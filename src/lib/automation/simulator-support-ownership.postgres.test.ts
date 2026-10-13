@@ -976,6 +976,34 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
   });
 
+  it("persists a labelled booking frame as an owned handoff without configuring or changing customer demand", async () => {
+    const f = await fixture();
+    const before = await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } });
+    const offeringBefore = await client.courseOffering.findUniqueOrThrow({ where: { id: f.offering.id } });
+    const frame = "https://calendar.example.test/opaque-public-room";
+    const fetch = vi.fn(async () => new Response(`<h1>Book a simulator</h1><iframe title="Book a bay" src="${frame}"></iframe>` +
+      '<iframe title="Book" src="https://calendar.example.test/checkout?token=private"></iframe>', { headers: { "content-type": "text/html" } }));
+    const first = await lane.readSimulatorSupportSource({ ...f.owner, source: "official" }, { fetch });
+    if (!first.acquired) throw new Error("Official fixture read was busy.");
+    expect(fetch).toHaveBeenCalledOnce();
+    const owner = { ...f.owner, revision: first.value.revision };
+    const claim = await lane.readSimulatorSupportClaim(owner);
+    expect(claim.research).toMatchObject({ readCount: 1, sourceFingerprint: f.fingerprint,
+      links: [frame], bookingLinks: [frame], bookingLinkRoles: [{ url: frame, observedAt: first.value.publicSource.observedAt }] });
+    expect(claim.researchGuide.suggestedReads).toContainEqual({ linkIndex: 1, rendered: false });
+    const following = vi.fn(async () => new Response('<h1>Public room information</h1>', { headers: { "content-type": "text/html" } }));
+    const second = await lane.readSimulatorSupportSource({ ...owner, linkIndex: 1 }, { fetch: following });
+    if (!second.acquired) throw new Error("Booking fixture read was busy.");
+    expect(following).toHaveBeenCalledWith(frame, expect.objectContaining({ credentials: "omit", method: "GET" }));
+    const final = await lane.readSimulatorSupportClaim({ ...owner, revision: second.value.revision });
+    expect(final.research.readCount).toBe(2);
+    expect(final.research.sourceFingerprint).toBe(f.fingerprint);
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(before);
+    expect(await client.courseOffering.findUniqueOrThrow({ where: { id: f.offering.id } })).toEqual(offeringBefore);
+    expect(await client.teeTimeMatch.count({ where: { teeSearchId: f.search.id } })).toBe(0);
+    expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
+  });
+
   it("persists a fresh bootstrap booking role and researches only its same-host Acuity schedule", async () => {
     const f = await fixture();
     const before = await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } });

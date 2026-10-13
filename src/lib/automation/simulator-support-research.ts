@@ -17,6 +17,7 @@ import { createBlockedResourceDiagnostics, simulatorCredentialHeaderKind, summar
 const MAX_BODY_BYTES = 1_500_000;
 const MAX_RENDER_BYTES = 6_000_000;
 const MAX_REQUESTS = 32;
+const MAX_RENDER_REQUESTS = 64;
 const DEADLINE_MS = 20_000;
 type Json = Record<string, unknown>;
 type Node = DefaultTreeAdapterMap["node"];
@@ -509,7 +510,7 @@ function resultFromBody(requestedUrl: string, url: string, status: number, conte
   const html = body.toString("utf8");
   const summary = summarizeSimulatorSupportPublicHtml(html, url);
   const publishedRoles = publishedBootstrapBookingRoles(html);
-  const bookingLinks = [...publicBookingLinkRoles(html, url, summary.links), ...publishedRoles];
+  const bookingLinks = [...publicBookingLinkRoles(html, url, summary.links), ...publicEmbeddedBookingLinks(html, url), ...publishedRoles];
   const venueLinks = publicVenueLinkRoles(html, url);
   // Preserve an observed booking CTA when the ordinary anchor list already
   // fills the saved-link cap. Every role must also survive in that same list.
@@ -606,6 +607,38 @@ function publicBookingLinkRoles(html: string, sourceUrl: string, safeLinks: stri
   };
   visit(parse(html));
   return [...roles];
+}
+
+/** Static, explicitly labelled booking frames are discovery links, never an
+ * instruction to load another origin inside the current rendered request. */
+function publicEmbeddedBookingLinks(html: string, sourceUrl: string) {
+  const links = new Set<string>();
+  const visit = (node: PublicNode) => {
+    const attrs = node.attrs ?? [];
+    if (node.tagName && ["script", "style", "form", "noscript", "template"].includes(node.tagName)) return;
+    if (attrs.some(attr => attr.name === "hidden" || attr.name === "aria-hidden" && attr.value === "true" ||
+      attr.name === "style" && /display\s*:\s*none|visibility\s*:\s*hidden/iu.test(attr.value))) return;
+    if (node.tagName === "iframe" && links.size < 4 && !attrs.some(attr => attr.name === "srcdoc")) {
+      const labels = attrs.filter(attr => ["title", "aria-label"].includes(attr.name)).map(attr => sanitizeResponderText(attr.value).trim());
+      // Require a published booking label, rather than inferring a calendar
+      // from an arbitrary embedded host or an opaque frame identifier.
+      if (labels.some(label => /^(?:book(?:ing)?|reserve|reservations?|appointments?|calendar|schedule)\b/iu.test(label))) {
+        const src = attrs.find(attr => attr.name === "src")?.value;
+        const lazy = attrs.find(attr => attr.name === "data-src")?.value;
+        const target = src && !/^about:blank(?:#.*)?$/iu.test(src) ? src : lazy;
+        if (target) {
+          try {
+            const url = publicUrl(new URL(target, sourceUrl).href);
+            if (![...url.searchParams.keys()].some(key => /^(?:action|step)$/iu.test(key)) &&
+                !/(?:^|\/)(?:checkout|payment|cart)(?:\/|$)/iu.test(url.pathname)) links.add(url.href);
+          } catch { /* Unsafe, interactive or malformed frames confer no role. */ }
+        }
+      }
+    }
+    for (const child of node.childNodes ?? []) visit(child);
+  };
+  visit(parse(html));
+  return [...links];
 }
 
 async function beforeDeadline<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -788,7 +821,7 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
     throw tagSimulatorResearchFailure(error, "BROWSER_LAUNCH");
   }
   let context: Awaited<ReturnType<ResearchBrowser["newContext"]>> | undefined;
-  let requestCount = 0, responseBytes = 0, blockedRequests = 0, routeFailure: unknown, hasRouteFailure = false;
+  let requestCount = 0, nonAssetRequestCount = 0, responseBytes = 0, blockedRequests = 0, routeFailure: unknown, hasRouteFailure = false;
   let navigation: Awaited<ReturnType<typeof read>> | undefined;
   let safeMainDocument: Awaited<ReturnType<typeof read>> & { observedAt: Date } | undefined;
   let terminalMainDocument: Awaited<ReturnType<typeof read>> & { observedAt: Date } | undefined;
@@ -974,8 +1007,11 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
             ...(rejection === "SENSITIVE_HEADERS" ? { headerKinds: credentialKinds } : {}), ...blockedBodyShape() }); blockedRequests += 1; await route.abort("blockedbyclient"); return; }
           if (terminalMainDocument) { blockedResources.record({ url: url.href, kind, method, reason: "TERMINAL_MAIN_DOCUMENT", originRelation }); blockedRequests += 1; await route.abort("blockedbyclient"); return; }
           if (deadline.aborted) throw new Error("SIMULATOR_RESEARCH_DEADLINE");
-          if (requestCount >= MAX_REQUESTS) { blockedResources.record({ url: url.href, kind, method, reason: "REQUEST_BUDGET", originRelation }); secondaryBudgetExhausted = true; blockedRequests += 1; await route.abort("blockedbyclient"); return; }
+          // Extra room is only for already-admitted anonymous static assets.
+          // Document/data exploration retains its original independent ceiling.
+          if (requestCount >= MAX_RENDER_REQUESTS || !staticAsset && nonAssetRequestCount >= MAX_REQUESTS) { blockedResources.record({ url: url.href, kind, method, reason: "REQUEST_BUDGET", originRelation }); secondaryBudgetExhausted = true; blockedRequests += 1; await route.abort("blockedbyclient"); return; }
           requestCount += 1;
+          if (!staticAsset) nonAssetRequestCount += 1;
           const publicHeaders: Record<string, string> = {};
           for (const key of ["accept", "accept-language", "user-agent"]) if (headers.has(key)) publicHeaders[key] = headers.get(key)!;
           if (headers.get("origin") === new URL(navigation?.url ?? requestedUrl).origin) publicHeaders.origin = headers.get("origin")!;
@@ -984,7 +1020,10 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
             assetRoot ?? (occupancy ? url.href : requestedUrl), occupancy ? target => publicOccupancyUrl(target, contractSlug) : undefined)
             .catch(error => { throw tagSimulatorResearchResourceKind(error, resourceKind); });
           if (response === cappedSecondaryAsset || response === rejectedSecondaryStylesheet || response === skippedAfterTerminalMain) {
-            if (response === skippedAfterTerminalMain) requestCount -= 1;
+            if (response === skippedAfterTerminalMain) {
+              requestCount -= 1;
+              if (!staticAsset) nonAssetRequestCount -= 1;
+            }
             blockedRequests += 1;
             await route.abort("blockedbyclient");
             return;

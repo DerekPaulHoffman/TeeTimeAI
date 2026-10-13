@@ -1046,6 +1046,44 @@ describe("bounded owned simulator public research transport", () => {
     expect(venue.bookingLinks).toEqual([booking]);
     expect(venue.venueLinks).toBeUndefined();
   });
+  it("retains explicitly labelled public booking frames without fetching them or inferring configuration", async () => {
+    const frame = "https://calendar.example.test/opaque-public-venue";
+    const html = `<h1>Book your session</h1><iframe title="Book a simulator" src="${frame}"></iframe>` +
+      '<iframe aria-label="Appointments" src="about:blank" data-src="/public-calendar"></iframe>';
+    const fetch = vi.fn(async () => response(html));
+    const result = await collectSimulatorSupportResearch({ url: source }, { fetch, lease });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(result.bookingLinks).toEqual([frame, `${source}/public-calendar`]);
+    expect(result.links).toEqual(result.bookingLinks);
+    expect(result.calendar).toBeUndefined(); expect(result.publicConfiguration).toBeUndefined();
+    expect(result.text).toBe("Book your session");
+  });
+  it("never promotes hidden, unlabelled, srcdoc, transaction or credential-bearing frames", async () => {
+    const html = [
+      '<iframe src="https://calendar.example.test/booking"></iframe>',
+      '<iframe title="How to book" src="https://video.example.test/public"></iframe>',
+      '<iframe title="Calendar" hidden src="https://calendar.example.test/hidden"></iframe>',
+      '<div aria-hidden="true"><iframe title="Book" src="https://calendar.example.test/aria-hidden"></iframe></div>',
+      '<div style="display: none"><iframe title="Book" src="https://calendar.example.test/css-hidden"></iframe></div>',
+      '<iframe title="Book" srcdoc="private" src="https://calendar.example.test/srcdoc"></iframe>',
+      '<iframe title="Book" src="https://calendar.example.test/checkout"></iframe>',
+      '<iframe title="Book" src="https://calendar.example.test/public?action=reserve"></iframe>',
+      '<iframe title="Book" src="https://calendar.example.test/public?token=secret"></iframe>',
+      '<iframe title="Book" src="http://127.0.0.1/private"></iframe>',
+      '<iframe title="Book" src="javascript:alert(1)"></iframe>',
+      '<template><iframe title="Book" src="https://calendar.example.test/template"></iframe></template>',
+    ].join("");
+    const result = await collectSimulatorSupportResearch({ url: source }, { fetch: vi.fn(async () => response(html)), lease });
+    expect(result.links).toEqual([]); expect(result.bookingLinks).toBeUndefined();
+    expect(JSON.stringify(result)).not.toMatch(/secret|srcdoc|127\.0\.0|javascript/u);
+  });
+  it("bounds frame discovery to four targets and retains them ahead of ordinary navigation", async () => {
+    const html = Array.from({ length: 30 }, (_, i) => `<a href="/page-${i}">Page</a>`).join("") +
+      Array.from({ length: 8 }, (_, i) => `<iframe title="Calendar ${i}" src="https://calendar.example.test/venue-${i}"></iframe>`).join("");
+    const result = await collectSimulatorSupportResearch({ url: source }, { fetch: vi.fn(async () => response(html)), lease });
+    expect(result.bookingLinks).toEqual(Array.from({ length: 4 }, (_, i) => `https://calendar.example.test/venue-${i}`));
+    expect(result.links).toHaveLength(30); expect(result.links.slice(0, 4)).toEqual(result.bookingLinks);
+  });
   it("retains booking and venue CTAs when ordinary navigation fills the link cap", async () => {
     const booking = "https://calendar.example.test/booking/bays";
     const golf = "https://tworoadsgolfclub.square.site/";
@@ -1159,8 +1197,34 @@ describe("bounded owned simulator public research transport", () => {
     expect(JSON.stringify(result)).not.toMatch(/Unproven|private-time|secret@example|availableSlots/u);
     expect(view.context.close).toHaveBeenCalledOnce(); expect(view.browser.close).toHaveBeenCalledOnce();
   });
-  it("serializes concurrent admitted assets per hostname before the shared lease without relaxing the 32-read cap", async () => {
-    const requests = [{ url: `${source}/` }, ...Array.from({ length: 35 }, (_, index) => ({ url: `${source}/asset-${index}`, kind: index % 2 ? "script" : "stylesheet" }))];
+  it("loads a 57-request public application anonymously while preserving the data and total ceilings", async () => {
+    const requests = [{ url: `${source}/` }, ...Array.from({ length: 56 }, (_, index) =>
+      ({ url: `${source}/app/chunk-${index}.js`, kind: "script", headers: { Cookie: "ambient-not-forwarded" } }))];
+    const html = '<h1>Public calendar</h1><iframe title="Book a bay" src="https://calendar.example.test/public"></iframe>';
+    const view = renderedBrowser(requests, html, true);
+    const fetch = vi.fn<typeof globalThis.fetch>(async url => response(String(url) === `${source}/` ? '<div id="app"></div>' : '/* public script */'));
+    const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
+    expect(fetch).toHaveBeenCalledTimes(57);
+    expect(result).toMatchObject({ admittedRequests: 57, blockedRequests: 0, renderComplete: true,
+      bookingLinks: ["https://calendar.example.test/public"] });
+    expect(fetch.mock.calls.every(call => !new Headers((call[1] as RequestInit).headers).has("cookie"))).toBe(true);
+    expect(fetch.mock.calls.every(call => (call[1] as RequestInit).credentials === "omit")).toBe(true);
+    expect(result.calendar).toBeUndefined();
+  });
+  it("does not use the additional static capacity for more than 32 document and data reads", async () => {
+    const requests = [{ url: `${source}/` },
+      ...Array.from({ length: 20 }, (_, index) => ({ url: `${source}/chunk-${index}.js`, kind: "script" })),
+      ...Array.from({ length: 33 }, (_, index) => ({ url: `${source}/public/data-${index}`, kind: "fetch" }))];
+    const view = renderedBrowser(requests);
+    const fetch = vi.fn(async (url: unknown) => response(String(url) === `${source}/` ? '<h1>Safe main facts</h1>' : 'public'));
+    const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
+    expect(fetch).toHaveBeenCalledTimes(52);
+    expect(result).toMatchObject({ admittedRequests: 52, blockedRequests: 2, renderComplete: false,
+      renderWarning: "SECONDARY_REQUEST_BUDGET_EXHAUSTED", text: "Safe main facts" });
+    for (const route of view.routes.slice(52)) expect(route.fulfill).not.toHaveBeenCalled();
+  });
+  it("serializes concurrent admitted assets per hostname before the shared lease with a 64-request total cap", async () => {
+    const requests = [{ url: `${source}/` }, ...Array.from({ length: 67 }, (_, index) => ({ url: `${source}/asset-${index}`, kind: index % 2 ? "script" : "stylesheet" }))];
     const view = renderedBrowser(requests, "<h1>Rendered page</h1>", true);
     let active = 0, maximum = 0, busy = 0;
     const exclusiveLease = vi.fn(async (_host: string, worker: () => Promise<unknown>) => {
@@ -1174,18 +1238,18 @@ describe("bounded owned simulator public research transport", () => {
     });
     const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease: exclusiveLease, browser: view.factory });
     expect(maximum).toBe(1); expect(busy).toBe(0);
-    expect(fetch).toHaveBeenCalledTimes(32); expect(exclusiveLease).toHaveBeenCalledTimes(32);
-    expect(result).toMatchObject({ text: "Safe main page", admittedRequests: 32, blockedRequests: 4, renderComplete: false, renderWarning: "SECONDARY_REQUEST_BUDGET_EXHAUSTED" });
-    for (const route of view.routes.slice(32)) expect(route.abort).toHaveBeenCalledOnce();
+    expect(fetch).toHaveBeenCalledTimes(64); expect(exclusiveLease).toHaveBeenCalledTimes(64);
+    expect(result).toMatchObject({ text: "Safe main page", admittedRequests: 64, blockedRequests: 4, renderComplete: false, renderWarning: "SECONDARY_REQUEST_BUDGET_EXHAUSTED" });
+    for (const route of view.routes.slice(64)) expect(route.abort).toHaveBeenCalledOnce();
   });
   it("preserves partial HTTP facts after a budget-caused navigation abort but never masks unrelated browser errors", async () => {
     for (const expectedAbort of [true, false]) {
-      const view = renderedBrowser([{ url: `${source}/` }, ...Array.from({ length: 32 }, (_, index) => ({ url: `${source}/script-${index}`, kind: "script" }))]);
+      const view = renderedBrowser([{ url: `${source}/` }, ...Array.from({ length: 64 }, (_, index) => ({ url: `${source}/script-${index}`, kind: "script" }))]);
       const original = view.page.goto.getMockImplementation()!;
       const failure = new Error(expectedAbort ? "page.goto: net::ERR_ABORTED at public destination" : "Browser programming invariant failed");
       view.page.goto.mockImplementation(async () => { await original(); throw failure; });
       const task = collectSimulatorSupportResearch({ url: source, render: true }, { fetch: vi.fn(async () => response("<h1>Safe public page</h1>")), lease, browser: view.factory });
-      if (expectedAbort) expect(await task).toMatchObject({ text: "Safe public page", admittedRequests: 32, renderComplete: false, contentProvenance: "MAIN_DOCUMENT_HTTP" });
+      if (expectedAbort) expect(await task).toMatchObject({ text: "Safe public page", admittedRequests: 64, renderComplete: false, contentProvenance: "MAIN_DOCUMENT_HTTP" });
       else await expect(task).rejects.toBe(failure);
       expect(view.page.content).not.toHaveBeenCalled();
     }
@@ -1579,7 +1643,7 @@ describe("bounded owned simulator public research transport", () => {
     for (const route of view.routes.slice(1)) expect(route.fulfill).not.toHaveBeenCalled();
     expect(view.context.close).toHaveBeenCalledOnce(); expect(view.browser.close).toHaveBeenCalledOnce();
   });
-  it.each(["SECONDARY_STYLESHEET_URL_REJECTED", "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED"])("does not refund the leaf read or relax the 32-request limit after %s", async renderWarning => {
+  it.each(["SECONDARY_STYLESHEET_URL_REJECTED", "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED"])("charges the rejected leaf and preserves the 32-document/data limit after %s", async renderWarning => {
     const asset = `${source}/public.css`;
     const requests = [{ url: `${source}/` }, { url: asset, kind: "stylesheet" },
       ...Array.from({ length: 35 }, (_, index) => ({ url: `${source}/public/data-${index}`, kind: "xhr" }))];
@@ -1590,12 +1654,12 @@ describe("bounded owned simulator public research transport", () => {
         : new Response("oversize-never-served", { headers: { "content-length": "1500001", "content-type": "text/css" } })
       : response('{"ranges":[{"id":1397}]}', 200, "application/json"));
     const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
-    expect(fetch).toHaveBeenCalledTimes(32); expect(lease).toHaveBeenCalledTimes(32);
-    expect(result).toMatchObject({ admittedRequests: 32, blockedRequests: 6, text: "Safe main facts", renderComplete: false,
+    expect(fetch).toHaveBeenCalledTimes(33); expect(lease).toHaveBeenCalledTimes(33);
+    expect(result).toMatchObject({ admittedRequests: 33, blockedRequests: 5, text: "Safe main facts", renderComplete: false,
       renderWarning, contentProvenance: "MAIN_DOCUMENT_HTTP" });
     expect(result.responseContracts).toBeUndefined(); expect(view.page.content).not.toHaveBeenCalled();
     expect(view.routes[1].fulfill).not.toHaveBeenCalled();
-    for (const route of view.routes.slice(32)) expect(route.fulfill).not.toHaveBeenCalled();
+    for (const route of view.routes.slice(33)) expect(route.fulfill).not.toHaveBeenCalled();
   });
   it("keeps an aggregate-cap breach and an already-started unrelated asset error hard", async () => {
     const requests = [{ url: `${source}/` }, ...Array.from({ length: 4 }, (_, index) => ({ url: `${source}/large-${index}.css`, kind: "stylesheet" }))];
