@@ -43,6 +43,8 @@ const ownedMessages: Record<string, Classification> = {
   "An unchanged structural source failure needs a different research route or materially changed source.": { category: "SOURCE", code: "STRUCTURAL_ROUTE_UNCHANGED", stage: "TARGET_SELECTION" },
   "The selected owned simulator source or link is unavailable.": { category: "SOURCE", code: "OWNED_SOURCE_UNAVAILABLE", stage: "TARGET_SELECTION" },
   "The selected link is not a fresh same-site page or official booking handoff.": { category: "ACCESS", code: "SAVED_LINK_NOT_ELIGIBLE", stage: "TARGET_SELECTION" },
+  "The saved evidence page must remain on the official website origin.": { category: "ACCESS", code: "EVIDENCE_ORIGIN_NOT_ELIGIBLE", stage: "TARGET_SELECTION" },
+  "Use the original official route when the evidence page is the homepage.": { category: "SOURCE", code: "EVIDENCE_IS_OFFICIAL_ROUTE", stage: "TARGET_SELECTION" },
   "Finish or reconcile the original source research attempt before retry.": { category: "OWNERSHIP", code: "RESEARCH_RECONCILIATION_REQUIRED" },
   "Recover is reserved for the same native owner after its lease expires.": { category: "OWNERSHIP", code: "RECOVERY_NOT_DUE" },
   "The original simulator research request is still within its bounded interval.": { category: "OWNERSHIP", code: "RESEARCH_REQUEST_STILL_ACTIVE" },

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
-import { readSafeSimulatorSupportFailure, type SimulatorSupportFailure } from "./simulator-support-failure";
-import { isAcuityPublicResearchRoot, isSimulatorPublicConfigurationSource, knownSimulatorPublicConfigurationFamily, simulatorPublicConfigurationSchema, teeSheetPublicTenant, upperHandPublicSource } from "@/lib/simulators/providers/public-configuration";
+import { classifySimulatorSupportFailure, readSafeSimulatorSupportFailure, type SimulatorSupportFailure } from "./simulator-support-failure";
+import { isAcuityPublicResearchRoot, isSimulatorPublicConfigurationSource, knownSimulatorPublicConfigurationFamily, simulatorPublicConfigurationSchema } from "@/lib/simulators/providers/public-configuration";
 
 export const SIMULATOR_RESEARCH_MAX_READS = 6;
 export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-official-venue-links-v6";
@@ -333,6 +333,23 @@ function savedBookingRoot(bookingUrl: string | null) {
   return getSafeCustomerBookingUrl(`https://${match[1]}/venues/${match[2]}/booking`);
 }
 
+function sameOfficialWebsite(value: string, official: string) {
+  const url = new URL(value), root = new URL(official);
+  return url.hostname.replace(/^www\./u, "") === root.hostname.replace(/^www\./u, "") &&
+    url.port === root.port && (url.protocol === root.protocol || root.protocol === "http:" && url.protocol === "https:");
+}
+
+/** Only actual successful current-source redirects merge destination accounting.
+ * Raw request identities still govern retries, denials and the six-read budget. */
+function researchDestination(state: SimulatorResearchState, value: string) {
+  const entry = [...state.history].reverse().find(row => routeIdentity(row.requestedUrl) === routeIdentity(value));
+  return entry?.outcome === "READ" && entry.httpStatus >= 200 && entry.httpStatus < 300 &&
+    entry.sourceFingerprint === state.sourceFingerprint &&
+    entry.publicReadEvidence?.sourceFingerprint === state.sourceFingerprint &&
+    entry.publicReadEvidence.accessControlsObserved && !entry.publicReadEvidence.accessControls.length
+    ? routeIdentity(entry.sourceUrl) : routeIdentity(value);
+}
+
 export function selectSimulatorResearchTarget(input: {
   state: SimulatorResearchState; officialUrl: string | null; bookingUrl: string | null; evidenceUrl?: string | null;
   source?: SimulatorResearchSource; linkIndex?: number; rendered: boolean; now: Date;
@@ -375,10 +392,10 @@ export function selectSimulatorResearchTarget(input: {
       previous?.sourceFingerprint === state.sourceFingerprint &&
       previous.outcome === "READ" && previous.publicReadEvidence?.sourceFingerprint === state.sourceFingerprint &&
       previous.publicReadEvidence.accessControlsObserved === true && !previous.publicReadEvidence.accessControls.length);
-    // An exact booking CTA published by the official venue may point to the
-    // provider homepage. Keep current-source, access and freshness fences.
-    const officialRootHandoffRole = Boolean(official && (teeSheetPublicTenant(url) || upperHandPublicSource(url)) &&
-      new URL(state.linkBaseUrl!).origin === new URL(official).origin &&
+    // An exact official booking CTA need not have a provider-specific URL shape.
+    // Accept only the observed official-site lineage, including www/HTTPS redirects.
+    const officialBookingHandoffRole = Boolean(official && previous &&
+      sameOfficialWebsite(previous.requestedUrl, official) && sameOfficialWebsite(previous.sourceUrl, official) &&
       state.bookingLinkRoles?.some(role => role.url === url && role.observedAt === previous?.observedAt) &&
       previous?.sourceFingerprint === state.sourceFingerprint &&
       previous.publicReadEvidence?.sourceFingerprint === state.sourceFingerprint &&
@@ -387,14 +404,18 @@ export function selectSimulatorResearchTarget(input: {
         new Date(previous.observedAt).getTime() > input.now.getTime() ||
         new Date(previous.observedAt).getTime() < input.now.getTime() - 30 * 60_000 ||
         new URL(url).origin !== new URL(state.linkBaseUrl!).origin &&
-          !(isFreshBookingLink(state, url, input.now) && (/\b(?:book(?:ing)?|reserv(?:e|ation)|appointments?|calendar)\b/i.test(new URL(url).pathname) || hostedRootRole || officialRootHandoffRole) ||
+          !(isFreshBookingLink(state, url, input.now) && (/\b(?:book(?:ing)?|reserv(?:e|ation)|appointments?|calendar)\b/i.test(new URL(url).pathname) || hostedRootRole || officialBookingHandoffRole) ||
             input.bookingUrl && new URL(url).hostname === new URL(input.bookingUrl).hostname || venueRole)) {
       throw new Error("The selected link is not a fresh same-site page or official booking handoff.");
     }
-    if (new URL(url).origin === new URL(state.linkBaseUrl!).origin && new Set(state.history.filter(entry => entry.source === "link" && new URL(entry.requestedUrl).origin === new URL(url).origin).map(entry => routeIdentity(entry.requestedUrl))).size >= 2) throw new Error("The bounded same-site research depth is exhausted.");
+    const sameSiteDestinations = new Set(state.history.filter(entry => entry.source === "link" &&
+      new URL(entry.requestedUrl).origin === new URL(url).origin).map(entry => researchDestination(state, entry.requestedUrl)));
+    if (new URL(url).origin === new URL(state.linkBaseUrl!).origin &&
+        !sameSiteDestinations.has(researchDestination(state, url)) && sameSiteDestinations.size >= 2)
+      throw new Error("The bounded same-site research depth is exhausted.");
   }
-  const destinations = new Set(state.history.filter(entry => entry.source === "booking" || entry.source === "booking-root" || entry.source === "link" && input.officialUrl && new URL(entry.requestedUrl).origin !== new URL(input.officialUrl).origin).map(entry => routeIdentity(entry.requestedUrl)));
-  if (source !== "official" && source !== "evidence" && !destinations.has(routeIdentity(url)) && destinations.size >= 3) throw new Error("The bounded simulator booking destination budget is exhausted.");
+  const destinations = new Set(state.history.filter(entry => entry.source === "booking" || entry.source === "booking-root" || entry.source === "link" && input.officialUrl && !sameOfficialWebsite(entry.requestedUrl, input.officialUrl)).map(entry => researchDestination(state, entry.requestedUrl)));
+  if (source !== "official" && source !== "evidence" && !destinations.has(researchDestination(state, url)) && destinations.size >= 3) throw new Error("The bounded simulator booking destination budget is exhausted.");
   const priorOnRoute = state.history.filter(entry => routeIdentity(entry.requestedUrl) === routeIdentity(url) && entry.rendered === input.rendered);
   const matching = priorOnRoute.at(-1);
   const protectedRoute = priorOnRoute.some(entry => entry.outcome === "HARD_FAILED" ||
@@ -434,6 +455,7 @@ export function getSimulatorResearchGuide(input: {
     { source: "official" as const, rendered: false }, { source: "official" as const, rendered: true },
   ];
   const seen = new Set<string>();
+  const rejectedReads: Array<(typeof routes)[number] & { failure: SimulatorSupportFailure }> = [];
   const suggestedReads = routes.filter(route => {
     try {
       const selected = selectSimulatorResearchTarget({ ...input, ...route });
@@ -441,10 +463,17 @@ export function getSimulatorResearchGuide(input: {
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
-    } catch { return false; }
+    } catch (error) {
+      const failure = classifySimulatorSupportFailure(error, "TARGET_SELECTION");
+      // A code defect must not masquerade as exhausted public research and close
+      // the worker with an unchanged retry. Only known policy rejections qualify.
+      if (failure.category === "UNKNOWN" || failure.category === "TOOLING") throw error;
+      rejectedReads.push({ ...route, failure });
+      return false;
+    }
   });
   return { readsRemaining: SIMULATOR_RESEARCH_MAX_READS - input.state.readCount,
-    inFlight: Boolean(input.state.inFlight), suggestedReads,
+    inFlight: Boolean(input.state.inFlight), suggestedReads, rejectedReads,
     blockedRequestDiagnostics: input.state.history.flatMap(entry => entry.blockedRequestDiagnostics &&
       entry.sourceFingerprint === input.state.sourceFingerprint && entry.rendered && entry.outcome === "READ" &&
       entry.httpStatus >= 200 && entry.httpStatus < 300 && entry.publicReadEvidence?.accessControlsObserved === true &&

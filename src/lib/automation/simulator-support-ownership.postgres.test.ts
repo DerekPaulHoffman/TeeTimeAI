@@ -1111,6 +1111,43 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     await lane.retrySimulatorSupport({ ...owner, revision: result.value.revision, retryMinutes: 15 });
   });
 
+  it.each(["opaque official CTA", "redirect alias"])("retains the owner instead of cooling down an available %s", async kind => {
+    const f = await fixture();
+    const run = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const audit = run.audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    const root = f.course.website!;
+    const page = `${root}/get-started/`, alias = `${root}//get-started/`;
+    const target = kind === "opaque official CTA" ? "https://calendar.example.test/ftbb/f40q4C/?o=m" : `${root}//how-to-book-play/`;
+    const observedAt = new Date(Date.now() - 1000).toISOString();
+    const receipt = (source: "official" | "link", requestedUrl: string, sourceUrl: string, rendered = false) => ({
+      source, requestedUrl, sourceUrl, rendered, observedAt, httpStatus: 200, outcome: "READ" as const,
+      sourceFingerprint: f.fingerprint, requestId: randomUUID(), publicReadEvidence: {
+        sourceFingerprint: f.fingerprint, accessControlsObserved: true as const, accessControls: [],
+        method: rendered ? "BROWSER" as const : "HTTP" as const,
+      },
+    });
+    const history = kind === "opaque official CTA" ? [receipt("official", root, root)] : [
+      receipt("official", root, root), receipt("official", root, root, true),
+      receipt("link", page, page), receipt("link", alias, page, true),
+    ];
+    audit.simulatorResearch = { version: 1, sourceFingerprint: f.fingerprint, readCount: history.length,
+      history, links: [target], bookingLinks: [target], bookingLinkRoles: [{ url: target, observedAt }],
+      linkBaseUrl: kind === "opaque official CTA" ? root : page, inFlight: null };
+    await client.automationRun.update({ where: { id: f.run.id }, data: { audit: audit as unknown as Prisma.InputJsonValue } });
+    const runBefore = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const incidentBefore = await client.simulatorSupportIncident.findUniqueOrThrow({ where: { id: f.incident.id } });
+    const searchBefore = await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } });
+    const result = await lane.retrySimulatorSupport({ ...f.owner, retryMinutes: 60 });
+    expect(result.acquired).toBe(true);
+    if (!result.acquired) throw new Error("Fixture retry writer was busy.");
+    expect(result.value).toMatchObject({ outcome: "booking_research_required", revision: f.owner.revision,
+      nextEligibleBookingRead: { linkIndex: 1, rendered: false }, researchGuide: { readsRemaining: 6 - history.length } });
+    expect(await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).toEqual(runBefore);
+    expect(await client.simulatorSupportIncident.findUniqueOrThrow({ where: { id: f.incident.id } })).toEqual(incidentBefore);
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(searchBefore);
+    expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
+  });
+
   it("refuses owned retry without mutation while a fresh booking-role link survives a later page", async () => {
     const f = await fixture(15, false, "https://booking.example.test/calendar");
     const initial = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });

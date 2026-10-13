@@ -134,14 +134,16 @@ describe("fresh hosted Acuity research handoff", () => {
     expect(() => follow({ ...observed(), readCount: 6 })).toThrow("budget");
   });
 
-  it("rejects missing or stale role proof, failed routes, and lookalike or access destinations", () => {
+  it("rejects missing or stale role proof, failed routes and access destinations", () => {
     expect(() => follow({ ...observed(), bookingLinkRoles: [] })).toThrow("handoff");
     expect(() => follow({ ...observed(), bookingLinkRoles: undefined })).toThrow("handoff");
     expect(() => follow(observed(), { now: new Date(now.getTime() + 31 * 60_000) })).toThrow("fresh");
-    for (const url of ["https://onegolfhaven.as.me.attacker.example/", "https://a.b.as.me/", "http://onegolfhaven.as.me/",
-      "https://onegolfhaven.as.me/login", "https://onegolfhaven.as.me/checkout", "https://other.example.test/"]) {
+    for (const url of ["https://onegolfhaven.as.me/login", "https://onegolfhaven.as.me/checkout"]) {
       expect(() => follow(observed(url))).toThrow();
     }
+    // A safe host is not rejected by spelling when it is the actual official
+    // CTA. A lookalike without that observed role still has no authority.
+    expect(() => follow({ ...observed("https://onegolfhaven.as.me.attacker.example/"), bookingLinkRoles: [], bookingLinks: [] })).toThrow("handoff");
     const failed = { ...official, source: "link" as const, requestedUrl: acuityTenantRoot, sourceUrl: acuityTenantRoot,
       observedAt: now.toISOString(), httpStatus: 403 };
     expect(() => follow(readSimulatorResearchState({ ...observed(), readCount: 2,
@@ -162,15 +164,106 @@ describe("official TeeSheet root handoff", () => {
     expect(follow().url).toBe(root);
     expect(state().history[0].collectorObservedAt).toBe(receipt.collectorObservedAt);
   });
-  it("rejects unknown roots, missing roles, stale or wrong-source evidence and access gates", () => {
+  it("rejects unsafe roots, missing roles, stale or wrong-source evidence and access gates", () => {
     expect(() => follow({ ...state(), bookingLinkRoles: [] })).toThrow("handoff");
     expect(() => follow(state(), { officialUrl: "https://unrelated.example.test" })).toThrow("handoff");
     expect(() => follow(state(), { now: new Date(now.getTime() + 31 * 60_000) })).toThrow("fresh");
-    for (const url of ["https://oakwood.teesheet.ai.attacker.example/", "http://oakwood.teesheet.ai/", "https://oakwood.teesheet.ai/?checkout=1"]) {
+    for (const url of ["https://user:password@oakwood.teesheet.ai/", "http://localhost/", "https://oakwood.teesheet.ai/checkout"]) {
       expect(() => follow({ ...state(), links: [url], bookingLinks: [url], bookingLinkRoles: [{ url, observedAt: now.toISOString() }] })).toThrow();
     }
     expect(() => follow({ ...state(), history: [{ ...receipt, publicReadEvidence: { ...receipt.publicReadEvidence, accessControls: ["ACCOUNT_REQUIRED"] } }] })).toThrow("handoff");
     expect(() => follow({ ...state(), readCount: 6 })).toThrow("budget");
+  });
+});
+
+describe("official opaque booking links and observed redirect destinations", () => {
+  const official = "http://www.golfcovect.com/";
+  const canonical = "https://www.golfcovect.com/";
+  const booking = "https://passfactory.com/ftbb/f40q4C/?o=m&bn=GolfCove";
+  const receipt = (requestedUrl = official, sourceUrl = canonical, rendered = false) => ({
+    source: "official" as const, requestedUrl, sourceUrl, sourceFingerprint: fingerprint,
+    observedAt: now.toISOString(), httpStatus: 200, rendered, outcome: "READ" as const,
+    requestId: "11111111-1111-4111-8111-111111111111",
+    publicReadEvidence: { sourceFingerprint: fingerprint, accessControlsObserved: true as const,
+      accessControls: [], method: rendered ? "BROWSER" as const : "HTTP" as const },
+  });
+  const state = () => readSimulatorResearchState({ ...empty(), readCount: 1, history: [receipt()],
+    links: [booking], bookingLinks: [booking], bookingLinkRoles: [{ url: booking, observedAt: now.toISOString() }],
+    linkBaseUrl: canonical }, fingerprint);
+  const input = (value = state()) => ({ state: value, officialUrl: official, bookingUrl: official, now, priorFailedRoutes: [] });
+
+  it("requires the actual opaque official CTA before allowing retry, including HTTPS and www redirects", () => {
+    expect(selectSimulatorResearchTarget({ ...input(), linkIndex: 1, rendered: false }).url).toBe(booking);
+    expect(getSimulatorResearchRetryGuide(input())).toMatchObject({ bookingResearchRequired: true,
+      nextEligibleBookingRead: { linkIndex: 1, rendered: false } });
+    const value = state();
+    value.history[0].sourceUrl = "https://golfcovect.com/";
+    value.linkBaseUrl = "https://golfcovect.com/";
+    expect(selectSimulatorResearchTarget({ ...input(value), linkIndex: 1, rendered: true }).url).toBe(booking);
+  });
+
+  it("does not generalize an unclassified link, cross-host redirect, stale role or changed source", () => {
+    for (const value of [
+      { ...state(), bookingLinkRoles: [], bookingLinks: [] },
+      { ...state(), history: [receipt("https://different.example/", canonical)] },
+      { ...state(), history: [receipt(official, "https://different.example/")], linkBaseUrl: "https://different.example/" },
+      { ...state(), bookingLinkRoles: [{ url: booking, observedAt: new Date(now.getTime() - 31 * 60_000).toISOString() }] },
+      { ...state(), sourceFingerprint: "b".repeat(64) },
+    ]) expect(() => selectSimulatorResearchTarget({ ...input(value), linkIndex: 1, rendered: false })).toThrow("handoff");
+  });
+
+  const happy = "https://happysindoorgolf.com/";
+  const started = `${happy}get-started/`;
+  const alias = `${happy}/get-started/`;
+  const howTo = `${happy}/how-to-book-play/`;
+  const happyState = () => readSimulatorResearchState({ ...empty(), readCount: 4,
+    history: [{ ...receipt(happy, happy) }, receipt(happy, happy, true),
+      { ...receipt(started, started), source: "link" },
+      { ...receipt(alias, started, true), source: "link" }],
+    links: [howTo], bookingLinks: [howTo], bookingLinkRoles: [{ url: howTo, observedAt: now.toISOString() }],
+    linkBaseUrl: started }, fingerprint);
+
+  it("counts Happy's plain and rendered redirect as one destination without refunding reads", () => {
+    const value = happyState();
+    const args = { state: value, officialUrl: happy, bookingUrl: happy, now, priorFailedRoutes: [] };
+    expect(getSimulatorResearchGuide(args).readsRemaining).toBe(2);
+    expect(getSimulatorResearchRetryGuide(args)).toMatchObject({ bookingResearchRequired: true,
+      nextEligibleBookingRead: { linkIndex: 1, rendered: false } });
+    expect(selectSimulatorResearchTarget({ ...args, linkIndex: 1, rendered: false }).url).toBe(howTo);
+    expect(value.history[3].requestedUrl).toBe(alias);
+    expect(() => selectSimulatorResearchTarget({ ...args, linkIndex: 1, rendered: false,
+      priorFailedRoutes: [{ url: howTo, rendered: false }] })).toThrow("structural");
+  });
+
+  it("allows rendering an already counted second page but preserves the two distinct page limit", () => {
+    const value = happyState();
+    value.history[3] = { ...value.history[3], requestedUrl: howTo, sourceUrl: howTo, rendered: false };
+    const args = { state: value, officialUrl: happy, bookingUrl: happy, now, priorFailedRoutes: [] };
+    expect(selectSimulatorResearchTarget({ ...args, linkIndex: 1, rendered: true }).url).toBe(howTo);
+    value.links = [`${happy}third-page/`];
+    expect(() => selectSimulatorResearchTarget({ ...args, linkIndex: 1, rendered: false })).toThrow("depth");
+    expect(getSimulatorResearchGuide(args).rejectedReads).toContainEqual(expect.objectContaining({ linkIndex: 1, rendered: false,
+      failure: expect.objectContaining({ stage: "TARGET_SELECTION", category: "BUDGET", code: "SAME_SITE_DEPTH_EXHAUSTED" }) }));
+  });
+
+  it("does not collapse guessed aliases, different queries, denied or unverified redirects", () => {
+    for (const change of [
+      { sourceUrl: alias }, { sourceUrl: `${started}?product=other` }, { httpStatus: 403 },
+      { sourceFingerprint: "b".repeat(64) }, { publicReadEvidence: undefined },
+      { publicReadEvidence: { ...receipt().publicReadEvidence, accessControls: ["ACCOUNT_REQUIRED" as const] } },
+    ]) {
+      const value = happyState();
+      value.history[3] = { ...value.history[3], ...change };
+      expect(() => selectSimulatorResearchTarget({ state: value, officialUrl: happy, bookingUrl: happy,
+        now, linkIndex: 1, rendered: false })).toThrow();
+    }
+  });
+
+  it("surfaces unknown tooling errors instead of presenting them as exhausted research", () => {
+    const value = happyState();
+    value.linkBaseUrl = "malformed internal state";
+    expect(() => getSimulatorResearchRetryGuide({ state: value, officialUrl: happy,
+      bookingUrl: happy, now, priorFailedRoutes: [] })).toThrow();
   });
 });
 
