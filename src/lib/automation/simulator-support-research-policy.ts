@@ -3,9 +3,10 @@ import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import { classifySimulatorSupportFailure, readSafeSimulatorSupportFailure, type SimulatorSupportFailure } from "./simulator-support-failure";
 import { isAcuityPublicResearchRoot, isSimulatorPublicConfigurationSource, knownSimulatorPublicConfigurationFamily, simulatorPublicConfigurationSchema } from "@/lib/simulators/providers/public-configuration";
 import { blockedResourceDiagnosticsSchema } from "./simulator-blocked-resources";
+import { simulatorPageSurfacesSchema } from "./simulator-page-surfaces";
 
 export const SIMULATOR_RESEARCH_MAX_READS = 6;
-export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-booking-frames-and-assets-v9";
+export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-static-budgets-and-surfaces-v10";
 export function getSimulatorResearchImplementationVersion(url: string) {
   const family = knownSimulatorPublicConfigurationFamily(url);
   if (family === "TEESHEET" || family === "UPPER_HAND" || family === "YOUR_GOLF_BOOKING") return "public-calendar-provider-api-configuration-v1";
@@ -165,11 +166,14 @@ const observation = z.object({
   blockedRequestDiagnostics: blockedRequestDiagnostics.optional(), blockedRequestDiagnosticsTruncated: z.literal(true).optional(),
   blockedResourceDiagnostics: blockedResourceDiagnosticsSchema.optional(), blockedResourceDiagnosticsTruncated: z.literal(true).optional(),
   publicConfiguration: simulatorPublicConfigurationSchema.optional(),
+  pageSurfaces: simulatorPageSurfacesSchema.optional(),
 }).strict().refine(entry => entry.outcome === "HARD_FAILED" ? Boolean(entry.requestId && entry.failure && entry.httpStatus === 0) :
   !entry.failure || Boolean(entry.requestId && entry.httpStatus === 0 && ["NETWORK_FAILED", "CAPACITY_BUSY"].includes(entry.outcome)))
   .refine(entry => !entry.sourceFingerprint || !entry.publicReadEvidence || entry.sourceFingerprint === entry.publicReadEvidence.sourceFingerprint)
   .refine(entry => !entry.publicReadEvidence || Boolean(entry.requestId && entry.outcome === "READ" &&
     entry.publicReadEvidence.method === (entry.rendered ? "BROWSER" : "HTTP")))
+  .refine(entry => !entry.pageSurfaces || Boolean(entry.outcome === "READ" && entry.httpStatus >= 200 && entry.httpStatus < 300 &&
+    entry.publicReadEvidence?.accessControlsObserved === true && entry.publicReadEvidence.accessControls.length === 0))
   .refine(entry => !entry.publicConfiguration || Boolean(entry.sourceFingerprint && entry.outcome === "READ" &&
     entry.httpStatus >= 200 && entry.httpStatus < 300 && entry.publicReadEvidence?.accessControlsObserved === true &&
     !entry.publicReadEvidence.accessControls.length && isSimulatorPublicConfigurationSource(entry.publicConfiguration, entry.sourceUrl)))
@@ -257,6 +261,25 @@ function isSecondaryRevalidationDue(route: SimulatorResearchBlockedRoute, now: D
     route.researchImplementationVersion === getSimulatorResearchImplementationVersion(route.url) &&
     route.accessControlsObserved === true && route.accessControls?.length === 0 && route.renderComplete === false &&
     Boolean(route.requestId) && Number.isFinite(observed) && observed <= now.getTime() - SECONDARY_REVALIDATION_BACKOFF_MS;
+}
+
+/** An independently fresh, plain public read can precede one repaired static
+ * budget probe. It never recovers an access denial or reopens the failed owner. */
+function isRepairedStaticBudgetReadDue(route: Partial<SimulatorResearchBlockedRoute>, state: SimulatorResearchState, now: Date) {
+  if (!route.url || route.rendered !== true || route.httpStatus !== 0 || !route.requestId || !route.observedAt ||
+      route.accessControls?.length || route.failure?.stage !== "PUBLIC_READ" || route.failure.category !== "BUDGET" ||
+      route.failure.code !== "PUBLIC_BODY_LIMIT" || route.failure.researchPhase !== "BROWSER_REQUEST" ||
+      !["SECONDARY_SCRIPT", "SECONDARY_STYLESHEET"].includes(route.failure.researchResourceKind ?? "") ||
+      route.researchImplementationVersion === getSimulatorResearchImplementationVersion(route.url)) return false;
+  const failedAt = Date.parse(route.observedAt);
+  if (!Number.isFinite(failedAt) || failedAt > now.getTime() - 15 * 60_000) return false;
+  return state.history.some(entry => entry.rendered === false && entry.outcome === "READ" &&
+    entry.httpStatus >= 200 && entry.httpStatus < 300 && routeIdentity(entry.requestedUrl) === routeIdentity(route.url!) &&
+    entry.sourceFingerprint === state.sourceFingerprint && entry.publicReadEvidence?.sourceFingerprint === state.sourceFingerprint &&
+    entry.publicReadEvidence.accessControlsObserved === true && entry.publicReadEvidence.accessControls.length === 0 &&
+    entry.researchImplementationVersion === getSimulatorResearchImplementationVersion(route.url!) && Boolean(entry.requestId) &&
+    Date.parse(entry.observedAt) > failedAt && Date.parse(entry.observedAt) <= now.getTime() &&
+    Date.parse(entry.observedAt) >= now.getTime() - 30 * 60_000);
 }
 /** A trusted owned parser deployment permits one re-read of its earlier complete public receipt.
  * This authorizes investigation only; fresh configuration/checkpoint rules remain unchanged.
@@ -370,7 +393,7 @@ function researchDestination(state: SimulatorResearchState, value: string) {
 export function selectSimulatorResearchTarget(input: {
   state: SimulatorResearchState; officialUrl: string | null; bookingUrl: string | null; evidenceUrl?: string | null;
   source?: SimulatorResearchSource; linkIndex?: number; rendered: boolean; now: Date;
-  priorFailedRoutes?: { url: string; rendered: boolean }[];
+  priorFailedRoutes?: Array<Pick<SimulatorResearchBlockedRoute, "url" | "rendered"> & Partial<SimulatorResearchBlockedRoute>>;
   postRepairResearchBoundary?: Date | null;
 }): { source: SimulatorResearchSource | "link"; url: string; rendered: boolean } {
   const { state } = input;
@@ -450,7 +473,8 @@ export function selectSimulatorResearchTarget(input: {
       (isSecondaryRevalidationDue(matchingRoute!, input.now) ||
         isSimulatorPostRepairResearchReadDue(matchingRoute!, input.now, input.postRepairResearchBoundary, priorOnRoute))))
     throw new Error("Use a different simulator source research route; the identical route was already attempted.");
-  if (input.priorFailedRoutes?.some(entry => routeIdentity(entry.url) === routeIdentity(url) && entry.rendered === input.rendered)) throw new Error("An unchanged structural source failure needs a different research route or materially changed source.");
+  if (input.priorFailedRoutes?.some(entry => routeIdentity(entry.url) === routeIdentity(url) && entry.rendered === input.rendered &&
+      !isRepairedStaticBudgetReadDue(entry, state, input.now))) throw new Error("An unchanged structural source failure needs a different research route or materially changed source.");
   return { source, url, rendered: input.rendered };
 }
 
@@ -506,6 +530,11 @@ export function getSimulatorResearchGuide(input: {
       ? [{ observedAt: entry.observedAt, source: entry.source, rendered: true as const,
         state: "NOT_EXECUTED" as const, diagnostics: entry.blockedRequestDiagnostics,
         ...(entry.blockedRequestDiagnosticsTruncated ? { truncated: true as const } : {}) }] : []),
+    pageSurfaces: input.state.history.flatMap(entry => entry.pageSurfaces && entry.outcome === "READ" &&
+      entry.sourceFingerprint === input.state.sourceFingerprint && entry.publicReadEvidence?.accessControlsObserved === true &&
+      entry.publicReadEvidence.accessControls.length === 0 && Date.parse(entry.observedAt) <= input.now.getTime() &&
+      Date.parse(entry.observedAt) >= input.now.getTime() - 30 * 60_000
+      ? [{ observedAt: entry.observedAt, source: entry.source, rendered: entry.rendered, ...entry.pageSurfaces }] : []),
     publicConfigurations: input.state.history.flatMap(entry => entry.publicConfiguration &&
       isSimulatorPublicConfigurationSource(entry.publicConfiguration, entry.sourceUrl) &&
       entry.sourceFingerprint === input.state.sourceFingerprint && entry.httpStatus >= 200 && entry.httpStatus < 300 &&

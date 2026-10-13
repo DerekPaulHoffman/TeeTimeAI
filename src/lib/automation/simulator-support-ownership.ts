@@ -371,7 +371,7 @@ export async function readSimulatorSupportSource(input: Owner & { source?: Simul
           source: before.value.source, requestedUrl: before.value.url, sourceUrl: before.value.url,
           sourceFingerprint: before.value.sourceFingerprint,
           observedAt: now.toISOString(), httpStatus: 0, rendered: before.value.rendered, outcome: "HARD_FAILED",
-          requestId: before.value.requestId, failure,
+          requestId: before.value.requestId, failure, researchImplementationVersion: getSimulatorResearchImplementationVersion(before.value.url),
         }] };
         const saved = await saveClaim(tx, row, now, {}, research);
         const researchOnly = row.claim.phase === "CLAIMED" && row.claim.plannedPaths.length === 0 &&
@@ -449,6 +449,7 @@ export async function readSimulatorSupportSource(input: Owner & { source?: Simul
         requestId: before.value.requestId, researchImplementationVersion: getSimulatorResearchImplementationVersion(before.value.url),
         ...(read.renderWarning ? { renderWarning: read.renderWarning } : {}),
         ...(read.configurationDiagnostic ? { configurationDiagnostic: read.configurationDiagnostic } : {}),
+        ...(read.pageSurfaces ? { pageSurfaces: read.pageSurfaces } : {}),
         ...(read.bodyLimitDiagnostics ? { bodyLimitDiagnostics: read.bodyLimitDiagnostics } : {}),
         ...(read.bodyLimitDiagnosticsTruncated ? { bodyLimitDiagnosticsTruncated: true as const } : {}),
         ...(read.blockedRequestDiagnostics ? { blockedRequestDiagnostics: read.blockedRequestDiagnostics } : {}),

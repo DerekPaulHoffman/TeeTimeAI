@@ -10,6 +10,45 @@ const savedBayUrl = "https://yourgolfbooking.com/venues/public-golf/booking/bays
 const bookingRootUrl = "https://yourgolfbooking.com/venues/public-golf/booking";
 const acuityTenantRoot = "https://onegolfhaven.as.me/";
 
+describe("revalidation after a known static budget repair", () => {
+  const failed = { url: bookingUrl, rendered: true, httpStatus: 0, requestId: "11111111-1111-4111-8111-111111111111",
+    observedAt: new Date(now.getTime() - 60 * 60_000).toISOString(), researchImplementationVersion: "public-calendar-booking-frames-and-assets-v9",
+    failure: { stage: "PUBLIC_READ" as const, category: "BUDGET" as const, code: "PUBLIC_BODY_LIMIT", researchPhase: "BROWSER_REQUEST" as const,
+      researchResourceKind: "SECONDARY_SCRIPT" as const } };
+  const current = () => readSimulatorResearchState({ ...empty(), readCount: 1, history: [{
+    source: "booking", requestedUrl: bookingUrl, sourceUrl: bookingUrl, sourceFingerprint: fingerprint,
+    observedAt: now.toISOString(), httpStatus: 200, rendered: false, outcome: "READ",
+    requestId: "22222222-2222-4222-8222-222222222222", researchImplementationVersion: getSimulatorResearchImplementationVersion(bookingUrl),
+    publicReadEvidence: { sourceFingerprint: fingerprint, accessControlsObserved: true, accessControls: [], method: "HTTP" },
+  }] }, fingerprint);
+  const run = (route: typeof failed | Record<string, unknown> = failed, state = current()) => select(state, {
+    source: "booking", rendered: true, priorFailedRoutes: [route],
+  });
+  it("requires a new collector and fresh same-source public HTTP proof, preserving the old failure", () => {
+    const copy = structuredClone(failed);
+    expect(run()).toEqual({ source: "booking", url: bookingUrl, rendered: true });
+    expect(run({ ...failed, researchImplementationVersion: undefined })).toBeDefined();
+    expect(failed).toEqual(copy);
+    expect(getSimulatorResearchGuide({ state: current(), officialUrl, bookingUrl, now, priorFailedRoutes: [failed] }).suggestedReads)
+      .toContainEqual({ source: "booking", rendered: true });
+  });
+  it("does not reopen current failures, unknown errors, main/data failures or access denials", () => {
+    for (const change of [
+      { researchImplementationVersion: getSimulatorResearchImplementationVersion(bookingUrl) },
+      { observedAt: now.toISOString() }, { requestId: undefined }, { accessControls: ["ACCOUNT_REQUIRED"] },
+      { httpStatus: 403 }, { failure: { ...failed.failure, code: "UNCLASSIFIED_FAILURE", category: "UNKNOWN" } },
+      { failure: { ...failed.failure, researchResourceKind: "MAIN_DOCUMENT" } },
+      { failure: { ...failed.failure, researchResourceKind: "XHR_OR_FETCH" } },
+    ]) expect(() => run({ ...failed, ...change })).toThrow();
+    expect(() => run(failed, empty())).toThrow();
+    const stale = current(); stale.history[0].observedAt = new Date(now.getTime() - 31 * 60_000).toISOString();
+    expect(() => run(failed, stale)).toThrow();
+    const changed = current(); changed.history[0].sourceFingerprint = "b".repeat(64);
+    expect(() => run(failed, changed)).toThrow();
+    expect(() => run(failed, { ...current(), readCount: 6 })).toThrow();
+  });
+});
+
 describe("official venue navigation and fragment route identity", () => {
   const brewery = "https://brewery.example.test/";
   const golf = "https://brewerygolfclub.square.site/";

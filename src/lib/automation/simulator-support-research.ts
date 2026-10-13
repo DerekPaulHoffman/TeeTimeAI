@@ -13,9 +13,11 @@ import { collectSimulatorPublicApiConfiguration, projectYourGolfBookingReviewedS
 import { tagSimulatorResearchFailure, tagSimulatorResearchResourceKind, type SimulatorResearchFailurePhase,
   type SimulatorResearchResourceKind } from "./simulator-support-failure";
 import { createBlockedResourceDiagnostics, simulatorCredentialHeaderKind, summarizeBlockedRequestBody, type SimulatorBlockedResourceDiagnostic } from "./simulator-blocked-resources";
+import { summarizeSimulatorPageSurfaces, type SimulatorPageSurfaces } from "./simulator-page-surfaces";
 
 const MAX_BODY_BYTES = 1_500_000;
-const MAX_RENDER_BYTES = 6_000_000;
+const MAX_RENDER_BYTES = 16_000_000;
+const MAX_NON_SCRIPT_BYTES = 6_000_000;
 const MAX_REQUESTS = 32;
 const MAX_RENDER_REQUESTS = 64;
 const DEADLINE_MS = 20_000;
@@ -125,6 +127,7 @@ export type SimulatorResearchResult = {
   venueLinks?: string[];
   calendar?: SimulatorPublicCalendar;
   publicConfiguration?: SimulatorPublicConfiguration;
+  pageSurfaces?: SimulatorPageSurfaces;
   jsonShape?: Array<{ path: string; type: string; count?: number }>;
   configurationDiagnostic?: SimulatorConfigurationDiagnostic;
   blockedRequests?: number;
@@ -529,7 +532,7 @@ function resultFromBody(requestedUrl: string, url: string, status: number, conte
   const retainedLinks = new Set(summary.links);
   const retainedBookingLinks = [...new Set(bookingLinks)].filter(link => retainedLinks.has(link));
   const retainedVenueLinks = venueLinks.filter(link => retainedLinks.has(link));
-  return { ...base, ...summary, ...(retainedBookingLinks.length ? { bookingLinks: retainedBookingLinks } : {}),
+  return { ...base, ...summary, pageSurfaces: summarizeSimulatorPageSurfaces(html, url), ...(retainedBookingLinks.length ? { bookingLinks: retainedBookingLinks } : {}),
     ...(retainedVenueLinks.length ? { venueLinks: retainedVenueLinks } : {}),
     ...(publicConfiguration ? { publicConfiguration } : {}), ...calendar };
 }
@@ -801,7 +804,7 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
       if (readResult.location) { if (redirects === 4) throw new Error("SIMULATOR_RESEARCH_REDIRECT_LIMIT"); url = readResult.location; continue; }
       const result = resultFromBody(requestedUrl, readResult.url, readResult.status, readResult.contentType, readResult.body, now());
       const controls = /^(?:text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(readResult.contentType) ? detectSimulatorResearchAccessControls(readResult.body.toString("utf8")) : [];
-      if (controls.length) return { ...result, text: "", links: [], bookingLinks: undefined, calendar: undefined, publicConfiguration: undefined, jsonShape: undefined, configurationDiagnostic: undefined, accessControls: controls };
+      if (controls.length) return { ...result, text: "", links: [], bookingLinks: undefined, calendar: undefined, publicConfiguration: undefined, jsonShape: undefined, configurationDiagnostic: undefined, pageSurfaces: undefined, accessControls: controls };
       if (readResult.status < 200 || readResult.status >= 300 || !/^(?:text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(readResult.contentType)) return result;
       let companionRequests = 0;
       const configuration = await collectSimulatorPublicApiConfiguration(readResult.url, async (target, headers) => {
@@ -821,7 +824,7 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
     throw tagSimulatorResearchFailure(error, "BROWSER_LAUNCH");
   }
   let context: Awaited<ReturnType<ResearchBrowser["newContext"]>> | undefined;
-  let requestCount = 0, nonAssetRequestCount = 0, responseBytes = 0, blockedRequests = 0, routeFailure: unknown, hasRouteFailure = false;
+  let requestCount = 0, nonAssetRequestCount = 0, responseBytes = 0, nonScriptBytes = 0, blockedRequests = 0, routeFailure: unknown, hasRouteFailure = false;
   let navigation: Awaited<ReturnType<typeof read>> | undefined;
   let safeMainDocument: Awaited<ReturnType<typeof read>> & { observedAt: Date } | undefined;
   let terminalMainDocument: Awaited<ReturnType<typeof read>> & { observedAt: Date } | undefined;
@@ -885,8 +888,10 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
       if (terminalMainDocument) return skippedAfterTerminalMain;
       if (deadline.aborted) throw new Error("SIMULATOR_RESEARCH_DEADLINE");
       if (hasRouteFailure) throw routeFailure;
-      const remainingBytes = MAX_RENDER_BYTES - responseBytes;
-      const resourceCeiling = resourceKind === "SECONDARY_SCRIPT" && isSecondaryAsset && safeMainDocument ? MAX_RENDER_BYTES : MAX_BODY_BYTES;
+      const extendedScript = resourceKind === "SECONDARY_SCRIPT" && isSecondaryAsset && Boolean(safeMainDocument);
+      const remainingBytes = Math.min(MAX_RENDER_BYTES - responseBytes,
+        extendedScript ? Infinity : MAX_NON_SCRIPT_BYTES - nonScriptBytes);
+      const resourceCeiling = extendedScript ? MAX_RENDER_BYTES : MAX_BODY_BYTES;
       const maxBodyBytes = Math.min(resourceCeiling, remainingBytes);
       if (maxBodyBytes <= 0) {
         routeFailure = tagSimulatorResearchResourceKind(new Error("SIMULATOR_RESEARCH_BODY_LIMIT"), resourceKind);
@@ -896,6 +901,7 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
       try {
         const response = await read(args[0], args[1], args[2], args[3], args[4], maxBodyBytes);
         responseBytes += response.body.length;
+        if (!extendedScript) nonScriptBytes += response.body.length;
         return response;
       }
       catch (error) {
@@ -904,6 +910,7 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
           // The pinned transport may have downloaded the response before its
           // effective URL or redirect was rejected. Charge its full admitted cap.
           responseBytes += maxBodyBytes;
+          if (!extendedScript) nonScriptBytes += maxBodyBytes;
           if (maxBodyBytes < resourceCeiling) {
             routeFailure = tagSimulatorResearchResourceKind(new Error("SIMULATOR_RESEARCH_BODY_LIMIT"), resourceKind);
             hasRouteFailure = true;
@@ -916,6 +923,7 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
         if (isSecondaryAsset && safeMainDocument && bodyLimit && !hasRouteFailure) {
           // Charge rejected bytes conservatively; exhausting the page budget is fatal.
           responseBytes += maxBodyBytes;
+          if (!extendedScript) nonScriptBytes += maxBodyBytes;
           if (maxBodyBytes < resourceCeiling) {
             routeFailure = tagSimulatorResearchResourceKind(new Error("SIMULATOR_RESEARCH_BODY_LIMIT"), resourceKind);
             hasRouteFailure = true;

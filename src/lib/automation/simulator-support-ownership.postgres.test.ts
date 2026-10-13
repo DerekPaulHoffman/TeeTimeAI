@@ -991,6 +991,9 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(claim.research).toMatchObject({ readCount: 1, sourceFingerprint: f.fingerprint,
       links: [frame], bookingLinks: [frame], bookingLinkRoles: [{ url: frame, observedAt: first.value.publicSource.observedAt }] });
     expect(claim.researchGuide.suggestedReads).toContainEqual({ linkIndex: 1, rendered: false });
+    expect(claim.researchGuide.pageSurfaces).toMatchObject([{ entries: [
+      { kind: "IFRAME", target: "PUBLIC_URL", bookingLabel: true }, { kind: "IFRAME", target: "UNSAFE", bookingLabel: true },
+    ] }]);
     const following = vi.fn(async () => new Response('<h1>Public room information</h1>', { headers: { "content-type": "text/html" } }));
     const second = await lane.readSimulatorSupportSource({ ...owner, linkIndex: 1 }, { fetch: following });
     if (!second.acquired) throw new Error("Booking fixture read was busy.");
@@ -1001,6 +1004,39 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(before);
     expect(await client.courseOffering.findUniqueOrThrow({ where: { id: f.offering.id } })).toEqual(offeringBefore);
     expect(await client.teeTimeMatch.count({ where: { teeSearchId: f.search.id } })).toBe(0);
+    expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
+  });
+
+  it("retains a legacy static budget failure and only revalidates after a fresh public plain read", async () => {
+    const target = "https://calendar.example.test/booking";
+    const f = await fixture(15, false, target);
+    const current = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const audit = current.audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    const failedAt = new Date(Date.now() - 60 * 60_000);
+    const previous = await client.automationRun.create({ data: { kind: "OTHER", status: "COMPLETED", outcome: "simulator_research_failed",
+      promptVersion: dispatcher.COURSE_DISPATCH_PROMPT_VERSION, startedAt: failedAt, completedAt: failedAt,
+      audit: { ...audit, simulatorResearch: { version: 1, sourceFingerprint: f.fingerprint, readCount: 1,
+        links: [], bookingLinks: [], linkBaseUrl: null, inFlight: null, history: [{ source: "booking", requestedUrl: target, sourceUrl: target,
+          sourceFingerprint: f.fingerprint, observedAt: failedAt.toISOString(), httpStatus: 0, rendered: true, outcome: "HARD_FAILED",
+          requestId: randomUUID(), failure: { stage: "PUBLIC_READ", category: "BUDGET", code: "PUBLIC_BODY_LIMIT",
+            researchPhase: "BROWSER_REQUEST", researchResourceKind: "SECONDARY_SCRIPT" } }] } } as unknown as Prisma.InputJsonValue } });
+    ids.runs.push(previous.id);
+    const fetch = vi.fn(async () => new Response('<h1>Public page</h1>', { headers: { "content-type": "text/html" } }));
+    await expect(lane.readSimulatorSupportSource({ ...f.owner, source: "booking", rendered: true }, { fetch })).rejects.toThrow("structural source failure");
+    expect(fetch).not.toHaveBeenCalled();
+    const plain = await lane.readSimulatorSupportSource({ ...f.owner, source: "booking" }, { fetch });
+    if (!plain.acquired) throw new Error("Plain read busy.");
+    const owner = { ...f.owner, revision: plain.value.revision };
+    const claim = await lane.readSimulatorSupportClaim(owner);
+    expect(claim.researchGuide.suggestedReads).toContainEqual({ source: "booking", rendered: true });
+    expect(claim.researchGuide.priorBlockedRoutes).toContainEqual(expect.objectContaining({ url: target, failure: expect.objectContaining({ code: "PUBLIC_BODY_LIMIT" }) }));
+    const browser = vi.fn(async () => { throw new Error("SIMULATOR_RESEARCH_PROVIDER_BUSY"); });
+    const next = await lane.readSimulatorSupportSource({ ...owner, source: "booking", rendered: true }, { fetch, browser });
+    if (!next.acquired) throw new Error("Rendered reservation busy.");
+    expect(browser).toHaveBeenCalledOnce();
+    expect(next.value.researchOutcome).toBe("CAPACITY_BUSY");
+    expect(await client.automationRun.findUniqueOrThrow({ where: { id: previous.id } })).toEqual(previous);
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toMatchObject({ status: "ACTIVE", syntheticMultiCycle: false });
     expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
   });
 
@@ -1828,6 +1864,7 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(inspected.revision).toBe(f.owner.revision + 2);
     expect(inspected.research).toMatchObject({ readCount: 1, inFlight: null, history: [{ outcome: "HARD_FAILED", httpStatus: 0,
       failure: { stage: "PUBLIC_READ", category: "UNKNOWN", code: "UNCLASSIFIED_FAILURE", researchPhase: "BROWSER_LAUNCH" } }] });
+    expect(inspected.research.history[0].researchImplementationVersion).toBe(getSimulatorResearchImplementationVersion(f.course.website!));
     expect(await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).toMatchObject({ status: "RUNNING", outcome: "simulator_research_hard_failed" });
     expect(JSON.stringify(inspected.research)).not.toContain(raw);
     expect(inspected.failedRead).toMatchObject({ revision: inspected.revision, readsUsed: 1, readsRemaining: 5,

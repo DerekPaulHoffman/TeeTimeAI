@@ -1295,13 +1295,13 @@ describe("bounded owned simulator public research transport", () => {
     let releaseFirst!: (value: Response) => void;
     const pendingFirst = new Promise<Response>(resolve => { releaseFirst = resolve; });
     const fetch = vi.fn(async (url: unknown) => String(url) === `${source}/` ? response(main)
-      : String(url) === first ? pendingFirst : new Response("not-served", { headers: { "content-length": "3000001", "content-type": "text/javascript" } }));
+      : String(url) === first ? pendingFirst : new Response("not-served", { headers: { "content-length": "8000001", "content-type": "text/javascript" } }));
     const collection = collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
     const outcome = collection.then(value => ({ value, error: undefined }), error => ({ value: undefined, error }));
     await vi.waitFor(() => expect(fetch.mock.calls.some(call => String(call[0]) === first)).toBe(true));
     await new Promise(resolve => setTimeout(resolve, 0));
     const secondStartedBeforeRelease = fetch.mock.calls.some(call => String(call[0]) === second);
-    releaseFirst(new Response("x".repeat(3_000_001), { headers: { "content-length": "3000001", "content-type": "text/javascript" } }));
+    releaseFirst(new Response("x".repeat(8_000_001), { headers: { "content-length": "8000001", "content-type": "text/javascript" } }));
     const settled = await outcome;
     expect(secondStartedBeforeRelease).toBe(false);
     expect(classifySimulatorSupportFailure(settled.error, "PUBLIC_READ")).toMatchObject({ category: "BUDGET", code: "PUBLIC_BODY_LIMIT", researchResourceKind: "SECONDARY_SCRIPT" });
@@ -1309,8 +1309,21 @@ describe("bounded owned simulator public research transport", () => {
     expect(view.routes[1].fulfill).toHaveBeenCalledOnce(); expect(view.routes[2].fulfill).not.toHaveBeenCalled();
     expect(view.page.content).not.toHaveBeenCalled(); expect(view.context.close).toHaveBeenCalledOnce(); expect(view.browser.close).toHaveBeenCalledOnce();
   });
-  it("accepts a script at the exact remaining six-megabyte budget without reading a later body", async () => {
-    const main = "<h1>Safe main</h1>", remaining = 6_000_000 - Buffer.byteLength(main);
+  it("allows a larger public script while retaining the separate six-megabyte non-script ceiling", async () => {
+    const root = `${source}/`, script = `${source}/public-app.js`;
+    const requests = [{ url: root }, { url: script, kind: "script" },
+      ...Array.from({ length: 4 }, (_, index) => ({ url: `${source}/public/data-${index}`, kind: "fetch" }))];
+    const view = renderedBrowser(requests);
+    const fetch = vi.fn(async (url: unknown) => String(url) === root ? response("<h1>Safe main</h1>")
+      : String(url) === script ? response("x".repeat(8_000_000), 200, "text/javascript")
+        : response("x".repeat(1_500_000), 200, "application/json"));
+    await expect(collectSimulatorSupportResearch({ url: root, render: true }, { fetch, lease, browser: view.factory })).rejects.toThrow("BODY_LIMIT");
+    expect(view.routes[1].fulfill).toHaveBeenCalledOnce();
+    expect(view.routes[5].fulfill).not.toHaveBeenCalled();
+    expect(fetch).toHaveBeenCalledTimes(6);
+  });
+  it("accepts a script at the exact remaining sixteen-megabyte budget without reading a later body", async () => {
+    const main = "<h1>Safe main</h1>", remaining = 16_000_000 - Buffer.byteLength(main);
     const view = renderedBrowser([{ url: `${source}/` }, { url: `${source}/exact.js`, kind: "script" }, { url: `${source}/never-read-data`, kind: "xhr" }]);
     const fetch = vi.fn(async (url: unknown) => String(url) === `${source}/` ? response(main)
       : new Response("x".repeat(remaining), { headers: { "content-length": String(remaining), "content-type": "text/javascript" } }));
@@ -1320,7 +1333,7 @@ describe("bounded owned simulator public research transport", () => {
     expect(view.page.content).not.toHaveBeenCalled(); expect(view.browser.close).toHaveBeenCalledOnce();
   });
   it.each([false, true])("rejects a script that exceeds the remaining aggregate budget without a partial success (streamed=%s)", async streamed => {
-    const main = "<h1>Safe main</h1>", remaining = 6_000_000 - Buffer.byteLength(main), cancel = vi.fn();
+    const main = "<h1>Safe main</h1>", remaining = 16_000_000 - Buffer.byteLength(main), cancel = vi.fn();
     const view = renderedBrowser([{ url: `${source}/` }, { url: `${source}/over-remaining.js`, kind: "script" }]);
     const fetch = vi.fn(async (url: unknown) => String(url) === `${source}/` ? response(main)
       : new Response(new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new Uint8Array(remaining)); controller.enqueue(new Uint8Array(1)); }, cancel }),
