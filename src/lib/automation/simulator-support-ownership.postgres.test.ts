@@ -933,6 +933,12 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
       blockedRequestDiagnostics: diagnostic, publicReadEvidence: { method: "BROWSER", accessControls: [] } });
     expect(current.researchGuide.blockedRequestDiagnostics).toMatchObject([{
       source: "booking", state: "NOT_EXECUTED", diagnostics: diagnostic }]);
+    const resourceDiagnostic = [{ state: "NOT_EXECUTED", resourceKind: "FETCH", method: "POST", reason: "UNSAFE_URL",
+      originRelation: "UNKNOWN", pathShape: "/booking/changefield", count: 1 }];
+    expect(read.value.publicSource.blockedResourceDiagnostics).toEqual(resourceDiagnostic);
+    expect(current.research.history[0]).toMatchObject({ blockedResourceDiagnostics: resourceDiagnostic,
+      renderWarning: "SECONDARY_REQUESTS_BLOCKED", publicReadEvidence: { renderComplete: false } });
+    expect(current.researchGuide.blockedResourceDiagnostics).toMatchObject([{ source: "booking", diagnostics: resourceDiagnostic }]);
     const saved = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id }, select: { audit: true } });
     expect(JSON.stringify(saved.audit)).not.toMatch(/secret@example|never-persist-this|customer|POST.*token/u);
     expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();

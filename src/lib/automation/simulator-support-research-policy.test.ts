@@ -273,6 +273,40 @@ describe("official opaque booking links and observed redirect destinations", () 
   });
 });
 
+describe("owned blocked-resource diagnostics", () => {
+  const diagnostics = [{ state: "NOT_EXECUTED" as const, resourceKind: "FETCH" as const, method: "GET" as const,
+    reason: "UNSCOPED_DESTINATION" as const, originRelation: "OTHER_ORIGIN" as const,
+    pathShape: "/api/availability/:value", count: 2 }];
+  const entry = { source: "booking" as const, requestedUrl: bookingUrl, sourceUrl: bookingUrl, sourceFingerprint: fingerprint,
+    requestId: "11111111-1111-4111-8111-111111111111", observedAt: now.toISOString(), rendered: true, httpStatus: 200,
+    outcome: "READ" as const, renderWarning: "SECONDARY_REQUESTS_BLOCKED" as const,
+    researchImplementationVersion: SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION,
+    publicReadEvidence: { sourceFingerprint: fingerprint, accessControlsObserved: true as const,
+      accessControls: [], method: "BROWSER" as const, renderComplete: false }, blockedResourceDiagnostics: diagnostics };
+  it("retains only fresh current-source facts and preserves the incomplete-render retry backoff", () => {
+    const state = readSimulatorResearchState({ ...empty(), readCount: 1, history: [entry] }, fingerprint);
+    const guide = getSimulatorResearchGuide({ state, officialUrl, bookingUrl, now, priorFailedRoutes: [] });
+    expect(guide.blockedResourceDiagnostics).toEqual([{ observedAt: entry.observedAt, source: "booking", rendered: true,
+      state: "NOT_EXECUTED", diagnostics }]);
+    expect(getSimulatorResearchGuide({ state, officialUrl, bookingUrl, now: new Date(now.getTime() + 31 * 60_000), priorFailedRoutes: [] }).blockedResourceDiagnostics).toEqual([]);
+    expect(() => select(state, { source: "booking", rendered: true })).toThrow("identical");
+    expect(select(state, { source: "booking", rendered: true, now: new Date(now.getTime() + 60 * 60_000) }).url).toBe(bookingUrl);
+  });
+  it("rejects unowned or raw diagnostics without granting a read, including inherited memory", () => {
+    const route = { url: bookingUrl, rendered: true, httpStatus: 200, outcome: "READ", accessControlsObserved: true,
+      accessControls: [], blockedResourceDiagnostics: diagnostics };
+    expect(readSimulatorResearchFailureMemory({ version: 1, sourceFingerprint: fingerprint, routes: [route] })?.routes[0].blockedResourceDiagnostics).toEqual(diagnostics);
+    for (const invalid of [
+      { ...entry, blockedResourceDiagnostics: [{ ...diagnostics[0], url: "https://private.test" }] },
+      { ...entry, rendered: false }, { ...entry, httpStatus: 403 },
+      { ...entry, publicReadEvidence: undefined },
+      { ...entry, publicReadEvidence: { ...entry.publicReadEvidence, accessControls: ["ACCOUNT_REQUIRED"] } },
+    ]) expect(() => readSimulatorResearchState({ ...empty(), readCount: 1, history: [invalid] }, fingerprint)).toThrow();
+    expect(() => readSimulatorResearchFailureMemory({ version: 1, sourceFingerprint: fingerprint,
+      routes: [{ ...route, accessControlsObserved: undefined }] })).toThrow();
+  });
+});
+
 describe("same-route research after an owned parser release", () => {
   const postRepairResearchBoundary = new Date("2026-10-06T19:55:00.125Z");
   const receipt = () => ({

@@ -57,6 +57,8 @@ async function readPriorFailedResearchRoutes(tx: Pick<Prisma.TransactionClient, 
         ...(entry.renderWarning ? { renderWarning: entry.renderWarning } : {}), ...(entry.configurationDiagnostic ? { configurationDiagnostic: entry.configurationDiagnostic } : {}),
         ...(entry.bodyLimitDiagnostics ? { bodyLimitDiagnostics: entry.bodyLimitDiagnostics } : {}),
         ...(entry.bodyLimitDiagnosticsTruncated ? { bodyLimitDiagnosticsTruncated: true as const } : {}),
+        ...(entry.blockedResourceDiagnostics ? { blockedResourceDiagnostics: entry.blockedResourceDiagnostics } : {}),
+        ...(entry.blockedResourceDiagnosticsTruncated ? { blockedResourceDiagnosticsTruncated: true as const } : {}),
         ...(entry.outcome === "READ" ? {
           outcome: "READ" as const,
           ...(entry.publicReadEvidence ? { accessControlsObserved: entry.publicReadEvidence.accessControlsObserved,
@@ -451,6 +453,8 @@ export async function readSimulatorSupportSource(input: Owner & { source?: Simul
         ...(read.bodyLimitDiagnosticsTruncated ? { bodyLimitDiagnosticsTruncated: true as const } : {}),
         ...(read.blockedRequestDiagnostics ? { blockedRequestDiagnostics: read.blockedRequestDiagnostics } : {}),
         ...(read.blockedRequestDiagnosticsTruncated ? { blockedRequestDiagnosticsTruncated: true as const } : {}),
+        ...(read.blockedResourceDiagnostics ? { blockedResourceDiagnostics: read.blockedResourceDiagnostics } : {}),
+        ...(read.blockedResourceDiagnosticsTruncated ? { blockedResourceDiagnosticsTruncated: true as const } : {}),
         ...(read.publicConfiguration ? { publicConfiguration: read.publicConfiguration } : {}),
         ...(outcome === "READ" && read.accessControlsObserved === true ? { publicReadEvidence: {
           sourceFingerprint: row.source.fingerprint,

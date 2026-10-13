@@ -839,7 +839,7 @@ describe("bounded owned simulator public research transport", () => {
     expect(view.routes[1].abort).toHaveBeenCalledOnce();
     expect(result).toMatchObject({ text: "", links: [tenantRoot], bookingLinks: [tenantRoot], blockedRequests: 1,
       renderComplete: false, contentProvenance: "MAIN_DOCUMENT_HTTP" });
-    expect(result.renderWarning).toBeUndefined();
+    expect(result.renderWarning).toBe("SECONDARY_REQUESTS_BLOCKED");
   });
   it("does not count page-title metadata as a completed client app render", async () => {
     const main = publishedBootstrap().replace("<div id='app'></div>", "<head><title>Public golf venue</title></head><div id='app'></div>");
@@ -896,6 +896,25 @@ describe("bounded owned simulator public research transport", () => {
     ]);
     expect(JSON.stringify(result)).not.toMatch(/secret@example|never-persist-this|private-session|customer-9273|private-token|unrelated\.example/u);
     for (const route of view.routes.slice(1)) expect(route.abort).toHaveBeenCalledOnce();
+  });
+  it("reports blocked script/data causes and does not call a visible shell a completed calendar render", async () => {
+    const requests: RequestFixture[] = [{ url: `${source}/` },
+      { url: "https://other.example.test/api/availability/public-123?filter=hidden", kind: "fetch" },
+      { url: `${source}/api/calendar`, kind: "fetch", headers: { Authorization: "Bearer hidden" } },
+      { url: `${source}/public/chunk.js`, kind: "script", headers: { Cookie: "hidden" } },
+      { url: `${source}/photo.jpg`, kind: "image" }];
+    const view = renderedBrowser(requests, "<div id='__next'><footer>Terms and privacy</footer></div>");
+    const fetch = vi.fn(async () => response("<div id='__next'><footer>Terms and privacy</footer></div>"));
+    const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({ renderComplete: false, renderWarning: "SECONDARY_REQUESTS_BLOCKED", blockedRequests: 4,
+      blockedResourceDiagnostics: [
+        { resourceKind: "FETCH", method: "GET", reason: "UNSCOPED_DESTINATION", originRelation: "OTHER_ORIGIN", pathShape: "/api/availability/:value" },
+        { resourceKind: "FETCH", method: "GET", reason: "SENSITIVE_HEADERS", originRelation: "SAME_SITE", pathShape: "/api/calendar" },
+        { resourceKind: "SCRIPT", method: "GET", reason: "SENSITIVE_HEADERS", originRelation: "SAME_SITE" },
+        { resourceKind: "OTHER", method: "GET", reason: "RESOURCE_KIND_NOT_ALLOWED", originRelation: "SAME_SITE" },
+      ] });
+    expect(JSON.stringify(result.blockedResourceDiagnostics)).not.toMatch(/other.example|public-123|hidden|Authorization|Cookie|secret/u);
   });
   it("bounds and deduplicates blocked-method diagnostics independently of the admitted-read cap", async () => {
     const requests: RequestFixture[] = [{ url: `${source}/` },
@@ -1062,8 +1081,8 @@ describe("bounded owned simulator public research transport", () => {
     const view = renderedBrowser(requests), fetch = vi.fn(async () => response("public"));
     const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
     expect(fetch).toHaveBeenCalledTimes(3); expect(lease).toHaveBeenCalledTimes(3);
-    expect(result).toMatchObject({ blockedRequests: 40, admittedRequests: 3, renderComplete: true, contentProvenance: "RENDERED_DOM" });
-    expect(result.renderWarning).toBeUndefined();
+    expect(result).toMatchObject({ blockedRequests: 40, admittedRequests: 3, renderComplete: false, contentProvenance: "RENDERED_DOM" });
+    expect(result.renderWarning).toBe("SECONDARY_REQUESTS_BLOCKED");
     for (const route of view.routes.slice(1, 41)) expect(route.abort).toHaveBeenCalledOnce();
     expect(view.routes[42].fulfill).toHaveBeenCalledOnce();
   });
