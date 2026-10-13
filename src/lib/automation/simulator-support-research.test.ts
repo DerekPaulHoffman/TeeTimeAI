@@ -1755,6 +1755,36 @@ describe("bounded owned simulator public research transport", () => {
     await assertion;
     expect(view.context.close).toHaveBeenCalledOnce(); expect(view.browser.close).toHaveBeenCalledOnce();
   });
+  it("allows a 25-second public render within 45 seconds while plain reads keep their 20-second limit", async () => {
+    vi.useFakeTimers();
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockImplementation(milliseconds => {
+      const controller = new AbortController();
+      timers.push(setTimeout(() => controller.abort(), milliseconds));
+      return controller.signal;
+    });
+    try {
+      const view = renderedBrowser([{ url: `${source}/` }]);
+      const original = view.page.goto.getMockImplementation()!;
+      view.page.goto.mockImplementation(async () => {
+        const response = await original();
+        await new Promise(resolve => setTimeout(resolve, 25_000));
+        return response;
+      });
+      const pending = collectSimulatorSupportResearch({ url: source, render: true }, {
+        fetch: vi.fn(async () => response("<h1>Safe public page</h1>")), lease, browser: view.factory,
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(25_000);
+      expect(await pending).toMatchObject({ renderComplete: true });
+      expect(timeout).toHaveBeenCalledWith(45_000);
+      expect(view.page.goto).toHaveBeenCalledWith(`${source}/`, expect.objectContaining({ timeout: 45_000 }));
+      await collectSimulatorSupportResearch({ url: source }, { fetch: vi.fn(async () => response("<h1>Public</h1>")), lease });
+      expect(timeout).toHaveBeenCalledWith(20_000);
+    } finally {
+      timers.forEach(clearTimeout); vi.clearAllTimers(); timeout.mockRestore(); vi.useRealTimers();
+    }
+  });
 });
 
 describe("trusted source-research failure phases", () => {

@@ -21,6 +21,7 @@ const MAX_NON_SCRIPT_BYTES = 6_000_000;
 const MAX_REQUESTS = 32;
 const MAX_RENDER_REQUESTS = 64;
 const DEADLINE_MS = 20_000;
+const RENDER_DEADLINE_MS = 45_000;
 type Json = Record<string, unknown>;
 type Node = DefaultTreeAdapterMap["node"];
 type PublicNode = { nodeName?: string; tagName?: string; value?: string; attrs?: { name: string; value: string }[]; childNodes?: PublicNode[] };
@@ -762,7 +763,7 @@ export async function collectSimulatorSupportResearch(input: { url: string; rend
 async function collectOwnedSimulatorSupportResearch(input: { url: string; render?: boolean }, dependencies: SimulatorResearchDependencies): Promise<SimulatorResearchResult> {
   const requestedUrl = publicUrl(input.url).href;
   const now = dependencies.now ?? (() => new Date());
-  const deadline = AbortSignal.timeout(DEADLINE_MS);
+  const deadline = AbortSignal.timeout(input.render ? RENDER_DEADLINE_MS : DEADLINE_MS);
   const lease = dependencies.lease ?? runWithProviderRequestLease;
   const read = async (url: string, method: "GET" | "HEAD" = "GET", headers?: Record<string, string>, scopedRoot = requestedUrl, extraGuard?: (url: URL) => boolean, maxBodyBytes = MAX_BODY_BYTES) => {
     const safe = publicUrl(url);
@@ -1073,7 +1074,7 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
     }));
     page = await researchOperation("BROWSER_CONTEXT", () => beforeDeadline(context!.newPage(), deadline));
     let response: Awaited<ReturnType<ResearchPage["goto"]>>;
-    try { response = await beforeDeadline(page.goto(requestedUrl, { waitUntil: "domcontentloaded", timeout: DEADLINE_MS }), deadline); }
+    try { response = await beforeDeadline(page.goto(requestedUrl, { waitUntil: "domcontentloaded", timeout: RENDER_DEADLINE_MS }), deadline); }
     catch (error) {
       if (hasRouteFailure) throw routeFailure;
       const expectedIncomplete = error instanceof Error && (error.name === "TimeoutError" || error.message === "SIMULATOR_RESEARCH_DEADLINE" || /^page\.goto: net::ERR_(?:ABORTED|BLOCKED_BY_CLIENT)\b/u.test(error.message));
