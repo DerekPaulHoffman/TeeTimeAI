@@ -168,7 +168,7 @@ describe("official TeeSheet root handoff", () => {
     expect(() => follow({ ...state(), bookingLinkRoles: [] })).toThrow("handoff");
     expect(() => follow(state(), { officialUrl: "https://unrelated.example.test" })).toThrow("handoff");
     expect(() => follow(state(), { now: new Date(now.getTime() + 31 * 60_000) })).toThrow("fresh");
-    for (const url of ["https://user:password@oakwood.teesheet.ai/", "http://localhost/", "https://oakwood.teesheet.ai/checkout"]) {
+    for (const url of ["https://user:password@oakwood.teesheet.ai/", "http://localhost/", "https://oakwood.teesheet.ai/checkout", "https://oakwood.teesheet.ai/?checkout=1"]) {
       expect(() => follow({ ...state(), links: [url], bookingLinks: [url], bookingLinkRoles: [{ url, observedAt: now.toISOString() }] })).toThrow();
     }
     expect(() => follow({ ...state(), history: [{ ...receipt, publicReadEvidence: { ...receipt.publicReadEvidence, accessControls: ["ACCOUNT_REQUIRED"] } }] })).toThrow("handoff");
@@ -210,6 +210,12 @@ describe("official opaque booking links and observed redirect destinations", () 
       { ...state(), bookingLinkRoles: [{ url: booking, observedAt: new Date(now.getTime() - 31 * 60_000).toISOString() }] },
       { ...state(), sourceFingerprint: "b".repeat(64) },
     ]) expect(() => selectSimulatorResearchTarget({ ...input(value), linkIndex: 1, rendered: false })).toThrow("handoff");
+  });
+
+  it.each(["checkout=1", "payment=1", "action=checkout", "step=payment", "view=cart"])("does not admit transaction query %s as an opaque calendar handoff", query => {
+    const value = state(), url = `https://calendar.example.test/opaque?${query}`;
+    value.links = [url]; value.bookingLinks = [url]; value.bookingLinkRoles = [{ url, observedAt: now.toISOString() }];
+    expect(() => selectSimulatorResearchTarget({ ...input(value), linkIndex: 1, rendered: false })).toThrow("handoff");
   });
 
   const happy = "https://happysindoorgolf.com/";

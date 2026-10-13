@@ -339,6 +339,13 @@ function sameOfficialWebsite(value: string, official: string) {
     url.port === root.port && (url.protocol === root.protocol || root.protocol === "http:" && url.protocol === "https:");
 }
 
+function hasTransactionQuery(value: string) {
+  const transaction = /^(?:checkout|payment|pay|cart|purchase|order)$/iu;
+  return [...new URL(value).searchParams].some(([key, content]) =>
+    transaction.test(key.replace(/[^a-z]/giu, "")) ||
+    /^(?:action|page|route|step|view)$/iu.test(key) && transaction.test(content));
+}
+
 /** Only actual successful current-source redirects merge destination accounting.
  * Raw request identities still govern retries, denials and the six-read budget. */
 function researchDestination(state: SimulatorResearchState, value: string) {
@@ -394,7 +401,7 @@ export function selectSimulatorResearchTarget(input: {
       previous.publicReadEvidence.accessControlsObserved === true && !previous.publicReadEvidence.accessControls.length);
     // An exact official booking CTA need not have a provider-specific URL shape.
     // Accept only the observed official-site lineage, including www/HTTPS redirects.
-    const officialBookingHandoffRole = Boolean(official && previous &&
+    const officialBookingHandoffRole = Boolean(official && previous && !hasTransactionQuery(url) &&
       sameOfficialWebsite(previous.requestedUrl, official) && sameOfficialWebsite(previous.sourceUrl, official) &&
       state.bookingLinkRoles?.some(role => role.url === url && role.observedAt === previous?.observedAt) &&
       previous?.sourceFingerprint === state.sourceFingerprint &&
