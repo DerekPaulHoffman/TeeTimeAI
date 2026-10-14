@@ -68,7 +68,7 @@ export function summarizeBlockedRequestBody(body: string | null, contentType: st
     fields.add(kind);
     if (!["ACTION", "OPERATION", "ROUTE"].includes(kind) || typeof value !== "string") continue;
     if (value.length > 512) { truncated = true; continue; }
-    const tokens = value.toLowerCase().split(/[^a-z]+/u);
+    const tokens = value.replace(/([a-z])([A-Z])/gu, "$1_$2").toLowerCase().split(/[^a-z]+/u);
     if (tokens.some(token => ["get", "list", "load", "fetch", "read", "search", "find", "retrieve"].includes(token))) hints.add("READ");
     if (tokens.some(token => ["create", "save", "submit", "send", "update", "delete", "reserve", "pay", "purchase", "checkout"].includes(token))) hints.add("WRITE");
     if (tokens.some(token => ["availability", "available", "slots", "times", "calendar"].includes(token))) hints.add("AVAILABILITY");

@@ -946,6 +946,33 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(JSON.stringify(saved.audit)).not.toMatch(/secret@example|never-persist-this|customer|POST.*token|private-contact|private-body-token|get_calendar/u);
     expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
   });
+  it("persists only closed diagnostics for a real blocked public cross-origin POST", async () => {
+    const target = "https://official.example.test/booking";
+    const f = await fixture(15, false, target);
+    const before = await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } });
+    const html = `<html><body><h1>Public page</h1><script>
+      fetch('https://api.example.test/availability',{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify({operation:'getAvailability',date:'2042-08-27',customerEmail:'private@example.test'})}).catch(()=>{});
+      </script></body></html>`;
+    const fetch = vi.fn(async () => new Response(html, { headers: { "content-type": "text/html" } }));
+    const lease = (async (_host: string, worker: () => Promise<unknown>) => ({ acquired: true as const, value: await worker() })) as
+      NonNullable<import("./simulator-support-research").SimulatorResearchDependencies["lease"]>;
+    const read = await lane.readSimulatorSupportSource({ ...f.owner, source: "booking", rendered: true }, {
+      fetch, lease, browser: async () => chromium.launch({ headless: true }),
+    });
+    if (!read.acquired) throw new Error("Blocked request observation unavailable.");
+    expect(fetch).toHaveBeenCalledOnce();
+    const diagnostic = { state: "NOT_EXECUTED", resourceKind: "FETCH", method: "POST", reason: "METHOD_NOT_ALLOWED",
+      originRelation: "OTHER_ORIGIN", pathShape: "/availability", count: 1,
+      bodyShape: { format: "JSON", fieldKinds: ["CONTACT", "DATE", "OPERATION"], operationHints: ["AVAILABILITY", "READ"] } };
+    const claim = await lane.readSimulatorSupportClaim({ ...f.owner, revision: read.value.revision });
+    expect(claim.research.history[0].blockedResourceDiagnostics).toContainEqual(diagnostic);
+    expect(claim.researchGuide.blockedResourceDiagnostics[0].diagnostics).toContainEqual(diagnostic);
+    expect(JSON.stringify(claim.research)).not.toMatch(/private@example|2042-08-27|getAvailability/u);
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(before);
+    expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
+  });
+
   it("persists only typed USchedule rental selectors under the original owned source receipt", async () => {
     const bookingUrl = "https://clients.uschedule.com/syntheticvenue/booking";
     const f = await fixture(15, false, bookingUrl);

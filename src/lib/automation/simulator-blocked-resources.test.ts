@@ -20,6 +20,15 @@ describe("blocked resource diagnostics", () => {
     expect(JSON.stringify(shape)).not.toMatch(/private|boundary|attachment/u);
     expect(summarizeBlockedRequestBody(body, "multipart/form-data").format).toBe("OTHER");
   });
+  it.each([
+    ["getAvailability", ["AVAILABILITY", "READ"]],
+    ["GetCalendarSlots", ["AVAILABILITY", "READ"]],
+    ["createBooking", ["BOOKING", "WRITE"]],
+  ])("retains only closed lexical hints for camel-case operation %s", (operation, hints) => {
+    const shape = summarizeBlockedRequestBody(JSON.stringify({ operation, customerEmail: "private@example.test", token: "private-token" }), "application/json");
+    expect(shape.operationHints).toEqual(hints);
+    expect(JSON.stringify(shape)).not.toMatch(/private|customer|token|getAvailability|GetCalendarSlots|createBooking/u);
+  });
   it("projects credential classes without retaining arbitrary header names or values", () => {
     expect(["Cookie", "authorization", "x-api-key", "x-auth-token", "private-secret", "accept", "x-cookie"].map(simulatorCredentialHeaderKind))
       .toEqual(["COOKIE", "AUTHORIZATION", "API_KEY", "TOKEN", "OTHER_CREDENTIAL", undefined, "OTHER_CREDENTIAL"]);

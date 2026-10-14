@@ -305,6 +305,23 @@ describe("bounded owned simulator public research transport", () => {
     expect(result.blockedResourceDiagnostics).toContainEqual(expect.objectContaining({ method: "POST", reason: "METHOD_NOT_ALLOWED" }));
     expect(JSON.stringify(result)).not.toContain("private-value");
   }, 15_000);
+  it("reports a real blocked cross-origin public POST shape without sending it", async () => {
+    const root = `${source}/`;
+    const html = `<html><body><h1>Public page</h1><script>
+      fetch('https://api.example.test/availability',{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify({operation:'getAvailability',date:'2042-08-27',customerEmail:'private@example.test'})}).catch(()=>{});
+      </script></body></html>`;
+    const fetch = vi.fn(async () => response(html));
+    const result = await collectSimulatorSupportResearch({ url: root, render: true }, {
+      fetch, lease, browser: async () => chromium.launch({ headless: true }),
+    });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(result.blockedResourceDiagnostics).toContainEqual(expect.objectContaining({
+      method: "POST", reason: "METHOD_NOT_ALLOWED", originRelation: "OTHER_ORIGIN",
+      bodyShape: { format: "JSON", fieldKinds: ["CONTACT", "DATE", "OPERATION"], operationHints: ["AVAILABILITY", "READ"] },
+    }));
+    expect(JSON.stringify(result)).not.toMatch(/private@example|getAvailability|2042-08-27/u);
+  }, 15_000);
 
   it("stops if passive activation changes the selected document", async () => {
     const html = '<h1>Public page</h1><script data-src="/public.js"></script>';
@@ -1080,7 +1097,7 @@ describe("bounded owned simulator public research transport", () => {
     ]));
     for (const route of view.routes.slice(4)) expect(route.abort).toHaveBeenCalledOnce();
   });
-  it("projects a blocked same-site request body without executing it or exposing submitted values", async () => {
+  it("projects blocked public request bodies without executing them or exposing submitted values", async () => {
     const view = renderedBrowser([{ url: `${source}/` },
       { url: `${source}/api/booking`, method: "POST", kind: "fetch", headers: { "content-type": "application/json" },
         body: JSON.stringify({ action: "get_calendar_availability", email: "private@example.test", token: "secret-value", resourceId: 987654 }) },
@@ -1093,9 +1110,27 @@ describe("bounded owned simulator public research transport", () => {
       expect.objectContaining({ method: "POST", reason: "METHOD_NOT_ALLOWED", originRelation: "SAME_SITE",
         bodyShape: { format: "JSON", fieldKinds: ["ACTION", "AUTH", "CONTACT", "RESOURCE"], operationHints: ["AVAILABILITY", "READ"] } }),
     ]));
-    expect(result.blockedResourceDiagnostics?.find(row => row.originRelation === "OTHER_ORIGIN")?.bodyShape).toBeUndefined();
+    expect(result.blockedResourceDiagnostics?.find(row => row.originRelation === "OTHER_ORIGIN")?.bodyShape)
+      .toEqual({ format: "JSON", fieldKinds: ["ACTION"], operationHints: ["FORM", "WRITE"] });
     expect(JSON.stringify(result.blockedResourceDiagnostics)).not.toMatch(/private@example|secret-value|987654|get_calendar|submit_form/u);
     expect(view.routes[1].abort).toHaveBeenCalledOnce(); expect(view.routes[2].abort).toHaveBeenCalledOnce();
+  });
+  it.each([
+    { url: "https://api.example.test/availability", headers: { authorization: "secret" } },
+    { url: "https://api.example.test/availability", headers: { cookie: "private" } },
+    { url: "https://api.example.test/availability", headers: { "x-api-key": "private" } },
+    { url: "http://127.0.0.1/private", headers: {} },
+    { url: "https://api.example.test/availability?token=private", headers: {} },
+    { url: "https://challenge.example.test/captcha", headers: {} },
+  ])("does not project bodies for credentialed, private, unsafe or challenge cross-origin requests", async ({ url, headers }) => {
+    const view = renderedBrowser([{ url: `${source}/` }, { url, kind: "xhr", method: "POST",
+      headers: { "content-type": "application/json", ...headers }, body: '{"action":"getAvailability","email":"private@example.test"}' }]);
+    const fetch = vi.fn(async () => response("<h1>Public page</h1>"));
+    const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(result.blockedResourceDiagnostics?.every(row => row.bodyShape === undefined)).toBe(true);
+    expect(JSON.stringify(result)).not.toContain("private@example.test");
+    expect(view.routes[1].abort).toHaveBeenCalledOnce();
   });
   it("bounds and deduplicates blocked-method diagnostics independently of the admitted-read cap", async () => {
     const requests: RequestFixture[] = [{ url: `${source}/` },

@@ -1015,10 +1015,16 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
     await researchOperation("BROWSER_ROUTE_SETUP", () => context!.route("**/*", async (route: Route) => {
       const operation = (async () => {
         const request = route.request();
+        let observedHeaders: Headers | undefined;
         const blockedBodyShape = () => {
           try {
             if (!["xhr", "fetch"].includes(request.resourceType()) || ["GET", "HEAD"].includes(request.method()) ||
-                new URL(request.url()).origin !== new URL(navigation?.url ?? requestedUrl).origin || typeof request.postData !== "function") return {};
+                typeof request.postData !== "function") return {};
+            if (new URL(request.url()).origin !== new URL(navigation?.url ?? requestedUrl).origin) {
+              const destination = publicUrl(request.url());
+              if (!observedHeaders || [...observedHeaders.keys()].some(key => simulatorCredentialHeaderKind(key)) ||
+                  /captcha|challenge|turnstile|cdn-cgi/iu.test(`${destination.hostname}${destination.pathname}`)) return {};
+            }
             return { bodyShape: summarizeBlockedRequestBody(request.postData(), request.headers()["content-type"] ?? "") };
           } catch { return {}; }
         };
@@ -1027,6 +1033,7 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
           const kind = request.resourceType();
           recordBlockedMethod(request.url(), kind, method);
           const headers = new Headers(await request.allHeaders());
+          observedHeaders = headers;
           const url = publicUrl(request.url());
           const resourceKind: SimulatorResearchResourceKind = request.isNavigationRequest() && request.frame() === page?.mainFrame()
             ? "MAIN_DOCUMENT" : kind === "document" ? "SECONDARY_DOCUMENT" : kind === "script" ? "SECONDARY_SCRIPT"

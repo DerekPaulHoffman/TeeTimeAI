@@ -76,6 +76,8 @@ The owned HTML collector also retains up to four statically published iframe tar
 
 A successful plain read of a fresh booking or venue-role link retains that exact requested target and its original role timestamp for the unused rendered route, even when the page has no outgoing anchors. This does not refresh evidence, retain arbitrary unlabelled links, expand the six-read budget or override access controls and spent-route guards.
 
+Blocked cross-origin XHR/fetch requests may include the same value-free body-shape summary as same-site requests only when their destination is public and safe, is not a challenge route, and their observed headers contain no credential class. JSON/form field classes and lexical operation hints, including camel-case names, are diagnostic only. They never authorize a POST, establish read-only server semantics, expose payload values or prove public monitoring support.
+
 After every settled source-read, retain its returned revision and read the fresh researchGuide with this exact command:
 
 & 'C:\Program Files\nodejs\node.exe' scripts/automation/course-support-worker-runtime.mjs production --selected-checkout <selected-checkout> --script automation:simulator-support -- inspect --assignment-ref <assignment-ref>
