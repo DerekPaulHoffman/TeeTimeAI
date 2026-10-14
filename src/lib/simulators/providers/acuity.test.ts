@@ -213,7 +213,7 @@ describe("explicit simulator rentals on a venue-named calendar", () => {
     expect(request.pathname).toBe("/api/scheduling/v1/availability/times");
     expect(request.searchParams.get("calendarId")).toBe("11388341");
     expect(request.searchParams.get("appointmentTypeId")).toBe("73234482");
-    expect(fetchImpl.mock.calls[1][1]).toMatchObject({ method: "GET", redirect: "manual", cache: "no-store" });
+    expect(fetchImpl.mock.calls[1][1]).toMatchObject({ method: "GET", redirect: "manual", credentials: "omit", cache: "no-store" });
     expect(new Headers(fetchImpl.mock.calls[1][1]?.headers).has("Cookie")).toBe(false);
     expect(new Headers(fetchImpl.mock.calls[1][1]?.headers).has("Authorization")).toBe(false);
     expect(result.slots).toHaveLength(11);

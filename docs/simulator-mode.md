@@ -151,6 +151,13 @@ durations in 30-minute steps. Older aggregate records retain their whole-hour
 and explicit hourly per-bay pricing checks. A 90-minute rental cannot satisfy
 a 60-minute alert; original saved intent is unchanged.
 
+Complete fresh owned Acuity configuration also produces a candidate facts packet
+for the existing guarded configure/adopt/release/verify sequence. It uses only
+the validated rental IDs and exact published supported durations, preserves
+unknown capacity, and never inserts a missing 60-minute product. The latest
+observation must qualify; an incomplete or failed later read cannot be replaced
+with an older positive observation.
+
 The canonical Acuity schedule may retain the exact published
 `ref=embedded_csp` marker. Reads preserve it; it is never forwarded to the
 availability API. Other, duplicate, tenant/resource-selecting or credential

@@ -283,7 +283,7 @@ function validateInput(input: SimulatorAvailabilityInput) {
 }
 async function publicRead(url: URL, contentType: string, fetchImpl: typeof fetch) {
   let response: Response;
-  try { response = await fetchWithProviderTimeout(url, { method: "GET", redirect: "manual", cache: "no-store", headers: { Accept: contentType } }, fetchImpl); }
+  try { response = await fetchWithProviderTimeout(url, { method: "GET", redirect: "manual", credentials: "omit", cache: "no-store", headers: { Accept: contentType } }, fetchImpl); }
   catch { throw new SimulatorAvailabilityError("HTTP_ERROR", "The public simulator calendar could not be reached", true); }
   if (!response.ok) throw new SimulatorAvailabilityError("HTTP_ERROR", "The public simulator calendar could not be read", response.status === 429 || response.status >= 500, response.status, response.headers.get("retry-after"));
   if (response.url && response.url !== url.toString()) throw sourceError("The simulator calendar changed its requested destination");

@@ -136,7 +136,7 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     return { ...f, engineeringOwner: owner, proof, runtime };
   }
 
-  it.each(["TEESHEET", "UPPER_HAND", "YOUR_GOLF_BOOKING"] as PublicSimulatorFixtureKind[])("discovers and closes %s through owned research without a manual facts packet", async kind => {
+  it.each(["TEESHEET", "UPPER_HAND", "YOUR_GOLF_BOOKING", "ACUITY"] as PublicSimulatorFixtureKind[])("discovers and closes %s through owned research without a manual facts packet", async kind => {
     const f = await engineeringFixture();
     const publicSource = publicSimulatorFixture(kind);
     const lease = (async (_host: string, work: () => Promise<unknown>) => ({acquired:true as const,value:await work()})) as NonNullable<import("./simulator-support-research").SimulatorResearchDependencies["lease"]>;
@@ -152,6 +152,7 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     owner = {...owner,revision:readBooking.value.revision};
     expect(readBooking.value.publicSource.publicConfiguration?.family).toBe(kind);
     expect(readBooking.value.configurationCandidate?.manifest.providerFamilyKey).toBe(kind);
+    expect(readBooking.value.configurationCandidate?.manifest.supportedDurationsMinutes).toEqual(kind === "ACUITY" ? [90] : [60]);
     const candidate = await lane.readSimulatorSupportConfigurationCandidate(owner);
     if (!candidate.acquired) throw new Error("Isolated candidate was busy.");
     const configInput = {...owner,...candidate.value};
@@ -182,7 +183,9 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     const runtime = {runtimeVersion:baseSha,deploymentId:proof.deploymentId,deploymentUrl:proof.deploymentUrl,environment:"production",host:"teetimespot.com"};
     for (let cycle=1;cycle<=2;cycle++) {
       const result = await runSimulatorEngineeringVerification(owner,runtime);
+      expect(result.failureCode).toBeNull();
       expect(result).toMatchObject({complete:true,outcome:"MATCH_FOUND",engineeringOnly:true,customerAcceptance:false,freshSuccessfulChecks:cycle});
+      expect(result.durationMinutes).toBe(kind === "ACUITY" ? 90 : 60);
       owner = {...owner,revision:result.revision};
     }
     const progress = await lane.readSimulatorSupportProgress(owner);

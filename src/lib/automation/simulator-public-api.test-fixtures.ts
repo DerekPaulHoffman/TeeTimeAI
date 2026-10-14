@@ -1,11 +1,17 @@
-export type PublicSimulatorFixtureKind = "TEESHEET" | "UPPER_HAND" | "YOUR_GOLF_BOOKING";
+export type PublicSimulatorFixtureKind = "TEESHEET" | "UPPER_HAND" | "YOUR_GOLF_BOOKING" | "ACUITY";
 
 /** Controlled signed-out provider shapes. An unexpected request always fails;
  * this fixture has no network, customer transport or credential fallback. */
 export function publicSimulatorFixture(kind: PublicSimulatorFixtureKind) {
   const providerUrl = kind === "TEESHEET" ? "https://fixturevenue.teesheet.ai/" : kind === "UPPER_HAND"
     ? "https://app.upperhand.io/customers/1683-fixture-venue/events"
+    : kind === "ACUITY" ? "https://app.acuityscheduling.com/schedule/a66e63ac"
     : "https://booking.trackmangolf.com/venues/fixture-venue/booking/bays";
+  const acuityBusiness = { id: 34536426, ownerKey: "a66e63ac", name: "Fixture simulator", timezone: "UTC",
+    includesAdminOnly: false, isExpired: false, description: "Public simulator rentals",
+    calendars: { "": [{ id: 11388341, name: "Fixture simulator", timezone: "UTC" }] },
+    appointmentTypes: { "": [{ id: 73234482, name: "1.5 Hour Sim Rental", duration: 90, active: true, private: false,
+      type: "service", classSize: null, canChooseQuantity: false, calendarIDs: [11388341] }] } };
   const eventUrl = "https://app.upperhand.io/customers/1683-fixture-venue/events/100948-virtual-golf-1-hour";
   const state = { venue: { id: 1543, slug: "fixture-venue", timezone: "UTC", status: "live", maintenanceMode: false },
     ranges: { items: [{ id: 1591, venue: 1543, slug: "bays", bookable: true, slotDuration: 30, slotInterval: 30, slotIntervalStart: 30, assumeOpen: true,
@@ -21,7 +27,15 @@ export function publicSimulatorFixture(kind: PublicSimulatorFixtureKind) {
     if (init?.method !== "GET" || init.credentials !== "omit") throw new Error("Fixture requires public GET only.");
     if (url.origin === "https://official.example.test" && url.pathname === "/") return page(`<a href="${providerUrl}">Book Now</a>`);
     if (url.href === providerUrl) return page(kind === "YOUR_GOLF_BOOKING"
-      ? `<script id="__NEXT_DATA__" type="application/json">${JSON.stringify({props:{pageProps:{initialReduxState:state}}})}</script>` : "Public simulator calendar");
+      ? `<script id="__NEXT_DATA__" type="application/json">${JSON.stringify({props:{pageProps:{initialReduxState:state}}})}</script>`
+      : kind === "ACUITY" ? `<script>var BUSINESS = ${JSON.stringify(acuityBusiness)};</script>` : "Public simulator calendar");
+    if (kind === "ACUITY" && url.origin === "https://app.acuityscheduling.com" && url.pathname === "/api/scheduling/v1/availability/times" &&
+        url.searchParams.get("owner") === "a66e63ac" && url.searchParams.get("appointmentTypeId") === "73234482" &&
+        url.searchParams.get("calendarId") === "11388341" && url.searchParams.get("maxDays") === "4" && url.searchParams.get("timezone") === "UTC") {
+      const date = url.searchParams.get("startDate");
+      if (!date || !/^\d{4}-\d{2}-\d{2}$/u.test(date)) throw new Error("Fixture requires its exact public date.");
+      return response({ [date]: [{ time: `${date}T10:00:00+0000`, slotsAvailable: 2 }] });
+    }
     if (kind === "TEESHEET" && url.origin === "https://qdp9jvb6p6.execute-api.us-east-1.amazonaws.com" && url.searchParams.get("venue") === "fixturevenue") {
       if (url.pathname === "/prod/availability/pricing") return response({booking_settings:{min_duration_mins:30,max_duration_mins:480,time_increment_mins:15,advance_booking_days:60}});
       if (url.pathname === "/prod/availability/slots") return response({date:url.searchParams.get("date"),duration_mins:60,priced_for:"me",request_mode:false,would_be_closed:false,

@@ -28,6 +28,7 @@ export function buildSimulatorResearchConfigurationCandidate(input: {
   let providerMetadata: Record<string, string | string[] | number | boolean | null>, bookingUrl: string;
   let bookingWindowDaysAhead: number | null = null;
   let maxPartySize: number | null = null;
+  let supportedDurationsMinutes = [60];
   if (config.family === "TEESHEET") {
     providerMetadata = { venueSlug: config.tenant };
     bookingUrl = observation.sourceUrl;
@@ -35,6 +36,13 @@ export function buildSimulatorResearchConfigurationCandidate(input: {
   } else if (config.family === "UPPER_HAND") {
     providerMetadata = { customerId: config.customerId, eventId: config.eventId, resourceIds: config.resourceIds };
     bookingUrl = config.bookingUrl;
+  } else if (config.family === "ACUITY") {
+    const rentals = config.rentals.filter(row => row.durationMinutes >= 60);
+    if (!rentals.length) return;
+    providerMetadata = { ownerKey: config.ownerKey, rentalProductIds: rentals.map(row => row.id) };
+    bookingUrl = observation.sourceUrl;
+    maxPartySize = config.maxPartySize;
+    supportedDurationsMinutes = [...new Set(rentals.map(row => row.durationMinutes))].sort((left, right) => left - right);
   } else if (config.family === "YOUR_GOLF_BOOKING") {
     providerMetadata = { venueSlug: config.venueSlug, venueId: config.venueId, rangeId: config.rangeId,
       publicOptionId: config.publicOptionId, resourceIds: config.resourceIds, rentalContract: config.rentalContract,
@@ -49,7 +57,7 @@ export function buildSimulatorResearchConfigurationCandidate(input: {
     manifest: { googlePlaceId: course.googlePlaceId, name: course.name, address: course.address,
       latitude: course.latitude, longitude: course.longitude, website: course.website!,
       bookingUrl, evidenceUrl: observation.sourceUrl, verifiedAt: observation.observedAt,
-      active: true, publicAccessStatus: "PUBLIC" as const, supportedDurationsMinutes: [60], maxPartySize,
+      active: true, publicAccessStatus: "PUBLIC" as const, supportedDurationsMinutes, maxPartySize,
       providerFamilyKey: config.family, providerMetadata,
       ...(bookingWindowDaysAhead === null ? {} : { bookingWindowDaysAhead }),
     },
