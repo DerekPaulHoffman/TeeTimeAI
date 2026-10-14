@@ -893,6 +893,28 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
   const assets = new Map<string, string>();
   let assetsObserved = false;
   let hasDeferredScripts = false;
+  let renderedAssetInspections = 0;
+  let renderedAssetAdmissions = 0;
+  const inspectRenderedAsset = async (target: URL) => {
+    if (!page || !safeMainDocument || terminalMainDocument || accessControls.size ||
+        renderedAssetInspections >= 20 || new Set(assets.values()).size >= 20) return;
+    renderedAssetInspections += 1;
+    const documentUrl = publicUrl(page.url()).href;
+    if (!sameOfficialHost(requestedUrl, documentUrl)) return;
+    const html = await researchOperation("BROWSER_DOCUMENT", () => beforeDeadline(page!.content(), deadline));
+    if (publicUrl(page.url()).href !== documentUrl) return;
+    if (Buffer.byteLength(html, "utf8") > MAX_BODY_BYTES) throw new Error("SIMULATOR_RESEARCH_BODY_LIMIT");
+    const controls = detectSimulatorResearchAccessControls(html);
+    controls.forEach(control => accessControls.add(control));
+    if (controls.length) return;
+    const declared = publicAssetDestinations(html, documentUrl);
+    // A browser-created script/style element is still an exact public asset
+    // declaration. It grants no authority to fetch data or nearby URLs.
+    if (declared.urls.includes(target.href) && !assets.has(target.href) && new Set(assets.values()).size < 20) {
+      assets.set(target.href, target.href);
+      renderedAssetAdmissions += 1;
+    }
+  };
   let contractSlug = publicVenueSlug(requestedUrl);
   // Serialize transport and accounting together so every host shares one page budget.
   const cappedSecondaryAsset = Symbol("CAPPED_SECONDARY_ASSET");
@@ -1009,9 +1031,8 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
           const resourceKind: SimulatorResearchResourceKind = request.isNavigationRequest() && request.frame() === page?.mainFrame()
             ? "MAIN_DOCUMENT" : kind === "document" ? "SECONDARY_DOCUMENT" : kind === "script" ? "SECONDARY_SCRIPT"
               : kind === "stylesheet" ? "SECONDARY_STYLESHEET" : kind === "xhr" || kind === "fetch" ? "XHR_OR_FETCH" : "OTHER";
-          const assetRoot = ["script", "stylesheet"].includes(kind) ? assets.get(url.href) : undefined;
+          let assetRoot = ["script", "stylesheet"].includes(kind) ? assets.get(url.href) : undefined;
           const occupancy = method === "GET" && publicOccupancyUrl(url, contractSlug);
-          const originRelation = sameOfficialHost(requestedUrl, url.href) ? "SAME_SITE" as const : assetRoot ? "DECLARED_ASSET" as const : "OTHER_ORIGIN" as const;
           // Public static assets are fetched independently with credentials:omit.
           // An ambient browser cookie must not prevent loading them; it is never
           // forwarded. Navigation/data requests and other credential headers
@@ -1021,6 +1042,13 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
             const credential = simulatorCredentialHeaderKind(key);
             return credential && !(staticAsset && credential === "COOKIE") ? [credential] : [];
           }))];
+          if (!assetRoot && !sameOfficialHost(requestedUrl, url.href) && staticAsset &&
+              ["GET", "HEAD"].includes(method) && !credentialKinds.length &&
+              !/captcha|challenge|turnstile|cdn-cgi/iu.test(`${url.hostname}${url.pathname}`)) {
+            await inspectRenderedAsset(url);
+            assetRoot = assets.get(url.href);
+          }
+          const originRelation = sameOfficialHost(requestedUrl, url.href) ? "SAME_SITE" as const : assetRoot ? "DECLARED_ASSET" as const : "OTHER_ORIGIN" as const;
           const rejection = !["document", "script", "stylesheet", "xhr", "fetch"].includes(kind) ? "RESOURCE_KIND_NOT_ALLOWED" as const
             : !["GET", "HEAD"].includes(method) ? "METHOD_NOT_ALLOWED" as const
               : credentialKinds.length ? "SENSITIVE_HEADERS" as const
@@ -1110,6 +1138,14 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
     await settleStartedRoutes();
     if (hasRouteFailure) throw routeFailure;
     if (deadline.aborted) throw new Error("SIMULATOR_RESEARCH_DEADLINE");
+    if (renderedAssetAdmissions > 0) {
+      // Async script execution can follow a fulfilled route after DOMContentLoaded.
+      // Give the already-declared loader a bounded chance to update the document.
+      for (let turn = 0; turn < 4; turn += 1) {
+        await beforeDeadline(page.waitForTimeout(150), deadline);
+        await settleStartedRoutes();
+      }
+    }
     if (hasDeferredScripts && safeMainDocument && !terminalMainDocument && !accessControls.size && !secondaryBudgetExhausted) {
       await researchOperation("BROWSER_NAVIGATION", async () => {
         const originalUrl = publicUrl(page!.url()).href;

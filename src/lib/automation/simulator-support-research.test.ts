@@ -201,6 +201,79 @@ describe("owned known-reader public configuration", () => {
 });
 
 describe("bounded owned simulator public research transport", () => {
+  it("loads an exact public script declared by the browser after the initial document", async () => {
+    const root = `${source}/`, asset = "https://assets.example.test/late-calendar.js";
+    const html = `<html><body><h1>Public booking</h1><div id="calendar"></div><script>
+      const script=document.createElement('script');script.src='${asset}';document.body.appendChild(script);
+      </script></body></html>`;
+    const fetch = vi.fn<typeof globalThis.fetch>(async url => String(url) === root ? response(html)
+      : response("document.getElementById('calendar').innerHTML='<a href=\"https://calendar.example.test/public\">Book a bay</a>';", 200, "text/javascript"));
+    const result = await collectSimulatorSupportResearch({ url: root, render: true }, {
+      fetch, lease, browser: async () => chromium.launch({ headless: true }),
+    });
+    expect(result).toMatchObject({ renderComplete: true, bookingLinks: ["https://calendar.example.test/public"] });
+    expect(fetch.mock.calls.map(call => String(call[0]))).toEqual([root, asset]);
+    expect(fetch.mock.calls.every(call => call[1]?.method === "GET" && call[1].credentials === "omit")).toBe(true);
+  }, 15_000);
+
+  it.each(["fetch", "document"])("does not promote a rendered script declaration into %s authority", async kind => {
+    const asset = "https://assets.example.test/late.js";
+    const view = renderedBrowser([{ url: `${source}/` }, { url: asset, kind }], `<script src='${asset}'></script>`);
+    const fetch = vi.fn(async () => response("<h1>Initial public document</h1>"));
+    const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(result.blockedResourceDiagnostics).toContainEqual(expect.objectContaining({ reason: "UNSCOPED_DESTINATION" }));
+  });
+
+  it("shares the same twenty external declarations between initial and rendered documents", async () => {
+    const assets = Array.from({ length: 21 }, (_, index) => `https://assets.example.test/public-${index}.js`);
+    const initial = assets.slice(0, 19).map(url => `<script src='${url}'></script>`).join("");
+    const html = assets.map(url => `<script src='${url}'></script>`).join("");
+    const view = renderedBrowser([{ url: `${source}/` }, ...assets.map(url => ({ url, kind: "script" }))], html);
+    const fetch = vi.fn(async (url: unknown) => String(url) === `${source}/` ? response(initial) : response("public asset", 200, "text/javascript"));
+    const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
+    expect(fetch).toHaveBeenCalledTimes(21);
+    expect(result.admittedRequests).toBe(21);
+    expect(result.blockedRequests).toBe(1);
+  });
+
+  it("does not use a rendered declaration when the page changes during capture", async () => {
+    const asset = "https://assets.example.test/late.js";
+    const view = renderedBrowser([{ url: `${source}/` }, { url: asset, kind: "script" }]);
+    view.page.content.mockImplementation(async () => {
+      view.page.url = () => "https://other.example.test/";
+      return `<script src='${asset}'></script>`;
+    });
+    const fetch = vi.fn(async () => response("<h1>Public page</h1>"));
+    await expect(collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory }))
+      .rejects.toThrow("DESTINATION_CHANGED");
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("never inspects rendered content to rescue a credential-bearing or POST asset request", async () => {
+    const asset = "https://assets.example.test/late.js";
+    const view = renderedBrowser([{ url: `${source}/` },
+      { url: asset, kind: "script", headers: { Authorization: "secret" } },
+      { url: asset, kind: "script", method: "POST" }], `<script src='${asset}'></script>`);
+    const fetch = vi.fn(async () => response("<h1>Public page</h1>"));
+    const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(view.page.content).toHaveBeenCalledOnce(); // Final observation only.
+    expect(result.blockedRequests).toBe(2);
+  });
+
+  it.each([
+    "<template><script src='https://assets.example.test/late.js'></script></template>",
+    "<h1>Verify you are human</h1><script src='https://assets.example.test/late.js'></script>",
+    "<h1>Public document</h1>",
+  ])("does not admit an inert, access-controlled or undeclared rendered asset", async html => {
+    const view = renderedBrowser([{ url: `${source}/` }, { url: "https://assets.example.test/late.js", kind: "script" }], html);
+    const fetch = vi.fn(async () => response("<h1>Initial public document</h1>"));
+    const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(result.renderComplete).toBe(false);
+  });
+
   it("lets a real public page load its declared deferred script through passive reading only", async () => {
     const root = `${source}/`, asset = "https://assets.example.test/public-widget.js";
     const html = `<html><body><h1>Public booking</h1><div id="calendar"></div>

@@ -1004,6 +1004,30 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
   });
 
+  it("records a browser-created public script under the original owner without changing demand", async () => {
+    const target = "https://official.example.test/booking", asset = "https://assets.example.test/late-widget.js";
+    const f = await fixture(15, false, target);
+    const before = await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } });
+    const html = `<html><body><h1>Public booking</h1><div id="calendar"></div><script>
+      const element=document.createElement('script');element.src='${asset}';document.body.appendChild(element);</script></body></html>`;
+    const fetch = vi.fn(async (url: unknown) => String(url) === target ? new Response(html, { headers: { "content-type": "text/html" } })
+      : new Response("document.getElementById('calendar').innerHTML='<a href=\"https://calendar.example.test/public\">Book a bay</a>';", { headers: { "content-type": "text/javascript" } }));
+    const lease = (async (_host: string, worker: () => Promise<unknown>) => ({ acquired: true as const, value: await worker() })) as
+      NonNullable<import("./simulator-support-research").SimulatorResearchDependencies["lease"]>;
+    const read = await lane.readSimulatorSupportSource({ ...f.owner, source: "booking", rendered: true }, {
+      fetch, lease, browser: async () => chromium.launch({ headless: true }),
+    });
+    if (!read.acquired) throw new Error("Rendered script research busy.");
+    expect(read.value.publicSource).toMatchObject({ bookingLinks: ["https://calendar.example.test/public"], renderComplete: true });
+    expect(read.value.publicSource.renderActivation).toBeUndefined();
+    const claim = await lane.readSimulatorSupportClaim({ ...f.owner, revision: read.value.revision });
+    expect(claim.research.history[0]).toMatchObject({ researchImplementationVersion: SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION,
+      rendered: true, outcome: "READ", publicReadEvidence: { renderComplete: true, accessControls: [] } });
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(before);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
+  });
+
   it("persists a labelled booking frame as an owned handoff without configuring or changing customer demand", async () => {
     const f = await fixture();
     const before = await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } });
