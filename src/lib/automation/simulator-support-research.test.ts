@@ -127,6 +127,25 @@ describe("owned known-reader public configuration", () => {
     expect(persistedDiagnostic(result.configurationDiagnostic)).toEqual(result.configurationDiagnostic);
     expect(JSON.stringify(result.configurationDiagnostic)).not.toMatch(/private|token|BUSINESS/u);
   });
+  it("carries a closed resource rejection without exposing calendar names or accepting mismatched diagnostics", async () => {
+    const result = await collectSimulatorSupportResearch({ url: acuitySource }, {
+      fetch: vi.fn(async () => response(acuityConfig({ calendars: { "": [{ id: 11388341,
+        name: "Private-name secret@example.test", timezone: "America/New_York" }] } }))), lease,
+    });
+    const diagnostic = { phase: "CONFIG", reason: "PUBLIC_PROVIDER_CONFIG_REJECTED", publicProviderFamily: "ACUITY",
+      contractField: "RESOURCE_IDENTITY", resourceIdentity: { reason: "CALENDAR_NAME_UNVERIFIED", calendarNameKind: "OTHER" } };
+    expect(result.configurationDiagnostic).toEqual(diagnostic);
+    expect(result.publicConfiguration).toBeUndefined();
+    expect(persistedDiagnostic(diagnostic)).toEqual(diagnostic);
+    expect(JSON.stringify(result.configurationDiagnostic)).not.toMatch(/Private-name|secret@example|11388341/u);
+    for (const patch of [
+      { publicProviderFamily: "TEESHEET" }, { contractField: "RENTAL_IDENTITY" }, { reason: "PUBLIC_PROVIDER_HTTP_ERROR", httpStatus: 503 },
+      { resourceIdentity: { reason: "RAW_PRIVATE_NAME" } },
+      { resourceIdentity: { reason: "CALENDAR_NAME_UNVERIFIED" } },
+      { resourceIdentity: { reason: "CALENDAR_MATCH_AMBIGUOUS", calendarNameKind: "OTHER" } },
+      { resourceIdentity: { ...diagnostic.resourceIdentity, rawName: "secret@example.test" } },
+    ]) expect(() => persistedDiagnostic({ ...diagnostic, ...patch })).toThrow();
+  });
   it("projects only the structural USchedule tenant, selected public service and verified default hour", async () => {
     const fetch = vi.fn(async () => response(uscheduleHtml));
     const result = await collectSimulatorSupportResearch({ url: uscheduleSource }, { fetch, lease, now: () => instant });

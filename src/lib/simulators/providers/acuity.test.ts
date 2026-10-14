@@ -91,6 +91,49 @@ describe("closed public configuration rejection diagnostics", () => {
     value.calendars["X-Golf Stratford"][0].name = "Unverified room";
     expect(inspectAcuityPublicConfiguration(landing(value), input.offering.bookingUrl)?.configurationDiagnostic?.contractField).toBe("RESOURCE_IDENTITY");
   });
+  it.each([
+    ["empty rental calendars", "RENTAL_CALENDARS_INVALID"],
+    ["malformed calendar catalog", "CALENDAR_CATALOG_INVALID"],
+    ["missing calendar", "CALENDAR_MATCH_AMBIGUOUS"],
+    ["duplicate calendar", "CALENDAR_MATCH_AMBIGUOUS"],
+    ["unknown name", "CALENDAR_NAME_UNVERIFIED", "OTHER"],
+    ["missing name", "CALENDAR_NAME_UNVERIFIED", "MISSING_OR_INVALID"],
+    ["invalid name", "CALENDAR_NAME_UNVERIFIED", "MISSING_OR_INVALID"],
+    ["venue name", "CALENDAR_NAME_UNVERIFIED", "VENUE_NAME"],
+    ["timezone mismatch", "CALENDAR_TIMEZONE_MISMATCH"],
+  ])("reports %s while preserving runtime rejection and avoiding an availability read", async (mode, reason, calendarNameKind) => {
+    const value = business(), first = value.calendars["X-Golf Stratford"][0];
+    if (mode === "empty rental calendars") value.appointmentTypes[""][0].calendarIDs = [];
+    if (mode === "malformed calendar catalog") value.calendars = null as unknown as typeof value.calendars;
+    if (mode === "missing calendar") value.calendars["X-Golf Stratford"] = [];
+    if (mode === "duplicate calendar") value.calendars["X-Golf Stratford"].push({ ...first });
+    if (mode === "unknown name") first.name = "Private-name secret@example.test";
+    if (mode === "missing name") first.name = undefined as unknown as string;
+    if (mode === "invalid name") first.name = "<span>Private-name secret@example.test</span>";
+    if (mode === "venue name") { Object.assign(value, { name: "Private-name secret@example.test" }); first.name = "Private-name secret@example.test"; }
+    if (mode === "timezone mismatch") first.timezone = "America/Chicago";
+    const diagnostic = inspectAcuityPublicConfiguration(landing(value), input.offering.bookingUrl)?.configurationDiagnostic;
+    expect(diagnostic).toEqual({ phase: "CONFIG", reason: "PUBLIC_PROVIDER_CONFIG_REJECTED", publicProviderFamily: "ACUITY",
+      contractField: "RESOURCE_IDENTITY", resourceIdentity: { reason, ...(calendarNameKind ? { calendarNameKind } : {}) } });
+    expect(JSON.stringify(diagnostic)).not.toMatch(/Private-name|secret@example|11388341|11402955|America\//u);
+    expect(projectAcuityPublicConfiguration(landing(value), input.offering.bookingUrl)).toBeUndefined();
+    const fetch = mockReads(undefined, landing(value));
+    await expect(fetchAcuitySimulatorAvailability({ ...input, durationMinutes: 60 }, fetch)).rejects.toMatchObject({
+      code: ["empty rental calendars", "malformed calendar catalog"].includes(mode) ? "SCHEMA_CHANGED" : "INVALID_SOURCE",
+    });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+  it.each(["pricing", "calendar"])("keeps aggregate %s rejection separate from named resource checks", async mode => {
+    const value = aggregateBusiness();
+    if (mode === "pricing") value.description = "Public rental";
+    else value.calendars[""][0].name = "Unverified room";
+    expect(inspectAcuityPublicConfiguration(landing(value as unknown as ReturnType<typeof business>), aggregateUrl)?.configurationDiagnostic)
+      .toMatchObject({ contractField: "RESOURCE_IDENTITY", resourceIdentity: { reason: mode === "pricing"
+        ? "AGGREGATE_CORROBORATION_MISSING" : "AGGREGATE_CALENDAR_MISMATCH" } });
+    const fetch = mockReads(undefined, landing(value as unknown as ReturnType<typeof business>));
+    await expect(fetchAcuitySimulatorAvailability(aggregateInput, fetch)).rejects.toMatchObject({ code: "INVALID_SOURCE" });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
   it.each(["private", "inactive", "class", "quantity"])("keeps %s abbreviated rentals ineligible", mode => {
     const value = shortRental(), product = value.appointmentTypes[""][0];
     if (mode === "private") product.private = true;
@@ -110,6 +153,7 @@ describe("closed public configuration rejection diagnostics", () => {
   ])("reports %s without exposing source values", (_name, html, contractField) => {
     expect(inspectAcuityPublicConfiguration(html, input.offering.bookingUrl)).toEqual({ configurationDiagnostic: {
       phase: "CONFIG", reason: "PUBLIC_PROVIDER_CONFIG_REJECTED", publicProviderFamily: "ACUITY", contractField,
+      ...(contractField === "RESOURCE_IDENTITY" ? { resourceIdentity: { reason: "CALENDAR_MATCH_AMBIGUOUS" } } : {}),
     } });
     expect(projectAcuityPublicConfiguration(html, input.offering.bookingUrl)).toBeUndefined();
   });

@@ -13,6 +13,17 @@ const OWNER_KEY = /^[a-zA-Z0-9]{4,40}$/u;
 const MAX_RESPONSE_BYTES = 600_000;
 type Node = DefaultTreeAdapterMap["node"];
 type PublicProduct = { id: string; calendarIds: string[]; calendarKind: "NAMED_BAY" | "OPAQUE_AGGREGATE" };
+export type AcuityResourceIdentityDiagnostic = {
+  reason: "RENTAL_CALENDARS_INVALID" | "CALENDAR_CATALOG_INVALID" | "CALENDAR_MATCH_AMBIGUOUS" |
+    "CALENDAR_NAME_UNVERIFIED" | "CALENDAR_TIMEZONE_MISMATCH" |
+    "AGGREGATE_CORROBORATION_MISSING" | "AGGREGATE_CALENDAR_MISMATCH";
+  calendarNameKind?: "MISSING_OR_INVALID" | "VENUE_NAME" | "OTHER";
+};
+const resourceIdentityFailures = new WeakMap<SimulatorAvailabilityError, AcuityResourceIdentityDiagnostic>();
+function resourceIdentityError(error: SimulatorAvailabilityError, diagnostic: AcuityResourceIdentityDiagnostic) {
+  resourceIdentityFailures.set(error, diagnostic);
+  return error;
+}
 
 export function isAcuityPublicBookingUrl(value: string) {
   return knownSimulatorPublicConfigurationFamily(value) === "ACUITY";
@@ -66,22 +77,38 @@ function selectPublicRentalProduct(business: Record<string, unknown>, rentalIds:
   const aggregate = aggregateHours > 0 && aggregateHours * 60 === durationMinutes;
   if (!namedBay && !aggregate) throw sourceError("The reviewed simulator product is not a public rental");
   const calendarIds = Array.isArray(product.calendarIDs) ? product.calendarIDs.map(String) : [];
-  if (!calendarIds.length || calendarIds.length > 40 || calendarIds.some((id) => !PUBLIC_ID.test(id)) || new Set(calendarIds).size !== calendarIds.length) throw schemaError("The public simulator rental calendars are missing or ambiguous");
-  const calendars = flattenPublicGroups(business.calendars).filter((item) => String(item.id) !== "any");
+  if (!calendarIds.length || calendarIds.length > 40 || calendarIds.some((id) => !PUBLIC_ID.test(id)) || new Set(calendarIds).size !== calendarIds.length) throw resourceIdentityError(
+    schemaError("The public simulator rental calendars are missing or ambiguous"), { reason: "RENTAL_CALENDARS_INVALID" });
+  let calendars: Record<string, unknown>[];
+  try { calendars = flattenPublicGroups(business.calendars).filter((item) => String(item.id) !== "any"); }
+  catch (error) {
+    if (error instanceof SimulatorAvailabilityError) resourceIdentityFailures.set(error, { reason: "CALENDAR_CATALOG_INVALID" });
+    throw error;
+  }
   if (aggregate && !namedBay) {
     const businessName = normalizePlainName(business.name, 120);
     if (!businessName || !hasExplicitHourlyPerBayPricing(business.description) || calendarIds.length !== 1 ||
         types.filter(item => normalizePlainName(item.name, 80) === normalizePlainName(name, 80) && item.duration === durationMinutes).length !== 1) {
-      throw sourceError("The public aggregate rental identity is not corroborated");
+      throw resourceIdentityError(sourceError("The public aggregate rental identity is not corroborated"),
+        { reason: "AGGREGATE_CORROBORATION_MISSING" });
     }
     const matching = calendars.filter(item => String(item.id) === calendarIds[0]);
     if (matching.length !== 1 || normalizePlainName(matching[0].name, 120) !== businessName ||
-        matching[0].timezone !== business.timezone) throw sourceError("The public aggregate rental calendar is not the venue calendar");
+        matching[0].timezone !== business.timezone) throw resourceIdentityError(
+          sourceError("The public aggregate rental calendar is not the venue calendar"), { reason: "AGGREGATE_CALENDAR_MISMATCH" });
     return { id: String(product.id), calendarIds, calendarKind: "OPAQUE_AGGREGATE" };
   }
   for (const id of calendarIds) {
     const matches = calendars.filter((item) => String(item.id) === id);
-    if (matches.length !== 1 || typeof matches[0].name !== "string" || !/^\s*bay\s+\d+\b/iu.test(matches[0].name) || matches[0].timezone !== business.timezone) throw sourceError("The public simulator product belongs to an unverified resource calendar");
+    if (matches.length !== 1) throw resourceIdentityError(sourceError("The public simulator product belongs to an unverified resource calendar"),
+      { reason: "CALENDAR_MATCH_AMBIGUOUS" });
+    if (typeof matches[0].name !== "string" || !/^\s*bay\s+\d+\b/iu.test(matches[0].name)) {
+      const name = normalizePlainName(matches[0].name, 120), venueName = normalizePlainName(business.name, 120);
+      throw resourceIdentityError(sourceError("The public simulator product belongs to an unverified resource calendar"),
+        { reason: "CALENDAR_NAME_UNVERIFIED", calendarNameKind: !name ? "MISSING_OR_INVALID" : venueName && name === venueName ? "VENUE_NAME" : "OTHER" });
+    }
+    if (matches[0].timezone !== business.timezone) throw resourceIdentityError(
+      sourceError("The public simulator product belongs to an unverified resource calendar"), { reason: "CALENDAR_TIMEZONE_MISMATCH" });
   }
   return { id: String(product.id), calendarIds, calendarKind: "NAMED_BAY" };
 }
@@ -152,7 +179,8 @@ export function projectAcuityPublicConfiguration(html: string, sourceUrl: string
 type AcuityConfigurationInspection = {
   publicConfiguration?: AcuityPublicConfiguration;
   configurationDiagnostic?: { phase: "CONFIG"; reason: "PUBLIC_PROVIDER_CONFIG_REJECTED"; publicProviderFamily: "ACUITY";
-    contractField: "SETTINGS" | "CATALOG" | "RENTAL_IDENTITY" | "PUBLIC_ACCESS" | "RESOURCE_IDENTITY" };
+    contractField: "SETTINGS" | "CATALOG" | "RENTAL_IDENTITY" | "PUBLIC_ACCESS" | "RESOURCE_IDENTITY";
+    resourceIdentity?: AcuityResourceIdentityDiagnostic };
 };
 
 /** Closed rejection reasons expose no raw configuration, identifiers or customer data. */
@@ -195,7 +223,10 @@ export function inspectAcuityPublicConfiguration(html: string, sourceUrl: string
     if (contractField === "RESOURCE_IDENTITY" && error instanceof SimulatorAvailabilityError && error.code === "UNSUPPORTED_DURATION") {
       contractField = "RENTAL_IDENTITY";
     }
-    return rejected();
+    const result = rejected();
+    const resourceIdentity = error instanceof SimulatorAvailabilityError ? resourceIdentityFailures.get(error) : undefined;
+    if (contractField === "RESOURCE_IDENTITY" && resourceIdentity) result.configurationDiagnostic!.resourceIdentity = resourceIdentity;
+    return result;
   }
 }
 

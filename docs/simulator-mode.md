@@ -128,6 +128,14 @@ conservative capacity metadata despite the scheduler's higher value; it does not
 use that metadata or the saved player count to qualify availability. No add-on
 duration is inferred as a session.
 
+Acuity configuration rejections retain a closed resource-identity reason for
+invalid rental calendar lists, malformed or ambiguous calendar matches, an
+unverified calendar name, timezone mismatch, and missing aggregate corroboration.
+An unverified name is classified only as missing/invalid, equal to the venue name, or
+other; raw names, calendar IDs, source values and private fields are excluded.
+These diagnostics preserve the existing runtime rejection and make no extra
+provider request. Legacy receipts may omit the detail and remain unknown.
+
 Acuity also recognizes an exact hour-labelled `Sim Rental` product when the
 label's hours equal the provider's numeric duration. Public service flags,
 unambiguous product identity and verified named-bay calendars remain required.

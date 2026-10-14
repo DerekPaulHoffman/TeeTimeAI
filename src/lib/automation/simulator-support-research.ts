@@ -5,7 +5,7 @@ import { bodySizeBand, createAddressPinnedPublicFetchTransport, getOwnedOfficial
 import { runWithProviderRequestLease } from "./provider-request-lease";
 import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import { sanitizeResponderText } from "./course-support-responder-policy";
-import { inspectAcuityPublicConfiguration } from "@/lib/simulators/providers/acuity";
+import { inspectAcuityPublicConfiguration, type AcuityResourceIdentityDiagnostic } from "@/lib/simulators/providers/acuity";
 import { projectGolfBookPublicConfiguration } from "@/lib/simulators/providers/golfbook";
 import { projectUSchedulePublicConfiguration } from "@/lib/simulators/providers/uschedule";
 import type { SimulatorPublicConfiguration } from "@/lib/simulators/providers/public-configuration";
@@ -49,6 +49,7 @@ export type SimulatorConfigurationDiagnostic = {
   publicProviderFamily?: PublicApiConfigurationDiagnostic["publicProviderFamily"] | "ACUITY";
   httpStatus?: number;
   contractField?: PublicApiConfigurationDiagnostic["contractField"];
+  resourceIdentity?: AcuityResourceIdentityDiagnostic;
   maintenanceModeState?: "FALSE" | "TRUE" | "NULL" | "MISSING" | "INVALID";
   field?: {
     path: "props" | "props.pageProps" | "initialReduxState" | "venue" | "ranges" | "ranges.items" | "ranges.items[]" | "bays" | "bays.bayOptions" | "bays.bayOptions[]" | "bays.bayOptions[].restrictions" | "bays.bayOptions[].appliedRequiredPerks" | "bays.items" | "bays.items[]";

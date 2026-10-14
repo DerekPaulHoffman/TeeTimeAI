@@ -6,7 +6,7 @@ import { blockedResourceDiagnosticsSchema } from "./simulator-blocked-resources"
 import { simulatorPageSurfacesSchema } from "./simulator-page-surfaces";
 
 export const SIMULATOR_RESEARCH_MAX_READS = 6;
-export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-known-embed-reference-v21";
+export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-resource-rejection-detail-v22";
 export function getSimulatorResearchImplementationVersion(url: string) {
   const family = knownSimulatorPublicConfigurationFamily(url);
   if (family === "TEESHEET" || family === "UPPER_HAND" || family === "YOUR_GOLF_BOOKING") return "public-calendar-provider-api-configuration-v1";
@@ -74,6 +74,11 @@ const configurationDiagnostic = z.object({
   publicProviderFamily: z.enum(["TEESHEET", "UPPER_HAND", "ACUITY"]).optional(),
   httpStatus: z.number().int().min(100).max(599).optional(),
   contractField: z.enum(["SETTINGS", "CATALOG", "RENTAL_IDENTITY", "PUBLIC_ACCESS", "DURATION", "RESOURCE_IDENTITY"]).optional(),
+  resourceIdentity: z.object({
+    reason: z.enum(["RENTAL_CALENDARS_INVALID", "CALENDAR_CATALOG_INVALID", "CALENDAR_MATCH_AMBIGUOUS", "CALENDAR_NAME_UNVERIFIED",
+      "CALENDAR_TIMEZONE_MISMATCH", "AGGREGATE_CORROBORATION_MISSING", "AGGREGATE_CALENDAR_MISMATCH"]),
+    calendarNameKind: z.enum(["MISSING_OR_INVALID", "VENUE_NAME", "OTHER"]).optional(),
+  }).strict().refine(entry => (entry.reason === "CALENDAR_NAME_UNVERIFIED") === (entry.calendarNameKind !== undefined)).optional(),
   maintenanceModeState: z.enum(["FALSE", "TRUE", "NULL", "MISSING", "INVALID"]).optional(),
   field: z.object({
     path: z.enum(["props", "props.pageProps", "initialReduxState", "venue", "ranges", "ranges.items", "ranges.items[]", "bays", "bays.bayOptions", "bays.bayOptions[]", "bays.bayOptions[].restrictions", "bays.bayOptions[].appliedRequiredPerks", "bays.items", "bays.items[]"]),
@@ -121,7 +126,9 @@ const configurationDiagnostic = z.object({
     entry.field === undefined && entry.maintenanceModeState === undefined && (entry.reason === "PUBLIC_PROVIDER_HTTP_ERROR"
       ? entry.httpStatus !== undefined && entry.contractField === undefined
       : entry.httpStatus === undefined && entry.contractField !== undefined)
-    : entry.publicProviderFamily === undefined && entry.httpStatus === undefined && entry.contractField === undefined);
+    : entry.publicProviderFamily === undefined && entry.httpStatus === undefined && entry.contractField === undefined)
+  .refine(entry => entry.resourceIdentity === undefined || entry.reason === "PUBLIC_PROVIDER_CONFIG_REJECTED" &&
+    entry.publicProviderFamily === "ACUITY" && entry.contractField === "RESOURCE_IDENTITY");
 const renderWarning = z.enum(["SECONDARY_REQUEST_BUDGET_EXHAUSTED", "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED", "SECONDARY_STYLESHEET_URL_REJECTED", "SECONDARY_REQUESTS_BLOCKED", "MAIN_DOCUMENT_HTTP_ERROR"]);
 const bodyLimitDiagnostic = z.object({
   resourceKind: z.enum(["SECONDARY_SCRIPT", "SECONDARY_STYLESHEET"]),

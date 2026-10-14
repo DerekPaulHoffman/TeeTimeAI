@@ -406,6 +406,32 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(JSON.stringify(saved.audit)).not.toMatch(/never-persist-this|secret@example|Simulator Booking|CLIENT_INFO/u);
     expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
   });
+  it("retains a closed resource rejection in owned evidence without accepting a calendar or changing demand", async () => {
+    const bookingUrl = "https://app.acuityscheduling.com/schedule/2991fba2";
+    const f = await fixture(15, false, bookingUrl);
+    const searchBefore = await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } });
+    const offeringBefore = await client.courseOffering.findUniqueOrThrow({ where: { id: f.offering.id } });
+    const business = { id: 34536426, ownerKey: "2991fba2", timezone: "America/New_York", includesAdminOnly: false, isExpired: false,
+      name: "Private-name secret@example.test", calendars: { "": [{ id: 11388341, name: "Private-name secret@example.test", timezone: "America/New_York" }] },
+      appointmentTypes: { "": [{ id: 73234482, name: "Simulator Booking 1 HR", duration: 60, active: true, private: false,
+        type: "service", classSize: null, canChooseQuantity: false, calendarIDs: [11388341] }] } };
+    const fetch = vi.fn(async () => new Response(`<script>var BUSINESS = ${JSON.stringify(business)};</script>`,
+      { headers: { "content-type": "text/html" } }));
+    const read = await lane.readSimulatorSupportSource({ ...f.owner, source: "booking" }, { fetch });
+    expect(read.acquired).toBe(true);
+    const current = await lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId });
+    expect(current.research.history[0]).toMatchObject({ sourceUrl: bookingUrl, configurationDiagnostic: {
+      publicProviderFamily: "ACUITY", contractField: "RESOURCE_IDENTITY",
+      resourceIdentity: { reason: "CALENDAR_NAME_UNVERIFIED", calendarNameKind: "VENUE_NAME" },
+    } });
+    expect(current.research.history[0].publicConfiguration).toBeUndefined();
+    const saved = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id }, select: { audit: true } });
+    expect(JSON.stringify(saved.audit)).not.toMatch(/Private-name|secret@example|11388341|73234482/u);
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(searchBefore);
+    expect(await client.courseOffering.findUniqueOrThrow({ where: { id: f.offering.id } })).toEqual(offeringBefore);
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
+  });
   it.each(["SECONDARY_STYLESHEET_URL_REJECTED", "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED"])("persists only typed incomplete rendered discovery facts after %s under the real claim", async renderWarning => {
     const bookingUrl = "https://app.acuityscheduling.com/schedule/2991fba2";
     const f = await fixture(15, false, bookingUrl);
