@@ -342,12 +342,16 @@ function prepareProductionOutput(checkout) {
 }
 
 function completeJsonOutput(stdout) {
-  const candidates = []; const starts = /(?:^|\n)[\t \uFEFF]*(?=[{[])/g; let match;
+  const candidates = []; const starts = /(?:^|\n)[\t \uFEFF]*[{[]/g; let match;
+  let rootCandidate, minimumIndent = Infinity;
   while ((match = starts.exec(stdout))) {
-    candidates.push(match.index + match[0].length); if (candidates.length > 64) candidates.splice(1, 1);
+    const start = match.index + match[0].length - 1;
+    const indentation = match[0].slice(0, -1).replace(/[\n\uFEFF]/gu, "").length;
+    if (indentation <= minimumIndent) { minimumIndent = indentation; rootCandidate = start; }
+    candidates.push(start); if (candidates.length > 64) candidates.splice(1, 1);
   }
-  for (let index = candidates.length - 1; index >= 0; index--) {
-    try { return { found: true, value: JSON.parse(stdout.slice(candidates[index]).trim()) }; }
+  for (const start of [...new Set([rootCandidate, ...[...candidates].reverse()])].filter(value => value !== undefined)) {
+    try { return { found: true, value: JSON.parse(stdout.slice(start).trim()) }; }
     catch { /* A complete original JSON suffix is required; never repair it. */ }
   }
   return { found: false };

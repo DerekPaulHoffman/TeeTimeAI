@@ -422,7 +422,7 @@ describe("private Windows worker runtime", () => {
     const { options, dependencies } = fixture();
     const original = dependencies.runCommand.getMockImplementation()!;
     const payload = { acquired: true, value: { note: "unicode ✓", rows: "private-data-".repeat(3000), nested: Array.from({ length: 100 }, (_, index) => ({ index })) } };
-    const raw = `npm banner\n\uFEFF${JSON.stringify(payload, null, 2)}\n`;
+    const raw = `{"progress":"starting"}\nnpm banner\n\uFEFF${JSON.stringify(payload, null, 2)}\n`;
     const emitter = join(options.checkout, "emit-output.cjs");
     writeFileSync(emitter, `process.stdout.write(${JSON.stringify(raw)});process.stderr.write('private-child-stderr')`);
     dependencies.runCommand.mockImplementation((command, args, runOptions) => {
