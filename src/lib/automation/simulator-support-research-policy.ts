@@ -6,7 +6,7 @@ import { blockedResourceDiagnosticsSchema } from "./simulator-blocked-resources"
 import { simulatorPageSurfacesSchema } from "./simulator-page-surfaces";
 
 export const SIMULATOR_RESEARCH_MAX_READS = 6;
-export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-bounded-bundle-evidence-v25";
+export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-diverse-source-evidence-v26";
 export function getSimulatorResearchImplementationVersion(url: string) {
   const family = knownSimulatorPublicConfigurationFamily(url);
   if (family === "TEESHEET" || family === "UPPER_HAND" || family === "YOUR_GOLF_BOOKING") return "public-calendar-provider-api-configuration-v1";

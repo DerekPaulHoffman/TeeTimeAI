@@ -441,19 +441,22 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(fetch).toHaveBeenCalledOnce();
     expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
   });
-  it.each(["ordinary", "large-bundle"])("offers redacted client-code evidence from the original Chromium reads without storing code or allowing POST: %s", async size => {
+  it.each(["ordinary", "large-bundle", "multiple-sources"])("offers redacted client-code evidence from the original Chromium reads without storing code or allowing POST: %s", async size => {
     const bookingUrl = "https://official.example.test/booking", asset = "https://official.example.test/public.js";
+    const libraryAsset = "https://official.example.test/a-library.js";
+    const library = Array.from({ length: 6 }, (_, index) => `function getAvailability${index}(){return fetch('/api/availability/library',{secret:'client-code-private'})}`).join(";");
     const f = await fixture(15, false, bookingUrl);
     const searchBefore = await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } });
     const offeringBefore = await client.courseOffering.findUniqueOrThrow({ where: { id: f.offering.id } });
     const script = (size === "large-bundle" ? `/*${"library padding ".repeat(110_000)}*/` : "") + `function getAvailability(date){const unused="client-code-private";return fetch('/api/availability',{
       method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({venueId:'11111111-2222-4333-8444-555555555555',date})})}
       getAvailability('2026-10-15').catch(()=>{});`;
-    const html = `<h1>Public rentals</h1><script src='${asset}'></script>`;
+    const html = `<h1>Public rentals</h1>${size === "multiple-sources" ? `<script src='${libraryAsset}'></script>` : ""}<script src='${asset}'></script>`;
     const fetch = vi.fn(async (input: unknown, init?: RequestInit) => {
       if (init?.method !== "GET") throw new Error("No POST authority.");
       if (String(input) === bookingUrl) return new Response(html, { headers: { "content-type": "text/html" } });
       if (String(input) === asset) return new Response(script, { headers: { "content-type": "application/javascript" } });
+      if (size === "multiple-sources" && String(input) === libraryAsset) return new Response(library, { headers: { "content-type": "application/javascript" } });
       throw new Error("No additional public request.");
     });
     const lease = (async (_host: string, work: () => Promise<unknown>) => ({ acquired: true as const, value: await work() })) as NonNullable<import("./simulator-support-research").SimulatorResearchDependencies["lease"]>;
@@ -462,17 +465,24 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     });
     if (!read.acquired) throw new Error("Owned client-code read was busy.");
     expect(read.value.publicSource).toMatchObject({ renderComplete: false, renderWarning: "SECONDARY_REQUESTS_BLOCKED",
-      clientCodeEvidence: { authority: "EVIDENCE_ONLY", fragments: [{ sourceKind: "EXTERNAL_SCRIPT", sourceUrl: asset }] } });
-    expect(fetch).toHaveBeenCalledTimes(2);
+      clientCodeEvidence: { authority: "EVIDENCE_ONLY" } });
+    expect(read.value.publicSource.clientCodeEvidence!.fragments).toContainEqual(expect.objectContaining({ sourceKind: "EXTERNAL_SCRIPT", sourceUrl: asset }));
+    expect(fetch).toHaveBeenCalledTimes(size === "multiple-sources" ? 3 : 2);
     expect(read.value.publicSource.publicConfiguration).toBeUndefined(); expect(read.value.configurationCandidate).toBeUndefined();
     expect(JSON.stringify(read.value.publicSource.clientCodeEvidence)).not.toMatch(/client-code-private|11111111-2222/u);
     if (size === "large-bundle") expect(read.value.publicSource.clientCodeEvidence).toMatchObject({
       fragments: [{ projection: "TOKEN_WINDOW" }], truncated: true,
     });
+    if (size === "multiple-sources") {
+      expect(read.value.publicSource.clientCodeEvidence!.fragments).toHaveLength(4);
+      expect(new Set(read.value.publicSource.clientCodeEvidence!.fragments.map(fragment => fragment.sourceSha256)).size).toBe(2);
+      expect(read.value.publicSource.clientCodeEvidence!.candidateSourceHashes).toHaveLength(2);
+      expect(read.value.publicSource.clientCodeEvidence!.sourceCoverageTruncated).toBe(false);
+    }
     const current = await lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId });
     expect(current.research.readCount).toBe(1); expect(current.research.history[0]).not.toHaveProperty("clientCodeEvidence");
     const saved = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id }, select: { audit: true } });
-    expect(JSON.stringify(saved.audit)).not.toMatch(/clientCodeEvidence|getAvailability|client-code-private|11111111-2222/u);
+    expect(JSON.stringify(saved.audit)).not.toMatch(/clientCodeEvidence|candidateSourceHashes|getAvailability|client-code-private|11111111-2222/u);
     expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(searchBefore);
     expect(await client.courseOffering.findUniqueOrThrow({ where: { id: f.offering.id } })).toEqual(offeringBefore);
     expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();

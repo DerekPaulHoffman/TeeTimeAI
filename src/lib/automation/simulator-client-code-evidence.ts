@@ -22,6 +22,10 @@ type Fragment = { sourceKind: "INLINE_SCRIPT" | "EXTERNAL_SCRIPT"; sourceUrl: st
   range: { start: number; end: number }; literalRedactions: number; code: string };
 export type SimulatorClientCodeEvidence = {
   version: 1; authority: "EVIDENCE_ONLY"; fragments: Fragment[]; warnings: Warning[]; truncated: boolean;
+  /** Bounded hashes of sources that produced candidate contexts, including
+   * sources omitted from the final projection. Never a complete script inventory. */
+  candidateSourceHashes?: string[];
+  sourceCoverageTruncated?: boolean;
 };
 function asNode(value: unknown): JsNode | undefined {
   return value && typeof value === "object" && "type" in value && "start" in value && "end" in value ? value as JsNode : undefined;
@@ -228,12 +232,29 @@ export function mergeSimulatorClientCodeEvidence(...inputs: Array<SimulatorClien
   const ordered = [...unique.values()].sort((left, right) => Number(right.basis === "API_PATH") - Number(left.basis === "API_PATH") ||
     left.sourceUrl.localeCompare(right.sourceUrl) || left.sourceSha256.localeCompare(right.sourceSha256) ||
     left.sourceKind.localeCompare(right.sourceKind) || left.range.start - right.range.start || left.range.end - right.range.end);
+  const groups = new Map<string, Fragment[]>();
+  for (const fragment of ordered) {
+    const key = `${fragment.sourceKind}:${fragment.sourceUrl}:${fragment.sourceSha256}`;
+    const group = groups.get(key) ?? []; group.push(fragment); groups.set(key, group);
+  }
+  // One source cannot consume every slot before another source is considered.
+  // This remains a bounded sample; omissions never prove absence of a contract.
   let chars = 0;
-  const fragments = ordered.filter(fragment => {
-    if (chars + fragment.code.length > MAX_TOTAL_CONTEXT) return false;
-    chars += fragment.code.length; return true;
-  }).slice(0, MAX_CONTEXTS);
+  const fragments: Fragment[] = [];
+  for (let depth = 0; depth < MAX_CONTEXTS && fragments.length < MAX_CONTEXTS; depth++) {
+    for (const group of groups.values()) {
+      const fragment = group[depth];
+      if (!fragment || chars + fragment.code.length > MAX_TOTAL_CONTEXT) continue;
+      fragments.push(fragment); chars += fragment.code.length;
+      if (fragments.length === MAX_CONTEXTS) break;
+    }
+  }
+  const candidateHashes = [...new Set(present.flatMap(value => [
+    ...(value.candidateSourceHashes ?? []), ...value.fragments.map(fragment => fragment.sourceSha256),
+  ]).filter(hash => /^[a-f0-9]{64}$/u.test(hash)))].sort();
   return { version: 1, authority: "EVIDENCE_ONLY", fragments,
+    candidateSourceHashes: candidateHashes.slice(0, 64),
+    sourceCoverageTruncated: candidateHashes.length > 64 || present.some(value => value.sourceCoverageTruncated),
     warnings: [...new Set(present.flatMap(value => value.warnings))],
     truncated: present.some(value => value.truncated) || fragments.length !== ordered.length };
 }

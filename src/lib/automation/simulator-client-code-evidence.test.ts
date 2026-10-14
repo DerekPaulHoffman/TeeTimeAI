@@ -138,4 +138,29 @@ describe("inert public client-code evidence", () => {
     expect(evidence.fragments.reduce((total, fragment) => total + fragment.code.length, 0)).toBeLessThanOrEqual(10_000);
     expect(mergeSimulatorClientCodeEvidence(...inputs.reverse())?.fragments).toEqual(evidence.fragments);
   });
+  it("gives a later source a context before one library consumes all four slots", () => {
+    const library = inspectSimulatorClientCode(Array.from({ length: 6 }, (_, index) =>
+      `function getAvailability${index}(){return fetch('/api/availability/library')}`).join(";"), "https://official.example.test/a-library.js", "EXTERNAL_SCRIPT");
+    const client = inspectSimulatorClientCode(`function getAvailability(){return fetch('/api/availability/client')}`,
+      "https://official.example.test/z-client.js", "EXTERNAL_SCRIPT");
+    const evidence = mergeSimulatorClientCodeEvidence(library, client)!;
+    expect(evidence.fragments).toHaveLength(4);
+    expect(new Set(evidence.fragments.map(fragment => fragment.sourceSha256)).size).toBe(2);
+    expect(evidence.fragments.some(fragment => fragment.sourceUrl.endsWith("/z-client.js"))).toBe(true);
+    expect(mergeSimulatorClientCodeEvidence(client, library)?.fragments).toEqual(evidence.fragments);
+    expect(evidence.candidateSourceHashes).toHaveLength(2);
+    expect(evidence.sourceCoverageTruncated).toBe(false);
+  });
+  it("retains bounded candidate-source coverage through incremental merges without adding excerpt slots", () => {
+    let evidence: ReturnType<typeof inspectSimulatorClientCode>;
+    for (let index = 0; index < 70; index++) evidence = mergeSimulatorClientCodeEvidence(evidence,
+      inspectSimulatorClientCode(`function getAvailability${index}(){return fetch('/api/availability')}`,
+        `https://official.example.test/source-${index}.js`, "EXTERNAL_SCRIPT"));
+    expect(evidence!.fragments).toHaveLength(4);
+    expect(evidence!.candidateSourceHashes).toHaveLength(64);
+    expect(evidence!.sourceCoverageTruncated).toBe(true);
+    expect(evidence!.truncated).toBe(true);
+    expect(evidence!.fragments.reduce((sum, fragment) => sum + fragment.code.length, 0)).toBeLessThanOrEqual(10_000);
+    expect(JSON.stringify(evidence)).not.toContain("private-token");
+  });
 });

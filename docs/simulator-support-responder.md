@@ -98,6 +98,14 @@ Source size, token/time scan, output and context bounds retain explicit
 warnings. Omitted code stays unknown, and the projection grants no additional
 network, method, destination, lease, eligibility or verification authority.
 
+The same four-context/10,000-character code limit samples one context per
+candidate source before additional contexts from a single source. Bounded
+`candidateSourceHashes` and `sourceCoverageTruncated` distinguish omitted
+candidate sources from the returned sample. They cover sources that produced
+candidate contexts, not every fetched script; absence remains unknown.
+Incremental merges preserve this bounded coverage metadata. No source may be
+reopened or extra request made solely because its context was omitted.
+
 Local tooling failures, transient provider backoff and positively observed
 technical access restrictions require different outcomes. Inspect retained
 diagnostics and repair reusable code when supported by evidence. Missing code,
