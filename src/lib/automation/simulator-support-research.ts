@@ -735,7 +735,9 @@ function publicAssetDestinations(html: string, sourceUrl: string) {
     if (path) { try {
       const url = publicUrl(new URL(path, sourceUrl).href);
       if (!/captcha|challenge|turnstile|cdn-cgi/iu.test(`${url.hostname}${url.pathname}`)) {
-        if (assets.size < 20) assets.add(url.href);
+        // Same-site resources already have request authority. They must not
+        // consume the bounded allowance for exact external declarations.
+        if (!sameOfficialHost(sourceUrl, url.href) && assets.size < 20) assets.add(url.href);
         if (script?.deferred) hasDeferredScripts = true;
       }
     } catch { /* Untrusted resource declarations cannot expand request authority. */ } }

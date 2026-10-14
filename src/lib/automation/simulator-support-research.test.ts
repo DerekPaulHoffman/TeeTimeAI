@@ -1075,6 +1075,32 @@ describe("bounded owned simulator public research transport", () => {
     expect(lease).toHaveBeenNthCalledWith(3, "styles.example.test", expect.any(Function));
     for (const route of view.routes.slice(3)) expect(route.abort).toHaveBeenCalledOnce();
   });
+  it("does not let same-site declarations crowd external assets out of their separate allowance", async () => {
+    const locals = Array.from({ length: 40 }, (_, index) => `${source}/local-${index}.js`);
+    const external = "https://cdn.example.test/public-calendar.js";
+    const html = locals.map(url => `<script src='${url}'></script>`).join("") + `<script src='${external}'></script>`;
+    const view = renderedBrowser([{ url: `${source}/` }, ...locals.map(url => ({ url, kind: "script" })), { url: external, kind: "script" }], html);
+    const fetch = vi.fn(async (url: unknown) => String(url) === `${source}/` ? response(html) : response("public script", 200, "text/javascript"));
+    const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
+    expect(fetch).toHaveBeenCalledTimes(42);
+    expect(fetch).toHaveBeenCalledWith(external, expect.objectContaining({ credentials: "omit" }));
+    expect(result.blockedRequests).toBe(0);
+    expect(result.admittedRequests).toBe(42);
+  });
+  it("still admits only twenty exact external assets and never grants adjacent data authority", async () => {
+    const assets = Array.from({ length: 21 }, (_, index) => `https://cdn.example.test/public-${index}.js`);
+    const html = assets.map(url => `<script src='${url}'></script>`).join("");
+    const view = renderedBrowser([{ url: `${source}/` }, ...assets.map(url => ({ url, kind: "script" })),
+      { url: assets[0], kind: "fetch" }, { url: `${assets[0]}?extra=1`, kind: "script" }], html);
+    const fetch = vi.fn(async (url: unknown) => String(url) === `${source}/` ? response(html) : response("public script", 200, "text/javascript"));
+    const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
+    expect(fetch).toHaveBeenCalledTimes(21);
+    expect(result.blockedRequests).toBe(3);
+    expect(result.blockedResourceDiagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ resourceKind: "SCRIPT", reason: "UNSCOPED_DESTINATION", count: 2 }),
+      expect.objectContaining({ resourceKind: "FETCH", reason: "UNSCOPED_DESTINATION", count: 1 }),
+    ]));
+  });
   it("exposes the existing fixed read-only bays route for an exact published Trackman booking root", async () => {
     const root = "https://booking.trackmangolf.com/venues/golf-oasis/booking";
     const result = await collectSimulatorSupportResearch({ url: root }, { fetch: vi.fn(async () => response("<h1>Public golf calendar</h1>")), lease });
