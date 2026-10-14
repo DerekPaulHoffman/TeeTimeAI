@@ -384,8 +384,8 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it("persists known public rental facts and returns them from the owned inspect guide without another source read", async () => {
-    const bookingUrl = "https://app.acuityscheduling.com/schedule/2991fba2";
+  it.each([false, true])("persists known public rental facts with the exact owned source, embedded=%s", async embedded => {
+    const bookingUrl = "https://app.acuityscheduling.com/schedule/2991fba2" + (embedded ? "?ref=embedded_csp" : "");
     const f = await fixture(15, false, bookingUrl);
     const business = { id: 34536426, ownerKey: "2991fba2", timezone: "America/New_York", includesAdminOnly: false, isExpired: false,
       description: "Up to 6 People Per Bay", calendars: { "": [{ id: 11388341, name: "Bay 1", timezone: "America/New_York" }] },
@@ -396,10 +396,12 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(read.acquired).toBe(true);
     const current = await lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId });
     expect(current.revision).toBeGreaterThan(f.owner.revision);
+    expect(current.research.history[0].sourceUrl).toBe(bookingUrl);
     expect(current.research.history[0].publicConfiguration).toMatchObject({ family: "ACUITY", ownerKey: "2991fba2", rentals: [{ id: "73234482", durationMinutes: 60 }] });
     expect(current.researchGuide.publicConfigurations).toMatchObject([{ source: "booking", rendered: false, configuration: { family: "ACUITY", ownerKey: "2991fba2" } }]);
     expect(current.researchGuide.readsRemaining).toBe(5);
     expect(fetch).toHaveBeenCalledTimes(1);
+    expect(String(fetch.mock.calls[0][0])).toBe(bookingUrl);
     const saved = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id }, select: { audit: true } });
     expect(JSON.stringify(saved.audit)).not.toMatch(/never-persist-this|secret@example|Simulator Booking|CLIENT_INFO/u);
     expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();

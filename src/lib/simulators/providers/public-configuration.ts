@@ -68,11 +68,13 @@ export function knownSimulatorPublicConfigurationFamily(sourceUrl: string): "ACU
   try {
     const url = new URL(sourceUrl);
     if (url.protocol !== "https:" || url.port || url.username || url.password || url.hash) return;
+    const keys = [...url.searchParams.keys()];
+    const acuityReference = !url.search || keys.length === 1 && keys[0] === "ref" &&
+      url.searchParams.get("ref") === "embedded_csp";
     if ((url.hostname === "app.acuityscheduling.com" || acuityTenantHost.test(url.hostname)) &&
-        !url.search && acuitySchedulePath.test(url.pathname)) return "ACUITY";
+        acuityReference && acuitySchedulePath.test(url.pathname)) return "ACUITY";
     if (!/^[a-z][a-z0-9-]{0,62}\.golfbook\.in$/u.test(url.hostname)) return;
     if (url.pathname === "/calendar.php" && !url.search) return "GOLFBOOK";
-    const keys = [...url.searchParams.keys()];
     if (url.pathname === "/bookingsheet.php" && keys.length === 2 && keys.includes("date") && url.searchParams.get("lang") === "en" &&
       validDate(url.searchParams.get("date") ?? "")) return "GOLFBOOK";
   } catch { return undefined; }

@@ -109,6 +109,14 @@ function renderedBrowser(requests: RequestFixture[], html = "<h1>Public rentals<
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.clearAllMocks(); });
 
 describe("owned known-reader public configuration", () => {
+  it("projects the exact canonical Acuity embed URL without stripping its reference marker", async () => {
+    const url = `${acuitySource}?ref=embedded_csp`;
+    const fetch = vi.fn(async () => response(acuityConfig()));
+    const result = await collectSimulatorSupportResearch({ url }, { fetch, lease });
+    expect(result).toMatchObject({ requestedUrl: url, url, publicConfiguration: { family: "ACUITY", ownerKey: "2991fba2" } });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(String(fetch.mock.calls[0][0])).toBe(url);
+  });
   it("persists only a closed Acuity rejection from the same owned read", async () => {
     const result = await collectSimulatorSupportResearch({ url: acuitySource }, {
       fetch: vi.fn(async () => response("<h1>Public rental</h1><script>var BUSINESS = privateConfig('private-token')</script>")), lease,

@@ -134,6 +134,11 @@ unambiguous product identity and verified named-bay calendars remain required.
 That label does not establish an unlisted shorter duration or bypass the
 responder's requested-session verification.
 
+The canonical Acuity schedule may retain the exact published
+`ref=embedded_csp` marker. Reads preserve it; it is never forwarded to the
+availability API. Other, duplicate, tenant/resource-selecting or credential
+query parameters remain rejected, as do mismatched tenant/configuration facts.
+
 ## Session proof and scheduling
 
 YourGolfBooking / Trackman reads the signed-out venue's published bay configuration and its public occupancy GET. The reviewed venue, range and public rental option must match the live source. Opening hours, the current booking horizon, eligible named bays, rental duration limits and restrictions are verified before an empty occupied list can produce openings. A complete session stays on one bay and excludes every overlapping booking, including member bookings. Neither the basket nor booking creation is invoked.

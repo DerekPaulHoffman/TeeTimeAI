@@ -28,6 +28,35 @@ function mockReads(payload: unknown = { "2026-10-10": [{ time: "2026-10-10T08:00
 }
 
 describe("closed public configuration rejection diagnostics", () => {
+  it.each(["https://app.acuityscheduling.com", "https://syntheticvenue.as.me"])("preserves the exact embedded reference on the canonical %s schedule", async origin => {
+    const bookingUrl = `${origin}/schedule/2991fba2?ref=embedded_csp`;
+    expect(isAcuityPublicBookingUrl(bookingUrl)).toBe(true);
+    expect(projectAcuityPublicConfiguration(landing(), bookingUrl)?.ownerKey).toBe("2991fba2");
+    const fetch = mockReads();
+    expect((await fetchAcuitySimulatorAvailability({ ...input, offering: { ...input.offering, bookingUrl } }, fetch)).complete).toBe(true);
+    expect(String(fetch.mock.calls[0][0])).toBe(bookingUrl);
+    expect(new URL(String(fetch.mock.calls[1][0])).searchParams.has("ref")).toBe(false);
+  });
+  it.each(["ref=other", "ref=", "ref=embedded_csp&ref=embedded_csp", "ref=embedded_csp&calendarId=1234",
+    "ref=embedded_csp&appointmentType=1234", "ref=embedded_csp&token=private", "REF=embedded_csp", "owner=1234&ref=embedded_csp"])(
+    "keeps unreviewed query %s rejected before provider I/O", async query => {
+      const bookingUrl = `${input.offering.bookingUrl}?${query}`;
+      expect(isAcuityPublicBookingUrl(bookingUrl)).toBe(false);
+      expect(projectAcuityPublicConfiguration(landing(), bookingUrl)).toBeUndefined();
+      const fetch = mockReads();
+      await expect(fetchAcuitySimulatorAvailability({ ...input, offering: { ...input.offering, bookingUrl } }, fetch)).rejects.toMatchObject({ code: "INVALID_SOURCE" });
+      expect(fetch).not.toHaveBeenCalled();
+    });
+  it("does not let the embed marker authorize another tenant or incomplete resource configuration", async () => {
+    const url = `${input.offering.bookingUrl}?ref=embedded_csp`;
+    const value = business(); value.ownerKey = "differentowner";
+    expect(inspectAcuityPublicConfiguration(landing(value), url)?.configurationDiagnostic?.contractField).toBe("SETTINGS");
+    const fetch = mockReads(undefined, landing(value));
+    await expect(fetchAcuitySimulatorAvailability({ ...input, offering: { ...input.offering, bookingUrl: url } }, fetch)).rejects.toMatchObject({ code: "INVALID_SOURCE" });
+    expect(fetch).toHaveBeenCalledOnce();
+    const missing = business(); missing.calendars = { "": [] } as unknown as typeof missing.calendars;
+    expect(inspectAcuityPublicConfiguration(landing(missing), url)?.configurationDiagnostic?.contractField).toBe("RESOURCE_IDENTITY");
+  });
   function shortRental() {
     const value = business();
     value.appointmentTypes[""] = [{ ...value.appointmentTypes[""][0], name: "1.5 Hour Sim Rental", duration: 90 }];
