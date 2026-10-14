@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   activeSearchInspectionQuery,
@@ -281,6 +281,7 @@ describe("activeSearchInspectionQuery", () => {
 });
 
 describe("latestCurrentActionableProbes", () => {
+  afterEach(() => vi.useRealTimers());
   it("keeps legacy blocked-policy probes actionable", () => {
     const probes = latestCurrentActionableProbes([
       {
@@ -298,6 +299,9 @@ describe("latestCurrentActionableProbes", () => {
   });
 
   it("does not surface a current corroborated technical final", () => {
+    // Keep this current-evidence fixture independent of the wall-clock date.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-17T12:00:00.000Z"));
     const probes = latestCurrentActionableProbes([
       {
         teeSearchId: "search-1",
