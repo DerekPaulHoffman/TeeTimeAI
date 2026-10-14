@@ -842,6 +842,7 @@ export function retrySimulatorSupport(input: Owner & { retryMinutes: number; cur
       if (retryGuide.bookingResearchRequired) return {
         outcome: "booking_research_required" as const, revision: row.claim.revision, leaseExpiresAt: row.claim.leaseExpiresAt,
         researchGuide: retryGuide.researchGuide, nextEligibleBookingRead: retryGuide.nextEligibleBookingRead,
+        ...(retryGuide.researchPurpose ? { researchPurpose: retryGuide.researchPurpose } : {}),
       };
       if (!publishedOwnedRelease && !retryGuide.skipHomepageFallback) assertSimulatorResearchFallbackBeforeRetry(state, bookingUrl, officialUrl);
     }

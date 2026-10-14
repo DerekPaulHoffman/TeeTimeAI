@@ -6,7 +6,7 @@ import { blockedResourceDiagnosticsSchema } from "./simulator-blocked-resources"
 import { simulatorPageSurfacesSchema } from "./simulator-page-surfaces";
 
 export const SIMULATOR_RESEARCH_MAX_READS = 6;
-export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-diverse-source-evidence-v26";
+export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-reference-root-before-retry-v27";
 export function getSimulatorResearchImplementationVersion(url: string) {
   const family = knownSimulatorPublicConfigurationFamily(url);
   if (family === "TEESHEET" || family === "UPPER_HAND" || family === "YOUR_GOLF_BOOKING") return "public-calendar-provider-api-configuration-v1";
@@ -568,8 +568,10 @@ export function getSimulatorResearchRetryGuide(input: {
   type Route = (typeof researchGuide.suggestedReads)[number];
   type CloseoutReason = "HARD_FAILURE" | "READ_BUDGET_EXHAUSTED" | "PROVIDER_BACKOFF" |
     "NO_ALLOWED_RESEARCH_ROUTES" | "NO_ELIGIBLE_BOOKING_ROUTES" | null;
-  const result = (nextEligibleBookingRead: Route | null, skipHomepageFallback: boolean, closeoutReason: CloseoutReason) => ({
+  const result = (nextEligibleBookingRead: Route | null, skipHomepageFallback: boolean, closeoutReason: CloseoutReason,
+    researchPurpose?: "PUBLIC_REFERENCE_ROOT") => ({
     researchGuide, nextEligibleBookingRead, bookingResearchRequired: Boolean(nextEligibleBookingRead), skipHomepageFallback, closeoutReason,
+    ...(researchPurpose ? { researchPurpose } : {}),
   });
   const latest = state.history.at(-1);
   if (latest?.outcome === "HARD_FAILED" && latest.requestId !== state.lastRecoveredFailureRequestId) return result(null, true, "HARD_FAILURE");
@@ -591,6 +593,30 @@ export function getSimulatorResearchRetryGuide(input: {
       (!official || routeIdentity(selected.url) !== routeIdentity(official));
   });
   if (next) return result(next, false, null);
+  // A linked public root can supply provider reference/contact evidence when
+  // an unknown booking surface is still an incomplete shell. It is never a
+  // booking-role or eligibility fact. Choose only an already-admitted route.
+  const simpleRoot = (value: string) => {
+    const safe = getSafeCustomerBookingUrl(value);
+    if (!safe) return false;
+    const url = new URL(value);
+    return new URL(safe).href === url.href && url.protocol === "https:" && url.pathname === "/" &&
+      !url.search && !url.hash && !url.port && !url.username && !url.password;
+  };
+  const freshIncomplete = latest?.outcome === "READ" && latest.rendered && latest.httpStatus >= 200 && latest.httpStatus < 300 &&
+    latest.sourceFingerprint === state.sourceFingerprint && latest.publicReadEvidence?.sourceFingerprint === state.sourceFingerprint &&
+    latest.publicReadEvidence.accessControlsObserved && latest.publicReadEvidence.accessControls.length === 0 &&
+    latest.publicReadEvidence.renderComplete === false && latest.renderWarning?.startsWith("SECONDARY_") &&
+    Date.parse(latest.observedAt) <= input.now.getTime() && Date.parse(latest.observedAt) >= input.now.getTime() - 30 * 60_000 &&
+    state.linkBaseUrl !== null && routeIdentity(state.linkBaseUrl) === routeIdentity(latest.sourceUrl);
+  if (freshIncomplete && !knownSimulatorPublicConfigurationFamily(input.bookingUrl ?? latest.sourceUrl) &&
+      !knownSimulatorPublicConfigurationFamily(latest.sourceUrl) &&
+      !state.history.some(entry => entry.publicConfiguration) &&
+      !state.history.some(entry => entry.source === "link" && entry.rendered && simpleRoot(entry.requestedUrl))) {
+    const reference = researchGuide.suggestedReads.find(route => route.rendered && route.linkIndex !== undefined &&
+      simpleRoot(state.links[route.linkIndex - 1]) && sameOfficialWebsite(state.links[route.linkIndex - 1], latest.sourceUrl));
+    if (reference) return result(reference, false, null, "PUBLIC_REFERENCE_ROOT");
+  }
   // Do not let the older homepage assertion demand a saved booking route whose
   // URL/mode is already consumed or denied by current source/budget guards.
   return result(null, distinctSavedBooking, distinctSavedBooking ? "NO_ELIGIBLE_BOOKING_ROUTES" : null);

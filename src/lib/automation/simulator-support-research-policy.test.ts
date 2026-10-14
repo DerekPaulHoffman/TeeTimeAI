@@ -10,6 +10,58 @@ const savedBayUrl = "https://yourgolfbooking.com/venues/public-golf/booking/bays
 const bookingRootUrl = "https://yourgolfbooking.com/venues/public-golf/booking";
 const acuityTenantRoot = "https://onegolfhaven.as.me/";
 
+describe("bounded public reference root before unchanged unknown-provider retry", () => {
+  const root = "https://calendar.example.test/";
+  const state = () => readSimulatorResearchState({ ...empty(), readCount: 2, links: [root, `${root}privacy`], bookingLinks: [], linkBaseUrl: bookingUrl,
+    history: [false, true].map((rendered, index) => ({ source: "booking", requestedUrl: bookingUrl, sourceUrl: bookingUrl,
+      sourceFingerprint: fingerprint, observedAt: now.toISOString(), httpStatus: 200, rendered, outcome: "READ",
+      requestId: `${index + 1}1111111-1111-4111-8111-111111111111`, ...(rendered ? { renderWarning: "SECONDARY_REQUESTS_BLOCKED" } : {}),
+      publicReadEvidence: { sourceFingerprint: fingerprint, accessControlsObserved: true, accessControls: [],
+        method: rendered ? "BROWSER" : "HTTP", ...(rendered ? { renderComplete: false } : {}) } })) }, fingerprint);
+  it("requires one already-allowed rendered same-site root reference while preserving the two spent reads", () => {
+    const research = state(), before = structuredClone(research);
+    const result = getSimulatorResearchRetryGuide({ state: research, officialUrl, bookingUrl, now, priorFailedRoutes: [] });
+    expect(result).toMatchObject({ bookingResearchRequired: true, researchPurpose: "PUBLIC_REFERENCE_ROOT",
+      nextEligibleBookingRead: { linkIndex: 1, rendered: true }, researchGuide: { readsRemaining: 4 } });
+    expect(selectSimulatorResearchTarget({ state: research, officialUrl, bookingUrl, now, priorFailedRoutes: [], ...result.nextEligibleBookingRead! }))
+      .toEqual({ source: "link", url: root, rendered: true });
+    expect(research).toEqual(before);
+  });
+  it.each(["stale", "future", "access", "unobserved", "complete", "backoff", "budget", "fingerprint", "already-attempted"])("does not force a reference root after %s evidence", kind => {
+    const research = state(), latest = research.history.at(-1)!;
+    if (kind === "stale") latest.observedAt = new Date(now.getTime() - 31 * 60_000).toISOString();
+    if (kind === "future") latest.observedAt = new Date(now.getTime() + 1).toISOString();
+    if (kind === "access") latest.publicReadEvidence!.accessControls = ["ACCOUNT_REQUIRED"];
+    if (kind === "unobserved") latest.publicReadEvidence!.accessControlsObserved = false;
+    if (kind === "complete") latest.publicReadEvidence!.renderComplete = true;
+    if (kind === "backoff") latest.httpStatus = 429;
+    if (kind === "budget") research.readCount = 6;
+    if (kind === "fingerprint") latest.sourceFingerprint = "b".repeat(64);
+    if (kind === "already-attempted") {
+      research.history.splice(1, 0, { ...latest, source: "link", requestedUrl: root, sourceUrl: root }); research.readCount++;
+      research.links[0] = "https://www.calendar.example.test/";
+    }
+    const result = getSimulatorResearchRetryGuide({ state: research, officialUrl, bookingUrl, now, priorFailedRoutes: [] });
+    expect(result.researchPurpose).toBeUndefined();
+  });
+  it.each([`${root}?page=reference`, `${root}#reference`, "https://other.example.test/", "http://calendar.example.test/", `${root}privacy`])(
+    "does not promote a query, fragment, different-site, downgraded or non-root link %s", url => {
+      const research = state(); research.links = [url];
+      expect(getSimulatorResearchRetryGuide({ state: research, officialUrl, bookingUrl, now, priorFailedRoutes: [] }).researchPurpose).toBeUndefined();
+    });
+  it("retains a prior access denial and does not reopen the reference route", () => {
+    const result = getSimulatorResearchRetryGuide({ state: state(), officialUrl, bookingUrl, now,
+      priorFailedRoutes: [{ url: root, rendered: true, httpStatus: 403 }] });
+    expect(result.researchPurpose).toBeUndefined();
+  });
+  it("does not apply the unknown-provider reference fallback to a known resolved provider", () => {
+    const research = state(), source = "https://app.acuityscheduling.com/schedule/2991fba2";
+    research.linkBaseUrl = source; research.links = ["https://app.acuityscheduling.com/"];
+    for (const entry of research.history) { entry.requestedUrl = source; entry.sourceUrl = source; }
+    expect(getSimulatorResearchRetryGuide({ state: research, officialUrl, bookingUrl: source, now, priorFailedRoutes: [] }).researchPurpose).toBeUndefined();
+  });
+});
+
 describe("revalidation after a known static budget repair", () => {
   const failed = { url: bookingUrl, rendered: true, httpStatus: 0, requestId: "11111111-1111-4111-8111-111111111111",
     observedAt: new Date(now.getTime() - 60 * 60_000).toISOString(), researchImplementationVersion: "public-calendar-booking-frames-and-assets-v9",

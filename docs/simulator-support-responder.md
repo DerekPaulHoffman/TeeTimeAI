@@ -106,6 +106,18 @@ candidate contexts, not every fetched script; absence remains unknown.
 Incremental merges preserve this bounded coverage metadata. No source may be
 reopened or extra request made solely because its context was omitted.
 
+For an unknown provider's fresh, positively public but incomplete rendered
+shell, retry may return the existing `booking_research_required` result with
+`researchPurpose: PUBLIC_REFERENCE_ROOT`. Follow its already-allowed rendered
+same-site root link before an unchanged retry. This is reference research,
+never a booking role or eligibility decision. It consumes the original six-read
+budget, happens at most once per assignment, and cannot reopen a denial or
+override access, freshness, source, destination, ownership, lease or backoff
+guards. Known providers retain their existing path. Configuration and monitoring
+still require the normal reviewed facts, exact release and two deployed checks.
+Provider reference/contact information does not establish this venue's identity,
+access, booking method or technical disposition.
+
 Local tooling failures, transient provider backoff and positively observed
 technical access restrictions require different outcomes. Inspect retained
 diagnostics and repair reusable code when supported by evidence. Missing code,

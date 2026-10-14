@@ -1184,6 +1184,54 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
   });
 
+  it.each(["REAL", "ENGINEERING"] as const)("requires the already-linked public reference root before cooling down %s demand", async authority => {
+    const bookingUrl = "https://calendar.example.test/booking", root = "https://calendar.example.test/";
+    const f = authority === "ENGINEERING" ? await engineeringFixture(false, bookingUrl) : await fixture(15, false, bookingUrl);
+    let owner = "engineeringOwner" in f ? f.engineeringOwner : f.owner;
+    const runId = "engineeringRun" in f ? f.engineeringRun.id : f.run.id;
+    const html = `<h1>Public shell</h1><a href='${root}'>Platform reference</a><a href='${root}privacy'>Privacy</a>
+      <script>fetch('/api/availability',{method:'POST',body:'{}'}).catch(()=>{});</script>`;
+    const fetch = vi.fn(async (input: unknown, init?: RequestInit) => {
+      if (init?.method !== "GET") throw new Error("No POST permission.");
+      if (String(input) === bookingUrl) return new Response(html, { headers: { "content-type": "text/html" } });
+      if (String(input) === root) return new Response("<h1>Public platform reference</h1><p>No booking contract here.</p>", { headers: { "content-type": "text/html" } });
+      throw new Error("No new reference destination.");
+    });
+    const lease = (async (_host: string, work: () => Promise<unknown>) => ({ acquired: true as const, value: await work() })) as NonNullable<import("./simulator-support-research").SimulatorResearchDependencies["lease"]>;
+    for (const rendered of [false, true]) {
+      const read = await lane.readSimulatorSupportSource({ ...owner, source: "booking", rendered }, { fetch, lease,
+        ...(rendered ? { browser: async () => chromium.launch({ headless: true }) } : {}) });
+      if (!read.acquired) throw new Error("Owned shell reference was busy."); owner = { ...owner, revision: read.value.revision };
+      if (rendered) expect(read.value.publicSource).toMatchObject({ renderComplete: false, renderWarning: "SECONDARY_REQUESTS_BLOCKED" });
+    }
+    const beforeRun = await client.automationRun.findUniqueOrThrow({ where: { id: runId } });
+    const beforeIncident = await client.simulatorSupportIncident.findUniqueOrThrow({ where: { id: f.incident.id } });
+    const beforeSearch = await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } });
+    const beforeOffering = await client.courseOffering.findUniqueOrThrow({ where: { id: f.offering.id } });
+    const retry = await lane.retrySimulatorSupport({ ...owner, retryMinutes: 60 });
+    if (!retry.acquired || retry.value.outcome !== "booking_research_required") throw new Error("Reference retry gate was absent.");
+    expect(retry.value).toMatchObject({ revision: owner.revision, researchPurpose: "PUBLIC_REFERENCE_ROOT",
+      nextEligibleBookingRead: { linkIndex: 1, rendered: true }, researchGuide: { readsRemaining: 4 } });
+    expect(retry.value).not.toHaveProperty("durableCloseoutRecorded");
+    expect(await client.automationRun.findUniqueOrThrow({ where: { id: runId } })).toEqual(beforeRun);
+    expect(await client.simulatorSupportIncident.findUniqueOrThrow({ where: { id: f.incident.id } })).toEqual(beforeIncident);
+    const reference = await lane.readSimulatorSupportSource({ ...owner, ...retry.value.nextEligibleBookingRead! }, {
+      fetch, lease, browser: async () => chromium.launch({ headless: true }),
+    });
+    if (!reference.acquired) throw new Error("Owned public root reference was busy."); owner = { ...owner, revision: reference.value.revision };
+    expect(reference.value.publicSource).toMatchObject({ url: root, renderComplete: true });
+    expect(reference.value.publicSource.publicConfiguration).toBeUndefined();
+    const current = await lane.readSimulatorSupportClaim(owner);
+    expect(current.research.readCount).toBe(3);
+    expect(current.research.history.at(-1)).toMatchObject({ source: "link", rendered: true, requestedUrl: root });
+    const closed = await lane.retrySimulatorSupport({ ...owner, retryMinutes: 60 });
+    expect(closed.acquired && closed.value.outcome).toBe("retryable_failed");
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(beforeSearch);
+    expect(await client.courseOffering.findUniqueOrThrow({ where: { id: f.offering.id } })).toEqual(beforeOffering);
+    expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
+  }, 30_000);
+
   it.each(["unlabelled", "challenged"])("does not retain a %s link as a booking handoff", async kind => {
     const f = await fixture();
     const target = kind === "unlabelled" ? "https://official.example.test/details" : "https://scheduler.example.test/opaque";
