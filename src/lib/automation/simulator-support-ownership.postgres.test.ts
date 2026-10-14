@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { randomUUID } from "node:crypto";
-import type { Route } from "@playwright/test";
+import { chromium, type Route } from "@playwright/test";
 import { Prisma, PrismaClient } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -973,6 +973,32 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(before);
     expect(await client.teeTimeMatch.count({ where: { teeSearchId: f.search.id } })).toBe(0);
     expect(coreMocks.fetch).not.toHaveBeenCalled();
+    expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
+  });
+
+  it("persists a source-bound passive render and its deferred-script diagnostics without changing demand", async () => {
+    const target = "https://official.example.test/booking", asset = "https://assets.example.test/public-widget.js";
+    const f = await fixture(15, false, target);
+    const before = await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } });
+    const html = `<html><body><h1>Public booking</h1><div id="calendar"></div><script type="text/deferred" data-cache-src="${asset}"></script>
+      <script>document.addEventListener('wheel',function(){const s=document.createElement('script');s.src='${asset}';document.body.appendChild(s);},{once:true});</script></body></html>`;
+    const fetch = vi.fn(async (url: unknown) => String(url) === target ? new Response(html, { headers: { "content-type": "text/html" } })
+      : new Response("document.getElementById('calendar').innerHTML='<a href=\"https://calendar.example.test/public\">Book a bay</a>';", { headers: { "content-type": "text/javascript" } }));
+    const lease = (async (_host: string, worker: () => Promise<unknown>) => ({ acquired: true as const, value: await worker() })) as
+      NonNullable<import("./simulator-support-research").SimulatorResearchDependencies["lease"]>;
+    const read = await lane.readSimulatorSupportSource({ ...f.owner, source: "booking", rendered: true }, {
+      fetch, lease, browser: async () => chromium.launch({ headless: true }),
+    });
+    if (!read.acquired) throw new Error("Passive render busy.");
+    expect(read.value.publicSource).toMatchObject({ renderActivation: "PASSIVE_POINTER_AND_SCROLL",
+      bookingLinks: ["https://calendar.example.test/public"], renderComplete: true });
+    const claim = await lane.readSimulatorSupportClaim({ ...f.owner, revision: read.value.revision });
+    expect(claim.research.history[0]).toMatchObject({ renderActivation: "PASSIVE_POINTER_AND_SCROLL" });
+    expect(claim.researchGuide.pageSurfaces).toMatchObject([{ renderActivation: "PASSIVE_POINTER_AND_SCROLL", entries: expect.arrayContaining([
+      expect.objectContaining({ kind: "EXTERNAL_SCRIPT", target: "LAZY_URL", scriptType: "OTHER" }),
+    ]) }]);
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(before);
+    expect(fetch).toHaveBeenCalledTimes(2);
     expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
   });
 

@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Route } from "@playwright/test";
+import { chromium, type Route } from "@playwright/test";
 import { fetchYourGolfBookingAvailability } from "@/lib/simulators/providers/your-golf-booking";
 import { projectAcuityPublicConfiguration } from "@/lib/simulators/providers/acuity";
 import { projectGolfBookPublicConfiguration } from "@/lib/simulators/providers/golfbook";
@@ -74,6 +74,8 @@ function renderedBrowser(requests: RequestFixture[], html = "<h1>Public rentals<
   const mainFrame = {}, childFrame = {}, popupFrame = {};
   const routes: Array<{ abort: ReturnType<typeof vi.fn>; fulfill: ReturnType<typeof vi.fn> }> = [];
   const page = {
+    mouse: { move: vi.fn(async () => undefined), wheel: vi.fn(async () => undefined), click: vi.fn() },
+    waitForTimeout: vi.fn(async () => undefined),
     mainFrame: () => mainFrame, url: () => requests[0].url,
     content: vi.fn(async () => html),
     goto: vi.fn(async () => {
@@ -199,6 +201,64 @@ describe("owned known-reader public configuration", () => {
 });
 
 describe("bounded owned simulator public research transport", () => {
+  it("lets a real public page load its declared deferred script through passive reading only", async () => {
+    const root = `${source}/`, asset = "https://assets.example.test/public-widget.js";
+    const html = `<html><body><h1>Public booking</h1><div id="calendar"></div>
+      <button onclick="document.body.textContent='UNEXPECTED_CLICK'">Book now</button>
+      <script>document.addEventListener('wheel', function(){const s=document.createElement('script');s.src='${asset}';document.body.appendChild(s);},{once:true});</script>
+      <script type="text/deferred" data-cache-src="${asset}"></script></body></html>`;
+    const fetch = vi.fn<typeof globalThis.fetch>(async url => String(url) === root ? response(html)
+      : response("document.getElementById('calendar').innerHTML='<a href=\"https://calendar.example.test/public\">Book a bay</a>';", 200, "text/javascript"));
+    const result = await collectSimulatorSupportResearch({ url: root, render: true }, {
+      fetch, lease, browser: async () => chromium.launch({ headless: true }),
+    });
+    expect(result).toMatchObject({ renderActivation: "PASSIVE_POINTER_AND_SCROLL", renderComplete: true,
+      bookingLinks: ["https://calendar.example.test/public"] });
+    expect(fetch.mock.calls.map(call => String(call[0]))).toEqual([root, asset]);
+    expect(fetch.mock.calls.every(call => call[1]?.method === "GET" && call[1].credentials === "omit")).toBe(true);
+    expect(result.text).not.toContain("UNEXPECTED_CLICK");
+  }, 15_000);
+
+  it("retains the POST guard when a deferred loader reacts to passive reading", async () => {
+    const root = `${source}/`, asset = "https://assets.example.test/public-widget.js";
+    const html = `<html><body><h1>Public booking</h1><script data-src="${asset}" type="text/deferred"></script>
+      <script>document.addEventListener('wheel',()=>fetch('/must-not-run',{method:'POST',body:'private-value'}),{once:true});</script></body></html>`;
+    const fetch = vi.fn(async () => response(html));
+    const result = await collectSimulatorSupportResearch({ url: root, render: true }, {
+      fetch, lease, browser: async () => chromium.launch({ headless: true }),
+    });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({ renderActivation: "PASSIVE_POINTER_AND_SCROLL", renderComplete: false });
+    expect(result.blockedResourceDiagnostics).toContainEqual(expect.objectContaining({ method: "POST", reason: "METHOD_NOT_ALLOWED" }));
+    expect(JSON.stringify(result)).not.toContain("private-value");
+  }, 15_000);
+
+  it("stops if passive activation changes the selected document", async () => {
+    const html = '<h1>Public page</h1><script data-src="/public.js"></script>';
+    const view = renderedBrowser([{ url: `${source}/` }], html);
+    view.page.mouse.wheel.mockImplementation(async () => { view.page.url = () => `${source}/different-page`; });
+    await expect(collectSimulatorSupportResearch({ url: source, render: true }, {
+      fetch: vi.fn(async () => response(html)), lease, browser: view.factory,
+    })).rejects.toThrow("DESTINATION_CHANGED");
+    expect(view.page.content).not.toHaveBeenCalled();
+    expect(view.page.mouse.click).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    '<script src="/ordinary.js"></script>',
+    '<script data-src="http://127.0.0.1/private.js"></script>',
+    '<script data-src="https://challenge.example.test/captcha.js"></script>',
+    '<script data-src="/one.js" data-cache-src="/two.js"></script>',
+    '<template><script data-src="/inert.js"></script></template>',
+    '<h1>Verify you are human</h1><script data-src="/public.js"></script>',
+  ])("does not activate an ordinary, unsafe, conflicting or restricted document", async html => {
+    const view = renderedBrowser([{ url: `${source}/` }], html);
+    const result = await collectSimulatorSupportResearch({ url: source, render: true }, {
+      fetch: vi.fn(async () => response(html)), lease, browser: view.factory,
+    });
+    expect(view.page.mouse.move).not.toHaveBeenCalled(); expect(view.page.mouse.wheel).not.toHaveBeenCalled();
+    expect(view.page.mouse.click).not.toHaveBeenCalled(); expect(result.renderActivation).toBeUndefined();
+  });
   it("returns exact public configuration facts without user, member, session or raw script payloads", () => {
     const result = extractSimulatorPublicCalendar(publishedConfig(), booking);
     expect(result.calendar).toMatchObject({ family: "YOUR_GOLF_BOOKING", venue: { id: "1357", slug: "golf-oasis", timeZone: "America/New_York" },

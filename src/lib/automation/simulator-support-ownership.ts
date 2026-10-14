@@ -450,6 +450,7 @@ export async function readSimulatorSupportSource(input: Owner & { source?: Simul
         ...(read.renderWarning ? { renderWarning: read.renderWarning } : {}),
         ...(read.configurationDiagnostic ? { configurationDiagnostic: read.configurationDiagnostic } : {}),
         ...(read.pageSurfaces ? { pageSurfaces: read.pageSurfaces } : {}),
+        ...(read.renderActivation ? { renderActivation: read.renderActivation } : {}),
         ...(read.bodyLimitDiagnostics ? { bodyLimitDiagnostics: read.bodyLimitDiagnostics } : {}),
         ...(read.bodyLimitDiagnosticsTruncated ? { bodyLimitDiagnosticsTruncated: true as const } : {}),
         ...(read.blockedRequestDiagnostics ? { blockedRequestDiagnostics: read.blockedRequestDiagnostics } : {}),

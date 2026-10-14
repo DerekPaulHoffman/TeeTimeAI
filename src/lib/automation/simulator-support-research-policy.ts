@@ -6,7 +6,7 @@ import { blockedResourceDiagnosticsSchema } from "./simulator-blocked-resources"
 import { simulatorPageSurfacesSchema } from "./simulator-page-surfaces";
 
 export const SIMULATOR_RESEARCH_MAX_READS = 6;
-export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-bounded-render-window-v11";
+export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-deferred-script-observation-v12";
 export function getSimulatorResearchImplementationVersion(url: string) {
   const family = knownSimulatorPublicConfigurationFamily(url);
   if (family === "TEESHEET" || family === "UPPER_HAND" || family === "YOUR_GOLF_BOOKING") return "public-calendar-provider-api-configuration-v1";
@@ -167,11 +167,13 @@ const observation = z.object({
   blockedResourceDiagnostics: blockedResourceDiagnosticsSchema.optional(), blockedResourceDiagnosticsTruncated: z.literal(true).optional(),
   publicConfiguration: simulatorPublicConfigurationSchema.optional(),
   pageSurfaces: simulatorPageSurfacesSchema.optional(),
+  renderActivation: z.literal("PASSIVE_POINTER_AND_SCROLL").optional(),
 }).strict().refine(entry => entry.outcome === "HARD_FAILED" ? Boolean(entry.requestId && entry.failure && entry.httpStatus === 0) :
   !entry.failure || Boolean(entry.requestId && entry.httpStatus === 0 && ["NETWORK_FAILED", "CAPACITY_BUSY"].includes(entry.outcome)))
   .refine(entry => !entry.sourceFingerprint || !entry.publicReadEvidence || entry.sourceFingerprint === entry.publicReadEvidence.sourceFingerprint)
   .refine(entry => !entry.publicReadEvidence || Boolean(entry.requestId && entry.outcome === "READ" &&
     entry.publicReadEvidence.method === (entry.rendered ? "BROWSER" : "HTTP")))
+  .refine(entry => !entry.renderActivation || entry.rendered && entry.outcome === "READ")
   .refine(entry => !entry.pageSurfaces || Boolean(entry.outcome === "READ" && entry.httpStatus >= 200 && entry.httpStatus < 300 &&
     entry.publicReadEvidence?.accessControlsObserved === true && entry.publicReadEvidence.accessControls.length === 0))
   .refine(entry => !entry.publicConfiguration || Boolean(entry.sourceFingerprint && entry.outcome === "READ" &&
@@ -534,7 +536,8 @@ export function getSimulatorResearchGuide(input: {
       entry.sourceFingerprint === input.state.sourceFingerprint && entry.publicReadEvidence?.accessControlsObserved === true &&
       entry.publicReadEvidence.accessControls.length === 0 && Date.parse(entry.observedAt) <= input.now.getTime() &&
       Date.parse(entry.observedAt) >= input.now.getTime() - 30 * 60_000
-      ? [{ observedAt: entry.observedAt, source: entry.source, rendered: entry.rendered, ...entry.pageSurfaces }] : []),
+      ? [{ observedAt: entry.observedAt, source: entry.source, rendered: entry.rendered,
+        ...(entry.renderActivation ? { renderActivation: entry.renderActivation } : {}), ...entry.pageSurfaces }] : []),
     publicConfigurations: input.state.history.flatMap(entry => entry.publicConfiguration &&
       isSimulatorPublicConfigurationSource(entry.publicConfiguration, entry.sourceUrl) &&
       entry.sourceFingerprint === input.state.sourceFingerprint && entry.httpStatus >= 200 && entry.httpStatus < 300 &&

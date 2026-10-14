@@ -2,6 +2,21 @@ import { describe, expect, it } from "vitest";
 import { simulatorPageSurfacesSchema, summarizeSimulatorPageSurfaces } from "./simulator-page-surfaces";
 
 describe("bounded public page structure diagnostics", () => {
+  it("distinguishes deferred declarations and script types from actual inline code", () => {
+    const result = summarizeSimulatorPageSurfaces('<script data-src="/public-a.js" type="text/deferred"></script>' +
+      '<script data-cache-src="/public-b.js" type="module"></script>' +
+      '<script>privateInline()</script><script src="/public-c.js" type="text/javascript"></script>', "https://venue.example.test/");
+    expect(result.entries).toEqual([
+      { kind: "EXTERNAL_SCRIPT", target: "LAZY_URL", hidden: false, bookingLabel: false, count: 1, scriptType: "OTHER" },
+      { kind: "EXTERNAL_SCRIPT", target: "LAZY_URL", hidden: false, bookingLabel: false, count: 1, scriptType: "MODULE" },
+      { kind: "INLINE_SCRIPT", target: "INLINE_CODE", hidden: false, bookingLabel: false, count: 1, scriptType: "MISSING" },
+      { kind: "EXTERNAL_SCRIPT", target: "PUBLIC_URL", hidden: false, bookingLabel: false, count: 1, scriptType: "JAVASCRIPT" },
+    ]);
+    expect(simulatorPageSurfacesSchema.parse(result)).toEqual(result);
+    expect(JSON.stringify(result)).not.toMatch(/public-[abc]|privateInline/);
+    const conflicting = summarizeSimulatorPageSurfaces('<script data-src="/one.js" data-cache-src="/two.js"></script>', "https://venue.example.test/");
+    expect(conflicting.entries[0]).toMatchObject({ kind: "EXTERNAL_SCRIPT", target: "UNSAFE" });
+  });
   it("distinguishes hidden, unlabelled and scripted booking surfaces without exposing their contents", () => {
     const result = summarizeSimulatorPageSurfaces(`<iframe src="https://unknown.example.test/private-venue-id"></iframe>
       <div hidden><iframe title="Online booking" data-src="https://calendar.example.test/private-id"></iframe></div>
