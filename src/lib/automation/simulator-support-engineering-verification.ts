@@ -5,6 +5,7 @@ import { withSimulatorEngineeringVerificationTransition, type SimulatorEngineeri
 import {
   assertSimulatorEngineeringRuntime, deriveSimulatorEngineeringVerificationDate, evaluateSimulatorEngineeringVerification,
   readSimulatorEngineeringVerificationState, SIMULATOR_ENGINEERING_VERIFICATION_DEADLINE_MS,
+  selectSimulatorEngineeringDuration, simulatorEngineeringDuration,
   SIMULATOR_ENGINEERING_VERIFICATION_LEASE_MS, SIMULATOR_ENGINEERING_VERIFICATION_MAX_READS,
   type SimulatorEngineeringVerificationObservation, type SimulatorEngineeringVerificationState,
 } from "./simulator-support-engineering-verification-policy";
@@ -14,7 +15,11 @@ export type SimulatorEngineeringRuntime = { runtimeVersion: string; deploymentId
 
 /** Persist only classifications, counts and clocks. Provider data and slots never enter an alert. */
 export function normalizeSimulatorEngineeringResult(result: SimulatorAvailabilityResult, startedAt: Date, now: Date,
-  intent?: { offeringId: string; requestedDate: string; timeZone: string }) {
+  intent?: { offeringId: string; requestedDate: string; timeZone: string; durationMinutes?: number }) {
+  const durationMinutes = intent?.durationMinutes ?? 60;
+  if (!Number.isInteger(durationMinutes) || durationMinutes < 60 || durationMinutes > 240 || durationMinutes % 30 !== 0) {
+    throw new Error("SIMULATOR_ENGINEERING_INCOMPLETE_READ");
+  }
   let safeEvidence = false;
   try { const url = new URL(result.evidenceUrl); safeEvidence = ["https:", "http:"].includes(url.protocol) && !url.username && !url.password; }
   catch { /* Malformed evidence cannot prove a public read. */ }
@@ -24,7 +29,7 @@ export function normalizeSimulatorEngineeringResult(result: SimulatorAvailabilit
   const ids = new Set<string>();
   for (const slot of result.slots) {
     if (!(slot.startsAt instanceof Date) || !(slot.endsAt instanceof Date) || !Number.isFinite(slot.startsAt.getTime()) ||
-        slot.endsAt.getTime() - slot.startsAt.getTime() !== 60 * 60_000 ||
+        slot.endsAt.getTime() - slot.startsAt.getTime() !== durationMinutes * 60_000 ||
         !slot.sourceId || !slot.resourceId || !slot.productId || ids.has(slot.sourceId) ||
         intent && (slot.offeringId !== intent.offeringId || new Intl.DateTimeFormat("en-CA", { timeZone: intent.timeZone,
           year: "numeric", month: "2-digit", day: "2-digit" }).format(slot.startsAt) !== intent.requestedDate)) {
@@ -112,9 +117,10 @@ export async function runSimulatorEngineeringVerification(input: SimulatorEngine
     const audit = context.audit as typeof context.audit & { simulatorEngineeringVerification?: unknown; simulatorEngineeringVerificationHistory?: unknown };
     assertSimulatorEngineeringRuntime(runtime, claim.deployment!, now);
     if (offering.publicAccessStatus !== "PUBLIC" || !offering.active || !offering.bookingUrl || !offering.verifiedAt ||
-        !offering.evidenceUrl || !offering.supportedDurationsMinutes.includes(60) || offering.automationEligibility === "BLOCKED") {
+        !offering.evidenceUrl || offering.automationEligibility === "BLOCKED") {
       throw new Error("SIMULATOR_ENGINEERING_PUBLIC_RENTAL_NOT_READY");
     }
+    const durationMinutes = selectSimulatorEngineeringDuration(offering.supportedDurationsMinutes);
     const previous = readSimulatorEngineeringVerificationState(audit.simulatorEngineeringVerification);
     if (audit.simulatorEngineeringVerification !== undefined && audit.simulatorEngineeringVerification !== null && !previous) {
       throw new Error("SIMULATOR_ENGINEERING_EVIDENCE_INVALID");
@@ -139,13 +145,16 @@ export async function runSimulatorEngineeringVerification(input: SimulatorEngine
     }
     const sameRelease = Boolean(previous && previous.sourceFingerprint === claim.sourceFingerprint && previous.runtimeVersion === claim.releaseSha &&
       previous.deploymentId === claim.deployment!.deploymentId);
+    if (previous && sameRelease && simulatorEngineeringDuration(previous) !== durationMinutes) {
+      throw new Error("SIMULATOR_ENGINEERING_EVIDENCE_INVALID");
+    }
     // A repair must register a new exact release/source before another bounded pair of reads.
     const historyValue = audit.simulatorEngineeringVerificationHistory;
     if (historyValue !== undefined && (!Array.isArray(historyValue) || historyValue.length > 8 ||
         historyValue.some(entry => !readSimulatorEngineeringVerificationState(entry)))) throw new Error("SIMULATOR_ENGINEERING_EVIDENCE_INVALID");
     const history = (historyValue ?? []) as SimulatorEngineeringVerificationState[];
     if (previous && !sameRelease && history.length >= 8) throw new Error("SIMULATOR_ENGINEERING_EVIDENCE_LIMIT");
-    const state: SimulatorEngineeringVerificationState = sameRelease ? previous! : { schemaVersion: 1,
+    const state: SimulatorEngineeringVerificationState = sameRelease ? previous! : { schemaVersion: 2, durationMinutes,
       sourceFingerprint: claim.sourceFingerprint, runtimeVersion: claim.releaseSha!, deploymentId: claim.deployment!.deploymentId,
       startedAt: now.toISOString(), readsUsed: 0, inFlight: null, observations: [] };
     if (state.inFlight || state.readsUsed >= SIMULATOR_ENGINEERING_VERIFICATION_MAX_READS ||
@@ -168,10 +177,11 @@ export async function runSimulatorEngineeringVerification(input: SimulatorEngine
       { observationToken: null }, { observationExpiresAt: { lte: now } },
     ] }, data: { observationToken: requestId, observationExpiresAt: expiresAt } });
     if (lease.count !== 1) throw new Error("SIMULATOR_ENGINEERING_PROVIDER_BUSY");
-    const inFlight = { requestId, revision: claim.revision + 1, requestedDate, startedAt: now.toISOString(), expiresAt: expiresAt.toISOString() };
+    const inFlight = { requestId, revision: claim.revision + 1, requestedDate, startedAt: now.toISOString(), expiresAt: expiresAt.toISOString(),
+      ...(state.schemaVersion === 2 ? { durationMinutes } : {}) };
     const saved = await context.save({ simulatorEngineeringVerification: { ...state, readsUsed: state.readsUsed + 1, inFlight },
       ...(previous && !sameRelease ? { simulatorEngineeringVerificationHistory: [...history, previous] } : {}) });
-    return { ...saved, requestId, requestedDate, startedAt: now, offering, timeZone };
+    return { ...saved, requestId, requestedDate, durationMinutes, startedAt: now, offering, timeZone };
   });
   if ("expiredReservation" in reserved || "deferred" in reserved) return reserved;
   const owner = { assignmentRef: input.assignmentRef, token: input.token, revision: reserved.revision, runtimeVersion: runtime.runtimeVersion };
@@ -187,7 +197,7 @@ export async function runSimulatorEngineeringVerification(input: SimulatorEngine
         assertSimulatorEngineeringRuntime(runtime, context.claim.deployment!, context.now);
         const state = readSimulatorEngineeringVerificationState((context.audit as { simulatorEngineeringVerification?: unknown }).simulatorEngineeringVerification);
         const pending = state?.inFlight;
-        if (!state || !pending || pending.requestId !== reserved.requestId || pending.revision !== owner.revision ||
+        if (!state || simulatorEngineeringDuration(state) !== reserved.durationMinutes || !pending || pending.requestId !== reserved.requestId || pending.revision !== owner.revision ||
             Date.parse(pending.expiresAt) <= context.now.getTime() || context.offering.observationToken !== reserved.requestId ||
             !context.offering.observationExpiresAt || context.offering.observationExpiresAt <= context.now) {
           throw new Error("SIMULATOR_ENGINEERING_RESERVATION_STALE");
@@ -195,14 +205,14 @@ export async function runSimulatorEngineeringVerification(input: SimulatorEngine
       });
       deadline.throwIfAborted();
       return deps.read({ offering: { ...reserved.offering, bookingUrl: reserved.offering.bookingUrl! },
-        date: reserved.requestedDate, durationMinutes: 60, partySize: 1, timeZone: reserved.timeZone }, boundedFetch);
+        date: reserved.requestedDate, durationMinutes: reserved.durationMinutes, partySize: 1, timeZone: reserved.timeZone }, boundedFetch);
     });
     if (!read.acquired) throw new Error("SIMULATOR_ENGINEERING_PROVIDER_BUSY");
     if (deadline.aborted || Date.now() - reserved.startedAt.getTime() > SIMULATOR_ENGINEERING_VERIFICATION_DEADLINE_MS) {
       throw new Error("SIMULATOR_ENGINEERING_READ_DEADLINE");
     }
     normalized = normalizeSimulatorEngineeringResult(read.value, reserved.startedAt, new Date(), {
-      offeringId: reserved.offering.id, requestedDate: reserved.requestedDate, timeZone: reserved.timeZone,
+      offeringId: reserved.offering.id, requestedDate: reserved.requestedDate, timeZone: reserved.timeZone, durationMinutes: reserved.durationMinutes,
     });
   } catch (error) {
     normalized = normalizeFailure(error);
@@ -212,7 +222,7 @@ export async function runSimulatorEngineeringVerification(input: SimulatorEngine
     assertSimulatorEngineeringRuntime(runtime, context.claim.deployment!, context.now);
     const state = readSimulatorEngineeringVerificationState((context.audit as { simulatorEngineeringVerification?: unknown }).simulatorEngineeringVerification);
     const pending = state?.inFlight;
-    if (!state || !pending || pending.requestId !== reserved.requestId || pending.revision !== owner.revision ||
+    if (!state || simulatorEngineeringDuration(state) !== reserved.durationMinutes || !pending || pending.requestId !== reserved.requestId || pending.revision !== owner.revision ||
         Date.parse(pending.expiresAt) <= context.now.getTime() || context.offering.observationToken !== reserved.requestId ||
         !context.offering.observationExpiresAt || context.offering.observationExpiresAt <= context.now) {
       throw new Error("SIMULATOR_ENGINEERING_RESERVATION_STALE");
@@ -235,6 +245,7 @@ export async function runSimulatorEngineeringVerification(input: SimulatorEngine
     } });
     const progress = evaluateSimulatorEngineeringVerification({ now: context.now, claim: context.claim, sourceFingerprint: context.claim.sourceFingerprint, state: next });
     return { ...saved, outcome: observation.outcome, complete: observation.complete, requestId: observation.requestId,
+      durationMinutes: reserved.durationMinutes,
       providerObservedAt: observation.providerObservedAt, slotCount: observation.slotCount, failureCode: observation.failureCode,
       ...(readerGuard && !customerDemandPresent && !observation.complete &&
         observation.failureCode === readerGuard.code ? { readerGuard: readerGuard.message } : {}),

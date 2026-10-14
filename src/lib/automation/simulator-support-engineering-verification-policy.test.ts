@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { assertSimulatorEngineeringRuntime, deriveSimulatorEngineeringVerificationDate, evaluateSimulatorEngineeringVerification,
-  readSimulatorEngineeringVerificationState, type SimulatorEngineeringVerificationState } from "./simulator-support-engineering-verification-policy";
+  readSimulatorEngineeringVerificationState, selectSimulatorEngineeringDuration, simulatorEngineeringDuration,
+  type SimulatorEngineeringVerificationState } from "./simulator-support-engineering-verification-policy";
 import type { SimulatorSupportClaim } from "./simulator-support-policy";
 
 const now = new Date("2026-10-08T15:00:00Z"), sha = "a".repeat(40), source = "b".repeat(64);
@@ -19,6 +20,31 @@ export function engineState(): SimulatorEngineeringVerificationState {
 function evaluate(state = engineState()) { return evaluateSimulatorEngineeringVerification({ now, claim, sourceFingerprint: source, state }); }
 
 describe("independent simulator engineering evidence", () => {
+  it("records the same explicit duration on version-two state and every observation", () => {
+    const state: SimulatorEngineeringVerificationState = { ...engineState(), schemaVersion: 2, durationMinutes: 90,
+      observations: engineState().observations.map(row => ({ ...row, durationMinutes: 90 })) };
+    expect(readSimulatorEngineeringVerificationState(state)).toEqual(state);
+    expect(simulatorEngineeringDuration(state)).toBe(90);
+    expect(evaluate(state).freshSuccessfulChecks).toBe(2);
+    for (const change of [
+      { ...state, durationMinutes: undefined },
+      { ...state, durationMinutes: 75 },
+      { ...state, observations: [{ ...state.observations[0], durationMinutes: 60 }, state.observations[1]] },
+      { ...state, observations: engineState().observations },
+      { ...engineState(), durationMinutes: 90 },
+    ]) expect(readSimulatorEngineeringVerificationState(change)).toBeUndefined();
+    expect(simulatorEngineeringDuration(engineState())).toBe(60);
+    const mixed = { ...state, observations: [{ ...state.observations[0], durationMinutes: 60 }, state.observations[1]] };
+    expect(evaluate(mixed).freshSuccessfulChecks).toBe(0);
+  });
+  it("chooses only a reviewed duration, retaining the one-hour preference when supported", () => {
+    expect(selectSimulatorEngineeringDuration([120, 90])).toBe(90);
+    expect(selectSimulatorEngineeringDuration([120, 60, 90])).toBe(60);
+    expect(selectSimulatorEngineeringDuration([240])).toBe(240);
+    for (const invalid of [[], [30], [75], [270], [90, 90], [90, NaN], [60, 90, 120, 150, 180, 210, 240, 270]]) {
+      expect(() => selectSimulatorEngineeringDuration(invalid)).toThrow("PUBLIC_RENTAL_NOT_READY");
+    }
+  });
   it("requires two genuine distinct fresh complete observations on exact source/runtime/deployment", () => {
     expect(readSimulatorEngineeringVerificationState(engineState())).toBeDefined();
     expect(evaluate()).toMatchObject({ freshSuccessfulChecks: 2, releaseReady: true, firstCheckReady: true });

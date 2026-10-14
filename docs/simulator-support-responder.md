@@ -102,7 +102,13 @@ engineering incident authority they are bounded independent observations from
 the authenticated deployed verification route on that same exact release. They
 retain their own request identities, source and provider timestamps and never
 write search, match, customer probe or delivery rows. They prove engineering
-coverage only. Real demand arriving during engineering verification requires
+coverage only. New engineering evidence records the selected reviewed duration
+in both the version-two state and every reservation/observation. Both reads must
+use that same duration. Legacy version-one evidence retains its original fixed
+60-minute meaning. A check at another duration never changes or proves recovery
+of an earlier customer's requested session length.
+
+Real demand arriving during engineering verification requires
 the normal customer lane, with safe original-owner closeout before yielding.
 
 A launch, native turn, tests, HTTP200, deployment, prepared payload, provider

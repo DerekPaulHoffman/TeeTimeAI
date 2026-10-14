@@ -46,6 +46,25 @@ beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(start); });
 afterEach(() => { vi.useRealTimers(); });
 
 describe("deployed independent simulator verification", () => {
+  it("verifies an actual reviewed ninety-minute rental and persists its duration without customer acceptance", async () => {
+    const f = fixture(); f.offering.supportedDurationsMinutes = [120, 90];
+    const first = await runSimulatorEngineeringVerification({ assignmentRef: "assignment", token: "owned", revision: 3 }, runtime, f.deps);
+    expect(first).toMatchObject({ durationMinutes: 90, freshSuccessfulChecks: 1, customerAcceptance: false });
+    expect(f.deps.read).toHaveBeenCalledWith(expect.objectContaining({ durationMinutes: 90 }), expect.any(Function));
+    expect(f.audit.simulatorEngineeringVerification).toMatchObject({ schemaVersion: 2, durationMinutes: 90,
+      observations: [{ durationMinutes: 90 }] });
+    const second = await runSimulatorEngineeringVerification({ assignmentRef: "assignment", token: "owned", revision: first.revision }, runtime, f.deps);
+    expect(second).toMatchObject({ durationMinutes: 90, freshSuccessfulChecks: 2, customerAcceptance: false });
+  });
+  it("does not refund the verification budget when a recorded duration disagrees with the same source", async () => {
+    const f = fixture();
+    const first = await runSimulatorEngineeringVerification({ assignmentRef: "assignment", token: "owned", revision: 3 }, runtime, f.deps);
+    const state = f.audit.simulatorEngineeringVerification as SimulatorEngineeringVerificationState;
+    f.audit.simulatorEngineeringVerification = { ...state, schemaVersion: 2, durationMinutes: 90,
+      observations: state.observations.map(row => ({ ...row, durationMinutes: 90 })) };
+    await expect(runSimulatorEngineeringVerification({ assignmentRef: "assignment", token: "owned", revision: first.revision }, runtime, f.deps)).rejects.toThrow("EVIDENCE_INVALID");
+    expect(f.deps.read).toHaveBeenCalledTimes(1);
+  });
   it("reserves before network, uses shared provider capacity and settles only raw-free counts/clocks", async () => {
     const f = fixture();
     const first = await runSimulatorEngineeringVerification({ assignmentRef: "assignment", token: "owned", revision: 3 }, runtime, f.deps);
@@ -110,7 +129,7 @@ describe("deployed independent simulator verification", () => {
     const persisted = f.audit.simulatorEngineeringVerification as SimulatorEngineeringVerificationState;
     expect(readSimulatorEngineeringVerificationState(persisted)).toBeDefined();
     expect(Object.keys(persisted.observations[0]).sort()).toEqual([
-      "requestId", "revision", "requestedDate", "startedAt", "expiresAt", "completedAt",
+      "requestId", "revision", "requestedDate", "startedAt", "expiresAt", "completedAt", "durationMinutes",
       "outcome", "complete", "providerObservedAt", "slotCount", "failureCode",
     ].sort());
     expect(JSON.stringify(f.audit)).not.toContain(guard);
@@ -256,6 +275,10 @@ describe("deployed independent simulator verification", () => {
     expect(normalizeSimulatorEngineeringResult({ ...f.result, slots }, start, start, intent)).toMatchObject({ complete: true, outcome: "MATCH_FOUND", slotCount: 1 });
     expect(normalizeSimulatorEngineeringResult({ ...f.result, slots: [slots[0]] }, start, start, intent)).toMatchObject({ complete: true, outcome: "NO_MATCH", slotCount: 0 });
     expect(() => normalizeSimulatorEngineeringResult({ ...f.result, slots: [{ ...slots[1], endsAt: new Date("2026-10-08T16:30:00Z") }] }, start, start, intent)).toThrow("INCOMPLETE_READ");
+    const ninety = { ...slots[1], endsAt: new Date("2026-10-08T17:30:00Z") };
+    expect(normalizeSimulatorEngineeringResult({ ...f.result, slots: [ninety] }, start, start, { ...intent, durationMinutes: 90 })).toMatchObject({ slotCount: 1 });
+    expect(() => normalizeSimulatorEngineeringResult({ ...f.result, slots: [slots[1]] }, start, start, { ...intent, durationMinutes: 90 })).toThrow("INCOMPLETE_READ");
+    expect(() => normalizeSimulatorEngineeringResult({ ...f.result, slots: [] }, start, start, { ...intent, durationMinutes: 75 })).toThrow("INCOMPLETE_READ");
   });
   it("has no customer search, probe, match, outbox or email imports/writes in the detached path", () => {
     const source = readFileSync(new URL("./simulator-support-engineering-verification.ts", import.meta.url), "utf8");

@@ -53,6 +53,19 @@ describe("simulator support progress", () => {
     expect(evaluateSimulatorSupportProgress(state)).toMatchObject({ nextAction: "RETRY_ENGINEERING", customerAcceptance: false, readyForCompletion: false,
       reasons: expect.arrayContaining(["NORMAL_CUSTOMER_CHECK_REQUIRED"]) });
   });
+  it("requires the recorded engineering duration to remain in the reviewed offering", () => {
+    const state = input(), legacy = engineeringState();
+    state.engineeringVerification = { ...legacy, schemaVersion: 2, durationMinutes: 90,
+      observations: legacy.observations.map(row => ({ ...row, durationMinutes: 90 })) };
+    state.offering.supportedDurationsMinutes = [90, 120];
+    expect(evaluateSimulatorSupportProgress(state)).toMatchObject({ nextAction: "COMPLETE", engineeringDurationMinutes: 90,
+      customerAcceptance: false, readyForCompletion: true });
+    state.offering.supportedDurationsMinutes = [60];
+    expect(evaluateSimulatorSupportProgress(state)).toMatchObject({ nextAction: "REPAIR", readyForCompletion: false,
+      reasons: expect.arrayContaining(["ENGINEERING_DURATION_NOT_REVIEWED"]) });
+    delete state.offering.supportedDurationsMinutes;
+    expect(evaluateSimulatorSupportProgress(state).readyForCompletion).toBe(false);
+  });
   it("reports repair for a settled schema failure and an expired reservation without hidden revision advances", () => {
     const state = input(); state.engineeringVerification = engineeringState(); state.searches = [];
     Object.assign(state.engineeringVerification.observations[1], { outcome: "FETCH_FAILED", complete: false,

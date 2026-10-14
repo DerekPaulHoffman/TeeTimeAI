@@ -17,7 +17,7 @@ import { evaluateSimulatorSupportProgress } from "./simulator-support-progress";
 import { assertSimulatorResearchFallbackBeforeRetry, getSimulatorResearchGuide, getSimulatorResearchRetryGuide, getSimulatorResearchObservationFingerprint, getSimulatorResearchImplementationVersion, readSettledSimulatorPublicCheckpoint, readSimulatorResearchState, selectSimulatorResearchTarget, mergeSimulatorResearchBlockedRoutes, readSimulatorResearchFailureMemory, currentSimulatorResearchBlockedRoutes, type SimulatorResearchBlockedRoute, type SimulatorResearchSource, type SimulatorResearchState } from "./simulator-support-research-policy";
 import { classifySimulatorSupportFailure, type SimulatorSupportFailure } from "./simulator-support-failure";
 import { validateSimulatorEngineeringAuthority } from "./simulator-support-incidents";
-import { readSimulatorEngineeringVerificationState } from "./simulator-support-engineering-verification-policy";
+import { readSimulatorEngineeringVerificationState, selectSimulatorEngineeringDuration } from "./simulator-support-engineering-verification-policy";
 import { getSimulatorPostRepairResearchBoundary, isProtectedSimulatorResearchDenial, selectRecoveredSimulatorResearchRoutes } from "./simulator-support-research-recovery";
 import { buildSimulatorResearchConfigurationCandidate } from "./simulator-research-configuration-candidate";
 
@@ -277,8 +277,9 @@ export async function configureSimulatorSupportOffering(input: Owner & { manifes
     const rows = parseSimulatorOfferingManifest(manifest, { verificationClock: now });
     if (rows.length !== 1) throw new Error("Owned simulator configuration accepts exactly one offering.");
     const facts = rows[0];
-    if (facts.publicAccessStatus !== "PUBLIC" || !facts.active || !facts.supportedDurationsMinutes.includes(60) ||
-        [facts.website, facts.bookingUrl, facts.evidenceUrl].some(url => !getSafeCustomerBookingUrl(url))) throw new Error("Simulator configuration requires reviewed public one-hour rental evidence and safe public URLs.");
+    if (facts.publicAccessStatus !== "PUBLIC" || !facts.active ||
+        [facts.website, facts.bookingUrl, facts.evidenceUrl].some(url => !getSafeCustomerBookingUrl(url))) throw new Error("Simulator configuration requires reviewed public rental evidence and safe public URLs.");
+    selectSimulatorEngineeringDuration(facts.supportedDurationsMinutes);
     const row = await loadOwned(tx, input, now);
     const codeRepair = row.claim.releaseSha && row.claim.phase === "IMPLEMENTING" &&
       Boolean((row.audit as CourseDispatchAudit & { simulatorRepairPending?: unknown }).simulatorRepairPending);
@@ -797,11 +798,12 @@ export function completeSimulatorSupport(input: Owner & { currentDeployment: Git
     await tx.simulatorSupportIncident.update({ where: { id: row.source.incident.id }, data: { status: "RESOLVED", resolvedAt: now, retryAt: null } });
     await tx.automationRun.update({ where: { id: row.runId }, data: { status: "COMPLETED", completedAt: now, outcome: engineering ? "simulator_engineering_monitoring_verified" : "simulator_monitoring_restored", audit: {
       ...row.audit, ...(engineering ? { simulatorEngineeringCompletion: { engineeringOnly: true, customerAcceptance: false,
-        runtimeVersion: row.claim.releaseSha, sourceFingerprint: row.source.fingerprint, verifiedAt: now.toISOString(), engineeringObservationIds: progress.qualifyingProbeIds } }
+        runtimeVersion: row.claim.releaseSha, sourceFingerprint: row.source.fingerprint, verifiedAt: now.toISOString(),
+        engineeringDurationMinutes: progress.engineeringDurationMinutes, engineeringObservationIds: progress.qualifyingProbeIds } }
         : { simulatorVerification: { runtimeVersion: row.claim.releaseSha, sourceFingerprint: row.source.fingerprint, verifiedAt: now.toISOString(), probeIds: progress.qualifyingProbeIds } }),
     } as unknown as Prisma.InputJsonValue } });
     return { outcome: "success" as const, durableCloseoutRecorded: true, engineeringOnly: row.audit.target.trafficClass === "SYNTHETIC",
-      ...(engineering ? { verificationKind: "ENGINEERING_ONLY" as const, customerAcceptance: false } : {}) };
+      ...(engineering ? { verificationKind: "ENGINEERING_ONLY" as const, engineeringDurationMinutes: progress.engineeringDurationMinutes, customerAcceptance: false } : {}) };
   });
 }
 

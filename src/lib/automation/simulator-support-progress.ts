@@ -1,5 +1,5 @@
 import { assertSimulatorSupportDeployment, type SimulatorSupportClaim } from "./simulator-support-policy";
-import { evaluateSimulatorEngineeringVerification, readSimulatorEngineeringVerificationState, type SimulatorEngineeringVerificationState } from "./simulator-support-engineering-verification-policy";
+import { evaluateSimulatorEngineeringVerification, readSimulatorEngineeringVerificationState, simulatorEngineeringDuration, type SimulatorEngineeringVerificationState } from "./simulator-support-engineering-verification-policy";
 
 type SearchState = {
   id: string;
@@ -32,7 +32,7 @@ export type SimulatorSupportProgressInput = {
   now: Date;
   claim: SimulatorSupportClaim;
   sourceFingerprint: string;
-  offering: { publicAccessStatus: string; monitoringState: string; automationEligibility: string };
+  offering: { publicAccessStatus: string; monitoringState: string; automationEligibility: string; supportedDurationsMinutes?: number[] };
   owner: { leaseValid: boolean; demandCurrent: boolean; sourceCurrent: boolean };
   /** The newest offering probes in descending observedAt/id order, at most 16. */
   probes: SimulatorSupportProgressProbe[];
@@ -46,6 +46,7 @@ export type SimulatorSupportProgress = {
   nextAction: "WAIT_FOR_CHECK" | "RECHECK_SECOND" | "VERIFY_ENGINEERING" | "RETRY_ENGINEERING" | "COMPLETE" | "REPAIR";
   verificationKind: "CUSTOMER_SEARCH" | "ENGINEERING_ONLY";
   customerAcceptance: boolean;
+  engineeringDurationMinutes?: number;
   reasons: string[];
   leaseValid: boolean;
   demandCurrent: boolean;
@@ -96,8 +97,11 @@ export function evaluateSimulatorSupportProgress(input: SimulatorSupportProgress
       try { if (claim.releaseSha && claim.deployment) { assertSimulatorSupportDeployment(claim.deployment, claim.releaseSha, now); releaseReady = true; } }
       catch { /* The engineering lane retains the same exact Ready release fence. */ }
     }
+    const engineeringDurationMinutes = state ? simulatorEngineeringDuration(state) : undefined;
+    const durationSupported = !state || (state.schemaVersion === 1 && input.offering.supportedDurationsMinutes === undefined) ||
+      Boolean(input.offering.supportedDurationsMinutes?.includes(engineeringDurationMinutes!));
     const offeringReady = input.offering.publicAccessStatus === "PUBLIC" && input.offering.monitoringState === "HEALTHY" &&
-      input.offering.automationEligibility === "ALLOWED";
+      input.offering.automationEligibility === "ALLOWED" && durationSupported;
     const sourceCurrent = owner.sourceCurrent && claim.sourceFingerprint === input.sourceFingerprint;
     const readyForCompletion = owner.leaseValid && owner.demandCurrent && sourceCurrent && releaseReady && offeringReady &&
       observed?.freshSuccessfulChecks === 2 && !observed.inFlight && !input.customerDemandPresent;
@@ -105,6 +109,7 @@ export function evaluateSimulatorSupportProgress(input: SimulatorSupportProgress
       ...(!owner.leaseValid ? ["OWNER_LEASE_STALE"] : []), ...(!owner.demandCurrent ? ["ENGINEERING_AUTHORITY_CHANGED"] : []),
       ...(!sourceCurrent ? ["OFFERING_SOURCE_CHANGED"] : []), ...(!releaseReady ? ["EXACT_RELEASE_NOT_READY"] : []),
       ...(!offeringReady ? ["PUBLIC_MONITORING_NOT_HEALTHY"] : []),
+      ...(!durationSupported ? ["ENGINEERING_DURATION_NOT_REVIEWED"] : []),
       ...(observed?.inFlight ? ["ENGINEERING_READ_IN_FLIGHT"] : []),
       ...(observed?.expiredReservation ? ["ENGINEERING_READ_EXPIRED"] : []),
       ...(input.customerDemandPresent ? ["NORMAL_CUSTOMER_CHECK_REQUIRED"] : []),
@@ -113,7 +118,7 @@ export function evaluateSimulatorSupportProgress(input: SimulatorSupportProgress
       ...(observed?.firstCheckReady && observed.freshSuccessfulChecks < 2 ? ["SECOND_FRESH_CHECK_NEEDED"] : []),
     ];
     const repair = !owner.leaseValid || !owner.demandCurrent || !sourceCurrent || !releaseReady ||
-      input.offering.publicAccessStatus !== "PUBLIC" || Boolean(observed?.expiredReservation) ||
+      input.offering.publicAccessStatus !== "PUBLIC" || !durationSupported || Boolean(observed?.expiredReservation) ||
       !state && !freshEpisode;
     const latestFailure = observed?.latestObservation;
     const repairableReaderFailure = Boolean(belongsToCurrentRelease && state && observed && observed.releaseReady &&
@@ -129,7 +134,8 @@ export function evaluateSimulatorSupportProgress(input: SimulatorSupportProgress
     return { nextAction: readyForCompletion ? "COMPLETE" : repair ? "REPAIR" : observed?.inFlight ? "WAIT_FOR_CHECK" :
       input.customerDemandPresent ? "RETRY_ENGINEERING" : repairableReaderFailure ? "REPAIR" :
       observed?.failedObservation ? "RETRY_ENGINEERING" : "VERIFY_ENGINEERING",
-      verificationKind: "ENGINEERING_ONLY", customerAcceptance: false, reasons, leaseValid: owner.leaseValid, demandCurrent: owner.demandCurrent,
+      verificationKind: "ENGINEERING_ONLY", customerAcceptance: false,
+      ...(engineeringDurationMinutes !== undefined ? { engineeringDurationMinutes } : {}), reasons, leaseValid: owner.leaseValid, demandCurrent: owner.demandCurrent,
       sourceCurrent, releaseReady, offeringReady, verificationCycle: state?.readsUsed ?? 0, firstCheckReady: observed?.firstCheckReady ?? false,
       freshSuccessfulChecks: observed?.freshSuccessfulChecks ?? 0, readyForCompletion, currentDeploymentReadbackRequired: true,
       qualifyingProbeIds: observed?.qualifyingObservationIds ?? [], latestProbe: null };

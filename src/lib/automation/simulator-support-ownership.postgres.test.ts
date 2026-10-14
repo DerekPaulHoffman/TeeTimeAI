@@ -112,12 +112,12 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     return { ...f, before, engineeringRun: run, engineeringOwner: { assignmentRef: assignment.assignmentRef, ownerThreadId: child, token: claim.value.token, revision: claim.value.revision } };
   }
 
-  async function readyEngineeringFixture() {
+  async function readyEngineeringFixture(durations = [60]) {
     const f = await engineeringFixture();
     let owner = f.engineeringOwner;
     const manifest = { googlePlaceId: f.course.googlePlaceId, name: f.course.name, address: f.course.address!, latitude: 41, longitude: -73,
       website: f.course.website!, bookingUrl: "https://official.example.test/book", evidenceUrl: f.course.website!, verifiedAt: new Date().toISOString(),
-      publicAccessStatus: "PUBLIC", supportedDurationsMinutes: [60], providerFamilyKey: "GOLFBOOK" };
+      publicAccessStatus: "PUBLIC", supportedDurationsMinutes: durations, providerFamilyKey: "GOLFBOOK" };
     const configured = await lane.configureSimulatorSupportOffering({ ...owner, manifest, apply: true,
       expectedFingerprint: f.fingerprint, expectedOfferingRevision: f.offering.monitoringRevision });
     if (!configured.acquired || configured.value.mode !== "applied") throw new Error("Engineering configuration failed.");
@@ -195,8 +195,8 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(coreMocks.sendMatch).not.toHaveBeenCalled();expect(coreMocks.sendStatus).not.toHaveBeenCalled();
   },30_000);
 
-  it("verifies two deployed engineering reads through the real writer envelope and completes without any customer state", async () => {
-    const f = await readyEngineeringFixture();
+  it.each([{ durations: [60], selected: 60 }, { durations: [90, 120], selected: 90 }])("verifies two deployed $selected-minute engineering reads without changing customer intent", async ({ durations, selected }) => {
+    const f = await readyEngineeringFixture(durations);
     const { runSimulatorEngineeringVerification } = await import("./simulator-support-engineering-verification");
     const before = { probes: await client.courseProbe.count({ where: { teeSearchId: f.search.id } }), matches: await client.teeTimeMatch.count({ where: { teeSearchId: f.search.id } }),
       deliveries: await client.searchEmailDelivery.count({ where: { teeSearchId: f.search.id } }), operator: await client.operatorNotificationDelivery.count({ where: { sourceSearchId: f.search.id } }) };
@@ -206,7 +206,8 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     for (let cycle = 1; cycle <= 2; cycle++) {
       const priorRevision = owner.revision;
       const result = await runSimulatorEngineeringVerification(owner, f.runtime);
-      expect(result).toMatchObject({ complete: true, outcome: "NO_MATCH", engineeringOnly: true, customerAcceptance: false, freshSuccessfulChecks: cycle, revision: priorRevision + 2 });
+      expect(result).toMatchObject({ complete: true, outcome: "NO_MATCH", durationMinutes: selected, engineeringOnly: true, customerAcceptance: false, freshSuccessfulChecks: cycle, revision: priorRevision + 2 });
+      expect(coreMocks.fetch).toHaveBeenLastCalledWith(expect.objectContaining({ durationMinutes: selected }), expect.any(Function));
       owner = { ...owner, revision: result.revision };
       const progress = await lane.readSimulatorSupportProgress(owner);
       if (!progress.acquired) throw new Error("Engineering progress was busy.");
@@ -221,7 +222,7 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
       deliveries: await client.searchEmailDelivery.count({ where: { teeSearchId: f.search.id } }), operator: await client.operatorNotificationDelivery.count({ where: { sourceSearchId: f.search.id } }) }).toEqual(before);
     const saved = await client.automationRun.findUniqueOrThrow({ where: { id: f.engineeringRun.id } });
     expect(saved).toMatchObject({ status: "COMPLETED", outcome: "simulator_engineering_monitoring_verified" });
-    expect(saved.audit).toMatchObject({ simulatorEngineeringCompletion: { engineeringOnly: true, customerAcceptance: false,
+    expect(saved.audit).toMatchObject({ simulatorEngineeringCompletion: { engineeringOnly: true, customerAcceptance: false, engineeringDurationMinutes: selected,
       engineeringObservationIds: [expect.any(String), expect.any(String)] } });
     expect((saved.audit as Prisma.JsonObject).simulatorVerification).toBeUndefined();
     expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();

@@ -36,6 +36,8 @@ export type SimulatorEngineeringVerificationReservation = {
   requestedDate: string;
   startedAt: string;
   expiresAt: string;
+  /** Version 1 reservations used the fixed 60-minute contract. */
+  durationMinutes?: number;
 };
 export type SimulatorEngineeringVerificationObservation = SimulatorEngineeringVerificationReservation & {
   completedAt: string;
@@ -46,7 +48,6 @@ export type SimulatorEngineeringVerificationObservation = SimulatorEngineeringVe
   failureCode: string | null;
 };
 export type SimulatorEngineeringVerificationState = {
-  schemaVersion: 1;
   sourceFingerprint: string;
   runtimeVersion: string;
   deploymentId: string;
@@ -54,7 +55,23 @@ export type SimulatorEngineeringVerificationState = {
   readsUsed: number;
   inFlight: SimulatorEngineeringVerificationReservation | null;
   observations: SimulatorEngineeringVerificationObservation[];
-};
+} & ({ schemaVersion: 1; durationMinutes?: never } | { schemaVersion: 2; durationMinutes: number });
+
+const validDuration = (value: unknown): value is number => typeof value === "number" && Number.isInteger(value) &&
+  value >= 60 && value <= 240 && value % 30 === 0;
+
+/** Use only reviewed manifest durations; this does not modify any customer request. */
+export function selectSimulatorEngineeringDuration(durations: readonly number[]) {
+  if (!Array.isArray(durations) || !durations.length || durations.length > 7 ||
+      durations.some(value => !validDuration(value)) || new Set(durations).size !== durations.length) {
+    throw new Error("SIMULATOR_ENGINEERING_PUBLIC_RENTAL_NOT_READY");
+  }
+  return durations.includes(60) ? 60 : Math.min(...durations);
+}
+
+export function simulatorEngineeringDuration(state: SimulatorEngineeringVerificationState) {
+  return state.schemaVersion === 1 ? 60 : state.durationMinutes;
+}
 
 const date = (value: unknown): value is string => typeof value === "string" && value.length >= 20 && value.length <= 32 && Number.isFinite(Date.parse(value));
 const boundedId = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/u.test(value);
@@ -63,10 +80,13 @@ const day = (value: unknown): value is string => typeof value === "string" && /^
 const reservationKeys = ["requestId", "revision", "requestedDate", "startedAt", "expiresAt"];
 const observationKeys = [...reservationKeys, "completedAt", "outcome", "complete", "providerObservedAt", "slotCount", "failureCode"];
 function exactKeys(value: object, keys: string[]) { return Object.keys(value).length === keys.length && Object.keys(value).every(key => keys.includes(key)); }
-function reservation(value: unknown, observation = false): value is SimulatorEngineeringVerificationReservation {
+function reservation(value: unknown, observation = false, durationMinutes?: number): value is SimulatorEngineeringVerificationReservation {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const row = value as SimulatorEngineeringVerificationReservation;
-  return exactKeys(row, observation ? observationKeys : reservationKeys) && boundedId(row.requestId) && Number.isSafeInteger(row.revision) && row.revision > 0 && day(row.requestedDate) &&
+  const keys = observation ? observationKeys : reservationKeys;
+  return exactKeys(row, durationMinutes === undefined ? keys : [...keys, "durationMinutes"]) &&
+    (durationMinutes === undefined || row.durationMinutes === durationMinutes) &&
+    boundedId(row.requestId) && Number.isSafeInteger(row.revision) && row.revision > 0 && day(row.requestedDate) &&
     date(row.startedAt) && date(row.expiresAt) && Date.parse(row.expiresAt) > Date.parse(row.startedAt) &&
     Date.parse(row.expiresAt) - Date.parse(row.startedAt) <= SIMULATOR_ENGINEERING_VERIFICATION_LEASE_MS;
 }
@@ -75,15 +95,17 @@ function reservation(value: unknown, observation = false): value is SimulatorEng
 export function readSimulatorEngineeringVerificationState(value: unknown): SimulatorEngineeringVerificationState | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const state = value as SimulatorEngineeringVerificationState;
-  if (!exactKeys(state, ["schemaVersion", "sourceFingerprint", "runtimeVersion", "deploymentId", "startedAt", "readsUsed", "inFlight", "observations"]) ||
-      state.schemaVersion !== 1 || !/^[a-f0-9]{64}$/u.test(state.sourceFingerprint) ||
+  const keys = ["schemaVersion", "sourceFingerprint", "runtimeVersion", "deploymentId", "startedAt", "readsUsed", "inFlight", "observations"];
+  if ((state.schemaVersion !== 1 && state.schemaVersion !== 2) ||
+      !exactKeys(state, state.schemaVersion === 2 ? [...keys, "durationMinutes"] : keys) ||
+      state.schemaVersion === 2 && !validDuration(state.durationMinutes) || !/^[a-f0-9]{64}$/u.test(state.sourceFingerprint) ||
       !/^[a-f0-9]{40}$/u.test(state.runtimeVersion) || !boundedId(state.deploymentId) || !date(state.startedAt) ||
       !Number.isSafeInteger(state.readsUsed) || state.readsUsed < 0 || state.readsUsed > SIMULATOR_ENGINEERING_VERIFICATION_MAX_READS ||
       !Array.isArray(state.observations) || state.observations.length > state.readsUsed ||
-      state.inFlight !== null && !reservation(state.inFlight)) return undefined;
+      state.inFlight !== null && !reservation(state.inFlight, false, state.schemaVersion === 2 ? state.durationMinutes : undefined)) return undefined;
   const ids = new Set<string>();
   for (const row of state.observations) {
-    if (!reservation(row, true) || !date(row.completedAt) || Date.parse(row.completedAt) < Date.parse(row.startedAt) ||
+    if (!reservation(row, true, state.schemaVersion === 2 ? state.durationMinutes : undefined) || !date(row.completedAt) || Date.parse(row.completedAt) < Date.parse(row.startedAt) ||
         !["MATCH_FOUND", "NO_MATCH", "FETCH_FAILED", "NEEDS_ADAPTER"].includes(row.outcome) ||
         typeof row.complete !== "boolean" || row.providerObservedAt !== null && !date(row.providerObservedAt) ||
         !Number.isSafeInteger(row.slotCount) || row.slotCount < 0 || row.slotCount > 65_536 ||
@@ -124,7 +146,7 @@ export function evaluateSimulatorEngineeringVerification(input: { now: Date; cla
   try {
     if (claim.releaseSha && claim.deployment) {
       assertSimulatorSupportDeployment(claim.deployment, claim.releaseSha, now);
-      releaseReady = state.runtimeVersion === claim.releaseSha && state.deploymentId === claim.deployment.deploymentId &&
+      releaseReady = Boolean(readSimulatorEngineeringVerificationState(state)) && state.runtimeVersion === claim.releaseSha && state.deploymentId === claim.deployment.deploymentId &&
         state.sourceFingerprint === claim.sourceFingerprint && state.sourceFingerprint === input.sourceFingerprint &&
         Date.parse(state.startedAt) >= Math.max(Date.parse(claim.claimedAt), Date.parse(claim.deployment.deployedAt)) &&
         Date.parse(state.startedAt) <= now.getTime();
