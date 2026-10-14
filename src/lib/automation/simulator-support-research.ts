@@ -1118,7 +1118,9 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
     }));
     page = await researchOperation("BROWSER_CONTEXT", () => beforeDeadline(context!.newPage(), deadline));
     let response: Awaited<ReturnType<ResearchPage["goto"]>>;
-    try { response = await beforeDeadline(page.goto(requestedUrl, { waitUntil: "domcontentloaded", timeout: RENDER_DEADLINE_MS }), deadline); }
+    // Load includes asynchronous scripts created during initial parsing;
+    // DOMContentLoaded alone can precede even their first intercepted request.
+    try { response = await beforeDeadline(page.goto(requestedUrl, { waitUntil: "load", timeout: RENDER_DEADLINE_MS }), deadline); }
     catch (error) {
       if (hasRouteFailure) throw routeFailure;
       const expectedIncomplete = error instanceof Error && (error.name === "TimeoutError" || error.message === "SIMULATOR_RESEARCH_DEADLINE" || /^page\.goto: net::ERR_(?:ABORTED|BLOCKED_BY_CLIENT)\b/u.test(error.message));
