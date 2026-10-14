@@ -15,6 +15,7 @@ import { tagSimulatorResearchFailure, tagSimulatorResearchResourceKind, type Sim
 import { createBlockedResourceDiagnostics, simulatorCredentialHeaderKind, summarizeBlockedRequestBody, type SimulatorBlockedResourceDiagnostic } from "./simulator-blocked-resources";
 import { declaredSimulatorScriptSource, summarizeSimulatorPageSurfaces, type SimulatorPageSurfaces } from "./simulator-page-surfaces";
 import { literalPublicScriptImports } from "./simulator-script-imports";
+import { inspectSimulatorClientCode, mergeSimulatorClientCodeEvidence, type SimulatorClientCodeEvidence } from "./simulator-client-code-evidence";
 
 const MAX_BODY_BYTES = 1_500_000;
 const MAX_RENDER_BYTES = 16_000_000;
@@ -130,6 +131,8 @@ export type SimulatorResearchResult = {
   venueLinks?: string[];
   calendar?: SimulatorPublicCalendar;
   publicConfiguration?: SimulatorPublicConfiguration;
+  /** Ephemeral redacted reference data; never an availability/permission fact. */
+  clientCodeEvidence?: SimulatorClientCodeEvidence;
   pageSurfaces?: SimulatorPageSurfaces;
   renderActivation?: "PASSIVE_POINTER_AND_SCROLL";
   jsonShape?: Array<{ path: string; type: string; count?: number }>;
@@ -787,12 +790,42 @@ function knownPublicNetworkError(error: unknown) {
 
 /** Caller owns and revalidates the simulator claim before/after this bounded public read. */
 export async function collectSimulatorSupportResearch(input: { url: string; render?: boolean }, dependencies: SimulatorResearchDependencies = {}): Promise<SimulatorResearchResult> {
-  const result = await collectOwnedSimulatorSupportResearch(input, dependencies);
-  return { ...result, accessControlsObserved: true, accessControls: result.accessControls ?? [] };
+  const clientCodeByDocument = new Map<string, SimulatorClientCodeEvidence>();
+  const result = await collectOwnedSimulatorSupportResearch(input, dependencies, clientCodeByDocument);
+  const evidence = result.httpStatus >= 200 && result.httpStatus < 300 && !result.accessControls?.length
+    ? clientCodeByDocument.get(result.url) : undefined;
+  return { ...result, accessControlsObserved: true, accessControls: result.accessControls ?? [],
+    ...(evidence ? { clientCodeEvidence: evidence } : {}) };
 }
 
-async function collectOwnedSimulatorSupportResearch(input: { url: string; render?: boolean }, dependencies: SimulatorResearchDependencies): Promise<SimulatorResearchResult> {
+function inlineClientCodeEvidence(html: string, sourceUrl: string) {
+  const pending: PublicNode[] = [parse(html)];
+  let evidence: SimulatorClientCodeEvidence | undefined, visited = 0, truncated = false;
+  while (pending.length && visited++ < 50_000) {
+    const node = pending.pop()!;
+    if (node.tagName && ["template", "noscript"].includes(node.tagName)) continue;
+    const attrs = new Map((node.attrs ?? []).map(attr => [attr.name, attr.value]));
+    const type = attrs.get("type")?.trim().toLowerCase();
+    if (node.tagName === "script" && !attrs.has("src") && !attrs.has("data-src") &&
+        (!type || type === "module" || /^(?:text|application)\/(?:java|ecma)script$/u.test(type))) {
+      evidence = mergeSimulatorClientCodeEvidence(evidence, inspectSimulatorClientCode(
+        (node.childNodes ?? []).map(child => child.value ?? "").join(""), sourceUrl, "INLINE_SCRIPT"));
+    }
+    for (const child of node.childNodes ?? []) {
+      if (pending.length < 50_000) pending.push(child); else truncated = true;
+    }
+  }
+  return pending.length || truncated ? { version: 1 as const, authority: "EVIDENCE_ONLY" as const, fragments: [],
+    warnings: ["AST_BUDGET" as const], truncated: true } : evidence;
+}
+
+async function collectOwnedSimulatorSupportResearch(input: { url: string; render?: boolean }, dependencies: SimulatorResearchDependencies,
+  clientCodeByDocument: Map<string, SimulatorClientCodeEvidence>): Promise<SimulatorResearchResult> {
   const requestedUrl = publicUrl(input.url).href;
+  const addClientCode = (documentUrl: string, evidence: SimulatorClientCodeEvidence | undefined) => {
+    if (!evidence || !clientCodeByDocument.has(documentUrl) && clientCodeByDocument.size >= 5) return;
+    clientCodeByDocument.set(documentUrl, mergeSimulatorClientCodeEvidence(clientCodeByDocument.get(documentUrl), evidence)!);
+  };
   const now = dependencies.now ?? (() => new Date());
   const deadline = AbortSignal.timeout(input.render ? RENDER_DEADLINE_MS : DEADLINE_MS);
   const lease = dependencies.lease ?? runWithProviderRequestLease;
@@ -838,6 +871,7 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
       const controls = /^(?:text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(readResult.contentType) ? detectSimulatorResearchAccessControls(readResult.body.toString("utf8")) : [];
       if (controls.length) return { ...result, text: "", links: [], bookingLinks: undefined, calendar: undefined, publicConfiguration: undefined, jsonShape: undefined, configurationDiagnostic: undefined, pageSurfaces: undefined, accessControls: controls };
       if (readResult.status < 200 || readResult.status >= 300 || !/^(?:text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(readResult.contentType)) return result;
+      addClientCode(readResult.url, inlineClientCodeEvidence(readResult.body.toString("utf8"), readResult.url));
       let companionRequests = 0;
       const configuration = await collectSimulatorPublicApiConfiguration(readResult.url, async (target, headers) => {
         companionRequests += 1;
@@ -1036,6 +1070,7 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
     await researchOperation("BROWSER_ROUTE_SETUP", () => context!.route("**/*", async (route: Route) => {
       const operation = (async () => {
         const request = route.request();
+        const clientCodeDocument = safeMainDocument?.url;
         let observedHeaders: Headers | undefined;
         const blockedBodyShape = () => {
           try {
@@ -1145,16 +1180,20 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
             if (!assetsObserved && request.isNavigationRequest() && request.frame() === page?.mainFrame() && response.status >= 200 && response.status < 300 && /^(?:text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(response.contentType)) {
               assetsObserved = true;
               safeMainDocument = { ...response, observedAt: now() };
+              addClientCode(response.url, inlineClientCodeEvidence(response.body.toString("utf8"), response.url));
               const declared = publicAssetDestinations(response.body.toString("utf8"), response.url);
               for (const asset of declared.urls) assets.set(asset, asset);
               hasDeferredScripts = declared.hasDeferredScripts;
               contractSlug ??= publishedYourGolfBookingSlug(response.body.toString("utf8"), response.url);
             }
             if (kind === "script" && response.status >= 200 && response.status < 300 && /(?:javascript|ecmascript)/iu.test(response.contentType)) {
-              for (const dependency of literalPublicScriptImports(response.body.toString("utf8"), response.url)) {
+              const script = response.body.toString("utf8");
+              for (const dependency of literalPublicScriptImports(script, response.url)) {
                 if (!sameOfficialHost(requestedUrl, dependency) && !assets.has(dependency) && new Set(assets.values()).size < 20)
                   assets.set(dependency, dependency);
               }
+              if (clientCodeDocument && clientCodeDocument === safeMainDocument?.url)
+                addClientCode(clientCodeDocument, inspectSimulatorClientCode(script, response.url, "EXTERNAL_SCRIPT"));
             }
             if (["xhr", "fetch"].includes(kind) && response.contentType.includes("application/json") && responseContracts.length < 8) {
               try { responseContracts.push({ ...contractPath(url), httpStatus: response.status, shape: summarizeSimulatorPublicJsonShape(JSON.parse(response.body.toString("utf8"))) }); } catch { /* Invalid JSON is not a contract. */ }

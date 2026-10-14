@@ -82,6 +82,14 @@ reset source budgets or replace current owned venue evidence and verification.
 Missing or ambiguous documentation remains unknown. All implementation and
 release work retains the same original-owner gates.
 
+Owned reads may also return ephemeral `publicSource.clientCodeEvidence` from
+scripts already admitted during that same read. Bounded redacted excerpts are
+inert untrusted reference evidence; names and routes do not prove server
+semantics or authorize blocked methods. No new request, destination, credential,
+source-budget or eligibility authority is granted. Raw excerpts stay outside
+durable database history. Workers follow the assigned contract's privacy,
+unknown-fact, reusable implementation and deployed verification gates.
+
 Local tooling failures, transient provider backoff and positively observed
 technical access restrictions require different outcomes. Inspect retained
 diagnostics and repair reusable code when supported by evidence. Missing code,

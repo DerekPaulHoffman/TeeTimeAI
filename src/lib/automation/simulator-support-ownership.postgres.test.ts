@@ -441,6 +441,39 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(fetch).toHaveBeenCalledOnce();
     expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
   });
+  it("offers redacted client-code evidence from the original Chromium reads without storing code or allowing POST", async () => {
+    const bookingUrl = "https://official.example.test/booking", asset = "https://official.example.test/public.js";
+    const f = await fixture(15, false, bookingUrl);
+    const searchBefore = await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } });
+    const offeringBefore = await client.courseOffering.findUniqueOrThrow({ where: { id: f.offering.id } });
+    const script = `function getAvailability(date){const unused="client-code-private";return fetch('/api/availability',{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({venueId:'11111111-2222-4333-8444-555555555555',date})})}
+      getAvailability('2026-10-15').catch(()=>{});`;
+    const html = `<h1>Public rentals</h1><script src='${asset}'></script>`;
+    const fetch = vi.fn(async (input: unknown, init?: RequestInit) => {
+      if (init?.method !== "GET") throw new Error("No POST authority.");
+      if (String(input) === bookingUrl) return new Response(html, { headers: { "content-type": "text/html" } });
+      if (String(input) === asset) return new Response(script, { headers: { "content-type": "application/javascript" } });
+      throw new Error("No additional public request.");
+    });
+    const lease = (async (_host: string, work: () => Promise<unknown>) => ({ acquired: true as const, value: await work() })) as NonNullable<import("./simulator-support-research").SimulatorResearchDependencies["lease"]>;
+    const read = await lane.readSimulatorSupportSource({ ...f.owner, source: "booking", rendered: true }, {
+      fetch, lease, browser: async () => chromium.launch({ headless: true }),
+    });
+    if (!read.acquired) throw new Error("Owned client-code read was busy.");
+    expect(read.value.publicSource).toMatchObject({ renderComplete: false, renderWarning: "SECONDARY_REQUESTS_BLOCKED",
+      clientCodeEvidence: { authority: "EVIDENCE_ONLY", fragments: [{ sourceKind: "EXTERNAL_SCRIPT", sourceUrl: asset }] } });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(read.value.publicSource.publicConfiguration).toBeUndefined(); expect(read.value.configurationCandidate).toBeUndefined();
+    expect(JSON.stringify(read.value.publicSource.clientCodeEvidence)).not.toMatch(/client-code-private|11111111-2222/u);
+    const current = await lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId });
+    expect(current.research.readCount).toBe(1); expect(current.research.history[0]).not.toHaveProperty("clientCodeEvidence");
+    const saved = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id }, select: { audit: true } });
+    expect(JSON.stringify(saved.audit)).not.toMatch(/clientCodeEvidence|getAvailability|client-code-private|11111111-2222/u);
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(searchBefore);
+    expect(await client.courseOffering.findUniqueOrThrow({ where: { id: f.offering.id } })).toEqual(offeringBefore);
+    expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
+  }, 30_000);
   it.each(["SECONDARY_STYLESHEET_URL_REJECTED", "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED"])("persists only typed incomplete rendered discovery facts after %s under the real claim", async renderWarning => {
     const bookingUrl = "https://app.acuityscheduling.com/schedule/2991fba2";
     const f = await fixture(15, false, bookingUrl);

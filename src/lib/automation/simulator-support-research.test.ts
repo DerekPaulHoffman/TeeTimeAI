@@ -108,6 +108,49 @@ function renderedBrowser(requests: RequestFixture[], html = "<h1>Public rentals<
 
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.clearAllMocks(); });
 
+describe("owned redacted client-code references", () => {
+  const sourceUrl = "https://official.example.test/booking";
+  const script = `function getAvailability(date){const unused="client-code-private";
+    return fetch("/api/availability",{method:"POST",body:JSON.stringify({venueId:"11111111-2222-4333-8444-555555555555",date})})}`;
+  it("returns inert inline reference structure from the same single HTTP read", async () => {
+    const fetch = vi.fn(async () => response(`<h1>Public rentals</h1><script>${script}</script>`));
+    const result = await collectSimulatorSupportResearch({ url: sourceUrl }, { fetch, lease });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(result.clientCodeEvidence).toMatchObject({ authority: "EVIDENCE_ONLY", fragments: [{ sourceKind: "INLINE_SCRIPT", sourceUrl }] });
+    expect(JSON.stringify(result.clientCodeEvidence)).not.toMatch(/client-code-private|11111111-2222/u);
+    expect(result.publicConfiguration).toBeUndefined(); expect(result.calendar).toBeUndefined();
+  });
+  it("retains admitted static code without admitting its POST or making the render complete", async () => {
+    const asset = "https://official.example.test/public.js", endpoint = "https://official.example.test/api/availability";
+    const html = `<h1>Public rentals</h1><script src='${asset}'></script>`;
+    const view = renderedBrowser([{ url: sourceUrl }, { url: asset, kind: "script" },
+      { url: endpoint, kind: "fetch", method: "POST", headers: { "content-type": "application/json" }, body: '{"date":"2026-10-15"}' }], html);
+    const fetch = vi.fn(async (input: unknown) => String(input) === sourceUrl ? response(html)
+      : String(input) === asset ? new Response(script, { headers: { "content-type": "application/javascript" } })
+        : (() => { throw new Error("No new request authority."); })());
+    const result = await collectSimulatorSupportResearch({ url: sourceUrl, render: true }, { fetch, lease, browser: view.factory });
+    expect(fetch).toHaveBeenCalledTimes(2); expect(view.routes[2].abort).toHaveBeenCalled(); expect(view.routes[2].fulfill).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ admittedRequests: 2, renderComplete: false, renderWarning: "SECONDARY_REQUESTS_BLOCKED",
+      clientCodeEvidence: { authority: "EVIDENCE_ONLY", fragments: [{ sourceKind: "EXTERNAL_SCRIPT", sourceUrl: asset }] } });
+    expect(result.publicConfiguration).toBeUndefined(); expect(result.calendar).toBeUndefined();
+    expect(Buffer.from(view.routes[1].fulfill.mock.calls[0][0].body).toString()).toBe(script);
+    expect(JSON.stringify(result.clientCodeEvidence)).not.toMatch(/client-code-private|11111111-2222/u);
+  });
+  it.each([401, 403, 404, 500])("does not return code from a terminal HTTP%s source", async status => {
+    const result = await collectSimulatorSupportResearch({ url: sourceUrl }, { lease,
+      fetch: vi.fn(async () => new Response(`<script>${script}</script>`, { status, headers: { "content-type": "text/html" } })) });
+    expect(result.clientCodeEvidence).toBeUndefined();
+  });
+  it("clears references on an account challenge and ignores inactive/data script blocks", async () => {
+    for (const html of [`<h1>Sign in to continue</h1><script>${script}</script>`,
+      `<template><script>${script}</script></template><noscript><script>${script}</script></noscript>`,
+      `<script type='application/json'>${JSON.stringify({ code: script })}</script>`]) {
+      const result = await collectSimulatorSupportResearch({ url: sourceUrl }, { fetch: vi.fn(async () => response(html)), lease });
+      expect(result.clientCodeEvidence).toBeUndefined();
+    }
+  });
+});
+
 describe("owned known-reader public configuration", () => {
   it("projects the exact canonical Acuity embed URL without stripping its reference marker", async () => {
     const url = `${acuitySource}?ref=embedded_csp`;
