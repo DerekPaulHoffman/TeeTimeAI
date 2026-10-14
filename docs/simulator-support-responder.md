@@ -90,6 +90,14 @@ source-budget or eligibility authority is granted. Raw excerpts stay outside
 durable database history. Workers follow the assigned contract's privacy,
 unknown-fact, reusable implementation and deployed verification gates.
 
+Large admitted scripts and exhausted whole-source AST walks can return
+`projection: TOKEN_WINDOW`. Every emitted token is independently redacted;
+comments and literal data are removed. These windows are always marked
+incomplete and never imply a complete function, program or API contract.
+Source size, token/time scan, output and context bounds retain explicit
+warnings. Omitted code stays unknown, and the projection grants no additional
+network, method, destination, lease, eligibility or verification authority.
+
 Local tooling failures, transient provider backoff and positively observed
 technical access restrictions require different outcomes. Inspect retained
 diagnostics and repair reusable code when supported by evidence. Missing code,

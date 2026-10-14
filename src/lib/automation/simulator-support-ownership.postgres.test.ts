@@ -441,12 +441,12 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(fetch).toHaveBeenCalledOnce();
     expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
   });
-  it("offers redacted client-code evidence from the original Chromium reads without storing code or allowing POST", async () => {
+  it.each(["ordinary", "large-bundle"])("offers redacted client-code evidence from the original Chromium reads without storing code or allowing POST: %s", async size => {
     const bookingUrl = "https://official.example.test/booking", asset = "https://official.example.test/public.js";
     const f = await fixture(15, false, bookingUrl);
     const searchBefore = await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } });
     const offeringBefore = await client.courseOffering.findUniqueOrThrow({ where: { id: f.offering.id } });
-    const script = `function getAvailability(date){const unused="client-code-private";return fetch('/api/availability',{
+    const script = (size === "large-bundle" ? `/*${"library padding ".repeat(110_000)}*/` : "") + `function getAvailability(date){const unused="client-code-private";return fetch('/api/availability',{
       method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({venueId:'11111111-2222-4333-8444-555555555555',date})})}
       getAvailability('2026-10-15').catch(()=>{});`;
     const html = `<h1>Public rentals</h1><script src='${asset}'></script>`;
@@ -466,6 +466,9 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(fetch).toHaveBeenCalledTimes(2);
     expect(read.value.publicSource.publicConfiguration).toBeUndefined(); expect(read.value.configurationCandidate).toBeUndefined();
     expect(JSON.stringify(read.value.publicSource.clientCodeEvidence)).not.toMatch(/client-code-private|11111111-2222/u);
+    if (size === "large-bundle") expect(read.value.publicSource.clientCodeEvidence).toMatchObject({
+      fragments: [{ projection: "TOKEN_WINDOW" }], truncated: true,
+    });
     const current = await lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId });
     expect(current.research.readCount).toBe(1); expect(current.research.history[0]).not.toHaveProperty("clientCodeEvidence");
     const saved = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id }, select: { audit: true } });

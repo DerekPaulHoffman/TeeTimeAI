@@ -76,14 +76,60 @@ describe("inert public client-code evidence", () => {
     expect(inspectSimulatorClientCode('function getAvailability(){return fetch("/api/availability")}', sourceUrl, "INLINE_SCRIPT")?.fragments[0].sourceUrl).toBe(sourceUrl);
   });
   it("reports source and syntax limits without inventing provider restrictions", () => {
-    expect(inspect("availability".repeat(150_001))).toMatchObject({ fragments: [], warnings: ["SOURCE_SIZE"], truncated: true });
+    expect(inspect("availability".repeat(1_600_001))).toMatchObject({ fragments: [], warnings: ["SOURCE_SIZE"], truncated: true });
     expect(inspect("function getAvailability(" )).toMatchObject({ fragments: [], warnings: ["SYNTAX_UNSUPPORTED"] });
     expect(inspect(`function getAvailability(){${"void 0;".repeat(600)}return fetch("/api/availability")}`))
       .toMatchObject({ fragments: [], warnings: ["CONTEXT_SIZE"], truncated: true });
   });
-  it("discards every excerpt when the AST walk did not inspect every literal", () => {
+  it("uses independently redacted incomplete token windows when the full AST budget is exhausted", () => {
     const source = `function getAvailability(){return fetch("/api/availability",{privateValue:"private-token"})}` + "0;".repeat(26_000);
-    expect(inspect(source)).toMatchObject({ fragments: [], warnings: ["AST_BUDGET"], truncated: true });
+    const evidence = inspect(source)!;
+    expect(evidence).toMatchObject({ fragments: [{ projection: "TOKEN_WINDOW" }], warnings: ["AST_BUDGET"], truncated: true });
+    expect(JSON.stringify(evidence)).not.toContain("private-token");
+  });
+  it("projects a request and response context from a large already-admitted bundle without evaluating or copying data", () => {
+    const source = `/*${"unrelated library ".repeat(100_000)}*/function getAvailability(date){
+      const secret="private-token";return fetch("/api/public/availability",{method:"POST",body:JSON.stringify({date,venueId:"private-venue"})})
+        .then(response=>response.json()).then(data=>data.availableSlots)};`;
+    const evidence = inspect(source)!;
+    expect(evidence).toMatchObject({ authority: "EVIDENCE_ONLY", fragments: [{ projection: "TOKEN_WINDOW", basis: "API_PATH" }], truncated: true });
+    const code = evidence.fragments[0].code;
+    expect(code).toContain('"/api/public/availability"'); expect(code).toContain('"POST"'); expect(code).toContain("availableSlots");
+    expect(JSON.stringify(evidence)).not.toMatch(/private-token|private-venue|unrelated library/u);
+    expect(evidence.fragments[0].sourceSha256).toBe(createHash("sha256").update(source).digest("hex"));
+  });
+  it("redacts every token in a large-bundle window including comments, templates, regex, numeric and protocol-shaped secrets", () => {
+    const source = `/*${"padding ".repeat(220_000)}*/function getAvailability(){
+      const password="GET", privateNumber=12345678, pattern=/private-regex/;
+      return fetch("/api/availability",{method:"POST",secret:true,authToken:"POST",apiKey:"POST",nonce:"GET",data:\`private-template\`})}`;
+    const evidence = inspect(source)!;
+    expect(evidence.fragments[0]).toMatchObject({ projection: "TOKEN_WINDOW" });
+    expect(JSON.stringify(evidence)).not.toMatch(/private-regex|12345678|private-template/u);
+    expect(evidence.fragments[0].literalRedactions).toBeGreaterThanOrEqual(6);
+    expect(evidence.fragments[0].code).toContain('authToken : "[REDACTED_LITERAL]"');
+    expect(evidence.fragments[0].code).toContain('password = "[REDACTED_LITERAL]"');
+    expect(evidence.fragments[0].code).toContain('apiKey : "[REDACTED_LITERAL]"');
+    expect(evidence.fragments[0].code).toContain('nonce : "[REDACTED_LITERAL]"');
+  });
+  it("finds a request after a large minified library prefix without enlarging output or reading beyond the source cap", () => {
+    const source = "void 0;".repeat(250_000) + `function getAvailability(day){return fetch('/api/availability',{method:'POST',day,secret:'private-token'}).then(response=>response.json())}`;
+    const evidence = inspect(source)!;
+    expect(evidence).toMatchObject({ fragments: [{ projection: "TOKEN_WINDOW", basis: "API_PATH" }], truncated: true });
+    expect(evidence.fragments[0].code).toContain("response . json");
+    expect(evidence.fragments[0].code.length).toBeLessThanOrEqual(4_000);
+    expect(JSON.stringify(evidence)).not.toContain("private-token");
+  });
+  it("discards token windows if a later lexical error makes the source unsupported", () => {
+    const source = `/*${"padding ".repeat(220_000)}*/function getAvailability(){return fetch('/api/availability')} /*unfinished`;
+    expect(inspect(source)).toMatchObject({ fragments: [], warnings: ["SYNTAX_UNSUPPORTED"], truncated: true });
+  });
+  it("reports a bounded scan without interpreting omitted code or exposing uninspected data", () => {
+    const source = `function getAvailability(){return fetch('/api/availability',{secret:'private-token'})}` + "0;".repeat(1_000_100);
+    const evidence = inspect(source)!;
+    expect(evidence).toMatchObject({ warnings: ["SCAN_BUDGET"], truncated: true });
+    expect(JSON.stringify(evidence)).not.toContain("private-token");
+    expect(evidence.fragments.every(fragment => fragment.projection === "TOKEN_WINDOW")).toBe(true);
+    expect(evidence.fragments.reduce((sum, fragment) => sum + fragment.code.length, 0)).toBeLessThanOrEqual(10_000);
   });
   it("deduplicates and bounds merged contexts deterministically", () => {
     const inputs = Array.from({ length: 8 }, (_, index) => inspect(`function getAvailability${index}(date){return fetch("/api/availability",{date})}`));

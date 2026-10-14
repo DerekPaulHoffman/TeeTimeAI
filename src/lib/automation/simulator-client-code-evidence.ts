@@ -1,22 +1,25 @@
 import { createHash } from "node:crypto";
-import { parse } from "acorn";
+import { parse, tokenizer, type Token } from "acorn";
 import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 
-const MAX_SOURCE_BYTES = 1_500_000;
+const MAX_SOURCE_BYTES = 16_000_000;
+const MAX_AST_SOURCE_BYTES = 1_500_000;
 const MAX_NODES = 50_000;
 const MAX_CONTEXT = 4_000;
 const MAX_CONTEXTS = 4;
 const MAX_TOTAL_CONTEXT = 10_000;
 const topic = /availab(?:ility|le)|calendar|slots/iu;
+const sensitiveName = /auth|password|secret|token|cookie|session|credential|email|phone|mobile|customer|client|user|address|contact|api[_-]?key|access[_-]?key|private[_-]?key|signature|nonce|csrf/iu;
 const functionTypes = new Set(["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"]);
 const publicLiterals = new Set(["get", "head", "post", "put", "patch", "delete", "options", "json", "application/json", "text/html",
   "read", "list", "search", "query", "availability", "reserve", "hold", "book", "purchase", "checkout", "pay", "cancel", "create", "update", "write", "release",
   "success", "error", "ok", "failed", "active", "inactive", "public", "private", "available", "unavailable", "open", "closed",
   "yyyy-mm-dd", "dd/mm/yyyy", "yyyy-mm-ddthh:mm:ss"]);
 type JsNode = { type: string; start: number; end: number; [key: string]: unknown };
-type Warning = "SOURCE_SIZE" | "AST_BUDGET" | "CONTEXT_SIZE" | "SYNTAX_UNSUPPORTED";
+type Warning = "SOURCE_SIZE" | "AST_BUDGET" | "SCAN_BUDGET" | "CONTEXT_SIZE" | "SYNTAX_UNSUPPORTED";
 type Fragment = { sourceKind: "INLINE_SCRIPT" | "EXTERNAL_SCRIPT"; sourceUrl: string; sourceSha256: string;
-  basis: "API_PATH" | "FUNCTION_NAME"; range: { start: number; end: number }; literalRedactions: number; code: string };
+  basis: "API_PATH" | "FUNCTION_NAME"; projection?: "TOKEN_WINDOW";
+  range: { start: number; end: number }; literalRedactions: number; code: string };
 export type SimulatorClientCodeEvidence = {
   version: 1; authority: "EVIDENCE_ONLY"; fragments: Fragment[]; warnings: Warning[]; truncated: boolean;
 };
@@ -75,6 +78,7 @@ export function inspectSimulatorClientCode(source: string, sourceUrl: string, so
     warnings: [warning], truncated: warning !== "SYNTAX_UNSUPPORTED" });
   if (Buffer.byteLength(source, "utf8") > MAX_SOURCE_BYTES) return empty("SOURCE_SIZE");
   if (!topic.test(source)) return;
+  if (Buffer.byteLength(source, "utf8") > MAX_AST_SOURCE_BYTES) return clientCodeTokenWindows(source, sourceUrl, sourceKind);
   const replacements: Array<{ start: number; end: number; text: string; literal: boolean }> = [];
   let root: unknown;
   try { root = parse(source, { ecmaVersion: "latest", sourceType: "module",
@@ -99,7 +103,7 @@ export function inspectSimulatorClientCode(source: string, sourceUrl: string, so
       const key = item.parent && ((["Property", "MethodDefinition"].includes(item.parent.type) && item.parent.key === node) ||
         item.parent.type === "MemberExpression" && item.parent.property === node);
       const sensitiveValue = item.parent?.type === "Property" && item.parent.value === node &&
-        /auth|password|secret|token|cookie|session|credential|email|phone|mobile|customer|client|user|address|contact/iu.test(symbol(item.parent.key));
+        sensitiveName.test(symbol(item.parent.key));
       const selector = typeof value === "string" && (/^[#.][a-z_][a-z0-9_-]{0,79}$/iu.test(value) ||
         /^(?:input|select|meta)\[name=['"]?[a-z_][a-z0-9_-]{0,79}['"]?\]$/iu.test(value));
       const keep = !sensitiveValue && typeof value === "string" && (key && /^[a-z_$][a-z0-9_$]{0,79}$/iu.test(value) ||
@@ -127,7 +131,7 @@ export function inspectSimulatorClientCode(source: string, sourceUrl: string, so
     }
   }
   // No excerpt may escape a traversal that did not inspect all its literals.
-  if (pending.length || traversalTruncated) return empty("AST_BUDGET");
+  if (pending.length || traversalTruncated) return clientCodeTokenWindows(source, sourceUrl, sourceKind, "AST_BUDGET");
   const sourceSha256 = createHash("sha256").update(source).digest("hex"), fragments: Fragment[] = [];
   let oversized = false;
   for (const [scope, detail] of scopes) {
@@ -143,6 +147,77 @@ export function inspectSimulatorClientCode(source: string, sourceUrl: string, so
   if (!fragments.length && !oversized) return;
   return mergeSimulatorClientCodeEvidence({ version: 1, authority: "EVIDENCE_ONLY", fragments,
     warnings: oversized ? ["CONTEXT_SIZE"] : [], truncated: oversized });
+}
+
+/** Large bundles are scanned without building a complete AST. Every returned
+ * token is independently redacted, so unvisited code can never leak through a
+ * partially inspected function. A window is explicitly incomplete evidence. */
+function clientCodeTokenWindows(source: string, sourceUrl: string, sourceKind: Fragment["sourceKind"], reason?: Warning): SimulatorClientCodeEvidence {
+  type LexicalToken = Token & { value?: unknown };
+  type SafeToken = { start: number; end: number; code: string; redactions: number; http: boolean };
+  type Window = { basis: Fragment["basis"]; tokens: SafeToken[]; remaining: number };
+  const ring: SafeToken[] = [], pending: Window[] = [], candidates: Window[] = [];
+  const warnings = new Set<Warning>(reason ? [reason] : []);
+  const started = performance.now(), stream = tokenizer(source, { ecmaVersion: "latest", sourceType: "module" });
+  let previous: LexicalToken | undefined, beforePrevious: LexicalToken | undefined, lastAnchor = -1000, visited = 0;
+  const value = (token: LexicalToken | undefined) => typeof token?.value === "string" ? token.value : token?.type.label ?? "";
+  const finish = (window: Window) => {
+    if (!window.tokens.some(token => token.http)) return;
+    candidates.push(window);
+    candidates.sort((left, right) => Number(right.basis === "API_PATH") - Number(left.basis === "API_PATH") || left.tokens[0].start - right.tokens[0].start);
+    if (candidates.length > 32) candidates.length = 32;
+  };
+  try {
+    let token: LexicalToken = stream.getToken();
+    while (token.type.label !== "eof") {
+      if (++visited > 2_000_000 || visited % 1024 === 0 && performance.now() - started > 2_000) { warnings.add("SCAN_BUDGET"); break; }
+      const next: LexicalToken = stream.getToken(), label = token.type.label, string = typeof token.value === "string" ? token.value : "";
+      const sensitive = [":", "="].includes(previous?.type.label ?? "") &&
+        sensitiveName.test(value(beforePrevious));
+      const key = label === "string" && next.type.label === ":" && /^[a-z_$][a-z0-9_$]{0,79}$/iu.test(string);
+      const route = label === "string" && publicRoute(string);
+      const selector = label === "string" && (/^[#.][a-z_][a-z0-9_-]{0,79}$/iu.test(string) ||
+        /^(?:input|select|meta)\[name=['"]?[a-z_][a-z0-9_-]{0,79}['"]?\]$/iu.test(string));
+      let code: string, redactions = 0;
+      if (label === "string") {
+        const keep = !sensitive && (key || route || selector || publicLiterals.has(string.toLowerCase()));
+        code = keep ? JSON.stringify(string) : '"[REDACTED_LITERAL]"'; redactions = Number(!keep);
+      } else if (["template", "invalidTemplate"].includes(label)) {
+        code = "[REDACTED_LITERAL]"; redactions = 1;
+      } else if (["num", "bigint", "regexp"].includes(label) || sensitive && ["true", "false"].includes(label)) {
+        code = "null/*REDACTED_LITERAL*/"; redactions = 1;
+      } else if (token.end - token.start > 100) {
+        code = "REDACTED_IDENTIFIER"; redactions = 1;
+      } else code = source.slice(token.start, token.end);
+      const safe: SafeToken = { start: token.start, end: token.end, code, redactions,
+        http: label === "name" && /^(?:fetch|ajax|get|post|put|patch|delete|request|open|send)$/iu.test(string) && next.type.label === "(" };
+      for (let index = pending.length - 1; index >= 0; index--) {
+        const window = pending[index]; window.tokens.push(safe);
+        if (--window.remaining <= 0) { finish(window); pending.splice(index, 1); }
+      }
+      const basis = route && topic.test(string) ? "API_PATH" : label === "name" && topic.test(string) && next.type.label === "(" ? "FUNCTION_NAME" : undefined;
+      if (basis && (visited - lastAnchor >= 16 || basis === "API_PATH") && pending.length < 8) {
+        pending.push({ basis, tokens: [...ring.slice(-64), safe], remaining: 128 }); lastAnchor = visited;
+      }
+      ring.push(safe); if (ring.length > 64) ring.shift();
+      beforePrevious = previous; previous = token; token = next;
+    }
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error;
+    return { version: 1, authority: "EVIDENCE_ONLY", fragments: [], warnings: ["SYNTAX_UNSUPPORTED"], truncated: true };
+  }
+  pending.forEach(finish);
+  const sourceSha256 = createHash("sha256").update(source).digest("hex"), fragments: Fragment[] = [];
+  for (const window of candidates) {
+    const start = window.tokens[0].start, end = window.tokens.at(-1)!.end;
+    if (fragments.some(fragment => start < fragment.range.end && end > fragment.range.start)) continue;
+    const code = window.tokens.map(token => token.code).join(" ");
+    if (code.length > MAX_CONTEXT) { warnings.add("CONTEXT_SIZE"); continue; }
+    fragments.push({ sourceKind, sourceUrl, sourceSha256, basis: window.basis, projection: "TOKEN_WINDOW",
+      range: { start, end }, literalRedactions: window.tokens.reduce((sum, token) => sum + token.redactions, 0), code });
+    if (fragments.length === MAX_CONTEXTS) break;
+  }
+  return mergeSimulatorClientCodeEvidence({ version: 1, authority: "EVIDENCE_ONLY", fragments, warnings: [...warnings], truncated: true })!;
 }
 
 export function mergeSimulatorClientCodeEvidence(...inputs: Array<SimulatorClientCodeEvidence | undefined>): SimulatorClientCodeEvidence | undefined {
