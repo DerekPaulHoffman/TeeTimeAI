@@ -185,6 +185,84 @@ function aggregateDays() {
     "2026-10-11": [], "2026-10-12": [], "2026-10-13": [] };
 }
 
+const venueRentalUrl = "https://app.acuityscheduling.com/schedule/a66e63ac";
+function venueRentalBusiness(durationMinutes = 90) {
+  const value = aggregateBusiness();
+  value.description = "Public simulator rental";
+  value.appointmentTypes[""][0].name = `${durationMinutes / 60} Hour Sim Rental`;
+  value.appointmentTypes[""][0].duration = durationMinutes;
+  return value;
+}
+function venueRentalInput(durationMinutes = 90): SimulatorAvailabilityInput {
+  return { ...aggregateInput, durationMinutes, offering: { ...aggregateInput.offering,
+    bookingUrl: venueRentalUrl, supportedDurationsMinutes: [durationMinutes] } };
+}
+
+describe("explicit simulator rentals on a venue-named calendar", () => {
+  it.each([60, 90, 120, 150, 180, 210, 240])("preserves a published %i-minute rental as opaque provider-computed stock", async durationMinutes => {
+    const value = venueRentalBusiness(durationMinutes), requestInput = venueRentalInput(durationMinutes);
+    const projected = projectAcuityPublicConfiguration(landing(value), venueRentalUrl);
+    expect(projected?.rentals).toEqual([{ id: "73234482", durationMinutes, calendarIds: ["11388341"],
+      calendarKind: "OPAQUE_AGGREGATE", aggregateRentalIdentity: "DURATION_LABELLED_SIM_RENTAL" }]);
+    expect(simulatorPublicConfigurationSchema.safeParse(projected).success).toBe(true);
+    const fetchImpl = mockReads(aggregateDays(), landing(value));
+    const result = await fetchAcuitySimulatorAvailability(requestInput, fetchImpl);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    const request = new URL(String(fetchImpl.mock.calls[1][0]));
+    expect(request.origin).toBe("https://app.acuityscheduling.com");
+    expect(request.pathname).toBe("/api/scheduling/v1/availability/times");
+    expect(request.searchParams.get("calendarId")).toBe("11388341");
+    expect(request.searchParams.get("appointmentTypeId")).toBe("73234482");
+    expect(fetchImpl.mock.calls[1][1]).toMatchObject({ method: "GET", redirect: "manual", cache: "no-store" });
+    expect(new Headers(fetchImpl.mock.calls[1][1]?.headers).has("Cookie")).toBe(false);
+    expect(new Headers(fetchImpl.mock.calls[1][1]?.headers).has("Authorization")).toBe(false);
+    expect(result.slots).toHaveLength(11);
+    expect(result.slots.every(slot => slot.resourceId === "ANY" && slot.maxPartySize === null &&
+      slot.endsAt.getTime() - slot.startsAt.getTime() === durationMinutes * 60_000)).toBe(true);
+    expect(JSON.stringify(projected)).not.toMatch(/One Golf Haven|Public simulator|Hour Sim Rental/u);
+  });
+  it("does not turn a 90-minute rental into the original one-hour demand", async () => {
+    const fetchImpl = mockReads(aggregateDays(), landing(venueRentalBusiness()));
+    const requestInput = venueRentalInput();
+    await expect(fetchAcuitySimulatorAvailability({ ...requestInput, durationMinutes: 60,
+      offering: { ...requestInput.offering, supportedDurationsMinutes: [60, 90] } }, fetchImpl))
+      .rejects.toMatchObject({ code: "UNSUPPORTED_DURATION" });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+  it.each([
+    ["staff calendar", (value: ReturnType<typeof venueRentalBusiness>) => { value.calendars[""][0].name = "Unverified staff"; }],
+    ["unsafe venue name", (value: ReturnType<typeof venueRentalBusiness>) => { value.name = "<span>Venue</span>"; value.calendars[""][0].name = value.name; }],
+    ["missing venue name", (value: ReturnType<typeof venueRentalBusiness>) => { value.name = ""; }],
+    ["calendar timezone", (value: ReturnType<typeof venueRentalBusiness>) => { value.calendars[""][0].timezone = "America/Chicago"; }],
+    ["duplicate resource", (value: ReturnType<typeof venueRentalBusiness>) => { value.calendars[""].push({ ...value.calendars[""][0] }); }],
+    ["multiple resources", (value: ReturnType<typeof venueRentalBusiness>) => { value.appointmentTypes[""][0].calendarIDs.push(11402955); value.calendars[""].push({ ...value.calendars[""][0], id: 11402955 }); }],
+    ["ambiguous rental", (value: ReturnType<typeof venueRentalBusiness>) => { value.appointmentTypes[""].push({ ...value.appointmentTypes[""][0], id: 73234483 }); }],
+    ["mismatched duration", (value: ReturnType<typeof venueRentalBusiness>) => { value.appointmentTypes[""][0].name = "1 Hour Sim Rental"; }],
+    ["lesson label", (value: ReturnType<typeof venueRentalBusiness>) => { value.appointmentTypes[""][0].name = "1.5 Hour Sim Rental Lesson"; }],
+    ["private rental", (value: ReturnType<typeof venueRentalBusiness>) => { value.appointmentTypes[""][0].private = true; }],
+    ["inactive rental", (value: ReturnType<typeof venueRentalBusiness>) => { value.appointmentTypes[""][0].active = false; }],
+    ["class rental", (value: ReturnType<typeof venueRentalBusiness>) => { value.appointmentTypes[""][0].classSize = 4; }],
+    ["quantity rental", (value: ReturnType<typeof venueRentalBusiness>) => { value.appointmentTypes[""][0].canChooseQuantity = true; }],
+    ["wrong owner", (value: ReturnType<typeof venueRentalBusiness>) => { value.ownerKey = "other123"; }],
+    ["admin-only tenant", (value: ReturnType<typeof venueRentalBusiness>) => { value.includesAdminOnly = true; }],
+  ] as const)("rejects %s before requesting availability", async (_label, mutate) => {
+    const value = venueRentalBusiness(); mutate(value);
+    expect(projectAcuityPublicConfiguration(landing(value), venueRentalUrl)).toBeUndefined();
+    const fetchImpl = mockReads(aggregateDays(), landing(value));
+    await expect(fetchAcuitySimulatorAvailability(venueRentalInput(), fetchImpl)).rejects.toBeInstanceOf(Error);
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+  it("requires the new source identity marker for fractional-hour aggregates", () => {
+    const projected = projectAcuityPublicConfiguration(landing(venueRentalBusiness()), venueRentalUrl);
+    if (!projected) throw new Error("Missing synthetic venue rental.");
+    const rental = { ...projected.rentals[0] }; delete rental.aggregateRentalIdentity;
+    expect(simulatorPublicConfigurationSchema.safeParse({ ...projected, rentals: [rental] }).success).toBe(false);
+    expect(simulatorPublicConfigurationSchema.safeParse({ ...projected,
+      rentals: [{ ...projected.rentals[0], calendarKind: undefined }] }).success).toBe(false);
+    expect(projectAcuityPublicConfiguration(landing(venueRentalBusiness(30)), venueRentalUrl)).toBeUndefined();
+  });
+});
+
 describe("Acuity public simulator availability", () => {
   it("uses the exact tenant calendar and witnessed four-day public mode for an opaque aggregate rental", async () => {
     const value = aggregateBusiness();

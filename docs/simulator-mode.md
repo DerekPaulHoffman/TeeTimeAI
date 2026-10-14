@@ -142,6 +142,15 @@ unambiguous product identity and verified named-bay calendars remain required.
 That label does not establish an unlisted shorter duration or bypass the
 responder's requested-session verification.
 
+For that exact duration-labelled public rental, one unique calendar whose safe
+normalized name equals the current tenant's venue name may use the existing
+opaque aggregate reader when its timezone also matches. It remains `ANY` stock;
+no physical bay IDs or bay counts are inferred. This source shape records
+`DURATION_LABELLED_SIM_RENTAL` separately and supports published 60–240 minute
+durations in 30-minute steps. Older aggregate records retain their whole-hour
+and explicit hourly per-bay pricing checks. A 90-minute rental cannot satisfy
+a 60-minute alert; original saved intent is unchanged.
+
 The canonical Acuity schedule may retain the exact published
 `ref=embedded_csp` marker. Reads preserve it; it is never forwarded to the
 availability API. Other, duplicate, tenant/resource-selecting or credential

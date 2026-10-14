@@ -12,7 +12,8 @@ const PUBLIC_ID = /^[1-9]\d{0,9}$/u;
 const OWNER_KEY = /^[a-zA-Z0-9]{4,40}$/u;
 const MAX_RESPONSE_BYTES = 600_000;
 type Node = DefaultTreeAdapterMap["node"];
-type PublicProduct = { id: string; calendarIds: string[]; calendarKind: "NAMED_BAY" | "OPAQUE_AGGREGATE" };
+type PublicProduct = { id: string; calendarIds: string[]; calendarKind: "NAMED_BAY" | "OPAQUE_AGGREGATE";
+  aggregateRentalIdentity?: "DURATION_LABELLED_SIM_RENTAL" };
 export type AcuityResourceIdentityDiagnostic = {
   reason: "RENTAL_CALENDARS_INVALID" | "CALENDAR_CATALOG_INVALID" | "CALENDAR_MATCH_AMBIGUOUS" |
     "CALENDAR_NAME_UNVERIFIED" | "CALENDAR_TIMEZONE_MISMATCH" |
@@ -85,9 +86,12 @@ function selectPublicRentalProduct(business: Record<string, unknown>, rentalIds:
     if (error instanceof SimulatorAvailabilityError) resourceIdentityFailures.set(error, { reason: "CALENDAR_CATALOG_INVALID" });
     throw error;
   }
-  if (aggregate && !namedBay) {
-    const businessName = normalizePlainName(business.name, 120);
-    if (!businessName || !hasExplicitHourlyPerBayPricing(business.description) || calendarIds.length !== 1 ||
+  const businessName = normalizePlainName(business.name, 120);
+  const venueRental = durationMinutes >= 60 && durationLabelledSimRental(name, durationMinutes) &&
+    calendarIds.length === 1 && businessName !== undefined && calendars.filter(item => String(item.id) === calendarIds[0]).length === 1 &&
+    calendars.some(item => String(item.id) === calendarIds[0] && !numberedBayName(item.name) && normalizePlainName(item.name, 120) === businessName);
+  if (aggregate && !namedBay || venueRental) {
+    if (!businessName || !venueRental && !hasExplicitHourlyPerBayPricing(business.description) || calendarIds.length !== 1 ||
         types.filter(item => normalizePlainName(item.name, 80) === normalizePlainName(name, 80) && item.duration === durationMinutes).length !== 1) {
       throw resourceIdentityError(sourceError("The public aggregate rental identity is not corroborated"),
         { reason: "AGGREGATE_CORROBORATION_MISSING" });
@@ -96,13 +100,14 @@ function selectPublicRentalProduct(business: Record<string, unknown>, rentalIds:
     if (matching.length !== 1 || normalizePlainName(matching[0].name, 120) !== businessName ||
         matching[0].timezone !== business.timezone) throw resourceIdentityError(
           sourceError("The public aggregate rental calendar is not the venue calendar"), { reason: "AGGREGATE_CALENDAR_MISMATCH" });
-    return { id: String(product.id), calendarIds, calendarKind: "OPAQUE_AGGREGATE" };
+    return { id: String(product.id), calendarIds, calendarKind: "OPAQUE_AGGREGATE",
+      ...(venueRental ? { aggregateRentalIdentity: "DURATION_LABELLED_SIM_RENTAL" as const } : {}) };
   }
   for (const id of calendarIds) {
     const matches = calendars.filter((item) => String(item.id) === id);
     if (matches.length !== 1) throw resourceIdentityError(sourceError("The public simulator product belongs to an unverified resource calendar"),
       { reason: "CALENDAR_MATCH_AMBIGUOUS" });
-    if (typeof matches[0].name !== "string" || !/^\s*bay\s+\d+\b/iu.test(matches[0].name)) {
+    if (!numberedBayName(matches[0].name)) {
       const name = normalizePlainName(matches[0].name, 120), venueName = normalizePlainName(business.name, 120);
       throw resourceIdentityError(sourceError("The public simulator product belongs to an unverified resource calendar"),
         { reason: "CALENDAR_NAME_UNVERIFIED", calendarNameKind: !name ? "MISSING_OR_INVALID" : venueName && name === venueName ? "VENUE_NAME" : "OTHER" });
@@ -121,6 +126,14 @@ function normalizePlainName(value: unknown, maxLength: number) {
 function namedBayRental(name: string, durationMinutes: number) {
   if (/\b(?:simulator|bay)\b/iu.test(name) && /\b(?:booking|rental|time)\b/iu.test(name) &&
       !/\b(?:league|member|lesson|fitting|handicap)\b/iu.test(name)) return true;
+  return durationLabelledSimRental(name, durationMinutes);
+}
+
+function numberedBayName(value: unknown) {
+  return typeof value === "string" && /^\s*bay\s+\d+\b/iu.test(value);
+}
+
+function durationLabelledSimRental(name: string, durationMinutes: number) {
   // An abbreviated label is corroborated by its exact published duration;
   // other uses of "sim", extra product terms and mismatched hours stay unknown.
   const hours = normalizePlainName(name, 80)?.match(/^(0\.5|[1-4](?:\.5)?) hours? sim rental$/u)?.[1];
@@ -209,7 +222,8 @@ export function inspectAcuityPublicConfiguration(html: string, sourceUrl: string
     const rentals = candidates.map(row => {
       const product = selectPublicRentalProduct(business, [String(row.id)], Number(row.duration));
       return { id: product.id, durationMinutes: Number(row.duration), calendarIds: product.calendarIds,
-        ...(product.calendarKind === "OPAQUE_AGGREGATE" ? { calendarKind: "OPAQUE_AGGREGATE" as const } : {}) };
+        ...(product.calendarKind === "OPAQUE_AGGREGATE" ? { calendarKind: "OPAQUE_AGGREGATE" as const } : {}),
+        ...(product.aggregateRentalIdentity ? { aggregateRentalIdentity: product.aggregateRentalIdentity } : {}) };
     });
     const resourceIds = [...new Set(rentals.flatMap(row => row.calendarIds))];
     const description = typeof business.description === "string" ? textContent(parse(business.description)) : "";

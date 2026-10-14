@@ -384,26 +384,32 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it.each([false, true])("persists known public rental facts with the exact owned source, embedded=%s", async embedded => {
+  it.each(["plain", "embedded", "venue-labelled"])("persists known public rental facts with the exact owned source, kind=%s", async kind => {
+    const embedded = kind === "embedded", venueLabelled = kind === "venue-labelled";
     const bookingUrl = "https://app.acuityscheduling.com/schedule/2991fba2" + (embedded ? "?ref=embedded_csp" : "");
     const f = await fixture(15, false, bookingUrl);
     const business = { id: 34536426, ownerKey: "2991fba2", timezone: "America/New_York", includesAdminOnly: false, isExpired: false,
       description: "Up to 6 People Per Bay", calendars: { "": [{ id: 11388341, name: "Bay 1", timezone: "America/New_York" }] },
       appointmentTypes: { "": [{ id: 73234482, name: "Simulator Booking 1 HR", duration: 60, active: true, private: false, type: "service", classSize: null, canChooseQuantity: false, calendarIDs: [11388341] }] },
       client: { email: "secret@example.test", token: "never-persist-this" } };
+    if (venueLabelled) {
+      Object.assign(business, { name: "Synthetic simulator" }); business.calendars[""][0].name = "Synthetic simulator";
+      business.appointmentTypes[""][0].name = "1.5 Hour Sim Rental"; business.appointmentTypes[""][0].duration = 90;
+    }
     const fetch = vi.fn(async () => new Response(`<script>var BUSINESS = ${JSON.stringify(business)};</script>`, { headers: { "content-type": "text/html" } }));
     const read = await lane.readSimulatorSupportSource({ ...f.owner, source: "booking" }, { fetch });
     expect(read.acquired).toBe(true);
     const current = await lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId });
     expect(current.revision).toBeGreaterThan(f.owner.revision);
     expect(current.research.history[0].sourceUrl).toBe(bookingUrl);
-    expect(current.research.history[0].publicConfiguration).toMatchObject({ family: "ACUITY", ownerKey: "2991fba2", rentals: [{ id: "73234482", durationMinutes: 60 }] });
+    expect(current.research.history[0].publicConfiguration).toMatchObject({ family: "ACUITY", ownerKey: "2991fba2", rentals: [{ id: "73234482", durationMinutes: venueLabelled ? 90 : 60,
+      ...(venueLabelled ? { calendarKind: "OPAQUE_AGGREGATE", aggregateRentalIdentity: "DURATION_LABELLED_SIM_RENTAL" } : {}) }] });
     expect(current.researchGuide.publicConfigurations).toMatchObject([{ source: "booking", rendered: false, configuration: { family: "ACUITY", ownerKey: "2991fba2" } }]);
     expect(current.researchGuide.readsRemaining).toBe(5);
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(String(fetch.mock.calls[0][0])).toBe(bookingUrl);
     const saved = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id }, select: { audit: true } });
-    expect(JSON.stringify(saved.audit)).not.toMatch(/never-persist-this|secret@example|Simulator Booking|CLIENT_INFO/u);
+    expect(JSON.stringify(saved.audit)).not.toMatch(/never-persist-this|secret@example|Simulator Booking|Hour Sim Rental|Synthetic simulator|CLIENT_INFO/u);
     expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
   });
   it("retains a closed resource rejection in owned evidence without accepting a calendar or changing demand", async () => {
