@@ -14,6 +14,7 @@ import { tagSimulatorResearchFailure, tagSimulatorResearchResourceKind, type Sim
   type SimulatorResearchResourceKind } from "./simulator-support-failure";
 import { createBlockedResourceDiagnostics, simulatorCredentialHeaderKind, summarizeBlockedRequestBody, type SimulatorBlockedResourceDiagnostic } from "./simulator-blocked-resources";
 import { declaredSimulatorScriptSource, summarizeSimulatorPageSurfaces, type SimulatorPageSurfaces } from "./simulator-page-surfaces";
+import { literalPublicScriptImports } from "./simulator-script-imports";
 
 const MAX_BODY_BYTES = 1_500_000;
 const MAX_RENDER_BYTES = 16_000_000;
@@ -727,6 +728,13 @@ function blockedRequestPathShape(url: URL) {
 function publicAssetDestinations(html: string, sourceUrl: string) {
   const assets = new Set<string>();
   let hasDeferredScripts = false;
+  const add = (value: string) => {
+    try {
+      const url = publicUrl(new URL(value, sourceUrl).href);
+      if (!/captcha|challenge|turnstile|cdn-cgi/iu.test(`${url.hostname}${url.pathname}`) &&
+          !sameOfficialHost(sourceUrl, url.href) && assets.size < 20) assets.add(url.href);
+    } catch { /* Untrusted resource declarations cannot expand request authority. */ }
+  };
   const visit = (node: PublicNode) => {
     if (node.tagName && ["template", "noscript"].includes(node.tagName)) return;
     const attrs = node.attrs ?? [];
@@ -737,10 +745,14 @@ function publicAssetDestinations(html: string, sourceUrl: string) {
       if (!/captcha|challenge|turnstile|cdn-cgi/iu.test(`${url.hostname}${url.pathname}`)) {
         // Same-site resources already have request authority. They must not
         // consume the bounded allowance for exact external declarations.
-        if (!sameOfficialHost(sourceUrl, url.href) && assets.size < 20) assets.add(url.href);
+        add(url.href);
         if (script?.deferred) hasDeferredScripts = true;
       }
     } catch { /* Untrusted resource declarations cannot expand request authority. */ } }
+    const scriptType = attrs.find(attr => attr.name === "type")?.value.trim().toLowerCase();
+    if (script && !script.value && (!scriptType || scriptType === "module" || /^(?:text|application)\/(?:java|ecma)script$/u.test(scriptType))) {
+      for (const dependency of literalPublicScriptImports((node.childNodes ?? []).map(child => child.value ?? "").join(""), sourceUrl)) add(dependency);
+    }
     for (const child of node.childNodes ?? []) visit(child);
   };
   visit(parse(html));
@@ -1124,6 +1136,12 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
               for (const asset of declared.urls) assets.set(asset, asset);
               hasDeferredScripts = declared.hasDeferredScripts;
               contractSlug ??= publishedYourGolfBookingSlug(response.body.toString("utf8"), response.url);
+            }
+            if (kind === "script" && response.status >= 200 && response.status < 300 && /(?:javascript|ecmascript)/iu.test(response.contentType)) {
+              for (const dependency of literalPublicScriptImports(response.body.toString("utf8"), response.url)) {
+                if (!sameOfficialHost(requestedUrl, dependency) && !assets.has(dependency) && new Set(assets.values()).size < 20)
+                  assets.set(dependency, dependency);
+              }
             }
             if (["xhr", "fetch"].includes(kind) && response.contentType.includes("application/json") && responseContracts.length < 8) {
               try { responseContracts.push({ ...contractPath(url), httpStatus: response.status, shape: summarizeSimulatorPublicJsonShape(JSON.parse(response.body.toString("utf8"))) }); } catch { /* Invalid JSON is not a contract. */ }

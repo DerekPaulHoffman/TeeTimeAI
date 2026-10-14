@@ -80,6 +80,8 @@ Blocked cross-origin XHR/fetch requests may include the same value-free body-sha
 
 Browser redirects remain inside the owned transport: a main redirect is followed by an explicit validated navigation, while secondary redirects are fetched and fulfilled without forwarding the redirect response to Chromium. Every hop consumes the existing request/byte budget and keeps the URL, credential and redirect limits. This is transport evidence, not a new booking or access authority.
 
+Literal import and re-export URLs in an admitted public script can declare exact script dependencies within the same twenty-external-asset allowance. The collector parses bounded source without evaluation; package names, computed imports, unsafe/challenge URLs and credential-bearing destinations are excluded. An import never authorizes a data request, POST, unrelated URL or broader host access.
+
 After every settled source-read, retain its returned revision and read the fresh researchGuide with this exact command:
 
 & 'C:\Program Files\nodejs\node.exe' scripts/automation/course-support-worker-runtime.mjs production --selected-checkout <selected-checkout> --script automation:simulator-support -- inspect --assignment-ref <assignment-ref>

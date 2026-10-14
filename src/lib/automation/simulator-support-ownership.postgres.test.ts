@@ -1031,14 +1031,16 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
   });
 
-  it("records a browser-created public script under the original owner without changing demand", async () => {
-    const target = "https://official.example.test/booking", asset = "https://assets.example.test/late-widget.js";
+  it.each(["DOM", "MODULE"])("records a public %s script under the original owner without changing demand", async mode => {
+    const target = "https://official.example.test/booking", asset = "https://assets.example.test/late-widget.js", entry = "https://assets.example.test/main.js";
     const f = await fixture(15, false, target);
     const before = await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } });
-    const html = `<html><body><h1>Public booking</h1><div id="calendar"></div><script>
-      const element=document.createElement('script');element.src='${asset}';document.body.appendChild(element);</script></body></html>`;
+    const html = `<html><body><h1>Public booking</h1><div id="calendar"></div>${mode === "MODULE"
+      ? `<script type='module' src='${entry}'></script>`
+      : `<script>const element=document.createElement('script');element.src='${asset}';document.body.appendChild(element);</script>`}</body></html>`;
     const fetch = vi.fn(async (url: unknown) => String(url) === target ? new Response(html, { headers: { "content-type": "text/html" } })
-      : new Response("document.getElementById('calendar').innerHTML='<a href=\"https://calendar.example.test/public\">Book a bay</a>';", { headers: { "content-type": "text/javascript" } }));
+      : new Response(String(url) === entry ? "import './late-widget.js';"
+        : "document.getElementById('calendar').innerHTML='<a href=\"https://calendar.example.test/public\">Book a bay</a>';", { headers: { "content-type": "text/javascript" } }));
     const lease = (async (_host: string, worker: () => Promise<unknown>) => ({ acquired: true as const, value: await worker() })) as
       NonNullable<import("./simulator-support-research").SimulatorResearchDependencies["lease"]>;
     const read = await lane.readSimulatorSupportSource({ ...f.owner, source: "booking", rendered: true }, {
@@ -1051,7 +1053,7 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(claim.research.history[0]).toMatchObject({ researchImplementationVersion: SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION,
       rendered: true, outcome: "READ", publicReadEvidence: { renderComplete: true, accessControls: [] } });
     expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(before);
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(mode === "MODULE" ? 3 : 2);
     expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
   });
 

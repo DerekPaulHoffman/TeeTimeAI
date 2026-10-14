@@ -201,6 +201,40 @@ describe("owned known-reader public configuration", () => {
 });
 
 describe("bounded owned simulator public research transport", () => {
+  it("loads literal module dependencies declared by an admitted public script", async () => {
+    const root = `${source}/`, entry = "https://modules.example.test/main.js", dependency = "https://modules.example.test/calendar.js";
+    const fetch = vi.fn(async (url: unknown) => String(url) === root
+      ? response(`<html><body><div id='calendar'></div><script type='module' src='${entry}'></script></body></html>`)
+      : String(url) === entry ? response("import { render } from './calendar.js'; render();", 200, "text/javascript")
+        : response("export function render(){document.getElementById('calendar').textContent='Public module calendar';}", 200, "text/javascript"));
+    const result = await collectSimulatorSupportResearch({ url: root, render: true }, {
+      fetch, lease, browser: async () => chromium.launch({ headless: true }),
+    });
+    expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([root, entry, dependency]);
+    expect(result).toMatchObject({ text: "Public module calendar", renderComplete: true });
+  }, 15_000);
+  it("does not turn an imported script URL into cross-origin data authority", async () => {
+    const entry = "https://modules.example.test/main.js", dependency = "https://modules.example.test/calendar.js";
+    const html = `<script type='module' src='${entry}'></script>`;
+    const view = renderedBrowser([{ url: `${source}/` }, { url: entry, kind: "script" }, { url: dependency, kind: "fetch" }], html);
+    const fetch = vi.fn(async (url: unknown) => String(url) === `${source}/` ? response(html)
+      : response("import './calendar.js';", 200, "text/javascript"));
+    const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(result.blockedResourceDiagnostics).toContainEqual(expect.objectContaining({ resourceKind: "FETCH", reason: "UNSCOPED_DESTINATION" }));
+  });
+  it("keeps literal imports inside the shared twenty-external-asset allowance", async () => {
+    const entry = "https://modules.example.test/main.js";
+    const dependencies = Array.from({ length: 21 }, (_, index) => `https://modules.example.test/module-${index}.js`);
+    const html = `<script type='module' src='${entry}'></script>`;
+    const view = renderedBrowser([{ url: `${source}/` }, { url: entry, kind: "script" },
+      ...dependencies.map(url => ({ url, kind: "script" }))], html);
+    const fetch = vi.fn(async (url: unknown) => String(url) === `${source}/` ? response(html)
+      : response(String(url) === entry ? dependencies.map(url => `import '${url}';`).join("\n") : "/* public module */", 200, "text/javascript"));
+    const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
+    expect(fetch).toHaveBeenCalledTimes(21);
+    expect(result.blockedRequests).toBe(2);
+  });
   it.each([200, 403])("owns every main redirect hop before rendering HTTP %i", async status => {
     const root = `${source}/start`, landing = `${source}/public/scheduler`;
     const browserRequests: Array<{ url: string; redirected: boolean }> = [];
