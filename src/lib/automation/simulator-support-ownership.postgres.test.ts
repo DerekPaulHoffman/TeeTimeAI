@@ -1058,6 +1058,7 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
   it("keeps the exact fresh booking handoff available for rendering when its plain page has no links", async () => {
     const f = await fixture();
     const target = "https://scheduler.example.test/opaque?venue=public";
+    const effective = "https://scheduler.example.test/public/schedule";
     const before = await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } });
     const first = await lane.readSimulatorSupportSource({ ...f.owner, source: "official" }, {
       fetch: vi.fn(async () => new Response(`<a href='${target}'>Book Online</a>`, { headers: { "content-type": "text/html" } })),
@@ -1065,7 +1066,9 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     if (!first.acquired) throw new Error("Initial handoff unavailable.");
     const firstClaim = await lane.readSimulatorSupportClaim({ ...f.owner, revision: first.value.revision });
     const originalRole = firstClaim.research.bookingLinkRoles?.[0];
-    const fetch = vi.fn(async () => new Response("<h1>Public scheduler shell</h1>", { headers: { "content-type": "text/html" } }));
+    const fetch = vi.fn(async (url: unknown) => String(url) === target
+      ? new Response(null, { status: 302, headers: { location: effective } })
+      : new Response("<h1>Public scheduler shell</h1>", { headers: { "content-type": "text/html" } }));
     const plain = await lane.readSimulatorSupportSource({ ...f.owner, revision: first.value.revision, linkIndex: 1 }, { fetch });
     if (!plain.acquired) throw new Error("Plain handoff unavailable.");
     expect(plain.value.publicSource.links).toEqual([]);
@@ -1087,7 +1090,7 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     const renderedClaim = await lane.readSimulatorSupportClaim({ ...owner, revision: rendered.value.revision });
     expect(renderedClaim.research.history.at(-1)?.failure).toBeUndefined();
     expect(renderedClaim.research.history.at(-1)).toMatchObject({ outcome: "READ" });
-    expect(rendered.value.publicSource).toMatchObject({ method: "BROWSER", httpStatus: 200, renderComplete: true });
+    expect(rendered.value.publicSource).toMatchObject({ method: "BROWSER", url: effective, httpStatus: 200, renderComplete: true });
     expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(before);
     expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
   });

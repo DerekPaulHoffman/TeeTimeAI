@@ -78,6 +78,8 @@ A successful plain read of a fresh booking or venue-role link retains that exact
 
 Blocked cross-origin XHR/fetch requests may include the same value-free body-shape summary as same-site requests only when their destination is public and safe, is not a challenge route, and their observed headers contain no credential class. JSON/form field classes and lexical operation hints, including camel-case names, are diagnostic only. They never authorize a POST, establish read-only server semantics, expose payload values or prove public monitoring support.
 
+Browser redirects remain inside the owned transport: a main redirect is followed by an explicit validated navigation, while secondary redirects are fetched and fulfilled without forwarding the redirect response to Chromium. Every hop consumes the existing request/byte budget and keeps the URL, credential and redirect limits. This is transport evidence, not a new booking or access authority.
+
 After every settled source-read, retain its returned revision and read the fresh researchGuide with this exact command:
 
 & 'C:\Program Files\nodejs\node.exe' scripts/automation/course-support-worker-runtime.mjs production --selected-checkout <selected-checkout> --script automation:simulator-support -- inspect --assignment-ref <assignment-ref>

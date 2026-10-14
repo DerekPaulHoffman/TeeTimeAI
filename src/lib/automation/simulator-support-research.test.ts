@@ -201,6 +201,96 @@ describe("owned known-reader public configuration", () => {
 });
 
 describe("bounded owned simulator public research transport", () => {
+  it.each([200, 403])("owns every main redirect hop before rendering HTTP %i", async status => {
+    const root = `${source}/start`, landing = `${source}/public/scheduler`;
+    const browserRequests: Array<{ url: string; redirected: boolean }> = [];
+    const fetch = vi.fn(async (url: unknown) => String(url) === root
+      ? new Response(null, { status: 302, headers: { location: landing } })
+      : response("<h1>Public scheduler</h1>", status));
+    const result = await collectSimulatorSupportResearch({ url: root, render: true }, { fetch, lease,
+      browser: async () => {
+        const browser = await chromium.launch({ headless: true });
+        return { newContext: async options => {
+          const context = await browser.newContext(options);
+          context.on("request", request => browserRequests.push({ url: request.url(), redirected: Boolean(request.redirectedFrom()) }));
+          return context;
+        }, close: () => browser.close() };
+      },
+    });
+    expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([root, landing]);
+    expect(browserRequests).toEqual([{ url: root, redirected: false }, { url: landing, redirected: false }]);
+    expect(result).toMatchObject({ requestedUrl: root, url: landing, httpStatus: status, admittedRequests: 2 });
+  }, 15_000);
+
+  it("owns redirected public script reads without giving Chromium a redirect response", async () => {
+    const root = `${source}/`, script = `${source}/loader.js`, target = `${source}/assets/widget.js`;
+    const requests: string[] = [];
+    const fetch = vi.fn(async (url: unknown) => String(url) === root
+      ? response(`<html><body><div id='calendar'></div><script src='${script}'></script></body></html>`)
+      : String(url) === script ? new Response(null, { status: 302, headers: { location: target } })
+        : response("document.getElementById('calendar').textContent='Public widget loaded';", 200, "text/javascript"));
+    const result = await collectSimulatorSupportResearch({ url: root, render: true }, { fetch, lease,
+      browser: async () => {
+        const browser = await chromium.launch({ headless: true });
+        return { newContext: async options => {
+          const context = await browser.newContext(options);
+          context.on("request", request => requests.push(request.url()));
+          return context;
+        }, close: () => browser.close() };
+      },
+    });
+    expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([root, script, target]);
+    expect(requests).toEqual([root, script]);
+    expect(result).toMatchObject({ text: "Public widget loaded", admittedRequests: 3, renderComplete: true });
+  }, 15_000);
+
+  it("keeps a rendered main redirect loop bounded to five owned reads", async () => {
+    const root = `${source}/start`;
+    const fetch = vi.fn(async (url: unknown) => new Response(null, { status: 302,
+      headers: { location: `${source}/next-${new URL(String(url)).pathname.replace(/\//gu, "")}` } }));
+    await expect(collectSimulatorSupportResearch({ url: root, render: true }, {
+      fetch, lease, browser: async () => chromium.launch({ headless: true }),
+    })).rejects.toThrow("REDIRECT_LIMIT");
+    expect(fetch).toHaveBeenCalledTimes(5);
+  }, 15_000);
+
+  it("counts redirected asset reads against the existing shared request limit", async () => {
+    const chain = `${source}/chain.js`, next = `${source}/chain-next.js`;
+    const requests = [{ url: `${source}/` },
+      ...Array.from({ length: 61 }, (_, index) => ({ url: `${source}/asset-${index}.js`, kind: "script" })),
+      { url: chain, kind: "script" }];
+    const view = renderedBrowser(requests, "<h1>Unproven browser output</h1>");
+    const fetch = vi.fn(async (url: unknown) => String(url) === `${source}/` ? response("<h1>Public main</h1>")
+      : [chain, next].includes(String(url)) ? new Response(null, { status: 302, headers: { location: next } })
+        : response("/* public script */", 200, "text/javascript"));
+    const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
+    expect(fetch).toHaveBeenCalledTimes(64);
+    expect(result).toMatchObject({ admittedRequests: 64, renderComplete: false, renderWarning: "SECONDARY_REQUEST_BUDGET_EXHAUSTED" });
+    expect(result.text).toBe("Public main");
+    expect(view.routes.at(-1)?.abort).toHaveBeenCalledOnce();
+  });
+
+  it("does not hide an unrelated navigation error behind a pending redirect", async () => {
+    const root = `${source}/`, landing = `${source}/landing`;
+    const view = renderedBrowser([{ url: root }]);
+    const originalGoto = view.page.goto.getMockImplementation()!;
+    const failure = new Error("Unrelated navigation invariant");
+    view.page.goto.mockImplementation(async () => { await originalGoto(); throw failure; });
+    const fetch = vi.fn(async () => new Response(null, { status: 302, headers: { location: landing } }));
+    await expect(collectSimulatorSupportResearch({ url: root, render: true }, { fetch, lease, browser: view.factory }))
+      .rejects.toBe(failure);
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it.each(["http://127.0.0.1/private", `${source}/login`, "https://elsewhere.example.test/private"])(
+    "rejects a rendered main redirect to %s before a second request", async location => {
+      const fetch = vi.fn(async () => new Response(null, { status: 302, headers: { location } }));
+      await expect(collectSimulatorSupportResearch({ url: `${source}/`, render: true }, {
+        fetch, lease, browser: async () => chromium.launch({ headless: true }),
+      })).rejects.toThrow(/UNSAFE_URL|DESTINATION_CHANGED/u);
+      expect(fetch).toHaveBeenCalledOnce();
+    }, 15_000);
+
   it("loads an exact public script declared by the browser after the initial document", async () => {
     const root = `${source}/`, asset = "https://assets.example.test/late-calendar.js";
     const html = `<html><body><h1>Public booking</h1><div id="calendar"></div><script>

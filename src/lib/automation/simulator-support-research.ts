@@ -888,6 +888,8 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
   const activeRoutes = new Set<Promise<void>>();
   let renderedReadTail: Promise<unknown> = Promise.resolve();
   let page: ResearchPage | undefined;
+  let pendingMainRedirect: { from: string; to: string } | undefined;
+  const getPendingMainRedirect = (): { from: string; to: string } | undefined => pendingMainRedirect;
   const accessControls = new Set<NonNullable<SimulatorResearchResult["accessControls"]>[number]>();
   const responseContracts: NonNullable<SimulatorResearchResult["responseContracts"]> = [];
   const assets = new Map<string, string>();
@@ -1073,39 +1075,62 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
           const publicHeaders: Record<string, string> = {};
           for (const key of ["accept", "accept-language", "user-agent"]) if (headers.has(key)) publicHeaders[key] = headers.get(key)!;
           if (headers.get("origin") === new URL(navigation?.url ?? requestedUrl).origin) publicHeaders.origin = headers.get("origin")!;
-          const response = await readRendered(resourceKind, (kind === "script" || kind === "stylesheet") && !request.isNavigationRequest(),
-            url.href, request.method() as "GET" | "HEAD", publicHeaders,
-            assetRoot ?? (occupancy ? url.href : requestedUrl), occupancy ? target => publicOccupancyUrl(target, contractSlug) : undefined)
-            .catch(error => { throw tagSimulatorResearchResourceKind(error, resourceKind); });
-          if (response === cappedSecondaryAsset || response === rejectedSecondaryStylesheet || response === skippedAfterTerminalMain) {
-            if (response === skippedAfterTerminalMain) {
-              requestCount -= 1;
-              if (!staticAsset) nonAssetRequestCount -= 1;
+          let fetchUrl = url.href;
+          for (let redirects = 0; ; redirects += 1) {
+            const response = await readRendered(resourceKind, (kind === "script" || kind === "stylesheet") && !request.isNavigationRequest(),
+              fetchUrl, request.method() as "GET" | "HEAD", publicHeaders,
+              assetRoot ?? (occupancy ? url.href : requestedUrl), occupancy ? target => publicOccupancyUrl(target, contractSlug) : undefined)
+              .catch(error => { throw tagSimulatorResearchResourceKind(error, resourceKind); });
+            if (response === cappedSecondaryAsset || response === rejectedSecondaryStylesheet || response === skippedAfterTerminalMain) {
+              if (response === skippedAfterTerminalMain) {
+                requestCount -= 1;
+                if (!staticAsset) nonAssetRequestCount -= 1;
+              }
+              blockedRequests += 1;
+              await route.abort("blockedbyclient");
+              return;
             }
-            blockedRequests += 1;
-            await route.abort("blockedbyclient");
+            if (response.location) {
+              if (assetRoot) assets.set(response.location, assetRoot);
+              if (request.isNavigationRequest() && request.frame() === page?.mainFrame()) {
+                navigation = response;
+                pendingMainRedirect = { from: url.href, to: response.location };
+                // Chromium does not route every redirect hop back through this
+                // callback. Abort this hop and navigate explicitly after it settles.
+                await route.abort("aborted");
+                return;
+              }
+              if (redirects >= 4) throw new Error("SIMULATOR_RESEARCH_REDIRECT_LIMIT");
+              if (requestCount >= MAX_RENDER_REQUESTS || !staticAsset && nonAssetRequestCount >= MAX_REQUESTS) {
+                blockedResources.record({ url: response.location, kind, method, reason: "REQUEST_BUDGET", originRelation });
+                secondaryBudgetExhausted = true; blockedRequests += 1; await route.abort("blockedbyclient"); return;
+              }
+              requestCount += 1;
+              if (!staticAsset) nonAssetRequestCount += 1;
+              fetchUrl = response.location;
+              continue;
+            }
+            if (request.isNavigationRequest() && request.frame() === page?.mainFrame()) navigation = response;
+            const terminalMain = !safeMainDocument && request.isNavigationRequest() && request.frame() === page?.mainFrame() && response.status >= 400 && response.status <= 599;
+            if (terminalMain) terminalMainDocument = { ...response, observedAt: now() };
+            const controls = /^(?:text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(response.contentType) ? detectSimulatorResearchAccessControls(response.body.toString("utf8")) : [];
+            controls.forEach(control => accessControls.add(control));
+            if (terminalMain) { await route.fulfill({ status: response.status, body: "", headers: { "content-type": "text/plain" } }); return; }
+            if (controls.length) { await route.fulfill({ status: response.status, body: "Public source requires interactive access.", headers: { "content-type": "text/plain" } }); return; }
+            if (!assetsObserved && request.isNavigationRequest() && request.frame() === page?.mainFrame() && response.status >= 200 && response.status < 300 && /^(?:text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(response.contentType)) {
+              assetsObserved = true;
+              safeMainDocument = { ...response, observedAt: now() };
+              const declared = publicAssetDestinations(response.body.toString("utf8"), response.url);
+              for (const asset of declared.urls) assets.set(asset, asset);
+              hasDeferredScripts = declared.hasDeferredScripts;
+              contractSlug ??= publishedYourGolfBookingSlug(response.body.toString("utf8"), response.url);
+            }
+            if (["xhr", "fetch"].includes(kind) && response.contentType.includes("application/json") && responseContracts.length < 8) {
+              try { responseContracts.push({ ...contractPath(url), httpStatus: response.status, shape: summarizeSimulatorPublicJsonShape(JSON.parse(response.body.toString("utf8"))) }); } catch { /* Invalid JSON is not a contract. */ }
+            }
+            await route.fulfill({ status: response.status, body: response.body, headers: { "content-type": response.contentType, ...(response.publicCors ? { "access-control-allow-origin": response.publicCors } : {}) } });
             return;
           }
-          if (assetRoot && response.location) assets.set(response.location, assetRoot);
-          if (request.isNavigationRequest() && request.frame() === page?.mainFrame()) navigation = response;
-          const terminalMain = !safeMainDocument && request.isNavigationRequest() && request.frame() === page?.mainFrame() && response.status >= 400 && response.status <= 599;
-          if (terminalMain) terminalMainDocument = { ...response, observedAt: now() };
-          const controls = /^(?:text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(response.contentType) ? detectSimulatorResearchAccessControls(response.body.toString("utf8")) : [];
-          controls.forEach(control => accessControls.add(control));
-          if (terminalMain) { await route.fulfill({ status: response.status, body: "", headers: { "content-type": "text/plain" } }); return; }
-          if (controls.length) { await route.fulfill({ status: response.status, body: "Public source requires interactive access.", headers: { "content-type": "text/plain" } }); return; }
-          if (!assetsObserved && request.isNavigationRequest() && request.frame() === page?.mainFrame() && response.status >= 200 && response.status < 300 && /^(?:text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(response.contentType)) {
-            assetsObserved = true;
-            safeMainDocument = { ...response, observedAt: now() };
-            const declared = publicAssetDestinations(response.body.toString("utf8"), response.url);
-            for (const asset of declared.urls) assets.set(asset, asset);
-            hasDeferredScripts = declared.hasDeferredScripts;
-            contractSlug ??= publishedYourGolfBookingSlug(response.body.toString("utf8"), response.url);
-          }
-          if (["xhr", "fetch"].includes(kind) && response.contentType.includes("application/json") && responseContracts.length < 8) {
-            try { responseContracts.push({ ...contractPath(url), httpStatus: response.status, shape: summarizeSimulatorPublicJsonShape(JSON.parse(response.body.toString("utf8"))) }); } catch { /* Invalid JSON is not a contract. */ }
-          }
-          await route.fulfill({ status: response.status, body: response.body, headers: { "content-type": response.contentType, ...(response.location ? { location: response.location } : {}), ...(response.publicCors ? { "access-control-allow-origin": response.publicCors } : {}) } });
         } catch (error) {
           if (isOwnedUnsafeUrlError(error)) {
             blockedResources.record({ url: request.url(), kind: request.resourceType(), method: request.method(), reason: "UNSAFE_URL", originRelation: "UNKNOWN", ...blockedBodyShape() });
@@ -1127,22 +1152,40 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
     let response: Awaited<ReturnType<ResearchPage["goto"]>>;
     // Load includes asynchronous scripts created during initial parsing;
     // DOMContentLoaded alone can precede even their first intercepted request.
-    try { response = await beforeDeadline(page.goto(requestedUrl, { waitUntil: "load", timeout: RENDER_DEADLINE_MS }), deadline); }
-    catch (error) {
-      if (hasRouteFailure) throw routeFailure;
-      const expectedIncomplete = error instanceof Error && (error.name === "TimeoutError" || error.message === "SIMULATOR_RESEARCH_DEADLINE" || /^page\.goto: net::ERR_(?:ABORTED|BLOCKED_BY_CLIENT)\b/u.test(error.message));
-      if (terminalMainDocument && expectedIncomplete) {
+    let navigationTarget = requestedUrl;
+    for (let redirects = 0; ; redirects += 1) {
+      pendingMainRedirect = undefined;
+      try { response = await beforeDeadline(page.goto(navigationTarget, { waitUntil: "load", timeout: RENDER_DEADLINE_MS }), deadline); }
+      catch (error) {
+        if (hasRouteFailure) throw routeFailure;
+        const redirect = getPendingMainRedirect();
+        if (redirect?.from === navigationTarget && error instanceof Error &&
+            /^page\.goto: net::ERR_(?:ABORTED|FAILED|BLOCKED_BY_CLIENT)\b/u.test(error.message)) {
+          if (redirects >= 4) throw new Error("SIMULATOR_RESEARCH_REDIRECT_LIMIT");
+          navigationTarget = redirect.to;
+          continue;
+        }
+        const expectedIncomplete = error instanceof Error && (error.name === "TimeoutError" || error.message === "SIMULATOR_RESEARCH_DEADLINE" || /^page\.goto: net::ERR_(?:ABORTED|BLOCKED_BY_CLIENT)\b/u.test(error.message));
+        if (terminalMainDocument && expectedIncomplete) {
+          await settleStartedRoutes();
+          if (hasRouteFailure) throw routeFailure;
+          return terminalMainObservation();
+        }
+        // A tooling bound or owned stylesheet rejection can preserve public HTTP facts. It cannot
+        // turn an unrelated browser, parser, authority or lease failure into evidence.
+        if (!(secondaryBudgetExhausted || secondaryAssetBodyLimitExceeded || secondaryStylesheetUrlRejected) || !safeMainDocument || (accessControls.size && !secondaryStylesheetUrlRejected) || !expectedIncomplete) throw tagSimulatorResearchFailure(error, "BROWSER_NAVIGATION");
         await settleStartedRoutes();
         if (hasRouteFailure) throw routeFailure;
-        return terminalMainObservation();
+        if (accessControls.size) return { requestedUrl, url: safeMainDocument.url, observedAt: now().toISOString(), httpStatus: safeMainDocument.status, text: "", links: [], method: "BROWSER", accessControls: [...accessControls], blockedRequests, admittedRequests: requestCount, renderComplete: false, contentProvenance: "MAIN_DOCUMENT_HTTP" };
+        return partialMainDocument(secondaryStylesheetUrlRejected ? "SECONDARY_STYLESHEET_URL_REJECTED" : secondaryAssetBodyLimitExceeded ? "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED" : "SECONDARY_REQUEST_BUDGET_EXHAUSTED");
       }
-      // A tooling bound or owned stylesheet rejection can preserve public HTTP facts. It cannot
-      // turn an unrelated browser, parser, authority or lease failure into evidence.
-      if (!(secondaryBudgetExhausted || secondaryAssetBodyLimitExceeded || secondaryStylesheetUrlRejected) || !safeMainDocument || (accessControls.size && !secondaryStylesheetUrlRejected) || !expectedIncomplete) throw tagSimulatorResearchFailure(error, "BROWSER_NAVIGATION");
-      await settleStartedRoutes();
-      if (hasRouteFailure) throw routeFailure;
-      if (accessControls.size) return { requestedUrl, url: safeMainDocument.url, observedAt: now().toISOString(), httpStatus: safeMainDocument.status, text: "", links: [], method: "BROWSER", accessControls: [...accessControls], blockedRequests, admittedRequests: requestCount, renderComplete: false, contentProvenance: "MAIN_DOCUMENT_HTTP" };
-      return partialMainDocument(secondaryStylesheetUrlRejected ? "SECONDARY_STYLESHEET_URL_REJECTED" : secondaryAssetBodyLimitExceeded ? "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED" : "SECONDARY_REQUEST_BUDGET_EXHAUSTED");
+      const redirect = getPendingMainRedirect();
+      if (redirect?.from === navigationTarget && navigation?.url !== redirect.to) {
+        if (redirects >= 4) throw new Error("SIMULATOR_RESEARCH_REDIRECT_LIMIT");
+        navigationTarget = redirect.to;
+        continue;
+      }
+      break;
     }
     await settleStartedRoutes();
     if (hasRouteFailure) throw routeFailure;
