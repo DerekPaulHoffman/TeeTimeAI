@@ -1028,6 +1028,59 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
   });
 
+  it("keeps the exact fresh booking handoff available for rendering when its plain page has no links", async () => {
+    const f = await fixture();
+    const target = "https://scheduler.example.test/opaque?venue=public";
+    const before = await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } });
+    const first = await lane.readSimulatorSupportSource({ ...f.owner, source: "official" }, {
+      fetch: vi.fn(async () => new Response(`<a href='${target}'>Book Online</a>`, { headers: { "content-type": "text/html" } })),
+    });
+    if (!first.acquired) throw new Error("Initial handoff unavailable.");
+    const firstClaim = await lane.readSimulatorSupportClaim({ ...f.owner, revision: first.value.revision });
+    const originalRole = firstClaim.research.bookingLinkRoles?.[0];
+    const fetch = vi.fn(async () => new Response("<h1>Public scheduler shell</h1>", { headers: { "content-type": "text/html" } }));
+    const plain = await lane.readSimulatorSupportSource({ ...f.owner, revision: first.value.revision, linkIndex: 1 }, { fetch });
+    if (!plain.acquired) throw new Error("Plain handoff unavailable.");
+    expect(plain.value.publicSource.links).toEqual([]);
+    const owner = { ...f.owner, revision: plain.value.revision };
+    const claim = await lane.readSimulatorSupportClaim(owner);
+    expect(claim.research).toMatchObject({ links: [target], bookingLinks: [target], bookingLinkRoles: [originalRole], readCount: 2 });
+    expect(claim.researchGuide.suggestedReads).toContainEqual({ linkIndex: 1, rendered: true });
+    expect(claim.researchGuide.suggestedReads).not.toContainEqual({ linkIndex: 1, rendered: false });
+    const retry = await lane.retrySimulatorSupport({ ...owner, retryMinutes: 60 });
+    if (!retry.acquired) throw new Error("Owned retry unavailable.");
+    expect(retry.value).toMatchObject({ outcome: "booking_research_required", revision: owner.revision,
+      nextEligibleBookingRead: { linkIndex: 1, rendered: true } });
+    const lease = (async (_host: string, worker: () => Promise<unknown>) => ({ acquired: true as const, value: await worker() })) as
+      NonNullable<import("./simulator-support-research").SimulatorResearchDependencies["lease"]>;
+    const rendered = await lane.readSimulatorSupportSource({ ...owner, linkIndex: 1, rendered: true }, {
+      fetch, lease, browser: async () => chromium.launch({ headless: true }),
+    });
+    if (!rendered.acquired) throw new Error("Rendered handoff unavailable.");
+    const renderedClaim = await lane.readSimulatorSupportClaim({ ...owner, revision: rendered.value.revision });
+    expect(renderedClaim.research.history.at(-1)?.failure).toBeUndefined();
+    expect(renderedClaim.research.history.at(-1)).toMatchObject({ outcome: "READ" });
+    expect(rendered.value.publicSource).toMatchObject({ method: "BROWSER", httpStatus: 200, renderComplete: true });
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(before);
+    expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
+  });
+
+  it.each(["unlabelled", "challenged"])("does not retain a %s link as a booking handoff", async kind => {
+    const f = await fixture();
+    const target = kind === "unlabelled" ? "https://official.example.test/details" : "https://scheduler.example.test/opaque";
+    const first = await lane.readSimulatorSupportSource({ ...f.owner, source: "official" }, {
+      fetch: vi.fn(async () => new Response(`<a href='${target}'>${kind === "unlabelled" ? "Details" : "Book Online"}</a>`, { headers: { "content-type": "text/html" } })),
+    });
+    if (!first.acquired) throw new Error("Initial link unavailable.");
+    const second = await lane.readSimulatorSupportSource({ ...f.owner, revision: first.value.revision, linkIndex: 1 }, {
+      fetch: vi.fn(async () => new Response(kind === "challenged" ? "<h1>Verify you are human</h1>" : "<h1>Public details</h1>", { headers: { "content-type": "text/html" } })),
+    });
+    if (!second.acquired) throw new Error("Second link unavailable.");
+    const claim = await lane.readSimulatorSupportClaim({ ...f.owner, revision: second.value.revision });
+    expect(claim.research.links).toEqual([]);
+    expect(claim.research.bookingLinkRoles).toEqual([]);
+  });
+
   it("persists a labelled booking frame as an owned handoff without configuring or changing customer demand", async () => {
     const f = await fixture();
     const before = await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } });

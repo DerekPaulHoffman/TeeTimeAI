@@ -74,7 +74,10 @@ Script diagnostics distinguish direct and data-source declarations from inline c
 
 The owned HTML collector also retains up to four statically published iframe targets with explicit booking/calendar labels. It accepts only safe src or lazy data-src URLs, excludes hidden, srcdoc, credential and transaction surfaces, and routes them through the same fresh indexed booking-handoff rules. This does not load an external frame within the current render, authorize clicks or form actions, establish venue identity or prove a public calendar. Missing iframe targets remain unknown; do not infer that a particular venue uses an iframe or invent its URL.
 
+A successful plain read of a fresh booking or venue-role link retains that exact requested target and its original role timestamp for the unused rendered route, even when the page has no outgoing anchors. This does not refresh evidence, retain arbitrary unlabelled links, expand the six-read budget or override access controls and spent-route guards.
+
 After every settled source-read, retain its returned revision and read the fresh researchGuide with this exact command:
+
 & 'C:\Program Files\nodejs\node.exe' scripts/automation/course-support-worker-runtime.mjs production --selected-checkout <selected-checkout> --script automation:simulator-support -- inspect --assignment-ref <assignment-ref>
 Inspect is an identity-scoped read of saved state. It needs only the assignment reference; it does not mutate the claim, renew the lease or spend a provider research attempt. Optional --token and --revision must be supplied together and must match the actual current claim; omit both when recovering an ambiguous revision. All mutations and progress still require the original token and most recently returned revision. Follow that guide's current priorities and link indices; an earlier page's link indices must not select a destination from a later receipt.
 

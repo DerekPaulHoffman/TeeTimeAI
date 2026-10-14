@@ -418,14 +418,25 @@ export async function readSimulatorSupportSource(input: Owner & { source?: Simul
     const collectorObservedAt = read.observedAt;
     read = { ...read, observedAt: now.toISOString() };
     const usableDocument = read.httpStatus >= 200 && read.httpStatus < 300;
+    let navigationLinks = read.links;
     const roleEvidence = new Map<string, string>();
     const venueEvidence = new Map<string, string>();
     if (usableDocument) {
-      const linked = new Set(read.links);
       const isFresh = (observedAt: string) => {
         const timestamp = Date.parse(observedAt);
         return Number.isFinite(timestamp) && timestamp >= now.getTime() - 30 * 60_000 && timestamp <= now.getTime();
       };
+      // A successful plain booking handoff may have no outgoing anchors while
+      // its own scheduler still needs rendering. Preserve only that exact,
+      // already-authorized target and its original evidence timestamp.
+      const continuingBookingRole = state.bookingLinkRoles?.find(role => role.url === before.value.url && isFresh(role.observedAt));
+      const continuingVenueRole = state.venueLinkRoles?.find(role => role.url === before.value.url && isFresh(role.observedAt));
+      if (before.value.source === "link" && !before.value.rendered && read.accessControlsObserved === true &&
+          !read.accessControls?.length && (continuingBookingRole || continuingVenueRole)) {
+        navigationLinks = [...read.links.filter(url => url !== before.value.url).slice(0, 29), before.value.url];
+        if (continuingVenueRole) venueEvidence.set(continuingVenueRole.url, continuingVenueRole.observedAt);
+      }
+      const linked = new Set(navigationLinks);
       for (const role of state.bookingLinkRoles ?? []) {
         if (linked.has(role.url) && isFresh(role.observedAt)) roleEvidence.set(role.url, role.observedAt);
       }
@@ -438,7 +449,7 @@ export async function readSimulatorSupportSource(input: Owner & { source?: Simul
         }
       }
     }
-    const research: SimulatorResearchState = { ...state, inFlight: null, links: usableDocument ? read.links : state.links,
+    const research: SimulatorResearchState = { ...state, inFlight: null, links: usableDocument ? navigationLinks : state.links,
       bookingLinks: usableDocument ? [...roleEvidence.keys()] : state.bookingLinks,
       bookingLinkRoles: usableDocument ? [...roleEvidence].map(([url, observedAt]) => ({ url, observedAt })) : state.bookingLinkRoles,
       venueLinkRoles: usableDocument ? [...venueEvidence].filter(([url]) => !roleEvidence.has(url)).map(([url, observedAt]) => ({ url, observedAt })) : state.venueLinkRoles,
