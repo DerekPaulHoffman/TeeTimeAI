@@ -128,6 +128,12 @@ conservative capacity metadata despite the scheduler's higher value; it does not
 use that metadata or the saved player count to qualify availability. No add-on
 duration is inferred as a session.
 
+Acuity also recognizes an exact hour-labelled `Sim Rental` product when the
+label's hours equal the provider's numeric duration. Public service flags,
+unambiguous product identity and verified named-bay calendars remain required.
+That label does not establish an unlisted shorter duration or bypass the
+responder's requested-session verification.
+
 ## Session proof and scheduling
 
 YourGolfBooking / Trackman reads the signed-out venue's published bay configuration and its public occupancy GET. The reviewed venue, range and public rental option must match the live source. Opening hours, the current booking horizon, eligible named bays, rental duration limits and restrictions are verified before an empty occupied list can produce openings. A complete session stays on one bay and excludes every overlapping booking, including member bookings. Neither the basket nor booking creation is invoked.

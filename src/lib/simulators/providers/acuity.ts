@@ -61,8 +61,7 @@ function selectPublicRentalProduct(business: Record<string, unknown>, rentalIds:
   const name = typeof product.name === "string" ? product.name : "";
   // An operator-reviewed ID still needs a current rental identity. League,
   // membership, instruction and fitting appointments are never rental stock.
-  const namedBay = /\b(?:simulator|bay)\b/iu.test(name) && /\b(?:booking|rental|time)\b/iu.test(name) &&
-    !/\b(?:league|member|lesson|fitting|handicap)\b/iu.test(name);
+  const namedBay = namedBayRental(name, durationMinutes);
   const aggregateHours = aggregateRentalHours(name);
   const aggregate = aggregateHours > 0 && aggregateHours * 60 === durationMinutes;
   if (!namedBay && !aggregate) throw sourceError("The reviewed simulator product is not a public rental");
@@ -90,6 +89,15 @@ function selectPublicRentalProduct(business: Record<string, unknown>, rentalIds:
 function normalizePlainName(value: unknown, maxLength: number) {
   if (typeof value !== "string" || !value.trim() || value.length > maxLength || /[<>\u0000-\u001f\u007f]/u.test(value)) return;
   return value.replace(/\s+/gu, " ").trim().toLocaleLowerCase("en-US");
+}
+
+function namedBayRental(name: string, durationMinutes: number) {
+  if (/\b(?:simulator|bay)\b/iu.test(name) && /\b(?:booking|rental|time)\b/iu.test(name) &&
+      !/\b(?:league|member|lesson|fitting|handicap)\b/iu.test(name)) return true;
+  // An abbreviated label is corroborated by its exact published duration;
+  // other uses of "sim", extra product terms and mismatched hours stay unknown.
+  const hours = normalizePlainName(name, 80)?.match(/^(0\.5|[1-4](?:\.5)?) hours? sim rental$/u)?.[1];
+  return hours !== undefined && Number(hours) * 60 === durationMinutes;
 }
 
 function aggregateRentalHours(value: unknown) {
@@ -165,8 +173,7 @@ export function inspectAcuityPublicConfiguration(html: string, sourceUrl: string
     const candidates = flattenPublicGroups(business.appointmentTypes).filter(row =>
       PUBLIC_ID.test(String(row.id)) && Number.isInteger(row.duration) && Number(row.duration) >= 30 && Number(row.duration) <= 240 && Number(row.duration) % 30 === 0 &&
       row.active === true && row.private === false && row.type === "service" && row.classSize === null && row.canChooseQuantity === false &&
-      typeof row.name === "string" && ((/\b(?:simulator|bay)\b/iu.test(row.name) && /\b(?:booking|rental|time)\b/iu.test(row.name) &&
-        !/\b(?:league|member|lesson|fitting|handicap)\b/iu.test(row.name)) ||
+      typeof row.name === "string" && (namedBayRental(row.name, Number(row.duration)) ||
         aggregateRentalHours(row.name) > 0 && aggregateRentalHours(row.name) * 60 === Number(row.duration)));
     contractField = "RENTAL_IDENTITY";
     if (!candidates.length || candidates.length > 20) return rejected();

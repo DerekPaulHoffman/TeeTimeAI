@@ -28,6 +28,48 @@ function mockReads(payload: unknown = { "2026-10-10": [{ time: "2026-10-10T08:00
 }
 
 describe("closed public configuration rejection diagnostics", () => {
+  function shortRental() {
+    const value = business();
+    value.appointmentTypes[""] = [{ ...value.appointmentTypes[""][0], name: "1.5 Hour Sim Rental", duration: 90 }];
+    return value;
+  }
+  it("recognizes an exact duration-labelled Sim Rental while retaining named bay identity", async () => {
+    const value = shortRental();
+    const config = projectAcuityPublicConfiguration(landing(value), input.offering.bookingUrl);
+    expect(config?.rentals).toEqual([{ id: "73234482", durationMinutes: 90, calendarIds: ["11388341", "11402955"] }]);
+    const fetch = mockReads(undefined, landing(value));
+    const result = await fetchAcuitySimulatorAvailability({ ...input, durationMinutes: 90,
+      offering: { ...input.offering, supportedDurationsMinutes: [90] } }, fetch);
+    expect(result.complete).toBe(true);
+    expect(result.slots[0].endsAt.getTime() - result.slots[0].startsAt.getTime()).toBe(90 * 60_000);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+  it.each(["Sim Rental", "1 Hour Sim Rental", "1.5 Hour Sim Card Rental", "1.5 Hour Flight Sim Rental",
+    "1.5 Hour Sim Rental Lesson", "1.5 Hour Sim Rental Members Only", "<span>1.5 Hour Sim Rental</span>"])(
+    "keeps uncorroborated or mismatched abbreviated product %s rejected", async name => {
+      const value = shortRental(); value.appointmentTypes[""][0].name = name;
+      expect(inspectAcuityPublicConfiguration(landing(value), input.offering.bookingUrl)?.configurationDiagnostic?.contractField).toBe("RENTAL_IDENTITY");
+      const fetch = mockReads(undefined, landing(value));
+      await expect(fetchAcuitySimulatorAvailability({ ...input, durationMinutes: 90,
+        offering: { ...input.offering, supportedDurationsMinutes: [90] } }, fetch)).rejects.toBeInstanceOf(Error);
+      expect(fetch).toHaveBeenCalledOnce();
+    });
+  it("does not let an abbreviated rental authorize a non-bay resource or a one-hour request", async () => {
+    const value = shortRental();
+    const fetch = mockReads(undefined, landing(value));
+    await expect(fetchAcuitySimulatorAvailability({ ...input, durationMinutes: 60 }, fetch)).rejects.toMatchObject({ code: "UNSUPPORTED_DURATION" });
+    expect(fetch).toHaveBeenCalledOnce();
+    value.calendars["X-Golf Stratford"][0].name = "Unverified room";
+    expect(inspectAcuityPublicConfiguration(landing(value), input.offering.bookingUrl)?.configurationDiagnostic?.contractField).toBe("RESOURCE_IDENTITY");
+  });
+  it.each(["private", "inactive", "class", "quantity"])("keeps %s abbreviated rentals ineligible", mode => {
+    const value = shortRental(), product = value.appointmentTypes[""][0];
+    if (mode === "private") product.private = true;
+    if (mode === "inactive") product.active = false;
+    if (mode === "class") product.classSize = 4;
+    if (mode === "quantity") product.canChooseQuantity = true;
+    expect(projectAcuityPublicConfiguration(landing(value), input.offering.bookingUrl)).toBeUndefined();
+  });
   it.each([
     ["missing configuration", "<h1>Public rental</h1>", "SETTINGS"],
     ["nonliteral configuration", "<script>var BUSINESS = getPrivateConfiguration();</script>", "SETTINGS"],
