@@ -5,7 +5,7 @@ import { bodySizeBand, createAddressPinnedPublicFetchTransport, getOwnedOfficial
 import { runWithProviderRequestLease } from "./provider-request-lease";
 import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import { sanitizeResponderText } from "./course-support-responder-policy";
-import { projectAcuityPublicConfiguration } from "@/lib/simulators/providers/acuity";
+import { inspectAcuityPublicConfiguration } from "@/lib/simulators/providers/acuity";
 import { projectGolfBookPublicConfiguration } from "@/lib/simulators/providers/golfbook";
 import { projectUSchedulePublicConfiguration } from "@/lib/simulators/providers/uschedule";
 import type { SimulatorPublicConfiguration } from "@/lib/simulators/providers/public-configuration";
@@ -46,7 +46,7 @@ export type SimulatorPublicCalendar = {
 export type SimulatorConfigurationDiagnostic = {
   phase: "CONFIG" | "VENUE" | "RANGES" | "RENTALS" | "RESOURCES";
   reason: "CONFIG_SHAPE" | "CONFIG_NUMBER" | "CONFIG_STRING" | "CONFIG_BOOLEAN" | "CONFIG_ARRAY" | "CONFIG_IDENTITY" | "CONFIG_NO_ELIGIBLE_RENTALS" | PublicApiConfigurationDiagnostic["reason"];
-  publicProviderFamily?: PublicApiConfigurationDiagnostic["publicProviderFamily"];
+  publicProviderFamily?: PublicApiConfigurationDiagnostic["publicProviderFamily"] | "ACUITY";
   httpStatus?: number;
   contractField?: PublicApiConfigurationDiagnostic["contractField"];
   maintenanceModeState?: "FALSE" | "TRUE" | "NULL" | "MISSING" | "INVALID";
@@ -530,14 +530,16 @@ function resultFromBody(requestedUrl: string, url: string, status: number, conte
     bookingLinks.unshift(bays);
   }
   const calendar = extractSimulatorPublicCalendar(html, url);
-  const publicConfiguration = projectAcuityPublicConfiguration(html, url) ?? projectGolfBookPublicConfiguration(html, url) ??
+  const acuity = inspectAcuityPublicConfiguration(html, url);
+  const publicConfiguration = acuity?.publicConfiguration ?? projectGolfBookPublicConfiguration(html, url) ??
     projectUSchedulePublicConfiguration(html, url) ?? projectYourGolfBookingReviewedSlotConfiguration(calendar.configurationDiagnostic, url);
   const retainedLinks = new Set(summary.links);
   const retainedBookingLinks = [...new Set(bookingLinks)].filter(link => retainedLinks.has(link));
   const retainedVenueLinks = venueLinks.filter(link => retainedLinks.has(link));
   return { ...base, ...summary, pageSurfaces: summarizeSimulatorPageSurfaces(html, url), ...(retainedBookingLinks.length ? { bookingLinks: retainedBookingLinks } : {}),
     ...(retainedVenueLinks.length ? { venueLinks: retainedVenueLinks } : {}),
-    ...(publicConfiguration ? { publicConfiguration } : {}), ...calendar };
+    ...(publicConfiguration ? { publicConfiguration } : {}), ...calendar,
+    ...(acuity?.configurationDiagnostic ? { configurationDiagnostic: acuity.configurationDiagnostic } : {}) };
 }
 
 function publishedBootstrapBookingRoles(html: string) {
@@ -739,7 +741,11 @@ function publicAssetDestinations(html: string, sourceUrl: string) {
     if (node.tagName && ["template", "noscript"].includes(node.tagName)) return;
     const attrs = node.attrs ?? [];
     const script = node.tagName === "script" ? declaredSimulatorScriptSource(new Map(attrs.map(attr => [attr.name, attr.value]))) : null;
-    const path = script ? script.value : node.tagName === "link" && attrs.some(attr => attr.name === "rel" && attr.value.toLowerCase().split(/\s+/u).includes("stylesheet")) ? attrs.find(attr => attr.name === "href")?.value : undefined;
+    const rel = attrs.find(attr => attr.name === "rel")?.value.toLowerCase().split(/\s+/u) ?? [];
+    const as = attrs.find(attr => attr.name === "as")?.value.toLowerCase();
+    const declaredAsset = node.tagName === "link" && (rel.includes("stylesheet") || rel.includes("modulepreload") ||
+      rel.includes("preload") && (as === "script" || as === "style"));
+    const path = script ? script.value : declaredAsset ? attrs.find(attr => attr.name === "href")?.value : undefined;
     if (path) { try {
       const url = publicUrl(new URL(path, sourceUrl).href);
       if (!/captcha|challenge|turnstile|cdn-cgi/iu.test(`${url.hostname}${url.pathname}`)) {

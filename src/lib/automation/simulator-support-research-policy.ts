@@ -6,7 +6,7 @@ import { blockedResourceDiagnosticsSchema } from "./simulator-blocked-resources"
 import { simulatorPageSurfacesSchema } from "./simulator-page-surfaces";
 
 export const SIMULATOR_RESEARCH_MAX_READS = 6;
-export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-literal-module-imports-v17";
+export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-preload-diagnostics-v18";
 export function getSimulatorResearchImplementationVersion(url: string) {
   const family = knownSimulatorPublicConfigurationFamily(url);
   if (family === "TEESHEET" || family === "UPPER_HAND" || family === "YOUR_GOLF_BOOKING") return "public-calendar-provider-api-configuration-v1";
@@ -71,7 +71,7 @@ const configurationDiagnostic = z.object({
   phase: z.enum(["CONFIG", "VENUE", "RANGES", "RENTALS", "RESOURCES"]),
   reason: z.enum(["CONFIG_SHAPE", "CONFIG_NUMBER", "CONFIG_STRING", "CONFIG_BOOLEAN", "CONFIG_ARRAY", "CONFIG_IDENTITY", "CONFIG_NO_ELIGIBLE_RENTALS",
     "PUBLIC_PROVIDER_HTTP_ERROR", "PUBLIC_PROVIDER_CONFIG_REJECTED", "PUBLIC_PROVIDER_CATALOG_AMBIGUOUS", "PUBLIC_PROVIDER_NO_ONE_HOUR_RENTAL"]),
-  publicProviderFamily: z.enum(["TEESHEET", "UPPER_HAND"]).optional(),
+  publicProviderFamily: z.enum(["TEESHEET", "UPPER_HAND", "ACUITY"]).optional(),
   httpStatus: z.number().int().min(100).max(599).optional(),
   contractField: z.enum(["SETTINGS", "CATALOG", "RENTAL_IDENTITY", "PUBLIC_ACCESS", "DURATION", "RESOURCE_IDENTITY"]).optional(),
   maintenanceModeState: z.enum(["FALSE", "TRUE", "NULL", "MISSING", "INVALID"]).optional(),

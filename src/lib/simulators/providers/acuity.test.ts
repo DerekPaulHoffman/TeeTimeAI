@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
 
-import { fetchAcuitySimulatorAvailability, isAcuityPublicBookingUrl, projectAcuityPublicConfiguration } from "./acuity";
+import { fetchAcuitySimulatorAvailability, inspectAcuityPublicConfiguration, isAcuityPublicBookingUrl, projectAcuityPublicConfiguration } from "./acuity";
 import { fetchSimulatorAvailability } from "./index";
 import type { SimulatorAvailabilityInput } from "./types";
 import { filterSimulatorSessionsForSearch } from "@/lib/tee-times/matching";
@@ -26,6 +26,33 @@ function landing(value = business()) { return `<html><script>var BUSINESS = ${JS
 function mockReads(payload: unknown = { "2026-10-10": [{ time: "2026-10-10T08:00:00-0400", slotsAvailable: 1 }] }, html = landing()) {
   return vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(html, { headers: { "Content-Type": "text/html" } })).mockResolvedValueOnce(new Response(JSON.stringify(payload), { headers: { "Content-Type": "application/json" } }));
 }
+
+describe("closed public configuration rejection diagnostics", () => {
+  it.each([
+    ["missing configuration", "<h1>Public rental</h1>", "SETTINGS"],
+    ["nonliteral configuration", "<script>var BUSINESS = getPrivateConfiguration();</script>", "SETTINGS"],
+    ["wrong owner", landing({ ...business(), ownerKey: "wrongowner" }), "SETTINGS"],
+    ["nonpublic configuration", landing({ ...business(), includesAdminOnly: true }), "PUBLIC_ACCESS"],
+    ["malformed catalog", landing({ ...business(), appointmentTypes: null } as unknown as ReturnType<typeof business>), "CATALOG"],
+    ["no recognized rentals", landing({ ...business(), appointmentTypes: { "": [] } }), "RENTAL_IDENTITY"],
+    ["unverified resource", landing({ ...business(), calendars: { "": [] } } as unknown as ReturnType<typeof business>), "RESOURCE_IDENTITY"],
+  ])("reports %s without exposing source values", (_name, html, contractField) => {
+    expect(inspectAcuityPublicConfiguration(html, input.offering.bookingUrl)).toEqual({ configurationDiagnostic: {
+      phase: "CONFIG", reason: "PUBLIC_PROVIDER_CONFIG_REJECTED", publicProviderFamily: "ACUITY", contractField,
+    } });
+    expect(projectAcuityPublicConfiguration(html, input.offering.bookingUrl)).toBeUndefined();
+  });
+  it("retains valid projection and emits no diagnostics for unrelated pages", () => {
+    expect(inspectAcuityPublicConfiguration(landing(), input.offering.bookingUrl)).toEqual({ publicConfiguration:
+      projectAcuityPublicConfiguration(landing(), input.offering.bookingUrl) });
+    expect(inspectAcuityPublicConfiguration(landing(), "https://unrelated.example.test/")).toBeUndefined();
+  });
+  it("keeps ambiguous rental identity separate from resource validation", () => {
+    const value = business();
+    value.appointmentTypes[""].push({ ...value.appointmentTypes[""][0] });
+    expect(inspectAcuityPublicConfiguration(landing(value), input.offering.bookingUrl)?.configurationDiagnostic?.contractField).toBe("RENTAL_IDENTITY");
+  });
+});
 
 const aggregateUrl = "https://onegolfhaven.as.me/schedule/a66e63ac";
 const aggregateInput: SimulatorAvailabilityInput = { ...input, durationMinutes: 60, partySize: 4,

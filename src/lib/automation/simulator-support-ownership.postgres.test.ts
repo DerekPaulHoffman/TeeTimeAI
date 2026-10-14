@@ -1031,12 +1031,13 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
   });
 
-  it.each(["DOM", "MODULE"])("records a public %s script under the original owner without changing demand", async mode => {
+  it.each(["DOM", "MODULE", "PRELOAD"])("records a public %s script under the original owner without changing demand", async mode => {
     const target = "https://official.example.test/booking", asset = "https://assets.example.test/late-widget.js", entry = "https://assets.example.test/main.js";
     const f = await fixture(15, false, target);
     const before = await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } });
     const html = `<html><body><h1>Public booking</h1><div id="calendar"></div>${mode === "MODULE"
       ? `<script type='module' src='${entry}'></script>`
+      : mode === "PRELOAD" ? `<link rel='modulepreload' href='${asset}'><script type='module'>const target='${asset}';await import(target);</script>`
       : `<script>const element=document.createElement('script');element.src='${asset}';document.body.appendChild(element);</script>`}</body></html>`;
     const fetch = vi.fn(async (url: unknown) => String(url) === target ? new Response(html, { headers: { "content-type": "text/html" } })
       : new Response(String(url) === entry ? "import './late-widget.js';"

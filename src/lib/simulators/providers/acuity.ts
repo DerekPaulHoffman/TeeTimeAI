@@ -138,18 +138,39 @@ function parseAggregateDates(input: SimulatorAvailabilityInput, envelope: Record
 /** Read the existing inert BUSINESS object without evaluating its script.
  * Projection shares the runtime's public rental and resource identity checks. */
 export function projectAcuityPublicConfiguration(html: string, sourceUrl: string): AcuityPublicConfiguration | undefined {
-  if (!isAcuityPublicBookingUrl(sourceUrl) || Buffer.byteLength(html, "utf8") > MAX_RESPONSE_BYTES) return;
+  return inspectAcuityPublicConfiguration(html, sourceUrl)?.publicConfiguration;
+}
+
+type AcuityConfigurationInspection = {
+  publicConfiguration?: AcuityPublicConfiguration;
+  configurationDiagnostic?: { phase: "CONFIG"; reason: "PUBLIC_PROVIDER_CONFIG_REJECTED"; publicProviderFamily: "ACUITY";
+    contractField: "SETTINGS" | "CATALOG" | "RENTAL_IDENTITY" | "PUBLIC_ACCESS" | "RESOURCE_IDENTITY" };
+};
+
+/** Closed rejection reasons expose no raw configuration, identifiers or customer data. */
+export function inspectAcuityPublicConfiguration(html: string, sourceUrl: string): AcuityConfigurationInspection | undefined {
+  if (!isAcuityPublicBookingUrl(sourceUrl)) return;
+  let contractField: NonNullable<AcuityConfigurationInspection["configurationDiagnostic"]>["contractField"] = "SETTINGS";
+  const rejected = (): AcuityConfigurationInspection => ({ configurationDiagnostic: {
+    phase: "CONFIG", reason: "PUBLIC_PROVIDER_CONFIG_REJECTED", publicProviderFamily: "ACUITY", contractField,
+  } });
+  if (Buffer.byteLength(html, "utf8") > MAX_RESPONSE_BYTES) return rejected();
   try {
     const ownerKey = new URL(sourceUrl).pathname.split("/").at(-1)!;
     const business = parsePublicBusiness(html);
-    if (business.ownerKey !== ownerKey || !PUBLIC_ID.test(String(business.id)) || business.includesAdminOnly !== false || business.isExpired !== false) return;
+    if (business.ownerKey !== ownerKey || !PUBLIC_ID.test(String(business.id))) return rejected();
+    contractField = "PUBLIC_ACCESS";
+    if (business.includesAdminOnly !== false || business.isExpired !== false) return rejected();
+    contractField = "CATALOG";
     const candidates = flattenPublicGroups(business.appointmentTypes).filter(row =>
       PUBLIC_ID.test(String(row.id)) && Number.isInteger(row.duration) && Number(row.duration) >= 30 && Number(row.duration) <= 240 && Number(row.duration) % 30 === 0 &&
       row.active === true && row.private === false && row.type === "service" && row.classSize === null && row.canChooseQuantity === false &&
       typeof row.name === "string" && ((/\b(?:simulator|bay)\b/iu.test(row.name) && /\b(?:booking|rental|time)\b/iu.test(row.name) &&
         !/\b(?:league|member|lesson|fitting|handicap)\b/iu.test(row.name)) ||
         aggregateRentalHours(row.name) > 0 && aggregateRentalHours(row.name) * 60 === Number(row.duration)));
-    if (!candidates.length || candidates.length > 20) return;
+    contractField = "RENTAL_IDENTITY";
+    if (!candidates.length || candidates.length > 20) return rejected();
+    contractField = "RESOURCE_IDENTITY";
     const rentals = candidates.map(row => {
       const product = selectPublicRentalProduct(business, [String(row.id)], Number(row.duration));
       return { id: product.id, durationMinutes: Number(row.duration), calendarIds: product.calendarIds,
@@ -158,11 +179,17 @@ export function projectAcuityPublicConfiguration(html: string, sourceUrl: string
     const resourceIds = [...new Set(rentals.flatMap(row => row.calendarIds))];
     const description = typeof business.description === "string" ? textContent(parse(business.description)) : "";
     const capacity = description.match(/up\s+to\s+(\d{1,2})\s+(?:people|players|guests)\s+per\s+bay/iu);
+    contractField = "SETTINGS";
     const result = simulatorPublicConfigurationSchema.safeParse({ family: "ACUITY", ownerKey, businessId: String(business.id),
       timeZone: business.timezone, maxPartySize: capacity ? Number(capacity[1]) : null, rentals,
       resources: resourceIds.map(id => ({ id, timeZone: business.timezone })) });
-    return result.success && result.data.family === "ACUITY" ? result.data : undefined;
-  } catch { return undefined; }
+    return result.success && result.data.family === "ACUITY" ? { publicConfiguration: result.data } : rejected();
+  } catch (error) {
+    if (contractField === "RESOURCE_IDENTITY" && error instanceof SimulatorAvailabilityError && error.code === "UNSUPPORTED_DURATION") {
+      contractField = "RENTAL_IDENTITY";
+    }
+    return rejected();
+  }
 }
 
 function parsePublicBusiness(html: string): Record<string, unknown> {

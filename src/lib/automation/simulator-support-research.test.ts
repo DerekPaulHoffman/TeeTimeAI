@@ -109,6 +109,16 @@ function renderedBrowser(requests: RequestFixture[], html = "<h1>Public rentals<
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.clearAllMocks(); });
 
 describe("owned known-reader public configuration", () => {
+  it("persists only a closed Acuity rejection from the same owned read", async () => {
+    const result = await collectSimulatorSupportResearch({ url: acuitySource }, {
+      fetch: vi.fn(async () => response("<h1>Public rental</h1><script>var BUSINESS = privateConfig('private-token')</script>")), lease,
+    });
+    expect(result.publicConfiguration).toBeUndefined();
+    expect(result.configurationDiagnostic).toEqual({ phase: "CONFIG", reason: "PUBLIC_PROVIDER_CONFIG_REJECTED",
+      publicProviderFamily: "ACUITY", contractField: "SETTINGS" });
+    expect(persistedDiagnostic(result.configurationDiagnostic)).toEqual(result.configurationDiagnostic);
+    expect(JSON.stringify(result.configurationDiagnostic)).not.toMatch(/private|token|BUSINESS/u);
+  });
   it("projects only the structural USchedule tenant, selected public service and verified default hour", async () => {
     const fetch = vi.fn(async () => response(uscheduleHtml));
     const result = await collectSimulatorSupportResearch({ url: uscheduleSource }, { fetch, lease, now: () => instant });
@@ -201,6 +211,26 @@ describe("owned known-reader public configuration", () => {
 });
 
 describe("bounded owned simulator public research transport", () => {
+  it.each(["modulepreload", "preload' as='script", "preload' as='style"])("honors exact public %s declarations without admitting adjacent data", async declaration => {
+    const asset = "https://assets.example.test/public-file.js";
+    const html = `<link rel='${declaration}' href='${asset}'>`;
+    const kind = declaration.includes("style") ? "stylesheet" : "script";
+    const view = renderedBrowser([{ url: `${source}/` }, { url: asset, kind },
+      { url: asset, kind: "fetch" }, { url: `${asset}?extra=1`, kind }], html);
+    const fetch = vi.fn(async (url: unknown) => String(url) === `${source}/` ? response(html) : response("/* public asset */"));
+    const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(result.blockedRequests).toBe(2);
+  });
+  it.each(["prefetch", "preconnect", "preload", "preload' as='fetch", "preload' as='document"])("does not authorize script requests from %s hints", async declaration => {
+    const asset = "https://assets.example.test/public-file.js";
+    const html = `<link rel='${declaration}' href='${asset}'>`;
+    const view = renderedBrowser([{ url: `${source}/` }, { url: asset, kind: "script" }], html);
+    const fetch = vi.fn(async () => response(html));
+    const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(result.blockedRequests).toBe(1);
+  });
   it("loads literal module dependencies declared by an admitted public script", async () => {
     const root = `${source}/`, entry = "https://modules.example.test/main.js", dependency = "https://modules.example.test/calendar.js";
     const fetch = vi.fn(async (url: unknown) => String(url) === root
@@ -1319,9 +1349,9 @@ describe("bounded owned simulator public research transport", () => {
     expect(result.blockedRequests).toBe(0);
     expect(result.admittedRequests).toBe(42);
   });
-  it("still admits only twenty exact external assets and never grants adjacent data authority", async () => {
+  it.each(["script", "modulepreload"])("still admits only twenty exact %s assets and never grants adjacent data authority", async declaration => {
     const assets = Array.from({ length: 21 }, (_, index) => `https://cdn.example.test/public-${index}.js`);
-    const html = assets.map(url => `<script src='${url}'></script>`).join("");
+    const html = assets.map(url => declaration === "script" ? `<script src='${url}'></script>` : `<link rel='modulepreload' href='${url}'>`).join("");
     const view = renderedBrowser([{ url: `${source}/` }, ...assets.map(url => ({ url, kind: "script" })),
       { url: assets[0], kind: "fetch" }, { url: `${assets[0]}?extra=1`, kind: "script" }], html);
     const fetch = vi.fn(async (url: unknown) => String(url) === `${source}/` ? response(html) : response("public script", 200, "text/javascript"));
