@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 
 const resource = z.enum(["DOCUMENT", "SCRIPT", "STYLESHEET", "XHR", "FETCH", "OTHER"]);
 const method = z.enum(["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OTHER"]);
@@ -82,27 +83,44 @@ const pathShape = z.string().max(120).refine(value => value === "/" || value.sta
   const parts = value.slice(1).split("/");
   return parts.length <= 9 && parts.every((part, index) => words.has(part) || part === ":more" && index === 8);
 })());
+const declaredOrigin = z.string().max(260).refine(value => {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.port && url.origin === value && Boolean(getSafeCustomerBookingUrl(value));
+  } catch { return false; }
+});
+function permitsDeclaredOrigin(entry: { resourceKind: string; method: string; reason: string; originRelation: string;
+  headerKinds?: unknown[]; bodyShape?: BodyShape }) {
+  return ["XHR", "FETCH"].includes(entry.resourceKind) && entry.method === "POST" && entry.reason === "METHOD_NOT_ALLOWED" &&
+    entry.originRelation === "OTHER_ORIGIN" && !entry.headerKinds?.length && Boolean(entry.bodyShape &&
+      ["JSON", "FORM", "EMPTY"].includes(entry.bodyShape.format) && !entry.bodyShape.truncated &&
+      !entry.bodyShape.fieldKinds.some(kind => kind === "AUTH" || kind === "CONTACT") &&
+      !entry.bodyShape.operationHints.some(hint => ["WRITE", "FORM", "BOOKING"].includes(hint)));
+}
 
 export const blockedResourceDiagnosticsSchema = z.array(z.object({
   state: z.literal("NOT_EXECUTED"), resourceKind: resource, method, reason, originRelation: relation,
   pathShape, count: z.number().int().min(1).max(32),
   headerKinds: z.array(headerKind).min(1).max(5).refine(values => new Set(values).size === values.length).optional(),
   bodyShape: blockedRequestBodyShapeSchema.optional(),
+  declaredOrigin: declaredOrigin.optional(),
 }).strict().refine(entry => !entry.headerKinds || entry.reason === "SENSITIVE_HEADERS")
+  .refine(entry => entry.declaredOrigin === undefined || permitsDeclaredOrigin(entry))
   .refine(entry => !entry.bodyShape || ["XHR", "FETCH"].includes(entry.resourceKind) && !["GET", "HEAD"].includes(entry.method)))
   .min(1).max(8).refine(entries => entries.reduce((sum, entry) => sum + entry.count, 0) <= 32 &&
   new Set(entries.map(entry => [entry.resourceKind, entry.method, entry.reason, entry.originRelation, entry.pathShape,
-    entry.headerKinds?.join(","), JSON.stringify(entry.bodyShape)].join("|"))).size === entries.length);
+    entry.headerKinds?.join(","), JSON.stringify(entry.bodyShape), entry.declaredOrigin].join("|"))).size === entries.length);
 
 export type SimulatorBlockedResourceDiagnostic = z.infer<typeof blockedResourceDiagnosticsSchema>[number];
 
-/** Closed facts only: no URL, host, query, header name/value or payload is retained. */
+/** Closed facts plus an opt-in screened POST origin; no path values, query, headers or payload values. */
 export function createBlockedResourceDiagnostics() {
   const entries: SimulatorBlockedResourceDiagnostic[] = [];
   let truncated = false, unresolvedActiveResource = false;
   return {
     record(input: { url: string; kind: string; method: string; reason: SimulatorBlockedResourceDiagnostic["reason"];
-      originRelation: SimulatorBlockedResourceDiagnostic["originRelation"]; headerKinds?: SimulatorCredentialHeaderKind[]; bodyShape?: BodyShape }) {
+      originRelation: SimulatorBlockedResourceDiagnostic["originRelation"]; headerKinds?: SimulatorCredentialHeaderKind[]; bodyShape?: BodyShape;
+      declaredOrigin?: string }) {
       const resourceKind = resource.safeParse(input.kind.toUpperCase()).data ?? "OTHER";
       const safeMethod = method.safeParse(input.method).data ?? "OTHER";
       if (["SCRIPT", "XHR", "FETCH"].includes(resourceKind)) unresolvedActiveResource = true;
@@ -112,13 +130,17 @@ export function createBlockedResourceDiagnostics() {
         shape += [...parts.slice(0, 8).map(part => words.has(part.toLowerCase()) ? part.toLowerCase() : ":value"),
           ...(parts.length > 8 ? [":more"] : [])].join("/");
       } catch { /* Invalid destinations never expose raw text. */ }
-      const entry = { state: "NOT_EXECUTED" as const, resourceKind, method: safeMethod,
+      const base = { state: "NOT_EXECUTED" as const, resourceKind, method: safeMethod,
         reason: input.reason, originRelation: input.originRelation, pathShape: shape,
         ...(input.headerKinds?.length ? { headerKinds: [...new Set(input.headerKinds)].sort() } : {}),
         ...(input.bodyShape ? { bodyShape: input.bodyShape } : {}) };
+      const origin = declaredOrigin.safeParse(input.declaredOrigin);
+      const safeRequest = getSafeCustomerBookingUrl(input.url);
+      const matchesRequest = origin.success && safeRequest && new URL(safeRequest).origin === origin.data;
+      const entry = { ...base, ...(origin.success && matchesRequest && permitsDeclaredOrigin(base) ? { declaredOrigin: origin.data } : {}) };
       const existing = entries.find(row => Object.entries(entry).every(([key, value]) =>
         JSON.stringify(row[key as keyof typeof row]) === JSON.stringify(value)) && JSON.stringify(row.headerKinds) === JSON.stringify(entry.headerKinds) &&
-        JSON.stringify(row.bodyShape) === JSON.stringify(entry.bodyShape));
+        JSON.stringify(row.bodyShape) === JSON.stringify(entry.bodyShape) && row.declaredOrigin === entry.declaredOrigin);
       if (entries.reduce((sum, row) => sum + row.count, 0) >= 32 || !existing && entries.length >= 8) { truncated = true; return; }
       if (existing) existing.count += 1;
       else entries.push({ ...entry, count: 1 });

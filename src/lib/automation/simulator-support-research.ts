@@ -1081,8 +1081,14 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
               : credentialKinds.length ? "SENSITIVE_HEADERS" as const
                 : ["script", "stylesheet"].includes(kind) && /captcha|challenge|turnstile|cdn-cgi/iu.test(`${url.hostname}${url.pathname}`) ? "CHALLENGE_RESOURCE" as const
                   : !sameOfficialHost(requestedUrl, url.href) && !assetRoot && !occupancy ? "UNSCOPED_DESTINATION" as const : null;
-          if (rejection) { blockedResources.record({ url: url.href, kind, method, reason: rejection, originRelation,
-            ...(rejection === "SENSITIVE_HEADERS" ? { headerKinds: credentialKinds } : {}), ...blockedBodyShape() }); blockedRequests += 1; await route.abort("blockedbyclient"); return; }
+          if (rejection) {
+            const shape = blockedBodyShape();
+            blockedResources.record({ url: url.href, kind, method, reason: rejection, originRelation,
+              ...(rejection === "SENSITIVE_HEADERS" ? { headerKinds: credentialKinds } : {}), ...shape,
+              ...(rejection === "METHOD_NOT_ALLOWED" && originRelation === "OTHER_ORIGIN" && !credentialKinds.length
+                ? { declaredOrigin: url.origin } : {}) });
+            blockedRequests += 1; await route.abort("blockedbyclient"); return;
+          }
           if (terminalMainDocument) { blockedResources.record({ url: url.href, kind, method, reason: "TERMINAL_MAIN_DOCUMENT", originRelation }); blockedRequests += 1; await route.abort("blockedbyclient"); return; }
           if (deadline.aborted) throw new Error("SIMULATOR_RESEARCH_DEADLINE");
           // Extra room is only for already-admitted anonymous static assets.

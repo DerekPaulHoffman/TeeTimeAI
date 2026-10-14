@@ -947,13 +947,14 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(JSON.stringify(saved.audit)).not.toMatch(/secret@example|never-persist-this|customer|POST.*token|private-contact|private-body-token|get_calendar/u);
     expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
   });
-  it("persists only closed diagnostics for a real blocked public cross-origin POST", async () => {
+  it.each([false, true])("persists screened origin metadata for a real blocked cross-origin POST, contact=%s", async contact => {
     const target = "https://official.example.test/booking";
     const f = await fixture(15, false, target);
     const before = await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } });
+    const payload = { operation: "getAvailability", date: "2042-08-27", ...(contact ? { customerEmail: "private@example.test" } : {}) };
     const html = `<html><body><h1>Public page</h1><script>
       fetch('https://api.example.test/availability',{method:'POST',headers:{'content-type':'application/json'},
-      body:JSON.stringify({operation:'getAvailability',date:'2042-08-27',customerEmail:'private@example.test'})}).catch(()=>{});
+      body:JSON.stringify(${JSON.stringify(payload)})}).catch(()=>{});
       </script></body></html>`;
     const fetch = vi.fn(async () => new Response(html, { headers: { "content-type": "text/html" } }));
     const lease = (async (_host: string, worker: () => Promise<unknown>) => ({ acquired: true as const, value: await worker() })) as
@@ -965,7 +966,8 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(fetch).toHaveBeenCalledOnce();
     const diagnostic = { state: "NOT_EXECUTED", resourceKind: "FETCH", method: "POST", reason: "METHOD_NOT_ALLOWED",
       originRelation: "OTHER_ORIGIN", pathShape: "/availability", count: 1,
-      bodyShape: { format: "JSON", fieldKinds: ["CONTACT", "DATE", "OPERATION"], operationHints: ["AVAILABILITY", "READ"] } };
+      bodyShape: { format: "JSON", fieldKinds: contact ? ["CONTACT", "DATE", "OPERATION"] : ["DATE", "OPERATION"], operationHints: ["AVAILABILITY", "READ"] },
+      ...(!contact ? { declaredOrigin: "https://api.example.test" } : {}) };
     const claim = await lane.readSimulatorSupportClaim({ ...f.owner, revision: read.value.revision });
     expect(claim.research.history[0].blockedResourceDiagnostics).toContainEqual(diagnostic);
     expect(claim.researchGuide.blockedResourceDiagnostics[0].diagnostics).toContainEqual(diagnostic);

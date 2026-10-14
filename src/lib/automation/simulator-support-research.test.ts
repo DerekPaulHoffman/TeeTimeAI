@@ -1269,6 +1269,21 @@ describe("bounded owned simulator public research transport", () => {
     expect(JSON.stringify(result.blockedResourceDiagnostics)).not.toMatch(/private@example|secret-value|987654|get_calendar|submit_form/u);
     expect(view.routes[1].abort).toHaveBeenCalledOnce(); expect(view.routes[2].abort).toHaveBeenCalledOnce();
   });
+  it("identifies only the screened external POST origin for documentation research without executing it", async () => {
+    const body = '{"date":"private-date","venueId":"private-venue"}';
+    const view = renderedBrowser([{ url: `${source}/` },
+      { url: "https://api.example.test/api/availability/private-venue?date=private-date", method: "POST", kind: "xhr", headers: { "content-type": "application/json" }, body },
+      { url: "https://credentials.example.test/api/availability/private-venue", method: "POST", kind: "xhr", headers: { "content-type": "application/json", authorization: "private-auth" }, body },
+      { url: "https://contact.example.test/api/availability/private-venue", method: "POST", kind: "xhr", headers: { "content-type": "application/json" }, body: '{"email":"private@example.test"}' }]);
+    const fetch = vi.fn(async () => response("<h1>Public page</h1>"));
+    const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
+    expect(fetch).toHaveBeenCalledOnce();
+    const origins = result.blockedResourceDiagnostics?.flatMap(row => row.declaredOrigin ? [row.declaredOrigin] : []);
+    expect(origins).toEqual(["https://api.example.test"]);
+    expect(result).toMatchObject({ renderComplete: false, renderWarning: "SECONDARY_REQUESTS_BLOCKED" });
+    expect(JSON.stringify(result.blockedResourceDiagnostics)).not.toMatch(/private-date|private-venue|private-auth|credentials.example|contact.example|private@example/u);
+    for (const route of view.routes.slice(1)) expect(route.abort).toHaveBeenCalledOnce();
+  });
   it.each([
     { url: "https://api.example.test/availability", headers: { authorization: "secret" } },
     { url: "https://api.example.test/availability", headers: { cookie: "private" } },

@@ -2,6 +2,53 @@ import { describe, expect, it } from "vitest";
 import { blockedResourceDiagnosticsSchema, createBlockedResourceDiagnostics, simulatorCredentialHeaderKind, summarizeBlockedRequestBody } from "./simulator-blocked-resources";
 
 describe("blocked resource diagnostics", () => {
+  it("retains only an explicitly screened blocked POST origin and keeps destinations distinct", () => {
+    const recorder = createBlockedResourceDiagnostics();
+    const shape = summarizeBlockedRequestBody('{"date":"private-date"}', "application/json");
+    for (const origin of ["https://first.example.test", "https://second.example.test"]) {
+      recorder.record({ url: `${origin}/api/availability/private-id?date=private-date`, kind: "xhr", method: "POST",
+        reason: "METHOD_NOT_ALLOWED", originRelation: "OTHER_ORIGIN", bodyShape: shape, declaredOrigin: origin });
+    }
+    recorder.record({ url: "https://first.example.test/api/availability/private-id", kind: "xhr", method: "POST",
+      reason: "METHOD_NOT_ALLOWED", originRelation: "OTHER_ORIGIN", bodyShape: shape });
+    const rows = recorder.fields().blockedResourceDiagnostics!;
+    expect(rows).toHaveLength(3);
+    expect(rows.map(row => row.declaredOrigin)).toEqual(["https://first.example.test", "https://second.example.test", undefined]);
+    expect(blockedResourceDiagnosticsSchema.parse(rows)).toEqual(rows);
+    expect(JSON.stringify(rows)).not.toMatch(/private-id|private-date|\?date/u);
+  });
+  it.each([
+    { url: "https://user:private@api.example.test/path" },
+    { url: "https://api.example.test/path?token=private" },
+    { url: "http://api.example.test/path" },
+    { declaredOrigin: "https://different.example.test" },
+    { kind: "script" }, { method: "GET" }, { method: "PUT" },
+    { reason: "SENSITIVE_HEADERS", headerKinds: ["TOKEN"] },
+    { originRelation: "SAME_SITE" },
+    { bodyShape: { format: "JSON", fieldKinds: ["AUTH"], operationHints: [] } },
+    { bodyShape: { format: "JSON", fieldKinds: ["CONTACT"], operationHints: [] } },
+    { bodyShape: { format: "OVERSIZED", fieldKinds: [], operationHints: [] } },
+    { bodyShape: { format: "JSON", fieldKinds: ["ACTION"], operationHints: ["WRITE"] } },
+    { bodyShape: { format: "FORM", fieldKinds: ["ACTION"], operationHints: ["FORM"] } },
+    { bodyShape: { format: "JSON", fieldKinds: ["ACTION"], operationHints: ["BOOKING"] } },
+    { bodyShape: undefined },
+  ])("withholds the origin from unscreened or unrelated input %j", patch => {
+    const recorder = createBlockedResourceDiagnostics();
+    recorder.record({ url: "https://api.example.test/path", kind: "xhr", method: "POST", reason: "METHOD_NOT_ALLOWED",
+      originRelation: "OTHER_ORIGIN", declaredOrigin: "https://api.example.test",
+      bodyShape: { format: "EMPTY", fieldKinds: [], operationHints: [] }, ...patch } as Parameters<typeof recorder.record>[0]);
+    expect(recorder.fields().blockedResourceDiagnostics?.[0].declaredOrigin).toBeUndefined();
+  });
+  it("rejects forged persisted origin shapes or diagnostic contexts", () => {
+    const entry = { state: "NOT_EXECUTED", resourceKind: "XHR", method: "POST", reason: "METHOD_NOT_ALLOWED",
+      originRelation: "OTHER_ORIGIN", pathShape: "/api/availability", count: 1,
+      bodyShape: { format: "EMPTY", fieldKinds: [], operationHints: [] }, declaredOrigin: "https://api.example.test" };
+    expect(blockedResourceDiagnosticsSchema.safeParse([entry]).success).toBe(true);
+    for (const patch of [{ declaredOrigin: "https://api.example.test/path" }, { declaredOrigin: "https://api.example.test?token=private" },
+      { declaredOrigin: "http://127.0.0.1" }, { reason: "UNSAFE_URL" }, { bodyShape: undefined }, { method: "DELETE" }]) {
+      expect(blockedResourceDiagnosticsSchema.safeParse([{ ...entry, ...patch }]).success).toBe(false);
+    }
+  });
   it("keeps closed body field classes and lexical hints while discarding every submitted value", () => {
     const form = summarizeBlockedRequestBody("action=submit_newsletter_form&email=private%40example.test&nonce=private-secret", "application/x-www-form-urlencoded; charset=utf-8");
     expect(form).toEqual({ format: "FORM", fieldKinds: ["ACTION", "AUTH", "CONTACT"], operationHints: ["FORM", "WRITE"] });
