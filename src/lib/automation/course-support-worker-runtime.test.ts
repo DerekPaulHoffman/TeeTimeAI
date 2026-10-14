@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { spawnSync } from "node:child_process";
-import { existsSync, linkSync, mkdtempSync, mkdirSync, readFileSync, rmSync, rmdirSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, ftruncateSync, linkSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, rmdirSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -162,7 +163,8 @@ function fixture() {
   const runtime = { status: "available", source: "installed_node", nodePath: "C:\\Program Files\\nodejs\\node.exe", npmCliPath: "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js" };
   const environment: Record<string, string> = { CODEX_THREAD_ID: "private-native-identity", PATH: "roaming-shims", SystemRoot: "C:\\Windows", APPDATA: "private-appdata" };
   for (const key of productionKeys) environment[key] = `private-${key}`;
-  const runCommand = vi.fn((command: string, args: string[]) => {
+  const runCommand = vi.fn((command: string, args: string[], runOptions?: import("node:child_process").SpawnSyncOptions) => {
+    void runOptions;
     if (command !== "git") {
       if (args[0]?.endsWith("vercel" + (process.platform === "win32" ? "\\" : "/") + "dist" + (process.platform === "win32" ? "\\" : "/") + "vc.js") && args.at(-1) === "--version") return { status: 0, stdout: "", stderr: "Vercel CLI 62.2.0\n" };
       if (args.at(-1) === "--version") return { status: 0, stdout: args.length === 1 ? "v22.22.2\n" : "10.9.7\n" };
@@ -364,9 +366,9 @@ describe("private Windows worker runtime", () => {
 
   it("requires the exact selected checkout and strict script/separator on the production CLI", () => {
     const parsed = readWorkerProductionArguments(["--selected-checkout", "private selected path", "--script", "automation:course-support", "--", "claim", "--max-courses", "1"]);
-    expect(parsed).toEqual({ selectedCheckout: "private selected path", script: "automation:course-support", args: ["claim", "--max-courses", "1"] });
+    expect(parsed).toEqual({ selectedCheckout: "private selected path", script: "automation:course-support", args: ["claim", "--max-courses", "1"], captureOutput: true });
     expect(readWorkerProductionArguments(["--selected-checkout", "private selected path", "--script", "automation:simulator-support", "--", "claim", "--assignment-ref", "private-assignment"]))
-      .toEqual({ selectedCheckout: "private selected path", script: "automation:simulator-support", args: ["claim", "--assignment-ref", "private-assignment"] });
+      .toEqual({ selectedCheckout: "private selected path", script: "automation:simulator-support", args: ["claim", "--assignment-ref", "private-assignment"], captureOutput: true });
     for (const invalid of [
       ["--script", "automation:course-support", "--", "claim"],
       ["--selected-checkout", "path", "--script", "automation:course-support"],
@@ -393,6 +395,103 @@ describe("private Windows worker runtime", () => {
     expect(production[2].env.PATH.startsWith("C:\\Program Files\\nodejs;")).toBe(true);
     for (const key of productionKeys) expect(production[2].env[key]).toBeUndefined();
     expect(dependencies.browserSmoke).not.toHaveBeenCalled();
+  });
+
+  it("retains the complete original inspection payload when its console display is truncated", () => {
+    const { checkout, options, dependencies } = fixture();
+    const original = dependencies.runCommand.getMockImplementation()!;
+    const payload = { acquired: true, value: { revision: 4, researchGuide: { evidence: "private-result-".repeat(2000) } } };
+    const raw = `npm command banner\n${JSON.stringify(payload)}\n`;
+    dependencies.runCommand.mockImplementation((command, args) => args.includes("env")
+      ? { status: 0, stdout: raw, stderr: "private-runtime-diagnostic" } : original(command, args));
+    const stdout: string[] = [], stderr: string[] = [];
+    const receipt = runCourseSupportWorkerProduction({ ...options, script: "automation:simulator-support", args: ["inspect"], captureOutput: true },
+      { ...dependencies, emitStdout: (value: string) => stdout.push(value), emitStderr: (value: string) => stderr.push(value) });
+    expect(receipt).toMatchObject({ outcome: "completed", exitCode: 0, retainedOutput: { payloadAvailable: true } });
+    expect(isPrivateWorkerPath(checkout, receipt.retainedOutput!.payloadPath!)).toBe(true);
+    expect(JSON.parse(readFileSync(receipt.retainedOutput!.payloadPath!, "utf8"))).toEqual(payload);
+    expect(readFileSync(receipt.retainedOutput!.stdoutPath, "utf8")).toBe(raw);
+    expect(readFileSync(receipt.retainedOutput!.stderrPath, "utf8")).toBe("private-runtime-diagnostic");
+    expect(stdout.join("")).toBe(raw);
+    expect(() => JSON.parse(stdout.join("").slice(0, 1000))).toThrow();
+    expect(stderr.join("")).not.toMatch(/private-result|private-runtime-diagnostic/u);
+    expect(JSON.parse(stderr.join("").trim()).workerProductionOutput.payloadAvailable).toBe(true);
+    expect(dependencies.runCommand.mock.calls.filter(([, args]) => args.includes("env"))).toHaveLength(1);
+  });
+  it("captures actual child file-descriptor output and a pretty JSON result without another execution", () => {
+    const { options, dependencies } = fixture();
+    const original = dependencies.runCommand.getMockImplementation()!;
+    const payload = { acquired: true, value: { note: "unicode ✓", rows: "private-data-".repeat(3000), nested: Array.from({ length: 100 }, (_, index) => ({ index })) } };
+    const raw = `npm banner\n\uFEFF${JSON.stringify(payload, null, 2)}\n`;
+    const emitter = join(options.checkout, "emit-output.cjs");
+    writeFileSync(emitter, `process.stdout.write(${JSON.stringify(raw)});process.stderr.write('private-child-stderr')`);
+    dependencies.runCommand.mockImplementation((command, args, runOptions) => {
+      if (!args.includes("env")) return original(command, args);
+      return spawnSync(process.execPath, [emitter],
+        { ...runOptions, encoding: "utf8" });
+    });
+    const emitted: string[] = [];
+    const receipt = runCourseSupportWorkerProduction({ ...options, script: "automation:simulator-support", args: ["inspect"], captureOutput: true },
+      { ...dependencies, emitStdout: (text: string) => emitted.push(text), emitStderr: () => undefined });
+    expect(receipt).toMatchObject({ outcome: "completed", retainedOutput: { payloadAvailable: true, stdoutBytes: Buffer.byteLength(raw) } });
+    expect(emitted.join("")).toBe(raw);
+    expect(JSON.parse(readFileSync(receipt.retainedOutput!.payloadPath!, "utf8"))).toEqual(payload);
+    expect(readFileSync(receipt.retainedOutput!.stderrPath, "utf8")).toBe("private-child-stderr");
+    const index = JSON.parse(readFileSync(receipt.retainedOutput!.receiptPath, "utf8"));
+    expect(index).toMatchObject({ script: "automation:simulator-support", nativeThreadId: options.environment.CODEX_THREAD_ID, commandExitCode: 0 });
+    expect(index.argumentsSha256).toBe(createHash("sha256").update(JSON.stringify(["inspect"])).digest("hex"));
+    expect(index.stdoutSha256).toBe(createHash("sha256").update(raw).digest("hex"));
+    expect(dependencies.runCommand.mock.calls.filter(([, args]) => args.includes("env"))).toHaveLength(1);
+  });
+  it.each(["file", "symlink"])("refuses a %s capture destination before production runs", kind => {
+    const { root, checkout, options, dependencies } = fixture();
+    const directory = join(checkout, ".codex-artifacts"); mkdirSync(directory, { recursive: true });
+    const destination = join(directory, "production-output");
+    if (kind === "file") writeFileSync(destination, "unrelated");
+    else { const shared = join(root, "shared-output"); mkdirSync(shared); symlinkSync(shared, destination, "junction"); }
+    const receipt = runCourseSupportWorkerProduction({ ...options, script: "automation:simulator-support", args: ["inspect"], captureOutput: true }, dependencies);
+    expect(receipt).toMatchObject({ outcome: "guard_rejected", phase: "production_output", reason: "PRIVATE_OUTPUT_UNAVAILABLE" });
+    expect(dependencies.runCommand.mock.calls.some(([, args]) => args.includes("env"))).toBe(false);
+  });
+  it("retains failed-command evidence privately, emits no private text and never replays", () => {
+    const { options, dependencies } = fixture(), original = dependencies.runCommand.getMockImplementation()!;
+    dependencies.runCommand.mockImplementation((command, args) => args.includes("env")
+      ? { status: 2, stdout: "private-output", stderr: "private-error" } : original(command, args));
+    const stdout: string[] = [], stderr: string[] = [];
+    const receipt = runCourseSupportWorkerProduction({ ...options, script: "automation:simulator-support", args: ["inspect", "--token", "private-argument-token"], captureOutput: true },
+      { ...dependencies, emitStdout: (text: string) => stdout.push(text), emitStderr: (text: string) => stderr.push(text) });
+    expect(receipt).toMatchObject({ outcome: "command_failed", exitCode: 2, retainedOutput: { payloadAvailable: false, payloadPath: null, commandExitCode: 2 } });
+    expect(readFileSync(receipt.retainedOutput!.stdoutPath, "utf8")).toBe("private-output");
+    expect(readFileSync(receipt.retainedOutput!.stderrPath, "utf8")).toBe("private-error");
+    expect(stdout).toEqual([]); expect(JSON.stringify(receipt) + stderr.join("")).not.toMatch(/private-output|private-error|private-argument-token/u);
+    expect(dependencies.runCommand.mock.calls.filter(([, args]) => args.includes("env"))).toHaveLength(1);
+  });
+  it("detects a shared output file after execution without writing private buffered output or replaying", () => {
+    const { root, checkout, options, dependencies } = fixture(), original = dependencies.runCommand.getMockImplementation()!;
+    dependencies.runCommand.mockImplementation((command, args) => {
+      if (!args.includes("env")) return original(command, args);
+      const directory = join(checkout, ".codex-artifacts/production-output");
+      linkSync(join(directory, readdirSync(directory)[0], "stdout.log"), join(root, "shared-stream"));
+      return { status: 0, stdout: "private-buffered-data", stderr: "" };
+    });
+    const receipt = runCourseSupportWorkerProduction({ ...options, script: "automation:simulator-support", args: ["inspect"], captureOutput: true },
+      { ...dependencies, emitStdout: () => undefined, emitStderr: () => undefined });
+    expect(receipt).toMatchObject({ outcome: "command_failed", phase: "production_output", reason: "PRIVATE_OUTPUT_REJECTED", commandExitCode: 0 });
+    expect(readFileSync(join(root, "shared-stream"), "utf8")).toBe("");
+    expect(dependencies.runCommand.mock.calls.filter(([, args]) => args.includes("env"))).toHaveLength(1);
+  });
+  it("bounds output inspection after a completed command without killing or replaying it", () => {
+    const { options, dependencies } = fixture(), original = dependencies.runCommand.getMockImplementation()!;
+    dependencies.runCommand.mockImplementation((command, args, runOptions) => {
+      if (!args.includes("env")) return original(command, args);
+      if (!Array.isArray(runOptions?.stdio) || typeof runOptions.stdio[1] !== "number") throw new Error("Captured descriptor missing.");
+      ftruncateSync(runOptions.stdio[1], 32 * 1024 * 1024 + 1);
+      return { status: 0, stdout: "", stderr: "" };
+    });
+    const receipt = runCourseSupportWorkerProduction({ ...options, script: "automation:simulator-support", args: ["inspect"], captureOutput: true },
+      { ...dependencies, emitStdout: () => undefined, emitStderr: () => undefined });
+    expect(receipt).toMatchObject({ outcome: "command_failed", phase: "production_output", reason: "OUTPUT_READ_LIMIT", commandExitCode: 0 });
+    expect(dependencies.runCommand.mock.calls.filter(([, args]) => args.includes("env"))).toHaveLength(1);
   });
 
   it.each(["binding", "identity", "checkout"])("blocks a production wrapper with wrong %s without any live execution", (failure) => {

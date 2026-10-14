@@ -118,6 +118,14 @@ still require the normal reviewed facts, exact release and two deployed checks.
 Provider reference/contact information does not establish this venue's identity,
 access, booking method or technical disposition.
 
+Production command displays can be shorter than their complete results. The
+worker runtime retains exact private stdout/stderr and a parsed complete JSON
+payload, with a bounded receipt index. Workers inspect bounded fields from
+their own verified capture instead of repeating protected operations. A legacy
+zero-exit read-only inspection may be freshly inspected once through the
+verified capture path after ordinary original-owner continuation admission;
+this grants no wake, new owner, source read, lease extension or mutation replay.
+
 Local tooling failures, transient provider backoff and positively observed
 technical access restrictions require different outcomes. Inspect retained
 diagnostics and repair reusable code when supported by evidence. Missing code,

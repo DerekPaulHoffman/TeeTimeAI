@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, realpathSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { isAbsolute, relative, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -302,6 +303,56 @@ export function prepareCourseSupportWorkerRuntime(options = {}, dependencies = {
   return { ...final, mode: "prepare", browser: finalBrowser, setupRequired: !ready, outcome: ready ? "prepared" : "readiness_failed", stages };
 }
 
+function prepareProductionOutput(checkout) {
+  const root = resolve(checkout, ".codex-artifacts", "production-output");
+  const opened = [];
+  try {
+    for (const directory of [resolve(checkout, ".codex-artifacts"), root]) {
+      if (!isPrivateWorkerPath(checkout, directory)) throw new Error("PRIVATE_OUTPUT_REJECTED");
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+      const stat = lstatSync(directory);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("PRIVATE_OUTPUT_REJECTED");
+    }
+    const directory = mkdtempSync(`${root}/command-`);
+    const files = Object.fromEntries(["stdout", "stderr", "payload", "receipt"].map(name => {
+      const path = resolve(directory, `${name}.${["payload", "receipt"].includes(name) ? "json" : "log"}`);
+      const fd = openSync(path, "wx+", 0o600); opened.push(fd);
+      return [name, { path, fd }];
+    }));
+    const validate = file => {
+      const stat = lstatSync(file.path), held = fstatSync(file.fd);
+      if (!isPrivateWorkerPath(checkout, file.path) || !stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 ||
+          held.nlink !== 1 || stat.dev !== held.dev || stat.ino !== held.ino) throw new Error("PRIVATE_OUTPUT_REJECTED");
+      return held;
+    };
+    const read = file => {
+      const { size } = validate(file);
+      // Bound in-memory inspection after terminal exit, never kill or replay
+      // a command merely because its retained output is large.
+      if (size > 32 * 1024 * 1024) throw new Error("OUTPUT_READ_LIMIT");
+      const buffer = Buffer.alloc(size); let offset = 0;
+      while (offset < size) {
+        const bytes = readSync(file.fd, buffer, offset, size - offset, offset);
+        if (!bytes) throw new Error("INCOMPLETE_OUTPUT_READ"); offset += bytes;
+      }
+      return buffer;
+    };
+    return { files, validate, read, close: () => { for (const fd of opened) closeSync(fd); } };
+  } catch (error) { for (const fd of opened) closeSync(fd); throw error; }
+}
+
+function completeJsonOutput(stdout) {
+  const candidates = []; const starts = /(?:^|\n)[\t \uFEFF]*(?=[{[])/g; let match;
+  while ((match = starts.exec(stdout))) {
+    candidates.push(match.index + match[0].length); if (candidates.length > 64) candidates.splice(1, 1);
+  }
+  for (let index = candidates.length - 1; index >= 0; index--) {
+    try { return { found: true, value: JSON.parse(stdout.slice(candidates[index]).trim()) }; }
+    catch { /* A complete original JSON suffix is required; never repair it. */ }
+  }
+  return { found: false };
+}
+
 export function runCourseSupportWorkerProduction(options = {}, dependencies = {}) {
   const checkout = canonical(options.checkout || process.cwd());
   const environment = options.environment || process.env;
@@ -313,19 +364,55 @@ export function runCourseSupportWorkerProduction(options = {}, dependencies = {}
   if (!guards.every(([, passed]) => passed) || inspection.setupRequired) return { ...inspection, mode: "production", outcome: "guard_rejected" };
   const command = courseSupportWorkerProductionCommand(runtime, options.script, options.args || [], checkout);
   const run = dependencies.runCommand || runCommand;
+  let capture;
+  if (options.captureOutput) {
+    try { capture = prepareProductionOutput(checkout); }
+    catch { return { mode: "production", outcome: "guard_rejected", exitCode: 2, phase: "production_output", reason: "PRIVATE_OUTPUT_UNAVAILABLE" }; }
+  }
   const started = performance.now();
-  const result = run(command.command, command.args, {
-    cwd: checkout, env: courseSupportWorkerRuntimeEnvironment(runtime, checkout, environment),
-    shell: false, stdio: "inherit", timeout: undefined
-  });
+  let result, retainedOutput, outputFailure;
+  try {
+    result = run(command.command, command.args, {
+      cwd: checkout, env: courseSupportWorkerRuntimeEnvironment(runtime, checkout, environment),
+      shell: false, stdio: capture ? ["ignore", capture.files.stdout.fd, capture.files.stderr.fd] : "inherit", timeout: undefined
+    });
+    if (capture) {
+      for (const name of ["stdout", "stderr"]) {
+        if (result[name] && capture.validate(capture.files[name]).size === 0) writeFileSync(capture.files[name].fd, result[name]);
+      }
+      const stdoutBytes = capture.read(capture.files.stdout), stderrBytes = capture.read(capture.files.stderr);
+      const stdout = stdoutBytes.toString("utf8");
+      const payload = completeJsonOutput(stdout);
+      capture.validate(capture.files.payload);
+      if (payload.found) writeFileSync(capture.files.payload.fd, `${JSON.stringify(payload.value)}\n`);
+      retainedOutput = { version: 1, receiptPath: capture.files.receipt.path, stdoutPath: capture.files.stdout.path, stderrPath: capture.files.stderr.path,
+        payloadPath: payload.found ? capture.files.payload.path : null, payloadAvailable: payload.found,
+        stdoutBytes: stdoutBytes.length, stderrBytes: stderrBytes.length,
+        stdoutSha256: createHash("sha256").update(stdoutBytes).digest("hex"), commandExitCode: result.status ?? null };
+      capture.validate(capture.files.receipt);
+      writeFileSync(capture.files.receipt.fd, `${JSON.stringify({ ...retainedOutput, script: options.script,
+        argumentsSha256: createHash("sha256").update(JSON.stringify(options.args || [])).digest("hex"),
+        nativeThreadId: environment.CODEX_THREAD_ID, completedAt: new Date().toISOString() })}\n`);
+      // Preserve stdout compatibility; the separate bounded index survives a
+      // shortened tool display. Private stderr is retained, not reprinted.
+      if (result.status === 0) (dependencies.emitStdout || (value => process.stdout.write(value)))(stdout);
+      (dependencies.emitStderr || (value => process.stderr.write(value)))(`${JSON.stringify({ workerProductionOutput: retainedOutput })}\n`);
+    }
+  } catch (error) {
+    if (!capture) throw error;
+    outputFailure = ["PRIVATE_OUTPUT_REJECTED", "OUTPUT_READ_LIMIT", "INCOMPLETE_OUTPUT_READ"].includes(error?.message) ? error.message : "OUTPUT_CAPTURE_FAILED";
+  } finally { capture?.close(); }
+  if (outputFailure) return { mode: "production", outcome: "command_failed", exitCode: 2, phase: "production_output",
+    reason: outputFailure, commandExitCode: result?.status ?? null };
   return { mode: "production", outcome: result.status === 0 ? "completed" : "command_failed", exitCode: result.status ?? 1,
+    ...(retainedOutput ? { retainedOutput } : {}),
     ...(result.status !== 0 ? { phase: "production_wrapper", elapsedMs: Math.round(performance.now() - started),
       spawnError: result.errorCode ? (["ENOENT", "EACCES", "EPERM", "ETIMEDOUT", "EIO", "ENOMEM"].includes(result.errorCode) ? result.errorCode : "UNCLASSIFIED") : null,
       signal: result.signal ? (["SIGTERM", "SIGKILL", "SIGINT", "SIGABRT"].includes(result.signal) ? result.signal : "UNCLASSIFIED") : null } : {}) };
 }
 
 export function readWorkerProductionArguments(args) {
-  const options = { args: [] };
+  const options = { args: [], captureOutput: true };
   const fields = { "--script": "script", "--checkout": "checkout", "--selected-checkout": "selectedCheckout" };
   let separator = false;
   for (let index = 0; index < args.length; index++) {
