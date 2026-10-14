@@ -73,6 +73,15 @@ Safe initial-document facts may survive a rejected stylesheet while
 `renderComplete:false` and their provenance remain explicit. They do not prove
 calendar availability. Missing historical fields remain unknown.
 
+An already-owned worker may separately research official provider API reference
+documentation with its available built-in search tool, within the assigned
+contract's two-search/four-document limit. Queries exclude private identifiers
+and opens exclude live venue, API, account and transaction pages. This
+reference-only path cannot observe venue availability, execute a blocked POST,
+reset source budgets or replace current owned venue evidence and verification.
+Missing or ambiguous documentation remains unknown. All implementation and
+release work retains the same original-owner gates.
+
 Local tooling failures, transient provider backoff and positively observed
 technical access restrictions require different outcomes. Inspect retained
 diagnostics and repair reusable code when supported by evidence. Missing code,
