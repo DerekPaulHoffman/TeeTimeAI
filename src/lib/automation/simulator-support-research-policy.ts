@@ -6,7 +6,7 @@ import { blockedResourceDiagnosticsSchema } from "./simulator-blocked-resources"
 import { simulatorPageSurfacesSchema } from "./simulator-page-surfaces";
 
 export const SIMULATOR_RESEARCH_MAX_READS = 6;
-export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-interactive-browser-v33";
+export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-first-failure-browser-v34";
 export function getSimulatorResearchImplementationVersion(url: string) {
   const family = knownSimulatorPublicConfigurationFamily(url);
   if (family === "TEESHEET" || family === "UPPER_HAND" || family === "YOUR_GOLF_BOOKING") return "public-calendar-provider-api-configuration-v1";
@@ -487,6 +487,44 @@ export function selectSimulatorResearchTarget(input: {
   return { source, url, rendered: input.rendered };
 }
 
+/** One incomplete fast calendar read is enough to require actual interaction.
+ * Finding a fresh booking link on a marketing page is successful discovery, so
+ * that link still gets its cheap first read. A usable public configuration also
+ * stays on the fast path; an empty availability result is not a read failure.
+ * This changes transport selection, never source/access/ownership authority.
+ */
+export function needsSimulatorInteractiveFallback(input: {
+  state: SimulatorResearchState; bookingUrl: string | null; now: Date;
+}) {
+  const { state, now } = input;
+  const latest = state.history.at(-1);
+  if (!latest || latest.rendered || state.inFlight || state.readCount >= SIMULATOR_RESEARCH_MAX_READS || !latest.requestId ||
+      latest.sourceFingerprint !== state.sourceFingerprint ||
+      !Number.isFinite(now.getTime()) || Date.parse(latest.observedAt) > now.getTime() ||
+      Date.parse(latest.observedAt) < now.getTime() - 30 * 60_000) return false;
+  // A failed HTTP transport gets one independent browser attempt. If that
+  // browser also fails, its rendered failure keeps the existing backoff.
+  if (latest.outcome === "NETWORK_FAILED" && latest.httpStatus === 0 && latest.failure?.stage === "PUBLIC_READ" &&
+      latest.failure.category === "NETWORK" && readSafeSimulatorSupportFailure(latest.failure)) return true;
+  if (latest.configurationDiagnostic?.reason === "PUBLIC_PROVIDER_HTTP_ERROR" &&
+      (latest.configurationDiagnostic.httpStatus === 429 || (latest.configurationDiagnostic.httpStatus ?? 0) >= 500)) return false;
+  if (latest.outcome !== "READ" || latest.httpStatus < 200 || latest.httpStatus >= 500 || latest.httpStatus === 429 || latest.publicConfiguration ||
+      latest.publicReadEvidence?.sourceFingerprint !== state.sourceFingerprint ||
+      latest.publicReadEvidence.accessControlsObserved !== true || latest.publicReadEvidence.accessControls.length) return false;
+  const foundBookingHandoff = state.linkBaseUrl !== null && routeIdentity(state.linkBaseUrl) === routeIdentity(latest.sourceUrl) &&
+    state.links.some(url => routeIdentity(url) !== routeIdentity(latest.requestedUrl) && (
+      state.bookingLinkRoles?.some(role => role.url === url && role.observedAt === latest.observedAt) &&
+        isFreshBookingLink(state, url, now) ||
+      state.venueLinkRoles?.some(role => role.url === url && role.observedAt === latest.observedAt) &&
+        isFreshVenueLink(state, url, now)));
+  return !foundBookingHandoff;
+}
+
+export function assertSimulatorInteractiveFallback(guide: { browserFallbackRequired: boolean }, interactive: boolean) {
+  if (guide.browserFallbackRequired && !interactive)
+    throw new Error("An incomplete fast calendar read requires the interactive browser before more source reads.");
+}
+
 /** Suggested commands retain the same saved-source, budget and failed-route fences. */
 export function getSimulatorResearchGuide(input: {
   state: SimulatorResearchState; officialUrl: string | null; bookingUrl: string | null; evidenceUrl?: string | null;
@@ -506,7 +544,7 @@ export function getSimulatorResearchGuide(input: {
   ];
   const seen = new Set<string>();
   const rejectedReads: Array<(typeof routes)[number] & { failure: SimulatorSupportFailure }> = [];
-  const suggestedReads = routes.filter(route => {
+  const allowedReads = routes.filter(route => {
     try {
       const selected = selectSimulatorResearchTarget({ ...input, ...route });
       const key = `${routeIdentity(selected.url)}:${selected.rendered}`;
@@ -522,7 +560,10 @@ export function getSimulatorResearchGuide(input: {
       return false;
     }
   });
+  const browserFallbackRequired = needsSimulatorInteractiveFallback(input) && allowedReads.some(route => route.rendered);
+  const suggestedReads = browserFallbackRequired ? allowedReads.filter(route => route.rendered) : allowedReads;
   return { readsRemaining: SIMULATOR_RESEARCH_MAX_READS - input.state.readCount,
+    browserFallbackRequired, ...(browserFallbackRequired ? { requiredTool: "course_research_browser" as const } : {}),
     inFlight: Boolean(input.state.inFlight), suggestedReads, rejectedReads,
     blockedResourceDiagnostics: input.state.history.flatMap(entry => entry.blockedResourceDiagnostics &&
       entry.sourceFingerprint === input.state.sourceFingerprint && entry.rendered && entry.outcome === "READ" &&
@@ -580,9 +621,12 @@ export function getSimulatorResearchRetryGuide(input: {
     latest.failure?.stage === "PUBLIC_READ" && latest.failure.category === "NETWORK" && readSafeSimulatorSupportFailure(latest.failure);
   const companionBackoff = latest?.configurationDiagnostic?.reason === "PUBLIC_PROVIDER_HTTP_ERROR" &&
     (latest.configurationDiagnostic.httpStatus === 429 || (latest.configurationDiagnostic.httpStatus ?? 0) >= 500);
-  if (latest?.outcome === "CAPACITY_BUSY" || latest?.httpStatus === 429 || recognizedNetwork || companionBackoff ||
+  if (latest?.outcome === "CAPACITY_BUSY" || latest?.httpStatus === 429 || recognizedNetwork && !researchGuide.browserFallbackRequired || companionBackoff ||
       latest?.outcome === "READ" && latest.httpStatus >= 500 && latest.httpStatus <= 599) return result(null, true, "PROVIDER_BACKOFF");
   if (researchGuide.suggestedReads.length === 0) return result(null, true, "NO_ALLOWED_RESEARCH_ROUTES");
+  if (researchGuide.browserFallbackRequired) return {
+    ...result(researchGuide.suggestedReads[0], false, null), researchMode: "INTERACTIVE_BROWSER" as const,
+  };
   const official = getSafeCustomerBookingUrl(input.officialUrl);
   const booking = getSafeCustomerBookingUrl(input.bookingUrl);
   const distinctSavedBooking = Boolean(booking && (!official || routeIdentity(booking) !== routeIdentity(official)));

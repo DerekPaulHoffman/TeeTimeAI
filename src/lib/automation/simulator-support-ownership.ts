@@ -14,7 +14,7 @@ import { z } from "zod";
 import { collectSimulatorSupportResearch, type SimulatorResearchDependencies, type SimulatorResearchResult } from "./simulator-support-research";
 export { summarizeSimulatorSupportPublicHtml } from "./simulator-support-research";
 import { evaluateSimulatorSupportProgress } from "./simulator-support-progress";
-import { assertSimulatorResearchFallbackBeforeRetry, getSimulatorResearchGuide, getSimulatorResearchRetryGuide, getSimulatorResearchObservationFingerprint, getSimulatorResearchImplementationVersion, readSettledSimulatorPublicCheckpoint, readSimulatorResearchState, selectSimulatorResearchTarget, mergeSimulatorResearchBlockedRoutes, readSimulatorResearchFailureMemory, currentSimulatorResearchBlockedRoutes, type SimulatorResearchBlockedRoute, type SimulatorResearchSource, type SimulatorResearchState } from "./simulator-support-research-policy";
+import { assertSimulatorInteractiveFallback, assertSimulatorResearchFallbackBeforeRetry, getSimulatorResearchGuide, getSimulatorResearchRetryGuide, getSimulatorResearchObservationFingerprint, getSimulatorResearchImplementationVersion, readSettledSimulatorPublicCheckpoint, readSimulatorResearchState, selectSimulatorResearchTarget, mergeSimulatorResearchBlockedRoutes, readSimulatorResearchFailureMemory, currentSimulatorResearchBlockedRoutes, type SimulatorResearchBlockedRoute, type SimulatorResearchSource, type SimulatorResearchState } from "./simulator-support-research-policy";
 import { classifySimulatorSupportFailure, type SimulatorSupportFailure } from "./simulator-support-failure";
 import { validateSimulatorEngineeringAuthority } from "./simulator-support-incidents";
 import { readSimulatorEngineeringVerificationState, selectSimulatorEngineeringDuration } from "./simulator-support-engineering-verification-policy";
@@ -334,7 +334,7 @@ export function readSimulatorSupportConfigurationCandidate(input: Owner) {
   });
 }
 
-export async function readSimulatorSupportSource(input: Owner & { source?: SimulatorResearchSource; linkIndex?: number; rendered?: boolean; interactiveChannel?: string }, dependencies: SimulatorResearchDependencies | typeof fetch = {}) {
+export async function readSimulatorSupportSource(input: Owner & { source?: SimulatorResearchSource; linkIndex?: number; rendered?: boolean; interactiveChannel?: string }, dependencies: (SimulatorResearchDependencies & { interactive?: typeof collectInteractiveSimulatorResearch }) | typeof fetch = {}) {
   const before = await withTransition(async (tx, now) => {
     const row = await loadOwned(tx, input, now);
     const state = readSimulatorResearchState(row.audit.simulatorResearch, row.source.fingerprint);
@@ -345,6 +345,10 @@ export async function readSimulatorSupportSource(input: Owner & { source?: Simul
       postRepairResearchBoundary), now, postRepairResearchBoundary);
     const selected = selectSimulatorResearchTarget({ state, officialUrl: row.source.offering.course.website ?? row.source.offering.evidenceUrl,
       bookingUrl: row.source.offering.bookingUrl, evidenceUrl: row.source.offering.evidenceUrl, source: input.source, linkIndex: input.linkIndex, rendered: input.rendered ?? false, now, priorFailedRoutes, postRepairResearchBoundary });
+    assertSimulatorInteractiveFallback(getSimulatorResearchGuide({ state,
+      officialUrl: row.source.offering.course.website ?? row.source.offering.evidenceUrl,
+      bookingUrl: row.source.offering.bookingUrl, evidenceUrl: row.source.offering.evidenceUrl,
+      now, priorFailedRoutes, postRepairResearchBoundary }), Boolean(input.interactiveChannel));
     const requestId = randomUUID();
     const research: SimulatorResearchState = { ...state, readCount: state.readCount + 1, inFlight: { requestId, startedAt: now.toISOString(), expiresAt: new Date(now.getTime() + (input.interactiveChannel ? INTERACTIVE_BROWSER_DURATION_MS + 30_000 : 60_000)).toISOString(), ...selected } };
     const saved = await saveClaim(tx, row, now);
@@ -358,7 +362,7 @@ export async function readSimulatorSupportSource(input: Owner & { source?: Simul
   let failureCode: string | undefined;
   let knownFailure: SimulatorSupportFailure | undefined;
   try {
-    read = input.interactiveChannel ? await collectInteractiveSimulatorResearch({ url: before.value.url, channel: input.interactiveChannel,
+    read = input.interactiveChannel ? await (typeof dependencies === "function" ? collectInteractiveSimulatorResearch : dependencies.interactive ?? collectInteractiveSimulatorResearch)({ url: before.value.url, channel: input.interactiveChannel,
       assertOwned: async () => { const checked = await withTransition(async (tx, now) => {
         const row = await loadOwned(tx, { ...input, revision: before.value.revision }, now);
         const state = readSimulatorResearchState(row.audit.simulatorResearch, row.source.fingerprint);
@@ -850,6 +854,7 @@ export function retrySimulatorSupport(input: Owner & { retryMinutes: number; cur
         outcome: "booking_research_required" as const, revision: row.claim.revision, leaseExpiresAt: row.claim.leaseExpiresAt,
         researchGuide: retryGuide.researchGuide, nextEligibleBookingRead: retryGuide.nextEligibleBookingRead,
         ...(retryGuide.researchPurpose ? { researchPurpose: retryGuide.researchPurpose } : {}),
+        ...("researchMode" in retryGuide ? { researchMode: retryGuide.researchMode } : {}),
       };
       if (!publishedOwnedRelease && !retryGuide.skipHomepageFallback) assertSimulatorResearchFallbackBeforeRetry(state, bookingUrl, officialUrl);
     }

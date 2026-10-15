@@ -8,6 +8,7 @@ import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-f
 import { createSimulatorSupportIntentDigest, SIMULATOR_SUPPORT_SOURCE_SELECT } from "./simulator-support-policy";
 import { SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION, getSimulatorResearchImplementationVersion } from "./simulator-support-research-policy";
 import { publicSimulatorFixture, type PublicSimulatorFixtureKind } from "./simulator-public-api.test-fixtures";
+import { collectSimulatorSupportResearch } from "./simulator-support-research";
 
 const coreMocks = vi.hoisted(() => ({ fetch: vi.fn(), sendMatch: vi.fn(), sendStatus: vi.fn() }));
 vi.mock("@/lib/simulators/providers", async importOriginal => ({
@@ -28,6 +29,20 @@ let lane: typeof import("./simulator-support-ownership");
 let incidents: typeof import("./simulator-support-incidents");
 const ids = { users: [] as string[], courses: [] as string[], runs: [] as string[] };
 const baseSha = "a".repeat(40);
+
+// Controlled collector at the interactive seam; browser actions have separate tests.
+async function readViaInteractiveFixture(input: Parameters<typeof lane.readSimulatorSupportSource>[0],
+  dependencies: Parameters<typeof lane.readSimulatorSupportSource>[1] = {}) {
+  const options = typeof dependencies === "function" ? { fetch: dependencies } : dependencies;
+  return lane.readSimulatorSupportSource({ ...input, rendered: true, interactiveChannel: "isolated-test-browser" }, {
+    ...options, interactive: async ({ url, assertOwned }) => {
+      await assertOwned();
+      const read = await collectSimulatorSupportResearch({ url, render: Boolean(options.browser) }, options);
+      await assertOwned();
+      return { ...read, method: "BROWSER", renderComplete: read.renderComplete ?? true };
+    },
+  });
+}
 
 describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => {
   beforeAll(async () => {
@@ -318,17 +333,27 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(f.before);
   });
 
-  it("researches and retries an ended opted-in engineering incident without changing its stopped search or sending", async () => {
+  it("requires a browser after one incomplete read without changing the stopped search, closing the owner or sending", async () => {
     const f = await engineeringFixture();
     expect((await lane.readSimulatorSupportClaim({ assignmentRef: f.engineeringOwner.assignmentRef, ownerThreadId: f.engineeringOwner.ownerThreadId })).supportAuthority).toBe("ENGINEERING_INCIDENT");
     const read = await lane.readSimulatorSupportSource({ ...f.engineeringOwner, source: "official" }, { fetch: vi.fn(async () => new Response("<h1>Public simulator rental details</h1>", { headers: { "content-type": "text/html" } })) });
     if (!read.acquired) throw new Error("Engineering public read was busy.");
-    await lane.retrySimulatorSupport({ ...f.engineeringOwner, revision: read.value.revision, retryMinutes: 60 });
+    const owner = { ...f.engineeringOwner, revision: read.value.revision };
+    const unchanged = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const skippedBrowser = vi.fn(async () => new Response("Must not repeat a passive read"));
+    await expect(lane.readSimulatorSupportSource({ ...owner, source: "official", rendered: true }, { fetch: skippedBrowser }))
+      .rejects.toThrow("requires the interactive browser");
+    expect(skippedBrowser).not.toHaveBeenCalled();
+    expect(await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).toEqual(unchanged);
+    const retry = await lane.retrySimulatorSupport({ ...owner, retryMinutes: 60 });
+    expect(retry).toMatchObject({ acquired: true, value: { outcome: "booking_research_required",
+      researchMode: "INTERACTIVE_BROWSER", researchGuide: { browserFallbackRequired: true,
+        requiredTool: "course_research_browser" } } });
     expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(f.before);
     expect(await client.simulatorSupportIncident.findUniqueOrThrow({ where: { id: f.incident.id } })).toMatchObject({ status: "AUTO_INVESTIGATING", resolvedAt: null });
     expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
     const count = await client.automationRun.count({ where: { promptVersion: dispatcher.COURSE_DISPATCH_PROMPT_VERSION, status: "RUNNING" } });
-    expect(count).toBe(0);
+    expect(count).toBe(1);
   });
 
   it("lets an engineering research owner yield to new real demand while preserving both searches", async () => {
@@ -474,7 +499,10 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
       fragments: [{ projection: "TOKEN_WINDOW" }], truncated: true,
     });
     if (size === "multiple-sources") {
-      expect(read.value.publicSource.clientCodeEvidence!.fragments).toHaveLength(4);
+      // The bounded sampler now permits up to sixteen distinct windows.
+      // Source coverage, rather than the old four-window cap, is the invariant.
+      expect(read.value.publicSource.clientCodeEvidence!.fragments.length).toBeGreaterThanOrEqual(2);
+      expect(read.value.publicSource.clientCodeEvidence!.fragments.length).toBeLessThanOrEqual(16);
       expect(new Set(read.value.publicSource.clientCodeEvidence!.fragments.map(fragment => fragment.sourceSha256)).size).toBe(2);
       expect(read.value.publicSource.clientCodeEvidence!.candidateSourceHashes).toHaveLength(2);
       expect(read.value.publicSource.clientCodeEvidence!.sourceCoverageTruncated).toBe(false);
@@ -974,7 +1002,7 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
       Object.defineProperty(response, "url", { value: "https://official.example.test/simulators/" });
       return response;
     });
-    const landing = await lane.readSimulatorSupportSource({ ...owner, linkIndex: 1 }, redirected);
+    const landing = await readViaInteractiveFixture({ ...owner, linkIndex: 1 }, redirected);
     if (!landing.acquired) throw new Error("Redirected source read failed."); owner = { ...owner, revision: landing.value.revision };
     expect(landing.value.publicSource).toMatchObject({ requestedUrl: "https://official.example.test/rates", url: "https://official.example.test/simulators/", links: ["https://official.example.test/simulators/book"] });
     expect((await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).audit).toMatchObject({ simulatorResearch: { version: 1, readCount: 2, linkBaseUrl: "https://official.example.test/simulators/" } });
@@ -1172,7 +1200,7 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
       nextEligibleBookingRead: { linkIndex: 1, rendered: true } });
     const lease = (async (_host: string, worker: () => Promise<unknown>) => ({ acquired: true as const, value: await worker() })) as
       NonNullable<import("./simulator-support-research").SimulatorResearchDependencies["lease"]>;
-    const rendered = await lane.readSimulatorSupportSource({ ...owner, linkIndex: 1, rendered: true }, {
+    const rendered = await readViaInteractiveFixture({ ...owner, linkIndex: 1, rendered: true }, {
       fetch, lease, browser: async () => chromium.launch({ headless: true }),
     });
     if (!rendered.acquired) throw new Error("Rendered handoff unavailable.");
@@ -1199,7 +1227,7 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     });
     const lease = (async (_host: string, work: () => Promise<unknown>) => ({ acquired: true as const, value: await work() })) as NonNullable<import("./simulator-support-research").SimulatorResearchDependencies["lease"]>;
     for (const rendered of [false, true]) {
-      const read = await lane.readSimulatorSupportSource({ ...owner, source: "booking", rendered }, { fetch, lease,
+      const read = await (rendered ? readViaInteractiveFixture : lane.readSimulatorSupportSource)({ ...owner, source: "booking", rendered }, { fetch, lease,
         ...(rendered ? { browser: async () => chromium.launch({ headless: true }) } : {}) });
       if (!read.acquired) throw new Error("Owned shell reference was busy."); owner = { ...owner, revision: read.value.revision };
       if (rendered) expect(read.value.publicSource).toMatchObject({ renderComplete: false, renderWarning: "SECONDARY_REQUESTS_BLOCKED" });
@@ -1239,7 +1267,7 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
       fetch: vi.fn(async () => new Response(`<a href='${target}'>${kind === "unlabelled" ? "Details" : "Book Online"}</a>`, { headers: { "content-type": "text/html" } })),
     });
     if (!first.acquired) throw new Error("Initial link unavailable.");
-    const second = await lane.readSimulatorSupportSource({ ...f.owner, revision: first.value.revision, linkIndex: 1 }, {
+    const second = await (kind === "unlabelled" ? readViaInteractiveFixture : lane.readSimulatorSupportSource)({ ...f.owner, revision: first.value.revision, linkIndex: 1 }, {
       fetch: vi.fn(async () => new Response(kind === "challenged" ? "<h1>Verify you are human</h1>" : "<h1>Public details</h1>", { headers: { "content-type": "text/html" } })),
     });
     if (!second.acquired) throw new Error("Second link unavailable.");
@@ -1303,7 +1331,7 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(claim.researchGuide.suggestedReads).toContainEqual({ source: "booking", rendered: true });
     expect(claim.researchGuide.priorBlockedRoutes).toContainEqual(expect.objectContaining({ url: target, failure: expect.objectContaining({ code: "PUBLIC_BODY_LIMIT" }) }));
     const browser = vi.fn(async () => { throw new Error("SIMULATOR_RESEARCH_PROVIDER_BUSY"); });
-    const next = await lane.readSimulatorSupportSource({ ...owner, source: "booking", rendered: true }, { fetch, browser });
+    const next = await readViaInteractiveFixture({ ...owner, source: "booking", rendered: true }, { fetch, browser });
     if (!next.acquired) throw new Error("Rendered reservation busy.");
     expect(browser).toHaveBeenCalledOnce();
     expect(next.value.researchOutcome).toBe("CAPACITY_BUSY");
@@ -1447,9 +1475,9 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     owner = { ...owner, revision: failed.value.revision };
     const inspected = await lane.readSimulatorSupportClaim(owner);
     expect(inspected.research).toMatchObject({ readCount: 2, linkBaseUrl: "https://official.example.test/", links: ["https://official.example.test/book-one", "https://official.example.test/book-two"] });
-    expect(inspected.researchGuide.suggestedReads).toContainEqual({ linkIndex: 2, rendered: false });
+    expect(inspected.researchGuide.suggestedReads).toContainEqual({ linkIndex: 2, rendered: true });
     const alternative = vi.fn(async () => new Response("<p>Public calendar</p>", { headers: { "content-type": "text/html" } }));
-    const result = await lane.readSimulatorSupportSource({ ...owner, linkIndex: 2 }, alternative);
+    const result = await readViaInteractiveFixture({ ...owner, linkIndex: 2 }, alternative);
     if (!result.acquired) throw new Error("Alternative source read failed.");
     expect(alternative).toHaveBeenCalledWith("https://official.example.test/book-two", expect.objectContaining({ method: "GET" }));
     expect(result.value.publicSource.httpStatus).toBe(200);
@@ -1523,8 +1551,8 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(refused.acquired).toBe(true);
     if (!refused.acquired) throw new Error("Retry guard writer was busy.");
     expect(refused.value).toMatchObject({ outcome: "booking_research_required", revision: owner.revision,
-      nextEligibleBookingRead: { linkIndex: 1, rendered: false } });
-    expect(refused.value.researchGuide.suggestedReads).toContainEqual({ linkIndex: 1, rendered: false });
+      nextEligibleBookingRead: { linkIndex: 1, rendered: true } });
+    expect(refused.value.researchGuide.suggestedReads).toContainEqual({ linkIndex: 1, rendered: true });
     expect(refused.value.researchGuide.readsRemaining).toBe(2);
     expect(refused.value.researchGuide.suggestedReads).not.toContainEqual({ source: "booking", rendered: false });
     expect(refused.value.researchGuide.suggestedReads).not.toContainEqual({ source: "booking", rendered: true });
@@ -1544,7 +1572,7 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
       research.bookingLinkRoles = [{ url: "https://official.example.test/venue", observedAt: new Date(Date.now() - 31 * 60_000).toISOString() }];
       await client.automationRun.update({ where: { id: f.run.id }, data: { audit: audit as unknown as Prisma.InputJsonValue } });
     }
-    const second = await lane.readSimulatorSupportSource({ ...f.owner, revision: first.value.revision, linkIndex: 2 }, vi.fn(async () => new Response(
+    const second = await (kind === "stale" ? readViaInteractiveFixture : lane.readSimulatorSupportSource)({ ...f.owner, revision: first.value.revision, linkIndex: 2 }, vi.fn(async () => new Response(
       kind === "stale" ? "<a href='/venue'>Rental details</a>" : "<a href='/other'>Other details</a>",
       { headers: { "content-type": "text/html" } })));
     if (!second.acquired) throw new Error("Details read failed.");
@@ -1619,15 +1647,8 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(guided.acquired).toBe(true);
     if (!guided.acquired) throw new Error("Booking fallback guide was busy.");
     expect(guided.value).toMatchObject({ outcome: "booking_research_required", revision: owner.revision,
-      nextEligibleBookingRead: { source: "booking", rendered: false } });
-    const booking = await lane.readSimulatorSupportSource({ ...owner, source: "booking" }, vi.fn(async () => new Response("<p>Calendar needs support</p>", { headers: { "content-type": "text/html" } })));
-    if (!booking.acquired) throw new Error("Booking research failed.");
-    owner = { ...owner, revision: booking.value.revision };
-    const stillGuided = await lane.retrySimulatorSupport({ ...owner, retryMinutes: 15 });
-    expect(stillGuided.acquired && stillGuided.value.outcome).toBe("booking_research_required");
-    if (!stillGuided.acquired || stillGuided.value.outcome !== "booking_research_required") throw new Error("Rendered booking guide was unavailable.");
-    expect(stillGuided.value.nextEligibleBookingRead).toEqual({ source: "booking", rendered: true });
-    const busy = await lane.readSimulatorSupportSource({ ...owner, source: "booking", rendered: true }, {
+      nextEligibleBookingRead: { source: "booking", rendered: true } });
+    const busy = await readViaInteractiveFixture({ ...owner, source: "booking", rendered: true }, {
       browser: async () => { throw new Error("SIMULATOR_RESEARCH_PROVIDER_BUSY"); },
     });
     if (!busy.acquired) throw new Error("Provider backoff observation failed.");

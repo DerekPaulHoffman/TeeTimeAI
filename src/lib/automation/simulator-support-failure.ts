@@ -42,6 +42,7 @@ const ownedMessages: Record<string, Classification> = {
   "Use a different simulator source research route; the identical route was already attempted.": { category: "BUDGET", code: "RESEARCH_ROUTE_REPEATED", stage: "TARGET_SELECTION" },
   "An unchanged structural source failure needs a different research route or materially changed source.": { category: "SOURCE", code: "STRUCTURAL_ROUTE_UNCHANGED", stage: "TARGET_SELECTION" },
   "The selected owned simulator source or link is unavailable.": { category: "SOURCE", code: "OWNED_SOURCE_UNAVAILABLE", stage: "TARGET_SELECTION" },
+  "An incomplete fast calendar read requires the interactive browser before more source reads.": { category: "SOURCE", code: "INTERACTIVE_BROWSER_REQUIRED", stage: "TARGET_SELECTION" },
   "The selected link is not a fresh same-site page or official booking handoff.": { category: "ACCESS", code: "SAVED_LINK_NOT_ELIGIBLE", stage: "TARGET_SELECTION" },
   "The saved evidence page must remain on the official website origin.": { category: "ACCESS", code: "EVIDENCE_ORIGIN_NOT_ELIGIBLE", stage: "TARGET_SELECTION" },
   "Use the original official route when the evidence page is the homepage.": { category: "SOURCE", code: "EVIDENCE_IS_OFFICIAL_ROUTE", stage: "TARGET_SELECTION" },
