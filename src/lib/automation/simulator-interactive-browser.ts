@@ -43,7 +43,10 @@ export function interactiveControlKind(input: { tag: string; role: string; name:
 }
 
 /** Only explicitly read-shaped anonymous JSON requests, never arbitrary page POSTs. */
-export function isAnonymousBrowserReadPost(_url: URL, headers: Headers, body: string) {
+export function isAnonymousBrowserReadPost(url: URL, headers: Headers, body: string) {
+  // This known REST API must use its exact source-bound contracts. Adding a
+  // GraphQL-looking field must not bypass them or authorize a transaction URL.
+  if (url.hostname === "api.passfactory.io") return false;
   if (Buffer.byteLength(body) > 32_768 || !/application\/json/iu.test(headers.get("content-type") ?? "")) return false;
   try {
     const value = JSON.parse(body);

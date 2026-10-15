@@ -23,7 +23,7 @@ describe("observed PassFactory public widget reads", () => {
     expect(allows("availability-widget/facility-widget", resource, ready(), new Headers({ origin: "https://evil.test", "content-type": "application/json" }))).toBe(false);
     for (const path of ["auth/login", "booking/create", "payment/checkout", "availability-widget/my-assigned", "availability-widget/facility-widget?extra=true"])
       expect(allows(path, resource)).toBe(false);
-    for (const key of ["token", "email", "customer_id", "reservation", "action", "hall_code"])
+    for (const key of ["token", "email", "customer_id", "reservation", "action", "hall_code", "query"])
       expect(allows("availability-widget/facility-widget", { ...resource, [key]: "injected" })).toBe(false);
     expect(allows("availability-widget/get-business-info", resource)).toBe(false);
     expect(allows("availability-widget/hall-widget", resource)).toBe(false);

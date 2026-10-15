@@ -31,6 +31,8 @@ describe("interactive public research boundaries", () => {
     expect(check({ query: "{ slots { time } }", token: "private" })).toBe(false);
     expect(check({ action: "unknown", date: "2026-10-15" })).toBe(false);
     expect(check({ action: "getSlots", email: "private@example.test" })).toBe(false);
+    expect(isAnonymousBrowserReadPost(new URL("https://api.passfactory.io/api/v1/booking/create"), headers,
+      JSON.stringify({ query: "{ slots { time } }" }))).toBe(false);
   });
 
   it("follows an observed new-tab booking link and waits for slow calendar resources", async () => {
