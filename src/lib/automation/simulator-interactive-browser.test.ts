@@ -55,7 +55,14 @@ describe("interactive public research boundaries", () => {
         : '<html><body><a target="_blank" href="https://booking.example.test/calendar">Reservations</a></body></html>',
       { headers: { "content-type": "text/html" } });
     }) as typeof global.fetch;
-    const lease = (async (_family: string, work: () => Promise<unknown>) => ({ acquired: true, value: await work() })) as never;
+    const leasedHosts = new Set<string>();
+    let busyDenials = 0;
+    const lease = (async (family: string, work: () => Promise<unknown>) => {
+      if (leasedHosts.has(family)) { busyDenials++; return { acquired: false }; }
+      leasedHosts.add(family);
+      try { return { acquired: true, value: await work() }; }
+      finally { leasedHosts.delete(family); }
+    }) as never;
     const task = collectInteractiveSimulatorResearch({ url: "https://public.example.test", channel,
       assertOwned: async () => { if (stopped) throw new Error("Fixture stopped"); } }, { fetch, lease });
     // Keep failures observable even when the collector exits before a response.
@@ -82,6 +89,7 @@ describe("interactive public research boundaries", () => {
       await writeFile(join(channel, "request-2.json"), JSON.stringify({ action: "finish" }));
       const result = await task;
       expect(result.text).toContain("Available calendar");
+      expect(busyDenials).toBe(0);
     } finally {
       stopped = true;
       await writeFile(join(channel, `request-${nextRequest}.json`), JSON.stringify({ action: "finish" })).catch(() => {});

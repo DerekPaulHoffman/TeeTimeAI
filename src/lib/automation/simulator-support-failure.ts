@@ -96,6 +96,7 @@ const sourceModules = new Set([
   "src/lib/automation/simulator-support-ownership.ts",
   "src/lib/automation/simulator-support-research.ts",
   "src/lib/automation/simulator-interactive-browser.ts",
+  "src/lib/automation/simulator-browser-request-queue.ts",
   "src/lib/automation/simulator-support-research-policy.ts",
   "src/lib/automation/simulator-support-failure.ts",
   "src/lib/automation/address-pinned-public-fetch.ts",

@@ -6,6 +6,7 @@ import { z } from "zod";
 import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import { createAddressPinnedPublicFetchTransport } from "./address-pinned-public-fetch";
 import { runWithProviderRequestLease } from "./provider-request-lease";
+import { createSimulatorBrowserRequestQueue } from "./simulator-browser-request-queue";
 import { sanitizeResponderText } from "./course-support-responder-policy";
 import { tagSimulatorResearchFailure, type SimulatorResearchFailurePhase } from "./simulator-support-failure";
 import { detectSimulatorResearchAccessControls, summarizeSimulatorPublicJsonShape,
@@ -134,6 +135,8 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
     maxResponseBytes: 4_000_000, timeoutMs: 45_000, redirectLimit: 0, authorizeReadPost: isAnonymousBrowserReadPost,
   });
   const lease = dependencies.lease ?? runWithProviderRequestLease;
+  const requestSignal = AbortSignal.any([deadline, transportAbort.signal]);
+  const requestQueue = createSimulatorBrowserRequestQueue(lease, requestSignal);
   const assertLive = async () => {
     if (deadline.aborted) throw new Error("SIMULATOR_RESEARCH_DEADLINE");
     if (failure) throw failure;
@@ -163,8 +166,8 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
             blocked += 1; return await route.abort("blockedbyclient");
           }
           if (++requests > 192 || bytes > 24_000_000) throw new Error("SIMULATOR_RESEARCH_REQUEST_LIMIT");
-          const leased = await lease(new URL(safe).hostname, async () => {
-            const response = await transport(safe, { method, headers: publicHeaders, credentials: "omit", redirect: "manual", signal: AbortSignal.any([deadline, transportAbort.signal]),
+          await requestQueue.run(new URL(safe).hostname, async () => {
+            const response = await transport(safe, { method, headers: publicHeaders, credentials: "omit", redirect: "manual", signal: requestSignal,
               ...(method === "POST" ? { body } : {}) });
             const buffer = Buffer.from(await response.arrayBuffer());
             bytes += buffer.length;
@@ -186,7 +189,6 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
             if (cors === "*" || cors && origins.has(cors)) responseHeaders["access-control-allow-origin"] = cors;
             await route.fulfill({ status: response.status, headers: responseHeaders, body: buffer });
           });
-          if (!leased.acquired) throw new Error("SIMULATOR_RESEARCH_PROVIDER_BUSY");
         } catch (error) { failure ??= tagSimulatorResearchFailure(error, "BROWSER_REQUEST"); await route.abort().catch(() => {}); }
       })();
       active.add(operation);
@@ -293,6 +295,7 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
     transportAbort.abort();
     await context.close().catch(() => {});
     await Promise.allSettled([...active]);
+    requestQueue.dispose();
     await browser.close();
   }
 }
