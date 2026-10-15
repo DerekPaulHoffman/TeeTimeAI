@@ -5,6 +5,7 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { courseSupportWorkerRuntimeEnvironment, resolveCourseSupportWorkerRuntime } from "./course-support-worker-runtime.mjs";
+import { courseBrowserTool, createCourseBrowserBridge } from "./course-support-browser-bridge.mjs";
 
 export const WORKER_PERMISSION_PROFILE = ":danger-full-access";
 export const WORKER_RPC_TIMEOUT_MS = 40_000;
@@ -118,7 +119,7 @@ export function courseSupportWorkerAppServerEnvironment(cwd, environment = proce
   return result;
 }
 
-export function createWorkerAppServer({ cliPath, cwd, eventPath, stderrPath, onMessage = () => {}, onFailure = () => {}, spawnProcess = spawn, timeoutMs = WORKER_RPC_TIMEOUT_MS, environment = courseSupportWorkerAppServerEnvironment(cwd) }) {
+export function createWorkerAppServer({ cliPath, cwd, eventPath, stderrPath, onMessage = () => {}, onFailure = () => {}, onToolCall, spawnProcess = spawn, timeoutMs = WORKER_RPC_TIMEOUT_MS, environment = courseSupportWorkerAppServerEnvironment(cwd) }) {
   const child = spawnProcess(cliPath, ["app-server", "--stdio"], {
     cwd, env: environment, windowsHide: true, shell: false, stdio: ["pipe", "pipe", "pipe"],
   });
@@ -161,6 +162,10 @@ export function createWorkerAppServer({ cliPath, cwd, eventPath, stderrPath, onM
       pending.delete(message.id); clearTimeout(request.timer);
       if (message.error) request.reject(Object.assign(failure("APP_SERVER_RPC_REJECTED"), { rpcCode: message.error.code }));
       else request.resolve(message.result);
+    } else if (message.method === "item/tool/call" && message.id != null && onToolCall) {
+      Promise.resolve(onToolCall(message.params)).then(result => {
+        if (!stopped) child.stdin.write(`${JSON.stringify({ id: message.id, result })}\n`);
+      }).catch(() => fail(failure("WORKER_BROWSER_TOOL_FAILED")));
     } else if (message.method && message.id != null && !isApprovalRequest(message)) {
       child.stdin.write(`${JSON.stringify({ id: message.id, error: { code: -32601, message: "This worker launcher does not implement client-side tools." } })}\n`);
     }
@@ -247,6 +252,7 @@ export async function prepareCourseSupportWorker(options) {
       cwd: checkout.cwd, ephemeral: false, historyMode, approvalPolicy: "never",
       permissions: WORKER_PERMISSION_PROFILE, runtimeWorkspaceRoots: [checkout.cwd],
       threadSource: "agent_created_thread",
+      dynamicTools: [courseBrowserTool],
     });
     if (UUID.test(started?.thread?.id ?? "")) receipt.threadId = started.thread.id;
     writeReceipt(receiptPath, receipt);
@@ -325,8 +331,15 @@ export async function runPreparedCourseSupportWorker(options) {
     if (receipt.turnId) await client?.request("turn/interrupt", { threadId: receipt.threadId, turnId: receipt.turnId }).catch(() => {});
   };
   const timer = setTimeout(() => { fatal = failure("WORKER_TURN_TIMEOUT"); wake(); }, turnTimeoutMs);
+  const browserBridge = createCourseBrowserBridge({ cwd: receipt.cwd, threadId: receipt.threadId,
+    nativeIdentityVerified: () => receipt.nativeIdentityVerified === true && !fatal });
   try {
-    client = clientFactory({ ...receipt, onFailure(error) { fatal ??= error; wake(); }, onMessage(message) {
+    client = clientFactory({ ...receipt, onToolCall(params) {
+      if (params?.threadId !== receipt.threadId || params?.turnId !== receipt.turnId || params?.tool !== courseBrowserTool.name) {
+        return { success: false, contentItems: [{ type: "inputText", text: "Browser call does not match the original native worker." }] };
+      }
+      return browserBridge.call(params.arguments);
+    }, onFailure(error) { fatal ??= error; wake(); }, onMessage(message) {
       let changed = false;
       if (isApprovalRequest(message)) {
         receipt.approvalRequests += 1; fatal = failure("UNEXPECTED_APPROVAL_REQUEST"); wake(); changed = true;
@@ -381,7 +394,7 @@ export async function runPreparedCourseSupportWorker(options) {
     try { writeReceipt(receiptPath, receipt); }
     catch (diagnosticError) { retainPrimaryFailure(error, diagnosticError); }
     throw error;
-  } finally { clearTimeout(timer); await client?.close(); }
+  } finally { clearTimeout(timer); await browserBridge.close(); await client?.close(); }
 }
 
 export function readWorkerLauncherArguments(args) {

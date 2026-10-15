@@ -17,7 +17,8 @@ type PinnedPublicRequest = {
   url: URL;
   address: string;
   family: 4 | 6;
-  method: "GET" | "HEAD";
+  method: "GET" | "HEAD" | "POST";
+  body?: string;
   headers: Headers;
   signal?: AbortSignal;
 };
@@ -40,6 +41,8 @@ type AddressPinnedPublicFetchPolicy = {
   maxResponseBytes: number;
   redirectLimit?: number;
   timeoutMs: number;
+  /** Opt-in only: caller must prove a bounded anonymous read operation. */
+  authorizeReadPost?: (url: URL, headers: Headers, body: string) => boolean;
 };
 
 const nonPublicNetworkBlockLists = buildNonPublicNetworkBlockLists();
@@ -89,10 +92,11 @@ export function createAddressPinnedPublicFetchTransport(
   return (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const requestInput = input instanceof Request ? input : null;
     const method = (init?.method ?? requestInput?.method ?? "GET").toUpperCase();
-    if (method !== "GET" && method !== "HEAD") {
+    if (method !== "GET" && method !== "HEAD" && method !== "POST") {
       throw new Error("Official-site discovery supports only safe read requests");
     }
-    if (init?.body || requestInput?.body) {
+    const body = typeof init?.body === "string" ? init.body : undefined;
+    if (method !== "POST" && (init?.body || requestInput?.body)) {
       throw new Error("Official-site discovery requests cannot include a body");
     }
     const headers = new Headers(requestInput?.headers);
@@ -115,6 +119,9 @@ export function createAddressPinnedPublicFetchTransport(
     let currentUrl = policy.parseUrl(
       requestInput?.url ?? (input instanceof URL ? input.toString() : String(input))
     );
+    if (method === "POST" && (!body || requestInput?.body || !policy.authorizeReadPost?.(currentUrl, headers, body))) {
+      throw new Error("Official-site discovery supports only authorized read requests");
+    }
 
     for (let redirectCount = 0; redirectCount <= redirectLimit; redirectCount += 1) {
       const addresses = await resolveAddressesWithSignal(
@@ -129,6 +136,7 @@ export function createAddressPinnedPublicFetchTransport(
           address: target.address,
           family: target.family,
           method,
+          ...(body ? { body } : {}),
           headers,
           signal
         }),
@@ -142,6 +150,7 @@ export function createAddressPinnedPublicFetchTransport(
       if (redirectMode === "manual") {
         return response;
       }
+      if (method === "POST") throw new Error("Public read POST redirects are not replayed");
       if (redirectMode === "error") {
         throw new Error("Official site returned a redirect");
       }
@@ -338,7 +347,7 @@ function requestPinnedPublicUrl(
       reject(new Error("Official site attempted an unsupported protocol upgrade"));
     });
     clientRequest.on("error", reject);
-    clientRequest.end();
+    clientRequest.end(input.body);
   });
 }
 

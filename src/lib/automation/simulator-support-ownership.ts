@@ -20,6 +20,7 @@ import { validateSimulatorEngineeringAuthority } from "./simulator-support-incid
 import { readSimulatorEngineeringVerificationState, selectSimulatorEngineeringDuration } from "./simulator-support-engineering-verification-policy";
 import { getSimulatorPostRepairResearchBoundary, isProtectedSimulatorResearchDenial, selectRecoveredSimulatorResearchRoutes } from "./simulator-support-research-recovery";
 import { buildSimulatorResearchConfigurationCandidate } from "./simulator-research-configuration-candidate";
+import { collectInteractiveSimulatorResearch, INTERACTIVE_BROWSER_DURATION_MS } from "./simulator-interactive-browser";
 
 type Owner = { assignmentRef: string; ownerThreadId: string; token: string; revision: number };
 const acquiredResearchFailureCodes = new Set([
@@ -333,7 +334,7 @@ export function readSimulatorSupportConfigurationCandidate(input: Owner) {
   });
 }
 
-export async function readSimulatorSupportSource(input: Owner & { source?: SimulatorResearchSource; linkIndex?: number; rendered?: boolean }, dependencies: SimulatorResearchDependencies | typeof fetch = {}) {
+export async function readSimulatorSupportSource(input: Owner & { source?: SimulatorResearchSource; linkIndex?: number; rendered?: boolean; interactiveChannel?: string }, dependencies: SimulatorResearchDependencies | typeof fetch = {}) {
   const before = await withTransition(async (tx, now) => {
     const row = await loadOwned(tx, input, now);
     const state = readSimulatorResearchState(row.audit.simulatorResearch, row.source.fingerprint);
@@ -345,7 +346,7 @@ export async function readSimulatorSupportSource(input: Owner & { source?: Simul
     const selected = selectSimulatorResearchTarget({ state, officialUrl: row.source.offering.course.website ?? row.source.offering.evidenceUrl,
       bookingUrl: row.source.offering.bookingUrl, evidenceUrl: row.source.offering.evidenceUrl, source: input.source, linkIndex: input.linkIndex, rendered: input.rendered ?? false, now, priorFailedRoutes, postRepairResearchBoundary });
     const requestId = randomUUID();
-    const research: SimulatorResearchState = { ...state, readCount: state.readCount + 1, inFlight: { requestId, startedAt: now.toISOString(), expiresAt: new Date(now.getTime() + 60_000).toISOString(), ...selected } };
+    const research: SimulatorResearchState = { ...state, readCount: state.readCount + 1, inFlight: { requestId, startedAt: now.toISOString(), expiresAt: new Date(now.getTime() + (input.interactiveChannel ? INTERACTIVE_BROWSER_DURATION_MS + 30_000 : 60_000)).toISOString(), ...selected } };
     const saved = await saveClaim(tx, row, now);
     await tx.automationRun.update({ where: { id: row.runId }, data: { audit: { ...row.audit,
       simulatorClaim: { ...row.claim, revision: saved.revision, leaseExpiresAt: saved.leaseExpiresAt }, simulatorResearch: research } as unknown as Prisma.InputJsonValue } });
@@ -357,7 +358,13 @@ export async function readSimulatorSupportSource(input: Owner & { source?: Simul
   let failureCode: string | undefined;
   let knownFailure: SimulatorSupportFailure | undefined;
   try {
-    read = await collectSimulatorSupportResearch({ url: before.value.url, render: before.value.rendered }, typeof dependencies === "function" ? { fetch: dependencies } : dependencies);
+    read = input.interactiveChannel ? await collectInteractiveSimulatorResearch({ url: before.value.url, channel: input.interactiveChannel,
+      assertOwned: async () => { const checked = await withTransition(async (tx, now) => {
+        const row = await loadOwned(tx, { ...input, revision: before.value.revision }, now);
+        const state = readSimulatorResearchState(row.audit.simulatorResearch, row.source.fingerprint);
+        if (row.source.fingerprint !== before.value.sourceFingerprint || state.inFlight?.requestId !== before.value.requestId ||
+            Date.parse(state.inFlight.expiresAt) <= now.getTime()) throw new Error("Interactive source authority changed.");
+      }); if (!checked.acquired) throw new Error("Interactive source ownership check could not acquire the writer."); } }) : await collectSimulatorSupportResearch({ url: before.value.url, render: before.value.rendered }, typeof dependencies === "function" ? { fetch: dependencies } : dependencies);
   } catch (error) {
     // Only known research/network failures become observations. Programming and ownership failures remain hard errors.
     const message = error instanceof Error ? error.message : "";

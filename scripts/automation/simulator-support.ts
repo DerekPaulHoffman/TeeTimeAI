@@ -40,11 +40,11 @@ export function readSimulatorSupportArguments(args: readonly string[]) {
       repair = true; index -= 1; continue;
     }
     const name = options[index], value = options[index + 1]?.trim();
-    if (!["--assignment-ref", "--token", "--revision", "--path", "--sha", "--retry-minutes", "--manifest", "--source", "--link"].includes(name) || values.has(name) || !value || value.startsWith("--")) throw new Error("Invalid simulator-support option.");
+    if (!["--assignment-ref", "--token", "--revision", "--path", "--sha", "--retry-minutes", "--manifest", "--source", "--link", "--interactive-channel"].includes(name) || values.has(name) || !value || value.startsWith("--")) throw new Error("Invalid simulator-support option.");
     values.set(name, value);
   }
   const allowed = new Set(["--assignment-ref", ...(command !== "claim" ? ["--token", "--revision"] : []),
-    ...(command === "path" ? ["--path"] : []), ...(command === "release" ? ["--sha"] : []), ...(command === "retry" ? ["--retry-minutes"] : []), ...(["configure", "classify"].includes(command) ? ["--manifest"] : []), ...(command === "source-read" ? ["--source", "--link"] : [])]);
+    ...(command === "path" ? ["--path"] : []), ...(command === "release" ? ["--sha"] : []), ...(command === "retry" ? ["--retry-minutes"] : []), ...(["configure", "classify"].includes(command) ? ["--manifest"] : []), ...(command === "source-read" ? ["--source", "--link", "--interactive-channel"] : [])]);
   if ([...values.keys()].some(value => !allowed.has(value)) || !values.get("--assignment-ref") ||
       (!["claim", "inspect"].includes(command) && (!values.get("--token") || !/^[1-9][0-9]*$/.test(values.get("--revision") ?? ""))) ||
       (command === "inspect" && (values.has("--token") !== values.has("--revision") ||
@@ -57,7 +57,7 @@ export function readSimulatorSupportArguments(args: readonly string[]) {
         (values.has("--source") && !(SIMULATOR_RESEARCH_SOURCE_NAMES as readonly string[]).includes(values.get("--source")!)) ||
         (values.has("--link") && !/^(?:[1-9]|[12][0-9]|30)$/.test(values.get("--link")!))))) throw new Error("Simulator-support command arguments are incomplete.");
   return { command, assignmentRef: values.get("--assignment-ref")!, token: values.get("--token")!, revision: Number(values.get("--revision")), path: values.get("--path"), releaseSha: values.get("--sha"), retryMinutes: Number(values.get("--retry-minutes")), manifestPath: values.get("--manifest"), source: values.get("--source") as SimulatorResearchSource | undefined,
-    linkIndex: values.has("--link") ? Number(values.get("--link")) : undefined, rendered, apply, repair, fromResearch };
+    linkIndex: values.has("--link") ? Number(values.get("--link")) : undefined, interactiveChannel: values.get("--interactive-channel"), rendered: rendered || values.has("--interactive-channel"), apply, repair, fromResearch };
 }
 
 function git(args: string[]) { return execFileSync("git", args, { encoding: "utf8", windowsHide: true }).trim(); }
@@ -155,7 +155,7 @@ async function main() {
   else if (input.command === "heartbeat") result = await heartbeatSimulatorSupport(owner);
   else if (input.command === "recover") result = await recoverSimulatorSupport(owner);
   else if (input.command === "retire") result = await retireSimulatorSupport(owner);
-  else if (input.command === "source-read") result = await readSimulatorSupportSource({ ...owner, source: input.source, linkIndex: input.linkIndex, rendered: input.rendered });
+  else if (input.command === "source-read") result = await readSimulatorSupportSource({ ...owner, source: input.source, linkIndex: input.linkIndex, rendered: input.rendered, interactiveChannel: input.interactiveChannel });
   else if (input.command === "configure") {
     const claim = await readSimulatorSupportClaim(owner);
     const offering = await prisma.courseOffering.findUniqueOrThrow({ where: { id: claim.offeringId } });

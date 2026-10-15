@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { courseBrowserTool } from "../../../scripts/automation/course-support-browser-bridge.mjs";
 
 import {
   WORKER_PERMISSION_PROFILE,
@@ -94,6 +95,7 @@ describe("course worker preparation contract", () => {
       .resolves.toMatchObject({ outcome: "prepared", threadId: THREAD });
     expect(server.request.mock.calls.map(([method]) => method)).toEqual(["initialize", "permissionProfile/list", "thread/start", "thread/name/set"]);
     expect(server.request.mock.calls.find(([method]) => method === "thread/start")?.[1]).toEqual({
+      dynamicTools: [courseBrowserTool],
       cwd: f.cwd, ephemeral: false, historyMode: "legacy", approvalPolicy: "never", permissions: WORKER_PERMISSION_PROFILE,
       runtimeWorkspaceRoots: [f.cwd], threadSource: "agent_created_thread",
     });
@@ -376,7 +378,7 @@ describe("worker environment and acknowledgement guards", () => {
 });
 
 describe("bounded app-server transport", () => {
-  function transport(options: { timeoutMs?: number; onMessage?: (message: Message) => void } = {}) {
+  function transport(options: { timeoutMs?: number; onMessage?: (message: Message) => void; onToolCall?: (params: unknown) => Promise<unknown> } = {}) {
     const f = fixture();
     const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), pid: 23456, kill: vi.fn() });
     child.stdin.on("finish", () => queueMicrotask(() => child.emit("close", 0)));
@@ -409,6 +411,20 @@ describe("bounded app-server transport", () => {
     expect(writes).toHaveLength(1);
     expect(t.onFailure).toHaveBeenCalled();
     expect(isApprovalRequest({ method: "mcpServer/elicitation/request" })).toBe(true);
+    await t.client.close();
+  });
+
+  it("routes only registered dynamic calls through the supplied native browser handler", async () => {
+    const response = { success: true, contentItems: [{ type: "inputText", text: "owned browser" }, { type: "inputImage", imageUrl: "data:image/png;base64,AAAA" }] };
+    const onToolCall = vi.fn(async () => response);
+    const t = transport({ onToolCall });
+    const writes: string[] = [];
+    t.child.stdin.on("data", chunk => writes.push(String(chunk)));
+    const params = { threadId: THREAD, turnId: TURN, tool: "course_research_browser", arguments: { action: "observe" } };
+    t.child.stdout.write(`${JSON.stringify({ id: 81, method: "item/tool/call", params })}\n`);
+    await vi.waitFor(() => expect(writes).toHaveLength(1));
+    expect(onToolCall).toHaveBeenCalledWith(params);
+    expect(JSON.parse(writes[0])).toEqual({ id: 81, result: response });
     await t.client.close();
   });
 

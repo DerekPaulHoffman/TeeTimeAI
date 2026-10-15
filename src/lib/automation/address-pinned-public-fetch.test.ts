@@ -30,6 +30,21 @@ function inertResponse(body: Buffer, declaredLength?: number) {
 }
 
 describe("address-pinned public response body limit", () => {
+  it("keeps POST disabled by default, and pins opted-in reads without following redirects", async () => {
+    const requestPinned = vi.fn(async (input: unknown) => { void input; return new Response("{}", { headers: { "content-type": "application/json" } }); });
+    const dependencies = { requestPinned, resolveAddresses: async () => [{ address: "8.8.8.8", family: 4 as const }] };
+    const policy = { parseUrl: (value: string) => new URL(value), maxResponseBytes: 1000, timeoutMs: 1000 };
+    const options = { method: "POST", body: '{"query":"{ slots { time } }"}', headers: { "content-type": "application/json" } };
+    await expect(createAddressPinnedPublicFetchTransport(policy, dependencies)("https://public.example.test/graphql", options)).rejects.toThrow("authorized read");
+    expect(requestPinned).not.toHaveBeenCalled();
+    const fetch = createAddressPinnedPublicFetchTransport({ ...policy, authorizeReadPost: () => true }, dependencies);
+    await fetch("https://public.example.test/graphql", options);
+    expect(requestPinned.mock.calls[0]?.[0]).toMatchObject({ address: "8.8.8.8", method: "POST", body: options.body });
+    await expect(fetch("https://public.example.test/graphql", { ...options, headers: { cookie: "session=private" } })).rejects.toThrow("credentials");
+    requestPinned.mockResolvedValueOnce(new Response(null, { status: 307, headers: { location: "https://other.example.test/" } }));
+    await expect(fetch("https://public.example.test/graphql", options)).rejects.toThrow("redirects are not replayed");
+    expect(requestPinned).toHaveBeenCalledTimes(2);
+  });
   it("keeps malformed measurements unknown without removing the owned cap marker", async () => {
     for (const [bytes, limit] of [[Infinity, 5], [NaN, 5], [6, 0], [6, Infinity], [4, 5]]) {
       expect(bodySizeBand(bytes, limit)).toBe("UNKNOWN");

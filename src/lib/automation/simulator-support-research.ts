@@ -512,7 +512,7 @@ async function boundedBody(response: Response, maxBodyBytes = MAX_BODY_BYTES) {
   return Buffer.concat(chunks);
 }
 
-function resultFromBody(requestedUrl: string, url: string, status: number, contentType: string, body: Buffer, observedAt: Date): SimulatorResearchResult {
+export function resultFromSimulatorResearchBody(requestedUrl: string, url: string, status: number, contentType: string, body: Buffer, observedAt: Date): SimulatorResearchResult {
   const base = { requestedUrl, url, httpStatus: status, observedAt: observedAt.toISOString(), method: "HTTP" as const, text: "", links: [] as string[] };
   if (status < 200 || status >= 300) return base;
   if (contentType.includes("application/json")) { try { return { ...base, jsonShape: summarizeSimulatorPublicJsonShape(JSON.parse(body.toString("utf8"))) }; } catch { return base; } }
@@ -545,6 +545,7 @@ function resultFromBody(requestedUrl: string, url: string, status: number, conte
     ...(publicConfiguration ? { publicConfiguration } : {}), ...calendar,
     ...(acuity?.configurationDiagnostic ? { configurationDiagnostic: acuity.configurationDiagnostic } : {}) };
 }
+const resultFromBody = resultFromSimulatorResearchBody;
 
 function publishedBootstrapBookingRoles(html: string) {
   const scripts: string[] = [];
