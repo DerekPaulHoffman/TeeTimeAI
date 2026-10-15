@@ -7,6 +7,7 @@ import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import { createAddressPinnedPublicFetchTransport } from "./address-pinned-public-fetch";
 import { runWithProviderRequestLease } from "./provider-request-lease";
 import { createSimulatorBrowserRequestQueue } from "./simulator-browser-request-queue";
+import { createBlockedResourceDiagnostics, simulatorCredentialHeaderKind, summarizeBlockedRequestBody } from "./simulator-blocked-resources";
 import { sanitizeResponderText } from "./course-support-responder-policy";
 import { tagSimulatorResearchFailure, type SimulatorResearchFailurePhase } from "./simulator-support-failure";
 import { detectSimulatorResearchAccessControls, summarizeSimulatorPublicJsonShape,
@@ -128,6 +129,7 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
   let loadComplete = false;
   const origins = new Set([new URL(requestedUrl).origin]);
   const contracts: NonNullable<SimulatorResearchResult["responseContracts"]> = [];
+  const blockedResources = createBlockedResourceDiagnostics();
   const active = new Set<Promise<void>>();
   let controls = new Map<string, { locator: Locator; kind: string; signature: string; href?: string }>();
   const transport = dependencies.fetch ?? createAddressPinnedPublicFetchTransport({
@@ -156,13 +158,36 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
           const body = request.postData() ?? "";
           const publicHeaders = new Headers();
           for (const key of ["accept", "accept-language", "user-agent", "content-type", "origin"]) if (headers[key]) publicHeaders.set(key, headers[key]);
-          if (!safe || !["GET", "HEAD", "POST"].includes(method) ||
-              Object.keys(headers).some(key => /^(?:authorization|proxy-authorization|x-api-key|api-key|x-auth-token)$/iu.test(key)) ||
-              !["document", "script", "stylesheet", "image", "font", "xhr", "fetch"].includes(kind) ||
-              method === "POST" && ((!origins.has(new URL(safe).origin) && !containsGraphqlQuery(body)) || !isAnonymousBrowserReadPost(new URL(safe), publicHeaders, body))) {
+          const sensitiveHeaders = Object.keys(headers).filter(key => /^(?:authorization|proxy-authorization|x-api-key|api-key|x-auth-token)$/iu.test(key));
+          const rejection = !safe ? "UNSAFE_URL" as const
+            : !["GET", "HEAD", "POST"].includes(method) ? "METHOD_NOT_ALLOWED" as const
+              : sensitiveHeaders.length ? "SENSITIVE_HEADERS" as const
+                : !["document", "script", "stylesheet", "image", "font", "xhr", "fetch"].includes(kind) ? "RESOURCE_KIND_NOT_ALLOWED" as const
+                  : method === "POST" && ((!origins.has(new URL(safe).origin) && !containsGraphqlQuery(body)) || !isAnonymousBrowserReadPost(new URL(safe), publicHeaders, body))
+                    ? "METHOD_NOT_ALLOWED" as const : null;
+          if (rejection) {
+            const sameOrigin = safe && origins.has(new URL(safe).origin);
+            const credentialKinds = Object.keys(headers).flatMap(key => {
+              const credential = simulatorCredentialHeaderKind(key);
+              return credential ? [credential] : [];
+            });
+            const canSummarizeBody = safe && ["xhr", "fetch"].includes(kind) && !["GET", "HEAD"].includes(method) &&
+              (sameOrigin || !credentialKinds.length && !/captcha|challenge|turnstile|cdn-cgi/iu.test(safe));
+            blockedResources.record({ url: safe ?? "", kind, method, reason: rejection,
+              originRelation: !safe ? "UNKNOWN" : sameOrigin ? "SAME_SITE" : "OTHER_ORIGIN",
+              ...(rejection === "SENSITIVE_HEADERS" ? { headerKinds: sensitiveHeaders.flatMap(key => {
+                const credential = simulatorCredentialHeaderKind(key); return credential ? [credential] : [];
+              }) } : {}),
+              ...(canSummarizeBody ? { bodyShape: summarizeBlockedRequestBody(body, headers["content-type"] ?? "") } : {}),
+              ...(safe && rejection === "METHOD_NOT_ALLOWED" && !sameOrigin && !credentialKinds.length && canSummarizeBody
+                ? { declaredOrigin: new URL(safe).origin } : {}),
+            });
             blocked += 1; return await route.abort("blockedbyclient");
           }
+          // The rejection above proves a safe URL; keep the original admission rules.
+          if (!safe) throw new Error("BROWSER_UNSAFE_REQUEST");
           if (kind === "document" && request.frame() === page?.mainFrame() && !origins.has(new URL(safe).origin)) {
+            blockedResources.record({ url: safe, kind, method, reason: "UNSCOPED_DESTINATION", originRelation: "OTHER_ORIGIN" });
             blocked += 1; return await route.abort("blockedbyclient");
           }
           if (++requests > 192 || bytes > 24_000_000) throw new Error("SIMULATOR_RESEARCH_REQUEST_LIMIT");
@@ -288,7 +313,8 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
     const result = resultFromSimulatorResearchBody(requestedUrl, page.url(), status, "text/html", Buffer.from(html), new Date());
     return { ...result, method: "BROWSER", accessControlsObserved: true, accessControls: detectSimulatorResearchAccessControls(html),
       renderComplete: blocked === 0 && loadComplete, ...(blocked ? { renderWarning: "SECONDARY_REQUESTS_BLOCKED" as const } : {}),
-      contentProvenance: "RENDERED_DOM", admittedRequests: requests, blockedRequests: blocked, responseContracts: contracts };
+      contentProvenance: "RENDERED_DOM", admittedRequests: requests, blockedRequests: blocked, responseContracts: contracts,
+      ...blockedResources.fields() };
   } finally {
     endResponse();
     deadline.removeEventListener("abort", closeExpiredContext);

@@ -44,7 +44,14 @@ describe("interactive public research boundaries", () => {
       visited.push(path);
       if (path.endsWith("/calendar.js")) {
         await new Promise(r => setTimeout(r, 6_000));
-        return new Response("document.querySelector('#calendar').textContent='Available calendar';", { headers: { "content-type": "text/javascript" } });
+        return new Response(`document.querySelector('#calendar').textContent='Available calendar';
+          fetch('/calendar/private-venue-id?private=query', {method:'POST',headers:{'content-type':'application/json'},
+            body:JSON.stringify({action:'getAvailableSlots',date:'2026-10-15'})}).catch(()=>{});
+          fetch('/api/calendar-data', {headers:{Authorization:'Bearer private-token'}}).catch(()=>{});
+          fetch('https://external.example.test/api/private-operation', {method:'POST',headers:{'content-type':'application/json'},
+            body:JSON.stringify({action:'getAvailableSlots',date:'2026-10-15'})}).catch(()=>{});
+          fetch('https://external.example.test/api/private-contact', {method:'POST',headers:{'content-type':'application/json'},
+            body:JSON.stringify({action:'sendContact',email:'private@example.test'})}).catch(()=>{});`, { headers: { "content-type": "text/javascript" } });
       }
       if (path.endsWith("/calendar.woff2")) {
         await new Promise(r => setTimeout(r, 12_000));
@@ -89,6 +96,17 @@ describe("interactive public research boundaries", () => {
       await writeFile(join(channel, "request-2.json"), JSON.stringify({ action: "finish" }));
       const result = await task;
       expect(result.text).toContain("Available calendar");
+      expect(result.blockedResourceDiagnostics).toEqual(expect.arrayContaining([expect.objectContaining({
+        state: "NOT_EXECUTED", resourceKind: "FETCH", method: "POST", reason: "METHOD_NOT_ALLOWED",
+        originRelation: "SAME_SITE", pathShape: "/calendar/:value",
+        bodyShape: { format: "JSON", fieldKinds: ["ACTION", "DATE"], operationHints: ["AVAILABILITY", "READ"] },
+      }), expect.objectContaining({ reason: "SENSITIVE_HEADERS", headerKinds: ["AUTHORIZATION"] }),
+      expect.objectContaining({ originRelation: "OTHER_ORIGIN", declaredOrigin: "https://external.example.test" })]));
+      const contact = result.blockedResourceDiagnostics?.find(row => row.bodyShape?.fieldKinds.includes("CONTACT"));
+      expect(contact).toBeDefined();
+      expect(contact?.declaredOrigin).toBeUndefined();
+      expect(JSON.stringify(result.blockedResourceDiagnostics)).not.toMatch(/private-|private=query|2026-10-15|getAvailableSlots|sendContact|private@example/u);
+      expect(visited.some(url => /private-|calendar-data|external\.example/u.test(url))).toBe(false);
       expect(busyDenials).toBe(0);
     } finally {
       stopped = true;
