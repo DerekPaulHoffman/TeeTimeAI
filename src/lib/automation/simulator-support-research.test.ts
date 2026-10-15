@@ -141,6 +141,35 @@ describe("owned redacted client-code references", () => {
       fetch: vi.fn(async () => new Response(`<script>${script}</script>`, { status, headers: { "content-type": "text/html" } })) });
     expect(result.clientCodeEvidence).toBeUndefined();
   });
+  it("retains four distinct admitted contexts when two script bundles contain the same request code", async () => {
+    const assets = ["a", "b", "copy", "d"].map(name => `https://official.example.test/${name}.js`);
+    const shared = `function getAvailability(){return fetch('/api/availability/shared',{secret:'private-token'})}`;
+    const bundle = shared + `;function getCalendar(){return fetch('/api/calendar/extra')}`;
+    const bodies = [bundle, `function getAvailability(){return fetch('/api/availability/b')}`, bundle + ";void 0;",
+      `function getAvailability(){return fetch('/api/availability/d')}`];
+    const html = `<h1>Public rentals</h1>${assets.map(asset => `<script src='${asset}'></script>`).join("")}`;
+    const blocked = `${sourceUrl}/non-read`;
+    const view = renderedBrowser([{ url: sourceUrl }, ...assets.map(url => ({ url, kind: "script" })),
+      { url: blocked, kind: "fetch", method: "POST", body: "{}" }], html);
+    const fetch = vi.fn(async (input: unknown) => {
+      if (String(input) === sourceUrl) return response(html);
+      const index = assets.indexOf(String(input));
+      if (index < 0) throw new Error("No additional request authority.");
+      return response(bodies[index], 200, "application/javascript");
+    });
+    const result = await collectSimulatorSupportResearch({ url: sourceUrl, render: true }, { fetch, lease, browser: view.factory });
+    const evidence = result.clientCodeEvidence!;
+    expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([sourceUrl, ...assets]);
+    expect(evidence.fragments).toHaveLength(4);
+    expect(new Set(evidence.fragments.map(fragment => fragment.code)).size).toBe(4);
+    expect(evidence.fragments.some(fragment => fragment.code.includes("/api/calendar/extra"))).toBe(true);
+    expect(evidence.candidateSourceHashes).toHaveLength(4);
+    expect(evidence.fragments.some(fragment => fragment.duplicateLocations?.length === 1)).toBe(true);
+    expect(JSON.stringify(evidence)).not.toContain("private-token");
+    expect(view.routes.at(-1)!.abort).toHaveBeenCalled();
+    expect(result).toMatchObject({ renderComplete: false, renderWarning: "SECONDARY_REQUESTS_BLOCKED" });
+    expect(result.publicConfiguration).toBeUndefined(); expect(result.calendar).toBeUndefined();
+  });
   it("clears references on an account challenge and ignores inactive/data script blocks", async () => {
     for (const html of [`<h1>Sign in to continue</h1><script>${script}</script>`,
       `<template><script>${script}</script></template><noscript><script>${script}</script></noscript>`,

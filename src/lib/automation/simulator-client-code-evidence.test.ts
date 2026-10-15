@@ -163,4 +163,48 @@ describe("inert public client-code evidence", () => {
     expect(evidence!.fragments.reduce((sum, fragment) => sum + fragment.code.length, 0)).toBeLessThanOrEqual(10_000);
     expect(JSON.stringify(evidence)).not.toContain("private-token");
   });
+  it("uses duplicate bundle text only once and fills the freed slot with distinct evidence", () => {
+    const shared = `function getAvailability(){return fetch('/api/availability/shared')}`;
+    const bundle = shared + `;function getCalendar(){return fetch('/api/calendar/extra')}`;
+    const first = inspectSimulatorClientCode(bundle, "https://official.example.test/a.js", "EXTERNAL_SCRIPT")!;
+    const copy = inspectSimulatorClientCode(bundle + ";void 0;", "https://official.example.test/copy.js", "EXTERNAL_SCRIPT")!;
+    const other = ["b", "d"].map(name => inspectSimulatorClientCode(
+      `function getAvailability(){return fetch('/api/availability/${name}')}`,
+      `https://official.example.test/${name}.js`, "EXTERNAL_SCRIPT")!);
+    const evidence = mergeSimulatorClientCodeEvidence(first, other[0], copy, other[1])!;
+    expect(evidence.fragments).toHaveLength(4);
+    expect(new Set(evidence.fragments.map(fragment => fragment.code)).size).toBe(4);
+    expect(evidence.fragments.some(fragment => fragment.code.includes("/api/calendar/extra"))).toBe(true);
+    const duplicate = evidence.fragments.find(fragment => fragment.code.includes("/api/availability/shared"))!;
+    expect(duplicate.duplicateLocations).toEqual([{ sourceKind: "EXTERNAL_SCRIPT", sourceUrl: "https://official.example.test/copy.js",
+      sourceSha256: copy.fragments[0].sourceSha256, range: first.fragments[0].range }]);
+    expect(evidence.candidateSourceHashes).toHaveLength(4);
+    expect(mergeSimulatorClientCodeEvidence(other[1], copy, other[0], first)).toEqual(evidence);
+    const incremental = [first, other[0], copy, other[1]].reduce((previous, value) => mergeSimulatorClientCodeEvidence(previous, value), undefined as ReturnType<typeof inspect>);
+    expect(incremental).toEqual(evidence);
+    expect(mergeSimulatorClientCodeEvidence(evidence, copy)).toEqual(evidence);
+  });
+  it("bounds duplicate attribution while retaining all candidate hashes and the incomplete marker", () => {
+    const sources = Array.from({ length: 12 }, (_, index) => inspectSimulatorClientCode(
+      `function getAvailability(){return fetch('/api/availability')}\n// private-copy-${index}`,
+      `https://official.example.test/copy-${index}.js`, "EXTERNAL_SCRIPT")!);
+    const evidence = mergeSimulatorClientCodeEvidence(...sources)!;
+    expect(evidence.fragments).toHaveLength(1);
+    expect(evidence.fragments[0].duplicateLocations).toHaveLength(8);
+    expect(evidence.fragments[0].duplicateLocationsTruncated).toBe(true);
+    expect(evidence.candidateSourceHashes).toHaveLength(12);
+    expect(evidence.truncated).toBe(true);
+    expect(JSON.stringify(evidence)).not.toContain("private-copy");
+    expect(mergeSimulatorClientCodeEvidence(...sources.reverse())).toEqual(evidence);
+  });
+  it("does not collapse a complete scope with identical text from an incomplete token window", () => {
+    const complete = inspect(`function getAvailability(){return fetch('/api/availability')}`)!;
+    const incomplete = { ...complete, truncated: true, fragments: complete.fragments.map(fragment => ({
+      ...fragment, sourceUrl: "https://official.example.test/window.js", projection: "TOKEN_WINDOW" as const,
+    })) };
+    const evidence = mergeSimulatorClientCodeEvidence(complete, incomplete)!;
+    expect(evidence.fragments).toHaveLength(2);
+    expect(evidence.fragments.every(fragment => !fragment.duplicateLocations)).toBe(true);
+    expect(evidence.truncated).toBe(true);
+  });
 });

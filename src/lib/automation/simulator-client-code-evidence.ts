@@ -8,6 +8,7 @@ const MAX_NODES = 50_000;
 const MAX_CONTEXT = 4_000;
 const MAX_CONTEXTS = 4;
 const MAX_TOTAL_CONTEXT = 10_000;
+const MAX_DUPLICATE_LOCATIONS = 8;
 const topic = /availab(?:ility|le)|calendar|slots/iu;
 const sensitiveName = /auth|password|secret|token|cookie|session|credential|email|phone|mobile|customer|client|user|address|contact|api[_-]?key|access[_-]?key|private[_-]?key|signature|nonce|csrf/iu;
 const functionTypes = new Set(["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"]);
@@ -17,9 +18,13 @@ const publicLiterals = new Set(["get", "head", "post", "put", "patch", "delete",
   "yyyy-mm-dd", "dd/mm/yyyy", "yyyy-mm-ddthh:mm:ss"]);
 type JsNode = { type: string; start: number; end: number; [key: string]: unknown };
 type Warning = "SOURCE_SIZE" | "AST_BUDGET" | "SCAN_BUDGET" | "CONTEXT_SIZE" | "SYNTAX_UNSUPPORTED";
-type Fragment = { sourceKind: "INLINE_SCRIPT" | "EXTERNAL_SCRIPT"; sourceUrl: string; sourceSha256: string;
+type FragmentLocation = { sourceKind: "INLINE_SCRIPT" | "EXTERNAL_SCRIPT"; sourceUrl: string; sourceSha256: string;
+  range: { start: number; end: number } };
+type Fragment = FragmentLocation & {
   basis: "API_PATH" | "FUNCTION_NAME"; projection?: "TOKEN_WINDOW";
-  range: { start: number; end: number }; literalRedactions: number; code: string };
+  literalRedactions: number; code: string;
+  /** Identical redacted text is shown once; these are locations, not semantic equivalence or request authority. */
+  duplicateLocations?: FragmentLocation[]; duplicateLocationsTruncated?: boolean };
 export type SimulatorClientCodeEvidence = {
   version: 1; authority: "EVIDENCE_ONLY"; fragments: Fragment[]; warnings: Warning[]; truncated: boolean;
   /** Bounded hashes of sources that produced candidate contexts, including
@@ -232,11 +237,33 @@ export function mergeSimulatorClientCodeEvidence(...inputs: Array<SimulatorClien
   const ordered = [...unique.values()].sort((left, right) => Number(right.basis === "API_PATH") - Number(left.basis === "API_PATH") ||
     left.sourceUrl.localeCompare(right.sourceUrl) || left.sourceSha256.localeCompare(right.sourceSha256) ||
     left.sourceKind.localeCompare(right.sourceKind) || left.range.start - right.range.start || left.range.end - right.range.end);
-  const groups = new Map<string, Fragment[]>();
+  const locationKey = (value: FragmentLocation) => `${value.sourceKind}:${value.sourceUrl}:${value.sourceSha256}:${value.range.start}:${value.range.end}`;
+  const sameText = new Map<string, Fragment[]>();
   for (const fragment of ordered) {
+    const key = `${fragment.projection ?? "AST"}\0${fragment.code}`;
+    const group = sameText.get(key) ?? []; group.push(fragment); sameText.set(key, group);
+  }
+  const distinct = [...sameText.values()].map(copies => {
+    const primary = { ...copies[0] };
+    delete primary.duplicateLocations;
+    delete primary.duplicateLocationsTruncated;
+    const locations = new Map<string, FragmentLocation>();
+    for (const copy of copies) for (const value of [copy, ...(copy.duplicateLocations ?? [])]) {
+      locations.set(locationKey(value), { sourceKind: value.sourceKind, sourceUrl: value.sourceUrl,
+        sourceSha256: value.sourceSha256, range: value.range });
+    }
+    const extras = [...locations.values()].filter(value => locationKey(value) !== locationKey(primary))
+      .sort((left, right) => locationKey(left).localeCompare(locationKey(right)));
+    return { ...primary, ...(extras.length ? { duplicateLocations: extras.slice(0, MAX_DUPLICATE_LOCATIONS) } : {}),
+      ...(extras.length > MAX_DUPLICATE_LOCATIONS || copies.some(copy => copy.duplicateLocationsTruncated)
+        ? { duplicateLocationsTruncated: true } : {}) };
+  });
+  const groups = new Map<string, Fragment[]>();
+  for (const fragment of distinct) {
     const key = `${fragment.sourceKind}:${fragment.sourceUrl}:${fragment.sourceSha256}`;
     const group = groups.get(key) ?? []; group.push(fragment); groups.set(key, group);
   }
+  // Duplicate bundle text consumes one slot, with bounded source attribution.
   // One source cannot consume every slot before another source is considered.
   // This remains a bounded sample; omissions never prove absence of a contract.
   let chars = 0;
@@ -250,11 +277,13 @@ export function mergeSimulatorClientCodeEvidence(...inputs: Array<SimulatorClien
     }
   }
   const candidateHashes = [...new Set(present.flatMap(value => [
-    ...(value.candidateSourceHashes ?? []), ...value.fragments.map(fragment => fragment.sourceSha256),
+    ...(value.candidateSourceHashes ?? []), ...value.fragments.flatMap(fragment => [fragment.sourceSha256,
+      ...(fragment.duplicateLocations ?? []).map(location => location.sourceSha256)]),
   ]).filter(hash => /^[a-f0-9]{64}$/u.test(hash)))].sort();
   return { version: 1, authority: "EVIDENCE_ONLY", fragments,
     candidateSourceHashes: candidateHashes.slice(0, 64),
     sourceCoverageTruncated: candidateHashes.length > 64 || present.some(value => value.sourceCoverageTruncated),
     warnings: [...new Set(present.flatMap(value => value.warnings))],
-    truncated: present.some(value => value.truncated) || fragments.length !== ordered.length };
+    truncated: present.some(value => value.truncated) || fragments.length !== distinct.length ||
+      fragments.some(fragment => fragment.duplicateLocationsTruncated) };
 }

@@ -94,6 +94,7 @@ Large admitted scripts and exhausted whole-source AST walks can return
 `projection: TOKEN_WINDOW`. Every emitted token is independently redacted;
 comments and literal data are removed. These windows are always marked
 incomplete and never imply a complete function, program or API contract.
+Identical redacted excerpts share one display slot, with bounded duplicate source locations retained for attribution. Matching text does not prove matching runtime behavior or authorize a request. Distinct complete scopes and incomplete token windows remain separate evidence; the existing four-excerpt and character limits still apply.
 Source size, token/time scan, output and context bounds retain explicit
 warnings. Omitted code stays unknown, and the projection grants no additional
 network, method, destination, lease, eligibility or verification authority.
