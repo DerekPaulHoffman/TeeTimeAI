@@ -7,6 +7,7 @@ import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import { createAddressPinnedPublicFetchTransport } from "./address-pinned-public-fetch";
 import { runWithProviderRequestLease } from "./provider-request-lease";
 import { createSimulatorBrowserRequestQueue } from "./simulator-browser-request-queue";
+import { createPassfactoryPublicReadPolicy, isIncidentalBrowserRequest } from "./passfactory-public-read-policy";
 import { createBlockedResourceDiagnostics, simulatorCredentialHeaderKind, summarizeBlockedRequestBody } from "./simulator-blocked-resources";
 import { sanitizeResponderText } from "./course-support-responder-policy";
 import { tagSimulatorResearchFailure, type SimulatorResearchFailurePhase } from "./simulator-support-failure";
@@ -56,11 +57,6 @@ export function isAnonymousBrowserReadPost(_url: URL, headers: Headers, body: st
   } catch { return false; }
 }
 
-function containsGraphqlQuery(body: string) {
-  if (body.length > 32_768) return false;
-  try { return typeof JSON.parse(body)?.query === "string"; } catch { return false; }
-}
-
 export async function validateBrowserChannel(directory: string, cwd = process.cwd()) {
   const root = await realpath(resolve(cwd, ".codex-artifacts", "browser"));
   const path = resolve(directory);
@@ -87,6 +83,10 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
   const channel = await validateBrowserChannel(input.channel);
   const requestedUrl = getSafeCustomerBookingUrl(input.url);
   if (!requestedUrl) throw new Error("SIMULATOR_RESEARCH_UNSAFE_URL");
+  const passfactory = createPassfactoryPublicReadPolicy();
+  passfactory.observeWidgetUrl(requestedUrl);
+  const allowsReadPost = (url: URL, headers: Headers, body: string) =>
+    isAnonymousBrowserReadPost(url, headers, body) || passfactory.allows(url, headers, body);
   const deadline = AbortSignal.timeout(INTERACTIVE_BROWSER_DURATION_MS);
   const expiresAt = Date.now() + INTERACTIVE_BROWSER_DURATION_MS;
   let failure: unknown;
@@ -123,10 +123,11 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
   const endResponse = () => { clearTimeout(responseTimer); responseTimer = undefined; };
   beginResponse(false);
   let page: Page | undefined;
-  let requests = 0, blocked = 0, bytes = 0, navigations = 0, sequence = 0;
+  let requests = 0, blocked = 0, blockingRequests = 0, bytes = 0, navigations = 0, sequence = 0;
   let status = 0;
   let choosingFilter = false;
   let loadComplete = false;
+  let pendingPublicReads = 0;
   const origins = new Set([new URL(requestedUrl).origin]);
   const contracts: NonNullable<SimulatorResearchResult["responseContracts"]> = [];
   const blockedResources = createBlockedResourceDiagnostics();
@@ -134,7 +135,7 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
   let controls = new Map<string, { locator: Locator; kind: string; signature: string; href?: string }>();
   const transport = dependencies.fetch ?? createAddressPinnedPublicFetchTransport({
     parseUrl: value => { const safe = getSafeCustomerBookingUrl(value); if (!safe) throw new Error("BROWSER_UNSAFE_REQUEST"); return new URL(safe); },
-    maxResponseBytes: 4_000_000, timeoutMs: 45_000, redirectLimit: 0, authorizeReadPost: isAnonymousBrowserReadPost,
+    maxResponseBytes: 4_000_000, timeoutMs: 45_000, redirectLimit: 0, authorizeReadPost: allowsReadPost,
   });
   const lease = dependencies.lease ?? runWithProviderRequestLease;
   const requestSignal = AbortSignal.any([deadline, transportAbort.signal]);
@@ -149,6 +150,7 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
     await context.route("**/*", async route => {
       const operation = (async () => {
         const request = route.request();
+        let trackedPublicRead = false;
         try {
           if (deadline.aborted || failure) return await route.abort();
           const safe = getSafeCustomerBookingUrl(request.url());
@@ -163,7 +165,7 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
             : !["GET", "HEAD", "POST"].includes(method) ? "METHOD_NOT_ALLOWED" as const
               : sensitiveHeaders.length ? "SENSITIVE_HEADERS" as const
                 : !["document", "script", "stylesheet", "image", "font", "xhr", "fetch"].includes(kind) ? "RESOURCE_KIND_NOT_ALLOWED" as const
-                  : method === "POST" && ((!origins.has(new URL(safe).origin) && !containsGraphqlQuery(body)) || !isAnonymousBrowserReadPost(new URL(safe), publicHeaders, body))
+                  : method === "POST" && !allowsReadPost(new URL(safe), publicHeaders, body)
                     ? "METHOD_NOT_ALLOWED" as const : null;
           if (rejection) {
             const sameOrigin = safe && origins.has(new URL(safe).origin);
@@ -182,15 +184,18 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
               ...(safe && rejection === "METHOD_NOT_ALLOWED" && !sameOrigin && !credentialKinds.length && canSummarizeBody
                 ? { declaredOrigin: new URL(safe).origin } : {}),
             });
-            blocked += 1; return await route.abort("blockedbyclient");
+            blocked += 1;
+            if (rejection === "SENSITIVE_HEADERS" || !isIncidentalBrowserRequest(request.url())) blockingRequests += 1;
+            return await route.abort("blockedbyclient");
           }
-          // The rejection above proves a safe URL; keep the original admission rules.
+          // The rejection above proves a safe URL.
           if (!safe) throw new Error("BROWSER_UNSAFE_REQUEST");
           if (kind === "document" && request.frame() === page?.mainFrame() && !origins.has(new URL(safe).origin)) {
             blockedResources.record({ url: safe, kind, method, reason: "UNSCOPED_DESTINATION", originRelation: "OTHER_ORIGIN" });
-            blocked += 1; return await route.abort("blockedbyclient");
+            blocked += 1; blockingRequests += 1; return await route.abort("blockedbyclient");
           }
           if (++requests > 192 || bytes > 24_000_000) throw new Error("SIMULATOR_RESEARCH_REQUEST_LIMIT");
+          if (method === "POST") { pendingPublicReads++; trackedPublicRead = true; }
           await requestQueue.run(new URL(safe).hostname, async () => {
             const response = await transport(safe, { method, headers: publicHeaders, credentials: "omit", redirect: "manual", signal: requestSignal,
               ...(method === "POST" ? { body } : {}) });
@@ -215,6 +220,7 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
             await route.fulfill({ status: response.status, headers: responseHeaders, body: buffer });
           });
         } catch (error) { failure ??= tagSimulatorResearchFailure(error, "BROWSER_REQUEST"); await route.abort().catch(() => {}); }
+        finally { if (trackedPublicRead) pendingPublicReads--; }
       })();
       active.add(operation);
       try { await operation; } finally { active.delete(operation); }
@@ -262,7 +268,7 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
       const image = (await page!.screenshot({ type: "png", animations: "disabled", timeout: budget(20_000) })).toString("base64");
       if (image.length > 3_000_000) throw new Error("BROWSER_SCREENSHOT_LIMIT");
       return { phase: "open", sequence, message, url: page!.url(), text: sanitizeResponderText(await page!.locator("body").innerText()).slice(0, 12_000),
-        controls: visible, loading: !loadComplete, accessControls: access, blockedRequests: blocked, admittedRequests: requests, screenshot: image };
+        controls: visible, loading: !loadComplete || pendingPublicReads > 0, accessControls: access, blockedRequests: blocked, admittedRequests: requests, screenshot: image };
     });
     await assertLive();
     await atPhase("BROWSER_NAVIGATION", () => page!.goto(requestedUrl, { waitUntil: "domcontentloaded", timeout: budget(45_000) }));
@@ -297,6 +303,12 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
           if (control.kind === "link" && control.href) {
             if (++navigations > 3) throw new Error("SIMULATOR_RESEARCH_REDIRECT_LIMIT");
             origins.add(new URL(control.href).origin);
+            passfactory.observeWidgetUrl(control.href);
+            const currentDocument = new URL(page.url()), nextDocument = new URL(control.href);
+            currentDocument.hash = ""; nextDocument.hash = "";
+            // Completeness describes the selected document, not abandoned
+            // marketing-page requests. Keep all rejections in the audit.
+            if (currentDocument.href !== nextDocument.href) blockingRequests = 0;
             // Follow the freshly observed anchor in this owned page. target=_blank
             // must not lose the handoff to our intentionally closed popup context.
             await atPhase("BROWSER_NAVIGATION", () => page!.goto(control.href!, { waitUntil: "domcontentloaded", timeout: budget(45_000) }));
@@ -312,7 +324,7 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
     const html = await page.content();
     const result = resultFromSimulatorResearchBody(requestedUrl, page.url(), status, "text/html", Buffer.from(html), new Date());
     return { ...result, method: "BROWSER", accessControlsObserved: true, accessControls: detectSimulatorResearchAccessControls(html),
-      renderComplete: blocked === 0 && loadComplete, ...(blocked ? { renderWarning: "SECONDARY_REQUESTS_BLOCKED" as const } : {}),
+      renderComplete: blockingRequests === 0 && loadComplete && pendingPublicReads === 0, ...(blockingRequests ? { renderWarning: "SECONDARY_REQUESTS_BLOCKED" as const } : {}),
       contentProvenance: "RENDERED_DOM", admittedRequests: requests, blockedRequests: blocked, responseContracts: contracts,
       ...blockedResources.fields() };
   } finally {
