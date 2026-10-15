@@ -25,7 +25,7 @@ describe("interactive public research boundaries", () => {
     const headers = new Headers({ "content-type": "application/json" });
     const check = (value: unknown) => isAnonymousBrowserReadPost(url, headers, JSON.stringify(value));
     expect(check({ query: "query Calendar { slots { time } }", variables: { date: "2026-10-15" } })).toBe(true);
-    expect(check({ action: "getAvailableSlots", date: "2026-10-15" })).toBe(true);
+    expect(check({ action: "getAvailableSlots", date: "2026-10-15" })).toBe(false);
     expect(check({ query: "mutation Reserve { reserve { id } }" })).toBe(false);
     expect(check({ query: "{ slots { time } }", token: "private" })).toBe(false);
     expect(check({ action: "unknown", date: "2026-10-15" })).toBe(false);

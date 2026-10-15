@@ -48,8 +48,8 @@ export function isAnonymousBrowserReadPost(_url: URL, headers: Headers, body: st
     if (/"[^"\\]*(?:password|secret|token|email|phone|card|payment|customer|account|session|authorization|cookie)[^"\\]*"\s*:/iu.test(serialized)) return false;
     if (/\b(?:mutation|subscription|checkout|reserve|purchase|payment|createBooking|bookSlot|delete|update|insert)\b/iu.test(serialized)) return false;
     if (typeof value.query === "string") return /^\s*(?:query\b|\{)/u.test(value.query) && !/\b(?:mutation|subscription)\b/u.test(value.query);
-    return [value.operationName, value.action, value.method].some(name => typeof name === "string" &&
-      /^(?:get|list|load|fetch|search|find|query|read|available|availability|calendar|slots)(?:[A-Z_.:/-]|$)/u.test(name));
+    // A get/list-shaped operation name alone does not establish read semantics.
+    return false;
   } catch { return false; }
 }
 
