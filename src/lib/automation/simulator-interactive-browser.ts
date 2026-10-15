@@ -7,6 +7,7 @@ import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import { createAddressPinnedPublicFetchTransport } from "./address-pinned-public-fetch";
 import { runWithProviderRequestLease } from "./provider-request-lease";
 import { sanitizeResponderText } from "./course-support-responder-policy";
+import { tagSimulatorResearchFailure, type SimulatorResearchFailurePhase } from "./simulator-support-failure";
 import { detectSimulatorResearchAccessControls, summarizeSimulatorPublicJsonShape,
   resultFromSimulatorResearchBody, type SimulatorResearchResult } from "./simulator-support-research";
 
@@ -85,23 +86,52 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
   const requestedUrl = getSafeCustomerBookingUrl(input.url);
   if (!requestedUrl) throw new Error("SIMULATOR_RESEARCH_UNSAFE_URL");
   const deadline = AbortSignal.timeout(INTERACTIVE_BROWSER_DURATION_MS);
-  const browser = await (dependencies.launch ?? (options => chromium.launch(options)))({ headless: true, timeout: 15_000 });
-  let context;
-  try { context = await browser.newContext({ storageState: { cookies: [], origins: [] }, serviceWorkers: "block",
-    acceptDownloads: false, viewport: { width: 1280, height: 900 } }); }
-  catch (error) { await browser.close(); throw error; }
-  let page: Page | undefined;
+  const expiresAt = Date.now() + INTERACTIVE_BROWSER_DURATION_MS;
   let failure: unknown;
+  // Leave headroom below the native bridge's 90-second response wait.
+  let responseExpiresAt = Math.min(expiresAt, Date.now() + 75_000);
+  const budget = (maximum: number) => {
+    const remaining = Math.min(expiresAt, responseExpiresAt) - Date.now();
+    if (remaining <= 0) throw new Error("SIMULATOR_RESEARCH_DEADLINE");
+    return Math.min(maximum, remaining);
+  };
+  const atPhase = async <T>(phase: SimulatorResearchFailurePhase, operation: () => Promise<T>): Promise<T> => {
+    try { return await operation(); } catch (error) { throw tagSimulatorResearchFailure(failure ?? error, phase); }
+  };
+  const browser = await atPhase("BROWSER_LAUNCH", () => (dependencies.launch ?? (options => chromium.launch(options)))({ headless: true, timeout: budget(15_000) }));
+  let context;
+  try { context = await atPhase("BROWSER_CONTEXT", () => browser.newContext({ storageState: { cookies: [], origins: [] }, serviceWorkers: "block",
+    acceptDownloads: false, viewport: { width: 1280, height: 900 } })); }
+  catch (error) { await browser.close(); throw error; }
+  const transportAbort = new AbortController();
+  const closeExpiredContext = () => {
+    failure ??= new Error("SIMULATOR_RESEARCH_DEADLINE");
+    transportAbort.abort();
+    void context.close().catch(() => {});
+  };
+  deadline.addEventListener("abort", closeExpiredContext, { once: true });
+  let responseTimer: ReturnType<typeof setTimeout> | undefined;
+  const beginResponse = (reset = true) => {
+    if (reset) responseExpiresAt = Math.min(expiresAt, Date.now() + 75_000);
+    responseTimer = setTimeout(() => {
+      failure ??= new Error("SIMULATOR_RESEARCH_DEADLINE");
+      closeExpiredContext();
+    }, budget(75_000));
+  };
+  const endResponse = () => { clearTimeout(responseTimer); responseTimer = undefined; };
+  beginResponse(false);
+  let page: Page | undefined;
   let requests = 0, blocked = 0, bytes = 0, navigations = 0, sequence = 0;
   let status = 0;
   let choosingFilter = false;
+  let loadComplete = false;
   const origins = new Set([new URL(requestedUrl).origin]);
   const contracts: NonNullable<SimulatorResearchResult["responseContracts"]> = [];
   const active = new Set<Promise<void>>();
   let controls = new Map<string, { locator: Locator; kind: string; signature: string; href?: string }>();
   const transport = dependencies.fetch ?? createAddressPinnedPublicFetchTransport({
     parseUrl: value => { const safe = getSafeCustomerBookingUrl(value); if (!safe) throw new Error("BROWSER_UNSAFE_REQUEST"); return new URL(safe); },
-    maxResponseBytes: 4_000_000, timeoutMs: 15_000, redirectLimit: 0, authorizeReadPost: isAnonymousBrowserReadPost,
+    maxResponseBytes: 4_000_000, timeoutMs: 45_000, redirectLimit: 0, authorizeReadPost: isAnonymousBrowserReadPost,
   });
   const lease = dependencies.lease ?? runWithProviderRequestLease;
   const assertLive = async () => {
@@ -134,7 +164,7 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
           }
           if (++requests > 192 || bytes > 24_000_000) throw new Error("SIMULATOR_RESEARCH_REQUEST_LIMIT");
           const leased = await lease(new URL(safe).hostname, async () => {
-            const response = await transport(safe, { method, headers: publicHeaders, credentials: "omit", redirect: "manual", signal: deadline,
+            const response = await transport(safe, { method, headers: publicHeaders, credentials: "omit", redirect: "manual", signal: AbortSignal.any([deadline, transportAbort.signal]),
               ...(method === "POST" ? { body } : {}) });
             const buffer = Buffer.from(await response.arrayBuffer());
             bytes += buffer.length;
@@ -157,7 +187,7 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
             await route.fulfill({ status: response.status, headers: responseHeaders, body: buffer });
           });
           if (!leased.acquired) throw new Error("SIMULATOR_RESEARCH_PROVIDER_BUSY");
-        } catch (error) { failure = error; await route.abort().catch(() => {}); }
+        } catch (error) { failure ??= tagSimulatorResearchFailure(error, "BROWSER_REQUEST"); await route.abort().catch(() => {}); }
       })();
       active.add(operation);
       try { await operation; } finally { active.delete(operation); }
@@ -175,15 +205,24 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
         inputType: input.type,
         sensitiveForm: Boolean(e.closest("form")?.querySelector('input[type="password"],input[type="email"],input[type="tel"],[autocomplete^="cc-"]')) };
     });
-    const snapshot = async (message?: string) => {
+    const snapshot = async (message?: string) => atPhase("BROWSER_DOCUMENT", async () => {
       await assertLive();
-      await page!.waitForTimeout(350);
+      // Wait for document resources, not networkidle: public calendars may poll forever.
+      // If secondary resources are still loading, return a usable observation and let
+      // the worker observe again within the original session and action budgets.
+      loadComplete = false;
+      const loadBudget = Math.min(30_000, Math.max(1, budget(75_000) - 20_000));
+      try { await page!.waitForLoadState("load", { timeout: loadBudget }); loadComplete = true; }
+      catch (error) { if (!(error instanceof Error) || error.name !== "TimeoutError") throw error; }
+      await assertLive();
+      page!.setDefaultTimeout(budget(10_000));
       const html = await page!.content();
       const access = detectSimulatorResearchAccessControls(html);
       controls = new Map();
       const visible = [];
       const locators = await page!.locator("a[href],button,select,input,[role=combobox],[role=option],[role=gridcell]").all();
       for (const locator of locators.slice(0, 300)) {
+        budget(10_000);
         if (!await locator.isVisible() || !await locator.isEnabled()) continue;
         const item = await observedControl(locator);
         const kind = interactiveControlKind(item);
@@ -193,14 +232,15 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
         visible.push({ target, kind, name: sanitizeResponderText(item.name), label: sanitizeResponderText(item.label),
           ...(item.tag === "select" ? { options: await locator.locator("option").allTextContents() } : {}) });
       }
-      const image = (await page!.screenshot({ type: "png", timeout: 5_000 })).toString("base64");
+      const image = (await page!.screenshot({ type: "png", animations: "disabled", timeout: budget(20_000) })).toString("base64");
       if (image.length > 3_000_000) throw new Error("BROWSER_SCREENSHOT_LIMIT");
       return { phase: "open", sequence, message, url: page!.url(), text: sanitizeResponderText(await page!.locator("body").innerText()).slice(0, 12_000),
-        controls: visible, accessControls: access, blockedRequests: blocked, admittedRequests: requests, screenshot: image };
-    };
+        controls: visible, loading: !loadComplete, accessControls: access, blockedRequests: blocked, admittedRequests: requests, screenshot: image };
+    });
     await assertLive();
-    await page.goto(requestedUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
+    await atPhase("BROWSER_NAVIGATION", () => page!.goto(requestedUrl, { waitUntil: "domcontentloaded", timeout: budget(45_000) }));
     await publish(join(channel, "response-0.json"), await snapshot());
+    endResponse();
     for (sequence = 1; sequence <= 24; sequence++) {
       let action: BrowserAction | undefined;
       const path = join(channel, `request-${sequence}.json`);
@@ -209,6 +249,7 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
         try { action = browserActionSchema.parse(await readChannelFile(path)); }
         catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; await delay(100); }
       }
+      beginResponse();
       await assertLive();
       if (action.action === "finish") break;
       if (action.action === "scroll") await page.mouse.wheel(0, action.direction === "down" ? 650 : -650);
@@ -216,7 +257,7 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
         const control = controls.get(action.target);
         if (!control || !await control.locator.isVisible() || !await control.locator.isEnabled() ||
             JSON.stringify(await observedControl(control.locator)) !== control.signature) {
-          await publish(join(channel, `response-${sequence}.json`), await snapshot("Target changed; choose from fresh controls.")); continue;
+          await publish(join(channel, `response-${sequence}.json`), await snapshot("Target changed; choose from fresh controls.")); endResponse(); continue;
         }
         if (action.action === "fill") {
           if (control.kind !== "field") throw new Error("BROWSER_ACTION_REJECTED");
@@ -229,19 +270,27 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
           if (control.kind === "link" && control.href) {
             if (++navigations > 3) throw new Error("SIMULATOR_RESEARCH_REDIRECT_LIMIT");
             origins.add(new URL(control.href).origin);
+            // Follow the freshly observed anchor in this owned page. target=_blank
+            // must not lose the handoff to our intentionally closed popup context.
+            await atPhase("BROWSER_NAVIGATION", () => page!.goto(control.href!, { waitUntil: "domcontentloaded", timeout: budget(45_000) }));
+          } else {
+            await atPhase("BROWSER_NAVIGATION", () => control.locator.click({ timeout: budget(15_000), noWaitAfter: true }));
           }
-          await control.locator.click({ timeout: 5_000, noWaitAfter: true });
         }
       }
       await publish(join(channel, `response-${sequence}.json`), await snapshot());
+      endResponse();
     }
     await assertLive();
     const html = await page.content();
     const result = resultFromSimulatorResearchBody(requestedUrl, page.url(), status, "text/html", Buffer.from(html), new Date());
     return { ...result, method: "BROWSER", accessControlsObserved: true, accessControls: detectSimulatorResearchAccessControls(html),
-      renderComplete: blocked === 0, ...(blocked ? { renderWarning: "SECONDARY_REQUESTS_BLOCKED" as const } : {}),
+      renderComplete: blocked === 0 && loadComplete, ...(blocked ? { renderWarning: "SECONDARY_REQUESTS_BLOCKED" as const } : {}),
       contentProvenance: "RENDERED_DOM", admittedRequests: requests, blockedRequests: blocked, responseContracts: contracts };
   } finally {
+    endResponse();
+    deadline.removeEventListener("abort", closeExpiredContext);
+    transportAbort.abort();
     await context.close().catch(() => {});
     await Promise.allSettled([...active]);
     await browser.close();

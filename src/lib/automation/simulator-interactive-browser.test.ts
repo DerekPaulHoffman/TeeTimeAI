@@ -4,6 +4,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { collectInteractiveSimulatorResearch, interactiveControlKind, isAnonymousBrowserReadPost } from "./simulator-interactive-browser";
+import { classifySimulatorSupportFailure } from "./simulator-support-failure";
 
 describe("interactive public research boundaries", () => {
   it("offers navigation and calendar filters, never slots, checkout or contact controls", () => {
@@ -30,6 +31,82 @@ describe("interactive public research boundaries", () => {
     expect(check({ query: "{ slots { time } }", token: "private" })).toBe(false);
     expect(check({ action: "unknown", date: "2026-10-15" })).toBe(false);
     expect(check({ action: "getSlots", email: "private@example.test" })).toBe(false);
+  });
+
+  it("follows an observed new-tab booking link and waits for slow calendar resources", async () => {
+    const channel = resolve(".codex-artifacts/browser", `fixture-${randomUUID()}`);
+    await mkdir(channel, { recursive: true });
+    let stopped = false;
+    let nextRequest = 1;
+    const visited: string[] = [];
+    const fetch = vi.fn(async (url: Parameters<typeof global.fetch>[0]) => {
+      const path = String(url);
+      visited.push(path);
+      if (path.endsWith("/calendar.js")) {
+        await new Promise(r => setTimeout(r, 6_000));
+        return new Response("document.querySelector('#calendar').textContent='Available calendar';", { headers: { "content-type": "text/javascript" } });
+      }
+      if (path.endsWith("/calendar.woff2")) {
+        await new Promise(r => setTimeout(r, 12_000));
+        return new Response(new Uint8Array([0]), { headers: { "content-type": "font/woff2" } });
+      }
+      return new Response(path.includes("booking.example.test")
+        ? '<html><style>@font-face{font-family:Calendar;src:url(/calendar.woff2)}body{font-family:Calendar}</style><body><div id="calendar">Loading calendar</div><script defer src="/calendar.js"></script><label>Duration<select><option>60 minutes</option></select></label></body></html>'
+        : '<html><body><a target="_blank" href="https://booking.example.test/calendar">Reservations</a></body></html>',
+      { headers: { "content-type": "text/html" } });
+    }) as typeof global.fetch;
+    const lease = (async (_family: string, work: () => Promise<unknown>) => ({ acquired: true, value: await work() })) as never;
+    const task = collectInteractiveSimulatorResearch({ url: "https://public.example.test", channel,
+      assertOwned: async () => { if (stopped) throw new Error("Fixture stopped"); } }, { fetch, lease });
+    // Keep failures observable even when the collector exits before a response.
+    const settled = task.then(value => ({ value }), error => ({ error }));
+    const wait = async (number: number) => {
+      for (let i = 0; i < 500; i++) {
+        try { return JSON.parse(await readFile(join(channel, `response-${number}.json`), "utf8")); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; await new Promise(r => setTimeout(r, 50)); }
+      }
+      throw new Error("Fixture response timeout");
+    };
+    try {
+      const first = await wait(0);
+      const reservations = first.controls.find((control: { name: string }) => control.name === "Reservations");
+      await writeFile(join(channel, "request-1.json"), JSON.stringify({ action: "click", target: reservations.target }));
+      nextRequest = 2;
+      const second = await wait(1);
+      expect(second.url).toBe("https://booking.example.test/calendar");
+      expect(second.text).toContain("Available calendar");
+      expect(second.loading).toBe(false);
+      expect(second.screenshot.length).toBeGreaterThan(1000);
+      expect(visited).toContain("https://booking.example.test/calendar.js");
+      expect(visited).toContain("https://booking.example.test/calendar.woff2");
+      await writeFile(join(channel, "request-2.json"), JSON.stringify({ action: "finish" }));
+      const result = await task;
+      expect(result.text).toContain("Available calendar");
+    } finally {
+      stopped = true;
+      await writeFile(join(channel, `request-${nextRequest}.json`), JSON.stringify({ action: "finish" })).catch(() => {});
+      await settled;
+      if (!channel.startsWith(resolve(".codex-artifacts/browser") + "/") && !channel.startsWith(resolve(".codex-artifacts/browser") + "\\")) throw new Error("Bad fixture path");
+      await rm(channel, { recursive: true, force: true });
+    }
+  }, 35_000);
+
+  it("retains the trusted request phase when navigation fails after a resource timeout", async () => {
+    const channel = resolve(".codex-artifacts/browser", `fixture-${randomUUID()}`);
+    await mkdir(channel, { recursive: true });
+    const error = new Error("Private network details must not escape");
+    error.name = "TimeoutError";
+    const lease = (async (_family: string, work: () => Promise<unknown>) => ({ acquired: true, value: await work() })) as never;
+    try {
+      await expect(collectInteractiveSimulatorResearch({ url: "https://public.example.test", channel, assertOwned: async () => {} },
+        { fetch: async () => { throw error; }, lease })).rejects.toBe(error);
+      expect(classifySimulatorSupportFailure(error, "PUBLIC_READ")).toMatchObject({
+        code: "PUBLIC_READ_TIMEOUT", category: "NETWORK", researchPhase: "BROWSER_REQUEST",
+      });
+    } finally {
+      if (!channel.startsWith(resolve(".codex-artifacts/browser") + "/") && !channel.startsWith(resolve(".codex-artifacts/browser") + "\\")) throw new Error("Bad fixture path");
+      await rm(channel, { recursive: true, force: true });
+    }
   });
 
   it("runs an isolated real browser with visual feedback and interactive duration selection", async () => {
