@@ -94,12 +94,12 @@ Large admitted scripts and exhausted whole-source AST walks can return
 `projection: TOKEN_WINDOW`. Every emitted token is independently redacted;
 comments and literal data are removed. These windows are always marked
 incomplete and never imply a complete function, program or API contract.
-Identical redacted excerpts share one display slot, with bounded duplicate source locations retained for attribution. Matching text does not prove matching runtime behavior or authorize a request. Distinct complete scopes and incomplete token windows remain separate evidence; the existing four-excerpt and character limits still apply.
+Identical redacted excerpts share one display slot, with bounded duplicate source locations retained for attribution. Matching text does not prove matching runtime behavior or authorize a request. Distinct complete scopes and incomplete token windows remain separate evidence. The collector can retain up to sixteen distinct excerpts within the unchanged 10,000-character total and 4,000-character per-excerpt limits; short contexts must not leave most of that existing text budget unused merely because four slots were filled.
 Source size, token/time scan, output and context bounds retain explicit
 warnings. Omitted code stays unknown, and the projection grants no additional
 network, method, destination, lease, eligibility or verification authority.
 
-The same four-context/10,000-character code limit samples one context per
+The sixteen-context/10,000-character code limit samples one context per
 candidate source before additional contexts from a single source. Bounded
 `candidateSourceHashes` and `sourceCoverageTruncated` distinguish omitted
 candidate sources from the returned sample. They cover sources that produced

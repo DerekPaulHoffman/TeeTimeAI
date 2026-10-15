@@ -134,29 +134,29 @@ describe("inert public client-code evidence", () => {
   it("deduplicates and bounds merged contexts deterministically", () => {
     const inputs = Array.from({ length: 8 }, (_, index) => inspect(`function getAvailability${index}(date){return fetch("/api/availability",{date})}`));
     const evidence = mergeSimulatorClientCodeEvidence(...inputs, ...inputs)!;
-    expect(evidence.fragments).toHaveLength(4); expect(evidence.truncated).toBe(true);
+    expect(evidence.fragments).toHaveLength(8); expect(evidence.truncated).toBe(false);
     expect(evidence.fragments.reduce((total, fragment) => total + fragment.code.length, 0)).toBeLessThanOrEqual(10_000);
     expect(mergeSimulatorClientCodeEvidence(...inputs.reverse())?.fragments).toEqual(evidence.fragments);
   });
-  it("gives a later source a context before one library consumes all four slots", () => {
+  it("gives a later source a context before taking second contexts from one library", () => {
     const library = inspectSimulatorClientCode(Array.from({ length: 6 }, (_, index) =>
       `function getAvailability${index}(){return fetch('/api/availability/library')}`).join(";"), "https://official.example.test/a-library.js", "EXTERNAL_SCRIPT");
     const client = inspectSimulatorClientCode(`function getAvailability(){return fetch('/api/availability/client')}`,
       "https://official.example.test/z-client.js", "EXTERNAL_SCRIPT");
     const evidence = mergeSimulatorClientCodeEvidence(library, client)!;
-    expect(evidence.fragments).toHaveLength(4);
+    expect(evidence.fragments).toHaveLength(7);
     expect(new Set(evidence.fragments.map(fragment => fragment.sourceSha256)).size).toBe(2);
     expect(evidence.fragments.some(fragment => fragment.sourceUrl.endsWith("/z-client.js"))).toBe(true);
     expect(mergeSimulatorClientCodeEvidence(client, library)?.fragments).toEqual(evidence.fragments);
     expect(evidence.candidateSourceHashes).toHaveLength(2);
     expect(evidence.sourceCoverageTruncated).toBe(false);
   });
-  it("retains bounded candidate-source coverage through incremental merges without adding excerpt slots", () => {
+  it("retains bounded candidate-source coverage through incremental merges", () => {
     let evidence: ReturnType<typeof inspectSimulatorClientCode>;
     for (let index = 0; index < 70; index++) evidence = mergeSimulatorClientCodeEvidence(evidence,
       inspectSimulatorClientCode(`function getAvailability${index}(){return fetch('/api/availability')}`,
         `https://official.example.test/source-${index}.js`, "EXTERNAL_SCRIPT"));
-    expect(evidence!.fragments).toHaveLength(4);
+    expect(evidence!.fragments).toHaveLength(16);
     expect(evidence!.candidateSourceHashes).toHaveLength(64);
     expect(evidence!.sourceCoverageTruncated).toBe(true);
     expect(evidence!.truncated).toBe(true);
@@ -206,5 +206,25 @@ describe("inert public client-code evidence", () => {
     expect(evidence.fragments).toHaveLength(2);
     expect(evidence.fragments.every(fragment => !fragment.duplicateLocations)).toBe(true);
     expect(evidence.truncated).toBe(true);
+  });
+  it("uses the existing text budget for more than four short request contexts from one source", () => {
+    const source = Array.from({ length: 12 }, (_, index) =>
+      `function getAvailability${index}(date){return fetch('/api/availability/route-${index}',{date,secret:'private-token'})}`).join(";");
+    const evidence = inspect(source)!;
+    expect(evidence.fragments).toHaveLength(12);
+    expect(evidence.fragments.reduce((sum, fragment) => sum + fragment.code.length, 0)).toBeLessThanOrEqual(10_000);
+    expect(evidence.truncated).toBe(false);
+    expect(JSON.stringify(evidence)).not.toContain("private-token");
+  });
+  it("still bounds a large number of small excerpts and never exceeds the total character budget", () => {
+    const small = inspect(Array.from({ length: 24 }, (_, index) =>
+      `function getAvailability${index}(){return fetch('/api/availability/route-${index}')}`).join(";"))!;
+    expect(small.fragments).toHaveLength(16); expect(small.truncated).toBe(true);
+    const large = inspect(Array.from({ length: 24 }, (_, index) =>
+      `function getAvailability${index}(){${"void 0;".repeat(240)}return fetch('/api/availability/route-${index}')}`).join(";"))!;
+    expect(large.fragments.length).toBeGreaterThan(4);
+    expect(large.fragments.reduce((sum, fragment) => sum + fragment.code.length, 0)).toBeLessThanOrEqual(10_000);
+    expect(large.fragments.every(fragment => fragment.code.length <= 4_000)).toBe(true);
+    expect(large.truncated).toBe(true);
   });
 });
