@@ -92,7 +92,7 @@ export function createAddressPinnedPublicFetchTransport(
   return (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     const requestInput = input instanceof Request ? input : null;
     const method = (init?.method ?? requestInput?.method ?? "GET").toUpperCase();
-    if (method !== "GET" && method !== "HEAD" && method !== "POST") {
+    if (method !== "GET" && method !== "HEAD" && (method !== "POST" || !policy.authorizeReadPost)) {
       throw new Error("Official-site discovery supports only safe read requests");
     }
     const body = typeof init?.body === "string" ? init.body : undefined;

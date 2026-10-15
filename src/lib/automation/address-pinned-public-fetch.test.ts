@@ -35,7 +35,7 @@ describe("address-pinned public response body limit", () => {
     const dependencies = { requestPinned, resolveAddresses: async () => [{ address: "8.8.8.8", family: 4 as const }] };
     const policy = { parseUrl: (value: string) => new URL(value), maxResponseBytes: 1000, timeoutMs: 1000 };
     const options = { method: "POST", body: '{"query":"{ slots { time } }"}', headers: { "content-type": "application/json" } };
-    await expect(createAddressPinnedPublicFetchTransport(policy, dependencies)("https://public.example.test/graphql", options)).rejects.toThrow("authorized read");
+    await expect(createAddressPinnedPublicFetchTransport(policy, dependencies)("https://public.example.test/graphql", options)).rejects.toThrow("only safe read");
     expect(requestPinned).not.toHaveBeenCalled();
     const fetch = createAddressPinnedPublicFetchTransport({ ...policy, authorizeReadPost: () => true }, dependencies);
     await fetch("https://public.example.test/graphql", options);
