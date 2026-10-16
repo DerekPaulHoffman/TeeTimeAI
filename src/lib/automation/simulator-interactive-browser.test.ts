@@ -139,7 +139,7 @@ describe("interactive public research boundaries", () => {
     }
   });
 
-  it("loads scoped public widget data while keeping telemetry blocked", async () => {
+  it("loads a hall published through the widget URL while keeping other halls and telemetry blocked", async () => {
     const channel = resolve(".codex-artifacts/browser", `fixture-${randomUUID()}`);
     await mkdir(channel, { recursive: true });
     let stopped = false, sequence = 1;
@@ -148,6 +148,10 @@ describe("interactive public research boundaries", () => {
       const body={facility_code:'Public123',start_date:'2026-10-01',end_date:'2026-10-31',type:2};
       await fetch('https://api.passfactory.io/api/v1/availability-widget/get-business-info',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({facility_code:'Public123'})});
       await fetch('https://api.passfactory.io/api/v1/availability-widget/facility-widget',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+      history.replaceState(null,'','?sc=Hall456');
+      const hallBody={hall_code:'Hall456',start_date:body.start_date,end_date:body.end_date,type:2};
+      await fetch('https://api.passfactory.io/api/v1/availability-widget/hall-widget',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(hallBody)});
+      await fetch('https://api.passfactory.io/api/v1/availability-widget/hall-widget',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...hallBody,hall_code:'Unobserved'})}).catch(()=>{});
       fetch('https://analytics.google.com/g/collect',{method:'POST',body:'tracking'}).catch(()=>{});
       document.querySelector('#calendar').textContent='Available public calendar';
       </script></body></html>`;
@@ -155,6 +159,7 @@ describe("interactive public research boundaries", () => {
       const url = String(input); visited.push(url);
       if (url.startsWith("https://api.passfactory.io/")) {
         expect(init?.method).toBe("POST"); expect(init?.credentials).toBe("omit");
+        expect(JSON.parse(String(init?.body)).hall_code).not.toBe("Unobserved");
         return new Response('{"data":{"available":true}}', { headers: { "content-type": "application/json", "access-control-allow-origin": "https://passfactory.com" } });
       }
       return new Response(url.startsWith("https://official.example.test/")
@@ -186,10 +191,10 @@ describe("interactive public research boundaries", () => {
       expect(view.text).toContain("Available public calendar");
       await writeFile(join(channel, `request-${sequence}.json`), JSON.stringify({ action: "finish" }));
       const result = await task;
-      expect(result.renderComplete).toBe(true);
+      expect(result.renderComplete).toBe(false);
       expect(result.blockedRequests).toBeGreaterThan(0);
-      expect(result.renderWarning).toBeUndefined();
-      expect(visited.filter(url => url.startsWith("https://api.passfactory.io/"))).toHaveLength(2);
+      expect(result.renderWarning).toBe("SECONDARY_REQUESTS_BLOCKED");
+      expect(visited.filter(url => url.startsWith("https://api.passfactory.io/"))).toHaveLength(3);
       expect(visited.some(url => url.includes("analytics.google.com"))).toBe(false);
     } finally {
       stopped = true;

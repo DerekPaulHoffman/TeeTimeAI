@@ -163,6 +163,10 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
           const body = request.postData() ?? "";
           const publicHeaders = new Headers();
           for (const key of ["accept", "accept-language", "user-agent", "content-type", "origin"]) if (headers[key]) publicHeaders.set(key, headers[key]);
+          // Widgets can publish their selected hall using history.replaceState
+          // before fetching its calendar. Admit only codes in the real page URL,
+          // never a resource identifier supplied by the request body alone.
+          if (page) passfactory.observeWidgetUrl(page.url());
           const sensitiveHeaders = Object.keys(headers).filter(key => /^(?:authorization|proxy-authorization|x-api-key|api-key|x-auth-token)$/iu.test(key));
           const rejection = !safe ? "UNSAFE_URL" as const
             : !["GET", "HEAD", "POST"].includes(method) ? "METHOD_NOT_ALLOWED" as const
