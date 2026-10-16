@@ -35,6 +35,17 @@ describe("interactive public research boundaries", () => {
       JSON.stringify({ query: "{ slots { time } }" }))).toBe(false);
   });
 
+  it("recognizes named listbox popup filters without admitting other popup actions", () => {
+    const popup = { tag: "div", role: "button", name: "", label: "Duration", hasPopup: "listbox" };
+    expect(interactiveControlKind(popup)).toBe("filter");
+    expect(interactiveControlKind({ ...popup, label: "Party size" })).toBe("filter");
+    expect(interactiveControlKind({ ...popup, label: "" })).toBeNull();
+    expect(interactiveControlKind({ ...popup, label: "Duration", hasPopup: "dialog" })).toBeNull();
+    expect(interactiveControlKind({ ...popup, label: "Reserve duration" })).toBeNull();
+    expect(interactiveControlKind({ ...popup, sensitiveForm: true })).toBeNull();
+    expect(interactiveControlKind({ ...popup, name: "1:00 PM" })).toBeNull();
+  });
+
   it("follows an observed new-tab booking link and waits for slow calendar resources", async () => {
     const channel = resolve(".codex-artifacts/browser", `fixture-${randomUUID()}`);
     await mkdir(channel, { recursive: true });
@@ -214,10 +225,14 @@ describe("interactive public research boundaries", () => {
       <label for="duration">Duration</label><select id="duration"><option>30 minutes</option><option>60 minutes</option></select>
       <button id="next">Next month</button><div id="state">October</div><button>1:00 PM</button>
       <label for="find">Search courses</label><input id="find" type="search"><div id="found"></div>
+      <span id="party-label">Party size</span><div id="party" role="button" tabindex="0" aria-haspopup="listbox" aria-labelledby="party-label">Choose</div>
+      <div id="party-options" role="listbox" hidden><div role="option">2 players</div></div>
       <button>Confirm reservation</button><a href="/login">Login</a>
       <script>document.querySelector('#duration').onchange=e=>document.querySelector('#state').textContent=e.target.value;
       document.querySelector('#next').onclick=()=>document.querySelector('#state').textContent='November';
       document.querySelector('#find').oninput=e=>document.querySelector('#found').textContent=e.target.value;
+      document.querySelector('#party').onclick=()=>document.querySelector('#party-options').hidden=false;
+      document.querySelector('[role=option]').onclick=()=>{document.querySelector('#party').textContent='2 players selected';document.querySelector('#party-options').hidden=true};
       fetch('/graphql',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:'query Calendar { slots { time } }'})});</script>
       </body></html>`;
     const fetch = vi.fn(async (url: Parameters<typeof global.fetch>[0]) => {
@@ -248,8 +263,18 @@ describe("interactive public research boundaries", () => {
       expect(third.text).toContain("Public course");
       const next = third.controls.find((control: { name: string }) => control.name === "Next month");
       await writeFile(join(channel, "request-3.json"), JSON.stringify({ action: "click", target: next.target }));
-      expect((await wait(3)).text).toContain("November");
-      await writeFile(join(channel, "request-4.json"), JSON.stringify({ action: "finish" }));
+      const fourth = await wait(3);
+      expect(fourth.text).toContain("November");
+      const party = fourth.controls.find((control: { kind: string; label: string }) => control.kind === "filter" && control.label === "Party size");
+      expect(party).toBeDefined();
+      expect(fourth.controls.some((control: { kind: string }) => control.kind === "option")).toBe(false);
+      await writeFile(join(channel, "request-4.json"), JSON.stringify({ action: "click", target: party.target }));
+      const fifth = await wait(4);
+      const option = fifth.controls.find((control: { kind: string; name: string }) => control.kind === "option" && control.name === "2 players");
+      expect(option).toBeDefined();
+      await writeFile(join(channel, "request-5.json"), JSON.stringify({ action: "click", target: option.target }));
+      expect((await wait(5)).text).toContain("2 players selected");
+      await writeFile(join(channel, "request-6.json"), JSON.stringify({ action: "finish" }));
       const result = await task;
       expect(result.text).toContain("November");
       expect(result.method).toBe("BROWSER");

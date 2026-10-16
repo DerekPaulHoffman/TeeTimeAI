@@ -29,11 +29,12 @@ const filterName = /\b(?:date|day|month|calendar|duration|length|party|players?|
 const timeSlot = /\b\d{1,2}:\d{2}\s*(?:am|pm)?\b/iu;
 
 /** UI intent is checked separately from the server request contract. Slots are never clicked. */
-export function interactiveControlKind(input: { tag: string; role: string; name: string; label: string; href?: string; calendar?: boolean; sensitiveForm?: boolean; inputType?: string }) {
+export function interactiveControlKind(input: { tag: string; role: string; name: string; label: string; href?: string; calendar?: boolean; sensitiveForm?: boolean; inputType?: string; hasPopup?: string }) {
   const name = `${input.name} ${input.label}`.trim();
   if (input.sensitiveForm || forbidden.test(name) || timeSlot.test(input.name)) return null;
   if (input.tag === "a" && input.href && getSafeCustomerBookingUrl(input.href)) return "link" as const;
-  if ((input.tag === "select" || input.role === "combobox") && filterName.test(name)) return "filter" as const;
+  if ((input.tag === "select" || input.role === "combobox" ||
+      (input.tag === "button" || input.role === "button") && input.hasPopup === "listbox") && filterName.test(name)) return "filter" as const;
   if (input.tag === "input" && ["search", "date", "text", "number"].includes(input.inputType ?? "") &&
       /\b(?:search|date|duration|players?|party|location|course)\b/iu.test(name)) return "field" as const;
   if (input.role === "option") return "option" as const;
@@ -240,6 +241,7 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
       const label = [e.getAttribute("aria-label"), ...(Array.from(input.labels ?? []).map(l => l.textContent)),
         e.getAttribute("aria-labelledby")?.split(/\s+/u).map(id => document.getElementById(id)?.textContent).join(" ")].filter(Boolean).join(" ");
       return { tag: e.tagName.toLowerCase(), role: e.getAttribute("role") ?? "", name: (e.innerText || e.getAttribute("aria-label") || "").trim().slice(0, 160), label: label.slice(0, 200),
+        hasPopup: e.getAttribute("aria-haspopup") ?? "",
         href: e instanceof HTMLAnchorElement ? e.href : undefined,
         calendar: Boolean(e.closest('[role="grid"]')),
         inputType: input.type,
@@ -260,7 +262,7 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
       const access = detectSimulatorResearchAccessControls(html);
       controls = new Map();
       const visible = [];
-      const locators = await page!.locator("a[href],button,select,input,[role=combobox],[role=option],[role=gridcell]").all();
+      const locators = await page!.locator('a[href],button,select,input,[role=combobox],[role=button][aria-haspopup="listbox"],[role=option],[role=gridcell]').all();
       for (const locator of locators.slice(0, 300)) {
         budget(10_000);
         if (!await locator.isVisible() || !await locator.isEnabled()) continue;
