@@ -71,7 +71,8 @@ export function isIncidentalBrowserRequest(value: string) {
     url.hostname === "googleads.g.doubleclick.net" && /^\/pagead\/viewthroughconversion\/\d+\/$/u.test(url.pathname) ||
     url.hostname === "r.stripe.com" && url.pathname === "/b" ||
     url.hostname === "m.stripe.com" && url.pathname === "/6" ||
-    url.hostname === "track-na2.hubspot.com" && url.pathname === "/__ptq.gif" ||
+    url.hostname === "track-na2.hubspot.com" && ["/__ptq.gif", "/__ptc.gif"].includes(url.pathname) ||
+    url.hostname === "forms-na2.hscollectedforms.net" && url.pathname === "/collected-forms/v1/config/json" ||
     url.hostname === "connect.facebook.net" && /^\/signals\/config\/\d+$/u.test(url.pathname) ||
     url.hostname === "maps.googleapis.com" && ["/maps/api/js/StaticMapService.GetMapImage",
       "/$rpc/google.internal.maps.mapsjs.v1.MapsJsInternalService/GetViewportInfo"].includes(url.pathname);

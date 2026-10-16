@@ -238,8 +238,23 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
     const observedControl = async (locator: Locator) => locator.evaluate(element => {
       const e = element as HTMLElement;
       const input = element as HTMLInputElement;
-      const label = [e.getAttribute("aria-label"), ...(Array.from(input.labels ?? []).map(l => l.textContent)),
+      let label = [e.getAttribute("aria-label"), ...(Array.from(input.labels ?? []).map(l => l.textContent)),
         e.getAttribute("aria-labelledby")?.split(/\s+/u).map(id => document.getElementById(id)?.textContent).join(" ")].filter(Boolean).join(" ");
+      // Some public widgets visually label custom dropdowns without wiring an
+      // accessible name. Accept only one visible direct label around exactly
+      // this control; never borrow a form's or another field's label.
+      if (!label) {
+        let group = e.parentElement;
+        for (let depth = 0; group && depth < 3 && !["BODY", "FORM"].includes(group.tagName); depth++, group = group.parentElement) {
+          const labels = Array.from(group.querySelectorAll<HTMLLabelElement>(":scope > label"))
+            .filter(l => l.getClientRects().length && (!l.htmlFor || l.htmlFor === e.id));
+          const fields = Array.from(group.querySelectorAll('select,input:not([type="hidden"]):not([aria-hidden="true"]),[role="combobox"],[role="button"][aria-haspopup="listbox"]'));
+          if (labels.length === 1 && fields.length === 1 && fields[0] === e) {
+            label = labels[0].textContent?.trim() ?? "";
+            break;
+          }
+        }
+      }
       return { tag: e.tagName.toLowerCase(), role: e.getAttribute("role") ?? "", name: (e.innerText || e.getAttribute("aria-label") || "").trim().slice(0, 160), label: label.slice(0, 200),
         hasPopup: e.getAttribute("aria-haspopup") ?? "",
         href: e instanceof HTMLAnchorElement ? e.href : undefined,

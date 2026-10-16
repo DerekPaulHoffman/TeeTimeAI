@@ -225,15 +225,19 @@ describe("interactive public research boundaries", () => {
       <label for="duration">Duration</label><select id="duration"><option>30 minutes</option><option>60 minutes</option></select>
       <button id="next">Next month</button><div id="state">October</div><button>1:00 PM</button>
       <label for="find">Search courses</label><input id="find" type="search"><div id="found"></div>
-      <span id="party-label">Party size</span><div id="party" role="button" tabindex="0" aria-haspopup="listbox" aria-labelledby="party-label">Choose</div>
+      <div><label>Party size</label><div><div id="party" role="combobox" tabindex="0" aria-haspopup="listbox">Choose</div><input aria-hidden="true" tabindex="-1"></div></div>
       <div id="party-options" role="listbox" hidden><div role="option">2 players</div></div>
+      <div><label>Duration</label><div role="combobox" aria-haspopup="listbox">Ambiguous first</div><div role="combobox" aria-haspopup="listbox">Ambiguous second</div></div>
+      <div><label for="different-field">Duration</label><div role="combobox" aria-haspopup="listbox">Wrong label</div></div>
       <button>Confirm reservation</button><a href="/login">Login</a>
       <script>document.querySelector('#duration').onchange=e=>document.querySelector('#state').textContent=e.target.value;
       document.querySelector('#next').onclick=()=>document.querySelector('#state').textContent='November';
       document.querySelector('#find').oninput=e=>document.querySelector('#found').textContent=e.target.value;
       document.querySelector('#party').onclick=()=>document.querySelector('#party-options').hidden=false;
       document.querySelector('[role=option]').onclick=()=>{document.querySelector('#party').textContent='2 players selected';document.querySelector('#party-options').hidden=true};
-      fetch('/graphql',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:'query Calendar { slots { time } }'})});</script>
+      fetch('/graphql',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:'query Calendar { slots { time } }'})});
+      fetch('https://forms-na2.hscollectedforms.net/collected-forms/v1/config/json?portalId=123&utk=abcdef0123456789abcdef0123456789').catch(()=>{});
+      fetch('https://track-na2.hubspot.com/__ptc.gif?utk=abcdef0123456789abcdef0123456789').catch(()=>{});</script>
       </body></html>`;
     const fetch = vi.fn(async (url: Parameters<typeof global.fetch>[0]) => {
       visited.push(String(url));
@@ -267,6 +271,7 @@ describe("interactive public research boundaries", () => {
       expect(fourth.text).toContain("November");
       const party = fourth.controls.find((control: { kind: string; label: string }) => control.kind === "filter" && control.label === "Party size");
       expect(party).toBeDefined();
+      expect(fourth.controls.some((control: { name: string }) => /Ambiguous|Wrong label/.test(control.name))).toBe(false);
       expect(fourth.controls.some((control: { kind: string }) => control.kind === "option")).toBe(false);
       await writeFile(join(channel, "request-4.json"), JSON.stringify({ action: "click", target: party.target }));
       const fifth = await wait(4);
@@ -278,6 +283,9 @@ describe("interactive public research boundaries", () => {
       const result = await task;
       expect(result.text).toContain("November");
       expect(result.method).toBe("BROWSER");
+      expect(result.renderComplete).toBe(true);
+      expect(result.blockedRequests).toBeGreaterThan(0);
+      expect(result.renderWarning).toBeUndefined();
       expect(result.responseContracts).toHaveLength(1);
       expect(visited).toEqual(["https://public.example.test/calendar", "https://public.example.test/graphql"]);
       expect(assertOwned.mock.calls.length).toBeGreaterThanOrEqual(5);

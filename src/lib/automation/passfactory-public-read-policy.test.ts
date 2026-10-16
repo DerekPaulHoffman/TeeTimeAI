@@ -47,6 +47,10 @@ it("exempts only exact incidental telemetry destinations from completeness", () 
   expect(isIncidentalBrowserRequest("https://r.stripe.com/b")).toBe(true);
   expect(isIncidentalBrowserRequest("https://analytics.google.com/g/collect?v=2")).toBe(true);
   expect(isIncidentalBrowserRequest("https://maps.googleapis.com/$rpc/google.internal.maps.mapsjs.v1.MapsJsInternalService/GetViewportInfo")).toBe(true);
+  expect(isIncidentalBrowserRequest("https://forms-na2.hscollectedforms.net/collected-forms/v1/config/json?portalId=123")).toBe(true);
+  expect(isIncidentalBrowserRequest("https://track-na2.hubspot.com/__ptc.gif?utk=tracking")).toBe(true);
   for (const url of ["https://api.passfactory.io/api/v1/availability-widget/hall-widget", "https://api.stripe.com/v1/payment_intents", "https://r.stripe.com/checkout", "https://r.stripe.com.evil.test/b", "https://other.test/g/collect"])
+    expect(isIncidentalBrowserRequest(url)).toBe(false);
+  for (const url of ["https://forms-na2.hscollectedforms.net/collected-forms/submit", "https://forms-na2.hscollectedforms.net.evil.test/collected-forms/v1/config/json", "http://forms-na2.hscollectedforms.net/collected-forms/v1/config/json", "https://track-na2.hubspot.com/submit", "https://track-na2.hubspot.com.evil.test/__ptc.gif"])
     expect(isIncidentalBrowserRequest(url)).toBe(false);
 });
