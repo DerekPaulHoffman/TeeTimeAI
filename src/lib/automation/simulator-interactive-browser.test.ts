@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { chromium } from "@playwright/test";
 import { collectInteractiveSimulatorResearch, interactiveControlKind, isAnonymousBrowserReadPost } from "./simulator-interactive-browser";
 import { classifySimulatorSupportFailure } from "./simulator-support-failure";
 
@@ -216,7 +217,7 @@ describe("interactive public research boundaries", () => {
     }
   }, 25_000);
 
-  it("retains admitted public display facts even after the generic response-shape budget is full", async () => {
+  it.each(["unchanged", "history", "navigation", "reload"])("retains only the current document's display facts (%s)", async (change) => {
     const channel = resolve(".codex-artifacts/browser", `fixture-${randomUUID()}`);
     await mkdir(channel, { recursive: true });
     const api = "https://api.passfactory.io/api/v1/availability-widget/";
@@ -226,46 +227,134 @@ describe("interactive public research boundaries", () => {
         start_date: "2026-10-16", end_date: "2026-10-16", start_time: "13:00:00", end_time: "17:00:00", slot_duration: 60, availability_type: 2 }],
     }] } };
     const visited: string[] = [];
+    let documents = 0;
     const fetch = vi.fn(async (url: Parameters<typeof global.fetch>[0]) => {
       const value = String(url); visited.push(value);
+      if (value.endsWith("/calendar.js")) return new Response("async function loadAvailability(){return fetch('/api/availability')}",
+        { headers: { "content-type": "application/javascript" } });
       if (value.startsWith(api)) return new Response(JSON.stringify(value.endsWith("hall-widget") ? fixture : { code: 200, payload: {} }),
         { headers: { "content-type": "application/json", "access-control-allow-origin": "*" } });
-      return new Response(`<html><body>Loading<script>(async()=>{
+      if (++documents > 1) return new Response("<html><body>New document ready</body></html>", { headers: { "content-type": "text/html" } });
+      return new Response(`<html><body>Loading<script src="/calendar.js"></script><script>(async()=>{
         for(let n=0;n<8;n++)await fetch('${api}get-business-info',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({hall_code:'publicHall'})});
         await fetch('${api}hall-widget',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({hall_code:'publicHall',start_date:'2026-10-16',end_date:'2026-10-16',type:2})});
+        ${change === "history" ? "history.replaceState(null,'','?sc=publicHall&view=calendar');" : ""}
+        ${change === "navigation" ? "location.assign('/next');return;" : ""}
+        ${change === "reload" ? "location.reload();return;" : ""}
         document.body.append('Calendar ready');
       })();</script></body></html>`, { headers: { "content-type": "text/html" } });
     }) as typeof global.fetch;
     const lease = (async (_host: string, work: () => Promise<unknown>) => ({ acquired: true, value: await work() })) as never;
     const task = collectInteractiveSimulatorResearch({ url: "https://passfactory.com/ftbb/publicFacility/?sc=publicHall", channel, assertOwned: async () => {} }, { fetch, lease });
-    const settled = task.then(value => ({ value }), error => ({ error }));
+    let terminalError: unknown;
+    const settled = task.then(value => ({ value }), error => { terminalError = error; return { error }; });
     let sequence = 0;
     try {
       for (; sequence < 8; sequence++) {
         let view;
-        for (let attempt = 0; attempt < 200; attempt++) {
+        // Match the bridge's bounded response window, not an arbitrary five
+        // seconds that hides real navigation/capture errors behind fixture timeouts.
+        const responseDeadline = Date.now() + 80_000;
+        while (Date.now() < responseDeadline) {
+          if (terminalError) throw terminalError;
           try { view = JSON.parse(await readFile(join(channel, `response-${sequence}.json`), "utf8")); break; }
           catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; await new Promise(r => setTimeout(r, 25)); }
         }
         if (!view) throw new Error("Fixture response timeout");
-        if (view.text.includes("Calendar ready") && !view.loading) break;
+        if (view.text.includes(change === "navigation" || change === "reload" ? "New document ready" : "Calendar ready") && !view.loading) break;
         await writeFile(join(channel, `request-${sequence + 1}.json`), JSON.stringify({ action: "observe" }));
       }
       await writeFile(join(channel, `request-${sequence + 1}.json`), JSON.stringify({ action: "finish" }));
       const result = await task;
       expect(result.renderComplete).toBe(true);
-      expect(result.responseContracts).toHaveLength(8);
-      expect(result.publicCalendarEvidence).toMatchObject([{ kind: "HALL", code: "publicHall", rule_times: [{
+      if (change === "navigation" || change === "reload") {
+        expect(result.responseContracts).toHaveLength(0);
+        expect(result.publicCalendarEvidence).toBeUndefined();
+        expect(result.clientCodeEvidence).toBeUndefined();
+      } else {
+        expect(result.responseContracts).toHaveLength(8);
+        expect(result.publicCalendarEvidence).toMatchObject([{ kind: "HALL", code: "publicHall", rule_times: [{
         availabilities: [{ table_id: "publicTable", slot_duration: 60, availability_type: 2 }],
-      }] }]);
-      expect(visited).toHaveLength(10);
+        }] }]);
+        expect(result.clientCodeEvidence?.fragments.some(fragment => fragment.code.includes("loadAvailability"))).toBe(true);
+      }
+      expect(visited).toHaveLength(change === "navigation" || change === "reload" ? 12 : 11);
     } finally {
       await writeFile(join(channel, `request-${sequence + 1}.json`), JSON.stringify({ action: "finish" })).catch(() => {});
       await settled;
       if (!channel.startsWith(resolve(".codex-artifacts/browser") + "/") && !channel.startsWith(resolve(".codex-artifacts/browser") + "\\")) throw new Error("Bad fixture path");
       await rm(channel, { recursive: true, force: true });
     }
-  }, 25_000);
+  }, 90_000);
+
+  it.each([
+    { loseOwnership: false, phase: "content" },
+    { loseOwnership: false, phase: "screenshot" },
+    { loseOwnership: true, phase: "content" },
+  ])("handles document changes without retrying lost ownership ($phase, lost=$loseOwnership)", async ({ loseOwnership, phase }) => {
+    const channel = resolve(".codex-artifacts/browser", `fixture-${randomUUID()}`);
+    await mkdir(channel, { recursive: true });
+    const browser = await chromium.launch({ headless: true });
+    const newContext = browser.newContext.bind(browser);
+    let changed = false;
+    let ownershipFailures = 0;
+    const ownershipError = new Error("Fixture ownership lost");
+    vi.spyOn(browser, "newContext").mockImplementation(async options => {
+      const context = await newContext(options);
+      const newPage = context.newPage.bind(context);
+      vi.spyOn(context, "newPage").mockImplementation(async () => {
+        const page = await newPage(), content = page.content.bind(page);
+        vi.spyOn(page, "content").mockImplementation(async () => {
+          const html = await content();
+          if (!changed && phase === "content") { changed = true; await page.goto("https://public.example.test/next"); }
+          return html;
+        });
+        const screenshot = page.screenshot.bind(page);
+        vi.spyOn(page, "screenshot").mockImplementation(async options => {
+          if (!changed && phase === "screenshot") {
+            changed = true;
+            await page.goto("https://public.example.test/next");
+            throw new Error("page.screenshot: Protocol error (Page.captureScreenshot): Unable to capture screenshot");
+          }
+          return screenshot(options);
+        });
+        return page;
+      });
+      return context;
+    });
+    const fetch = vi.fn(async (url: Parameters<typeof global.fetch>[0]) => new Response(String(url).endsWith("/next")
+      ? "<html><body>New public document</body></html>"
+      : "<html><body>Login required to view availability</body></html>", { headers: { "content-type": "text/html" } })) as typeof global.fetch;
+    const lease = (async (_host: string, work: () => Promise<unknown>) => ({ acquired: true, value: await work() })) as never;
+    const task = collectInteractiveSimulatorResearch({ url: "https://public.example.test/", channel, assertOwned: async () => {
+      if (changed && loseOwnership) { ownershipFailures++; throw ownershipError; }
+    } },
+      { fetch, lease, launch: async () => browser });
+    const settled = task.then(value => ({ value }), error => ({ error }));
+    try {
+      if (loseOwnership) {
+        await expect(task).rejects.toBe(ownershipError);
+        expect(ownershipFailures).toBe(1);
+        expect(fetch).toHaveBeenCalledTimes(2);
+        return;
+      }
+      let view;
+      for (let attempt = 0; attempt < 400; attempt++) {
+        try { view = JSON.parse(await readFile(join(channel, "response-0.json"), "utf8")); break; }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; await new Promise(r => setTimeout(r, 25)); }
+      }
+      expect(view?.text).toBe("New public document");
+      expect(view?.accessControls).toEqual([]);
+      await writeFile(join(channel, "request-1.json"), JSON.stringify({ action: "finish" }));
+      expect((await task).accessControls).toEqual([]);
+      expect(fetch).toHaveBeenCalledTimes(2);
+    } finally {
+      await writeFile(join(channel, "request-1.json"), JSON.stringify({ action: "finish" })).catch(() => {});
+      await settled;
+      if (!channel.startsWith(resolve(".codex-artifacts/browser") + "/") && !channel.startsWith(resolve(".codex-artifacts/browser") + "\\")) throw new Error("Bad fixture path");
+      await rm(channel, { recursive: true, force: true });
+    }
+  }, 20_000);
 
   it("runs an isolated real browser with visual feedback and interactive duration selection", async () => {
     const channel = resolve(".codex-artifacts/browser", `fixture-${randomUUID()}`);

@@ -133,11 +133,15 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
   let status = 0;
   let choosingFilter = false;
   let loadComplete = false;
+  let documentEpoch = 0;
+  let viewGeneration = 0;
+  let lastNavigationAt = 0;
+  let pendingNavigation = false;
   let pendingPublicReads = 0;
   const origins = new Set([new URL(requestedUrl).origin]);
   const contracts: NonNullable<SimulatorResearchResult["responseContracts"]> = [];
-  const calendarEvidence = new Map<string, { document: string; evidence: PassfactoryCalendarEvidence }>();
-  const clientEvidence = new Map<string, SimulatorClientCodeEvidence>();
+  const calendarEvidence = new Map<string, { document: number; evidence: PassfactoryCalendarEvidence }>();
+  const clientEvidence = new Map<number, SimulatorClientCodeEvidence>();
   let selectedCalendarFilters: NonNullable<SimulatorResearchResult["selectedCalendarFilters"]> = [];
   const blockedResources = createBlockedResourceDiagnostics();
   const active = new Set<Promise<void>>();
@@ -159,6 +163,7 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
     await context.route("**/*", async route => {
       const operation = (async () => {
         const request = route.request();
+        const sourceDocument = documentEpoch;
         let trackedPublicRead = false;
         try {
           if (deadline.aborted || failure) return await route.abort();
@@ -167,7 +172,6 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
           const method = request.method();
           const kind = request.resourceType();
           const body = request.postData() ?? "";
-          const document = page?.url() ?? requestedUrl;
           const publicHeaders = new Headers();
           for (const key of ["accept", "accept-language", "user-agent", "content-type", "origin"]) if (headers[key]) publicHeaders.set(key, headers[key]);
           // Widgets can publish their selected hall using history.replaceState
@@ -208,6 +212,20 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
             blockedResources.record({ url: safe, kind, method, reason: "UNSCOPED_DESTINATION", originRelation: "OTHER_ORIGIN" });
             blocked += 1; blockingRequests += 1; return await route.abort("blockedbyclient");
           }
+          if (kind === "document" && request.frame() === page?.mainFrame()) {
+            if (++documentEpoch > 6) throw new Error("SIMULATOR_RESEARCH_REDIRECT_LIMIT");
+            pendingNavigation = true;
+            // A history/query/hash update keeps this document. Only a real
+            // main-document request starts a new evidence scope, even on reload.
+            blockingRequests = 0;
+            calendarEvidence.clear();
+            clientEvidence.clear();
+            contracts.length = 0;
+            controls.clear();
+            selectedCalendarFilters = [];
+            choosingFilter = false;
+          }
+          const document = kind === "document" && request.frame() === page?.mainFrame() ? documentEpoch : sourceDocument;
           if (++requests > 192 || bytes > 24_000_000) throw new Error("SIMULATOR_RESEARCH_REQUEST_LIMIT");
           if (method === "POST") { pendingPublicReads++; trackedPublicRead = true; }
           await requestQueue.run(new URL(safe).hostname, async () => {
@@ -224,22 +242,22 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
               if (!next || method === "POST" || ++navigations > 6 || new URL(next).hostname.replace(/^www\./u, "") !== new URL(safe).hostname.replace(/^www\./u, "")) throw new Error("BROWSER_UNSAFE_REDIRECT");
               origins.add(new URL(next).origin); responseHeaders.location = next;
             }
-            if (request.isNavigationRequest() && request.frame() === page?.mainFrame()) status = response.status;
+            if (document === documentEpoch && request.isNavigationRequest() && request.frame() === page?.mainFrame()) status = response.status;
             if (response.status >= 200 && response.status < 300 && kind === "script" && request.frame() === page?.mainFrame() && /(?:javascript|ecmascript)/iu.test(type)) {
               const evidence = inspectSimulatorClientCode(buffer.toString("utf8"), safe, "EXTERNAL_SCRIPT");
-              if (evidence && (clientEvidence.has(document) || clientEvidence.size < 5))
+              if (document === documentEpoch && evidence && (clientEvidence.has(document) || clientEvidence.size < 5))
                 clientEvidence.set(document, mergeSimulatorClientCodeEvidence(clientEvidence.get(document), evidence)!);
             }
             if (type.includes("json")) {
               try {
                 const json = JSON.parse(buffer.toString("utf8"));
-                if (contracts.length < 8) contracts.push({ pathShape: new URL(safe).pathname.split("/").map(p => p ? ":value" : "").join("/"), queryKeys: [],
+                if (document === documentEpoch && contracts.length < 8) contracts.push({ pathShape: new URL(safe).pathname.split("/").map(p => p ? ":value" : "").join("/"), queryKeys: [],
                   httpStatus: response.status, shape: summarizeSimulatorPublicJsonShape(json) });
                 // Retain closed public display facts independently of the first-eight
                 // shape samples. This does not expose arbitrary API bodies or add reads.
                 const evidence = response.status >= 200 && response.status < 300 && method === "POST" && passfactory.allows(new URL(safe), publicHeaders, body)
                   ? projectPassfactoryCalendarEvidence(safe, body, json) : undefined;
-                if (evidence) {
+                if (document === documentEpoch && evidence) {
                   const key = `${document}:${evidence.kind}:${evidence.code}`;
                   if (calendarEvidence.has(key) || calendarEvidence.size < 8) calendarEvidence.set(key, { document, evidence });
                 }
@@ -257,6 +275,9 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
     });
     page = await context.newPage();
     page.on("popup", popup => { void popup.close(); });
+    page.on("framenavigated", frame => {
+      if (frame === page?.mainFrame()) { viewGeneration++; lastNavigationAt = Date.now(); pendingNavigation = false; }
+    });
     const observedControl = async (locator: Locator) => locator.evaluate(element => {
       const e = element as HTMLElement;
       const input = element as HTMLInputElement;
@@ -285,41 +306,64 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
         selectedValue: e.tagName === "SELECT" ? (element as HTMLSelectElement).selectedOptions[0]?.textContent ?? "" : e.innerText,
         sensitiveForm: Boolean(e.closest("form")?.querySelector('input[type="password"],input[type="email"],input[type="tel"],[autocomplete^="cc-"]')) };
     });
-    const snapshot = async (message?: string) => atPhase("BROWSER_DOCUMENT", async () => {
-      await assertLive();
-      // Wait for document resources, not networkidle: public calendars may poll forever.
-      // If secondary resources are still loading, return a usable observation and let
-      // the worker observe again within the original session and action budgets.
-      loadComplete = false;
-      const loadBudget = Math.min(30_000, Math.max(1, budget(75_000) - 20_000));
-      try { await page!.waitForLoadState("load", { timeout: loadBudget }); loadComplete = true; }
-      catch (error) { if (!(error instanceof Error) || error.name !== "TimeoutError") throw error; }
-      await assertLive();
-      page!.setDefaultTimeout(budget(10_000));
-      const html = await page!.content();
-      const access = detectSimulatorResearchAccessControls(html);
-      controls = new Map();
-      const visible = [];
-      selectedCalendarFilters = [];
-      const locators = await page!.locator('a[href],button,select,input,[role=combobox],[role=button][aria-haspopup="listbox"],[role=option],[role=gridcell]').all();
-      for (const locator of locators.slice(0, 300)) {
-        budget(10_000);
-        if (!await locator.isVisible() || !await locator.isEnabled()) continue;
-        const item = await observedControl(locator);
-        const kind = interactiveControlKind(item);
-        if (!kind || access.length || status >= 400 || kind === "option" && !choosingFilter) continue;
-        const target = randomUUID();
-        controls.set(target, { locator, kind, signature: JSON.stringify(item), href: item.href });
-        visible.push({ target, kind, name: sanitizeResponderText(item.name), label: sanitizeResponderText(item.label),
-          ...(item.tag === "select" ? { options: await locator.locator("option").allTextContents() } : {}) });
-        if (kind === "filter") selectedCalendarFilters.push({ label: sanitizeResponderText(item.label).slice(0, 200),
-          value: sanitizeResponderText(item.selectedValue ?? "").replace(/[\u200b-\u200d\ufeff]/gu, "").trim().slice(0, 160) });
+    const captureSnapshot = async (message?: string) => atPhase("BROWSER_DOCUMENT", async () => {
+      for (let attempt = 0; ; attempt++) {
+        const generation = viewGeneration;
+        const epoch = documentEpoch;
+        try {
+          await assertLive();
+          // A short settling window lets an already-running display read finish
+          // before screenshot capture. Polling sites still get a provisional
+          // snapshot; this is not an unbounded network-idle wait.
+          const settleUntil = Date.now() + budget(250);
+          while ((pendingNavigation || pendingPublicReads > 0) && Date.now() < settleUntil) await delay(25);
+          loadComplete = false;
+          const loadBudget = Math.min(30_000, Math.max(1, budget(75_000) - 20_000));
+          try { await page!.waitForLoadState("load", { timeout: loadBudget }); loadComplete = true; }
+          catch (error) { if (!(error instanceof Error) || error.name !== "TimeoutError") throw error; }
+          await assertLive();
+          page!.setDefaultTimeout(budget(10_000));
+          const html = await page!.content();
+          if (generation !== viewGeneration || epoch !== documentEpoch) throw new Error("BROWSER_DOCUMENT_CHANGED");
+          const access = detectSimulatorResearchAccessControls(html);
+          controls = new Map();
+          const visible = [];
+          selectedCalendarFilters = [];
+          const locators = await page!.locator('a[href],button,select,input,[role=combobox],[role=button][aria-haspopup="listbox"],[role=option],[role=gridcell]').all();
+          for (const locator of locators.slice(0, 300)) {
+            budget(10_000);
+            if (!await locator.isVisible() || !await locator.isEnabled()) continue;
+            const item = await observedControl(locator);
+            const kind = interactiveControlKind(item);
+            if (!kind || access.length || status >= 400 || kind === "option" && !choosingFilter) continue;
+            const target = randomUUID();
+            controls.set(target, { locator, kind, signature: JSON.stringify(item), href: item.href });
+            visible.push({ target, kind, name: sanitizeResponderText(item.name), label: sanitizeResponderText(item.label),
+              ...(item.tag === "select" ? { options: await locator.locator("option").allTextContents() } : {}) });
+            if (kind === "filter") selectedCalendarFilters.push({ label: sanitizeResponderText(item.label).slice(0, 200),
+              value: sanitizeResponderText(item.selectedValue ?? "").replace(/[\u200b-\u200d\ufeff]/gu, "").trim().slice(0, 160) });
+          }
+          const image = (await page!.screenshot({ type: "png", animations: "disabled", timeout: budget(20_000) })).toString("base64");
+          if (image.length > 3_000_000) throw new Error("BROWSER_SCREENSHOT_LIMIT");
+          const text = sanitizeResponderText(await page!.locator("body").innerText()).slice(0, 12_000);
+          if (generation !== viewGeneration || epoch !== documentEpoch) throw new Error("BROWSER_DOCUMENT_CHANGED");
+          return { html, view: { phase: "open", sequence, message, url: page!.url(), text,
+            controls: visible, selectedCalendarFilters, loading: pendingNavigation || !loadComplete || pendingPublicReads > 0,
+            accessControls: access, blockedRequests: blocked, admittedRequests: requests, screenshot: image } };
+        } catch (error) {
+          const changed = error instanceof Error &&
+            (/BROWSER_DOCUMENT_CHANGED|Execution context was destroyed|Cannot find context with specified id|Unable to retrieve content because the page is navigating/u.test(error.message) ||
+              (generation !== viewGeneration || epoch !== documentEpoch) && error.name === "TimeoutError" ||
+              /Protocol error \(Page\.captureScreenshot\): Unable to capture screenshot/u.test(error.message) &&
+                (pendingNavigation || generation !== viewGeneration || epoch !== documentEpoch || Date.now() - lastNavigationAt < 1_000));
+          if (attempt >= 3 || !changed || failure || deadline.aborted) throw error;
+          // Retry observation only. No navigation or provider request is replayed;
+          // the same response/session deadlines still bound all attempts.
+          await delay(100);
+        }
       }
-      const image = (await page!.screenshot({ type: "png", animations: "disabled", timeout: budget(20_000) })).toString("base64");
-      if (image.length > 3_000_000) throw new Error("BROWSER_SCREENSHOT_LIMIT");
-      return { phase: "open", sequence, message, url: page!.url(), text: sanitizeResponderText(await page!.locator("body").innerText()).slice(0, 12_000),
-        controls: visible, selectedCalendarFilters, loading: !loadComplete || pendingPublicReads > 0, accessControls: access, blockedRequests: blocked, admittedRequests: requests, screenshot: image };
     });
+    const snapshot = async (message?: string) => (await captureSnapshot(message)).view;
     await assertLive();
     await atPhase("BROWSER_NAVIGATION", () => page!.goto(requestedUrl, { waitUntil: "domcontentloaded", timeout: budget(45_000) }));
     await publish(join(channel, "response-0.json"), await snapshot());
@@ -371,13 +415,13 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
       endResponse();
     }
     await assertLive();
-    const html = await page.content();
+    const { html } = await captureSnapshot();
     const result = resultFromSimulatorResearchBody(requestedUrl, page.url(), status, "text/html", Buffer.from(html), new Date());
     const finalUrl = page.url();
-    const codeEvidence = mergeSimulatorClientCodeEvidence(clientEvidence.get(finalUrl), inlineClientCodeEvidence(html, finalUrl));
-    const publicCalendarEvidence = [...calendarEvidence.values()].filter(item => item.document === finalUrl).map(item => item.evidence);
+    const codeEvidence = mergeSimulatorClientCodeEvidence(clientEvidence.get(documentEpoch), inlineClientCodeEvidence(html, finalUrl));
+    const publicCalendarEvidence = [...calendarEvidence.values()].filter(item => item.document === documentEpoch).map(item => item.evidence);
     return { ...result, method: "BROWSER", accessControlsObserved: true, accessControls: detectSimulatorResearchAccessControls(html),
-      renderComplete: blockingRequests === 0 && loadComplete && pendingPublicReads === 0, ...(blockingRequests ? { renderWarning: "SECONDARY_REQUESTS_BLOCKED" as const } : {}),
+      renderComplete: !pendingNavigation && blockingRequests === 0 && loadComplete && pendingPublicReads === 0, ...(blockingRequests ? { renderWarning: "SECONDARY_REQUESTS_BLOCKED" as const } : {}),
       contentProvenance: "RENDERED_DOM", admittedRequests: requests, blockedRequests: blocked, responseContracts: contracts,
       ...(!detectSimulatorResearchAccessControls(html).length && status >= 200 && status < 300 ? {
         selectedCalendarFilters, ...(codeEvidence ? { clientCodeEvidence: codeEvidence } : {}),
