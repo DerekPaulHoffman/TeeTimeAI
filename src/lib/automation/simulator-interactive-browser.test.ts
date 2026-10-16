@@ -216,7 +216,7 @@ describe("interactive public research boundaries", () => {
     }
   }, 25_000);
 
-  it("retains admitted public display facts even after the generic response-shape budget is full", async () => {
+  it.each(["unchanged", "history", "navigation"])("scopes admitted display facts to the document (%s)", async (changeUrl) => {
     const channel = resolve(".codex-artifacts/browser", `fixture-${randomUUID()}`);
     await mkdir(channel, { recursive: true });
     const api = "https://api.passfactory.io/api/v1/availability-widget/";
@@ -228,11 +228,16 @@ describe("interactive public research boundaries", () => {
     const visited: string[] = [];
     const fetch = vi.fn(async (url: Parameters<typeof global.fetch>[0]) => {
       const value = String(url); visited.push(value);
+      if (value.endsWith("/next")) return new Response("<html><body>Calendar ready</body></html>", { headers: { "content-type": "text/html" } });
+      if (value.endsWith("/calendar.js")) return new Response("async function loadAvailability(){const token='private-token';return fetch('/api/availability')}",
+        { headers: { "content-type": "application/javascript" } });
       if (value.startsWith(api)) return new Response(JSON.stringify(value.endsWith("hall-widget") ? fixture : { code: 200, payload: {} }),
         { headers: { "content-type": "application/json", "access-control-allow-origin": "*" } });
-      return new Response(`<html><body>Loading<script>(async()=>{
+      return new Response(`<html><body>Loading<script src="/calendar.js"></script><script>(async()=>{
         for(let n=0;n<8;n++)await fetch('${api}get-business-info',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({hall_code:'publicHall'})});
         await fetch('${api}hall-widget',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({hall_code:'publicHall',start_date:'2026-10-16',end_date:'2026-10-16',type:2})});
+        ${changeUrl === "history" ? "history.replaceState(null,'','?sc=publicHall&view=calendar');" : ""}
+        ${changeUrl === "navigation" ? "document.body.insertAdjacentHTML('beforeend','<a href=\"/next\">Next calendar</a>');" : ""}
         document.body.append('Calendar ready');
       })();</script></body></html>`, { headers: { "content-type": "text/html" } });
     }) as typeof global.fetch;
@@ -248,17 +253,38 @@ describe("interactive public research boundaries", () => {
           catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; await new Promise(r => setTimeout(r, 25)); }
         }
         if (!view) throw new Error("Fixture response timeout");
-        if (view.text.includes("Calendar ready") && !view.loading) break;
+        if (view.text.includes("Calendar ready") && !view.loading &&
+            (changeUrl !== "navigation" || view.controls.some((control: { name: string }) => control.name === "Next calendar"))) break;
         await writeFile(join(channel, `request-${sequence + 1}.json`), JSON.stringify({ action: "observe" }));
+      }
+      if (changeUrl === "navigation") {
+        const current = JSON.parse(await readFile(join(channel, `response-${sequence}.json`), "utf8"));
+        const next = current.controls.find((control: { name: string }) => control.name === "Next calendar");
+        expect(next).toBeDefined();
+        sequence++;
+        await writeFile(join(channel, `request-${sequence}.json`), JSON.stringify({ action: "click", target: next.target }));
+        let navigated;
+        for (let attempt = 0; attempt < 200; attempt++) {
+          try { navigated = JSON.parse(await readFile(join(channel, `response-${sequence}.json`), "utf8")); break; }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; await new Promise(r => setTimeout(r, 25)); }
+        }
+        expect(navigated?.url).toBe("https://passfactory.com/next");
       }
       await writeFile(join(channel, `request-${sequence + 1}.json`), JSON.stringify({ action: "finish" }));
       const result = await task;
       expect(result.renderComplete).toBe(true);
       expect(result.responseContracts).toHaveLength(8);
-      expect(result.publicCalendarEvidence).toMatchObject([{ kind: "HALL", code: "publicHall", rule_times: [{
-        availabilities: [{ table_id: "publicTable", slot_duration: 60, availability_type: 2 }],
-      }] }]);
-      expect(visited).toHaveLength(10);
+      if (changeUrl === "navigation") {
+        expect(result.publicCalendarEvidence).toBeUndefined();
+        expect(result.clientCodeEvidence).toBeUndefined();
+      } else {
+        expect(result.publicCalendarEvidence).toMatchObject([{ kind: "HALL", code: "publicHall", rule_times: [{
+          availabilities: [{ table_id: "publicTable", slot_duration: 60, availability_type: 2 }],
+        }] }]);
+        expect(result.clientCodeEvidence?.fragments.some(fragment => fragment.code.includes("loadAvailability"))).toBe(true);
+        expect(JSON.stringify(result.clientCodeEvidence)).not.toContain("private-token");
+      }
+      expect(visited).toHaveLength(changeUrl === "navigation" ? 12 : 11);
     } finally {
       await writeFile(join(channel, `request-${sequence + 1}.json`), JSON.stringify({ action: "finish" })).catch(() => {});
       await settled;

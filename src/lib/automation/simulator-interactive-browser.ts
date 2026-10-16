@@ -136,8 +136,12 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
   let pendingPublicReads = 0;
   const origins = new Set([new URL(requestedUrl).origin]);
   const contracts: NonNullable<SimulatorResearchResult["responseContracts"]> = [];
-  const calendarEvidence = new Map<string, { document: string; evidence: PassfactoryCalendarEvidence }>();
-  const clientEvidence = new Map<string, SimulatorClientCodeEvidence>();
+  // History updates can change the selected resource without replacing the
+  // document that supplied its scripts and configuration. A real navigation,
+  // however, must never inherit evidence from the abandoned document.
+  let documentGeneration = 0;
+  const calendarEvidence = new Map<string, { document: number; evidence: PassfactoryCalendarEvidence }>();
+  const clientEvidence = new Map<number, SimulatorClientCodeEvidence>();
   let selectedCalendarFilters: NonNullable<SimulatorResearchResult["selectedCalendarFilters"]> = [];
   const blockedResources = createBlockedResourceDiagnostics();
   const active = new Set<Promise<void>>();
@@ -167,7 +171,8 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
           const method = request.method();
           const kind = request.resourceType();
           const body = request.postData() ?? "";
-          const document = page?.url() ?? requestedUrl;
+          if (request.isNavigationRequest() && request.frame() === page?.mainFrame()) documentGeneration++;
+          const document = documentGeneration;
           const publicHeaders = new Headers();
           for (const key of ["accept", "accept-language", "user-agent", "content-type", "origin"]) if (headers[key]) publicHeaders.set(key, headers[key]);
           // Widgets can publish their selected hall using history.replaceState
@@ -374,8 +379,8 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
     const html = await page.content();
     const result = resultFromSimulatorResearchBody(requestedUrl, page.url(), status, "text/html", Buffer.from(html), new Date());
     const finalUrl = page.url();
-    const codeEvidence = mergeSimulatorClientCodeEvidence(clientEvidence.get(finalUrl), inlineClientCodeEvidence(html, finalUrl));
-    const publicCalendarEvidence = [...calendarEvidence.values()].filter(item => item.document === finalUrl).map(item => item.evidence);
+    const codeEvidence = mergeSimulatorClientCodeEvidence(clientEvidence.get(documentGeneration), inlineClientCodeEvidence(html, finalUrl));
+    const publicCalendarEvidence = [...calendarEvidence.values()].filter(item => item.document === documentGeneration).map(item => item.evidence);
     return { ...result, method: "BROWSER", accessControlsObserved: true, accessControls: detectSimulatorResearchAccessControls(html),
       renderComplete: blockingRequests === 0 && loadComplete && pendingPublicReads === 0, ...(blockingRequests ? { renderWarning: "SECONDARY_REQUESTS_BLOCKED" as const } : {}),
       contentProvenance: "RENDERED_DOM", admittedRequests: requests, blockedRequests: blocked, responseContracts: contracts,
