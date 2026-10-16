@@ -216,6 +216,57 @@ describe("interactive public research boundaries", () => {
     }
   }, 25_000);
 
+  it("retains admitted public display facts even after the generic response-shape budget is full", async () => {
+    const channel = resolve(".codex-artifacts/browser", `fixture-${randomUUID()}`);
+    await mkdir(channel, { recursive: true });
+    const api = "https://api.passfactory.io/api/v1/availability-widget/";
+    const fixture = { code: 200, payload: { code: "publicHall", name: "Public hall", rule_times: [{
+      code: "publicRule", name: "Public hours", settings_for: "public", availability_ticket_type: "GENERAL_TABLE",
+      multi_booking_enabled: false, minutes_per_booking: null, availabilities: [{ table_id: "publicTable", table_title: "Golf simulator",
+        start_date: "2026-10-16", end_date: "2026-10-16", start_time: "13:00:00", end_time: "17:00:00", slot_duration: 60, availability_type: 2 }],
+    }] } };
+    const visited: string[] = [];
+    const fetch = vi.fn(async (url: Parameters<typeof global.fetch>[0]) => {
+      const value = String(url); visited.push(value);
+      if (value.startsWith(api)) return new Response(JSON.stringify(value.endsWith("hall-widget") ? fixture : { code: 200, payload: {} }),
+        { headers: { "content-type": "application/json", "access-control-allow-origin": "*" } });
+      return new Response(`<html><body>Loading<script>(async()=>{
+        for(let n=0;n<8;n++)await fetch('${api}get-business-info',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({hall_code:'publicHall'})});
+        await fetch('${api}hall-widget',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({hall_code:'publicHall',start_date:'2026-10-16',end_date:'2026-10-16',type:2})});
+        document.body.append('Calendar ready');
+      })();</script></body></html>`, { headers: { "content-type": "text/html" } });
+    }) as typeof global.fetch;
+    const lease = (async (_host: string, work: () => Promise<unknown>) => ({ acquired: true, value: await work() })) as never;
+    const task = collectInteractiveSimulatorResearch({ url: "https://passfactory.com/ftbb/publicFacility/?sc=publicHall", channel, assertOwned: async () => {} }, { fetch, lease });
+    const settled = task.then(value => ({ value }), error => ({ error }));
+    let sequence = 0;
+    try {
+      for (; sequence < 8; sequence++) {
+        let view;
+        for (let attempt = 0; attempt < 200; attempt++) {
+          try { view = JSON.parse(await readFile(join(channel, `response-${sequence}.json`), "utf8")); break; }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; await new Promise(r => setTimeout(r, 25)); }
+        }
+        if (!view) throw new Error("Fixture response timeout");
+        if (view.text.includes("Calendar ready") && !view.loading) break;
+        await writeFile(join(channel, `request-${sequence + 1}.json`), JSON.stringify({ action: "observe" }));
+      }
+      await writeFile(join(channel, `request-${sequence + 1}.json`), JSON.stringify({ action: "finish" }));
+      const result = await task;
+      expect(result.renderComplete).toBe(true);
+      expect(result.responseContracts).toHaveLength(8);
+      expect(result.publicCalendarEvidence).toMatchObject([{ kind: "HALL", code: "publicHall", rule_times: [{
+        availabilities: [{ table_id: "publicTable", slot_duration: 60, availability_type: 2 }],
+      }] }]);
+      expect(visited).toHaveLength(10);
+    } finally {
+      await writeFile(join(channel, `request-${sequence + 1}.json`), JSON.stringify({ action: "finish" })).catch(() => {});
+      await settled;
+      if (!channel.startsWith(resolve(".codex-artifacts/browser") + "/") && !channel.startsWith(resolve(".codex-artifacts/browser") + "\\")) throw new Error("Bad fixture path");
+      await rm(channel, { recursive: true, force: true });
+    }
+  }, 25_000);
+
   it("runs an isolated real browser with visual feedback and interactive duration selection", async () => {
     const channel = resolve(".codex-artifacts/browser", `fixture-${randomUUID()}`);
     await mkdir(channel, { recursive: true });
@@ -230,8 +281,9 @@ describe("interactive public research boundaries", () => {
       <div><label>Duration</label><div role="combobox" aria-haspopup="listbox">Ambiguous first</div><div role="combobox" aria-haspopup="listbox">Ambiguous second</div></div>
       <div><label for="different-field">Duration</label><div role="combobox" aria-haspopup="listbox">Wrong label</div></div>
       <button>Confirm reservation</button><a href="/login">Login</a>
-      <script>document.querySelector('#duration').onchange=e=>document.querySelector('#state').textContent=e.target.value;
-      document.querySelector('#next').onclick=()=>document.querySelector('#state').textContent='November';
+      <script>async function loadAvailability(){const token='private-token-value';return fetch('/api/availability')}
+      document.querySelector('#duration').onchange=e=>document.querySelector('#state').textContent=e.target.value;
+      document.querySelector('#next').onclick=()=>{document.querySelector('#state').textContent='November';document.querySelector('#duration').selectedIndex=-1};
       document.querySelector('#find').oninput=e=>document.querySelector('#found').textContent=e.target.value;
       document.querySelector('#party').onclick=()=>document.querySelector('#party-options').hidden=false;
       document.querySelector('[role=option]').onclick=()=>{document.querySelector('#party').textContent='2 players selected';document.querySelector('#party-options').hidden=true};
@@ -261,6 +313,7 @@ describe("interactive public research boundaries", () => {
       await writeFile(join(channel, "request-1.json"), JSON.stringify({ action: "select", target: duration.target, option: "60 minutes" }));
       const second = await wait(1);
       expect(second.text).toContain("60 minutes");
+      expect(second.selectedCalendarFilters).toContainEqual({ label: "Duration", value: "60 minutes" });
       const search = second.controls.find((control: { kind: string }) => control.kind === "field");
       await writeFile(join(channel, "request-2.json"), JSON.stringify({ action: "fill", target: search.target, text: "Public course" }));
       const third = await wait(2);
@@ -269,6 +322,7 @@ describe("interactive public research boundaries", () => {
       await writeFile(join(channel, "request-3.json"), JSON.stringify({ action: "click", target: next.target }));
       const fourth = await wait(3);
       expect(fourth.text).toContain("November");
+      expect(fourth.selectedCalendarFilters).toContainEqual({ label: "Duration", value: "" });
       const party = fourth.controls.find((control: { kind: string; label: string }) => control.kind === "filter" && control.label === "Party size");
       expect(party).toBeDefined();
       expect(fourth.controls.some((control: { name: string }) => /Ambiguous|Wrong label/.test(control.name))).toBe(false);
@@ -287,6 +341,10 @@ describe("interactive public research boundaries", () => {
       expect(result.blockedRequests).toBeGreaterThan(0);
       expect(result.renderWarning).toBeUndefined();
       expect(result.responseContracts).toHaveLength(1);
+      expect(result.selectedCalendarFilters).toContainEqual({ label: "Duration", value: "" });
+      expect(result.selectedCalendarFilters).toContainEqual({ label: "Party size", value: "2 players selected" });
+      expect(result.clientCodeEvidence?.fragments.length).toBeGreaterThan(0);
+      expect(JSON.stringify(result.clientCodeEvidence)).not.toContain("private-token-value");
       expect(visited).toEqual(["https://public.example.test/calendar", "https://public.example.test/graphql"]);
       expect(assertOwned.mock.calls.length).toBeGreaterThanOrEqual(5);
     } finally {

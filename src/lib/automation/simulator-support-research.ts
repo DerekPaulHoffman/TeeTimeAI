@@ -16,6 +16,7 @@ import { createBlockedResourceDiagnostics, simulatorCredentialHeaderKind, summar
 import { declaredSimulatorScriptSource, summarizeSimulatorPageSurfaces, type SimulatorPageSurfaces } from "./simulator-page-surfaces";
 import { literalPublicScriptImports } from "./simulator-script-imports";
 import { inspectSimulatorClientCode, mergeSimulatorClientCodeEvidence, type SimulatorClientCodeEvidence } from "./simulator-client-code-evidence";
+import type { PassfactoryCalendarEvidence } from "./passfactory-calendar-evidence";
 
 const MAX_BODY_BYTES = 1_500_000;
 const MAX_RENDER_BYTES = 16_000_000;
@@ -133,6 +134,9 @@ export type SimulatorResearchResult = {
   publicConfiguration?: SimulatorPublicConfiguration;
   /** Ephemeral redacted reference data; never an availability/permission fact. */
   clientCodeEvidence?: SimulatorClientCodeEvidence;
+  /** Ephemeral public display facts; never sufficient for configuration/adoption. */
+  publicCalendarEvidence?: PassfactoryCalendarEvidence[];
+  selectedCalendarFilters?: Array<{ label: string; value: string }>;
   pageSurfaces?: SimulatorPageSurfaces;
   renderActivation?: "PASSIVE_POINTER_AND_SCROLL";
   jsonShape?: Array<{ path: string; type: string; count?: number }>;
@@ -799,7 +803,7 @@ export async function collectSimulatorSupportResearch(input: { url: string; rend
     ...(evidence ? { clientCodeEvidence: evidence } : {}) };
 }
 
-function inlineClientCodeEvidence(html: string, sourceUrl: string) {
+export function inlineClientCodeEvidence(html: string, sourceUrl: string) {
   const pending: PublicNode[] = [parse(html)];
   let evidence: SimulatorClientCodeEvidence | undefined, visited = 0, truncated = false;
   while (pending.length && visited++ < 50_000) {

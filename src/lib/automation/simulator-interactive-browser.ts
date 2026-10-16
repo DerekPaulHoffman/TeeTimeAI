@@ -8,10 +8,12 @@ import { createAddressPinnedPublicFetchTransport } from "./address-pinned-public
 import { runWithProviderRequestLease } from "./provider-request-lease";
 import { createSimulatorBrowserRequestQueue } from "./simulator-browser-request-queue";
 import { createPassfactoryPublicReadPolicy, isIncidentalBrowserRequest } from "./passfactory-public-read-policy";
+import { projectPassfactoryCalendarEvidence, type PassfactoryCalendarEvidence } from "./passfactory-calendar-evidence";
+import { inspectSimulatorClientCode, mergeSimulatorClientCodeEvidence, type SimulatorClientCodeEvidence } from "./simulator-client-code-evidence";
 import { createBlockedResourceDiagnostics, simulatorCredentialHeaderKind, summarizeBlockedRequestBody } from "./simulator-blocked-resources";
 import { sanitizeResponderText } from "./course-support-responder-policy";
 import { tagSimulatorResearchFailure, type SimulatorResearchFailurePhase } from "./simulator-support-failure";
-import { detectSimulatorResearchAccessControls, summarizeSimulatorPublicJsonShape,
+import { detectSimulatorResearchAccessControls, inlineClientCodeEvidence, summarizeSimulatorPublicJsonShape,
   resultFromSimulatorResearchBody, type SimulatorResearchResult } from "./simulator-support-research";
 
 export const INTERACTIVE_BROWSER_DURATION_MS = 5 * 60_000;
@@ -134,6 +136,9 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
   let pendingPublicReads = 0;
   const origins = new Set([new URL(requestedUrl).origin]);
   const contracts: NonNullable<SimulatorResearchResult["responseContracts"]> = [];
+  const calendarEvidence = new Map<string, { document: string; evidence: PassfactoryCalendarEvidence }>();
+  const clientEvidence = new Map<string, SimulatorClientCodeEvidence>();
+  let selectedCalendarFilters: NonNullable<SimulatorResearchResult["selectedCalendarFilters"]> = [];
   const blockedResources = createBlockedResourceDiagnostics();
   const active = new Set<Promise<void>>();
   let controls = new Map<string, { locator: Locator; kind: string; signature: string; href?: string }>();
@@ -162,6 +167,7 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
           const method = request.method();
           const kind = request.resourceType();
           const body = request.postData() ?? "";
+          const document = page?.url() ?? requestedUrl;
           const publicHeaders = new Headers();
           for (const key of ["accept", "accept-language", "user-agent", "content-type", "origin"]) if (headers[key]) publicHeaders.set(key, headers[key]);
           // Widgets can publish their selected hall using history.replaceState
@@ -219,9 +225,25 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
               origins.add(new URL(next).origin); responseHeaders.location = next;
             }
             if (request.isNavigationRequest() && request.frame() === page?.mainFrame()) status = response.status;
-            if (type.includes("json") && contracts.length < 8) {
-              try { contracts.push({ pathShape: new URL(safe).pathname.split("/").map(p => p ? ":value" : "").join("/"), queryKeys: [],
-                httpStatus: response.status, shape: summarizeSimulatorPublicJsonShape(JSON.parse(buffer.toString("utf8"))) }); } catch { /* Not JSON. */ }
+            if (response.status >= 200 && response.status < 300 && kind === "script" && request.frame() === page?.mainFrame() && /(?:javascript|ecmascript)/iu.test(type)) {
+              const evidence = inspectSimulatorClientCode(buffer.toString("utf8"), safe, "EXTERNAL_SCRIPT");
+              if (evidence && (clientEvidence.has(document) || clientEvidence.size < 5))
+                clientEvidence.set(document, mergeSimulatorClientCodeEvidence(clientEvidence.get(document), evidence)!);
+            }
+            if (type.includes("json")) {
+              try {
+                const json = JSON.parse(buffer.toString("utf8"));
+                if (contracts.length < 8) contracts.push({ pathShape: new URL(safe).pathname.split("/").map(p => p ? ":value" : "").join("/"), queryKeys: [],
+                  httpStatus: response.status, shape: summarizeSimulatorPublicJsonShape(json) });
+                // Retain closed public display facts independently of the first-eight
+                // shape samples. This does not expose arbitrary API bodies or add reads.
+                const evidence = response.status >= 200 && response.status < 300 && method === "POST" && passfactory.allows(new URL(safe), publicHeaders, body)
+                  ? projectPassfactoryCalendarEvidence(safe, body, json) : undefined;
+                if (evidence) {
+                  const key = `${document}:${evidence.kind}:${evidence.code}`;
+                  if (calendarEvidence.has(key) || calendarEvidence.size < 8) calendarEvidence.set(key, { document, evidence });
+                }
+              } catch { /* Not a recognized public display response. */ }
             }
             const cors = response.headers.get("access-control-allow-origin");
             if (cors === "*" || cors && origins.has(cors)) responseHeaders["access-control-allow-origin"] = cors;
@@ -260,6 +282,7 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
         href: e instanceof HTMLAnchorElement ? e.href : undefined,
         calendar: Boolean(e.closest('[role="grid"]')),
         inputType: input.type,
+        selectedValue: e.tagName === "SELECT" ? (element as HTMLSelectElement).selectedOptions[0]?.textContent ?? "" : e.innerText,
         sensitiveForm: Boolean(e.closest("form")?.querySelector('input[type="password"],input[type="email"],input[type="tel"],[autocomplete^="cc-"]')) };
     });
     const snapshot = async (message?: string) => atPhase("BROWSER_DOCUMENT", async () => {
@@ -277,6 +300,7 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
       const access = detectSimulatorResearchAccessControls(html);
       controls = new Map();
       const visible = [];
+      selectedCalendarFilters = [];
       const locators = await page!.locator('a[href],button,select,input,[role=combobox],[role=button][aria-haspopup="listbox"],[role=option],[role=gridcell]').all();
       for (const locator of locators.slice(0, 300)) {
         budget(10_000);
@@ -288,11 +312,13 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
         controls.set(target, { locator, kind, signature: JSON.stringify(item), href: item.href });
         visible.push({ target, kind, name: sanitizeResponderText(item.name), label: sanitizeResponderText(item.label),
           ...(item.tag === "select" ? { options: await locator.locator("option").allTextContents() } : {}) });
+        if (kind === "filter") selectedCalendarFilters.push({ label: sanitizeResponderText(item.label).slice(0, 200),
+          value: sanitizeResponderText(item.selectedValue ?? "").replace(/[\u200b-\u200d\ufeff]/gu, "").trim().slice(0, 160) });
       }
       const image = (await page!.screenshot({ type: "png", animations: "disabled", timeout: budget(20_000) })).toString("base64");
       if (image.length > 3_000_000) throw new Error("BROWSER_SCREENSHOT_LIMIT");
       return { phase: "open", sequence, message, url: page!.url(), text: sanitizeResponderText(await page!.locator("body").innerText()).slice(0, 12_000),
-        controls: visible, loading: !loadComplete || pendingPublicReads > 0, accessControls: access, blockedRequests: blocked, admittedRequests: requests, screenshot: image };
+        controls: visible, selectedCalendarFilters, loading: !loadComplete || pendingPublicReads > 0, accessControls: access, blockedRequests: blocked, admittedRequests: requests, screenshot: image };
     });
     await assertLive();
     await atPhase("BROWSER_NAVIGATION", () => page!.goto(requestedUrl, { waitUntil: "domcontentloaded", timeout: budget(45_000) }));
@@ -347,9 +373,16 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
     await assertLive();
     const html = await page.content();
     const result = resultFromSimulatorResearchBody(requestedUrl, page.url(), status, "text/html", Buffer.from(html), new Date());
+    const finalUrl = page.url();
+    const codeEvidence = mergeSimulatorClientCodeEvidence(clientEvidence.get(finalUrl), inlineClientCodeEvidence(html, finalUrl));
+    const publicCalendarEvidence = [...calendarEvidence.values()].filter(item => item.document === finalUrl).map(item => item.evidence);
     return { ...result, method: "BROWSER", accessControlsObserved: true, accessControls: detectSimulatorResearchAccessControls(html),
       renderComplete: blockingRequests === 0 && loadComplete && pendingPublicReads === 0, ...(blockingRequests ? { renderWarning: "SECONDARY_REQUESTS_BLOCKED" as const } : {}),
       contentProvenance: "RENDERED_DOM", admittedRequests: requests, blockedRequests: blocked, responseContracts: contracts,
+      ...(!detectSimulatorResearchAccessControls(html).length && status >= 200 && status < 300 ? {
+        selectedCalendarFilters, ...(codeEvidence ? { clientCodeEvidence: codeEvidence } : {}),
+        ...(publicCalendarEvidence.length ? { publicCalendarEvidence } : {}),
+      } : {}),
       ...blockedResources.fields() };
   } finally {
     endResponse();
