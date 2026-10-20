@@ -1,4 +1,5 @@
 import type { TeeTimeSlot } from "@/lib/tee-times/matching";
+import { parseTeeItUpV2PublicSource } from "./teeitup-public-source";
 
 import { fetchWithProviderTimeout, providerHttpError } from "./fetch-with-timeout";
 import {
@@ -71,6 +72,8 @@ export function isTeeItUpMetadata(value: unknown): value is TeeItUpMetadata {
   const bookingUrl = parseCanonicalTeeItUpBookingUrl(
     metadata.bookingBaseUrl
   );
+  // A V2 tenant URL names one observed alias; never synthesize sibling tenants.
+  if (parseTeeItUpV2PublicSource(metadata.bookingBaseUrl) && aliases.length !== 1) return false;
   if (
     !bookingUrl ||
     !aliases.some(
@@ -444,6 +447,8 @@ function parseBookingPageConfiguration(html: string) {
 }
 
 function getBookingOrigin(alias: string, bookingBaseUrl: string) {
+  const v2 = parseTeeItUpV2PublicSource(bookingBaseUrl);
+  if (v2 && v2.alias.toLowerCase() === alias.toLowerCase()) return v2.origin;
   try {
     const bookingUrl = new URL(bookingBaseUrl);
     const domainMatch = bookingUrl.hostname.match(/\.book\.teeitup\.(golf|com)$/i);
@@ -503,6 +508,11 @@ function withDateParam(bookingBaseUrl: string, date: Date) {
 }
 
 function parseCanonicalTeeItUpBookingUrl(value: string) {
+  const v2 = parseTeeItUpV2PublicSource(value);
+  if (v2) {
+    if (v2.date !== undefined || v2.selectedIds && v2.selectedIds.length !== 1 || value !== v2.url) return null;
+    return { alias: v2.alias, facilityId: v2.selectedIds?.[0] };
+  }
   try {
     const url = new URL(value);
     const hostMatch = url.hostname.match(

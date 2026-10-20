@@ -3,6 +3,8 @@ import { isUSchedulePublicRentalLabel } from "@/lib/automation/uschedule-public-
 import { whooshSimulatorMetadataSchema } from "./whoosh-simulator-source";
 import { teeItUpOfficialIdentityProofSchema } from "./teeitup-official-identity";
 import { lightspeedMetadataSchema } from "./lightspeed-source";
+import { ameliaMetadataSchema } from "./amelia-source";
+import { chronogolfMetadataSchema } from "./chronogolf-source";
 
 const numericId = z.number().int().min(1).max(2_147_483_647);
 const publicId = z.string().regex(/^[1-9]\d{0,9}$/u);
@@ -22,6 +24,8 @@ export const existingAdapterMetadataSchema = z.discriminatedUnion("family", [
     serviceId: publicId, serviceName: z.string().trim().min(3).max(200).refine(isUSchedulePublicRentalLabel) }).strict(),
   whooshSimulatorMetadataSchema,
   lightspeedMetadataSchema,
+  ameliaMetadataSchema,
+  chronogolfMetadataSchema,
 ]);
 
 export type ExistingAdapterMetadata = z.infer<typeof existingAdapterMetadataSchema>;

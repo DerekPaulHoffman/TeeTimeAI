@@ -23,6 +23,15 @@ describe("official source/address identity attestation", () => {
     expect(source.venueAddress).toBe("6191 Nell Yates Dr, Lithonia, GA 30058, USA");
     expect(() => resolveTeeItUpRecipeFacilities(source, [facility])).toThrow("ADAPTER_IDENTITY_MISMATCH");
   });
+  it.each(["/", "/teetimes"])("attests only the exact observed V2 public booking link %s", path => {
+    const bookingUrl = `https://public.book-v2.teeitup.golf${path}`, identity = { ...source, bookingUrl };
+    const document = page(address + `<a href="${bookingUrl}">Tee Times</a>`);
+    const proof = deriveTeeItUpOfficialIdentityProof(identity, document);
+    expect(proof.bookingUrl).toBe(bookingUrl);
+    expect(resolveTeeItUpRecipeFacilities(identity, [facility], proof)).toEqual([facility]);
+    expect(() => deriveTeeItUpOfficialIdentityProof(identity, page(address + `<a href="https://other.book-v2.teeitup.golf/">Tee Times</a>`))).toThrow();
+    expect(() => deriveTeeItUpOfficialIdentityProof({ ...identity, bookingUrl: `${bookingUrl}?timeId=123` }, document)).toThrow();
+  });
   it.each([
     page(undefined, "Mystery Valley Golf Clubhouse – Golf at Its Best"),
     page(undefined, "Visit Mystery Valley Golf Club – Golf at Its Best"),

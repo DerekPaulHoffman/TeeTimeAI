@@ -7,6 +7,7 @@ const GOOGLE_PLACES_TOTAL_TIMEOUT_MS = 12_000;
 type GooglePlacesRequestTiming = {
   attemptTimeoutMs?: number;
   totalTimeoutMs?: number;
+  maxAttempts?: 1 | 2;
 };
 
 type GooglePlacesRequestResult<T> = {
@@ -39,6 +40,8 @@ async function runGooglePlacesRequest<T = never>(
 ): Promise<GooglePlacesRequestResult<T>> {
   const callerSignal =
     init?.signal ?? (input instanceof Request ? input.signal : undefined);
+  const maxAttempts = timing.maxAttempts ?? GOOGLE_PLACES_MAX_ATTEMPTS;
+  if (maxAttempts !== 1 && maxAttempts !== 2) throw new Error("Invalid Google Places attempt limit");
   const attemptTimeoutMs = normalizeTimeoutMs(
     timing.attemptTimeoutMs,
     GOOGLE_PLACES_ATTEMPT_TIMEOUT_MS
@@ -53,7 +56,7 @@ async function runGooglePlacesRequest<T = never>(
   try {
     throwIfAborted(operationSignal.signal);
 
-    for (let attempt = 1; attempt <= GOOGLE_PLACES_MAX_ATTEMPTS; attempt += 1) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       const attemptTimeout = createTimeoutSignal(
         attemptTimeoutMs,
         "Google Places request attempt timed out"
@@ -72,7 +75,7 @@ async function runGooglePlacesRequest<T = never>(
         );
         if (
           isTransientGooglePlacesStatus(response.status) &&
-          attempt < GOOGLE_PLACES_MAX_ATTEMPTS
+          attempt < maxAttempts
         ) {
           retryDelayMs = getRetryDelayMs(response);
           if (retryDelayMs === null) {
@@ -108,7 +111,7 @@ async function runGooglePlacesRequest<T = never>(
           }
         }
 
-        if (attempt === GOOGLE_PLACES_MAX_ATTEMPTS) {
+        if (attempt === maxAttempts) {
           throw lastError;
         }
         retryDelayMs = GOOGLE_PLACES_DEFAULT_RETRY_DELAY_MS;

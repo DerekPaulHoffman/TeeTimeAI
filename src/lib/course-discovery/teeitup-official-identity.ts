@@ -1,5 +1,6 @@
 import { parse, type DefaultTreeAdapterMap } from "parse5";
 import { createHash } from "node:crypto";
+import { parseTeeItUpV2PublicSource } from "@/lib/adapters/teeitup-public-source";
 import { z } from "zod";
 
 const publicUrl = z.string().url().max(2048).refine(value => {
@@ -82,7 +83,7 @@ export function deriveTeeItUpOfficialIdentityProof(source: OfficialIdentitySourc
   if (!source.officialUrl || !source.venueAddress || page.html.length > 2_000_000) return fail();
   const official = new URL(source.officialUrl), current = new URL(page.url), booking = new URL(source.bookingUrl);
   if (official.protocol !== "https:" || official.origin !== current.origin || current.username || current.password || current.port ||
-    booking.protocol !== "https:" || !/^[a-z0-9-]+\.book\.teeitup\.(?:com|golf)$/u.test(booking.hostname)) return fail();
+    booking.protocol !== "https:" || !(/^[a-z0-9-]+\.book\.teeitup\.(?:com|golf)$/u.test(booking.hostname) || parseTeeItUpV2PublicSource(booking.href))) return fail();
   const canonical = completeUSAddress(source.venueAddress), expected = fullCourseName(source.venueName);
   if (!canonical || expected.replace(/\bgolf course\b/gu, "").trim().length < 5) return fail();
   const entries = nodes(parse(page.html));
@@ -93,7 +94,7 @@ export function deriveTeeItUpOfficialIdentityProof(source: OfficialIdentitySourc
   if (entries.filter(node => node.tagName === "h1").some(node => fullCourseName(text(node)) !== expected)) return fail();
   if (headings.some(name => /\bgolf course$/u.test(name) && name !== expected)) return fail();
   const linkNodes = entries.filter(node => node.tagName === "a" && /\b(?:tee\s*times?|book|reservations?)\b/iu.test(text(node))).flatMap(node => {
-    try { const url = new URL(attr(node, "href") ?? "", current); return /^[a-z0-9-]+\.book\.teeitup\.(?:com|golf)$/u.test(url.hostname) ? [{ node, url: url.href }] : []; } catch { return []; }
+    try { const url = new URL(attr(node, "href") ?? "", current); return /^[a-z0-9-]+\.book\.teeitup\.(?:com|golf)$/u.test(url.hostname) || parseTeeItUpV2PublicSource(url.href) ? [{ node, url: url.href }] : []; } catch { return []; }
   });
   if (!linkNodes.some(value => value.url === booking.href) || new Set(linkNodes.map(value => value.url)).size !== 1) return fail();
   const addresses = new Map<string, z.infer<typeof addressSchema>>();

@@ -9,7 +9,8 @@ import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-b
 import { getTimeZoneOffsetMinutes } from "@/lib/timezones";
 import { accessExecutionDiagnosticSchema, accessExecutionInputSchema, accessExecutionResultSchema, expandRecipeTemplate, hashAccessRecipe,
   parseAccessRecipe, recipeAllowsRequest, type AccessExecutionInput, type AccessExecutionResult,
-  readRecipeFieldFormat, isActiveBrowserAccessChallenge, type AccessExecutionDiagnostic, type CourseAccessRecipeData, type RecipeDateParts, type RecipeField } from "./recipe";
+  readRecipeFieldFormat, isActiveBrowserAccessChallenge,
+  type AccessExecutionDiagnostic, type CourseAccessRecipeData, type RecipeDateParts, type RecipeField } from "./recipe";
 import { continueNativeBrowserRead, createNativePublicBrowserProxy, nativeReadPreflightMethod, type NativePublicProxy } from "./native-public-browser";
 import { installNativeRedirectRouting, type NativeReadRoute } from "./native-redirect-routing";
 import { launchPublicReadBrowser } from "./public-browser-launch";
@@ -28,6 +29,7 @@ import { isObservedPublicCalendarDay } from "./public-calendar-day";
 import { selectPublicRentalProduct } from "./public-product-control";
 import { followPublicAvailabilityLink } from "./public-navigation-control";
 import { selectPublicDateChoice } from "./public-date-choice";
+import { continuePublicRentalService, selectPublicRentalService, type PublicRentalServiceSelection } from "./public-service-control";
 
 type ExtractedAccessRecipe = Exclude<CourseAccessRecipeData, { engine: "EXISTING_ADAPTER" }>;
 
@@ -399,6 +401,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
     page.on("popup", popup => { void popup.close(); });
     page.setDefaultTimeout(Math.min(10_000, Math.max(1, deadline - clock().getTime())));
     let blocked = false, requests = 0, bytes = 0, pendingRequests = 0, mutationGeneration = 0;
+    const pendingReadCount = () => Math.max(pendingRequests, redirectRouting?.pendingReads ?? 0);
     let responseGeneration: number | undefined;
     let rejectedResponseGeneration: number | undefined;
     const usesServerDocument = recipe.availabilityResponse.kind === "SERVER_DOCUMENT";
@@ -445,7 +448,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
       const expires = Date.now() + 15_000;
       while (!signal.aborted && Date.now() < expires) {
         if (responseGeneration === mutationGeneration) return;
-        if (rejectedResponseGeneration === mutationGeneration && !pendingRequests) throw new Error("AVAILABILITY_RESPONSE_FAILED");
+        if (rejectedResponseGeneration === mutationGeneration && !pendingReadCount()) throw new Error("AVAILABILITY_RESPONSE_FAILED");
         if (blocked) throw new Error("AVAILABILITY_RESPONSE_UNCONFIRMED");
         await page.waitForTimeout(100);
       }
@@ -455,7 +458,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
       const expires = Date.now() + 10_000;
       let quietSince = Date.now();
       while (!signal.aborted && Date.now() < expires) {
-        if (pendingRequests) quietSince = Date.now();
+        if (pendingReadCount()) quietSince = Date.now();
         else if (Date.now() - quietSince >= 600) return;
         await page.waitForTimeout(100);
       }
@@ -463,6 +466,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
     };
     let selectedProductDuration: number | undefined;
     let selectedDateDay: Locator | undefined;
+    let selectedRentalService: PublicRentalServiceSelection | undefined;
     const handleRoute = async (route: NativeReadRoute) => {
       const request = route.request();
       if (isIncidentalBrowserRequest(request.url()) || isNonEvidenceBrowserResource(request.url(), request.resourceType())) { await route.abort(); return; }
@@ -530,17 +534,25 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
     };
     let rejectedSubframes = 0;
     await context.route("**/*", async route => {
-      if (route.request().frame() !== page.mainFrame()) {
-        // Embedded content never participates in recipe proof. Reject it before
-        // native correlation/dispatch; the top page still needs every proof.
-        await route.abort().catch(() => {});
-        if (++rejectedSubframes > 1024) {
-          blocked = true; failure ??= recipeExecutionDiagnostic("SUBFRAME_REQUEST_LIMIT", activity);
-          void context.close().catch(() => {});
+      try {
+        if (nativeProxy) {
+          // CDP owns every native request and its exact response. Playwright's
+          // independent pause grants no route, policy or response authority.
+          if (!redirectRouting) throw new Error("NATIVE_ROUTING_UNAVAILABLE");
+          await redirectRouting.releasePlaywrightRoute(route);
+          return;
         }
-        return;
+        if (route.request().frame() !== page.mainFrame()) {
+          // Embedded content cannot contribute recipe evidence in either mode.
+          await route.abort().catch(() => {});
+          if (++rejectedSubframes > 1024) {
+            blocked = true; failure ??= recipeExecutionDiagnostic("SUBFRAME_REQUEST_LIMIT", activity);
+            void context.close().catch(() => {});
+          }
+          return;
+        }
+        await handleRoute(route);
       }
-      try { await handleRoute(redirectRouting ? redirectRouting.wrapRoute(route) : route); }
       catch (error) {
         blocked = true;
         failure ??= recipeExecutionDiagnostic(error, activity);
@@ -570,13 +582,25 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
             throw new Error("UNVERIFIED_CLIENT_DURATION");
           carryDurationFence = true; previousAvailabilityRequests = passfactoryAvailabilityRequests;
         }
-        if (step.action === "followLink" || step.action === "selectDateChoice" || step.action === "selectDate" || step.action === "selectProduct" || step.action === "select" || step.action === "fill" ||
+        if (step.action === "followLink" || step.action === "selectDateChoice" || step.action === "selectDate" || step.action === "selectProduct" ||
+          step.action === "selectRentalService" || step.action === "continueToAvailability" || step.action === "select" || step.action === "fill" ||
           step.action === "clickFilter" && ["SELECT_DATE", "APPLY_DATE", "SELECT_FILTER", "RUN_SEARCH"].includes(step.purpose)) {
           mutationGeneration++; responseGeneration = undefined; rejectedResponseGeneration = undefined;
           carriedDurationGeneration = carryDurationFence ? mutationGeneration : undefined;
         }
         if (step.action === "followLink") {
+          selectedRentalService = undefined;
           await followPublicAvailabilityLink(page.locator(step.selector), expandRecipeTemplate(step.text, input), url => recipeAllowsRequest(recipe, url, "GET"));
+          continue;
+        }
+        if (step.action === "selectRentalService") {
+          selectedRentalService = undefined;
+          selectedRentalService = await selectPublicRentalService(page.locator(step.selector), step.optionText);
+          continue;
+        }
+        if (step.action === "continueToAvailability") {
+          if (!selectedRentalService) throw new Error("UNVERIFIED_RENTAL_SERVICE");
+          await continuePublicRentalService(page.locator(step.selector), selectedRentalService, step.mode);
           continue;
         }
         if (step.action === "selectDateChoice") {
@@ -590,6 +614,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
           continue;
         }
         if (step.action === "selectProduct") {
+          selectedRentalService = undefined;
           const card = page.locator(step.productSelector);
           const button = card.locator(step.selector);
           if (!input.durationMinutes) throw new Error("UNSAFE_PRODUCT_SELECTION");
@@ -686,7 +711,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
       if (second.duration === undefined) second.duration = selectedProductDuration;
       if (providerThrottled) return fail("FAILED", "PROVIDER_THROTTLED");
       if (blocked || !recipeAllowsRequest(recipe, canonicalCpsPublicUrl(page.url()), "GET")) return fail("INCOMPLETE", "UNSCOPED_OR_FAILED_RESOURCE");
-      if (pendingRequests || responseGeneration !== mutationGeneration || JSON.stringify(first) !== JSON.stringify(second)) return fail("INCOMPLETE", "UNSETTLED_RESULTS");
+      if (pendingReadCount() || responseGeneration !== mutationGeneration || JSON.stringify(first) !== JSON.stringify(second)) return fail("INCOMPLETE", "UNSETTLED_RESULTS");
       if (usesServerDocument && (!serverDocument || serverDocument.generation !== mutationGeneration ||
           serverDocument.documentSequence !== mainDocumentSequence || serverDocument.dataSequence !== dataRequestSequence ||
           !sameServerDocumentEvidence(serverDocument.extracted, second))) return fail("INCOMPLETE", "SERVER_DOCUMENT_DOM_MISMATCH");

@@ -68,7 +68,7 @@ export async function cacheCourseCandidatePhotos(courses: readonly unknown[]) {
   );
 }
 
-function normalizeGooglePlacePhoto(value: unknown): GooglePlacePhoto | null {
+export function normalizeGooglePlacePhoto(value: unknown): GooglePlacePhoto | null {
   if (!value || typeof value !== "object") {
     return null;
   }

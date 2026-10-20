@@ -102,6 +102,14 @@ const runnableMetadata = {
 } as const;
 
 describe("provider capability registry", () => {
+  it("admits only bounded public V2 TeeItUp landings without widening account or transaction routes", () => {
+    const origin = "https://public.book-v2.teeitup.golf";
+    for (const path of ["/", "/teetimes", "/teetimes/?course=11&date=2030-10-23"])
+      expect(isProviderPublicBookingLandingUrl(`${origin}${path}`)).toBe(true);
+    for (const path of ["/account", "/checkout", "/teetimes/123", "/?slotId=123", "/?date=2030-02-30", "/#teetimes"])
+      expect(isProviderPublicBookingLandingUrl(`${origin}${path}`)).toBe(false);
+    expect(isProviderPublicBookingLandingUrl("https://public.book-v2.teeitup.com/")).toBe(false);
+  });
   it.each([
     "https://api.ezlinksgolf.com/v1/public-tee-times",
     "https://public-api.ezlinksgolf.com/tee-times",

@@ -2,6 +2,7 @@ import { z } from "zod";
 import { resolveTeeItUpFacilityIdentity } from "@/lib/adapters/teeitup-facility-identity";
 import { isSafeRecipeUrl } from "./recipe";
 import { matchesOfficialFacility, type TeeItUpOfficialIdentityProof } from "./teeitup-official-identity";
+import { parseTeeItUpV2PublicSource } from "@/lib/adapters/teeitup-public-source";
 
 const id = z.number().int().min(1).max(2_147_483_647);
 const facility = z.object({ id, courseId: z.string().min(1).max(128), name: z.string().min(2).max(256),
@@ -11,6 +12,8 @@ export type TeeItUpRecipeFacility = z.infer<typeof facility>;
 /** Scope comes from the actual public booking URL, never proposed identifiers. */
 export function parseTeeItUpRecipeSource(value: string) {
   if (!isSafeRecipeUrl(value)) return null;
+  const v2 = parseTeeItUpV2PublicSource(value);
+  if (v2) return { alias: v2.alias, origin: v2.origin, selectedIds: v2.selectedIds };
   const url = new URL(value), match = /^([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\.book\.teeitup\.(?:com|golf)$/u.exec(url.hostname);
   if (!match || url.pathname !== "/" || url.hash || [...url.searchParams.keys()].some(key => !["course", "date"].includes(key)) ||
     url.searchParams.getAll("course").length > 1 || url.searchParams.getAll("date").length > 1) return null;

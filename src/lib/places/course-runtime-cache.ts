@@ -21,8 +21,12 @@ export async function readCourseRuntimeCache<T>(key: string): Promise<T | null> 
 export async function writeCourseRuntimeCache(
   key: string,
   value: unknown,
-  name: "course-discovery" | "course-lookup" | "course-photo" | "course-photo-metadata"
+  name: "course-discovery" | "course-lookup" | "course-photo" | "course-photo-metadata",
+  options: { ttlSeconds: number } = { ttlSeconds: COURSE_CACHE_TTL_SECONDS }
 ) {
+  if (!Number.isSafeInteger(options.ttlSeconds) || options.ttlSeconds < 1 || options.ttlSeconds > COURSE_CACHE_TTL_SECONDS) {
+    throw new Error("Invalid course runtime cache lifetime");
+  }
   if (process.env.VERCEL_ENV !== "production") {
     return;
   }
@@ -31,7 +35,7 @@ export async function writeCourseRuntimeCache(
     await getCourseCache().set(key, value, {
       name,
       tags: [name],
-      ttl: COURSE_CACHE_TTL_SECONDS
+      ttl: options.ttlSeconds
     });
   } catch (error) {
     console.warn(

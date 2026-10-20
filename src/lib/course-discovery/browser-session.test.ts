@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createAddressPinnedPublicFetchTransport } from "@/lib/automation/address-pinned-public-fetch";
 import { createCourseDiscoveryBrowserSession, discoveryBrowserActionSchema, discoveryPublicAnchorKind, discoveryPublicChoiceKind, normalizeDiscoveryNavigationUrl, redactDiscoveryFailureUrl, redactDiscoveryJson, redactDiscoveryRequestUrl, sameDiscoveryMainDocument } from "./browser-session";
 import * as nativeBrowser from "./native-public-browser";
+import * as nativeRouting from "./native-redirect-routing";
 import { deriveTeeItUpOfficialIdentityProof } from "./teeitup-official-identity";
 
 vi.mock("@/lib/automation/provider-request-lease", () => ({ runWithProviderRequestLease: vi.fn() }));
@@ -88,8 +89,8 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       expect(next.text).not.toContain("delegated click ran");
     } finally { await session.close(); }
   },25_000);
-  it("opens only an exact visible official iframe source as a separate guarded main page", async () => {
-    const official = "https://example.org/", visible = "https://public-rentals.book.teeitup.com/", hidden = "https://hidden-rentals.book.teeitup.com/";
+  it.each(["https://public-rentals.book.teeitup.com/", "https://public-rentals.book-v2.teeitup.golf/"])("opens only an exact visible official iframe source as a separate guarded main page: %s", async visible => {
+    const official = "https://example.org/", hidden = "https://hidden-rentals.book.teeitup.com/";
     const fetcher = vi.fn(async value => new Response(String(value) === official
       ? `<html><body><h1>Public golf rentals</h1><iframe src="${visible}" style="width:400px;height:200px"></iframe><iframe hidden src="${hidden}"></iframe></body></html>`
       : "<html><body><h1>Public availability page</h1></body></html>", { headers: { "content-type": "text/html" } })) as unknown as typeof fetch;
@@ -105,6 +106,24 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       const standalone = await session.execute({ id: 3, action: "open", url: visible });
       expect(standalone.text).toContain("Public availability page");
       expect(fetcher).toHaveBeenCalledTimes(2);
+    } finally { await session.close(); }
+  }, 25_000);
+  it("loads observed public versioned scripts while blocking credential-bearing companions", async () => {
+    const official = "https://example.org/", asset = "https://example.org/wp-includes/js/dist/hooks.min.js?ver=f0f188028580e8dc1255";
+    const denied = `${asset}&token=private`;
+    const fetcher = vi.fn(async value => String(value) === official
+      ? new Response(`<html><body><h1>Public Golf</h1><script src="${asset}"></script><script src="${denied}"></script></body></html>`, { headers: { "content-type": "text/html" } })
+      : new Response('document.querySelector("h1").textContent="Public availability loaded"', { headers: { "content-type": "application/javascript" } })) as unknown as typeof fetch;
+    const session = await createCourseDiscoveryBrowserSession({ initialUrls: [official], deadlineAt: new Date(Date.now() + 20_000) }, {
+      fetch: fetcher, launchBrowser: () => chromium.launch({ executablePath, headless: true }),
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      const snapshot = await session.execute({ id: 1, action: "open", url: official });
+      expect(snapshot.text).toContain("Public availability loaded");
+      expect(fetcher.mock.calls.map(args => String(args[0]))).toEqual([official, asset]);
+      expect(snapshot.requestFailures).toContainEqual(expect.objectContaining({ url: "https://example.org/wp-includes/js/dist/hooks.min.js", reason: "UNSAFE_URL" }));
+      expect(JSON.stringify(snapshot.requestFailures)).not.toContain("private");
     } finally { await session.close(); }
   }, 25_000);
   it("retains body-free request diagnostics after the first navigation fails", async () => {
@@ -364,6 +383,47 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       expect(snapshot.initialContentWaitMs).toBeLessThan(500);
     } finally { await session.close(); }
   }, 25_000);
+  it("keeps a rendered page loading until native response capture finishes after the shared handler", async () => {
+    const fixture = '<!doctype html><html><body><h1>Public golf availability ready</h1><a href="/times">View tee times</a><script>fetch("/api/public").catch(()=>{})</script></body></html>';
+    let release: () => void = () => {}, pending = 0;
+    const captured = new Promise<void>(resolve => { release = resolve; });
+    let session: Awaited<ReturnType<typeof createCourseDiscoveryBrowserSession>> | undefined;
+    const routing = vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, handler) => ({
+      prepare: () => {}, close: async () => {}, get lastFailure() { return undefined; },
+      get pendingReads() { return pending; },
+      releasePlaywrightRoute: async route => {
+        pending++;
+        try {
+          // Unit transport seam: real CDP owns this invocation in production.
+          await handler(route);
+          if (route.request().url().endsWith("/api/public")) await captured;
+        } finally { pending--; }
+      },
+    }));
+    const native = vi.spyOn(nativeBrowser, "continueNativeBrowserRead").mockImplementation(async route => {
+      const isJson = route.request().url().endsWith("/api/public");
+      const body = Buffer.from(isJson ? '{"complete":true}' : fixture), headers = { "content-type": isJson ? "application/json" : "text/html" };
+      await route.fulfill({ status: 200, headers, body });
+      return { status: 200, url: route.request().url(), headers, body };
+    });
+    try {
+      session = await createCourseDiscoveryBrowserSession({ initialUrls: ["https://example.org/"], deadlineAt: new Date(Date.now() + 20_000) }, {
+        browserTransport: "NATIVE_CHROME", launchBrowser: () => chromium.launch({ executablePath, headless: true }),
+        requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+      });
+      const opened = await session.execute({ id: 1, action: "open", url: "https://example.org/" });
+      expect(opened.text).toContain("Public golf availability ready");
+      expect(opened.loading).toBe(true); expect(opened.pendingRequestCount).toBe(1);
+      expect(session.diagnostics()).toMatchObject({ loading: true, pendingRequestCount: 1 });
+      expect(opened.requestCount).toBe(2);
+      expect(opened.responses).toContainEqual(expect.objectContaining({ url: "https://example.org/api/public", status: 200 }));
+      release();
+      const settled = await session.execute({ id: 2, action: "observe" });
+      expect(settled.loading).toBe(false); expect(settled.pendingRequestCount).toBe(0);
+      expect(settled.requestCount).toBe(2);
+      expect(settled.responses).toEqual([]); // Each response snapshot drains once.
+    } finally { release(); await session?.close(); native.mockRestore(); routing.mockRestore(); }
+  }, 25_000);
   const pageHtml = '<!doctype html><html><body><h1>Sample simulator</h1><label for="duration">Duration</label>' +
     '<p>First time, you will have to select a picture in CAPTCHA when booking.</p>' +
     '<span id="visible-date">Thursday, October 22, 2026</span>' +
@@ -541,6 +601,10 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       await route.fulfill({ status: 200, headers, body });
       return { status: 200, url: route.request().url(), headers, body };
     });
+    const routing = vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, handler) => ({
+      prepare: () => {}, close: async () => {}, get lastFailure() { return undefined; }, get pendingReads() { return 0; },
+      releasePlaywrightRoute: route => handler(route),
+    }));
     const session = await createCourseDiscoveryBrowserSession({ deadlineAt: new Date(Date.now() + 30_000), initialUrls: ["https://example.org/"] }, {
       browserTransport,
       fetch: (async url => new Response(String(url).endsWith("/api/public") ? payload : fixture,
@@ -556,7 +620,7 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       expect(response.schemaEvidence?.fields).toContainEqual(expect.objectContaining({ path: "publicRows[].startsAt", examples: ["2030-10-23T10:00:00-04:00"] }));
       expect(JSON.stringify(response.schemaEvidence).length).toBeLessThanOrEqual(12_000);
       expect(JSON.stringify(response)).not.toContain("never-expose-token");
-    } finally { await session.close(); native.mockRestore(); }
+    } finally { await session.close(); native.mockRestore(); routing.mockRestore(); }
   }, 25_000);
   it("inspects only observed adapter sources with the trusted venue identity", async () => {
     const inspectAdapter = vi.fn(async () => ({ adapter: { family: "FOREUP" as const, facilityId: 1, scheduleId: 2, bookingClassId: 3 } }));

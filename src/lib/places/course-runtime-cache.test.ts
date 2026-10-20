@@ -68,6 +68,17 @@ describe("course runtime cache", () => {
     expect(getCoursePhotoMetadataCacheKey(" course-1 ")).toBe("photo-metadata-v1:course-1");
   });
 
+  it("uses a bounded short lifetime for optional negative-cache entries", async () => {
+    await writeCourseRuntimeCache("photo-metadata-throttle-v1", { until: 123 }, "course-photo-metadata", { ttlSeconds: 300 });
+    expect(mocks.set).toHaveBeenCalledWith("photo-metadata-throttle-v1", { until: 123 }, {
+      name: "course-photo-metadata", tags: ["course-photo-metadata"], ttl: 300,
+    });
+    for (const ttlSeconds of [0, -1, 31_536_001, NaN, 1.5]) {
+      await expect(writeCourseRuntimeCache("invalid", {}, "course-photo-metadata", { ttlSeconds })).rejects.toThrow(/lifetime/);
+    }
+    expect(mocks.set).toHaveBeenCalledTimes(1);
+  });
+
   it("uses a different course-data key after the review version changes", () => {
     const input = {
       latitude: 41.24241,

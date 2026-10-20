@@ -281,9 +281,7 @@ describe("Google Places mapping", () => {
 
   it("loads a fresh Google Places photo and its required attribution", async () => {
     process.env.GOOGLE_PLACES_API_KEY = "test-key";
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue({
-      ok: true,
-      json: async () => ({
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({
         photos: [
           {
             name: "places/course-1/photos/photo-1",
@@ -295,8 +293,7 @@ describe("Google Places mapping", () => {
             ]
           }
         ]
-      })
-    } as Response);
+    }));
 
     await expect(getGooglePlacePhoto("course/with spaces")).resolves.toEqual({
       photoReference: "places/course-1/photos/photo-1",
@@ -321,10 +318,7 @@ describe("Google Places mapping", () => {
 
   it("falls back when Google has no current course photo", async () => {
     process.env.GOOGLE_PLACES_API_KEY = "test-key";
-    vi.spyOn(globalThis, "fetch").mockResolvedValue({
-      ok: true,
-      json: async () => ({})
-    } as Response);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({}));
 
     await expect(getGooglePlacePhoto("course-1")).resolves.toBeNull();
   });

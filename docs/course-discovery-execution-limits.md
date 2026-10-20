@@ -25,16 +25,25 @@ transport, and replay uses that saved choice:
 Both paths enforce public URL and read-only request policies. Native CORS
 preflights may name GET or POST; the actual POST independently requires a known
 anonymous read shape. WebSockets and service workers are disabled. Request
-leases last through `response.finished()` and body observation; native failure
+leases last through complete response-body observation; native failure
 cancels the affected host's tunnels before the lease is released. Deadlines, request
 counts, response bytes, connections, and sockets are bounded. No fallback
 silently changes the saved transport.
 
-Native redirects are intercepted through a separate Chromium Fetch session
-before dispatch. Initial and redirected requests use the same policy, provider
-lease, request budget, and response-evidence handler. Response completion and
-body bytes come from the current browser's Network events, so a redirect cannot
-silently skip either the guard or the final availability evidence. The current
+Native requests and redirects are intercepted through one Chromium Fetch
+session before dispatch. Initial and redirected requests use the same policy,
+provider lease, request budget, and response-evidence handler. Each response is
+bound to its actual Fetch request ID, network ID, main frame and redirect chain;
+there is no URL-based match between separate Playwright and Chromium streams.
+Playwright releases only its independent pause. It cannot admit a request or
+supply response evidence. The Fetch response stage captures the current
+browser's bounded body, continues the original response without changes, and
+then completes the read. This avoids waiting for page JavaScript to consume one
+body before a concurrent request can acquire the provider lease. Pending policy
+work and response capture prevent settled discovery or replay proof. Missing,
+aborted, stale or inconsistent identities fail closed. URLs rejected by the
+public read policy, and existing media/telemetry denials, never dispatch or
+contribute response evidence. The current
 qualified native path is the main frame only. Subframe requests, including
 cross-process iframe requests, are rejected before dispatch and reported as
 unsupported capabilities without terminating an otherwise usable main page.
@@ -44,9 +53,15 @@ popup requests are also rejected. This does not change the installed Local
 Reader's supported providers.
 
 Discovery can promote an exact visible public iframe `src` from a successful
-current official document into a separately guarded main-frame read. Hidden,
+current official document into a separately guarded main-frame read. It can
+also use a provider landing page reached through an observed public booking
+anchor on that official document, after an HTTP 200 response and an exact
+visible venue-name/full-address check. That provenance is session-local and
+cannot be supplied by the model or restored from a checkpoint. Hidden,
 inert, `srcdoc`, login, selected-slot and unsafe sources are excluded. A blocked
-frame URL or diagnostic alone never grants this authority. A successful fixed
+frame URL or diagnostic alone never grants this authority. This includes the
+observed public TeeItUp v2 root host, without rewriting it to a legacy route or
+inferring adapter identifiers. A successful fixed
 adapter inspection may supply source evidence for an unchanged
 `EXISTING_ADAPTER` recipe without loading the provider's JavaScript page. This
 controller-only observation is bound to the exact job, inputs, target, URLs and
@@ -83,6 +98,15 @@ booking instructions is not itself an access challenge.
   commands, or an arbitrary evaluator. Public product selection is separate from
   selecting an appointment or tee time: only an exact Book/Select control within
   a duration-proven product card may use `selectProduct`.
+- `selectRentalService` selects one exact observed public golf-rental option
+  from a labelled Service, Activity or Product control. Custom menus must be
+  owned by that control's `aria-controls`; lessons, events and memberships
+  cannot qualify. `continueToAvailability` uses an execution-owned selection
+  token and allows only the initial service continuation and an explicit skip
+  of optional packages. It cannot advance through visible date/time, contact,
+  account or payment controls. Service selection provides no duration,
+  capacity, resource identity or availability proof; those still require fresh
+  independent evidence.
 - Discovery follows initial or observed public links. The qualified native path
   accepts up to five safe GET/HEAD redirects between the same hostname and its
   `www` variant. Other
@@ -95,13 +119,52 @@ booking instructions is not itself an access challenge.
   still prevent complete proof. Known telemetry and the payment-only
   `js.stripe.com` client are aborted without counting as missing availability
   evidence; they receive no additional network authority.
+- Public static script/style URLs may contain a conventional single hexadecimal
+  `ver` build value. This exception applies only to GET script/style resources
+  with a static file extension; source URLs, data requests, credentials and
+  recipe route permissions retain their existing checks.
 - `EXISTING_ADAPTER` stores only typed identifiers for the existing ForeUP,
-  Acuity and TeeItUp public readers. TeeItUp identifiers come from the observed
+  Acuity, TeeItUp, USchedule, Whoosh, Lightspeed, Amelia and Chronogolf public readers. TeeItUp identifiers come from the observed
   official booking URL and public directory; name, street address, timezone and
   the exact facility set must agree. Each replay rechecks public configuration and venue
   identity, then uses their fixed read-only routes, shared provider leases and
   normalized source IDs. A model cannot supply routes, code or extractors for
   this engine.
+- The Amelia reader starts from an observed public booking page on the official
+  origin. It must verify the full venue identity, public plugin configuration,
+  complete eligible rental/provider set and supported client semantics before
+  requesting availability. Requests bind the actual attendee count, base rental
+  duration and explicit calendar range. Returned UTC starts are converted to
+  the course-local date; provider setup/cleanup buffers are not added to the
+  customer session. Only independently verified supported durations qualify;
+  optional extras and later booking steps grant no additional action authority.
+  Changed configuration or incomplete range/resource evidence cannot become an
+  empty result.
+  The initial Amelia implementation is limited to the three reviewed public
+  client assets from the observed 9.8.1 build, one unfiltered booking widget,
+  explicit course-local timezone settings and base rental durations. A changed
+  client, narrowed location/provider scope, or unsupported duration option
+  requires investigation. Optional extra time is not silently combined into a
+  different rental length.
+- The Chronogolf reader starts from an observed public club profile and verifies
+  the official website, full venue name and address, timezone, public player type
+  and every course's numeric ID, UUID and published round options. The two
+  reviewed public client assets are pinned and rechecked before availability.
+  Its fixed dated request includes every course UUID and the full union of
+  published hole options. Explicit pagination headers, stable totals and every
+  row's identity, local date, UTC time and minimum/maximum players must agree.
+  Missing pages, duplicate times, unknown courses and changed client/catalog
+  evidence are incomplete results. A time returned for the union of round
+  options has no invented round length or price; physical layout remains a
+  separate course fact. Discovery verification and subsequent execution use the
+  same typed link check: the freshly verified numeric club ID may resolve to its
+  canonical dated profile, with the exact course UUID and stable slot ID. This
+  does not change generic recipe origin or link checks.
+  The reader uses no saved cookies or credentials and
+  follows at most two observed redirects between public club profiles. One
+  execution permits at most ten availability pages and fifteen total public
+  reads within ninety seconds and the original job deadline; each response is
+  limited to two megabytes and the total to sixteen megabytes.
 - A TeeItUp alternate street address requires a controller-observed official
   page with a complete venue name, exact booking link and full public address.
   Its locality, state and ZIP must match the stored address, and exactly one

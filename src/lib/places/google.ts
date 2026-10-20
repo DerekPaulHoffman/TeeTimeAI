@@ -20,12 +20,11 @@ import {
   type GooglePlaceReviewIndex
 } from "@/lib/places/google-place-reviews";
 import {
-  cacheGooglePlacePhoto,
-  readCachedGooglePlacePhoto,
   type CoursePhotoAttribution,
   type GooglePlacePhoto
 } from "@/lib/places/course-photo-metadata";
 import { fetchGooglePlacesJsonWithRetry } from "@/lib/places/google-places-request";
+import { createCoursePhotoLookup } from "@/lib/places/course-photo-lookup";
 import { getTimeZoneForCoordinates } from "@/lib/timezones";
 
 export type {
@@ -568,54 +567,32 @@ export async function searchGolfCoursesByName(
   });
 }
 
-export async function getGooglePlacePhoto(
-  googlePlaceId: string
-): Promise<GooglePlacePhoto | null> {
-  const normalizedPlaceId = googlePlaceId.trim();
-  if (!normalizedPlaceId) {
-    return null;
-  }
-
-  const cachedPhoto = await readCachedGooglePlacePhoto(normalizedPlaceId);
-  if (cachedPhoto) {
-    return cachedPhoto;
-  }
-
-  const apiKey = getGooglePlacesApiKey();
-  if (!apiKey) {
-    return null;
-  }
-
-  try {
+const lookupGooglePlacePhoto = createCoursePhotoLookup({
+  async load(googlePlaceId) {
+    const apiKey = getGooglePlacesApiKey();
+    if (!apiKey) return { status: 503 };
     const { response, json } = await fetchGooglePlacesJsonWithRetry<
       Pick<GooglePlace, "photos">
     >(
-      `https://places.googleapis.com/v1/places/${encodeURIComponent(normalizedPlaceId)}`,
+      `https://places.googleapis.com/v1/places/${encodeURIComponent(googlePlaceId)}`,
       {
         cache: "no-store",
         headers: {
           "X-Goog-Api-Key": apiKey,
           "X-Goog-FieldMask": "photos"
         }
-      }
+      },
+      { maxAttempts: 1 }
     );
-    if (!response.ok) {
-      return null;
-    }
-
-    const place = json ?? {};
-    const photo = place.photos?.[0];
-    if (!photo?.name) {
-      return null;
-    }
-
-    return cacheGooglePlacePhoto(normalizedPlaceId, {
-      photoReference: photo.name,
-      authorAttributions: photo.authorAttributions ?? []
-    });
-  } catch {
-    return null;
+    const photo = json?.photos?.[0];
+    return { status: response.status, ...(photo?.name ? { photo: {
+      photoReference: photo.name, authorAttributions: photo.authorAttributions ?? [],
+    } } : {}) };
   }
+});
+
+export async function getGooglePlacePhoto(googlePlaceId: string): Promise<GooglePlacePhoto | null> {
+  return lookupGooglePlacePhoto(googlePlaceId);
 }
 
 async function searchPublicGolfCoursePlacesByName(input: CourseNameSearchInput) {

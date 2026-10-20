@@ -12,6 +12,7 @@ import { isGolfNowMetadata } from "@/lib/adapters/golfnow";
 import { isQuick18Metadata, isQuick18PublicSearchUrl } from "@/lib/adapters/quick18";
 import { isGolfWithAccessMetadata } from "@/lib/adapters/golf-with-access";
 import { isTeeItUpMetadata } from "@/lib/adapters/teeitup";
+import { parseTeeItUpV2PublicSource } from "@/lib/adapters/teeitup-public-source";
 import { isTeesnapMetadata } from "@/lib/adapters/teesnap";
 import { isWebTracMetadata } from "@/lib/adapters/webtrac";
 import { isWhooshMetadata } from "@/lib/adapters/whoosh";
@@ -699,6 +700,7 @@ function isProviderFamilyPublicBookingLandingUrl(
       );
     case "TEEITUP":
       return Boolean(
+        parseTeeItUpV2PublicSource(url.href) ||
         /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.(?:book|play)\.teeitup\.(?:golf|com)$/u.test(
           hostname
         ) &&

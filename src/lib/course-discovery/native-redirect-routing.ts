@@ -1,9 +1,9 @@
 import type { Frame, Page, Response, Route } from "@playwright/test";
 import { canonicalPublicReadUrl } from "./public-request-url";
-import { PUBLIC_BROWSER_TOTAL_BYTES } from "./browser-resource-limits";
+import { PUBLIC_BROWSER_TOTAL_BYTES, publicBrowserResponseLimit } from "./browser-resource-limits";
 
-/** Requests and responses come from the current browser's CDP events. No
- * secondary HTTP client or model-authored response participates in evidence. */
+/** One CDP owner validates every initial/redirected read. Evidence comes from
+ * that exact request's paused Chrome response, independently of page body use. */
 export interface NativeReadRequest {
   url(): string; method(): string; headers(): Record<string, string>; postData(): string | null;
   resourceType(): string; isNavigationRequest(): boolean; frame(): Frame;
@@ -16,10 +16,12 @@ function pending<T>() {
   const promise = new Promise<T>(resolve => { settle = resolve; });
   return { promise, settle };
 }
-type RecordEntry = { id: string; networkId: string; url: string; method: string; headers: Record<string, string>; body: string | null;
-  kind: string; parent: RecordEntry | null; depth: number; paused: boolean; wrapped?: boolean; redirected?: boolean; adapter: NativeReadRequest;
-  response: ReturnType<typeof pending<NativeReadResponse | Error>>; finished: ReturnType<typeof pending<Error | null>>;
-  metadata?: { url: string; status: number; headers: Record<string, string> } };
+type RecordEntry = {
+  id: string; networkId: string; url: string; transportUrl: string; method: string; headers: Record<string, string>; body: string | null;
+  kind: string; parent: RecordEntry | null; depth: number; paused: boolean; admitted: boolean; failed: boolean; responseStarted: boolean; complete: boolean;
+  failureCode?: string;
+  adapter: NativeReadRequest; response: ReturnType<typeof pending<NativeReadResponse | Error>>;
+};
 const resourceKinds: Record<string, string> = { Document: "document", Stylesheet: "stylesheet", Image: "image", Media: "media",
   Font: "font", Script: "script", XHR: "xhr", Fetch: "fetch", EventSource: "eventsource", WebSocket: "websocket",
   Manifest: "manifest", Other: "other", Ping: "ping", Preflight: "other" };
@@ -27,6 +29,19 @@ function headers(value: Record<string, string | number>): Record<string, string>
   const entries = Object.entries(value);
   if (entries.length > 128 || JSON.stringify(entries).length > 65_536) throw new Error("NATIVE_REDIRECT_HEADERS_LIMIT");
   return Object.fromEntries(entries.map(([key, item]) => [key.toLowerCase(), String(item)]));
+}
+function responseHeaders(values: Array<{ name: string; value: string }>) {
+  if (!Array.isArray(values) || values.length > 128 || JSON.stringify(values).length > 65_536) throw new Error("NATIVE_REDIRECT_HEADERS_LIMIT");
+  const result: Record<string, string> = {};
+  for (const item of values) {
+    const name = item.name.toLowerCase();
+    if (Object.hasOwn(result, name)) {
+      if (["content-length", "content-type", "location"].includes(name)) {
+        if (result[name] !== item.value) throw new Error("NATIVE_REDIRECT_RESPONSE_HEADERS_CONFLICT");
+      } else result[name] += `${name === "set-cookie" ? "\n" : ", "}${item.value}`;
+    } else result[name] = item.value;
+  }
+  return result;
 }
 
 export async function installNativeRedirectRouting(page: Page, handler: (route: NativeReadRoute) => Promise<void>, options: {
@@ -39,17 +54,17 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
   const cdp = await page.context().newCDPSession(page);
   const rootFrameId = (await cdp.send("Page.getFrameTree")).frameTree.frame.id;
   const records = new Map<string, RecordEntry>();
-  let closing: Promise<void> | undefined, closed = false, lastFailure: string | undefined, interceptedRequests = 0;
+  let closing: Promise<void> | undefined, closed = false, enabled = false, lastFailure: string | undefined;
+  let interceptedRequests = 0, pendingReads = 0, responseBytes = 0;
   const failure = (code: string) => { lastFailure = code; try { options.onFailure?.(code); } catch { /* Diagnostics cannot authorize work. */ } };
-  const equivalent = (left: string, right: string, method: string) => left === right || canonicalPublicReadUrl(left, method) === right;
   const onAbort = () => { void close("NATIVE_REDIRECT_CANCELLED"); };
   function close(code = "NATIVE_REDIRECT_CLOSED") {
     if (closing) return closing;
     closed = true;
     if (code !== "NATIVE_REDIRECT_CLOSED") failure(code);
     options.signal?.removeEventListener("abort", onAbort);
-    for (const record of records.values()) { record.response.settle(new Error(code)); record.finished.settle(new Error(code)); }
-    // Never detach interception while live paused requests could resume.
+    for (const record of records.values()) { record.failed = true; record.response.settle(new Error(code)); }
+    // Never detach interception while paused requests could resume.
     closing = (async () => { await page.close({ runBeforeUnload: false }).catch(() => {}); await cdp.detach().catch(() => {}); })();
     return closing;
   }
@@ -59,54 +74,60 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
       timer = setTimeout(() => { reject(new Error(code)); void close(code); }, timeoutMs);
     })]); } finally { clearTimeout(timer); }
   };
-  const metadata = (networkId: string, value: { url: string; status: number; headers: Record<string, string | number> }, complete = false) => {
-    // Browser-local images can report Network metadata without a Fetch request.
-    // They carry no public availability evidence and confer no URL permission.
-    if (/^(?:data|blob):/u.test(value.url)) return;
-    const matching = [...records.values()].filter(record => record.networkId === networkId && equivalent(record.url, value.url, record.method));
-    if (matching.length !== 1) { void close("NATIVE_REDIRECT_RESPONSE_MISMATCH"); return; }
-    const record = matching[0];
-    record.metadata = { url: value.url, status: value.status, headers: headers(value.headers) };
-    const snapshot = record.metadata;
-    record.response.settle({ url: () => snapshot.url, status: () => snapshot.status, allHeaders: async () => ({ ...snapshot.headers }),
-      finished: () => bounded(record.finished.promise, "NATIVE_REDIRECT_RESPONSE_TIMEOUT"),
-      body: async () => {
-        const failed = await bounded(record.finished.promise, "NATIVE_REDIRECT_RESPONSE_TIMEOUT");
-        if (failed) throw failed;
-        if (snapshot.status >= 300 && snapshot.status < 400 || [204, 205, 304].includes(snapshot.status)) return Buffer.alloc(0);
-        const body = await bounded(cdp.send("Network.getResponseBody", { requestId: networkId }), "NATIVE_REDIRECT_BODY_TIMEOUT");
-        return Buffer.from(body.body, body.base64Encoded ? "base64" : "utf8");
-      } });
-    if (complete) { record.redirected = true; record.finished.settle(null); }
-  };
-  cdp.on("Network.responseReceived", event => {
-    try { metadata(event.requestId, event.response); } catch { void close("NATIVE_REDIRECT_RESPONSE_MISMATCH"); }
-  });
-  cdp.on("Network.requestWillBeSent", event => {
-    if (event.redirectResponse) try { metadata(event.requestId, event.redirectResponse, true); } catch { void close("NATIVE_REDIRECT_RESPONSE_MISMATCH"); }
-  });
-  cdp.on("Network.loadingFinished", event => {
-    // Exclude only responses that actually continued as redirects. A terminal
-    // 304 (and a non-followed 3xx) completes on loadingFinished like any other
-    // bodyless response, without a subsequent redirectResponse event.
-    const matching = [...records.values()].filter(record => record.networkId === event.requestId && record.metadata && !record.redirected);
-    if (matching.length > 1) { void close("NATIVE_REDIRECT_RESPONSE_MISMATCH"); return; }
-    matching[0]?.finished.settle(null);
-  });
+  const failRecord = (record: RecordEntry, code: string) => { record.failed = true; record.failureCode = code; record.response.settle(new Error(code)); };
   cdp.on("Network.loadingFailed", event => {
-    for (const record of records.values()) if (record.networkId === event.requestId) {
-      record.response.settle(new Error("NATIVE_REDIRECT_NETWORK_FAILED")); record.finished.settle(new Error("NATIVE_REDIRECT_NETWORK_FAILED"));
-    }
+    for (const record of records.values()) if (record.networkId === event.requestId && !record.complete && !record.failed)
+      failRecord(record, "NATIVE_REDIRECT_NETWORK_FAILED");
   });
   options.signal?.addEventListener("abort", onAbort, { once: true });
   cdp.on("Fetch.requestPaused", event => {
+    // Include dispatch and capture before any await, so ready DOM cannot hide
+    // an incomplete native read before the shared handler starts or resumes.
+    pendingReads++;
     void (async () => {
       if (closed) return;
       const reject = () => cdp.send("Fetch.failRequest", { requestId: event.requestId, errorReason: "BlockedByClient" });
+      if (event.responseStatusCode !== undefined || event.responseErrorReason !== undefined) {
+        const record = records.get(event.requestId);
+        // Enumerate the same fail-closed checks without retaining headers,
+        // request bodies or provider error text in diagnostics.
+        const mismatch = !record ? "NATIVE_REDIRECT_RESPONSE_UNKNOWN" : !record.admitted ? "NATIVE_REDIRECT_RESPONSE_UNADMITTED" :
+          record.failed && !(record.failureCode === "NATIVE_REDIRECT_NETWORK_FAILED" && event.responseErrorReason) ? "NATIVE_REDIRECT_RESPONSE_PRIOR_FAILURE" : record.responseStarted ? "NATIVE_REDIRECT_RESPONSE_DUPLICATE" :
+            record.paused ? "NATIVE_REDIRECT_RESPONSE_REQUEST_PAUSED" : record.networkId !== event.networkId ? "NATIVE_REDIRECT_RESPONSE_NETWORK_MISMATCH" :
+              record.transportUrl !== event.request.url ? "NATIVE_REDIRECT_RESPONSE_URL_MISMATCH" : record.method !== event.request.method ? "NATIVE_REDIRECT_RESPONSE_METHOD_MISMATCH" :
+                event.frameId !== rootFrameId ? "NATIVE_REDIRECT_RESPONSE_FRAME_MISMATCH" : !event.responseErrorReason &&
+                  (!Number.isInteger(event.responseStatusCode) || event.responseStatusCode! < 100 || event.responseStatusCode! > 599) ? "NATIVE_REDIRECT_RESPONSE_STATUS_INVALID" : undefined;
+        if (mismatch || !record) { await close(mismatch ?? "NATIVE_REDIRECT_RESPONSE_UNKNOWN"); return; }
+        record.responseStarted = true;
+        if (event.responseErrorReason) {
+          // Chrome has failed this exact admitted read. Do not create response
+          // evidence or close unrelated documents/reads because an optional
+          // resource failed. The root page.goto still reports navigation failure.
+          failRecord(record, "NATIVE_REDIRECT_NETWORK_FAILED");
+          await bounded(reject(), "NATIVE_REDIRECT_ABORT_TIMEOUT");
+          return;
+        }
+        const status = event.responseStatusCode!, values = responseHeaders(event.responseHeaders ?? []);
+        const maxBytes = publicBrowserResponseLimit(record.kind), declared = Number(values["content-length"] ?? 0);
+        if (!Number.isFinite(declared) || declared < 0 || declared > maxBytes) { await close("NATIVE_RESPONSE_LIMIT"); return; }
+        const noBody = record.method === "HEAD" || [204, 205, 304].includes(status) || status >= 300 && status < 400;
+        // Network.loadingFinished can wait for page JavaScript to consume a
+        // Fetch body, deadlocking Promise.all behind a serialized provider lease.
+        const body = noBody ? Buffer.alloc(0) : await bounded(cdp.send("Fetch.getResponseBody", { requestId: record.id }), "NATIVE_REDIRECT_BODY_TIMEOUT")
+          .then(value => Buffer.from(value.body, value.base64Encoded ? "base64" : "utf8"));
+        responseBytes += body.length;
+        if (body.length > maxBytes || responseBytes > PUBLIC_BROWSER_TOTAL_BYTES) { await close("NATIVE_RESPONSE_LIMIT"); return; }
+        if (closed || options.signal?.aborted || record.failed) return;
+        // Preserve the actual status, headers and body. Completion follows the
+        // successful unchanged release, never a fabricated/fulfilled response.
+        await bounded(cdp.send("Fetch.continueResponse", { requestId: record.id }), "NATIVE_REDIRECT_RESPONSE_TIMEOUT");
+        if (closed || options.signal?.aborted || record.failed) return;
+        record.complete = true;
+        record.response.settle({ url: () => record.transportUrl, status: () => status, allHeaders: async () => ({ ...values }),
+          finished: async () => null, body: async () => body });
+        return;
+      }
       if (++interceptedRequests > limit) { await reject(); await close("NATIVE_REDIRECT_REQUEST_REJECTED"); return; }
-      // Embedded frames cannot supply evidence or network authority. Deny their
-      // first request and every redirect before dispatch, while retaining the
-      // independently guarded top document. Malformed root metadata stays fatal.
       if (event.frameId && event.frameId !== rootFrameId) {
         await reject();
         try { options.onSubframeBlocked?.({ url: event.request.url, resourceType: resourceKinds[event.resourceType] ?? "other" }); }
@@ -118,49 +139,69 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         await reject(); await close("NATIVE_REDIRECT_REQUEST_REJECTED"); return;
       }
       const parent = event.redirectedRequestId ? records.get(event.redirectedRequestId) : null;
-      if (event.redirectedRequestId && (!parent || parent.depth >= 5)) { await reject(); await close("NATIVE_REDIRECT_PROVENANCE_REJECTED"); return; }
+      if (event.redirectedRequestId && (!parent || !parent.admitted || parent.failed || parent.depth >= 5)) {
+        await reject(); await close("NATIVE_REDIRECT_PROVENANCE_REJECTED"); return;
+      }
       const kind = resourceKinds[event.resourceType];
       if (!kind) { await reject(); await close("NATIVE_REDIRECT_RESOURCE_REJECTED"); return; }
-      const record: RecordEntry = { id: event.requestId, networkId: event.networkId, url: event.request.url, method: event.request.method,
-        headers: headers(event.request.headers), body: event.request.postData ?? null, kind, parent: parent ?? null,
-        depth: parent ? parent.depth + 1 : 0, paused: true, response: pending(), finished: pending(), adapter: undefined as unknown as NativeReadRequest };
+      const record: RecordEntry = { id: event.requestId, networkId: event.networkId, url: event.request.url, transportUrl: event.request.url,
+        method: event.request.method, headers: headers(event.request.headers), body: event.request.postData ?? null, kind,
+        parent: parent ?? null, depth: parent ? parent.depth + 1 : 0, paused: true, admitted: false, failed: false, responseStarted: false, complete: false,
+        response: pending(), adapter: undefined as unknown as NativeReadRequest };
       record.adapter = { url: () => record.url, method: () => record.method, headers: () => ({ ...record.headers }), postData: () => record.body,
         resourceType: () => record.kind, isNavigationRequest: () => record.kind === "document", frame: () => page.mainFrame(),
         redirectedFrom: () => record.parent?.adapter ?? null, response: async () => {
           const value = await bounded(record.response.promise, "NATIVE_REDIRECT_RESPONSE_TIMEOUT"); if (value instanceof Error) throw value; return value;
         } };
       records.set(record.id, record);
-      if (!parent) { record.paused = false; await cdp.send("Fetch.continueRequest", { requestId: record.id }); return; }
       const route: NativeReadRoute = { request: () => record.adapter,
         continue: async values => {
-          if (!record.paused || closed || values && Object.keys(values).some(key => key !== "url") ||
-              values?.url && !equivalent(record.url, values.url, record.method)) throw new Error("NATIVE_REDIRECT_CONTINUE_REJECTED");
-          record.paused = false;
-          await cdp.send("Fetch.continueRequest", { requestId: record.id, ...(values?.url && values.url !== record.url ? { url: values.url } : {}) });
+          if (!record.paused || closed || record.failed || options.signal?.aborted || values && Object.keys(values).some(key => key !== "url") ||
+              values?.url && values.url !== record.url && canonicalPublicReadUrl(record.url, record.method) !== values.url)
+            throw new Error("NATIVE_REDIRECT_CONTINUE_REJECTED");
+          record.paused = false; record.admitted = true; record.transportUrl = values?.url ?? record.url;
+          await bounded(cdp.send("Fetch.continueRequest", { requestId: record.id, ...(record.transportUrl !== record.url ? { url: record.transportUrl } : {}) }),
+            "NATIVE_REDIRECT_REQUEST_TIMEOUT");
         },
-        abort: async () => { if (record.paused && !closed) { record.paused = false; await reject(); } },
+        abort: async () => {
+          if (record.paused && !closed) { record.paused = false; failRecord(record, "NATIVE_REDIRECT_REQUEST_REJECTED"); await reject(); }
+        },
         fulfill: async () => { throw new Error("NATIVE_REDIRECT_FULFILL_REJECTED"); },
       };
       try { await handler(route); }
-      catch { await route.abort().catch(() => {}); await close("NATIVE_REDIRECT_HANDLER_FAILED"); }
-    })().catch(() => { void close("NATIVE_REDIRECT_ROUTING_FAILED"); });
+      catch (error) {
+        await route.abort().catch(() => {});
+        if (record.failureCode === "NATIVE_REDIRECT_NETWORK_FAILED" && error instanceof Error && error.message === record.failureCode) return;
+        await close("NATIVE_REDIRECT_HANDLER_FAILED");
+      }
+    })().catch(error => { void close(error instanceof Error && /^[A-Z_0-9]+$/u.test(error.message) ? error.message : "NATIVE_REDIRECT_ROUTING_FAILED"); })
+      .finally(() => { pendingReads--; });
   });
-  await cdp.send("Network.enable", { maxTotalBufferSize: PUBLIC_BROWSER_TOTAL_BYTES, maxResourceBufferSize: 16_000_000, maxPostDataSize: 32768 });
-  await cdp.send("Fetch.enable", { patterns: [{ urlPattern: "*", requestStage: "Request" }] });
-  if (options.signal?.aborted) await close("NATIVE_REDIRECT_CANCELLED");
+  try {
+    await cdp.send("Network.enable", { maxTotalBufferSize: PUBLIC_BROWSER_TOTAL_BYTES, maxResourceBufferSize: 16_000_000, maxPostDataSize: 32768 });
+    await cdp.send("Fetch.enable", { patterns: [{ urlPattern: "*", requestStage: "Request" }, { urlPattern: "*", requestStage: "Response" }] });
+    enabled = true;
+    if (options.signal?.aborted) { await close("NATIVE_REDIRECT_CANCELLED"); options.signal.throwIfAborted(); }
+  } catch (error) { await close("NATIVE_REDIRECT_INSTALL_FAILED"); throw error; }
   return {
     prepare(frame: Frame) {
-      if (closed || frame !== page.mainFrame()) { failure("NATIVE_REDIRECT_FRAME_UNGUARDED"); throw new Error("NATIVE_REDIRECT_FRAME_UNGUARDED"); }
+      if (closed || !enabled || frame !== page.mainFrame()) { failure("NATIVE_REDIRECT_FRAME_UNGUARDED"); throw new Error("NATIVE_REDIRECT_FRAME_UNGUARDED"); }
     },
-    wrapRoute(route: Route): NativeReadRoute {
-      const request = route.request();
-      if (closed || request.frame() !== page.mainFrame()) throw new Error("NATIVE_REDIRECT_FRAME_UNGUARDED");
-      const matching = [...records.values()].filter(record => !record.wrapped && record.url === request.url() && record.method === request.method() && !record.parent &&
-        record.adapter.isNavigationRequest() === request.isNavigationRequest());
-      if (matching.length !== 1) { failure("NATIVE_REDIRECT_REQUEST_MISMATCH"); throw new Error("NATIVE_REDIRECT_REQUEST_MISMATCH"); }
-      matching[0].wrapped = true;
-      return { request: () => matching[0].adapter, continue: route.continue.bind(route), abort: route.abort.bind(route), fulfill: route.fulfill.bind(route) };
+    /** Release only Playwright's independent pause. CDP owns policy, exact
+     * response identity, dispatch and leases; this never supplies evidence. */
+    async releasePlaywrightRoute(route: Route) {
+      try {
+        if (closed || !enabled || options.signal?.aborted) throw new Error("NATIVE_REDIRECT_CLOSED");
+        const request = route.request();
+        if (request.frame() !== page.mainFrame() || request.frame().page() !== page) throw new Error("NATIVE_REDIRECT_FRAME_UNGUARDED");
+        await bounded(route.continue(), "NATIVE_REDIRECT_REQUEST_TIMEOUT");
+      } catch {
+        // A popup request can precede frame creation. Missing/foreign frame
+        // metadata must abort; its public-looking URL grants no authority.
+        await route.abort().catch(() => {});
+      }
     },
+    get pendingReads() { return pendingReads; },
     get lastFailure() { return lastFailure; }, close: () => close(),
   };
 }

@@ -45,6 +45,36 @@ function reads(recipe: ExistingAdapterRecipe, payload: unknown, html?: string) {
 }
 
 describe("fixed existing adapter recipes", () => {
+  it.each(["/", "/teetimes", "/teetimes/"])("inspects and replays an observed V2 %s with exact identity, headers and edited party", async path => {
+    const origin = "https://public.book-v2.teeitup.golf", source = { ...teeitup.source, bookingUrl: `${origin}${path}` };
+    const fetch = vi.fn<typeof globalThis.fetch>(async (value, init) => {
+      const url = new URL(String(value)); expect(init).toMatchObject({ method: "GET", credentials: "omit", redirect: "manual" });
+      const headers = new Headers(init?.headers); expect(headers.get("origin")).toBe(origin); expect(headers.get("referer")).toBe(`${origin}/`); expect(headers.get("x-be-alias")).toBe("public");
+      if (url.pathname.endsWith("/facilities")) return Response.json([teeitupDirectory[0]]);
+      expect([...url.searchParams.keys()].sort()).toEqual(["date", "facilityIds", "returnPromotedRates"]);
+      expect(url.searchParams.get("facilityIds")).toBe("11");
+      return Response.json([{ teetimes: [{ courseId: "provider-11", teetime: `${url.searchParams.get("date")}T15:00:00Z`, rates: [{ allowedPlayers: [2, 4], holes: 9 }] },
+        { courseId: "provider-11", teetime: `${url.searchParams.get("date")}T16:00:00Z`, rates: [{ allowedPlayers: [3, 4], holes: 18 }] }] }]);
+    });
+    const { adapter } = await inspectExistingAdapter(source, { ...deps, fetch });
+    expect(adapter).toEqual({ family: "TEEITUP", alias: "public", facilityIds: [11] });
+    const recipe = parseAccessRecipe({ ...teeitup, source, adapter }) as ExistingAdapterRecipe;
+    for (const request of [input, { ...input, date: "2030-10-23", players: 3 }]) {
+      const result = await executeExistingAdapterRecipe(recipe, request, { ...deps, fetch });
+      expect(result).toMatchObject({ status: "AVAILABLE", complete: true, evidence: { completeVerified: true, capacityVerified: true, venueVerified: true } });
+      expect(result.slots).toHaveLength(1); expect(result.slots[0].holes).toBe(request.players === 2 ? 9 : 18);
+      expect(result.slots[0].sourceId).toBe(`teeitup-11-provider-11-${request.date}T${request.players === 2 ? "15" : "16"}:00:00Z`);
+      expect(result.slots[0].bookingUrl).toBe(`${origin}${path}?course=11&date=${request.date}`);
+    }
+    const mismatched = teeitupReads([], [{ ...teeitupDirectory[0], address: "99 Other Road, Example, NY 12345, USA" }]);
+    await expect(inspectExistingAdapter(source, { ...deps, fetch: mismatched })).rejects.toThrow("ADAPTER_IDENTITY_MISMATCH");
+  });
+  it("does not probe an unrecognized external booking host as a self-hosted plugin", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>();
+    await expect(inspectExistingAdapter({ ...acuity.source, bookingUrl: "https://other.example.org/calendar" }, { ...deps, fetch }))
+      .rejects.toThrow("UNSUPPORTED_ADAPTER_SOURCE");
+    expect(fetch).not.toHaveBeenCalled();
+  });
   it("discovers and independently reuses a directory-proven simulator with explicit duration rates", async () => {
     const source = { ...teeitup.source, bookingUrl: "https://studio.book.teeitup.com/", venueName: "Example Swing Studio",
       venueAddress: "100 Main Road Ste A, Example, NY 12345, USA" };

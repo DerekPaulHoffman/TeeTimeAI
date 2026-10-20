@@ -54,28 +54,38 @@ function recipe(transport: "NATIVE_CHROME" | "PINNED_HTTP" = "NATIVE_CHROME") {
 describe.runIf(existsSync(chrome))("offline CPS discovery and deterministic browser wiring", () => {
   let browsers: Browser[], nativeSeen: string[], serverSeen: string[], pinnedSeen: string[], failedRequests: string[];
   let responseEvents: string[], requestEvents: string[];
+  let correlationEvents: object[];
   let discoveryFailures: string[];
   let server: Server;
-  let respond: (url: string, context: BrowserContext) => { status?: number; location?: string; body?: string };
+  let respond: (url: string, context: BrowserContext) => { status?: number; location?: string; body?: string; contentType?: string; echoRequestBody?: boolean; networkFailure?: boolean };
   beforeEach(async () => {
     browsers = []; nativeSeen = []; serverSeen = []; pinnedSeen = []; failedRequests = [];
-    responseEvents = []; requestEvents = [];
+    responseEvents = []; requestEvents = []; correlationEvents = [];
     discoveryFailures = [];
     const start = Date.now(), push = responseEvents.push.bind(responseEvents);
     responseEvents.push = (...values) => push(...values.map(value => `${Date.now() - start}ms ${value}`));
     respond = url => ({ body: html(new URL(url).searchParams.get("Date") ?? date) });
-    const requestContexts = new Map<string, BrowserContext[]>(), redirectedContexts = new Map<string, BrowserContext>();
+    const requestContexts = new Map<string, BrowserContext[]>(), redirectedContexts = new Map<string, BrowserContext>(), networkFailureUrls = new Set<string>();
     server = createServer({ cert: fixtureCertificate, key: fixtureKey }, (request, response) => {
       const url = `https://${request.headers.host}${request.url}`;
       serverSeen.push(url);
+      // Chrome may retry a failed script inside the same admitted request.
+      // Keep the explicit fixture failure instead of replacing it with an
+      // unbound-retry HTTP500, which would qualify a different response path.
+      if (networkFailureUrls.has(url)) { request.socket.destroy(); return; }
       const context = requestContexts.get(url)?.shift() ?? redirectedContexts.get(url);
       if (!context || !["official.example.org", "sc.cps.golf"].includes(request.headers.host ?? "")) {
         response.writeHead(500); response.end("Unbound offline request"); return;
       }
       const reply = respond(url, context);
+      if (reply.networkFailure) { networkFailureUrls.add(url); request.socket.destroy(); return; }
       if (reply.location) redirectedContexts.set(reply.location, context);
-      response.writeHead(reply.status ?? 200, { "content-type": "text/html", ...(reply.location ? { location: reply.location } : {}) });
-      response.end(reply.body ?? "");
+      response.writeHead(reply.status ?? 200, { "content-type": reply.contentType ?? "text/html", ...(reply.location ? { location: reply.location } : {}) });
+      if (reply.echoRequestBody) {
+        let body = "";
+        request.on("data", chunk => { body += chunk; });
+        request.on("end", () => response.end(body));
+      } else response.end(reply.body ?? "");
     });
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
     const port = (server.address() as AddressInfo).port;
@@ -102,6 +112,22 @@ describe.runIf(existsSync(chrome))("offline CPS discovery and deterministic brow
     const newContext = browser.newContext.bind(browser);
     vi.spyOn(browser, "newContext").mockImplementation(async options => {
       const context = await newContext({ ...options, ignoreHTTPSErrors: true });
+      const originalSession = context.newCDPSession.bind(context), originalRoute = context.route.bind(context);
+      vi.spyOn(context, "newCDPSession").mockImplementation(async target => {
+        const cdp = await originalSession(target);
+        cdp.on("Fetch.requestPaused", event => correlationEvents.push({ event: "CDP", url: event.request.url, kind: event.resourceType,
+          headers: event.request.headers }));
+        return cdp;
+      });
+      vi.spyOn(context, "route").mockImplementation(async (pattern, handler, options) => originalRoute(pattern, async route => {
+        const request = route.request(), allHeaders = request.allHeaders.bind(request);
+        vi.spyOn(request, "allHeaders").mockImplementation(async () => {
+          correlationEvents.push({ event: "PW_HEADERS_START", url: request.url(), kind: request.resourceType() });
+          const values = await allHeaders(); correlationEvents.push({ event: "PW_HEADERS_END", url: request.url(), kind: request.resourceType(), headers: values });
+          return values;
+        });
+        await handler(route, request);
+      }, options));
       context.on("requestfailed", request => failedRequests.push(`${request.url()} ${request.failure()?.errorText}`));
       context.on("request", request => requestEvents.push(`${request.url()} FROM ${request.redirectedFrom()?.url() ?? "none"}`));
       context.on("response", response => responseEvents.push(`${response.url()} ${response.status()}`));
@@ -114,6 +140,15 @@ describe.runIf(existsSync(chrome))("offline CPS discovery and deterministic brow
     const response = respond(url, undefined as unknown as BrowserContext);
     return new Response(response.body ?? "", { status: response.status ?? 200,
       headers: { "content-type": "text/html", ...(response.location ? { location: response.location } : {}) } });
+  };
+  const nativeOwner = async (read: (route: NativeReadRoute) => Promise<void>) => {
+    const proxy = await nativeBrowser.createNativePublicBrowserProxy({ signal: AbortSignal.timeout(30_000) });
+    const browser = await launchBrowser();
+    const context = await browser.newContext({ proxy: { server: proxy.server, bypass: "<-loopback>" }, serviceWorkers: "block" });
+    const page = await context.newPage(), failures: string[] = [];
+    const routing = await installNativeRedirectRouting(page, read, { onFailure: code => failures.push(code) });
+    await context.route("**/*", route => routing.releasePlaywrightRoute(route));
+    return { page, routing, failures, close: async () => { await routing.close(); await context.close(); await proxy.close(); } };
   };
   const openDiscovery = (browserTransport: "NATIVE_CHROME" | "PINNED_HTTP" = "NATIVE_CHROME") => createCourseDiscoveryBrowserSession({
     initialUrls: [official], deadlineAt: new Date(Date.now() + 30_000), venueName: "Offline Golf Course", timeZone: input.timeZone,
@@ -133,6 +168,35 @@ describe.runIf(existsSync(chrome))("offline CPS discovery and deterministic brow
     expect(JSON.stringify(opened)).not.toContain("2020-01-01");
     return session.execute({ id: 2, action: "click", target: link.target });
   }
+
+  it("retains the official document and independent public availability after an optional script network failure", async () => {
+    const optional = "https://official.example.org/optional.js", availability = `https://official.example.org/availability?date=${date}`;
+    respond = url => url === optional ? { networkFailure: true } : url === availability ? { contentType: "application/json", body: JSON.stringify({ date, slots: ["10:00"] }) } :
+      { body: `<html><body><h1>Offline Golf Course</h1><script src="${optional}"></script><script>fetch(${JSON.stringify(availability)}).then(r=>r.json()).then(()=>document.title='public data ready');</script></body></html>` };
+    const session = await openDiscovery();
+    try {
+      const opened = await session.execute({ id: 1, action: "open", url: official });
+      const observed = await session.execute({ id: 2, action: "observe" });
+      const responses = [...opened.responses, ...observed.responses], requests = [...opened.requests, ...observed.requests];
+      expect(observed.url).toBe(official); expect(observed.text).toContain("Offline Golf Course");
+      expect(responses, JSON.stringify({ opened, observed, serverSeen, nativeSeen, failedRequests, responseEvents })).toContainEqual(expect.objectContaining({ url: availability, status: 200, body: { date, slots: ["10:00"] } }));
+      expect(observed.requestFailures).toContainEqual(expect.objectContaining({ reason: "NATIVE_REDIRECT_NETWORK_FAILED", url: optional, resourceType: "script" }));
+      expect(requests).toContainEqual(expect.objectContaining({ url: official, status: 200 }));
+      expect(requests).toContainEqual(expect.objectContaining({ url: availability, status: 200 }));
+      expect(observed.loading).toBe(false); expect(discoveryFailures.every(code => code === "NATIVE_REDIRECT_NETWORK_FAILED")).toBe(true);
+    } finally { await session.close(); }
+  }, 40_000);
+
+  it("propagates an actual root navigation network failure without returning document evidence", async () => {
+    respond = () => ({ networkFailure: true });
+    const session = await openDiscovery();
+    try {
+      await expect(session.execute({ id: 1, action: "open", url: official })).rejects.toThrow();
+      await vi.waitFor(() => expect(session.diagnostics().requestFailures).toContainEqual(expect.objectContaining({ reason: "NATIVE_REDIRECT_NETWORK_FAILED", resourceType: "document" })));
+      expect(session.diagnostics().requests.some(row => row.status !== undefined)).toBe(false);
+      expect(serverSeen).toContain(official); expect(discoveryFailures).toContain("NATIVE_REDIRECT_NETWORK_FAILED");
+    } finally { await session.close(); }
+  }, 40_000);
 
   it("exposes only the canonical official link, then uses a fresh native session and retains dated response evidence", async () => {
     normalResponses(sessionUrl(firstToken, otherDate));
@@ -169,7 +233,7 @@ describe.runIf(existsSync(chrome))("offline CPS discovery and deterministic brow
       expect(serverSeen).not.toContain(unobserved); expect(nativeSeen).not.toContain(unobserved);
       expect(nativeSeen).toContain(entry); expect(serverSeen).toContain(entry);
       if (action === "link-prefetch") {
-        expect(discoveryFailures.length).toBeGreaterThan(0);
+        expect(discoveryFailures.length, JSON.stringify({ correlationEvents, requestEvents, responseEvents, nativeSeen, serverSeen, reached })).toBeGreaterThan(0);
         expect(discoveryFailures.every(reason => reason === "UNSAFE_URL")).toBe(true);
       } else expect(discoveryFailures).toEqual([]);
     } finally { await session.close(); }
@@ -231,7 +295,7 @@ describe.runIf(existsSync(chrome))("offline CPS discovery and deterministic brow
     } finally { await session.close(); }
   }, 40_000);
 
-  it("binds a repeated initial URL to its new request instead of historical records", async () => {
+  it("reads a repeated initial URL independently without borrowing a prior response", async () => {
     normalResponses();
     const session = await openDiscovery();
     try {
@@ -261,18 +325,121 @@ describe.runIf(existsSync(chrome))("offline CPS discovery and deterministic brow
       catch (error) { failures.push(String(error)); await route.abort().catch(() => {}); }
     };
     const routing = await installNativeRedirectRouting(page, read, { onFailure: code => failures.push(code) });
-    await context.route("**/*", async route => {
-      try { await read(routing.wrapRoute(route)); }
-      catch (error) { failures.push(String(error)); await route.abort().catch(() => {}); }
-    });
+    await context.route("**/*", route => routing.releasePlaywrightRoute(route));
     try {
       await page.goto(official, { waitUntil: "domcontentloaded" });
       await page.getByText("Book a Bay", { exact: true }).click();
       expect(await page.locator("body").innerText(), JSON.stringify({ nativeSeen, serverSeen, failures })).toContain(date);
-      expect(nativeSeen.filter(url => url === destination)).toHaveLength(2);
-      expect(serverSeen.filter(url => url === destination)).toHaveLength(2);
+      expect(nativeSeen.filter(url => url === destination), JSON.stringify({ nativeSeen, serverSeen, failures, requestEvents, responseEvents })).toHaveLength(2);
+      expect(serverSeen.filter(url => url === destination), JSON.stringify({ nativeSeen, serverSeen, failures, requestEvents, responseEvents })).toHaveLength(2);
       expect(failures).toEqual([]);
     } finally { await routing.close(); await context.close(); await proxy.close(); }
+  }, 40_000);
+
+  it("owns actual simultaneous script and fetch reads by exact Chrome request IDs", async () => {
+    const destination = "https://official.example.org/shared.js";
+    respond = url => url === official ? { body: `<html><body><h1>Offline Golf Course</h1><script>fetch(${JSON.stringify(destination)}).catch(()=>{})</script><script defer src="${destination}"></script></body></html>` }
+      : { body: "globalThis.offlineFixture=true;", contentType: "application/javascript" };
+    const proxy = await nativeBrowser.createNativePublicBrowserProxy({ signal: AbortSignal.timeout(30_000) });
+    const browser = await launchBrowser();
+    const context = await browser.newContext({ proxy: { server: proxy.server, bypass: "<-loopback>" }, serviceWorkers: "block" });
+    const page = await context.newPage(), failures: string[] = [], queued: NativeReadRoute[] = [], evidence: object[] = [];
+    const completed: Array<{ url: string; kind: string; status: number; body: string }> = [];
+    let handled: Promise<void[]> | undefined;
+    const read = async (route: NativeReadRoute) => {
+      if (![official, destination].includes(route.request().url()) || route.request().method() !== "GET") { await route.abort(); return; }
+      try {
+        const result = await nativeBrowser.continueNativeBrowserRead(route, AbortSignal.timeout(10_000), 2_000_000, undefined, route.request().url());
+        completed.push({ url: route.request().url(), kind: route.request().resourceType(), status: result.status, body: result.body.toString("utf8") });
+      }
+      catch (error) { failures.push(String(error)); await route.abort().catch(() => {}); }
+    };
+    const routing = await installNativeRedirectRouting(page, async route => {
+      if (route.request().url() !== destination) { await read(route); return; }
+      queued.push(route);
+      evidence.push({ event: "CHROME_ROUTE", kind: route.request().resourceType(), headers: route.request().headers() });
+      if (queued.length === 2 && !handled) { handled = Promise.all(queued.map(read)); await handled; }
+    }, { onFailure: code => failures.push(code) });
+    await context.route("**/*", route => routing.releasePlaywrightRoute(route));
+    try {
+      await page.goto(official, { waitUntil: "domcontentloaded", timeout: 15_000 });
+      await handled;
+      await vi.waitFor(() => expect(serverSeen.filter(url => url === destination), JSON.stringify({ evidence, completed, failures, nativeSeen, serverSeen })).toHaveLength(2));
+      expect(queued.map(route => route.request().resourceType()).sort()).toEqual(["script", "xhr"]);
+      expect(nativeSeen.filter(url => url === destination)).toHaveLength(2);
+      const completedReads = completed.filter(row => row.url === destination);
+      expect(completedReads).toHaveLength(2);
+      expect(completedReads.every(row => row.status === 200 && row.body === "globalThis.offlineFixture=true;")).toBe(true);
+      expect(completedReads.filter(row => row.kind === "script")).toHaveLength(1);
+      expect(completedReads.filter(row => ["xhr", "fetch"].includes(row.kind))).toHaveLength(1);
+      expect(failures, JSON.stringify({ correlationEvents, evidence, completed, nativeSeen, serverSeen, requestEvents, responseEvents })).toEqual([]);
+    } finally { await routing.close(); await context.close(); await proxy.close(); }
+  }, 40_000);
+
+  it.each([false, true])("captures two deferred-consumption %s reads under one provider lease without mixing exact bodies", async post => {
+    const destination = "https://official.example.org/availability", dates = [date, otherDate];
+    const calls = dates.map(value => `fetch(${JSON.stringify(destination)}${post ? `,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({date:${JSON.stringify(value)}})}` : ""})`);
+    // This valid consumer waits for both responses before reading either body.
+    // Network.loadingFinished cannot be used to serialize these provider reads.
+    respond = url => url === official ? { body: `<html><body><script>Promise.all([${calls.join(",")}]).then(x=>Promise.all(x.map(r=>r.text()))).then(x=>document.title=x.join('|'));</script></body></html>` }
+      : { body: "actual public body", echoRequestBody: post, contentType: post ? "application/json" : "text/plain" };
+    let tail = Promise.resolve(), active = 0, maxActive = 0, batch: Promise<void[]> | undefined;
+    const queued: NativeReadRoute[] = [], completed: Array<{ requestBody: string | null; responseBody: string; status: number }> = [];
+    const read = async (route: NativeReadRoute) => {
+      const request = route.request();
+      if (![official, destination].includes(request.url()) || request.method() !== (request.url() === destination && post ? "POST" : "GET")) { await route.abort(); return; }
+      if (post && request.url() === destination) expect(dates).toContain(JSON.parse(request.postData()!).date);
+      const previous = tail; let release!: () => void; tail = new Promise<void>(resolve => { release = resolve; }); await previous;
+      active++; maxActive = Math.max(maxActive, active);
+      try {
+        const result = await nativeBrowser.continueNativeBrowserRead(route, AbortSignal.timeout(10_000), 2_000_000, undefined, request.url());
+        if (request.url() === destination) completed.push({ requestBody: request.postData(), responseBody: result.body.toString(), status: result.status });
+      } finally { active--; release(); }
+    };
+    const owner = await nativeOwner(async route => {
+      if (route.request().url() !== destination) { await read(route); return; }
+      queued.push(route);
+      if (queued.length === 2 && !batch) { batch = Promise.all(queued.map(read)); await batch; }
+    });
+    try {
+      await owner.page.goto(official, { waitUntil: "domcontentloaded", timeout: 15_000 });
+      await owner.page.waitForFunction(() => document.title.includes("|"), undefined, { timeout: 10_000 });
+      await batch;
+      expect(queued).toHaveLength(2); expect(maxActive).toBe(1); expect(completed).toHaveLength(2);
+      expect(completed.every(value => value.status === 200 && value.responseBody === (post ? value.requestBody : "actual public body"))).toBe(true);
+      expect(serverSeen.filter(url => url === destination)).toHaveLength(2); expect(nativeSeen.filter(url => url === destination)).toHaveLength(2);
+      expect(owner.failures).toEqual([]); await vi.waitFor(() => expect(owner.routing.pendingReads).toBe(0));
+    } finally { await owner.close(); }
+  }, 40_000);
+
+  it("keeps initial and redirect response bodies serialized by one provider lease", async () => {
+    normalResponses(); let tail = Promise.resolve(), active = 0, maxActive = 0;
+    const serializedLease = async <T>(_family: string, work: () => Promise<T>) => {
+      const previous = tail; let release!: () => void; tail = new Promise<void>(resolve => { release = resolve; }); await previous;
+      active++; maxActive = Math.max(maxActive, active);
+      try { return { acquired: true as const, value: await work() }; } finally { active--; release(); }
+    };
+    const session = await createCourseDiscoveryBrowserSession({ initialUrls: [official], deadlineAt: new Date(Date.now() + 30_000), venueName: "Offline Golf Course", timeZone: input.timeZone },
+      { launchBrowser, browserTransport: "NATIVE_CHROME", requestLease: serializedLease });
+    try {
+      expect((await followOfficial(session)).text).toContain(date); expect(maxActive).toBe(1);
+      expect(serverSeen).toContain(entry); expect(serverSeen).toContain(sessionUrl(firstToken));
+    } finally { await session.close(); }
+  }, 40_000);
+
+  it("denies a later same-host transaction even when its native tunnel was already used", async () => {
+    const denied = "https://official.example.org/checkout";
+    respond = () => ({ body: `<html><body><script>fetch(${JSON.stringify(denied)}).catch(()=>document.title='denied');</script></body></html>` });
+    const owner = await nativeOwner(async route => {
+      if (route.request().url() !== official) { await route.abort(); return; }
+      await nativeBrowser.continueNativeBrowserRead(route, AbortSignal.timeout(10_000), 2_000_000, undefined, official);
+    });
+    try {
+      await owner.page.goto(official, { waitUntil: "domcontentloaded", timeout: 15_000 });
+      await owner.page.waitForFunction(() => document.title === "denied", undefined, { timeout: 10_000 });
+      expect(serverSeen).toContain(official); expect(nativeSeen).toContain(official);
+      expect(serverSeen).not.toContain(denied); expect(nativeSeen).not.toContain(denied); expect(owner.failures).toEqual([]);
+    } finally { await owner.close(); }
   }, 40_000);
 
   it("ignores local data and blob image metadata without treating it as availability evidence", async () => {

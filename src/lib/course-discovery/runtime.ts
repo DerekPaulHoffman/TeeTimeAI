@@ -10,6 +10,7 @@ import { assertActiveAccessRecipeInTransaction, getActiveAccessRecipe, type Disc
 import { accessExecutionInputSchema, accessExecutionResultSchema, type AccessExecutionInput, type AccessExecutionResult } from "./recipe";
 import { isReaderObservationCurrent } from "./observation-clock";
 import { isTeeItUpRecipeSlotLink } from "./teeitup-recipe-source";
+import { isChronogolfRecipeSlotLink } from "./chronogolf-source";
 
 const EXECUTION_TTL_MS = 180_000;
 const RESULT_TTL_MS = 90_000;
@@ -159,7 +160,9 @@ export async function completeRecipeExecution(id: string, leaseToken: string, va
     if (result.sourceUrl !== bookingUrl) throw new Error("Recipe source changed");
     for (const slot of result.slots) {
       const correctBookingUrl = storedRecipe.engine === "EXISTING_ADAPTER" && storedRecipe.adapter?.family === "TEEITUP"
-        ? isTeeItUpRecipeSlotLink(bookingUrl, context.input.date, storedRecipe.adapter.facilityIds ?? [], slot) : slot.bookingUrl === bookingUrl;
+        ? isTeeItUpRecipeSlotLink(bookingUrl, context.input.date, storedRecipe.adapter.facilityIds ?? [], slot)
+        : storedRecipe.engine === "EXISTING_ADAPTER" && storedRecipe.adapter?.family === "CHRONOGOLF"
+          ? isChronogolfRecipeSlotLink(bookingUrl, storedRecipe.adapter, context.input.date, slot) : slot.bookingUrl === bookingUrl;
       if (!correctBookingUrl || (context.target.kind === "OUTDOOR" && slot.availableSpots < context.input.players) ||
           !isRecipeSlotWithinWindow(slot, context.input, now) ||
           (context.input.durationMinutes && (!slot.endsAt || Date.parse(slot.endsAt) - Date.parse(slot.startsAt) !== context.input.durationMinutes * 60_000))) throw new Error("Invalid recipe slot");

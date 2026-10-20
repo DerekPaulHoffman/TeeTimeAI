@@ -10,6 +10,7 @@ import { activeDiscoveryPilotSearchIds, isDiscoveryPilotSearch } from "./config"
 import { hasLegacyDiscoveryOwner } from "./legacy-exclusion";
 import { isReaderObservationCurrent } from "./observation-clock";
 import { isTeeItUpRecipeSlotLink } from "./teeitup-recipe-source";
+import { isChronogolfRecipeSlotLink } from "./chronogolf-source";
 import {
   accessExecutionInputSchema,
   accessExecutionResultSchema,
@@ -354,8 +355,11 @@ export async function recordDiscoveryVerification(input: { jobId: string; leaseT
       (result.status === "AVAILABLE") !== (result.slots.length > 0)) conflict();
     for (const slot of result.slots) {
       const start = localSlotTime(slot.startsAt, challenge.input.timeZone);
+      const correctBookingLink = recipe.engine === "EXISTING_ADAPTER" && recipe.adapter.family === "CHRONOGOLF"
+        ? isChronogolfRecipeSlotLink(recipe.source.bookingUrl, recipe.adapter, challenge.input.date, slot)
+        : new URL(slot.bookingUrl).origin === new URL(recipe.source.bookingUrl).origin;
       if (start.date !== challenge.input.date || start.time < challenge.input.startTime || start.time >= challenge.input.endTime ||
-        new URL(slot.bookingUrl).origin !== new URL(recipe.source.bookingUrl).origin) conflict();
+        !correctBookingLink) conflict();
       if (recipe.engine === "EXISTING_ADAPTER" && recipe.adapter.family === "TEEITUP" &&
           !isTeeItUpRecipeSlotLink(recipe.source.bookingUrl, challenge.input.date, recipe.adapter.facilityIds, slot)) conflict();
       if (!source.offering && slot.availableSpots < challenge.input.players) conflict();

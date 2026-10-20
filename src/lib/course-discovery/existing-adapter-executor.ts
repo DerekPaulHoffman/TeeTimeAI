@@ -20,6 +20,9 @@ import { deriveTeeItUpOfficialIdentityProof, type OfficialIdentityPage, type Tee
 import { parseTeeItUpSimulatorAvailability } from "./teeitup-simulator";
 import { parseLightspeedSource } from "./lightspeed-source";
 import { executeLightspeed, inspectLightspeed } from "./lightspeed-executor";
+import { executeAmelia, inspectAmelia } from "./amelia-executor";
+import { parseChronogolfSource } from "./chronogolf-source";
+import { executeChronogolf, inspectChronogolf } from "./chronogolf-executor";
 
 type Dependencies = {
   fetch?: typeof fetch;
@@ -179,12 +182,26 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
 /** For a controller-observed provider URL only. Reads typed public configuration
  * and returns bounded IDs; availability and activation remain separate proofs. */
 export async function inspectExistingAdapter(source: Source, deps: Dependencies): Promise<{ adapter: ExistingAdapterMetadata }> {
+  if (parseChronogolfSource(source.bookingUrl)) {
+    if (!source.officialUrl) fail("ADAPTER_IDENTITY_MISSING");
+    return { adapter: await inspectChronogolf({ ...source, officialUrl: source.officialUrl }, deps) };
+  }
   if (parseLightspeedSource(source.bookingUrl)) {
     if (!source.officialUrl) fail("ADAPTER_IDENTITY_MISSING");
     return { adapter: await inspectLightspeed({ ...source, officialUrl: source.officialUrl }, deps) };
   }
   if (parseWhooshSimulatorSource(source.bookingUrl)) return { adapter: await inspectWhooshSimulator(source, deps) };
-  if (familyForSource(source) === "USCHEDULE") {
+  let family: ReturnType<typeof familyForSource>;
+  try { family = familyForSource(source); }
+  catch (error) {
+    if (!(error instanceof Error) || error.message !== "UNSUPPORTED_ADAPTER_SOURCE") throw error;
+    if (!source.officialUrl || !isSafeRecipeUrl(source.officialUrl) ||
+        new URL(source.bookingUrl).origin !== new URL(source.officialUrl).origin) throw error;
+    // The observed self-hosted page must prove its venue and Amelia bootstrap
+    // before the fixed inspector can admit any plugin API request.
+    return { adapter: await inspectAmelia({ ...source, officialUrl: source.officialUrl }, deps) };
+  }
+  if (family === "USCHEDULE") {
     const session = createUSchedulePublicSession(source.bookingUrl, deps);
     try {
       const response = await session.read(source.bookingUrl);
@@ -233,11 +250,11 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
   let uscheduleSession: ReturnType<typeof createUSchedulePublicSession> | undefined;
   try {
     const adapter = existingAdapterMetadataSchema.parse(recipe.adapter);
-    const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED"].includes(adapter.family) || adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR";
+    const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA"].includes(adapter.family) || adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR";
     if (input.timeZone !== recipe.source.timeZone || recipe.source.providerFamily.toUpperCase() !== adapter.family ||
         (recipe.target.kind === "SIMULATOR") !== simulator || simulator && (!recipe.target.offeringId || !input.durationMinutes) ||
         adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR" && (adapter.facilityIds.length !== 1 || adapter.officialIdentityProof)) fail("ADAPTER_TARGET_MISMATCH");
-    if (!["USCHEDULE", "WHOOSH", "LIGHTSPEED"].includes(adapter.family)) session = reader(recipe.source, deps, adapter, input);
+    if (!["USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "CHRONOGOLF"].includes(adapter.family)) session = reader(recipe.source, deps, adapter, input);
     const start = deps.toInstant(`${input.date}T${input.startTime}:00`, input);
     const next = new Date(`${input.date}T00:00:00Z`); next.setUTCDate(next.getUTCDate() + 1);
     const end = deps.toInstant(`${input.endTime === "24:00" ? next.toISOString().slice(0, 10) : input.date}T${input.endTime === "24:00" ? "00:00" : input.endTime}:00`, input);
@@ -250,6 +267,14 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
     if (adapter.family === "LIGHTSPEED") {
       const slots = await executeLightspeed(recipe.source, adapter, { courseId: recipe.target.courseId, offeringId: recipe.target.offeringId! }, input, deps);
       return result(slots.filter(slot => new Date(slot.startsAt) > now && new Date(slot.startsAt) >= start && new Date(slot.endsAt!) <= end));
+    }
+    if (adapter.family === "AMELIA") {
+      const slots = await executeAmelia(recipe.source, adapter, { courseId: recipe.target.courseId, offeringId: recipe.target.offeringId! }, input, deps);
+      return result(slots.filter(slot => new Date(slot.startsAt) > now && new Date(slot.startsAt) >= start && new Date(slot.endsAt!) <= end));
+    }
+    if (adapter.family === "CHRONOGOLF") {
+      const slots = await executeChronogolf(recipe.source, adapter, { courseId: recipe.target.courseId }, input, deps);
+      return result(slots.filter(slot => new Date(slot.startsAt) > now && new Date(slot.startsAt) >= start && new Date(slot.startsAt) < end));
     }
     if (adapter.family === "USCHEDULE") {
       const normalized = recipe.source.venueName.normalize("NFKC").toLowerCase().replace(/&/gu, "and").replace(/[^a-z0-9]/gu, "");

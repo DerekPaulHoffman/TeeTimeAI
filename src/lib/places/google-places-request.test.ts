@@ -45,6 +45,14 @@ describe("Google Places transient request retries", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("allows decorative reads to use one attempt without changing the critical default", async () => {
+    const fetchMock = vi.fn(async () => new Response("quota exceeded", { status: 429 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await fetchGooglePlacesJsonWithRetry("https://example.test/photo", undefined, { maxAttempts: 1 });
+    expect(result.response.status).toBe(429);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("does not retry sooner than a long Retry-After instruction", async () => {
     const fetchMock = vi.fn(async () =>
       new Response("rate limited", {

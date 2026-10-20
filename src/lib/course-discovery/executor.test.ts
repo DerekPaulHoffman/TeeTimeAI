@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { executeAccessRecipe, matchesAvailabilityResponse, parseObservedCalendarDate, recipeExecutionDiagnostic, recipeTimeToInstant, venueProofMatches, type AccessExecutorDependencies } from "./executor";
 import { parseAccessRecipe } from "./recipe";
 import * as nativeBrowser from "./native-public-browser";
+import * as nativeRouting from "./native-redirect-routing";
 import * as publicReadPolicy from "@/lib/automation/passfactory-public-read-policy";
 import * as pinnedTransport from "@/lib/automation/address-pinned-public-fetch";
 import * as passfactoryDuration from "./passfactory-client-duration";
@@ -25,6 +26,20 @@ const executionInput = { date: "2026-10-22", timeZone: "America/New_York", playe
 const now = () => new Date("2026-10-20T12:00:00Z");
 const payload = () => ({ venue: "Example Golf", date: executionInput.date, complete: true, empty: false, players: 2,
   slots: [{ start: "09:00", capacity: 4, holes: 18 }] });
+/** These executor-policy fixtures synthesize a browser response. Real native
+ * dispatch/body identity belongs to the separate offline TLS test lane. */
+function nativeControllerFixture() {
+  let pending = 0;
+  return vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, handler) => ({
+    prepare: () => {}, close: async () => {}, lastFailure: undefined,
+    get pendingReads() { return pending; },
+    releasePlaywrightRoute: async route => {
+      pending++;
+      try { await handler(route); }
+      finally { pending--; }
+    },
+  }));
+}
 function dependencies(body: unknown, status = 200): AccessExecutorDependencies {
   return { now, fetch: vi.fn(async () => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } })) as unknown as typeof fetch,
     requestLease: async (_family, work) => ({ acquired: true, value: await work() }) };
@@ -369,6 +384,7 @@ describe.runIf(existsSync(chromeExecutable))("isolated browser recipe replay", (
     expect(result.evidence.dateVerified).toBe(expected === "AVAILABLE");
   }, 20_000);
   it.each(["PINNED_HTTP", "NATIVE_CHROME"] as const)("allows a bounded large %s public build script while retaining smaller data caps", async browserTransport => {
+    const controller = nativeControllerFixture();
     const selected = recipe();
     if (selected.engine !== "BROWSER_DOM") throw new Error("fixture");
     selected.browserTransport = browserTransport;
@@ -402,7 +418,7 @@ describe.runIf(existsSync(chromeExecutable))("isolated browser recipe replay", (
       expect(new Set(families)).toEqual(new Set(["example.org"]));
       expect(limits).toContainEqual({ kind: "script", limit: 16_000_000 });
       expect(limits).toContainEqual({ kind: "document", limit: 2_000_000 });
-    } finally { native.mockRestore(); pinned.mockRestore(); }
+    } finally { native.mockRestore(); pinned.mockRestore(); controller.mockRestore(); }
   }, 20_000);
   it("observes a recipe-permitted SPA frame URL before its public read policy", async () => {
     const selected = recipe();
@@ -423,6 +439,7 @@ describe.runIf(existsSync(chromeExecutable))("isolated browser recipe replay", (
     } finally { policy.mockRestore(); }
   }, 20_000);
   it.each(["PINNED_HTTP", "NATIVE_CHROME"] as const)("removes only the approved public ForeUP API key before %s transport", async browserTransport => {
+    const controller = nativeControllerFixture();
     const selected = recipe();
     if (selected.engine !== "BROWSER_DOM") throw new Error("fixture");
     selected.browserTransport = browserTransport;
@@ -441,7 +458,7 @@ describe.runIf(existsSync(chromeExecutable))("isolated browser recipe replay", (
       expect((await executeAccessRecipe(selected, executionInput, deps)).status).toBe("AVAILABLE");
       expect(seen).toContain("https://foreupsoftware.com/index.php/api/booking/times?date=2026-10-22");
       expect(seen.some(url => url.includes("api_key"))).toBe(false);
-    } finally { native.mockRestore(); }
+    } finally { native.mockRestore(); controller.mockRestore(); }
   }, 20_000);
   it.each([
     ['<div id="players-choice">Players <a data-value="2" id="choice">2</a></div>', "AVAILABLE"],
@@ -546,6 +563,7 @@ describe.runIf(existsSync(chromeExecutable))("isolated browser recipe replay", (
     expect(result).toMatchObject({ status: "INCOMPLETE", complete: false, slots: [], evidence: { reason: "AMBIGUOUS_PROOF_FIELD" } });
   }, 20_000);
   it.each(["PINNED_HTTP", "NATIVE_CHROME"] as const)("preserves %s throttling as a retryable transport result", async browserTransport => {
+    const controller = nativeControllerFixture();
     const selected = recipe();
     if (selected.engine !== "BROWSER_DOM") throw new Error("fixture");
     selected.browserTransport = browserTransport;
@@ -558,7 +576,7 @@ describe.runIf(existsSync(chromeExecutable))("isolated browser recipe replay", (
     try {
       expect(await executeAccessRecipe(selected, executionInput, deps)).toMatchObject({ status: "FAILED", complete: false,
         evidence: { reason: "PROVIDER_THROTTLED", diagnostic: { code: "HTTP_429" } } });
-    } finally { native.mockRestore(); }
+    } finally { native.mockRestore(); controller.mockRestore(); }
   }, 20_000);
   it("requires actual empty-state text rather than an arbitrary visible container", async () => {
     const selected = recipe();

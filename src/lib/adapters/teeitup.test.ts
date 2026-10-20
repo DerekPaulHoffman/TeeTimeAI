@@ -10,6 +10,18 @@ describe("TeeItUp adapter", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
   });
+  it.each(["/", "/teetimes", "/teetimes/"])("uses the exact observed V2 origin for public reads at %s", async path => {
+    const origin = "https://public.book-v2.teeitup.golf", base = `${origin}${path}?course=11`;
+    const read = vi.fn<typeof fetch>().mockResolvedValueOnce(Response.json([{ id: 11, courseId: "public-course", timeZone: "America/New_York" }]))
+      .mockResolvedValueOnce(Response.json([{ teetimes: [{ courseId: "public-course", teetime: "2030-10-22T15:00:00Z", rates: [{ allowedPlayers: [2, 4], holes: 9 }] }] }]));
+    const result = await fetchTeeItUpTeeSheet({ courseId: "course", date: new Date("2030-10-22T00:00:00Z"), players: 2,
+      metadata: { aliases: ["public"], bookingBaseUrl: base, facilityIds: [11] } }, read);
+    expect(read.mock.calls.map(([url]) => String(url))).toEqual(["https://phx-api-be-east-1b.kenna.io/alias/public/facilities",
+      "https://phx-api-be-east-1b.kenna.io/v2/tee-times?date=2030-10-22&facilityIds=11&returnPromotedRates=true"]);
+    for (const [, init] of read.mock.calls) expect(init?.headers).toMatchObject({ origin, referer: `${origin}/`, "x-be-alias": "public" });
+    expect(result.slots[0]).toMatchObject({ sourceId: "teeitup-11-public-course-2030-10-22T15:00:00Z", bookingUrl: `${base}&date=2030-10-22`, holes: 9 });
+    expect(isTeeItUpMetadata({ aliases: ["public", "other"], bookingBaseUrl: `${origin}/` })).toBe(false);
+  });
 
   it("requires exact player-count membership and ignores missing or malformed player lists", async () => {
     const read = vi.fn<typeof fetch>().mockResolvedValueOnce(Response.json([{ id: 123, courseId: "public-course", timeZone: "America/New_York" }]))

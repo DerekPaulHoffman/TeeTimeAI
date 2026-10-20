@@ -19,7 +19,8 @@ export function isSafeRecipeUrl(value: string) {
   } catch { return false; }
 }
 /** Browser scripts/styles are read-only resources, not customer booking URLs.
- * Build hashes in a static asset path are not authentication credentials. */
+ * Build hashes in a static asset path or the conventional `ver` cache key are
+ * not credentials. This exception never admits a data request or source URL. */
 export function isSafeBrowserAssetUrl(value: string, resourceType: string, method: string) {
   if (value.length > 2048 || method !== "GET" || !["script", "stylesheet"].includes(resourceType)) return false;
   if (isSafeRecipeUrl(value)) return true;
@@ -27,8 +28,15 @@ export function isSafeBrowserAssetUrl(value: string, resourceType: string, metho
     const url = new URL(value), path = decodeURIComponent(url.pathname);
     const unchangedQueryAndHost = new URL(url.href);
     unchangedQueryAndHost.pathname = "/public-asset.js";
+    // WordPress serves public .js/.css files with a truncated SHA build version.
+    // Mask only one exact conventional hex version; every other query value,
+    // hostname and credential check still goes through the ordinary URL guard.
+    const versions = url.searchParams.getAll("ver");
+    if (versions.length === 1 && /^(?:[a-f0-9]{20}|[a-f0-9]{32}|[a-f0-9]{40}|[a-f0-9]{64})$/iu.test(versions[0]))
+      unchangedQueryAndHost.searchParams.set("ver", "public-build-version");
     return isSafeRecipeUrl(unchangedQueryAndHost.href) && !url.hash &&
       /\.(?:m?js|css)$/iu.test(path) && !path.split("/").includes("..") && !/[\r\n{}]/u.test(path) &&
+      !forbiddenPath.test(path) &&
       !/(?:^|\/)(?:login|signin|signup|auth|account|sessions?|tokens?|credentials?|passwords?|secrets?|cookies?|authorization|api[-_]?keys?)(?:\/|$)/iu.test(path) &&
       [...url.searchParams].every(([key, item]) => !secret.test(key) && !/[\r\n]/u.test(item));
   } catch { return false; }
@@ -71,6 +79,10 @@ export const recipeRouteSchema = z.object({
   queryKeys: z.array(z.string().min(1).max(80).regex(/^[a-zA-Z0-9_\[\].-]+$/u).refine(value => !secret.test(value))).max(30).default([]),
 }).strict();
 const stepSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("selectRentalService"), selector: recipeSelectorSchema, optionText: recipeTemplateSchema }).strict()
+    .describe("Select one exact observed public golf/simulator rental service option within a labelled Service/Activity/Product selector. Supports native select or a public combobox with its exact aria-controls listbox. Lessons, events, memberships/packages, dated times and contact/transaction controls are forbidden. This supplies no duration/capacity proof; independently prove the requested full interval at the final inventory."),
+  z.object({ action: z.literal("continueToAvailability"), selector: recipeSelectorSchema, mode: z.enum(["SERVICE", "SKIP_PACKAGES"]) }).strict()
+    .describe("SIMULATOR only: after successful selectRentalService in this execution, advance the same public service-only widget using its exact Continue/Next button (SERVICE), or the explicit Skip packages and continue with the selected service button (SKIP_PACKAGES). Requires unchanged visible rental selection in the same document, no date/time/contact/payment inputs, no selected slot, no submit/href, and no package purchase. Never use generic Continue after calendar/availability or into customer details. Final fresh date-bound response and independent complete/date/duration/resource proof remain mandatory."),
   z.object({ action: z.literal("selectDateChoice"), selector: recipeSelectorSchema }).strict()
     .describe("Choose the requested date from a bounded public grid of buttons labelled with a full English month/day/four-digit year (optional correct weekday). Use one reusable selector for all day choices. Requires a unique visible requested date and at least two distinct sibling date options; time/product cards and sensitive contexts are rejected. Final date-bound response and source-date proof are still required."),
   z.object({ action: z.literal("followLink"), selector: recipeSelectorSchema, text: recipeTemplateSchema }).strict()
@@ -138,17 +150,20 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
     engine: z.literal("EXISTING_ADAPTER"), adapter: existingAdapterMetadataSchema }).strict(),
 ]).superRefine((recipe, ctx) => {
   if (recipe.engine === "EXISTING_ADAPTER") {
-    const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED"].includes(recipe.adapter.family) ||
+    const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA"].includes(recipe.adapter.family) ||
       recipe.adapter.family === "TEEITUP" && recipe.adapter.offeringKind === "SIMULATOR";
     if (recipe.source.providerFamily !== recipe.adapter.family ||
       (recipe.target.kind === "SIMULATOR") !== simulator ||
-      recipe.target.kind === "SIMULATOR" && !recipe.target.offeringId || recipe.adapter.family === "TEEITUP" && !recipe.source.venueAddress)
+      recipe.target.kind === "SIMULATOR" && !recipe.target.offeringId || ["TEEITUP", "AMELIA", "CHRONOGOLF"].includes(recipe.adapter.family) && !recipe.source.venueAddress)
       ctx.addIssue({ code: "custom", message: "Supported adapter metadata must match the source and target kind" });
     if (recipe.adapter.family === "TEEITUP" && simulator &&
         (recipe.adapter.facilityIds.length !== 1 || recipe.adapter.officialIdentityProof))
       ctx.addIssue({ code: "custom", message: "Simulator adapter requires one exact directory identity" });
     return;
   }
+  if (recipe.engine === "BROWSER_DOM" && recipe.target.kind !== "SIMULATOR" &&
+      recipe.steps.some(step => ["selectRentalService", "continueToAvailability"].includes(step.action)))
+    ctx.addIssue({ code: "custom", message: "Rental-service navigation requires a simulator target" });
   const dateFields = "kind" in recipe.proof.date ? [recipe.proof.date.monthYear, recipe.proof.date.day] : [recipe.proof.date];
   const readers = [recipe.proof.venue, ...dateFields, recipe.proof.complete, recipe.proof.empty, recipe.proof.players,
     recipe.proof.durationMinutes, recipe.slots.startsAt, recipe.slots.endsAt, recipe.slots.availableSpots,

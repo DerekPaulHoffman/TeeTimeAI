@@ -26,6 +26,15 @@ describe("TeeItUp recipe source scope", () => {
   it("can identify one unique directory facility without model-supplied IDs", () => {
     expect(resolveTeeItUpRecipeFacilities({ ...source, bookingUrl: "https://harbor.book.teeitup.golf/" }, [rows[0]])[0].id).toBe(11);
   });
+  it.each(["/", "/teetimes", "/teetimes/"])("binds observed public V2 %s to the same unique facility and edited-date link", path => {
+    const bookingUrl = `https://public.book-v2.teeitup.golf${path}`, identity = { ...source, bookingUrl };
+    expect(parseTeeItUpRecipeSource(bookingUrl)).toMatchObject({ alias: "public", origin: "https://public.book-v2.teeitup.golf" });
+    expect(resolveTeeItUpRecipeFacilities(identity, [rows[0]])[0].id).toBe(11);
+    const booking = teeItUpRecipeBookingUrl(bookingUrl, "2030-10-23", 11);
+    expect(isTeeItUpRecipeSlotLink(bookingUrl, "2030-10-23", [11], { sourceId: "teeitup-11-provider-time", resourceId: "teeitup-facility:11", bookingUrl: booking })).toBe(true);
+    expect(new URL(booking).pathname).toBe(path);
+    expect(() => resolveTeeItUpRecipeFacilities(identity, [{ ...rows[0], address: "99 Other Rd, Example, NY 12345, US" }])).toThrow("ADAPTER_IDENTITY_MISMATCH");
+  });
   it("infers only one exact simulator identity and preserves outdoor exclusion by default", () => {
     const simulator = { ...rows[0], name: "Example Swing Studio", address: "100 Main Rd, Suite A, Example, NY 12345, US", isSimulator: true };
     const identity = { ...source, bookingUrl: "https://example.book.teeitup.com/", venueName: simulator.name,

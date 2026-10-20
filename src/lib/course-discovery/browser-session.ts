@@ -29,6 +29,9 @@ import { observedPublicDateChoices, isPublicDateChoice } from "./public-date-cho
 import { isPublicAvailabilityNavigation } from "./public-navigation-control";
 import { observedPublicFrameSources } from "./public-frame-source";
 import { launchPublicReadBrowser } from "./public-browser-launch";
+import { createPublicBookingParentScope, readPublicBookingParentIdentity } from "./public-booking-parent";
+import { inspectPublicRentalService, openPublicRentalService, selectPublicRentalService, inspectPublicServiceContinuation,
+  continuePublicRentalService, type PublicRentalServiceProof, type PublicRentalServiceSelection, type PublicServiceContinuationMode } from "./public-service-control";
 
 const identifier = z.union([z.string().max(128), z.number().int()]);
 export const discoveryBrowserActionSchema = z.discriminatedUnion("action", [
@@ -45,7 +48,8 @@ export const discoveryBrowserActionSchema = z.discriminatedUnion("action", [
 export type DiscoveryBrowserAction = z.infer<typeof discoveryBrowserActionSchema>;
 type ObservedControl = { tag: string; role: string; name: string; label: string; href?: string; calendar: boolean;
   sensitiveForm: boolean; inputType: string; hasPopup: string; selector: string; options?: Array<{ value: string; label: string }>;
-  currentValue?: string; product?: { selector: string; durationMinutes: number }; choiceValue?: string; choiceContext?: string; disabledChoice?: boolean };
+  currentValue?: string; product?: { selector: string; durationMinutes: number }; choiceValue?: string; choiceContext?: string; disabledChoice?: boolean;
+  service?: PublicRentalServiceProof; serviceContinuation?: PublicServiceContinuationMode; serviceMenuOption?: boolean };
 
 export function discoveryPublicChoiceKind(control: Pick<ObservedControl, "tag" | "name" | "href" | "calendar" | "sensitiveForm" | "choiceValue" | "choiceContext" | "disabledChoice">) {
   if (control.sensitiveForm || control.disabledChoice || control.href || /\b(?:checkout|reserve|book|pay|confirm|cancel)\b|\d{1,2}:\d{2}/iu.test(control.name)) return null;
@@ -157,6 +161,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
   const deadline = AbortSignal.any([AbortSignal.timeout(remaining), cancellation.signal]);
   const allowedNavigation = new Set(initialUrls.map(value => new URL(value).href));
   const cpsScope = createCpsPublicSessionScope(initialUrls);
+  const bookingParents = createPublicBookingParentScope({ officialUrl: input.venueOfficialUrl, venueName: input.venueName, venueAddress: input.venueAddress });
   let officialIdentityPage: (OfficialIdentityPage & { observedAt: number }) | undefined;
   let officialIdentityDocument: { url: string; html: string } | undefined;
   const navigationOrigins = new Set(initialUrls.map(value => new URL(value).origin));
@@ -207,9 +212,14 @@ export async function createCourseDiscoveryBrowserSession(input: {
       observedRequests.push(metadata); requestMetadataBytes += size;
     }
   };
-  const controls = new Map<string, { locator: Locator; signature: string; kind: string; href?: string; calendarDay?: string; dropdown?: PublicDropdownProof }>();
+  const controls = new Map<string, { locator: Locator; signature: string; kind: string; href?: string; calendarDay?: string; dropdown?: PublicDropdownProof;
+    service?: boolean; serviceContinuation?: PublicServiceContinuationMode }>();
+  let serviceSelection: PublicRentalServiceSelection | undefined;
   const observedElements = new Map<string, { locator: Locator; signature: string }>();
   let closed = false, requestCount = 0, interceptCount = 0, responseBytes = 0, blockedRequests = 0, pendingRequests = 0, actions = 0, observations = 0;
+  // Native CDP owns every guarded read and its response capture. Its pending
+  // work may outlive handleRoute; pinned HTTP uses the local handler count.
+  const pendingReadCount = () => Math.max(pendingRequests, redirectRouting?.pendingReads ?? 0);
   let terminalFailure: string | undefined;
   let navigation: { url: string; status: number } | undefined;
   let navigationStartedAt: number | undefined;
@@ -241,6 +251,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       if (!isSafeRecipeUrl(requestUrl) && !isSafeBrowserAssetUrl(requestUrl, request.resourceType(), request.method())) throw new Error("UNSAFE_URL");
       const url = new URL(requestUrl);
       if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+        bookingParents.beginDocument(request.url());
         if (input.venueOfficialUrl && url.origin === new URL(input.venueOfficialUrl).origin) {
           officialIdentityDocument = undefined; officialIdentityPage = undefined;
         }
@@ -298,7 +309,12 @@ export async function createCourseDiscoveryBrowserSession(input: {
         return { status: response.status, headers: Object.fromEntries(response.headers), buffer };
       });
       metadata.status = reply.status;
-      if (request.isNavigationRequest() && request.frame() === page.mainFrame()) navigation = { url: request.url(), status: reply.status };
+      if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+        navigation = { url: request.url(), status: reply.status };
+        // Only actual main-document response/redirect metadata can establish
+        // parent provenance; model navigation arguments and XHRs cannot.
+        bookingParents.observeDocument({ url: request.url(), status: reply.status, redirectedFrom: request.redirectedFrom()?.url() });
+      }
       // Retain only the bounded, successfully read official document. Its raw
       // semantic markup is reproducible on warm reads; page.content() contains
       // transient browser mutations and must not define the saved witness.
@@ -361,7 +377,14 @@ export async function createCourseDiscoveryBrowserSession(input: {
       await route.abort().catch(() => {});
       return;
     }
-    try { await handleRoute(redirectRouting ? redirectRouting.wrapRoute(route) : route); }
+    try {
+      if (nativeProxy) {
+        if (!redirectRouting) throw new Error("NATIVE_REDIRECT_UNAVAILABLE");
+        // The sole CDP request handler already owns policy, leases and source
+        // evidence. Release only Playwright's independent pause here.
+        await redirectRouting.releasePlaywrightRoute(route);
+      } else await handleRoute(route);
+    }
     catch (error) {
       blockedRequests++;
       const reason = error instanceof Error && /^[A-Z_]{1,80}$/u.test(error.message) ? error.message : "NATIVE_REDIRECT_ROUTING_FAILED";
@@ -444,14 +467,28 @@ export async function createCourseDiscoveryBrowserSession(input: {
       ...(node.tagName === "SELECT" ? { options: Array.from((node as HTMLSelectElement).options).slice(0, 100).map(item => ({ value: item.value.slice(0, 200), label: (item.textContent ?? "").trim().slice(0, 200) })) } : {}) };
   }, undefined, { timeout: 1000 }).then(async control => {
     const product = ["a", "button"].includes(control.tag) ? await inspectPublicRentalProduct(locator) : undefined;
-    return { ...control, ...(product ? { product } : {}), ...(control.href ? { href: normalizeDiscoveryNavigationUrl(control.href) } : {}) };
+    const service = control.tag === "select" || control.role === "combobox" ? await inspectPublicRentalService(locator) : undefined;
+    let serviceContinuation: PublicServiceContinuationMode | undefined;
+    if (serviceSelection && control.tag === "button") {
+      const mode = /^Skip packages and continue with (?:the )?selected service\b/iu.test(control.name) ? "SKIP_PACKAGES" : "SERVICE";
+      if (await inspectPublicServiceContinuation(locator, serviceSelection, mode)) serviceContinuation = mode;
+    }
+    const serviceMenuOption = control.role === "option" && await locator.evaluate(element => {
+      const menu = element.closest('[role="listbox"]');
+      if (!menu?.id) return false;
+      return Array.from(document.querySelectorAll('[role="combobox"]')).some(trigger => trigger.getAttribute("aria-controls") === menu.id &&
+        /^(?:Select\s+)?(?:Service|Activity|Product):?$/iu.test(trigger.getAttribute("aria-label") ?? ""));
+    }, undefined, { timeout: 1000 });
+    return { ...control, ...(product ? { product } : {}), ...(service ? { service } : {}),
+      ...(serviceContinuation ? { serviceContinuation } : {}), ...(serviceMenuOption ? { serviceMenuOption: true } : {}),
+      ...(control.href ? { href: normalizeDiscoveryNavigationUrl(control.href) } : {}) };
   });
   const publicControlKind = (control: ObservedControl, blockedAccess: boolean) => {
-    if (!recipeSelectorSchema.safeParse(control.selector).success || blockedAccess) return null;
+    if (!recipeSelectorSchema.safeParse(control.selector).success || blockedAccess || control.serviceMenuOption) return null;
     // The generic link fallback must retain the same transaction-parameter
     // exclusion as a labelled public availability link.
     if (control.href && !isPublicAvailabilityNavigation(control.href, (control.name || control.label).trim())) return null;
-    const kind = control.product ? "product" : discoveryPublicAnchorKind(control) ?? discoveryPublicChoiceKind(control) ?? interactiveControlKind(control) ?? (control.tag === "select" && !control.sensitiveForm ? "filter" : null);
+    const kind = control.service ? "filter" : control.serviceContinuation ? "service-continuation" : control.product ? "product" : discoveryPublicAnchorKind(control) ?? discoveryPublicChoiceKind(control) ?? interactiveControlKind(control) ?? (control.tag === "select" && !control.sensitiveForm ? "filter" : null);
     if (!kind || /\b(?:book|reserve|checkout|confirm|purchase|pay)\b/iu.test(control.name) && !["link", "product"].includes(kind) ||
       control.href && !isSafeRecipeUrl(control.href)) return null;
     return kind;
@@ -508,18 +545,20 @@ export async function createCourseDiscoveryBrowserSession(input: {
     if (control.href) { allowedNavigation.add(control.href); passfactory.observeWidgetUrl(control.href); cpsScope.observeEntry(control.href); }
     const target = randomUUID();
     controls.set(target, { locator, signature: JSON.stringify(control), kind, href: control.href,
-      ...(extra.date ? { calendarDay: extra.date } : {}), ...(extra.dropdown ? { dropdown: extra.dropdown } : {}) });
+      ...(extra.date ? { calendarDay: extra.date } : {}), ...(extra.dropdown ? { dropdown: extra.dropdown } : {}),
+      ...(control.service ? { service: true } : {}), ...(control.serviceContinuation ? { serviceContinuation: control.serviceContinuation } : {}) });
     observedElements.set(control.selector, { locator, signature: JSON.stringify(control) });
     return { target, selector: control.selector, kind, name: sanitizeResponderText(control.name), label: sanitizeResponderText(extra.dropdown?.label ?? control.label),
       ...(control.href ? { href: control.href } : {}), ...(control.currentValue === undefined ? {} : { currentValue: sanitizeResponderText(control.currentValue) }),
       ...(control.product ? { product: control.product } : {}),
-      ...(control.options ? { options: control.options.map(option => ({ value: sanitizeResponderText(option.value), label: sanitizeResponderText(option.label) })) } : {}) };
+      ...(control.service ? { options: control.service.options.map(option => ({ value: sanitizeResponderText(option.label), label: sanitizeResponderText(option.label) })) } : {}),
+      ...(control.options && !control.service ? { options: control.options.map(option => ({ value: sanitizeResponderText(option.value), label: sanitizeResponderText(option.label) })) } : {}) };
   };
   const waitForInitialContent = async () => {
     const startedAt = Date.now();
     // A blank shell is not a settled page. Keep the original navigation clock
     // across observe calls; a slow request cannot create a fresh waiting budget.
-    while (navigationStartedAt !== undefined && pendingRequests > 0 && Date.now() < Math.min(navigationStartedAt + 30_000, input.deadlineAt.getTime())) {
+    while (navigationStartedAt !== undefined && pendingReadCount() > 0 && Date.now() < Math.min(navigationStartedAt + 30_000, input.deadlineAt.getTime())) {
       deadline.throwIfAborted();
       const text = sanitizeResponderText(await page.locator("body").innerText()).slice(0, 16_000);
       if (text.replace(/[^\p{L}\p{N}]/gu, "").length >= 40 || isActiveBrowserAccessChallenge(text, await page.title())) break;
@@ -632,8 +671,10 @@ export async function createCourseDiscoveryBrowserSession(input: {
         .map(attribute => [attribute.name, attribute.value.slice(0, 200)])), undefined, { timeout: 1000 });
       elements.push({ selector: control.selector, tag: control.tag, text: sanitizeResponderText(control.name).slice(0, 250), attributes });
     }
+    const bookingParentIdentity = !blockedAccess && bookingParents.needsIdentity(currentUrl) ? await readPublicBookingParentIdentity(page) : undefined;
+    const parentProof = bookingParents.authorizeParent(currentUrl, bookingParentIdentity);
     const publicFrameSources = !blockedAccess && input.venueOfficialUrl && navigation?.status === 200
-      ? await observedPublicFrameSources(page, input.venueOfficialUrl, navigation.url) : [];
+      ? await observedPublicFrameSources(page, input.venueOfficialUrl, navigation.url, parentProof) : [];
     const frames: DiscoveryBrowserSnapshot["frames"] = publicFrameSources.map(url => ({ url, source: "OFFICIAL_IFRAME_SRC" }));
     for (const frame of page.frames()) {
       const url = normalizeDiscoveryNavigationUrl(frame.url());
@@ -645,6 +686,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
     const finalDocumentStartedAt = await page.evaluate(() => performance.timeOrigin);
     if (page.url() !== actualCurrentUrl || documentStartedAt !== finalDocumentStartedAt)
       throw new Error("DISCOVERY_SNAPSHOT_CHANGED");
+    for (const control of visible) if (control.kind === "link" && control.href)
+      bookingParents.observeOfficialLink(currentUrl, control.href, `${control.name} ${control.label}`.trim());
     for (const url of publicFrameSources) {
       allowedNavigation.add(url); passfactory.observeWidgetUrl(url); cpsScope.observeEntry(url);
     }
@@ -655,8 +698,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
     observedRequests.splice(0, observedRequests.length, ...pendingMetadata);
     requestMetadataBytes = pendingMetadata.reduce((total, request) => total + JSON.stringify(request).length + 120, 0);
     return { url: currentUrl, text, controls: visible, elements, frames, responses: responses.splice(0), requests, requestFailures: requestFailures.map(failure => ({ ...failure })),
-      ...(capabilityDiagnostics.length ? { capabilityDiagnostics: capabilityDiagnostics.map(value => ({ ...value })) } : {}), loading: pendingRequests > 0,
-      blockedRequests, requestCount, interceptCount, responseBytes, startupMs, initialContentWaitMs, pendingRequestCount: pendingRequests,
+      ...(capabilityDiagnostics.length ? { capabilityDiagnostics: capabilityDiagnostics.map(value => ({ ...value })) } : {}), loading: pendingReadCount() > 0,
+      blockedRequests, requestCount, interceptCount, responseBytes, startupMs, initialContentWaitMs, pendingRequestCount: pendingReadCount(),
       ...(navigationStartedAt === undefined ? {} : { navigationElapsedMs: Date.now() - navigationStartedAt }),
       ...(navigation && sameDiscoveryMainDocument(navigation.url, actualCurrentUrl) ? { navigationStatus: navigation.status } : {}),
       browserTransport: deps.browserTransport ?? "PINNED_HTTP", accessRequirementObserved: blockedAccess };
@@ -678,7 +721,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     diagnostics() {
       // Available even when navigation throws or the page has already closed.
       // This contains transport facts only, never page text or response bodies.
-      return { loading: pendingRequests > 0, pendingRequestCount: pendingRequests,
+      return { loading: pendingReadCount() > 0, pendingRequestCount: pendingReadCount(),
         requests: observedRequests.map(request => ({ url: request.url, method: request.method, resourceType: request.resourceType,
           ...(request.status === undefined ? {} : { status: request.status }),
           ...(request.blockedReason ? { blockedReason: request.blockedReason } : {}) })),
@@ -745,6 +788,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
             admitted = registerControl(returned.locator, current, "link");
             result.controls.push(admitted);
           }
+          bookingParents.observeOfficialLink(result.url, current.href, `${current.name} ${current.label}`.trim());
           for (const entry of structure.ancestors) for (const item of [entry, ...entry.children]) {
             if (item.selector !== current.selector) continue;
             const before = { href: item.href, target: item.target };
@@ -763,6 +807,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
         return { ...await snapshot(), adapter: result.adapter };
       }
       if (action.action === "open") {
+        serviceSelection = undefined;
         if (!isSafeRecipeUrl(action.url) || !allowedNavigation.has(new URL(action.url).href)) throw new Error("UNOBSERVED_NAVIGATION");
         navigationOrigins.add(new URL(action.url).origin); passfactory.observeWidgetUrl(action.url);
         navigationStartedAt = Date.now();
@@ -776,17 +821,29 @@ export async function createCourseDiscoveryBrowserSession(input: {
           !await isPublicDateChoice(known.locator, known.calendarDay)) throw new Error("STALE_OR_UNKNOWN_CONTROL");
         if (action.action === "select") {
           if (known.kind !== "filter") throw new Error("UNSAFE_CONTROL");
-          if (known.dropdown) await selectPublicDropdown(known.locator, { value: action.option, purpose: known.dropdown.purpose, simulator: true });
+          if (known.service) { serviceSelection = undefined; serviceSelection = await selectPublicRentalService(known.locator, action.option); }
+          else if (known.dropdown) { serviceSelection = undefined; await selectPublicDropdown(known.locator, { value: action.option, purpose: known.dropdown.purpose, simulator: true }); }
           else {
+            serviceSelection = undefined;
             const observed = await observeControl(known.locator);
             const option = observed.options?.find(item => item.value === action.option || item.label === action.option);
             if (!option) throw new Error("UNOBSERVED_OPTION");
             await known.locator.selectOption(option.value);
           }
         } else if (action.action === "fill") {
+          serviceSelection = undefined;
           if (known.kind !== "field" || !/^[\d\s/:.T-]{1,120}$/u.test(action.text)) throw new Error("UNSAFE_CONTROL");
           await known.locator.fill(action.text); await known.locator.dispatchEvent("change");
         } else {
+          if (known.service) {
+            await openPublicRentalService(known.locator);
+            return snapshot();
+          }
+          if (known.serviceContinuation) {
+            await continuePublicRentalService(known.locator, serviceSelection, known.serviceContinuation);
+            return snapshot();
+          }
+          serviceSelection = undefined;
           if (known.kind === "field" || known.kind === "filter" && (await observeControl(known.locator)).tag === "select") throw new Error("USE_TYPED_CONTROL_ACTION");
           if (known.href) {
             if (!isSafeRecipeUrl(known.href)) throw new Error("UNSAFE_NAVIGATION");

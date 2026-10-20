@@ -3,7 +3,7 @@ import { bindDiscoveryRecipeIdentity, createDiscoveryAdapterObservation, discove
 import { safeBrowserActionIssues } from "../../../scripts/automation/course-discovery-diagnostics.mjs";
 
 describe("durable discovery browser diagnostics", () => {
-  it.each(["FOREUP", "ACUITY", "TEEITUP", "USCHEDULE", "WHOOSH", "LIGHTSPEED"])("binds current %s inspection evidence to exact job, source, input and typed metadata", family => {
+  it.each(["FOREUP", "ACUITY", "TEEITUP", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "CHRONOGOLF"])("binds current %s inspection evidence to exact job, source, input and typed metadata", family => {
     const job = { id: "job", request: { identity: { name: "Public golf", officialUrl: "https://official.example.org/" },
       target: { courseId: "course", kind: "OUTDOOR" }, input: { date: "2026-10-23", players: 2 } } };
     const bookingUrl = "https://booking.example.org/availability", context = job.request.identity.officialUrl;

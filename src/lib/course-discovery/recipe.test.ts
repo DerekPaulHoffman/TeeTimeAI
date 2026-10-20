@@ -53,6 +53,29 @@ describe("course access recipes", () => {
     expect(recipeAllowsRequest(recipe, asset, "GET")).toBe(false);
     expect(recipeAllowsRequest(recipe, asset.replace("example.org", "other.example.org"), "GET", "script")).toBe(false);
   });
+  it("admits conventional public static build versions without admitting credentials or data reads", () => {
+    const script = "https://public.example.org/wp-includes/js/dist/hooks.min.js?ver=f0f188028580e8dc1255";
+    expect(isSafeRecipeUrl(script)).toBe(false);
+    expect(isSafeBrowserAssetUrl(script, "script", "GET")).toBe(true);
+    expect(isSafeBrowserAssetUrl(script.replace("hooks.min.js", "style.css"), "stylesheet", "GET")).toBe(true);
+    for (const resource of ["fetch", "xhr", "document", "other"])
+      expect(isSafeBrowserAssetUrl(script, resource, "GET")).toBe(false);
+    expect(isSafeBrowserAssetUrl(script, "script", "POST")).toBe(false);
+    for (const unsafe of [
+      script.replace("?ver=", "?token="), script.replace("?ver=", "?v="),
+      `${script}&ver=1dfe7db3940c23ea9216`, `${script}&next=https%3A%2F%2Fexample.org%2F%3Ftoken%3Dprivate`,
+      `${script}&other=abcdefghijklmnopqrst1234`, `${script}&api_key=private`, `${script}#fragment`,
+      script.replace("f0f188028580e8dc1255", "abcdefghijklmnopqrst1234"),
+      script.replace("public.example.org", "127.0.0.1"), script.replace("public.example.org", "user:password@public.example.org"),
+      script.replace("/wp-includes/js/dist/hooks.min.js", "/checkout/hooks.min.js"),
+      script.replace("/wp-includes/js/dist/hooks.min.js", "/account/hooks.min.js"),
+      script.replace("/wp-includes/js/dist/hooks.min.js", "/api/calendar"),
+    ]) expect(isSafeBrowserAssetUrl(unsafe, "script", "GET"), unsafe).toBe(false);
+    const recipe = parseAccessRecipe({ ...httpRecipe(), permittedRoutes: [{ origin: "https://public.example.org", path: "/wp-includes/js/dist/*", methods: ["GET"], queryKeys: ["ver"] }] });
+    expect(recipeAllowsRequest(recipe, script, "GET", "script")).toBe(true);
+    expect(recipeAllowsRequest(recipe, script, "GET", "fetch")).toBe(false);
+    expect(recipeAllowsRequest(recipe, script.replace("public.example.org", "unobserved.example.org"), "GET", "script")).toBe(false);
+  });
   it("parses a complete recipe and hashes object key order deterministically", () => {
     const recipe = parseAccessRecipe(httpRecipe());
     const reordered = Object.fromEntries(Object.entries(recipe).reverse());
