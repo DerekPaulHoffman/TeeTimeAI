@@ -82,6 +82,21 @@ function simulatorTestVenue(name: string, distanceMeters: number, supported = tr
 }
 
 describe("TeeTimeIntake", () => {
+  it("allows exactly one outdoor layout or Simulator to be selected", () => {
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
+    render(<TeeTimeIntake {...signedInAccountProps} simulatorEnabled />);
+    const filters = within(screen.getByRole("group", { name: "Course layout" }));
+
+    for (const outdoor of ["Any", "9-hole", "18-hole"]) {
+      for (const selected of [outdoor, "Simulator", outdoor]) {
+        fireEvent.click(filters.getByRole("button", { name: selected, exact: true }));
+        expect(filters.getAllByRole("button", { pressed: true })).toEqual([
+          filters.getByRole("button", { name: selected, exact: true })
+        ]);
+      }
+    }
+  });
+
   it("switches a direct simulator entry to the outdoor Any filter and keeps the heading in sync", () => {
     window.history.replaceState({}, "", "/search?mode=SIMULATOR");
     vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));

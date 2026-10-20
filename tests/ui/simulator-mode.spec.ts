@@ -157,13 +157,20 @@ async function expectNoHorizontalOverflow(page: Page) {
     width: document.documentElement.scrollWidth,
     buttons: [...document.querySelectorAll<HTMLElement>(".figma-hole-options button")].map((button) => {
       const rect = button.getBoundingClientRect();
-      return { left: rect.left, right: rect.right };
+      return {
+        left: rect.left,
+        right: rect.right,
+        height: rect.height,
+        clippedWidth: button.scrollWidth - button.clientWidth,
+      };
     }),
   }));
   expect(geometry.width).toBeLessThanOrEqual(geometry.viewport + 2);
   for (const button of geometry.buttons) {
     expect(button.left).toBeGreaterThanOrEqual(-1);
     expect(button.right).toBeLessThanOrEqual(geometry.viewport + 1);
+    expect(button.height).toBeGreaterThanOrEqual(geometry.viewport < 768 ? 44 : 38);
+    expect(button.clippedWidth).toBeLessThanOrEqual(1);
   }
 }
 

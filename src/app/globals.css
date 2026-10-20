@@ -10145,13 +10145,174 @@ button {
   .figma-hole-options > button:not(:last-child)::after {
     right: -6px;
   }
+}
 
-  .figma-hole-filter.has-simulator .figma-hole-options > button:nth-child(3)::after {
+/* Golf layouts and indoor simulator remain one mutually exclusive control. */
+.figma-hole-filter.figma-play-type {
+  align-items: stretch;
+  flex-direction: column;
+  gap: 10px;
+  justify-content: center;
+  min-width: 0;
+  padding-block: 14px;
+}
+
+.figma-layout-heading {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  width: 100%;
+}
+
+.figma-play-type .figma-layout-heading strong {
+  align-items: center;
+  display: inline-flex;
+  font-size: 12px;
+  gap: 8px;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.figma-golf-icon {
+  font-size: 20px;
+  line-height: 1;
+}
+
+.figma-indoor-label {
+  color: #45675d;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.figma-play-type .figma-hole-options {
+  display: grid;
+  gap: 0;
+  grid-template-columns: minmax(0, 1fr);
+  padding: 0;
+  width: 100%;
+}
+
+.figma-play-type.has-simulator .figma-hole-options {
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.figma-golf-layout-options {
+  align-items: stretch;
+  display: grid;
+  gap: 4px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  min-width: 0;
+}
+
+.figma-play-type .figma-hole-options button,
+.figma-play-type .figma-hole-options button.is-active {
+  font-size: 12px;
+  height: auto;
+  min-height: 38px;
+  padding: 0 5px;
+}
+
+.figma-play-type .figma-hole-options button.is-active {
+  background: #f0f3ef;
+  border-color: #ced8cf;
+}
+
+.figma-play-type .figma-hole-options .figma-simulator-option {
+  align-items: center;
+  background: #edf4ed;
+  border-color: #cedbd1;
+  color: #24533d;
+  display: inline-flex;
+  gap: 6px;
+  justify-content: center;
+  margin-left: 12px;
+  padding: 0 9px;
+}
+
+.figma-play-type .figma-simulator-option::before {
+  background: #dce5df;
+  bottom: 0;
+  content: "";
+  left: -13px;
+  pointer-events: none;
+  position: absolute;
+  top: 0;
+  width: 1px;
+}
+
+.figma-play-type .figma-simulator-option img {
+  flex: 0 0 28px;
+  height: 28px;
+  width: 28px;
+}
+
+.figma-play-type .figma-hole-options .figma-simulator-option.is-active {
+  background: #dcebdc;
+  border-color: #63846a;
+  box-shadow: inset 0 0 0 1px #63846a;
+}
+
+.figma-play-type .figma-hole-options button:focus-visible {
+  outline: 2px solid #24533d;
+  outline-offset: 3px;
+}
+
+@media (max-width: 767px) {
+  .figma-hole-filter.figma-play-type.has-simulator,
+  .figma-filter-strip:has(.has-simulator) .figma-time-field {
+    grid-column: 1 / -1;
+  }
+
+  .figma-play-type .figma-hole-options button,
+  .figma-play-type .figma-hole-options button.is-active {
+    min-height: 44px;
+  }
+
+  .figma-play-type .figma-hole-options .figma-desktop-copy {
+    display: inline;
+  }
+
+  .figma-play-type .figma-hole-options .figma-mobile-copy {
+    display: none;
+  }
+}
+
+@media (min-width: 768px) and (max-width: 1023px) {
+  .figma-hole-filter.figma-play-type {
+    padding-inline: 12px;
+  }
+
+  .figma-play-type.has-simulator .figma-hole-options {
+    gap: 8px;
+  }
+
+  .figma-play-type .figma-hole-options button,
+  .figma-play-type .figma-hole-options button.is-active {
+    font-size: 11px;
+    padding-inline: 3px;
+  }
+
+  .figma-play-type .figma-hole-options .figma-simulator-option {
+    gap: 4px;
+    margin-left: 8px;
+    padding-inline: 6px;
+  }
+
+  .figma-play-type .figma-simulator-option::before {
+    left: -9px;
+  }
+}
+
+@media (max-width: 380px) {
+  .figma-play-type .figma-hole-options .figma-desktop-copy {
     display: none;
   }
 
-  .figma-hole-filter.has-simulator .figma-hole-options > button:last-child {
-    grid-column: 1 / -1;
+  .figma-play-type .figma-hole-options .figma-mobile-copy {
+    display: inline;
   }
 }
 

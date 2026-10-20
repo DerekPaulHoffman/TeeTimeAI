@@ -1,6 +1,7 @@
 "use client";
 
 import { ChevronDown, LocateFixed, Search, X } from "lucide-react";
+import Image from "next/image";
 import { useEffect, useRef } from "react";
 
 import { AlertDatePicker } from "@/components/alert-date-picker";
@@ -315,39 +316,50 @@ export function TeeTimeSearchControls({
             Times use each course&apos;s local time zone.
           </span>
         </div>
-        <div className={`figma-hole-filter${simulatorEnabled ? " has-simulator" : ""}`} aria-label="Course layout" role="group">
-          <strong>
-            <span className="figma-filter-label-icon" aria-hidden="true">⛳</span>
-            <span className="figma-desktop-copy">Course layout</span>
-            <span className="figma-mobile-copy">Holes</span>
-          </strong>
+        <div className={`figma-hole-filter figma-play-type${simulatorEnabled ? " has-simulator" : ""}`} aria-label="Course layout" role="group">
+          <div className="figma-layout-heading">
+            <strong>
+              <span className="figma-golf-icon" aria-hidden="true">⛳</span>
+              Golf
+            </strong>
+            {simulatorEnabled ? <span className="figma-indoor-label">Indoor</span> : null}
+          </div>
           <div className="figma-hole-options">
-            {(["any", "9", "18"] as const).map((value) => (
-              <button
-                aria-label={value === "any" ? "Any" : `${value}-hole`}
-                aria-pressed={mode === "OUTDOOR" && holeFilter === value}
-                className={mode === "OUTDOOR" && holeFilter === value ? "is-active" : ""}
-                key={value}
-                onClick={() => onHoleFilterChange(value)}
-                type="button"
-              >
-                {value === "any" ? (
-                  "Any"
-                ) : (
-                  <>
-                    <span className="figma-desktop-copy">{value}-hole</span>
-                    <span className="figma-mobile-copy">{value}H</span>
-                  </>
-                )}
-              </button>
-            ))}
+            <div className="figma-golf-layout-options">
+              {(["any", "9", "18"] as const).map((value) => (
+                <button
+                  aria-label={value === "any" ? "Any" : `${value}-hole`}
+                  aria-pressed={mode === "OUTDOOR" && holeFilter === value}
+                  className={mode === "OUTDOOR" && holeFilter === value ? "is-active" : ""}
+                  key={value}
+                  onClick={() => onHoleFilterChange(value)}
+                  type="button"
+                >
+                  {value === "any" ? (
+                    "Any"
+                  ) : (
+                    <>
+                      <span className="figma-desktop-copy">{value}-hole</span>
+                      <span className="figma-mobile-copy">{value}H</span>
+                    </>
+                  )}
+                </button>
+              ))}
+            </div>
             {simulatorEnabled ? (
               <button
                 aria-pressed={mode === "SIMULATOR"}
-                className={mode === "SIMULATOR" ? "is-active" : ""}
+                className={`figma-simulator-option${mode === "SIMULATOR" ? " is-active" : ""}`}
                 onClick={() => onModeChange?.("SIMULATOR")}
                 type="button"
               >
+                <Image
+                  alt=""
+                  aria-hidden="true"
+                  height={28}
+                  src="/icons/golf-simulator.svg"
+                  width={28}
+                />
                 Simulator
               </button>
             ) : null}
