@@ -5621,6 +5621,20 @@ button {
   max-width: 760px;
 }
 
+/* Keep both modes' text in the same layout slot, exposing only the active copy. */
+.search-mode-copy {
+  display: grid;
+}
+
+.search-mode-copy > span {
+  grid-area: 1 / 1;
+}
+
+.search-mode-copy > span[aria-hidden="true"] {
+  pointer-events: none;
+  visibility: hidden;
+}
+
 .figma-search-experience {
   margin: 24px auto 0;
   max-width: 1408px;
@@ -9933,6 +9947,7 @@ button {
   grid-column: 1 / -1;
   margin: 12px;
   min-width: 0;
+  min-height: 76px;
 }
 
 .figma-search-actions .figma-search-submit {
@@ -10216,15 +10231,16 @@ button {
 }
 
 .figma-play-type .figma-hole-options button.is-active {
-  background: #f0f3ef;
-  border-color: #ced8cf;
+  background: #18332b;
+  border-color: #18332b;
+  color: #ffffff;
 }
 
-.figma-play-type .figma-hole-options .figma-simulator-option {
+.figma-play-type .figma-hole-options button.figma-simulator-option {
   align-items: center;
-  background: #edf4ed;
-  border-color: #cedbd1;
-  color: #24533d;
+  background: transparent;
+  border-color: #d1d8d3;
+  color: #14231d;
   display: inline-flex;
   gap: 6px;
   justify-content: center;
@@ -10250,9 +10266,10 @@ button {
 }
 
 .figma-play-type .figma-hole-options .figma-simulator-option.is-active {
-  background: #dcebdc;
-  border-color: #63846a;
-  box-shadow: inset 0 0 0 1px #63846a;
+  background: #18332b;
+  border-color: #18332b;
+  box-shadow: none;
+  color: #ffffff;
 }
 
 .figma-play-type .figma-hole-options button:focus-visible {
@@ -10295,7 +10312,7 @@ button {
     padding-inline: 3px;
   }
 
-  .figma-play-type .figma-hole-options .figma-simulator-option {
+  .figma-play-type .figma-hole-options button.figma-simulator-option {
     gap: 4px;
     margin-left: 8px;
     padding-inline: 6px;
