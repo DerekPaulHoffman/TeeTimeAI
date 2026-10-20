@@ -237,6 +237,9 @@ test.describe("simulator mode", () => {
       expect(new Set(inactiveColors).size).toBe(1);
       const activeColor = await chosen.evaluate(button => getComputedStyle(button).backgroundColor);
       expect(activeColor).not.toBe(inactiveColors[0]);
+      const simulatorBorder = await layout.getByRole("button", { name: "Simulator", exact: true })
+        .evaluate(button => getComputedStyle(button).borderColor);
+      expect(simulatorBorder).toBe("rgba(0, 0, 0, 0)");
       const after = await measure();
       expect(after.scrollY, `scroll position after choosing ${name}`).toBeCloseTo(before.scrollY, 0);
       expect(after.toolbarTop).toBeCloseTo(before.toolbarTop, 0);

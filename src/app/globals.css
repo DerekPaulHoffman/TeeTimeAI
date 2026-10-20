@@ -10239,7 +10239,7 @@ button {
 .figma-play-type .figma-hole-options button.figma-simulator-option {
   align-items: center;
   background: transparent;
-  border-color: #d1d8d3;
+  border-color: transparent;
   color: #14231d;
   display: inline-flex;
   gap: 6px;
@@ -10267,7 +10267,7 @@ button {
 
 .figma-play-type .figma-hole-options .figma-simulator-option.is-active {
   background: #18332b;
-  border-color: #18332b;
+  border-color: transparent;
   box-shadow: none;
   color: #ffffff;
 }
