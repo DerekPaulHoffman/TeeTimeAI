@@ -5,11 +5,13 @@
 import { existsSync } from "node:fs";
 import { createServer, type Server } from "node:https";
 import { connect, type AddressInfo } from "node:net";
-import { chromium, type Browser, type BrowserContext } from "@playwright/test";
+import type { Browser, BrowserContext } from "@playwright/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createCourseDiscoveryBrowserSession } from "./browser-session";
 import { executeAccessRecipe } from "./executor";
 import * as nativeBrowser from "./native-public-browser";
+import { installNativeRedirectRouting, type NativeReadRoute } from "./native-redirect-routing";
+import { launchPublicReadBrowser } from "./public-browser-launch";
 import { parseAccessRecipe } from "./recipe";
 
 vi.mock("@/lib/automation/provider-request-lease", () => ({ runWithProviderRequestLease: vi.fn() }));
@@ -96,7 +98,7 @@ describe.runIf(existsSync(chrome))("offline CPS discovery and deterministic brow
     vi.restoreAllMocks();
   });
   const launchBrowser = async () => {
-    const browser = await chromium.launch({ executablePath: chrome, headless: true, args: ["--ignore-certificate-errors"] });
+    const browser = await launchPublicReadBrowser({ executablePath: chrome, headless: true, args: ["--ignore-certificate-errors"] });
     const newContext = browser.newContext.bind(browser);
     vi.spyOn(browser, "newContext").mockImplementation(async options => {
       const context = await newContext({ ...options, ignoreHTTPSErrors: true });
@@ -149,6 +151,33 @@ describe.runIf(existsSync(chrome))("offline CPS discovery and deterministic brow
       expect(JSON.stringify(changed)).not.toContain(firstToken);
       expect(pinnedSeen).toEqual([]);
     } finally { await session.close(); }
+  }, 40_000);
+
+  it.each(["prefetch", "prerender", "link-prefetch"])("prevents speculative %s before dispatch while retaining explicit guarded navigation", async action => {
+    const unobserved = "https://official.example.org/checkout";
+    const rule = action === "link-prefetch" ? `<link rel="prefetch" href="${unobserved}">`
+      : `<script type="speculationrules">${JSON.stringify({ [action]: [{ source: "list", urls: [unobserved], eagerness: "eager" }] })}</script>`;
+    normalResponses(); const original = respond;
+    respond = (url, context) => {
+      const reply = original(url, context);
+      return { ...reply, ...(reply.body ? { body: reply.body.replace("</body>", `${rule}</body>`) } : {}) };
+    };
+    const session = await openDiscovery();
+    try {
+      const reached = await followOfficial(session);
+      expect(reached.text).toContain(date);
+      expect(serverSeen).not.toContain(unobserved); expect(nativeSeen).not.toContain(unobserved);
+      expect(nativeSeen).toContain(entry); expect(serverSeen).toContain(entry);
+      if (action === "link-prefetch") {
+        expect(discoveryFailures.length).toBeGreaterThan(0);
+        expect(discoveryFailures.every(reason => reason === "UNSAFE_URL")).toBe(true);
+      } else expect(discoveryFailures).toEqual([]);
+    } finally { await session.close(); }
+    const replay = await executeAccessRecipe(recipe(), input, { launchBrowser, fetch: pinnedFetch, requestLease: lease,
+      now: () => new Date("2026-10-20T12:00:00Z") });
+    if (action === "link-prefetch") { expect(replay.complete).toBe(false); expect(replay.status).not.toBe("EMPTY"); }
+    else expect(replay).toMatchObject({ complete: true, status: "AVAILABLE" });
+    expect(serverSeen).not.toContain(unobserved); expect(nativeSeen).not.toContain(unobserved);
   }, 40_000);
 
   it.each(["tenant", "course"] as const)("rejects a fresh redirect crossing the admitted %s", async kind => {
@@ -214,6 +243,36 @@ describe.runIf(existsSync(chrome))("offline CPS discovery and deterministic brow
       expect(nativeSeen.filter(url => url === official)).toHaveLength(2);
       expect(serverSeen).toContain(sessionUrl(firstToken));
     } finally { await session.close(); }
+  }, 40_000);
+
+  it("correlates actual hover prefetch and same-URL anchor navigation independently of provider scheduling", async () => {
+    const destination = "https://official.example.org/calendar";
+    respond = url => ({ body: url === official
+      ? `<html><body><h1>Offline Golf Course</h1><a href="${destination}" onmouseover="fetch(this.href).catch(()=>{})" onclick="return true">Book a Bay</a></body></html>`
+      : html(date) });
+    const proxy = await nativeBrowser.createNativePublicBrowserProxy({ signal: AbortSignal.timeout(30_000) });
+    const browser = await launchBrowser();
+    const context = await browser.newContext({ proxy: { server: proxy.server, bypass: "<-loopback>" }, serviceWorkers: "block" });
+    const page = await context.newPage();
+    const failures: string[] = [];
+    const read = async (route: NativeReadRoute) => {
+      if (![official, destination].includes(route.request().url()) || route.request().method() !== "GET") { await route.abort(); return; }
+      try { await nativeBrowser.continueNativeBrowserRead(route, AbortSignal.timeout(10_000), 2_000_000, undefined, route.request().url()); }
+      catch (error) { failures.push(String(error)); await route.abort().catch(() => {}); }
+    };
+    const routing = await installNativeRedirectRouting(page, read, { onFailure: code => failures.push(code) });
+    await context.route("**/*", async route => {
+      try { await read(routing.wrapRoute(route)); }
+      catch (error) { failures.push(String(error)); await route.abort().catch(() => {}); }
+    });
+    try {
+      await page.goto(official, { waitUntil: "domcontentloaded" });
+      await page.getByText("Book a Bay", { exact: true }).click();
+      expect(await page.locator("body").innerText(), JSON.stringify({ nativeSeen, serverSeen, failures })).toContain(date);
+      expect(nativeSeen.filter(url => url === destination)).toHaveLength(2);
+      expect(serverSeen.filter(url => url === destination)).toHaveLength(2);
+      expect(failures).toEqual([]);
+    } finally { await routing.close(); await context.close(); await proxy.close(); }
   }, 40_000);
 
   it("ignores local data and blob image metadata without treating it as availability evidence", async () => {

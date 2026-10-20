@@ -155,7 +155,8 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
     wrapRoute(route: Route): NativeReadRoute {
       const request = route.request();
       if (closed || request.frame() !== page.mainFrame()) throw new Error("NATIVE_REDIRECT_FRAME_UNGUARDED");
-      const matching = [...records.values()].filter(record => !record.wrapped && record.url === request.url() && record.method === request.method() && !record.parent);
+      const matching = [...records.values()].filter(record => !record.wrapped && record.url === request.url() && record.method === request.method() && !record.parent &&
+        record.adapter.isNavigationRequest() === request.isNavigationRequest());
       if (matching.length !== 1) { failure("NATIVE_REDIRECT_REQUEST_MISMATCH"); throw new Error("NATIVE_REDIRECT_REQUEST_MISMATCH"); }
       matching[0].wrapped = true;
       return { request: () => matching[0].adapter, continue: route.continue.bind(route), abort: route.abort.bind(route), fulfill: route.fulfill.bind(route) };

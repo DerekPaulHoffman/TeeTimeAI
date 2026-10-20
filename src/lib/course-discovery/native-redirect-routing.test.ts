@@ -17,6 +17,35 @@ async function installed(maxRequests?: number) {
 }
 
 describe("native redirect metadata boundaries", () => {
+  it("distinguishes a concurrent same-URL prefetch from document navigation", async () => {
+    const test = await installed(), url = "https://example.org/calendar";
+    try {
+      const emit = test.events.get("Fetch.requestPaused")!;
+      for (const [requestId, resourceType] of [["prefetch", "XHR"], ["document", "Document"]]) emit({
+        requestId, networkId: requestId, frameId: "main", resourceType, request: { url, method: "GET", headers: {} },
+      });
+      const route = (navigation: boolean) => ({ request: () => ({ url: () => url, method: () => "GET", frame: () => test.main,
+        isNavigationRequest: () => navigation }), continue: vi.fn(), abort: vi.fn(), fulfill: vi.fn() }) as unknown as Route;
+      expect(test.guard.wrapRoute(route(false)).request().resourceType()).toBe("xhr");
+      expect(test.guard.wrapRoute(route(true)).request().resourceType()).toBe("document");
+      expect(test.failures).toEqual([]);
+    } finally { await test.guard.close(); }
+  });
+
+  it.each([false, true])("still rejects ambiguous same-URL requests of one navigation kind (%s)", async navigation => {
+    const test = await installed(), url = "https://example.org/calendar";
+    try {
+      const emit = test.events.get("Fetch.requestPaused")!;
+      for (let index = 0; index < 2; index++) emit({ requestId: `request-${index}`, networkId: `network-${index}`, frameId: "main",
+        resourceType: navigation ? "Document" : "XHR", request: { url, method: "GET", headers: {} } });
+      const route = { request: () => ({ url: () => url, method: () => "GET", frame: () => test.main, isNavigationRequest: () => navigation }),
+        continue: vi.fn(), abort: vi.fn(), fulfill: vi.fn() } as unknown as Route;
+      expect(() => test.guard.wrapRoute(route)).toThrow("NATIVE_REDIRECT_REQUEST_MISMATCH");
+      expect(route.continue).not.toHaveBeenCalled();
+      expect(test.failures).toEqual(["NATIVE_REDIRECT_REQUEST_MISMATCH"]);
+    } finally { await test.guard.close(); }
+  });
+
   it("denies subframe first requests and redirect provenance before dispatch without closing the root", async () => {
     const test = await installed();
     try {
@@ -76,7 +105,7 @@ describe("native redirect metadata boundaries", () => {
     try {
       test.events.get("Fetch.requestPaused")!({ requestId: "fetch-1", networkId: "network-1", frameId: "main", resourceType: "Stylesheet",
         request: { url, method: "GET", headers: {} } });
-      const route = { request: () => ({ url: () => url, method: () => "GET", frame: () => test.main }),
+      const route = { request: () => ({ url: () => url, method: () => "GET", frame: () => test.main, isNavigationRequest: () => false }),
         continue: vi.fn(), abort: vi.fn(), fulfill: vi.fn() } as unknown as Route;
       const response = test.guard.wrapRoute(route).request().response();
       test.events.get("Network.responseReceived")!({ requestId: "network-1", response: { url, status, headers: {} } });

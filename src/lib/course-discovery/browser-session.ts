@@ -28,6 +28,7 @@ import { canonicalCpsPublicUrl, cpsPublicEntryUrl, cpsSessionKey, createCpsPubli
 import { observedPublicDateChoices, isPublicDateChoice } from "./public-date-choice";
 import { isPublicAvailabilityNavigation } from "./public-navigation-control";
 import { observedPublicFrameSources } from "./public-frame-source";
+import { launchPublicReadBrowser } from "./public-browser-launch";
 
 const identifier = z.union([z.string().max(128), z.number().int()]);
 export const discoveryBrowserActionSchema = z.discriminatedUnion("action", [
@@ -168,7 +169,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
   const nativeProxy = deps.browserTransport === "NATIVE_CHROME" ? await createNativePublicBrowserProxy({ signal: deadline }) : undefined;
   let browser: Browser;
   try {
-    browser = deps.launchBrowser ? await deps.launchBrowser() : await (await import("@playwright/test")).chromium.launch({
+    browser = deps.launchBrowser ? await deps.launchBrowser() : await launchPublicReadBrowser({
       headless: !(nativeProxy && process.platform === "win32"), ...(process.platform === "win32" ? { channel: "chrome" } : {}), timeout: Math.min(15_000, remaining),
       ...(nativeProxy ? { args: ["--disable-quic", "--proxy-bypass-list=<-loopback>"] } : {}),
     });

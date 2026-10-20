@@ -12,6 +12,7 @@ import { accessExecutionDiagnosticSchema, accessExecutionInputSchema, accessExec
   readRecipeFieldFormat, isActiveBrowserAccessChallenge, type AccessExecutionDiagnostic, type CourseAccessRecipeData, type RecipeDateParts, type RecipeField } from "./recipe";
 import { continueNativeBrowserRead, createNativePublicBrowserProxy, nativeReadPreflightMethod, type NativePublicProxy } from "./native-public-browser";
 import { installNativeRedirectRouting, type NativeReadRoute } from "./native-redirect-routing";
+import { launchPublicReadBrowser } from "./public-browser-launch";
 import { requestFamilyForUrl } from "./request-family";
 import { canonicalPublicReadUrl } from "./public-request-url";
 import { canonicalCpsPublicUrl, cpsSessionKey, createCpsPublicSessionScope } from "./cps-public-navigation";
@@ -385,7 +386,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
     }
     if (recipe.browserTransport === "NATIVE_CHROME") nativeProxy = await createNativePublicBrowserProxy({ signal, maxBytes: PUBLIC_BROWSER_TUNNEL_BYTES, maxConnections: 128 });
     try {
-      browser = deps.launchBrowser ? await deps.launchBrowser() : await (await import("@playwright/test")).chromium.launch({ headless: !(nativeProxy && process.platform === "win32"),
+      browser = deps.launchBrowser ? await deps.launchBrowser() : await launchPublicReadBrowser({ headless: !(nativeProxy && process.platform === "win32"),
         ...(process.platform === "win32" ? { channel: "chrome" } : {}),
         ...(nativeProxy ? { args: ["--disable-quic", "--proxy-bypass-list=<-loopback>"] } : {}) });
     } catch { throw new Error("BROWSER_UNAVAILABLE"); }
