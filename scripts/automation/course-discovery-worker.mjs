@@ -21,12 +21,28 @@ function safeObservedUrl(value) {
   } catch { return false; }
 }
 /** Canonical identity belongs to the claimed job, never to generated prose. */
-export function bindDiscoveryRecipeIdentity(recipe, job) {
+export function bindDiscoveryRecipeIdentity(recipe, job, adapterObservation) {
   if (!recipe || typeof recipe !== "object" || Array.isArray(recipe)) return recipe;
   const proposedSource = recipe.source && typeof recipe.source === "object" && !Array.isArray(recipe.source) ? recipe.source : {};
   const source = { ...proposedSource };
   delete source.venueAddress;
-  return { ...recipe, target: { ...job.request.target }, source: {
+  const adapter = recipe.adapter && typeof recipe.adapter === "object" && !Array.isArray(recipe.adapter) ? { ...recipe.adapter } : undefined;
+  if (adapter) {
+    delete adapter.officialIdentityProof;
+    const observed = adapterObservation?.adapter;
+    if (adapter.family === "TEEITUP" && observed?.family === "TEEITUP" && observed.alias === adapter.alias &&
+        adapterObservation.jobId === job.id && adapterObservation.officialUrl === job.request.identity.officialUrl && adapterObservation.bookingUrl === proposedSource.bookingUrl &&
+        Array.isArray(adapter.facilityIds) && Array.isArray(observed.facilityIds) && adapter.facilityIds.length > 0 && adapter.facilityIds.length <= 100 &&
+        adapter.facilityIds.every(id => Number.isSafeInteger(id) && id > 0) &&
+        JSON.stringify([...adapter.facilityIds].sort((a, b) => a - b)) === JSON.stringify([...observed.facilityIds].sort((a, b) => a - b))) {
+      try {
+        const proof = JSON.stringify(observed.officialIdentityProof);
+        if (proof && Buffer.byteLength(proof, "utf8") <= 16_000 && observed.officialIdentityProof &&
+            typeof observed.officialIdentityProof === "object" && !Array.isArray(observed.officialIdentityProof)) adapter.officialIdentityProof = JSON.parse(proof);
+      } catch { /* Malformed controller evidence never becomes recipe authority. */ }
+    }
+  }
+  return { ...recipe, ...(adapter ? { adapter } : {}), target: { ...job.request.target }, source: {
     ...source,
     venueName: job.request.identity.name, officialUrl: job.request.identity.officialUrl,
     timeZone: job.request.input.timeZone,
@@ -42,7 +58,8 @@ export function readDiscoveryControllerCheckpoint(checkpoint, officialUrl) {
   return { urls: [...new Set(value.observedNavigationUrls.filter(safeObservedUrl))], officialObserved: value.officialSourceObserved === true,
     readUrls: [...new Set((value.observedReadUrls ?? []).filter(safeObservedUrl))],
     ...(["PINNED_HTTP", "NATIVE_CHROME"].includes(value.browserTransport) ? { browserTransport: value.browserTransport } : {}),
-    transportFallbackUsed: value.transportFallbackUsed === true, lastFeedback: safeLastFeedback(value.lastFeedback) };
+    transportFallbackUsed: value.transportFallbackUsed === true, lastFeedback: safeLastFeedback(value.lastFeedback),
+    lastFailure: safeLastFeedback(value.lastFailure) };
 }
 function safeReplayDiagnostic(value) {
   if (!value || typeof value !== "object" || !/^[A-Z_0-9]{1,80}$/u.test(value.code ?? "")) return undefined;
@@ -84,6 +101,19 @@ function safeLastFeedback(value) {
     slotCount: Number.isInteger(details.slotCount) && details.slotCount >= 0 ? Math.min(details.slotCount, 500) : 0,
     ...(safeReplayDiagnostic(details.diagnostic) ? { diagnostic: safeReplayDiagnostic(details.diagnostic) } : {}),
   } };
+}
+
+/** Historical failure evidence survives a later successful observation. Never use it as current access proof. */
+function meaningfulFailure(feedback) {
+  const safe = safeLastFeedback(feedback);
+  if (!safe || safe.code === "DISCOVERY_BROWSER_INCOMPLETE" && !safe.details.failure && !safe.details.requests.length) return undefined;
+  return safe;
+}
+
+export function noVerifiedRecipeDiagnostic(feedback) {
+  const evidence = meaningfulFailure(feedback);
+  return { code: "NO_VERIFIED_RECIPE", reason: evidence?.details.reason ?? evidence?.details.failure?.code ??
+    evidence?.details.requests?.[0]?.code ?? evidence?.code ?? "NO_RECIPE_VERIFIED", ...(evidence ? { evidence } : {}) };
 }
 
 /** Persist bounded transport facts, never page text, request bodies or credentials. */
@@ -305,10 +335,12 @@ export function createDiscoveryProcess({ executable, args, cwd, environment, sig
   };
 }
 
-export function createDiscoveryBrowser({ cwd, deadlineAt, initialUrls, timeZone = "UTC", venueName, venueAddress, helperEnvironment = {}, signal, processFactory = createDiscoveryProcess }) {
+export function createDiscoveryBrowser({ cwd, deadlineAt, initialUrls, timeZone = "UTC", venueName, venueAddress, venueOfficialUrl, helperEnvironment = {}, signal, processFactory = createDiscoveryProcess }) {
   const channel = processFactory({ executable: process.execPath,
     args: [join(cwd, "node_modules/tsx/dist/cli.mjs"), join(cwd, "scripts/automation/course-discovery-browser.ts"), "--deadline", deadlineAt, "--initial-urls", JSON.stringify(initialUrls),
-      ...(venueName ? ["--venue-name", venueName] : []), ...(venueAddress ? ["--venue-address", venueAddress] : []), "--time-zone", timeZone],
+      ...(venueName ? ["--venue-name", venueName] : []), ...(venueAddress ? ["--venue-address", venueAddress] : []),
+      ...(venueOfficialUrl ? ["--venue-official-url", venueOfficialUrl] : []),
+      "--time-zone", timeZone],
     cwd, environment: { ...discoveryProcessEnvironment(), ...helperEnvironment }, signal, timeoutMs: Math.min(90_000, Math.max(1, Date.parse(deadlineAt) - Date.now())),
   });
   return { request: value => channel.request(value), async close() {
@@ -427,10 +459,13 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
   let officialSourceObserved = restoredController.officialObserved;
   let checkpointSummary = typeof job.checkpoint?.summary === "string" ? job.checkpoint.summary.slice(0, 2000) : "";
   let lastFeedback = restoredController.lastFeedback;
+  let lastFailure = meaningfulFailure(restoredController.lastFailure ?? lastFeedback);
+  let terminalDiagnostic;
   let lastBrowserSnapshot;
+  let adapterObservation;
   let currentAccessRequirementObserved = false;
   const controllerCheckpoint = () => ({ version: 1, officialUrl: job.request.identity.officialUrl,
-    officialSourceObserved, observedNavigationUrls: [...observedNavigationUrls], observedReadUrls: [...observedReadUrls], browserTransport, transportFallbackUsed, lastFeedback });
+    officialSourceObserved, observedNavigationUrls: [...observedNavigationUrls], observedReadUrls: [...observedReadUrls], browserTransport, transportFallbackUsed, lastFeedback, lastFailure, terminalDiagnostic });
   const saveCheckpoint = extra => {
     let payload = { summary: checkpointSummary, controller: controllerCheckpoint(), ...extra };
     while (Buffer.byteLength(JSON.stringify(payload), "utf8") > 30_000 && (observedReadUrls.size || observedNavigationUrls.size)) {
@@ -551,10 +586,13 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
             currentAccessRequirementObserved = false;
             if (!input || !BROWSER_ACTIONS.includes(input.action) || Object.keys(input).some(key => !["action", "url", "target", "option", "text", "direction", "selector"].includes(key))) throw discoveryError("DISCOVERY_BROWSER_ACTION_INVALID");
             browserActions++;
+            if (["open", "finish", "inspect_adapter"].includes(input.action)) adapterObservation = undefined;
             if (!browser) {
+              adapterObservation = undefined;
               browserStartedAt ??= new Date().toISOString(); lastRequestCount = 0; lastResponseBytes = 0;
               browser = browserFactory({ cwd, deadlineAt: job.deadlineAt, timeZone: job.request.input.timeZone, venueName: job.request.identity.name,
-                venueAddress: job.request.identity.address, initialUrls: initialUrls(),
+                venueAddress: job.request.identity.address,
+                venueOfficialUrl: job.request.identity.officialUrl, initialUrls: initialUrls(),
                 helperEnvironment: browserEnvironment(), signal });
             }
             if (input.action === "open") firstOpenStartedAt ??= new Date().toISOString();
@@ -569,9 +607,11 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
               didFallback = true;
               browserTransport = browserTransport === "NATIVE_CHROME" ? "PINNED_HTTP" : "NATIVE_CHROME";
               browserTransportsTried.push(browserTransport);
+              adapterObservation = undefined;
               await browser.close(); lastRequestCount = 0; lastResponseBytes = 0;
               browser = browserFactory({ cwd, deadlineAt: job.deadlineAt, timeZone: job.request.input.timeZone, venueName: job.request.identity.name,
                 venueAddress: job.request.identity.address,
+                venueOfficialUrl: job.request.identity.officialUrl,
                 initialUrls: [...new Set([...initialUrls(), snapshot.url])].slice(-16), helperEnvironment: browserEnvironment(), signal });
               browserActions++;
               snapshot = await browser.request({ action: "open", url: snapshot.url });
@@ -594,11 +634,14 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
             boundObservedUrls();
             if (typeof job.request.identity.officialUrl === "string" &&
                 (snapshot?.url === job.request.identity.officialUrl || input.action === "open" && input.url === job.request.identity.officialUrl)) officialSourceObserved = true;
+            if (lastBrowserSnapshot?.url !== snapshot?.url) adapterObservation = undefined;
+            if (input.action === "inspect_adapter" && snapshot?.adapter?.family === "TEEITUP" && snapshot.adapter.officialIdentityProof)
+              adapterObservation = { jobId: job.id, officialUrl: job.request.identity.officialUrl, bookingUrl: input.url, adapter: snapshot.adapter };
             lastBrowserSnapshot = snapshot;
             currentAccessRequirementObserved = snapshot?.accessRequirementObserved === true;
             const browserFeedback = discoveryBrowserFeedback(snapshot, input.action);
             const previousFeedback = JSON.stringify(lastFeedback);
-            if (browserFeedback) lastFeedback = browserFeedback;
+            if (browserFeedback) { lastFeedback = browserFeedback; lastFailure = meaningfulFailure(browserFeedback) ?? lastFailure; }
             else if (lastFeedback?.code === "DISCOVERY_BROWSER_INCOMPLETE") lastFeedback = undefined;
             if (isNewObservedUrl || hasNewObservedRead || previousOfficialObserved !== officialSourceObserved || didFallback || previousFeedback !== JSON.stringify(lastFeedback)) await saveCheckpoint({});
             if (input.action === "open") firstOpenCompletedAt ??= new Date().toISOString();
@@ -616,10 +659,11 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
             result = { saved: true };
           } else {
             if (!input?.recipe || Object.keys(input).some(key => key !== "recipe") || activated) throw discoveryError("DISCOVERY_PROPOSAL_INVALID");
-            const recipe = bindDiscoveryRecipeIdentity(input.recipe, job);
+            const recipe = bindDiscoveryRecipeIdentity(input.recipe, job, adapterObservation);
             const validation = await validateRecipe({ recipe, signal });
             if (validation.valid !== true) throw discoveryError("DISCOVERY_RECIPE_INVALID", { details: { issues: validation.issues } });
             await browser?.close(); browser = null;
+            adapterObservation = undefined;
             const proposedUrl = recipe.source?.bookingUrl;
             const sourceEvidence = officialSourceObserved && job.request.identity.officialUrl && typeof proposedUrl === "string" && observedNavigationUrls.has(proposedUrl)
               ? { officialUrl: job.request.identity.officialUrl, observedBookingUrl: proposedUrl } : undefined;
@@ -632,9 +676,10 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
           if (activated) finish();
           else if (terminalOutcome) rejectTurn(discoveryError(`DISCOVERY_${terminalOutcome}`));
         } catch (error) {
+          if (message.params.tool === "discovery_browser") adapterObservation = undefined;
           const feedback = safeLastFeedback({ code: error?.code, details: error?.details }) ??
             (message.params.tool === "discovery_browser" ? discoveryBrowserFeedback(lastBrowserSnapshot, message.params.arguments?.action, error) : undefined);
-          if (feedback) { lastFeedback = feedback; await saveCheckpoint({}).catch(() => {}); }
+          if (feedback) { lastFeedback = feedback; lastFailure = meaningfulFailure(feedback) ?? lastFailure; await saveCheckpoint({}).catch(() => {}); }
           send({ id: message.id, result: { success: false, contentItems: [{ type: "inputText", text: JSON.stringify({ error: /^[A-Z_]+$/u.test(error?.code ?? "") ? error.code : "DISCOVERY_TOOL_FAILED",
             ...(feedback ? { details: feedback.details } : {}),
             ...(message.params.tool === "discovery_browser" && message.params.arguments?.action === "finish"
@@ -684,7 +729,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
     const turn = await app.request("turn/start", { threadId, input: [{ type: "text", text: JSON.stringify({ identity: job.request.identity, target: job.request.target,
       input: job.request.input, deadlineAt: job.deadlineAt, attempt: job.attempts,
       trustedResumeUrls: [...restoredController.urls, ...(restoredController.readUrls ?? [])], activeBrowserTransport: browserTransport,
-      previousDiagnostic: restoredController.lastFeedback,
+      previousDiagnostic: restoredController.lastFeedback ?? restoredController.lastFailure,
       previousCheckpoint: typeof job.checkpoint?.summary === "string" ? job.checkpoint.summary.slice(0, 2000) : undefined }) }] });
     turnId = turn.turn?.id ?? turnId;
     if (!turnId) throw discoveryError("DISCOVERY_TURN_INVALID");
@@ -693,7 +738,14 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
       else signal?.addEventListener("abort", () => reject(discoveryError("DISCOVERY_CANCELLED")), { once: true });
     });
     await Promise.race([completion, aborted]);
-    if (!activated) throw discoveryError("DISCOVERY_NO_VERIFIED_RECIPE");
+    if (!activated) {
+      terminalDiagnostic = noVerifiedRecipeDiagnostic(lastFailure ?? lastFeedback);
+      // Save while this worker still owns its lease; the supervisor keeps the
+      // existing retry/outcome contract and cannot reconstruct model evidence.
+      try { await saveCheckpoint({}); }
+      catch { /* Preserve the observed failure if diagnostic persistence is unavailable or the lease became stale. */ }
+      throw discoveryError("DISCOVERY_NO_VERIFIED_RECIPE", { discoveryDiagnostic: terminalDiagnostic });
+    }
     return { outcome: "activated", activation: activated, metrics: metrics() };
   } catch (error) {
     if (error instanceof Error) error.discoveryMetrics = metrics();

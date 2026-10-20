@@ -71,7 +71,9 @@ async function main() {
   const venueAddressAt = args.indexOf("--venue-address");
   const venueAddress = venueAddressAt >= 0 ? args[venueAddressAt + 1] : undefined;
   if (venueAddress !== undefined && (venueAddress.length > 1024 || /[\u0000-\u001f\u007f]/u.test(venueAddress))) throw new Error("INVALID_VENUE_IDENTITY");
-  const session = await createCourseDiscoveryBrowserSession({ deadlineAt, initialUrls, timeZone, venueName, venueAddress }, { requestLease,
+  const officialUrlAt = args.indexOf("--venue-official-url");
+  const venueOfficialUrl = officialUrlAt >= 0 ? args[officialUrlAt + 1] : undefined;
+  const session = await createCourseDiscoveryBrowserSession({ deadlineAt, initialUrls, timeZone, venueName, venueAddress, venueOfficialUrl }, { requestLease,
     browserTransport: configuredTransport as "PINNED_HTTP" | "NATIVE_CHROME" });
   const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
   const timer = setTimeout(() => { input.close(); void session.close(); }, Math.max(1, deadlineAt.getTime() - Date.now()));

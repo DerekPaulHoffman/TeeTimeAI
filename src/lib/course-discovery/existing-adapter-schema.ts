@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { isUSchedulePublicRentalLabel } from "@/lib/automation/uschedule-public-read-policy";
 import { whooshSimulatorMetadataSchema } from "./whoosh-simulator-source";
+import { teeItUpOfficialIdentityProofSchema } from "./teeitup-official-identity";
 
 const numericId = z.number().int().min(1).max(2_147_483_647);
 const publicId = z.string().regex(/^[1-9]\d{0,9}$/u);
@@ -13,7 +14,8 @@ export const existingAdapterMetadataSchema = z.discriminatedUnion("family", [
     businessId: publicId, rentalProductIds: z.array(publicId).min(1).max(20)
       .refine(ids => new Set(ids).size === ids.length) }).strict(),
   z.object({ family: z.literal("TEEITUP"), alias: z.string().regex(/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u),
-    facilityIds: z.array(numericId).min(1).max(20).refine(ids => new Set(ids).size === ids.length) }).strict(),
+    facilityIds: z.array(numericId).min(1).max(20).refine(ids => new Set(ids).size === ids.length),
+    officialIdentityProof: teeItUpOfficialIdentityProofSchema.optional() }).strict(),
   z.object({ family: z.literal("USCHEDULE"), tenant: z.string().regex(/^[a-z][a-z0-9-]{2,62}$/u),
     serviceId: publicId, serviceName: z.string().trim().min(3).max(200).refine(isUSchedulePublicRentalLabel) }).strict(),
   whooshSimulatorMetadataSchema,

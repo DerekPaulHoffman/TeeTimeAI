@@ -21,6 +21,73 @@ const NON_RENTAL_PRIMARY_TYPES = new Set([
 const LESSON_OR_FITTING_PATH = /\/(?:golf-lessons?|golf-school|club-fitting)(?:\/|$)/i;
 export const SIMULATOR_DISCOVERY_CLASSIFICATION_VERSION = "public-rentals-v3";
 
+type SimulatorConfirmationDiagnostic = {
+  reason: "CONFIGURATION_MISSING" | "REQUEST_FAILED" | "UPSTREAM_HTTP_ERROR" | "MALFORMED_RESPONSE";
+  upstreamStatus?: number;
+  googleErrorCode?: number;
+  googleErrorStatus?: string;
+};
+
+export class SimulatorVenueConfirmationUnavailableError extends Error {
+  constructor(readonly diagnostic: SimulatorConfirmationDiagnostic) {
+    super("We could not verify this venue right now. Please try again shortly.");
+    this.name = "SimulatorVenueConfirmationUnavailableError";
+  }
+}
+
+function confirmationUnavailable(diagnostic: SimulatorConfirmationDiagnostic): never {
+  // Provider bodies, request URLs/headers, and selected venue details must not
+  // become application logs. These fixed codes still distinguish an upstream
+  // outage/configuration failure from a rejected simulator identity.
+  console.error("[simulator-place-confirmation-unavailable]", diagnostic);
+  throw new SimulatorVenueConfirmationUnavailableError(diagnostic);
+}
+
+async function readGoogleErrorDiagnostic(response: Response) {
+  const reader = response.body?.getReader();
+  if (!reader) return {};
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("DIAGNOSTIC_DEADLINE")), 1_000);
+  });
+  try {
+    const decoder = new TextDecoder();
+    let text = "";
+    let bytes = 0;
+    while (true) {
+      const { done, value } = await Promise.race([reader.read(), expired]);
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > 8_192) return {};
+      text += decoder.decode(value, { stream: true });
+    }
+    const error = JSON.parse(text + decoder.decode())?.error;
+    const statuses = new Set(["INVALID_ARGUMENT", "UNAUTHENTICATED", "PERMISSION_DENIED", "NOT_FOUND",
+      "RESOURCE_EXHAUSTED", "FAILED_PRECONDITION", "DEADLINE_EXCEEDED", "INTERNAL", "UNAVAILABLE", "UNKNOWN"]);
+    return {
+      ...(Number.isInteger(error?.code) && error.code >= 100 && error.code <= 599 ? { googleErrorCode: error.code as number } : {}),
+      ...(statuses.has(error?.status) ? { googleErrorStatus: error.status as string } : {}),
+    };
+  } catch {
+    return {};
+  } finally {
+    clearTimeout(timer);
+    void reader.cancel().catch(() => undefined);
+  }
+}
+
+function isCompletePlaceIdentity(value: unknown): value is GooglePlace {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const place = value as GooglePlace;
+  return typeof (place.id ?? place.name) === "string" && Boolean(place.id ?? place.name) &&
+    typeof place.displayName?.text === "string" && Boolean(place.displayName.text.trim()) &&
+    Number.isFinite(place.location?.latitude) && Number.isFinite(place.location?.longitude) &&
+    (place.types === undefined || Array.isArray(place.types) && place.types.every((type) => typeof type === "string")) &&
+    (place.primaryType === undefined || typeof place.primaryType === "string") &&
+    (place.businessStatus === undefined || typeof place.businessStatus === "string") &&
+    (place.websiteUri === undefined || typeof place.websiteUri === "string");
+}
+
 export function getReviewedPersistedSimulatorCandidates(reviews: GooglePlaceReviewIndex, offerings: SimulatorOfferingIndex) {
   return filterReviewedSimulatorCandidates(getPersistedSimulatorCandidates(offerings), reviews, offerings);
 }
@@ -39,32 +106,48 @@ export function filterReviewedSimulatorCandidates(candidates: CourseCandidate[],
 }
 
 export function filterSimulatorPlaces(places: GooglePlace[], reviews: GooglePlaceReviewIndex, offerings: SimulatorOfferingIndex) {
-  return places.filter((place) => {
+  return places.filter((place) => simulatorRejectionReason(place, reviews, offerings) === null);
+}
+
+function simulatorRejectionReason(place: GooglePlace, reviews: GooglePlaceReviewIndex, offerings: SimulatorOfferingIndex) {
     const id = (place.id ?? place.name ?? "").replace(/^places\//, "");
     const review = reviews.byPlaceId.get(id);
     const canonicalId = review?.canonicalPlaceId ?? id;
     const canonicalReview = reviews.byPlaceId.get(canonicalId);
     const offering = offerings.byPlaceId.get(canonicalId);
-    if (!id || !place.displayName?.text || !Number.isFinite(place.location?.latitude) || !Number.isFinite(place.location?.longitude) ||
-      (place.businessStatus && place.businessStatus !== "OPERATIONAL")) return false;
-    if (offering && (!offering.active || offering.publicAccessStatus === "NOT_PUBLIC")) return false;
-    if ([review, canonicalReview].some((fact) => fact?.classification === "MEMBERS_ONLY_SIMULATOR")) return false;
+    if (!id || !place.displayName?.text || !Number.isFinite(place.location?.latitude) || !Number.isFinite(place.location?.longitude)) return "MISSING_REQUIRED_IDENTITY";
+    if (place.businessStatus && place.businessStatus !== "OPERATIONAL") return "NOT_OPERATIONAL";
+    if (offering && (!offering.active || offering.publicAccessStatus === "NOT_PUBLIC")) return "OFFERING_NOT_PUBLIC";
+    if ([review, canonicalReview].some((fact) => fact?.classification === "MEMBERS_ONLY_SIMULATOR")) return "REVIEWED_MEMBERS_ONLY";
     const verified = hasVerifiedPublicSimulatorRental(offering);
     // An outdoor non-course review is retained. Only simulator classifications may
     // be explored here; a reviewed rental may independently establish public access.
     if (!verified && [review, canonicalReview].some((fact) => fact?.accessOverride === "VERIFIED_PRIVATE" ||
-      (fact?.accessOverride === "VERIFIED_NON_COURSE" && fact.classification !== "INDOOR_SIMULATOR"))) return false;
+      (fact?.accessOverride === "VERIFIED_NON_COURSE" && fact.classification !== "INDOOR_SIMULATOR"))) return "REVIEWED_PRIVATE_OR_NON_COURSE";
     const name = place.displayName.text;
-    if (verified) return true;
+    if (verified) return null;
     const primaryType = place.primaryType ?? "";
-    if (NON_RENTAL_NAME.test(name) || MEMBERS_ONLY.test(name) || RESIDENTIAL_NAME.test(name) ||
-      NON_RENTAL_PRIMARY_TYPES.has(primaryType) || primaryType.endsWith("_store") || primaryType.endsWith("_shop") ||
-      hasLessonOrFittingWebsite(place.websiteUri)) return false;
+    if (NON_RENTAL_NAME.test(name) || MEMBERS_ONLY.test(name) || RESIDENTIAL_NAME.test(name)) return "EXCLUDED_NAME";
+    if (NON_RENTAL_PRIMARY_TYPES.has(primaryType) || primaryType.endsWith("_store") || primaryType.endsWith("_shop")) return "EXCLUDED_PRIMARY_TYPE";
+    if (hasLessonOrFittingWebsite(place.websiteUri)) return "EXCLUDED_WEBSITE_PATH";
     // Text relevance and a website alone can surface apartments and other unrelated
     // businesses. Preserve likely golf hybrids without treating them as verified rentals.
     return place.types?.includes("indoor_golf_course") || [review, canonicalReview].some((fact) =>
-      fact?.classification === "INDOOR_SIMULATOR") || (Boolean(place.websiteUri) && /\bgolf\b/i.test(name));
+      fact?.classification === "INDOOR_SIMULATOR") || (Boolean(place.websiteUri) && /\bgolf\b/i.test(name))
+      ? null : "MISSING_SIMULATOR_EVIDENCE";
+}
+
+function rejectSimulatorIdentity(reason: NonNullable<ReturnType<typeof simulatorRejectionReason>> | "EXACT_ID_MISMATCH", place: GooglePlace, upstreamStatus: number): never {
+  const primaryTypes = new Set(["indoor_golf_course", "golf_course", "golf_instructor", "sports_coaching", "sports_school",
+    "bar", "sports_bar", "sports_complex", "store", "sporting_goods_store", "apartment_building", "apartment_complex",
+    "condominium_complex", "housing_complex", "real_estate_agency"]);
+  const statuses = new Set(["OPERATIONAL", "CLOSED_TEMPORARILY", "CLOSED_PERMANENTLY"]);
+  console.error("[simulator-place-confirmation-rejected]", {
+    reason, upstreamStatus,
+    ...(primaryTypes.has(place.primaryType ?? "") ? { primaryType: place.primaryType } : {}),
+    ...(statuses.has(place.businessStatus ?? "") ? { businessStatus: place.businessStatus } : {}),
   });
+  throw new Error("The selected venue could not be confirmed as a simulator. Refresh the venues and try again.");
 }
 
 function hasLessonOrFittingWebsite(website: string | undefined) {
@@ -93,19 +176,27 @@ export async function getSimulatorVenueForDemand(googlePlaceId: string, reviews:
     throw new Error("The selected simulator venue is invalid. Refresh the venues and try again.");
   }
   const key = getGooglePlacesApiKey();
-  if (!key) throw new Error("GOOGLE_PLACES_API_KEY is not configured");
-  const { response, json } = await fetchGooglePlacesJsonWithRetry<GooglePlace>(
-    `https://places.googleapis.com/v1/places/${encodeURIComponent(googlePlaceId)}`, {
-      headers: { "X-Goog-Api-Key": key, "X-Goog-FieldMask":
-        "id,displayName,formattedAddress,addressComponents,location,websiteUri,nationalPhoneNumber,types,primaryType,businessStatus" },
-      signal: AbortSignal.timeout(12_000),
-    },
-  );
-  const emptyOfferings: SimulatorOfferingIndex = { byPlaceId: new Map(), reviewVersion: "none" };
-  if (!response.ok || !json || (json.id ?? json.name?.replace(/^places\//, "")) !== googlePlaceId ||
-    filterSimulatorPlaces([json], reviews, emptyOfferings).length !== 1) {
-    throw new Error("The selected venue could not be confirmed as a simulator. Refresh the venues and try again.");
+  if (!key) confirmationUnavailable({ reason: "CONFIGURATION_MISSING" });
+  let result: Awaited<ReturnType<typeof fetchGooglePlacesJsonWithRetry<GooglePlace>>>;
+  try {
+    result = await fetchGooglePlacesJsonWithRetry<GooglePlace>(
+      `https://places.googleapis.com/v1/places/${encodeURIComponent(googlePlaceId)}`, {
+        headers: { "X-Goog-Api-Key": key, "X-Goog-FieldMask":
+          "id,displayName,formattedAddress,addressComponents,location,websiteUri,nationalPhoneNumber,types,primaryType,businessStatus" },
+        signal: AbortSignal.timeout(12_000),
+      },
+    );
+  } catch (error) {
+    confirmationUnavailable({ reason: error instanceof SyntaxError ? "MALFORMED_RESPONSE" : "REQUEST_FAILED" });
   }
+  const { response, json } = result;
+  if (!response.ok) confirmationUnavailable({ reason: "UPSTREAM_HTTP_ERROR", upstreamStatus: response.status,
+    ...await readGoogleErrorDiagnostic(response) });
+  if (!isCompletePlaceIdentity(json)) confirmationUnavailable({ reason: "MALFORMED_RESPONSE", upstreamStatus: response.status });
+  const emptyOfferings: SimulatorOfferingIndex = { byPlaceId: new Map(), reviewVersion: "none" };
+  if ((json.id ?? json.name?.replace(/^places\//, "")) !== googlePlaceId) rejectSimulatorIdentity("EXACT_ID_MISMATCH", json, response.status);
+  const rejection = simulatorRejectionReason(json, reviews, emptyOfferings);
+  if (rejection) rejectSimulatorIdentity(rejection, json, response.status);
   const candidate = mapGooglePlaceToCourseCandidate(json, reviews);
   return { ...candidate, website: getSafeCustomerBookingUrl(candidate.website) ?? undefined };
 }

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildGooglePlaceReviewIndex, type GooglePlaceReviewRecord } from "./google-place-reviews";
 import type { GooglePlace } from "./google";
-import { filterSimulatorPlaces, getSimulatorVenueForDemand, searchNearbySimulatorVenues, searchSimulatorVenuesByName } from "./simulator-google";
+import { filterSimulatorPlaces, getSimulatorVenueForDemand, searchNearbySimulatorVenues, searchSimulatorVenuesByName, SimulatorVenueConfirmationUnavailableError } from "./simulator-google";
 import { buildSimulatorOfferingIndex, type SimulatorOfferingRecord } from "./simulator-offerings";
 
 const reviews = buildGooglePlaceReviewIndex([]);
@@ -10,7 +10,7 @@ const place: GooglePlace = { id: "place-1", displayName: { text: "Example Indoor
   primaryType: "indoor_golf_course", types: ["indoor_golf_course"], businessStatus: "OPERATIONAL",
   location: { latitude: 41.24, longitude: -73.2 }, websiteUri: "https://venue.example" };
 const oldKey = process.env.GOOGLE_PLACES_API_KEY;
-afterEach(() => { vi.unstubAllGlobals(); if (oldKey === undefined) delete process.env.GOOGLE_PLACES_API_KEY; else process.env.GOOGLE_PLACES_API_KEY = oldKey; });
+afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); if (oldKey === undefined) delete process.env.GOOGLE_PLACES_API_KEY; else process.env.GOOGLE_PLACES_API_KEY = oldKey; });
 
 describe("simulator Places discovery", () => {
   it("allows a private bay but rejects members-only facilities and non-rental fittings", () => {
@@ -59,6 +59,96 @@ describe("simulator Places discovery", () => {
     await expect(getSimulatorVenueForDemand("place-1", reviews)).rejects.toThrow(/could not be confirmed/i);
     await expect(getSimulatorVenueForDemand("https://127.0.0.1/admin", reviews)).rejects.toThrow(/invalid/i);
     expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([403, 429, 503])("classifies upstream HTTP %s as retryable without leaking provider error details", async (status) => {
+    process.env.GOOGLE_PLACES_API_KEY = "private-api-key";
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: {
+      code: status, status: "PERMISSION_DENIED", message: "private-api-key owner@example.com https://example.com/?key=secret",
+      details: [{ reason: "private-api-key" }],
+    } }), { status, headers: { "Retry-After": "60" } })));
+    await expect(getSimulatorVenueForDemand("place-1", reviews)).rejects.toMatchObject({
+      name: "SimulatorVenueConfirmationUnavailableError",
+      diagnostic: { reason: "UPSTREAM_HTTP_ERROR", upstreamStatus: status, googleErrorCode: status, googleErrorStatus: "PERMISSION_DENIED" },
+    });
+    expect(log).toHaveBeenCalledWith("[simulator-place-confirmation-unavailable]", {
+      reason: "UPSTREAM_HTTP_ERROR", upstreamStatus: status, googleErrorCode: status, googleErrorStatus: "PERMISSION_DENIED",
+    });
+    expect(JSON.stringify(log.mock.calls)).not.toMatch(/private-api-key|owner@example|key=secret/);
+  });
+
+  it.each([null, {}, { ...place, id: undefined }, { ...place, location: undefined }, { ...place, types: "indoor_golf_course" }])(
+    "treats incomplete or malformed successful Details responses as unavailable", async (body) => {
+      process.env.GOOGLE_PLACES_API_KEY = "test-key";
+      vi.spyOn(console, "error").mockImplementation(() => undefined);
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(body), { status: 200 })));
+      await expect(getSimulatorVenueForDemand("place-1", reviews)).rejects.toMatchObject({
+        name: "SimulatorVenueConfirmationUnavailableError", diagnostic: { reason: "MALFORMED_RESPONSE", upstreamStatus: 200 },
+      });
+    },
+  );
+
+  it("does not expose transport failures or malformed JSON as an invalid venue", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("secret url and provider data"); }));
+    await expect(getSimulatorVenueForDemand("place-1", reviews)).rejects.toMatchObject({
+      diagnostic: { reason: "REQUEST_FAILED" },
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("not-json secret provider data", { status: 200 })));
+    await expect(getSimulatorVenueForDemand("place-1", reviews)).rejects.toMatchObject({
+      diagnostic: { reason: "MALFORMED_RESPONSE" },
+    });
+    expect(JSON.stringify(log.mock.calls)).not.toContain("secret");
+  });
+
+  it("preserves simulator classification across Search and exact Details for mixed-use indoor venues", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    const hybrid = { ...place, types: ["indoor_golf_course", "golf_course", "sports_coaching", "sports_school", "sports_bar"] };
+    expect(filterSimulatorPlaces([hybrid], reviews, emptyOfferings)).toEqual([hybrid]);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(hybrid), { status: 200 })));
+    await expect(getSimulatorVenueForDemand("place-1", reviews)).resolves.toMatchObject({ googlePlaceId: "place-1" });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ...hybrid, primaryType: "golf_instructor" }), { status: 200 })));
+    const error = await getSimulatorVenueForDemand("place-1", reviews).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(SimulatorVenueConfirmationUnavailableError);
+    expect((error as Error).message).toMatch(/could not be confirmed/);
+  });
+
+  it.each([
+    { overrides: { id: "secret-other-place" }, reason: "EXACT_ID_MISMATCH", primaryType: "indoor_golf_course", businessStatus: "OPERATIONAL" },
+    { overrides: { businessStatus: "CLOSED_TEMPORARILY" }, reason: "NOT_OPERATIONAL", primaryType: "indoor_golf_course", businessStatus: "CLOSED_TEMPORARILY" },
+    { overrides: { businessStatus: "secret-unrecognized-status" }, reason: "NOT_OPERATIONAL", primaryType: "indoor_golf_course" },
+    { overrides: { displayName: { text: "secret-name Members Only Indoor Golf" } }, reason: "EXCLUDED_NAME", primaryType: "indoor_golf_course", businessStatus: "OPERATIONAL" },
+    { overrides: { primaryType: "secret_unrecognized_store" }, reason: "EXCLUDED_PRIMARY_TYPE", businessStatus: "OPERATIONAL" },
+    { overrides: { websiteUri: "https://secret.example/golf-lessons/private" }, reason: "EXCLUDED_WEBSITE_PATH", primaryType: "indoor_golf_course", businessStatus: "OPERATIONAL" },
+    { overrides: { displayName: { text: "secret-name" }, primaryType: "secret_unrecognized_type", types: [] }, reason: "MISSING_SIMULATOR_EVIDENCE", businessStatus: "OPERATIONAL" },
+  ])("records a bounded reason for genuine rejection: $reason", async ({ overrides, reason, primaryType, businessStatus }) => {
+    process.env.GOOGLE_PLACES_API_KEY = "secret-api-key";
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const providerPlace = { ...place, ...overrides, formattedAddress: "secret-address" };
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(providerPlace), { status: 200 })));
+    const error = await getSimulatorVenueForDemand("place-1", reviews).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(SimulatorVenueConfirmationUnavailableError);
+    expect((error as Error).message).toMatch(/could not be confirmed/);
+    expect(log).toHaveBeenCalledWith("[simulator-place-confirmation-rejected]", {
+      reason, upstreamStatus: 200, ...(primaryType ? { primaryType } : {}), ...(businessStatus ? { businessStatus } : {}),
+    });
+    expect(JSON.stringify(log.mock.calls)).not.toContain("secret");
+  });
+
+  it("keeps exact reviewed exclusions as400 with a fixed diagnostic", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(place), { status: 200 })));
+    await expect(getSimulatorVenueForDemand("place-1", buildGooglePlaceReviewIndex([
+      review("place-1", "MEMBERS_ONLY_SIMULATOR", null),
+    ]))).rejects.toThrow(/could not be confirmed/);
+    expect(log).toHaveBeenCalledWith("[simulator-place-confirmation-rejected]", {
+      reason: "REVIEWED_MEMBERS_ONLY", upstreamStatus: 200, primaryType: "indoor_golf_course", businessStatus: "OPERATIONAL",
+    });
   });
 
   it.each(["direct", "canonical alias"])("does not recover a %s private rental from saved provisional demand", async (identity) => {

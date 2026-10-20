@@ -16,6 +16,7 @@ import { createTeeSearchForUser, listTeeSearchesForUser } from "@/lib/searches/s
 import { SearchEmailDeliveryInProgressError } from "@/lib/users/pending-email";
 import { teeSearchInputSchema } from "@/lib/validation/search";
 import { isSimulatorModeEnabled } from "@/lib/simulators/config";
+import { SimulatorVenueConfirmationUnavailableError } from "@/lib/places/simulator-google";
 
 export async function GET() {
   if (!hasDatabaseConfig()) {
@@ -175,6 +176,9 @@ function accountSetupError() {
 }
 
 function handleAppError(error: unknown) {
+  if (error instanceof SimulatorVenueConfirmationUnavailableError) {
+    return NextResponse.json({ error: error.message, retryable: true }, { status: 503 });
+  }
   if (error instanceof SearchEmailDeliveryInProgressError) {
     return NextResponse.json(
       { error: error.message, retryable: true },

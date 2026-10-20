@@ -16,6 +16,7 @@ import { requestFamilyForUrl } from "./request-family";
 import { assertTeeItUpRecipeAvailability, parseTeeItUpRecipeSource, resolveTeeItUpRecipeFacilities, teeItUpRecipeBookingUrl, type TeeItUpRecipeFacility } from "./teeitup-recipe-source";
 import { parseWhooshSimulatorSource } from "./whoosh-simulator-source";
 import { executeWhooshSimulator, inspectWhooshSimulator } from "./whoosh-simulator-executor";
+import { deriveTeeItUpOfficialIdentityProof, type OfficialIdentityPage, type TeeItUpOfficialIdentityProof } from "./teeitup-official-identity";
 
 type Dependencies = {
   fetch?: typeof fetch;
@@ -23,8 +24,9 @@ type Dependencies = {
   deadlineAt?: Date;
   requestLease?: <T>(family: string, work: () => Promise<T>) => Promise<{ acquired: true; value: T } | { acquired: false }>;
   venueMatches: (expected: string, observed: unknown) => boolean;
+  officialIdentityPage?: OfficialIdentityPage;
 };
-type Source = Pick<ExistingAdapterRecipe["source"], "bookingUrl" | "venueName" | "venueAddress" | "timeZone">;
+type Source = Pick<ExistingAdapterRecipe["source"], "bookingUrl" | "venueName" | "venueAddress" | "timeZone"> & { officialUrl?: string };
 const publicId = /^[1-9]\d{0,9}$/u;
 const foreupPath = /^\/index\.php\/booking\/([1-9]\d{0,9})(?:\/([1-9]\d{0,9}))?\/?$/u;
 
@@ -59,6 +61,7 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
   let acuity: AcuityPublicConfiguration | undefined;
   const teeitup = family === "TEEITUP" ? parseTeeItUpRecipeSource(source.bookingUrl)! : undefined;
   let teeitupFacilities: TeeItUpRecipeFacility[] | undefined;
+  let officialIdentityProof: TeeItUpOfficialIdentityProof | undefined;
   let availabilityWasArray = false;
   let transportFailure: string | undefined;
   let requests = 0;
@@ -66,6 +69,8 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
     if (!isSafeRecipeUrl(value)) return fail("UNSCOPED_ADAPTER_REQUEST");
     const url = new URL(value);
     if (url.href === booking.href) return url;
+    if (adapter?.family === "TEEITUP" && adapter.officialIdentityProof && url.href === adapter.officialIdentityProof.officialPageUrl &&
+        source.officialUrl && url.origin === new URL(source.officialUrl).origin) return url;
     if (teeitup && url.origin === "https://phx-api-be-east-1b.kenna.io") {
       if (url.pathname === `/alias/${teeitup.alias}/facilities` && !url.search) return url;
       if (input && adapter?.family === "TEEITUP" && teeitupFacilities && url.pathname === "/v2/tee-times" &&
@@ -114,8 +119,20 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
       const bytes = await response.arrayBuffer();
       if (bytes.byteLength > 600_000) fail("ADAPTER_RESPONSE_LIMIT");
       const text = Buffer.from(bytes).toString("utf8");
+      if (adapter?.family === "TEEITUP" && adapter.officialIdentityProof && url.href === adapter.officialIdentityProof.officialPageUrl) {
+        if (!/^text\/html(?:;|$)/iu.test(response.headers.get("content-type") ?? "")) fail("OFFICIAL_IDENTITY_UNVERIFIED");
+        const current = deriveTeeItUpOfficialIdentityProof(source, { url: url.href, html: text });
+        if (JSON.stringify(current) !== JSON.stringify(adapter.officialIdentityProof)) fail("OFFICIAL_IDENTITY_CHANGED");
+        officialIdentityProof = current;
+      }
       if (teeitup && url.pathname === `/alias/${teeitup.alias}/facilities`) {
-        teeitupFacilities = resolveTeeItUpRecipeFacilities(source, JSON.parse(text));
+        if (adapter?.family === "TEEITUP" && adapter.officialIdentityProof && !officialIdentityProof) fail("OFFICIAL_IDENTITY_UNVERIFIED");
+        try { teeitupFacilities = resolveTeeItUpRecipeFacilities(source, JSON.parse(text), officialIdentityProof); }
+        catch (error) {
+          if (adapter || !deps.officialIdentityPage || !(error instanceof Error) || error.message !== "ADAPTER_IDENTITY_MISMATCH") throw error;
+          officialIdentityProof = deriveTeeItUpOfficialIdentityProof(source, deps.officialIdentityPage, { requireVisibleEvidence: true });
+          teeitupFacilities = resolveTeeItUpRecipeFacilities(source, JSON.parse(text), officialIdentityProof);
+        }
         if (adapter && (adapter.family !== "TEEITUP" || adapter.alias !== teeitup.alias ||
             JSON.stringify(adapter.facilityIds) !== JSON.stringify(teeitupFacilities.map(row => row.id)))) fail("ADAPTER_CONFIGURATION_CHANGED");
       }
@@ -146,7 +163,8 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
       return new Response(bytes, { status: response.status, headers: response.headers });
     });
   };
-  return { read, family, teeitup, teeitupFacilities: () => teeitupFacilities, dispose: () => queue.dispose(), availabilityWasArray: () => availabilityWasArray, failureReason: () => transportFailure };
+  return { read, family, teeitup, teeitupFacilities: () => teeitupFacilities, officialIdentityProof: () => officialIdentityProof,
+    dispose: () => queue.dispose(), availabilityWasArray: () => availabilityWasArray, failureReason: () => transportFailure };
 }
 
 /** For a controller-observed provider URL only. Reads typed public configuration
@@ -171,7 +189,7 @@ export async function inspectExistingAdapter(source: Source, deps: Dependencies)
         accept: "application/json", "x-be-alias": session.teeitup.alias, origin: session.teeitup.origin, referer: `${session.teeitup.origin}/`,
       } });
       return { adapter: existingAdapterMetadataSchema.parse({ family: "TEEITUP", alias: session.teeitup.alias,
-        facilityIds: session.teeitupFacilities()!.map(row => row.id) }) };
+        facilityIds: session.teeitupFacilities()!.map(row => row.id), ...(session.officialIdentityProof() ? { officialIdentityProof: session.officialIdentityProof() } : {}) }) };
     }
     if (session.family === "FOREUP") {
       const config = await readForeupPublicConfiguration({ bookingUrl: source.bookingUrl, courseName: source.venueName,
@@ -243,6 +261,7 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
       return result(slots);
     }
     if (adapter.family === "TEEITUP") {
+      if (adapter.officialIdentityProof) await session!.read(adapter.officialIdentityProof.officialPageUrl);
       const origin = new URL(recipe.source.bookingUrl).origin;
       const bookingBaseUrl = adapter.facilityIds.length === 1 ? `${origin}/?course=${adapter.facilityIds[0]}` : `${origin}/`;
       const available = await fetchTeeItUpTeeSheet({ courseId: recipe.target.courseId, date: new Date(`${input.date}T00:00:00Z`), players: input.players, timeZone: input.timeZone,

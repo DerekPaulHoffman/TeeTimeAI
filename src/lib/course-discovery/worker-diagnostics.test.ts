@@ -1,8 +1,24 @@
 import { describe, expect, it } from "vitest";
-import { bindDiscoveryRecipeIdentity, discoveryBrowserFeedback, readDiscoveryControllerCheckpoint } from "../../../scripts/automation/course-discovery-worker.mjs";
+import { bindDiscoveryRecipeIdentity, discoveryBrowserFeedback, noVerifiedRecipeDiagnostic, readDiscoveryControllerCheckpoint } from "../../../scripts/automation/course-discovery-worker.mjs";
 import { safeBrowserActionIssues } from "../../../scripts/automation/course-discovery-diagnostics.mjs";
 
 describe("durable discovery browser diagnostics", () => {
+  it("retains sanitized adapter identity evidence without interpreting an unverified result as a tool crash or access wall", () => {
+    const feedback = discoveryBrowserFeedback({ url: "https://venue.example/times?date=2026-10-23", requests: [] }, "inspect_adapter",
+      { code: "ADAPTER_IDENTITY_MISMATCH", message: "secret raw provider response" });
+    const diagnostic = noVerifiedRecipeDiagnostic(feedback);
+    expect(diagnostic).toEqual({ code: "NO_VERIFIED_RECIPE", reason: "ADAPTER_IDENTITY_MISMATCH", evidence: {
+      code: "DISCOVERY_BROWSER_INCOMPLETE", details: { action: "inspect_adapter", failure: {
+        code: "ADAPTER_IDENTITY_MISMATCH", url: "https://venue.example/times" }, requests: [] } } });
+    const restored = readDiscoveryControllerCheckpoint({ controller: { version: 1, officialUrl: "https://venue.example/",
+      observedNavigationUrls: [], lastFailure: feedback } }, "https://venue.example/");
+    expect(noVerifiedRecipeDiagnostic(restored.lastFailure)).toEqual(diagnostic);
+    expect(JSON.stringify(diagnostic)).not.toMatch(/secret|2026|ACCESS_REQUIRED|TOOL_FAILURE/);
+    expect(noVerifiedRecipeDiagnostic({ code: "injected", details: { reason: "PRIVATE_VALUE" } }))
+      .toEqual({ code: "NO_VERIFIED_RECIPE", reason: "NO_RECIPE_VERIFIED" });
+    expect(noVerifiedRecipeDiagnostic(discoveryBrowserFeedback({ loading: true, pendingRequestCount: 1, requests: [] }, "observe")))
+      .toEqual({ code: "NO_VERIFIED_RECIPE", reason: "NO_RECIPE_VERIFIED" });
+  });
   it("preserves bounded argument schema issues without rejected values or unknown property names", () => {
     const issues = [{ path: ["target"], code: "invalid_type", input: "private-value", message: "private-value" },
       { path: [], code: "unrecognized_keys", keys: ["selector", "private@example.org"] }];
@@ -21,6 +37,24 @@ describe("durable discovery browser diagnostics", () => {
     expect(bindDiscoveryRecipeIdentity(proposed, job).source.venueAddress).toBe("12 Public Road");
     const withoutAddress = { ...job, request: { ...job.request, identity: { ...job.request.identity, address: undefined } } };
     expect(bindDiscoveryRecipeIdentity(proposed, withoutAddress).source).not.toHaveProperty("venueAddress");
+  });
+  it("copies an alternate-address proof only from the current exact controller observation", () => {
+    const job = { id: "job-1", request: { target: { courseId: "course" }, identity: { name: "Public course", officialUrl: "https://venue.example/" }, input: { timeZone: "UTC" } } };
+    const proposed = { source: { bookingUrl: "https://public.book.teeitup.com/" },
+      adapter: { family: "TEEITUP", alias: "public", facilityIds: [7], officialIdentityProof: { forged: true } } };
+    const observed = { jobId: job.id, officialUrl: job.request.identity.officialUrl, bookingUrl: proposed.source.bookingUrl,
+      adapter: { family: "TEEITUP", alias: "public", facilityIds: [7], officialIdentityProof: { source: "https://venue.example/", digest: "trusted" } } };
+    expect(bindDiscoveryRecipeIdentity(proposed, job).adapter).not.toHaveProperty("officialIdentityProof");
+    expect(bindDiscoveryRecipeIdentity(proposed, job, observed).adapter.officialIdentityProof).toEqual(observed.adapter.officialIdentityProof);
+    for (const mismatch of [
+      { ...observed, jobId: "another-job" },
+      { ...observed, officialUrl: "https://other.example/" },
+      { ...observed, bookingUrl: "https://other.book.teeitup.com/" },
+      { ...observed, adapter: { ...observed.adapter, alias: "other" } },
+      { ...observed, adapter: { ...observed.adapter, facilityIds: [8] } },
+      { ...observed, adapter: { ...observed.adapter, officialIdentityProof: "malformed" } },
+    ]) expect(bindDiscoveryRecipeIdentity(proposed, job, mismatch).adapter).not.toHaveProperty("officialIdentityProof");
+    expect(proposed.adapter.officialIdentityProof).toEqual({ forged: true });
   });
   it("retains public bootstrap failures across a checkpoint without retaining bodies, query values or page text", () => {
     const feedback = discoveryBrowserFeedback({ url: "https://venue.example/", text: "do not retain this text",

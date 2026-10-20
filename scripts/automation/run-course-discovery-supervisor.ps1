@@ -73,7 +73,7 @@ try {
       $record = $line | ConvertFrom-Json
       if (-not $record.event -or $line.Length -gt 16384) { throw 'INVALID_LOG_RECORD' }
       $safe = [ordered]@{}
-      foreach ($key in @('event', 'active', 'kind', 'code', 'jobId', 'firstPickedUpAt', 'startedAt', 'deadlineAt', 'completedAt', 'observedAt')) {
+      foreach ($key in @('event', 'active', 'kind', 'code', 'diagnosticCode', 'diagnosticReason', 'jobId', 'firstPickedUpAt', 'startedAt', 'deadlineAt', 'completedAt', 'observedAt')) {
         $value = $record.$key
         if ($null -ne $value -and ([string]$value) -match '^[A-Za-z0-9_.:+-]{1,200}$') { $safe[$key] = $value }
       }

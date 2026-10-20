@@ -3,6 +3,7 @@ import { executeExistingAdapterRecipe, inspectExistingAdapter } from "./existing
 import { existingAdapterMetadataSchema, type ExistingAdapterRecipe } from "./existing-adapter-schema";
 import { recipeTimeToInstant, venueProofMatches } from "./executor";
 import { parseAccessRecipe } from "./recipe";
+import { deriveTeeItUpOfficialIdentityProof } from "./teeitup-official-identity";
 
 const input = { date: "2030-10-22", timeZone: "America/New_York", players: 2, startTime: "10:00", endTime: "20:00" };
 const now = () => new Date("2030-10-20T12:00:00Z");
@@ -111,6 +112,48 @@ describe("fixed existing adapter recipes", () => {
     const fetch = teeitupReads([], [teeitupDirectory[0], { ...teeitupDirectory[1], address: "11 Harbor Drive, Example, NY 12345, US" }]);
     expect(await executeExistingAdapterRecipe(teeitup, input, { ...deps, fetch })).toMatchObject({ status: "INCOMPLETE", complete: false });
     expect(fetch).toHaveBeenCalledOnce();
+  });
+  it("uses a browser-corroborated official alternate address without changing the canonical address, and freshly validates every replay", async () => {
+    const source = { ...teeitup.source, bookingUrl: "https://harbor.book.teeitup.com/" };
+    const html = '<html><head><title>Harbor Golf Course | Public Golf</title></head><body><h1>Harbor Golf Course</h1>' +
+      '<p>20 Harbor Road, Example, NY 12345, US</p><a href="https://harbor.book.teeitup.com/">Tee Times</a></body></html>';
+    const officialIdentityPage = { url: source.officialUrl, html, visibleEvidence: { title: "Harbor Golf Course | Public Golf",
+      headings: ["Harbor Golf Course"], addressTexts: ["20 Harbor Road, Example, NY 12345, US"], linkUrls: [source.bookingUrl] } };
+    const directory = [{ ...teeitupDirectory[0], name: "Harbor Golf Club", address: "20 Harbor Rd, Example, NY 12345, USA" }];
+    const fetch = vi.fn<typeof globalThis.fetch>(async value => {
+      const url = new URL(String(value));
+      return url.origin === new URL(source.officialUrl).origin ? new Response(html, { headers: { "content-type": "text/html" } }) :
+        Response.json(url.pathname.endsWith("/facilities") ? directory : [{ teetimes: [{ courseId: "provider-11", teetime: "2030-10-22T15:00:00Z", rates: [{ allowedPlayers: [1, 2] }] }] }]);
+    });
+    await expect(inspectExistingAdapter(source, { ...deps, fetch })).rejects.toThrow("ADAPTER_IDENTITY_MISMATCH");
+    const { adapter } = await inspectExistingAdapter(source, { ...deps, fetch, officialIdentityPage });
+    expect(adapter).toMatchObject({ family: "TEEITUP", facilityIds: [11], officialIdentityProof: { kind: "OFFICIAL_SOURCE_ADDRESS" } });
+    const recipe = parseAccessRecipe({ ...teeitup, source, adapter }) as ExistingAdapterRecipe;
+    for (let pass = 0; pass < 2; pass++) expect(await executeExistingAdapterRecipe(recipe, input, { ...deps, fetch })).toMatchObject({ status: "AVAILABLE", complete: true });
+    expect(fetch.mock.calls.filter(([url]) => String(url) === source.officialUrl)).toHaveLength(2);
+    expect(recipe.source.venueAddress).toBe("10 Harbor Drive, Example, NY 12345, USA");
+  });
+  it.each(["link", "address", "markup", "off-origin", "ambiguous-directory"])("fails closed before availability when fresh official evidence changes: %s", async mutation => {
+    const source = { ...teeitup.source, bookingUrl: "https://harbor.book.teeitup.com/" };
+    const html = '<html><head><title>Harbor Golf Club</title></head><body><h1>Harbor Golf Club</h1>' +
+      '<p>20 Harbor Road, Example, NY 12345, US</p><a href="https://harbor.book.teeitup.com/">Tee Times</a></body></html>';
+    const proof = deriveTeeItUpOfficialIdentityProof(source, { url: source.officialUrl, html });
+    const recipe = parseAccessRecipe({ ...teeitup, source, adapter: { family: "TEEITUP", alias: "harbor", facilityIds: [11], officialIdentityProof: proof } }) as ExistingAdapterRecipe;
+    const row = { ...teeitupDirectory[0], name: "Harbor Golf Club", address: "20 Harbor Road, Example, NY 12345, US" };
+    const fetch = vi.fn<typeof globalThis.fetch>(async value => {
+      const url = new URL(String(value));
+      if (url.origin === new URL(source.officialUrl).origin) {
+        const changed = mutation === "link" ? html.replace('href="https://harbor.book', 'href="https://other.book') :
+          mutation === "address" ? html.replace("20 Harbor", "21 Harbor") : mutation === "markup" ? html.replace("<p>", '<p class="changed">') : html;
+        const response = new Response(changed, { headers: { "content-type": "text/html" } });
+        if (mutation === "off-origin") Object.defineProperty(response, "url", { value: "https://other.example.org/" });
+        return response;
+      }
+      return Response.json(mutation === "ambiguous-directory" ? [row, { ...row, id: 33, courseId: "other" }] : [row]);
+    });
+    const result = await executeExistingAdapterRecipe(recipe, input, { ...deps, fetch });
+    expect(result).toMatchObject({ status: "INCOMPLETE", complete: false, slots: [] });
+    expect(fetch.mock.calls.some(([value]) => String(value).includes("/v2/tee-times"))).toBe(false);
   });
   it("accepts directory order changes without changing the exact facility set or requested booking date", async () => {
     const fetch = teeitupReads([], [...teeitupDirectory].reverse());

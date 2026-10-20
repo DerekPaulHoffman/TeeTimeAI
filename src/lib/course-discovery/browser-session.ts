@@ -21,6 +21,7 @@ import { observedPublicDropdowns, selectPublicDropdown, type PublicDropdownProof
 import { venueProofMatches } from "./executor";
 import type { ExistingAdapterMetadata } from "./existing-adapter-schema";
 import { publicResponseSchema, type PublicResponseSchema } from "./public-response-schema";
+import type { OfficialIdentityPage } from "./teeitup-official-identity";
 
 const identifier = z.union([z.string().max(128), z.number().int()]);
 export const discoveryBrowserActionSchema = z.discriminatedUnion("action", [
@@ -124,7 +125,7 @@ export function redactDiscoveryJson(value: unknown, depth = 0): unknown {
 /** Scoped, disposable discovery browser. The model receives data and opaque
  * control IDs; it never receives browser/CDP access or a JavaScript evaluator. */
 export async function createCourseDiscoveryBrowserSession(input: {
-  deadlineAt: Date; initialUrls: string[]; timeZone?: string; venueName?: string; venueAddress?: string;
+  deadlineAt: Date; initialUrls: string[]; timeZone?: string; venueName?: string; venueAddress?: string; venueOfficialUrl?: string;
 }, deps: DiscoveryBrowserSessionDependencies = {}) {
   const startupStartedAt = Date.now();
   if (!input.initialUrls.length || input.initialUrls.length > 16 || !input.initialUrls.every(isSafeRecipeUrl)) throw new Error("INVALID_INITIAL_URLS");
@@ -134,6 +135,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
   const cancellation = new AbortController();
   const deadline = AbortSignal.any([AbortSignal.timeout(remaining), cancellation.signal]);
   const allowedNavigation = new Set(input.initialUrls.map(value => new URL(value).href));
+  let officialIdentityPage: (OfficialIdentityPage & { observedAt: number }) | undefined;
+  let officialIdentityDocument: { url: string; html: string } | undefined;
   const navigationOrigins = new Set(input.initialUrls.map(value => new URL(value).origin));
   const passfactory = createPassfactoryPublicReadPolicy();
   const uschedule = createUSchedulePublicReadPolicy();
@@ -202,6 +205,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
       if (!isSafeRecipeUrl(requestUrl) && !isSafeBrowserAssetUrl(requestUrl, request.resourceType(), request.method())) throw new Error("UNSAFE_URL");
       const url = new URL(requestUrl);
       if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+        if (input.venueOfficialUrl && url.origin === new URL(input.venueOfficialUrl).origin) {
+          officialIdentityDocument = undefined; officialIdentityPage = undefined;
+        }
         if (nativeProxy && request.redirectedFrom()) {
           if (!isObservedNativeRedirect(request, navigationOrigins)) throw new Error("UNSAFE_REDIRECT");
           allowedNavigation.add(url.href); navigationOrigins.add(url.origin);
@@ -257,6 +263,13 @@ export async function createCourseDiscoveryBrowserSession(input: {
       });
       metadata.status = reply.status;
       if (request.isNavigationRequest() && request.frame() === page.mainFrame()) navigation = { url: request.url(), status: reply.status };
+      // Retain only the bounded, successfully read official document. Its raw
+      // semantic markup is reproducible on warm reads; page.content() contains
+      // transient browser mutations and must not define the saved witness.
+      if (request.isNavigationRequest() && request.frame() === page.mainFrame() && input.venueOfficialUrl &&
+          url.origin === new URL(input.venueOfficialUrl).origin && reply.status >= 200 && reply.status < 300 &&
+          reply.buffer.length <= 600_000 && /^text\/html(?:;|$)/iu.test(reply.headers["content-type"] ?? ""))
+        officialIdentityDocument = { url: url.href, html: reply.buffer.toString("utf8") };
       if (["GET", "HEAD"].includes(method) && ["document", "xhr", "fetch"].includes(request.resourceType()) &&
           reply.status >= 200 && reply.status < 400 && isSafeRecipeUrl(url.href)) allowedNavigation.add(url.href);
       responseBytes += reply.buffer.length;
@@ -409,6 +422,28 @@ export async function createCourseDiscoveryBrowserSession(input: {
     }
     const text = sanitizeResponderText(await page.locator("body").innerText()).slice(0, 16_000);
     const blockedAccess = isActiveBrowserAccessChallenge(text, await page.title());
+    if (!blockedAccess && officialIdentityDocument && sameDiscoveryMainDocument(officialIdentityDocument.url, currentUrl)) {
+        const visibleEvidence = await page.evaluate(() => {
+          const headings: string[] = [], linkUrls: string[] = [], addressTexts: string[] = [];
+          for (const node of Array.from(document.querySelectorAll('h1,h2,a[href],address,p,div,li,td')).slice(0, 3000)) {
+            if (!(node instanceof HTMLElement) || node.closest('form,script,template,noscript,iframe,[hidden],[inert],[aria-hidden="true"]')) continue;
+            const rect = node.getBoundingClientRect();
+            let ancestor: HTMLElement | null = node, visible = Boolean(rect.width && rect.height), depth = 0;
+            while (ancestor && visible && depth++ < 32) {
+              const style = getComputedStyle(ancestor);
+              if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') visible = false;
+              ancestor = ancestor.parentElement;
+            }
+            if (!visible || ancestor) continue;
+            const value = node.innerText.replace(/\n+/gu, ', ').replace(/\s+/gu, ' ').trim();
+            if (/^H[12]$/u.test(node.tagName) && value.length <= 300 && headings.length < 80) headings.push(value);
+            if (node instanceof HTMLAnchorElement && linkUrls.length < 120) linkUrls.push(node.href);
+            if (value.length >= 15 && value.length <= 500 && addressTexts.length < 160 && /\b\d{5}(?:-\d{4})?\b/u.test(value)) addressTexts.push(value);
+          }
+          return { title: document.title.slice(0, 500), headings, linkUrls, addressTexts };
+        });
+        officialIdentityPage = { ...officialIdentityDocument, visibleEvidence, observedAt: Date.now() };
+    }
     const visible: DiscoveryBrowserSnapshot["controls"] = [];
     const candidates: Array<{ locator: Locator; date?: string; dropdown?: PublicDropdownProof }> = (await page.locator('a[href],a[data-value],button,select,input,td,th,[role="combobox"],[role="option"],[role="gridcell"],[role="button"]').all()).slice(0, 180).map(locator => ({ locator }));
     const dayCandidates = blockedAccess ? [] : await observedPublicCalendarDays(page);
@@ -534,8 +569,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
       if (action.action === "inspect_adapter") {
         if (!isSafeRecipeUrl(action.url) || !allowedNavigation.has(new URL(action.url).href)) throw new Error("UNOBSERVED_NAVIGATION");
         if (!input.venueName || input.venueName.length > 200) throw new Error("MISSING_VENUE_IDENTITY");
-        const result = await (deps.inspectAdapter ?? inspectExistingAdapter)({ bookingUrl: action.url, venueName: input.venueName, venueAddress: input.venueAddress, timeZone: input.timeZone ?? "UTC" },
-          { venueMatches: venueProofMatches, requestLease: deps.requestLease ?? runWithProviderRequestLease, deadlineAt: input.deadlineAt });
+        const result = await (deps.inspectAdapter ?? inspectExistingAdapter)({ officialUrl: input.venueOfficialUrl, bookingUrl: action.url, venueName: input.venueName, venueAddress: input.venueAddress, timeZone: input.timeZone ?? "UTC" },
+          { venueMatches: venueProofMatches, requestLease: deps.requestLease ?? runWithProviderRequestLease, deadlineAt: input.deadlineAt,
+            ...(officialIdentityPage && Date.now() - officialIdentityPage.observedAt <= 5 * 60_000 ? { officialIdentityPage } : {}) });
         return { ...await snapshot(), adapter: result.adapter };
       }
       if (action.action === "open") {

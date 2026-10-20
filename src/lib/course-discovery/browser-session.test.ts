@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createAddressPinnedPublicFetchTransport } from "@/lib/automation/address-pinned-public-fetch";
 import { createCourseDiscoveryBrowserSession, discoveryBrowserActionSchema, discoveryPublicAnchorKind, discoveryPublicChoiceKind, normalizeDiscoveryNavigationUrl, redactDiscoveryJson, redactDiscoveryRequestUrl, sameDiscoveryMainDocument } from "./browser-session";
 import * as nativeBrowser from "./native-public-browser";
+import { deriveTeeItUpOfficialIdentityProof } from "./teeitup-official-identity";
 
 vi.mock("@/lib/automation/provider-request-lease", () => ({ runWithProviderRequestLease: vi.fn() }));
 vi.mock("@/lib/automation/address-pinned-public-fetch", () => ({ createAddressPinnedPublicFetchTransport: vi.fn() }));
@@ -59,6 +60,26 @@ describe("discovery browser public protocol", () => {
 
 const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
+  it.each([false, true])("corroborates official address visibility, including transparent ancestors: %s", async hidden => {
+    const officialUrl = "https://example.org/", bookingUrl = "https://harbor.book.teeitup.com/";
+    const fixture = '<html><head><title>Harbor Golf Club</title></head><body><h1>Harbor Golf Club</h1>' +
+      `<div${hidden ? ' style="opacity:0"' : ''}><p>20 Harbor Road<br>Example, NY 12345, US</p></div>` +
+      `<a href="${bookingUrl}">Tee Times</a><script>document.querySelector("p").className="browser-added-layout";</script></body></html>`;
+    const inspectAdapter = vi.fn(async (source, deps) => ({ adapter: { family: "TEEITUP" as const, alias: "harbor", facilityIds: [11],
+      officialIdentityProof: deriveTeeItUpOfficialIdentityProof(source, deps.officialIdentityPage!, { requireVisibleEvidence: true }) } }));
+    const session = await createCourseDiscoveryBrowserSession({ deadlineAt: new Date(Date.now() + 30_000), initialUrls: [officialUrl],
+      venueOfficialUrl: officialUrl, venueName: "Harbor Golf Course", venueAddress: "10 Harbor Drive, Example, NY 12345, US", timeZone: "America/New_York" }, {
+      fetch: async () => new Response(fixture, { headers: { "content-type": "text/html" } }),
+      launchBrowser: () => chromium.launch({ executablePath, headless: true }), requestLease: async (_family, work) => ({ acquired: true, value: await work() }), inspectAdapter,
+    });
+    try {
+      await session.execute({ id: 1, action: "open", url: officialUrl });
+      const result = session.execute({ id: 2, action: "inspect_adapter", url: bookingUrl });
+      if (hidden) await expect(result).rejects.toThrow("OFFICIAL_IDENTITY_UNVERIFIED");
+      else expect((await result).adapter).toMatchObject({ officialIdentityProof: deriveTeeItUpOfficialIdentityProof({ officialUrl, bookingUrl,
+        venueName: "Harbor Golf Course", venueAddress: "10 Harbor Drive, Example, NY 12345, US", timeZone: "America/New_York" }, { url: officialUrl, html: fixture }) });
+    } finally { await session.close(); }
+  }, 25_000);
   it("exposes proven numeric div dates as opaque controls and clicks only the current calendar", async () => {
     const fixture = '<!doctype html><html><body><h1>Public simulator</h1><div data-testid="variable-week-calendar"><h2>October 2030</h2><div>Mo Tu We Th Fr Sa Su</div>' +
       '<div data-testid="calendar-day-2030-10-23" aria-label="2030-10-23 AvailabilityLoaded"><span>23</span></div></div><p id="result">Unselected</p>' +

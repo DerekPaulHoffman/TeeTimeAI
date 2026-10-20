@@ -68,7 +68,7 @@ syncBuiltinESMExports();
 `);
     const child = spawn(process.execPath, ["--import", pathToFileURL(preload).href, "--import", "tsx",
       resolve("scripts/automation/course-discovery-browser.ts"), "--deadline", new Date(Date.now() + 30_000).toISOString(),
-      "--initial-urls", '["https://example.org/simulator"]'], {
+      "--initial-urls", '["https://example.org/simulator"]', "--venue-official-url", "https://example.org/simulator"], {
       cwd: process.cwd(), windowsHide: true, env: { ...discoveryProcessEnvironment(),
         COURSE_DISCOVERY_API_ORIGIN: `http://127.0.0.1:${port}`, LOCAL_READER_DEVICE_TOKEN: secret,
         COURSE_DISCOVERY_JOB_ID: "fixture-job", COURSE_DISCOVERY_LEASE_TOKEN: "00000000-0000-4000-8000-000000000002", COURSE_DISCOVERY_JOB_KIND: "discovery" },

@@ -65,6 +65,18 @@ booking instructions is not itself an access challenge.
   identity, then uses their fixed read-only routes, shared provider leases and
   normalized source IDs. A model cannot supply routes, code or extractors for
   this engine.
+- A TeeItUp alternate street address requires a controller-observed official
+  page with a complete venue name, exact booking link and full public address.
+  Its locality, state and ZIP must match the stored address, and exactly one
+  non-simulator directory facility must match the official address, full name
+  and timezone. Only a terminal `Golf Club`/`Golf Course` name difference is
+  normalized; partial names and ambiguous facilities are rejected. The stored
+  course address is retained. Discovery corroborates rendered visibility;
+  each independent replay and warm execution re-fetches the official HTML and
+  compares the same semantic text and markup witness. This is public-source
+  evidence, not a geographical proximity claim or a fresh computed-CSS check.
+  Hidden markup, changed witnesses, changed identity and ambiguous addresses
+  fail closed. The model cannot supply this attestation.
 - `HTTP_JSON` request bodies currently support a flat object of scalar values
   and known parameter templates. They do not yet express arbitrary nested
   GraphQL query/variable documents, even though the network read policy can

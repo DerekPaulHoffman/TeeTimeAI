@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createCourseDiscoveryClient, discoveryError } from "./course-discovery-client.mjs";
-import { executeDiscoveryRecipe, prepareDiscoveryModelCatalog, runCourseDiscoveryWorker } from "./course-discovery-worker.mjs";
+import { executeDiscoveryRecipe, noVerifiedRecipeDiagnostic, prepareDiscoveryModelCatalog, runCourseDiscoveryWorker } from "./course-discovery-worker.mjs";
 
 export const DISCOVERY_POLL_MS = 15_000;
 export const DISCOVERY_HEARTBEAT_MS = 15_000;
@@ -125,6 +125,9 @@ export function createCourseDiscoverySupervisor({ client, startWorker, executeRe
         }
         emit("attempt_ended", { ...jobEvent, completedAt: new Date(now()).toISOString(),
           ...(error?.discoveryMetrics ? { metrics: error.discoveryMetrics } : {}),
+          ...(error?.code === "DISCOVERY_NO_VERIFIED_RECIPE" ? {
+            diagnosticCode: "NO_VERIFIED_RECIPE", diagnosticReason: noVerifiedRecipeDiagnostic(error.discoveryDiagnostic?.evidence).reason,
+          } : {}),
           code: /^[A-Z_]+$/u.test(error?.code ?? "") ? error.code : "DISCOVERY_WORKER_FAILED" });
       } finally {
         entry.settled = true;

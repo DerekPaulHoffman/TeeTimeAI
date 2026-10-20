@@ -282,6 +282,25 @@ describe("bounded discovery supervisor", () => {
     await supervisor.stop();
   });
 
+  it("keeps two-attempt transport compatibility while distinguishing exhausted unverified work in diagnostics", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(now);
+    const evidence = { code: "DISCOVERY_BROWSER_INCOMPLETE", details: { action: "inspect_adapter", requests: [],
+      failure: { code: "ADAPTER_IDENTITY_MISMATCH", url: "https://venue.example/calendar?private=value" } } };
+    const error = Object.assign(new Error("untrusted raw provider message"), { code: "DISCOVERY_NO_VERIFIED_RECIPE",
+      discoveryDiagnostic: { code: "NO_VERIFIED_RECIPE", reason: "UNTRUSTED_REASON", evidence } });
+    const assigned = { ...job(), attempts: 2 };
+    const client = { next: vi.fn().mockResolvedValueOnce({ job: assigned }).mockResolvedValue({ job: null }), heartbeat: vi.fn(), fail: vi.fn(async () => ({})) };
+    const onEvent = vi.fn();
+    const supervisor = createCourseDiscoverySupervisor({ client, startWorker: async () => { throw error; }, onEvent });
+    await supervisor.start(); await vi.advanceTimersByTimeAsync(1);
+    expect(client.fail).toHaveBeenCalledExactlyOnceWith(assigned.id, assigned.leaseToken, "TOOL_FAILURE", true);
+    expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ event: "attempt_ended", code: "DISCOVERY_NO_VERIFIED_RECIPE",
+      diagnosticCode: "NO_VERIFIED_RECIPE", diagnosticReason: "ADAPTER_IDENTITY_MISMATCH", deadlineAt: assigned.deadlineAt }));
+    expect(JSON.stringify(onEvent.mock.calls)).not.toMatch(/private|untrusted|UNTRUSTED_REASON/);
+    expect(client.next).toHaveBeenCalledTimes(2);
+    await supervisor.stop();
+  });
+
   it.each(["ACCESS_REQUIRED", "UNSUPPORTED"])("persists a classified %s failure without another attempt", async outcome => {
     vi.useFakeTimers(); vi.setSystemTime(now);
     const client = { next: vi.fn().mockResolvedValueOnce({ job: job() }).mockResolvedValue({ job: null }), heartbeat: vi.fn(), fail: vi.fn(async () => ({})) };
@@ -308,8 +327,9 @@ describe("controller-only verification", () => {
     const configurations: Array<{ args: string[] }> = [];
     const processFactory = vi.fn((options: { args: string[] }) => { configurations.push(options); return { request: vi.fn(async () => ({})), close: vi.fn(async () => {}) }; });
     const browser = createDiscoveryBrowser({ cwd: process.cwd(), deadlineAt: new Date(now + 60000).toISOString(),
-      initialUrls: ["https://example.org/"], timeZone: "America/Los_Angeles", processFactory });
+      initialUrls: ["https://example.org/"], timeZone: "America/Los_Angeles", venueOfficialUrl: "https://example.org/", processFactory });
     expect(configurations[0].args.slice(-2)).toEqual(["--time-zone", "America/Los_Angeles"]);
+    expect(configurations[0].args).toEqual(expect.arrayContaining(["--venue-official-url", "https://example.org/"]));
     await browser.close();
   });
 
@@ -705,6 +725,85 @@ describe("controller-only verification", () => {
       } });
       await expect(runCourseDiscoveryWorker({ job: { ...inputJob, checkpoint: stored }, client, cwd: process.cwd(), sourceHome, recipeSchema: {}, resolveCli: () => "fixed-codex", processFactory: retryFactory })).rejects.toMatchObject({ code: "DISCOVERY_NO_VERIFIED_RECIPE" });
       expect(retryInput?.previousDiagnostic).toEqual(stored.controller.lastFeedback);
+    } finally { rmSync(sourceHome, { recursive: true, force: true }); }
+  });
+
+  it("persists the underlying inspector failure after a successful observation and normal model completion", async () => {
+    const sourceHome = mkdtempSync(join(tmpdir(), "discovery-terminal-diagnostic-"));
+    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }));
+    writeFileSync(join(sourceHome, "auth.json"), "test-auth");
+    const checkpoint = vi.fn(async () => ({}));
+    const client = { helperEnvironment: () => ({}), checkpoint };
+    const inputJob = { ...job(), request: { ...job().request, identity: { name: "Public golf", officialUrl: "https://example.org/" } } };
+    const processFactory = options => ({ notify: vi.fn(), close: vi.fn(async () => {}), request: async (method: string) => {
+      if (method === "thread/start") return { thread: { id: "thread-1" }, approvalPolicy: "never", sandbox: { type: "readOnly" } };
+      if (method === "turn/start") {
+        queueMicrotask(async () => {
+          await options.onMessage({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1" } } }, () => {});
+          for (const [index, args] of [
+            { action: "open", url: "https://example.org/" },
+            { action: "inspect_adapter", url: "https://example.org/" },
+            { action: "observe" },
+          ].entries()) await options.onMessage({ id: index + 1, method: "item/tool/call", params: { threadId: "thread-1", turnId: "turn-1",
+            tool: "discovery_browser", arguments: args } }, () => {});
+          await options.onMessage({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } }, () => {});
+        });
+        return { turn: { id: "turn-1" } };
+      }
+      return {};
+    } });
+    try {
+      const failure = await runCourseDiscoveryWorker({ job: inputJob, client, cwd: process.cwd(), sourceHome, recipeSchema: {},
+        resolveCli: () => "fixed-codex", processFactory, browserFactory: () => ({ close: async () => {}, request: async action => {
+          if (action.action === "inspect_adapter") throw Object.assign(new Error("private provider text"), { code: "ADAPTER_IDENTITY_MISMATCH" });
+          return { url: "https://example.org/", text: "Public golf", controls: [], requests: [], loading: false };
+        } }) }).catch(error => error);
+      expect(failure).toMatchObject({ code: "DISCOVERY_NO_VERIFIED_RECIPE", discoveryDiagnostic: {
+        code: "NO_VERIFIED_RECIPE", reason: "ADAPTER_IDENTITY_MISMATCH" } });
+      const stored = checkpoint.mock.calls.at(-1)![2];
+      expect(stored.controller.lastFeedback).toBeUndefined();
+      expect(stored.controller.terminalDiagnostic).toEqual(failure.discoveryDiagnostic);
+      expect(stored.controller.lastFailure.details.failure.code).toBe("ADAPTER_IDENTITY_MISMATCH");
+      expect(JSON.stringify(stored)).not.toContain("private provider text");
+    } finally { rmSync(sourceHome, { recursive: true, force: true }); }
+  });
+
+  it.each([false, true])("uses only current-context fixed-inspector proof (context reopened: %s)", async reopened => {
+    const sourceHome = mkdtempSync(join(tmpdir(), "discovery-proof-context-"));
+    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }));
+    writeFileSync(join(sourceHome, "auth.json"), "test-auth");
+    const client = { helperEnvironment: () => ({}), checkpoint: vi.fn(async () => ({})) };
+    const inputJob = { ...job(), request: { ...job().request, identity: { name: "Public golf", officialUrl: "https://example.org/", bookingUrl: "https://example.org/" } } };
+    const observedAdapter = { family: "TEEITUP", alias: "public", facilityIds: [7], officialIdentityProof: { digest: "fixed-inspector-proof" } };
+    const proposals: Array<{ adapter: { officialIdentityProof?: unknown } }> = [];
+    const processFactory = options => ({ notify: vi.fn(), close: vi.fn(async () => {}), request: async (method: string) => {
+      if (method === "thread/start") return { thread: { id: "thread-1" }, approvalPolicy: "never", sandbox: { type: "readOnly" } };
+      if (method === "turn/start") {
+        queueMicrotask(async () => {
+          await options.onMessage({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1" } } }, () => {});
+          const calls = [
+            ["discovery_browser", { action: "open", url: "https://example.org/" }],
+            ["discovery_browser", { action: "inspect_adapter", url: "https://example.org/" }],
+            ...(reopened ? [["discovery_browser", { action: "open", url: "https://example.org/" }]] : []),
+            ["discovery_propose_recipe", { recipe: { source: { bookingUrl: "https://example.org/" }, adapter: {
+              ...observedAdapter, officialIdentityProof: { digest: "model-forged-proof" } } } }],
+          ];
+          for (const [index, [tool, args]] of calls.entries()) await options.onMessage({ id: index + 1, method: "item/tool/call", params: {
+            threadId: "thread-1", turnId: "turn-1", tool, arguments: args } }, () => {});
+          await options.onMessage({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } }, () => {});
+        });
+        return { turn: { id: "turn-1" } };
+      }
+      return {};
+    } });
+    try {
+      await expect(runCourseDiscoveryWorker({ job: inputJob, client, cwd: process.cwd(), sourceHome, recipeSchema: {},
+        resolveCli: () => "fixed-codex", processFactory, validateRecipe: async ({ recipe }) => { proposals.push(recipe); return { valid: false, issues: [] }; },
+        browserFactory: () => ({ close: async () => {}, request: async action => ({ url: "https://example.org/", text: "Public course", controls: [], requests: [],
+          ...(action.action === "inspect_adapter" ? { adapter: observedAdapter } : {}) }) }),
+      })).rejects.toMatchObject({ code: "DISCOVERY_NO_VERIFIED_RECIPE" });
+      expect(proposals).toHaveLength(1);
+      expect(proposals[0].adapter.officialIdentityProof).toEqual(reopened ? undefined : observedAdapter.officialIdentityProof);
     } finally { rmSync(sourceHome, { recursive: true, force: true }); }
   });
 

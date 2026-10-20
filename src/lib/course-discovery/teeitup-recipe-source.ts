@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { resolveTeeItUpFacilityIdentity } from "@/lib/adapters/teeitup-facility-identity";
 import { isSafeRecipeUrl } from "./recipe";
+import { matchesOfficialFacility, type TeeItUpOfficialIdentityProof } from "./teeitup-official-identity";
 
 const id = z.number().int().min(1).max(2_147_483_647);
 const facility = z.object({ id, courseId: z.string().min(1).max(128), name: z.string().min(2).max(256),
@@ -41,7 +42,7 @@ export function isTeeItUpRecipeSlotLink(source: string, date: string, allowedIds
   catch { return false; }
 }
 
-export function resolveTeeItUpRecipeFacilities(source: { bookingUrl: string; venueName: string; venueAddress?: string; timeZone: string }, value: unknown) {
+export function resolveTeeItUpRecipeFacilities(source: { bookingUrl: string; venueName: string; venueAddress?: string; timeZone: string }, value: unknown, officialProof?: TeeItUpOfficialIdentityProof) {
   const booking = parseTeeItUpRecipeSource(source.bookingUrl);
   const parsed = z.array(facility).min(1).max(100).safeParse(value);
   if (!booking || !source.venueAddress || !parsed.success ||
@@ -50,8 +51,11 @@ export function resolveTeeItUpRecipeFacilities(source: { bookingUrl: string; ven
   const identity = { name: source.venueName, address: source.venueAddress, timeZone: source.timeZone };
   const matches = (row: TeeItUpRecipeFacility) => row.isSimulator !== true && resolveTeeItUpFacilityIdentity(identity,
     [{ ...row, name: row.name.split(/\s+-\s+/u)[0] }]).status === "MATCHED";
-  const selected = booking.selectedIds ? parsed.data.filter(row => booking.selectedIds!.includes(row.id)) : parsed.data.filter(matches);
-  if (booking.selectedIds ? selected.length !== booking.selectedIds.length || !selected.every(matches) : selected.length !== 1)
+  const alternate = officialProof ? parsed.data.filter(row => matchesOfficialFacility(officialProof, source, row)) : [];
+  if (officialProof && (alternate.length !== 1 || officialProof.bookingUrl !== source.bookingUrl)) throw new Error("ADAPTER_IDENTITY_MISMATCH");
+  const accepted = (row: TeeItUpRecipeFacility) => matches(row) || officialProof !== undefined && alternate[0]?.id === row.id;
+  const selected = booking.selectedIds ? parsed.data.filter(row => booking.selectedIds!.includes(row.id)) : parsed.data.filter(accepted);
+  if (booking.selectedIds ? selected.length !== booking.selectedIds.length || !selected.every(accepted) : selected.length !== 1)
     throw new Error("ADAPTER_IDENTITY_MISMATCH");
   return selected.sort((a, b) => a.id - b.id);
 }

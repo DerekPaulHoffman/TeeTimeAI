@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { GET, POST } from "./route";
+import { SimulatorVenueConfirmationUnavailableError } from "@/lib/places/simulator-google";
 
 const mocks = vi.hoisted(() => ({
   after: vi.fn(),
@@ -118,6 +119,22 @@ describe("POST /api/searches", () => {
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toEqual({ error: "Search date must be in the future for every selected course" });
     expect(mocks.startSearchSchedule).not.toHaveBeenCalled();
+  });
+
+  it("returns retryable503 for an unavailable simulator identity provider without starting any saved-search side effects", async () => {
+    mocks.hasClerkConfig.mockReturnValue(true);
+    mocks.getRequiredAppUser.mockResolvedValue({ id: "app-user-1", email: "owner@example.com" });
+    mocks.createTeeSearchForUser.mockRejectedValue(new SimulatorVenueConfirmationUnavailableError({
+      reason: "UPSTREAM_HTTP_ERROR", upstreamStatus: 403, googleErrorStatus: "PERMISSION_DENIED",
+    }));
+    const response = await POST(searchRequest());
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({
+      error: "We could not verify this venue right now. Please try again shortly.", retryable: true,
+    });
+    expect(mocks.startSearchSchedule).not.toHaveBeenCalled();
+    expect(mocks.startOperatorNotificationForSearch).not.toHaveBeenCalled();
+    expect(mocks.queuePendingCourseProfiles).not.toHaveBeenCalled();
   });
 
   it("rejects an impossible calendar date before calling the creation service", async () => {
