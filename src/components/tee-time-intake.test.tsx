@@ -1368,7 +1368,11 @@ describe("TeeTimeIntake", () => {
     window.removeEventListener(OPEN_FEEDBACK_EVENT, handleFeedback);
   });
 
-  it("shows a styled recovery toast with feedback when alert creation fails", async () => {
+  it.each([
+    { status: 400, retryable: false, message: "Something went wrong, and we're working on it." },
+    { status: 503, retryable: true, message: "We can't verify this venue right now. Your alert wasn't saved. Please try again later." },
+    { status: 503, retryable: false, message: "Something went wrong, and we're working on it." }
+  ])("shows a safe recovery toast for alert creation status $status (retryable $retryable)", async ({ status, retryable, message }) => {
     const course = {
       address: "100 Public Links Rd, Trumbull, CT",
       googlePlaceId: "course-1",
@@ -1396,7 +1400,7 @@ describe("TeeTimeIntake", () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url === "/api/searches") {
-        return Response.json({ error: "Internal course classification mismatch" }, { status: 400 });
+        return Response.json({ error: "Internal course classification mismatch", retryable }, { status });
       }
       if (url === "/api/analytics/events") {
         return Response.json({ event: { id: "event-1" } }, { status: 201 });
@@ -1408,7 +1412,7 @@ describe("TeeTimeIntake", () => {
 
     render(<TeeTimeIntake {...signedInAccountProps} />);
 
-    const saveButton = await screen.findByRole("button", { name: "Start getting alerts" });
+    const saveButton = await screen.findByRole("button", { name: "Start getting alerts" }, { timeout: 5_000 });
     await waitFor(() =>
       expect((saveButton as HTMLButtonElement).disabled).toBe(false)
     );
@@ -1416,7 +1420,7 @@ describe("TeeTimeIntake", () => {
 
     const toastTitle = await screen.findByText("We couldn't start your alert");
     expect(toastTitle.closest('[role="alert"]')?.textContent).toContain(
-      "Something went wrong, and we're working on it."
+      message
     );
     expect(document.querySelector("[data-alert-confetti]")).toBeNull();
     expect(screen.queryByText("Your alert is created")).toBeNull();
@@ -1426,7 +1430,7 @@ describe("TeeTimeIntake", () => {
       .map(([, init]) => JSON.parse(String(init?.body)))
       .find((event) => event.name === "search_submission_failed");
     expect(failureEvent).toMatchObject({
-      metadata: { mode: "OUTDOOR", responseStatus: 400 },
+      metadata: { mode: "OUTDOOR", responseStatus: status },
       trafficClass: "PUBLIC"
     });
 

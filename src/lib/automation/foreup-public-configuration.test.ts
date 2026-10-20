@@ -113,8 +113,37 @@ describe("public ForeUp schedule configuration", () => {
     expect(new URL(String(fetchImpl.mock.calls[1][0])).searchParams.get("booking_class")).toBe("4931");
   });
 
+  it("selects exact Public Tee Times alongside restricted classes and reads that class", async () => {
+    const publicClass = { teesheet_id: "792", booking_class_id: "4931", active: "1", hidden: "0", name: "Public Tee Times" };
+    const memberClass = { ...publicClass, booking_class_id: "4932", name: "Members Club Tee Times" };
+    const document = (classes: object[]) => `<script>SCHEDULES = ${JSON.stringify([
+      { ...schedules[0], booking_classes: classes },
+      { ...schedules[1], booking_classes: [{ ...publicClass, teesheet_id: "781", booking_class_id: "4930" }] },
+    ])};</script>`;
+    const parse = (classes: object[]) => parseForeupPublicConfiguration({ bookingUrl, courseName: "Columbia Bridges", html: document(classes) });
+    expect(parse([memberClass, { ...publicClass, name: " public tee times " }]))
+      .toMatchObject({ scheduleId: 792, bookingClassId: 4931 });
+    expect(parse([{ ...publicClass, active: "0" }, memberClass])).toBeNull();
+    expect(parse([{ ...publicClass, hidden: "1" }, memberClass])).toBeNull();
+    expect(parse([{ ...publicClass, teesheet_id: "781" }, memberClass])).toBeNull();
+    expect(parse([publicClass, { ...publicClass, booking_class_id: "4933" }])).toBeNull();
+    for (const name of ["Public", "Online Tee Times"]) {
+      expect(parse([publicClass, { ...publicClass, booking_class_id: "4933", name }])).toBeNull();
+    }
+
+    const fetchImpl = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(document([memberClass, publicClass]), { status: 200, headers: { "content-type": "text/html" } }))
+      .mockResolvedValueOnce(new Response("[]", { status: 200, headers: { "content-type": "application/json" } }));
+    expect(await readForeupPublicConfiguration({ bookingUrl, courseName: "Columbia Bridges", fetchImpl }))
+      .toMatchObject({ scheduleId: 792, bookingClassId: 4931 });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(new URL(String(fetchImpl.mock.calls[1][0])).searchParams.get("booking_class")).toBe("4931");
+  });
+
   it.each(["Members Online Tee Times", "Online Tee Times Members", "Online Tee Times (Residents)",
-    "Account Tee Times", "Member", "Resident", "Online Tee Times Special", "OnlineTeeTimes", ""])
+    "Account Tee Times", "Member", "Resident", "Online Tee Times Special", "OnlineTeeTimes",
+    "Members Public Tee Times", "Public Tee Times Members", "Public Tee Times (Residents)",
+    "Public Tee Times Special", "PublicTeeTimes", ""])
   ("does not infer public access from restricted or near-match label %s", name => {
     expect(parseForeupPublicConfiguration({ bookingUrl, courseName: "Columbia Bridges",
       html: `<script>SCHEDULES = ${JSON.stringify([{ ...schedules[0], booking_classes: [

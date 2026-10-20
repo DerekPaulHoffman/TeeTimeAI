@@ -17,6 +17,22 @@ $env:PSModulePath = (Join-Path $PSHOME 'Modules') + [IO.Path]::PathSeparator + $
 $taskPath = '\TeeTimeSpot\'
 $marker = 'Tee Time Spot course discovery supervisor; managed lifecycle v1'
 
+function ConvertTo-CourseDiscoveryHeartbeatInstant {
+  param($Value)
+  # Windows PowerShell keeps JSON timestamps as strings, while PowerShell 7
+  # may return DateTime. Never stringify a typed date: that loses its offset
+  # and fractional seconds before a culture/local-time parse.
+  if ($Value -is [DateTimeOffset]) { return $Value.ToUniversalTime() }
+  if ($Value -is [DateTime]) {
+    if ($Value.Kind -eq [DateTimeKind]::Unspecified) { return $null }
+    return ([DateTimeOffset]$Value).ToUniversalTime()
+  }
+  if ($Value -isnot [string] -or $Value -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?(?:Z|[+-]\d{2}:\d{2})$') { return $null }
+  $parsed = [DateTimeOffset]::MinValue
+  if (-not [DateTimeOffset]::TryParse($Value, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$parsed)) { return $null }
+  return $parsed.ToUniversalTime()
+}
+
 try {
   if ($env:OS -ne 'Windows_NT') { throw 'WINDOWS_REQUIRED' }
   Import-Module -Name (Join-Path $windowsPowerShellModules 'ScheduledTasks\ScheduledTasks.psd1') -ErrorAction Stop
@@ -69,17 +85,21 @@ try {
       $latest = Get-ChildItem -LiteralPath $LogDirectory -File -Filter '*.jsonl' | Where-Object { $_.Name -match '^\d{4}-\d{2}-\d{2}\.jsonl$' } | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
       if ($latest) {
         $records = @(Get-Content -LiteralPath $latest.FullName -Tail 200 | ForEach-Object { try { $_ | ConvertFrom-Json } catch { } })
-        $heartbeat = $records | Where-Object { $_.event -in @('supervisor_started', 'poll_completed') -and $_.observedAt } | Select-Object -Last 1
+        $heartbeat = $records | Where-Object { $_.event -in @('supervisor_started', 'poll_completed') } | Select-Object -Last 1
         $pollFailed = $false
         foreach ($record in $records) {
           if ($record.event -eq 'poll_failed') { $pollFailed = $true }
           elseif ($record.event -eq 'poll_completed') { $summary.pollStatus = if ($pollFailed) { 'failed' } else { 'completed' }; $pollFailed = $false }
         }
         if ($heartbeat) {
-          $at = [DateTimeOffset]::Parse($heartbeat.observedAt)
-          $summary.lastHeartbeatAt = $at.ToUniversalTime().ToString('o')
-          $summary.heartbeatAgeSeconds = [Math]::Max(0, [Math]::Floor(([DateTimeOffset]::UtcNow - $at).TotalSeconds))
-          $summary.heartbeatStatus = if ($summary.heartbeatAgeSeconds -le 60) { 'fresh' } else { 'stale' }
+          $at = ConvertTo-CourseDiscoveryHeartbeatInstant $heartbeat.observedAt
+          if ($null -eq $at) {
+            $summary.heartbeatStatus = 'invalid'
+          } else {
+            $summary.lastHeartbeatAt = $at.ToString('o')
+            $summary.heartbeatAgeSeconds = [Math]::Floor(([DateTimeOffset]::UtcNow - $at).TotalSeconds)
+            $summary.heartbeatStatus = if ($summary.heartbeatAgeSeconds -lt 0) { 'future' } elseif ($summary.heartbeatAgeSeconds -le 60) { 'fresh' } else { 'stale' }
+          }
         }
       }
     }

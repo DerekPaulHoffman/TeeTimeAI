@@ -96,10 +96,10 @@ export function parseForeupPublicConfiguration(input: {
   });
   const labelledPublic = visibleClasses.filter(bookingClass => {
     const name = (bookingClass as Record<string, unknown>).name;
-    return typeof name === "string" && /^(?:public|online tee times)$/iu.test(name.trim());
+    return typeof name === "string" && /^(?:public|public tee times|online tee times)$/iu.test(name.trim());
   });
   // Public and membership classes may share one public page. Select only its
-  // sole explicit public class (including the observed Online Tee Times label);
+  // sole explicit public class (including observed public tee-time labels);
   // retain the legacy single unlabelled configuration.
   const publicClasses = labelledPublic.length ? labelledPublic : visibleClasses.length === 1 &&
     (visibleClasses[0] as Record<string, unknown>).name === undefined ? visibleClasses : [];

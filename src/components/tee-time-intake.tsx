@@ -360,6 +360,7 @@ function TeeTimeIntakeContent({
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveFailureVisible, setSaveFailureVisible] = useState(false);
+  const [venueVerificationUnavailable, setVenueVerificationUnavailable] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [alertLimitReached, setAlertLimitReached] = useState(false);
   const [savedSignature, setSavedSignature] = useState<string | null>(null);
@@ -708,6 +709,7 @@ function TeeTimeIntakeContent({
 
   async function discoverFromSearchControls() {
     setSaveFailureVisible(false);
+    setVenueVerificationUnavailable(false);
     const validationError = !locationText.trim()
       ? "Enter a city and state, ZIP code, or street address, or use your current location."
       : !isDateFuture
@@ -1183,6 +1185,7 @@ function TeeTimeIntakeContent({
     }
 
     setSaveFailureVisible(false);
+    setVenueVerificationUnavailable(false);
     setAlertLimitReached(false);
     setSaving(true);
     try {
@@ -1219,7 +1222,7 @@ function TeeTimeIntakeContent({
       });
 
       if (!response.ok) {
-        const responseBody = (await response.json().catch(() => null)) as { error?: string } | null;
+        const responseBody = (await response.json().catch(() => null)) as { error?: string; retryable?: boolean } | null;
         trackWebsiteEvent({
           name: "search_submission_failed",
           metadata: {
@@ -1233,6 +1236,9 @@ function TeeTimeIntakeContent({
         if (response.status === 400 && responseBody?.error === `You can keep up to ${MAX_QUEUED_SEARCHES_PER_USER} active or paused searches in the queue.`) {
           setAlertLimitReached(true);
           return;
+        }
+        if (response.status === 503 && responseBody?.retryable === true) {
+          setVenueVerificationUnavailable(true);
         }
         throw new Error(responseBody?.error ?? "Could not save this search. Try again in a moment.");
       }
@@ -1306,6 +1312,7 @@ function TeeTimeIntakeContent({
       ) : null}
       {saveFailureVisible ? (
         <AlertFailureToast
+          venueVerificationUnavailable={venueVerificationUnavailable}
           onClose={() => setSaveFailureVisible(false)}
           onSendFeedback={() =>
             openFeedback({
@@ -1749,10 +1756,12 @@ function TeeTimeIntakeContent({
 
 function AlertFailureToast({
   onClose,
-  onSendFeedback
+  onSendFeedback,
+  venueVerificationUnavailable
 }: {
   onClose: () => void;
   onSendFeedback: () => void;
+  venueVerificationUnavailable: boolean;
 }) {
   return (
     <div className="alert-failure-toast" role="alert" aria-live="assertive">
@@ -1760,8 +1769,9 @@ function AlertFailureToast({
       <div>
         <strong>We couldn&apos;t start your alert</strong>
         <p>
-          Something went wrong, and we&apos;re working on it. If anything here
-          looks incorrect, send us feedback.
+          {venueVerificationUnavailable
+            ? "We can't verify this venue right now. Your alert wasn't saved. Please try again later."
+            : "Something went wrong, and we're working on it. If anything here looks incorrect, send us feedback."}
         </p>
         <button type="button" onClick={onSendFeedback}>
           <Flag aria-hidden="true" size={14} />

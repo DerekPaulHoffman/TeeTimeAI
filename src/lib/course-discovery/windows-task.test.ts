@@ -27,6 +27,40 @@ describe.runIf(process.platform === "win32")("Windows supervisor lifecycle dry r
       rmSync(temporary, { recursive: true, force: true });
     }
   }, 30_000);
+  it.each(interpreters)("preserves heartbeat instants and rejects invalid/future health with %s", interpreter => {
+    const temporary = mkdtempSync(join(tmpdir(), "course-discovery-task-"));
+    const logs = join(temporary, "logs"); mkdirSync(logs);
+    const log = join(logs, `${new Date().toISOString().slice(0, 10)}.jsonl`);
+    const taskName = `Tee Time Spot Course Discovery test-${randomUUID().slice(0, 20)}`;
+    const script = resolve("scripts/automation/manage-course-discovery-task.ps1");
+    const quote = (value: string) => `'${value.replace(/'/gu, "''")}'`;
+    const inspect = () => JSON.parse(execFileSync(interpreter, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "RemoteSigned", "-Command",
+      `[Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::GetCultureInfo('fr-FR'); & ${quote(script)} -Action Inspect -TaskName ${quote(taskName)} -LogDirectory ${quote(logs)}`],
+    { encoding: "utf8", windowsHide: true }).trim());
+    try {
+      for (const [ageMs, status] of [[10_000, "fresh"], [300_000, "stale"], [-300_000, "future"]] as const) {
+        const at = new Date(Date.now() - ageMs).toISOString();
+        writeFileSync(log, `${JSON.stringify({ event: "poll_completed", observedAt: at })}\n`);
+        const result = inspect();
+        expect(new Date(result.lastHeartbeatAt).toISOString()).toBe(at);
+        expect(result).toMatchObject({ exists: false, ready: false, heartbeatStatus: status });
+        if (status === "future") expect(result.heartbeatAgeSeconds).toBeLessThan(0);
+        else expect(result.heartbeatAgeSeconds).toBeGreaterThanOrEqual(ageMs / 1_000);
+      }
+      const instant = new Date(Date.now() - 300_000);
+      const offsetTimestamp = `${new Date(instant.getTime() - 4 * 3_600_000).toISOString().slice(0, -1)}-04:00`;
+      writeFileSync(log, `${JSON.stringify({ event: "poll_completed", observedAt: offsetTimestamp })}\n`);
+      expect(new Date(inspect().lastHeartbeatAt).toISOString()).toBe(instant.toISOString());
+      for (const observedAt of ["not-a-timestamp", "2026-10-20T20:28:22.489", null]) {
+        // A malformed latest heartbeat must not inherit an earlier fresh row.
+        writeFileSync(log, `${JSON.stringify({ event: "poll_completed", observedAt: new Date().toISOString() })}\n${JSON.stringify({ event: "poll_completed", observedAt })}\n`);
+        expect(inspect()).toMatchObject({ exists: false, ready: false, heartbeatStatus: "invalid" });
+      }
+    } finally {
+      if (dirname(temporary) !== resolve(tmpdir()) || !temporary.startsWith(join(resolve(tmpdir()), "course-discovery-task-"))) throw new Error("Unsafe test cleanup path");
+      rmSync(temporary, { recursive: true, force: true });
+    }
+  }, 60_000);
   it("validates protected external config and plans registration without exposing credentials or applying", () => {
     const temporary = mkdtempSync(join(tmpdir(), "course-discovery-task-"));
     const config = join(temporary, "runtime.json");
