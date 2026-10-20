@@ -43,6 +43,16 @@ a late interceptor attach has not proved safe for their first redirect. Foreign
 popup requests are also rejected. This does not change the installed Local
 Reader's supported providers.
 
+Discovery can promote an exact visible public iframe `src` from a successful
+current official document into a separately guarded main-frame read. Hidden,
+inert, `srcdoc`, login, selected-slot and unsafe sources are excluded. A blocked
+frame URL or diagnostic alone never grants this authority. A successful fixed
+adapter inspection may supply source evidence for an unchanged
+`EXISTING_ADAPTER` recipe without loading the provider's JavaScript page. This
+controller-only observation is bound to the exact job, inputs, target, URLs and
+metadata, is not restored from checkpoints, and never replaces the two fresh
+independent availability replays required for activation.
+
 The pinned browser path rejects redirects instead of releasing a Location into
 an unpinned browser request. A provider requiring that transition needs a
 qualified native main-frame path or another supported reader. Such a failure

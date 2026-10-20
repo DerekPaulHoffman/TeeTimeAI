@@ -27,6 +27,7 @@ import { inspectPublicRentalProduct } from "./public-product-control";
 import { canonicalCpsPublicUrl, cpsPublicEntryUrl, cpsSessionKey, createCpsPublicSessionScope } from "./cps-public-navigation";
 import { observedPublicDateChoices, isPublicDateChoice } from "./public-date-choice";
 import { isPublicAvailabilityNavigation } from "./public-navigation-control";
+import { observedPublicFrameSources } from "./public-frame-source";
 
 const identifier = z.union([z.string().max(128), z.number().int()]);
 export const discoveryBrowserActionSchema = z.discriminatedUnion("action", [
@@ -92,7 +93,7 @@ export type DiscoveryBrowserSnapshot = {
   requests: Array<{ url: string; method: string; resourceType: string; status?: number; blockedReason?: string; body?: unknown }>;
   requestFailures?: Array<{ reason: string; resourceType: string; url?: string }>;
   capabilityDiagnostics?: Array<{ code: "SUBFRAME_UNSUPPORTED"; resourceType: string; url?: string }>;
-  frames: Array<{ url: string }>;
+  frames: Array<{ url: string; source?: "OFFICIAL_IFRAME_SRC" }>;
   elements: Array<{ selector: string; tag: string; text: string; attributes: Record<string, string> }>;
   loading: boolean; blockedRequests: number; requestCount: number; interceptCount: number; responseBytes: number; startupMs: number;
   navigationStatus?: number; navigationElapsedMs?: number; initialContentWaitMs?: number; pendingRequestCount?: number;
@@ -630,12 +631,22 @@ export async function createCourseDiscoveryBrowserSession(input: {
         .map(attribute => [attribute.name, attribute.value.slice(0, 200)])), undefined, { timeout: 1000 });
       elements.push({ selector: control.selector, tag: control.tag, text: sanitizeResponderText(control.name).slice(0, 250), attributes });
     }
-    const frames = page.frames().filter(frame => frame !== page.mainFrame() && isSafeRecipeUrl(normalizeDiscoveryNavigationUrl(frame.url()))).map(frame => ({ url: normalizeDiscoveryNavigationUrl(frame.url()) })).slice(0, 10);
+    const publicFrameSources = !blockedAccess && input.venueOfficialUrl && navigation?.status === 200
+      ? await observedPublicFrameSources(page, input.venueOfficialUrl, navigation.url) : [];
+    const frames: DiscoveryBrowserSnapshot["frames"] = publicFrameSources.map(url => ({ url, source: "OFFICIAL_IFRAME_SRC" }));
+    for (const frame of page.frames()) {
+      const url = normalizeDiscoveryNavigationUrl(frame.url());
+      if (frames.length >= 10) break;
+      if (frame !== page.mainFrame() && isSafeRecipeUrl(url) && !frames.some(value => value.url === url)) frames.push({ url });
+    }
     // A client navigation can replace the DOM while its old locator inventory
     // is being read. Never return controls and text from different documents.
     const finalDocumentStartedAt = await page.evaluate(() => performance.timeOrigin);
     if (page.url() !== actualCurrentUrl || documentStartedAt !== finalDocumentStartedAt)
       throw new Error("DISCOVERY_SNAPSHOT_CHANGED");
+    for (const url of publicFrameSources) {
+      allowedNavigation.add(url); passfactory.observeWidgetUrl(url); cpsScope.observeEntry(url);
+    }
     // Frame presence is descriptive only. A blocked or unread frame cannot
     // grant a navigation URL or authorize a provider's embedded resource.
     const requests = observedRequests.map(request => ({ ...request }));

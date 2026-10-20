@@ -776,6 +776,67 @@ describe("controller-only verification", () => {
     } finally { rmSync(sourceHome, { recursive: true, force: true }); }
   });
 
+  it.each(["current", "open", "finish", "navigation", "failed-inspect", "failed-replay"])("uses only a current fixed inspection for source evidence (%s)", async invalidation => {
+    const sourceHome = mkdtempSync(join(tmpdir(), "discovery-inspector-source-"));
+    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }));
+    writeFileSync(join(sourceHome, "auth.json"), "test-auth");
+    const officialUrl = "https://example.org/", bookingUrl = "https://booking.example.org/calendar";
+    const inputJob = { ...job(), request: { ...job().request, identity: { name: "Public golf", officialUrl, bookingUrl: null } } };
+    const adapter = { family: "FOREUP", facilityId: 1, scheduleId: 2, bookingClassId: 3 };
+    const recipe = { engine: "EXISTING_ADAPTER", source: { bookingUrl, providerFamily: "FOREUP" }, adapter };
+    const hash = "a".repeat(64), requests: unknown[] = [], checkpoints: unknown[] = [], replies: unknown[] = [];
+    const client = { helperEnvironment: () => ({}), checkpoint: async (_id, _token, value) => { checkpoints.push(value); },
+      candidate: vi.fn(async () => ({ recipeHash: hash, challenges: [
+        { id: "first", recipeHash: hash, input: { date: "2026-10-23" } }, { id: "second", recipeHash: hash, input: { date: "2026-10-24" } },
+      ] })), verification: vi.fn(async () => ({})), activate: vi.fn(async () => ({})) };
+    const actions: Array<[string, object]> = [["discovery_browser", { action: "open", url: officialUrl }],
+      ["discovery_browser", { action: "inspect_adapter", url: bookingUrl }]];
+    if (invalidation === "open") actions.push(["discovery_browser", { action: "open", url: officialUrl }]);
+    if (invalidation === "finish") actions.push(["discovery_browser", { action: "finish" }]);
+    if (invalidation === "navigation") actions.push(["discovery_browser", { action: "click", target: "00000000-0000-4000-8000-000000000001" }]);
+    if (invalidation === "failed-inspect") actions.push(["discovery_browser", { action: "inspect_adapter", url: bookingUrl }]);
+    actions.push(["discovery_propose_recipe", { recipe }]);
+    let inspections = 0;
+    const executeRecipe = vi.fn(async () => invalidation === "failed-replay" ? { status: "INCOMPLETE", complete: false } : { status: "EMPTY", complete: true });
+    const processFactory = options => ({ notify: vi.fn(), close: vi.fn(async () => {}), request: async (method: string) => {
+      if (method === "thread/start") return { thread: { id: "thread-1" }, approvalPolicy: "never", sandbox: { type: "readOnly" } };
+      if (method === "turn/start") {
+        queueMicrotask(async () => {
+          await options.onMessage({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1" } } }, () => {});
+          for (const [index, [tool, args]] of actions.entries()) await options.onMessage({ id: index + 1, method: "item/tool/call",
+            params: { threadId: "thread-1", turnId: "turn-1", tool, arguments: args } }, reply => replies.push(reply));
+          await options.onMessage({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } }, () => {});
+        }); return { turn: { id: "turn-1" } };
+      } return {};
+    } });
+    try {
+      const result = await runCourseDiscoveryWorker({ job: inputJob, client, cwd: process.cwd(), sourceHome, recipeSchema: {},
+        resolveCli: () => "fixed-codex", processFactory, validateRecipe: async () => ({ valid: true }), executeRecipe,
+        browserFactory: () => ({ close: async () => {}, request: async action => {
+          requests.push(action);
+          if (action.action === "inspect_adapter") {
+            if (++inspections > 1) throw Object.assign(new Error("Inspection failed"), { code: "ADAPTER_IDENTITY_MISMATCH" });
+            return { url: officialUrl, text: "Public golf", controls: [], adapter };
+          }
+          return { url: action.action === "click" ? `${officialUrl}changed` : officialUrl, text: "Public golf", controls: [] };
+        } }),
+      }).catch(error => error);
+      if (invalidation === "current") {
+        expect(result.outcome).toBe("activated");
+        expect(client.candidate).toHaveBeenCalledWith(inputJob.id, inputJob.leaseToken, expect.anything(), undefined,
+          { officialUrl, observedBookingUrl: bookingUrl });
+        expect(executeRecipe).toHaveBeenCalledTimes(2); expect(client.verification).toHaveBeenCalledTimes(2);
+        expect(client.activate).toHaveBeenCalledOnce();
+        expect(requests).toEqual([{ action: "open", url: officialUrl }, { action: "inspect_adapter", url: bookingUrl }]);
+      } else {
+        expect(result.code).toBe("DISCOVERY_NO_VERIFIED_RECIPE"); expect(client.activate).not.toHaveBeenCalled();
+        if (invalidation === "failed-replay") { expect(client.candidate).toHaveBeenCalledOnce(); expect(executeRecipe).toHaveBeenCalledOnce(); }
+        else { expect(client.candidate).not.toHaveBeenCalled(); expect(JSON.stringify(replies)).toContain("DISCOVERY_SOURCE_NOT_OBSERVED"); }
+      }
+      expect(checkpoints.every(value => !Object.hasOwn((value as { controller: object }).controller, "adapterObservation"))).toBe(true);
+    } finally { rmSync(sourceHome, { recursive: true, force: true }); }
+  });
+
   it("keeps observed controls usable when a proposal lacks booking-source evidence", async () => {
     const sourceHome = mkdtempSync(join(tmpdir(), "discovery-source-correction-"));
     writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }));

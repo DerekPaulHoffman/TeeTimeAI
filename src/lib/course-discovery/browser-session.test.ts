@@ -71,6 +71,25 @@ describe("discovery browser public protocol", () => {
 
 const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
+  it("opens only an exact visible official iframe source as a separate guarded main page", async () => {
+    const official = "https://example.org/", visible = "https://public-rentals.book.teeitup.com/", hidden = "https://hidden-rentals.book.teeitup.com/";
+    const fetcher = vi.fn(async value => new Response(String(value) === official
+      ? `<html><body><h1>Public golf rentals</h1><iframe src="${visible}" style="width:400px;height:200px"></iframe><iframe hidden src="${hidden}"></iframe></body></html>`
+      : "<html><body><h1>Public availability page</h1></body></html>", { headers: { "content-type": "text/html" } })) as unknown as typeof fetch;
+    const session = await createCourseDiscoveryBrowserSession({ initialUrls: [official], venueOfficialUrl: official, deadlineAt: new Date(Date.now() + 20_000) }, {
+      fetch: fetcher, launchBrowser: () => chromium.launch({ executablePath, headless: true }),
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      const snapshot = await session.execute({ id: 1, action: "open", url: official });
+      expect(snapshot.frames).toContainEqual({ url: visible, source: "OFFICIAL_IFRAME_SRC" });
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      await expect(session.execute({ id: 2, action: "open", url: hidden })).rejects.toThrow("UNOBSERVED_NAVIGATION");
+      const standalone = await session.execute({ id: 3, action: "open", url: visible });
+      expect(standalone.text).toContain("Public availability page");
+      expect(fetcher).toHaveBeenCalledTimes(2);
+    } finally { await session.close(); }
+  }, 25_000);
   it("retains body-free request diagnostics after the first navigation fails", async () => {
     const session = await createCourseDiscoveryBrowserSession({ initialUrls: ["https://example.org/"], deadlineAt: new Date(Date.now() + 15_000) }, {
       fetch: vi.fn(async () => { throw new Error("FIXTURE_NETWORK_FAILURE"); }) as unknown as typeof fetch,

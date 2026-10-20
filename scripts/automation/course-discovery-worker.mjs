@@ -21,6 +21,41 @@ function safeObservedUrl(value) {
       [...url.searchParams.keys()].every(key => !/password|secret|token|cookie|session|credential|authorization|api.?key|email|phone/iu.test(key));
   } catch { return false; }
 }
+function canonicalDataKey(value) {
+  try {
+    const serialized = JSON.stringify(value);
+    if (!serialized || Buffer.byteLength(serialized, "utf8") > 131_072) return undefined;
+    const sort = (item, depth = 0) => {
+      if (depth > 16) throw new Error("DATA_DEPTH_LIMIT");
+      if (Array.isArray(item)) return item.map(value => sort(value, depth + 1));
+      if (item && typeof item === "object") return Object.fromEntries(Object.keys(item).sort()
+        .map(key => [key, sort(item[key], depth + 1)]));
+      return item;
+    };
+    return JSON.stringify(sort(JSON.parse(serialized)));
+  } catch { return undefined; }
+}
+/** This observation is controller memory only; checkpoints cannot restore it. */
+export function createDiscoveryAdapterObservation(job, bookingUrl, adapter, contextUrl) {
+  if (!safeObservedUrl(job?.request?.identity?.officialUrl) || !safeObservedUrl(bookingUrl) || !safeObservedUrl(contextUrl) ||
+      !["FOREUP", "ACUITY", "TEEITUP", "USCHEDULE", "WHOOSH", "LIGHTSPEED"].includes(adapter?.family)) return undefined;
+  const adapterKey = canonicalDataKey(adapter), identityKey = canonicalDataKey(job.request.identity),
+    targetKey = canonicalDataKey(job.request.target), inputKey = canonicalDataKey(job.request.input);
+  if (!adapterKey || !identityKey || !targetKey || !inputKey) return undefined;
+  return { jobId: job.id, officialUrl: job.request.identity.officialUrl, bookingUrl, contextUrl,
+    identityKey, targetKey, inputKey, adapter: JSON.parse(adapterKey) };
+}
+/** A fixed inspector reads public configuration; fresh replay still proves availability. */
+export function inspectedAdapterSourceEvidence(recipe, job, observation, officialSourceObserved, contextUrl) {
+  if (recipe?.engine !== "EXISTING_ADAPTER" || officialSourceObserved !== true || !observation ||
+      observation.jobId !== job.id || observation.officialUrl !== job.request.identity.officialUrl ||
+      observation.bookingUrl !== recipe.source?.bookingUrl || observation.contextUrl !== contextUrl ||
+      observation.identityKey !== canonicalDataKey(job.request.identity) || observation.targetKey !== canonicalDataKey(job.request.target) ||
+      observation.inputKey !== canonicalDataKey(job.request.input)) return undefined;
+  const candidateKey = canonicalDataKey(recipe.adapter), observedKey = canonicalDataKey(observation.adapter);
+  if (!candidateKey || candidateKey !== observedKey) return undefined;
+  return { officialUrl: observation.officialUrl, observedBookingUrl: observation.bookingUrl };
+}
 /** Canonical identity belongs to the claimed job, never to generated prose. */
 export function bindDiscoveryRecipeIdentity(recipe, job, adapterObservation) {
   if (!recipe || typeof recipe !== "object" || Array.isArray(recipe)) return recipe;
@@ -678,8 +713,8 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
             if (typeof job.request.identity.officialUrl === "string" &&
                 (snapshot?.url === job.request.identity.officialUrl || input.action === "open" && input.url === job.request.identity.officialUrl)) officialSourceObserved = true;
             if (lastBrowserSnapshot?.url !== snapshot?.url) adapterObservation = undefined;
-            if (input.action === "inspect_adapter" && snapshot?.adapter?.family === "TEEITUP" && snapshot.adapter.officialIdentityProof)
-              adapterObservation = { jobId: job.id, officialUrl: job.request.identity.officialUrl, bookingUrl: input.url, adapter: snapshot.adapter };
+            if (input.action === "inspect_adapter")
+              adapterObservation = createDiscoveryAdapterObservation(job, input.url, snapshot?.adapter, snapshot?.url);
             lastBrowserSnapshot = snapshot;
             currentAccessRequirementObserved = snapshot?.accessRequirementObserved === true;
             const browserFeedback = discoveryBrowserFeedback(snapshot, input.action);
@@ -717,7 +752,8 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
             if (validation.valid !== true) throw discoveryError("DISCOVERY_RECIPE_INVALID", { details: { issues: validation.issues } });
             const proposedUrl = recipe.source?.bookingUrl;
             const sourceEvidence = officialSourceObserved && job.request.identity.officialUrl && typeof proposedUrl === "string" && observedNavigationUrls.has(proposedUrl)
-              ? { officialUrl: job.request.identity.officialUrl, observedBookingUrl: proposedUrl } : undefined;
+              ? { officialUrl: job.request.identity.officialUrl, observedBookingUrl: proposedUrl }
+              : inspectedAdapterSourceEvidence(recipe, job, adapterObservation, officialSourceObserved, lastBrowserSnapshot?.url);
             if (proposedUrl !== job.request.identity.bookingUrl && !sourceEvidence) throw discoveryError("DISCOVERY_SOURCE_NOT_OBSERVED");
             // A rejected proposal must leave its current observed controls and
             // links usable for correction within the same attempt.
@@ -767,6 +803,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
         "Simulator players are saved context, not simultaneous tee-sheet spots or a number of bays. Select one bay if the widget requires a bay/guest quantity. Do not parameterize simulator availability using players. Respect a published whole-bay capacity when present, but never infer one: unknown capacity remains unknown and does not block observing whole-bay availability. Parameterize the requested duration.",
         `The initial browser transport is ${browserTransport}. A main-document HTTP403 triggers one trusted fallback to the other public-read transport. Preserve the actual browserTransport reported by the latest snapshot in BROWSER_DOM recipes, including after a fallback. HTTP429 does not trigger a fallback.`,
         "Find the real availability request or deterministic rendered structure. Visible controls may be used while loading is true; pending analytics do not require waiting when relevant controls are present. The finish action closes the session; use it only to reset a heavy session or when finished. On reset, previously observed navigation and successful public GET URLs remain permitted. Trusted resume URLs may be opened directly.",
+        "Frames marked source OFFICIAL_IFRAME_SRC identify exact visible public sources from the current official-page DOM. You may inspect_adapter or open that exact URL as a standalone main-frame read; a URL appearing only in capability diagnostics does not grant navigation authority.",
         "After observing a public ForeUP, Acuity, TeeItUp, USchedule, Whoosh or Lightspeed simulator agenda URL, use discovery_browser inspect_adapter with that observed URL. The fixed inspector returns verified existing-adapter metadata when supported. Prefer the EXISTING_ADAPTER recipe variant using those typed fields over reconstructing its browser selectors. USchedule uses the selected public simulator rental, exact requested duration and whole-date pagination in a fresh anonymous session. Whoosh uses a fixed public exact-duration query bound to the observed simulator facility and its resource pools. Lightspeed independently verifies the official venue identity and entire public rental catalog, then reads every eligible product for the requested duration; never substitute a single bay subset for complete venue availability. The inspector obtains venue identity from the controller, not from tool arguments.",
         "Use discovery_browser inspect with an element selector from the current snapshot to inspect its actual ancestor structure, child labels and match counts. Use these observations to choose unique proof and collection containers; do not guess parent paths or mix golf rentals with non-golf resources.",
         "Parameterize the request date and supported duration with {{date}}, {{day}}, {{month}}, {{year}}, {{durationMinutes}} and other schema templates. Do not hardcode today's calendar position or the sample day. Date proof must read an actual full-date element or supported attribute, not assume the requested date.",
@@ -775,7 +812,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
         "BROWSER_DOM permittedRoutes must include every observed required document, script, stylesheet and public data bootstrap route, using exact origins, bounded path prefixes and query key names. Static assets are not implicitly permitted. Exclude incidental analytics where the page works without them. Public anonymous-read POST bodies are shown only after the fixed policy authorizes them; do not invent endpoints or body fields.",
         "Every BROWSER_DOM recipe requires availabilityResponse identifying the observed availability request URL, method, and date binding in QUERY or JSON_BODY. It must complete successfully for the exact requested date after input changes. Normally select duration/player filters before the final date-triggered read. For the exact public PassFactory widget only, ordinary select-DURATION may follow date selection: the fixed runtime independently verifies its pinned client code and prior successful day response before supporting that client-only filter. Do not invent a bypass flag. A changed sidebar date or visible body is not completion. Use proof.complete {availabilityResponse:true} only with an observed JSON success path/value in availabilityResponse.success (an HTTP200 alone does not prove application success), or read an explicit DOM ready/loaded/complete field. Simulator slots.scope must identify actual resource cards with a direct child label, not a broad ancestor wrapping multiple resources.",
         "For an OUTDOOR page that returns its complete availability in the dated main-document HTML itself, availabilityResponse kind SERVER_DOCUMENT and proof.complete {serverDocument:true} are available. The interpreter requires a fresh successful full HTML document GET bound to the requested date, and compares venue, date, capacity and every extracted row against the inert original response. A client-rendered grid, a container alone, incomplete HTML, later data loads or pagination cannot use this proof. Do not invent per-slot player capacity when the page only states a general group limit.",
-        "Use schema field readers and formats for date, venue, capacity, duration and completeness proof. After inspecting an adapter, open its observed public booking URL before proposing it so the controller has the official-to-booking source chain. A rejected proposal retains the browser for correction. A proposal is tested immediately; use returned failing-step or route diagnostics to refine it within this attempt. Aim for a verified reusable recipe within five minutes, leaving the overall fifteen-minute deadline for fresh execution and notification. Do not repeat unchanged failures.",
+        "Use schema field readers and formats for date, venue, capacity, duration and completeness proof. After a successful fixed inspect_adapter, prefer proposing EXISTING_ADAPTER immediately with its exact inspected booking URL and unchanged returned adapter metadata. The controller retains that current inspection as source evidence, so no provider JavaScript page visit is required. Different URLs or metadata require a new inspection; an explicit open, browser reset, failed browser action or change of observed URL clears the inspection. This does not authorize unobserved browser or JSON recipes. A rejected proposal retains the browser for correction. A proposal is tested immediately; use returned failing-step or route diagnostics to refine it within this attempt. Aim for a verified reusable recipe within five minutes, leaving the overall fifteen-minute deadline for fresh execution and notification. Do not repeat unchanged failures.",
         "For an actual observed login or challenge wall, checkpoint outcome ACCESS_REQUIRED only when the current browser snapshot reports accessRequirementObserved:true. A model summary or HTTP403 alone cannot establish this. An UNSUPPORTED report is an unverified capability limitation: it ends only this attempt as a retryable failure within the original job deadline, never as a terminal unsupported-source verdict. One failed adapter does not establish that every allowed method is unsupported. First use returned diagnostics to correct stale controls, unfinished navigation or recipe schema errors. Policy prose, a requirement to sign in to book, a mere CAPTCHA mention, missing data or a transient fetch error is not a terminal access outcome. Propose only a data recipe; the controller validates and replays it independently. Missing availability is not zero times.",
         `Recipe JSON schema: ${JSON.stringify(recipeSchema)}`,
       ].join(" "),

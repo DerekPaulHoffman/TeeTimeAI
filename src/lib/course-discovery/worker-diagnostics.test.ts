@@ -1,8 +1,31 @@
 import { describe, expect, it } from "vitest";
-import { bindDiscoveryRecipeIdentity, discoveryBrowserFeedback, discoveryCheckpointDisposition, noVerifiedRecipeDiagnostic, readDiscoveryControllerCheckpoint, safeBrowserFailureDiagnostics } from "../../../scripts/automation/course-discovery-worker.mjs";
+import { bindDiscoveryRecipeIdentity, createDiscoveryAdapterObservation, discoveryBrowserFeedback, discoveryCheckpointDisposition, inspectedAdapterSourceEvidence, noVerifiedRecipeDiagnostic, readDiscoveryControllerCheckpoint, safeBrowserFailureDiagnostics } from "../../../scripts/automation/course-discovery-worker.mjs";
 import { safeBrowserActionIssues } from "../../../scripts/automation/course-discovery-diagnostics.mjs";
 
 describe("durable discovery browser diagnostics", () => {
+  it.each(["FOREUP", "ACUITY", "TEEITUP", "USCHEDULE", "WHOOSH", "LIGHTSPEED"])("binds current %s inspection evidence to exact job, source, input and typed metadata", family => {
+    const job = { id: "job", request: { identity: { name: "Public golf", officialUrl: "https://official.example.org/" },
+      target: { courseId: "course", kind: "OUTDOOR" }, input: { date: "2026-10-23", players: 2 } } };
+    const bookingUrl = "https://booking.example.org/availability", context = job.request.identity.officialUrl;
+    const adapter = { family, resources: [1, 2], configuration: { duration: 60, active: true } };
+    const observation = createDiscoveryAdapterObservation(job, bookingUrl, adapter, context);
+    const recipe = bindDiscoveryRecipeIdentity({ engine: "EXISTING_ADAPTER", source: { bookingUrl },
+      adapter: { configuration: { active: true, duration: 60 }, resources: [1, 2], family } }, job, observation);
+    expect(inspectedAdapterSourceEvidence(recipe, job, observation, true, context)).toEqual({ officialUrl: context, observedBookingUrl: bookingUrl });
+    expect(inspectedAdapterSourceEvidence(recipe, job, observation, false, context)).toBeUndefined();
+    expect(inspectedAdapterSourceEvidence(recipe, { ...job, id: "other" }, observation, true, context)).toBeUndefined();
+    expect(inspectedAdapterSourceEvidence(recipe, { ...job, request: { ...job.request, input: { date: "2026-10-24", players: 2 } } }, observation, true, context)).toBeUndefined();
+    expect(inspectedAdapterSourceEvidence(recipe, { ...job, request: { ...job.request, target: { courseId: "other", kind: "OUTDOOR" } } }, observation, true, context)).toBeUndefined();
+    expect(inspectedAdapterSourceEvidence(recipe, job, observation, true, "https://official.example.org/changed")).toBeUndefined();
+    expect(inspectedAdapterSourceEvidence({ ...recipe, source: { bookingUrl: `${bookingUrl}/other` } }, job, observation, true, context)).toBeUndefined();
+    expect(inspectedAdapterSourceEvidence({ ...recipe, adapter: { ...adapter, resources: [1, 3] } }, job, observation, true, context)).toBeUndefined();
+    for (const engine of ["HTTP_JSON", "BROWSER_DOM"]) expect(inspectedAdapterSourceEvidence({ ...recipe, engine }, job, observation, true, context)).toBeUndefined();
+    adapter.resources[0] = 9;
+    expect(observation.adapter.resources).toEqual([1, 2]);
+    expect(readDiscoveryControllerCheckpoint({ controller: { version: 1, officialUrl: context, officialSourceObserved: true,
+      observedNavigationUrls: [], adapterObservation: observation } }, context)).not.toHaveProperty("adapterObservation");
+  });
+
   it("retains failed first-navigation facts without bodies, credentials or query values", () => {
     const safe = safeBrowserFailureDiagnostics({ loading: true, pendingRequestCount: 5000,
       text: "private page text", requests: [null, { url: "https://venue.example/read?token=private", method: "GET", resourceType: "document", status: 403, body: "private" },
