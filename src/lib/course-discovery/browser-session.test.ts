@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { chromium } from "@playwright/test";
 import { describe, expect, it, vi } from "vitest";
 import { createAddressPinnedPublicFetchTransport } from "@/lib/automation/address-pinned-public-fetch";
-import { createCourseDiscoveryBrowserSession, discoveryBrowserActionSchema, discoveryPublicAnchorKind, discoveryPublicChoiceKind, normalizeDiscoveryNavigationUrl, redactDiscoveryJson, redactDiscoveryRequestUrl, sameDiscoveryMainDocument } from "./browser-session";
+import { createCourseDiscoveryBrowserSession, discoveryBrowserActionSchema, discoveryPublicAnchorKind, discoveryPublicChoiceKind, normalizeDiscoveryNavigationUrl, redactDiscoveryFailureUrl, redactDiscoveryJson, redactDiscoveryRequestUrl, sameDiscoveryMainDocument } from "./browser-session";
 import * as nativeBrowser from "./native-public-browser";
 import { deriveTeeItUpOfficialIdentityProof } from "./teeitup-official-identity";
 
@@ -16,6 +16,10 @@ describe("discovery browser public protocol", () => {
     expect(discoveryPublicAnchorKind({ ...control, name: "Reserve 09:30" })).toBeNull();
     expect(discoveryPublicAnchorKind({ ...control, href: "https://example.org/checkout" })).toBeNull();
     expect(discoveryPublicAnchorKind({ ...control, href: "https://example.org/tee-times?slot=123" })).toBeNull();
+    expect(discoveryPublicAnchorKind({ ...control, href: "https://example.org/tee-times?Time=AnyTime&Player=99" })).toBe("link");
+    expect(discoveryPublicAnchorKind({ ...control, href: "https://example.org/tee-times?Time=09:30" })).toBeNull();
+    expect(discoveryPublicAnchorKind({ ...control, href: "https://example.org/tee-times?teeTimeId=123" })).toBeNull();
+    expect(discoveryPublicAnchorKind({ ...control, href: "https://example.org/review" })).toBeNull();
   });
   it("normalizes only the known observed ForeUP public bootstrap login bookmark", () => {
     expect(normalizeDiscoveryNavigationUrl("https://foreupsoftware.com/index.php/booking/21017#/login")).toBe("https://foreupsoftware.com/index.php/booking/21017");
@@ -51,6 +55,13 @@ describe("discovery browser public protocol", () => {
     expect((redactDiscoveryJson(Array.from({ length: 300 }, (_, index) => index)) as unknown[])).toHaveLength(100);
     expect(redactDiscoveryRequestUrl("https://maps.example.org/api?key=private-value&date=2026-10-22")).toBe("https://maps.example.org/api?key=REDACTED&date=2026-10-22");
   });
+  it("exposes only safe session-free diagnostic paths without query or fragment values", () => {
+    expect(redactDiscoveryFailureUrl("https://public.example.org/calendar?token=secret&date=2030-10-23#private", "fetch")).toBe("https://public.example.org/calendar");
+    expect(redactDiscoveryFailureUrl("https://sc.cps.golf/ExampleV3/(S(abc123abc123abc123abc123))/Home/nIndex?CourseId=1", "document"))
+      .toBe("https://sc.cps.golf/ExampleV3/Home/nIndex");
+    for (const value of ["https://user:secret@example.org/calendar", "https://127.0.0.1/calendar", "https://example.org/account/token-secret", "not-url"])
+      expect(redactDiscoveryFailureUrl(value, "fetch")).toBeUndefined();
+  });
   it("requires prebound safe sources before launching a browser", async () => {
     const launchBrowser = vi.fn();
     await expect(createCourseDiscoveryBrowserSession({ deadlineAt: new Date(Date.now() + 30_000), initialUrls: ["https://127.0.0.1/"] }, { launchBrowser })).rejects.toThrow("INVALID_INITIAL_URLS");
@@ -60,6 +71,125 @@ describe("discovery browser public protocol", () => {
 
 const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
+  it("bounds a 3000-control scan before per-control inspection without losing its lower public link", async () => {
+    const fixture = '<h1>Public Golf</h1>' + Array.from({ length: 2999 }, (_, index) => `<button>Decorative ${index}</button>`).join('') +
+      '<a href="https://booking.example.org/calendar">Book Your Tee Time</a>';
+    const session = await createCourseDiscoveryBrowserSession({ deadlineAt: new Date(Date.now() + 25_000), initialUrls: ['https://example.org/'] }, {
+      fetch: async () => new Response(fixture, { headers: { 'content-type': 'text/html' } }),
+      launchBrowser: () => chromium.launch({ executablePath, headless: true }), requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      const startedAt = Date.now();
+      const initial = await session.execute({ id: 1, action: 'open', url: 'https://example.org/' });
+      expect(Date.now() - startedAt).toBeLessThan(15_000);
+      expect(initial.controls).toHaveLength(1);
+      expect(initial.controls[0]).toMatchObject({ name: 'Book Your Tee Time', href: 'https://booking.example.org/calendar' });
+    } finally { await session.close(); }
+  }, 30_000);
+  it("rebuilds a snapshot after client navigation replaces an enumerated control list without repeating the click", async () => {
+    const fixture = `<html><body><h1>Public Golf</h1><a href="/times" onclick="event.preventDefault();window.publicClicks=(window.publicClicks||0)+1;history.pushState({},'',this.href);document.body.innerHTML='<h1>Loading public choices</h1>'+Array.from({length:120},(_,i)=>'<button>Next '+i+'</button>').join('');setTimeout(()=>{document.body.innerHTML='<h1>Public availability ready</h1><button>Next date</button>'},425)">Book Your Tee Time</a></body></html>`;
+    let browser: Awaited<ReturnType<typeof chromium.launch>>;
+    const fetch = vi.fn(async () => new Response(fixture, { headers: { 'content-type': 'text/html' } })) as unknown as typeof globalThis.fetch;
+    const session = await createCourseDiscoveryBrowserSession({ deadlineAt: new Date(Date.now() + 25_000), initialUrls: ['https://example.org/'] }, {
+      fetch, launchBrowser: async () => browser = await chromium.launch({ executablePath, headless: true }),
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      const initial = await session.execute({ id: 1, action: 'open', url: 'https://example.org/' });
+      const link = initial.controls.find(control => control.name === 'Book Your Tee Time')!;
+      const startedAt = Date.now();
+      const followed = await session.execute({ id: 2, action: 'click', target: link.target });
+      expect(Date.now() - startedAt).toBeLessThan(6000);
+      expect(followed.url).toBe('https://example.org/times');
+      expect(followed.text).toBe('Public availability ready\nNext date');
+      expect(followed.controls.map(control => control.name)).toEqual(['Next date']);
+      expect(await browser!.contexts()[0].pages()[0].evaluate(() => (window as unknown as { publicClicks: number }).publicClicks)).toBe(1);
+      expect(fetch).toHaveBeenCalledTimes(1);
+    } finally { await session.close(); }
+  }, 30_000);
+  it("preserves safe same-tab client navigation while following a public any-time filter", async () => {
+    const fixture = '<html><body><h1>Public Golf</h1><a href="/times?Time=AnyTime" onclick="event.preventDefault();history.pushState({},\'\',this.href);document.querySelector(\'h1\').textContent=\'Client rendered availability\'">Book Your Tee Time</a></body></html>';
+    const fetch = vi.fn(async () => new Response(fixture, { headers: { 'content-type': 'text/html' } })) as unknown as typeof globalThis.fetch;
+    const session = await createCourseDiscoveryBrowserSession({ deadlineAt: new Date(Date.now() + 25_000), initialUrls: ['https://example.org/'] }, {
+      fetch, launchBrowser: () => chromium.launch({ executablePath, headless: true }), requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      const initial = await session.execute({ id: 1, action: 'open', url: 'https://example.org/' });
+      const link = initial.controls.find(control => control.name === 'Book Your Tee Time')!;
+      const followed = await session.execute({ id: 2, action: 'click', target: link.target });
+      expect(followed.url).toBe('https://example.org/times?Time=AnyTime');
+      expect(followed.text).toContain('Client rendered availability');
+      expect(fetch).toHaveBeenCalledTimes(1);
+    } finally { await session.close(); }
+  }, 30_000);
+  it("finds a public booking link beyond 180 hidden, irrelevant and ordinary navigation controls", async () => {
+    const fixture = '<html><body><h1>Public Golf</h1>' +
+      Array.from({ length: 190 }, (_, i) => `<button hidden>Hidden${i}</button><button>Decorative${i}</button><a href="/section${i}">Section${i}</a>`).join('') +
+      '<a id="book-link" href="https://booking.example.org/calendar">Book Your Tee Time</a></body></html>';
+    const fetch = vi.fn(async value => new Response(String(value).includes('booking.example.org') ? '<h1>Public tee times</h1>' : fixture,
+      { headers: { 'content-type': 'text/html' } })) as unknown as typeof globalThis.fetch;
+    const session = await createCourseDiscoveryBrowserSession({ deadlineAt: new Date(Date.now() + 45_000), initialUrls: ['https://example.org/'] }, {
+      fetch, launchBrowser: () => chromium.launch({ executablePath, headless: true }), requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      const initial = await session.execute({ id: 1, action: 'open', url: 'https://example.org/' });
+      expect(initial.controls.length).toBeLessThanOrEqual(180);
+      const link = initial.controls.find(control => control.name === 'Book Your Tee Time')!;
+      expect(link).toMatchObject({ kind: 'link', href: 'https://booking.example.org/calendar' });
+      expect((await session.execute({ id: 2, action: 'click', target: link.target })).url).toBe(link.href);
+    } finally { await session.close(); }
+  }, 50_000);
+  it.each(['follow', 'stale'])("promotes a unique rendered inspected public link beyond the output cap: %s", async mode => {
+    const fixture = '<html><body><h1>Public Golf</h1>' +
+      Array.from({ length: 190 }, (_, i) => `<a href="/booking${i}">Book a session${i}</a>`).join('') +
+      '<a id="late-public-link" href="https://booking.example.org/calendar">Golf Tee Times</a></body></html>';
+    let browser: Awaited<ReturnType<typeof chromium.launch>>;
+    const session = await createCourseDiscoveryBrowserSession({ deadlineAt: new Date(Date.now() + 45_000), initialUrls: ['https://example.org/'] }, {
+      fetch: async value => new Response(String(value).includes('booking.example.org') ? '<h1>Public tee times</h1>' : fixture, { headers: { 'content-type': 'text/html' } }),
+      launchBrowser: async () => browser = await chromium.launch({ executablePath, headless: true }), requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      const initial = await session.execute({ id: 1, action: 'open', url: 'https://example.org/' });
+      expect(initial.controls.some(control => control.name === 'Golf Tee Times')).toBe(false);
+      const observed = initial.elements.find(element => element.text === 'Golf Tee Times')!;
+      expect(observed).toBeDefined();
+      await expect(session.execute({ id: 10, action: 'open', url: 'https://booking.example.org/calendar' })).rejects.toThrow('UNOBSERVED_NAVIGATION');
+      const inspected = await session.execute({ id: 2, action: 'inspect', selector: observed.selector });
+      const link = inspected.controls.find(control => control.selector === observed.selector)!;
+      expect(link).toMatchObject({ kind: 'link', href: 'https://booking.example.org/calendar' });
+      expect(inspected.controls).toHaveLength(180);
+      expect(inspected.structure?.ancestors[0]).toMatchObject({ href: link.href, target: link.target });
+      if (mode === 'follow') expect((await session.execute({ id: 3, action: 'click', target: link.target })).url).toBe(link.href);
+      else {
+        await browser!.contexts()[0].pages()[0].evaluate(() => { (document.getElementById('late-public-link') as HTMLAnchorElement).href = 'https://example.org/checkout'; });
+        await expect(session.execute({ id: 3, action: 'click', target: link.target })).rejects.toThrow('STALE_OR_UNKNOWN_CONTROL');
+      }
+    } finally { await session.close(); }
+  }, 50_000);
+  it("does not promote inspected unsafe, private, transaction or hidden links", async () => {
+    const urls = ['https://127.0.0.1/private', 'https://example.org/login', 'https://example.org/checkout', 'https://example.org/calendar?slot=123'];
+    const fixture = '<html><body><h1>Public Golf</h1>' +
+      Array.from({ length: 190 }, (_, i) => `<a href="/booking${i}">Book a session${i}</a>`).join('') +
+      urls.map((url, i) => `<a id="denied${i}" href="${url}">Golf availability${i}</a>`).join('') +
+      '<a id="hidden-link" hidden href="https://hidden.example.org/calendar">Hidden golf availability</a></body></html>';
+    const fetch = vi.fn(async () => new Response(fixture, { headers: { 'content-type': 'text/html' } })) as unknown as typeof globalThis.fetch;
+    const session = await createCourseDiscoveryBrowserSession({ deadlineAt: new Date(Date.now() + 60_000), initialUrls: ['https://example.org/'] }, {
+      fetch, launchBrowser: () => chromium.launch({ executablePath, headless: true }), requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      let current = await session.execute({ id: 1, action: 'open', url: 'https://example.org/' });
+      for (let index = 0; index < urls.length; index++) {
+        const node = current.elements.find(element => element.text === `Golf availability${index}`)!;
+        current = await session.execute({ id: index + 2, action: 'inspect', selector: node.selector });
+        expect(current.controls.some(control => control.href === urls[index])).toBe(false);
+        expect(current.structure?.ancestors[0].href).toBeUndefined();
+        await expect(session.execute({ id: 10 + index, action: 'open', url: urls[index] })).rejects.toThrow('UNOBSERVED_NAVIGATION');
+      }
+      expect(current.elements.some(element => element.text === 'Hidden golf availability')).toBe(false);
+      await expect(session.execute({ id: 20, action: 'inspect', selector: '[id="hidden-link"]' })).rejects.toThrow('STALE_OR_UNKNOWN_ELEMENT');
+    } finally { await session.close(); }
+    expect(fetch).toHaveBeenCalledTimes(1);
+  }, 65_000);
   it.each([false, true])("corroborates official address visibility, including transparent ancestors: %s", async hidden => {
     const officialUrl = "https://example.org/", bookingUrl = "https://harbor.book.teeitup.com/";
     const fixture = '<html><head><title>Harbor Golf Club</title></head><body><h1>Harbor Golf Club</h1>' +

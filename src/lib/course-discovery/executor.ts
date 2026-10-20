@@ -9,10 +9,12 @@ import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-b
 import { getTimeZoneOffsetMinutes } from "@/lib/timezones";
 import { accessExecutionDiagnosticSchema, accessExecutionInputSchema, accessExecutionResultSchema, expandRecipeTemplate, hashAccessRecipe,
   parseAccessRecipe, recipeAllowsRequest, type AccessExecutionInput, type AccessExecutionResult,
-  publicRentalDurationMinutes, readRecipeFieldFormat, isActiveBrowserAccessChallenge, type AccessExecutionDiagnostic, type CourseAccessRecipeData, type RecipeDateParts, type RecipeField } from "./recipe";
+  readRecipeFieldFormat, isActiveBrowserAccessChallenge, type AccessExecutionDiagnostic, type CourseAccessRecipeData, type RecipeDateParts, type RecipeField } from "./recipe";
 import { continueNativeBrowserRead, createNativePublicBrowserProxy, nativeReadPreflightMethod, type NativePublicProxy } from "./native-public-browser";
+import { installNativeRedirectRouting, type NativeReadRoute } from "./native-redirect-routing";
 import { requestFamilyForUrl } from "./request-family";
 import { canonicalPublicReadUrl } from "./public-request-url";
+import { canonicalCpsPublicUrl, cpsSessionKey, createCpsPublicSessionScope } from "./cps-public-navigation";
 import { executeExistingAdapterRecipe } from "./existing-adapter-executor";
 import { selectPublicFilter } from "./public-filter-control";
 import { selectPublicCalendarDate } from "./public-calendar-control";
@@ -22,6 +24,9 @@ import { hasInspectedPassfactoryDurationClients, isInspectedPassfactoryDurationC
 import { extractServerDocument, sameServerDocumentEvidence, type ServerDocumentExtraction } from "./server-document-proof";
 import { PUBLIC_BROWSER_TOTAL_BYTES, PUBLIC_BROWSER_TUNNEL_BYTES, publicBrowserResponseLimit } from "./browser-resource-limits";
 import { isObservedPublicCalendarDay } from "./public-calendar-day";
+import { selectPublicRentalProduct } from "./public-product-control";
+import { followPublicAvailabilityLink } from "./public-navigation-control";
+import { selectPublicDateChoice } from "./public-date-choice";
 
 type ExtractedAccessRecipe = Exclude<CourseAccessRecipeData, { engine: "EXISTING_ADAPTER" }>;
 
@@ -380,7 +385,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
     }
     if (recipe.browserTransport === "NATIVE_CHROME") nativeProxy = await createNativePublicBrowserProxy({ signal, maxBytes: PUBLIC_BROWSER_TUNNEL_BYTES, maxConnections: 128 });
     try {
-      browser = deps.launchBrowser ? await deps.launchBrowser() : await (await import("@playwright/test")).chromium.launch({ headless: true,
+      browser = deps.launchBrowser ? await deps.launchBrowser() : await (await import("@playwright/test")).chromium.launch({ headless: !(nativeProxy && process.platform === "win32"),
         ...(process.platform === "win32" ? { channel: "chrome" } : {}),
         ...(nativeProxy ? { args: ["--disable-quic", "--proxy-bypass-list=<-loopback>"] } : {}) });
     } catch { throw new Error("BROWSER_UNAVAILABLE"); }
@@ -388,6 +393,8 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
       ...(nativeProxy ? { proxy: { server: nativeProxy.server, bypass: "<-loopback>" } } : {}) });
     await context.routeWebSocket("**/*", route => { route.close(); });
     const page = await context.newPage();
+    let redirectRouting: Awaited<ReturnType<typeof installNativeRedirectRouting>> | undefined;
+    const cpsScope = createCpsPublicSessionScope([recipe.source.bookingUrl, expandRecipeTemplate(recipe.pageUrl, input, true)]);
     page.on("popup", popup => { void popup.close(); });
     page.setDefaultTimeout(Math.min(10_000, Math.max(1, deadline - clock().getTime())));
     let blocked = false, requests = 0, bytes = 0, pendingRequests = 0, mutationGeneration = 0;
@@ -455,11 +462,12 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
     };
     let selectedProductDuration: number | undefined;
     let selectedDateDay: Locator | undefined;
-    await context.route("**/*", async route => {
+    const handleRoute = async (route: NativeReadRoute) => {
       const request = route.request();
       if (isIncidentalBrowserRequest(request.url()) || isNonEvidenceBrowserResource(request.url(), request.resourceType())) { await route.abort(); return; }
       pendingRequests++;
-      const requestUrl = canonicalPublicReadUrl(request.url(), request.method());
+      const transportUrl = canonicalPublicReadUrl(request.url(), request.method());
+      const requestUrl = canonicalCpsPublicUrl(transportUrl);
       const requestGeneration = mutationGeneration;
       const mainDocument = request.resourceType() === "document" && request.isNavigationRequest() && request.frame() === page.mainFrame();
       if (mainDocument) mainDocumentSequence++;
@@ -476,8 +484,12 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
       }
       try {
         if (++requests > 128 || signal.aborted) throw new Error("REQUEST_LIMIT");
+        if (request.frame().page() !== page) throw new Error("UNSUPPORTED_BROWSER_PAGE");
+        redirectRouting?.prepare(request.frame());
+        if (!cpsScope.authorize(transportUrl, request.redirectedFrom()?.url())) throw new Error("UNOBSERVED_CPS_SESSION");
+        if (cpsSessionKey(transportUrl) && !nativeProxy) throw new Error("CPS_NATIVE_BROWSER_REQUIRED");
         passfactory.observeWidgetUrl(requestUrl);
-        const frameUrl = request.frame().url();
+        const frameUrl = canonicalCpsPublicUrl(request.frame().url());
         if (recipeAllowsRequest(recipe, frameUrl, "GET")) passfactory.observeWidgetUrl(frameUrl);
         const requestHeaders = request.headers();
         const headers = new Headers();
@@ -492,7 +504,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
           const native = await requestQueue.run(requestFamilyForUrl(requestUrl), () => {
             const hostname = new URL(requestUrl).hostname;
             nativeProxy!.allowHostConnections(hostname);
-            return continueNativeBrowserRead(route, signal, responseLimit, () => nativeProxy!.cancelHostConnections(hostname), requestUrl);
+            return continueNativeBrowserRead(route, signal, responseLimit, () => nativeProxy!.cancelHostConnections(hostname), transportUrl);
           });
           bytes += native.body.length;
           if (bytes > PUBLIC_BROWSER_TOTAL_BYTES) { cancellation.abort("RESPONSE_LIMIT"); throw new Error("RESPONSE_LIMIT"); }
@@ -514,6 +526,19 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
           { main: mainDocument, sequence: capturedDocumentSequence, dataSequence: capturedDataSequence, contentType: response.headers.get("content-type") ?? "" });
       } catch (error) { blocked = true; failure ??= recipeExecutionDiagnostic(error, { url: requestUrl, method: request.method(), resourceType: request.resourceType() }); await route.abort().catch(() => {}); }
       finally { pendingRequests--; }
+    };
+    await context.route("**/*", async route => {
+      try { await handleRoute(redirectRouting ? redirectRouting.wrapRoute(route) : route); }
+      catch (error) {
+        blocked = true;
+        failure ??= recipeExecutionDiagnostic(error, activity);
+        await route.abort().catch(() => {});
+        void redirectRouting?.close();
+      }
+    });
+    if (nativeProxy) redirectRouting = await installNativeRedirectRouting(page, handleRoute, {
+      signal, maxRequests: 1024,
+      onFailure: code => { blocked = true; failure ??= recipeExecutionDiagnostic(code, activity); },
     });
     const stop = () => { void context.close().catch(() => {}); };
     signal.addEventListener("abort", stop, { once: true });
@@ -522,7 +547,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
       activity = { url: pageUrl, method: "GET", resourceType: "document" };
       await page.goto(pageUrl, { waitUntil: "domcontentloaded", timeout: Math.min(30_000, Math.max(1, deadline - clock().getTime())) });
       for (const [stepIndex, step] of recipe.steps.entries()) {
-        activity = { stepIndex, url: page.url(), method: "GET", resourceType: "document" };
+        activity = { stepIndex, url: canonicalCpsPublicUrl(page.url()), method: "GET", resourceType: "document" };
         signal.throwIfAborted();
         if (isActiveBrowserAccessChallenge(await page.locator("body").innerText(), await page.title())) return fail("ACCESS_REQUIRED", "ACCESS_REQUIRED");
         let carryDurationFence = false, previousAvailabilityRequests = passfactoryAvailabilityRequests;
@@ -533,10 +558,19 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
             throw new Error("UNVERIFIED_CLIENT_DURATION");
           carryDurationFence = true; previousAvailabilityRequests = passfactoryAvailabilityRequests;
         }
-        if (step.action === "selectDate" || step.action === "selectProduct" || step.action === "select" || step.action === "fill" ||
+        if (step.action === "followLink" || step.action === "selectDateChoice" || step.action === "selectDate" || step.action === "selectProduct" || step.action === "select" || step.action === "fill" ||
           step.action === "clickFilter" && ["SELECT_DATE", "APPLY_DATE", "SELECT_FILTER", "RUN_SEARCH"].includes(step.purpose)) {
           mutationGeneration++; responseGeneration = undefined; rejectedResponseGeneration = undefined;
           carriedDurationGeneration = carryDurationFence ? mutationGeneration : undefined;
+        }
+        if (step.action === "followLink") {
+          await followPublicAvailabilityLink(page.locator(step.selector), expandRecipeTemplate(step.text, input), url => recipeAllowsRequest(recipe, url, "GET"));
+          continue;
+        }
+        if (step.action === "selectDateChoice") {
+          selectedDateDay = await selectPublicDateChoice(page, step.selector, input.date);
+          selectedRequestedDate = true;
+          continue;
         }
         if (step.action === "selectDate") {
           selectedDateDay = await selectPublicCalendarDate(page, { ...step, date: input.date });
@@ -546,16 +580,9 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
         if (step.action === "selectProduct") {
           const card = page.locator(step.productSelector);
           const button = card.locator(step.selector);
-          if (!input.durationMinutes || await card.count() !== 1 || await button.count() !== 1 || !await card.isVisible() || !await button.isVisible()) throw new Error("UNSAFE_PRODUCT_SELECTION");
-          const text = clean((await card.innerText()).replace(/([a-z])([A-Z])/gu, "$1 $2").replace(/([A-Za-z])(\d)/gu, "$1 $2"));
-          const buttonText = clean(await button.innerText());
-          const sensitiveForm = await card.locator('input[type=password],input[type=email],input[type=tel],[autocomplete^="cc-"]').count();
-          const tag = await button.evaluate(element => element.tagName.toLowerCase());
-          if (text.length > 2000 || !["button", "a"].includes(tag) || !/^(?:book|select)$/iu.test(buttonText) || sensitiveForm ||
-            /\b\d{1,2}:\d{2}/u.test(text) || publicRentalDurationMinutes(text) !== input.durationMinutes ||
-            /\b(?:checkout|pay|payment|purchase|confirm|password|sign in|login)\b/iu.test(text)) throw new Error("UNSAFE_PRODUCT_SELECTION");
+          if (!input.durationMinutes) throw new Error("UNSAFE_PRODUCT_SELECTION");
+          await selectPublicRentalProduct(button, card, input.durationMinutes);
           selectedProductDuration = input.durationMinutes;
-          await button.click();
           continue;
         }
         let node = page.locator(step.selector);
@@ -638,7 +665,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
       await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
       if (isActiveBrowserAccessChallenge(await page.locator("body").innerText(), await page.title())) return fail("ACCESS_REQUIRED", "ACCESS_REQUIRED");
       if (providerThrottled) return fail("FAILED", "PROVIDER_THROTTLED");
-      if (blocked || !recipeAllowsRequest(recipe, page.url(), "GET")) return fail("INCOMPLETE", "UNSCOPED_OR_FAILED_RESOURCE");
+      if (blocked || !recipeAllowsRequest(recipe, canonicalCpsPublicUrl(page.url()), "GET")) return fail("INCOMPLETE", "UNSCOPED_OR_FAILED_RESOURCE");
       const first = await extractDom(recipe, page.locator("body"));
       if (first.duration === undefined) first.duration = selectedProductDuration;
       await page.waitForTimeout(750);
@@ -646,13 +673,13 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
       const second = await extractDom(recipe, page.locator("body"));
       if (second.duration === undefined) second.duration = selectedProductDuration;
       if (providerThrottled) return fail("FAILED", "PROVIDER_THROTTLED");
-      if (blocked || !recipeAllowsRequest(recipe, page.url(), "GET")) return fail("INCOMPLETE", "UNSCOPED_OR_FAILED_RESOURCE");
+      if (blocked || !recipeAllowsRequest(recipe, canonicalCpsPublicUrl(page.url()), "GET")) return fail("INCOMPLETE", "UNSCOPED_OR_FAILED_RESOURCE");
       if (pendingRequests || responseGeneration !== mutationGeneration || JSON.stringify(first) !== JSON.stringify(second)) return fail("INCOMPLETE", "UNSETTLED_RESULTS");
       if (usesServerDocument && (!serverDocument || serverDocument.generation !== mutationGeneration ||
           serverDocument.documentSequence !== mainDocumentSequence || serverDocument.dataSequence !== dataRequestSequence ||
           !sameServerDocumentEvidence(serverDocument.extracted, second))) return fail("INCOMPLETE", "SERVER_DOCUMENT_DOM_MISMATCH");
       return normalize(recipe, input, second, clock());
-    } finally { signal.removeEventListener("abort", stop); await context.close().catch(() => {}); }
+    } finally { signal.removeEventListener("abort", stop); await redirectRouting?.close(); await context.close().catch(() => {}); }
   } catch (error) {
     failure ??= recipeExecutionDiagnostic(error, activity);
     const message = error instanceof Error ? error.message : "";

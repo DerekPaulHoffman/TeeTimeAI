@@ -4,6 +4,7 @@ import { z } from "zod";
 import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import { existingAdapterMetadataSchema } from "./existing-adapter-schema";
 import { isServerDocumentSelector } from "./server-document-proof";
+import { hasCpsSessionState } from "./cps-public-navigation";
 
 const secret = /(?:password|secret|token|cookie|session|credential|authorization|api.?key|email|phone)/iu;
 const forbiddenPath = /(?:^|\/)(?:login|signin|signup|auth|account|checkout|cart|payment|pay|purchase|orders?|confirm|admin)(?:\/|$)|(?:^|\/)(?:bookings?|reservations?|reserve)\/(?:create|submit|confirm|cancel|hold|reserve)(?:\/|$)/iu;
@@ -11,7 +12,7 @@ const parameterNames = ["date", "timeZone", "players", "durationMinutes", "start
 export function isSafeRecipeUrl(value: string) {
   try {
     const url = new URL(value);
-    return Boolean(getSafeCustomerBookingUrl(value)) && !/[{}]/u.test(value) && url.protocol === "https:" && !url.username && !url.password && !url.port &&
+    return Boolean(getSafeCustomerBookingUrl(value)) && !hasCpsSessionState(value) && !/[{}]/u.test(value) && url.protocol === "https:" && !url.username && !url.password && !url.port &&
       !isIP(url.hostname) && /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/iu.test(url.hostname) && !url.hostname.includes("..") && url.hostname.includes(".") && !/(?:^|\.)(?:localhost|local|internal|test|invalid)$/iu.test(url.hostname) &&
       !forbiddenPath.test(decodeURIComponent(url.pathname)) &&
       [...url.searchParams].every(([key, item]) => !secret.test(key) && !/[\r\n]/u.test(item));
@@ -70,10 +71,15 @@ export const recipeRouteSchema = z.object({
   queryKeys: z.array(z.string().min(1).max(80).regex(/^[a-zA-Z0-9_\[\].-]+$/u).refine(value => !secret.test(value))).max(30).default([]),
 }).strict();
 const stepSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("selectDateChoice"), selector: recipeSelectorSchema }).strict()
+    .describe("Choose the requested date from a bounded public grid of buttons labelled with a full English month/day/four-digit year (optional correct weekday). Use one reusable selector for all day choices. Requires a unique visible requested date and at least two distinct sibling date options; time/product cards and sensitive contexts are rejected. Final date-bound response and source-date proof are still required."),
+  z.object({ action: z.literal("followLink"), selector: recipeSelectorSchema, text: recipeTemplateSchema }).strict()
+    .describe("Follow an exact visible public navigation anchor using its current observed href and label (for example Next between service, resource, date and availability pages). The href must match permittedRoutes; selected time/slot, account, review, payment, sensitive forms and new-window targets are rejected. Never use this to choose an availability time."),
   z.object({ action: z.literal("selectDate"), monthYearSelector: recipeSelectorSchema,
     nextSelector: recipeSelectorSchema, previousSelector: recipeSelectorSchema, daySelector: recipeSelectorSchema }).strict()
     .describe("Choose the requested date using a visible full English month and four-digit year heading, safe calendar next/previous controls and a reusable numeric day selector. Moves at most twelve months, verifying each adjacent month before selecting the exact visible requested day. Final independent date proof is still required."),
-  z.object({ action: z.literal("selectProduct"), selector: recipeSelectorSchema, productSelector: recipeSelectorSchema }).strict(),
+  z.object({ action: z.literal("selectProduct"), selector: recipeSelectorSchema, productSelector: recipeSelectorSchema }).strict()
+    .describe("Choose the requested whole-rental duration within one observed public product/resource card. Supports Book/Select on a single-duration card, or an exact duration-and-price option (for example 1 hour $40) within one named rental/bay card. Duplicate durations, start-time/date choices, mixed action controls, sensitive forms and transaction steps are rejected. productSelector must identify the same enclosing card proved by the control; it cannot be a broad page wrapper."),
   z.object({ action: z.literal("select"), selector: recipeSelectorSchema, value: recipeTemplateSchema,
     purpose: z.enum(["DATE", "PLAYERS", "DURATION", "PRODUCT", "RESOURCE"]) }).strict().describe("Select an observed native HTML <select> option value. PLAYERS/DURATION also support a labelled public role=combobox with an exact visible data-value option, or a focusable dropdown with one adjacent explicit field label and caret whose displayed option and selected readback are independently verified. Duration values are minutes; simulator party selection is one bay. The inspected PassFactory /ftbb client resets duration when the date changes: select DATE then DURATION. Only that hash-verified local duration operation may retain an already completed date response; all other filters require a new response."),
   z.object({ action: z.literal("fill"), selector: recipeSelectorSchema, value: recipeTemplateSchema,
@@ -132,10 +138,15 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
     engine: z.literal("EXISTING_ADAPTER"), adapter: existingAdapterMetadataSchema }).strict(),
 ]).superRefine((recipe, ctx) => {
   if (recipe.engine === "EXISTING_ADAPTER") {
+    const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED"].includes(recipe.adapter.family) ||
+      recipe.adapter.family === "TEEITUP" && recipe.adapter.offeringKind === "SIMULATOR";
     if (recipe.source.providerFamily !== recipe.adapter.family ||
-      (recipe.target.kind === "SIMULATOR") !== (["ACUITY", "USCHEDULE", "WHOOSH"].includes(recipe.adapter.family)) ||
+      (recipe.target.kind === "SIMULATOR") !== simulator ||
       recipe.target.kind === "SIMULATOR" && !recipe.target.offeringId || recipe.adapter.family === "TEEITUP" && !recipe.source.venueAddress)
       ctx.addIssue({ code: "custom", message: "Supported adapter metadata must match the source and target kind" });
+    if (recipe.adapter.family === "TEEITUP" && simulator &&
+        (recipe.adapter.facilityIds.length !== 1 || recipe.adapter.officialIdentityProof))
+      ctx.addIssue({ code: "custom", message: "Simulator adapter requires one exact directory identity" });
     return;
   }
   const dateFields = "kind" in recipe.proof.date ? [recipe.proof.date.monthYear, recipe.proof.date.day] : [recipe.proof.date];

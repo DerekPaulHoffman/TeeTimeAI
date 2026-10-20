@@ -45,6 +45,51 @@ function reads(recipe: ExistingAdapterRecipe, payload: unknown, html?: string) {
 }
 
 describe("fixed existing adapter recipes", () => {
+  it("discovers and independently reuses a directory-proven simulator with explicit duration rates", async () => {
+    const source = { ...teeitup.source, bookingUrl: "https://studio.book.teeitup.com/", venueName: "Example Swing Studio",
+      venueAddress: "100 Main Road Ste A, Example, NY 12345, USA" };
+    const directory = [{ id: 11, courseId: "studio-11", name: source.venueName, address: "100 Main Rd, Suite A, Example, NY 12345, US",
+      timeZone: input.timeZone, isSimulator: true }];
+    const lease = vi.fn(deps.requestLease);
+    const fetch = vi.fn<typeof globalThis.fetch>(async value => {
+      const url = new URL(String(value));
+      if (url.pathname.endsWith("/facilities")) return Response.json(directory);
+      expect([...url.searchParams.keys()].sort()).toEqual(["date", "facilityIds", "returnPromotedRates"]);
+      return Response.json([{ teetimes: [{ courseId: "studio-11", teetime: `${url.searchParams.get("date")}T15:00:00.000Z`,
+        minPlayers: 1, maxPlayers: 1, rates: [55, 56].map(resource => ({ name: "Simulator - 1 hr", allowedPlayers: [1],
+          holes: 18, isSimulator: false, golfnow: { GolfCourseId: resource, GolfFacilityId: 11 } })) }] }]);
+    });
+    const { adapter } = await inspectExistingAdapter(source, { ...deps, fetch, requestLease: lease });
+    expect(adapter).toEqual({ family: "TEEITUP", alias: "studio", facilityIds: [11], offeringKind: "SIMULATOR" });
+    const recipe = parseAccessRecipe({ schemaVersion: 1, engine: "EXISTING_ADAPTER", source,
+      target: { courseId: "studio", offeringId: "rental", kind: "SIMULATOR" }, adapter }) as ExistingAdapterRecipe;
+    for (const request of [{ ...input, durationMinutes: 60 }, { ...input, date: "2030-10-23", players: 4, durationMinutes: 60 }]) {
+      const result = await executeExistingAdapterRecipe(recipe, request, { ...deps, fetch, requestLease: lease });
+      expect(result).toMatchObject({ status: "AVAILABLE", complete: true, evidence: { venueVerified: true, durationVerified: true, completeVerified: true } });
+      expect(result.slots).toHaveLength(2);
+      expect(result.slots[0]).toMatchObject({ startsAt: `${request.date}T15:00:00.000Z`, endsAt: `${request.date}T16:00:00.000Z`,
+        capacity: null, availableSpots: 1, resourceId: "teeitup-facility:11:simulator:55" });
+      expect(result.slots[0]).not.toHaveProperty("holes");
+    }
+    expect(fetch).toHaveBeenCalledTimes(5);
+    expect(new Set(lease.mock.calls.map(([family]) => family))).toEqual(new Set(["teeitup"]));
+    expect(source.venueAddress).toBe("100 Main Road Ste A, Example, NY 12345, USA");
+  });
+  it("fails closed when a simulator becomes outdoor or loses explicit duration evidence", async () => {
+    const source = { ...teeitup.source, bookingUrl: "https://studio.book.teeitup.com/", venueName: "Example Swing Studio",
+      venueAddress: "100 Main Rd Suite A, Example, NY 12345, US" };
+    const recipe = parseAccessRecipe({ schemaVersion: 1, engine: "EXISTING_ADAPTER", source,
+      target: { courseId: "studio", offeringId: "rental", kind: "SIMULATOR" },
+      adapter: { family: "TEEITUP", alias: "studio", facilityIds: [11], offeringKind: "SIMULATOR" } }) as ExistingAdapterRecipe;
+    for (const simulator of [false, true]) {
+      const directory = [{ id: 11, courseId: "studio-11", name: source.venueName, address: source.venueAddress, timeZone: input.timeZone, isSimulator: simulator }];
+      const fetch = teeitupReads([{ teetimes: [{ courseId: "studio-11", teetime: "2030-10-22T15:00:00Z", rates: [{ allowedPlayers: [1],
+        name: "Simulator - NaN hr", golfnow: { GolfCourseId: 55, GolfFacilityId: 11 } }] }] }], directory);
+      expect(await executeExistingAdapterRecipe(recipe, { ...input, durationMinutes: 60 }, { ...deps, fetch }))
+        .toMatchObject({ status: "INCOMPLETE", complete: false, slots: [] });
+      if (!simulator) expect(fetch).toHaveBeenCalledOnce();
+    }
+  });
   it("retains strict data-only metadata", () => {
     expect(existingAdapterMetadataSchema.safeParse({ ...foreup.adapter, code: "fetch(...)" }).success).toBe(false);
     expect(existingAdapterMetadataSchema.safeParse({ ...acuity.adapter, rentalProductIds: ["67", "67"] }).success).toBe(false);

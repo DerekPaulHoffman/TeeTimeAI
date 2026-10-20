@@ -587,6 +587,25 @@ describe.runIf(existsSync(chromeExecutable))("isolated browser recipe replay", (
     const wrong = await executeAccessRecipe(selected, { ...executionInput, durationMinutes: 120 }, browserDeps(fixture));
     expect(wrong.status).toBe("FAILED"); expect(wrong.evidence.reason).toBe("UNSAFE_PRODUCT_SELECTION");
   }, 30_000);
+  it("replays a duration-price product within the exact public bay card", async () => {
+    const base = recipe();
+    if (base.engine !== "BROWSER_DOM") throw new Error("fixture");
+    const selected = parseAccessRecipe({ ...base, target: { ...base.target, kind: "SIMULATOR", offeringId: "offering-1" },
+      steps: [{ action: "selectProduct", selector: "#choose", productSelector: "#product" }],
+      slots: { ...base.slots, scope: { selector: "#rental", label: { selector: "h2" }, expectedLabel: "Golf simulator" }, endsAt: { derive: "ADD_REQUESTED_DURATION" } } });
+    const fixture = html.replace('<p id="loaded">Ready</p>', '<article id="product"><h2>Bay 1 Reservation</h2><div><button id="choose">1 hour $40</button><button>2 hours $80</button></div></article><p id="loaded" hidden>Ready</p>')
+      .replace(/(<div class="slot">.*?<\/div>)/u, '<article id="rental"><h2>Golf simulator</h2>$1</article>')
+      .replace('value="2026-10-22"', 'value="Thursday, October22,2026"')
+      .replace("</body>", '<script>document.querySelector("#choose").addEventListener("click",()=>{document.querySelector("#loaded").hidden=false;document.querySelector("#product").hidden=true;});</script></body>');
+    const result = await executeAccessRecipe(selected, { ...executionInput, durationMinutes: 60 }, browserDeps(fixture));
+    expect(result.status).toBe("AVAILABLE");
+    expect(result.evidence.durationVerified).toBe(true);
+    expect(result.slots[0].endsAt).toBe("2026-10-22T14:00:00.000Z");
+    const wrongCard = parseAccessRecipe({ ...selected, steps: [{ action: "selectProduct", selector: "#choose", productSelector: "body" }] });
+    const rejected = await executeAccessRecipe(wrongCard, { ...executionInput, durationMinutes: 60 }, browserDeps(fixture));
+    expect(rejected.status).toBe("FAILED");
+    expect(rejected.evidence.reason).toBe("UNSAFE_PRODUCT_SELECTION");
+  }, 30_000);
   it("binds simulator rows to the exact observed resource label across card reordering", async () => {
     const base = recipe();
     if (base.engine !== "BROWSER_DOM") throw new Error("fixture");

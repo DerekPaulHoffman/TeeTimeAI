@@ -26,6 +26,26 @@ describe("TeeItUp recipe source scope", () => {
   it("can identify one unique directory facility without model-supplied IDs", () => {
     expect(resolveTeeItUpRecipeFacilities({ ...source, bookingUrl: "https://harbor.book.teeitup.golf/" }, [rows[0]])[0].id).toBe(11);
   });
+  it("infers only one exact simulator identity and preserves outdoor exclusion by default", () => {
+    const simulator = { ...rows[0], name: "Example Swing Studio", address: "100 Main Rd, Suite A, Example, NY 12345, US", isSimulator: true };
+    const identity = { ...source, bookingUrl: "https://example.book.teeitup.com/", venueName: simulator.name,
+      venueAddress: "100 Main Road Ste A, Example, NY 12345, USA" };
+    expect(resolveTeeItUpRecipeFacilities(identity, [simulator], undefined, "AUTO")).toEqual([simulator]);
+    expect(resolveTeeItUpRecipeFacilities(identity, [simulator], undefined, "SIMULATOR")).toEqual([simulator]);
+    expect(() => resolveTeeItUpRecipeFacilities(identity, [simulator])).toThrow("ADAPTER_IDENTITY_MISMATCH");
+    for (const changed of [{ ...simulator, isSimulator: false }, { ...simulator, name: "Example Swing Studio Golf" },
+      { ...simulator, address: simulator.address.replace("Suite A", "Suite B") }, { ...simulator, timeZone: "America/Chicago" }])
+      expect(() => resolveTeeItUpRecipeFacilities(identity, [changed], undefined, "SIMULATOR")).toThrow();
+    expect(() => resolveTeeItUpRecipeFacilities({ ...identity, bookingUrl: `${identity.bookingUrl}?course=11` },
+      [simulator, { ...simulator, id: 33, courseId: "duplicate" }], undefined, "SIMULATOR")).toThrow();
+  });
+  it("checks simulator resource and facility consistency in booking links", () => {
+    const slot = { sourceId: "teeitup-11-simulator-88-duration-60-2030-10-23T15:00:00.000Z", resourceId: "teeitup-facility:11:simulator:88",
+      bookingUrl: teeItUpRecipeBookingUrl(source.bookingUrl, "2030-10-23", 11) };
+    expect(isTeeItUpRecipeSlotLink(source.bookingUrl, "2030-10-23", [11], slot)).toBe(true);
+    expect(isTeeItUpRecipeSlotLink(source.bookingUrl, "2030-10-23", [11], { ...slot, resourceId: "teeitup-facility:11:simulator:89" })).toBe(false);
+    expect(isTeeItUpRecipeSlotLink(source.bookingUrl, "2030-10-23", [11], { ...slot, resourceId: "teeitup-facility:22:simulator:88" })).toBe(false);
+  });
   it("binds a changed-date link to its exact allowed resource and source ID", () => {
     const date = "2030-10-23";
     const slot = { sourceId: "teeitup-11-provider-11-time", resourceId: "teeitup-facility:11", bookingUrl: teeItUpRecipeBookingUrl(source.bookingUrl, date, 11) };

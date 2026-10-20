@@ -14,6 +14,13 @@ describe("public facility identity reconciliation", () => {
     expect(resolveTeeItUpFacilityIdentity(course, [facility, { ...facility, id: 13485 }]))
       .toEqual({ status: "UNRESOLVED", reason: "AMBIGUOUS" });
   });
+  it("normalizes Suite and Ste without discarding the unit identity", () => {
+    const venue = { ...course, address: "100 Main Road Ste: A, Example, NY 12345, USA" };
+    const row = { ...facility, address: "100 Main Rd, Suite A, Example, NY 12345, US" };
+    expect(resolveTeeItUpFacilityIdentity(venue, [row]).status).toBe("MATCHED");
+    for (const address of ["100 Main Rd, Suite B, Example, NY 12345, US", "100 Main Rd, Example, NY 12345, US"])
+      expect(resolveTeeItUpFacilityIdentity(venue, [{ ...row, address }]).status).toBe("UNRESOLVED");
+  });
   it.each([
     { name: "Spring Lake 18 Hole Golf Course" },
     { name: "Spring Lake North Golf Course" },

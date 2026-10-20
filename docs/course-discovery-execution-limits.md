@@ -17,6 +17,10 @@ transport, and replay uses that saved choice:
   rejects private/reserved/mixed DNS answers, and pins its TCP connection to a
   checked public IP. Chrome retains end-to-end TLS and fresh anonymous cookies;
   the proxy does not decrypt TLS or inherit a signed-in browser profile.
+  On Windows this path uses a visible managed Chrome window: the inspected
+  public legacy calendar returned403 to headless Chrome and exposed inventory
+  in a fresh visible window. Discovery and replay use the same presentation.
+  The installed user profile and Local Reader are not reused or modified.
 
 Both paths enforce public URL and read-only request policies. Native CORS
 preflights may name GET or POST; the actual POST independently requires a known
@@ -25,6 +29,21 @@ leases last through `response.finished()` and body observation; native failure
 cancels the affected host's tunnels before the lease is released. Deadlines, request
 counts, response bytes, connections, and sockets are bounded. No fallback
 silently changes the saved transport.
+
+Native redirects are intercepted through a separate Chromium Fetch session
+before dispatch. Initial and redirected requests use the same policy, provider
+lease, request budget, and response-evidence handler. Response completion and
+body bytes come from the current browser's Network events, so a redirect cannot
+silently skip either the guard or the final availability evidence. The current
+qualified native path is the main frame only. Subframes, including cross-process
+iframes, fail with an explicit capability diagnostic; a late interceptor attach
+has not proved safe for their first redirect. Foreign popup requests are also
+rejected. This does not change the installed Local Reader's supported providers.
+
+The pinned browser path rejects redirects instead of releasing a Location into
+an unpinned browser request. A provider requiring that transition needs a
+qualified native main-frame path or another supported reader. Such a failure
+cannot become empty availability or an inferred authentication requirement.
 
 Decoded responses are capped at 16 MB per script, 6 MB per stylesheet, and
 2 MB per document or data response, with 48 MB total per disposable browser
@@ -47,8 +66,9 @@ booking instructions is not itself an access challenge.
   commands, or an arbitrary evaluator. Public product selection is separate from
   selecting an appointment or tee time: only an exact Book/Select control within
   a duration-proven product card may use `selectProduct`.
-- Discovery follows initial or observed public links. Up to five safe GET/HEAD
-  redirects between the same hostname and its `www` variant are accepted. Other
+- Discovery follows initial or observed public links. The qualified native path
+  accepts up to five safe GET/HEAD redirects between the same hostname and its
+  `www` variant. Other
   hostname changes and POST redirects are rejected. A visible provider link can
   be opened separately after it is observed. Replay still requires every URL
   and read method to match an exact permitted recipe route.
@@ -196,6 +216,32 @@ same search, course, offering, start/end, resource, product and holes. This
 keeps an already-sent opening sent. Ambiguous identities stay separate.
 
 ## Evidence level
+
+The fixed `LIGHTSPEED` simulator reader uses only exact, anonymous HTTPS GETs.
+Each run verifies the canonical official title/address and its sole company
+booking link, then reads the complete public service catalog. Literal
+`self.__next_f.push` JSON is decoded as data; no script or React reference is
+executed. The observed client lists `availableDurations` and matches the
+duration variation even when that child variation's `bookable` field is false;
+the public parent service and its online-booking flag remain required.
+
+Every eligible requested-duration service is read independently. The current
+contract supports one explicit location per service and no employee assignment;
+ambiguous variations and multi-location products fail closed. Each returned
+document must echo its exact request path/query and match company, service,
+variation, duration, location and timezone. Explicit slot starts must fall on
+the requested venue-local date. End times follow the inspected public client's
+start-plus-duration behavior. Unknown golfer capacity remains null. A failure
+on any required product discards the whole result; one bay cannot establish
+venue-wide completeness or an empty result. Empty lists require the provider's
+explicit no-available-times text on every required product. Source redirects
+are rejected, reads retain provider/global leases through body completion,
+and no session or customer fields are persisted.
+
+Generic browser recipes also support duration/price product buttons, exact
+public navigation anchors and full-date button grids. These controls retain
+transaction, selected-time, visibility and ambiguity guards. They do not relax
+the separate venue/date/completeness or full-resource evidence requirements.
 
 The fixed `WHOOSH` simulator reader uses two fixed anonymous GraphQL queries.
 It verifies the observed club/facility identity, provider timezone, simulator

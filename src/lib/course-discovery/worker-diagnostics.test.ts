@@ -1,8 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { bindDiscoveryRecipeIdentity, discoveryBrowserFeedback, noVerifiedRecipeDiagnostic, readDiscoveryControllerCheckpoint } from "../../../scripts/automation/course-discovery-worker.mjs";
+import { bindDiscoveryRecipeIdentity, discoveryBrowserFeedback, discoveryCheckpointDisposition, noVerifiedRecipeDiagnostic, readDiscoveryControllerCheckpoint } from "../../../scripts/automation/course-discovery-worker.mjs";
 import { safeBrowserActionIssues } from "../../../scripts/automation/course-discovery-diagnostics.mjs";
 
 describe("durable discovery browser diagnostics", () => {
+  it.each([false, true, undefined, "true"])("never turns model unsupported prose into a terminal verdict, access flag %s", access => {
+    expect(discoveryCheckpointDisposition("UNSUPPORTED", access)).toBe("RETRYABLE_LIMITATION");
+    expect(discoveryCheckpointDisposition(undefined, access)).toBe("CONTINUE");
+  });
+  it("keeps terminal access dependent on the current exact boolean observation", () => {
+    expect(discoveryCheckpointDisposition("ACCESS_REQUIRED", true)).toBe("TERMINAL_ACCESS");
+    for (const value of [undefined, false, "true", 1, {}])
+      expect(() => discoveryCheckpointDisposition("ACCESS_REQUIRED", value)).toThrow("DISCOVERY_ACCESS_NOT_CONFIRMED");
+    for (const value of ["TOOL_FAILURE", "ALL_ENGINES_UNSUPPORTED", null, { outcome: "UNSUPPORTED" }])
+      expect(() => discoveryCheckpointDisposition(value, true)).toThrow("DISCOVERY_CHECKPOINT_INVALID");
+  });
   it("retains sanitized adapter identity evidence without interpreting an unverified result as a tool crash or access wall", () => {
     const feedback = discoveryBrowserFeedback({ url: "https://venue.example/times?date=2026-10-23", requests: [] }, "inspect_adapter",
       { code: "ADAPTER_IDENTITY_MISMATCH", message: "secret raw provider response" });
@@ -18,6 +29,16 @@ describe("durable discovery browser diagnostics", () => {
       .toEqual({ code: "NO_VERIFIED_RECIPE", reason: "NO_RECIPE_VERIFIED" });
     expect(noVerifiedRecipeDiagnostic(discoveryBrowserFeedback({ loading: true, pendingRequestCount: 1, requests: [] }, "observe")))
       .toEqual({ code: "NO_VERIFIED_RECIPE", reason: "NO_RECIPE_VERIFIED" });
+  });
+  it("keeps model capability reports unverified and ignores invented terminal evidence", () => {
+    const diagnostic = noVerifiedRecipeDiagnostic({ code: "DISCOVERY_CAPABILITY_UNVERIFIED", details: {
+      reason: "ALL_ENGINES_UNSUPPORTED", rawBody: "private provider text", outcome: "UNSUPPORTED" } });
+    expect(diagnostic).toEqual({ code: "NO_VERIFIED_RECIPE", reason: "CAPABILITY_LIMITATION_UNVERIFIED",
+      evidence: { code: "DISCOVERY_CAPABILITY_UNVERIFIED", details: { reason: "CAPABILITY_LIMITATION_UNVERIFIED" } } });
+    expect(JSON.stringify(diagnostic)).not.toMatch(/private|ALL_ENGINES_UNSUPPORTED|rawBody|outcome/);
+    const restored = readDiscoveryControllerCheckpoint({ controller: { version: 1, officialUrl: "https://venue.example/",
+      observedNavigationUrls: [], lastFailure: diagnostic.evidence } }, "https://venue.example/");
+    expect(noVerifiedRecipeDiagnostic(restored.lastFailure)).toEqual(diagnostic);
   });
   it("preserves bounded argument schema issues without rejected values or unknown property names", () => {
     const issues = [{ path: ["target"], code: "invalid_type", input: "private-value", message: "private-value" },
@@ -73,12 +94,31 @@ describe("durable discovery browser diagnostics", () => {
       action: "click", failure: { code: "BROWSER_NAVIGATION_FAILED", url: "https://venue.example/times" }, requests: [] } });
   });
 
+  it("retains bounded recent failures after the per-observation request journal drains", () => {
+    const feedback = discoveryBrowserFeedback({ loading: false, requests: [], requestFailures: [
+      { reason: "UNSAFE_METHOD", resourceType: "fetch", url: "https://venue.example/public-read?value=private", body: "private" },
+      { reason: "UNOBSERVED_CPS_SESSION", resourceType: "document", url: "https://sc.cps.golf/Example/(S(abc123abc123abc123abc123))/Home/nIndex" },
+      { reason: "unsafe private text", resourceType: "fetch", url: "https://venue.example/" },
+    ] }, "observe");
+    expect(feedback.details.requests).toEqual([
+      { code: "UNOBSERVED_CPS_SESSION", resourceType: "document" },
+      { code: "UNSAFE_METHOD", resourceType: "fetch", url: "https://venue.example/public-read" },
+    ]);
+    expect(JSON.stringify(feedback)).not.toMatch(/private|abc123|body/);
+    const bounded = discoveryBrowserFeedback({ requests: [], requestFailures: Array.from({ length: 100 }, (_, index) => ({
+      reason: "UNSAFE_METHOD", resourceType: "fetch", url: `https://venue.example/read-${index}`,
+    })) }, "observe");
+    expect(bounded.details.requests).toHaveLength(8);
+    expect(bounded.details.requests[0].url).toBe("https://venue.example/read-99");
+  });
+
   it("bounds hostile diagnostic collections and discards arbitrary fields", () => {
     const requests = Array.from({ length: 100 }, () => ({ url: "https://venue.example/api", method: "POST", resourceType: "fetch",
       blockedReason: "UNSAFE_METHOD", body: { secret: "must not survive" } }));
     const feedback = discoveryBrowserFeedback({ loading: true, pendingRequestCount: 99_999, requests }, "untrusted-action");
     expect(feedback.details).toMatchObject({ action: "observe", pendingRequestCount: 1024 });
-    expect(feedback.details.requests).toHaveLength(8);
+    expect(feedback.details.requests).toHaveLength(1);
+    expect(feedback.details.requests[0]).toMatchObject({ code: "UNSAFE_METHOD", url: "https://venue.example/api" });
     expect(JSON.stringify(feedback)).not.toContain("secret");
   });
 

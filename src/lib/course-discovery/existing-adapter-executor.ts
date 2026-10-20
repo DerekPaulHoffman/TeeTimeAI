@@ -17,6 +17,9 @@ import { assertTeeItUpRecipeAvailability, parseTeeItUpRecipeSource, resolveTeeIt
 import { parseWhooshSimulatorSource } from "./whoosh-simulator-source";
 import { executeWhooshSimulator, inspectWhooshSimulator } from "./whoosh-simulator-executor";
 import { deriveTeeItUpOfficialIdentityProof, type OfficialIdentityPage, type TeeItUpOfficialIdentityProof } from "./teeitup-official-identity";
+import { parseTeeItUpSimulatorAvailability } from "./teeitup-simulator";
+import { parseLightspeedSource } from "./lightspeed-source";
+import { executeLightspeed, inspectLightspeed } from "./lightspeed-executor";
 
 type Dependencies = {
   fetch?: typeof fetch;
@@ -61,6 +64,7 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
   let acuity: AcuityPublicConfiguration | undefined;
   const teeitup = family === "TEEITUP" ? parseTeeItUpRecipeSource(source.bookingUrl)! : undefined;
   let teeitupFacilities: TeeItUpRecipeFacility[] | undefined;
+  let teeitupSimulatorSlots: AccessExecutionResult["slots"] | undefined;
   let officialIdentityProof: TeeItUpOfficialIdentityProof | undefined;
   let availabilityWasArray = false;
   let transportFailure: string | undefined;
@@ -127,17 +131,21 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
       }
       if (teeitup && url.pathname === `/alias/${teeitup.alias}/facilities`) {
         if (adapter?.family === "TEEITUP" && adapter.officialIdentityProof && !officialIdentityProof) fail("OFFICIAL_IDENTITY_UNVERIFIED");
-        try { teeitupFacilities = resolveTeeItUpRecipeFacilities(source, JSON.parse(text), officialIdentityProof); }
+        const offeringKind = adapter?.family === "TEEITUP" ? adapter.offeringKind ?? "OUTDOOR" : "AUTO";
+        try { teeitupFacilities = resolveTeeItUpRecipeFacilities(source, JSON.parse(text), officialIdentityProof, offeringKind); }
         catch (error) {
           if (adapter || !deps.officialIdentityPage || !(error instanceof Error) || error.message !== "ADAPTER_IDENTITY_MISMATCH") throw error;
           officialIdentityProof = deriveTeeItUpOfficialIdentityProof(source, deps.officialIdentityPage, { requireVisibleEvidence: true });
           teeitupFacilities = resolveTeeItUpRecipeFacilities(source, JSON.parse(text), officialIdentityProof);
         }
         if (adapter && (adapter.family !== "TEEITUP" || adapter.alias !== teeitup.alias ||
-            JSON.stringify(adapter.facilityIds) !== JSON.stringify(teeitupFacilities.map(row => row.id)))) fail("ADAPTER_CONFIGURATION_CHANGED");
+            JSON.stringify(adapter.facilityIds) !== JSON.stringify(teeitupFacilities.map(row => row.id)) ||
+            (adapter.offeringKind === "SIMULATOR") !== teeitupFacilities.every(row => row.isSimulator === true))) fail("ADAPTER_CONFIGURATION_CHANGED");
       }
       if (teeitup && input && url.pathname === "/v2/tee-times") {
-        assertTeeItUpRecipeAvailability(JSON.parse(text), teeitupFacilities!, input);
+        if (adapter?.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR")
+          teeitupSimulatorSlots = parseTeeItUpSimulatorAvailability(JSON.parse(text), teeitupFacilities!, input, source.bookingUrl);
+        else assertTeeItUpRecipeAvailability(JSON.parse(text), teeitupFacilities!, input);
         availabilityWasArray = true;
       }
       if (family === "ACUITY" && url.href === booking.href) {
@@ -164,12 +172,17 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
     });
   };
   return { read, family, teeitup, teeitupFacilities: () => teeitupFacilities, officialIdentityProof: () => officialIdentityProof,
+    teeitupSimulatorSlots: () => teeitupSimulatorSlots,
     dispose: () => queue.dispose(), availabilityWasArray: () => availabilityWasArray, failureReason: () => transportFailure };
 }
 
 /** For a controller-observed provider URL only. Reads typed public configuration
  * and returns bounded IDs; availability and activation remain separate proofs. */
 export async function inspectExistingAdapter(source: Source, deps: Dependencies): Promise<{ adapter: ExistingAdapterMetadata }> {
+  if (parseLightspeedSource(source.bookingUrl)) {
+    if (!source.officialUrl) fail("ADAPTER_IDENTITY_MISSING");
+    return { adapter: await inspectLightspeed({ ...source, officialUrl: source.officialUrl }, deps) };
+  }
   if (parseWhooshSimulatorSource(source.bookingUrl)) return { adapter: await inspectWhooshSimulator(source, deps) };
   if (familyForSource(source) === "USCHEDULE") {
     const session = createUSchedulePublicSession(source.bookingUrl, deps);
@@ -189,7 +202,9 @@ export async function inspectExistingAdapter(source: Source, deps: Dependencies)
         accept: "application/json", "x-be-alias": session.teeitup.alias, origin: session.teeitup.origin, referer: `${session.teeitup.origin}/`,
       } });
       return { adapter: existingAdapterMetadataSchema.parse({ family: "TEEITUP", alias: session.teeitup.alias,
-        facilityIds: session.teeitupFacilities()!.map(row => row.id), ...(session.officialIdentityProof() ? { officialIdentityProof: session.officialIdentityProof() } : {}) }) };
+        facilityIds: session.teeitupFacilities()!.map(row => row.id),
+        ...(session.teeitupFacilities()!.every(row => row.isSimulator === true) ? { offeringKind: "SIMULATOR" } : {}),
+        ...(session.officialIdentityProof() ? { officialIdentityProof: session.officialIdentityProof() } : {}) }) };
     }
     if (session.family === "FOREUP") {
       const config = await readForeupPublicConfiguration({ bookingUrl: source.bookingUrl, courseName: source.venueName,
@@ -218,10 +233,11 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
   let uscheduleSession: ReturnType<typeof createUSchedulePublicSession> | undefined;
   try {
     const adapter = existingAdapterMetadataSchema.parse(recipe.adapter);
+    const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED"].includes(adapter.family) || adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR";
     if (input.timeZone !== recipe.source.timeZone || recipe.source.providerFamily.toUpperCase() !== adapter.family ||
-        (recipe.target.kind === "SIMULATOR") !== (["ACUITY", "USCHEDULE", "WHOOSH"].includes(adapter.family)) ||
-        ["ACUITY", "USCHEDULE", "WHOOSH"].includes(adapter.family) && (!recipe.target.offeringId || !input.durationMinutes)) fail("ADAPTER_TARGET_MISMATCH");
-    if (!["USCHEDULE", "WHOOSH"].includes(adapter.family)) session = reader(recipe.source, deps, adapter, input);
+        (recipe.target.kind === "SIMULATOR") !== simulator || simulator && (!recipe.target.offeringId || !input.durationMinutes) ||
+        adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR" && (adapter.facilityIds.length !== 1 || adapter.officialIdentityProof)) fail("ADAPTER_TARGET_MISMATCH");
+    if (!["USCHEDULE", "WHOOSH", "LIGHTSPEED"].includes(adapter.family)) session = reader(recipe.source, deps, adapter, input);
     const start = deps.toInstant(`${input.date}T${input.startTime}:00`, input);
     const next = new Date(`${input.date}T00:00:00Z`); next.setUTCDate(next.getUTCDate() + 1);
     const end = deps.toInstant(`${input.endTime === "24:00" ? next.toISOString().slice(0, 10) : input.date}T${input.endTime === "24:00" ? "00:00" : input.endTime}:00`, input);
@@ -229,6 +245,10 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
     if (end <= now) fail("INVALID_REQUEST_DATE_OR_ZONE");
     if (adapter.family === "WHOOSH") {
       const slots = await executeWhooshSimulator(recipe.source, adapter, { courseId: recipe.target.courseId, offeringId: recipe.target.offeringId! }, input, deps);
+      return result(slots.filter(slot => new Date(slot.startsAt) > now && new Date(slot.startsAt) >= start && new Date(slot.endsAt!) <= end));
+    }
+    if (adapter.family === "LIGHTSPEED") {
+      const slots = await executeLightspeed(recipe.source, adapter, { courseId: recipe.target.courseId, offeringId: recipe.target.offeringId! }, input, deps);
       return result(slots.filter(slot => new Date(slot.startsAt) > now && new Date(slot.startsAt) >= start && new Date(slot.endsAt!) <= end));
     }
     if (adapter.family === "USCHEDULE") {
@@ -262,6 +282,17 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
     }
     if (adapter.family === "TEEITUP") {
       if (adapter.officialIdentityProof) await session!.read(adapter.officialIdentityProof.officialPageUrl);
+      if (adapter.offeringKind === "SIMULATOR") {
+        const origin = new URL(recipe.source.bookingUrl).origin;
+        const headers = { accept: "application/json", "x-be-alias": adapter.alias, origin, referer: `${origin}/` };
+        await session!.read(`https://phx-api-be-east-1b.kenna.io/alias/${adapter.alias}/facilities`, { headers });
+        const url = new URL("https://phx-api-be-east-1b.kenna.io/v2/tee-times");
+        url.searchParams.set("date", input.date); url.searchParams.set("facilityIds", adapter.facilityIds.join(",")); url.searchParams.set("returnPromotedRates", "true");
+        await session!.read(url, { headers });
+        const slots = session!.teeitupSimulatorSlots();
+        if (!slots || !session!.availabilityWasArray()) fail("ADAPTER_EMPTY_UNPROVEN");
+        return result(slots.filter(slot => new Date(slot.startsAt) > now && new Date(slot.startsAt) >= start && new Date(slot.endsAt!) <= end));
+      }
       const origin = new URL(recipe.source.bookingUrl).origin;
       const bookingBaseUrl = adapter.facilityIds.length === 1 ? `${origin}/?course=${adapter.facilityIds[0]}` : `${origin}/`;
       const available = await fetchTeeItUpTeeSheet({ courseId: recipe.target.courseId, date: new Date(`${input.date}T00:00:00Z`), players: input.players, timeZone: input.timeZone,

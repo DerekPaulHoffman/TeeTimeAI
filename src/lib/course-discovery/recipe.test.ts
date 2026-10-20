@@ -15,6 +15,16 @@ export const httpRecipe = () => ({
 export const executionInput = { date: "2026-10-22", timeZone: "America/New_York", players: 2, startTime: "08:00", endTime: "12:00" };
 
 describe("course access recipes", () => {
+  it("keeps TeeItUp outdoor by default and requires explicit single-facility simulator metadata", () => {
+    const recipe = { schemaVersion: 1, engine: "EXISTING_ADAPTER", target: { courseId: "sim", offeringId: "rental", kind: "SIMULATOR" },
+      source: { ...httpRecipe().source, bookingUrl: "https://studio.book.teeitup.com/", venueAddress: "100 Main Rd Suite A, Example, NY 12345, US", providerFamily: "TEEITUP" },
+      adapter: { family: "TEEITUP", alias: "studio", facilityIds: [11], offeringKind: "SIMULATOR" } };
+    expect(parseAccessRecipe(recipe)).toMatchObject({ adapter: { offeringKind: "SIMULATOR" } });
+    expect(() => parseAccessRecipe({ ...recipe, adapter: { family: "TEEITUP", alias: "studio", facilityIds: [11] } })).toThrow();
+    expect(() => parseAccessRecipe({ ...recipe, target: { courseId: "sim", kind: "OUTDOOR" } })).toThrow();
+    expect(() => parseAccessRecipe({ ...recipe, adapter: { ...recipe.adapter, facilityIds: [11, 22] } })).toThrow();
+    expect(() => parseAccessRecipe({ ...recipe, target: { courseId: "sim", kind: "SIMULATOR" } })).toThrow();
+  });
   it("accepts only typed existing adapter metadata without model-defined routes or extractors", () => {
     const base = httpRecipe();
     const recipe = { schemaVersion: 1, engine: "EXISTING_ADAPTER", target: base.target,

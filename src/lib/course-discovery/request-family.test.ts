@@ -11,6 +11,11 @@ describe("learned requests use the established provider mutex", () => {
   it("keeps unknown hosts bounded by their actual hostname", () => {
     expect(requestFamilyForUrl("https://public.example.org/times")).toBe("public.example.org");
   });
+  it("shares the exact Lightspeed public host across catalog and availability reads", () => {
+    expect(requestFamilyForUrl("https://booking.lightspeed.app/example")).toBe("booking.lightspeed.app");
+    expect(requestFamilyForUrl("https://booking.lightspeed.app/example/time?date=2026-10-23")).toBe("booking.lightspeed.app");
+    expect(requestFamilyForUrl("https://booking.lightspeed.app.evil.example/example")).toBe("booking.lightspeed.app.evil.example");
+  });
   it("shares USchedule browser, fixed adapter and legacy family without extending to other hosts", () => {
     const legacy = normalizeProviderFamilyKey("USCHEDULE");
     expect(requestFamilyForUrl("https://clients.uschedule.com/example/booking")).toBe(legacy);

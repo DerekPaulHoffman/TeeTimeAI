@@ -54,6 +54,11 @@ canonical match writes. Simulator availability represents one full resource
 rental; saved player count is not a bay-capacity filter. `24:00` means the next
 venue-local midnight.
 
+A model's `UNSUPPORTED` report ends only its current attempt as an unverified
+capability limitation. It does not prove the source is inaccessible or bypass
+the one-retry limit and original deadline. A terminal access requirement still
+requires a current browser-observed authentication or challenge wall.
+
 ## Prepare without sending email
 
 - Apply additive migrations to an isolated database first, then validate the
@@ -160,7 +165,8 @@ identified provider families, fresh verified inventory, and no configured source
 Golf Cove, One Golf Haven and Tashua are development cases and are excluded.
 Do not reroll a difficult selection; record its outcome or exclusion.
 
-Enable the preconfigured three-target cohort before the user creates its
+Enable the preconfigured three-target cohort before the owner, or an agent
+expressly authorized by that owner to use the normal product UI, creates its
 normal alerts. Automatic enrollment must be bounded to the selected owner and
 targets, persistent, and limited to three lifetime enrollments. Existing exact
 `COURSE_DISCOVERY_PILOT_SEARCH_IDS` are available for development/recovery, but
@@ -204,8 +210,9 @@ are rejected.
 
 For the acceptance run:
 
-1. Start the supervisor with logs saved outside the repository. The user creates
-   the three ordinary alerts. No source hints, configuration edits, worker
+1. Start the supervisor with logs saved outside the repository. The owner or
+   their expressly authorized agent creates the three ordinary alerts through
+   the product UI. No source hints, configuration edits, worker
    nudges or completion commands are permitted after admission.
 2. Record job IDs, immutable first pickup, every attempt, browser startup,
    provider requests, discovery/replay duration, CLI/model versions, token

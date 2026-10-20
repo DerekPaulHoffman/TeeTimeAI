@@ -11,6 +11,7 @@ import { runWithProviderRequestLease } from "@/lib/automation/provider-request-l
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
 import { isActiveBrowserAccessChallenge, isSafeBrowserAssetUrl, isSafeRecipeUrl, recipeSelectorSchema } from "./recipe";
 import { continueNativeBrowserRead, createNativePublicBrowserProxy, isObservedNativeRedirect, nativeReadPreflightMethod } from "./native-public-browser";
+import { installNativeRedirectRouting, type NativeReadRoute } from "./native-redirect-routing";
 import { requestFamilyForUrl } from "./request-family";
 import { canonicalPublicReadUrl } from "./public-request-url";
 import { inspectExistingAdapter } from "./existing-adapter-executor";
@@ -22,6 +23,10 @@ import { venueProofMatches } from "./executor";
 import type { ExistingAdapterMetadata } from "./existing-adapter-schema";
 import { publicResponseSchema, type PublicResponseSchema } from "./public-response-schema";
 import type { OfficialIdentityPage } from "./teeitup-official-identity";
+import { inspectPublicRentalProduct } from "./public-product-control";
+import { canonicalCpsPublicUrl, cpsPublicEntryUrl, cpsSessionKey, createCpsPublicSessionScope } from "./cps-public-navigation";
+import { observedPublicDateChoices, isPublicDateChoice } from "./public-date-choice";
+import { isPublicAvailabilityNavigation } from "./public-navigation-control";
 
 const identifier = z.union([z.string().max(128), z.number().int()]);
 export const discoveryBrowserActionSchema = z.discriminatedUnion("action", [
@@ -56,14 +61,15 @@ export function discoveryPublicAnchorKind(control: Pick<ObservedControl, "tag" |
   if (!/\b(?:book|reserve|reservations?|tee\s*times?|availability)\b/iu.test(text) ||
       /\b(?:login|log in|sign in|sign up|register|checkout|pay|payment|purchase|confirm|cancel|delete|send|subscribe|password|email|phone)\b/iu.test(text) ||
       /\b\d{1,2}:\d{2}\s*(?:am|pm)?\b/iu.test(text)) return null;
-  const url = new URL(control.href);
-  if ([...url.searchParams.keys()].some(key => /^(?:time|start|slot|booking_?id|reservation_?id)$/iu.test(key))) return null;
+  if (!isPublicAvailabilityNavigation(control.href, text.trim())) return null;
   return "link" as const;
 }
 
 /** ForeUP's official login bookmark shares a documented public tee-sheet
  * bootstrap. Inspect that public base without entering the login route. */
 export function normalizeDiscoveryNavigationUrl(value: string) {
+  const cps = cpsPublicEntryUrl(value);
+  if (cps) return cps;
   try {
     const url = new URL(value);
     if (url.protocol === "https:" && url.hostname === "foreupsoftware.com" &&
@@ -81,9 +87,10 @@ export function sameDiscoveryMainDocument(observedUrl: string, currentUrl: strin
   return Boolean(observedUrl && currentUrl) && observedUrl.split("#", 1)[0] === currentUrl.split("#", 1)[0];
 }
 export type DiscoveryBrowserSnapshot = {
-  url: string; text: string; controls: Array<{ target: string; selector: string; kind: string; name: string; label: string; options?: Array<{ value: string; label: string }>; currentValue?: string; product?: { selector: string; durationMinutes: number } }>;
+  url: string; text: string; controls: Array<{ target: string; selector: string; kind: string; name: string; label: string; href?: string; options?: Array<{ value: string; label: string }>; currentValue?: string; product?: { selector: string; durationMinutes: number } }>;
   responses: Array<{ url: string; status: number; method: string; body?: unknown; bodyOmitted?: true; schemaEvidence?: PublicResponseSchema; schemaEvidenceOmitted?: true }>;
   requests: Array<{ url: string; method: string; resourceType: string; status?: number; blockedReason?: string; body?: unknown }>;
+  requestFailures?: Array<{ reason: string; resourceType: string; url?: string }>;
   frames: Array<{ url: string }>;
   elements: Array<{ selector: string; tag: string; text: string; attributes: Record<string, string> }>;
   loading: boolean; blockedRequests: number; requestCount: number; interceptCount: number; responseBytes: number; startupMs: number;
@@ -92,7 +99,7 @@ export type DiscoveryBrowserSnapshot = {
   accessRequirementObserved?: boolean;
   adapter?: ExistingAdapterMetadata;
   structure?: { selected: string; ancestors: Array<{ selector: string; matches: number; tag: string; text: string;
-    attributes: Record<string, string>; children: Array<{ selector: string; tag: string; text: string }> }> };
+    attributes: Record<string, string>; href?: string; target?: string; children: Array<{ selector: string; tag: string; text: string; href?: string; target?: string }> }> };
 };
 export type DiscoveryBrowserSessionDependencies = {
   fetch?: typeof fetch;
@@ -105,11 +112,21 @@ export type DiscoveryBrowserSessionDependencies = {
 const sensitive = /password|secret|token|cookie|session|credential|authorization|api.?key|email|phone|contact|card|customer|user|person|attendee/iu;
 /** URL metadata may contain a site's public API key; it is not model input. */
 export function redactDiscoveryRequestUrl(value: string) {
+  value = canonicalCpsPublicUrl(value);
   try {
     const url = new URL(value);
     for (const key of url.searchParams.keys()) if (/^(?:key|api[-_]?key|access[-_]?token|token|secret|password|credential|authorization|email|phone)$/iu.test(key)) url.searchParams.set(key, "REDACTED");
     return url.href;
   } catch { return ""; }
+}
+/** Diagnostic paths are public and session-free; query values are never needed
+ * to distinguish a policy rejection from a transport failure. */
+export function redactDiscoveryFailureUrl(value: string, resourceType: string) {
+  try {
+    const url = new URL(canonicalCpsPublicUrl(value));
+    url.search = ""; url.hash = "";
+    return isSafeRecipeUrl(url.href) || isSafeBrowserAssetUrl(url.href, resourceType, "GET") ? url.href : undefined;
+  } catch { return undefined; }
 }
 /** Project public calendar data only; never return response headers or raw bodies. */
 export function redactDiscoveryJson(value: unknown, depth = 0): unknown {
@@ -128,19 +145,21 @@ export async function createCourseDiscoveryBrowserSession(input: {
   deadlineAt: Date; initialUrls: string[]; timeZone?: string; venueName?: string; venueAddress?: string; venueOfficialUrl?: string;
 }, deps: DiscoveryBrowserSessionDependencies = {}) {
   const startupStartedAt = Date.now();
-  if (!input.initialUrls.length || input.initialUrls.length > 16 || !input.initialUrls.every(isSafeRecipeUrl)) throw new Error("INVALID_INITIAL_URLS");
+  const initialUrls = input.initialUrls.map(normalizeDiscoveryNavigationUrl);
+  if (!initialUrls.length || initialUrls.length > 16 || !initialUrls.every(isSafeRecipeUrl)) throw new Error("INVALID_INITIAL_URLS");
   try { new Intl.DateTimeFormat("en-US", { timeZone: input.timeZone ?? "UTC" }); } catch { throw new Error("INVALID_TIME_ZONE"); }
   const remaining = input.deadlineAt.getTime() - Date.now();
   if (!Number.isFinite(remaining) || remaining <= 0 || remaining > 20 * 60_000) throw new Error("INVALID_DEADLINE");
   const cancellation = new AbortController();
   const deadline = AbortSignal.any([AbortSignal.timeout(remaining), cancellation.signal]);
-  const allowedNavigation = new Set(input.initialUrls.map(value => new URL(value).href));
+  const allowedNavigation = new Set(initialUrls.map(value => new URL(value).href));
+  const cpsScope = createCpsPublicSessionScope(initialUrls);
   let officialIdentityPage: (OfficialIdentityPage & { observedAt: number }) | undefined;
   let officialIdentityDocument: { url: string; html: string } | undefined;
-  const navigationOrigins = new Set(input.initialUrls.map(value => new URL(value).origin));
+  const navigationOrigins = new Set(initialUrls.map(value => new URL(value).origin));
   const passfactory = createPassfactoryPublicReadPolicy();
   const uschedule = createUSchedulePublicReadPolicy();
-  input.initialUrls.forEach(value => passfactory.observeWidgetUrl(value));
+  initialUrls.forEach(value => passfactory.observeWidgetUrl(value));
   const readPost = (url: URL, headers: Headers, body: string) =>
     isAnonymousBrowserReadPost(url, headers, body) || passfactory.allows(url, headers, body) || uschedule.allows(url, headers, body);
   const queue = createSimulatorBrowserRequestQueue(deps.requestLease ?? runWithProviderRequestLease, deadline);
@@ -148,7 +167,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
   let browser: Browser;
   try {
     browser = deps.launchBrowser ? await deps.launchBrowser() : await (await import("@playwright/test")).chromium.launch({
-      headless: true, ...(process.platform === "win32" ? { channel: "chrome" } : {}), timeout: Math.min(15_000, remaining),
+      headless: !(nativeProxy && process.platform === "win32"), ...(process.platform === "win32" ? { channel: "chrome" } : {}), timeout: Math.min(15_000, remaining),
       ...(nativeProxy ? { args: ["--disable-quic", "--proxy-bypass-list=<-loopback>"] } : {}),
     });
   } catch (error) { await nativeProxy?.close(); queue.dispose(); throw error; }
@@ -156,10 +175,12 @@ export async function createCourseDiscoveryBrowserSession(input: {
     ...(nativeProxy ? { proxy: { server: nativeProxy.server, bypass: "<-loopback>" } } : {}) });
   await context.routeWebSocket("**/*", route => { route.close(); });
   const page = await context.newPage();
+  let redirectRouting: Awaited<ReturnType<typeof installNativeRedirectRouting>> | undefined;
   const startupMs = Date.now() - startupStartedAt;
   page.setDefaultTimeout(Math.min(10_000, remaining));
   const responses: DiscoveryBrowserSnapshot["responses"] = [];
   const observedRequests: DiscoveryBrowserSnapshot["requests"] = [];
+  const requestFailures: NonNullable<DiscoveryBrowserSnapshot["requestFailures"]> = [];
   const pendingRequestMetadata = new Set<DiscoveryBrowserSnapshot["requests"][number]>();
   let requestMetadataBytes = 0;
   const recordRequest = (metadata: DiscoveryBrowserSnapshot["requests"][number], priority = false) => {
@@ -180,16 +201,18 @@ export async function createCourseDiscoveryBrowserSession(input: {
   const controls = new Map<string, { locator: Locator; signature: string; kind: string; href?: string; calendarDay?: string; dropdown?: PublicDropdownProof }>();
   const observedElements = new Map<string, { locator: Locator; signature: string }>();
   let closed = false, requestCount = 0, interceptCount = 0, responseBytes = 0, blockedRequests = 0, pendingRequests = 0, actions = 0, observations = 0;
+  let terminalFailure: string | undefined;
   let navigation: { url: string; status: number } | undefined;
   let navigationStartedAt: number | undefined;
-  const close = async () => { if (closed) return; closed = true; cancellation.abort("BROWSER_CLOSED"); queue.dispose(); await context.close().catch(() => {}); await browser.close().catch(() => {}); await nativeProxy?.close(); };
+  const close = async () => { if (closed) return; closed = true; await redirectRouting?.close(); cancellation.abort("BROWSER_CLOSED"); queue.dispose(); await context.close().catch(() => {}); await browser.close().catch(() => {}); await nativeProxy?.close(); };
   const abort = () => { void close(); };
   deadline.addEventListener("abort", abort, { once: true });
   page.on("popup", popup => { void popup.close(); });
   context.on("page", opened => { if (opened !== page) void opened.close(); });
-  await context.route("**/*", async route => {
+  const handleRoute = async (route: NativeReadRoute) => {
     const request = route.request();
-    const requestUrl = canonicalPublicReadUrl(request.url(), request.method());
+    const transportUrl = canonicalPublicReadUrl(request.url(), request.method());
+    const requestUrl = canonicalCpsPublicUrl(transportUrl);
     // Denied media/telemetry never spends the public-read budget. A separate
     // hard interception cap still bounds hostile pages that emit rejected work.
     if (++interceptCount > 1024) { await route.abort().catch(() => {}); void close(); return; }
@@ -202,6 +225,10 @@ export async function createCourseDiscoveryBrowserSession(input: {
     pendingRequestMetadata.add(metadata);
     try {
       deadline.throwIfAborted();
+      if (request.frame().page() !== page) throw new Error("UNSUPPORTED_BROWSER_PAGE");
+      redirectRouting?.prepare(request.frame());
+      if (!cpsScope.authorize(transportUrl, request.redirectedFrom()?.url())) throw new Error("UNOBSERVED_CPS_SESSION");
+      if (cpsSessionKey(transportUrl) && !nativeProxy) throw new Error("CPS_NATIVE_BROWSER_REQUIRED");
       if (!isSafeRecipeUrl(requestUrl) && !isSafeBrowserAssetUrl(requestUrl, request.resourceType(), request.method())) throw new Error("UNSAFE_URL");
       const url = new URL(requestUrl);
       if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
@@ -209,7 +236,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
           officialIdentityDocument = undefined; officialIdentityPage = undefined;
         }
         if (nativeProxy && request.redirectedFrom()) {
-          if (!isObservedNativeRedirect(request, navigationOrigins)) throw new Error("UNSAFE_REDIRECT");
+          if (!cpsSessionKey(transportUrl) && !isObservedNativeRedirect(request, navigationOrigins)) throw new Error("UNSAFE_REDIRECT");
           allowedNavigation.add(url.href); navigationOrigins.add(url.origin);
         }
         if (!allowedNavigation.has(url.href) && !navigationOrigins.has(url.origin)) throw new Error("UNOBSERVED_NAVIGATION");
@@ -246,7 +273,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
           nativeProxy.allowHostConnections(url.hostname);
           const response = await continueNativeBrowserRead(route, deadline, responseLimit, async () => {
             await nativeProxy.cancelHostConnections(url.hostname);
-          }, requestUrl);
+          }, transportUrl);
           return { status: response.status, headers: response.headers, buffer: response.body };
         }
         const transport = deps.fetch ?? createAddressPinnedPublicFetchTransport({
@@ -280,7 +307,16 @@ export async function createCourseDiscoveryBrowserSession(input: {
       for (const key of ["content-type", "access-control-allow-origin"]) { const value = reply.headers[key]; if (value) responseHeaders[key] = value; }
       const redirect = reply.headers.location;
       if (redirect) {
-        const next = new URL(redirect, url);
+        // Chromium skips Playwright's route handler for redirected requests.
+        // Pinned HTTP must not release a Location into an unpinned browser read.
+        if (!nativeProxy) throw new Error("PINNED_REDIRECT_UNSUPPORTED");
+        const nextTransport = new URL(redirect, transportUrl);
+        // A native CPS landing may mint a new anonymous session in Location.
+        // Admit only this context's proved same-course redirect; persist and
+        // expose its canonical URL, never the transport's session segment.
+        if (!cpsScope.authorize(nextTransport.href, transportUrl) || cpsSessionKey(nextTransport.href) && !nativeProxy)
+          throw new Error("UNSAFE_REDIRECT");
+        const next = new URL(canonicalCpsPublicUrl(nextTransport.href));
         if (method === "POST" || !isSafeRecipeUrl(next.href) || next.hostname.replace(/^www\./u, "") !== url.hostname.replace(/^www\./u, "")) throw new Error("UNSAFE_REDIRECT");
         responseHeaders.location = next.href;
         allowedNavigation.add(next.href); navigationOrigins.add(next.origin);
@@ -300,12 +336,41 @@ export async function createCourseDiscoveryBrowserSession(input: {
     } catch (error) {
       blockedRequests++;
       metadata.blockedReason = error instanceof Error && /^[A-Z_]{1,80}$/u.test(error.message) ? error.message : "REQUEST_FAILED";
+      const failureUrl = redactDiscoveryFailureUrl(requestUrl, request.resourceType());
+      requestFailures.push({ reason: metadata.blockedReason, resourceType: request.resourceType(), ...(failureUrl ? { url: failureUrl } : {}) });
+      if (requestFailures.length > 12) requestFailures.shift();
       deps.onRequestFailure?.({ url: metadata.url, resourceType: metadata.resourceType, reason: metadata.blockedReason });
       recordRequest(metadata, true);
       await route.abort().catch(() => {});
     }
     finally { pendingRequests--; pendingRequestMetadata.delete(metadata); }
+  };
+  await context.route("**/*", async route => {
+    try { await handleRoute(redirectRouting ? redirectRouting.wrapRoute(route) : route); }
+    catch (error) {
+      blockedRequests++;
+      const reason = error instanceof Error && /^[A-Z_]{1,80}$/u.test(error.message) ? error.message : "NATIVE_REDIRECT_ROUTING_FAILED";
+      terminalFailure = reason;
+      requestFailures.push({ reason, resourceType: route.request().resourceType() });
+      if (requestFailures.length > 12) requestFailures.shift();
+      await route.abort().catch(() => {});
+      void close();
+    }
   });
+  if (nativeProxy) {
+    try {
+      redirectRouting = await installNativeRedirectRouting(page, handleRoute, {
+        signal: deadline, maxRequests: 1024,
+        onFailure: reason => {
+          if (closed) return;
+          terminalFailure = reason;
+          blockedRequests++;
+          requestFailures.push({ reason, resourceType: "document" });
+          if (requestFailures.length > 12) requestFailures.shift();
+        },
+      });
+    } catch (error) { await close(); throw error; }
+  }
 
   const observeControl = (locator: Locator): Promise<ObservedControl> => locator.evaluate(element => {
     const node = element as HTMLElement;
@@ -343,7 +408,6 @@ export async function createCourseDiscoveryBrowserSession(input: {
         if (label) break;
       }
     }
-    let product: ObservedControl["product"];
     let choiceContext: string | undefined;
     if (node.hasAttribute("data-value")) {
       let parent = node.parentElement;
@@ -353,20 +417,6 @@ export async function createCourseDiscoveryBrowserSession(input: {
       }
       if (!label && choiceContext) label = choiceContext;
     }
-    if (/^(?:book|select)$/iu.test(node.innerText.trim()) && ["BUTTON", "A"].includes(node.tagName)) {
-      let card = node.parentElement;
-      for (let depth = 0; card && depth < 6 && !["BODY", "FORM"].includes(card.tagName); depth++, card = card.parentElement) {
-        const text = card.innerText.replace(/([a-z])([A-Z])/gu, "$1 $2").replace(/([A-Za-z])(\d)/gu, "$1 $2").trim();
-        const minutes = [...text.matchAll(/\b(\d+(?:\.\d+)?)\s*(hours?|hrs?|hr|minutes?|mins?|min)\b/giu)]
-          .map(match => Number(match[1]) * (/^h/iu.test(match[2]) ? 60 : 1));
-        const unique = [...new Set(minutes)];
-        if (text.length <= 2000 && unique.length === 1 && Number.isInteger(unique[0]) && unique[0] >= 15 && unique[0] <= 480 &&
-          !/\b\d{1,2}:\d{2}/u.test(text) && !/\b(?:checkout|payment|purchase|confirm|password|sign in|login)\b/iu.test(text) &&
-          !card.querySelector('input[type=password],input[type=email],input[type=tel],[autocomplete^="cc-"]')) {
-          product = { selector: selectors.for(card), durationMinutes: unique[0] }; break;
-        }
-      }
-    }
     return { tag: node.tagName.toLowerCase(), role: node.getAttribute("role") ?? "", name: (node.innerText || node.getAttribute("aria-label") || node.querySelector("img")?.getAttribute("alt") || node.getAttribute("title") || "").trim().slice(0, 160),
       label: label.trim().slice(0, 200), href: node instanceof HTMLAnchorElement ? node.href : undefined,
       calendar: Boolean(node.closest('[role="grid"],[role="dialog"],[class*="calendar"],[class*="datepicker"]')),
@@ -375,15 +425,79 @@ export async function createCourseDiscoveryBrowserSession(input: {
       choiceValue: node.getAttribute("data-value") ?? undefined, choiceContext,
       disabledChoice: node.getAttribute("aria-disabled") === "true" || node.classList.contains("disabled"),
       ...((node.tagName === "SELECT" || node.tagName === "INPUT" && ["date", "number"].includes(field.type)) ? { currentValue: field.value.slice(0, 200) } : {}),
-      ...(product ? { product } : {}),
       ...(node.tagName === "SELECT" ? { options: Array.from((node as HTMLSelectElement).options).slice(0, 100).map(item => ({ value: item.value.slice(0, 200), label: (item.textContent ?? "").trim().slice(0, 200) })) } : {}) };
-  }).then(control => ({ ...control, ...(control.href ? { href: normalizeDiscoveryNavigationUrl(control.href) } : {}) }));
+  }, undefined, { timeout: 1000 }).then(async control => {
+    const product = ["a", "button"].includes(control.tag) ? await inspectPublicRentalProduct(locator) : undefined;
+    return { ...control, ...(product ? { product } : {}), ...(control.href ? { href: normalizeDiscoveryNavigationUrl(control.href) } : {}) };
+  });
   const publicControlKind = (control: ObservedControl, blockedAccess: boolean) => {
     if (!recipeSelectorSchema.safeParse(control.selector).success || blockedAccess) return null;
+    // The generic link fallback must retain the same transaction-parameter
+    // exclusion as a labelled public availability link.
+    if (control.href && !isPublicAvailabilityNavigation(control.href, (control.name || control.label).trim())) return null;
     const kind = control.product ? "product" : discoveryPublicAnchorKind(control) ?? discoveryPublicChoiceKind(control) ?? interactiveControlKind(control) ?? (control.tag === "select" && !control.sensitiveForm ? "filter" : null);
     if (!kind || /\b(?:book|reserve|checkout|confirm|purchase|pay)\b/iu.test(control.name) && !["link", "product"].includes(kind) ||
       control.href && !isSafeRecipeUrl(control.href)) return null;
     return kind;
+  };
+  const isRenderedControl = (locator: Locator) => locator.evaluate(element => {
+    if (!(element instanceof HTMLElement) || element.closest('[hidden],[inert],[aria-hidden="true"]')) return false;
+    const bounds = element.getBoundingClientRect();
+    if (!bounds.width || !bounds.height) return false;
+    let node: HTMLElement | null = element, depth = 0;
+    for (; node && depth < 32; node = node.parentElement, depth++) {
+      const style = getComputedStyle(node);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+    }
+    return !node;
+  }, undefined, { timeout: 1000 });
+  const controlCandidates = async () => {
+    const matches = page.locator('a[href],a[data-value],button,select,input,td,th,[role="combobox"],[role="option"],[role="gridcell"],[role="button"]');
+    const indexes = await matches.evaluateAll(nodes => {
+      const visible: Array<{ index: number; priority: boolean }> = [];
+      // Bound the DOM scan, not the unfiltered prefix of potential controls.
+      // Navigation labels only affect ordering; full safety classification is
+      // still required before registration or returning an action target.
+      for (let index = 0; index < Math.min(nodes.length, 3000); index++) {
+        const element = nodes[index];
+        if (!(element instanceof HTMLElement) || element.closest('[hidden],[inert],[aria-hidden="true"]')) continue;
+        const bounds = element.getBoundingClientRect();
+        if (!bounds.width || !bounds.height) continue;
+        let node: HTMLElement | null = element, rendered = true, depth = 0;
+        for (; node && depth < 32; node = node.parentElement, depth++) {
+          const style = getComputedStyle(node);
+          if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') { rendered = false; break; }
+        }
+        if (!rendered || node) continue;
+        // Avoid thousands of cross-process reads for plain decorative buttons.
+        // This only removes shapes the full classifier cannot admit. Named,
+        // labelled, popup, calendar and product candidates still go through the
+        // unchanged per-control validation before any action is exposed.
+        if (element.tagName === 'BUTTON' && !element.getAttribute('aria-label') && !element.getAttribute('aria-labelledby') &&
+            !element.getAttribute('title') && !element.getAttribute('aria-haspopup') && !element.hasAttribute('data-value') &&
+            element.getAttribute('role') !== 'option' && !element.closest('[role="grid"],[role="dialog"],[class*="calendar"],[class*="datepicker"]')) {
+          const name = (element.innerText || element.querySelector('img')?.getAttribute('alt') || '').trim();
+          const candidateName = /\b(?:date|day|month|calendar|duration|length|party|players?|people|guests?|bay|resource|simulator|location|activity|availability|available|search|view times|next|previous|back|continue|apply)\b/iu.test(name);
+          const productName = /^(?:book|select)$/iu.test(name) || /\b(?:hours?|hrs?|hr|minutes?|mins?|min)\b.*(?:\$|USD)|\d\s*h\s*(?:\$|USD)/iu.test(name);
+          if (!candidateName && !productName) continue;
+        }
+        visible.push({ index, priority: element.tagName === 'A' && /\b(?:book|reserve|reservations?|tee\s*times?|availability)\b/iu.test(`${element.innerText} ${element.getAttribute('aria-label') ?? ''}`) });
+      }
+      return visible.sort((left, right) => Number(right.priority) - Number(left.priority) || left.index - right.index).map(value => value.index);
+    });
+    return indexes.map(index => matches.nth(index));
+  };
+  const registerControl = (locator: Locator, control: ObservedControl, kind: string, extra: { date?: string; dropdown?: PublicDropdownProof } = {}) => {
+    if (control.href && !isSafeRecipeUrl(control.href)) throw new Error("UNSAFE_NAVIGATION");
+    if (control.href) { allowedNavigation.add(control.href); passfactory.observeWidgetUrl(control.href); cpsScope.observeEntry(control.href); }
+    const target = randomUUID();
+    controls.set(target, { locator, signature: JSON.stringify(control), kind, href: control.href,
+      ...(extra.date ? { calendarDay: extra.date } : {}), ...(extra.dropdown ? { dropdown: extra.dropdown } : {}) });
+    observedElements.set(control.selector, { locator, signature: JSON.stringify(control) });
+    return { target, selector: control.selector, kind, name: sanitizeResponderText(control.name), label: sanitizeResponderText(extra.dropdown?.label ?? control.label),
+      ...(control.href ? { href: control.href } : {}), ...(control.currentValue === undefined ? {} : { currentValue: sanitizeResponderText(control.currentValue) }),
+      ...(control.product ? { product: control.product } : {}),
+      ...(control.options ? { options: control.options.map(option => ({ value: sanitizeResponderText(option.value), label: sanitizeResponderText(option.label) })) } : {}) };
   };
   const waitForInitialContent = async () => {
     const startedAt = Date.now();
@@ -394,7 +508,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       const text = sanitizeResponderText(await page.locator("body").innerText()).slice(0, 16_000);
       if (text.replace(/[^\p{L}\p{N}]/gu, "").length >= 40 || isActiveBrowserAccessChallenge(text, await page.title())) break;
       let usableControl = false;
-      for (const node of (await page.locator('a[href],a[data-value],button,select,input,td,th,[role="combobox"],[role="option"],[role="gridcell"],[role="button"]').all()).slice(0, 180)) {
+      for (const node of await controlCandidates()) {
         if (!await node.isVisible() || !await node.isEnabled()) continue;
         const control = await observeControl(node);
         if (/[\p{L}\p{N}]{2}/u.test(`${control.name} ${control.label}`) && publicControlKind(control, false)) {
@@ -406,7 +520,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     }
     return Date.now() - startedAt;
   };
-  const snapshot = async (settleInitialContent = false): Promise<DiscoveryBrowserSnapshot> => {
+  const snapshotOnce = async (settleInitialContent = false): Promise<DiscoveryBrowserSnapshot> => {
     deadline.throwIfAborted();
     if (closed) throw new Error("BROWSER_CLOSED");
     controls.clear();
@@ -415,12 +529,14 @@ export async function createCourseDiscoveryBrowserSession(input: {
     const initialContentWaitMs = settleInitialContent ? await waitForInitialContent() : 0;
     // A public app may change its route without making a document request.
     // Only its actually observed URL on an already admitted origin is reusable.
-    const currentUrl = page.url();
+    const actualCurrentUrl = page.url();
+    const documentStartedAt = await page.evaluate(() => performance.timeOrigin);
+    const currentUrl = normalizeDiscoveryNavigationUrl(actualCurrentUrl);
     if (isSafeRecipeUrl(currentUrl) && navigationOrigins.has(new URL(currentUrl).origin)) {
       allowedNavigation.add(currentUrl);
       passfactory.observeWidgetUrl(currentUrl);
     }
-    const text = sanitizeResponderText(await page.locator("body").innerText()).slice(0, 16_000);
+    const text = sanitizeResponderText(await page.locator("body").innerText({ timeout: 1000 })).slice(0, 16_000);
     const blockedAccess = isActiveBrowserAccessChallenge(text, await page.title());
     if (!blockedAccess && officialIdentityDocument && sameDiscoveryMainDocument(officialIdentityDocument.url, currentUrl)) {
         const visibleEvidence = await page.evaluate(() => {
@@ -445,30 +561,24 @@ export async function createCourseDiscoveryBrowserSession(input: {
         officialIdentityPage = { ...officialIdentityDocument, visibleEvidence, observedAt: Date.now() };
     }
     const visible: DiscoveryBrowserSnapshot["controls"] = [];
-    const candidates: Array<{ locator: Locator; date?: string; dropdown?: PublicDropdownProof }> = (await page.locator('a[href],a[data-value],button,select,input,td,th,[role="combobox"],[role="option"],[role="gridcell"],[role="button"]').all()).slice(0, 180).map(locator => ({ locator }));
-    const dayCandidates = blockedAccess ? [] : await observedPublicCalendarDays(page);
+    const candidates: Array<{ locator: Locator; date?: string; dropdown?: PublicDropdownProof }> = (await controlCandidates()).map(locator => ({ locator }));
+    const dayCandidates = blockedAccess ? [] : [...await observedPublicCalendarDays(page), ...await observedPublicDateChoices(page)];
     const dropdowns = blockedAccess ? [] : (await observedPublicDropdowns(page)).map(value => ({ locator: value.locator, dropdown: value.proof }));
     const seenControls = new Set<string>();
     for (const { locator, date, dropdown } of [...dayCandidates, ...dropdowns, ...candidates] as typeof candidates) {
-      if (!await locator.isVisible() || !await locator.isEnabled()) continue;
+      if (!await isRenderedControl(locator) || !await locator.isEnabled({ timeout: 1000 })) continue;
       const control = await observeControl(locator);
       if (seenControls.has(control.selector)) continue;
       seenControls.add(control.selector);
       // Native public selects remain discoverable when the widget omitted an
       // accessible name, without admitting sensitive forms or arbitrary fields.
       const kind = ((date || dropdown) && !blockedAccess && recipeSelectorSchema.safeParse(control.selector).success
-        ? dropdown ? "filter" : interactiveControlKind({ ...control, verifiedCalendarDay: true }) : publicControlKind(control, blockedAccess)) ??
+        ? dropdown ? "filter" : "calendar" : publicControlKind(control, blockedAccess)) ??
         (!blockedAccess && /^(?:Apply|Apply dates)$/iu.test(control.name) && await isPublicCalendarApply(locator) ? "calendar" : null);
       if (!kind) continue;
-      if (control.href && isSafeRecipeUrl(control.href)) { allowedNavigation.add(control.href); passfactory.observeWidgetUrl(control.href); }
       if (control.href && !isSafeRecipeUrl(control.href)) continue;
-      const target = randomUUID();
-      controls.set(target, { locator, signature: JSON.stringify(control), kind, href: control.href, ...(date ? { calendarDay: date } : {}), ...(dropdown ? { dropdown } : {}) });
-      observedElements.set(control.selector, { locator, signature: JSON.stringify(control) });
-      visible.push({ target, selector: control.selector, kind, name: sanitizeResponderText(control.name), label: sanitizeResponderText(dropdown?.label ?? control.label),
-        ...(control.currentValue === undefined ? {} : { currentValue: sanitizeResponderText(control.currentValue) }),
-        ...(control.product ? { product: control.product } : {}),
-        ...(control.options ? { options: control.options.map(option => ({ value: sanitizeResponderText(option.value), label: sanitizeResponderText(option.label) })) } : {}) });
+      visible.push(registerControl(locator, control, kind, { date, dropdown }));
+      if (visible.length >= 180) break;
     }
     const elements: DiscoveryBrowserSnapshot["elements"] = [];
     const allElements = page.locator("body *");
@@ -503,24 +613,44 @@ export async function createCourseDiscoveryBrowserSession(input: {
       observedElements.set(control.selector, { locator: node, signature: JSON.stringify(control) });
       const attributes = await node.evaluate(element => Object.fromEntries(Array.from(element.attributes)
         .filter(attribute => ["id", "class", "role", "datetime", "aria-label", "aria-selected", "aria-current", "value"].includes(attribute.name) || /^data-(?:date|time|timestamp|capacity|value|duration|resource|product|loaded|complete)$/u.test(attribute.name))
-        .map(attribute => [attribute.name, attribute.value.slice(0, 200)])));
+        .map(attribute => [attribute.name, attribute.value.slice(0, 200)])), undefined, { timeout: 1000 });
       elements.push({ selector: control.selector, tag: control.tag, text: sanitizeResponderText(control.name).slice(0, 250), attributes });
     }
-    const frames = page.frames().filter(frame => frame !== page.mainFrame() && isSafeRecipeUrl(frame.url())).map(frame => ({ url: frame.url() })).slice(0, 10);
+    const frames = page.frames().filter(frame => frame !== page.mainFrame() && isSafeRecipeUrl(normalizeDiscoveryNavigationUrl(frame.url()))).map(frame => ({ url: normalizeDiscoveryNavigationUrl(frame.url()) })).slice(0, 10);
+    // A client navigation can replace the DOM while its old locator inventory
+    // is being read. Never return controls and text from different documents.
+    const finalDocumentStartedAt = await page.evaluate(() => performance.timeOrigin);
+    if (page.url() !== actualCurrentUrl || documentStartedAt !== finalDocumentStartedAt)
+      throw new Error("DISCOVERY_SNAPSHOT_CHANGED");
     for (const frame of frames) { allowedNavigation.add(frame.url); passfactory.observeWidgetUrl(frame.url); }
     const requests = observedRequests.map(request => ({ ...request }));
     const pendingMetadata = observedRequests.filter(request => pendingRequestMetadata.has(request));
     observedRequests.splice(0, observedRequests.length, ...pendingMetadata);
     requestMetadataBytes = pendingMetadata.reduce((total, request) => total + JSON.stringify(request).length + 120, 0);
-    return { url: page.url(), text, controls: visible, elements, frames, responses: responses.splice(0), requests, loading: pendingRequests > 0,
+    return { url: currentUrl, text, controls: visible, elements, frames, responses: responses.splice(0), requests, requestFailures: requestFailures.map(failure => ({ ...failure })), loading: pendingRequests > 0,
       blockedRequests, requestCount, interceptCount, responseBytes, startupMs, initialContentWaitMs, pendingRequestCount: pendingRequests,
       ...(navigationStartedAt === undefined ? {} : { navigationElapsedMs: Date.now() - navigationStartedAt }),
-      ...(navigation && sameDiscoveryMainDocument(navigation.url, page.url()) ? { navigationStatus: navigation.status } : {}),
+      ...(navigation && sameDiscoveryMainDocument(navigation.url, actualCurrentUrl) ? { navigationStatus: navigation.status } : {}),
       browserTransport: deps.browserTransport ?? "PINNED_HTTP", accessRequirementObserved: blockedAccess };
+  };
+  const snapshot = async (settleInitialContent = false): Promise<DiscoveryBrowserSnapshot> => {
+    for (let attempt = 0; ; attempt++) {
+      try { return await snapshotOnce(settleInitialContent); }
+      catch (error) {
+        const message = error instanceof Error ? error.message : "";
+        const replaced = /DISCOVERY_SNAPSHOT_CHANGED|Execution context was destroyed|Cannot find context|Frame (?:was )?detached|locator\.(?:evaluate|isEnabled|innerText): Timeout/iu.test(message);
+        if (attempt >= 1 || !replaced || closed || deadline.aborted) throw error;
+        // Retry only the read. The public click/filter is never replayed, and
+        // the original session deadline and action counters remain unchanged.
+        await page.waitForTimeout(Math.min(150, Math.max(1, input.deadlineAt.getTime() - Date.now())));
+      }
+    }
   };
   return {
     async execute(value: unknown): Promise<DiscoveryBrowserSnapshot> {
       const action = discoveryBrowserActionSchema.parse(value);
+      try {
+      if (terminalFailure) throw new Error(terminalFailure);
       deadline.throwIfAborted();
       if (closed || action.action !== "observe" && ++actions > 40) throw new Error("BROWSER_ACTION_LIMIT");
       if (action.action === "observe") {
@@ -530,7 +660,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       if (action.action === "finish") { const result = await snapshot(); await close(); return result; }
       if (action.action === "inspect") {
         const known = observedElements.get(action.selector);
-        if (!known || !await known.locator.isVisible() || JSON.stringify(await observeControl(known.locator)) !== known.signature)
+        if (!known || !await isRenderedControl(known.locator) || JSON.stringify(await observeControl(known.locator)) !== known.signature)
           throw new Error("STALE_OR_UNKNOWN_ELEMENT");
         const structure: NonNullable<DiscoveryBrowserSnapshot["structure"]> = { selected: action.selector, ancestors: [] };
         const returnedNodes: Array<{ locator: Locator; selector: string; signature: string }> = [];
@@ -561,8 +691,28 @@ export async function createCourseDiscoveryBrowserSession(input: {
         }
         const result = await snapshot();
         for (const returned of returnedNodes) {
-          if (await returned.locator.isVisible() && JSON.stringify(await observeControl(returned.locator)) === returned.signature)
-            observedElements.set(returned.selector, { locator: returned.locator, signature: returned.signature });
+          if (!await isRenderedControl(returned.locator)) continue;
+          const current = await observeControl(returned.locator);
+          if (JSON.stringify(current) !== returned.signature) continue;
+          observedElements.set(returned.selector, { locator: returned.locator, signature: returned.signature });
+          // Inspection can find a real public link beyond the bounded control
+          // inventory. Admit only that exact, unique, currently rendered link;
+          // selectors still never grant click or unrestricted URL authority.
+          if (current.tag !== "a" || !current.href || result.accessRequirementObserved ||
+              publicControlKind(current, false) !== "link" || !await returned.locator.isEnabled() ||
+              await page.locator(current.selector).count() !== 1) continue;
+          let admitted = result.controls.find(control => control.selector === current.selector);
+          if (!admitted) {
+            if (result.controls.length >= 180) controls.delete(result.controls.pop()!.target);
+            admitted = registerControl(returned.locator, current, "link");
+            result.controls.push(admitted);
+          }
+          for (const entry of structure.ancestors) for (const item of [entry, ...entry.children]) {
+            if (item.selector !== current.selector) continue;
+            const before = { href: item.href, target: item.target };
+            item.href = admitted.href; item.target = admitted.target;
+            if (JSON.stringify(structure).length > 6000) { item.href = before.href; item.target = before.target; }
+          }
         }
         return { ...result, structure };
       }
@@ -583,8 +733,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
       else if (action.action === "scroll") await page.mouse.wheel(0, action.direction === "down" ? 600 : -600);
       else if (["click", "select", "fill"].includes(action.action) && "target" in action) {
         const known = controls.get(action.target);
-        if (!known || !await known.locator.isVisible() || !await known.locator.isEnabled() || JSON.stringify(await observeControl(known.locator)) !== known.signature) throw new Error("STALE_OR_UNKNOWN_CONTROL");
-        if (known.calendarDay && !await isObservedPublicCalendarDay(known.locator, known.calendarDay)) throw new Error("STALE_OR_UNKNOWN_CONTROL");
+        if (!known || !await isRenderedControl(known.locator) || !await known.locator.isEnabled() || JSON.stringify(await observeControl(known.locator)) !== known.signature) throw new Error("STALE_OR_UNKNOWN_CONTROL");
+        if (known.calendarDay && !await isObservedPublicCalendarDay(known.locator, known.calendarDay) &&
+          !await isPublicDateChoice(known.locator, known.calendarDay)) throw new Error("STALE_OR_UNKNOWN_CONTROL");
         if (action.action === "select") {
           if (known.kind !== "filter") throw new Error("UNSAFE_CONTROL");
           if (known.dropdown) await selectPublicDropdown(known.locator, { value: action.option, purpose: known.dropdown.purpose, simulator: true });
@@ -602,11 +753,20 @@ export async function createCourseDiscoveryBrowserSession(input: {
           if (known.href) {
             if (!isSafeRecipeUrl(known.href)) throw new Error("UNSAFE_NAVIGATION");
             allowedNavigation.add(known.href); navigationOrigins.add(new URL(known.href).origin); navigationStartedAt = Date.now();
-            await page.goto(known.href, { waitUntil: "domcontentloaded" });
+            const target = await known.locator.getAttribute("target");
+            const rawHref = await known.locator.evaluate(element => (element as HTMLAnchorElement).href, undefined, { timeout: 1000 });
+            const canonicalBootstrap = rawHref !== known.href && normalizeDiscoveryNavigationUrl(rawHref) === known.href;
+            if (canonicalBootstrap || target && !["_self", "_top", "_parent"].includes(target.toLowerCase()))
+              await page.goto(known.href, { waitUntil: "domcontentloaded" });
+            else await known.locator.click();
           } else await known.locator.click();
         }
       }
       return snapshot(action.action === "open" || action.action === "observe");
+      } catch (error) {
+        if (terminalFailure) throw new Error(terminalFailure);
+        throw error;
+      }
     },
     async close() { deadline.removeEventListener("abort", abort); await close(); },
   };

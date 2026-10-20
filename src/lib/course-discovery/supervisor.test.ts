@@ -83,6 +83,16 @@ describe("browser snapshot progress", () => {
     vi.advanceTimersByTime(29_999);
     expect(() => compact(snapshot("still-waiting"))).not.toThrow();
   });
+  it("keeps recent sanitized request failures after compacting an unchanged page", () => {
+    const compact = createDiscoverySnapshotCompactor();
+    const state = { ...snapshot("first"), requestFailures: [{ reason: "UNSAFE_METHOD", resourceType: "fetch",
+      url: "https://example.org/public-read?value=private", body: "private" }] };
+    compact(state); compact(state);
+    const result = compact(state);
+    expect(result).toMatchObject({ unchanged: true, requestFailures: [{ reason: "UNSAFE_METHOD", resourceType: "fetch", url: "https://example.org/public-read" }] });
+    expect(JSON.stringify(result)).not.toContain("private");
+    expect(compact({ ...state, requestFailures: [{ reason: "UNSAFE_REDIRECT", resourceType: "document" }] })).toHaveProperty("text");
+  });
   it("delivers late response schema evidence and restarts the idle clock without changing the DOM", () => {
     vi.useFakeTimers(); vi.setSystemTime(now);
     const compact = createDiscoverySnapshotCompactor();
@@ -301,12 +311,32 @@ describe("bounded discovery supervisor", () => {
     await supervisor.stop();
   });
 
-  it.each(["ACCESS_REQUIRED", "UNSUPPORTED"])("persists a classified %s failure without another attempt", async outcome => {
+  it.each([1, 2])("keeps an unverified limitation on the existing bounded retry path at attempt %i", async attempts => {
+    vi.useFakeTimers(); vi.setSystemTime(now);
+    const assigned = { ...job(), attempts };
+    const failure = Object.assign(new Error("No recipe verified"), { code: "DISCOVERY_NO_VERIFIED_RECIPE", discoveryDiagnostic: {
+      evidence: { code: "DISCOVERY_CAPABILITY_UNVERIFIED", details: { reason: "CAPABILITY_LIMITATION_UNVERIFIED" } } } });
+    const client = { next: vi.fn().mockResolvedValueOnce({ job: assigned }).mockResolvedValue({ job: null }),
+      heartbeat: vi.fn(), fail: vi.fn(async () => ({})) };
+    const startWorker = vi.fn(async (options: unknown) => { expect(options).toMatchObject({ job: assigned }); throw failure; });
+    const onEvent = vi.fn();
+    const supervisor = createCourseDiscoverySupervisor({ client, startWorker, onEvent });
+    await supervisor.start(); await vi.advanceTimersByTimeAsync(1);
+    expect(client.fail).toHaveBeenCalledExactlyOnceWith(assigned.id, assigned.leaseToken, "TOOL_FAILURE", true);
+    expect(startWorker).toHaveBeenCalledOnce();
+    expect(startWorker.mock.calls[0][0]).toMatchObject({ job: assigned });
+    expect(assigned.deadlineAt).toBe(new Date(now + 900_000).toISOString());
+    expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ event: "attempt_ended", deadlineAt: assigned.deadlineAt,
+      diagnosticReason: "CAPABILITY_LIMITATION_UNVERIFIED" }));
+    await supervisor.stop();
+  });
+
+  it("persists a controller-confirmed access failure without another attempt", async () => {
     vi.useFakeTimers(); vi.setSystemTime(now);
     const client = { next: vi.fn().mockResolvedValueOnce({ job: job() }).mockResolvedValue({ job: null }), heartbeat: vi.fn(), fail: vi.fn(async () => ({})) };
-    const supervisor = createCourseDiscoverySupervisor({ client, startWorker: async () => { throw Object.assign(new Error(outcome), { code: `DISCOVERY_${outcome}` }); } });
+    const supervisor = createCourseDiscoverySupervisor({ client, startWorker: async () => { throw Object.assign(new Error("access"), { code: "DISCOVERY_ACCESS_REQUIRED" }); } });
     await supervisor.start(); await vi.advanceTimersByTimeAsync(1);
-    expect(client.fail).toHaveBeenCalledWith("job-1", "private-lease-value", outcome, false);
+    expect(client.fail).toHaveBeenCalledWith("job-1", "private-lease-value", "ACCESS_REQUIRED", false);
     await supervisor.stop();
   });
 });
@@ -585,6 +615,54 @@ describe("controller-only verification", () => {
   });
 
   it.each([
+    { context: "unobserved", failureCode: undefined, loading: false },
+    { context: "unfinished page", failureCode: undefined, loading: true },
+    { context: "stale element", failureCode: "STALE_OR_UNKNOWN_ELEMENT", loading: true },
+    { context: "one unsupported adapter", failureCode: "UNSUPPORTED_ADAPTER_SOURCE", loading: false },
+  ])("cannot terminalize an unsupported report based on $context", async ({ failureCode, loading }) => {
+    const sourceHome = mkdtempSync(join(tmpdir(), "discovery-unverified-limit-test-"));
+    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }));
+    writeFileSync(join(sourceHome, "auth.json"), "test-auth");
+    const checkpoint = vi.fn(async () => ({}));
+    const client = { helperEnvironment: () => ({}), checkpoint, candidate: vi.fn(), activate: vi.fn() };
+    const replies: unknown[] = [];
+    const inputJob = job();
+    const processFactory = options => ({ notify: vi.fn(), close: vi.fn(async () => {}), request: async (method: string) => {
+      if (method === "thread/start") return { thread: { id: "thread-1" }, approvalPolicy: "never", sandbox: { type: "readOnly" } };
+      if (method === "turn/start") {
+        queueMicrotask(async () => {
+          await options.onMessage({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1" } } }, () => {});
+          if (failureCode || loading) await options.onMessage({ id: 1, method: "item/tool/call", params: { threadId: "thread-1", turnId: "turn-1",
+            tool: "discovery_browser", arguments: { action: "observe" } } }, () => {});
+          if (failureCode) await options.onMessage({ id: 2, method: "item/tool/call", params: { threadId: "thread-1", turnId: "turn-1",
+            tool: "discovery_browser", arguments: { action: "inspect_adapter", url: "https://example.org/" } } }, () => {});
+          await options.onMessage({ id: 3, method: "item/tool/call", params: { threadId: "thread-1", turnId: "turn-1",
+            tool: "discovery_checkpoint", arguments: { summary: "The model asserts every engine is unsupported.", outcome: "UNSUPPORTED" } } }, reply => replies.push(reply));
+        });
+        return { turn: { id: "turn-1" } };
+      }
+      return {};
+    } });
+    try {
+      const error = await runCourseDiscoveryWorker({ job: inputJob, client, cwd: process.cwd(), sourceHome, recipeSchema: {},
+        resolveCli: () => "fixed-codex", processFactory, browserFactory: () => ({ close: async () => {}, request: async action => {
+          if (action.action === "inspect_adapter") throw Object.assign(new Error("private provider text"), { code: failureCode });
+          return { url: "https://example.org/", controls: [], requests: [], loading, pendingRequestCount: loading ? 1 : 0 };
+        } }) }).catch(error => error);
+      expect(error).toMatchObject({ code: "DISCOVERY_NO_VERIFIED_RECIPE", discoveryDiagnostic: {
+        reason: failureCode ?? "CAPABILITY_LIMITATION_UNVERIFIED" } });
+      const saved = checkpoint.mock.calls.at(-1)![2];
+      expect(saved).toMatchObject({ reportedOutcome: "UNSUPPORTED", controller: { terminalDiagnostic: error.discoveryDiagnostic } });
+      expect(saved).not.toHaveProperty("outcome");
+      const reply = replies[0] as { result: { contentItems: Array<{ text: string }> } };
+      expect(JSON.parse(reply.result.contentItems[0].text)).toMatchObject({ saved: true, terminal: false, retryable: true });
+      expect(JSON.stringify(saved)).not.toContain("private provider text");
+      expect(client.candidate).not.toHaveBeenCalled(); expect(client.activate).not.toHaveBeenCalled();
+      expect(inputJob.attempts).toBe(1); expect(inputJob.deadlineAt).toBe(new Date(now + 900_000).toISOString());
+    } finally { rmSync(sourceHome, { recursive: true, force: true }); }
+  });
+
+  it.each([
     { observed: true, failNavigation: false, reobserve: false },
     { observed: false, failNavigation: false, reobserve: false },
     { observed: true, failNavigation: true, reobserve: false },
@@ -623,11 +701,13 @@ describe("controller-only verification", () => {
           if (input.action === "open") throw Object.assign(new Error("BROWSER_NAVIGATION_FAILED"), { code: "BROWSER_NAVIGATION_FAILED" });
           return { url: "https://example.org/", text: observed ? "Verify you are human" : "", controls: [], accessRequirementObserved: observed };
         } }),
-      })).rejects.toMatchObject({ code: accessAllowed ? "DISCOVERY_ACCESS_REQUIRED" : "DISCOVERY_UNSUPPORTED" });
-      expect(checkpoint).toHaveBeenCalledWith("job-1", "private-lease-value", expect.objectContaining({ outcome: accessAllowed ? "ACCESS_REQUIRED" : "UNSUPPORTED" }), undefined);
+      })).rejects.toMatchObject({ code: accessAllowed ? "DISCOVERY_ACCESS_REQUIRED" : "DISCOVERY_NO_VERIFIED_RECIPE" });
+      expect(checkpoint).toHaveBeenCalledWith("job-1", "private-lease-value", expect.objectContaining(accessAllowed
+        ? { outcome: "ACCESS_REQUIRED" } : { reportedOutcome: "UNSUPPORTED" }), undefined);
       if (!accessAllowed) {
         expect(JSON.stringify(replies)).toContain("DISCOVERY_ACCESS_NOT_CONFIRMED");
         expect(checkpoint.mock.calls.some(call => call[2].outcome === "ACCESS_REQUIRED")).toBe(false);
+        expect(checkpoint.mock.calls.some(call => call[2].outcome === "UNSUPPORTED")).toBe(false);
       }
       expect(client.candidate).not.toHaveBeenCalled(); expect(client.activate).not.toHaveBeenCalled();
     } finally { rmSync(sourceHome, { recursive: true, force: true }); }
@@ -671,7 +751,7 @@ describe("controller-only verification", () => {
           } };
         },
       }).catch(error => error);
-      expect(failure).toMatchObject({ code: "DISCOVERY_UNSUPPORTED", discoveryMetrics: { providerRequestsObserved: 3, responseBytesObserved: 250 } });
+      expect(failure).toMatchObject({ code: "DISCOVERY_NO_VERIFIED_RECIPE", discoveryMetrics: { providerRequestsObserved: 3, responseBytesObserved: 250 } });
       expect(configurations).toHaveLength(2);
       expect(configurations.every(config => config.deadlineAt === inputJob.deadlineAt)).toBe(true);
       expect(closes.every(close => close.mock.calls.length === 1)).toBe(true);
@@ -709,7 +789,7 @@ describe("controller-only verification", () => {
       await expect(runCourseDiscoveryWorker({ job: inputJob, client, cwd: process.cwd(), sourceHome, recipeSchema: {}, resolveCli: () => "fixed-codex", processFactory,
         validateRecipe: async () => ({ valid: false, issues: [{ path: "proof.complete.selector", code: "custom", message: "Expected a bounded public display selector" }] }),
         browserFactory: () => ({ request: async action => { if (action.action === "observe") observedAfterValidation = !browserClosed; return { url: "https://example.org/", text: "Public golf", controls: [] }; }, close: async () => { browserClosed = true; } }),
-      })).rejects.toMatchObject({ code: "DISCOVERY_UNSUPPORTED" });
+      })).rejects.toMatchObject({ code: "DISCOVERY_NO_VERIFIED_RECIPE" });
       expect(candidate).not.toHaveBeenCalled(); expect(observedAfterValidation).toBe(true);
       const stored = checkpoint.mock.calls.at(-1)![2];
       expect(stored).toMatchObject({ summary: "Needs another attempt", controller: { lastFeedback: { code: "DISCOVERY_RECIPE_INVALID", details: { issues: [{ path: "proof.complete.selector" }] } } } });
@@ -836,7 +916,7 @@ describe("controller-only verification", () => {
           return { url: observedUrl, text: "Public page", controls: [], navigationStatus: status,
             browserTransport: config.helperEnvironment.COURSE_DISCOVERY_BROWSER_TRANSPORT, requestCount: 1, responseBytes: 100 };
         } }; },
-      })).rejects.toMatchObject({ code: "DISCOVERY_UNSUPPORTED" });
+      })).rejects.toMatchObject({ code: "DISCOVERY_NO_VERIFIED_RECIPE" });
       expect(configured).toHaveLength(status === 403 ? 2 : 1);
       expect(configured[0].helperEnvironment.COURSE_DISCOVERY_BROWSER_TRANSPORT).toBe("NATIVE_CHROME");
       if (status === 403) expect(configured[1].helperEnvironment.COURSE_DISCOVERY_BROWSER_TRANSPORT).toBe("PINNED_HTTP");

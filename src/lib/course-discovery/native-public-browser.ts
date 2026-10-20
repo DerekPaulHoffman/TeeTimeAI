@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage } from "node:http";
 import { connect as netConnect, type Socket } from "node:net";
 import type { AddressInfo } from "node:net";
-import type { Route } from "@playwright/test";
+import type { NativeReadRoute } from "./native-redirect-routing";
 import { resolvePinnedPublicAddress, type ResolvedPublicAddress } from "@/lib/automation/address-pinned-public-fetch";
 import { isSafeRecipeUrl } from "./recipe";
 import { canonicalPublicReadUrl } from "./public-request-url";
@@ -155,7 +155,7 @@ function abortable<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
 
 /** Call inside the provider lease. Continuing a route only dispatches it;
  * the lease remains held until the actual browser response finishes. */
-export async function continueNativeBrowserRead(route: Route, signal: AbortSignal, maxBytes = 2_000_000,
+export async function continueNativeBrowserRead(route: NativeReadRoute, signal: AbortSignal, maxBytes = 2_000_000,
   abortNetwork?: () => Promise<void>, canonicalUrl?: string) {
   let networkFinished = false;
   try {

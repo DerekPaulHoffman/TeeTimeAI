@@ -5,5 +5,6 @@ import { getKnownProviderFamilyForHostname, normalizeProviderFamilyKey } from "@
 export function requestFamilyForUrl(value: string) {
   const hostname = new URL(value).hostname;
   if (hostname === "clients.uschedule.com") return normalizeProviderFamilyKey("USCHEDULE");
+  if (hostname === "booking.lightspeed.app") return hostname;
   return getKnownProviderFamilyForHostname(hostname) ?? normalizeProviderFamilyKey(hostname);
 }
