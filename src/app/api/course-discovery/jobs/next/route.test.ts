@@ -12,15 +12,15 @@ import { POST } from "./route";
 import { POST as activate } from "../[id]/activate/route";
 
 const secret = "test-only-local-discovery-key-123456";
-function request(path: string, value: unknown, signed = true) {
+function request(path: string, value: unknown, signed = true, token = secret) {
   const body = JSON.stringify(value);
   const timestamp = String(Date.now());
   return new NextRequest(`https://teetimespot.com${path}`, { method: "POST", body, headers: {
     "content-type": "application/json", "x-local-reader-timestamp": timestamp,
-    "x-local-reader-signature": signed ? signLocalReaderPayload(secret, `POST\n${path}\n${timestamp}\n${body}`) : "invalid",
+    "x-local-reader-signature": signed ? signLocalReaderPayload(token, `POST\n${path}\n${timestamp}\n${body}`) : "invalid",
   } });
 }
-beforeEach(() => { vi.resetAllMocks(); vi.stubEnv("LOCAL_READER_DEVICE_TOKEN", secret); });
+beforeEach(() => { vi.resetAllMocks(); vi.stubEnv("LOCAL_READER_DEVICE_TOKEN", secret); vi.stubEnv("COURSE_DISCOVERY_DEVICE_TOKEN", undefined); });
 afterEach(() => vi.unstubAllEnvs());
 
 describe("private discovery API boundary", () => {
@@ -28,6 +28,15 @@ describe("private discovery API boundary", () => {
     const response = await POST(request("/api/course-discovery/jobs/next", { workerId: "worker-one" }, false));
     expect(response.status).toBe(401);
     expect(mocks.next).not.toHaveBeenCalled();
+  });
+  it("uses the dedicated learning credential when configured", async () => {
+    const dedicated = "dedicated-course-discovery-fixture-token";
+    vi.stubEnv("COURSE_DISCOVERY_DEVICE_TOKEN", dedicated);
+    const rejected = await POST(request("/api/course-discovery/jobs/next", { workerId: "worker-one" }));
+    expect(rejected.status).toBe(401); expect(mocks.next).not.toHaveBeenCalled();
+    mocks.next.mockResolvedValue(null);
+    const accepted = await POST(request("/api/course-discovery/jobs/next", { workerId: "worker-one" }, true, dedicated));
+    expect(accepted.status).toBe(200); expect(mocks.next).toHaveBeenCalledWith("worker-one");
   });
   it("rejects unknown fields instead of letting callers supply job authority", async () => {
     const response = await POST(request("/api/course-discovery/jobs/next", { workerId: "worker-one", deadlineAt: "later" }));

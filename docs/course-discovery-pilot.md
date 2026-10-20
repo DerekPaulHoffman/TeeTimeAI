@@ -66,8 +66,14 @@ venue-local midnight.
   available. The supervisor requires the pinned `@openai/codex` installation,
   a signed-in local Codex account, and its existing model catalog.
 - Set `COURSE_DISCOVERY_API_ORIGIN` in the supervisor environment to the exact
-  application origin. Supply the existing `LOCAL_READER_DEVICE_TOKEN` through
-  the local secret mechanism. Never put its value in a command transcript,
+  application origin. Configure a separate server-side
+  `COURSE_DISCOVERY_DEVICE_TOKEN` and supply that same value to the supervisor
+  under its existing local `LOCAL_READER_DEVICE_TOKEN` transport key. This
+  learning credential authorizes only `/api/course-discovery/*`; it never
+  replaces or authorizes the installed Local Reader's `/api/local-reader/*`
+  credential. Only an absent dedicated server setting retains the old-token
+  migration fallback; a configured empty or invalid setting fails closed.
+  Never put either credential in a command transcript,
   receipt, repository or model prompt. The API authenticates requests with
   body-bound HMAC signatures and timestamp validation.
 - Select `COURSE_DISCOVERY_BROWSER_TRANSPORT=PINNED_HTTP` or `NATIVE_CHROME`

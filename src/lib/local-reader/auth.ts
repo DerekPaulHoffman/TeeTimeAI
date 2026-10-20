@@ -7,9 +7,10 @@ import {
 
 export function assertLocalReaderRequest(
   request: NextRequest,
-  serializedBody = ""
+  serializedBody = "",
+  expectedToken: string | undefined = process.env.LOCAL_READER_DEVICE_TOKEN
 ) {
-  const secret = process.env.LOCAL_READER_DEVICE_TOKEN
+  const secret = expectedToken
     ?.replace(/^\uFEFF/u, "")
     .trim();
   if (!secret || secret.length < 16) {

@@ -16,7 +16,7 @@ function request(value: unknown, signed = true) {
   return new NextRequest(`https://teetimespot.com${path}`, { method: "POST", body, headers: { "content-type": "application/json",
     "x-local-reader-timestamp": timestamp, "x-local-reader-signature": signed ? signLocalReaderPayload(secret, `POST\n${path}\n${timestamp}\n${body}`) : "invalid" } });
 }
-beforeEach(() => { vi.resetAllMocks(); vi.stubEnv("LOCAL_READER_DEVICE_TOKEN", secret); mocks.propose.mockResolvedValue({ recipeHash: "a".repeat(64), challenges: [] }); });
+beforeEach(() => { vi.resetAllMocks(); vi.stubEnv("LOCAL_READER_DEVICE_TOKEN", secret); vi.stubEnv("COURSE_DISCOVERY_DEVICE_TOKEN", undefined); mocks.propose.mockResolvedValue({ recipeHash: "a".repeat(64), challenges: [] }); });
 afterEach(() => vi.unstubAllEnvs());
 const context = { params: Promise.resolve({ id: "job1" }) };
 describe("trusted observed-source candidate input", () => {
