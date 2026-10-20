@@ -872,6 +872,7 @@ function TeeTimeIntakeContent({
 
   function selectMode(nextMode: SearchMode) {
     if (nextMode === mode) return;
+    shouldScrollToResultsRef.current = false;
     discoveryRequestRef.current?.abort();
     lookupRequestRef.current?.abort();
     storeSearchDraft({ location: locationText, radius: searchRadiusMiles, date, startTime, endTime, players,

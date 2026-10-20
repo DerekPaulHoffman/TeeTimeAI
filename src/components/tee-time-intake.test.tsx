@@ -102,11 +102,11 @@ describe("TeeTimeIntake", () => {
     vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
     render(<TeeTimeIntake {...signedInAccountProps} simulatorEnabled showPageHeader initialValues={{ mode: "SIMULATOR" }} />);
 
-    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Find indoor golf simulators and set a free alert.");
+    expect(screen.getByRole("heading", { level: 1, name: "Find indoor golf simulators and set a free alert." })).toBeTruthy();
     const filters = screen.getByRole("group", { name: "Course layout" });
     fireEvent.click(within(filters).getByRole("button", { name: "Any", exact: true }));
 
-    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Find public golf tee times and set a free alert.");
+    expect(screen.getByRole("heading", { level: 1, name: "Find public golf tee times and set a free alert." })).toBeTruthy();
     expect(within(filters).getByRole("button", { name: "Any", exact: true }).getAttribute("aria-pressed")).toBe("true");
     expect(window.location.search).toBe("");
   });
@@ -1110,11 +1110,11 @@ describe("TeeTimeIntake", () => {
     vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
     Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
     render(<TeeTimeIntake {...signedInAccountProps} simulatorEnabled showPageHeader initialValues={{ location: "Fairfield, CT", date: "2099-10-03" }} />);
-    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Find public golf tee times and set a free alert.");
+    expect(screen.getByRole("heading", { level: 1, name: "Find public golf tee times and set a free alert." })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Search", exact: true }));
     await waitFor(() => expect(outdoorSignal).toBeDefined());
     fireEvent.click(screen.getByRole("button", { name: "Simulator", exact: true }));
-    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Find indoor golf simulators and set a free alert.");
+    expect(screen.getByRole("heading", { level: 1, name: "Find indoor golf simulators and set a free alert." })).toBeTruthy();
     expect(outdoorSignal?.aborted).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "Search", exact: true }));
     await screen.findByRole("heading", { name: "Current Simulator" });
@@ -1130,7 +1130,7 @@ describe("TeeTimeIntake", () => {
     expect(new URL(window.location.href).searchParams.get("mode")).toBe("SIMULATOR");
     expect((screen.getByLabelText("Location") as HTMLInputElement).value).toBe("Fairfield, CT");
     fireEvent.click(screen.getByRole("button", { name: "9-hole", exact: true }));
-    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Find public golf tee times and set a free alert.");
+    expect(screen.getByRole("heading", { level: 1, name: "Find public golf tee times and set a free alert." })).toBeTruthy();
     expect(new URL(window.location.href).searchParams.has("mode")).toBe(false);
     expect(screen.queryByRole("heading", { name: "Current Simulator" })).toBeNull();
   });
