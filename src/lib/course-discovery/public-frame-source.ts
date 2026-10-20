@@ -3,6 +3,7 @@ import { isPublicAvailabilityNavigation } from "./public-navigation-control";
 import { parseTeeItUpRecipeSource } from "./teeitup-recipe-source";
 import { parseLightspeedSource } from "./lightspeed-source";
 import { isSafeRecipeUrl } from "./recipe";
+import { cpsPublicEntryUrl } from "./cps-public-navigation";
 
 /** Promote a source attribute, never a child frame's current/redirected URL. */
 export function publicFrameSource(input: { src: string; label: string; visible: boolean; srcdoc: boolean },
@@ -11,7 +12,9 @@ export function publicFrameSource(input: { src: string; label: string; visible: 
     const current = new URL(documentUrl), official = new URL(officialUrl);
     if (!input.visible || input.srcdoc || ![documentUrl, officialUrl, verifiedDocumentUrl].every(isSafeRecipeUrl) || current.origin !== official.origin || current.protocol !== "https:" ||
         verifiedDocumentUrl.split("#", 1)[0] !== current.href.split("#", 1)[0] || !input.src.trim()) return;
-    const url = new URL(input.src, current).href;
+    const raw = new URL(input.src, current).href;
+    const url = cpsPublicEntryUrl(raw) ?? raw;
+    if (!isSafeRecipeUrl(url)) return;
     const knownEntry = Boolean(parseTeeItUpRecipeSource(url) || parseLightspeedSource(url));
     const labelled = /\b(?:tee\s*times?|booking|availability|book\s+(?:a\s+)?bay|simulator\s+rentals?)\b/iu.test(input.label);
     if ((!knownEntry && !labelled) || !isPublicAvailabilityNavigation(url, input.label || "Public tee time availability")) return;

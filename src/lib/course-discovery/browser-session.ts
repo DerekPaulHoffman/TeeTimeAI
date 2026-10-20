@@ -793,7 +793,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
             const target = await known.locator.getAttribute("target");
             const rawHref = await known.locator.evaluate(element => (element as HTMLAnchorElement).href, undefined, { timeout: 1000 });
             const canonicalBootstrap = rawHref !== known.href && normalizeDiscoveryNavigationUrl(rawHref) === known.href;
-            if (canonicalBootstrap || target && !["_self", "_top", "_parent"].includes(target.toLowerCase()))
+            const ordinaryDocumentLink = !new URL(known.href).hash && !await known.locator.getAttribute("onclick");
+            if (canonicalBootstrap || ordinaryDocumentLink || target && !["_self", "_top", "_parent"].includes(target.toLowerCase()))
               await page.goto(known.href, { waitUntil: "domcontentloaded" });
             else await known.locator.click();
           } else await known.locator.click();

@@ -52,6 +52,10 @@ adapter inspection may supply source evidence for an unchanged
 controller-only observation is bound to the exact job, inputs, target, URLs and
 metadata, is not restored from checkpoints, and never replaces the two fresh
 independent availability replays required for activation.
+Ordinary explicit document links in discovery open their already verified href
+directly. Fragment links and inline handlers retain their typed interaction
+path. Legacy CPS iframe source URLs are canonicalized to a fresh public entry;
+copied anonymous sessions never become saved source authority.
 
 The pinned browser path rejects redirects instead of releasing a Location into
 an unpinned browser request. A provider requiring that transition needs a

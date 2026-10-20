@@ -71,6 +71,23 @@ describe("discovery browser public protocol", () => {
 
 const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
+  it("uses the exact observed document href instead of unrelated delegated click handlers", async () => {
+    const source = "https://example.org/", destination = "https://example.org/tee-times";
+    const fetcher = vi.fn(async value => new Response(String(value) === source
+      ? `<html><body><h1>Public golf</h1><a id="book" href="${destination}">Book tee times</a><script>document.addEventListener('click',e=>{e.preventDefault();document.body.append(' delegated click ran');});</script></body></html>`
+      : "<html><body><h1>Next booking page</h1></body></html>", { headers: { "content-type": "text/html" } })) as unknown as typeof fetch;
+    const session = await createCourseDiscoveryBrowserSession({ initialUrls: [source], deadlineAt: new Date(Date.now()+20_000) }, {
+      fetch: fetcher, launchBrowser: () => chromium.launch({ executablePath, headless:true }),
+      requestLease: async (_family, work) => ({ acquired:true, value:await work() }),
+    });
+    try {
+      const snapshot = await session.execute({id:1,action:"open",url:source});
+      const link = snapshot.controls.find(control=>control.name==="Book tee times")!;
+      const next = await session.execute({id:2,action:"click",target:link.target});
+      expect(next.url).toBe(destination); expect(next.text).toContain("Next booking page");
+      expect(next.text).not.toContain("delegated click ran");
+    } finally { await session.close(); }
+  },25_000);
   it("opens only an exact visible official iframe source as a separate guarded main page", async () => {
     const official = "https://example.org/", visible = "https://public-rentals.book.teeitup.com/", hidden = "https://hidden-rentals.book.teeitup.com/";
     const fetcher = vi.fn(async value => new Response(String(value) === official

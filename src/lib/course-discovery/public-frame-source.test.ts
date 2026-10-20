@@ -28,4 +28,10 @@ describe("official public iframe source navigation", () => {
     expect(read({ ...entry, src: "https://video.example/clip" })).toBeUndefined();
     expect(read({ ...entry, label: "Sign in to booking" })).toBeUndefined();
   });
+  it("discards copied CPS session and date state before returning a public entry", () => {
+    const src = "https://sc.cps.golf/ExampleV3/(S(abc123abc123abc123abc123))/Home/nIndex?CourseId=1&Time=AnyTime&Player=99&Hole=Any&Date=2026-10-23";
+    const result = read({ ...entry, src, label: "Tee time booking" });
+    expect(result).toBe("https://sc.cps.golf/ExampleV3/Home/nIndex?CourseId=1&Time=AnyTime&Player=99&Hole=Any");
+    expect(result).not.toMatch(/abc123|2026/);
+  });
 });
