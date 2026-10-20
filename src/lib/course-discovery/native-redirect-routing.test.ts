@@ -3,18 +3,53 @@ import type { Page, Route } from "@playwright/test";
 import { describe, expect, it, vi } from "vitest";
 import { installNativeRedirectRouting } from "./native-redirect-routing";
 
-async function installed() {
+async function installed(maxRequests?: number) {
   const events = new Map<string, (event: unknown) => void>();
   const close = vi.fn(async () => {}), detach = vi.fn(async () => {});
-  const main = {}, failures: string[] = [];
+  const main = {}, failures: string[] = [], subframes: object[] = [];
   const cdp = { on: (name: string, listener: (event: unknown) => void) => { events.set(name, listener); },
     send: vi.fn(async (name: string) => name === "Page.getFrameTree" ? { frameTree: { frame: { id: "main" } } } : {}), detach };
   const page = { context: () => ({ newCDPSession: async () => cdp }), mainFrame: () => main, close } as unknown as Page;
-  const guard = await installNativeRedirectRouting(page, vi.fn(), { timeoutMs: 100, onFailure: code => failures.push(code) });
-  return { guard, events, close, failures, main };
+  const handler = vi.fn();
+  const guard = await installNativeRedirectRouting(page, handler, { timeoutMs: 100, maxRequests,
+    onFailure: code => failures.push(code), onSubframeBlocked: request => subframes.push(request) });
+  return { guard, events, close, failures, main, cdp, subframes, handler };
 }
 
 describe("native redirect metadata boundaries", () => {
+  it("denies subframe first requests and redirect provenance before dispatch without closing the root", async () => {
+    const test = await installed();
+    try {
+      const emit = test.events.get("Fetch.requestPaused")!;
+      emit({ requestId: "child-first", networkId: "child-network", frameId: "child", resourceType: "Document",
+        request: { url: "https://frame.example.org/first", method: "GET", headers: {} } });
+      emit({ requestId: "child-redirect", networkId: "child-network", frameId: "child", resourceType: "Document",
+        redirectedRequestId: "root-request", request: { url: "https://frame.example.org/redirected", method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(test.subframes).toHaveLength(2));
+      expect(test.cdp.send.mock.calls.filter(([method]) => method === "Fetch.failRequest")).toHaveLength(2);
+      expect(test.cdp.send.mock.calls.some(([method]) => method === "Fetch.continueRequest")).toBe(false);
+      expect(test.handler).not.toHaveBeenCalled();
+      expect(test.close).not.toHaveBeenCalled(); expect(test.failures).toEqual([]);
+    } finally { await test.guard.close(); }
+  });
+
+  it("bounds rejected subframes and still fails closed for missing root metadata", async () => {
+    const test = await installed(2);
+    const emit = test.events.get("Fetch.requestPaused")!;
+    for (let i = 0; i < 3; i++) emit({ requestId: `child-${i}`, networkId: `network-${i}`, frameId: "child", resourceType: "Document",
+      request: { url: "https://frame.example.org/", method: "GET", headers: {} } });
+    await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce());
+    expect(test.subframes).toHaveLength(2); expect(test.failures).toContain("NATIVE_REDIRECT_REQUEST_REJECTED");
+    await test.guard.close();
+    const missing = await installed();
+    missing.events.get("Fetch.requestPaused")!({ requestId: "root", frameId: "main", resourceType: "Document",
+      request: { url: "https://example.org/", method: "GET", headers: {} } });
+    await vi.waitFor(() => expect(missing.close).toHaveBeenCalledOnce());
+    expect(missing.subframes).toEqual([]);
+    expect(missing.cdp.send.mock.calls.some(([method]) => method === "Fetch.continueRequest")).toBe(false);
+    await missing.guard.close();
+  });
+
   it("ignores browser-local image metadata but rejects untracked HTTPS evidence", async () => {
     const test = await installed();
     const emit = test.events.get("Network.responseReceived")!;

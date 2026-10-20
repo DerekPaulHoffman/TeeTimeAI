@@ -31,6 +31,7 @@ function headers(value: Record<string, string | number>): Record<string, string>
 
 export async function installNativeRedirectRouting(page: Page, handler: (route: NativeReadRoute) => Promise<void>, options: {
   signal?: AbortSignal; maxRequests?: number; timeoutMs?: number; onFailure?: (code: string) => void;
+  onSubframeBlocked?: (request: { url: string; resourceType: string }) => void;
 } = {}) {
   options.signal?.throwIfAborted();
   const limit = Math.min(1024, Math.max(1, options.maxRequests ?? 256));
@@ -38,7 +39,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
   const cdp = await page.context().newCDPSession(page);
   const rootFrameId = (await cdp.send("Page.getFrameTree")).frameTree.frame.id;
   const records = new Map<string, RecordEntry>();
-  let closing: Promise<void> | undefined, closed = false, lastFailure: string | undefined;
+  let closing: Promise<void> | undefined, closed = false, lastFailure: string | undefined, interceptedRequests = 0;
   const failure = (code: string) => { lastFailure = code; try { options.onFailure?.(code); } catch { /* Diagnostics cannot authorize work. */ } };
   const equivalent = (left: string, right: string, method: string) => left === right || canonicalPublicReadUrl(left, method) === right;
   const onAbort = () => { void close("NATIVE_REDIRECT_CANCELLED"); };
@@ -102,6 +103,16 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
     void (async () => {
       if (closed) return;
       const reject = () => cdp.send("Fetch.failRequest", { requestId: event.requestId, errorReason: "BlockedByClient" });
+      if (++interceptedRequests > limit) { await reject(); await close("NATIVE_REDIRECT_REQUEST_REJECTED"); return; }
+      // Embedded frames cannot supply evidence or network authority. Deny their
+      // first request and every redirect before dispatch, while retaining the
+      // independently guarded top document. Malformed root metadata stays fatal.
+      if (event.frameId && event.frameId !== rootFrameId) {
+        await reject();
+        try { options.onSubframeBlocked?.({ url: event.request.url, resourceType: resourceKinds[event.resourceType] ?? "other" }); }
+        catch { /* A diagnostic must not change the denial. */ }
+        return;
+      }
       if (records.size >= limit || records.has(event.requestId) || event.frameId !== rootFrameId || !event.networkId ||
           event.request.hasPostData && event.request.postData === undefined || (event.request.postData?.length ?? 0) > 32768) {
         await reject(); await close("NATIVE_REDIRECT_REQUEST_REJECTED"); return;

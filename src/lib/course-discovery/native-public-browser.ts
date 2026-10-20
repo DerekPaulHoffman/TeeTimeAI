@@ -161,6 +161,9 @@ export async function continueNativeBrowserRead(route: NativeReadRoute, signal: 
   try {
     const bounded = AbortSignal.any([signal, AbortSignal.timeout(15_000)]);
     const responsePromise = route.request().response();
+    // Dispatch or cleanup can fail before we await the response. Observe its
+    // rejection now, while retaining the original promise and failure below.
+    void responsePromise.catch(() => {});
     if (canonicalUrl && canonicalUrl !== route.request().url() &&
         canonicalPublicReadUrl(route.request().url(), route.request().method()) !== canonicalUrl) throw new Error("UNSAFE_REQUEST_REWRITE");
     await route.continue(canonicalUrl ? { url: canonicalUrl } : undefined);

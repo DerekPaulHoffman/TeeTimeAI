@@ -232,14 +232,36 @@ describe.runIf(existsSync(chrome))("offline CPS discovery and deterministic brow
     } finally { await session.close(); }
   }, 40_000);
 
-  it.each(["https://official.example.org/frame", "https://frame.example.org/frame"])("fails closed before unguarded iframe transport %s", async frameUrl => {
-    respond = () => ({ body: `<html><body><h1>Public golf</h1><iframe src="${frameUrl}"></iframe></body></html>` });
+  it.each(["https://official.example.org/frame", "https://frame.example.org/frame"])("denies iframe first/redirect URLs while retaining main content %s", async frameUrl => {
+    const redirected = `${frameUrl}-redirected`;
+    respond = url => url === frameUrl ? { status: 302, location: redirected }
+      : { body: `<html><body><h1>Public golf</h1><iframe src="${frameUrl}"></iframe></body></html>` };
     const session = await openDiscovery();
     try {
-      await session.execute({ id: 1, action: "open", url: official }).catch(() => {});
+      const snapshot = await session.execute({ id: 1, action: "open", url: official });
+      expect(snapshot.text).toContain("Public golf");
+      expect(snapshot.capabilityDiagnostics).toContainEqual(expect.objectContaining({ code: "SUBFRAME_UNSUPPORTED", resourceType: "document" }));
       expect(nativeSeen).not.toContain(frameUrl);
       expect(serverSeen).not.toContain(frameUrl);
+      expect(nativeSeen).not.toContain(redirected);
+      expect(serverSeen).not.toContain(redirected);
+      expect(snapshot.requestFailures).toEqual([]);
+      await expect(session.execute({ id: 2, action: "open", url: frameUrl })).rejects.toThrow("UNOBSERVED_NAVIGATION");
     } finally { await session.close(); }
+  }, 40_000);
+
+  it.each([false, true])("keeps main-frame completeness independent of denied subframes (wrong date: %s)", async wrongDate => {
+    const frame = "https://frame.example.org/availability", redirected = `${frame}-redirected`;
+    respond = url => url === frame ? { status: 302, location: redirected }
+      : new URL(url).pathname.includes("/(S(") ? { body: html(wrongDate ? otherDate : date).replace("</body>", `<iframe src="${frame}"></iframe></body>`) }
+      : { status: 302, location: sessionUrl(firstToken) };
+    const result = await executeAccessRecipe(recipe(), input, { launchBrowser, fetch: pinnedFetch, requestLease: lease,
+      now: () => new Date("2026-10-20T12:00:00Z") });
+    if (wrongDate) {
+      expect(result.complete).toBe(false); expect(result.slots).toEqual([]); expect(result.status).not.toBe("EMPTY");
+    } else expect(result).toMatchObject({ status: "AVAILABLE", complete: true, evidence: { dateVerified: true, completeVerified: true } });
+    expect(serverSeen).not.toContain(frame); expect(serverSeen).not.toContain(redirected);
+    expect(nativeSeen).not.toContain(frame); expect(nativeSeen).not.toContain(redirected);
   }, 40_000);
 
   it("replays independently with fresh sessions and verifies each actual requested date", async () => {

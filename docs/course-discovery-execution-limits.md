@@ -35,10 +35,13 @@ before dispatch. Initial and redirected requests use the same policy, provider
 lease, request budget, and response-evidence handler. Response completion and
 body bytes come from the current browser's Network events, so a redirect cannot
 silently skip either the guard or the final availability evidence. The current
-qualified native path is the main frame only. Subframes, including cross-process
-iframes, fail with an explicit capability diagnostic; a late interceptor attach
-has not proved safe for their first redirect. Foreign popup requests are also
-rejected. This does not change the installed Local Reader's supported providers.
+qualified native path is the main frame only. Subframe requests, including
+cross-process iframe requests, are rejected before dispatch and reported as
+unsupported capabilities without terminating an otherwise usable main page.
+Their contents and mere frame presence grant no source or navigation authority;
+a late interceptor attach has not proved safe for their first redirect. Foreign
+popup requests are also rejected. This does not change the installed Local
+Reader's supported providers.
 
 The pinned browser path rejects redirects instead of releasing a Location into
 an unpinned browser request. A provider requiring that transition needs a

@@ -112,6 +112,32 @@ describe("public-address native Chrome CONNECT transport", () => {
     }).finally(() => { lifecycle.push("lease-released"); })).rejects.toThrow("NATIVE_RESPONSE_LIMIT");
     expect(lifecycle).toEqual(["network-closed", "lease-released"]);
   });
+  it("observes a pending response rejected by cleanup after dispatch fails", async () => {
+    const dispatchFailure = new Error("NATIVE_CONTINUE_FAILED");
+    let rejectResponse: (error: Error) => void = () => {};
+    const response = new Promise<null>((_resolve, reject) => { rejectResponse = reject; });
+    const unhandled = vi.fn();
+    const stop = vi.fn(async () => {
+      rejectResponse(new Error("NATIVE_REDIRECT_REQUEST_REJECTED"));
+      await new Promise<void>(resolve => setImmediate(resolve));
+    });
+    const route = { continue: vi.fn(async () => { throw dispatchFailure; }),
+      request: () => ({ response: () => response }) } as unknown as Route;
+    process.on("unhandledRejection", unhandled);
+    try {
+      await expect(continueNativeBrowserRead(route, AbortSignal.timeout(1000), 100, stop)).rejects.toBe(dispatchFailure);
+      expect(stop).toHaveBeenCalledOnce();
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally { process.off("unhandledRejection", unhandled); }
+  });
+  it("preserves a response rejection after dispatch succeeds", async () => {
+    const responseFailure = new Error("NATIVE_REDIRECT_NETWORK_FAILED");
+    const stop = vi.fn(async () => {});
+    const route = { continue: vi.fn(async () => {}),
+      request: () => ({ response: async () => { throw responseFailure; } }) } as unknown as Route;
+    await expect(continueNativeBrowserRead(route, AbortSignal.timeout(1000), 100, stop)).rejects.toBe(responseFailure);
+    expect(stop).toHaveBeenCalledOnce();
+  });
   it("stops native network on cancellation while response body remains open", async () => {
     const signal = new AbortController();
     const stop = vi.fn(async () => {});

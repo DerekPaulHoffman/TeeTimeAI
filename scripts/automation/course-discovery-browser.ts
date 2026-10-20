@@ -90,7 +90,7 @@ async function main() {
       } catch (error) {
         const code = publicFailureCode(error);
         const issues = error instanceof z.ZodError ? safeBrowserActionIssues(error.issues) : undefined;
-        process.stdout.write(`${JSON.stringify({ id, ok: false, error: code, ...(issues ? { issues } : {}) })}\n`);
+        process.stdout.write(`${JSON.stringify({ id, ok: false, error: code, diagnostics: session.diagnostics(), ...(issues ? { issues } : {}) })}\n`);
       }
     }
   } finally { clearTimeout(timer); input.close(); await session.close(); }

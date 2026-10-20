@@ -527,7 +527,18 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
       } catch (error) { blocked = true; failure ??= recipeExecutionDiagnostic(error, { url: requestUrl, method: request.method(), resourceType: request.resourceType() }); await route.abort().catch(() => {}); }
       finally { pendingRequests--; }
     };
+    let rejectedSubframes = 0;
     await context.route("**/*", async route => {
+      if (route.request().frame() !== page.mainFrame()) {
+        // Embedded content never participates in recipe proof. Reject it before
+        // native correlation/dispatch; the top page still needs every proof.
+        await route.abort().catch(() => {});
+        if (++rejectedSubframes > 1024) {
+          blocked = true; failure ??= recipeExecutionDiagnostic("SUBFRAME_REQUEST_LIMIT", activity);
+          void context.close().catch(() => {});
+        }
+        return;
+      }
       try { await handleRoute(redirectRouting ? redirectRouting.wrapRoute(route) : route); }
       catch (error) {
         blocked = true;

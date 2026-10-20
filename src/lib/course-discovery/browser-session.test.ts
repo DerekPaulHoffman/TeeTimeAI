@@ -71,6 +71,20 @@ describe("discovery browser public protocol", () => {
 
 const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
+  it("retains body-free request diagnostics after the first navigation fails", async () => {
+    const session = await createCourseDiscoveryBrowserSession({ initialUrls: ["https://example.org/"], deadlineAt: new Date(Date.now() + 15_000) }, {
+      fetch: vi.fn(async () => { throw new Error("FIXTURE_NETWORK_FAILURE"); }) as unknown as typeof fetch,
+      launchBrowser: () => chromium.launch({ executablePath, headless: true }),
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      await expect(session.execute({ id: 1, action: "open", url: "https://example.org/" })).rejects.toThrow();
+      expect(session.diagnostics()).toMatchObject({ requests: [expect.objectContaining({ url: "https://example.org/", blockedReason: "FIXTURE_NETWORK_FAILURE" })],
+        requestFailures: [expect.objectContaining({ reason: "FIXTURE_NETWORK_FAILURE" })] });
+      expect(session.diagnostics()).not.toHaveProperty("text");
+      expect(session.diagnostics().requests[0]).not.toHaveProperty("body");
+    } finally { await session.close(); }
+  }, 20_000);
   it("bounds a 3000-control scan before per-control inspection without losing its lower public link", async () => {
     const fixture = '<h1>Public Golf</h1>' + Array.from({ length: 2999 }, (_, index) => `<button>Decorative ${index}</button>`).join('') +
       '<a href="https://booking.example.org/calendar">Book Your Tee Time</a>';

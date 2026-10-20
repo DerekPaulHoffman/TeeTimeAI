@@ -1,8 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { bindDiscoveryRecipeIdentity, discoveryBrowserFeedback, discoveryCheckpointDisposition, noVerifiedRecipeDiagnostic, readDiscoveryControllerCheckpoint } from "../../../scripts/automation/course-discovery-worker.mjs";
+import { bindDiscoveryRecipeIdentity, discoveryBrowserFeedback, discoveryCheckpointDisposition, noVerifiedRecipeDiagnostic, readDiscoveryControllerCheckpoint, safeBrowserFailureDiagnostics } from "../../../scripts/automation/course-discovery-worker.mjs";
 import { safeBrowserActionIssues } from "../../../scripts/automation/course-discovery-diagnostics.mjs";
 
 describe("durable discovery browser diagnostics", () => {
+  it("retains failed first-navigation facts without bodies, credentials or query values", () => {
+    const safe = safeBrowserFailureDiagnostics({ loading: true, pendingRequestCount: 5000,
+      text: "private page text", requests: [null, { url: "https://venue.example/read?token=private", method: "GET", resourceType: "document", status: 403, body: "private" },
+        { url: "https://venue.example/read?date=2026-10-23", method: "GET", resourceType: "document", blockedReason: "NATIVE_RESPONSE_TIMEOUT", body: "private" }],
+      requestFailures: [{ reason: "NATIVE_RESPONSE_TIMEOUT", resourceType: "document", url: "https://venue.example/read?date=2026-10-23" }] });
+    const feedback = discoveryBrowserFeedback(safe, "open", { code: "BROWSER_NAVIGATION_FAILED" });
+    expect(feedback.details).toMatchObject({ loading: true, pendingRequestCount: 1024,
+      requests: expect.arrayContaining([{ code: "NATIVE_RESPONSE_TIMEOUT", url: "https://venue.example/read", method: "GET", resourceType: "document" }]) });
+    expect(JSON.stringify(safe)).not.toMatch(/private|token|2026|body|text/);
+    expect(safeBrowserFailureDiagnostics(null)).toBeUndefined();
+  });
   it.each([false, true, undefined, "true"])("never turns model unsupported prose into a terminal verdict, access flag %s", access => {
     expect(discoveryCheckpointDisposition("UNSUPPORTED", access)).toBe("RETRYABLE_LIMITATION");
     expect(discoveryCheckpointDisposition(undefined, access)).toBe("CONTINUE");

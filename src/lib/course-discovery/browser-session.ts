@@ -91,6 +91,7 @@ export type DiscoveryBrowserSnapshot = {
   responses: Array<{ url: string; status: number; method: string; body?: unknown; bodyOmitted?: true; schemaEvidence?: PublicResponseSchema; schemaEvidenceOmitted?: true }>;
   requests: Array<{ url: string; method: string; resourceType: string; status?: number; blockedReason?: string; body?: unknown }>;
   requestFailures?: Array<{ reason: string; resourceType: string; url?: string }>;
+  capabilityDiagnostics?: Array<{ code: "SUBFRAME_UNSUPPORTED"; resourceType: string; url?: string }>;
   frames: Array<{ url: string }>;
   elements: Array<{ selector: string; tag: string; text: string; attributes: Record<string, string> }>;
   loading: boolean; blockedRequests: number; requestCount: number; interceptCount: number; responseBytes: number; startupMs: number;
@@ -181,6 +182,12 @@ export async function createCourseDiscoveryBrowserSession(input: {
   const responses: DiscoveryBrowserSnapshot["responses"] = [];
   const observedRequests: DiscoveryBrowserSnapshot["requests"] = [];
   const requestFailures: NonNullable<DiscoveryBrowserSnapshot["requestFailures"]> = [];
+  const capabilityDiagnostics: NonNullable<DiscoveryBrowserSnapshot["capabilityDiagnostics"]> = [];
+  const recordSubframe = ({ url, resourceType }: { url: string; resourceType: string }) => {
+    const safeUrl = redactDiscoveryFailureUrl(canonicalCpsPublicUrl(url), resourceType);
+    capabilityDiagnostics.push({ code: "SUBFRAME_UNSUPPORTED", resourceType, ...(safeUrl ? { url: safeUrl } : {}) });
+    if (capabilityDiagnostics.length > 12) capabilityDiagnostics.shift();
+  };
   const pendingRequestMetadata = new Set<DiscoveryBrowserSnapshot["requests"][number]>();
   let requestMetadataBytes = 0;
   const recordRequest = (metadata: DiscoveryBrowserSnapshot["requests"][number], priority = false) => {
@@ -346,6 +353,12 @@ export async function createCourseDiscoveryBrowserSession(input: {
     finally { pendingRequests--; pendingRequestMetadata.delete(metadata); }
   };
   await context.route("**/*", async route => {
+    if (route.request().frame() !== page.mainFrame()) {
+      if (++interceptCount > 1024) { await route.abort().catch(() => {}); void close(); return; }
+      recordSubframe({ url: route.request().url(), resourceType: route.request().resourceType() });
+      await route.abort().catch(() => {});
+      return;
+    }
     try { await handleRoute(redirectRouting ? redirectRouting.wrapRoute(route) : route); }
     catch (error) {
       blockedRequests++;
@@ -361,6 +374,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     try {
       redirectRouting = await installNativeRedirectRouting(page, handleRoute, {
         signal: deadline, maxRequests: 1024,
+        onSubframeBlocked: recordSubframe,
         onFailure: reason => {
           if (closed) return;
           terminalFailure = reason;
@@ -622,12 +636,14 @@ export async function createCourseDiscoveryBrowserSession(input: {
     const finalDocumentStartedAt = await page.evaluate(() => performance.timeOrigin);
     if (page.url() !== actualCurrentUrl || documentStartedAt !== finalDocumentStartedAt)
       throw new Error("DISCOVERY_SNAPSHOT_CHANGED");
-    for (const frame of frames) { allowedNavigation.add(frame.url); passfactory.observeWidgetUrl(frame.url); }
+    // Frame presence is descriptive only. A blocked or unread frame cannot
+    // grant a navigation URL or authorize a provider's embedded resource.
     const requests = observedRequests.map(request => ({ ...request }));
     const pendingMetadata = observedRequests.filter(request => pendingRequestMetadata.has(request));
     observedRequests.splice(0, observedRequests.length, ...pendingMetadata);
     requestMetadataBytes = pendingMetadata.reduce((total, request) => total + JSON.stringify(request).length + 120, 0);
-    return { url: currentUrl, text, controls: visible, elements, frames, responses: responses.splice(0), requests, requestFailures: requestFailures.map(failure => ({ ...failure })), loading: pendingRequests > 0,
+    return { url: currentUrl, text, controls: visible, elements, frames, responses: responses.splice(0), requests, requestFailures: requestFailures.map(failure => ({ ...failure })),
+      ...(capabilityDiagnostics.length ? { capabilityDiagnostics: capabilityDiagnostics.map(value => ({ ...value })) } : {}), loading: pendingRequests > 0,
       blockedRequests, requestCount, interceptCount, responseBytes, startupMs, initialContentWaitMs, pendingRequestCount: pendingRequests,
       ...(navigationStartedAt === undefined ? {} : { navigationElapsedMs: Date.now() - navigationStartedAt }),
       ...(navigation && sameDiscoveryMainDocument(navigation.url, actualCurrentUrl) ? { navigationStatus: navigation.status } : {}),
@@ -647,6 +663,16 @@ export async function createCourseDiscoveryBrowserSession(input: {
     }
   };
   return {
+    diagnostics() {
+      // Available even when navigation throws or the page has already closed.
+      // This contains transport facts only, never page text or response bodies.
+      return { loading: pendingRequests > 0, pendingRequestCount: pendingRequests,
+        requests: observedRequests.map(request => ({ url: request.url, method: request.method, resourceType: request.resourceType,
+          ...(request.status === undefined ? {} : { status: request.status }),
+          ...(request.blockedReason ? { blockedReason: request.blockedReason } : {}) })),
+        capabilityDiagnostics: capabilityDiagnostics.map(value => ({ ...value })),
+        requestFailures: requestFailures.map(failure => ({ ...failure })) };
+    },
     async execute(value: unknown): Promise<DiscoveryBrowserSnapshot> {
       const action = discoveryBrowserActionSchema.parse(value);
       try {

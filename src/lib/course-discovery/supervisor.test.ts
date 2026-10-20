@@ -508,6 +508,22 @@ describe("controller-only verification", () => {
     await connection.close();
   });
 
+  it("carries bounded first-navigation diagnostics through a failed helper reply", async () => {
+    const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), pid: 1, exitCode: 0, signalCode: null });
+    const connection = createDiscoveryProcess({ executable: "fixed", args: [], cwd: ".", environment: {}, spawnProcess: () => child });
+    const pending = connection.request({ action: "open" }).catch(error => error);
+    child.stdout.write(JSON.stringify({ id: 1, ok: false, error: "BROWSER_NAVIGATION_FAILED", diagnostics: {
+      loading: true, pendingRequestCount: 2, text: "private text",
+      requests: [{ url: "https://example.org/times?date=2026-10-23", method: "GET", resourceType: "document", blockedReason: "NATIVE_RESPONSE_TIMEOUT", body: "private" }],
+    } }) + "\n");
+    const error = await pending;
+    expect(error).toMatchObject({ code: "BROWSER_NAVIGATION_FAILED", details: { browserDiagnostics: {
+      loading: true, pendingRequestCount: 2, requests: [{ url: "https://example.org/times", method: "GET", resourceType: "document", blockedReason: "NATIVE_RESPONSE_TIMEOUT" }],
+    } } });
+    expect(JSON.stringify(error.details)).not.toMatch(/private|2026/);
+    await connection.close();
+  });
+
   it("keeps controller credentials out of model input and rejects model-supplied verification", async () => {
     const sourceHome = mkdtempSync(join(tmpdir(), "discovery-source-test-"));
     writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }));
@@ -757,6 +773,43 @@ describe("controller-only verification", () => {
       expect(closes.every(close => close.mock.calls.length === 1)).toBe(true);
       expect(JSON.stringify(replies[1])).toContain("original deadline");
       expect(checkpoint.mock.calls.at(-1)![2]).toMatchObject({ controller: { observedNavigationUrls: ["https://example.org/"] } });
+    } finally { rmSync(sourceHome, { recursive: true, force: true }); }
+  });
+
+  it("keeps observed controls usable when a proposal lacks booking-source evidence", async () => {
+    const sourceHome = mkdtempSync(join(tmpdir(), "discovery-source-correction-"));
+    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }));
+    writeFileSync(join(sourceHome, "auth.json"), "test-auth");
+    const inputJob = { ...job(), request: { ...job().request, identity: { name: "Public golf", officialUrl: "https://example.org/", bookingUrl: null } } };
+    const candidate = vi.fn(), replies: unknown[] = [];
+    let closed = false, usableAfterRejection = false;
+    const processFactory = options => ({ notify: vi.fn(), close: vi.fn(async () => {}), request: async (method: string) => {
+      if (method === "thread/start") return { thread: { id: "thread-1" }, approvalPolicy: "never", sandbox: { type: "readOnly" } };
+      if (method === "turn/start") {
+        queueMicrotask(async () => {
+          await options.onMessage({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1" } } }, () => {});
+          for (const [index, [tool, args]] of [
+            ["discovery_browser", { action: "open", url: "https://example.org/" }],
+            ["discovery_propose_recipe", { recipe: { source: { bookingUrl: "https://booking.example.org/" } } }],
+            ["discovery_browser", { action: "observe" }],
+          ].entries()) await options.onMessage({ id: index + 1, method: "item/tool/call", params: { threadId: "thread-1", turnId: "turn-1", tool, arguments: args } }, reply => replies.push(reply));
+          await options.onMessage({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } }, () => {});
+        });
+        return { turn: { id: "turn-1" } };
+      }
+      return {};
+    } });
+    try {
+      await expect(runCourseDiscoveryWorker({ job: inputJob, client: { helperEnvironment: () => ({}), checkpoint: async () => ({}), candidate },
+        cwd: process.cwd(), sourceHome, recipeSchema: {}, resolveCli: () => "fixed-codex", processFactory, validateRecipe: async () => ({ valid: true }),
+        browserFactory: () => ({ request: async action => {
+          if (action.action === "observe") usableAfterRejection = !closed;
+          return { url: "https://example.org/", text: "Public golf", controls: [] };
+        }, close: async () => { closed = true; } }),
+      })).rejects.toMatchObject({ code: "DISCOVERY_NO_VERIFIED_RECIPE" });
+      expect(usableAfterRejection).toBe(true);
+      expect(candidate).not.toHaveBeenCalled();
+      expect(JSON.stringify(replies)).toContain("DISCOVERY_SOURCE_NOT_OBSERVED");
     } finally { rmSync(sourceHome, { recursive: true, force: true }); }
   });
 
