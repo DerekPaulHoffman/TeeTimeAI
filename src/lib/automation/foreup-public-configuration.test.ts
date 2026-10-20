@@ -67,4 +67,24 @@ describe("public ForeUp schedule configuration", () => {
       .toBeNull();
     expect(blocked).toHaveBeenCalledTimes(2);
   });
+
+  it("selects the sole explicit Public class from a venue's Tee Sheet without membership assumptions", () => {
+    const classes = [
+      { teesheet_id: "792", booking_class_id: "4932", active: "1", hidden: "0", name: "Annual Members" },
+      { teesheet_id: "792", booking_class_id: "4931", active: "1", hidden: "0", name: " Public " },
+      { teesheet_id: "792", booking_class_id: "4933", active: "1", hidden: "0", name: "Mens Club Members" },
+    ];
+    const parse = (bookingClasses: unknown[], title = "Harbor Tee Sheet") => parseForeupPublicConfiguration({
+      bookingUrl, courseName: "Harbor Golf Course", html: `<script>SCHEDULES = ${JSON.stringify([
+        { course_id: "19021", title, teesheet_id: "792", booking_classes: bookingClasses },
+      ])};</script>`,
+    });
+    expect(parse(classes)).toMatchObject({ scheduleId: 792, bookingClassId: 4931 });
+    expect(parse([classes[0]])).toBeNull();
+    expect(parse(classes.filter(row => row.name !== " Public "))).toBeNull();
+    expect(parse([...classes, { ...classes[1], booking_class_id: "4934" }])).toBeNull();
+    expect(parse(classes.map(row => row.name === " Public " ? { ...row, hidden: "1" } : row))).toBeNull();
+    expect(parse(classes, "Another Harbor Tee Sheet")).toBeNull();
+    expect(parse(classes, "Harbor Tee Sheet Practice")).toBeNull();
+  });
 });

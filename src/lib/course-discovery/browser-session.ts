@@ -5,6 +5,7 @@ import { createAddressPinnedPublicFetchTransport } from "@/lib/automation/addres
 import { createPassfactoryPublicReadPolicy, isIncidentalBrowserRequest, isNonEvidenceBrowserResource } from "@/lib/automation/passfactory-public-read-policy";
 import { interactiveControlKind, isAnonymousBrowserReadPost } from "@/lib/automation/simulator-interactive-browser";
 import { addVerifiedMindbodyReadHeaders } from "@/lib/automation/mindbody-public-read-policy";
+import { createUSchedulePublicReadPolicy } from "@/lib/automation/uschedule-public-read-policy";
 import { sanitizeResponderText } from "@/lib/automation/course-support-responder-policy";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
@@ -14,8 +15,12 @@ import { requestFamilyForUrl } from "./request-family";
 import { canonicalPublicReadUrl } from "./public-request-url";
 import { inspectExistingAdapter } from "./existing-adapter-executor";
 import { isPublicCalendarApply } from "./public-calendar-apply";
+import { isObservedPublicCalendarDay, observedPublicCalendarDays } from "./public-calendar-day";
+import { PUBLIC_BROWSER_TOTAL_BYTES, publicBrowserResponseLimit } from "./browser-resource-limits";
+import { observedPublicDropdowns, selectPublicDropdown, type PublicDropdownProof } from "./public-dropdown-control";
 import { venueProofMatches } from "./executor";
 import type { ExistingAdapterMetadata } from "./existing-adapter-schema";
+import { publicResponseSchema, type PublicResponseSchema } from "./public-response-schema";
 
 const identifier = z.union([z.string().max(128), z.number().int()]);
 export const discoveryBrowserActionSchema = z.discriminatedUnion("action", [
@@ -68,15 +73,22 @@ export function normalizeDiscoveryNavigationUrl(value: string) {
   } catch { /* Normal URL validation below rejects invalid source links. */ }
   return value;
 }
+
+/** Fragments select a client-side view of the same HTTP document. Keep every
+ * other URL byte exact so a later route/query cannot borrow an earlier status. */
+export function sameDiscoveryMainDocument(observedUrl: string, currentUrl: string) {
+  return Boolean(observedUrl && currentUrl) && observedUrl.split("#", 1)[0] === currentUrl.split("#", 1)[0];
+}
 export type DiscoveryBrowserSnapshot = {
   url: string; text: string; controls: Array<{ target: string; selector: string; kind: string; name: string; label: string; options?: Array<{ value: string; label: string }>; currentValue?: string; product?: { selector: string; durationMinutes: number } }>;
-  responses: Array<{ url: string; status: number; method: string; body: unknown }>;
+  responses: Array<{ url: string; status: number; method: string; body?: unknown; bodyOmitted?: true; schemaEvidence?: PublicResponseSchema; schemaEvidenceOmitted?: true }>;
   requests: Array<{ url: string; method: string; resourceType: string; status?: number; blockedReason?: string; body?: unknown }>;
   frames: Array<{ url: string }>;
   elements: Array<{ selector: string; tag: string; text: string; attributes: Record<string, string> }>;
   loading: boolean; blockedRequests: number; requestCount: number; interceptCount: number; responseBytes: number; startupMs: number;
   navigationStatus?: number; navigationElapsedMs?: number; initialContentWaitMs?: number; pendingRequestCount?: number;
   browserTransport: "PINNED_HTTP" | "NATIVE_CHROME";
+  accessRequirementObserved?: boolean;
   adapter?: ExistingAdapterMetadata;
   structure?: { selected: string; ancestors: Array<{ selector: string; matches: number; tag: string; text: string;
     attributes: Record<string, string>; children: Array<{ selector: string; tag: string; text: string }> }> };
@@ -124,9 +136,10 @@ export async function createCourseDiscoveryBrowserSession(input: {
   const allowedNavigation = new Set(input.initialUrls.map(value => new URL(value).href));
   const navigationOrigins = new Set(input.initialUrls.map(value => new URL(value).origin));
   const passfactory = createPassfactoryPublicReadPolicy();
+  const uschedule = createUSchedulePublicReadPolicy();
   input.initialUrls.forEach(value => passfactory.observeWidgetUrl(value));
   const readPost = (url: URL, headers: Headers, body: string) =>
-    isAnonymousBrowserReadPost(url, headers, body) || passfactory.allows(url, headers, body);
+    isAnonymousBrowserReadPost(url, headers, body) || passfactory.allows(url, headers, body) || uschedule.allows(url, headers, body);
   const queue = createSimulatorBrowserRequestQueue(deps.requestLease ?? runWithProviderRequestLease, deadline);
   const nativeProxy = deps.browserTransport === "NATIVE_CHROME" ? await createNativePublicBrowserProxy({ signal: deadline }) : undefined;
   let browser: Browser;
@@ -161,7 +174,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       observedRequests.push(metadata); requestMetadataBytes += size;
     }
   };
-  const controls = new Map<string, { locator: Locator; signature: string; kind: string; href?: string }>();
+  const controls = new Map<string, { locator: Locator; signature: string; kind: string; href?: string; calendarDay?: string; dropdown?: PublicDropdownProof }>();
   const observedElements = new Map<string, { locator: Locator; signature: string }>();
   let closed = false, requestCount = 0, interceptCount = 0, responseBytes = 0, blockedRequests = 0, pendingRequests = 0, actions = 0, observations = 0;
   let navigation: { url: string; status: number } | undefined;
@@ -206,6 +219,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       for (const key of ["accept", "content-type", "origin"]) if (requestHeaders[key]) headers.set(key, requestHeaders[key]);
       const body = request.postData() ?? undefined;
       if (!addVerifiedMindbodyReadHeaders(url, method, requestHeaders, headers, body ?? "")) throw new Error("UNSAFE_METHOD");
+      if (!uschedule.addReadHeaders(url, method, requestHeaders, headers, body ?? "")) throw new Error("UNSAFE_METHOD");
       const preflight = nativeProxy && method === "OPTIONS" && nativeReadPreflightMethod(requestHeaders);
       if (!["GET", "HEAD"].includes(method) && !preflight && !(method === "POST" && body && readPost(url, headers, body))) throw new Error("UNSAFE_METHOD");
       if (method === "POST" && body) {
@@ -218,9 +232,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
         } catch { /* Non-JSON public reads remain opaque; never return raw text. */ }
       }
       if (requestCount >= 192) throw new Error("PUBLIC_READ_REQUEST_LIMIT");
-      if (responseBytes >= 24_000_000) throw new Error("PUBLIC_READ_BYTE_LIMIT");
+      if (responseBytes >= PUBLIC_BROWSER_TOTAL_BYTES) throw new Error("PUBLIC_READ_BYTE_LIMIT");
       requestCount++;
-      const responseLimit = ["script", "stylesheet"].includes(request.resourceType()) ? 6_000_000 : 2_000_000;
+      const responseLimit = publicBrowserResponseLimit(request.resourceType());
       const reply = await queue.run(requestFamilyForUrl(url.href), async () => {
         if (nativeProxy) {
           nativeProxy.allowHostConnections(url.hostname);
@@ -246,6 +260,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
       if (["GET", "HEAD"].includes(method) && ["document", "xhr", "fetch"].includes(request.resourceType()) &&
           reply.status >= 200 && reply.status < 400 && isSafeRecipeUrl(url.href)) allowedNavigation.add(url.href);
       responseBytes += reply.buffer.length;
+      if (url.hostname === "clients.uschedule.com" && method === "GET" && /^text\/html(?:;|$)/iu.test(reply.headers["content-type"] ?? ""))
+        uschedule.observeResponse(url.href, method, reply.status, reply.headers["content-type"] ?? "", reply.buffer.toString("utf8"));
+      if (responseBytes > PUBLIC_BROWSER_TOTAL_BYTES) { cancellation.abort("PUBLIC_READ_BYTE_LIMIT"); throw new Error("PUBLIC_READ_BYTE_LIMIT"); }
       const responseHeaders: Record<string, string> = {};
       for (const key of ["content-type", "access-control-allow-origin"]) { const value = reply.headers[key]; if (value) responseHeaders[key] = value; }
       const redirect = reply.headers.location;
@@ -257,8 +274,13 @@ export async function createCourseDiscoveryBrowserSession(input: {
       }
       if (responses.length < 12 && /application\/(?:[a-z0-9.+-]*\+)?json/iu.test(responseHeaders["content-type"] ?? "") && ["xhr", "fetch"].includes(request.resourceType())) {
         try {
-          const projected = redactDiscoveryJson(JSON.parse(reply.buffer.toString("utf8")));
-          if (JSON.stringify(projected).length < 28_000) responses.push({ url: redactDiscoveryRequestUrl(url.href), status: reply.status, method, body: projected });
+          const original: unknown = JSON.parse(reply.buffer.toString("utf8"));
+          const projected = redactDiscoveryJson(original);
+          const schemaEvidence = publicResponseSchema(original);
+          const schemaBytes = responses.reduce((total, response) => total + (response.schemaEvidence ? JSON.stringify(response.schemaEvidence).length : 0), 0);
+          responses.push({ url: redactDiscoveryRequestUrl(url.href), status: reply.status, method,
+            ...(JSON.stringify(projected).length < 28_000 ? { body: projected } : { bodyOmitted: true as const }),
+            ...(schemaBytes + JSON.stringify(schemaEvidence).length <= 24_000 ? { schemaEvidence } : { schemaEvidenceOmitted: true as const }) });
         } catch { /* Invalid JSON is not evidence. */ }
       }
       if (!nativeProxy) await route.fulfill({ status: reply.status, headers: responseHeaders, body: reply.buffer });
@@ -388,38 +410,55 @@ export async function createCourseDiscoveryBrowserSession(input: {
     const text = sanitizeResponderText(await page.locator("body").innerText()).slice(0, 16_000);
     const blockedAccess = isActiveBrowserAccessChallenge(text, await page.title());
     const visible: DiscoveryBrowserSnapshot["controls"] = [];
-    const candidates = await page.locator('a[href],a[data-value],button,select,input,td,th,[role="combobox"],[role="option"],[role="gridcell"],[role="button"]').all();
-    for (const locator of candidates.slice(0, 180)) {
+    const candidates: Array<{ locator: Locator; date?: string; dropdown?: PublicDropdownProof }> = (await page.locator('a[href],a[data-value],button,select,input,td,th,[role="combobox"],[role="option"],[role="gridcell"],[role="button"]').all()).slice(0, 180).map(locator => ({ locator }));
+    const dayCandidates = blockedAccess ? [] : await observedPublicCalendarDays(page);
+    const dropdowns = blockedAccess ? [] : (await observedPublicDropdowns(page)).map(value => ({ locator: value.locator, dropdown: value.proof }));
+    const seenControls = new Set<string>();
+    for (const { locator, date, dropdown } of [...dayCandidates, ...dropdowns, ...candidates] as typeof candidates) {
       if (!await locator.isVisible() || !await locator.isEnabled()) continue;
       const control = await observeControl(locator);
+      if (seenControls.has(control.selector)) continue;
+      seenControls.add(control.selector);
       // Native public selects remain discoverable when the widget omitted an
       // accessible name, without admitting sensitive forms or arbitrary fields.
-      const kind = publicControlKind(control, blockedAccess) ??
+      const kind = ((date || dropdown) && !blockedAccess && recipeSelectorSchema.safeParse(control.selector).success
+        ? dropdown ? "filter" : interactiveControlKind({ ...control, verifiedCalendarDay: true }) : publicControlKind(control, blockedAccess)) ??
         (!blockedAccess && /^(?:Apply|Apply dates)$/iu.test(control.name) && await isPublicCalendarApply(locator) ? "calendar" : null);
       if (!kind) continue;
       if (control.href && isSafeRecipeUrl(control.href)) { allowedNavigation.add(control.href); passfactory.observeWidgetUrl(control.href); }
       if (control.href && !isSafeRecipeUrl(control.href)) continue;
       const target = randomUUID();
-      controls.set(target, { locator, signature: JSON.stringify(control), kind, href: control.href });
-      visible.push({ target, selector: control.selector, kind, name: sanitizeResponderText(control.name), label: sanitizeResponderText(control.label),
+      controls.set(target, { locator, signature: JSON.stringify(control), kind, href: control.href, ...(date ? { calendarDay: date } : {}), ...(dropdown ? { dropdown } : {}) });
+      observedElements.set(control.selector, { locator, signature: JSON.stringify(control) });
+      visible.push({ target, selector: control.selector, kind, name: sanitizeResponderText(control.name), label: sanitizeResponderText(dropdown?.label ?? control.label),
         ...(control.currentValue === undefined ? {} : { currentValue: sanitizeResponderText(control.currentValue) }),
         ...(control.product ? { product: control.product } : {}),
         ...(control.options ? { options: control.options.map(option => ({ value: sanitizeResponderText(option.value), label: sanitizeResponderText(option.label) })) } : {}) });
     }
     const elements: DiscoveryBrowserSnapshot["elements"] = [];
     const allElements = page.locator("body *");
-    const dateIndexes = await allElements.evaluateAll(nodes => {
-      const matches: number[] = [];
-      for (let index = 0; index < Math.min(nodes.length, 3000) && matches.length < 24; index++) {
+    const displayIndexes = await allElements.evaluateAll(nodes => {
+      const dates: number[] = [], times: number[] = [], resources: number[] = [], durations: number[] = [];
+      for (let index = 0; index < Math.min(nodes.length, 3000); index++) {
         const node = nodes[index];
+        if (node.closest("script,style,noscript,input,textarea,select,option") ||
+          node.closest("form")?.querySelector('input[type=password],input[type=email],input[type=tel],[autocomplete^="cc-"]')) continue;
         const ownText = Array.from(node.childNodes).filter(child => child.nodeType === Node.TEXT_NODE).map(child => child.textContent ?? "").join(" ").trim();
         const label = node.getAttribute("aria-label") ?? "";
         const text = `${ownText} ${label}`;
-        if (text.length < 250 && /\b(?:\d{4}-\d{2}-\d{2}|(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4})\b/iu.test(text)) matches.push(index);
+        if (text.length < 250 && dates.length < 24 && /\b(?:\d{4}-\d{2}-\d{2}|(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4})\b/iu.test(text)) dates.push(index);
+        // Read public display leaves independently of generated CSS classes.
+        // These entries grant inspection only, never click authority.
+        if (!ownText || ownText.length > 160 || node.children.length ||
+          /\b(?:login|sign in|sign up|password|email|phone|checkout|payment|purchase|reserve|confirm|submit|contact)\b/iu.test(ownText)) continue;
+        if (times.length < 48 && /^(?:(?:[01]?\d|2[0-3]):[0-5]\d(?:\s*[ap]\.?m\.?)?|(?:[1-9]|1[0-2])\s*[ap]\.?m\.?)$/iu.test(ownText)) times.push(index);
+        else if (resources.length < 24 && /\b(?:golf|sims?|simulators?|bays?|rentals?|rooms?|courses?)\b/iu.test(ownText) &&
+          !/\b(?:lessons?|coaching|classes?|leagues?|members?)\b/iu.test(ownText)) resources.push(index);
+        else if (durations.length < 16 && /^(?:\d+(?:\.\d+)?\s*(?:minutes?|mins?|min|hours?|hrs?|hr|h)\s*(?:[-–]\s*)?)+$/iu.test(ownText)) durations.push(index);
       }
-      return matches;
+      return [...dates, ...times, ...resources, ...durations];
     });
-    const nodes = [...dateIndexes.map(index => allElements.nth(index)), ...await page.locator('h1,h2,h3,label,time,[datetime],[data-date],[data-time],[data-capacity],[aria-live],select,input[type=date],input[type=number],td,li,[class*="slot"],[class*="time"],[class*="card"]').all()];
+    const nodes = [...displayIndexes.map(index => allElements.nth(index)), ...await page.locator('h1,h2,h3,label,time,[datetime],[data-date],[data-time],[data-capacity],[aria-live],select,input[type=date],input[type=number],td,li,[class*="slot"],[class*="time"],[class*="card"]').all()];
     const seenElements = new Set<string>();
     for (const node of nodes.slice(0, 180)) {
       if (!await node.isVisible()) continue;
@@ -441,8 +480,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
     return { url: page.url(), text, controls: visible, elements, frames, responses: responses.splice(0), requests, loading: pendingRequests > 0,
       blockedRequests, requestCount, interceptCount, responseBytes, startupMs, initialContentWaitMs, pendingRequestCount: pendingRequests,
       ...(navigationStartedAt === undefined ? {} : { navigationElapsedMs: Date.now() - navigationStartedAt }),
-      ...(navigation?.url === page.url() ? { navigationStatus: navigation.status } : {}),
-      browserTransport: deps.browserTransport ?? "PINNED_HTTP" };
+      ...(navigation && sameDiscoveryMainDocument(navigation.url, page.url()) ? { navigationStatus: navigation.status } : {}),
+      browserTransport: deps.browserTransport ?? "PINNED_HTTP", accessRequirementObserved: blockedAccess };
   };
   return {
     async execute(value: unknown): Promise<DiscoveryBrowserSnapshot> {
@@ -459,6 +498,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
         if (!known || !await known.locator.isVisible() || JSON.stringify(await observeControl(known.locator)) !== known.signature)
           throw new Error("STALE_OR_UNKNOWN_ELEMENT");
         const structure: NonNullable<DiscoveryBrowserSnapshot["structure"]> = { selected: action.selector, ancestors: [] };
+        const returnedNodes: Array<{ locator: Locator; selector: string; signature: string }> = [];
         let node = known.locator;
         for (let depth = 0; depth < 4; depth++) {
           const control = await observeControl(node);
@@ -466,21 +506,30 @@ export async function createCourseDiscoveryBrowserSession(input: {
           const attributes = await node.evaluate(element => Object.fromEntries(Array.from(element.attributes)
             .filter(attribute => ["id", "class", "role"].includes(attribute.name)).map(attribute => [attribute.name, attribute.value.slice(0, 100)])));
           const children: Array<{ selector: string; tag: string; text: string }> = [];
+          const returnedChildren: typeof returnedNodes = [];
           for (const child of (await node.locator(":scope > *").all()).slice(0, 12)) {
             if (children.length >= 6 || !await child.isVisible()) continue;
             const observed = await observeControl(child);
             if (observed.sensitiveForm || !recipeSelectorSchema.safeParse(observed.selector).success) continue;
             children.push({ selector: observed.selector, tag: observed.tag, text: sanitizeResponderText(observed.name).slice(0, 80) });
+            returnedChildren.push({ locator: child, selector: observed.selector, signature: JSON.stringify(observed) });
           }
           const selector = control.tag === "body" ? "body" : control.selector;
           const entry = { selector, matches: await page.locator(selector).count(), tag: control.tag,
             text: sanitizeResponderText(control.name).slice(0, 160), attributes, children };
           if (JSON.stringify({ ...structure, ancestors: [...structure.ancestors, entry] }).length > 6000) break;
           structure.ancestors.push(entry);
+          returnedNodes.push(...returnedChildren);
+          returnedNodes.push({ locator: node, selector, signature: JSON.stringify(control) });
           if (control.tag === "body") break;
           node = node.locator("..");
         }
-        return { ...await snapshot(), structure };
+        const result = await snapshot();
+        for (const returned of returnedNodes) {
+          if (await returned.locator.isVisible() && JSON.stringify(await observeControl(returned.locator)) === returned.signature)
+            observedElements.set(returned.selector, { locator: returned.locator, signature: returned.signature });
+        }
+        return { ...result, structure };
       }
       if (action.action === "inspect_adapter") {
         if (!isSafeRecipeUrl(action.url) || !allowedNavigation.has(new URL(action.url).href)) throw new Error("UNOBSERVED_NAVIGATION");
@@ -499,12 +548,16 @@ export async function createCourseDiscoveryBrowserSession(input: {
       else if (["click", "select", "fill"].includes(action.action) && "target" in action) {
         const known = controls.get(action.target);
         if (!known || !await known.locator.isVisible() || !await known.locator.isEnabled() || JSON.stringify(await observeControl(known.locator)) !== known.signature) throw new Error("STALE_OR_UNKNOWN_CONTROL");
+        if (known.calendarDay && !await isObservedPublicCalendarDay(known.locator, known.calendarDay)) throw new Error("STALE_OR_UNKNOWN_CONTROL");
         if (action.action === "select") {
           if (known.kind !== "filter") throw new Error("UNSAFE_CONTROL");
-          const observed = await observeControl(known.locator);
-          const option = observed.options?.find(item => item.value === action.option || item.label === action.option);
-          if (!option) throw new Error("UNOBSERVED_OPTION");
-          await known.locator.selectOption(option.value);
+          if (known.dropdown) await selectPublicDropdown(known.locator, { value: action.option, purpose: known.dropdown.purpose, simulator: true });
+          else {
+            const observed = await observeControl(known.locator);
+            const option = observed.options?.find(item => item.value === action.option || item.label === action.option);
+            if (!option) throw new Error("UNOBSERVED_OPTION");
+            await known.locator.selectOption(option.value);
+          }
         } else if (action.action === "fill") {
           if (known.kind !== "field" || !/^[\d\s/:.T-]{1,120}$/u.test(action.text)) throw new Error("UNSAFE_CONTROL");
           await known.locator.fill(action.text); await known.locator.dispatchEvent("change");

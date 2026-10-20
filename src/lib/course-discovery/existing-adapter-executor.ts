@@ -1,6 +1,9 @@
 import { fetchForeupTeeSheet } from "@/lib/adapters/foreup";
 import { fetchTeeItUpTeeSheet } from "@/lib/adapters/teeitup";
 import { createAddressPinnedPublicFetchTransport } from "@/lib/automation/address-pinned-public-fetch";
+import { createUSchedulePublicSession } from "@/lib/automation/uschedule-public-session";
+import { fetchUScheduleRecipeAvailability, inspectUScheduleRecipeConfiguration } from "@/lib/simulators/providers/uschedule";
+import { uschedulePublicTenant } from "@/lib/simulators/providers/public-configuration";
 import { readForeupPublicConfiguration } from "@/lib/automation/foreup-public-configuration";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
@@ -11,6 +14,8 @@ import { existingAdapterMetadataSchema, type ExistingAdapterMetadata, type Exist
 import { accessExecutionInputSchema, accessExecutionResultSchema, isSafeRecipeUrl, type AccessExecutionInput, type AccessExecutionResult } from "./recipe";
 import { requestFamilyForUrl } from "./request-family";
 import { assertTeeItUpRecipeAvailability, parseTeeItUpRecipeSource, resolveTeeItUpRecipeFacilities, teeItUpRecipeBookingUrl, type TeeItUpRecipeFacility } from "./teeitup-recipe-source";
+import { parseWhooshSimulatorSource } from "./whoosh-simulator-source";
+import { executeWhooshSimulator, inspectWhooshSimulator } from "./whoosh-simulator-executor";
 
 type Dependencies = {
   fetch?: typeof fetch;
@@ -30,6 +35,7 @@ function familyForSource(source: Source) {
   if (url.hostname === "foreupsoftware.com" && !url.search && foreupPath.test(url.pathname)) return "FOREUP" as const;
   if (isAcuityPublicBookingUrl(source.bookingUrl)) return "ACUITY" as const;
   if (parseTeeItUpRecipeSource(source.bookingUrl)) return "TEEITUP" as const;
+  if (uschedulePublicTenant(source.bookingUrl)) return "USCHEDULE" as const;
   return fail("UNSUPPORTED_ADAPTER_SOURCE");
 }
 function dateParameter(date: string) { const [year, month, day] = date.split("-"); return `${month}-${day}-${year}`; }
@@ -146,6 +152,18 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
 /** For a controller-observed provider URL only. Reads typed public configuration
  * and returns bounded IDs; availability and activation remain separate proofs. */
 export async function inspectExistingAdapter(source: Source, deps: Dependencies): Promise<{ adapter: ExistingAdapterMetadata }> {
+  if (parseWhooshSimulatorSource(source.bookingUrl)) return { adapter: await inspectWhooshSimulator(source, deps) };
+  if (familyForSource(source) === "USCHEDULE") {
+    const session = createUSchedulePublicSession(source.bookingUrl, deps);
+    try {
+      const response = await session.read(source.bookingUrl);
+      const config = inspectUScheduleRecipeConfiguration(await response.text(), source.bookingUrl);
+      const normalized = source.venueName.normalize("NFKC").toLowerCase().replace(/&/gu, "and").replace(/[^a-z0-9]/gu, "");
+      if (!config || normalized.length < 8 || normalized !== config.tenant.replace(/-/gu, "")) fail("ADAPTER_IDENTITY_MISMATCH");
+      return { adapter: existingAdapterMetadataSchema.parse({ family: "USCHEDULE", tenant: config.tenant,
+        serviceId: config.selected.serviceId, serviceName: config.selected.serviceName }) };
+    } finally { session.dispose(); }
+  }
   const session = reader(source, deps);
   try {
     if (session.teeitup) {
@@ -179,26 +197,44 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
       durationVerified: !reason, completeVerified: !reason, ...(reason ? { reason } : {}) },
   });
   let session: ReturnType<typeof reader> | undefined;
+  let uscheduleSession: ReturnType<typeof createUSchedulePublicSession> | undefined;
   try {
     const adapter = existingAdapterMetadataSchema.parse(recipe.adapter);
     if (input.timeZone !== recipe.source.timeZone || recipe.source.providerFamily.toUpperCase() !== adapter.family ||
-        (recipe.target.kind === "SIMULATOR") !== (adapter.family === "ACUITY") ||
-        adapter.family === "ACUITY" && (!recipe.target.offeringId || !input.durationMinutes)) fail("ADAPTER_TARGET_MISMATCH");
-    session = reader(recipe.source, deps, adapter, input);
+        (recipe.target.kind === "SIMULATOR") !== (["ACUITY", "USCHEDULE", "WHOOSH"].includes(adapter.family)) ||
+        ["ACUITY", "USCHEDULE", "WHOOSH"].includes(adapter.family) && (!recipe.target.offeringId || !input.durationMinutes)) fail("ADAPTER_TARGET_MISMATCH");
+    if (!["USCHEDULE", "WHOOSH"].includes(adapter.family)) session = reader(recipe.source, deps, adapter, input);
     const start = deps.toInstant(`${input.date}T${input.startTime}:00`, input);
     const next = new Date(`${input.date}T00:00:00Z`); next.setUTCDate(next.getUTCDate() + 1);
     const end = deps.toInstant(`${input.endTime === "24:00" ? next.toISOString().slice(0, 10) : input.date}T${input.endTime === "24:00" ? "00:00" : input.endTime}:00`, input);
     const now = clock();
     if (end <= now) fail("INVALID_REQUEST_DATE_OR_ZONE");
+    if (adapter.family === "WHOOSH") {
+      const slots = await executeWhooshSimulator(recipe.source, adapter, { courseId: recipe.target.courseId, offeringId: recipe.target.offeringId! }, input, deps);
+      return result(slots.filter(slot => new Date(slot.startsAt) > now && new Date(slot.startsAt) >= start && new Date(slot.endsAt!) <= end));
+    }
+    if (adapter.family === "USCHEDULE") {
+      const normalized = recipe.source.venueName.normalize("NFKC").toLowerCase().replace(/&/gu, "and").replace(/[^a-z0-9]/gu, "");
+      if (uschedulePublicTenant(recipe.source.bookingUrl) !== adapter.tenant || normalized.length < 8 || normalized !== adapter.tenant.replace(/-/gu, "")) fail("ADAPTER_IDENTITY_MISMATCH");
+      uscheduleSession = createUSchedulePublicSession(recipe.source.bookingUrl, deps);
+      const available = await fetchUScheduleRecipeAvailability({ date: input.date, durationMinutes: input.durationMinutes!, partySize: 1,
+        timeZone: input.timeZone, offering: { id: recipe.target.offeringId!, courseId: recipe.target.courseId, bookingUrl: recipe.source.bookingUrl,
+          providerFamilyKey: "USCHEDULE", active: true, publicAccessStatus: "PUBLIC", providerMetadata: { tenant: adapter.tenant, serviceId: adapter.serviceId },
+          maxPartySize: null, supportedDurationsMinutes: [input.durationMinutes!] } }, adapter, uscheduleSession.read);
+      return result(available.slots.filter(slot => slot.startsAt > now && slot.startsAt >= start && slot.endsAt <= end).map(slot => ({
+        sourceId: slot.sourceId, startsAt: slot.startsAt.toISOString(), endsAt: slot.endsAt.toISOString(), availableSpots: 1,
+        capacity: null, bookingUrl: recipe.source.bookingUrl, resourceId: slot.resourceId, productId: slot.productId,
+      })));
+    }
     if (adapter.family === "FOREUP") {
       const path = foreupPath.exec(new URL(recipe.source.bookingUrl).pathname);
       if (!path || Number(path[1]) !== adapter.facilityId || path[2] && Number(path[2]) !== adapter.scheduleId) fail("ADAPTER_SOURCE_MISMATCH");
       const config = await readForeupPublicConfiguration({ bookingUrl: recipe.source.bookingUrl, courseName: recipe.source.venueName,
-        fetchImpl: session.read, rethrowError: () => true });
+        fetchImpl: session!.read, rethrowError: () => true });
       if (!config || config.scheduleId !== adapter.scheduleId || config.bookingClassId !== adapter.bookingClassId) fail("ADAPTER_CONFIGURATION_CHANGED");
       const available = await fetchForeupTeeSheet({ courseId: recipe.target.courseId, date: new Date(`${input.date}T00:00:00Z`), players: input.players,
-        metadata: { scheduleId: adapter.scheduleId, bookingClassId: adapter.bookingClassId, bookingBaseUrl: recipe.source.bookingUrl }, fetchImpl: session.read });
-      if (!session.availabilityWasArray()) fail("ADAPTER_EMPTY_UNPROVEN");
+        metadata: { scheduleId: adapter.scheduleId, bookingClassId: adapter.bookingClassId, bookingBaseUrl: recipe.source.bookingUrl }, fetchImpl: session!.read });
+      if (!session!.availabilityWasArray()) fail("ADAPTER_EMPTY_UNPROVEN");
       const slots = available.slots.map(slot => ({ ...slot, time: deps.toInstant(slot.startsAt, input) })).filter(slot =>
         slot.time > now && slot.time >= start && slot.time < end && slot.availableSpots >= input.players).map(slot => ({
         sourceId: slot.sourceId, startsAt: slot.time.toISOString(), availableSpots: slot.availableSpots, bookingUrl: recipe.source.bookingUrl,
@@ -210,8 +246,8 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
       const origin = new URL(recipe.source.bookingUrl).origin;
       const bookingBaseUrl = adapter.facilityIds.length === 1 ? `${origin}/?course=${adapter.facilityIds[0]}` : `${origin}/`;
       const available = await fetchTeeItUpTeeSheet({ courseId: recipe.target.courseId, date: new Date(`${input.date}T00:00:00Z`), players: input.players, timeZone: input.timeZone,
-        metadata: { aliases: [adapter.alias], bookingBaseUrl, facilityIds: adapter.facilityIds } }, session.read);
-      if (!session.availabilityWasArray()) fail("ADAPTER_EMPTY_UNPROVEN");
+        metadata: { aliases: [adapter.alias], bookingBaseUrl, facilityIds: adapter.facilityIds } }, session!.read);
+      if (!session!.availabilityWasArray()) fail("ADAPTER_EMPTY_UNPROVEN");
       return result(available.slots.map(slot => ({ ...slot, time: deps.toInstant(slot.startsAt, input) })).filter(slot =>
         slot.time > now && slot.time >= start && slot.time < end && slot.availableSpots >= input.players).map(slot => ({
         sourceId: slot.sourceId, startsAt: slot.time.toISOString(), availableSpots: slot.availableSpots,
@@ -220,18 +256,18 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
         ...(slot.holes === 9 || slot.holes === 18 ? { holes: slot.holes as 9 | 18 } : {}),
       })));
     }
-    const observed = await readAcuityPublicConfiguration({ bookingUrl: recipe.source.bookingUrl, fetchImpl: session.read });
+    const observed = await readAcuityPublicConfiguration({ bookingUrl: recipe.source.bookingUrl, fetchImpl: session!.read });
     if (!observed) fail("ADAPTER_CONFIGURATION_UNVERIFIED");
     const available = await fetchAcuitySimulatorAvailability({ date: input.date, durationMinutes: input.durationMinutes!, partySize: 1,
       timeZone: input.timeZone, offering: { id: recipe.target.offeringId!, courseId: recipe.target.courseId, bookingUrl: recipe.source.bookingUrl,
         providerFamilyKey: "ACUITY", providerMetadata: { ownerKey: adapter.ownerKey, rentalProductIds: adapter.rentalProductIds },
-        maxPartySize: observed.configuration.maxPartySize, supportedDurationsMinutes: [] } }, session.read);
+        maxPartySize: observed.configuration.maxPartySize, supportedDurationsMinutes: [] } }, session!.read);
     return result(available.slots.filter(slot => slot.startsAt > now && slot.startsAt >= start && slot.endsAt <= end).map(slot => ({
       sourceId: slot.sourceId, startsAt: slot.startsAt.toISOString(), endsAt: slot.endsAt.toISOString(), availableSpots: 1,
       capacity: slot.maxPartySize, bookingUrl: recipe.source.bookingUrl, resourceId: slot.resourceId, productId: slot.productId,
     })));
   } catch (error) {
-    const message = session?.failureReason() ?? (error instanceof Error ? error.message : "");
+    const message = session?.failureReason() ?? uscheduleSession?.failureReason() ?? (error instanceof Error ? error.message : "");
     return result([], /^[A-Z_]{1,80}$/u.test(message) ? message : "ADAPTER_READ_FAILED");
-  } finally { session?.dispose(); }
+  } finally { session?.dispose(); uscheduleSession?.dispose(); }
 }

@@ -2,7 +2,8 @@ import { existsSync } from "node:fs";
 import { chromium } from "@playwright/test";
 import { describe, expect, it, vi } from "vitest";
 import { createAddressPinnedPublicFetchTransport } from "@/lib/automation/address-pinned-public-fetch";
-import { createCourseDiscoveryBrowserSession, discoveryBrowserActionSchema, discoveryPublicAnchorKind, discoveryPublicChoiceKind, normalizeDiscoveryNavigationUrl, redactDiscoveryJson, redactDiscoveryRequestUrl } from "./browser-session";
+import { createCourseDiscoveryBrowserSession, discoveryBrowserActionSchema, discoveryPublicAnchorKind, discoveryPublicChoiceKind, normalizeDiscoveryNavigationUrl, redactDiscoveryJson, redactDiscoveryRequestUrl, sameDiscoveryMainDocument } from "./browser-session";
+import * as nativeBrowser from "./native-public-browser";
 
 vi.mock("@/lib/automation/provider-request-lease", () => ({ runWithProviderRequestLease: vi.fn() }));
 vi.mock("@/lib/automation/address-pinned-public-fetch", () => ({ createAddressPinnedPublicFetchTransport: vi.fn() }));
@@ -19,6 +20,15 @@ describe("discovery browser public protocol", () => {
     expect(normalizeDiscoveryNavigationUrl("https://foreupsoftware.com/index.php/booking/21017#/login")).toBe("https://foreupsoftware.com/index.php/booking/21017");
     expect(normalizeDiscoveryNavigationUrl("https://other.example.org/index.php/booking/21017#/login")).toContain("#/login");
     expect(normalizeDiscoveryNavigationUrl("https://foreupsoftware.com/account#/login")).toContain("#/login");
+  });
+  it("matches a main document across fragments without borrowing another path, query, or origin status", () => {
+    const observed = "https://example.org/booking?course=12";
+    expect(sameDiscoveryMainDocument(observed, `${observed}#teetimes`)).toBe(true);
+    expect(sameDiscoveryMainDocument(`${observed}#old`, `${observed}#new`)).toBe(true);
+    for (const current of ["https://example.org/booking?course=13#teetimes", "https://example.org/other?course=12#teetimes",
+      "https://another.example.org/booking?course=12#teetimes", "http://example.org/booking?course=12#teetimes", ""]) {
+      expect(sameDiscoveryMainDocument(observed, current)).toBe(false);
+    }
   });
   it("recognizes calendar cells and bounded numeric filter choices without selecting slots", () => {
     const cell = { tag: "td", name: "22", calendar: true, sensitiveForm: false };
@@ -49,6 +59,67 @@ describe("discovery browser public protocol", () => {
 
 const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
+  it("exposes proven numeric div dates as opaque controls and clicks only the current calendar", async () => {
+    const fixture = '<!doctype html><html><body><h1>Public simulator</h1><div data-testid="variable-week-calendar"><h2>October 2030</h2><div>Mo Tu We Th Fr Sa Su</div>' +
+      '<div data-testid="calendar-day-2030-10-23" aria-label="2030-10-23 AvailabilityLoaded"><span>23</span></div></div><p id="result">Unselected</p>' +
+      '<script>document.querySelector("[data-testid=calendar-day-2030-10-23]").onclick=()=>document.querySelector("#result").textContent="Selected October 23";</script></body></html>';
+    const session = await createCourseDiscoveryBrowserSession({ deadlineAt: new Date(Date.now() + 20_000), initialUrls: ["https://example.org/"] }, {
+      fetch: (async () => new Response(fixture, { headers: { "content-type": "text/html" } })) as typeof fetch,
+      launchBrowser: () => chromium.launch({ executablePath, headless: true }), requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      const snapshot = await session.execute({ id: 1, action: "open", url: "https://example.org/" });
+      const dates = snapshot.controls.filter(control => control.kind === "calendar" && control.name === "23");
+      expect(dates).toHaveLength(1);
+      const selected = await session.execute({ id: 2, action: "click", target: dates[0].target });
+      expect(selected.text).toContain("Selected October 23");
+      await expect(session.execute({ id: 3, action: "click", target: dates[0].target })).rejects.toThrow("STALE_OR_UNKNOWN_CONTROL");
+    } finally { await session.close(); }
+  }, 25_000);
+  it.each([
+    { text: "You must sign in to view tee times.", expected: true },
+    { text: "You must sign in to book. Public tee times are shown below.", expected: false },
+  ])("reports observed access requirements without treating booking policy as access: $expected", async ({ text, expected }) => {
+    const url = "https://example.org/";
+    const session = await createCourseDiscoveryBrowserSession({ deadlineAt: new Date(Date.now() + 30_000), initialUrls: [url] }, {
+      fetch: async () => new Response(`<!doctype html><html><body><h1>Public golf</h1><p>${text}</p></body></html>`,
+        { headers: { "content-type": "text/html" } }),
+      launchBrowser: () => chromium.launch({ executablePath, headless: true }),
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try { expect((await session.execute({ id: 1, action: "open", url })).accessRequirementObserved).toBe(expected); }
+    finally { await session.close(); }
+  }, 20_000);
+  it.each([403, 429])("retains main-document HTTP %i for a hash-routed public link", async status => {
+    const url = "https://example.org/booking?course=12#teetimes";
+    const session = await createCourseDiscoveryBrowserSession({ deadlineAt: new Date(Date.now() + 30_000), initialUrls: [url] }, {
+      browserTransport: "PINNED_HTTP",
+      fetch: vi.fn(async () => new Response("<!doctype html><html><body><h1>Public booking document unavailable</h1></body></html>",
+        { status, headers: { "content-type": "text/html" } })) as unknown as typeof fetch,
+      launchBrowser: () => chromium.launch({ executablePath, headless: true }),
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      const result = await session.execute({ id: 1, action: "open", url });
+      expect(result.url).toBe(url);
+      expect(result.navigationStatus).toBe(status);
+    } finally { await session.close(); }
+  }, 20_000);
+  it("does not reuse a document's status after a client-side query change", async () => {
+    const url = "https://example.org/booking?course=12#teetimes";
+    const session = await createCourseDiscoveryBrowserSession({ deadlineAt: new Date(Date.now() + 30_000), initialUrls: [url] }, {
+      browserTransport: "PINNED_HTTP",
+      fetch: vi.fn(async () => new Response('<!doctype html><html><body><h1>Public booking document unavailable</h1><script>history.replaceState(null,"","?course=13#teetimes")</script></body></html>',
+        { status: 403, headers: { "content-type": "text/html" } })) as unknown as typeof fetch,
+      launchBrowser: () => chromium.launch({ executablePath, headless: true }),
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      const result = await session.execute({ id: 1, action: "open", url });
+      expect(result.url).toBe("https://example.org/booking?course=13#teetimes");
+      expect(result.navigationStatus).toBeUndefined();
+    } finally { await session.close(); }
+  }, 20_000);
   it("waits for initial delayed public content without a manual observe or reload", async () => {
     const fixture = '<!doctype html><html><body><a href="#">×</a><script>fetch("/api/content").then(r=>r.json()).then(()=>{document.body.innerHTML="<h1>Public golf</h1><a href=\'/times\'>Book a tee time</a>";});</script></body></html>';
     const session = await createCourseDiscoveryBrowserSession({ deadlineAt: new Date(Date.now() + 20_000), initialUrls: ["https://example.org/"] }, {
@@ -161,6 +232,54 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       expect(JSON.stringify(inspected.structure)).not.toContain("fetch(");
     } finally { await session.close(); }
   }, 25_000);
+  it("inspects returned focusable controls and continues through returned ancestors without accepting stale or unseen nodes", async () => {
+    const fixture = '<!doctype html><html><body><section id="layout"><div id="outer"><div id="middle"><div id="field">' +
+      '<div>Duration</div><div tabindex="0" aria-haspopup="listbox"><span>1 Hr</span></div>' +
+      '</div></div></div></section><aside><div><b id="unseen">Neutral content</b></div></aside></body></html>';
+    let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
+    const session = await createCourseDiscoveryBrowserSession({ deadlineAt: new Date(Date.now() + 30_000), initialUrls: ["https://example.org/"] }, {
+      fetch: (async () => new Response(fixture, { headers: { "content-type": "text/html" } })) as typeof fetch,
+      launchBrowser: async () => browser = await chromium.launch({ executablePath, headless: true }),
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      const opened = await session.execute({ id: 1, action: "open", url: "https://example.org/" });
+      const duration = opened.controls.find(control => control.label === "Duration");
+      expect(duration).toBeDefined();
+      const inspected = await session.execute({ id: 2, action: "inspect", selector: duration!.selector });
+      expect(inspected.structure?.ancestors[0].text).toBe("1 Hr");
+      const outer = inspected.structure!.ancestors.find(row => row.selector === '[id="outer"]');
+      expect(outer).toBeDefined();
+      const continued = await session.execute({ id: 3, action: "inspect", selector: outer!.selector });
+      expect(continued.structure?.ancestors[0].selector).toBe('[id="outer"]');
+      await expect(session.execute({ id: 4, action: "inspect", selector: '[id="unseen"]' })).rejects.toThrow("STALE_OR_UNKNOWN_ELEMENT");
+      await browser!.contexts()[0].pages()[0].locator('[id="outer"]').evaluate(element => element.setAttribute("id", "changed"));
+      await expect(session.execute({ id: 5, action: "inspect", selector: '[id="outer"]' })).rejects.toThrow("STALE_OR_UNKNOWN_ELEMENT");
+    } finally { await session.close(); }
+  }, 25_000);
+  it("observes and inspects public time and rental leaves despite generated CSS without granting slot clicks", async () => {
+    const fixture = '<!doctype html><html><body><h1>Public golf</h1><main><div id="grid"><div class="r-abc">' +
+      '<div>10:00 am</div><div>Sims</div><div>30 min-3 hr</div></div></div></main>' +
+      '<div hidden><span>11:00 am</span></div><form><input type="email" value="private@example.org"><div>Private Bay</div><div>12:00 pm</div></form>' +
+      '<div>Reserve Bay</div><div id="unseen">Neutral content</div></body></html>';
+    const session = await createCourseDiscoveryBrowserSession({ deadlineAt: new Date(Date.now() + 30_000), initialUrls: ["https://example.org/"] }, {
+      fetch: (async () => new Response(fixture, { headers: { "content-type": "text/html" } })) as typeof fetch,
+      launchBrowser: () => chromium.launch({ executablePath, headless: true }),
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      const opened = await session.execute({ id: 1, action: "open", url: "https://example.org/" });
+      expect(opened.elements).toEqual(expect.arrayContaining([
+        expect.objectContaining({ text: "10:00 am" }), expect.objectContaining({ text: "Sims" }), expect.objectContaining({ text: "30 min-3 hr" }),
+      ]));
+      expect(opened.elements.some(element => /Private Bay|11:00 am|12:00 pm|Reserve Bay/u.test(element.text))).toBe(false);
+      expect(opened.controls.some(control => /10:00 am|Sims|30 min-3 hr/u.test(control.name))).toBe(false);
+      const rental = opened.elements.find(element => element.text === "Sims")!;
+      const inspected = await session.execute({ id: 2, action: "inspect", selector: rental.selector });
+      expect(inspected.structure?.ancestors.some(row => row.text.includes("10:00 am") && row.text.includes("Sims"))).toBe(true);
+      await expect(session.execute({ id: 3, action: "inspect", selector: '[id="unseen"]' })).rejects.toThrow("STALE_OR_UNKNOWN_ELEMENT");
+    } finally { await session.close(); }
+  }, 25_000);
   it("projects only authorized public-read JSON request bodies", async () => {
     const body = { query: "query Availability { times { startsAt } }", variables: { date: "2026-10-22" } };
     const fixture = '<!doctype html><html><body><h1>Calendar</h1><script>fetch("/graphql",{method:"POST",headers:{"content-type":"application/json"},body:' + JSON.stringify(JSON.stringify(body)) + '});</script></body></html>';
@@ -173,6 +292,70 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       expect(snapshot.requests).toEqual(expect.arrayContaining([expect.objectContaining({ method: "POST", body })]));
       expect(JSON.stringify(snapshot.requests)).not.toContain("headers");
     } finally { await session.close(); }
+  }, 25_000);
+  it("adds bounded structural evidence for deeply nested public JSON while retaining value redaction", async () => {
+    const fixture = '<!doctype html><html><body><h1>Public golf</h1><script>fetch("/api/public");</script></body></html>';
+    const payload = { data: { node: { agendas: { edges: [{ node: { availableTimes: [{ startsAt: "2030-10-23T10:00:00-04:00", id: "private-opaque-id", session: { token: "private-token" } }] } }] } } } };
+    const session = await createCourseDiscoveryBrowserSession({ deadlineAt: new Date(Date.now() + 30_000), initialUrls: ["https://example.org/"] }, {
+      fetch: (async url => new Response(String(url).endsWith("/api/public") ? JSON.stringify(payload) : fixture,
+        { headers: { "content-type": String(url).endsWith("/api/public") ? "application/json" : "text/html" } })) as typeof fetch,
+      launchBrowser: () => chromium.launch({ executablePath, headless: true }),
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      const opened = await session.execute({ id: 1, action: "open", url: "https://example.org/" });
+      const response = opened.responses.find(item => item.url.endsWith("/api/public"))!;
+      expect(JSON.stringify(response.body)).toContain("[depth limit]");
+      expect(response.schemaEvidence?.kind).toBe("SAMPLED_SCHEMA_ONLY");
+      expect(response.schemaEvidence?.fields).toContainEqual(expect.objectContaining({
+        path: "data.node.agendas.edges[].node.availableTimes[].startsAt", examples: ["2030-10-23T10:00:00-04:00"],
+      }));
+      expect(JSON.stringify(response)).not.toMatch(/private-opaque-id|private-token/u);
+    } finally { await session.close(); }
+  }, 25_000);
+  it("caps schema evidence at 24KB across one response snapshot and explicitly marks omitted evidence", async () => {
+    const fixture = '<!doctype html><html><body><h1>Public golf</h1><script>Promise.all([1,2,3,4].map(n=>fetch("/api/"+n)));</script></body></html>';
+    const payload = Object.fromEntries(Array.from({ length: 120 }, (_, index) => [`field_${String(index).padStart(3, "0")}_${"a".repeat(60)}`, "value"]));
+    const session = await createCourseDiscoveryBrowserSession({ deadlineAt: new Date(Date.now() + 30_000), initialUrls: ["https://example.org/"] }, {
+      fetch: (async url => new Response(String(url).includes("/api/") ? JSON.stringify(payload) : fixture,
+        { headers: { "content-type": String(url).includes("/api/") ? "application/json" : "text/html" } })) as typeof fetch,
+      launchBrowser: () => chromium.launch({ executablePath, headless: true }),
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      const opened = await session.execute({ id: 1, action: "open", url: "https://example.org/" });
+      expect(opened.responses).toHaveLength(4);
+      expect(opened.responses.reduce((sum, response) => sum + (response.schemaEvidence ? JSON.stringify(response.schemaEvidence).length : 0), 0)).toBeLessThanOrEqual(24_000);
+      expect(opened.responses.some(response => response.schemaEvidenceOmitted === true)).toBe(true);
+      expect(opened.responses.every(response => response.body && (response.schemaEvidence || response.schemaEvidenceOmitted))).toBe(true);
+    } finally { await session.close(); }
+  }, 25_000);
+  it.each(["PINNED_HTTP", "NATIVE_CHROME"] as const)("retains a bounded %s schema when the projected public body exceeds its limit", async browserTransport => {
+    const fixture = '<!doctype html><html><body><h1>Public golf</h1><script>fetch("/api/public");</script></body></html>';
+    const payload = JSON.stringify({ publicRows: Array.from({ length: 100 }, () => ({ label: "x".repeat(600), startsAt: "2030-10-23T10:00:00-04:00" })),
+      token: "never-expose-token" });
+    const native = vi.spyOn(nativeBrowser, "continueNativeBrowserRead").mockImplementation(async route => {
+      const json = route.request().url().endsWith("/api/public");
+      const body = Buffer.from(json ? payload : fixture), headers = { "content-type": json ? "application/json" : "text/html" };
+      await route.fulfill({ status: 200, headers, body });
+      return { status: 200, url: route.request().url(), headers, body };
+    });
+    const session = await createCourseDiscoveryBrowserSession({ deadlineAt: new Date(Date.now() + 30_000), initialUrls: ["https://example.org/"] }, {
+      browserTransport,
+      fetch: (async url => new Response(String(url).endsWith("/api/public") ? payload : fixture,
+        { headers: { "content-type": String(url).endsWith("/api/public") ? "application/json" : "text/html" } })) as typeof fetch,
+      launchBrowser: () => chromium.launch({ executablePath, headless: true }),
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      const opened = await session.execute({ id: 1, action: "open", url: "https://example.org/" });
+      const response = opened.responses.find(item => item.url.endsWith("/api/public"))!;
+      expect(response.body).toBeUndefined();
+      expect(response.bodyOmitted).toBe(true);
+      expect(response.schemaEvidence?.fields).toContainEqual(expect.objectContaining({ path: "publicRows[].startsAt", examples: ["2030-10-23T10:00:00-04:00"] }));
+      expect(JSON.stringify(response.schemaEvidence).length).toBeLessThanOrEqual(12_000);
+      expect(JSON.stringify(response)).not.toContain("never-expose-token");
+    } finally { await session.close(); native.mockRestore(); }
   }, 25_000);
   it("inspects only observed adapter sources with the trusted venue identity", async () => {
     const inspectAdapter = vi.fn(async () => ({ adapter: { family: "FOREUP" as const, facilityId: 1, scheduleId: 2, bookingClassId: 3 } }));
@@ -205,7 +388,7 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       expect(inspectAdapter).toHaveBeenCalledWith({ bookingUrl: snapshot.url, venueName: "Trusted venue", timeZone: "America/New_York" }, expect.any(Object));
     } finally { await session.close(); }
   }, 25_000);
-  it("gives pinned scripts and styles six MB while retaining the two MB data limit", async () => {
+  it("loads a fourteen MB pinned script while retaining six MB styles and two MB data limits", async () => {
     const fixture = '<!doctype html><html><head><link rel="stylesheet" href="/assets/style.css"></head><body><h1>Public venue</h1>' +
       '<script src="/assets/app.js"></script><script>fetch("/large-data").catch(()=>{});</script></body></html>';
     const largeComment = '/*' + 'x'.repeat(3_000_000) + '*/';
@@ -214,7 +397,7 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       const url = options.parseUrl(String(value));
       limits.set(url.pathname, options.maxResponseBytes!);
       const script = url.pathname.endsWith(".js"), style = url.pathname.endsWith(".css"), data = url.pathname === "/large-data";
-      return new Response(script ? `${largeComment};document.body.append(" script loaded");` : style ? largeComment : data ? JSON.stringify({ text: largeComment }) : fixture,
+      return new Response(script ? `/*${"x".repeat(14_500_000)}*/;document.body.append(" script loaded");` : style ? largeComment : data ? JSON.stringify({ text: largeComment }) : fixture,
         { headers: { "content-type": script ? "application/javascript" : style ? "text/css" : data ? "application/json" : "text/html" } });
     });
     const session = await createCourseDiscoveryBrowserSession({ deadlineAt: new Date(Date.now() + 30_000), initialUrls: ["https://example.org/"] }, {
@@ -223,12 +406,27 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
     try {
       const snapshot = await session.execute({ id: 1, action: "open", url: "https://example.org/" });
       expect(snapshot.text).toContain("script loaded");
-      expect(limits.get("/assets/app.js")).toBe(6_000_000);
+      expect(limits.get("/assets/app.js")).toBe(16_000_000);
       expect(limits.get("/assets/style.css")).toBe(6_000_000);
       expect(limits.get("/large-data")).toBe(2_000_000);
       expect(snapshot.requests).toContainEqual(expect.objectContaining({ url: "https://example.org/large-data", blockedReason: "BODY_LIMIT" }));
       expect(snapshot.responseBytes).toBeGreaterThan(6_000_000);
     } finally { await session.close(); vi.mocked(createAddressPinnedPublicFetchTransport).mockReset(); }
+  }, 25_000);
+  it("stops cumulative decoded responses at the finite session budget", async () => {
+    const fixture = '<!doctype html><html><body><h1>Public venue</h1>' + [1, 2, 3, 4].map(id => `<script src="/bundle-${id}.js"></script>`).join("") + '</body></html>';
+    const body = `/*${"x".repeat(14_000_000)}*/`;
+    const failures: string[] = [];
+    const session = await createCourseDiscoveryBrowserSession({ deadlineAt: new Date(Date.now() + 20_000), initialUrls: ["https://example.org/"] }, {
+      fetch: (async value => new Response(String(value).endsWith('.js') ? body : fixture,
+        { headers: { "content-type": String(value).endsWith('.js') ? "application/javascript" : "text/html" } })) as typeof fetch,
+      launchBrowser: () => chromium.launch({ executablePath, headless: true }), requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+      onRequestFailure: failure => failures.push(failure.reason),
+    });
+    try {
+      await session.execute({ id: 1, action: "open", url: "https://example.org/" }).catch(() => {});
+      expect(failures).toContain("PUBLIC_READ_BYTE_LIMIT");
+    } finally { await session.close(); }
   }, 25_000);
   it("does not spend public-read capacity on denied POSTs or decorative images", async () => {
     const fixture = '<!doctype html><html><body><h1>Sample simulator</h1><img src="/photo.png"><script>' +

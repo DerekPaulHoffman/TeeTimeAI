@@ -75,7 +75,7 @@ const stepSchema = z.discriminatedUnion("action", [
     .describe("Choose the requested date using a visible full English month and four-digit year heading, safe calendar next/previous controls and a reusable numeric day selector. Moves at most twelve months, verifying each adjacent month before selecting the exact visible requested day. Final independent date proof is still required."),
   z.object({ action: z.literal("selectProduct"), selector: recipeSelectorSchema, productSelector: recipeSelectorSchema }).strict(),
   z.object({ action: z.literal("select"), selector: recipeSelectorSchema, value: recipeTemplateSchema,
-    purpose: z.enum(["DATE", "PLAYERS", "DURATION", "PRODUCT", "RESOURCE"]) }).strict().describe("Select an observed native HTML <select> option value. Public role=combobox controls are also supported only for PLAYERS/DURATION when their label proves that purpose and an exact visible data-value option exists. Duration values are minutes; simulator party selection is one bay. The inspected PassFactory /ftbb client resets duration when the date changes: select DATE then DURATION. Only that hash-verified local duration operation may retain an already completed date response; all other filters require a new response."),
+    purpose: z.enum(["DATE", "PLAYERS", "DURATION", "PRODUCT", "RESOURCE"]) }).strict().describe("Select an observed native HTML <select> option value. PLAYERS/DURATION also support a labelled public role=combobox with an exact visible data-value option, or a focusable dropdown with one adjacent explicit field label and caret whose displayed option and selected readback are independently verified. Duration values are minutes; simulator party selection is one bay. The inspected PassFactory /ftbb client resets duration when the date changes: select DATE then DURATION. Only that hash-verified local duration operation may retain an already completed date response; all other filters require a new response."),
   z.object({ action: z.literal("fill"), selector: recipeSelectorSchema, value: recipeTemplateSchema,
     purpose: z.enum(["DATE", "PLAYERS", "DURATION"]) }).strict(),
   z.object({ action: z.literal("clickFilter"), selector: recipeSelectorSchema, text: recipeTemplateSchema,
@@ -133,7 +133,7 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
 ]).superRefine((recipe, ctx) => {
   if (recipe.engine === "EXISTING_ADAPTER") {
     if (recipe.source.providerFamily !== recipe.adapter.family ||
-      (recipe.target.kind === "SIMULATOR") !== (recipe.adapter.family === "ACUITY") ||
+      (recipe.target.kind === "SIMULATOR") !== (["ACUITY", "USCHEDULE", "WHOOSH"].includes(recipe.adapter.family)) ||
       recipe.target.kind === "SIMULATOR" && !recipe.target.offeringId || recipe.adapter.family === "TEEITUP" && !recipe.source.venueAddress)
       ctx.addIssue({ code: "custom", message: "Supported adapter metadata must match the source and target kind" });
     return;
@@ -255,5 +255,5 @@ export function publicRentalDurationMinutes(value: string): number | undefined {
 export function isActiveBrowserAccessChallenge(text: string, title = "") {
   if (/^(?:just a moment[.!…]*|access denied|human verification|security verification|waiting room)$/iu.test(title.trim())) return true;
   const prefix = text.replace(/\s+/gu, " ").trim().slice(0, 800);
-  return /\b(?:verify (?:that )?you are human|checking your browser|performing security verification|you (?:must|need to) (?:log|sign) in to (?:view|book|continue))\b/iu.test(prefix) && text.length < 6000;
+  return /\b(?:verify (?:that )?you are human|checking your browser|performing security verification|you (?:must|need to) (?:log|sign) in to (?:view|continue))\b/iu.test(prefix) && text.length < 6000;
 }

@@ -375,7 +375,7 @@ describe.runIf(existsSync(chromeExecutable))("isolated browser recipe replay", (
     const assetPath = "/_next/static/0123456789abcdef0123456789abcdef/_buildManifest.js";
     selected.permittedRoutes.push({ origin: "https://example.org", path: assetPath, methods: ["GET"], queryKeys: [] });
     const page = html.replace("</body>", `<script src="${assetPath}"></script></body>`);
-    const scriptBody = `/*${"x".repeat(3_000_000)}*/`;
+    const scriptBody = `/*${"x".repeat(14_500_000)}*/`;
     const limits: Array<{ kind: string; limit: number | undefined }> = [];
     const native = vi.spyOn(nativeBrowser, "continueNativeBrowserRead").mockImplementation(async (route, _signal, limit) => {
       const script = route.request().resourceType() === "script";
@@ -386,7 +386,7 @@ describe.runIf(existsSync(chromeExecutable))("isolated browser recipe replay", (
       return { url: route.request().url(), status: 200, headers, body };
     });
     const pinned = vi.spyOn(pinnedTransport, "createAddressPinnedPublicFetchTransport").mockImplementation(options => {
-      const script = options.maxResponseBytes === 6_000_000;
+      const script = options.maxResponseBytes === 16_000_000;
       limits.push({ kind: script ? "script" : "document", limit: options.maxResponseBytes });
       expect(() => options.parseUrl(`https://unscoped.example.org${assetPath}`)).toThrow();
       if (script) expect(options.parseUrl(`https://example.org${assetPath}`).pathname).toBe(assetPath);
@@ -400,7 +400,7 @@ describe.runIf(existsSync(chromeExecutable))("isolated browser recipe replay", (
       expect(result.status).toBe("AVAILABLE");
       expect(families.length).toBeGreaterThanOrEqual(2);
       expect(new Set(families)).toEqual(new Set(["example.org"]));
-      expect(limits).toContainEqual({ kind: "script", limit: 6_000_000 });
+      expect(limits).toContainEqual({ kind: "script", limit: 16_000_000 });
       expect(limits).toContainEqual({ kind: "document", limit: 2_000_000 });
     } finally { native.mockRestore(); pinned.mockRestore(); }
   }, 20_000);

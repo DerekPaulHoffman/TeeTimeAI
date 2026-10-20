@@ -20,6 +20,8 @@ import { applyPublicCalendarDate } from "./public-calendar-apply";
 import { hasInspectedPassfactoryDurationClients, isInspectedPassfactoryDurationClient, isPassfactoryDurationClientUrl, isPassfactoryAvailabilityRequest, isPassfactoryDurationContext,
   isPassfactoryDurationRequestBound, type PublicAvailabilityRequest } from "./passfactory-client-duration";
 import { extractServerDocument, sameServerDocumentEvidence, type ServerDocumentExtraction } from "./server-document-proof";
+import { PUBLIC_BROWSER_TOTAL_BYTES, PUBLIC_BROWSER_TUNNEL_BYTES, publicBrowserResponseLimit } from "./browser-resource-limits";
+import { isObservedPublicCalendarDay } from "./public-calendar-day";
 
 type ExtractedAccessRecipe = Exclude<CourseAccessRecipeData, { engine: "EXISTING_ADAPTER" }>;
 
@@ -345,7 +347,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
   const read = async (url: string, method: string, body?: string, headers = new Headers({ accept: "application/json" }), resourceType?: string) => {
     if (!recipeAllowsRequest(recipe, url, method, resourceType)) throw new Error("UNSCOPED_REQUEST");
     if (method === "POST" && !allowsPost(new URL(url), headers, body ?? "")) throw new Error("UNSAFE_POST");
-    const maxResponseBytes = ["script", "stylesheet"].includes(resourceType ?? "") ? 6_000_000 : 2_000_000;
+    const maxResponseBytes = publicBrowserResponseLimit(resourceType ?? "");
     const transport = deps.fetch ?? createAddressPinnedPublicFetchTransport({
       parseUrl: value => { if (!recipeAllowsRequest(recipe, value, method, resourceType)) throw new Error("UNSCOPED_REQUEST"); return new URL(value); },
       maxResponseBytes, timeoutMs: 15_000, redirectLimit: 0, authorizeReadPost: allowsPost,
@@ -376,7 +378,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
       if (!/^application\/(?:[a-z0-9.+-]*\+)?json(?:;|$)/iu.test(response.headers.get("content-type") ?? "")) throw new Error("NOT_JSON");
       return normalize(recipe, input, extractJson(recipe, JSON.parse(Buffer.from(buffer).toString("utf8"))), clock());
     }
-    if (recipe.browserTransport === "NATIVE_CHROME") nativeProxy = await createNativePublicBrowserProxy({ signal, maxBytes: 16_000_000, maxConnections: 128 });
+    if (recipe.browserTransport === "NATIVE_CHROME") nativeProxy = await createNativePublicBrowserProxy({ signal, maxBytes: PUBLIC_BROWSER_TUNNEL_BYTES, maxConnections: 128 });
     try {
       browser = deps.launchBrowser ? await deps.launchBrowser() : await (await import("@playwright/test")).chromium.launch({ headless: true,
         ...(process.platform === "win32" ? { channel: "chrome" } : {}),
@@ -486,14 +488,14 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
           if (!recipeAllowsRequest(recipe, requestUrl, preflight ?? request.method(), request.resourceType()) ||
             Object.keys(requestHeaders).some(key => /^(?:authorization|proxy-authorization|x-api-key)$/iu.test(key)) ||
             request.method() === "POST" && !allowsPost(new URL(requestUrl), headers, request.postData() ?? "")) throw new Error("UNSCOPED_REQUEST");
-          const responseLimit = ["script", "stylesheet"].includes(request.resourceType()) ? 6_000_000 : 2_000_000;
+          const responseLimit = publicBrowserResponseLimit(request.resourceType());
           const native = await requestQueue.run(requestFamilyForUrl(requestUrl), () => {
             const hostname = new URL(requestUrl).hostname;
             nativeProxy!.allowHostConnections(hostname);
             return continueNativeBrowserRead(route, signal, responseLimit, () => nativeProxy!.cancelHostConnections(hostname), requestUrl);
           });
           bytes += native.body.length;
-          if (bytes > 16_000_000) { cancellation.abort("RESPONSE_LIMIT"); throw new Error("RESPONSE_LIMIT"); }
+          if (bytes > PUBLIC_BROWSER_TOTAL_BYTES) { cancellation.abort("RESPONSE_LIMIT"); throw new Error("RESPONSE_LIMIT"); }
           if (native.status >= 400) { blocked = true; failure ??= recipeExecutionDiagnostic(`HTTP_${native.status}`, { url: requestUrl, method: request.method(), resourceType: request.resourceType() }); }
           if (native.status === 429) { providerThrottled = true; throw new Error("PROVIDER_THROTTLED"); }
           observeClientScript(requestUrl, request.resourceType(), native.status, native.body);
@@ -503,7 +505,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
         }
         const { response, buffer } = await read(requestUrl, request.method(), request.postData() ?? undefined, headers, request.resourceType());
         bytes += buffer.byteLength;
-        if (bytes > 16_000_000) throw new Error("RESPONSE_LIMIT");
+        if (bytes > PUBLIC_BROWSER_TOTAL_BYTES) throw new Error("RESPONSE_LIMIT");
         const responseHeaders: Record<string, string> = {};
         for (const key of ["content-type", "access-control-allow-origin"]) { const value = response.headers.get(key); if (value) responseHeaders[key] = value; }
         await route.fulfill({ status: response.status, headers: responseHeaders, body: Buffer.from(buffer) });
@@ -617,7 +619,8 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
             /^(?:\d{1,3}(?:\s+(?:holes?|players?|guests?|minutes?|hours?))?|any|all|both|morning|midday|evening|anytime)$/iu.test(text);
           if (text !== expected || forbiddenControl.test(text) || /\b\d{1,2}:\d{2}\b/u.test(text) ||
             choice.disabled || choice.sensitive || (!["button", "div", "span", "td", "th"].includes(tag) && !filterChoice)) throw new Error("UNSAFE_CONTROL");
-          const calendar = await node.evaluate(element => Boolean(element.closest('[role="grid"], [role="dialog"], [class*="calendar"], [class*="datepicker"]')));
+          const calendar = await node.evaluate(element => Boolean(element.closest('[role="grid"], [role="dialog"], [class*="calendar"], [class*="datepicker"]'))) ||
+            step.purpose === "SELECT_DATE" && await isObservedPublicCalendarDay(node, input.date);
           if (["td", "th"].includes(tag) && (!calendar || !["SELECT_DATE", "NEXT_MONTH", "PREVIOUS_MONTH"].includes(step.purpose))) throw new Error("UNSAFE_CONTROL");
           if (filterChoice && recipe.target.kind === "SIMULATOR" && /players?|party|guests?/iu.test(choice.context) && choice.value !== "1") throw new Error("UNSAFE_CONTROL");
           if (step.purpose === "SELECT_DATE" && (!calendar || !/^\d{1,2}$|^\d{4}-\d{2}-\d{2}$/u.test(text))) throw new Error("UNSAFE_CONTROL");

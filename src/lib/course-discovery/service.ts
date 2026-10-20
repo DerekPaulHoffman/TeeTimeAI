@@ -42,6 +42,11 @@ export const discoverySourceEvidenceSchema = z.object({
 type DiscoverySourceEvidence = z.infer<typeof discoverySourceEvidenceSchema>;
 
 export function isRetryableDiscoveryTransactionError(error: unknown) {
+  // Prisma's PostgreSQL adapter can surface a commit-time serialization
+  // conflict directly instead of wrapping it in a known request error.
+  if (error instanceof Error && error.name === "DriverAdapterError" &&
+      error.cause && typeof error.cause === "object" &&
+      "kind" in error.cause && error.cause.kind === "TransactionWriteConflict") return true;
   if (!(error instanceof Prisma.PrismaClientKnownRequestError)) return false;
   if (error.code === "P2034") return true;
   if (error.code !== "P2010") return false;
@@ -85,7 +90,10 @@ async function transaction<T>(action: (tx: Tx) => Promise<T>): Promise<T> {
   for (let attempt = 0; ; attempt++) {
     try { return await prisma.$transaction(action, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 10_000 }); }
     catch (error) {
-      if (attempt >= 2 || !isRetryableDiscoveryTransactionError(error)) throw error;
+      if (attempt >= 4 || !isRetryableDiscoveryTransactionError(error)) throw error;
+      // Spread competing workers before retrying the whole transaction. Its
+      // ownership and database deadline checks run again on every attempt.
+      await new Promise(resolve => setTimeout(resolve, 20 * 2 ** attempt + Math.floor(Math.random() * 30)));
     }
   }
 }

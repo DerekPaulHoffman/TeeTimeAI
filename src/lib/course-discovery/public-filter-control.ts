@@ -1,5 +1,6 @@
 import type { Locator } from "@playwright/test";
 import { publicRentalDurationMinutes } from "./recipe";
+import { inspectPublicDropdown, selectPublicDropdown } from "./public-dropdown-control";
 
 /** Select a displayed filter, never a time or transaction control. */
 export async function selectPublicFilter(node: Locator, input: {
@@ -12,6 +13,7 @@ export async function selectPublicFilter(node: Locator, input: {
     await node.selectOption(input.value);
     return;
   }
+  if (await inspectPublicDropdown(node)) return selectPublicDropdown(node, input);
   if (!["DURATION", "PLAYERS"].includes(input.purpose) || !/^[1-9]\d{0,2}$/u.test(input.value) ||
       Number(input.value) > (input.purpose === "DURATION" ? 480 : 20) ||
       input.simulator && input.purpose === "PLAYERS" && input.value !== "1") throw new Error("UNSAFE_CONTROL");

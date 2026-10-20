@@ -32,7 +32,7 @@ const filterName = /\b(?:date|day|month|calendar|duration|length|party|players?|
 const timeSlot = /\b\d{1,2}:\d{2}\s*(?:am|pm)?\b/iu;
 
 /** UI intent is checked separately from the server request contract. Slots are never clicked. */
-export function interactiveControlKind(input: { tag: string; role: string; name: string; label: string; href?: string; calendar?: boolean; sensitiveForm?: boolean; inputType?: string; hasPopup?: string }) {
+export function interactiveControlKind(input: { tag: string; role: string; name: string; label: string; href?: string; calendar?: boolean; verifiedCalendarDay?: boolean; sensitiveForm?: boolean; inputType?: string; hasPopup?: string }) {
   const name = `${input.name} ${input.label}`.trim();
   if (input.sensitiveForm || forbidden.test(name) || timeSlot.test(input.name)) return null;
   if (input.tag === "a" && input.href && getSafeCustomerBookingUrl(input.href)) return "link" as const;
@@ -41,6 +41,7 @@ export function interactiveControlKind(input: { tag: string; role: string; name:
   if (input.tag === "input" && ["search", "date", "text", "number"].includes(input.inputType ?? "") &&
       /\b(?:search|date|duration|players?|party|location|course)\b/iu.test(name)) return "field" as const;
   if (input.role === "option") return "option" as const;
+  if (input.verifiedCalendarDay && ["div", "span"].includes(input.tag) && /^(?:[1-9]|[12]\d|3[01])$/u.test(input.name.trim())) return "calendar" as const;
   if ((input.role === "gridcell" || input.tag === "button") &&
       (filterName.test(name) || (input.role === "gridcell" || input.calendar) && /\d/u.test(input.name))) return "calendar" as const;
   return null;
@@ -53,7 +54,7 @@ export function isAnonymousBrowserReadPost(url: URL, headers: Headers, body: str
   if (headers.has("next-action")) return isMindbodyPublicReadPost(url, headers, body);
   // This known REST API must use its exact source-bound contracts. Adding a
   // GraphQL-looking field must not bypass them or authorize a transaction URL.
-  if (url.hostname === "api.passfactory.io") return false;
+  if (["api.passfactory.io", "clients.uschedule.com"].includes(url.hostname)) return false;
   if (Buffer.byteLength(body) > 32_768 || !/application\/json/iu.test(headers.get("content-type") ?? "")) return false;
   try {
     const value = JSON.parse(body);

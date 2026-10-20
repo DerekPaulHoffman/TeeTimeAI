@@ -1,7 +1,20 @@
 import { describe, expect, it } from "vitest";
 import { bindDiscoveryRecipeIdentity, discoveryBrowserFeedback, readDiscoveryControllerCheckpoint } from "../../../scripts/automation/course-discovery-worker.mjs";
+import { safeBrowserActionIssues } from "../../../scripts/automation/course-discovery-diagnostics.mjs";
 
 describe("durable discovery browser diagnostics", () => {
+  it("preserves bounded argument schema issues without rejected values or unknown property names", () => {
+    const issues = [{ path: ["target"], code: "invalid_type", input: "private-value", message: "private-value" },
+      { path: [], code: "unrecognized_keys", keys: ["selector", "private@example.org"] }];
+    const sanitized = safeBrowserActionIssues(issues);
+    expect(safeBrowserActionIssues(sanitized)).toEqual(sanitized);
+    const feedback = discoveryBrowserFeedback(undefined, "click", { code: "BROWSER_ACTION_SCHEMA_INVALID", details: { issues } });
+    expect(feedback.details.issues).toEqual([{ path: "target", code: "invalid_type" },
+      { path: "", code: "unrecognized_keys", keys: ["selector", "field"] }]);
+    const restored = readDiscoveryControllerCheckpoint({ controller: { version: 1, officialUrl: "https://venue.example/", observedNavigationUrls: [], lastFeedback: feedback } }, "https://venue.example/");
+    expect(restored.lastFeedback).toEqual(feedback);
+    expect(JSON.stringify(feedback)).not.toMatch(/private|input|message/);
+  });
   it("binds adapter address evidence to trusted demand and discards a model-supplied address when demand has none", () => {
     const proposed = { source: { venueAddress: "Untrusted address", bookingUrl: "https://venue.example/booking" } };
     const job = { request: { target: { courseId: "course" }, identity: { name: "Public course", officialUrl: "https://venue.example/", address: "12 Public Road" }, input: { timeZone: "America/New_York" } } };

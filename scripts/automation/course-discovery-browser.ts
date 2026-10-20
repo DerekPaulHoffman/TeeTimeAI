@@ -4,8 +4,10 @@ import { createCourseDiscoveryBrowserSession } from "../../src/lib/course-discov
 import { executeAccessRecipe } from "../../src/lib/course-discovery/executor";
 import { accessExecutionInputSchema, accessRecipeSchema, parseAccessRecipe } from "../../src/lib/course-discovery/recipe";
 import { remoteProviderLease } from "../../src/lib/course-discovery/remote-provider-lease";
+import { safeBrowserActionIssues } from "./course-discovery-diagnostics.mjs";
 
 function publicFailureCode(error: unknown) {
+  if (error instanceof z.ZodError) return "BROWSER_ACTION_SCHEMA_INVALID";
   const message = error instanceof Error ? error.message : "";
   if (/^[A-Z_]{1,80}$/u.test(message)) return message;
   if (/\.evaluate:|ReferenceError:|__name is not defined/iu.test(message)) return "BROWSER_EVALUATION_FAILED";
@@ -22,7 +24,7 @@ async function main() {
       source += chunk;
       if (Buffer.byteLength(source, "utf8") > 131_072) throw new Error("REQUEST_TOO_LARGE");
     }
-    const knownPaths = new Set("schemaVersion target courseId offeringId kind source officialUrl bookingUrl venueName venueAddress providerFamily timeZone engine browserTransport pageUrl availabilityResponse serverDocument endDatePath success equals permittedRoutes origin path methods queryKeys steps action selector monthYearSelector nextSelector previousSelector daySelector productSelector text purpose value proof venue date monthYear day complete empty players durationMinutes slots scope label expectedLabel collection startsAt endsAt derive availableSpots minimumPlayers capacity holes resourceId productId request url method body adapter family facilityId facilityIds alias scheduleId bookingClassId ownerKey businessId rentalProductIds".split(" "));
+    const knownPaths = new Set("schemaVersion target courseId offeringId kind source officialUrl bookingUrl venueName venueAddress providerFamily timeZone engine browserTransport pageUrl availabilityResponse serverDocument endDatePath success equals permittedRoutes origin path methods queryKeys steps action selector monthYearSelector nextSelector previousSelector daySelector productSelector text purpose value proof venue date monthYear day complete empty players durationMinutes slots scope label expectedLabel collection startsAt endsAt derive availableSpots minimumPlayers capacity holes resourceId productId request url method body adapter family facilityId facilityIds alias scheduleId bookingClassId ownerKey businessId rentalProductIds tenant serviceId serviceName clubSlug facilitySlug clubId courseBuckets courseIds name".split(" "));
     const safeMessages = new Set(["Expected a bounded public display selector", "Unknown or malformed template parameter", "Field readers must match the engine", "Outdoor recipes require available-player evidence", "Simulator recipes require offering, duration and end-time proof", "Simulator player count is saved context and cannot parameterize availability", "Simulator availability may request only one bay; saved players are context"]);
     try {
       const value = JSON.parse(source) as { recipe: unknown };
@@ -85,7 +87,8 @@ async function main() {
         if (value.action === "finish") break;
       } catch (error) {
         const code = publicFailureCode(error);
-        process.stdout.write(`${JSON.stringify({ id, ok: false, error: code })}\n`);
+        const issues = error instanceof z.ZodError ? safeBrowserActionIssues(error.issues) : undefined;
+        process.stdout.write(`${JSON.stringify({ id, ok: false, error: code, ...(issues ? { issues } : {}) })}\n`);
       }
     }
   } finally { clearTimeout(timer); input.close(); await session.close(); }

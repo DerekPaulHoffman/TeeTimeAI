@@ -83,6 +83,19 @@ describe("browser snapshot progress", () => {
     vi.advanceTimersByTime(29_999);
     expect(() => compact(snapshot("still-waiting"))).not.toThrow();
   });
+  it("delivers late response schema evidence and restarts the idle clock without changing the DOM", () => {
+    vi.useFakeTimers(); vi.setSystemTime(now);
+    const compact = createDiscoverySnapshotCompactor();
+    for (let index = 0; index < 4; index++) compact(snapshot(String(index)));
+    vi.advanceTimersByTime(30_000);
+    const response = { url: "https://example.org/calendar", status: 200, method: "GET", body: {}, schemaEvidence: { kind: "SAMPLED_SCHEMA_ONLY", fields: [] } };
+    expect(compact({ ...snapshot("new-response"), responses: [response] })).toMatchObject({ responses: [response] });
+    expect(compact(snapshot("still-current"))).toHaveProperty("text");
+    for (let index = 0; index < 3; index++) compact(snapshot(String(index)));
+    expect(() => compact(snapshot("same-time"))).not.toThrow();
+    vi.advanceTimersByTime(30_000);
+    expect(() => compact(snapshot("later"))).toThrow("DISCOVERY_NO_BROWSER_PROGRESS");
+  });
   it("does not stop a pending load and resets when content changes", () => {
     const compact = createDiscoverySnapshotCompactor();
     for (let i = 0; i < 10; i++) expect(compact(snapshot(String(i), true))).toHaveProperty("text");
@@ -551,28 +564,99 @@ describe("controller-only verification", () => {
     } finally { rmSync(sourceHome, { recursive: true, force: true }); }
   });
 
-  it("ends with a factual access checkpoint without allowing a model success assertion", async () => {
+  it.each([
+    { observed: true, failNavigation: false, reobserve: false },
+    { observed: false, failNavigation: false, reobserve: false },
+    { observed: true, failNavigation: true, reobserve: false },
+    { observed: true, failNavigation: true, reobserve: true },
+  ])("requires current browser access evidence before an access checkpoint: %j", async ({ observed, failNavigation, reobserve }) => {
+    const accessAllowed = observed && (!failNavigation || reobserve);
     const sourceHome = mkdtempSync(join(tmpdir(), "discovery-access-test-"));
     writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }));
     writeFileSync(join(sourceHome, "auth.json"), "test-auth");
     const checkpoint = vi.fn(async () => ({}));
     const client = { helperEnvironment: () => ({}), checkpoint, candidate: vi.fn(), activate: vi.fn() };
+    const replies: unknown[] = [];
     const processFactory = (options) => ({ notify: vi.fn(), close: vi.fn(async () => {}), request: async (method: string) => {
       if (method === "thread/start") return { thread: { id: "thread-1" }, approvalPolicy: "never", sandbox: { type: "readOnly" } };
       if (method === "turn/start") {
         queueMicrotask(async () => {
           await options.onMessage({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1" } } }, () => {});
+          await options.onMessage({ id: 0, method: "item/tool/call", params: { threadId: "thread-1", turnId: "turn-1", tool: "discovery_browser",
+            arguments: { action: "observe" } } }, () => {});
+          if (failNavigation) await options.onMessage({ id: 3, method: "item/tool/call", params: { threadId: "thread-1", turnId: "turn-1", tool: "discovery_browser",
+            arguments: { action: "open", url: "https://example.org/other" } } }, () => {});
+          if (reobserve) await options.onMessage({ id: 4, method: "item/tool/call", params: { threadId: "thread-1", turnId: "turn-1", tool: "discovery_browser",
+            arguments: { action: "observe" } } }, () => {});
           await options.onMessage({ id: 1, method: "item/tool/call", params: { threadId: "thread-1", turnId: "turn-1", tool: "discovery_checkpoint",
-            arguments: { summary: "The availability page requires signing in before any schedule is shown.", outcome: "ACCESS_REQUIRED" } } }, () => {});
+            arguments: { summary: "The availability page requires signing in before any schedule is shown.", outcome: "ACCESS_REQUIRED" } } }, reply => replies.push(reply));
+          if (!accessAllowed) await options.onMessage({ id: 2, method: "item/tool/call", params: { threadId: "thread-1", turnId: "turn-1", tool: "discovery_checkpoint",
+            arguments: { summary: "Public response did not expose a supported availability method.", outcome: "UNSUPPORTED" } } }, () => {});
         });
         return { turn: { id: "turn-1" } };
       }
       return {};
     } });
     try {
-      await expect(runCourseDiscoveryWorker({ job: job(), client, cwd: process.cwd(), sourceHome, recipeSchema: {}, resolveCli: () => "fixed-codex", processFactory })).rejects.toMatchObject({ code: "DISCOVERY_ACCESS_REQUIRED" });
-      expect(checkpoint).toHaveBeenCalledWith("job-1", "private-lease-value", expect.objectContaining({ outcome: "ACCESS_REQUIRED" }), undefined);
+      await expect(runCourseDiscoveryWorker({ job: job(), client, cwd: process.cwd(), sourceHome, recipeSchema: {}, resolveCli: () => "fixed-codex", processFactory,
+        browserFactory: () => ({ close: async () => {}, request: async input => {
+          if (input.action === "open") throw Object.assign(new Error("BROWSER_NAVIGATION_FAILED"), { code: "BROWSER_NAVIGATION_FAILED" });
+          return { url: "https://example.org/", text: observed ? "Verify you are human" : "", controls: [], accessRequirementObserved: observed };
+        } }),
+      })).rejects.toMatchObject({ code: accessAllowed ? "DISCOVERY_ACCESS_REQUIRED" : "DISCOVERY_UNSUPPORTED" });
+      expect(checkpoint).toHaveBeenCalledWith("job-1", "private-lease-value", expect.objectContaining({ outcome: accessAllowed ? "ACCESS_REQUIRED" : "UNSUPPORTED" }), undefined);
+      if (!accessAllowed) {
+        expect(JSON.stringify(replies)).toContain("DISCOVERY_ACCESS_NOT_CONFIRMED");
+        expect(checkpoint.mock.calls.some(call => call[2].outcome === "ACCESS_REQUIRED")).toBe(false);
+      }
       expect(client.candidate).not.toHaveBeenCalled(); expect(client.activate).not.toHaveBeenCalled();
+    } finally { rmSync(sourceHome, { recursive: true, force: true }); }
+  });
+
+  it("releases a failed finish and reopens within the original deadline while retaining metrics", async () => {
+    const sourceHome = mkdtempSync(join(tmpdir(), "discovery-reset-test-"));
+    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }));
+    writeFileSync(join(sourceHome, "auth.json"), "test-auth");
+    const inputJob = job();
+    const checkpoint = vi.fn(async () => ({}));
+    const configurations: Array<{ deadlineAt: string }> = [];
+    const closes: ReturnType<typeof vi.fn>[] = [];
+    const replies: unknown[] = [];
+    const processFactory = options => ({ notify: vi.fn(), close: vi.fn(async () => {}), request: async (method: string) => {
+      if (method === "thread/start") return { thread: { id: "thread-1" }, approvalPolicy: "never", sandbox: { type: "readOnly" } };
+      if (method === "turn/start") {
+        queueMicrotask(async () => {
+          await options.onMessage({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1" } } }, () => {});
+          for (const [index, args] of [{ action: "open", url: "https://example.org/" }, { action: "finish" },
+            { action: "open", url: "https://example.org/" }].entries()) {
+            await options.onMessage({ id: index + 1, method: "item/tool/call", params: { threadId: "thread-1", turnId: "turn-1",
+              tool: "discovery_browser", arguments: args } }, reply => replies.push(reply));
+          }
+          await options.onMessage({ id: 4, method: "item/tool/call", params: { threadId: "thread-1", turnId: "turn-1",
+            tool: "discovery_checkpoint", arguments: { summary: "Verified reset", outcome: "UNSUPPORTED" } } }, () => {});
+        });
+        return { turn: { id: "turn-1" } };
+      }
+      return {};
+    } });
+    try {
+      const failure = await runCourseDiscoveryWorker({ job: inputJob, client: { helperEnvironment: () => ({}), checkpoint }, cwd: process.cwd(), sourceHome,
+        recipeSchema: {}, resolveCli: () => "fixed-codex", processFactory,
+        browserFactory: config => {
+          configurations.push(config); const ordinal = configurations.length;
+          const close = vi.fn(async () => {}); closes.push(close);
+          return { close, request: async action => {
+            if (action.action === "finish") throw Object.assign(new Error("Page already closed"), { code: "BROWSER_UNAVAILABLE" });
+            return { url: "https://example.org/", controls: [], requestCount: ordinal, responseBytes: ordinal === 1 ? 100 : 150 };
+          } };
+        },
+      }).catch(error => error);
+      expect(failure).toMatchObject({ code: "DISCOVERY_UNSUPPORTED", discoveryMetrics: { providerRequestsObserved: 3, responseBytesObserved: 250 } });
+      expect(configurations).toHaveLength(2);
+      expect(configurations.every(config => config.deadlineAt === inputJob.deadlineAt)).toBe(true);
+      expect(closes.every(close => close.mock.calls.length === 1)).toBe(true);
+      expect(JSON.stringify(replies[1])).toContain("original deadline");
+      expect(checkpoint.mock.calls.at(-1)![2]).toMatchObject({ controller: { observedNavigationUrls: ["https://example.org/"] } });
     } finally { rmSync(sourceHome, { recursive: true, force: true }); }
   });
 
@@ -629,15 +713,17 @@ describe("controller-only verification", () => {
     writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }));
     writeFileSync(join(sourceHome, "auth.json"), "test-auth");
     const configured: Array<{ deadlineAt: string; helperEnvironment: Record<string, string> }> = [];
+    const observedUrl = "https://example.org/#teetimes";
+    const openedUrls: string[] = [];
     const checkpoint = vi.fn(async () => ({}));
     const client = { helperEnvironment: () => ({ COURSE_DISCOVERY_BROWSER_TRANSPORT: "NATIVE_CHROME" }), checkpoint };
-    const inputJob = { ...job(), request: { ...job().request, identity: { name: "Public golf", officialUrl: "https://example.org/", bookingUrl: "https://example.org/" } } };
+    const inputJob = { ...job(), request: { ...job().request, identity: { name: "Public golf", officialUrl: observedUrl, bookingUrl: observedUrl } } };
     const processFactory = (options) => ({ notify: vi.fn(), close: vi.fn(async () => {}), request: async (method: string) => {
       if (method === "thread/start") return { thread: { id: "thread-1" }, approvalPolicy: "never", sandbox: { type: "readOnly" } };
       if (method === "turn/start") {
         queueMicrotask(async () => {
           await options.onMessage({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1" } } }, () => {});
-          await options.onMessage({ id: 1, method: "item/tool/call", params: { threadId: "thread-1", turnId: "turn-1", tool: "discovery_browser", arguments: { action: "open", url: "https://example.org/" } } }, () => {});
+          await options.onMessage({ id: 1, method: "item/tool/call", params: { threadId: "thread-1", turnId: "turn-1", tool: "discovery_browser", arguments: { action: "open", url: observedUrl } } }, () => {});
           await options.onMessage({ id: 2, method: "item/tool/call", params: { threadId: "thread-1", turnId: "turn-1", tool: "discovery_checkpoint", arguments: { summary: "Bounded test complete", outcome: "UNSUPPORTED" } } }, () => {});
         });
         return { turn: { id: "turn-1" } };
@@ -646,14 +732,18 @@ describe("controller-only verification", () => {
     } });
     try {
       await expect(runCourseDiscoveryWorker({ job: inputJob, client, cwd: process.cwd(), sourceHome, recipeSchema: {}, resolveCli: () => "fixed-codex", processFactory,
-        browserFactory: config => { configured.push(config); return { close: async () => {}, request: async () => ({ url: "https://example.org/", text: "Public page", controls: [], navigationStatus: configured.length === 1 ? status : 200,
-          browserTransport: config.helperEnvironment.COURSE_DISCOVERY_BROWSER_TRANSPORT, requestCount: 1, responseBytes: 100 }) }; },
+        browserFactory: config => { configured.push(config); return { close: async () => {}, request: async input => {
+          openedUrls.push(input.url);
+          return { url: observedUrl, text: "Public page", controls: [], navigationStatus: status,
+            browserTransport: config.helperEnvironment.COURSE_DISCOVERY_BROWSER_TRANSPORT, requestCount: 1, responseBytes: 100 };
+        } }; },
       })).rejects.toMatchObject({ code: "DISCOVERY_UNSUPPORTED" });
       expect(configured).toHaveLength(status === 403 ? 2 : 1);
       expect(configured[0].helperEnvironment.COURSE_DISCOVERY_BROWSER_TRANSPORT).toBe("NATIVE_CHROME");
       if (status === 403) expect(configured[1].helperEnvironment.COURSE_DISCOVERY_BROWSER_TRANSPORT).toBe("PINNED_HTTP");
+      expect(openedUrls).toEqual(Array.from({ length: status === 403 ? 2 : 1 }, () => observedUrl));
       expect(configured.every(config => config.deadlineAt === inputJob.deadlineAt)).toBe(true);
-      expect(checkpoint).toHaveBeenLastCalledWith("job-1", "private-lease-value", expect.objectContaining({ controller: expect.objectContaining({ observedNavigationUrls: ["https://example.org/"], officialSourceObserved: true,
+      expect(checkpoint).toHaveBeenLastCalledWith("job-1", "private-lease-value", expect.objectContaining({ controller: expect.objectContaining({ observedNavigationUrls: [observedUrl], officialSourceObserved: true,
         browserTransport: status === 403 ? "PINNED_HTTP" : "NATIVE_CHROME", transportFallbackUsed: status === 403 }) }), undefined);
     } finally { rmSync(sourceHome, { recursive: true, force: true }); }
   });

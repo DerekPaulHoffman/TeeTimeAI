@@ -68,6 +68,8 @@ describe("course access recipes", () => {
     expect(isActiveBrowserAccessChallenge("First time, you will have to select a picture in CAPTCHA when booking.", "Public golf")).toBe(false);
     expect(isActiveBrowserAccessChallenge("Verify you are human to continue", "Just a moment...")).toBe(true);
     expect(isActiveBrowserAccessChallenge("Checking your browser before continuing", "Golf")).toBe(true);
+    expect(isActiveBrowserAccessChallenge("You must sign in to book. Public tee times are shown below.", "Golf")).toBe(false);
+    expect(isActiveBrowserAccessChallenge("You must sign in to view tee times.", "Golf")).toBe(true);
   });
   it.each(["script", "input[type=password]", "#token", "iframe", "div:has(script)", "x;alert(1)"])("rejects unsafe selector %s", selector => {
     expect(recipeSelectorSchema.safeParse(selector).success).toBe(false);

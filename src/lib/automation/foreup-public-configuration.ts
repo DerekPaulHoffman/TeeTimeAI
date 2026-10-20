@@ -76,7 +76,8 @@ export function parseForeupPublicConfiguration(input: {
   const matching = schedules.filter((schedule) => {
     if (!schedule || typeof schedule !== "object" || Array.isArray(schedule)) return false;
     const entry = schedule as Record<string, unknown>;
-    const title = normalizeName(entry.title);
+    // A provider's structural schedule suffix is not part of venue identity.
+    const title = normalizeName(entry.title).replace(/\btee sheet$/u, "").trim();
     return positiveProviderId(entry.course_id) === facilityId &&
       title.length >= 5 &&
       (targetName === title || targetName.endsWith(` ${title}`));
@@ -86,13 +87,21 @@ export function parseForeupPublicConfiguration(input: {
   const scheduleId = positiveProviderId(selected.teesheet_id);
   const classes = selected.booking_classes;
   if (!scheduleId || !Array.isArray(classes) || classes.length > 20) return null;
-  const publicClasses = classes.filter((bookingClass) => {
+  const visibleClasses = classes.filter((bookingClass) => {
     if (!bookingClass || typeof bookingClass !== "object" || Array.isArray(bookingClass)) return false;
     const entry = bookingClass as Record<string, unknown>;
     return positiveProviderId(entry.teesheet_id) === scheduleId &&
       String(entry.active) === "1" && String(entry.hidden) === "0" &&
       positiveProviderId(entry.booking_class_id) !== null;
   });
+  const labelledPublic = visibleClasses.filter(bookingClass => {
+    const name = (bookingClass as Record<string, unknown>).name;
+    return typeof name === "string" && /^public$/iu.test(name.trim());
+  });
+  // Public and membership classes may share one public page. Select only its
+  // explicit public class; retain the legacy single unlabelled configuration.
+  const publicClasses = labelledPublic.length ? labelledPublic : visibleClasses.length === 1 &&
+    (visibleClasses[0] as Record<string, unknown>).name === undefined ? visibleClasses : [];
   if (publicClasses.length !== 1) return null;
   const bookingClassId = positiveProviderId((publicClasses[0] as Record<string, unknown>).booking_class_id)!;
   return {

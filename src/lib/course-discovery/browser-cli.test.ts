@@ -94,6 +94,10 @@ syncBuiltinESMExports();
       const duration = opened.result.controls.find((control: { selector: string }) => control.selector === '[id="duration"]');
       expect(duration.options).toHaveLength(2);
       expect(opened.result.controls.find((control: { selector: string }) => control.selector === '[id="choose"]')).toMatchObject({ kind: "product", product: { selector: '[id="rental"]', durationMinutes: 60 } });
+      const malformed = await request({ id: 20, action: "click", selector: "#PRIVATE_VALUE" });
+      expect(malformed).toMatchObject({ ok: false, error: "BROWSER_ACTION_SCHEMA_INVALID",
+        issues: expect.arrayContaining([expect.objectContaining({ path: "target" })]) });
+      expect(JSON.stringify(malformed)).not.toContain("PRIVATE_VALUE");
       const selected = await request({ id: 2, action: "select", target: duration.target, option: "60" });
       expect(selected.ok, stderr).toBe(true);
       const finished = await request({ id: 3, action: "finish" });

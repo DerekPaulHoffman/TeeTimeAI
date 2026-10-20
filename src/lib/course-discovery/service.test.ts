@@ -335,6 +335,31 @@ describe("bounded course discovery persistence", () => {
     expect(mocks.db.$transaction).toHaveBeenCalledTimes(1);
   });
 
+  it("retries a direct adapter commit conflict without consuming a job attempt", async () => {
+    const error = Object.assign(new Error("TransactionWriteConflict"), {
+      name: "DriverAdapterError", cause: { kind: "TransactionWriteConflict" },
+    });
+    mocks.db.$transaction.mockRejectedValueOnce(error);
+    const created = await ensureDiscoveryJob({ courseId: "course1", searchId: "search1" });
+    expect(created).toMatchObject({ status: "QUEUED", attempts: 0, firstPickedUpAt: null });
+    expect(mocks.db.$transaction).toHaveBeenCalledTimes(2);
+  });
+
+  it("bounds repeated serialization conflicts and leaves admission unchanged", async () => {
+    const error = new Prisma.PrismaClientKnownRequestError("concurrent write", { code: "P2034", clientVersion: "7.9.1" });
+    mocks.db.$transaction.mockRejectedValue(error);
+    await expect(ensureDiscoveryJob({ courseId: "course1", searchId: "search1" })).rejects.toBe(error);
+    expect(mocks.db.$transaction).toHaveBeenCalledTimes(5);
+    expect(mocks.db.courseDiscoveryJob.create).not.toHaveBeenCalled();
+  });
+
+  it("does not retry other direct adapter failures", async () => {
+    const error = Object.assign(new Error("AuthenticationFailed"), { name: "DriverAdapterError", cause: { kind: "AuthenticationFailed" } });
+    mocks.db.$transaction.mockRejectedValueOnce(error);
+    await expect(ensureDiscoveryJob({ courseId: "course1", searchId: "search1" })).rejects.toBe(error);
+    expect(mocks.db.$transaction).toHaveBeenCalledTimes(1);
+  });
+
   it("replaces a stale active pointer with a new discovery job without deleting history", async () => {
     course.activeAccessRecipeId = "stale-recipe";
     mocks.db.courseAccessRecipe.findUnique.mockResolvedValue({ id: "stale-recipe", targetKey: "course:course1", sourceFingerprint: "old", payload: recipe });

@@ -4,5 +4,6 @@ import { getKnownProviderFamilyForHostname, normalizeProviderFamilyKey } from "@
  * descriptive family label must never select the request-concurrency key. */
 export function requestFamilyForUrl(value: string) {
   const hostname = new URL(value).hostname;
+  if (hostname === "clients.uschedule.com") return normalizeProviderFamilyKey("USCHEDULE");
   return getKnownProviderFamilyForHostname(hostname) ?? normalizeProviderFamilyKey(hostname);
 }

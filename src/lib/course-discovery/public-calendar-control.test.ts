@@ -30,4 +30,13 @@ describe.runIf(existsSync(executablePath))("bounded public calendar navigation",
     await withPage(fixture.replace('<button class="day">23</button>', '<button class="day">22</button>'), page =>
       expect(selectPublicCalendarDate(page, { ...controls, date: "2026-10-22" })).rejects.toThrow("AMBIGUOUS_CALENDAR_CONTROL"));
   });
+  it("replays a proved data-labelled div calendar with nested day wrappers", async () => {
+    const calendar = '<div data-testid="variable-week-calendar"><p id="month">October 2026</p><p>Mo Tu We Th Fr Sa Su</p>' +
+      '<div><div id="requested" data-testid="calendar-day-2026-10-23"><span>23</span></div></div></div>' +
+      '<output id="selected"></output><script>document.querySelector("#requested").onclick=()=>document.querySelector("#selected").textContent="2026-10-23";</script>';
+    await withPage(calendar, async page => {
+      await selectPublicCalendarDate(page, { ...controls, daySelector: '[data-testid^="calendar-day-"]', date: "2026-10-23" });
+      expect(await page.locator("#selected").innerText()).toBe("2026-10-23");
+    });
+  });
 });

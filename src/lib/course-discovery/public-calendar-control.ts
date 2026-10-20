@@ -1,4 +1,5 @@
 import type { Locator, Page } from "@playwright/test";
+import { isObservedPublicCalendarDay } from "./public-calendar-day";
 
 const monthNames = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
 
@@ -24,7 +25,7 @@ async function assertCalendarControl(node: Locator, direction?: number) {
     let parent: Element | null = element;
     let calendar = false;
     for (let depth = 0; parent && depth < 7; depth++, parent = parent.parentElement) {
-      if (["grid", "dialog"].includes(parent.getAttribute("role") ?? "") || /calendar|date.?picker/iu.test(parent.getAttribute("class") ?? "")) calendar = true;
+      if (["grid", "dialog"].includes(parent.getAttribute("role") ?? "") || /calendar|date.?picker/iu.test(`${parent.getAttribute("class") ?? ""} ${parent.getAttribute("data-testid") ?? ""}`)) calendar = true;
     }
     return { calendar, tag: element.tagName.toLowerCase(),
       label: (element.getAttribute("aria-label") || (element as HTMLElement).innerText || "").replace(/\s+/gu, " ").trim(),
@@ -62,7 +63,7 @@ export async function selectPublicCalendarDate(page: Page, input: {
   }
   if (current !== target) throw new Error("CALENDAR_MONTH_LIMIT");
   const button = await uniqueVisible(page, input.daySelector, day);
-  await assertCalendarControl(button);
+  if (!await isObservedPublicCalendarDay(button, input.date)) await assertCalendarControl(button);
   await button.click();
   return button;
 }

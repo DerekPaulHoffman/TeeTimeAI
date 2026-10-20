@@ -26,6 +26,15 @@ cancels the affected host's tunnels before the lease is released. Deadlines, req
 counts, response bytes, connections, and sockets are bounded. No fallback
 silently changes the saved transport.
 
+Decoded responses are capped at 16 MB per script, 6 MB per stylesheet, and
+2 MB per document or data response, with 48 MB total per disposable browser
+session. The native CONNECT proxy separately caps encrypted wire traffic at
+24 MB; request and connection caps are unchanged. These are different byte
+measurements: the observed public calendar bootstrap was 2.76 MB compressed
+and 14.50 MB decoded. Its official-site-to-calendar path exceeded the previous
+24 MB decoded session limit. A rejected body is not included in the worker's
+accepted-response byte total, so that metric alone understates rejected traffic.
+
 Neither transport is proof that sites readable by the installed Tee Time Spot
 Local Reader will work in the new executor. The installed extension and its
 existing provider parsers are unchanged. Active human-verification, login, and
@@ -176,12 +185,55 @@ keeps an already-sent opening sent. Ambiguous identities stay separate.
 
 ## Evidence level
 
+The fixed `WHOOSH` simulator reader uses two fixed anonymous GraphQL queries.
+It verifies the observed club/facility identity, provider timezone, simulator
+and golf type, public flags, complete course/bucket connections, and one complete
+requested-date agenda. Both minimum and maximum duration equal the request;
+one group is requested independently of saved player context. The public
+client's `availableTimes` and `seriesLength * 15` contract proves the available
+duration. Display blocks are not interpreted as free intervals or subtracted
+again. GraphQL errors, partial connections, unknown resources, contradictory
+dates, insufficient duration and blocking restrictions fail closed.
+
+Whoosh resource identity is the provider's pooled course bucket, not an inferred
+physical bay. Provider scheduling capacity is not recorded as a golfer limit;
+`capacity` remains null. The alert link retains the observed official agenda
+URL, which can contain `today` or the discovery date. Users may need to select
+the date shown in the alert after following that link; execution still reads
+and verifies the requested date independently.
+
+The fixed `USCHEDULE` existing-adapter recipe binds one observed public simulator
+rental by tenant, service ID and exact service name. It rechecks that the tenant
+matches the canonical venue name (punctuation, spaces and `&`/`and` only), the
+actual document tenant, the selected rental, one-bay quantity, unrestricted
+resource selector and requested duration on every returned page. A literal
+provider `chosenDate` declaration is parsed without execution and must match
+the requested date. The reader follows only the exact observed continuation
+cursor and requires a later-day witness before declaring the requested day
+complete. A partial first page cannot establish empty or complete availability.
+
+That reader creates a fresh, execution-only `ASP.NET_SessionId` from the exact
+public booking GET. It injects only that anonymous cookie into the same pinned
+HTTPS origin and tenant route, keeps it in memory, and discards it when the read
+ends. Recipe inputs, environment credentials and previous browser sessions
+cannot supply the cookie. Only observed public rental/date/duration filters and
+the fixed pagination operation are permitted; time, payment, cart, contact,
+membership and checkout operations remain excluded. The public filter browser
+policy has the same bounded operation semantics, but complete USchedule date
+results use the fixed adapter rather than generic DOM presence as proof.
+
 Cold discovery snapshots the available model catalog before claiming work and
 reuses that immutable snapshot for its workers. A temporarily incomplete local
 catalog must not consume a database attempt. Warm recipe execution does not
 require a model catalog. Local validation permits at most five seconds of
 workstation/database clock difference; database lease and deadline expiry checks
 remain strict, and retries retain the first pickup's original deadline.
+
+Postgres serialization conflicts retry the complete transaction at most five
+times with bounded backoff. This includes commit-time conflicts surfaced
+directly by the Prisma PostgreSQL adapter. Each retry rechecks current ownership
+and database time; it does not consume a discovery attempt or extend a lease or
+deadline. Authentication and unrelated database failures are not retried here.
 
 The focused recipe, executor, browser-session, and runtime-window tests include
 isolated Chrome fixtures with an in-memory transport, malformed and missing
