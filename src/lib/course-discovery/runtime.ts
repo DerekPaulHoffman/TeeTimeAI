@@ -8,6 +8,8 @@ import { parseCourseLocalWindowEnd } from "@/lib/searches/window-end";
 import { zonedDateTimeToDate } from "@/lib/timezones";
 import { assertActiveAccessRecipeInTransaction, getActiveAccessRecipe, type DiscoveryTarget } from "./service";
 import { accessExecutionInputSchema, accessExecutionResultSchema, type AccessExecutionInput, type AccessExecutionResult } from "./recipe";
+import { isReaderObservationCurrent } from "./observation-clock";
+import { isTeeItUpRecipeSlotLink } from "./teeitup-recipe-source";
 
 const EXECUTION_TTL_MS = 180_000;
 const RESULT_TTL_MS = 90_000;
@@ -146,16 +148,19 @@ export async function completeRecipeExecution(id: string, leaseToken: string, va
     if (!search || search.status !== "ACTIVE" || !await isDiscoveryPilotSearch(search.id) || search.alertGeneration !== context.alertGeneration ||
         search.scheduleVersion !== job.scheduleVersion || target?.activeAccessRecipeId !== context.recipeId ||
         !search.preferences.some(pref => pref.courseId === context.target.courseId && (!context.target.offeringId || pref.offeringId === context.target.offeringId)) ||
-        result.evidence.recipeHash !== context.recipeHash || Date.parse(result.observedAt) < job.claimedAt!.getTime() ||
-        Date.parse(result.observedAt) > now.getTime() + 5_000) throw new Error("Recipe execution is no longer current");
+        result.evidence.recipeHash !== context.recipeHash || !job.claimedAt ||
+        !isReaderObservationCurrent(Date.parse(result.observedAt), job.claimedAt.getTime(), now.getTime())) throw new Error("Recipe execution is no longer current");
     if (result.complete && (!result.evidence.venueVerified || !result.evidence.dateVerified || !result.evidence.capacityVerified ||
         !result.evidence.durationVerified || !result.evidence.completeVerified)) throw new Error("Incomplete recipe evidence");
     const stored = await tx.courseAccessRecipe.findUniqueOrThrow({ where: { id: context.recipeId } });
     await assertActiveAccessRecipeInTransaction(tx, context.target, context.recipeId);
     const bookingUrl = (stored.payload as unknown as { source: { bookingUrl: string } }).source.bookingUrl;
+    const storedRecipe = stored.payload as unknown as { engine: string; adapter?: { family: string; facilityIds?: number[] } };
     if (result.sourceUrl !== bookingUrl) throw new Error("Recipe source changed");
     for (const slot of result.slots) {
-      if (slot.bookingUrl !== bookingUrl || (context.target.kind === "OUTDOOR" && slot.availableSpots < context.input.players) ||
+      const correctBookingUrl = storedRecipe.engine === "EXISTING_ADAPTER" && storedRecipe.adapter?.family === "TEEITUP"
+        ? isTeeItUpRecipeSlotLink(bookingUrl, context.input.date, storedRecipe.adapter.facilityIds ?? [], slot) : slot.bookingUrl === bookingUrl;
+      if (!correctBookingUrl || (context.target.kind === "OUTDOOR" && slot.availableSpots < context.input.players) ||
           !isRecipeSlotWithinWindow(slot, context.input, now) ||
           (context.input.durationMinutes && (!slot.endsAt || Date.parse(slot.endsAt) - Date.parse(slot.startsAt) !== context.input.durationMinutes * 60_000))) throw new Error("Invalid recipe slot");
     }

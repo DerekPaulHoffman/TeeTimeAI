@@ -181,6 +181,7 @@ describe("fetchCourseTeeSheet", () => {
     expect(adapterMocks.fetchTeeItUpTeeSheet).toHaveBeenCalledWith({
       courseId: "course-1",
       date,
+      players: 3,
       timeZone: "America/New_York",
       metadata
     });

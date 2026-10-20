@@ -8,6 +8,8 @@ import { getSyntheticMultiCycleExpiresAt } from "@/lib/automation/synthetic-test
 import { parseCourseLocalWindowEnd } from "@/lib/searches/window-end";
 import { activeDiscoveryPilotSearchIds, isDiscoveryPilotSearch } from "./config";
 import { hasLegacyDiscoveryOwner } from "./legacy-exclusion";
+import { isReaderObservationCurrent } from "./observation-clock";
+import { isTeeItUpRecipeSlotLink } from "./teeitup-recipe-source";
 import {
   accessExecutionInputSchema,
   accessExecutionResultSchema,
@@ -25,7 +27,7 @@ export const DISCOVERY_MAX_ATTEMPTS = 2;
 export type DiscoveryTarget = { courseId: string; offeringId?: string; kind: "OUTDOOR" | "SIMULATOR" };
 export type DiscoveryRequest = {
   target: DiscoveryTarget;
-  identity: { name: string; officialUrl: string | null; bookingUrl: string | null; timeZone: string; providerFamily: string | null };
+  identity: { name: string; officialUrl: string | null; bookingUrl: string | null; timeZone: string; providerFamily: string | null; address?: string };
   input: AccessExecutionInput;
   demand?: { searchId: string; alertGeneration: number };
 };
@@ -49,7 +51,7 @@ export function isRetryableDiscoveryTransactionError(error: unknown) {
 }
 
 const courseSelect = {
-  id: true, name: true, website: true, detectedBookingUrl: true, timeZone: true,
+  id: true, name: true, address: true, website: true, detectedBookingUrl: true, timeZone: true,
   providerFamilyKey: true, bookingMetadata: true, isPublic: true, activeAccessRecipeId: true,
   bookingMethod: true, bookingAccessMode: true, automationEligibility: true, automationReason: true,
 } satisfies Prisma.CourseSelect;
@@ -100,11 +102,14 @@ async function loadSource(tx: Tx, target: Pick<DiscoveryTarget, "courseId" | "of
   if (!course || !target.offeringId && course.isPublic === false) conflict();
   const offering = target.offeringId ? await tx.courseOffering.findUnique({ where: { id: target.offeringId }, select: offeringSelect }) : null;
   if (target.offeringId && (!offering || offering.courseId !== course.id || offering.kind !== "SIMULATOR" || !offering.active || offering.publicAccessStatus === "NOT_PUBLIC")) conflict();
-  const identity = {
+  const fingerprintIdentity = {
     name: course.name, officialUrl: course.website, bookingUrl: offering ? offering.bookingUrl : course.detectedBookingUrl,
     timeZone: course.timeZone, providerFamily: offering ? offering.providerFamilyKey : course.providerFamilyKey,
   };
-  const sourceFingerprint = digest({ identity, metadata: offering ? offering.providerMetadata : course.bookingMetadata,
+  // Preserve existing fingerprints; address-bound recipes separately recheck
+  // the trusted address at proposal, proof, activation and every later replay.
+  const identity = { ...fingerprintIdentity, ...(course.address ? { address: course.address } : {}) };
+  const sourceFingerprint = digest({ identity: fingerprintIdentity, metadata: offering ? offering.providerMetadata : course.bookingMetadata,
     access: offering ? { publicAccessStatus: offering.publicAccessStatus, automationEligibility: offering.automationEligibility }
       : { bookingMethod: course.bookingMethod, bookingAccessMode: course.bookingAccessMode, automationEligibility: course.automationEligibility, automationReason: course.automationReason },
     offering: offering ? { id: offering.id, maxPartySize: offering.maxPartySize, supportedDurationsMinutes: offering.supportedDurationsMinutes } : null });
@@ -283,6 +288,7 @@ function bindRecipe(recipe: CourseAccessRecipeData, source: Source, sourceEviden
   const normalizeName = (value: string) => value.normalize("NFKC").replace(/\s+/gu, " ").trim().toLocaleLowerCase("en-US");
   if (canonical(recipe.target) !== canonical(source.target) || recipe.source.timeZone !== source.identity.timeZone ||
     normalizeName(recipe.source.venueName) !== normalizeName(source.identity.name) ||
+    recipe.source.venueAddress !== undefined && normalizeName(recipe.source.venueAddress) !== normalizeName(source.identity.address ?? "") ||
     source.identity.officialUrl && recipe.source.officialUrl !== source.identity.officialUrl) conflict();
   if (sourceEvidence && (sourceEvidence.officialUrl !== recipe.source.officialUrl ||
       sourceEvidence.observedBookingUrl !== recipe.source.bookingUrl)) conflict();
@@ -333,7 +339,7 @@ export async function recordDiscoveryVerification(input: { jobId: string; leaseT
       return { verifiedCount: verification.challenges.filter(item => item.result).length };
     }
     const observed = Date.parse(result.observedAt);
-    if (observed < Date.parse(challenge.issuedAt) || observed > now.getTime() + 5_000 ||
+    if (!isReaderObservationCurrent(observed, Date.parse(challenge.issuedAt), now.getTime()) ||
       result.sourceUrl !== recipe.source.bookingUrl || !result.complete || !["AVAILABLE", "EMPTY"].includes(result.status) ||
       !result.evidence.venueVerified || !result.evidence.dateVerified || !source.offering && !result.evidence.capacityVerified ||
       !result.evidence.durationVerified || !result.evidence.completeVerified ||
@@ -342,6 +348,8 @@ export async function recordDiscoveryVerification(input: { jobId: string; leaseT
       const start = localSlotTime(slot.startsAt, challenge.input.timeZone);
       if (start.date !== challenge.input.date || start.time < challenge.input.startTime || start.time >= challenge.input.endTime ||
         new URL(slot.bookingUrl).origin !== new URL(recipe.source.bookingUrl).origin) conflict();
+      if (recipe.engine === "EXISTING_ADAPTER" && recipe.adapter.family === "TEEITUP" &&
+          !isTeeItUpRecipeSlotLink(recipe.source.bookingUrl, challenge.input.date, recipe.adapter.facilityIds, slot)) conflict();
       if (!source.offering && slot.availableSpots < challenge.input.players) conflict();
       if (challenge.input.durationMinutes) {
         if (!slot.endsAt || Date.parse(slot.endsAt) - Date.parse(slot.startsAt) !== challenge.input.durationMinutes * 60_000) conflict();

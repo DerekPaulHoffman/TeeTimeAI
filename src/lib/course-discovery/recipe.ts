@@ -3,6 +3,7 @@ import { isIP } from "node:net";
 import { z } from "zod";
 import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import { existingAdapterMetadataSchema } from "./existing-adapter-schema";
+import { isServerDocumentSelector } from "./server-document-proof";
 
 const secret = /(?:password|secret|token|cookie|session|credential|authorization|api.?key|email|phone)/iu;
 const forbiddenPath = /(?:^|\/)(?:login|signin|signup|auth|account|checkout|cart|payment|pay|purchase|orders?|confirm|admin)(?:\/|$)|(?:^|\/)(?:bookings?|reservations?|reserve)\/(?:create|submit|confirm|cancel|hold|reserve)(?:\/|$)/iu;
@@ -78,16 +79,19 @@ const stepSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("fill"), selector: recipeSelectorSchema, value: recipeTemplateSchema,
     purpose: z.enum(["DATE", "PLAYERS", "DURATION"]) }).strict(),
   z.object({ action: z.literal("clickFilter"), selector: recipeSelectorSchema, text: recipeTemplateSchema,
-    purpose: z.enum(["OPEN_DATE_PICKER", "NEXT_MONTH", "PREVIOUS_MONTH", "SELECT_DATE", "OPEN_FILTER", "SELECT_FILTER", "RUN_SEARCH"]) }).strict().describe("Click only an observed public calendar/filter control. SELECT_DATE must use an observed reusable day selector plus text {{day}}; the executor requires exactly one visible text match."),
+    purpose: z.enum(["OPEN_DATE_PICKER", "NEXT_MONTH", "PREVIOUS_MONTH", "SELECT_DATE", "APPLY_DATE", "OPEN_FILTER", "SELECT_FILTER", "RUN_SEARCH"]) }).strict().describe("Click only an observed public calendar/filter control. SELECT_DATE must use an observed reusable day selector plus text {{day}}; the executor requires exactly one visible text match. APPLY_DATE may click Apply/Apply dates only inside the same proven public month/day picker after selecting the requested day. It still requires a fresh successful date-bound response and full source-date proof."),
   z.object({ action: z.literal("waitFor"), selector: recipeSelectorSchema }).strict(),
 ]);
 const availabilityResponseSchema = z.object({
+  kind: z.enum(["JSON", "SERVER_DOCUMENT"]).optional(),
   url: urlTemplate, method: z.enum(["GET", "POST"]),
   date: z.object({ source: z.enum(["QUERY", "JSON_BODY"]), path: jsonPath }).strict(),
   endDatePath: jsonPath.optional(),
   success: z.object({ path: jsonPath, equals: z.union([z.string().max(200), z.number().finite(), z.boolean(), z.null()]) }).strict().optional(),
 }).strict().refine(value => value.method === "POST" || value.date.source === "QUERY", "GET date binding must read a query parameter")
-  .describe("Required completed availability-response fence. Exact observed URL/method and date parameter (QUERY key or JSON_BODY path) must equal the requested YYYY-MM-DD; optional endDatePath must equal the same day. success checks a JSON response field against an observed scalar (for example code equals 200), and is required for response-only completion. A successful matching response must start after the last date/filter change. Only the runtime-verified PassFactory /ftbb client-only DURATION select may follow a completed day response without another read. Any new availability request retires that carried proof. This proves freshness, not availability by itself; DOM resource/date/duration/empty proof is still required.");
+  .refine(value => value.kind !== "SERVER_DOCUMENT" || value.method === "GET" && value.date.source === "QUERY" && !value.success && !value.endDatePath,
+    "Server document proof requires a dated GET document")
+  .describe("Required completed availability-response fence. Exact URL/method and date parameter must equal requested YYYY-MM-DD. Default JSON uses observed scalar success for response-only completion. Explicit kind SERVER_DOCUMENT requires GET/query date and proof.complete {serverDocument:true}: a complete text/html main document whose inert source venue/date/slot fields equal the settled visible DOM; outdoor simple CSS only, no pagination or later data fetch. A matching response must start after the last date/filter change. Only the runtime-verified PassFactory /ftbb client-only DURATION select may carry a completed day response. This proves freshness, not availability by itself; independent capacity/duration/empty proof remains required.");
 const timeZone = z.string().max(80).refine(value => {
   try { new Intl.DateTimeFormat("en-US", { timeZone: value }); return true; } catch { return false; }
 });
@@ -104,11 +108,13 @@ export type AccessExecutionInput = z.infer<typeof accessExecutionInputSchema>;
 const common = {
   schemaVersion: z.literal(1),
   target: z.object({ courseId: z.string().min(1).max(128), offeringId: z.string().min(1).max(128).optional(), kind: z.enum(["OUTDOOR", "SIMULATOR"]) }).strict(),
-  source: z.object({ officialUrl: safeUrl, bookingUrl: safeUrl, venueName: z.string().min(2).max(200), providerFamily: z.string().min(1).max(80).regex(/^[A-Za-z0-9._-]+$/u), timeZone }).strict(),
+  source: z.object({ officialUrl: safeUrl, bookingUrl: safeUrl, venueName: z.string().min(2).max(200),
+    venueAddress: z.string().trim().min(3).max(1024).refine(value => !/[\u0000-\u001f\u007f]/u.test(value)).optional(),
+    providerFamily: z.string().min(1).max(80).regex(/^[A-Za-z0-9._-]+$/u), timeZone }).strict(),
   permittedRoutes: z.array(recipeRouteSchema).min(1).max(40),
   proof: z.object({ venue: recipeFieldSchema, date: z.union([recipeFieldSchema, recipeDatePartsSchema]),
-    complete: z.union([recipeFieldSchema, z.object({ availabilityResponse: z.literal(true) }).strict()])
-      .describe("Read explicit true/ready/loaded/complete state, or for BROWSER_DOM use {availabilityResponse:true} after its required fresh date-bound response. Presence of body or an arbitrary container is not completion."),
+    complete: z.union([recipeFieldSchema, z.object({ availabilityResponse: z.literal(true) }).strict(), z.object({ serverDocument: z.literal(true) }).strict()])
+      .describe("Read explicit true/ready/loaded/complete state, use {availabilityResponse:true} for verified JSON success, or {serverDocument:true} with kind SERVER_DOCUMENT for full raw/visible HTML equality. Presence of body or an arbitrary container is not completion."),
     empty: recipeFieldSchema.optional(), players: recipeFieldSchema.optional(), durationMinutes: recipeFieldSchema.optional() }).strict(),
   slots: z.object({ collection: z.union([z.object({ path: jsonPath }).strict(), z.object({ selector: recipeSelectorSchema }).strict()]),
     scope: recipeResourceScopeSchema.optional(),
@@ -128,7 +134,7 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
   if (recipe.engine === "EXISTING_ADAPTER") {
     if (recipe.source.providerFamily !== recipe.adapter.family ||
       (recipe.target.kind === "SIMULATOR") !== (recipe.adapter.family === "ACUITY") ||
-      recipe.target.kind === "SIMULATOR" && !recipe.target.offeringId)
+      recipe.target.kind === "SIMULATOR" && !recipe.target.offeringId || recipe.adapter.family === "TEEITUP" && !recipe.source.venueAddress)
       ctx.addIssue({ code: "custom", message: "Supported adapter metadata must match the source and target kind" });
     return;
   }
@@ -136,12 +142,21 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
   const readers = [recipe.proof.venue, ...dateFields, recipe.proof.complete, recipe.proof.empty, recipe.proof.players,
     recipe.proof.durationMinutes, recipe.slots.startsAt, recipe.slots.endsAt, recipe.slots.availableSpots,
     recipe.slots.holes, recipe.slots.resourceId, recipe.slots.productId, recipe.slots.minimumPlayers, recipe.slots.capacity,
-    recipe.slots.scope?.label].filter(value => value && !("derive" in value) && !("availabilityResponse" in value)) as RecipeField[];
+    recipe.slots.scope?.label].filter(value => value && !("derive" in value) && !("availabilityResponse" in value) && !("serverDocument" in value)) as RecipeField[];
   if (readers.some(field => recipe.engine === "HTTP_JSON" ? !("path" in field) : !("selector" in field)) ||
     (recipe.engine === "HTTP_JSON") !== ("path" in recipe.slots.collection)) ctx.addIssue({ code: "custom", message: "Field readers must match the engine" });
   if (recipe.engine === "HTTP_JSON" && "kind" in recipe.proof.date) ctx.addIssue({ code: "custom", message: "DATE_PARTS requires visible DOM fields" });
   if (recipe.engine === "HTTP_JSON" && "availabilityResponse" in recipe.proof.complete)
     ctx.addIssue({ code: "custom", message: "Response completion requires the browser response fence" });
+  if (recipe.engine === "HTTP_JSON" && "serverDocument" in recipe.proof.complete)
+    ctx.addIssue({ code: "custom", message: "Server document completion requires the browser response fence" });
+  if (recipe.engine === "BROWSER_DOM") {
+    const serverDocument = recipe.availabilityResponse.kind === "SERVER_DOCUMENT";
+    if (serverDocument !== ("serverDocument" in recipe.proof.complete) || serverDocument &&
+      (recipe.target.kind !== "OUTDOOR" || "kind" in recipe.proof.date || readers.some(field => !("selector" in field) || !isServerDocumentSelector(field.selector)) ||
+        !("selector" in recipe.slots.collection) || !isServerDocumentSelector(recipe.slots.collection.selector)))
+      ctx.addIssue({ code: "custom", message: "Server document proof requires outdoor static selectors and matching completion" });
+  }
   if (recipe.engine === "BROWSER_DOM" && "availabilityResponse" in recipe.proof.complete && !recipe.availabilityResponse.success)
     ctx.addIssue({ code: "custom", message: "Response-only completion requires an application-level JSON success guard" });
   if (recipe.slots.scope && (recipe.engine !== "BROWSER_DOM" || recipe.target.kind !== "SIMULATOR"))

@@ -22,7 +22,7 @@ async function main() {
       source += chunk;
       if (Buffer.byteLength(source, "utf8") > 131_072) throw new Error("REQUEST_TOO_LARGE");
     }
-    const knownPaths = new Set("schemaVersion target courseId offeringId kind source officialUrl bookingUrl venueName providerFamily timeZone engine browserTransport pageUrl availabilityResponse endDatePath success equals permittedRoutes origin path methods queryKeys steps action selector monthYearSelector nextSelector previousSelector daySelector productSelector text purpose value proof venue date monthYear day complete empty players durationMinutes slots scope label expectedLabel collection startsAt endsAt derive availableSpots minimumPlayers capacity holes resourceId productId request url method body adapter family facilityId scheduleId bookingClassId ownerKey businessId rentalProductIds".split(" "));
+    const knownPaths = new Set("schemaVersion target courseId offeringId kind source officialUrl bookingUrl venueName venueAddress providerFamily timeZone engine browserTransport pageUrl availabilityResponse serverDocument endDatePath success equals permittedRoutes origin path methods queryKeys steps action selector monthYearSelector nextSelector previousSelector daySelector productSelector text purpose value proof venue date monthYear day complete empty players durationMinutes slots scope label expectedLabel collection startsAt endsAt derive availableSpots minimumPlayers capacity holes resourceId productId request url method body adapter family facilityId facilityIds alias scheduleId bookingClassId ownerKey businessId rentalProductIds".split(" "));
     const safeMessages = new Set(["Expected a bounded public display selector", "Unknown or malformed template parameter", "Field readers must match the engine", "Outdoor recipes require available-player evidence", "Simulator recipes require offering, duration and end-time proof", "Simulator player count is saved context and cannot parameterize availability", "Simulator availability may request only one bay; saved players are context"]);
     try {
       const value = JSON.parse(source) as { recipe: unknown };
@@ -66,7 +66,10 @@ async function main() {
   const timeZone = timeZoneAt >= 0 ? args[timeZoneAt + 1] : "UTC";
   const venueNameAt = args.indexOf("--venue-name");
   const venueName = venueNameAt >= 0 ? args[venueNameAt + 1] : undefined;
-  const session = await createCourseDiscoveryBrowserSession({ deadlineAt, initialUrls, timeZone, venueName }, { requestLease,
+  const venueAddressAt = args.indexOf("--venue-address");
+  const venueAddress = venueAddressAt >= 0 ? args[venueAddressAt + 1] : undefined;
+  if (venueAddress !== undefined && (venueAddress.length > 1024 || /[\u0000-\u001f\u007f]/u.test(venueAddress))) throw new Error("INVALID_VENUE_IDENTITY");
+  const session = await createCourseDiscoveryBrowserSession({ deadlineAt, initialUrls, timeZone, venueName, venueAddress }, { requestLease,
     browserTransport: configuredTransport as "PINNED_HTTP" | "NATIVE_CHROME" });
   const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
   const timer = setTimeout(() => { input.close(); void session.close(); }, Math.max(1, deadlineAt.getTime() - Date.now()));

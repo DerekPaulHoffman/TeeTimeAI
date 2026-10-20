@@ -19,7 +19,7 @@ vi.mock("./config", () => ({ isDiscoveryPilotSearch: mocks.pilot, activeDiscover
 import {
   activateDiscoveryRecipe, checkpointDiscoveryJob, claimNextDiscoveryJob, degradeRecipe,
   DiscoveryConflictError, ensureDiscoveryJob, failDiscoveryJob, getActiveAccessRecipe,
-  heartbeatDiscoveryJob, proposeDiscoveryRecipe, recordDiscoveryVerification,
+  heartbeatDiscoveryJob, proposeDiscoveryRecipe, recordDiscoveryVerification, assertActiveAccessRecipeInTransaction,
 } from "./service";
 
 const now = new Date("2030-01-01T12:00:00.000Z");
@@ -156,6 +156,27 @@ describe("bounded course discovery persistence", () => {
     expect(mocks.db.courseAccessRecipe.create).not.toHaveBeenCalled();
   });
 
+  it("binds optional recipe addresses without changing legacy source fingerprints", async () => {
+    const owner = (await claimed())!;
+    const fingerprint = owner.sourceFingerprint;
+    course.address = "10 Example Drive, Example, NY 12345, USA";
+    expect((await heartbeatDiscoveryJob(owner.id, owner.leaseToken!)).sourceFingerprint).toBe(fingerprint);
+    const bound = parseAccessRecipe({ ...recipe, source: { ...recipe.source, venueAddress: course.address } });
+    await expect(proposeDiscoveryRecipe(owner.id, owner.leaseToken!, { ...bound,
+      source: { ...bound.source, venueAddress: "11 Other Street" } })).rejects.toBeInstanceOf(DiscoveryConflictError);
+    await proposeDiscoveryRecipe(owner.id, owner.leaseToken!, bound);
+    course.activeAccessRecipeId = "active";
+    mocks.db.courseAccessRecipe.findUnique.mockResolvedValue({ id: "active", targetKey: "course:course1", sourceFingerprint: fingerprint,
+      payload: bound, hash: hashAccessRecipe(bound) });
+    expect(await getActiveAccessRecipe({ courseId: "course1" })).not.toBeNull();
+    course.address = "12 Changed Street";
+    expect(await getActiveAccessRecipe({ courseId: "course1" })).toBeNull();
+    await expect(assertActiveAccessRecipeInTransaction(mocks.db as never, { courseId: "course1" }, "active")).rejects.toBeInstanceOf(DiscoveryConflictError);
+    mocks.db.courseAccessRecipe.findUnique.mockResolvedValue({ id: "active", targetKey: "course:course1", sourceFingerprint: fingerprint,
+      payload: recipe, hash: hashAccessRecipe(recipe) });
+    expect(await getActiveAccessRecipe({ courseId: "course1" })).not.toBeNull();
+  });
+
   it("requires trusted observed-source evidence to replace a non-null booking URL", async () => {
     course.detectedBookingUrl = recipe.source.officialUrl;
     const owner = (await claimed())!;
@@ -209,6 +230,31 @@ describe("bounded course discovery persistence", () => {
     expect(course.activeAccessRecipeId).toBe("recipe1");
     expect(job!.status).toBe("SUCCEEDED");
     expect(job!.activeTargetKey).toBeNull();
+  });
+
+  it.each([-2100, 2100])("accepts fresh client proof with %ims clock skew and retains its timestamp", async offset => {
+    const owner = (await claimed())!;
+    const candidate = await proposeDiscoveryRecipe(owner.id, owner.leaseToken!, recipe);
+    const challenge = candidate.challenges[0];
+    const proof = { ...result(), observedAt: new Date(now.getTime() + offset).toISOString() };
+    await recordDiscoveryVerification({ jobId: owner.id, leaseToken: owner.leaseToken!, challengeId: challenge.id,
+      recipeHash: candidate.recipeHash, input: challenge.input, result: proof });
+    expect((job!.verification as { challenges: Array<{ result?: { observedAt: string } }> }).challenges[0].result?.observedAt).toBe(proof.observedAt);
+  });
+
+  it.each([-5001, 5001])("rejects stale or excessively future proof at %ims", async offset => {
+    const owner = (await claimed())!, candidate = await proposeDiscoveryRecipe(owner.id, owner.leaseToken!, recipe);
+    const challenge = candidate.challenges[0];
+    await expect(recordDiscoveryVerification({ jobId: owner.id, leaseToken: owner.leaseToken!, challengeId: challenge.id,
+      recipeHash: candidate.recipeHash, input: challenge.input, result: { ...result(), observedAt: new Date(now.getTime() + offset).toISOString() } })).rejects.toBeInstanceOf(DiscoveryConflictError);
+  });
+
+  it("does not extend an expired server deadline for a clock-tolerant proof", async () => {
+    const owner = (await claimed())!, candidate = await proposeDiscoveryRecipe(owner.id, owner.leaseToken!, recipe);
+    job!.deadlineAt = new Date(now.getTime() - 1);
+    await expect(recordDiscoveryVerification({ jobId: owner.id, leaseToken: owner.leaseToken!, challengeId: candidate.challenges[0].id,
+      recipeHash: candidate.recipeHash, input: candidate.challenges[0].input,
+      result: { ...result(), observedAt: new Date(now.getTime() - 2100).toISOString() } })).rejects.toBeInstanceOf(DiscoveryConflictError);
   });
 
   it("rejects wrong challenge input and immutable proof replacement", async () => {

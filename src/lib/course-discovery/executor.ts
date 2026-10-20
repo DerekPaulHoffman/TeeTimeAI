@@ -3,6 +3,7 @@ import type { Browser, Locator } from "@playwright/test";
 import { createAddressPinnedPublicFetchTransport } from "@/lib/automation/address-pinned-public-fetch";
 import { createPassfactoryPublicReadPolicy, isIncidentalBrowserRequest, isNonEvidenceBrowserResource } from "@/lib/automation/passfactory-public-read-policy";
 import { isAnonymousBrowserReadPost } from "@/lib/automation/simulator-interactive-browser";
+import { addVerifiedMindbodyReadHeaders } from "@/lib/automation/mindbody-public-read-policy";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
 import { getTimeZoneOffsetMinutes } from "@/lib/timezones";
@@ -15,8 +16,10 @@ import { canonicalPublicReadUrl } from "./public-request-url";
 import { executeExistingAdapterRecipe } from "./existing-adapter-executor";
 import { selectPublicFilter } from "./public-filter-control";
 import { selectPublicCalendarDate } from "./public-calendar-control";
+import { applyPublicCalendarDate } from "./public-calendar-apply";
 import { hasInspectedPassfactoryDurationClients, isInspectedPassfactoryDurationClient, isPassfactoryDurationClientUrl, isPassfactoryAvailabilityRequest, isPassfactoryDurationContext,
   isPassfactoryDurationRequestBound, type PublicAvailabilityRequest } from "./passfactory-client-duration";
+import { extractServerDocument, sameServerDocumentEvidence, type ServerDocumentExtraction } from "./server-document-proof";
 
 type ExtractedAccessRecipe = Exclude<CourseAccessRecipeData, { engine: "EXISTING_ADAPTER" }>;
 
@@ -100,7 +103,7 @@ function extractJson(recipe: ExtractedAccessRecipe, body: unknown): Extracted {
   const collection = "path" in recipe.slots.collection ? jsonField(body, recipe.slots.collection) : undefined;
   if (!Array.isArray(collection) || collection.length > 500) throw new Error("INCOMPLETE_COLLECTION");
   const fields = Object.entries(recipe.slots).filter(([key]) => key !== "collection" && key !== "scope") as Array<[string, RecipeField]>;
-  return { venue: jsonField(body, p.venue), date: jsonField(body, "kind" in p.date ? undefined : p.date), complete: jsonField(body, "availabilityResponse" in p.complete ? undefined : p.complete),
+  return { venue: jsonField(body, p.venue), date: jsonField(body, "kind" in p.date ? undefined : p.date), complete: jsonField(body, "availabilityResponse" in p.complete || "serverDocument" in p.complete ? undefined : p.complete),
     empty: jsonField(body, p.empty), players: jsonField(body, p.players), duration: jsonField(body, p.durationMinutes),
     rows: collection.map(row => Object.fromEntries(fields.map(([key, field]) => [key, jsonField(row, field)]))) };
 }
@@ -126,6 +129,8 @@ function parseSourceDate(value: unknown) {
 /** Reject DST gaps and ambiguous local wall times; an explicit offset disambiguates. */
 export function recipeTimeToInstant(value: unknown, input: AccessExecutionInput) {
   let text = clean(value);
+  text = text.replace(/(T\d{2}:\d{2}:\d{2})\.(\d{1,9})(?=Z|[+-]\d{2}:\d{2}|$)/u,
+    (_, seconds: string, fraction: string) => `${seconds}.${fraction.slice(0, 3).padEnd(3, "0")}`);
   const clock = /^(\d{1,2}):([0-5]\d)(?::([0-5]\d))?\s*(AM|PM)?$/iu.exec(text);
   if (clock) {
     let hour = Number(clock[1]);
@@ -138,13 +143,15 @@ export function recipeTimeToInstant(value: unknown, input: AccessExecutionInput)
     if (!Number.isFinite(date.getTime())) throw new Error("INVALID_SLOT_TIME");
     return date;
   }
-  if (!/^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/u.test(text)) throw new Error("INVALID_SLOT_TIME");
+  if (!/^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{3})?)?$/u.test(text)) throw new Error("INVALID_SLOT_TIME");
   if (text.length === 16) text += ":00";
+  const fraction = /\.\d{3}$/u.exec(text)?.[0] ?? "";
+  if (fraction) text = text.slice(0, -4);
   const wall = Date.parse(`${text}Z`);
   const offsets = new Set([-36, 0, 36].map(hours => getTimeZoneOffsetMinutes(new Date(wall + hours * 3_600_000), input.timeZone)));
   const matches = [...offsets].map(offset => new Date(wall - offset * 60_000)).filter(date => localParts(date, input.timeZone) === text);
   if (matches.length !== 1) throw new Error("AMBIGUOUS_OR_INVALID_LOCAL_TIME");
-  return matches[0];
+  return new Date(matches[0].getTime() + Number(fraction || 0) * 1000);
 }
 function boundedNumber(value: unknown, maximum: number) {
   const text = clean(value);
@@ -305,7 +312,7 @@ async function extractDom(recipe: ExtractedAccessRecipe, root: Locator): Promise
     if (row.resourceId === undefined && observedResourceId) row.resourceId = observedResourceId;
     rows.push(row);
   }
-  return { venue: await domField(root, p.venue), date: "kind" in p.date ? await domDateParts(root, p.date) : await domField(root, p.date), complete: "availabilityResponse" in p.complete ? true : await domField(root, p.complete),
+  return { venue: await domField(root, p.venue), date: "kind" in p.date ? await domDateParts(root, p.date) : await domField(root, p.date), complete: "availabilityResponse" in p.complete || "serverDocument" in p.complete ? true : await domField(root, p.complete),
     empty: await domField(scope ? collectionRoot : root, p.empty), players: await domField(root, p.players), duration: await domField(root, p.durationMinutes), rows };
 }
 
@@ -384,12 +391,29 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
     let blocked = false, requests = 0, bytes = 0, pendingRequests = 0, mutationGeneration = 0;
     let responseGeneration: number | undefined;
     let rejectedResponseGeneration: number | undefined;
+    const usesServerDocument = recipe.availabilityResponse.kind === "SERVER_DOCUMENT";
+    let mainDocumentSequence = 0, dataRequestSequence = 0;
+    let serverDocument: { generation: number; documentSequence: number; dataSequence: number; extracted: ServerDocumentExtraction } | undefined;
     let lastSuccessfulAvailabilityRequest: PublicAvailabilityRequest | undefined;
     const inspectedPassfactoryDurationClients = new Set<string>();
     let selectedRequestedDate = false;
     let passfactoryAvailabilityRequests = 0, carriedDurationGeneration: number | undefined;
-    const observeAvailabilityResponse = (generation: number, request: { url: string; method: string; body?: string | null }, status: number, body: Uint8Array) => {
+    const observeAvailabilityResponse = (generation: number, request: { url: string; method: string; body?: string | null }, status: number, body: Uint8Array,
+      document?: { main: boolean; sequence: number; dataSequence: number; contentType: string }) => {
       if (generation !== mutationGeneration || !matchesAvailabilityRequest(recipe, input, request)) return;
+      if (usesServerDocument) {
+        try {
+          if (!document?.main || document.sequence !== mainDocumentSequence || document.dataSequence !== dataRequestSequence ||
+              status !== 200 || !/^text\/html(?:;|$)/iu.test(document.contentType)) throw new Error("SERVER_DOCUMENT_UNCONFIRMED");
+          const extracted = extractServerDocument(recipe, Buffer.from(body).toString("utf8"), (field, value) => readRecipeFieldFormat(field, value));
+          serverDocument = { generation, documentSequence: document.sequence, dataSequence: document.dataSequence, extracted };
+          responseGeneration = generation; rejectedResponseGeneration = undefined;
+        } catch (error) {
+          serverDocument = undefined; responseGeneration = undefined; rejectedResponseGeneration = generation;
+          failure ??= recipeExecutionDiagnostic(error);
+        }
+        return;
+      }
       if (matchesAvailabilityResponse(recipe, input, request, status, body)) {
         responseGeneration = generation;
         rejectedResponseGeneration = undefined;
@@ -428,12 +452,20 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
       throw new Error("UNSETTLED_REQUESTS");
     };
     let selectedProductDuration: number | undefined;
+    let selectedDateDay: Locator | undefined;
     await context.route("**/*", async route => {
       const request = route.request();
       if (isIncidentalBrowserRequest(request.url()) || isNonEvidenceBrowserResource(request.url(), request.resourceType())) { await route.abort(); return; }
       pendingRequests++;
       const requestUrl = canonicalPublicReadUrl(request.url(), request.method());
       const requestGeneration = mutationGeneration;
+      const mainDocument = request.resourceType() === "document" && request.isNavigationRequest() && request.frame() === page.mainFrame();
+      if (mainDocument) mainDocumentSequence++;
+      if (["xhr", "fetch"].includes(request.resourceType())) dataRequestSequence++;
+      const capturedDocumentSequence = mainDocumentSequence, capturedDataSequence = dataRequestSequence;
+      if (usesServerDocument && (mainDocument || ["xhr", "fetch"].includes(request.resourceType()))) {
+        serverDocument = undefined; responseGeneration = undefined; rejectedResponseGeneration = requestGeneration;
+      }
       if (isPassfactoryAvailabilityRequest({ url: requestUrl, method: request.method() })) {
         passfactoryAvailabilityRequests++;
         if (carriedDurationGeneration === mutationGeneration) {
@@ -448,6 +480,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
         const requestHeaders = request.headers();
         const headers = new Headers();
         for (const key of ["accept", "content-type", "origin"]) if (requestHeaders[key]) headers.set(key, requestHeaders[key]);
+        if (!addVerifiedMindbodyReadHeaders(new URL(requestUrl), request.method(), requestHeaders, headers, request.postData() ?? "")) throw new Error("UNSCOPED_REQUEST");
         if (nativeProxy) {
           const preflight = request.method() === "OPTIONS" ? nativeReadPreflightMethod(requestHeaders) : null;
           if (!recipeAllowsRequest(recipe, requestUrl, preflight ?? request.method(), request.resourceType()) ||
@@ -464,7 +497,8 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
           if (native.status >= 400) { blocked = true; failure ??= recipeExecutionDiagnostic(`HTTP_${native.status}`, { url: requestUrl, method: request.method(), resourceType: request.resourceType() }); }
           if (native.status === 429) { providerThrottled = true; throw new Error("PROVIDER_THROTTLED"); }
           observeClientScript(requestUrl, request.resourceType(), native.status, native.body);
-          observeAvailabilityResponse(requestGeneration, { url: requestUrl, method: request.method(), body: request.postData() }, native.status, native.body);
+          observeAvailabilityResponse(requestGeneration, { url: requestUrl, method: request.method(), body: request.postData() }, native.status, native.body,
+            { main: mainDocument, sequence: capturedDocumentSequence, dataSequence: capturedDataSequence, contentType: native.headers["content-type"] ?? "" });
           return;
         }
         const { response, buffer } = await read(requestUrl, request.method(), request.postData() ?? undefined, headers, request.resourceType());
@@ -474,7 +508,8 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
         for (const key of ["content-type", "access-control-allow-origin"]) { const value = response.headers.get(key); if (value) responseHeaders[key] = value; }
         await route.fulfill({ status: response.status, headers: responseHeaders, body: Buffer.from(buffer) });
         observeClientScript(requestUrl, request.resourceType(), response.status, new Uint8Array(buffer));
-        observeAvailabilityResponse(requestGeneration, { url: requestUrl, method: request.method(), body: request.postData() }, response.status, new Uint8Array(buffer));
+        observeAvailabilityResponse(requestGeneration, { url: requestUrl, method: request.method(), body: request.postData() }, response.status, new Uint8Array(buffer),
+          { main: mainDocument, sequence: capturedDocumentSequence, dataSequence: capturedDataSequence, contentType: response.headers.get("content-type") ?? "" });
       } catch (error) { blocked = true; failure ??= recipeExecutionDiagnostic(error, { url: requestUrl, method: request.method(), resourceType: request.resourceType() }); await route.abort().catch(() => {}); }
       finally { pendingRequests--; }
     });
@@ -497,12 +532,12 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
           carryDurationFence = true; previousAvailabilityRequests = passfactoryAvailabilityRequests;
         }
         if (step.action === "selectDate" || step.action === "selectProduct" || step.action === "select" || step.action === "fill" ||
-          step.action === "clickFilter" && ["SELECT_DATE", "SELECT_FILTER", "RUN_SEARCH"].includes(step.purpose)) {
+          step.action === "clickFilter" && ["SELECT_DATE", "APPLY_DATE", "SELECT_FILTER", "RUN_SEARCH"].includes(step.purpose)) {
           mutationGeneration++; responseGeneration = undefined; rejectedResponseGeneration = undefined;
           carriedDurationGeneration = carryDurationFence ? mutationGeneration : undefined;
         }
         if (step.action === "selectDate") {
-          await selectPublicCalendarDate(page, { ...step, date: input.date });
+          selectedDateDay = await selectPublicCalendarDate(page, { ...step, date: input.date });
           selectedRequestedDate = true;
           continue;
         }
@@ -523,6 +558,12 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
         }
         let node = page.locator(step.selector);
         if (step.action === "waitFor") { await node.waitFor({ state: "visible" }); continue; }
+        if (step.action === "clickFilter" && step.purpose === "APPLY_DATE") {
+          if (!selectedRequestedDate || !selectedDateDay || await node.count() !== 1 ||
+              clean(await node.innerText()) !== expandRecipeTemplate(step.text, input)) throw new Error("UNSAFE_CALENDAR_APPLY");
+          await applyPublicCalendarDate(node, { day: selectedDateDay, date: input.date });
+          continue;
+        }
         if (step.action === "clickFilter" && step.purpose === "SELECT_DATE") {
           const dateText = expandRecipeTemplate(step.text, input);
           if (!/^\d{1,2}$|^\d{4}-\d{2}-\d{2}$/u.test(dateText)) throw new Error("UNSAFE_CONTROL");
@@ -586,7 +627,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
           if (step.purpose === "RUN_SEARCH" && !/^(?:search|find times|show times|view availability|check availability)$/iu.test(text)) throw new Error("UNSAFE_CONTROL");
           if (["OPEN_FILTER", "SELECT_FILTER"].includes(step.purpose) && !filterChoice && !/duration|minutes?|hours?|players?|party|group|golf|bay|resource|rental/iu.test(text)) throw new Error("UNSAFE_CONTROL");
           await node.click();
-          if (step.purpose === "SELECT_DATE") selectedRequestedDate = true;
+          if (step.purpose === "SELECT_DATE") { selectedRequestedDate = true; selectedDateDay = node; }
         }
       }
       await waitForAvailabilityResponse();
@@ -604,6 +645,9 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
       if (providerThrottled) return fail("FAILED", "PROVIDER_THROTTLED");
       if (blocked || !recipeAllowsRequest(recipe, page.url(), "GET")) return fail("INCOMPLETE", "UNSCOPED_OR_FAILED_RESOURCE");
       if (pendingRequests || responseGeneration !== mutationGeneration || JSON.stringify(first) !== JSON.stringify(second)) return fail("INCOMPLETE", "UNSETTLED_RESULTS");
+      if (usesServerDocument && (!serverDocument || serverDocument.generation !== mutationGeneration ||
+          serverDocument.documentSequence !== mainDocumentSequence || serverDocument.dataSequence !== dataRequestSequence ||
+          !sameServerDocumentEvidence(serverDocument.extracted, second))) return fail("INCOMPLETE", "SERVER_DOCUMENT_DOM_MISMATCH");
       return normalize(recipe, input, second, clock());
     } finally { signal.removeEventListener("abort", stop); await context.close().catch(() => {}); }
   } catch (error) {

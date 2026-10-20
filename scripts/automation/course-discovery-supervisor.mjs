@@ -2,12 +2,13 @@ import { randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createCourseDiscoveryClient, discoveryError } from "./course-discovery-client.mjs";
-import { executeDiscoveryRecipe, runCourseDiscoveryWorker } from "./course-discovery-worker.mjs";
+import { executeDiscoveryRecipe, prepareDiscoveryModelCatalog, runCourseDiscoveryWorker } from "./course-discovery-worker.mjs";
 
 export const DISCOVERY_POLL_MS = 15_000;
 export const DISCOVERY_HEARTBEAT_MS = 15_000;
 export const DISCOVERY_CONCURRENCY = 3;
 export const DISCOVERY_WORK_BUDGET_MS = 12 * 60_000;
+export const DISCOVERY_CLOCK_SKEW_MS = 5_000;
 export function discoveryWorkDeadline(job) {
   const firstPickup = Date.parse(job.firstPickedUpAt);
   const absolute = Date.parse(job.deadlineAt);
@@ -15,25 +16,49 @@ export function discoveryWorkDeadline(job) {
 }
 
 export function validateClaimedDiscoveryJob(job, now = Date.now()) {
+  const firstPickup = Date.parse(job?.firstPickedUpAt);
+  const deadline = Date.parse(job?.deadlineAt);
   if (!job || typeof job.id !== "string" || !/^[A-Za-z0-9_-]{1,200}$/u.test(job.id) ||
       typeof job.leaseToken !== "string" || job.leaseToken.length < 16 ||
       !Number.isInteger(job.attempts) || job.attempts < 1 || job.attempts > 2 ||
-      !Number.isFinite(Date.parse(job.deadlineAt)) || Date.parse(job.deadlineAt) <= now ||
-      Date.parse(job.deadlineAt) - now > 15 * 60_000 ||
+      !Number.isFinite(firstPickup) || !Number.isFinite(deadline) || deadline <= now ||
+      deadline <= firstPickup || deadline - firstPickup > 15 * 60_000 || firstPickup > now + DISCOVERY_CLOCK_SKEW_MS ||
       !job.request?.identity || !job.request?.target || !job.request?.input) {
     throw discoveryError("DISCOVERY_JOB_INVALID");
   }
   return job;
 }
 
+export function validateClaimedRecipeExecution(job, now = Date.now()) {
+  // The server owns the exact three-minute expiry. Allow only a bounded
+  // cross-machine clock offset here; never change the received deadline.
+  if (!job || typeof job.id !== "string" || typeof job.leaseToken !== "string" || !job.recipe || !job.input ||
+      !(Date.parse(job.deadlineAt) > now) || Date.parse(job.deadlineAt) - now > 3 * 60_000 + DISCOVERY_CLOCK_SKEW_MS)
+    throw discoveryError("DISCOVERY_EXECUTION_INVALID");
+  return job;
+}
+
 /** Polling, leases and deadlines are controller-owned, independent of inference. */
-export function createCourseDiscoverySupervisor({ client, startWorker, executeRecipe, workerId = `discovery-${randomUUID()}`,
+export function createCourseDiscoverySupervisor({ client, startWorker, executeRecipe, prepareWorker, workerId = `discovery-${randomUUID()}`,
   now = Date.now, onEvent = () => {}, timers = { setInterval, clearInterval, setTimeout, clearTimeout } }) {
   const active = new Map();
   let stopped = false;
   let polling = false;
   let pollTimer;
   let pollPromise;
+  let workerPrepared = false;
+  let preparation;
+  const ensureWorkerPrepared = async () => {
+    if (workerPrepared) return;
+    try {
+      preparation ??= Promise.resolve().then(() => prepareWorker?.());
+      await preparation;
+      workerPrepared = true;
+    } catch (error) {
+      preparation = undefined;
+      throw error;
+    }
+  };
   const emit = (event, detail = {}) => onEvent({ event, active: active.size, ...detail });
 
   function launch(job, execution = false) {
@@ -124,13 +149,16 @@ export function createCourseDiscoverySupervisor({ client, startWorker, executeRe
         if (client.nextExecution && executeRecipe) {
           const { job: execution } = await client.nextExecution(workerId);
           if (execution && !stopped) {
-            if (typeof execution.id !== "string" || typeof execution.leaseToken !== "string" || !execution.recipe || !execution.input ||
-                !(Date.parse(execution.deadlineAt) > now()) || Date.parse(execution.deadlineAt) - now() > 3 * 60_000) throw discoveryError("DISCOVERY_EXECUTION_INVALID");
+            validateClaimedRecipeExecution(execution, now());
             if (active.has(`execution:${execution.id}`)) { emit("duplicate_claim_rejected"); break; }
             launch(execution, true);
             continue;
           }
         }
+        // Warm recipes need no model catalog. Prepare cold-worker capability
+        // before claiming a job so a local prerequisite cannot consume an attempt.
+        await ensureWorkerPrepared();
+        if (stopped) break;
         const { job } = await client.next(workerId);
         if (!job || stopped) break;
         validateClaimedDiscoveryJob(job, now());
@@ -168,8 +196,10 @@ async function main() {
     deviceToken: process.env.LOCAL_READER_DEVICE_TOKEN,
     browserTransport: process.env.COURSE_DISCOVERY_BROWSER_TRANSPORT ?? "PINNED_HTTP",
   });
+  let modelCatalogJson;
   const supervisor = createCourseDiscoverySupervisor({ client,
-    startWorker: options => runCourseDiscoveryWorker({ ...options, client, cwd }),
+    prepareWorker: () => { modelCatalogJson = prepareDiscoveryModelCatalog(); },
+    startWorker: options => runCourseDiscoveryWorker({ ...options, client, cwd, modelCatalogJson }),
     executeRecipe: options => executeDiscoveryRecipe({ ...options, cwd }),
     onEvent: event => process.stdout.write(`${JSON.stringify(event)}\n`),
   });

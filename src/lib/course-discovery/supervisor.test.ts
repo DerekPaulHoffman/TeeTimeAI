@@ -2,17 +2,18 @@
 import { createHmac } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCourseDiscoveryClient } from "../../../scripts/automation/course-discovery-client.mjs";
-import { createCourseDiscoverySupervisor, discoveryWorkDeadline, validateClaimedDiscoveryJob } from "../../../scripts/automation/course-discovery-supervisor.mjs";
-import { cleanupDiscoveryDirectory, createDiscoveryBrowser, createDiscoveryProcess, createDiscoverySnapshotCompactor, discoveryProcessEnvironment, readDiscoveryControllerCheckpoint, restrictedModelCatalog, runCourseDiscoveryWorker, verifyDiscoveryCandidate } from "../../../scripts/automation/course-discovery-worker.mjs";
+import { createCourseDiscoverySupervisor, discoveryWorkDeadline, validateClaimedDiscoveryJob, validateClaimedRecipeExecution } from "../../../scripts/automation/course-discovery-supervisor.mjs";
+import { cleanupDiscoveryDirectory, createDiscoveryBrowser, createDiscoveryProcess, createDiscoverySnapshotCompactor, discoveryProcessEnvironment, prepareDiscoveryModelCatalog, readDiscoveryControllerCheckpoint, restrictedModelCatalog, runCourseDiscoveryWorker, verifyDiscoveryCandidate } from "../../../scripts/automation/course-discovery-worker.mjs";
 
 afterEach(() => { vi.useRealTimers(); });
 const now = new Date("2026-10-20T14:00:00Z").getTime();
 const job = (id = "job-1") => ({ id, leaseToken: "private-lease-value", attempts: 1,
+  firstPickedUpAt: new Date(now).toISOString(),
   deadlineAt: new Date(now + 15 * 60_000).toISOString(),
   request: { target: { courseId: "c1", kind: "OUTDOOR" }, identity: { name: "Public golf" }, input: { date: "2026-10-22" } },
 });
@@ -91,6 +92,65 @@ describe("browser snapshot progress", () => {
 });
 
 describe("bounded discovery supervisor", () => {
+  it.each([2071, 2100, 2067, -2100])("accepts a valid server budget with %ims clock offset", offset => {
+    const pickup = now + offset;
+    const assigned = { ...job(), firstPickedUpAt: new Date(pickup).toISOString(), deadlineAt: new Date(pickup + 900_000).toISOString() };
+    expect(validateClaimedDiscoveryJob(assigned, now)).toBe(assigned);
+    expect(validateClaimedDiscoveryJob({ ...assigned, attempts: 2 }, now + 90_000).deadlineAt).toBe(assigned.deadlineAt);
+    expect(discoveryWorkDeadline(assigned)).toBe(pickup + 720_000);
+  });
+
+  it("rejects malformed, extended or expired discovery budgets without granting a new deadline", () => {
+    for (const assigned of [
+      { ...job(), firstPickedUpAt: undefined }, { ...job(), firstPickedUpAt: "invalid" },
+      { ...job(), deadlineAt: "invalid" }, { ...job(), deadlineAt: new Date(now + 900_001).toISOString() },
+      { ...job(), firstPickedUpAt: new Date(now + 5001).toISOString(), deadlineAt: new Date(now + 905_001).toISOString() },
+      { ...job(), firstPickedUpAt: new Date(now - 1000).toISOString(), deadlineAt: new Date(now).toISOString() },
+      { ...job(), firstPickedUpAt: new Date(now + 1000).toISOString(), deadlineAt: new Date(now + 1000).toISOString() },
+    ]) expect(() => validateClaimedDiscoveryJob(assigned, now)).toThrow("DISCOVERY_JOB_INVALID");
+  });
+
+  it("allows bounded clock offset for warm execution while rejecting expired or overlong work", () => {
+    const warm = { id: "warm", leaseToken: "lease", recipe: {}, input: {}, deadlineAt: new Date(now + 182_100).toISOString() };
+    expect(validateClaimedRecipeExecution(warm, now)).toBe(warm);
+    expect(warm.deadlineAt).toBe(new Date(now + 182_100).toISOString());
+    for (const deadline of [now, now - 1, now + 185_001]) {
+      expect(() => validateClaimedRecipeExecution({ ...warm, deadlineAt: new Date(deadline).toISOString() }, now)).toThrow("DISCOVERY_EXECUTION_INVALID");
+    }
+    expect(() => validateClaimedRecipeExecution({ ...warm, deadlineAt: "invalid" }, now)).toThrow("DISCOVERY_EXECUTION_INVALID");
+  });
+
+  it("does not claim cold work until a required model snapshot is available", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(now);
+    let catalog = { models: [{ slug: "other-model" }] };
+    const read = vi.fn(() => JSON.stringify(catalog));
+    const prepareWorker = vi.fn(() => prepareDiscoveryModelCatalog({ read }));
+    const client = { next: vi.fn(async () => ({ job: null })), nextExecution: vi.fn(async () => ({ job: null })), fail: vi.fn() };
+    const startWorker = vi.fn();
+    const supervisor = createCourseDiscoverySupervisor({ client, startWorker, prepareWorker, executeRecipe: vi.fn() });
+    await supervisor.start();
+    expect(client.next).not.toHaveBeenCalled(); expect(startWorker).not.toHaveBeenCalled(); expect(client.fail).not.toHaveBeenCalled();
+    catalog = { models: [{ slug: "gpt-6-astra" }] };
+    await supervisor.tick(); await supervisor.tick();
+    expect(client.next).toHaveBeenCalledTimes(2);
+    expect(prepareWorker).toHaveBeenCalledTimes(2); // One failed read, one successful immutable snapshot.
+    await supervisor.stop();
+  });
+
+  it("runs warm recipes even when cold model preparation fails, without burning a cold attempt", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(now);
+    const warm = { id: "warm", leaseToken: "lease", recipe: {}, input: {}, deadlineAt: new Date(now + 182_100).toISOString() };
+    const client = { nextExecution: vi.fn().mockResolvedValueOnce({ job: warm }).mockResolvedValue({ job: null }),
+      next: vi.fn(), executionResult: vi.fn(async () => ({})), fail: vi.fn() };
+    const executeRecipe = vi.fn(async () => ({ status: "EMPTY", complete: true }));
+    const prepareWorker = vi.fn(() => { throw new Error("DISCOVERY_MODEL_UNAVAILABLE"); });
+    const supervisor = createCourseDiscoverySupervisor({ client, prepareWorker, startWorker: vi.fn(), executeRecipe });
+    await supervisor.start(); await vi.advanceTimersByTimeAsync(1);
+    expect(executeRecipe).toHaveBeenCalledOnce(); expect(client.executionResult).toHaveBeenCalledOnce();
+    expect(client.next).not.toHaveBeenCalled(); expect(client.fail).not.toHaveBeenCalled();
+    await supervisor.stop();
+  });
+
   it("reserves the last three minutes without changing the durable job deadline", async () => {
     vi.useFakeTimers(); vi.setSystemTime(now);
     const earlier = { ...job(), firstPickedUpAt: new Date(now - 11 * 60_000 - 59_000).toISOString(), deadlineAt: new Date(now + 181_000).toISOString() };
@@ -196,7 +256,7 @@ describe("bounded discovery supervisor", () => {
   it("correlates failed model usage with the owned job and original deadline", async () => {
     vi.useFakeTimers(); vi.setSystemTime(now);
     const firstPickedUpAt = new Date(now - 10_000).toISOString();
-    const assigned = { ...job(), firstPickedUpAt };
+    const assigned = { ...job(), firstPickedUpAt, deadlineAt: new Date(Date.parse(firstPickedUpAt) + 900_000).toISOString() };
     const onEvent = vi.fn();
     const metrics = { model: "gpt-6-astra", tokenUsage: { totalTokens: 400 } };
     const error = Object.assign(new Error("failed"), { code: "DISCOVERY_NO_VERIFIED_RECIPE", discoveryMetrics: metrics });
@@ -302,6 +362,54 @@ describe("controller-only verification", () => {
     const restricted = restrictedModelCatalog({ models: [{ slug: "gpt-6-astra", apply_patch_tool_type: "freeform", shell_type: "unified_exec", experimental_supported_tools: ["clock"] }] });
     expect(restricted.models[0]).toMatchObject({ apply_patch_tool_type: null, shell_type: "disabled", experimental_supported_tools: [], supports_search_tool: false });
     expect(discoveryProcessEnvironment({ PATH: "bin", LOCAL_READER_DEVICE_TOKEN: "private", DATABASE_URL: "private", RESEND_API_KEY: "private", AUTOMATION_API_KEY: "private" })).toEqual({ PATH: "bin" });
+  });
+
+  it("pins one restricted catalog before three workers even if the shared cache is replaced", async () => {
+    const sourceHome = mkdtempSync(join(tmpdir(), "discovery-catalog-test-"));
+    const cache = join(sourceHome, "models_cache.json");
+    writeFileSync(cache, JSON.stringify({ models: [{ slug: "gpt-6-astra", shell_type: "unified_exec", experimental_supported_tools: ["shell"] }, { slug: "other-model" }] }));
+    writeFileSync(join(sourceHome, "auth.json"), "offline-auth-fixture");
+    const read = vi.fn((path: string, encoding: BufferEncoding) => readFileSync(path, encoding));
+    let modelCatalogJson: string;
+    const catalogs: unknown[] = [];
+    const processFactory = vi.fn(options => {
+      catalogs.push(JSON.parse(readFileSync(join(options.environment.CODEX_HOME, "model-catalog.json"), "utf8")));
+      throw Object.assign(new Error("offline stop"), { code: "OFFLINE_STOP" });
+    });
+    const claims = [job("catalog-1"), job("catalog-2"), job("catalog-3")];
+    const client = { next: vi.fn(async () => ({ job: claims.shift() ?? null })), fail: vi.fn(async () => ({})), helperEnvironment: () => ({}) };
+    const prepareWorker = vi.fn(() => {
+      modelCatalogJson = prepareDiscoveryModelCatalog({ sourceHome, read });
+      writeFileSync(cache, JSON.stringify({ models: [] }));
+    });
+    const startWorker = vi.fn(options => runCourseDiscoveryWorker({ ...options, client, cwd: process.cwd(), sourceHome,
+      modelCatalogJson, recipeSchema: {}, resolveCli: () => "offline-codex", processFactory }));
+    const supervisor = createCourseDiscoverySupervisor({ client, prepareWorker, startWorker, now: () => now });
+    try {
+      await supervisor.start(); await supervisor.stop();
+      expect(prepareWorker).toHaveBeenCalledOnce(); expect(read).toHaveBeenCalledOnce(); expect(startWorker).toHaveBeenCalledTimes(3);
+      expect(processFactory).toHaveBeenCalledTimes(3);
+      expect(catalogs).toEqual(Array(3).fill({ models: [expect.objectContaining({ slug: "gpt-6-astra", shell_type: "disabled", experimental_supported_tools: [] })] }));
+      expect(JSON.parse(modelCatalogJson!)).toEqual(catalogs[0]);
+    } finally { await supervisor.stop(); rmSync(sourceHome, { recursive: true, force: true }); }
+  });
+
+  it.each(["not json", "null", '{"models":{}}', '{"models":[]}'])
+    ("fails safely on an unusable model catalog %s", value => {
+      expect(() => prepareDiscoveryModelCatalog({ read: () => value })).toThrow(/DISCOVERY_MODEL_(?:CATALOG_UNAVAILABLE|UNAVAILABLE)/u);
+    });
+
+  it("shares one in-flight preparation across concurrent ticks before any cold claim", async () => {
+    const ready = deferred(), prepareWorker = vi.fn(() => ready.promise);
+    const client = { next: vi.fn(async () => ({ job: null })) };
+    const supervisor = createCourseDiscoverySupervisor({ client, prepareWorker, startWorker: vi.fn() });
+    const started = supervisor.start();
+    await supervisor.tick(); await supervisor.tick();
+    expect(prepareWorker).toHaveBeenCalledOnce(); expect(client.next).not.toHaveBeenCalled();
+    ready.resolve(undefined); await started;
+    expect(client.next).toHaveBeenCalledOnce();
+    await supervisor.tick(); expect(prepareWorker).toHaveBeenCalledOnce();
+    await supervisor.stop();
   });
 
   it("rejects unrelated native requests and routes bounded NDJSON responses", async () => {

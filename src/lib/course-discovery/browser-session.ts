@@ -4,6 +4,7 @@ import { z } from "zod";
 import { createAddressPinnedPublicFetchTransport } from "@/lib/automation/address-pinned-public-fetch";
 import { createPassfactoryPublicReadPolicy, isIncidentalBrowserRequest, isNonEvidenceBrowserResource } from "@/lib/automation/passfactory-public-read-policy";
 import { interactiveControlKind, isAnonymousBrowserReadPost } from "@/lib/automation/simulator-interactive-browser";
+import { addVerifiedMindbodyReadHeaders } from "@/lib/automation/mindbody-public-read-policy";
 import { sanitizeResponderText } from "@/lib/automation/course-support-responder-policy";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
@@ -12,6 +13,7 @@ import { continueNativeBrowserRead, createNativePublicBrowserProxy, isObservedNa
 import { requestFamilyForUrl } from "./request-family";
 import { canonicalPublicReadUrl } from "./public-request-url";
 import { inspectExistingAdapter } from "./existing-adapter-executor";
+import { isPublicCalendarApply } from "./public-calendar-apply";
 import { venueProofMatches } from "./executor";
 import type { ExistingAdapterMetadata } from "./existing-adapter-schema";
 
@@ -110,7 +112,7 @@ export function redactDiscoveryJson(value: unknown, depth = 0): unknown {
 /** Scoped, disposable discovery browser. The model receives data and opaque
  * control IDs; it never receives browser/CDP access or a JavaScript evaluator. */
 export async function createCourseDiscoveryBrowserSession(input: {
-  deadlineAt: Date; initialUrls: string[]; timeZone?: string; venueName?: string;
+  deadlineAt: Date; initialUrls: string[]; timeZone?: string; venueName?: string; venueAddress?: string;
 }, deps: DiscoveryBrowserSessionDependencies = {}) {
   const startupStartedAt = Date.now();
   if (!input.initialUrls.length || input.initialUrls.length > 16 || !input.initialUrls.every(isSafeRecipeUrl)) throw new Error("INVALID_INITIAL_URLS");
@@ -203,6 +205,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       if (nativeProxy && Object.keys(requestHeaders).some(key => /^(?:authorization|proxy-authorization|x-api-key)$/iu.test(key))) throw new Error("CREDENTIAL_HEADERS");
       for (const key of ["accept", "content-type", "origin"]) if (requestHeaders[key]) headers.set(key, requestHeaders[key]);
       const body = request.postData() ?? undefined;
+      if (!addVerifiedMindbodyReadHeaders(url, method, requestHeaders, headers, body ?? "")) throw new Error("UNSAFE_METHOD");
       const preflight = nativeProxy && method === "OPTIONS" && nativeReadPreflightMethod(requestHeaders);
       if (!["GET", "HEAD"].includes(method) && !preflight && !(method === "POST" && body && readPost(url, headers, body))) throw new Error("UNSAFE_METHOD");
       if (method === "POST" && body) {
@@ -391,7 +394,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
       const control = await observeControl(locator);
       // Native public selects remain discoverable when the widget omitted an
       // accessible name, without admitting sensitive forms or arbitrary fields.
-      const kind = publicControlKind(control, blockedAccess);
+      const kind = publicControlKind(control, blockedAccess) ??
+        (!blockedAccess && /^(?:Apply|Apply dates)$/iu.test(control.name) && await isPublicCalendarApply(locator) ? "calendar" : null);
       if (!kind) continue;
       if (control.href && isSafeRecipeUrl(control.href)) { allowedNavigation.add(control.href); passfactory.observeWidgetUrl(control.href); }
       if (control.href && !isSafeRecipeUrl(control.href)) continue;
@@ -481,7 +485,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       if (action.action === "inspect_adapter") {
         if (!isSafeRecipeUrl(action.url) || !allowedNavigation.has(new URL(action.url).href)) throw new Error("UNOBSERVED_NAVIGATION");
         if (!input.venueName || input.venueName.length > 200) throw new Error("MISSING_VENUE_IDENTITY");
-        const result = await (deps.inspectAdapter ?? inspectExistingAdapter)({ bookingUrl: action.url, venueName: input.venueName, timeZone: input.timeZone ?? "UTC" },
+        const result = await (deps.inspectAdapter ?? inspectExistingAdapter)({ bookingUrl: action.url, venueName: input.venueName, venueAddress: input.venueAddress, timeZone: input.timeZone ?? "UTC" },
           { venueMatches: venueProofMatches, requestLease: deps.requestLease ?? runWithProviderRequestLease, deadlineAt: input.deadlineAt });
         return { ...await snapshot(), adapter: result.adapter };
       }

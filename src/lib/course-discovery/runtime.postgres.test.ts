@@ -83,6 +83,32 @@ describe.skipIf(!url)("learned recipe through durable execution and normal match
     expect(await client.localReaderJob.count({ where: { courseId: f.course.id, purpose: "RECIPE_CHECK" } })).toBe(1);
   });
 
+  it.each([-2100, 2100])("retains a fresh reader timestamp with %ims skew", async offset => {
+    const f = await fixture();
+    await runtime.getOrQueueRecipeExecution({ searchId: f.search.id, target: f.target, input: f.input });
+    const claim = (await runtime.claimNextRecipeExecution("skew-reader"))!;
+    const stored = await client.localReaderJob.findUniqueOrThrow({ where: { id: claim.id } });
+    const result = { ...await f.run(claim.input), observedAt: new Date(stored.claimedAt!.getTime() + offset).toISOString() };
+    await runtime.completeRecipeExecution(claim.id, claim.leaseToken, result);
+    expect((await client.localReaderJob.findUniqueOrThrow({ where: { id: claim.id } })).result).toMatchObject({ observedAt: result.observedAt });
+  });
+
+  it("rejects stale, future, superseded and expired warm proofs without accepting an old result", async () => {
+    const f = await fixture();
+    await runtime.getOrQueueRecipeExecution({ searchId: f.search.id, target: f.target, input: f.input });
+    const claim = (await runtime.claimNextRecipeExecution("skew-reader"))!;
+    const stored = await client.localReaderJob.findUniqueOrThrow({ where: { id: claim.id } });
+    const result = await f.run(claim.input);
+    for (const observedAt of [new Date(stored.claimedAt!.getTime() - 5001), new Date(Date.now() + 60000)])
+      await expect(runtime.completeRecipeExecution(claim.id, claim.leaseToken, { ...result, observedAt: observedAt.toISOString() })).rejects.toThrow("no longer current");
+    await client.teeSearch.update({ where: { id: f.search.id }, data: { alertGeneration: { increment: 1 } } });
+    await expect(runtime.completeRecipeExecution(claim.id, claim.leaseToken, result)).rejects.toThrow("no longer current");
+    await client.teeSearch.update({ where: { id: f.search.id }, data: { alertGeneration: f.search.alertGeneration } });
+    await client.localReaderJob.update({ where: { id: claim.id }, data: { jobExpiresAt: new Date(Date.now() - 1) } });
+    await expect(runtime.completeRecipeExecution(claim.id, claim.leaseToken, result)).rejects.toThrow("lease expired");
+    expect((await client.localReaderJob.findUniqueOrThrow({ where: { id: claim.id } })).status).toBe("LEASED");
+  });
+
   it("recovers the first-warm deadline from Postgres, then gives later checks a normal budget", async () => {
     const f = await fixture();
     const deadline = new Date(Date.now() + 120_000);

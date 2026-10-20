@@ -113,20 +113,25 @@ export function isTeeItUpMetadata(value: unknown): value is TeeItUpMetadata {
 export async function fetchTeeItUpSlots(input: {
   courseId: string;
   date: Date;
+  players?: number;
   timeZone?: string;
   metadata: TeeItUpMetadata;
-}): Promise<TeeTimeSlot[]> {
-  return (await fetchTeeItUpTeeSheet(input)).slots;
+}, fetchImpl: typeof fetch = fetch): Promise<TeeTimeSlot[]> {
+  return (await fetchTeeItUpTeeSheet(input, fetchImpl)).slots;
 }
 
 export async function fetchTeeItUpTeeSheet(input: {
   courseId: string;
   date: Date;
+  players?: number;
   timeZone?: string;
   metadata: TeeItUpMetadata;
-}): Promise<TeeItUpTeeSheetResult> {
+}, fetchImpl: typeof fetch = fetch): Promise<TeeItUpTeeSheetResult> {
   if (!isTeeItUpMetadata(input.metadata)) {
     throw new Error("TeeItUp metadata is invalid or ambiguously scoped");
+  }
+  if (input.players !== undefined && (!Number.isInteger(input.players) || input.players < 1 || input.players > 100)) {
+    throw new Error("TeeItUp player count is invalid");
   }
 
   const slots: TeeTimeSlot[] = [];
@@ -137,7 +142,7 @@ export async function fetchTeeItUpTeeSheet(input: {
     const facilityResolution = await fetchFacilities(
       alias,
       aliasBookingBaseUrl,
-      input.timeZone ?? "America/New_York"
+      input.timeZone ?? "America/New_York", fetchImpl
     );
     const discoveredFacilities = facilityResolution.facilities;
     const facilities = input.metadata.facilityIds
@@ -172,7 +177,7 @@ export async function fetchTeeItUpTeeSheet(input: {
       facilityResolution.apiAlias,
       input.date,
       facilityIds,
-      aliasBookingBaseUrl
+      aliasBookingBaseUrl, fetchImpl
     );
     const facilityByCourseId = new Map(
       facilities
@@ -212,8 +217,13 @@ export async function fetchTeeItUpTeeSheet(input: {
           continue;
         }
 
-        const rate = pickBestRate(slot.rates);
-        const availableSpots = getAvailableSpots(slot.rates);
+        // Allowed counts can be discrete (for example [3, 4]); the maximum
+        // does not authorize a smaller party. Choose rates only after this test.
+        const validRates = (Array.isArray(slot.rates) ? slot.rates : []).filter(rate => Array.isArray(rate?.allowedPlayers) &&
+          rate.allowedPlayers.length > 0 && rate.allowedPlayers.every(players => Number.isInteger(players) && players > 0 && players <= 100));
+        const rates = input.players === undefined ? validRates : validRates.filter(rate => rate.allowedPlayers!.includes(input.players!));
+        const rate = pickBestRate(rates);
+        const availableSpots = getAvailableSpots(rates);
         if (availableSpots < 1) {
           continue;
         }
@@ -240,7 +250,7 @@ export async function fetchTeeItUpTeeSheet(input: {
           bookingUrl: withDateParam(aliasBookingBaseUrl, input.date),
           priceCents: rate?.greenFeeCart,
           holes: rate?.holes,
-          priceOptions: getPriceOptions(slot.rates),
+          priceOptions: getPriceOptions(rates),
           evidenceUrl: buildTeeTimesUrl(input.date, facilityIds).toString()
         });
       }
@@ -315,12 +325,12 @@ function pickEarlierBookingWindow(
 async function fetchFacilities(
   alias: string,
   bookingBaseUrl: string,
-  timeZone: string
+  timeZone: string, fetchImpl: typeof fetch
 ): Promise<{ apiAlias: string; facilities: TeeItUpFacility[] }> {
   const url = `${TEEITUP_API_BASE_URL}/alias/${alias}/facilities`;
   const response = await fetchWithProviderTimeout(url, {
     headers: teeItUpHeaders(alias, bookingBaseUrl)
-  });
+  }, fetchImpl);
 
   if (response.ok) {
     return {
@@ -333,7 +343,7 @@ async function fetchFacilities(
     throw providerHttpError("TeeItUp facilities", response);
   }
 
-  const configuration = await fetchBookingPageConfiguration(bookingBaseUrl);
+  const configuration = await fetchBookingPageConfiguration(bookingBaseUrl, fetchImpl);
   if (!configuration) {
     throw providerHttpError("TeeItUp facilities", response);
   }
@@ -351,12 +361,12 @@ async function fetchFacilitySlots(
   alias: string,
   date: Date,
   facilityIds: number[],
-  bookingBaseUrl: string
+  bookingBaseUrl: string, fetchImpl: typeof fetch
 ) {
   const url = buildTeeTimesUrl(date, facilityIds);
   const response = await fetchWithProviderTimeout(url.toString(), {
     headers: teeItUpHeaders(alias, bookingBaseUrl)
-  });
+  }, fetchImpl);
 
   if (!response.ok) {
     throw providerHttpError("TeeItUp tee times", response);
@@ -384,13 +394,13 @@ function teeItUpHeaders(alias: string, bookingBaseUrl: string) {
   };
 }
 
-async function fetchBookingPageConfiguration(bookingBaseUrl: string) {
+async function fetchBookingPageConfiguration(bookingBaseUrl: string, fetchImpl: typeof fetch) {
   const bookingOrigin = new URL(bookingBaseUrl).origin;
   const response = await fetchWithProviderTimeout(bookingBaseUrl, {
     headers: {
       accept: "text/html,application/xhtml+xml;q=0.9"
     }
-  });
+  }, fetchImpl);
   if (!response.ok || new URL(response.url || bookingBaseUrl).origin !== bookingOrigin) {
     return null;
   }

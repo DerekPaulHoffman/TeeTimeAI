@@ -11,6 +11,20 @@ describe("TeeItUp adapter", () => {
     vi.unstubAllGlobals();
   });
 
+  it("requires exact player-count membership and ignores missing or malformed player lists", async () => {
+    const read = vi.fn<typeof fetch>().mockResolvedValueOnce(Response.json([{ id: 123, courseId: "public-course", timeZone: "America/New_York" }]))
+      .mockResolvedValueOnce(Response.json([{ teetimes: [
+        { courseId: "public-course", teetime: "2030-10-22T15:00:00Z", rates: [{ allowedPlayers: [3, 4], holes: 18 }] },
+        { courseId: "public-course", teetime: "2030-10-22T15:10:00Z", rates: [{ allowedPlayers: [1, 3], holes: 18 }] },
+        { courseId: "public-course", teetime: "2030-10-22T15:20:00Z", rates: [{}, { allowedPlayers: [] }, { allowedPlayers: "1234" }] },
+        { courseId: "public-course", teetime: "2030-10-22T15:30:00Z", rates: [{ allowedPlayers: [2, 4], holes: 9 }, { allowedPlayers: [3, 4], holes: 18 }] },
+      ] }]));
+    const result = await fetchTeeItUpTeeSheet({ courseId: "course", date: new Date("2030-10-22T00:00:00Z"), players: 2,
+      metadata: { aliases: ["public"], bookingBaseUrl: "https://public.book.teeitup.com/" } }, read);
+    expect(result.slots).toHaveLength(1);
+    expect(result.slots[0]).toMatchObject({ startsAt: "2030-10-22T11:30", availableSpots: 4, holes: 9 });
+  });
+
   it("discovers facilities for aliases and normalizes available tee times", async () => {
     const fetchMock = vi
       .fn()

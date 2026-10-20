@@ -8,6 +8,7 @@ import { createAddressPinnedPublicFetchTransport } from "./address-pinned-public
 import { runWithProviderRequestLease } from "./provider-request-lease";
 import { createSimulatorBrowserRequestQueue } from "./simulator-browser-request-queue";
 import { createPassfactoryPublicReadPolicy, isIncidentalBrowserRequest } from "./passfactory-public-read-policy";
+import { addVerifiedMindbodyReadHeaders, isMindbodyPublicReadPost } from "./mindbody-public-read-policy";
 import { projectPassfactoryCalendarEvidence, type PassfactoryCalendarEvidence } from "./passfactory-calendar-evidence";
 import { inspectSimulatorClientCode, mergeSimulatorClientCodeEvidence, type SimulatorClientCodeEvidence } from "./simulator-client-code-evidence";
 import { createBlockedResourceDiagnostics, simulatorCredentialHeaderKind, summarizeBlockedRequestBody } from "./simulator-blocked-resources";
@@ -47,6 +48,9 @@ export function interactiveControlKind(input: { tag: string; role: string; name:
 
 /** Only explicitly read-shaped anonymous JSON requests, never arbitrary page POSTs. */
 export function isAnonymousBrowserReadPost(url: URL, headers: Headers, body: string) {
+  // A Next server-action header controls the operation independently of body
+  // shape. Never let a GraphQL-looking body authorize an unknown action.
+  if (headers.has("next-action")) return isMindbodyPublicReadPost(url, headers, body);
   // This known REST API must use its exact source-bound contracts. Adding a
   // GraphQL-looking field must not bypass them or authorize a transaction URL.
   if (url.hostname === "api.passfactory.io") return false;
@@ -174,6 +178,7 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
           const body = request.postData() ?? "";
           const publicHeaders = new Headers();
           for (const key of ["accept", "accept-language", "user-agent", "content-type", "origin"]) if (headers[key]) publicHeaders.set(key, headers[key]);
+          const publicAction = safe && addVerifiedMindbodyReadHeaders(new URL(safe), method, headers, publicHeaders, body);
           // Widgets can publish their selected hall using history.replaceState
           // before fetching its calendar. Admit only codes in the real page URL,
           // never a resource identifier supplied by the request body alone.
@@ -182,6 +187,7 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
           const rejection = !safe ? "UNSAFE_URL" as const
             : !["GET", "HEAD", "POST"].includes(method) ? "METHOD_NOT_ALLOWED" as const
               : sensitiveHeaders.length ? "SENSITIVE_HEADERS" as const
+                : !publicAction ? "METHOD_NOT_ALLOWED" as const
                 : !["document", "script", "stylesheet", "image", "font", "xhr", "fetch"].includes(kind) ? "RESOURCE_KIND_NOT_ALLOWED" as const
                   : method === "POST" && !allowsReadPost(new URL(safe), publicHeaders, body)
                     ? "METHOD_NOT_ALLOWED" as const : null;

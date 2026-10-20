@@ -49,8 +49,10 @@ booking instructions is not itself an access challenge.
   still prevent complete proof. Known telemetry and the payment-only
   `js.stripe.com` client are aborted without counting as missing availability
   evidence; they receive no additional network authority.
-- `EXISTING_ADAPTER` stores only typed identifiers for the existing ForeUP and
-  Acuity public readers. Each replay rechecks public configuration and venue
+- `EXISTING_ADAPTER` stores only typed identifiers for the existing ForeUP,
+  Acuity and TeeItUp public readers. TeeItUp identifiers come from the observed
+  official booking URL and public directory; name, street address, timezone and
+  the exact facility set must agree. Each replay rechecks public configuration and venue
   identity, then uses their fixed read-only routes, shared provider leases and
   normalized source IDs. A model cannot supply routes, code or extractors for
   this engine.
@@ -68,6 +70,17 @@ booking instructions is not itself an access challenge.
   supported. New markup may require a new supported interpreter operation;
   a model must not supply code to work around that limit. Ambiguous field
   selectors report `AMBIGUOUS_PROOF_FIELD`.
+- `APPLY_DATE` can confirm a selected day only inside the same visible public
+  calendar, with its full month/year and selected day verified. It retires the
+  previous response proof. A generic Apply button or dialog is insufficient.
+- Outdoor availability rendered entirely in the dated main-document response
+  can use `availabilityResponse.kind: SERVER_DOCUMENT` together with
+  `proof.complete: {serverDocument: true}`. This requires a complete HTTP 200
+  HTML document, bounded static selectors, and matching venue, date, capacity
+  and every extracted row in both the inert source and two settled DOM reads.
+  Pagination, script-only inventory, partial documents, later data reads and
+  missing player-capacity evidence fail closed. It does not infer remaining
+  places from a course's general group-size or pricing policy.
 - An empty result needs explicit empty-state evidence. A visible generic
   container is insufficient. Incomplete or inaccessible pages do not become
   empty availability.
@@ -99,6 +112,29 @@ booking instructions is not itself an access challenge.
   that opening-hour intervals alone are free inventory.
 - Provider HTTP 429 responses remain `PROVIDER_THROTTLED` retry results; they
   do not prove account requirements or invalidate a previously working recipe.
+
+## Public action and date-picker limits
+
+Mindbody's public service page uses Next server actions even for reads. Four
+independently inspected action IDs are permitted for displayed-service prices,
+next-available labels, service-ID decoding and public service-routing flags.
+Each has an exact argument schema, requires the official HTTPS host and public
+services route, and binds Origin and Referer to the same widget. Unknown actions,
+extra fields, private staff filters, credentials and transaction fields are
+rejected. The public Next-Action header is forwarded only after this validation;
+a GraphQL-looking body cannot authorize an unknown server action.
+
+The schedule's separate multipart availability action remains unsupported.
+It carries an opaque bound argument, so accepting its body shape alone would
+not establish source provenance. Observing the service cards is not proof that
+date-specific monitoring works for this provider.
+
+`APPLY_DATE` handles public pickers that commit the selected date separately.
+It accepts only Apply/Apply dates inside an observed visible month/year and
+numeric-day grid, outside sensitive/contact and checkout contexts. Replay also
+requires the previously selected requested day in that same picker. Applying
+the filter invalidates prior response evidence: the subsequent successful
+date-bound response and complete source-date proof are still required.
 
 ## Matching contracts
 
@@ -139,6 +175,13 @@ same search, course, offering, start/end, resource, product and holes. This
 keeps an already-sent opening sent. Ambiguous identities stay separate.
 
 ## Evidence level
+
+Cold discovery snapshots the available model catalog before claiming work and
+reuses that immutable snapshot for its workers. A temporarily incomplete local
+catalog must not consume a database attempt. Warm recipe execution does not
+require a model catalog. Local validation permits at most five seconds of
+workstation/database clock difference; database lease and deadline expiry checks
+remain strict, and retries retain the first pickup's original deadline.
 
 The focused recipe, executor, browser-session, and runtime-window tests include
 isolated Chrome fixtures with an in-memory transport, malformed and missing

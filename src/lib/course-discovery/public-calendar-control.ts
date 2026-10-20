@@ -64,4 +64,5 @@ export async function selectPublicCalendarDate(page: Page, input: {
   const button = await uniqueVisible(page, input.daySelector, day);
   await assertCalendarControl(button);
   await button.click();
+  return button;
 }

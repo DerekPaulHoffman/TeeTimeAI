@@ -77,6 +77,8 @@ function boundedText(value: unknown, max: number): value is string {
 function addressKey(value: string) {
   return value.normalize("NFKC").toLowerCase()
     .replace(/\b(?:united states of america|united states|usa)\b/gu, "us")
+    .replace(/\b(?:drive|road|street|avenue|boulevard|lane|court|parkway|highway|circle|trail|terrace)\b/gu,
+      word => ({ drive: "dr", road: "rd", street: "st", avenue: "ave", boulevard: "blvd", lane: "ln", court: "ct", parkway: "pkwy", highway: "hwy", circle: "cir", trail: "trl", terrace: "ter" })[word]!)
     .replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 }
 
