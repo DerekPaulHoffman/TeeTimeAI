@@ -189,6 +189,22 @@ export function projectAcuityPublicConfiguration(html: string, sourceUrl: string
   return inspectAcuityPublicConfiguration(html, sourceUrl)?.publicConfiguration;
 }
 
+/** The observed public business name binds a newly learned recipe to a venue.
+ * Existing configuration projection deliberately retains its original shape. */
+export function parseAcuityPublicConfigurationIdentity(html: string, sourceUrl: string) {
+  const configuration = projectAcuityPublicConfiguration(html, sourceUrl);
+  if (!configuration) return;
+  const business = parsePublicBusiness(html);
+  if (typeof business.name !== "string" || business.name.trim().length < 2 || business.name.length > 200 ||
+      /[<>\u0000-\u001f\u007f]/u.test(business.name)) return;
+  return { configuration, venueName: business.name.replace(/\s+/gu, " ").trim() };
+}
+
+export async function readAcuityPublicConfiguration(input: { bookingUrl: string; fetchImpl?: typeof fetch }) {
+  if (!isAcuityPublicBookingUrl(input.bookingUrl)) throw sourceError("The simulator source is not a public calendar");
+  return parseAcuityPublicConfigurationIdentity(await publicRead(new URL(input.bookingUrl), "text/html", input.fetchImpl ?? fetch), input.bookingUrl);
+}
+
 type AcuityConfigurationInspection = {
   publicConfiguration?: AcuityPublicConfiguration;
   configurationDiagnostic?: { phase: "CONFIG"; reason: "PUBLIC_PROVIDER_CONFIG_REJECTED"; publicProviderFamily: "ACUITY";

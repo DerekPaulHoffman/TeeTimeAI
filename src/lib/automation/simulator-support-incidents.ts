@@ -1,4 +1,5 @@
 import { Prisma } from "@prisma/client";
+import { excludeDiscoveryPilotTargets } from "@/lib/course-discovery/legacy-exclusion";
 import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
 import { createSimulatorSupportIntentDigest, isCurrentSimulatorSupportSource, isValidSimulatorEngineeringAuthority, isValidSimulatorSupportClaim, SIMULATOR_SUPPORT_SOURCE_SELECT, type SimulatorEngineeringAuthority } from "./simulator-support-policy";
 import type { CourseDispatchAudit } from "./course-support-course-dispatch";
@@ -118,12 +119,13 @@ export async function resolveUnownedSimulatorSupportIncident(tx: Prisma.Transact
 }
 
 export async function listSimulatorSupportDispatchCandidates(now: Date, tx: Prisma.TransactionClient) {
-  const incidents = await tx.simulatorSupportIncident.findMany({
+  const observedIncidents = await tx.simulatorSupportIncident.findMany({
     where: { status: "AUTO_INVESTIGATING", OR: [{ retryAt: null }, { retryAt: { lte: now } }], offering: { kind: "SIMULATOR", active: true, publicAccessStatus: { not: "NOT_PUBLIC" } } },
     include: { offering: { include: { course: { select: { timeZone: true } } } } },
     orderBy: [{ firstSeenAt: "asc" }, { id: "asc" }], take: 128,
   });
-  if (incidents.length === 128) throw new Error("Simulator support queue reached its bounded read limit.");
+  if (observedIncidents.length === 128) throw new Error("Simulator support queue reached its bounded read limit.");
+  const incidents = await excludeDiscoveryPilotTargets(observedIncidents.map(incident => ({ ...incident, courseId: incident.offering.courseId })), tx, now);
   if (incidents.length === 0) return [];
   const preferences = await tx.coursePreference.findMany({
     where: { offeringId: { in: incidents.map(incident => incident.offeringId) }, teeSearch: { mode: "SIMULATOR", status: "ACTIVE", OR: [{ trafficClass: { notIn: ["TEST", "AUTOMATION"] } }, { trafficClass: { in: ["TEST", "AUTOMATION"] }, syntheticMultiCycle: true }] } },

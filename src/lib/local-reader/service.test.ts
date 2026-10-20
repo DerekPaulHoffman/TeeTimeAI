@@ -2094,6 +2094,26 @@ describe("local reader job service", () => {
     );
   });
 
+  it("does not count separate recipe-runner leases against installed-reader capacity", async () => {
+    const recipeJobs = ["recipe-1", "recipe-2"].map(id => ({ id, courseKey: `recipe:${id}`, requiredCapabilityKey: null }));
+    prismaMocks.localReaderJob.findMany.mockImplementation(async query => {
+      if (query.where.status === "LEASED") {
+        return query.where.purpose?.in?.includes("RECIPE_CHECK") || !query.where.purpose ? recipeJobs : [];
+      }
+      return [];
+    });
+
+    await expect(claimNextLocalReaderJob("chrome-home")).resolves.toBeNull();
+
+    // Reaching the candidate read proves unrelated recipe leases did not fill
+    // this reader's two-job capacity. Actual provider traffic has its own lease.
+    expect(prismaMocks.localReaderJob.findMany.mock.calls.length).toBeGreaterThan(1);
+    expect(prismaMocks.localReaderJob.findMany).toHaveBeenNthCalledWith(1,
+      expect.objectContaining({ where: expect.objectContaining({
+        purpose: { in: ["OFFICIAL_SOURCE_DISCOVERY", "ALERT_CHECK", "COURSE_VERIFICATION"] },
+      }) }));
+  });
+
   it("does not lease a third global reader job", async () => {
     prismaMocks.localReaderJob.updateMany.mockResolvedValue({ count: 0 });
     prismaMocks.localReaderJob.findMany.mockResolvedValueOnce([

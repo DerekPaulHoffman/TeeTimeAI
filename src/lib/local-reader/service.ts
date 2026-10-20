@@ -955,6 +955,7 @@ async function claimReaderCandidate(handshake: LocalReaderAgentHandshake) {
           }
           const activeJobs = await transaction.localReaderJob.findMany({
             where: {
+              purpose: { in: ["OFFICIAL_SOURCE_DISCOVERY", "ALERT_CHECK", "COURSE_VERIFICATION"] },
               status: "LEASED",
               jobExpiresAt: { gt: databaseNow },
               leaseExpiresAt: { gt: databaseNow },

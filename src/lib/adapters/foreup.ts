@@ -47,6 +47,7 @@ export async function fetchForeupSlots(input: {
   date: Date;
   players: number;
   metadata: ForeupMetadata;
+  fetchImpl?: typeof fetch;
 }): Promise<TeeTimeSlot[]> {
   return (await fetchForeupTeeSheet(input)).slots;
 }
@@ -57,10 +58,11 @@ export async function fetchForeupTeeSheet(input: {
   players: number;
   metadata: ForeupMetadata;
   discoverBookingWindow?: boolean;
+  fetchImpl?: typeof fetch;
 }): Promise<ForeupTeeSheetResult> {
   const availability = await fetchForeupAvailability(input);
   const bookingWindowEvidence = input.discoverBookingWindow
-    ? await fetchForeupBookingWindow(input.metadata)
+    ? await fetchForeupBookingWindow(input.metadata, input.fetchImpl)
     : null;
   return { ...availability, bookingWindowEvidence };
 }
@@ -70,6 +72,7 @@ async function fetchForeupAvailability(input: {
   date: Date;
   players: number;
   metadata: ForeupMetadata;
+  fetchImpl?: typeof fetch;
 }): Promise<Pick<ForeupTeeSheetResult, "slots" | "targetDateStatus">> {
   const dateParam = formatForeupDate(input.date);
   const url = new URL("https://foreupsoftware.com/index.php/api/booking/times");
@@ -86,7 +89,7 @@ async function fetchForeupAvailability(input: {
     headers: {
       accept: "application/json"
     }
-  });
+  }, input.fetchImpl);
 
   if (!response.ok) {
     throw providerHttpError("ForeUP", response);
@@ -122,13 +125,14 @@ async function fetchForeupAvailability(input: {
 }
 
 async function fetchForeupBookingWindow(
-  metadata: ForeupMetadata
+  metadata: ForeupMetadata,
+  fetchImpl?: typeof fetch,
 ): Promise<BookingWindowEvidence | null> {
   const evidenceUrl = metadata.bookingWindowEvidenceUrl ?? metadata.bookingBaseUrl;
   try {
     const response = await fetchWithProviderTimeout(evidenceUrl, {
       headers: { accept: "text/html,application/xhtml+xml" }
-    });
+    }, fetchImpl);
     if (!response.ok) {
       return null;
     }

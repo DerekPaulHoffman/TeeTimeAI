@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import { createPassfactoryPublicReadPolicy, isIncidentalBrowserRequest } from "./passfactory-public-read-policy";
+import { createPassfactoryPublicReadPolicy, isIncidentalBrowserRequest, isNonEvidenceBrowserResource } from "./passfactory-public-read-policy";
 
 describe("observed PassFactory public widget reads", () => {
   const headers = new Headers({ origin: "https://passfactory.com", "content-type": "application/json" });
@@ -46,11 +46,39 @@ describe("observed PassFactory public widget reads", () => {
 it("exempts only exact incidental telemetry destinations from completeness", () => {
   expect(isIncidentalBrowserRequest("https://r.stripe.com/b")).toBe(true);
   expect(isIncidentalBrowserRequest("https://analytics.google.com/g/collect?v=2")).toBe(true);
+  expect(isIncidentalBrowserRequest("https://www.google-analytics.com/analytics.js")).toBe(true);
+  expect(isIncidentalBrowserRequest("https://www.google-analytics.com/j/collect?v=1")).toBe(true);
+  expect(isIncidentalBrowserRequest("https://www.google-analytics.com.evil.test/analytics.js")).toBe(false);
+  expect(isIncidentalBrowserRequest("https://passfactory.com/favicon/favicon-96x96.png")).toBe(true);
+  expect(isIncidentalBrowserRequest("https://example.org/favicon.ico")).toBe(true);
+  expect(isIncidentalBrowserRequest("https://example.org/apple-touch-icon-precomposed.png")).toBe(true);
+  expect(isIncidentalBrowserRequest("https://example.org/api/availability.png")).toBe(false);
+  expect(isIncidentalBrowserRequest("https://connect.facebook.net/en_US/fbevents.js")).toBe(true);
+  expect(isIncidentalBrowserRequest("https://js-na2.hs-scripts.com/242014557.js")).toBe(true);
+  expect(isIncidentalBrowserRequest("https://js-na2.hs-scripts.com/availability.js")).toBe(false);
+  expect(isIncidentalBrowserRequest("https://maps.googleapis.com/maps/api/js?key=public-key")).toBe(true);
   expect(isIncidentalBrowserRequest("https://maps.googleapis.com/$rpc/google.internal.maps.mapsjs.v1.MapsJsInternalService/GetViewportInfo")).toBe(true);
   expect(isIncidentalBrowserRequest("https://forms-na2.hscollectedforms.net/collected-forms/v1/config/json?portalId=123")).toBe(true);
   expect(isIncidentalBrowserRequest("https://track-na2.hubspot.com/__ptc.gif?utk=tracking")).toBe(true);
+  expect(isIncidentalBrowserRequest("https://www.googletagmanager.com/gtag/js?id=G-PUBLIC")).toBe(true);
+  expect(isIncidentalBrowserRequest("https://www.googletagmanager.com/gtm.js?id=GTM-PUBLIC")).toBe(true);
+  expect(isIncidentalBrowserRequest("https://js.stripe.com/dahlia/stripe.js")).toBe(true);
+  expect(isIncidentalBrowserRequest("https://js.stripe.com/terminal/v1")).toBe(true);
+  expect(isIncidentalBrowserRequest("https://js.stripe.com.evil.test/dahlia/stripe.js")).toBe(false);
+  expect(isIncidentalBrowserRequest("https://api.stripe.com/v1/payment_intents")).toBe(false);
+  for (const url of ["https://www.googletagmanager.com/gtag/availability", "https://www.googletagmanager.com.evil.test/gtag/js", "http://www.googletagmanager.com/gtag/js", "https://u:p@www.googletagmanager.com/gtag/js"])
+    expect(isIncidentalBrowserRequest(url)).toBe(false);
   for (const url of ["https://api.passfactory.io/api/v1/availability-widget/hall-widget", "https://api.stripe.com/v1/payment_intents", "https://r.stripe.com/checkout", "https://r.stripe.com.evil.test/b", "https://other.test/g/collect"])
     expect(isIncidentalBrowserRequest(url)).toBe(false);
   for (const url of ["https://forms-na2.hscollectedforms.net/collected-forms/submit", "https://forms-na2.hscollectedforms.net.evil.test/collected-forms/v1/config/json", "http://forms-na2.hscollectedforms.net/collected-forms/v1/config/json", "https://track-na2.hubspot.com/submit", "https://track-na2.hubspot.com.evil.test/__ptc.gif"])
     expect(isIncidentalBrowserRequest(url)).toBe(false);
+});
+
+it("aborts decorative preloads reported as other without hiding application reads", () => {
+  expect(isNonEvidenceBrowserResource("https://example.org/uploads/photo.png", "other")).toBe(true);
+  expect(isNonEvidenceBrowserResource("https://example.org/static/type.woff2", "other")).toBe(true);
+  expect(isNonEvidenceBrowserResource("https://example.org/api/availability", "fetch")).toBe(false);
+  expect(isNonEvidenceBrowserResource("https://example.org/api/availability.json", "other")).toBe(false);
+  expect(isNonEvidenceBrowserResource("https://example.org/static/app.js", "script")).toBe(false);
+  expect(isNonEvidenceBrowserResource("https://example.org/api/times.png", "fetch")).toBe(false);
 });

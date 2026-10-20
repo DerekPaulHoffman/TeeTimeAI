@@ -23,6 +23,8 @@ import {
   suppressSearchEmailDeliveriesForMatches,
 } from "@/lib/email/search-delivery-outbox";
 import { prisma } from "@/lib/prisma";
+import { assertRecipeObservationCurrent, markRecipeObservationConsumed } from "@/lib/course-discovery/runtime";
+import { continueGenericRecipeMatchSources } from "@/lib/course-discovery/match-source-continuity";
 import {
   assertCurrentSearchCheckWrite,
   getSearchCheckWriteContext,
@@ -3277,6 +3279,9 @@ export type TeeTimeMatchObservationInput = {
   bookingUrl: string;
   priceCents?: number;
   holes?: number;
+  endsAt?: Date;
+  resourceId?: string;
+  productId?: string;
   evidenceUrl?: string;
   observedAt?: Date;
   transaction?: Prisma.TransactionClient;
@@ -3351,6 +3356,9 @@ export async function recordTeeTimeMatch(input: TeeTimeMatchObservationInput) {
       bookingUrl: input.bookingUrl,
       priceCents: input.priceCents,
       holes: input.holes,
+      endsAt: input.endsAt,
+      resourceId: input.resourceId,
+      productId: input.productId,
       evidenceUrl: input.evidenceUrl,
     },
     create: {
@@ -3364,6 +3372,9 @@ export async function recordTeeTimeMatch(input: TeeTimeMatchObservationInput) {
       bookingUrl: input.bookingUrl,
       priceCents: input.priceCents,
       holes: input.holes,
+      endsAt: input.endsAt,
+      resourceId: input.resourceId,
+      productId: input.productId,
       evidenceUrl: input.evidenceUrl,
     },
   });
@@ -3485,6 +3496,7 @@ export async function commitCurrentCourseTeeTimeMatches(input: {
     resumePreviouslyAcceptedSource?: boolean;
   };
   sourceKind: "SUCCESS" | "FAILURE";
+  accessRecipeObservation?: { jobId: string; recipeId: string; courseId: string; searchId: string };
   bookingWindowEvidence?: BookingWindowEvidence;
   markBookingWindowChecked?: boolean;
   pricing?: CoursePriceEstimate;
@@ -3546,6 +3558,9 @@ export async function commitCurrentCourseTeeTimeMatches(input: {
   return runSerializedCourseMonitoringWrite(
     input.courseId,
     async (transaction) => {
+      if (input.accessRecipeObservation) {
+        await assertRecipeObservationCurrent(transaction, input.accessRecipeObservation);
+      }
       if (
         input.providerObservation &&
         !(await renewCourseProviderObservationInTransaction(
@@ -3623,7 +3638,10 @@ export async function commitCurrentCourseTeeTimeMatches(input: {
         matchId?: string;
         isPending: boolean;
       }> = [];
-      for (const match of input.matches) {
+      const matches = await continueGenericRecipeMatchSources(transaction, {
+        searchId: input.searchId, courseId: input.courseId,
+      }, input.matches);
+      for (const match of matches) {
         const persistedMatch = await recordTeeTimeMatch({
           ...match,
           searchId: input.searchId,
@@ -3645,7 +3663,7 @@ export async function commitCurrentCourseTeeTimeMatches(input: {
           courseId: input.courseId,
           date: input.date,
           timeZone: input.timeZone,
-          confirmedMatches: input.matches.map((match) => ({
+          confirmedMatches: matches.map((match) => ({
             sourceId: match.sourceId,
             startsAt: match.startsAt,
           })),
@@ -3678,6 +3696,7 @@ export async function commitCurrentCourseTeeTimeMatches(input: {
           input.providerObservation,
         );
       }
+      if (input.accessRecipeObservation) await markRecipeObservationConsumed(transaction, input.accessRecipeObservation);
       return {
         sourceEvidenceAccepted: true as const,
         persistedMatchStates,

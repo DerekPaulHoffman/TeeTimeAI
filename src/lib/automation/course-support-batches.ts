@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { excludeDiscoveryPilotTargets } from "@/lib/course-discovery/legacy-exclusion";
 
 import { Prisma } from "@prisma/client";
 import type {
@@ -17735,7 +17736,7 @@ async function listParkedSourceCompleteFinalizationRecoveryCandidates(
 
 type CourseSupportClaimCandidateReadClient = Pick<
   Prisma.TransactionClient,
-  "courseSupportIncident" | "courseMonitoringEvent"
+  "courseSupportIncident" | "courseMonitoringEvent" | "coursePreference" | "courseDiscoveryPilotEnrollment" | "teeSearch"
 >;
 
 async function listCourseSupportClaimCandidateIncidents(
@@ -17759,7 +17760,7 @@ async function listCourseSupportClaimCandidateIncidents(
     select: COURSE_SUPPORT_CANDIDATE_INCIDENT_SELECT,
   });
   if (firstPage.length <= COURSE_SUPPORT_CANDIDATE_QUEUE_READ_LIMIT) {
-    return retainBoundedCourseSupportCandidates(client, firstPage, onHistoryBlocked);
+    return retainBoundedCourseSupportCandidates(client, await excludeDiscoveryPilotTargets(firstPage, client, now), onHistoryBlocked);
   }
 
   const dueIncidents = firstPage.filter(
@@ -17785,7 +17786,7 @@ async function listCourseSupportClaimCandidateIncidents(
         "The parked course-support recovery queue exceeds the bounded scan limit.",
       );
     }
-    return retainBoundedCourseSupportCandidates(client, dueIncidents, onHistoryBlocked);
+    return retainBoundedCourseSupportCandidates(client, await excludeDiscoveryPilotTargets(dueIncidents, client, now), onHistoryBlocked);
   }
   const exactParkedIds = new Set(
     buildSelectableCourseSupportClaimCandidates(parkedSuperset, now)
@@ -17798,7 +17799,7 @@ async function listCourseSupportClaimCandidateIncidents(
     ...dueIncidents,
     ...parkedSuperset.filter((incident) => exactParkedIds.has(incident.id)),
   ];
-  return retainBoundedCourseSupportCandidates(client, incidents, onHistoryBlocked);
+  return retainBoundedCourseSupportCandidates(client, await excludeDiscoveryPilotTargets(incidents, client, now), onHistoryBlocked);
 }
 
 async function listCourseSupportClaimCandidates(

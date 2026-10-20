@@ -14,7 +14,7 @@ const PROVIDER_REQUEST_HEARTBEAT_MS = 30 * 1000;
 const PROVIDER_REQUEST_CLAIM_ATTEMPTS = 8;
 const PROVIDER_REQUEST_RETRY_MS = 500;
 
-type ProviderRequestLease = {
+export type ProviderRequestLease = {
   providerFamilyKey: string;
   globalSlot: number;
   leaseToken: string;
@@ -106,7 +106,8 @@ function waitForProviderRequestHeartbeat(signal: AbortSignal) {
   });
 }
 
-async function claimProviderRequestLease(providerFamilyKey: string) {
+export async function claimProviderRequestLease(providerFamilyKey: string) {
+  providerFamilyKey = normalizeProviderFamilyKey(providerFamilyKey);
   const now = new Date();
   const leaseExpiresAt = new Date(now.getTime() + PROVIDER_REQUEST_LEASE_MS);
   const leaseToken = randomUUID();
@@ -210,7 +211,7 @@ async function renewProviderRequestLease(lease: ProviderRequestLease) {
 
 class ProviderRequestLeaseLostError extends Error {}
 
-async function releaseProviderRequestLease(lease: ProviderRequestLease) {
+export async function releaseProviderRequestLease(lease: ProviderRequestLease) {
   await prisma.$transaction([
     prisma.providerRequestLease.deleteMany({
       where: {

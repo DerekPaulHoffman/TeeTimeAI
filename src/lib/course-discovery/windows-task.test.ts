@@ -1,0 +1,72 @@
+// @vitest-environment node
+import { execFileSync, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { describe, expect, it } from "vitest";
+
+describe.runIf(process.platform === "win32")("Windows supervisor lifecycle dry runs", () => {
+  const interpreters = ["powershell.exe", "pwsh.exe"].filter(name => process.platform === "win32" &&
+    spawnSync(name, ["-NoProfile", "-NonInteractive", "-Command", "exit 0"], { windowsHide: true }).status === 0);
+  it.each(interpreters)("inspects read-only with %s using inbox modules rather than inherited user modules", interpreter => {
+    const temporary = mkdtempSync(join(tmpdir(), "course-discovery-task-"));
+    const fakeModule = join(temporary, "ScheduledTasks");
+    mkdirSync(fakeModule);
+    writeFileSync(join(fakeModule, "ScheduledTasks.psm1"), 'throw "UNTRUSTED_MODULE_LOADED"');
+    try {
+      const taskName = `Tee Time Spot Course Discovery test-${randomUUID().slice(0, 20)}`;
+      const result = execFileSync(interpreter, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "RemoteSigned", "-File",
+        resolve("scripts/automation/manage-course-discovery-task.ps1"), "-Action", "Inspect", "-TaskName", taskName], {
+        encoding: "utf8", windowsHide: true, env: { ...process.env, PSModulePath: temporary },
+      });
+      expect(JSON.parse(result.trim())).toMatchObject({ action: "Inspect", apply: false, exists: false });
+      expect(result).not.toContain("UNTRUSTED_MODULE_LOADED");
+    } finally {
+      if (dirname(temporary) !== resolve(tmpdir()) || !temporary.startsWith(join(resolve(tmpdir()), "course-discovery-task-"))) throw new Error("Unsafe test cleanup path");
+      rmSync(temporary, { recursive: true, force: true });
+    }
+  }, 30_000);
+  it("validates protected external config and plans registration without exposing credentials or applying", () => {
+    const temporary = mkdtempSync(join(tmpdir(), "course-discovery-task-"));
+    const config = join(temporary, "runtime.json");
+    const secret = "fake-test-device-secret-never-print";
+    writeFileSync(config, JSON.stringify({ COURSE_DISCOVERY_API_ORIGIN: "https://example.org", LOCAL_READER_DEVICE_TOKEN: secret,
+      COURSE_DISCOVERY_BROWSER_TRANSPORT: "NATIVE_CHROME" }));
+    try {
+      const acl = '$env:PSModulePath=Join-Path $PSHOME "Modules"; $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User; $acl=New-Object Security.AccessControl.FileSecurity; ' +
+        '$acl.SetOwner($sid); $acl.SetAccessRuleProtection($true,$false); ' +
+        '$acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($sid,"FullControl","Allow"))); ' +
+        'Set-Acl -LiteralPath $args[0] -AclObject $acl';
+      // Pass the generated filename as an argument, never interpolate file content.
+      execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `& {param($p) ${acl.replace("$args[0]", "$p")} } '${config.replace(/'/gu, "''")}'`], { windowsHide: true });
+      const taskName = `Tee Time Spot Course Discovery test-${randomUUID().slice(0, 20)}`;
+      const result = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "RemoteSigned", "-File",
+        resolve("scripts/automation/manage-course-discovery-task.ps1"), "-Action", "Register", "-WorkspacePath", process.cwd(),
+        "-ConfigPath", config, "-NodePath", process.execPath, "-TaskName", taskName], { encoding: "utf8", windowsHide: true });
+      const plan = JSON.parse(result.trim());
+      expect(plan).toMatchObject({ action: "Register", apply: false, exists: false, restartCount: 3, hiddenWindow: true, credentialsInArguments: false });
+      expect(result).not.toContain(secret);
+      const inspect = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "RemoteSigned", "-File",
+        resolve("scripts/automation/manage-course-discovery-task.ps1"), "-TaskName", taskName], { encoding: "utf8", windowsHide: true });
+      expect(JSON.parse(inspect.trim()).exists).toBe(false);
+      const logs = join(temporary, "logs"); mkdirSync(logs);
+      writeFileSync(join(logs, `${new Date().toISOString().slice(0, 10)}.jsonl`), JSON.stringify({ event: "poll_completed", observedAt: new Date().toISOString(), secret }) + "\n");
+      const healthy = execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "RemoteSigned", "-File",
+        resolve("scripts/automation/manage-course-discovery-task.ps1"), "-TaskName", taskName, "-LogDirectory", logs], { encoding: "utf8", windowsHide: true });
+      expect(JSON.parse(healthy.trim())).toMatchObject({ exists: false, heartbeatStatus: "fresh" });
+      expect(healthy).not.toContain(secret);
+      writeFileSync(config, "malformed secret material");
+      const invalid = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "RemoteSigned", "-File",
+        resolve("scripts/automation/run-course-discovery-supervisor.ps1"), "-ValidateOnly", "-WorkspacePath", process.cwd(),
+        "-ConfigPath", config, "-NodePath", process.execPath], { encoding: "utf8", windowsHide: true });
+      expect(invalid.status).toBe(1);
+      expect(invalid.stderr).toContain("COURSE_DISCOVERY_RUNTIME_START_FAILED");
+      expect(invalid.stderr).not.toContain("malformed secret material");
+    } finally {
+      // Test-owned absolute path was generated by mkdtemp under the system temp directory.
+      if (dirname(temporary) !== resolve(tmpdir()) || !temporary.startsWith(join(resolve(tmpdir()), "course-discovery-task-"))) throw new Error("Unsafe test cleanup path");
+      rmSync(temporary, { recursive: true, force: true });
+    }
+  }, 30_000);
+});

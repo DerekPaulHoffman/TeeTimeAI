@@ -57,6 +57,7 @@ import { assertSimulatorSessionFitsWindow } from "@/lib/searches/simulator-windo
 import { DEFAULT_SIMULATOR_DURATION_MINUTES } from "@/lib/searches/search-mode";
 import { getSimulatorVenueForDemand } from "@/lib/places/simulator-google";
 import type { CourseCandidate } from "@/lib/places/google";
+import { enrollDiscoveryPilotInTransaction } from "@/lib/course-discovery/enrollment";
 
 const SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE = 0.06;
 const QUEUED_SEARCH_STATUSES = ["ACTIVE", "PAUSED"] as const;
@@ -156,6 +157,7 @@ export async function createTeeSearchForUser(
       },
       include: searchInclude,
     });
+    await enrollDiscoveryPilotInTransaction(transaction, created);
     await enqueueOperatorNotification(transaction, created);
     return created;
   });
@@ -334,6 +336,7 @@ async function createSimulatorTeeSearchForUser(
       },
       include: searchInclude,
     });
+    await enrollDiscoveryPilotInTransaction(transaction, created);
     await enqueueOperatorNotification(transaction, created);
     return created;
   });

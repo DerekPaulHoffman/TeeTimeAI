@@ -52,6 +52,7 @@ import {
 } from "@/lib/users/pending-email";
 import { getLocalReaderCourseKey } from "@/lib/local-reader/course-key";
 import { getNewestCompletedLocalReaderProviderObservationInTransaction } from "@/lib/local-reader/service";
+import { hasUnreconciledRecipeDeliveryObservation } from "@/lib/course-discovery/delivery-freshness";
 
 export type { SearchEmailDeliveryPayload } from "@/lib/email/search-delivery-payload";
 
@@ -1608,6 +1609,12 @@ export async function drainSearchEmailDeliveryGroup<
                 claimToken: claim.claimToken,
                 delivery,
               });
+              const matchIds = input.kind === "MATCH"
+                ? uniqueMatchRefs(claim.payload.matchRefs ?? []).map(match => match.matchId)
+                : getStatusAdvertisedMatchIds(claim.payload);
+              if (matchIds.length && await prisma.$transaction(transaction => hasUnreconciledRecipeDeliveryObservation(transaction, {
+                searchId: input.searchId, alertGeneration: input.alertGeneration, matchIds, now: now(),
+              }))) throw new DeliveryProviderSourcePendingError();
               if (claim.payload.schemaVersion === 3 && input.kind === "MATCH") {
                 const sourceState = await prisma.$transaction((transaction) =>
                   getSimulatorDeliverySourceState(transaction, input.searchId, claim.payload, now()),

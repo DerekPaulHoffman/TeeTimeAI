@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import { runSimulatorSearchCheck } from "@/lib/automation/simulator-search-check";
+import { isDiscoveryPilotSearch } from "@/lib/course-discovery/config";
+import { checkLearnedOutdoor, queueFailedOutdoorDiscovery } from "@/lib/course-discovery/checks";
 
 import type {
   CourseMonitoringMode,
@@ -568,6 +570,7 @@ async function checkSearch(
   }
 
   let monitoringRetryCourseIds = new Set<string>();
+  const discoveryPendingCourseIds = new Set<string>();
   let monitoringDeferredCourseIds = new Set<string>();
   let monitoringPreparationFailed = false;
   let monitoringPreparation = {
@@ -590,7 +593,7 @@ async function checkSearch(
           : [];
       },
     );
-    const preparation = await prepareSearchMonitoring(
+    const preparation = await isDiscoveryPilotSearch(search.id) ? monitoringPreparation : await prepareSearchMonitoring(
       search,
       undefined,
       new Date(),
@@ -697,6 +700,22 @@ async function checkSearch(
     async (preference) => {
       await maintainSearchCheckLease(lease);
       const course = preference.course as AutomationCourse;
+      let learned: Awaited<ReturnType<typeof checkLearnedOutdoor>>;
+      try { learned = await checkLearnedOutdoor(search, preference, automationRunId, lease); }
+      catch {
+        courseResults.push({ courseId: course.id, courseName: course.name, timeZone: course.timeZone, rank: preference.rank,
+          outcome: "FETCH_FAILED", availableMatches: 0, message: "We could not verify this course’s availability.",
+          bookingUrl: getCustomerBookingUrl(course) });
+        return;
+      }
+      if (learned) {
+        courseResults.push(learned);
+        if (learned.outcome === "CHECK_PENDING") {
+          monitoringRetryCourseIds.add(course.id);
+          discoveryPendingCourseIds.add(course.id);
+        }
+        return;
+      }
       const customerBookingUrl = getCustomerBookingUrl(course);
       const persistedPlaybookAssessment = course.supportIncident
         ? assessAutomationPlaybook(
@@ -2701,6 +2720,25 @@ async function checkSearch(
     },
   );
 
+  // A method advertised as runnable can still fail on today's public source.
+  // Enrolled pilots hand that concrete failure to bounded discovery, retaining
+  // successful established methods and any in-flight local reader check.
+  if (await isDiscoveryPilotSearch(search.id)) {
+    for (const result of courseResults) {
+      if (!["FETCH_FAILED", "NEEDS_ADAPTER"].includes(result.outcome)) continue;
+      const preference = search.preferences.find(item => item.courseId === result.courseId);
+      if (!preference) continue;
+      try {
+        if (await queueFailedOutdoorDiscovery(search, preference, result.outcome)) {
+          result.outcome = "CHECK_PENDING";
+          result.message = "We’re checking this course’s official availability.";
+          monitoringRetryCourseIds.add(result.courseId);
+          discoveryPendingCourseIds.add(result.courseId);
+        }
+      } catch { /* Keep the original failure; a later ordinary check may retry admission. */ }
+    }
+  }
+
   const preferenceContext = new Map(
     search.preferences.map((preference) => {
       const observedFacts = observedBookingFactsByCourse.get(
@@ -2803,10 +2841,14 @@ async function checkSearch(
         : []),
     ].sort((left, right) => left.getTime() - right.getTime())[0] ?? null;
   let supportRetryNeeded = supportRetryAt !== null;
+  if (await isDiscoveryPilotSearch(search.id) && courseResults.some(result => result.outcome === "CHECK_PENDING")) {
+    supportRetryAt = new Date(Date.now() + 60_000);
+    supportRetryNeeded = true;
+  }
 
   await maintainSearchCheckLease(lease);
   const checkedAt = new Date();
-  applyCustomerMonitoringProjection(search, courseResults, checkedAt);
+  applyCustomerMonitoringProjection(search, courseResults, checkedAt, discoveryPendingCourseIds);
   const statusEmailsEnabled = areSearchStatusEmailsEnabled();
   const statusKindBeforeRetry = statusEmailsEnabled
     ? getEnabledSearchStatusEmailKind(
@@ -2871,7 +2913,7 @@ async function checkSearch(
     pendingStatusReplacement = null;
   }
   search = (await getActiveSearchForAutomation(searchId)) ?? search;
-  applyCustomerMonitoringProjection(search, courseResults, checkedAt);
+  applyCustomerMonitoringProjection(search, courseResults, checkedAt, discoveryPendingCourseIds);
   await maintainSearchCheckLease(lease);
   let monitoringNoticeOutcome: SearchCheckResult["statusEmailOutcome"] =
     "skipped";
@@ -2901,7 +2943,7 @@ async function checkSearch(
         supportRetryNeeded = true;
       }
       search = (await getActiveSearchForAutomation(searchId)) ?? search;
-      applyCustomerMonitoringProjection(search, courseResults, checkedAt);
+      applyCustomerMonitoringProjection(search, courseResults, checkedAt, discoveryPendingCourseIds);
     } catch (error) {
       if (error instanceof SearchCheckLeaseLostError) {
         throw error;
@@ -3380,10 +3422,11 @@ function getLiveCustomerMonitoringStatus(
   });
 }
 
-function applyCustomerMonitoringProjection(
+export function applyCustomerMonitoringProjection(
   search: NonNullable<Awaited<ReturnType<typeof getActiveSearchForAutomation>>>,
   courseResults: SearchCheckCourseResult[],
   observedAt: Date,
+  discoveryPendingCourseIds: ReadonlySet<string> = new Set(),
 ) {
   const resultByCourse = new Map(
     courseResults.map((result) => [result.courseId, result]),
@@ -3391,6 +3434,12 @@ function applyCustomerMonitoringProjection(
   for (const preference of search.preferences) {
     const result = resultByCourse.get(preference.course.id);
     if (!result) continue;
+    if (result.outcome === "CHECK_PENDING" && discoveryPendingCourseIds.has(preference.course.id)) {
+      result.supportStatus = "IN_OPERATOR_QUEUE";
+      delete result.automationPlaybookExhausted;
+      delete result.automationStalledAtEndpoint;
+      continue;
+    }
     const customerStatus = getLiveCustomerMonitoringStatus(
       preference.course,
       result,

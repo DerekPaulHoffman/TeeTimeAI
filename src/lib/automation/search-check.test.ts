@@ -168,7 +168,7 @@ vi.mock("@/lib/automation/provider-execution-marker", () => ({
 }));
 vi.mock("@/lib/local-reader/service", () => localReaderMocks);
 
-import { buildMatchDeliveryGroupKey, runSearchCheck } from "./search-check";
+import { applyCustomerMonitoringProjection, buildMatchDeliveryGroupKey, runSearchCheck } from "./search-check";
 import {
   appendAutomationPlaybookEvent,
   assessAutomationPlaybook,
@@ -518,6 +518,24 @@ function installResolvedLocalReaderMonitoring(
   dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
   return course;
 }
+
+describe("active discovery pending projection", () => {
+  it("keeps active learning pending while ordinary legacy escalation remains enforced", () => {
+    const oldCourse = { ...search.preferences[0].course, monitoringStatus: { state: "ENGINEERING_VERIFICATION_NEEDED" },
+      supportIncident: { id: "old-incident", cycle: 1, status: "NEEDS_HUMAN", attemptLedger: buildExhaustedPlaybook(),
+        humanReviewReason: "CAPTCHA_OR_QUEUE", escalatedAt: PLAYBOOK_OBSERVED_AT, escalationDeadlineAt: PLAYBOOK_OBSERVED_AT } };
+    const current = { ...search, preferences: [{ rank: 1, course: oldCourse }] } as unknown as Parameters<typeof applyCustomerMonitoringProjection>[0];
+    const pending = { courseId: "course-1", courseName: "Course", outcome: "CHECK_PENDING", availableMatches: 0,
+      message: "We’re checking this course’s official availability." } as Parameters<typeof applyCustomerMonitoringProjection>[1][number];
+    const ordinary = { ...pending };
+    applyCustomerMonitoringProjection(current, [ordinary], PLAYBOOK_OBSERVED_AT);
+    expect(ordinary.outcome).toBe("NEEDS_ADAPTER");
+    applyCustomerMonitoringProjection(current, [pending], PLAYBOOK_OBSERVED_AT, new Set(["course-1"]));
+    expect(pending).toMatchObject({ outcome: "CHECK_PENDING", supportStatus: "IN_OPERATOR_QUEUE",
+      message: "We’re checking this course’s official availability." });
+    expect(pending.automationPlaybookExhausted).toBeUndefined();
+  });
+});
 
 describe("buildMatchDeliveryGroupKey", () => {
   it("creates a new idempotency group when the same tee time reopens", () => {

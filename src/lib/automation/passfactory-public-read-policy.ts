@@ -65,7 +65,10 @@ export function isIncidentalBrowserRequest(value: string) {
   let url: URL;
   try { url = new URL(value); } catch { return false; }
   if (url.protocol !== "https:" || url.port || url.username || url.password) return false;
-  return ["analytics.google.com", "www.google-analytics.com", "region1.google-analytics.com", "stats.g.doubleclick.net"].includes(url.hostname) && url.pathname === "/g/collect" ||
+  return /(?:^|\/)(?:favicon(?:[-\w]*)|apple-touch-icon(?:[-\w]*))\.(?:ico|png|svg)$/iu.test(url.pathname) ||
+    url.hostname === "js.stripe.com" ||
+    url.hostname === "www.googletagmanager.com" && ["/gtag/js", "/gtm.js"].includes(url.pathname) ||
+    ["analytics.google.com", "www.google-analytics.com", "region1.google-analytics.com", "stats.g.doubleclick.net"].includes(url.hostname) ||
     url.hostname === "www.google.com" && /^(?:\/g\/collect|\/ccm\/collect|\/rmkt\/collect\/\d+\/)$/u.test(url.pathname) ||
     url.hostname === "ad.doubleclick.net" && url.pathname === "/ccm/s/collect" ||
     url.hostname === "googleads.g.doubleclick.net" && /^\/pagead\/viewthroughconversion\/\d+\/$/u.test(url.pathname) ||
@@ -73,7 +76,17 @@ export function isIncidentalBrowserRequest(value: string) {
     url.hostname === "m.stripe.com" && url.pathname === "/6" ||
     url.hostname === "track-na2.hubspot.com" && ["/__ptq.gif", "/__ptc.gif"].includes(url.pathname) ||
     url.hostname === "forms-na2.hscollectedforms.net" && url.pathname === "/collected-forms/v1/config/json" ||
-    url.hostname === "connect.facebook.net" && /^\/signals\/config\/\d+$/u.test(url.pathname) ||
-    url.hostname === "maps.googleapis.com" && ["/maps/api/js/StaticMapService.GetMapImage",
+    url.hostname === "js-na2.hs-scripts.com" && /^\/\d+\.js$/u.test(url.pathname) ||
+    url.hostname === "connect.facebook.net" && /^(?:\/signals\/config\/\d+|\/[a-z]{2}_[A-Z]{2}\/fbevents\.js)$/u.test(url.pathname) ||
+    url.hostname === "maps.googleapis.com" && ["/maps/api/js", "/maps/api/js/StaticMapService.GetMapImage",
       "/$rpc/google.internal.maps.mapsjs.v1.MapsJsInternalService/GetViewportInfo"].includes(url.pathname);
+}
+
+/** Chrome sometimes reports favicons, preloaded images and fonts as `other`.
+ * They are outside text/JSON availability evidence and are always aborted. */
+export function isNonEvidenceBrowserResource(value: string, resourceType: string) {
+  if (["image", "media", "font"].includes(resourceType)) return true;
+  if (resourceType !== "other") return false;
+  try { return /\.(?:png|jpe?g|gif|webp|avif|svg|ico|woff2?|ttf|otf|eot)$/iu.test(new URL(value).pathname); }
+  catch { return false; }
 }

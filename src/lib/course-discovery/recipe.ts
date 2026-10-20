@@ -1,0 +1,244 @@
+import { createHash } from "node:crypto";
+import { isIP } from "node:net";
+import { z } from "zod";
+import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
+import { existingAdapterMetadataSchema } from "./existing-adapter-schema";
+
+const secret = /(?:password|secret|token|cookie|session|credential|authorization|api.?key|email|phone)/iu;
+const forbiddenPath = /(?:^|\/)(?:login|signin|signup|auth|account|checkout|cart|payment|pay|purchase|orders?|confirm|admin)(?:\/|$)|(?:^|\/)(?:bookings?|reservations?|reserve)\/(?:create|submit|confirm|cancel|hold|reserve)(?:\/|$)/iu;
+const parameterNames = ["date", "timeZone", "players", "durationMinutes", "startTime", "endTime", "day", "month", "year"] as const;
+export function isSafeRecipeUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return Boolean(getSafeCustomerBookingUrl(value)) && !/[{}]/u.test(value) && url.protocol === "https:" && !url.username && !url.password && !url.port &&
+      !isIP(url.hostname) && /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/iu.test(url.hostname) && !url.hostname.includes("..") && url.hostname.includes(".") && !/(?:^|\.)(?:localhost|local|internal|test|invalid)$/iu.test(url.hostname) &&
+      !forbiddenPath.test(decodeURIComponent(url.pathname)) &&
+      [...url.searchParams].every(([key, item]) => !secret.test(key) && !/[\r\n]/u.test(item));
+  } catch { return false; }
+}
+/** Browser scripts/styles are read-only resources, not customer booking URLs.
+ * Build hashes in a static asset path are not authentication credentials. */
+export function isSafeBrowserAssetUrl(value: string, resourceType: string, method: string) {
+  if (value.length > 2048 || method !== "GET" || !["script", "stylesheet"].includes(resourceType)) return false;
+  if (isSafeRecipeUrl(value)) return true;
+  try {
+    const url = new URL(value), path = decodeURIComponent(url.pathname);
+    const unchangedQueryAndHost = new URL(url.href);
+    unchangedQueryAndHost.pathname = "/public-asset.js";
+    return isSafeRecipeUrl(unchangedQueryAndHost.href) && !url.hash &&
+      /\.(?:m?js|css)$/iu.test(path) && !path.split("/").includes("..") && !/[\r\n{}]/u.test(path) &&
+      !/(?:^|\/)(?:login|signin|signup|auth|account|sessions?|tokens?|credentials?|passwords?|secrets?|cookies?|authorization|api[-_]?keys?)(?:\/|$)/iu.test(path) &&
+      [...url.searchParams].every(([key, item]) => !secret.test(key) && !/[\r\n]/u.test(item));
+  } catch { return false; }
+}
+const safeUrl = z.string().max(2048).refine(isSafeRecipeUrl, "Expected a public HTTPS read URL");
+export const recipeTemplateSchema = z.string().min(1).max(2048).refine(value => {
+  const replaced = value.replace(/\{\{([A-Za-z]+)\}\}/gu, (_, name: string) =>
+    parameterNames.includes(name as typeof parameterNames[number]) ? "x" : "{");
+  return !/[{}\r\n]/u.test(replaced);
+}, "Unknown or malformed template parameter");
+const urlTemplate = recipeTemplateSchema.refine(value => isSafeRecipeUrl(value.replace(/\{\{[A-Za-z]+\}\}/gu, "x")));
+export const recipeSelectorSchema = z.string().min(1).max(240).refine(value =>
+  /^[a-zA-Z0-9_\-\s.#\[\]="'~^$*|:(),>+]+$/u.test(value) &&
+  !/(?:script|iframe|password|secret|token|cookie|session|credential|authorization|api.?key|email|phone|:has\(|:visited)/iu.test(value),
+"Expected a bounded public display selector").describe("Bounded CSS only: tags, classes, ids, attribute equality and descendant/child selectors. No :has(), scripts, iframes, visited links or sensitive credential/contact fields. Use a reusable calendar day base selector with SELECT_DATE text {{day}}, never a fixed nth-child for a requested day.");
+const jsonPath = z.string().min(1).max(240).regex(/^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/u).refine(value =>
+  !value.split(".").some(part => ["__proto__", "prototype", "constructor"].includes(part) || secret.test(part)));
+export const recipeFieldSchema = z.union([
+  z.object({ path: jsonPath, format: z.enum(["INTEGER", "DURATION_MINUTES"]).optional() }).strict(),
+  z.object({ selector: recipeSelectorSchema, attribute: z.enum(["datetime", "data-date", "data-time", "data-value", "data-capacity", "value", "selected-label", "aria-label"]).optional(), format: z.enum(["INTEGER", "DURATION_MINUTES"]).optional() }).strict(),
+]);
+export type RecipeField = z.infer<typeof recipeFieldSchema>;
+const visibleDateText = z.object({ selector: recipeSelectorSchema }).strict();
+export const recipeDatePartsSchema = z.object({ kind: z.literal("DATE_PARTS"), monthYear: visibleDateText, day: visibleDateText }).strict()
+  .describe("DOM only: visible month name plus four-digit year, and one currently selected day. Selection must be marked by aria-selected, aria-current=date, data-selected, Mui-selected, or active+day classes.");
+export type RecipeDateParts = z.infer<typeof recipeDatePartsSchema>;
+export const recipeResourceScopeSchema = z.object({
+  selector: recipeSelectorSchema.refine(value => !/^(?:html|body|main|:root)(?:$|[\s>+.#[:])/iu.test(value.trim()), "Use resource cards, not the page root"),
+  label: recipeFieldSchema,
+  expectedLabel: z.string().trim().min(2).max(200).refine(value =>
+    /(?:^|\W)(?:simulators?|rentals?|bays?|rooms?)(?:\W|\d|$)/iu.test(value) &&
+    !/\b(?:members?[-\s]+only|lessons?|fittings?|leagues?|classes?|coaching)\b/iu.test(value) &&
+    (!/\b(?:multi[-\s]?sport|baseball|soccer|hockey|tennis)\b/iu.test(value) || /\bgolf\b/iu.test(value)), "Use a public golf rental resource"),
+}).strict().describe("SIMULATOR DOM only: reusable selector matching resource cards, a visible label reader relative to each card, and its exact observed public rental label. The executor chooses the unique matching card and reads slots and proof.empty only inside it; card order is not identity. Venue/date/duration/complete proof stays global.");
+export const recipeRouteSchema = z.object({
+  origin: safeUrl.refine(value => new URL(value).origin === value, "Use an exact origin"),
+  path: z.string().min(1).max(300).regex(/^\/[A-Za-z0-9_./%\-]*(?:\*)?$/u).refine(value =>
+    !value.includes("..") && value !== "/*" && !forbiddenPath.test(decodeURIComponent(value))),
+  methods: z.array(z.enum(["GET", "POST"])).min(1).max(2),
+  queryKeys: z.array(z.string().min(1).max(80).regex(/^[a-zA-Z0-9_\[\].-]+$/u).refine(value => !secret.test(value))).max(30).default([]),
+}).strict();
+const stepSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("selectDate"), monthYearSelector: recipeSelectorSchema,
+    nextSelector: recipeSelectorSchema, previousSelector: recipeSelectorSchema, daySelector: recipeSelectorSchema }).strict()
+    .describe("Choose the requested date using a visible full English month and four-digit year heading, safe calendar next/previous controls and a reusable numeric day selector. Moves at most twelve months, verifying each adjacent month before selecting the exact visible requested day. Final independent date proof is still required."),
+  z.object({ action: z.literal("selectProduct"), selector: recipeSelectorSchema, productSelector: recipeSelectorSchema }).strict(),
+  z.object({ action: z.literal("select"), selector: recipeSelectorSchema, value: recipeTemplateSchema,
+    purpose: z.enum(["DATE", "PLAYERS", "DURATION", "PRODUCT", "RESOURCE"]) }).strict().describe("Select an observed native HTML <select> option value. Public role=combobox controls are also supported only for PLAYERS/DURATION when their label proves that purpose and an exact visible data-value option exists. Duration values are minutes; simulator party selection is one bay. The inspected PassFactory /ftbb client resets duration when the date changes: select DATE then DURATION. Only that hash-verified local duration operation may retain an already completed date response; all other filters require a new response."),
+  z.object({ action: z.literal("fill"), selector: recipeSelectorSchema, value: recipeTemplateSchema,
+    purpose: z.enum(["DATE", "PLAYERS", "DURATION"]) }).strict(),
+  z.object({ action: z.literal("clickFilter"), selector: recipeSelectorSchema, text: recipeTemplateSchema,
+    purpose: z.enum(["OPEN_DATE_PICKER", "NEXT_MONTH", "PREVIOUS_MONTH", "SELECT_DATE", "OPEN_FILTER", "SELECT_FILTER", "RUN_SEARCH"]) }).strict().describe("Click only an observed public calendar/filter control. SELECT_DATE must use an observed reusable day selector plus text {{day}}; the executor requires exactly one visible text match."),
+  z.object({ action: z.literal("waitFor"), selector: recipeSelectorSchema }).strict(),
+]);
+const availabilityResponseSchema = z.object({
+  url: urlTemplate, method: z.enum(["GET", "POST"]),
+  date: z.object({ source: z.enum(["QUERY", "JSON_BODY"]), path: jsonPath }).strict(),
+  endDatePath: jsonPath.optional(),
+  success: z.object({ path: jsonPath, equals: z.union([z.string().max(200), z.number().finite(), z.boolean(), z.null()]) }).strict().optional(),
+}).strict().refine(value => value.method === "POST" || value.date.source === "QUERY", "GET date binding must read a query parameter")
+  .describe("Required completed availability-response fence. Exact observed URL/method and date parameter (QUERY key or JSON_BODY path) must equal the requested YYYY-MM-DD; optional endDatePath must equal the same day. success checks a JSON response field against an observed scalar (for example code equals 200), and is required for response-only completion. A successful matching response must start after the last date/filter change. Only the runtime-verified PassFactory /ftbb client-only DURATION select may follow a completed day response without another read. Any new availability request retires that carried proof. This proves freshness, not availability by itself; DOM resource/date/duration/empty proof is still required.");
+const timeZone = z.string().max(80).refine(value => {
+  try { new Intl.DateTimeFormat("en-US", { timeZone: value }); return true; } catch { return false; }
+});
+const localDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/u).refine(value => {
+  const date = new Date(`${value}T00:00:00Z`);
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
+});
+const time = z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/u);
+export const accessExecutionInputSchema = z.object({
+  date: localDate, timeZone, players: z.number().int().min(1).max(20),
+  durationMinutes: z.number().int().min(15).max(480).optional(), startTime: time, endTime: z.union([time, z.literal("24:00")]),
+}).strict().refine(value => value.startTime < value.endTime, "The requested window must end after it starts");
+export type AccessExecutionInput = z.infer<typeof accessExecutionInputSchema>;
+const common = {
+  schemaVersion: z.literal(1),
+  target: z.object({ courseId: z.string().min(1).max(128), offeringId: z.string().min(1).max(128).optional(), kind: z.enum(["OUTDOOR", "SIMULATOR"]) }).strict(),
+  source: z.object({ officialUrl: safeUrl, bookingUrl: safeUrl, venueName: z.string().min(2).max(200), providerFamily: z.string().min(1).max(80).regex(/^[A-Za-z0-9._-]+$/u), timeZone }).strict(),
+  permittedRoutes: z.array(recipeRouteSchema).min(1).max(40),
+  proof: z.object({ venue: recipeFieldSchema, date: z.union([recipeFieldSchema, recipeDatePartsSchema]),
+    complete: z.union([recipeFieldSchema, z.object({ availabilityResponse: z.literal(true) }).strict()])
+      .describe("Read explicit true/ready/loaded/complete state, or for BROWSER_DOM use {availabilityResponse:true} after its required fresh date-bound response. Presence of body or an arbitrary container is not completion."),
+    empty: recipeFieldSchema.optional(), players: recipeFieldSchema.optional(), durationMinutes: recipeFieldSchema.optional() }).strict(),
+  slots: z.object({ collection: z.union([z.object({ path: jsonPath }).strict(), z.object({ selector: recipeSelectorSchema }).strict()]),
+    scope: recipeResourceScopeSchema.optional(),
+    startsAt: recipeFieldSchema, endsAt: z.union([recipeFieldSchema, z.object({ derive: z.literal("ADD_REQUESTED_DURATION") }).strict()]).optional(), availableSpots: recipeFieldSchema.optional(), minimumPlayers: recipeFieldSchema.optional(), capacity: recipeFieldSchema.optional(),
+    holes: recipeFieldSchema.optional(), resourceId: recipeFieldSchema.optional(), productId: recipeFieldSchema.optional(),
+  }).strict(),
+};
+export const accessRecipeSchema = z.discriminatedUnion("engine", [
+  z.object({ ...common, engine: z.literal("HTTP_JSON"), request: z.object({ url: urlTemplate,
+    method: z.enum(["GET", "POST"]), body: z.record(z.string().max(80).refine(value => !secret.test(value)),
+      z.union([recipeTemplateSchema, z.number().finite(), z.boolean()])).optional() }).strict() }).strict(),
+  z.object({ ...common, engine: z.literal("BROWSER_DOM"), browserTransport: z.enum(["PINNED_HTTP", "NATIVE_CHROME"]).default("PINNED_HTTP"), pageUrl: urlTemplate,
+    availabilityResponse: availabilityResponseSchema, steps: z.array(stepSchema).max(32) }).strict(),
+  z.object({ schemaVersion: common.schemaVersion, target: common.target, source: common.source,
+    engine: z.literal("EXISTING_ADAPTER"), adapter: existingAdapterMetadataSchema }).strict(),
+]).superRefine((recipe, ctx) => {
+  if (recipe.engine === "EXISTING_ADAPTER") {
+    if (recipe.source.providerFamily !== recipe.adapter.family ||
+      (recipe.target.kind === "SIMULATOR") !== (recipe.adapter.family === "ACUITY") ||
+      recipe.target.kind === "SIMULATOR" && !recipe.target.offeringId)
+      ctx.addIssue({ code: "custom", message: "Supported adapter metadata must match the source and target kind" });
+    return;
+  }
+  const dateFields = "kind" in recipe.proof.date ? [recipe.proof.date.monthYear, recipe.proof.date.day] : [recipe.proof.date];
+  const readers = [recipe.proof.venue, ...dateFields, recipe.proof.complete, recipe.proof.empty, recipe.proof.players,
+    recipe.proof.durationMinutes, recipe.slots.startsAt, recipe.slots.endsAt, recipe.slots.availableSpots,
+    recipe.slots.holes, recipe.slots.resourceId, recipe.slots.productId, recipe.slots.minimumPlayers, recipe.slots.capacity,
+    recipe.slots.scope?.label].filter(value => value && !("derive" in value) && !("availabilityResponse" in value)) as RecipeField[];
+  if (readers.some(field => recipe.engine === "HTTP_JSON" ? !("path" in field) : !("selector" in field)) ||
+    (recipe.engine === "HTTP_JSON") !== ("path" in recipe.slots.collection)) ctx.addIssue({ code: "custom", message: "Field readers must match the engine" });
+  if (recipe.engine === "HTTP_JSON" && "kind" in recipe.proof.date) ctx.addIssue({ code: "custom", message: "DATE_PARTS requires visible DOM fields" });
+  if (recipe.engine === "HTTP_JSON" && "availabilityResponse" in recipe.proof.complete)
+    ctx.addIssue({ code: "custom", message: "Response completion requires the browser response fence" });
+  if (recipe.engine === "BROWSER_DOM" && "availabilityResponse" in recipe.proof.complete && !recipe.availabilityResponse.success)
+    ctx.addIssue({ code: "custom", message: "Response-only completion requires an application-level JSON success guard" });
+  if (recipe.slots.scope && (recipe.engine !== "BROWSER_DOM" || recipe.target.kind !== "SIMULATOR"))
+    ctx.addIssue({ code: "custom", message: "Resource scopes apply only to simulator DOM cards" });
+  if (recipe.engine === "BROWSER_DOM" && recipe.target.kind === "SIMULATOR" && !recipe.slots.scope)
+    ctx.addIssue({ code: "custom", message: "Simulator DOM recipes require a labelled resource-card scope" });
+  if (recipe.engine === "HTTP_JSON" && recipe.request.method === "GET" && recipe.request.body) ctx.addIssue({ code: "custom", message: "GET cannot carry a body" });
+  const productSelection = recipe.engine === "BROWSER_DOM" && recipe.steps.some(step => step.action === "selectProduct");
+  if (recipe.target.kind === "OUTDOOR" && !recipe.slots.availableSpots)
+    ctx.addIssue({ code: "custom", message: "Outdoor recipes require available-player evidence" });
+  if (recipe.target.kind === "SIMULATOR" && (!recipe.target.offeringId || (!recipe.proof.durationMinutes && !productSelection) || !recipe.slots.endsAt))
+    ctx.addIssue({ code: "custom", message: "Simulator recipes require offering, duration and end-time proof" });
+  if (recipe.slots.endsAt && "derive" in recipe.slots.endsAt && recipe.target.kind !== "SIMULATOR")
+    ctx.addIssue({ code: "custom", message: "Only proven simulator rentals can derive their end time" });
+  if (recipe.target.kind === "SIMULATOR" && JSON.stringify(recipe.engine === "HTTP_JSON" ? recipe.request :
+    { pageUrl: recipe.pageUrl, steps: recipe.steps }).includes("{{players}}"))
+    ctx.addIssue({ code: "custom", message: "Simulator player count is saved context and cannot parameterize availability" });
+  if (recipe.target.kind === "SIMULATOR" && recipe.engine === "BROWSER_DOM" && recipe.steps.some(step =>
+    (step.action === "select" || step.action === "fill") && step.purpose === "PLAYERS" && step.value !== "1"))
+    ctx.addIssue({ code: "custom", message: "Simulator availability may request only one bay; saved players are context" });
+});
+export type CourseAccessRecipeData = z.infer<typeof accessRecipeSchema>;
+export function parseAccessRecipe(input: unknown): CourseAccessRecipeData { return accessRecipeSchema.parse(input); }
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value && typeof value === "object") return `{${Object.entries(value).filter(([, item]) => item !== undefined).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`).join(",")}}`;
+  return JSON.stringify(value);
+}
+export function hashAccessRecipe(recipe: CourseAccessRecipeData) { return createHash("sha256").update(canonical(parseAccessRecipe(recipe))).digest("hex"); }
+export function expandRecipeTemplate(template: string, input: AccessExecutionInput, urlEncoded = false) {
+  recipeTemplateSchema.parse(template);
+  const [year, month, day] = input.date.split("-");
+  const values: Record<string, string | number | undefined> = { ...input, year, month: Number(month), day: Number(day) };
+  return template.replace(/\{\{([A-Za-z]+)\}\}/gu, (_, key: string) => {
+    const value = values[key];
+    if (value === undefined) throw new Error("A required recipe parameter is missing");
+    return urlEncoded ? encodeURIComponent(String(value)) : String(value);
+  });
+}
+export function recipeAllowsRequest(recipe: CourseAccessRecipeData, value: string, method: string, resourceType?: string) {
+  if (recipe.engine === "EXISTING_ADAPTER") return false; // Fixed adapter transport owns its exact routes.
+  if (!isSafeRecipeUrl(value) && !isSafeBrowserAssetUrl(value, resourceType ?? "", method)) return false;
+  const url = new URL(value);
+  return recipe.permittedRoutes.some(route => route.origin === url.origin && route.methods.includes(method as "GET" | "POST") &&
+    (route.path.endsWith("*") ? url.pathname.startsWith(route.path.slice(0, -1)) : route.path === url.pathname) &&
+    [...url.searchParams.keys()].every(key => route.queryKeys.includes(key)));
+}
+export const accessExecutionDiagnosticSchema = z.object({
+  code: z.string().regex(/^[A-Z_0-9]{1,80}$/u), stepIndex: z.number().int().min(0).max(31).optional(),
+  url: z.string().max(2048).refine(value => {
+    try { const url = new URL(value); return !url.search && !url.hash &&
+      (isSafeRecipeUrl(value) || isSafeBrowserAssetUrl(value, "script", "GET") || isSafeBrowserAssetUrl(value, "stylesheet", "GET")); } catch { return false; }
+  }).optional(),
+  method: z.enum(["GET", "HEAD", "POST", "OPTIONS"]).optional(),
+  resourceType: z.enum(["document", "stylesheet", "image", "media", "font", "script", "xhr", "fetch", "other"]).optional(),
+}).strict();
+export type AccessExecutionDiagnostic = z.infer<typeof accessExecutionDiagnosticSchema>;
+
+export const accessExecutionResultSchema = z.object({
+  status: z.enum(["AVAILABLE", "EMPTY", "INCOMPLETE", "ACCESS_REQUIRED", "FAILED"]), complete: z.boolean(),
+  observedAt: z.string().datetime(), sourceUrl: safeUrl,
+  slots: z.array(z.object({ sourceId: z.string().min(1).max(128), startsAt: z.string().datetime(), endsAt: z.string().datetime().optional(),
+    availableSpots: z.number().int().min(1).max(100), capacity: z.number().int().min(1).max(100).nullable().optional(), holes: z.union([z.literal(9), z.literal(18)]).optional(),
+    bookingUrl: safeUrl, resourceId: z.string().min(1).max(128).optional(), productId: z.string().min(1).max(128).optional() }).strict()).max(500),
+  evidence: z.object({ recipeHash: z.string().regex(/^[a-f0-9]{64}$/u), venueVerified: z.boolean(), dateVerified: z.boolean(),
+    capacityVerified: z.boolean(), durationVerified: z.boolean(), completeVerified: z.boolean(), reason: z.string().max(120).optional(),
+    diagnostic: accessExecutionDiagnosticSchema.optional() }).strict(),
+}).strict().superRefine((result, ctx) => {
+  if ((result.status === "AVAILABLE" && (!result.complete || !result.slots.length)) ||
+    (result.status === "EMPTY" && (!result.complete || result.slots.length)) ||
+    (!["AVAILABLE", "EMPTY"].includes(result.status) && (result.complete || result.slots.length)))
+    ctx.addIssue({ code: "custom", message: "Result status must agree with completeness and slots" });
+  if (result.complete && ![result.evidence.venueVerified, result.evidence.dateVerified, result.evidence.capacityVerified,
+    result.evidence.durationVerified, result.evidence.completeVerified].every(Boolean))
+    ctx.addIssue({ code: "custom", message: "Complete results require every applicable proof" });
+});
+export type AccessExecutionResult = z.infer<typeof accessExecutionResultSchema>;
+
+export function readRecipeFieldFormat(field: RecipeField, value: unknown): unknown {
+  if (!field.format) return value;
+  if (field.format === "INTEGER") {
+    const match = /^(\d+)(?:\s+(?:players?|people|spots?|available))?$/iu.exec(String(value ?? "").trim());
+    return match ? Number(match[1]) : undefined;
+  }
+  return publicRentalDurationMinutes(String(value ?? ""));
+}
+/** This intentionally recognizes duration units, never price or appointment time. */
+export function publicRentalDurationMinutes(value: string): number | undefined {
+  const durations = [...value.matchAll(/\b(\d+(?:\.\d+)?)\s*(hours?|hrs?|hr|minutes?|mins?|min)\b/giu)]
+    .map(match => Number(match[1]) * (/^h/iu.test(match[2]) ? 60 : 1));
+  const unique = [...new Set(durations)];
+  return unique.length === 1 && Number.isInteger(unique[0]) && unique[0] >= 15 && unique[0] <= 480 ? unique[0] : undefined;
+}
+
+/** A mention in booking instructions is not a current access gate. */
+export function isActiveBrowserAccessChallenge(text: string, title = "") {
+  if (/^(?:just a moment[.!…]*|access denied|human verification|security verification|waiting room)$/iu.test(title.trim())) return true;
+  const prefix = text.replace(/\s+/gu, " ").trim().slice(0, 800);
+  return /\b(?:verify (?:that )?you are human|checking your browser|performing security verification|you (?:must|need to) (?:log|sign) in to (?:view|book|continue))\b/iu.test(prefix) && text.length < 6000;
+}

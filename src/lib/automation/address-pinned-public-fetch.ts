@@ -8,7 +8,7 @@ import {
 import { request as httpsRequest } from "node:https";
 import { BlockList, isIP, type LookupFunction } from "node:net";
 
-type ResolvedPublicAddress = {
+export type ResolvedPublicAddress = {
   address: string;
   family: 4 | 6;
 };
@@ -171,6 +171,21 @@ async function resolvePublicAddresses(hostname: string) {
     address: answer.address,
     family: answer.family as 4 | 6
   }));
+}
+
+/** Shared DNS admission for browser CONNECT tunnels and public HTTP reads. */
+export async function resolvePinnedPublicAddress(hostname: string, dependencies: {
+  resolveAddresses?: (hostname: string) => Promise<ResolvedPublicAddress[]>;
+  signal?: AbortSignal;
+} = {}): Promise<ResolvedPublicAddress> {
+  if (!/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/iu.test(hostname) || !hostname.includes(".") ||
+    hostname.includes("..") || isIP(hostname) || /(?:^|\.)(?:localhost|local|internal|lan|home|corp)$/iu.test(hostname)) {
+    throw new Error("A public DNS hostname is required");
+  }
+  const addresses = await resolveAddressesWithSignal(hostname, dependencies.resolveAddresses ?? resolvePublicAddresses,
+    dependencies.signal ?? AbortSignal.timeout(15_000));
+  if (addresses.length > 64) throw new Error("Public DNS answer limit exceeded");
+  return selectPinnedPublicAddress(addresses);
 }
 
 function resolveAddressesWithSignal(

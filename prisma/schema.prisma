@@ -311,6 +311,16 @@ enum LocalReaderJobPurpose {
   ALERT_CHECK
   COURSE_VERIFICATION
   OFFICIAL_SOURCE_DISCOVERY
+  RECIPE_CHECK
+}
+
+enum CourseDiscoveryJobStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  TIMED_OUT
+  CANCELLED
 }
 
 enum CourseProfileStatus {
@@ -396,6 +406,7 @@ model Course {
   bookingAccessMode                   BookingAccessMode                   @default(UNKNOWN)
   policyNotes                         String?
   bookingMetadata                     Json?
+  activeAccessRecipeId                String?
   intelligenceVerifiedAt              DateTime?
   intelligenceReviewAt                DateTime?
   intelligenceConfidence              Float?
@@ -420,6 +431,8 @@ model Course {
   supportBatchIncidents               CourseSupportBatchIncident[]
   supportVerificationRequests         CourseSupportVerificationRequest[]
   localReaderJobs                     LocalReaderJob[]
+  accessRecipes                       CourseAccessRecipe[]
+  discoveryJobs                       CourseDiscoveryJob[]
   profile                             CourseProfile?
 
   @@index([latitude, longitude])
@@ -444,6 +457,7 @@ model CourseOffering {
   verifiedAt                DateTime?
   providerFamilyKey         String?
   providerMetadata          Json?
+  activeAccessRecipeId      String?
   maxPartySize              Int?
   supportedDurationsMinutes Int[]                      @default([])
   bookingWindowDaysAhead    Int?
@@ -463,10 +477,81 @@ model CourseOffering {
   probes                    CourseProbe[]
   matches                   TeeTimeMatch[]
   simulatorSupportIncident  SimulatorSupportIncident?
+  accessRecipes             CourseAccessRecipe[]
+  discoveryJobs             CourseDiscoveryJob[]
 
   @@unique([courseId, kind])
   @@index([kind, active, publicAccessStatus])
   @@index([kind, monitoringState])
+}
+
+// One bounded learning attempt owns a target; native model sessions are disposable.
+// Append-only pilot quota receipts deliberately have no cascading relation:
+// deleting a search or account must not refund a consumed trial slot.
+model CourseDiscoveryPilotEnrollment {
+  id          String   @id @default(cuid())
+  searchId    String   @unique
+  ownerUserId String
+  cohortId    String
+  targetKey   String
+  slot        Int
+  createdAt   DateTime @default(now())
+
+  @@unique([cohortId, targetKey])
+  @@unique([cohortId, slot])
+  @@index([ownerUserId, cohortId, createdAt])
+}
+
+model CourseDiscoveryJob {
+  id                 String                   @id @default(cuid())
+  targetKey          String
+  activeTargetKey    String?                  @unique
+  courseId           String
+  offeringId         String?
+  sourceFingerprint  String
+  baseRecipeId       String?
+  status             CourseDiscoveryJobStatus @default(QUEUED)
+  attempts           Int                      @default(0)
+  workerId           String?
+  firstPickedUpAt    DateTime?
+  deadlineAt         DateTime?
+  leaseToken         String?
+  leaseExpiresAt     DateTime?
+  checkpoint         Json?
+  request            Json
+  candidate          Json?
+  candidateHash      String?
+  // Only the trusted coordinator's challenge/result endpoints write this field.
+  verification       Json?
+  outcome            String?
+  result             Json?
+  completedAt        DateTime?
+  createdAt          DateTime                 @default(now())
+  updatedAt          DateTime                 @updatedAt
+  course             Course                   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  offering           CourseOffering?          @relation(fields: [offeringId], references: [id], onDelete: Cascade)
+
+  @@index([status, leaseExpiresAt, createdAt])
+  @@index([targetKey, createdAt])
+}
+
+// Payload and verification evidence are immutable; activation is a target pointer.
+model CourseAccessRecipe {
+  id                String          @id @default(cuid())
+  targetKey         String
+  courseId          String
+  offeringId        String?
+  version           Int
+  hash              String
+  sourceFingerprint String
+  payload           Json
+  verification      Json
+  createdAt         DateTime        @default(now())
+  course            Course          @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  offering          CourseOffering? @relation(fields: [offeringId], references: [id], onDelete: Cascade)
+
+  @@unique([targetKey, version])
+  @@index([targetKey, hash])
 }
 
 model SimulatorSupportIncident {

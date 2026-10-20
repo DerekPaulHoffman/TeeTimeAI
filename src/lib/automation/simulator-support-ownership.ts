@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { assertNotDiscoveryPilotTarget } from "@/lib/course-discovery/legacy-exclusion";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
@@ -532,6 +533,7 @@ export async function claimSimulatorSupportAssignment(input: { assignmentRef: st
     const dispatch = await import("./course-support-course-dispatch");
     if (!dispatch.isCourseSupportLaunchAuthorityCurrent(row.audit, now)) throw new Error("Simulator launch authority expired before claim.");
     const source = await lockSource(tx, row.audit, now);
+    await assertNotDiscoveryPilotTarget(tx, { courseId: source.offering.courseId, offeringId: source.offering.id }, now);
     if (row.audit.target.engineeringAuthority && source.verificationTargets.some(search => !["TEST", "AUTOMATION"].includes(search.trafficClass))) throw new Error("SIMULATOR_ENGINEERING_CUSTOMER_CHECK_REQUIRED");
     if (source.incident.updatedAt.toISOString() !== row.audit.target.updatedAt || (source.incident.retryAt && source.incident.retryAt > now)) throw new Error("Simulator incident changed or is not due.");
     const latest = await tx.courseProbe.findFirst({ where: { offeringId: source.offering.id, teeSearchId: { in: row.audit.target.searchRefs.map(ref => ref.id) } }, orderBy: [{ observedAt: "desc" }, { id: "desc" }] });
