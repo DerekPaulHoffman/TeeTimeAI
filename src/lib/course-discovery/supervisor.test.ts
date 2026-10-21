@@ -569,6 +569,37 @@ describe("controller-only verification", () => {
     await connection.close();
   });
 
+  it("reports a redacted model failure without changing the worker failure outcome", async () => {
+    const sourceHome = mkdtempSync(join(tmpdir(), "discovery-turn-failure-test-"));
+    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }));
+    writeFileSync(join(sourceHome, "auth.json"), "test-auth");
+    const client = { candidate: vi.fn(), activate: vi.fn(), helperEnvironment: () => ({}) };
+    const processFactory = options => ({ notify: vi.fn(), close: vi.fn(async () => {}), request: async (method: string) => {
+      if (method === "thread/start") return { thread: { id: "thread-1" }, approvalPolicy: "never", sandbox: { type: "readOnly" } };
+      if (method === "turn/start") {
+        queueMicrotask(async () => {
+          await options.onMessage({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1" } } }, () => {});
+          await options.onMessage({ method: "turn/completed", params: { threadId: "thread-1", turn: {
+            id: "turn-1", status: "failed", error: { codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 502 } },
+              message: "secret provider request", additionalDetails: "private-lease-value" },
+          } } }, () => {});
+        });
+        return { turn: { id: "turn-1" } };
+      }
+      return {};
+    } });
+    try {
+      const failure = await runCourseDiscoveryWorker({ job: job(), client, cwd: process.cwd(), sourceHome, recipeSchema: {},
+        resolveCli: () => "fixed-codex", processFactory }).catch(error => error);
+      expect(failure).toMatchObject({ code: "DISCOVERY_TURN_FAILED", discoveryMetrics: {
+        modelFailure: { turnStatus: "failed", errorCategory: "responseStreamDisconnected", httpStatusCode: 502 },
+      } });
+      expect(JSON.stringify(failure.discoveryMetrics)).not.toMatch(/secret|private-lease-value|additionalDetails/);
+      expect(client.candidate).not.toHaveBeenCalled();
+      expect(client.activate).not.toHaveBeenCalled();
+    } finally { rmSync(sourceHome, { recursive: true, force: true }); }
+  });
+
   it("keeps controller credentials out of model input and rejects model-supplied verification", async () => {
     const sourceHome = mkdtempSync(join(tmpdir(), "discovery-source-test-"));
     writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }));

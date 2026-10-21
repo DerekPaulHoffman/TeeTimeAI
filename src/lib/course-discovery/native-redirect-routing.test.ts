@@ -419,10 +419,10 @@ describe("native exact request and response ownership", () => {
     } finally { await test.guard.close(); }
   });
 
-  it("denies subframes before policy/dispatch without invalidating main evidence", async () => {
+  it.each(["XHR", "Ping"])("denies %s subframes before policy/dispatch without invalidating main evidence", async resourceType => {
     const test = await installed();
     try {
-      test.request("child", { frameId: "child", redirectedRequestId: "unknown" });
+      test.request("child", { frameId: "child", resourceType, networkId: undefined, redirectedRequestId: "unknown" });
       await vi.waitFor(() => expect(test.subframes).toHaveLength(1));
       expect(test.handler).not.toHaveBeenCalled(); expect(test.close).not.toHaveBeenCalled(); expect(test.failures).toEqual([]);
       expect(test.cdp.send.mock.calls.some(([name]) => name === "Fetch.continueRequest")).toBe(false);
@@ -472,6 +472,97 @@ describe("native exact request and response ownership", () => {
       expect(JSON.stringify(test.guard.rejectedRequests)).not.toMatch(/never-retain|authorization|postData"/u);
       expect(stop).not.toHaveBeenCalled(); expect(test.close).not.toHaveBeenCalled();
     } finally { queue.dispose(); signal.abort(); await test.guard.close(); }
+  });
+
+  it.each([false, true])("aborts Ping without dispatch or evidence while same-host document/data peers complete (network ID present: %s)", async networkIdPresent => {
+    const test = await installed(), signal = new AbortController(), stop = vi.fn(async () => {}), bodies: string[] = [];
+    const queue = createSimulatorBrowserRequestQueue(async (_host, work) => ({ acquired: true as const, value: await work() }), signal.signal);
+    test.handler.mockImplementation(async route => {
+      test.routes.push(route);
+      bodies.push((await queue.run("example.org", () => continueNativeBrowserRead(route, signal.signal, 1000, stop))).body.toString());
+    });
+    try {
+      test.request("ping", { resourceType: "Ping", networkId: networkIdPresent ? "network-ping" : undefined,
+        request: { url: "https://example.org/collect?private=not-retained", method: "POST", hasPostData: true,
+          postData: "x".repeat(672), headers: { authorization: "not-retained" } } });
+      test.request("document", { resourceType: "Document" }); test.request("availability");
+      test.response("document");
+      await vi.waitFor(() => expect(test.cdp.send.mock.calls.filter(([name]) => name === "Fetch.continueRequest")
+        .map(([, value]) => value?.requestId)).toEqual(["document", "availability"]));
+      test.response("availability");
+      test.events.get("Network.loadingFailed")!({ requestId: "network-ping" });
+      await vi.waitFor(() => { expect(test.guard.pendingReads).toBe(0); expect(bodies).toEqual(["body-document", "body-availability"]); });
+      expect(test.handler).toHaveBeenCalledTimes(2);
+      expect(test.cdp.send.mock.calls.filter(([name]) => name === "Fetch.failRequest").map(([, value]) => value?.requestId)).toEqual(["ping"]);
+      expect(test.cdp.send.mock.calls.filter(([name]) => ["Fetch.getResponseBody", "Fetch.continueResponse"].includes(name))
+        .map(([, value]) => value?.requestId)).not.toContain("ping");
+      expect(test.guard.rejectedRequests).toEqual([expect.objectContaining({ code: "NATIVE_REDIRECT_PING_UNSUPPORTED",
+        method: "POST", resourceType: "ping", networkIdPresent, postDataBytes: 672, recordCount: 0 })]);
+      expect(JSON.stringify(test.guard.rejectedRequests)).not.toMatch(/not-retained|authorization|postData"/u);
+      expect(test.guard.firstFatal).toBeUndefined(); expect(test.failures).toEqual([]); expect(stop).not.toHaveBeenCalled(); expect(test.close).not.toHaveBeenCalled();
+    } finally { queue.dispose(); signal.abort(); await test.guard.close(); }
+  });
+
+  it.each(["missing", "empty", "oversized"])("never constructs a read record for Ping with %s POST data", async kind => {
+    const test = await installed();
+    try {
+      test.request("ping", { resourceType: "Ping", networkId: undefined, request: { url: "https://example.org/collect", method: "POST",
+        hasPostData: true, ...(kind === "missing" ? {} : { postData: kind === "empty" ? "" : "x".repeat(32769) }), headers: {} } });
+      await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+      expect(test.handler).not.toHaveBeenCalled(); expect(test.close).not.toHaveBeenCalled();
+      expect(test.guard.rejectedRequests?.[0].code).toBe("NATIVE_REDIRECT_PING_UNSUPPORTED");
+      expect(test.cdp.send.mock.calls.filter(([name]) => ["Fetch.continueRequest", "Fetch.getResponseBody", "Fetch.continueResponse"].includes(name))).toEqual([]);
+    } finally { await test.guard.close(); }
+  });
+
+  it("does not let a late response fabricate evidence for a denied Ping", async () => {
+    const test = await installed();
+    try {
+      test.request("ping", { resourceType: "Ping", networkId: undefined });
+      await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+      test.response("ping", { resourceType: "Ping", networkId: undefined });
+      await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_RESPONSE_UNKNOWN"));
+      expect(test.handler).not.toHaveBeenCalled();
+      expect(test.cdp.send.mock.calls.some(([name]) => ["Fetch.getResponseBody", "Fetch.continueResponse"].includes(name))).toBe(false);
+    } finally { await test.guard.close(); }
+  });
+
+  it.each(["cap", "missing-frame", "duplicate-id"])("retains the %s fatal guard before Ping denial", async kind => {
+    const test = await installed(kind === "cap" ? 1 : undefined);
+    try {
+      if (kind === "cap" || kind === "duplicate-id") test.request("one");
+      test.request(kind === "cap" ? "two" : "one", { resourceType: "Ping", networkId: undefined,
+        ...(kind === "missing-frame" ? { frameId: undefined } : {}) });
+      await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce());
+      const suffix = kind === "cap" ? "INTERCEPT_LIMIT" : kind === "missing-frame" ? "FRAME_MISSING" : "DUPLICATE_FETCH_ID";
+      expect(test.failures).toContain(`NATIVE_REDIRECT_${suffix}`); expect(test.guard.rejectedRequests).toEqual([]);
+    } finally { await test.guard.close(); }
+  });
+
+  it.each(["reject", "hang"])("still closes when the exact Ping abort %ss", async kind => {
+    const test = await installed(), send = test.cdp.send.getMockImplementation()!;
+    test.cdp.send.mockImplementation((name, value) => name === "Fetch.failRequest"
+      ? kind === "hang" ? new Promise(() => {}) : Promise.reject(new Error("Protocol abort rejected")) : send(name, value));
+    try {
+      test.request("ping", { resourceType: "Ping", networkId: undefined });
+      await vi.waitFor(() => { expect(test.close).toHaveBeenCalledOnce(); expect(test.guard.pendingReads).toBe(0); });
+      expect(test.failures).toContain(kind === "hang" ? "NATIVE_REDIRECT_ABORT_TIMEOUT" : "NATIVE_REDIRECT_ROUTING_FAILED");
+      expect(test.handler).not.toHaveBeenCalled(); expect(test.guard.rejectedRequests).toEqual([]);
+    } finally { await test.guard.close(); }
+  });
+
+  it("counts denied Pings toward the intercept limit and bounds copied diagnostics", async () => {
+    const test = await installed(14);
+    try {
+      for (let index = 0; index < 14; index++) test.request(`ping-${index}`, { resourceType: "Ping", networkId: undefined });
+      await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+      expect(test.guard.rejectedRequests).toHaveLength(12);
+      const copy = test.guard.rejectedRequests!; copy[0].code = "MUTATED"; copy.pop();
+      expect(test.guard.rejectedRequests).toHaveLength(12); expect(test.guard.rejectedRequests?.[0].code).toBe("NATIVE_REDIRECT_PING_UNSUPPORTED");
+      test.request("availability");
+      await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_INTERCEPT_LIMIT"));
+      expect(test.handler).not.toHaveBeenCalled();
+    } finally { await test.guard.close(); }
   });
 
   it.each(["reject", "hang"])("still closes when aborting an oversized POST %ss", async kind => {

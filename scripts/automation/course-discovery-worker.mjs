@@ -4,7 +4,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { discoveryError } from "./course-discovery-client.mjs";
-import { safeBrowserActionIssues } from "./course-discovery-diagnostics.mjs";
+import { safeBrowserActionIssues, safeDiscoveryTurnFailure } from "./course-discovery-diagnostics.mjs";
 
 const VERSION = "0.160.1";
 const BROWSER_ACTIONS = ["open", "observe", "click", "select", "fill", "scroll", "inspect_adapter", "inspect", "finish"];
@@ -115,6 +115,34 @@ function safeBrowserRequestFailures(value) {
     return safe ? { reason: safe.code, ...(safe.url ? { url: safe.url } : {}), ...(safe.resourceType ? { resourceType: safe.resourceType } : {}) } : undefined;
   }).filter(Boolean);
 }
+/** Native controller facts are diagnostic only, never navigation authority. */
+function safeNativeRequestDiagnostic(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || typeof value.code !== "string" || !/^NATIVE_[A-Z_0-9]{1,73}$/u.test(value.code)) return undefined;
+  const result = { code: value.code };
+  if (safeObservedUrl(value.url)) {
+    try {
+      const url = new URL(value.url);
+      // Diagnostic restoration must not expose credential/session-bearing
+      // paths that the native controller would never retain as public URLs.
+      if (!/(?:^|\/)(?:sessions?|tokens?|secrets?|credentials?|passwords?|cookies?|authorization|api[-_]?keys?|private)(?:\/|$)/iu.test(decodeURIComponent(url.pathname))) {
+        url.search = ""; url.hash = ""; result.url = url.href;
+      }
+    } catch { /* Malformed encoded paths never enter diagnostics. */ }
+  }
+  if (["GET", "HEAD", "POST", "OPTIONS", "PUT", "PATCH", "DELETE", "CONNECT", "TRACE", "OTHER"].includes(value.method)) result.method = value.method;
+  if (["document", "script", "stylesheet", "xhr", "fetch", "image", "media", "font", "eventsource", "websocket", "manifest", "ping", "other"].includes(value.resourceType)) result.resourceType = value.resourceType;
+  for (const [key, maximum] of Object.entries({ interceptedRequests: 1025, recordCount: 1024, requestLimit: 1024, postDataBytes: 1_000_000 }))
+    if (Number.isSafeInteger(value[key]) && value[key] >= 0 && value[key] <= maximum) result[key] = value[key];
+  for (const key of ["framePresent", "rootFrame", "networkIdPresent", "duplicateRequestId", "hasPostData", "postDataPresent"])
+    if (typeof value[key] === "boolean") result[key] = value[key];
+  return result;
+}
+function safeNativeBrowserDiagnostics(value) {
+  const firstFatal = safeNativeRequestDiagnostic(value?.nativeFirstFatal);
+  const rejected = (Array.isArray(value?.nativeRejectedRequests) ? value.nativeRejectedRequests : []).slice(-12)
+    .map(safeNativeRequestDiagnostic).filter(Boolean);
+  return { ...(firstFatal ? { nativeFirstFatal: firstFatal } : {}), ...(rejected.length ? { nativeRejectedRequests: rejected } : {}) };
+}
 export function safeBrowserFailureDiagnostics(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   return { requests: (Array.isArray(value.requests) ? value.requests : []).slice(-12).map(request => {
@@ -125,7 +153,7 @@ export function safeBrowserFailureDiagnostics(value) {
       ...(safe.resourceType ? { resourceType: safe.resourceType } : {}),
       ...(Number.isInteger(request.status) && request.status >= 100 && request.status <= 599 ? { status: request.status } : {}),
       ...(/^[A-Z_0-9]{1,80}$/u.test(request.blockedReason ?? "") ? { blockedReason: request.blockedReason } : {}) };
-  }).filter(Boolean), requestFailures: safeBrowserRequestFailures(value.requestFailures),
+  }).filter(Boolean), requestFailures: safeBrowserRequestFailures(value.requestFailures), ...safeNativeBrowserDiagnostics(value),
   capabilityDiagnostics: (Array.isArray(value.capabilityDiagnostics) ? value.capabilityDiagnostics : []).slice(-12)
     .map(safeReplayDiagnostic).filter(item => item?.code === "SUBFRAME_UNSUPPORTED"),
   ...(typeof value.loading === "boolean" ? { loading: value.loading } : {}),
@@ -145,6 +173,7 @@ function safeLastFeedback(value) {
       ...(Number.isSafeInteger(details.pendingRequestCount) && details.pendingRequestCount >= 0
         ? { pendingRequestCount: Math.min(details.pendingRequestCount, 1024) } : {}),
       requests: (Array.isArray(details.requests) ? details.requests : []).slice(0, 8).map(safeReplayDiagnostic).filter(Boolean),
+      ...safeNativeBrowserDiagnostics(details),
     } };
   }
   if (value.code === "DISCOVERY_RECIPE_INVALID") {
@@ -169,7 +198,8 @@ function safeLastFeedback(value) {
 /** Historical failure evidence survives a later successful observation. Never use it as current access proof. */
 function meaningfulFailure(feedback) {
   const safe = safeLastFeedback(feedback);
-  if (!safe || safe.code === "DISCOVERY_BROWSER_INCOMPLETE" && !safe.details.failure && !safe.details.requests.length) return undefined;
+  if (!safe || safe.code === "DISCOVERY_BROWSER_INCOMPLETE" && !safe.details.failure && !safe.details.requests.length &&
+      !safe.details.nativeFirstFatal && !safe.details.nativeRejectedRequests?.length) return undefined;
   return safe;
 }
 
@@ -181,6 +211,7 @@ export function noVerifiedRecipeDiagnostic(feedback) {
 
 /** Persist bounded transport facts, never page text, request bodies or credentials. */
 export function discoveryBrowserFeedback(snapshot, action, error) {
+  const nativeDiagnostics = safeNativeBrowserDiagnostics(snapshot);
   const currentRequests = (Array.isArray(snapshot?.requests) ? snapshot.requests : [])
     .filter(request => request?.blockedReason || request?.status >= 400)
     .filter(request => ["document", "script", "stylesheet", "xhr", "fetch"].includes(request.resourceType))
@@ -191,10 +222,11 @@ export function discoveryBrowserFeedback(snapshot, action, error) {
   const requests = [...new Map([...currentRequests, ...recentFailures].map(failure => [JSON.stringify(failure), failure])).values()].slice(0, 8);
   const failure = error ? safeReplayDiagnostic({ code: /^[A-Z_0-9]{1,80}$/u.test(error.code ?? "")
     ? error.code : "BROWSER_ACTION_FAILED", url: snapshot?.url }) : undefined;
-  if (!failure && !requests.length && !(snapshot?.loading === true && snapshot?.pendingRequestCount > 0)) return undefined;
+  if (!failure && !requests.length && !nativeDiagnostics.nativeFirstFatal && !nativeDiagnostics.nativeRejectedRequests?.length &&
+      !(snapshot?.loading === true && snapshot?.pendingRequestCount > 0)) return undefined;
   return safeLastFeedback({ code: "DISCOVERY_BROWSER_INCOMPLETE", details: { action, failure,
     ...(error?.code === "BROWSER_ACTION_SCHEMA_INVALID" ? { issues: safeBrowserActionIssues(error.details?.issues) } : {}),
-    loading: snapshot?.loading, pendingRequestCount: snapshot?.pendingRequestCount, requests } });
+    loading: snapshot?.loading, pendingRequestCount: snapshot?.pendingRequestCount, requests, ...nativeDiagnostics } });
 }
 
 /** Model reports may explain a failed attempt, never prove every engine unsupported. */
@@ -240,11 +272,17 @@ export function createDiscoverySnapshotCompactor() {
   let unchanged = 0;
   let unchangedSince;
   return snapshot => {
+    if (snapshot && typeof snapshot === "object") {
+      const projected = { ...snapshot };
+      delete projected.nativeFirstFatal; delete projected.nativeRejectedRequests;
+      snapshot = { ...projected, ...safeNativeBrowserDiagnostics(snapshot) };
+    }
     if (!snapshot || typeof snapshot !== "object" || typeof snapshot.text !== "string") return snapshot;
     if (snapshot.structure || snapshot.adapter) return snapshot;
     const requestFailures = safeBrowserRequestFailures(snapshot.requestFailures);
     const capabilityDiagnostics = safeBrowserFailureDiagnostics(snapshot).capabilityDiagnostics;
-    const fingerprint = JSON.stringify({ url: snapshot.url, text: snapshot.text, elements: snapshot.elements, frames: snapshot.frames, adapter: snapshot.adapter, accessRequirementObserved: snapshot.accessRequirementObserved, requestFailures, capabilityDiagnostics,
+    const nativeDiagnostics = safeNativeBrowserDiagnostics(snapshot);
+    const fingerprint = JSON.stringify({ url: snapshot.url, text: snapshot.text, elements: snapshot.elements, frames: snapshot.frames, adapter: snapshot.adapter, accessRequirementObserved: snapshot.accessRequirementObserved, requestFailures, capabilityDiagnostics, ...nativeDiagnostics,
       controls: snapshot.controls?.map(control => Object.fromEntries(Object.entries(control).filter(([key]) => key !== "target"))) });
     // New bounded response evidence can arrive after the DOM stops changing.
     // Deliver it and restart the idle clock rather than dropping its schema.
@@ -257,7 +295,7 @@ export function createDiscoverySnapshotCompactor() {
     if (unchanged >= 5 && Date.now() - unchangedSince >= 30_000) throw discoveryError("DISCOVERY_NO_BROWSER_PROGRESS");
     if (unchanged < 3) return snapshot;
     return { url: snapshot.url, loading: snapshot.loading, controls: snapshot.controls, frames: snapshot.frames,
-      requests: snapshot.requests, requestFailures, capabilityDiagnostics, responses: snapshot.responses, requestCount: snapshot.requestCount, interceptCount: snapshot.interceptCount, responseBytes: snapshot.responseBytes,
+      requests: snapshot.requests, requestFailures, capabilityDiagnostics, ...nativeDiagnostics, responses: snapshot.responses, requestCount: snapshot.requestCount, interceptCount: snapshot.interceptCount, responseBytes: snapshot.responseBytes,
       navigationElapsedMs: snapshot.navigationElapsedMs, initialContentWaitMs: snapshot.initialContentWaitMs, pendingRequestCount: snapshot.pendingRequestCount,
       browserTransport: snapshot.browserTransport, navigationStatus: snapshot.navigationStatus, accessRequirementObserved: snapshot.accessRequirementObserved, adapter: snapshot.adapter, unchanged: true,
       note: "The settled page content and control state are unchanged. These are the current control targets. Choose a different supported action or checkpoint the limitation." };
@@ -601,7 +639,9 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
   let lastRequestCount = 0;
   let lastResponseBytes = 0;
   let reportedMetrics;
+  let modelFailure;
   const metrics = () => (reportedMetrics = { model, tokenUsage, browserActions, replayDurationsMs, browserTransportsTried,
+    ...(modelFailure ? { modelFailure } : {}),
     ...(firstBrowserStartupMs !== undefined ? { firstBrowserStartupMs } : {}), ...(browserStartedAt ? { browserStartedAt } : {}),
     ...(firstOpenStartedAt ? { firstOpenStartedAt } : {}), ...(firstOpenCompletedAt ? { firstOpenCompletedAt,
       firstOpenElapsedMs: Date.parse(firstOpenCompletedAt) - Date.parse(firstOpenStartedAt) } : {}),
@@ -661,7 +701,11 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
           rejectTurn(discoveryError("DISCOVERY_FORBIDDEN_TOOL")); return;
         }
         if (message.method === "turn/completed" && message.params?.threadId === threadId && message.params?.turn?.id === turnId) {
-          if (message.params.turn.status === "completed") finish(); else rejectTurn(discoveryError("DISCOVERY_TURN_FAILED"));
+          if (message.params.turn.status === "completed") finish();
+          else {
+            modelFailure = safeDiscoveryTurnFailure(message.params.turn);
+            rejectTurn(discoveryError("DISCOVERY_TURN_FAILED"));
+          }
         }
         if (message.id == null || !message.method) return;
         if (message.method !== "item/tool/call" || message.params?.threadId !== threadId || message.params?.turnId !== turnId ||

@@ -65,7 +65,12 @@ export const recipeFieldSchema = z.union([
   z.object({ path: jsonPath, format: z.enum(["INTEGER", "DURATION_MINUTES"]).optional() }).strict(),
   z.object({ selector: recipeSelectorSchema, attribute: z.enum(["datetime", "data-date", "data-time", "data-value", "data-capacity", "value", "selected-label", "aria-label"]).optional(), format: z.enum(["INTEGER", "DURATION_MINUTES"]).optional() }).strict(),
 ]);
-export type RecipeField = z.infer<typeof recipeFieldSchema>;
+const venueGreetingFieldSchema = z.object({ selector: recipeSelectorSchema, format: z.literal("VENUE_GREETING") }).strict()
+  .describe("DOM venue proof only, visible text with no attribute/path: opt in only for an observed complete 'Welcome to <whole venue>.' with no extra copy, or 'Welcome to [the ]<whole venue>’s online tee time engine.' (ASCII 's also accepted) optionally followed by exactly 'You are guaranteed to receive the best online rates for <whole rate venue> when you book direct with us. We look forward to seeing [you ]on the golf course.' Full text is limited to 500 characters, each captured name to 200. Both names must strictly match the canonical venue; arbitrary prose, other copy and hidden/attribute fallbacks reject. Raw/live text equality is checked before interpretation.");
+const venueProofFieldSchema = z.union([recipeFieldSchema, venueGreetingFieldSchema]);
+// The new reader shape is text-only. Ordinary field schemas above retain
+// their original formats, so the greeting cannot be used for slots or dates.
+export type RecipeField = z.infer<typeof recipeFieldSchema> | (z.infer<typeof venueGreetingFieldSchema> & { attribute?: never });
 const visibleDateText = z.object({ selector: recipeSelectorSchema }).strict();
 export const recipeDatePartsSchema = z.object({ kind: z.literal("DATE_PARTS"), monthYear: visibleDateText, day: visibleDateText }).strict()
   .describe("DOM only: visible month name plus four-digit year, and one currently selected day. Selection must be marked by aria-selected, aria-current=date, data-selected, Mui-selected, or active+day classes.");
@@ -147,7 +152,7 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
   z.object({ ...common, engine: z.literal("HTTP_JSON"), request: z.object({ url: urlTemplate,
     method: z.enum(["GET", "POST"]), body: z.record(z.string().max(80).refine(value => !secret.test(value)),
       z.union([recipeTemplateSchema, z.number().finite(), z.boolean()])).optional() }).strict() }).strict(),
-  z.object({ ...common, engine: z.literal("BROWSER_DOM"), browserTransport: z.enum(["PINNED_HTTP", "NATIVE_CHROME"]).default("PINNED_HTTP"), pageUrl: urlTemplate,
+  z.object({ ...common, proof: common.proof.extend({ venue: venueProofFieldSchema }), engine: z.literal("BROWSER_DOM"), browserTransport: z.enum(["PINNED_HTTP", "NATIVE_CHROME"]).default("PINNED_HTTP"), pageUrl: urlTemplate,
     availabilityResponse: availabilityResponseSchema, steps: z.array(stepSchema).max(32) }).strict(),
   z.object({ schemaVersion: common.schemaVersion, target: common.target, source: common.source,
     engine: z.literal("EXISTING_ADAPTER"), adapter: existingAdapterMetadataSchema }).strict(),
@@ -255,7 +260,9 @@ export const accessExecutionResultSchema = z.object({
 export type AccessExecutionResult = z.infer<typeof accessExecutionResultSchema>;
 
 export function readRecipeFieldFormat(field: RecipeField, value: unknown): unknown {
-  if (!field.format) return value;
+  // Venue claims retain the complete source text through raw/live parity.
+  // Only normalize() may interpret this opt-in identity grammar afterwards.
+  if (!field.format || field.format === "VENUE_GREETING") return value;
   if (field.format === "INTEGER") {
     const match = /^(\d+)(?:\s+(?:players?|people|spots?|available))?$/iu.exec(String(value ?? "").trim());
     return match ? Number(match[1]) : undefined;

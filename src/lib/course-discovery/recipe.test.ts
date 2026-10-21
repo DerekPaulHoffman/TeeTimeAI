@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { accessExecutionInputSchema, accessExecutionResultSchema, expandRecipeTemplate, hashAccessRecipe,
-  isActiveBrowserAccessChallenge, isSafeBrowserAssetUrl, isSafeRecipeUrl, parseAccessRecipe, recipeAllowsRequest, recipeSelectorSchema } from "./recipe";
+  isActiveBrowserAccessChallenge, isSafeBrowserAssetUrl, isSafeRecipeUrl, parseAccessRecipe, recipeAllowsRequest, recipeSelectorSchema, readRecipeFieldFormat } from "./recipe";
 
 export const httpRecipe = () => ({
   schemaVersion: 1 as const, engine: "HTTP_JSON" as const,
@@ -15,6 +15,26 @@ export const httpRecipe = () => ({
 export const executionInput = { date: "2026-10-22", timeZone: "America/New_York", players: 2, startTime: "08:00", endTime: "12:00" };
 
 describe("course access recipes", () => {
+  it("allows an opt-in greeting only for DOM venue text and preserves the full raw reader value", () => {
+    const greeting = { selector: "#venue", format: "VENUE_GREETING" };
+    const dom = { schemaVersion: 1, target: httpRecipe().target, source: httpRecipe().source, engine: "BROWSER_DOM", pageUrl: "https://example.org/?date={{date}}", steps: [],
+      permittedRoutes: [{ origin: "https://example.org", path: "/", methods: ["GET"], queryKeys: ["date"] }],
+      availabilityResponse: { kind: "SERVER_DOCUMENT", url: "https://example.org/?date={{date}}", method: "GET", date: { source: "QUERY", path: "date" } },
+      proof: { venue: greeting, date: { selector: "#date", attribute: "value" }, complete: { serverDocument: true } },
+      slots: { collection: { selector: ".slot" }, startsAt: { selector: ".start" }, availableSpots: { selector: ".capacity" } } };
+    const parsed = parseAccessRecipe(dom);
+    expect(parsed).toMatchObject({ engine: "BROWSER_DOM", proof: { venue: greeting } });
+    expect(readRecipeFieldFormat({ selector: "#venue", format: "VENUE_GREETING" }, " Welcome to Example Golf. "))
+      .toBe(" Welcome to Example Golf. ");
+    expect(hashAccessRecipe(parsed)).not.toBe(hashAccessRecipe(parseAccessRecipe({ ...dom, proof: { ...dom.proof, venue: { selector: "#venue" } } })));
+    for (const venue of [{ ...greeting, attribute: "aria-label" }, { ...greeting, attribute: "value" }, { ...greeting, path: "venue" }, { path: "venue", format: "VENUE_GREETING" }])
+      expect(() => parseAccessRecipe({ ...dom, proof: { ...dom.proof, venue } })).toThrow();
+    expect(() => parseAccessRecipe({ ...httpRecipe(), proof: { ...httpRecipe().proof, venue: greeting } })).toThrow();
+    for (const key of ["date", "complete", "empty", "players", "durationMinutes"])
+      expect(() => parseAccessRecipe({ ...dom, proof: { ...dom.proof, [key]: greeting } })).toThrow();
+    for (const key of ["startsAt", "endsAt", "availableSpots", "minimumPlayers", "capacity", "holes", "resourceId", "productId"])
+      expect(() => parseAccessRecipe({ ...dom, slots: { ...dom.slots, [key]: greeting } })).toThrow();
+  });
   it("keeps TeeItUp outdoor by default and requires explicit single-facility simulator metadata", () => {
     const recipe = { schemaVersion: 1, engine: "EXISTING_ADAPTER", target: { courseId: "sim", offeringId: "rental", kind: "SIMULATOR" },
       source: { ...httpRecipe().source, bookingUrl: "https://studio.book.teeitup.com/", venueAddress: "100 Main Rd Suite A, Example, NY 12345, US", providerFamily: "TEEITUP" },

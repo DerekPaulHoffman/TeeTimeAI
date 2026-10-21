@@ -31,6 +31,7 @@ import { followPublicAvailabilityLink } from "./public-navigation-control";
 import { selectPublicDateChoice } from "./public-date-choice";
 import { continuePublicRentalService, selectPublicRentalService, type PublicRentalServiceSelection } from "./public-service-control";
 import { parsePublicPlayerOptions } from "./public-player-options";
+import { matchesPublicVenueGreeting } from "./public-venue-greeting";
 
 type ExtractedAccessRecipe = Exclude<CourseAccessRecipeData, { engine: "EXISTING_ADAPTER" }>;
 
@@ -175,7 +176,10 @@ function boundedNumber(value: unknown, maximum: number) {
 }
 function normalize(recipe: ExtractedAccessRecipe, input: AccessExecutionInput, data: Extracted, now: Date): AccessExecutionResult {
   const simulator = recipe.target.kind === "SIMULATOR";
-  const evidence = { recipeHash: hashAccessRecipe(recipe), venueVerified: venueProofMatches(recipe.source.venueName, data.venue),
+  const venueVerified = recipe.proof.venue.format === "VENUE_GREETING"
+    ? matchesPublicVenueGreeting(recipe.source.venueName, data.venue, venueProofMatches)
+    : venueProofMatches(recipe.source.venueName, data.venue);
+  const evidence = { recipeHash: hashAccessRecipe(recipe), venueVerified,
     dateVerified: parseSourceDate(data.date) === input.date, capacityVerified: simulator,
     durationVerified: recipe.target.kind === "OUTDOOR", completeVerified: affirmative(data.complete) };
   const result = (status: AccessExecutionResult["status"], reason?: string, slots: AccessExecutionResult["slots"] = []): AccessExecutionResult =>

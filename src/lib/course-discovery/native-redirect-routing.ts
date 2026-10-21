@@ -217,6 +217,17 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
       const metadataRejection = records.size >= limit ? "NATIVE_REDIRECT_RECORD_LIMIT" : records.has(event.requestId) ? "NATIVE_REDIRECT_DUPLICATE_FETCH_ID" :
         event.frameId !== rootFrameId ? "NATIVE_REDIRECT_FRAME_MISSING" : undefined;
       if (metadataRejection) { await rejectInitial(metadataRejection); return; }
+      if (event.resourceType === "Ping") {
+        // Ancillary beacons are never availability reads. Deny the exact pause
+        // without requiring network identity or creating an admitted record.
+        // Cap/frame/duplicate checks above and bounded abort failure still win.
+        const diagnostic = requestDiagnostic("NATIVE_REDIRECT_PING_UNSUPPORTED");
+        await bounded(reject(), "NATIVE_REDIRECT_ABORT_TIMEOUT");
+        rejectedRequests.push(diagnostic);
+        if (rejectedRequests.length > 12) rejectedRequests.shift();
+        try { options.onRequestRejected?.({ ...diagnostic }); } catch { /* Diagnostics cannot authorize work. */ }
+        return;
+      }
       const networkId = event.networkId;
       if (!networkId) { await rejectInitial("NATIVE_REDIRECT_NETWORK_ID_MISSING"); return; }
       const rejection = event.request.hasPostData && event.request.postData === undefined ? "NATIVE_REDIRECT_POST_BODY_MISSING" :

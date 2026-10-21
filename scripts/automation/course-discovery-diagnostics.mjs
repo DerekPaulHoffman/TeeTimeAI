@@ -11,3 +11,30 @@ export function safeBrowserActionIssues(value) {
     ...(Array.isArray(issue?.keys) ? { keys: issue.keys.slice(0, 8).map(key => fields.has(key) ? key : 'field') } : {}),
   }));
 }
+
+// Scalar categories from the pinned Codex 0.160 app-server protocol. Provider
+// messages/additionalDetails can contain request data and must never escape.
+const turnErrorCategories = new Set(['contextWindowExceeded', 'sessionBudgetExceeded', 'usageLimitExceeded', 'rateLimitExceeded',
+  'flexUnavailable', 'serverOverloaded', 'cyberPolicy', 'misalignmentPolicyViolation', 'tooManyDenials', 'internalServerError',
+  'unauthorized', 'badRequest', 'threadRollbackFailed', 'sandboxError', 'other']);
+const structuredTurnErrors = new Set(['httpConnectionFailed', 'responseStreamConnectionFailed', 'responseStreamDisconnected',
+  'responseTooManyFailedAttempts', 'activeTurnNotSteerable']);
+export function safeDiscoveryTurnFailure(turn) {
+  if (!turn || typeof turn !== 'object' || Array.isArray(turn) || typeof turn.status !== 'string' ||
+      !['failed', 'interrupted', 'inProgress'].includes(turn.status)) return undefined;
+  const result = { turnStatus: turn.status };
+  const info = turn.error && typeof turn.error === 'object' && !Array.isArray(turn.error) ? turn.error.codexErrorInfo : undefined;
+  if (typeof info === 'string' && turnErrorCategories.has(info)) result.errorCategory = info;
+  else if (info && typeof info === 'object' && !Array.isArray(info)) {
+    const keys = Object.keys(info);
+    if (keys.length === 1 && structuredTurnErrors.has(keys[0])) {
+      const category = keys[0], details = info[category];
+      if (details && typeof details === 'object' && !Array.isArray(details)) {
+        result.errorCategory = category;
+        if (category !== 'activeTurnNotSteerable' && Number.isInteger(details.httpStatusCode) &&
+            details.httpStatusCode >= 100 && details.httpStatusCode <= 599) result.httpStatusCode = details.httpStatusCode;
+      }
+    }
+  }
+  return result;
+}

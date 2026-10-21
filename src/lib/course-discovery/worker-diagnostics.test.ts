@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bindDiscoveryRecipeIdentity, createDiscoveryAdapterObservation, discoveryBrowserFeedback, discoveryCheckpointDisposition, inspectedAdapterSourceEvidence, noVerifiedRecipeDiagnostic, readDiscoveryControllerCheckpoint, safeBrowserFailureDiagnostics } from "../../../scripts/automation/course-discovery-worker.mjs";
+import { bindDiscoveryRecipeIdentity, createDiscoveryAdapterObservation, createDiscoverySnapshotCompactor, discoveryBrowserFeedback, discoveryCheckpointDisposition, inspectedAdapterSourceEvidence, noVerifiedRecipeDiagnostic, readDiscoveryControllerCheckpoint, safeBrowserFailureDiagnostics } from "../../../scripts/automation/course-discovery-worker.mjs";
 import { safeBrowserActionIssues } from "../../../scripts/automation/course-discovery-diagnostics.mjs";
 
 describe("durable discovery browser diagnostics", () => {
@@ -36,6 +36,66 @@ describe("durable discovery browser diagnostics", () => {
       requests: expect.arrayContaining([{ code: "NATIVE_RESPONSE_TIMEOUT", url: "https://venue.example/read", method: "GET", resourceType: "document" }]) });
     expect(JSON.stringify(safe)).not.toMatch(/private|token|2026|body|text/);
     expect(safeBrowserFailureDiagnostics(null)).toBeUndefined();
+  });
+  it("preserves exact native first-fatal facts through feedback and checkpoint without retaining source objects", () => {
+    const firstFatal = { code: "NATIVE_REDIRECT_NETWORK_ID_MISSING", url: "https://venue.example/public?date=2026-10-23#private",
+      method: "GET", resourceType: "script", interceptedRequests: 71, recordCount: 70, requestLimit: 1024, postDataBytes: 0,
+      framePresent: true, rootFrame: true, networkIdPresent: false, duplicateRequestId: false, hasPostData: false, postDataPresent: false,
+      headers: { authorization: "private" }, postData: "private", networkId: "private", frameId: "private", requestId: "private" };
+    const rejected = { ...firstFatal, code: "NATIVE_REDIRECT_POST_BODY_LIMIT", method: "POST", resourceType: "xhr", postDataBytes: 90_512 };
+    const safe = safeBrowserFailureDiagnostics({ nativeFirstFatal: firstFatal, nativeRejectedRequests: [rejected] });
+    const feedback = discoveryBrowserFeedback(safe, "open", { code: firstFatal.code });
+    const checkpoint = { controller: { version: 1, officialUrl: "https://venue.example/", observedNavigationUrls: [], lastFeedback: feedback } };
+    const restored = readDiscoveryControllerCheckpoint(checkpoint, "https://venue.example/");
+    expect(restored.lastFeedback.details.nativeFirstFatal).toEqual({
+      code: firstFatal.code, url: "https://venue.example/public", method: "GET", resourceType: "script",
+      interceptedRequests: 71, recordCount: 70, requestLimit: 1024, postDataBytes: 0,
+      framePresent: true, rootFrame: true, networkIdPresent: false, duplicateRequestId: false, hasPostData: false, postDataPresent: false,
+    });
+    expect(restored.lastFeedback.details.nativeRejectedRequests).toEqual([expect.objectContaining({ code: rejected.code, postDataBytes: 90_512 })]);
+    firstFatal.code = "NATIVE_CHANGED"; rejected.postDataBytes = 1;
+    safe.nativeFirstFatal.code = "NATIVE_CHANGED_AGAIN";
+    expect(feedback.details.nativeFirstFatal.code).toBe("NATIVE_REDIRECT_NETWORK_ID_MISSING");
+    feedback.details.nativeRejectedRequests[0].postDataBytes = 2;
+    expect(restored.lastFeedback.details.nativeRejectedRequests[0].postDataBytes).toBe(90_512);
+    expect(restored).toMatchObject({ urls: [], readUrls: [], entryUrls: [], officialObserved: false });
+    expect(JSON.stringify(restored)).not.toMatch(/private|2026|headers|postData"|networkId"|frameId|requestId/);
+  });
+  it("bounds native diagnostics and omits malformed metadata and unsafe URLs", () => {
+    const safe = safeBrowserFailureDiagnostics({ nativeFirstFatal: { code: "NATIVE_REDIRECT_NETWORK_ID_MISSING",
+      method: "GET private", resourceType: "script private", interceptedRequests: 1026, recordCount: -1, requestLimit: Infinity,
+      postDataBytes: 1_000_001, framePresent: "true", networkIdPresent: 0, arbitrary: "private" },
+    nativeRejectedRequests: Array.from({ length: 100 }, (_, index) => ({ code: "NATIVE_REDIRECT_POST_BODY_LIMIT",
+      url: `https://venue.example/read-${index}?value=private`, method: "POST", resourceType: "xhr" })) });
+    expect(safe.nativeFirstFatal).toEqual({ code: "NATIVE_REDIRECT_NETWORK_ID_MISSING" });
+    expect(safe.nativeRejectedRequests).toHaveLength(12);
+    expect(safe.nativeRejectedRequests[0].url).toBe("https://venue.example/read-88");
+    for (const url of ["https://venue.example/read?token=private", "https://venue.example/login", "https://user:private@venue.example/read",
+      "https://venue.example/session/private-id", "https://venue.example/token/private-id", "https://venue.example/secret/private-id",
+      "https://venue.example/%73ession/private-id", "https://venue.example/read%2Fcredentials%2Fprivate-id",
+      "http://venue.example/read", "https://127.0.0.1/read", "https://sc.cps.golf/Example/(S(abc123abc123abc123abc123))/Home/nIndex"]) {
+      expect(safeBrowserFailureDiagnostics({ nativeFirstFatal: { code: "NATIVE_REDIRECT_NETWORK_ID_MISSING", url } }).nativeFirstFatal)
+        .toEqual({ code: "NATIVE_REDIRECT_NETWORK_ID_MISSING" });
+    }
+    for (const value of [null, [], "private", { code: "private" }, { code: "HTTP_403" }, { code: ["NATIVE_REDIRECT_NETWORK_ID_MISSING"] }]) {
+      const invalid = safeBrowserFailureDiagnostics({ nativeFirstFatal: value, nativeRejectedRequests: [value] });
+      expect(invalid).not.toHaveProperty("nativeFirstFatal");
+      expect(invalid).not.toHaveProperty("nativeRejectedRequests");
+    }
+    expect(JSON.stringify(safe)).not.toMatch(/private|arbitrary|Infinity/);
+  });
+  it("keeps sanitized native diagnostics in initial and compact snapshots and detects new first-fatal evidence", () => {
+    const compact = createDiscoverySnapshotCompactor();
+    const state = { url: "https://venue.example/", text: "Same public page", controls: [], loading: false,
+      nativeFirstFatal: { code: "NATIVE_REDIRECT_NETWORK_ID_MISSING", method: "GET", resourceType: "document", body: "private" },
+      nativeRejectedRequests: [{ code: "NATIVE_REDIRECT_POST_BODY_LIMIT", url: "https://venue.example/read?date=private", headers: "private" }] };
+    expect(JSON.stringify(compact(state))).not.toContain("private");
+    compact(state);
+    expect(compact(state)).toMatchObject({ unchanged: true, nativeFirstFatal: { code: "NATIVE_REDIRECT_NETWORK_ID_MISSING" },
+      nativeRejectedRequests: [{ code: "NATIVE_REDIRECT_POST_BODY_LIMIT", url: "https://venue.example/read" }] });
+    expect(compact({ ...state, nativeFirstFatal: { code: "NATIVE_REDIRECT_FRAME_MISSING" } })).toHaveProperty("text");
+    expect(state.nativeFirstFatal.body).toBe("private");
+    expect(JSON.stringify(createDiscoverySnapshotCompactor()({ ...state, structure: { nodes: [] } }))).not.toContain("private");
   });
   it.each([false, true, undefined, "true"])("never turns model unsupported prose into a terminal verdict, access flag %s", access => {
     expect(discoveryCheckpointDisposition("UNSUPPORTED", access)).toBe("RETRYABLE_LIMITATION");
