@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Browser, Locator } from "@playwright/test";
 import { z } from "zod";
 import { createAddressPinnedPublicFetchTransport } from "@/lib/automation/address-pinned-public-fetch";
@@ -11,7 +11,7 @@ import { runWithProviderRequestLease } from "@/lib/automation/provider-request-l
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
 import { isActiveBrowserAccessChallenge, isSafeBrowserAssetUrl, isSafeRecipeUrl, recipeSelectorSchema } from "./recipe";
 import { continueNativeBrowserRead, createNativePublicBrowserProxy, isObservedNativeRedirect, isObservedNativeRedirectTarget, nativeReadPreflightMethod } from "./native-public-browser";
-import { installNativeRedirectRouting, type NativeFirstFatal, type NativeReadRoute, type NativeRequestDiagnostic } from "./native-redirect-routing";
+import { installNativeRedirectRouting, isNativeReadSupersededFailure, type NativeFirstFatal, type NativeReadRoute, type NativeRequestDiagnostic } from "./native-redirect-routing";
 import { requestFamilyForUrl } from "./request-family";
 import { canonicalPublicReadUrl } from "./public-request-url";
 import { inspectExistingAdapter } from "./existing-adapter-executor";
@@ -30,6 +30,7 @@ import { isPublicAvailabilityNavigation } from "./public-navigation-control";
 import { observedPublicFrameSources } from "./public-frame-source";
 import { launchPublicReadBrowser } from "./public-browser-launch";
 import { createPublicBookingParentScope, readPublicBookingParentIdentity } from "./public-booking-parent";
+import { createEzLinksPublicReadPolicy, type EzLinksDocumentToken } from "./ezlinks-public-read-policy";
 import { inspectPublicRentalService, openPublicRentalService, selectPublicRentalService, inspectPublicServiceContinuation,
   continuePublicRentalService, type PublicRentalServiceProof, type PublicRentalServiceSelection, type PublicServiceContinuationMode } from "./public-service-control";
 
@@ -50,6 +51,21 @@ type ObservedControl = { tag: string; role: string; name: string; label: string;
   sensitiveForm: boolean; inputType: string; hasPopup: string; selector: string; options?: Array<{ value: string; label: string }>;
   currentValue?: string; product?: { selector: string; durationMinutes: number }; choiceValue?: string; choiceContext?: string; disabledChoice?: boolean;
   service?: PublicRentalServiceProof; serviceContinuation?: PublicServiceContinuationMode; serviceMenuOption?: boolean };
+type EzLinksDocumentWitness = { url: string; settled: boolean; status?: number; token?: EzLinksDocumentToken;
+  observedAt?: number;
+  init?: unknown; initAt?: number; initVersion: number; pendingInit: number; initAttempted: boolean;
+  readContractAssets: Map<string, { complete: boolean; sha256?: string }>; readContractFailed: boolean; readContractVersion: number };
+type EzLinksControllerRead = { nonce: string; document: EzLinksDocumentWitness; token: EzLinksDocumentToken; version: number;
+  contractVersion?: number; url: string; method: "GET" | "POST"; body?: string; seen: boolean; complete: boolean; result?: unknown; error?: Error };
+const ezLinksReadHeader = "x-tts-public-read";
+export type EzLinksReadContract = { kind: "EZLINKS_UNPAGED_SEARCH_V1"; assets: Array<{ path: string; sha256: string }> };
+// Reviewed unpaged loadData/search semantics. These are not fetch targets or
+// model-supplied hashes: only this document's already admitted Script reads can
+// provide the fully decoded bytes for the exact two public assets.
+const ezLinksReadContractAssets = [
+  { path: "/assets/index-DsLbHQvf.js", sha256: "4e2bb6ea29fa910e04620c1551d737aecaff9df23bf6be99f9da6d72e9b1addb" },
+  { path: "/assets/index-CvL6jQuU.js", sha256: "6547b7841afb6945817f5c354437875bd5f1fb59031ed511cf16d30bca72262f" },
+] as const;
 
 export function discoveryPublicChoiceKind(control: Pick<ObservedControl, "tag" | "name" | "href" | "calendar" | "sensitiveForm" | "choiceValue" | "choiceContext" | "disabledChoice">) {
   if (control.sensitiveForm || control.disabledChoice || control.href || /\b(?:checkout|reserve|book|pay|confirm|cancel)\b|\d{1,2}:\d{2}/iu.test(control.name)) return null;
@@ -172,9 +188,11 @@ export async function createCourseDiscoveryBrowserSession(input: {
   const navigationOrigins = new Set(initialUrls.map(value => new URL(value).origin));
   const passfactory = createPassfactoryPublicReadPolicy();
   const uschedule = createUSchedulePublicReadPolicy();
+  const ezlinks = createEzLinksPublicReadPolicy();
   initialUrls.forEach(value => passfactory.observeWidgetUrl(value));
   const readPost = (url: URL, headers: Headers, body: string) =>
-    isAnonymousBrowserReadPost(url, headers, body) || passfactory.allows(url, headers, body) || uschedule.allows(url, headers, body);
+    ezlinks.handles(url) ? ezlinks.allows(url, headers, body) :
+      isAnonymousBrowserReadPost(url, headers, body) || passfactory.allows(url, headers, body) || uschedule.allows(url, headers, body);
   const queue = createSimulatorBrowserRequestQueue(deps.requestLease ?? runWithProviderRequestLease, deadline);
   const nativeProxy = deps.browserTransport === "NATIVE_CHROME" ? await createNativePublicBrowserProxy({ signal: deadline }) : undefined;
   let browser: Browser;
@@ -228,11 +246,45 @@ export async function createCourseDiscoveryBrowserSession(input: {
   let terminalFailure: string | undefined;
   let navigation: { url: string; status: number } | undefined;
   let navigationStartedAt: number | undefined;
-  const close = async () => { if (closed) return; closed = true; await redirectRouting?.close(); cancellation.abort("BROWSER_CLOSED"); queue.dispose(); await context.close().catch(() => {}); await browser.close().catch(() => {}); await nativeProxy?.close(); };
+  let ezDocument: EzLinksDocumentWitness | undefined, ezControllerRead: EzLinksControllerRead | undefined;
+  let ezConfigurationRead: { document: EzLinksDocumentWitness; token: EzLinksDocumentToken; version: number } | undefined;
+  let ezReadContractRead: { document: EzLinksDocumentWitness; token: EzLinksDocumentToken; version: number } | undefined;
+  const ezReadNonces = new Set<string>();
+  const modelSafe = <T>(value: T): T => {
+    if (!ezReadNonces.size) return value;
+    let json = JSON.stringify(value);
+    for (const nonce of ezReadNonces) json = json.replaceAll(nonce, "[private-read-id]");
+    return JSON.parse(json) as T;
+  };
+  const clearEzDocument = () => {
+    if (ezControllerRead) ezControllerRead.error = new Error("EZLINKS_DOCUMENT_CHANGED");
+    ezControllerRead = undefined; ezConfigurationRead = undefined; ezReadContractRead = undefined; ezDocument = undefined;
+    ezlinks.observeDocument("", 0);
+  };
+  const assertEzReadContract = (witness: EzLinksDocumentWitness | undefined, version: number | undefined) => {
+    if (version !== undefined && (!witness || witness !== ezDocument || witness.token !== ezlinks.currentDocument() ||
+        witness.readContractFailed || witness.readContractVersion !== version)) throw new Error("EZLINKS_READ_CONTRACT_UNVERIFIED");
+  };
+  const completedEzReadAssets = (witness: EzLinksDocumentWitness) => !witness.readContractFailed && ezLinksReadContractAssets.every(asset => {
+    const read = witness.readContractAssets.get(asset.path);
+    return read?.complete && read.sha256 === asset.sha256;
+  });
+  const close = async () => { if (closed) return; closed = true; clearEzDocument(); await redirectRouting?.close(); cancellation.abort("BROWSER_CLOSED"); queue.dispose(); await context.close().catch(() => {}); await browser.close().catch(() => {}); await nativeProxy?.close(); };
   const abort = () => { void close(); };
   deadline.addEventListener("abort", abort, { once: true });
   page.on("popup", popup => { void popup.close(); });
   context.on("page", opened => { if (opened !== page) void opened.close(); });
+  const waitEz = async (ready: () => boolean, code: string, durationMs = 5_000) => {
+    const until = Math.min(Date.now() + durationMs, input.deadlineAt.getTime());
+    for (;;) {
+      deadline.throwIfAborted();
+      if (terminalFailure) throw new Error(terminalFailure);
+      if (closed) throw new Error("BROWSER_CLOSED");
+      if (ready()) return;
+      if (Date.now() >= until) throw new Error(code);
+      await new Promise(resolve => setTimeout(resolve, Math.min(25, Math.max(1, until - Date.now()))));
+    }
+  };
   const handleRoute = async (route: NativeReadRoute) => {
     const request = route.request();
     const transportUrl = canonicalPublicReadUrl(request.url(), request.method());
@@ -247,6 +299,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
     };
     recordRequest(metadata, ["xhr", "fetch", "document"].includes(metadata.resourceType));
     pendingRequestMetadata.add(metadata);
+    let ezWitness: EzLinksDocumentWitness | undefined, ezToken: EzLinksDocumentToken | undefined, ezCall: EzLinksControllerRead | undefined;
+    let ezAsset: typeof ezLinksReadContractAssets[number] | undefined, ezAssetRead: { complete: boolean; sha256?: string } | undefined;
+    let ezInitRequest = false;
     try {
       deadline.throwIfAborted();
       if (request.frame().page() !== page) throw new Error("UNSUPPORTED_BROWSER_PAGE");
@@ -265,8 +320,31 @@ export async function createCourseDiscoveryBrowserSession(input: {
           allowedNavigation.add(url.href);
         }
         if (!allowedNavigation.has(url.href) && !navigationOrigins.has(url.origin)) throw new Error("UNOBSERVED_NAVIGATION");
+        clearEzDocument();
+        if (ezlinks.handles(url)) ezDocument = { url: url.href, settled: false, initVersion: 0, pendingInit: 0, initAttempted: false,
+          readContractAssets: new Map(), readContractFailed: false, readContractVersion: 0 };
       }
       const method = request.method();
+      // Capture the exact initiating document, not whatever document happens
+      // to be current after an init/response acknowledgement resumes JS.
+      ezWitness = ezDocument;
+      if (ezWitness && request.frame() === page.mainFrame() && request.resourceType() === "script" && url.origin === new URL(ezWitness.url).origin) {
+        ezAsset = ezLinksReadContractAssets.find(asset => url.href === new URL(asset.path, ezWitness!.url).href);
+        if (ezAsset) {
+          ezAssetRead = { complete: false };
+          ezWitness.readContractAssets.set(ezAsset.path, ezAssetRead); ezWitness.readContractVersion++;
+        }
+      }
+      ezInitRequest = Boolean(ezWitness && url.origin === new URL(ezWitness.url).origin && url.pathname === "/api/search/init" && method === "GET");
+      if (ezInitRequest) {
+        ezWitness!.initAttempted = true;
+        ezWitness!.pendingInit++;
+        await waitEz(() => ezWitness !== ezDocument || ezWitness!.settled, "EZLINKS_CONFIGURATION_UNAVAILABLE");
+        if (ezWitness !== ezDocument || !ezWitness?.token) throw new Error("EZLINKS_DOCUMENT_CHANGED");
+      }
+      if (ezWitness && method === "POST" && ezlinks.handles(url) && ezWitness.pendingInit > 0)
+        await waitEz(() => ezWitness !== ezDocument || ezWitness!.init !== undefined || ezWitness!.pendingInit === 0, "EZLINKS_CONFIGURATION_UNAVAILABLE");
+      ezToken = ezWitness?.token;
       // Public widgets may select a resource with history.replaceState before
       // issuing its read. Bind only the URL actually observed in this frame.
       const frameUrl = request.frame().url();
@@ -274,8 +352,20 @@ export async function createCourseDiscoveryBrowserSession(input: {
       const headers = new Headers();
       const requestHeaders = request.headers();
       if (nativeProxy && Object.keys(requestHeaders).some(key => /^(?:authorization|proxy-authorization|x-api-key)$/iu.test(key))) throw new Error("CREDENTIAL_HEADERS");
+      if (ezlinks.handles(url) && Object.keys(requestHeaders).some(key =>
+        !(nativeProxy && key.toLowerCase() === "cookie") && /authorization|cookie|token|api.?key|secret|credential|next-action|csrf|session/iu.test(key)))
+        throw new Error("CREDENTIAL_HEADERS");
       for (const key of ["accept", "content-type", "origin"]) if (requestHeaders[key]) headers.set(key, requestHeaders[key]);
       const body = request.postData() ?? undefined;
+      const controllerNonce = requestHeaders[ezLinksReadHeader];
+      if (controllerNonce !== undefined) {
+        ezCall = ezControllerRead;
+        if (!ezCall || ezCall.seen || controllerNonce !== ezCall.nonce || ezCall.document !== ezWitness || ezWitness !== ezDocument ||
+            ezCall.token !== ezToken || ezCall.version !== ezWitness?.initVersion || ezCall.url !== url.href || ezCall.method !== method || ezCall.body !== body)
+          throw new Error("EZLINKS_PUBLIC_READ_REJECTED");
+        ezCall.seen = true;
+        assertEzReadContract(ezWitness, ezCall.contractVersion);
+      }
       if (!addVerifiedMindbodyReadHeaders(url, method, requestHeaders, headers, body ?? "")) throw new Error("UNSAFE_METHOD");
       if (!uschedule.addReadHeaders(url, method, requestHeaders, headers, body ?? "")) throw new Error("UNSAFE_METHOD");
       const preflight = nativeProxy && method === "OPTIONS" && nativeReadPreflightMethod(requestHeaders);
@@ -294,6 +384,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
       requestCount++;
       const responseLimit = publicBrowserResponseLimit(request.resourceType());
       const reply = await queue.run(requestFamilyForUrl(url.href), async () => {
+        // A same-document script read can retire the completion contract while
+        // this exact POST waits for the shared provider lease.
+        assertEzReadContract(ezWitness, ezCall?.contractVersion);
         if (nativeProxy) {
           nativeProxy.allowHostConnections(url.hostname);
           const response = await continueNativeBrowserRead(route, deadline, responseLimit, async () => {
@@ -312,13 +405,24 @@ export async function createCourseDiscoveryBrowserSession(input: {
         const buffer = Buffer.from(await response.arrayBuffer());
         if (buffer.length > responseLimit) throw new Error("BODY_LIMIT");
         return { status: response.status, headers: Object.fromEntries(response.headers), buffer };
-      });
+      }, request.signal);
+      if (request.signal?.aborted) {
+        // A fully captured old response still spends the cumulative byte
+        // budget, but a retired document cannot publish evidence/authority.
+        responseBytes += reply.buffer.length;
+        if (responseBytes > PUBLIC_BROWSER_TOTAL_BYTES) throw new Error("PUBLIC_READ_BYTE_LIMIT");
+        return;
+      }
       metadata.status = reply.status;
       if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
         navigation = { url: request.url(), status: reply.status };
         // Only actual main-document response/redirect metadata can establish
         // parent provenance; model navigation arguments and XHRs cannot.
         bookingParents.observeDocument({ url: request.url(), status: reply.status, redirectedFrom: request.redirectedFrom()?.url() });
+        if (ezWitness === ezDocument && ezWitness) {
+          ezWitness.status = reply.status; ezWitness.settled = true; ezWitness.observedAt = Date.now();
+          ezWitness.token = /^text\/html(?:;|$)/iu.test(reply.headers["content-type"] ?? "") ? ezlinks.observeDocument(url, reply.status) : undefined;
+        }
       }
       // Retain only the bounded, successfully read official document. Its raw
       // semantic markup is reproducible on warm reads; page.content() contains
@@ -333,6 +437,39 @@ export async function createCourseDiscoveryBrowserSession(input: {
       if (url.hostname === "clients.uschedule.com" && method === "GET" && /^text\/html(?:;|$)/iu.test(reply.headers["content-type"] ?? ""))
         uschedule.observeResponse(url.href, method, reply.status, reply.headers["content-type"] ?? "", reply.buffer.toString("utf8"));
       if (responseBytes > PUBLIC_BROWSER_TOTAL_BYTES) { cancellation.abort("PUBLIC_READ_BYTE_LIMIT"); throw new Error("PUBLIC_READ_BYTE_LIMIT"); }
+      if (ezAsset && ezAssetRead && ezWitness === ezDocument) {
+        // Chrome can start a script after the HTML response ACK but before the
+        // main handler publishes its token. Wait only after queue.run released
+        // the provider lease, and bind to the initiating document object.
+        await waitEz(() => ezWitness !== ezDocument || ezWitness!.settled, "EZLINKS_READ_CONTRACT_UNVERIFIED");
+        if (ezWitness !== ezDocument || !ezWitness?.token || ezWitness.token !== ezlinks.currentDocument())
+          throw new Error("EZLINKS_READ_CONTRACT_UNVERIFIED");
+        const directCompleteScript = nativeProxy && request.frame() === page.mainFrame() && method === "GET" && !request.redirectedFrom() && transportUrl === url.href &&
+          reply.status === 200 && /^(?:text|application)\/(?:javascript|ecmascript)(?:\s*;|$)/iu.test(reply.headers["content-type"] ?? "");
+        const digest = directCompleteScript ? createHash("sha256").update(reply.buffer).digest("hex") : undefined;
+        ezAssetRead.complete = true; ezWitness.readContractVersion++;
+        if (digest !== ezAsset.sha256) ezWitness.readContractFailed = true;
+        else ezAssetRead.sha256 = digest;
+      }
+      if (ezInitRequest || ezCall) {
+        if (ezWitness !== ezDocument || !ezToken || ezToken !== ezlinks.currentDocument()) throw new Error("EZLINKS_DOCUMENT_CHANGED");
+        const json = reply.status === 200 && /^application\/json(?:\s*;\s*charset\s*=\s*utf-?8)?$/iu.test(reply.headers["content-type"] ?? "") && reply.buffer.length <= 600_000;
+        let raw: unknown;
+        try { if (json) raw = JSON.parse(reply.buffer.toString("utf8")); } catch { /* Invalid JSON is never controller proof. */ }
+        if (ezInitRequest) {
+          ezWitness!.init = undefined; ezWitness!.initVersion++;
+          const valid = ezlinks.observeResponse(url, method, reply.status, reply.headers["content-type"] ?? "", raw, ezToken);
+          if (valid && json && raw !== undefined) { ezWitness!.init = raw; ezWitness!.initAt = Date.now(); }
+          if (ezControllerRead && ezControllerRead !== ezCall) ezControllerRead.error = new Error("EZLINKS_DOCUMENT_CHANGED");
+        }
+        if (ezCall) {
+          if (ezCall !== ezControllerRead || ezCall.document !== ezDocument || ezCall.token !== ezToken ||
+              (!ezInitRequest && ezCall.version !== ezWitness!.initVersion)) throw new Error("EZLINKS_DOCUMENT_CHANGED");
+          if (!json || raw === undefined || ezInitRequest && ezWitness!.init === undefined) throw new Error("EZLINKS_PUBLIC_READ_FAILED");
+          assertEzReadContract(ezWitness, ezCall.contractVersion);
+          ezCall.result = raw; ezCall.complete = true;
+        }
+      }
       const responseHeaders: Record<string, string> = {};
       for (const key of ["content-type", "access-control-allow-origin"]) { const value = reply.headers[key]; if (value) responseHeaders[key] = value; }
       const redirect = reply.headers.location;
@@ -355,6 +492,12 @@ export async function createCourseDiscoveryBrowserSession(input: {
         allowedNavigation.add(next.href);
       }
       if (responses.length < 12 && /application\/(?:[a-z0-9.+-]*\+)?json/iu.test(responseHeaders["content-type"] ?? "") && ["xhr", "fetch"].includes(request.resourceType())) {
+        if (ezlinks.handles(url) && url.pathname === "/api/search/search") {
+          // r01 is the provider's IDToken, not durable slot identity. The
+          // controller keeps raw listing JSON privately; model snapshots get
+          // neither its values nor schema examples that could repeat them.
+          responses.push({ url: redactDiscoveryRequestUrl(url.href), status: reply.status, method, bodyOmitted: true, schemaEvidenceOmitted: true });
+        } else {
         try {
           const original: unknown = JSON.parse(reply.buffer.toString("utf8"));
           const projected = redactDiscoveryJson(original);
@@ -364,9 +507,16 @@ export async function createCourseDiscoveryBrowserSession(input: {
             ...(JSON.stringify(projected).length < 28_000 ? { body: projected } : { bodyOmitted: true as const }),
             ...(schemaBytes + JSON.stringify(schemaEvidence).length <= 24_000 ? { schemaEvidence } : { schemaEvidenceOmitted: true as const }) });
         } catch { /* Invalid JSON is not evidence. */ }
+        }
       }
       if (!nativeProxy) await route.fulfill({ status: reply.status, headers: responseHeaders, body: reply.buffer });
     } catch (error) {
+      if (ezAssetRead && ezWitness === ezDocument && ezWitness) {
+        ezAssetRead.complete = true; ezWitness.readContractFailed = true; ezWitness.readContractVersion++;
+      }
+      if (ezCall && ezCall === ezControllerRead) ezCall.error = new Error(isNativeReadSupersededFailure(error) ? "EZLINKS_DOCUMENT_CHANGED" :
+        error instanceof Error && error.message === "EZLINKS_READ_CONTRACT_UNVERIFIED" ? error.message : "EZLINKS_PUBLIC_READ_FAILED");
+      if (isNativeReadSupersededFailure(error)) return;
       blockedRequests++;
       metadata.blockedReason = error instanceof Error && /^[A-Z_]{1,80}$/u.test(error.message) ? error.message : "REQUEST_FAILED";
       const failureUrl = redactDiscoveryFailureUrl(requestUrl, request.resourceType());
@@ -376,7 +526,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       recordRequest(metadata, true);
       await route.abort().catch(() => {});
     }
-    finally { pendingRequests--; pendingRequestMetadata.delete(metadata); }
+    finally { if (ezInitRequest && ezWitness) ezWitness.pendingInit--; pendingRequests--; pendingRequestMetadata.delete(metadata); }
   };
   await context.route("**/*", async route => {
     if (route.request().frame() !== page.mainFrame()) {
@@ -732,7 +882,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
         if (terminalFailure) throw new Error(terminalFailure);
         deadline.throwIfAborted();
         if (closed) throw new Error("BROWSER_CLOSED");
-        return result;
+        return modelSafe(result);
       }
       catch (error) {
         const message = error instanceof Error ? error.message : "";
@@ -744,7 +894,125 @@ export async function createCourseDiscoveryBrowserSession(input: {
       }
     }
   };
+  const currentEzDocument = async () => {
+    deadline.throwIfAborted();
+    if (terminalFailure) throw new Error(terminalFailure);
+    if (closed) throw new Error("BROWSER_CLOSED");
+    if (!nativeProxy) throw new Error("EZLINKS_NATIVE_BROWSER_REQUIRED");
+    const witness = ezDocument;
+    if (!witness || !witness.settled) throw new Error("EZLINKS_DOCUMENT_CHANGED");
+    const rootSearchRoute = () => {
+      try {
+        const original = new URL(witness.url), current = new URL(page.mainFrame().url());
+        return witness === ezDocument && witness.status === 200 && witness.token !== undefined && witness.token === ezlinks.currentDocument() &&
+          witness.observedAt !== undefined && Date.now() >= witness.observedAt && Date.now() - witness.observedAt <= 300_000 &&
+          original.protocol === "https:" && current.origin === original.origin && original.pathname === "/" && current.pathname === "/search" &&
+          !original.username && !original.password && !original.port && !original.search && !original.hash &&
+          !current.username && !current.password && !current.port && !current.search && !current.hash;
+      } catch { return false; }
+    };
+    const currentLocation = async () => {
+      if (sameDiscoveryMainDocument(witness.url, page.mainFrame().url())) return undefined;
+      if (!rootSearchRoute()) throw new Error("EZLINKS_DOCUMENT_CHANGED");
+      // The pinned html5-mode router sends its default root state to /search.
+      // This private alias cannot rewrite source URLs or authorize navigation;
+      // the exact native document/token and both completed code hashes remain
+      // required. Any wait is outside provider capacity and the original clock.
+      await waitEz(() => witness !== ezDocument || witness.readContractFailed || completedEzReadAssets(witness), "EZLINKS_READ_CONTRACT_UNVERIFIED");
+      if (!rootSearchRoute() || !completedEzReadAssets(witness)) throw new Error("EZLINKS_READ_CONTRACT_UNVERIFIED");
+      return witness.readContractVersion;
+    };
+    const aliasVersion = await currentLocation();
+    const visible = await page.locator("body").evaluate(element => (element as HTMLElement).innerText.slice(0, 100_000), undefined,
+      { timeout: Math.min(1000, Math.max(1, input.deadlineAt.getTime() - Date.now())) });
+    if ([401, 403].includes(witness.status ?? 0) || isActiveBrowserAccessChallenge(visible, await page.title()))
+      throw new Error("ACCESS_REQUIRED");
+    if (witness !== ezDocument || !witness.token || witness.token !== ezlinks.currentDocument()) throw new Error("EZLINKS_DOCUMENT_CHANGED");
+    const finalAliasVersion = await currentLocation();
+    if (aliasVersion !== undefined && aliasVersion !== finalAliasVersion) throw new Error("EZLINKS_DOCUMENT_CHANGED");
+    return witness;
+  };
+  const fixedEzRead = async (witness: EzLinksDocumentWitness, method: "GET" | "POST", body?: string, version = witness.initVersion) => {
+    if (ezControllerRead) throw new Error("EZLINKS_PUBLIC_READ_BUSY");
+    if (witness !== await currentEzDocument() || !witness.token || witness.initVersion !== version) throw new Error("EZLINKS_DOCUMENT_CHANGED");
+    const contract = method === "POST" ? ezReadContractRead : undefined;
+    if (contract && (contract.document !== witness || contract.token !== witness.token)) throw new Error("EZLINKS_READ_CONTRACT_UNVERIFIED");
+    assertEzReadContract(witness, contract?.version);
+    const url = new URL(method === "GET" ? "/api/search/init" : "/api/search/search", witness.url);
+    if (method === "POST" && !ezlinks.allows(url, new Headers({ "content-type": "application/json", origin: url.origin }), body ?? ""))
+      throw new Error("EZLINKS_PUBLIC_READ_REJECTED");
+    if (ezReadNonces.size >= 192) throw new Error("PUBLIC_READ_REQUEST_LIMIT");
+    const call: EzLinksControllerRead = { nonce: randomUUID(), document: witness, token: witness.token, version: witness.initVersion,
+      url: url.href, method, body, seen: false, complete: false, ...(contract ? { contractVersion: contract.version } : {}) };
+    ezControllerRead = call;
+    ezReadNonces.add(call.nonce);
+    try {
+      // Implementation-owned fixed fetch only. Its return value/body is never
+      // evidence: only the correlated, fully guarded native response resolves
+      // this call. An overridden fetch cannot fabricate a captured response.
+      const started = page.evaluate(async ({ url, method, body, nonce, header }) => {
+        const headers: Record<string, string> = { [header]: nonce };
+        if (method === "POST") headers["content-type"] = "application/json";
+        const response = await fetch(url, { method, headers, ...(body === undefined ? {} : { body }), credentials: "same-origin", redirect: "error" });
+        await response.arrayBuffer();
+      }, { url: url.href, method, body, nonce: call.nonce, header: ezLinksReadHeader });
+      void started.catch(() => { if (!call.complete) call.error ??= new Error("EZLINKS_PUBLIC_READ_FAILED"); });
+      await waitEz(() => {
+        if (call.error) throw call.error;
+        if (ezControllerRead !== call || ezDocument !== witness || ezlinks.currentDocument() !== call.token) throw new Error("EZLINKS_DOCUMENT_CHANGED");
+        assertEzReadContract(witness, call.contractVersion);
+        return call.complete;
+      }, "EZLINKS_READ_TIMEOUT");
+      assertEzReadContract(witness, call.contractVersion);
+      return structuredClone(call.result);
+    } finally { if (ezControllerRead === call) ezControllerRead = undefined; }
+  };
+  const readEzLinksConfiguration = async () => {
+    const witness = await currentEzDocument();
+    if (witness.init === undefined) {
+      // Wait outside provider capacity for the site's actual automatic init.
+      // A failed observed init is not retried as an access-wall workaround.
+      await waitEz(() => witness !== ezDocument || witness.init !== undefined || witness.initAttempted,
+        "EZLINKS_CONFIGURATION_UNAVAILABLE", 500).catch(error => {
+        if (!(error instanceof Error) || error.message !== "EZLINKS_CONFIGURATION_UNAVAILABLE" || witness.initAttempted) throw error;
+      });
+      if (witness.pendingInit > 0)
+        await waitEz(() => witness !== ezDocument || witness.init !== undefined || witness.pendingInit === 0, "EZLINKS_CONFIGURATION_UNAVAILABLE");
+      if (witness !== ezDocument) throw new Error("EZLINKS_DOCUMENT_CHANGED");
+      if (witness.init === undefined) {
+        if (witness.initAttempted) throw new Error("EZLINKS_CONFIGURATION_UNAVAILABLE");
+        await fixedEzRead(witness, "GET");
+      }
+    }
+    if (witness !== await currentEzDocument() || witness.init === undefined || !witness.initAt || Date.now() - witness.initAt > 300_000)
+      throw new Error("EZLINKS_CONFIGURATION_UNAVAILABLE");
+    ezConfigurationRead = { document: witness, token: witness.token!, version: witness.initVersion };
+    return structuredClone(witness.init);
+  };
+  const readEzLinksReadContract = async (): Promise<EzLinksReadContract> => {
+    const witness = await currentEzDocument();
+    const complete = () => completedEzReadAssets(witness);
+    await waitEz(() => witness !== ezDocument || witness.readContractFailed || complete(), "EZLINKS_READ_CONTRACT_UNVERIFIED");
+    const version = witness.readContractVersion;
+    if (witness !== ezDocument || witness.readContractFailed || !complete()) throw new Error("EZLINKS_READ_CONTRACT_UNVERIFIED");
+    if (witness !== await currentEzDocument() || witness.readContractVersion !== version || witness.readContractFailed || !complete())
+      throw new Error("EZLINKS_READ_CONTRACT_UNVERIFIED");
+    ezReadContractRead = { document: witness, token: witness.token!, version };
+    return { kind: "EZLINKS_UNPAGED_SEARCH_V1", assets: ezLinksReadContractAssets.map(asset => ({ ...asset })) };
+  };
   return {
+    // Controller-only methods; intentionally absent from action/tool schemas.
+    readEzLinksConfiguration,
+    readEzLinksReadContract,
+    async readEzLinksAvailability(body: unknown) {
+      const witness = await currentEzDocument(), binding = ezConfigurationRead;
+      if (!binding || binding.document !== witness || binding.token !== witness.token || binding.version !== witness.initVersion)
+        throw new Error("EZLINKS_DOCUMENT_CHANGED");
+      let serialized: string;
+      try { serialized = JSON.stringify(body); } catch { throw new Error("EZLINKS_PUBLIC_READ_REJECTED"); }
+      if (typeof serialized !== "string" || Buffer.byteLength(serialized) > 2048) throw new Error("EZLINKS_PUBLIC_READ_REJECTED");
+      return fixedEzRead(witness, "POST", serialized, binding.version);
+    },
     diagnostics() {
       // Available even when navigation throws or the page has already closed.
       // This contains transport facts only, never page text or response bodies.
@@ -826,7 +1094,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
             if (JSON.stringify(structure).length > 6000) { item.href = before.href; item.target = before.target; }
           }
         }
-        return { ...result, structure };
+        return modelSafe({ ...result, structure });
       }
       if (action.action === "inspect_adapter") {
         if (!isSafeRecipeUrl(action.url) || !allowedNavigation.has(new URL(action.url).href)) throw new Error("UNOBSERVED_NAVIGATION");
@@ -840,6 +1108,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
         serviceSelection = undefined;
         if (!isSafeRecipeUrl(action.url) || !allowedNavigation.has(new URL(action.url).href)) throw new Error("UNOBSERVED_NAVIGATION");
         navigationOrigins.add(new URL(action.url).origin); passfactory.observeWidgetUrl(action.url);
+        await redirectRouting?.beginDocumentNavigation(page.mainFrame());
+        responses.length = 0;
         navigationStartedAt = Date.now();
         await page.goto(action.url, { waitUntil: "commit", timeout: Math.min(30_000, Math.max(1, input.deadlineAt.getTime() - Date.now())) });
       } else if (page.url() === "about:blank") throw new Error("OPEN_A_SOURCE_FIRST");
@@ -883,6 +1153,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
             const canonicalBootstrap = rawHref !== known.href && normalizeDiscoveryNavigationUrl(rawHref) === known.href;
             const ordinaryDocumentLink = !new URL(known.href).hash && !await known.locator.getAttribute("onclick");
             if (canonicalBootstrap || ordinaryDocumentLink || target && !["_self", "_top", "_parent"].includes(target.toLowerCase())) {
+              await redirectRouting?.beginDocumentNavigation(page.mainFrame());
+              responses.length = 0;
+              navigationStartedAt = Date.now();
               await page.goto(known.href, { waitUntil: "commit" });
               documentNavigation = true;
             }

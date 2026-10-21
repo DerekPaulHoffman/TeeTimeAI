@@ -72,6 +72,37 @@ describe("discovery browser public protocol", () => {
 
 const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
+  it("retires native work only after exact admitted document navigation and preserves cumulative budgets/deadline", async () => {
+    const boundaries: string[] = [], originalDeadline = new Date(Date.now() + 30_000);
+    const deadlineMillis = originalDeadline.getTime();
+    const native = vi.spyOn(nativeBrowser, "continueNativeBrowserRead").mockImplementation(async route => {
+      const body = Buffer.from('<h1>Public golf document</h1><a href="https://example.org/next">View tee times</a>'), headers = { "content-type": "text/html" };
+      await route.fulfill({ status: 200, headers, body }); return { status: 200, url: route.request().url(), headers, body };
+    });
+    const routing = vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (page, handler) => ({
+      prepare: () => {}, beginDocumentNavigation: async frame => { expect(frame).toBe(page.mainFrame()); boundaries.push(page.url()); },
+      close: async () => {}, pendingReads: 0, lastFailure: undefined, releasePlaywrightRoute: route => handler(route),
+    }));
+    const session = await createCourseDiscoveryBrowserSession({ initialUrls: ["https://example.org/"], deadlineAt: originalDeadline }, {
+      browserTransport: "NATIVE_CHROME", launchBrowser: () => chromium.launch({ executablePath, headless: true }),
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      await expect(session.execute({ id: 1, action: "open", url: "https://unobserved.example.org/" })).rejects.toThrow("UNOBSERVED_NAVIGATION");
+      expect(boundaries).toEqual([]);
+      const first = await session.execute({ id: 2, action: "open", url: "https://example.org/" });
+      expect(boundaries).toEqual(["about:blank"]);
+      await session.execute({ id: 3, action: "observe" });
+      await expect(session.execute({ id: 4, action: "click", target: "00000000-0000-4000-8000-000000000001" })).rejects.toThrow("STALE_OR_UNKNOWN_CONTROL");
+      expect(boundaries).toHaveLength(1);
+      const observed = await session.execute({ id: 5, action: "observe" });
+      const link = observed.controls.find(control => control.href === "https://example.org/next")!;
+      const next = await session.execute({ id: 6, action: "click", target: link.target });
+      expect(boundaries).toEqual(["about:blank", "https://example.org/"]); expect(next.url).toBe("https://example.org/next");
+      expect(next.requestCount).toBeGreaterThan(first.requestCount); expect(next.responseBytes).toBeGreaterThan(first.responseBytes);
+      expect(next.interceptCount).toBeGreaterThan(first.interceptCount); expect(originalDeadline.getTime()).toBe(deadlineMillis);
+    } finally { await session.close(); native.mockRestore(); routing.mockRestore(); }
+  }, 20_000);
   it.each(["open", "observed document link"])("returns committed public controls before deferred assets finish: %s", async mode => {
     const source = "https://example.org/", destination = "https://example.org/tee-times", asset = "https://assets.example.org/pending.js";
     let release!: () => void;
@@ -458,7 +489,7 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
     const captured = new Promise<void>(resolve => { release = resolve; });
     let session: Awaited<ReturnType<typeof createCourseDiscoveryBrowserSession>> | undefined;
     const routing = vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, handler) => ({
-      prepare: () => {}, close: async () => {}, get lastFailure() { return undefined; },
+      prepare: () => {}, beginDocumentNavigation: async () => {}, close: async () => {}, get lastFailure() { return undefined; },
       get pendingReads() { return pending; },
       releasePlaywrightRoute: async route => {
         pending++;
@@ -498,7 +529,7 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       interceptedRequests: 12, recordCount: 8, requestLimit: 1024, hasPostData: true, postDataPresent: false, postDataBytes: 0 };
     const routing = vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, _handler, options) => {
       options?.onFailure?.(fatal.code);
-      return { prepare: () => {}, close: async () => {}, pendingReads: 0, lastFailure: fatal.code,
+      return { prepare: () => {}, beginDocumentNavigation: async () => {}, close: async () => {}, pendingReads: 0, lastFailure: fatal.code,
         get firstFatal() { return { ...fatal }; }, releasePlaywrightRoute: async route => { await route.abort(); } };
     });
     let session: Awaited<ReturnType<typeof createCourseDiscoveryBrowserSession>> | undefined;
@@ -519,7 +550,7 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
     let notifyFailure: ((code: string) => void) | undefined, failed = false;
     const routing = vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, handler, options) => {
       notifyFailure = options?.onFailure;
-      return { prepare: () => {}, close: async () => {}, pendingReads: 0, get lastFailure() { return failed ? fatal.code : undefined; },
+      return { prepare: () => {}, beginDocumentNavigation: async () => {}, close: async () => {}, pendingReads: 0, get lastFailure() { return failed ? fatal.code : undefined; },
         get firstFatal() { return failed ? { ...fatal } : undefined; }, releasePlaywrightRoute: route => handler(route) };
     });
     const native = vi.spyOn(nativeBrowser, "continueNativeBrowserRead").mockImplementation(async route => {
@@ -542,7 +573,7 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
     const rejected = { code: "NATIVE_REDIRECT_POST_BODY_LIMIT", url: "https://example.org/collect", method: "POST", resourceType: "xhr", postDataBytes: 40000 };
     const routing = vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, handler, options) => {
       options?.onRequestRejected?.(rejected);
-      return { prepare: () => {}, close: async () => {}, pendingReads: 0, lastFailure: undefined,
+      return { prepare: () => {}, beginDocumentNavigation: async () => {}, close: async () => {}, pendingReads: 0, lastFailure: undefined,
         get rejectedRequests() { return [{ ...rejected }]; }, releasePlaywrightRoute: route => handler(route) };
     });
     const native = vi.spyOn(nativeBrowser, "continueNativeBrowserRead").mockImplementation(async route => {
@@ -741,7 +772,7 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       return { status: 200, url: route.request().url(), headers, body };
     });
     const routing = vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, handler) => ({
-      prepare: () => {}, close: async () => {}, get lastFailure() { return undefined; }, get pendingReads() { return 0; },
+      prepare: () => {}, beginDocumentNavigation: async () => {}, close: async () => {}, get lastFailure() { return undefined; }, get pendingReads() { return 0; },
       releasePlaywrightRoute: route => handler(route),
     }));
     const session = await createCourseDiscoveryBrowserSession({ deadlineAt: new Date(Date.now() + 30_000), initialUrls: ["https://example.org/"] }, {

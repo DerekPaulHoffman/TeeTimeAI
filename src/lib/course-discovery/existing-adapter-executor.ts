@@ -26,6 +26,9 @@ import { parseChronogolfSource } from "./chronogolf-source";
 import { executeChronogolf, inspectChronogolf } from "./chronogolf-executor";
 import { parseGolfVxSource } from "./golfvx-source";
 import { executeGolfVx, inspectGolfVx } from "./golfvx-executor";
+import { parseEzLinksSource } from "./ezlinks-source";
+import { isEzLinksProviderUrl } from "./ezlinks-public-read-policy";
+import { executeEzLinks, inspectEzLinks } from "./ezlinks-executor";
 
 type Dependencies = {
   fetch?: typeof fetch;
@@ -208,6 +211,11 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
 /** For a controller-observed provider URL only. Reads typed public configuration
  * and returns bounded IDs; availability and activation remain separate proofs. */
 export async function inspectExistingAdapter(source: Source, deps: Dependencies): Promise<{ adapter: ExistingAdapterMetadata }> {
+  if (isEzLinksProviderUrl(source.bookingUrl)) {
+    if (!parseEzLinksSource(source.bookingUrl)) fail("UNSUPPORTED_ADAPTER_SOURCE");
+    if (!source.officialUrl || !source.venueAddress) fail("ADAPTER_IDENTITY_MISSING");
+    return { adapter: await inspectEzLinks({ ...source, officialUrl: source.officialUrl }, deps) };
+  }
   if (parseGolfVxSource(source.bookingUrl)) {
     if (!source.officialUrl) fail("ADAPTER_IDENTITY_MISSING");
     return { adapter: await inspectGolfVx({ ...source, officialUrl: source.officialUrl }, deps) };
@@ -284,12 +292,19 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
     if (input.timeZone !== recipe.source.timeZone || recipe.source.providerFamily.toUpperCase() !== adapter.family ||
         (recipe.target.kind === "SIMULATOR") !== simulator || simulator && (!recipe.target.offeringId || !input.durationMinutes) ||
         adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR" && (adapter.facilityIds.length !== 1 || adapter.officialIdentityProof)) fail("ADAPTER_TARGET_MISMATCH");
-    if (!["USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "CHRONOGOLF", "GOLFVX"].includes(adapter.family)) session = reader(recipe.source, deps, adapter, input);
+    if (adapter.family === "EZLINKS" && (!recipe.source.officialUrl || !recipe.source.venueAddress ||
+        parseEzLinksSource(recipe.source.bookingUrl)?.tenant !== adapter.tenant || input.durationMinutes !== undefined))
+      fail("ADAPTER_TARGET_MISMATCH");
+    if (!["USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS"].includes(adapter.family)) session = reader(recipe.source, deps, adapter, input);
     const start = deps.toInstant(`${input.date}T${input.startTime}:00`, input);
     const next = new Date(`${input.date}T00:00:00Z`); next.setUTCDate(next.getUTCDate() + 1);
     const end = deps.toInstant(`${input.endTime === "24:00" ? next.toISOString().slice(0, 10) : input.date}T${input.endTime === "24:00" ? "00:00" : input.endTime}:00`, input);
     const now = clock();
     if (end <= now) fail("INVALID_REQUEST_DATE_OR_ZONE");
+    if (adapter.family === "EZLINKS") {
+      const slots = await executeEzLinks(recipe.source, adapter, { courseId: recipe.target.courseId }, input, deps);
+      return result(slots.filter(slot => new Date(slot.startsAt) > now && new Date(slot.startsAt) >= start && new Date(slot.startsAt) < end && slot.availableSpots >= input.players));
+    }
     if (adapter.family === "GOLFVX") {
       const slots = await executeGolfVx(recipe.source, adapter, { courseId: recipe.target.courseId, offeringId: recipe.target.offeringId! }, input, deps);
       return result(slots.filter(slot => new Date(slot.startsAt) > now && new Date(slot.startsAt) >= start && new Date(slot.endsAt!) <= end));
@@ -365,6 +380,7 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
         ...(slot.holes === 9 || slot.holes === 18 ? { holes: slot.holes as 9 | 18 } : {}),
       })));
     }
+    if (adapter.family !== "ACUITY") fail("UNSUPPORTED_ADAPTER_SOURCE");
     const observed = await readAcuityPublicConfiguration({ bookingUrl: recipe.source.bookingUrl, fetchImpl: session!.read });
     if (!observed) fail("ADAPTER_CONFIGURATION_UNVERIFIED");
     const available = await fetchAcuitySimulatorAvailability({ date: input.date, durationMinutes: input.durationMinutes!, partySize: 1,

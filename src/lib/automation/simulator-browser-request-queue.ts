@@ -3,6 +3,7 @@ type RequestLease = <T>(hostname: string, work: () => Promise<T>) => Promise<
 >;
 type PendingRequest = {
   hostname: string;
+  signal: AbortSignal;
   work: () => Promise<unknown>;
   resolve: (value: unknown) => void;
   reject: (error: unknown) => void;
@@ -33,16 +34,16 @@ export function createSimulatorBrowserRequestQueue(lease: RequestLease, signal: 
   const execute = async (request: PendingRequest) => {
     try {
       for (;;) {
-        signal.throwIfAborted();
+        request.signal.throwIfAborted();
         const result = await lease(request.hostname, async () => {
           // Cancellation while the durable lease was being acquired must not
           // start another provider request; the lease helper still releases it.
-          signal.throwIfAborted();
+          request.signal.throwIfAborted();
           return request.work();
         });
-        signal.throwIfAborted();
+        request.signal.throwIfAborted();
         if (result.acquired) { request.resolve(result.value); return; }
-        await waitForCapacity(signal);
+        await waitForCapacity(request.signal);
       }
     } catch (error) { request.reject(error); }
     finally { activeHosts.delete(request.hostname); drain(); }
@@ -55,16 +56,18 @@ export function createSimulatorBrowserRequestQueue(lease: RequestLease, signal: 
       const index = pending.findIndex(request => !activeHosts.has(request.hostname));
       if (index < 0) return;
       const [request] = pending.splice(index, 1);
+      if (request.signal.aborted) { request.reject(request.signal.reason); continue; }
       activeHosts.add(request.hostname);
       void execute(request);
     }
   };
 
   return {
-    run<T>(hostname: string, work: () => Promise<T>): Promise<T> {
-      signal.throwIfAborted();
+    run<T>(hostname: string, work: () => Promise<T>, requestSignal?: AbortSignal): Promise<T> {
+      const combined = requestSignal ? AbortSignal.any([signal, requestSignal]) : signal;
+      combined.throwIfAborted();
       return new Promise<T>((resolve, reject) => {
-        pending.push({ hostname: hostname.toLowerCase(), work, resolve: value => resolve(value as T), reject });
+        pending.push({ hostname: hostname.toLowerCase(), signal: combined, work, resolve: value => resolve(value as T), reject });
         drain();
       });
     },

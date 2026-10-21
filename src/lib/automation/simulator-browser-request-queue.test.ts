@@ -79,4 +79,28 @@ describe("interactive browser request capacity", () => {
       expect(work).not.toHaveBeenCalled();
     } finally { queue.dispose(); }
   });
+
+  it("cancels only a retired document's queued work and preserves current peers and the original session signal", async () => {
+    const session = new AbortController(), old = new AbortController(), release = deferred();
+    const work = vi.fn(async () => "retired must not dispatch");
+    const queue = createSimulatorBrowserRequestQueue(async (_host, run) => ({ acquired: true as const, value: await run() }), session.signal);
+    try {
+      const holding = queue.run("same.test", async () => { await release.promise; return "old terminal ACK"; });
+      const retired = expect(queue.run("same.test", work, old.signal)).rejects.toThrow("retired document");
+      const current = queue.run("same.test", async () => "new document");
+      old.abort(new Error("retired document")); release.resolve();
+      await expect(holding).resolves.toBe("old terminal ACK"); await retired;
+      await expect(current).resolves.toBe("new document");
+      expect(work).not.toHaveBeenCalled(); expect(session.signal.aborted).toBe(false);
+    } finally { session.abort(); queue.dispose(); }
+  });
+
+  it("checks exact request cancellation after real lease acquisition before dispatch", async () => {
+    const session = new AbortController(), old = new AbortController(), work = vi.fn();
+    const queue = createSimulatorBrowserRequestQueue(async (_host, run) => {
+      old.abort(new Error("terminal old read")); return { acquired: true as const, value: await run() };
+    }, session.signal);
+    try { await expect(queue.run("same.test", work, old.signal)).rejects.toThrow("terminal old read"); expect(work).not.toHaveBeenCalled(); }
+    finally { session.abort(); queue.dispose(); }
+  });
 });

@@ -1,7 +1,10 @@
 // @vitest-environment node
-import type { Page, Route } from "@playwright/test";
+import { existsSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import { chromium, type Page, type Route } from "@playwright/test";
 import { describe, expect, it, vi } from "vitest";
-import { installNativeRedirectRouting, isNativeReadTerminalFailure, type NativeReadRoute, type NativeRequestDiagnostic } from "./native-redirect-routing";
+import { installNativeRedirectRouting, isNativeReadSupersededFailure, isNativeReadTerminalFailure, type NativeReadRoute, type NativeRequestDiagnostic } from "./native-redirect-routing";
 import { continueNativeBrowserRead, isObservedNativeRedirect, isObservedNativeRedirectTarget } from "./native-public-browser";
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
 
@@ -25,6 +28,165 @@ async function installed(maxRequests?: number, signal?: AbortSignal) {
 function playwrightRoute(test: Awaited<ReturnType<typeof installed>>) {
   return { request: () => ({ frame: () => test.main }), continue: vi.fn(async () => {}), abort: vi.fn(async () => {}), fulfill: vi.fn() } as unknown as Route;
 }
+
+describe("native document-generation retirement", () => {
+  const identity = (test: Awaited<ReturnType<typeof installed>>, id: string, loaderId: string, kind = "XHR", url = "https://example.org/data") =>
+    test.events.get("Network.requestWillBeSent")!({ requestId: `network-${id}`, loaderId, frameId: "main", type: kind, request: { url, method: "GET" } });
+  const startDocument = async (test: Awaited<ReturnType<typeof installed>>, id = "document", loader = "loader-one") => {
+    await test.guard.beginDocumentNavigation(test.main as never);
+    identity(test, id, loader, "Document"); test.request(id, { resourceType: "Document" });
+  };
+
+  it("waits for exact old-network terminal ACK and handler/lease drain; queued/late old reads never dispatch or become evidence", async () => {
+    const test = await installed(), session = new AbortController(), stop = vi.fn(async () => {});
+    let active = 0, released = 0; const completed: string[] = [], errors: unknown[] = [];
+    const queue = createSimulatorBrowserRequestQueue(async (_host, work) => {
+      active++; try { return { acquired: true as const, value: await work() }; } finally { active--; released++; }
+    }, session.signal);
+    test.handler.mockImplementation(async route => {
+      test.routes.push(route);
+      try { const value = await queue.run("example.org", () => continueNativeBrowserRead(route, session.signal, 1000, stop), route.request().signal); completed.push(value.body.toString()); }
+      catch (error) { errors.push(error); if (!isNativeReadSupersededFailure(error)) throw error; }
+    });
+    try {
+      await startDocument(test); test.response("document", { resourceType: "Document" });
+      await vi.waitFor(() => expect(completed).toEqual(["body-document"]));
+      identity(test, "active", "loader-one", "Script"); test.request("active", { resourceType: "Script" });
+      identity(test, "queued", "loader-one", "Script"); test.request("queued", { resourceType: "Script" });
+      await vi.waitFor(() => expect(active).toBe(1));
+      let boundaryComplete = false;
+      const boundary = test.guard.beginDocumentNavigation(test.main as never).then(() => { boundaryComplete = true; });
+      await vi.waitFor(() => expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.failRequest" && value?.requestId === "queued")).toBe(true));
+      expect(boundaryComplete).toBe(false); expect(active).toBe(1); expect(released).toBe(1);
+      test.events.get("Network.loadingFailed")!({ requestId: "network-active" });
+      await boundary;
+      expect(active).toBe(0); expect(errors).toHaveLength(2); expect(errors.every(isNativeReadSupersededFailure)).toBe(true);
+      // An old loader's late request/response is denied, never offered to the shared handler.
+      identity(test, "late", "loader-one", "Script"); test.request("late", { resourceType: "Script" });
+      await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+      test.response("late", { resourceType: "Script", responseStatusCode: undefined, responseErrorReason: "Failed" });
+      identity(test, "next", "loader-two", "Document"); test.request("next", { resourceType: "Document" });
+      await vi.waitFor(() => expect(test.routes).toHaveLength(4)); test.response("next", { resourceType: "Document" });
+      await vi.waitFor(() => expect(completed).toEqual(["body-document", "body-next"]));
+      const dispatches = test.cdp.send.mock.calls.filter(([name]) => name === "Fetch.continueRequest").map(([, value]) => value?.requestId);
+      expect(dispatches).toEqual(["document", "active", "next"]); expect(stop).not.toHaveBeenCalled();
+      expect(test.failures).toEqual([]); expect(test.guard.firstFatal).toBeUndefined();
+    } finally { session.abort(); queue.dispose(); await test.guard.close(); }
+  });
+
+  it("never treats stopLoading ACK as terminal proof for an active read", async () => {
+    const test = await installed();
+    test.handler.mockImplementation(async route => { test.routes.push(route); await route.continue(); });
+    try {
+      await startDocument(test); test.response("document", { resourceType: "Document" });
+      await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+      identity(test, "held", "loader-one", "Script"); test.request("held", { resourceType: "Script" });
+      await vi.waitFor(() => expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "held")).toBe(true));
+      await expect(test.guard.beginDocumentNavigation(test.main as never)).rejects.toThrow("NATIVE_REDIRECT_DRAIN_TIMEOUT");
+      expect(test.close).toHaveBeenCalledOnce(); expect(test.failures).toContain("NATIVE_REDIRECT_DRAIN_TIMEOUT");
+    } finally { await test.guard.close(); }
+  });
+
+  it.each(["unknown loader", "wrong URL", "wrong method", "wrong kind"])("fails closed on %s, even for an otherwise public read", async mismatch => {
+    const test = await installed();
+    try {
+      await startDocument(test); await test.routes[0].continue(); test.response("document", { resourceType: "Document" });
+      await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+      test.events.get("Network.requestWillBeSent")!({ requestId: "network-other", loaderId: mismatch === "unknown loader" ? "unknown" : "loader-one",
+        frameId: "main", type: mismatch === "wrong kind" ? "Script" : "XHR", request: { url: mismatch === "wrong URL" ? "https://example.org/other" : "https://example.org/data", method: mismatch === "wrong method" ? "POST" : "GET" } });
+      test.request("other"); await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_LOADER_MISMATCH"));
+      expect(test.routes).toHaveLength(1);
+    } finally { await test.guard.close(); }
+  });
+
+  it("retains the cumulative request cap across boundaries", async () => {
+    const test = await installed(2);
+    try {
+      await startDocument(test); await test.routes[0].continue(); test.response("document", { resourceType: "Document" });
+      await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+      await test.guard.beginDocumentNavigation(test.main as never);
+      identity(test, "next", "loader-two", "Document"); test.request("next", { resourceType: "Document" });
+      await test.routes[1].continue(); test.response("next", { resourceType: "Document" });
+      await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+      identity(test, "over", "loader-two"); test.request("over");
+      await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_RECORD_LIMIT"));
+      expect(test.routes).toHaveLength(2);
+    } finally { await test.guard.close(); }
+  });
+
+  it("still closes for an uncompleted response on the current successor document", async () => {
+    const test = await installed();
+    try {
+      await startDocument(test); await test.routes[0].continue(); test.response("document", { resourceType: "Document" });
+      await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+      await test.guard.beginDocumentNavigation(test.main as never);
+      identity(test, "next", "loader-two", "Document"); test.request("next", { resourceType: "Document" }); await test.routes[1].continue();
+      await expect(test.routes[1].request().response()).rejects.toThrow("NATIVE_REDIRECT_RESPONSE_TIMEOUT");
+      expect(test.guard.firstFatal).toMatchObject({ code: "NATIVE_REDIRECT_RESPONSE_TIMEOUT", phase: "RESPONSE_WAIT", resourceType: "document" });
+      expect(test.close).toHaveBeenCalledOnce();
+    } finally { await test.guard.close(); }
+  });
+
+  it.each(["reject", "hang"])("closes if the exact paused-read cancellation %s cannot be acknowledged", async mode => {
+    const test = await installed(), send = test.cdp.send.getMockImplementation()!;
+    try {
+      await startDocument(test); await test.routes[0].continue(); test.response("document", { resourceType: "Document" });
+      await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+      identity(test, "queued", "loader-one"); test.request("queued");
+      test.cdp.send.mockImplementation((name, value) => name === "Fetch.failRequest" ? mode === "hang" ? new Promise(() => {}) : Promise.reject(new Error("offline abort rejection")) : send(name, value));
+      await expect(test.guard.beginDocumentNavigation(test.main as never)).rejects.toThrow(mode === "hang" ? "NATIVE_REDIRECT_ABORT_TIMEOUT" : "offline abort rejection");
+      expect(test.close).toHaveBeenCalledOnce();
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "queued")).toBe(false);
+    } finally { await test.guard.close(); }
+  });
+});
+
+const nativeChromePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
+describe.runIf(existsSync(nativeChromePath))("offline Chrome document ownership", () => {
+  it("terminates an old real document's active/queued assets before the next document uses the same lease lane", async () => {
+    const reads: string[] = [], closed: string[] = [], bodies: string[] = [], failures: string[] = [];
+    const server = createServer((request, response) => {
+      const path = request.url!; reads.push(path);
+      if (path === "/old.js" || path === "/queued.js") { request.on("close", () => closed.push(path)); return; }
+      response.setHeader("Content-Type", "text/html");
+      response.end(path === "/" ? '<h1>Public old golf document</h1><a href="/next">Book tee times</a><script defer src="/old.js"></script><script defer src="/queued.js"></script>' : '<h1>Public successor golf document</h1>');
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const browser = await chromium.launch({ executablePath: nativeChromePath, headless: true });
+    const context = await browser.newContext({ serviceWorkers: "block" }), page = await context.newPage(), session = new AbortController();
+    let active = 0, maximum = 0, releases = 0;
+    const queue = createSimulatorBrowserRequestQueue(async (_host, work) => {
+      active++; maximum = Math.max(maximum, active);
+      try { return { acquired: true as const, value: await work() }; } finally { active--; releases++; }
+    }, session.signal);
+    // Only this isolated local fixture admits loopback; production still runs
+    // the unchanged public URL/DNS/provider checks in its shared route handler.
+    const guard = await installNativeRedirectRouting(page, async route => {
+      try {
+        const reply = await queue.run("fixture", () => continueNativeBrowserRead(route, session.signal, 10_000), route.request().signal);
+        if (!route.request().signal?.aborted) bodies.push(reply.body.toString());
+      } catch (error) { if (!isNativeReadSupersededFailure(error)) throw error; }
+    }, { timeoutMs: 5_000, maxRequests: 16, onFailure: value => failures.push(value) });
+    try {
+      await guard.beginDocumentNavigation(page.mainFrame()); await page.goto(`${url}/`, { waitUntil: "commit" });
+      await vi.waitFor(() => { expect(reads).toContain("/old.js"); expect(guard.pendingReads).toBeGreaterThanOrEqual(2); });
+      expect(reads).not.toContain("/queued.js");
+      await guard.beginDocumentNavigation(page.mainFrame());
+      expect(active).toBe(0); expect(releases).toBeGreaterThanOrEqual(2);
+      await vi.waitFor(() => expect(closed).toContain("/old.js"));
+      await page.goto(`${url}/next`, { waitUntil: "commit" });
+      await expect(page.locator("h1").innerText()).resolves.toBe("Public successor golf document");
+      await vi.waitFor(() => expect(guard.pendingReads).toBe(0));
+      expect(bodies.some(body => body.includes("Public successor"))).toBe(true);
+      expect(reads).not.toContain("/queued.js"); expect(failures).toEqual([]); expect(maximum).toBe(1);
+      expect(guard.firstFatal).toBeUndefined();
+    } finally {
+      session.abort(); await guard.close(); queue.dispose(); await browser.close();
+      server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+  }, 20_000);
+});
 
 describe("native exact request and response ownership", () => {
   it("gives two identical reads distinct exact response/body identities without Playwright matching", async () => {

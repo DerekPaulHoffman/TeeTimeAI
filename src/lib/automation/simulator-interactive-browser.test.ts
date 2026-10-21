@@ -36,6 +36,18 @@ describe("interactive public research boundaries", () => {
       JSON.stringify({ query: "{ slots { time } }" }))).toBe(false);
   });
 
+  it.each(["public-course.ezlinksgolf.com", "api.ezlinksgolf.com", "ezlinksgolf.com"])("does not let GraphQL-shaped fields bypass the exact EZLinks read contract on %s", hostname => {
+    const headers = new Headers({ "content-type": "application/json" });
+    for (const path of ["/api/search/search", "/api/search/gsahs", "/api/reservation/create"]) {
+      const url = new URL(`https://${hostname}${path}`);
+      for (const p07 of [false, true]) expect(isAnonymousBrowserReadPost(url, headers, JSON.stringify({
+        query: "{ slots { time } }", p01: [17], p02: "10/23/2026", p03: "08:00", p04: "18:00", p05: 0, p06: 2, p07,
+      }))).toBe(false);
+    }
+    expect(isAnonymousBrowserReadPost(new URL("https://calendar.example.org/graphql"), headers,
+      JSON.stringify({ query: "{ slots { time } }" }))).toBe(true);
+  });
+
   it("recognizes named listbox popup filters without admitting other popup actions", () => {
     const popup = { tag: "div", role: "button", name: "", label: "Duration", hasPopup: "listbox" };
     expect(interactiveControlKind(popup)).toBe("filter");

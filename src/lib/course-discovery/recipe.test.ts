@@ -146,6 +146,25 @@ describe("course access recipes", () => {
     expect(() => parseAccessRecipe({ ...recipe, adapter: { ...recipe.adapter, facilityIds: [11, 22] } })).toThrow();
     expect(() => parseAccessRecipe({ ...recipe, target: { courseId: "sim", kind: "SIMULATOR" } })).toThrow();
   });
+  it("keeps EZLinks recipes outdoor and persists public identity without transient request authority", () => {
+    const base = httpRecipe();
+    const recipe = { schemaVersion: 1, engine: "EXISTING_ADAPTER", target: base.target,
+      source: { ...base.source, bookingUrl: "https://public-course.ezlinksgolf.com/search", providerFamily: "EZLINKS",
+        venueAddress: "17 Golf Way, Example, NY 12345, US" },
+      adapter: { family: "EZLINKS", tenant: "public-course", sponsorId: 901, courseIds: [17], catalogHash: "a".repeat(64), browserTransport: "NATIVE_CHROME",
+        clients: [
+          { path: "/assets/index-DsLbHQvf.js", sha256: "4e2bb6ea29fa910e04620c1551d737aecaff9df23bf6be99f9da6d72e9b1addb" },
+          { path: "/assets/index-CvL6jQuU.js", sha256: "6547b7841afb6945817f5c354437875bd5f1fb59031ed511cf16d30bca72262f" },
+        ] } };
+    const parsed = parseAccessRecipe(recipe);
+    expect(parsed).toMatchObject({ engine: "EXISTING_ADAPTER", adapter: { family: "EZLINKS" } });
+    expect(recipeAllowsRequest(parsed, "https://public-course.ezlinksgolf.com/api/search/search", "POST")).toBe(false);
+    expect(() => parseAccessRecipe({ ...recipe, target: { courseId: "course", offeringId: "rental", kind: "SIMULATOR" } })).toThrow();
+    expect(() => parseAccessRecipe({ ...recipe, source: { ...recipe.source, venueAddress: undefined } })).toThrow();
+    for (const field of ["documentToken", "session", "request", "holdAndReturnOne"])
+      expect(() => parseAccessRecipe({ ...recipe, adapter: { ...recipe.adapter, [field]: "not-reusable-authority" } })).toThrow();
+  });
+
   it("accepts only typed existing adapter metadata without model-defined routes or extractors", () => {
     const base = httpRecipe();
     const recipe = { schemaVersion: 1, engine: "EXISTING_ADAPTER", target: base.target,

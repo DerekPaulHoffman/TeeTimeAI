@@ -19,7 +19,7 @@ describe("durable discovery browser diagnostics", () => {
       expect(invalid.lastFeedback.details.diagnostic).toEqual({ code: "ADAPTER_READ_FAILED" });
     }
   });
-  it.each(["FOREUP", "ACUITY", "TEEITUP", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "CHRONOGOLF", "GOLFVX"])("binds current %s inspection evidence to exact job, source, input and typed metadata", family => {
+  it.each(["FOREUP", "ACUITY", "TEEITUP", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS"])("binds current %s inspection evidence to exact job, source, input and typed metadata", family => {
     const job = { id: "job", request: { identity: { name: "Public golf", officialUrl: "https://official.example.org/" },
       target: { courseId: "course", kind: "OUTDOOR" }, input: { date: "2026-10-23", players: 2 } } };
     const bookingUrl = "https://booking.example.org/availability", context = job.request.identity.officialUrl;
