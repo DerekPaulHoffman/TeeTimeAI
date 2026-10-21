@@ -12,8 +12,9 @@ describe("official public iframe source navigation", () => {
   it("exposes a visible unlabeled v2 public entry exactly as observed without inventing a legacy route", () => {
     const src = "https://c70350ae-111b-4722-b4d0-c74be760d7ec.book-v2.teeitup.golf/";
     expect(read({ ...entry, src })).toBe(src);
+    expect(read({ ...entry, src: `${src}?course=123` })).toBe(`${src}?course=123`);
     for (const unsafe of [src.replace("teeitup.golf", "teeitup.golf.example.org"), src.replace("book-v2", "account"),
-      `${src}login`, `${src}?course=123`, `${src}#login`, src.replace("https://", "http://")])
+      `${src}login`, `${src}?course=invalid`, `${src}?course=123&course=456`, `${src}#login`, src.replace("https://", "http://")])
       expect(read({ ...entry, src: unsafe })).toBeUndefined();
     expect(read({ ...entry, src, visible: false })).toBeUndefined();
     expect(read({ ...entry, src, label: "Sign in to booking" })).toBeUndefined();

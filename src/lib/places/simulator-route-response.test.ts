@@ -14,7 +14,9 @@ vi.mock("@/lib/places/course-runtime-cache", async (importOriginal) => ({
 vi.mock("@/lib/places/simulator-google", async (importOriginal) => ({
   ...await importOriginal<typeof import("./simulator-google")>(), searchNearbySimulatorVenues: mocks.searchNearby, searchSimulatorVenuesByName: mocks.searchByName
 }));
-vi.mock("@/lib/places/course-photo-metadata", () => ({ cacheCourseCandidatePhotos: mocks.cachePhotos }));
+vi.mock("@/lib/places/course-photo-metadata", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./course-photo-metadata")>(), cacheCourseCandidatePhotos: mocks.cachePhotos
+}));
 
 const row: SimulatorOfferingRecord = {
   id: "rental-1", courseId: "venue-1", active: true, publicAccessStatus: "PUBLIC", bookingUrl: "https://booking.example/simulator",
