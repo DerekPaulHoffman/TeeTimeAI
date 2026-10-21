@@ -65,7 +65,7 @@ type RecordEntry = {
   adapter: NativeReadRequest; response: ReturnType<typeof pending<NativeReadResponse | Error>>;
 };
 type DocumentGeneration = { id: number; retired: boolean; loaderId?: string };
-type NetworkIdentity = { revision: number; loaderId: string; frameId?: string; url: string; method: string; kind: string };
+type NetworkIdentity = { revision: number; loaderId: string; frameId?: string; url: string; method: string; kind: string; kindKnown: boolean };
 type PendingInitialPause = { id: string; generation: DocumentGeneration; retired: boolean;
   retirementAck?: Promise<void>; cancelled: ReturnType<typeof pending<void>> };
 type NativeRecordOwner = { closed: boolean };
@@ -207,7 +207,8 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
     if (!generationTracking || closed || event.frameId !== rootFrameId) return;
     if (!networkIdentities.has(event.requestId) && networkIdentities.size >= limit) { void close("NATIVE_REDIRECT_RECORD_LIMIT"); return; }
     networkIdentities.set(event.requestId, { revision: ++networkIdentityRevision, loaderId: event.loaderId, frameId: event.frameId,
-      url: event.request.url, method: event.request.method, kind: resourceKinds[event.type ?? ""] ?? "other" });
+      url: event.request.url, method: event.request.method, kind: resourceKinds[event.type ?? ""] ?? "other",
+      kindKnown: Object.hasOwn(resourceKinds, event.type ?? "") });
     networkWaiters.get(event.requestId)?.settle();
   });
   cdp.on("Network.loadingFailed", event => {
@@ -374,6 +375,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
       if (!kind) { await reject(); await close("NATIVE_REDIRECT_RESOURCE_REJECTED"); return; }
       let requestGeneration = generation;
       let requestIdentityRevision: number | undefined;
+      let denyResourceKind = false;
       pendingInitialPause = { id: event.requestId, generation: parent?.generation ?? generation, retired: false, cancelled: pending() };
       initialPauses.set(event.requestId, pendingInitialPause);
       if (pendingInitialPause.generation.retired) { await abortInitialPause(pendingInitialPause); return; }
@@ -404,7 +406,9 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         if (pendingInitialPause.retired) { await pendingInitialPause.retirementAck; return; }
         if (closed || options.signal?.aborted) return;
         const identity = networkIdentities.get(networkId);
-        if (!identity?.loaderId || identity.frameId !== rootFrameId || identity.url !== event.request.url || identity.method !== event.request.method || !sameKind(identity) || !fresh(identity)) {
+        const kindMismatch = !sameKind(identity);
+        if (!identity?.loaderId || identity.frameId !== rootFrameId || identity.url !== event.request.url || identity.method !== event.request.method || !fresh(identity) ||
+            kindMismatch && (!identity.kindKnown || kind === "document" || identity.kind === "document" || !["GET", "HEAD"].includes(event.request.method))) {
           firstFatal ??= diagnostic("LOADER_IDENTITY"); await reject(); await close("NATIVE_REDIRECT_LOADER_MISMATCH"); return;
         }
         const known = loaderOwners.get(identity.loaderId);
@@ -417,6 +421,10 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         if (parent && requestGeneration !== parent.generation) {
           firstFatal ??= diagnostic("REDIRECT_GENERATION"); await reject(); await close("NATIVE_REDIRECT_LOADER_MISMATCH"); return;
         }
+        if (kindMismatch && (requestGeneration !== generation || requestGeneration.retired)) {
+          firstFatal ??= diagnostic("LOADER_OWNER"); await reject(); await close("NATIVE_REDIRECT_LOADER_MISMATCH"); return;
+        }
+        denyResourceKind = kindMismatch;
         requestIdentityRevision = identity.revision;
       }
       if (parent) {
@@ -431,6 +439,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         try { sameHost = new URL(parent.transportUrl).hostname.replace(/^www\./u, "") === new URL(event.request.url).hostname.replace(/^www\./u, ""); }
         catch { /* Invalid URLs fail the provenance check. */ }
         if (!result || result instanceof Error || records.has(event.requestId) || !releasedRedirect(parent, event.request.url) ||
+            denyResourceKind && (parent.kind !== kind || networkId !== parent.networkId) ||
             event.request.method !== parent.method || document && (parent.kind !== "document" || !["GET", "HEAD"].includes(parent.method))) {
           await reject(); await close("NATIVE_REDIRECT_PROVENANCE_REJECTED"); return;
         }
@@ -452,6 +461,19 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
           }
           await reject(); await close("NATIVE_REDIRECT_PROVENANCE_REJECTED"); return;
         }
+      }
+      if (denyResourceKind) {
+        // A current, exact public GET can be classified differently by two
+        // Chrome event streams. This grants NO read: abort its tracked pause
+        // before any handler/lease/response. Independent replay must treat the
+        // rejection as incomplete; discovery can still inspect the document.
+        const diagnostic = requestDiagnostic("NATIVE_REDIRECT_RESOURCE_KIND_REJECTED");
+        await abortInitialPause(pendingInitialPause);
+        if (closed || options.signal?.aborted || pendingInitialPause.generation.retired) return;
+        rejectedRequests.push(diagnostic);
+        if (rejectedRequests.length > 12) rejectedRequests.shift();
+        try { options.onRequestRejected?.({ ...diagnostic }); } catch { /* No diagnostic authorizes data. */ }
+        return;
       }
       const record: RecordEntry = { id: event.requestId, networkId, url: event.request.url, transportUrl: event.request.url,
         method: event.request.method, headers: headers(event.request.headers), body: event.request.postData ?? null, kind,

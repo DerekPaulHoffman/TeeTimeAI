@@ -236,17 +236,21 @@ describe.runIf(existsSync(chromeExecutable))("isolated browser recipe replay", (
     const result = await executeAccessRecipe(recipe(), executionInput, browserDeps(html));
     expect(result.status).toBe("AVAILABLE"); expect(result.slots[0].startsAt).toBe("2026-10-22T13:00:00.000Z");
   }, 20_000);
-  it.each(["denied-script", "unknown-fatal"] as const)("keeps native %s replay incomplete without inventing its initiating document", async mode => {
-    const rejected = { code: "NATIVE_REDIRECT_CROSS_HOST_RESOURCE_REJECTED", url: "https://cdn.example.net/public.js?build=42",
+  it.each((['inventory', 'empty'] as const).flatMap(outcome =>
+    (["healthy", "denied-script", "denied-resource-kind", "unknown-fatal"] as const).map(mode => ({ mode, outcome }))))(
+    "keeps native $mode $outcome replay honest without inventing its initiating document", async ({ mode, outcome }) => {
+    const rejected = { code: mode === "denied-resource-kind" ? "NATIVE_REDIRECT_RESOURCE_KIND_REJECTED" : "NATIVE_REDIRECT_CROSS_HOST_RESOURCE_REJECTED",
+      url: "https://cdn.example.net/public.js?build=42",
       method: "GET" as const, resourceType: "script" as const };
+    const fixture = outcome === "empty" ? html.replace(/<div class="slot">.*?<\/div>/u, '<div id="empty">No tee times available</div>') : html;
     const routing = vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, handler, options) => {
-      if (mode === "denied-script") options?.onRequestRejected?.(rejected);
-      else options?.onFailure?.("NATIVE_REDIRECT_PROVENANCE_REJECTED");
+      if (mode === "denied-script" || mode === "denied-resource-kind") options?.onRequestRejected?.(rejected);
+      else if (mode === "unknown-fatal") options?.onFailure?.("NATIVE_REDIRECT_PROVENANCE_REJECTED");
       return { prepare: () => {}, close: async () => {}, lastFailure: undefined, pendingReads: 0,
         releasePlaywrightRoute: route => handler(route) };
     });
     const native = vi.spyOn(nativeBrowser, "continueNativeBrowserRead").mockImplementation(async route => {
-      const body = Buffer.from(browserHtml(html)), headers = { "content-type": "text/html" };
+      const body = Buffer.from(browserHtml(fixture)), headers = { "content-type": "text/html" };
       await route.fulfill({ status: 200, headers, body });
       return { url: route.request().url(), status: 200, headers, body };
     });
@@ -254,9 +258,15 @@ describe.runIf(existsSync(chromeExecutable))("isolated browser recipe replay", (
       const selected = recipe();
       if (selected.engine !== "BROWSER_DOM") throw new Error("fixture");
       selected.browserTransport = "NATIVE_CHROME";
-      const result = await executeAccessRecipe(selected, executionInput, browserDeps(html));
+      const result = await executeAccessRecipe(selected, executionInput, browserDeps(fixture));
+      expect(native).toHaveBeenCalled();
+      if (mode === "healthy") {
+        expect(result).toMatchObject({ status: outcome === "empty" ? "EMPTY" : "AVAILABLE", complete: true });
+        expect(result.slots).toHaveLength(outcome === "empty" ? 0 : 1);
+        return;
+      }
       expect(result).toMatchObject({ status: "INCOMPLETE", complete: false, slots: [] });
-      expect(result.evidence.diagnostic).toEqual(mode === "denied-script"
+      expect(result.evidence.diagnostic).toEqual(mode === "denied-script" || mode === "denied-resource-kind"
         ? { code: rejected.code, url: "https://cdn.example.net/public.js", method: "GET", resourceType: "script" }
         : { code: "NATIVE_REDIRECT_PROVENANCE_REJECTED" });
     } finally { native.mockRestore(); routing.mockRestore(); }

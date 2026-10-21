@@ -170,6 +170,104 @@ describe("native document-generation retirement", () => {
     } finally { await test.guard.close(); }
   });
 
+  it.each([
+    ["Script", "Fetch", "GET"], ["Fetch", "Script", "GET"], ["Image", "Stylesheet", "HEAD"],
+  ])("denies exact non-document %s/%s %s disagreement without dispatch and retains independent reads", async (networkKind, fetchKind, method) => {
+    const test = await installed();
+    try {
+      await startDocument(test); await test.routes[0].continue(); test.response("document", { resourceType: "Document" });
+      await test.routes[0].request().response();
+      test.events.get("Network.requestWillBeSent")!({ requestId: "network-denied", loaderId: "loader-one", frameId: "main", type: networkKind,
+        request: { url: "https://example.org/optional.js", method } });
+      test.request("denied", { resourceType: fetchKind, request: { url: "https://example.org/optional.js", method, headers: {} } });
+      await vi.waitFor(() => expect(test.rejections).toHaveLength(1));
+      expect(test.rejections[0]).toMatchObject({ code: "NATIVE_REDIRECT_RESOURCE_KIND_REJECTED", method });
+      expect(test.routes).toHaveLength(1); expect(test.failures).toEqual([]); expect(test.guard.firstFatal).toBeUndefined();
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "denied")).toBe(false);
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.getResponseBody" && value?.requestId === "denied")).toBe(false);
+      identity(test, "availability", "loader-one"); test.request("availability"); await test.routes[1].continue(); test.response("availability");
+      expect((await (await test.routes[1].request().response())?.body())?.toString()).toBe("body-availability");
+      expect(test.routes).toHaveLength(2); expect(test.failures).toEqual([]);
+    } finally { await test.guard.close(); }
+  });
+
+  it.each(["network document", "fetch document", "POST", "OPTIONS", "unknown kind", "URL", "method", "loader"])(
+    "keeps %s disagreement fatal rather than downgrading identity or authority", async mismatch => {
+      const test = await installed(), method = ["POST", "OPTIONS"].includes(mismatch) ? mismatch : "GET";
+      try {
+        await startDocument(test); await test.routes[0].continue(); test.response("document", { resourceType: "Document" });
+        await test.routes[0].request().response();
+        test.events.get("Network.requestWillBeSent")!({ requestId: "network-denied", loaderId: mismatch === "loader" ? "unknown" : "loader-one", frameId: "main",
+          type: mismatch === "network document" ? "Document" : mismatch === "unknown kind" ? "UNRECOGNIZED" : "Script",
+          request: { url: mismatch === "URL" ? "https://example.org/other" : "https://example.org/optional.js", method: mismatch === "method" ? "HEAD" : method } });
+        test.request("denied", { resourceType: mismatch === "fetch document" ? "Document" : "Fetch",
+          request: { url: "https://example.org/optional.js", method, headers: {} } });
+        await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_LOADER_MISMATCH"));
+        expect(test.rejections).toEqual([]); expect(test.routes).toHaveLength(1);
+      } finally { await test.guard.close(); }
+    });
+
+  it("does not downgrade a retired loader's resource-kind disagreement", async () => {
+    const test = await installed();
+    try {
+      await startDocument(test); await test.routes[0].continue(); test.response("document", { resourceType: "Document" });
+      await test.routes[0].request().response(); await test.guard.beginDocumentNavigation(test.main as never);
+      identity(test, "successor", "loader-two", "Document"); test.request("successor", { resourceType: "Document" });
+      await test.routes[1].continue(); test.response("successor", { resourceType: "Document" }); await test.routes[1].request().response();
+      identity(test, "denied", "loader-one", "Script"); test.request("denied", { resourceType: "Fetch" });
+      await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_LOADER_MISMATCH"));
+      expect(test.guard.firstFatal).toMatchObject({ phase: "LOADER_OWNER" });
+      expect(test.rejections).toEqual([]); expect(test.routes).toHaveLength(2);
+    } finally { await test.guard.close(); }
+  });
+
+  it.each(["Location", "network ID"])("requires exact redirect %s before a resource-kind denial", async mismatch => {
+    const test = await installed(), target = "https://example.org/optional.js";
+    try {
+      await startDocument(test); await test.routes[0].continue(); test.response("document", { resourceType: "Document" }); await test.routes[0].request().response();
+      identity(test, "parent", "loader-one", "Fetch"); test.request("parent", { resourceType: "Fetch" }); await test.routes[1].continue();
+      test.response("parent", { resourceType: "Fetch", responseStatusCode: 302,
+        responseHeaders: [{ name: "Location", value: mismatch === "Location" ? "https://example.org/wrong" : target }] });
+      await test.routes[1].request().response();
+      identity(test, mismatch === "network ID" ? "other" : "parent", "loader-one", "Script", target);
+      test.request("denied", { networkId: mismatch === "network ID" ? "network-other" : "network-parent", resourceType: "Fetch", redirectedRequestId: "parent",
+        request: { url: target, method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_PROVENANCE_REJECTED"));
+      expect(test.rejections).toEqual([]); expect(test.routes).toHaveLength(2);
+    } finally { await test.guard.close(); }
+  });
+
+  it("deduplicates and awaits the exact kind-denial abort ACK during document retirement", async () => {
+    const test = await installed(), ack = deferred<object>(), send = test.cdp.send.getMockImplementation()!;
+    try {
+      await startDocument(test); await test.routes[0].continue(); test.response("document", { resourceType: "Document" }); await test.routes[0].request().response();
+      test.cdp.send.mockImplementation((name, value) => name === "Fetch.failRequest" && value?.requestId === "denied" ? ack.promise : send(name, value));
+      identity(test, "denied", "loader-one", "Script"); test.request("denied", { resourceType: "Fetch" });
+      await vi.waitFor(() => expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.failRequest" && value?.requestId === "denied")).toBe(true));
+      const stopsBefore = test.cdp.send.mock.calls.filter(([name]) => name === "Page.stopLoading").length;
+      let finished = false; const boundary = test.guard.beginDocumentNavigation(test.main as never).then(() => { finished = true; });
+      await new Promise(resolve => setTimeout(resolve, 10));
+      expect(finished).toBe(false); expect(test.rejections).toEqual([]); expect(test.routes).toHaveLength(1);
+      expect(test.cdp.send.mock.calls.filter(([name]) => name === "Page.stopLoading")).toHaveLength(stopsBefore);
+      expect(test.cdp.send.mock.calls.filter(([name, value]) => name === "Fetch.failRequest" && value?.requestId === "denied")).toHaveLength(1);
+      ack.resolve({}); await boundary;
+      expect(test.guard.pendingReads).toBe(0); expect(test.failures).toEqual([]); expect(test.rejections).toEqual([]);
+    } finally { ack.resolve({}); await test.guard.close(); }
+  });
+
+  it.each(["reject", "hang"])("closes if a resource-kind denial's exact abort ACK %s", async mode => {
+    const test = await installed(), send = test.cdp.send.getMockImplementation()!;
+    try {
+      await startDocument(test); await test.routes[0].continue(); test.response("document", { resourceType: "Document" }); await test.routes[0].request().response();
+      test.cdp.send.mockImplementation((name, value) => name === "Fetch.failRequest" && value?.requestId === "denied" ?
+        mode === "hang" ? new Promise(() => {}) : Promise.reject(new Error("denial abort failed")) : send(name, value));
+      identity(test, "denied", "loader-one", "Script"); test.request("denied", { resourceType: "Fetch" });
+      await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce());
+      expect(test.rejections).toEqual([]); expect(test.routes).toHaveLength(1);
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "denied")).toBe(false);
+    } finally { await test.guard.close(); }
+  });
+
   it("waits for exact old-network terminal ACK and handler/lease drain; queued/late old reads never dispatch or become evidence", async () => {
     const test = await installed(), session = new AbortController(), stop = vi.fn(async () => {});
     let active = 0, released = 0; const completed: string[] = [], errors: unknown[] = [];
@@ -220,13 +318,13 @@ describe("native document-generation retirement", () => {
     } finally { await test.guard.close(); }
   });
 
-  it.each(["unknown loader", "wrong URL", "wrong method", "wrong kind"])("fails closed on %s, even for an otherwise public read", async mismatch => {
+  it.each(["unknown loader", "wrong URL", "wrong method", "document kind"])("fails closed on %s, even for an otherwise public read", async mismatch => {
     const test = await installed();
     try {
       await startDocument(test); await test.routes[0].continue(); test.response("document", { resourceType: "Document" });
       await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
       test.events.get("Network.requestWillBeSent")!({ requestId: "network-other", loaderId: mismatch === "unknown loader" ? "unknown" : "loader-one",
-        frameId: "main", type: mismatch === "wrong kind" ? "Script" : "XHR", request: { url: mismatch === "wrong URL" ? "https://example.org/other" : "https://example.org/data", method: mismatch === "wrong method" ? "POST" : "GET" } });
+        frameId: "main", type: mismatch === "document kind" ? "Document" : "XHR", request: { url: mismatch === "wrong URL" ? "https://example.org/other" : "https://example.org/data", method: mismatch === "wrong method" ? "POST" : "GET" } });
       test.request("other"); await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_LOADER_MISMATCH"));
       expect(test.routes).toHaveLength(1);
     } finally { await test.guard.close(); }

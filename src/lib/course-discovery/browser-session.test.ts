@@ -569,8 +569,11 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       expect(session.diagnostics().nativeFirstFatal).toEqual(fatal);
     } finally { await session?.close(); native.mockRestore(); routing.mockRestore(); }
   }, 20_000);
-  it("keeps oversized POST rejection diagnostics nonterminal while public controls render", async () => {
-    const rejected = { code: "NATIVE_REDIRECT_POST_BODY_LIMIT", url: "https://example.org/collect", method: "POST", resourceType: "xhr", postDataBytes: 40000 };
+  it.each([
+    { code: "NATIVE_REDIRECT_POST_BODY_LIMIT", url: "https://example.org/collect", method: "POST", resourceType: "xhr", postDataBytes: 40000 },
+    { code: "NATIVE_REDIRECT_CROSS_HOST_RESOURCE_REJECTED", url: "https://cdn.example.net/public.js", method: "GET", resourceType: "script" },
+    { code: "NATIVE_REDIRECT_RESOURCE_KIND_REJECTED", url: "https://example.org/public.js", method: "GET", resourceType: "other" },
+  ])("keeps $code rejection diagnostics nonterminal while public controls render", async rejected => {
     const routing = vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, handler, options) => {
       options?.onRequestRejected?.(rejected);
       return { prepare: () => {}, beginDocumentNavigation: async () => {}, close: async () => {}, pendingReads: 0, lastFailure: undefined,
@@ -589,8 +592,9 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       const observed = await session.execute({ id: 1, action: "open", url: "https://example.org/" });
       expect(observed.controls).toContainEqual(expect.objectContaining({ name: "View tee times", kind: "link" }));
       expect(observed.nativeFirstFatal).toBeUndefined(); expect(observed.nativeRejectedRequests).toEqual([rejected]);
-      expect(observed.requestFailures).toContainEqual({ reason: rejected.code, url: rejected.url, resourceType: "xhr" });
+      expect(observed.requestFailures).toContainEqual({ reason: rejected.code, url: rejected.url, resourceType: rejected.resourceType });
       const again = await session.execute({ id: 2, action: "observe" });
+      expect(again.controls).toContainEqual(expect.objectContaining({ name: "View tee times", kind: "link" }));
       expect(again.nativeFirstFatal).toBeUndefined(); expect(session.diagnostics().nativeRejectedRequests).toEqual([rejected]);
     } finally { await session?.close(); native.mockRestore(); routing.mockRestore(); }
   }, 15_000);

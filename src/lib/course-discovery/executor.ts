@@ -575,7 +575,8 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
       onRequestRejected: request => {
         // Discovery can retain a useful page after this denied asset hop, but
         // replay must not certify a recipe whose declared scripts were absent.
-        if (request.code === "NATIVE_REDIRECT_CROSS_HOST_RESOURCE_REJECTED") {
+        if (request.code === "NATIVE_REDIRECT_CROSS_HOST_RESOURCE_REJECTED" ||
+            request.code === "NATIVE_REDIRECT_RESOURCE_KIND_REJECTED") {
           blocked = true; failure ??= recipeExecutionDiagnostic(request.code, request);
         }
       },
