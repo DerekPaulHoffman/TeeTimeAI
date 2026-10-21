@@ -874,6 +874,7 @@ test.describe("Tee Time Spot UI smoke", () => {
       return {
         dateField: box(".figma-date-field"),
         distance: box(".figma-distance-group"),
+        hasSimulator: toolbar.querySelector(".figma-hole-filter")?.classList.contains("has-simulator") === true,
         holes: box(".figma-hole-filter"),
         location: box(".figma-location-field"),
         players: box('label[for="players"]'),
@@ -891,11 +892,19 @@ test.describe("Tee Time Spot UI smoke", () => {
     expect(filterLayout.distance).not.toBeNull();
     expect(filterLayout.search).not.toBeNull();
     expect(Math.abs(filterLayout.players!.top - filterLayout.dateField!.top)).toBeLessThan(2);
-    expect(Math.abs(filterLayout.time!.top - filterLayout.holes!.top)).toBeLessThan(2);
+    if (testInfo.project.name.includes("mobile") && filterLayout.hasSimulator) {
+      expect(Math.abs(filterLayout.time!.width - filterLayout.location!.width)).toBeLessThan(2);
+      expect(Math.abs(filterLayout.holes!.width - filterLayout.location!.width)).toBeLessThan(2);
+      expect(filterLayout.holes!.top).toBeGreaterThanOrEqual(filterLayout.time!.bottom - 2);
+    } else {
+      expect(Math.abs(filterLayout.time!.top - filterLayout.holes!.top)).toBeLessThan(2);
+    }
     if (testInfo.project.name.includes("mobile")) {
       expect(filterLayout.location!.width).toBeGreaterThan(filterLayout.players!.width * 1.9);
       expect(filterLayout.players!.top).toBeGreaterThan(filterLayout.location!.bottom - 2);
-      expect(filterLayout.distance!.top).toBeGreaterThan(filterLayout.time!.bottom - 2);
+      expect(filterLayout.distance!.top).toBeGreaterThan(
+        (filterLayout.hasSimulator ? filterLayout.holes! : filterLayout.time!).bottom - 2
+      );
       expect(filterLayout.search!.top).toBeGreaterThan(filterLayout.distance!.bottom - 2);
       expect(filterLayout.search!.width).toBeGreaterThan(filterLayout.location!.width * 0.9);
     } else {
