@@ -76,6 +76,39 @@ describe("course access recipes", () => {
     expect(recipeAllowsRequest(recipe, script, "GET", "fetch")).toBe(false);
     expect(recipeAllowsRequest(recipe, script.replace("public.example.org", "unobserved.example.org"), "GET", "script")).toBe(false);
   });
+  it("admits only typed extensionless public bundles with one bounded version value", () => {
+    const version = "Abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGH";
+    expect(version).toHaveLength(44);
+    const script = `https://public.example.org/bundles/desktopjs?v=${version}`;
+    const style = `https://public.example.org/content/css/base?v=${version}`;
+    for (const [asset, kind] of [[script, "script"], [style, "stylesheet"]] as const) {
+      expect(isSafeRecipeUrl(asset)).toBe(false);
+      expect(isSafeBrowserAssetUrl(asset, kind, "GET")).toBe(true);
+      for (const resource of ["fetch", "xhr", "document", "other"])
+        expect(isSafeBrowserAssetUrl(asset, resource, "GET")).toBe(false);
+      for (const method of ["HEAD", "POST", "OPTIONS"])
+        expect(isSafeBrowserAssetUrl(asset, kind, method)).toBe(false);
+      for (const unsafe of [
+        asset.replace(version, version.slice(0, -1)), asset.replace(version, version + "H"), asset.replace(version, version.slice(0, -1) + "="),
+        `${asset}&v=${version}`, `${asset}&other=1`, `${asset}&token=private`, asset.replace("?v=", "?token="), asset.replace("?v=", "?ver="),
+        `${asset}#fragment`, asset.replace("public.example.org", "127.0.0.1"), asset.replace("public.example.org", "8.8.8.8"),
+        asset.replace("public.example.org", "venue.internal"), asset.replace("public.example.org", "user:password@public.example.org"),
+        asset.replace("public.example.org", "public.example.org:8443"), asset.replace("https:", "http:"),
+        asset.replace(kind === "script" ? "desktopjs" : "base", "account"), asset.replace(kind === "script" ? "desktopjs" : "base", "secret"),
+      ]) expect(isSafeBrowserAssetUrl(unsafe, kind, "GET"), unsafe).toBe(false);
+    }
+    expect(isSafeBrowserAssetUrl(script, "stylesheet", "GET")).toBe(false);
+    expect(isSafeBrowserAssetUrl(style, "script", "GET")).toBe(false);
+    for (const path of ["/bundles/account", "/bundles/token", "/bundles/desktopjs/checkout", "/account/bundles/desktopjs", "/api/calendar",
+      "/content/css/secret", "/content/css/base/checkout", "/%62undles/desktopjs", "/bundles/desktop.js", `/bundles/${"a".repeat(81)}`])
+      expect(isSafeBrowserAssetUrl(`https://public.example.org${path}?v=${version}`, "script", "GET"), path).toBe(false);
+    const recipe = parseAccessRecipe({ ...httpRecipe(), permittedRoutes: [{ origin: "https://public.example.org", path: "/bundles/desktopjs", methods: ["GET"], queryKeys: ["v"] }] });
+    expect(recipeAllowsRequest(recipe, script, "GET", "script")).toBe(true);
+    expect(recipeAllowsRequest(recipe, script, "GET", "fetch")).toBe(false);
+    expect(recipeAllowsRequest(recipe, script.replace("public.example.org", "other.example.org"), "GET", "script")).toBe(false);
+    expect(recipeAllowsRequest(parseAccessRecipe({ ...httpRecipe(), permittedRoutes: [{ origin: "https://public.example.org", path: "/bundles/desktopjs", methods: ["GET"], queryKeys: [] }] }), script, "GET", "script")).toBe(false);
+    expect(() => parseAccessRecipe({ ...httpRecipe(), source: { ...httpRecipe().source, bookingUrl: script } })).toThrow();
+  });
   it("parses a complete recipe and hashes object key order deterministically", () => {
     const recipe = parseAccessRecipe(httpRecipe());
     const reordered = Object.fromEntries(Object.entries(recipe).reverse());
@@ -115,6 +148,18 @@ describe("course access recipes", () => {
     expect(recipeAllowsRequest(recipe, value + "&extra=1", "GET")).toBe(false);
     expect(recipeAllowsRequest(recipe, value, "POST")).toBe(false);
     expect(recipeAllowsRequest(recipe, value.replace("example.org", "evil.example.org"), "GET")).toBe(false);
+  });
+  it.each(["2030-01-01", "2030-12-31", "2031-01-01"])("binds zero-padded compact dates without changing existing parts for %s", date => {
+    expect(expandRecipeTemplate("{{date}}|{{dateCompact}}|{{year}}|{{month}}|{{day}}", { date }))
+      .toBe(`${date}|${date.replaceAll("-", "")}|${date.slice(0, 4)}|${Number(date.slice(5, 7))}|${Number(date.slice(8))}`);
+    const value = parseAccessRecipe({ ...httpRecipe(), request: { url: "https://example.org/api/availability?date={{dateCompact}}", method: "GET" } });
+    expect(hashAccessRecipe(value)).not.toBe(hashAccessRecipe(parseAccessRecipe(httpRecipe())));
+  });
+  it("rejects invalid compact source dates, unknown names and unbound required inputs", () => {
+    for (const date of ["2030-02-30", "20300101", "2030-1-01", "2030-01-01T00:00:00Z", "2030-13-01"])
+      expect(() => expandRecipeTemplate("{{dateCompact}}", { date })).toThrow();
+    for (const template of ["{{datecompact}}", "{{dateCompact2}}", "{{dateCompact", "{{unknown}}", "{{players}}"])
+      expect(() => expandRecipeTemplate(template, { date: "2030-01-01" })).toThrow();
   });
   it("requires simulator identity, duration and end-time evidence", () => {
     const recipe = httpRecipe();

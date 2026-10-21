@@ -11,7 +11,7 @@ import { runWithProviderRequestLease } from "@/lib/automation/provider-request-l
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
 import { isActiveBrowserAccessChallenge, isSafeBrowserAssetUrl, isSafeRecipeUrl, recipeSelectorSchema } from "./recipe";
 import { continueNativeBrowserRead, createNativePublicBrowserProxy, isObservedNativeRedirect, nativeReadPreflightMethod } from "./native-public-browser";
-import { installNativeRedirectRouting, type NativeReadRoute } from "./native-redirect-routing";
+import { installNativeRedirectRouting, type NativeFirstFatal, type NativeReadRoute, type NativeRequestDiagnostic } from "./native-redirect-routing";
 import { requestFamilyForUrl } from "./request-family";
 import { canonicalPublicReadUrl } from "./public-request-url";
 import { inspectExistingAdapter } from "./existing-adapter-executor";
@@ -97,6 +97,8 @@ export type DiscoveryBrowserSnapshot = {
   responses: Array<{ url: string; status: number; method: string; body?: unknown; bodyOmitted?: true; schemaEvidence?: PublicResponseSchema; schemaEvidenceOmitted?: true }>;
   requests: Array<{ url: string; method: string; resourceType: string; status?: number; blockedReason?: string; body?: unknown }>;
   requestFailures?: Array<{ reason: string; resourceType: string; url?: string }>;
+  nativeFirstFatal?: NativeFirstFatal;
+  nativeRejectedRequests?: NativeRequestDiagnostic[];
   capabilityDiagnostics?: Array<{ code: "SUBFRAME_UNSUPPORTED"; resourceType: string; url?: string }>;
   frames: Array<{ url: string; source?: "OFFICIAL_IFRAME_SRC" }>;
   elements: Array<{ selector: string; tag: string; text: string; attributes: Record<string, string> }>;
@@ -400,6 +402,13 @@ export async function createCourseDiscoveryBrowserSession(input: {
       redirectRouting = await installNativeRedirectRouting(page, handleRoute, {
         signal: deadline, maxRequests: 1024,
         onSubframeBlocked: recordSubframe,
+        onRequestRejected: request => {
+          blockedRequests++;
+          const resourceType = request.resourceType ?? "other";
+          requestFailures.push({ reason: request.code, resourceType, ...(request.url ? { url: request.url } : {}) });
+          if (requestFailures.length > 12) requestFailures.shift();
+          deps.onRequestFailure?.({ reason: request.code, resourceType, url: request.url ?? "" });
+        },
         onFailure: reason => {
           if (closed) return;
           terminalFailure = reason;
@@ -698,6 +707,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
     observedRequests.splice(0, observedRequests.length, ...pendingMetadata);
     requestMetadataBytes = pendingMetadata.reduce((total, request) => total + JSON.stringify(request).length + 120, 0);
     return { url: currentUrl, text, controls: visible, elements, frames, responses: responses.splice(0), requests, requestFailures: requestFailures.map(failure => ({ ...failure })),
+      ...(redirectRouting?.firstFatal ? { nativeFirstFatal: redirectRouting.firstFatal } : {}),
+      ...(redirectRouting?.rejectedRequests?.length ? { nativeRejectedRequests: redirectRouting.rejectedRequests } : {}),
       ...(capabilityDiagnostics.length ? { capabilityDiagnostics: capabilityDiagnostics.map(value => ({ ...value })) } : {}), loading: pendingReadCount() > 0,
       blockedRequests, requestCount, interceptCount, responseBytes, startupMs, initialContentWaitMs, pendingRequestCount: pendingReadCount(),
       ...(navigationStartedAt === undefined ? {} : { navigationElapsedMs: Date.now() - navigationStartedAt }),
@@ -722,6 +733,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
       // Available even when navigation throws or the page has already closed.
       // This contains transport facts only, never page text or response bodies.
       return { loading: pendingReadCount() > 0, pendingRequestCount: pendingReadCount(),
+        ...(redirectRouting?.firstFatal ? { nativeFirstFatal: redirectRouting.firstFatal } : {}),
+        ...(redirectRouting?.rejectedRequests?.length ? { nativeRejectedRequests: redirectRouting.rejectedRequests } : {}),
         requests: observedRequests.map(request => ({ url: request.url, method: request.method, resourceType: request.resourceType,
           ...(request.status === undefined ? {} : { status: request.status }),
           ...(request.blockedReason ? { blockedReason: request.blockedReason } : {}) })),

@@ -424,6 +424,51 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       expect(settled.responses).toEqual([]); // Each response snapshot drains once.
     } finally { release(); await session?.close(); native.mockRestore(); routing.mockRestore(); }
   }, 25_000);
+  it("retains the first fatal native guard projection when later open and observe calls fail", async () => {
+    const fatal = { code: "NATIVE_REDIRECT_POST_BODY_MISSING", url: "https://example.org/collect", method: "POST", resourceType: "xhr",
+      interceptedRequests: 12, recordCount: 8, requestLimit: 1024, hasPostData: true, postDataPresent: false, postDataBytes: 0 };
+    const routing = vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, _handler, options) => {
+      options?.onFailure?.(fatal.code);
+      return { prepare: () => {}, close: async () => {}, pendingReads: 0, lastFailure: fatal.code,
+        get firstFatal() { return { ...fatal }; }, releasePlaywrightRoute: async route => { await route.abort(); } };
+    });
+    let session: Awaited<ReturnType<typeof createCourseDiscoveryBrowserSession>> | undefined;
+    try {
+      session = await createCourseDiscoveryBrowserSession({ initialUrls: ["https://example.org/"], deadlineAt: new Date(Date.now() + 10_000) }, {
+        browserTransport: "NATIVE_CHROME", launchBrowser: () => chromium.launch({ executablePath, headless: true }),
+        requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+      });
+      await expect(session.execute({ id: 1, action: "open", url: "https://example.org/" })).rejects.toThrow(fatal.code);
+      expect(session.diagnostics().nativeFirstFatal).toEqual(fatal);
+      await expect(session.execute({ id: 2, action: "observe" })).rejects.toThrow(fatal.code);
+      expect(session.diagnostics().nativeFirstFatal).toEqual(fatal);
+    } finally { await session?.close(); routing.mockRestore(); }
+  }, 15_000);
+  it("keeps oversized POST rejection diagnostics nonterminal while public controls render", async () => {
+    const rejected = { code: "NATIVE_REDIRECT_POST_BODY_LIMIT", url: "https://example.org/collect", method: "POST", resourceType: "xhr", postDataBytes: 40000 };
+    const routing = vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, handler, options) => {
+      options?.onRequestRejected?.(rejected);
+      return { prepare: () => {}, close: async () => {}, pendingReads: 0, lastFailure: undefined,
+        get rejectedRequests() { return [{ ...rejected }]; }, releasePlaywrightRoute: route => handler(route) };
+    });
+    const native = vi.spyOn(nativeBrowser, "continueNativeBrowserRead").mockImplementation(async route => {
+      const body = Buffer.from('<!doctype html><h1>Public golf availability</h1><a href="/times">View tee times</a>'), headers = { "content-type": "text/html" };
+      await route.fulfill({ status: 200, headers, body }); return { status: 200, url: route.request().url(), headers, body };
+    });
+    let session: Awaited<ReturnType<typeof createCourseDiscoveryBrowserSession>> | undefined;
+    try {
+      session = await createCourseDiscoveryBrowserSession({ initialUrls: ["https://example.org/"], deadlineAt: new Date(Date.now() + 10_000) }, {
+        browserTransport: "NATIVE_CHROME", launchBrowser: () => chromium.launch({ executablePath, headless: true }),
+        requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+      });
+      const observed = await session.execute({ id: 1, action: "open", url: "https://example.org/" });
+      expect(observed.controls).toContainEqual(expect.objectContaining({ name: "View tee times", kind: "link" }));
+      expect(observed.nativeFirstFatal).toBeUndefined(); expect(observed.nativeRejectedRequests).toEqual([rejected]);
+      expect(observed.requestFailures).toContainEqual({ reason: rejected.code, url: rejected.url, resourceType: "xhr" });
+      const again = await session.execute({ id: 2, action: "observe" });
+      expect(again.nativeFirstFatal).toBeUndefined(); expect(session.diagnostics().nativeRejectedRequests).toEqual([rejected]);
+    } finally { await session?.close(); native.mockRestore(); routing.mockRestore(); }
+  }, 15_000);
   const pageHtml = '<!doctype html><html><body><h1>Sample simulator</h1><label for="duration">Duration</label>' +
     '<p>First time, you will have to select a picture in CAPTCHA when booking.</p>' +
     '<span id="visible-date">Thursday, October 22, 2026</span>' +

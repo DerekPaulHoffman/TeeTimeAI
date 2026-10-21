@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage } from "node:http";
 import { connect as netConnect, type Socket } from "node:net";
 import type { AddressInfo } from "node:net";
-import type { NativeReadRoute } from "./native-redirect-routing";
+import { isNativeReadTerminalFailure, type NativeReadRoute } from "./native-redirect-routing";
 import { resolvePinnedPublicAddress, type ResolvedPublicAddress } from "@/lib/automation/address-pinned-public-fetch";
 import { isSafeRecipeUrl } from "./recipe";
 import { canonicalPublicReadUrl } from "./public-request-url";
@@ -183,7 +183,10 @@ export async function continueNativeBrowserRead(route: NativeReadRoute, signal: 
   } catch (error) {
     // route.abort cannot cancel an already continued request. Stop the actual
     // context/tunnel before releasing the enclosing provider request lease.
-    if (!networkFinished) await abortNetwork?.();
+    // A controller-attested Network.loadingFailed/responseErrorReason already
+    // ended this exact read. Destroying its host's tunnels would also cancel
+    // independent reads paused behind the same provider queue.
+    if (!networkFinished && !isNativeReadTerminalFailure(error)) await abortNetwork?.();
     if (error instanceof Error && error.name === "TimeoutError") throw new Error("NATIVE_RESPONSE_TIMEOUT");
     throw error;
   }

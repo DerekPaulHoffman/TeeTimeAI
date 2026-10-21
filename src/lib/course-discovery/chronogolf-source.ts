@@ -117,6 +117,20 @@ function officialHost(value: string) {
   try { const url = new URL(value); return url.protocol === "https:" && !url.port && !url.username && !url.password && !url.hash && !url.search &&
     /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z]{2,}$/u.test(url.hostname) && !/(?:^|\.)(?:localhost|local|internal|invalid|test)$/u.test(url.hostname) ? url.hostname.replace(/^www\./u, "") : null; } catch { return null; }
 }
+/** Provider profile website text is identity evidence, never a fetch target.
+ * A legacy HTTP spelling may name the exact canonical HTTPS host; this does
+ * not change the canonical source requirement or any reader URL authority. */
+function providerWebsiteIdentityHost(value: string) {
+  if (value.length > 2048 || /[\u0000-\u0020\u007f]/u.test(value)) return null;
+  const authority = /^https?:\/\/([^/?#]+)/iu.exec(value)?.[1];
+  if (!authority || /[:@]/u.test(authority)) return null;
+  try {
+    const url = new URL(value);
+    if (!["http:", "https:"].includes(url.protocol)) return null;
+    url.protocol = "https:";
+    return officialHost(url.href);
+  } catch { return null; }
+}
 function physicalAddress(value: string) {
   const parsed = completeUSAddress(value);
   if (!parsed) return null;
@@ -135,7 +149,7 @@ export function parseChronogolfProfile(html: string, actualUrl: string, source: 
   if (!parsed.success) fail("ADAPTER_PROFILE_SCHEMA_CHANGED");
   const club = parsed.data, expectedName = fullCourseName(source.venueName), canonical = physicalAddress(source.venueAddress);
   if (!canonical || expectedName.length < 8 || fullCourseName(club.name) !== expectedName || club.timezone !== source.timeZone ||
-      officialHost(club.website) !== officialHost(source.officialUrl)) fail("ADAPTER_IDENTITY_MISMATCH");
+      providerWebsiteIdentityHost(club.website) !== officialHost(source.officialUrl)) fail("ADAPTER_IDENTITY_MISMATCH");
   const province = Object.entries(stateNames).find(([code, region]) => [code.toLowerCase(), region.toLowerCase()].includes(club.province.toLowerCase()))?.[0];
   if (!province || !/^(?:United States(?: of America)?|USA?|US)$/iu.test(club.country)) fail("ADAPTER_IDENTITY_MISMATCH");
   const observed = physicalAddress(`${club.address}, ${club.city}, ${province} ${club.postcode}`);
@@ -145,7 +159,7 @@ export function parseChronogolfProfile(html: string, actualUrl: string, source: 
   const courses = club.courses.map(course => ({ id: course.id, uuid: course.uuid, name: course.name, layoutHoles: course.holes,
     bookableHoles: [...course.bookableHoles].sort((a, b) => a - b) })).sort((a, b) => a.id - b.id);
   if (!unique(courses.map(course => course.id)) || !unique(courses.map(course => course.uuid))) fail("ADAPTER_CATALOG_AMBIGUOUS");
-  const catalog = { clubId: club.id, clubUuid: club.uuid, profileUrl: canonicalUrl, name: club.name, websiteHost: officialHost(club.website),
+  const catalog = { clubId: club.id, clubUuid: club.uuid, profileUrl: canonicalUrl, name: club.name, websiteHost: providerWebsiteIdentityHost(club.website),
     address: observed, timeZone: club.timezone, publicPlayerTypeId: club.defaultAffiliationTypeId, courses, clients: document.clients };
   return chronogolfMetadataSchema.parse({ family: "CHRONOGOLF", clubId: club.id, profileUrl: canonicalUrl, timeZone: club.timezone,
     publicPlayerTypeId: club.defaultAffiliationTypeId, courses, clients: document.clients, catalogHash: createHash("sha256").update(JSON.stringify(catalog)).digest("hex") });

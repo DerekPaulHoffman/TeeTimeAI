@@ -130,7 +130,7 @@ describe("public-address native Chrome CONNECT transport", () => {
       expect(unhandled).not.toHaveBeenCalled();
     } finally { process.off("unhandledRejection", unhandled); }
   });
-  it("preserves a response rejection after dispatch succeeds", async () => {
+  it("does not trust an unbranded network-failure message to skip actual network cleanup", async () => {
     const responseFailure = new Error("NATIVE_REDIRECT_NETWORK_FAILED");
     const stop = vi.fn(async () => {});
     const route = { continue: vi.fn(async () => {}),

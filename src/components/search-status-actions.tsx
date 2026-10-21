@@ -1,6 +1,6 @@
 "use client";
 
-import { type DragEvent, useEffect, useId, useState } from "react";
+import { type DragEvent, useEffect, useId, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   ArrowDown,
@@ -70,6 +70,9 @@ export function SearchStatusActions({
   const router = useRouter();
   const midnightHelpId = useId();
   const [pending, setPending] = useState(false);
+  const [removalRequested, setRemovalRequested] = useState(false);
+  const removeButtonRef = useRef<HTMLButtonElement>(null);
+  const keepButtonRef = useRef<HTMLButtonElement>(null);
   const serverStateKey = JSON.stringify([
     searchId,
     status,
@@ -113,6 +116,10 @@ export function SearchStatusActions({
       coursePreferences: [...initialCoursePreferences].sort((a, b) => a.rank - b.rank)
     };
   }
+
+  useEffect(() => {
+    if (removalRequested) keepButtonRef.current?.focus();
+  }, [removalRequested]);
 
   useEffect(() => {
     if (localStatus !== "ACTIVE" ||
@@ -188,22 +195,23 @@ export function SearchStatusActions({
   }
 
   async function removeSearch() {
-    if (!window.confirm(mode === "SIMULATOR" ? "Remove this simulator alert?" : "Remove this tee-time alert?")) {
-      return;
-    }
+    if (!removalRequested || pending) return;
 
     setPending(true);
     setError(null);
-    const response = await fetch(`/api/searches/${searchId}`, {
-      method: "DELETE"
-    });
-
-    if (response.ok) {
-      router.refresh();
-    } else {
-      setError(await readError(response, "Could not remove search."));
+    try {
+      const response = await fetch(`/api/searches/${searchId}`, { method: "DELETE" });
+      if (response.ok) {
+        setRemovalRequested(false);
+        router.refresh();
+      } else {
+        setError(await readError(response, "Could not remove search."));
+      }
+    } catch {
+      setError("Could not remove search. Please try again.");
+    } finally {
+      setPending(false);
     }
-    setPending(false);
   }
 
   function moveCoursePreference(index: number, direction: -1 | 1) {
@@ -526,14 +534,32 @@ export function SearchStatusActions({
             <button
               className="button button-ghost dashboard-icon-button"
               type="button"
-              onClick={removeSearch}
+              onClick={() => setRemovalRequested(true)}
               disabled={pending}
+              ref={removeButtonRef}
               aria-label="Remove alert"
               title="Remove alert"
             >
               <Trash2 size={16} />
             </button>
           </div>
+          {removalRequested ? (
+            <div className="search-check-status" role="group" aria-label="Confirm alert removal">
+              <div>
+                <strong>{mode === "SIMULATOR" ? "Remove this simulator alert?" : "Remove this tee-time alert?"}</strong>
+                <p>Checks and notifications for this alert will stop.</p>
+                <div className="inline-actions">
+                  <button className="button button-ghost" type="button" disabled={pending} ref={keepButtonRef}
+                    onClick={() => { setRemovalRequested(false); removeButtonRef.current?.focus(); }}>
+                    Keep alert
+                  </button>
+                  <button className="button button-dark" type="button" disabled={pending} onClick={removeSearch}>
+                    {pending ? "Removing…" : "Confirm removal"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : null}
           {initialAdditionalEmails.length > 0 ? (
             <p className="meta recipient-count">
               {initialAdditionalEmails.length} extra recipient

@@ -5,10 +5,11 @@ import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import { existingAdapterMetadataSchema } from "./existing-adapter-schema";
 import { isServerDocumentSelector } from "./server-document-proof";
 import { hasCpsSessionState } from "./cps-public-navigation";
+import { recipeLocalDateSchema as localDate, recipeTemplateSchema } from "./recipe-template";
+export { expandRecipeTemplate, recipeTemplateSchema } from "./recipe-template";
 
 const secret = /(?:password|secret|token|cookie|session|credential|authorization|api.?key|email|phone)/iu;
 const forbiddenPath = /(?:^|\/)(?:login|signin|signup|auth|account|checkout|cart|payment|pay|purchase|orders?|confirm|admin)(?:\/|$)|(?:^|\/)(?:bookings?|reservations?|reserve)\/(?:create|submit|confirm|cancel|hold|reserve)(?:\/|$)/iu;
-const parameterNames = ["date", "timeZone", "players", "durationMinutes", "startTime", "endTime", "day", "month", "year"] as const;
 export function isSafeRecipeUrl(value: string) {
   try {
     const url = new URL(value);
@@ -19,13 +20,24 @@ export function isSafeRecipeUrl(value: string) {
   } catch { return false; }
 }
 /** Browser scripts/styles are read-only resources, not customer booking URLs.
- * Build hashes in a static asset path or the conventional `ver` cache key are
+ * Build hashes in a static asset path or a conventional bundle cache key are
  * not credentials. This exception never admits a data request or source URL. */
 export function isSafeBrowserAssetUrl(value: string, resourceType: string, method: string) {
   if (value.length > 2048 || method !== "GET" || !["script", "stylesheet"].includes(resourceType)) return false;
   if (isSafeRecipeUrl(value)) return true;
   try {
     const url = new URL(value), path = decodeURIComponent(url.pathname);
+    // Public ASP.NET-style bundles can be extensionless. Admit only the
+    // observed 44-character URL-safe version shape on its typed static route.
+    // Keep the original path/host under the ordinary credential and URL guard.
+    const bundlePath = resourceType === "script" ? /^\/bundles\/[a-z][a-z0-9_-]{0,79}$/iu : /^\/content\/css\/[a-z][a-z0-9_-]{0,79}$/iu;
+    const bundleVersions = url.searchParams.getAll("v");
+    if (url.pathname === path && bundlePath.test(path) && !url.hash && url.searchParams.size === 1 &&
+        bundleVersions.length === 1 && /^[A-Za-z0-9_-]{44}$/u.test(bundleVersions[0])) {
+      const publicBundle = new URL(url.href);
+      publicBundle.searchParams.set("v", "public-build-version");
+      return isSafeRecipeUrl(publicBundle.href);
+    }
     const unchangedQueryAndHost = new URL(url.href);
     unchangedQueryAndHost.pathname = "/public-asset.js";
     // WordPress serves public .js/.css files with a truncated SHA build version.
@@ -42,11 +54,6 @@ export function isSafeBrowserAssetUrl(value: string, resourceType: string, metho
   } catch { return false; }
 }
 const safeUrl = z.string().max(2048).refine(isSafeRecipeUrl, "Expected a public HTTPS read URL");
-export const recipeTemplateSchema = z.string().min(1).max(2048).refine(value => {
-  const replaced = value.replace(/\{\{([A-Za-z]+)\}\}/gu, (_, name: string) =>
-    parameterNames.includes(name as typeof parameterNames[number]) ? "x" : "{");
-  return !/[{}\r\n]/u.test(replaced);
-}, "Unknown or malformed template parameter");
 const urlTemplate = recipeTemplateSchema.refine(value => isSafeRecipeUrl(value.replace(/\{\{[A-Za-z]+\}\}/gu, "x")));
 export const recipeSelectorSchema = z.string().min(1).max(240).refine(value =>
   /^[a-zA-Z0-9_\-\s.#\[\]="'~^$*|:(),>+]+$/u.test(value) &&
@@ -112,10 +119,6 @@ const availabilityResponseSchema = z.object({
   .describe("Required completed availability-response fence. Exact URL/method and date parameter must equal requested YYYY-MM-DD. Default JSON uses observed scalar success for response-only completion. Explicit kind SERVER_DOCUMENT requires GET/query date and proof.complete {serverDocument:true}: a complete text/html main document whose inert source venue/date/slot fields equal the settled visible DOM; outdoor simple CSS only, no pagination or later data fetch. A matching response must start after the last date/filter change. Only the runtime-verified PassFactory /ftbb client-only DURATION select may carry a completed day response. This proves freshness, not availability by itself; independent capacity/duration/empty proof remains required.");
 const timeZone = z.string().max(80).refine(value => {
   try { new Intl.DateTimeFormat("en-US", { timeZone: value }); return true; } catch { return false; }
-});
-const localDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/u).refine(value => {
-  const date = new Date(`${value}T00:00:00Z`);
-  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
 });
 const time = z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/u);
 export const accessExecutionInputSchema = z.object({
@@ -212,16 +215,6 @@ function canonical(value: unknown): string {
   return JSON.stringify(value);
 }
 export function hashAccessRecipe(recipe: CourseAccessRecipeData) { return createHash("sha256").update(canonical(parseAccessRecipe(recipe))).digest("hex"); }
-export function expandRecipeTemplate(template: string, input: AccessExecutionInput, urlEncoded = false) {
-  recipeTemplateSchema.parse(template);
-  const [year, month, day] = input.date.split("-");
-  const values: Record<string, string | number | undefined> = { ...input, year, month: Number(month), day: Number(day) };
-  return template.replace(/\{\{([A-Za-z]+)\}\}/gu, (_, key: string) => {
-    const value = values[key];
-    if (value === undefined) throw new Error("A required recipe parameter is missing");
-    return urlEncoded ? encodeURIComponent(String(value)) : String(value);
-  });
-}
 export function recipeAllowsRequest(recipe: CourseAccessRecipeData, value: string, method: string, resourceType?: string) {
   if (recipe.engine === "EXISTING_ADAPTER") return false; // Fixed adapter transport owns its exact routes.
   if (!isSafeRecipeUrl(value) && !isSafeBrowserAssetUrl(value, resourceType ?? "", method)) return false;

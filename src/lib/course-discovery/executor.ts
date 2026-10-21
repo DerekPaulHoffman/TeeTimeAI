@@ -23,13 +23,14 @@ import { selectPublicCalendarDate } from "./public-calendar-control";
 import { applyPublicCalendarDate } from "./public-calendar-apply";
 import { hasInspectedPassfactoryDurationClients, isInspectedPassfactoryDurationClient, isPassfactoryDurationClientUrl, isPassfactoryAvailabilityRequest, isPassfactoryDurationContext,
   isPassfactoryDurationRequestBound, type PublicAvailabilityRequest } from "./passfactory-client-duration";
-import { extractServerDocument, sameServerDocumentEvidence, type ServerDocumentExtraction } from "./server-document-proof";
+import { extractServerDocument, sameServerDocumentEvidence, serverDocumentMismatchDiagnostic, type ServerDocumentExtraction } from "./server-document-proof";
 import { PUBLIC_BROWSER_TOTAL_BYTES, PUBLIC_BROWSER_TUNNEL_BYTES, publicBrowserResponseLimit } from "./browser-resource-limits";
 import { isObservedPublicCalendarDay } from "./public-calendar-day";
 import { selectPublicRentalProduct } from "./public-product-control";
 import { followPublicAvailabilityLink } from "./public-navigation-control";
 import { selectPublicDateChoice } from "./public-date-choice";
 import { continuePublicRentalService, selectPublicRentalService, type PublicRentalServiceSelection } from "./public-service-control";
+import { parsePublicPlayerOptions } from "./public-player-options";
 
 type ExtractedAccessRecipe = Exclude<CourseAccessRecipeData, { engine: "EXISTING_ADAPTER" }>;
 
@@ -82,7 +83,9 @@ function matchesAvailabilityRequest(recipe: Extract<CourseAccessRecipeData, { en
   try {
     const source = fence.date.source === "QUERY" ? new URL(request.url).searchParams : JSON.parse(request.body ?? "");
     const read = (path: string) => source instanceof URLSearchParams ? source.get(path) : jsonField(source, { path });
-    return read(fence.date.path) === input.date && (!fence.endDatePath || read(fence.endDatePath) === input.date);
+    const date = read(fence.date.path);
+    const matchedDate = date === input.date || fence.kind === "SERVER_DOCUMENT" && date === input.date.replaceAll("-", "");
+    return matchedDate && (!fence.endDatePath || read(fence.endDatePath) === input.date);
   } catch { return false; }
 }
 export function matchesAvailabilityResponse(recipe: Extract<CourseAccessRecipeData, { engine: "BROWSER_DOM" }>, input: AccessExecutionInput,
@@ -200,11 +203,13 @@ function normalize(recipe: ExtractedAccessRecipe, input: AccessExecutionInput, d
     const start = recipeTimeToInstant(row.startsAt, input);
     const local = localParts(start, input.timeZone);
     if (local.slice(0, 10) !== input.date) return result("INCOMPLETE", "WRONG_SLOT_DATE");
-    const availableSpots = simulator ? 1 : boundedNumber(row.availableSpots, 100);
-    const minimumPlayers = simulator || row.minimumPlayers === undefined ? 1 : boundedNumber(row.minimumPlayers, 100);
+    const playerOptions = simulator ? undefined : parsePublicPlayerOptions(row.availableSpots);
+    const availableSpots = simulator ? 1 : playerOptions?.maxPlayers ?? boundedNumber(row.availableSpots, 100);
+    const minimumPlayers = simulator ? 1 : row.minimumPlayers === undefined ? playerOptions?.minPlayers ?? 1 : boundedNumber(row.minimumPlayers, 100);
     const capacityText = clean(row.capacity);
     const capacity = /^\d+$/u.test(capacityText) && Number(capacityText) >= 1 && Number(capacityText) <= 100 ? Number(capacityText) : null;
-    if (minimumPlayers > availableSpots) return result("INCOMPLETE", "INVALID_CAPACITY_RANGE");
+    if (minimumPlayers > availableSpots || playerOptions && row.minimumPlayers !== undefined && minimumPlayers !== playerOptions.minPlayers)
+      return result("INCOMPLETE", "INVALID_CAPACITY_RANGE");
     const end = recipe.slots.endsAt && "derive" in recipe.slots.endsAt
       ? new Date(start.getTime() + input.durationMinutes! * 60_000)
       : row.endsAt === undefined ? undefined : recipeTimeToInstant(row.endsAt, input);
@@ -216,7 +221,7 @@ function normalize(recipe: ExtractedAccessRecipe, input: AccessExecutionInput, d
     const resourceId = row.resourceId === undefined ? undefined : clean(row.resourceId);
     const productId = row.productId === undefined ? undefined : clean(row.productId);
     if ((resourceId !== undefined && (!resourceId || resourceId.length > 128)) || (productId !== undefined && (!productId || productId.length > 128))) return result("INCOMPLETE", "INVALID_RESOURCE_IDENTITY");
-    if ((!simulator && (availableSpots < input.players || minimumPlayers > input.players)) || start <= now ||
+    if ((!simulator && (availableSpots < input.players || minimumPlayers > input.players || playerOptions && !playerOptions.allowedPlayers.includes(input.players))) || start <= now ||
       start < windowStart || start >= windowEnd || (end && end > windowEnd)) continue;
     const startsAt = start.toISOString();
     const sourceId = createHash("sha256").update([recipe.target.courseId, recipe.target.offeringId ?? "", resourceId ?? "", productId ?? "", startsAt, end?.toISOString() ?? "", String(holes ?? "")].join("\n")).digest("hex");
@@ -418,7 +423,8 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
         try {
           if (!document?.main || document.sequence !== mainDocumentSequence || document.dataSequence !== dataRequestSequence ||
               status !== 200 || !/^text\/html(?:;|$)/iu.test(document.contentType)) throw new Error("SERVER_DOCUMENT_UNCONFIRMED");
-          const extracted = extractServerDocument(recipe, Buffer.from(body).toString("utf8"), (field, value) => readRecipeFieldFormat(field, value));
+          const extracted = extractServerDocument(recipe, Buffer.from(body).toString("utf8"), (field, value) => readRecipeFieldFormat(field, value),
+            { responseUrl: request.url, requestedDate: input.date, input });
           serverDocument = { generation, documentSequence: document.sequence, dataSequence: document.dataSequence, extracted };
           responseGeneration = generation; rejectedResponseGeneration = undefined;
         } catch (error) {
@@ -714,7 +720,11 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
       if (pendingReadCount() || responseGeneration !== mutationGeneration || JSON.stringify(first) !== JSON.stringify(second)) return fail("INCOMPLETE", "UNSETTLED_RESULTS");
       if (usesServerDocument && (!serverDocument || serverDocument.generation !== mutationGeneration ||
           serverDocument.documentSequence !== mainDocumentSequence || serverDocument.dataSequence !== dataRequestSequence ||
-          !sameServerDocumentEvidence(serverDocument.extracted, second))) return fail("INCOMPLETE", "SERVER_DOCUMENT_DOM_MISMATCH");
+          !sameServerDocumentEvidence(serverDocument.extracted, second))) {
+        failure ??= recipeExecutionDiagnostic(serverDocumentMismatchDiagnostic(serverDocument,
+          { generation: mutationGeneration, documentSequence: mainDocumentSequence, dataSequence: dataRequestSequence }, second), activity);
+        return fail("INCOMPLETE", "SERVER_DOCUMENT_DOM_MISMATCH");
+      }
       return normalize(recipe, input, second, clock());
     } finally { signal.removeEventListener("abort", stop); await redirectRouting?.close(); await context.close().catch(() => {}); }
   } catch (error) {

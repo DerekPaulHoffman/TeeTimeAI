@@ -42,6 +42,26 @@ describe("fresh exact profile identity and complete UUID catalog", () => {
       publicPlayerTypeId: 56, courses: [{ id: 5678, uuid: club().courses[0].uuid, layoutHoles: 18, bookableHoles: [9, 18] }] });
     expect(chronogolfMetadataSchema.safeParse({ ...parsed, cookie: "never" }).success).toBe(false);
   });
+  it.each(["http://www.example.org", "http://example.org/", "https://example.org/"])
+    ("normalizes provider website %s as exact host identity only", website => {
+      const baseline = parseChronogolfProfile(html(), source.bookingUrl, source);
+      const value = club(); value.website = website;
+      expect(parseChronogolfProfile(html(value), source.bookingUrl, source)).toEqual(baseline);
+      expect(source.officialUrl).toBe("https://www.example.org/");
+    });
+  it.each(["http://unrelated.example.org/", "http://example.org.evil.org/", "http://other.example.org/", "http://user:pass@www.example.org/",
+    "http://www.example.org:80/", "http://www.example.org:8443/", "https://www.example.org:443/", "http://www.example.org/?token=1", "http://www.example.org/#login",
+    "ftp://www.example.org/", "javascript:alert(1)", "http://localhost/", "http://127.0.0.1/", "http://www.exa\tmple.org/"])
+    ("rejects unsafe or different provider website identity %s", website => {
+      const value = club(); value.website = website;
+      expect(() => parseChronogolfProfile(html(value), source.bookingUrl, source)).toThrow();
+    });
+  it("retains HTTPS canonical source and full venue identity requirements with a provider HTTP spelling", () => {
+    const value = club(); value.website = "http://www.example.org";
+    expect(() => parseChronogolfProfile(html(value), source.bookingUrl, { ...source, officialUrl: "http://www.example.org/" })).toThrow("ADAPTER_IDENTITY_MISSING");
+    for (const changed of [{ ...value, name: "Other Example Golf Club" }, { ...value, address: "2100 Fairway Boulevard" }, { ...value, timezone: "America/New_York" }])
+      expect(() => parseChronogolfProfile(html(changed), source.bookingUrl, source)).toThrow("ADAPTER_IDENTITY_MISMATCH");
+  });
   it("binds observed numeric-to-slug mapping without accepting another source alias", () => {
     expect(parseChronogolfProfile(html(), source.bookingUrl, { ...source, bookingUrl: "https://www.chronogolf.com/club/1234" }).clubId).toBe(1234);
     expect(parseChronogolfProfile(html(), "https://www.chronogolf.com/club/1234", { ...source, bookingUrl: "https://www.chronogolf.com/club/1234" }).profileUrl).toBe(source.bookingUrl);

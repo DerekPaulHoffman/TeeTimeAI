@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -33,6 +33,49 @@ const savedSearch: ComponentProps<typeof SearchStatusActions> = {
 };
 
 describe("SearchStatusActions", () => {
+  it.each(["OUTDOOR", "SIMULATOR"] as const)("confirms %s removal in the page and lets the owner keep the alert", async (mode) => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetchMock);
+    const nativeConfirm = vi.spyOn(window, "confirm");
+    render(<SearchStatusActions {...savedSearch} mode={mode} />);
+    const remove = screen.getByRole("button", { name: "Remove alert" });
+    fireEvent.click(remove);
+    const confirmation = screen.getByRole("group", { name: "Confirm alert removal" });
+    expect(within(confirmation).getByText(mode === "SIMULATOR" ? "Remove this simulator alert?" : "Remove this tee-time alert?")).toBeTruthy();
+    const keep = within(confirmation).getByRole("button", { name: "Keep alert" });
+    expect(document.activeElement).toBe(keep);
+    expect(fetchMock).not.toHaveBeenCalled();
+    fireEvent.click(keep);
+    expect(screen.queryByRole("group", { name: "Confirm alert removal" })).toBeNull();
+    expect(document.activeElement).toBe(remove);
+    expect(fetchMock).not.toHaveBeenCalled();
+    fireEvent.click(remove);
+    fireEvent.click(screen.getByRole("button", { name: "Confirm removal" }));
+    await waitFor(() => expect(refreshMock).toHaveBeenCalledOnce());
+    expect(fetchMock).toHaveBeenCalledExactlyOnceWith("/api/searches/search-1", { method: "DELETE" });
+    expect(nativeConfirm).not.toHaveBeenCalled();
+  });
+
+  it("keeps removal retryable after a network failure and prevents duplicate pending deletes", async () => {
+    let finish!: (value: { ok: boolean }) => void;
+    const fetchMock = vi.fn().mockRejectedValueOnce(new Error("offline"))
+      .mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<SearchStatusActions {...savedSearch} />);
+    fireEvent.click(screen.getByRole("button", { name: "Remove alert" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm removal" }));
+    await screen.findByText("Could not remove search. Please try again.");
+    expect(refreshMock).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm removal" }));
+    const removing = screen.getByRole("button", { name: "Removing…" }) as HTMLButtonElement;
+    expect(removing.disabled).toBe(true);
+    fireEvent.click(removing);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await act(async () => finish({ ok: true }));
+    expect(refreshMock).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("group", { name: "Confirm alert removal" })).toBeNull();
+  });
+
   it("shows saved simulator midnight as 00:00 and sends 24:00 on save", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal("fetch", fetchMock);
