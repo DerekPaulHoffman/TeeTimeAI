@@ -125,7 +125,7 @@ function safeBrowserRequestFailures(value) {
 function safeNativeRequestDiagnostic(value) {
   if (!value || typeof value !== "object" || Array.isArray(value) || typeof value.code !== "string" || !/^NATIVE_[A-Z_0-9]{1,73}$/u.test(value.code)) return undefined;
   const result = { code: value.code };
-  if (["RESPONSE_WAIT", "CONTINUE_RESPONSE_ACK"].includes(value.phase)) result.phase = value.phase;
+  if (["RESPONSE_WAIT", "CONTINUE_RESPONSE_ACK", "LOADER_IDENTITY_WAIT", "LOADER_IDENTITY", "LOADER_OWNER", "REDIRECT_GENERATION"].includes(value.phase)) result.phase = value.phase;
   if (safeObservedUrl(value.url)) {
     try {
       const url = new URL(value.url);
@@ -140,7 +140,8 @@ function safeNativeRequestDiagnostic(value) {
   if (["document", "script", "stylesheet", "xhr", "fetch", "image", "media", "font", "eventsource", "websocket", "manifest", "ping", "other"].includes(value.resourceType)) result.resourceType = value.resourceType;
   for (const [key, maximum] of Object.entries({ interceptedRequests: 1025, recordCount: 1024, requestLimit: 1024, postDataBytes: 1_000_000 }))
     if (Number.isSafeInteger(value[key]) && value[key] >= 0 && value[key] <= maximum) result[key] = value[key];
-  for (const key of ["framePresent", "rootFrame", "networkIdPresent", "duplicateRequestId", "hasPostData", "postDataPresent"])
+  for (const key of ["framePresent", "rootFrame", "networkIdPresent", "duplicateRequestId", "hasPostData", "postDataPresent",
+    "identityPresent", "loaderPresent", "loaderKnown", "identityFresh", "identityUrlMatches", "identityMethodMatches", "identityKindMatches", "identityFrameMatches"])
     if (typeof value[key] === "boolean") result[key] = value[key];
   return result;
 }

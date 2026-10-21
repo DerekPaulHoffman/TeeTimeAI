@@ -15,10 +15,12 @@ export type NativeReadResponse = Pick<Response, "url" | "status" | "allHeaders" 
 export type NativeReadRoute = Pick<Route, "continue" | "abort" | "fulfill"> & { request(): NativeReadRequest };
 export type NativeRequestDiagnostic = {
   code: string; url?: string; method?: string; resourceType?: string;
-  phase?: "RESPONSE_WAIT" | "CONTINUE_RESPONSE_ACK";
+  phase?: "RESPONSE_WAIT" | "CONTINUE_RESPONSE_ACK" | "LOADER_IDENTITY_WAIT" | "LOADER_IDENTITY" | "LOADER_OWNER" | "REDIRECT_GENERATION";
   interceptedRequests?: number; recordCount?: number; requestLimit?: number; postDataBytes?: number;
   framePresent?: boolean; rootFrame?: boolean; networkIdPresent?: boolean; duplicateRequestId?: boolean;
   hasPostData?: boolean; postDataPresent?: boolean;
+  identityPresent?: boolean; loaderPresent?: boolean; loaderKnown?: boolean; identityFresh?: boolean;
+  identityUrlMatches?: boolean; identityMethodMatches?: boolean; identityKindMatches?: boolean; identityFrameMatches?: boolean;
 };
 export type NativeFirstFatal = NativeRequestDiagnostic;
 export type NativeRedirectRouting = {
@@ -57,13 +59,15 @@ type RecordEntry = {
   id: string; networkId: string; url: string; transportUrl: string; method: string; headers: Record<string, string>; body: string | null;
   kind: string; parent: RecordEntry | null; depth: number; paused: boolean; admitted: boolean; failed: boolean; responseStarted: boolean; complete: boolean;
   failureCode?: string; failure?: Error;
-  generation: DocumentGeneration; cancellation: AbortController; handlerDone: boolean; responsePaused: boolean;
+  generation: DocumentGeneration; networkIdentityRevision?: number; cancellation: AbortController; handlerDone: boolean; responsePaused: boolean;
   retirementAck?: Promise<void>;
   redirect?: { status: number; target: string }; redirectChildId?: string;
   adapter: NativeReadRequest; response: ReturnType<typeof pending<NativeReadResponse | Error>>;
 };
 type DocumentGeneration = { id: number; retired: boolean; loaderId?: string };
-type NetworkIdentity = { loaderId: string; frameId?: string; url: string; method: string; kind: string };
+type NetworkIdentity = { revision: number; loaderId: string; frameId?: string; url: string; method: string; kind: string };
+type PendingInitialPause = { id: string; generation: DocumentGeneration; retired: boolean;
+  retirementAck?: Promise<void>; cancelled: ReturnType<typeof pending<void>> };
 type NativeRecordOwner = { closed: boolean };
 // Only adapters minted by this controller have redirect provenance. A model,
 // Playwright lookalike, diagnostic or caller-supplied redirectedFrom chain does
@@ -130,12 +134,13 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
   const records = new Map<string, RecordEntry>();
   const networkIdentities = new Map<string, NetworkIdentity>();
   const networkWaiters = new Map<string, ReturnType<typeof pending<void>>>();
+  const initialPauses = new Map<string, PendingInitialPause>();
   const loaderOwners = new Map<string, DocumentGeneration>();
   let generation: DocumentGeneration = { id: 0, retired: false }, generationTracking = false, boundaryPending = false, awaitingDocument = false;
   const owner: NativeRecordOwner = { closed: false };
   const rejectedRequests: NativeRequestDiagnostic[] = [];
   let closing: Promise<void> | undefined, closed = false, enabled = false, lastFailure: string | undefined, firstFatal: NativeFirstFatal | undefined;
-  let interceptedRequests = 0, pendingReads = 0, responseBytes = 0;
+  let interceptedRequests = 0, pendingReads = 0, responseBytes = 0, networkIdentityRevision = 0;
   const failure = (code: string) => { lastFailure = code; try { options.onFailure?.(code); } catch { /* Diagnostics cannot authorize work. */ } };
   const onAbort = () => { void close("NATIVE_REDIRECT_CANCELLED"); };
   function close(code = "NATIVE_REDIRECT_CLOSED") {
@@ -145,6 +150,8 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
     if (code !== "NATIVE_REDIRECT_CLOSED") { firstFatal ??= { code }; failure(code); }
     options.signal?.removeEventListener("abort", onAbort);
     for (const record of records.values()) { record.failed = true; record.response.settle(new Error(code)); }
+    for (const waiter of networkWaiters.values()) waiter.settle();
+    for (const pause of initialPauses.values()) pause.cancelled.settle();
     // Never detach interception while paused requests could resume.
     closing = (async () => { await page.close({ runBeforeUnload: false }).catch(() => {}); await cdp.detach().catch(() => {}); })();
     return closing;
@@ -190,10 +197,16 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
     });
     return record.retirementAck;
   };
+  const abortInitialPause = (pause: PendingInitialPause) => {
+    pause.retired = true;
+    pause.retirementAck ??= bounded(cdp.send("Fetch.failRequest", { requestId: pause.id, errorReason: "BlockedByClient" }),
+      "NATIVE_REDIRECT_ABORT_TIMEOUT").then(() => { pause.cancelled.settle(); });
+    return pause.retirementAck;
+  };
   cdp.on("Network.requestWillBeSent", event => {
     if (!generationTracking || closed || event.frameId !== rootFrameId) return;
     if (!networkIdentities.has(event.requestId) && networkIdentities.size >= limit) { void close("NATIVE_REDIRECT_RECORD_LIMIT"); return; }
-    networkIdentities.set(event.requestId, { loaderId: event.loaderId, frameId: event.frameId,
+    networkIdentities.set(event.requestId, { revision: ++networkIdentityRevision, loaderId: event.loaderId, frameId: event.frameId,
       url: event.request.url, method: event.request.method, kind: resourceKinds[event.type ?? ""] ?? "other" });
     networkWaiters.get(event.requestId)?.settle();
   });
@@ -206,6 +219,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
     // Include dispatch and capture before any await, so ready DOM cannot hide
     // an incomplete native read before the shared handler starts or resumes.
     pendingReads++;
+    let pendingInitialPause: PendingInitialPause | undefined;
     void (async () => {
       if (closed) return;
       const reject = () => cdp.send("Fetch.failRequest", { requestId: event.requestId, errorReason: "BlockedByClient" });
@@ -353,36 +367,70 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
       if (event.redirectedRequestId && (!parent || !parent.admitted || parent.failed || parent.depth >= 5 || parent.redirectChildId)) {
         await reject(); await close("NATIVE_REDIRECT_PROVENANCE_REJECTED"); return;
       }
+      // Reserve the exact single child before waiting for independently ordered
+      // Network metadata. A second pause cannot share this parent's authority.
+      if (parent) parent.redirectChildId = event.requestId;
       const kind = resourceKinds[event.resourceType];
       if (!kind) { await reject(); await close("NATIVE_REDIRECT_RESOURCE_REJECTED"); return; }
       let requestGeneration = generation;
+      let requestIdentityRevision: number | undefined;
+      pendingInitialPause = { id: event.requestId, generation: parent?.generation ?? generation, retired: false, cancelled: pending() };
+      initialPauses.set(event.requestId, pendingInitialPause);
+      if (pendingInitialPause.generation.retired) { await abortInitialPause(pendingInitialPause); return; }
       if (generationTracking) {
-        if (!networkIdentities.has(networkId)) {
+        const sameKind = (identity: NetworkIdentity | undefined) => identity?.kind === kind ||
+          [identity?.kind, kind].every(value => value === "xhr" || value === "fetch");
+        const fresh = (identity: NetworkIdentity | undefined) => Boolean(identity &&
+          (!parent?.networkIdentityRevision || identity.revision > parent.networkIdentityRevision));
+        const diagnostic = (phase: NativeRequestDiagnostic["phase"]): NativeRequestDiagnostic => {
+          const identity = networkIdentities.get(networkId);
+          return { ...requestDiagnostic("NATIVE_REDIRECT_LOADER_MISMATCH"), phase,
+            identityPresent: Boolean(identity), loaderPresent: Boolean(identity?.loaderId),
+            loaderKnown: Boolean(identity?.loaderId && loaderOwners.has(identity.loaderId)), identityFresh: fresh(identity),
+            identityUrlMatches: identity?.url === event.request.url, identityMethodMatches: identity?.method === event.request.method,
+            identityKindMatches: sameKind(identity), identityFrameMatches: identity?.frameId === rootFrameId };
+        };
+        const current = networkIdentities.get(networkId);
+        // CDP reuses Network.requestId across HTTP redirects. Fetch can pause
+        // the child before requestWillBeSent publishes its next hop. Only the
+        // exact consumed parent revision may wait; a fresh mismatch is fatal.
+        const parentHopPending = parent && networkId === parent.networkId && current?.revision === parent.networkIdentityRevision;
+        if (!current || parentHopPending) {
           const waiter = networkWaiters.get(networkId) ?? pending<void>(); networkWaiters.set(networkId, waiter);
-          try { await bounded(waiter.promise, "NATIVE_REDIRECT_LOADER_TIMEOUT"); } finally { networkWaiters.delete(networkId); }
+          try { await bounded(Promise.race([waiter.promise, pendingInitialPause.cancelled.promise]), "NATIVE_REDIRECT_LOADER_TIMEOUT",
+            () => diagnostic("LOADER_IDENTITY_WAIT")); }
+          finally { networkWaiters.delete(networkId); }
         }
+        if (pendingInitialPause.retired) { await pendingInitialPause.retirementAck; return; }
+        if (closed || options.signal?.aborted) return;
         const identity = networkIdentities.get(networkId);
-        const sameKind = identity?.kind === kind || [identity?.kind, kind].every(value => value === "xhr" || value === "fetch");
-        if (!identity?.loaderId || identity.frameId !== rootFrameId || identity.url !== event.request.url || identity.method !== event.request.method || !sameKind)
-          { await reject(); await close("NATIVE_REDIRECT_LOADER_MISMATCH"); return; }
+        if (!identity?.loaderId || identity.frameId !== rootFrameId || identity.url !== event.request.url || identity.method !== event.request.method || !sameKind(identity) || !fresh(identity)) {
+          firstFatal ??= diagnostic("LOADER_IDENTITY"); await reject(); await close("NATIVE_REDIRECT_LOADER_MISMATCH"); return;
+        }
         const known = loaderOwners.get(identity.loaderId);
         if (kind === "document" && !parent && awaitingDocument && !known) {
           generation.loaderId = identity.loaderId; loaderOwners.set(identity.loaderId, generation); awaitingDocument = false;
-        } else if (!known) { await reject(); await close("NATIVE_REDIRECT_LOADER_MISMATCH"); return; }
+        } else if (!known) {
+          firstFatal ??= diagnostic("LOADER_OWNER"); await reject(); await close("NATIVE_REDIRECT_LOADER_MISMATCH"); return;
+        }
         requestGeneration = loaderOwners.get(identity.loaderId)!;
-        if (parent && requestGeneration !== parent.generation) { await reject(); await close("NATIVE_REDIRECT_LOADER_MISMATCH"); return; }
+        if (parent && requestGeneration !== parent.generation) {
+          firstFatal ??= diagnostic("REDIRECT_GENERATION"); await reject(); await close("NATIVE_REDIRECT_LOADER_MISMATCH"); return;
+        }
+        requestIdentityRevision = identity.revision;
       }
       if (parent) {
-        parent.redirectChildId = event.requestId;
         // A redirected child may pause before the parent's route handler
         // resumes. Wait outside the child handler/provider lane for that exact
         // parent's successful release; no FIFO/URL inference or origin grant.
-        const result = await bounded(parent.response.promise, "NATIVE_REDIRECT_PROVENANCE_TIMEOUT");
+        const result = await bounded(Promise.race([parent.response.promise, pendingInitialPause.cancelled.promise]), "NATIVE_REDIRECT_PROVENANCE_TIMEOUT");
+        if (pendingInitialPause.retired) { await pendingInitialPause.retirementAck; return; }
+        if (closed || options.signal?.aborted) return;
         const document = kind === "document";
         let sameHost = false;
         try { sameHost = new URL(parent.transportUrl).hostname.replace(/^www\./u, "") === new URL(event.request.url).hostname.replace(/^www\./u, ""); }
         catch { /* Invalid URLs fail the provenance check. */ }
-        if (result instanceof Error || closed || options.signal?.aborted || records.has(event.requestId) || !releasedRedirect(parent, event.request.url) ||
+        if (!result || result instanceof Error || records.has(event.requestId) || !releasedRedirect(parent, event.request.url) ||
             event.request.method !== parent.method || document && (parent.kind !== "document" || !["GET", "HEAD"].includes(parent.method))) {
           await reject(); await close("NATIVE_REDIRECT_PROVENANCE_REJECTED"); return;
         }
@@ -408,7 +456,8 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
       const record: RecordEntry = { id: event.requestId, networkId, url: event.request.url, transportUrl: event.request.url,
         method: event.request.method, headers: headers(event.request.headers), body: event.request.postData ?? null, kind,
         parent: parent ?? null, depth: parent ? parent.depth + 1 : 0, paused: true, admitted: false, failed: false, responseStarted: false, complete: false,
-        generation: requestGeneration, cancellation: new AbortController(), handlerDone: false, responsePaused: false,
+        generation: requestGeneration, networkIdentityRevision: requestIdentityRevision,
+        cancellation: new AbortController(), handlerDone: false, responsePaused: false,
         response: pending(), adapter: undefined as unknown as NativeReadRequest };
       record.adapter = { signal: record.cancellation.signal, url: () => record.url, method: () => record.method, headers: () => ({ ...record.headers }), postData: () => record.body,
         resourceType: () => record.kind, isNavigationRequest: () => record.kind === "document", frame: () => page.mainFrame(),
@@ -418,6 +467,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         } };
       nativeRequestRecords.set(record.adapter, { record, owner });
       records.set(record.id, record);
+      initialPauses.delete(event.requestId); pendingInitialPause = undefined;
       if (requestGeneration.retired) {
         await bounded(reject(), "NATIVE_REDIRECT_ABORT_TIMEOUT"); record.paused = false;
         failRecord(record, "NATIVE_READ_SUPERSEDED"); record.handlerDone = true; return;
@@ -453,7 +503,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         await close("NATIVE_REDIRECT_HANDLER_FAILED");
       } finally { record.handlerDone = true; }
     })().catch(error => { void close(error instanceof Error && /^[A-Z_0-9]+$/u.test(error.message) ? error.message : "NATIVE_REDIRECT_ROUTING_FAILED"); })
-      .finally(() => { pendingReads--; });
+      .finally(() => { if (pendingInitialPause) initialPauses.delete(pendingInitialPause.id); pendingReads--; });
   });
   try {
     await cdp.send("Network.enable", { maxTotalBufferSize: PUBLIC_BROWSER_TOTAL_BYTES, maxResourceBufferSize: 16_000_000, maxPostDataSize: 32768 });
@@ -480,13 +530,15 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         // Abort pauses first: stopLoading can invalidate an interception before
         // Chrome has delivered its terminal event. Never infer an ACK from
         // Invalid InterceptionId or release a lease on that error.
+        await Promise.all([...initialPauses.values()].filter(pause => pause.generation === previous).map(abortInitialPause));
         await Promise.all(old.filter(record => record.paused || record.responsePaused).map(async record => {
           if (record.complete || record.failed) return;
           await abortRetiredPause(record, cdp.send("Fetch.failRequest", { requestId: record.id, errorReason: "BlockedByClient" }));
         }));
         await bounded(cdp.send("Page.stopLoading"), "NATIVE_REDIRECT_DRAIN_TIMEOUT");
         await bounded((async () => {
-          while ([...records.values()].some(record => record.generation === previous && (!record.handlerDone || !record.complete && !record.failed))) {
+          while ([...initialPauses.values()].some(pause => pause.generation === previous) ||
+            [...records.values()].some(record => record.generation === previous && (!record.handlerDone || !record.complete && !record.failed))) {
             if (closed || options.signal?.aborted) throw new Error("NATIVE_REDIRECT_CLOSED");
             await new Promise(resolve => setTimeout(resolve, 5));
           }

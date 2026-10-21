@@ -77,6 +77,20 @@ describe("durable discovery browser diagnostics", () => {
     expect(restored).toMatchObject({ urls: [], readUrls: [], entryUrls: [], officialObserved: false });
     expect(JSON.stringify(restored)).not.toMatch(/private|2026|headers|postData"|networkId"|frameId|requestId/);
   });
+  it.each(["LOADER_IDENTITY_WAIT", "LOADER_IDENTITY", "LOADER_OWNER", "REDIRECT_GENERATION"])("keeps bounded %s facts without retaining native IDs or supplied values", phase => {
+    const safe = safeBrowserFailureDiagnostics({ nativeFirstFatal: { code: "NATIVE_REDIRECT_LOADER_MISMATCH", phase,
+      identityPresent: true, loaderPresent: true, loaderKnown: false, identityFresh: false, identityUrlMatches: false,
+      identityMethodMatches: true, identityKindMatches: true, identityFrameMatches: true,
+      loaderId: "private", networkId: "private", revision: 123, url: "https://venue.example/read?secret=private" } });
+    expect(safe.nativeFirstFatal).toEqual({ code: "NATIVE_REDIRECT_LOADER_MISMATCH", phase,
+      identityPresent: true, loaderPresent: true, loaderKnown: false, identityFresh: false, identityUrlMatches: false,
+      identityMethodMatches: true, identityKindMatches: true, identityFrameMatches: true });
+    expect(JSON.stringify(safe)).not.toMatch(/private|loaderId|networkId|revision|secret/);
+    const malformed = safeBrowserFailureDiagnostics({ nativeFirstFatal: { code: "NATIVE_REDIRECT_LOADER_MISMATCH", phase: "private",
+      identityPresent: "true", loaderPresent: "private", loaderKnown: 1, identityFresh: 0, identityUrlMatches: {},
+      identityMethodMatches: [], identityKindMatches: null, identityFrameMatches: "private" } });
+    expect(malformed.nativeFirstFatal).toEqual({ code: "NATIVE_REDIRECT_LOADER_MISMATCH" });
+  });
   it("bounds native diagnostics and omits malformed metadata and unsafe URLs", () => {
     const safe = safeBrowserFailureDiagnostics({ nativeFirstFatal: { code: "NATIVE_REDIRECT_NETWORK_ID_MISSING",
       method: "GET private", resourceType: "script private", interceptedRequests: 1026, recordCount: -1, requestLimit: Infinity,

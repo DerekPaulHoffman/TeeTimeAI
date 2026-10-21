@@ -37,6 +37,139 @@ describe("native document-generation retirement", () => {
     identity(test, id, loader, "Document"); test.request(id, { resourceType: "Document" });
   };
 
+  it.each(["https://example.org/booking", "https://example.org/data"])("waits for a fresh network hop for redirect %s before its network event", async target => {
+    const test = await installed();
+    try {
+      await startDocument(test); await test.routes[0].continue();
+      test.response("document", { resourceType: "Document", responseStatusCode: 302, responseHeaders: [{ name: "Location", value: target }] });
+      await test.routes[0].request().response();
+      test.request("child", { networkId: "network-document", resourceType: "Document", redirectedRequestId: "document",
+        request: { url: target, method: "GET", headers: {} } });
+      await new Promise(resolve => setTimeout(resolve, 10));
+      expect(test.failures).toEqual([]); expect(test.routes).toHaveLength(1);
+      identity(test, "document", "loader-one", "Document", target);
+      await vi.waitFor(() => expect(test.routes).toHaveLength(2));
+      await test.routes[1].continue();
+      test.response("child", { networkId: "network-document", resourceType: "Document", request: { url: target, method: "GET", headers: {} } });
+      expect((await test.routes[1].request().response())?.status()).toBe(200);
+      expect(test.failures).toEqual([]);
+    } finally { await test.guard.close(); }
+  });
+
+  it.each(["URL", "method", "kind", "loader"])("rejects fresh redirect metadata with the wrong %s before dispatch", async mismatch => {
+    const test = await installed(), target = "https://example.org/booking";
+    try {
+      await startDocument(test); await test.routes[0].continue();
+      test.response("document", { resourceType: "Document", responseStatusCode: 302, responseHeaders: [{ name: "Location", value: target }] });
+      await test.routes[0].request().response();
+      test.request("child", { networkId: "network-document", resourceType: "Document", redirectedRequestId: "document",
+        request: { url: target, method: "GET", headers: {} } });
+      test.events.get("Network.requestWillBeSent")!({ requestId: "network-document", loaderId: mismatch === "loader" ? "unknown" : "loader-one",
+        frameId: "main", type: mismatch === "kind" ? "Script" : "Document",
+        request: { url: mismatch === "URL" ? "https://example.org/wrong" : target, method: mismatch === "method" ? "HEAD" : "GET" } });
+      await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_LOADER_MISMATCH"));
+      expect(test.routes).toHaveLength(1);
+      expect(test.guard.firstFatal).toMatchObject({ code: "NATIVE_REDIRECT_LOADER_MISMATCH", identityFresh: true,
+        phase: mismatch === "loader" ? "LOADER_OWNER" : "LOADER_IDENTITY" });
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "child")).toBe(false);
+    } finally { await test.guard.close(); }
+  });
+
+  it.each(["missing", "foreign network", "foreign frame"])("times out without admitting a redirect from %s metadata", async mismatch => {
+    const test = await installed(), target = "https://example.org/booking";
+    try {
+      await startDocument(test); await test.routes[0].continue();
+      test.response("document", { resourceType: "Document", responseStatusCode: 302, responseHeaders: [{ name: "Location", value: target }] });
+      await test.routes[0].request().response();
+      test.request("child", { networkId: "network-document", resourceType: "Document", redirectedRequestId: "document",
+        request: { url: target, method: "GET", headers: {} } });
+      if (mismatch !== "missing") test.events.get("Network.requestWillBeSent")!({
+        requestId: mismatch === "foreign network" ? "network-other" : "network-document", loaderId: "loader-one",
+        frameId: mismatch === "foreign frame" ? "child" : "main", type: "Document", request: { url: target, method: "GET" } });
+      await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_LOADER_TIMEOUT"));
+      await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+      expect(test.routes).toHaveLength(1);
+      expect(test.guard.firstFatal).toMatchObject({ code: "NATIVE_REDIRECT_LOADER_TIMEOUT", phase: "LOADER_IDENTITY_WAIT", identityFresh: false });
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "child")).toBe(false);
+    } finally { await test.guard.close(); }
+  });
+
+  it.each(["cancel", "retire"])("never dispatches a waiting redirect after document %s", async mode => {
+    const abort = new AbortController(), test = await installed(undefined, abort.signal), target = "https://example.org/booking";
+    try {
+      await startDocument(test); await test.routes[0].continue();
+      test.response("document", { resourceType: "Document", responseStatusCode: 302, responseHeaders: [{ name: "Location", value: target }] });
+      await test.routes[0].request().response();
+      test.request("child", { networkId: "network-document", resourceType: "Document", redirectedRequestId: "document",
+        request: { url: target, method: "GET", headers: {} } });
+      if (mode === "cancel") abort.abort(); else await test.guard.beginDocumentNavigation(test.main as never);
+      identity(test, "document", "loader-one", "Document", target);
+      await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+      expect(test.routes).toHaveLength(1);
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "child")).toBe(false);
+    } finally { await test.guard.close(); }
+  });
+
+  it("reserves one redirect child while its network metadata is pending", async () => {
+    const test = await installed(), target = "https://example.org/booking";
+    try {
+      await startDocument(test); await test.routes[0].continue();
+      test.response("document", { resourceType: "Document", responseStatusCode: 302, responseHeaders: [{ name: "Location", value: target }] });
+      await test.routes[0].request().response();
+      for (const id of ["child", "duplicate-child"]) test.request(id, { networkId: "network-document", resourceType: "Document", redirectedRequestId: "document",
+        request: { url: target, method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_PROVENANCE_REJECTED"));
+      identity(test, "document", "loader-one", "Document", target);
+      await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+      expect(test.routes).toHaveLength(1);
+    } finally { await test.guard.close(); }
+  });
+
+  it.each(["cancel", "retire"])("settles a pending redirect on %s without any late network event or fatal timer", async mode => {
+    const abort = new AbortController(), test = await installed(undefined, abort.signal), target = "https://example.org/booking";
+    try {
+      await startDocument(test); await test.routes[0].continue();
+      test.response("document", { resourceType: "Document", responseStatusCode: 302, responseHeaders: [{ name: "Location", value: target }] });
+      await test.routes[0].request().response();
+      test.request("child", { networkId: "network-document", resourceType: "Document", redirectedRequestId: "document",
+        request: { url: target, method: "GET", headers: {} } });
+      if (mode === "cancel") abort.abort(); else await test.guard.beginDocumentNavigation(test.main as never);
+      await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+      expect(test.routes).toHaveLength(1);
+      if (mode === "retire") {
+        const commands = test.cdp.send.mock.calls;
+        const abortIndex = commands.findIndex(([name, value]) => name === "Fetch.failRequest" && value?.requestId === "child");
+        expect(abortIndex).toBeGreaterThanOrEqual(0);
+        expect(commands.slice(abortIndex + 1).some(([name]) => name === "Page.stopLoading")).toBe(true);
+        identity(test, "successor", "loader-two", "Document"); test.request("successor", { resourceType: "Document" });
+        await test.routes[1].continue(); test.response("successor", { resourceType: "Document" });
+        expect((await test.routes[1].request().response())?.status()).toBe(200);
+      }
+      await new Promise(resolve => setTimeout(resolve, 150));
+      expect(test.failures).toEqual(mode === "cancel" ? ["NATIVE_REDIRECT_CANCELLED"] : []);
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "child")).toBe(false);
+    } finally { await test.guard.close(); }
+  });
+
+  it.each(["reject", "hang"])("requires the pending redirect pause's abort ACK before retirement when it %s", async mode => {
+    const test = await installed(), target = "https://example.org/booking", send = test.cdp.send.getMockImplementation()!;
+    try {
+      await startDocument(test); await test.routes[0].continue();
+      test.response("document", { resourceType: "Document", responseStatusCode: 302, responseHeaders: [{ name: "Location", value: target }] });
+      await test.routes[0].request().response();
+      test.request("child", { networkId: "network-document", resourceType: "Document", redirectedRequestId: "document",
+        request: { url: target, method: "GET", headers: {} } });
+      const stopsBefore = test.cdp.send.mock.calls.filter(([name]) => name === "Page.stopLoading").length;
+      test.cdp.send.mockImplementation((name, value) => name === "Fetch.failRequest" && value?.requestId === "child" ?
+        mode === "hang" ? new Promise(() => {}) : Promise.reject(new Error("pending pause abort rejected")) : send(name, value));
+      await expect(test.guard.beginDocumentNavigation(test.main as never)).rejects.toThrow(
+        mode === "hang" ? "NATIVE_REDIRECT_ABORT_TIMEOUT" : "pending pause abort rejected");
+      expect(test.close).toHaveBeenCalledOnce();
+      expect(test.cdp.send.mock.calls.filter(([name]) => name === "Page.stopLoading")).toHaveLength(stopsBefore);
+      expect(test.routes).toHaveLength(1);
+    } finally { await test.guard.close(); }
+  });
+
   it("waits for exact old-network terminal ACK and handler/lease drain; queued/late old reads never dispatch or become evidence", async () => {
     const test = await installed(), session = new AbortController(), stop = vi.fn(async () => {});
     let active = 0, released = 0; const completed: string[] = [], errors: unknown[] = [];
@@ -143,6 +276,40 @@ describe("native document-generation retirement", () => {
 
 const nativeChromePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 describe.runIf(existsSync(nativeChromePath))("offline Chrome document ownership", () => {
+  it("loads actual document and script HTTP redirects with document-generation tracking enabled", async () => {
+    const reads: string[] = [], bodies: string[] = [], failures: string[] = [];
+    const server = createServer((request, response) => {
+      const path = request.url!; reads.push(path);
+      if (path === "/start" || path === "/old.js") {
+        response.writeHead(302, { Location: path === "/start" ? "/" : "/current.js" }); response.end(); return;
+      }
+      response.setHeader("Content-Type", path === "/current.js" ? "application/javascript" : "text/html");
+      response.end(path === "/current.js" ? 'document.documentElement.dataset.publicRead="complete";' :
+        '<h1>Public redirected course</h1><script defer src="/old.js"></script>');
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const browser = await chromium.launch({ executablePath: nativeChromePath, headless: true });
+    const context = await browser.newContext({ serviceWorkers: "block" }), page = await context.newPage(), session = new AbortController();
+    const queue = createSimulatorBrowserRequestQueue(async (_host, work) => ({ acquired: true as const, value: await work() }), session.signal);
+    const guard = await installNativeRedirectRouting(page, async route => {
+      const reply = await queue.run("fixture", () => continueNativeBrowserRead(route, session.signal, 5000), route.request().signal);
+      bodies.push(reply.body.toString());
+    }, { timeoutMs: 3000, maxRequests: 16, onFailure: code => failures.push(code) });
+    try {
+      await guard.beginDocumentNavigation(page.mainFrame()); await page.goto(`${url}/start`, { waitUntil: "domcontentloaded" });
+      await vi.waitFor(() => expect(guard.pendingReads).toBe(0));
+      expect(await page.locator("h1").innerText()).toBe("Public redirected course");
+      expect(await page.locator("html").getAttribute("data-public-read")).toBe("complete");
+      expect(reads).toEqual(expect.arrayContaining(["/start", "/", "/old.js", "/current.js"]));
+      expect(bodies.some(body => body.includes("Public redirected course"))).toBe(true);
+      expect(failures).toEqual([]); expect(guard.firstFatal).toBeUndefined();
+    } finally {
+      session.abort(); await guard.close(); queue.dispose(); await browser.close();
+      server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+  }, 15_000);
+
   it("terminates an old real document's active/queued assets before the next document uses the same lease lane", async () => {
     const reads: string[] = [], closed: string[] = [], bodies: string[] = [], failures: string[] = [];
     const server = createServer((request, response) => {
