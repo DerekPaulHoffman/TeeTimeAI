@@ -14,8 +14,11 @@ function rental() { return { id: 101, store_id: storeId, name: "Bay rental", pro
   sale_start_date: null, sale_end_date: null, metadata: null, plan_id: null, grant_type: null, tier_code: null, external_ref_id: null,
   total_count: null, total_minutes: null, period_minutes: null, period_unit: null, validity_period_value: null, validity_period_unit: null,
   billing_interval: null, plan_name: null, plan_subtitle: null }; }
+function membership(id = 201) { return { ...rental(), id, name: "Practice Membership", product_type: "PASS", duration_minutes: null,
+  resource_type: null, min_party_size: null, max_party_size: null, plan_id: 31, billing_interval: "monthly", base_price: 99,
+  plan_name: "Practice Membership", sale_start_date: "2026-10-21 00:00:00", metadata: { membership: { pricing: { monthly: { enabled: true, price: 99 } } } } }; }
 function rooms() { return { has_unassigned: 1, room_types: [{ code: "private", name: "Private Room", surcharge: 0, confirm_policy: "INSTANT" }] }; }
-const parse = (stores = [store()], products = [rental()], room = rooms(), identity = source) =>
+const parse = (stores = [store()], products: unknown[] = [rental()], room = rooms(), identity = source) =>
   parseGolfVxConfiguration(envelope(stores), envelope(products), envelope([room]), identity);
 
 describe("GolfVX exact public source and immutable configuration", () => {
@@ -76,6 +79,34 @@ describe("GolfVX exact public source and immutable configuration", () => {
     const current = parse(undefined, [rental(), { ...rental(), id: 102, duration_minutes: 15 }]);
     expect(current.products).toHaveLength(2); expect(current.catalogHash).not.toBe(baseline.catalogHash);
     expect(parse(undefined, undefined, { has_unassigned: 0, room_types: rooms().room_types }).catalogHash).not.toBe(baseline.catalogHash);
+  });
+  it("excludes only validated non-resource membership passes without changing saved rental metadata/hash", () => {
+    const baseline = parse();
+    expect(parse(undefined, [membership(), rental(), membership(202)])).toEqual(baseline);
+    expect(parse(undefined, [rental(), { ...membership(), name: "Updated Public Plan", plan_id: 32, base_price: 199,
+      available_online: 0, status: "INACTIVE", sale_start_date: "2026-11-01 00:00:00",
+      metadata: { membership: { pricing: { monthly: { enabled: true, price: 199 }, yearly: { enabled: true, price: 1999 } } } } }])).toEqual(baseline);
+    expect(() => parse(undefined, [membership()])).toThrow("GOLFVX_RENTAL_SCHEMA_UNSUPPORTED");
+  });
+  it("validates every catalog identity and duplicate before excluding any non-rental pass", () => {
+    for (const rows of [[rental(), membership(), membership()], [rental(), membership(101)], [rental(), { ...membership(), store_id: otherId }],
+      [rental(), { ...membership(), id: 0 }], [rental(), { ...membership(), id: "201" }],
+      [rental(), membership(), { ...membership(), resource_type: "SCREEN_GOLF" }]])
+      expect(() => parse(undefined, rows)).toThrow("GOLFVX_PRODUCT_IDENTITY_INVALID");
+  });
+  it.each(["resource_type", "secondary_resource_type", "duration_minutes", "min_party_size", "max_party_size"])("rejects PASS with a rental hint in %s", field => {
+    const value = field.endsWith("resource_type") ? "SCREEN_GOLF" : 1;
+    expect(() => parse(undefined, [rental(), { ...membership(), [field]: value }])).toThrow("GOLFVX_NONRENTAL_SCHEMA_UNSUPPORTED");
+  });
+  it.each(["plan_id", "billing_interval", "sale_start_date", "metadata", "plan_name", "base_price"])("rejects malformed non-rental PASS %s", field => {
+    const value = ({ plan_id: 0, billing_interval: "unknown", sale_start_date: "2026-02-30 00:00:00", metadata: null, plan_name: null, base_price: "99" } as Record<string, unknown>)[field];
+    expect(() => parse(undefined, [rental(), { ...membership(), [field]: value }])).toThrow("GOLFVX_NONRENTAL_SCHEMA_UNSUPPORTED");
+  });
+  it("rejects unknown types and malformed status/online/booking modes rather than silently excluding them", () => {
+    expect(() => parse(undefined, [rental(), { ...membership(), product_type: "UNKNOWN" }])).toThrow("GOLFVX_PRODUCT_TYPE_UNSUPPORTED");
+    for (const row of [{ ...membership(), status: "UNKNOWN" }, { ...membership(), available_online: true }, { ...membership(), booking_type: "MEMBER" }])
+      expect(() => parse(undefined, [rental(), row])).toThrow("GOLFVX_PRODUCT_IDENTITY_INVALID");
+    expect(() => parse(undefined, [rental(), { ...membership(), product_type: "TIMED" }])).toThrow("GOLFVX_RENTAL_SCHEMA_UNSUPPORTED");
   });
   it("rejects duplicate/unsafe/empty room scopes and unproved confirmation policy", () => {
     expect(() => parse(undefined, undefined, { ...rooms(), room_types: [...rooms().room_types, ...rooms().room_types] })).toThrow();

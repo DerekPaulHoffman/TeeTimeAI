@@ -20,6 +20,9 @@ function rental(id = 101, base = 5) { return { id, store_id: storeId, name: "Bay
   sale_start_date: null, sale_end_date: null, metadata: null, plan_id: null, grant_type: null, tier_code: null, external_ref_id: null,
   total_count: null, total_minutes: null, period_minutes: null, period_unit: null, validity_period_value: null, validity_period_unit: null,
   billing_interval: null, plan_name: null, plan_subtitle: null }; }
+function membership(id = 201) { return { ...rental(), id, name: "Practice Membership", product_type: "PASS", duration_minutes: null,
+  resource_type: null, min_party_size: null, max_party_size: null, plan_id: 31, billing_interval: "monthly", base_price: 99,
+  plan_name: "Practice Membership", sale_start_date: "2026-10-21 00:00:00", metadata: { membership: { pricing: { monthly: { enabled: true, price: 99 } } } } }; }
 const rooms = () => ({ has_unassigned: 1, room_types: [{ code: "private", name: "Private Room", surcharge: 0, confirm_policy: "INSTANT" }] });
 function availability() { return { slot_minutes: 15, min_booking_minutes: 60, max_booking_minutes: null, max_party_size: 6, store_timezone: source.timeZone,
   store_now: "2026-10-21T14:39:22-04:00", business_date: "2026-10-21", booking_start_date: "2026-10-21", booking_end_date: "2026-10-27", reason: null,
@@ -27,7 +30,7 @@ function availability() { return { slot_minutes: 15, min_booking_minutes: 60, ma
     return { start: `${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(minute % 60).padStart(2, "0")}`, available: remaining >= 60,
       max_available_minutes: remaining, bays: 9, bays_for_full: remaining >= 60 ? 9 : 0, zone: "OFFPEAK", is_peak: false }; }) }; }
 const metadata = () => parseGolfVxConfiguration(envelope([store()]), envelope([rental()]), envelope([rooms()]), source);
-type Options = { products?: ReturnType<typeof rental>[]; stores?: ReturnType<typeof store>[]; room?: ReturnType<typeof rooms>;
+type Options = { products?: unknown[]; stores?: ReturnType<typeof store>[]; room?: ReturnType<typeof rooms>;
   availability?: (url: URL) => unknown; transform?: (url: URL, response: Response) => Response };
 function dependencies(options: Options = {}) {
   const reads: URL[] = [], inits: RequestInit[] = [], families: string[] = []; let active = 0, maximum = 0;
@@ -76,6 +79,27 @@ describe("GolfVX fixed public all-product/all-room reader", () => {
     const deps = dependencies({ products }); const slots = await execute(deps, input, saved);
     expect(deps.reads).toHaveLength(7); expect(slots).toHaveLength(148); expect(new Set(slots.map(value => value.productId))).toHaveLength(2);
   });
+  it("reuses the identical saved rental method after membership passes are added or repriced, without membership reads", async () => {
+    const deps = dependencies({ products: [membership(), rental(), { ...membership(202), base_price: 299, plan_id: 32 }] });
+    expect(await inspectGolfVx(source, deps)).toEqual(metadata());
+    const slots = await execute(deps);
+    expect(slots).toHaveLength(74); expect(new Set(slots.map(slot => slot.productId))).toEqual(new Set(["golfvx-product:101"]));
+    expect(deps.reads.filter(url => url.pathname.endsWith("/availability"))).toHaveLength(2);
+    expect(deps.reads.filter(url => url.pathname.endsWith("/availability")).every(url => url.searchParams.get("product_id") === "101")).toBe(true);
+    expect(deps.reads.every(url => !/member|plan|quote|create|hold|payment/u.test(url.pathname))).toBe(true);
+  });
+  it("keeps every rental × room in scope when unrelated passes are present", async () => {
+    const products = [membership(), rental(), rental(102, 15)];
+    const saved = parseGolfVxConfiguration(envelope([store()]), envelope(products), envelope([rooms()]), source);
+    const deps = dependencies({ products }); expect(await execute(deps, input, saved)).toHaveLength(148); expect(deps.reads).toHaveLength(7);
+  });
+  it("rejects ambiguous or malformed passes before any availability read", async () => {
+    for (const products of [[rental(), { ...membership(), resource_type: "SCREEN_GOLF" }], [rental(), membership(), membership()],
+      [rental(), { ...membership(), store_id: "22222222-2222-4222-8222-222222222222" }]]) {
+      const deps = dependencies({ products }); await expect(execute(deps)).rejects.toThrow(/GOLFVX_(?:NONRENTAL_SCHEMA_UNSUPPORTED|PRODUCT_IDENTITY_INVALID)/u);
+      expect(deps.reads.some(url => url.pathname.endsWith("/availability"))).toBe(false);
+    }
+  });
   it("fails before any availability read on saved/fresh catalog or identity changes", async () => {
     for (const deps of [dependencies({ products: [rental(), rental(102)] }), dependencies({ room: { ...rooms(), has_unassigned: 0 } }),
       dependencies({ stores: [{ ...store(), store_name: "Golf VX Other City" }] })]) {
@@ -109,6 +133,20 @@ describe("GolfVX fixed public all-product/all-room reader", () => {
     if (kind === "available") row.available = false; if (kind === "full") row.bays_for_full = 0;
     if (kind === "bayCount") row.bays_for_full = 10; if (kind === "duration") row.max_available_minutes = 30; if (kind === "peak") row.is_peak = true;
     await expect(execute(dependencies({ availability: () => envelope([data]) }))).rejects.toThrow("ADAPTER_SLOT_MISMATCH");
+  });
+  it("accepts explicit EARLY non-peak rows in a complete mixed rate-zone grid", async () => {
+    const data = availability();
+    data.slots.forEach((row, index) => { row.zone = index < 16 ? "EARLY" : index < 36 ? "OFFPEAK" : "PEAK"; row.is_peak = row.zone === "PEAK"; });
+    const slots = await execute(dependencies({ availability: () => envelope([data]) }));
+    expect(slots).toHaveLength(74); expect(slots.every(slot => slot.availableSpots === 1 && slot.capacity === 4)).toBe(true);
+  });
+  it("rejects EARLY rows falsely marked peak", async () => {
+    const data = availability(); data.slots[0].zone = "EARLY"; data.slots[0].is_peak = true;
+    await expect(execute(dependencies({ availability: () => envelope([data]) }))).rejects.toThrow("ADAPTER_SLOT_MISMATCH");
+  });
+  it.each(["UNKNOWN", "early", "NIGHT"])("continues to reject unqualified rate-zone value %s", async zone => {
+    const data = availability(); data.slots[0].zone = zone;
+    await expect(execute(dependencies({ availability: () => envelope([data]) }))).rejects.toThrow("ADAPTER_AVAILABILITY_SCHEMA_CHANGED");
   });
   it("fails the entire run if any required room scope fails", async () => {
     await expect(execute(dependencies({ transform: (url, response) => url.searchParams.get("room_type") === "private" ? new Response("", { status: 503 }) : response }))).rejects.toThrow("ADAPTER_TRANSPORT_FAILED");

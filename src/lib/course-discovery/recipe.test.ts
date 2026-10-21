@@ -3,7 +3,8 @@ import { z } from "zod";
 import { venueProofMatches } from "./executor";
 import { matchesPublicVenueGreeting } from "./public-venue-greeting";
 import { accessExecutionInputSchema, accessExecutionResultSchema, accessRecipeSchema, expandRecipeTemplate, hashAccessRecipe,
-  isActiveBrowserAccessChallenge, isSafeBrowserAssetUrl, isSafeRecipeUrl, parseAccessRecipe, recipeAllowsRequest, recipeSelectorSchema, readRecipeFieldFormat } from "./recipe";
+  isActiveBrowserAccessChallenge, isSafeBrowserAssetUrl, isSafeRecipeUrl, parseAccessRecipe, recipeAllowsRequest, recipeSelectorSchema, readRecipeFieldFormat,
+  SERVER_DOCUMENT_SELECTOR_MESSAGE } from "./recipe";
 
 export const httpRecipe = () => ({
   schemaVersion: 1 as const, engine: "HTTP_JSON" as const,
@@ -16,8 +17,76 @@ export const httpRecipe = () => ({
   slots: { collection: { path: "slots" }, startsAt: { path: "start" }, availableSpots: { path: "capacity" }, holes: { path: "holes" } },
 });
 export const executionInput = { date: "2026-10-22", timeZone: "America/New_York", players: 2, startTime: "08:00", endTime: "12:00" };
+const serverDocumentRecipe = () => ({
+  schemaVersion: 1, engine: "BROWSER_DOM", target: httpRecipe().target, source: httpRecipe().source,
+  pageUrl: "https://example.org/teetimes?teedate={{dateCompact}}", steps: [],
+  permittedRoutes: [{ origin: "https://example.org", path: "/teetimes", methods: ["GET"], queryKeys: ["teedate"] }],
+  availabilityResponse: { kind: "SERVER_DOCUMENT", url: "https://example.org/teetimes?teedate={{dateCompact}}",
+    method: "GET", date: { source: "QUERY", path: "teedate" } },
+  proof: { venue: { selector: ".be_search_message_body p", format: "VENUE_GREETING" },
+    date: { selector: "#SearchForm_Date", attribute: "value" }, complete: { serverDocument: true } },
+  slots: { collection: { selector: ".matrixTable tbody tr" }, startsAt: { selector: ".mtrxTeeTimes" },
+    availableSpots: { selector: ".matrixPlayers" }, minimumPlayers: { selector: ".matrixPlayers" } },
+});
 
 describe("course access recipes", () => {
+  it.each([".be_search_message_body p:first-child", ".be_search_message_body p:nth-of-type(1)"])(
+    "identifies the exact unsupported static venue selector field for %s", selector => {
+      const recipe = serverDocumentRecipe();
+      for (const venue of [{ ...recipe.proof.venue, selector }, { selector }]) {
+        const result = accessRecipeSchema.safeParse({ ...recipe, proof: { ...recipe.proof, venue } });
+        expect(result.success).toBe(false);
+        if (result.success) throw new Error("Expected the static selector rejection");
+        expect(result.error.issues).toEqual([{ code: "custom", path: ["proof", "venue", "selector"], message: SERVER_DOCUMENT_SELECTOR_MESSAGE }]);
+        expect(JSON.stringify(result.error.issues)).not.toContain(selector);
+      }
+    });
+  it.each(["#venue", ".venue", ".venue p", "section.venue > p.greeting", "h1#venue.title"])(
+    "retains valid static selector %s and the supported value attribute reader", selector => {
+      const recipe = serverDocumentRecipe();
+      expect(parseAccessRecipe({ ...recipe, proof: { ...recipe.proof, venue: { ...recipe.proof.venue, selector } } }))
+        .toMatchObject({ proof: { venue: { selector }, date: { selector: "#SearchForm_Date", attribute: "value" } } });
+    });
+  it.each(["p[class=greeting]", ".venue *", "h1,h2", "h1 + p", "h1 ~ p"])(
+    "preserves the static grammar rejection for %s", selector => {
+      const recipe = serverDocumentRecipe(), result = accessRecipeSchema.safeParse({ ...recipe,
+        proof: { ...recipe.proof, venue: { ...recipe.proof.venue, selector } } });
+      expect(result.success).toBe(false);
+      if (result.success) throw new Error("Expected the static selector rejection");
+      expect(result.error.issues).toContainEqual({ code: "custom", path: ["proof", "venue", "selector"], message: SERVER_DOCUMENT_SELECTOR_MESSAGE });
+    });
+  it.each([
+    ["proof", "date"], ["proof", "complete"], ["proof", "empty"], ["proof", "players"], ["proof", "durationMinutes"],
+    ["slots", "collection"], ["slots", "startsAt"], ["slots", "endsAt"], ["slots", "availableSpots"],
+    ["slots", "minimumPlayers"], ["slots", "capacity"], ["slots", "holes"], ["slots", "resourceId"], ["slots", "productId"],
+  ] as const)("reports an unsupported static selector at %s.%s.selector", (section, name) => {
+    const recipe = serverDocumentRecipe(), result = accessRecipeSchema.safeParse({ ...recipe,
+      [section]: { ...recipe[section], [name]: { selector: ".field:nth-of-type(1)" } } });
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error("Expected the static selector rejection");
+    expect(result.error.issues).toContainEqual({ code: "custom", path: [section, name, "selector"], message: SERVER_DOCUMENT_SELECTOR_MESSAGE });
+  });
+  it("does not impose static selector grammar on an ordinary browser JSON-response recipe", () => {
+    const recipe = serverDocumentRecipe();
+    expect(() => parseAccessRecipe({ ...recipe, availabilityResponse: { ...recipe.availabilityResponse, kind: "JSON" },
+      proof: { ...recipe.proof, venue: { ...recipe.proof.venue, selector: ".venue p:first-child" }, complete: { selector: "#ready" } } })).not.toThrow();
+  });
+  it("emits the precise conditional static grammar in the model's actual JSON schema", () => {
+    const schema = z.toJSONSchema(accessRecipeSchema, { io: "input", unrepresentable: "any" });
+    const descriptions: string[] = [];
+    const inspect = (value: unknown) => {
+      if (!value || typeof value !== "object") return;
+      const node = value as { properties?: { engine?: { const?: string }; availabilityResponse?: { description?: string } } };
+      if (node.properties?.engine?.const === "BROWSER_DOM") descriptions.push(node.properties.availabilityResponse?.description ?? "");
+      for (const child of Object.values(value)) inspect(child);
+    };
+    inspect(schema);
+    expect(descriptions).toHaveLength(1);
+    for (const rule of ["For SERVER_DOCUMENT, every proof field selector, slot field selector and slots.collection.selector",
+      SERVER_DOCUMENT_SELECTOR_MESSAGE, ":first-child and :nth-of-type(1) are unsupported", 'attribute:"value" remain available'])
+      expect(descriptions[0]).toContain(rule);
+    expect(JSON.stringify(schema)).toContain("SERVER_DOCUMENT proof and slot/collection readers use the stricter static grammar");
+  });
   it("exposes the existing bounded venue-name equivalence in the model's greeting JSON schema", () => {
     const schema = z.toJSONSchema(accessRecipeSchema, { io: "input", unrepresentable: "any" });
     const variants: Array<Record<string, unknown>> = [];

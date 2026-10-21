@@ -19,7 +19,9 @@ const clock = z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/u);
 const minutes = (value: string) => Number(value.slice(0, 2)) * 60 + Number(value.slice(3));
 const slotSchema = z.object({ start: clock, available: z.boolean(), max_available_minutes: z.number().int().min(0).max(1440),
   bays: z.number().int().min(0).max(100), bays_for_full: z.number().int().min(0).max(100),
-  zone: z.enum(["PEAK", "OFFPEAK"]), is_peak: z.boolean() }).strict();
+  // Retained public client 8575046b...6453 at offsets 722/1038 names EARLY
+  // explicitly as Morning. The captured public response marks it non-peak.
+  zone: z.enum(["PEAK", "OFFPEAK", "EARLY"]), is_peak: z.boolean() }).strict();
 const availabilitySchema = z.object({ slot_minutes: z.literal(15), min_booking_minutes: z.number().int().min(1).max(480),
   max_booking_minutes: z.number().int().min(1).max(1440).nullable(), max_party_size: z.number().int().min(1).max(100),
   store_timezone: z.string().min(3).max(100), store_now: z.string().datetime({ offset: true }), business_date: dateOnly,

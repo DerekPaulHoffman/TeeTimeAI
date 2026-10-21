@@ -21,6 +21,23 @@ const product = z.object({ id, name: rentalName, durationMinutes: z.number().int
   minPartySize: id.max(100), maxPartySize: id.max(100), productType: z.literal("TIMED"), bookingType: z.literal("PURCHASE"),
   resourceType: z.literal("SCREEN_GOLF"), availableOnline: z.union([z.literal(0), z.literal(1)]), status: z.enum(["ACTIVE", "INACTIVE"]) }).strict()
   .refine(value => value.minPartySize <= value.maxPartySize);
+const productIdentity = z.object({ id, store_id: uuid, name: z.string().trim().min(2).max(160), product_type: z.string().min(1).max(40),
+  booking_type: z.literal("PURCHASE"), available_online: z.union([z.literal(0), z.literal(1)]), status: z.enum(["ACTIVE", "INACTIVE"]) });
+const saleDateTime = z.string().regex(/^\d{4}-\d{2}-\d{2} (?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d$/u).refine(value => {
+  const parsed = new Date(`${value.replace(" ", "T")}Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 19) === value.replace(" ", "T");
+});
+// Public PASS plans have no rental resource/duration/party binding. Only this
+// explicit non-inventory shape may be excluded; a PASS with any resource hint
+// or a malformed/foreign/duplicate catalog identity remains unsupported.
+const nonRentalPass = productIdentity.extend({ product_type: z.literal("PASS"), duration_minutes: z.null(), resource_type: z.null(),
+  secondary_resource_type: z.null(), min_party_size: z.null(), max_party_size: z.null(), plan_id: id, billing_interval: z.literal("monthly"),
+  sale_start_date: saleDateTime.nullable(), sale_end_date: saleDateTime.nullable(), plan_name: z.string().trim().min(2).max(160),
+  plan_subtitle: z.string().max(400).nullable(), base_price: z.number().finite().min(0).max(1_000_000),
+  external_ref_id: z.null(), tier_code: z.null(), grant_type: z.null(), total_count: z.null(), total_minutes: z.null(), period_minutes: z.null(),
+  period_unit: z.null(), validity_period_value: z.null(), validity_period_unit: z.null(),
+  metadata: z.object({ membership: z.record(z.string(), z.unknown()) }).strict() })
+  .refine(value => value.sale_start_date === null || value.sale_end_date === null || value.sale_start_date <= value.sale_end_date);
 const rooms = z.object({ hasUnassigned: z.boolean(), types: z.array(z.object({ code: roomCode, name: z.string().trim().min(1).max(100),
   surcharge: z.number().finite().min(0).max(100_000), confirmPolicy: z.literal("INSTANT") }).strict()).max(20)
   .refine(values => new Set(values.map(value => value.code)).size === values.length) }).strict()
@@ -82,16 +99,29 @@ export function parseGolfVxConfiguration(storesBody: unknown, productsBody: unkn
     const result = z.object({ store_id: uuid, store_name: z.string().trim().min(5).max(200), industry_code: z.string().min(1).max(40),
       currency: z.string().min(1).max(10), timezone: timeZone, booking_period_days: id.max(366), operating_hours: z.string().max(8000),
       slot_duration_minutes: id.max(480), default_break_times: z.null() }).safeParse(value);
-    if (!result.success) fail(); return result.data;
+    if (!result.success) fail("GOLFVX_STORE_SCHEMA_UNSUPPORTED"); return result.data;
   });
   if (!stores.length || new Set(stores.map(value => value.store_id)).size !== stores.length) fail("ADAPTER_IDENTITY_MISMATCH");
   const selected = stores.find(value => value.store_id === context.storeId);
   if (!selected || nameKey(selected.store_name) !== nameKey(source.venueName) || nameKey(source.venueName).length < 8 ||
       selected.timezone !== source.timeZone || selected.industry_code !== "GOLF" || selected.currency !== "USD") fail("ADAPTER_IDENTITY_MISMATCH");
   let operatingHours: z.infer<typeof week>;
-  try { operatingHours = week.parse(JSON.parse(selected.operating_hours)); } catch { fail(); }
+  try { operatingHours = week.parse(JSON.parse(selected.operating_hours)); } catch { fail("GOLFVX_OPERATING_HOURS_UNSUPPORTED"); }
   const rawProducts = golfVxEnvelopeRows(productsBody);
-  const products = rawProducts.map(value => {
+  // Validate every row before excluding anything, including non-rental PASS
+  // identities. Excluded commerce changes cannot invalidate rental knowledge.
+  const catalog = rawProducts.map(value => {
+    const parsed = productIdentity.safeParse(value);
+    if (!parsed.success || parsed.data.store_id !== context.storeId) fail("GOLFVX_PRODUCT_IDENTITY_INVALID");
+    return { value, identity: parsed.data };
+  });
+  if (new Set(catalog.map(row => row.identity.id)).size !== catalog.length) fail("GOLFVX_PRODUCT_IDENTITY_INVALID");
+  const products = catalog.flatMap(({ value, identity }) => {
+    if (identity.product_type === "PASS") {
+      if (!nonRentalPass.safeParse(value).success) fail("GOLFVX_NONRENTAL_SCHEMA_UNSUPPORTED");
+      return [];
+    }
+    if (identity.product_type !== "TIMED") fail("GOLFVX_PRODUCT_TYPE_UNSUPPORTED");
     const parsed = z.object({ id, store_id: uuid, name: rentalName, product_type: z.literal("TIMED"), booking_type: z.literal("PURCHASE"),
       duration_minutes: id.max(480), resource_type: z.literal("SCREEN_GOLF"), secondary_resource_type: z.null(),
       min_party_size: id.max(100), max_party_size: id.max(100), available_online: z.union([z.literal(0), z.literal(1)]),
@@ -99,16 +129,19 @@ export function parseGolfVxConfiguration(storesBody: unknown, productsBody: unkn
       plan_id: z.null(), grant_type: z.null(), tier_code: z.null(), external_ref_id: z.null(), total_count: z.null(), total_minutes: z.null(),
       period_minutes: z.null(), period_unit: z.null(), validity_period_value: z.null(), validity_period_unit: z.null(),
       billing_interval: z.null(), plan_name: z.null(), plan_subtitle: z.null() }).safeParse(value);
-    if (!parsed.success || parsed.data.store_id !== context.storeId) fail();
+    if (!parsed.success) fail("GOLFVX_RENTAL_SCHEMA_UNSUPPORTED");
     const row = parsed.data;
-    return product.parse({ id: row.id, name: row.name, durationMinutes: row.duration_minutes, minPartySize: row.min_party_size, maxPartySize: row.max_party_size,
+    const rental = product.safeParse({ id: row.id, name: row.name, durationMinutes: row.duration_minutes, minPartySize: row.min_party_size, maxPartySize: row.max_party_size,
       productType: row.product_type, bookingType: row.booking_type, resourceType: row.resource_type, availableOnline: row.available_online, status: row.status });
+    if (!rental.success) fail("GOLFVX_RENTAL_SCHEMA_UNSUPPORTED");
+    return [rental.data];
   }).sort((a, b) => a.id - b.id);
+  if (!products.length || products.length > 20) fail("GOLFVX_RENTAL_SCHEMA_UNSUPPORTED");
   const rawRooms = golfVxEnvelopeRows(roomsBody);
-  if (rawRooms.length !== 1) fail();
+  if (rawRooms.length !== 1) fail("GOLFVX_ROOM_TYPES_COUNT_UNSUPPORTED");
   const parsedRooms = z.object({ has_unassigned: z.union([z.literal(0), z.literal(1)]), room_types: z.array(z.object({ code: roomCode,
     name: z.string().trim().min(1).max(100), surcharge: z.number().finite().min(0).max(100_000), confirm_policy: z.literal("INSTANT") }).strict()).max(20) }).strict().safeParse(rawRooms[0]);
-  if (!parsedRooms.success) fail();
+  if (!parsedRooms.success) fail("GOLFVX_ROOM_TYPES_SCHEMA_UNSUPPORTED");
   const config = { family: "GOLFVX" as const, ...context, timeZone: source.timeZone,
     identity: identity.parse({ officialUrl: source.officialUrl, venueName: source.venueName, venueAddress: source.venueAddress }),
     store: store.parse({ name: selected.store_name, industry: selected.industry_code, currency: selected.currency,

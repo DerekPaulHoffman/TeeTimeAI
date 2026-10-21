@@ -182,7 +182,7 @@ function safeLastFeedback(value) {
     return { code: value.code, details: { issues: issues.slice(0, 16).map(issue => ({
       path: typeof issue.path === "string" && /^[A-Za-z0-9_.]{0,180}$/u.test(issue.path) ? issue.path : "recipe",
       code: typeof issue.code === "string" && /^[a-z_]{1,40}$/u.test(issue.code) ? issue.code : "invalid_recipe",
-      message: ["Expected a bounded public display selector", "Unknown or malformed template parameter", "Field readers must match the engine", "Outdoor recipes require available-player evidence", "Simulator recipes require offering, duration and end-time proof", "Simulator player count is saved context and cannot parameterize availability", "Simulator availability may request only one bay; saved players are context", "Recipe field does not match the required schema."].includes(issue.message) ? issue.message : "Recipe field does not match the required schema.",
+      message: ["Server document selectors allow only tags, classes, IDs, descendant and child combinators; no pseudo-classes, attribute selectors, wildcards, lists or sibling combinators.", "Expected a bounded public display selector", "Unknown or malformed template parameter", "Field readers must match the engine", "Outdoor recipes require available-player evidence", "Simulator recipes require offering, duration and end-time proof", "Simulator player count is saved context and cannot parameterize availability", "Simulator availability may request only one bay; saved players are context", "Recipe field does not match the required schema."].includes(issue.message) ? issue.message : "Recipe field does not match the required schema.",
     })) } };
   }
   const details = value.details ?? {};
@@ -201,6 +201,17 @@ function meaningfulFailure(feedback) {
   if (!safe || safe.code === "DISCOVERY_BROWSER_INCOMPLETE" && !safe.details.failure && !safe.details.requests.length &&
       !safe.details.nativeFirstFatal && !safe.details.nativeRejectedRequests?.length) return undefined;
   return safe;
+}
+
+/** Passive request denials cannot replace a concrete tool or recipe failure.
+ * This preserves historical diagnostics only; it never grants access or makes
+ * an incomplete browser result complete. New explicit failures remain current. */
+function retainMeaningfulFailure(previous, feedback) {
+  const next = meaningfulFailure(feedback);
+  if (!next) return previous;
+  const explicit = value => value && (value.code !== "DISCOVERY_BROWSER_INCOMPLETE" ||
+    Boolean(value.details.failure || value.details.nativeFirstFatal));
+  return explicit(previous) && !explicit(next) ? previous : next;
 }
 
 export function noVerifiedRecipeDiagnostic(feedback) {
@@ -794,7 +805,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
             currentAccessRequirementObserved = snapshot?.accessRequirementObserved === true;
             const browserFeedback = discoveryBrowserFeedback(snapshot, input.action);
             const previousFeedback = JSON.stringify(lastFeedback);
-            if (browserFeedback) { lastFeedback = browserFeedback; lastFailure = meaningfulFailure(browserFeedback) ?? lastFailure; }
+            if (browserFeedback) { lastFeedback = browserFeedback; lastFailure = retainMeaningfulFailure(lastFailure, browserFeedback); }
             else if (lastFeedback?.code === "DISCOVERY_BROWSER_INCOMPLETE") lastFeedback = undefined;
             if (isNewObservedUrl || hasNewObservedEntry || hasNewObservedRead || previousOfficialObserved !== officialSourceObserved || didFallback || previousFeedback !== JSON.stringify(lastFeedback)) await saveCheckpoint({});
             if (input.action === "open") firstOpenCompletedAt ??= new Date().toISOString();
@@ -847,7 +858,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
           const feedback = safeLastFeedback({ code: error?.code, details: error?.details }) ??
             (message.params.tool === "discovery_browser" ? discoveryBrowserFeedback(
               safeBrowserFailureDiagnostics(error?.details?.browserDiagnostics) ?? lastBrowserSnapshot, message.params.arguments?.action, error) : undefined);
-          if (feedback) { lastFeedback = feedback; lastFailure = meaningfulFailure(feedback) ?? lastFailure; await saveCheckpoint({}).catch(() => {}); }
+          if (feedback) { lastFeedback = feedback; lastFailure = retainMeaningfulFailure(lastFailure, feedback); await saveCheckpoint({}).catch(() => {}); }
           send({ id: message.id, result: { success: false, contentItems: [{ type: "inputText", text: JSON.stringify({ error: /^[A-Z_]+$/u.test(error?.code ?? "") ? error.code : "DISCOVERY_TOOL_FAILED",
             ...(feedback ? { details: feedback.details } : {}),
             ...(message.params.tool === "discovery_browser" && message.params.arguments?.action === "finish"
@@ -900,7 +911,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
     const turn = await app.request("turn/start", { threadId, input: [{ type: "text", text: JSON.stringify({ identity: job.request.identity, target: job.request.target,
       input: job.request.input, deadlineAt: job.deadlineAt, attempt: job.attempts,
       trustedResumeUrls: [...restoredController.urls, ...(restoredController.entryUrls ?? []), ...(restoredController.readUrls ?? [])], activeBrowserTransport: browserTransport,
-      previousDiagnostic: restoredController.lastFeedback ?? restoredController.lastFailure,
+      previousDiagnostic: restoredController.lastFailure ?? restoredController.lastFeedback,
       previousCheckpoint: typeof job.checkpoint?.summary === "string" ? job.checkpoint.summary.slice(0, 2000) : undefined }) }] });
     turnId = turn.turn?.id ?? turnId;
     if (!turnId) throw discoveryError("DISCOVERY_TURN_INVALID");

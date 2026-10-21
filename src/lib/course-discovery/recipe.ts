@@ -55,10 +55,11 @@ export function isSafeBrowserAssetUrl(value: string, resourceType: string, metho
 }
 const safeUrl = z.string().max(2048).refine(isSafeRecipeUrl, "Expected a public HTTPS read URL");
 const urlTemplate = recipeTemplateSchema.refine(value => isSafeRecipeUrl(value.replace(/\{\{[A-Za-z]+\}\}/gu, "x")));
+export const SERVER_DOCUMENT_SELECTOR_MESSAGE = "Server document selectors allow only tags, classes, IDs, descendant and child combinators; no pseudo-classes, attribute selectors, wildcards, lists or sibling combinators.";
 export const recipeSelectorSchema = z.string().min(1).max(240).refine(value =>
   /^[a-zA-Z0-9_\-\s.#\[\]="'~^$*|:(),>+]+$/u.test(value) &&
   !/(?:script|iframe|password|secret|token|cookie|session|credential|authorization|api.?key|email|phone|:has\(|:visited)/iu.test(value),
-"Expected a bounded public display selector").describe("Bounded CSS only: tags, classes, ids, attribute equality and descendant/child selectors. No :has(), scripts, iframes, visited links or sensitive credential/contact fields. Use a reusable calendar day base selector with SELECT_DATE text {{day}}, never a fixed nth-child for a requested day.");
+"Expected a bounded public display selector").describe("Bounded CSS only: tags, classes, ids, attribute equality and descendant/child selectors. No :has(), scripts, iframes, visited links or sensitive credential/contact fields. Use a reusable calendar day base selector with SELECT_DATE text {{day}}, never a fixed nth-child for a requested day. SERVER_DOCUMENT proof and slot/collection readers use the stricter static grammar documented by availabilityResponse.");
 const jsonPath = z.string().min(1).max(240).regex(/^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/u).refine(value =>
   !value.split(".").some(part => ["__proto__", "prototype", "constructor"].includes(part) || secret.test(part)));
 export const recipeFieldSchema = z.union([
@@ -121,7 +122,7 @@ const availabilityResponseSchema = z.object({
 }).strict().refine(value => value.method === "POST" || value.date.source === "QUERY", "GET date binding must read a query parameter")
   .refine(value => value.kind !== "SERVER_DOCUMENT" || value.method === "GET" && value.date.source === "QUERY" && !value.success && !value.endDatePath,
     "Server document proof requires a dated GET document")
-  .describe("Required completed availability-response fence. Exact URL/method and date parameter must equal requested YYYY-MM-DD. Default JSON uses observed scalar success for response-only completion. Explicit kind SERVER_DOCUMENT requires GET/query date and proof.complete {serverDocument:true}: a complete text/html main document whose inert source venue/date/slot fields equal the settled visible DOM; outdoor simple CSS only, no pagination or later data fetch. A matching response must start after the last date/filter change. Only the runtime-verified PassFactory /ftbb client-only DURATION select may carry a completed day response. This proves freshness, not availability by itself; independent capacity/duration/empty proof remains required.");
+  .describe(`Required completed availability-response fence. Exact URL/method and date parameter must equal requested YYYY-MM-DD. Default JSON uses observed scalar success for response-only completion. Explicit kind SERVER_DOCUMENT requires GET/query date and proof.complete {serverDocument:true}: a complete text/html main document whose inert source venue/date/slot fields equal the settled visible DOM; outdoor static CSS only, no pagination or later data fetch. For SERVER_DOCUMENT, every proof field selector, slot field selector and slots.collection.selector must follow this static grammar: ${SERVER_DOCUMENT_SELECTOR_MESSAGE} Use an observed tag/class/ID or bounded descendant/child chain that identifies the intended field; positional selectors such as :first-child and :nth-of-type(1) are unsupported. Supported field attribute readers such as attribute:"value" remain available; CSS attribute selectors are forbidden. A matching response must start after the last date/filter change. Only the runtime-verified PassFactory /ftbb client-only DURATION select may carry a completed day response. This proves freshness, not availability by itself; independent capacity/duration/empty proof remains required.`);
 const timeZone = z.string().max(80).refine(value => {
   try { new Intl.DateTimeFormat("en-US", { timeZone: value }); return true; } catch { return false; }
 });
@@ -187,9 +188,17 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
   if (recipe.engine === "BROWSER_DOM") {
     const serverDocument = recipe.availabilityResponse.kind === "SERVER_DOCUMENT";
     if (serverDocument !== ("serverDocument" in recipe.proof.complete) || serverDocument &&
-      (recipe.target.kind !== "OUTDOOR" || "kind" in recipe.proof.date || readers.some(field => !("selector" in field) || !isServerDocumentSelector(field.selector)) ||
-        !("selector" in recipe.slots.collection) || !isServerDocumentSelector(recipe.slots.collection.selector)))
+      (recipe.target.kind !== "OUTDOOR" || "kind" in recipe.proof.date || readers.some(field => !("selector" in field)) ||
+        !("selector" in recipe.slots.collection)))
       ctx.addIssue({ code: "custom", message: "Server document proof requires outdoor static selectors and matching completion" });
+    if (serverDocument) {
+      for (const [section, fields] of [["proof", recipe.proof], ["slots", recipe.slots]] as const) {
+        for (const [name, field] of Object.entries(fields)) {
+          if (field && "selector" in field && !isServerDocumentSelector(field.selector))
+            ctx.addIssue({ code: "custom", path: [section, name, "selector"], message: SERVER_DOCUMENT_SELECTOR_MESSAGE });
+        }
+      }
+    }
   }
   if (recipe.engine === "BROWSER_DOM" && "availabilityResponse" in recipe.proof.complete && !recipe.availabilityResponse.success)
     ctx.addIssue({ code: "custom", message: "Response-only completion requires an application-level JSON success guard" });

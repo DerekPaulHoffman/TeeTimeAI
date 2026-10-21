@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCourseDiscoveryClient } from "../../../scripts/automation/course-discovery-client.mjs";
+import { SERVER_DOCUMENT_SELECTOR_MESSAGE } from "./recipe";
 import { createCourseDiscoverySupervisor, discoveryWorkDeadline, validateClaimedDiscoveryJob, validateClaimedRecipeExecution } from "../../../scripts/automation/course-discovery-supervisor.mjs";
 import { cleanupDiscoveryDirectory, createDiscoveryBrowser, createDiscoveryProcess, createDiscoverySnapshotCompactor, DISCOVERY_BROWSER_INPUT_SCHEMA, DISCOVERY_TOOLS, discoveryProcessEnvironment, prepareDiscoveryModelCatalog, readDiscoveryControllerCheckpoint, restrictedModelCatalog, runCourseDiscoveryWorker, verifyDiscoveryCandidate } from "../../../scripts/automation/course-discovery-worker.mjs";
 
@@ -1043,12 +1044,22 @@ describe("controller-only verification", () => {
     } });
     try {
       await expect(runCourseDiscoveryWorker({ job: inputJob, client, cwd: process.cwd(), sourceHome, recipeSchema: {}, resolveCli: () => "fixed-codex", processFactory,
-        validateRecipe: async () => ({ valid: false, issues: [{ path: "proof.complete.selector", code: "custom", message: "Expected a bounded public display selector" }] }),
-        browserFactory: () => ({ request: async action => { if (action.action === "observe") observedAfterValidation = !browserClosed; return { url: "https://example.org/", text: "Public golf", controls: [] }; }, close: async () => { browserClosed = true; } }),
+        validateRecipe: async () => ({ valid: false, issues: [{ path: "proof.venue.selector", code: "custom", message: SERVER_DOCUMENT_SELECTOR_MESSAGE }] }),
+        browserFactory: () => ({ request: async action => {
+          if (action.action === "observe") {
+            observedAfterValidation = !browserClosed;
+            return { url: "https://example.org/", text: "Public golf", controls: [],
+              requests: [{ url: "https://example.org/optional", method: "GET", resourceType: "fetch", blockedReason: "UNSAFE_URL" }] };
+          }
+          return { url: "https://example.org/", text: "Public golf", controls: [] };
+        }, close: async () => { browserClosed = true; } }),
       })).rejects.toMatchObject({ code: "DISCOVERY_NO_VERIFIED_RECIPE" });
       expect(candidate).not.toHaveBeenCalled(); expect(observedAfterValidation).toBe(true);
       const stored = checkpoint.mock.calls.at(-1)![2];
-      expect(stored).toMatchObject({ summary: "Needs another attempt", controller: { lastFeedback: { code: "DISCOVERY_RECIPE_INVALID", details: { issues: [{ path: "proof.complete.selector" }] } } } });
+      expect(stored).toMatchObject({ summary: "Needs another attempt", controller: {
+        lastFeedback: { code: "DISCOVERY_BROWSER_INCOMPLETE", details: { requests: [{ code: "UNSAFE_URL" }] } },
+        lastFailure: { code: "DISCOVERY_RECIPE_INVALID", details: { issues: [{ path: "proof.venue.selector", message: SERVER_DOCUMENT_SELECTOR_MESSAGE }] } },
+      } });
       expect(readDiscoveryControllerCheckpoint(stored, "https://example.org/").lastFeedback).toEqual(stored.controller.lastFeedback);
       let retryInput: { previousDiagnostic?: unknown } | undefined;
       const retryFactory = options => ({ notify: vi.fn(), close: vi.fn(async () => {}), request: async (method: string, params: { input: Array<{ text: string }> }) => {
@@ -1060,11 +1071,11 @@ describe("controller-only verification", () => {
         return {};
       } });
       await expect(runCourseDiscoveryWorker({ job: { ...inputJob, checkpoint: stored }, client, cwd: process.cwd(), sourceHome, recipeSchema: {}, resolveCli: () => "fixed-codex", processFactory: retryFactory })).rejects.toMatchObject({ code: "DISCOVERY_NO_VERIFIED_RECIPE" });
-      expect(retryInput?.previousDiagnostic).toEqual(stored.controller.lastFeedback);
+      expect(retryInput?.previousDiagnostic).toEqual(stored.controller.lastFailure);
     } finally { rmSync(sourceHome, { recursive: true, force: true }); }
   });
 
-  it("persists the underlying inspector failure after a successful observation and normal model completion", async () => {
+  it("persists the underlying inspector failure after an observation with passive denials and normal model completion", async () => {
     const sourceHome = mkdtempSync(join(tmpdir(), "discovery-terminal-diagnostic-"));
     writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }));
     writeFileSync(join(sourceHome, "auth.json"), "test-auth");
@@ -1092,12 +1103,14 @@ describe("controller-only verification", () => {
       const failure = await runCourseDiscoveryWorker({ job: inputJob, client, cwd: process.cwd(), sourceHome, recipeSchema: {},
         resolveCli: () => "fixed-codex", processFactory, browserFactory: () => ({ close: async () => {}, request: async action => {
           if (action.action === "inspect_adapter") throw Object.assign(new Error("private provider text"), { code: "ADAPTER_IDENTITY_MISMATCH" });
+          if (action.action === "observe") return { url: "https://example.org/", text: "Public golf", controls: [], loading: false,
+            requests: [{ url: "https://example.org/optional?private=value", method: "GET", resourceType: "xhr", blockedReason: "UNSAFE_URL" }] };
           return { url: "https://example.org/", text: "Public golf", controls: [], requests: [], loading: false };
         } }) }).catch(error => error);
       expect(failure).toMatchObject({ code: "DISCOVERY_NO_VERIFIED_RECIPE", discoveryDiagnostic: {
         code: "NO_VERIFIED_RECIPE", reason: "ADAPTER_IDENTITY_MISMATCH" } });
       const stored = checkpoint.mock.calls.at(-1)![2];
-      expect(stored.controller.lastFeedback).toBeUndefined();
+      expect(stored.controller.lastFeedback).toMatchObject({ code: "DISCOVERY_BROWSER_INCOMPLETE", details: { requests: [{ code: "UNSAFE_URL" }] } });
       expect(stored.controller.terminalDiagnostic).toEqual(failure.discoveryDiagnostic);
       expect(stored.controller.lastFailure.details.failure.code).toBe("ADAPTER_IDENTITY_MISMATCH");
       expect(JSON.stringify(stored)).not.toContain("private provider text");
