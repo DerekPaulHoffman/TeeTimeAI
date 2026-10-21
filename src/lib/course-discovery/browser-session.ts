@@ -419,7 +419,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
           if (closed) return;
           terminalFailure = reason;
           blockedRequests++;
-          requestFailures.push({ reason, resourceType: "document" });
+          // A controller-wide failure is not proof that a document caused it.
+          // The first-fatal/rejection projections retain actual request kinds.
+          requestFailures.push({ reason, resourceType: redirectRouting?.firstFatal?.resourceType ?? "other" });
           if (requestFailures.length > 12) requestFailures.shift();
         },
       });

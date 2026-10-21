@@ -572,7 +572,14 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
     });
     if (nativeProxy) redirectRouting = await installNativeRedirectRouting(page, handleRoute, {
       signal, maxRequests: 1024,
-      onFailure: code => { blocked = true; failure ??= recipeExecutionDiagnostic(code, activity); },
+      onRequestRejected: request => {
+        // Discovery can retain a useful page after this denied asset hop, but
+        // replay must not certify a recipe whose declared scripts were absent.
+        if (request.code === "NATIVE_REDIRECT_CROSS_HOST_RESOURCE_REJECTED") {
+          blocked = true; failure ??= recipeExecutionDiagnostic(request.code, request);
+        }
+      },
+      onFailure: code => { blocked = true; failure ??= recipeExecutionDiagnostic(code); },
     });
     const stop = () => { void context.close().catch(() => {}); };
     signal.addEventListener("abort", stop, { once: true });

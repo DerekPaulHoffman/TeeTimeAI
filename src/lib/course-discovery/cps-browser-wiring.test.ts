@@ -270,6 +270,43 @@ describe.runIf(existsSync(chrome))("offline CPS discovery and deterministic brow
     } finally { await session.close(); }
   }, 40_000);
 
+  it("denies an actual cross-host Script→Script redirect without losing the document, availability or provider lanes", async () => {
+    const optional = "https://official.example.org/optional.js", destination = "https://sc.cps.golf/denied-cdn.js";
+    const availability = `https://official.example.org/availability?date=${date}`;
+    let active = 0, maxActive = 0, tail = Promise.resolve();
+    const leased: string[] = [], serverLeaseCounts: number[] = [];
+    const serializedLease = async <T>(family: string, work: () => Promise<T>) => {
+      const prior = tail; let release!: () => void; tail = new Promise<void>(resolve => { release = resolve; }); await prior;
+      active++; maxActive = Math.max(maxActive, active); leased.push(family);
+      try { return { acquired: true as const, value: await work() }; } finally { active--; release(); }
+    };
+    respond = url => {
+      serverLeaseCounts.push(active);
+      return url === optional ? { status: 307, location: destination, contentType: "application/javascript" }
+        : url === availability ? { contentType: "application/json", body: JSON.stringify({ date, slots: ["10:00"] }) }
+          : { body: `<html><body><h1>Offline Golf Course</h1><script src="${optional}"></script><script>fetch(${JSON.stringify(availability)}).then(r=>r.json()).then(()=>document.title='public data ready');</script></body></html>` };
+    };
+    const session = await createCourseDiscoveryBrowserSession({ initialUrls: [official], deadlineAt: new Date(Date.now() + 30_000),
+      venueName: "Offline Golf Course", timeZone: input.timeZone }, { launchBrowser, browserTransport: "NATIVE_CHROME", requestLease: serializedLease,
+      onRequestFailure: value => { discoveryFailures.push(value.reason); } });
+    try {
+      const opened = await session.execute({ id: 1, action: "open", url: official });
+      const observed = await session.execute({ id: 2, action: "observe" });
+      expect(observed.url).toBe(official); expect(observed.text).toContain("Offline Golf Course"); expect(observed.loading).toBe(false);
+      expect([...opened.responses, ...observed.responses]).toContainEqual(expect.objectContaining({ url: availability, status: 200, body: { date, slots: ["10:00"] } }));
+      expect([...opened.requests, ...observed.requests]).toContainEqual(expect.objectContaining({ url: official, status: 200, resourceType: "document" }));
+      expect(observed.requestFailures).toContainEqual(expect.objectContaining({ reason: "NATIVE_REDIRECT_CROSS_HOST_RESOURCE_REJECTED", url: destination, resourceType: "script" }));
+      expect(discoveryFailures).toContain("NATIVE_REDIRECT_CROSS_HOST_RESOURCE_REJECTED");
+      expect(discoveryFailures.every(code => ["UNSAFE_REDIRECT", "NATIVE_REDIRECT_CROSS_HOST_RESOURCE_REJECTED"].includes(code))).toBe(true);
+      expect(session.diagnostics().nativeFirstFatal).toBeUndefined(); expect(observed.pendingRequestCount).toBe(0);
+      expect(nativeSeen).toEqual([official, optional, availability]); expectGuardedServerDispatches(nativeSeen);
+      expect(serverSeen).not.toContain(destination); expect(nativeSeen).not.toContain(destination); expect(pinnedSeen).toEqual([]);
+      expect(leased).toHaveLength(3); expect(serverLeaseCounts).toEqual([1, 1, 1]); expect(maxActive).toBe(1); expect(active).toBe(0);
+      await expect(session.execute({ id: 3, action: "open", url: destination })).rejects.toThrow("UNOBSERVED_NAVIGATION");
+      expect(serverSeen).not.toContain(destination);
+    } finally { await session.close(); }
+  }, 40_000);
+
   it("propagates an actual root navigation network failure without returning document evidence", async () => {
     respond = () => ({ networkFailure: true });
     const session = await openDiscovery();

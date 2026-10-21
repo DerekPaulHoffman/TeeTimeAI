@@ -484,6 +484,75 @@ describe("native exact request and response ownership", () => {
     } finally { await test.guard.close(); }
   });
 
+  it.each(["GET", "HEAD"])("denies only an exactly attested cross-host Script→Script %s while document/data peers finish", async method => {
+    const test = await installed(), root = "https://example.org/optional.js", target = "https://cdn.example.net/optional.js?v=public-build";
+    try {
+      test.request("script", { resourceType: "Script", request: { url: root, method, headers: {} } });
+      await test.routes[0].continue();
+      test.response("script", { resourceType: "Script", responseStatusCode: 307, responseHeaders: [{ name: "Location", value: target }],
+        request: { url: root, method, headers: {} } });
+      await test.routes[0].request().response();
+      test.request("denied-child", { networkId: "network-script", resourceType: "Script", redirectedRequestId: "script",
+        request: { url: target, method, headers: {} } });
+      await vi.waitFor(() => expect(test.rejections).toHaveLength(1));
+      expect(test.rejections[0]).toMatchObject({ code: "NATIVE_REDIRECT_CROSS_HOST_RESOURCE_REJECTED", resourceType: "script", method,
+        url: "https://cdn.example.net/optional.js", recordCount: 1 });
+      expect(JSON.stringify(test.rejections)).not.toContain("public-build");
+      expect(JSON.stringify(test.rejections)).not.toContain("network-script");
+      expect(test.routes).toHaveLength(1); expect(test.handler).toHaveBeenCalledTimes(1);
+      expect(test.cdp.send.mock.calls.filter(([name]) => name === "Fetch.continueRequest")).toHaveLength(1);
+      expect(test.cdp.send.mock.calls.filter(([name, value]) => name === "Fetch.failRequest" && value?.requestId === "denied-child")).toHaveLength(1);
+      test.request("document", { resourceType: "Document" }); test.request("availability");
+      await Promise.all(test.routes.slice(1).map(route => route.continue()));
+      test.response("document", { resourceType: "Document" }); test.response("availability");
+      const values = await Promise.all(test.routes.slice(1).map(async route => (await (await route.request().response())?.body())?.toString()));
+      expect(values).toEqual(["body-document", "body-availability"]);
+      await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+      expect(test.failures).toEqual([]); expect(test.close).not.toHaveBeenCalled();
+      expect(test.guard.firstFatal).toBeUndefined(); expect(test.guard.rejectedRequests).toEqual(test.rejections);
+    } finally { await test.guard.close(); }
+  });
+
+  it.each(["wrong-target", "status-200", "missing-location", "method", "kind", "network", "missing-parent", "denied-parent", "unsafe-target"])(
+    "retains fatal provenance rejection for an invalid script redirect: %s", async failure => {
+      const test = await installed(), root = "https://example.org/optional.js", target = failure === "unsafe-target" ? "https://127.0.0.1/optional.js" : "https://cdn.example.net/optional.js";
+      try {
+        test.request("script", { resourceType: "Script", request: { url: root, method: "GET", headers: {} } });
+        if (failure === "denied-parent") await test.routes[0].abort();
+        else {
+          await test.routes[0].continue(); test.response("script", { resourceType: "Script", responseStatusCode: failure === "status-200" ? 200 : 302,
+            responseHeaders: failure === "missing-location" ? [] : [{ name: "Location", value: failure === "wrong-target" ? `${target}/wrong` : target }],
+            request: { url: root, method: "GET", headers: {} } });
+          await test.routes[0].request().response();
+        }
+        test.request("child", { networkId: failure === "network" ? "wrong-network" : "network-script", resourceType: failure === "kind" ? "Document" : "Script",
+          redirectedRequestId: failure === "missing-parent" ? "missing" : "script", request: { url: target, method: failure === "method" ? "HEAD" : "GET", headers: {} } });
+        await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_PROVENANCE_REJECTED"));
+        expect(test.rejections).toEqual([]); expect(test.routes).toHaveLength(1); expect(test.close).toHaveBeenCalledOnce();
+      } finally { await test.guard.close(); }
+    });
+
+  it.each(["failure", "hang", "cancel"])("fails closed if attested script-hop rejection ends in %s", async outcome => {
+    vi.useFakeTimers(); const cancellation = new AbortController(), test = await installed(undefined, cancellation.signal);
+    const root = "https://example.org/optional.js", target = "https://cdn.example.net/optional.js", rejected = deferred<object>();
+    const send = test.cdp.send.getMockImplementation()!;
+    try {
+      test.request("script", { resourceType: "Script", request: { url: root, method: "GET", headers: {} } }); await test.routes[0].continue();
+      test.response("script", { resourceType: "Script", responseStatusCode: 302, responseHeaders: [{ name: "Location", value: target }],
+        request: { url: root, method: "GET", headers: {} } }); await test.routes[0].request().response();
+      test.cdp.send.mockImplementation((name, value) => name === "Fetch.failRequest" && value?.requestId === "child"
+        ? outcome === "failure" ? Promise.reject(new Error("offline rejection failed")) : rejected.promise : send(name, value));
+      test.request("child", { networkId: "network-script", resourceType: "Script", redirectedRequestId: "script", request: { url: target, method: "GET", headers: {} } });
+      await Promise.resolve(); await Promise.resolve();
+      if (outcome === "cancel") { cancellation.abort(); rejected.resolve({}); }
+      await vi.advanceTimersByTimeAsync(101);
+      expect(test.close).toHaveBeenCalledOnce(); expect(test.rejections).toEqual([]);
+      expect(test.failures).toContain(outcome === "hang" ? "NATIVE_REDIRECT_ABORT_TIMEOUT" : outcome === "cancel" ? "NATIVE_REDIRECT_CANCELLED" : "NATIVE_REDIRECT_ROUTING_FAILED");
+      expect(test.cdp.send.mock.calls.filter(([name]) => name === "Fetch.continueRequest")).toHaveLength(1);
+      expect(test.routes).toHaveLength(1); expect(test.guard.pendingReads).toBe(0);
+    } finally { rejected.resolve({}); await test.guard.close(); vi.useRealTimers(); }
+  });
+
   it.each(["https://127.0.0.1/booking", "https://user:secret@example.net/booking", "https://booking.example.net/checkout", "http://booking.example.net/booking"])("does not grant public document authority to unsafe Location %s", async target => {
     const test = await installed(), root = "https://book.example.org/booking";
     try {

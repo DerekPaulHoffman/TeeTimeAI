@@ -236,6 +236,31 @@ describe.runIf(existsSync(chromeExecutable))("isolated browser recipe replay", (
     const result = await executeAccessRecipe(recipe(), executionInput, browserDeps(html));
     expect(result.status).toBe("AVAILABLE"); expect(result.slots[0].startsAt).toBe("2026-10-22T13:00:00.000Z");
   }, 20_000);
+  it.each(["denied-script", "unknown-fatal"] as const)("keeps native %s replay incomplete without inventing its initiating document", async mode => {
+    const rejected = { code: "NATIVE_REDIRECT_CROSS_HOST_RESOURCE_REJECTED", url: "https://cdn.example.net/public.js?build=42",
+      method: "GET" as const, resourceType: "script" as const };
+    const routing = vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, handler, options) => {
+      if (mode === "denied-script") options?.onRequestRejected?.(rejected);
+      else options?.onFailure?.("NATIVE_REDIRECT_PROVENANCE_REJECTED");
+      return { prepare: () => {}, close: async () => {}, lastFailure: undefined, pendingReads: 0,
+        releasePlaywrightRoute: route => handler(route) };
+    });
+    const native = vi.spyOn(nativeBrowser, "continueNativeBrowserRead").mockImplementation(async route => {
+      const body = Buffer.from(browserHtml(html)), headers = { "content-type": "text/html" };
+      await route.fulfill({ status: 200, headers, body });
+      return { url: route.request().url(), status: 200, headers, body };
+    });
+    try {
+      const selected = recipe();
+      if (selected.engine !== "BROWSER_DOM") throw new Error("fixture");
+      selected.browserTransport = "NATIVE_CHROME";
+      const result = await executeAccessRecipe(selected, executionInput, browserDeps(html));
+      expect(result).toMatchObject({ status: "INCOMPLETE", complete: false, slots: [] });
+      expect(result.evidence.diagnostic).toEqual(mode === "denied-script"
+        ? { code: rejected.code, url: "https://cdn.example.net/public.js", method: "GET", resourceType: "script" }
+        : { code: "NATIVE_REDIRECT_PROVENANCE_REJECTED" });
+    } finally { native.mockRestore(); routing.mockRestore(); }
+  }, 20_000);
   it("matches only a successful exact date-bound query or JSON availability response", () => {
     const selected = recipe();
     if (selected.engine !== "BROWSER_DOM") throw new Error("fixture");

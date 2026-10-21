@@ -305,8 +305,25 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         try { sameHost = new URL(parent.transportUrl).hostname.replace(/^www\./u, "") === new URL(event.request.url).hostname.replace(/^www\./u, ""); }
         catch { /* Invalid URLs fail the provenance check. */ }
         if (result instanceof Error || closed || options.signal?.aborted || records.has(event.requestId) || !releasedRedirect(parent, event.request.url) ||
-            event.request.method !== parent.method || document && (parent.kind !== "document" || !["GET", "HEAD"].includes(parent.method)) ||
-            !document && !sameHost) {
+            event.request.method !== parent.method || document && (parent.kind !== "document" || !["GET", "HEAD"].includes(parent.method))) {
+          await reject(); await close("NATIVE_REDIRECT_PROVENANCE_REJECTED"); return;
+        }
+        if (!document && !sameHost) {
+          // A genuine Script->Script CDN redirect still has no cross-host
+          // read permission. Deny that exact browser pause without destroying
+          // unrelated public documents/data. This is not a fallback for bad
+          // provenance: the exact released Location, method, frame, network
+          // chain, kind and depth must all already be established.
+          if (kind === "script" && parent.kind === kind && ["GET", "HEAD"].includes(parent.method) &&
+              networkId === parent.networkId && (isSafeRecipeUrl(event.request.url) || isSafeBrowserAssetUrl(event.request.url, kind, "GET"))) {
+            const diagnostic = requestDiagnostic("NATIVE_REDIRECT_CROSS_HOST_RESOURCE_REJECTED");
+            await bounded(reject(), "NATIVE_REDIRECT_ABORT_TIMEOUT");
+            if (closed || options.signal?.aborted) return;
+            rejectedRequests.push(diagnostic);
+            if (rejectedRequests.length > 12) rejectedRequests.shift();
+            try { options.onRequestRejected?.({ ...diagnostic }); } catch { /* Diagnostics cannot authorize work. */ }
+            return;
+          }
           await reject(); await close("NATIVE_REDIRECT_PROVENANCE_REJECTED"); return;
         }
       }

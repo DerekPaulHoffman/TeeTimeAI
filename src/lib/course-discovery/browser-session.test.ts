@@ -440,6 +440,7 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       });
       await expect(session.execute({ id: 1, action: "open", url: "https://example.org/" })).rejects.toThrow(fatal.code);
       expect(session.diagnostics().nativeFirstFatal).toEqual(fatal);
+      expect(session.diagnostics().requestFailures).toContainEqual({ reason: fatal.code, resourceType: "other" });
       await expect(session.execute({ id: 2, action: "observe" })).rejects.toThrow(fatal.code);
       expect(session.diagnostics().nativeFirstFatal).toEqual(fatal);
     } finally { await session?.close(); routing.mockRestore(); }
