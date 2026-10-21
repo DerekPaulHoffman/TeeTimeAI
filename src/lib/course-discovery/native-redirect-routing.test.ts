@@ -2,7 +2,7 @@
 import type { Page, Route } from "@playwright/test";
 import { describe, expect, it, vi } from "vitest";
 import { installNativeRedirectRouting, isNativeReadTerminalFailure, type NativeReadRoute, type NativeRequestDiagnostic } from "./native-redirect-routing";
-import { continueNativeBrowserRead } from "./native-public-browser";
+import { continueNativeBrowserRead, isObservedNativeRedirect, isObservedNativeRedirectTarget } from "./native-public-browser";
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
 
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; }
@@ -412,10 +412,124 @@ describe("native exact request and response ownership", () => {
     const test = await installed();
     try {
       test.request("one"); await test.routes[0].continue();
-      test.request("two", { redirectedRequestId: "one" }); expect(test.routes[1].request().redirectedFrom()).toBe(test.routes[0].request());
+      test.response("one", { responseStatusCode: 302, responseHeaders: [{ name: "Location", value: "/data" }] });
+      await test.routes[0].request().response();
+      test.request("two", { redirectedRequestId: "one" });
+      await vi.waitFor(() => expect(test.routes).toHaveLength(2));
+      expect(test.routes[1].request().redirectedFrom()).toBe(test.routes[0].request());
       test.request("three", { redirectedRequestId: "missing" });
       await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_PROVENANCE_REJECTED"));
       expect(test.routes).toHaveLength(2);
+    } finally { await test.guard.close(); }
+  });
+
+  it.each([301, 302, 303, 307, 308])("attests only the exact released %i document Location rooted at an authorized full URL", async status => {
+    const test = await installed(), root = "https://book.example.org/booking?course=7", target = "https://booking.example.net/booking?course=7";
+    const roots = new Set([root]);
+    try {
+      test.request("root", { resourceType: "Document", request: { url: root, method: "GET", headers: {} } });
+      const original = test.routes[0].request(); await test.routes[0].continue();
+      expect(isObservedNativeRedirectTarget(original, target, roots)).toBe(false);
+      test.response("root", { responseStatusCode: status, responseHeaders: [{ name: "Location", value: target }], request: { url: root, method: "GET", headers: {} } });
+      await original.response();
+      expect(isObservedNativeRedirectTarget(original, target, roots)).toBe(true);
+      expect(isObservedNativeRedirectTarget(original, `${target}&other=1`, roots)).toBe(false);
+      test.request("child", { resourceType: "Document", redirectedRequestId: "root", request: { url: target, method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(test.routes).toHaveLength(2));
+      const child = test.routes[1].request();
+      expect(isObservedNativeRedirect(child, roots)).toBe(true);
+      expect(isObservedNativeRedirect(child, new Set([new URL(root).origin]))).toBe(false);
+      expect(isObservedNativeRedirect(child, new Set([`${root}&different=1`]))).toBe(false);
+      expect(isObservedNativeRedirect({ ...child }, roots)).toBe(false);
+      await test.guard.close();
+      expect(isObservedNativeRedirect(child, roots)).toBe(false);
+      expect(isObservedNativeRedirectTarget(original, target, roots)).toBe(false);
+    } finally { await test.guard.close(); }
+  });
+
+  it("holds a child outside its handler until its exact parent response is successfully released", async () => {
+    const test = await installed(), released = deferred<object>(), root = "https://book.example.org/booking", target = "https://booking.example.net/booking";
+    const send = test.cdp.send.getMockImplementation()!;
+    test.cdp.send.mockImplementation((name, value) => name === "Fetch.continueResponse" ? released.promise : send(name, value));
+    try {
+      test.request("root", { resourceType: "Document", request: { url: root, method: "GET", headers: {} } });
+      const original = test.routes[0].request(); await test.routes[0].continue();
+      test.request("child", { resourceType: "Document", redirectedRequestId: "root", request: { url: target, method: "GET", headers: {} } });
+      expect(test.routes).toHaveLength(1); expect(test.guard.pendingReads).toBeGreaterThan(0);
+      test.response("root", { responseStatusCode: 302, responseHeaders: [{ name: "Location", value: target }], request: { url: root, method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(test.cdp.send.mock.calls.some(([name]) => name === "Fetch.continueResponse")).toBe(true));
+      expect(test.routes).toHaveLength(1); expect(isObservedNativeRedirectTarget(original, target, new Set([root]))).toBe(false);
+      released.resolve({});
+      await vi.waitFor(() => expect(test.routes).toHaveLength(2));
+      expect(isObservedNativeRedirect(test.routes[1].request(), new Set([root]))).toBe(true);
+      expect(test.failures).toEqual([]);
+    } finally { released.resolve({}); await test.guard.close(); }
+  });
+
+  it.each(["wrong-target", "status-200", "missing-location", "duplicate-location", "method-change", "post", "xhr-parent", "crosshost-script"])("rejects an unattested redirected document/asset: %s", async failure => {
+    const test = await installed(), root = "https://book.example.org/booking", target = "https://booking.example.net/booking";
+    const method = failure === "post" ? "POST" : "GET", kind = failure === "xhr-parent" ? "XHR" : "Document";
+    try {
+      test.request("root", { resourceType: kind, request: { url: root, method, headers: {} } }); await test.routes[0].continue();
+      const location = failure === "wrong-target" ? `${target}/different` : target;
+      test.response("root", { responseStatusCode: failure === "status-200" ? 200 : 302,
+        responseHeaders: failure === "missing-location" ? [] : [{ name: "Location", value: location }, ...(failure === "duplicate-location" ? [{ name: "Location", value: location }] : [])],
+        request: { url: root, method, headers: {} } });
+      await test.routes[0].request().response();
+      test.request("child", { resourceType: failure === "crosshost-script" ? "Script" : "Document", redirectedRequestId: "root",
+        request: { url: target, method: failure === "method-change" ? "HEAD" : method, headers: {} } });
+      await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_PROVENANCE_REJECTED"));
+      expect(test.routes).toHaveLength(1);
+      expect(test.cdp.send.mock.calls.filter(([name]) => name === "Fetch.continueRequest")).toHaveLength(1);
+    } finally { await test.guard.close(); }
+  });
+
+  it.each(["https://127.0.0.1/booking", "https://user:secret@example.net/booking", "https://booking.example.net/checkout", "http://booking.example.net/booking"])("does not grant public document authority to unsafe Location %s", async target => {
+    const test = await installed(), root = "https://book.example.org/booking";
+    try {
+      test.request("root", { resourceType: "Document", request: { url: root, method: "GET", headers: {} } }); await test.routes[0].continue();
+      test.response("root", { responseStatusCode: 302, responseHeaders: [{ name: "Location", value: target }], request: { url: root, method: "GET", headers: {} } });
+      await test.routes[0].request().response();
+      expect(isObservedNativeRedirectTarget(test.routes[0].request(), target, new Set([root]))).toBe(false);
+      test.handler.mockImplementation(async route => { test.routes.push(route);
+        expect(isObservedNativeRedirect(route.request(), new Set([root]))).toBe(false); await route.abort(); });
+      test.request("child", { resourceType: "Document", redirectedRequestId: "root", request: { url: target, method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(test.routes).toHaveLength(2));
+      expect(test.cdp.send.mock.calls.filter(([name]) => name === "Fetch.continueRequest")).toHaveLength(1);
+    } finally { await test.guard.close(); }
+  });
+
+  it("bounds redirect depth at five actual HTTP hops and never treats the final origin as a root", async () => {
+    const test = await installed(), root = "https://first.example.org/booking";
+    let url = root;
+    try {
+      test.request("0", { resourceType: "Document", request: { url, method: "GET", headers: {} } });
+      for (let index = 0; index < 5; index++) {
+        const next = `https://hop${index}.example.net/booking`;
+        await test.routes[index].continue(); test.response(String(index), { responseStatusCode: 302, responseHeaders: [{ name: "Location", value: next }], request: { url, method: "GET", headers: {} } });
+        await test.routes[index].request().response();
+        test.request(String(index + 1), { resourceType: "Document", redirectedRequestId: String(index), request: { url: next, method: "GET", headers: {} } });
+        await vi.waitFor(() => expect(test.routes).toHaveLength(index + 2)); url = next;
+      }
+      expect(isObservedNativeRedirect(test.routes[5].request(), new Set([root]))).toBe(true);
+      await test.routes[5].continue(); test.response("5", { responseStatusCode: 302, responseHeaders: [{ name: "Location", value: "https://sixth.example.net/booking" }], request: { url, method: "GET", headers: {} } });
+      await test.routes[5].request().response();
+      expect(isObservedNativeRedirectTarget(test.routes[5].request(), "https://sixth.example.net/booking", new Set([root]))).toBe(false);
+      test.request("6", { resourceType: "Document", redirectedRequestId: "5", request: { url: "https://sixth.example.net/booking", method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_PROVENANCE_REJECTED")); expect(test.routes).toHaveLength(6);
+    } finally { await test.guard.close(); }
+  });
+
+  it.each(["timeout", "failure", "cancel"])("does not attest a redirect while parent release ends in %s", async outcome => {
+    const cancellation = new AbortController(), test = await installed(undefined, cancellation.signal), root = "https://book.example.org/booking", target = "https://booking.example.net/booking";
+    try {
+      test.request("root", { resourceType: "Document", request: { url: root, method: "GET", headers: {} } }); await test.routes[0].continue();
+      test.request("child", { resourceType: "Document", redirectedRequestId: "root", request: { url: target, method: "GET", headers: {} } });
+      if (outcome === "failure") test.events.get("Network.loadingFailed")!({ requestId: "network-root" });
+      if (outcome === "cancel") cancellation.abort();
+      await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce());
+      expect(test.routes).toHaveLength(1); expect(isObservedNativeRedirectTarget(test.routes[0].request(), target, new Set([root]))).toBe(false);
+      expect(test.cdp.send.mock.calls.filter(([name]) => name === "Fetch.continueRequest")).toHaveLength(1);
     } finally { await test.guard.close(); }
   });
 

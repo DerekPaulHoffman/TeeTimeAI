@@ -10,7 +10,7 @@ import { sanitizeResponderText } from "@/lib/automation/course-support-responder
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
 import { isActiveBrowserAccessChallenge, isSafeBrowserAssetUrl, isSafeRecipeUrl, recipeSelectorSchema } from "./recipe";
-import { continueNativeBrowserRead, createNativePublicBrowserProxy, isObservedNativeRedirect, nativeReadPreflightMethod } from "./native-public-browser";
+import { continueNativeBrowserRead, createNativePublicBrowserProxy, isObservedNativeRedirect, isObservedNativeRedirectTarget, nativeReadPreflightMethod } from "./native-public-browser";
 import { installNativeRedirectRouting, type NativeFirstFatal, type NativeReadRoute, type NativeRequestDiagnostic } from "./native-redirect-routing";
 import { requestFamilyForUrl } from "./request-family";
 import { canonicalPublicReadUrl } from "./public-request-url";
@@ -162,6 +162,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
   const cancellation = new AbortController();
   const deadline = AbortSignal.any([AbortSignal.timeout(remaining), cancellation.signal]);
   const allowedNavigation = new Set(initialUrls.map(value => new URL(value).href));
+  // Redirects and successful ancillary reads never become new chain roots.
+  // Only exact explicit inputs and actually observed safe public links do.
+  const observedNavigationRoots = new Set(allowedNavigation);
   const cpsScope = createCpsPublicSessionScope(initialUrls);
   const bookingParents = createPublicBookingParentScope({ officialUrl: input.venueOfficialUrl, venueName: input.venueName, venueAddress: input.venueAddress });
   let officialIdentityPage: (OfficialIdentityPage & { observedAt: number }) | undefined;
@@ -258,8 +261,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
           officialIdentityDocument = undefined; officialIdentityPage = undefined;
         }
         if (nativeProxy && request.redirectedFrom()) {
-          if (!cpsSessionKey(transportUrl) && !isObservedNativeRedirect(request, navigationOrigins)) throw new Error("UNSAFE_REDIRECT");
-          allowedNavigation.add(url.href); navigationOrigins.add(url.origin);
+          if (!cpsSessionKey(transportUrl) && !isObservedNativeRedirect(request, observedNavigationRoots)) throw new Error("UNSAFE_REDIRECT");
+          allowedNavigation.add(url.href);
         }
         if (!allowedNavigation.has(url.href) && !navigationOrigins.has(url.origin)) throw new Error("UNOBSERVED_NAVIGATION");
       }
@@ -344,9 +347,12 @@ export async function createCourseDiscoveryBrowserSession(input: {
         if (!cpsScope.authorize(nextTransport.href, transportUrl) || cpsSessionKey(nextTransport.href) && !nativeProxy)
           throw new Error("UNSAFE_REDIRECT");
         const next = new URL(canonicalCpsPublicUrl(nextTransport.href));
-        if (method === "POST" || !isSafeRecipeUrl(next.href) || next.hostname.replace(/^www\./u, "") !== url.hostname.replace(/^www\./u, "")) throw new Error("UNSAFE_REDIRECT");
+        const sameHost = next.hostname.replace(/^www\./u, "") === url.hostname.replace(/^www\./u, "");
+        const observedDocumentRedirect = request.isNavigationRequest() && request.frame() === page.mainFrame() &&
+          isObservedNativeRedirectTarget(request, nextTransport.href, observedNavigationRoots);
+        if (method === "POST" || !isSafeRecipeUrl(next.href) || !sameHost && !observedDocumentRedirect) throw new Error("UNSAFE_REDIRECT");
         responseHeaders.location = next.href;
-        allowedNavigation.add(next.href); navigationOrigins.add(next.origin);
+        allowedNavigation.add(next.href);
       }
       if (responses.length < 12 && /application\/(?:[a-z0-9.+-]*\+)?json/iu.test(responseHeaders["content-type"] ?? "") && ["xhr", "fetch"].includes(request.resourceType())) {
         try {
@@ -551,7 +557,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
   };
   const registerControl = (locator: Locator, control: ObservedControl, kind: string, extra: { date?: string; dropdown?: PublicDropdownProof } = {}) => {
     if (control.href && !isSafeRecipeUrl(control.href)) throw new Error("UNSAFE_NAVIGATION");
-    if (control.href) { allowedNavigation.add(control.href); passfactory.observeWidgetUrl(control.href); cpsScope.observeEntry(control.href); }
+    if (control.href) { allowedNavigation.add(control.href); observedNavigationRoots.add(control.href); passfactory.observeWidgetUrl(control.href); cpsScope.observeEntry(control.href); }
     const target = randomUUID();
     controls.set(target, { locator, signature: JSON.stringify(control), kind, href: control.href,
       ...(extra.date ? { calendarDay: extra.date } : {}), ...(extra.dropdown ? { dropdown: extra.dropdown } : {}),
@@ -698,7 +704,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     for (const control of visible) if (control.kind === "link" && control.href)
       bookingParents.observeOfficialLink(currentUrl, control.href, `${control.name} ${control.label}`.trim());
     for (const url of publicFrameSources) {
-      allowedNavigation.add(url); passfactory.observeWidgetUrl(url); cpsScope.observeEntry(url);
+      allowedNavigation.add(url); observedNavigationRoots.add(url); passfactory.observeWidgetUrl(url); cpsScope.observeEntry(url);
     }
     // Frame presence is descriptive only. A blocked or unread frame cannot
     // grant a navigation URL or authorize a provider's embedded resource.
@@ -860,7 +866,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
           if (known.kind === "field" || known.kind === "filter" && (await observeControl(known.locator)).tag === "select") throw new Error("USE_TYPED_CONTROL_ACTION");
           if (known.href) {
             if (!isSafeRecipeUrl(known.href)) throw new Error("UNSAFE_NAVIGATION");
-            allowedNavigation.add(known.href); navigationOrigins.add(new URL(known.href).origin); navigationStartedAt = Date.now();
+            allowedNavigation.add(known.href); observedNavigationRoots.add(known.href); navigationOrigins.add(new URL(known.href).origin); navigationStartedAt = Date.now();
             const target = await known.locator.getAttribute("target");
             const rawHref = await known.locator.evaluate(element => (element as HTMLAnchorElement).href, undefined, { timeout: 1000 });
             const canonicalBootstrap = rawHref !== known.href && normalizeDiscoveryNavigationUrl(rawHref) === known.href;

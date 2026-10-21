@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage } from "node:http";
 import { connect as netConnect, type Socket } from "node:net";
 import type { AddressInfo } from "node:net";
-import { isNativeReadTerminalFailure, type NativeReadRoute } from "./native-redirect-routing";
+import { hasAttestedNativeDocumentRedirect, hasAttestedNativeDocumentRedirectTarget, isNativeReadTerminalFailure, type NativeReadRoute } from "./native-redirect-routing";
 import { resolvePinnedPublicAddress, type ResolvedPublicAddress } from "@/lib/automation/address-pinned-public-fetch";
 import { isSafeRecipeUrl } from "./recipe";
 import { canonicalPublicReadUrl } from "./public-request-url";
@@ -30,19 +30,13 @@ export function nativeReadPreflightMethod(headers: Record<string, string>): "GET
 }
 
 type RedirectRequest = { url(): string; method(): string; redirectedFrom(): RedirectRequest | null };
-/** Chromium dispatches a redirect before the preceding route handler resumes.
- * Admit only a bounded, public, same-host GET chain rooted in an observed origin. */
-export function isObservedNativeRedirect(request: RedirectRequest, observedOrigins: ReadonlySet<string>) {
-  let current = request, redirects = 0;
-  const host = new URL(current.url()).hostname.replace(/^www\./u, "");
-  for (;;) {
-    if (!isSafeRecipeUrl(current.url()) || !["GET", "HEAD"].includes(current.method()) ||
-      new URL(current.url()).hostname.replace(/^www\./u, "") !== host) return false;
-    const previous = current.redirectedFrom();
-    if (!previous) return redirects > 0 && observedOrigins.has(new URL(current.url()).origin);
-    if (++redirects > 5) return false;
-    current = previous;
-  }
+/** Actual controller-owned HTTP redirect proof, rooted in an exact explicit
+ * navigation or observed public link. Origin membership is never sufficient. */
+export function isObservedNativeRedirect(request: RedirectRequest, observedRootUrls: ReadonlySet<string>) {
+  return hasAttestedNativeDocumentRedirect(request, observedRootUrls);
+}
+export function isObservedNativeRedirectTarget(request: RedirectRequest, target: string, observedRootUrls: ReadonlySet<string>) {
+  return hasAttestedNativeDocumentRedirectTarget(request, target, observedRootUrls);
 }
 
 function connectHost(request: IncomingMessage) {

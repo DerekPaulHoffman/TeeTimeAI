@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { accessExecutionInputSchema, accessExecutionResultSchema, expandRecipeTemplate, hashAccessRecipe,
+import { z } from "zod";
+import { venueProofMatches } from "./executor";
+import { matchesPublicVenueGreeting } from "./public-venue-greeting";
+import { accessExecutionInputSchema, accessExecutionResultSchema, accessRecipeSchema, expandRecipeTemplate, hashAccessRecipe,
   isActiveBrowserAccessChallenge, isSafeBrowserAssetUrl, isSafeRecipeUrl, parseAccessRecipe, recipeAllowsRequest, recipeSelectorSchema, readRecipeFieldFormat } from "./recipe";
 
 export const httpRecipe = () => ({
@@ -15,6 +18,35 @@ export const httpRecipe = () => ({
 export const executionInput = { date: "2026-10-22", timeZone: "America/New_York", players: 2, startTime: "08:00", endTime: "12:00" };
 
 describe("course access recipes", () => {
+  it("exposes the existing bounded venue-name equivalence in the model's greeting JSON schema", () => {
+    const schema = z.toJSONSchema(accessRecipeSchema, { io: "input", unrepresentable: "any" });
+    const variants: Array<Record<string, unknown>> = [];
+    const inspect = (value: unknown) => {
+      if (!value || typeof value !== "object") return;
+      const node = value as Record<string, unknown>;
+      if ((node.properties as { format?: { const?: string } } | undefined)?.format?.const === "VENUE_GREETING") variants.push(node);
+      for (const child of Object.values(node)) inspect(child);
+    };
+    inspect(schema);
+    expect(variants).toHaveLength(1);
+    expect(variants[0]).toMatchObject({ required: ["selector", "format"], additionalProperties: false });
+    const description = String(variants[0].description);
+    for (const rule of ["main name and rate name independently", "Unicode compatibility forms, case, punctuation and spacing",
+      "terminal Golf Club or Golf Course", "remaining whole-name cores match", "at least 8 letters/digits", "not generic golf/category words",
+      "Example Ridge Golf Club matches Example Ridge", "arbitrary abbreviations, substring matches or another location",
+      "never changes the canonical source identity", "Raw/live text equality is checked before interpretation"])
+      expect(description).toContain(rule);
+
+    const greeting = (main: string, rate: string) => `Welcome to ${main}'s online tee time engine. You are guaranteed to receive the best online rates for ${rate} when you book direct with us. We look forward to seeing on the golf course.`;
+    const canonical = "Example Ridge Golf Club";
+    for (const [main, rate] of [[canonical, "Example Ridge"], ["Example Ridge", canonical], ["EXAMPLE-RIDGE", "Example Ridge Golf Course"]])
+      expect(matchesPublicVenueGreeting(canonical, greeting(main, rate), venueProofMatches)).toBe(true);
+    for (const other of ["Example Ridge East", "Other Example Ridge", "Ridge", "ERGC"])
+      for (const [main, rate] of [[canonical, other], [other, canonical]])
+        expect(matchesPublicVenueGreeting(canonical, greeting(main, rate), venueProofMatches)).toBe(false);
+    expect(matchesPublicVenueGreeting("Ridge Golf Club", greeting("Ridge Golf Club", "Ridge"), venueProofMatches)).toBe(false);
+    expect(matchesPublicVenueGreeting("Public Golf Club", greeting("Public Golf Club", "Public"), venueProofMatches)).toBe(false);
+  });
   it("allows an opt-in greeting only for DOM venue text and preserves the full raw reader value", () => {
     const greeting = { selector: "#venue", format: "VENUE_GREETING" };
     const dom = { schemaVersion: 1, target: httpRecipe().target, source: httpRecipe().source, engine: "BROWSER_DOM", pageUrl: "https://example.org/?date={{date}}", steps: [],
@@ -149,6 +181,14 @@ describe("course access recipes", () => {
       expect(isSafeRecipeUrl(`https://example.org${path}`)).toBe(true);
     for (const path of ["/reservation/create", "/reservations/submit", "/booking/confirm", "/cart", "/checkout"])
       expect(isSafeRecipeUrl(`https://example.org${path}`)).toBe(false);
+  });
+  it("keeps GolfVX guest billing data outside generic navigation and request recipes", () => {
+    expect(isSafeRecipeUrl("https://booking.golfvx.net/book/11111111-1111-4111-8111-111111111111")).toBe(true);
+    for (const path of ["stores", "room-types", "availability", "quote", "reservations", "payment"])
+      expect(isSafeRecipeUrl(`https://booking.golfvx.net/api/v1/billing/guest/booking/${path}`)).toBe(false);
+    const recipe = httpRecipe();
+    recipe.request.url = "https://booking.golfvx.net/api/v1/billing/guest/booking/availability?date={{date}}";
+    expect(() => parseAccessRecipe(recipe)).toThrow();
   });
   it("distinguishes active access challenges from ordinary CAPTCHA instructions", () => {
     expect(isActiveBrowserAccessChallenge("First time, you will have to select a picture in CAPTCHA when booking.", "Public golf")).toBe(false);

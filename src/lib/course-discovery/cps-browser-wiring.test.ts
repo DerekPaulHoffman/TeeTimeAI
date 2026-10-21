@@ -168,6 +168,89 @@ describe.runIf(existsSync(chrome))("offline CPS discovery and deterministic brow
     expect(JSON.stringify(opened)).not.toContain("2020-01-01");
     return session.execute({ id: 2, action: "click", target: link.target });
   }
+  function expectGuardedServerDispatches(expected: string[]) {
+    // Installed Chrome can issue this unrelated startup read before the test
+    // context exists. The injected socket still reaches only this TLS fixture,
+    // whose missing-context branch rejects it with HTTP 500; it is never page proof.
+    // Keep every other URL in the exact dispatch assertion, including forbidden
+    // destinations, instead of ignoring arbitrary hosts or unexpected reads.
+    const startup = serverSeen.filter(value => new URL(value).origin === "https://www.google.com" && new URL(value).pathname === "/async/folae");
+    expect(startup.length).toBeLessThanOrEqual(1);
+    expect(startup.every(value => !nativeSeen.includes(value))).toBe(true);
+    expect(serverSeen.filter(value => !startup.includes(value))).toEqual(expected);
+  }
+
+  it("follows an observed cross-host HTTP document redirect with a separate serialized lease for every hop", async () => {
+    const observedEntry = "https://official.example.org/public-tee-times";
+    const landing = "https://sc.cps.golf/public-availability?date=2026-10-23";
+    let active = 0, maxActive = 0, tail = Promise.resolve();
+    const leased: string[] = [], serverLeaseCounts: number[] = [];
+    const serializedLease = async <T>(family: string, work: () => Promise<T>) => {
+      const prior = tail; let release!: () => void; tail = new Promise<void>(resolve => { release = resolve; }); await prior;
+      active++; maxActive = Math.max(maxActive, active); leased.push(family);
+      try { return { acquired: true as const, value: await work() }; } finally { active--; release(); }
+    };
+    respond = url => {
+      serverLeaseCounts.push(active);
+      return url === official ? { body: `<html><body><a href="${observedEntry}">Public tee times</a></body></html>` }
+        : url === observedEntry ? { status: 302, location: landing }
+          : { body: html(date) };
+    };
+    const session = await createCourseDiscoveryBrowserSession({ initialUrls: [official], deadlineAt: new Date(Date.now() + 30_000),
+      venueName: "Offline Golf Course", timeZone: input.timeZone }, { launchBrowser, browserTransport: "NATIVE_CHROME", requestLease: serializedLease });
+    try {
+      const root = await session.execute({ id: 1, action: "open", url: official });
+      const link = root.controls.find(control => control.name === "Public tee times")!;
+      expect(link?.href).toBe(observedEntry);
+      const result = await session.execute({ id: 2, action: "click", target: link.target });
+      expect(result.url).toBe(landing); expect(result.text).toContain(date);
+      expect(result.requests).toContainEqual(expect.objectContaining({ url: observedEntry, status: 302, resourceType: "document" }));
+      expect(result.requests).toContainEqual(expect.objectContaining({ url: landing, status: 200, resourceType: "document" }));
+      expect(nativeSeen).toEqual([official, observedEntry, landing]); expectGuardedServerDispatches(nativeSeen);
+      expect(leased).toHaveLength(3); expect(serverLeaseCounts).toEqual([1, 1, 1]); expect(maxActive).toBe(1);
+      expect(active).toBe(0); expect(result.loading).toBe(false); expect(discoveryFailures).toEqual([]); expect(pinnedSeen).toEqual([]);
+    } finally { await session.close(); }
+  }, 40_000);
+
+  it.each(["script-only", "200-Location"] as const)("does not fabricate cross-host redirect authority from %s navigation", async kind => {
+    const denied = "https://sc.cps.golf/unobserved-document";
+    respond = url => url === official ? { status: 200, ...(kind === "200-Location" ? { location: denied } : {}),
+      body: `<html><body><h1>Offline Golf Course</h1><script>location.href=${JSON.stringify(denied)}</script></body></html>` } : { body: html(date) };
+    const session = await openDiscovery();
+    try {
+      await session.execute({ id: 1, action: "open", url: official }).catch(() => {});
+      await vi.waitFor(() => expect(discoveryFailures.length).toBeGreaterThan(0));
+      expectGuardedServerDispatches([official]); expect(nativeSeen).toEqual([official]); expect(pinnedSeen).toEqual([]);
+      await expect(session.execute({ id: 2, action: "open", url: denied })).rejects.toThrow("UNOBSERVED_NAVIGATION");
+      expect(serverSeen).not.toContain(denied);
+    } finally { await session.close(); }
+  }, 40_000);
+
+  it("does not promote a real redirected destination into authority for a different same-origin document", async () => {
+    const landing = "https://sc.cps.golf/public-availability", mismatch = "https://sc.cps.golf/different-unobserved-document";
+    respond = url => url === official ? { status: 302, location: landing } : url === landing
+      ? { body: `<html><body><h1>Offline Golf Course</h1><script>location.href=${JSON.stringify(mismatch)}</script></body></html>` }
+      : { body: html(date) };
+    const session = await openDiscovery();
+    try {
+      await session.execute({ id: 1, action: "open", url: official }).catch(() => {});
+      await vi.waitFor(() => expect(discoveryFailures).toContain("UNOBSERVED_NAVIGATION"));
+      expect(nativeSeen).toEqual([official, landing]); expectGuardedServerDispatches(nativeSeen);
+      expect(serverSeen).not.toContain(mismatch); expect(nativeSeen).not.toContain(mismatch);
+    } finally { await session.close(); }
+  }, 40_000);
+
+  it.each(["https://127.0.0.1/availability", "https://10.0.0.1/availability", "https://sc.cps.golf/checkout", sessionUrl(copiedToken)])(
+    "denies an actual cross-host Location before dispatch when URL or CPS scope is not admitted: %s", async denied => {
+      respond = url => url === official ? { status: 302, location: denied } : { body: html(date) };
+      const session = await openDiscovery();
+      try {
+        await session.execute({ id: 1, action: "open", url: official }).catch(() => {});
+        await vi.waitFor(() => expect(discoveryFailures.length).toBeGreaterThan(0));
+        expect(nativeSeen).toEqual([official]); expectGuardedServerDispatches([official]); expect(pinnedSeen).toEqual([]);
+        expect(serverSeen).not.toContain(denied);
+      } finally { await session.close(); }
+    }, 40_000);
 
   it("retains the official document and independent public availability after an optional script network failure", async () => {
     const optional = "https://official.example.org/optional.js", availability = `https://official.example.org/availability?date=${date}`;

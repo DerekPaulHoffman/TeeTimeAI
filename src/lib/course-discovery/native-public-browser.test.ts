@@ -2,7 +2,7 @@
 import { createServer as createTcpServer, connect, type AddressInfo, type Socket } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolvePinnedPublicAddress } from "@/lib/automation/address-pinned-public-fetch";
-import { continueNativeBrowserRead, createNativePublicBrowserProxy, isObservedNativeRedirect, nativeReadPreflightMethod, type NativePublicProxy } from "./native-public-browser";
+import { continueNativeBrowserRead, createNativePublicBrowserProxy, isObservedNativeRedirect, isObservedNativeRedirectTarget, nativeReadPreflightMethod, type NativePublicProxy } from "./native-public-browser";
 import type { Route } from "@playwright/test";
 
 const opened: NativePublicProxy[] = [];
@@ -22,12 +22,14 @@ describe("public-address native Chrome CONNECT transport", () => {
     expect(nativeReadPreflightMethod({ origin: "https://127.0.0.1", "access-control-request-method": "GET" })).toBeNull();
     expect(nativeReadPreflightMethod({ origin: "https://example.org", "access-control-request-method": "POST", "access-control-request-headers": "authorization" })).toBeNull();
   });
-  it("accepts an observed www redirect chain without allowing external, POST or unbounded redirects", () => {
+  it("does not accept structural redirect lookalikes or an observed origin as HTTP provenance", () => {
     type Request = Parameters<typeof isObservedNativeRedirect>[0];
     const request = (url: string, previous: Request | null = null, method = "GET"): Request => ({ url: () => url, method: () => method, redirectedFrom: () => previous });
     const original = request("https://www.example.org/golf");
     const observed = new Set(["https://www.example.org"]);
-    expect(isObservedNativeRedirect(request("https://example.org/golf", original), observed)).toBe(true);
+    expect(isObservedNativeRedirect(request("https://example.org/golf", original), observed)).toBe(false);
+    expect(isObservedNativeRedirect(request("https://example.org/golf", original), new Set([original.url()]))).toBe(false);
+    expect(isObservedNativeRedirectTarget(original, "https://example.org/golf", new Set([original.url()]))).toBe(false);
     expect(isObservedNativeRedirect(request("https://other.example.org/golf", original), observed)).toBe(false);
     expect(isObservedNativeRedirect(request("https://example.org/golf", request("https://www.example.org/golf", null, "POST")), observed)).toBe(false);
     let chain = original;

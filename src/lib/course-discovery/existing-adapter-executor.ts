@@ -23,6 +23,8 @@ import { executeLightspeed, inspectLightspeed } from "./lightspeed-executor";
 import { executeAmelia, inspectAmelia } from "./amelia-executor";
 import { parseChronogolfSource } from "./chronogolf-source";
 import { executeChronogolf, inspectChronogolf } from "./chronogolf-executor";
+import { parseGolfVxSource } from "./golfvx-source";
+import { executeGolfVx, inspectGolfVx } from "./golfvx-executor";
 
 type Dependencies = {
   fetch?: typeof fetch;
@@ -182,6 +184,10 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
 /** For a controller-observed provider URL only. Reads typed public configuration
  * and returns bounded IDs; availability and activation remain separate proofs. */
 export async function inspectExistingAdapter(source: Source, deps: Dependencies): Promise<{ adapter: ExistingAdapterMetadata }> {
+  if (parseGolfVxSource(source.bookingUrl)) {
+    if (!source.officialUrl) fail("ADAPTER_IDENTITY_MISSING");
+    return { adapter: await inspectGolfVx({ ...source, officialUrl: source.officialUrl }, deps) };
+  }
   if (parseChronogolfSource(source.bookingUrl)) {
     if (!source.officialUrl) fail("ADAPTER_IDENTITY_MISSING");
     return { adapter: await inspectChronogolf({ ...source, officialUrl: source.officialUrl }, deps) };
@@ -250,16 +256,20 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
   let uscheduleSession: ReturnType<typeof createUSchedulePublicSession> | undefined;
   try {
     const adapter = existingAdapterMetadataSchema.parse(recipe.adapter);
-    const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA"].includes(adapter.family) || adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR";
+    const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "GOLFVX"].includes(adapter.family) || adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR";
     if (input.timeZone !== recipe.source.timeZone || recipe.source.providerFamily.toUpperCase() !== adapter.family ||
         (recipe.target.kind === "SIMULATOR") !== simulator || simulator && (!recipe.target.offeringId || !input.durationMinutes) ||
         adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR" && (adapter.facilityIds.length !== 1 || adapter.officialIdentityProof)) fail("ADAPTER_TARGET_MISMATCH");
-    if (!["USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "CHRONOGOLF"].includes(adapter.family)) session = reader(recipe.source, deps, adapter, input);
+    if (!["USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "CHRONOGOLF", "GOLFVX"].includes(adapter.family)) session = reader(recipe.source, deps, adapter, input);
     const start = deps.toInstant(`${input.date}T${input.startTime}:00`, input);
     const next = new Date(`${input.date}T00:00:00Z`); next.setUTCDate(next.getUTCDate() + 1);
     const end = deps.toInstant(`${input.endTime === "24:00" ? next.toISOString().slice(0, 10) : input.date}T${input.endTime === "24:00" ? "00:00" : input.endTime}:00`, input);
     const now = clock();
     if (end <= now) fail("INVALID_REQUEST_DATE_OR_ZONE");
+    if (adapter.family === "GOLFVX") {
+      const slots = await executeGolfVx(recipe.source, adapter, { courseId: recipe.target.courseId, offeringId: recipe.target.offeringId! }, input, deps);
+      return result(slots.filter(slot => new Date(slot.startsAt) > now && new Date(slot.startsAt) >= start && new Date(slot.endsAt!) <= end));
+    }
     if (adapter.family === "WHOOSH") {
       const slots = await executeWhooshSimulator(recipe.source, adapter, { courseId: recipe.target.courseId, offeringId: recipe.target.offeringId! }, input, deps);
       return result(slots.filter(slot => new Date(slot.startsAt) > now && new Date(slot.startsAt) >= start && new Date(slot.endsAt!) <= end));

@@ -5,6 +5,7 @@ import { teeItUpOfficialIdentityProofSchema } from "./teeitup-official-identity"
 import { lightspeedMetadataSchema } from "./lightspeed-source";
 import { ameliaMetadataSchema } from "./amelia-source";
 import { chronogolfMetadataSchema } from "./chronogolf-source";
+import { golfVxMetadataSchema } from "./golfvx-source";
 
 const numericId = z.number().int().min(1).max(2_147_483_647);
 const publicId = z.string().regex(/^[1-9]\d{0,9}$/u);
@@ -26,6 +27,7 @@ export const existingAdapterMetadataSchema = z.discriminatedUnion("family", [
   lightspeedMetadataSchema,
   ameliaMetadataSchema,
   chronogolfMetadataSchema,
+  golfVxMetadataSchema,
 ]);
 
 export type ExistingAdapterMetadata = z.infer<typeof existingAdapterMetadataSchema>;

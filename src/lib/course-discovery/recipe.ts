@@ -66,7 +66,7 @@ export const recipeFieldSchema = z.union([
   z.object({ selector: recipeSelectorSchema, attribute: z.enum(["datetime", "data-date", "data-time", "data-value", "data-capacity", "value", "selected-label", "aria-label"]).optional(), format: z.enum(["INTEGER", "DURATION_MINUTES"]).optional() }).strict(),
 ]);
 const venueGreetingFieldSchema = z.object({ selector: recipeSelectorSchema, format: z.literal("VENUE_GREETING") }).strict()
-  .describe("DOM venue proof only, visible text with no attribute/path: opt in only for an observed complete 'Welcome to <whole venue>.' with no extra copy, or 'Welcome to [the ]<whole venue>’s online tee time engine.' (ASCII 's also accepted) optionally followed by exactly 'You are guaranteed to receive the best online rates for <whole rate venue> when you book direct with us. We look forward to seeing [you ]on the golf course.' Full text is limited to 500 characters, each captured name to 200. Both names must strictly match the canonical venue; arbitrary prose, other copy and hidden/attribute fallbacks reject. Raw/live text equality is checked before interpretation.");
+  .describe("DOM venue proof only, visible text with no attribute/path: opt in only for an observed complete 'Welcome to <whole venue>.' with no extra copy, or 'Welcome to [the ]<whole venue>’s online tee time engine.' (ASCII 's also accepted) optionally followed by exactly 'You are guaranteed to receive the best online rates for <whole rate venue> when you book direct with us. We look forward to seeing [you ]on the golf course.' Full text is limited to 500 characters, each captured name to 200. Both the main name and rate name independently use the existing strict whole-venue matcher: Unicode compatibility forms, case, punctuation and spacing are ignored. A terminal Golf Club or Golf Course label may be omitted or interchanged only when the remaining whole-name cores match, contain at least 8 letters/digits, and are not generic golf/category words; for example, Example Ridge Golf Club matches Example Ridge. This does not allow arbitrary abbreviations, substring matches or another location, and never changes the canonical source identity. Arbitrary prose, other copy and hidden/attribute fallbacks reject. Raw/live text equality is checked before interpretation.");
 const venueProofFieldSchema = z.union([recipeFieldSchema, venueGreetingFieldSchema]);
 // The new reader shape is text-only. Ordinary field schemas above retain
 // their original formats, so the greeting cannot be used for slots or dates.
@@ -158,11 +158,11 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
     engine: z.literal("EXISTING_ADAPTER"), adapter: existingAdapterMetadataSchema }).strict(),
 ]).superRefine((recipe, ctx) => {
   if (recipe.engine === "EXISTING_ADAPTER") {
-    const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA"].includes(recipe.adapter.family) ||
+    const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "GOLFVX"].includes(recipe.adapter.family) ||
       recipe.adapter.family === "TEEITUP" && recipe.adapter.offeringKind === "SIMULATOR";
     if (recipe.source.providerFamily !== recipe.adapter.family ||
       (recipe.target.kind === "SIMULATOR") !== simulator ||
-      recipe.target.kind === "SIMULATOR" && !recipe.target.offeringId || ["TEEITUP", "AMELIA", "CHRONOGOLF"].includes(recipe.adapter.family) && !recipe.source.venueAddress)
+      recipe.target.kind === "SIMULATOR" && !recipe.target.offeringId || ["TEEITUP", "AMELIA", "CHRONOGOLF", "GOLFVX"].includes(recipe.adapter.family) && !recipe.source.venueAddress)
       ctx.addIssue({ code: "custom", message: "Supported adapter metadata must match the source and target kind" });
     if (recipe.adapter.family === "TEEITUP" && simulator &&
         (recipe.adapter.facilityIds.length !== 1 || recipe.adapter.officialIdentityProof))

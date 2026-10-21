@@ -45,8 +45,40 @@ type RecordEntry = {
   id: string; networkId: string; url: string; transportUrl: string; method: string; headers: Record<string, string>; body: string | null;
   kind: string; parent: RecordEntry | null; depth: number; paused: boolean; admitted: boolean; failed: boolean; responseStarted: boolean; complete: boolean;
   failureCode?: string; failure?: Error;
+  redirect?: { status: number; target: string }; redirectChildId?: string;
   adapter: NativeReadRequest; response: ReturnType<typeof pending<NativeReadResponse | Error>>;
 };
+type NativeRecordOwner = { closed: boolean };
+// Only adapters minted by this controller have redirect provenance. A model,
+// Playwright lookalike, diagnostic or caller-supplied redirectedFrom chain does
+// not gain authority by exposing the same methods or URL strings.
+const nativeRequestRecords = new WeakMap<object, { record: RecordEntry; owner: NativeRecordOwner }>();
+const redirectStatuses = new Set([301, 302, 303, 307, 308]);
+function releasedRedirect(record: RecordEntry, target: string) {
+  return record.admitted && record.complete && !record.failed && record.redirect?.target === target;
+}
+function trustedDocumentChain(record: RecordEntry, owner: NativeRecordOwner, roots: ReadonlySet<string>) {
+  if (owner.closed || record.depth > 5) return false;
+  let current = record;
+  for (;;) {
+    if (current.kind !== "document" || !["GET", "HEAD"].includes(current.method) || current.failed ||
+        !isSafeRecipeUrl(current.url) || !isSafeRecipeUrl(current.transportUrl)) return false;
+    if (!current.parent) return current.admitted && roots.has(current.url);
+    if (current.method !== current.parent.method || !releasedRedirect(current.parent, current.url)) return false;
+    current = current.parent;
+  }
+}
+/** Exact completed HTTP provenance only; callers still apply their URL, route,
+ * CPS session, DNS and provider-lease policies to every individual hop. */
+export function hasAttestedNativeDocumentRedirect(request: object, roots: ReadonlySet<string>) {
+  const value = nativeRequestRecords.get(request);
+  return Boolean(value && value.record.parent && trustedDocumentChain(value.record, value.owner, roots));
+}
+export function hasAttestedNativeDocumentRedirectTarget(request: object, target: string, roots: ReadonlySet<string>) {
+  const value = nativeRequestRecords.get(request);
+  return Boolean(value && value.record.depth < 5 && releasedRedirect(value.record, target) &&
+    isSafeRecipeUrl(target) && trustedDocumentChain(value.record, value.owner, roots));
+}
 const resourceKinds: Record<string, string> = { Document: "document", Stylesheet: "stylesheet", Image: "image", Media: "media",
   Font: "font", Script: "script", XHR: "xhr", Fetch: "fetch", EventSource: "eventsource", WebSocket: "websocket",
   Manifest: "manifest", Other: "other", Ping: "ping", Preflight: "other" };
@@ -80,6 +112,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
   const cdp = await page.context().newCDPSession(page);
   const rootFrameId = (await cdp.send("Page.getFrameTree")).frameTree.frame.id;
   const records = new Map<string, RecordEntry>();
+  const owner: NativeRecordOwner = { closed: false };
   const rejectedRequests: NativeRequestDiagnostic[] = [];
   let closing: Promise<void> | undefined, closed = false, enabled = false, lastFailure: string | undefined, firstFatal: NativeFirstFatal | undefined;
   let interceptedRequests = 0, pendingReads = 0, responseBytes = 0;
@@ -88,6 +121,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
   function close(code = "NATIVE_REDIRECT_CLOSED") {
     if (closing) return closing;
     closed = true;
+    owner.closed = true;
     if (code !== "NATIVE_REDIRECT_CLOSED") { firstFatal ??= { code }; failure(code); }
     options.signal?.removeEventListener("abort", onAbort);
     for (const record of records.values()) { record.failed = true; record.response.settle(new Error(code)); }
@@ -198,6 +232,13 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
           // successful unchanged release, never a fabricated/fulfilled response.
           await recordCommand(record, cdp.send("Fetch.continueResponse", { requestId: record.id }), "NATIVE_REDIRECT_RESPONSE_TIMEOUT");
           if (closed || options.signal?.aborted || record.failed) return;
+          // Publish redirect authority only after Chrome acknowledges the
+          // unchanged response release. A Location alone, failed release, or
+          // duplicate header never attests a navigation.
+          if (redirectStatuses.has(status) && (event.responseHeaders ?? []).filter(item => item.name.toLowerCase() === "location").length === 1) {
+            try { record.redirect = { status, target: new URL(values.location, record.transportUrl).href }; }
+            catch { /* An invalid Location cannot authorize a child request. */ }
+          }
           record.complete = true;
           record.response.settle({ url: () => record.transportUrl, status: () => status, allHeaders: async () => ({ ...values }),
             finished: async () => null, body: async () => body });
@@ -248,11 +289,27 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         await rejectInitial(rejection); return;
       }
       const parent = event.redirectedRequestId ? records.get(event.redirectedRequestId) : null;
-      if (event.redirectedRequestId && (!parent || !parent.admitted || parent.failed || parent.depth >= 5)) {
+      if (event.redirectedRequestId && (!parent || !parent.admitted || parent.failed || parent.depth >= 5 || parent.redirectChildId)) {
         await reject(); await close("NATIVE_REDIRECT_PROVENANCE_REJECTED"); return;
       }
       const kind = resourceKinds[event.resourceType];
       if (!kind) { await reject(); await close("NATIVE_REDIRECT_RESOURCE_REJECTED"); return; }
+      if (parent) {
+        parent.redirectChildId = event.requestId;
+        // A redirected child may pause before the parent's route handler
+        // resumes. Wait outside the child handler/provider lane for that exact
+        // parent's successful release; no FIFO/URL inference or origin grant.
+        const result = await bounded(parent.response.promise, "NATIVE_REDIRECT_PROVENANCE_TIMEOUT");
+        const document = kind === "document";
+        let sameHost = false;
+        try { sameHost = new URL(parent.transportUrl).hostname.replace(/^www\./u, "") === new URL(event.request.url).hostname.replace(/^www\./u, ""); }
+        catch { /* Invalid URLs fail the provenance check. */ }
+        if (result instanceof Error || closed || options.signal?.aborted || records.has(event.requestId) || !releasedRedirect(parent, event.request.url) ||
+            event.request.method !== parent.method || document && (parent.kind !== "document" || !["GET", "HEAD"].includes(parent.method)) ||
+            !document && !sameHost) {
+          await reject(); await close("NATIVE_REDIRECT_PROVENANCE_REJECTED"); return;
+        }
+      }
       const record: RecordEntry = { id: event.requestId, networkId, url: event.request.url, transportUrl: event.request.url,
         method: event.request.method, headers: headers(event.request.headers), body: event.request.postData ?? null, kind,
         parent: parent ?? null, depth: parent ? parent.depth + 1 : 0, paused: true, admitted: false, failed: false, responseStarted: false, complete: false,
@@ -262,6 +319,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         redirectedFrom: () => record.parent?.adapter ?? null, response: async () => {
           const value = await bounded(record.response.promise, "NATIVE_REDIRECT_RESPONSE_TIMEOUT"); if (value instanceof Error) throw value; return value;
         } };
+      nativeRequestRecords.set(record.adapter, { record, owner });
       records.set(record.id, record);
       const route: NativeReadRoute = { request: () => record.adapter,
         continue: async values => {
