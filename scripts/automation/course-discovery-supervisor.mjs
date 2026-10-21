@@ -63,7 +63,8 @@ export function createCourseDiscoverySupervisor({ client, startWorker, executeRe
 
   function launch(job, execution = false) {
     const controller = new AbortController();
-    const entry = { controller, promise: null, settled: false, heartbeatPending: false };
+    const entry = { controller, promise: null, settled: false, heartbeatPending: false,
+      heartbeatPromise: null, activationPreparing: false, activationReady: false };
     const key = `${execution ? "execution" : "discovery"}:${job.id}`;
     const jobEvent = { jobId: job.id, kind: execution ? "execution" : "discovery",
       firstPickedUpAt: job.firstPickedUpAt ?? null, startedAt: new Date(now()).toISOString(), deadlineAt: job.deadlineAt,
@@ -84,23 +85,72 @@ export function createCourseDiscoverySupervisor({ client, startWorker, executeRe
       leaseTimer = timers.setTimeout(() => controller.abort(discoveryError("DISCOVERY_LEASE_EXPIRED")), Math.max(1, entry.leaseExpiresAt - now()));
     };
     renewLocalLease(job.leaseExpiresAt);
-    const heartbeatTimer = timers.setInterval(async () => {
-      if (execution || entry.settled || entry.heartbeatPending || controller.signal.aborted) return;
+    const heartbeatTimer = timers.setInterval(() => {
+      if (execution || entry.settled || entry.activationPreparing || entry.heartbeatPending || controller.signal.aborted) return;
       entry.heartbeatPending = true;
-      try {
-        const acknowledged = await client.heartbeat(job.id, job.leaseToken, controller.signal);
-        if (!controller.signal.aborted) renewLocalLease(acknowledged?.job?.leaseExpiresAt);
-      } catch (error) {
-        if (controller.signal.aborted || entry.settled) return;
-        if (error?.code === "DISCOVERY_LEASE_REJECTED" || error?.status === 409) controller.abort(discoveryError("DISCOVERY_LEASE_REJECTED"));
-        else if (now() >= entry.leaseExpiresAt) controller.abort(discoveryError("DISCOVERY_LEASE_EXPIRED"));
-        else emit("heartbeat_retry_pending", { ...jobEvent });
-      }
-      finally { entry.heartbeatPending = false; }
+      entry.heartbeatPromise = (async () => {
+        try {
+          const acknowledged = await client.heartbeat(job.id, job.leaseToken, controller.signal);
+          if (!controller.signal.aborted) renewLocalLease(acknowledged?.job?.leaseExpiresAt);
+        } catch (error) {
+          if (controller.signal.aborted || entry.settled) return;
+          if (error?.code === "DISCOVERY_LEASE_REJECTED" || error?.status === 409) controller.abort(discoveryError("DISCOVERY_LEASE_REJECTED"));
+          else if (now() >= entry.leaseExpiresAt) controller.abort(discoveryError("DISCOVERY_LEASE_EXPIRED"));
+          else emit("heartbeat_retry_pending", { ...jobEvent });
+        }
+        finally { entry.heartbeatPending = false; }
+      })();
     }, DISCOVERY_HEARTBEAT_MS);
     const cancelled = new Promise((_, reject) => controller.signal.addEventListener("abort", () => reject(controller.signal.reason ?? discoveryError("DISCOVERY_CANCELLED")), { once: true }));
     cancelled.catch(() => {});
+    let activationAcknowledgedAt;
+    let activationAcknowledgedMs;
+    let acknowledgedMetrics;
+    let postActivationTimer;
+    let postActivationBudgetExpired = false;
+    let rejectPostActivationCleanup;
+    const postActivationCleanup = new Promise((_, reject) => { rejectPostActivationCleanup = reject; });
+    postActivationCleanup.catch(() => {});
+    const assertLiveActivationFences = () => {
+      if (!controller.signal.aborted && now() >= entry.leaseExpiresAt) controller.abort(discoveryError("DISCOVERY_LEASE_EXPIRED"));
+      if (!controller.signal.aborted && discoveryWorkDeadline(job) <= now()) {
+        failureReason = "DEADLINE";
+        controller.abort(discoveryError("DISCOVERY_DEADLINE"));
+      }
+      controller.signal.throwIfAborted();
+    };
+    const beforeActivate = async () => {
+      // Activation retires the server lease. Stop new heartbeats and drain the
+      // existing request before its final CAS; expiry/deadline timers stay live.
+      if (activationAcknowledgedAt) throw discoveryError("DISCOVERY_ALREADY_ACTIVATED");
+      entry.activationPreparing = true;
+      timers.clearInterval(heartbeatTimer);
+      if (entry.heartbeatPromise) await Promise.race([entry.heartbeatPromise, cancelled]);
+      assertLiveActivationFences();
+      entry.activationReady = true;
+    };
+    const afterActivate = ({ metrics } = {}) => {
+      // Only the trusted worker calls this after the server activation ACK.
+      // A late ACK cannot resurrect a pre-existing lease/deadline cancellation.
+      if (!entry.activationReady || entry.heartbeatPending || activationAcknowledgedAt ||
+          !metrics || typeof metrics !== "object" || Array.isArray(metrics)) throw discoveryError("DISCOVERY_ACTIVATION_ACK_INVALID");
+      assertLiveActivationFences();
+      acknowledgedMetrics = structuredClone(metrics);
+      activationAcknowledgedMs = now();
+      activationAcknowledgedAt = new Date(activationAcknowledgedMs).toISOString();
+      timers.clearTimeout(deadlineTimer);
+      timers.clearTimeout(leaseTimer);
+      postActivationTimer = timers.setTimeout(() => {
+        postActivationBudgetExpired = true;
+        rejectPostActivationCleanup(discoveryError("DISCOVERY_POST_ACTIVATION_CLEANUP_PENDING"));
+      }, 5_000);
+    };
     let running;
+    let workerSettled = false;
+    let settledWorkerOutcome;
+    let settledWorkerMetrics;
+    let endedEvent;
+    let activatedEvent;
     entry.promise = (async () => {
       try {
         if (execution) {
@@ -111,34 +161,60 @@ export function createCourseDiscoverySupervisor({ client, startWorker, executeRe
           emit("execution_completed", { ...jobEvent, completedAt: new Date(now()).toISOString() });
         } else {
           if (discoveryWorkDeadline(job) <= now()) { failureReason = "DEADLINE"; throw discoveryError("DISCOVERY_WORK_DEADLINE"); }
-          running = Promise.resolve().then(() => startWorker({ job, workDeadlineAt: new Date(discoveryWorkDeadline(job)).toISOString(), signal: controller.signal }));
-          const outcome = await Promise.race([running, cancelled]);
+          running = Promise.resolve().then(() => startWorker({ job, workDeadlineAt: new Date(discoveryWorkDeadline(job)).toISOString(), signal: controller.signal, beforeActivate, afterActivate }));
+          // Cancellation can win the outer race while the worker is collecting
+          // final usage during cleanup. Retain that result without changing the
+          // supervisor's lease outcome or claiming activation from a 409.
+          running.then(outcome => { workerSettled = true; settledWorkerOutcome = outcome; settledWorkerMetrics = outcome?.metrics; },
+            error => { workerSettled = true; settledWorkerMetrics = error?.discoveryMetrics; });
+          const outcome = await Promise.race([running, cancelled, postActivationCleanup]);
           if (outcome?.outcome !== "activated") throw discoveryError("DISCOVERY_NO_VERIFIED_RECIPE");
-          emit("activated", { ...jobEvent, completedAt: new Date(now()).toISOString(), metrics: outcome.metrics });
+          activatedEvent = { ...jobEvent, completedAt: new Date(now()).toISOString(), metrics: outcome.metrics };
         }
       } catch (error) {
-        if (!execution && !stopped && !["DISCOVERY_LEASE_REJECTED", "DISCOVERY_LEASE_EXPIRED"].includes(error?.code)) {
-          if (error?.code === "DISCOVERY_ACCESS_REQUIRED") failureReason = "ACCESS_REQUIRED";
-          else if (error?.code === "DISCOVERY_UNSUPPORTED") failureReason = "UNSUPPORTED";
-          try { await client.fail(job.id, job.leaseToken, failureReason, failureReason === "TOOL_FAILURE"); }
-          catch { /* A stale lease must never be rebound or retried locally. */ }
+        if (activationAcknowledgedAt) {
+          // The backend activation is durable even if local cleanup fails or
+          // exceeds its own budget. Never send fail after its acknowledged CAS.
+          activatedEvent = { ...jobEvent, completedAt: new Date(now()).toISOString() };
+        } else {
+          if (!execution && !stopped && !["DISCOVERY_LEASE_REJECTED", "DISCOVERY_LEASE_EXPIRED"].includes(error?.code)) {
+            if (error?.code === "DISCOVERY_ACCESS_REQUIRED") failureReason = "ACCESS_REQUIRED";
+            else if (error?.code === "DISCOVERY_UNSUPPORTED") failureReason = "UNSUPPORTED";
+            try { await client.fail(job.id, job.leaseToken, failureReason, failureReason === "TOOL_FAILURE"); }
+            catch { /* A stale lease must never be rebound or retried locally. */ }
+          }
+          endedEvent = { ...jobEvent, completedAt: new Date(now()).toISOString(),
+            ...(error?.discoveryMetrics ? { metrics: error.discoveryMetrics } : {}),
+            ...(error?.code === "DISCOVERY_NO_VERIFIED_RECIPE" ? {
+              diagnosticCode: "NO_VERIFIED_RECIPE", diagnosticReason: noVerifiedRecipeDiagnostic(error.discoveryDiagnostic?.evidence).reason,
+            } : {}),
+            code: /^[A-Z_]+$/u.test(error?.code ?? "") ? error.code : "DISCOVERY_WORKER_FAILED" };
         }
-        emit("attempt_ended", { ...jobEvent, completedAt: new Date(now()).toISOString(),
-          ...(error?.discoveryMetrics ? { metrics: error.discoveryMetrics } : {}),
-          ...(error?.code === "DISCOVERY_NO_VERIFIED_RECIPE" ? {
-            diagnosticCode: "NO_VERIFIED_RECIPE", diagnosticReason: noVerifiedRecipeDiagnostic(error.discoveryDiagnostic?.evidence).reason,
-          } : {}),
-          code: /^[A-Z_]+$/u.test(error?.code ?? "") ? error.code : "DISCOVERY_WORKER_FAILED" });
       } finally {
         entry.settled = true;
         timers.clearInterval(heartbeatTimer);
         timers.clearTimeout(deadlineTimer);
         timers.clearTimeout(leaseTimer);
+        timers.clearTimeout(postActivationTimer);
         if (!controller.signal.aborted) controller.abort(discoveryError("DISCOVERY_ATTEMPT_FINISHED"));
         // Keep the slot until cooperative process cleanup completes, bounded if a worker wedges.
         let cleanupTimer;
-        await Promise.race([running?.catch(() => {}), new Promise(done => { cleanupTimer = timers.setTimeout(done, 5_000); })]);
+        const cleanupMs = activationAcknowledgedAt ? Math.max(0, 5_000 - (now() - activationAcknowledgedMs)) : 5_000;
+        if (!postActivationBudgetExpired && cleanupMs > 0) {
+          await Promise.race([running?.catch(() => {}), new Promise(done => { cleanupTimer = timers.setTimeout(done, cleanupMs); })]);
+        }
         timers.clearTimeout(cleanupTimer);
+        if (activatedEvent) {
+          if (activationAcknowledgedAt) {
+            const finalMetrics = !postActivationBudgetExpired && workerSettled && settledWorkerOutcome?.outcome === "activated" &&
+              settledWorkerMetrics && typeof settledWorkerMetrics === "object" && !Array.isArray(settledWorkerMetrics);
+            emit("activated", { ...activatedEvent, activationAcknowledgedAt, metrics: finalMetrics
+              ? { ...structuredClone(settledWorkerMetrics), metricsFinal: true }
+              : { ...acknowledgedMetrics, metricsFinal: false, cleanupWarning: "POST_ACTIVATION_CLEANUP_PENDING" } });
+          } else emit("activated", activatedEvent);
+        }
+        if (endedEvent) emit("attempt_ended", { ...endedEvent,
+          ...(endedEvent.metrics ?? settledWorkerMetrics ? { metrics: endedEvent.metrics ?? settledWorkerMetrics } : {}) });
         active.delete(key);
       }
     })();

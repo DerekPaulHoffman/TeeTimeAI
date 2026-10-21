@@ -245,6 +245,10 @@ export const accessExecutionDiagnosticSchema = z.object({
   }).optional(),
   method: z.enum(["GET", "HEAD", "POST", "OPTIONS"]).optional(),
   resourceType: z.enum(["document", "stylesheet", "image", "media", "font", "script", "xhr", "fetch", "other"]).optional(),
+  simulatorError: z.object({
+    code: z.enum(["INVALID_SOURCE", "INVALID_REQUEST", "UNSUPPORTED_PROVIDER", "UNSUPPORTED_DURATION", "PARTY_TOO_LARGE", "PUBLIC_SESSION_REQUIRED", "HTTP_ERROR", "SCHEMA_CHANGED"]),
+    retryable: z.boolean(), httpStatus: z.number().int().min(100).max(599).optional(),
+  }).strict().optional(),
 }).strict();
 export type AccessExecutionDiagnostic = z.infer<typeof accessExecutionDiagnosticSchema>;
 

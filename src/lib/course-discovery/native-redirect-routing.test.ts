@@ -397,6 +397,55 @@ describe("native exact request and response ownership", () => {
     } finally { await test.guard.close(); vi.useRealTimers(); }
   });
 
+  it("retains copied request facts and response-wait phase before timeout cleanup", async () => {
+    vi.useFakeTimers(); const test = await installed();
+    try {
+      test.request("private-fetch-id", { networkId: "private-network-id", resourceType: "Script", request: {
+        url: "https://example.org/public.js?token=private-query#private-fragment", method: "GET",
+        headers: { Authorization: "private-header" },
+      } });
+      await test.routes[0].continue();
+      const rejected = expect(test.routes[0].request().response()).rejects.toThrow("NATIVE_REDIRECT_RESPONSE_TIMEOUT");
+      await vi.advanceTimersByTimeAsync(101); await rejected;
+      expect(test.guard.firstFatal).toEqual({ code: "NATIVE_REDIRECT_RESPONSE_TIMEOUT", phase: "RESPONSE_WAIT",
+        url: "https://example.org/public.js", method: "GET", resourceType: "script", interceptedRequests: 1,
+        recordCount: 1, requestLimit: 256, framePresent: true, rootFrame: true, networkIdPresent: true,
+        duplicateRequestId: false, hasPostData: false, postDataPresent: false, postDataBytes: 0 });
+      const copy = test.guard.firstFatal!; copy.phase = "CONTINUE_RESPONSE_ACK"; copy.url = "https://mutated.example/";
+      expect(test.guard.firstFatal?.phase).toBe("RESPONSE_WAIT"); expect(test.guard.firstFatal?.url).toBe("https://example.org/public.js");
+      expect(JSON.stringify(test.guard.firstFatal)).not.toMatch(/private-|Authorization|token|networkId"|frameId"|headers|postData"/u);
+      expect(test.close).toHaveBeenCalledOnce(); expect(test.failures).toEqual(["NATIVE_REDIRECT_RESPONSE_TIMEOUT"]);
+      expect(test.cdp.send.mock.calls.some(([name]) => name === "Fetch.continueResponse")).toBe(false);
+      expect(test.guard.pendingReads).toBe(0);
+    } finally { await test.guard.close(); vi.useRealTimers(); }
+  });
+
+  it("distinguishes a timed-out unchanged response acknowledgement and produces no response proof", async () => {
+    vi.useFakeTimers(); const test = await installed(), send = test.cdp.send.getMockImplementation()!;
+    test.cdp.send.mockImplementation((name, value) => name === "Fetch.continueResponse" ? new Promise(() => {}) : send(name, value));
+    try {
+      test.request("one", { resourceType: "Script" }); await test.routes[0].continue(); test.response("one", { resourceType: "Script" });
+      await vi.waitFor(() => expect(test.cdp.send.mock.calls.some(([name]) => name === "Fetch.continueResponse")).toBe(true), { interval: 1, timeout: 50 });
+      await vi.advanceTimersByTimeAsync(101);
+      expect(test.guard.firstFatal).toMatchObject({ code: "NATIVE_REDIRECT_RESPONSE_TIMEOUT", phase: "CONTINUE_RESPONSE_ACK",
+        url: "https://example.org/data", method: "GET", resourceType: "script", duplicateRequestId: false });
+      await expect(test.routes[0].request().response()).rejects.toThrow("NATIVE_REDIRECT_RESPONSE_TIMEOUT");
+      expect(test.close).toHaveBeenCalledOnce(); expect(test.guard.pendingReads).toBe(0);
+      expect(test.failures[0]).toBe("NATIVE_REDIRECT_RESPONSE_TIMEOUT");
+    } finally { await test.guard.close(); vi.useRealTimers(); }
+  });
+
+  it.each(["https://example.org/account/session-secret/collect", "https://sc.cps.golf/(S(abcdefghijklmnopqrstuvwx))/v3.5/teetimes"])("omits unsafe response-timeout URLs %s", async url => {
+    vi.useFakeTimers(); const test = await installed();
+    try {
+      test.request("one", { request: { url, method: "GET", headers: {} } }); await test.routes[0].continue();
+      const rejected = expect(test.routes[0].request().response()).rejects.toThrow("NATIVE_REDIRECT_RESPONSE_TIMEOUT");
+      await vi.advanceTimersByTimeAsync(101); await rejected;
+      expect(test.guard.firstFatal).toMatchObject({ code: "NATIVE_REDIRECT_RESPONSE_TIMEOUT", phase: "RESPONSE_WAIT" });
+      expect(test.guard.firstFatal?.url).toBeUndefined(); expect(test.close).toHaveBeenCalledOnce();
+    } finally { await test.guard.close(); vi.useRealTimers(); }
+  });
+
   it("does not release a captured response after cancellation", async () => {
     const cancellation = new AbortController(), test = await installed(undefined, cancellation.signal), body = deferred<{ body: string; base64Encoded: boolean }>();
     const send = test.cdp.send.getMockImplementation()!;

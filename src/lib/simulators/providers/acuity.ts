@@ -12,7 +12,7 @@ const PUBLIC_ID = /^[1-9]\d{0,9}$/u;
 const OWNER_KEY = /^[a-zA-Z0-9]{4,40}$/u;
 const MAX_RESPONSE_BYTES = 600_000;
 type Node = DefaultTreeAdapterMap["node"];
-type PublicProduct = { id: string; calendarIds: string[]; calendarKind: "NAMED_BAY" | "OPAQUE_AGGREGATE";
+type PublicProduct = { id: string; calendarIds: string[]; calendarKind: "NAMED_BAY" | "OPAQUE_AGGREGATE" | "OPAQUE_POOLED";
   aggregateRentalIdentity?: "DURATION_LABELLED_SIM_RENTAL" };
 export type AcuityResourceIdentityDiagnostic = {
   reason: "RENTAL_CALENDARS_INVALID" | "CALENDAR_CATALOG_INVALID" | "CALENDAR_MATCH_AMBIGUOUS" |
@@ -50,7 +50,7 @@ export async function fetchAcuitySimulatorAvailability(input: SimulatorAvailabil
     ? Math.min(liveCapacity, input.offering.maxPartySize ?? liveCapacity)
     : input.offering.maxPartySize;
   const product = selectPublicRentalProduct(business, rentalIds.map(String), input.durationMinutes);
-  const aggregate = product.calendarKind === "OPAQUE_AGGREGATE";
+  const aggregate = product.calendarKind === "OPAQUE_AGGREGATE" || product.calendarKind === "OPAQUE_POOLED";
   const readUrl = new URL("/api/scheduling/v1/availability/times", aggregate ? url.origin : ORIGIN);
   readUrl.search = new URLSearchParams(aggregate
     ? { owner: ownerKey, appointmentTypeId: product.id, calendarId: product.calendarIds[0], startDate: input.date,
@@ -78,6 +78,25 @@ function selectPublicRentalProduct(business: Record<string, unknown>, rentalIds:
   const aggregate = aggregateHours > 0 && aggregateHours * 60 === durationMinutes;
   if (!namedBay && !aggregate) throw sourceError("The reviewed simulator product is not a public rental");
   const calendarIds = Array.isArray(product.calendarIDs) ? product.calendarIDs.map(String) : [];
+  if (calendarIds.includes("any")) {
+    // This synthetic public resource is an opaque pool, never a named bay or
+    // a numeric calendar. Its blank synthetic timezone inherits only the
+    // independently verified business timezone under this exact contract.
+    const calendars = flattenPublicGroups(business.calendars);
+    const rentals = types.filter(item => item.active === true && item.private === false && item.type === "service" &&
+      item.classSize === null && item.canChooseQuantity === false && typeof item.name === "string" &&
+      namedBayRental(item.name, Number(item.duration)));
+    if (calendarIds.length !== 1 || !pooledRentalDuration(name, durationMinutes) || product.paddingBefore !== 0 || product.paddingAfter !== 0 ||
+        calendars.length !== 1 || calendars[0].id !== "any" || calendars[0].name !== "Any available" || calendars[0].timezone !== "" ||
+        !rentals.length || rentals.some(item => !PUBLIC_ID.test(String(item.id)) || !pooledRentalDuration(String(item.name), Number(item.duration)) ||
+          item.paddingBefore !== 0 || item.paddingAfter !== 0 || !Array.isArray(item.calendarIDs) ||
+          item.calendarIDs.length !== 1 || item.calendarIDs[0] !== "any") ||
+        new Set(rentals.map(item => String(item.id))).size !== rentals.length || new Set(rentals.map(item => item.duration)).size !== rentals.length) {
+      throw resourceIdentityError(sourceError("The public simulator pooled calendar contract is not corroborated"),
+        { reason: "RENTAL_CALENDARS_INVALID" });
+    }
+    return { id: String(product.id), calendarIds, calendarKind: "OPAQUE_POOLED" };
+  }
   if (!calendarIds.length || calendarIds.length > 40 || calendarIds.some((id) => !PUBLIC_ID.test(id)) || new Set(calendarIds).size !== calendarIds.length) throw resourceIdentityError(
     schemaError("The public simulator rental calendars are missing or ambiguous"), { reason: "RENTAL_CALENDARS_INVALID" });
   let calendars: Record<string, unknown>[];
@@ -131,6 +150,13 @@ function namedBayRental(name: string, durationMinutes: number) {
 
 function numberedBayName(value: unknown) {
   return typeof value === "string" && /^\s*bay\s+\d+\b/iu.test(value);
+}
+
+function pooledRentalDuration(name: string, durationMinutes: number) {
+  // Longer published products are validated with the whole pool catalog, but
+  // the independent request/configuration duration ceiling remains240minutes.
+  const hours = normalizePlainName(name, 80)?.match(/^simulator (?:booking|rental) ([1-6]) hours?$/u)?.[1];
+  return hours !== undefined && Number(hours) * 60 === durationMinutes;
 }
 
 function durationLabelledSimRental(name: string, durationMinutes: number) {
@@ -238,7 +264,7 @@ export function inspectAcuityPublicConfiguration(html: string, sourceUrl: string
     const rentals = candidates.map(row => {
       const product = selectPublicRentalProduct(business, [String(row.id)], Number(row.duration));
       return { id: product.id, durationMinutes: Number(row.duration), calendarIds: product.calendarIds,
-        ...(product.calendarKind === "OPAQUE_AGGREGATE" ? { calendarKind: "OPAQUE_AGGREGATE" as const } : {}),
+        ...(product.calendarKind !== "NAMED_BAY" ? { calendarKind: product.calendarKind } : {}),
         ...(product.aggregateRentalIdentity ? { aggregateRentalIdentity: product.aggregateRentalIdentity } : {}) };
     });
     const resourceIds = [...new Set(rentals.flatMap(row => row.calendarIds))];
@@ -300,7 +326,10 @@ function validateInput(input: SimulatorAvailabilityInput) {
 async function publicRead(url: URL, contentType: string, fetchImpl: typeof fetch) {
   let response: Response;
   try { response = await fetchWithProviderTimeout(url, { method: "GET", redirect: "manual", credentials: "omit", cache: "no-store", headers: { Accept: contentType } }, fetchImpl); }
-  catch { throw new SimulatorAvailabilityError("HTTP_ERROR", "The public simulator calendar could not be reached", true); }
+  catch (error) {
+    if (error instanceof SimulatorAvailabilityError && ["INVALID_SOURCE", "INVALID_REQUEST", "UNSUPPORTED_PROVIDER", "UNSUPPORTED_DURATION", "PARTY_TOO_LARGE", "PUBLIC_SESSION_REQUIRED", "HTTP_ERROR", "SCHEMA_CHANGED"].includes(error.code)) throw error;
+    throw new SimulatorAvailabilityError("HTTP_ERROR", "The public simulator calendar could not be reached", true);
+  }
   if (!response.ok) throw new SimulatorAvailabilityError("HTTP_ERROR", "The public simulator calendar could not be read", response.status === 429 || response.status >= 500, response.status, response.headers.get("retry-after"));
   if (response.url && response.url !== url.toString()) throw sourceError("The simulator calendar changed its requested destination");
   if (response.headers.get("content-type")?.split(";")[0].trim().toLowerCase() !== contentType) throw schemaError("The public simulator calendar returned an unexpected response type");

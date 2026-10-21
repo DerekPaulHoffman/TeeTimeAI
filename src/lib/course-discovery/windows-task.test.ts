@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { execFileSync, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -9,6 +9,50 @@ import { describe, expect, it } from "vitest";
 describe.runIf(process.platform === "win32")("Windows supervisor lifecycle dry runs", () => {
   const interpreters = ["powershell.exe", "pwsh.exe"].filter(name => process.platform === "win32" &&
     spawnSync(name, ["-NoProfile", "-NonInteractive", "-Command", "exit 0"], { windowsHide: true }).status === 0);
+  it.each(interpreters)("preserves acknowledged cleanup evidence and redacts unknown warning data with %s", interpreter => {
+    const temporary = mkdtempSync(join(tmpdir(), "course-discovery-task-"));
+    const config = join(temporary, "runtime.json"), fakeNode = join(temporary, "fixture-output.ps1"), logs = join(temporary, "logs");
+    const activationAcknowledgedAt = "2026-10-21T20:00:00.000Z";
+    const browserTimes = { browserStartedAt: "2026-10-21T19:59:15.123Z", firstOpenStartedAt: "2026-10-21T15:59:16.456-04:00",
+      firstOpenCompletedAt: "2026-10-21T19:59:47.789Z" };
+    writeFileSync(config, JSON.stringify({ COURSE_DISCOVERY_API_ORIGIN: "https://example.org", LOCAL_READER_DEVICE_TOKEN: "fake-test-device-secret-never-print",
+      COURSE_DISCOVERY_BROWSER_TRANSPORT: "NATIVE_CHROME" }));
+    const events = [
+      { event: "activated", activationAcknowledgedAt, firstPickedUpAt: activationAcknowledgedAt, deadlineAt: "2026-10-21T20:15:00.000Z", private: "private-provider-data", metrics: {
+        model: "gpt-6-astra", ...browserTimes, metricsFinal: false, cleanupWarning: "POST_ACTIVATION_CLEANUP_PENDING", private: "private-provider-data" } },
+      { event: "activated", metrics: { metricsFinal: "private-provider-data", cleanupWarning: "private-provider-data" } },
+    ];
+    // This fixture replaces the node executable only for this invocation. The
+    // real supervisor entrypoint is passed as an ignored argument, never run.
+    writeFileSync(fakeNode, `param($IgnoredEntrypoint)\n${events.map(event => `Write-Output '${JSON.stringify(event)}'`).join("\n")}\n`);
+    try {
+      const quote = (value: string) => `'${value.replace(/'/gu, "''")}'`;
+      const protect = "$env:PSModulePath=Join-Path $PSHOME 'Modules'; $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User; $acl=New-Object Security.AccessControl.FileSecurity; " +
+        "$acl.SetOwner($sid); $acl.SetAccessRuleProtection($true,$false); " +
+        "$acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($sid,'FullControl','Allow'))); ";
+      execFileSync(interpreter, ["-NoProfile", "-NonInteractive", "-Command", `${protect}Set-Acl -LiteralPath ${quote(config)} -AclObject $acl`], { windowsHide: true });
+      execFileSync(interpreter, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "RemoteSigned", "-File",
+        resolve("scripts/automation/run-course-discovery-supervisor.ps1"), "-WorkspacePath", process.cwd(), "-ConfigPath", config,
+        "-NodePath", fakeNode, "-LogDirectory", logs], { windowsHide: true });
+      const log = readFileSync(join(logs, `${new Date().toISOString().slice(0, 10)}.jsonl`), "utf8").replace(/^\uFEFF/u, "");
+      const rows = log.trim().split(/\r?\n/u).map(line => JSON.parse(line));
+      const { activationAcknowledgedAt: retainedAck, firstPickedUpAt, deadlineAt, ...first } = rows[0];
+      expect(new Date(retainedAck).toISOString()).toBe(activationAcknowledgedAt);
+      expect(new Date(firstPickedUpAt).toISOString()).toBe(activationAcknowledgedAt);
+      expect(new Date(deadlineAt).toISOString()).toBe("2026-10-21T20:15:00.000Z");
+      expect(first.metrics).toMatchObject({ browserStartedAt: expect.any(String), firstOpenStartedAt: expect.any(String), firstOpenCompletedAt: expect.any(String) });
+      const { browserStartedAt, firstOpenStartedAt, firstOpenCompletedAt, ...metrics } = first.metrics;
+      expect(new Date(browserStartedAt).toISOString()).toBe(browserTimes.browserStartedAt);
+      expect(new Date(firstOpenStartedAt).toISOString()).toBe("2026-10-21T19:59:16.456Z");
+      expect(new Date(firstOpenCompletedAt).toISOString()).toBe(browserTimes.firstOpenCompletedAt);
+      expect([{ ...first, metrics }, rows[1]]).toEqual([{ event: "activated", metrics: { model: "gpt-6-astra",
+        metricsFinal: false, cleanupWarning: "POST_ACTIVATION_CLEANUP_PENDING" } }, { event: "activated", metrics: {} }]);
+      expect(log).not.toContain("private-provider-data"); expect(log).not.toContain("fake-test-device-secret-never-print");
+    } finally {
+      if (dirname(temporary) !== resolve(tmpdir()) || !temporary.startsWith(join(resolve(tmpdir()), "course-discovery-task-"))) throw new Error("Unsafe test cleanup path");
+      rmSync(temporary, { recursive: true, force: true });
+    }
+  }, 30_000);
   it.each(interpreters)("inspects read-only with %s using inbox modules rather than inherited user modules", interpreter => {
     const temporary = mkdtempSync(join(tmpdir(), "course-discovery-task-"));
     const fakeModule = join(temporary, "ScheduledTasks");

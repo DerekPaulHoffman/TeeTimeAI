@@ -73,14 +73,24 @@ try {
       $record = $line | ConvertFrom-Json
       if (-not $record.event -or $line.Length -gt 16384) { throw 'INVALID_LOG_RECORD' }
       $safe = [ordered]@{}
-      foreach ($key in @('event', 'active', 'kind', 'code', 'diagnosticCode', 'diagnosticReason', 'jobId', 'firstPickedUpAt', 'startedAt', 'deadlineAt', 'completedAt', 'observedAt')) {
+      foreach ($key in @('event', 'active', 'kind', 'code', 'diagnosticCode', 'diagnosticReason', 'jobId', 'firstPickedUpAt', 'startedAt', 'deadlineAt', 'completedAt', 'observedAt', 'activationAcknowledgedAt')) {
         $value = $record.$key
+        if ($key -in @('firstPickedUpAt', 'startedAt', 'deadlineAt', 'completedAt', 'observedAt', 'activationAcknowledgedAt')) {
+          # PowerShell 7 materializes JSON instants as DateTime. Preserve the
+          # actual instant rather than culture-formatting and dropping it.
+          if ($value -is [DateTimeOffset]) { $value = $value.ToUniversalTime().ToString('o') }
+          elseif ($value -is [DateTime] -and $value.Kind -ne [DateTimeKind]::Unspecified) { $value = $value.ToUniversalTime().ToString('o') }
+        }
         if ($null -ne $value -and ([string]$value) -match '^[A-Za-z0-9_.:+-]{1,200}$') { $safe[$key] = $value }
       }
       if ($record.metrics) {
         $metrics = [ordered]@{}
         foreach ($key in @('model', 'browserActions', 'browserStartedAt', 'firstBrowserStartupMs', 'firstOpenStartedAt', 'firstOpenCompletedAt', 'firstOpenElapsedMs', 'providerRequestsObserved', 'responseBytesObserved')) {
           $value = $record.metrics.$key
+          if ($key -in @('browserStartedAt', 'firstOpenStartedAt', 'firstOpenCompletedAt')) {
+            if ($value -is [DateTimeOffset]) { $value = $value.ToUniversalTime().ToString('o') }
+            elseif ($value -is [DateTime] -and $value.Kind -ne [DateTimeKind]::Unspecified) { $value = $value.ToUniversalTime().ToString('o') }
+          }
           if ($null -ne $value -and ([string]$value) -match '^[A-Za-z0-9_.:+-]{1,120}$') { $metrics[$key] = $value }
         }
         if ($record.metrics.tokenUsage) {
@@ -93,6 +103,10 @@ try {
         if ($record.metrics.replayDurationsMs -is [array] -and $record.metrics.replayDurationsMs.Count -le 32) {
           $durations = @($record.metrics.replayDurationsMs | Where-Object { ([string]$_) -match '^\d{1,6}$' -and [int]$_ -le 180000 })
           if ($durations.Count -eq $record.metrics.replayDurationsMs.Count) { $metrics.replayDurationsMs = $durations }
+        }
+        if ($record.metrics.metricsFinal -is [bool]) { $metrics.metricsFinal = $record.metrics.metricsFinal }
+        if ($record.metrics.cleanupWarning -in @('TEMP_DIRECTORY_RETAINED_WITHOUT_AUTH', 'TEMP_CREDENTIAL_CLEANUP_FAILED', 'POST_ACTIVATION_CLEANUP_PENDING')) {
+          $metrics.cleanupWarning = $record.metrics.cleanupWarning
         }
         $safe.metrics = $metrics
       }

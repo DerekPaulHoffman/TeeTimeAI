@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { fetchAcuitySimulatorAvailability, inspectAcuityPublicConfiguration, isAcuityPublicBookingUrl, projectAcuityPublicConfiguration } from "./acuity";
 import { fetchSimulatorAvailability } from "./index";
-import type { SimulatorAvailabilityInput } from "./types";
+import { SimulatorAvailabilityError, type SimulatorAvailabilityInput } from "./types";
 import { filterSimulatorSessionsForSearch } from "@/lib/tee-times/matching";
 import { simulatorPublicConfigurationSchema } from "./public-configuration";
 
@@ -26,6 +26,108 @@ function landing(value = business()) { return `<html><script>var BUSINESS = ${JS
 function mockReads(payload: unknown = { "2026-10-10": [{ time: "2026-10-10T08:00:00-0400", slotsAvailable: 1 }] }, html = landing()) {
   return vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(html, { headers: { "Content-Type": "text/html" } })).mockResolvedValueOnce(new Response(JSON.stringify(payload), { headers: { "Content-Type": "application/json" } }));
 }
+
+const pooledUrl = "https://app.acuityscheduling.com/schedule/pool1234";
+function pooledBusiness() {
+  return { ...business(), name: "Example Simulator Pool", ownerKey: "pool1234", description: "Public simulator rental",
+    calendars: { "": [{ id: "any", name: "Any available", timezone: "" }] },
+    appointmentTypes: { "": [1, 2, 3, 4, 5, 6].map(hours => ({ id: 100 + hours, name: `Simulator ${hours > 4 ? "Rental" : "Booking"} ${hours} ${hours === 1 ? "Hour" : "Hours"}`,
+      duration: hours * 60, active: true, private: false, type: "service", classSize: null as number | null, canChooseQuantity: false,
+      paddingBefore: 0, paddingAfter: 0, calendarIDs: ["any"] })) } };
+}
+function pooledInput(durationMinutes = 60): SimulatorAvailabilityInput {
+  return { ...input, durationMinutes, partySize: 2, offering: { ...input.offering, bookingUrl: pooledUrl, maxPartySize: null,
+    supportedDurationsMinutes: [60, 120, 180, 240], providerMetadata: { ownerKey: "pool1234", rentalProductIds: ["101", "102", "103", "104"] } } };
+}
+function pooledLanding(value = pooledBusiness()) { return `<script>var BUSINESS = ${JSON.stringify(value)};</script>`; }
+function pooledDays() {
+  return { "2026-10-10": [{ time: "2026-10-10T10:00:00-0400", slotsAvailable: 6 }],
+    "2026-10-11": [], "2026-10-12": [], "2026-10-13": [] };
+}
+
+describe("explicit public simulator rentals on an opaque any-only pool", () => {
+  it.each([60, 120, 180, 240])("retains published %imin duration and provider pool semantics", async durationMinutes => {
+    const config = projectAcuityPublicConfiguration(pooledLanding(), pooledUrl);
+    expect(config).toMatchObject({ family: "ACUITY", timeZone: input.timeZone, maxPartySize: null,
+      resources: [{ id: "any", timeZone: input.timeZone }] });
+    expect(config?.rentals).toEqual([1, 2, 3, 4].map(hours => ({ id: String(100 + hours), durationMinutes: hours * 60,
+      calendarIds: ["any"], calendarKind: "OPAQUE_POOLED" })));
+    const fetchImpl = mockReads(pooledDays(), pooledLanding());
+    const result = await fetchAcuitySimulatorAvailability(pooledInput(durationMinutes), fetchImpl);
+    const url = new URL(String(fetchImpl.mock.calls[1][0]));
+    expect(url.origin).toBe("https://app.acuityscheduling.com");
+    expect(url.pathname).toBe("/api/scheduling/v1/availability/times");
+    expect(Object.fromEntries(url.searchParams)).toEqual({ owner: "pool1234", appointmentTypeId: String(100 + durationMinutes / 60),
+      calendarId: "any", startDate: input.date, maxDays: "4", timezone: input.timeZone });
+    expect(result).toMatchObject({ complete: true, slots: [{ resourceId: "ANY", productId: String(100 + durationMinutes / 60), maxPartySize: null }] });
+    expect(result.slots).toHaveLength(1);
+    expect(result.slots[0].endsAt.getTime() - result.slots[0].startsAt.getTime()).toBe(durationMinutes * 60_000);
+    expect(result.slots[0]).not.toHaveProperty("availableSpots");
+    expect(result.slots[0]).not.toHaveProperty("resourceCount");
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(fetchImpl.mock.calls[1][1]).toMatchObject({ method: "GET", credentials: "omit", redirect: "manual", cache: "no-store" });
+  });
+  it.each([
+    ["mixed product calendars", (value: ReturnType<typeof pooledBusiness>) => { value.appointmentTypes[""][0].calendarIDs.push("1234"); }],
+    ["duplicate pooled product calendars", (value: ReturnType<typeof pooledBusiness>) => { value.appointmentTypes[""][0].calendarIDs.push("any"); }],
+    ["mixed calendar catalog", (value: ReturnType<typeof pooledBusiness>) => { value.calendars[""].push({ id: "1234", name: "Bay 1", timezone: input.timeZone }); }],
+    ["duplicate pooled catalog", (value: ReturnType<typeof pooledBusiness>) => { value.calendars[""].push({ ...value.calendars[""][0] }); }],
+    ["unknown pool label", (value: ReturnType<typeof pooledBusiness>) => { value.calendars[""][0].name = "Other resource"; }],
+    ["nonempty synthetic timezone", (value: ReturnType<typeof pooledBusiness>) => { value.calendars[""][0].timezone = input.timeZone; }],
+    ["foreign synthetic timezone", (value: ReturnType<typeof pooledBusiness>) => { value.calendars[""][0].timezone = "America/Chicago"; }],
+    ["missing synthetic timezone", (value: ReturnType<typeof pooledBusiness>) => { delete (value.calendars[""][0] as Partial<{ timezone: string }>).timezone; }],
+    ["invalid business timezone", (value: ReturnType<typeof pooledBusiness>) => { value.timezone = "Not/AZone"; }],
+    ["foreign business timezone", (value: ReturnType<typeof pooledBusiness>) => { value.timezone = "America/Chicago"; }],
+    ["padding before", (value: ReturnType<typeof pooledBusiness>) => { value.appointmentTypes[""][0].paddingBefore = 5; }],
+    ["padding after", (value: ReturnType<typeof pooledBusiness>) => { value.appointmentTypes[""][0].paddingAfter = 5; }],
+    ["missing padding", (value: ReturnType<typeof pooledBusiness>) => { delete (value.appointmentTypes[""][0] as Partial<{ paddingAfter: number }>).paddingAfter; }],
+    ["duration label mismatch", (value: ReturnType<typeof pooledBusiness>) => { value.appointmentTypes[""][0].name = "Simulator Booking 2 Hours"; }],
+    ["lesson", (value: ReturnType<typeof pooledBusiness>) => { value.appointmentTypes[""][0].name = "Simulator Booking 1 Hour Lesson"; }],
+    ["member", (value: ReturnType<typeof pooledBusiness>) => { value.appointmentTypes[""][0].name = "Simulator Booking 1 Hour Members"; }],
+    ["quantity", (value: ReturnType<typeof pooledBusiness>) => { value.appointmentTypes[""][0].canChooseQuantity = true; }],
+    ["class", (value: ReturnType<typeof pooledBusiness>) => { value.appointmentTypes[""][0].classSize = 6; }],
+    ["private", (value: ReturnType<typeof pooledBusiness>) => { value.appointmentTypes[""][0].private = true; }],
+    ["inactive", (value: ReturnType<typeof pooledBusiness>) => { value.appointmentTypes[""][0].active = false; }],
+    ["duplicate requested duration", (value: ReturnType<typeof pooledBusiness>) => { value.appointmentTypes[""].push({ ...value.appointmentTypes[""][0], id: 999 }); }],
+    ["duplicate product ID", (value: ReturnType<typeof pooledBusiness>) => { value.appointmentTypes[""][1].id = value.appointmentTypes[""][0].id; }],
+    ["other rental has mixed identity", (value: ReturnType<typeof pooledBusiness>) => { value.appointmentTypes[""][1].calendarIDs = ["999"]; }],
+    ["longer rental has mixed identity", (value: ReturnType<typeof pooledBusiness>) => { value.appointmentTypes[""][5].calendarIDs = ["999"]; }],
+    ["longer rental has padding", (value: ReturnType<typeof pooledBusiness>) => { value.appointmentTypes[""][5].paddingAfter = 30; }],
+    ["longer rental has mismatched duration", (value: ReturnType<typeof pooledBusiness>) => { value.appointmentTypes[""][5].duration = 300; }],
+    ["wrong tenant", (value: ReturnType<typeof pooledBusiness>) => { value.ownerKey = "anotherowner"; }],
+  ] as const)("rejects %s before reading availability", async (_label, mutate) => {
+    const value = pooledBusiness(); mutate(value);
+    const projection = projectAcuityPublicConfiguration(pooledLanding(value), pooledUrl);
+    // A different valid business timezone is rejected against the execution's
+    // trusted context, rather than against an invented parser-side timezone.
+    if (["lesson", "member", "quantity", "class", "private", "inactive"].includes(_label)) {
+      expect(Boolean(projection?.rentals.some(row => row.id === "101"))).toBe(false);
+    } else if (_label !== "foreign business timezone") expect(projection).toBeUndefined();
+    const fetchImpl = mockReads(pooledDays(), pooledLanding(value));
+    await expect(fetchAcuitySimulatorAvailability(pooledInput(), fetchImpl)).rejects.toBeInstanceOf(SimulatorAvailabilityError);
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+  it.each([
+    {}, { "2026-10-11": [] }, { "2026-10-10": [], "2026-10-14": [] },
+    { "2026-10-10": [], "2026-02-30": [] }, { "2026-10-10": [], "2026-10-11": [{ time: "2026-10-12T10:00:00-0400", slotsAvailable: 1 }] },
+    { "2026-10-10": [], "2026-10-11": [{ time: "2026-10-11T10:00:00-0500", slotsAvailable: 1 }] },
+    { "2026-10-10": [], "2026-10-11": [{ time: "2026-10-11T10:00:00-0400", slotsAvailable: 1, unknown: true }] },
+  ])("rejects incomplete or malformed four-day pooled evidence instead of EMPTY", async payload => {
+    await expect(fetchAcuitySimulatorAvailability(pooledInput(), mockReads(payload, pooledLanding()))).rejects.toMatchObject({ code: "SCHEMA_CHANGED" });
+  });
+  it("accepts an explicitly present empty requested pool while checking all returned dates", async () => {
+    const payload = { ...pooledDays(), "2026-10-10": [] };
+    expect((await fetchAcuitySimulatorAvailability(pooledInput(), mockReads(payload, pooledLanding()))).slots).toEqual([]);
+  });
+  it("validates published five/six-hour rentals without expanding supported execution duration", async () => {
+    const value = pooledBusiness();
+    expect(value.appointmentTypes[""].map(row => row.duration)).toEqual([60, 120, 180, 240, 300, 360]);
+    expect(projectAcuityPublicConfiguration(pooledLanding(value), pooledUrl)?.rentals.map(row => row.durationMinutes)).toEqual([60, 120, 180, 240]);
+    const fetchImpl = mockReads(pooledDays(), pooledLanding(value));
+    await expect(fetchAcuitySimulatorAvailability(pooledInput(300), fetchImpl)).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
 
 describe("closed public configuration rejection diagnostics", () => {
   it.each(["https://app.acuityscheduling.com", "https://syntheticvenue.as.me"])("preserves the exact embedded reference on the canonical %s schedule", async origin => {
@@ -499,5 +601,23 @@ describe("Acuity public simulator availability", () => {
   it("sanitizes public transport failures", async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockRejectedValue(new Error("private transport detail"));
     await expect(fetchAcuitySimulatorAvailability(input, fetchImpl)).rejects.toMatchObject({ code: "HTTP_ERROR", message: "The public simulator calendar could not be reached", retryable: true });
+  });
+  it.each([
+    new SimulatorAvailabilityError("INVALID_SOURCE", "controller identity rejected"),
+    new SimulatorAvailabilityError("HTTP_ERROR", "controller HTTP failure", true, 503),
+  ])("preserves exact typed controller errors from an injected public read", async error => {
+    const fetchImpl = vi.fn<typeof fetch>().mockRejectedValue(error);
+    await expect(fetchAcuitySimulatorAvailability(input, fetchImpl)).rejects.toBe(error);
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+  it("does not grant typed-error authority to lookalike or mutated transport exceptions", async () => {
+    const fake = Object.assign(new Error("secret transport detail"), { code: "INVALID_SOURCE", retryable: false, httpStatus: 503 });
+    const mutated = new SimulatorAvailabilityError("INVALID_SOURCE", "secret transport detail");
+    Object.defineProperty(mutated, "code", { value: "UNKNOWN_PRIVATE_CODE" });
+    for (const error of [fake, mutated]) {
+      const fetchImpl = vi.fn<typeof fetch>().mockRejectedValue(error);
+      await expect(fetchAcuitySimulatorAvailability(input, fetchImpl)).rejects.toMatchObject({ code: "HTTP_ERROR",
+        message: "The public simulator calendar could not be reached", retryable: true });
+    }
   });
 });

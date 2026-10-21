@@ -107,6 +107,12 @@ function safeReplayDiagnostic(value) {
   if (safeObservedUrl(value.url)) { const url = new URL(value.url); url.search = ""; url.hash = ""; result.url = url.href; }
   if (["GET", "HEAD", "POST", "OPTIONS"].includes(value.method)) result.method = value.method;
   if (["document", "script", "stylesheet", "xhr", "fetch", "other"].includes(value.resourceType)) result.resourceType = value.resourceType;
+  const simulatorError = value.simulatorError;
+  if (simulatorError && ["INVALID_SOURCE", "INVALID_REQUEST", "UNSUPPORTED_PROVIDER", "UNSUPPORTED_DURATION", "PARTY_TOO_LARGE", "PUBLIC_SESSION_REQUIRED", "HTTP_ERROR", "SCHEMA_CHANGED"].includes(simulatorError.code) && typeof simulatorError.retryable === "boolean") {
+    result.simulatorError = { code: simulatorError.code, retryable: simulatorError.retryable };
+    if (Number.isInteger(simulatorError.httpStatus) && simulatorError.httpStatus >= 100 && simulatorError.httpStatus <= 599)
+      result.simulatorError.httpStatus = simulatorError.httpStatus;
+  }
   return result;
 }
 function safeBrowserRequestFailures(value) {
@@ -119,6 +125,7 @@ function safeBrowserRequestFailures(value) {
 function safeNativeRequestDiagnostic(value) {
   if (!value || typeof value !== "object" || Array.isArray(value) || typeof value.code !== "string" || !/^NATIVE_[A-Z_0-9]{1,73}$/u.test(value.code)) return undefined;
   const result = { code: value.code };
+  if (["RESPONSE_WAIT", "CONTINUE_RESPONSE_ACK"].includes(value.phase)) result.phase = value.phase;
   if (safeObservedUrl(value.url)) {
     try {
       const url = new URL(value.url);
@@ -561,7 +568,7 @@ export async function validateDiscoveryRecipe({ cwd, recipe, signal, spawnProces
   });
 }
 
-export async function verifyDiscoveryCandidate({ client, job, recipe, executeRecipe, signal, sourceEvidence, onReplay = () => {} }) {
+export async function verifyDiscoveryCandidate({ client, job, recipe, executeRecipe, signal, sourceEvidence, onReplay = () => {}, beforeActivate = async () => {}, afterActivate = async () => {} }) {
   const proposal = await client.candidate(job.id, job.leaseToken, recipe, signal, sourceEvidence);
   if (!/^[a-f0-9]{64}$/u.test(proposal.recipeHash ?? "") || !Array.isArray(proposal.challenges) || proposal.challenges.length !== 2 ||
       new Set(proposal.challenges.map(challenge => challenge.id)).size !== 2) throw discoveryError("DISCOVERY_CHALLENGES_INVALID");
@@ -584,10 +591,17 @@ export async function verifyDiscoveryCandidate({ client, job, recipe, executeRec
     }
     await client.verification(job.id, challenge.id, job.leaseToken, { recipeHash: proposal.recipeHash, input: challenge.input, result }, signal);
   }
-  return client.activate(job.id, job.leaseToken, signal);
+  // Stop and drain lease heartbeats before the final compare-and-set retires
+  // this lease. A post-commit heartbeat must not cancel successful cleanup.
+  await beforeActivate();
+  signal?.throwIfAborted();
+  const activation = await client.activate(job.id, job.leaseToken, signal);
+  if (!activation || typeof activation !== "object" || Array.isArray(activation)) throw discoveryError("DISCOVERY_ACTIVATION_INVALID");
+  await afterActivate();
+  return activation;
 }
 
-export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineAt, client, cwd, signal, model = DISCOVERY_MODEL,
+export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineAt, client, cwd, signal, model = DISCOVERY_MODEL, beforeActivate = async () => {}, afterActivate = async () => {},
   processFactory = createDiscoveryProcess, browserFactory = createDiscoveryBrowser,
   validateRecipe = args => validateDiscoveryRecipe({ cwd, ...args }),
   executeRecipe = args => executeDiscoveryRecipe({ cwd, helperEnvironment: client.helperEnvironment("discovery", originalJob), ...args }), resolveCli = resolveDiscoveryCli,
@@ -599,6 +613,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
   let app;
   let browser;
   let activated;
+  let activationStarted = false;
   const restoredController = readDiscoveryControllerCheckpoint(job.checkpoint, job.request.identity.officialUrl);
   const observedNavigationUrls = new Set(restoredController.urls);
   const observedReadUrls = new Set(restoredController.readUrls ?? []);
@@ -611,6 +626,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
   let lastFailure = meaningfulFailure(restoredController.lastFailure ?? lastFeedback);
   let terminalDiagnostic;
   let lastBrowserSnapshot;
+  let browserControlsInvalidated = false;
   let adapterObservation;
   let currentAccessRequirementObserved = false;
   const controllerCheckpoint = () => ({ version: 1, officialUrl: job.request.identity.officialUrl,
@@ -729,9 +745,10 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
           rejectTurn(discoveryError("DISCOVERY_TOOL_QUEUE_LIMIT")); return;
         }
         queuedTools++;
-        const run = async () => { try {
+        const run = async () => { let replayClosedBrowser = false; try {
           if (stopping || signal?.aborted) throw discoveryError("DISCOVERY_CANCELLED");
           if (activated) throw discoveryError("DISCOVERY_ALREADY_ACTIVATED");
+          if (activationStarted) throw discoveryError("DISCOVERY_ACTIVATION_FINISHED");
           const input = message.params.arguments;
           let result;
           let terminalOutcome;
@@ -742,6 +759,8 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
             currentAccessRequirementObserved = false;
             if (!input || !BROWSER_ACTIONS.includes(input.action) || Object.keys(input).some(key => !["action", "url", "target", "option", "text", "direction", "selector"].includes(key))) throw discoveryError("DISCOVERY_BROWSER_ACTION_INVALID");
             browserActions++;
+            if (browserControlsInvalidated && !["open", "inspect_adapter", "finish"].includes(input.action))
+              throw discoveryError("BROWSER_SESSION_CLOSED");
             if (["open", "finish", "inspect_adapter"].includes(input.action)) adapterObservation = undefined;
             if (!browser) {
               adapterObservation = undefined;
@@ -802,6 +821,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
             if (input.action === "inspect_adapter")
               adapterObservation = createDiscoveryAdapterObservation(job, input.url, snapshot?.adapter, snapshot?.url);
             lastBrowserSnapshot = snapshot;
+            if (input.action === "open") browserControlsInvalidated = false;
             currentAccessRequirementObserved = snapshot?.accessRequirementObserved === true;
             const browserFeedback = discoveryBrowserFeedback(snapshot, input.action);
             const previousFeedback = JSON.stringify(lastFeedback);
@@ -810,7 +830,10 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
             if (isNewObservedUrl || hasNewObservedEntry || hasNewObservedRead || previousOfficialObserved !== officialSourceObserved || didFallback || previousFeedback !== JSON.stringify(lastFeedback)) await saveCheckpoint({});
             if (input.action === "open") firstOpenCompletedAt ??= new Date().toISOString();
             result = compactSnapshot(snapshot);
-            if (input.action === "finish") { await browser.close(); browser = null; }
+            if (input.action === "finish") {
+              await browser.close(); browser = null;
+              browserControlsInvalidated = true; lastBrowserSnapshot = undefined; currentAccessRequirementObserved = false;
+            }
           } else if (message.params.tool === "discovery_checkpoint") {
             if (typeof input?.summary !== "string" || input.summary.length > 2000 ||
                 Object.keys(input).some(key => !["summary", "outcome"].includes(key))) throw discoveryError("DISCOVERY_CHECKPOINT_INVALID");
@@ -841,12 +864,17 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
               ? { officialUrl: job.request.identity.officialUrl, observedBookingUrl: proposedUrl }
               : inspectedAdapterSourceEvidence(recipe, job, adapterObservation, officialSourceObserved, lastBrowserSnapshot?.url);
             if (proposedUrl !== job.request.identity.bookingUrl && !sourceEvidence) throw discoveryError("DISCOVERY_SOURCE_NOT_OBSERVED");
-            // A rejected proposal must leave its current observed controls and
-            // links usable for correction within the same attempt.
+            // Schema/source rejection above leaves the current controls usable.
+            // Independent replay closes discovery's session. Its opaque controls
+            // and access observations cannot survive that close, even on failure.
             await browser?.close(); browser = null;
+            replayClosedBrowser = true; browserControlsInvalidated = true;
+            lastBrowserSnapshot = undefined; currentAccessRequirementObserved = false;
             adapterObservation = undefined;
             activated = await verifyDiscoveryCandidate({ client, job, recipe, executeRecipe, signal, sourceEvidence,
-              onReplay: ({ elapsedMs }) => replayDurationsMs.push(elapsedMs) });
+              onReplay: ({ elapsedMs }) => replayDurationsMs.push(elapsedMs),
+              beforeActivate: async () => { activationStarted = true; await beforeActivate(); },
+              afterActivate: () => afterActivate({ metrics: metrics() }) });
             result = { activated: true };
           }
           send({ id: message.id, result: { success: true, contentItems: [{ type: "inputText", text: JSON.stringify(result) }] } });
@@ -861,15 +889,18 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
           if (feedback) { lastFeedback = feedback; lastFailure = retainMeaningfulFailure(lastFailure, feedback); await saveCheckpoint({}).catch(() => {}); }
           send({ id: message.id, result: { success: false, contentItems: [{ type: "inputText", text: JSON.stringify({ error: /^[A-Z_]+$/u.test(error?.code ?? "") ? error.code : "DISCOVERY_TOOL_FAILED",
             ...(feedback ? { details: feedback.details } : {}),
-            ...(message.params.tool === "discovery_browser" && message.params.arguments?.action === "finish"
+            ...(replayClosedBrowser ? { browserSessionClosed: true,
+              hint: "Independent replay closed the discovery browser. Open an already observed public URL to obtain fresh controls before correcting the recipe; the original deadline is unchanged." } : {}),
+            ...(message.params.tool === "discovery_browser" && (message.params.arguments?.action === "finish" || error?.code === "BROWSER_SESSION_CLOSED")
               ? { hint: "The browser session is closed. Open an already observed public URL to start a fresh session within the original deadline." } : {}),
             ...(error?.code === "DISCOVERY_SOURCE_NOT_OBSERVED" ? { hint: "Open the official source and follow its public booking link before proposing a changed booking URL." } : {}) }) }] } });
-          if (["DISCOVERY_LEASE_REJECTED", "DISCOVERY_NO_BROWSER_PROGRESS"].includes(error?.code)) rejectTurn(error);
+          if (activationStarted || ["DISCOVERY_LEASE_REJECTED", "DISCOVERY_NO_BROWSER_PROGRESS"].includes(error?.code)) rejectTurn(error);
         } finally {
           // finish must release even a helper whose page closed before it could
           // produce its final snapshot. Keep the job clock and observed URLs.
           if (message.params.tool === "discovery_browser" && message.params.arguments?.action === "finish") {
             await browser?.close().catch(() => {}); browser = null;
+            browserControlsInvalidated = true; lastBrowserSnapshot = undefined; currentAccessRequirementObserved = false;
           }
           queuedTools--;
         } };
@@ -899,7 +930,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
         "BROWSER_DOM permittedRoutes must include every observed required document, script, stylesheet and public data bootstrap route, using exact origins, bounded path prefixes and query key names. Static assets are not implicitly permitted. Exclude incidental analytics where the page works without them. Public anonymous-read POST bodies are shown only after the fixed policy authorizes them; do not invent endpoints or body fields.",
         "Every BROWSER_DOM recipe requires availabilityResponse identifying the observed availability request URL, method, and date binding in QUERY or JSON_BODY. It must complete successfully for the exact requested date after input changes. Normally select duration/player filters before the final date-triggered read. For the exact public PassFactory widget only, ordinary select-DURATION may follow date selection: the fixed runtime independently verifies its pinned client code and prior successful day response before supporting that client-only filter. Do not invent a bypass flag. A changed sidebar date or visible body is not completion. Use proof.complete {availabilityResponse:true} only with an observed JSON success path/value in availabilityResponse.success (an HTTP200 alone does not prove application success), or read an explicit DOM ready/loaded/complete field. Simulator slots.scope must identify actual resource cards with a direct child label, not a broad ancestor wrapping multiple resources.",
         "For an OUTDOOR page that returns its complete availability in the dated main-document HTML itself, availabilityResponse kind SERVER_DOCUMENT and proof.complete {serverDocument:true} are available. The interpreter requires a fresh successful full HTML document GET bound to the requested date, and compares venue, date, capacity and every extracted row against the inert original response. A client-rendered grid, a container alone, incomplete HTML, later data loads or pagination cannot use this proof. Do not invent per-slot player capacity when the page only states a general group limit.",
-        "Use schema field readers and formats for date, venue, capacity, duration and completeness proof. After a successful fixed inspect_adapter, prefer proposing EXISTING_ADAPTER immediately with its exact inspected booking URL and unchanged returned adapter metadata. The controller retains that current inspection as source evidence, so no provider JavaScript page visit is required. Different URLs or metadata require a new inspection; an explicit open, browser reset, failed browser action or change of observed URL clears the inspection. This does not authorize unobserved browser or JSON recipes. A rejected proposal retains the browser for correction. A proposal is tested immediately; use returned failing-step or route diagnostics to refine it within this attempt. Aim for a verified reusable recipe within five minutes, leaving the overall fifteen-minute deadline for fresh execution and notification. Do not repeat unchanged failures.",
+        "Use schema field readers and formats for date, venue, capacity, duration and completeness proof. After a successful fixed inspect_adapter, prefer proposing EXISTING_ADAPTER immediately with its exact inspected booking URL and unchanged returned adapter metadata. The controller retains that current inspection as source evidence, so no provider JavaScript page visit is required. Different URLs or metadata require a new inspection; an explicit open, browser reset, failed browser action or change of observed URL clears the inspection. This does not authorize unobserved browser or JSON recipes. Schema or source rejection retains the current browser. Once independent replay begins, discovery's browser closes and all its controls become stale. If replay fails, open an already observed public URL for fresh controls or inspect its supported adapter again before correcting the recipe. Use the returned failing-step or route diagnostics within this attempt and original deadline. Aim for a verified reusable recipe within five minutes, leaving the overall fifteen-minute deadline for fresh execution and notification. Do not repeat unchanged failures.",
         "When observed field text fits an available interpreter, propose the observed data recipe and let deterministic replay decide normalized identity; use its feedback to refine rather than treating your own wording interpretation as a proven unsupported capability. Previous checkpoint summaries are unverified model hypotheses, not schema restrictions.",
         "For an actual observed login or challenge wall, checkpoint outcome ACCESS_REQUIRED only when the current browser snapshot reports accessRequirementObserved:true. A model summary or HTTP403 alone cannot establish this. An UNSUPPORTED report is an unverified capability limitation: it ends only this attempt as a retryable failure within the original job deadline, never as a terminal unsupported-source verdict. One failed adapter does not establish that every allowed method is unsupported. First use returned diagnostics to correct stale controls, unfinished navigation or recipe schema errors. Policy prose, a requirement to sign in to book, a mere CAPTCHA mention, missing data or a transient fetch error is not a terminal access outcome. Propose only a data recipe; the controller validates and replays it independently. Missing availability is not zero times.",
         `Recipe JSON schema: ${JSON.stringify(recipeSchema)}`,

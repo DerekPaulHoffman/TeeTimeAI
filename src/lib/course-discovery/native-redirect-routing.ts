@@ -14,6 +14,7 @@ export type NativeReadResponse = Pick<Response, "url" | "status" | "allHeaders" 
 export type NativeReadRoute = Pick<Route, "continue" | "abort" | "fulfill"> & { request(): NativeReadRequest };
 export type NativeRequestDiagnostic = {
   code: string; url?: string; method?: string; resourceType?: string;
+  phase?: "RESPONSE_WAIT" | "CONTINUE_RESPONSE_ACK";
   interceptedRequests?: number; recordCount?: number; requestLimit?: number; postDataBytes?: number;
   framePresent?: boolean; rootFrame?: boolean; networkIdPresent?: boolean; duplicateRequestId?: boolean;
   hasPostData?: boolean; postDataPresent?: boolean;
@@ -129,20 +130,25 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
     closing = (async () => { await page.close({ runBeforeUnload: false }).catch(() => {}); await cdp.detach().catch(() => {}); })();
     return closing;
   }
-  const bounded = async <T>(promise: Promise<T>, code: string): Promise<T> => {
+  const bounded = async <T>(promise: Promise<T>, code: string, timeoutDiagnostic?: () => NativeRequestDiagnostic): Promise<T> => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try { return await Promise.race([promise, new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => { reject(new Error(code)); void close(code); }, timeoutMs);
+      timer = setTimeout(() => {
+        // Capture the exact initiating read before generic session cleanup
+        // records a code-only failure. Diagnostics cannot alter fatal cleanup.
+        try { if (timeoutDiagnostic) firstFatal ??= { ...timeoutDiagnostic(), code }; } catch { /* Keep the original timeout. */ }
+        reject(new Error(code)); void close(code);
+      }, timeoutMs);
     })]); } finally { clearTimeout(timer); }
   };
-  const recordCommand = async <T>(record: RecordEntry, command: Promise<T>, code: string): Promise<T> => {
+  const recordCommand = async <T>(record: RecordEntry, command: Promise<T>, code: string, timeoutDiagnostic?: () => NativeRequestDiagnostic): Promise<T> => {
     // A terminal attestation belongs only to this exact record. It ends that
     // command's wait, never authorizes a response or changes another record.
     const terminated = record.response.promise.then(value => {
       if (isNativeReadTerminalFailure(value)) throw value;
       return new Promise<never>(() => {});
     });
-    try { return await bounded(Promise.race([command, terminated]), code); }
+    try { return await bounded(Promise.race([command, terminated]), code, timeoutDiagnostic); }
     catch (error) {
       if (record.failure && isNativeReadTerminalFailure(record.failure)) throw record.failure;
       throw error;
@@ -185,6 +191,13 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
           hasPostData: event.request.hasPostData === true, postDataPresent: typeof event.request.postData === "string",
           postDataBytes: Math.min(1_000_000, typeof event.request.postData === "string" ? Buffer.byteLength(event.request.postData) : 0) };
       };
+      const responseTimeoutDiagnostic = (record: RecordEntry, phase: NonNullable<NativeRequestDiagnostic["phase"]>): NativeRequestDiagnostic => ({
+        ...requestDiagnostic("NATIVE_REDIRECT_RESPONSE_TIMEOUT"), phase, method: record.method, resourceType: record.kind,
+        // This record already passed the initial duplicate/body checks. The
+        // response pause itself is not a duplicate initial request.
+        duplicateRequestId: false, hasPostData: record.body !== null, postDataPresent: record.body !== null,
+        postDataBytes: Math.min(1_000_000, record.body === null ? 0 : Buffer.byteLength(record.body)),
+      });
       const rejectInitial = async (code: string) => {
         // Retain one initiating classification before awaiting rejection.
         firstFatal ??= requestDiagnostic(code);
@@ -230,7 +243,8 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
           if (closed || options.signal?.aborted || record.failed) return;
           // Preserve the actual status, headers and body. Completion follows the
           // successful unchanged release, never a fabricated/fulfilled response.
-          await recordCommand(record, cdp.send("Fetch.continueResponse", { requestId: record.id }), "NATIVE_REDIRECT_RESPONSE_TIMEOUT");
+          await recordCommand(record, cdp.send("Fetch.continueResponse", { requestId: record.id }), "NATIVE_REDIRECT_RESPONSE_TIMEOUT",
+            () => responseTimeoutDiagnostic(record, "CONTINUE_RESPONSE_ACK"));
           if (closed || options.signal?.aborted || record.failed) return;
           // Publish redirect authority only after Chrome acknowledges the
           // unchanged response release. A Location alone, failed release, or
@@ -334,7 +348,8 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
       record.adapter = { url: () => record.url, method: () => record.method, headers: () => ({ ...record.headers }), postData: () => record.body,
         resourceType: () => record.kind, isNavigationRequest: () => record.kind === "document", frame: () => page.mainFrame(),
         redirectedFrom: () => record.parent?.adapter ?? null, response: async () => {
-          const value = await bounded(record.response.promise, "NATIVE_REDIRECT_RESPONSE_TIMEOUT"); if (value instanceof Error) throw value; return value;
+          const value = await bounded(record.response.promise, "NATIVE_REDIRECT_RESPONSE_TIMEOUT",
+            () => responseTimeoutDiagnostic(record, "RESPONSE_WAIT")); if (value instanceof Error) throw value; return value;
         } };
       nativeRequestRecords.set(record.adapter, { record, owner });
       records.set(record.id, record);

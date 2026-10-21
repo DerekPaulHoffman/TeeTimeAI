@@ -2,8 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import { executeExistingAdapterRecipe, inspectExistingAdapter } from "./existing-adapter-executor";
 import { existingAdapterMetadataSchema, type ExistingAdapterRecipe } from "./existing-adapter-schema";
 import { recipeTimeToInstant, venueProofMatches } from "./executor";
-import { parseAccessRecipe } from "./recipe";
+import { accessExecutionDiagnosticSchema, parseAccessRecipe } from "./recipe";
 import { deriveTeeItUpOfficialIdentityProof } from "./teeitup-official-identity";
+import { SimulatorAvailabilityError } from "@/lib/simulators/providers/types";
 
 const input = { date: "2030-10-22", timeZone: "America/New_York", players: 2, startTime: "10:00", endTime: "20:00" };
 const now = () => new Date("2030-10-20T12:00:00Z");
@@ -256,6 +257,30 @@ describe("fixed existing adapter recipes", () => {
     expect(fetch).toHaveBeenCalledTimes(3);
     expect(new URL(String(fetch.mock.calls.at(-1)![0])).searchParams.has("players")).toBe(false);
   });
+  it("inspects and independently executes a pooled public rental without inventing resource or player counts", async () => {
+    const html = acuityHtml({ calendars: { "": [{ id: "any", name: "Any available", timezone: "" }] },
+      appointmentTypes: { "": [{ id: 67, name: "Simulator Booking 1 Hour", duration: 60, active: true, private: false, type: "service",
+        classSize: null, canChooseQuantity: false, calendarIDs: ["any"], paddingBefore: 0, paddingAfter: 0 }] } });
+    const fetch = vi.fn<typeof globalThis.fetch>(async value => {
+      const url = new URL(String(value));
+      if (url.pathname.startsWith("/schedule/")) return new Response(html, { headers: { "content-type": "text/html" } });
+      expect(url.pathname).toBe("/api/scheduling/v1/availability/times");
+      expect(url.searchParams.get("calendarId")).toBe("any"); expect(url.searchParams.get("maxDays")).toBe("4");
+      expect(url.searchParams.has("players")).toBe(false);
+      const date = url.searchParams.get("startDate")!;
+      return Response.json({ [date]: [{ time: `${date}T11:00:00-0400`, slotsAvailable: 6 }] });
+    });
+    const { adapter } = await inspectExistingAdapter(acuity.source, { ...deps, fetch });
+    const recipe = parseAccessRecipe({ ...acuity, adapter }) as ExistingAdapterRecipe;
+    for (const request of [{ ...input, durationMinutes: 60 }, { ...input, durationMinutes: 60, date: "2030-10-23", players: 4 }]) {
+      const result = await executeExistingAdapterRecipe(recipe, request, { ...deps, fetch });
+      expect(result).toMatchObject({ status: "AVAILABLE", complete: true, slots: [{ availableSpots: 1, capacity: null, resourceId: "ANY",
+        startsAt: `${request.date}T15:00:00.000Z`, endsAt: `${request.date}T16:00:00.000Z` }],
+        evidence: { venueVerified: true, dateVerified: true, capacityVerified: true, durationVerified: true, completeVerified: true } });
+      expect(result.slots).toHaveLength(1);
+    }
+    expect(fetch).toHaveBeenCalledTimes(7);
+  });
   it.each([{ name: "Another Simulator" }, { ownerKey: "another123" }, { id: 999 }, { timezone: "America/Chicago" }])(
     "requires current Acuity venue/tenant/timezone identity", async overrides => {
       const fetch = reads(acuity, {}, acuityHtml(overrides));
@@ -294,5 +319,79 @@ describe("fixed existing adapter recipes", () => {
     const result = await executeExistingAdapterRecipe(recipe, { ...input, durationMinutes: 60 }, { ...deps, fetch });
     expect(result).toMatchObject({ status: "FAILED", complete: false, slots: [], evidence: { reason: "PROVIDER_THROTTLED" } });
     expect(fetch).toHaveBeenCalledOnce();
+  });
+  it.each([
+    [403, "ACCESS_REQUIRED", "ACCESS_REQUIRED", false],
+    [429, "FAILED", "PROVIDER_THROTTLED", true],
+    [503, "INCOMPLETE", "ADAPTER_TRANSPORT_FAILED", true],
+  ] as const)("retains safe Acuity HTTP %s diagnostics and existing outcome semantics", async (status, outcome, reason, retryable) => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () => new Response("secret provider response", {
+      status, headers: { "retry-after": "secret retry guidance" },
+    }));
+    const result = await executeExistingAdapterRecipe(acuity, { ...input, durationMinutes: 60 }, { ...deps, fetch });
+    expect(result).toMatchObject({ status: outcome, complete: false, slots: [], evidence: { reason,
+      diagnostic: { code: "SIMULATOR_PROVIDER_ERROR", simulatorError: { code: "HTTP_ERROR", retryable, httpStatus: status } } } });
+    expect(JSON.stringify(result)).not.toContain("secret");
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+  it.each([
+    [{ name: "Another Simulator" }, "ADAPTER_IDENTITY_MISMATCH"],
+    [{ id: 999 }, "ADAPTER_CONFIGURATION_CHANGED"],
+  ] as const)("retains controller-owned Acuity configuration failure through the provider fetch catch", async (overrides, reason) => {
+    const fetch = reads(acuity, {}, acuityHtml(overrides));
+    const result = await executeExistingAdapterRecipe(acuity, { ...input, durationMinutes: 60 }, { ...deps, fetch });
+    expect(result).toMatchObject({ status: "INCOMPLETE", complete: false, evidence: { reason,
+      diagnostic: { code: "SIMULATOR_PROVIDER_ERROR", simulatorError: { code: "INVALID_SOURCE", retryable: false } } } });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+  it("retains trusted unsupported-duration and availability-schema errors without prose", async () => {
+    const unsupported = await executeExistingAdapterRecipe(acuity, { ...input, durationMinutes: 90 }, { ...deps, fetch: reads(acuity, {}) });
+    expect(unsupported).toMatchObject({ status: "INCOMPLETE", slots: [], evidence: { reason: "UNSUPPORTED_DURATION",
+      diagnostic: { simulatorError: { code: "UNSUPPORTED_DURATION", retryable: false } } } });
+    const malformed = await executeExistingAdapterRecipe(acuity, { ...input, durationMinutes: 60 }, { ...deps,
+      fetch: reads(acuity, { [input.date]: [{ time: "2030-10-22T11:00:00-0400", slotsAvailable: -1 }] }) });
+    expect(malformed).toMatchObject({ status: "INCOMPLETE", slots: [], evidence: { reason: "SCHEMA_CHANGED",
+      diagnostic: { simulatorError: { code: "SCHEMA_CHANGED", retryable: false } } } });
+  });
+  it("projects only closed trusted error fields and rejects fake or mutated error authority", async () => {
+    const trusted = new SimulatorAvailabilityError("HTTP_ERROR", "secret https://private.example/?token=secret", true, 503, "secret retry-after");
+    const fetch = vi.fn<typeof globalThis.fetch>();
+    const run = (error: Error) => executeExistingAdapterRecipe(acuity, { ...input, durationMinutes: 60 }, { ...deps, fetch,
+      toInstant: () => { throw error; } });
+    const result = await run(trusted);
+    expect(result.evidence).toMatchObject({ reason: "HTTP_ERROR", diagnostic: { code: "SIMULATOR_PROVIDER_ERROR",
+      simulatorError: { code: "HTTP_ERROR", retryable: true, httpStatus: 503 } } });
+    expect(result.evidence.diagnostic).toEqual({ code: "SIMULATOR_PROVIDER_ERROR", simulatorError: { code: "HTTP_ERROR", retryable: true, httpStatus: 503 } });
+    expect(JSON.stringify(result)).not.toContain("secret");
+    const fake = Object.assign(new Error("HTTP_ERROR"), { code: "HTTP_ERROR", retryable: true, httpStatus: 503 });
+    const mutated = new SimulatorAvailabilityError("HTTP_ERROR", "secret");
+    Object.defineProperty(mutated, "code", { value: "SECRET_UNKNOWN_CODE" });
+    for (const error of [fake, mutated, new Error("secret transport detail")]) {
+      const failed = await run(error);
+      expect(failed).toMatchObject({ status: "INCOMPLETE", evidence: { reason: "ADAPTER_READ_FAILED" } });
+      expect(failed.evidence.diagnostic).toBeUndefined();
+      expect(JSON.stringify(failed)).not.toContain("secret");
+    }
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it.each([99, 600, 503.5, "503"])("omits invalid typed HTTP status %s from replay diagnostics", async status => {
+    const error = new SimulatorAvailabilityError("HTTP_ERROR", "secret", true);
+    Object.defineProperty(error, "httpStatus", { value: status });
+    const result = await executeExistingAdapterRecipe(acuity, { ...input, durationMinutes: 60 }, { ...deps,
+      toInstant: () => { throw error; } });
+    expect(result.evidence.diagnostic).toEqual({ code: "SIMULATOR_PROVIDER_ERROR", simulatorError: { code: "HTTP_ERROR", retryable: true } });
+  });
+  it("keeps fixed target failures independent of untrusted provider errors", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>();
+    const result = await executeExistingAdapterRecipe(acuity, input, { ...deps, fetch });
+    expect(result.evidence.reason).toBe("ADAPTER_TARGET_MISMATCH");
+    expect(result.evidence.diagnostic).toBeUndefined();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it.each([
+    { code: "UNKNOWN", retryable: false }, { code: "HTTP_ERROR", retryable: "true" },
+    { code: "HTTP_ERROR", retryable: true, httpStatus: 600 }, { code: "HTTP_ERROR", retryable: true, message: "secret" },
+  ])("rejects unknown or extended simulator diagnostic payloads", simulatorError => {
+    expect(accessExecutionDiagnosticSchema.safeParse({ code: "SIMULATOR_PROVIDER_ERROR", simulatorError }).success).toBe(false);
   });
 });

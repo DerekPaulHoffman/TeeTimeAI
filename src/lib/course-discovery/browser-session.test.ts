@@ -72,6 +72,75 @@ describe("discovery browser public protocol", () => {
 
 const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
+  it.each(["open", "observed document link"])("returns committed public controls before deferred assets finish: %s", async mode => {
+    const source = "https://example.org/", destination = "https://example.org/tee-times", asset = "https://assets.example.org/pending.js";
+    let release!: () => void;
+    const pendingAsset = new Promise<void>(resolve => { release = resolve; });
+    const fixture = `<html><body><h1>Public Golf</h1><a href="${destination}">Book tee times</a>` +
+      `<script>window.publicDomReady=false;document.addEventListener('DOMContentLoaded',()=>{window.publicDomReady=true})</script>` +
+      `<script defer src="${asset}"></script></body></html>`;
+    const fetcher = vi.fn(async value => {
+      if (String(value) === asset) { await pendingAsset; return new Response("/* public asset */", { headers: { "content-type": "application/javascript" } }); }
+      return new Response(mode === "observed document link" && String(value) === source
+        ? `<h1>Public Golf</h1><a href="${destination}">Book tee times</a>` : fixture, { headers: { "content-type": "text/html" } });
+    }) as unknown as typeof fetch;
+    let browser: Awaited<ReturnType<typeof chromium.launch>>;
+    const session = await createCourseDiscoveryBrowserSession({ initialUrls: [source], deadlineAt: new Date(Date.now() + 20_000) }, {
+      fetch: fetcher, launchBrowser: async () => browser = await chromium.launch({ executablePath, headless: true }),
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const initial = mode === "observed document link" ? await session.execute({ id: 1, action: "open", url: source }) : undefined;
+      const startedAt = Date.now();
+      const opening = initial ? session.execute({ id: 2, action: "click", target: initial.controls.find(control => control.href === destination)!.target })
+        : session.execute({ id: 1, action: "open", url: source });
+      const snapshot = await Promise.race([opening, new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error("COMMITTED_CONTROLS_NOT_RETURNED")), 7_000); })]);
+      clearTimeout(timer);
+      expect(Date.now() - startedAt).toBeLessThan(7_000);
+      expect(snapshot.url).toBe(initial ? destination : source); expect(snapshot.navigationStatus).toBe(200);
+      expect(snapshot.controls).toContainEqual(expect.objectContaining({ kind: "link", name: "Book tee times", href: destination }));
+      expect(snapshot.loading).toBe(true); expect(snapshot.pendingRequestCount).toBeGreaterThan(0);
+      expect(snapshot.requests).toContainEqual({ url: asset, method: "GET", resourceType: "script" });
+      expect(await browser!.contexts()[0].pages()[0].evaluate(() => (window as unknown as { publicDomReady: boolean }).publicDomReady)).toBe(false);
+      expect(snapshot.responses).toEqual([]);
+      expect(snapshot).not.toHaveProperty("complete"); expect(snapshot).not.toHaveProperty("slots");
+    } finally { clearTimeout(timer); release(); await session.close(); }
+    await expect(session.execute({ id: 3, action: "open", url: source })).rejects.toThrow("BROWSER_CLOSED");
+  }, 25_000);
+
+  it("gives a later admitted document its own content clock and retains that clock on observe", async () => {
+    const source = "https://example.org/", destination = "https://example.org/tee-times", asset = "https://assets.example.org/pending.js";
+    const deadlineAt = new Date(Date.now() + 90_000), originalDeadline = deadlineAt.getTime(), realNow = Date.now.bind(Date);
+    let release!: () => void;
+    const pendingAsset = new Promise<void>(resolve => { release = resolve; });
+    const fixture = `<html><body><span>Loading</span><script>setTimeout(()=>{const a=document.createElement('a');a.href='/availability';a.textContent='View tee times';document.body.append(a)},1500)</script>` +
+      `<script defer src="${asset}"></script></body></html>`;
+    const fetcher = vi.fn(async value => {
+      if (String(value) === asset) { await pendingAsset; return new Response("/* public asset */", { headers: { "content-type": "application/javascript" } }); }
+      return new Response(String(value) === source ? `<h1>Public Golf</h1><a href="${destination}">Book tee times</a>` : fixture,
+        { headers: { "content-type": "text/html" } });
+    }) as unknown as typeof fetch;
+    const session = await createCourseDiscoveryBrowserSession({ initialUrls: [source], deadlineAt }, {
+      fetch: fetcher, launchBrowser: () => chromium.launch({ executablePath, headless: true }),
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    let clock: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      const initial = await session.execute({ id: 1, action: "open", url: source });
+      clock = vi.spyOn(Date, "now").mockImplementation(() => realNow() + 35_000);
+      const followed = await session.execute({ id: 2, action: "click", target: initial.controls.find(control => control.href === destination)!.target });
+      expect(followed.controls).toContainEqual(expect.objectContaining({ name: "View tee times", href: "https://example.org/availability" }));
+      expect(followed.initialContentWaitMs).toBeGreaterThan(200);
+      expect(followed.navigationElapsedMs).toBeLessThan(7_000);
+      expect(followed.loading).toBe(true);
+      const observed = await session.execute({ id: 3, action: "observe" });
+      expect(observed.navigationElapsedMs!).toBeGreaterThan(followed.navigationElapsedMs! + 600);
+      expect(observed.navigationElapsedMs).toBeLessThan(9_000);
+      expect(deadlineAt.getTime()).toBe(originalDeadline);
+    } finally { clock?.mockRestore(); release(); await session.close(); }
+  }, 25_000);
+
   it("uses the exact observed document href instead of unrelated delegated click handlers", async () => {
     const source = "https://example.org/", destination = "https://example.org/tee-times";
     const fetcher = vi.fn(async value => new Response(String(value) === source
@@ -445,6 +514,30 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       expect(session.diagnostics().nativeFirstFatal).toEqual(fatal);
     } finally { await session?.close(); routing.mockRestore(); }
   }, 15_000);
+  it("rejects a fatal native guard that arrives after document commit while its snapshot is settling", async () => {
+    const fatal = { code: "NATIVE_REDIRECT_RESPONSE_TIMEOUT", phase: "RESPONSE_WAIT" as const, url: "https://example.org/public.js", method: "GET", resourceType: "script" };
+    let notifyFailure: ((code: string) => void) | undefined, failed = false;
+    const routing = vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, handler, options) => {
+      notifyFailure = options?.onFailure;
+      return { prepare: () => {}, close: async () => {}, pendingReads: 0, get lastFailure() { return failed ? fatal.code : undefined; },
+        get firstFatal() { return failed ? { ...fatal } : undefined; }, releasePlaywrightRoute: route => handler(route) };
+    });
+    const native = vi.spyOn(nativeBrowser, "continueNativeBrowserRead").mockImplementation(async route => {
+      const body = Buffer.from('<h1>Public golf</h1><a href="/times">View tee times</a>'), headers = { "content-type": "text/html" };
+      await route.fulfill({ status: 200, headers, body });
+      setTimeout(() => { failed = true; notifyFailure?.(fatal.code); }, 10);
+      return { status: 200, url: route.request().url(), headers, body };
+    });
+    let session: Awaited<ReturnType<typeof createCourseDiscoveryBrowserSession>> | undefined;
+    try {
+      session = await createCourseDiscoveryBrowserSession({ initialUrls: ["https://example.org/"], deadlineAt: new Date(Date.now() + 15_000) }, {
+        browserTransport: "NATIVE_CHROME", launchBrowser: () => chromium.launch({ executablePath, headless: true }),
+        requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+      });
+      await expect(session.execute({ id: 1, action: "open", url: "https://example.org/" })).rejects.toThrow(fatal.code);
+      expect(session.diagnostics().nativeFirstFatal).toEqual(fatal);
+    } finally { await session?.close(); native.mockRestore(); routing.mockRestore(); }
+  }, 20_000);
   it("keeps oversized POST rejection diagnostics nonterminal while public controls render", async () => {
     const rejected = { code: "NATIVE_REDIRECT_POST_BODY_LIMIT", url: "https://example.org/collect", method: "POST", resourceType: "xhr", postDataBytes: 40000 };
     const routing = vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, handler, options) => {

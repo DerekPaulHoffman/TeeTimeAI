@@ -3,6 +3,22 @@ import { bindDiscoveryRecipeIdentity, createDiscoveryAdapterObservation, createD
 import { safeBrowserActionIssues } from "../../../scripts/automation/course-discovery-diagnostics.mjs";
 
 describe("durable discovery browser diagnostics", () => {
+  it("retains only typed simulator classifications through a failed replay checkpoint", () => {
+    const feedback = { code: "DISCOVERY_REPLAY_INCOMPLETE", details: { status: "INCOMPLETE", reason: "ADAPTER_HTTP_ERROR",
+      diagnostic: { code: "ADAPTER_HTTP_ERROR", simulatorError: { code: "HTTP_ERROR", retryable: true, httpStatus: 503,
+        message: "private provider text", retryAfter: "private", body: "private" } } } };
+    const restored = readDiscoveryControllerCheckpoint({ controller: { version: 1, officialUrl: "https://venue.example/",
+      observedNavigationUrls: [], lastFailure: feedback } }, "https://venue.example/");
+    expect(restored.lastFailure.details.diagnostic).toEqual({ code: "ADAPTER_HTTP_ERROR",
+      simulatorError: { code: "HTTP_ERROR", retryable: true, httpStatus: 503 } });
+    expect(JSON.stringify(restored)).not.toMatch(/private|message|retryAfter|body/);
+    for (const simulatorError of [{ code: "PRIVATE_VALUE", retryable: true }, { code: "HTTP_ERROR", retryable: "true" }]) {
+      const invalid = readDiscoveryControllerCheckpoint({ controller: { version: 1, officialUrl: "https://venue.example/",
+        observedNavigationUrls: [], lastFeedback: { ...feedback, details: { ...feedback.details,
+          diagnostic: { code: "ADAPTER_READ_FAILED", simulatorError } } } } }, "https://venue.example/");
+      expect(invalid.lastFeedback.details.diagnostic).toEqual({ code: "ADAPTER_READ_FAILED" });
+    }
+  });
   it.each(["FOREUP", "ACUITY", "TEEITUP", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "CHRONOGOLF", "GOLFVX"])("binds current %s inspection evidence to exact job, source, input and typed metadata", family => {
     const job = { id: "job", request: { identity: { name: "Public golf", officialUrl: "https://official.example.org/" },
       target: { courseId: "course", kind: "OUTDOOR" }, input: { date: "2026-10-23", players: 2 } } };
@@ -38,7 +54,7 @@ describe("durable discovery browser diagnostics", () => {
     expect(safeBrowserFailureDiagnostics(null)).toBeUndefined();
   });
   it("preserves exact native first-fatal facts through feedback and checkpoint without retaining source objects", () => {
-    const firstFatal = { code: "NATIVE_REDIRECT_NETWORK_ID_MISSING", url: "https://venue.example/public?date=2026-10-23#private",
+    const firstFatal = { code: "NATIVE_REDIRECT_NETWORK_ID_MISSING", phase: "RESPONSE_WAIT", url: "https://venue.example/public?date=2026-10-23#private",
       method: "GET", resourceType: "script", interceptedRequests: 71, recordCount: 70, requestLimit: 1024, postDataBytes: 0,
       framePresent: true, rootFrame: true, networkIdPresent: false, duplicateRequestId: false, hasPostData: false, postDataPresent: false,
       headers: { authorization: "private" }, postData: "private", networkId: "private", frameId: "private", requestId: "private" };
@@ -48,7 +64,7 @@ describe("durable discovery browser diagnostics", () => {
     const checkpoint = { controller: { version: 1, officialUrl: "https://venue.example/", observedNavigationUrls: [], lastFeedback: feedback } };
     const restored = readDiscoveryControllerCheckpoint(checkpoint, "https://venue.example/");
     expect(restored.lastFeedback.details.nativeFirstFatal).toEqual({
-      code: firstFatal.code, url: "https://venue.example/public", method: "GET", resourceType: "script",
+      code: firstFatal.code, phase: "RESPONSE_WAIT", url: "https://venue.example/public", method: "GET", resourceType: "script",
       interceptedRequests: 71, recordCount: 70, requestLimit: 1024, postDataBytes: 0,
       framePresent: true, rootFrame: true, networkIdPresent: false, duplicateRequestId: false, hasPostData: false, postDataPresent: false,
     });
@@ -64,7 +80,7 @@ describe("durable discovery browser diagnostics", () => {
   it("bounds native diagnostics and omits malformed metadata and unsafe URLs", () => {
     const safe = safeBrowserFailureDiagnostics({ nativeFirstFatal: { code: "NATIVE_REDIRECT_NETWORK_ID_MISSING",
       method: "GET private", resourceType: "script private", interceptedRequests: 1026, recordCount: -1, requestLimit: Infinity,
-      postDataBytes: 1_000_001, framePresent: "true", networkIdPresent: 0, arbitrary: "private" },
+      postDataBytes: 1_000_001, framePresent: "true", networkIdPresent: 0, phase: "private", arbitrary: "private" },
     nativeRejectedRequests: Array.from({ length: 100 }, (_, index) => ({ code: "NATIVE_REDIRECT_POST_BODY_LIMIT",
       url: `https://venue.example/read-${index}?value=private`, method: "POST", resourceType: "xhr" })) });
     expect(safe.nativeFirstFatal).toEqual({ code: "NATIVE_REDIRECT_NETWORK_ID_MISSING" });

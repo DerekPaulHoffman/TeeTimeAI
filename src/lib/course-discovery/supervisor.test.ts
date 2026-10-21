@@ -417,9 +417,10 @@ describe("controller-only verification", () => {
     const client = { candidate: vi.fn(async () => ({ recipeHash: hash, challenges })),
       verification: vi.fn(async (_id: string, challenge: string) => { calls.push(challenge); }), activate: vi.fn(async () => { calls.push("activate"); return {}; }) };
     const executeRecipe = vi.fn(async ({ input }) => ({ status: "EMPTY", complete: true, input }));
-    await verifyDiscoveryCandidate({ client, job: job(), recipe, executeRecipe });
+    await verifyDiscoveryCandidate({ client, job: job(), recipe, executeRecipe,
+      beforeActivate: async () => { calls.push("prepare-activation"); }, afterActivate: async () => { calls.push("acknowledged"); } });
     expect(executeRecipe.mock.calls.map(([args]) => args.input)).toEqual(challenges.map(item => item.input));
-    expect(calls).toEqual(["a", "b", "activate"]);
+    expect(calls).toEqual(["a", "b", "prepare-activation", "activate", "acknowledged"]);
   });
 
   it("does not activate after rejected proof or duplicate challenges", async () => {
@@ -429,6 +430,16 @@ describe("controller-only verification", () => {
     const executeRecipe = vi.fn();
     await expect(verifyDiscoveryCandidate({ client, job: job(), recipe: {}, executeRecipe })).rejects.toThrow("DISCOVERY_CHALLENGES_INVALID");
     expect(executeRecipe).not.toHaveBeenCalled(); expect(client.activate).not.toHaveBeenCalled();
+  });
+
+  it.each([null, false, [], 123, "unverified"])("does not acknowledge a malformed activation response: %s", async activation => {
+    const hash = "b".repeat(64), afterActivate = vi.fn();
+    const client = { candidate: async () => ({ recipeHash: hash, challenges: [
+      { id: "a", recipeHash: hash, input: {} }, { id: "b", recipeHash: hash, input: {} },
+    ] }), verification: async () => ({}), activate: async () => activation };
+    await expect(verifyDiscoveryCandidate({ client, job: job(), recipe: {},
+      executeRecipe: async () => ({ status: "EMPTY", complete: true }), afterActivate })).rejects.toMatchObject({ code: "DISCOVERY_ACTIVATION_INVALID" });
+    expect(afterActivate).not.toHaveBeenCalled();
   });
 
   it("cannot activate when a fixed replay or server verification fails", async () => {
@@ -978,6 +989,89 @@ describe("controller-only verification", () => {
       }
       expect(checkpoints.every(value => !Object.hasOwn((value as { controller: object }).controller, "adapterObservation"))).toBe(true);
     } finally { rmSync(sourceHome, { recursive: true, force: true }); }
+  });
+
+  it.each([false, true])("requires fresh controls after failed replay and bounds final activation (failure: %s)", async activationFails => {
+    const sourceHome = mkdtempSync(join(tmpdir(), "discovery-replay-reopen-"));
+    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }));
+    writeFileSync(join(sourceHome, "auth.json"), "test-auth");
+    const officialUrl = "https://example.org/";
+    const inputJob = { ...job(), request: { ...job().request, identity: { name: "Public golf", officialUrl, bookingUrl: officialUrl } } };
+    const recipe = { engine: "EXISTING_ADAPTER", source: { bookingUrl: officialUrl }, adapter: { family: "FOREUP", facilityId: 1, scheduleId: 2, bookingClassId: 3 } };
+    const hash = "a".repeat(64), replies: unknown[] = [], browserRequests: unknown[] = [], configurations: unknown[] = [];
+    const closed: boolean[] = [];
+    let completeTools: () => void;
+    const toolsCompleted = new Promise<void>(resolve => { completeTools = resolve; });
+    const client = { helperEnvironment: () => ({}), checkpoint: vi.fn(async () => ({})),
+      candidate: vi.fn(async () => ({ recipeHash: hash, challenges: [
+        { id: "first", recipeHash: hash, input: { date: "2026-10-23" } },
+        { id: "second", recipeHash: hash, input: { date: "2026-10-24" } },
+      ] })), verification: vi.fn(async () => ({})), activate: vi.fn(async () => {
+        if (activationFails) throw Object.assign(new Error("Final activation unavailable"), { code: "DISCOVERY_ACTIVATION_REJECTED" });
+        return {};
+      }) };
+    const executeRecipe = vi.fn(async () => {
+      expect(closed.at(-1)).toBe(true);
+      return executeRecipe.mock.calls.length === 1 ? { status: "INCOMPLETE", complete: false, evidence: { reason: "ADAPTER_READ_FAILED" } }
+        : { status: "EMPTY", complete: true };
+    });
+    const processFactory = options => ({ notify: vi.fn(), close: vi.fn(async () => {}), request: async (method: string) => {
+      if (method === "thread/start") return { thread: { id: "thread-1" }, approvalPolicy: "never", sandbox: { type: "readOnly" } };
+      if (method === "turn/start") {
+        queueMicrotask(async () => {
+          await options.onMessage({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1" } } }, () => {});
+          const actions = [
+            ["discovery_browser", { action: "open", url: officialUrl }],
+            ["discovery_propose_recipe", { recipe }],
+            ["discovery_browser", { action: "click", target: "00000000-0000-4000-8000-000000000001" }],
+            ["discovery_checkpoint", { summary: "Old snapshot showed access required", outcome: "ACCESS_REQUIRED" }],
+            ["discovery_browser", { action: "open", url: officialUrl }],
+            ["discovery_propose_recipe", { recipe }],
+            ...(activationFails ? [["discovery_browser", { action: "open", url: officialUrl }]] : []),
+          ];
+          for (const [index, [tool, args]] of actions.entries()) await options.onMessage({ id: index + 1, method: "item/tool/call",
+            params: { threadId: "thread-1", turnId: "turn-1", tool, arguments: args } }, reply => replies.push(reply));
+          await options.onMessage({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } }, () => {});
+          completeTools();
+        }); return { turn: { id: "turn-1" } };
+      } return {};
+    } });
+    try {
+      const result = await runCourseDiscoveryWorker({ job: inputJob, client, cwd: process.cwd(), sourceHome, recipeSchema: {},
+        resolveCli: () => "fixed-codex", processFactory, validateRecipe: async () => ({ valid: true }), executeRecipe,
+        browserFactory: config => {
+          configurations.push(config); const index = closed.length; closed.push(false);
+          return { close: async () => { closed[index] = true; }, request: async action => {
+            expect(closed[index]).toBe(false); browserRequests.push(action);
+            return { url: officialUrl, text: "Public golf", controls: [], accessRequirementObserved: index === 0 };
+          } };
+        } }).catch(error => error);
+      await toolsCompleted;
+      if (activationFails) expect(result.code).toBe("DISCOVERY_ACTIVATION_REJECTED");
+      else expect(result.outcome).toBe("activated");
+      expect(client.candidate).toHaveBeenCalledTimes(2); expect(executeRecipe).toHaveBeenCalledTimes(3);
+      expect(client.verification).toHaveBeenCalledTimes(2); expect(client.activate).toHaveBeenCalledOnce();
+      expect(browserRequests).toEqual([{ action: "open", url: officialUrl }, { action: "open", url: officialUrl }]);
+      expect(configurations).toHaveLength(2);
+      for (const config of configurations) expect(config).toMatchObject({ deadlineAt: inputJob.deadlineAt, initialUrls: [officialUrl] });
+      expect(JSON.stringify(replies)).toContain("browserSessionClosed");
+      expect(JSON.stringify(replies)).toContain("BROWSER_SESSION_CLOSED");
+      expect(JSON.stringify(replies)).toContain("DISCOVERY_ACCESS_NOT_CONFIRMED");
+    } finally { rmSync(sourceHome, { recursive: true, force: true }); }
+  });
+
+  it("does not activate when the final heartbeat drain rejects or cancels", async () => {
+    for (const abort of [false, true]) {
+      const controller = new AbortController(), hash = "b".repeat(64);
+      const client = { candidate: async () => ({ recipeHash: hash, challenges: [
+        { id: "a", recipeHash: hash, input: {} }, { id: "b", recipeHash: hash, input: {} },
+      ] }), verification: vi.fn(async () => ({})), activate: vi.fn() };
+      const failure = Object.assign(new Error("Lease rejected"), { code: "DISCOVERY_LEASE_REJECTED" });
+      const beforeActivate = async () => { if (abort) controller.abort(failure); else throw failure; };
+      await expect(verifyDiscoveryCandidate({ client, job: job(), recipe: {}, signal: controller.signal,
+        executeRecipe: async () => ({ status: "EMPTY", complete: true }), beforeActivate })).rejects.toBe(failure);
+      expect(client.verification).toHaveBeenCalledTimes(2); expect(client.activate).not.toHaveBeenCalled();
+    }
   });
 
   it("keeps observed controls usable when a proposal lacks booking-source evidence", async () => {

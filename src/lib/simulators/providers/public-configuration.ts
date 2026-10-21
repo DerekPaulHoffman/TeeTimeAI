@@ -86,17 +86,22 @@ export const simulatorPublicConfigurationSchema = z.discriminatedUnion("family",
   z.object({
     family: z.literal("ACUITY"), ownerKey: z.string().regex(/^[a-zA-Z0-9]{4,40}$/u), businessId: publicId,
     timeZone, maxPartySize: z.number().int().min(1).max(20).nullable(),
-    rentals: z.array(z.object({ id: publicId, durationMinutes: duration, calendarIds: uniqueIds,
-      calendarKind: z.literal("OPAQUE_AGGREGATE").optional(),
+    rentals: z.array(z.object({ id: publicId, durationMinutes: duration,
+      calendarIds: z.array(z.union([publicId, z.literal("any")])).min(1).max(40).refine(ids => new Set(ids).size === ids.length),
+      calendarKind: z.enum(["OPAQUE_AGGREGATE", "OPAQUE_POOLED"]).optional(),
       aggregateRentalIdentity: z.literal("DURATION_LABELLED_SIM_RENTAL").optional() }).strict()).min(1).max(20),
-    resources: z.array(z.object({ id: publicId, timeZone }).strict()).min(1).max(40),
+    resources: z.array(z.object({ id: z.union([publicId, z.literal("any")]), timeZone }).strict()).min(1).max(40),
   }).strict().refine(value => new Set(value.rentals.map(row => row.id)).size === value.rentals.length &&
     new Set(value.resources.map(row => row.id)).size === value.resources.length &&
     value.resources.every(row => row.timeZone === value.timeZone) &&
     value.rentals.every(row => row.calendarIds.every(id => value.resources.some(resource => resource.id === id)) &&
       (!row.aggregateRentalIdentity || row.calendarKind === "OPAQUE_AGGREGATE") &&
-      (!row.calendarKind || row.calendarIds.length === 1 && row.durationMinutes >= 60 &&
-        row.durationMinutes % (row.aggregateRentalIdentity ? 30 : 60) === 0))),
+      (row.calendarKind === "OPAQUE_POOLED" ? row.calendarIds.length === 1 && row.calendarIds[0] === "any" &&
+        row.durationMinutes >= 60 && row.durationMinutes % 60 === 0 : row.calendarIds.every(id => id !== "any") &&
+        (!row.calendarKind || row.calendarIds.length === 1 && row.durationMinutes >= 60 &&
+          row.durationMinutes % (row.aggregateRentalIdentity ? 30 : 60) === 0))) &&
+    (!value.resources.some(row => row.id === "any") || value.resources.length === 1 &&
+      value.rentals.every(row => row.calendarKind === "OPAQUE_POOLED"))),
   z.object({
     family: z.literal("GOLFBOOK"), templateId: publicId,
     date: z.string().refine(validDate),

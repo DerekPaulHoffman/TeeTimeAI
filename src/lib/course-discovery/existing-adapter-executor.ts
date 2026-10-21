@@ -10,8 +10,9 @@ import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-b
 import { fetchAcuitySimulatorAvailability, parseAcuityPublicConfigurationIdentity, readAcuityPublicConfiguration } from "@/lib/simulators/providers/acuity";
 import { isAcuityPublicBookingUrl } from "@/lib/simulators/providers/acuity";
 import type { AcuityPublicConfiguration } from "@/lib/simulators/providers/public-configuration";
+import { SimulatorAvailabilityError } from "@/lib/simulators/providers/types";
 import { existingAdapterMetadataSchema, type ExistingAdapterMetadata, type ExistingAdapterRecipe } from "./existing-adapter-schema";
-import { accessExecutionInputSchema, accessExecutionResultSchema, isSafeRecipeUrl, type AccessExecutionInput, type AccessExecutionResult } from "./recipe";
+import { accessExecutionDiagnosticSchema, accessExecutionInputSchema, accessExecutionResultSchema, isSafeRecipeUrl, type AccessExecutionDiagnostic, type AccessExecutionInput, type AccessExecutionResult } from "./recipe";
 import { requestFamilyForUrl } from "./request-family";
 import { assertTeeItUpRecipeAvailability, parseTeeItUpRecipeSource, resolveTeeItUpRecipeFacilities, teeItUpRecipeBookingUrl, type TeeItUpRecipeFacility } from "./teeitup-recipe-source";
 import { parseWhooshSimulatorSource } from "./whoosh-simulator-source";
@@ -38,7 +39,8 @@ type Source = Pick<ExistingAdapterRecipe["source"], "bookingUrl" | "venueName" |
 const publicId = /^[1-9]\d{0,9}$/u;
 const foreupPath = /^\/index\.php\/booking\/([1-9]\d{0,9})(?:\/([1-9]\d{0,9}))?\/?$/u;
 
-function fail(code: string): never { throw new Error(code); }
+class FixedAdapterFailure extends Error {}
+function fail(code: string): never { throw new FixedAdapterFailure(code); }
 function familyForSource(source: Source) {
   if (!isSafeRecipeUrl(source.bookingUrl)) return fail("INVALID_ADAPTER_SOURCE");
   const url = new URL(source.bookingUrl);
@@ -54,10 +56,32 @@ function exactKeys(url: URL, required: string[], optional: string[] = []) {
   return new Set(keys).size === keys.length && required.every(key => keys.includes(key)) && keys.every(key => required.includes(key) || optional.includes(key));
 }
 
+function simulatorErrorDiagnostic(error: unknown): AccessExecutionDiagnostic | undefined {
+  if (!(error instanceof SimulatorAvailabilityError)) return;
+  const diagnostic = accessExecutionDiagnosticSchema.safeParse({ code: "SIMULATOR_PROVIDER_ERROR", simulatorError: {
+    code: error.code, retryable: error.retryable === true,
+    ...(Number.isInteger(error.httpStatus) && error.httpStatus! >= 100 && error.httpStatus! <= 599 ? { httpStatus: error.httpStatus } : {}),
+  } });
+  return diagnostic.success ? diagnostic.data : undefined;
+}
+
 /** One fixed GET-only transport for existing public readers; model-supplied
  * routes, headers, bodies and provider mutex names never enter this contract. */
 function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMetadata, input?: AccessExecutionInput) {
   const family = familyForSource(source);
+  let fixedReadFailure: string | undefined;
+  // Keep controller-owned validation separate from provider prose even when a
+  // provider reader catches an injected fetch failure.
+  function fail(code: string): never {
+    fixedReadFailure = code;
+    if (family === "ACUITY") throw new SimulatorAvailabilityError("INVALID_SOURCE", code);
+    throw new Error(code);
+  }
+  function failHttp(code: string, status: number): never {
+    fixedReadFailure = code;
+    if (family === "ACUITY") throw new SimulatorAvailabilityError("HTTP_ERROR", code, status === 429 || status >= 500, status);
+    throw new Error(code);
+  }
   if (adapter && adapter.family !== family) fail("ADAPTER_SOURCE_MISMATCH");
   if (family === "TEEITUP" && !source.venueAddress) fail("ADAPTER_IDENTITY_MISSING");
   const clock = deps.now ?? (() => new Date());
@@ -72,7 +96,6 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
   let teeitupSimulatorSlots: AccessExecutionResult["slots"] | undefined;
   let officialIdentityProof: TeeItUpOfficialIdentityProof | undefined;
   let availabilityWasArray = false;
-  let transportFailure: string | undefined;
   let requests = 0;
   const parseUrl = (value: string) => {
     if (!isSafeRecipeUrl(value)) return fail("UNSCOPED_ADAPTER_REQUEST");
@@ -122,9 +145,10 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
       signal.throwIfAborted();
       const response = await transport(url, { ...init, method: "GET", headers, signal: init?.signal ? AbortSignal.any([signal, init.signal]) : signal,
         credentials: "omit", redirect: "manual", cache: "no-store" });
-      if (response.status === 429) { transportFailure = "PROVIDER_THROTTLED"; fail(transportFailure); }
-      if ([401, 403].includes(response.status)) { transportFailure = "ACCESS_REQUIRED"; fail(transportFailure); }
-      if (!response.ok || response.redirected || response.url && response.url !== url.href) fail("ADAPTER_TRANSPORT_FAILED");
+      if (response.status === 429) failHttp("PROVIDER_THROTTLED", response.status);
+      if ([401, 403].includes(response.status)) failHttp("ACCESS_REQUIRED", response.status);
+      if (!response.ok) failHttp("ADAPTER_TRANSPORT_FAILED", response.status);
+      if (response.redirected || response.url && response.url !== url.href) fail("ADAPTER_TRANSPORT_FAILED");
       const bytes = await response.arrayBuffer();
       if (bytes.byteLength > 600_000) fail("ADAPTER_RESPONSE_LIMIT");
       const text = Buffer.from(bytes).toString("utf8");
@@ -178,7 +202,7 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
   };
   return { read, family, teeitup, teeitupFacilities: () => teeitupFacilities, officialIdentityProof: () => officialIdentityProof,
     teeitupSimulatorSlots: () => teeitupSimulatorSlots,
-    dispose: () => queue.dispose(), availabilityWasArray: () => availabilityWasArray, failureReason: () => transportFailure };
+    dispose: () => queue.dispose(), availabilityWasArray: () => availabilityWasArray, failureReason: () => fixedReadFailure };
 }
 
 /** For a controller-observed provider URL only. Reads typed public configuration
@@ -246,11 +270,11 @@ export async function inspectExistingAdapter(source: Source, deps: Dependencies)
 export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe, rawInput: AccessExecutionInput,
   deps: Dependencies & { recipeHash: string; toInstant: (value: unknown, input: AccessExecutionInput) => Date }): Promise<AccessExecutionResult> {
   const input = accessExecutionInputSchema.parse(rawInput), clock = deps.now ?? (() => new Date());
-  const result = (slots: AccessExecutionResult["slots"], reason?: string): AccessExecutionResult => accessExecutionResultSchema.parse({
+  const result = (slots: AccessExecutionResult["slots"], reason?: string, diagnostic?: AccessExecutionDiagnostic): AccessExecutionResult => accessExecutionResultSchema.parse({
     status: reason ? reason === "ACCESS_REQUIRED" ? "ACCESS_REQUIRED" : reason === "PROVIDER_THROTTLED" ? "FAILED" : "INCOMPLETE" : slots.length ? "AVAILABLE" : "EMPTY",
     complete: !reason, observedAt: clock().toISOString(), sourceUrl: recipe.source.bookingUrl, slots,
     evidence: { recipeHash: deps.recipeHash, venueVerified: !reason, dateVerified: !reason, capacityVerified: !reason,
-      durationVerified: !reason, completeVerified: !reason, ...(reason ? { reason } : {}) },
+      durationVerified: !reason, completeVerified: !reason, ...(reason ? { reason } : {}), ...(diagnostic ? { diagnostic } : {}) },
   });
   let session: ReturnType<typeof reader> | undefined;
   let uscheduleSession: ReturnType<typeof createUSchedulePublicSession> | undefined;
@@ -352,7 +376,9 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
       capacity: slot.maxPartySize, bookingUrl: recipe.source.bookingUrl, resourceId: slot.resourceId, productId: slot.productId,
     })));
   } catch (error) {
-    const message = session?.failureReason() ?? uscheduleSession?.failureReason() ?? (error instanceof Error ? error.message : "");
-    return result([], /^[A-Z_]{1,80}$/u.test(message) ? message : "ADAPTER_READ_FAILED");
+    const diagnostic = simulatorErrorDiagnostic(error);
+    const message = session?.failureReason() ?? uscheduleSession?.failureReason() ?? diagnostic?.simulatorError?.code ??
+      (error instanceof FixedAdapterFailure || recipe.adapter.family !== "ACUITY" && error instanceof Error ? error.message : "");
+    return result([], /^[A-Z_]{1,80}$/u.test(message) ? message : "ADAPTER_READ_FAILED", diagnostic);
   } finally { session?.dispose(); uscheduleSession?.dispose(); }
 }

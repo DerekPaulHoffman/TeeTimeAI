@@ -725,7 +725,15 @@ export async function createCourseDiscoveryBrowserSession(input: {
   };
   const snapshot = async (settleInitialContent = false): Promise<DiscoveryBrowserSnapshot> => {
     for (let attempt = 0; ; attempt++) {
-      try { return await snapshotOnce(settleInitialContent); }
+      try {
+        const result = await snapshotOnce(settleInitialContent);
+        // A committed page can be readable while resources are pending. That
+        // does not permit a concurrent fatal guard or closed session to pass.
+        if (terminalFailure) throw new Error(terminalFailure);
+        deadline.throwIfAborted();
+        if (closed) throw new Error("BROWSER_CLOSED");
+        return result;
+      }
       catch (error) {
         const message = error instanceof Error ? error.message : "";
         const replaced = /DISCOVERY_SNAPSHOT_CHANGED|Execution context was destroyed|Cannot find context|Frame (?:was )?detached|locator\.(?:evaluate|isEnabled|innerText): Timeout/iu.test(message);
@@ -751,6 +759,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     },
     async execute(value: unknown): Promise<DiscoveryBrowserSnapshot> {
       const action = discoveryBrowserActionSchema.parse(value);
+      let documentNavigation = false;
       try {
       if (terminalFailure) throw new Error(terminalFailure);
       deadline.throwIfAborted();
@@ -832,7 +841,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
         if (!isSafeRecipeUrl(action.url) || !allowedNavigation.has(new URL(action.url).href)) throw new Error("UNOBSERVED_NAVIGATION");
         navigationOrigins.add(new URL(action.url).origin); passfactory.observeWidgetUrl(action.url);
         navigationStartedAt = Date.now();
-        await page.goto(action.url, { waitUntil: "domcontentloaded", timeout: Math.min(30_000, Math.max(1, input.deadlineAt.getTime() - Date.now())) });
+        await page.goto(action.url, { waitUntil: "commit", timeout: Math.min(30_000, Math.max(1, input.deadlineAt.getTime() - Date.now())) });
       } else if (page.url() === "about:blank") throw new Error("OPEN_A_SOURCE_FIRST");
       else if (action.action === "scroll") await page.mouse.wheel(0, action.direction === "down" ? 600 : -600);
       else if (["click", "select", "fill"].includes(action.action) && "target" in action) {
@@ -873,13 +882,15 @@ export async function createCourseDiscoveryBrowserSession(input: {
             const rawHref = await known.locator.evaluate(element => (element as HTMLAnchorElement).href, undefined, { timeout: 1000 });
             const canonicalBootstrap = rawHref !== known.href && normalizeDiscoveryNavigationUrl(rawHref) === known.href;
             const ordinaryDocumentLink = !new URL(known.href).hash && !await known.locator.getAttribute("onclick");
-            if (canonicalBootstrap || ordinaryDocumentLink || target && !["_self", "_top", "_parent"].includes(target.toLowerCase()))
-              await page.goto(known.href, { waitUntil: "domcontentloaded" });
+            if (canonicalBootstrap || ordinaryDocumentLink || target && !["_self", "_top", "_parent"].includes(target.toLowerCase())) {
+              await page.goto(known.href, { waitUntil: "commit" });
+              documentNavigation = true;
+            }
             else await known.locator.click();
           } else await known.locator.click();
         }
       }
-      return snapshot(action.action === "open" || action.action === "observe");
+      return snapshot(action.action === "open" || action.action === "observe" || documentNavigation);
       } catch (error) {
         if (terminalFailure) throw new Error(terminalFailure);
         throw error;
