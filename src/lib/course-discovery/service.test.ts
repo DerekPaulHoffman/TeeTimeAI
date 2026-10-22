@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Prisma } from "@prisma/client";
-import { hashAccessRecipe, parseAccessRecipe, type AccessExecutionInput } from "./recipe";
+import { hashAccessRecipe, isSafeRecipeUrl, parseAccessRecipe, type AccessExecutionInput } from "./recipe";
 
 const mocks = vi.hoisted(() => ({
   db: {
@@ -80,6 +80,50 @@ beforeEach(() => {
 });
 
 describe("bounded course discovery persistence", () => {
+  it("issues HTTPS discovery identity from raw HTTP sources through verification, activation and current reuse", async () => {
+    course.website = "http://golf.example.com/";
+    course.detectedBookingUrl = "http://golf.example.com/times";
+    const admitted = (await ensureDiscoveryJob({ courseId: "course1", searchId: "search1" }))!;
+    expect(admitted.request).toMatchObject({ identity: { officialUrl: recipe.source.officialUrl, bookingUrl: recipe.source.bookingUrl } });
+    expect(course.website).toBe("http://golf.example.com/");
+    expect(course.detectedBookingUrl).toBe("http://golf.example.com/times");
+    const owner = (await claimNextDiscoveryJob("http-source-worker"))!;
+    expect(owner.request).toMatchObject({ identity: { officialUrl: recipe.source.officialUrl, bookingUrl: recipe.source.bookingUrl } });
+    expect(owner.sourceFingerprint).toBe(admitted.sourceFingerprint);
+    const candidate = await proposeDiscoveryRecipe(owner.id, owner.leaseToken!, recipe);
+    for (const challenge of candidate.challenges) await recordDiscoveryVerification({ jobId: owner.id, leaseToken: owner.leaseToken!,
+      challengeId: challenge.id, recipeHash: candidate.recipeHash, input: challenge.input, result: result(challenge.input.players) });
+    await activateDiscoveryRecipe(owner.id, owner.leaseToken!);
+    const stored = mocks.db.courseAccessRecipe.create.mock.calls.at(-1)![0].data;
+    const adoptedFingerprint = mocks.db.courseAccessRecipe.update.mock.calls.at(-1)![0].data.sourceFingerprint;
+    mocks.db.courseAccessRecipe.findUnique.mockResolvedValue({ id: "recipe1", ...stored, sourceFingerprint: adoptedFingerprint });
+    expect(await getActiveAccessRecipe({ courseId: "course1" })).toMatchObject({ recipe });
+    expect(await ensureDiscoveryJob({ courseId: "course1", searchId: "search1" })).toBeNull();
+    expect(mocks.db.courseDiscoveryJob.create).toHaveBeenCalledOnce();
+    expect(course.website).toBe("http://golf.example.com/");
+  });
+
+  it("cancels raw HTTP source drift even when the issued HTTPS identity would be unchanged", async () => {
+    course.website = "http://golf.example.com/";
+    const owner = (await claimed())!;
+    const firstPickup = owner.firstPickedUpAt, deadline = owner.deadlineAt;
+    course.website = "https://golf.example.com/";
+    job!.leaseExpiresAt = new Date(now.getTime() - 1);
+    expect(await claimNextDiscoveryJob("changed-source-worker")).toBeNull();
+    expect(job).toMatchObject({ status: "CANCELLED", outcome: "SOURCE_CHANGED", firstPickedUpAt: firstPickup, deadlineAt: deadline });
+    expect(mocks.db.courseAccessRecipe.create).not.toHaveBeenCalled();
+  });
+
+  it.each(["http://127.0.0.1/", "http://user:secret@golf.example.com/", "http://golf.example.com/login", "http://golf.example.com/times?token=secret", "http://golf.example.com:80/"])(
+    "retains the unsafe source %s in issued identity instead of silently replacing it with null", async raw => {
+      course.website = raw;
+      course.detectedBookingUrl = raw;
+      const owner = (await claimed())!;
+      expect(owner.request).toMatchObject({ identity: { officialUrl: raw, bookingUrl: raw } });
+      expect(isSafeRecipeUrl(raw)).toBe(false);
+      await expect(proposeDiscoveryRecipe(owner.id, owner.leaseToken!, recipe)).rejects.toBeInstanceOf(DiscoveryConflictError);
+    });
+
   it("deduplicates repeated demand while deriving identity and parameters from current state", async () => {
     const first = await ensureDiscoveryJob({ courseId: "course1", searchId: "search1" });
     const second = await ensureDiscoveryJob({ courseId: "course1", searchId: "search1" });

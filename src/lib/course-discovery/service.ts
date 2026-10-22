@@ -11,6 +11,7 @@ import { hasLegacyDiscoveryOwner } from "./legacy-exclusion";
 import { isReaderObservationCurrent } from "./observation-clock";
 import { isTeeItUpRecipeSlotLink } from "./teeitup-recipe-source";
 import { isChronogolfRecipeSlotLink } from "./chronogolf-source";
+import { normalizeDiscoverySourceUrl } from "./source-url";
 import {
   accessExecutionInputSchema,
   accessExecutionResultSchema,
@@ -131,7 +132,8 @@ async function loadSource(tx: Tx, target: Pick<DiscoveryTarget, "courseId" | "of
   };
   // Preserve existing fingerprints; address-bound recipes separately recheck
   // the trusted address at proposal, proof, activation and every later replay.
-  const identity = { ...fingerprintIdentity, ...(course.address ? { address: course.address } : {}) };
+  const identity = { ...fingerprintIdentity, officialUrl: normalizeDiscoverySourceUrl(fingerprintIdentity.officialUrl),
+    bookingUrl: normalizeDiscoverySourceUrl(fingerprintIdentity.bookingUrl), ...(course.address ? { address: course.address } : {}) };
   const sourceFingerprint = getDiscoverySourceFingerprint(course, offering);
   return { course, offering, identity, sourceFingerprint, activeRecipeId: offering ? offering.activeAccessRecipeId : course.activeAccessRecipeId,
     target: { courseId: course.id, ...(offering ? { offeringId: offering.id } : {}), kind: offering ? "SIMULATOR" as const : "OUTDOOR" as const } };
