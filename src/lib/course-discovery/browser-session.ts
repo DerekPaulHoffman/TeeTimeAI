@@ -11,7 +11,7 @@ import { createUSchedulePublicReadPolicy } from "@/lib/automation/uschedule-publ
 import { sanitizeResponderText } from "@/lib/automation/course-support-responder-policy";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
-import { isActiveBrowserAccessChallenge, isSafeBrowserAssetUrl, isSafeRecipeUrl, recipeSelectorSchema } from "./recipe";
+import { isActiveBrowserAccessChallenge, isSafeBrowserAssetUrl, isSafeBrowserBootstrapReadUrl, isSafeRecipeUrl, recipeSelectorSchema } from "./recipe";
 import { continueNativeBrowserRead, createNativePublicBrowserProxy, isObservedNativeRedirect, isObservedNativeRedirectTarget, nativeReadPreflightMethod } from "./native-public-browser";
 import { installNativeRedirectRouting, isNativeReadSupersededFailure, type NativeFirstFatal, type NativeReadRoute, type NativeRequestDiagnostic } from "./native-redirect-routing";
 import { requestFamilyForUrl } from "./request-family";
@@ -117,7 +117,7 @@ export function sameDiscoveryMainDocument(observedUrl: string, currentUrl: strin
 export type DiscoveryBrowserSnapshot = {
   url: string; text: string; controls: Array<{ target: string; selector: string; kind: string; name: string; label: string; href?: string; options?: Array<{ value: string; label: string }>; currentValue?: string; product?: { selector: string; durationMinutes: number } }>;
   responses: Array<{ url: string; status: number; method: string; body?: unknown; bodyOmitted?: true; schemaEvidence?: PublicResponseSchema; schemaEvidenceOmitted?: true }>;
-  requests: Array<{ url: string; method: string; resourceType: string; status?: number; blockedReason?: string; body?: unknown;
+  requests: Array<{ url: string; method: string; resourceType: string; status?: number; blockedReason?: string; body?: unknown; readPurpose?: "PUBLIC_BOOTSTRAP";
     urlRejection?: ReturnType<typeof safePublicUrlRejectionDiagnostic> }>;
   requestFailures?: Array<{ reason: string; resourceType: string; method?: string; url?: string;
     urlRejection?: ReturnType<typeof safePublicUrlRejectionDiagnostic> }>;
@@ -247,7 +247,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
   const pendingRequestMetadata = new Set<DiscoveryBrowserSnapshot["requests"][number]>();
   let requestMetadataBytes = 0;
   const recordRequest = (metadata: DiscoveryBrowserSnapshot["requests"][number], priority = false) => {
-    if ((!isSafeRecipeUrl(metadata.url) && !isSafeBrowserAssetUrl(metadata.url, metadata.resourceType, metadata.method)) || observedRequests.includes(metadata)) return;
+    if ((!isSafeRecipeUrl(metadata.url) && !isSafeBrowserAssetUrl(metadata.url, metadata.resourceType, metadata.method) &&
+        !isSafeBrowserBootstrapReadUrl(metadata.url, metadata.resourceType, metadata.method)) || observedRequests.includes(metadata)) return;
     const size = JSON.stringify(metadata).length + 120;
     if (priority) {
       while (observedRequests.length && (observedRequests.length >= 80 || requestMetadataBytes + size > 10_000)) {
@@ -338,7 +339,18 @@ export async function createCourseDiscoveryBrowserSession(input: {
       redirectRouting?.prepare(request.frame());
       if (!cpsScope.authorize(transportUrl, request.redirectedFrom()?.url())) throw new Error("UNOBSERVED_CPS_SESSION");
       if (cpsSessionKey(transportUrl) && !nativeProxy) throw new Error("CPS_NATIVE_BROWSER_REQUIRED");
-      if (!isSafeRecipeUrl(requestUrl) && !isSafeBrowserAssetUrl(requestUrl, request.resourceType(), request.method())) {
+      const method = request.method(), requestHeaders = request.headers();
+      const preflight = nativeProxy && method === "OPTIONS" && nativeReadPreflightMethod(requestHeaders);
+      // The native router separately correlates the browser's GET preflight
+      // with its initiating root-frame data read. Validate only that read's
+      // purpose here; wire method and diagnostic resource kind stay original.
+      const bootstrapMethod = preflight === "GET" ? "GET" : method;
+      const bootstrapKind = preflight === "GET" ? "fetch" : request.resourceType();
+      const bootstrapRead = isSafeBrowserBootstrapReadUrl(requestUrl, bootstrapKind, bootstrapMethod);
+      if (bootstrapRead) metadata.readPurpose = "PUBLIC_BOOTSTRAP";
+      const parent = request.redirectedFrom();
+      if (parent && isSafeBrowserBootstrapReadUrl(parent.url(), parent.resourceType(), parent.method())) throw new Error("UNSAFE_REDIRECT");
+      if (!isSafeRecipeUrl(requestUrl) && !isSafeBrowserAssetUrl(requestUrl, request.resourceType(), method) && !bootstrapRead) {
         metadata.urlRejection = describePublicUrlRejection(request.url(), requestUrl, request.method(), request.resourceType(), "BROWSER_REQUEST_URL",
           { recipe: isSafeRecipeUrl, asset: isSafeBrowserAssetUrl });
         throw new Error("UNSAFE_URL");
@@ -366,7 +378,6 @@ export async function createCourseDiscoveryBrowserSession(input: {
         if (ezlinks.handles(url)) ezDocument = { url: url.href, settled: false, initVersion: 0, pendingInit: 0, initAttempted: false,
           readContractAssets: new Map(), readContractFailed: false, readContractVersion: 0 };
       }
-      const method = request.method();
       // Capture the exact initiating document, not whatever document happens
       // to be current after an init/response acknowledgement resumes JS.
       ezWitness = ezDocument;
@@ -392,7 +403,6 @@ export async function createCourseDiscoveryBrowserSession(input: {
       const frameUrl = request.frame().url();
       if (isSafeRecipeUrl(frameUrl)) passfactory.observeWidgetUrl(frameUrl);
       const headers = new Headers();
-      const requestHeaders = request.headers();
       const body = request.postData() ?? undefined;
       if (nativeProxy && isRexNamespace(url) && method === "POST" &&
           !isRexPublicBrowserReadPost(url, method, requestHeaders, body ?? "", frameUrl))
@@ -414,7 +424,6 @@ export async function createCourseDiscoveryBrowserSession(input: {
       }
       if (!addVerifiedMindbodyReadHeaders(url, method, requestHeaders, headers, body ?? "")) throw new Error("UNSAFE_METHOD");
       if (!uschedule.addReadHeaders(url, method, requestHeaders, headers, body ?? "")) throw new Error("UNSAFE_METHOD");
-      const preflight = nativeProxy && method === "OPTIONS" && nativeReadPreflightMethod(requestHeaders);
       if (!["GET", "HEAD"].includes(method) && !preflight && !(method === "POST" && body && readPost(url, headers, body)))
         throw new Error(!nativeProxy && method === "POST" && isRexNamespace(url) ? rexProjectedPublicReadRejection(url, headers, body ?? "", frameUrl) : "UNSAFE_METHOD");
       if (method === "POST" && body) {
@@ -443,7 +452,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
         }
         const transport = deps.fetch ?? createAddressPinnedPublicFetchTransport({
           parseUrl: value => {
-            if (!isSafeRecipeUrl(value) && !isSafeBrowserAssetUrl(value, request.resourceType(), method)) {
+            if (!isSafeRecipeUrl(value) && !isSafeBrowserAssetUrl(value, request.resourceType(), method) &&
+                !isSafeBrowserBootstrapReadUrl(value, request.resourceType(), method)) {
               metadata.urlRejection = describePublicUrlRejection(value, value, method, request.resourceType(), "PINNED_TRANSPORT_URL",
                 { recipe: isSafeRecipeUrl, asset: isSafeBrowserAssetUrl });
               throw new Error("UNSAFE_URL");
@@ -530,6 +540,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
       for (const key of ["content-type", "access-control-allow-origin"]) { const value = reply.headers[key]; if (value) responseHeaders[key] = value; }
       const redirect = reply.headers.location;
       if (redirect) {
+        // These exact public setup contracts are direct GETs. A Location must
+        // not promote ancillary data into navigation or inventory authority.
+        if (bootstrapRead) throw new Error("UNSAFE_REDIRECT");
         // Chromium skips Playwright's route handler for redirected requests.
         // Pinned HTTP must not release a Location into an unpinned browser read.
         if (!nativeProxy) throw new Error("PINNED_REDIRECT_UNSUPPORTED");
@@ -547,7 +560,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
         responseHeaders.location = next.href;
         allowedNavigation.add(next.href);
       }
-      if (responses.length < 12 && /application\/(?:[a-z0-9.+-]*\+)?json/iu.test(responseHeaders["content-type"] ?? "") && ["xhr", "fetch"].includes(request.resourceType())) {
+      // Setup responses let the public page initialize, but never supply
+      // model-visible inventory bodies, schemas, or availability authority.
+      if (!bootstrapRead && responses.length < 12 && /application\/(?:[a-z0-9.+-]*\+)?json/iu.test(responseHeaders["content-type"] ?? "") && ["xhr", "fetch"].includes(request.resourceType())) {
         if (ezlinks.handles(url) && url.pathname === "/api/search/search") {
           // r01 is the provider's IDToken, not durable slot identity. The
           // controller keeps raw listing JSON privately; model snapshots get
@@ -1105,6 +1120,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
         ...(redirectRouting?.firstFatal ? { nativeFirstFatal: redirectRouting.firstFatal } : {}),
         ...(redirectRouting?.rejectedRequests?.length ? { nativeRejectedRequests: redirectRouting.rejectedRequests } : {}),
         requests: observedRequests.map(request => ({ url: request.url, method: request.method, resourceType: request.resourceType,
+          ...(request.readPurpose ? { readPurpose: request.readPurpose } : {}),
           ...(request.status === undefined ? {} : { status: request.status }),
           ...(request.blockedReason ? { blockedReason: request.blockedReason } : {}) })),
         capabilityDiagnostics: capabilityDiagnostics.map(value => ({ ...value })),

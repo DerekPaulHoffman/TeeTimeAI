@@ -922,7 +922,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
             }
             let hasNewObservedRead = false;
             for (const request of snapshot?.requests ?? []) {
-              if (!["GET", "HEAD"].includes(request.method) || !["document", "xhr", "fetch"].includes(request.resourceType) ||
+              if (request.readPurpose === "PUBLIC_BOOTSTRAP" || !["GET", "HEAD"].includes(request.method) || !["document", "xhr", "fetch"].includes(request.resourceType) ||
                   !(request.status >= 200 && request.status < 400) || request.blockedReason ||
                   !safeObservedUrl(request.url) || request.url.includes("REDACTED") || observedNavigationUrls.has(request.url) || observedReadUrls.has(request.url)) continue;
               observedReadUrls.add(request.url); hasNewObservedRead = true;

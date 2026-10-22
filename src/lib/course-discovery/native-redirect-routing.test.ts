@@ -29,6 +29,275 @@ function playwrightRoute(test: Awaited<ReturnType<typeof installed>>) {
   return { request: () => ({ frame: () => test.main }), continue: vi.fn(async () => {}), abort: vi.fn(async () => {}), fulfill: vi.fn() } as unknown as Route;
 }
 
+describe("native root GET CORS preflight ownership", () => {
+  const url = "https://api.example.org/public-data";
+  const source = (test: Awaited<ReturnType<typeof installed>>, values: object = {}) => test.events.get("Network.requestWillBeSent")!({
+    requestId: "original-get", loaderId: "current-loader", frameId: "main", type: "Fetch", request: { url, method: "GET" }, ...values });
+  const metadata = (test: Awaited<ReturnType<typeof installed>>, values: object = {}) => test.events.get("Network.requestWillBeSent")!({
+    requestId: "preflight", loaderId: "", type: "Other", initiator: { type: "preflight", requestId: "original-get" }, request: { url, method: "OPTIONS" }, ...values });
+  const pause = (test: Awaited<ReturnType<typeof installed>>, values: object = {}) => test.request("options", {
+    networkId: "preflight", request: { url, method: "OPTIONS", headers: { Origin: "https://example.org", "Access-Control-Request-Method": "GET" } }, ...values });
+  const prepare = async (sourceValues: object = {}, withSource = true) => {
+    const test = await installed(); await test.guard.beginDocumentNavigation(test.main as never);
+    test.events.get("Network.requestWillBeSent")!({ requestId: "document", loaderId: "current-loader", frameId: "main", type: "Document", request: { url: "https://example.org", method: "GET" } });
+    test.request("document", { networkId: "document", resourceType: "Document", request: { url: "https://example.org", method: "GET", headers: {} } });
+    await test.routes[0].continue(); test.response("document", { networkId: "document", resourceType: "Document", request: { url: "https://example.org", method: "GET", headers: {} } });
+    await test.routes[0].request().response(); if (withSource) source(test, sourceValues); return test;
+  };
+  it("waits for the exact frameless loaderless preflight and independently routes the later GET", async () => {
+    const test = await prepare();
+    try {
+      pause(test); await new Promise(resolve => setTimeout(resolve, 5)); expect(test.routes).toHaveLength(1);
+      metadata(test); await vi.waitFor(() => expect(test.routes).toHaveLength(2));
+      expect(test.routes[1].request().method()).toBe("OPTIONS"); await test.routes[1].continue();
+      test.response("options", { networkId: "preflight", responseStatusCode: 204, request: { url, method: "OPTIONS", headers: {} } });
+      expect((await test.routes[1].request().response())?.status()).toBe(204);
+      test.request("actual", { networkId: "original-get", resourceType: "Fetch", request: { url, method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(test.routes).toHaveLength(3)); await test.routes[2].continue();
+      test.response("actual", { networkId: "original-get", resourceType: "Fetch", request: { url, method: "GET", headers: {} } });
+      expect((await test.routes[2].request().response())?.status()).toBe(200); expect(test.failures).toEqual([]);
+    } finally { await test.guard.close(); }
+  });
+  it.each([false, true])("waits for a late exact GET identity when OPTIONS Network arrives first (Fetch before both: %s)", async fetchFirst => {
+    const test = await prepare({}, false);
+    try {
+      if (fetchFirst) pause(test);
+      metadata(test); if (!fetchFirst) pause(test);
+      await new Promise(resolve => setTimeout(resolve, 5)); expect(test.routes).toHaveLength(1);
+      source(test); await vi.waitFor(() => expect(test.routes).toHaveLength(2));
+      await test.routes[1].continue(); test.response("options", { networkId: "preflight", responseStatusCode: 204, request: { url, method: "OPTIONS", headers: {} } });
+      expect((await test.routes[1].request().response())?.status()).toBe(204);
+      test.request("actual", { networkId: "original-get", resourceType: "Fetch", request: { url, method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(test.routes).toHaveLength(3)); await test.routes[2].continue();
+      test.response("actual", { networkId: "original-get", resourceType: "Fetch", request: { url, method: "GET", headers: {} } });
+      expect((await test.routes[2].request().response())?.status()).toBe(200); expect(test.failures).toEqual([]);
+    } finally { await test.guard.close(); }
+  });
+  it.each([false, true])("binds an exact body-free HEAD preflight in either CDP order (OPTIONS before source: %s)", async optionsFirst => {
+    const test = await prepare({}, false), headSource = { request: { url, method: "HEAD" } };
+    const headPause = { request: { url, method: "OPTIONS", headers: { Origin: "https://example.org", "Access-Control-Request-Method": "HEAD" } } };
+    try {
+      if (optionsFirst) { pause(test, headPause); metadata(test); expect(test.routes).toHaveLength(1); source(test, headSource); }
+      else { source(test, headSource); metadata(test); pause(test, headPause); }
+      await vi.waitFor(() => expect(test.routes).toHaveLength(2)); await test.routes[1].continue();
+      test.response("options", { networkId: "preflight", responseStatusCode: 204, request: { url, method: "OPTIONS", headers: {} } });
+      expect((await test.routes[1].request().response())?.status()).toBe(204);
+      test.request("actual-head", { networkId: "original-get", resourceType: "Fetch", request: { url, method: "HEAD", headers: {} } });
+      await vi.waitFor(() => expect(test.routes).toHaveLength(3)); await test.routes[2].continue();
+      test.response("actual-head", { networkId: "original-get", resourceType: "Fetch", request: { url, method: "HEAD", headers: {} } });
+      const response = await test.routes[2].request().response(); expect(response?.status()).toBe(200); expect((await response?.body())?.length).toBe(0);
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.getResponseBody" && ["options", "actual-head"].includes(value?.requestId ?? ""))).toBe(false);
+      expect(test.failures).toEqual([]);
+    } finally { await test.guard.close(); }
+  });
+  it.each(["HEAD requested GET", "GET requested HEAD", "HEAD with body", "terminal HEAD"])("rejects mismatched or noncurrent HEAD preflight evidence: %s", async mismatch => {
+    const test = await prepare({}, false), sourceMethod = mismatch === "GET requested HEAD" ? "GET" : "HEAD";
+    try {
+      metadata(test); source(test, { request: { url, method: sourceMethod, ...(mismatch === "HEAD with body" ? { hasPostData: true, postData: "opaque" } : {}) } });
+      if (mismatch === "terminal HEAD") test.events.get("Network.loadingFailed")!({ requestId: "original-get" });
+      pause(test, { request: { url, method: "OPTIONS", headers: { "Access-Control-Request-Method": mismatch === "HEAD requested GET" ? "GET" : "HEAD" } } });
+      await vi.waitFor(() => expect(test.failures.length).toBeGreaterThan(0)); expect(test.routes).toHaveLength(1);
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "options")).toBe(false);
+    } finally { await test.guard.close(); }
+  });
+  it("correlates seven earlier OPTIONS identities only to their independently reordered GET parents", async () => {
+    const test = await prepare({}, false), order = [6, 0, 4, 2, 1, 5, 3];
+    try {
+      for (let index = 0; index < 7; index++) {
+        const target = `${url}/${index}`;
+        test.request(`options-${index}`, { networkId: `preflight-${index}`, request: { url: target, method: "OPTIONS", headers: { "Access-Control-Request-Method": "GET" } } });
+        metadata(test, { requestId: `preflight-${index}`, initiator: { type: "preflight", requestId: `get-${index}` }, request: { url: target, method: "OPTIONS" } });
+      }
+      expect(test.routes).toHaveLength(1);
+      for (const index of order) source(test, { requestId: `get-${index}`, request: { url: `${url}/${index}`, method: "GET" } });
+      await vi.waitFor(() => expect(test.routes).toHaveLength(8));
+      expect(test.routes.slice(1).map(route => route.request().url())).toEqual(order.map(index => `${url}/${index}`));
+      for (const [offset, index] of order.entries()) {
+        await test.routes[offset + 1].continue();
+        test.response(`options-${index}`, { networkId: `preflight-${index}`, responseStatusCode: 204, request: { url: `${url}/${index}`, method: "OPTIONS", headers: {} } });
+        expect((await test.routes[offset + 1].request().response())?.status()).toBe(204);
+      }
+      for (let index = 0; index < 7; index++) test.request(`actual-${index}`, { networkId: `get-${index}`, resourceType: "Fetch", request: { url: `${url}/${index}`, method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(test.routes).toHaveLength(15));
+      expect(test.routes.slice(8).every(route => route.request().method() === "GET")).toBe(true); expect(test.failures).toEqual([]);
+    } finally { await test.guard.close(); }
+  });
+  it.each(["URL", "frame", "loader", "method", "body", "kind"])("does not bind earlier OPTIONS to a late GET with mismatched %s", async mismatch => {
+    const test = await prepare({}, false);
+    try {
+      metadata(test); pause(test);
+      source(test, mismatch === "URL" ? { request: { url: "https://api.example.org/other", method: "GET" } }
+        : mismatch === "frame" ? { frameId: "foreign" } : mismatch === "loader" ? { loaderId: "foreign-loader" }
+          : mismatch === "method" ? { request: { url, method: "POST" } } : mismatch === "body" ? { request: { url, method: "GET", hasPostData: true, postData: "opaque" } } : { type: "Script" });
+      await vi.waitFor(() => expect(test.failures.length).toBeGreaterThan(0)); expect(test.routes).toHaveLength(1);
+    } finally { await test.guard.close(); }
+  });
+  it.each(["duplicate OPTIONS", "conflicting OPTIONS", "invalid first parent", "unknown parent", "parent terminal", "OPTIONS terminal"])(
+    "never heals pending preflight evidence after %s", async mismatch => {
+      const test = await prepare({}, false);
+      try {
+        metadata(test, mismatch === "unknown parent" ? { initiator: { type: "preflight", requestId: "missing" } } : {});
+        if (mismatch === "duplicate OPTIONS" || mismatch === "conflicting OPTIONS") metadata(test,
+          mismatch === "conflicting OPTIONS" ? { request: { url: "https://api.example.org/other", method: "OPTIONS" } } : {});
+        if (mismatch === "invalid first parent") source(test, { request: { url, method: "POST" } });
+        if (mismatch.endsWith("terminal")) test.events.get("Network.loadingFailed")!({ requestId: mismatch === "parent terminal" ? "original-get" : "preflight" });
+        source(test); pause(test);
+        await vi.waitFor(() => expect(test.failures.length).toBeGreaterThan(0)); expect(test.routes).toHaveLength(1);
+      } finally { await test.guard.close(); }
+    });
+  it("expires pending preflight evidence under the unchanged identity timeout", async () => {
+    const test = await prepare({}, false), clock = vi.spyOn(Date, "now");
+    try {
+      clock.mockReturnValueOnce(Date.now() - 101); metadata(test); clock.mockRestore(); source(test); pause(test);
+      await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_LOADER_TIMEOUT")); expect(test.routes).toHaveLength(1);
+    } finally { clock.mockRestore(); await test.guard.close(); }
+  });
+  it("does not move pending preflight evidence to a new document generation", async () => {
+    const test = await prepare({}, false);
+    try {
+      metadata(test); await test.guard.beginDocumentNavigation(test.main as never);
+      test.events.get("Network.requestWillBeSent")!({ requestId: "next-document", loaderId: "next-loader", frameId: "main", type: "Document", request: { url: "https://example.org/next", method: "GET" } });
+      test.request("next-document", { networkId: "next-document", resourceType: "Document", request: { url: "https://example.org/next", method: "GET", headers: {} } });
+      await test.routes[1].continue(); test.response("next-document", { networkId: "next-document", resourceType: "Document", request: { url: "https://example.org/next", method: "GET", headers: {} } });
+      await test.routes[1].request().response(); source(test, { loaderId: "next-loader" }); pause(test);
+      await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_LOADER_TIMEOUT")); expect(test.routes).toHaveLength(2);
+    } finally { await test.guard.close(); }
+  });
+  it("cannot publish pending preflight evidence after its waiting pause is cancelled", async () => {
+    const test = await prepare({}, false); pause(test); metadata(test); await test.guard.close(); source(test);
+    await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0)); expect(test.routes).toHaveLength(1);
+  });
+  it("does not share one late GET parent between two earlier OPTIONS identities", async () => {
+    const test = await prepare({}, false);
+    try {
+      metadata(test); metadata(test, { requestId: "second-preflight" }); source(test); pause(test);
+      await vi.waitFor(() => expect(test.routes).toHaveLength(2));
+      test.request("second-options", { networkId: "second-preflight", request: { url, method: "OPTIONS", headers: { "Access-Control-Request-Method": "GET" } } });
+      await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_LOADER_TIMEOUT")); expect(test.routes).toHaveLength(2);
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "second-options")).toBe(false);
+    } finally { await test.guard.close(); }
+  });
+  it("bounds pending OPTIONS and existing Network identities together at the original record limit", async () => {
+    const test = await installed(2); await test.guard.beginDocumentNavigation(test.main as never);
+    test.events.get("Network.requestWillBeSent")!({ requestId: "document", loaderId: "current-loader", frameId: "main", type: "Document", request: { url: "https://example.org", method: "GET" } });
+    test.request("document", { networkId: "document", resourceType: "Document", request: { url: "https://example.org", method: "GET", headers: {} } });
+    await test.routes[0].continue(); test.response("document", { networkId: "document", resourceType: "Document", request: { url: "https://example.org", method: "GET", headers: {} } });
+    await test.routes[0].request().response();
+    try {
+      metadata(test); metadata(test, { requestId: "second-preflight", initiator: { type: "preflight", requestId: "second-get" } });
+      await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_RECORD_LIMIT")); expect(test.routes).toHaveLength(1);
+    } finally { await test.guard.close(); }
+  });
+  it.each(["initiator", "source id", "source URL", "source frame", "source loader", "source method", "source body", "source kind", "preflight frame", "preflight loader", "preflight URL", "preflight body", "network id"])(
+    "does not infer preflight ownership from mismatched %s", async mismatch => {
+      const test = await prepare(mismatch === "source URL" ? { request: { url: "https://api.example.org/other", method: "GET" } }
+        : mismatch === "source frame" ? { frameId: "foreign" } : mismatch === "source loader" ? { loaderId: "foreign-loader" }
+          : mismatch === "source method" ? { request: { url, method: "POST" } } : mismatch === "source body" ? { request: { url, method: "GET", hasPostData: true, postData: "opaque" } }
+            : mismatch === "source kind" ? { type: "Script" } : {});
+      try {
+        metadata(test, mismatch === "initiator" ? { initiator: { type: "other" } } : mismatch === "source id" ? { initiator: { type: "preflight", requestId: "missing" } }
+          : mismatch === "preflight frame" ? { frameId: "foreign" } : mismatch === "preflight loader" ? { loaderId: "foreign-loader" }
+            : mismatch === "preflight URL" ? { request: { url: "https://api.example.org/other", method: "OPTIONS" } }
+              : mismatch === "preflight body" ? { request: { url, method: "OPTIONS", hasPostData: true, postData: "opaque" } } : {});
+        pause(test, mismatch === "network id" ? { networkId: "foreign-preflight" } : {});
+        await vi.waitFor(() => expect(test.failures.length).toBeGreaterThan(0)); expect(test.routes).toHaveLength(1);
+        expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "options")).toBe(false);
+      } finally { await test.guard.close(); }
+    });
+  it.each(["requested POST", "fetch body", "revised initiator"])("rejects a changed %s after exact network correlation", async mismatch => {
+    const test = await prepare();
+    try {
+      metadata(test); if (mismatch === "revised initiator") source(test);
+      pause(test, mismatch === "requested POST" ? { request: { url, method: "OPTIONS", headers: { Origin: "https://example.org", "Access-Control-Request-Method": "POST" } } }
+        : mismatch === "fetch body" ? { request: { url, method: "OPTIONS", hasPostData: true, postData: "opaque", headers: { "Access-Control-Request-Method": "GET" } } } : {});
+      await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_LOADER_MISMATCH")); expect(test.routes).toHaveLength(1);
+    } finally { await test.guard.close(); }
+  });
+  it("never reuses an original GET correlation for a second preflight", async () => {
+    const test = await prepare();
+    try {
+      metadata(test); pause(test); await vi.waitFor(() => expect(test.routes).toHaveLength(2)); await test.routes[1].continue();
+      test.response("options", { networkId: "preflight", responseStatusCode: 204, request: { url, method: "OPTIONS", headers: {} } }); await test.routes[1].request().response();
+      metadata(test, { requestId: "preflight-two" }); test.request("options-two", { networkId: "preflight-two", request: { url, method: "OPTIONS", headers: { "Access-Control-Request-Method": "GET" } } });
+      await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_LOADER_TIMEOUT")); expect(test.routes).toHaveLength(2);
+    } finally { await test.guard.close(); }
+  });
+  it("cannot dispatch a queued preflight after its original source identity changes", async () => {
+    const test = await prepare();
+    try {
+      metadata(test); pause(test); await vi.waitFor(() => expect(test.routes).toHaveLength(2)); source(test);
+      await expect(test.routes[1].continue()).rejects.toThrow("NATIVE_REDIRECT_CONTINUE_REJECTED");
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "options")).toBe(false);
+    } finally { await test.guard.close(); }
+  });
+  it.each([false, true])("aborts a preflight held for its lease when the exact source GET fails (replacement source: %s)", async replacement => {
+    const test = await prepare(), leaseReady = deferred<object>(), signal = new AbortController(), failures: string[] = [];
+    const queue = createSimulatorBrowserRequestQueue(async (_host, work) => { await leaseReady.promise; return { acquired: true as const, value: await work() }; }, signal.signal);
+    test.handler.mockImplementation(async route => {
+      test.routes.push(route);
+      try { await queue.run("api.example.org", () => route.continue()); }
+      catch (error) { failures.push((error as Error).message); await route.abort(); }
+    });
+    try {
+      metadata(test); pause(test); await vi.waitFor(() => expect(test.routes).toHaveLength(2));
+      test.events.get("Network.loadingFailed")!({ requestId: "original-get" });
+      if (replacement) source(test);
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "options")).toBe(false);
+      leaseReady.resolve({}); await vi.waitFor(() => { expect(test.guard.pendingReads).toBe(0); expect(failures).toEqual(["NATIVE_REDIRECT_CONTINUE_REJECTED"]); });
+      expect(test.cdp.send.mock.calls.filter(([name]) => name === "Fetch.failRequest").map(([, value]) => value?.requestId)).toEqual(["options"]);
+      expect(test.cdp.send.mock.calls.some(([name, value]) => ["Fetch.continueRequest", "Fetch.getResponseBody", "Fetch.continueResponse"].includes(name) && value?.requestId === "options")).toBe(false);
+      expect(test.routes).toHaveLength(2); expect(test.guard.firstFatal).toBeUndefined();
+    } finally { leaseReady.resolve({}); queue.dispose(); signal.abort(); await test.guard.close(); }
+  });
+  it.each(["before binding", "before Fetch admission"])("never dispatches preflight when its exact source GET terminates %s", async timing => {
+    const test = await prepare();
+    try {
+      if (timing === "before Fetch admission") metadata(test);
+      test.events.get("Network.loadingFailed")!({ requestId: "original-get" });
+      if (timing === "before binding") metadata(test);
+      pause(test); await vi.waitFor(() => expect(test.failures.length).toBeGreaterThan(0));
+      expect(test.routes).toHaveLength(1);
+      expect(test.cdp.send.mock.calls.some(([name, value]) => ["Fetch.continueRequest", "Fetch.getResponseBody"].includes(name) && value?.requestId === "options")).toBe(false);
+    } finally { await test.guard.close(); }
+  });
+  it("never admits a terminal OPTIONS identity published before its Fetch pause", async () => {
+    const test = await prepare();
+    try {
+      metadata(test); test.events.get("Network.loadingFailed")!({ requestId: "preflight" }); pause(test);
+      await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_LOADER_MISMATCH")); expect(test.routes).toHaveLength(1);
+      expect(test.cdp.send.mock.calls.some(([name, value]) => ["Fetch.continueRequest", "Fetch.getResponseBody"].includes(name) && value?.requestId === "options")).toBe(false);
+    } finally { await test.guard.close(); }
+  });
+  it("retires a paused preflight without dispatching or transferring its source ownership", async () => {
+    const test = await prepare();
+    try {
+      metadata(test); pause(test); await vi.waitFor(() => expect(test.routes).toHaveLength(2)); await test.guard.beginDocumentNavigation(test.main as never);
+      await expect(test.routes[1].continue()).rejects.toThrow(); expect(test.routes[1].request().signal?.aborted).toBe(true);
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "options")).toBe(false);
+    } finally { await test.guard.close(); }
+  });
+  it("does not borrow the original GET from a retired document generation", async () => {
+    const test = await prepare();
+    try {
+      await test.guard.beginDocumentNavigation(test.main as never); metadata(test); pause(test);
+      await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_LOADER_TIMEOUT")); expect(test.routes).toHaveLength(1);
+    } finally { await test.guard.close(); }
+  });
+  it("does not give a second Fetch pause the consumed preflight identity", async () => {
+    const test = await prepare();
+    try {
+      metadata(test); pause(test); await vi.waitFor(() => expect(test.routes).toHaveLength(2));
+      test.request("duplicate-options", { networkId: "preflight", request: { url, method: "OPTIONS", headers: { "Access-Control-Request-Method": "GET" } } });
+      await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_LOADER_MISMATCH")); expect(test.routes).toHaveLength(2);
+    } finally { await test.guard.close(); }
+  });
+  it("cannot publish a late preflight identity after cancellation of its wait", async () => {
+    const test = await prepare(); pause(test); await test.guard.close(); metadata(test);
+    await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0)); expect(test.routes).toHaveLength(1);
+    expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "options")).toBe(false);
+  });
+});
+
 describe("native document-generation retirement", () => {
   const identity = (test: Awaited<ReturnType<typeof installed>>, id: string, loaderId: string, kind = "XHR", url = "https://example.org/data") =>
     test.events.get("Network.requestWillBeSent")!({ requestId: `network-${id}`, loaderId, frameId: "main", type: kind, request: { url, method: "GET" } });
@@ -1615,6 +1884,110 @@ describe("native exact request and response ownership", () => {
       expect(JSON.stringify(test.guard.rejectedRequests)).not.toMatch(/never-retain|authorization|postData"/u);
       expect(stop).not.toHaveBeenCalled(); expect(test.close).not.toHaveBeenCalled();
     } finally { queue.dispose(); signal.abort(); await test.guard.close(); }
+  });
+
+  it.each([
+    ["Image", "https://example.org/photo"], ["Font", "https://example.org/type"], ["Media", "https://example.org/video"],
+    ["Other", "https://example.org/photo.png"], ["Other", "https://example.org/type.woff2"],
+  ])("aborts non-evidence browser %s without a network ID while a legitimate GET still completes (%s)", async (resourceType, url) => {
+    const test = await installed(), signal = new AbortController(), stop = vi.fn(async () => {}), bodies: string[] = [];
+    const lease = vi.fn(async (_host: string, work: () => Promise<unknown>) => ({ acquired: true as const, value: await work() }));
+    const queue = createSimulatorBrowserRequestQueue(lease, signal.signal);
+    test.handler.mockImplementation(async route => {
+      test.routes.push(route);
+      bodies.push((await queue.run("example.org", () => continueNativeBrowserRead(route, signal.signal, 1000, stop))).body.toString());
+    });
+    try {
+      test.request("decoration", { resourceType, networkId: undefined, request: { url, method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+      expect(test.handler).not.toHaveBeenCalled(); expect(lease).not.toHaveBeenCalled();
+      test.request("availability");
+      await vi.waitFor(() => expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "availability")).toBe(true));
+      test.response("availability");
+      await vi.waitFor(() => { expect(test.guard.pendingReads).toBe(0); expect(bodies).toEqual(["body-availability"]); });
+      expect(test.handler).toHaveBeenCalledOnce(); expect(lease).toHaveBeenCalledOnce();
+      expect(test.cdp.send.mock.calls.filter(([name]) => name === "Fetch.failRequest").map(([, value]) => value?.requestId)).toEqual(["decoration"]);
+      expect(test.cdp.send.mock.calls.filter(([name]) => ["Fetch.continueRequest", "Fetch.getResponseBody", "Fetch.continueResponse"].includes(name))
+        .map(([, value]) => value?.requestId)).not.toContain("decoration");
+      expect(test.guard.rejectedRequests).toEqual([]); expect(test.rejections).toEqual([]);
+      expect(test.guard.firstFatal).toBeUndefined(); expect(test.failures).toEqual([]); expect(stop).not.toHaveBeenCalled(); expect(test.close).not.toHaveBeenCalled();
+    } finally { queue.dispose(); signal.abort(); await test.guard.close(); }
+  });
+
+  it("keeps a non-evidence abort pending until its exact ACK without consuming another read's budget", async () => {
+    const test = await installed(), ack = deferred<object>(), send = test.cdp.send.getMockImplementation()!;
+    test.cdp.send.mockImplementation((name, value) => name === "Fetch.failRequest" && value?.requestId === "decoration" ? ack.promise : send(name, value));
+    try {
+      test.request("decoration", { resourceType: "Image", networkId: undefined });
+      expect(test.guard.pendingReads).toBe(1); expect(test.guard.rejectedRequests).toEqual([]);
+      test.request("availability"); await test.routes[0].continue(); test.response("availability");
+      expect((await (await test.routes[0].request().response())?.body())?.toString()).toBe("body-availability");
+      await vi.waitFor(() => expect(test.guard.pendingReads).toBe(1));
+      expect(test.handler).toHaveBeenCalledOnce(); expect(test.close).not.toHaveBeenCalled();
+      ack.resolve({}); await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+      expect(test.guard.rejectedRequests).toEqual([]); expect(test.rejections).toEqual([]); expect(test.guard.firstFatal).toBeUndefined();
+      expect(test.cdp.send.mock.calls.filter(([name]) => name === "Fetch.failRequest").map(([, value]) => value?.requestId)).toEqual(["decoration"]);
+    } finally { ack.resolve({}); await test.guard.close(); }
+  });
+
+  it.each(["Document", "Script", "XHR", "Fetch", "Stylesheet", "Other"])("keeps missing network identity fatal for evidence-capable %s", async resourceType => {
+    const test = await installed();
+    try {
+      test.request("critical", { resourceType, networkId: undefined, request: { url: "https://example.org/availability.json", method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce());
+      expect(test.guard.firstFatal?.code).toBe("NATIVE_REDIRECT_NETWORK_ID_MISSING"); expect(test.handler).not.toHaveBeenCalled();
+      expect(test.guard.rejectedRequests).toEqual([]);
+      expect(test.cdp.send.mock.calls.some(([name]) => ["Fetch.continueRequest", "Fetch.getResponseBody", "Fetch.continueResponse"].includes(name))).toBe(false);
+    } finally { await test.guard.close(); }
+  });
+
+  it.each(["cap", "missing-frame", "duplicate-id"])("retains the %s fatal guard before non-evidence denial", async kind => {
+    const test = await installed(kind === "cap" ? 1 : undefined);
+    try {
+      if (kind === "cap" || kind === "duplicate-id") test.request("one");
+      test.request(kind === "cap" ? "two" : "one", { resourceType: "Image", networkId: undefined,
+        ...(kind === "missing-frame" ? { frameId: undefined } : {}) });
+      await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce());
+      const suffix = kind === "cap" ? "INTERCEPT_LIMIT" : kind === "missing-frame" ? "FRAME_MISSING" : "DUPLICATE_FETCH_ID";
+      expect(test.failures).toContain(`NATIVE_REDIRECT_${suffix}`); expect(test.guard.rejectedRequests).toEqual([]);
+    } finally { await test.guard.close(); }
+  });
+
+  it.each(["reject", "hang"])("still closes when the exact non-evidence abort %ss", async kind => {
+    const test = await installed(), send = test.cdp.send.getMockImplementation()!;
+    test.cdp.send.mockImplementation((name, value) => name === "Fetch.failRequest"
+      ? kind === "hang" ? new Promise(() => {}) : Promise.reject(new Error("Protocol abort rejected")) : send(name, value));
+    try {
+      test.request("decoration", { resourceType: "Image", networkId: undefined });
+      await vi.waitFor(() => { expect(test.close).toHaveBeenCalledOnce(); expect(test.guard.pendingReads).toBe(0); });
+      expect(test.failures).toContain(kind === "hang" ? "NATIVE_REDIRECT_ABORT_TIMEOUT" : "NATIVE_REDIRECT_ROUTING_FAILED");
+      expect(test.handler).not.toHaveBeenCalled(); expect(test.guard.rejectedRequests).toEqual([]);
+    } finally { await test.guard.close(); }
+  });
+
+  it("cannot turn a denied non-evidence request's late response into evidence", async () => {
+    const test = await installed();
+    try {
+      test.request("decoration", { resourceType: "Image", networkId: undefined });
+      await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+      test.response("decoration", { resourceType: "Image", networkId: undefined });
+      await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_RESPONSE_UNKNOWN"));
+      expect(test.handler).not.toHaveBeenCalled();
+      expect(test.cdp.send.mock.calls.some(([name]) => ["Fetch.continueRequest", "Fetch.getResponseBody", "Fetch.continueResponse"].includes(name))).toBe(false);
+    } finally { await test.guard.close(); }
+  });
+
+  it("counts acknowledged non-evidence denials toward the unchanged intercept budget", async () => {
+    const test = await installed(1);
+    try {
+      test.request("decoration", { resourceType: "Image", networkId: undefined });
+      await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+      expect(test.guard.rejectedRequests).toEqual([]); expect(test.rejections).toEqual([]);
+      test.request("availability");
+      await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_INTERCEPT_LIMIT"));
+      expect(test.guard.firstFatal).toMatchObject({ interceptedRequests: 2, requestLimit: 1, recordCount: 0 });
+      expect(test.handler).not.toHaveBeenCalled();
+    } finally { await test.guard.close(); }
   });
 
   it.each([false, true])("aborts Ping without dispatch or evidence while same-host document/data peers complete (network ID present: %s)", async networkIdPresent => {

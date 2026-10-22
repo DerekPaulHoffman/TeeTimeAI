@@ -3,7 +3,7 @@ import { z } from "zod";
 import { venueProofMatches } from "./executor";
 import { matchesPublicVenueGreeting } from "./public-venue-greeting";
 import { accessExecutionInputSchema, accessExecutionResultSchema, accessRecipeSchema, expandRecipeTemplate, hashAccessRecipe,
-  isActiveBrowserAccessChallenge, isSafeBrowserAssetUrl, isSafeRecipeUrl, parseAccessRecipe, recipeAllowsRequest, recipeSelectorSchema, readRecipeFieldFormat,
+  isActiveBrowserAccessChallenge, isSafeBrowserAssetUrl, isSafeBrowserBootstrapReadUrl, isSafeRecipeUrl, parseAccessRecipe, recipeAllowsRequest, recipeSelectorSchema, readRecipeFieldFormat,
   SERVER_DOCUMENT_SELECTOR_MESSAGE } from "./recipe";
 
 export const httpRecipe = () => ({
@@ -192,6 +192,72 @@ describe("course access recipes", () => {
     expect(recipeAllowsRequest(recipe, asset, "GET", "script")).toBe(true);
     expect(recipeAllowsRequest(recipe, asset, "GET")).toBe(false);
     expect(recipeAllowsRequest(recipe, asset.replace("example.org", "other.example.org"), "GET", "script")).toBe(false);
+  });
+  it.each([
+    "https://public.example.org/App/GlobalTenantSettings",
+    "https://public.example.org/AuthenticationSettings",
+    "https://public.example.org/AuthenticationSettings?AuthenticationType=",
+    "https://public.example.org/Booking/Teetimes/GetReadOnlyTeeSheet",
+    "https://public.example.org/api-yoa/dining/venue_info?venue_url_key=public-golf-studio&widget_type=embedded&modify_upgrades=false",
+  ])("allows only browser GET metadata for the observed public RPC shape %s", url => {
+    expect(isSafeRecipeUrl(url)).toBe(false);
+    expect(isSafeBrowserBootstrapReadUrl(url, "xhr", "GET")).toBe(true);
+    expect(isSafeBrowserBootstrapReadUrl(url, "fetch", "GET")).toBe(true);
+    for (const kind of ["document", "script", "stylesheet", "other", ""])
+      expect(isSafeBrowserBootstrapReadUrl(url, kind, "GET")).toBe(false);
+    for (const method of ["POST", "HEAD", "OPTIONS", "DELETE"])
+      expect(isSafeBrowserBootstrapReadUrl(url, "fetch", method)).toBe(false);
+  });
+  it("keeps public bootstrap permission route-scoped and outside HTTP, source, page and response proof", () => {
+    const url = "https://public.example.org/api-yoa/dining/venue_info?venue_url_key=public-golf-studio&widget_type=embedded&modify_upgrades=false";
+    const route = { origin: "https://public.example.org", path: "/api-yoa/dining/venue_info", methods: ["GET"], queryKeys: ["venue_url_key", "widget_type", "modify_upgrades"] };
+    const browser = parseAccessRecipe({ ...serverDocumentRecipe(), permittedRoutes: [...serverDocumentRecipe().permittedRoutes, route] });
+    expect(recipeAllowsRequest(browser, url, "GET", "fetch")).toBe(true);
+    for (const value of [url.replace("public.example.org", "other.example.org"), url.replace("/venue_info", "/other"), `${url}&unexpected=1`])
+      expect(recipeAllowsRequest(browser, value, "GET", "fetch")).toBe(false);
+    expect(recipeAllowsRequest(browser, url, "GET", "document")).toBe(false);
+    expect(recipeAllowsRequest(parseAccessRecipe({ ...httpRecipe(), permittedRoutes: [...httpRecipe().permittedRoutes, route] }), url, "GET", "fetch")).toBe(false);
+    expect(() => parseAccessRecipe({ ...serverDocumentRecipe(), source: { ...httpRecipe().source, bookingUrl: url } })).toThrow();
+    expect(() => parseAccessRecipe({ ...serverDocumentRecipe(), pageUrl: url })).toThrow();
+    expect(() => parseAccessRecipe({ ...serverDocumentRecipe(), availabilityResponse: { ...serverDocumentRecipe().availabilityResponse, url } })).toThrow();
+    expect(url).toBe("https://public.example.org/api-yoa/dining/venue_info?venue_url_key=public-golf-studio&widget_type=embedded&modify_upgrades=false");
+  });
+  it("requires an explicit HEAD route and keeps it separate from GET and availability proof", () => {
+    const source = serverDocumentRecipe();
+    const url = "https://example.org/public-resource";
+    const recipe = parseAccessRecipe({ ...source, permittedRoutes: [...source.permittedRoutes,
+      { origin: "https://example.org", path: "/public-resource", methods: ["HEAD"], queryKeys: [] }] });
+    expect(recipeAllowsRequest(recipe, url, "HEAD", "fetch")).toBe(true);
+    for (const method of ["GET", "POST", "OPTIONS"])
+      expect(recipeAllowsRequest(recipe, url, method, "fetch")).toBe(false);
+    for (const other of [url + "/other", url + "?date=2026-10-23", url.replace("example.org", "other.example.org")])
+      expect(recipeAllowsRequest(recipe, other, "HEAD", "fetch")).toBe(false);
+    expect(recipeAllowsRequest(parseAccessRecipe(source), url, "HEAD", "fetch")).toBe(false);
+    expect(() => parseAccessRecipe({ ...source, availabilityResponse: { ...source.availabilityResponse, method: "HEAD" } })).toThrow();
+    expect(() => parseAccessRecipe({ ...httpRecipe(), request: { ...httpRecipe().request, method: "HEAD" } })).toThrow();
+  });
+  it.each([
+    "/App/InitializationSettings", "/AuthenticationSettings/", "/authenticationSettings", "/%41uthenticationSettings", "/App/../AuthenticationSettings",
+    "/account/AuthenticationSettings", "/checkout/GlobalTenantSettings", "/reservation/create/GlobalTenantSettings", "/auth/venue_info?venue_url_key=public-golf",
+    "/AuthenticationSettings?AuthenticationType", "/AuthenticationSettings?AuthenticationType=password", "/AuthenticationSettings?AuthenticationType=&AuthenticationType=",
+    "/AuthenticationSettings?%41uthenticationType=", "/AuthenticationSettings?authenticationType=", "/GlobalTenantSettings?AuthenticationType=",
+    "/AuthenticationSettings?AuthenticationType=&token=private", "/AuthenticationSettings?AuthenticationType=&next=%2Faccount%2Flogin",
+    "/venue_info?venue_url_key=public-golf&venue_url_key=public-golf", "/venue_info?%76enue_url_key=public-golf", "/venue_info?venue_url_key=%70ublic-golf",
+    "/venue_info?venue_url_key=", "/venue_info?venue_url_key=publicvenue1234567890123456789", "/venue_info?venue_url_key=secret-token",
+    "/venue_info?venue_url_key=https%3A%2F%2Fexample.org%2Fpublic", "/venue_info?venue_url_key=public-golf&api_key=private", "/api/availability?venue_url_key=public-golf",
+    "/Booking/Teetimes/GetReadOnlyTeeSheet?date=2026-10-23", "/Booking/Teetimes/GetReadOnlyTeeSheet?",
+    "/Booking/Teetimes/GetReadOnlyTeeSheet/", "/Booking/Teetimes/getReadOnlyTeeSheet", "/Booking/Teetimes/%47etReadOnlyTeeSheet",
+    "/checkout/GetReadOnlyTeeSheet", "/Booking/Teetimes/ReleaseTeeTimes", "/Booking/Teetimes/GetMaxBookingDays",
+  ])("keeps aliases, credentials, transaction paths and unproved metadata outside bootstrap permission: %s", path => {
+    expect(isSafeBrowserBootstrapReadUrl(`https://public.example.org${path}`, "fetch", "GET")).toBe(false);
+  });
+  it("preserves authority checks and validates public venue values before masking their key", () => {
+    const path = "/venue_info?venue_url_key=public-golf";
+    for (const origin of ["http://public.example.org", "https://127.0.0.1", "https://venue.internal", "https://user:password@public.example.org", "https://public.example.org:8443"])
+      expect(isSafeBrowserBootstrapReadUrl(origin + path, "fetch", "GET")).toBe(false);
+    expect(isSafeBrowserBootstrapReadUrl(`https://public.example.org${path}#fragment`, "fetch", "GET")).toBe(false);
+    expect(isSafeBrowserBootstrapReadUrl(`https://public.example.org/venue_info?venue_url_key=${"a".repeat(129)}`, "fetch", "GET")).toBe(false);
+    expect(isSafeBrowserBootstrapReadUrl(`https://public.example.org/venue_info?venue_url_key=${"a".repeat(128)}`, "fetch", "GET")).toBe(true);
   });
   it("admits conventional public static build versions without admitting credentials or data reads", () => {
     const script = "https://public.example.org/wp-includes/js/dist/hooks.min.js?ver=f0f188028580e8dc1255";

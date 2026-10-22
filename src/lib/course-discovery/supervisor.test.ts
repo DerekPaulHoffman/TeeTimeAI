@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCourseDiscoveryClient } from "../../../scripts/automation/course-discovery-client.mjs";
-import { SERVER_DOCUMENT_SELECTOR_MESSAGE } from "./recipe";
+import { isSafeRecipeUrl, SERVER_DOCUMENT_SELECTOR_MESSAGE } from "./recipe";
 import { createCourseDiscoverySupervisor, discoveryWorkDeadline, validateClaimedDiscoveryJob, validateClaimedRecipeExecution } from "../../../scripts/automation/course-discovery-supervisor.mjs";
 import { cleanupDiscoveryDirectory, createDiscoveryBrowser, createDiscoveryProcess, createDiscoverySnapshotCompactor, DISCOVERY_BROWSER_INPUT_SCHEMA, DISCOVERY_TOOLS, discoveryProcessEnvironment, prepareDiscoveryModelCatalog, readDiscoveryControllerCheckpoint, restrictedModelCatalog, runCourseDiscoveryWorker, verifyDiscoveryCandidate } from "../../../scripts/automation/course-discovery-worker.mjs";
 
@@ -926,6 +926,72 @@ describe("controller-only verification", () => {
         for (const url of excluded) expect(config.initialUrls).not.toContain(url);
       }
       expect(configurations[1].initialUrls).toContain(entry); expect(configurations[2].initialUrls).toContain(entry);
+      expect(client.candidate).not.toHaveBeenCalled(); expect(client.activate).not.toHaveBeenCalled();
+    } finally { rmSync(sourceHome, { recursive: true, force: true }); }
+  });
+
+  it("keeps public bootstrap metadata out of URL authority across reset and checkpoint resume", async () => {
+    const sourceHome = mkdtempSync(join(tmpdir(), "discovery-bootstrap-authority-"));
+    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }));
+    writeFileSync(join(sourceHome, "auth.json"), "test-auth");
+    const official = "https://example.org/", bootstrap = "https://example.org/App/GlobalTenantSettings";
+    const normal = "https://example.org/api/availability?date=2026-10-23", otherPurpose = "https://example.org/api/public-options";
+    const metadata = { url: bootstrap, method: "GET", resourceType: "xhr", status: 200, readPurpose: "PUBLIC_BOOTSTRAP" };
+    expect(isSafeRecipeUrl(bootstrap)).toBe(false); // This caused actual helper startup rejection when promoted.
+    const inputJob = { ...job(), request: { ...job().request, identity: { name: "Public golf", officialUrl: official, bookingUrl: null } } };
+    const configurations: Array<{ initialUrls: string[]; deadlineAt: string }> = [];
+    const checkpoints: Array<{ controller: { observedNavigationUrls: string[]; observedReadUrls: string[]; observedEntryUrls: string[] } }> = [];
+    const replies: unknown[] = [];
+    const client = { helperEnvironment: () => ({ COURSE_DISCOVERY_BROWSER_TRANSPORT: "NATIVE_CHROME" }),
+      checkpoint: async (_id, _token, value) => { checkpoints.push(structuredClone(value)); }, candidate: vi.fn(), activate: vi.fn() };
+    let phase = 1;
+    const processFactory = options => ({ notify: vi.fn(), close: vi.fn(async () => {}), request: async (method: string) => {
+      if (method === "thread/start") return { thread: { id: "thread-1" }, approvalPolicy: "never", sandbox: { type: "readOnly" } };
+      if (method === "turn/start") {
+        queueMicrotask(async () => {
+          await options.onMessage({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1" } } }, () => {});
+          const actions = phase === 1 ? [
+            ["discovery_browser", { action: "open", url: official }],
+            ["discovery_browser", { action: "finish" }],
+            ["discovery_browser", { action: "open", url: official }],
+            ["discovery_propose_recipe", { recipe: { engine: "BROWSER_DOM", source: { bookingUrl: bootstrap } } }],
+          ] : [["discovery_browser", { action: "open", url: official }]];
+          for (const [index, [tool, args]] of actions.entries()) await options.onMessage({ id: index + 1, method: "item/tool/call",
+            params: { threadId: "thread-1", turnId: "turn-1", tool, arguments: args } }, reply => replies.push(reply));
+          await options.onMessage({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } }, () => {});
+        });
+        return { turn: { id: "turn-1" } };
+      }
+      return {};
+    } });
+    const browserFactory = config => {
+      configurations.push(config);
+      // Mirror the unchanged fixed helper's strict startup check, without launching a process/browser.
+      if (!config.initialUrls.every(isSafeRecipeUrl)) throw Object.assign(new Error("Invalid initial URL"), { code: "INVALID_INITIAL_URLS" });
+      return { close: async () => {}, request: async action => ({ url: official, browserTransport: "NATIVE_CHROME", controls: [], frames: [],
+        requests: action.action === "finish" ? [] : [metadata,
+          { url: normal, method: "GET", resourceType: "xhr", status: 200 },
+          { url: otherPurpose, method: "HEAD", resourceType: "fetch", status: 200, readPurpose: "OTHER_PURPOSE" }] }) };
+    };
+    try {
+      const run = currentJob => runCourseDiscoveryWorker({ job: currentJob, client, cwd: process.cwd(), sourceHome, recipeSchema: {}, resolveCli: () => "fixed-codex",
+        processFactory, browserFactory, validateRecipe: async () => ({ valid: true }) }).catch(error => error);
+      expect(await run(inputJob)).toMatchObject({ code: "DISCOVERY_NO_VERIFIED_RECIPE" });
+      const persisted = checkpoints.at(-1)!;
+      expect(persisted.controller).toMatchObject({ observedNavigationUrls: [official], observedReadUrls: [normal, otherPurpose], observedEntryUrls: [] });
+      const firstReply = replies[0] as { result: { contentItems: Array<{ text: string }> } };
+      expect(JSON.parse(firstReply.result.contentItems[0].text).requests).toContainEqual(metadata);
+      expect(JSON.stringify(replies)).toContain("DISCOVERY_SOURCE_NOT_OBSERVED");
+      expect(JSON.stringify(replies)).not.toContain("INVALID_INITIAL_URLS");
+      phase = 2;
+      expect(await run({ ...inputJob, attempts: 2, checkpoint: persisted })).toMatchObject({ code: "DISCOVERY_NO_VERIFIED_RECIPE" });
+      expect(configurations).toHaveLength(3);
+      for (const config of configurations) {
+        expect(config.deadlineAt).toBe(inputJob.deadlineAt);
+        expect(config.initialUrls.every(isSafeRecipeUrl)).toBe(true);
+        expect(config.initialUrls).not.toContain(bootstrap);
+      }
+      for (const config of configurations.slice(1)) expect(config.initialUrls).toEqual([official, normal, otherPurpose]);
       expect(client.candidate).not.toHaveBeenCalled(); expect(client.activate).not.toHaveBeenCalled();
     } finally { rmSync(sourceHome, { recursive: true, force: true }); }
   });

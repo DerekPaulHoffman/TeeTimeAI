@@ -98,6 +98,24 @@ describe("deterministic course recipe execution", () => {
       launchBrowser: vi.fn(async () => { throw new Error("Executable does not exist"); }) });
     expect(result).toMatchObject({ status: "FAILED", complete: false, slots: [], evidence: { reason: "BROWSER_UNAVAILABLE" } });
   });
+  it("never treats public bootstrap metadata as the dated availability response", () => {
+    const base = { ...httpRecipe() }; Reflect.deleteProperty(base, "request");
+    const selected = parseAccessRecipe({ ...base, engine: "BROWSER_DOM", pageUrl: "https://example.org/tee-times", steps: [],
+      availabilityResponse: { url: "https://example.org/api/availability?date={{date}}", method: "GET", date: { source: "QUERY", path: "date" } },
+      proof: { venue: { selector: "#venue" }, date: { selector: "#date" }, complete: { selector: "#loaded" } },
+      slots: { collection: { selector: ".slot" }, startsAt: { selector: ".start" }, availableSpots: { selector: ".capacity" } } });
+    if (selected.engine !== "BROWSER_DOM") throw new Error("fixture");
+    // Defense in depth for callers holding an unparsed object: parseAccessRecipe
+    // independently rejects these URLs as an availability fence.
+    for (const url of ["https://example.org/App/GlobalTenantSettings?date={{date}}",
+      "https://example.org/AuthenticationSettings?AuthenticationType=&date={{date}}",
+      "https://example.org/api/venue_info?venue_url_key=public-golf-club&date={{date}}"] ) {
+      selected.availabilityResponse.url = url;
+      const request = { url: url.replace("{{date}}", executionInput.date), method: "GET" };
+      expect(matchesAvailabilityResponse(selected, executionInput, request, 200, JSON.stringify({ complete: true, empty: true }))).toBe(false);
+      expect(() => parseAccessRecipe(selected)).toThrow();
+    }
+  });
   it("excludes a tee time exactly at the end boundary, matching server acceptance", async () => {
     const result = await executeAccessRecipe(parseAccessRecipe(httpRecipe()), executionInput,
       dependencies({ ...payload(), slots: [{ start: "12:00", capacity: 4, holes: 18 }] }));
@@ -247,6 +265,35 @@ describe.runIf(existsSync(chromeExecutable))("isolated browser recipe replay", (
   it("replays a safe select and extracts visible proof in a fresh real browser", async () => {
     const result = await executeAccessRecipe(recipe(), executionInput, browserDeps(html));
     expect(result.status).toBe("AVAILABLE"); expect(result.slots[0].startsAt).toBe("2026-10-22T13:00:00.000Z");
+  }, 20_000);
+  it.each([true, false])("replays ancillary setup only inside its saved route scope (%s)", async scoped => {
+    const selected = recipe();
+    const bootstrap = "https://example.org/App/GlobalTenantSettings";
+    if (scoped) selected.permittedRoutes.push({ origin: "https://example.org", path: "/App/GlobalTenantSettings", methods: ["GET"], queryKeys: [] });
+    const fixture = html.replace("</body>", '<script>fetch("/App/GlobalTenantSettings").then(r=>r.json()).then(()=>document.querySelector("#loaded").textContent="Ready").catch(()=>{});</script></body>');
+    const deps = browserDeps(fixture), originalFetch = deps.fetch!;
+    deps.fetch = vi.fn(async (url, init) => String(url) === bootstrap
+      ? new Response(JSON.stringify({ settings: "public", complete: true, empty: true }), { headers: { "content-type": "application/json" } })
+      : originalFetch(url, init)) as typeof fetch;
+    const result = await executeAccessRecipe(selected, executionInput, deps);
+    expect(result.status).toBe(scoped ? "AVAILABLE" : "INCOMPLETE");
+    const read = vi.mocked(deps.fetch!).mock.calls.some(([url]) => String(url) === bootstrap);
+    expect(read).toBe(scoped);
+    if (!scoped) expect(result.slots).toEqual([]);
+  }, 20_000);
+  it.each(["HEAD", "GET"] as const)("replays a public HEAD only with its explicit saved method (%s)", async allowedMethod => {
+    const selected = parseAccessRecipe({ ...recipe(), permittedRoutes: [...recipe().permittedRoutes,
+      { origin: "https://example.org", path: "/public-resource", methods: [allowedMethod], queryKeys: [] }] });
+    const fixture = html.replace("</body>", '<script>fetch("/public-resource",{method:"HEAD"}).catch(()=>{});</script></body>');
+    const deps = browserDeps(fixture), originalFetch = deps.fetch!;
+    deps.fetch = vi.fn(async (url, init) => String(url) === "https://example.org/public-resource"
+      ? new Response(null, { status: 200 }) : originalFetch(url, init)) as typeof fetch;
+    const result = await executeAccessRecipe(selected, executionInput, deps);
+    expect(result.status).toBe(allowedMethod === "HEAD" ? "AVAILABLE" : "INCOMPLETE");
+    const calls = vi.mocked(deps.fetch!).mock.calls.filter(([url]) => String(url) === "https://example.org/public-resource");
+    expect(calls).toHaveLength(allowedMethod === "HEAD" ? 1 : 0);
+    if (calls.length) expect(calls[0][1]?.method).toBe("HEAD");
+    if (allowedMethod !== "HEAD") expect(result.slots).toEqual([]);
   }, 20_000);
   it.each((['inventory', 'empty'] as const).flatMap(outcome =>
     (["healthy", "denied-script", "denied-resource-kind", "unknown-fatal"] as const).map(mode => ({ mode, outcome }))))(

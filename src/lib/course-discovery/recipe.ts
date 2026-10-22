@@ -6,6 +6,7 @@ import { existingAdapterMetadataSchema } from "./existing-adapter-schema";
 import { isServerDocumentSelector } from "./server-document-proof";
 import { hasCpsSessionState } from "./cps-public-navigation";
 import { recipeLocalDateSchema as localDate, recipeTemplateSchema } from "./recipe-template";
+import { isSafePublicBootstrapReadUrl } from "./public-bootstrap-read-url";
 export { expandRecipeTemplate, recipeTemplateSchema } from "./recipe-template";
 
 const secret = /(?:password|secret|token|cookie|session|credential|authorization|api.?key|email|phone)/iu;
@@ -18,6 +19,11 @@ export function isSafeRecipeUrl(value: string) {
       !forbiddenPath.test(decodeURIComponent(url.pathname)) &&
       [...url.searchParams].every(([key, item]) => !secret.test(key) && !/[\r\n]/u.test(item));
   } catch { return false; }
+}
+/** Anonymous metadata RPC permission is separate from source/navigation and
+ * availability-response URLs. Actual transport bytes always remain unchanged. */
+export function isSafeBrowserBootstrapReadUrl(value: string, resourceType: string, method: string) {
+  return isSafePublicBootstrapReadUrl(value, resourceType, method, isSafeRecipeUrl);
 }
 /** Browser scripts/styles are read-only resources, not customer booking URLs.
  * Build hashes in a static asset path or a conventional bundle cache key are
@@ -88,7 +94,7 @@ export const recipeRouteSchema = z.object({
   origin: safeUrl.refine(value => new URL(value).origin === value, "Use an exact origin"),
   path: z.string().min(1).max(300).regex(/^\/[A-Za-z0-9_./%\-]*(?:\*)?$/u).refine(value =>
     !value.includes("..") && value !== "/*" && !forbiddenPath.test(decodeURIComponent(value))),
-  methods: z.array(z.enum(["GET", "POST"])).min(1).max(2),
+  methods: z.array(z.enum(["GET", "HEAD", "POST"])).min(1).max(3),
   queryKeys: z.array(z.string().min(1).max(80).regex(/^[a-zA-Z0-9_\[\].-]+$/u).refine(value => !secret.test(value))).max(30).default([]),
 }).strict();
 const stepSchema = z.discriminatedUnion("action", [
@@ -233,9 +239,10 @@ function canonical(value: unknown): string {
 export function hashAccessRecipe(recipe: CourseAccessRecipeData) { return createHash("sha256").update(canonical(parseAccessRecipe(recipe))).digest("hex"); }
 export function recipeAllowsRequest(recipe: CourseAccessRecipeData, value: string, method: string, resourceType?: string) {
   if (recipe.engine === "EXISTING_ADAPTER") return false; // Fixed adapter transport owns its exact routes.
-  if (!isSafeRecipeUrl(value) && !isSafeBrowserAssetUrl(value, resourceType ?? "", method)) return false;
+  if (!isSafeRecipeUrl(value) && !isSafeBrowserAssetUrl(value, resourceType ?? "", method) &&
+    !(recipe.engine === "BROWSER_DOM" && isSafeBrowserBootstrapReadUrl(value, resourceType ?? "", method))) return false;
   const url = new URL(value);
-  return recipe.permittedRoutes.some(route => route.origin === url.origin && route.methods.includes(method as "GET" | "POST") &&
+  return recipe.permittedRoutes.some(route => route.origin === url.origin && route.methods.includes(method as "GET" | "HEAD" | "POST") &&
     (route.path.endsWith("*") ? url.pathname.startsWith(route.path.slice(0, -1)) : route.path === url.pathname) &&
     [...url.searchParams.keys()].every(key => route.queryKeys.includes(key)));
 }

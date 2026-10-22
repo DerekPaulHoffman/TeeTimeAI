@@ -21,9 +21,9 @@ export type NativePublicProxy = {
 
 /** OPTIONS only discovers whether the browser may issue a separately guarded
  * read. It does not authorize the eventual POST or expand a recipe route. */
-export function nativeReadPreflightMethod(headers: Record<string, string>): "GET" | "POST" | null {
+export function nativeReadPreflightMethod(headers: Record<string, string>): "GET" | "HEAD" | "POST" | null {
   const method = headers["access-control-request-method"]?.toUpperCase();
-  if (method !== "GET" && method !== "POST" || !headers.origin || !isSafeRecipeUrl(headers.origin)) return null;
+  if (method !== "GET" && method !== "HEAD" && method !== "POST" || !headers.origin || !isSafeRecipeUrl(headers.origin)) return null;
   const requested = headers["access-control-request-headers"] ?? "";
   if (requested && !/^[a-z0-9_, -]+$/iu.test(requested) || /authorization|cookie|token|secret|api[-_]?key/iu.test(requested)) return null;
   return method;

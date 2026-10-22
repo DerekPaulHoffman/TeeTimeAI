@@ -22,6 +22,17 @@ describe("public-address native Chrome CONNECT transport", () => {
     expect(nativeReadPreflightMethod({ origin: "https://127.0.0.1", "access-control-request-method": "GET" })).toBeNull();
     expect(nativeReadPreflightMethod({ origin: "https://example.org", "access-control-request-method": "POST", "access-control-request-headers": "authorization" })).toBeNull();
   });
+  it("returns the exact public HEAD preflight method without mapping it to GET", () => {
+    expect(nativeReadPreflightMethod({ origin: "https://example.org", "access-control-request-method": "HEAD", "access-control-request-headers": "accept,x-requested-with" })).toBe("HEAD");
+    expect(nativeReadPreflightMethod({ origin: "https://example.org", "access-control-request-method": "GET" })).toBe("GET");
+    expect(nativeReadPreflightMethod({ origin: "https://example.org", "access-control-request-method": "POST" })).toBe("POST");
+  });
+  it.each(["authorization", "cookie", "x-token", "x-secret", "api-key"])("keeps credential header %s denied on a public HEAD preflight", requested => {
+    expect(nativeReadPreflightMethod({ origin: "https://example.org", "access-control-request-method": "HEAD", "access-control-request-headers": requested })).toBeNull();
+  });
+  it.each(["https://127.0.0.1", "https://user@example.org", "http://example.org"])("keeps unsafe origin %s denied on a public HEAD preflight", origin => {
+    expect(nativeReadPreflightMethod({ origin, "access-control-request-method": "HEAD" })).toBeNull();
+  });
   it("does not accept structural redirect lookalikes or an observed origin as HTTP provenance", () => {
     type Request = Parameters<typeof isObservedNativeRedirect>[0];
     const request = (url: string, previous: Request | null = null, method = "GET"): Request => ({ url: () => url, method: () => method, redirectedFrom: () => previous });

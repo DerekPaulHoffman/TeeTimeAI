@@ -11,7 +11,7 @@ import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-b
 import { getTimeZoneOffsetMinutes } from "@/lib/timezones";
 import { accessExecutionDiagnosticSchema, accessExecutionInputSchema, accessExecutionResultSchema, expandRecipeTemplate, hashAccessRecipe,
   parseAccessRecipe, recipeAllowsRequest, type AccessExecutionInput, type AccessExecutionResult,
-  readRecipeFieldFormat, isActiveBrowserAccessChallenge,
+  readRecipeFieldFormat, isActiveBrowserAccessChallenge, isSafeBrowserBootstrapReadUrl,
   type AccessExecutionDiagnostic, type CourseAccessRecipeData, type RecipeDateParts, type RecipeField } from "./recipe";
 import { continueNativeBrowserRead, createNativePublicBrowserProxy, nativeReadPreflightMethod, type NativePublicProxy } from "./native-public-browser";
 import { installNativeRedirectRouting, type NativeReadRoute } from "./native-redirect-routing";
@@ -83,6 +83,9 @@ export function recipeExecutionDiagnostic(error: unknown, context: { stepIndex?:
 function matchesAvailabilityRequest(recipe: Extract<CourseAccessRecipeData, { engine: "BROWSER_DOM" }>, input: AccessExecutionInput,
   request: { url: string; method: string; body?: string | null }) {
   const fence = recipe.availabilityResponse;
+  // Public setup data is ancillary even if a recipe mistakenly names it as
+  // the response fence. It cannot prove dated inventory or an empty result.
+  if (isSafeBrowserBootstrapReadUrl(request.url, "fetch", request.method)) return false;
   if (request.method !== fence.method || request.url !== expandRecipeTemplate(fence.url, input, true)) return false;
   try {
     const source = fence.date.source === "QUERY" ? new URL(request.url).searchParams : JSON.parse(request.body ?? "");
@@ -513,6 +516,8 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
         redirectRouting?.prepare(request.frame());
         if (!cpsScope.authorize(transportUrl, request.redirectedFrom()?.url())) throw new Error("UNOBSERVED_CPS_SESSION");
         if (cpsSessionKey(transportUrl) && !nativeProxy) throw new Error("CPS_NATIVE_BROWSER_REQUIRED");
+        const parent = request.redirectedFrom();
+        if (parent && isSafeBrowserBootstrapReadUrl(parent.url(), parent.resourceType(), parent.method())) throw new Error("UNSCOPED_REQUEST");
         passfactory.observeWidgetUrl(requestUrl);
         const frameUrl = canonicalCpsPublicUrl(request.frame().url());
         if (recipeAllowsRequest(recipe, frameUrl, "GET")) passfactory.observeWidgetUrl(frameUrl);
@@ -525,7 +530,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
           if (isRexNamespace(new URL(requestUrl)) && request.method() === "POST" &&
               !isRexPublicBrowserReadPost(new URL(requestUrl), request.method(), requestHeaders, request.postData() ?? "", frameUrl)) throw new Error("UNSCOPED_REQUEST");
           const rexPlaceholder = isRexAnonymousPlaceholderRead(new URL(requestUrl), request.method(), requestHeaders, request.postData() ?? "", frameUrl);
-          if (!recipeAllowsRequest(recipe, requestUrl, preflight ?? request.method(), request.resourceType()) ||
+          if (!recipeAllowsRequest(recipe, requestUrl, preflight ?? request.method(), preflight === "GET" ? "fetch" : request.resourceType()) ||
             !rexPlaceholder && Object.keys(requestHeaders).some(key => /^(?:authorization|proxy-authorization|x-api-key)$/iu.test(key)) ||
             request.method() === "POST" && !allowsPost(new URL(requestUrl), headers, request.postData() ?? "")) throw new Error("UNSCOPED_REQUEST");
           const responseLimit = publicBrowserResponseLimit(request.resourceType());
@@ -536,6 +541,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
           });
           bytes += native.body.length;
           if (bytes > PUBLIC_BROWSER_TOTAL_BYTES) { cancellation.abort("RESPONSE_LIMIT"); throw new Error("RESPONSE_LIMIT"); }
+          if (native.headers.location && isSafeBrowserBootstrapReadUrl(requestUrl, request.resourceType(), request.method())) throw new Error("UNSCOPED_REQUEST");
           if (native.status >= 400) { blocked = true; failure ??= recipeExecutionDiagnostic(`HTTP_${native.status}`, { url: requestUrl, method: request.method(), resourceType: request.resourceType() }); }
           if (native.status === 429) { providerThrottled = true; throw new Error("PROVIDER_THROTTLED"); }
           if (mainDocument) catalogTiles.completeDocument(catalogDocument, native.status, native.headers["content-type"] ?? "");

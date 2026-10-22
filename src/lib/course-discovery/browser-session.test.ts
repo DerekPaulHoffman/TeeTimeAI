@@ -272,6 +272,62 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       expect(JSON.stringify(snapshot.requestFailures)).not.toContain("private");
     } finally { await session.close(); }
   }, 25_000);
+  it("initializes public widgets through ancillary reads without exposing them as inventory or navigation", async () => {
+    const official = "https://example.org/";
+    const settings = "https://example.org/App/GlobalTenantSettings";
+    const authentication = "https://example.org/AuthenticationSettings?AuthenticationType=";
+    const venue = "https://example.org/api/venue_info?venue_url_key=public-golf-club&widget_type=reservations&modify_upgrades=false";
+    const denied = `${venue}&token=private-fixture`;
+    const urls = [settings, authentication, venue, "https://example.org/Booking/Teetimes/GetReadOnlyTeeSheet"];
+    const fetcher = vi.fn(async value => String(value) === official
+      ? new Response(`<html><body><h1>Loading public filters</h1><script>
+        Promise.all(${JSON.stringify(urls)}.map(url=>fetch(url).then(response=>response.json())))
+          .then(()=>document.querySelector('h1').textContent='Public filters ready');
+        fetch(${JSON.stringify(denied)}).catch(()=>{});
+        </script></body></html>`, { headers: { "content-type": "text/html" } })
+      : new Response(JSON.stringify({ venue: "Example Golf", complete: true, empty: true, settings: "public" }),
+        { headers: { "content-type": "application/json" } })) as unknown as typeof fetch;
+    const session = await createCourseDiscoveryBrowserSession({ initialUrls: [official], deadlineAt: new Date(Date.now() + 20_000) }, {
+      fetch: fetcher, launchBrowser: () => chromium.launch({ executablePath, headless: true }),
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      const snapshot = await session.execute({ id: 1, action: "open", url: official });
+      expect(snapshot.text).toContain("Public filters ready");
+      expect(fetcher.mock.calls.map(args => String(args[0]))).toEqual([official, ...urls]);
+      expect(snapshot.requests.filter(row => urls.includes(row.url))).toHaveLength(urls.length);
+      expect(snapshot.requests.filter(row => urls.includes(row.url)).every(row => row.readPurpose === "PUBLIC_BOOTSTRAP")).toBe(true);
+      expect(snapshot.responses).toEqual([]);
+      for (const url of urls) await expect(session.execute({ id: url, action: "open", url })).rejects.toThrow("UNOBSERVED_NAVIGATION");
+      expect(snapshot.requestFailures).toContainEqual(expect.objectContaining({ reason: "UNSAFE_URL" }));
+      expect(JSON.stringify(snapshot.requestFailures)).not.toContain("private-fixture");
+    } finally { await session.close(); }
+  }, 25_000);
+  it("keeps native bootstrap redirects out of navigation and inventory authority", async () => {
+    const official = "https://example.org/", bootstrap = `${official}App/GlobalTenantSettings`, redirected = `${official}public-data`;
+    const seen: string[] = [];
+    const native = vi.spyOn(nativeBrowser, "continueNativeBrowserRead").mockImplementation(async route => {
+      const url = route.request().url(); seen.push(url);
+      const status = url === bootstrap ? 302 : 200;
+      const body = Buffer.from(url === official ? '<h1>Public Golf</h1><script>fetch("/App/GlobalTenantSettings").catch(()=>{});</script>' : "");
+      const headers = url === bootstrap ? { "content-type": "application/json", location: redirected } : { "content-type": "text/html" };
+      await route.fulfill({ status, headers, body }); return { status, url, headers, body };
+    });
+    const routing = vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, handler) => ({
+      prepare: () => {}, beginDocumentNavigation: async () => {}, close: async () => {}, pendingReads: 0, lastFailure: undefined, releasePlaywrightRoute: route => handler(route),
+    }));
+    const session = await createCourseDiscoveryBrowserSession({ initialUrls: [official], deadlineAt: new Date(Date.now() + 20_000) }, {
+      browserTransport: "NATIVE_CHROME", launchBrowser: () => chromium.launch({ executablePath, headless: true }),
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      const snapshot = await session.execute({ id: 1, action: "open", url: official });
+      expect(seen).toEqual([official, bootstrap]);
+      expect(snapshot.responses).toEqual([]);
+      expect(snapshot.requestFailures).toContainEqual(expect.objectContaining({ reason: "UNSAFE_REDIRECT" }));
+      await expect(session.execute({ id: 2, action: "open", url: redirected })).rejects.toThrow("UNOBSERVED_NAVIGATION");
+    } finally { await session.close(); native.mockRestore(); routing.mockRestore(); }
+  }, 25_000);
   it("retains body-free request diagnostics after the first navigation fails", async () => {
     const session = await createCourseDiscoveryBrowserSession({ initialUrls: ["https://example.org/"], deadlineAt: new Date(Date.now() + 15_000) }, {
       fetch: vi.fn(async () => { throw new Error("FIXTURE_NETWORK_FAILURE"); }) as unknown as typeof fetch,
