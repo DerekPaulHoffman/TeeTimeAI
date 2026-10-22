@@ -21,6 +21,38 @@ function safeObservedUrl(value) {
       [...url.searchParams.keys()].every(key => !/password|secret|token|cookie|session|credential|authorization|api.?key|email|phone/iu.test(key));
   } catch { return false; }
 }
+/** A current controller snapshot may select an anonymous transport, never
+ * authorize the denied body or carry browser cookies to that transport. */
+export function shouldUseRexPinnedFallback(snapshot, transport, used, action) {
+  const record = value => value !== null && typeof value === "object" && !Array.isArray(value);
+  if (!record(snapshot) || !["browserTransport", "navigationStatus", "accessRequirementObserved", "url", "requests"].every(key => Object.hasOwn(snapshot, key)) ||
+      used || transport !== "NATIVE_CHROME" || snapshot.browserTransport !== "NATIVE_CHROME" ||
+      !["open", "observe"].includes(action) || snapshot?.navigationStatus !== 200 || snapshot.accessRequirementObserved !== false ||
+      snapshot.nativeFirstFatal || !safeObservedUrl(snapshot.url)) return false;
+  try {
+    const document = new URL(snapshot.url);
+    if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.reservewithrex\.com$/u.test(document.hostname) || document.pathname !== "/package" || document.hash ||
+        [...document.searchParams.keys()].some(key => !["venue", "date", "guests", "currentPackage"].includes(key))) return false;
+    if (!Array.isArray(snapshot.requests) || snapshot.requests.some(request => !record(request) ||
+        !["url", "method", "resourceType"].every(key => Object.hasOwn(request, key) && typeof request[key] === "string") ||
+        request.status !== undefined && (!Object.hasOwn(request, "status") || !Number.isSafeInteger(request.status) || request.status < 100 || request.status > 599))) return false;
+    const requests = snapshot.requests;
+    if (snapshot.requestFailures !== undefined && (!Array.isArray(snapshot.requestFailures) || snapshot.requestFailures.some(failure => !record(failure) || typeof failure.reason !== "string"))) return false;
+    if (requests.some(request => request.status === 429 || request.blockedReason === "PROVIDER_THROTTLED") ||
+        (snapshot.requestFailures ?? []).some(failure => ["PROVIDER_THROTTLED", "HTTP_429"].includes(failure.reason))) return false;
+    return requests.some(request => {
+      if (request.method !== "POST" || !["xhr", "fetch"].includes(request.resourceType) || request.blockedReason !== "REX_READ_HEADER_COOKIE") return false;
+      if (!Object.hasOwn(request, "blockedReason")) return false;
+      const url = new URL(request.url);
+      return url.origin === document.origin && url.pathname === "/api/venue/get" && !url.search && !url.hash && !url.username && !url.password && !url.port;
+    });
+  } catch { return false; }
+}
+export function bindDiscoveryRecipeBrowserTransport(recipe, actualTransport) {
+  if (recipe?.engine !== "BROWSER_DOM") return recipe;
+  if (!["PINNED_HTTP", "NATIVE_CHROME"].includes(actualTransport)) throw discoveryError("DISCOVERY_BROWSER_TRANSPORT_UNVERIFIED");
+  return { ...recipe, browserTransport: actualTransport };
+}
 function canonicalDataKey(value) {
   try {
     const serialized = JSON.stringify(value);
@@ -663,6 +695,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
   mkdirSync(working);
   let app;
   let browser;
+  let retiringBrowser;
   let activated;
   let activationStarted = false;
   const restoredController = readDiscoveryControllerCheckpoint(job.checkpoint, job.request.identity.officialUrl);
@@ -716,6 +749,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
   let responseBytesObserved;
   let lastRequestCount = 0;
   let lastResponseBytes = 0;
+  let browserThrottleObserved = false;
   let reportedMetrics;
   let modelFailure;
   const metrics = () => (reportedMetrics = { model, tokenUsage, browserActions, replayDurationsMs, browserTransportsTried,
@@ -725,7 +759,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
       firstOpenElapsedMs: Date.parse(firstOpenCompletedAt) - Date.parse(firstOpenStartedAt) } : {}),
     ...(providerRequestsObserved !== undefined ? { providerRequestsObserved } : {}),
     ...(responseBytesObserved !== undefined ? { responseBytesObserved } : {}) });
-  const compactSnapshot = createDiscoverySnapshotCompactor();
+  let compactSnapshot = createDiscoverySnapshotCompactor();
   let browserTransport = restoredController.browserTransport ?? client.helperEnvironment("discovery", job).COURSE_DISCOVERY_BROWSER_TRANSPORT ?? "PINNED_HTTP";
   let transportFallbackUsed = restoredController.transportFallbackUsed ?? false;
   const browserTransportsTried = [browserTransport];
@@ -824,8 +858,37 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
             if (input.action === "open") firstOpenStartedAt ??= new Date().toISOString();
             let snapshot = await browser.request(input);
             recordBrowserMetrics(snapshot);
+            browserThrottleObserved ||= snapshot?.navigationStatus === 429 ||
+              Array.isArray(snapshot?.requests) && snapshot.requests.some(request => request?.status === 429 || request?.blockedReason === "PROVIDER_THROTTLED") ||
+              Array.isArray(snapshot?.requestFailures) && snapshot.requestFailures.some(failure => ["PROVIDER_THROTTLED", "HTTP_429"].includes(failure?.reason));
             let didFallback = false;
-            if (input.action !== "finish" && snapshot?.navigationStatus === 403 && !transportFallbackUsed && safeObservedUrl(snapshot.url)) {
+            if (!browserThrottleObserved && shouldUseRexPinnedFallback(snapshot, browserTransport, transportFallbackUsed, input.action)) {
+              const observedDocument = snapshot.url;
+              transportFallbackUsed = true; didFallback = true; browserTransport = "PINNED_HTTP";
+              browserTransportsTried.push(browserTransport);
+              adapterObservation = undefined; lastBrowserSnapshot = undefined; browserControlsInvalidated = true; currentAccessRequirementObserved = false;
+              observedReadUrls.delete(observedDocument); observedEntryUrls.delete(observedDocument); observedNavigationUrls.add(observedDocument); boundObservedUrls();
+              retiringBrowser = browser; browser = null;
+              try {
+                // Commit the one-way choice before creating or dispatching its
+                // successor, including when close/open or this process fails.
+                await saveCheckpoint({});
+                await retiringBrowser.close(); retiringBrowser = null;
+              } catch (error) {
+                stopping = true;
+                throw error?.code === "DISCOVERY_LEASE_REJECTED" ? error : discoveryError("DISCOVERY_TRANSPORT_FALLBACK_FAILED");
+              }
+              lastRequestCount = 0; lastResponseBytes = 0; compactSnapshot = createDiscoverySnapshotCompactor();
+              browser = browserFactory({ cwd, deadlineAt: job.deadlineAt, timeZone: job.request.input.timeZone, venueName: job.request.identity.name,
+                venueAddress: job.request.identity.address, venueOfficialUrl: job.request.identity.officialUrl,
+                initialUrls: initialUrls(), helperEnvironment: browserEnvironment(), signal });
+              browserActions++;
+              snapshot = await browser.request({ action: "open", url: observedDocument });
+              recordBrowserMetrics(snapshot);
+              if (snapshot?.browserTransport !== "PINNED_HTTP") throw discoveryError("DISCOVERY_BROWSER_TRANSPORT_UNVERIFIED");
+              browserControlsInvalidated = false;
+              snapshot = { ...snapshot, transportFallback: "Retried this observed public package once using credentialless pinned reads after a catalog cookie-header denial." };
+            } else if (input.action !== "finish" && snapshot?.navigationStatus === 403 && !transportFallbackUsed && safeObservedUrl(snapshot.url)) {
               // A transport-specific denial is not yet an account requirement.
               // Retry this exact observed public document once with the other
               // fixed read transport, retaining the original job deadline.
@@ -907,7 +970,9 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
             }
           } else {
             if (!input?.recipe || Object.keys(input).some(key => key !== "recipe") || activated) throw discoveryError("DISCOVERY_PROPOSAL_INVALID");
-            const recipe = bindDiscoveryRecipeIdentity(input.recipe, job, adapterObservation, lastBrowserSnapshot?.url);
+            let recipe = bindDiscoveryRecipeIdentity(input.recipe, job, adapterObservation, lastBrowserSnapshot?.url);
+            const actualBrowserTransport = browser && !browserControlsInvalidated && lastBrowserSnapshot?.browserTransport === browserTransport ? browserTransport : undefined;
+            if (recipe?.engine === "BROWSER_DOM" && actualBrowserTransport) recipe = bindDiscoveryRecipeBrowserTransport(recipe, actualBrowserTransport);
             const validation = await validateRecipe({ recipe, signal });
             if (validation.valid !== true) throw discoveryError("DISCOVERY_RECIPE_INVALID", { details: { issues: validation.issues } });
             const proposedUrl = recipe.source?.bookingUrl;
@@ -915,6 +980,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
               ? { officialUrl: job.request.identity.officialUrl, observedBookingUrl: proposedUrl }
               : inspectedAdapterSourceEvidence(recipe, job, adapterObservation, officialSourceObserved, lastBrowserSnapshot?.url);
             if (proposedUrl !== job.request.identity.bookingUrl && !sourceEvidence) throw discoveryError("DISCOVERY_SOURCE_NOT_OBSERVED");
+            if (recipe?.engine === "BROWSER_DOM" && !actualBrowserTransport) throw discoveryError("DISCOVERY_BROWSER_TRANSPORT_UNVERIFIED");
             // Schema/source rejection above leaves the current controls usable.
             // Independent replay closes discovery's session. Its opaque controls
             // and access observations cannot survive that close, even on failure.
@@ -945,7 +1011,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
             ...(message.params.tool === "discovery_browser" && (message.params.arguments?.action === "finish" || error?.code === "BROWSER_SESSION_CLOSED")
               ? { hint: "The browser session is closed. Open an already observed public URL to start a fresh session within the original deadline." } : {}),
             ...(error?.code === "DISCOVERY_SOURCE_NOT_OBSERVED" ? { hint: "Open the official source and follow its public booking link before proposing a changed booking URL." } : {}) }) }] } });
-          if (activationStarted || ["DISCOVERY_LEASE_REJECTED", "DISCOVERY_NO_BROWSER_PROGRESS"].includes(error?.code)) rejectTurn(error);
+          if (activationStarted || ["DISCOVERY_LEASE_REJECTED", "DISCOVERY_NO_BROWSER_PROGRESS", "DISCOVERY_TRANSPORT_FALLBACK_FAILED"].includes(error?.code)) rejectTurn(error);
         } finally {
           // finish must release even a helper whose page closed before it could
           // produce its final snapshot. Keep the job clock and observed URLs.
@@ -969,7 +1035,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
         "Use public signed-out pages to identify the exact venue and requested offering. For simulator requests identify whole-bay golf rentals, excluding lessons, events and non-golf resources.",
         "The controller owns recipe target and source.venueName, source.venueAddress, source.officialUrl, and source.timeZone: it copies those fields exactly from this job before validation. Keep the job's canonical values; do not rename the venue to match a page heading. You discover the access method and observed public bookingUrl. Independent replay must still prove the canonical venue against the actual public page.",
         "Simulator players are saved attendee context, not simultaneous tee-sheet spots or a number of bays. Select one bay if the widget requires a resource quantity. Generic recipes must not use players as a bay or availability quantity; fixed typed adapters apply a verified attendee filter when the provider distinguishes people from resources. Respect a published whole-bay capacity when present, but never infer one: unknown capacity remains unknown and does not block observing whole-bay availability. Parameterize the requested duration.",
-        `The initial browser transport is ${browserTransport}. A main-document HTTP403 triggers one trusted fallback to the other public-read transport. Preserve the actual browserTransport reported by the latest snapshot in BROWSER_DOM recipes, including after a fallback. HTTP429 does not trigger a fallback.`,
+        `The initial browser transport is ${browserTransport}. A main-document HTTP403 or a fixed controller policy may trigger one shared trusted transport fallback. The controller binds BROWSER_DOM recipes to the actual latest browser transport, including after a fallback. HTTP429 does not trigger a fallback.`,
         "Find the real availability request or deterministic rendered structure. Visible controls may be used while loading is true; pending analytics do not require waiting when relevant controls are present. The finish action closes the session; use it only to reset a heavy session or when finished. On reset, previously observed navigation and successful public GET URLs remain permitted. Trusted resume URLs may be opened directly.",
         "Frames marked source OFFICIAL_IFRAME_SRC identify exact visible public sources from the current official-page DOM. You may inspect_adapter or open that exact URL as a standalone main-frame read, including after reset. Their admission alone is not a visit or source/availability proof; a URL appearing only in capability diagnostics does not grant navigation authority.",
         "After observing a public ForeUP, Acuity, TeeItUp, USchedule, Whoosh, Lightspeed simulator agenda or canonical Chronogolf club profile URL, use discovery_browser inspect_adapter with that observed URL. A self-hosted official simulator booking page using Amelia also supports inspect_adapter on its observed page URL; the fixed inspector verifies the page and public plugin configuration. Prefer the EXISTING_ADAPTER recipe variant using those typed fields over reconstructing its browser selectors. Chronogolf uses the canonical public club profile rather than a widget URL; the fixed reader verifies the full course catalog and complete dated public inventory. USchedule uses the selected public simulator rental, exact requested duration and whole-date pagination in a fresh anonymous session. Whoosh uses a fixed public exact-duration query bound to the observed simulator facility and its resource pools. Lightspeed and Amelia independently verify official venue identity and the complete public rental catalog, then read every eligible product/resource for the requested duration; never substitute a single bay subset for complete venue availability. The inspector obtains venue identity from the controller, not from tool arguments.",
@@ -1018,6 +1084,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
   } finally {
     stopping = true;
     if (app && threadId && turnId) await app.request("turn/interrupt", { threadId, turnId }).catch(() => {});
+    await retiringBrowser?.close().catch(() => {});
     await browser?.close();
     await app?.close();
     // Final usage may arrive while the completed turn is being interrupted or
