@@ -4,6 +4,7 @@ import { createAddressPinnedPublicFetchTransport } from "@/lib/automation/addres
 import { createPassfactoryPublicReadPolicy, isIncidentalBrowserRequest, isNonEvidenceBrowserResource } from "@/lib/automation/passfactory-public-read-policy";
 import { isAnonymousBrowserReadPost } from "@/lib/automation/simulator-interactive-browser";
 import { isRexAnonymousPlaceholderRead, isRexNamespace, isRexPublicBrowserReadPost } from "@/lib/automation/rex-public-read-policy";
+import { createPublicCatalogTileScope, openPublicCatalogTile, type PublicCatalogTileProof } from "./public-catalog-tile";
 import { addVerifiedMindbodyReadHeaders } from "@/lib/automation/mindbody-public-read-policy";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
@@ -408,6 +409,8 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
       ...(nativeProxy ? { proxy: { server: nativeProxy.server, bypass: "<-loopback>" } } : {}) });
     await context.routeWebSocket("**/*", route => { route.close(); });
     const page = await context.newPage();
+    const catalogTiles = createPublicCatalogTileScope();
+    page.on("framenavigated", frame => { if (frame === page.mainFrame()) catalogTiles.checkDocument(frame.url()); });
     let redirectRouting: Awaited<ReturnType<typeof installNativeRedirectRouting>> | undefined;
     const cpsScope = createCpsPublicSessionScope([recipe.source.bookingUrl, expandRecipeTemplate(recipe.pageUrl, input, true)]);
     page.on("popup", popup => { void popup.close(); });
@@ -478,6 +481,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
       throw new Error("UNSETTLED_REQUESTS");
     };
     let selectedProductDuration: number | undefined;
+    let selectedCatalogTile: PublicCatalogTileProof | undefined;
     let selectedDateDay: Locator | undefined;
     let selectedRentalService: PublicRentalServiceSelection | undefined;
     const handleRoute = async (route: NativeReadRoute) => {
@@ -488,6 +492,9 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
       const requestUrl = canonicalCpsPublicUrl(transportUrl);
       const requestGeneration = mutationGeneration;
       const mainDocument = request.resourceType() === "document" && request.isNavigationRequest() && request.frame() === page.mainFrame();
+      const catalogDocument = mainDocument ? catalogTiles.beginDocument(requestUrl) : undefined;
+      const catalogRead = request.frame() === page.mainFrame() && ["xhr", "fetch"].includes(request.resourceType())
+        ? catalogTiles.beginRead(requestUrl, request.method(), request.postData(), request.frame().url()) : undefined;
       if (mainDocument) mainDocumentSequence++;
       if (["xhr", "fetch"].includes(request.resourceType())) dataRequestSequence++;
       const capturedDocumentSequence = mainDocumentSequence, capturedDataSequence = dataRequestSequence;
@@ -531,6 +538,8 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
           if (bytes > PUBLIC_BROWSER_TOTAL_BYTES) { cancellation.abort("RESPONSE_LIMIT"); throw new Error("RESPONSE_LIMIT"); }
           if (native.status >= 400) { blocked = true; failure ??= recipeExecutionDiagnostic(`HTTP_${native.status}`, { url: requestUrl, method: request.method(), resourceType: request.resourceType() }); }
           if (native.status === 429) { providerThrottled = true; throw new Error("PROVIDER_THROTTLED"); }
+          if (mainDocument) catalogTiles.completeDocument(catalogDocument, native.status, native.headers["content-type"] ?? "");
+          catalogTiles.completeRead(catalogRead, native.status, native.headers["content-type"] ?? "", native.body);
           observeClientScript(requestUrl, request.resourceType(), native.status, native.body);
           observeAvailabilityResponse(requestGeneration, { url: requestUrl, method: request.method(), body: request.postData() }, native.status, native.body,
             { main: mainDocument, sequence: capturedDocumentSequence, dataSequence: capturedDataSequence, contentType: native.headers["content-type"] ?? "" });
@@ -541,6 +550,8 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
         if (bytes > PUBLIC_BROWSER_TOTAL_BYTES) throw new Error("RESPONSE_LIMIT");
         const responseHeaders: Record<string, string> = {};
         for (const key of ["content-type", "access-control-allow-origin"]) { const value = response.headers.get(key); if (value) responseHeaders[key] = value; }
+        if (mainDocument) catalogTiles.completeDocument(catalogDocument, response.status, response.headers.get("content-type") ?? "");
+        catalogTiles.completeRead(catalogRead, response.status, response.headers.get("content-type") ?? "", new Uint8Array(buffer));
         await route.fulfill({ status: response.status, headers: responseHeaders, body: Buffer.from(buffer) });
         observeClientScript(requestUrl, request.resourceType(), response.status, new Uint8Array(buffer));
         observeAvailabilityResponse(requestGeneration, { url: requestUrl, method: request.method(), body: request.postData() }, response.status, new Uint8Array(buffer),
@@ -648,6 +659,11 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
         }
         let node = page.locator(step.selector);
         if (step.action === "waitFor") { await node.waitFor({ state: "visible" }); continue; }
+        if (step.action === "clickFilter" && step.purpose === "OPEN_FILTER" && await node.count() === 1 &&
+            await node.evaluate(element => element.tagName === "ARTICLE")) {
+          selectedCatalogTile = await openPublicCatalogTile(node, catalogTiles, expandRecipeTemplate(step.text, input));
+          continue;
+        }
         if (step.action === "clickFilter" && step.purpose === "APPLY_DATE") {
           if (!selectedRequestedDate || !selectedDateDay || await node.count() !== 1 ||
               clean(await node.innerText()) !== expandRecipeTemplate(step.text, input)) throw new Error("UNSAFE_CALENDAR_APPLY");
@@ -724,6 +740,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
       await waitForAvailabilityResponse();
       await waitForQuietReads();
       await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+      if (selectedCatalogTile && !catalogTiles.selected(page.url(), selectedCatalogTile)) return fail("INCOMPLETE", "PUBLIC_CATALOG_SELECTION_UNCONFIRMED");
       if (isActiveBrowserAccessChallenge(await page.locator("body").innerText(), await page.title())) return fail("ACCESS_REQUIRED", "ACCESS_REQUIRED");
       if (providerThrottled) return fail("FAILED", "PROVIDER_THROTTLED");
       if (blocked || !recipeAllowsRequest(recipe, canonicalCpsPublicUrl(page.url()), "GET")) return fail("INCOMPLETE", "UNSCOPED_OR_FAILED_RESOURCE");
@@ -736,6 +753,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
       if (providerThrottled) return fail("FAILED", "PROVIDER_THROTTLED");
       if (blocked || !recipeAllowsRequest(recipe, canonicalCpsPublicUrl(page.url()), "GET")) return fail("INCOMPLETE", "UNSCOPED_OR_FAILED_RESOURCE");
       if (pendingReadCount() || responseGeneration !== mutationGeneration || JSON.stringify(first) !== JSON.stringify(second)) return fail("INCOMPLETE", "UNSETTLED_RESULTS");
+      if (selectedCatalogTile && !catalogTiles.selected(page.url(), selectedCatalogTile)) return fail("INCOMPLETE", "PUBLIC_CATALOG_SELECTION_UNCONFIRMED");
       if (usesServerDocument && (!serverDocument || serverDocument.generation !== mutationGeneration ||
           serverDocument.documentSequence !== mainDocumentSequence || serverDocument.dataSequence !== dataRequestSequence ||
           !sameServerDocumentEvidence(serverDocument.extracted, second))) {
@@ -749,7 +767,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
     failure ??= recipeExecutionDiagnostic(error, activity);
     const message = error instanceof Error ? error.message : "";
     const reason = providerThrottled ? "PROVIDER_THROTTLED" : /^[A-Z_0-9]{1,80}$/u.test(message) ? message : failure.code;
-    return fail(reason === "ACCESS_REQUIRED" ? "ACCESS_REQUIRED" : ["INVALID_SLOT_TIME", "AMBIGUOUS_OR_INVALID_LOCAL_TIME", "INCOMPLETE_COLLECTION", "INVALID_CAPACITY_OR_DURATION", "UNSETTLED_REQUESTS", "AMBIGUOUS_PROOF_FIELD", "RESOURCE_IDENTITY_MISMATCH", "AMBIGUOUS_RESOURCE_SCOPE", "INVALID_RESOURCE_SCOPE", "RESOURCE_SCOPE_NOT_CARD", "AVAILABILITY_RESPONSE_UNCONFIRMED", "AVAILABILITY_RESPONSE_FAILED", "UNVERIFIED_CLIENT_DURATION", "DURATION_PROOF_MISMATCH"].includes(reason) ? "INCOMPLETE" : "FAILED",
+    return fail(reason === "ACCESS_REQUIRED" ? "ACCESS_REQUIRED" : ["INVALID_SLOT_TIME", "AMBIGUOUS_OR_INVALID_LOCAL_TIME", "INCOMPLETE_COLLECTION", "INVALID_CAPACITY_OR_DURATION", "UNSETTLED_REQUESTS", "AMBIGUOUS_PROOF_FIELD", "RESOURCE_IDENTITY_MISMATCH", "AMBIGUOUS_RESOURCE_SCOPE", "INVALID_RESOURCE_SCOPE", "RESOURCE_SCOPE_NOT_CARD", "AVAILABILITY_RESPONSE_UNCONFIRMED", "AVAILABILITY_RESPONSE_FAILED", "UNVERIFIED_CLIENT_DURATION", "DURATION_PROOF_MISMATCH", "UNVERIFIED_PUBLIC_CATALOG_TILE", "PUBLIC_CATALOG_SELECTION_UNCONFIRMED"].includes(reason) ? "INCOMPLETE" : "FAILED",
       reason);
   } finally { cancellation.abort("EXECUTION_FINISHED"); requestQueue.dispose(); await browser?.close().catch(() => {}); await nativeProxy?.close(); }
 }

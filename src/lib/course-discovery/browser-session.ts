@@ -28,6 +28,7 @@ import type { OfficialIdentityPage } from "./teeitup-official-identity";
 import { createTeeItUpOfficialBookingScope, observedTeeItUpOfficialBookingChain, type TeeItUpSourceRequestToken } from "./teeitup-official-booking-context";
 import { discoveryNavigationFailureKind, safeOfficialSourceDiagnostic, type OfficialSourceDiagnostic, type NavigationFailureKind } from "./official-source-diagnostics";
 import { inspectPublicRentalProduct } from "./public-product-control";
+import { createPublicCatalogTileScope, inspectPublicCatalogTile, openPublicCatalogTile } from "./public-catalog-tile";
 import { canonicalCpsPublicUrl, cpsPublicEntryUrl, cpsSessionKey, createCpsPublicSessionScope } from "./cps-public-navigation";
 import { observedPublicDateChoices, isPublicDateChoice } from "./public-date-choice";
 import { isPublicAvailabilityNavigation } from "./public-navigation-control";
@@ -55,7 +56,7 @@ type ObservedControl = { tag: string; role: string; name: string; label: string;
   sensitiveForm: boolean; inputType: string; hasPopup: string; selector: string; options?: Array<{ value: string; label: string }>;
   currentValue?: string; product?: { selector: string; durationMinutes: number }; choiceValue?: string; choiceContext?: string; disabledChoice?: boolean;
   formSafeAnchor?: boolean; readOnlyFormDisplay?: boolean; documentNavigationOnly?: boolean;
-  service?: PublicRentalServiceProof; serviceContinuation?: PublicServiceContinuationMode; serviceMenuOption?: boolean };
+  service?: PublicRentalServiceProof; serviceContinuation?: PublicServiceContinuationMode; serviceMenuOption?: boolean; catalogTile?: boolean };
 type EzLinksDocumentWitness = { url: string; settled: boolean; status?: number; token?: EzLinksDocumentToken;
   observedAt?: number;
   init?: unknown; initAt?: number; initVersion: number; pendingInit: number; initAttempted: boolean;
@@ -211,6 +212,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
   }
   const navigationOrigins = new Set(initialUrls.map(value => new URL(value).origin));
   const passfactory = createPassfactoryPublicReadPolicy();
+  const catalogTiles = createPublicCatalogTileScope();
   const uschedule = createUSchedulePublicReadPolicy();
   const ezlinks = createEzLinksPublicReadPolicy();
   initialUrls.forEach(value => passfactory.observeWidgetUrl(value));
@@ -259,7 +261,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       observedRequests.push(metadata); requestMetadataBytes += size;
     }
   };
-  const controls = new Map<string, { locator: Locator; signature: string; kind: string; href?: string; documentNavigationOnly?: boolean; calendarDay?: string; dropdown?: PublicDropdownProof;
+  const controls = new Map<string, { locator: Locator; signature: string; kind: string; href?: string; documentNavigationOnly?: boolean; calendarDay?: string; dropdown?: PublicDropdownProof; catalogTile?: boolean;
     service?: boolean; serviceContinuation?: PublicServiceContinuationMode }>();
   let serviceSelection: PublicRentalServiceSelection | undefined;
   const observedElements = new Map<string, { locator: Locator; signature: string }>();
@@ -298,7 +300,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
   deadline.addEventListener("abort", abort, { once: true });
   page.on("popup", popup => { void popup.close(); });
   context.on("page", opened => { if (opened !== page) void opened.close(); });
-  page.on("framenavigated", frame => { if (frame === page.mainFrame()) teeBookingScope.checkCurrentDocument(frame.url()); });
+  page.on("framenavigated", frame => { if (frame === page.mainFrame()) { teeBookingScope.checkCurrentDocument(frame.url()); catalogTiles.checkDocument(frame.url()); } });
   const waitEz = async (ready: () => boolean, code: string, durationMs = 5_000) => {
     const until = Math.min(Date.now() + durationMs, input.deadlineAt.getTime());
     for (;;) {
@@ -328,6 +330,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
     let ezAsset: typeof ezLinksReadContractAssets[number] | undefined, ezAssetRead: { complete: boolean; sha256?: string } | undefined;
     let ezInitRequest = false;
     let teeRequestToken: TeeItUpSourceRequestToken | undefined;
+    let catalogDocument: ReturnType<typeof catalogTiles.beginDocument>;
+    let catalogRead: ReturnType<typeof catalogTiles.beginRead>;
     try {
       deadline.throwIfAborted();
       if (request.frame().page() !== page) throw new Error("UNSUPPORTED_BROWSER_PAGE");
@@ -340,7 +344,10 @@ export async function createCourseDiscoveryBrowserSession(input: {
         throw new Error("UNSAFE_URL");
       }
       const url = new URL(requestUrl);
+      if (request.frame() === page.mainFrame() && ["xhr", "fetch"].includes(request.resourceType()))
+        catalogRead = catalogTiles.beginRead(requestUrl, request.method(), request.postData(), request.frame().url());
       if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+        catalogDocument = catalogTiles.beginDocument(requestUrl);
         officialSourceDiagnostic = undefined;
         teeRequestToken = nativeProxy ? teeBookingScope.beginMainDocument(request, { url: request.url(), method: request.method(), parent: request.redirectedFrom() ?? undefined }) : undefined;
         teeDocumentToken = teeRequestToken;
@@ -459,6 +466,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       }
       metadata.status = reply.status;
       if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+        catalogTiles.completeDocument(catalogDocument, reply.status, reply.headers["content-type"] ?? "");
         if (teeRequestToken) teeBookingScope.completeMainDocument(teeRequestToken, { status: reply.status,
           location: reply.headers.location, contentType: reply.headers["content-type"] });
         navigation = { url: request.url(), status: reply.status };
@@ -484,6 +492,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       if (url.hostname === "clients.uschedule.com" && method === "GET" && /^text\/html(?:;|$)/iu.test(reply.headers["content-type"] ?? ""))
         uschedule.observeResponse(url.href, method, reply.status, reply.headers["content-type"] ?? "", reply.buffer.toString("utf8"));
       if (responseBytes > PUBLIC_BROWSER_TOTAL_BYTES) { cancellation.abort("PUBLIC_READ_BYTE_LIMIT"); throw new Error("PUBLIC_READ_BYTE_LIMIT"); }
+      catalogTiles.completeRead(catalogRead, reply.status, reply.headers["content-type"] ?? "", reply.buffer);
       if (ezAsset && ezAssetRead && ezWitness === ezDocument) {
         // Chrome can start a script after the HTML response ACK but before the
         // main handler publishes its token. Wait only after queue.run released
@@ -618,6 +627,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
         onFailure: reason => {
           if (closed) return;
           teeBookingScope.invalidate();
+          catalogTiles.beginDocument("about:blank");
           terminalFailure = reason;
           blockedRequests++;
           // A controller-wide failure is not proof that a document caused it.
@@ -695,6 +705,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       ...(node.tagName === "SELECT" && !sensitiveForm ? { options: Array.from((node as HTMLSelectElement).options).slice(0, 100).map(item => ({ value: item.value.slice(0, 200), label: (item.textContent ?? "").trim().slice(0, 200) })) } : {}) };
   }, undefined, { timeout: 1000 }).then(async control => {
     const product = !control.sensitiveForm && ["a", "button"].includes(control.tag) ? await inspectPublicRentalProduct(locator) : undefined;
+    const catalogTile = !control.sensitiveForm && control.tag === "article" ? await inspectPublicCatalogTile(locator, catalogTiles) : undefined;
     const service = !control.sensitiveForm && (control.tag === "select" || control.role === "combobox") ? await inspectPublicRentalService(locator) : undefined;
     let serviceContinuation: PublicServiceContinuationMode | undefined;
     if (!control.sensitiveForm && serviceSelection && control.tag === "button") {
@@ -710,7 +721,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     const href = control.href ? normalizeDiscoveryNavigationUrl(control.href) : undefined;
     const documentNavigationOnly = Boolean(control.formSafeAnchor && href && !new URL(href).hash &&
       discoveryPublicAnchorKind({ ...control, href, sensitiveForm: false }));
-    return { ...control, ...(documentNavigationOnly ? { documentNavigationOnly: true } : {}), ...(product ? { product } : {}), ...(service ? { service } : {}),
+    return { ...control, ...(catalogTile ? { name: catalogTile.name, label: catalogTile.name, catalogTile: true } : {}), ...(documentNavigationOnly ? { documentNavigationOnly: true } : {}), ...(product ? { product } : {}), ...(service ? { service } : {}),
       ...(serviceContinuation ? { serviceContinuation } : {}), ...(serviceMenuOption ? { serviceMenuOption: true } : {}),
       ...(href ? { href } : {}) };
   });
@@ -720,7 +731,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     // exclusion as a labelled public availability link.
     if (control.href && !isPublicAvailabilityNavigation(control.href, (control.name || control.label).trim())) return null;
     if (control.documentNavigationOnly) return "link";
-    const kind = control.service ? "filter" : control.serviceContinuation ? "service-continuation" : control.product ? "product" : discoveryPublicAnchorKind(control) ?? discoveryPublicChoiceKind(control) ?? interactiveControlKind(control) ?? (control.tag === "select" && !control.sensitiveForm ? "filter" : null);
+    const kind = control.catalogTile || control.service ? "filter" : control.serviceContinuation ? "service-continuation" : control.product ? "product" : discoveryPublicAnchorKind(control) ?? discoveryPublicChoiceKind(control) ?? interactiveControlKind(control) ?? (control.tag === "select" && !control.sensitiveForm ? "filter" : null);
     if (!kind || /\b(?:book|reserve|checkout|confirm|purchase|pay)\b/iu.test(control.name) && !["link", "product"].includes(kind) ||
       control.href && !isSafeRecipeUrl(control.href)) return null;
     return kind;
@@ -737,7 +748,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     return !node;
   }, undefined, { timeout: 1000 });
   const controlCandidates = async () => {
-    const matches = page.locator('a[href],a[data-value],button,select,input,td,th,[role="combobox"],[role="option"],[role="gridcell"],[role="button"]');
+    const matches = page.locator('a[href],a[data-value],button,select,input,td,th,[role="combobox"],[role="option"],[role="gridcell"],[role="button"],article.package-card-v2.package-card-v2--package');
     const indexes = await matches.evaluateAll(nodes => {
       const visible: Array<{ index: number; priority: boolean }> = [];
       // Bound the DOM scan, not the unfiltered prefix of potential controls.
@@ -777,6 +788,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     if (control.href) { allowedNavigation.add(control.href); observedNavigationRoots.add(control.href); passfactory.observeWidgetUrl(control.href); cpsScope.observeEntry(control.href); }
     const target = randomUUID();
     controls.set(target, { locator, signature: JSON.stringify(control), kind, href: control.href, ...(control.documentNavigationOnly ? { documentNavigationOnly: true } : {}),
+      ...(control.catalogTile ? { catalogTile: true } : {}),
       ...(extra.date ? { calendarDay: extra.date } : {}), ...(extra.dropdown ? { dropdown: extra.dropdown } : {}),
       ...(control.service ? { service: true } : {}), ...(control.serviceContinuation ? { serviceContinuation: control.serviceContinuation } : {}) });
     observedElements.set(control.selector, { locator, signature: JSON.stringify(control) });
@@ -1221,6 +1233,10 @@ export async function createCourseDiscoveryBrowserSession(input: {
           if (known.kind !== "field" || !/^[\d\s/:.T-]{1,120}$/u.test(action.text)) throw new Error("UNSAFE_CONTROL");
           await known.locator.fill(action.text); await known.locator.dispatchEvent("change");
         } else {
+          if (known.catalogTile) {
+            await openPublicCatalogTile(known.locator, catalogTiles);
+            return snapshot();
+          }
           if (known.service) {
             await openPublicRentalService(known.locator);
             return snapshot();
