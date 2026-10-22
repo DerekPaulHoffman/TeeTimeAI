@@ -9,6 +9,34 @@ const strict = (value: string) => getSafeCustomerBookingUrl(value) === value;
 const accepts = (url: string, method = "GET", kind = "xhr") => isSafePublicAvailabilityReadUrl(url, kind, method, strict);
 const change = (key: string, value: string) => semanticUrl.replace(new RegExp(`([?&]${key}=)[^&]*`, "u"), `$1${value}`);
 
+describe("published public tee-sheet POST URL role", () => {
+  const url = "https://api.membersports.com/api/v1/golfclubs/onlineBookingTeeTimes";
+  it("validates only an exact data-read URL while retaining the original customer URL rejection", () => {
+    const callback = vi.fn(strict);
+    expect(strict(url)).toBe(false);
+    expect(isSafePublicAvailabilityReadUrl(url, "fetch", "POST", callback)).toBe(true);
+    expect(callback).toHaveBeenCalledExactlyOnceWith(url.replace("/onlineBookingTeeTimes", "/public-tee-sheet"));
+    expect(isSafePublicAvailabilityReadUrl(url, "xhr", "POST", strict)).toBe(true);
+    expect(strict(url)).toBe(false);
+    expect(isSafePublicAvailabilityReadUrl(url, "fetch", "POST", () => false)).toBe(false);
+  });
+  it.each(["GET", "HEAD", "OPTIONS", "PUT"])("rejects another method %s", method => {
+    expect(isSafePublicAvailabilityReadUrl(url, "fetch", method, strict)).toBe(false);
+  });
+  it.each(["document", "script", "stylesheet", "other"])("grants no %s resource permission", kind => {
+    expect(isSafePublicAvailabilityReadUrl(url, kind, "POST", strict)).toBe(false);
+  });
+  it.each(["?date=10/23/2026", "#state", "/", "/extra"])("rejects URL suffix %s", suffix => {
+    expect(isSafePublicAvailabilityReadUrl(url + suffix, "fetch", "POST", strict)).toBe(false);
+  });
+  it.each(["http://api.membersports.com/api/v1/golfclubs/onlineBookingTeeTimes",
+    url.replace("api.membersports.com", "api.membersports.com:443"), url.replace("/golfclubs/", "/golfclubs/./"),
+    url.replace("onlineBookingTeeTimes", "%6fnlineBookingTeeTimes"), url.replace("onlineBookingTeeTimes", "createBooking")])(
+    "rejects raw URL aliases and other operations: %s", alias => {
+      expect(isSafePublicAvailabilityReadUrl(alias, "fetch", "POST", strict)).toBe(false);
+    });
+});
+
 describe("published public availability range URL", () => {
   it("permits the observed query semantics while the ordinary customer URL remains rejected", () => {
     expect(strict(semanticUrl)).toBe(false);

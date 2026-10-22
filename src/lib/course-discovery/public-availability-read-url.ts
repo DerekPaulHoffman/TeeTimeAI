@@ -1,6 +1,7 @@
 const rangePrefix = "https://www.sevenrooms.com/api-yoa/availability/widget/range?";
 const requiredKeys = ["venue", "time_slot", "party_size", "halo_size_interval", "start_date", "num_days", "channel"];
 const allowedKeys = new Set([...requiredKeys, "selected_lang_code", "picked_duration"]);
+const memberSportsTeeSheet = "https://api.membersports.com/api/v1/golfclubs/onlineBookingTeeTimes";
 
 function boundedInteger(value: string, minimum: number, maximum: number) {
   return /^(?:0|[1-9]\d*)$/u.test(value) && Number(value) >= minimum && Number(value) <= maximum;
@@ -18,6 +19,13 @@ function calendarDate(value: string) {
  * not rewrite the wire URL, grant navigation, or prove inventory completeness. */
 export function isSafePublicAvailabilityReadUrl(value: string, resourceType: string, method: string,
   strictUrl: (value: string) => boolean) {
+  // This fixed public read basename resembles opaque state to the customer URL
+  // guard. The exception grants only data-read URL validation, never navigation,
+  // body/header authority or a changed wire URL.
+  if (value === memberSportsTeeSheet && method === "POST" && ["xhr", "fetch"].includes(resourceType)) {
+    try { return strictUrl(value.replace("/onlineBookingTeeTimes", "/public-tee-sheet")) === true; }
+    catch { return false; }
+  }
   if (value.length > 2048 || value.trim() !== value || !value.startsWith(rangePrefix) || value.includes("#") ||
       method !== "GET" || !["xhr", "fetch"].includes(resourceType)) return false;
   try {

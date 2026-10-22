@@ -1,7 +1,7 @@
 import type { Locator } from "@playwright/test";
 import { publicRentalDurationMinutes } from "./recipe";
 import { inspectPublicDropdown, selectPublicDropdown } from "./public-dropdown-control";
-import { inspectPublicDurationButton, selectPublicDurationButton } from "./public-duration-button";
+import { inspectPublicMenuButton, selectPublicMenuButton } from "./public-duration-button";
 
 /** Select a displayed filter, never a time or transaction control. */
 export async function selectPublicFilter(node: Locator, input: {
@@ -14,7 +14,8 @@ export async function selectPublicFilter(node: Locator, input: {
     await node.selectOption(input.value);
     return;
   }
-  if (input.purpose === "DURATION" && await inspectPublicDurationButton(node)) return selectPublicDurationButton(node, input.value);
+  if ((input.purpose === "DURATION" || input.purpose === "PLAYERS") && await inspectPublicMenuButton(node, input.purpose))
+    return selectPublicMenuButton(node, input.value, input.purpose);
   if (await inspectPublicDropdown(node)) return selectPublicDropdown(node, input);
   if (!["DURATION", "PLAYERS"].includes(input.purpose) || !/^[1-9]\d{0,2}$/u.test(input.value) ||
       Number(input.value) > (input.purpose === "DURATION" ? 480 : 20) ||

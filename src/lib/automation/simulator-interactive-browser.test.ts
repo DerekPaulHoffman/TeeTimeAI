@@ -48,6 +48,11 @@ describe("interactive public research boundaries", () => {
       JSON.stringify({ query: "{ slots { time } }" }))).toBe(true);
   });
 
+  it.each(["onlineBookingTeeTimes", "createBooking", "unknown"])("keeps MemberSports POSTs out of the generic GraphQL exception: %s", operation => {
+    expect(isAnonymousBrowserReadPost(new URL(`https://api.membersports.com/api/v1/golfclubs/${operation}`),
+      new Headers({ "content-type": "application/json" }), JSON.stringify({ query: "{ slots { time } }" }))).toBe(false);
+  });
+
   it("routes Rex only through the closed public catalog contract", () => {
     const origin = "https://venue.reservewithrex.com";
     const headers = new Headers({ origin, "content-type": "application/json" });

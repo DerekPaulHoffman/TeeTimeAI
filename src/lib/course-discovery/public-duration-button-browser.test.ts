@@ -10,12 +10,17 @@ const chrome = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? "C:/Program Fi
 const entry = "https://www.sevenrooms.com/reservations/examplegolf";
 const range = "https://www.sevenrooms.com/api-yoa/availability/widget/range?venue=examplegolf&time_slot=18:00&party_size={{players}}&halo_size_interval=64&start_date={{dateMdy}}&num_days=1&channel=web&picked_duration={{durationMinutes}}";
 function html() {
+  const empty = '<div><button tabindex="-1"></button></div>';
+  const menu = (id: string, heading: string, choices: string[]) => `<section id="${id}" hidden><div tabindex="0">${heading}</div><div>${empty.repeat(3)}${choices.map(value => `<div><button aria-label="${value}">${value}</button></div>`).join("")}${empty.repeat(2)}</div></section>`;
+  const markup = `<button id="players"><div id="party-value">2</div><div>Players</div></button>${menu("party-menu", "SELECT DESIRED PARTY SIZE", ["1", "2", "3", "4"])}<button id="duration"><div id="value">1 hr</div><div>duration</div></button>${menu("menu", "SELECT DESIRED DURATION", ["1 hr", "2 hr", "3 hr", "4 hr"])}`;
   return `<h1 id="venue">Select a time at Example Golf</h1><div id="root"></div><script>
-  setTimeout(()=>{document.querySelector('#root').innerHTML='<label>Players<select id="players" name="players"><option value="2">2</option><option value="3">3</option></select></label><button id="duration"><div id="value">1 hr</div><div>duration</div></button><section id="menu" hidden><h2>SELECT DESIRED DURATION</h2><div><button aria-label="1 hr">1 hr</button><button aria-label="2 hr">2 hr</button></div></section>';
-  function refresh(){const date=new URLSearchParams(location.search).get('date')||'2030-10-23';const duration=parseInt(document.querySelector('#value').textContent)*60;fetch('https://www.sevenrooms.com/api-yoa/availability/widget/range?venue=examplegolf&time_slot=18:00&party_size='+document.querySelector('#players').value+'&halo_size_interval=64&start_date='+date.slice(5,7)+'-'+date.slice(8)+'-'+date.slice(0,4)+'&num_days=1&channel=web&picked_duration='+duration)}
+  setTimeout(()=>{document.querySelector('#root').innerHTML=${JSON.stringify(markup)};
+  function refresh(){const date=new URLSearchParams(location.search).get('date')||'2030-10-23';const duration=parseInt(document.querySelector('#value').textContent)*60;fetch('https://www.sevenrooms.com/api-yoa/availability/widget/range?venue=examplegolf&time_slot=18:00&party_size='+document.querySelector('#party-value').textContent+'&halo_size_interval=64&start_date='+date.slice(5,7)+'-'+date.slice(8)+'-'+date.slice(0,4)+'&num_days=1&channel=web&picked_duration='+duration)}
   document.querySelector('#duration').onclick=()=>document.querySelector('#menu').hidden=false;
-  document.querySelectorAll('#menu button').forEach(button=>button.onclick=()=>{document.querySelector('#value').textContent=button.textContent;document.querySelector('#menu').hidden=true;refresh()});
-  document.querySelector('#players').onchange=refresh;},200);
+  document.querySelectorAll('#menu button[aria-label]').forEach(button=>button.onclick=()=>{document.querySelector('#value').textContent=button.textContent;document.querySelector('#menu').hidden=true;refresh()});
+  document.querySelector('#players').onclick=()=>document.querySelector('#party-menu').hidden=false;
+  document.querySelectorAll('#party-menu button[aria-label]').forEach(button=>button.onclick=()=>{document.querySelector('#party-value').textContent=button.textContent;document.querySelector('#party-menu').hidden=true;refresh()});
+  document.querySelectorAll('button[tabindex="-1"]').forEach(button=>button.onclick=()=>{throw Error('AUXILIARY_MUST_NOT_CLICK')});},200);
   </script>`;
 }
 function transport(log: string[]) {
@@ -55,9 +60,28 @@ describe.runIf(existsSync(chrome))("duration-button discovery and fixed replay, 
       expect(duration).toMatchObject({ kind: "filter", label: "duration", currentValue: "60" });
       snapshot = await session.execute({ id: "select", action: "select", target: duration!.target, option: "120" });
       expect(snapshot.controls.find(control => control.filterPurpose === "DURATION")).toMatchObject({ currentValue: "120" });
+      const players = snapshot.controls.find(control => control.filterPurpose === "PLAYERS");
+      expect(players).toMatchObject({ kind: "filter", label: "Players", currentValue: "2" });
+      await expect(session.execute({ id: "wrong-action", action: "click", target: players!.target })).rejects.toThrow("USE_TYPED_CONTROL_ACTION");
+      snapshot = await session.execute({ id: "players", action: "select", target: players!.target, option: "3" });
+      expect(snapshot.controls.find(control => control.filterPurpose === "PLAYERS")).toMatchObject({ currentValue: "3" });
       expect(reads.some(url => url.includes("picked_duration=120"))).toBe(true);
+      expect(reads.some(url => url.includes("party_size=3") && url.includes("picked_duration=120"))).toBe(true);
     } finally { await session.close(); }
   }, 15_000);
+  it("keeps an ordinary simulator BROWSER_DOM recipe at one bay after adding participant menus", () => {
+    const sample = saved();
+    const dom = { schemaVersion: 1, engine: "BROWSER_DOM", target: sample.target, source: sample.source,
+      pageUrl: entry, permittedRoutes: sample.permittedRoutes, browserTransport: "PINNED_HTTP",
+      availabilityResponse: { ...sample.availabilityResponse, url: sample.availabilityResponse.url.replace("{{players}}", "1") },
+      steps: [{ action: "select", selector: "#players", value: "1", purpose: "PLAYERS" }],
+      proof: { venue: { selector: "#venue" }, date: { selector: "#date" }, complete: { selector: "#ready" }, durationMinutes: { selector: "#duration" } },
+      slots: { collection: { selector: ".slot" }, scope: { selector: ".resource", label: { selector: ".label" }, expectedLabel: "Golf Rental" },
+        startsAt: { selector: ".time" }, endsAt: { derive: "ADD_REQUESTED_DURATION" } } };
+    expect(parseAccessRecipe(dom)).toMatchObject({ engine: "BROWSER_DOM" });
+    for (const value of ["2", "{{players}}"])
+      expect(() => parseAccessRecipe({ ...dom, steps: [{ ...dom.steps[0], value }] })).toThrow();
+  });
   it("replays the same saved filter after SPA boot for changed date, duration and participants", async () => {
     const recipe = saved(), hashes: string[] = [];
     for (const input of [{ date: "2030-10-23", durationMinutes: 60, players: 2 }, { date: "2030-10-24", durationMinutes: 120, players: 3 }]) {

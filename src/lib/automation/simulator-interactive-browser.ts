@@ -56,7 +56,7 @@ export function isAnonymousBrowserReadPost(url: URL, headers: Headers, body: str
   if (isRexNamespace(url)) return isRexPublicReadPost(url, headers, body);
   // This known REST API must use its exact source-bound contracts. Adding a
   // GraphQL-looking field must not bypass them or authorize a transaction URL.
-  if (["api.passfactory.io", "clients.uschedule.com"].includes(url.hostname) ||
+  if (["api.passfactory.io", "clients.uschedule.com", "api.membersports.com"].includes(url.hostname) ||
       url.hostname === "ezlinksgolf.com" || url.hostname.endsWith(".ezlinksgolf.com")) return false;
   if (Buffer.byteLength(body) > 32_768 || !/application\/json/iu.test(headers.get("content-type") ?? "")) return false;
   try {

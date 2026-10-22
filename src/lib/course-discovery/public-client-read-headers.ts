@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { parse, type Node } from "acorn";
-import { isSafeBrowserAssetUrl, isSafeRecipeUrl } from "./recipe";
+import { isSafeBrowserAssetUrl, isSafeBrowserAvailabilityReadUrl, isSafeRecipeUrl } from "./recipe";
+import { isMemberSportsPublicTeeSheetPost } from "@/lib/automation/membersports-public-read-policy";
 
 /** These facts must come from controller-private token maps, never a model,
  * recipe, checkpoint, or a caller-supplied serialized claim of admission. */
@@ -20,6 +21,8 @@ export type PublicClientScriptFacts = {
 export type PublicClientRequestFacts = {
   document: object; loader: object; url: string; method: string; resourceType: string;
   rootFrame: boolean; live: boolean; hasBody: boolean;
+  /** Bounded controller-private bytes; never supplied by a recipe or exposed. */
+  body?: string | null;
   headers: readonly (readonly [string, string])[];
   /** Only the controller's exact native preflight correlation may set this. */
   sourceRequest?: object;
@@ -203,14 +206,27 @@ export function createPublicClientReadHeaderScope(document: object, attestors: P
     return true;
   };
   const requestFacts = (request: object, method: "read" | "preflight") => {
-    if (failedRequests.has(request) || !currentDocument()) return null;
+    const current = currentDocument();
+    if (failedRequests.has(request) || !current) return null;
     const facts = attest("request", request);
     if (!facts || facts.document !== document || facts.loader !== loader || facts.rootFrame !== true || facts.live !== true ||
-        facts.hasBody !== false || !["xhr", "fetch"].includes(String(facts.resourceType)) || typeof facts.url !== "string" ||
-        facts.url.length > 2048 || !isSafeRecipeUrl(facts.url) ||
-        (method === "read" ? facts.method !== "GET" && facts.method !== "HEAD" : facts.method !== "OPTIONS")) return null;
+        !["xhr", "fetch"].includes(String(facts.resourceType)) || typeof facts.url !== "string" ||
+        facts.url.length > 2048) return null;
     const headers = headerMap(facts.headers);
-    return headers ? { facts, headers } : null;
+    if (!headers) return null;
+    const effectiveMethod = method === "preflight" ? headers.get("access-control-request-method") : facts.method;
+    if (!isSafeRecipeUrl(facts.url) && !isSafeBrowserAvailabilityReadUrl(facts.url, String(facts.resourceType), String(effectiveMethod))) return null;
+    const noBody = facts.hasBody === false && (facts.body === undefined || facts.body === null);
+    if (method === "preflight") return facts.method === "OPTIONS" && noBody ? { facts, headers } : null;
+    if (["GET", "HEAD"].includes(String(facts.method))) return noBody ? { facts, headers } : null;
+    // Only this reviewed public tee-sheet body may extend the header witness to
+    // a POST. All existing source/key/auth/current-request checks still run.
+    if (facts.method !== "POST" || facts.hasBody !== true || typeof facts.body !== "string" ||
+        Buffer.byteLength(facts.body) > 32_768) return null;
+    try {
+      return isMemberSportsPublicTeeSheetPost(new URL(facts.url), new Headers([...headers]), facts.body, String(current.url))
+        ? { facts, headers } : null;
+    } catch { return null; }
   };
   const read = (request: object): Read | null => {
     const input = requestFacts(request, "read");
@@ -218,7 +234,8 @@ export function createPublicClientReadHeaderScope(document: object, attestors: P
       !ordinaryHeaders.has(key) && !["authorization", "x-api-key", "cookie"].includes(key))) return null;
     const key = input.headers.get("x-api-key"), authorization = input.headers.get("authorization");
     if (!key || !publicValues.has(hash(key)) || authorization !== undefined && authorization !== "Bearer null") return null;
-    return { ...input, signature: hash(JSON.stringify([input.facts.url, input.facts.method, input.facts.resourceType, [...input.headers]])) };
+    return { ...input, signature: hash(JSON.stringify([input.facts.url, input.facts.method, input.facts.resourceType,
+      input.facts.body ?? null, [...input.headers]])) };
   };
   const preflight = (request: object, source: object) => {
     const actual = read(source), input = requestFacts(request, "preflight");

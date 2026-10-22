@@ -42,7 +42,8 @@ describe("native private public-client header proofs", () => {
   const apiUrl = "https://api.example.org/public/calendar", literal = "public-display-literal";
   const readHeaders = { Accept: "application/json", Authorization: "Bearer null", "x-api-key": literal };
   const scriptBody = `function intercept(r){return r.clone({setHeaders:merge({"x-api-key":"${literal}"},other)});}`;
-  async function prepared(ack?: ReturnType<typeof deferred<object>>, afterRoute?: (route: NativeReadRoute) => Promise<void>) {
+  async function prepared(ack?: ReturnType<typeof deferred<object>>, afterRoute?: (route: NativeReadRoute) => Promise<void>,
+    urls = { document: documentUrl, script: scriptUrl }) {
     const test = await installed(undefined, undefined, afterRoute);
     const original = test.cdp.send.getMockImplementation()!;
     test.cdp.send.mockImplementation(async (name, value) => {
@@ -54,17 +55,17 @@ describe("native private public-client header proofs", () => {
     const network = (id: string, url: string, type: string, method = "GET", headers: Record<string, string> = {}) =>
       test.events.get("Network.requestWillBeSent")!({ requestId: id, loaderId: "current-loader", frameId: "main", type,
         request: { url, method, headers } });
-    network("document-network", documentUrl, "Document");
-    test.request("public-document", { networkId: "document-network", resourceType: "Document", request: { url: documentUrl, method: "GET", headers: {} } });
+    network("document-network", urls.document, "Document");
+    test.request("public-document", { networkId: "document-network", resourceType: "Document", request: { url: urls.document, method: "GET", headers: {} } });
     await test.routes[0].continue();
-    test.response("public-document", { networkId: "document-network", resourceType: "Document", request: { url: documentUrl, method: "GET", headers: {} },
+    test.response("public-document", { networkId: "document-network", resourceType: "Document", request: { url: urls.document, method: "GET", headers: {} },
       responseHeaders: [{ name: "Content-Type", value: "text/html" }] });
     await test.routes[0].request().response();
-    test.events.get("Page.frameNavigated")!({ frame: { id: "main", loaderId: "current-loader", url: documentUrl } });
-    network("script-network", scriptUrl, "Script");
-    test.request("public-script", { networkId: "script-network", resourceType: "Script", request: { url: scriptUrl, method: "GET", headers: {} } });
+    test.events.get("Page.frameNavigated")!({ frame: { id: "main", loaderId: "current-loader", url: urls.document } });
+    network("script-network", urls.script, "Script");
+    test.request("public-script", { networkId: "script-network", resourceType: "Script", request: { url: urls.script, method: "GET", headers: {} } });
     await test.routes[1].continue();
-    test.response("public-script", { networkId: "script-network", resourceType: "Script", request: { url: scriptUrl, method: "GET", headers: {} },
+    test.response("public-script", { networkId: "script-network", resourceType: "Script", request: { url: urls.script, method: "GET", headers: {} },
       responseHeaders: [{ name: "Content-Type", value: "text/javascript" }] });
     if (!ack) await test.routes[1].request().response();
     const get = async (headers: Record<string, string> = readHeaders, method = "GET") => {
@@ -75,6 +76,42 @@ describe("native private public-client header proofs", () => {
     };
     return { ...test, network, get };
   }
+
+  it.each(["same", "different", "missing"] as const)("binds public tee-sheet POST preflight and actual body without rewriting: %s", bodyMode => {
+    return (async () => {
+      const doc = "https://app.membersports.com/tee-times/21/34/0";
+      const url = "https://api.membersports.com/api/v1/golfclubs/onlineBookingTeeTimes";
+      const data = { configurationTypeId: 0, date: "10/23/2026", golfClubGroupId: 0, golfClubId: 21, golfCourseId: 34, groupSheetTypeId: 0 };
+      const body = JSON.stringify(data), actualBody = bodyMode === "different" ? JSON.stringify({ ...data, date: "10/24/2026" }) : body;
+      const headers = { ...readHeaders, "Content-Type": "application/json", Origin: "https://app.membersports.com" };
+      const test = await prepared(undefined, undefined, { document: doc, script: "https://app.membersports.com/main.js" });
+      try {
+        test.events.get("Network.requestWillBeSent")!({ requestId: "sheet-network", loaderId: "current-loader", frameId: "main", type: "Fetch",
+          request: { url, method: "POST", headers, hasPostData: true, ...(bodyMode === "missing" ? {} : { postData: body }) } });
+        test.events.get("Network.requestWillBeSent")!({ requestId: "sheet-options-network", loaderId: "", type: "Other",
+          initiator: { type: "preflight", requestId: "sheet-network" }, request: { url, method: "OPTIONS", headers: {} } });
+        test.request("sheet-options", { networkId: "sheet-options-network", resourceType: "Other", request: { url, method: "OPTIONS", headers: {
+          Origin: "https://app.membersports.com", "Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "authorization,content-type,x-api-key" } } });
+        await vi.waitFor(() => expect(test.routes).toHaveLength(3));
+        const options = test.routes[2], preflight = await authorizePublicClientReadHeaders(options.request());
+        if (bodyMode === "missing") expect(preflight).toBeNull();
+        else {
+          expect(preflight).not.toBeNull();
+          expect(nativePublicClientPreflightMethod(options.request(), preflight!)).toBe("POST");
+          await options.continue();
+        }
+        test.request("sheet-read", { networkId: "sheet-network", resourceType: "Fetch", request: { url, method: "POST", headers, hasPostData: true, postData: actualBody } });
+        await vi.waitFor(() => expect(test.routes).toHaveLength(4));
+        const actual = test.routes[3], proof = await authorizePublicClientReadHeaders(actual.request());
+        if (bodyMode === "same") {
+          expect(proof).not.toBeNull(); expect(isCurrentPublicClientReadHeaders(proof!)).toBe(true);
+          await actual.continue();
+          expect(test.cdp.send.mock.calls.find(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "sheet-read"))
+            .toEqual(["Fetch.continueRequest", { requestId: "sheet-read" }]);
+        } else expect(proof).toBeNull();
+      } finally { await test.guard.close(); }
+    })();
+  });
   it.each(["GET", "HEAD"])("authorizes only the current actual %s adapter and continues unchanged", async method => {
     const test = await prepared();
     try {

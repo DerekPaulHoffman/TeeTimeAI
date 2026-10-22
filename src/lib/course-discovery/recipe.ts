@@ -70,7 +70,8 @@ const availabilityUrlTemplate = recipeTemplateSchema.refine(value => {
   if (isSafeRecipeUrl(value.replace(/\{\{[A-Za-z]+\}\}/gu, "x"))) return true;
   const samples: Record<string, string> = { date: "2030-01-02", dateCompact: "20300102", dateMdy: "01-02-2030", players: "2",
     durationMinutes: "60", startTime: "08:00", endTime: "18:00", timeZone: "America/New_York", year: "2030", month: "1", day: "2" };
-  return isSafeBrowserAvailabilityReadUrl(value.replace(/\{\{([A-Za-z]+)\}\}/gu, (_, key: string) => samples[key] ?? ""), "fetch", "GET");
+  const sample = value.replace(/\{\{([A-Za-z]+)\}\}/gu, (_, key: string) => samples[key] ?? "");
+  return ["GET", "POST"].some(method => isSafeBrowserAvailabilityReadUrl(sample, "fetch", method));
 });
 export const SERVER_DOCUMENT_SELECTOR_MESSAGE = "Server document selectors allow only tags, classes, IDs, descendant and child combinators; no pseudo-classes, attribute selectors, wildcards, lists or sibling combinators.";
 export const recipeSelectorSchema = z.string().min(1).max(240).refine(value =>
@@ -127,7 +128,7 @@ const stepSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("selectProduct"), selector: recipeSelectorSchema, productSelector: recipeSelectorSchema }).strict()
     .describe("Choose the requested whole-rental duration within one observed public product/resource card. Supports Book/Select on a single-duration card, or an exact duration-and-price option (for example 1 hour $40) within one named rental/bay card. Duplicate durations, start-time/date choices, mixed action controls, sensitive forms and transaction steps are rejected. productSelector must identify the same enclosing card proved by the control; it cannot be a broad page wrapper."),
   z.object({ action: z.literal("select"), selector: recipeSelectorSchema, value: recipeTemplateSchema,
-    purpose: z.enum(["DATE", "PLAYERS", "DURATION", "PRODUCT", "RESOURCE"]) }).strict().describe("Select an observed native HTML <select> option value. PLAYERS/DURATION also support a labelled public role=combobox with an exact visible data-value option, or a focusable dropdown with one adjacent explicit field label and caret whose displayed option and selected readback are independently verified. DURATION also supports an explicitly labelled duration button that opens one bounded duration-only menu; exact offered minutes and the closed menu plus selected button readback are independently verified. Duration values are minutes; simulator party selection is one bay except the closed SEVENROOMS_PUBLIC_PARTICIPANTS binding, which requests attendees. The inspected PassFactory /ftbb client resets duration when the date changes: select DATE then DURATION. Only that hash-verified local duration operation may retain an already completed date response; all other filters require a new response."),
+    purpose: z.enum(["DATE", "PLAYERS", "DURATION", "PRODUCT", "RESOURCE"]) }).strict().describe("Select an observed native HTML <select> option value. PLAYERS/DURATION also support a labelled public role=combobox with an exact visible data-value option, or a focusable dropdown with one adjacent explicit field label and caret whose displayed option and selected readback are independently verified. DURATION also supports an explicitly labelled duration button that opens one bounded duration-only menu; exact offered minutes and the closed menu plus selected button readback are independently verified. PLAYERS supports an explicit Players button with its current count, one SELECT DESIRED PARTY SIZE menu, and unique numeric options with matching accessible labels; current ownership, closed menu and selected count are independently verified. Duration values are minutes; simulator party selection is one bay except the closed SEVENROOMS_PUBLIC_PARTICIPANTS binding, which requests attendees. The inspected PassFactory /ftbb client resets duration when the date changes: select DATE then DURATION. Only that hash-verified local duration operation may retain an already completed date response; all other filters require a new response."),
   z.object({ action: z.literal("fill"), selector: recipeSelectorSchema, value: recipeTemplateSchema,
     purpose: z.enum(["DATE", "PLAYERS", "DURATION"]) }).strict(),
   z.object({ action: z.literal("clickFilter"), selector: recipeSelectorSchema, text: recipeTemplateSchema,
@@ -138,10 +139,16 @@ const availabilityResponseSchema = z.object({
   kind: z.enum(["JSON", "SERVER_DOCUMENT"]).optional(),
   url: availabilityUrlTemplate, method: z.enum(["GET", "POST"]),
   date: z.object({ source: z.enum(["QUERY", "JSON_BODY", "PATH"]), path: jsonPath,
-    format: z.enum(["ISO_DATE", "MM-DD-YYYY"]).optional().describe("Default ISO_DATE is YYYY-MM-DD. Explicit MM-DD-YYYY binds a zero-padded public provider date; use {{dateMdy}} in its URL template.") }).strict(),
+    format: z.enum(["ISO_DATE", "MM-DD-YYYY", "M/D/YYYY"]).optional().describe("Default ISO_DATE is YYYY-MM-DD. MM-DD-YYYY is zero-padded; use {{dateMdy}} in its URL. M/D/YYYY is an explicit unpadded month/day/year JSON_BODY date on a POST only.") }).strict(),
   endDatePath: jsonPath.optional(),
   success: z.object({ path: jsonPath, equals: z.union([z.string().max(200), z.number().finite(), z.boolean(), z.null()]) }).strict().optional(),
 }).strict().refine(value => value.method === "POST" || value.date.source === "QUERY" || value.date.source === "PATH", "GET date binding must read a query parameter or explicit path segment")
+  .refine(value => {
+    const url = expandRecipeTemplate(value.url, { date: "2030-01-02", timeZone: "America/New_York", players: 2,
+      durationMinutes: 60, startTime: "08:00", endTime: "18:00" }, true);
+    return isSafeRecipeUrl(url) || isSafeBrowserAvailabilityReadUrl(url, "fetch", value.method);
+  }, "Availability URL must permit the exact response method")
+  .refine(value => value.date.format !== "M/D/YYYY" || value.method === "POST" && value.date.source === "JSON_BODY", "M/D/YYYY date binding requires a POST JSON body")
   .refine(value => value.date.source !== "PATH" || value.method === "GET" && /^(?:[0-9]|[1-5][0-9]|6[0-3])$/u.test(value.date.path) &&
     (!value.endDatePath || /^(?:[0-9]|[1-5][0-9]|6[0-3])$/u.test(value.endDatePath)), "PATH date binding requires GET and zero-based decimal segment indexes 0..63")
   .refine(value => value.kind !== "SERVER_DOCUMENT" || value.method === "GET" && value.date.source === "QUERY" && !value.success && !value.endDatePath,

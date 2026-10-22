@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { transformSync } from "esbuild";
 import { chromium, type Browser, type Page } from "@playwright/test";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { inspectPublicDurationButton, observedPublicDurationButtons, selectPublicDurationButton } from "./public-duration-button";
+import { inspectPublicDurationButton, inspectPublicMenuButton, observedPublicDurationButtons, observedPublicMenuButtons, selectPublicDurationButton, selectPublicMenuButton } from "./public-duration-button";
 import { selectPublicFilter } from "./public-filter-control";
 
 const chrome = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? "C:/Program Files/Google/Chrome/Application/chrome.exe";
@@ -15,12 +15,72 @@ const fixture = () => `<div><div><div><button id="duration"><div id="value">1 hr
  document.querySelector('#duration').onclick=()=>{document.querySelector('#menu').hidden=false;};
  document.querySelectorAll('#menu button').forEach(button=>button.onclick=()=>{document.querySelector('#value').textContent=button.textContent;document.querySelector('#selected').textContent=button.textContent;document.querySelector('#menu').hidden=true});
  </script>`;
+// The measured public menus contain three empty non-tabbable leaf buttons
+// before four choices and two afterward. They are never option targets.
+const sourceBackedFixture = () => fixture().replace("<h2>SELECT DESIRED DURATION</h2><div>",
+  '<div tabindex="0">SELECT DESIRED DURATION</div><div><div><button tabindex="-1"></button></div><div><button tabindex="-1"></button></div><div><button tabindex="-1"></button></div>')
+  .replace('</div></section>', '<div><button tabindex="-1"></button></div><div><button tabindex="-1"></button></div></div></section>')
+  .replace(/(<button id="sr-selectdesiredduration-[3-6]"[^>]*>[^<]+<\/button>)/gu, '<div>$1</div>')
+  .replace("document.querySelectorAll('#menu button')", "document.querySelectorAll('#menu button[aria-label]')")
+  .replace('</script>', "document.querySelectorAll('#menu button[tabindex=\"-1\"]').forEach(button=>button.onclick=()=>document.querySelector('#selected').textContent='AUXILIARY_CLICKED');</script>");
+const participantFixture = () => sourceBackedFixture().replace('id="value">1 hr', 'id="value">2')
+  .replace('<div>duration</div>', '<div>Players</div>').replace('SELECT DESIRED DURATION', 'SELECT DESIRED PARTY SIZE')
+  .replace(/aria-label="([1-4]) hr">[1-4] hr/gu, 'aria-label="$1">$1');
 
 describe.runIf(existsSync(chrome))("shared labelled duration-button filter", () => {
   let browser: Browser, page: Page;
   beforeAll(async () => { browser = await chromium.launch({ executablePath: chrome, headless: true }); });
   beforeEach(async () => { await page?.close(); page = await browser.newPage(); page.setDefaultTimeout(1000); });
   afterAll(async () => { await browser?.close(); });
+  it("selects the actual source-backed menu without clicking its five raw-empty non-tabbable leaf buttons", async () => {
+    await page.setContent(sourceBackedFixture());
+    await selectPublicFilter(page.locator("#duration"), { value: "120", purpose: "DURATION", simulator: true });
+    expect(await page.locator("#selected").innerText()).toBe("2 hr");
+    expect(await page.locator("#menu").isVisible()).toBe(false);
+  });
+  it("uses the same safe interpreter for offered participant values and preserves the simulator one-bay fence", async () => {
+    await page.setContent(participantFixture());
+    expect((await observedPublicMenuButtons(page)).map(found => found.proof.purpose)).toEqual(["PLAYERS"]);
+    await expect(selectPublicFilter(page.locator("#duration"), { value: "3", purpose: "PLAYERS", simulator: true })).rejects.toThrow("UNSAFE_CONTROL");
+    expect(await page.locator("#menu").isVisible()).toBe(false);
+    for (const value of ["2", "3"]) {
+      await selectPublicFilter(page.locator("#duration"), { value, purpose: "PLAYERS", simulator: false });
+      expect(await inspectPublicMenuButton(page.locator("#duration"), "PLAYERS")).toMatchObject({ purpose: "PLAYERS", players: Number(value) });
+      expect(await page.locator("#selected").innerText()).toBe(value);
+      expect(await page.locator("#menu").isVisible()).toBe(false);
+    }
+  });
+  it.each([
+    ['tabbable', '<button tabindex="0"></button>'],
+    ['whitespace text', '<button tabindex="-1"> </button>'],
+    ['whitespace aria label', '<button tabindex="-1" aria-label=" "></button>'],
+    ['over-80 aria label', `<button tabindex="-1" aria-label="${"x".repeat(81)}"></button>`],
+    ['over-80 title', `<button tabindex="-1" title="${"x".repeat(81)}"></button>`],
+    ['value even empty', '<button tabindex="-1" value=""></button>'],
+    ['data value', '<button tabindex="-1" data-value="3"></button>'],
+    ['name', '<button tabindex="-1" name="action"></button>'],
+    ['content', '<button tabindex="-1" content=""></button>'],
+    ['sensitive attribute', '<button tabindex="-1" data-token="PRIVATE_SENTINEL"></button>'],
+    ['accessible referenced label', '<button tabindex="-1" aria-labelledby="elsewhere"></button>'],
+    ['nested content', '<button tabindex="-1"><span></span></button>'],
+  ])("does not omit unknown auxiliary-looking controls: %s", async (_name, button) => {
+    await page.setContent(sourceBackedFixture().replace('<button tabindex="-1"></button>', button));
+    await expect(selectPublicDurationButton(page.locator("#duration"), "120")).rejects.toThrow();
+    expect(await page.locator("#selected").innerText()).toBe("");
+  });
+  it.each([
+    participantFixture().replace('aria-label="3">3', 'aria-label="4">3'),
+    participantFixture().replace('aria-label="3">3', 'aria-label="3" tabindex="-1">3'),
+    participantFixture().replace('aria-label="3">3', 'aria-label="2">2'),
+    participantFixture().replace('SELECT DESIRED PARTY SIZE', 'SELECT A TEE TIME'),
+    participantFixture().replace('aria-label="3">3', 'aria-label="Book">Book'),
+    `<form>${participantFixture()}</form>`,
+    `<section contenteditable="true">${participantFixture()}</section>`,
+  ])("rejects unsafe or ambiguous participant menu ownership and choices", async html => {
+    await page.setContent(html);
+    await expect(selectPublicMenuButton(page.locator("#duration"), "3", "PLAYERS")).rejects.toThrow();
+    expect(await page.locator("#selected").innerText()).toBe("");
+  });
   it("exposes the actual button as a duration filter and reuses it for changed requested minutes", async () => {
     await page.setContent(fixture());
     const found = await observedPublicDurationButtons(page);
@@ -39,6 +99,9 @@ describe.runIf(existsSync(chrome))("shared labelled duration-button filter", () 
     await page.setContent(fixture());
     await compiledModule.exports.selectPublicDurationButton(page.locator("#duration"), "120");
     expect(await page.locator("#value").innerText()).toBe("2 hr");
+    await page.setContent(participantFixture());
+    await compiledModule.exports.selectPublicMenuButton(page.locator("#duration"), "3", "PLAYERS");
+    expect(await page.locator("#value").innerText()).toBe("3");
   });
   it.each([
     fixture().replace("<div>duration</div>", "<div>Checkout</div>"),

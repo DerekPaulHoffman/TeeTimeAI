@@ -3,6 +3,7 @@ import type { Browser, Locator } from "@playwright/test";
 import { createAddressPinnedPublicFetchTransport } from "@/lib/automation/address-pinned-public-fetch";
 import { createPassfactoryPublicReadPolicy, isIncidentalBrowserRequest, isNonEvidenceBrowserResource } from "@/lib/automation/passfactory-public-read-policy";
 import { isAnonymousBrowserReadPost } from "@/lib/automation/simulator-interactive-browser";
+import { isMemberSportsPublicTeeSheetPost } from "@/lib/automation/membersports-public-read-policy";
 import { isRexAnonymousPlaceholderRead, isRexNamespace, isRexPublicBrowserReadPost } from "@/lib/automation/rex-public-read-policy";
 import { createPublicCatalogTileScope, openPublicCatalogTile, type PublicCatalogTileProof } from "./public-catalog-tile";
 import { addVerifiedMindbodyReadHeaders } from "@/lib/automation/mindbody-public-read-policy";
@@ -100,8 +101,9 @@ function matchesAvailabilityRequest(recipe: BrowserAccessRecipe, input: AccessEx
     const read = (path: string) => fence.date.source === "PATH" ? /^(?:[0-9]|[1-5][0-9]|6[0-3])$/u.test(path) ? segments[Number(path)] : undefined
       : source instanceof URLSearchParams ? source.get(path) : jsonField(source, { path });
     const date = read(fence.date.path);
-    const expectedDate = fence.date.format === "MM-DD-YYYY" ? expandRecipeTemplate("{{dateMdy}}", input) : input.date;
-    const matchedDate = date === expectedDate || fence.date.format !== "MM-DD-YYYY" && fence.kind === "SERVER_DOCUMENT" && date === input.date.replaceAll("-", "");
+    const expectedDate = fence.date.format === "MM-DD-YYYY" ? expandRecipeTemplate("{{dateMdy}}", input) :
+      fence.date.format === "M/D/YYYY" ? expandRecipeTemplate("{{month}}/{{day}}/{{year}}", input) : input.date;
+    const matchedDate = date === expectedDate || (fence.date.format ?? "ISO_DATE") === "ISO_DATE" && fence.kind === "SERVER_DOCUMENT" && date === input.date.replaceAll("-", "");
     return matchedDate && (!fence.endDatePath || read(fence.endDatePath) === expectedDate);
   } catch { return false; }
 }
@@ -583,9 +585,10 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
           if (isRexNamespace(new URL(requestUrl)) && request.method() === "POST" &&
               !isRexPublicBrowserReadPost(new URL(requestUrl), request.method(), requestHeaders, request.postData() ?? "", frameUrl)) throw new Error("UNSCOPED_REQUEST");
           const rexPlaceholder = isRexAnonymousPlaceholderRead(new URL(requestUrl), request.method(), requestHeaders, request.postData() ?? "", frameUrl);
-          if (!recipeAllowsRequest(recipe, requestUrl, preflight ?? request.method(), preflight === "GET" ? "fetch" : request.resourceType()) ||
+          if (!recipeAllowsRequest(recipe, requestUrl, preflight ?? request.method(), preflight ? "fetch" : request.resourceType()) ||
             !rexPlaceholder && !publicHeaderProof && Object.keys(requestHeaders).some(key => /^(?:authorization|proxy-authorization|x-api-key)$/iu.test(key)) ||
-            request.method() === "POST" && !allowsPost(new URL(requestUrl), headers, request.postData() ?? "")) throw new Error("UNSCOPED_REQUEST");
+            request.method() === "POST" && !(allowsPost(new URL(requestUrl), headers, request.postData() ?? "") ||
+              publicHeaderProof && isMemberSportsPublicTeeSheetPost(new URL(requestUrl), headers, request.postData() ?? "", frameUrl))) throw new Error("UNSCOPED_REQUEST");
           const responseLimit = publicBrowserResponseLimit(request.resourceType());
           const native = await requestQueue.run(requestFamilyForUrl(requestUrl), () => {
             if (publicHeaderProof && !isCurrentPublicClientReadHeaders(publicHeaderProof)) throw new Error("UNSCOPED_REQUEST");

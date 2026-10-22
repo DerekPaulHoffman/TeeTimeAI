@@ -81,7 +81,7 @@ type RecordEntry = {
 type DocumentGeneration = { id: number; retired: boolean; loaderId?: string };
 type PreflightSource = { networkId: string; identity: NetworkIdentity; generation: DocumentGeneration; used: boolean };
 type NetworkIdentity = { id: string; revision: number; loaderId: string; frameId?: string; url: string; method: string; kind: string; kindKnown: boolean;
-  hasBody: boolean; headerEntries: Array<[string, string]>; generation: DocumentGeneration; preflight?: PreflightSource };
+  hasBody: boolean; body: string | null; headerEntries: Array<[string, string]>; generation: DocumentGeneration; preflight?: PreflightSource };
 type PendingPreflightIdentity = { identity: NetworkIdentity; sourceNetworkId: string; generation: DocumentGeneration; createdAt: number; invalid: boolean };
 type PendingInitialPause = { id: string; generation: DocumentGeneration; retired: boolean;
   networkId: string; url: string; method: string; kind: string; networkFailed: ReturnType<typeof pending<void>>;
@@ -113,7 +113,7 @@ type SourceLoadingFailure = Partial<Record<typeof nativePublicHeaderFailureFactK
 export type NativePublicHeaderProofFailure = { reason: PublicClientReadHeaderFailureReason | "OWNER_CLOSED" | "CONTEXT_CHANGED" | "NATIVE_RECORD_NOT_CURRENT" } &
   Partial<Record<typeof nativePublicHeaderFailureFactKeys[number], boolean>> & Partial<Pick<SourceLoadingFailure, "nativeSourceLoadingFailedErrorKind" | "nativeSourceLoadingFailedCorsError">>;
 const publicHeaderProofs = new WeakMap<object, { record: RecordEntry; owner: NativeRecordOwner;
-  current: () => boolean; method: "GET" | "HEAD" | null; firstFailure?: Readonly<NativePublicHeaderProofFailure> }>();
+  current: () => boolean; method: "GET" | "HEAD" | "POST" | null; firstFailure?: Readonly<NativePublicHeaderProofFailure> }>();
 function rejectPublicHeaderProof(proof: PublicClientReadHeaderProof, failure: NativePublicHeaderProofFailure) {
   const value = publicHeaderProofs.get(proof);
   if (value && !value.firstFailure) value.firstFailure = Object.freeze({ ...failure });
@@ -136,7 +136,7 @@ export function publicClientReadHeaderProofFailure(proof: PublicClientReadHeader
   const value = publicHeaderProofs.get(proof)?.firstFailure;
   return value ? { ...value } : null;
 }
-export function nativePublicClientPreflightMethod(request: NativeReadRequest, proof: PublicClientReadHeaderProof): "GET" | "HEAD" | null {
+export function nativePublicClientPreflightMethod(request: NativeReadRequest, proof: PublicClientReadHeaderProof): "GET" | "HEAD" | "POST" | null {
   const value = publicHeaderProofs.get(proof);
   return value && value.record.adapter === request && value.record.method === "OPTIONS" && isCurrentPublicClientReadHeaders(proof) ? value.method : null;
 }
@@ -240,7 +240,8 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
       !record.generation.retired && record.loaderId === committedDocument?.loaderId && identity?.revision === record.networkIdentityRevision &&
       (record.preflight ? liveHeaderDocument(context) && !failedNetworkIdentities.has(identity) &&
         record.preflight.generation === generation && liveHeaderIdentity(record.preflight.identity, context)
-        : liveHeaderIdentity(identity, context)) && identity.url === record.url && identity.method === record.method);
+        : liveHeaderIdentity(identity, context)) && identity.url === record.url && identity.method === record.method &&
+      (record.method !== "POST" || identity.hasBody && identity.body !== null && identity.body === record.body));
   };
   const headerRecordFailureFacts = (record: RecordEntry, context: HeaderContext) => {
     const identity = networkIdentities.get(record.networkId), source = record.preflight?.identity;
@@ -275,13 +276,13 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
           if (records.get(record.id) === record) {
             return { document, loader: context.loader, url: record.url, method: record.method,
               resourceType: record.preflight?.identity.kind ?? record.kind, rootFrame: true,
-              live: liveHeaderRecord(record, context), hasBody: record.body !== null, headers: record.headerEntries,
+              live: liveHeaderRecord(record, context), hasBody: record.body !== null, body: record.body, headers: record.headerEntries,
               ...(record.preflight ? { sourceRequest: record.preflight.identity } : {}) };
           }
           const identity = value as NetworkIdentity;
           return networkIdentities.get(identity.id) === identity ? { document, loader: context.loader, url: identity.url, method: identity.method,
             resourceType: identity.kind, rootFrame: identity.frameId === rootFrameId, live: liveHeaderIdentity(identity, context),
-            hasBody: identity.hasBody, headers: identity.headerEntries } : null;
+            hasBody: identity.hasBody, body: identity.body, headers: identity.headerEntries } : null;
         },
       });
       headerContext = context;
@@ -314,7 +315,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
     }
     if (!proof || !context) return null;
     const captured = context;
-    publicHeaderProofs.set(proof, { record, owner, method: record.preflight ? record.preflight.identity.method as "GET" | "HEAD" : null,
+    publicHeaderProofs.set(proof, { record, owner, method: record.preflight ? record.preflight.identity.method as "GET" | "HEAD" | "POST" : null,
       current: () => {
         if (headerContext !== captured) return rejectPublicHeaderProof(proof, { reason: "CONTEXT_CHANGED" });
         if (!liveHeaderRecord(record, captured)) {
@@ -502,6 +503,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
     const identity: NetworkIdentity = { id: event.requestId, revision: ++networkIdentityRevision, loaderId: event.loaderId, frameId: event.frameId,
       url: event.request.url, method: event.request.method, kind: resourceKinds[event.type ?? ""] ?? "other",
       kindKnown: Object.hasOwn(resourceKinds, event.type ?? ""), hasBody: event.request.hasPostData === true || event.request.postData !== undefined,
+      body: typeof event.request.postData === "string" && Buffer.byteLength(event.request.postData) <= 32_768 ? event.request.postData : null,
       headerEntries: entries, generation };
     if (nativePreflight) {
       // Chrome can emit raw loaderless OPTIONS metadata before its exact read

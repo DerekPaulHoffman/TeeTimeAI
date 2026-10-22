@@ -32,6 +32,52 @@ function replaceHeader(f: ReturnType<typeof fixture>, key: string, value?: strin
   if (value !== undefined) f.requestFacts.headers = [...f.requestFacts.headers, [key, value]];
 }
 
+function teeSheetFixture() {
+  const f = fixture();
+  f.documentFacts.url = "https://app.membersports.com/tee-times/21/34/0";
+  f.scriptFacts.url = "https://app.membersports.com/main.js";
+  const body = { configurationTypeId: 0, date: "10/23/2026", golfClubGroupId: 0,
+    golfClubId: 21, golfCourseId: 34, groupSheetTypeId: 0 };
+  Object.assign(f.requestFacts, { url: "https://api.membersports.com/api/v1/golfclubs/onlineBookingTeeTimes",
+    method: "POST", hasBody: true, body: JSON.stringify(body) });
+  replaceHeader(f, "content-type", "application/json");
+  replaceHeader(f, "origin", "https://app.membersports.com");
+  Object.assign(f.optionsFacts, { url: f.requestFacts.url, headers: [["Origin", "https://app.membersports.com"],
+    ["Access-Control-Request-Method", "POST"], ["Access-Control-Request-Headers", "authorization,content-type,x-api-key"]] });
+  return { ...f, body };
+}
+
+describe("source-bound public tee-sheet POST header proofs", () => {
+  it("requires both the current published key and the reviewed anonymous body for read and preflight", () => {
+    const f = teeSheetFixture();
+    expect(f.scope.proveRead(f.request)).toBeNull();
+    f.capture();
+    const read = f.scope.proveRead(f.request), options = f.scope.provePreflight(f.options, f.request);
+    expect(read).not.toBeNull(); expect(options).not.toBeNull();
+    expect(f.scope.isCurrent(read!)).toBe(true); expect(f.scope.isCurrent(options!)).toBe(true);
+    expect(JSON.stringify([read, options])).toBe("[{},{}]");
+    replaceHeader(f, "x-api-key", "unpublished-value");
+    expect(f.scope.proveRead(f.request)).toBeNull(); expect(f.scope.provePreflight(f.options, f.request)).toBeNull();
+  });
+
+  it.each(["body", "document", "profile", "endpoint", "missing-body", "real-token"] as const)(
+    "permanently revokes queued read and preflight when the exact public request changes: %s", change => {
+      const f = teeSheetFixture(); f.capture();
+      const read = f.scope.proveRead(f.request)!, options = f.scope.provePreflight(f.options, f.request)!;
+      expect(read).not.toBeNull(); expect(options).not.toBeNull();
+      const original = { ...f.requestFacts }, originalDocument = f.documentFacts.url;
+      if (change === "body") f.requestFacts.body = JSON.stringify({ ...f.body, date: "10/24/2026" });
+      if (change === "document") f.documentFacts.url = "https://app.membersports.com/tee-times/21/35/0";
+      if (change === "profile") f.requestFacts.body = JSON.stringify({ ...f.body, memberProfileId: 1 });
+      if (change === "endpoint") f.requestFacts.url = "https://api.membersports.com/api/v1/golfclubs/createBooking";
+      if (change === "missing-body") f.requestFacts.body = null;
+      if (change === "real-token") replaceHeader(f, "authorization", "Bearer account-value");
+      expect(f.scope.isCurrent(read)).toBe(false); expect(f.scope.isCurrent(options)).toBe(false);
+      Object.assign(f.requestFacts, original); f.documentFacts.url = originalDocument;
+      expect(f.scope.isCurrent(read)).toBe(false); expect(f.scope.isCurrent(options)).toBe(false);
+    });
+});
+
 describe("public client read header value publicity", () => {
   it("keeps only opaque RAM proofs and supports attested GET/HEAD, without claiming API-base or merge causality", () => {
     const f = fixture();
@@ -55,6 +101,13 @@ describe("public client read header value publicity", () => {
     for (const value of ["", "Bearer undefined", "Bearer a-real-value", "bearer null", "Bearer null ", "Basic null"]) {
       replaceHeader(f, "authorization", value); expect(f.scope.proveRead(f.request)).toBeNull();
     }
+  });
+
+  it.each(["", "{}"])("rejects contradictory body bytes on an attested body-free GET: %j", body => {
+    const f = fixture(); f.capture();
+    f.requestFacts.body = body;
+    expect(f.scope.proveRead(f.request)).toBeNull();
+    expect(f.scope.provePreflight(f.options, f.request)).toBeNull();
   });
 
   it.each([
