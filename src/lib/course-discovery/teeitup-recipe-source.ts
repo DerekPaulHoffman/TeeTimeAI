@@ -3,6 +3,7 @@ import { resolveTeeItUpFacilityIdentity } from "@/lib/adapters/teeitup-facility-
 import { isSafeRecipeUrl } from "./recipe";
 import { matchesOfficialFacility, type TeeItUpOfficialIdentityProof } from "./teeitup-official-identity";
 import { parseTeeItUpV2PublicSource } from "@/lib/adapters/teeitup-public-source";
+import { bindTeeItUpOfficialBookingFacility, type TeeItUpOfficialBookingSourceProof } from "./teeitup-official-booking-source";
 
 const id = z.number().int().min(1).max(2_147_483_647);
 const facility = z.object({ id, courseId: z.string().min(1).max(128), name: z.string().min(2).max(256),
@@ -46,11 +47,11 @@ export function isTeeItUpRecipeSlotLink(source: string, date: string, allowedIds
   catch { return false; }
 }
 
-export function resolveTeeItUpRecipeFacilities(source: { bookingUrl: string; venueName: string; venueAddress?: string; timeZone: string }, value: unknown, officialProof?: TeeItUpOfficialIdentityProof,
-  offeringKind: "OUTDOOR" | "SIMULATOR" | "AUTO" = "OUTDOOR") {
+export function resolveTeeItUpRecipeFacilities(source: { bookingUrl: string; venueName: string; venueAddress?: string; timeZone: string; officialUrl?: string }, value: unknown, officialProof?: TeeItUpOfficialIdentityProof,
+  offeringKind: "OUTDOOR" | "SIMULATOR" | "AUTO" = "OUTDOOR", bookingProof?: TeeItUpOfficialBookingSourceProof) {
   const booking = parseTeeItUpRecipeSource(source.bookingUrl);
   const parsed = z.array(facility).min(1).max(100).safeParse(value);
-  if (offeringKind === "SIMULATOR" && officialProof) throw new Error("ADAPTER_IDENTITY_MISMATCH");
+  if (offeringKind === "SIMULATOR" && (officialProof || bookingProof) || officialProof && bookingProof) throw new Error("ADAPTER_IDENTITY_MISMATCH");
   if (!booking || !source.venueAddress || !parsed.success ||
       new Set(parsed.data.map(row => row.id)).size !== parsed.data.length || new Set(parsed.data.map(row => row.courseId)).size !== parsed.data.length)
     throw new Error("ADAPTER_CONFIGURATION_UNVERIFIED");
@@ -63,8 +64,11 @@ export function resolveTeeItUpRecipeFacilities(source: { bookingUrl: string; ven
       [{ ...row, name: row.name.split(/\s+-\s+/u)[0] }]).status === "MATCHED";
   };
   const alternate = officialProof ? parsed.data.filter(row => matchesOfficialFacility(officialProof, source, row)) : [];
+  if (bookingProof && JSON.stringify(bindTeeItUpOfficialBookingFacility(source, bookingProof, value)) !== JSON.stringify(bookingProof))
+    throw new Error("OFFICIAL_BOOKING_SOURCE_CHANGED");
   if (officialProof && (alternate.length !== 1 || officialProof.bookingUrl !== source.bookingUrl)) throw new Error("ADAPTER_IDENTITY_MISMATCH");
-  const accepted = (row: TeeItUpRecipeFacility) => matches(row) || officialProof !== undefined && alternate[0]?.id === row.id;
+  const accepted = (row: TeeItUpRecipeFacility) => matches(row) || officialProof !== undefined && alternate[0]?.id === row.id ||
+    bookingProof !== undefined && row.id === bookingProof.facilityId && row.courseId === bookingProof.courseId;
   const selected = booking.selectedIds ? parsed.data.filter(row => booking.selectedIds!.includes(row.id)) : parsed.data.filter(accepted);
   if (booking.selectedIds ? selected.length !== booking.selectedIds.length || !selected.every(accepted) : selected.length !== 1)
     throw new Error("ADAPTER_IDENTITY_MISMATCH");

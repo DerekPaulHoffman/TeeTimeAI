@@ -23,6 +23,7 @@ import { venueProofMatches } from "./executor";
 import type { ExistingAdapterMetadata } from "./existing-adapter-schema";
 import { publicResponseSchema, type PublicResponseSchema } from "./public-response-schema";
 import type { OfficialIdentityPage } from "./teeitup-official-identity";
+import { createTeeItUpOfficialBookingScope, observedTeeItUpOfficialBookingChain, type TeeItUpSourceRequestToken } from "./teeitup-official-booking-context";
 import { inspectPublicRentalProduct } from "./public-product-control";
 import { canonicalCpsPublicUrl, cpsPublicEntryUrl, cpsSessionKey, createCpsPublicSessionScope } from "./cps-public-navigation";
 import { observedPublicDateChoices, isPublicDateChoice } from "./public-date-choice";
@@ -50,6 +51,7 @@ export type DiscoveryBrowserAction = z.infer<typeof discoveryBrowserActionSchema
 type ObservedControl = { tag: string; role: string; name: string; label: string; href?: string; calendar: boolean;
   sensitiveForm: boolean; inputType: string; hasPopup: string; selector: string; options?: Array<{ value: string; label: string }>;
   currentValue?: string; product?: { selector: string; durationMinutes: number }; choiceValue?: string; choiceContext?: string; disabledChoice?: boolean;
+  formSafeAnchor?: boolean; readOnlyFormDisplay?: boolean; documentNavigationOnly?: boolean;
   service?: PublicRentalServiceProof; serviceContinuation?: PublicServiceContinuationMode; serviceMenuOption?: boolean };
 type EzLinksDocumentWitness = { url: string; settled: boolean; status?: number; token?: EzLinksDocumentToken;
   observedAt?: number;
@@ -183,6 +185,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
   const observedNavigationRoots = new Set(allowedNavigation);
   const cpsScope = createCpsPublicSessionScope(initialUrls);
   const bookingParents = createPublicBookingParentScope({ officialUrl: input.venueOfficialUrl, venueName: input.venueName, venueAddress: input.venueAddress });
+  const teeBookingScope = createTeeItUpOfficialBookingScope({ officialUrl: input.venueOfficialUrl, venueName: input.venueName ?? "",
+    venueAddress: input.venueAddress, timeZone: input.timeZone ?? "UTC" }, deadline);
+  let teeDocumentToken: TeeItUpSourceRequestToken | undefined;
   type OfficialDocumentProof = { kind: "VERIFIED_OFFICIAL_DOCUMENT"; officialUrl: string; documentUrl: string };
   let officialIdentityPage: (OfficialIdentityPage & { observedAt: number; officialDocumentProof: OfficialDocumentProof }) | undefined;
   let officialIdentityDocument: { url: string; html: string; officialDocumentProof: OfficialDocumentProof } | undefined;
@@ -241,7 +246,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       observedRequests.push(metadata); requestMetadataBytes += size;
     }
   };
-  const controls = new Map<string, { locator: Locator; signature: string; kind: string; href?: string; calendarDay?: string; dropdown?: PublicDropdownProof;
+  const controls = new Map<string, { locator: Locator; signature: string; kind: string; href?: string; documentNavigationOnly?: boolean; calendarDay?: string; dropdown?: PublicDropdownProof;
     service?: boolean; serviceContinuation?: PublicServiceContinuationMode }>();
   let serviceSelection: PublicRentalServiceSelection | undefined;
   const observedElements = new Map<string, { locator: Locator; signature: string }>();
@@ -275,11 +280,12 @@ export async function createCourseDiscoveryBrowserSession(input: {
     const read = witness.readContractAssets.get(asset.path);
     return read?.complete && read.sha256 === asset.sha256;
   });
-  const close = async () => { if (closed) return; closed = true; clearEzDocument(); await redirectRouting?.close(); cancellation.abort("BROWSER_CLOSED"); queue.dispose(); await context.close().catch(() => {}); await browser.close().catch(() => {}); await nativeProxy?.close(); };
+  const close = async () => { if (closed) return; closed = true; teeBookingScope.close(); clearEzDocument(); await redirectRouting?.close(); cancellation.abort("BROWSER_CLOSED"); queue.dispose(); await context.close().catch(() => {}); await browser.close().catch(() => {}); await nativeProxy?.close(); };
   const abort = () => { void close(); };
   deadline.addEventListener("abort", abort, { once: true });
   page.on("popup", popup => { void popup.close(); });
   context.on("page", opened => { if (opened !== page) void opened.close(); });
+  page.on("framenavigated", frame => { if (frame === page.mainFrame()) teeBookingScope.checkCurrentDocument(frame.url()); });
   const waitEz = async (ready: () => boolean, code: string, durationMs = 5_000) => {
     const until = Math.min(Date.now() + durationMs, input.deadlineAt.getTime());
     for (;;) {
@@ -308,6 +314,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     let ezWitness: EzLinksDocumentWitness | undefined, ezToken: EzLinksDocumentToken | undefined, ezCall: EzLinksControllerRead | undefined;
     let ezAsset: typeof ezLinksReadContractAssets[number] | undefined, ezAssetRead: { complete: boolean; sha256?: string } | undefined;
     let ezInitRequest = false;
+    let teeRequestToken: TeeItUpSourceRequestToken | undefined;
     try {
       deadline.throwIfAborted();
       if (request.frame().page() !== page) throw new Error("UNSUPPORTED_BROWSER_PAGE");
@@ -317,6 +324,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
       if (!isSafeRecipeUrl(requestUrl) && !isSafeBrowserAssetUrl(requestUrl, request.resourceType(), request.method())) throw new Error("UNSAFE_URL");
       const url = new URL(requestUrl);
       if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+        teeRequestToken = nativeProxy ? teeBookingScope.beginMainDocument(request, { url: request.url(), method: request.method(), parent: request.redirectedFrom() ?? undefined }) : undefined;
+        teeDocumentToken = teeRequestToken;
         const priorOfficial = bookingParents.authorizeParent(request.url());
         bookingParents.beginDocument(request.url());
         if (priorOfficial?.kind === "VERIFIED_OFFICIAL_DOCUMENT" || input.venueOfficialUrl && url.origin === new URL(input.venueOfficialUrl).origin ||
@@ -423,6 +432,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
       }
       metadata.status = reply.status;
       if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+        if (teeRequestToken) teeBookingScope.completeMainDocument(teeRequestToken, { status: reply.status,
+          location: reply.headers.location, contentType: reply.headers["content-type"] });
         navigation = { url: request.url(), status: reply.status };
         // Only actual main-document response/redirect metadata can establish
         // parent provenance; model navigation arguments and XHRs cannot.
@@ -520,6 +531,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       }
       if (!nativeProxy) await route.fulfill({ status: reply.status, headers: responseHeaders, body: reply.buffer });
     } catch (error) {
+      if (teeRequestToken) teeBookingScope.invalidate();
       if (ezAssetRead && ezWitness === ezDocument && ezWitness) {
         ezAssetRead.complete = true; ezWitness.readContractFailed = true; ezWitness.readContractVersion++;
       }
@@ -576,6 +588,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
         },
         onFailure: reason => {
           if (closed) return;
+          teeBookingScope.invalidate();
           terminalFailure = reason;
           blockedRequests++;
           // A controller-wide failure is not proof that a document caused it.
@@ -632,20 +645,30 @@ export async function createCourseDiscoveryBrowserSession(input: {
       }
       if (!label && choiceContext) label = choiceContext;
     }
-    return { tag: node.tagName.toLowerCase(), role: node.getAttribute("role") ?? "", name: (node.innerText || node.getAttribute("aria-label") || node.querySelector("img")?.getAttribute("alt") || node.getAttribute("title") || "").trim().slice(0, 160),
+    const name = (node.innerText || node.getAttribute("aria-label") || node.querySelector("img")?.getAttribute("alt") || node.getAttribute("title") || "").trim().slice(0, 160);
+    const form = node.closest("form");
+    const sensitiveForm = Boolean(form?.querySelector('input[type=password],input[type=email],input[type=tel],[autocomplete^="cc-"]'));
+    const pageWrapperForm = Boolean(form && form.parentElement === document.body && form.querySelector("h1") && form.querySelector('footer,[role="contentinfo"]'));
+    const independentDisplay = !node.closest('input,textarea,select,button,[contenteditable],[role="button"],[role="combobox"]') &&
+      !node.querySelector('input,textarea,select,button,[contenteditable]');
+    return { tag: node.tagName.toLowerCase(), role: node.getAttribute("role") ?? "", name,
       label: label.trim().slice(0, 200), href: node instanceof HTMLAnchorElement ? node.href : undefined,
       calendar: Boolean(node.closest('[role="grid"],[role="dialog"],[class*="calendar"],[class*="datepicker"]')),
-      sensitiveForm: Boolean(node.closest("form")?.querySelector('input[type=password],input[type=email],input[type=tel],[autocomplete^="cc-"]')),
+      sensitiveForm,
+      ...(sensitiveForm && pageWrapperForm && node.tagName === "A" && independentDisplay && !node.hasAttribute("download") ? { formSafeAnchor: true } : {}),
+      ...(sensitiveForm && pageWrapperForm && independentDisplay && /^(?:H[1-3]|ADDRESS|P|DIV|SPAN|LI|TD|TH|TIME)$/u.test(node.tagName) && name &&
+        !/\b(?:login|log in|sign in|sign up|register|password|email|phone|subscribe|submit|checkout|payment|purchase|confirm|cancel|delete|send)\b/iu.test(name)
+        ? { readOnlyFormDisplay: true } : {}),
       inputType: field.type ?? "", hasPopup: node.getAttribute("aria-haspopup") ?? "", selector: selectors.for(node),
       choiceValue: node.getAttribute("data-value") ?? undefined, choiceContext,
       disabledChoice: node.getAttribute("aria-disabled") === "true" || node.classList.contains("disabled"),
-      ...((node.tagName === "SELECT" || node.tagName === "INPUT" && ["date", "number"].includes(field.type)) ? { currentValue: field.value.slice(0, 200) } : {}),
-      ...(node.tagName === "SELECT" ? { options: Array.from((node as HTMLSelectElement).options).slice(0, 100).map(item => ({ value: item.value.slice(0, 200), label: (item.textContent ?? "").trim().slice(0, 200) })) } : {}) };
+      ...(!sensitiveForm && (node.tagName === "SELECT" || node.tagName === "INPUT" && ["date", "number"].includes(field.type)) ? { currentValue: field.value.slice(0, 200) } : {}),
+      ...(node.tagName === "SELECT" && !sensitiveForm ? { options: Array.from((node as HTMLSelectElement).options).slice(0, 100).map(item => ({ value: item.value.slice(0, 200), label: (item.textContent ?? "").trim().slice(0, 200) })) } : {}) };
   }, undefined, { timeout: 1000 }).then(async control => {
-    const product = ["a", "button"].includes(control.tag) ? await inspectPublicRentalProduct(locator) : undefined;
-    const service = control.tag === "select" || control.role === "combobox" ? await inspectPublicRentalService(locator) : undefined;
+    const product = !control.sensitiveForm && ["a", "button"].includes(control.tag) ? await inspectPublicRentalProduct(locator) : undefined;
+    const service = !control.sensitiveForm && (control.tag === "select" || control.role === "combobox") ? await inspectPublicRentalService(locator) : undefined;
     let serviceContinuation: PublicServiceContinuationMode | undefined;
-    if (serviceSelection && control.tag === "button") {
+    if (!control.sensitiveForm && serviceSelection && control.tag === "button") {
       const mode = /^Skip packages and continue with (?:the )?selected service\b/iu.test(control.name) ? "SKIP_PACKAGES" : "SERVICE";
       if (await inspectPublicServiceContinuation(locator, serviceSelection, mode)) serviceContinuation = mode;
     }
@@ -655,15 +678,19 @@ export async function createCourseDiscoveryBrowserSession(input: {
       return Array.from(document.querySelectorAll('[role="combobox"]')).some(trigger => trigger.getAttribute("aria-controls") === menu.id &&
         /^(?:Select\s+)?(?:Service|Activity|Product):?$/iu.test(trigger.getAttribute("aria-label") ?? ""));
     }, undefined, { timeout: 1000 });
-    return { ...control, ...(product ? { product } : {}), ...(service ? { service } : {}),
+    const href = control.href ? normalizeDiscoveryNavigationUrl(control.href) : undefined;
+    const documentNavigationOnly = Boolean(control.formSafeAnchor && href && !new URL(href).hash &&
+      discoveryPublicAnchorKind({ ...control, href, sensitiveForm: false }));
+    return { ...control, ...(documentNavigationOnly ? { documentNavigationOnly: true } : {}), ...(product ? { product } : {}), ...(service ? { service } : {}),
       ...(serviceContinuation ? { serviceContinuation } : {}), ...(serviceMenuOption ? { serviceMenuOption: true } : {}),
-      ...(control.href ? { href: normalizeDiscoveryNavigationUrl(control.href) } : {}) };
+      ...(href ? { href } : {}) };
   });
   const publicControlKind = (control: ObservedControl, blockedAccess: boolean) => {
     if (!recipeSelectorSchema.safeParse(control.selector).success || blockedAccess || control.serviceMenuOption) return null;
     // The generic link fallback must retain the same transaction-parameter
     // exclusion as a labelled public availability link.
     if (control.href && !isPublicAvailabilityNavigation(control.href, (control.name || control.label).trim())) return null;
+    if (control.documentNavigationOnly) return "link";
     const kind = control.service ? "filter" : control.serviceContinuation ? "service-continuation" : control.product ? "product" : discoveryPublicAnchorKind(control) ?? discoveryPublicChoiceKind(control) ?? interactiveControlKind(control) ?? (control.tag === "select" && !control.sensitiveForm ? "filter" : null);
     if (!kind || /\b(?:book|reserve|checkout|confirm|purchase|pay)\b/iu.test(control.name) && !["link", "product"].includes(kind) ||
       control.href && !isSafeRecipeUrl(control.href)) return null;
@@ -720,7 +747,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     if (control.href && !isSafeRecipeUrl(control.href)) throw new Error("UNSAFE_NAVIGATION");
     if (control.href) { allowedNavigation.add(control.href); observedNavigationRoots.add(control.href); passfactory.observeWidgetUrl(control.href); cpsScope.observeEntry(control.href); }
     const target = randomUUID();
-    controls.set(target, { locator, signature: JSON.stringify(control), kind, href: control.href,
+    controls.set(target, { locator, signature: JSON.stringify(control), kind, href: control.href, ...(control.documentNavigationOnly ? { documentNavigationOnly: true } : {}),
       ...(extra.date ? { calendarDay: extra.date } : {}), ...(extra.dropdown ? { dropdown: extra.dropdown } : {}),
       ...(control.service ? { service: true } : {}), ...(control.serviceContinuation ? { serviceContinuation: control.serviceContinuation } : {}) });
     observedElements.set(control.selector, { locator, signature: JSON.stringify(control) });
@@ -774,7 +801,10 @@ export async function createCourseDiscoveryBrowserSession(input: {
         const visibleEvidence = await page.evaluate(() => {
           const headings: string[] = [], linkUrls: string[] = [], addressTexts: string[] = [];
           for (const node of Array.from(document.querySelectorAll('h1,h2,a[href],address,p,div,li,td')).slice(0, 3000)) {
-            if (!(node instanceof HTMLElement) || node.closest('form,script,template,noscript,iframe,[hidden],[inert],[aria-hidden="true"]')) continue;
+            if (!(node instanceof HTMLElement) || node.closest('script,template,noscript,iframe,input,textarea,select,button,[contenteditable],[hidden],[inert],[aria-hidden="true"]') ||
+                node.querySelector('input,textarea,select,button,[contenteditable]')) continue;
+            const form = node.closest("form");
+            if (form && (form.parentElement !== document.body || !form.querySelector("h1") || !form.querySelector('footer,[role="contentinfo"]'))) continue;
             const rect = node.getBoundingClientRect();
             let ancestor: HTMLElement | null = node, visible = Boolean(rect.width && rect.height), depth = 0;
             while (ancestor && visible && depth++ < 32) {
@@ -818,8 +848,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       const dates: number[] = [], times: number[] = [], resources: number[] = [], durations: number[] = [];
       for (let index = 0; index < Math.min(nodes.length, 3000); index++) {
         const node = nodes[index];
-        if (node.closest("script,style,noscript,input,textarea,select,option") ||
-          node.closest("form")?.querySelector('input[type=password],input[type=email],input[type=tel],[autocomplete^="cc-"]')) continue;
+        if (node.closest("script,style,noscript,input,textarea,select,option")) continue;
         const ownText = Array.from(node.childNodes).filter(child => child.nodeType === Node.TEXT_NODE).map(child => child.textContent ?? "").join(" ").trim();
         const label = node.getAttribute("aria-label") ?? "";
         const text = `${ownText} ${label}`;
@@ -840,7 +869,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     for (const node of nodes.slice(0, 180)) {
       if (!await node.isVisible()) continue;
       const control = await observeControl(node);
-      if (!recipeSelectorSchema.safeParse(control.selector).success || control.sensitiveForm || seenElements.has(control.selector)) continue;
+      if (!recipeSelectorSchema.safeParse(control.selector).success || control.sensitiveForm && !control.readOnlyFormDisplay && !control.documentNavigationOnly || seenElements.has(control.selector)) continue;
       seenElements.add(control.selector);
       observedElements.set(control.selector, { locator: node, signature: JSON.stringify(control) });
       const attributes = await node.evaluate(element => Object.fromEntries(Array.from(element.attributes)
@@ -863,6 +892,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
     const finalDocumentStartedAt = await page.evaluate(() => performance.timeOrigin);
     if (page.url() !== actualCurrentUrl || documentStartedAt !== finalDocumentStartedAt)
       throw new Error("DISCOVERY_SNAPSHOT_CHANGED");
+    teeBookingScope.observeRenderedSnapshot(teeDocumentToken, { url: actualCurrentUrl, timeOrigin: documentStartedAt,
+      ...(officialIdentityPage && officialIdentityPage.url === actualCurrentUrl ? { officialPage: officialIdentityPage, verifiedOfficial: officialIdentityPage.officialDocumentProof } : {}),
+      frames: publicFrameSources, blocked: Boolean(blockedAccess || terminalFailure || redirectRouting?.firstFatal) });
     for (const control of visible) if (control.kind === "link" && control.href)
       bookingParents.observeOfficialLink(currentUrl, control.href, `${control.name} ${control.label}`.trim());
     for (const url of publicFrameSources) {
@@ -1056,7 +1088,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
         let node = known.locator;
         for (let depth = 0; depth < 4; depth++) {
           const control = await observeControl(node);
-          if (control.sensitiveForm || !recipeSelectorSchema.safeParse(control.selector).success) break;
+          if (control.sensitiveForm && !control.readOnlyFormDisplay && !control.documentNavigationOnly || !recipeSelectorSchema.safeParse(control.selector).success) break;
           const attributes = await node.evaluate(element => Object.fromEntries(Array.from(element.attributes)
             .filter(attribute => ["id", "class", "role"].includes(attribute.name)).map(attribute => [attribute.name, attribute.value.slice(0, 100)])));
           const children: Array<{ selector: string; tag: string; text: string }> = [];
@@ -1064,7 +1096,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
           for (const child of (await node.locator(":scope > *").all()).slice(0, 12)) {
             if (children.length >= 6 || !await child.isVisible()) continue;
             const observed = await observeControl(child);
-            if (observed.sensitiveForm || !recipeSelectorSchema.safeParse(observed.selector).success) continue;
+            if (observed.sensitiveForm && !observed.readOnlyFormDisplay && !observed.documentNavigationOnly || !recipeSelectorSchema.safeParse(observed.selector).success) continue;
             children.push({ selector: observed.selector, tag: observed.tag, text: sanitizeResponderText(observed.name).slice(0, 80) });
             returnedChildren.push({ locator: child, selector: observed.selector, signature: JSON.stringify(observed) });
           }
@@ -1110,10 +1142,18 @@ export async function createCourseDiscoveryBrowserSession(input: {
         if (!isSafeRecipeUrl(action.url) || !allowedNavigation.has(new URL(action.url).href)) throw new Error("UNOBSERVED_NAVIGATION");
         if (!input.venueName || input.venueName.length > 200) throw new Error("MISSING_VENUE_IDENTITY");
         discardStaleOfficialIdentity(normalizeDiscoveryNavigationUrl(page.url()));
+        teeBookingScope.checkCurrentDocument(page.url(), await page.evaluate(() => performance.timeOrigin));
+        const officialBookingSourceToken = teeBookingScope.tokenFor(action.url, page.url());
         const result = await (deps.inspectAdapter ?? inspectExistingAdapter)({ officialUrl: input.venueOfficialUrl, bookingUrl: action.url, venueName: input.venueName, venueAddress: input.venueAddress, timeZone: input.timeZone ?? "UTC" },
           { venueMatches: venueProofMatches, requestLease: deps.requestLease ?? runWithProviderRequestLease, deadlineAt: input.deadlineAt,
-            ...(officialIdentityPage && Date.now() - officialIdentityPage.observedAt <= 5 * 60_000 ? { officialIdentityPage } : {}) });
-        return { ...await snapshot(), adapter: result.adapter };
+            ...(officialIdentityPage && Date.now() - officialIdentityPage.observedAt <= 5 * 60_000 ? { officialIdentityPage } : {}),
+            ...(officialBookingSourceToken ? { officialBookingSourceToken } : {}) });
+        const inspectedSnapshot = await snapshot();
+        if (result.adapter.family === "TEEITUP" && result.adapter.officialBookingSourceProof) {
+          if (!officialBookingSourceToken) throw new Error("OFFICIAL_BOOKING_SOURCE_UNVERIFIED");
+          observedTeeItUpOfficialBookingChain(officialBookingSourceToken);
+        }
+        return { ...inspectedSnapshot, adapter: result.adapter };
       }
       if (action.action === "open") {
         serviceSelection = undefined;
@@ -1163,7 +1203,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
             const rawHref = await known.locator.evaluate(element => (element as HTMLAnchorElement).href, undefined, { timeout: 1000 });
             const canonicalBootstrap = rawHref !== known.href && normalizeDiscoveryNavigationUrl(rawHref) === known.href;
             const ordinaryDocumentLink = !new URL(known.href).hash && !await known.locator.getAttribute("onclick");
-            if (canonicalBootstrap || ordinaryDocumentLink || target && !["_self", "_top", "_parent"].includes(target.toLowerCase())) {
+            if (known.documentNavigationOnly || canonicalBootstrap || ordinaryDocumentLink || target && !["_self", "_top", "_parent"].includes(target.toLowerCase())) {
               await redirectRouting?.beginDocumentNavigation(page.mainFrame());
               responses.length = 0;
               navigationStartedAt = Date.now();

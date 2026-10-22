@@ -31,6 +31,9 @@ import { isEzLinksProviderUrl } from "./ezlinks-public-read-policy";
 import { executeEzLinks, inspectEzLinks } from "./ezlinks-executor";
 import { deriveUScheduleOfficialLocation, parseUScheduleLocationSource } from "@/lib/simulators/providers/uschedule-location-source";
 import { executeUSchedulePublicLocation, inspectUSchedulePublicLocation } from "./uschedule-location-executor";
+import { observedTeeItUpOfficialBookingChain, type TeeItUpOfficialBookingToken } from "./teeitup-official-booking-context";
+import { bindTeeItUpOfficialBookingFacility, type TeeItUpOfficialBookingSourceProof, type TeeItUpObservedSourceChain } from "./teeitup-official-booking-source";
+import { readTeeItUpOfficialBookingChain } from "./teeitup-official-booking-reader";
 
 type Dependencies = {
   fetch?: typeof fetch;
@@ -39,6 +42,7 @@ type Dependencies = {
   requestLease?: <T>(family: string, work: () => Promise<T>) => Promise<{ acquired: true; value: T } | { acquired: false }>;
   venueMatches: (expected: string, observed: unknown) => boolean;
   officialIdentityPage?: OfficialIdentityPage;
+  officialBookingSourceToken?: TeeItUpOfficialBookingToken;
 };
 type Source = Pick<ExistingAdapterRecipe["source"], "bookingUrl" | "venueName" | "venueAddress" | "timeZone"> & { officialUrl?: string };
 const publicId = /^[1-9]\d{0,9}$/u;
@@ -100,8 +104,26 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
   let teeitupFacilities: TeeItUpRecipeFacility[] | undefined;
   let teeitupSimulatorSlots: AccessExecutionResult["slots"] | undefined;
   let officialIdentityProof: TeeItUpOfficialIdentityProof | undefined;
+  let officialBookingSourceProof: TeeItUpOfficialBookingSourceProof | undefined;
+  let freshBookingChain: TeeItUpObservedSourceChain | undefined;
+  let preparingBookingChain: Promise<void> | undefined;
+  const initialBookingToken = !adapter && family === "TEEITUP" ? deps.officialBookingSourceToken : undefined;
+  const savedBookingProof = adapter?.family === "TEEITUP" ? adapter.officialBookingSourceProof : undefined;
+  function validateInitialBookingToken() {
+    if (initialBookingToken) observedTeeItUpOfficialBookingChain(initialBookingToken);
+  }
+  async function prepareBookingChain() {
+    if (!savedBookingProof && !initialBookingToken) return;
+    preparingBookingChain ??= (async () => {
+      const expected = savedBookingProof ?? observedTeeItUpOfficialBookingChain(initialBookingToken!);
+      freshBookingChain = await readTeeItUpOfficialBookingChain(source, expected, { fetch: deps.fetch, signal, requestLease: deps.requestLease });
+      validateInitialBookingToken();
+    })();
+    await preparingBookingChain;
+    validateInitialBookingToken();
+  }
   let availabilityWasArray = false;
-  let requests = 0;
+  let requests = 0, dataBytes = 0;
   const parseUrl = (value: string) => {
     if (!isSafeRecipeUrl(value)) return fail("UNSCOPED_ADAPTER_REQUEST");
     const url = new URL(value);
@@ -136,7 +158,7 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
   };
   const transport = deps.fetch ?? createAddressPinnedPublicFetchTransport({ parseUrl, maxResponseBytes: 600_000, timeoutMs: 15_000, redirectLimit: 0 });
   const read: typeof fetch = async (value, init) => {
-    if (++requests > 6) fail("ADAPTER_REQUEST_LIMIT");
+    if (++requests > (savedBookingProof || initialBookingToken ? 2 : 6)) fail("ADAPTER_REQUEST_LIMIT");
     const raw = value instanceof Request ? value.url : String(value);
     const method = (init?.method ?? (value instanceof Request ? value.method : "GET")).toUpperCase();
     const headers = new Headers(init?.headers ?? (value instanceof Request ? value.headers : undefined));
@@ -146,8 +168,12 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
     if (teeitup && url.hostname === "phx-api-be-east-1b.kenna.io" &&
         (headers.get("x-be-alias") !== teeitup.alias || headers.get("origin") !== teeitup.origin || headers.get("referer") !== `${teeitup.origin}/`))
       fail("UNSAFE_ADAPTER_REQUEST");
+    // This independent source refresh runs before acquiring a data lease.
+    // No nested queue/lease can deadlock on the same provider family.
+    if (teeitup) await prepareBookingChain();
     return queue.run(requestFamilyForUrl(url.href), async () => {
       signal.throwIfAborted();
+      validateInitialBookingToken();
       const response = await transport(url, { ...init, method: "GET", headers, signal: init?.signal ? AbortSignal.any([signal, init.signal]) : signal,
         credentials: "omit", redirect: "manual", cache: "no-store" });
       if (response.status === 429) failHttp("PROVIDER_THROTTLED", response.status);
@@ -156,6 +182,8 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
       if (response.redirected || response.url && response.url !== url.href) fail("ADAPTER_TRANSPORT_FAILED");
       const bytes = await response.arrayBuffer();
       if (bytes.byteLength > 600_000) fail("ADAPTER_RESPONSE_LIMIT");
+      dataBytes += bytes.byteLength;
+      if ((savedBookingProof || initialBookingToken) && dataBytes > 1_200_000) fail("ADAPTER_RESPONSE_LIMIT");
       const text = Buffer.from(bytes).toString("utf8");
       if (adapter?.family === "TEEITUP" && adapter.officialIdentityProof && url.href === adapter.officialIdentityProof.officialPageUrl) {
         if (!/^text\/html(?:;|$)/iu.test(response.headers.get("content-type") ?? "")) fail("OFFICIAL_IDENTITY_UNVERIFIED");
@@ -166,12 +194,24 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
       if (teeitup && url.pathname === `/alias/${teeitup.alias}/facilities`) {
         if (adapter?.family === "TEEITUP" && adapter.officialIdentityProof && !officialIdentityProof) fail("OFFICIAL_IDENTITY_UNVERIFIED");
         const offeringKind = adapter?.family === "TEEITUP" ? adapter.offeringKind ?? "OUTDOOR" : "AUTO";
-        try { teeitupFacilities = resolveTeeItUpRecipeFacilities(source, JSON.parse(text), officialIdentityProof, offeringKind); }
-        catch (error) {
-          if (adapter || !deps.officialIdentityPage || !(error instanceof Error) || error.message !== "ADAPTER_IDENTITY_MISMATCH") throw error;
-          officialIdentityProof = deriveTeeItUpOfficialIdentityProof(source, deps.officialIdentityPage, { requireVisibleEvidence: true });
-          teeitupFacilities = resolveTeeItUpRecipeFacilities(source, JSON.parse(text), officialIdentityProof);
+        if (savedBookingProof) {
+          if (!freshBookingChain) fail("OFFICIAL_BOOKING_SOURCE_UNVERIFIED");
+          officialBookingSourceProof = bindTeeItUpOfficialBookingFacility(source, freshBookingChain, JSON.parse(text));
+          if (JSON.stringify(officialBookingSourceProof) !== JSON.stringify(savedBookingProof)) fail("OFFICIAL_BOOKING_SOURCE_CHANGED");
         }
+        try { teeitupFacilities = resolveTeeItUpRecipeFacilities(source, JSON.parse(text), officialIdentityProof, offeringKind, officialBookingSourceProof); }
+        catch (error) {
+          if (adapter || !(error instanceof Error) || error.message !== "ADAPTER_IDENTITY_MISMATCH") throw error;
+          if (freshBookingChain) {
+            officialBookingSourceProof = bindTeeItUpOfficialBookingFacility(source, freshBookingChain, JSON.parse(text));
+            teeitupFacilities = resolveTeeItUpRecipeFacilities(source, JSON.parse(text), undefined, "OUTDOOR", officialBookingSourceProof);
+          } else {
+            if (!deps.officialIdentityPage) throw error;
+            officialIdentityProof = deriveTeeItUpOfficialIdentityProof(source, deps.officialIdentityPage, { requireVisibleEvidence: true });
+            teeitupFacilities = resolveTeeItUpRecipeFacilities(source, JSON.parse(text), officialIdentityProof);
+          }
+        }
+        validateInitialBookingToken();
         if (adapter && (adapter.family !== "TEEITUP" || adapter.alias !== teeitup.alias ||
             JSON.stringify(adapter.facilityIds) !== JSON.stringify(teeitupFacilities.map(row => row.id)) ||
             (adapter.offeringKind === "SIMULATOR") !== teeitupFacilities.every(row => row.isSimulator === true))) fail("ADAPTER_CONFIGURATION_CHANGED");
@@ -206,6 +246,7 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
     });
   };
   return { read, family, teeitup, teeitupFacilities: () => teeitupFacilities, officialIdentityProof: () => officialIdentityProof,
+    officialBookingSourceProof: () => { validateInitialBookingToken(); return officialBookingSourceProof; },
     teeitupSimulatorSlots: () => teeitupSimulatorSlots,
     dispose: () => queue.dispose(), availabilityWasArray: () => availabilityWasArray, failureReason: () => fixedReadFailure };
 }
@@ -267,7 +308,8 @@ export async function inspectExistingAdapter(source: Source, deps: Dependencies)
       return { adapter: existingAdapterMetadataSchema.parse({ family: "TEEITUP", alias: session.teeitup.alias,
         facilityIds: session.teeitupFacilities()!.map(row => row.id),
         ...(session.teeitupFacilities()!.every(row => row.isSimulator === true) ? { offeringKind: "SIMULATOR" } : {}),
-        ...(session.officialIdentityProof() ? { officialIdentityProof: session.officialIdentityProof() } : {}) }) };
+        ...(session.officialIdentityProof() ? { officialIdentityProof: session.officialIdentityProof() } : {}),
+        ...(session.officialBookingSourceProof() ? { officialBookingSourceProof: session.officialBookingSourceProof() } : {}) }) };
     }
     if (session.family === "FOREUP") {
       const config = await readForeupPublicConfiguration({ bookingUrl: source.bookingUrl, courseName: source.venueName,
@@ -299,7 +341,7 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
     const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "GOLFVX"].includes(adapter.family) || adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR";
     if (input.timeZone !== recipe.source.timeZone || recipe.source.providerFamily.toUpperCase() !== adapter.family ||
         (recipe.target.kind === "SIMULATOR") !== simulator || simulator && (!recipe.target.offeringId || !input.durationMinutes) ||
-        adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR" && (adapter.facilityIds.length !== 1 || adapter.officialIdentityProof)) fail("ADAPTER_TARGET_MISMATCH");
+        adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR" && (adapter.facilityIds.length !== 1 || adapter.officialIdentityProof || adapter.officialBookingSourceProof)) fail("ADAPTER_TARGET_MISMATCH");
     if (adapter.family === "EZLINKS" && (!recipe.source.officialUrl || !recipe.source.venueAddress ||
         parseEzLinksSource(recipe.source.bookingUrl)?.tenant !== adapter.tenant || input.durationMinutes !== undefined))
       fail("ADAPTER_TARGET_MISMATCH");

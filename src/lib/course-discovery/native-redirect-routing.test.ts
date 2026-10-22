@@ -9,7 +9,7 @@ import { continueNativeBrowserRead, isObservedNativeRedirect, isObservedNativeRe
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
 
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; }
-async function installed(maxRequests?: number, signal?: AbortSignal) {
+async function installed(maxRequests?: number, signal?: AbortSignal, afterRoute?: (route: NativeReadRoute) => Promise<void>) {
   const events = new Map<string, (event: unknown) => void>(), routes: NativeReadRoute[] = [];
   const close = vi.fn(async () => {}), detach = vi.fn(async () => {}), failures: string[] = [], subframes: object[] = [], rejections: NativeRequestDiagnostic[] = [];
   const main = { page: () => page };
@@ -17,7 +17,7 @@ async function installed(maxRequests?: number, signal?: AbortSignal) {
     send: vi.fn(async (name: string, value?: { requestId?: string }) => name === "Page.getFrameTree" ? { frameTree: { frame: { id: "main" } } }
       : name === "Fetch.getResponseBody" ? { body: `body-${value?.requestId}`, base64Encoded: false } : {}), detach };
   const page = { context: () => ({ newCDPSession: async () => cdp }), mainFrame: () => main, close } as unknown as Page;
-  const handler = vi.fn(async (route: NativeReadRoute) => { routes.push(route); });
+  const handler = vi.fn(async (route: NativeReadRoute) => { routes.push(route); await afterRoute?.(route); });
   const guard = await installNativeRedirectRouting(page, handler, { timeoutMs: 100, maxRequests, signal,
     onFailure: code => failures.push(code), onSubframeBlocked: request => subframes.push(request), onRequestRejected: request => rejections.push(request) });
   const request = (id: string, values: object = {}) => events.get("Fetch.requestPaused")!({ requestId: id, networkId: `network-${id}`,
@@ -486,8 +486,225 @@ describe("native document-generation retirement", () => {
   });
 });
 
+describe("native one-shot renderer navigation ownership", () => {
+  const source = "https://example.org/data", target = "https://example.org/teetimes";
+  type Test = Awaited<ReturnType<typeof installed>>;
+  const identity = (test: Test, id: string, loader: string, url = target, method = "GET") => test.events.get("Network.requestWillBeSent")!({
+    requestId: `network-${id}`, loaderId: loader, frameId: "main", type: "Document", request: { url, method } });
+  const intent = (test: Test, values: object = {}) => test.events.get("Page.frameRequestedNavigation")!({
+    frameId: "main", reason: "scriptInitiated", disposition: "currentTab", url: target, ...values });
+  const successor = (test: Test, id = "successor", values: object = {}) => test.request(id, { resourceType: "Document",
+    request: { url: target, method: "GET", headers: {} }, ...values });
+  const prepare = async (test: Test, commit = true) => {
+    await test.guard.beginDocumentNavigation(test.main as never);
+    identity(test, "document", "loader-source", source);
+    test.request("document", { resourceType: "Document" }); await test.routes[0].continue();
+    test.response("document", { resourceType: "Document" });
+    await test.routes[0].request().response();
+    if (commit) test.events.get("Page.frameNavigated")!({ frame: { id: "main", loaderId: "loader-source", url: source } });
+  };
+
+  it("holds the exact successor until its committed source response ACK completes", async () => {
+    const test = await installed(), ack = deferred<void>(), send = test.cdp.send.getMockImplementation()!;
+    try {
+      test.cdp.send.mockImplementation((name, value) => name === "Fetch.continueResponse" && value?.requestId === "document" ? ack.promise : send(name, value));
+      await test.guard.beginDocumentNavigation(test.main as never);
+      identity(test, "document", "loader-source", source); test.request("document", { resourceType: "Document" });
+      await test.routes[0].continue(); test.response("document", { resourceType: "Document" });
+      await vi.waitFor(() => expect(test.cdp.send.mock.calls.some(([name]) => name === "Fetch.continueResponse")).toBe(true));
+      test.events.get("Page.frameNavigated")!({ frame: { id: "main", loaderId: "loader-source", url: source } });
+      intent(test); identity(test, "successor", "loader-next"); successor(test);
+      await new Promise(resolve => setTimeout(resolve, 10));
+      expect(test.routes).toHaveLength(1);
+      expect(test.routes[0].request().signal?.aborted).toBe(false);
+      ack.resolve(); await vi.waitFor(() => expect(test.routes).toHaveLength(2));
+      expect(test.routes[0].request().signal?.aborted).toBe(true);
+      expect(test.cdp.send.mock.calls.filter(([name]) => name === "Page.stopLoading")).toHaveLength(1);
+      expect(test.failures).toEqual([]);
+    } finally { ack.resolve(); await test.guard.close(); }
+  });
+
+  it.each(["missing", "wrong target", "foreign frame", "anchor", "new tab", "uncommitted", "wrong commit URL", "wrong commit loader", "expired", "network before intent", "POST", "GET body"])(
+    "rejects unknown document ownership with %s intent", async mode => {
+      const test = await installed(); let clock: ReturnType<typeof vi.spyOn> | undefined;
+      try {
+        await prepare(test, !["uncommitted", "wrong commit URL", "wrong commit loader"].includes(mode));
+        if (mode.startsWith("wrong commit")) test.events.get("Page.frameNavigated")!({ frame: { id: "main",
+          loaderId: mode === "wrong commit loader" ? "unknown" : "loader-source", url: mode === "wrong commit URL" ? target : source } });
+        if (mode === "network before intent") identity(test, "successor", "loader-next");
+        if (mode !== "missing") intent(test, mode === "wrong target" ? { url: "https://example.org/other" }
+          : mode === "foreign frame" ? { frameId: "child" } : mode === "anchor" ? { reason: "anchorClick" }
+            : mode === "new tab" ? { disposition: "newTab" } : {});
+        if (mode === "expired") clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 101);
+        if (mode !== "network before intent") identity(test, "successor", "loader-next", target, mode === "POST" ? "POST" : "GET");
+        successor(test, "successor", { request: { url: target, method: mode === "POST" ? "POST" : "GET", headers: {},
+          ...(mode === "GET body" ? { hasPostData: true, postData: "body" } : {}) } });
+        await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce());
+        expect(test.routes).toHaveLength(1);
+        expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "successor")).toBe(false);
+        expect(test.guard.firstFatal).toMatchObject({ code: "NATIVE_REDIRECT_LOADER_MISMATCH", phase: "LOADER_OWNER" });
+      } finally { clock?.mockRestore(); await test.guard.close(); }
+    });
+
+  it("cannot transfer an intent across an explicit document boundary", async () => {
+    const test = await installed();
+    try {
+      await prepare(test); intent(test); await test.guard.beginDocumentNavigation(test.main as never);
+      identity(test, "new-document", "loader-explicit", source); test.request("new-document", { resourceType: "Document" });
+      identity(test, "successor", "loader-next"); successor(test);
+      await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce());
+      expect(test.routes).toHaveLength(2);
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "successor")).toBe(false);
+    } finally { await test.guard.close(); }
+  });
+
+  it.each(["success", "target cancelled", "session cancelled", "duplicate", "explicit boundary overlap", "old handler hangs"])("protects the paused successor while its old handler drains (%s)", async mode => {
+    const held = deferred<void>(), cancellation = new AbortController(), test = await installed(undefined, cancellation.signal, async route => {
+      if (route.request().url() === source) await held.promise;
+    });
+    try {
+      await prepare(test); intent(test); identity(test, "successor", "loader-next"); successor(test);
+      await vi.waitFor(() => expect(test.routes[0].request().signal?.aborted).toBe(true));
+      expect(test.routes).toHaveLength(1);
+      if (mode === "target cancelled") test.events.get("Network.loadingFailed")!({ requestId: "network-successor" });
+      if (mode === "session cancelled") cancellation.abort();
+      if (mode === "duplicate") { identity(test, "duplicate", "loader-duplicate"); successor(test, "duplicate"); }
+      if (mode === "explicit boundary overlap") await expect(test.guard.beginDocumentNavigation(test.main as never)).rejects.toThrow("NATIVE_REDIRECT_NAVIGATION_REJECTED");
+      if (mode !== "old handler hangs") held.resolve();
+      if (mode === "target cancelled" || mode === "session cancelled" || mode === "old handler hangs") {
+        await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce());
+        expect(test.routes).toHaveLength(1);
+        expect(test.failures).toContain(mode === "target cancelled" ? "NATIVE_REDIRECT_NETWORK_FAILED"
+          : mode === "session cancelled" ? "NATIVE_REDIRECT_CANCELLED" : "NATIVE_REDIRECT_DRAIN_TIMEOUT");
+      } else {
+        await vi.waitFor(() => expect(test.routes).toHaveLength(2)); expect(test.failures).toEqual([]);
+      }
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "successor")).toBe(false);
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "duplicate")).toBe(false);
+      expect(test.cdp.send.mock.calls.filter(([name]) => name === "Page.stopLoading")).toHaveLength(1);
+    } finally { held.resolve(); await test.guard.close(); }
+  });
+
+  it.each(["missing", "URL", "method", "kind", "frame"])("cannot adopt a renderer intent with %s Network identity", async mismatch => {
+    const test = await installed();
+    try {
+      await prepare(test); intent(test);
+      if (mismatch !== "missing") test.events.get("Network.requestWillBeSent")!({ requestId: "network-successor", loaderId: "loader-next",
+        frameId: mismatch === "frame" ? "foreign" : "main", type: mismatch === "kind" ? "XHR" : "Document",
+        request: { url: mismatch === "URL" ? source : target, method: mismatch === "method" ? "POST" : "GET" } });
+      successor(test);
+      await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce());
+      expect(test.routes).toHaveLength(1);
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "successor")).toBe(false);
+    } finally { await test.guard.close(); }
+  });
+
+  it.each(["reject", "hang"])("never dispatches the successor if an old pause abort ACK %s", async mode => {
+    const test = await installed(), send = test.cdp.send.getMockImplementation()!;
+    try {
+      await prepare(test);
+      test.events.get("Network.requestWillBeSent")!({ requestId: "network-old", loaderId: "loader-source", frameId: "main", type: "XHR", request: { url: source, method: "GET" } });
+      test.request("old");
+      test.cdp.send.mockImplementation((name, value) => name === "Fetch.failRequest" && value?.requestId === "old"
+        ? mode === "hang" ? new Promise(() => {}) : Promise.reject(new Error("offline abort rejected")) : send(name, value));
+      intent(test); identity(test, "successor", "loader-next"); successor(test);
+      await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce());
+      expect(test.routes).toHaveLength(2);
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "successor")).toBe(false);
+    } finally { await test.guard.close(); }
+  });
+});
+
 const nativeChromePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 describe.runIf(existsSync(nativeChromePath))("offline Chrome document ownership", () => {
+  it.each(["HTTP redirect", "SPA replacement", "denied SPA replacement", "late old navigation"] as const)("tracks actual root to tee-times document ownership with unchanged shared read guards (%s)", async mode => {
+    const reads: string[] = [], failures: string[] = [], bodies: string[] = [], handled: string[] = [];
+    const trace: Array<Record<string, unknown>> = [], stopEntered = deferred<void>(), stopReleased = deferred<void>();
+    let retiring = false;
+    const server = createServer((request, response) => {
+      const path = request.url!; reads.push(path);
+      if (path === "/teetimes" && mode === "HTTP redirect") { response.writeHead(302, { Location: "/" }); response.end(); return; }
+      response.setHeader("Content-Type", "text/html");
+      response.end('<link rel="icon" href="data:,"><h1>' + (path === "/" ? "Public root" : "Public tee times") + '</h1>' +
+        (path === "/teetimes" && mode.includes("SPA replacement") ? `<script>location.replace(${JSON.stringify(mode === "denied SPA replacement" ? "/checkout" : "/")});</script>` : ""));
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const browser = await chromium.launch({ executablePath: nativeChromePath, headless: true });
+    const context = await browser.newContext({ serviceWorkers: "block" }), page = await context.newPage(), session = new AbortController();
+    const cdp = await context.newCDPSession(page), rootFrame = (await cdp.send("Page.getFrameTree")).frameTree.frame.id;
+    cdp.on("Page.frameNavigated", event => {
+      if (event.frame.id === rootFrame && event.frame.url.startsWith(url)) trace.push({ event: "Page.frameNavigated",
+        path: new URL(event.frame.url).pathname, loaderId: event.frame.loaderId, rootFrame: true, boundaryPending: retiring });
+    });
+    cdp.on("Page.frameRequestedNavigation", event => {
+      if (event.frameId === rootFrame && event.url.startsWith(url)) trace.push({ event: "Page.frameRequestedNavigation",
+        path: new URL(event.url).pathname, reason: event.reason, disposition: event.disposition, rootFrame: true, boundaryPending: retiring });
+    });
+    await cdp.send("Page.enable");
+    const controlled = {
+      on(name: string, listener: (event: unknown) => void) {
+        cdp.on(name as never, (event: unknown) => {
+          const value = event as { requestId?: string; networkId?: string; redirectedRequestId?: string; resourceType?: string; type?: string;
+            frameId?: string; loaderId?: string; responseStatusCode?: number; responseErrorReason?: string; request?: { url?: string }; redirectResponse?: { status: number } };
+          if (value.request?.url?.startsWith(url)) trace.push({ event: name, path: new URL(value.request.url).pathname,
+            requestId: value.requestId, networkId: value.networkId, loaderId: value.loaderId, parentId: value.redirectedRequestId,
+            kind: value.type ?? value.resourceType, rootFrame: value.frameId === rootFrame,
+            responseStage: value.responseStatusCode !== undefined || value.responseErrorReason !== undefined,
+            redirectStatus: value.redirectResponse?.status, boundaryPending: retiring });
+          listener(event);
+        });
+      },
+      send(name: string, values?: object) {
+        if (name === "Page.stopLoading" && retiring && mode === "late old navigation") {
+          stopEntered.resolve(); return stopReleased.promise.then(() => cdp.send(name as never, values as never));
+        }
+        return cdp.send(name as never, values as never);
+      }, detach: () => cdp.detach(),
+    };
+    vi.spyOn(context, "newCDPSession").mockResolvedValue(controlled as never);
+    const queue = createSimulatorBrowserRequestQueue(async (_host, work) => ({ acquired: true as const, value: await work() }), session.signal);
+    const guard = await installNativeRedirectRouting(page, async route => {
+      handled.push(new URL(route.request().url()).pathname);
+      if (new URL(route.request().url()).pathname === "/checkout") { await route.abort(); return; }
+      const reply = await queue.run("fixture", () => continueNativeBrowserRead(route, session.signal, 10_000), route.request().signal);
+      if (!route.request().signal?.aborted) bodies.push(reply.body.toString());
+    }, { timeoutMs: 3000, maxRequests: 16, onFailure: code => failures.push(code) });
+    let boundary: Promise<void> | undefined;
+    try {
+      await context.route("**/*", route => guard.releasePlaywrightRoute(route));
+      await guard.beginDocumentNavigation(page.mainFrame()); await page.goto(`${url}/`, { waitUntil: "load", timeout: 5000 });
+      await vi.waitFor(() => expect(guard.pendingReads).toBe(0));
+      retiring = true; boundary = guard.beginDocumentNavigation(page.mainFrame()); boundary.catch(() => {});
+      if (mode === "late old navigation") {
+        await stopEntered.promise;
+        await page.evaluate(() => { location.assign("/"); }).catch(() => {});
+        await vi.waitFor(() => expect(trace.filter(row => row.event === "Fetch.requestPaused" && row.path === "/" && !row.responseStage)).toHaveLength(2));
+        await vi.waitFor(() => expect(guard.pendingReads).toBe(0));
+        expect(reads.filter(path => path === "/")).toHaveLength(1);
+        expect(handled).toEqual(["/"]); stopReleased.resolve();
+      }
+      await boundary; retiring = false;
+      let navigationError: string | undefined;
+      try { await page.goto(`${url}/teetimes`, { waitUntil: "load", timeout: 5000 }); }
+      catch (error) { navigationError = error instanceof Error ? error.name : "UNKNOWN"; }
+      await vi.waitFor(() => expect(guard.pendingReads).toBe(0));
+      console.info("LOCAL_NATIVE_NAVIGATION_TRACE", JSON.stringify({ mode, trace, handled, reads, failures, firstFatal: guard.firstFatal ?? null, navigationError }));
+      expect(failures).toEqual([]);
+      expect(guard.firstFatal).toBeUndefined();
+      if (mode === "denied SPA replacement") {
+        expect(handled).toEqual(["/", "/teetimes", "/checkout"]);
+        expect(reads).toEqual(["/", "/teetimes"]);
+        expect(bodies).toHaveLength(2); return;
+      }
+      expect(bodies.some(body => body.includes(mode === "late old navigation" ? "Public tee times" : "Public root"))).toBe(true);
+      expect(await page.locator("h1").innerText()).toBe(mode === "late old navigation" ? "Public tee times" : "Public root");
+    } finally {
+      stopReleased.resolve(); await boundary?.catch(() => {}); session.abort(); await guard.close(); queue.dispose(); await browser.close();
+      server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+  }, 20_000);
+
   it.each(["inline icon", "late incidental fetch"])("drains one real response pause once while another initial abort ACK is held (%s)", async icon => {
     const reads: string[] = [], bodies: string[] = [], failures: string[] = [], commandFailures: { command: string; path: string | null; error: string }[] = [];
     const faviconLifecycle: { event: string; kind?: string; responseStage?: boolean; networkKnown?: boolean; rootFrame?: boolean; loaderMatchesDocument?: boolean }[] = [];

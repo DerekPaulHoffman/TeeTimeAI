@@ -57,7 +57,7 @@ export function inspectedAdapterSourceEvidence(recipe, job, observation, officia
   return { officialUrl: observation.officialUrl, observedBookingUrl: observation.bookingUrl };
 }
 /** Canonical identity belongs to the claimed job, never to generated prose. */
-export function bindDiscoveryRecipeIdentity(recipe, job, adapterObservation) {
+export function bindDiscoveryRecipeIdentity(recipe, job, adapterObservation, contextUrl) {
   if (!recipe || typeof recipe !== "object" || Array.isArray(recipe)) return recipe;
   const proposedSource = recipe.source && typeof recipe.source === "object" && !Array.isArray(recipe.source) ? recipe.source : {};
   const source = { ...proposedSource };
@@ -65,6 +65,7 @@ export function bindDiscoveryRecipeIdentity(recipe, job, adapterObservation) {
   const adapter = recipe.adapter && typeof recipe.adapter === "object" && !Array.isArray(recipe.adapter) ? { ...recipe.adapter } : undefined;
   if (adapter) {
     delete adapter.officialIdentityProof;
+    delete adapter.officialBookingSourceProof;
     const observed = adapterObservation?.adapter;
     if (adapter.family === "TEEITUP" && observed?.family === "TEEITUP" && observed.alias === adapter.alias &&
         adapterObservation.jobId === job.id && adapterObservation.officialUrl === job.request.identity.officialUrl && adapterObservation.bookingUrl === proposedSource.bookingUrl &&
@@ -76,6 +77,23 @@ export function bindDiscoveryRecipeIdentity(recipe, job, adapterObservation) {
         if (proof && Buffer.byteLength(proof, "utf8") <= 16_000 && observed.officialIdentityProof &&
             typeof observed.officialIdentityProof === "object" && !Array.isArray(observed.officialIdentityProof)) adapter.officialIdentityProof = JSON.parse(proof);
       } catch { /* Malformed controller evidence never becomes recipe authority. */ }
+    }
+    if (adapter.family === "TEEITUP" && observed?.family === "TEEITUP" && adapterObservation.jobId === job.id &&
+        adapterObservation.officialUrl === job.request.identity.officialUrl && adapterObservation.bookingUrl === proposedSource.bookingUrl &&
+        adapterObservation.contextUrl === contextUrl && contextUrl === proposedSource.bookingUrl &&
+        adapterObservation.identityKey === canonicalDataKey(job.request.identity) && adapterObservation.targetKey === canonicalDataKey(job.request.target) &&
+        adapterObservation.inputKey === canonicalDataKey(job.request.input) && job.request.target.kind === "OUTDOOR") {
+      const inspected = { ...observed }; delete inspected.officialIdentityProof; delete inspected.officialBookingSourceProof;
+      const proof = observed.officialBookingSourceProof;
+      if (canonicalDataKey(inspected) === canonicalDataKey(adapter) && proof && typeof proof === "object" && !Array.isArray(proof) &&
+          proof.kind === "OFFICIAL_BOOKING_SOURCE" && proof.officialUrl === job.request.identity.officialUrl && proof.bookingSourceUrl === proposedSource.bookingUrl &&
+          proof.alias === adapter.alias && adapter.facilityIds?.length === 1 && proof.facilityId === adapter.facilityIds[0] &&
+          typeof proof.courseId === "string" && proof.courseId.length > 0 && proof.courseId.length <= 128 &&
+          proof.venueName === job.request.identity.name && proof.canonicalAddress === job.request.identity.address &&
+          proof.timeZone === job.request.input.timeZone && proof.providerAddressVerified === false) {
+        try { const serialized = JSON.stringify(proof); if (Buffer.byteLength(serialized, "utf8") <= 16_000) adapter.officialBookingSourceProof = JSON.parse(serialized); }
+        catch { /* This process's fresh inspection is the only source of the copied proof. */ }
+      }
     }
   }
   return { ...recipe, ...(adapter ? { adapter } : {}), target: { ...job.request.target }, source: {
@@ -125,7 +143,7 @@ function safeBrowserRequestFailures(value) {
 function safeNativeRequestDiagnostic(value) {
   if (!value || typeof value !== "object" || Array.isArray(value) || typeof value.code !== "string" || !/^NATIVE_[A-Z_0-9]{1,73}$/u.test(value.code)) return undefined;
   const result = { code: value.code };
-  if (["RESPONSE_WAIT", "CONTINUE_RESPONSE_ACK", "LOADER_IDENTITY_WAIT", "LOADER_IDENTITY", "LOADER_OWNER", "REDIRECT_GENERATION"].includes(value.phase)) result.phase = value.phase;
+  if (["RESPONSE_WAIT", "CONTINUE_RESPONSE_ACK", "LOADER_IDENTITY_WAIT", "LOADER_IDENTITY", "LOADER_OWNER", "REDIRECT_GENERATION", "DOCUMENT_INTENT", "DOCUMENT_DRAIN"].includes(value.phase)) result.phase = value.phase;
   if (safeObservedUrl(value.url)) {
     try {
       const url = new URL(value.url);
@@ -141,7 +159,8 @@ function safeNativeRequestDiagnostic(value) {
   for (const [key, maximum] of Object.entries({ interceptedRequests: 1025, recordCount: 1024, requestLimit: 1024, postDataBytes: 1_000_000 }))
     if (Number.isSafeInteger(value[key]) && value[key] >= 0 && value[key] <= maximum) result[key] = value[key];
   for (const key of ["framePresent", "rootFrame", "networkIdPresent", "duplicateRequestId", "hasPostData", "postDataPresent",
-    "identityPresent", "loaderPresent", "loaderKnown", "identityFresh", "identityUrlMatches", "identityMethodMatches", "identityKindMatches", "identityFrameMatches"])
+    "identityPresent", "loaderPresent", "loaderKnown", "identityFresh", "identityUrlMatches", "identityMethodMatches", "identityKindMatches", "identityFrameMatches",
+    "parentPresent", "awaitingDocument", "parentCurrentGeneration", "documentCommitted", "documentIntentPresent", "documentIntentUsed", "sourceResponseComplete", "successorTerminalFailed"])
     if (typeof value[key] === "boolean") result[key] = value[key];
   return result;
 }
@@ -762,7 +781,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
             browserActions++;
             if (browserControlsInvalidated && !["open", "inspect_adapter", "finish"].includes(input.action))
               throw discoveryError("BROWSER_SESSION_CLOSED");
-            if (["open", "finish", "inspect_adapter"].includes(input.action)) adapterObservation = undefined;
+            if (["open", "finish", "inspect_adapter"].includes(input.action) || adapterObservation?.adapter?.officialBookingSourceProof) adapterObservation = undefined;
             if (!browser) {
               adapterObservation = undefined;
               browserStartedAt ??= new Date().toISOString(); lastRequestCount = 0; lastResponseBytes = 0;
@@ -857,7 +876,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
             }
           } else {
             if (!input?.recipe || Object.keys(input).some(key => key !== "recipe") || activated) throw discoveryError("DISCOVERY_PROPOSAL_INVALID");
-            const recipe = bindDiscoveryRecipeIdentity(input.recipe, job, adapterObservation);
+            const recipe = bindDiscoveryRecipeIdentity(input.recipe, job, adapterObservation, lastBrowserSnapshot?.url);
             const validation = await validateRecipe({ recipe, signal });
             if (validation.valid !== true) throw discoveryError("DISCOVERY_RECIPE_INVALID", { details: { issues: validation.issues } });
             const proposedUrl = recipe.source?.bookingUrl;

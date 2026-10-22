@@ -77,18 +77,24 @@ describe("durable discovery browser diagnostics", () => {
     expect(restored).toMatchObject({ urls: [], readUrls: [], entryUrls: [], officialObserved: false });
     expect(JSON.stringify(restored)).not.toMatch(/private|2026|headers|postData"|networkId"|frameId|requestId/);
   });
-  it.each(["LOADER_IDENTITY_WAIT", "LOADER_IDENTITY", "LOADER_OWNER", "REDIRECT_GENERATION"])("keeps bounded %s facts without retaining native IDs or supplied values", phase => {
+  it.each(["LOADER_IDENTITY_WAIT", "LOADER_IDENTITY", "LOADER_OWNER", "REDIRECT_GENERATION", "DOCUMENT_INTENT", "DOCUMENT_DRAIN"])("keeps bounded %s facts without retaining native IDs or supplied values", phase => {
     const safe = safeBrowserFailureDiagnostics({ nativeFirstFatal: { code: "NATIVE_REDIRECT_LOADER_MISMATCH", phase,
       identityPresent: true, loaderPresent: true, loaderKnown: false, identityFresh: false, identityUrlMatches: false,
       identityMethodMatches: true, identityKindMatches: true, identityFrameMatches: true,
+      parentPresent: false, awaitingDocument: false, parentCurrentGeneration: false, documentCommitted: true,
+      documentIntentPresent: true, documentIntentUsed: true, sourceResponseComplete: true, successorTerminalFailed: false,
       loaderId: "private", networkId: "private", revision: 123, url: "https://venue.example/read?secret=private" } });
     expect(safe.nativeFirstFatal).toEqual({ code: "NATIVE_REDIRECT_LOADER_MISMATCH", phase,
       identityPresent: true, loaderPresent: true, loaderKnown: false, identityFresh: false, identityUrlMatches: false,
-      identityMethodMatches: true, identityKindMatches: true, identityFrameMatches: true });
+      identityMethodMatches: true, identityKindMatches: true, identityFrameMatches: true,
+      parentPresent: false, awaitingDocument: false, parentCurrentGeneration: false, documentCommitted: true,
+      documentIntentPresent: true, documentIntentUsed: true, sourceResponseComplete: true, successorTerminalFailed: false });
     expect(JSON.stringify(safe)).not.toMatch(/private|loaderId|networkId|revision|secret/);
     const malformed = safeBrowserFailureDiagnostics({ nativeFirstFatal: { code: "NATIVE_REDIRECT_LOADER_MISMATCH", phase: "private",
       identityPresent: "true", loaderPresent: "private", loaderKnown: 1, identityFresh: 0, identityUrlMatches: {},
-      identityMethodMatches: [], identityKindMatches: null, identityFrameMatches: "private" } });
+      identityMethodMatches: [], identityKindMatches: null, identityFrameMatches: "private", parentPresent: "private", awaitingDocument: 1,
+      parentCurrentGeneration: {}, documentCommitted: [], documentIntentPresent: null, documentIntentUsed: 0,
+      sourceResponseComplete: "true", successorTerminalFailed: "false" } });
     expect(malformed.nativeFirstFatal).toEqual({ code: "NATIVE_REDIRECT_LOADER_MISMATCH" });
   });
   it("bounds native diagnostics and omits malformed metadata and unsafe URLs", () => {

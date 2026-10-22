@@ -2,6 +2,7 @@ import { z } from "zod";
 import { isUSchedulePublicRentalLabel } from "@/lib/automation/uschedule-public-read-policy";
 import { whooshSimulatorMetadataSchema } from "./whoosh-simulator-source";
 import { teeItUpOfficialIdentityProofSchema } from "./teeitup-official-identity";
+import { teeItUpOfficialBookingSourceProofSchema } from "./teeitup-official-booking-source";
 import { lightspeedMetadataSchema } from "./lightspeed-source";
 import { ameliaMetadataSchema } from "./amelia-source";
 import { chronogolfMetadataSchema } from "./chronogolf-source";
@@ -22,7 +23,10 @@ export const existingAdapterMetadataSchema = z.discriminatedUnion("family", [
   z.object({ family: z.literal("TEEITUP"), alias: z.string().regex(/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u),
     facilityIds: z.array(numericId).min(1).max(20).refine(ids => new Set(ids).size === ids.length),
     offeringKind: z.literal("SIMULATOR").optional(),
-    officialIdentityProof: teeItUpOfficialIdentityProofSchema.optional() }).strict(),
+    officialIdentityProof: teeItUpOfficialIdentityProofSchema.optional(),
+    officialBookingSourceProof: teeItUpOfficialBookingSourceProofSchema.optional() }).strict()
+    .refine(value => !value.officialBookingSourceProof || !value.officialIdentityProof && !value.offeringKind &&
+      value.alias === value.officialBookingSourceProof.alias && value.facilityIds.length === 1 && value.facilityIds[0] === value.officialBookingSourceProof.facilityId),
   z.object({ family: z.literal("USCHEDULE"), tenant: z.string().regex(/^[a-z][a-z0-9-]{2,62}$/u),
     serviceId: publicId, serviceName: z.string().trim().min(3).max(200), publicLocationProof: uschedulePublicLocationProofSchema.optional() }).strict()
     .refine(value => value.publicLocationProof ? isUScheduleNonMemberRental(value.serviceName) : isUSchedulePublicRentalLabel(value.serviceName),
