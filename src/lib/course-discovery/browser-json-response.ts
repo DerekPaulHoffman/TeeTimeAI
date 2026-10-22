@@ -1,0 +1,79 @@
+import { createHash } from "node:crypto";
+import { isSafePublicAvailabilityReadUrl } from "./public-availability-read-url";
+
+export type BrowserJsonResponseRows = {
+  path: string; dateKey: "REQUESTED_DATE"; rowsPath: string;
+  typePath: string; excludeType: "request"; availableTypes: string[]; accessIdPath: string;
+  labelPath: string; expectedRentalLabel: string; startsAtPath: string; durationMinutesPath: string;
+};
+type Input = { date: string; players: number; durationMinutes?: number; startTime: string; endTime: string };
+const object = (value: unknown): value is Record<string, unknown> => Boolean(value && typeof value === "object" && !Array.isArray(value));
+function field(value: unknown, path: string): unknown {
+  if (path.length > 240 || !/^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/u.test(path)) throw new Error("BROWSER_JSON_INVALID_PATH");
+  const keys = path.split(".");
+  if (keys.some(key => ["__proto__", "prototype", "constructor"].includes(key) || /password|secret|token|cookie|session|credential|authorization|api.?key|email|phone|contact|card|customer|user|person|attendee|member|profile|account|notes?|payment/iu.test(key))) throw new Error("BROWSER_JSON_INVALID_PATH");
+  for (const key of keys) {
+    if (!object(value) || !Object.prototype.hasOwnProperty.call(value, key)) return undefined;
+    value = value[key];
+  }
+  return value;
+}
+
+/** This is the published public range role only. It grants no URL, credential,
+ * transport or transaction permission; callers still apply every normal fence. */
+export function browserJsonParticipantRequestMatches(request: { url: string; method: string }, bookingUrl: string,
+  input: Input, strictUrl: (value: string) => boolean) {
+  if (!isSafePublicAvailabilityReadUrl(request.url, "fetch", request.method, strictUrl)) return false;
+  try {
+    const entry = new URL(bookingUrl), url = new URL(request.url);
+    const venue = /^\/reservations\/([a-z0-9]+(?:[-_][a-z0-9]+)*)$/u.exec(entry.pathname)?.[1];
+    if (entry.origin !== "https://www.sevenrooms.com" || !venue || entry.username || entry.password || entry.port || entry.hash ||
+        url.searchParams.get("venue") !== venue || !Number.isInteger(input.players) || input.players < 1 || input.players > 4 ||
+        !Number.isInteger(input.durationMinutes) || input.durationMinutes! < 15 || input.durationMinutes! > 480 ||
+        url.searchParams.get("party_size") !== String(input.players) || url.searchParams.get("picked_duration") !== String(input.durationMinutes) ||
+        url.searchParams.get("start_date") !== `${input.date.slice(5, 7)}-${input.date.slice(8)}-${input.date.slice(0, 4)}` ||
+        url.searchParams.get("num_days") !== "1") return false;
+    const minutes = (time: string) => Number(time.slice(0, 2)) * 60 + Number(time.slice(3));
+    const center = minutes(url.searchParams.get("time_slot")!), radius = Number(url.searchParams.get("halo_size_interval")) * 15;
+    // The pinned public client divides a minute halo by 15 for the wire and
+    // compares the same halo with moment.add/subtract(..., "minutes").
+    return center - radius <= minutes(input.startTime) && center + radius >= minutes(input.endTime);
+  } catch { return false; }
+}
+
+/** Full original response interpretation, never the model's sampled schema.
+ * Only the requested own date key and one group/child-array level are read. */
+export function extractBrowserJsonRows(body: unknown, plan: BrowserJsonResponseRows, input: Input) {
+  const dates = field(body, plan.path);
+  if (!object(dates) || !Object.prototype.hasOwnProperty.call(dates, input.date)) throw new Error("BROWSER_JSON_DATE_MISSING");
+  const groups = dates[input.date];
+  if (!Array.isArray(groups) || groups.length > 500) throw new Error("BROWSER_JSON_INCOMPLETE_COLLECTION");
+  const rows: Array<Record<string, unknown>> = [];
+  let visited = groups.length;
+  for (const group of groups) {
+    if (!object(group)) throw new Error("BROWSER_JSON_INCOMPLETE_COLLECTION");
+    const children = field(group, plan.rowsPath);
+    if (!Array.isArray(children) || (visited += children.length) > 500) throw new Error("BROWSER_JSON_INCOMPLETE_COLLECTION");
+    for (const child of children) {
+      if (!object(child)) throw new Error("BROWSER_JSON_MALFORMED_ROW");
+      const type = field(child, plan.typePath);
+      if (typeof type !== "string" || !/^[A-Za-z][A-Za-z_-]{0,31}$/u.test(type)) throw new Error("BROWSER_JSON_MALFORMED_ROW");
+      // The public client keeps request-only times separately. Their flags do
+      // not make them instantly available rentals, so no request row is emitted.
+      if (type === plan.excludeType) continue;
+      if (!plan.availableTypes.includes(type)) throw new Error("BROWSER_JSON_UNKNOWN_ROW_TYPE");
+      const identity = field(child, plan.accessIdPath), label = field(child, plan.labelPath);
+      const startsAt = field(child, plan.startsAtPath), duration = field(child, plan.durationMinutesPath);
+      if (typeof identity !== "string" || !identity || identity.length > 256 || identity.trim() !== identity || /\p{Cc}/u.test(identity) ||
+          typeof label !== "string" || label !== plan.expectedRentalLabel ||
+          typeof startsAt !== "string" || !startsAt || startsAt.length > 100 ||
+          !Number.isInteger(duration) || Number(duration) < 15 || Number(duration) > 480 || duration !== input.durationMinutes)
+        throw new Error("BROWSER_JSON_MALFORMED_ROW");
+      rows.push({ startsAt, resourceId: `public-json:${createHash("sha256").update(identity).digest("hex")}` });
+    }
+  }
+  // An empty map or request-only response cannot independently attest rental
+  // identity or duration. Never fill those missing facts from the saved input.
+  return { date: input.date, complete: true, empty: false, players: input.players,
+    duration: rows.length ? input.durationMinutes : undefined, rows };
+}

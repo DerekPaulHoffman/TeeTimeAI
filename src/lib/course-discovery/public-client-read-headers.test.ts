@@ -327,4 +327,21 @@ describe("public client read header value publicity", () => {
     Object.assign(f.optionsFacts, original);
     expect(f.scope.isCurrent(preflight)).toBe(false); expect(f.scope.provePreflight(f.options, f.request)).toBeNull();
   });
+
+  it.each(["epoch", "source", "document", "request", "script-version"] as const)("retains only the observed first current-proof failure: %s", fault => {
+    const f = fixture(), captured = f.capture()!;
+    const read = f.scope.proveRead(f.request)!, options = f.scope.provePreflight(f.options, f.request)!;
+    const checked = fault === "script-version" ? captured : fault === "request" ? options : read;
+    expect(f.scope.failureReason(checked)).toBeNull();
+    let reason: string;
+    if (fault === "epoch") { f.scope.invalidate(); reason = "REVOCATION_EPOCH_CHANGED"; }
+    else if (fault === "source") { f.scripts.delete(f.script); reason = "PUBLIC_SOURCE_INVALID"; }
+    else if (fault === "document") { f.documentFacts.live = false; reason = "DOCUMENT_NOT_CURRENT"; }
+    else if (fault === "request") { f.requestFacts.live = false; reason = "REQUEST_SIGNATURE_CHANGED"; }
+    else { const extra = {}; f.scripts.set(extra, { ...f.scriptFacts, body: source("second-public-literal") }); f.scope.captureScript(extra); reason = "SCRIPT_VERSION_CHANGED"; }
+    // The accessor alone must not revalidate facts or invent a failure.
+    expect(f.scope.failureReason(checked)).toBeNull();
+    expect(f.scope.isCurrent(checked)).toBe(false); expect(f.scope.failureReason(checked)).toBe(reason);
+    f.scope.close(); expect(f.scope.isCurrent(checked)).toBe(false); expect(f.scope.failureReason(checked)).toBe(reason);
+  });
 });

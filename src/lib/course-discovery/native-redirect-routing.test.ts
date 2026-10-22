@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import { chromium, type Page, type Route } from "@playwright/test";
 import { describe, expect, it, vi } from "vitest";
 import { authorizePublicClientReadHeaders, installNativeRedirectRouting, isCurrentPublicClientReadHeaders,
-  nativePublicClientPreflightMethod, isNativeReadSupersededFailure, isNativeReadTerminalFailure, type NativeReadRoute, type NativeRequestDiagnostic } from "./native-redirect-routing";
+  publicClientReadHeaderProofFailure, nativePublicClientPreflightMethod, isNativeReadSupersededFailure, isNativeReadTerminalFailure, type NativeReadRoute, type NativeRequestDiagnostic } from "./native-redirect-routing";
 import { continueNativeBrowserRead, isObservedNativeRedirect, isObservedNativeRedirectTarget, nativeReadPreflightMethod } from "./native-public-browser";
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
 
@@ -73,6 +73,7 @@ describe("native private public-client header proofs", () => {
     try {
       const route = await test.get(readHeaders, method), proof = await authorizePublicClientReadHeaders(route.request());
       expect(proof).not.toBeNull(); expect(Object.keys(proof!)).toEqual([]); expect(isCurrentPublicClientReadHeaders(proof!)).toBe(true);
+      expect(publicClientReadHeaderProofFailure(proof!)).toBeNull();
       expect(nativePublicClientPreflightMethod(route.request(), proof!)).toBeNull();
       expect(await authorizePublicClientReadHeaders({ ...route.request() })).toBeNull();
       await route.continue();
@@ -127,8 +128,17 @@ describe("native private public-client header proofs", () => {
       expect(nativePublicClientPreflightMethod(route.request(), proof!)).toBe(method);
       expect(nativePublicClientPreflightMethod(test.routes[1].request(), proof!)).toBeNull();
       test.events.get("Network.loadingFailed")!({ requestId: "original-get" });
+      // Reading diagnostics does not run the check, so the first failure is
+      // recorded only by the existing queued/current validation below.
+      expect(publicClientReadHeaderProofFailure(proof!)).toBeNull();
       expect(isCurrentPublicClientReadHeaders(proof!)).toBe(false);
+      const firstFailure = publicClientReadHeaderProofFailure(proof!);
+      expect(firstFailure).toMatchObject({ reason: "NATIVE_RECORD_NOT_CURRENT", nativeDocumentCurrent: true,
+        nativeRecordFailed: false, nativeRequestCancelled: false, nativeSourceIdentityCurrent: true, nativeSourceFailed: true });
+      expect(firstFailure).not.toHaveProperty("url"); expect(JSON.stringify(firstFailure)).not.toContain(literal);
       await expect(route.continue()).rejects.toThrow("NATIVE_REDIRECT_CONTINUE_REJECTED");
+      await test.guard.close(); expect(isCurrentPublicClientReadHeaders(proof!)).toBe(false);
+      expect(publicClientReadHeaderProofFailure(proof!)).toEqual(firstFailure);
       expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "public-options")).toBe(false);
     } finally { await test.guard.close(); }
   });
@@ -156,8 +166,17 @@ describe("native private public-client header proofs", () => {
         if (fault === "unsafe-spa") test.events.get("Page.navigatedWithinDocument")!({ frameId: "main", url: "https://booking.example.org/account" });
         if (fault === "boundary") await test.guard.beginDocumentNavigation(test.main as never);
         if (fault === "close") await test.guard.close();
+        expect(publicClientReadHeaderProofFailure(proof!)).toBeNull();
         expect(isCurrentPublicClientReadHeaders(proof!)).toBe(false);
+        const firstFailure = publicClientReadHeaderProofFailure(proof!);
+        expect(firstFailure).not.toBeNull();
+        if (fault === "source-failed") expect(firstFailure?.reason).toBe("REVOCATION_EPOCH_CHANGED");
+        if (fault === "request-failed") expect(firstFailure).toMatchObject({ reason: "NATIVE_RECORD_NOT_CURRENT", nativeIdentityFailed: true });
+        if (fault === "close") expect(firstFailure?.reason).toBe("OWNER_CLOSED");
+        if (fault === "identity-revised") expect(firstFailure).toMatchObject({ reason: "NATIVE_RECORD_NOT_CURRENT", nativeIdentityRevisionCurrent: false });
         await expect(route.continue()).rejects.toThrow();
+        await test.guard.close(); expect(isCurrentPublicClientReadHeaders(proof!)).toBe(false);
+        expect(publicClientReadHeaderProofFailure(proof!)).toEqual(firstFailure);
         expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "actual-read")).toBe(false);
       } finally { await test.guard.close(); }
     });

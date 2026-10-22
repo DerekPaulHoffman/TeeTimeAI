@@ -28,6 +28,13 @@ describe("discovery browser public protocol", () => {
     expect(duplicate).toMatchObject({ authorizationShape: "OTHER_REDACTED", duplicateHeaderNames: true,
       requestedPreflightMethod: "OTHER", requestedHeaderDuplicates: true });
     expect(publicHeaderFailureDiagnostic("HEADER_PROOF_REVOKED_AFTER_QUEUE", "GET", {}, null)).not.toHaveProperty("requestedPreflightMethod");
+    const observed = publicHeaderFailureDiagnostic("HEADER_PROOF_REVOKED_AFTER_QUEUE", "OPTIONS", {}, null,
+      { reason: "NATIVE_RECORD_NOT_CURRENT", nativeRequestCancelled: true, nativeRecordFailed: "private-value", headers: "private-value", digest: "private-value" } as never);
+    expect(observed).toMatchObject({ privateProofFailureReason: "NATIVE_RECORD_NOT_CURRENT", nativeRequestCancelled: true });
+    expect(observed).not.toHaveProperty("nativeRecordFailed"); expect(observed).not.toHaveProperty("headers");
+    expect(JSON.stringify(observed)).not.toContain("private-value");
+    expect(publicHeaderFailureDiagnostic("HEADER_PROOF_REVOKED_AFTER_QUEUE", "GET", {}, null,
+      { reason: "private-value" } as never).privateProofFailureReason).toBe("UNOBSERVED");
   });
   it("admits public reservation navigation while excluding slot and transaction controls", () => {
     const control = { tag: "a", name: "Click here to reserve a tee time", label: "", href: "https://example.org/tee-times", sensitiveForm: false };
@@ -103,6 +110,8 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       close: async () => {}, allowHostConnections: () => {}, cancelHostConnections: async () => {}, stats: () => ({ connections: 0, activeSockets: 0, bytes: 0 }) });
     const authorize = vi.spyOn(nativeRouting, "authorizePublicClientReadHeaders").mockResolvedValue(mode === "missing" ? null : proof);
     const current = vi.spyOn(nativeRouting, "isCurrentPublicClientReadHeaders").mockImplementation(() => live);
+    const firstFailure = vi.spyOn(nativeRouting, "publicClientReadHeaderProofFailure").mockImplementation(() => live ? null :
+      { reason: "NATIVE_RECORD_NOT_CURRENT", nativeRequestCancelled: true });
     const preflight = vi.spyOn(nativeRouting, "nativePublicClientPreflightMethod").mockReturnValue("GET");
     const routing = vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, handler) => ({
       prepare: () => {}, beginDocumentNavigation: async () => {}, close: async () => {}, pendingReads: 0, lastFailure: undefined,
@@ -141,9 +150,12 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       } });
       expect(next.requestFailures?.find(row => row.url === data)).toMatchObject({ reason: "CREDENTIAL_HEADERS", publicHeaderDiagnostic: { stage: mode === "missing" ? "HEADER_PROOF_MISSING" : "HEADER_PROOF_REVOKED_AFTER_QUEUE" } });
       expect(diagnosticAtDenial?.requests.find(row => row.url === data)).toMatchObject({ blockedReason: "CREDENTIAL_HEADERS",
-        publicHeaderDiagnostic: { stage: mode === "missing" ? "HEADER_PROOF_MISSING" : "HEADER_PROOF_REVOKED_AFTER_QUEUE" } });
+        publicHeaderDiagnostic: { stage: mode === "missing" ? "HEADER_PROOF_MISSING" : "HEADER_PROOF_REVOKED_AFTER_QUEUE",
+          privateProofFailureReason: mode === "missing" ? "UNOBSERVED" : "NATIVE_RECORD_NOT_CURRENT",
+          ...(mode === "revoked" ? { nativeRequestCancelled: true } : {}) } });
+      if (mode === "missing") expect(firstFailure).not.toHaveBeenCalled();
       expect(reads).toEqual([entry]); expect(JSON.stringify([first, next])).not.toContain("fixture-public-literal");
-    } finally { release(); await session.close(); native.mockRestore(); routing.mockRestore(); preflight.mockRestore(); current.mockRestore(); authorize.mockRestore(); proxy.mockRestore(); }
+    } finally { release(); await session.close(); native.mockRestore(); routing.mockRestore(); preflight.mockRestore(); current.mockRestore(); firstFailure.mockRestore(); authorize.mockRestore(); proxy.mockRestore(); }
   }, 20_000);
 
   it("keeps a successful inventory GET out of document roots while preserving an actual public href", async () => {

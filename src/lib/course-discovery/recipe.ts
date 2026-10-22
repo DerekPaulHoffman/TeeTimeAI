@@ -5,7 +5,7 @@ import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import { existingAdapterMetadataSchema } from "./existing-adapter-schema";
 import { isServerDocumentSelector } from "./server-document-proof";
 import { hasCpsSessionState } from "./cps-public-navigation";
-import { recipeLocalDateSchema as localDate, recipeTemplateSchema } from "./recipe-template";
+import { expandRecipeTemplate, recipeLocalDateSchema as localDate, recipeTemplateSchema } from "./recipe-template";
 import { isSafePublicBootstrapReadUrl } from "./public-bootstrap-read-url";
 import { isSafePublicAvailabilityReadUrl } from "./public-availability-read-url";
 export { expandRecipeTemplate, recipeTemplateSchema } from "./recipe-template";
@@ -86,9 +86,13 @@ export const recipeFieldSchema = z.union([
 const venueGreetingFieldSchema = z.object({ selector: recipeSelectorSchema, format: z.literal("VENUE_GREETING") }).strict()
   .describe("DOM venue proof only, visible text with no attribute/path: opt in only for an observed complete 'Welcome to <whole venue>.' with no extra copy, or 'Welcome to [the ]<whole venue>’s online tee time engine.' (ASCII 's also accepted) optionally followed by exactly 'You are guaranteed to receive the best online rates for <whole rate venue> when you book direct with us. We look forward to seeing [you ]on the golf course.' Full text is limited to 500 characters, each captured name to 200. Both the main name and rate name independently use the existing strict whole-venue matcher: Unicode compatibility forms, case, punctuation and spacing are ignored. A terminal Golf Club or Golf Course label may be omitted or interchanged only when the remaining whole-name cores match, contain at least 8 letters/digits, and are not generic golf/category words; for example, Example Ridge Golf Club matches Example Ridge. This does not allow arbitrary abbreviations, substring matches or another location, and never changes the canonical source identity. Arbitrary prose, other copy and hidden/attribute fallbacks reject. Raw/live text equality is checked before interpretation.");
 const venueProofFieldSchema = z.union([recipeFieldSchema, venueGreetingFieldSchema]);
+const browserJsonVenueSchema = z.object({ selector: recipeSelectorSchema,
+  format: z.enum(["VENUE_GREETING", "VENUE_SELECT_TIME"]).optional() }).strict()
+  .describe("Fresh visible whole-venue proof. VENUE_SELECT_TIME accepts only exact 'Select a time at <whole venue>'; no arbitrary prefix, substring or extra prose.");
 // The new reader shape is text-only. Ordinary field schemas above retain
 // their original formats, so the greeting cannot be used for slots or dates.
-export type RecipeField = z.infer<typeof recipeFieldSchema> | (z.infer<typeof venueGreetingFieldSchema> & { attribute?: never });
+export type RecipeField = z.infer<typeof recipeFieldSchema> | (z.infer<typeof venueGreetingFieldSchema> & { attribute?: never }) |
+  (z.infer<typeof browserJsonVenueSchema> & { attribute?: never });
 const visibleDateText = z.object({ selector: recipeSelectorSchema }).strict();
 export const recipeDatePartsSchema = z.object({ kind: z.literal("DATE_PARTS"), monthYear: visibleDateText, day: visibleDateText }).strict()
   .describe("DOM only: visible month name plus four-digit year, and one currently selected day. Selection must be marked by aria-selected, aria-current=date, data-selected, Mui-selected, active+day classes, or a BUTTON with both exact days and daySelected classes.");
@@ -133,14 +137,16 @@ const stepSchema = z.discriminatedUnion("action", [
 const availabilityResponseSchema = z.object({
   kind: z.enum(["JSON", "SERVER_DOCUMENT"]).optional(),
   url: availabilityUrlTemplate, method: z.enum(["GET", "POST"]),
-  date: z.object({ source: z.enum(["QUERY", "JSON_BODY"]), path: jsonPath,
+  date: z.object({ source: z.enum(["QUERY", "JSON_BODY", "PATH"]), path: jsonPath,
     format: z.enum(["ISO_DATE", "MM-DD-YYYY"]).optional().describe("Default ISO_DATE is YYYY-MM-DD. Explicit MM-DD-YYYY binds a zero-padded public provider date; use {{dateMdy}} in its URL template.") }).strict(),
   endDatePath: jsonPath.optional(),
   success: z.object({ path: jsonPath, equals: z.union([z.string().max(200), z.number().finite(), z.boolean(), z.null()]) }).strict().optional(),
-}).strict().refine(value => value.method === "POST" || value.date.source === "QUERY", "GET date binding must read a query parameter")
+}).strict().refine(value => value.method === "POST" || value.date.source === "QUERY" || value.date.source === "PATH", "GET date binding must read a query parameter or explicit path segment")
+  .refine(value => value.date.source !== "PATH" || value.method === "GET" && /^(?:[0-9]|[1-5][0-9]|6[0-3])$/u.test(value.date.path) &&
+    (!value.endDatePath || /^(?:[0-9]|[1-5][0-9]|6[0-3])$/u.test(value.endDatePath)), "PATH date binding requires GET and zero-based decimal segment indexes 0..63")
   .refine(value => value.kind !== "SERVER_DOCUMENT" || value.method === "GET" && value.date.source === "QUERY" && !value.success && !value.endDatePath,
     "Server document proof requires a dated GET document")
-  .describe(`Required completed availability-response fence. Exact URL/method and date parameter must equal requested YYYY-MM-DD. Default JSON uses observed scalar success for response-only completion. Explicit kind SERVER_DOCUMENT requires GET/query date and proof.complete {serverDocument:true}: a complete text/html main document whose inert source venue/date/slot fields equal the settled visible DOM; outdoor static CSS only, no pagination or later data fetch. For SERVER_DOCUMENT, every proof field selector, slot field selector and slots.collection.selector must follow this static grammar: ${SERVER_DOCUMENT_SELECTOR_MESSAGE} Use an observed tag/class/ID or bounded descendant/child chain that identifies the intended field; positional selectors such as :first-child and :nth-of-type(1) are unsupported. Supported field attribute readers such as attribute:"value" remain available; CSS attribute selectors are forbidden. A matching response must start after the last date/filter change. Only the runtime-verified PassFactory /ftbb client-only DURATION select may carry a completed day response. This proves freshness, not availability by itself; independent capacity/duration/empty proof remains required.`);
+  .describe(`Required completed availability-response fence. Exact URL/method and date must equal the requested date in the explicit format. GET uses QUERY or PATH; PATH path/endDatePath are decimal zero-based indexes 0..63 into nonempty raw URI path segments. Duplicate/trailing slashes, encoded slashes and encoded date values are not date proof. This grants no route permission. Default JSON uses observed scalar success for response-only completion. Explicit kind SERVER_DOCUMENT requires GET/query date and proof.complete {serverDocument:true}: a complete text/html main document whose inert source venue/date/slot fields equal the settled visible DOM; outdoor static CSS only, no pagination or later data fetch. For SERVER_DOCUMENT, every proof field selector, slot field selector and slots.collection.selector must follow this static grammar: ${SERVER_DOCUMENT_SELECTOR_MESSAGE} Use an observed tag/class/ID or bounded descendant/child chain that identifies the intended field; positional selectors such as :first-child and :nth-of-type(1) are unsupported. Supported field attribute readers such as attribute:"value" remain available; CSS attribute selectors are forbidden. A matching response must start after the last date/filter change. Only the runtime-verified PassFactory /ftbb client-only DURATION select may carry a completed day response. This proves freshness, not availability by itself; independent capacity/duration/empty proof remains required.`);
 const timeZone = z.string().max(80).refine(value => {
   try { new Intl.DateTimeFormat("en-US", { timeZone: value }); return true; } catch { return false; }
 });
@@ -167,12 +173,28 @@ const common = {
     holes: recipeFieldSchema.optional(), resourceId: recipeFieldSchema.optional(), productId: recipeFieldSchema.optional(),
   }).strict(),
 };
+const browserJsonPath = jsonPath.refine(value => !/contact|card|customer|user|person|attendee|member|profile|account|notes?|payment/iu.test(value), "Private response paths are not inventory readers");
+const browserJsonRowsSchema = z.object({
+  path: browserJsonPath, dateKey: z.literal("REQUESTED_DATE"), rowsPath: browserJsonPath,
+  typePath: browserJsonPath, excludeType: z.literal("request"),
+  availableTypes: z.array(z.string().regex(/^[A-Za-z][A-Za-z_-]{0,31}$/u)).min(1).max(8)
+    .refine(values => !values.includes("request") && new Set(values).size === values.length), accessIdPath: browserJsonPath,
+  labelPath: browserJsonPath, expectedRentalLabel: recipeResourceScopeSchema.shape.expectedLabel,
+  startsAtPath: browserJsonPath, durationMinutesPath: browserJsonPath,
+}).strict().describe("Original completed JSON only: requested own date key -> group array -> one child-array path, at most 500 groups plus rows. Every non-request row needs a nonempty public access identity, exact observed public rental label, actual time and duration. Request rows never become instant availability; malformed rows never disappear. No literal IDs, scripts, recursive wildcards or sampled-schema completion.");
 export const accessRecipeSchema = z.discriminatedUnion("engine", [
   z.object({ ...common, engine: z.literal("HTTP_JSON"), request: z.object({ url: urlTemplate,
     method: z.enum(["GET", "POST"]), body: z.record(z.string().max(80).refine(value => !secret.test(value)),
       z.union([recipeTemplateSchema, z.number().finite(), z.boolean()])).optional() }).strict() }).strict(),
   z.object({ ...common, proof: common.proof.extend({ venue: venueProofFieldSchema }), engine: z.literal("BROWSER_DOM"), browserTransport: z.enum(["PINNED_HTTP", "NATIVE_CHROME"]).default("PINNED_HTTP"), pageUrl: urlTemplate,
     availabilityResponse: availabilityResponseSchema, steps: z.array(stepSchema).max(32) }).strict(),
+  z.object({ schemaVersion: common.schemaVersion, target: common.target, source: common.source, permittedRoutes: common.permittedRoutes,
+    engine: z.literal("BROWSER_JSON"), browserTransport: z.enum(["PINNED_HTTP", "NATIVE_CHROME"]).default("PINNED_HTTP"), pageUrl: urlTemplate,
+    steps: z.array(stepSchema).max(32), availabilityResponse: availabilityResponseSchema,
+    requestBinding: z.literal("SEVENROOMS_PUBLIC_PARTICIPANTS"), responseRows: browserJsonRowsSchema,
+    proof: z.object({ venue: browserJsonVenueSchema, date: z.object({ availabilityDateKey: z.literal(true) }).strict(),
+      complete: z.object({ availabilityResponse: z.literal(true) }).strict() }).strict(),
+  }).strict(),
   z.object({ schemaVersion: common.schemaVersion, target: common.target, source: common.source,
     engine: z.literal("EXISTING_ADAPTER"), adapter: existingAdapterMetadataSchema }).strict(),
 ]).superRefine((recipe, ctx) => {
@@ -188,6 +210,27 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
     if (recipe.adapter.family === "TEEITUP" && simulator &&
         (recipe.adapter.facilityIds.length !== 1 || recipe.adapter.officialIdentityProof || recipe.adapter.officialBookingSourceProof))
       ctx.addIssue({ code: "custom", message: "Simulator adapter requires one exact directory identity" });
+    return;
+  }
+  if (recipe.engine === "BROWSER_JSON") {
+    const fence = recipe.availabilityResponse;
+    if (recipe.target.kind !== "SIMULATOR" || !recipe.target.offeringId || fence.kind === "SERVER_DOCUMENT" || fence.method !== "GET" ||
+        fence.date.source !== "QUERY" || fence.date.path !== "start_date" || fence.date.format !== "MM-DD-YYYY" || fence.endDatePath ||
+        !fence.success || !browserJsonPath.safeParse(fence.success.path).success)
+      ctx.addIssue({ code: "custom", message: "Browser JSON requires a simulator offering and explicit successful public participant/date response" });
+    const sample: AccessExecutionInput = { date: "2030-01-02", timeZone: recipe.source.timeZone, players: 2, durationMinutes: 60, startTime: "10:00", endTime: "20:00" };
+    try {
+      const url = expandRecipeTemplate(fence.url, sample, true), entry = new URL(recipe.source.bookingUrl);
+      const page = new URL(expandRecipeTemplate(recipe.pageUrl, sample, true));
+      const venue = /^\/reservations\/([a-z0-9]+(?:[-_][a-z0-9]+)*)$/u.exec(entry.pathname)?.[1];
+      if (!isSafeBrowserAvailabilityReadUrl(url, "fetch", "GET") || entry.origin !== "https://www.sevenrooms.com" ||
+          !venue || page.origin !== entry.origin || page.pathname !== entry.pathname ||
+          new URL(url).searchParams.get("venue") !== venue || recipe.pageUrl.includes("{{players}}") ||
+          fence.url.replace("party_size={{players}}", "party_size=2").includes("{{players}}") ||
+          recipe.steps.some(step => JSON.stringify(step).includes("{{players}}") &&
+            (!(step.action === "select" || step.action === "fill") || step.purpose !== "PLAYERS" || step.value !== "{{players}}")))
+        ctx.addIssue({ code: "custom", message: "Browser JSON participant binding requires the exact public venue/range role" });
+    } catch { ctx.addIssue({ code: "custom", message: "Invalid browser JSON participant response" }); }
     return;
   }
   if (recipe.engine === "BROWSER_DOM" && recipe.target.kind !== "SIMULATOR" &&
@@ -252,7 +295,7 @@ export function hashAccessRecipe(recipe: CourseAccessRecipeData) { return create
 export function recipeAllowsRequest(recipe: CourseAccessRecipeData, value: string, method: string, resourceType?: string) {
   if (recipe.engine === "EXISTING_ADAPTER") return false; // Fixed adapter transport owns its exact routes.
   if (!isSafeRecipeUrl(value) && !isSafeBrowserAssetUrl(value, resourceType ?? "", method) &&
-    !(recipe.engine === "BROWSER_DOM" && (isSafeBrowserBootstrapReadUrl(value, resourceType ?? "", method) ||
+    !((recipe.engine === "BROWSER_DOM" || recipe.engine === "BROWSER_JSON") && (isSafeBrowserBootstrapReadUrl(value, resourceType ?? "", method) ||
       isSafeBrowserAvailabilityReadUrl(value, resourceType ?? "", method)))) return false;
   const url = new URL(value);
   return recipe.permittedRoutes.some(route => route.origin === url.origin && route.methods.includes(method as "GET" | "HEAD" | "POST") &&
@@ -297,7 +340,7 @@ export type AccessExecutionResult = z.infer<typeof accessExecutionResultSchema>;
 export function readRecipeFieldFormat(field: RecipeField, value: unknown): unknown {
   // Venue claims retain the complete source text through raw/live parity.
   // Only normalize() may interpret this opt-in identity grammar afterwards.
-  if (!field.format || field.format === "VENUE_GREETING") return value;
+  if (!field.format || field.format === "VENUE_GREETING" || field.format === "VENUE_SELECT_TIME") return value;
   if (field.format === "INTEGER") {
     const match = /^(\d+)(?:\s+(?:players?|people|spots?|available))?$/iu.exec(String(value ?? "").trim());
     return match ? Number(match[1]) : undefined;

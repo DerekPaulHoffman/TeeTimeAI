@@ -3,7 +3,7 @@ import { isNonEvidenceBrowserResource } from "@/lib/automation/passfactory-publi
 import { canonicalPublicReadUrl } from "./public-request-url";
 import { PUBLIC_BROWSER_TOTAL_BYTES, publicBrowserResponseLimit } from "./browser-resource-limits";
 import { isSafeBrowserAssetUrl, isSafeRecipeUrl } from "./recipe";
-import { createPublicClientReadHeaderScope, type PublicClientReadHeaderProof } from "./public-client-read-headers";
+import { createPublicClientReadHeaderScope, type PublicClientReadHeaderProof, type PublicClientReadHeaderFailureReason } from "./public-client-read-headers";
 
 /** One CDP owner validates every initial/redirected read. Evidence comes from
  * that exact request's paused Chrome response, independently of page body use. */
@@ -94,8 +94,18 @@ type NativeRecordOwner = { closed: boolean; authorizeHeaders?: (record: RecordEn
 // Playwright lookalike, diagnostic or caller-supplied redirectedFrom chain does
 // not gain authority by exposing the same methods or URL strings.
 const nativeRequestRecords = new WeakMap<object, { record: RecordEntry; owner: NativeRecordOwner }>();
+export const nativePublicHeaderFailureFactKeys = ["nativeDocumentCurrent", "nativeRecordPresent", "nativeRecordFailed", "nativeRequestCancelled",
+  "nativeGenerationCurrent", "nativeGenerationRetired", "nativeLoaderCurrent", "nativeIdentityPresent", "nativeIdentityRevisionCurrent",
+  "nativeIdentityFailed", "nativeSourceIdentityCurrent", "nativeSourceFailed", "nativeSourceGenerationCurrent", "nativeSourceLoaderCurrent", "nativeSourceRootFrame"] as const;
+export type NativePublicHeaderProofFailure = { reason: PublicClientReadHeaderFailureReason | "OWNER_CLOSED" | "CONTEXT_CHANGED" | "NATIVE_RECORD_NOT_CURRENT" } &
+  Partial<Record<typeof nativePublicHeaderFailureFactKeys[number], boolean>>;
 const publicHeaderProofs = new WeakMap<object, { record: RecordEntry; owner: NativeRecordOwner;
-  current: () => boolean; method: "GET" | "HEAD" | null }>();
+  current: () => boolean; method: "GET" | "HEAD" | null; firstFailure?: Readonly<NativePublicHeaderProofFailure> }>();
+function rejectPublicHeaderProof(proof: PublicClientReadHeaderProof, failure: NativePublicHeaderProofFailure) {
+  const value = publicHeaderProofs.get(proof);
+  if (value && !value.firstFailure) value.firstFailure = Object.freeze({ ...failure });
+  return false;
+}
 /** Only an adapter minted by the native controller can ask for a publicity
  * proof. It grants no cookie, URL, DNS, route, response, or lease authority. */
 export async function authorizePublicClientReadHeaders(request: NativeReadRequest): Promise<PublicClientReadHeaderProof | null> {
@@ -104,7 +114,14 @@ export async function authorizePublicClientReadHeaders(request: NativeReadReques
 }
 export function isCurrentPublicClientReadHeaders(proof: PublicClientReadHeaderProof) {
   const value = publicHeaderProofs.get(proof);
-  return Boolean(value && !value.owner.closed && value.current());
+  if (!value) return false;
+  if (value.owner.closed) return rejectPublicHeaderProof(proof, { reason: "OWNER_CLOSED" });
+  return Boolean(value.current());
+}
+/** Returns the cached first failed check, without touching current state. */
+export function publicClientReadHeaderProofFailure(proof: PublicClientReadHeaderProof): NativePublicHeaderProofFailure | null {
+  const value = publicHeaderProofs.get(proof)?.firstFailure;
+  return value ? { ...value } : null;
 }
 export function nativePublicClientPreflightMethod(request: NativeReadRequest, proof: PublicClientReadHeaderProof): "GET" | "HEAD" | null {
   const value = publicHeaderProofs.get(proof);
@@ -211,6 +228,18 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         record.preflight.generation === generation && liveHeaderIdentity(record.preflight.identity, context)
         : liveHeaderIdentity(identity, context)) && identity.url === record.url && identity.method === record.method);
   };
+  const headerRecordFailureFacts = (record: RecordEntry, context: HeaderContext) => {
+    const identity = networkIdentities.get(record.networkId), source = record.preflight?.identity;
+    return { nativeDocumentCurrent: liveHeaderDocument(context), nativeRecordPresent: records.get(record.id) === record,
+      nativeRecordFailed: record.failed, nativeRequestCancelled: record.cancellation.signal.aborted,
+      nativeGenerationCurrent: record.generation === generation, nativeGenerationRetired: record.generation.retired,
+      nativeLoaderCurrent: record.loaderId === committedDocument?.loaderId, nativeIdentityPresent: Boolean(identity),
+      nativeIdentityRevisionCurrent: Boolean(identity && identity.revision === record.networkIdentityRevision),
+      nativeIdentityFailed: Boolean(identity && failedNetworkIdentities.has(identity)),
+      ...(source ? { nativeSourceIdentityCurrent: networkIdentities.get(source.id) === source, nativeSourceFailed: failedNetworkIdentities.has(source),
+        nativeSourceGenerationCurrent: source.generation === generation, nativeSourceLoaderCurrent: source.loaderId === committedDocument?.loaderId && loaderOwners.get(source.loaderId) === generation,
+        nativeSourceRootFrame: source.frameId === rootFrameId } : {}) };
+  };
   const currentHeaderContext = () => {
     const document = committedDocument?.record;
     if (!document || !document.complete || document.failed || document.generation !== generation || generation.retired || boundaryPending || closed) return null;
@@ -272,7 +301,15 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
     if (!proof || !context) return null;
     const captured = context;
     publicHeaderProofs.set(proof, { record, owner, method: record.preflight ? record.preflight.identity.method as "GET" | "HEAD" : null,
-      current: () => headerContext === captured && liveHeaderRecord(record, captured) && captured.scope.isCurrent(proof) });
+      current: () => {
+        if (headerContext !== captured) return rejectPublicHeaderProof(proof, { reason: "CONTEXT_CHANGED" });
+        if (!liveHeaderRecord(record, captured)) {
+          const facts = headerRecordFailureFacts(record, captured);
+          return rejectPublicHeaderProof(proof, { reason: facts.nativeDocumentCurrent ? "NATIVE_RECORD_NOT_CURRENT" : "DOCUMENT_NOT_CURRENT", ...facts });
+        }
+        if (!captured.scope.isCurrent(proof)) return rejectPublicHeaderProof(proof, { reason: captured.scope.failureReason(proof) ?? "PROOF_NOT_ATTESTED" });
+        return true;
+      } });
     record.publicHeaderProof = proof;
     return proof;
   };

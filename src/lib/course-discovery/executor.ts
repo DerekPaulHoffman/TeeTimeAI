@@ -12,6 +12,7 @@ import { getTimeZoneOffsetMinutes } from "@/lib/timezones";
 import { accessExecutionDiagnosticSchema, accessExecutionInputSchema, accessExecutionResultSchema, expandRecipeTemplate, hashAccessRecipe,
   parseAccessRecipe, recipeAllowsRequest, type AccessExecutionInput, type AccessExecutionResult,
   readRecipeFieldFormat, isActiveBrowserAccessChallenge, isSafeBrowserBootstrapReadUrl,
+  isSafeRecipeUrl, isSafeBrowserAvailabilityReadUrl,
   type AccessExecutionDiagnostic, type CourseAccessRecipeData, type RecipeDateParts, type RecipeField } from "./recipe";
 import { continueNativeBrowserRead, createNativePublicBrowserProxy, nativeReadPreflightMethod, type NativePublicProxy } from "./native-public-browser";
 import { installNativeRedirectRouting, authorizePublicClientReadHeaders, isCurrentPublicClientReadHeaders, nativePublicClientPreflightMethod, type NativeReadRoute } from "./native-redirect-routing";
@@ -35,8 +36,10 @@ import { inspectPublicDatePickerInput, openPublicDatePickerInput } from "./publi
 import { continuePublicRentalService, selectPublicRentalService, type PublicRentalServiceSelection } from "./public-service-control";
 import { parsePublicPlayerOptions } from "./public-player-options";
 import { matchesPublicVenueGreeting } from "./public-venue-greeting";
+import { browserJsonParticipantRequestMatches, extractBrowserJsonRows } from "./browser-json-response";
 
 type ExtractedAccessRecipe = Exclude<CourseAccessRecipeData, { engine: "EXISTING_ADAPTER" }>;
+type BrowserAccessRecipe = Extract<CourseAccessRecipeData, { engine: "BROWSER_DOM" | "BROWSER_JSON" }>;
 
 export type AccessExecutorDependencies = {
   fetch?: typeof fetch;
@@ -81,23 +84,27 @@ export function recipeExecutionDiagnostic(error: unknown, context: { stepIndex?:
   } catch { /* No unsafe or unparseable URL enters diagnostic feedback. */ }
   return diagnostic;
 }
-function matchesAvailabilityRequest(recipe: Extract<CourseAccessRecipeData, { engine: "BROWSER_DOM" }>, input: AccessExecutionInput,
+function matchesAvailabilityRequest(recipe: BrowserAccessRecipe, input: AccessExecutionInput,
   request: { url: string; method: string; body?: string | null }) {
   const fence = recipe.availabilityResponse;
   // Public setup data is ancillary even if a recipe mistakenly names it as
   // the response fence. It cannot prove dated inventory or an empty result.
   if (isSafeBrowserBootstrapReadUrl(request.url, "fetch", request.method)) return false;
   if (request.method !== fence.method || request.url !== expandRecipeTemplate(fence.url, input, true)) return false;
+  if (recipe.engine === "BROWSER_JSON" && !browserJsonParticipantRequestMatches(request, recipe.source.bookingUrl, input, isSafeRecipeUrl)) return false;
   try {
-    const source = fence.date.source === "QUERY" ? new URL(request.url).searchParams : JSON.parse(request.body ?? "");
-    const read = (path: string) => source instanceof URLSearchParams ? source.get(path) : jsonField(source, { path });
+    const url = new URL(request.url), segments = url.pathname.slice(1).split("/");
+    if (fence.date.source === "PATH" && (request.method !== "GET" || segments.some(segment => !segment) || /%(?:2f|5c)/iu.test(url.pathname))) return false;
+    const source = fence.date.source === "QUERY" ? url.searchParams : fence.date.source === "PATH" ? undefined : JSON.parse(request.body ?? "");
+    const read = (path: string) => fence.date.source === "PATH" ? /^(?:[0-9]|[1-5][0-9]|6[0-3])$/u.test(path) ? segments[Number(path)] : undefined
+      : source instanceof URLSearchParams ? source.get(path) : jsonField(source, { path });
     const date = read(fence.date.path);
     const expectedDate = fence.date.format === "MM-DD-YYYY" ? expandRecipeTemplate("{{dateMdy}}", input) : input.date;
     const matchedDate = date === expectedDate || fence.date.format !== "MM-DD-YYYY" && fence.kind === "SERVER_DOCUMENT" && date === input.date.replaceAll("-", "");
     return matchedDate && (!fence.endDatePath || read(fence.endDatePath) === expectedDate);
   } catch { return false; }
 }
-export function matchesAvailabilityResponse(recipe: Extract<CourseAccessRecipeData, { engine: "BROWSER_DOM" }>, input: AccessExecutionInput,
+export function matchesAvailabilityResponse(recipe: BrowserAccessRecipe, input: AccessExecutionInput,
   request: { url: string; method: string; body?: string | null }, status: number, responseBody?: string | Uint8Array) {
   if (status < 200 || status >= 300 || !matchesAvailabilityRequest(recipe, input, request)) return false;
   const success = recipe.availabilityResponse.success;
@@ -120,7 +127,7 @@ function jsonField(root: unknown, field: RecipeField | undefined): unknown {
   }
   return readRecipeFieldFormat(field, value);
 }
-function extractJson(recipe: ExtractedAccessRecipe, body: unknown): Extracted {
+function extractJson(recipe: Extract<CourseAccessRecipeData, { engine: "HTTP_JSON" }>, body: unknown): Extracted {
   const p = recipe.proof;
   const collection = "path" in recipe.slots.collection ? jsonField(body, recipe.slots.collection) : undefined;
   if (!Array.isArray(collection) || collection.length > 500) throw new Error("INCOMPLETE_COLLECTION");
@@ -192,6 +199,8 @@ function normalize(recipe: ExtractedAccessRecipe, input: AccessExecutionInput, d
   const simulator = recipe.target.kind === "SIMULATOR";
   const venueVerified = recipe.proof.venue.format === "VENUE_GREETING"
     ? matchesPublicVenueGreeting(recipe.source.venueName, data.venue, venueProofMatches)
+    : recipe.proof.venue.format === "VENUE_SELECT_TIME"
+      ? /^Select a time at .{2,200}$/u.test(clean(data.venue)) && venueProofMatches(recipe.source.venueName, clean(data.venue).slice("Select a time at ".length))
     : venueProofMatches(recipe.source.venueName, data.venue);
   const evidence = { recipeHash: hashAccessRecipe(recipe), venueVerified,
     dateVerified: parseSourceDate(data.date) === input.date, capacityVerified: simulator,
@@ -204,6 +213,7 @@ function normalize(recipe: ExtractedAccessRecipe, input: AccessExecutionInput, d
   // bay; public capacity, when known, remains descriptive metadata only.
   if (!simulator && data.players !== undefined && boundedNumber(data.players, 100) !== input.players) return result("INCOMPLETE", "PLAYER_FILTER_MISMATCH");
   if (recipe.target.kind === "SIMULATOR") {
+    if (recipe.engine === "BROWSER_JSON" && data.duration === undefined) return result("INCOMPLETE", "DURATION_PROOF_MISMATCH");
     if (!input.durationMinutes || boundedNumber(data.duration, 480) !== input.durationMinutes) return result("INCOMPLETE", "DURATION_PROOF_MISMATCH");
     evidence.durationVerified = true;
   }
@@ -228,7 +238,8 @@ function normalize(recipe: ExtractedAccessRecipe, input: AccessExecutionInput, d
     const capacity = /^\d+$/u.test(capacityText) && Number(capacityText) >= 1 && Number(capacityText) <= 100 ? Number(capacityText) : null;
     if (minimumPlayers > availableSpots || playerOptions && row.minimumPlayers !== undefined && minimumPlayers !== playerOptions.minPlayers)
       return result("INCOMPLETE", "INVALID_CAPACITY_RANGE");
-    const end = recipe.slots.endsAt && "derive" in recipe.slots.endsAt
+    const endField = recipe.engine === "BROWSER_JSON" ? { derive: "ADD_REQUESTED_DURATION" } : recipe.slots.endsAt;
+    const end = endField && "derive" in endField
       ? new Date(start.getTime() + input.durationMinutes! * 60_000)
       : row.endsAt === undefined ? undefined : recipeTimeToInstant(row.endsAt, input);
     if (end && end <= start) return result("INCOMPLETE", "INVALID_SLOT_DURATION");
@@ -287,7 +298,7 @@ async function domDateParts(root: Locator, field: RecipeDateParts) {
   if (!selected) return undefined;
   return parseObservedCalendarDate(await domField(root, field.monthYear), await domField(root, field.day));
 }
-async function extractDom(recipe: ExtractedAccessRecipe, root: Locator): Promise<Extracted> {
+async function extractDom(recipe: Extract<CourseAccessRecipeData, { engine: "BROWSER_DOM" }>, root: Locator): Promise<Extracted> {
   const p = recipe.proof;
   const rows: Extracted["rows"] = [];
   if (!("selector" in recipe.slots.collection)) throw new Error("INVALID_COLLECTION");
@@ -430,17 +441,26 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
     const pendingReadCount = () => Math.max(pendingRequests, redirectRouting?.pendingReads ?? 0);
     let responseGeneration: number | undefined;
     let rejectedResponseGeneration: number | undefined;
-    const usesServerDocument = recipe.availabilityResponse.kind === "SERVER_DOCUMENT";
+    const usesServerDocument = recipe.engine === "BROWSER_DOM" && recipe.availabilityResponse.kind === "SERVER_DOCUMENT";
     let mainDocumentSequence = 0, dataRequestSequence = 0;
     let serverDocument: { generation: number; documentSequence: number; dataSequence: number; extracted: ServerDocumentExtraction } | undefined;
     let lastSuccessfulAvailabilityRequest: PublicAvailabilityRequest | undefined;
+    let latestBrowserJsonRead = 0;
+    let browserJson: { generation: number; documentSequence: number; readSequence: number; extracted: ReturnType<typeof extractBrowserJsonRows> } | undefined;
     const inspectedPassfactoryDurationClients = new Set<string>();
     let selectedRequestedDate = false;
     let passfactoryAvailabilityRequests = 0, carriedDurationGeneration: number | undefined;
     const observeAvailabilityResponse = (generation: number, request: { url: string; method: string; body?: string | null }, status: number, body: Uint8Array,
       document?: { main: boolean; sequence: number; dataSequence: number; contentType: string }) => {
-      if (generation !== mutationGeneration || !matchesAvailabilityRequest(recipe, input, request)) return;
-      if (usesServerDocument) {
+      if (generation !== mutationGeneration) return;
+      if (recipe.engine === "BROWSER_JSON" && (!document || document.sequence !== mainDocumentSequence || document.dataSequence !== latestBrowserJsonRead)) return;
+      if (!matchesAvailabilityRequest(recipe, input, request)) {
+        if (recipe.engine === "BROWSER_JSON" && isSafeBrowserAvailabilityReadUrl(request.url, "fetch", request.method)) {
+          browserJson = undefined; responseGeneration = undefined; rejectedResponseGeneration = generation;
+        }
+        return;
+      }
+      if (recipe.engine === "BROWSER_DOM" && usesServerDocument) {
         try {
           if (!document?.main || document.sequence !== mainDocumentSequence || document.dataSequence !== dataRequestSequence ||
               status !== 200 || !/^text\/html(?:;|$)/iu.test(document.contentType)) throw new Error("SERVER_DOCUMENT_UNCONFIRMED");
@@ -455,10 +475,22 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
         return;
       }
       if (matchesAvailabilityResponse(recipe, input, request, status, body)) {
+        if (recipe.engine === "BROWSER_JSON") {
+          try {
+            if (!/^application\/(?:[a-z0-9.+-]*\+)?json(?:;|$)/iu.test(document?.contentType ?? "")) throw new Error("BROWSER_JSON_NOT_JSON");
+            browserJson = { generation, documentSequence: document!.sequence, readSequence: document!.dataSequence,
+              extracted: extractBrowserJsonRows(JSON.parse(Buffer.from(body).toString("utf8")), recipe.responseRows, input) };
+          } catch (error) {
+            browserJson = undefined; responseGeneration = undefined; rejectedResponseGeneration = generation;
+            failure ??= recipeExecutionDiagnostic(error);
+            return;
+          }
+        }
         responseGeneration = generation;
         rejectedResponseGeneration = undefined;
         lastSuccessfulAvailabilityRequest = request;
       } else {
+        browserJson = undefined;
         responseGeneration = undefined;
         rejectedResponseGeneration = generation;
         lastSuccessfulAvailabilityRequest = undefined;
@@ -509,6 +541,10 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
       if (mainDocument) mainDocumentSequence++;
       if (["xhr", "fetch"].includes(request.resourceType())) dataRequestSequence++;
       const capturedDocumentSequence = mainDocumentSequence, capturedDataSequence = dataRequestSequence;
+      if (recipe.engine === "BROWSER_JSON" && (mainDocument || isSafeBrowserAvailabilityReadUrl(requestUrl, request.resourceType(), request.method()))) {
+        browserJson = undefined; responseGeneration = undefined; rejectedResponseGeneration = undefined;
+        latestBrowserJsonRead = capturedDataSequence;
+      }
       if (usesServerDocument && (mainDocument || ["xhr", "fetch"].includes(request.resourceType()))) {
         serverDocument = undefined; responseGeneration = undefined; rejectedResponseGeneration = requestGeneration;
       }
@@ -628,7 +664,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
         signal.throwIfAborted();
         if (isActiveBrowserAccessChallenge(await page.locator("body").innerText(), await page.title())) return fail("ACCESS_REQUIRED", "ACCESS_REQUIRED");
         let carryDurationFence = false, previousAvailabilityRequests = passfactoryAvailabilityRequests;
-        if (step.action === "select" && step.purpose === "DURATION" && selectedRequestedDate && isPassfactoryDurationContext(recipe, page.url())) {
+        if (recipe.engine === "BROWSER_DOM" && step.action === "select" && step.purpose === "DURATION" && selectedRequestedDate && isPassfactoryDurationContext(recipe, page.url())) {
           await waitForAvailabilityResponse();
           await waitForQuietReads();
           if (!hasInspectedPassfactoryDurationClients(inspectedPassfactoryDurationClients) || !isPassfactoryDurationRequestBound(recipe, page.url(), input.date, lastSuccessfulAvailabilityRequest))
@@ -638,7 +674,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
         if (step.action === "followLink" || step.action === "selectDateChoice" || step.action === "selectDate" || step.action === "selectProduct" ||
           step.action === "selectRentalService" || step.action === "continueToAvailability" || step.action === "select" || step.action === "fill" ||
           step.action === "clickFilter" && ["SELECT_DATE", "APPLY_DATE", "SELECT_FILTER", "RUN_SEARCH"].includes(step.purpose)) {
-          mutationGeneration++; responseGeneration = undefined; rejectedResponseGeneration = undefined;
+          mutationGeneration++; responseGeneration = undefined; rejectedResponseGeneration = undefined; browserJson = undefined;
           carriedDurationGeneration = carryDurationFence ? mutationGeneration : undefined;
         }
         if (step.action === "followLink") {
@@ -704,9 +740,9 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
         if (forbiddenControl.test(label)) throw new Error("UNSAFE_CONTROL");
         if (step.action === "select") {
           await selectPublicFilter(node, { value: expandRecipeTemplate(step.value, input), purpose: step.purpose,
-            simulator: recipe.target.kind === "SIMULATOR" });
+            simulator: recipe.target.kind === "SIMULATOR" && recipe.engine !== "BROWSER_JSON" });
           if (step.purpose === "DATE") selectedRequestedDate = true;
-          if (carryDurationFence) {
+          if (recipe.engine === "BROWSER_DOM" && carryDurationFence) {
             await waitForQuietReads();
             if (boundedNumber(await domField(page.locator("body"), recipe.proof.durationMinutes), 480) !== input.durationMinutes)
               throw new Error("DURATION_PROOF_MISMATCH");
@@ -768,12 +804,22 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
       if (isActiveBrowserAccessChallenge(await page.locator("body").innerText(), await page.title())) return fail("ACCESS_REQUIRED", "ACCESS_REQUIRED");
       if (providerThrottled) return fail("FAILED", "PROVIDER_THROTTLED");
       if (blocked || !recipeAllowsRequest(recipe, canonicalCpsPublicUrl(page.url()), "GET")) return fail("INCOMPLETE", "UNSCOPED_OR_FAILED_RESOURCE");
-      const first = await extractDom(recipe, page.locator("body"));
-      if (first.duration === undefined) first.duration = selectedProductDuration;
+      const extract = async (): Promise<Extracted> => {
+        if (recipe.engine === "BROWSER_DOM") return extractDom(recipe, page.locator("body"));
+        const current = browserJson;
+        if (!current || current.generation !== mutationGeneration || current.documentSequence !== mainDocumentSequence ||
+            current.readSequence !== latestBrowserJsonRead) throw new Error("AVAILABILITY_RESPONSE_UNCONFIRMED");
+        const venue = await domField(page.locator("body"), recipe.proof.venue);
+        if (browserJson !== current || current.generation !== mutationGeneration || current.documentSequence !== mainDocumentSequence ||
+            current.readSequence !== latestBrowserJsonRead) throw new Error("UNSETTLED_RESULTS");
+        return { ...current.extracted, venue };
+      };
+      const first = await extract();
+      if (recipe.engine === "BROWSER_DOM" && first.duration === undefined) first.duration = selectedProductDuration;
       await page.waitForTimeout(750);
       await waitForQuietReads();
-      const second = await extractDom(recipe, page.locator("body"));
-      if (second.duration === undefined) second.duration = selectedProductDuration;
+      const second = await extract();
+      if (recipe.engine === "BROWSER_DOM" && second.duration === undefined) second.duration = selectedProductDuration;
       if (providerThrottled) return fail("FAILED", "PROVIDER_THROTTLED");
       if (blocked || !recipeAllowsRequest(recipe, canonicalCpsPublicUrl(page.url()), "GET")) return fail("INCOMPLETE", "UNSCOPED_OR_FAILED_RESOURCE");
       if (pendingReadCount() || responseGeneration !== mutationGeneration || JSON.stringify(first) !== JSON.stringify(second)) return fail("INCOMPLETE", "UNSETTLED_RESULTS");
@@ -791,7 +837,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
     failure ??= recipeExecutionDiagnostic(error, activity);
     const message = error instanceof Error ? error.message : "";
     const reason = providerThrottled ? "PROVIDER_THROTTLED" : /^[A-Z_0-9]{1,80}$/u.test(message) ? message : failure.code;
-    return fail(reason === "ACCESS_REQUIRED" ? "ACCESS_REQUIRED" : ["INVALID_SLOT_TIME", "AMBIGUOUS_OR_INVALID_LOCAL_TIME", "INCOMPLETE_COLLECTION", "INVALID_CAPACITY_OR_DURATION", "UNSETTLED_REQUESTS", "AMBIGUOUS_PROOF_FIELD", "RESOURCE_IDENTITY_MISMATCH", "AMBIGUOUS_RESOURCE_SCOPE", "INVALID_RESOURCE_SCOPE", "RESOURCE_SCOPE_NOT_CARD", "AVAILABILITY_RESPONSE_UNCONFIRMED", "AVAILABILITY_RESPONSE_FAILED", "UNVERIFIED_CLIENT_DURATION", "DURATION_PROOF_MISMATCH", "UNVERIFIED_PUBLIC_CATALOG_TILE", "PUBLIC_CATALOG_SELECTION_UNCONFIRMED"].includes(reason) ? "INCOMPLETE" : "FAILED",
+    return fail(reason === "ACCESS_REQUIRED" ? "ACCESS_REQUIRED" : reason.startsWith("BROWSER_JSON_") || ["INVALID_SLOT_TIME", "AMBIGUOUS_OR_INVALID_LOCAL_TIME", "INCOMPLETE_COLLECTION", "INVALID_CAPACITY_OR_DURATION", "UNSETTLED_REQUESTS", "AMBIGUOUS_PROOF_FIELD", "RESOURCE_IDENTITY_MISMATCH", "AMBIGUOUS_RESOURCE_SCOPE", "INVALID_RESOURCE_SCOPE", "RESOURCE_SCOPE_NOT_CARD", "AVAILABILITY_RESPONSE_UNCONFIRMED", "AVAILABILITY_RESPONSE_FAILED", "UNVERIFIED_CLIENT_DURATION", "DURATION_PROOF_MISMATCH", "UNVERIFIED_PUBLIC_CATALOG_TILE", "PUBLIC_CATALOG_SELECTION_UNCONFIRMED"].includes(reason) ? "INCOMPLETE" : "FAILED",
       reason);
   } finally { cancellation.abort("EXECUTION_FINISHED"); requestQueue.dispose(); await browser?.close().catch(() => {}); await nativeProxy?.close(); }
 }

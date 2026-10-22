@@ -26,6 +26,8 @@ export type PublicClientRequestFacts = {
 };
 declare const proofBrand: unique symbol;
 export type PublicClientReadHeaderProof = { readonly [proofBrand]: true };
+export type PublicClientReadHeaderFailureReason = "PROOF_NOT_ATTESTED" | "SCRIPT_VERSION_CHANGED" | "REVOCATION_EPOCH_CHANGED" |
+  "DOCUMENT_NOT_CURRENT" | "PUBLIC_VALUES_MISSING" | "PUBLIC_SOURCE_INVALID" | "REQUEST_SIGNATURE_CHANGED";
 
 const MAX_SOURCE_BYTES = 2 * 1024 * 1024;
 const MAX_AST_NODES = 250_000;
@@ -160,6 +162,7 @@ type ProofState = { version: number; kind: "script" } |
 export function createPublicClientReadHeaderScope(document: object, attestors: PublicClientReadHeaderAttestors) {
   const sources = new Map<object, string>(), publicValues = new Set<string>();
   const proofs = new WeakMap<object, ProofState>(), failedSources = new WeakSet<object>(), failedRequests = new WeakSet<object>();
+  const proofFailures = new WeakMap<object, PublicClientReadHeaderFailureReason>();
   let version = 0, revocationEpoch = 0, closed = false, loader: object | null = null, origin = "";
   const attest = (kind: keyof PublicClientReadHeaderAttestors, value: object) => {
     try { return data(attestors[kind](value)); } catch { return null; }
@@ -190,11 +193,12 @@ export function createPublicClientReadHeaderScope(document: object, attestors: P
   };
   const scriptDigest = (facts: Record<string, unknown> & { body: string }) =>
     hash(JSON.stringify([facts.url, facts.mimeType, hash(facts.body)]));
-  const currentSources = () => {
-    if (!currentDocument() || !publicValues.size) return false;
+  const currentSources = (rejected?: (reason: PublicClientReadHeaderFailureReason) => void) => {
+    if (!currentDocument()) { rejected?.("DOCUMENT_NOT_CURRENT"); return false; }
+    if (!publicValues.size) { rejected?.("PUBLIC_VALUES_MISSING"); return false; }
     for (const [source, digest] of sources) {
       const facts = scriptFacts(source);
-      if (!facts || scriptDigest(facts) !== digest) { failedSources.add(source); invalidate(); return false; }
+      if (!facts || scriptDigest(facts) !== digest) { rejected?.("PUBLIC_SOURCE_INVALID"); failedSources.add(source); invalidate(); return false; }
     }
     return true;
   };
@@ -264,16 +268,24 @@ export function createPublicClientReadHeaderScope(document: object, attestors: P
     /** Call again inside queued dispatch, after acquiring the ordinary lease. */
     isCurrent(value: PublicClientReadHeaderProof): boolean {
       const state = proofs.get(value);
+      const rejected = (reason: PublicClientReadHeaderFailureReason) => {
+        if (token(value) && !proofFailures.has(value)) proofFailures.set(value, reason);
+        return false;
+      };
       // Adding a valid witness changes script captures, not queued read authority.
       // Destructive invalidation still permanently revokes every old proof; all
       // current sources and the exact private request are rechecked below.
-      if (!state || (state.kind === "script" ? state.version !== version : state.revocationEpoch !== revocationEpoch) ||
-          !currentSources()) return false;
+      if (!state) return rejected("PROOF_NOT_ATTESTED");
+      if (state.kind === "script" ? state.version !== version : state.revocationEpoch !== revocationEpoch)
+        return rejected(state.kind === "script" ? "SCRIPT_VERSION_CHANGED" : "REVOCATION_EPOCH_CHANGED");
+      if (!currentSources(rejected)) return false;
       if (state.kind === "script") return true;
       const signature = state.kind === "read" ? read(state.request)?.signature : preflight(state.request, state.source);
-      if (signature !== state.signature) { failedRequests.add(state.request); return false; }
+      if (signature !== state.signature) { failedRequests.add(state.request); return rejected("REQUEST_SIGNATURE_CHANGED"); }
       return true;
     },
+    /** Observed first failure only. Reading diagnostics never revalidates a proof. */
+    failureReason(value: PublicClientReadHeaderProof) { return proofFailures.get(value) ?? null; },
     /** Source failure retires every existing witness; no checkpoint restore. */
     invalidate,
     close() { closed = true; invalidate(); },
