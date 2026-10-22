@@ -72,6 +72,46 @@ describe("discovery browser public protocol", () => {
 
 const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
+  it("observes a public language-bearing inventory response without promoting it to navigation", async () => {
+    const source = "https://www.sevenrooms.com/reservations/publicrental";
+    const inventory = "https://www.sevenrooms.com/api-yoa/availability/widget/range?venue=publicrental&time_slot=12:00&party_size=1&halo_size_interval=16&start_date=10-23-2026&num_days=1&channel=SEVENROOMS_WIDGET&selected_lang_code=en&picked_duration=60";
+    const html = `<h1>Public rental</h1><script>fetch(${JSON.stringify(inventory)}).then(r=>r.json()).then(()=>document.querySelector('h1').textContent='Public inventory ready')</script>`;
+    const fetch = vi.fn(async url => String(url) === inventory
+      ? new Response(JSON.stringify({ status: "success", data: { times: ["10:00"] } }), { headers: { "content-type": "application/json" } })
+      : new Response(html, { headers: { "content-type": "text/html" } })) as unknown as typeof globalThis.fetch;
+    const session = await createCourseDiscoveryBrowserSession({ initialUrls: [source], deadlineAt: new Date(Date.now() + 20_000) }, {
+      launchBrowser: () => chromium.launch({ executablePath, headless: true }), fetch,
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      const snapshot = await session.execute({ id: 1, action: "open", url: source });
+      expect(snapshot.text).toContain("Public inventory ready");
+      expect(snapshot.requests.find(row => row.url === inventory)).toMatchObject({ status: 200, method: "GET" });
+      expect(snapshot.requests.find(row => row.url === inventory)?.readPurpose).toBe("PUBLIC_AVAILABILITY");
+      expect(snapshot.responses.find(row => row.url === inventory)?.body).toMatchObject({ status: "success" });
+      await expect(session.execute({ id: 2, action: "open", url: inventory })).rejects.toThrow();
+    } finally { await session.close(); }
+  }, 25_000);
+
+  it("exposes and safely opens a readonly date input labelled by its placeholder", async () => {
+    const source = "https://example.org/public-times";
+    const html = `<h1>Public Golf</h1><input id="date-input" readonly placeholder="Choose date" aria-haspopup="dialog" value="Thu, Oct 22, 2026" onclick="document.getElementById('calendar').hidden=false"><div id="calendar" role="dialog" hidden>Calendar ready</div>`;
+    const fetch = vi.fn(async () => new Response(html, { headers: { "content-type": "text/html" } })) as unknown as typeof globalThis.fetch;
+    const session = await createCourseDiscoveryBrowserSession({ initialUrls: [source], deadlineAt: new Date(Date.now() + 20_000) }, {
+      launchBrowser: () => chromium.launch({ executablePath, headless: true }), fetch,
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      const first = await session.execute({ id: 1, action: "open", url: source });
+      const date = first.controls.find(control => control.selector === '[id="date-input"]')!;
+      expect(date).toMatchObject({ kind: "calendar", name: "Choose date", currentValue: "Thu, Oct 22, 2026", readOnly: true });
+      await expect(session.execute({ id: 2, action: "fill", target: date.target, text: "2026-10-23" })).rejects.toThrow("UNSAFE_CONTROL");
+      const next = await session.execute({ id: 3, action: "click", target: date.target });
+      expect(next.text).toContain("Calendar ready");
+      expect(fetch).toHaveBeenCalledTimes(1);
+    } finally { await session.close(); }
+  }, 25_000);
+
   it("retires native work only after exact admitted document navigation and preserves cumulative budgets/deadline", async () => {
     const boundaries: string[] = [], originalDeadline = new Date(Date.now() + 30_000);
     const deadlineMillis = originalDeadline.getTime();

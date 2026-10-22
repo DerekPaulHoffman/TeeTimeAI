@@ -82,3 +82,32 @@ it("aborts decorative preloads reported as other without hiding application read
   expect(isNonEvidenceBrowserResource("https://example.org/static/app.js", "script")).toBe(false);
   expect(isNonEvidenceBrowserResource("https://example.org/api/times.png", "fetch")).toBe(false);
 });
+
+it("quietly denies observed analytics without hiding availability or an access wall", () => {
+  for (const url of [
+    "https://e.clarity.ms/collect", "https://q.clarity.ms/collect",
+    "https://o17585.ingest.us.sentry.io/api/6350689/envelope/?sentry_key=public",
+    "https://example.org/cdn-cgi/zaraz/s.js?z=opaque",
+  ]) {
+    expect(isIncidentalBrowserRequest(url)).toBe(true);
+    expect(isNonEvidenceBrowserResource(url, "script")).toBe(true);
+  }
+  // This exact injected detector is aborted, never executed or treated as
+  // proof of access. Visible challenge pages still use the access-wall guard.
+  expect(isNonEvidenceBrowserResource("https://example.org/cdn-cgi/challenge-platform/scripts/jsd/main.js", "script")).toBe(true);
+  for (const url of [
+    "https://e.clarity.ms/availability", "https://e.clarity.ms.evil.test/collect",
+    "https://o17585.ingest.us.sentry.io/api/6350689/availability/",
+    "https://o17585.ingest.us.sentry.io.evil.test/api/6350689/envelope/",
+    "https://example.org/cdn-cgi/zaraz/availability", "http://example.org/cdn-cgi/zaraz/s.js",
+    "https://user:password@example.org/cdn-cgi/zaraz/s.js",
+    "https://example.org:444/cdn-cgi/zaraz/s.js",
+  ]) expect(isIncidentalBrowserRequest(url)).toBe(false);
+  for (const [url, kind] of [
+    ["https://example.org/cdn-cgi/challenge-platform/scripts/jsd/main.js", "fetch"],
+    ["https://example.org/cdn-cgi/challenge-platform/scripts/jsd/main.js", "document"],
+    ["https://example.org/cdn-cgi/challenge-platform/scripts/jsd/api.js", "script"],
+    ["http://example.org/cdn-cgi/challenge-platform/scripts/jsd/main.js", "script"],
+    ["https://example.org/api/availability", "fetch"],
+  ]) expect(isNonEvidenceBrowserResource(url, kind)).toBe(false);
+});

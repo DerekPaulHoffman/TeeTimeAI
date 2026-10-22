@@ -11,9 +11,9 @@ import { createUSchedulePublicReadPolicy } from "@/lib/automation/uschedule-publ
 import { sanitizeResponderText } from "@/lib/automation/course-support-responder-policy";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
-import { isActiveBrowserAccessChallenge, isSafeBrowserAssetUrl, isSafeBrowserBootstrapReadUrl, isSafeRecipeUrl, recipeSelectorSchema } from "./recipe";
+import { isActiveBrowserAccessChallenge, isSafeBrowserAssetUrl, isSafeBrowserBootstrapReadUrl, isSafeBrowserAvailabilityReadUrl, isSafeRecipeUrl, recipeSelectorSchema } from "./recipe";
 import { continueNativeBrowserRead, createNativePublicBrowserProxy, isObservedNativeRedirect, isObservedNativeRedirectTarget, nativeReadPreflightMethod } from "./native-public-browser";
-import { installNativeRedirectRouting, isNativeReadSupersededFailure, type NativeFirstFatal, type NativeReadRoute, type NativeRequestDiagnostic } from "./native-redirect-routing";
+import { installNativeRedirectRouting, isNativeReadSupersededFailure, authorizePublicClientReadHeaders, isCurrentPublicClientReadHeaders, nativePublicClientPreflightMethod, type NativeFirstFatal, type NativeReadRoute, type NativeRequestDiagnostic } from "./native-redirect-routing";
 import { requestFamilyForUrl } from "./request-family";
 import { canonicalPublicReadUrl } from "./public-request-url";
 import { inspectExistingAdapter } from "./existing-adapter-executor";
@@ -31,6 +31,7 @@ import { inspectPublicRentalProduct } from "./public-product-control";
 import { createPublicCatalogTileScope, inspectPublicCatalogTile, openPublicCatalogTile } from "./public-catalog-tile";
 import { canonicalCpsPublicUrl, cpsPublicEntryUrl, cpsSessionKey, createCpsPublicSessionScope } from "./cps-public-navigation";
 import { observedPublicDateChoices, isPublicDateChoice } from "./public-date-choice";
+import { inspectPublicDatePickerInput, openPublicDatePickerInput, type PublicDatePickerInputProof } from "./public-date-picker-input";
 import { isPublicAvailabilityNavigation } from "./public-navigation-control";
 import { observedPublicFrameSources } from "./public-frame-source";
 import { launchPublicReadBrowser } from "./public-browser-launch";
@@ -55,7 +56,7 @@ export type DiscoveryBrowserAction = z.infer<typeof discoveryBrowserActionSchema
 type ObservedControl = { tag: string; role: string; name: string; label: string; href?: string; calendar: boolean;
   sensitiveForm: boolean; inputType: string; hasPopup: string; selector: string; options?: Array<{ value: string; label: string }>;
   currentValue?: string; product?: { selector: string; durationMinutes: number }; choiceValue?: string; choiceContext?: string; disabledChoice?: boolean;
-  formSafeAnchor?: boolean; readOnlyFormDisplay?: boolean; documentNavigationOnly?: boolean;
+  formSafeAnchor?: boolean; readOnlyFormDisplay?: boolean; documentNavigationOnly?: boolean; datePicker?: PublicDatePickerInputProof;
   service?: PublicRentalServiceProof; serviceContinuation?: PublicServiceContinuationMode; serviceMenuOption?: boolean; catalogTile?: boolean };
 type EzLinksDocumentWitness = { url: string; settled: boolean; status?: number; token?: EzLinksDocumentToken;
   observedAt?: number;
@@ -115,9 +116,9 @@ export function sameDiscoveryMainDocument(observedUrl: string, currentUrl: strin
   return Boolean(observedUrl && currentUrl) && observedUrl.split("#", 1)[0] === currentUrl.split("#", 1)[0];
 }
 export type DiscoveryBrowserSnapshot = {
-  url: string; text: string; controls: Array<{ target: string; selector: string; kind: string; name: string; label: string; href?: string; options?: Array<{ value: string; label: string }>; currentValue?: string; product?: { selector: string; durationMinutes: number } }>;
+  url: string; text: string; controls: Array<{ target: string; selector: string; kind: string; name: string; label: string; href?: string; options?: Array<{ value: string; label: string }>; currentValue?: string; readOnly?: true; product?: { selector: string; durationMinutes: number } }>;
   responses: Array<{ url: string; status: number; method: string; body?: unknown; bodyOmitted?: true; schemaEvidence?: PublicResponseSchema; schemaEvidenceOmitted?: true }>;
-  requests: Array<{ url: string; method: string; resourceType: string; status?: number; blockedReason?: string; body?: unknown; readPurpose?: "PUBLIC_BOOTSTRAP";
+  requests: Array<{ url: string; method: string; resourceType: string; status?: number; blockedReason?: string; body?: unknown; readPurpose?: "PUBLIC_BOOTSTRAP" | "PUBLIC_AVAILABILITY";
     urlRejection?: ReturnType<typeof safePublicUrlRejectionDiagnostic> }>;
   requestFailures?: Array<{ reason: string; resourceType: string; method?: string; url?: string;
     urlRejection?: ReturnType<typeof safePublicUrlRejectionDiagnostic> }>;
@@ -248,7 +249,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
   let requestMetadataBytes = 0;
   const recordRequest = (metadata: DiscoveryBrowserSnapshot["requests"][number], priority = false) => {
     if ((!isSafeRecipeUrl(metadata.url) && !isSafeBrowserAssetUrl(metadata.url, metadata.resourceType, metadata.method) &&
-        !isSafeBrowserBootstrapReadUrl(metadata.url, metadata.resourceType, metadata.method)) || observedRequests.includes(metadata)) return;
+        !isSafeBrowserBootstrapReadUrl(metadata.url, metadata.resourceType, metadata.method) &&
+        !isSafeBrowserAvailabilityReadUrl(metadata.url, metadata.resourceType, metadata.method)) || observedRequests.includes(metadata)) return;
     const size = JSON.stringify(metadata).length + 120;
     if (priority) {
       while (observedRequests.length && (observedRequests.length >= 80 || requestMetadataBytes + size > 10_000)) {
@@ -263,7 +265,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     }
   };
   const controls = new Map<string, { locator: Locator; signature: string; kind: string; href?: string; documentNavigationOnly?: boolean; calendarDay?: string; dropdown?: PublicDropdownProof; catalogTile?: boolean;
-    service?: boolean; serviceContinuation?: PublicServiceContinuationMode }>();
+    service?: boolean; serviceContinuation?: PublicServiceContinuationMode; datePicker?: PublicDatePickerInputProof }>();
   let serviceSelection: PublicRentalServiceSelection | undefined;
   const observedElements = new Map<string, { locator: Locator; signature: string }>();
   let closed = false, requestCount = 0, interceptCount = 0, responseBytes = 0, blockedRequests = 0, pendingRequests = 0, actions = 0, observations = 0;
@@ -340,7 +342,10 @@ export async function createCourseDiscoveryBrowserSession(input: {
       if (!cpsScope.authorize(transportUrl, request.redirectedFrom()?.url())) throw new Error("UNOBSERVED_CPS_SESSION");
       if (cpsSessionKey(transportUrl) && !nativeProxy) throw new Error("CPS_NATIVE_BROWSER_REQUIRED");
       const method = request.method(), requestHeaders = request.headers();
-      const preflight = nativeProxy && method === "OPTIONS" && nativeReadPreflightMethod(requestHeaders);
+      const publicHeaderProof = nativeProxy && (method === "OPTIONS" || Object.keys(requestHeaders).some(key => /^(?:authorization|x-api-key)$/iu.test(key)))
+        ? await authorizePublicClientReadHeaders(request) : null;
+      const preflight = nativeProxy && method === "OPTIONS" && (nativeReadPreflightMethod(requestHeaders) ||
+        publicHeaderProof && nativePublicClientPreflightMethod(request, publicHeaderProof));
       // The native router separately correlates the browser's GET preflight
       // with its initiating root-frame data read. Validate only that read's
       // purpose here; wire method and diagnostic resource kind stay original.
@@ -348,9 +353,11 @@ export async function createCourseDiscoveryBrowserSession(input: {
       const bootstrapKind = preflight === "GET" ? "fetch" : request.resourceType();
       const bootstrapRead = isSafeBrowserBootstrapReadUrl(requestUrl, bootstrapKind, bootstrapMethod);
       if (bootstrapRead) metadata.readPurpose = "PUBLIC_BOOTSTRAP";
+      else if (isSafeBrowserAvailabilityReadUrl(requestUrl, request.resourceType(), method)) metadata.readPurpose = "PUBLIC_AVAILABILITY";
       const parent = request.redirectedFrom();
       if (parent && isSafeBrowserBootstrapReadUrl(parent.url(), parent.resourceType(), parent.method())) throw new Error("UNSAFE_REDIRECT");
-      if (!isSafeRecipeUrl(requestUrl) && !isSafeBrowserAssetUrl(requestUrl, request.resourceType(), method) && !bootstrapRead) {
+      if (!isSafeRecipeUrl(requestUrl) && !isSafeBrowserAssetUrl(requestUrl, request.resourceType(), method) && !bootstrapRead &&
+          !isSafeBrowserAvailabilityReadUrl(requestUrl, request.resourceType(), method)) {
         metadata.urlRejection = describePublicUrlRejection(request.url(), requestUrl, request.method(), request.resourceType(), "BROWSER_REQUEST_URL",
           { recipe: isSafeRecipeUrl, asset: isSafeBrowserAssetUrl });
         throw new Error("UNSAFE_URL");
@@ -408,7 +415,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
           !isRexPublicBrowserReadPost(url, method, requestHeaders, body ?? "", frameUrl))
         throw new Error(rexPublicBrowserReadRejection(url, method, requestHeaders, body ?? "", frameUrl));
       const rexPlaceholder = nativeProxy && isRexAnonymousPlaceholderRead(url, method, requestHeaders, body ?? "", frameUrl);
-      if (nativeProxy && !rexPlaceholder && Object.keys(requestHeaders).some(key => /^(?:authorization|proxy-authorization|x-api-key)$/iu.test(key))) throw new Error("CREDENTIAL_HEADERS");
+      if (nativeProxy && !rexPlaceholder && !publicHeaderProof && Object.keys(requestHeaders).some(key => /^(?:authorization|proxy-authorization|x-api-key)$/iu.test(key))) throw new Error("CREDENTIAL_HEADERS");
       if (ezlinks.handles(url) && Object.keys(requestHeaders).some(key =>
         !(nativeProxy && key.toLowerCase() === "cookie") && /authorization|cookie|token|api.?key|secret|credential|next-action|csrf|session/iu.test(key)))
         throw new Error("CREDENTIAL_HEADERS");
@@ -443,6 +450,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
         // A same-document script read can retire the completion contract while
         // this exact POST waits for the shared provider lease.
         assertEzReadContract(ezWitness, ezCall?.contractVersion);
+        if (publicHeaderProof && !isCurrentPublicClientReadHeaders(publicHeaderProof)) throw new Error("CREDENTIAL_HEADERS");
         if (nativeProxy) {
           nativeProxy.allowHostConnections(url.hostname);
           const response = await continueNativeBrowserRead(route, deadline, responseLimit, async () => {
@@ -453,7 +461,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
         const transport = deps.fetch ?? createAddressPinnedPublicFetchTransport({
           parseUrl: value => {
             if (!isSafeRecipeUrl(value) && !isSafeBrowserAssetUrl(value, request.resourceType(), method) &&
-                !isSafeBrowserBootstrapReadUrl(value, request.resourceType(), method)) {
+                !isSafeBrowserBootstrapReadUrl(value, request.resourceType(), method) && !isSafeBrowserAvailabilityReadUrl(value, request.resourceType(), method)) {
               metadata.urlRejection = describePublicUrlRejection(value, value, method, request.resourceType(), "PINNED_TRANSPORT_URL",
                 { recipe: isSafeRecipeUrl, asset: isSafeBrowserAssetUrl });
               throw new Error("UNSAFE_URL");
@@ -719,6 +727,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       ...(!sensitiveForm && (node.tagName === "SELECT" || node.tagName === "INPUT" && ["date", "number"].includes(field.type)) ? { currentValue: field.value.slice(0, 200) } : {}),
       ...(node.tagName === "SELECT" && !sensitiveForm ? { options: Array.from((node as HTMLSelectElement).options).slice(0, 100).map(item => ({ value: item.value.slice(0, 200), label: (item.textContent ?? "").trim().slice(0, 200) })) } : {}) };
   }, undefined, { timeout: 1000 }).then(async control => {
+    const datePicker = !control.sensitiveForm && control.tag === "input" ? await inspectPublicDatePickerInput(locator) : undefined;
     const product = !control.sensitiveForm && ["a", "button"].includes(control.tag) ? await inspectPublicRentalProduct(locator) : undefined;
     const catalogTile = !control.sensitiveForm && control.tag === "article" ? await inspectPublicCatalogTile(locator, catalogTiles) : undefined;
     const service = !control.sensitiveForm && (control.tag === "select" || control.role === "combobox") ? await inspectPublicRentalService(locator) : undefined;
@@ -736,7 +745,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
     const href = control.href ? normalizeDiscoveryNavigationUrl(control.href) : undefined;
     const documentNavigationOnly = Boolean(control.formSafeAnchor && href && !new URL(href).hash &&
       discoveryPublicAnchorKind({ ...control, href, sensitiveForm: false }));
-    return { ...control, ...(catalogTile ? { name: catalogTile.name, label: catalogTile.name, catalogTile: true } : {}), ...(documentNavigationOnly ? { documentNavigationOnly: true } : {}), ...(product ? { product } : {}), ...(service ? { service } : {}),
+    return { ...control, ...(datePicker ? { datePicker, name: datePicker.label, label: datePicker.label, currentValue: datePicker.currentValue } : {}),
+      ...(catalogTile ? { name: catalogTile.name, label: catalogTile.name, catalogTile: true } : {}), ...(documentNavigationOnly ? { documentNavigationOnly: true } : {}), ...(product ? { product } : {}), ...(service ? { service } : {}),
       ...(serviceContinuation ? { serviceContinuation } : {}), ...(serviceMenuOption ? { serviceMenuOption: true } : {}),
       ...(href ? { href } : {}) };
   });
@@ -746,6 +756,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     // exclusion as a labelled public availability link.
     if (control.href && !isPublicAvailabilityNavigation(control.href, (control.name || control.label).trim())) return null;
     if (control.documentNavigationOnly) return "link";
+    if (control.datePicker) return "calendar";
     const kind = control.catalogTile || control.service ? "filter" : control.serviceContinuation ? "service-continuation" : control.product ? "product" : discoveryPublicAnchorKind(control) ?? discoveryPublicChoiceKind(control) ?? interactiveControlKind(control) ?? (control.tag === "select" && !control.sensitiveForm ? "filter" : null);
     if (!kind || /\b(?:book|reserve|checkout|confirm|purchase|pay)\b/iu.test(control.name) && !["link", "product"].includes(kind) ||
       control.href && !isSafeRecipeUrl(control.href)) return null;
@@ -804,11 +815,13 @@ export async function createCourseDiscoveryBrowserSession(input: {
     const target = randomUUID();
     controls.set(target, { locator, signature: JSON.stringify(control), kind, href: control.href, ...(control.documentNavigationOnly ? { documentNavigationOnly: true } : {}),
       ...(control.catalogTile ? { catalogTile: true } : {}),
+      ...(control.datePicker ? { datePicker: control.datePicker } : {}),
       ...(extra.date ? { calendarDay: extra.date } : {}), ...(extra.dropdown ? { dropdown: extra.dropdown } : {}),
       ...(control.service ? { service: true } : {}), ...(control.serviceContinuation ? { serviceContinuation: control.serviceContinuation } : {}) });
     observedElements.set(control.selector, { locator, signature: JSON.stringify(control) });
     return { target, selector: control.selector, kind, name: sanitizeResponderText(control.name), label: sanitizeResponderText(extra.dropdown?.label ?? control.label),
       ...(control.href ? { href: control.href } : {}), ...(control.currentValue === undefined ? {} : { currentValue: sanitizeResponderText(control.currentValue) }),
+      ...(control.datePicker ? { readOnly: true as const } : {}),
       ...(control.product ? { product: control.product } : {}),
       ...(control.service ? { options: control.service.options.map(option => ({ value: sanitizeResponderText(option.label), label: sanitizeResponderText(option.label) })) } : {}),
       ...(control.options && !control.service ? { options: control.options.map(option => ({ value: sanitizeResponderText(option.value), label: sanitizeResponderText(option.label) })) } : {}) };
@@ -1249,6 +1262,10 @@ export async function createCourseDiscoveryBrowserSession(input: {
           if (known.kind !== "field" || !/^[\d\s/:.T-]{1,120}$/u.test(action.text)) throw new Error("UNSAFE_CONTROL");
           await known.locator.fill(action.text); await known.locator.dispatchEvent("change");
         } else {
+          if (known.datePicker) {
+            await openPublicDatePickerInput(known.locator, known.datePicker);
+            return snapshot();
+          }
           if (known.catalogTile) {
             await openPublicCatalogTile(known.locator, catalogTiles);
             return snapshot();

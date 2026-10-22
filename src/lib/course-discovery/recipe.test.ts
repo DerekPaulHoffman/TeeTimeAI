@@ -3,7 +3,7 @@ import { z } from "zod";
 import { venueProofMatches } from "./executor";
 import { matchesPublicVenueGreeting } from "./public-venue-greeting";
 import { accessExecutionInputSchema, accessExecutionResultSchema, accessRecipeSchema, expandRecipeTemplate, hashAccessRecipe,
-  isActiveBrowserAccessChallenge, isSafeBrowserAssetUrl, isSafeBrowserBootstrapReadUrl, isSafeRecipeUrl, parseAccessRecipe, recipeAllowsRequest, recipeSelectorSchema, readRecipeFieldFormat,
+  isActiveBrowserAccessChallenge, isSafeBrowserAssetUrl, isSafeBrowserBootstrapReadUrl, isSafeBrowserAvailabilityReadUrl, isSafeRecipeUrl, parseAccessRecipe, recipeAllowsRequest, recipeSelectorSchema, readRecipeFieldFormat,
   SERVER_DOCUMENT_SELECTOR_MESSAGE } from "./recipe";
 
 export const httpRecipe = () => ({
@@ -30,6 +30,26 @@ const serverDocumentRecipe = () => ({
 });
 
 describe("course access recipes", () => {
+  it("keeps the public language-bearing inventory read inside explicit browser routes", () => {
+    const template = "https://www.sevenrooms.com/api-yoa/availability/widget/range?venue=publicrental&time_slot=12:00&party_size=1&halo_size_interval=16&start_date={{dateMdy}}&num_days=1&channel=SEVENROOMS_WIDGET&selected_lang_code=en&picked_duration={{durationMinutes}}";
+    const url = expandRecipeTemplate(template, { ...executionInput, durationMinutes: 60 }, true);
+    expect(isSafeRecipeUrl(url)).toBe(false);
+    expect(isSafeBrowserAvailabilityReadUrl(url, "fetch", "GET")).toBe(true);
+    const base = serverDocumentRecipe();
+    const recipe = parseAccessRecipe({ ...base, proof: { ...base.proof, complete: { selector: "#ready" } },
+      availabilityResponse: { url: template, method: "GET", date: { source: "QUERY", path: "start_date", format: "MM-DD-YYYY" } },
+      permittedRoutes: [...base.permittedRoutes, { origin: "https://www.sevenrooms.com", path: "/api-yoa/availability/widget/range", methods: ["GET"],
+        queryKeys: ["venue", "time_slot", "party_size", "halo_size_interval", "start_date", "num_days", "channel", "selected_lang_code", "picked_duration"] }] });
+    expect(recipeAllowsRequest(recipe, url, "GET", "fetch")).toBe(true);
+    expect(recipeAllowsRequest(recipe, url, "GET", "document")).toBe(false);
+    expect(recipeAllowsRequest(recipe, url, "POST", "fetch")).toBe(false);
+    expect(recipeAllowsRequest({ ...recipe, permittedRoutes: base.permittedRoutes }, url, "GET", "fetch")).toBe(false);
+    expect(recipeAllowsRequest(recipe, url + "&client_id=anonymous", "GET", "fetch")).toBe(false);
+    expect(() => parseAccessRecipe({ ...recipe, source: { ...recipe.source, bookingUrl: url } })).toThrow();
+    expect(() => parseAccessRecipe({ ...httpRecipe(), request: { url: template, method: "GET" } })).toThrow();
+    expect(expandRecipeTemplate("{{dateMdy}}|{{month}}|{{day}}", { date: "2030-01-02" })).toBe("01-02-2030|1|2");
+  });
+
   it.each([".be_search_message_body p:first-child", ".be_search_message_body p:nth-of-type(1)"])(
     "identifies the exact unsupported static venue selector field for %s", selector => {
       const recipe = serverDocumentRecipe();

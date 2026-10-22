@@ -78,6 +78,9 @@ export function isIncidentalBrowserRequest(value: string) {
     url.hostname === "forms-na2.hscollectedforms.net" && url.pathname === "/collected-forms/v1/config/json" ||
     url.hostname === "js-na2.hs-scripts.com" && /^\/\d+\.js$/u.test(url.pathname) ||
     url.hostname === "connect.facebook.net" && /^(?:\/signals\/config\/\d+|\/[a-z]{2}_[A-Z]{2}\/fbevents\.js)$/u.test(url.pathname) ||
+    ["e.clarity.ms", "q.clarity.ms"].includes(url.hostname) && url.pathname === "/collect" ||
+    /^o\d+\.ingest\.us\.sentry\.io$/u.test(url.hostname) && /^\/api\/\d+\/envelope\/$/u.test(url.pathname) ||
+    url.pathname === "/cdn-cgi/zaraz/s.js" ||
     url.hostname === "maps.googleapis.com" && ["/maps/api/js", "/maps/api/js/StaticMapService.GetMapImage",
       "/$rpc/google.internal.maps.mapsjs.v1.MapsJsInternalService/GetViewportInfo"].includes(url.pathname);
 }
@@ -86,6 +89,18 @@ export function isIncidentalBrowserRequest(value: string) {
  * They are outside text/JSON availability evidence and are always aborted. */
 export function isNonEvidenceBrowserResource(value: string, resourceType: string) {
   if (["image", "media", "font"].includes(resourceType)) return true;
+  // Deny analytics before native loader correlation, including CDP Ping.
+  // This grants no read and cannot hide an application availability request.
+  if (isIncidentalBrowserRequest(value)) return true;
+  if (resourceType === "script") {
+    try {
+      const url = new URL(value);
+      // Never execute this injected detection script or give it loader/source
+      // authority. A rendered access challenge remains a separate outcome.
+      if (url.protocol === "https:" && !url.port && !url.username && !url.password &&
+          url.pathname === "/cdn-cgi/challenge-platform/scripts/jsd/main.js") return true;
+    } catch { /* Unknown resources retain ordinary request validation. */ }
+  }
   if (resourceType !== "other") return false;
   try { return /\.(?:png|jpe?g|gif|webp|avif|svg|ico|woff2?|ttf|otf|eot)$/iu.test(new URL(value).pathname); }
   catch { return false; }

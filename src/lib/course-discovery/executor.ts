@@ -14,7 +14,7 @@ import { accessExecutionDiagnosticSchema, accessExecutionInputSchema, accessExec
   readRecipeFieldFormat, isActiveBrowserAccessChallenge, isSafeBrowserBootstrapReadUrl,
   type AccessExecutionDiagnostic, type CourseAccessRecipeData, type RecipeDateParts, type RecipeField } from "./recipe";
 import { continueNativeBrowserRead, createNativePublicBrowserProxy, nativeReadPreflightMethod, type NativePublicProxy } from "./native-public-browser";
-import { installNativeRedirectRouting, type NativeReadRoute } from "./native-redirect-routing";
+import { installNativeRedirectRouting, authorizePublicClientReadHeaders, isCurrentPublicClientReadHeaders, nativePublicClientPreflightMethod, type NativeReadRoute } from "./native-redirect-routing";
 import { launchPublicReadBrowser } from "./public-browser-launch";
 import { requestFamilyForUrl } from "./request-family";
 import { canonicalPublicReadUrl } from "./public-request-url";
@@ -30,7 +30,8 @@ import { PUBLIC_BROWSER_TOTAL_BYTES, PUBLIC_BROWSER_TUNNEL_BYTES, publicBrowserR
 import { isObservedPublicCalendarDay } from "./public-calendar-day";
 import { selectPublicRentalProduct } from "./public-product-control";
 import { followPublicAvailabilityLink } from "./public-navigation-control";
-import { selectPublicDateChoice } from "./public-date-choice";
+import { selectPublicDateChoice, parsePublicDateChoice } from "./public-date-choice";
+import { inspectPublicDatePickerInput, openPublicDatePickerInput } from "./public-date-picker-input";
 import { continuePublicRentalService, selectPublicRentalService, type PublicRentalServiceSelection } from "./public-service-control";
 import { parsePublicPlayerOptions } from "./public-player-options";
 import { matchesPublicVenueGreeting } from "./public-venue-greeting";
@@ -91,8 +92,9 @@ function matchesAvailabilityRequest(recipe: Extract<CourseAccessRecipeData, { en
     const source = fence.date.source === "QUERY" ? new URL(request.url).searchParams : JSON.parse(request.body ?? "");
     const read = (path: string) => source instanceof URLSearchParams ? source.get(path) : jsonField(source, { path });
     const date = read(fence.date.path);
-    const matchedDate = date === input.date || fence.kind === "SERVER_DOCUMENT" && date === input.date.replaceAll("-", "");
-    return matchedDate && (!fence.endDatePath || read(fence.endDatePath) === input.date);
+    const expectedDate = fence.date.format === "MM-DD-YYYY" ? expandRecipeTemplate("{{dateMdy}}", input) : input.date;
+    const matchedDate = date === expectedDate || fence.date.format !== "MM-DD-YYYY" && fence.kind === "SERVER_DOCUMENT" && date === input.date.replaceAll("-", "");
+    return matchedDate && (!fence.endDatePath || read(fence.endDatePath) === expectedDate);
   } catch { return false; }
 }
 export function matchesAvailabilityResponse(recipe: Extract<CourseAccessRecipeData, { engine: "BROWSER_DOM" }>, input: AccessExecutionInput,
@@ -134,6 +136,12 @@ function localParts(date: Date, timeZone: string) {
   return `${byType.year}-${byType.month}-${byType.day}T${byType.hour}:${byType.minute}:${byType.second}`;
 }
 function parseSourceDate(value: unknown) {
+  const original = clean(value);
+  const labelled = parsePublicDateChoice(original.replace(/([A-Za-z])(\d)/gu, "$1 $2").replace(/,(?=\S)/gu, ", "));
+  if (labelled) return labelled;
+  // A supplied weekday must agree with the full date. Do not strip an invalid
+  // weekday and accidentally turn contradictory source evidence into proof.
+  if (/^(?:Sun(?:day)?|Mon(?:day)?|Tue(?:sday)?|Wed(?:nesday)?|Thu(?:rsday)?|Fri(?:day)?|Sat(?:urday)?)\b/iu.test(original)) return undefined;
   const text = clean(value).replace(/^(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s*,?\s*/iu, "")
     .replace(/([A-Za-z])(\d)/gu, "$1 $2");
   if (/^\d{4}-\d{2}-\d{2}(?:T|$)/u.test(text)) return text.slice(0, 10);
@@ -526,15 +534,19 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
         for (const key of ["accept", "content-type", "origin"]) if (requestHeaders[key]) headers.set(key, requestHeaders[key]);
         if (!addVerifiedMindbodyReadHeaders(new URL(requestUrl), request.method(), requestHeaders, headers, request.postData() ?? "")) throw new Error("UNSCOPED_REQUEST");
         if (nativeProxy) {
-          const preflight = request.method() === "OPTIONS" ? nativeReadPreflightMethod(requestHeaders) : null;
+          const publicHeaderProof = request.method() === "OPTIONS" || Object.keys(requestHeaders).some(key => /^(?:authorization|x-api-key)$/iu.test(key))
+            ? await authorizePublicClientReadHeaders(request) : null;
+          const preflight = request.method() === "OPTIONS" ? nativeReadPreflightMethod(requestHeaders) ||
+            publicHeaderProof && nativePublicClientPreflightMethod(request, publicHeaderProof) : null;
           if (isRexNamespace(new URL(requestUrl)) && request.method() === "POST" &&
               !isRexPublicBrowserReadPost(new URL(requestUrl), request.method(), requestHeaders, request.postData() ?? "", frameUrl)) throw new Error("UNSCOPED_REQUEST");
           const rexPlaceholder = isRexAnonymousPlaceholderRead(new URL(requestUrl), request.method(), requestHeaders, request.postData() ?? "", frameUrl);
           if (!recipeAllowsRequest(recipe, requestUrl, preflight ?? request.method(), preflight === "GET" ? "fetch" : request.resourceType()) ||
-            !rexPlaceholder && Object.keys(requestHeaders).some(key => /^(?:authorization|proxy-authorization|x-api-key)$/iu.test(key)) ||
+            !rexPlaceholder && !publicHeaderProof && Object.keys(requestHeaders).some(key => /^(?:authorization|proxy-authorization|x-api-key)$/iu.test(key)) ||
             request.method() === "POST" && !allowsPost(new URL(requestUrl), headers, request.postData() ?? "")) throw new Error("UNSCOPED_REQUEST");
           const responseLimit = publicBrowserResponseLimit(request.resourceType());
           const native = await requestQueue.run(requestFamilyForUrl(requestUrl), () => {
+            if (publicHeaderProof && !isCurrentPublicClientReadHeaders(publicHeaderProof)) throw new Error("UNSCOPED_REQUEST");
             const hostname = new URL(requestUrl).hostname;
             nativeProxy!.allowHostConnections(hostname);
             return continueNativeBrowserRead(route, signal, responseLimit, () => nativeProxy!.cancelHostConnections(hostname), transportUrl);
@@ -712,6 +724,12 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
           if (step.purpose === "DATE") selectedRequestedDate = true;
         } else {
           const expected = expandRecipeTemplate(step.text, input);
+          if (step.purpose === "OPEN_DATE_PICKER" && tag === "input") {
+            const proof = await inspectPublicDatePickerInput(node);
+            if (!proof || proof.label !== expected) throw new Error("UNSAFE_CONTROL");
+            await openPublicDatePickerInput(node, proof);
+            continue;
+          }
           const text = clean(await node.innerText()) || clean(await node.getAttribute("aria-label"));
           const choice = await node.evaluate(element => {
             let context = "";

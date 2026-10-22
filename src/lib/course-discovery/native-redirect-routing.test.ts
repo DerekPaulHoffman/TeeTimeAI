@@ -4,8 +4,9 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { chromium, type Page, type Route } from "@playwright/test";
 import { describe, expect, it, vi } from "vitest";
-import { installNativeRedirectRouting, isNativeReadSupersededFailure, isNativeReadTerminalFailure, type NativeReadRoute, type NativeRequestDiagnostic } from "./native-redirect-routing";
-import { continueNativeBrowserRead, isObservedNativeRedirect, isObservedNativeRedirectTarget } from "./native-public-browser";
+import { authorizePublicClientReadHeaders, installNativeRedirectRouting, isCurrentPublicClientReadHeaders,
+  nativePublicClientPreflightMethod, isNativeReadSupersededFailure, isNativeReadTerminalFailure, type NativeReadRoute, type NativeRequestDiagnostic } from "./native-redirect-routing";
+import { continueNativeBrowserRead, isObservedNativeRedirect, isObservedNativeRedirectTarget, nativeReadPreflightMethod } from "./native-public-browser";
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
 
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; }
@@ -29,6 +30,161 @@ function playwrightRoute(test: Awaited<ReturnType<typeof installed>>) {
   return { request: () => ({ frame: () => test.main }), continue: vi.fn(async () => {}), abort: vi.fn(async () => {}), fulfill: vi.fn() } as unknown as Route;
 }
 
+describe("native private public-client header proofs", () => {
+  const documentUrl = "https://booking.example.org/calendar", scriptUrl = "https://booking.example.org/main.js";
+  const apiUrl = "https://api.example.org/public/calendar", literal = "public-display-literal";
+  const readHeaders = { Accept: "application/json", Authorization: "Bearer null", "x-api-key": literal };
+  const scriptBody = `function intercept(r){return r.clone({setHeaders:merge({"x-api-key":"${literal}"},other)});}`;
+  async function prepared(ack?: ReturnType<typeof deferred<object>>) {
+    const test = await installed();
+    const original = test.cdp.send.getMockImplementation()!;
+    test.cdp.send.mockImplementation(async (name, value) => {
+      if (name === "Fetch.getResponseBody" && value?.requestId === "public-script") return { body: scriptBody, base64Encoded: false };
+      if (name === "Fetch.continueResponse" && value?.requestId === "public-script" && ack) return await ack.promise;
+      return await original(name, value);
+    });
+    await test.guard.beginDocumentNavigation(test.main as never);
+    const network = (id: string, url: string, type: string, method = "GET", headers: Record<string, string> = {}) =>
+      test.events.get("Network.requestWillBeSent")!({ requestId: id, loaderId: "current-loader", frameId: "main", type,
+        request: { url, method, headers } });
+    network("document-network", documentUrl, "Document");
+    test.request("public-document", { networkId: "document-network", resourceType: "Document", request: { url: documentUrl, method: "GET", headers: {} } });
+    await test.routes[0].continue();
+    test.response("public-document", { networkId: "document-network", resourceType: "Document", request: { url: documentUrl, method: "GET", headers: {} },
+      responseHeaders: [{ name: "Content-Type", value: "text/html" }] });
+    await test.routes[0].request().response();
+    test.events.get("Page.frameNavigated")!({ frame: { id: "main", loaderId: "current-loader", url: documentUrl } });
+    network("script-network", scriptUrl, "Script");
+    test.request("public-script", { networkId: "script-network", resourceType: "Script", request: { url: scriptUrl, method: "GET", headers: {} } });
+    await test.routes[1].continue();
+    test.response("public-script", { networkId: "script-network", resourceType: "Script", request: { url: scriptUrl, method: "GET", headers: {} },
+      responseHeaders: [{ name: "Content-Type", value: "text/javascript" }] });
+    if (!ack) await test.routes[1].request().response();
+    const get = async (headers: Record<string, string> = readHeaders, method = "GET") => {
+      const index = test.routes.length;
+      network("actual-network", apiUrl, "Fetch", method, headers);
+      test.request("actual-read", { networkId: "actual-network", resourceType: "Fetch", request: { url: apiUrl, method, headers } });
+      await vi.waitFor(() => expect(test.routes).toHaveLength(index + 1)); return test.routes[index];
+    };
+    return { ...test, network, get };
+  }
+  it.each(["GET", "HEAD"])("authorizes only the current actual %s adapter and continues unchanged", async method => {
+    const test = await prepared();
+    try {
+      const route = await test.get(readHeaders, method), proof = await authorizePublicClientReadHeaders(route.request());
+      expect(proof).not.toBeNull(); expect(Object.keys(proof!)).toEqual([]); expect(isCurrentPublicClientReadHeaders(proof!)).toBe(true);
+      expect(nativePublicClientPreflightMethod(route.request(), proof!)).toBeNull();
+      expect(await authorizePublicClientReadHeaders({ ...route.request() })).toBeNull();
+      await route.continue();
+      expect(test.cdp.send.mock.calls.find(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "actual-read"))
+        .toEqual(["Fetch.continueRequest", { requestId: "actual-read" }]);
+    } finally { await test.guard.close(); }
+  });
+  it("waits outside dispatch for the exact in-flight script response ACK, without early authority", async () => {
+    const ack = deferred<object>(), test = await prepared(ack);
+    try {
+      const route = await test.get(); let settled = false;
+      const proof = authorizePublicClientReadHeaders(route.request()).then(value => { settled = true; return value; });
+      await new Promise(resolve => setTimeout(resolve, 5)); expect(settled).toBe(false);
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "actual-read")).toBe(false);
+      ack.resolve({}); const actual = await proof; expect(actual).not.toBeNull(); expect(isCurrentPublicClientReadHeaders(actual!)).toBe(true);
+    } finally { ack.resolve({}); await test.guard.close(); }
+  });
+  it("never publishes a script whose exact read fails while its response ACK is held", async () => {
+    const ack = deferred<object>(), test = await prepared(ack);
+    try {
+      const route = await test.get(), proof = authorizePublicClientReadHeaders(route.request());
+      test.events.get("Network.loadingFailed")!({ requestId: "script-network" });
+      expect(await proof).toBeNull(); ack.resolve({});
+      await new Promise(resolve => setTimeout(resolve, 5));
+      expect(await authorizePublicClientReadHeaders(route.request())).toBeNull();
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "actual-read")).toBe(false);
+    } finally { ack.resolve({}); await test.guard.close(); }
+  });
+  it.each(["wrong-key", "real-token", "case-duplicate", "proxy-auth", "session-companion"])("does not authorize actual header mismatch: %s", async fault => {
+    const test = await prepared();
+    try {
+      const headers: Record<string, string> = { ...readHeaders };
+      if (fault === "wrong-key") headers["x-api-key"] = "other-display-literal";
+      if (fault === "real-token") headers.Authorization = "Bearer real-value";
+      if (fault === "case-duplicate") headers["X-API-Key"] = literal;
+      if (fault === "proxy-auth") headers["Proxy-Authorization"] = "do-not-expose";
+      if (fault === "session-companion") headers["x-session-id"] = "do-not-expose";
+      const route = await test.get(headers); expect(await authorizePublicClientReadHeaders(route.request())).toBeNull();
+    } finally { await test.guard.close(); }
+  });
+  it.each(["GET", "HEAD"])("uses only the exact private %s identity for OPTIONS before its Fetch pause", async method => {
+    const test = await prepared();
+    try {
+      test.network("original-get", apiUrl, "Fetch", method, readHeaders);
+      test.events.get("Network.requestWillBeSent")!({ requestId: "options-network", loaderId: "", type: "Other",
+        initiator: { type: "preflight", requestId: "original-get" }, request: { url: apiUrl, method: "OPTIONS", headers: {} } });
+      test.request("public-options", { networkId: "options-network", resourceType: "Other", request: { url: apiUrl, method: "OPTIONS", headers: {
+        Origin: "https://booking.example.org", "Access-Control-Request-Method": method, "Access-Control-Request-Headers": "authorization,x-api-key" } } });
+      await vi.waitFor(() => expect(test.routes).toHaveLength(3));
+      const route = test.routes[2], proof = await authorizePublicClientReadHeaders(route.request());
+      expect(proof).not.toBeNull(); expect(route.request().resourceType()).toBe("other");
+      expect(nativePublicClientPreflightMethod(route.request(), proof!)).toBe(method);
+      expect(nativePublicClientPreflightMethod(test.routes[1].request(), proof!)).toBeNull();
+      test.events.get("Network.loadingFailed")!({ requestId: "original-get" });
+      expect(isCurrentPublicClientReadHeaders(proof!)).toBe(false);
+      await expect(route.continue()).rejects.toThrow("NATIVE_REDIRECT_CONTINUE_REJECTED");
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "public-options")).toBe(false);
+    } finally { await test.guard.close(); }
+  });
+  it("retains Network header aliases and independently rejects source key duplicates before source Fetch exists", async () => {
+    const test = await prepared();
+    try {
+      test.network("original-get", apiUrl, "Fetch", "GET", { ...readHeaders, "X-API-Key": literal });
+      test.events.get("Network.requestWillBeSent")!({ requestId: "options-network", loaderId: "", type: "Other",
+        initiator: { type: "preflight", requestId: "original-get" }, request: { url: apiUrl, method: "OPTIONS" } });
+      test.request("public-options", { networkId: "options-network", resourceType: "Other", request: { url: apiUrl, method: "OPTIONS", headers: {
+        Origin: "https://booking.example.org", "Access-Control-Request-Method": "GET", "Access-Control-Request-Headers": "authorization,x-api-key" } } });
+      await vi.waitFor(() => expect(test.routes).toHaveLength(3));
+      expect(await authorizePublicClientReadHeaders(test.routes[2].request())).toBeNull();
+    } finally { await test.guard.close(); }
+  });
+  it.each(["source-failed", "document-failed", "request-failed", "identity-revised", "unsafe-spa", "boundary", "close"])(
+    "rechecks exact proof after a queued wait and blocks dispatch on %s", async fault => {
+      const test = await prepared();
+      try {
+        const route = await test.get(), proof = await authorizePublicClientReadHeaders(route.request()); expect(proof).not.toBeNull();
+        if (fault === "source-failed") test.events.get("Network.loadingFailed")!({ requestId: "script-network" });
+        if (fault === "document-failed") test.events.get("Network.loadingFailed")!({ requestId: "document-network" });
+        if (fault === "request-failed") test.events.get("Network.loadingFailed")!({ requestId: "actual-network" });
+        if (fault === "identity-revised") test.network("actual-network", apiUrl, "Fetch", "GET", readHeaders);
+        if (fault === "unsafe-spa") test.events.get("Page.navigatedWithinDocument")!({ frameId: "main", url: "https://booking.example.org/account" });
+        if (fault === "boundary") await test.guard.beginDocumentNavigation(test.main as never);
+        if (fault === "close") await test.guard.close();
+        expect(isCurrentPublicClientReadHeaders(proof!)).toBe(false);
+        await expect(route.continue()).rejects.toThrow();
+        expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "actual-read")).toBe(false);
+      } finally { await test.guard.close(); }
+    });
+  it("retains the same-loader safe SPA proof and does not leak keys into diagnostics", async () => {
+    const test = await prepared();
+    try {
+      const route = await test.get(), proof = await authorizePublicClientReadHeaders(route.request());
+      test.events.get("Page.navigatedWithinDocument")!({ frameId: "main", url: `${documentUrl}?date=2026-10-24` });
+      expect(isCurrentPublicClientReadHeaders(proof!)).toBe(true);
+      expect(JSON.stringify([proof, test.guard.firstFatal, test.guard.rejectedRequests])).not.toContain(literal);
+    } finally { await test.guard.close(); }
+  });
+  it("does not retire a good native witness when a different ordinary chunk completes", async () => {
+    const test = await prepared();
+    try {
+      const route = await test.get(), proof = await authorizePublicClientReadHeaders(route.request());
+      const url = "https://booking.example.org/chunk.js";
+      test.network("chunk-network", url, "Script");
+      test.request("benign-chunk", { networkId: "chunk-network", resourceType: "Script", request: { url, method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(test.routes).toHaveLength(4)); await test.routes[3].continue();
+      test.response("benign-chunk", { networkId: "chunk-network", resourceType: "Script", request: { url, method: "GET", headers: {} },
+        responseHeaders: [{ name: "Content-Type", value: "text/javascript" }] });
+      await test.routes[3].request().response(); expect(isCurrentPublicClientReadHeaders(proof!)).toBe(true);
+    } finally { await test.guard.close(); }
+  });
+});
+
 describe("native root GET CORS preflight ownership", () => {
   const url = "https://api.example.org/public-data";
   const source = (test: Awaited<ReturnType<typeof installed>>, values: object = {}) => test.events.get("Network.requestWillBeSent")!({
@@ -44,6 +200,45 @@ describe("native root GET CORS preflight ownership", () => {
     await test.routes[0].continue(); test.response("document", { networkId: "document", resourceType: "Document", request: { url: "https://example.org", method: "GET", headers: {} } });
     await test.routes[0].request().response(); if (withSource) source(test, sourceValues); return test;
   };
+  it("diagnoses an exact rejected bodyful HEAD preflight source without granting it read authority", async () => {
+    const test = await prepare({ request: { url, method: "HEAD", hasPostData: true, postData: "private-body-not-retained" } });
+    try {
+      metadata(test);
+      pause(test, { request: { url, method: "OPTIONS", headers: { Origin: "https://example.org", "Access-Control-Request-Method": "HEAD", "X-Private": "private-header-not-retained" } } });
+      await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_LOADER_TIMEOUT"));
+      expect(test.guard.firstFatal).toMatchObject({ requestedPreflightMethod: "HEAD", phase: "LOADER_IDENTITY_WAIT",
+        preflightCandidatePresent: true, preflightCandidateInvalid: true, preflightSourceKnown: true, preflightSourceMethod: "HEAD",
+        preflightSourceCurrentGeneration: true, preflightSourceFailed: false, preflightSourceBodyPresent: true,
+        preflightSourceRootFrame: true, preflightSourceLoaderKnown: true, preflightSourceUrlMatches: true });
+      const serialized = JSON.stringify(test.guard.firstFatal);
+      expect(serialized).not.toContain("private-body-not-retained"); expect(serialized).not.toContain("private-header-not-retained");
+      expect(serialized).not.toContain("original-get"); expect(test.routes).toHaveLength(1);
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "options")).toBe(false);
+    } finally { await test.guard.close(); }
+  });
+  it("omits unavailable preflight source facts instead of reporting unobserved negative facts", async () => {
+    const test = await prepare({}, false);
+    try {
+      pause(test, { request: { url, method: "OPTIONS", headers: { "Access-Control-Request-Method": "DELETE" } } });
+      await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_LOADER_TIMEOUT"));
+      expect(test.guard.firstFatal).toMatchObject({ requestedPreflightMethod: "DELETE", preflightCandidatePresent: false, preflightSourceKnown: false });
+      for (const field of ["preflightCandidateInvalid", "preflightSourceMethod", "preflightSourceCurrentGeneration", "preflightSourceFailed", "preflightSourceBodyPresent", "preflightSourceRootFrame", "preflightSourceLoaderKnown", "preflightSourceUrlMatches"])
+        expect(test.guard.firstFatal).not.toHaveProperty(field);
+      expect(test.routes).toHaveLength(1);
+    } finally { await test.guard.close(); }
+  });
+  it.each([
+    { "Access-Control-Request-Method": "POST", "access-control-request-method": "GET" },
+    { "Access-Control-Request-Method": "private-method-not-retained" },
+  ])("projects conflicting or unrecognized preflight method text only as OTHER: %j", async requestHeaders => {
+    const test = await prepare({}, false);
+    try {
+      pause(test, { request: { url, method: "OPTIONS", headers: requestHeaders } });
+      await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_LOADER_TIMEOUT"));
+      expect(test.guard.firstFatal?.requestedPreflightMethod).toBe("OTHER");
+      expect(JSON.stringify(test.guard.firstFatal)).not.toContain("private-method-not-retained"); expect(test.routes).toHaveLength(1);
+    } finally { await test.guard.close(); }
+  });
   it("waits for the exact frameless loaderless preflight and independently routes the later GET", async () => {
     const test = await prepare();
     try {
@@ -56,6 +251,47 @@ describe("native root GET CORS preflight ownership", () => {
       await vi.waitFor(() => expect(test.routes).toHaveLength(3)); await test.routes[2].continue();
       test.response("actual", { networkId: "original-get", resourceType: "Fetch", request: { url, method: "GET", headers: {} } });
       expect((await test.routes[2].request().response())?.status()).toBe(200); expect(test.failures).toEqual([]);
+    } finally { await test.guard.close(); }
+  });
+  it.each([false, true])("correlates an exact bodyful POST preflight for caller denial without poisoning later public GETs (OPTIONS first: %s)", async optionsFirst => {
+    const test = await prepare({}, false);
+    const postSource = { request: { url, method: "POST", hasPostData: true, postData: '{"unapproved":"public-rest-operation"}' } };
+    const postPause = { request: { url, method: "OPTIONS", headers: { origin: "https://example.org", "access-control-request-method": "POST", "access-control-request-headers": "authorization,x-api-key" } } };
+    try {
+      if (optionsFirst) { metadata(test); pause(test, postPause); expect(test.routes).toHaveLength(1); source(test, postSource); }
+      else { source(test, postSource); metadata(test); pause(test, postPause); }
+      await vi.waitFor(() => expect(test.routes).toHaveLength(2));
+      // Ownership only reaches the unchanged caller policy. It never creates
+      // a public-client-key proof or sends either the preflight or actual POST.
+      const route = test.routes[1];
+      expect(nativeReadPreflightMethod(route.request().headers())).toBeNull();
+      expect(await authorizePublicClientReadHeaders(route.request())).toBeNull();
+      await route.abort();
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "options")).toBe(false);
+      expect(test.guard.firstFatal).toBeUndefined(); expect(test.failures).toEqual([]);
+      source(test, { requestId: "later-get", request: { url: `${url}/later`, method: "GET" } });
+      test.request("later-get-pause", { networkId: "later-get", resourceType: "Fetch", request: { url: `${url}/later`, method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(test.routes).toHaveLength(3)); await test.routes[2].continue();
+      test.response("later-get-pause", { networkId: "later-get", resourceType: "Fetch", request: { url: `${url}/later`, method: "GET", headers: {} } });
+      expect((await test.routes[2].request().response())?.status()).toBe(200); expect(test.failures).toEqual([]);
+    } finally { await test.guard.close(); }
+  });
+  it("leaves credentialless POST preflight permission and eventual POST dispatch as separate caller decisions", async () => {
+    const test = await prepare({ request: { url, method: "POST", hasPostData: true, postData: '{"unapproved":"operation"}' } });
+    try {
+      metadata(test); pause(test, { request: { url, method: "OPTIONS", headers: { origin: "https://example.org", "access-control-request-method": "POST", "access-control-request-headers": "content-type" } } });
+      await vi.waitFor(() => expect(test.routes).toHaveLength(2));
+      expect(nativeReadPreflightMethod(test.routes[1].request().headers())).toBe("POST");
+      await test.routes[1].continue();
+      test.response("options", { networkId: "preflight", responseStatusCode: 204, request: { url, method: "OPTIONS", headers: {} } });
+      expect((await test.routes[1].request().response())?.status()).toBe(204);
+      test.request("actual-post", { networkId: "original-get", resourceType: "Fetch", request: { url, method: "POST", hasPostData: true, postData: '{"unapproved":"operation"}', headers: { "content-type": "application/json" } } });
+      await vi.waitFor(() => expect(test.routes).toHaveLength(3));
+      expect(test.routes[2].request().postData()).toBe('{"unapproved":"operation"}');
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "actual-post")).toBe(false);
+      // This unapproved REST operation is rejected by the caller; the successful
+      // OPTIONS response has granted no authority to continue the actual POST.
+      await test.routes[2].abort(); expect(test.guard.firstFatal).toBeUndefined(); expect(test.failures).toEqual([]);
     } finally { await test.guard.close(); }
   });
   it.each([false, true])("waits for a late exact GET identity when OPTIONS Network arrives first (Fetch before both: %s)", async fetchFirst => {
@@ -222,16 +458,19 @@ describe("native root GET CORS preflight ownership", () => {
       await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_LOADER_TIMEOUT")); expect(test.routes).toHaveLength(2);
     } finally { await test.guard.close(); }
   });
-  it("cannot dispatch a queued preflight after its original source identity changes", async () => {
-    const test = await prepare();
+  it.each(["GET", "POST"])("cannot dispatch a queued %s preflight after its original source identity changes", async method => {
+    const sourceValues = { request: { url, method, ...(method === "POST" ? { hasPostData: true, postData: "{}" } : {}) } };
+    const test = await prepare(sourceValues);
     try {
-      metadata(test); pause(test); await vi.waitFor(() => expect(test.routes).toHaveLength(2)); source(test);
+      metadata(test); pause(test, { request: { url, method: "OPTIONS", headers: { "Access-Control-Request-Method": method } } });
+      await vi.waitFor(() => expect(test.routes).toHaveLength(2)); source(test, sourceValues);
       await expect(test.routes[1].continue()).rejects.toThrow("NATIVE_REDIRECT_CONTINUE_REJECTED");
       expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "options")).toBe(false);
     } finally { await test.guard.close(); }
   });
-  it.each([false, true])("aborts a preflight held for its lease when the exact source GET fails (replacement source: %s)", async replacement => {
-    const test = await prepare(), leaseReady = deferred<object>(), signal = new AbortController(), failures: string[] = [];
+  it.each(["GET", "POST"].flatMap(method => [false, true].map(replacement => ({ method, replacement }))))("aborts a preflight held for its lease when the exact source fails: %j", async ({ method, replacement }) => {
+    const sourceValues = { request: { url, method, ...(method === "POST" ? { hasPostData: true, postData: "{}" } : {}) } };
+    const test = await prepare(sourceValues), leaseReady = deferred<object>(), signal = new AbortController(), failures: string[] = [];
     const queue = createSimulatorBrowserRequestQueue(async (_host, work) => { await leaseReady.promise; return { acquired: true as const, value: await work() }; }, signal.signal);
     test.handler.mockImplementation(async route => {
       test.routes.push(route);
@@ -239,9 +478,9 @@ describe("native root GET CORS preflight ownership", () => {
       catch (error) { failures.push((error as Error).message); await route.abort(); }
     });
     try {
-      metadata(test); pause(test); await vi.waitFor(() => expect(test.routes).toHaveLength(2));
+      metadata(test); pause(test, { request: { url, method: "OPTIONS", headers: { "Access-Control-Request-Method": method } } }); await vi.waitFor(() => expect(test.routes).toHaveLength(2));
       test.events.get("Network.loadingFailed")!({ requestId: "original-get" });
-      if (replacement) source(test);
+      if (replacement) source(test, sourceValues);
       expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "options")).toBe(false);
       leaseReady.resolve({}); await vi.waitFor(() => { expect(test.guard.pendingReads).toBe(0); expect(failures).toEqual(["NATIVE_REDIRECT_CONTINUE_REJECTED"]); });
       expect(test.cdp.send.mock.calls.filter(([name]) => name === "Fetch.failRequest").map(([, value]) => value?.requestId)).toEqual(["options"]);
@@ -1987,6 +2226,22 @@ describe("native exact request and response ownership", () => {
       await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_INTERCEPT_LIMIT"));
       expect(test.guard.firstFatal).toMatchObject({ interceptedRequests: 2, requestLimit: 1, recordCount: 0 });
       expect(test.handler).not.toHaveBeenCalled();
+    } finally { await test.guard.close(); }
+  });
+
+  it.each([
+    ["https://e.clarity.ms/collect", "Ping"],
+    ["https://example.org/cdn-cgi/zaraz/s.js?z=opaque", "Script"],
+    ["https://example.org/cdn-cgi/challenge-platform/scripts/jsd/main.js", "Script"],
+  ])("quietly denies excluded %s before loader identity without closing public peers", async (url, resourceType) => {
+    const test = await installed();
+    try {
+      test.request("excluded", { resourceType, networkId: undefined, request: { url, method: resourceType === "Ping" ? "POST" : "GET", headers: {} } });
+      await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+      expect(test.handler).not.toHaveBeenCalled();
+      expect(test.cdp.send.mock.calls.filter(([name]) => name === "Fetch.failRequest").map(([, value]) => value?.requestId)).toEqual(["excluded"]);
+      expect(test.guard.rejectedRequests).toEqual([]);
+      expect(test.guard.firstFatal).toBeUndefined(); expect(test.failures).toEqual([]); expect(test.close).not.toHaveBeenCalled();
     } finally { await test.guard.close(); }
   });
 

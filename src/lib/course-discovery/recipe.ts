@@ -7,6 +7,7 @@ import { isServerDocumentSelector } from "./server-document-proof";
 import { hasCpsSessionState } from "./cps-public-navigation";
 import { recipeLocalDateSchema as localDate, recipeTemplateSchema } from "./recipe-template";
 import { isSafePublicBootstrapReadUrl } from "./public-bootstrap-read-url";
+import { isSafePublicAvailabilityReadUrl } from "./public-availability-read-url";
 export { expandRecipeTemplate, recipeTemplateSchema } from "./recipe-template";
 
 const secret = /(?:password|secret|token|cookie|session|credential|authorization|api.?key|email|phone)/iu;
@@ -24,6 +25,10 @@ export function isSafeRecipeUrl(value: string) {
  * availability-response URLs. Actual transport bytes always remain unchanged. */
 export function isSafeBrowserBootstrapReadUrl(value: string, resourceType: string, method: string) {
   return isSafePublicBootstrapReadUrl(value, resourceType, method, isSafeRecipeUrl);
+}
+/** A public inventory read is separate from customer/source navigation. */
+export function isSafeBrowserAvailabilityReadUrl(value: string, resourceType: string, method: string) {
+  return isSafePublicAvailabilityReadUrl(value, resourceType, method, isSafeRecipeUrl);
 }
 /** Browser scripts/styles are read-only resources, not customer booking URLs.
  * Build hashes in a static asset path or a conventional bundle cache key are
@@ -61,6 +66,12 @@ export function isSafeBrowserAssetUrl(value: string, resourceType: string, metho
 }
 const safeUrl = z.string().max(2048).refine(isSafeRecipeUrl, "Expected a public HTTPS read URL");
 const urlTemplate = recipeTemplateSchema.refine(value => isSafeRecipeUrl(value.replace(/\{\{[A-Za-z]+\}\}/gu, "x")));
+const availabilityUrlTemplate = recipeTemplateSchema.refine(value => {
+  if (isSafeRecipeUrl(value.replace(/\{\{[A-Za-z]+\}\}/gu, "x"))) return true;
+  const samples: Record<string, string> = { date: "2030-01-02", dateCompact: "20300102", dateMdy: "01-02-2030", players: "2",
+    durationMinutes: "60", startTime: "08:00", endTime: "18:00", timeZone: "America/New_York", year: "2030", month: "1", day: "2" };
+  return isSafeBrowserAvailabilityReadUrl(value.replace(/\{\{([A-Za-z]+)\}\}/gu, (_, key: string) => samples[key] ?? ""), "fetch", "GET");
+});
 export const SERVER_DOCUMENT_SELECTOR_MESSAGE = "Server document selectors allow only tags, classes, IDs, descendant and child combinators; no pseudo-classes, attribute selectors, wildcards, lists or sibling combinators.";
 export const recipeSelectorSchema = z.string().min(1).max(240).refine(value =>
   /^[a-zA-Z0-9_\-\s.#\[\]="'~^$*|:(),>+]+$/u.test(value) &&
@@ -103,7 +114,7 @@ const stepSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("continueToAvailability"), selector: recipeSelectorSchema, mode: z.enum(["SERVICE", "SKIP_PACKAGES"]) }).strict()
     .describe("SIMULATOR only: after successful selectRentalService in this execution, advance the same public service-only widget using its exact Continue/Next button (SERVICE), or the explicit Skip packages and continue with the selected service button (SKIP_PACKAGES). Requires unchanged visible rental selection in the same document, no date/time/contact/payment inputs, no selected slot, no submit/href, and no package purchase. Never use generic Continue after calendar/availability or into customer details. Final fresh date-bound response and independent complete/date/duration/resource proof remain mandatory."),
   z.object({ action: z.literal("selectDateChoice"), selector: recipeSelectorSchema }).strict()
-    .describe("Choose the requested date from a bounded public grid of buttons labelled with a full English month/day/four-digit year (optional correct weekday). Use one reusable selector for all day choices. Requires a unique visible requested date and at least two distinct sibling date options; time/product cards and sensitive contexts are rejected. Final date-bound response and source-date proof are still required."),
+    .describe("Choose the requested date from explicit full date labels using a full or abbreviated English month, day and four-digit year with an optional correct weekday. Supports sibling date buttons and numeric buttons with an exact full aria-label inside a public role=grid calendar. Use one reusable selector for all choices; at least two distinct dates and one requested match are required. Times, products, forms and sensitive contexts are rejected. Final date-bound response and source-date proof are still required."),
   z.object({ action: z.literal("followLink"), selector: recipeSelectorSchema, text: recipeTemplateSchema }).strict()
     .describe("Follow an exact visible public navigation anchor using its current observed href and label (for example Next between service, resource, date and availability pages). The href must match permittedRoutes; selected time/slot, account, review, payment, sensitive forms and new-window targets are rejected. Never use this to choose an availability time."),
   z.object({ action: z.literal("selectDate"), monthYearSelector: recipeSelectorSchema,
@@ -116,13 +127,14 @@ const stepSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("fill"), selector: recipeSelectorSchema, value: recipeTemplateSchema,
     purpose: z.enum(["DATE", "PLAYERS", "DURATION"]) }).strict(),
   z.object({ action: z.literal("clickFilter"), selector: recipeSelectorSchema, text: recipeTemplateSchema,
-    purpose: z.enum(["OPEN_DATE_PICKER", "NEXT_MONTH", "PREVIOUS_MONTH", "SELECT_DATE", "APPLY_DATE", "OPEN_FILTER", "SELECT_FILTER", "RUN_SEARCH"]) }).strict().describe("Click only an observed public calendar/filter control. SELECT_DATE must use an observed reusable day selector plus text {{day}}; the executor requires exactly one visible text match. APPLY_DATE may click Apply/Apply dates only inside the same proven public month/day picker after selecting the requested day. It still requires a fresh successful date-bound response and full source-date proof."),
+    purpose: z.enum(["OPEN_DATE_PICKER", "NEXT_MONTH", "PREVIOUS_MONTH", "SELECT_DATE", "APPLY_DATE", "OPEN_FILTER", "SELECT_FILTER", "RUN_SEARCH"]) }).strict().describe("Click only an observed public calendar/filter control. OPEN_DATE_PICKER also supports a readonly text/date input with its exact observed date/calendar label or placeholder and dialog popup; click it, never fill it. SELECT_DATE must use an observed reusable day selector plus text {{day}}; the executor requires exactly one visible text match. APPLY_DATE may click Apply/Apply dates only inside the same proven public month/day picker after selecting the requested day. It still requires a fresh successful date-bound response and full source-date proof."),
   z.object({ action: z.literal("waitFor"), selector: recipeSelectorSchema }).strict(),
 ]);
 const availabilityResponseSchema = z.object({
   kind: z.enum(["JSON", "SERVER_DOCUMENT"]).optional(),
-  url: urlTemplate, method: z.enum(["GET", "POST"]),
-  date: z.object({ source: z.enum(["QUERY", "JSON_BODY"]), path: jsonPath }).strict(),
+  url: availabilityUrlTemplate, method: z.enum(["GET", "POST"]),
+  date: z.object({ source: z.enum(["QUERY", "JSON_BODY"]), path: jsonPath,
+    format: z.enum(["ISO_DATE", "MM-DD-YYYY"]).optional().describe("Default ISO_DATE is YYYY-MM-DD. Explicit MM-DD-YYYY binds a zero-padded public provider date; use {{dateMdy}} in its URL template.") }).strict(),
   endDatePath: jsonPath.optional(),
   success: z.object({ path: jsonPath, equals: z.union([z.string().max(200), z.number().finite(), z.boolean(), z.null()]) }).strict().optional(),
 }).strict().refine(value => value.method === "POST" || value.date.source === "QUERY", "GET date binding must read a query parameter")
@@ -240,7 +252,8 @@ export function hashAccessRecipe(recipe: CourseAccessRecipeData) { return create
 export function recipeAllowsRequest(recipe: CourseAccessRecipeData, value: string, method: string, resourceType?: string) {
   if (recipe.engine === "EXISTING_ADAPTER") return false; // Fixed adapter transport owns its exact routes.
   if (!isSafeRecipeUrl(value) && !isSafeBrowserAssetUrl(value, resourceType ?? "", method) &&
-    !(recipe.engine === "BROWSER_DOM" && isSafeBrowserBootstrapReadUrl(value, resourceType ?? "", method))) return false;
+    !(recipe.engine === "BROWSER_DOM" && (isSafeBrowserBootstrapReadUrl(value, resourceType ?? "", method) ||
+      isSafeBrowserAvailabilityReadUrl(value, resourceType ?? "", method)))) return false;
   const url = new URL(value);
   return recipe.permittedRoutes.some(route => route.origin === url.origin && route.methods.includes(method as "GET" | "HEAD" | "POST") &&
     (route.path.endsWith("*") ? url.pathname.startsWith(route.path.slice(0, -1)) : route.path === url.pathname) &&

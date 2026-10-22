@@ -45,6 +45,33 @@ function dependencies(body: unknown, status = 200): AccessExecutorDependencies {
     requestLease: async (_family, work) => ({ acquired: true, value: await work() }) };
 }
 describe("deterministic course recipe execution", () => {
+  it("binds an explicit public month-day-year response date without accepting an implicit format", () => {
+    const base = { ...httpRecipe() }; Reflect.deleteProperty(base, "request");
+    const url = "https://www.sevenrooms.com/api-yoa/availability/widget/range?venue=publicrental&time_slot=12:00&party_size=1&halo_size_interval=16&start_date={{dateMdy}}&num_days=1&channel=SEVENROOMS_WIDGET&selected_lang_code=en";
+    const recipe = parseAccessRecipe({ ...base, engine: "BROWSER_DOM", pageUrl: "https://example.org/tee-times", steps: [],
+      proof: { venue: { selector: "#venue" }, date: { selector: "#date" }, complete: { selector: "#ready" } },
+      slots: { collection: { selector: ".slot" }, startsAt: { selector: ".start" }, availableSpots: { selector: ".capacity" } },
+      availabilityResponse: { url, method: "GET", date: { source: "QUERY", path: "start_date", format: "MM-DD-YYYY" } } });
+    if (recipe.engine !== "BROWSER_DOM") throw Error("browser fixture");
+    const actual = url.replace("{{dateMdy}}", "10-22-2026");
+    expect(matchesAvailabilityResponse(recipe, executionInput, { url: actual, method: "GET" }, 200)).toBe(true);
+    expect(matchesAvailabilityResponse(recipe, executionInput, { url: actual.replace("10-22-2026", "10-23-2026"), method: "GET" }, 200)).toBe(false);
+    expect(matchesAvailabilityResponse(recipe, executionInput, { url: actual, method: "GET" }, 500)).toBe(false);
+    expect(matchesAvailabilityResponse({ ...recipe, availabilityResponse: { ...recipe.availabilityResponse, date: { source: "QUERY", path: "start_date" } } },
+      executionInput, { url: actual, method: "GET" }, 200)).toBe(false);
+  });
+
+  it("verifies abbreviated public date labels and rejects contradictory weekdays", async () => {
+    for (const date of ["Thu, Oct 22, 2026", "Thursday, October 22, 2026", "Thursday, October22,2026"]) {
+      const result = await executeAccessRecipe(httpRecipe(), executionInput, dependencies({ ...payload(), date }));
+      expect(result).toMatchObject({ status: "AVAILABLE", complete: true, evidence: { dateVerified: true } });
+    }
+    for (const date of ["Fri, Oct 22, 2026", "Friday, October 22, 2026", "Friday, October22,2026", "Thu, Feb 30, 2026"]) {
+      const result = await executeAccessRecipe(httpRecipe(), executionInput, dependencies({ ...payload(), date }));
+      expect(result).toMatchObject({ status: "INCOMPLETE", complete: false, evidence: { dateVerified: false } });
+    }
+  });
+
   it("normalizes only standalone ampersand conjunctions while keeping the whole venue and location", () => {
     expect(venueProofMatches("COR-Golf Cafe and Lounge", "COR Golf Cafe & Lounge")).toBe(true);
     expect(venueProofMatches("COR Golf Cafe & Lounge", "COR-Golf Cafe and Lounge")).toBe(true);
@@ -265,6 +292,40 @@ describe.runIf(existsSync(chromeExecutable))("isolated browser recipe replay", (
   it("replays a safe select and extracts visible proof in a fresh real browser", async () => {
     const result = await executeAccessRecipe(recipe(), executionInput, browserDeps(html));
     expect(result.status).toBe("AVAILABLE"); expect(result.slots[0].startsAt).toBe("2026-10-22T13:00:00.000Z");
+  }, 20_000);
+  it.each(["2026-10-22", "2026-10-23"])("replays a saved language-bearing range for %s", async date => {
+    const range = "https://www.sevenrooms.com/api-yoa/availability/widget/range?venue=publicrental&time_slot=12:00&party_size=1&halo_size_interval=16&start_date={{dateMdy}}&num_days=1&channel=SEVENROOMS_WIDGET&selected_lang_code=en&picked_duration=60";
+    const selected = parseAccessRecipe({ ...recipe(), steps: [],
+      permittedRoutes: [{ origin: "https://example.org", path: "/tee-times", methods: ["GET"], queryKeys: [] },
+        { origin: "https://www.sevenrooms.com", path: "/api-yoa/availability/widget/range", methods: ["GET"],
+          queryKeys: ["venue", "time_slot", "party_size", "halo_size_interval", "start_date", "num_days", "channel", "selected_lang_code", "picked_duration"] }],
+      availabilityResponse: { url: range, method: "GET", date: { source: "QUERY", path: "start_date", format: "MM-DD-YYYY" }, success: { path: "status", equals: "success" } },
+    });
+    const actual = range.replace("{{dateMdy}}", date.slice(5, 7) + "-" + date.slice(8) + "-" + date.slice(0, 4));
+    const fixture = `<h1 id="venue">Example Golf</h1><input id="date" value="${date}"><select id="players"><option selected value="2">2</option></select><p id="loaded">Loading</p><div id="times"></div>` +
+      `<script>fetch(${JSON.stringify(actual)}).then(r=>r.json()).then(v=>{if(v.status==='success'){document.querySelector('#loaded').textContent='Ready';document.querySelector('#times').innerHTML='<div class="slot"><span class="start">09:00</span><span class="capacity">4</span><span class="holes">18</span></div>'}})</script>`;
+    const deps = browserDeps(fixture, false), originalFetch = deps.fetch!;
+    deps.fetch = vi.fn(async (url, init) => String(url) === actual
+      ? new Response(JSON.stringify({ status: "success" }), { headers: { "content-type": "application/json", "access-control-allow-origin": "*" } })
+      : originalFetch(url, init)) as typeof fetch;
+    const result = await executeAccessRecipe(selected, { ...executionInput, date }, deps);
+    expect(result).toMatchObject({ status: "AVAILABLE", complete: true, evidence: { dateVerified: true } });
+    expect(result.slots[0].startsAt).toBe(date + "T13:00:00.000Z");
+    expect(vi.mocked(deps.fetch!).mock.calls.some(([url]) => String(url) === actual)).toBe(true);
+  }, 20_000);
+  it("replays a readonly date opener and an explicitly labelled numeric calendar day", async () => {
+    const selected = parseAccessRecipe({ ...recipe(), steps: [
+      { action: "clickFilter", selector: "#date", text: "Choose date", purpose: "OPEN_DATE_PICKER" },
+      { action: "selectDateChoice", selector: "#calendar button" },
+      { action: "select", selector: "#players", value: "{{players}}", purpose: "PLAYERS" },
+    ] });
+    const fixture = html.replace('<input id="date" value="2026-10-22">',
+      '<input id="date" readonly placeholder="Choose date" aria-haspopup="dialog" value="Wed, Oct 21, 2026" onclick="document.querySelector(\'#calendar\').hidden=false">' +
+      '<table id="calendar" role="grid" hidden><tr><td role="gridcell"><button aria-label="Wed, Oct 21, 2026">21</button></td>' +
+      '<td role="gridcell"><button aria-label="Thu, Oct 22, 2026" onclick="let d=document.querySelector(\'#date\');d.value=\'Thu, Oct 22, 2026\';d.dispatchEvent(new Event(\'change\',{bubbles:true}));document.querySelector(\'#calendar\').hidden=true">22</button></td></tr></table>');
+    const result = await executeAccessRecipe(selected, executionInput, browserDeps(fixture));
+    expect(result).toMatchObject({ status: "AVAILABLE", complete: true, evidence: { dateVerified: true } });
+    expect(result.slots[0].startsAt).toBe("2026-10-22T13:00:00.000Z");
   }, 20_000);
   it.each([true, false])("replays ancillary setup only inside its saved route scope (%s)", async scoped => {
     const selected = recipe();

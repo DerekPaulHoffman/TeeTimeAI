@@ -930,13 +930,14 @@ describe("controller-only verification", () => {
     } finally { rmSync(sourceHome, { recursive: true, force: true }); }
   });
 
-  it("keeps public bootstrap metadata out of URL authority across reset and checkpoint resume", async () => {
+  it.each(["PUBLIC_BOOTSTRAP", "PUBLIC_AVAILABILITY"])("keeps %s out of URL authority across reset and checkpoint resume", async readPurpose => {
     const sourceHome = mkdtempSync(join(tmpdir(), "discovery-bootstrap-authority-"));
     writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }));
     writeFileSync(join(sourceHome, "auth.json"), "test-auth");
-    const official = "https://example.org/", bootstrap = "https://example.org/App/GlobalTenantSettings";
+    const official = "https://example.org/", bootstrap = readPurpose === "PUBLIC_BOOTSTRAP" ? "https://example.org/App/GlobalTenantSettings" :
+      "https://www.sevenrooms.com/api-yoa/availability/widget/range?venue=publicrental&time_slot=12:00&party_size=1&halo_size_interval=16&start_date=10-23-2026&num_days=1&channel=SEVENROOMS_WIDGET&selected_lang_code=en";
     const normal = "https://example.org/api/availability?date=2026-10-23", otherPurpose = "https://example.org/api/public-options";
-    const metadata = { url: bootstrap, method: "GET", resourceType: "xhr", status: 200, readPurpose: "PUBLIC_BOOTSTRAP" };
+    const metadata = { url: bootstrap, method: "GET", resourceType: "xhr", status: 200, readPurpose };
     expect(isSafeRecipeUrl(bootstrap)).toBe(false); // This caused actual helper startup rejection when promoted.
     const inputJob = { ...job(), request: { ...job().request, identity: { name: "Public golf", officialUrl: official, bookingUrl: null } } };
     const configurations: Array<{ initialUrls: string[]; deadlineAt: string }> = [];
