@@ -130,6 +130,37 @@ describe("explicit public simulator rentals on an opaque any-only pool", () => {
 });
 
 describe("closed public configuration rejection diagnostics", () => {
+  it.each([30, 60, 90, 120])("recognizes the observed %i Minute Simulator Reservation label without changing named resource or duration proof", async durationMinutes => {
+    const value = business();
+    value.appointmentTypes[""] = [{ ...value.appointmentTypes[""][0], name: `${durationMinutes} Minute Simulator Reservation`, duration: durationMinutes }];
+    const config = projectAcuityPublicConfiguration(landing(value), input.offering.bookingUrl);
+    expect(config?.rentals).toEqual([{ id: "73234482", durationMinutes, calendarIds: ["11388341", "11402955"] }]);
+    const fetch = mockReads(undefined, landing(value));
+    const result = await fetchAcuitySimulatorAvailability({ ...input, durationMinutes,
+      offering: { ...input.offering, supportedDurationsMinutes: [durationMinutes],
+        providerMetadata: { ownerKey: "2991fba2", rentalProductIds: ["73234482"] } } }, fetch);
+    expect(result.complete).toBe(true);
+    expect(result.slots[0].endsAt.getTime() - result.slots[0].startsAt.getTime()).toBe(durationMinutes * 60_000);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+  it.each(["Simulator Reservation Lesson", "League Simulator Reservation", "Member Simulator Reservation",
+    "Simulator Reservation Fitting", "Simulator Reservation Handicap", "Reservation", "Simulator Reservationless"])(
+    "does not classify excluded or uncorroborated %s as a rental", name => {
+      const value = business(); value.appointmentTypes[""] = [{ ...value.appointmentTypes[""][0], name }];
+      expect(inspectAcuityPublicConfiguration(landing(value), input.offering.bookingUrl)?.configurationDiagnostic?.contractField).toBe("RENTAL_IDENTITY");
+    });
+  it("keeps public catalog, requested duration and calendar identity fences for reservation-labelled rentals", async () => {
+    const value = business(); value.appointmentTypes[""] = [{ ...value.appointmentTypes[""][0], name: "60 Minute Simulator Reservation" }];
+    for (const flags of [{ private: true }, { active: false }, { type: "class" }, { classSize: 4 }, { canChooseQuantity: true }, { duration: 300 }]) {
+      const changed = { ...value, appointmentTypes: { "": [{ ...value.appointmentTypes[""][0], ...flags }] } };
+      expect(inspectAcuityPublicConfiguration(`<script>var BUSINESS = ${JSON.stringify(changed)};</script>`, input.offering.bookingUrl)?.configurationDiagnostic?.contractField).toBe("RENTAL_IDENTITY");
+    }
+    const fetch = mockReads(undefined, landing(value));
+    await expect(fetchAcuitySimulatorAvailability(input, fetch)).rejects.toMatchObject({ code: "UNSUPPORTED_DURATION" });
+    expect(fetch).toHaveBeenCalledOnce();
+    value.calendars["X-Golf Stratford"][0].name = "Unverified room";
+    expect(inspectAcuityPublicConfiguration(landing(value), input.offering.bookingUrl)?.configurationDiagnostic?.contractField).toBe("RESOURCE_IDENTITY");
+  });
   it.each(["https://app.acuityscheduling.com", "https://syntheticvenue.as.me"])("preserves the exact embedded reference on the canonical %s schedule", async origin => {
     const bookingUrl = `${origin}/schedule/2991fba2?ref=embedded_csp`;
     expect(isAcuityPublicBookingUrl(bookingUrl)).toBe(true);

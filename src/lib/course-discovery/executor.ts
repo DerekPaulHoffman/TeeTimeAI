@@ -50,7 +50,8 @@ const clean = (value: unknown) => String(value ?? "").replace(/\s+/gu, " ").trim
 /** Public providers often append a category label to the same venue name.
  * This only normalizes observed proof; canonical recipe/source binding stays exact. */
 export function venueProofMatches(canonical: string, observed: unknown) {
-  const compact = (value: unknown) => clean(value).normalize("NFKC").toLocaleLowerCase("en-US").replace(/[^\p{L}\p{N}]/gu, "");
+  const compact = (value: unknown) => clean(value).normalize("NFKC").toLocaleLowerCase("en-US")
+    .replace(/(?<=\s)&(?=\s)/gu, "and").replace(/[^\p{L}\p{N}]/gu, "");
   const expected = compact(canonical), actual = compact(observed);
   if (expected === actual) return true;
   const core = (value: string) => value.replace(/golf(?:course|club)$/u, "");

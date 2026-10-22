@@ -143,7 +143,7 @@ function normalizePlainName(value: unknown, maxLength: number) {
 }
 
 function namedBayRental(name: string, durationMinutes: number) {
-  if (/\b(?:simulator|bay)\b/iu.test(name) && /\b(?:booking|rental|time)\b/iu.test(name) &&
+  if (/\b(?:simulator|bay)\b/iu.test(name) && /\b(?:booking|rental|reservation|time)\b/iu.test(name) &&
       !/\b(?:league|member|lesson|fitting|handicap)\b/iu.test(name)) return true;
   return durationLabelledSimRental(name, durationMinutes);
 }

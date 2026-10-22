@@ -45,6 +45,18 @@ function dependencies(body: unknown, status = 200): AccessExecutorDependencies {
     requestLease: async (_family, work) => ({ acquired: true, value: await work() }) };
 }
 describe("deterministic course recipe execution", () => {
+  it("normalizes only standalone ampersand conjunctions while keeping the whole venue and location", () => {
+    expect(venueProofMatches("COR-Golf Cafe and Lounge", "COR Golf Cafe & Lounge")).toBe(true);
+    expect(venueProofMatches("COR Golf Cafe & Lounge", "COR-Golf Cafe and Lounge")).toBe(true);
+    expect(venueProofMatches("COR Golf Cafe and Lounge", "COR Golf Cafe \t&\n Lounge")).toBe(true);
+    expect(venueProofMatches("COR Golf Cafe and Lounge", "COR Golf Cafe&Lounge")).toBe(false);
+    expect(venueProofMatches("COR Golf Cafe and Lounge", "COR Golf Cafe &amp; Lounge")).toBe(false);
+    expect(venueProofMatches("COR Golf Cafe R and D Lounge", "COR Golf Cafe R&D Lounge")).toBe(false);
+    expect(venueProofMatches("COR Golf Cafe and Lounge", "COR Golf Cafe & Lounge Denver")).toBe(false);
+    expect(venueProofMatches("COR Golf Cafe and Lounge Denver", "COR Golf Cafe & Lounge Boulder")).toBe(false);
+    expect(venueProofMatches("COR Golf Cafe and Lounge", "Golf Cafe & Lounge")).toBe(false);
+    expect(venueProofMatches("COR Golf Cafe and Lounge", "COR Golf Cafe & and Lounge")).toBe(false);
+  });
   it("normalizes public venue category suffixes only for a distinctive matching core", () => {
     expect(venueProofMatches("Tashua Knolls", "Tashua Knolls Golf Course")).toBe(true);
     expect(venueProofMatches("Tashua Knolls", "TashuaKnollsGolfCourse")).toBe(true);

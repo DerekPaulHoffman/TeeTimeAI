@@ -6,7 +6,7 @@ import { createAddressPinnedPublicFetchTransport } from "@/lib/automation/addres
 import { createPassfactoryPublicReadPolicy, isIncidentalBrowserRequest, isNonEvidenceBrowserResource } from "@/lib/automation/passfactory-public-read-policy";
 import { interactiveControlKind, isAnonymousBrowserReadPost } from "@/lib/automation/simulator-interactive-browser";
 import { addVerifiedMindbodyReadHeaders } from "@/lib/automation/mindbody-public-read-policy";
-import { isRexAnonymousPlaceholderRead, isRexNamespace, isRexPublicBrowserReadPost } from "@/lib/automation/rex-public-read-policy";
+import { isRexAnonymousPlaceholderRead, isRexNamespace, isRexPublicBrowserReadPost, rexProjectedPublicReadRejection, rexPublicBrowserReadRejection } from "@/lib/automation/rex-public-read-policy";
 import { createUSchedulePublicReadPolicy } from "@/lib/automation/uschedule-public-read-policy";
 import { sanitizeResponderText } from "@/lib/automation/course-support-responder-policy";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
@@ -388,7 +388,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
       const requestHeaders = request.headers();
       const body = request.postData() ?? undefined;
       if (nativeProxy && isRexNamespace(url) && method === "POST" &&
-          !isRexPublicBrowserReadPost(url, method, requestHeaders, body ?? "", frameUrl)) throw new Error("UNSAFE_METHOD");
+          !isRexPublicBrowserReadPost(url, method, requestHeaders, body ?? "", frameUrl))
+        throw new Error(rexPublicBrowserReadRejection(url, method, requestHeaders, body ?? "", frameUrl));
       const rexPlaceholder = nativeProxy && isRexAnonymousPlaceholderRead(url, method, requestHeaders, body ?? "", frameUrl);
       if (nativeProxy && !rexPlaceholder && Object.keys(requestHeaders).some(key => /^(?:authorization|proxy-authorization|x-api-key)$/iu.test(key))) throw new Error("CREDENTIAL_HEADERS");
       if (ezlinks.handles(url) && Object.keys(requestHeaders).some(key =>
@@ -407,7 +408,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
       if (!addVerifiedMindbodyReadHeaders(url, method, requestHeaders, headers, body ?? "")) throw new Error("UNSAFE_METHOD");
       if (!uschedule.addReadHeaders(url, method, requestHeaders, headers, body ?? "")) throw new Error("UNSAFE_METHOD");
       const preflight = nativeProxy && method === "OPTIONS" && nativeReadPreflightMethod(requestHeaders);
-      if (!["GET", "HEAD"].includes(method) && !preflight && !(method === "POST" && body && readPost(url, headers, body))) throw new Error("UNSAFE_METHOD");
+      if (!["GET", "HEAD"].includes(method) && !preflight && !(method === "POST" && body && readPost(url, headers, body)))
+        throw new Error(!nativeProxy && method === "POST" && isRexNamespace(url) ? rexProjectedPublicReadRejection(url, headers, body ?? "", frameUrl) : "UNSAFE_METHOD");
       if (method === "POST" && body) {
         try {
           const projected = redactDiscoveryJson(JSON.parse(body));

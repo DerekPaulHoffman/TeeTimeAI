@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isRexAnonymousPlaceholderRead, isRexNamespace, isRexPublicBrowserReadPost, isRexPublicReadPost } from "./rex-public-read-policy";
+import { isRexAnonymousPlaceholderRead, isRexNamespace, isRexPublicBrowserReadPost, isRexPublicReadPost, rexProjectedPublicReadRejection, rexPublicBrowserReadRejection } from "./rex-public-read-policy";
 
 const origin = "https://venue.reservewithrex.com";
 const venueId = "507f1f77bcf86cd799439011", packageId = "507f1f77bcf86cd799439012";
@@ -51,5 +51,73 @@ describe("published Rex anonymous availability reads", () => {
     for (const key of ["Cookie", "x-auth-token", "x-csrf-token", "authorization", "x-api-key"])
       expect(isRexPublicBrowserReadPost(url, "POST", { ...original, [key]: "value" }, body, origin + "/package")).toBe(false);
     expect(isRexPublicBrowserReadPost(url, "POST", original, body, "https://other.reservewithrex.com/package")).toBe(false);
+  });
+});
+
+describe("closed Rex rejection diagnostics without request values", () => {
+  const url = new URL(origin + "/api/venue/get");
+  const original = () => ({ origin, "content-type": "application/json" });
+  const reason = (value: unknown, headers = original(), frame = origin + "/package") =>
+    rexPublicBrowserReadRejection(url, "POST", headers, JSON.stringify(value), frame);
+
+  it("does not change allowed or denied policy outcomes or mutate their inputs", () => {
+    for (const value of [input, { ...input, targetPackage: "" }, { ...input, privateSecretName: "private-value" }]) {
+      const h = original(), body = JSON.stringify(value), before = isRexPublicBrowserReadPost(url, "POST", h, body, origin + "/package");
+      const snapshot = JSON.stringify({ h, value });
+      const code = reason(value, h);
+      expect(isRexPublicBrowserReadPost(url, "POST", h, body, origin + "/package")).toBe(before);
+      expect(JSON.stringify({ h, value })).toBe(snapshot);
+      expect(code).toMatch(/^[A-Z_]{1,80}$/u);
+      expect(code === "REX_READ_NOT_REJECTED").toBe(before);
+    }
+  });
+  it.each([
+    [{ ...input, targetPackage: "" }, "REX_READ_BODY_TARGET_PACKAGE_EMPTY_STRING_FORMAT"],
+    [{ ...input, guests: "2" }, "REX_READ_BODY_GUESTS_STRING_TYPE"],
+    [{ ...input, guests: 0 }, "REX_READ_BODY_GUESTS_NUMBER_RANGE"],
+    [{ ...input, date: "2026-02-30" }, "REX_READ_BODY_DATE_STRING_VALUE"],
+    [{ ...input, venueId: null }, "REX_READ_BODY_VENUE_ID_NULL_TYPE"],
+    [{ ...input, unknownPrivateKey: "secret-input-value" }, "REX_READ_BODY_OTHER_OBJECT_EXTRA_FIELDS"],
+    [null, "REX_READ_BODY_ROOT_NULL_TYPE"],
+  ])("projects only a known field/type/issue for %j", (value, expected) => {
+    expect(reason(value)).toBe(expected);
+    expect(reason(value)).not.toMatch(/secret-input-value|unknownPrivateKey|507f|2026|\b0\b/u);
+  });
+  it.each([
+    ["authorization", "Bearer private-value", "AUTHORIZATION"], ["Cookie", "private-value", "COOKIE"],
+    ["x-csrf-token", "private-value", "CSRF"], ["x-api-key", "private-value", "API_KEY"],
+    ["x-private-token", "private-value", "TOKEN"], ["x-http-method-override", "POST", "METHOD_OVERRIDE"],
+    ["x-secret-private-header", "private-value", "OTHER_CREDENTIAL"],
+  ])("reports only the credential kind for %s", (key, value, kind) => {
+    const code = reason(input, { ...original(), [key]: value });
+    expect(code).toBe(`REX_READ_HEADER_${kind}`);
+    expect(code).not.toContain(value);
+    expect(code).not.toContain(key);
+  });
+  it("distinguishes frame, origin, type, JSON and byte-bound failures", () => {
+    expect(reason(input, original(), "not-a-url/private-value")).toBe("REX_READ_FRAME_URL");
+    expect(reason(input, original(), "https://other.reservewithrex.com/package")).toBe("REX_READ_FRAME_ORIGIN");
+    expect(reason(input, { ...original(), origin: "https://other.reservewithrex.com" })).toBe("REX_READ_ORIGIN");
+    expect(reason(input, { ...original(), "content-type": "text/plain" })).toBe("REX_READ_CONTENT_TYPE");
+    expect(rexPublicBrowserReadRejection(url, "POST", original(), "secret-invalid-json", origin)).toBe("REX_READ_BODY_JSON");
+    expect(rexPublicBrowserReadRejection(url, "POST", original(), "x".repeat(16_385), origin)).toBe("REX_READ_BODY_LIMIT");
+    expect(rexPublicBrowserReadRejection(new URL(origin + "/api/reservation"), "POST", original(), JSON.stringify(input), origin)).toBe("REX_READ_PATH");
+    expect(rexPublicBrowserReadRejection(new URL(url.href + "?secret=private-value"), "POST", original(), JSON.stringify(input), origin)).toBe("REX_READ_URL_STATE");
+  });
+  it("keeps the exact placeholder exception scoped and never prints a bearer", () => {
+    const endpoint = new URL(origin + "/api/venue/get-venue-with-package"), h = { ...original(), authorization: "bearer null" };
+    expect(rexPublicBrowserReadRejection(endpoint, "POST", h, JSON.stringify(input), origin + "/package")).toBe("REX_READ_NOT_REJECTED");
+    expect(rexPublicBrowserReadRejection(endpoint, "POST", h, JSON.stringify(input), origin + "/account")).toBe("REX_READ_PLACEHOLDER_FRAME");
+    expect(rexPublicBrowserReadRejection(endpoint, "POST", { ...h, cookie: "private-cookie" }, JSON.stringify(input), origin + "/package")).toBe("REX_READ_HEADER_COOKIE");
+    expect(rexPublicBrowserReadRejection(endpoint, "POST", h, JSON.stringify({ ...input, resourceIds: ["private-id"] }), origin + "/package")).toBe("REX_READ_BODY_RESOURCE_IDS_ARRAY_RANGE");
+  });
+  it("describes only projected public headers and body for a pinned transport denial", () => {
+    const h = headers(); h.set("cookie", "private-cookie"); h.set("authorization", "private-bearer");
+    const body = JSON.stringify({ ...input, targetPackage: "" });
+    expect(rexPublicBrowserReadRejection(url, "POST", Object.fromEntries(h), body, origin)).toBe("REX_READ_HEADER_AUTHORIZATION");
+    expect(rexProjectedPublicReadRejection(url, h, body, origin)).toBe("REX_READ_BODY_TARGET_PACKAGE_EMPTY_STRING_FORMAT");
+    expect(isRexPublicReadPost(url, h, body)).toBe(false);
+    expect(h.get("cookie")).toBe("private-cookie"); expect(h.get("authorization")).toBe("private-bearer");
+    expect(rexProjectedPublicReadRejection(url, h, JSON.stringify(input), origin)).toBe("REX_READ_PROJECTED_POLICY");
   });
 });

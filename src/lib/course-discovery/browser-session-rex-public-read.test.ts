@@ -82,10 +82,52 @@ describe.runIf(existsSync(chrome))("REX discovery native policy boundary", () =>
         expect([...initial.responses, ...snapshot.responses]).toContainEqual(expect.objectContaining({ url: origin + path, status: 200, method: "POST" }));
       } else {
         expect(posts).toEqual([]);
-        expect([...initial.requests, ...snapshot.requests]).toContainEqual(expect.objectContaining({ method: "POST", blockedReason: "UNSAFE_METHOD" }));
+        const codes: Record<Exclude<Mode, "valid">, string> = { "real bearer": "REX_READ_HEADER_AUTHORIZATION", cookie: "REX_READ_HEADER_COOKIE",
+          "anonymous cookie": "REX_READ_HEADER_COOKIE", "anonymous token": "REX_READ_HEADER_TOKEN", csrf: "REX_READ_HEADER_CSRF",
+          "unsafe body": "REX_READ_BODY_OTHER_OBJECT_EXTRA_FIELDS", "unknown GraphQL": "REX_READ_PATH" };
+        expect([...initial.requests, ...snapshot.requests]).toContainEqual(expect.objectContaining({ method: "POST", blockedReason: codes[mode] }));
       }
       expect(JSON.stringify([initial, snapshot])).not.toContain(secret); expect(fetcher).not.toHaveBeenCalled();
       expect(maximum).toBe(1); expect(active).toBe(0);
+    } finally { await session.close(); }
+  }, 20_000);
+});
+
+describe.runIf(existsSync(chrome))("REX pinned public projection diagnostics", () => {
+  it.each(["valid", "empty package", "unknown body"] as const)("keeps original cookies out of pinned transport: %s", async mode => {
+    let browser: Browser | undefined;
+    const body = { venueId: publicBody.venueId, date: publicBody.date, guests: 2, duration: 2, lanes: 1, packagesTag: "",
+      ...(mode === "empty package" ? { targetPackage: "" } : {}), ...(mode === "unknown body" ? { privateInput: secret } : {}) };
+    const html = `<html><body><h1>Public Golf Rentals</h1><script>document.cookie='account=${secret}; Secure; SameSite=Lax';
+      fetch('/api/venue/get',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(${JSON.stringify(body)})})
+        .catch(()=>{}).finally(()=>{window.fixtureDone=true;});</script></body></html>`;
+    const posts: Array<{ headers: Headers; body: string | undefined; credentials: RequestCredentials | undefined }> = [];
+    const fetcher = vi.fn(async (url: URL | RequestInfo, init?: RequestInit) => {
+      if (String(url) === origin + "/api/venue/get") {
+        posts.push({ headers: new Headers(init?.headers), body: init?.body?.toString(), credentials: init?.credentials });
+        return new Response('{"ok":true,"slots":[]}', { headers: { "content-type": "application/json" } });
+      }
+      if (String(url) !== entry || init?.method !== "GET") throw new Error("UNEXPECTED_FIXTURE_DISPATCH");
+      return new Response(html, { headers: { "content-type": "text/html" } });
+    }) as typeof fetch;
+    const session = await createCourseDiscoveryBrowserSession({ initialUrls: [entry], venueOfficialUrl: entry,
+      deadlineAt: new Date(Date.now() + 15_000), timeZone: "America/Los_Angeles", venueName: "Public Golf Rentals" }, {
+      browserTransport: "PINNED_HTTP", fetch: fetcher, launchBrowser: async () => browser = await chromium.launch({ executablePath: chrome, headless: true }),
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      const initial = await session.execute({ id: 1, action: "open", url: entry });
+      await browser!.contexts()[0].pages()[0].waitForFunction(() => Boolean((window as Window & { fixtureDone?: boolean }).fixtureDone));
+      const snapshot = await session.execute({ id: 2, action: "observe" });
+      if (mode === "valid") {
+        expect(posts).toHaveLength(1); expect(posts[0].credentials).toBe("omit"); expect(posts[0].headers.has("cookie")).toBe(false);
+        expect(posts[0].headers.has("authorization")).toBe(false); expect(JSON.parse(posts[0].body!)).toEqual(body);
+      } else {
+        expect(posts).toEqual([]);
+        expect([...initial.requests, ...snapshot.requests]).toContainEqual(expect.objectContaining({ method: "POST",
+          blockedReason: mode === "empty package" ? "REX_READ_BODY_TARGET_PACKAGE_EMPTY_STRING_FORMAT" : "REX_READ_BODY_OTHER_OBJECT_EXTRA_FIELDS" }));
+      }
+      expect(JSON.stringify([initial, snapshot])).not.toContain(secret);
     } finally { await session.close(); }
   }, 20_000);
 });
