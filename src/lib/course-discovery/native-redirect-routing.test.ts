@@ -217,6 +217,37 @@ describe("native document-generation retirement", () => {
     } finally { initialAck.resolve({}); await boundary?.catch(() => {}); await test.guard.close(); }
   });
 
+  it.each(["unknown loader", "foreign generation"])("never publishes a successor after a rejected late-pause abort closes during drain (%s)", async mismatch => {
+    const test = await installed(), initialAck = deferred<object>(), send = test.cdp.send.getMockImplementation()!;
+    let boundary: Promise<void> | undefined;
+    try {
+      await startDocument(test); await test.routes[0].continue(); test.response("document", { resourceType: "Document" }); await test.routes[0].request().response();
+      if (mismatch === "foreign generation") {
+        await test.guard.beginDocumentNavigation(test.main as never);
+        identity(test, "successor", "loader-two", "Document"); test.request("successor", { resourceType: "Document" });
+        await test.routes[1].continue(); test.response("successor", { resourceType: "Document" }); await test.routes[1].request().response();
+      }
+      vi.useFakeTimers();
+      test.cdp.send.mockImplementation((name, value) => name === "Fetch.failRequest" && value?.requestId === "initial" ? initialAck.promise
+        : name === "Fetch.failRequest" && value?.requestId === "late" ? Promise.reject(new Error("Invalid InterceptionId")) : send(name, value));
+      test.request("initial"); boundary = test.guard.beginDocumentNavigation(test.main as never); boundary.catch(() => {});
+      identity(test, "late", mismatch === "unknown loader" ? "unknown" : "loader-one", "Fetch");
+      test.request("late", { resourceType: "XHR" });
+      test.events.get("Network.loadingFailed")!({ requestId: "network-late" });
+      // Let the late abort's existing timeout precede the drain timeout. The
+      // mismatched terminal event cannot ACK either unknown/foreign ownership.
+      await vi.advanceTimersByTimeAsync(10); initialAck.resolve({});
+      await vi.advanceTimersByTimeAsync(100);
+      await expect(boundary).rejects.toThrow();
+      expect(test.failures).toContain("NATIVE_REDIRECT_ABORT_TIMEOUT");
+      expect(test.guard.firstFatal).toMatchObject({ code: "NATIVE_REDIRECT_ABORT_TIMEOUT" });
+      expect(test.guard.lastFailure).toBe("NATIVE_REDIRECT_ABORT_TIMEOUT");
+      expect(test.close).toHaveBeenCalledOnce();
+      expect(test.routes).toHaveLength(mismatch === "foreign generation" ? 2 : 1);
+      expect(test.cdp.send.mock.calls.some(([name, value]) => ["Fetch.continueRequest", "Fetch.getResponseBody"].includes(name) && value?.requestId === "late")).toBe(false);
+    } finally { initialAck.resolve({}); await boundary?.catch(() => {}); await test.guard.close(); vi.useRealTimers(); }
+  });
+
   it.each([
     ["Script", "Fetch", "GET"], ["Fetch", "Script", "GET"], ["Image", "Stylesheet", "HEAD"],
   ])("denies exact non-document %s/%s %s disagreement without dispatch and retains independent reads", async (networkKind, fetchKind, method) => {

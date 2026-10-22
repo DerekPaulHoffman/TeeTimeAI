@@ -54,6 +54,21 @@ const deps = { now: () => new Date("2030-10-20T12:00:00Z"), venueMatches: venueP
 const input = { date: "2030-10-23", timeZone: source.timeZone, players: 2, startTime: "09:00", endTime: "18:00" };
 
 describe("official booking source proof", () => {
+  it("treats an existing comma followed by a printed line break as address formatting", () => {
+    const html = homeHtml.replace(source.venueAddress, "565 Competition Road, Example,<br>\nNC 27603");
+    expect(readTeeItUpOfficialHome(source, { ...home, html }, true).bookingPageUrl).toBe(bookingPage);
+    expect(teeItUpCompleteStreetAddress("565 Competition Road,, NC 27603")).toBeUndefined();
+    expect(teeItUpCompleteStreetAddress("565 Competition Road, Example, Other, NC 27603")).toBeUndefined();
+    for (const changed of ["565 Other Road, Example,<br>NC 27603", "565 Competition Road Ste 2, Example,<br>NC 27603", "565 N Competition Road, Example,<br>NC 27603", "565 Competition Road, Example,<br>NC 27604"])
+      expect(() => readTeeItUpOfficialHome(source, { ...home, html: homeHtml.replace(source.venueAddress, changed) }, true)).toThrow();
+  });
+  it("does not claim rendered matches on an inert read or let diagnostics alter validation", () => {
+    const values: unknown[] = [];
+    const result = readTeeItUpOfficialHome(source, { ...home, visibleEvidence: undefined }, false, value => values.push(value));
+    expect(JSON.stringify(values)).not.toMatch(/rendered(?:Venue|Link|Address)Matches/u);
+    expect(readTeeItUpOfficialHome(source, home, true, () => { throw new Error("PRIVATE_CALLBACK_FAILURE"); }).bookingPageUrl).toBe(result.bookingPageUrl);
+    expect(() => readTeeItUpOfficialHome(source, { ...home, visibleEvidence: undefined }, true, () => { throw new Error("PRIVATE_CALLBACK_FAILURE"); })).toThrow("OFFICIAL_BOOKING_SOURCE_UNVERIFIED");
+  });
   it("retains both literal address claims and both immutable provider IDs", () => {
     const seen = observed(), chain = observedTeeItUpOfficialBookingChain(seen.token);
     expect(bindTeeItUpOfficialBookingFacility(source, chain, directory)).toMatchObject({ kind: "OFFICIAL_BOOKING_SOURCE", alias: "example-golf",

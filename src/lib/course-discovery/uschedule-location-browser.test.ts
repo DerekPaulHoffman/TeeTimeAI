@@ -29,12 +29,13 @@ function tlsLiteral(name: string): string {
   return JSON.parse(literal);
 }
 describe.runIf(existsSync(chrome))("actual native official-location provenance", () => {
-  it.each([true, false])("requires a page wrapper before following its public link and independently inspecting its official location: %s", async pageWrapper => {
+  it.each(["wrapper", "small-form", "hidden-address"] as const)("requires current rendered evidence in the page wrapper: %s", async mode => {
+    const pageWrapper = mode !== "small-form";
     const officialUrl = "https://example.org/", finalUrl = "https://www.example.org/", bookingUrl = "https://clients.uschedule.com/examplegolf/booking";
     const entry = `${bookingUrl}?filter=loc[82]`, venueName = "Example Indoor Golf Club", venueAddress = "10 Main Street, Example, WA 98000, USA";
     expect(isSafeRecipeUrl(entry)).toBe(true); expect(isPublicAvailabilityNavigation(entry, "Tee Time")).toBe(true);
     const officialHtml = `<html><body><script>window.formValueReads=0;for(const type of [HTMLInputElement,HTMLSelectElement,HTMLTextAreaElement]){const p=Object.getOwnPropertyDescriptor(type.prototype,'value');Object.defineProperty(type.prototype,'value',{...p,get(){window.formValueReads++;return p.get.call(this)}})}</script><form id="Form" method="post" onsubmit="window.wrapperSubmitted=true;return false">
-      <h1>${venueName}</h1><div><p>${venueAddress}</p></div><a id="public-link" href="${entry}" onclick="window.wrapperClicked=true;return false">Tee Time</a>
+      <h1>${venueName}</h1><div><p class="public-address">${venueAddress}</p></div>${mode === "hidden-address" ? '<style>.public-address{display:none}</style>' : ""}<a id="public-link" href="${entry}" onclick="window.wrapperClicked=true;return false">Tee Time</a>
       <a id="account-link" href="https://example.org/account">Account</a><a id="checkout-link" href="https://example.org/checkout">Book 09:00</a>
       <a id="email-link" href="${entry}">Book by email</a><a id="time-link" href="${entry}">Book 10:30</a>
       <a id="hash-link" href="${entry}#availability">Book tee times</a><a id="download-link" download href="${entry}">Book tee times</a>
@@ -87,6 +88,12 @@ describe.runIf(existsSync(chrome))("actual native official-location provenance",
         return;
       }
       expect(link).toBeDefined(); expect(recipeSelectorSchema.safeParse(link!.selector).success).toBe(true);
+      if (mode === "hidden-address") {
+        await expect(session.execute({ id: 2, action: "inspect_adapter", url: entry })).rejects.toThrow("INVALID_ADAPTER_SOURCE");
+        expect(session.diagnostics().officialSourceDiagnostic).toMatchObject({ stage: "RENDERED_ADDRESS", rawOfficialCaptured: true, rawVenueMatches: true,
+          rawAddressMatches: true, rawLinkMatches: true, renderedAddressMatches: false, derivationRejected: true, legacyFallback: true });
+        expect(fixedFetch).not.toHaveBeenCalled(); return;
+      }
       expect(initial.controls).toHaveLength(1);
       expect(initial.elements).toContainEqual(expect.objectContaining({ tag: "h1", text: venueName }));
       expect(JSON.stringify(initial)).not.toMatch(/private-(?:sentinel|text|hidden|textarea|anchor)/u);

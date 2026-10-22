@@ -250,6 +250,9 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         if (closed || options.signal?.aborted) throw new Error("NATIVE_REDIRECT_CLOSED");
         await new Promise(resolve => setTimeout(resolve, 5));
       }
+      // A fatal abort can close the controller just before its pause's finally
+      // removes the last row. An empty set is not a successful closed drain.
+      if (closed || options.signal?.aborted) throw new Error("NATIVE_REDIRECT_CLOSED");
     })(), "NATIVE_REDIRECT_DRAIN_TIMEOUT");
   };
   cdp.on("Page.frameNavigated", event => {
@@ -672,6 +675,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         // Stop dispatch before the successor document starts. Only an exact
         // paused-abort ACK or Network.loadingFailed can settle an old lease.
         await retireGeneration(previous, true);
+        if (closed || options.signal?.aborted) throw new Error("NATIVE_REDIRECT_CLOSED");
         generation = { id: previous.id + 1, retired: false }; generationTracking = true; awaitingDocument = true;
       } catch (error) { await close("NATIVE_REDIRECT_DRAIN_FAILED"); throw error; }
       finally { boundaryPending = false; }

@@ -1,6 +1,7 @@
 import { isTeeItUpPlayEntry, publicDocumentUrl, readTeeItUpOfficialEmbed, readTeeItUpOfficialHome, sameTeeItUpOfficialHost,
   teeItUpBookAlias, type TeeItUpObservedSourceChain, type TeeItUpSourceIdentity } from "./teeitup-official-booking-source";
 import type { OfficialIdentityPage } from "./teeitup-official-identity";
+import type { OfficialSourceDiagnostic } from "./official-source-diagnostics";
 
 declare const requestBrand: unique symbol;
 declare const chainBrand: unique symbol;
@@ -24,10 +25,21 @@ export function createTeeItUpOfficialBookingScope(source: TeeItUpSourceIdentity,
   let home: { record: Record; value: ReturnType<typeof readTeeItUpOfficialHome> } | undefined;
   let page: { record: Record; value: ReturnType<typeof readTeeItUpOfficialEmbed> } | undefined;
   let finalSnapshot: { epoch: number; url: string; record: Record } | undefined;
-  function reset() { epoch++; sequence = 0; current = undefined; records = new WeakMap(); tokens = new WeakMap(); home = undefined; page = undefined; finalSnapshot = undefined; }
+  let homeDiagnostic: OfficialSourceDiagnostic | undefined;
+  function reset() { epoch++; sequence = 0; current = undefined; records = new WeakMap(); tokens = new WeakMap(); home = undefined; page = undefined; finalSnapshot = undefined; homeDiagnostic = undefined; }
   function invalidate() { reset(); }
   signal.addEventListener("abort", invalidate, { once: true });
   return {
+    diagnostics(currentUrl: string): OfficialSourceDiagnostic {
+      const final = finalSnapshot?.record, entry = final?.parent && records.get(final.parent);
+      const chainRedirect = Boolean(entry && page && entry.url === page.value.iframeEntryUrl && entry.status !== undefined && redirects.has(entry.status) &&
+        entry.location === final?.url && entry.order === page.record.order + 1 && final?.order === entry.order + 1);
+      const chainTokenCurrent = Boolean(active && !signal.aborted && home && page && finalSnapshot?.epoch === epoch && final === current &&
+        final?.url === currentUrl && teeItUpBookAlias(currentUrl) && final.status === 200 && final.html && chainRedirect);
+      return { ...homeDiagnostic, stage: chainTokenCurrent ? "CHAIN_CURRENT" : homeDiagnostic?.stage ?? "CHAIN_INCOMPLETE",
+        chainHome: Boolean(home), chainBookingPage: Boolean(page), renderedFrameObserved: Boolean(page), chainRedirect,
+        chainFinalDocument: Boolean(final?.status === 200 && final.html), chainTokenCurrent };
+    },
     checkCurrentDocument(url: string, timeOrigin?: number) {
       if (current && (current.url !== url || timeOrigin !== undefined && current.timeOrigin !== undefined && current.timeOrigin !== timeOrigin)) reset();
     },
@@ -68,7 +80,7 @@ export function createTeeItUpOfficialBookingScope(source: TeeItUpSourceIdentity,
             parent.status !== undefined && redirects.has(parent.status) && parent.location === record.url &&
             sameTeeItUpOfficialHost(root.href, actual.href) && root.pathname === actual.pathname && root.search === actual.search;
           if (!exactRoot && !aliasRoot) return;
-          try { home = { record, value: readTeeItUpOfficialHome(source, input.officialPage, true) }; } catch { return; }
+          try { home = { record, value: readTeeItUpOfficialHome(source, input.officialPage, true, value => { homeDiagnostic = value; }) }; } catch { return; }
         } else if (record.order === home.record.order + 1 && input.url === home.value.bookingPageUrl) {
           try { page = { record, value: readTeeItUpOfficialEmbed(input.officialPage, input.frames) }; } catch { page = undefined; }
         }

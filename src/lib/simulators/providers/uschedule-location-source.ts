@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { parse, type DefaultTreeAdapterMap } from "parse5";
 import { z } from "zod";
 import type { OfficialIdentityPage } from "@/lib/course-discovery/teeitup-official-identity";
+import type { OfficialSourceDiagnostic } from "@/lib/course-discovery/official-source-diagnostics";
 
 type Node = DefaultTreeAdapterMap["node"];
 type Element = DefaultTreeAdapterMap["element"];
@@ -106,35 +107,47 @@ export function sameUScheduleOfficialSite(left: string, right: string) {
 export type UScheduleOfficialIdentityPage = OfficialIdentityPage & { officialDocumentProof?: {
   kind: "VERIFIED_OFFICIAL_DOCUMENT"; officialUrl: string; documentUrl: string;
 } };
-export function deriveUScheduleOfficialLocation(source: Source, page: UScheduleOfficialIdentityPage, requireVisibleEvidence = true): UScheduleOfficialLocationProof {
+export function deriveUScheduleOfficialLocation(source: Source, page: UScheduleOfficialIdentityPage, requireVisibleEvidence = true,
+  onDiagnostic?: (value: OfficialSourceDiagnostic) => void): UScheduleOfficialLocationProof {
+  const facts: OfficialSourceDiagnostic = { stage: "SOURCE_CONTEXT" };
+  const emit = () => { try { onDiagnostic?.({ ...facts }); } catch { /* Diagnostics cannot change identity validation. */ } };
+  const check = (condition: unknown, stage: OfficialSourceDiagnostic["stage"], key: Exclude<keyof OfficialSourceDiagnostic, "stage">) => {
+    facts.stage = stage; facts[key] = Boolean(condition); emit(); if (!condition) return fail();
+  };
   const booking = parseUScheduleLocationSource(source.bookingUrl);
-  if (!booking || !source.officialUrl || !source.venueAddress || !/^\d/u.test(source.venueAddress) || !/\b\d{5}(?:-\d{4})?\b/u.test(source.venueAddress)) return fail();
+  check(booking && source.officialUrl && source.venueAddress && /^\d/u.test(source.venueAddress) && /\b\d{5}(?:-\d{4})?\b/u.test(source.venueAddress), "SOURCE_CONTEXT", "sourceContextValid");
+  if (!booking || !source.officialUrl || !source.venueAddress) return fail();
   const current = new URL(page.url), official = new URL(source.officialUrl);
-  if (!sameUScheduleOfficialSite(current.href, official.href)) return fail();
+  check(sameUScheduleOfficialSite(current.href, official.href), "OFFICIAL_SITE", "officialSiteMatches");
   // An alias is accepted initially only after the live controller verified the
   // actual official HTTP document. Warm reads use the exact saved URL and hash.
-  if (requireVisibleEvidence && current.origin !== official.origin &&
-      (page.officialDocumentProof?.kind !== "VERIFIED_OFFICIAL_DOCUMENT" || page.officialDocumentProof.officialUrl !== source.officialUrl ||
-       page.officialDocumentProof.documentUrl !== current.href)) return fail();
+  if (requireVisibleEvidence) check(current.origin === official.origin || page.officialDocumentProof?.kind === "VERIFIED_OFFICIAL_DOCUMENT" &&
+    page.officialDocumentProof.officialUrl === source.officialUrl && page.officialDocumentProof.documentUrl === current.href, "OFFICIAL_PROVENANCE", "officialProvenance");
+  facts.stage = "RAW_DOCUMENT"; emit();
   const all = nodes(page.html), expected = nameKey(source.venueName), canonicalAddress = addressKey(source.venueAddress);
   const headings = all.filter(node => node.tagName === "h1" && !hidden(node));
-  if (expected.length < 8 || headings.length !== 1 || nameKey(text(headings[0])) !== expected) return fail();
+  check(expected.length >= 8 && headings.length === 1 && nameKey(text(headings[0])) === expected, "RAW_VENUE", "rawVenueMatches");
   const links = all.filter(node => node.tagName === "a" && !hidden(node) && /\b(?:tee\s*time|book|rental|reservation)/iu.test(text(node))).flatMap(node => {
     try { const value = parseUScheduleLocationSource(new URL(attr(node, "href") ?? "", current).href);
       return value?.locationId && value.canonicalUrl === booking.canonicalUrl ? [{ node, value }] : []; } catch { return []; }
   });
-  if (!links.length || new Set(links.map(value => value.value.url)).size !== 1) return fail();
+  check(links.length && new Set(links.map(value => value.value.url)).size === 1, "RAW_LINK", "rawLinkMatches");
   const link = links[0].value;
-  if (booking.locationId && booking.locationId !== link.locationId) return fail();
+  check(!booking.locationId || booking.locationId === link.locationId, "RAW_LINK", "rawLinkMatches");
   const addresses = all.filter(node => ["address", "p", "div", "li", "td"].includes(node.tagName) && !hidden(node))
     .filter(node => { const value = clean(text(node)); return value.length <= 500 && (` ${addressKey(value)} `).includes(` ${canonicalAddress} `); });
-  if (!addresses.length) return fail();
+  check(addresses.length, "RAW_ADDRESS", "rawAddressMatches");
   const visible = page.visibleEvidence;
-  if (requireVisibleEvidence && (!visible || !visible.headings.some(value => nameKey(value) === expected) || !visible.linkUrls.includes(link.url) ||
-      !visible.addressTexts.some(value => (` ${addressKey(value)} `).includes(` ${canonicalAddress} `)))) return fail();
+  if (requireVisibleEvidence) {
+    check(visible?.headings.some(value => nameKey(value) === expected), "RENDERED_VENUE", "renderedVenueMatches");
+    check(visible?.linkUrls.includes(link.url), "RENDERED_LINK", "renderedLinkMatches");
+    check(visible?.addressTexts.some(value => (` ${addressKey(value)} `).includes(` ${canonicalAddress} `)), "RENDERED_ADDRESS", "renderedAddressMatches");
+  }
   const markup = [...headings, ...links.map(value => value.node), ...addresses].map(witness);
-  return uscheduleOfficialLocationProofSchema.parse({ kind: "OFFICIAL_PUBLIC_LOCATION_V1", officialPageUrl: current.href, entryUrl: link.url,
+  const proof = uscheduleOfficialLocationProofSchema.parse({ kind: "OFFICIAL_PUBLIC_LOCATION_V1", officialPageUrl: current.href, entryUrl: link.url,
     locationId: link.locationId, venueName: source.venueName, addressKey: canonicalAddress, markupWitnessSha256: digest(markup) });
+  facts.stage = "LOCATION_VERIFIED"; emit();
+  return proof;
 }
 
 export function readUScheduleLocationCatalog(html: string, sourceUrl: string, official: UScheduleOfficialLocationProof) {

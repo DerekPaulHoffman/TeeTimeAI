@@ -24,6 +24,7 @@ import type { ExistingAdapterMetadata } from "./existing-adapter-schema";
 import { publicResponseSchema, type PublicResponseSchema } from "./public-response-schema";
 import type { OfficialIdentityPage } from "./teeitup-official-identity";
 import { createTeeItUpOfficialBookingScope, observedTeeItUpOfficialBookingChain, type TeeItUpSourceRequestToken } from "./teeitup-official-booking-context";
+import { discoveryNavigationFailureKind, safeOfficialSourceDiagnostic, type OfficialSourceDiagnostic, type NavigationFailureKind } from "./official-source-diagnostics";
 import { inspectPublicRentalProduct } from "./public-product-control";
 import { canonicalCpsPublicUrl, cpsPublicEntryUrl, cpsSessionKey, createCpsPublicSessionScope } from "./cps-public-navigation";
 import { observedPublicDateChoices, isPublicDateChoice } from "./public-date-choice";
@@ -117,6 +118,8 @@ export type DiscoveryBrowserSnapshot = {
   requestFailures?: Array<{ reason: string; resourceType: string; url?: string }>;
   nativeFirstFatal?: NativeFirstFatal;
   nativeRejectedRequests?: NativeRequestDiagnostic[];
+  officialSourceDiagnostic?: OfficialSourceDiagnostic;
+  navigationFailureKind?: NavigationFailureKind;
   capabilityDiagnostics?: Array<{ code: "SUBFRAME_UNSUPPORTED"; resourceType: string; url?: string }>;
   frames: Array<{ url: string; source?: "OFFICIAL_IFRAME_SRC" }>;
   elements: Array<{ selector: string; tag: string; text: string; attributes: Record<string, string> }>;
@@ -191,6 +194,12 @@ export async function createCourseDiscoveryBrowserSession(input: {
   type OfficialDocumentProof = { kind: "VERIFIED_OFFICIAL_DOCUMENT"; officialUrl: string; documentUrl: string };
   let officialIdentityPage: (OfficialIdentityPage & { observedAt: number; officialDocumentProof: OfficialDocumentProof }) | undefined;
   let officialIdentityDocument: { url: string; html: string; officialDocumentProof: OfficialDocumentProof } | undefined;
+  let officialSourceDiagnostic: OfficialSourceDiagnostic | undefined, navigationFailureKind: NavigationFailureKind | undefined;
+  const officialDiagnostics = () => safeOfficialSourceDiagnostic({ ...teeBookingScope.diagnostics(page.url()), ...officialSourceDiagnostic,
+    rawOfficialCaptured: Boolean(officialIdentityDocument), currentOfficialDocument: Boolean(officialIdentityDocument && sameDiscoveryMainDocument(officialIdentityDocument.url, page.url())),
+    officialProvenance: officialIdentityDocument?.officialDocumentProof.kind === "VERIFIED_OFFICIAL_DOCUMENT",
+    renderedHeadingsPresent: Boolean(officialIdentityPage?.visibleEvidence?.headings.length), renderedAddressesPresent: Boolean(officialIdentityPage?.visibleEvidence?.addressTexts.length),
+    renderedLinksPresent: Boolean(officialIdentityPage?.visibleEvidence?.linkUrls.length) });
   function discardStaleOfficialIdentity(currentUrl: string) {
     if (officialIdentityPage && input.venueOfficialUrl &&
         [new URL(input.venueOfficialUrl).origin, new URL(officialIdentityPage.url).origin].includes(new URL(currentUrl).origin) &&
@@ -324,6 +333,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       if (!isSafeRecipeUrl(requestUrl) && !isSafeBrowserAssetUrl(requestUrl, request.resourceType(), request.method())) throw new Error("UNSAFE_URL");
       const url = new URL(requestUrl);
       if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+        officialSourceDiagnostic = undefined;
         teeRequestToken = nativeProxy ? teeBookingScope.beginMainDocument(request, { url: request.url(), method: request.method(), parent: request.redirectedFrom() ?? undefined }) : undefined;
         teeDocumentToken = teeRequestToken;
         const priorOfficial = bookingParents.authorizeParent(request.url());
@@ -909,6 +919,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     return { url: currentUrl, text, controls: visible, elements, frames, responses: responses.splice(0), requests, requestFailures: requestFailures.map(failure => ({ ...failure })),
       ...(redirectRouting?.firstFatal ? { nativeFirstFatal: redirectRouting.firstFatal } : {}),
       ...(redirectRouting?.rejectedRequests?.length ? { nativeRejectedRequests: redirectRouting.rejectedRequests } : {}),
+      officialSourceDiagnostic: officialDiagnostics(), ...(navigationFailureKind ? { navigationFailureKind } : {}),
       ...(capabilityDiagnostics.length ? { capabilityDiagnostics: capabilityDiagnostics.map(value => ({ ...value })) } : {}), loading: pendingReadCount() > 0,
       blockedRequests, requestCount, interceptCount, responseBytes, startupMs, initialContentWaitMs, pendingRequestCount: pendingReadCount(),
       ...(navigationStartedAt === undefined ? {} : { navigationElapsedMs: Date.now() - navigationStartedAt }),
@@ -1059,6 +1070,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       // Available even when navigation throws or the page has already closed.
       // This contains transport facts only, never page text or response bodies.
       return { loading: pendingReadCount() > 0, pendingRequestCount: pendingReadCount(),
+        officialSourceDiagnostic: officialDiagnostics(), ...(navigationFailureKind ? { navigationFailureKind } : {}),
         ...(redirectRouting?.firstFatal ? { nativeFirstFatal: redirectRouting.firstFatal } : {}),
         ...(redirectRouting?.rejectedRequests?.length ? { nativeRejectedRequests: redirectRouting.rejectedRequests } : {}),
         requests: observedRequests.map(request => ({ url: request.url, method: request.method, resourceType: request.resourceType,
@@ -1069,7 +1081,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
     },
     async execute(value: unknown): Promise<DiscoveryBrowserSnapshot> {
       const action = discoveryBrowserActionSchema.parse(value);
-      let documentNavigation = false;
+      let documentNavigation = false, navigationAttempted = false;
+      navigationFailureKind = undefined;
       try {
       if (terminalFailure) throw new Error(terminalFailure);
       deadline.throwIfAborted();
@@ -1139,6 +1152,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
         return modelSafe({ ...result, structure });
       }
       if (action.action === "inspect_adapter") {
+        officialSourceDiagnostic = undefined;
         if (!isSafeRecipeUrl(action.url) || !allowedNavigation.has(new URL(action.url).href)) throw new Error("UNOBSERVED_NAVIGATION");
         if (!input.venueName || input.venueName.length > 200) throw new Error("MISSING_VENUE_IDENTITY");
         discardStaleOfficialIdentity(normalizeDiscoveryNavigationUrl(page.url()));
@@ -1146,6 +1160,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
         const officialBookingSourceToken = teeBookingScope.tokenFor(action.url, page.url());
         const result = await (deps.inspectAdapter ?? inspectExistingAdapter)({ officialUrl: input.venueOfficialUrl, bookingUrl: action.url, venueName: input.venueName, venueAddress: input.venueAddress, timeZone: input.timeZone ?? "UTC" },
           { venueMatches: venueProofMatches, requestLease: deps.requestLease ?? runWithProviderRequestLease, deadlineAt: input.deadlineAt,
+            onOfficialSourceDiagnostic: value => { officialSourceDiagnostic = safeOfficialSourceDiagnostic(value); },
             ...(officialIdentityPage && Date.now() - officialIdentityPage.observedAt <= 5 * 60_000 ? { officialIdentityPage } : {}),
             ...(officialBookingSourceToken ? { officialBookingSourceToken } : {}) });
         const inspectedSnapshot = await snapshot();
@@ -1162,6 +1177,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
         await redirectRouting?.beginDocumentNavigation(page.mainFrame());
         responses.length = 0;
         navigationStartedAt = Date.now();
+        navigationAttempted = true;
         await page.goto(action.url, { waitUntil: "commit", timeout: Math.min(30_000, Math.max(1, input.deadlineAt.getTime() - Date.now())) });
       } else if (page.url() === "about:blank") throw new Error("OPEN_A_SOURCE_FIRST");
       else if (action.action === "scroll") await page.mouse.wheel(0, action.direction === "down" ? 600 : -600);
@@ -1207,6 +1223,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
               await redirectRouting?.beginDocumentNavigation(page.mainFrame());
               responses.length = 0;
               navigationStartedAt = Date.now();
+              navigationAttempted = true;
               await page.goto(known.href, { waitUntil: "commit" });
               documentNavigation = true;
             }
@@ -1216,6 +1233,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       }
       return snapshot(action.action === "open" || action.action === "observe" || documentNavigation);
       } catch (error) {
+        if (navigationAttempted) navigationFailureKind = discoveryNavigationFailureKind(error);
         if (terminalFailure) throw new Error(terminalFailure);
         throw error;
       }

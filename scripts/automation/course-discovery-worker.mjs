@@ -170,6 +170,23 @@ function safeNativeBrowserDiagnostics(value) {
     .map(safeNativeRequestDiagnostic).filter(Boolean);
   return { ...(firstFatal ? { nativeFirstFatal: firstFatal } : {}), ...(rejected.length ? { nativeRejectedRequests: rejected } : {}) };
 }
+/** Closed diagnostic copy only. These fields are never navigation/source proof. */
+function safeOfficialBrowserDiagnostics(value) {
+  const result = {}, source = value?.officialSourceDiagnostic;
+  const stages = ["CONTROLLER_CAPTURE", "SOURCE_CONTEXT", "OFFICIAL_SITE", "OFFICIAL_PROVENANCE", "RAW_DOCUMENT", "RAW_VENUE", "RAW_LINK", "RAW_ADDRESS",
+    "RENDERED_VENUE", "RENDERED_LINK", "RENDERED_ADDRESS", "LOCATION_VERIFIED", "LOCATION_DERIVATION_REJECTED", "LEGACY_FALLBACK", "CHAIN_INCOMPLETE", "CHAIN_CURRENT", "INSPECTOR_REJECTED", "INSPECTOR_VERIFIED"];
+  if (source && typeof source === "object" && !Array.isArray(source) && typeof source.stage === "string" && stages.includes(source.stage)) {
+    const copy = { stage: source.stage };
+    for (const key of ["rawOfficialCaptured", "currentOfficialDocument", "officialProvenance", "sourceContextValid", "officialSiteMatches",
+      "rawVenueMatches", "rawAddressMatches", "rawLinkMatches", "renderedVenueMatches", "renderedAddressMatches", "renderedLinkMatches", "renderedFrameObserved",
+      "renderedHeadingsPresent", "renderedAddressesPresent", "renderedLinksPresent", "chainHome", "chainBookingPage", "chainRedirect", "chainFinalDocument", "chainTokenCurrent", "legacyFallback", "derivationRejected"])
+      if (typeof source[key] === "boolean") copy[key] = source[key];
+    result.officialSourceDiagnostic = copy;
+  }
+  if (typeof value?.navigationFailureKind === "string" && ["TIMEOUT", "ABORTED", "DNS", "TLS", "NETWORK", "CLOSED", "UNKNOWN"].includes(value.navigationFailureKind))
+    result.navigationFailureKind = value.navigationFailureKind;
+  return result;
+}
 export function safeBrowserFailureDiagnostics(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   return { requests: (Array.isArray(value.requests) ? value.requests : []).slice(-12).map(request => {
@@ -180,7 +197,7 @@ export function safeBrowserFailureDiagnostics(value) {
       ...(safe.resourceType ? { resourceType: safe.resourceType } : {}),
       ...(Number.isInteger(request.status) && request.status >= 100 && request.status <= 599 ? { status: request.status } : {}),
       ...(/^[A-Z_0-9]{1,80}$/u.test(request.blockedReason ?? "") ? { blockedReason: request.blockedReason } : {}) };
-  }).filter(Boolean), requestFailures: safeBrowserRequestFailures(value.requestFailures), ...safeNativeBrowserDiagnostics(value),
+  }).filter(Boolean), requestFailures: safeBrowserRequestFailures(value.requestFailures), ...safeNativeBrowserDiagnostics(value), ...safeOfficialBrowserDiagnostics(value),
   capabilityDiagnostics: (Array.isArray(value.capabilityDiagnostics) ? value.capabilityDiagnostics : []).slice(-12)
     .map(safeReplayDiagnostic).filter(item => item?.code === "SUBFRAME_UNSUPPORTED"),
   ...(typeof value.loading === "boolean" ? { loading: value.loading } : {}),
@@ -201,6 +218,7 @@ function safeLastFeedback(value) {
         ? { pendingRequestCount: Math.min(details.pendingRequestCount, 1024) } : {}),
       requests: (Array.isArray(details.requests) ? details.requests : []).slice(0, 8).map(safeReplayDiagnostic).filter(Boolean),
       ...safeNativeBrowserDiagnostics(details),
+      ...safeOfficialBrowserDiagnostics(details),
     } };
   }
   if (value.code === "DISCOVERY_RECIPE_INVALID") {
@@ -250,6 +268,7 @@ export function noVerifiedRecipeDiagnostic(feedback) {
 /** Persist bounded transport facts, never page text, request bodies or credentials. */
 export function discoveryBrowserFeedback(snapshot, action, error) {
   const nativeDiagnostics = safeNativeBrowserDiagnostics(snapshot);
+  const officialDiagnostics = safeOfficialBrowserDiagnostics(snapshot);
   const currentRequests = (Array.isArray(snapshot?.requests) ? snapshot.requests : [])
     .filter(request => request?.blockedReason || request?.status >= 400)
     .filter(request => ["document", "script", "stylesheet", "xhr", "fetch"].includes(request.resourceType))
@@ -264,7 +283,7 @@ export function discoveryBrowserFeedback(snapshot, action, error) {
       !(snapshot?.loading === true && snapshot?.pendingRequestCount > 0)) return undefined;
   return safeLastFeedback({ code: "DISCOVERY_BROWSER_INCOMPLETE", details: { action, failure,
     ...(error?.code === "BROWSER_ACTION_SCHEMA_INVALID" ? { issues: safeBrowserActionIssues(error.details?.issues) } : {}),
-    loading: snapshot?.loading, pendingRequestCount: snapshot?.pendingRequestCount, requests, ...nativeDiagnostics } });
+    loading: snapshot?.loading, pendingRequestCount: snapshot?.pendingRequestCount, requests, ...nativeDiagnostics, ...officialDiagnostics } });
 }
 
 /** Model reports may explain a failed attempt, never prove every engine unsupported. */
@@ -313,14 +332,16 @@ export function createDiscoverySnapshotCompactor() {
     if (snapshot && typeof snapshot === "object") {
       const projected = { ...snapshot };
       delete projected.nativeFirstFatal; delete projected.nativeRejectedRequests;
-      snapshot = { ...projected, ...safeNativeBrowserDiagnostics(snapshot) };
+      delete projected.officialSourceDiagnostic; delete projected.navigationFailureKind;
+      snapshot = { ...projected, ...safeNativeBrowserDiagnostics(snapshot), ...safeOfficialBrowserDiagnostics(snapshot) };
     }
     if (!snapshot || typeof snapshot !== "object" || typeof snapshot.text !== "string") return snapshot;
     if (snapshot.structure || snapshot.adapter) return snapshot;
     const requestFailures = safeBrowserRequestFailures(snapshot.requestFailures);
     const capabilityDiagnostics = safeBrowserFailureDiagnostics(snapshot).capabilityDiagnostics;
     const nativeDiagnostics = safeNativeBrowserDiagnostics(snapshot);
-    const fingerprint = JSON.stringify({ url: snapshot.url, text: snapshot.text, elements: snapshot.elements, frames: snapshot.frames, adapter: snapshot.adapter, accessRequirementObserved: snapshot.accessRequirementObserved, requestFailures, capabilityDiagnostics, ...nativeDiagnostics,
+    const officialDiagnostics = safeOfficialBrowserDiagnostics(snapshot);
+    const fingerprint = JSON.stringify({ url: snapshot.url, text: snapshot.text, elements: snapshot.elements, frames: snapshot.frames, adapter: snapshot.adapter, accessRequirementObserved: snapshot.accessRequirementObserved, requestFailures, capabilityDiagnostics, ...nativeDiagnostics, ...officialDiagnostics,
       controls: snapshot.controls?.map(control => Object.fromEntries(Object.entries(control).filter(([key]) => key !== "target"))) });
     // New bounded response evidence can arrive after the DOM stops changing.
     // Deliver it and restart the idle clock rather than dropping its schema.
@@ -333,7 +354,7 @@ export function createDiscoverySnapshotCompactor() {
     if (unchanged >= 5 && Date.now() - unchangedSince >= 30_000) throw discoveryError("DISCOVERY_NO_BROWSER_PROGRESS");
     if (unchanged < 3) return snapshot;
     return { url: snapshot.url, loading: snapshot.loading, controls: snapshot.controls, frames: snapshot.frames,
-      requests: snapshot.requests, requestFailures, capabilityDiagnostics, ...nativeDiagnostics, responses: snapshot.responses, requestCount: snapshot.requestCount, interceptCount: snapshot.interceptCount, responseBytes: snapshot.responseBytes,
+      requests: snapshot.requests, requestFailures, capabilityDiagnostics, ...nativeDiagnostics, ...officialDiagnostics, responses: snapshot.responses, requestCount: snapshot.requestCount, interceptCount: snapshot.interceptCount, responseBytes: snapshot.responseBytes,
       navigationElapsedMs: snapshot.navigationElapsedMs, initialContentWaitMs: snapshot.initialContentWaitMs, pendingRequestCount: snapshot.pendingRequestCount,
       browserTransport: snapshot.browserTransport, navigationStatus: snapshot.navigationStatus, accessRequirementObserved: snapshot.accessRequirementObserved, adapter: snapshot.adapter, unchanged: true,
       note: "The settled page content and control state are unchanged. These are the current control targets. Choose a different supported action or checkpoint the limitation." };

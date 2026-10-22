@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { parse, type DefaultTreeAdapterMap } from "parse5";
 import { z } from "zod";
 import { fullCourseName, type OfficialIdentityPage, type OfficialIdentitySource } from "./teeitup-official-identity";
+import type { OfficialSourceDiagnostic } from "./official-source-diagnostics";
 
 const sha = z.string().regex(/^[a-f0-9]{64}$/u);
 const url = z.string().max(2048).refine(value => Boolean(publicDocumentUrl(value)));
@@ -42,7 +43,10 @@ const directions: Record<string, string> = { n: "n", north: "n", s: "s", south: 
 /** Every component except the parsed house number remains part of identity. */
 export function teeItUpCompleteStreetAddress(value: string) {
   if (typeof value !== "string" || value.length > 1024 || /[\u0000-\u001f\u007f]/u.test(value)) return;
-  const parts = clean(value).split(/\s*,\s*/u);
+  // A printed <br> contributes a delimiter even when the preceding text
+  // already ends in a comma. Collapse only empty delimiter runs; no nonempty
+  // address component, direction, unit or number is discarded.
+  const parts = clean(value).replace(/,(?:\s*,)+/gu, ",").split(/\s*,\s*/u);
   if (parts.length === 4 && /^(?:US|USA|United States(?: of America)?)$/iu.test(parts[3])) parts.pop();
   if (parts.length !== 3 || !/^[A-Za-z .'-]{2,80}$/u.test(parts[1])) return;
   const region = /^([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$/iu.exec(parts[2]);
@@ -119,24 +123,36 @@ function witness(entries: Element[]) {
   }))).digest("hex");
 }
 function headingName(value: string) { return fullCourseName(clean(value).replace(/^Welcome to\s+/iu, "")); }
-export function readTeeItUpOfficialHome(source: TeeItUpSourceIdentity, page: OfficialIdentityPage, rendered: boolean) {
-  if (!source.officialUrl || !source.venueAddress || !sameTeeItUpOfficialHost(source.officialUrl, page.url)) return fail();
+export function readTeeItUpOfficialHome(source: TeeItUpSourceIdentity, page: OfficialIdentityPage, rendered: boolean,
+  onDiagnostic?: (value: OfficialSourceDiagnostic) => void) {
+  const facts: OfficialSourceDiagnostic = { stage: "SOURCE_CONTEXT" };
+  const emit = () => { try { onDiagnostic?.({ ...facts }); } catch { /* Diagnostics cannot change identity validation. */ } };
+  const check = (condition: unknown, stage: OfficialSourceDiagnostic["stage"], key: Exclude<keyof OfficialSourceDiagnostic, "stage">) => {
+    facts.stage = stage; facts[key] = Boolean(condition); emit(); if (!condition) return fail();
+  };
+  check(source.officialUrl && source.venueAddress, "SOURCE_CONTEXT", "sourceContextValid");
+  if (!source.officialUrl || !source.venueAddress) return fail();
+  check(sameTeeItUpOfficialHost(source.officialUrl, page.url), "OFFICIAL_SITE", "officialSiteMatches");
+  facts.stage = "RAW_DOCUMENT"; emit();
   const canonical = teeItUpCompleteStreetAddress(source.venueAddress), all = nodes(page.html), expected = fullCourseName(source.venueName);
-  if (!canonical || expected.replace(/\bgolf course$/u, "").trim().length < 5) return fail();
+  check(canonical && expected.replace(/\bgolf course$/u, "").trim().length >= 5, "SOURCE_CONTEXT", "sourceContextValid");
   const headings = all.filter(node => /^(?:h1|h2)$/u.test(node.tagName) && !hidden(node) && headingName(text(node)) === expected);
-  if (!headings.length || all.some(node => node.tagName === "h1" && !hidden(node) && headingName(text(node)) !== expected)) return fail();
+  check(headings.length && !all.some(node => node.tagName === "h1" && !hidden(node) && headingName(text(node)) !== expected), "RAW_VENUE", "rawVenueMatches");
   const addresses = all.filter(node => ["address", "p", "div", "li", "td"].includes(node.tagName) && !hidden(node) && !restrictedContext(node) && clean(text(node)).length <= 500 &&
     JSON.stringify(teeItUpCompleteStreetAddress(clean(text(node)))) === JSON.stringify(canonical));
-  if (!addresses.length) return fail();
+  check(addresses.length, "RAW_ADDRESS", "rawAddressMatches");
   const links = all.filter(node => node.tagName === "a" && !hidden(node) && /\b(?:tee\s*times?|book|reservations?)\b/iu.test(text(node)) &&
     !/\b(?:lesson|member|login|sign in|checkout|purchase|payment|confirm)\b/iu.test(text(node))).flatMap(node => {
       try { const target = publicDocumentUrl(new URL(attr(node, "href") ?? "", page.url).href);
         return target && !target.search && target.origin === new URL(page.url).origin && target.href !== page.url ? [{ node, url: target.href }] : []; } catch { return []; }
     });
-  if (!links.length || new Set(links.map(value => value.url)).size !== 1) return fail();
+  check(links.length && new Set(links.map(value => value.url)).size === 1, "RAW_LINK", "rawLinkMatches");
   const target = links[0].url, visible = page.visibleEvidence;
-  if (rendered && (!visible || !visible.headings.some(value => headingName(value) === expected) || !visible.linkUrls.includes(target) ||
-    !visible.addressTexts.some(value => JSON.stringify(teeItUpCompleteStreetAddress(value)) === JSON.stringify(canonical)))) return fail();
+  if (rendered) {
+    check(visible?.headings.some(value => headingName(value) === expected), "RENDERED_VENUE", "renderedVenueMatches");
+    check(visible?.linkUrls.includes(target), "RENDERED_LINK", "renderedLinkMatches");
+    check(visible?.addressTexts.some(value => JSON.stringify(teeItUpCompleteStreetAddress(value)) === JSON.stringify(canonical)), "RENDERED_ADDRESS", "renderedAddressMatches");
+  }
   return { url: page.url, bookingPageUrl: target, witness: witness([...headings, ...addresses, ...links.map(value => value.node)]) };
 }
 export function readTeeItUpOfficialEmbed(page: OfficialIdentityPage, renderedFrames?: string[]) {

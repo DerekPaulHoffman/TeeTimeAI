@@ -34,6 +34,7 @@ import { executeUSchedulePublicLocation, inspectUSchedulePublicLocation } from "
 import { observedTeeItUpOfficialBookingChain, type TeeItUpOfficialBookingToken } from "./teeitup-official-booking-context";
 import { bindTeeItUpOfficialBookingFacility, type TeeItUpOfficialBookingSourceProof, type TeeItUpObservedSourceChain } from "./teeitup-official-booking-source";
 import { readTeeItUpOfficialBookingChain } from "./teeitup-official-booking-reader";
+import type { OfficialSourceDiagnostic } from "./official-source-diagnostics";
 
 type Dependencies = {
   fetch?: typeof fetch;
@@ -43,6 +44,7 @@ type Dependencies = {
   venueMatches: (expected: string, observed: unknown) => boolean;
   officialIdentityPage?: OfficialIdentityPage;
   officialBookingSourceToken?: TeeItUpOfficialBookingToken;
+  onOfficialSourceDiagnostic?: (value: OfficialSourceDiagnostic) => void;
 };
 type Source = Pick<ExistingAdapterRecipe["source"], "bookingUrl" | "venueName" | "venueAddress" | "timeZone"> & { officialUrl?: string };
 const publicId = /^[1-9]\d{0,9}$/u;
@@ -284,11 +286,14 @@ export async function inspectExistingAdapter(source: Source, deps: Dependencies)
   }
   if (family === "USCHEDULE") {
     let location = false;
+    let locationDiagnostic: OfficialSourceDiagnostic | undefined;
+    const diagnostic = (value: OfficialSourceDiagnostic) => { try { deps.onOfficialSourceDiagnostic?.(value); } catch { /* Diagnostic sinks cannot change reader behavior. */ } };
     if (deps.officialIdentityPage) {
-      try { deriveUScheduleOfficialLocation(source, deps.officialIdentityPage); location = true; }
-      catch { /* Unchanged legacy source/identity contract is checked below. */ }
+      try { deriveUScheduleOfficialLocation(source, deps.officialIdentityPage, true, value => { locationDiagnostic = value; diagnostic(value); }); location = true; }
+      catch { diagnostic({ ...locationDiagnostic, stage: locationDiagnostic?.stage ?? "LOCATION_DERIVATION_REJECTED", derivationRejected: true, legacyFallback: true }); }
     }
     if (location) return { adapter: existingAdapterMetadataSchema.parse(await inspectUSchedulePublicLocation(source, deps)) };
+    if (!deps.officialIdentityPage) diagnostic({ stage: "LEGACY_FALLBACK", derivationRejected: true, legacyFallback: true });
     const session = createUSchedulePublicSession(source.bookingUrl, deps);
     try {
       const response = await session.read(source.bookingUrl);
