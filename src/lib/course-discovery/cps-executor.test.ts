@@ -83,6 +83,18 @@ describe("CPS fixed fresh public reads", () => {
     expect(await inspectCps({ ...source, officialUrl: "https://thebobgc.com/" }, fixture.deps)).toMatchObject({ family: "CPS" });
     expect(fixture.reads.slice(0, 4).map(read => read.url.pathname)).toEqual(["/", "/", "/teetimes", "/bookteetimes"]);
   });
+  it.each(["redirect", "link"])("handles the retained two-link homepage and a %s to its already queued booking page", async kind => {
+    const fixture = setup((url, _init, normal) => {
+      if (url.hostname !== "www.thebobgc.com") return normal();
+      const content = url.pathname === "/" ? '<a href="/teetimes">BOOK A TEE TIME</a><a href="/bookteetimes">Tee time reservations</a>' :
+        url.pathname === "/teetimes" && kind === "link" ? '<a href="/bookteetimes">Book a Tee Time</a>' : undefined;
+      return content ? new Response(`<body>${content}${footer}</body>`, { headers: { "content-type": "text/html" } }) : normal();
+    });
+    expect(await inspectCps(source, fixture.deps)).toMatchObject({ family: "CPS" });
+    expect(fixture.reads.filter(read => read.url.hostname === "www.thebobgc.com").map(read => read.url.pathname))
+      .toEqual(["/", "/teetimes", "/bookteetimes"]);
+    expect(fixture.reads.every(read => read.init.method === "GET")).toBe(true);
+  });
   it("rejects a current official challenge and private/foreign redirects before provider reads", async () => {
     for (const location of ["/login", "https://foreign.example.com/teetimes"]) {
       const fixture = setup(() => new Response(null, { status: 302, headers: { location } }));

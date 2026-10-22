@@ -108,23 +108,27 @@ function createReader(source: CpsSource, deps: CpsDependencies, date: string) {
     });
   };
   const official = async () => {
-    let url = source.officialUrl, links = 0, redirects = 0; const seen = new Set<string>();
-    for (let index = 0; index < 5; index++) {
-      if (seen.has(url)) fail("OFFICIAL_BOOKING_SOURCE_UNVERIFIED"); seen.add(url);
+    let links = 0, redirects = 0; const seen = new Set<string>(), pending = [source.officialUrl];
+    for (let index = 0; index < 5 && pending.length; index++) {
+      const url = pending.shift()!;
+      if (seen.has(url)) { index--; continue; }
+      seen.add(url);
       const page = await read(url, new Headers({ accept: "text/html", "user-agent": "TeeTimeSpot/1.0 (+https://teetimespot.com)" }), "html");
       if (page.status !== 200) {
         const location = page.headers.get("location"); if (!location || ++redirects > 2) fail("OFFICIAL_BOOKING_SOURCE_UNVERIFIED");
         const next = new URL(location, url);
         if (!sameCpsOfficialSite(next.href, source.officialUrl) || next.origin !== new URL(url).origin &&
             (index !== 0 || next.pathname !== new URL(url).pathname)) fail("OFFICIAL_BOOKING_SOURCE_UNVERIFIED");
-        url = next.href; continue;
+        if (seen.has(next.href)) fail("OFFICIAL_BOOKING_SOURCE_UNVERIFIED");
+        pending.unshift(next.href); continue;
       }
       const content = teeItUpInertDocumentContent(page.text);
       if (isActiveBrowserAccessChallenge(content.text, content.title)) fail("ACCESS_REQUIRED");
       const proof = inspectCpsOfficialDocument(page.text, url, source);
       if (proof.bookingLinked) return;
-      if (++links > 1 || !proof.nextUrl) fail("OFFICIAL_BOOKING_SOURCE_UNVERIFIED");
-      url = proof.nextUrl;
+      const next = proof.nextUrls?.filter(value => !seen.has(value) && !pending.includes(value));
+      if (!next || (links += next.length) > 2) fail("OFFICIAL_BOOKING_SOURCE_UNVERIFIED");
+      pending.push(...next);
     }
     fail("OFFICIAL_BOOKING_SOURCE_UNVERIFIED");
   };

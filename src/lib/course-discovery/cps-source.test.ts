@@ -22,9 +22,11 @@ describe("CPS stable public source", () => {
       "https://nested.thebobgcpa.cps.golf/", "https://thebobgcpa.cps.golf" + CPS_API_PATH + "/TeeTimes"])
       expect(parseCpsSource(value)).toBeUndefined();
   });
-  it("replays the retained Bob footer and unique observed tee-times link then exact titled iframe", () => {
+  it("replays the retained Bob footer and observed tee-times links then exact titled iframe", () => {
     expect(inspectCpsOfficialDocument(page('<a href="/teetimes">BOOK A TEE TIME</a><a href="/teetimes">Tee Times</a>'), source.officialUrl, source))
-      .toEqual({ bookingLinked: false, nextUrl: "https://www.thebobgc.com/teetimes" });
+      .toEqual({ bookingLinked: false, nextUrls: ["https://www.thebobgc.com/teetimes"] });
+    expect(inspectCpsOfficialDocument(page('<a href="/teetimes">BOOK A TEE TIME</a><a href="/bookteetimes">Tee time reservations</a><a href="/teetimes">Tee Times</a>'), source.officialUrl, source))
+      .toEqual({ bookingLinked: false, nextUrls: ["https://www.thebobgc.com/teetimes", "https://www.thebobgc.com/bookteetimes"] });
     expect(inspectCpsOfficialDocument(page(`<h1>Book a Tee Time</h1><iframe src="${source.bookingUrl}" title="Book a Tee Time"></iframe>`),
       "https://www.thebobgc.com/bookteetimes", source)).toEqual({ bookingLinked: true });
   });
@@ -37,7 +39,7 @@ describe("CPS stable public source", () => {
     ["hidden iframe", page(`<div hidden><iframe src="${source.bookingUrl}" title="Book a Tee Time"></iframe></div>`)],
     ["srcdoc", page(`<iframe src="${source.bookingUrl}" srcdoc="ignored" title="Book a Tee Time"></iframe>`)],
     ["unlabelled iframe", page(`<iframe src="${source.bookingUrl}"></iframe>`)],
-    ["different booking pages", page('<a href="/teetimes">Tee Times</a><a href="/different">Book a Tee Time</a>')],
+    ["too many booking pages", page('<a href="/teetimes">Tee Times</a><a href="/different">Book a Tee Time</a><a href="/third">Tee Times</a>')],
     ["script identity", `<body><script>${footer}</script><iframe src="${source.bookingUrl}" title="Book a Tee Time"></iframe></body>`],
   ])("rejects %s without promoting a guessed booking route", (_name, html) => {
     expect(() => inspectCpsOfficialDocument(html, source.officialUrl, source)).toThrow();

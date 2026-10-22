@@ -60,7 +60,7 @@ function visibleText(node: Node): string {
 }
 /** Fresh inert HTML corroborates the canonical address and exact observed
  * provider link. It does not claim a provider street address or refreshed CSS. */
-export function inspectCpsOfficialDocument(html: string, pageUrl: string, source: CpsSource): { bookingLinked: boolean; nextUrl?: string } {
+export function inspectCpsOfficialDocument(html: string, pageUrl: string, source: CpsSource): { bookingLinked: boolean; nextUrls?: string[] } {
   validateCpsIdentity(source);
   if (html.length > 600_000 || !sameCpsOfficialSite(pageUrl, source.officialUrl)) cpsFailure("OFFICIAL_IDENTITY_UNVERIFIED");
   const root = parse(html), entries: Element[] = [];
@@ -95,8 +95,8 @@ export function inspectCpsOfficialDocument(html: string, pageUrl: string, source
     if (providerLinks.size !== 1 || !providerLinks.has(source.bookingUrl)) cpsFailure("OFFICIAL_BOOKING_SOURCE_MISMATCH");
     return { bookingLinked: true };
   }
-  if (localLinks.size !== 1) cpsFailure("OFFICIAL_BOOKING_SOURCE_UNVERIFIED");
-  return { bookingLinked: false, nextUrl: [...localLinks][0] };
+  if (!localLinks.size || localLinks.size > 2) cpsFailure("OFFICIAL_BOOKING_SOURCE_UNVERIFIED");
+  return { bookingLinked: false, nextUrls: [...localLinks] };
 }
 
 const configurationSchema = z.object({ siteName: tenant, onlineApi: publicValue, authorityBaseUrl: publicValue,
