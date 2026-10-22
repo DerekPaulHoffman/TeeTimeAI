@@ -205,7 +205,7 @@ export function createPublicClientReadHeaderScope(document: object, attestors: P
     }
     return true;
   };
-  const requestFacts = (request: object, method: "read" | "preflight") => {
+  const requestFacts = (request: object, method: "read" | "preflight", correlatedOrigin?: string) => {
     const current = currentDocument();
     if (failedRequests.has(request) || !current) return null;
     const facts = attest("request", request);
@@ -223,13 +223,19 @@ export function createPublicClientReadHeaderScope(document: object, attestors: P
     // a POST. All existing source/key/auth/current-request checks still run.
     if (facts.method !== "POST" || facts.hasBody !== true || typeof facts.body !== "string" ||
         Buffer.byteLength(facts.body) > 32_768) return null;
+    if (headers.has("origin") && headers.get("origin") !== origin) return null;
     try {
-      return isMemberSportsPublicTeeSheetPost(new URL(facts.url), new Headers([...headers]), facts.body, String(current.url))
+      const policyHeaders = new Headers([...headers]);
+      // Chrome's early Network event can omit Origin. Only an exact private
+      // linked preflight may supply it for this validation copy; the raw source
+      // headers/signature and eventual Fetch proof stay unchanged and strict.
+      if (!headers.has("origin") && correlatedOrigin === origin) policyHeaders.set("origin", correlatedOrigin);
+      return isMemberSportsPublicTeeSheetPost(new URL(facts.url), policyHeaders, facts.body, String(current.url))
         ? { facts, headers } : null;
     } catch { return null; }
   };
-  const read = (request: object): Read | null => {
-    const input = requestFacts(request, "read");
+  const read = (request: object, correlatedOrigin?: string): Read | null => {
+    const input = requestFacts(request, "read", correlatedOrigin);
     if (!input || [...input.headers].some(([key, value]) => anonymousCorrelationHeaders.has(key) ? !uuidV4.test(value) :
       !ordinaryHeaders.has(key) && !["authorization", "x-api-key", "cookie"].includes(key))) return null;
     const key = input.headers.get("x-api-key"), authorization = input.headers.get("authorization");
@@ -238,10 +244,12 @@ export function createPublicClientReadHeaderScope(document: object, attestors: P
       input.facts.body ?? null, [...input.headers]])) };
   };
   const preflight = (request: object, source: object) => {
-    const actual = read(source), input = requestFacts(request, "preflight");
-    if (!actual || !input || input.facts.sourceRequest !== source || input.facts.url !== actual.facts.url ||
+    const input = requestFacts(request, "preflight");
+    if (!input || input.facts.sourceRequest !== source || input.headers.get("origin") !== origin ||
         [...input.headers.keys()].some(key => !ordinaryHeaders.has(key) && !["access-control-request-method", "access-control-request-headers"].includes(key)) ||
-        input.headers.get("origin") !== origin || input.headers.get("access-control-request-method") !== actual.facts.method) return null;
+        !["GET", "HEAD", "POST"].includes(input.headers.get("access-control-request-method") ?? "")) return null;
+    const actual = read(source, input.headers.get("origin"));
+    if (!actual || input.facts.url !== actual.facts.url || input.headers.get("access-control-request-method") !== actual.facts.method) return null;
     const value = input.headers.get("access-control-request-headers");
     if (!value || value.length > 512) return null;
     const names = value.split(",").map(item => item.trim().toLowerCase());

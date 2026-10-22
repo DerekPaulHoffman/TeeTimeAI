@@ -1,16 +1,16 @@
 const endpoint = "https://api.membersports.com/api/v1/golfclubs/onlineBookingTeeTimes";
 const publicOrigin = "https://app.membersports.com";
 const fields = ["configurationTypeId", "date", "golfClubGroupId", "golfClubId", "golfCourseId", "groupSheetTypeId"] as const;
-const member = `"(?:${fields.join("|")})"\\s*:\\s*(?:0|[1-9][0-9]{0,9}|"[0-9/]{8,10}")`;
+const member = `"(?:${fields.join("|")})"\\s*:\\s*(?:0|[1-9][0-9]{0,9}|"[0-9-]{10}")`;
 const flatSixFields = new RegExp(`^\\s*\\{\\s*${member}(?:\\s*,\\s*${member}){5}\\s*\\}\\s*$`, "u");
 const correlationNames = new Set(["x-ms-device-id", "x-ms-client-session-id", "x-ms-request-id", "x-ms-attempt-id"]);
 const positiveId = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= 2_147_483_647;
 
 function calendarDate(value: unknown): boolean {
   if (typeof value !== "string") return false;
-  const match = /^([1-9]|1[0-2])\/([1-9]|[12][0-9]|3[01])\/([1-9][0-9]{3})$/u.exec(value);
+  const match = /^([1-9][0-9]{3})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$/u.exec(value);
   if (!match) return false;
-  const month = Number(match[1]), day = Number(match[2]), year = Number(match[3]);
+  const year = Number(match[1]), month = Number(match[2]), day = Number(match[3]);
   const date = new Date(Date.UTC(year, month - 1, day));
   return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
 }

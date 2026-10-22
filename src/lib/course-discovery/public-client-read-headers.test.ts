@@ -36,7 +36,7 @@ function teeSheetFixture() {
   const f = fixture();
   f.documentFacts.url = "https://app.membersports.com/tee-times/21/34/0";
   f.scriptFacts.url = "https://app.membersports.com/main.js";
-  const body = { configurationTypeId: 0, date: "10/23/2026", golfClubGroupId: 0,
+  const body = { configurationTypeId: 0, date: "2026-10-23", golfClubGroupId: 0,
     golfClubId: 21, golfCourseId: 34, groupSheetTypeId: 0 };
   Object.assign(f.requestFacts, { url: "https://api.membersports.com/api/v1/golfclubs/onlineBookingTeeTimes",
     method: "POST", hasBody: true, body: JSON.stringify(body) });
@@ -48,6 +48,29 @@ function teeSheetFixture() {
 }
 
 describe("source-bound public tee-sheet POST header proofs", () => {
+  it("uses only linked OPTIONS Origin for validation of an early source with Origin absent", () => {
+    const f = teeSheetFixture(); replaceHeader(f, "origin"); f.capture();
+    const before = JSON.stringify(f.requestFacts.headers);
+    expect(f.scope.proveRead(f.request)).toBeNull();
+    const proof = f.scope.provePreflight(f.options, f.request);
+    expect(proof).not.toBeNull(); expect(f.scope.isCurrent(proof!)).toBe(true);
+    expect(f.scope.proveRead(f.request)).toBeNull();
+    expect(JSON.stringify(f.requestFacts.headers)).toBe(before);
+    f.optionsFacts.headers = f.optionsFacts.headers.map(([key, value]) => [key, key === "Origin" ? "https://other.example.org" : value]);
+    expect(f.scope.isCurrent(proof!)).toBe(false);
+  });
+  it.each(["", "https://other.example.org", "https://app.membersports.com/", " https://app.membersports.com", "https://app.membersports.com "])("never replaces a present source Origin: %j", origin => {
+    const f = teeSheetFixture(); replaceHeader(f, "origin", origin); f.capture();
+    expect(f.scope.proveRead(f.request)).toBeNull(); expect(f.scope.provePreflight(f.options, f.request)).toBeNull();
+  });
+  it.each(["missing", "wrong", "duplicate", "unlinked"] as const)("requires a valid linked OPTIONS before inferring an absent source Origin: %s", fault => {
+    const f = teeSheetFixture(); replaceHeader(f, "origin"); f.capture();
+    if (fault === "missing") f.optionsFacts.headers = f.optionsFacts.headers.filter(([key]) => key !== "Origin");
+    if (fault === "wrong") f.optionsFacts.headers = f.optionsFacts.headers.map(([key, value]) => [key, key === "Origin" ? "https://other.example.org" : value]);
+    if (fault === "duplicate") f.optionsFacts.headers = [...f.optionsFacts.headers, ["origin", "https://app.membersports.com"]];
+    if (fault === "unlinked") f.optionsFacts.sourceRequest = {};
+    expect(f.scope.provePreflight(f.options, f.request)).toBeNull(); expect(f.scope.proveRead(f.request)).toBeNull();
+  });
   it("requires both the current published key and the reviewed anonymous body for read and preflight", () => {
     const f = teeSheetFixture();
     expect(f.scope.proveRead(f.request)).toBeNull();
@@ -66,7 +89,7 @@ describe("source-bound public tee-sheet POST header proofs", () => {
       const read = f.scope.proveRead(f.request)!, options = f.scope.provePreflight(f.options, f.request)!;
       expect(read).not.toBeNull(); expect(options).not.toBeNull();
       const original = { ...f.requestFacts }, originalDocument = f.documentFacts.url;
-      if (change === "body") f.requestFacts.body = JSON.stringify({ ...f.body, date: "10/24/2026" });
+      if (change === "body") f.requestFacts.body = JSON.stringify({ ...f.body, date: "2026-10-24" });
       if (change === "document") f.documentFacts.url = "https://app.membersports.com/tee-times/21/35/0";
       if (change === "profile") f.requestFacts.body = JSON.stringify({ ...f.body, memberProfileId: 1 });
       if (change === "endpoint") f.requestFacts.url = "https://api.membersports.com/api/v1/golfclubs/createBooking";

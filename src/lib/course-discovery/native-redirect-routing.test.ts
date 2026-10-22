@@ -77,17 +77,19 @@ describe("native private public-client header proofs", () => {
     return { ...test, network, get };
   }
 
-  it.each(["same", "different", "missing"] as const)("binds public tee-sheet POST preflight and actual body without rewriting: %s", bodyMode => {
+  it.each(["same", "different", "missing", "source-origin-missing", "fetch-origin-missing"] as const)("binds public tee-sheet POST preflight and actual body without rewriting: %s", bodyMode => {
     return (async () => {
       const doc = "https://app.membersports.com/tee-times/21/34/0";
       const url = "https://api.membersports.com/api/v1/golfclubs/onlineBookingTeeTimes";
-      const data = { configurationTypeId: 0, date: "10/23/2026", golfClubGroupId: 0, golfClubId: 21, golfCourseId: 34, groupSheetTypeId: 0 };
-      const body = JSON.stringify(data), actualBody = bodyMode === "different" ? JSON.stringify({ ...data, date: "10/24/2026" }) : body;
+      const data = { configurationTypeId: 0, date: "2026-10-23", golfClubGroupId: 0, golfClubId: 21, golfCourseId: 34, groupSheetTypeId: 0 };
+      const body = JSON.stringify(data), actualBody = bodyMode === "different" ? JSON.stringify({ ...data, date: "2026-10-24" }) : body;
       const headers = { ...readHeaders, "Content-Type": "application/json", Origin: "https://app.membersports.com" };
+      const sourceHeaders = bodyMode === "source-origin-missing" ? Object.fromEntries(Object.entries(headers).filter(([key]) => key !== "Origin")) : headers;
+      const fetchHeaders = bodyMode === "fetch-origin-missing" ? Object.fromEntries(Object.entries(headers).filter(([key]) => key !== "Origin")) : headers;
       const test = await prepared(undefined, undefined, { document: doc, script: "https://app.membersports.com/main.js" });
       try {
         test.events.get("Network.requestWillBeSent")!({ requestId: "sheet-network", loaderId: "current-loader", frameId: "main", type: "Fetch",
-          request: { url, method: "POST", headers, hasPostData: true, ...(bodyMode === "missing" ? {} : { postData: body }) } });
+          request: { url, method: "POST", headers: sourceHeaders, hasPostData: true, ...(bodyMode === "missing" ? {} : { postData: body }) } });
         test.events.get("Network.requestWillBeSent")!({ requestId: "sheet-options-network", loaderId: "", type: "Other",
           initiator: { type: "preflight", requestId: "sheet-network" }, request: { url, method: "OPTIONS", headers: {} } });
         test.request("sheet-options", { networkId: "sheet-options-network", resourceType: "Other", request: { url, method: "OPTIONS", headers: {
@@ -100,10 +102,10 @@ describe("native private public-client header proofs", () => {
           expect(nativePublicClientPreflightMethod(options.request(), preflight!)).toBe("POST");
           await options.continue();
         }
-        test.request("sheet-read", { networkId: "sheet-network", resourceType: "Fetch", request: { url, method: "POST", headers, hasPostData: true, postData: actualBody } });
+        test.request("sheet-read", { networkId: "sheet-network", resourceType: "Fetch", request: { url, method: "POST", headers: fetchHeaders, hasPostData: true, postData: actualBody } });
         await vi.waitFor(() => expect(test.routes).toHaveLength(4));
         const actual = test.routes[3], proof = await authorizePublicClientReadHeaders(actual.request());
-        if (bodyMode === "same") {
+        if (bodyMode === "same" || bodyMode === "source-origin-missing") {
           expect(proof).not.toBeNull(); expect(isCurrentPublicClientReadHeaders(proof!)).toBe(true);
           await actual.continue();
           expect(test.cdp.send.mock.calls.find(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "sheet-read"))

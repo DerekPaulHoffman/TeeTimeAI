@@ -3,7 +3,7 @@ import { isMemberSportsPublicTeeSheetPost } from "./membersports-public-read-pol
 
 const endpoint = "https://api.membersports.com/api/v1/golfclubs/onlineBookingTeeTimes";
 const documentUrl = "https://app.membersports.com/tee-times/12679/15654/0";
-const input = { configurationTypeId: 0, date: "10/23/2026", golfClubGroupId: 0, golfClubId: 12679, golfCourseId: 15654, groupSheetTypeId: 0 };
+const input = { configurationTypeId: 0, date: "2026-10-23", golfClubGroupId: 0, golfClubId: 12679, golfCourseId: 15654, groupSheetTypeId: 0 };
 const headers = () => new Headers({ origin: "https://app.membersports.com", "content-type": "application/json" });
 const allows = (value: unknown = input, source = documentUrl, url = endpoint, h = headers()) =>
   isMemberSportsPublicTeeSheetPost(new URL(url), h, JSON.stringify(value), source);
@@ -11,9 +11,9 @@ const allows = (value: unknown = input, source = documentUrl, url = endpoint, h 
 describe("published MemberSports anonymous public tee-sheet read", () => {
   it("accepts the six-field date read bound to its current public document", () => {
     expect(allows()).toBe(true);
-    expect(allows({ ...input, date: "10/24/2026" })).toBe(true);
-    expect(allows({ ...input, date: "2/29/2028" })).toBe(true);
-    expect(allows({ ...input, date: "1/1/2027" })).toBe(true);
+    expect(allows({ ...input, date: "2026-10-24" })).toBe(true);
+    expect(allows({ ...input, date: "2028-02-29" })).toBe(true);
+    expect(allows({ ...input, date: "2027-01-01" })).toBe(true);
   });
   it("allows ordinary JSON order/whitespace and does not infer player or booking actions", () => {
     const body = JSON.stringify(Object.fromEntries(Object.entries(input).reverse()), null, 2);
@@ -29,9 +29,11 @@ describe("published MemberSports anonymous public tee-sheet read", () => {
   it.each([
     { configurationTypeId: 1 }, { golfClubGroupId: 1 }, { groupSheetTypeId: 1 },
     { golfClubId: 12680 }, { golfCourseId: 15655 }, { golfClubId: "12679" },
-    { golfCourseId: 0 }, { configurationTypeId: null }, { date: "2026-10-23" },
-    { date: "10/23/26" }, { date: "02/03/2027" }, { date: "2/29/2027" },
-    { date: "2/30/2028" }, { date: "13/1/2026" }, { date: "10/23/2026 10:00" },
+    { golfCourseId: 0 }, { configurationTypeId: null }, { date: "10/23/2026" },
+    { date: "2026-10-3" }, { date: "2027-2-03" }, { date: "2027-02-29" },
+    { date: "2028-02-30" }, { date: "2026-13-01" }, { date: "2026-10-23T10:00:00Z" },
+    { date: "2026-00-01" }, { date: "2026-01-00" }, { date: "2026-04-31" },
+    { date: "026-10-23" }, { date: "2026/10/23" }, { date: "2026-10-23 " },
   ])("denies a changed identity, group, configuration or invalid source date %j", delta => {
     expect(allows({ ...input, ...delta })).toBe(false);
   });
