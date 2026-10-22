@@ -11,6 +11,21 @@ describe("typed Acuity public calendar identity", () => {
   it("represents an any-only pool explicitly without claiming named or numeric resources", () => {
     expect(simulatorPublicConfigurationSchema.parse(pool())).toEqual(pool());
   });
+  it.each([30, 90, 150, 210])("represents a provider-verified %i-minute any-only rental within the general duration contract", durationMinutes => {
+    const value = pool(); value.rentals[0].durationMinutes = durationMinutes;
+    expect(simulatorPublicConfigurationSchema.parse(value)).toEqual(value);
+  });
+  it.each([0, 15, 45, 75, 250, 270, 300])("rejects %i minutes outside the thirty-minute-step rental contract", durationMinutes => {
+    const value = pool(); value.rentals[0].durationMinutes = durationMinutes;
+    expect(simulatorPublicConfigurationSchema.safeParse(value).success).toBe(false);
+  });
+  it("does not let a half-hour increment relax mixed resources or the numeric aggregate contract", () => {
+    const mixed = pool(); mixed.rentals[0].durationMinutes = 90; mixed.resources.push({ id: "123", timeZone: mixed.timeZone });
+    expect(simulatorPublicConfigurationSchema.safeParse(mixed).success).toBe(false);
+    const aggregate = pool(); aggregate.rentals[0].durationMinutes = 90; aggregate.rentals[0].calendarKind = "OPAQUE_AGGREGATE";
+    aggregate.rentals[0].calendarIds = ["123"]; aggregate.resources[0].id = "123";
+    expect(simulatorPublicConfigurationSchema.safeParse(aggregate).success).toBe(false);
+  });
   it.each([
     ["missing pooled kind", (value: ReturnType<typeof pool>) => { delete (value.rentals[0] as Partial<{ calendarKind: string }>).calendarKind; }],
     ["numeric aggregate kind", (value: ReturnType<typeof pool>) => { value.rentals[0].calendarKind = "OPAQUE_AGGREGATE"; }],
@@ -22,7 +37,7 @@ describe("typed Acuity public calendar identity", () => {
     ["resource timezone mismatch", (value: ReturnType<typeof pool>) => { value.resources[0].timeZone = "America/Chicago"; }],
     ["empty projected timezone", (value: ReturnType<typeof pool>) => { value.resources[0].timeZone = ""; }],
     ["invalid business timezone", (value: ReturnType<typeof pool>) => { value.timeZone = "Invalid/Zone"; }],
-    ["unproven half-hour pool", (value: ReturnType<typeof pool>) => { value.rentals[0].durationMinutes = 90; }],
+    ["invalid quarter-hour pool", (value: ReturnType<typeof pool>) => { value.rentals[0].durationMinutes = 45; }],
   ] as const)("rejects %s", (_name, mutate) => {
     const value = pool(); mutate(value);
     expect(simulatorPublicConfigurationSchema.safeParse(value).success).toBe(false);

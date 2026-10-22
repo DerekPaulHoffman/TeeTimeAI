@@ -155,8 +155,10 @@ function numberedBayName(value: unknown) {
 function pooledRentalDuration(name: string, durationMinutes: number) {
   // Longer published products are validated with the whole pool catalog, but
   // the independent request/configuration duration ceiling remains240minutes.
-  const hours = normalizePlainName(name, 80)?.match(/^simulator (?:booking|rental) ([1-6]) hours?$/u)?.[1];
-  return hours !== undefined && Number(hours) * 60 === durationMinutes;
+  const normalized = normalizePlainName(name, 80);
+  const hours = normalized?.match(/^simulator (?:booking|rental) ([1-6]) hours?$/u)?.[1];
+  const minutes = normalized?.match(/^(30|60|90|120|150|180|210|240) minute simulator reservation$/u)?.[1];
+  return hours !== undefined && Number(hours) * 60 === durationMinutes || minutes !== undefined && Number(minutes) === durationMinutes;
 }
 
 function durationLabelledSimRental(name: string, durationMinutes: number) {

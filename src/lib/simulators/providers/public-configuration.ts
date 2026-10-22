@@ -97,7 +97,7 @@ export const simulatorPublicConfigurationSchema = z.discriminatedUnion("family",
     value.rentals.every(row => row.calendarIds.every(id => value.resources.some(resource => resource.id === id)) &&
       (!row.aggregateRentalIdentity || row.calendarKind === "OPAQUE_AGGREGATE") &&
       (row.calendarKind === "OPAQUE_POOLED" ? row.calendarIds.length === 1 && row.calendarIds[0] === "any" &&
-        row.durationMinutes >= 60 && row.durationMinutes % 60 === 0 : row.calendarIds.every(id => id !== "any") &&
+        row.durationMinutes >= 30 && row.durationMinutes % 30 === 0 : row.calendarIds.every(id => id !== "any") &&
         (!row.calendarKind || row.calendarIds.length === 1 && row.durationMinutes >= 60 &&
           row.durationMinutes % (row.aggregateRentalIdentity ? 30 : 60) === 0))) &&
     (!value.resources.some(row => row.id === "any") || value.resources.length === 1 &&

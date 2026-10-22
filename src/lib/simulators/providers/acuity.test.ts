@@ -44,8 +44,65 @@ function pooledDays() {
   return { "2026-10-10": [{ time: "2026-10-10T10:00:00-0400", slotsAvailable: 6 }],
     "2026-10-11": [], "2026-10-12": [], "2026-10-13": [] };
 }
+function minuteReservationPool() {
+  const value = pooledBusiness();
+  value.appointmentTypes[""] = [30, 60, 90, 120, 150, 180, 210, 240].map((duration, index) => ({
+    ...value.appointmentTypes[""][0], id: 201 + index, name: `${duration} Minute Simulator Reservation`, duration,
+  }));
+  return value;
+}
+function minuteReservationInput(durationMinutes = 60): SimulatorAvailabilityInput {
+  const value = minuteReservationPool();
+  return { ...pooledInput(durationMinutes), offering: { ...pooledInput(durationMinutes).offering,
+    supportedDurationsMinutes: value.appointmentTypes[""].map(row => row.duration),
+    providerMetadata: { ownerKey: "pool1234", rentalProductIds: value.appointmentTypes[""].map(row => String(row.id)) } } };
+}
 
 describe("explicit public simulator rentals on an opaque any-only pool", () => {
+  it.each([30, 60, 90, 120, 150, 180, 210, 240])("corroborates the observed %i Minute Simulator Reservation pool with exact published duration", async durationMinutes => {
+    const value = minuteReservationPool(), request = minuteReservationInput(durationMinutes);
+    const config = projectAcuityPublicConfiguration(pooledLanding(value), pooledUrl);
+    expect(config?.rentals).toEqual(value.appointmentTypes[""].map(row => ({ id: String(row.id), durationMinutes: row.duration,
+      calendarIds: ["any"], calendarKind: "OPAQUE_POOLED" })));
+    const fetch = mockReads(pooledDays(), pooledLanding(value));
+    const result = await fetchAcuitySimulatorAvailability(request, fetch);
+    expect(result.complete).toBe(true);
+    expect(result.slots).toHaveLength(1);
+    expect(result.slots[0].endsAt.getTime() - result.slots[0].startsAt.getTime()).toBe(durationMinutes * 60_000);
+    expect(result.slots[0]).toMatchObject({ resourceId: "ANY", maxPartySize: null });
+    expect(new URL(String(fetch.mock.calls[1][0])).searchParams.get("appointmentTypeId")).toBe(String(200 + durationMinutes / 30));
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+  it.each(["60 Minute Simulator Reservation", "30 Minutes Simulator Reservation", "30 Minute Bay Reservation",
+    "Simulator Reservation 30 Minute", "030 Minute Simulator Reservation", "30.0 Minute Simulator Reservation",
+    "15 Minute Simulator Reservation", "270 Minute Simulator Reservation", "30 Minute Simulator Reservation Lesson",
+    "Member 30 Minute Simulator Reservation", "League 30 Minute Simulator Reservation"])(
+    "keeps unverified minute pool label %s rejected before availability", async name => {
+      const value = minuteReservationPool(); value.appointmentTypes[""][0].name = name;
+      const config = projectAcuityPublicConfiguration(pooledLanding(value), pooledUrl);
+      expect(Boolean(config?.rentals.some(row => row.id === "201"))).toBe(false);
+      const fetch = mockReads(pooledDays(), pooledLanding(value));
+      await expect(fetchAcuitySimulatorAvailability(minuteReservationInput(30), fetch)).rejects.toBeInstanceOf(SimulatorAvailabilityError);
+      expect(fetch).toHaveBeenCalledOnce();
+    });
+  it.each([
+    ["padding before", (value: ReturnType<typeof minuteReservationPool>) => { value.appointmentTypes[""][0].paddingBefore = 5; }],
+    ["padding after", (value: ReturnType<typeof minuteReservationPool>) => { value.appointmentTypes[""][0].paddingAfter = 5; }],
+    ["mixed product calendars", (value: ReturnType<typeof minuteReservationPool>) => { value.appointmentTypes[""][0].calendarIDs.push("1234"); }],
+    ["calendar name", (value: ReturnType<typeof minuteReservationPool>) => { value.calendars[""][0].name = "Other pool"; }],
+    ["synthetic timezone", (value: ReturnType<typeof minuteReservationPool>) => { value.calendars[""][0].timezone = input.timeZone; }],
+    ["extra calendar", (value: ReturnType<typeof minuteReservationPool>) => { value.calendars[""].push({ id: "1234", name: "Bay 1", timezone: input.timeZone }); }],
+    ["duplicate ID", (value: ReturnType<typeof minuteReservationPool>) => { value.appointmentTypes[""][1].id = value.appointmentTypes[""][0].id; }],
+    ["duplicate duration", (value: ReturnType<typeof minuteReservationPool>) => { value.appointmentTypes[""][1].duration = 30; value.appointmentTypes[""][1].name = "30 Minute Simulator Reservation"; }],
+    ["wrong owner", (value: ReturnType<typeof minuteReservationPool>) => { value.ownerKey = "differentowner"; }],
+    ["unverified extra rental", (value: ReturnType<typeof minuteReservationPool>) => { value.appointmentTypes[""].push({ ...value.appointmentTypes[""][0], id: 999, name: "Simulator Reservation Extra" }); }],
+  ] as const)("retains %s rejection on the minute-labelled pool", async (_label, mutate) => {
+    const value = minuteReservationPool(); mutate(value);
+    expect(projectAcuityPublicConfiguration(pooledLanding(value), pooledUrl)).toBeUndefined();
+    const fetch = mockReads(pooledDays(), pooledLanding(value));
+    await expect(fetchAcuitySimulatorAvailability(minuteReservationInput(30), fetch)).rejects.toBeInstanceOf(SimulatorAvailabilityError);
+    expect(fetch).toHaveBeenCalledOnce();
+  });
   it.each([60, 120, 180, 240])("retains published %imin duration and provider pool semantics", async durationMinutes => {
     const config = projectAcuityPublicConfiguration(pooledLanding(), pooledUrl);
     expect(config).toMatchObject({ family: "ACUITY", timeZone: input.timeZone, maxPartySize: null,
