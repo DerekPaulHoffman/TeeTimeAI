@@ -11,6 +11,25 @@ const base = {
 } as const;
 
 describe("dashboard monitoring verdict", () => {
+  it("uses current terminal discovery proof instead of retry promises or older healthy/book-window facts", () => {
+    const verdict = getDashboardMonitoringVerdict({ ...base, alertStatus: "ACTIVE", monitoringState: "HEALTHY",
+      discoveryStatus: { state: "TERMINAL_FAILURE", completedAt: new Date("2026-10-22T00:37:34Z") },
+      latestProbe: { outcome: "NO_MATCH", observedAt: new Date("2026-10-22T00:36:00Z") },
+      upcomingBookingWindow: { opensAt: "later" } });
+    expect(verdict.label).toBe("Automatic availability not confirmed");
+    expect(verdict.detail).toContain("Your alert remains active");
+    expect(verdict.detail).toContain("official site");
+    expect(verdict.detail).not.toMatch(/retrying|keeps trying|no matching|manual review|private|account/i);
+    expect(verdict.icon).toBe("unavailable");
+  });
+
+  it("does not let terminal discovery override factual direct access guidance", () => {
+    const verdict = getDashboardMonitoringVerdict({ ...base, alertSupport: "PHONE_ONLY", bookingPhone: "555-0100",
+      discoveryStatus: { state: "TERMINAL_FAILURE", completedAt: new Date() },
+      latestProbe: { outcome: "MANUAL_DIRECT", observedAt: new Date() } });
+    expect(verdict.label).toBe("Call the course");
+  });
+
   it("does not describe reusable healthy course evidence as this request's completed check", () => {
     const verdict = getDashboardMonitoringVerdict({ ...base, monitoringState: "HEALTHY" });
     expect(verdict.detail).not.toContain("completed successfully");
@@ -35,7 +54,7 @@ describe("dashboard monitoring verdict", () => {
   });
 
   it.each(["PAUSED", "COMPLETED", "CANCELLED"])("never describes a %s alert as active or starting checks", (alertStatus) => {
-    for (const input of [{}, { monitoringState: "AUTO_INVESTIGATING" as const }, { supportIncidentStatus: "NEEDS_HUMAN" as const, automationPlaybookExhausted: true }, { upcomingBookingWindow: { opensAt: "later" } }]) {
+    for (const input of [{}, { discoveryStatus: { state: "TERMINAL_FAILURE" as const, completedAt: new Date() } }, { monitoringState: "AUTO_INVESTIGATING" as const }, { supportIncidentStatus: "NEEDS_HUMAN" as const, automationPlaybookExhausted: true }, { upcomingBookingWindow: { opensAt: "later" } }]) {
       const verdict = getDashboardMonitoringVerdict({ ...base, ...input, alertStatus });
       expect(verdict.detail).not.toMatch(/remains active|first check is starting|will begin checking/);
       expect(verdict.detail).not.toContain("notify you");

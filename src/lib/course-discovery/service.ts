@@ -77,6 +77,20 @@ type Tx = Prisma.TransactionClient;
 type Source = Awaited<ReturnType<typeof loadSource>>;
 type Search = Prisma.TeeSearchGetPayload<{ select: typeof searchSelect }>;
 
+type FingerprintCourse = Prisma.CourseGetPayload<{ select: typeof courseSelect }>;
+type FingerprintOffering = Prisma.CourseOfferingGetPayload<{ select: typeof offeringSelect }>;
+
+/** Pure current-source binding shared with the read-only customer projection. */
+export function getDiscoverySourceFingerprint(course: FingerprintCourse, offering: FingerprintOffering | null = null) {
+  return digest({ identity: {
+    name: course.name, officialUrl: course.website, bookingUrl: offering ? offering.bookingUrl : course.detectedBookingUrl,
+    timeZone: course.timeZone, providerFamily: offering ? offering.providerFamilyKey : course.providerFamilyKey,
+  }, metadata: offering ? offering.providerMetadata : course.bookingMetadata,
+  access: offering ? { publicAccessStatus: offering.publicAccessStatus, automationEligibility: offering.automationEligibility }
+    : { bookingMethod: course.bookingMethod, bookingAccessMode: course.bookingAccessMode, automationEligibility: course.automationEligibility, automationReason: course.automationReason },
+  offering: offering ? { id: offering.id, maxPartySize: offering.maxPartySize, supportedDurationsMinutes: offering.supportedDurationsMinutes } : null });
+}
+
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   if (value && typeof value === "object") return `{${Object.entries(value).filter(([, item]) => item !== undefined).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`).join(",")}}`;
@@ -118,10 +132,7 @@ async function loadSource(tx: Tx, target: Pick<DiscoveryTarget, "courseId" | "of
   // Preserve existing fingerprints; address-bound recipes separately recheck
   // the trusted address at proposal, proof, activation and every later replay.
   const identity = { ...fingerprintIdentity, ...(course.address ? { address: course.address } : {}) };
-  const sourceFingerprint = digest({ identity: fingerprintIdentity, metadata: offering ? offering.providerMetadata : course.bookingMetadata,
-    access: offering ? { publicAccessStatus: offering.publicAccessStatus, automationEligibility: offering.automationEligibility }
-      : { bookingMethod: course.bookingMethod, bookingAccessMode: course.bookingAccessMode, automationEligibility: course.automationEligibility, automationReason: course.automationReason },
-    offering: offering ? { id: offering.id, maxPartySize: offering.maxPartySize, supportedDurationsMinutes: offering.supportedDurationsMinutes } : null });
+  const sourceFingerprint = getDiscoverySourceFingerprint(course, offering);
   return { course, offering, identity, sourceFingerprint, activeRecipeId: offering ? offering.activeAccessRecipeId : course.activeAccessRecipeId,
     target: { courseId: course.id, ...(offering ? { offeringId: offering.id } : {}), kind: offering ? "SIMULATOR" as const : "OUTDOOR" as const } };
 }

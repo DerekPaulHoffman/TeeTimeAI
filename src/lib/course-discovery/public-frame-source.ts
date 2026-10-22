@@ -28,7 +28,13 @@ export function publicFrameSource(input: { src: string; label: string; visible: 
     const parsed = new URL(url);
     const teeItUpV2 = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.book-v2\.teeitup\.golf$/u.test(parsed.hostname) &&
       parsed.pathname === "/" && !parsed.search && !parsed.hash;
-    const knownEntry = Boolean(parseTeeItUpRecipeSource(url) || parseLightspeedSource(url) || teeItUpV2);
+    // Legacy official embeds can omit a title on their public play entry.
+    // Expose that exact source only; the later book destination still needs
+    // independently observed navigation/redirect authority and fresh identity.
+    const officialDocument = scopedParent && parentProof?.kind === "VERIFIED_OFFICIAL_DOCUMENT";
+    const teeItUpPlay = officialDocument && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.play\.teeitup\.com$/u.test(parsed.hostname) &&
+      parsed.pathname === "/" && !parsed.search && !parsed.hash;
+    const knownEntry = Boolean(parseTeeItUpRecipeSource(url) || parseLightspeedSource(url) || teeItUpV2 || teeItUpPlay);
     const labelled = /\b(?:tee\s*times?|booking|availability|book\s+(?:a\s+)?bay|simulator\s+rentals?)\b/iu.test(input.label);
     if ((!knownEntry && !labelled) || !isPublicAvailabilityNavigation(url, input.label || "Public tee time availability")) return;
     return url;

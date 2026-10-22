@@ -1,5 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { StrictMode } from "react";
+import { hydrateRoot } from "react-dom/client";
+import { renderToString } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -821,6 +823,33 @@ describe("TeeTimeIntake", () => {
     expect(fetchMock.mock.calls.some(([input]) => /known-times|check-times|local-reader/.test(String(input)))).toBe(false);
   });
 
+  it("reconciles the simulator minimum after server and browser calendar dates differ", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    mockDateBoundaryRequests();
+    const component = <TeeTimeIntake {...signedInAccountProps} simulatorEnabled
+      initialValues={{ mode: "SIMULATOR", date: "2026-10-23" }} />;
+    vi.setSystemTime(new Date("2026-10-22T00:30:00"));
+    const container = document.createElement("div");
+    container.innerHTML = renderToString(component);
+    expect(container.querySelector<HTMLInputElement>("#date")?.min).not.toBe("2026-10-21");
+    document.body.append(container);
+    // The same instant can have different local calendar dates on the server
+    // and browser. Hydration must replace the server's date constraint.
+    vi.setSystemTime(new Date("2026-10-21T20:30:00"));
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    let root: ReturnType<typeof hydrateRoot> | undefined;
+    try {
+      await act(async () => { root = hydrateRoot(container, component); });
+      await waitFor(() => expect(container.querySelector<HTMLInputElement>("#date")?.min).toBe("2026-10-21"));
+      expect(container.querySelector<HTMLInputElement>("#date")?.value).toBe("2026-10-23");
+      expect(errors.mock.calls.every(([message]) => String(message).includes("hydrated"))).toBe(true);
+    } finally {
+      await act(async () => root?.unmount());
+      container.remove();
+      errors.mockRestore();
+    }
+  });
+
   it("keeps explicitly selected simulator today and offers end-of-date midnight", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-09-30T03:16:30.000Z"));
@@ -833,7 +862,7 @@ describe("TeeTimeIntake", () => {
     render(<TeeTimeIntake {...signedInAccountProps} simulatorEnabled initialValues={{ mode: "SIMULATOR" }} />);
     await screen.findByRole("dialog", { name: "Notify me" });
     const dateInput = document.querySelector("#date") as HTMLInputElement;
-    expect(dateInput.min).toBe("2026-09-29");
+    await waitFor(() => expect(dateInput.min).toBe("2026-09-29"));
     expect(dateInput.value).toBe("2026-09-29");
     const start = document.querySelector("#startTime") as HTMLSelectElement;
     const end = document.querySelector("#endTime") as HTMLSelectElement;

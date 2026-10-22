@@ -7,6 +7,7 @@ import { ameliaMetadataSchema } from "./amelia-source";
 import { chronogolfMetadataSchema } from "./chronogolf-source";
 import { golfVxMetadataSchema } from "./golfvx-source";
 import { ezlinksMetadataSchema } from "./ezlinks-source";
+import { isUScheduleNonMemberRental, uschedulePublicLocationProofSchema } from "@/lib/simulators/providers/uschedule-location-source";
 
 const numericId = z.number().int().min(1).max(2_147_483_647);
 const publicId = z.string().regex(/^[1-9]\d{0,9}$/u);
@@ -23,7 +24,9 @@ export const existingAdapterMetadataSchema = z.discriminatedUnion("family", [
     offeringKind: z.literal("SIMULATOR").optional(),
     officialIdentityProof: teeItUpOfficialIdentityProofSchema.optional() }).strict(),
   z.object({ family: z.literal("USCHEDULE"), tenant: z.string().regex(/^[a-z][a-z0-9-]{2,62}$/u),
-    serviceId: publicId, serviceName: z.string().trim().min(3).max(200).refine(isUSchedulePublicRentalLabel) }).strict(),
+    serviceId: publicId, serviceName: z.string().trim().min(3).max(200), publicLocationProof: uschedulePublicLocationProofSchema.optional() }).strict()
+    .refine(value => value.publicLocationProof ? isUScheduleNonMemberRental(value.serviceName) : isUSchedulePublicRentalLabel(value.serviceName),
+      "A public location rental needs its independently verified location contract"),
   whooshSimulatorMetadataSchema,
   lightspeedMetadataSchema,
   ameliaMetadataSchema,

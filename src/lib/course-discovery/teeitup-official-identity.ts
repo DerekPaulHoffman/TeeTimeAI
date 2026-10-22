@@ -54,7 +54,7 @@ export function completeUSAddress(value: string) {
   const normalized = clean(value).replace(/^Address\s*:\s*/iu, "").replace(/\s*,\s*/gu, ", ");
   const match = /^(\d{1,7}[A-Za-z]?\s+[^,]{2,135}), ([A-Za-z .'-]{2,80}), ([A-Z]{2}) (\d{5})(?:-\d{4})?(?:, \3 \4(?:-\d{4})?)?(?:, (?:US|USA|United States(?: of America)?))?$/iu.exec(normalized);
   if (!match || /\b(?:p\.?\s*o\.?\s*box|mailing|corporate|billing|headquarters)\b/iu.test(normalized) ||
-    !/\b(?:dr(?:ive)?|rd|road|st(?:reet)?|ave(?:nue)?|blvd|boulevard|ln|lane|ct|court|pkwy|parkway|hwy|highway|cir(?:cle)?|trl|trail|ter(?:race)?)\.?$/iu.test(match[1])) return null;
+    !/\b(?:dr(?:ive)?|rd|road|st(?:reet)?|ave(?:nue)?|blvd|boulevard|ln|lane|ct|court|pkwy|parkway|hwy|highway|cir(?:cle)?|trl|trail|ter(?:race)?|way)\.?$/iu.test(match[1])) return null;
   return { street: streetKey(match[1]), locality: clean(match[2]).toLowerCase(), region: match[3].toUpperCase(), postalCode: match[4], country: "US" as const };
 }
 function markupWitness(node: Element) {

@@ -1,12 +1,15 @@
 import { parse as parseScript } from "acorn";
 import { parse, type DefaultTreeAdapterMap } from "parse5";
 import { z } from "zod";
+import { createHash } from "node:crypto";
 
 import { fetchWithProviderTimeout } from "@/lib/adapters/fetch-with-timeout";
 import { isUSchedulePublicRentalLabel } from "@/lib/automation/uschedule-public-read-policy";
 import { simulatorPublicConfigurationSchema, uschedulePublicTenant, type USchedulePublicConfiguration } from "./public-configuration";
 import { SimulatorAvailabilityError, type SimulatorAvailabilityInput, type SimulatorAvailabilityResult,
   type SimulatorAvailabilitySlot } from "./types";
+import { parseUScheduleLocationSource, readUScheduleLocationCatalog, USCHEDULE_LOCATION_CLIENT,
+  type UScheduleOfficialLocationProof, type USchedulePublicLocationProof } from "./uschedule-location-source";
 
 type Node = DefaultTreeAdapterMap["node"];
 type Element = DefaultTreeAdapterMap["element"];
@@ -38,9 +41,17 @@ function accessChanged(html: string) {
       node.tagName === "input" && attr(node, "type") === "password" ||
       node.tagName === "iframe" && /recaptcha|hcaptcha|challenges\.cloudflare/iu.test(attr(node, "src") ?? ""));
 }
-type LearnedRental = { serviceId: string; serviceName: string; durationMinutes: number; date?: string; tenant?: string };
+type LearnedRental = { serviceId: string; serviceName: string; durationMinutes: number; date?: string; tenant?: string;
+  publicLocationProof?: USchedulePublicLocationProof };
 function selectedRental(html: string, learned?: LearnedRental) {
   if (accessChanged(html)) throw sourceError("The public simulator scheduler now requires interactive access");
+  if (learned?.publicLocationProof) {
+    const proof = learned.publicLocationProof, catalog = readUScheduleLocationCatalog(html, proof.official.entryUrl, proof.official);
+    if (!catalog.locationSelected || catalog.proof.catalogHash !== proof.catalogHash || catalog.selectedServiceId !== learned.serviceId ||
+        catalog.service.serviceName !== learned.serviceName || catalog.selectedDuration !== learned.durationMinutes)
+      throw sourceError("The public location rental changed");
+    return { serviceId: learned.serviceId, durationMinutes: learned.durationMinutes };
+  }
   const all = elements(parse(html));
   const options = (id: string) => {
     const selects = all.filter(node => node.tagName === "select" && attr(node, "id") === id);
@@ -167,7 +178,12 @@ function listing(html: string, expectedServiceId: string, learned?: LearnedRenta
     }
     if (dates.length !== 1 || dates[0] !== learned.date) throw schemaError("The public selected date is not the requested date");
     const rows = all.filter(node => (attr(node, "class") ?? "").split(/\s/u).includes("next_avail_item"));
-    if (rows.some(node => !visibleText(node).replace(/\s+/gu, " ").includes(learned.serviceName))) throw schemaError("The public row rental identity changed");
+    if (rows.some(node => {
+      if (!learned.publicLocationProof) return !visibleText(node).replace(/\s+/gu, " ").includes(learned.serviceName);
+      const label = children(node)[1];
+      const escaped = learned.serviceName.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+      return !label || !new RegExp(`^${escaped} - \\$\\d+(?:\\.\\d{2})?$`, "u").test(visibleText(label).replace(/\s+/gu, " ").trim());
+    })) throw schemaError("The public row rental identity changed");
   }
   const times = pooledRows(html);
   if (times.some((time, index) => index > 0 && time.order <= times[index - 1].order))
@@ -216,23 +232,25 @@ async function bounded(response: Response, ceiling: number) {
   try { return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, size)); }
   catch { throw schemaError("The public simulator response encoding changed"); }
 }
-async function publicResponse(url: URL, init: RequestInit, expectedType: string, ceiling: number,
-  fetchImpl: typeof fetch, signal: AbortSignal) {
+async function publicResponse(url: URL, init: RequestInit, expectedType: string | string[], ceiling: number,
+  fetchImpl: typeof fetch, signal: AbortSignal, bootstrapTarget?: string) {
   let response: Response;
   try { response = await fetchWithProviderTimeout(url, { ...init, signal, redirect: "manual", cache: "no-store", credentials: "omit" }, fetchImpl); }
   catch { throw new SimulatorAvailabilityError("HTTP_ERROR", "The public simulator scheduler could not be reached", true); }
-  if (response.status !== 200 || response.headers.has("location")) throw new SimulatorAvailabilityError("HTTP_ERROR",
+  const bootstrap = response.status === 302 && bootstrapTarget !== undefined && response.headers.get("location") &&
+    new URL(response.headers.get("location")!, url).href === bootstrapTarget;
+  if (response.status !== 200 && !bootstrap || response.headers.has("location") && !bootstrap) throw new SimulatorAvailabilityError("HTTP_ERROR",
     "The public simulator scheduler did not return a direct public response", response.status === 429 || response.status >= 500,
     response.status, response.headers.get("retry-after"));
   if (response.url && response.url !== url.href) throw sourceError("The public simulator scheduler changed destination");
   const sentCookie = new Headers(init.headers).get("cookie");
   if (sentCookie && response.headers.getSetCookie().some(row => row.split(";", 1)[0] !== sentCookie))
     throw sourceError("The anonymous public scheduler session changed");
-  if (response.headers.get("content-type")?.split(";")[0].trim().toLowerCase() !== expectedType)
+  if (!(Array.isArray(expectedType) ? expectedType : [expectedType]).includes(response.headers.get("content-type")?.split(";")[0].trim().toLowerCase() ?? ""))
     throw schemaError("The public simulator scheduler returned an unexpected response type");
   return { response, body: await bounded(response, ceiling) };
 }
-async function refresh(url: URL, cookie: string, name: "start_date" | "more_next_avail" | "length" | "service_id" | "group_size", value: string,
+async function refresh(url: URL, cookie: string, name: "start_date" | "more_next_avail" | "length" | "service_id" | "group_size" | "location_id", value: string,
   fetchImpl: typeof fetch, signal: AbortSignal) {
   const endpoint = new URL(`${url.pathname}/changefield`, url.origin);
   const { body } = await publicResponse(endpoint, { method: "POST", headers: { Accept: "application/json",
@@ -267,28 +285,74 @@ export function inspectUScheduleRecipeConfiguration(html: string, sourceUrl: str
   return { tenant, rentals, durations, selected: current[0] };
 }
 
+/** A separate fixed contract for an official location's included public rental.
+ * The caller supplies freshly verified official markup, never proposed IDs. */
+export async function prepareUScheduleLocationCatalog(official: UScheduleOfficialLocationProof, fetchImpl: typeof fetch, signal: AbortSignal) {
+  let url = new URL(official.entryUrl);
+  const source = parseUScheduleLocationSource(url.href);
+  if (!source?.locationId) throw sourceError("The official public location source changed");
+  let page = await publicResponse(url, { method: "GET", headers: { Accept: "text/html" } }, "text/html", MAX_HTML_BYTES, fetchImpl, signal, source.canonicalUrl);
+  let bootstrapCookie: string | undefined;
+  if (page.response.status === 302) {
+    const cookies = page.response.headers.getSetCookie();
+    if (cookies.length > 1) throw sourceError("Anonymous public session changed");
+    bootstrapCookie = cookies[0]?.split(";", 1)[0];
+    if (bootstrapCookie && !/^ASP\.NET_SessionId=[A-Za-z0-9]{8,100}$/u.test(bootstrapCookie)) throw sourceError("Anonymous public session changed");
+    url = new URL(source.canonicalUrl);
+    page = await publicResponse(url, { method: "GET", headers: { Accept: "text/html", ...(bootstrapCookie ? { Cookie: bootstrapCookie } : {}) } }, "text/html", MAX_HTML_BYTES, fetchImpl, signal);
+  }
+  let config = readUScheduleLocationCatalog(page.body, url.href, official);
+  const cookies = page.response.headers.getSetCookie(), cookie = cookies.length === 1 ? cookies[0].split(";", 1)[0] : bootstrapCookie ?? "";
+  if (!/^ASP\.NET_SessionId=[A-Za-z0-9]{8,100}$/u.test(cookie)) throw sourceError("Anonymous public session missing");
+  const client = await publicResponse(new URL(config.clientUrl), { method: "GET", headers: { Accept: "application/javascript" } },
+    ["application/javascript", "text/javascript"], MAX_HTML_BYTES, fetchImpl, signal);
+  if (createHash("sha256").update(client.body).digest("hex") !== USCHEDULE_LOCATION_CLIENT.sha256)
+    throw sourceError("The public location filter contract changed");
+  const filter = async (name: "location_id" | "service_id", value: string) => {
+    await refresh(url, cookie, name, value, fetchImpl, signal);
+    page = await publicResponse(url, { method: "GET", headers: { Accept: "text/html", Cookie: cookie } }, "text/html", MAX_HTML_BYTES, fetchImpl, signal);
+    config = readUScheduleLocationCatalog(page.body, url.href, official);
+  };
+  if (!config.locationSelected) await filter("location_id", official.locationId);
+  if (!config.locationSelected) throw sourceError("The public location did not select the requested venue");
+  if (config.selectedServiceId !== config.service.serviceId) await filter("service_id", config.service.serviceId);
+  if (!config.locationSelected || config.selectedServiceId !== config.service.serviceId) throw sourceError("The public rental did not select");
+  return { url, page, cookie, config };
+}
+
 /** Fixed read-only learned path; every page proves selected product, one bay,
  * duration, chronological cursor progress and a later-day completeness witness. */
-export async function fetchUScheduleRecipeAvailability(input: SimulatorAvailabilityInput, service: { serviceId: string; serviceName: string },
+export async function fetchUScheduleRecipeAvailability(input: SimulatorAvailabilityInput, service: { serviceId: string; serviceName: string; publicLocationProof?: USchedulePublicLocationProof },
   fetchImpl: typeof fetch): Promise<SimulatorAvailabilityResult> {
-  const url = new URL(input.offering.bookingUrl), signal = AbortSignal.timeout(90_000);
-  if (!uschedulePublicTenant(url.href) || !validDate(input.date) || input.partySize !== 1 || !PUBLIC_ID.test(service.serviceId)) throw sourceError("Invalid learned public rental");
-  let page = await publicResponse(url, { method: "GET", headers: { Accept: "text/html" } }, "text/html", MAX_HTML_BYTES, fetchImpl, signal);
-  const config = inspectUScheduleRecipeConfiguration(page.body, url.href);
-  if (!config || !config.rentals.some(row => row.serviceId === service.serviceId && row.serviceName === service.serviceName) || !config.durations.includes(input.durationMinutes))
-    throw sourceError("The learned public rental is no longer available");
+  let url = new URL(service.publicLocationProof?.official.entryUrl ?? input.offering.bookingUrl);
+  const signal = AbortSignal.timeout(90_000);
+  if (!(service.publicLocationProof ? parseUScheduleLocationSource(url.href) : uschedulePublicTenant(url.href)) ||
+      !validDate(input.date) || input.partySize !== 1 || !PUBLIC_ID.test(service.serviceId)) throw sourceError("Invalid learned public rental");
+  const location = service.publicLocationProof ? await prepareUScheduleLocationCatalog(service.publicLocationProof.official, fetchImpl, signal) : undefined;
+  if (location) url = location.url;
+  let page = location?.page ?? await publicResponse(url, { method: "GET", headers: { Accept: "text/html" } }, "text/html", MAX_HTML_BYTES, fetchImpl, signal);
+  if (location) {
+    if (location.config.proof.catalogHash !== service.publicLocationProof!.catalogHash || location.config.service.serviceId !== service.serviceId ||
+        location.config.service.serviceName !== service.serviceName || !location.config.durations.includes(input.durationMinutes))
+      throw sourceError("The public location catalog changed");
+  } else {
+    const config = inspectUScheduleRecipeConfiguration(page.body, url.href);
+    if (!config || !config.rentals.some(row => row.serviceId === service.serviceId && row.serviceName === service.serviceName) || !config.durations.includes(input.durationMinutes))
+      throw sourceError("The learned public rental is no longer available");
+  }
   const cookies = page.response.headers.getSetCookie();
-  const cookie = cookies.length === 1 ? cookies[0].split(";", 1)[0] : "";
+  const cookie = location?.cookie ?? (cookies.length === 1 ? cookies[0].split(";", 1)[0] : "");
   if (!/^ASP\.NET_SessionId=[A-Za-z0-9]{8,100}$/u.test(cookie)) throw sourceError("Anonymous public session missing");
   const filter = async (name: "service_id" | "length" | "group_size" | "start_date", value: string) => {
     await refresh(url, cookie, name, value, fetchImpl, signal);
     page = await publicResponse(url, { method: "GET", headers: { Accept: "text/html", Cookie: cookie } }, "text/html", MAX_HTML_BYTES, fetchImpl, signal);
   };
-  if (config.selected.serviceId !== service.serviceId) await filter("service_id", service.serviceId);
+  if (!location && inspectUScheduleRecipeConfiguration(page.body, url.href)!.selected.serviceId !== service.serviceId) await filter("service_id", service.serviceId);
   await filter("length", String(input.durationMinutes));
-  await filter("group_size", "1");
+  if (!location) await filter("group_size", "1");
   await filter("start_date", `${input.date.slice(5, 7)}/${input.date.slice(8, 10)}/${input.date.slice(0, 4)}`);
-  const learned = { ...service, durationMinutes: input.durationMinutes, date: input.date, tenant: config.tenant }, slots: SimulatorAvailabilitySlot[] = [], seen = new Set<string>();
+  const tenant = location ? parseUScheduleLocationSource(url.href)!.tenant : uschedulePublicTenant(url.href)!;
+  const learned = { ...service, durationMinutes: input.durationMinutes, date: input.date, tenant }, slots: SimulatorAvailabilitySlot[] = [], seen = new Set<string>();
   let previousOrder = -Infinity;
   for (let index = 0; index < 16; index++) {
     const current = listing(page.body, service.serviceId, learned);
@@ -304,7 +368,8 @@ export async function fetchUScheduleRecipeAvailability(input: SimulatorAvailabil
       const endsAt = venueInstant(new Date(time.order + input.durationMinutes * 60_000).toISOString().slice(0, 19), input.timeZone);
       if (endsAt.getTime() - startsAt.getTime() !== input.durationMinutes * 60_000) throw schemaError("The public rental crosses a timezone transition");
       slots.push({ sourceId: `uschedule:${input.offering.id}:${service.serviceId}:${startsAt.toISOString()}`, offeringId: input.offering.id,
-        resourceId: "ANY", productId: service.serviceId, startsAt, endsAt, maxPartySize: null, bookingUrl: url.href }); seen.add(time.value);
+        resourceId: service.publicLocationProof ? `uschedule-location:${service.publicLocationProof.locationId}:pooled` : "ANY",
+        productId: service.serviceId, startsAt, endsAt, maxPartySize: service.publicLocationProof?.maxPartySize ?? null, bookingUrl: url.href }); seen.add(time.value);
     }
     previousOrder = current.times.at(-1)!.order;
     if (crossedDate) return { slots, complete: true, observedAt: new Date(), evidenceUrl: url.href };

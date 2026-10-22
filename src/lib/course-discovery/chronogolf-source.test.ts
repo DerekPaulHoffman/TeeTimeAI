@@ -42,6 +42,14 @@ describe("fresh exact profile identity and complete UUID catalog", () => {
       publicPlayerTypeId: 56, courses: [{ id: 5678, uuid: club().courses[0].uuid, layoutHoles: 18, bookableHoles: [9, 18] }] });
     expect(chronogolfMetadataSchema.safeParse({ ...parsed, cookie: "never" }).success).toBe(false);
   });
+  it("matches a complete Way address and retains every physical identity component", () => {
+    const identity = { ...source, venueAddress: "14330 SE Husky Way, Auburn, WA 98092, USA" };
+    const value = { ...club(), address: "14330 Southeast Husky Way", city: "Auburn", postcode: "98092" };
+    expect(parseChronogolfProfile(html(value), source.bookingUrl, identity).clubId).toBe(value.id);
+    for (const changed of [{ address: "14331 Southeast Husky Way" }, { address: "14330 Southwest Husky Way" },
+      { address: "14330 Southeast Other Way" }, { city: "Kent" }, { postcode: "98091" }, { province: "Oregon" }])
+      expect(() => parseChronogolfProfile(html({ ...value, ...changed }), source.bookingUrl, identity)).toThrow("ADAPTER_IDENTITY_MISMATCH");
+  });
   it.each(["http://www.example.org", "http://example.org/", "https://example.org/"])
     ("normalizes provider website %s as exact host identity only", website => {
       const baseline = parseChronogolfProfile(html(), source.bookingUrl, source);

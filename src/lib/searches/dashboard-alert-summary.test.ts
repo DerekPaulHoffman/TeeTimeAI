@@ -96,6 +96,18 @@ describe("dashboard alert summary", () => {
     expect(status.detail).not.toMatch(/keep trying|no matching times|checked successfully/i);
   });
 
+  it("shows terminal automatic checking honestly while preserving active lifecycle and partial matching coverage", () => {
+    const failed = courseStatus("FETCH_FAILED", {}, {
+      discoveryStatus: { state: "TERMINAL_FAILURE", completedAt: new Date() },
+    });
+    expect(summary([failed])).toMatchObject({ lifecycleLabel: "Active", headline: "Automatic availability not confirmed" });
+    expect(failed.tone).toBe("unavailable");
+    expect(failed.hasCurrentPublicInventory).toBe(false);
+    const partial = summary([courseStatus("MATCH_FOUND", { qualifyingMatchCount: 1 }), failed], 1);
+    expect(partial.headline).toBe("1 matching time now");
+    expect(partial.coverageNotice).toContain("Availability not confirmed for 1 course");
+  });
+
   it.each(["NEEDS_ADAPTER", "FETCH_FAILED", "BLOCKED_TOOLING"] as const)(
     "does not describe %s as an empty successful check or trust its slot counters",
     (outcome) => {

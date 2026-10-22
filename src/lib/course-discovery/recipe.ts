@@ -165,6 +165,8 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
       (recipe.target.kind === "SIMULATOR") !== simulator ||
       recipe.target.kind === "SIMULATOR" && !recipe.target.offeringId || ["TEEITUP", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS"].includes(recipe.adapter.family) && !recipe.source.venueAddress)
       ctx.addIssue({ code: "custom", message: "Supported adapter metadata must match the source and target kind" });
+    if (recipe.adapter.family === "USCHEDULE" && recipe.adapter.publicLocationProof && !recipe.source.venueAddress)
+      ctx.addIssue({ code: "custom", message: "A public location rental requires canonical venue address context" });
     if (recipe.adapter.family === "TEEITUP" && simulator &&
         (recipe.adapter.facilityIds.length !== 1 || recipe.adapter.officialIdentityProof))
       ctx.addIssue({ code: "custom", message: "Simulator adapter requires one exact directory identity" });

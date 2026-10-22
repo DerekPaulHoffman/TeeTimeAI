@@ -202,6 +202,61 @@ describe.skipIf(!url)("learned recipe through durable execution and normal match
       expect(await client.searchEmailDelivery.count({ where: { teeSearchId: f.search.id, status: "SENT" } })).toBe(0);
     });
 
+  it.each([false, true])("suppresses an unsent outbox group after a newer EMPTY is canonically consumed (simulator=%s)", async simulator => {
+    const f = await fixture(simulator);
+    const { runSearchCheck } = await import("@/lib/automation/search-check");
+    const { drainSearchEmailDeliveryGroup } = await import("@/lib/email/search-delivery-outbox");
+    const runTag = `isolated-vanished-unsent-${f.search.id}`;
+    try {
+      await runtime.getOrQueueRecipeExecution({ searchId: f.search.id, target: f.target, input: f.input });
+      const first = (await runtime.claimNextRecipeExecution("unsent-first-reader"))!;
+      const available = await f.run(first.input);
+      await runtime.completeRecipeExecution(first.id, first.leaseToken, available);
+      mail.match.mockRejectedValue(new Error("Isolated mail transport unavailable"));
+      mail.status.mockRejectedValue(new Error("Isolated mail transport unavailable"));
+      try { await runSearchCheck(f.search.id, runTag, f.lease); } catch { /* Retain the durable unsent obligation. */ }
+      const match = await client.teeTimeMatch.findFirstOrThrow({ where: { teeSearchId: f.search.id, availabilityStatus: "AVAILABLE" } });
+      expect(match.alertStatus).not.toBe("SENT");
+      expect(match.sentAt).toBeNull();
+      const groups = (await client.searchEmailDelivery.findMany({ where: { teeSearchId: f.search.id, status: "FAILED" } }))
+        .filter(row => Array.isArray((row.payload as { matchIds?: unknown }).matchIds) &&
+          (row.payload as { matchIds: unknown[] }).matchIds.includes(match.id));
+      expect(groups.length).toBeGreaterThan(0);
+      expect(groups.every(row => row.attemptCount > 0 && row.sentAt === null)).toBe(true);
+
+      await client.localReaderJob.update({ where: { id: first.id }, data: { resultExpiresAt: new Date(0) } });
+      await runtime.getOrQueueRecipeExecution({ searchId: f.search.id, target: f.target, input: f.input });
+      const next = (await runtime.claimNextRecipeExecution("unsent-next-reader"))!;
+      const empty = { ...available, observedAt: new Date().toISOString(), status: "EMPTY" as const, slots: [] };
+      await runtime.completeRecipeExecution(next.id, next.leaseToken, empty);
+      await client.searchEmailDelivery.updateMany({ where: { id: { in: groups.map(row => row.id) } }, data: { nextAttemptAt: new Date(0) } });
+      mail.match.mockResolvedValue({ deliveryStatus: "sent", id: "isolated-mail-sink" });
+      mail.status.mockResolvedValue({ deliveryStatus: "sent", id: "isolated-mail-sink" });
+      const outcome = await runSearchCheck(f.search.id, runTag, f.lease);
+      expect(outcome.courseResults[0].outcome).toBe("NO_MATCH");
+      expect((await client.localReaderJob.findUniqueOrThrow({ where: { id: next.id } })).sourceContext).toMatchObject({
+        consumed: { recipeHash: empty.evidence.recipeHash, observedAt: empty.observedAt, consumedAt: expect.any(String) },
+      });
+      expect(await client.teeTimeMatch.findUniqueOrThrow({ where: { id: match.id } })).toMatchObject({ availabilityStatus: "GONE", sentAt: null });
+
+      const transport = vi.fn().mockResolvedValue({ deliveryStatus: "sent" as const });
+      for (const group of groups) {
+        await expect(drainSearchEmailDeliveryGroup({ searchId: f.search.id, alertGeneration: f.search.alertGeneration,
+          checkLeaseToken: f.lease.token, kind: group.kind, groupKey: group.groupKey, send: transport }))
+          .resolves.toContainEqual({ id: group.id, status: "SUPPRESSED" });
+        const suppressed = await client.searchEmailDelivery.findUniqueOrThrow({ where: { id: group.id } });
+        expect(suppressed).toMatchObject({ status: "SUPPRESSED", sentAt: null });
+        expect(suppressed.payload).toEqual(group.payload);
+      }
+      expect(transport).not.toHaveBeenCalled();
+      expect(await client.searchEmailDelivery.count({ where: { id: { in: groups.map(row => row.id) }, status: "SENT" } })).toBe(0);
+    } finally {
+      mail.match.mockResolvedValue({ deliveryStatus: "sent", id: "isolated-mail-sink" });
+      mail.status.mockResolvedValue({ deliveryStatus: "sent", id: "isolated-mail-sink" });
+      ids.runs.push(...(await client.automationRun.findMany({ where: { notes: { contains: runTag } }, select: { id: true } })).map(run => run.id));
+    }
+  });
+
   it.each([false, true])("preserves a sent legacy opening when repaired by a generic recipe (simulator=%s)", async simulator => {
     const f = await fixture(simulator);
     await client.teeSearch.update({ where: { id: f.search.id }, data: { statusEmailSentAt: new Date() } });

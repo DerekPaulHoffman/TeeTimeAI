@@ -162,12 +162,59 @@ describe("native document-generation retirement", () => {
       const stopsBefore = test.cdp.send.mock.calls.filter(([name]) => name === "Page.stopLoading").length;
       test.cdp.send.mockImplementation((name, value) => name === "Fetch.failRequest" && value?.requestId === "child" ?
         mode === "hang" ? new Promise(() => {}) : Promise.reject(new Error("pending pause abort rejected")) : send(name, value));
-      await expect(test.guard.beginDocumentNavigation(test.main as never)).rejects.toThrow(
-        mode === "hang" ? "NATIVE_REDIRECT_ABORT_TIMEOUT" : "pending pause abort rejected");
+      await expect(test.guard.beginDocumentNavigation(test.main as never)).rejects.toThrow("NATIVE_REDIRECT_ABORT_TIMEOUT");
       expect(test.close).toHaveBeenCalledOnce();
       expect(test.cdp.send.mock.calls.filter(([name]) => name === "Page.stopLoading")).toHaveLength(stopsBefore);
       expect(test.routes).toHaveLength(1);
     } finally { await test.guard.close(); }
+  });
+
+  it.each([["XHR", "Fetch"], ["Fetch", "XHR"]])("settles an owned retired %s pause only after its actual %s Network terminal event", async (fetchKind, networkKind) => {
+    const test = await installed(), initialAck = deferred<object>(), send = test.cdp.send.getMockImplementation()!;
+    let boundary: Promise<void> | undefined;
+    try {
+      await startDocument(test); await test.routes[0].continue(); test.response("document", { resourceType: "Document" }); await test.routes[0].request().response();
+      let lateAborts = 0, complete = false;
+      test.cdp.send.mockImplementation((name, value) => {
+        if (name === "Fetch.failRequest" && value?.requestId === "initial") return initialAck.promise;
+        if (name === "Fetch.failRequest" && value?.requestId === "late") { lateAborts++; return Promise.reject(new Error("Invalid InterceptionId")); }
+        return send(name, value);
+      });
+      test.request("initial"); boundary = test.guard.beginDocumentNavigation(test.main as never).then(() => { complete = true; }); boundary.catch(() => {});
+      identity(test, "late", "loader-one", networkKind); test.request("late", { resourceType: fetchKind });
+      await vi.waitFor(() => expect(lateAborts).toBe(1), { interval: 1 });
+      await new Promise(resolve => setTimeout(resolve, 10));
+      expect(test.failures).toEqual([]); expect(complete).toBe(false); expect(test.routes).toHaveLength(1);
+      test.events.get("Network.loadingFailed")!({ requestId: "network-late", type: networkKind }); initialAck.resolve({});
+      await boundary; await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+      expect(test.failures).toEqual([]); expect(test.guard.firstFatal).toBeUndefined();
+      expect(test.cdp.send.mock.calls.some(([name, value]) => ["Fetch.continueRequest", "Fetch.getResponseBody"].includes(name) && value?.requestId === "late")).toBe(false);
+    } finally { initialAck.resolve({}); await boundary?.catch(() => {}); await test.guard.close(); }
+  });
+
+  it.each(["no event", "wrong network", "wrong URL", "wrong method", "foreign frame", "unknown loader", "foreign generation", "wrong kind", "unknown kind"])("does not settle a rejected initial abort from %s terminal evidence", async mismatch => {
+    const test = await installed(), initialAck = deferred<object>(), send = test.cdp.send.getMockImplementation()!;
+    let boundary: Promise<void> | undefined;
+    try {
+      await startDocument(test); await test.routes[0].continue(); test.response("document", { resourceType: "Document" }); await test.routes[0].request().response();
+      if (mismatch === "foreign generation") {
+        await test.guard.beginDocumentNavigation(test.main as never);
+        identity(test, "successor", "loader-two", "Document"); test.request("successor", { resourceType: "Document" });
+        await test.routes[1].continue(); test.response("successor", { resourceType: "Document" }); await test.routes[1].request().response();
+      }
+      test.cdp.send.mockImplementation((name, value) => name === "Fetch.failRequest" && value?.requestId === "initial" ? initialAck.promise
+        : name === "Fetch.failRequest" && value?.requestId === "late" ? Promise.reject(new Error("Invalid InterceptionId")) : send(name, value));
+      test.request("initial"); boundary = test.guard.beginDocumentNavigation(test.main as never); boundary.catch(() => {});
+      test.events.get("Network.requestWillBeSent")!({ requestId: "network-late", loaderId: mismatch === "unknown loader" ? "foreign-loader" : "loader-one",
+        frameId: mismatch === "foreign frame" ? "foreign" : "main", type: mismatch === "wrong kind" ? "Script" : mismatch === "unknown kind" ? "Unknown" : "Fetch",
+        request: { url: mismatch === "wrong URL" ? "https://example.org/foreign" : "https://example.org/data", method: mismatch === "wrong method" ? "POST" : "GET" } });
+      test.request("late", { resourceType: "XHR" });
+      if (mismatch !== "no event") test.events.get("Network.loadingFailed")!({ requestId: mismatch === "wrong network" ? "foreign-network" : "network-late" });
+      initialAck.resolve({});
+      await expect(boundary).rejects.toThrow(); await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce());
+      expect(test.failures).toContain("NATIVE_REDIRECT_ABORT_TIMEOUT"); expect(test.routes).toHaveLength(mismatch === "foreign generation" ? 2 : 1);
+      expect(test.cdp.send.mock.calls.some(([name, value]) => ["Fetch.continueRequest", "Fetch.getResponseBody"].includes(name) && value?.requestId === "late")).toBe(false);
+    } finally { initialAck.resolve({}); await boundary?.catch(() => {}); await test.guard.close(); }
   });
 
   it.each([
@@ -253,6 +300,73 @@ describe("native document-generation retirement", () => {
       ack.resolve({}); await boundary;
       expect(test.guard.pendingReads).toBe(0); expect(test.failures).toEqual([]); expect(test.rejections).toEqual([]);
     } finally { ack.resolve({}); await test.guard.close(); }
+  });
+
+  it("deduplicates one retired response abort while the boundary awaits an initial pause", async () => {
+    const test = await installed(), initialAck = deferred<object>(), responseAck = deferred<object>(), send = test.cdp.send.getMockImplementation()!;
+    let boundary: Promise<void> | undefined;
+    try {
+      await startDocument(test); await test.routes[0].continue(); test.response("document", { resourceType: "Document" }); await test.routes[0].request().response();
+      identity(test, "active", "loader-one", "Script"); test.request("active", { resourceType: "Script" }); await test.routes[1].continue();
+      let responseAborts = 0;
+      test.cdp.send.mockImplementation((name, value) => {
+        if (name === "Fetch.failRequest" && value?.requestId === "initial") return initialAck.promise;
+        if (name === "Fetch.failRequest" && value?.requestId === "active") {
+          if (++responseAborts > 1) return Promise.reject(new Error("Invalid InterceptionId"));
+          return responseAck.promise;
+        }
+        return send(name, value);
+      });
+      // Actual initial pause is waiting for its Network identity; it has no lease.
+      test.request("initial", { resourceType: "Script" });
+      boundary = test.guard.beginDocumentNavigation(test.main as never); boundary.catch(() => {});
+      await vi.waitFor(() => expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.failRequest" && value?.requestId === "initial")).toBe(true), { interval: 1 });
+      test.response("active", { resourceType: "Script" });
+      await vi.waitFor(() => expect(responseAborts).toBe(1), { interval: 1 });
+      initialAck.resolve({}); await new Promise(resolve => setTimeout(resolve, 10));
+      expect(responseAborts).toBe(1); expect(test.close).not.toHaveBeenCalled();
+      responseAck.resolve({}); await boundary;
+      await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+      expect(test.failures).toEqual([]); expect(test.guard.firstFatal).toBeUndefined();
+    } finally { initialAck.resolve({}); responseAck.resolve({}); await boundary?.catch(() => {}); await test.guard.close(); }
+  });
+
+  it("requires a distinct later response-pause ACK after the same request-pause ACK", async () => {
+    const test = await installed(), requestAck = deferred<object>(), responseAck = deferred<object>(), send = test.cdp.send.getMockImplementation()!;
+    let boundary: Promise<void> | undefined;
+    try {
+      await startDocument(test); await test.routes[0].continue(); test.response("document", { resourceType: "Document" }); await test.routes[0].request().response();
+      identity(test, "queued", "loader-one", "Script"); test.request("queued", { resourceType: "Script" });
+      let aborts = 0, boundaryComplete = false;
+      test.cdp.send.mockImplementation((name, value) => name === "Fetch.failRequest" && value?.requestId === "queued"
+        ? ++aborts === 1 ? requestAck.promise : responseAck.promise : send(name, value));
+      boundary = test.guard.beginDocumentNavigation(test.main as never).then(() => { boundaryComplete = true; }); boundary.catch(() => {});
+      await vi.waitFor(() => expect(aborts).toBe(1), { interval: 1 });
+      test.response("queued", { resourceType: "Script", responseStatusCode: undefined, responseErrorReason: "Aborted" });
+      await vi.waitFor(() => expect(aborts).toBe(2), { interval: 1 });
+      requestAck.resolve({}); await new Promise(resolve => setTimeout(resolve, 10));
+      expect(boundaryComplete).toBe(false); expect(test.guard.pendingReads).toBeGreaterThan(0);
+      responseAck.resolve({}); await boundary;
+      await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+      expect(aborts).toBe(2); expect(test.failures).toEqual([]); expect(test.guard.firstFatal).toBeUndefined();
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "queued")).toBe(false);
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.getResponseBody" && value?.requestId === "queued")).toBe(false);
+    } finally { requestAck.resolve({}); responseAck.resolve({}); await boundary?.catch(() => {}); await test.guard.close(); }
+  });
+
+  it.each(["reject", "hang"])("still closes when a distinct retired response abort %s after a successful request abort", async mode => {
+    const test = await installed(), send = test.cdp.send.getMockImplementation()!;
+    try {
+      await startDocument(test); await test.routes[0].continue(); test.response("document", { resourceType: "Document" }); await test.routes[0].request().response();
+      identity(test, "queued", "loader-one", "Script"); test.request("queued", { resourceType: "Script" });
+      await test.guard.beginDocumentNavigation(test.main as never);
+      test.cdp.send.mockImplementation((name, value) => name === "Fetch.failRequest" && value?.requestId === "queued"
+        ? mode === "hang" ? new Promise(() => {}) : Promise.reject(new Error("Invalid InterceptionId")) : send(name, value));
+      test.response("queued", { resourceType: "Script", responseStatusCode: undefined, responseErrorReason: "Aborted" });
+      await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce());
+      expect(test.guard.firstFatal).toBeDefined();
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.getResponseBody" && value?.requestId === "queued")).toBe(false);
+    } finally { await test.guard.close(); }
   });
 
   it.each(["reject", "hang"])("closes if a resource-kind denial's exact abort ACK %s", async mode => {
@@ -374,6 +488,128 @@ describe("native document-generation retirement", () => {
 
 const nativeChromePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 describe.runIf(existsSync(nativeChromePath))("offline Chrome document ownership", () => {
+  it.each(["inline icon", "late incidental fetch"])("drains one real response pause once while another initial abort ACK is held (%s)", async icon => {
+    const reads: string[] = [], bodies: string[] = [], failures: string[] = [], commandFailures: { command: string; path: string | null; error: string }[] = [];
+    const faviconLifecycle: { event: string; kind?: string; responseStage?: boolean; networkKnown?: boolean; rootFrame?: boolean; loaderMatchesDocument?: boolean }[] = [];
+    const initialAck = deferred<void>(), responseAck = deferred<void>(), stopAck = deferred<void>();
+    let releaseOldResponse: (() => void) | undefined, publishFaviconFailure: (() => void) | undefined, retiring = false, faviconAborts = 0;
+    const server = createServer((request, response) => {
+      reads.push(request.url!);
+      if (request.url === "/old.js") {
+        response.setHeader("Content-Type", "application/javascript");
+        releaseOldResponse = () => response.end("window.oldRetiredScriptExecuted = true;"); return;
+      }
+      response.setHeader("Content-Type", "text/html");
+      response.end('<link rel="icon" href="data:,">' + (request.url === "/" ? '<h1>Old public document</h1><script async src="/old.js"></script><script async src="/provisional.js"></script>' : '<h1>Successor public document</h1>'));
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const browser = await chromium.launch({ executablePath: nativeChromePath, headless: true });
+    const context = await browser.newContext({ serviceWorkers: "block" }), page = await context.newPage(), session = new AbortController();
+    const cdp = await context.newCDPSession(page), requestUrls = new Map<string, string>(), networkUrls = new Map<string, string>();
+    const rootFrame = (await cdp.send("Page.getFrameTree")).frameTree.frame.id;
+    let documentLoader: string | undefined;
+    let initialAborts = 0, responseAborts = 0, active = 0, maximum = 0;
+    const send = (name: string, values?: { requestId?: string }) => cdp.send(name as never, values as never).catch(error => {
+      const target = values?.requestId ? requestUrls.get(values.requestId) : undefined;
+      if (target === `${url}/favicon.ico`) faviconLifecycle.push({ event: `${name}:REJECTED` });
+      commandFailures.push({ command: name, path: target ? new URL(target).pathname : null, error: error instanceof Error ? error.message.slice(0, 200) : "UNKNOWN" });
+      throw error;
+    });
+    const controlled = {
+      on(name: string, listener: (event: unknown) => void) {
+        cdp.on(name as never, (event: unknown) => {
+          const value = event as { requestId?: string; networkId?: string; resourceType?: string; type?: string; frameId?: string; loaderId?: string; responseStatusCode?: number; responseErrorReason?: string; request?: { url?: string } };
+          if (name === "Network.requestWillBeSent" && value.requestId && value.request?.url) networkUrls.set(value.requestId, value.request.url);
+          if (name === "Network.requestWillBeSent" && value.type === "Document" && value.request?.url === `${url}/`) documentLoader = value.loaderId;
+          if (name === "Fetch.requestPaused" && value.requestId && value.request?.url) requestUrls.set(value.requestId, value.request.url);
+          if (name === "Network.requestWillBeSent" && value.request?.url === `${url}/favicon.ico`) faviconLifecycle.push({ event: name, kind: value.type, rootFrame: value.frameId === rootFrame, loaderMatchesDocument: value.loaderId === documentLoader });
+          if (name === "Fetch.requestPaused" && value.request?.url === `${url}/favicon.ico`) faviconLifecycle.push({ event: name, kind: value.resourceType,
+            responseStage: value.responseStatusCode !== undefined || value.responseErrorReason !== undefined, networkKnown: Boolean(value.networkId && networkUrls.get(value.networkId) === value.request.url) });
+          if (name === "Network.loadingFailed" && value.requestId && networkUrls.get(value.requestId) === `${url}/favicon.ico`) {
+            faviconLifecycle.push({ event: name, kind: value.type });
+            // Retain this actual exact-ID event, but do not publish terminal
+            // proof until after checking that the failed command alone cannot
+            // settle the navigation boundary.
+            publishFaviconFailure = () => listener(event); return;
+          }
+          // Delay only this real local request's Network metadata. The actual
+          // Fetch pause remains guarded and cannot reach the shared lease lane.
+          if (name === "Network.requestWillBeSent" && value.request?.url === `${url}/provisional.js`) return;
+          listener(event);
+        });
+      },
+      send(name: string, values?: { requestId?: string }) {
+        const target = values?.requestId ? requestUrls.get(values.requestId) : undefined;
+        if (name === "Page.stopLoading" && retiring) return send(name, values).then(value => { stopAck.resolve(); return value; });
+        if (name === "Fetch.failRequest" && target === `${url}/favicon.ico`) {
+          faviconAborts++; return stopAck.promise.then(() => send(name, values));
+        }
+        if (name === "Fetch.failRequest" && target === `${url}/provisional.js`) {
+          initialAborts++; return initialAck.promise.then(() => send(name, values));
+        }
+        if (name === "Fetch.failRequest" && target === `${url}/old.js`) {
+          responseAborts++; return responseAck.promise.then(() => send(name, values));
+        }
+        return send(name, values);
+      },
+      detach: () => cdp.detach(),
+    };
+    vi.spyOn(context, "newCDPSession").mockResolvedValue(controlled as never);
+    const queue = createSimulatorBrowserRequestQueue(async (_host, work) => {
+      active++; maximum = Math.max(maximum, active);
+      try { return { acquired: true as const, value: await work() }; } finally { active--; }
+    }, session.signal);
+    // Loopback admission belongs only to this isolated test. All real CDP
+    // pause/response/body and lease handling uses the production helper.
+    const guard = await installNativeRedirectRouting(page, async route => {
+      try {
+        const reply = await queue.run("fixture", () => continueNativeBrowserRead(route, session.signal, 10_000), route.request().signal);
+        if (!route.request().signal?.aborted) bodies.push(reply.body.toString());
+      } catch (error) { if (!isNativeReadSupersededFailure(error)) throw error; }
+    }, { timeoutMs: 5_000, maxRequests: 16, onFailure: value => failures.push(value) });
+    let boundary: Promise<void> | undefined;
+    try {
+      await context.route("**/*", route => guard.releasePlaywrightRoute(route));
+      await guard.beginDocumentNavigation(page.mainFrame()); await page.goto(`${url}/`, { waitUntil: "commit" });
+      await vi.waitFor(() => { expect(releaseOldResponse).toBeDefined(); expect([...requestUrls.values()]).toContain(`${url}/provisional.js`); });
+      expect(reads).not.toContain("/provisional.js"); expect(active).toBe(1);
+      let finished = false;
+      retiring = true;
+      boundary = guard.beginDocumentNavigation(page.mainFrame()).then(() => { finished = true; }); boundary.catch(() => {});
+      await vi.waitFor(() => expect(initialAborts).toBe(1));
+      if (icon === "late incidental fetch") {
+        await page.evaluate(() => { void fetch("/favicon.ico").catch(() => {}); });
+        await vi.waitFor(() => expect(faviconAborts).toBe(1));
+        expect(reads).not.toContain("/favicon.ico");
+      }
+      releaseOldResponse!(); await vi.waitFor(() => expect(responseAborts).toBe(1));
+      initialAck.resolve(); await new Promise(resolve => setTimeout(resolve, 20));
+      expect(responseAborts).toBe(1); expect(finished).toBe(false); expect(active).toBe(1);
+      responseAck.resolve();
+      if (icon === "late incidental fetch") {
+        await vi.waitFor(() => { expect(commandFailures.some(item => item.path === "/favicon.ico")).toBe(true); expect(publishFaviconFailure).toBeDefined(); });
+        expect({ failures, boundaryComplete: finished, terminalCaptured: Boolean(publishFaviconFailure) }).toEqual({ failures: [], boundaryComplete: false, terminalCaptured: true });
+        publishFaviconFailure!();
+      }
+      await boundary;
+      expect(active).toBe(0); expect(reads).not.toContain("/provisional.js");
+      expect(bodies.some(body => body.includes("oldRetiredScriptExecuted"))).toBe(false);
+      expect(commandFailures).toEqual(icon === "inline icon" ? [] : [{ command: "Fetch.failRequest", path: "/favicon.ico", error: expect.stringContaining("Invalid InterceptionId") }]);
+      expect(faviconLifecycle.some(item => item.event === "Network.loadingFailed")).toBe(icon === "late incidental fetch");
+      expect(failures, JSON.stringify(faviconLifecycle)).toEqual([]); expect(guard.firstFatal).toBeUndefined();
+      await page.goto(`${url}/next`, { waitUntil: "commit" });
+      await expect(page.locator("h1").innerText()).resolves.toBe("Successor public document");
+      await vi.waitFor(() => expect(guard.pendingReads).toBe(0));
+      expect(failures).toEqual([]); expect(guard.firstFatal).toBeUndefined(); expect(maximum).toBe(1);
+      expect(initialAborts).toBe(1); expect(responseAborts).toBe(1);
+    } finally {
+      initialAck.resolve(); responseAck.resolve(); stopAck.resolve(); publishFaviconFailure?.(); await boundary?.catch(() => {});
+      session.abort(); await guard.close(); queue.dispose(); await browser.close();
+      server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+  }, 20_000);
+
   it("loads actual document and script HTTP redirects with document-generation tracking enabled", async () => {
     const reads: string[] = [], bodies: string[] = [], failures: string[] = [];
     const server = createServer((request, response) => {

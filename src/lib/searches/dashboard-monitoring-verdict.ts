@@ -4,6 +4,7 @@ import {
   type CustomerMonitoringStatusInput
 } from "@/lib/customer-monitoring-status";
 import { getDashboardCourseAction } from "@/lib/searches/dashboard-course-action";
+import type { DashboardDiscoveryStatus } from "@/lib/searches/dashboard-discovery-status";
 
 export type DashboardMonitoringVerdictInput = {
   alertSupport: CourseAlertSupport | null;
@@ -40,12 +41,14 @@ export type DashboardMonitoringVerdictInput = {
   now?: Date;
   firstTimeLookup: boolean;
   alertStatus?: string;
+  discoveryStatus?: DashboardDiscoveryStatus | null;
 };
 
 export function getDashboardMonitoringVerdict(
   input: DashboardMonitoringVerdictInput
 ) {
   const active = !input.alertStatus || input.alertStatus === "ACTIVE";
+  const terminalDiscovery = active && input.discoveryStatus?.state === "TERMINAL_FAILURE";
   const lifecycleDetail = active
     ? "Your alert remains active."
     : input.alertStatus === "PAUSED"
@@ -68,7 +71,7 @@ export function getDashboardMonitoringVerdict(
   });
 
   if (
-    customerStatus !== "NEEDS_HUMAN_REVIEW" &&
+    !terminalDiscovery && customerStatus !== "NEEDS_HUMAN_REVIEW" &&
     customerStatus !== "FINAL_DIRECT_ACTION" &&
     input.upcomingBookingWindow &&
     (!input.latestProbe || input.latestProbe.outcome === "NO_MATCH")
@@ -84,7 +87,7 @@ export function getDashboardMonitoringVerdict(
     };
   }
 
-  if (customerStatus === "MONITORED" &&
+  if (!terminalDiscovery && customerStatus === "MONITORED" &&
     (input.latestProbe?.outcome === "MATCH_FOUND" || input.latestProbe?.outcome === "NO_MATCH")) {
     return {
       label: "Tee-time alerts available",
@@ -104,6 +107,17 @@ export function getDashboardMonitoringVerdict(
       emoji: "👀",
       icon: "unavailable" as const,
       className: "is-official-site-only"
+    };
+  }
+
+  if (terminalDiscovery &&
+      customerStatus !== "FINAL_DIRECT_ACTION") {
+    return {
+      label: "Automatic availability not confirmed",
+      detail: "Your alert remains active. We couldn't confirm automatic checks for this course. Use the official site for current tee times.",
+      emoji: "⚠️",
+      icon: "unavailable" as const,
+      className: "is-official-site-only",
     };
   }
 

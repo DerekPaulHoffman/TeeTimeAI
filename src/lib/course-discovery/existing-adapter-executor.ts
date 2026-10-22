@@ -29,6 +29,8 @@ import { executeGolfVx, inspectGolfVx } from "./golfvx-executor";
 import { parseEzLinksSource } from "./ezlinks-source";
 import { isEzLinksProviderUrl } from "./ezlinks-public-read-policy";
 import { executeEzLinks, inspectEzLinks } from "./ezlinks-executor";
+import { deriveUScheduleOfficialLocation, parseUScheduleLocationSource } from "@/lib/simulators/providers/uschedule-location-source";
+import { executeUSchedulePublicLocation, inspectUSchedulePublicLocation } from "./uschedule-location-executor";
 
 type Dependencies = {
   fetch?: typeof fetch;
@@ -50,7 +52,7 @@ function familyForSource(source: Source) {
   if (url.hostname === "foreupsoftware.com" && !url.search && foreupPath.test(url.pathname)) return "FOREUP" as const;
   if (isAcuityPublicBookingUrl(source.bookingUrl)) return "ACUITY" as const;
   if (parseTeeItUpRecipeSource(source.bookingUrl)) return "TEEITUP" as const;
-  if (uschedulePublicTenant(source.bookingUrl)) return "USCHEDULE" as const;
+  if (uschedulePublicTenant(source.bookingUrl) || parseUScheduleLocationSource(source.bookingUrl)?.locationId) return "USCHEDULE" as const;
   return fail("UNSUPPORTED_ADAPTER_SOURCE");
 }
 function dateParameter(date: string) { const [year, month, day] = date.split("-"); return `${month}-${day}-${year}`; }
@@ -240,6 +242,12 @@ export async function inspectExistingAdapter(source: Source, deps: Dependencies)
     return { adapter: await inspectAmelia({ ...source, officialUrl: source.officialUrl }, deps) };
   }
   if (family === "USCHEDULE") {
+    let location = false;
+    if (deps.officialIdentityPage) {
+      try { deriveUScheduleOfficialLocation(source, deps.officialIdentityPage); location = true; }
+      catch { /* Unchanged legacy source/identity contract is checked below. */ }
+    }
+    if (location) return { adapter: existingAdapterMetadataSchema.parse(await inspectUSchedulePublicLocation(source, deps)) };
     const session = createUSchedulePublicSession(source.bookingUrl, deps);
     try {
       const response = await session.read(source.bookingUrl);
@@ -326,6 +334,14 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
       return result(slots.filter(slot => new Date(slot.startsAt) > now && new Date(slot.startsAt) >= start && new Date(slot.startsAt) < end));
     }
     if (adapter.family === "USCHEDULE") {
+      if (adapter.publicLocationProof) {
+        const available = await executeUSchedulePublicLocation(recipe.source, { ...adapter, publicLocationProof: adapter.publicLocationProof },
+          { courseId: recipe.target.courseId, offeringId: recipe.target.offeringId! }, input, deps);
+        return result(available.slots.filter(slot => slot.startsAt > now && slot.startsAt >= start && slot.endsAt <= end).map(slot => ({
+          sourceId: slot.sourceId, startsAt: slot.startsAt.toISOString(), endsAt: slot.endsAt.toISOString(), availableSpots: 1,
+          capacity: slot.maxPartySize, bookingUrl: recipe.source.bookingUrl, resourceId: slot.resourceId, productId: slot.productId,
+        })));
+      }
       const normalized = recipe.source.venueName.normalize("NFKC").toLowerCase().replace(/&/gu, "and").replace(/[^a-z0-9]/gu, "");
       if (uschedulePublicTenant(recipe.source.bookingUrl) !== adapter.tenant || normalized.length < 8 || normalized !== adapter.tenant.replace(/-/gu, "")) fail("ADAPTER_IDENTITY_MISMATCH");
       uscheduleSession = createUSchedulePublicSession(recipe.source.bookingUrl, deps);

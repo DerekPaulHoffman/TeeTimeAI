@@ -129,4 +129,37 @@ describe("dashboard course and simulator presentation", () => {
     expect(dom.querySelector(".known-tee-time")?.getAttribute("aria-label")).toContain("4 spots, 18 holes");
     expect(dom.querySelector(".dashboard-alert-accordion")?.hasAttribute("open")).toBe(false);
   });
+
+  it("shows a terminal course investigation without promising retries or ending the saved alert", async () => {
+    const search = fixture("GOLF", "Unconfirmed Public Course");
+    search.probes = [];
+    const projected = { ...search, preferences: search.preferences.map(preference => ({ ...preference,
+      discoveryStatus: { state: "TERMINAL_FAILURE", completedAt: observedAt } })) };
+    vi.mocked(listTeeSearchesForUser).mockResolvedValue([projected] as unknown as Awaited<ReturnType<typeof listTeeSearchesForUser>>);
+    const dom = document.createElement("div");
+    dom.innerHTML = renderToStaticMarkup(await DashboardPage());
+    expect(dom.querySelector(".dashboard-alert-summary-copy")?.textContent).toContain("Automatic availability not confirmed");
+    expect(dom.querySelector(".watch-course-availability")?.textContent).toContain("We couldn't confirm automatic checks");
+    expect(dom.querySelector(".watch-course-availability")?.textContent).toContain("Your alert remains active");
+    expect(dom.querySelector(".status-pill.active")?.textContent).toBe("Active");
+    expect(dom.querySelector('a[href="https://official.example/booking"]')).not.toBeNull();
+    expect(dom.textContent).not.toMatch(/still retrying|keeps trying|No public times listed|No matching times for your request/);
+    expect(dom.querySelector('.dashboard-alert-accordion button')).not.toBeNull();
+  });
+
+  it("shows the same honest terminal state on the current simulator offering without claiming no sessions", async () => {
+    const search = fixture("SIMULATOR", "Unconfirmed Simulator");
+    search.matches = [];
+    search.probes = [];
+    const projected = { ...search, preferences: search.preferences.map(preference => ({ ...preference,
+      discoveryStatus: { state: "TERMINAL_FAILURE", completedAt: observedAt } })) };
+    vi.mocked(listTeeSearchesForUser).mockResolvedValue([projected] as unknown as Awaited<ReturnType<typeof listTeeSearchesForUser>>);
+    const dom = document.createElement("div");
+    dom.innerHTML = renderToStaticMarkup(await DashboardPage());
+    expect(dom.querySelector(".dashboard-alert-summary-copy")?.textContent).toContain("Automatic availability not confirmed");
+    expect(dom.querySelector(".watch-course-availability")?.textContent).toContain("Your alert remains active");
+    expect(dom.querySelector(".watch-course-availability")?.textContent).toContain("official site");
+    expect(dom.textContent).not.toMatch(/Simulator check pending|will retry|No matching sessions/);
+    expect(dom.querySelector('a[href="https://official.example/booking"]')).not.toBeNull();
+  });
 });

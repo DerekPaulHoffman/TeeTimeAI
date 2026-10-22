@@ -1,5 +1,6 @@
 import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import { getSimulatorOfferingSourceFingerprint } from "./source-fingerprint";
+import type { DashboardDiscoveryStatus } from "@/lib/searches/dashboard-discovery-status";
 
 type Offering = Parameters<typeof getSimulatorOfferingSourceFingerprint>[0] & {
   automationEligibility: string;
@@ -12,7 +13,7 @@ type Offering = Parameters<typeof getSimulatorOfferingSourceFingerprint>[0] & {
 type Probe = { outcome: string; observedAt: Date; rawSummary: unknown };
 
 export type SimulatorDashboardStatusKind = "ENDED" | "PAUSED" | "STOPPED" | "UNAVAILABLE" |
-  "BOOKING_NOT_OPEN" | "AVAILABLE" | "NO_MATCH" | "ADDING_SUPPORT" | "RETRYING" | "PENDING";
+  "UNCONFIRMED" | "BOOKING_NOT_OPEN" | "AVAILABLE" | "NO_MATCH" | "ADDING_SUPPORT" | "RETRYING" | "PENDING";
 
 /** The alert header shares the venue's verified state instead of inferring health from the search lifecycle. */
 export function getSimulatorAlertSummary(statuses: { kind: SimulatorDashboardStatusKind; label: string }[]) {
@@ -21,6 +22,7 @@ export function getSimulatorAlertSummary(statuses: { kind: SimulatorDashboardSta
   if (statuses.every(status => status.kind === "NO_MATCH")) return "Checked · No matching sessions";
   if (statuses.every(status => status.kind === "BOOKING_NOT_OPEN")) return "Public booking windows have not opened yet";
   if (statuses.some(status => status.kind === "UNAVAILABLE")) return "Some simulator alerts unavailable";
+  if (statuses.some(status => status.kind === "UNCONFIRMED")) return "Some simulator availability not confirmed";
   if (statuses.some(status => status.kind === "ADDING_SUPPORT")) return "Adding simulator alert support";
   if (statuses.some(status => status.kind === "RETRYING")) return "Availability checks will retry";
   return "Simulator checks pending";
@@ -35,6 +37,7 @@ export function getSimulatorDashboardStatus(input: {
   windowEnded: boolean;
   website: string | null;
   now?: Date;
+  discoveryStatus?: DashboardDiscoveryStatus | null;
 }) {
   const { offering, probe, currentMatchCount, alertStatus, windowEnded, website } = input;
   const now = input.now ?? new Date();
@@ -58,10 +61,13 @@ export function getSimulatorDashboardStatus(input: {
     offering.automationEligibility === "BLOCKED") || currentProbe && probe?.outcome === "MANUAL_DIRECT";
   const opensAt = typeof summary?.opensAt === "string" ? new Date(summary.opensAt) : null;
   const bookingNotOpen = currentProbe && verifiedRental && summary?.bookingNotOpen === true && opensAt && opensAt > now;
+  const terminalDiscovery = input.discoveryStatus?.state === "TERMINAL_FAILURE" &&
+    !(current && probe && probe.observedAt >= input.discoveryStatus.completedAt);
   const kind: SimulatorDashboardStatusKind = windowEnded ? "ENDED"
     : alertStatus === "PAUSED" ? "PAUSED"
     : alertStatus !== "ACTIVE" ? "STOPPED"
     : identityFinal || officialSiteOnly ? "UNAVAILABLE"
+    : terminalDiscovery ? "UNCONFIRMED"
     : bookingNotOpen ? "BOOKING_NOT_OPEN"
     : current && currentMatchCount > 0 ? "AVAILABLE"
     : current && probe?.outcome === "NO_MATCH" ? "NO_MATCH"
@@ -73,6 +79,7 @@ export function getSimulatorDashboardStatus(input: {
     : kind === "STOPPED" ? "Checks stopped"
     : kind === "UNAVAILABLE" && identityFinal ? "Public simulator rentals aren’t available here. Check the official site for options."
     : kind === "UNAVAILABLE" ? "Simulator alerts aren’t available here. Check the official site for rental options."
+    : kind === "UNCONFIRMED" ? "Automatic availability not confirmed"
     : kind === "BOOKING_NOT_OPEN" ? "The public booking window has not opened yet."
     : kind === "AVAILABLE" ? "Matching simulator sessions available"
     : kind === "NO_MATCH" ? "Checked · No matching sessions"
@@ -83,6 +90,7 @@ export function getSimulatorDashboardStatus(input: {
   return {
     kind,
     label,
+    ...(kind === "UNCONFIRMED" ? { detail: "Your alert remains active. We couldn't confirm automatic checks for this venue. Use the official site for current sessions." } : {}),
     officialUrl: safeBookingUrl ?? getSafeCustomerBookingUrl(website) ?? null,
     officialLinkLabel: verifiedRental && safeBookingUrl && !identityFinal && !officialSiteOnly ? "Official booking page" : "Official site",
   };

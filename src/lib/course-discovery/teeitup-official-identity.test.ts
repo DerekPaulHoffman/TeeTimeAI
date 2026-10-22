@@ -78,6 +78,14 @@ describe("official source/address identity attestation", () => {
     expect(completeUSAddress("Shadow Rock Drive, Lithonia, GA 30058, US")).toBeNull();
     expect(completeUSAddress("6094 Shadow Rock Drive, GA 30058, US")).toBeNull();
   });
+  it("recognizes a complete Way address without discarding the street or direction", () => {
+    expect(completeUSAddress("14330 SE Husky Way, Auburn, WA 98092, USA")).toEqual({
+      street: "14330 se husky way", locality: "auburn", region: "WA", postalCode: "98092", country: "US",
+    });
+    for (const address of ["SE Husky Way, Auburn, WA 98092, USA", "14330 SE Husky Way, WA 98092, USA",
+      "14330 SE Husky, Auburn, WA 98092, USA", "PO Box 14330, Auburn, WA 98092, USA"])
+      expect(completeUSAddress(address)).toBeNull();
+  });
   it("requires browser visibility at discovery and changes its witness on concealment-related markup changes", () => {
     const captured = { ...page(), visibleEvidence: { title: "Mystery Valley Golf Club – Golf at Its Best", headings: ["Mystery Valley Golf Club"],
       linkUrls: [source.bookingUrl], addressTexts: ["Address: 6094 Shadow Rock Drive, Lithonia, GA 30058, US"] } };

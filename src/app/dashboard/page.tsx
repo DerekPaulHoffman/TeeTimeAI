@@ -288,6 +288,7 @@ function DashboardSearchCard({
         automationEligibility: course.automationEligibility,
         automationReason: course.automationReason,
         latestProbe,
+        discoveryStatus: preference.discoveryStatus,
         upcomingBookingWindow,
         monitoringState: course.monitoringStatus?.state ?? null,
         monitoringStateChangedAt: course.monitoringStatus?.stateChangedAt ?? null,
@@ -779,7 +780,8 @@ function SimulatorDashboardCard({ search, canManage, coursePhotos, ownerEmailSta
     const venueMatches = [...new Map(matches.filter(match => match.offeringId === offering?.id).map(match =>
       [[match.startsAt.toISOString(), match.endsAt?.toISOString(), match.bookingUrl].join("|"), match])).values()];
     const status = getSimulatorDashboardStatus({ offering, probe, currentMatchCount: venueMatches.length,
-      alertStatus: search.status, windowEnded: ended, website: preference.course.website, now });
+      alertStatus: search.status, windowEnded: ended, website: preference.course.website, now,
+      discoveryStatus: preference.discoveryStatus });
     return { preference, venueMatches, status };
   });
   return <article className="dashboard-row" data-single-course={search.preferences.length === 1} id={`alert-${search.id}`}>
@@ -828,6 +830,7 @@ function SimulatorDashboardCard({ search, canManage, coursePhotos, ownerEmailSta
               <p className="meta"><MapPin aria-hidden="true" size={12} />{getCompactLocation(preference.course.address)}</p>
               <div className="watch-course-availability">
                 <div className="watch-course-availability-heading"><strong>{venueStatus.label}</strong></div>
+                {venueStatus.detail ? <p>{venueStatus.detail}</p> : null}
               </div>
             </div>
             <div className="watch-course-links">

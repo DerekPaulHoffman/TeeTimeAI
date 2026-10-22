@@ -1335,9 +1335,7 @@ function TeeTimeIntakeContent({
         locationErrorId={searchError ? "search-validation-error" : LOCATION_SEARCH_ERROR_ID}
         locationInputInvalid={locationInputInvalid}
         locationText={locationText}
-        minSearchDate={mode === "SIMULATOR"
-          ? getMinimumSearchDateInputValue(new Date(), selectedTimeZones, true)
-          : minSearchDate}
+        minSearchDate={minSearchDate}
         mobileTimeEditorOpen={mobileTimeEditorOpen}
         onDateChange={reconcileDateFromControl}
         onEndTimeChange={setEndTime}

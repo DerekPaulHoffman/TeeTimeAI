@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { prisma } from "@/lib/prisma";
+import { getDiscoverySourceFingerprint } from "@/lib/course-discovery/service";
 import {
   createTeeSearchForUser,
   deleteTeeSearchForUser,
@@ -40,6 +41,7 @@ vi.mock("@/lib/prisma", () => ({
     courseProbe: {
       findMany: vi.fn(),
     },
+    courseDiscoveryJob: { findFirst: vi.fn() },
     googlePlaceReview: {
       findMany: vi.fn(),
     },
@@ -134,6 +136,7 @@ beforeEach(() => {
   providerObservationMocks.getCourseProviderObservationFencesInTransaction.mockResolvedValue(
     new Map(),
   );
+  mockedPrisma.courseDiscoveryJob.findFirst.mockResolvedValue(null);
 });
 
 afterEach(() => {
@@ -141,6 +144,66 @@ afterEach(() => {
 });
 
 describe("listTeeSearchesForUser", () => {
+  it("projects only the newest exact owned-request terminal investigation without changing demand or scheduler", async () => {
+    vi.setSystemTime(new Date("2026-10-22T00:40:00Z"));
+    const course = {
+      id: "course-1", name: "Public Golf Club", address: "1 Fairway Rd",
+      website: "https://golf.example/", detectedBookingUrl: null, timeZone: "America/New_York",
+      providerFamilyKey: null, bookingMetadata: {}, isPublic: true, activeAccessRecipeId: null,
+      bookingMethod: "UNKNOWN", bookingAccessMode: "UNKNOWN", automationEligibility: "UNKNOWN", automationReason: "NONE",
+    } as Parameters<typeof getDiscoverySourceFingerprint>[0];
+    const stored = { id: "search-1", userId: "owner-1", status: "ACTIVE", mode: "OUTDOOR", alertGeneration: 0,
+      createdAt: new Date("2026-10-22T00:35:40Z"), date: new Date("2026-10-23T00:00:00Z"),
+      startTime: "08:00", endTime: "18:00", players: 2, durationMinutes: null, statusEmailSnapshot: null,
+      checkStatus: "WAITING", nextCheckAt: new Date("2026-10-22T00:42:47Z"), matches: [],
+      preferences: [{ id: "pref-1", courseId: course.id, offeringId: null, course, offering: null }] };
+    const completedAt = new Date("2026-10-22T00:37:34Z");
+    const job = { targetKey: "course:course-1", courseId: course.id, offeringId: null, baseRecipeId: null,
+      sourceFingerprint: getDiscoverySourceFingerprint(course), status: "FAILED", createdAt: stored.createdAt, completedAt,
+      request: { demand: { searchId: stored.id, alertGeneration: 0 }, target: { courseId: course.id, kind: "OUTDOOR" },
+        input: { date: "2026-10-23", timeZone: course.timeZone, players: 2, startTime: "08:00", endTime: "18:00" },
+        identity: { name: course.name, address: course.address, officialUrl: course.website,
+          bookingUrl: null, timeZone: course.timeZone, providerFamily: null } } };
+    mockedPrisma.teeSearch.findMany.mockResolvedValue([stored] as never);
+    mockedPrisma.$queryRaw.mockResolvedValue([]);
+    mockedPrisma.courseDiscoveryJob.findFirst.mockResolvedValue(job as never);
+    const [projected] = await listTeeSearchesForUser("owner-1");
+    expect(projected.preferences[0].discoveryStatus).toEqual({ state: "TERMINAL_FAILURE", completedAt });
+    expect(projected).toMatchObject({ status: "ACTIVE", checkStatus: "WAITING", nextCheckAt: stored.nextCheckAt });
+    expect(mockedPrisma.teeSearch.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { userId: "owner-1" } }));
+    expect(mockedPrisma.courseDiscoveryJob.findFirst).toHaveBeenCalledExactlyOnceWith({
+      where: { targetKey: "course:course-1", courseId: "course-1", offeringId: null,
+        AND: [{ request: { path: ["demand", "searchId"], equals: "search-1" } },
+          { request: { path: ["demand", "alertGeneration"], equals: 0 } }] },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      select: { targetKey: true, courseId: true, offeringId: true, sourceFingerprint: true,
+        baseRecipeId: true, status: true, request: true, createdAt: true, completedAt: true },
+    });
+    expect(projected.preferences[0].discoveryStatus).not.toHaveProperty("request");
+    expect(mockedPrisma.teeSearch.update).not.toHaveBeenCalled();
+    mockedPrisma.courseDiscoveryJob.findFirst.mockResolvedValue({ ...job, status: "RUNNING", completedAt: null } as never);
+    expect((await listTeeSearchesForUser("owner-1"))[0].preferences[0].discoveryStatus).toBeNull();
+  });
+
+  it("bounds discovery status reads to fifteen active selected targets and skips inactive history", async () => {
+    const searches = Array.from({ length: 4 }, (_, index) => ({
+      id: `search-${index}`, status: "ACTIVE", alertGeneration: 0, mode: "OUTDOOR", durationMinutes: null,
+      createdAt: new Date("2026-06-30T00:00:00Z"), statusEmailSnapshot: null, matches: [],
+      ...currentSearchSettings(Array.from({ length: 5 }, (_, target) => `course-${index}-${target}`)),
+    })).map(search => ({ ...search, preferences: search.preferences.map(preference => ({ ...preference,
+      id: `pref-${preference.course.id}`, courseId: preference.course.id, offeringId: null, offering: null })) }));
+    mockedPrisma.teeSearch.findMany.mockResolvedValue(searches as never);
+    mockedPrisma.$queryRaw.mockResolvedValue([]);
+    mockedPrisma.courseDiscoveryJob.findFirst.mockClear();
+    const projected = await listTeeSearchesForUser("owner-1");
+    expect(mockedPrisma.courseDiscoveryJob.findFirst).toHaveBeenCalledTimes(15);
+    expect(projected.flatMap(search => search.preferences).every(preference => preference.discoveryStatus === null)).toBe(true);
+    mockedPrisma.courseDiscoveryJob.findFirst.mockClear();
+    mockedPrisma.teeSearch.findMany.mockResolvedValue(searches.map(search => ({ ...search, status: "PAUSED" })) as never);
+    await listTeeSearchesForUser("owner-1");
+    expect(mockedPrisma.courseDiscoveryJob.findFirst).not.toHaveBeenCalled();
+  });
+
   it("hides the old probe totals and last check after an owned settings edit", async () => {
     const oldProbe = {
       id: "old-probe", teeSearchId: "search-1", courseId: "course-1",

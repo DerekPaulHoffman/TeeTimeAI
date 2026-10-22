@@ -183,8 +183,14 @@ export async function createCourseDiscoveryBrowserSession(input: {
   const observedNavigationRoots = new Set(allowedNavigation);
   const cpsScope = createCpsPublicSessionScope(initialUrls);
   const bookingParents = createPublicBookingParentScope({ officialUrl: input.venueOfficialUrl, venueName: input.venueName, venueAddress: input.venueAddress });
-  let officialIdentityPage: (OfficialIdentityPage & { observedAt: number }) | undefined;
-  let officialIdentityDocument: { url: string; html: string } | undefined;
+  type OfficialDocumentProof = { kind: "VERIFIED_OFFICIAL_DOCUMENT"; officialUrl: string; documentUrl: string };
+  let officialIdentityPage: (OfficialIdentityPage & { observedAt: number; officialDocumentProof: OfficialDocumentProof }) | undefined;
+  let officialIdentityDocument: { url: string; html: string; officialDocumentProof: OfficialDocumentProof } | undefined;
+  function discardStaleOfficialIdentity(currentUrl: string) {
+    if (officialIdentityPage && input.venueOfficialUrl &&
+        [new URL(input.venueOfficialUrl).origin, new URL(officialIdentityPage.url).origin].includes(new URL(currentUrl).origin) &&
+        !sameDiscoveryMainDocument(officialIdentityPage.url, currentUrl)) officialIdentityPage = undefined;
+  }
   const navigationOrigins = new Set(initialUrls.map(value => new URL(value).origin));
   const passfactory = createPassfactoryPublicReadPolicy();
   const uschedule = createUSchedulePublicReadPolicy();
@@ -311,8 +317,10 @@ export async function createCourseDiscoveryBrowserSession(input: {
       if (!isSafeRecipeUrl(requestUrl) && !isSafeBrowserAssetUrl(requestUrl, request.resourceType(), request.method())) throw new Error("UNSAFE_URL");
       const url = new URL(requestUrl);
       if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+        const priorOfficial = bookingParents.authorizeParent(request.url());
         bookingParents.beginDocument(request.url());
-        if (input.venueOfficialUrl && url.origin === new URL(input.venueOfficialUrl).origin) {
+        if (priorOfficial?.kind === "VERIFIED_OFFICIAL_DOCUMENT" || input.venueOfficialUrl && url.origin === new URL(input.venueOfficialUrl).origin ||
+            officialIdentityDocument && sameDiscoveryMainDocument(officialIdentityDocument.url, url.href)) {
           officialIdentityDocument = undefined; officialIdentityPage = undefined;
         }
         if (nativeProxy && request.redirectedFrom()) {
@@ -427,10 +435,11 @@ export async function createCourseDiscoveryBrowserSession(input: {
       // Retain only the bounded, successfully read official document. Its raw
       // semantic markup is reproducible on warm reads; page.content() contains
       // transient browser mutations and must not define the saved witness.
-      if (request.isNavigationRequest() && request.frame() === page.mainFrame() && input.venueOfficialUrl &&
-          url.origin === new URL(input.venueOfficialUrl).origin && reply.status >= 200 && reply.status < 300 &&
+      const officialDocumentProof = bookingParents.authorizeParent(url.href);
+      if (request.isNavigationRequest() && request.frame() === page.mainFrame() && officialDocumentProof?.kind === "VERIFIED_OFFICIAL_DOCUMENT" &&
+          reply.status === 200 &&
           reply.buffer.length <= 600_000 && /^text\/html(?:;|$)/iu.test(reply.headers["content-type"] ?? ""))
-        officialIdentityDocument = { url: url.href, html: reply.buffer.toString("utf8") };
+        officialIdentityDocument = { url: url.href, html: reply.buffer.toString("utf8"), officialDocumentProof };
       if (["GET", "HEAD"].includes(method) && ["document", "xhr", "fetch"].includes(request.resourceType()) &&
           reply.status >= 200 && reply.status < 400 && isSafeRecipeUrl(url.href)) allowedNavigation.add(url.href);
       responseBytes += reply.buffer.length;
@@ -760,6 +769,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     }
     const text = sanitizeResponderText(await page.locator("body").innerText({ timeout: 1000 })).slice(0, 16_000);
     const blockedAccess = isActiveBrowserAccessChallenge(text, await page.title());
+    discardStaleOfficialIdentity(currentUrl);
     if (!blockedAccess && officialIdentityDocument && sameDiscoveryMainDocument(officialIdentityDocument.url, currentUrl)) {
         const visibleEvidence = await page.evaluate(() => {
           const headings: string[] = [], linkUrls: string[] = [], addressTexts: string[] = [];
@@ -1099,6 +1109,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       if (action.action === "inspect_adapter") {
         if (!isSafeRecipeUrl(action.url) || !allowedNavigation.has(new URL(action.url).href)) throw new Error("UNOBSERVED_NAVIGATION");
         if (!input.venueName || input.venueName.length > 200) throw new Error("MISSING_VENUE_IDENTITY");
+        discardStaleOfficialIdentity(normalizeDiscoveryNavigationUrl(page.url()));
         const result = await (deps.inspectAdapter ?? inspectExistingAdapter)({ officialUrl: input.venueOfficialUrl, bookingUrl: action.url, venueName: input.venueName, venueAddress: input.venueAddress, timeZone: input.timeZone ?? "UTC" },
           { venueMatches: venueProofMatches, requestLease: deps.requestLease ?? runWithProviderRequestLease, deadlineAt: input.deadlineAt,
             ...(officialIdentityPage && Date.now() - officialIdentityPage.observedAt <= 5 * 60_000 ? { officialIdentityPage } : {}) });

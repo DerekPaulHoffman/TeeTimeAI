@@ -208,6 +208,52 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       expect(fetcher).toHaveBeenCalledTimes(2);
     } finally { await session.close(); }
   }, 25_000);
+  it("admits the actual unlabeled play iframe after following the official Tee Times page without inventing its book destination", async () => {
+    const official = "https://example.org/", teeTimes = `${official}tee-times/`;
+    const play = "https://public-course.play.teeitup.com/", book = "https://public-course.book.teeitup.com/";
+    const hidden = "https://hidden-course.play.teeitup.com/";
+    const fetcher = vi.fn(async value => {
+      const url = String(value);
+      const html = url === official ? `<h1>Example Golf Club</h1><a href="${teeTimes}">Book Now</a>` : url === teeTimes
+        ? `<h1>Book a Tee Time</h1><iframe src="${play}" style="width:400px;height:200px"></iframe><iframe hidden src="${hidden}"></iframe>`
+        : url === play ? `<h1>Public tee times</h1><a href="${book}">View tee times</a>` : "<h1>Official booking availability</h1>";
+      return new Response(`<html><body>${html}</body></html>`, { headers: { "content-type": "text/html" } });
+    }) as unknown as typeof fetch;
+    const session = await createCourseDiscoveryBrowserSession({ initialUrls: [official], venueOfficialUrl: official, deadlineAt: new Date(Date.now() + 25_000) }, {
+      fetch: fetcher, launchBrowser: () => chromium.launch({ executablePath, headless: true }),
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      const home = await session.execute({ id: 1, action: "open", url: official });
+      const booking = await session.execute({ id: 2, action: "click", target: home.controls.find(control => control.href === teeTimes)!.target });
+      expect(booking).toMatchObject({ url: teeTimes, navigationStatus: 200, frames: [{ url: play, source: "OFFICIAL_IFRAME_SRC" }] });
+      expect(fetcher.mock.calls.map(args => String(args[0]))).toEqual([official, teeTimes]);
+      await expect(session.execute({ id: 3, action: "open", url: book })).rejects.toThrow("UNOBSERVED_NAVIGATION");
+      await expect(session.execute({ id: 4, action: "open", url: hidden })).rejects.toThrow("UNOBSERVED_NAVIGATION");
+      const standalone = await session.execute({ id: 5, action: "open", url: play });
+      expect(standalone.controls).toContainEqual(expect.objectContaining({ href: book, name: "View tee times" }));
+      expect(fetcher.mock.calls.map(args => String(args[0]))).toEqual([official, teeTimes, play]);
+      const observedBook = await session.execute({ id: 6, action: "open", url: book });
+      expect(observedBook.text).toContain("Official booking availability");
+    } finally { await session.close(); }
+  }, 30_000);
+  it.each(["unverified client URL", "failed document"])("does not expose a new play frame using an old or unsuccessful main-document response: %s", async scenario => {
+    const official = "https://example.org/", play = "https://public-course.play.teeitup.com/";
+    const html = `<html><body><h1>Public golf</h1><iframe src="${play}" style="width:400px;height:200px"></iframe>` +
+      (scenario === "unverified client URL" ? '<script>history.replaceState(null,"","/unverified-booking-page");</script>' : "") + "</body></html>";
+    const fetcher = vi.fn(async () => new Response(html, { status: scenario === "failed document" ? 403 : 200,
+      headers: { "content-type": "text/html" } })) as unknown as typeof fetch;
+    const session = await createCourseDiscoveryBrowserSession({ initialUrls: [official], venueOfficialUrl: official, deadlineAt: new Date(Date.now() + 20_000) }, {
+      fetch: fetcher, launchBrowser: () => chromium.launch({ executablePath, headless: true }),
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      const snapshot = await session.execute({ id: 1, action: "open", url: official });
+      expect(snapshot.frames).not.toContainEqual(expect.objectContaining({ url: play, source: "OFFICIAL_IFRAME_SRC" }));
+      expect(fetcher).toHaveBeenCalledOnce();
+      await expect(session.execute({ id: 2, action: "open", url: play })).rejects.toThrow("UNOBSERVED_NAVIGATION");
+    } finally { await session.close(); }
+  }, 25_000);
   it("loads observed public versioned scripts while blocking credential-bearing companions", async () => {
     const official = "https://example.org/", asset = "https://example.org/wp-includes/js/dist/hooks.min.js?ver=f0f188028580e8dc1255";
     const denied = `${asset}&token=private`;

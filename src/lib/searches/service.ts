@@ -58,6 +58,7 @@ import { DEFAULT_SIMULATOR_DURATION_MINUTES } from "@/lib/searches/search-mode";
 import { getSimulatorVenueForDemand } from "@/lib/places/simulator-google";
 import type { CourseCandidate } from "@/lib/places/google";
 import { enrollDiscoveryPilotInTransaction } from "@/lib/course-discovery/enrollment";
+import { dashboardDiscoveryJobSelect, getDashboardDiscoveryStatus } from "@/lib/searches/dashboard-discovery-status";
 
 const SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE = 0.06;
 const QUEUED_SEARCH_STATUSES = ["ACTIVE", "PAUSED"] as const;
@@ -742,16 +743,46 @@ export async function listTeeSearchesForUser(userId: string) {
       probesBySearch.set(probe.teeSearchId, probes);
     }
 
-    return searches.map((search) =>
-      projectCurrentCustomerMatches(
+    // Only active owner-selected requests need this small read-only status.
+    // The product permits three alerts of five courses; cap legacy overflow too.
+    const discoveryTargets = searches.filter(search => search.status === "ACTIVE")
+      .flatMap(search => search.preferences.map(preference => ({ search, preference })))
+      .slice(0, MAX_QUEUED_SEARCHES_PER_USER * MAX_COURSE_PREFERENCES);
+    const discoveryJobs = new Map<string,
+      Prisma.CourseDiscoveryJobGetPayload<{ select: typeof dashboardDiscoveryJobSelect }> | null>();
+    await Promise.all(discoveryTargets.map(async ({ search, preference }) => {
+      const job = await transaction.courseDiscoveryJob.findFirst({
+        where: {
+          targetKey: preference.offeringId ? `offering:${preference.offeringId}` : `course:${preference.courseId}`,
+          courseId: preference.courseId, offeringId: preference.offeringId,
+          AND: [
+            { request: { path: ["demand", "searchId"], equals: search.id } },
+            { request: { path: ["demand", "alertGeneration"], equals: search.alertGeneration } },
+          ],
+        },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        select: dashboardDiscoveryJobSelect,
+      });
+      discoveryJobs.set(JSON.stringify([search.id, preference.courseId, preference.offeringId]), job);
+    }));
+
+    return searches.map((search) => {
+      const current = projectCurrentCustomerMatches(
         projectCurrentCheckEvidence({
           ...search,
           probes: probesBySearch.get(search.id) ?? [],
         }),
         completedLocalReaderSources,
         providerObservationFences,
-      ),
-    );
+      );
+      return { ...current, preferences: current.preferences.map(preference => ({
+        ...preference,
+        discoveryStatus: getDashboardDiscoveryStatus(current, preference,
+          discoveryJobs.get(JSON.stringify([search.id, preference.courseId, preference.offeringId])) ?? null,
+          current.probes.find(probe => probe.courseId === preference.courseId &&
+            (current.mode !== "SIMULATOR" || probe.offeringId === preference.offeringId))),
+      })) };
+    });
   });
 }
 

@@ -61,12 +61,14 @@ type RecordEntry = {
   failureCode?: string; failure?: Error;
   generation: DocumentGeneration; networkIdentityRevision?: number; cancellation: AbortController; handlerDone: boolean; responsePaused: boolean;
   retirementAck?: Promise<void>;
+  retirementAcks?: Partial<Record<"request" | "response", Promise<void>>>;
   redirect?: { status: number; target: string }; redirectChildId?: string;
   adapter: NativeReadRequest; response: ReturnType<typeof pending<NativeReadResponse | Error>>;
 };
 type DocumentGeneration = { id: number; retired: boolean; loaderId?: string };
 type NetworkIdentity = { revision: number; loaderId: string; frameId?: string; url: string; method: string; kind: string; kindKnown: boolean };
 type PendingInitialPause = { id: string; generation: DocumentGeneration; retired: boolean;
+  networkId: string; url: string; method: string; kind: string; networkFailed: ReturnType<typeof pending<void>>;
   retirementAck?: Promise<void>; cancelled: ReturnType<typeof pending<void>> };
 type NativeRecordOwner = { closed: boolean };
 // Only adapters minted by this controller have redirect provenance. A model,
@@ -190,17 +192,32 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
     if (isNativeReadTerminalFailure(record.failure)) record.cancellation.abort(record.failure);
     record.response.settle(record.failure);
   };
-  const abortRetiredPause = (record: RecordEntry, command: Promise<unknown>) => {
-    record.retirementAck = bounded(command, "NATIVE_REDIRECT_ABORT_TIMEOUT").then(() => {
-      record.paused = false; record.responsePaused = false;
+  const abortRetiredPause = (record: RecordEntry, stage: "request" | "response", command: () => Promise<unknown>) => {
+    // The boundary and a late response event can observe the same pause while
+    // another abort ACK is pending. Dispatch one command for that exact stage;
+    // a genuinely later response pause still needs its own bounded ACK.
+    const acks = record.retirementAcks ??= {};
+    const existing = acks[stage];
+    if (existing) return existing;
+    const ack = bounded(Promise.resolve().then(command), "NATIVE_REDIRECT_ABORT_TIMEOUT").then(() => {
+      if (stage === "request") record.paused = false;
+      else record.responsePaused = false;
       if (!record.complete) failRecord(record, "NATIVE_READ_SUPERSEDED");
     });
-    return record.retirementAck;
+    acks[stage] = ack; record.retirementAck = ack;
+    return ack;
   };
   const abortInitialPause = (pause: PendingInitialPause) => {
     pause.retired = true;
-    pause.retirementAck ??= bounded(cdp.send("Fetch.failRequest", { requestId: pause.id, errorReason: "BlockedByClient" }),
-      "NATIVE_REDIRECT_ABORT_TIMEOUT").then(() => { pause.cancelled.settle(); });
+    if (!pause.retirementAck) {
+      // stopLoading can invalidate a newly arriving retired interception. A
+      // rejected command proves nothing; await either its actual ACK or the
+      // independently correlated terminal Network event, under the same cap.
+      const acknowledged = Promise.resolve().then(() => cdp.send("Fetch.failRequest", { requestId: pause.id, errorReason: "BlockedByClient" }))
+        .then(() => {}, () => new Promise<never>(() => {}));
+      pause.retirementAck = bounded(Promise.race([acknowledged, pause.networkFailed.promise]),
+        "NATIVE_REDIRECT_ABORT_TIMEOUT").then(() => { pause.cancelled.settle(); });
+    }
     return pause.retirementAck;
   };
   cdp.on("Network.requestWillBeSent", event => {
@@ -214,6 +231,11 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
   cdp.on("Network.loadingFailed", event => {
     for (const record of records.values()) if (record.networkId === event.requestId && !record.complete && !record.failed)
       failRecord(record, record.generation.retired ? "NATIVE_READ_SUPERSEDED" : "NATIVE_REDIRECT_NETWORK_FAILED");
+    const identity = networkIdentities.get(event.requestId);
+    for (const pause of initialPauses.values()) if (pause.generation.retired && pause.networkId === event.requestId && identity &&
+      identity.frameId === rootFrameId && identity.url === pause.url && identity.method === pause.method && identity.kindKnown &&
+      (identity.kind === pause.kind || [identity.kind, pause.kind].every(kind => kind === "xhr" || kind === "fetch")) &&
+      loaderOwners.get(identity.loaderId) === pause.generation) pause.networkFailed.settle();
   });
   options.signal?.addEventListener("abort", onAbort, { once: true });
   cdp.on("Fetch.requestPaused", event => {
@@ -262,7 +284,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
               record.kind !== resourceKinds[event.resourceType] || event.frameId !== rootFrameId || record.responseStarted)
             { await close("NATIVE_REDIRECT_RESPONSE_MISMATCH"); return; }
           record.responseStarted = true; record.responsePaused = true;
-          await abortRetiredPause(record, reject());
+          await abortRetiredPause(record, "response", reject);
           return;
         }
         // Chrome can terminate a paused read while it waits for a provider
@@ -376,7 +398,8 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
       let requestGeneration = generation;
       let requestIdentityRevision: number | undefined;
       let denyResourceKind = false;
-      pendingInitialPause = { id: event.requestId, generation: parent?.generation ?? generation, retired: false, cancelled: pending() };
+      pendingInitialPause = { id: event.requestId, generation: parent?.generation ?? generation, retired: false, cancelled: pending(),
+        networkId: event.networkId!, url: event.request.url, method: event.request.method, kind, networkFailed: pending() };
       initialPauses.set(event.requestId, pendingInitialPause);
       if (pendingInitialPause.generation.retired) { await abortInitialPause(pendingInitialPause); return; }
       if (generationTracking) {
@@ -555,12 +578,13 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         await Promise.all([...initialPauses.values()].filter(pause => pause.generation === previous).map(abortInitialPause));
         await Promise.all(old.filter(record => record.paused || record.responsePaused).map(async record => {
           if (record.complete || record.failed) return;
-          await abortRetiredPause(record, cdp.send("Fetch.failRequest", { requestId: record.id, errorReason: "BlockedByClient" }));
+          await abortRetiredPause(record, record.responsePaused ? "response" : "request",
+            () => cdp.send("Fetch.failRequest", { requestId: record.id, errorReason: "BlockedByClient" }));
         }));
         await bounded(cdp.send("Page.stopLoading"), "NATIVE_REDIRECT_DRAIN_TIMEOUT");
         await bounded((async () => {
           while ([...initialPauses.values()].some(pause => pause.generation === previous) ||
-            [...records.values()].some(record => record.generation === previous && (!record.handlerDone || !record.complete && !record.failed))) {
+            [...records.values()].some(record => record.generation === previous && (record.responsePaused || !record.handlerDone || !record.complete && !record.failed))) {
             if (closed || options.signal?.aborted) throw new Error("NATIVE_REDIRECT_CLOSED");
             await new Promise(resolve => setTimeout(resolve, 5));
           }

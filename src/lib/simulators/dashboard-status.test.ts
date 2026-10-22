@@ -25,6 +25,31 @@ function fixture(outcome?: string) {
 }
 
 describe("simulator dashboard status", () => {
+  it.each([undefined, "NEEDS_ADAPTER", "FETCH_FAILED"])("does not promise pending support or retries for terminal discovery over %s", outcome => {
+    const input = fixture(outcome);
+    const status = getSimulatorDashboardStatus({ ...input,
+      discoveryStatus: { state: "TERMINAL_FAILURE", completedAt: now } });
+    expect(status.kind).toBe("UNCONFIRMED");
+    expect(status.label).toBe("Automatic availability not confirmed");
+    expect(status.detail).toContain("Your alert remains active");
+    expect(status.officialUrl).toBe(input.offering.bookingUrl);
+    expect(status.label + status.detail).not.toMatch(/will retry|pending|Adding|No matching|not public|account/i);
+    expect(getSimulatorAlertSummary([status])).toBe(status.label);
+    expect(getSimulatorAlertSummary([status, getSimulatorDashboardStatus(fixture("NO_MATCH"))]))
+      .toBe("Some simulator availability not confirmed");
+  });
+
+  it("preserves a newer successful simulator observation and factual final access guidance", () => {
+    const discoveryStatus = { state: "TERMINAL_FAILURE" as const, completedAt: new Date(observedAt.getTime() - 1) };
+    expect(getSimulatorDashboardStatus({ ...fixture("NO_MATCH"), discoveryStatus }).kind).toBe("NO_MATCH");
+    expect(getSimulatorDashboardStatus({ ...fixture("MATCH_FOUND"), discoveryStatus, currentMatchCount: 1 }).kind).toBe("AVAILABLE");
+    expect(getSimulatorDashboardStatus({ ...fixture("IDENTITY_FINAL"), discoveryStatus }).kind).toBe("UNAVAILABLE");
+    for (const alertStatus of ["PAUSED", "CANCELLED", "COMPLETED"]) {
+      expect(getSimulatorDashboardStatus({ ...fixture("FETCH_FAILED"), discoveryStatus, alertStatus }).kind)
+        .toBe(alertStatus === "PAUSED" ? "PAUSED" : "STOPPED");
+    }
+  });
+
   it("distinguishes the first pending check from persisted support work", () => {
     expect(getSimulatorDashboardStatus(fixture()).label).toBe("Simulator check pending");
     const input = fixture("NEEDS_ADAPTER");

@@ -1,4 +1,7 @@
 import { parse, type DefaultTreeAdapterMap } from "parse5";
+import { createHash } from "node:crypto";
+import { parseUScheduleLocationSource, readUScheduleLocationCatalog, USCHEDULE_LOCATION_CLIENT,
+  type UScheduleOfficialLocationProof } from "@/lib/simulators/providers/uschedule-location-source";
 
 type Node = DefaultTreeAdapterMap["node"];
 type Element = DefaultTreeAdapterMap["element"];
@@ -36,13 +39,43 @@ function validDate(value: string, format: "US" | "ISO") {
  * are never authorized. Each instance is bound to successfully read public HTML
  * and its current rental options; it does not store or forward session cookies.
  */
-export function createUSchedulePublicReadPolicy() {
+export function createUSchedulePublicReadPolicy(context: { officialLocation?: UScheduleOfficialLocationProof } = {}) {
   const sources = new Map<string, Map<string, Set<string>>>();
+  const locationSources = new Map<string, { filters: Map<string, Set<string>>; clientUrl: string }>();
+  const verifiedClients = new Set<string>();
+  const scopedBooking = (value: string) => {
+    const legacy = bookingUrl(value);
+    if (legacy) return legacy;
+    const parsed = parseUScheduleLocationSource(value), expected = context.officialLocation && parseUScheduleLocationSource(context.officialLocation.entryUrl);
+    return parsed && expected && parsed.canonicalUrl === expected.canonicalUrl && parsed.locationId === expected.locationId ? new URL(value) : undefined;
+  };
+  const locationReady = (url: string) => {
+    const value = locationSources.get(url); return value && verifiedClients.has(value.clientUrl) ? value : undefined;
+  };
   return {
+    publicClientUrl(value: string) { return locationSources.get(value)?.clientUrl; },
+    locationReadReady(value: string) { return Boolean(locationReady(value)); },
     observeResponse(value: string, method: string, status: number, contentType: string, body: string) {
-      const url = bookingUrl(value);
+      if ([...locationSources.values()].some(source => source.clientUrl === value)) {
+        verifiedClients.delete(value);
+        if (method === "GET" && status === 200 && /^(?:application|text)\/javascript(?:;|$)/iu.test(contentType) && Buffer.byteLength(body) <= 600_000 &&
+            createHash("sha256").update(body).digest("hex") === USCHEDULE_LOCATION_CLIENT.sha256) { verifiedClients.add(value); return true; }
+        return false;
+      }
+      const url = scopedBooking(value);
+      if (url && method === "GET") locationSources.delete(url.href);
       if (!url || method !== "GET" || status !== 200 || !/^text\/html(?:;|$)/iu.test(contentType) || Buffer.byteLength(body) > 2_000_000) return false;
       sources.delete(url.href);
+      if (context.officialLocation) {
+        try {
+          const catalog = readUScheduleLocationCatalog(body, url.href, context.officialLocation);
+          locationSources.set(url.href, { clientUrl: catalog.clientUrl, filters: new Map([
+            ["location_id", new Set([context.officialLocation.locationId])], ["service_id", new Set([catalog.service.serviceId])],
+            ["length", new Set(catalog.durations.map(String))],
+          ]) });
+          return true;
+        } catch { return false; } // Location mode cannot fall back to broader legacy filters.
+      }
       const nodes = elements(parse(body));
       if (nodes.length > 20_000) return false;
       const options = (id: string) => {
@@ -67,8 +100,8 @@ export function createUSchedulePublicReadPolicy() {
       if (Buffer.byteLength(body) > 2048 || !/^application\/json(?:;\s*charset=utf-8)?$/iu.test(headers.get("content-type") ?? "") ||
           headers.get("origin") !== url.origin || headers.has("next-action") ||
           [...headers.keys()].some(key => /^(?:authorization|proxy-authorization|cookie|x-api-key|api-key|x-auth-token)$/iu.test(key))) return false;
-      const source = bookingUrl(headers.get("referer") ?? "");
-      if (!source || !sources.has(source.href) || url.origin !== source.origin || url.search || url.hash || url.port || url.username || url.password) return false;
+      const source = scopedBooking(headers.get("referer") ?? "");
+      if (!source || !sources.has(source.href) && !locationReady(source.href) || url.origin !== source.origin || url.search || url.hash || url.port || url.username || url.password) return false;
       let value: unknown;
       try { value = JSON.parse(body); } catch { return false; }
       if (url.pathname === `${source.pathname}/getavailabledates`) {
@@ -78,7 +111,8 @@ export function createUSchedulePublicReadPolicy() {
       if (url.pathname !== `${source.pathname}/changefield` || !Array.isArray(value) || value.length !== 1 || !value[0] || typeof value[0] !== "object") return false;
       const item = value[0] as Record<string, unknown>;
       if (Object.keys(item).length !== 2 || typeof item.Name !== "string" || typeof item.Value !== "string") return false;
-      return item.Name === "start_date" ? validDate(item.Value, "US") : sources.get(source.href)!.get(item.Name)?.has(item.Value) === true;
+      return item.Name === "start_date" ? validDate(item.Value, "US") :
+        (sources.get(source.href)?.get(item.Name) ?? locationReady(source.href)?.filters.get(item.Name))?.has(item.Value) === true;
     },
     addReadHeaders(url: URL, method: string, original: Record<string, string>, headers: Headers, body: string) {
       if (url.hostname !== "clients.uschedule.com" || method !== "POST") return true;
