@@ -4,14 +4,25 @@ type SchemaField = { path: string; type: string; examples?: Array<string | numbe
 export type PublicResponseSchema = { kind: "SAMPLED_SCHEMA_ONLY"; fields: SchemaField[]; truncated: boolean; nodesVisited: number };
 const privateKey = /password|secret|token|cookie|session|credential|authorization|api.?key|email|phone|contact|card|customer|user|person|attendee|member|profile|account|notes?|payment|query/iu;
 const identityKey = /(?:^id$|ids$|Id$|_id$|uuid|identifier)/u;
-const dateKey = /^(?:date|startDate|endDate|startTime|endTime|startsAt|endsAt|startAt|endAt|timestamp|datetime|time_iso|utc_datetime|real_datetime_of_slot)$/iu;
+const dateKey = /^(?:date|startDate|endDate|time|startTime|endTime|startsAt|endsAt|startAt|endAt|timestamp|datetime|time_iso|utc_datetime|real_datetime_of_slot)$/iu;
 const numberKey = /^(?:duration|durationMinutes|players|capacity|maxPartySize|availableSpots|spots|spotsLeft|year|month|day)$/iu;
 const flagKey = /^(?:available|isAvailable|hasNextPage|hasMore|complete|isComplete|success|is_held|is_requestable)$/iu;
 const statusKey = /^(?:status|statusCode|httpStatus)$/iu;
 const errorKey = /^(?:error|errorMessage)$/iu;
 const successValue = /^(?:SUCCESS|success|Success|OK|ok|Ok)$/u;
 const publicSlotType = /^(?:book|request)$/u;
+const publicRentalLabelKey = /^(?:public_time_slot_description|public_description_title|publicTimeSlotDescription|publicDescriptionTitle)$/u;
 const dateValue = /^(?:\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:?\d{2})?)?|\d{1,2}:\d{2}(?::\d{2})?(?:\s?[AP]M)?)$/iu;
+function publicRentalLabelExample(key: string, value: string) {
+  // Only explicitly public resource descriptors can reveal text examples.
+  // Generic names, titles, descriptions and identifiers remain structural.
+  return publicRentalLabelKey.test(key) && value.length <= 120 && value === value.trim() &&
+    /^[\p{L}\p{N}][\p{L}\p{N} '&().,/#-]*$/u.test(value) &&
+    /(?:^|\W)(?:simulators?|rentals?|bays?|rooms?)(?:\W|\d|$)/iu.test(value) &&
+    !/\b(?:members?[-\s]+only|lessons?|fittings?|leagues?|classes?|coaching|book|reserve|checkout|pay|purchase|login|password|email|phone|contact)\b/iu.test(value) &&
+    !/\b\d{3}[- .]?\d{3}[- .]?\d{4}\b|(?:^|\D)(?:\d[ -]?){12,18}\d(?:\D|$)|[A-Za-z0-9_-]{24,}/u.test(value) &&
+    (!/\b(?:multi[-\s]?sport|baseball|soccer|hockey|tennis)\b/iu.test(value) || /\bgolf\b/iu.test(value));
+}
 function numericExample(key: string, value: number) {
   if (statusKey.test(key) && Number.isSafeInteger(value) && (value === 0 || value === 1 || value >= 100 && value <= 599)) return value;
   if (!Number.isSafeInteger(value) || !numberKey.test(key)) return undefined;
@@ -78,6 +89,7 @@ export function publicResponseSchema(value: unknown): PublicResponseSchema {
         : statusKey.test(key) && successValue.test(item) ? item
         : key === "type" && publicSlotType.test(item) ? item
         : item.length <= 80 && dateKey.test(key) && dateValue.test(item) ? item
+        : publicRentalLabelExample(key, item) ? item
         : key === "__typename" && /^[A-Za-z_][A-Za-z0-9_]{0,79}$/u.test(item) ? item : undefined;
       record(path, "string", example); return;
     }

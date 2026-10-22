@@ -717,6 +717,18 @@ describe.runIf(existsSync(chromeExecutable))("isolated browser recipe replay", (
     expect(result.status).toBe("INCOMPLETE"); expect(result.slots).toEqual([]);
     expect(result.evidence.diagnostic).toEqual({ code: "UNSCOPED_REQUEST", url: "https://unscoped.example.org/slots.js", method: "GET", resourceType: "script" });
   }, 20_000);
+  it("reports the terminal control step when an earlier resource also failed", async () => {
+    const selected = recipe();
+    if (selected.engine !== "BROWSER_DOM") throw new Error("fixture");
+    selected.steps = [{ action: "select", selector: "#missing-players", value: "{{players}}", purpose: "PLAYERS" }];
+    const deps = browserDeps(html.replace("</body>", '<script src="https://unscoped.example.org/slots.js"></script></body>'));
+    const result = await executeAccessRecipe(selected, executionInput, deps);
+    expect(result).toMatchObject({ status: "FAILED", complete: false, slots: [], evidence: {
+      reason: "AMBIGUOUS_CONTROL", diagnostic: { code: "AMBIGUOUS_CONTROL", stepIndex: 0,
+        url: "https://example.org/tee-times", method: "GET", resourceType: "document" },
+    } });
+    expect(vi.mocked(deps.fetch!).mock.calls.every(([url]) => !String(url).includes("unscoped.example.org"))).toBe(true);
+  }, 20_000);
   it("skips decorative images without classifying complete DOM evidence as blocked", async () => {
     const result = await executeAccessRecipe(recipe(), executionInput, browserDeps(html.replace("</body>", '<img src="https://unscoped.example.org/map.png"></body>')));
     expect(result.status).toBe("AVAILABLE");

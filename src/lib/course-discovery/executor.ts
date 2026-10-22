@@ -22,6 +22,7 @@ import { canonicalPublicReadUrl } from "./public-request-url";
 import { canonicalCpsPublicUrl, cpsSessionKey, createCpsPublicSessionScope } from "./cps-public-navigation";
 import { executeExistingAdapterRecipe } from "./existing-adapter-executor";
 import { selectPublicFilter } from "./public-filter-control";
+import { trySelectPublicFilterOption } from "./public-filter-option";
 import { selectPublicCalendarDate } from "./public-calendar-control";
 import { applyPublicCalendarDate } from "./public-calendar-apply";
 import { hasInspectedPassfactoryDurationClients, isInspectedPassfactoryDurationClient, isPassfactoryDurationClientUrl, isPassfactoryAvailabilityRequest, isPassfactoryDurationContext,
@@ -369,11 +370,12 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
   const now = clock();
   let activity: { stepIndex?: number; url?: string; method?: string; resourceType?: string } = {};
   let failure: AccessExecutionDiagnostic | undefined;
+  let terminalFailure: AccessExecutionDiagnostic | undefined;
   let providerThrottled = false;
   const fail = (status: AccessExecutionResult["status"], reason: string): AccessExecutionResult => ({ status, complete: false,
     observedAt: clock().toISOString(), sourceUrl: recipe.source.bookingUrl, slots: [], evidence: { recipeHash: hashAccessRecipe(recipe),
       venueVerified: false, dateVerified: false, capacityVerified: false, durationVerified: false, completeVerified: false, reason,
-      diagnostic: failure ?? recipeExecutionDiagnostic(reason, activity) } });
+      diagnostic: terminalFailure ?? failure ?? recipeExecutionDiagnostic(reason, activity) } });
   if (input.timeZone !== recipe.source.timeZone || input.date < localParts(now, input.timeZone).slice(0, 10)) return fail("INCOMPLETE", "INVALID_REQUEST_DATE_OR_ZONE");
   const deadline = Math.min(deps.deadlineAt?.getTime() ?? Infinity, now.getTime() + 120_000);
   if (deadline <= now.getTime()) return fail("FAILED", "DEADLINE_EXCEEDED");
@@ -713,6 +715,10 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
         }
         let node = page.locator(step.selector);
         if (step.action === "waitFor") { await node.waitFor({ state: "visible" }); continue; }
+        if (step.action === "clickFilter" && step.purpose === "SELECT_FILTER" &&
+            await trySelectPublicFilterOption(node, expandRecipeTemplate(step.text, input), {
+              simulator: recipe.target.kind === "SIMULATOR" && recipe.engine !== "BROWSER_JSON",
+            })) continue;
         if (step.action === "clickFilter" && step.purpose === "OPEN_FILTER" && await node.count() === 1 &&
             await node.evaluate(element => element.tagName === "ARTICLE")) {
           selectedCatalogTile = await openPublicCatalogTile(node, catalogTiles, expandRecipeTemplate(step.text, input));
@@ -797,6 +803,10 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
           if (step.purpose === "SELECT_DATE") { selectedRequestedDate = true; selectedDateDay = node; }
         }
       }
+      // Subsequent response/proof checks are no longer executing the last
+      // control. Keep their resource diagnostic when a blocked read explains
+      // incomplete availability, without attributing it to that control.
+      activity = { url: canonicalCpsPublicUrl(page.url()), method: "GET", resourceType: "document" };
       await waitForAvailabilityResponse();
       await waitForQuietReads();
       await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
@@ -834,9 +844,13 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
       return normalize(recipe, input, second, clock());
     } finally { signal.removeEventListener("abort", stop); await redirectRouting?.close(); await context.close().catch(() => {}); }
   } catch (error) {
-    failure ??= recipeExecutionDiagnostic(error, activity);
+    // A queued resource may fail while the browser closes after a control
+    // error. Report the actual terminal step, rather than letting an ancillary
+    // request or its cleanup hide the error that ended this execution.
+    const terminalDiagnostic = recipeExecutionDiagnostic(error, activity);
+    terminalFailure = !providerThrottled && (activity.stepIndex !== undefined || !failure) ? terminalDiagnostic : undefined;
     const message = error instanceof Error ? error.message : "";
-    const reason = providerThrottled ? "PROVIDER_THROTTLED" : /^[A-Z_0-9]{1,80}$/u.test(message) ? message : failure.code;
+    const reason = providerThrottled ? "PROVIDER_THROTTLED" : /^[A-Z_0-9]{1,80}$/u.test(message) ? message : terminalDiagnostic.code;
     return fail(reason === "ACCESS_REQUIRED" ? "ACCESS_REQUIRED" : reason.startsWith("BROWSER_JSON_") || ["INVALID_SLOT_TIME", "AMBIGUOUS_OR_INVALID_LOCAL_TIME", "INCOMPLETE_COLLECTION", "INVALID_CAPACITY_OR_DURATION", "UNSETTLED_REQUESTS", "AMBIGUOUS_PROOF_FIELD", "RESOURCE_IDENTITY_MISMATCH", "AMBIGUOUS_RESOURCE_SCOPE", "INVALID_RESOURCE_SCOPE", "RESOURCE_SCOPE_NOT_CARD", "AVAILABILITY_RESPONSE_UNCONFIRMED", "AVAILABILITY_RESPONSE_FAILED", "UNVERIFIED_CLIENT_DURATION", "DURATION_PROOF_MISMATCH", "UNVERIFIED_PUBLIC_CATALOG_TILE", "PUBLIC_CATALOG_SELECTION_UNCONFIRMED"].includes(reason) ? "INCOMPLETE" : "FAILED",
       reason);
   } finally { cancellation.abort("EXECUTION_FINISHED"); requestQueue.dispose(); await browser?.close().catch(() => {}); await nativeProxy?.close(); }

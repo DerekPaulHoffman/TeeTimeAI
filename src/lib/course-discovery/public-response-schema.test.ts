@@ -82,4 +82,32 @@ describe("bounded public JSON schema evidence", () => {
     expect(publicResponseSchema({ rows: [{ type: "something_else" }] }).fields.find(field => field.path === "rows[].type")?.examples).toBeUndefined();
     expect(result.kind).toBe("SAMPLED_SCHEMA_ONLY");
   });
+  it("shows a bounded time field clock example while suppressing text and private subtree examples", () => {
+    for (const time of ["9:00 AM", "17:15", "17:15:00", "2026-10-23T17:15:00Z"]) {
+      expect(publicResponseSchema({ rows: [{ time }] }).fields.find(field => field.path === "rows[].time")?.examples).toEqual([time]);
+    }
+    for (const time of ["Jane Doe", "jane@example.com", "Call 555-123-4567", "9:00 AM book now", "9:00 AM\nprivate"]) {
+      expect(publicResponseSchema({ rows: [{ time }] }).fields.find(field => field.path === "rows[].time")?.examples).toBeUndefined();
+    }
+    const privateResult = JSON.stringify(publicResponseSchema({ customer: { time: "9:00 AM" }, account: { time: "17:15" } }));
+    expect(privateResult).not.toContain("9:00 AM"); expect(privateResult).not.toContain("17:15");
+  });
+  it("identifies exact explicitly public rental descriptor fields without exposing arbitrary descriptions", () => {
+    const result = publicResponseSchema({ rows: [{ public_time_slot_description: "Peak Rental", public_description_title: "Simulator Bay 2",
+      publicTimeSlotDescription: "Golf Room", publicDescriptionTitle: "Bay Rental", title: "PERSONAL TEXT", description: "PRIVATE TEXT" }],
+      customer: { public_time_slot_description: "Private Rental" } });
+    for (const [key, label] of Object.entries({ public_time_slot_description: "Peak Rental", public_description_title: "Simulator Bay 2",
+      publicTimeSlotDescription: "Golf Room", publicDescriptionTitle: "Bay Rental" })) {
+      expect(result.fields.find(field => field.path === `rows[].${key}`)?.examples).toEqual([label]);
+    }
+    for (const value of ["PERSONAL TEXT", "PRIVATE TEXT", "Private Rental"]) expect(JSON.stringify(result)).not.toContain(value);
+    expect(result.kind).toBe("SAMPLED_SCHEMA_ONLY");
+  });
+  it("suppresses unsafe or non-rental text even under an explicitly public descriptor key", () => {
+    for (const label of ["Jane Doe", "Rental jane@example.com", "Rental 555-123-4567", "Rental contact Jane", "Book Bay", "Private\nRental",
+      " Rental", "Rental ", "Members only Rental", "Soccer Bay", "Rental https://example.org", `Rental ${"x".repeat(121)}`, "Rental abcdefghijklmnopqrstuvwxyz0123456789",
+      "Rental 1234 5678 9012 3456", "Rental 1234-5678-9012-3456", "Rental 1234567890123456789"]) {
+      expect(publicResponseSchema({ public_time_slot_description: label }).fields[1]?.examples, label).toBeUndefined();
+    }
+  });
 });

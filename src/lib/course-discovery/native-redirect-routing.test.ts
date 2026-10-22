@@ -1,11 +1,11 @@
 // @vitest-environment node
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { chromium, type Page, type Route } from "@playwright/test";
 import { describe, expect, it, vi } from "vitest";
 import { authorizePublicClientReadHeaders, installNativeRedirectRouting, isCurrentPublicClientReadHeaders,
-  publicClientReadHeaderProofFailure, nativePublicClientPreflightMethod, isNativeReadSupersededFailure, isNativeReadTerminalFailure, type NativeReadRoute, type NativeRequestDiagnostic } from "./native-redirect-routing";
+  publicClientReadHeaderProofFailure, nativeSourceLoadingFailedCorsErrors, nativePublicClientPreflightMethod, isNativeReadSupersededFailure, isNativeReadTerminalFailure, type NativeReadRoute, type NativeRequestDiagnostic } from "./native-redirect-routing";
 import { continueNativeBrowserRead, isObservedNativeRedirect, isObservedNativeRedirectTarget, nativeReadPreflightMethod } from "./native-public-browser";
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
 
@@ -31,12 +31,19 @@ function playwrightRoute(test: Awaited<ReturnType<typeof installed>>) {
 }
 
 describe("native private public-client header proofs", () => {
+  it("projects exactly the installed structured CORS error union plus a closed OTHER category", () => {
+    const protocol = readFileSync("node_modules/playwright-core/types/protocol.d.ts", "utf8");
+    const match = protocol.match(/export type CorsError = ([^;]+);/u);
+    expect(match).not.toBeNull();
+    const allowed = match![1].split("|").map(value => JSON.parse(value));
+    expect(allowed).toHaveLength(28); expect(nativeSourceLoadingFailedCorsErrors).toEqual([...allowed, "OTHER"]);
+  });
   const documentUrl = "https://booking.example.org/calendar", scriptUrl = "https://booking.example.org/main.js";
   const apiUrl = "https://api.example.org/public/calendar", literal = "public-display-literal";
   const readHeaders = { Accept: "application/json", Authorization: "Bearer null", "x-api-key": literal };
   const scriptBody = `function intercept(r){return r.clone({setHeaders:merge({"x-api-key":"${literal}"},other)});}`;
-  async function prepared(ack?: ReturnType<typeof deferred<object>>) {
-    const test = await installed();
+  async function prepared(ack?: ReturnType<typeof deferred<object>>, afterRoute?: (route: NativeReadRoute) => Promise<void>) {
+    const test = await installed(undefined, undefined, afterRoute);
     const original = test.cdp.send.getMockImplementation()!;
     test.cdp.send.mockImplementation(async (name, value) => {
       if (name === "Fetch.getResponseBody" && value?.requestId === "public-script") return { body: scriptBody, base64Encoded: false };
@@ -127,19 +134,76 @@ describe("native private public-client header proofs", () => {
       expect(proof).not.toBeNull(); expect(route.request().resourceType()).toBe("other");
       expect(nativePublicClientPreflightMethod(route.request(), proof!)).toBe(method);
       expect(nativePublicClientPreflightMethod(test.routes[1].request(), proof!)).toBeNull();
-      test.events.get("Network.loadingFailed")!({ requestId: "original-get" });
+      test.events.get("Network.loadingFailed")!({ requestId: "original-get", canceled: true, errorText: "net::ERR_ABORTED" });
       // Reading diagnostics does not run the check, so the first failure is
       // recorded only by the existing queued/current validation below.
       expect(publicClientReadHeaderProofFailure(proof!)).toBeNull();
       expect(isCurrentPublicClientReadHeaders(proof!)).toBe(false);
       const firstFailure = publicClientReadHeaderProofFailure(proof!);
       expect(firstFailure).toMatchObject({ reason: "NATIVE_RECORD_NOT_CURRENT", nativeDocumentCurrent: true,
-        nativeRecordFailed: false, nativeRequestCancelled: false, nativeSourceIdentityCurrent: true, nativeSourceFailed: true });
+        nativeRecordFailed: false, nativeRequestCancelled: false, nativeSourceIdentityCurrent: true, nativeSourceFailed: true,
+        nativeSourceFetchRecordPresent: false, nativeSourceLoadingFailedCanceledPresent: true, nativeSourceLoadingFailedCanceled: true,
+        nativeSourceLoadingFailedErrorKind: "ABORTED", nativeSourceLoadingFailedCorsErrorPresent: false });
+      expect(firstFailure).not.toHaveProperty("nativeSourceFetchAdmitted");
       expect(firstFailure).not.toHaveProperty("url"); expect(JSON.stringify(firstFailure)).not.toContain(literal);
       await expect(route.continue()).rejects.toThrow("NATIVE_REDIRECT_CONTINUE_REJECTED");
       await test.guard.close(); expect(isCurrentPublicClientReadHeaders(proof!)).toBe(false);
       expect(publicClientReadHeaderProofFailure(proof!)).toEqual(firstFailure);
       expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "public-options")).toBe(false);
+    } finally { await test.guard.close(); }
+  });
+  it("retains the first exact source loadingFailed snapshot before mutating an admitted Fetch record", async () => {
+    const held = deferred<void>(), test = await prepared(undefined, async route => {
+      if (route.request().url() === apiUrl && route.request().method() === "GET") await held.promise;
+    });
+    try {
+      const get = await test.get(); await get.continue();
+      test.events.get("Network.requestWillBeSent")!({ requestId: "options-network", loaderId: "", type: "Other",
+        initiator: { type: "preflight", requestId: "actual-network" }, request: { url: apiUrl, method: "OPTIONS", headers: {} } });
+      test.request("public-options", { networkId: "options-network", resourceType: "Other", request: { url: apiUrl, method: "OPTIONS", headers: {
+        Origin: "https://booking.example.org", "Access-Control-Request-Method": "GET", "Access-Control-Request-Headers": "authorization,x-api-key" } } });
+      await vi.waitFor(() => expect(test.routes).toHaveLength(4));
+      const request = test.routes[3].request(), first = await authorizePublicClientReadHeaders(request), later = await authorizePublicClientReadHeaders(request);
+      expect(first).not.toBeNull(); expect(later).not.toBeNull();
+      test.events.get("Network.loadingFailed")!({ requestId: "unrelated-network", canceled: true, errorText: "net::ERR_ABORTED" });
+      expect(isCurrentPublicClientReadHeaders(first!)).toBe(true);
+      test.events.get("Network.loadingFailed")!({ requestId: "actual-network", canceled: false, errorText: "net::ERR_TIMED_OUT", corsErrorStatus: { corsError: "private-value" } });
+      expect(isCurrentPublicClientReadHeaders(first!)).toBe(false);
+      const observed = publicClientReadHeaderProofFailure(first!);
+      expect(observed).toMatchObject({ nativeSourceFetchRecordPresent: true, nativeSourceFetchAdmitted: true, nativeSourceFetchFailed: false,
+        nativeSourceFetchHandlerDone: false, nativeSourceLoadingFailedCanceledPresent: true, nativeSourceLoadingFailedCanceled: false,
+        nativeSourceLoadingFailedErrorKind: "TIMED_OUT", nativeSourceLoadingFailedCorsErrorPresent: true, nativeSourceLoadingFailedCorsError: "OTHER" });
+      test.events.get("Network.loadingFailed")!({ requestId: "actual-network", canceled: true, errorText: "private-value" });
+      expect(isCurrentPublicClientReadHeaders(later!)).toBe(false);
+      expect(publicClientReadHeaderProofFailure(later!)).toEqual(observed);
+      expect(JSON.stringify(observed)).not.toContain("private-value"); expect(JSON.stringify(observed)).not.toContain("actual-network");
+      expect(JSON.stringify(observed)).not.toContain("net::ERR_TIMED_OUT");
+    } finally { held.resolve(); await test.guard.close(); }
+  });
+  it.each([
+    { errorText: "net::ERR_BLOCKED_BY_CLIENT", kind: "BLOCKED_BY_CLIENT", cors: "HeaderDisallowedByPreflightResponse" },
+    { errorText: "net::ERR_FAILED", kind: "FAILED", cors: "MissingAllowOriginHeader" },
+    { errorText: "private person@example.org detail", kind: "OTHER", cors: "private person@example.org detail" }, { errorText: undefined, kind: "OTHER", cors: undefined },
+  ])("classifies only closed source error categories without inventing a missing canceled flag: %j", async ({ errorText, kind, cors }) => {
+    const test = await prepared();
+    try {
+      test.network("original-get", apiUrl, "Fetch", "GET", readHeaders);
+      test.events.get("Network.requestWillBeSent")!({ requestId: "options-network", loaderId: "", type: "Other",
+        initiator: { type: "preflight", requestId: "original-get" }, request: { url: apiUrl, method: "OPTIONS", headers: {} } });
+      test.request("public-options", { networkId: "options-network", resourceType: "Other", request: { url: apiUrl, method: "OPTIONS", headers: {
+        Origin: "https://booking.example.org", "Access-Control-Request-Method": "GET", "Access-Control-Request-Headers": "authorization,x-api-key" } } });
+      await vi.waitFor(() => expect(test.routes).toHaveLength(3));
+      const proof = await authorizePublicClientReadHeaders(test.routes[2].request()); expect(proof).not.toBeNull();
+      test.events.get("Network.loadingFailed")!({ requestId: "original-get", ...(errorText === undefined ? {} : { errorText }),
+        ...(cors === undefined ? {} : { corsErrorStatus: { corsError: cors, failedParameter: "private person@example.org detail" } }) });
+      expect(isCurrentPublicClientReadHeaders(proof!)).toBe(false);
+      const observed = publicClientReadHeaderProofFailure(proof!);
+      expect(observed).toMatchObject({ nativeSourceFetchRecordPresent: false, nativeSourceLoadingFailedCanceledPresent: false,
+        nativeSourceLoadingFailedErrorKind: kind, nativeSourceLoadingFailedCorsErrorPresent: cors !== undefined,
+        ...(cors === undefined ? {} : { nativeSourceLoadingFailedCorsError: cors.startsWith("private") ? "OTHER" : cors }) });
+      if (cors === undefined) expect(observed).not.toHaveProperty("nativeSourceLoadingFailedCorsError");
+      expect(observed).not.toHaveProperty("nativeSourceLoadingFailedCanceled");
+      expect(JSON.stringify(observed)).not.toContain("person@example.org"); expect(JSON.stringify(observed)).not.toContain("net::ERR_");
     } finally { await test.guard.close(); }
   });
   it("retains Network header aliases and independently rejects source key duplicates before source Fetch exists", async () => {

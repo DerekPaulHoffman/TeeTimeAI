@@ -96,9 +96,22 @@ type NativeRecordOwner = { closed: boolean; authorizeHeaders?: (record: RecordEn
 const nativeRequestRecords = new WeakMap<object, { record: RecordEntry; owner: NativeRecordOwner }>();
 export const nativePublicHeaderFailureFactKeys = ["nativeDocumentCurrent", "nativeRecordPresent", "nativeRecordFailed", "nativeRequestCancelled",
   "nativeGenerationCurrent", "nativeGenerationRetired", "nativeLoaderCurrent", "nativeIdentityPresent", "nativeIdentityRevisionCurrent",
-  "nativeIdentityFailed", "nativeSourceIdentityCurrent", "nativeSourceFailed", "nativeSourceGenerationCurrent", "nativeSourceLoaderCurrent", "nativeSourceRootFrame"] as const;
+  "nativeIdentityFailed", "nativeSourceIdentityCurrent", "nativeSourceFailed", "nativeSourceGenerationCurrent", "nativeSourceLoaderCurrent", "nativeSourceRootFrame",
+  "nativeSourceFetchRecordPresent", "nativeSourceFetchAdmitted", "nativeSourceFetchFailed", "nativeSourceFetchHandlerDone",
+  "nativeSourceLoadingFailedCanceledPresent", "nativeSourceLoadingFailedCanceled", "nativeSourceLoadingFailedCorsErrorPresent"] as const;
+export const nativeSourceLoadingFailedErrorKinds = ["ABORTED", "BLOCKED_BY_CLIENT", "TIMED_OUT", "FAILED", "OTHER"] as const;
+// Installed CDP's closed Network.CorsError union, plus unknown-safe fallback.
+export const nativeSourceLoadingFailedCorsErrors = ["DisallowedByMode", "InvalidResponse", "WildcardOriginNotAllowed", "MissingAllowOriginHeader",
+  "MultipleAllowOriginValues", "InvalidAllowOriginValue", "AllowOriginMismatch", "InvalidAllowCredentials", "CorsDisabledScheme", "PreflightInvalidStatus",
+  "PreflightDisallowedRedirect", "PreflightWildcardOriginNotAllowed", "PreflightMissingAllowOriginHeader", "PreflightMultipleAllowOriginValues",
+  "PreflightInvalidAllowOriginValue", "PreflightAllowOriginMismatch", "PreflightInvalidAllowCredentials", "PreflightMissingAllowExternal", "PreflightInvalidAllowExternal",
+  "InvalidAllowMethodsPreflightResponse", "InvalidAllowHeadersPreflightResponse", "MethodDisallowedByPreflightResponse", "HeaderDisallowedByPreflightResponse",
+  "RedirectContainsCredentials", "InsecureLocalNetwork", "InvalidLocalNetworkAccess", "NoCorsRedirectModeNotFollow", "LocalNetworkAccessPermissionDenied", "OTHER"] as const;
+type SourceLoadingFailure = Partial<Record<typeof nativePublicHeaderFailureFactKeys[number], boolean>> &
+  { nativeSourceLoadingFailedErrorKind: typeof nativeSourceLoadingFailedErrorKinds[number];
+    nativeSourceLoadingFailedCorsError?: typeof nativeSourceLoadingFailedCorsErrors[number] };
 export type NativePublicHeaderProofFailure = { reason: PublicClientReadHeaderFailureReason | "OWNER_CLOSED" | "CONTEXT_CHANGED" | "NATIVE_RECORD_NOT_CURRENT" } &
-  Partial<Record<typeof nativePublicHeaderFailureFactKeys[number], boolean>>;
+  Partial<Record<typeof nativePublicHeaderFailureFactKeys[number], boolean>> & Partial<Pick<SourceLoadingFailure, "nativeSourceLoadingFailedErrorKind" | "nativeSourceLoadingFailedCorsError">>;
 const publicHeaderProofs = new WeakMap<object, { record: RecordEntry; owner: NativeRecordOwner;
   current: () => boolean; method: "GET" | "HEAD" | null; firstFailure?: Readonly<NativePublicHeaderProofFailure> }>();
 function rejectPublicHeaderProof(proof: PublicClientReadHeaderProof, failure: NativePublicHeaderProofFailure) {
@@ -191,6 +204,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
   const records = new Map<string, RecordEntry>();
   const networkIdentities = new Map<string, NetworkIdentity>();
   const failedNetworkIdentities = new WeakSet<NetworkIdentity>();
+  const sourceLoadingFailures = new WeakMap<NetworkIdentity, Readonly<SourceLoadingFailure>>();
   const pendingPreflightIdentities = new Map<string, PendingPreflightIdentity>();
   const preflightSources = new Set<NetworkIdentity>();
   const networkWaiters = new Map<string, ReturnType<typeof pending<void>>>();
@@ -238,7 +252,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
       nativeIdentityFailed: Boolean(identity && failedNetworkIdentities.has(identity)),
       ...(source ? { nativeSourceIdentityCurrent: networkIdentities.get(source.id) === source, nativeSourceFailed: failedNetworkIdentities.has(source),
         nativeSourceGenerationCurrent: source.generation === generation, nativeSourceLoaderCurrent: source.loaderId === committedDocument?.loaderId && loaderOwners.get(source.loaderId) === generation,
-        nativeSourceRootFrame: source.frameId === rootFrameId } : {}) };
+        nativeSourceRootFrame: source.frameId === rootFrameId, ...sourceLoadingFailures.get(source) } : {}) };
   };
   const currentHeaderContext = () => {
     const document = committedDocument?.record;
@@ -505,6 +519,23 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
     for (const [id, pending] of pendingPreflightIdentities) if (pending.sourceNetworkId === event.requestId) bindPendingPreflight(id, pending, identity);
   });
   cdp.on("Network.loadingFailed", event => {
+    // Snapshot only the exact current identity's FIRST terminal event, before
+    // failRecord changes its native Fetch state. No event text or IDs escape.
+    const failedIdentity = networkIdentities.get(event.requestId);
+    if (failedIdentity && !sourceLoadingFailures.has(failedIdentity)) {
+      const sourceRecord = [...records.values()].find(record => record.networkId === failedIdentity.id &&
+        record.networkIdentityRevision === failedIdentity.revision && record.generation === failedIdentity.generation);
+      const errorKind = event.errorText === "net::ERR_ABORTED" ? "ABORTED" : event.errorText === "net::ERR_BLOCKED_BY_CLIENT" ? "BLOCKED_BY_CLIENT"
+        : event.errorText === "net::ERR_TIMED_OUT" ? "TIMED_OUT" : event.errorText === "net::ERR_FAILED" ? "FAILED" : "OTHER";
+      const corsError = event.corsErrorStatus?.corsError;
+      sourceLoadingFailures.set(failedIdentity, Object.freeze({ nativeSourceFetchRecordPresent: Boolean(sourceRecord),
+        ...(sourceRecord ? { nativeSourceFetchAdmitted: sourceRecord.admitted, nativeSourceFetchFailed: sourceRecord.failed,
+          nativeSourceFetchHandlerDone: sourceRecord.handlerDone } : {}), nativeSourceLoadingFailedCanceledPresent: typeof event.canceled === "boolean",
+        ...(typeof event.canceled === "boolean" ? { nativeSourceLoadingFailedCanceled: event.canceled } : {}),
+        nativeSourceLoadingFailedErrorKind: errorKind, nativeSourceLoadingFailedCorsErrorPresent: event.corsErrorStatus !== undefined,
+        ...(event.corsErrorStatus !== undefined ? { nativeSourceLoadingFailedCorsError:
+          typeof corsError === "string" && nativeSourceLoadingFailedCorsErrors.includes(corsError) ? corsError : "OTHER" } : {}) }));
+    }
     for (const record of headerScripts.keys()) if (record.networkId === event.requestId && witnessedHeaderScripts.has(record)) headerContext?.scope.invalidate();
     for (const [id, pending] of pendingPreflightIdentities) if (id === event.requestId || pending.sourceNetworkId === event.requestId) pending.invalid = true;
     for (const record of records.values()) if (record.networkId === event.requestId && !record.complete && !record.failed)

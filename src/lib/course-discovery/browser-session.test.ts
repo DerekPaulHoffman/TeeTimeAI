@@ -35,6 +35,18 @@ describe("discovery browser public protocol", () => {
     expect(JSON.stringify(observed)).not.toContain("private-value");
     expect(publicHeaderFailureDiagnostic("HEADER_PROOF_REVOKED_AFTER_QUEUE", "GET", {}, null,
       { reason: "private-value" } as never).privateProofFailureReason).toBe("UNOBSERVED");
+    const loadingFailed = publicHeaderFailureDiagnostic("HEADER_PROOF_REVOKED_AFTER_QUEUE", "OPTIONS", {}, null,
+      { reason: "NATIVE_RECORD_NOT_CURRENT", nativeSourceFetchRecordPresent: true, nativeSourceFetchAdmitted: true, nativeSourceFetchFailed: false,
+        nativeSourceFetchHandlerDone: false, nativeSourceLoadingFailedCanceledPresent: true, nativeSourceLoadingFailedCanceled: false,
+        nativeSourceLoadingFailedCorsErrorPresent: true, nativeSourceLoadingFailedErrorKind: "TIMED_OUT",
+        nativeSourceLoadingFailedCorsError: "HeaderDisallowedByPreflightResponse", errorText: "private-value", failedParameter: "private-value" } as never);
+    expect(loadingFailed).toMatchObject({ nativeSourceFetchRecordPresent: true, nativeSourceFetchAdmitted: true, nativeSourceFetchFailed: false,
+      nativeSourceFetchHandlerDone: false, nativeSourceLoadingFailedCanceledPresent: true, nativeSourceLoadingFailedCanceled: false,
+      nativeSourceLoadingFailedCorsErrorPresent: true, nativeSourceLoadingFailedErrorKind: "TIMED_OUT", nativeSourceLoadingFailedCorsError: "HeaderDisallowedByPreflightResponse" });
+    expect(JSON.stringify(loadingFailed)).not.toContain("private-value");
+    const unknown = publicHeaderFailureDiagnostic("HEADER_PROOF_REVOKED_AFTER_QUEUE", "GET", {}, null,
+      { reason: "NATIVE_RECORD_NOT_CURRENT", nativeSourceLoadingFailedErrorKind: "private-value", nativeSourceLoadingFailedCorsError: "private-value" } as never);
+    expect(unknown).not.toHaveProperty("nativeSourceLoadingFailedErrorKind"); expect(unknown).not.toHaveProperty("nativeSourceLoadingFailedCorsError");
   });
   it("admits public reservation navigation while excluding slot and transaction controls", () => {
     const control = { tag: "a", name: "Click here to reserve a tee time", label: "", href: "https://example.org/tee-times", sensitiveForm: false };

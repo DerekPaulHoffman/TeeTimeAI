@@ -14,7 +14,7 @@ import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-b
 import { isActiveBrowserAccessChallenge, isSafeBrowserAssetUrl, isSafeBrowserBootstrapReadUrl, isSafeBrowserAvailabilityReadUrl, isSafeRecipeUrl, recipeSelectorSchema } from "./recipe";
 import { continueNativeBrowserRead, createNativePublicBrowserProxy, isObservedNativeRedirect, isObservedNativeRedirectTarget, nativeReadPreflightMethod } from "./native-public-browser";
 import { installNativeRedirectRouting, isNativeReadSupersededFailure, authorizePublicClientReadHeaders, isCurrentPublicClientReadHeaders, nativePublicClientPreflightMethod,
-  publicClientReadHeaderProofFailure, nativePublicHeaderFailureFactKeys, type NativePublicHeaderProofFailure, type NativeFirstFatal, type NativeReadRoute, type NativeRequestDiagnostic } from "./native-redirect-routing";
+  publicClientReadHeaderProofFailure, nativePublicHeaderFailureFactKeys, nativeSourceLoadingFailedErrorKinds, nativeSourceLoadingFailedCorsErrors, type NativePublicHeaderProofFailure, type NativeFirstFatal, type NativeReadRoute, type NativeRequestDiagnostic } from "./native-redirect-routing";
 import { requestFamilyForUrl } from "./request-family";
 import { canonicalPublicReadUrl } from "./public-request-url";
 import { inspectExistingAdapter } from "./existing-adapter-executor";
@@ -22,6 +22,7 @@ import { isPublicCalendarApply } from "./public-calendar-apply";
 import { isObservedPublicCalendarDay, observedPublicCalendarDays } from "./public-calendar-day";
 import { PUBLIC_BROWSER_TOTAL_BYTES, publicBrowserResponseLimit } from "./browser-resource-limits";
 import { observedPublicDropdowns, selectPublicDropdown, type PublicDropdownProof } from "./public-dropdown-control";
+import { observedPublicDurationButtons, selectPublicDurationButton, type PublicDurationButtonProof } from "./public-duration-button";
 import { venueProofMatches } from "./executor";
 import type { ExistingAdapterMetadata } from "./existing-adapter-schema";
 import { publicResponseSchema, type PublicResponseSchema } from "./public-response-schema";
@@ -134,6 +135,10 @@ export function publicHeaderFailureDiagnostic(stage: "HEADER_PROOF_MISSING" | "H
   for (const key of nativePublicHeaderFailureFactKeys) if (typeof proofFailure?.[key] === "boolean") nativeFacts[key] = proofFailure[key];
   return { stage, ...(method === "OPTIONS" && requestedMethod.length ? { requestedPreflightMethod } : {}), ordinaryPreflightMethod,
     privateProofFailureReason: proofFailure && publicHeaderFailureReasons.has(proofFailure.reason) ? proofFailure.reason : "UNOBSERVED" as const, ...nativeFacts,
+    ...(proofFailure?.nativeSourceLoadingFailedErrorKind && nativeSourceLoadingFailedErrorKinds.includes(proofFailure.nativeSourceLoadingFailedErrorKind)
+      ? { nativeSourceLoadingFailedErrorKind: proofFailure.nativeSourceLoadingFailedErrorKind } : {}),
+    ...(proofFailure?.nativeSourceLoadingFailedCorsError && nativeSourceLoadingFailedCorsErrors.includes(proofFailure.nativeSourceLoadingFailedCorsError)
+      ? { nativeSourceLoadingFailedCorsError: proofFailure.nativeSourceLoadingFailedCorsError } : {}),
     authorizationShape: authorization.length === 0 ? "MISSING" as const : authorization.length === 1 && authorization[0] === "Bearer null" ? "BEARER_NULL" as const : "OTHER_REDACTED" as const,
     apiKeyPresent: names.includes("x-api-key"), proxyAuthorizationPresent: names.includes("proxy-authorization"), cookiePresent: names.includes("cookie"),
     duplicateHeaderNames: new Set(names).size !== names.length, headerCount: Math.min(entries.length, 128), headerNamesTruncated: entries.length > 128,
@@ -147,7 +152,7 @@ export function publicHeaderFailureDiagnostic(stage: "HEADER_PROOF_MISSING" | "H
     requestedUnknownHeader: requestedNames.some(name => !knownRequested.has(name)) };
 }
 export type DiscoveryBrowserSnapshot = {
-  url: string; text: string; controls: Array<{ target: string; selector: string; kind: string; name: string; label: string; href?: string; options?: Array<{ value: string; label: string }>; currentValue?: string; readOnly?: true; product?: { selector: string; durationMinutes: number } }>;
+  url: string; text: string; controls: Array<{ target: string; selector: string; kind: string; name: string; label: string; href?: string; options?: Array<{ value: string; label: string }>; currentValue?: string; filterPurpose?: "DURATION"; readOnly?: true; product?: { selector: string; durationMinutes: number } }>;
   responses: Array<{ url: string; status: number; method: string; body?: unknown; bodyOmitted?: true; schemaEvidence?: PublicResponseSchema; schemaEvidenceOmitted?: true }>;
   requests: Array<{ url: string; method: string; resourceType: string; status?: number; blockedReason?: string; body?: unknown; readPurpose?: "PUBLIC_BOOTSTRAP" | "PUBLIC_AVAILABILITY";
     urlRejection?: ReturnType<typeof safePublicUrlRejectionDiagnostic>; publicHeaderDiagnostic?: ReturnType<typeof publicHeaderFailureDiagnostic> }>;
@@ -295,7 +300,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       observedRequests.push(metadata); requestMetadataBytes += size;
     }
   };
-  const controls = new Map<string, { locator: Locator; signature: string; kind: string; href?: string; documentNavigationOnly?: boolean; calendarDay?: string; dropdown?: PublicDropdownProof; catalogTile?: boolean;
+  const controls = new Map<string, { locator: Locator; signature: string; kind: string; href?: string; documentNavigationOnly?: boolean; calendarDay?: string; dropdown?: PublicDropdownProof; durationButton?: PublicDurationButtonProof; catalogTile?: boolean;
     service?: boolean; serviceContinuation?: PublicServiceContinuationMode; datePicker?: PublicDatePickerInputProof }>();
   let serviceSelection: PublicRentalServiceSelection | undefined;
   const observedElements = new Map<string, { locator: Locator; signature: string }>();
@@ -849,7 +854,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     });
     return indexes.map(index => matches.nth(index));
   };
-  const registerControl = (locator: Locator, control: ObservedControl, kind: string, extra: { date?: string; dropdown?: PublicDropdownProof } = {}) => {
+  const registerControl = (locator: Locator, control: ObservedControl, kind: string, extra: { date?: string; dropdown?: PublicDropdownProof; durationButton?: PublicDurationButtonProof } = {}) => {
     if (control.href && !isSafeRecipeUrl(control.href)) throw new Error("UNSAFE_NAVIGATION");
     if (control.href) { allowedNavigation.add(control.href); observedNavigationRoots.add(control.href); passfactory.observeWidgetUrl(control.href); cpsScope.observeEntry(control.href); }
     const target = randomUUID();
@@ -857,11 +862,13 @@ export async function createCourseDiscoveryBrowserSession(input: {
       ...(control.catalogTile ? { catalogTile: true } : {}),
       ...(control.datePicker ? { datePicker: control.datePicker } : {}),
       ...(extra.date ? { calendarDay: extra.date } : {}), ...(extra.dropdown ? { dropdown: extra.dropdown } : {}),
+      ...(extra.durationButton ? { durationButton: extra.durationButton } : {}),
       ...(control.service ? { service: true } : {}), ...(control.serviceContinuation ? { serviceContinuation: control.serviceContinuation } : {}) });
     observedElements.set(control.selector, { locator, signature: JSON.stringify(control) });
-    return { target, selector: control.selector, kind, name: sanitizeResponderText(control.name), label: sanitizeResponderText(extra.dropdown?.label ?? control.label),
+    return { target, selector: control.selector, kind, name: sanitizeResponderText(control.name), label: sanitizeResponderText(extra.durationButton?.label ?? extra.dropdown?.label ?? control.label),
       ...(control.href ? { href: control.href } : {}), ...(control.currentValue === undefined ? {} : { currentValue: sanitizeResponderText(control.currentValue) }),
       ...(control.datePicker ? { readOnly: true as const } : {}),
+      ...(extra.durationButton ? { filterPurpose: "DURATION" as const, currentValue: String(extra.durationButton.minutes) } : {}),
       ...(control.product ? { product: control.product } : {}),
       ...(control.service ? { options: control.service.options.map(option => ({ value: sanitizeResponderText(option.label), label: sanitizeResponderText(option.label) })) } : {}),
       ...(control.options && !control.service ? { options: control.options.map(option => ({ value: sanitizeResponderText(option.value), label: sanitizeResponderText(option.label) })) } : {}) };
@@ -932,23 +939,24 @@ export async function createCourseDiscoveryBrowserSession(input: {
         officialIdentityPage = { ...officialIdentityDocument, visibleEvidence, observedAt: Date.now() };
     }
     const visible: DiscoveryBrowserSnapshot["controls"] = [];
-    const candidates: Array<{ locator: Locator; date?: string; dropdown?: PublicDropdownProof }> = (await controlCandidates()).map(locator => ({ locator }));
+    const candidates: Array<{ locator: Locator; date?: string; dropdown?: PublicDropdownProof; durationButton?: PublicDurationButtonProof }> = (await controlCandidates()).map(locator => ({ locator }));
     const dayCandidates = blockedAccess ? [] : [...await observedPublicCalendarDays(page), ...await observedPublicDateChoices(page)];
     const dropdowns = blockedAccess ? [] : (await observedPublicDropdowns(page)).map(value => ({ locator: value.locator, dropdown: value.proof }));
+    const durationButtons = blockedAccess ? [] : (await observedPublicDurationButtons(page)).map(value => ({ locator: value.locator, durationButton: value.proof }));
     const seenControls = new Set<string>();
-    for (const { locator, date, dropdown } of [...dayCandidates, ...dropdowns, ...candidates] as typeof candidates) {
+    for (const { locator, date, dropdown, durationButton } of [...dayCandidates, ...dropdowns, ...durationButtons, ...candidates] as typeof candidates) {
       if (!await isRenderedControl(locator) || !await locator.isEnabled({ timeout: 1000 })) continue;
       const control = await observeControl(locator);
       if (seenControls.has(control.selector)) continue;
       seenControls.add(control.selector);
       // Native public selects remain discoverable when the widget omitted an
       // accessible name, without admitting sensitive forms or arbitrary fields.
-      const kind = ((date || dropdown) && !blockedAccess && recipeSelectorSchema.safeParse(control.selector).success
-        ? dropdown ? "filter" : "calendar" : publicControlKind(control, blockedAccess)) ??
+      const kind = ((date || dropdown || durationButton) && !blockedAccess && recipeSelectorSchema.safeParse(control.selector).success
+        ? dropdown || durationButton ? "filter" : "calendar" : publicControlKind(control, blockedAccess)) ??
         (!blockedAccess && /^(?:Apply|Apply dates)$/iu.test(control.name) && await isPublicCalendarApply(locator) ? "calendar" : null);
       if (!kind) continue;
       if (control.href && !isSafeRecipeUrl(control.href)) continue;
-      visible.push(registerControl(locator, control, kind, { date, dropdown }));
+      visible.push(registerControl(locator, control, kind, { date, dropdown, durationButton }));
       if (visible.length >= 180) break;
     }
     const elements: DiscoveryBrowserSnapshot["elements"] = [];
@@ -1291,6 +1299,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
         if (action.action === "select") {
           if (known.kind !== "filter") throw new Error("UNSAFE_CONTROL");
           if (known.service) { serviceSelection = undefined; serviceSelection = await selectPublicRentalService(known.locator, action.option); }
+          else if (known.durationButton) { serviceSelection = undefined; await selectPublicDurationButton(known.locator, action.option); }
           else if (known.dropdown) { serviceSelection = undefined; await selectPublicDropdown(known.locator, { value: action.option, purpose: known.dropdown.purpose, simulator: true }); }
           else {
             serviceSelection = undefined;
@@ -1321,7 +1330,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
             return snapshot();
           }
           serviceSelection = undefined;
-          if (known.kind === "field" || known.kind === "filter" && (await observeControl(known.locator)).tag === "select") throw new Error("USE_TYPED_CONTROL_ACTION");
+          if (known.kind === "field" || known.kind === "filter" && (known.durationButton || (await observeControl(known.locator)).tag === "select")) throw new Error("USE_TYPED_CONTROL_ACTION");
           if (known.href) {
             if (!isSafeRecipeUrl(known.href)) throw new Error("UNSAFE_NAVIGATION");
             allowedNavigation.add(known.href); observedNavigationRoots.add(known.href); navigationOrigins.add(new URL(known.href).origin); navigationStartedAt = Date.now();
