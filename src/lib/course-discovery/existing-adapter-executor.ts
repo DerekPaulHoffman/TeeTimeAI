@@ -29,6 +29,10 @@ import { executeGolfVx, inspectGolfVx } from "./golfvx-executor";
 import { parseEzLinksSource } from "./ezlinks-source";
 import { isEzLinksProviderUrl } from "./ezlinks-public-read-policy";
 import { executeEzLinks, inspectEzLinks } from "./ezlinks-executor";
+import { parseRexSource } from "./rex-source";
+import { executeRex, inspectRex } from "./rex-executor";
+import { parseCpsSource } from "./cps-source";
+import { executeCps, inspectCps } from "./cps-executor";
 import { deriveUScheduleOfficialLocation, parseUScheduleLocationSource } from "@/lib/simulators/providers/uschedule-location-source";
 import { executeUSchedulePublicLocation, inspectUSchedulePublicLocation } from "./uschedule-location-executor";
 import { observedTeeItUpOfficialBookingChain, type TeeItUpOfficialBookingToken } from "./teeitup-official-booking-context";
@@ -256,6 +260,14 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
 /** For a controller-observed provider URL only. Reads typed public configuration
  * and returns bounded IDs; availability and activation remain separate proofs. */
 export async function inspectExistingAdapter(source: Source, deps: Dependencies): Promise<{ adapter: ExistingAdapterMetadata }> {
+  if (parseRexSource(source.bookingUrl)) {
+    if (!source.officialUrl || !source.venueAddress) fail("ADAPTER_IDENTITY_MISSING");
+    return { adapter: await inspectRex({ ...source, officialUrl: source.officialUrl, venueAddress: source.venueAddress }, deps) };
+  }
+  if (parseCpsSource(source.bookingUrl)) {
+    if (!source.officialUrl || !source.venueAddress) fail("ADAPTER_IDENTITY_MISSING");
+    return { adapter: await inspectCps({ ...source, officialUrl: source.officialUrl, venueAddress: source.venueAddress }, deps) };
+  }
   if (isEzLinksProviderUrl(source.bookingUrl)) {
     if (!parseEzLinksSource(source.bookingUrl)) fail("UNSUPPORTED_ADAPTER_SOURCE");
     if (!source.officialUrl || !source.venueAddress) fail("ADAPTER_IDENTITY_MISSING");
@@ -343,19 +355,29 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
   let uscheduleSession: ReturnType<typeof createUSchedulePublicSession> | undefined;
   try {
     const adapter = existingAdapterMetadataSchema.parse(recipe.adapter);
-    const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "GOLFVX"].includes(adapter.family) || adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR";
+    const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "GOLFVX", "REX"].includes(adapter.family) || adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR";
     if (input.timeZone !== recipe.source.timeZone || recipe.source.providerFamily.toUpperCase() !== adapter.family ||
         (recipe.target.kind === "SIMULATOR") !== simulator || simulator && (!recipe.target.offeringId || !input.durationMinutes) ||
         adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR" && (adapter.facilityIds.length !== 1 || adapter.officialIdentityProof || adapter.officialBookingSourceProof)) fail("ADAPTER_TARGET_MISMATCH");
     if (adapter.family === "EZLINKS" && (!recipe.source.officialUrl || !recipe.source.venueAddress ||
         parseEzLinksSource(recipe.source.bookingUrl)?.tenant !== adapter.tenant || input.durationMinutes !== undefined))
       fail("ADAPTER_TARGET_MISMATCH");
-    if (!["USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS"].includes(adapter.family)) session = reader(recipe.source, deps, adapter, input);
+    if (["REX", "CPS"].includes(adapter.family) && (!recipe.source.officialUrl || !recipe.source.venueAddress ||
+        adapter.family === "CPS" && input.durationMinutes !== undefined)) fail("ADAPTER_TARGET_MISMATCH");
+    if (!["USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS", "REX", "CPS"].includes(adapter.family)) session = reader(recipe.source, deps, adapter, input);
     const start = deps.toInstant(`${input.date}T${input.startTime}:00`, input);
     const next = new Date(`${input.date}T00:00:00Z`); next.setUTCDate(next.getUTCDate() + 1);
     const end = deps.toInstant(`${input.endTime === "24:00" ? next.toISOString().slice(0, 10) : input.date}T${input.endTime === "24:00" ? "00:00" : input.endTime}:00`, input);
     const now = clock();
     if (end <= now) fail("INVALID_REQUEST_DATE_OR_ZONE");
+    if (adapter.family === "REX") {
+      const slots = await executeRex(recipe.source, adapter, { courseId: recipe.target.courseId, offeringId: recipe.target.offeringId! }, input, deps);
+      return result(slots.filter(slot => new Date(slot.startsAt) > now && new Date(slot.startsAt) >= start && new Date(slot.endsAt!) <= end));
+    }
+    if (adapter.family === "CPS") {
+      const slots = await executeCps(recipe.source, adapter, { courseId: recipe.target.courseId }, input, deps);
+      return result(slots.filter(slot => new Date(slot.startsAt) > now && new Date(slot.startsAt) >= start && new Date(slot.startsAt) < end && slot.availableSpots >= input.players));
+    }
     if (adapter.family === "EZLINKS") {
       const slots = await executeEzLinks(recipe.source, adapter, { courseId: recipe.target.courseId }, input, deps);
       return result(slots.filter(slot => new Date(slot.startsAt) > now && new Date(slot.startsAt) >= start && new Date(slot.startsAt) < end && slot.availableSpots >= input.players));

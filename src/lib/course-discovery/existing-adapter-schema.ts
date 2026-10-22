@@ -8,6 +8,8 @@ import { ameliaMetadataSchema } from "./amelia-source";
 import { chronogolfMetadataSchema } from "./chronogolf-source";
 import { golfVxMetadataSchema } from "./golfvx-source";
 import { ezlinksMetadataSchema } from "./ezlinks-source";
+import { rexMetadataSchema } from "./rex-source";
+import { cpsMetadataSchema } from "./cps-source";
 import { isUScheduleNonMemberRental, uschedulePublicLocationProofSchema } from "@/lib/simulators/providers/uschedule-location-source";
 
 const numericId = z.number().int().min(1).max(2_147_483_647);
@@ -37,6 +39,8 @@ export const existingAdapterMetadataSchema = z.discriminatedUnion("family", [
   chronogolfMetadataSchema,
   golfVxMetadataSchema,
   ezlinksMetadataSchema,
+  rexMetadataSchema,
+  cpsMetadataSchema,
 ]);
 
 export type ExistingAdapterMetadata = z.infer<typeof existingAdapterMetadataSchema>;

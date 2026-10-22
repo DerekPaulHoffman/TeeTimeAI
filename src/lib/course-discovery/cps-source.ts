@@ -1,0 +1,138 @@
+import { createHash } from "node:crypto";
+import { parse, type DefaultTreeAdapterMap } from "parse5";
+import { z } from "zod";
+import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
+import { completeUSAddress, fullCourseName } from "./teeitup-official-identity";
+
+const id = z.number().int().min(1).max(2_147_483_647);
+const tenant = z.string().regex(/^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u)
+  .refine(value => !/^(?:www|api|admin|auth|login|account|private|member|test|staging)$/u.test(value));
+const label = z.string().trim().min(1).max(240).refine(value => !/[\u0000-\u001f\u007f]/u.test(value));
+const publicValue = z.string().trim().min(1).max(2048).refine(value => !/[\u0000-\u001f\u007f]/u.test(value));
+export const CPS_API_PATH = "/onlineres/onlineapi/api/v1/onlinereservation";
+// This build's published 569/507/647 + main clients perform one unpaged GET;
+// the UI's load-more operation slices the already returned content locally.
+export const CPS_PUBLIC_BUILD = "25.3.4.21239412485";
+export const cpsMetadataSchema = z.object({ family: z.literal("CPS"), tenant,
+  courseIds: z.array(id).min(1).max(40).refine(values => values.every((value, index) => !index || values[index - 1] < value)),
+  catalogHash: z.string().regex(/^[a-f0-9]{64}$/u) }).strict();
+export type CpsMetadata = z.infer<typeof cpsMetadataSchema>;
+export type CpsSource = { officialUrl: string; bookingUrl: string; venueName: string; venueAddress?: string; timeZone: string };
+export function cpsFailure(code: string): never { throw new Error(code); }
+function safePublicUrl(value: string) {
+  try { const url = new URL(value); return value.length <= 2048 && url.href === value && url.protocol === "https:" &&
+    !url.username && !url.password && !url.port && !url.search && !url.hash && Boolean(getSafeCustomerBookingUrl(value)); }
+  catch { return false; }
+}
+export function parseCpsSource(value: string): { bookingUrl: string; origin: string; tenant: string } | undefined {
+  try {
+    if (!safePublicUrl(value)) return;
+    const url = new URL(value), match = /^([a-z][a-z0-9-]*)\.cps\.golf$/u.exec(url.hostname);
+    if (!match || !tenant.safeParse(match[1]).success || !["/", "/onlineresweb/search-teetime"].includes(url.pathname)) return;
+    return { bookingUrl: url.href, origin: url.origin, tenant: match[1] };
+  } catch { return; }
+}
+export function validateCpsIdentity(source: CpsSource) {
+  if (!parseCpsSource(source.bookingUrl) || !safePublicUrl(source.officialUrl) || !source.venueAddress ||
+      source.venueAddress.length > 1024 || !completeUSAddress(source.venueAddress) || !label.safeParse(source.venueName).success ||
+      fullCourseName(source.venueName).replace(/[^\p{L}\p{N}]/gu, "").length < 8) cpsFailure("ADAPTER_IDENTITY_MISSING");
+  try { if (!source.timeZone.includes("/")) cpsFailure("ADAPTER_IDENTITY_MISSING"); new Intl.DateTimeFormat("en-US", { timeZone: source.timeZone }); }
+  catch { cpsFailure("ADAPTER_IDENTITY_MISSING"); }
+}
+export function sameCpsOfficialSite(value: string, officialUrl: string) {
+  if (!safePublicUrl(value) || !safePublicUrl(officialUrl)) return false;
+  const current = new URL(value), official = new URL(officialUrl);
+  return current.hostname.replace(/^www\./u, "") === official.hostname.replace(/^www\./u, "");
+}
+
+type Node = DefaultTreeAdapterMap["node"];
+type Element = DefaultTreeAdapterMap["element"];
+const element = (node: Node): node is Element => "tagName" in node;
+const attr = (node: Element, key: string) => node.attrs.find(value => value.name === key)?.value;
+const excluded = (node: Element) => ["script", "style", "template", "noscript", "form"].includes(node.tagName) ||
+  ["hidden", "inert"].some(key => attr(node, key) !== undefined) || attr(node, "aria-hidden") === "true" ||
+  /display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0(?:[;\s]|$)/iu.test(attr(node, "style") ?? "") ||
+  /(?:^|\s)(?:hidden|d-none|invisible|visually-hidden|sr-only|screen-reader-only)(?:\s|$)/iu.test(attr(node, "class") ?? "");
+function visibleText(node: Node): string {
+  if (node.nodeName === "#text") return (node as DefaultTreeAdapterMap["textNode"]).value;
+  if (element(node) && (excluded(node) || node.tagName === "iframe")) return " ";
+  return "childNodes" in node ? node.childNodes.map(visibleText).join(" ") : "";
+}
+/** Fresh inert HTML corroborates the canonical address and exact observed
+ * provider link. It does not claim a provider street address or refreshed CSS. */
+export function inspectCpsOfficialDocument(html: string, pageUrl: string, source: CpsSource): { bookingLinked: boolean; nextUrl?: string } {
+  validateCpsIdentity(source);
+  if (html.length > 600_000 || !sameCpsOfficialSite(pageUrl, source.officialUrl)) cpsFailure("OFFICIAL_IDENTITY_UNVERIFIED");
+  const root = parse(html), entries: Element[] = [];
+  const walk = (node: Node) => {
+    if (element(node)) { if (excluded(node)) return; entries.push(node); }
+    if (entries.length > 10_000) cpsFailure("ADAPTER_RESPONSE_LIMIT");
+    if ("childNodes" in node) node.childNodes.forEach(walk);
+  };
+  walk(root);
+  const body = entries.find(node => node.tagName === "body");
+  const text = visibleText(body ?? root).normalize("NFKC").replace(/[|\r\n]+/gu, ", ").replace(/\s+/gu, " ");
+  const name = fullCourseName(source.venueName), words = fullCourseName(text);
+  if (!(` ${words} `).includes(` ${name} `)) cpsFailure("OFFICIAL_IDENTITY_UNVERIFIED");
+  const addresses = new Set<string>();
+  for (const match of text.matchAll(/\b\d{1,8}\s+[A-Za-z0-9 .#'’-]+,\s*[A-Za-z .'-]+,\s*[A-Za-z]{2}\s+\d{5}(?:-\d{4})?(?:,?\s*(?:USA|US|United States))?\b/gu)) {
+    const address = completeUSAddress(match[0]); if (address) addresses.add(JSON.stringify(address));
+  }
+  if (addresses.size !== 1 || !addresses.has(JSON.stringify(completeUSAddress(source.venueAddress!)))) cpsFailure("OFFICIAL_IDENTITY_UNVERIFIED");
+  const providerLinks = new Set<string>(), localLinks = new Set<string>();
+  for (const node of entries) {
+    if (!["a", "iframe"].includes(node.tagName)) continue;
+    const isFrame = node.tagName === "iframe", raw = attr(node, isFrame ? "src" : "href");
+    if (!raw || isFrame && attr(node, "srcdoc") !== undefined) continue;
+    const title = isFrame ? attr(node, "title") ?? "" : visibleText(node);
+    if (!/\b(?:tee\s*times?|book(?:\s+a)?\s+tee\s*time|reservations?)\b/iu.test(title)) continue;
+    let url: URL; try { url = new URL(raw, pageUrl); } catch { continue; }
+    if (parseCpsSource(url.href)) providerLinks.add(url.href);
+    else if (!isFrame && sameCpsOfficialSite(url.href, pageUrl) && url.origin === new URL(pageUrl).origin && url.href !== pageUrl &&
+        !/\/(?:login|signin|account|checkout|cart|payment|contact)(?:\/|$)/iu.test(url.pathname)) localLinks.add(url.href);
+  }
+  if (providerLinks.size) {
+    if (providerLinks.size !== 1 || !providerLinks.has(source.bookingUrl)) cpsFailure("OFFICIAL_BOOKING_SOURCE_MISMATCH");
+    return { bookingLinked: true };
+  }
+  if (localLinks.size !== 1) cpsFailure("OFFICIAL_BOOKING_SOURCE_UNVERIFIED");
+  return { bookingLinked: false, nextUrl: [...localLinks][0] };
+}
+
+const configurationSchema = z.object({ siteName: tenant, onlineApi: publicValue, authorityBaseUrl: publicValue,
+  clientId: publicValue, websiteId: publicValue, apiKey: publicValue, buildNumber: z.string().trim() }).passthrough();
+export type CpsConfiguration = z.infer<typeof configurationSchema>;
+const optionCourse = z.object({ courseId: id, courseName: label, webSiteId: publicValue }).passthrough();
+const optionsSchema = z.object({ webSiteId: publicValue, courseOptions: z.array(optionCourse).min(1).max(40),
+  reservationOptions: z.object({ terminalId: z.number().int().min(0).max(2_147_483_647) }).passthrough() }).passthrough();
+export type CpsOptions = z.infer<typeof optionsSchema>;
+export function parseCpsConfiguration(value: unknown, source: CpsSource): CpsConfiguration {
+  const result = configurationSchema.safeParse(value), context = parseCpsSource(source.bookingUrl);
+  if (!result.success || !context || result.data.siteName !== context.tenant || result.data.onlineApi !== context.origin + CPS_API_PATH ||
+      result.data.authorityBaseUrl !== context.origin + "/identityapi" || result.data.buildNumber !== CPS_PUBLIC_BUILD) cpsFailure("CPS_CONFIGURATION_UNVERIFIED");
+  return result.data;
+}
+export function parseCpsOptions(value: unknown, configuration: CpsConfiguration): CpsOptions {
+  const parsed = optionsSchema.safeParse(value);
+  if (!parsed.success || parsed.data.webSiteId !== configuration.websiteId && !/^0+(?:-0+)*$/u.test(configuration.websiteId) ||
+      parsed.data.courseOptions.some(row => row.webSiteId !== parsed.data.webSiteId) ||
+      new Set(parsed.data.courseOptions.map(row => row.courseId)).size !== parsed.data.courseOptions.length) cpsFailure("CPS_OPTIONS_UNVERIFIED");
+  return parsed.data;
+}
+export function parseCpsCatalog(value: unknown, options: CpsOptions, source: CpsSource): CpsMetadata {
+  validateCpsIdentity(source);
+  const rows = z.array(z.object({ courseId: id, courseName: label, timezoneId: label, websiteId: publicValue,
+    active: z.literal(true), holes: z.union([z.literal(9), z.literal(18)]) }).passthrough()).min(1).max(40).safeParse(value);
+  if (!rows.success) cpsFailure("CPS_CATALOG_UNVERIFIED");
+  const name = fullCourseName(source.venueName), courses = [...rows.data].sort((a, b) => a.courseId - b.courseId);
+  const ids = courses.map(row => row.courseId), declared = options.courseOptions.map(row => row.courseId).sort((a, b) => a - b);
+  if (new Set(ids).size !== ids.length || JSON.stringify(ids) !== JSON.stringify(declared) ||
+      courses.some(row => fullCourseName(row.courseName) !== name || row.timezoneId !== source.timeZone || row.websiteId !== options.webSiteId) ||
+      options.courseOptions.some(row => fullCourseName(row.courseName) !== name)) cpsFailure("ADAPTER_IDENTITY_MISMATCH");
+  const context = parseCpsSource(source.bookingUrl)!;
+  // Website IDs and public API keys are freshly rederived RAM-only routing data.
+  const stable = { tenant: context.tenant, courseIds: ids, venueName: name, venueAddress: completeUSAddress(source.venueAddress!),
+    officialUrl: source.officialUrl, timeZone: source.timeZone, courses: courses.map(row => ({ id: row.courseId, name: row.courseName, timeZone: row.timezoneId })) };
+  return cpsMetadataSchema.parse({ family: "CPS", tenant: context.tenant, courseIds: ids,
+    catalogHash: createHash("sha256").update(JSON.stringify(stable)).digest("hex") });
+}
