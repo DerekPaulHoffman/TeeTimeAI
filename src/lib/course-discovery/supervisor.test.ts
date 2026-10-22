@@ -905,7 +905,8 @@ describe("controller-only verification", () => {
         return { url: official, frames: action.action === "finish" ? [] : [
           { url: entry, source: "OFFICIAL_IFRAME_SRC" }, { url: excluded[0] },
           { url: "https://example.org/login", source: "OFFICIAL_IFRAME_SRC" },
-        ], capabilityDiagnostics: [{ code: "SUBFRAME_UNSUPPORTED", url: excluded[1], resourceType: "document" }] };
+        ], requests: action.action === "finish" ? [] : [{ url: entry, method: "GET", resourceType: "xhr", status: 200 }],
+        capabilityDiagnostics: [{ code: "SUBFRAME_UNSUPPORTED", url: excluded[1], resourceType: "document" }] };
       } };
     };
     try {
@@ -913,7 +914,7 @@ describe("controller-only verification", () => {
         processFactory, browserFactory, validateRecipe: async () => ({ valid: true }) }).catch(error => error);
       expect(await run(inputJob)).toMatchObject({ code: "DISCOVERY_NO_VERIFIED_RECIPE" });
       const persisted = checkpoints.at(-1)!;
-      expect(persisted.controller).toMatchObject({ officialSourceObserved: true, observedNavigationUrls: [official], observedReadUrls: [], observedEntryUrls: [entry] });
+      expect(persisted.controller).toMatchObject({ officialSourceObserved: true, observedNavigationUrls: [official], observedReadUrls: [entry], observedEntryUrls: [entry] });
       expect(JSON.stringify(replies)).toContain("DISCOVERY_SOURCE_NOT_OBSERVED");
       expect(JSON.stringify(replies)).toContain("DISCOVERY_CHECKPOINT_INVALID");
       phase = 2;
@@ -930,32 +931,37 @@ describe("controller-only verification", () => {
     } finally { rmSync(sourceHome, { recursive: true, force: true }); }
   });
 
-  it.each(["PUBLIC_BOOTSTRAP", "PUBLIC_AVAILABILITY"])("keeps %s out of URL authority across reset and checkpoint resume", async readPurpose => {
+  it.each(["PUBLIC_BOOTSTRAP", "PUBLIC_AVAILABILITY"])("keeps %s and successful data reads out of navigation authority across reset and checkpoint resume", async readPurpose => {
     const sourceHome = mkdtempSync(join(tmpdir(), "discovery-bootstrap-authority-"));
     writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }));
     writeFileSync(join(sourceHome, "auth.json"), "test-auth");
     const official = "https://example.org/", bootstrap = readPurpose === "PUBLIC_BOOTSTRAP" ? "https://example.org/App/GlobalTenantSettings" :
       "https://www.sevenrooms.com/api-yoa/availability/widget/range?venue=publicrental&time_slot=12:00&party_size=1&halo_size_interval=16&start_date=10-23-2026&num_days=1&channel=SEVENROOMS_WIDGET&selected_lang_code=en";
+    const documentUrl = "https://example.org/committed-calendar";
     const normal = "https://example.org/api/availability?date=2026-10-23", otherPurpose = "https://example.org/api/public-options";
     const metadata = { url: bootstrap, method: "GET", resourceType: "xhr", status: 200, readPurpose };
     expect(isSafeRecipeUrl(bootstrap)).toBe(false); // This caused actual helper startup rejection when promoted.
     const inputJob = { ...job(), request: { ...job().request, identity: { name: "Public golf", officialUrl: official, bookingUrl: null } } };
     const configurations: Array<{ initialUrls: string[]; deadlineAt: string }> = [];
+    const resumeUrls: string[][] = [];
     const checkpoints: Array<{ controller: { observedNavigationUrls: string[]; observedReadUrls: string[]; observedEntryUrls: string[] } }> = [];
     const replies: unknown[] = [];
     const client = { helperEnvironment: () => ({ COURSE_DISCOVERY_BROWSER_TRANSPORT: "NATIVE_CHROME" }),
       checkpoint: async (_id, _token, value) => { checkpoints.push(structuredClone(value)); }, candidate: vi.fn(), activate: vi.fn() };
-    let phase = 1;
-    const processFactory = options => ({ notify: vi.fn(), close: vi.fn(async () => {}), request: async (method: string) => {
+    let phase = 1, dataOpenDispatches = 0;
+    const processFactory = options => ({ notify: vi.fn(), close: vi.fn(async () => {}), request: async (method: string, params: { input?: Array<{ text: string }> } = {}) => {
       if (method === "thread/start") return { thread: { id: "thread-1" }, approvalPolicy: "never", sandbox: { type: "readOnly" } };
       if (method === "turn/start") {
+        resumeUrls.push(JSON.parse(params.input![0].text).trustedResumeUrls);
         queueMicrotask(async () => {
           await options.onMessage({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1" } } }, () => {});
           const actions = phase === 1 ? [
             ["discovery_browser", { action: "open", url: official }],
             ["discovery_browser", { action: "finish" }],
+            ["discovery_browser", { action: "open", url: normal }],
             ["discovery_browser", { action: "open", url: official }],
             ["discovery_propose_recipe", { recipe: { engine: "BROWSER_DOM", source: { bookingUrl: bootstrap } } }],
+            ["discovery_propose_recipe", { recipe: { engine: "BROWSER_DOM", source: { bookingUrl: normal } } }],
           ] : [["discovery_browser", { action: "open", url: official }]];
           for (const [index, [tool, args]] of actions.entries()) await options.onMessage({ id: index + 1, method: "item/tool/call",
             params: { threadId: "thread-1", turnId: "turn-1", tool, arguments: args } }, reply => replies.push(reply));
@@ -969,20 +975,28 @@ describe("controller-only verification", () => {
       configurations.push(config);
       // Mirror the unchanged fixed helper's strict startup check, without launching a process/browser.
       if (!config.initialUrls.every(isSafeRecipeUrl)) throw Object.assign(new Error("Invalid initial URL"), { code: "INVALID_INITIAL_URLS" });
-      return { close: async () => {}, request: async action => ({ url: official, browserTransport: "NATIVE_CHROME", controls: [], frames: [],
+      return { close: async () => {}, request: async action => {
+        // Model only the fixed helper's explicit startup navigation authority;
+        // no actual browser, provider dispatch or page transport is used.
+        if (action.action === "open" && !config.initialUrls.includes(action.url))
+          throw Object.assign(new Error("UNOBSERVED_NAVIGATION"), { code: "UNOBSERVED_NAVIGATION" });
+        if (action.action === "open" && action.url === normal) dataOpenDispatches++;
+        return { url: action.action === "open" && action.url === normal ? normal : documentUrl, browserTransport: "NATIVE_CHROME", controls: [], frames: [],
         requests: action.action === "finish" ? [] : [metadata,
           { url: normal, method: "GET", resourceType: "xhr", status: 200 },
-          { url: otherPurpose, method: "HEAD", resourceType: "fetch", status: 200, readPurpose: "OTHER_PURPOSE" }] }) };
+          { url: otherPurpose, method: "HEAD", resourceType: "fetch", status: 200, readPurpose: "OTHER_PURPOSE" }] };
+      } };
     };
     try {
       const run = currentJob => runCourseDiscoveryWorker({ job: currentJob, client, cwd: process.cwd(), sourceHome, recipeSchema: {}, resolveCli: () => "fixed-codex",
         processFactory, browserFactory, validateRecipe: async () => ({ valid: true }) }).catch(error => error);
       expect(await run(inputJob)).toMatchObject({ code: "DISCOVERY_NO_VERIFIED_RECIPE" });
       const persisted = checkpoints.at(-1)!;
-      expect(persisted.controller).toMatchObject({ observedNavigationUrls: [official], observedReadUrls: [normal, otherPurpose], observedEntryUrls: [] });
+      expect(persisted.controller).toMatchObject({ observedNavigationUrls: [documentUrl], observedReadUrls: [normal, otherPurpose], observedEntryUrls: [] });
       const firstReply = replies[0] as { result: { contentItems: Array<{ text: string }> } };
       expect(JSON.parse(firstReply.result.contentItems[0].text).requests).toContainEqual(metadata);
       expect(JSON.stringify(replies)).toContain("DISCOVERY_SOURCE_NOT_OBSERVED");
+      expect(JSON.stringify(replies)).toContain("UNOBSERVED_NAVIGATION");
       expect(JSON.stringify(replies)).not.toContain("INVALID_INITIAL_URLS");
       phase = 2;
       expect(await run({ ...inputJob, attempts: 2, checkpoint: persisted })).toMatchObject({ code: "DISCOVERY_NO_VERIFIED_RECIPE" });
@@ -992,7 +1006,9 @@ describe("controller-only verification", () => {
         expect(config.initialUrls.every(isSafeRecipeUrl)).toBe(true);
         expect(config.initialUrls).not.toContain(bootstrap);
       }
-      for (const config of configurations.slice(1)) expect(config.initialUrls).toEqual([official, normal, otherPurpose]);
+      for (const config of configurations.slice(1)) expect(config.initialUrls).toEqual([official, documentUrl]);
+      expect(resumeUrls).toEqual([[], [documentUrl]]);
+      expect(dataOpenDispatches).toBe(0);
       expect(client.candidate).not.toHaveBeenCalled(); expect(client.activate).not.toHaveBeenCalled();
     } finally { rmSync(sourceHome, { recursive: true, force: true }); }
   });

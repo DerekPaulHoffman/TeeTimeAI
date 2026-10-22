@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { chromium } from "@playwright/test";
 import { describe, expect, it, vi } from "vitest";
 import { createAddressPinnedPublicFetchTransport } from "@/lib/automation/address-pinned-public-fetch";
-import { createCourseDiscoveryBrowserSession, discoveryBrowserActionSchema, discoveryPublicAnchorKind, discoveryPublicChoiceKind, normalizeDiscoveryNavigationUrl, redactDiscoveryFailureUrl, redactDiscoveryJson, redactDiscoveryRequestUrl, sameDiscoveryMainDocument } from "./browser-session";
+import { createCourseDiscoveryBrowserSession, discoveryBrowserActionSchema, discoveryPublicAnchorKind, discoveryPublicChoiceKind, normalizeDiscoveryNavigationUrl, publicHeaderFailureDiagnostic, redactDiscoveryFailureUrl, redactDiscoveryJson, redactDiscoveryRequestUrl, sameDiscoveryMainDocument } from "./browser-session";
 import * as nativeBrowser from "./native-public-browser";
 import * as nativeRouting from "./native-redirect-routing";
 import { deriveTeeItUpOfficialIdentityProof } from "./teeitup-official-identity";
@@ -11,6 +11,24 @@ vi.mock("@/lib/automation/provider-request-lease", () => ({ runWithProviderReque
 vi.mock("@/lib/automation/address-pinned-public-fetch", () => ({ createAddressPinnedPublicFetchTransport: vi.fn() }));
 
 describe("discovery browser public protocol", () => {
+  it("projects header-denial facts as closed categories without header names, values or digests", () => {
+    const diagnostic = publicHeaderFailureDiagnostic("HEADER_PROOF_MISSING", "OPTIONS", {
+      Authorization: "Bearer null", "x-api-key": "private-key-value", "x-ms-request-id": "private-correlation-value",
+      "X-Private-Token-Name": "private-companion-value", "Access-Control-Request-Method": "GET",
+      "Access-Control-Request-Headers": "authorization,x-api-key,x-private-token-name",
+    }, null);
+    expect(diagnostic).toMatchObject({ stage: "HEADER_PROOF_MISSING", requestedPreflightMethod: "GET", ordinaryPreflightMethod: null,
+      authorizationShape: "BEARER_NULL", apiKeyPresent: true, sensitiveCompanionPresent: true,
+      requestedAuthorization: true, requestedApiKey: true, requestedUnknownHeader: true, requestedHeaderSyntaxValid: true,
+      privateProofFailureReason: "UNOBSERVED" });
+    for (const privateText of ["private-key-value", "private-correlation-value", "private-companion-value", "x-private-token-name"])
+      expect(JSON.stringify(diagnostic)).not.toContain(privateText);
+    const duplicate = publicHeaderFailureDiagnostic("HEADER_PROOF_MISSING", "OPTIONS", { Authorization: "Bearer null", authorization: "Bearer null",
+      "Access-Control-Request-Method": "GET", "access-control-request-method": "POST", "access-control-request-headers": "x-api-key,x-api-key" }, null);
+    expect(duplicate).toMatchObject({ authorizationShape: "OTHER_REDACTED", duplicateHeaderNames: true,
+      requestedPreflightMethod: "OTHER", requestedHeaderDuplicates: true });
+    expect(publicHeaderFailureDiagnostic("HEADER_PROOF_REVOKED_AFTER_QUEUE", "GET", {}, null)).not.toHaveProperty("requestedPreflightMethod");
+  });
   it("admits public reservation navigation while excluding slot and transaction controls", () => {
     const control = { tag: "a", name: "Click here to reserve a tee time", label: "", href: "https://example.org/tee-times", sensitiveForm: false };
     expect(discoveryPublicAnchorKind(control)).toBe("link");
@@ -72,6 +90,84 @@ describe("discovery browser public protocol", () => {
 
 const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
+  it.each(["missing", "revoked"] as const)("classifies native public header proof failure without changing denial: %s", async mode => {
+    // Synthetic private-proof/native bridge; real Chrome uses only in-memory replies.
+    const entry = "https://example.org/header-diagnostic", data = "https://example.org/public-data";
+    let release!: () => void, held!: () => void, live = true, leases = 0;
+    let diagnosticAtDenial: ReturnType<Awaited<ReturnType<typeof createCourseDiscoveryBrowserSession>>["diagnostics"]> | undefined;
+    const released = new Promise<void>(resolve => { release = resolve; });
+    const queued = new Promise<void>(resolve => { held = resolve; });
+    const proof = Object.freeze({}) as NonNullable<Awaited<ReturnType<typeof nativeRouting.authorizePublicClientReadHeaders>>>;
+    const reads: string[] = [];
+    const proxy = vi.spyOn(nativeBrowser, "createNativePublicBrowserProxy").mockResolvedValue({ server: "http://127.0.0.1:9",
+      close: async () => {}, allowHostConnections: () => {}, cancelHostConnections: async () => {}, stats: () => ({ connections: 0, activeSockets: 0, bytes: 0 }) });
+    const authorize = vi.spyOn(nativeRouting, "authorizePublicClientReadHeaders").mockResolvedValue(mode === "missing" ? null : proof);
+    const current = vi.spyOn(nativeRouting, "isCurrentPublicClientReadHeaders").mockImplementation(() => live);
+    const preflight = vi.spyOn(nativeRouting, "nativePublicClientPreflightMethod").mockReturnValue("GET");
+    const routing = vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, handler) => ({
+      prepare: () => {}, beginDocumentNavigation: async () => {}, close: async () => {}, pendingReads: 0, lastFailure: undefined,
+      releasePlaywrightRoute: async route => {
+        const raw = route.request(), isData = raw.url() === data;
+        const request: nativeRouting.NativeReadRequest = { url: () => raw.url(), method: () => isData ? "OPTIONS" : raw.method(),
+          headers: () => isData ? { authorization: "Bearer null", "x-api-key": "fixture-public-literal", origin: "https://example.org",
+            "access-control-request-method": "GET", "access-control-request-headers": "authorization,x-api-key" } : raw.headers(),
+          postData: () => null, resourceType: () => isData ? "xhr" : raw.resourceType(), isNavigationRequest: () => raw.isNavigationRequest(),
+          frame: () => raw.frame(), redirectedFrom: () => null, response: () => raw.response() };
+        await handler({ request: () => request, continue: options => route.continue(options), abort: reason => route.abort(reason), fulfill: options => route.fulfill(options) });
+      },
+    }));
+    const native = vi.spyOn(nativeBrowser, "continueNativeBrowserRead").mockImplementation(async route => {
+      reads.push(route.request().url());
+      const body = Buffer.from(`<h1>Public calendar</h1><script>fetch('/public-data').catch(()=>{}).finally(()=>window.fixtureDone=true)</script>`);
+      const headers = { "content-type": "text/html" };
+      await route.fulfill({ status: 200, headers, body }); return { status: 200, url: route.request().url(), headers, body };
+    });
+    let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
+    const session = await createCourseDiscoveryBrowserSession({ initialUrls: [entry], deadlineAt: new Date(Date.now() + 15_000) }, {
+      browserTransport: "NATIVE_CHROME", launchBrowser: async () => browser = await chromium.launch({ executablePath, headless: true }),
+      requestLease: async (_family, work) => { if (++leases === 2 && mode === "revoked") { held(); await released; } return { acquired: true, value: await work() }; },
+      onRequestFailure: () => { diagnosticAtDenial = session.diagnostics(); },
+    });
+    try {
+      const opening = session.execute({ id: 1, action: "open", url: entry });
+      if (mode === "revoked") { await queued; live = false; release(); }
+      const first = await opening;
+      await browser!.contexts()[0].pages()[0].waitForFunction(() => Boolean((window as Window & { fixtureDone?: boolean }).fixtureDone));
+      const next = await session.execute({ id: 2, action: "observe" });
+      const denied = [...first.requests, ...next.requests].find(row => row.url === data && row.blockedReason);
+      expect(denied).toMatchObject({ blockedReason: "CREDENTIAL_HEADERS", publicHeaderDiagnostic: {
+        stage: mode === "missing" ? "HEADER_PROOF_MISSING" : "HEADER_PROOF_REVOKED_AFTER_QUEUE", requestedPreflightMethod: "GET",
+        authorizationShape: "BEARER_NULL", apiKeyPresent: true, requestedAuthorization: true, requestedApiKey: true,
+      } });
+      expect(next.requestFailures?.find(row => row.url === data)).toMatchObject({ reason: "CREDENTIAL_HEADERS", publicHeaderDiagnostic: { stage: mode === "missing" ? "HEADER_PROOF_MISSING" : "HEADER_PROOF_REVOKED_AFTER_QUEUE" } });
+      expect(diagnosticAtDenial?.requests.find(row => row.url === data)).toMatchObject({ blockedReason: "CREDENTIAL_HEADERS",
+        publicHeaderDiagnostic: { stage: mode === "missing" ? "HEADER_PROOF_MISSING" : "HEADER_PROOF_REVOKED_AFTER_QUEUE" } });
+      expect(reads).toEqual([entry]); expect(JSON.stringify([first, next])).not.toContain("fixture-public-literal");
+    } finally { release(); await session.close(); native.mockRestore(); routing.mockRestore(); preflight.mockRestore(); current.mockRestore(); authorize.mockRestore(); proxy.mockRestore(); }
+  }, 20_000);
+
+  it("keeps a successful inventory GET out of document roots while preserving an actual public href", async () => {
+    const source = "https://example.org/public-calendar", inventory = "https://example.org/availability", linked = "https://example.org/tee-times";
+    const fetcher = vi.fn(async value => String(value) === source
+      ? new Response(`<h1>Public calendar</h1><a href="${linked}">Tee times</a><script>fetch('/availability').then(r=>r.json()).then(()=>window.fixtureDone=true)</script>`, { headers: { "content-type": "text/html" } })
+      : String(value) === inventory ? new Response('{"slots":[]}', { headers: { "content-type": "application/json" } })
+        : new Response("<h1>Linked public tee times</h1>", { headers: { "content-type": "text/html" } })) as unknown as typeof fetch;
+    let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
+    const session = await createCourseDiscoveryBrowserSession({ initialUrls: [source], deadlineAt: new Date(Date.now() + 15_000) }, {
+      launchBrowser: async () => browser = await chromium.launch({ executablePath, headless: true }), fetch: fetcher,
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      const first = await session.execute({ id: 1, action: "open", url: source });
+      await browser!.contexts()[0].pages()[0].waitForFunction(() => Boolean((window as Window & { fixtureDone?: boolean }).fixtureDone));
+      const observed = await session.execute({ id: 2, action: "observe" });
+      expect([...first.requests, ...observed.requests].some(row => row.url === inventory && row.status === 200)).toBe(true);
+      await expect(session.execute({ id: 3, action: "open", url: inventory })).rejects.toThrow("UNOBSERVED_NAVIGATION");
+      const opened = await session.execute({ id: 4, action: "open", url: linked });
+      expect(opened.text).toContain("Linked public tee times");
+    } finally { await session.close(); }
+  }, 20_000);
+
   it("observes a public language-bearing inventory response without promoting it to navigation", async () => {
     const source = "https://www.sevenrooms.com/reservations/publicrental";
     const inventory = "https://www.sevenrooms.com/api-yoa/availability/widget/range?venue=publicrental&time_slot=12:00&party_size=1&halo_size_interval=16&start_date=10-23-2026&num_days=1&channel=SEVENROOMS_WIDGET&selected_lang_code=en&picked_duration=60";

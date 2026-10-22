@@ -115,13 +115,39 @@ export function normalizeDiscoveryNavigationUrl(value: string) {
 export function sameDiscoveryMainDocument(observedUrl: string, currentUrl: string) {
   return Boolean(observedUrl && currentUrl) && observedUrl.split("#", 1)[0] === currentUrl.split("#", 1)[0];
 }
+
+/** Closed observations explain an unchanged header denial; none authorize a request. */
+export function publicHeaderFailureDiagnostic(stage: "HEADER_PROOF_MISSING" | "HEADER_PROOF_REVOKED_AFTER_QUEUE", method: string,
+  requestHeaders: Record<string, string>, ordinaryPreflightMethod: "GET" | "HEAD" | "POST" | null) {
+  const entries = Object.entries(requestHeaders), names = entries.map(([name]) => name.toLowerCase());
+  const values = (name: string) => entries.filter(([key]) => key.toLowerCase() === name).map(([, value]) => value);
+  const authorization = values("authorization"), requestedMethod = values("access-control-request-method"), requested = values("access-control-request-headers");
+  const requestedNames = requested.length === 1 && requested[0].length <= 512 ? requested[0].split(",").map(name => name.trim().toLowerCase()) : [];
+  const knownRequested = new Set(["accept", "accept-language", "cache-control", "pragma", "content-type", "authorization", "x-api-key",
+    "x-ms-device-id", "x-ms-client-session-id", "x-ms-request-id", "x-ms-attempt-id"]);
+  const requestedPreflightMethod = requestedMethod.length === 1 && /^(?:GET|HEAD|POST|PUT|PATCH|DELETE|CONNECT|TRACE)$/u.test(requestedMethod[0])
+    ? requestedMethod[0] as "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "CONNECT" | "TRACE" : "OTHER";
+  return { stage, ...(method === "OPTIONS" && requestedMethod.length ? { requestedPreflightMethod } : {}), ordinaryPreflightMethod,
+    privateProofFailureReason: "UNOBSERVED" as const,
+    authorizationShape: authorization.length === 0 ? "MISSING" as const : authorization.length === 1 && authorization[0] === "Bearer null" ? "BEARER_NULL" as const : "OTHER_REDACTED" as const,
+    apiKeyPresent: names.includes("x-api-key"), proxyAuthorizationPresent: names.includes("proxy-authorization"), cookiePresent: names.includes("cookie"),
+    duplicateHeaderNames: new Set(names).size !== names.length, headerCount: Math.min(entries.length, 128), headerNamesTruncated: entries.length > 128,
+    sensitiveCompanionPresent: names.some(name => !["authorization", "x-api-key", "cookie"].includes(name) && /authorization|token|secret|api[-_]?key|credential|csrf|session/iu.test(name) &&
+      !["x-ms-device-id", "x-ms-client-session-id", "x-ms-request-id", "x-ms-attempt-id"].includes(name)),
+    requestedHeaderListPresent: requested.length > 0, requestedHeaderCount: Math.min(requestedNames.length, 128),
+    requestedHeaderSyntaxValid: requested.length === 1 && requested[0].length <= 512 && requestedNames.length > 0 && requestedNames.length <= 16 &&
+      requestedNames.every(name => /^[a-z0-9-]{1,80}$/u.test(name)),
+    requestedHeaderDuplicates: new Set(requestedNames).size !== requestedNames.length,
+    requestedAuthorization: requestedNames.includes("authorization"), requestedApiKey: requestedNames.includes("x-api-key"),
+    requestedUnknownHeader: requestedNames.some(name => !knownRequested.has(name)) };
+}
 export type DiscoveryBrowserSnapshot = {
   url: string; text: string; controls: Array<{ target: string; selector: string; kind: string; name: string; label: string; href?: string; options?: Array<{ value: string; label: string }>; currentValue?: string; readOnly?: true; product?: { selector: string; durationMinutes: number } }>;
   responses: Array<{ url: string; status: number; method: string; body?: unknown; bodyOmitted?: true; schemaEvidence?: PublicResponseSchema; schemaEvidenceOmitted?: true }>;
   requests: Array<{ url: string; method: string; resourceType: string; status?: number; blockedReason?: string; body?: unknown; readPurpose?: "PUBLIC_BOOTSTRAP" | "PUBLIC_AVAILABILITY";
-    urlRejection?: ReturnType<typeof safePublicUrlRejectionDiagnostic> }>;
+    urlRejection?: ReturnType<typeof safePublicUrlRejectionDiagnostic>; publicHeaderDiagnostic?: ReturnType<typeof publicHeaderFailureDiagnostic> }>;
   requestFailures?: Array<{ reason: string; resourceType: string; method?: string; url?: string;
-    urlRejection?: ReturnType<typeof safePublicUrlRejectionDiagnostic> }>;
+    urlRejection?: ReturnType<typeof safePublicUrlRejectionDiagnostic>; publicHeaderDiagnostic?: ReturnType<typeof publicHeaderFailureDiagnostic> }>;
   nativeFirstFatal?: NativeFirstFatal;
   nativeRejectedRequests?: NativeRequestDiagnostic[];
   officialSourceDiagnostic?: OfficialSourceDiagnostic;
@@ -344,7 +370,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
       const method = request.method(), requestHeaders = request.headers();
       const publicHeaderProof = nativeProxy && (method === "OPTIONS" || Object.keys(requestHeaders).some(key => /^(?:authorization|x-api-key)$/iu.test(key)))
         ? await authorizePublicClientReadHeaders(request) : null;
-      const preflight = nativeProxy && method === "OPTIONS" && (nativeReadPreflightMethod(requestHeaders) ||
+      const ordinaryPreflightMethod = nativeProxy && method === "OPTIONS" ? nativeReadPreflightMethod(requestHeaders) : null;
+      const preflight = nativeProxy && method === "OPTIONS" && (ordinaryPreflightMethod ||
         publicHeaderProof && nativePublicClientPreflightMethod(request, publicHeaderProof));
       // The native router separately correlates the browser's GET preflight
       // with its initiating root-frame data read. Validate only that read's
@@ -415,7 +442,10 @@ export async function createCourseDiscoveryBrowserSession(input: {
           !isRexPublicBrowserReadPost(url, method, requestHeaders, body ?? "", frameUrl))
         throw new Error(rexPublicBrowserReadRejection(url, method, requestHeaders, body ?? "", frameUrl));
       const rexPlaceholder = nativeProxy && isRexAnonymousPlaceholderRead(url, method, requestHeaders, body ?? "", frameUrl);
-      if (nativeProxy && !rexPlaceholder && !publicHeaderProof && Object.keys(requestHeaders).some(key => /^(?:authorization|proxy-authorization|x-api-key)$/iu.test(key))) throw new Error("CREDENTIAL_HEADERS");
+      if (nativeProxy && !rexPlaceholder && !publicHeaderProof && Object.keys(requestHeaders).some(key => /^(?:authorization|proxy-authorization|x-api-key)$/iu.test(key))) {
+        metadata.publicHeaderDiagnostic = publicHeaderFailureDiagnostic("HEADER_PROOF_MISSING", method, requestHeaders, ordinaryPreflightMethod);
+        throw new Error("CREDENTIAL_HEADERS");
+      }
       if (ezlinks.handles(url) && Object.keys(requestHeaders).some(key =>
         !(nativeProxy && key.toLowerCase() === "cookie") && /authorization|cookie|token|api.?key|secret|credential|next-action|csrf|session/iu.test(key)))
         throw new Error("CREDENTIAL_HEADERS");
@@ -450,7 +480,10 @@ export async function createCourseDiscoveryBrowserSession(input: {
         // A same-document script read can retire the completion contract while
         // this exact POST waits for the shared provider lease.
         assertEzReadContract(ezWitness, ezCall?.contractVersion);
-        if (publicHeaderProof && !isCurrentPublicClientReadHeaders(publicHeaderProof)) throw new Error("CREDENTIAL_HEADERS");
+        if (publicHeaderProof && !isCurrentPublicClientReadHeaders(publicHeaderProof)) {
+          metadata.publicHeaderDiagnostic = publicHeaderFailureDiagnostic("HEADER_PROOF_REVOKED_AFTER_QUEUE", method, requestHeaders, ordinaryPreflightMethod);
+          throw new Error("CREDENTIAL_HEADERS");
+        }
         if (nativeProxy) {
           nativeProxy.allowHostConnections(url.hostname);
           const response = await continueNativeBrowserRead(route, deadline, responseLimit, async () => {
@@ -504,7 +537,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
           reply.status === 200 &&
           reply.buffer.length <= 600_000 && /^text\/html(?:;|$)/iu.test(reply.headers["content-type"] ?? ""))
         officialIdentityDocument = { url: url.href, html: reply.buffer.toString("utf8"), officialDocumentProof };
-      if (["GET", "HEAD"].includes(method) && ["document", "xhr", "fetch"].includes(request.resourceType()) &&
+      if (["GET", "HEAD"].includes(method) && request.isNavigationRequest() && request.resourceType() === "document" &&
           reply.status >= 200 && reply.status < 400 && isSafeRecipeUrl(url.href)) allowedNavigation.add(url.href);
       responseBytes += reply.buffer.length;
       if (url.hostname === "clients.uschedule.com" && method === "GET" && /^text\/html(?:;|$)/iu.test(reply.headers["content-type"] ?? ""))
@@ -602,7 +635,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
       const failureUrl = redactDiscoveryFailureUrl(requestUrl, request.resourceType());
       if (metadata.urlRejection) metadata.url = failureUrl ?? "";
       requestFailures.push({ reason: metadata.blockedReason, resourceType: request.resourceType(), method: request.method(),
-        ...(failureUrl ? { url: failureUrl } : {}), ...(metadata.urlRejection ? { urlRejection: safePublicUrlRejectionDiagnostic(metadata.urlRejection) } : {}) });
+        ...(failureUrl ? { url: failureUrl } : {}), ...(metadata.urlRejection ? { urlRejection: safePublicUrlRejectionDiagnostic(metadata.urlRejection) } : {}),
+        ...(metadata.publicHeaderDiagnostic ? { publicHeaderDiagnostic: { ...metadata.publicHeaderDiagnostic } } : {}) });
       if (requestFailures.length > 12) requestFailures.shift();
       deps.onRequestFailure?.({ url: metadata.url, resourceType: metadata.resourceType, reason: metadata.blockedReason });
       recordRequest(metadata, true);
@@ -1135,9 +1169,11 @@ export async function createCourseDiscoveryBrowserSession(input: {
         requests: observedRequests.map(request => ({ url: request.url, method: request.method, resourceType: request.resourceType,
           ...(request.readPurpose ? { readPurpose: request.readPurpose } : {}),
           ...(request.status === undefined ? {} : { status: request.status }),
-          ...(request.blockedReason ? { blockedReason: request.blockedReason } : {}) })),
+          ...(request.blockedReason ? { blockedReason: request.blockedReason } : {}),
+          ...(request.publicHeaderDiagnostic ? { publicHeaderDiagnostic: { ...request.publicHeaderDiagnostic } } : {}) })),
         capabilityDiagnostics: capabilityDiagnostics.map(value => ({ ...value })),
-        requestFailures: requestFailures.map(failure => ({ ...failure })) };
+        requestFailures: requestFailures.map(failure => ({ ...failure,
+          ...(failure.publicHeaderDiagnostic ? { publicHeaderDiagnostic: { ...failure.publicHeaderDiagnostic } } : {}) })) };
     },
     async execute(value: unknown): Promise<DiscoveryBrowserSnapshot> {
       const action = discoveryBrowserActionSchema.parse(value);

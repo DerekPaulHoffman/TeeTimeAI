@@ -144,6 +144,13 @@ describe("trusted REX anonymous transport selection", () => {
     const typed = { engine: "EXISTING_ADAPTER" };
     expect(bindDiscoveryRecipeBrowserTransport(typed, undefined)).toBe(typed);
   });
+  it("binds response-backed browser proposals to the actual transport and rejects an unverified one", () => {
+    const proposal = { engine: "BROWSER_JSON", browserTransport: "model-choice", responseRows: { path: "data.availability" } };
+    expect(bindDiscoveryRecipeBrowserTransport(proposal, "NATIVE_CHROME")).toEqual({ ...proposal, browserTransport: "NATIVE_CHROME" });
+    expect(bindDiscoveryRecipeBrowserTransport(proposal, "PINNED_HTTP")).toEqual({ ...proposal, browserTransport: "PINNED_HTTP" });
+    expect(proposal.browserTransport).toBe("model-choice");
+    expect(() => bindDiscoveryRecipeBrowserTransport(proposal, undefined)).toThrow("DISCOVERY_BROWSER_TRANSPORT_UNVERIFIED");
+  });
 });
 
 describe("worker fallback persistence, lifetime and independent replay", () => {

@@ -38,4 +38,38 @@ describe("bounded public JSON schema evidence", () => {
     for (const path of ["durationMinutes", "players", "month", "year"]) expect(result.fields.find(field => field.path === path)?.examples).toBeUndefined();
     expect(result.fields.find(field => field.path === "data.durationMinutes")?.examples).toEqual([90]);
   });
+  it("retains closed success envelope scalars before a large nested inventory consumes the schema budget", () => {
+    const inventory = Object.fromEntries(Array.from({ length: 80 }, (_, index) => [`column${index}`, {
+      data: { value: "arbitrary public or private text", nested: { quantity: 9 } },
+    }]));
+    const result = publicResponseSchema({ TeeTimeData: [inventory], ErrorMessage: "", status: "SUCCESS", success: true });
+    expect(result.truncated).toBe(true);
+    expect(result.fields).toContainEqual({ path: "ErrorMessage", type: "string", examples: [""] });
+    expect(result.fields).toContainEqual({ path: "status", type: "string", examples: ["SUCCESS"] });
+    expect(result.fields).toContainEqual({ path: "success", type: "boolean", examples: [true] });
+    expect(result.kind).toBe("SAMPLED_SCHEMA_ONLY");
+    expect(JSON.stringify(result).length).toBeLessThanOrEqual(12000);
+  });
+  it("never exposes arbitrary status or nonempty error text as scalar examples", () => {
+    const result = publicResponseSchema({ status: "Jane Doe", errorMessage: "Jane: jane@example.com", message: "OK",
+      customer: { status: "SUCCESS", ErrorMessage: "" }, data: { status: "ok", ErrorMessage: "", statusCode: 200 } });
+    expect(result.fields.find(field => field.path === "status")?.examples).toBeUndefined();
+    expect(result.fields.find(field => field.path === "errorMessage")?.examples).toBeUndefined();
+    expect(result.fields.find(field => field.path === "message")?.examples).toBeUndefined();
+    expect(result.fields).toContainEqual({ path: "data.status", type: "string", examples: ["ok"] });
+    expect(result.fields).toContainEqual({ path: "data.ErrorMessage", type: "string", examples: [""] });
+    expect(result.fields).toContainEqual({ path: "data.statusCode", type: "number", examples: [200] });
+    for (const text of ["Jane", "jane@example.com", "customer.status"]) expect(JSON.stringify(result)).not.toContain(text);
+  });
+  it("shows observed public time and flag scalars without interpreting their availability semantics", () => {
+    const result = publicResponseSchema({ time_iso: "2026-10-23T17:15:00", utc_datetime: "2026-10-23T21:15:00Z",
+      real_datetime_of_slot: "2026-10-23 17:15:00", is_held: true, is_requestable: false, type: "PERSONAL TEXT",
+      account: { time_iso: "2026-10-23T12:00:00" }, errorMessage: "" });
+    for (const path of ["time_iso", "utc_datetime", "real_datetime_of_slot", "is_held", "is_requestable"]) {
+      expect(result.fields.find(field => field.path === path)?.examples).toHaveLength(1);
+    }
+    expect(JSON.stringify(result)).not.toContain("PERSONAL TEXT");
+    expect(JSON.stringify(result)).not.toContain("12:00:00");
+    expect(result.kind).toBe("SAMPLED_SCHEMA_ONLY");
+  });
 });
