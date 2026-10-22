@@ -165,6 +165,10 @@ function parseSourceDate(value: unknown) {
 /** Reject DST gaps and ambiguous local wall times; an explicit offset disambiguates. */
 export function recipeTimeToInstant(value: unknown, input: AccessExecutionInput) {
   let text = clean(value);
+  // Some public JSON rows use this exact local timestamp spelling. Check the
+  // original string so whitespace cleanup cannot widen its single separator.
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2} (?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{1,9})?)?$/u.test(value))
+    text = value.replace(" ", "T");
   text = text.replace(/(T\d{2}:\d{2}:\d{2})\.(\d{1,9})(?=Z|[+-]\d{2}:\d{2}|$)/u,
     (_, seconds: string, fraction: string) => `${seconds}.${fraction.slice(0, 3).padEnd(3, "0")}`);
   const clock = /^(\d{1,2}):([0-5]\d)(?::([0-5]\d))?\s*(AM|PM)?$/iu.exec(text);

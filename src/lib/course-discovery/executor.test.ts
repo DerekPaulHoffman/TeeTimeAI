@@ -261,6 +261,20 @@ describe("deterministic course recipe execution", () => {
     expect(() => recipeTimeToInstant("2026-11-01T01:30:00", executionInput)).toThrow();
     expect(recipeTimeToInstant("2026-11-01T01:30:00-04:00", executionInput).toISOString()).toBe("2026-11-01T05:30:00.000Z");
   });
+  it("reads exact public local space-separated timestamps through the existing timezone round trip", () => {
+    const input = { ...executionInput, date: "2026-10-23" };
+    for (const value of ["2026-10-23 14:00", "2026-10-23 14:00:00"])
+      expect(recipeTimeToInstant(value, input).toISOString()).toBe("2026-10-23T18:00:00.000Z");
+    expect(recipeTimeToInstant("2026-10-24 21:15:00", { ...input, date: "2026-10-24" }).toISOString()).toBe("2026-10-25T01:15:00.000Z");
+    expect(recipeTimeToInstant("2026-10-23 14:00:00.123456789", input).toISOString()).toBe("2026-10-23T18:00:00.123Z");
+    expect(recipeTimeToInstant("2026-10-23 14:00:00.1", input).toISOString()).toBe("2026-10-23T18:00:00.100Z");
+  });
+  it.each(["2026-03-08 02:30:00", "2026-11-01 01:30:00", "2026-02-30 14:00:00", "2026-13-01 14:00:00",
+    "2026-10-23 24:00:00", "2026-10-23 14:60:00", "2026-10-23 14:00:60", "2026-10-23  14:00:00", "2026-10-23\t14:00:00",
+    " 2026-10-23 14:00:00", "2026-10-23 14:00:00 ", "2026-10-23 14:00:00Z", "2026-10-23 14:00:00-04:00", "10/23/2026 14:00:00",
+    "2026-10-23 14:00:00.1234567890"])("rejects ambiguous, invalid or non-exact space-separated timestamp %s", value => {
+    expect(() => recipeTimeToInstant(value, executionInput)).toThrow();
+  });
 });
 
 const chromeExecutable = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
