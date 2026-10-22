@@ -54,7 +54,7 @@ export async function fetchAcuitySimulatorAvailability(input: SimulatorAvailabil
   const readUrl = new URL("/api/scheduling/v1/availability/times", aggregate ? url.origin : ORIGIN);
   readUrl.search = new URLSearchParams(aggregate
     ? { owner: ownerKey, appointmentTypeId: product.id, calendarId: product.calendarIds[0], startDate: input.date,
-        maxDays: "4", timezone: input.timeZone }
+        maxDays: "1", timezone: input.timeZone }
     : { owner: ownerKey, calendarId: "any", appointmentTypeId: product.id, startDate: input.date, timezone: input.timeZone }).toString();
   let payload: unknown;
   try { payload = JSON.parse(await publicRead(readUrl, "application/json", fetchImpl)); }
@@ -192,23 +192,17 @@ function parseLegacyDate(input: SimulatorAvailabilityInput, envelope: Record<str
 }
 
 function parseAggregateDates(input: SimulatorAvailabilityInput, envelope: Record<string, unknown>, productId: string, maxPartySize: number | null) {
-  const dates = Object.keys(envelope);
-  if (!Object.hasOwn(envelope, input.date) || dates.length > 4) throw schemaError("The public simulator calendar did not return the requested date");
-  const first = Date.parse(`${input.date}T12:00:00Z`);
-  let requested: ReturnType<typeof parseProviderComputedSlots> = [];
-  for (const date of dates) {
-    const day = Date.parse(`${date}T12:00:00Z`);
-    if (!/^\d{4}-\d{2}-\d{2}$/u.test(date) || !Number.isFinite(day) || new Date(day).toISOString().slice(0, 10) !== date ||
-        day < first || day > first + 3 * 86_400_000) throw schemaError("The public simulator calendar returned a date outside its four-day request");
-    const rows = envelope[date];
-    if (!Array.isArray(rows) || rows.length > 300 || rows.some(row => !record(row) ||
-        Object.keys(row).length !== 2 || !Object.hasOwn(row, "time") || !Object.hasOwn(row, "slotsAvailable"))) {
-      throw schemaError("The public simulator calendar returned an unrecognized date row");
-    }
-    const parsed = parseProviderComputedSlots({ input: { ...input, date }, payload: rows, productId, maxPartySize, sourcePrefix: "acuity" });
-    if (date === input.date) requested = parsed;
+  // The public client's selected-day mode returns one explicit date. Its
+  // multi-day mode may skip unavailable days, so it is not a calendar span.
+  if (!Object.hasOwn(envelope, input.date) || Object.keys(envelope).length !== 1) {
+    throw schemaError("The public simulator calendar did not return exactly the requested date");
   }
-  return requested;
+  const rows = envelope[input.date];
+  if (!Array.isArray(rows) || rows.length > 300 || rows.some(row => !record(row) ||
+      Object.keys(row).length !== 2 || !Object.hasOwn(row, "time") || !Object.hasOwn(row, "slotsAvailable"))) {
+    throw schemaError("The public simulator calendar returned an unrecognized date row");
+  }
+  return parseProviderComputedSlots({ input, payload: rows, productId, maxPartySize, sourcePrefix: "acuity" });
 }
 
 /** Read the existing inert BUSINESS object without evaluating its script.

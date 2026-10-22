@@ -152,7 +152,7 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
         url.pathname === "/api/scheduling/v1/availability/times" &&
         exactKeys(url, ["owner", "calendarId", "appointmentTypeId", "startDate", "timezone"], ["maxDays"]) &&
         url.searchParams.get("owner") === acuity.ownerKey && url.searchParams.get("startDate") === input.date &&
-        url.searchParams.get("timezone") === input.timeZone && (!url.searchParams.has("maxDays") || url.searchParams.get("maxDays") === "4") &&
+        url.searchParams.get("timezone") === input.timeZone && (!url.searchParams.has("maxDays") || url.searchParams.get("maxDays") === "1") &&
         (url.searchParams.get("calendarId") === "any" || acuity.resources.some(row => row.id === url.searchParams.get("calendarId"))) &&
         acuity.rentals.some(row => row.id === url.searchParams.get("appointmentTypeId") && row.durationMinutes === input.durationMinutes) &&
         (!adapter || adapter.family === "ACUITY" && adapter.rentalProductIds.includes(url.searchParams.get("appointmentTypeId") ?? ""))) return url;

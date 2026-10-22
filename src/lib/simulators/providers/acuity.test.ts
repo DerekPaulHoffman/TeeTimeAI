@@ -41,8 +41,7 @@ function pooledInput(durationMinutes = 60): SimulatorAvailabilityInput {
 }
 function pooledLanding(value = pooledBusiness()) { return `<script>var BUSINESS = ${JSON.stringify(value)};</script>`; }
 function pooledDays() {
-  return { "2026-10-10": [{ time: "2026-10-10T10:00:00-0400", slotsAvailable: 6 }],
-    "2026-10-11": [], "2026-10-12": [], "2026-10-13": [] };
+  return { "2026-10-10": [{ time: "2026-10-10T10:00:00-0400", slotsAvailable: 6 }] };
 }
 function minuteReservationPool() {
   const value = pooledBusiness();
@@ -115,7 +114,7 @@ describe("explicit public simulator rentals on an opaque any-only pool", () => {
     expect(url.origin).toBe("https://app.acuityscheduling.com");
     expect(url.pathname).toBe("/api/scheduling/v1/availability/times");
     expect(Object.fromEntries(url.searchParams)).toEqual({ owner: "pool1234", appointmentTypeId: String(100 + durationMinutes / 60),
-      calendarId: "any", startDate: input.date, maxDays: "4", timezone: input.timeZone });
+      calendarId: "any", startDate: input.date, maxDays: "1", timezone: input.timeZone });
     expect(result).toMatchObject({ complete: true, slots: [{ resourceId: "ANY", productId: String(100 + durationMinutes / 60), maxPartySize: null }] });
     expect(result.slots).toHaveLength(1);
     expect(result.slots[0].endsAt.getTime() - result.slots[0].startsAt.getTime()).toBe(durationMinutes * 60_000);
@@ -166,14 +165,15 @@ describe("explicit public simulator rentals on an opaque any-only pool", () => {
   });
   it.each([
     {}, { "2026-10-11": [] }, { "2026-10-10": [], "2026-10-14": [] },
-    { "2026-10-10": [], "2026-02-30": [] }, { "2026-10-10": [], "2026-10-11": [{ time: "2026-10-12T10:00:00-0400", slotsAvailable: 1 }] },
-    { "2026-10-10": [], "2026-10-11": [{ time: "2026-10-11T10:00:00-0500", slotsAvailable: 1 }] },
-    { "2026-10-10": [], "2026-10-11": [{ time: "2026-10-11T10:00:00-0400", slotsAvailable: 1, unknown: true }] },
-  ])("rejects incomplete or malformed four-day pooled evidence instead of EMPTY", async payload => {
+    { "2026-10-10": [], "2026-02-30": [] }, { "2026-10-10": [{ time: "2026-10-12T10:00:00-0400", slotsAvailable: 1 }] },
+    { "2026-10-10": [{ time: "2026-10-10T10:00:00-0500", slotsAvailable: 1 }] },
+    { "2026-10-10": [{ time: "2026-10-10T10:00:00-0400", slotsAvailable: 1, unknown: true }] },
+    { "2026-10-10": [], "2026-10-11": [] },
+  ])("rejects incomplete or malformed exact-day pooled evidence instead of EMPTY", async payload => {
     await expect(fetchAcuitySimulatorAvailability(pooledInput(), mockReads(payload, pooledLanding()))).rejects.toMatchObject({ code: "SCHEMA_CHANGED" });
   });
-  it("accepts an explicitly present empty requested pool while checking all returned dates", async () => {
-    const payload = { ...pooledDays(), "2026-10-10": [] };
+  it("accepts only an explicitly present empty requested pool", async () => {
+    const payload = { "2026-10-10": [] };
     expect((await fetchAcuitySimulatorAvailability(pooledInput(), mockReads(payload, pooledLanding()))).slots).toEqual([]);
   });
   it("validates published five/six-hour rentals without expanding supported execution duration", async () => {
@@ -371,8 +371,7 @@ function aggregateBusiness() {
       type: "service", classSize: null as number | null, canChooseQuantity: false, calendarIDs: [11388341] }] } };
 }
 function aggregateDays() {
-  return { "2026-10-10": Array.from({ length: 11 }, (_, index) => ({ time: `2026-10-10T${String(index + 11).padStart(2, "0")}:00:00-0400`, slotsAvailable: 5 })),
-    "2026-10-11": [], "2026-10-12": [], "2026-10-13": [] };
+  return { "2026-10-10": Array.from({ length: 11 }, (_, index) => ({ time: `2026-10-10T${String(index + 11).padStart(2, "0")}:00:00-0400`, slotsAvailable: 5 })) };
 }
 
 const venueRentalUrl = "https://app.acuityscheduling.com/schedule/a66e63ac";
@@ -454,7 +453,7 @@ describe("explicit simulator rentals on a venue-named calendar", () => {
 });
 
 describe("Acuity public simulator availability", () => {
-  it("uses the exact tenant calendar and witnessed four-day public mode for an opaque aggregate rental", async () => {
+  it("uses the exact tenant calendar and witnessed selected-day public mode for an opaque aggregate rental", async () => {
     const value = aggregateBusiness();
     const projected = projectAcuityPublicConfiguration(landing(value), aggregateUrl);
     expect(projected).toMatchObject({ family: "ACUITY", ownerKey: "a66e63ac", maxPartySize: null,
@@ -468,7 +467,7 @@ describe("Acuity public simulator availability", () => {
     expect(request.origin).toBe("https://onegolfhaven.as.me");
     expect(request.pathname).toBe("/api/scheduling/v1/availability/times");
     expect([...request.searchParams]).toEqual([["owner", "a66e63ac"], ["appointmentTypeId", "73234482"],
-      ["calendarId", "11388341"], ["startDate", "2026-10-10"], ["maxDays", "4"], ["timezone", "America/New_York"]]);
+      ["calendarId", "11388341"], ["startDate", "2026-10-10"], ["maxDays", "1"], ["timezone", "America/New_York"]]);
     expect(fetchImpl.mock.calls[1][1]).toMatchObject({ method: "GET", redirect: "manual", cache: "no-store" });
     expect(new Headers(fetchImpl.mock.calls[1][1]?.headers).has("Cookie")).toBe(false);
     expect(new Headers(fetchImpl.mock.calls[1][1]?.headers).has("Authorization")).toBe(false);
@@ -546,13 +545,15 @@ describe("Acuity public simulator availability", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
   it.each([
+    ["absent requested date", {}],
     ["missing requested date", { "2026-10-11": [] }],
     ["null requested date", { "2026-10-10": null }],
     ["foreign fifth date", { ...aggregateDays(), "2026-10-14": [] }],
     ["malformed date key", { "2026-10-10": [], "2026-10-0x": [] }],
-    ["adjacent mismatched local date", { "2026-10-10": [], "2026-10-11": [{ time: "2026-10-10T11:00:00-0400", slotsAvailable: 5 }] }],
-    ["adjacent wrong timezone offset", { "2026-10-10": [], "2026-10-11": [{ time: "2026-10-11T11:00:00-0500", slotsAvailable: 5 }] }],
-    ["adjacent negative count", { "2026-10-10": [], "2026-10-11": [{ time: "2026-10-11T11:00:00-0400", slotsAvailable: -1 }] }],
+    ["additional adjacent day", { "2026-10-10": [], "2026-10-11": [] }],
+    ["mismatched local date", { "2026-10-10": [{ time: "2026-10-11T11:00:00-0400", slotsAvailable: 5 }] }],
+    ["wrong timezone offset", { "2026-10-10": [{ time: "2026-10-10T11:00:00-0500", slotsAvailable: 5 }] }],
+    ["negative count", { "2026-10-10": [{ time: "2026-10-10T11:00:00-0400", slotsAvailable: -1 }] }],
     ["selected string count", { "2026-10-10": [{ time: "2026-10-10T11:00:00-0400", slotsAvailable: "5" }] }],
     ["unrecognized row field", { "2026-10-10": [{ time: "2026-10-10T11:00:00-0400", slotsAvailable: 5, private: true }] }],
   ])("rejects aggregate %s", async (_label, payload) => {

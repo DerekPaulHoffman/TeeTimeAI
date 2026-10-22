@@ -5,6 +5,7 @@ import { recipeTimeToInstant, venueProofMatches } from "./executor";
 import { accessExecutionDiagnosticSchema, parseAccessRecipe } from "./recipe";
 import { deriveTeeItUpOfficialIdentityProof } from "./teeitup-official-identity";
 import { SimulatorAvailabilityError } from "@/lib/simulators/providers/types";
+import * as acuityProvider from "@/lib/simulators/providers/acuity";
 
 const input = { date: "2030-10-22", timeZone: "America/New_York", players: 2, startTime: "10:00", endTime: "20:00" };
 const now = () => new Date("2030-10-20T12:00:00Z");
@@ -34,6 +35,11 @@ function acuityHtml(overrides: Record<string, unknown> = {}) {
     includesAdminOnly: false, isExpired: false, description: "", calendars: { "Example Simulator": [{ id: 89, name: "Bay 1", timezone: input.timeZone }] },
     appointmentTypes: { "": [{ id: 67, name: "Simulator Rental", duration: 60, active: true, private: false, type: "service",
       classSize: null, canChooseQuantity: false, calendarIDs: [89] }] }, ...overrides })};</script>`;
+}
+function pooledAcuityHtml() {
+  return acuityHtml({ calendars: { "": [{ id: "any", name: "Any available", timezone: "" }] },
+    appointmentTypes: { "": [{ id: 67, name: "Simulator Booking 1 Hour", duration: 60, active: true, private: false, type: "service",
+      classSize: null, canChooseQuantity: false, calendarIDs: ["any"], paddingBefore: 0, paddingAfter: 0 }] } });
 }
 function reads(recipe: ExistingAdapterRecipe, payload: unknown, html?: string) {
   return vi.fn<typeof fetch>(async value => {
@@ -258,14 +264,12 @@ describe("fixed existing adapter recipes", () => {
     expect(new URL(String(fetch.mock.calls.at(-1)![0])).searchParams.has("players")).toBe(false);
   });
   it("inspects and independently executes a pooled public rental without inventing resource or player counts", async () => {
-    const html = acuityHtml({ calendars: { "": [{ id: "any", name: "Any available", timezone: "" }] },
-      appointmentTypes: { "": [{ id: 67, name: "Simulator Booking 1 Hour", duration: 60, active: true, private: false, type: "service",
-        classSize: null, canChooseQuantity: false, calendarIDs: ["any"], paddingBefore: 0, paddingAfter: 0 }] } });
+    const html = pooledAcuityHtml();
     const fetch = vi.fn<typeof globalThis.fetch>(async value => {
       const url = new URL(String(value));
       if (url.pathname.startsWith("/schedule/")) return new Response(html, { headers: { "content-type": "text/html" } });
       expect(url.pathname).toBe("/api/scheduling/v1/availability/times");
-      expect(url.searchParams.get("calendarId")).toBe("any"); expect(url.searchParams.get("maxDays")).toBe("4");
+      expect(url.searchParams.get("calendarId")).toBe("any"); expect(url.searchParams.get("maxDays")).toBe("1");
       expect(url.searchParams.has("players")).toBe(false);
       const date = url.searchParams.get("startDate")!;
       return Response.json({ [date]: [{ time: `${date}T11:00:00-0400`, slotsAvailable: 6 }] });
@@ -281,6 +285,41 @@ describe("fixed existing adapter recipes", () => {
     }
     expect(fetch).toHaveBeenCalledTimes(7);
   });
+  it.each([
+    ["missing date", {}],
+    ["other date", { "2030-10-23": [] }],
+    ["extra date", { [input.date]: [], "2030-10-23": [] }],
+    ["wrong local date", { [input.date]: [{ time: "2030-10-23T11:00:00-0400", slotsAvailable: 1 }] }],
+    ["wrong timezone", { [input.date]: [{ time: "2030-10-22T11:00:00-0500", slotsAvailable: 1 }] }],
+    ["unknown field", { [input.date]: [{ time: "2030-10-22T11:00:00-0400", slotsAvailable: 1, unknown: true }] }],
+  ])("keeps pooled %s incomplete rather than empty", async (_label, payload) => {
+    const result = await executeExistingAdapterRecipe(acuity, { ...input, durationMinutes: 60 },
+      { ...deps, fetch: reads(acuity, payload, pooledAcuityHtml()) });
+    expect(result).toMatchObject({ status: "INCOMPLETE", complete: false, slots: [], evidence: { completeVerified: false, dateVerified: false } });
+  });
+  it.each(["old multi-day mode", "other maxDays", "extra parameter", "other date", "other timezone"])(
+    "denies pooled %s before transport dispatch", async mode => {
+      const original = acuityProvider.fetchAcuitySimulatorAvailability;
+      const spy = vi.spyOn(acuityProvider, "fetchAcuitySimulatorAvailability").mockImplementationOnce(async (providerInput, read = globalThis.fetch) =>
+        original(providerInput, (async (value, init) => {
+          const url = new URL(String(value));
+          if (url.pathname.endsWith("/availability/times")) {
+            if (mode === "old multi-day mode") url.searchParams.set("maxDays", "4");
+            if (mode === "other maxDays") url.searchParams.set("maxDays", "2");
+            if (mode === "extra parameter") url.searchParams.set("extra", "1");
+            if (mode === "other date") url.searchParams.set("startDate", "2030-10-23");
+            if (mode === "other timezone") url.searchParams.set("timezone", "America/Chicago");
+          }
+          return read(url, init);
+        }) as typeof fetch));
+      const fetch = reads(acuity, { [input.date]: [] }, pooledAcuityHtml());
+      try {
+        const result = await executeExistingAdapterRecipe(acuity, { ...input, durationMinutes: 60 }, { ...deps, fetch });
+        expect(result).toMatchObject({ status: "INCOMPLETE", complete: false, slots: [], evidence: { reason: "UNSCOPED_ADAPTER_REQUEST" } });
+        expect(fetch).toHaveBeenCalledTimes(2);
+        expect(fetch.mock.calls.every(([value]) => new URL(String(value)).pathname.startsWith("/schedule/"))).toBe(true);
+      } finally { spy.mockRestore(); }
+    });
   it.each([{ name: "Another Simulator" }, { ownerKey: "another123" }, { id: 999 }, { timezone: "America/Chicago" }])(
     "requires current Acuity venue/tenant/timezone identity", async overrides => {
       const fetch = reads(acuity, {}, acuityHtml(overrides));
