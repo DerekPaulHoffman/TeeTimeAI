@@ -151,8 +151,8 @@ function headerMap(value: unknown): Map<string, string> | null {
 
 type Read = { facts: Record<string, unknown>; headers: Map<string, string>; signature: string };
 type ProofState = { version: number; kind: "script" } |
-  { version: number; kind: "read"; request: object; signature: string } |
-  { version: number; kind: "preflight"; request: object; source: object; signature: string };
+  { revocationEpoch: number; kind: "read"; request: object; signature: string } |
+  { revocationEpoch: number; kind: "preflight"; request: object; source: object; signature: string };
 
 /** Prototype boundary only: constructing this scope does not brand native
  * requests. Integration must supply controller-private WeakMap attestors and
@@ -160,11 +160,11 @@ type ProofState = { version: number; kind: "script" } |
 export function createPublicClientReadHeaderScope(document: object, attestors: PublicClientReadHeaderAttestors) {
   const sources = new Map<object, string>(), publicValues = new Set<string>();
   const proofs = new WeakMap<object, ProofState>(), failedSources = new WeakSet<object>(), failedRequests = new WeakSet<object>();
-  let version = 0, closed = false, loader: object | null = null, origin = "";
+  let version = 0, revocationEpoch = 0, closed = false, loader: object | null = null, origin = "";
   const attest = (kind: keyof PublicClientReadHeaderAttestors, value: object) => {
     try { return data(attestors[kind](value)); } catch { return null; }
   };
-  const invalidate = () => { version++; sources.clear(); publicValues.clear(); };
+  const invalidate = () => { version++; revocationEpoch++; sources.clear(); publicValues.clear(); };
   const currentDocument = () => {
     const facts = attest("document", document);
     if (closed || !facts || facts.live !== true || facts.rootFrame !== true || !token(facts.loader) ||
@@ -254,17 +254,21 @@ export function createPublicClientReadHeaderScope(document: object, attestors: P
     proveRead(request: object): PublicClientReadHeaderProof | null {
       if (!currentSources()) return null;
       const actual = read(request);
-      return actual ? proof({ kind: "read", version, request, signature: actual.signature }) : null;
+      return actual ? proof({ kind: "read", revocationEpoch, request, signature: actual.signature }) : null;
     },
     provePreflight(request: object, source: object): PublicClientReadHeaderProof | null {
       if (!currentSources()) return null;
       const signature = preflight(request, source);
-      return signature ? proof({ kind: "preflight", version, request, source, signature }) : null;
+      return signature ? proof({ kind: "preflight", revocationEpoch, request, source, signature }) : null;
     },
     /** Call again inside queued dispatch, after acquiring the ordinary lease. */
     isCurrent(value: PublicClientReadHeaderProof): boolean {
       const state = proofs.get(value);
-      if (!state || state.version !== version || !currentSources()) return false;
+      // Adding a valid witness changes script captures, not queued read authority.
+      // Destructive invalidation still permanently revokes every old proof; all
+      // current sources and the exact private request are rechecked below.
+      if (!state || (state.kind === "script" ? state.version !== version : state.revocationEpoch !== revocationEpoch) ||
+          !currentSources()) return false;
       if (state.kind === "script") return true;
       const signature = state.kind === "read" ? read(state.request)?.signature : preflight(state.request, state.source);
       if (signature !== state.signature) { failedRequests.add(state.request); return false; }

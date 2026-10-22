@@ -10,6 +10,7 @@ const flagKey = /^(?:available|isAvailable|hasNextPage|hasMore|complete|isComple
 const statusKey = /^(?:status|statusCode|httpStatus)$/iu;
 const errorKey = /^(?:error|errorMessage)$/iu;
 const successValue = /^(?:SUCCESS|success|Success|OK|ok|Ok)$/u;
+const publicSlotType = /^(?:book|request)$/u;
 const dateValue = /^(?:\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:?\d{2})?)?|\d{1,2}:\d{2}(?::\d{2})?(?:\s?[AP]M)?)$/iu;
 function numericExample(key: string, value: number) {
   if (statusKey.test(key) && Number.isSafeInteger(value) && (value === 0 || value === 1 || value >= 100 && value <= 599)) return value;
@@ -45,8 +46,12 @@ export function publicResponseSchema(value: unknown): PublicResponseSchema {
       // prefix. Actual inventory validation always reads the original body.
       const shapes = new Set<string>();
       for (const child of item.slice(0, 32)) {
-        const shape = child && typeof child === "object" && !Array.isArray(child)
+        let shape = child && typeof child === "object" && !Array.isArray(child)
           ? Object.keys(child).slice(0, 80).sort().join("|") : Array.isArray(child) ? "array" : child === null ? "null" : typeof child;
+        // Two closed public row types may have identical keys. Keep one
+        // representative of each without sampling arbitrary string values.
+        if (child && typeof child === "object" && !Array.isArray(child) &&
+            typeof child.type === "string" && publicSlotType.test(child.type)) shape += `|type:${child.type}`;
         if (shapes.has(shape)) continue;
         if (shapes.size >= 3) { truncated = true; break; }
         shapes.add(shape); visit(child, `${path}[]`, "", depth + 1);
@@ -71,6 +76,7 @@ export function publicResponseSchema(value: unknown): PublicResponseSchema {
     if (typeof item === "string") {
       const example = errorKey.test(key) && item === "" ? item
         : statusKey.test(key) && successValue.test(item) ? item
+        : key === "type" && publicSlotType.test(item) ? item
         : item.length <= 80 && dateKey.test(key) && dateValue.test(item) ? item
         : key === "__typename" && /^[A-Za-z_][A-Za-z0-9_]{0,79}$/u.test(item) ? item : undefined;
       record(path, "string", example); return;

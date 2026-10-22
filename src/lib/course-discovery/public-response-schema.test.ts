@@ -72,4 +72,14 @@ describe("bounded public JSON schema evidence", () => {
     expect(JSON.stringify(result)).not.toContain("12:00:00");
     expect(result.kind).toBe("SAMPLED_SCHEMA_ONLY");
   });
+  it("samples only the closed book/request type words without assuming they occur or imply availability", () => {
+    const value = { rows: [{ type: "request" }, { type: "book" }, { type: "Jane" }],
+      account: { type: "book" }, other: { type: "arbitrary_unknown_type" } };
+    const result = publicResponseSchema(value);
+    expect(result.fields.find(field => field.path === "rows[].type")?.examples).toEqual(["request", "book"]);
+    expect(result.fields.find(field => field.path === "other.type")?.examples).toBeUndefined();
+    for (const text of ["Jane", "arbitrary_unknown_type", "account.type"]) expect(JSON.stringify(result)).not.toContain(text);
+    expect(publicResponseSchema({ rows: [{ type: "something_else" }] }).fields.find(field => field.path === "rows[].type")?.examples).toBeUndefined();
+    expect(result.kind).toBe("SAMPLED_SCHEMA_ONLY");
+  });
 });

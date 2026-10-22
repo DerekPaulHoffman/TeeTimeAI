@@ -239,15 +239,19 @@ describe("public client read header value publicity", () => {
     expect(f.scope.isCurrent(proof)).toBe(true);
   });
 
-  it.each(["clear", "close", "source-failure", "source-replaced", "source-url-replaced", "document-retired", "loader-replaced", "foreign-document", "unsafe-route"] as const)(
+  it.each(["clear", "close", "source-failure", "source-removed", "source-replaced", "source-url-replaced", "additional-source-failure", "document-retired", "loader-replaced", "foreign-document", "unsafe-route"] as const)(
     "invalidates queued proofs on %s without healing old authority", action => {
       const f = fixture(); const capture = f.capture()!; const read = f.scope.proveRead(f.request)!;
       const preflight = f.scope.provePreflight(f.options, f.request)!;
+      const additional = {}, additionalFacts = { ...f.scriptFacts, url: "https://booking.example.com/chunk.js", body: source("additional-public-literal") };
+      f.scripts.set(additional, additionalFacts); expect(f.scope.captureScript(additional)).not.toBeNull();
       if (action === "clear") f.scope.invalidate();
       if (action === "close") f.scope.close();
       if (action === "source-failure") f.scriptFacts.live = false;
+      if (action === "source-removed") f.scripts.delete(f.script);
       if (action === "source-replaced") f.scriptFacts.body = source("replacement-public-literal");
       if (action === "source-url-replaced") f.scriptFacts.url = "https://booking.example.com/replacement.js";
+      if (action === "additional-source-failure") additionalFacts.live = false;
       if (action === "document-retired") f.documentFacts.live = false;
       if (action === "loader-replaced") f.documentFacts.loader = {};
       if (action === "foreign-document") f.documentFacts.url = "https://foreign.example.com/calendar";
@@ -256,16 +260,71 @@ describe("public client read header value publicity", () => {
       expect(f.scope.isCurrent(capture)).toBe(false);
       f.documentFacts.live = true; f.documentFacts.loader = f.loader; f.documentFacts.url = "https://booking.example.com/calendar";
       f.scriptFacts.live = true; f.scriptFacts.body = source();
+      const renewed = {}; f.scripts.set(renewed, { ...f.scriptFacts, url: "https://booking.example.com/renewed.js" });
+      f.scope.captureScript(renewed);
       expect(f.scope.isCurrent(read)).toBe(false);
+      expect(f.scope.isCurrent(preflight)).toBe(false);
     });
 
-  it("changes the opaque version when a newly captured source is added and rechecks cancellation after lease wait", () => {
-    const f = fixture(); f.capture(); const old = f.scope.proveRead(f.request)!;
+  it.each([publicLiteral, "second-public-literal"])("keeps queued read and preflight proofs current after additive public script capture: %s", async literal => {
+    const f = fixture(); const capture = f.capture()!;
+    const read = f.scope.proveRead(f.request)!, preflight = f.scope.provePreflight(f.options, f.request)!;
+    let release!: () => void;
+    const wait = new Promise<void>(resolve => { release = resolve; });
+    const queued = (async () => { await wait; return [f.scope.isCurrent(read), f.scope.isCurrent(preflight)]; })();
+    const extra = {}; f.scripts.set(extra, { ...f.scriptFacts, url: "https://booking.example.com/chunk.js", body: source(literal) });
+    const additional = f.scope.captureScript(extra);
+    expect(additional).not.toBeNull();
+    release(); expect(await queued).toEqual([true, true]);
+    // Script captures remain version-specific; read proofs recheck all current
+    // witnesses and the unchanged private request rather than borrowing that version.
+    expect(f.scope.isCurrent(capture)).toBe(false); expect(f.scope.isCurrent(additional!)).toBe(true);
+    expect(JSON.stringify([read, preflight, additional])).toBe("[{},{},{}]");
+  });
+
+  it("does not preserve queued authority after an additive script when request cancellation occurs", () => {
+    const f = fixture(); f.capture(); const current = f.scope.proveRead(f.request)!;
+    const preflight = f.scope.provePreflight(f.options, f.request)!;
     const extra = {}; f.scripts.set(extra, { ...f.scriptFacts, body: source("second-public-literal") });
-    expect(f.scope.captureScript(extra)).not.toBeNull(); expect(f.scope.isCurrent(old)).toBe(false);
-    const current = f.scope.proveRead(f.request)!; expect(f.scope.isCurrent(current)).toBe(true);
+    expect(f.scope.captureScript(extra)).not.toBeNull();
     f.requestFacts.live = false; expect(f.scope.isCurrent(current)).toBe(false);
+    expect(f.scope.isCurrent(preflight)).toBe(false);
     f.requestFacts.live = true; expect(f.scope.isCurrent(current)).toBe(false);
+    expect(f.scope.isCurrent(preflight)).toBe(false);
     expect(f.scope.proveRead(f.request)).toBeNull();
+  });
+
+  it.each(["url", "public-key", "authorization", "duplicate-header", "root", "loader", "document", "body", "resource-type"] as const)(
+    "rechecks unchanged private request facts after additive capture: %s", change => {
+      const f = fixture(); f.capture();
+      const read = f.scope.proveRead(f.request)!, preflight = f.scope.provePreflight(f.options, f.request)!;
+      const extra = {}; f.scripts.set(extra, { ...f.scriptFacts, body: source("second-public-literal") });
+      f.scope.captureScript(extra);
+      const original = { ...f.requestFacts };
+      if (change === "url") f.requestFacts.url = "https://api.example.com/public/other";
+      if (change === "public-key") replaceHeader(f, "x-api-key", "second-public-literal");
+      if (change === "authorization") replaceHeader(f, "authorization", "Bearer real-value");
+      if (change === "duplicate-header") f.requestFacts.headers = [...f.requestFacts.headers, ["X-API-Key", publicLiteral]];
+      if (change === "root") f.requestFacts.rootFrame = false;
+      if (change === "loader") f.requestFacts.loader = {};
+      if (change === "document") f.requestFacts.document = {};
+      if (change === "body") f.requestFacts.hasBody = true;
+      if (change === "resource-type") f.requestFacts.resourceType = "xhr";
+      expect(f.scope.isCurrent(read)).toBe(false); expect(f.scope.isCurrent(preflight)).toBe(false);
+      Object.assign(f.requestFacts, original);
+      expect(f.scope.isCurrent(read)).toBe(false); expect(f.scope.isCurrent(preflight)).toBe(false);
+      expect(f.scope.proveRead(f.request)).toBeNull();
+    });
+
+  it.each(["source-correlation", "requested-headers"] as const)("rechecks exact preflight facts after additive capture: %s", change => {
+    const f = fixture(); f.capture();
+    const read = f.scope.proveRead(f.request)!, preflight = f.scope.provePreflight(f.options, f.request)!;
+    const extra = {}; f.scripts.set(extra, { ...f.scriptFacts, body: source("second-public-literal") }); f.scope.captureScript(extra);
+    const original = { ...f.optionsFacts };
+    if (change === "source-correlation") f.optionsFacts.sourceRequest = {};
+    if (change === "requested-headers") f.optionsFacts.headers = [...f.optionsFacts.headers, ["Authorization", "Bearer null"]];
+    expect(f.scope.isCurrent(preflight)).toBe(false); expect(f.scope.isCurrent(read)).toBe(true);
+    Object.assign(f.optionsFacts, original);
+    expect(f.scope.isCurrent(preflight)).toBe(false); expect(f.scope.provePreflight(f.options, f.request)).toBeNull();
   });
 });
