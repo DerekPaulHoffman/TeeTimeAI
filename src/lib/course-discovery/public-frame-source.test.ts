@@ -10,6 +10,27 @@ describe("official public iframe source navigation", () => {
     expect(read()).toBe(entry.src);
     expect(read({ ...entry, src: "/availability", label: "Tee time booking" })).toBe("https://venue.example/availability");
   });
+  it("accepts the observed simulator-bay iframe title while preserving source and public-entry fences", () => {
+    const src = "https://app.acuityscheduling.com/schedule.php?owner=35639488";
+    const frame = { ...entry, src, label: "Book a simulator bay or lesson with COR Golf" };
+    expect(read(frame)).toBe(src);
+    expect(read({ ...frame, label: "Book a simulator bay with Example Golf" })).toBe(src);
+    for (const rejected of [
+      { ...frame, visible: false }, { ...frame, srcdoc: true },
+      { ...frame, label: "Sign in to book a simulator bay" },
+      { ...frame, label: "Book a simulator bay checkout" },
+      { ...frame, src: "https://app.acuityscheduling.com/private?token=secret" },
+      { ...frame, src: "https://app.acuityscheduling.com/account?owner=35639488" },
+      { ...frame, src: "https://app.acuityscheduling.com/login?owner=35639488" },
+      { ...frame, src: "https://app.acuityscheduling.com/checkout?owner=35639488" },
+      { ...frame, src: `${src}&token=secret` },
+      { ...frame, src: src.replace("https://", "http://") },
+      { ...frame, src: src.replace("https://", "https://user:secret@") },
+    ]) expect(read(rejected)).toBeUndefined();
+    expect(read(frame, document, "https://venue.example/old")).toBeUndefined();
+    expect(read(frame, "https://other.example/book", "https://other.example/book")).toBeUndefined();
+    expect(read({ ...frame, label: "COR Golf lesson video" })).toBeUndefined();
+  });
   it("exposes a visible unlabeled v2 public entry exactly as observed without inventing a legacy route", () => {
     const src = "https://c70350ae-111b-4722-b4d0-c74be760d7ec.book-v2.teeitup.golf/";
     expect(read({ ...entry, src })).toBe(src);

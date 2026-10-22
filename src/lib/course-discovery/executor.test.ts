@@ -418,6 +418,24 @@ describe.runIf(existsSync(chromeExecutable))("isolated browser recipe replay", (
     expect(result.status).toBe(expected);
     expect(result.evidence.dateVerified).toBe(expected === "AVAILABLE");
   }, 20_000);
+  it.each([
+    ["October 2026", "22", "button", "days daySelected", "AVAILABLE"],
+    ["October 2026", "21", "button", "days daySelected", "INCOMPLETE"],
+    ["September 2026", "22", "button", "days daySelected", "INCOMPLETE"],
+    ["October 2025", "22", "button", "days daySelected", "INCOMPLETE"],
+    ["October 2026", "22", "button", "days", "INCOMPLETE"],
+    ["October 2026", "22", "button", "daySelected", "INCOMPLETE"],
+    ["October 2026", "22", "button", "days daySelectedOther", "INCOMPLETE"],
+    ["October 2026", "22", "span", "days daySelected", "INCOMPLETE"],
+  ])("proves observed button calendar selected-state %s/%s in %s.%s", async (monthYear, day, tag, classes, expected) => {
+    const selected = recipe();
+    selected.proof.date = { kind: "DATE_PARTS", monthYear: { selector: "#month-year" }, day: { selector: "#selected-day" } };
+    const fixture = html.replace('<input id="date" value="2026-10-22">',
+      `<div class="calendar"><div id="month-year">${monthYear}</div><${tag} id="selected-day" class="${classes}">${day}</${tag}></div>`);
+    const result = await executeAccessRecipe(selected, executionInput, browserDeps(fixture));
+    expect(result.status).toBe(expected);
+    expect(result.evidence.dateVerified).toBe(expected === "AVAILABLE");
+  }, 20_000);
   it.each(["PINNED_HTTP", "NATIVE_CHROME"] as const)("allows a bounded large %s public build script while retaining smaller data caps", async browserTransport => {
     const controller = nativeControllerFixture();
     const selected = recipe();

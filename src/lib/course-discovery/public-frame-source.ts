@@ -35,7 +35,7 @@ export function publicFrameSource(input: { src: string; label: string; visible: 
     const teeItUpPlay = officialDocument && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.play\.teeitup\.com$/u.test(parsed.hostname) &&
       parsed.pathname === "/" && !parsed.search && !parsed.hash;
     const knownEntry = Boolean(parseTeeItUpRecipeSource(url) || parseLightspeedSource(url) || teeItUpV2 || teeItUpPlay);
-    const labelled = /\b(?:tee\s*times?|booking|availability|book\s+(?:a\s+)?bay|simulator\s+rentals?)\b/iu.test(input.label);
+    const labelled = /\b(?:tee\s*times?|booking|availability|book\s+(?:a\s+)?(?:simulator\s+)?bay|simulator\s+rentals?)\b/iu.test(input.label);
     if ((!knownEntry && !labelled) || !isPublicAvailabilityNavigation(url, input.label || "Public tee time availability")) return;
     return url;
   } catch { return; }

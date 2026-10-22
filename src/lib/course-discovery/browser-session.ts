@@ -1,10 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
+import { describePublicUrlRejection, safePublicUrlRejectionDiagnostic } from "../../../scripts/automation/course-discovery-diagnostics.mjs";
 import type { Browser, Locator } from "@playwright/test";
 import { z } from "zod";
 import { createAddressPinnedPublicFetchTransport } from "@/lib/automation/address-pinned-public-fetch";
 import { createPassfactoryPublicReadPolicy, isIncidentalBrowserRequest, isNonEvidenceBrowserResource } from "@/lib/automation/passfactory-public-read-policy";
 import { interactiveControlKind, isAnonymousBrowserReadPost } from "@/lib/automation/simulator-interactive-browser";
 import { addVerifiedMindbodyReadHeaders } from "@/lib/automation/mindbody-public-read-policy";
+import { isRexAnonymousPlaceholderRead, isRexNamespace, isRexPublicBrowserReadPost } from "@/lib/automation/rex-public-read-policy";
 import { createUSchedulePublicReadPolicy } from "@/lib/automation/uschedule-public-read-policy";
 import { sanitizeResponderText } from "@/lib/automation/course-support-responder-policy";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
@@ -114,8 +116,10 @@ export function sameDiscoveryMainDocument(observedUrl: string, currentUrl: strin
 export type DiscoveryBrowserSnapshot = {
   url: string; text: string; controls: Array<{ target: string; selector: string; kind: string; name: string; label: string; href?: string; options?: Array<{ value: string; label: string }>; currentValue?: string; product?: { selector: string; durationMinutes: number } }>;
   responses: Array<{ url: string; status: number; method: string; body?: unknown; bodyOmitted?: true; schemaEvidence?: PublicResponseSchema; schemaEvidenceOmitted?: true }>;
-  requests: Array<{ url: string; method: string; resourceType: string; status?: number; blockedReason?: string; body?: unknown }>;
-  requestFailures?: Array<{ reason: string; resourceType: string; url?: string }>;
+  requests: Array<{ url: string; method: string; resourceType: string; status?: number; blockedReason?: string; body?: unknown;
+    urlRejection?: ReturnType<typeof safePublicUrlRejectionDiagnostic> }>;
+  requestFailures?: Array<{ reason: string; resourceType: string; method?: string; url?: string;
+    urlRejection?: ReturnType<typeof safePublicUrlRejectionDiagnostic> }>;
   nativeFirstFatal?: NativeFirstFatal;
   nativeRejectedRequests?: NativeRequestDiagnostic[];
   officialSourceDiagnostic?: OfficialSourceDiagnostic;
@@ -330,7 +334,11 @@ export async function createCourseDiscoveryBrowserSession(input: {
       redirectRouting?.prepare(request.frame());
       if (!cpsScope.authorize(transportUrl, request.redirectedFrom()?.url())) throw new Error("UNOBSERVED_CPS_SESSION");
       if (cpsSessionKey(transportUrl) && !nativeProxy) throw new Error("CPS_NATIVE_BROWSER_REQUIRED");
-      if (!isSafeRecipeUrl(requestUrl) && !isSafeBrowserAssetUrl(requestUrl, request.resourceType(), request.method())) throw new Error("UNSAFE_URL");
+      if (!isSafeRecipeUrl(requestUrl) && !isSafeBrowserAssetUrl(requestUrl, request.resourceType(), request.method())) {
+        metadata.urlRejection = describePublicUrlRejection(request.url(), requestUrl, request.method(), request.resourceType(), "BROWSER_REQUEST_URL",
+          { recipe: isSafeRecipeUrl, asset: isSafeBrowserAssetUrl });
+        throw new Error("UNSAFE_URL");
+      }
       const url = new URL(requestUrl);
       if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
         officialSourceDiagnostic = undefined;
@@ -378,12 +386,15 @@ export async function createCourseDiscoveryBrowserSession(input: {
       if (isSafeRecipeUrl(frameUrl)) passfactory.observeWidgetUrl(frameUrl);
       const headers = new Headers();
       const requestHeaders = request.headers();
-      if (nativeProxy && Object.keys(requestHeaders).some(key => /^(?:authorization|proxy-authorization|x-api-key)$/iu.test(key))) throw new Error("CREDENTIAL_HEADERS");
+      const body = request.postData() ?? undefined;
+      if (nativeProxy && isRexNamespace(url) && method === "POST" &&
+          !isRexPublicBrowserReadPost(url, method, requestHeaders, body ?? "", frameUrl)) throw new Error("UNSAFE_METHOD");
+      const rexPlaceholder = nativeProxy && isRexAnonymousPlaceholderRead(url, method, requestHeaders, body ?? "", frameUrl);
+      if (nativeProxy && !rexPlaceholder && Object.keys(requestHeaders).some(key => /^(?:authorization|proxy-authorization|x-api-key)$/iu.test(key))) throw new Error("CREDENTIAL_HEADERS");
       if (ezlinks.handles(url) && Object.keys(requestHeaders).some(key =>
         !(nativeProxy && key.toLowerCase() === "cookie") && /authorization|cookie|token|api.?key|secret|credential|next-action|csrf|session/iu.test(key)))
         throw new Error("CREDENTIAL_HEADERS");
       for (const key of ["accept", "content-type", "origin"]) if (requestHeaders[key]) headers.set(key, requestHeaders[key]);
-      const body = request.postData() ?? undefined;
       const controllerNonce = requestHeaders[ezLinksReadHeader];
       if (controllerNonce !== undefined) {
         ezCall = ezControllerRead;
@@ -423,7 +434,11 @@ export async function createCourseDiscoveryBrowserSession(input: {
         }
         const transport = deps.fetch ?? createAddressPinnedPublicFetchTransport({
           parseUrl: value => {
-            if (!isSafeRecipeUrl(value) && !isSafeBrowserAssetUrl(value, request.resourceType(), method)) throw new Error("UNSAFE_URL");
+            if (!isSafeRecipeUrl(value) && !isSafeBrowserAssetUrl(value, request.resourceType(), method)) {
+              metadata.urlRejection = describePublicUrlRejection(value, value, method, request.resourceType(), "PINNED_TRANSPORT_URL",
+                { recipe: isSafeRecipeUrl, asset: isSafeBrowserAssetUrl });
+              throw new Error("UNSAFE_URL");
+            }
             return new URL(value);
           },
           maxResponseBytes: responseLimit, timeoutMs: 15_000, redirectLimit: 0, authorizeReadPost: readPost,
@@ -551,7 +566,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
       blockedRequests++;
       metadata.blockedReason = error instanceof Error && /^[A-Z_]{1,80}$/u.test(error.message) ? error.message : "REQUEST_FAILED";
       const failureUrl = redactDiscoveryFailureUrl(requestUrl, request.resourceType());
-      requestFailures.push({ reason: metadata.blockedReason, resourceType: request.resourceType(), ...(failureUrl ? { url: failureUrl } : {}) });
+      if (metadata.urlRejection) metadata.url = failureUrl ?? "";
+      requestFailures.push({ reason: metadata.blockedReason, resourceType: request.resourceType(), method: request.method(),
+        ...(failureUrl ? { url: failureUrl } : {}), ...(metadata.urlRejection ? { urlRejection: safePublicUrlRejectionDiagnostic(metadata.urlRejection) } : {}) });
       if (requestFailures.length > 12) requestFailures.shift();
       deps.onRequestFailure?.({ url: metadata.url, resourceType: metadata.resourceType, reason: metadata.blockedReason });
       recordRequest(metadata, true);

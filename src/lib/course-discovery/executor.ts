@@ -3,6 +3,7 @@ import type { Browser, Locator } from "@playwright/test";
 import { createAddressPinnedPublicFetchTransport } from "@/lib/automation/address-pinned-public-fetch";
 import { createPassfactoryPublicReadPolicy, isIncidentalBrowserRequest, isNonEvidenceBrowserResource } from "@/lib/automation/passfactory-public-read-policy";
 import { isAnonymousBrowserReadPost } from "@/lib/automation/simulator-interactive-browser";
+import { isRexAnonymousPlaceholderRead, isRexNamespace, isRexPublicBrowserReadPost } from "@/lib/automation/rex-public-read-policy";
 import { addVerifiedMindbodyReadHeaders } from "@/lib/automation/mindbody-public-read-policy";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
@@ -268,7 +269,8 @@ async function domDateParts(root: Locator, field: RecipeDateParts) {
   if (await day.count() !== 1 || !await day.isVisible()) return undefined;
   const selected = await day.evaluate(element => element.getAttribute("aria-selected") === "true" ||
     element.getAttribute("aria-current") === "date" || element.getAttribute("data-selected") === "true" ||
-    element.classList.contains("Mui-selected") || element.classList.contains("active") && element.classList.contains("day"));
+    element.classList.contains("Mui-selected") || element.classList.contains("active") && element.classList.contains("day") ||
+    element.tagName === "BUTTON" && element.classList.contains("days") && element.classList.contains("daySelected"));
   if (!selected) return undefined;
   return parseObservedCalendarDate(await domField(root, field.monthYear), await domField(root, field.day));
 }
@@ -512,8 +514,11 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
         if (!addVerifiedMindbodyReadHeaders(new URL(requestUrl), request.method(), requestHeaders, headers, request.postData() ?? "")) throw new Error("UNSCOPED_REQUEST");
         if (nativeProxy) {
           const preflight = request.method() === "OPTIONS" ? nativeReadPreflightMethod(requestHeaders) : null;
+          if (isRexNamespace(new URL(requestUrl)) && request.method() === "POST" &&
+              !isRexPublicBrowserReadPost(new URL(requestUrl), request.method(), requestHeaders, request.postData() ?? "", frameUrl)) throw new Error("UNSCOPED_REQUEST");
+          const rexPlaceholder = isRexAnonymousPlaceholderRead(new URL(requestUrl), request.method(), requestHeaders, request.postData() ?? "", frameUrl);
           if (!recipeAllowsRequest(recipe, requestUrl, preflight ?? request.method(), request.resourceType()) ||
-            Object.keys(requestHeaders).some(key => /^(?:authorization|proxy-authorization|x-api-key)$/iu.test(key)) ||
+            !rexPlaceholder && Object.keys(requestHeaders).some(key => /^(?:authorization|proxy-authorization|x-api-key)$/iu.test(key)) ||
             request.method() === "POST" && !allowsPost(new URL(requestUrl), headers, request.postData() ?? "")) throw new Error("UNSCOPED_REQUEST");
           const responseLimit = publicBrowserResponseLimit(request.resourceType());
           const native = await requestQueue.run(requestFamilyForUrl(requestUrl), () => {

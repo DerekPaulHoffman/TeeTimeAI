@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { bindDiscoveryRecipeIdentity, createDiscoveryAdapterObservation, createDiscoverySnapshotCompactor, discoveryBrowserFeedback, discoveryCheckpointDisposition, inspectedAdapterSourceEvidence, noVerifiedRecipeDiagnostic, readDiscoveryControllerCheckpoint, safeBrowserFailureDiagnostics } from "../../../scripts/automation/course-discovery-worker.mjs";
-import { safeBrowserActionIssues } from "../../../scripts/automation/course-discovery-diagnostics.mjs";
+import { describePublicUrlRejection, safeBrowserActionIssues } from "../../../scripts/automation/course-discovery-diagnostics.mjs";
 
 describe("durable discovery browser diagnostics", () => {
   it("retains only typed simulator classifications through a failed replay checkpoint", () => {
@@ -169,6 +169,70 @@ describe("durable discovery browser diagnostics", () => {
     const restored = readDiscoveryControllerCheckpoint({ controller: { version: 1, officialUrl: "https://venue.example/",
       observedNavigationUrls: [], lastFailure: diagnostic.evidence } }, "https://venue.example/");
     expect(noVerifiedRecipeDiagnostic(restored.lastFailure)).toEqual(diagnostic);
+  });
+  it("retains a passive denied POST after a healthy first open without making it the causal terminal reason", () => {
+    const feedback = discoveryBrowserFeedback({ url: "https://venue.example/", loading: false, pendingRequestCount: 0,
+      requests: [{ url: "https://venue.example/telemetry?value=private", method: "POST", resourceType: "fetch",
+        blockedReason: "UNSAFE_METHOD", body: "private" }] }, "open");
+    expect(feedback.details).toMatchObject({ action: "open", loading: false, pendingRequestCount: 0,
+      requests: [{ code: "UNSAFE_METHOD", url: "https://venue.example/telemetry", method: "POST", resourceType: "fetch" }] });
+    expect(feedback.details).not.toHaveProperty("failure");
+    expect(discoveryCheckpointDisposition("UNSUPPORTED", false)).toBe("RETRYABLE_LIMITATION");
+    const diagnostic = noVerifiedRecipeDiagnostic(feedback);
+    expect(diagnostic).toEqual({ code: "NO_VERIFIED_RECIPE", reason: "NO_RECIPE_VERIFIED", evidence: feedback });
+    const restored = readDiscoveryControllerCheckpoint({ controller: { version: 1, officialUrl: "https://venue.example/",
+      observedNavigationUrls: [], lastFailure: feedback } }, "https://venue.example/");
+    expect(noVerifiedRecipeDiagnostic(restored.lastFailure)).toEqual(diagnostic);
+    expect(JSON.stringify(diagnostic)).not.toContain("private");
+  });
+  it("keeps an explicit stale action causal while retaining separate passive request denials", () => {
+    const feedback = discoveryBrowserFeedback({ loading: false, pendingRequestCount: 0,
+      requests: [{ url: "https://venue.example/telemetry", method: "POST", resourceType: "fetch", blockedReason: "UNSAFE_METHOD" }] },
+    "click", { code: "STALE_OR_UNKNOWN_ELEMENT" });
+    expect(noVerifiedRecipeDiagnostic(feedback)).toMatchObject({ reason: "STALE_OR_UNKNOWN_ELEMENT", evidence: {
+      details: { failure: { code: "STALE_OR_UNKNOWN_ELEMENT" }, requests: [{ code: "UNSAFE_METHOD" }] } } });
+  });
+  it("uses an actual native fatal before passive denials while preserving explicit tool failure precedence", () => {
+    const snapshot = { loading: false, requests: [{ url: "https://venue.example/telemetry", method: "POST",
+      resourceType: "fetch", blockedReason: "UNSAFE_METHOD" }],
+    nativeFirstFatal: { code: "NATIVE_REDIRECT_DRAIN_FAILED", phase: "DOCUMENT_DRAIN" } };
+    expect(noVerifiedRecipeDiagnostic(discoveryBrowserFeedback(snapshot, "observe"))).toMatchObject({
+      reason: "NATIVE_REDIRECT_DRAIN_FAILED", evidence: { details: { nativeFirstFatal: snapshot.nativeFirstFatal,
+        requests: [{ code: "UNSAFE_METHOD" }] } } });
+    expect(noVerifiedRecipeDiagnostic(discoveryBrowserFeedback(snapshot, "click", { code: "STALE_OR_UNKNOWN_ELEMENT" })))
+      .toMatchObject({ reason: "STALE_OR_UNKNOWN_ELEMENT" });
+  });
+  it("preserves explicit replay failure classification without promoting unrelated request evidence", () => {
+    const diagnostic = noVerifiedRecipeDiagnostic({ code: "DISCOVERY_REPLAY_INCOMPLETE", details: {
+      status: "INCOMPLETE", reason: "ADAPTER_HTTP_ERROR", diagnostic: { code: "ADAPTER_HTTP_ERROR",
+        simulatorError: { code: "HTTP_ERROR", retryable: true, httpStatus: 503 } },
+      requests: [{ code: "UNSAFE_METHOD", body: "private" }] } });
+    expect(diagnostic).toMatchObject({ reason: "ADAPTER_HTTP_ERROR", evidence: { code: "DISCOVERY_REPLAY_INCOMPLETE",
+      details: { status: "INCOMPLETE", reason: "ADAPTER_HTTP_ERROR", diagnostic: { simulatorError: { httpStatus: 503 } } } } });
+    expect(diagnostic.evidence.details).not.toHaveProperty("requests");
+    expect(JSON.stringify(diagnostic)).not.toContain("private");
+  });
+  it("preserves bounded rejected URL facts and method through current and historical request checkpoints", () => {
+    const url = "https://venue.example/api/options?version=1.2.3&api_key=private-value#private-fragment";
+    const urlRejection = describePublicUrlRejection(url, url, "GET", "xhr", "BROWSER_REQUEST_URL", {
+      recipe: () => true, asset: () => false });
+    const snapshot = { loading: false, pendingRequestCount: 0,
+      requests: [{ url: "https://venue.example/api/options", method: "GET", resourceType: "xhr", blockedReason: "UNSAFE_URL", urlRejection }],
+      requestFailures: [{ url: "https://venue.example/api/options", method: "GET", resourceType: "xhr", reason: "UNSAFE_URL", urlRejection }] };
+    const safe = safeBrowserFailureDiagnostics(snapshot);
+    expect(safe.requests[0].urlRejection).toEqual(urlRejection);
+    expect(safe.requestFailures[0]).toMatchObject({ method: "GET", url: "https://venue.example/api/options", urlRejection });
+    const feedback = discoveryBrowserFeedback(safe, "observe");
+    const restored = readDiscoveryControllerCheckpoint({ controller: { version: 1, officialUrl: "https://venue.example/",
+      observedNavigationUrls: [], lastFailure: feedback } }, "https://venue.example/");
+    expect(restored.lastFailure.details.requests).toHaveLength(1);
+    expect(restored.lastFailure.details.requests[0]).toMatchObject({ code: "UNSAFE_URL", method: "GET", urlRejection });
+    expect(noVerifiedRecipeDiagnostic(restored.lastFailure).reason).toBe("NO_RECIPE_VERIFIED");
+    expect(JSON.stringify(restored)).not.toMatch(/private|api_key=|version=|fragment/);
+    const compact = createDiscoverySnapshotCompactor()({ ...snapshot, requests: safe.requests, requestFailures: safe.requestFailures });
+    expect(compact.requestFailures[0].urlRejection).toEqual(urlRejection);
+    safe.requests[0].urlRejection.queryKeys[0].valueClasses.push("EMPTY");
+    expect(restored.lastFailure.details.requests[0].urlRejection.queryKeys[0].valueClasses).toEqual(["DOTTED_VERSION"]);
   });
   it("preserves bounded argument schema issues without rejected values or unknown property names", () => {
     const issues = [{ path: ["target"], code: "invalid_type", input: "private-value", message: "private-value" },

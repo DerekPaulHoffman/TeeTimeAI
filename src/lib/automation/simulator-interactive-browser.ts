@@ -9,6 +9,7 @@ import { runWithProviderRequestLease } from "./provider-request-lease";
 import { createSimulatorBrowserRequestQueue } from "./simulator-browser-request-queue";
 import { createPassfactoryPublicReadPolicy, isIncidentalBrowserRequest } from "./passfactory-public-read-policy";
 import { addVerifiedMindbodyReadHeaders, isMindbodyPublicReadPost } from "./mindbody-public-read-policy";
+import { isRexNamespace, isRexPublicReadPost } from "./rex-public-read-policy";
 import { projectPassfactoryCalendarEvidence, type PassfactoryCalendarEvidence } from "./passfactory-calendar-evidence";
 import { inspectSimulatorClientCode, mergeSimulatorClientCodeEvidence, type SimulatorClientCodeEvidence } from "./simulator-client-code-evidence";
 import { createBlockedResourceDiagnostics, simulatorCredentialHeaderKind, summarizeBlockedRequestBody } from "./simulator-blocked-resources";
@@ -52,6 +53,7 @@ export function isAnonymousBrowserReadPost(url: URL, headers: Headers, body: str
   // A Next server-action header controls the operation independently of body
   // shape. Never let a GraphQL-looking body authorize an unknown action.
   if (headers.has("next-action")) return isMindbodyPublicReadPost(url, headers, body);
+  if (isRexNamespace(url)) return isRexPublicReadPost(url, headers, body);
   // This known REST API must use its exact source-bound contracts. Adding a
   // GraphQL-looking field must not bypass them or authorize a transaction URL.
   if (["api.passfactory.io", "clients.uschedule.com"].includes(url.hostname) ||

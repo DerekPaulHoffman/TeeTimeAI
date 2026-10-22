@@ -48,6 +48,17 @@ describe("interactive public research boundaries", () => {
       JSON.stringify({ query: "{ slots { time } }" }))).toBe(true);
   });
 
+  it("routes Rex only through the closed public catalog contract", () => {
+    const origin = "https://venue.reservewithrex.com";
+    const headers = new Headers({ origin, "content-type": "application/json" });
+    const body = { venueId: "507f1f77bcf86cd799439011", date: "2026-10-23", guests: 2, duration: 2, lanes: 1 };
+    expect(isAnonymousBrowserReadPost(new URL(origin + "/api/venue/get"), headers, JSON.stringify(body))).toBe(true);
+    for (const path of ["/api/venue/get", "/api/venue/get-venue-with-package", "/api/reservation/create", "/graphql"])
+      expect(isAnonymousBrowserReadPost(new URL(origin + path), headers, JSON.stringify({ query: "{ slots { time } }" }))).toBe(false);
+    headers.set("next-action", "unknown");
+    expect(isAnonymousBrowserReadPost(new URL(origin + "/api/venue/get"), headers, JSON.stringify(body))).toBe(false);
+  });
+
   it("recognizes named listbox popup filters without admitting other popup actions", () => {
     const popup = { tag: "div", role: "button", name: "", label: "Duration", hasPopup: "listbox" };
     expect(interactiveControlKind(popup)).toBe("filter");

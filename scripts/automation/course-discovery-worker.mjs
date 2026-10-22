@@ -4,7 +4,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { discoveryError } from "./course-discovery-client.mjs";
-import { safeBrowserActionIssues, safeDiscoveryTurnFailure } from "./course-discovery-diagnostics.mjs";
+import { safeBrowserActionIssues, safeDiscoveryTurnFailure, safePublicUrlRejectionDiagnostic } from "./course-discovery-diagnostics.mjs";
 
 const VERSION = "0.160.1";
 const BROWSER_ACTIONS = ["open", "observe", "click", "select", "fill", "scroll", "inspect_adapter", "inspect", "finish"];
@@ -125,6 +125,8 @@ function safeReplayDiagnostic(value) {
   if (safeObservedUrl(value.url)) { const url = new URL(value.url); url.search = ""; url.hash = ""; result.url = url.href; }
   if (["GET", "HEAD", "POST", "OPTIONS"].includes(value.method)) result.method = value.method;
   if (["document", "script", "stylesheet", "xhr", "fetch", "other"].includes(value.resourceType)) result.resourceType = value.resourceType;
+  const urlRejection = safePublicUrlRejectionDiagnostic(value.urlRejection);
+  if (urlRejection) result.urlRejection = urlRejection;
   const simulatorError = value.simulatorError;
   if (simulatorError && ["INVALID_SOURCE", "INVALID_REQUEST", "UNSUPPORTED_PROVIDER", "UNSUPPORTED_DURATION", "PARTY_TOO_LARGE", "PUBLIC_SESSION_REQUIRED", "HTTP_ERROR", "SCHEMA_CHANGED"].includes(simulatorError.code) && typeof simulatorError.retryable === "boolean") {
     result.simulatorError = { code: simulatorError.code, retryable: simulatorError.retryable };
@@ -135,8 +137,10 @@ function safeReplayDiagnostic(value) {
 }
 function safeBrowserRequestFailures(value) {
   return (Array.isArray(value) ? value : []).slice(-12).map(failure => {
-    const safe = safeReplayDiagnostic({ code: failure?.reason, url: failure?.url, resourceType: failure?.resourceType });
-    return safe ? { reason: safe.code, ...(safe.url ? { url: safe.url } : {}), ...(safe.resourceType ? { resourceType: safe.resourceType } : {}) } : undefined;
+    const safe = safeReplayDiagnostic({ code: failure?.reason, url: failure?.url, resourceType: failure?.resourceType,
+      method: failure?.method, urlRejection: failure?.urlRejection });
+    return safe ? { reason: safe.code, ...(safe.url ? { url: safe.url } : {}), ...(safe.resourceType ? { resourceType: safe.resourceType } : {}),
+      ...(safe.method ? { method: safe.method } : {}), ...(safe.urlRejection ? { urlRejection: safe.urlRejection } : {}) } : undefined;
   }).filter(Boolean);
 }
 /** Native controller facts are diagnostic only, never navigation authority. */
@@ -195,6 +199,7 @@ export function safeBrowserFailureDiagnostics(value) {
     if (!safe) return undefined;
     return { ...(safe.url ? { url: safe.url } : {}), ...(safe.method ? { method: safe.method } : {}),
       ...(safe.resourceType ? { resourceType: safe.resourceType } : {}),
+      ...(safe.urlRejection ? { urlRejection: safe.urlRejection } : {}),
       ...(Number.isInteger(request.status) && request.status >= 100 && request.status <= 599 ? { status: request.status } : {}),
       ...(/^[A-Z_0-9]{1,80}$/u.test(request.blockedReason ?? "") ? { blockedReason: request.blockedReason } : {}) };
   }).filter(Boolean), requestFailures: safeBrowserRequestFailures(value.requestFailures), ...safeNativeBrowserDiagnostics(value), ...safeOfficialBrowserDiagnostics(value),
@@ -261,8 +266,12 @@ function retainMeaningfulFailure(previous, feedback) {
 
 export function noVerifiedRecipeDiagnostic(feedback) {
   const evidence = meaningfulFailure(feedback);
+  // Passive request denials remain bounded evidence, not a proven reason that
+  // discovery failed. Only explicit tool/replay errors or a native fatal can
+  // establish that causal diagnostic; no availability authority changes here.
   return { code: "NO_VERIFIED_RECIPE", reason: evidence?.details.reason ?? evidence?.details.failure?.code ??
-    evidence?.details.requests?.[0]?.code ?? evidence?.code ?? "NO_RECIPE_VERIFIED", ...(evidence ? { evidence } : {}) };
+    evidence?.details.nativeFirstFatal?.code ?? (evidence?.code !== "DISCOVERY_BROWSER_INCOMPLETE" ? evidence?.code : undefined) ??
+    "NO_RECIPE_VERIFIED", ...(evidence ? { evidence } : {}) };
 }
 
 /** Persist bounded transport facts, never page text, request bodies or credentials. */
@@ -273,9 +282,10 @@ export function discoveryBrowserFeedback(snapshot, action, error) {
     .filter(request => request?.blockedReason || request?.status >= 400)
     .filter(request => ["document", "script", "stylesheet", "xhr", "fetch"].includes(request.resourceType))
     .map(request => safeReplayDiagnostic({ code: request.blockedReason || "HTTP_ERROR",
-      url: request.url, method: request.method, resourceType: request.resourceType })).filter(Boolean);
+      url: request.url, method: request.method, resourceType: request.resourceType, urlRejection: request.urlRejection })).filter(Boolean);
   const recentFailures = safeBrowserRequestFailures(snapshot?.requestFailures).reverse()
-    .map(failure => safeReplayDiagnostic({ code: failure.reason, url: failure.url, resourceType: failure.resourceType }));
+    .map(failure => safeReplayDiagnostic({ code: failure.reason, url: failure.url, resourceType: failure.resourceType,
+      method: failure.method, urlRejection: failure.urlRejection }));
   const requests = [...new Map([...currentRequests, ...recentFailures].map(failure => [JSON.stringify(failure), failure])).values()].slice(0, 8);
   const failure = error ? safeReplayDiagnostic({ code: /^[A-Z_0-9]{1,80}$/u.test(error.code ?? "")
     ? error.code : "BROWSER_ACTION_FAILED", url: snapshot?.url }) : undefined;
