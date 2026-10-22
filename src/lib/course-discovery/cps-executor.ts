@@ -171,16 +171,18 @@ export function normalizeCpsAvailability(value: unknown, transactionId: string, 
   const ids = new Set<number>();
   // Validate every row, including excluded times/party options, before filtering.
   const rows = response.data.content.map(row => {
-    if (ids.has(row.teeSheetId) || !metadata.courseIds.includes(row.courseId) || row.startTime.slice(0, 10) !== input.date ||
-        ![9, 18].includes(row.holes ?? row.defaultHoles ?? 0)) fail("CPS_AVAILABILITY_INCOMPLETE");
-    ids.add(row.teeSheetId); return { row, instant: cpsLocalInstant(row.startTime, input.timeZone) };
+    if (ids.has(row.teeSheetId) || !metadata.courseIds.includes(row.courseId) || row.startTime.slice(0, 10) !== input.date)
+      fail("CPS_AVAILABILITY_INCOMPLETE");
+    const holes = row.holes ?? row.defaultHoles;
+    if (holes !== 9 && holes !== 18) fail("CPS_AVAILABILITY_INCOMPLETE");
+    ids.add(row.teeSheetId); return { row, holes, instant: cpsLocalInstant(row.startTime, input.timeZone) };
   });
   return rows.filter(({ row, instant }) => row.availableParticipantNo.includes(input.players) && (row.minPlayer ?? 1) <= input.players &&
     row.startTime.slice(11, 16) >= input.startTime && row.startTime.slice(11, 16) < input.endTime && instant > now)
-    .map(({ row, instant }) => ({ sourceId: `cps-${metadata.tenant}-${row.teeSheetId}`, startsAt: instant.toISOString(),
+    .map(({ row, holes, instant }) => ({ sourceId: `cps-${metadata.tenant}-${row.teeSheetId}`, startsAt: instant.toISOString(),
       availableSpots: Math.max(...row.availableParticipantNo), bookingUrl: source.bookingUrl, resourceId: `cps-course:${row.courseId}`,
       // This is a sold round choice, never physical Course.layoutHoleCounts.
-      holes: (row.holes ?? row.defaultHoles)! })).sort((a, b) => a.startsAt.localeCompare(b.startsAt) || a.sourceId.localeCompare(b.sourceId));
+      holes })).sort((a, b) => a.startsAt.localeCompare(b.startsAt) || a.sourceId.localeCompare(b.sourceId));
 }
 export async function inspectCps(source: CpsSource, deps: CpsDependencies = {}): Promise<CpsMetadata> {
   const date = (deps.now ?? (() => new Date()))().toISOString().slice(0, 10), reader = createReader(source, deps, date);
