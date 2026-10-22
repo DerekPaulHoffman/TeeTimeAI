@@ -149,6 +149,17 @@ describe("CPS fixed fresh public reads", () => {
 
 describe("CPS complete full-sheet normalization", () => {
   const normalize = (value: unknown, request = input) => normalizeCpsAvailability(value, uuid, metadata(), source, request, new Date("2026-10-22T00:00:00Z"));
+  it("accepts the observed full nine-hole sheet with no default round length", () => {
+    const rows = Array.from({ length: 55 }, (_, index) => ({ ...row(index + 1), defaultHoles: 0 }));
+    expect(normalize(envelope(rows))).toHaveLength(55);
+    expect(normalize(envelope(rows)).every(slot => slot.holes === 9)).toBe(true);
+  });
+  it.each([
+    { holes: undefined, defaultHoles: 0 }, { holes: 0, defaultHoles: 9 },
+    { holes: 9, defaultHoles: 7 }, { holes: 9, defaultHoles: "0" },
+  ])("requires a concrete valid round length for %j", fields => {
+    expect(() => normalize(envelope([{ ...row(), ...fields }]))).toThrow("CPS_AVAILABILITY_INCOMPLETE");
+  });
   it("uses exact party membership/minPlayer and an end-exclusive window before publishing a stable ID", () => {
     const result = normalize(envelope([row(), { ...row(8), availableParticipantNo: [1, 3, 4] }, { ...row(9), minPlayer: 3 },
       { ...row(10), startTime: "2026-10-23T18:00:00" }, { ...row(11), startTime: "2026-10-23T08:00:00" }]));

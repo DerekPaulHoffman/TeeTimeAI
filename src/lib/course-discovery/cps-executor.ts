@@ -160,7 +160,9 @@ const slotSchema = z.object({ teeSheetId: z.number().int().min(1).max(Number.MAX
   startTime: z.string().regex(/^\d{4}-\d{2}-\d{2}[T ](?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{1,7})?)?$/u),
   availableParticipantNo: z.array(participant).max(4).refine(values => new Set(values).size === values.length),
   minPlayer: participant.nullish(), holes: z.union([z.literal(9), z.literal(18)]).nullish(),
-  defaultHoles: z.union([z.literal(9), z.literal(18)]).nullish() }).passthrough();
+  // The public client uses zero for "no default". A concrete 9/18-hole
+  // selection is still required below; zero cannot supply a round length.
+  defaultHoles: z.union([z.literal(0), z.literal(9), z.literal(18)]).nullish() }).passthrough();
 export function normalizeCpsAvailability(value: unknown, transactionId: string, metadata: CpsMetadata, source: CpsSource,
   input: AccessExecutionInput, now: Date): AccessExecutionResult["slots"] {
   validateInput(input, source);
