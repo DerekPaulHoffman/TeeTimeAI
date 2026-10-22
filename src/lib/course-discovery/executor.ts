@@ -38,7 +38,7 @@ import { inspectPublicDatePickerInput, openPublicDatePickerInput } from "./publi
 import { continuePublicRentalService, selectPublicRentalService, type PublicRentalServiceSelection } from "./public-service-control";
 import { parsePublicPlayerOptions } from "./public-player-options";
 import { matchesPublicVenueGreeting } from "./public-venue-greeting";
-import { browserJsonParticipantRequestMatches, extractBrowserJsonRows } from "./browser-json-response";
+import { browserJsonAncillaryCalendarRequestMatches, browserJsonParticipantRequestMatches, extractBrowserJsonRows } from "./browser-json-response";
 
 type ExtractedAccessRecipe = Exclude<CourseAccessRecipeData, { engine: "EXISTING_ADAPTER" }>;
 type BrowserAccessRecipe = Extract<CourseAccessRecipeData, { engine: "BROWSER_DOM" | "BROWSER_JSON" }>;
@@ -455,12 +455,16 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
     let lastSuccessfulAvailabilityRequest: PublicAvailabilityRequest | undefined;
     let latestBrowserJsonRead = 0;
     let browserJson: { generation: number; documentSequence: number; readSequence: number; extracted: ReturnType<typeof extractBrowserJsonRows> } | undefined;
+    const ancillaryBrowserJsonRead = (request: { url: string; method: string; resourceType?: string }) => recipe.engine === "BROWSER_JSON" &&
+      browserJsonAncillaryCalendarRequestMatches(request, { url: expandRecipeTemplate(recipe.availabilityResponse.url, input, true), method: recipe.availabilityResponse.method },
+        recipe.source.bookingUrl, input, isSafeRecipeUrl);
     const inspectedPassfactoryDurationClients = new Set<string>();
     let selectedRequestedDate = false;
     let passfactoryAvailabilityRequests = 0, carriedDurationGeneration: number | undefined;
-    const observeAvailabilityResponse = (generation: number, request: { url: string; method: string; body?: string | null }, status: number, body: Uint8Array,
+    const observeAvailabilityResponse = (generation: number, request: { url: string; method: string; body?: string | null; resourceType?: string }, status: number, body: Uint8Array,
       document?: { main: boolean; sequence: number; dataSequence: number; contentType: string }) => {
       if (generation !== mutationGeneration) return;
+      if (!document?.main && ancillaryBrowserJsonRead(request)) return;
       if (recipe.engine === "BROWSER_JSON" && (!document || document.sequence !== mainDocumentSequence || document.dataSequence !== latestBrowserJsonRead)) return;
       if (!matchesAvailabilityRequest(recipe, input, request)) {
         if (recipe.engine === "BROWSER_JSON" && isSafeBrowserAvailabilityReadUrl(request.url, "fetch", request.method)) {
@@ -549,7 +553,8 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
       if (mainDocument) mainDocumentSequence++;
       if (["xhr", "fetch"].includes(request.resourceType())) dataRequestSequence++;
       const capturedDocumentSequence = mainDocumentSequence, capturedDataSequence = dataRequestSequence;
-      if (recipe.engine === "BROWSER_JSON" && (mainDocument || isSafeBrowserAvailabilityReadUrl(requestUrl, request.resourceType(), request.method()))) {
+      if (recipe.engine === "BROWSER_JSON" && (mainDocument || isSafeBrowserAvailabilityReadUrl(requestUrl, request.resourceType(), request.method()) &&
+          !ancillaryBrowserJsonRead({ url: requestUrl, method: request.method(), resourceType: request.resourceType() }))) {
         browserJson = undefined; responseGeneration = undefined; rejectedResponseGeneration = undefined;
         latestBrowserJsonRead = capturedDataSequence;
       }
@@ -604,7 +609,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
           if (mainDocument) catalogTiles.completeDocument(catalogDocument, native.status, native.headers["content-type"] ?? "");
           catalogTiles.completeRead(catalogRead, native.status, native.headers["content-type"] ?? "", native.body);
           observeClientScript(requestUrl, request.resourceType(), native.status, native.body);
-          observeAvailabilityResponse(requestGeneration, { url: requestUrl, method: request.method(), body: request.postData() }, native.status, native.body,
+          observeAvailabilityResponse(requestGeneration, { url: requestUrl, method: request.method(), body: request.postData(), resourceType: request.resourceType() }, native.status, native.body,
             { main: mainDocument, sequence: capturedDocumentSequence, dataSequence: capturedDataSequence, contentType: native.headers["content-type"] ?? "" });
           return;
         }
@@ -617,7 +622,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
         catalogTiles.completeRead(catalogRead, response.status, response.headers.get("content-type") ?? "", new Uint8Array(buffer));
         await route.fulfill({ status: response.status, headers: responseHeaders, body: Buffer.from(buffer) });
         observeClientScript(requestUrl, request.resourceType(), response.status, new Uint8Array(buffer));
-        observeAvailabilityResponse(requestGeneration, { url: requestUrl, method: request.method(), body: request.postData() }, response.status, new Uint8Array(buffer),
+        observeAvailabilityResponse(requestGeneration, { url: requestUrl, method: request.method(), body: request.postData(), resourceType: request.resourceType() }, response.status, new Uint8Array(buffer),
           { main: mainDocument, sequence: capturedDocumentSequence, dataSequence: capturedDataSequence, contentType: response.headers.get("content-type") ?? "" });
       } catch (error) { blocked = true; failure ??= recipeExecutionDiagnostic(error, { url: requestUrl, method: request.method(), resourceType: request.resourceType() }); await route.abort().catch(() => {}); }
       finally { pendingRequests--; }

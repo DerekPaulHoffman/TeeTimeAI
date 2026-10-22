@@ -15,7 +15,7 @@ const chrome = process.env.CHROME_PATH ?? "C:/Program Files/Google/Chrome/Applic
 const origin = "https://app.membersports.com", pageUrl = origin + "/tee-times/123/456/0";
 const endpoint = "https://api.membersports.com/api/v1/golfclubs/onlineBookingTeeTimes";
 const input = { date: "2026-10-23", timeZone: "America/New_York", players: 2, startTime: "08:00", endTime: "18:00" };
-const publicBody = { configurationTypeId: 0, date: "10/23/2026", golfClubGroupId: 0, golfClubId: 123, golfCourseId: 456, groupSheetTypeId: 0 };
+const publicBody = { configurationTypeId: 0, date: "2026-10-23", golfClubGroupId: 0, golfClubId: 123, golfCourseId: 456, groupSheetTypeId: 0 };
 const publicKey = "synthetic-public-literal";
 type Mode = "proved" | "missing POST route" | "missing private proof";
 function recipe(mode: Mode) {
@@ -26,7 +26,7 @@ function recipe(mode: Mode) {
       { origin, path: "/tee-times/123/456/0", methods: ["GET"], queryKeys: [] },
       { origin: "https://api.membersports.com", path: "/api/v1/golfclubs/onlineBookingTeeTimes", methods: mode === "missing POST route" ? ["GET"] : ["POST"], queryKeys: [] },
     ],
-    availabilityResponse: { url: endpoint, method: "POST", date: { source: "JSON_BODY", path: "date", format: "M/D/YYYY" }, success: { path: "ok", equals: true } },
+    availabilityResponse: { url: endpoint, method: "POST", date: { source: "JSON_BODY", path: "date" }, success: { path: "ok", equals: true } },
     proof: { venue: { selector: "#venue" }, date: { selector: "#date" }, players: { selector: "#players" }, complete: { availabilityResponse: true } },
     slots: { collection: { selector: ".slot" }, startsAt: { selector: ".start" }, availableSpots: { selector: ".capacity" }, holes: { selector: ".holes" } },
   });

@@ -41,6 +41,31 @@ export function browserJsonParticipantRequestMatches(request: { url: string; met
   } catch { return false; }
 }
 
+/** A finite observed calendar-prefetch shape, not a provider range limit or
+ * inventory proof. Callers still admit/account for the request normally. */
+export function browserJsonAncillaryCalendarRequestMatches(request: { url: string; method: string; resourceType?: string },
+  primary: { url: string; method: string }, bookingUrl: string, input: Input, strictUrl: (value: string) => boolean) {
+  if (!browserJsonParticipantRequestMatches(primary, bookingUrl, input, strictUrl) ||
+      !["xhr", "fetch"].includes(request.resourceType ?? "") ||
+      !isSafePublicAvailabilityReadUrl(request.url, request.resourceType!, request.method, strictUrl)) return false;
+  try {
+    const candidate = new URL(request.url), planned = new URL(primary.url);
+    if (candidate.origin !== planned.origin || candidate.pathname !== planned.pathname || candidate.searchParams.get("num_days") !== "3") return false;
+    const pairs = (url: URL) => [...url.searchParams.entries()].filter(([key]) => !["start_date", "num_days"].includes(key))
+      .sort(([a, av], [b, bv]) => a.localeCompare(b) || av.localeCompare(bv));
+    if (JSON.stringify(pairs(candidate)) !== JSON.stringify(pairs(planned))) return false;
+    const day = (value: string) => {
+      const [month, date, year] = value.split("-").map(Number);
+      return Date.UTC(year, month - 1, date);
+    };
+    // Strict URL validation above already proves both real calendar dates.
+    // These eight offsets were observed across a month boundary; no claim is
+    // made about a universal client loop or provider maximum.
+    const offset = (day(candidate.searchParams.get("start_date")!) - day(planned.searchParams.get("start_date")!)) / 86_400_000;
+    return [1, 4, 7, 10, 13, 16, 19, 22].includes(offset);
+  } catch { return false; }
+}
+
 /** Full original response interpretation, never the model's sampled schema.
  * Only the requested own date key and one group/child-array level are read. */
 export function extractBrowserJsonRows(body: unknown, plan: BrowserJsonResponseRows, input: Input) {

@@ -4,7 +4,7 @@ import { chromium } from "@playwright/test";
 import { describe, expect, it } from "vitest";
 import { parseAccessRecipe, type AccessExecutionInput } from "./recipe";
 import { executeAccessRecipe } from "./executor";
-import { browserJsonParticipantRequestMatches, extractBrowserJsonRows } from "./browser-json-response";
+import { browserJsonAncillaryCalendarRequestMatches, browserJsonParticipantRequestMatches, extractBrowserJsonRows } from "./browser-json-response";
 import { isSafeRecipeUrl } from "./recipe";
 
 const input: AccessExecutionInput = { date: "2030-10-23", timeZone: "America/New_York", players: 2, durationMinutes: 60, startTime: "10:00", endTime: "20:00" };
@@ -25,6 +25,51 @@ const recipe = () => ({ schemaVersion: 1, engine: "BROWSER_JSON", target: { cour
   requestBinding: "SEVENROOMS_PUBLIC_PARTICIPANTS", responseRows: { ...plan } });
 function wire(value = input) { return range.replace("{{players}}", String(value.players)).replace("{{durationMinutes}}", String(value.durationMinutes))
   .replace("{{dateMdy}}", `${value.date.slice(5, 7)}-${value.date.slice(8)}-${value.date.slice(0, 4)}`); }
+function prefetchUrl(offset: number, primary = wire()) {
+  const mdy = new URL(primary).searchParams.get("start_date")!.split("-").map(Number), date = new Date(Date.UTC(mdy[2], mdy[0] - 1, mdy[1] + offset));
+  const next = `${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}-${date.getUTCFullYear()}`;
+  return primary.replace(/start_date=\d{2}-\d{2}-\d{4}/u, `start_date=${next}`).replace("num_days=1", "num_days=3");
+}
+
+describe("finite observed calendar-prefetch classification, no read admission", () => {
+  const primary = () => ({ url: wire() + "&selected_lang_code=en", method: "GET" });
+  const ancillary = (url = prefetchUrl(1, primary().url), resourceType = "fetch", method = "GET") => ({ url, resourceType, method });
+  it("recognizes all eight observed offsets and exact reordered pairs without making them inventory proof", () => {
+    for (const offset of [1, 4, 7, 10, 13, 16, 19, 22]) {
+      const request = ancillary(prefetchUrl(offset, primary().url));
+      expect(browserJsonAncillaryCalendarRequestMatches(request, primary(), entry, input, isSafeRecipeUrl)).toBe(true);
+      expect(browserJsonParticipantRequestMatches(request, entry, input, isSafeRecipeUrl)).toBe(false);
+      expect(browserJsonAncillaryCalendarRequestMatches({ ...request, resourceType: "xhr" }, primary(), entry, input, isSafeRecipeUrl)).toBe(true);
+    }
+    const url = ancillary().url, [path, query] = url.split("?");
+    expect(browserJsonAncillaryCalendarRequestMatches(ancillary(`${path}?${query.split("&").reverse().join("&")}`), primary(), entry, input, isSafeRecipeUrl)).toBe(true);
+  });
+  it.each([
+    ["party_size=2", "party_size=3"], ["picked_duration=60", "picked_duration=90"], ["time_slot=18:00", "time_slot=17:00"],
+    ["halo_size_interval=64", "halo_size_interval=63"], ["channel=web", "channel=OTHER"], ["selected_lang_code=en", "selected_lang_code=fr"],
+    ["venue=examplegolf", "venue=other"], ["num_days=3", "num_days=1"], ["num_days=3", "num_days=2"],
+    ["start_date=10-24-2030", "start_date=10-23-2030"], ["start_date=10-24-2030", "start_date=10-25-2030"],
+    ["start_date=10-24-2030", "start_date=11-17-2030"], ["start_date=10-24-2030", "start_date=02-30-2030"],
+    ["venue=", "%76enue="], ["time_slot=18:00", "time_slot=18%3A00"],
+  ])("keeps changed or unrecognized pair %s relevant", (from, to) => {
+    expect(browserJsonAncillaryCalendarRequestMatches(ancillary(ancillary().url.replace(from, to)), primary(), entry, input, isSafeRecipeUrl)).toBe(false);
+  });
+  it("requires full primary input/window/source binding and the unchanged strict callback", () => {
+    for (const planned of [{ ...primary(), method: "POST" }, { ...primary(), url: primary().url.replace("num_days=1", "num_days=3") },
+      { ...primary(), url: primary().url.replace("halo_size_interval=64", "halo_size_interval=1") }])
+      expect(browserJsonAncillaryCalendarRequestMatches(ancillary(), planned, entry, input, isSafeRecipeUrl)).toBe(false);
+    expect(browserJsonAncillaryCalendarRequestMatches(ancillary(), primary(), entry.replace("examplegolf", "other"), input, isSafeRecipeUrl)).toBe(false);
+    expect(browserJsonAncillaryCalendarRequestMatches(ancillary(), primary(), entry, { ...input, players: 3 }, isSafeRecipeUrl)).toBe(false);
+    expect(browserJsonAncillaryCalendarRequestMatches(ancillary(), primary(), entry, input, () => false)).toBe(false);
+  });
+  it("rejects document/POST/unknown context, extra/duplicate keys and URL aliases", () => {
+    for (const request of [ancillary(undefined, "document"), ancillary(undefined, "fetch", "POST"), ancillary(undefined, "other"),
+      ancillary(ancillary().url + "&debug=true"), ancillary(ancillary().url + "&party_size=2"), ancillary(ancillary().url + "&client_id=private"),
+      ancillary(ancillary().url.replace("www.sevenrooms.com", "foreign.example")), ancillary(ancillary().url.replace("www.sevenrooms.com", "www.sevenrooms.com:443")),
+      ancillary(ancillary().url.replace("/widget/range?", "/widget/%72ange?")), ancillary(ancillary().url + "#fragment")])
+      expect(browserJsonAncillaryCalendarRequestMatches(request, primary(), entry, input, isSafeRecipeUrl)).toBe(false);
+  });
+});
 
 describe("bounded browser JSON response contract", () => {
   it("parses the explicit response mode with no fake DOM slots", () => { expect(parseAccessRecipe(recipe()).engine).toBe("BROWSER_JSON"); });
