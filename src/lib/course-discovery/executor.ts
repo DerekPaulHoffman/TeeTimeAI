@@ -24,6 +24,7 @@ import { canonicalCpsPublicUrl, cpsSessionKey, createCpsPublicSessionScope } fro
 import { executeExistingAdapterRecipe } from "./existing-adapter-executor";
 import { selectPublicFilter } from "./public-filter-control";
 import { trySelectPublicFilterOption } from "./public-filter-option";
+import { tryOpenPublicPlayerCombobox } from "./public-player-combobox";
 import { selectPublicCalendarDate } from "./public-calendar-control";
 import { applyPublicCalendarDate } from "./public-calendar-apply";
 import { hasInspectedPassfactoryDurationClients, isInspectedPassfactoryDurationClient, isPassfactoryDurationClientUrl, isPassfactoryAvailabilityRequest, isPassfactoryDurationContext,
@@ -731,6 +732,8 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
             await trySelectPublicFilterOption(node, expandRecipeTemplate(step.text, input), {
               simulator: recipe.target.kind === "SIMULATOR" && recipe.engine !== "BROWSER_JSON",
             })) continue;
+        if (step.action === "clickFilter" && step.purpose === "OPEN_FILTER" &&
+            await tryOpenPublicPlayerCombobox(node, expandRecipeTemplate(step.text, input))) continue;
         if (step.action === "clickFilter" && step.purpose === "OPEN_FILTER" && await node.count() === 1 &&
             await node.evaluate(element => element.tagName === "ARTICLE")) {
           selectedCatalogTile = await openPublicCatalogTile(node, catalogTiles, expandRecipeTemplate(step.text, input));

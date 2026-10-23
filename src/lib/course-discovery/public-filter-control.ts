@@ -2,6 +2,7 @@ import type { Locator } from "@playwright/test";
 import { publicRentalDurationMinutes } from "./recipe";
 import { inspectPublicDropdown, selectPublicDropdown } from "./public-dropdown-control";
 import { inspectPublicMenuButton, selectPublicMenuButton } from "./public-duration-button";
+import { trySelectPublicPlayerCombobox } from "./public-player-combobox";
 
 /** Select a displayed filter, never a time or transaction control. */
 export async function selectPublicFilter(node: Locator, input: {
@@ -14,6 +15,7 @@ export async function selectPublicFilter(node: Locator, input: {
     await node.selectOption(input.value);
     return;
   }
+  if (input.purpose === "PLAYERS" && await trySelectPublicPlayerCombobox(node, input.value, input.simulator)) return;
   if ((input.purpose === "DURATION" || input.purpose === "PLAYERS") && await inspectPublicMenuButton(node, input.purpose))
     return selectPublicMenuButton(node, input.value, input.purpose);
   if (await inspectPublicDropdown(node)) return selectPublicDropdown(node, input);

@@ -11,7 +11,7 @@ function optionProof(element: Element) {
     unsafe(node: Element) {
       for (let parent: Element | null = node, depth = 0; parent; parent = parent.parentElement, depth++) {
         if (parent.hasAttribute("contenteditable") && parent.getAttribute("contenteditable")?.toLowerCase() !== "false") return true;
-        if (depth < 8 && parent.tagName !== "BODY" && /password|secret|credential|email|phone|contact|account|member|profile|birth|bday|dob|checkout|payment|purchase|confirm|reserve/iu.test(
+        if (depth < 8 && parent.tagName !== "BODY" && /password|secret|credential|email|phone|contact|account|member|profile|birth|bday|dob|checkout|payment|purchase|confirm|reserve|\b(?:login|logon|sign[ -]?(?:in|up)|auth(?:entication|orization)?)\b/iu.test(
           `${parent.getAttribute("aria-label") ?? ""} ${parent.getAttribute("name") ?? ""} ${parent.getAttribute("title") ?? ""}`)) return true;
       }
       if (node instanceof HTMLElement && node.isContentEditable || [...node.querySelectorAll("[contenteditable]")]

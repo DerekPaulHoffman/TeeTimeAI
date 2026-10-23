@@ -28,6 +28,7 @@ describe("public role option ownership", () => {
     menu.replace('aria-label="Players"', 'aria-label="Account players"'), menu.replace('aria-label="Players"', 'aria-label="Other"').replace('4 Players', 'Other'),
     menu.replace('id="menu"', 'id="menu" aria-label="Confirm purchase"'),
     `<form>${menu}</form>`, menu.replace('<custom-item role="option">2', '<custom-item role="option" form="external">2'),
+    `<section aria-label="Login">${menu}</section>`, `<section aria-label="Sign in">${menu}</section>`,
     menu.replace('<custom-item role="option">2', '<custom-item role="option" aria-disabled="true">2'),
     menu.replace('<custom-item role="option">2', '<custom-item role="option" href="https://example.org/book">2'),
     menu.replace('2 Players</custom-item>', '2 Players</custom-item><custom-item role="option">2 Players</custom-item>'),
