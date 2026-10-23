@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { chromium } from "@playwright/test";
 import { describe, expect, it, vi } from "vitest";
 import { executeAccessRecipe, matchesAvailabilityResponse, parseObservedCalendarDate, recipeExecutionDiagnostic, recipeTimeToInstant, venueProofMatches, type AccessExecutorDependencies } from "./executor";
-import { parseAccessRecipe } from "./recipe";
+import { accessExecutionDiagnosticSchema, parseAccessRecipe } from "./recipe";
 import * as nativeBrowser from "./native-public-browser";
 import * as nativeRouting from "./native-redirect-routing";
 import * as publicReadPolicy from "@/lib/automation/passfactory-public-read-policy";
@@ -114,6 +114,13 @@ describe("deterministic course recipe execution", () => {
       stepIndex: 2, url: "https://example.org/times?token=secret-value#private", method: "GET", resourceType: "document",
     })).toEqual({ code: "STEP_TIMEOUT", stepIndex: 2, url: "https://example.org/times", method: "GET", resourceType: "document" });
     expect(recipeExecutionDiagnostic(new Error("unsafe secret-value"), { url: "https://u:p@example.org/" })).toEqual({ code: "EXECUTION_FAILED" });
+  });
+  it("bounds earlier request failure evidence to one strict non-recursive public diagnostic", () => {
+    const earlierRequestFailure = { code: "REQUEST_LIMIT", url: "https://example.org/public.js", method: "GET", resourceType: "script" };
+    expect(accessExecutionDiagnosticSchema.safeParse({ code: "STEP_TIMEOUT", stepIndex: 2, earlierRequestFailure }).success).toBe(true);
+    for (const extra of [{ earlierRequestFailure }, { stepIndex: 1 }, { body: "private-never-emitted" },
+      { url: "https://example.org/public.js?token=private" }, { method: "DELETE" }, { resourceType: "websocket" }])
+      expect(accessExecutionDiagnosticSchema.safeParse({ code: "STEP_TIMEOUT", earlierRequestFailure: { ...earlierRequestFailure, ...extra } }).success).toBe(false);
   });
   it.each(["PINNED_HTTP", "NATIVE_CHROME"])("classifies unavailable %s Chrome separately from source access or empty results", async browserTransport => {
     const base = { ...httpRecipe() }; Reflect.deleteProperty(base, "request");
@@ -725,6 +732,7 @@ describe.runIf(existsSync(chromeExecutable))("isolated browser recipe replay", (
     const result = await executeAccessRecipe(selected, executionInput, browserDeps(html.replace("</body>", '<button id="book">Book Now</button></body>')));
     expect(result.status).toBe("FAILED"); expect(result.evidence.reason).toBe("UNSAFE_CONTROL");
     expect(result.evidence.diagnostic).toMatchObject({ code: "UNSAFE_CONTROL", stepIndex: 0 });
+    expect(result.evidence.diagnostic?.earlierRequestFailure).toBeUndefined();
   }, 20_000);
   it("fails incomplete when a required unscoped request occurs", async () => {
     const result = await executeAccessRecipe(recipe(), executionInput, browserDeps(html.replace("</body>", '<script src="https://unscoped.example.org/slots.js"></script></body>')));
@@ -739,9 +747,58 @@ describe.runIf(existsSync(chromeExecutable))("isolated browser recipe replay", (
     const result = await executeAccessRecipe(selected, executionInput, deps);
     expect(result).toMatchObject({ status: "FAILED", complete: false, slots: [], evidence: {
       reason: "AMBIGUOUS_CONTROL", diagnostic: { code: "AMBIGUOUS_CONTROL", stepIndex: 0,
-        url: "https://example.org/tee-times", method: "GET", resourceType: "document" },
+        url: "https://example.org/tee-times", method: "GET", resourceType: "document",
+        earlierRequestFailure: { code: "UNSCOPED_REQUEST", url: "https://unscoped.example.org/slots.js", method: "GET", resourceType: "script" } },
     } });
     expect(vi.mocked(deps.fetch!).mock.calls.every(([url]) => !String(url).includes("unscoped.example.org"))).toBe(true);
+  }, 20_000);
+  it("retains a read failure observed before a later control wait times out", async () => {
+    const selected = recipe();
+    if (selected.engine !== "BROWSER_DOM") throw new Error("fixture");
+    selected.steps = [{ action: "waitFor", selector: "#missing-calendar" }];
+    const deps = browserDeps(html.replace("</body>", '<script src="https://unscoped.example.org/bootstrap.js?private=never-emit"></script></body>'), false);
+    const launch = deps.launchBrowser!;
+    // Only the owned fixture's Locator wait is shortened; real request/step
+    // ordering and the production executor's diagnostic selection are used.
+    deps.launchBrowser = async () => {
+      const browser = await launch(), newContext = browser.newContext.bind(browser);
+      vi.spyOn(browser, "newContext").mockImplementation(async options => {
+        const context = await newContext(options), newPage = context.newPage.bind(context);
+        vi.spyOn(context, "newPage").mockImplementation(async () => {
+          const page = await newPage(), setDefaultTimeout = page.setDefaultTimeout.bind(page);
+          vi.spyOn(page, "setDefaultTimeout").mockImplementation(value => setDefaultTimeout(Math.min(value, 250)));
+          return page;
+        });
+        return context;
+      });
+      return browser;
+    };
+    const result = await executeAccessRecipe(selected, executionInput, deps);
+    expect(result).toMatchObject({ status: "FAILED", complete: false, slots: [], evidence: { reason: "STEP_TIMEOUT",
+      diagnostic: { code: "STEP_TIMEOUT", stepIndex: 0, earlierRequestFailure: {
+        code: "UNSCOPED_REQUEST", url: "https://unscoped.example.org/bootstrap.js", method: "GET", resourceType: "script" } } } });
+    expect(JSON.stringify(result)).not.toContain("never-emit");
+    expect(vi.mocked(deps.fetch!).mock.calls.every(([url]) => !String(url).includes("unscoped.example.org"))).toBe(true);
+  }, 20_000);
+  it("does not mislabel a cleanup-only native failure as an earlier request failure", async () => {
+    const selected = recipe();
+    if (selected.engine !== "BROWSER_DOM") throw new Error("fixture");
+    selected.browserTransport = "NATIVE_CHROME";
+    selected.steps = [{ action: "select", selector: "#missing-players", value: "{{players}}", purpose: "PLAYERS" }];
+    const controller = vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, handler, options) => ({
+      prepare: () => {}, close: async () => { options?.onFailure?.("NATIVE_REDIRECT_CLOSE_FAILED"); }, lastFailure: undefined, pendingReads: 0,
+      releasePlaywrightRoute: async route => { await handler(route); },
+    }));
+    const native = vi.spyOn(nativeBrowser, "continueNativeBrowserRead").mockImplementation(async route => {
+      const body = Buffer.from(html), headers = { "content-type": "text/html" };
+      await route.fulfill({ status: 200, headers, body });
+      return { url: route.request().url(), status: 200, headers, body };
+    });
+    try {
+      const result = await executeAccessRecipe(selected, executionInput, browserDeps(html, false));
+      expect(result.evidence.diagnostic).toEqual({ code: "AMBIGUOUS_CONTROL", stepIndex: 0,
+        url: "https://example.org/tee-times", method: "GET", resourceType: "document" });
+    } finally { native.mockRestore(); controller.mockRestore(); }
   }, 20_000);
   it("skips decorative images without classifying complete DOM evidence as blocked", async () => {
     const result = await executeAccessRecipe(recipe(), executionInput, browserDeps(html.replace("</body>", '<img src="https://unscoped.example.org/map.png"></body>')));
@@ -773,8 +830,10 @@ describe.runIf(existsSync(chromeExecutable))("isolated browser recipe replay", (
       return { url: route.request().url(), status: 429, headers, body };
     });
     try {
-      expect(await executeAccessRecipe(selected, executionInput, deps)).toMatchObject({ status: "FAILED", complete: false,
+      const result = await executeAccessRecipe(selected, executionInput, deps);
+      expect(result).toMatchObject({ status: "FAILED", complete: false,
         evidence: { reason: "PROVIDER_THROTTLED", diagnostic: { code: "HTTP_429" } } });
+      expect(result.evidence.diagnostic?.earlierRequestFailure).toBeUndefined();
     } finally { native.mockRestore(); controller.mockRestore(); }
   }, 20_000);
   it("requires actual empty-state text rather than an arbitrary visible container", async () => {

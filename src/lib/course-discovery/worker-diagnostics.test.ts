@@ -1,8 +1,56 @@
 import { describe, expect, it } from "vitest";
-import { bindDiscoveryRecipeIdentity, createDiscoveryAdapterObservation, createDiscoverySnapshotCompactor, discoveryBrowserFeedback, discoveryCheckpointDisposition, inspectedAdapterSourceEvidence, noVerifiedRecipeDiagnostic, readDiscoveryControllerCheckpoint, safeBrowserFailureDiagnostics } from "../../../scripts/automation/course-discovery-worker.mjs";
+import { bindDiscoveryRecipeIdentity, createDiscoveryAdapterObservation, createDiscoverySnapshotCompactor, discoveryBrowserFeedback, discoveryCheckpointDisposition, inspectedAdapterSourceEvidence, noVerifiedRecipeDiagnostic, readDiscoveryControllerCheckpoint, safeBrowserFailureDiagnostics, verifyDiscoveryCandidate } from "../../../scripts/automation/course-discovery-worker.mjs";
 import { describePublicUrlRejection, safeBrowserActionIssues } from "../../../scripts/automation/course-discovery-diagnostics.mjs";
 
 describe("durable discovery browser diagnostics", () => {
+  it("preserves one bounded earlier request failure through replay and checkpoint without changing the terminal diagnostic", async () => {
+    const hash = "a".repeat(64), primary = { code: "STEP_TIMEOUT", stepIndex: 2, method: "GET", resourceType: "document",
+      url: "https://venue.example/calendar?date=private-date#private-fragment",
+      earlierRequestFailure: { code: "UNSCOPED_REQUEST", url: "https://assets.example/calendar.js?build=private-build#private-fragment",
+        method: "GET", resourceType: "script", stepIndex: 30, headers: { authorization: "private-authorization" }, body: "private-body",
+        earlierRequestFailure: { code: "PRIVATE_NESTED", url: "https://private.example/" } } };
+    let result;
+    try {
+      await verifyDiscoveryCandidate({ job: { id: "job", leaseToken: "synthetic-lease", deadlineAt: "2026-10-23T10:15:00Z" }, recipe: {},
+        client: { candidate: async () => ({ recipeHash: hash, challenges: [{ id: "one", recipeHash: hash, input: {} }, { id: "two", recipeHash: hash, input: {} }] }) },
+        executeRecipe: async () => ({ status: "INCOMPLETE", complete: false, slots: [], evidence: { reason: "STEP_TIMEOUT", diagnostic: primary } }) });
+    } catch (error) { result = error; }
+    const expected = { code: "STEP_TIMEOUT", stepIndex: 2, method: "GET", resourceType: "document", url: "https://venue.example/calendar",
+      earlierRequestFailure: { code: "UNSCOPED_REQUEST", url: "https://assets.example/calendar.js", method: "GET", resourceType: "script" } };
+    expect(result).toMatchObject({ code: "DISCOVERY_REPLAY_INCOMPLETE", details: { reason: "STEP_TIMEOUT", diagnostic: expected } });
+    const restored = readDiscoveryControllerCheckpoint({ controller: { version: 1, officialUrl: "https://venue.example/", observedNavigationUrls: [],
+      lastFailure: { code: result.code, details: result.details } } }, "https://venue.example/");
+    expect(restored.lastFailure.details.diagnostic).toEqual(expected);
+    expect(noVerifiedRecipeDiagnostic(restored.lastFailure).reason).toBe("STEP_TIMEOUT");
+    primary.earlierRequestFailure.code = "MUTATED";
+    expect(restored.lastFailure.details.diagnostic.earlierRequestFailure.code).toBe("UNSCOPED_REQUEST");
+    expect(JSON.stringify(restored)).not.toMatch(/private|headers|authorization|body|PRIVATE_NESTED/);
+  });
+  it.each([null, [], "private", { code: ["UNSCOPED_REQUEST"] }, { code: "private-value" }, { code: "A".repeat(81) }])(
+    "drops malformed earlier request diagnostics while preserving the primary and throttle precedence (%j)", earlierRequestFailure => {
+      const feedback = { code: "DISCOVERY_REPLAY_INCOMPLETE", details: { status: "INCOMPLETE", reason: "PROVIDER_THROTTLED",
+        diagnostic: { code: "PROVIDER_THROTTLED", method: "GET", resourceType: "fetch", earlierRequestFailure } } };
+      const restored = readDiscoveryControllerCheckpoint({ controller: { version: 1, officialUrl: "https://venue.example/", observedNavigationUrls: [],
+        lastFailure: feedback } }, "https://venue.example/");
+      expect(restored.lastFailure.details.diagnostic).toEqual({ code: "PROVIDER_THROTTLED", method: "GET", resourceType: "fetch" });
+      expect(noVerifiedRecipeDiagnostic(restored.lastFailure).reason).toBe("PROVIDER_THROTTLED");
+    });
+  it("retains only closed fields for an earlier request and never treats it as a terminal reason", () => {
+    const feedback = { code: "DISCOVERY_REPLAY_INCOMPLETE", details: { status: "INCOMPLETE", reason: "STEP_TIMEOUT",
+      diagnostic: { code: "STEP_TIMEOUT", earlierRequestFailure: { code: "HTTP_403", url: "https://user:private@venue.example/read",
+        method: "DELETE", resourceType: "private", arbitrary: "private", stepIndex: 3 } } } };
+    const restored = readDiscoveryControllerCheckpoint({ controller: { version: 1, officialUrl: "https://venue.example/", observedNavigationUrls: [],
+      lastFailure: feedback } }, "https://venue.example/");
+    expect(restored.lastFailure.details.diagnostic).toEqual({ code: "STEP_TIMEOUT", earlierRequestFailure: { code: "HTTP_403" } });
+    expect(noVerifiedRecipeDiagnostic(restored.lastFailure).reason).toBe("STEP_TIMEOUT");
+  });
+  it.each(["document", "stylesheet", "image", "media", "font", "script", "xhr", "fetch", "other"])(
+    "preserves the closed earlier request kind %s without changing existing primary-kind projection", resourceType => {
+      const restored = readDiscoveryControllerCheckpoint({ controller: { version: 1, officialUrl: "https://venue.example/", observedNavigationUrls: [],
+        lastFailure: { code: "DISCOVERY_REPLAY_INCOMPLETE", details: { reason: "STEP_TIMEOUT", diagnostic: { code: "STEP_TIMEOUT",
+          earlierRequestFailure: { code: "HTTP_403", method: "OPTIONS", resourceType } } } } } }, "https://venue.example/");
+      expect(restored.lastFailure.details.diagnostic).toEqual({ code: "STEP_TIMEOUT", earlierRequestFailure: { code: "HTTP_403", method: "OPTIONS", resourceType } });
+    });
   it("retains only typed simulator classifications through a failed replay checkpoint", () => {
     const feedback = { code: "DISCOVERY_REPLAY_INCOMPLETE", details: { status: "INCOMPLETE", reason: "ADAPTER_HTTP_ERROR",
       diagnostic: { code: "ADAPTER_HTTP_ERROR", simulatorError: { code: "HTTP_ERROR", retryable: true, httpStatus: 503,

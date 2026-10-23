@@ -369,14 +369,20 @@ export function recipeAllowsRequest(recipe: CourseAccessRecipeData, value: strin
     (route.path.endsWith("*") ? url.pathname.startsWith(route.path.slice(0, -1)) : route.path === url.pathname) &&
     [...url.searchParams.keys()].every(key => route.queryKeys.includes(key)));
 }
-export const accessExecutionDiagnosticSchema = z.object({
-  code: z.string().regex(/^[A-Z_0-9]{1,80}$/u), stepIndex: z.number().int().min(0).max(31).optional(),
+const accessRequestFailureDiagnosticSchema = z.object({
+  code: z.string().regex(/^[A-Z_0-9]{1,80}$/u),
   url: z.string().max(2048).refine(value => {
     try { const url = new URL(value); return !url.search && !url.hash &&
       (isSafeRecipeUrl(value) || isSafeBrowserAssetUrl(value, "script", "GET") || isSafeBrowserAssetUrl(value, "stylesheet", "GET")); } catch { return false; }
   }).optional(),
   method: z.enum(["GET", "HEAD", "POST", "OPTIONS"]).optional(),
   resourceType: z.enum(["document", "stylesheet", "image", "media", "font", "script", "xhr", "fetch", "other"]).optional(),
+}).strict();
+export const accessExecutionDiagnosticSchema = accessRequestFailureDiagnosticSchema.extend({
+  stepIndex: z.number().int().min(0).max(31).optional(),
+  // An observation from before terminal unwinding, not a cause or access verdict.
+  earlierRequestFailure: accessRequestFailureDiagnosticSchema.optional()
+    .describe("A request failure observed before terminal unwinding. Temporal evidence only; it does not establish the cause or an access requirement."),
   simulatorError: z.object({
     code: z.enum(["INVALID_SOURCE", "INVALID_REQUEST", "UNSUPPORTED_PROVIDER", "UNSUPPORTED_DURATION", "PARTY_TOO_LARGE", "PUBLIC_SESSION_REQUIRED", "HTTP_ERROR", "SCHEMA_CHANGED"]),
     retryable: z.boolean(), httpStatus: z.number().int().min(100).max(599).optional(),

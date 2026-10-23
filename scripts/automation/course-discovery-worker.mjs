@@ -166,6 +166,16 @@ function safeReplayDiagnostic(value) {
     if (Number.isInteger(simulatorError.httpStatus) && simulatorError.httpStatus >= 100 && simulatorError.httpStatus <= 599)
       result.simulatorError.httpStatus = simulatorError.httpStatus;
   }
+  // Temporal request evidence is separate from the terminal replay diagnostic.
+  // Its producer owns ordering; this bounded copy asserts no causal relation.
+  const earlier = value.earlierRequestFailure;
+  if (earlier && typeof earlier === "object" && !Array.isArray(earlier) && typeof earlier.code === "string" && /^[A-Z_0-9]{1,80}$/u.test(earlier.code)) {
+    const failure = { code: earlier.code };
+    if (safeObservedUrl(earlier.url)) { const url = new URL(earlier.url); url.search = ""; url.hash = ""; failure.url = url.href; }
+    if (["GET", "HEAD", "POST", "OPTIONS"].includes(earlier.method)) failure.method = earlier.method;
+    if (["document", "stylesheet", "image", "media", "font", "script", "xhr", "fetch", "other"].includes(earlier.resourceType)) failure.resourceType = earlier.resourceType;
+    result.earlierRequestFailure = failure;
+  }
   return result;
 }
 function safeBrowserRequestFailures(value) {

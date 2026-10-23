@@ -91,6 +91,11 @@ export function recipeExecutionDiagnostic(error: unknown, context: { stepIndex?:
   } catch { /* No unsafe or unparseable URL enters diagnostic feedback. */ }
   return diagnostic;
 }
+function requestFailureFields(diagnostic: AccessExecutionDiagnostic): NonNullable<AccessExecutionDiagnostic["earlierRequestFailure"]> {
+  const { code, url, method, resourceType } = diagnostic;
+  return { code, ...(url === undefined ? {} : { url }), ...(method === undefined ? {} : { method }),
+    ...(resourceType === undefined ? {} : { resourceType }) };
+}
 function matchesAvailabilityRequest(recipe: BrowserAccessRecipe, input: AccessExecutionInput,
   request: { url: string; method: string; body?: string | null }) {
   const fence = recipe.availabilityResponse;
@@ -385,11 +390,16 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
   let activity: { stepIndex?: number; url?: string; method?: string; resourceType?: string } = {};
   let failure: AccessExecutionDiagnostic | undefined;
   let terminalFailure: AccessExecutionDiagnostic | undefined;
+  let earlierRequestFailure: NonNullable<AccessExecutionDiagnostic["earlierRequestFailure"]> | undefined;
   let providerThrottled = false;
-  const fail = (status: AccessExecutionResult["status"], reason: string): AccessExecutionResult => ({ status, complete: false,
-    observedAt: clock().toISOString(), sourceUrl: recipe.source.bookingUrl, slots: [], evidence: { recipeHash: hashAccessRecipe(recipe),
-      venueVerified: false, dateVerified: false, capacityVerified: false, durationVerified: false, completeVerified: false, reason,
-      diagnostic: terminalFailure ?? failure ?? recipeExecutionDiagnostic(reason, activity) } });
+  const fail = (status: AccessExecutionResult["status"], reason: string): AccessExecutionResult => {
+    const primary = terminalFailure ?? failure ?? recipeExecutionDiagnostic(reason, activity);
+    const diagnostic = earlierRequestFailure && JSON.stringify(earlierRequestFailure) !== JSON.stringify(requestFailureFields(primary))
+      ? { ...primary, earlierRequestFailure } : primary;
+    return { status, complete: false,
+      observedAt: clock().toISOString(), sourceUrl: recipe.source.bookingUrl, slots: [], evidence: { recipeHash: hashAccessRecipe(recipe),
+        venueVerified: false, dateVerified: false, capacityVerified: false, durationVerified: false, completeVerified: false, reason, diagnostic } };
+  };
   if (input.timeZone !== recipe.source.timeZone || input.date < localParts(now, input.timeZone).slice(0, 10)) return fail("INCOMPLETE", "INVALID_REQUEST_DATE_OR_ZONE");
   const deadline = Math.min(deps.deadlineAt?.getTime() ?? Infinity, now.getTime() + 120_000);
   if (deadline <= now.getTime()) return fail("FAILED", "DEADLINE_EXCEEDED");
@@ -950,6 +960,11 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
         return fail("INCOMPLETE", "SERVER_DOCUMENT_DOM_MISMATCH");
       }
       return normalize(recipe, input, second, clock());
+    } catch (error) {
+      // Capture before close can create its own request failures. This says
+      // only that the read failed earlier; the primary terminal error wins.
+      earlierRequestFailure = failure ? requestFailureFields(failure) : undefined;
+      throw error;
     } finally { signal.removeEventListener("abort", stop); await redirectRouting?.close(); await context.close().catch(() => {}); }
   } catch (error) {
     // A queued resource may fail while the browser closes after a control
