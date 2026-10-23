@@ -34,7 +34,7 @@ import { applyPublicCalendarDate } from "./public-calendar-apply";
 import { hasInspectedPassfactoryDurationClients, isInspectedPassfactoryDurationClient, isPassfactoryDurationClientUrl, isPassfactoryAvailabilityRequest, isPassfactoryDurationContext,
   isPassfactoryDurationRequestBound, type PublicAvailabilityRequest } from "./passfactory-client-duration";
 import { extractServerDocument, sameServerDocumentEvidence, serverDocumentMismatchDiagnostic, type ServerDocumentExtraction } from "./server-document-proof";
-import { PUBLIC_BROWSER_TOTAL_BYTES, PUBLIC_BROWSER_TUNNEL_BYTES, publicBrowserResponseLimit } from "./browser-resource-limits";
+import { PUBLIC_BROWSER_REQUEST_LIMIT, PUBLIC_BROWSER_TOTAL_BYTES, PUBLIC_BROWSER_TUNNEL_BYTES, publicBrowserResponseLimit } from "./browser-resource-limits";
 import { isObservedPublicCalendarDay } from "./public-calendar-day";
 import { selectPublicRentalProduct } from "./public-product-control";
 import { followPublicAvailabilityLink } from "./public-navigation-control";
@@ -685,7 +685,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
       }
       let publicHeaderDiagnostic: AccessExecutionDiagnostic["publicHeaderDiagnostic"] | undefined;
       try {
-        if (++requests > 128 || signal.aborted) throw new Error("REQUEST_LIMIT");
+        if (++requests > PUBLIC_BROWSER_REQUEST_LIMIT || signal.aborted) throw new Error("REQUEST_LIMIT");
         if (request.frame().page() !== page) throw new Error("UNSUPPORTED_BROWSER_PAGE");
         redirectRouting?.prepare(request.frame());
         if (!cpsScope.authorize(transportUrl, request.redirectedFrom()?.url())) throw new Error("UNOBSERVED_CPS_SESSION");

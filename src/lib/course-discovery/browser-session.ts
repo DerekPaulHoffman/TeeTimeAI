@@ -23,7 +23,7 @@ import { canonicalPublicReadUrl } from "./public-request-url";
 import { inspectExistingAdapter } from "./existing-adapter-executor";
 import { isPublicCalendarApply } from "./public-calendar-apply";
 import { isObservedPublicCalendarDay, observedPublicCalendarDays } from "./public-calendar-day";
-import { PUBLIC_BROWSER_TOTAL_BYTES, publicBrowserResponseLimit } from "./browser-resource-limits";
+import { PUBLIC_BROWSER_REQUEST_LIMIT, PUBLIC_BROWSER_TOTAL_BYTES, publicBrowserResponseLimit } from "./browser-resource-limits";
 import { observedPublicDropdowns, selectPublicDropdown, type PublicDropdownProof } from "./public-dropdown-control";
 import { observedPublicMenuButtons, selectPublicMenuButton, type PublicMenuButtonProof } from "./public-duration-button";
 import { venueProofMatches } from "./executor";
@@ -454,7 +454,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
           }
         } catch { /* Non-JSON public reads remain opaque; never return raw text. */ }
       }
-      if (requestCount >= 192) throw new Error("PUBLIC_READ_REQUEST_LIMIT");
+      if (requestCount >= PUBLIC_BROWSER_REQUEST_LIMIT) throw new Error("PUBLIC_READ_REQUEST_LIMIT");
       if (responseBytes >= PUBLIC_BROWSER_TOTAL_BYTES) throw new Error("PUBLIC_READ_BYTE_LIMIT");
       requestCount++;
       const responseLimit = publicBrowserResponseLimit(request.resourceType());
