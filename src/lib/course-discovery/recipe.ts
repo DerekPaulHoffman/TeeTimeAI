@@ -106,13 +106,32 @@ export const recipeResourceScopeSchema = z.object({
     !/\b(?:members?[-\s]+only|lessons?|fittings?|leagues?|classes?|coaching)\b/iu.test(value) &&
     (!/\b(?:multi[-\s]?sport|baseball|soccer|hockey|tennis)\b/iu.test(value) || /\bgolf\b/iu.test(value)), "Use a public golf rental resource"),
 }).strict().describe("SIMULATOR DOM only: reusable selector matching resource cards, a visible label reader relative to each card, and its exact observed public rental label. The executor chooses the unique matching card and reads slots and proof.empty only inside it; card order is not identity. Venue/date/duration/complete proof stays global.");
-export const recipeRouteSchema = z.object({
-  origin: safeUrl.refine(value => new URL(value).origin === value, "Use an exact origin"),
+const routeOrigin = safeUrl.refine(value => new URL(value).origin === value, "Use an exact origin");
+const routeQueryKeys = z.array(z.string().min(1).max(80).regex(/^[a-zA-Z0-9_\[\].-]+$/u).refine(value => !secret.test(value))).max(30).default([]);
+const legacyRecipeRouteSchema = z.object({
+  origin: routeOrigin,
   path: z.string().min(1).max(300).regex(/^\/[A-Za-z0-9_./%\-]*(?:\*)?$/u).refine(value =>
     !value.includes("..") && value !== "/*" && !forbiddenPath.test(decodeURIComponent(value))),
   methods: z.array(z.enum(["GET", "HEAD", "POST"])).min(1).max(3),
-  queryKeys: z.array(z.string().min(1).max(80).regex(/^[a-zA-Z0-9_\[\].-]+$/u).refine(value => !secret.test(value))).max(30).default([]),
+  queryKeys: routeQueryKeys,
 }).strict();
+const publicAssetRecipeRouteSchema = z.object({
+  origin: routeOrigin,
+  path: z.string().min(1).max(1500),
+  methods: z.tuple([z.literal("GET")]),
+  queryKeys: routeQueryKeys,
+  resourceTypes: z.array(z.enum(["script", "stylesheet"])).min(1).max(2).refine(values => new Set(values).size === values.length),
+}).strict().superRefine((route, ctx) => {
+  try {
+    const url = new URL(route.origin + route.path);
+    if (!route.path.startsWith("/") || /[\s*?#{\u0000-\u001f\u007f}]/u.test(route.path) ||
+        url.origin !== route.origin || url.pathname !== route.path || url.search || url.hash ||
+        decodeURIComponent(route.path).split("/").includes("..") ||
+        route.resourceTypes.some(type => !isSafeBrowserAssetUrl(url.href, type, "GET")))
+      ctx.addIssue({ code: "custom", message: "Use an exact public script or stylesheet path" });
+  } catch { ctx.addIssue({ code: "custom", message: "Use an exact public script or stylesheet path" }); }
+});
+export const recipeRouteSchema = z.union([legacyRecipeRouteSchema, publicAssetRecipeRouteSchema]);
 const stepSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("openOfficialBooking"), addressSelector: recipeSelectorSchema, bookingLinkSelector: recipeSelectorSchema }).strict()
     .describe("Only MEMBERSPORTS_PUBLIC_TEE_SHEET: on the current official same-origin document, independently read one complete physical address matching the canonical venueAddress and one exact public booking anchor matching bookingUrl. The executor navigates that observed href in this context, including a published _blank link without clicking a new window. This asserts no name alias and grants no new route. Start at the official page or follow an observed same-site link first; never supply a guessed page or address."),
@@ -171,7 +190,10 @@ const common = {
   source: z.object({ officialUrl: safeUrl, bookingUrl: safeUrl, venueName: z.string().min(2).max(200),
     venueAddress: z.string().trim().min(3).max(1024).refine(value => !/[\u0000-\u001f\u007f]/u.test(value)).optional(),
     providerFamily: z.string().min(1).max(80).regex(/^[A-Za-z0-9._-]+$/u), timeZone }).strict(),
-  permittedRoutes: z.array(recipeRouteSchema).min(1).max(40),
+  permittedRoutes: z.array(recipeRouteSchema).min(1).max(168).superRefine((routes, ctx) => {
+    if (routes.filter(route => !("resourceTypes" in route)).length > 40 || routes.filter(route => "resourceTypes" in route).length > 128)
+      ctx.addIssue({ code: "custom", message: "Limit public data routes to 40 and exact asset routes to 128" });
+  }),
   proof: z.object({ venue: recipeFieldSchema, date: z.union([recipeFieldSchema, recipeDatePartsSchema]),
     complete: z.union([recipeFieldSchema, z.object({ availabilityResponse: z.literal(true) }).strict(), z.object({ serverDocument: z.literal(true) }).strict()])
       .describe("Read explicit true/ready/loaded/complete state, use {availabilityResponse:true} for verified JSON success, or {serverDocument:true} with kind SERVER_DOCUMENT for full raw/visible HTML equality. Presence of body or an arbitrary container is not completion."),
@@ -213,6 +235,8 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
   z.object({ schemaVersion: common.schemaVersion, target: common.target, source: common.source,
     engine: z.literal("EXISTING_ADAPTER"), adapter: existingAdapterMetadataSchema }).strict(),
 ]).superRefine((recipe, ctx) => {
+  if (recipe.engine === "HTTP_JSON" && recipe.permittedRoutes.some(route => "resourceTypes" in route))
+    ctx.addIssue({ code: "custom", message: "Public asset routes require a browser recipe" });
   if (recipe.engine === "EXISTING_ADAPTER") {
     const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "GOLFVX", "REX"].includes(recipe.adapter.family) ||
       recipe.adapter.family === "TEEITUP" && recipe.adapter.offeringKind === "SIMULATOR";
@@ -340,7 +364,8 @@ export function recipeAllowsRequest(recipe: CourseAccessRecipeData, value: strin
     !((recipe.engine === "BROWSER_DOM" || recipe.engine === "BROWSER_JSON") && (isSafeBrowserBootstrapReadUrl(value, resourceType ?? "", method) ||
       isSafeBrowserAvailabilityReadUrl(value, resourceType ?? "", method)))) return false;
   const url = new URL(value);
-  return recipe.permittedRoutes.some(route => route.origin === url.origin && route.methods.includes(method as "GET" | "HEAD" | "POST") &&
+  return recipe.permittedRoutes.some(route => route.origin === url.origin && route.methods.some(allowed => allowed === method) &&
+    (!("resourceTypes" in route) || route.resourceTypes.some(type => type === resourceType) && isSafeBrowserAssetUrl(value, resourceType ?? "", method)) &&
     (route.path.endsWith("*") ? url.pathname.startsWith(route.path.slice(0, -1)) : route.path === url.pathname) &&
     [...url.searchParams.keys()].every(key => route.queryKeys.includes(key)));
 }
