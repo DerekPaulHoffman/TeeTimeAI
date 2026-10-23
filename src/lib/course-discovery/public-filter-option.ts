@@ -33,10 +33,22 @@ function optionProof(element: Element) {
         const references = attributes.flatMap(name => (child.getAttribute(name) ?? "").split(/\s+/u).filter(Boolean));
         if (references.length > 8 || new Set(references).size !== references.length ||
             references.some(id => id.length > 128 || document.querySelectorAll(`[id="${CSS.escape(id)}"]`).length !== 1)) return false;
-        const hints = `${child.getAttribute("id") ?? ""} ${child.getAttribute("name") ?? ""} ${child.getAttribute("aria-label") ?? ""} ${child.getAttribute("title") ?? ""} ${child.getAttribute("placeholder") ?? ""} ` +
+        const rawId = child.getAttribute("id") ?? "";
+        const normalizedId = rawId.replace(/([a-z])([A-Z])/gu, "$1 $2").replace(/[_-]/gu, " ");
+        const layoutId = child instanceof HTMLElement && child !== form &&
+          !child.matches("input,select,textarea,button,option,optgroup,output,label,legend,a,area,summary,details,audio,video") &&
+          child.tabIndex < 0 && !child.hasAttribute("tabindex") && !child.hasAttribute("href") &&
+          [null, "presentation", "none"].includes(child.getAttribute("role")) &&
+          !child.getAttributeNames().some(name => /^on/iu.test(name) ||
+            /^aria-(?:haspopup|controls|owns|expanded|pressed|checked|selected)$/iu.test(name));
+        const privateHint = /password|secret|credential|email|phone|contact|customer|account|member|profile|birth|bday|dob|checkout|payment|purchase|confirm|reserve|\b(?:login|logon|sign[ -]?(?:in|up)|auth(?:entication|orization)?|book|pay|submit|continue|credit|debit|card|cc|cvv|cvc|expiry|expiration|ssn)\b/iu;
+        // A passive layout ID can name a card view; field/label/context hints
+        // still use the full privacy pattern, as do card-number/input IDs.
+        const privateLayoutId = /password|secret|credential|email|phone|contact|customer|account|member|profile|birth|bday|dob|checkout|payment|purchase|confirm|reserve|\b(?:login|logon|sign[ -]?(?:in|up)|auth(?:entication|orization)?|book|pay|submit|continue|credit|debit|cc|cvv|cvc|expiry|expiration|ssn)\b|\bcard\s+(?:number|input)\b/iu;
+        const hints = `${child.getAttribute("name") ?? ""} ${child.getAttribute("aria-label") ?? ""} ${child.getAttribute("title") ?? ""} ${child.getAttribute("placeholder") ?? ""} ` +
           references.map(id => document.getElementById(id)?.textContent ?? "").join(" ") +
           (/^(?:LABEL|LEGEND|BUTTON)$/u.test(child.tagName) || child.getAttribute("role") === "button" ? child.textContent ?? "" : "");
-        if (hints.length > 500 || /password|secret|credential|email|phone|contact|customer|account|member|profile|birth|bday|dob|checkout|payment|purchase|confirm|reserve|\b(?:login|logon|sign[ -]?(?:in|up)|auth(?:entication|orization)?|book|pay|submit|continue|credit|debit|card|cc|cvv|cvc|expiry|expiration|ssn)\b/iu.test(
+        if (rawId.length + 1 + hints.length > 500 || (layoutId ? privateLayoutId : privateHint).test(normalizedId) || privateHint.test(
           hints.replace(/([a-z])([A-Z])/gu, "$1 $2").replace(/[_-]/gu, " "))) return false;
         // Passive siblings supply no selection, date, party or request authority.
         // In particular, neither input.value nor radio.checked is read here.

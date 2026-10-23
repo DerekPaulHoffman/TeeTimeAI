@@ -151,6 +151,13 @@ export function readDiscoveryControllerCheckpoint(checkpoint, officialUrl) {
     transportFallbackUsed: value.transportFallbackUsed === true, lastFeedback: safeLastFeedback(value.lastFeedback),
     lastFailure: safeLastFeedback(value.lastFailure) };
 }
+function copyRequestUrlFingerprint(source, target) {
+  const fingerprint = source.requestUrlFingerprint;
+  if (!target.url && target.method === "GET" && ["script", "stylesheet"].includes(target.resourceType) &&
+      fingerprint && typeof fingerprint === "object" && !Array.isArray(fingerprint) &&
+      ["originSha256", "pathnameSha256"].every(key => Object.hasOwn(fingerprint, key) && typeof fingerprint[key] === "string" && /^[a-f0-9]{64}$/u.test(fingerprint[key])))
+    target.requestUrlFingerprint = { originSha256: fingerprint.originSha256, pathnameSha256: fingerprint.pathnameSha256 };
+}
 function safeReplayDiagnostic(value) {
   if (!value || typeof value !== "object" || !/^[A-Z_0-9]{1,80}$/u.test(value.code ?? "")) return undefined;
   const result = { code: value.code };
@@ -158,6 +165,7 @@ function safeReplayDiagnostic(value) {
   if (safeObservedUrl(value.url)) { const url = new URL(value.url); url.search = ""; url.hash = ""; result.url = url.href; }
   if (["GET", "HEAD", "POST", "OPTIONS"].includes(value.method)) result.method = value.method;
   if (["document", "script", "stylesheet", "xhr", "fetch", "other"].includes(value.resourceType)) result.resourceType = value.resourceType;
+  copyRequestUrlFingerprint(value, result);
   const urlRejection = safePublicUrlRejectionDiagnostic(value.urlRejection);
   if (urlRejection) result.urlRejection = urlRejection;
   const simulatorError = value.simulatorError;
@@ -166,6 +174,11 @@ function safeReplayDiagnostic(value) {
     if (Number.isInteger(simulatorError.httpStatus) && simulatorError.httpStatus >= 100 && simulatorError.httpStatus <= 599)
       result.simulatorError.httpStatus = simulatorError.httpStatus;
   }
+  const requestState = value.requestState;
+  const boundedCount = count => count === "OVER_LIMIT" || Number.isSafeInteger(count) && count >= 0 && count <= 1024;
+  if (requestState && typeof requestState === "object" && !Array.isArray(requestState) &&
+      ["pendingReads", "currentDocumentPendingHandlers"].every(key => Object.hasOwn(requestState, key) && boundedCount(requestState[key])))
+    result.requestState = { pendingReads: requestState.pendingReads, currentDocumentPendingHandlers: requestState.currentDocumentPendingHandlers };
   // Temporal request evidence is separate from the terminal replay diagnostic.
   // Its producer owns ordering; this bounded copy asserts no causal relation.
   const earlier = value.earlierRequestFailure;
@@ -174,6 +187,7 @@ function safeReplayDiagnostic(value) {
     if (safeObservedUrl(earlier.url)) { const url = new URL(earlier.url); url.search = ""; url.hash = ""; failure.url = url.href; }
     if (["GET", "HEAD", "POST", "OPTIONS"].includes(earlier.method)) failure.method = earlier.method;
     if (["document", "stylesheet", "image", "media", "font", "script", "xhr", "fetch", "other"].includes(earlier.resourceType)) failure.resourceType = earlier.resourceType;
+    copyRequestUrlFingerprint(earlier, failure);
     result.earlierRequestFailure = failure;
   }
   return result;

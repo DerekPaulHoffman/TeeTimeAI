@@ -88,13 +88,17 @@ export function recipeExecutionDiagnostic(error: unknown, context: { stepIndex?:
   try {
     const url = new URL(context.url ?? ""); url.search = ""; url.hash = "";
     if (accessExecutionDiagnosticSchema.safeParse({ code, url: url.href }).success) diagnostic.url = url.href;
+    else if ((context.url?.length ?? 2049) <= 2048 && url.protocol === "https:" && !url.username && !url.password && !url.port &&
+        diagnostic.method === "GET" && ["script", "stylesheet"].includes(diagnostic.resourceType ?? ""))
+      diagnostic.requestUrlFingerprint = { originSha256: createHash("sha256").update(url.origin, "utf8").digest("hex"),
+        pathnameSha256: createHash("sha256").update(url.pathname, "utf8").digest("hex") };
   } catch { /* No unsafe or unparseable URL enters diagnostic feedback. */ }
   return diagnostic;
 }
 function requestFailureFields(diagnostic: AccessExecutionDiagnostic): NonNullable<AccessExecutionDiagnostic["earlierRequestFailure"]> {
-  const { code, url, method, resourceType } = diagnostic;
+  const { code, url, method, resourceType, requestUrlFingerprint } = diagnostic;
   return { code, ...(url === undefined ? {} : { url }), ...(method === undefined ? {} : { method }),
-    ...(resourceType === undefined ? {} : { resourceType }) };
+    ...(resourceType === undefined ? {} : { resourceType }), ...(requestUrlFingerprint === undefined ? {} : { requestUrlFingerprint }) };
 }
 function matchesAvailabilityRequest(recipe: BrowserAccessRecipe, input: AccessExecutionInput,
   request: { url: string; method: string; body?: string | null }) {
@@ -391,11 +395,13 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
   let failure: AccessExecutionDiagnostic | undefined;
   let terminalFailure: AccessExecutionDiagnostic | undefined;
   let earlierRequestFailure: NonNullable<AccessExecutionDiagnostic["earlierRequestFailure"]> | undefined;
+  let terminalRequestState: AccessExecutionDiagnostic["requestState"];
   let providerThrottled = false;
   const fail = (status: AccessExecutionResult["status"], reason: string): AccessExecutionResult => {
     const primary = terminalFailure ?? failure ?? recipeExecutionDiagnostic(reason, activity);
-    const diagnostic = earlierRequestFailure && JSON.stringify(earlierRequestFailure) !== JSON.stringify(requestFailureFields(primary))
+    const selected = earlierRequestFailure && JSON.stringify(earlierRequestFailure) !== JSON.stringify(requestFailureFields(primary))
       ? { ...primary, earlierRequestFailure } : primary;
+    const diagnostic = terminalRequestState ? { ...selected, requestState: terminalRequestState } : selected;
     return { status, complete: false,
       observedAt: clock().toISOString(), sourceUrl: recipe.source.bookingUrl, slots: [], evidence: { recipeHash: hashAccessRecipe(recipe),
         venueVerified: false, dateVerified: false, capacityVerified: false, durationVerified: false, completeVerified: false, reason, diagnostic } };
@@ -413,7 +419,8 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
   const allowsPost = (url: URL, headers: Headers, body: string) => recipeAllowsRequest(recipe, url.href, "POST") &&
     (isAnonymousBrowserReadPost(url, headers, body) || passfactory.allows(url, headers, body));
   const requestQueue = createSimulatorBrowserRequestQueue(deps.requestLease ?? runWithProviderRequestLease, signal);
-  const read = async (url: string, method: string, body?: string, headers = new Headers({ accept: "application/json" }), resourceType?: string) => {
+  const read = async (url: string, method: string, body?: string, headers = new Headers({ accept: "application/json" }), resourceType?: string,
+    observeFailure?: (diagnostic: AccessExecutionDiagnostic) => void) => {
     if (!recipeAllowsRequest(recipe, url, method, resourceType)) throw new Error("UNSCOPED_REQUEST");
     if (method === "POST" && !allowsPost(new URL(url), headers, body ?? "")) throw new Error("UNSAFE_POST");
     const maxResponseBytes = publicBrowserResponseLimit(resourceType ?? "");
@@ -423,7 +430,10 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
     });
     return requestQueue.run(requestFamilyForUrl(url), async () => {
       const response = await transport(url, { method, body, headers, signal, credentials: "omit", redirect: "manual", cache: "no-store" });
-      if (!response.ok) failure ??= recipeExecutionDiagnostic(`HTTP_${response.status}`, { url, method, resourceType });
+      if (!response.ok) {
+        const diagnostic = recipeExecutionDiagnostic(`HTTP_${response.status}`, { url, method, resourceType });
+        failure ??= diagnostic; observeFailure?.(diagnostic);
+      }
       if (response.status === 429) { providerThrottled = true; throw new Error("PROVIDER_THROTTLED"); }
       if ([401, 403].includes(response.status)) throw new Error("ACCESS_REQUIRED");
       if (!response.ok || response.redirected || response.url && response.url !== url) throw new Error("TRANSPORT_FAILED");
@@ -469,6 +479,12 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
     let rejectedResponseGeneration: number | undefined;
     const usesServerDocument = recipe.engine === "BROWSER_DOM" && recipe.availabilityResponse.kind === "SERVER_DOCUMENT";
     let mainDocumentSequence = 0, dataRequestSequence = 0;
+    let currentDocumentPendingHandlers = 0;
+    let currentDocumentFailure: NonNullable<AccessExecutionDiagnostic["earlierRequestFailure"]> | undefined;
+    type DocumentOwner = { sequence: number; mainFrame: boolean };
+    const observeOwnedFailure = (diagnostic: AccessExecutionDiagnostic, owner?: DocumentOwner) => {
+      if (owner?.mainFrame && owner.sequence === mainDocumentSequence) currentDocumentFailure ??= requestFailureFields(diagnostic);
+    };
     let serverDocument: { generation: number; documentSequence: number; dataSequence: number; extracted: ServerDocumentExtraction } | undefined;
     let lastSuccessfulAvailabilityRequest: PublicAvailabilityRequest | undefined;
     let latestBrowserJsonRead = 0;
@@ -528,6 +544,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
         } catch (error) {
           serverDocument = undefined; responseGeneration = undefined; rejectedResponseGeneration = generation;
           failure ??= recipeExecutionDiagnostic(error);
+          observeOwnedFailure(recipeExecutionDiagnostic(error, request), document && { sequence: document.sequence, mainFrame: document.sourceMainFrame });
         }
         return;
       }
@@ -539,7 +556,9 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
               body: JSON.parse(Buffer.from(body).toString("utf8")), request };
           } catch (error) {
             memberSportsRead = undefined; responseGeneration = undefined; rejectedResponseGeneration = generation;
-            failure ??= recipeExecutionDiagnostic(error); return;
+            failure ??= recipeExecutionDiagnostic(error);
+            observeOwnedFailure(recipeExecutionDiagnostic(error, request), document && { sequence: document.sequence, mainFrame: document.sourceMainFrame });
+            return;
           }
         } else if (recipe.engine === "BROWSER_JSON" && recipe.requestBinding === "SEVENROOMS_PUBLIC_PARTICIPANTS") {
           try {
@@ -549,6 +568,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
           } catch (error) {
             browserJson = undefined; responseGeneration = undefined; rejectedResponseGeneration = generation;
             failure ??= recipeExecutionDiagnostic(error);
+            observeOwnedFailure(recipeExecutionDiagnostic(error, request), document && { sequence: document.sequence, mainFrame: document.sourceMainFrame });
             return;
           }
         }
@@ -606,11 +626,14 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
         ? catalogTiles.beginRead(requestUrl, request.method(), request.postData(), request.frame().url()) : undefined;
       if (mainDocument) {
         mainDocumentSequence++;
+        currentDocumentFailure = undefined; currentDocumentPendingHandlers = 0;
         memberSportsRead = undefined; memberSportsMetadata.clear();
         if (memberSportsIdentity && requestUrl !== memberSportsIdentity.proof.bookingUrl) memberSportsIdentity = undefined;
       }
       if (["xhr", "fetch"].includes(request.resourceType())) dataRequestSequence++;
       const capturedDocumentSequence = mainDocumentSequence, capturedDataSequence = dataRequestSequence;
+      const diagnosticOwner = { sequence: capturedDocumentSequence, mainFrame: request.frame() === page.mainFrame() };
+      if (diagnosticOwner.mainFrame) currentDocumentPendingHandlers++;
       if (sevenRooms && (mainDocument || isSafeBrowserAvailabilityReadUrl(requestUrl, request.resourceType(), request.method()) &&
           !ancillaryBrowserJsonRead({ url: requestUrl, method: request.method(), resourceType: request.resourceType() }))) {
         browserJson = undefined; responseGeneration = undefined; rejectedResponseGeneration = undefined;
@@ -669,7 +692,11 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
           bytes += native.body.length;
           if (bytes > PUBLIC_BROWSER_TOTAL_BYTES) { cancellation.abort("RESPONSE_LIMIT"); throw new Error("RESPONSE_LIMIT"); }
           if (native.headers.location && isSafeBrowserBootstrapReadUrl(requestUrl, request.resourceType(), request.method())) throw new Error("UNSCOPED_REQUEST");
-          if (native.status >= 400) { blocked = true; failure ??= recipeExecutionDiagnostic(`HTTP_${native.status}`, { url: requestUrl, method: request.method(), resourceType: request.resourceType() }); }
+          if (native.status >= 400) {
+            blocked = true;
+            const diagnostic = recipeExecutionDiagnostic(`HTTP_${native.status}`, { url: requestUrl, method: request.method(), resourceType: request.resourceType() });
+            failure ??= diagnostic; observeOwnedFailure(diagnostic, diagnosticOwner);
+          }
           if (native.status === 429) { providerThrottled = true; throw new Error("PROVIDER_THROTTLED"); }
           if (mainDocument) catalogTiles.completeDocument(catalogDocument, native.status, native.headers["content-type"] ?? "");
           catalogTiles.completeRead(catalogRead, native.status, native.headers["content-type"] ?? "", native.body);
@@ -678,7 +705,8 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
             { main: mainDocument, sequence: capturedDocumentSequence, dataSequence: capturedDataSequence, contentType: native.headers["content-type"] ?? "", sourceMainFrame: request.frame() === page.mainFrame() });
           return;
         }
-        const { response, buffer } = await read(requestUrl, request.method(), request.postData() ?? undefined, headers, request.resourceType());
+        const { response, buffer } = await read(requestUrl, request.method(), request.postData() ?? undefined, headers, request.resourceType(),
+          diagnostic => observeOwnedFailure(diagnostic, diagnosticOwner));
         bytes += buffer.byteLength;
         if (bytes > PUBLIC_BROWSER_TOTAL_BYTES) throw new Error("RESPONSE_LIMIT");
         const responseHeaders: Record<string, string> = {};
@@ -689,8 +717,15 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
         observeClientScript(requestUrl, request.resourceType(), response.status, new Uint8Array(buffer));
         observeAvailabilityResponse(requestGeneration, { url: requestUrl, method: request.method(), body: request.postData(), resourceType: request.resourceType() }, response.status, new Uint8Array(buffer),
           { main: mainDocument, sequence: capturedDocumentSequence, dataSequence: capturedDataSequence, contentType: response.headers.get("content-type") ?? "", sourceMainFrame: request.frame() === page.mainFrame() });
-      } catch (error) { blocked = true; failure ??= recipeExecutionDiagnostic(error, { url: requestUrl, method: request.method(), resourceType: request.resourceType() }); await route.abort().catch(() => {}); }
-      finally { pendingRequests--; }
+      } catch (error) {
+        blocked = true;
+        const diagnostic = recipeExecutionDiagnostic(error, { url: requestUrl, method: request.method(), resourceType: request.resourceType() });
+        failure ??= diagnostic; observeOwnedFailure(diagnostic, diagnosticOwner);
+        await route.abort().catch(() => {});
+      } finally {
+        pendingRequests--;
+        if (diagnosticOwner.mainFrame && diagnosticOwner.sequence === mainDocumentSequence) currentDocumentPendingHandlers--;
+      }
     };
     let rejectedSubframes = 0;
     await context.route("**/*", async route => {
@@ -963,7 +998,9 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
     } catch (error) {
       // Capture before close can create its own request failures. This says
       // only that the read failed earlier; the primary terminal error wins.
-      earlierRequestFailure = failure ? requestFailureFields(failure) : undefined;
+      earlierRequestFailure = currentDocumentFailure;
+      const count = (value: number): number | "OVER_LIMIT" => Number.isSafeInteger(value) && value >= 0 && value <= 1024 ? value : "OVER_LIMIT";
+      terminalRequestState = { pendingReads: count(pendingReadCount()), currentDocumentPendingHandlers: count(currentDocumentPendingHandlers) };
       throw error;
     } finally { signal.removeEventListener("abort", stop); await redirectRouting?.close(); await context.close().catch(() => {}); }
   } catch (error) {

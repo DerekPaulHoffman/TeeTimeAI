@@ -51,6 +51,30 @@ describe("public player combobox without invented option values", () => {
     await selectPublicFilter(page.locator("#players"), { value: "2", purpose: "PLAYERS", simulator: false });
     expect(await page.locator("#picked").textContent()).toBe("2 Players");
   });
+  it.each(['<mat-card id="a-tee-times-card-view-open-dialog-mather"></mat-card>', '<div id="public-card-layout"><span>Views</span></div>'])(
+    "does not classify a passive layout-only card identifier as a private field (%s)", async layout => {
+      await page.setContent(formFixture("", passiveFilters + layout));
+      await selectPublicFilter(page.locator("#players"), { value: "2", purpose: "PLAYERS", simulator: false });
+      expect(await page.locator("#picked").textContent()).toBe("2 Players");
+    });
+  it.each([
+    '<div id="credit-card-layout"></div>', '<div id="debit-card-layout"></div>', '<div id="payment-card-layout"></div>',
+    '<div id="card-number"></div>', '<div id="card-input"></div>', '<input readonly id="card">',
+    '<button id="card" type="button">View</button>', '<select id="card"><option>View</option></select>',
+    '<div id="card" role="button">View</div>', '<div id="card" role="combobox">View</div>', '<div id="card" tabindex="0"></div>',
+    '<div id="card" onclick="void 0"></div>', '<div id="layout" name="card"></div>', '<div id="layout" aria-label="Card"></div>',
+    '<div id="layout" title="Card"></div>', '<div id="layout" placeholder="Card"></div>', '<label>Card</label>',
+    '<div aria-describedby="card-label"></div><span id="card-label">Card</span>',
+  ])("retains full private hints for fields, interactive nodes and semantic card labels (%s)", async extra => {
+    await page.setContent(formFixture("", extra));
+    await expect(selectPublicFilter(page.locator("#players"), { value: "2", purpose: "PLAYERS", simulator: false })).rejects.toThrow("UNSAFE_CONTROL");
+    expect(await page.locator("#opened").textContent()).toBe("");
+  });
+  it("retains the full private-ID guard on the form itself", async () => {
+    await page.setContent(formFixture('id="card"'));
+    await expect(selectPublicFilter(page.locator("#players"), { value: "2", purpose: "PLAYERS", simulator: false })).rejects.toThrow("UNSAFE_CONTROL");
+    expect(await page.locator("#opened").textContent()).toBe("");
+  });
   it.each([
     ['method="POST"', ""], ['action="/search"', ""], ['target="_blank"', ""], ['enctype="text/plain"', ""],
     ['onsubmit="window.privateSubmit=true"', ""], ['aria-label="Account filters"', ""],

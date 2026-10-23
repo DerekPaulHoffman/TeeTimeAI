@@ -31,6 +31,25 @@ describe("public role option ownership", () => {
     expect(await trySelectPublicFilterOption(page.locator("custom-item"), "2 Players", { simulator: false })).toBe(true);
     expect(await page.locator("#picked").textContent()).toBe("2 Players");
   });
+  it.each(['<mat-card id="a-tee-times-card-view-open-dialog-mather"></mat-card>', '<div id="public-card-layout"></div>'])(
+    "rechecks passive card-layout identifiers without promoting them to field semantics (%s)", async layout => {
+      await page.setContent(formMenu("", layout));
+      expect(await trySelectPublicFilterOption(page.locator("custom-item"), "2 Players", { simulator: false })).toBe(true);
+      expect(await page.locator("#picked").textContent()).toBe("2 Players");
+    });
+  it.each([
+    '<div id="credit-card-layout"></div>', '<div id="debit-card-layout"></div>', '<div id="payment-card-layout"></div>',
+    '<div id="card-number"></div>', '<div id="card-input"></div>', '<input readonly id="card">',
+    '<button id="card" type="button">View</button>', '<select id="card"><option>View</option></select>',
+    '<div id="card" role="button">View</div>', '<div id="card" role="combobox">View</div>', '<div id="card" tabindex="0"></div>',
+    '<div id="card" onclick="void 0"></div>', '<div name="card"></div>', '<div aria-label="Card"></div>',
+    '<div title="Card"></div>', '<div placeholder="Card"></div>', '<label>Card</label>',
+    '<div aria-labelledby="card-label"></div><span id="card-label">Card</span>',
+  ])("does not let passive layout-ID handling weaken semantic card privacy (%s)", async extra => {
+    await page.setContent(formMenu("", extra));
+    await expect(trySelectPublicFilterOption(page.locator("custom-item"), "2 Players", { simulator: false })).rejects.toThrow("UNSAFE_CONTROL");
+    expect(await page.locator("#picked").textContent()).toBe("");
+  });
   it.each([
     ['method="POST"', ""], ['action="/search"', ""], ['target="_blank"', ""], ['enctype="text/plain"', ""],
     ['aria-label="Login filters"', ""], ["", '<label>Account profile</label>'], ["", '<input type="hidden" value="private-never-read">'],

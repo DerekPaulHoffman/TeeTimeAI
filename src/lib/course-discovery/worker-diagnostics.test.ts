@@ -3,6 +3,61 @@ import { bindDiscoveryRecipeIdentity, createDiscoveryAdapterObservation, createD
 import { describePublicUrlRejection, safeBrowserActionIssues } from "../../../scripts/automation/course-discovery-diagnostics.mjs";
 
 describe("durable discovery browser diagnostics", () => {
+  it.each(["script", "stylesheet"])("preserves only opaque GET %s fingerprints when no public URL survives", resourceType => {
+    const requestUrlFingerprint = { originSha256: "a".repeat(64), pathnameSha256: "b".repeat(64) };
+    const diagnostic = { code: "UNSCOPED_REQUEST", method: "GET", resourceType, url: "https://private.internal/opaque-path?secret=never-emitted",
+      requestUrlFingerprint: { ...requestUrlFingerprint, rawOrigin: "private-origin", rawPathname: "private-path" },
+      earlierRequestFailure: { code: "UNSAFE_URL", method: "GET", resourceType, requestUrlFingerprint } };
+    const restored = readDiscoveryControllerCheckpoint({ controller: { version: 1, officialUrl: "https://venue.example/", observedNavigationUrls: [],
+      lastFailure: { code: "DISCOVERY_REPLAY_INCOMPLETE", details: { reason: "UNSCOPED_REQUEST", diagnostic } } } }, "https://venue.example/");
+    expect(restored.lastFailure.details.diagnostic).toEqual({ code: "UNSCOPED_REQUEST", method: "GET", resourceType, requestUrlFingerprint,
+      earlierRequestFailure: { code: "UNSAFE_URL", method: "GET", resourceType, requestUrlFingerprint } });
+    expect(JSON.stringify(restored)).not.toMatch(/private|opaque-path|secret|rawOrigin|rawPathname/);
+    diagnostic.requestUrlFingerprint.originSha256 = "c".repeat(64);
+    expect(restored.lastFailure.details.diagnostic.requestUrlFingerprint.originSha256).toBe("a".repeat(64));
+  });
+  it.each([
+    { requestUrlFingerprint: null }, { requestUrlFingerprint: { originSha256: "a".repeat(64) } },
+    { requestUrlFingerprint: { originSha256: "A".repeat(64), pathnameSha256: "b".repeat(64) } },
+    { requestUrlFingerprint: { originSha256: "a".repeat(63), pathnameSha256: "b".repeat(64) } },
+    { requestUrlFingerprint: { originSha256: ["a".repeat(64)], pathnameSha256: "b".repeat(64) } },
+    { method: "HEAD" }, { method: "POST" }, { resourceType: "xhr" }, { resourceType: "fetch" }, { resourceType: "document" },
+    { url: "https://venue.example/public.js" },
+  ])("omits ineligible fingerprints without changing the primary or retaining extra fields (%j)", change => {
+    const diagnostic = { code: "STEP_TIMEOUT", method: "GET", resourceType: "script",
+      requestUrlFingerprint: { originSha256: "a".repeat(64), pathnameSha256: "b".repeat(64) }, ...change };
+    const restored = readDiscoveryControllerCheckpoint({ controller: { version: 1, officialUrl: "https://venue.example/", observedNavigationUrls: [],
+      lastFailure: { code: "DISCOVERY_REPLAY_INCOMPLETE", details: { reason: "STEP_TIMEOUT", diagnostic: { ...diagnostic,
+        earlierRequestFailure: { ...diagnostic, code: "UNSAFE_URL" } } } } } }, "https://venue.example/");
+    expect(restored.lastFailure.details.diagnostic).not.toHaveProperty("requestUrlFingerprint");
+    expect(restored.lastFailure.details.diagnostic.earlierRequestFailure).not.toHaveProperty("requestUrlFingerprint");
+    expect(noVerifiedRecipeDiagnostic(restored.lastFailure).reason).toBe("STEP_TIMEOUT");
+  });
+  it.each([{ pendingReads: 0, currentDocumentPendingHandlers: 0 }, { pendingReads: 1024, currentDocumentPendingHandlers: 1 },
+    { pendingReads: "OVER_LIMIT", currentDocumentPendingHandlers: "OVER_LIMIT" }])(
+    "preserves bounded primary requestState through checkpoint without exposing supplied extras (%j)", requestState => {
+      const feedback = { code: "DISCOVERY_REPLAY_INCOMPLETE", details: { reason: "STEP_TIMEOUT", diagnostic: { code: "STEP_TIMEOUT",
+        requestState: { ...requestState, queueOwner: "private-owner", url: "https://private.example/?token=private", body: "private-body" },
+        earlierRequestFailure: { code: "UNSCOPED_REQUEST", requestState: { pendingReads: 99, currentDocumentPendingHandlers: 99 } } } } };
+      const restored = readDiscoveryControllerCheckpoint({ controller: { version: 1, officialUrl: "https://venue.example/", observedNavigationUrls: [],
+        lastFailure: feedback } }, "https://venue.example/");
+      expect(restored.lastFailure.details.diagnostic).toEqual({ code: "STEP_TIMEOUT", requestState,
+        earlierRequestFailure: { code: "UNSCOPED_REQUEST" } });
+      expect(noVerifiedRecipeDiagnostic(restored.lastFailure).reason).toBe("STEP_TIMEOUT");
+      expect(JSON.stringify(restored)).not.toMatch(/private|queueOwner|body/);
+      feedback.details.diagnostic.requestState.pendingReads = "MUTATED";
+      feedback.details.diagnostic.requestState.currentDocumentPendingHandlers = 1024;
+      expect(restored.lastFailure.details.diagnostic.requestState).toEqual(requestState);
+    });
+  it.each([null, [], "private", {}, Object.create({ pendingReads: 0, currentDocumentPendingHandlers: 0 }), { pendingReads: 0 }, { pendingReads: 0, currentDocumentPendingHandlers: -1 },
+    { pendingReads: 1025, currentDocumentPendingHandlers: 0 }, { pendingReads: 1.5, currentDocumentPendingHandlers: 0 },
+    { pendingReads: "1024", currentDocumentPendingHandlers: 0 }, { pendingReads: "OVER_LIMIT_PRIVATE", currentDocumentPendingHandlers: 0 }])(
+    "omits malformed requestState without changing terminal outcome (%j)", requestState => {
+      const restored = readDiscoveryControllerCheckpoint({ controller: { version: 1, officialUrl: "https://venue.example/", observedNavigationUrls: [],
+        lastFailure: { code: "DISCOVERY_REPLAY_INCOMPLETE", details: { reason: "PROVIDER_THROTTLED", diagnostic: { code: "HTTP_429", requestState } } } } }, "https://venue.example/");
+      expect(restored.lastFailure.details.diagnostic).toEqual({ code: "HTTP_429" });
+      expect(noVerifiedRecipeDiagnostic(restored.lastFailure).reason).toBe("PROVIDER_THROTTLED");
+    });
   it("preserves one bounded earlier request failure through replay and checkpoint without changing the terminal diagnostic", async () => {
     const hash = "a".repeat(64), primary = { code: "STEP_TIMEOUT", stepIndex: 2, method: "GET", resourceType: "document",
       url: "https://venue.example/calendar?date=private-date#private-fragment",

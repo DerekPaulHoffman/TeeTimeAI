@@ -369,6 +369,9 @@ export function recipeAllowsRequest(recipe: CourseAccessRecipeData, value: strin
     (route.path.endsWith("*") ? url.pathname.startsWith(route.path.slice(0, -1)) : route.path === url.pathname) &&
     [...url.searchParams.keys()].every(key => route.queryKeys.includes(key)));
 }
+const requestUrlFingerprintSchema = z.preprocess(value => value && typeof value === "object" && !Array.isArray(value) &&
+  ["originSha256", "pathnameSha256"].every(key => Object.hasOwn(value, key)) ? value : null,
+z.object({ originSha256: z.string().regex(/^[a-f0-9]{64}$/u), pathnameSha256: z.string().regex(/^[a-f0-9]{64}$/u) }).strict());
 const accessRequestFailureDiagnosticSchema = z.object({
   code: z.string().regex(/^[A-Z_0-9]{1,80}$/u),
   url: z.string().max(2048).refine(value => {
@@ -377,17 +380,27 @@ const accessRequestFailureDiagnosticSchema = z.object({
   }).optional(),
   method: z.enum(["GET", "HEAD", "POST", "OPTIONS"]).optional(),
   resourceType: z.enum(["document", "stylesheet", "image", "media", "font", "script", "xhr", "fetch", "other"]).optional(),
+  requestUrlFingerprint: requestUrlFingerprintSchema.optional().describe("Opaque hashes of the parsed HTTPS origin and exact pathname when a GET script or stylesheet failure has no safe diagnostic URL. No query, fragment, or request authority."),
 }).strict();
 export const accessExecutionDiagnosticSchema = accessRequestFailureDiagnosticSchema.extend({
   stepIndex: z.number().int().min(0).max(31).optional(),
   // An observation from before terminal unwinding, not a cause or access verdict.
   earlierRequestFailure: accessRequestFailureDiagnosticSchema.optional()
-    .describe("A request failure observed before terminal unwinding. Temporal evidence only; it does not establish the cause or an access requirement."),
+    .describe("A request failure owned by the captured current main-document sequence and observed before terminal unwinding. Temporal evidence only; it does not establish the cause or an access requirement."),
+  requestState: z.object({
+    pendingReads: z.union([z.number().int().min(0).max(1024), z.literal("OVER_LIMIT")]),
+    currentDocumentPendingHandlers: z.union([z.number().int().min(0).max(1024), z.literal("OVER_LIMIT")]),
+  }).strict().optional().describe("Counts captured before terminal cleanup. pendingReads is the existing global handler/native pending maximum; currentDocumentPendingHandlers counts only handlers with a captured current main-document owner, not a provider or network census."),
   simulatorError: z.object({
     code: z.enum(["INVALID_SOURCE", "INVALID_REQUEST", "UNSUPPORTED_PROVIDER", "UNSUPPORTED_DURATION", "PARTY_TOO_LARGE", "PUBLIC_SESSION_REQUIRED", "HTTP_ERROR", "SCHEMA_CHANGED"]),
     retryable: z.boolean(), httpStatus: z.number().int().min(100).max(599).optional(),
   }).strict().optional(),
-}).strict();
+}).strict().superRefine((diagnostic, ctx) => {
+  for (const [value, path] of [[diagnostic, []], [diagnostic.earlierRequestFailure, ["earlierRequestFailure"]]] as const)
+    if (value?.requestUrlFingerprint && (value.url !== undefined || value.method !== "GET" ||
+        !["script", "stylesheet"].includes(value.resourceType ?? "")))
+      ctx.addIssue({ code: "custom", message: "Opaque request fingerprints require an omitted URL and GET script or stylesheet context", path: [...path, "requestUrlFingerprint"] });
+});
 export type AccessExecutionDiagnostic = z.infer<typeof accessExecutionDiagnosticSchema>;
 
 export const accessExecutionResultSchema = z.object({

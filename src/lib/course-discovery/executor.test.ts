@@ -737,7 +737,8 @@ describe.runIf(existsSync(chromeExecutable))("isolated browser recipe replay", (
   it("fails incomplete when a required unscoped request occurs", async () => {
     const result = await executeAccessRecipe(recipe(), executionInput, browserDeps(html.replace("</body>", '<script src="https://unscoped.example.org/slots.js"></script></body>')));
     expect(result.status).toBe("INCOMPLETE"); expect(result.slots).toEqual([]);
-    expect(result.evidence.diagnostic).toEqual({ code: "UNSCOPED_REQUEST", url: "https://unscoped.example.org/slots.js", method: "GET", resourceType: "script" });
+    expect(result.evidence.diagnostic).toEqual({ code: "UNSCOPED_REQUEST", url: "https://unscoped.example.org/slots.js", method: "GET", resourceType: "script",
+      requestState: { pendingReads: 0, currentDocumentPendingHandlers: 0 } });
   }, 20_000);
   it("reports the terminal control step when an earlier resource also failed", async () => {
     const selected = recipe();
@@ -797,7 +798,8 @@ describe.runIf(existsSync(chromeExecutable))("isolated browser recipe replay", (
     try {
       const result = await executeAccessRecipe(selected, executionInput, browserDeps(html, false));
       expect(result.evidence.diagnostic).toEqual({ code: "AMBIGUOUS_CONTROL", stepIndex: 0,
-        url: "https://example.org/tee-times", method: "GET", resourceType: "document" });
+        url: "https://example.org/tee-times", method: "GET", resourceType: "document",
+        requestState: { pendingReads: 0, currentDocumentPendingHandlers: 0 } });
     } finally { native.mockRestore(); controller.mockRestore(); }
   }, 20_000);
   it("skips decorative images without classifying complete DOM evidence as blocked", async () => {
