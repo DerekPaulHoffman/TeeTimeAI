@@ -8,6 +8,7 @@ const url = "https://www.sevenrooms.com/api-yoa/availability/widget/range?venue=
 const request = (value = url, method = "GET") => ({ url: value, method });
 const describeMismatch = (actual = request(), expected = request(), source = booking,
   strictUrl = isSafeRecipeUrl) => describeBrowserJsonRequestMismatch(actual, expected, source, strictUrl);
+const input = { date: "2030-10-23", players: 2, durationMinutes: 60, startTime: "10:00", endTime: "20:00" };
 
 describe("closed public range request mismatch diagnostics, no matching authority", () => {
   it("leaves an identical expanded tuple without a diagnostic", () => {
@@ -88,5 +89,67 @@ describe("closed public range request mismatch diagnostics, no matching authorit
     expect(result).toBe("BROWSER_JSON_REQUEST_CHANNEL_MISMATCH");
     expect(result).toMatch(/^[A-Z_0-9]{1,80}$/u);
     expect(result).not.toContain("private_sentinel");
+  });
+
+  it("distinguishes an actual midnight halo ending at16:00 from a serialization mismatch", () => {
+    const actual = request(url.replace("time_slot=20:00", "time_slot=00:00"));
+    expect(describeBrowserJsonRequestMismatch(actual, request(), booking, isSafeRecipeUrl, input))
+      .toBe("BROWSER_JSON_REQUEST_ACTUAL_WINDOW_END_UNCOVERED");
+    const changedInput = { ...input, date: "2030-10-24", players: 3, durationMinutes: 120, startTime: "11:00", endTime: "19:00" };
+    const expected = request(url.replace("10-23-2030", "10-24-2030").replace("party_size=2", "party_size=3").replace("picked_duration=60", "picked_duration=120"));
+    expect(describeBrowserJsonRequestMismatch(request(expected.url.replace("time_slot=20:00", "time_slot=00:00")), expected, booking, isSafeRecipeUrl, changedInput))
+      .toBe("BROWSER_JSON_REQUEST_ACTUAL_WINDOW_END_UNCOVERED");
+  });
+
+  it.each([
+    ["23:00", "START"], ["00:00", "END"], ["15:00", "BOTH"],
+  ])("reports only the uncovered %s window edges on each side", (center, edge) => {
+    const uncovered = request(url.replace("time_slot=20:00", `time_slot=${center}`).replace("halo_size_interval=64", "halo_size_interval=0"));
+    expect(describeBrowserJsonRequestMismatch(uncovered, request(), booking, isSafeRecipeUrl, input))
+      .toBe(`BROWSER_JSON_REQUEST_ACTUAL_WINDOW_${edge}_UNCOVERED`);
+    expect(describeBrowserJsonRequestMismatch(request(), uncovered, booking, isSafeRecipeUrl, input))
+      .toBe(`BROWSER_JSON_REQUEST_SAVED_WINDOW_${edge}_UNCOVERED`);
+  });
+
+  it.each([
+    ["party_size=2", "party_size=3"], ["picked_duration=60", "picked_duration=120"],
+    ["start_date=10-23-2030", "start_date=10-24-2030"], ["num_days=1", "num_days=3"],
+  ])("identifies current-input disagreement on either side: %s", (from, to) => {
+    const mismatched = request(url.replace(from, to));
+    expect(describeBrowserJsonRequestMismatch(mismatched, request(), booking, isSafeRecipeUrl, input))
+      .toBe("BROWSER_JSON_REQUEST_ACTUAL_INPUT_MISMATCH");
+    expect(describeBrowserJsonRequestMismatch(request(), mismatched, booking, isSafeRecipeUrl, input))
+      .toBe("BROWSER_JSON_REQUEST_SAVED_INPUT_MISMATCH");
+  });
+
+  it("does not accuse a semantically accepted dynamic clock but exposes any other raw fence difference", () => {
+    const dynamic = request(url.replace("time_slot=20:00", "time_slot=18:00"));
+    expect(describeBrowserJsonRequestMismatch(dynamic, request(), booking, isSafeRecipeUrl, input)).toBeUndefined();
+    const [path, query] = dynamic.url.split("?");
+    const reversed = request(`${path}?${query.split("&").reverse().join("&")}`);
+    for (const actual of [reversed, request(dynamic.url.replace("channel=SEVENROOMS_WIDGET", "channel=web")),
+      request(dynamic.url.replace("selected_lang_code=en", "selected_lang_code=fr")), request(dynamic.url.replace("halo_size_interval=64", "halo_size_interval=63"))]) {
+      const code = describeBrowserJsonRequestMismatch(actual, request(), booking, isSafeRecipeUrl, input);
+      expect(code).toBe("BROWSER_JSON_REQUEST_OUTSIDE_CLOCK_SERIALIZATION_MISMATCH");
+      expect(code).toMatch(/^[A-Z_0-9]{1,80}$/u); expect(code).not.toContain("18:00");
+    }
+  });
+
+  it.each([
+    ["time_slot=20:00", "time_slot=20%3A00"], ["time_slot=20:00", "time_slot=20%3a00"],
+    ["venue=examplegolf", "%76enue=examplegolf"], ["party_size=2", "party_size=2&party_size=2"],
+    ["channel=SEVENROOMS_WIDGET", "channel=SEVENROOMS_WIDGET&token=private-sentinel"],
+  ])("retains every canonical-role rejection with input supplied: %s", (from, to) => {
+    const invalid = request(url.replace(from, to));
+    expect(describeBrowserJsonRequestMismatch(invalid, request(), booking, isSafeRecipeUrl, input)).toBeUndefined();
+    expect(describeBrowserJsonRequestMismatch(request(), invalid, booking, isSafeRecipeUrl, input)).toBeUndefined();
+  });
+
+  it("requires an already valid current input and strict source even for code-only analysis", () => {
+    for (const invalid of [{ ...input, players: 5 }, { ...input, durationMinutes: undefined }, { ...input, startTime: "25:00" },
+      { ...input, startTime: "20:00", endTime: "10:00" }])
+      expect(describeBrowserJsonRequestMismatch(request(), request(), booking, isSafeRecipeUrl, invalid)).toBeUndefined();
+    expect(describeBrowserJsonRequestMismatch(request(), request(), booking, () => false, input)).toBeUndefined();
+    expect(describeBrowserJsonRequestMismatch(request(), request(), booking.replace("examplegolf", "othergolf"), isSafeRecipeUrl, input)).toBeUndefined();
   });
 });

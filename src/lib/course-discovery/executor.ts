@@ -532,7 +532,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
       if (!matchesAvailabilityRequest(recipe, input, request)) {
         if (sevenRooms && isSafeBrowserAvailabilityReadUrl(request.url, "fetch", request.method)) {
           browserJson = undefined; responseGeneration = undefined; rejectedResponseGeneration = generation;
-          const mismatch = describeBrowserJsonRequestMismatch(request, { url: expandRecipeTemplate(recipe.availabilityResponse.url, input, true), method: recipe.availabilityResponse.method }, recipe.source.bookingUrl, isSafeRecipeUrl);
+          const mismatch = describeBrowserJsonRequestMismatch(request, { url: expandRecipeTemplate(recipe.availabilityResponse.url, input, true), method: recipe.availabilityResponse.method }, recipe.source.bookingUrl, isSafeRecipeUrl, input);
           if (mismatch) observeOwnedFailure(recipeExecutionDiagnostic(mismatch, request), document && { sequence: document.sequence, mainFrame: document.sourceMainFrame });
         }
         return;
