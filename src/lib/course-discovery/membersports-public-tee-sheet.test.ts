@@ -41,6 +41,28 @@ describe("full original public tee-sheet normalization and DOM parity", () => {
     expect(result.status).toBe("VERIFIED"); expect(result.slots).toHaveLength(2);
     expect(result.slots[1]).toMatchObject({ availableSpots: 1, minimumPlayers: 1 });
   });
+  it.each([0, 1, 2] as const)("preserves base hole rule %s for an explicit null inactive three-way override", holesRequirementTypeId => {
+    const round = holesRequirementTypeId === 1 ? "9" : holesRequirementTypeId === 2 ? "18" : "BOTH";
+    const facts = dom([{ minute: 810, cards: [card({ round, maximumPlayers: holesRequirementTypeId === 1 ? 4 : 3 })] }]);
+    const make = (threeWayHolesRequirementTypeId: number | null) => [{ teeTime: 810,
+      items: [item(1, 810, { holesRequirementTypeId, threeWayHolesRequirementTypeId, backNinePlayerCount: 1 })] }];
+    const result = normalize(make(null), context(), facts);
+    expect(result).toEqual(normalize(make(0), context(), facts));
+    expect(result).toMatchObject({ status: "VERIFIED", complete: true, slots: [{ roundHoles: holesRequirementTypeId === 0 ? null : holesRequirementTypeId === 1 ? 9 : 18 }] });
+  });
+  it.each([undefined, "0", "1", false, {}, [], NaN, -1, 3])("does not convert an unknown three-way override into inactive null: %j", threeWayHolesRequirementTypeId => {
+    expect(normalize([{ teeTime: 810, items: [item(1, 810, { threeWayHolesRequirementTypeId })] }], context(), dom()))
+      .toMatchObject({ status: "INCOMPLETE", reason: "ROW_INVALID", slots: [] });
+  });
+  it("retains positive numeric substitution and does not let a null override replace the required base hole rule", () => {
+    const facts = dom([{ minute: 810, cards: [card({ round: "18", maximumPlayers: 2 })] }]);
+    const response = [{ teeTime: 810, items: [item(1, 810, { holesRequirementTypeId: 0, threeWayHolesRequirementTypeId: 2, backNinePlayerCount: 2 })] }];
+    expect(normalize(response, context(), facts)).toMatchObject({ status: "VERIFIED", slots: [{ roundHoles: 18, availableSpots: 2 }] });
+    expect(normalize([{ teeTime: 810, items: [item(1, 810, { holesRequirementTypeId: null, threeWayHolesRequirementTypeId: null })] }], context(), dom()))
+      .toMatchObject({ status: "INCOMPLETE", reason: "ROW_INVALID" });
+    const missing = item(1, 810) as Record<string, unknown>; delete missing.threeWayHolesRequirementTypeId;
+    expect(normalize([{ teeTime: 810, items: [missing] }], context(), dom())).toMatchObject({ status: "INCOMPLETE", reason: "ROW_INVALID" });
+  });
   it("lowers minimum only under the published partially-filled singles rule", () => {
     const input = context(); input.input.players = 1;
     const result = normalize([{ teeTime: 810, items: [item(1, 810, { playerCount: 1, minimumNumberOfPlayers: 2 })] }], input, dom([{ minute: 810, cards: [card({ maximumPlayers: 3 })] }]));

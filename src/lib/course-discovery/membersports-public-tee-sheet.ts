@@ -100,12 +100,14 @@ export function normalizeMemberSportsPublicTeeSheet(response: unknown, context: 
           backPlayers = own(item, "backNinePlayerCount"), minimum = own(item, "minimumNumberOfPlayers"), holeRule = own(item, "holesRequirementTypeId"),
           threeWay = own(item, "threeWayHolesRequirementTypeId"), singles = own(item, "allowSinglesToBookOnline"), override = own(item, "ruleOverridesMinimumPlayer"), restricted = own(item, "bookingNotAllowed");
         if (!teeTimeId || !integer(rotation, 0, 100) || typeof back !== "boolean" || own(item, "teeTime") !== minute || !integer(players, 0, 4) ||
-          !integer(backPlayers, 0, 4) || !integer(minimum, 1, 4) || !integer(holeRule, 0, 2) || !integer(threeWay, 0, 2) ||
+          !integer(backPlayers, 0, 4) || !integer(minimum, 1, 4) || !integer(holeRule, 0, 2) || threeWay !== null && !integer(threeWay, 0, 2) ||
           typeof singles !== "boolean" || typeof override !== "boolean" || typeof restricted !== "boolean" || typeof own(item, "hide") !== "boolean" ||
           typeof own(item, "hasBackNineEvent") !== "boolean") return fail("ROW_INVALID");
         if (own(item, "hasBackNineEvent") !== false) return fail("UNSUPPORTED_RULES");
         if (identities.has(teeTimeId)) return fail("DUPLICATE_IDENTITY"); identities.add(teeTimeId);
-        const effective = holeRule === 0 && threeWay > 0 ? threeWay : holeRule;
+        // The published positive-only override leaves an explicit JSON null
+        // inactive. Missing, malformed and unknown values still fail above.
+        const effective = holeRule === 0 && typeof threeWay === "number" && threeWay > 0 ? threeWay : holeRule;
         const available = effective === 1 ? 4 - players : Math.min(4 - players, 4 - backPlayers);
         const min = (players > 0 || effective !== 1 && backPlayers > 0) && singles ? 1 : minimum;
         const hidden = !singles && !override && 4 - players < 2;
