@@ -92,6 +92,16 @@ export function isNonEvidenceBrowserResource(value: string, resourceType: string
   // Deny analytics before native loader correlation, including CDP Ping.
   // This grants no read and cannot hide an application availability request.
   if (isIncidentalBrowserRequest(value)) return true;
+  if (["script", "xhr"].includes(resourceType)) {
+    try {
+      const url = new URL(value);
+      // Font Awesome clients supply icons, never tee-sheet evidence. Abort the
+      // kit and its two observed icon bundles without granting their routes.
+      if (url.href === value && url.protocol === "https:" && !url.port && !url.username && !url.password && !url.search && !url.hash &&
+          (resourceType === "script" && url.hostname === "kit.fontawesome.com" && /^\/[a-f0-9]{10}\.js$/u.test(url.pathname) ||
+            url.hostname === "ka-p.fontawesome.com" && /^\/releases\/v\d{1,2}\.\d{1,2}\.\d{1,3}\/js\/(?:pro-v4-shims|pro-plus)\.min\.js$/u.test(url.pathname))) return true;
+    } catch { /* Unknown resource metadata retains ordinary validation. */ }
+  }
   if (resourceType === "script") {
     // This exact optional Google Sign-In client is denied, never executed or
     // treated as inventory evidence. Rendered access gates remain separate.

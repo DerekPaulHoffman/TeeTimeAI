@@ -22,12 +22,14 @@ const recipe = () => parseAccessRecipe({ schemaVersion: 1, engine: "BROWSER_DOM"
 /** Synthetic caller fixture: real isolated Chrome, in-memory wire and leases.
  * The optional client is never fetched or executed; no real provider proof. */
 describe.runIf(existsSync(chrome))("optional account and payment clients supply no inventory or access authority", () => {
-  const run = async (client: string, mode: "inventory" | "access" | "payment") => {
+  const run = async (client: string, mode: "inventory" | "access" | "payment", kind: "script" | "xhr" = "script") => {
     const html = `<!doctype html><html><body><h1>Example Golf</h1><p id="date">2026-10-23</p><p id="ready">Ready</p>` +
       `<div class="slot"><span class="time">09:00</span><span class="players">4</span></div>` +
       (mode === "access" ? "<p>You must sign in to view availability</p>" : "") +
       '<button id="payment" type="button" onclick="console.log(\'PAYMENT_ACTION_ENTERED\')">Pay now</button>' +
-      `<script src="${client}"></script><script>fetch('/availability?date=2026-10-23')</script></body></html>`;
+      (kind === "script" ? `<script src="${client}"></script>` :
+        `<script>const icons=new XMLHttpRequest();icons.open('GET',${JSON.stringify(client)});icons.send();</script>`) +
+      "<script>fetch('/availability?date=2026-10-23')</script></body></html>";
     const fetch = vi.fn(async url => new Response(String(url) === pageUrl ? html : '{"ok":true}',
       { headers: { "content-type": String(url) === pageUrl ? "text/html" : "application/json" } })) as typeof globalThis.fetch;
     const families: string[] = []; let paymentActions = 0;
@@ -46,8 +48,10 @@ describe.runIf(existsSync(chrome))("optional account and payment clients supply 
     if (selected.engine !== "BROWSER_DOM") throw new Error("fixture");
     if (mode === "payment") selected.steps.push({ action: "clickFilter", selector: "#payment", text: "Pay now", purpose: "RUN_SEARCH" });
     const result = await executeAccessRecipe(selected, input, deps);
-    expect(isSafeRecipeUrl(client)).toBe(false);
-    expect(isSafeBrowserAssetUrl(client, "script", "GET")).toBe(false);
+    if (clients.includes(client)) {
+      expect(isSafeRecipeUrl(client)).toBe(false);
+      expect(isSafeBrowserAssetUrl(client, "script", "GET")).toBe(false);
+    }
     expect(recipeAllowsRequest(selected, client, "GET", "script")).toBe(false);
     expect(vi.mocked(fetch).mock.calls.map(([url]) => String(url))).not.toContain(client);
     expect(new Set(families)).toEqual(new Set(["example.org"]));
@@ -63,5 +67,16 @@ describe.runIf(existsSync(chrome))("optional account and payment clients supply 
   }, 15_000);
   it("refuses to enter an actual payment control even when it is mislabeled as a search step", async () => {
     expect(await run(clients[1], "payment")).toMatchObject({ status: "FAILED", complete: false, slots: [], evidence: { reason: "UNSAFE_CONTROL" } });
+  }, 15_000);
+  it.each([
+    ["https://kit.fontawesome.com/7aa4bc216c.js", "script"],
+    ["https://ka-p.fontawesome.com/releases/v7.3.1/js/pro-plus.min.js", "script"],
+    ["https://ka-p.fontawesome.com/releases/v7.3.1/js/pro-v4-shims.min.js", "xhr"],
+  ] as const)("keeps public inventory complete while an unrelated icon client is denied: %s %s", async (client, kind) => {
+    expect(await run(client, "inventory", kind)).toMatchObject({ status: "AVAILABLE", complete: true, slots: [{ availableSpots: 4 }] });
+  }, 15_000);
+  it("keeps a rendered access gate when an unrelated icon XHR is denied", async () => {
+    expect(await run("https://ka-p.fontawesome.com/releases/v7.3.1/js/pro-v4-shims.min.js", "access", "xhr"))
+      .toMatchObject({ status: "ACCESS_REQUIRED", complete: false, slots: [] });
   }, 15_000);
 });

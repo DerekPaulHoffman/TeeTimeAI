@@ -126,20 +126,25 @@ describe.runIf(existsSync(chrome))("request failures belong to their captured ma
     const fetch = vi.fn(async url => {
       if (String(url) === official) return html(`<a id="booking" hidden href="${booking}">View tee times</a><script>fetch('https://late.example.org/data').catch(()=>{})</script>`);
       if (String(url) === "https://late.example.org/data") {
-        await control.page().locator("#booking").evaluate(node => { (node as HTMLElement).hidden = false; });
+        // The page itself navigates to an already permitted same-origin URL.
+        // A public control cannot now run while this initial read is pending.
+        await control.page().locator("#booking").evaluate(node => { window.location.href = (node as HTMLAnchorElement).href; });
         return old;
       }
       if (String(url) === booking) {
         // The new document handler has already captured its own generation.
         if (oldFailsBeforeTerminal) rejectOld(new Error("LATE_OLD_READ_FAILED"));
-        return html("<h1>Booking</h1><script>fetch('https://current.example.org/data').catch(()=>{})</script>");
+        return html('<h1 id="booking-document">Booking</h1><script>fetch(\'https://current.example.org/data\').catch(()=>{})</script>');
       }
       return current;
     }) as typeof globalThis.fetch;
     const control: ReturnType<typeof fixture> = fixture(fetch, () => { rejectOld(new Error("LATE_OLD_READ_FAILED")); releaseCurrent(new Response("ready")); });
+    const selected = recipe();
+    if (selected.engine !== "BROWSER_DOM") throw Error("fixture");
+    selected.steps = [{ action: "waitFor", selector: "#booking-document" }, { action: "waitFor", selector: "#missing-calendar" }];
     try {
-      const result = await executeAccessRecipe(recipe(), input, control.deps);
-      expect(result).toMatchObject({ status: "FAILED", complete: false, evidence: { reason: "STEP_TIMEOUT", diagnostic: { code: "STEP_TIMEOUT", stepIndex: 2,
+      const result = await executeAccessRecipe(selected, input, control.deps);
+      expect(result).toMatchObject({ status: "FAILED", complete: false, evidence: { reason: "STEP_TIMEOUT", diagnostic: { code: "STEP_TIMEOUT", stepIndex: 1,
         requestState: { pendingReads: oldFailsBeforeTerminal ? 1 : 2, currentDocumentPendingHandlers: 1 } } } });
       expect(result.evidence.diagnostic?.earlierRequestFailure).toBeUndefined();
       expect(fetch.mock.calls.map(([url]) => String(url))).toEqual(expect.arrayContaining([official, booking, "https://late.example.org/data", "https://current.example.org/data"]));

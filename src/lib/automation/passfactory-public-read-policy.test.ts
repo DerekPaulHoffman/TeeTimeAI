@@ -110,6 +110,33 @@ it("quietly denies only the exact Datacap card-tokenization script without a pay
     expect(isNonEvidenceBrowserResource(url, "script")).toBe(false);
 });
 
+it("quietly denies bounded Font Awesome icon clients without hiding an availability request", () => {
+  for (const value of [
+    "https://kit.fontawesome.com/7aa4bc216c.js",
+    "https://kit.fontawesome.com/abcdef0123.js",
+  ]) {
+    expect(isNonEvidenceBrowserResource(value, "script")).toBe(true);
+    expect(isNonEvidenceBrowserResource(value, "xhr")).toBe(false);
+  }
+  for (const value of [
+    "https://ka-p.fontawesome.com/releases/v7.3.1/js/pro-v4-shims.min.js",
+    "https://ka-p.fontawesome.com/releases/v7.3.1/js/pro-plus.min.js",
+  ]) for (const kind of ["script", "xhr"]) expect(isNonEvidenceBrowserResource(value, kind)).toBe(true);
+  for (const [value, kind] of [
+    ["https://ka-p.fontawesome.com/releases/v7.3.1/js/pro-v4-shims.min.js", "fetch"],
+    ["https://kit.fontawesome.com/7aa4bc216c.js", "document"],
+    ["https://kit.fontawesome.com/7aa4bc216c.js?token=private", "script"],
+    ["https://kit.fontawesome.com/7aa4bc216c.js#private", "script"],
+    ["https://kit.fontawesome.com/availability.js", "script"],
+    ["https://kit.fontawesome.com.evil.test/7aa4bc216c.js", "script"],
+    ["https://user:password@kit.fontawesome.com/7aa4bc216c.js", "script"],
+    ["http://kit.fontawesome.com/7aa4bc216c.js", "script"],
+    ["https://ka-p.fontawesome.com/releases/v7.3.1/js/availability.min.js", "xhr"],
+    ["https://ka-p.fontawesome.com/releases/v7.3.1/js/pro-plus.min.js?credential=private", "xhr"],
+    ["https://ka-p.fontawesome.com:444/releases/v7.3.1/js/pro-plus.min.js", "xhr"],
+  ]) expect(isNonEvidenceBrowserResource(value, kind)).toBe(false);
+});
+
 it("quietly denies observed analytics without hiding availability or an access wall", () => {
   for (const url of [
     "https://e.clarity.ms/collect", "https://q.clarity.ms/collect",

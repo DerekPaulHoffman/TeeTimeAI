@@ -44,6 +44,7 @@ import { continuePublicRentalService, selectPublicRentalService, type PublicRent
 import { parsePublicPlayerOptions } from "./public-player-options";
 import { matchesPublicVenueGreeting } from "./public-venue-greeting";
 import { browserJsonAncillaryCalendarRequestMatches, browserJsonParticipantRequestMatches, extractBrowserJsonRows } from "./browser-json-response";
+import { describeBrowserJsonRequestMismatch } from "./browser-json-request-diagnostics";
 
 type ExtractedAccessRecipe = Exclude<CourseAccessRecipeData, { engine: "EXISTING_ADAPTER" }>;
 type BrowserAccessRecipe = Extract<CourseAccessRecipeData, { engine: "BROWSER_DOM" | "BROWSER_JSON" }>;
@@ -530,6 +531,8 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
       if (!matchesAvailabilityRequest(recipe, input, request)) {
         if (sevenRooms && isSafeBrowserAvailabilityReadUrl(request.url, "fetch", request.method)) {
           browserJson = undefined; responseGeneration = undefined; rejectedResponseGeneration = generation;
+          const mismatch = describeBrowserJsonRequestMismatch(request, { url: expandRecipeTemplate(recipe.availabilityResponse.url, input, true), method: recipe.availabilityResponse.method }, recipe.source.bookingUrl, isSafeRecipeUrl);
+          if (mismatch) observeOwnedFailure(recipeExecutionDiagnostic(mismatch, request), document && { sequence: document.sequence, mainFrame: document.sourceMainFrame });
         }
         return;
       }
@@ -777,6 +780,13 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
         activity = { stepIndex, url: canonicalCpsPublicUrl(page.url()), method: "GET", resourceType: "document" };
         signal.throwIfAborted();
         if (isActiveBrowserAccessChallenge(await page.locator("body").innerText(), await page.title())) return fail("ACCESS_REQUIRED", "ACCESS_REQUIRED");
+        if (step.action !== "waitFor") {
+          await waitForQuietReads();
+          await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+          signal.throwIfAborted();
+          if (pendingReadCount()) throw new Error("UNSETTLED_REQUESTS");
+          if (isActiveBrowserAccessChallenge(await page.locator("body").innerText(), await page.title())) return fail("ACCESS_REQUIRED", "ACCESS_REQUIRED");
+        }
         let carryDurationFence = false, previousAvailabilityRequests = passfactoryAvailabilityRequests;
         if (recipe.engine === "BROWSER_DOM" && step.action === "select" && step.purpose === "DURATION" && selectedRequestedDate && isPassfactoryDurationContext(recipe, page.url())) {
           await waitForAvailabilityResponse();
@@ -1011,7 +1021,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
     terminalFailure = !providerThrottled && (activity.stepIndex !== undefined || !failure) ? terminalDiagnostic : undefined;
     const message = error instanceof Error ? error.message : "";
     const reason = providerThrottled ? "PROVIDER_THROTTLED" : /^[A-Z_0-9]{1,80}$/u.test(message) ? message : terminalDiagnostic.code;
-    return fail(reason === "ACCESS_REQUIRED" ? "ACCESS_REQUIRED" : reason.startsWith("BROWSER_JSON_") || reason.startsWith("MEMBERSPORTS_") || ["OFFICIAL_BOOKING_IDENTITY_UNVERIFIED", "INVALID_SLOT_TIME", "AMBIGUOUS_OR_INVALID_LOCAL_TIME", "INCOMPLETE_COLLECTION", "INVALID_CAPACITY_OR_DURATION", "UNSETTLED_REQUESTS", "AMBIGUOUS_PROOF_FIELD", "RESOURCE_IDENTITY_MISMATCH", "AMBIGUOUS_RESOURCE_SCOPE", "INVALID_RESOURCE_SCOPE", "RESOURCE_SCOPE_NOT_CARD", "AVAILABILITY_RESPONSE_UNCONFIRMED", "AVAILABILITY_RESPONSE_FAILED", "UNVERIFIED_CLIENT_DURATION", "DURATION_PROOF_MISMATCH", "UNVERIFIED_PUBLIC_CATALOG_TILE", "PUBLIC_CATALOG_SELECTION_UNCONFIRMED"].includes(reason) ? "INCOMPLETE" : "FAILED",
+    return fail(reason === "ACCESS_REQUIRED" ? "ACCESS_REQUIRED" : reason.startsWith("BROWSER_JSON_") || reason.startsWith("MEMBERSPORTS_") || reason.startsWith("PUBLIC_PARTY_RANGE_") || ["OFFICIAL_BOOKING_IDENTITY_UNVERIFIED", "INVALID_SLOT_TIME", "AMBIGUOUS_OR_INVALID_LOCAL_TIME", "INCOMPLETE_COLLECTION", "INVALID_CAPACITY_OR_DURATION", "UNSETTLED_REQUESTS", "AMBIGUOUS_PROOF_FIELD", "RESOURCE_IDENTITY_MISMATCH", "AMBIGUOUS_RESOURCE_SCOPE", "INVALID_RESOURCE_SCOPE", "RESOURCE_SCOPE_NOT_CARD", "AVAILABILITY_RESPONSE_UNCONFIRMED", "AVAILABILITY_RESPONSE_FAILED", "UNVERIFIED_CLIENT_DURATION", "DURATION_PROOF_MISMATCH", "UNVERIFIED_PUBLIC_CATALOG_TILE", "PUBLIC_CATALOG_SELECTION_UNCONFIRMED"].includes(reason) ? "INCOMPLETE" : "FAILED",
       reason);
   } finally { cancellation.abort("EXECUTION_FINISHED"); requestQueue.dispose(); await browser?.close().catch(() => {}); await nativeProxy?.close(); }
 }
