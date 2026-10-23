@@ -616,7 +616,10 @@ export async function createCourseDiscoveryBrowserSession(input: {
         const sameHost = next.hostname.replace(/^www\./u, "") === url.hostname.replace(/^www\./u, "");
         const observedDocumentRedirect = request.isNavigationRequest() && request.frame() === page.mainFrame() &&
           isObservedNativeRedirectTarget(request, nextTransport.href, observedNavigationRoots);
-        if (method === "POST" || !isSafeRecipeUrl(next.href) || !sameHost && !observedDocumentRedirect) throw new Error("UNSAFE_REDIRECT");
+        // Only the controller's exact anonymous bootstrap POST can attest its
+        // released 302/303 to a same-origin bodyless GET. Other POSTs still fail.
+        if (method === "POST" && !(nativeProxy && mindbodySource && observedDocumentRedirect) ||
+            !isSafeRecipeUrl(next.href) || !sameHost && !observedDocumentRedirect) throw new Error("UNSAFE_REDIRECT");
         responseHeaders.location = next.href;
         allowedNavigation.add(next.href);
       }

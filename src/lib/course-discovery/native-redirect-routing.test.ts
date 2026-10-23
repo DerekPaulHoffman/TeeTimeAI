@@ -1270,15 +1270,78 @@ describe("native anonymous Mindbody bootstrap ownership", () => {
       expect(JSON.stringify(test.guard.firstFatal?.intentCallbackTargetQuery)).not.toContain("685163");
     } finally { await test.guard.close(); }
   });
-  it("keeps POST document redirects including 303 denied", async () => {
+  it.each([302, 303])("attests the exact released public bootstrap %i to a bodyless same-origin GET", async status => {
     const test = await installed();
+    const destination = "https://clients.mindbodyonline.com/ASP/adm/adm_appt_search.asp", roots = new Set([source]);
     try {
       await prepare(test); intent(test); network(test); post(test); await vi.waitFor(() => expect(test.routes).toHaveLength(2)); await test.routes[1].continue();
-      test.response("bootstrap", { resourceType: "Document", request: { url: target, method: "POST", headers, hasPostData: true, postData: body }, responseStatusCode: 303, responseHeaders: [{ name: "Location", value: source }] });
+      const parent = test.routes[1].request();
+      expect(isObservedNativeRedirectTarget(parent, destination, roots)).toBe(false);
+      test.response("bootstrap", { resourceType: "Document", request: { url: target, method: "POST", headers, hasPostData: true, postData: body }, responseStatusCode: status, responseHeaders: [{ name: "Location", value: destination }] });
       await test.routes[1].request().response();
-      test.events.get("Network.requestWillBeSent")!({ requestId: "network-bootstrap", loaderId: "loader-post", frameId: "main", type: "Document", request: { url: source, method: "GET", headers: {} } });
-      test.request("redirected", { networkId: "network-bootstrap", redirectedRequestId: "bootstrap", resourceType: "Document", request: { url: source, method: "GET", headers: {} } });
+      expect(isObservedNativeRedirectTarget(parent, destination, roots)).toBe(true);
+      expect(isObservedNativeRedirectTarget(parent, destination, new Set([target]))).toBe(false);
+      test.events.get("Network.requestWillBeSent")!({ requestId: "network-bootstrap", loaderId: "loader-post", frameId: "main", type: "Document", request: { url: destination, method: "GET", headers: {} } });
+      test.request("redirected", { networkId: "network-bootstrap", redirectedRequestId: "bootstrap", resourceType: "Document", request: { url: destination, method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(test.routes).toHaveLength(3));
+      const child = test.routes[2].request();
+      expect(child.redirectedFrom()).toBe(parent); expect(child.postData()).toBeNull();
+      expect(isObservedNativeRedirect(child, roots)).toBe(true);
+      expect(isObservedNativeRedirect({ ...child }, roots)).toBe(false);
+      await test.routes[2].continue();
+      expect(test.cdp.send.mock.calls.filter(([name]) => name === "Fetch.continueRequest")).toHaveLength(3);
+      expect(test.failures).toEqual([]);
+      await test.guard.close(); expect(isObservedNativeRedirect(child, roots)).toBe(false);
+    } finally { await test.guard.close(); }
+  });
+  it("waits for the exact bootstrap redirect response ACK before releasing its GET child", async () => {
+    const test = await installed(), ack = deferred<object>(), destination = "https://clients.mindbodyonline.com/ASP/adm/adm_appt_search.asp";
+    const send = test.cdp.send.getMockImplementation()!;
+    test.cdp.send.mockImplementation((name, values) => name === "Fetch.continueResponse" && values?.requestId === "bootstrap" ? ack.promise : send(name, values));
+    try {
+      await prepare(test); intent(test); network(test); post(test); await vi.waitFor(() => expect(test.routes).toHaveLength(2)); await test.routes[1].continue();
+      test.response("bootstrap", { resourceType: "Document", request: { url: target, method: "POST", headers, hasPostData: true, postData: body }, responseStatusCode: 302, responseHeaders: [{ name: "Location", value: destination }] });
+      test.events.get("Network.requestWillBeSent")!({ requestId: "network-bootstrap", loaderId: "loader-post", frameId: "main", type: "Document", request: { url: destination, method: "GET", headers: {} } });
+      test.request("redirected", { networkId: "network-bootstrap", redirectedRequestId: "bootstrap", resourceType: "Document", request: { url: destination, method: "GET", headers: {} } });
+      await new Promise(resolve => setTimeout(resolve, 5)); expect(test.routes).toHaveLength(2);
+      expect(isObservedNativeRedirectTarget(test.routes[1].request(), destination, new Set([source]))).toBe(false);
+      ack.resolve({}); await vi.waitFor(() => expect(test.routes).toHaveLength(3));
+      expect(isObservedNativeRedirect(test.routes[2].request(), new Set([source]))).toBe(true); expect(test.failures).toEqual([]);
+    } finally { ack.resolve({}); await test.guard.close(); }
+  });
+  it("keeps an ordinary POST 303 untrusted even with the exact public-looking form", async () => {
+    const test = await installed(), destination = "https://clients.mindbodyonline.com/ASP/adm/adm_appt_search.asp";
+    try {
+      post(test); await test.routes[0].continue();
+      test.response("bootstrap", { resourceType: "Document", request: { url: target, method: "POST", headers, hasPostData: true, postData: body }, responseStatusCode: 303, responseHeaders: [{ name: "Location", value: destination }] });
+      await test.routes[0].request().response();
+      expect(isObservedNativeRedirectTarget(test.routes[0].request(), destination, new Set([source, target]))).toBe(false);
+      test.request("redirected", { networkId: "network-bootstrap", redirectedRequestId: "bootstrap", resourceType: "Document", request: { url: destination, method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce()); expect(test.routes).toHaveLength(1);
+      expect(test.guard.firstFatal).toMatchObject({ code: "NATIVE_REDIRECT_PROVENANCE_REJECTED", redirectParentStatus: 303, redirectBootstrapAttested: false });
+    } finally { await test.guard.close(); }
+  });
+  it.each(["200", "301", "307", "308", "body", "network body", "POST", "HEAD", "different network", "different origin", "login", "checkout", "credential query", "wrong Location", "duplicate Location"] as const)("keeps the public bootstrap redirect bounded: %s", async mode => {
+    const test = await installed();
+    const destination = mode === "different origin" ? "https://other.example.org/calendar" : mode === "login" ? "https://clients.mindbodyonline.com/login"
+      : mode === "checkout" ? "https://clients.mindbodyonline.com/checkout" : mode === "credential query" ? "https://clients.mindbodyonline.com/calendar?token=private-value"
+        : "https://clients.mindbodyonline.com/ASP/adm/adm_appt_search.asp";
+    const status = ["200", "301", "307", "308"].includes(mode) ? Number(mode) : 302;
+    const childMethod = mode === "POST" || mode === "HEAD" ? mode : "GET";
+    const networkId = mode === "different network" ? "network-other" : "network-bootstrap";
+    try {
+      await prepare(test); intent(test); network(test); post(test); await vi.waitFor(() => expect(test.routes).toHaveLength(2)); await test.routes[1].continue();
+      test.response("bootstrap", { resourceType: "Document", request: { url: target, method: "POST", headers, hasPostData: true, postData: body }, responseStatusCode: status,
+        responseHeaders: [{ name: "Location", value: mode === "wrong Location" ? source : destination }, ...(mode === "duplicate Location" ? [{ name: "location", value: destination }] : [])] });
+      await test.routes[1].request().response();
+      test.events.get("Network.requestWillBeSent")!({ requestId: networkId, loaderId: "loader-post", frameId: "main", type: "Document",
+        request: { url: destination, method: childMethod, headers: {}, ...(mode === "network body" ? { hasPostData: true, postData: "" } : {}) } });
+      test.request("redirected", { networkId, redirectedRequestId: "bootstrap", resourceType: "Document",
+        request: { url: destination, method: childMethod, headers: {}, ...(mode === "body" ? { hasPostData: true, postData: "" } : {}) } });
       await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce()); expect(test.routes).toHaveLength(2); expect(test.failures).toContain("NATIVE_REDIRECT_PROVENANCE_REJECTED");
+      expect(test.guard.firstFatal).toMatchObject({ code: "NATIVE_REDIRECT_PROVENANCE_REJECTED", phase: "REDIRECT_PROVENANCE", method: childMethod,
+        parentPresent: true, redirectParentMethod: "POST", redirectParentStatus: status, redirectParentComplete: true, redirectBootstrapAttested: true });
+      expect(JSON.stringify(test.guard.firstFatal)).not.toContain("private-value");
     } finally { await test.guard.close(); }
   });
 });

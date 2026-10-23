@@ -24,13 +24,15 @@ export type NativeRequestDiagnostic = {
   preflightSourceMethod?: "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "CONNECT" | "TRACE" | "OTHER";
   preflightSourceCurrentGeneration?: boolean; preflightSourceFailed?: boolean; preflightSourceBodyPresent?: boolean;
   preflightSourceRootFrame?: boolean; preflightSourceLoaderKnown?: boolean; preflightSourceUrlMatches?: boolean;
-  phase?: "RESPONSE_WAIT" | "CONTINUE_RESPONSE_ACK" | "LOADER_IDENTITY_WAIT" | "LOADER_IDENTITY" | "LOADER_OWNER" | "REDIRECT_GENERATION" | "DOCUMENT_INTENT" | "DOCUMENT_DRAIN";
+  phase?: "RESPONSE_WAIT" | "CONTINUE_RESPONSE_ACK" | "LOADER_IDENTITY_WAIT" | "LOADER_IDENTITY" | "LOADER_OWNER" | "REDIRECT_GENERATION" | "REDIRECT_PROVENANCE" | "DOCUMENT_INTENT" | "DOCUMENT_DRAIN";
   interceptedRequests?: number; recordCount?: number; requestLimit?: number; postDataBytes?: number;
   framePresent?: boolean; rootFrame?: boolean; networkIdPresent?: boolean; duplicateRequestId?: boolean;
   hasPostData?: boolean; postDataPresent?: boolean;
   identityPresent?: boolean; loaderPresent?: boolean; loaderKnown?: boolean; identityFresh?: boolean;
   identityUrlMatches?: boolean; identityMethodMatches?: boolean; identityKindMatches?: boolean; identityFrameMatches?: boolean;
   parentPresent?: boolean; awaitingDocument?: boolean; parentCurrentGeneration?: boolean;
+  redirectParentMethod?: "GET" | "HEAD" | "POST" | "OTHER"; redirectParentStatus?: number; redirectParentComplete?: boolean;
+  redirectLocationMatches?: boolean; redirectNetworkMatches?: boolean; redirectChildBodyAbsent?: boolean; redirectBootstrapAttested?: boolean;
   documentCommitted?: boolean; documentIntentPresent?: boolean; documentIntentUsed?: boolean;
   sourceResponseComplete?: boolean; successorTerminalFailed?: boolean;
   documentIntentKind?: "NONE" | "SCRIPT_GET" | "PUBLIC_FORM_POST";
@@ -166,14 +168,30 @@ const redirectStatuses = new Set([301, 302, 303, 307, 308]);
 function releasedRedirect(record: RecordEntry, target: string) {
   return record.admitted && record.complete && !record.failed && record.redirect?.target === target;
 }
+function releasedPublicBootstrapGetRedirect(record: RecordEntry, target: string, method: string, bodyPresent: boolean) {
+  // The private source was minted only after the completed anonymous source
+  // document drained. A generic POST, retained body or 307/308 has no authority.
+  if (!record.mindbodyBootstrapSource || record.parent || record.depth !== 0 || record.kind !== "document" || record.method !== "POST" ||
+      record.generation.retired || record.body === null || method !== "GET" || bodyPresent || !releasedRedirect(record, target) ||
+      ![302, 303].includes(record.redirect!.status) || !isSafeRecipeUrl(record.url) || !isSafeRecipeUrl(record.transportUrl) || !isSafeRecipeUrl(target)) return false;
+  try {
+    return new URL(record.transportUrl).origin === new URL(target).origin &&
+      isMindbodyClassicPublicBootstrapPost(new URL(record.transportUrl), new Headers(record.headerEntries), record.body, record.mindbodyBootstrapSource.sourceUrl);
+  } catch { return false; }
+}
 function trustedDocumentChain(record: RecordEntry, owner: NativeRecordOwner, roots: ReadonlySet<string>) {
   if (owner.closed || record.depth > 5) return false;
-  let current = record;
+  let current = record, child: RecordEntry | undefined;
   for (;;) {
-    if (current.generation.retired || current.kind !== "document" || !["GET", "HEAD"].includes(current.method) || current.failed ||
+    if (current.generation.retired || current.kind !== "document" || current.failed ||
         !isSafeRecipeUrl(current.url) || !isSafeRecipeUrl(current.transportUrl)) return false;
+    if (current.method === "POST") return Boolean(child && current.mindbodyBootstrapSource && roots.has(current.mindbodyBootstrapSource.sourceUrl) &&
+      releasedPublicBootstrapGetRedirect(current, child.url, child.method, child.body !== null));
+    if (!["GET", "HEAD"].includes(current.method)) return false;
     if (!current.parent) return current.admitted && roots.has(current.url);
-    if (current.method !== current.parent.method || !releasedRedirect(current.parent, current.url)) return false;
+    if (!releasedRedirect(current.parent, current.url) || current.method !== current.parent.method &&
+        !releasedPublicBootstrapGetRedirect(current.parent, current.url, current.method, current.body !== null)) return false;
+    child = current;
     current = current.parent;
   }
 }
@@ -186,7 +204,9 @@ export function hasAttestedNativeDocumentRedirect(request: object, roots: Readon
 export function hasAttestedNativeDocumentRedirectTarget(request: object, target: string, roots: ReadonlySet<string>) {
   const value = nativeRequestRecords.get(request);
   return Boolean(value && value.record.depth < 5 && releasedRedirect(value.record, target) &&
-    isSafeRecipeUrl(target) && trustedDocumentChain(value.record, value.owner, roots));
+    isSafeRecipeUrl(target) && (trustedDocumentChain(value.record, value.owner, roots) || !value.owner.closed &&
+      value.record.mindbodyBootstrapSource && roots.has(value.record.mindbodyBootstrapSource.sourceUrl) &&
+      releasedPublicBootstrapGetRedirect(value.record, target, "GET", false)));
 }
 const resourceKinds: Record<string, string> = { Document: "document", Stylesheet: "stylesheet", Image: "image", Media: "media",
   Font: "font", Script: "script", XHR: "xhr", Fetch: "fetch", EventSource: "eventsource", WebSocket: "websocket",
@@ -777,8 +797,18 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         await rejectInitial(rejection); return;
       }
       const parent = event.redirectedRequestId ? records.get(event.redirectedRequestId) : null;
+      const rejectProvenance = async () => {
+        const code = "NATIVE_REDIRECT_PROVENANCE_REJECTED";
+        firstFatal ??= { ...requestDiagnostic(code), phase: "REDIRECT_PROVENANCE", parentPresent: Boolean(parent),
+          ...(parent ? { redirectParentMethod: ["GET", "HEAD", "POST"].includes(parent.method) ? parent.method as "GET" | "HEAD" | "POST" : "OTHER",
+            ...(parent.responseStatus === undefined ? {} : { redirectParentStatus: parent.responseStatus }), redirectParentComplete: parent.complete,
+            redirectLocationMatches: parent.redirect?.target === event.request.url, redirectNetworkMatches: parent.networkId === networkId,
+            redirectChildBodyAbsent: event.request.hasPostData !== true && event.request.postData === undefined,
+            redirectBootstrapAttested: Boolean(parent.mindbodyBootstrapSource) } : {}) };
+        await reject(); await close(code);
+      };
       if (event.redirectedRequestId && (!parent || !parent.admitted || parent.failed || parent.depth >= 5 || parent.redirectChildId)) {
-        await reject(); await close("NATIVE_REDIRECT_PROVENANCE_REJECTED"); return;
+        await rejectProvenance(); return;
       }
       // Reserve the exact single child before waiting for independently ordered
       // Network metadata. A second pause cannot share this parent's authority.
@@ -972,10 +1002,13 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         let sameHost = false;
         try { sameHost = new URL(parent.transportUrl).hostname.replace(/^www\./u, "") === new URL(event.request.url).hostname.replace(/^www\./u, ""); }
         catch { /* Invalid URLs fail the provenance check. */ }
+        const publicBootstrapGet = document && networkId === parent.networkId && requestLoaderId === parent.loaderId && requestGeneration === parent.generation &&
+          networkIdentities.get(networkId)?.hasBody === false && releasedPublicBootstrapGetRedirect(parent, event.request.url, event.request.method,
+            event.request.hasPostData === true || event.request.postData !== undefined);
         if (!result || result instanceof Error || records.has(event.requestId) || !releasedRedirect(parent, event.request.url) ||
             denyResourceKind && (parent.kind !== kind || networkId !== parent.networkId) ||
-            event.request.method !== parent.method || document && (parent.kind !== "document" || !["GET", "HEAD"].includes(parent.method))) {
-          await reject(); await close("NATIVE_REDIRECT_PROVENANCE_REJECTED"); return;
+            !publicBootstrapGet && (event.request.method !== parent.method || document && (parent.kind !== "document" || !["GET", "HEAD"].includes(parent.method)))) {
+          await rejectProvenance(); return;
         }
         if (!document && !sameHost) {
           // A genuine Script->Script CDN redirect still has no cross-host
@@ -993,7 +1026,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
             try { options.onRequestRejected?.({ ...diagnostic }); } catch { /* Diagnostics cannot authorize work. */ }
             return;
           }
-          await reject(); await close("NATIVE_REDIRECT_PROVENANCE_REJECTED"); return;
+          await rejectProvenance(); return;
         }
       }
       if (denyResourceKind) {

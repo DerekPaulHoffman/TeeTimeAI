@@ -180,7 +180,7 @@ describe("durable discovery browser diagnostics", () => {
     expect(restored).toMatchObject({ urls: [], readUrls: [], entryUrls: [], officialObserved: false });
     expect(JSON.stringify(restored)).not.toMatch(/private|2026|headers|postData"|networkId"|frameId|requestId/);
   });
-  it.each(["LOADER_IDENTITY_WAIT", "LOADER_IDENTITY", "LOADER_OWNER", "REDIRECT_GENERATION", "DOCUMENT_INTENT", "DOCUMENT_DRAIN"])("keeps bounded %s facts without retaining native IDs or supplied values", phase => {
+  it.each(["LOADER_IDENTITY_WAIT", "LOADER_IDENTITY", "LOADER_OWNER", "REDIRECT_GENERATION", "REDIRECT_PROVENANCE", "DOCUMENT_INTENT", "DOCUMENT_DRAIN"])("keeps bounded %s facts without retaining native IDs or supplied values", phase => {
     const safe = safeBrowserFailureDiagnostics({ nativeFirstFatal: { code: "NATIVE_REDIRECT_LOADER_MISMATCH", phase,
       identityPresent: true, loaderPresent: true, loaderKnown: false, identityFresh: false, identityUrlMatches: false,
       identityMethodMatches: true, identityKindMatches: true, identityFrameMatches: true,
@@ -199,6 +199,45 @@ describe("durable discovery browser diagnostics", () => {
       parentCurrentGeneration: {}, documentCommitted: [], documentIntentPresent: null, documentIntentUsed: 0,
       sourceResponseComplete: "true", successorTerminalFailed: "false" } });
     expect(malformed.nativeFirstFatal).toEqual({ code: "NATIVE_REDIRECT_LOADER_MISMATCH" });
+  });
+  it("preserves closed redirect provenance through feedback, checkpoint and compact snapshots", () => {
+    const expected = { code: "NATIVE_REDIRECT_PROVENANCE_REJECTED", phase: "REDIRECT_PROVENANCE", method: "GET", resourceType: "document",
+      parentPresent: true, redirectParentMethod: "POST", redirectParentStatus: 302, redirectParentComplete: true,
+      redirectLocationMatches: false, redirectNetworkMatches: true, redirectChildBodyAbsent: true, redirectBootstrapAttested: true };
+    const diagnostic = { ...expected, body: "private-body", headers: { authorization: "private-authorization" },
+      parentUrl: "https://venue.example/read?token=private-value", requestId: "private-id", arbitrary: "private-extra" };
+    const safe = safeBrowserFailureDiagnostics({ nativeFirstFatal: diagnostic, nativeRejectedRequests: [diagnostic] });
+    expect(safe.nativeFirstFatal).toEqual(expected); expect(safe.nativeRejectedRequests).toEqual([expected]);
+    const feedback = discoveryBrowserFeedback(safe, "open", { code: expected.code });
+    const restored = readDiscoveryControllerCheckpoint({ controller: { version: 1, officialUrl: "https://venue.example/", observedNavigationUrls: [], lastFeedback: feedback } }, "https://venue.example/");
+    expect(restored.lastFeedback.details.nativeFirstFatal).toEqual(expected);
+    const compact = createDiscoverySnapshotCompactor(), state = { url: "https://venue.example/", text: "Same public page", controls: [], loading: false, nativeFirstFatal: diagnostic };
+    expect(compact(state).nativeFirstFatal).toEqual(expected);
+    compact(state);
+    expect(compact(state)).toMatchObject({ unchanged: true, nativeFirstFatal: expected });
+    expect(compact({ ...state, nativeFirstFatal: { ...diagnostic, redirectParentStatus: 303 } })).toHaveProperty("text");
+    diagnostic.redirectParentStatus = 999;
+    expect(feedback.details.nativeFirstFatal).toEqual(expected); expect(restored.lastFeedback.details.nativeFirstFatal).toEqual(expected);
+    expect(JSON.stringify(safe)).not.toMatch(/private|body|headers|parentUrl|requestId|arbitrary/);
+    for (const method of ["GET", "HEAD", "POST", "OTHER"])
+      expect(safeBrowserFailureDiagnostics({ nativeFirstFatal: { code: expected.code, redirectParentMethod: method } }).nativeFirstFatal)
+        .toEqual({ code: expected.code, redirectParentMethod: method });
+    for (const status of [100, 302, 303, 599])
+      expect(safeBrowserFailureDiagnostics({ nativeFirstFatal: { code: expected.code, redirectParentStatus: status } }).nativeFirstFatal)
+        .toEqual({ code: expected.code, redirectParentStatus: status });
+  });
+  it("omits malformed redirect provenance without copying supplied values", () => {
+    const code = "NATIVE_REDIRECT_PROVENANCE_REJECTED";
+    for (const redirectParentMethod of ["PUT", "post", "POST private", ["POST"], {}, null])
+      expect(safeBrowserFailureDiagnostics({ nativeFirstFatal: { code, redirectParentMethod } }).nativeFirstFatal).toEqual({ code });
+    for (const redirectParentStatus of [99, 600, 302.5, "302", NaN, Infinity, null, [302]])
+      expect(safeBrowserFailureDiagnostics({ nativeFirstFatal: { code, redirectParentStatus } }).nativeFirstFatal).toEqual({ code });
+    for (const value of ["true", "private", 1, [], {}, null]) {
+      const diagnostic = { code, phase: ["REDIRECT_PROVENANCE"], redirectParentComplete: value, redirectLocationMatches: value,
+        redirectNetworkMatches: value, redirectChildBodyAbsent: value, redirectBootstrapAttested: value, body: "private-body", headers: "private-headers" };
+      const safe = safeBrowserFailureDiagnostics({ nativeFirstFatal: diagnostic, nativeRejectedRequests: [diagnostic] });
+      expect(safe.nativeFirstFatal).toEqual({ code }); expect(safe.nativeRejectedRequests).toEqual([{ code }]);
+    }
   });
   it("bounds native diagnostics and omits malformed metadata and unsafe URLs", () => {
     const safe = safeBrowserFailureDiagnostics({ nativeFirstFatal: { code: "NATIVE_REDIRECT_NETWORK_ID_MISSING",

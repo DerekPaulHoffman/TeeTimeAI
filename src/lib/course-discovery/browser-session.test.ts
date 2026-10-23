@@ -110,7 +110,7 @@ describe("discovery browser public protocol", () => {
 
 const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
-  it.each(["valid", "valid query", "wrong query", "missing", "revoked", "invalid body"] as const)("independently checks a native classic bootstrap before queued transport: %s", async mode => {
+  it.each(["valid", "valid query", "wrong query", "missing", "revoked", "invalid body", "redirect 302", "redirect 303", "redirect unproven", "redirect 307"] as const)("independently checks a native classic bootstrap before queued transport: %s", async mode => {
     const entry = "https://clients.mindbodyonline.com/classic/ws?studioid=685163&stype=-9", target = "https://clients.mindbodyonline.com/classic/home" + (mode === "valid query" ? "?studioid=685163" : mode === "wrong query" ? "?studioid=12345" : "");
     const empty = "tg vt lvl qParam view page catid prodid prodGroupId sSU optForwardingLink singleUseToken oAuthToken launchGUID launchUID launchPWDChange launchPWDChangeKey launchLostPWD launchResetPWD launchBizModeLogin launchBizModeLoginWithRedirectLink key consumerModeRedirect extLink giftCardID".split(" ");
     const fields = new URLSearchParams([...empty.map(key => [key, ""]), ["studioId", "685163"], ["stype", "-9"], ["trn", "0"], ["classid", "0"], ["date", "10/23/2026"]]);
@@ -118,22 +118,30 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
     const html = `<link rel="icon" href="data:,"><h1>Public site entry</h1><form method="post" action="${target}">` +
       [...fields].map(([key, value]) => `<input type="hidden" name="${key}" value="${value}">`).join("") + '</form><script>onload=()=>document.forms[0].submit()</script>';
     const proof = Object.freeze({ sourceUrl: entry }), reads: string[] = [], failures: string[] = [];
+    const destination = "https://clients.mindbodyonline.com/ASP/adm/adm_appt_search.asp";
+    const redirect = mode.startsWith("redirect "), attestedRedirect = mode === "redirect 302" || mode === "redirect 303";
     let postRequest: nativeRouting.NativeReadRequest | undefined, live = true, leases = 0, release!: () => void, held!: () => void;
     const released = new Promise<void>(resolve => { release = resolve; }), queued = new Promise<void>(resolve => { held = resolve; });
     const proxy = vi.spyOn(nativeBrowser, "createNativePublicBrowserProxy").mockResolvedValue({ server: "http://127.0.0.1:9", close: async () => {}, allowHostConnections: () => {}, cancelHostConnections: async () => {}, stats: () => ({ connections: 0, activeSockets: 0, bytes: 0 }) });
     const sourceProof = vi.spyOn(nativeRouting, "nativeMindbodyBootstrapSource").mockImplementation(request => request === postRequest && live && mode !== "missing" ? proof : null);
+    const redirectTarget = vi.spyOn(nativeBrowser, "isObservedNativeRedirectTarget").mockImplementation((request, next, roots) =>
+      attestedRedirect && request === postRequest && next === destination && roots.has(entry));
+    const redirectChild = vi.spyOn(nativeBrowser, "isObservedNativeRedirect").mockImplementation((request, roots) =>
+      attestedRedirect && request.url() === destination && request.redirectedFrom() === postRequest && roots.has(entry));
     const routing = vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, handler) => ({
       prepare: () => {}, beginDocumentNavigation: async () => {}, close: async () => {}, pendingReads: 0, lastFailure: undefined,
       releasePlaywrightRoute: async route => {
         const raw = route.request(), request: nativeRouting.NativeReadRequest = { url: () => raw.url(), method: () => raw.method(), headers: () => raw.headers(), postData: () => raw.postData(),
-          resourceType: () => raw.resourceType(), isNavigationRequest: () => raw.isNavigationRequest(), frame: () => raw.frame(), redirectedFrom: () => null, response: () => raw.response() };
+          resourceType: () => raw.resourceType(), isNavigationRequest: () => raw.isNavigationRequest(), frame: () => raw.frame(), redirectedFrom: () => raw.redirectedFrom() && postRequest || null, response: () => raw.response() };
         if (raw.url() === target) postRequest = request;
         await handler({ request: () => request, continue: options => route.continue(options), abort: reason => route.abort(reason), fulfill: options => route.fulfill(options) });
       },
     }));
     const native = vi.spyOn(nativeBrowser, "continueNativeBrowserRead").mockImplementation(async route => {
-      reads.push(`${route.request().method()} ${route.request().url()}`); const body = Buffer.from(route.request().url() === entry ? html : '<link rel="icon" href="data:,"><h1>Public schedule</h1>'), headers = { "content-type": "text/html" };
-      await route.fulfill({ status: 200, headers, body }); return { status: 200, url: route.request().url(), headers, body };
+      reads.push(`${route.request().method()} ${route.request().url()}`); const body = Buffer.from(route.request().url() === entry ? html : '<link rel="icon" href="data:,"><h1>Public schedule</h1>');
+      const redirected = redirect && route.request().method() === "POST", status = redirected ? mode === "redirect 303" ? 303 : mode === "redirect 307" ? 307 : 302 : 200;
+      const headers = { "content-type": "text/html", ...(redirected ? { location: destination } : {}) };
+      await route.fulfill({ status, headers, body }); return { status, url: route.request().url(), headers, body };
     });
     const session = await createCourseDiscoveryBrowserSession({ initialUrls: [entry], deadlineAt: new Date(Date.now() + 15_000) }, {
       browserTransport: "NATIVE_CHROME", launchBrowser: () => chromium.launch({ executablePath, headless: true }),
@@ -144,11 +152,13 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       const opening = session.execute({ id: 1, action: "open", url: entry });
       if (mode === "revoked") { await queued; live = false; release(); }
       await opening;
-      const valid = mode === "valid" || mode === "valid query";
-      await vi.waitFor(() => expect(valid ? reads.length === 2 : failures.length > 0).toBe(true));
-      expect(reads).toEqual(valid ? [`GET ${entry}`, `POST ${target}`] : [`GET ${entry}`]);
-      if (!valid) expect(failures).toContain(mode === "missing" ? "UNSAFE_METHOD" : "MINDBODY_BOOTSTRAP_READ_REJECTED");
-    } finally { release(); await session.close(); native.mockRestore(); routing.mockRestore(); sourceProof.mockRestore(); proxy.mockRestore(); }
+      const valid = mode === "valid" || mode === "valid query" || attestedRedirect;
+      await vi.waitFor(() => expect(valid ? reads.length === (attestedRedirect ? 3 : 2) : failures.length > 0).toBe(true));
+      expect(reads).toEqual(attestedRedirect ? [`GET ${entry}`, `POST ${target}`, `GET ${destination}`]
+        : valid || redirect ? [`GET ${entry}`, `POST ${target}`] : [`GET ${entry}`]);
+      if (valid) expect(failures).toEqual([]);
+      if (!valid) expect(failures).toContain(redirect ? "UNSAFE_REDIRECT" : mode === "missing" ? "UNSAFE_METHOD" : "MINDBODY_BOOTSTRAP_READ_REJECTED");
+    } finally { release(); await session.close(); native.mockRestore(); routing.mockRestore(); sourceProof.mockRestore(); redirectTarget.mockRestore(); redirectChild.mockRestore(); proxy.mockRestore(); }
   }, 20_000);
 
   it.each(["missing", "revoked"] as const)("classifies native public header proof failure without changing denial: %s", async mode => {
