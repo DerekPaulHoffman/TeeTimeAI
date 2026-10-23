@@ -183,7 +183,8 @@ export function projectMemberSportsPublicTeeSheetDom(root: Element): MemberSport
         const part = parts[0], labels = part.querySelectorAll(":scope > .name"), ranges = part.querySelectorAll(".rightCells > .iconCell.first > span");
         if (labels.length !== 1 || ranges.length !== 1) return output;
         const label = dom.text(labels[0], 32), range = dom.text(ranges[0], 12), hidden = dom.hidden(card);
-        const rounds = part.querySelectorAll(".iconCell.holes9,.iconCell.holes18,.iconCell.holesBoth");
+        // The published round marker is a DIV directly inside a right-side iconCell.
+        const rounds = part.querySelectorAll(":scope > .rightCells > .iconCell > div.holes9,:scope > .rightCells > .iconCell > div.holes18,:scope > .rightCells > .iconCell > div.holesBoth");
         // Published desktop emits a hidden blank front placeholder for a
         // back-only pair. It is not an offer; all substantive cards remain.
         if (hidden && label === "" && ["", "-"].includes(range) && rounds.length === 0) continue;

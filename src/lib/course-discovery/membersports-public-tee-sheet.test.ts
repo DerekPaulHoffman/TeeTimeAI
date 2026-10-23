@@ -170,9 +170,28 @@ describe("full original public tee-sheet normalization and DOM parity", () => {
   });
 });
 
-const htmlCard = (label = "Front", range = "1-4", round = "holes9", extra = "") => `<div class="courseRow ${extra}"><app-tee-time-card class="bookingCard"><div class="teeTimeCard"><div class="name">${label}</div><div class="rightCells"><div class="iconCell first"><span>${range}</span></div><div class="iconCell ${round}"></div></div></div></app-tee-time-card></div>`;
+// The published component puts the round class on a DIV directly inside iconCell.
+const htmlCard = (label = "Front", range = "1-4", round = "holes9", extra = "") => `<div class="courseRow ${extra}"><app-tee-time-card class="bookingCard"><div class="teeTimeCard"><div class="name">${label}</div><div class="rightCells"><div class="iconCell first"><span>${range}</span></div><div class="iconCell"><div class="${round}"></div></div></div></div></app-tee-time-card></div>`;
 const html = (cards = htmlCard()) => `<div class="dateFormat">${dateText}</div><div class="teeTimes"><div class="teeTime"><div class="timeCol">01:30 PM</div><div class="availableBookings">${cards}</div></div><div class="teeTime"><div class="timeCol">01:40 PM</div><div class="availableBookings"></div></div></div>`;
 describe("passive primary-class DOM projection", () => {
+  it.each([["holes9", "9"], ["holes18", "18"], ["holesBoth", "BOTH"]] as const)("reads the published direct-child %s round marker", (roundClass, round) => {
+    document.body.innerHTML = html(htmlCard("Front", "1-4", roundClass));
+    expect(project(document.body)).toMatchObject({ projectionComplete: true, groups: [{ minute: 810, cards: [card({ round })] }, { minute: 820, cards: [] }] });
+  });
+  it.each([
+    ["inline marker", '<div class="iconCell holes9"></div>'],
+    ["wrong parent", '<div class="otherCell"><div class="holes9"></div></div>'],
+    ["wrong position", '<div class="holes9"></div>'],
+    ["wrong marker element", '<div class="iconCell"><span class="holes9"></span></div>'],
+    ["nested marker", '<div class="iconCell"><span><div class="holes9"></div></span></div>'],
+    ["duplicate marker", '<div class="iconCell"><div class="holes9"></div><div class="holes9"></div></div>'],
+    ["two rounds", '<div class="iconCell"><div class="holes9"></div><div class="holes18"></div></div>'],
+    ["conflicting classes", '<div class="iconCell"><div class="holes9 holes18"></div></div>'],
+    ["unknown round", '<div class="iconCell"><div class="holes27"></div></div>'],
+  ])("rejects an unproven %s round structure", (_description, replacement) => {
+    document.body.innerHTML = html(htmlCard().replace('<div class="iconCell"><div class="holes9"></div></div>', replacement));
+    expect(project(document.body).projectionComplete).toBe(false);
+  });
   it("captures complete groups/cards, empty time labels, round/range and hidden/restricted state only", () => {
     document.body.innerHTML = html(htmlCard() + htmlCard("Back", "1-3", "holes18", "hidden").replace('class="teeTimeCard"', 'class="teeTimeCard restricted"'));
     const facts = project(document.body);
