@@ -81,9 +81,9 @@ export const recipeSelectorSchema = z.string().min(1).max(240).refine(value =>
 const jsonPath = z.string().min(1).max(240).regex(/^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/u).refine(value =>
   !value.split(".").some(part => ["__proto__", "prototype", "constructor"].includes(part) || secret.test(part)));
 export const recipeFieldSchema = z.union([
-  z.object({ path: jsonPath, format: z.enum(["INTEGER", "DURATION_MINUTES"]).optional() }).strict(),
-  z.object({ selector: recipeSelectorSchema, attribute: z.enum(["datetime", "data-date", "data-time", "data-value", "data-capacity", "value", "selected-label", "aria-label"]).optional(), format: z.enum(["INTEGER", "DURATION_MINUTES"]).optional() }).strict(),
-]);
+  z.object({ path: jsonPath, format: z.enum(["INTEGER", "DURATION_MINUTES", "PUBLIC_PARTY_RANGE"]).optional() }).strict(),
+  z.object({ selector: recipeSelectorSchema, attribute: z.enum(["datetime", "data-date", "data-time", "data-value", "data-capacity", "value", "selected-label", "aria-label"]).optional(), format: z.enum(["INTEGER", "DURATION_MINUTES", "PUBLIC_PARTY_RANGE"]).optional() }).strict(),
+]).describe("Read an observed source field. INTEGER handles exact numeric or labelled player counts such as '2 Players'. PUBLIC_PARTY_RANGE is only outdoor DOM availableSpots text: an exact ASCII 1..4 min-max leaf beside the current explicit person icon, with no price/time/duration/private context. It preserves the inclusive minimum and maximum; it is not a generic numeric parser.");
 const venueGreetingFieldSchema = z.object({ selector: recipeSelectorSchema, format: z.literal("VENUE_GREETING") }).strict()
   .describe("DOM venue proof only, visible text with no attribute/path: opt in only for an observed complete 'Welcome to <whole venue>.' with no extra copy, or 'Welcome to [the ]<whole venue>’s online tee time engine.' (ASCII 's also accepted) optionally followed by exactly 'You are guaranteed to receive the best online rates for <whole rate venue> when you book direct with us. We look forward to seeing [you ]on the golf course.' Full text is limited to 500 characters, each captured name to 200. Both the main name and rate name independently use the existing strict whole-venue matcher: Unicode compatibility forms, case, punctuation and spacing are ignored. A terminal Golf Club or Golf Course label may be omitted or interchanged only when the remaining whole-name cores match, contain at least 8 letters/digits, and are not generic golf/category words; for example, Example Ridge Golf Club matches Example Ridge. This does not allow arbitrary abbreviations, substring matches or another location, and never changes the canonical source identity. Arbitrary prose, other copy and hidden/attribute fallbacks reject. Raw/live text equality is checked before interpretation.");
 const venueProofFieldSchema = z.union([recipeFieldSchema, venueGreetingFieldSchema]);
@@ -114,6 +114,8 @@ export const recipeRouteSchema = z.object({
   queryKeys: z.array(z.string().min(1).max(80).regex(/^[a-zA-Z0-9_\[\].-]+$/u).refine(value => !secret.test(value))).max(30).default([]),
 }).strict();
 const stepSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("openOfficialBooking"), addressSelector: recipeSelectorSchema, bookingLinkSelector: recipeSelectorSchema }).strict()
+    .describe("Only MEMBERSPORTS_PUBLIC_TEE_SHEET: on the current official same-origin document, independently read one complete physical address matching the canonical venueAddress and one exact public booking anchor matching bookingUrl. The executor navigates that observed href in this context, including a published _blank link without clicking a new window. This asserts no name alias and grants no new route. Start at the official page or follow an observed same-site link first; never supply a guessed page or address."),
   z.object({ action: z.literal("selectRentalService"), selector: recipeSelectorSchema, optionText: recipeTemplateSchema }).strict()
     .describe("Select one exact observed public golf/simulator rental service option within a labelled Service/Activity/Product selector. Supports native select or a public combobox with its exact aria-controls listbox. Lessons, events, memberships/packages, dated times and contact/transaction controls are forbidden. This supplies no duration/capacity proof; independently prove the requested full interval at the final inventory."),
   z.object({ action: z.literal("continueToAvailability"), selector: recipeSelectorSchema, mode: z.enum(["SERVICE", "SKIP_PACKAGES"]) }).strict()
@@ -195,13 +197,19 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
       z.union([recipeTemplateSchema, z.number().finite(), z.boolean()])).optional() }).strict() }).strict(),
   z.object({ ...common, proof: common.proof.extend({ venue: venueProofFieldSchema }), engine: z.literal("BROWSER_DOM"), browserTransport: z.enum(["PINNED_HTTP", "NATIVE_CHROME"]).default("PINNED_HTTP"), pageUrl: urlTemplate,
     availabilityResponse: availabilityResponseSchema, steps: z.array(stepSchema).max(32) }).strict(),
-  z.object({ schemaVersion: common.schemaVersion, target: common.target, source: common.source, permittedRoutes: common.permittedRoutes,
+  z.discriminatedUnion("requestBinding", [z.object({ schemaVersion: common.schemaVersion, target: common.target, source: common.source, permittedRoutes: common.permittedRoutes,
     engine: z.literal("BROWSER_JSON"), browserTransport: z.enum(["PINNED_HTTP", "NATIVE_CHROME"]).default("PINNED_HTTP"), pageUrl: urlTemplate,
     steps: z.array(stepSchema).max(32), availabilityResponse: availabilityResponseSchema,
     requestBinding: z.literal("SEVENROOMS_PUBLIC_PARTICIPANTS"), responseRows: browserJsonRowsSchema,
     proof: z.object({ venue: browserJsonVenueSchema, date: z.object({ availabilityDateKey: z.literal(true) }).strict(),
       complete: z.object({ availabilityResponse: z.literal(true) }).strict() }).strict(),
-  }).strict(),
+  }).strict(), z.object({ schemaVersion: common.schemaVersion, target: common.target, source: common.source, permittedRoutes: common.permittedRoutes,
+    engine: z.literal("BROWSER_JSON"), browserTransport: z.literal("NATIVE_CHROME"), pageUrl: urlTemplate,
+    steps: z.array(stepSchema).max(32), availabilityResponse: availabilityResponseSchema,
+    requestBinding: z.literal("MEMBERSPORTS_PUBLIC_TEE_SHEET"),
+    proof: z.object({ venue: z.object({ officialBookingLink: z.literal(true) }).strict(),
+      date: z.object({ availabilityRequestDate: z.literal(true) }).strict(), complete: z.object({ publicTeeSheet: z.literal(true) }).strict() }).strict(),
+  }).strict()]),
   z.object({ schemaVersion: common.schemaVersion, target: common.target, source: common.source,
     engine: z.literal("EXISTING_ADAPTER"), adapter: existingAdapterMetadataSchema }).strict(),
 ]).superRefine((recipe, ctx) => {
@@ -219,6 +227,29 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
       ctx.addIssue({ code: "custom", message: "Simulator adapter requires one exact directory identity" });
     return;
   }
+  if (recipe.engine === "BROWSER_JSON" && recipe.requestBinding === "MEMBERSPORTS_PUBLIC_TEE_SHEET") {
+    const fence = recipe.availabilityResponse;
+    const opening = recipe.steps.findIndex(step => step.action === "openOfficialBooking");
+    try {
+      const booking = new URL(recipe.source.bookingUrl), official = new URL(recipe.source.officialUrl), page = new URL(recipe.pageUrl);
+      const ids = /^\/tee-times\/([1-9]\d*)\/([1-9]\d*)\/0$/u.exec(booking.pathname);
+      if (recipe.target.kind !== "OUTDOOR" || recipe.target.offeringId || !recipe.source.venueAddress || recipe.source.providerFamily !== "MEMBERSPORTS" ||
+          booking.origin !== "https://app.membersports.com" || booking.search || booking.hash || !ids ||
+          ids.slice(1).some(id => !Number.isSafeInteger(Number(id)) || Number(id) > 2147483647) ||
+          page.origin !== official.origin || /[{}]/u.test(recipe.pageUrl) ||
+          fence.url !== "https://api.membersports.com/api/v1/golfclubs/onlineBookingTeeTimes" || fence.method !== "POST" ||
+          fence.date.source !== "JSON_BODY" || fence.date.path !== "date" || (fence.date.format ?? "ISO_DATE") !== "ISO_DATE" ||
+          fence.kind === "SERVER_DOCUMENT" || fence.success || fence.endDatePath ||
+          opening < 0 || recipe.steps.filter(step => step.action === "openOfficialBooking").length !== 1 ||
+          recipe.steps.slice(0, opening).some(step => !["waitFor", "followLink"].includes(step.action)) ||
+          recipe.steps.slice(opening + 1).some(step => !["waitFor", "selectDateChoice", "selectDate"].includes(step.action) &&
+            !(step.action === "clickFilter" && ["OPEN_DATE_PICKER", "NEXT_MONTH", "PREVIOUS_MONTH", "SELECT_DATE", "APPLY_DATE"].includes(step.purpose))))
+        ctx.addIssue({ code: "custom", message: "Public tee-sheet proof requires the exact outdoor MemberSports source, public POST and fresh official address/link operation" });
+    } catch { ctx.addIssue({ code: "custom", message: "Invalid public tee-sheet source" }); }
+    return;
+  }
+  if (recipe.engine !== "HTTP_JSON" && recipe.steps.some(step => step.action === "openOfficialBooking"))
+    ctx.addIssue({ code: "custom", message: "Official booking identity navigation requires the closed public tee-sheet binding" });
   if (recipe.engine === "BROWSER_JSON") {
     const fence = recipe.availabilityResponse;
     if (recipe.target.kind !== "SIMULATOR" || !recipe.target.offeringId || fence.kind === "SERVER_DOCUMENT" || fence.method !== "GET" ||
@@ -248,6 +279,10 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
     recipe.proof.durationMinutes, recipe.slots.startsAt, recipe.slots.endsAt, recipe.slots.availableSpots,
     recipe.slots.holes, recipe.slots.resourceId, recipe.slots.productId, recipe.slots.minimumPlayers, recipe.slots.capacity,
     recipe.slots.scope?.label].filter(value => value && !("derive" in value) && !("availabilityResponse" in value) && !("serverDocument" in value)) as RecipeField[];
+  if (readers.some(field => field.format === "PUBLIC_PARTY_RANGE" && field !== recipe.slots.availableSpots) ||
+      recipe.slots.availableSpots?.format === "PUBLIC_PARTY_RANGE" && (recipe.engine !== "BROWSER_DOM" || recipe.target.kind !== "OUTDOOR" ||
+        !("selector" in recipe.slots.availableSpots) || recipe.slots.availableSpots.attribute))
+    ctx.addIssue({ code: "custom", message: "Public party ranges require outdoor DOM slot text beside an explicit public player icon" });
   if (readers.some(field => recipe.engine === "HTTP_JSON" ? !("path" in field) : !("selector" in field)) ||
     (recipe.engine === "HTTP_JSON") !== ("path" in recipe.slots.collection)) ctx.addIssue({ code: "custom", message: "Field readers must match the engine" });
   if (recipe.engine === "HTTP_JSON" && "kind" in recipe.proof.date) ctx.addIssue({ code: "custom", message: "DATE_PARTS requires visible DOM fields" });
@@ -348,6 +383,10 @@ export function readRecipeFieldFormat(field: RecipeField, value: unknown): unkno
   // Venue claims retain the complete source text through raw/live parity.
   // Only normalize() may interpret this opt-in identity grammar afterwards.
   if (!field.format || field.format === "VENUE_GREETING" || field.format === "VENUE_SELECT_TIME") return value;
+  if (field.format === "PUBLIC_PARTY_RANGE") {
+    const range = /^([1-4])\s*-\s*([1-4])$/u.exec(String(value ?? "").trim());
+    return range && Number(range[1]) <= Number(range[2]) ? `${range[1]} to ${range[2]} players` : undefined;
+  }
   if (field.format === "INTEGER") {
     const match = /^(\d+)(?:\s+(?:players?|people|spots?|available))?$/iu.exec(String(value ?? "").trim());
     return match ? Number(match[1]) : undefined;

@@ -25,6 +25,10 @@ import { executeExistingAdapterRecipe } from "./existing-adapter-executor";
 import { selectPublicFilter } from "./public-filter-control";
 import { trySelectPublicFilterOption } from "./public-filter-option";
 import { tryOpenPublicPlayerCombobox } from "./public-player-combobox";
+import { readPublicPartyRangeField } from "./public-party-range-field";
+import { tryOpenPublicDatePickerButton } from "./public-date-picker-button";
+import { attestMemberSportsOfficialBookingIdentity } from "./membersports-official-booking-identity";
+import { normalizeMemberSportsPublicTeeSheet, projectMemberSportsPublicTeeSheetDom } from "./membersports-public-tee-sheet";
 import { selectPublicCalendarDate } from "./public-calendar-control";
 import { applyPublicCalendarDate } from "./public-calendar-apply";
 import { hasInspectedPassfactoryDurationClients, isInspectedPassfactoryDurationClient, isPassfactoryDurationClientUrl, isPassfactoryAvailabilityRequest, isPassfactoryDurationContext,
@@ -52,7 +56,7 @@ export type AccessExecutorDependencies = {
   requestLease?: <T>(family: string, work: () => Promise<T>) => Promise<{ acquired: true; value: T } | { acquired: false }>;
 };
 type Extracted = { venue: unknown; date: unknown; complete: unknown; empty: unknown; players: unknown; duration: unknown;
-  rows: Array<Record<string, unknown>> };
+  rows: Array<Record<string, unknown>>; settlementProof?: string };
 const forbiddenControl = /\b(?:login|sign in|sign up|register|checkout|pay|payment|purchase|buy|book|cart|reserve|confirm|submit|cancel|delete|send|subscribe|password|email|phone)\b/iu;
 const clean = (value: unknown) => String(value ?? "").replace(/\s+/gu, " ").trim();
 /** Public providers often append a category label to the same venue name.
@@ -94,7 +98,8 @@ function matchesAvailabilityRequest(recipe: BrowserAccessRecipe, input: AccessEx
   // the response fence. It cannot prove dated inventory or an empty result.
   if (isSafeBrowserBootstrapReadUrl(request.url, "fetch", request.method)) return false;
   if (request.method !== fence.method || request.url !== expandRecipeTemplate(fence.url, input, true)) return false;
-  if (recipe.engine === "BROWSER_JSON" && !browserJsonParticipantRequestMatches(request, recipe.source.bookingUrl, input, isSafeRecipeUrl)) return false;
+  if (recipe.engine === "BROWSER_JSON" && recipe.requestBinding === "SEVENROOMS_PUBLIC_PARTICIPANTS" &&
+      !browserJsonParticipantRequestMatches(request, recipe.source.bookingUrl, input, isSafeRecipeUrl)) return false;
   try {
     const url = new URL(request.url), segments = url.pathname.slice(1).split("/");
     if (fence.date.source === "PATH" && (request.method !== "GET" || segments.some(segment => !segment) || /%(?:2f|5c)/iu.test(url.pathname))) return false;
@@ -205,9 +210,10 @@ function boundedNumber(value: unknown, maximum: number) {
 }
 function normalize(recipe: ExtractedAccessRecipe, input: AccessExecutionInput, data: Extracted, now: Date): AccessExecutionResult {
   const simulator = recipe.target.kind === "SIMULATOR";
-  const venueVerified = recipe.proof.venue.format === "VENUE_GREETING"
+  const venueFormat = "format" in recipe.proof.venue ? recipe.proof.venue.format : undefined;
+  const venueVerified = venueFormat === "VENUE_GREETING"
     ? matchesPublicVenueGreeting(recipe.source.venueName, data.venue, venueProofMatches)
-    : recipe.proof.venue.format === "VENUE_SELECT_TIME"
+    : venueFormat === "VENUE_SELECT_TIME"
       ? /^Select a time at .{2,200}$/u.test(clean(data.venue)) && venueProofMatches(recipe.source.venueName, clean(data.venue).slice("Select a time at ".length))
     : venueProofMatches(recipe.source.venueName, data.venue);
   const evidence = { recipeHash: hashAccessRecipe(recipe), venueVerified,
@@ -246,7 +252,7 @@ function normalize(recipe: ExtractedAccessRecipe, input: AccessExecutionInput, d
     const capacity = /^\d+$/u.test(capacityText) && Number(capacityText) >= 1 && Number(capacityText) <= 100 ? Number(capacityText) : null;
     if (minimumPlayers > availableSpots || playerOptions && row.minimumPlayers !== undefined && minimumPlayers !== playerOptions.minPlayers)
       return result("INCOMPLETE", "INVALID_CAPACITY_RANGE");
-    const endField = recipe.engine === "BROWSER_JSON" ? { derive: "ADD_REQUESTED_DURATION" } : recipe.slots.endsAt;
+    const endField = recipe.engine === "BROWSER_JSON" ? simulator ? { derive: "ADD_REQUESTED_DURATION" } : undefined : recipe.slots.endsAt;
     const end = endField && "derive" in endField
       ? new Date(start.getTime() + input.durationMinutes! * 60_000)
       : row.endsAt === undefined ? undefined : recipeTimeToInstant(row.endsAt, input);
@@ -281,6 +287,7 @@ async function domField(root: Locator, field: RecipeField | undefined): Promise<
   const count = await node.count();
   if (count > 1) throw new Error("AMBIGUOUS_PROOF_FIELD");
   if (count !== 1 || !(await node.isVisible())) return undefined;
+  if (field.format === "PUBLIC_PARTY_RANGE") return readPublicPartyRangeField(node);
   let value: unknown;
   if (field.attribute === "value") value = await node.inputValue();
   else if (field.attribute === "selected-label") value = await node.evaluate(element => element instanceof HTMLSelectElement ? element.selectedOptions[0]?.textContent : null);
@@ -456,19 +463,46 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
     let lastSuccessfulAvailabilityRequest: PublicAvailabilityRequest | undefined;
     let latestBrowserJsonRead = 0;
     let browserJson: { generation: number; documentSequence: number; readSequence: number; extracted: ReturnType<typeof extractBrowserJsonRows> } | undefined;
-    const ancillaryBrowserJsonRead = (request: { url: string; method: string; resourceType?: string }) => recipe.engine === "BROWSER_JSON" &&
+    const memberSports = recipe.engine === "BROWSER_JSON" && recipe.requestBinding === "MEMBERSPORTS_PUBLIC_TEE_SHEET";
+    const sevenRooms = recipe.engine === "BROWSER_JSON" && recipe.requestBinding === "SEVENROOMS_PUBLIC_PARTICIPANTS";
+    let memberSportsIdentity: { proof: Awaited<ReturnType<typeof attestMemberSportsOfficialBookingIdentity>>; bookingDocumentSequence: number } | undefined;
+    let memberSportsRead: { generation: number; documentSequence: number; readSequence: number; body: unknown;
+      request: { url: string; method: string; body?: string | null } } | undefined;
+    const memberSportsMetadata = new Map<"courses" | "parameters" | "bookingCounts", { documentSequence: number; readSequence: number; body: unknown }>();
+    const memberSportsMetadataRole = (request: { url: string; method: string }) => {
+      if (!memberSports || request.method !== "GET") return undefined;
+      const booking = /^\/tee-times\/([1-9]\d*)\/([1-9]\d*)\/0$/u.exec(new URL(recipe.source.bookingUrl).pathname);
+      const url = new URL(request.url);
+      if (!booking || url.origin !== "https://api.membersports.com" || url.search || url.hash) return undefined;
+      const [, club, course] = booking;
+      if (url.pathname === `/api/v1/golfclubs/${club}/coursesslim`) return "courses" as const;
+      if (url.pathname === `/api/v1/golfclubs/${club}/golfCourses/${course}/types/0/teesheetparameters`) return "parameters" as const;
+      const counts = new RegExp(`^/api/v1/teesheets/golfclubs/${club}/courses/${course}/types/0/dates/${input.date}/\\d{4}-\\d{2}-\\d{2}/[1-9]\\d*/profiles/0/bookingCounts$`, "u");
+      return counts.test(url.pathname) ? "bookingCounts" as const : undefined;
+    };
+    const ancillaryBrowserJsonRead = (request: { url: string; method: string; resourceType?: string }) => sevenRooms &&
       browserJsonAncillaryCalendarRequestMatches(request, { url: expandRecipeTemplate(recipe.availabilityResponse.url, input, true), method: recipe.availabilityResponse.method },
         recipe.source.bookingUrl, input, isSafeRecipeUrl);
     const inspectedPassfactoryDurationClients = new Set<string>();
     let selectedRequestedDate = false;
     let passfactoryAvailabilityRequests = 0, carriedDurationGeneration: number | undefined;
     const observeAvailabilityResponse = (generation: number, request: { url: string; method: string; body?: string | null; resourceType?: string }, status: number, body: Uint8Array,
-      document?: { main: boolean; sequence: number; dataSequence: number; contentType: string }) => {
+      document?: { main: boolean; sequence: number; dataSequence: number; contentType: string; sourceMainFrame: boolean }) => {
+      const metadataRole = memberSportsMetadataRole(request);
+      if (metadataRole && document?.sourceMainFrame && document.sequence === mainDocumentSequence) {
+        memberSportsMetadata.delete(metadataRole);
+        if (status === 200 && /^application\/(?:[a-z0-9.+-]*\+)?json(?:;|$)/iu.test(document.contentType)) {
+          try { memberSportsMetadata.set(metadataRole, { documentSequence: document.sequence, readSequence: document.dataSequence,
+            body: JSON.parse(Buffer.from(body).toString("utf8")) }); } catch { /* Missing original JSON remains unverified. */ }
+        }
+      }
       if (generation !== mutationGeneration) return;
       if (!document?.main && ancillaryBrowserJsonRead(request)) return;
-      if (recipe.engine === "BROWSER_JSON" && (!document || document.sequence !== mainDocumentSequence || document.dataSequence !== latestBrowserJsonRead)) return;
+      if (recipe.engine === "BROWSER_JSON" && (!document || document.sequence !== mainDocumentSequence)) return;
+      if (sevenRooms && document?.dataSequence !== latestBrowserJsonRead) return;
+      if (memberSports && (!document?.sourceMainFrame || document.dataSequence !== latestBrowserJsonRead)) return;
       if (!matchesAvailabilityRequest(recipe, input, request)) {
-        if (recipe.engine === "BROWSER_JSON" && isSafeBrowserAvailabilityReadUrl(request.url, "fetch", request.method)) {
+        if (sevenRooms && isSafeBrowserAvailabilityReadUrl(request.url, "fetch", request.method)) {
           browserJson = undefined; responseGeneration = undefined; rejectedResponseGeneration = generation;
         }
         return;
@@ -488,7 +522,16 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
         return;
       }
       if (matchesAvailabilityResponse(recipe, input, request, status, body)) {
-        if (recipe.engine === "BROWSER_JSON") {
+        if (memberSports) {
+          try {
+            if (!/^application\/(?:[a-z0-9.+-]*\+)?json(?:;|$)/iu.test(document?.contentType ?? "")) throw new Error("MEMBERSPORTS_NOT_JSON");
+            memberSportsRead = { generation, documentSequence: document!.sequence, readSequence: document!.dataSequence,
+              body: JSON.parse(Buffer.from(body).toString("utf8")), request };
+          } catch (error) {
+            memberSportsRead = undefined; responseGeneration = undefined; rejectedResponseGeneration = generation;
+            failure ??= recipeExecutionDiagnostic(error); return;
+          }
+        } else if (recipe.engine === "BROWSER_JSON" && recipe.requestBinding === "SEVENROOMS_PUBLIC_PARTICIPANTS") {
           try {
             if (!/^application\/(?:[a-z0-9.+-]*\+)?json(?:;|$)/iu.test(document?.contentType ?? "")) throw new Error("BROWSER_JSON_NOT_JSON");
             browserJson = { generation, documentSequence: document!.sequence, readSequence: document!.dataSequence,
@@ -551,12 +594,23 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
       const catalogDocument = mainDocument ? catalogTiles.beginDocument(requestUrl) : undefined;
       const catalogRead = request.frame() === page.mainFrame() && ["xhr", "fetch"].includes(request.resourceType())
         ? catalogTiles.beginRead(requestUrl, request.method(), request.postData(), request.frame().url()) : undefined;
-      if (mainDocument) mainDocumentSequence++;
+      if (mainDocument) {
+        mainDocumentSequence++;
+        memberSportsRead = undefined; memberSportsMetadata.clear();
+        if (memberSportsIdentity && requestUrl !== memberSportsIdentity.proof.bookingUrl) memberSportsIdentity = undefined;
+      }
       if (["xhr", "fetch"].includes(request.resourceType())) dataRequestSequence++;
       const capturedDocumentSequence = mainDocumentSequence, capturedDataSequence = dataRequestSequence;
-      if (recipe.engine === "BROWSER_JSON" && (mainDocument || isSafeBrowserAvailabilityReadUrl(requestUrl, request.resourceType(), request.method()) &&
+      if (sevenRooms && (mainDocument || isSafeBrowserAvailabilityReadUrl(requestUrl, request.resourceType(), request.method()) &&
           !ancillaryBrowserJsonRead({ url: requestUrl, method: request.method(), resourceType: request.resourceType() }))) {
         browserJson = undefined; responseGeneration = undefined; rejectedResponseGeneration = undefined;
+        latestBrowserJsonRead = capturedDataSequence;
+      }
+      // Any later tee-sheet POST retires the old evidence before admission,
+      // including a different date or invalid body. Only the latest exact
+      // requested-date response from this main frame may replace it.
+      if (memberSports && (mainDocument || requestUrl === recipe.availabilityResponse.url && request.method() === "POST")) {
+        memberSportsRead = undefined; responseGeneration = undefined; rejectedResponseGeneration = undefined;
         latestBrowserJsonRead = capturedDataSequence;
       }
       if (usesServerDocument && (mainDocument || ["xhr", "fetch"].includes(request.resourceType()))) {
@@ -611,7 +665,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
           catalogTiles.completeRead(catalogRead, native.status, native.headers["content-type"] ?? "", native.body);
           observeClientScript(requestUrl, request.resourceType(), native.status, native.body);
           observeAvailabilityResponse(requestGeneration, { url: requestUrl, method: request.method(), body: request.postData(), resourceType: request.resourceType() }, native.status, native.body,
-            { main: mainDocument, sequence: capturedDocumentSequence, dataSequence: capturedDataSequence, contentType: native.headers["content-type"] ?? "" });
+            { main: mainDocument, sequence: capturedDocumentSequence, dataSequence: capturedDataSequence, contentType: native.headers["content-type"] ?? "", sourceMainFrame: request.frame() === page.mainFrame() });
           return;
         }
         const { response, buffer } = await read(requestUrl, request.method(), request.postData() ?? undefined, headers, request.resourceType());
@@ -624,7 +678,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
         await route.fulfill({ status: response.status, headers: responseHeaders, body: Buffer.from(buffer) });
         observeClientScript(requestUrl, request.resourceType(), response.status, new Uint8Array(buffer));
         observeAvailabilityResponse(requestGeneration, { url: requestUrl, method: request.method(), body: request.postData(), resourceType: request.resourceType() }, response.status, new Uint8Array(buffer),
-          { main: mainDocument, sequence: capturedDocumentSequence, dataSequence: capturedDataSequence, contentType: response.headers.get("content-type") ?? "" });
+          { main: mainDocument, sequence: capturedDocumentSequence, dataSequence: capturedDataSequence, contentType: response.headers.get("content-type") ?? "", sourceMainFrame: request.frame() === page.mainFrame() });
       } catch (error) { blocked = true; failure ??= recipeExecutionDiagnostic(error, { url: requestUrl, method: request.method(), resourceType: request.resourceType() }); await route.abort().catch(() => {}); }
       finally { pendingRequests--; }
     };
@@ -686,11 +740,27 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
             throw new Error("UNVERIFIED_CLIENT_DURATION");
           carryDurationFence = true; previousAvailabilityRequests = passfactoryAvailabilityRequests;
         }
-        if (step.action === "followLink" || step.action === "selectDateChoice" || step.action === "selectDate" || step.action === "selectProduct" ||
+        if (step.action === "openOfficialBooking" || step.action === "followLink" || step.action === "selectDateChoice" || step.action === "selectDate" || step.action === "selectProduct" ||
           step.action === "selectRentalService" || step.action === "continueToAvailability" || step.action === "select" || step.action === "fill" ||
           step.action === "clickFilter" && ["SELECT_DATE", "APPLY_DATE", "SELECT_FILTER", "RUN_SEARCH"].includes(step.purpose)) {
           mutationGeneration++; responseGeneration = undefined; rejectedResponseGeneration = undefined; browserJson = undefined;
+          memberSportsRead = undefined;
           carriedDurationGeneration = carryDurationFence ? mutationGeneration : undefined;
+        }
+        if (step.action === "openOfficialBooking") {
+          if (!memberSports || !recipe.source.venueAddress) throw new Error("OFFICIAL_BOOKING_IDENTITY_UNVERIFIED");
+          await waitForQuietReads();
+          const sequence = mainDocumentSequence;
+          const proof = await attestMemberSportsOfficialBookingIdentity(page, {
+            officialUrl: recipe.source.officialUrl, bookingUrl: recipe.source.bookingUrl, venueAddress: recipe.source.venueAddress,
+          }, { addressSelector: step.addressSelector, bookingLinkSelector: step.bookingLinkSelector });
+          if (sequence !== mainDocumentSequence || pendingReadCount() || canonicalCpsPublicUrl(page.url()) !== proof.officialDocumentUrl ||
+              !recipeAllowsRequest(recipe, proof.bookingUrl, "GET")) throw new Error("OFFICIAL_BOOKING_IDENTITY_UNVERIFIED");
+          memberSportsIdentity = { proof, bookingDocumentSequence: sequence + 1 };
+          await page.goto(proof.bookingUrl, { waitUntil: "domcontentloaded", timeout: Math.min(30_000, Math.max(1, deadline - clock().getTime())) });
+          if (mainDocumentSequence !== sequence + 1 || canonicalCpsPublicUrl(page.url()) !== proof.bookingUrl)
+            throw new Error("OFFICIAL_BOOKING_IDENTITY_UNVERIFIED");
+          continue;
         }
         if (step.action === "followLink") {
           selectedRentalService = undefined;
@@ -781,6 +851,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
           if (step.purpose === "DATE") selectedRequestedDate = true;
         } else {
           const expected = expandRecipeTemplate(step.text, input);
+          if (step.purpose === "OPEN_DATE_PICKER" && await tryOpenPublicDatePickerButton(node, expected)) continue;
           if (step.purpose === "OPEN_DATE_PICKER" && tag === "input") {
             const proof = await inspectPublicDatePickerInput(node);
             if (!proof || proof.label !== expected) throw new Error("UNSAFE_CONTROL");
@@ -831,6 +902,28 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
       if (blocked || !recipeAllowsRequest(recipe, canonicalCpsPublicUrl(page.url()), "GET")) return fail("INCOMPLETE", "UNSCOPED_OR_FAILED_RESOURCE");
       const extract = async (): Promise<Extracted> => {
         if (recipe.engine === "BROWSER_DOM") return extractDom(recipe, page.locator("body"));
+        if (recipe.requestBinding === "MEMBERSPORTS_PUBLIC_TEE_SHEET") {
+          const current = memberSportsRead, identity = memberSportsIdentity;
+          if (!current || !identity || current.generation !== mutationGeneration || current.documentSequence !== mainDocumentSequence ||
+              current.readSequence !== latestBrowserJsonRead || identity.bookingDocumentSequence !== mainDocumentSequence ||
+              canonicalCpsPublicUrl(page.url()) !== identity.proof.bookingUrl || pendingReadCount()) throw new Error("AVAILABILITY_RESPONSE_UNCONFIRMED");
+          const metadata = Object.fromEntries([...memberSportsMetadata].filter(([, value]) => value.documentSequence === mainDocumentSequence)
+            .map(([key, value]) => [key, value.body]));
+          const dom = await page.locator("body").evaluate(projectMemberSportsPublicTeeSheetDom);
+          const verified = normalizeMemberSportsPublicTeeSheet(current.body, { documentUrl: identity.proof.bookingUrl,
+            requestUrl: current.request.url, requestMethod: current.request.method, requestBody: current.request.body ?? "", input,
+            metadata: { courses: metadata.courses, parameters: metadata.parameters, bookingCounts: metadata.bookingCounts }, voucherApplied: false },
+          { ...dom, settled: pendingReadCount() === 0 });
+          if (memberSportsRead !== current || memberSportsIdentity !== identity || current.generation !== mutationGeneration ||
+              current.documentSequence !== mainDocumentSequence || current.readSequence !== latestBrowserJsonRead || pendingReadCount())
+            throw new Error("UNSETTLED_RESULTS");
+          if (verified.status !== "VERIFIED") throw new Error(`MEMBERSPORTS_${verified.reason}`);
+          return { venue: recipe.source.venueName, date: input.date, complete: true, empty: verified.emptyVerified, players: input.players, duration: undefined,
+            settlementProof: createHash("sha256").update(JSON.stringify({ dom, metadata: [...memberSportsMetadata],
+              documentSequence: current.documentSequence, readSequence: current.readSequence })).digest("hex"),
+            rows: verified.slots.map(slot => ({ startsAt: `${String(Math.floor(slot.minute / 60)).padStart(2, "0")}:${String(slot.minute % 60).padStart(2, "0")}`,
+              availableSpots: slot.availableSpots, minimumPlayers: slot.minimumPlayers, ...(slot.roundHoles ? { holes: slot.roundHoles } : {}), productId: slot.sourceId })) };
+        }
         const current = browserJson;
         if (!current || current.generation !== mutationGeneration || current.documentSequence !== mainDocumentSequence ||
             current.readSequence !== latestBrowserJsonRead) throw new Error("AVAILABILITY_RESPONSE_UNCONFIRMED");
@@ -866,7 +959,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
     terminalFailure = !providerThrottled && (activity.stepIndex !== undefined || !failure) ? terminalDiagnostic : undefined;
     const message = error instanceof Error ? error.message : "";
     const reason = providerThrottled ? "PROVIDER_THROTTLED" : /^[A-Z_0-9]{1,80}$/u.test(message) ? message : terminalDiagnostic.code;
-    return fail(reason === "ACCESS_REQUIRED" ? "ACCESS_REQUIRED" : reason.startsWith("BROWSER_JSON_") || ["INVALID_SLOT_TIME", "AMBIGUOUS_OR_INVALID_LOCAL_TIME", "INCOMPLETE_COLLECTION", "INVALID_CAPACITY_OR_DURATION", "UNSETTLED_REQUESTS", "AMBIGUOUS_PROOF_FIELD", "RESOURCE_IDENTITY_MISMATCH", "AMBIGUOUS_RESOURCE_SCOPE", "INVALID_RESOURCE_SCOPE", "RESOURCE_SCOPE_NOT_CARD", "AVAILABILITY_RESPONSE_UNCONFIRMED", "AVAILABILITY_RESPONSE_FAILED", "UNVERIFIED_CLIENT_DURATION", "DURATION_PROOF_MISMATCH", "UNVERIFIED_PUBLIC_CATALOG_TILE", "PUBLIC_CATALOG_SELECTION_UNCONFIRMED"].includes(reason) ? "INCOMPLETE" : "FAILED",
+    return fail(reason === "ACCESS_REQUIRED" ? "ACCESS_REQUIRED" : reason.startsWith("BROWSER_JSON_") || reason.startsWith("MEMBERSPORTS_") || ["OFFICIAL_BOOKING_IDENTITY_UNVERIFIED", "INVALID_SLOT_TIME", "AMBIGUOUS_OR_INVALID_LOCAL_TIME", "INCOMPLETE_COLLECTION", "INVALID_CAPACITY_OR_DURATION", "UNSETTLED_REQUESTS", "AMBIGUOUS_PROOF_FIELD", "RESOURCE_IDENTITY_MISMATCH", "AMBIGUOUS_RESOURCE_SCOPE", "INVALID_RESOURCE_SCOPE", "RESOURCE_SCOPE_NOT_CARD", "AVAILABILITY_RESPONSE_UNCONFIRMED", "AVAILABILITY_RESPONSE_FAILED", "UNVERIFIED_CLIENT_DURATION", "DURATION_PROOF_MISMATCH", "UNVERIFIED_PUBLIC_CATALOG_TILE", "PUBLIC_CATALOG_SELECTION_UNCONFIRMED"].includes(reason) ? "INCOMPLETE" : "FAILED",
       reason);
   } finally { cancellation.abort("EXECUTION_FINISHED"); requestQueue.dispose(); await browser?.close().catch(() => {}); await nativeProxy?.close(); }
 }
