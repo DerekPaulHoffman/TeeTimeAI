@@ -1157,13 +1157,14 @@ describe("native anonymous Mindbody bootstrap ownership", () => {
   const network = (test: Test, changes: object = {}) => test.events.get("Network.requestWillBeSent")!({ requestId: "network-bootstrap", loaderId: "loader-post", frameId: "main", type: "Document",
     request: { url: target, method: "POST", headers, hasPostData: true, postData: body }, ...changes });
   const post = (test: Test, changes: object = {}) => test.request("bootstrap", { resourceType: "Document", request: { url: target, method: "POST", headers, hasPostData: true, postData: body }, ...changes });
-  const prepare = async (test: Test, commit = true, ack?: ReturnType<typeof deferred<object>>) => {
+  const prepare = async (test: Test, commit = true, ack?: ReturnType<typeof deferred<object>>, method = "GET", sourceBody?: string) => {
     const send = test.cdp.send.getMockImplementation()!;
     if (ack) test.cdp.send.mockImplementation((name, values) => name === "Fetch.continueResponse" && values?.requestId === "document" ? ack.promise : send(name, values));
     await test.guard.beginDocumentNavigation(test.main as never);
-    test.events.get("Network.requestWillBeSent")!({ requestId: "network-document", loaderId: "loader-source", frameId: "main", type: "Document", request: { url: source, method: "GET", headers: {} } });
-    test.request("document", { resourceType: "Document", request: { url: source, method: "GET", headers: {} } }); await test.routes[0].continue();
-    test.response("document", { resourceType: "Document", request: { url: source, method: "GET", headers: {} }, responseHeaders: [{ name: "Content-Type", value: "text/html" }] });
+    const sourceRequest = { url: source, method, headers: {}, ...(sourceBody === undefined ? {} : { hasPostData: true, postData: sourceBody }) };
+    test.events.get("Network.requestWillBeSent")!({ requestId: "network-document", loaderId: "loader-source", frameId: "main", type: "Document", request: sourceRequest });
+    test.request("document", { resourceType: "Document", request: sourceRequest }); await test.routes[0].continue();
+    test.response("document", { resourceType: "Document", request: sourceRequest, responseHeaders: [{ name: "Content-Type", value: "text/html" }] });
     if (!ack) await test.routes[0].request().response();
     else await vi.waitFor(() => expect(test.cdp.send.mock.calls.some(([name]) => name === "Fetch.continueResponse")).toBe(true));
     if (commit) test.events.get("Page.frameNavigated")!({ frame: { id: "main", loaderId: "loader-source", url: source } });
@@ -1246,6 +1247,25 @@ describe("native anonymous Mindbody bootstrap ownership", () => {
       ack.resolve({}); await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce()); expect(test.routes).toHaveLength(1);
       expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "bootstrap")).toBe(false);
     } finally { ack.resolve({}); await test.guard.close(); }
+  });
+  it.each(["target query", "source method", "source body", "current URL"] as const)("retains the rejected callback facts even without an intent: %s", async mode => {
+    const test = await installed(), attemptedTarget = mode === "target query" ? target + "?studioid=685163" : target;
+    try {
+      await prepare(test, true, undefined, mode === "source method" ? "HEAD" : "GET", mode === "source body" ? "" : undefined);
+      if (mode === "current URL") test.events.get("Page.navigatedWithinDocument")!({ frameId: "main", url: source + "&extra=1" });
+      intent(test, { url: attemptedTarget });
+      network(test, { request: { url: attemptedTarget, method: "POST", headers, hasPostData: true, postData: body } });
+      post(test, { request: { url: attemptedTarget, method: "POST", headers, hasPostData: true, postData: body } });
+      await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce()); expect(test.routes).toHaveLength(1);
+      expect(test.guard.firstFatal).toMatchObject({ documentIntentKind: "NONE", documentIntentStatus: "PUBLIC_SOURCE_NOT_ELIGIBLE",
+        intentCallbackSourceIsGet: mode !== "source method", intentCallbackSourceBodyAbsent: mode !== "source body", intentCallbackSourceUrlCurrent: mode !== "current URL",
+        intentCallbackSourceBinding: mode === "target query" ? "TARGET" : mode === "current URL" ? "SOURCE_QUERY_COUNT" : "VALID",
+        intentCallbackKnownSourceEndpoint: true, intentCallbackSourceQueryCount: mode === "current URL" ? 3 : 2,
+        intentCallbackTargetOriginMatches: true, intentCallbackTargetPathMatches: true, intentCallbackTargetQueryPresent: mode === "target query", intentCallbackTargetFragmentPresent: false,
+        intentCallbackTargetQueryCount: mode === "target query" ? 1 : 0,
+        intentCallbackTargetQuery: mode === "target query" ? [{ key: "studioid", occurrences: 1, canonicalKeys: true, valueClasses: ["MATCHES_SOURCE_STUDIO"] }] : [] });
+      expect(JSON.stringify(test.guard.firstFatal?.intentCallbackTargetQuery)).not.toContain("685163");
+    } finally { await test.guard.close(); }
   });
   it("keeps POST document redirects including 303 denied", async () => {
     const test = await installed();

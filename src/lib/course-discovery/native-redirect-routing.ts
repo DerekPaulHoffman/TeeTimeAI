@@ -1,6 +1,7 @@
 import type { Frame, Page, Response, Route } from "@playwright/test";
 import { isNonEvidenceBrowserResource } from "@/lib/automation/passfactory-public-read-policy";
-import { isMindbodyClassicPublicBootstrapPost, mindbodyClassicPublicBootstrapSource, mindbodyClassicPublicBootstrapPostDiagnostic, type MindbodyClassicBootstrapPostOutcome } from "@/lib/automation/mindbody-public-read-policy";
+import { isMindbodyClassicPublicBootstrapPost, mindbodyClassicPublicBootstrapSource, mindbodyClassicPublicBootstrapPostDiagnostic, mindbodyClassicPublicBootstrapSourceDiagnostic, mindbodyClassicBootstrapUrlDiagnostic,
+  type MindbodyClassicBootstrapPostOutcome, type MindbodyClassicBootstrapSourceOutcome, type MindbodyClassicBootstrapQueryCount, type MindbodyClassicBootstrapQueryRow } from "@/lib/automation/mindbody-public-read-policy";
 import { canonicalPublicReadUrl } from "./public-request-url";
 import { PUBLIC_BROWSER_TOTAL_BYTES, publicBrowserResponseLimit } from "./browser-resource-limits";
 import { isSafeBrowserAssetUrl, isSafeRecipeUrl } from "./recipe";
@@ -38,6 +39,11 @@ export type NativeRequestDiagnostic = {
   intentSourceIsGet?: boolean; intentSourceBodyAbsent?: boolean; intentSourceHtml?: boolean;
   intentSourceUrlCurrent?: boolean; intentSourceBindingValid?: boolean; intentRevisionFresh?: boolean; intentWithinDeadline?: boolean;
   fetchBootstrapPolicy?: MindbodyClassicBootstrapPostOutcome; networkBootstrapPolicy?: MindbodyClassicBootstrapPostOutcome;
+  intentCallbackSourceIsGet?: boolean; intentCallbackSourceBodyAbsent?: boolean; intentCallbackSourceUrlCurrent?: boolean;
+  intentCallbackSourceBinding?: MindbodyClassicBootstrapSourceOutcome;
+  intentCallbackKnownSourceEndpoint?: boolean; intentCallbackSourceQueryCount?: MindbodyClassicBootstrapQueryCount;
+  intentCallbackTargetOriginMatches?: boolean; intentCallbackTargetPathMatches?: boolean; intentCallbackTargetQueryPresent?: boolean; intentCallbackTargetFragmentPresent?: boolean;
+  intentCallbackTargetQueryCount?: MindbodyClassicBootstrapQueryCount; intentCallbackTargetQuery?: MindbodyClassicBootstrapQueryRow[];
 };
 export type NativeFirstFatal = NativeRequestDiagnostic;
 export type NativeRedirectRouting = {
@@ -230,6 +236,8 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
   let committedDocument: CommittedDocument | undefined, documentIntent: DocumentIntent | undefined;
   // Last root navigation callback outcome only; never consulted for authority.
   let documentIntentStatus: NonNullable<NativeRequestDiagnostic["documentIntentStatus"]> = "NO_EVENT";
+  let documentIntentCallback: { sourceUrl: string; targetUrl: string; sourceIsGet: boolean; sourceBodyAbsent: boolean; sourceUrlCurrent: boolean;
+    sourceBinding: MindbodyClassicBootstrapSourceOutcome } | undefined;
   let currentDocumentUrl = "";
   const owner: NativeRecordOwner = { closed: false };
   type HeaderContext = { document: RecordEntry; loader: object; scope: ReturnType<typeof createPublicClientReadHeaderScope> };
@@ -483,6 +491,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
   cdp.on("Page.frameRequestedNavigation", event => {
     if (event.frameId !== rootFrameId) return;
     documentIntent = undefined;
+    documentIntentCallback = undefined;
     documentIntentStatus = !committedDocument ? "NO_COMMITTED_SOURCE" :
       !generationTracking || closed || boundaryPending || awaitingDocument || committedDocument.record.generation !== generation || generation.retired || committedDocument.record.failed
         ? "SOURCE_NOT_CURRENT" : "NAVIGATION_NOT_ELIGIBLE";
@@ -490,6 +499,10 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
       committedDocument.record.generation !== generation || generation.retired || committedDocument.record.failed ||
       !["scriptInitiated", "formSubmissionPost"].includes(event.reason) || event.disposition !== "currentTab" || typeof event.url !== "string" || event.url.length > 2048) return;
     documentIntentStatus = "PUBLIC_SOURCE_NOT_ELIGIBLE";
+    if (event.reason === "formSubmissionPost") documentIntentCallback = { sourceUrl: currentDocumentUrl, targetUrl: event.url,
+      sourceIsGet: committedDocument.record.method === "GET", sourceBodyAbsent: committedDocument.record.body === null,
+      sourceUrlCurrent: currentDocumentUrl === committedDocument.record.transportUrl,
+      sourceBinding: mindbodyClassicPublicBootstrapSourceDiagnostic(currentDocumentUrl, event.url) };
     if (event.reason === "formSubmissionPost" && (committedDocument.record.method !== "GET" || committedDocument.record.body !== null ||
         currentDocumentUrl !== committedDocument.record.transportUrl || !mindbodyClassicPublicBootstrapSource(currentDocumentUrl, event.url))) return;
     // This private one-use event binds ownership, never navigation permission.
@@ -794,6 +807,15 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
           const intent = documentIntent;
           const bootstrapDiagnostic: Partial<NativeRequestDiagnostic> = {};
           if (kind === "document" && event.request.method === "POST") {
+            if (documentIntentCallback) {
+              const callback = documentIntentCallback, url = mindbodyClassicBootstrapUrlDiagnostic(callback.sourceUrl, callback.targetUrl, event.request.postData);
+              Object.assign(bootstrapDiagnostic, { intentCallbackSourceIsGet: callback.sourceIsGet, intentCallbackSourceBodyAbsent: callback.sourceBodyAbsent,
+                intentCallbackSourceUrlCurrent: callback.sourceUrlCurrent, intentCallbackSourceBinding: callback.sourceBinding,
+                intentCallbackKnownSourceEndpoint: url.knownSourceEndpoint, intentCallbackSourceQueryCount: url.sourceQueryCount,
+                intentCallbackTargetOriginMatches: url.targetOriginMatches, intentCallbackTargetPathMatches: url.targetPathMatches,
+                intentCallbackTargetQueryPresent: url.targetQueryPresent, intentCallbackTargetFragmentPresent: url.targetFragmentPresent,
+                intentCallbackTargetQueryCount: url.targetQueryCount, intentCallbackTargetQuery: url.targetQuery });
+            }
             Object.assign(bootstrapDiagnostic, {
               documentIntentKind: !intent ? "NONE" : intent.reason === "formSubmissionPost" ? "PUBLIC_FORM_POST" : "SCRIPT_GET",
               documentIntentStatus,

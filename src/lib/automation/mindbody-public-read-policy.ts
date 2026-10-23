@@ -88,17 +88,68 @@ const classicBootstrapFields = ["tg", "vt", "lvl", "stype", "qParam", "view", "t
 
 /** Pure URL binding. Only a current, completed native document can attest it. */
 export function mindbodyClassicPublicBootstrapSource(sourceUrl: string, targetUrl: string): { studioId: string } | null {
+  if (mindbodyClassicPublicBootstrapSourceDiagnostic(sourceUrl, targetUrl) !== "VALID") return null;
+  return { studioId: new URL(sourceUrl).searchParams.get("studioid")! };
+}
+
+export const mindbodyClassicBootstrapSourceOutcomes = ["VALID", "URL_PARSE", "SOURCE_ORIGIN", "SOURCE_PATH", "SOURCE_QUERY_COUNT", "SOURCE_QUERY_KEYS", "SOURCE_QUERY_VALUES", "TARGET"] as const;
+export type MindbodyClassicBootstrapSourceOutcome = typeof mindbodyClassicBootstrapSourceOutcomes[number];
+
+/** Identical binding conditions, projected only as a closed failure category. */
+export function mindbodyClassicPublicBootstrapSourceDiagnostic(sourceUrl: string, targetUrl: string): MindbodyClassicBootstrapSourceOutcome {
   try {
     const source = new URL(sourceUrl), target = new URL(targetUrl);
-    if (source.protocol !== "https:" || source.hostname !== "clients.mindbodyonline.com" || source.username || source.password || source.port ||
-        source.pathname !== "/classic/ws" || source.hash || target.href !== "https://clients.mindbodyonline.com/classic/home") return null;
+    if (source.protocol !== "https:" || source.hostname !== "clients.mindbodyonline.com" || source.username || source.password || source.port) return "SOURCE_ORIGIN";
+    if (source.pathname !== "/classic/ws" || source.hash) return "SOURCE_PATH";
+    if (target.href !== "https://clients.mindbodyonline.com/classic/home") return "TARGET";
     const parts = source.search.slice(1).split("&");
     // Require literal keys/values: percent aliases and duplicate keys cannot
     // borrow the public source's routing identity.
-    if (parts.length !== 2 || !parts.every(part => /^(?:studioid=[1-9]\d{0,9}|stype=-9)$/u.test(part)) ||
-        source.searchParams.getAll("studioid").length !== 1 || source.searchParams.getAll("stype").length !== 1) return null;
-    return { studioId: source.searchParams.get("studioid")! };
-  } catch { return null; }
+    if (parts.length !== 2) return "SOURCE_QUERY_COUNT";
+    if (!parts.every(part => /^(?:studioid|stype)=/u.test(part)) ||
+        source.searchParams.getAll("studioid").length !== 1 || source.searchParams.getAll("stype").length !== 1) return "SOURCE_QUERY_KEYS";
+    if (!parts.every(part => /^(?:studioid=[1-9]\d{0,9}|stype=-9)$/u.test(part))) return "SOURCE_QUERY_VALUES";
+    return "VALID";
+  } catch { return "URL_PARSE"; }
+}
+
+export type MindbodyClassicBootstrapQueryCount = number | "OVER_LIMIT";
+export type MindbodyClassicBootstrapQueryRow = { key: "studioid" | "studioId" | "stype" | "trn" | "classid" | "date" | "OTHER"; occurrences: number; canonicalKeys: boolean;
+  valueClasses: Array<"EMPTY" | "MATCHES_SOURCE_STUDIO" | "PUBLIC_STYPE_MINUS_NINE" | "ZERO" | "ONE" | "TRUE" | "FALSE" | "MATCHES_BODY_DATE" | "PUBLIC_CALENDAR_DATE" | "NONEMPTY" | "OTHER"> };
+
+/** Safe observations of an attempted callback URL. Unknown names and every
+ * original value stay private, including a query on a rejected target. */
+export function mindbodyClassicBootstrapUrlDiagnostic(sourceUrl: string, targetUrl: string, body?: string) {
+  const count = (size: number): MindbodyClassicBootstrapQueryCount => size <= 32 ? size : "OVER_LIMIT";
+  const result = { knownSourceEndpoint: false, sourceQueryCount: count(0), targetOriginMatches: false, targetPathMatches: false,
+    targetQueryPresent: false, targetFragmentPresent: false, targetQueryCount: count(0), targetQuery: [] as MindbodyClassicBootstrapQueryRow[] };
+  let source: URL, target: URL;
+  try { source = new URL(sourceUrl); target = new URL(targetUrl); } catch { return result; }
+  result.knownSourceEndpoint = source.origin === "https://clients.mindbodyonline.com" && source.pathname === "/classic/ws";
+  result.sourceQueryCount = count([...source.searchParams].length);
+  result.targetOriginMatches = target.origin === "https://clients.mindbodyonline.com" && !target.username && !target.password;
+  result.targetPathMatches = target.pathname === "/classic/home";
+  result.targetQueryPresent = target.href.includes("?"); result.targetFragmentPresent = target.href.includes("#");
+  const entries = [...target.searchParams]; result.targetQueryCount = count(entries.length);
+  if (entries.length > 32) return result;
+  const studio = source.searchParams.get("studioid"), bodyDate = typeof body === "string" && Buffer.byteLength(body) <= 32768 ? new URLSearchParams(body).get("date") : null;
+  const allowed = ["studioid", "studioId", "stype", "trn", "classid", "date"] as const;
+  const rows = new Map<MindbodyClassicBootstrapQueryRow["key"], MindbodyClassicBootstrapQueryRow>();
+  for (const [name, value] of entries) {
+    const key = (allowed as readonly string[]).includes(name) ? name as typeof allowed[number] : "OTHER";
+    let row = rows.get(key);
+    if (!row) { row = { key, occurrences: 0, canonicalKeys: key !== "OTHER", valueClasses: [] }; rows.set(key, row); }
+    row.occurrences++;
+    const rawMatches = target.search.slice(1).split("&").filter(part => part.startsWith(`${name}=`)).length;
+    row.canonicalKeys = row.canonicalKeys && rawMatches === target.searchParams.getAll(name).length;
+    const category: MindbodyClassicBootstrapQueryRow["valueClasses"][number] = key === "OTHER" ? "OTHER" : value === "" ? "EMPTY" :
+      (key === "studioid" || key === "studioId") && studio !== null && /^[1-9]\d{0,9}$/u.test(studio) && value === studio ? "MATCHES_SOURCE_STUDIO" :
+        key === "stype" && value === "-9" && source.searchParams.get("stype") === "-9" ? "PUBLIC_STYPE_MINUS_NINE" :
+          key === "date" && publicUsCalendarDate(value) ? value === bodyDate ? "MATCHES_BODY_DATE" : "PUBLIC_CALENDAR_DATE" :
+            value === "0" ? "ZERO" : value === "1" ? "ONE" : value === "true" ? "TRUE" : value === "false" ? "FALSE" : "NONEMPTY";
+    if (!row.valueClasses.includes(category)) row.valueClasses.push(category);
+  }
+  result.targetQuery = [...rows.values()]; return result;
 }
 
 function publicUsCalendarDate(value: string) {

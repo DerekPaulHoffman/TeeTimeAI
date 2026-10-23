@@ -2,7 +2,8 @@
 import { describe, expect, it } from "vitest";
 import { existsSync } from "node:fs";
 import { chromium } from "@playwright/test";
-import { addVerifiedMindbodyReadHeaders, isMindbodyPublicReadPost, MINDBODY_PUBLIC_READ_ACTIONS, isMindbodyClassicPublicBootstrapPost, mindbodyClassicPublicBootstrapSource, mindbodyClassicPublicBootstrapPostDiagnostic, mindbodyClassicBootstrapPostOutcomes } from "./mindbody-public-read-policy";
+import { addVerifiedMindbodyReadHeaders, isMindbodyPublicReadPost, MINDBODY_PUBLIC_READ_ACTIONS, isMindbodyClassicPublicBootstrapPost, mindbodyClassicPublicBootstrapSource, mindbodyClassicPublicBootstrapPostDiagnostic, mindbodyClassicBootstrapPostOutcomes,
+  mindbodyClassicPublicBootstrapSourceDiagnostic, mindbodyClassicBootstrapSourceOutcomes, mindbodyClassicBootstrapUrlDiagnostic } from "./mindbody-public-read-policy";
 import { isAnonymousBrowserReadPost } from "./simulator-interactive-browser";
 
 // Captured with unknown POSTs blocked before transmission. The public client
@@ -77,6 +78,38 @@ describe("Mindbody anonymous classic display bootstrap", () => {
       expect(diagnostic).toBe(value.outcome); expect(allows(body, sourceUrl, target, h)).toBe(diagnostic === "VALID");
       expect(JSON.stringify(diagnostic)).not.toContain("private-");
     }
+  });
+  it("classifies every source binding condition without admitting a queried target", () => {
+    const cases: Array<[typeof mindbodyClassicBootstrapSourceOutcomes[number], string, string]> = [
+      ["VALID", entry, target], ["URL_PARSE", "not-url", target], ["SOURCE_ORIGIN", entry.replace("https:", "http:"), target],
+      ["SOURCE_PATH", entry.replace("/ws?", "/other?"), target], ["SOURCE_QUERY_COUNT", entry + "&extra=1", target],
+      ["SOURCE_QUERY_KEYS", entry.replace("studioid=", "studio%69d="), target], ["SOURCE_QUERY_VALUES", entry.replace("-9", "-8"), target],
+      ["TARGET", entry, target + "?studioid=685163"],
+    ];
+    expect(cases.map(([outcome]) => outcome)).toEqual(mindbodyClassicBootstrapSourceOutcomes);
+    for (const [outcome, sourceUrl, targetUrl] of cases) {
+      expect(mindbodyClassicPublicBootstrapSourceDiagnostic(sourceUrl, targetUrl)).toBe(outcome);
+      expect(mindbodyClassicPublicBootstrapSource(sourceUrl, targetUrl) !== null).toBe(outcome === "VALID");
+    }
+    expect(mindbodyClassicPublicBootstrapSource(entry.replace("studioid=685163&stype=-9", "stype=-9&studioid=685163"), target)).not.toBeNull();
+  });
+  it("projects only closed target routing categories, canonical keys and bounded counts", () => {
+    const url = target + "?studioid=685163&stype=-9&trn=0&classid=0&date=10%2F23%2F2026&privateQueryName=privateValue";
+    const diagnostic = mindbodyClassicBootstrapUrlDiagnostic(entry, url, form().toString());
+    expect(diagnostic).toMatchObject({ knownSourceEndpoint: true, sourceQueryCount: 2, targetOriginMatches: true, targetPathMatches: true,
+      targetQueryPresent: true, targetFragmentPresent: false, targetQueryCount: 6 });
+    expect(diagnostic.targetQuery).toEqual([
+      { key: "studioid", occurrences: 1, canonicalKeys: true, valueClasses: ["MATCHES_SOURCE_STUDIO"] },
+      { key: "stype", occurrences: 1, canonicalKeys: true, valueClasses: ["PUBLIC_STYPE_MINUS_NINE"] },
+      { key: "trn", occurrences: 1, canonicalKeys: true, valueClasses: ["ZERO"] },
+      { key: "classid", occurrences: 1, canonicalKeys: true, valueClasses: ["ZERO"] },
+      { key: "date", occurrences: 1, canonicalKeys: true, valueClasses: ["MATCHES_BODY_DATE"] },
+      { key: "OTHER", occurrences: 1, canonicalKeys: false, valueClasses: ["OTHER"] },
+    ]);
+    for (const raw of ["685163", "10/23/2026", "privateQueryName", "privateValue"]) expect(JSON.stringify(diagnostic)).not.toContain(raw);
+    expect(mindbodyClassicBootstrapUrlDiagnostic(entry, target + "?%73tudioid=685163").targetQuery).toEqual([{ key: "studioid", occurrences: 1, canonicalKeys: false, valueClasses: ["MATCHES_SOURCE_STUDIO"] }]);
+    expect(mindbodyClassicBootstrapUrlDiagnostic(entry, target + "?" + Array(33).fill("private=private").join("&"))).toMatchObject({ targetQueryCount: "OVER_LIMIT", targetQuery: [] });
+    expect(mindbodyClassicBootstrapUrlDiagnostic(entry, target + "#private").targetFragmentPresent).toBe(true);
   });
 });
 
