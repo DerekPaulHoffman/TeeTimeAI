@@ -122,6 +122,7 @@ export function bindDiscoveryRecipeIdentity(recipe, job, adapterObservation, con
   if (adapter) {
     delete adapter.officialIdentityProof;
     delete adapter.officialBookingSourceProof;
+    delete adapter.officialPostalConflictProof;
     const observed = adapterObservation?.adapter;
     if (adapter.family === "TEEITUP" && observed?.family === "TEEITUP" && observed.alias === adapter.alias &&
         adapterObservation.jobId === job.id && adapterObservation.officialUrl === job.request.identity.officialUrl && adapterObservation.bookingUrl === proposedSource.bookingUrl &&
@@ -139,7 +140,7 @@ export function bindDiscoveryRecipeIdentity(recipe, job, adapterObservation, con
         adapterObservation.contextUrl === contextUrl && contextUrl === proposedSource.bookingUrl &&
         adapterObservation.identityKey === canonicalDataKey(job.request.identity) && adapterObservation.targetKey === canonicalDataKey(job.request.target) &&
         adapterObservation.inputKey === canonicalDataKey(job.request.input) && job.request.target.kind === "OUTDOOR") {
-      const inspected = { ...observed }; delete inspected.officialIdentityProof; delete inspected.officialBookingSourceProof;
+      const inspected = { ...observed }; delete inspected.officialIdentityProof; delete inspected.officialBookingSourceProof; delete inspected.officialPostalConflictProof;
       const proof = observed.officialBookingSourceProof;
       if (canonicalDataKey(inspected) === canonicalDataKey(adapter) && proof && typeof proof === "object" && !Array.isArray(proof) &&
           proof.kind === "OFFICIAL_BOOKING_SOURCE" && proof.officialUrl === job.request.identity.officialUrl && proof.bookingSourceUrl === proposedSource.bookingUrl &&
@@ -149,6 +150,22 @@ export function bindDiscoveryRecipeIdentity(recipe, job, adapterObservation, con
           proof.timeZone === job.request.input.timeZone && proof.providerAddressVerified === false) {
         try { const serialized = JSON.stringify(proof); if (Buffer.byteLength(serialized, "utf8") <= 16_000) adapter.officialBookingSourceProof = JSON.parse(serialized); }
         catch { /* This process's fresh inspection is the only source of the copied proof. */ }
+      }
+    }
+    if (adapter.family === "TEEITUP" && observed?.family === "TEEITUP" && adapterObservation.jobId === job.id &&
+        adapterObservation.officialUrl === job.request.identity.officialUrl && adapterObservation.bookingUrl === proposedSource.bookingUrl &&
+        adapterObservation.contextUrl === contextUrl && adapterObservation.identityKey === canonicalDataKey(job.request.identity) &&
+        adapterObservation.targetKey === canonicalDataKey(job.request.target) && adapterObservation.inputKey === canonicalDataKey(job.request.input) &&
+        job.request.target.kind === "OUTDOOR") {
+      const inspected = { ...observed }; delete inspected.officialIdentityProof; delete inspected.officialBookingSourceProof; delete inspected.officialPostalConflictProof;
+      const proof = observed.officialPostalConflictProof;
+      if (canonicalDataKey(inspected) === canonicalDataKey(adapter) && proof?.kind === "OFFICIAL_POSTAL_CONFLICT" &&
+          proof.officialUrl === job.request.identity.officialUrl && proof.officialSourceProof?.bookingUrl === proposedSource.bookingUrl &&
+          [proof.officialSourceProof?.officialPageUrl, proposedSource.bookingUrl].includes(contextUrl) && proof.alias === adapter.alias &&
+          adapter.facilityIds?.length === 1 && proof.facilityId === adapter.facilityIds[0] &&
+          proof.canonicalAddress === job.request.identity.address && proof.timeZone === job.request.input.timeZone && proof.providerAddressVerified === false) {
+        try { const serialized = JSON.stringify(proof); if (Buffer.byteLength(serialized, "utf8") <= 16_000) adapter.officialPostalConflictProof = JSON.parse(serialized); }
+        catch { /* Only current controller inspection can confer this proof. */ }
       }
     }
   }

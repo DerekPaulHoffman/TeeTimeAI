@@ -14,7 +14,7 @@ export const teeItUpOfficialIdentityProofSchema = z.object({ kind: z.literal("OF
 export type TeeItUpOfficialIdentityProof = z.infer<typeof teeItUpOfficialIdentityProofSchema>;
 export type OfficialIdentitySource = { officialUrl?: string; bookingUrl: string; venueName: string; venueAddress?: string; timeZone: string };
 export type OfficialIdentityPage = { url: string; html: string; visibleEvidence?: {
-  title: string; headings: string[]; linkUrls: string[]; addressTexts: string[];
+  title: string; headings: string[]; linkUrls: string[]; addressTexts: string[]; phoneTexts?: string[];
 } };
 type Node = DefaultTreeAdapterMap["node"];
 type Element = DefaultTreeAdapterMap["element"];

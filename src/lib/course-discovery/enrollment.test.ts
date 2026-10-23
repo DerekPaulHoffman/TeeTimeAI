@@ -67,6 +67,25 @@ describe("atomic ordinary-alert pilot enrollment", () => {
     expect(await enrollDiscoveryPilotInTransaction(replacement.tx, search("replacement"), env)).toBe(false); replacement.release();
     expect(db.rows).toHaveLength(1);
   });
+  it("retains old enrollment receipts and independently bounds an explicitly named new experiment", async () => {
+    const db = database();
+    const candidates = [search("old-a", "a"), search("old-b", "b"),
+      { ...search("old-c", "venue"), mode: "SIMULATOR", preferences: [{ courseId: "venue", offeringId: "c" }] }];
+    const enroll = async (candidate: typeof candidates[number], settings: typeof env & { COURSE_DISCOVERY_PILOT_RUN_ID?: string }) => {
+      const tx = db.transaction();
+      try { return await enrollDiscoveryPilotInTransaction(tx.tx, candidate, settings); } finally { tx.release(); }
+    };
+    for (const candidate of candidates) expect(await enroll(candidate, env)).toBe(true);
+    const oldReceipts = structuredClone(db.rows);
+    expect(await enroll(search("deleted-replacement"), env)).toBe(false);
+    const next = { ...env, COURSE_DISCOVERY_PILOT_RUN_ID: "sol-replay-20261023-1" };
+    expect(await enroll(candidates[0], next)).toBe(false);
+    for (const candidate of candidates) expect(await enroll({ ...candidate, id: candidate.id.replace("old-", "new-") }, next)).toBe(true);
+    expect(await enroll(search("fourth"), next)).toBe(false);
+    expect(db.rows.slice(0, 3)).toEqual(oldReceipts);
+    expect(db.rows.slice(3).map(row => row.slot)).toEqual([1, 2, 3]);
+    expect(new Set(db.rows.map(row => row.cohortId)).size).toBe(2);
+  });
   it("retains the legacy explicit-ID rollout rather than opening another auto cohort", async () => {
     const db = database(); const tx = db.transaction();
     expect(await enrollDiscoveryPilotInTransaction(tx.tx, search("first"), { ...env, COURSE_DISCOVERY_PILOT_SEARCH_IDS: "legacy" })).toBe(false);

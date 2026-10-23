@@ -10,7 +10,7 @@ export function discoveryPilotSearchIds(env: NodeJS.ProcessEnv = process.env): s
   return [...new Set(values)];
 }
 
-export type AutomaticDiscoveryPilot = { ownerUserId: string; targetKeys: string[]; cohortId: string };
+export type AutomaticDiscoveryPilot = { ownerUserId: string; targetKeys: string[]; cohortId: string; runId?: string };
 export type DiscoveryPilotTargetSearch = { mode: string; preferences: Array<{
   courseId: string; offeringId?: string | null; course?: { googlePlaceId: string | null } | null;
 }> };
@@ -19,11 +19,15 @@ export type DiscoveryPilotTargetSearch = { mode: string; preferences: Array<{
 export function automaticDiscoveryPilot(env: NodeJS.ProcessEnv = process.env): AutomaticDiscoveryPilot | null {
   if (env.COURSE_DISCOVERY_ENABLED !== "true" || env.COURSE_DISCOVERY_PILOT_SEARCH_IDS?.trim()) return null;
   const ownerUserId = env.COURSE_DISCOVERY_PILOT_OWNER_USER_ID?.trim() ?? "";
+  const runId = env.COURSE_DISCOVERY_PILOT_RUN_ID?.trim() ?? "";
   const targetKeys = (env.COURSE_DISCOVERY_PILOT_TARGET_KEYS ?? "").split(",").map(value => value.trim()).filter(Boolean).sort();
+  if (runId && !/^[a-z0-9][a-z0-9-]{0,63}$/u.test(runId)) return null;
   if (!/^[A-Za-z0-9_-]{1,128}$/u.test(ownerUserId) || targetKeys.length !== 3 || new Set(targetKeys).size !== 3 ||
     targetKeys.some(key => !/^(?:(?:course|offering):[A-Za-z0-9_-]{1,128}|place:[A-Za-z0-9_-]{1,256}:(?:OUTDOOR|SIMULATOR))$/u.test(key))) return null;
-  const cohortId = createHash("sha256").update(JSON.stringify({ ownerUserId, targetKeys })).digest("hex");
-  return { ownerUserId, targetKeys, cohortId };
+  // An operator may name a new, separately recorded three-alert experiment.
+  // Omit the property entirely for existing deployments to retain their hash.
+  const cohortId = createHash("sha256").update(JSON.stringify({ ownerUserId, targetKeys, ...(runId ? { runId } : {}) })).digest("hex");
+  return { ownerUserId, targetKeys, cohortId, ...(runId ? { runId } : {}) };
 }
 
 async function readerOrDefault(reader?: PilotReader): Promise<PilotReader> {

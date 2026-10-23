@@ -1,4 +1,5 @@
 import type { Prisma } from "@prisma/client";
+import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { activeDiscoveryPilotSearchIds, automaticDiscoveryPilot, discoveryPilotSearchIds, isCourseDiscoveryEnabled, isDiscoveryPilotSearch, matchingDiscoveryPilotTargetKey } from "./config";
 
@@ -31,6 +32,18 @@ describe("automatic pilot configuration and enrollment reads", () => {
     expect(automaticDiscoveryPilot(autoEnv)?.cohortId).toBe(automaticDiscoveryPilot({ ...autoEnv,
       COURSE_DISCOVERY_PILOT_TARGET_KEYS: "course:c,course:a,offering:b" })?.cohortId);
     expect(automaticDiscoveryPilot({ ...autoEnv, COURSE_DISCOVERY_PILOT_SEARCH_IDS: "legacy" })).toBeNull();
+  });
+  it("preserves legacy cohort hashes and requires an explicit valid name for a new experiment", () => {
+    const legacy = automaticDiscoveryPilot(autoEnv)!;
+    expect(legacy.cohortId).toBe(createHash("sha256").update(JSON.stringify({ ownerUserId: "owner-1", targetKeys: ["course:a", "course:c", "offering:b"] })).digest("hex"));
+    expect(automaticDiscoveryPilot({ ...autoEnv, COURSE_DISCOVERY_PILOT_RUN_ID: "  " })).toEqual(legacy);
+    const named = automaticDiscoveryPilot({ ...autoEnv, COURSE_DISCOVERY_PILOT_RUN_ID: "sol-replay-20261023-1" })!;
+    expect(named.runId).toBe("sol-replay-20261023-1");
+    expect(named.cohortId).not.toBe(legacy.cohortId);
+    expect(automaticDiscoveryPilot({ ...autoEnv, COURSE_DISCOVERY_PILOT_RUN_ID: named.runId,
+      COURSE_DISCOVERY_PILOT_TARGET_KEYS: "course:c,course:a,offering:b" })).toEqual(named);
+    for (const invalid of ["*", "two runs", "UPPERCASE", "a".repeat(65), "../run"])
+      expect(automaticDiscoveryPilot({ ...autoEnv, COURSE_DISCOVERY_PILOT_RUN_ID: invalid })).toBeNull();
   });
   it("accepts place identities before internal rows exist, bound to the exact search mode", () => {
     const keys = ["place:ChIJ_new_one:OUTDOOR", "place:ChIJ_new_two:SIMULATOR", "place:ChIJ_new_three:OUTDOOR"];

@@ -280,7 +280,7 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
     if (recipe.adapter.family === "USCHEDULE" && recipe.adapter.publicLocationProof && !recipe.source.venueAddress)
       ctx.addIssue({ code: "custom", message: "A public location rental requires canonical venue address context" });
     if (recipe.adapter.family === "TEEITUP" && simulator &&
-        (recipe.adapter.facilityIds.length !== 1 || recipe.adapter.officialIdentityProof || recipe.adapter.officialBookingSourceProof))
+        (recipe.adapter.facilityIds.length !== 1 || recipe.adapter.officialIdentityProof || recipe.adapter.officialBookingSourceProof || recipe.adapter.officialPostalConflictProof))
       ctx.addIssue({ code: "custom", message: "Simulator adapter requires one exact directory identity" });
     return;
   }

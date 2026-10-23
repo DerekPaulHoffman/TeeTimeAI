@@ -928,7 +928,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     discardStaleOfficialIdentity(currentUrl);
     if (!blockedAccess && officialIdentityDocument && sameDiscoveryMainDocument(officialIdentityDocument.url, currentUrl)) {
         const visibleEvidence = await page.evaluate(() => {
-          const headings: string[] = [], linkUrls: string[] = [], addressTexts: string[] = [];
+          const headings: string[] = [], linkUrls: string[] = [], addressTexts: string[] = [], phoneTexts: string[] = [];
           for (const node of Array.from(document.querySelectorAll('h1,h2,a[href],address,p,div,li,td')).slice(0, 3000)) {
             if (!(node instanceof HTMLElement) || node.closest('script,template,noscript,iframe,input,textarea,select,button,[contenteditable],[hidden],[inert],[aria-hidden="true"]') ||
                 node.querySelector('input,textarea,select,button,[contenteditable]')) continue;
@@ -945,9 +945,18 @@ export async function createCourseDiscoveryBrowserSession(input: {
             const value = node.innerText.replace(/\n+/gu, ', ').replace(/\s+/gu, ' ').trim();
             if (/^H[12]$/u.test(node.tagName) && value.length <= 300 && headings.length < 80) headings.push(value);
             if (node instanceof HTMLAnchorElement && linkUrls.length < 120) linkUrls.push(node.href);
+            if (node instanceof HTMLAnchorElement && /^tel:/u.test(node.getAttribute("href") ?? "") && !form && value.length <= 40 && phoneTexts.length < 20) {
+              let context: HTMLElement | null = node, publicContact = true;
+              while (context) {
+                if (/(?:account|member|profile|customer|checkout|payment|billing|corporate|mailing|fax)/iu.test(
+                  ["id", "class", "aria-label", "title", "name"].map(key => context!.getAttribute(key) ?? "").join(" "))) publicContact = false;
+                context = context.parentElement;
+              }
+              if (publicContact) phoneTexts.push(value);
+            }
             if (value.length >= 15 && value.length <= 500 && addressTexts.length < 160 && /\b\d{5}(?:-\d{4})?\b/u.test(value)) addressTexts.push(value);
           }
-          return { title: document.title.slice(0, 500), headings, linkUrls, addressTexts };
+          return { title: document.title.slice(0, 500), headings, linkUrls, addressTexts, phoneTexts };
         });
         officialIdentityPage = { ...officialIdentityDocument, visibleEvidence, observedAt: Date.now() };
     }

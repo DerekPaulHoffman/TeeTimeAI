@@ -3,6 +3,7 @@ import { isUSchedulePublicRentalLabel } from "@/lib/automation/uschedule-public-
 import { whooshSimulatorMetadataSchema } from "./whoosh-simulator-source";
 import { teeItUpOfficialIdentityProofSchema } from "./teeitup-official-identity";
 import { teeItUpOfficialBookingSourceProofSchema } from "./teeitup-official-booking-source";
+import { teeItUpPostalConflictProofSchema } from "./teeitup-postal-conflict-proof";
 import { lightspeedMetadataSchema } from "./lightspeed-source";
 import { ameliaMetadataSchema } from "./amelia-source";
 import { chronogolfMetadataSchema } from "./chronogolf-source";
@@ -26,9 +27,12 @@ export const existingAdapterMetadataSchema = z.discriminatedUnion("family", [
     facilityIds: z.array(numericId).min(1).max(20).refine(ids => new Set(ids).size === ids.length),
     offeringKind: z.literal("SIMULATOR").optional(),
     officialIdentityProof: teeItUpOfficialIdentityProofSchema.optional(),
-    officialBookingSourceProof: teeItUpOfficialBookingSourceProofSchema.optional() }).strict()
+    officialBookingSourceProof: teeItUpOfficialBookingSourceProofSchema.optional(),
+    officialPostalConflictProof: teeItUpPostalConflictProofSchema.optional() }).strict()
     .refine(value => !value.officialBookingSourceProof || !value.officialIdentityProof && !value.offeringKind &&
-      value.alias === value.officialBookingSourceProof.alias && value.facilityIds.length === 1 && value.facilityIds[0] === value.officialBookingSourceProof.facilityId),
+      !value.officialPostalConflictProof && value.alias === value.officialBookingSourceProof.alias && value.facilityIds.length === 1 && value.facilityIds[0] === value.officialBookingSourceProof.facilityId)
+    .refine(value => !value.officialPostalConflictProof || !value.officialIdentityProof && !value.officialBookingSourceProof && !value.offeringKind &&
+      value.alias === value.officialPostalConflictProof.alias && value.facilityIds.length === 1 && value.facilityIds[0] === value.officialPostalConflictProof.facilityId),
   z.object({ family: z.literal("USCHEDULE"), tenant: z.string().regex(/^[a-z][a-z0-9-]{2,62}$/u),
     serviceId: publicId, serviceName: z.string().trim().min(3).max(200), publicLocationProof: uschedulePublicLocationProofSchema.optional() }).strict()
     .refine(value => value.publicLocationProof ? isUScheduleNonMemberRental(value.serviceName) : isUSchedulePublicRentalLabel(value.serviceName),

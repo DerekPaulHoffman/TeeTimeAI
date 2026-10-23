@@ -1,9 +1,10 @@
 import { z } from "zod";
 import { resolveTeeItUpFacilityIdentity } from "@/lib/adapters/teeitup-facility-identity";
 import { isSafeRecipeUrl } from "./recipe";
-import { matchesOfficialFacility, type TeeItUpOfficialIdentityProof } from "./teeitup-official-identity";
+import { fullCourseName, matchesOfficialFacility, type TeeItUpOfficialIdentityProof } from "./teeitup-official-identity";
 import { parseTeeItUpV2PublicSource } from "@/lib/adapters/teeitup-public-source";
 import { bindTeeItUpOfficialBookingFacility, type TeeItUpOfficialBookingSourceProof } from "./teeitup-official-booking-source";
+import { normalizePublicCoursePhone, type TeeItUpPostalConflictProof } from "./teeitup-postal-conflict-proof";
 
 const id = z.number().int().min(1).max(2_147_483_647);
 const facility = z.object({ id, courseId: z.string().min(1).max(128), name: z.string().min(2).max(256),
@@ -48,10 +49,11 @@ export function isTeeItUpRecipeSlotLink(source: string, date: string, allowedIds
 }
 
 export function resolveTeeItUpRecipeFacilities(source: { bookingUrl: string; venueName: string; venueAddress?: string; timeZone: string; officialUrl?: string }, value: unknown, officialProof?: TeeItUpOfficialIdentityProof,
-  offeringKind: "OUTDOOR" | "SIMULATOR" | "AUTO" = "OUTDOOR", bookingProof?: TeeItUpOfficialBookingSourceProof) {
+  offeringKind: "OUTDOOR" | "SIMULATOR" | "AUTO" = "OUTDOOR", bookingProof?: TeeItUpOfficialBookingSourceProof, postalProof?: TeeItUpPostalConflictProof) {
   const booking = parseTeeItUpRecipeSource(source.bookingUrl);
   const parsed = z.array(facility).min(1).max(100).safeParse(value);
-  if (offeringKind === "SIMULATOR" && (officialProof || bookingProof) || officialProof && bookingProof) throw new Error("ADAPTER_IDENTITY_MISMATCH");
+  if (offeringKind === "SIMULATOR" && (officialProof || bookingProof || postalProof) ||
+      [officialProof, bookingProof, postalProof].filter(Boolean).length > 1) throw new Error("ADAPTER_IDENTITY_MISMATCH");
   if (!booking || !source.venueAddress || !parsed.success ||
       new Set(parsed.data.map(row => row.id)).size !== parsed.data.length || new Set(parsed.data.map(row => row.courseId)).size !== parsed.data.length)
     throw new Error("ADAPTER_CONFIGURATION_UNVERIFIED");
@@ -64,11 +66,22 @@ export function resolveTeeItUpRecipeFacilities(source: { bookingUrl: string; ven
       [{ ...row, name: row.name.split(/\s+-\s+/u)[0] }]).status === "MATCHED";
   };
   const alternate = officialProof ? parsed.data.filter(row => matchesOfficialFacility(officialProof, source, row)) : [];
+  if (postalProof) {
+    const row = parsed.data.find(row => row.id === postalProof.facilityId);
+    const raw = Array.isArray(value) ? value.find(row => row?.id === postalProof.facilityId) : undefined;
+    if (!row || row.courseId !== postalProof.courseId || row.address !== postalProof.providerAddress || row.timeZone !== postalProof.timeZone ||
+        row.isSimulator !== false || raw?.country !== "US" || normalizePublicCoursePhone(raw?.phone) !== postalProof.publicCoursePhone ||
+        booking.alias !== postalProof.alias || source.venueAddress !== postalProof.canonicalAddress || source.timeZone !== postalProof.timeZone ||
+        source.officialUrl !== postalProof.officialUrl || source.bookingUrl !== postalProof.officialSourceProof.bookingUrl ||
+        fullCourseName(source.venueName) !== postalProof.officialSourceProof.venueName)
+      throw new Error("OFFICIAL_POSTAL_CONFLICT_UNVERIFIED");
+  }
   if (bookingProof && JSON.stringify(bindTeeItUpOfficialBookingFacility(source, bookingProof, value)) !== JSON.stringify(bookingProof))
     throw new Error("OFFICIAL_BOOKING_SOURCE_CHANGED");
   if (officialProof && (alternate.length !== 1 || officialProof.bookingUrl !== source.bookingUrl)) throw new Error("ADAPTER_IDENTITY_MISMATCH");
   const accepted = (row: TeeItUpRecipeFacility) => matches(row) || officialProof !== undefined && alternate[0]?.id === row.id ||
-    bookingProof !== undefined && row.id === bookingProof.facilityId && row.courseId === bookingProof.courseId;
+    bookingProof !== undefined && row.id === bookingProof.facilityId && row.courseId === bookingProof.courseId ||
+    postalProof !== undefined && row.id === postalProof.facilityId && row.courseId === postalProof.courseId;
   const selected = booking.selectedIds ? parsed.data.filter(row => booking.selectedIds!.includes(row.id)) : parsed.data.filter(accepted);
   if (booking.selectedIds ? selected.length !== booking.selectedIds.length || !selected.every(accepted) : selected.length !== 1)
     throw new Error("ADAPTER_IDENTITY_MISMATCH");

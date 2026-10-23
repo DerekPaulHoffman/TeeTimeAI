@@ -39,6 +39,7 @@ import { observedTeeItUpOfficialBookingChain, type TeeItUpOfficialBookingToken }
 import { bindTeeItUpOfficialBookingFacility, type TeeItUpOfficialBookingSourceProof, type TeeItUpObservedSourceChain } from "./teeitup-official-booking-source";
 import { readTeeItUpOfficialBookingChain } from "./teeitup-official-booking-reader";
 import type { OfficialSourceDiagnostic } from "./official-source-diagnostics";
+import { bindTeeItUpPostalConflictProof, type TeeItUpPostalConflictProof } from "./teeitup-postal-conflict-proof";
 
 type Dependencies = {
   fetch?: typeof fetch;
@@ -111,10 +112,13 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
   let teeitupSimulatorSlots: AccessExecutionResult["slots"] | undefined;
   let officialIdentityProof: TeeItUpOfficialIdentityProof | undefined;
   let officialBookingSourceProof: TeeItUpOfficialBookingSourceProof | undefined;
+  let officialPostalConflictProof: TeeItUpPostalConflictProof | undefined;
+  let postalOfficialPage: OfficialIdentityPage | undefined;
   let freshBookingChain: TeeItUpObservedSourceChain | undefined;
   let preparingBookingChain: Promise<void> | undefined;
   const initialBookingToken = !adapter && family === "TEEITUP" ? deps.officialBookingSourceToken : undefined;
   const savedBookingProof = adapter?.family === "TEEITUP" ? adapter.officialBookingSourceProof : undefined;
+  const savedPostalProof = adapter?.family === "TEEITUP" ? adapter.officialPostalConflictProof : undefined;
   function validateInitialBookingToken() {
     if (initialBookingToken) observedTeeItUpOfficialBookingChain(initialBookingToken);
   }
@@ -136,6 +140,8 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
     if (url.href === booking.href) return url;
     if (adapter?.family === "TEEITUP" && adapter.officialIdentityProof && url.href === adapter.officialIdentityProof.officialPageUrl &&
         source.officialUrl && url.origin === new URL(source.officialUrl).origin) return url;
+    if (savedPostalProof && url.href === savedPostalProof.officialSourceProof.officialPageUrl &&
+        source.officialUrl && savedPostalProof.officialUrl === source.officialUrl && url.origin === new URL(source.officialUrl).origin) return url;
     if (teeitup && url.origin === "https://phx-api-be-east-1b.kenna.io") {
       if (url.pathname === `/alias/${teeitup.alias}/facilities` && !url.search) return url;
       if (input && adapter?.family === "TEEITUP" && teeitupFacilities && url.pathname === "/v2/tee-times" &&
@@ -197,6 +203,10 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
         if (JSON.stringify(current) !== JSON.stringify(adapter.officialIdentityProof)) fail("OFFICIAL_IDENTITY_CHANGED");
         officialIdentityProof = current;
       }
+      if (savedPostalProof && url.href === savedPostalProof.officialSourceProof.officialPageUrl) {
+        if (!/^text\/html(?:;|$)/iu.test(response.headers.get("content-type") ?? "")) fail("OFFICIAL_POSTAL_CONFLICT_UNVERIFIED");
+        postalOfficialPage = { url: url.href, html: text };
+      }
       if (teeitup && url.pathname === `/alias/${teeitup.alias}/facilities`) {
         if (adapter?.family === "TEEITUP" && adapter.officialIdentityProof && !officialIdentityProof) fail("OFFICIAL_IDENTITY_UNVERIFIED");
         const offeringKind = adapter?.family === "TEEITUP" ? adapter.offeringKind ?? "OUTDOOR" : "AUTO";
@@ -205,7 +215,12 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
           officialBookingSourceProof = bindTeeItUpOfficialBookingFacility(source, freshBookingChain, JSON.parse(text));
           if (JSON.stringify(officialBookingSourceProof) !== JSON.stringify(savedBookingProof)) fail("OFFICIAL_BOOKING_SOURCE_CHANGED");
         }
-        try { teeitupFacilities = resolveTeeItUpRecipeFacilities(source, JSON.parse(text), officialIdentityProof, offeringKind, officialBookingSourceProof); }
+        if (savedPostalProof) {
+          if (!postalOfficialPage) fail("OFFICIAL_POSTAL_CONFLICT_UNVERIFIED");
+          officialPostalConflictProof = bindTeeItUpPostalConflictProof(source, postalOfficialPage, JSON.parse(text));
+          if (JSON.stringify(officialPostalConflictProof) !== JSON.stringify(savedPostalProof)) fail("OFFICIAL_POSTAL_CONFLICT_CHANGED");
+        }
+        try { teeitupFacilities = resolveTeeItUpRecipeFacilities(source, JSON.parse(text), officialIdentityProof, offeringKind, officialBookingSourceProof, officialPostalConflictProof); }
         catch (error) {
           if (adapter || !(error instanceof Error) || error.message !== "ADAPTER_IDENTITY_MISMATCH") throw error;
           if (freshBookingChain) {
@@ -213,8 +228,14 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
             teeitupFacilities = resolveTeeItUpRecipeFacilities(source, JSON.parse(text), undefined, "OUTDOOR", officialBookingSourceProof);
           } else {
             if (!deps.officialIdentityPage) throw error;
-            officialIdentityProof = deriveTeeItUpOfficialIdentityProof(source, deps.officialIdentityPage, { requireVisibleEvidence: true });
-            teeitupFacilities = resolveTeeItUpRecipeFacilities(source, JSON.parse(text), officialIdentityProof);
+            try {
+              officialIdentityProof = deriveTeeItUpOfficialIdentityProof(source, deps.officialIdentityPage, { requireVisibleEvidence: true });
+              teeitupFacilities = resolveTeeItUpRecipeFacilities(source, JSON.parse(text), officialIdentityProof);
+            } catch {
+              officialPostalConflictProof = bindTeeItUpPostalConflictProof(source, deps.officialIdentityPage, JSON.parse(text), { requireVisibleEvidence: true });
+              officialIdentityProof = undefined;
+              teeitupFacilities = resolveTeeItUpRecipeFacilities(source, JSON.parse(text), undefined, "OUTDOOR", undefined, officialPostalConflictProof);
+            }
           }
         }
         validateInitialBookingToken();
@@ -253,6 +274,7 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
   };
   return { read, family, teeitup, teeitupFacilities: () => teeitupFacilities, officialIdentityProof: () => officialIdentityProof,
     officialBookingSourceProof: () => { validateInitialBookingToken(); return officialBookingSourceProof; },
+    officialPostalConflictProof: () => officialPostalConflictProof,
     teeitupSimulatorSlots: () => teeitupSimulatorSlots,
     dispose: () => queue.dispose(), availabilityWasArray: () => availabilityWasArray, failureReason: () => fixedReadFailure };
 }
@@ -326,7 +348,8 @@ export async function inspectExistingAdapter(source: Source, deps: Dependencies)
         facilityIds: session.teeitupFacilities()!.map(row => row.id),
         ...(session.teeitupFacilities()!.every(row => row.isSimulator === true) ? { offeringKind: "SIMULATOR" } : {}),
         ...(session.officialIdentityProof() ? { officialIdentityProof: session.officialIdentityProof() } : {}),
-        ...(session.officialBookingSourceProof() ? { officialBookingSourceProof: session.officialBookingSourceProof() } : {}) }) };
+        ...(session.officialBookingSourceProof() ? { officialBookingSourceProof: session.officialBookingSourceProof() } : {}),
+        ...(session.officialPostalConflictProof() ? { officialPostalConflictProof: session.officialPostalConflictProof() } : {}) }) };
     }
     if (session.family === "FOREUP") {
       const config = await readForeupPublicConfiguration({ bookingUrl: source.bookingUrl, courseName: source.venueName,
@@ -358,7 +381,7 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
     const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "GOLFVX", "REX"].includes(adapter.family) || adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR";
     if (input.timeZone !== recipe.source.timeZone || recipe.source.providerFamily.toUpperCase() !== adapter.family ||
         (recipe.target.kind === "SIMULATOR") !== simulator || simulator && (!recipe.target.offeringId || !input.durationMinutes) ||
-        adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR" && (adapter.facilityIds.length !== 1 || adapter.officialIdentityProof || adapter.officialBookingSourceProof)) fail("ADAPTER_TARGET_MISMATCH");
+        adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR" && (adapter.facilityIds.length !== 1 || adapter.officialIdentityProof || adapter.officialBookingSourceProof || adapter.officialPostalConflictProof)) fail("ADAPTER_TARGET_MISMATCH");
     if (adapter.family === "EZLINKS" && (!recipe.source.officialUrl || !recipe.source.venueAddress ||
         parseEzLinksSource(recipe.source.bookingUrl)?.tenant !== adapter.tenant || input.durationMinutes !== undefined))
       fail("ADAPTER_TARGET_MISMATCH");
@@ -441,6 +464,7 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
     }
     if (adapter.family === "TEEITUP") {
       if (adapter.officialIdentityProof) await session!.read(adapter.officialIdentityProof.officialPageUrl);
+      if (adapter.officialPostalConflictProof) await session!.read(adapter.officialPostalConflictProof.officialSourceProof.officialPageUrl);
       if (adapter.offeringKind === "SIMULATOR") {
         const origin = new URL(recipe.source.bookingUrl).origin;
         const headers = { accept: "application/json", "x-be-alias": adapter.alias, origin, referer: `${origin}/` };

@@ -168,7 +168,7 @@ Do not reroll a difficult selection; record its outcome or exclusion.
 Enable the preconfigured three-target cohort before the owner, or an agent
 expressly authorized by that owner to use the normal product UI, creates its
 normal alerts. Automatic enrollment must be bounded to the selected owner and
-targets, persistent, and limited to three lifetime enrollments. Existing exact
+targets, persistent, and limited to three lifetime enrollments per recorded experiment. Existing exact
 `COURSE_DISCOVERY_PILOT_SEARCH_IDS` are available for development/recovery, but
 adding IDs after alert creation is not a blind acceptance run.
 
@@ -180,6 +180,8 @@ that file accepts only the three supervisor keys listed above.
 COURSE_DISCOVERY_ENABLED=true
 COURSE_DISCOVERY_PILOT_OWNER_USER_ID=<exact internal User.id>
 COURSE_DISCOVERY_PILOT_TARGET_KEYS=course:<id>,offering:<id>,course:<id>
+# Optional operator-assigned identifier for a separately recorded experiment:
+COURSE_DISCOVERY_PILOT_RUN_ID=sol-comparison-20261023-1
 ```
 
 Release the code initially with `COURSE_DISCOVERY_ENABLED=false`, after the
@@ -196,6 +198,15 @@ setting takes precedence. Each ordinary alert must contain one selected target.
 Enrollment runs inside its normal creation transaction, under an owner row
 lock. Its append-only receipt binds the owner, configuration cohort, target,
 search ID and one of three slots. Deleting an alert does not refund a slot.
+An absent or blank run ID preserves the original cohort hash and its consumed
+slots. A valid run ID is 1–64 lowercase letters, digits or hyphens, beginning
+with a letter or digit. Invalid configuration disables automatic enrollment.
+Only the operator may select a new run ID before deploying and creating new
+ordinary alerts for another authorized experiment. Retain prior enrollment,
+job, recipe and delivery evidence; never move an old search into the new run,
+change an existing job's pickup or deadline, or rotate target aliases to obtain
+another quota. Each run still admits only the exact owner and three targets.
+Retries stay within their original experiment and fifteen-minute clock.
 Changing date, time, duration or players preserves enrollment; changing the
 target leaves the pilot. The observer's inventory evidence and recipe details
 are never placed in this runtime configuration.
