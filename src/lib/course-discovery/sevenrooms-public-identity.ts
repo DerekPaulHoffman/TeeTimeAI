@@ -47,7 +47,7 @@ export function verifySevenRoomsPublicIdentity(body: unknown, source: Source, re
   if (!actual) {
     actual = parsePublicUSBusinessAddressParts({ address, city: own(venue, "city") ? venue.city : undefined,
       state: own(venue, "state") ? venue.state : undefined, postalCode: own(venue, "postal_code") ? venue.postal_code : undefined,
-      country: own(venue, "country") ? venue.country : own(venue, "country_code") ? venue.country_code : undefined });
+      country: Object.hasOwn(venue, "country") ? venue.country : Object.hasOwn(venue, "country_code") ? venue.country_code : undefined });
   } else {
     // Redundant actual fields must not contradict the independently complete
     // address. Missing redundant fields do not borrow from the expected source.
