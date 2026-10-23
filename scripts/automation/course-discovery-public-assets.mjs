@@ -43,9 +43,14 @@ export function createDiscoveryPublicAssetInventory() {
     observe(browser, snapshot) {
       if (browser !== owner || !owner) return;
       if (snapshot?.browserTransport !== transport) { clear(); return; }
-      if (!Array.isArray(snapshot.requests)) return;
-      if (snapshot.requests.length > 1024) { overflow = true; return; }
-      for (const request of snapshot.requests) {
+      if (snapshot.completedPublicAssetRequestsOverflow === true) overflow = true;
+      const completed = snapshot.completedPublicAssetRequests;
+      if (completed !== undefined && (!Array.isArray(completed) || completed.length > 128 || Buffer.byteLength(JSON.stringify(completed)) > 64_000)) {
+        overflow = true; return;
+      }
+      const requests = Array.isArray(snapshot.requests) ? snapshot.requests : [];
+      if (requests.length > 1024) { overflow = true; return; }
+      for (const request of [...(completed ?? []), ...requests]) {
         const route = observedAsset(request);
         if (!route) continue;
         const key = JSON.stringify([route.origin, route.path, route.resourceTypes]);

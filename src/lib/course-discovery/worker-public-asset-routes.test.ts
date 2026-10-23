@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { createDiscoveryPublicAssetInventory } from "../../../scripts/automation/course-discovery-public-assets.mjs";
-import { runCourseDiscoveryWorker } from "../../../scripts/automation/course-discovery-worker.mjs";
+import { createDiscoverySnapshotCompactor, runCourseDiscoveryWorker } from "../../../scripts/automation/course-discovery-worker.mjs";
 
 const transport = "NATIVE_CHROME";
 const official = "https://example.org/";
@@ -162,6 +162,22 @@ async function run(options: { engine?: string; actions?: Action[]; checkpoint?: 
 }
 
 describe("worker asset serialization before validation and independent replay", () => {
+  it("uses completed private asset deltas before compaction without returning them to the model or checkpoint", async () => {
+    const outcome = await run({ snapshot: (config, input) => ({ url: input.url ?? booking, text: "Public booking", controls: [], elements: [], frames: [],
+      browserTransport: config.helperEnvironment.COURSE_DISCOVERY_BROWSER_TRANSPORT, navigationStatus: 200, loading: false,
+      requests: [], completedPublicAssetRequests: input.url === booking ? [asset(parentAsset), asset(childAsset)] : [], completedPublicAssetRequestsOverflow: false }) });
+    expect(outcome.result.outcome).toBe("activated");
+    expect(outcome.client.candidate.mock.calls[0][2].permittedRoutes).toContainEqual(routeOf(parentAsset));
+    expect(outcome.client.candidate.mock.calls[0][2].permittedRoutes).toContainEqual(routeOf(childAsset));
+    for (const value of [...outcome.replies, ...outcome.checkpoints]) expect(JSON.stringify(value)).not.toContain("completedPublicAssetRequests");
+  });
+  it("does not let compatibility request rows override sticky private-channel overflow", async () => {
+    const outcome = await run({ snapshot: (config, input) => ({ url: input.url ?? booking,
+      browserTransport: config.helperEnvironment.COURSE_DISCOVERY_BROWSER_TRANSPORT, navigationStatus: 200,
+      requests: [asset()], completedPublicAssetRequests: [], completedPublicAssetRequestsOverflow: true }) });
+    expect(outcome.validateRecipe).not.toHaveBeenCalled(); expect(outcome.client.candidate).not.toHaveBeenCalled();
+    expect(outcome.executeRecipe).not.toHaveBeenCalled(); expect(JSON.stringify(outcome.replies)).toContain("DISCOVERY_PUBLIC_ASSET_ROUTE_LIMIT");
+  });
   it.each(["BROWSER_JSON", "BROWSER_DOM"])("enriches a %s omission-shaped proposal identically for validation, candidate and both replays", async engine => {
     const outcome = await run({ engine });
     expect(outcome.result.outcome).toBe("activated");
@@ -182,7 +198,8 @@ describe("worker asset serialization before validation and independent replay", 
       if (input.url === booking) bookingOpens++;
       return { url: input.url ?? booking, browserTransport: config.helperEnvironment.COURSE_DISCOVERY_BROWSER_TRANSPORT,
         navigationStatus: mode === "fallback" && bookingOpens === 2 && index === 0 ? 403 : 200,
-        accessRequirementObserved: false, requests: index === 0 && bookingOpens === 1 ? [asset()] : [] };
+        accessRequirementObserved: false, requests: [], completedPublicAssetRequests: index === 0 && bookingOpens === 1 ? [asset()] : [],
+        completedPublicAssetRequestsOverflow: false };
     } });
     const candidates = outcome.client.candidate.mock.calls;
     expect(candidates.at(-1)[2].permittedRoutes).toEqual(proposal().permittedRoutes);
@@ -203,5 +220,50 @@ describe("worker asset serialization before validation and independent replay", 
       navigationStatus: 200, requests: Array.from({ length: 129 }, (_, i) => asset(`https://cdn.example.org/chunk-${i}.js`)) }) });
     expect(outcome.validateRecipe).not.toHaveBeenCalled(); expect(outcome.client.candidate).not.toHaveBeenCalled();
     expect(outcome.executeRecipe).not.toHaveBeenCalled(); expect(JSON.stringify(outcome.replies)).toContain("DISCOVERY_PUBLIC_ASSET_ROUTE_LIMIT");
+  });
+});
+
+describe("private completed asset channel", () => {
+  it.each(["count", "bytes", "malformed"])("rejects a private-channel %s overflow without compatibility fallback", kind => {
+    const inventory = createDiscoveryPublicAssetInventory(), browser = {};
+    inventory.begin(browser, transport);
+    const completedPublicAssetRequests = kind === "count" ? Array.from({ length: 129 }, (_, index) => asset(`https://cdn.example.org/chunk-${index}.js`)) :
+      kind === "bytes" ? Array.from({ length: 80 }, (_, index) => asset(`https://cdn.example.org/${"a".repeat(850)}${index}.js`)) : {};
+    inventory.observe(browser, { browserTransport: transport, requests: [asset()], completedPublicAssetRequests });
+    expect(() => inventory.enrich(proposal(), browser, transport)).toThrow("DISCOVERY_PUBLIC_ASSET_ROUTE_LIMIT");
+  });
+  it("does not transfer private deltas across browser owners or transport changes", () => {
+    const inventory = createDiscoveryPublicAssetInventory(), browser = {}, other = {};
+    inventory.begin(browser, transport);
+    inventory.observe(other, { browserTransport: transport, requests: [], completedPublicAssetRequests: [asset()] });
+    expect(inventory.enrich(proposal(), browser, transport)).toBeDefined();
+    expect(inventory.enrich(proposal(), browser, transport).permittedRoutes).toHaveLength(1);
+    inventory.observe(browser, { browserTransport: "PINNED_HTTP", requests: [], completedPublicAssetRequests: [asset()] });
+    expect(() => inventory.enrich(proposal(), browser, transport)).toThrow("DISCOVERY_PUBLIC_ASSET_CONTEXT_UNVERIFIED");
+  });
+  it.each(["ordinary", "no-text", "structure", "adapter", "response", "unchanged"])("strips private metadata before the compactor %s return", kind => {
+    const compact = createDiscoverySnapshotCompactor();
+    const base = { url: booking, text: "Public page", controls: [], elements: [], frames: [], loading: false, requests: [] };
+    if (kind === "unchanged") { compact(base); compact(base); }
+    const snapshot = { ...base, ...(kind === "no-text" ? { text: undefined } : {}),
+      ...(kind === "structure" ? { structure: { selected: "#public" } } : {}), ...(kind === "adapter" ? { adapter: { family: "EXAMPLE" } } : {}),
+      ...(kind === "response" ? { responses: [{ status: 200 }] } : {}),
+      completedPublicAssetRequests: [asset("https://cdn.example.org/site.js?build=private-channel-sentinel")], completedPublicAssetRequestsOverflow: true };
+    const result = compact(snapshot);
+    expect(result).not.toHaveProperty("completedPublicAssetRequests"); expect(result).not.toHaveProperty("completedPublicAssetRequestsOverflow");
+    expect(JSON.stringify(result)).not.toContain("private-channel-sentinel"); expect(snapshot.completedPublicAssetRequests).toHaveLength(1);
+  });
+  it("accumulates private completed deltas, ignores uncompleted kinds and keeps overflow sticky until a new owner", () => {
+    const inventory = createDiscoveryPublicAssetInventory(), browser = {};
+    inventory.begin(browser, transport);
+    inventory.observe(browser, { browserTransport: transport, requests: [], completedPublicAssetRequests: [asset(), asset(childAsset)] });
+    inventory.observe(browser, { browserTransport: transport, requests: [], completedPublicAssetRequests: [asset("https://cdn.example.org/pending.js", { status: undefined }),
+      asset("https://cdn.example.org/redirect.js", { status: 302 }), asset("https://cdn.example.org/failed.js", { status: 500 }),
+      asset("https://cdn.example.org/blocked.js", { blockedReason: "UNSAFE_URL" }), asset("https://cdn.example.org/data", { resourceType: "fetch" })] });
+    expect(inventory.enrich(proposal(), browser, transport).permittedRoutes).toHaveLength(3);
+    inventory.observe(browser, { browserTransport: transport, requests: [], completedPublicAssetRequests: [], completedPublicAssetRequestsOverflow: true });
+    inventory.observe(browser, { browserTransport: transport, requests: [asset()], completedPublicAssetRequestsOverflow: false });
+    expect(() => inventory.enrich(proposal(), browser, transport)).toThrow("DISCOVERY_PUBLIC_ASSET_ROUTE_LIMIT");
+    inventory.begin(browser, transport); expect(inventory.enrich(proposal(), browser, transport).permittedRoutes).toHaveLength(1);
   });
 });

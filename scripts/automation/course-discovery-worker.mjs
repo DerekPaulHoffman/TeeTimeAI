@@ -462,6 +462,7 @@ export function createDiscoverySnapshotCompactor() {
   return snapshot => {
     if (snapshot && typeof snapshot === "object") {
       const projected = { ...snapshot };
+      delete projected.completedPublicAssetRequests; delete projected.completedPublicAssetRequestsOverflow;
       delete projected.nativeFirstFatal; delete projected.nativeRejectedRequests;
       delete projected.officialSourceDiagnostic; delete projected.navigationFailureKind;
       snapshot = { ...projected, ...safeNativeBrowserDiagnostics(snapshot), ...safeOfficialBrowserDiagnostics(snapshot) };

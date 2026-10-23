@@ -6,6 +6,7 @@ import { createCourseDiscoveryBrowserSession, discoveryBrowserActionSchema, disc
 import * as nativeBrowser from "./native-public-browser";
 import * as nativeRouting from "./native-redirect-routing";
 import { deriveTeeItUpOfficialIdentityProof } from "./teeitup-official-identity";
+import type { DiscoveryBrowserSnapshot } from "./browser-session";
 
 vi.mock("@/lib/automation/provider-request-lease", () => ({ runWithProviderRequestLease: vi.fn() }));
 vi.mock("@/lib/automation/address-pinned-public-fetch", () => ({ createAddressPinnedPublicFetchTransport: vi.fn() }));
@@ -293,6 +294,7 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       expect(snapshot.controls).toContainEqual(expect.objectContaining({ kind: "link", name: "Book tee times", href: destination }));
       expect(snapshot.loading).toBe(true); expect(snapshot.pendingRequestCount).toBeGreaterThan(0);
       expect(snapshot.requests).toContainEqual({ url: asset, method: "GET", resourceType: "script" });
+      expect(snapshot.completedPublicAssetRequests ?? []).not.toContainEqual(expect.objectContaining({ url: asset }));
       expect(await browser!.contexts()[0].pages()[0].evaluate(() => (window as unknown as { publicDomReady: boolean }).publicDomReady)).toBe(false);
       expect(snapshot.responses).toEqual([]);
       expect(snapshot).not.toHaveProperty("complete"); expect(snapshot).not.toHaveProperty("slots");
@@ -414,6 +416,90 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       await expect(session.execute({ id: 2, action: "open", url: play })).rejects.toThrow("UNOBSERVED_NAVIGATION");
     } finally { await session.close(); }
   }, 25_000);
+  it.each([100, 129])("retains completed public assets independently of the lossy model request window (%i assets)", async count => {
+    const source = "https://example.org/", urls = Array.from({ length: count }, (_, index) =>
+      `https://example.org/public-${index}-${"a".repeat(120)}.js`);
+    const html = `<h1>Public golf</h1><a href="/times">Book tee times</a>${urls.map(url => `<script defer src="${url}"></script>`).join("")}`;
+    const fetcher = vi.fn(async value => {
+      const url = String(value);
+      if (url === source) return new Response(html, { headers: { "content-type": "text/html" } });
+      if (urls.includes(url)) return new Response(`window.assetCount=(window.assetCount||0)+1;${url === urls.at(-1) ?
+        "Promise.all(Array.from({length:20},(_,i)=>fetch('/public-data-'+i).then(r=>r.json()))).then(()=>window.fixtureDone=true)" : ""}`,
+      { headers: { "content-type": "application/javascript" } });
+      return new Response('{"ready":true}', { headers: { "content-type": "application/json" } });
+    }) as unknown as typeof fetch;
+    let browser: Awaited<ReturnType<typeof chromium.launch>>;
+    const session = await createCourseDiscoveryBrowserSession({ initialUrls: [source], deadlineAt: new Date(Date.now() + 25_000) }, {
+      fetch: fetcher, launchBrowser: async () => browser = await chromium.launch({ executablePath, headless: true }),
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      const first = await session.execute({ id: 1, action: "open", url: source });
+      await browser!.contexts()[0].pages()[0].waitForFunction(() => (window as unknown as { fixtureDone?: boolean }).fixtureDone === true);
+      const settled = await session.execute({ id: 2, action: "observe" });
+      const completed = [...(first.completedPublicAssetRequests ?? []), ...(settled.completedPublicAssetRequests ?? [])];
+      expect(new Set(completed.map(row => row.url)).size).toBe(Math.min(count, 128));
+      expect(completed.every(row => Object.keys(row).sort().join(",") === "method,resourceType,status,url" && row.method === "GET" && row.resourceType === "script" && row.status === 200)).toBe(true);
+      expect(first.requests.length + settled.requests.length).toBeLessThan(count + 21);
+      expect(settled.completedPublicAssetRequestsOverflow).toBe(count > 128);
+      const next = await session.execute({ id: 3, action: "observe" });
+      expect(next.completedPublicAssetRequests).toEqual([]); expect(next.completedPublicAssetRequestsOverflow).toBe(count > 128);
+      expect(Buffer.byteLength(JSON.stringify(completed))).toBeLessThanOrEqual(64_000);
+    } finally { await session.close(); }
+  }, 30_000);
+
+  it("retains completed assets when an adapter action fails after building its snapshot", async () => {
+    const source = "https://example.org/", asset = "https://example.org/late-public.js";
+    let browser: Awaited<ReturnType<typeof chromium.launch>>;
+    // The synthetic returned source proof cannot replace the missing private
+    // document token. Its existing post-snapshot gate must still reject.
+    const inspectAdapter = vi.fn(async () => ({ adapter: { family: "TEEITUP", officialBookingSourceProof: {} } as unknown as NonNullable<DiscoveryBrowserSnapshot["adapter"]> }));
+    const session = await createCourseDiscoveryBrowserSession({ initialUrls: [source], venueName: "Public venue", deadlineAt: new Date(Date.now() + 20_000) }, {
+      inspectAdapter, fetch: vi.fn(async value => new Response(String(value) === source ? "<h1>Public golf</h1>" : "/* public script */",
+        { headers: { "content-type": String(value) === source ? "text/html" : "application/javascript" } })) as unknown as typeof fetch,
+      launchBrowser: async () => browser = await chromium.launch({ executablePath, headless: true }),
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      await session.execute({ id: 1, action: "open", url: source });
+      await browser!.contexts()[0].pages()[0].evaluate(url => new Promise<void>((resolve, reject) => {
+        const script = document.createElement("script"); script.src = url; script.onload = () => resolve(); script.onerror = () => reject(new Error("FIXTURE_SCRIPT_FAILED")); document.head.append(script);
+      }), asset);
+      await expect(session.execute({ id: 2, action: "inspect_adapter", url: source })).rejects.toThrow("OFFICIAL_BOOKING_SOURCE_UNVERIFIED");
+      const recovered = await session.execute({ id: 3, action: "observe" });
+      expect(recovered.completedPublicAssetRequests).toEqual([{ url: asset, method: "GET", resourceType: "script", status: 200 }]);
+      expect((await session.execute({ id: 4, action: "observe" })).completedPublicAssetRequests).toEqual([]);
+    } finally { await session.close(); }
+  }, 25_000);
+
+  it("publishes only fulfilled successful script and stylesheet evidence, excluding failed, redirected and data requests", async () => {
+    const source = "https://example.org/", good = "https://example.org/public.js", style = "https://example.org/public.css";
+    const html = '<h1>Public golf</h1><link rel="stylesheet" href="/public.css"><script defer src="/public.js"></script>' +
+      '<script defer src="/failed.js"></script><script defer src="/redirect.js"></script><script defer src="/denied.js?access_token=private"></script>';
+    let browser: Awaited<ReturnType<typeof chromium.launch>>;
+    const fetcher = vi.fn(async value => {
+      const url = String(value);
+      if (url === source) return new Response(html, { headers: { "content-type": "text/html" } });
+      if (url.endsWith("/failed.js")) return new Response("/* unavailable */", { status: 503 });
+      if (url.endsWith("/redirect.js")) return new Response("", { status: 302, headers: { location: "/redirect-target.js" } });
+      if (url === style) return new Response("body{}", { headers: { "content-type": "text/css" } });
+      if (url === good) return new Response("fetch('/public-data').then(()=>window.fixtureDone=true)", { headers: { "content-type": "application/javascript" } });
+      return new Response('{"ready":true}', { headers: { "content-type": "application/json" } });
+    }) as unknown as typeof fetch;
+    const session = await createCourseDiscoveryBrowserSession({ initialUrls: [source], deadlineAt: new Date(Date.now() + 20_000) }, {
+      fetch: fetcher, launchBrowser: async () => browser = await chromium.launch({ executablePath, headless: true }),
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      const first = await session.execute({ id: 1, action: "open", url: source });
+      await browser!.contexts()[0].pages()[0].waitForFunction(() => (window as unknown as { fixtureDone?: boolean }).fixtureDone === true);
+      const second = await session.execute({ id: 2, action: "observe" });
+      expect([...(first.completedPublicAssetRequests ?? []), ...(second.completedPublicAssetRequests ?? [])].sort((a, b) => a.url.localeCompare(b.url)))
+        .toEqual([{ url: style, method: "GET", resourceType: "stylesheet", status: 200 }, { url: good, method: "GET", resourceType: "script", status: 200 }]);
+      expect(vi.mocked(fetcher).mock.calls.some(([url]) => String(url).includes("access_token") || String(url).includes("redirect-target"))).toBe(false);
+    } finally { await session.close(); }
+  }, 25_000);
+
   it("loads observed public versioned scripts while blocking credential-bearing companions", async () => {
     const official = "https://example.org/", asset = "https://example.org/wp-includes/js/dist/hooks.min.js?ver=f0f188028580e8dc1255";
     const denied = `${asset}&token=private`;

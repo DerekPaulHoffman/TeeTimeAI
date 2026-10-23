@@ -126,6 +126,9 @@ export type DiscoveryBrowserSnapshot = {
   responses: Array<{ url: string; status: number; method: string; body?: unknown; bodyOmitted?: true; schemaEvidence?: PublicResponseSchema; schemaEvidenceOmitted?: true }>;
   requests: Array<{ url: string; method: string; resourceType: string; status?: number; blockedReason?: string; body?: unknown; readPurpose?: "PUBLIC_BOOTSTRAP" | "PUBLIC_AVAILABILITY";
     urlRejection?: ReturnType<typeof safePublicUrlRejectionDiagnostic>; publicHeaderDiagnostic?: ReturnType<typeof publicHeaderFailureDiagnostic> }>;
+  /** Controller-to-worker only; stripped before any model/tool response. */
+  completedPublicAssetRequests?: Array<{ url: string; method: "GET"; resourceType: "script" | "stylesheet"; status: number }>;
+  completedPublicAssetRequestsOverflow?: boolean;
   requestFailures?: Array<{ reason: string; resourceType: string; method?: string; url?: string;
     urlRejection?: ReturnType<typeof safePublicUrlRejectionDiagnostic>; publicHeaderDiagnostic?: ReturnType<typeof publicHeaderFailureDiagnostic> }>;
   nativeFirstFatal?: NativeFirstFatal;
@@ -244,6 +247,20 @@ export async function createCourseDiscoveryBrowserSession(input: {
   page.setDefaultTimeout(Math.min(10_000, remaining));
   const responses: DiscoveryBrowserSnapshot["responses"] = [];
   const observedRequests: DiscoveryBrowserSnapshot["requests"] = [];
+  const completedPublicAssets = new Map<string, NonNullable<DiscoveryBrowserSnapshot["completedPublicAssetRequests"]>[number]>();
+  const deliveredPublicAssets = new Set<string>();
+  let completedPublicAssetRequestsOverflow = false;
+  const recordCompletedPublicAsset = (url: string, resourceType: string, status: number) => {
+    if (completedPublicAssetRequestsOverflow || !["script", "stylesheet"].includes(resourceType) ||
+        status < 200 || status >= 300 || !isSafeBrowserAssetUrl(url, resourceType, "GET")) return;
+    const key = JSON.stringify([url, resourceType]);
+    if (completedPublicAssets.has(key)) return;
+    const value = { url, method: "GET" as const, resourceType: resourceType as "script" | "stylesheet", status };
+    if (completedPublicAssets.size >= 128 || Buffer.byteLength(JSON.stringify([...completedPublicAssets.values(), value]), "utf8") > 64_000) {
+      completedPublicAssetRequestsOverflow = true; return;
+    }
+    completedPublicAssets.set(key, value);
+  };
   const requestFailures: NonNullable<DiscoveryBrowserSnapshot["requestFailures"]> = [];
   const capabilityDiagnostics: NonNullable<DiscoveryBrowserSnapshot["capabilityDiagnostics"]> = [];
   const recordSubframe = ({ url, resourceType }: { url: string; resourceType: string }) => {
@@ -289,7 +306,14 @@ export async function createCourseDiscoveryBrowserSession(input: {
     if (!ezReadNonces.size) return value;
     let json = JSON.stringify(value);
     for (const nonce of ezReadNonces) json = json.replaceAll(nonce, "[private-read-id]");
-    return JSON.parse(json) as T;
+    const safe = JSON.parse(json) as T;
+    // Private completed metadata is never model input and must retain its
+    // exact observed URL through this public-response nonce sanitizer.
+    if (value && typeof value === "object" && safe && typeof safe === "object") {
+      for (const key of ["completedPublicAssetRequests", "completedPublicAssetRequestsOverflow"] as const)
+        if (Object.hasOwn(value, key)) Object.assign(safe, { [key]: (value as Record<string, unknown>)[key] });
+    }
+    return safe;
   };
   const clearEzDocument = () => {
     if (ezControllerRead) ezControllerRead.error = new Error("EZLINKS_DOCUMENT_CHANGED");
@@ -304,7 +328,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     const read = witness.readContractAssets.get(asset.path);
     return read?.complete && read.sha256 === asset.sha256;
   });
-  const close = async () => { if (closed) return; closed = true; teeBookingScope.close(); clearEzDocument(); await redirectRouting?.close(); cancellation.abort("BROWSER_CLOSED"); queue.dispose(); await context.close().catch(() => {}); await browser.close().catch(() => {}); await nativeProxy?.close(); };
+  const close = async () => { if (closed) return; closed = true; completedPublicAssets.clear(); deliveredPublicAssets.clear(); teeBookingScope.close(); clearEzDocument(); await redirectRouting?.close(); cancellation.abort("BROWSER_CLOSED"); queue.dispose(); await context.close().catch(() => {}); await browser.close().catch(() => {}); await nativeProxy?.close(); };
   const abort = () => { void close(); };
   deadline.addEventListener("abort", abort, { once: true });
   page.on("popup", popup => { void popup.close(); });
@@ -605,6 +629,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
         }
       }
       if (!nativeProxy) await route.fulfill({ status: reply.status, headers: responseHeaders, body: reply.buffer });
+      if (!closed && !request.signal?.aborted && method === "GET" && !request.redirectedFrom() && !redirect)
+        recordCompletedPublicAsset(url.href, request.resourceType(), reply.status);
     } catch (error) {
       if (teeRequestToken) teeBookingScope.invalidate();
       if (ezAssetRead && ezWitness === ezDocument && ezWitness) {
@@ -1014,7 +1040,11 @@ export async function createCourseDiscoveryBrowserSession(input: {
         if (terminalFailure) throw new Error(terminalFailure);
         deadline.throwIfAborted();
         if (closed) throw new Error("BROWSER_CLOSED");
-        return modelSafe(result);
+        const safe = modelSafe(result);
+        const entries = [...completedPublicAssets].filter(([key]) => !deliveredPublicAssets.has(key));
+        // Snapshot retries and later inspect/adapter work cannot acknowledge
+        // this channel. Only the final successful execute return may do so.
+        return { ...safe, completedPublicAssetRequests: entries.map(([, value]) => ({ ...value })), completedPublicAssetRequestsOverflow };
       }
       catch (error) {
         const message = error instanceof Error ? error.message : "";
@@ -1162,6 +1192,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
           ...(failure.publicHeaderDiagnostic ? { publicHeaderDiagnostic: { ...failure.publicHeaderDiagnostic } } : {}) })) };
     },
     async execute(value: unknown): Promise<DiscoveryBrowserSnapshot> {
+      const executeAction = async (): Promise<DiscoveryBrowserSnapshot> => {
       const action = discoveryBrowserActionSchema.parse(value);
       let documentNavigation = false, navigationAttempted = false;
       navigationFailureKind = undefined;
@@ -1328,6 +1359,14 @@ export async function createCourseDiscoveryBrowserSession(input: {
         if (terminalFailure) throw new Error(terminalFailure);
         throw error;
       }
+      };
+      const result = await executeAction();
+      // A failed action may have built a snapshot before post-snapshot work
+      // threw. Acknowledge only exact rows actually returned by this action;
+      // concurrently completed assets remain available to the next snapshot.
+      if (!closed) for (const asset of result.completedPublicAssetRequests ?? [])
+        deliveredPublicAssets.add(JSON.stringify([asset.url, asset.resourceType]));
+      return result;
     },
     async close() { deadline.removeEventListener("abort", abort); await close(); },
   };
