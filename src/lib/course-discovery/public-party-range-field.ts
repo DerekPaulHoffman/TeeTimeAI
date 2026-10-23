@@ -76,8 +76,19 @@ export async function readPublicPartyRangeField(node: Locator): Promise<string |
     if (!parent || parent.children.length !== 2 || !check.visible(parent)) return { reason: "PARENT_SHAPE" as const };
     const icon = [...parent.children].find(child => child !== element);
     if (!(icon instanceof HTMLElement) || icon.getAttribute("role") !== "img" || icon.innerText.trim() !== "person" ||
-        !check.visible(icon) || icon.hasAttribute("href") || icon.querySelector("input,button,select,textarea,a[href]"))
+        icon.hasAttribute("href") || icon.querySelector("input,button,select,textarea,a[href]"))
       return { reason: "ICON_CONTEXT" as const };
+    if (!check.visible(icon)) {
+      // A static person adornment may hide only itself from accessibility.
+      // Its physical visibility and the leaf's strict ancestor proof remain.
+      const box = icon.getBoundingClientRect(), style = getComputedStyle(icon);
+      if (icon.getAttribute("aria-hidden") !== "true" || icon.children.length || icon.hasAttribute("hidden") || icon.hasAttribute("inert") ||
+          icon.hasAttribute("form") || icon.hasAttribute("tabindex") || icon.hasAttribute("aria-describedby") ||
+          icon.isContentEditable || icon.hasAttribute("contenteditable") || icon.matches("input,select,textarea,button,a,area,summary,details") ||
+          icon.getAttributeNames().some(name => /^on|^aria-(?:haspopup|controls|owns|expanded|pressed|checked|selected)$/iu.test(name)) ||
+          box.width <= 0 || box.height <= 0 || style.display === "none" || style.visibility === "hidden" || style.opacity === "0" ||
+          icon.parentElement?.closest('[hidden],[inert],[aria-hidden="true"]')) return { reason: "ICON_CONTEXT" as const };
+    }
     const iconLabel = [icon.getAttribute("aria-label"), icon.getAttribute("title"), icon.getAttribute("name"),
       ...(icon.getAttribute("aria-labelledby") ?? "").split(/\s+/u).filter(Boolean).map(id => document.getElementById(id)?.textContent ?? "unresolved")]
       .filter(Boolean).join(" ").replace(/\s+/gu, " ").trim();

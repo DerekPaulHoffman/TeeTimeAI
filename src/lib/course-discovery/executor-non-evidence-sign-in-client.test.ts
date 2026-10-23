@@ -7,7 +7,7 @@ import { isSafeBrowserAssetUrl, isSafeRecipeUrl, parseAccessRecipe, recipeAllows
 
 vi.mock("@/lib/automation/provider-request-lease", () => ({ runWithProviderRequestLease: vi.fn() }));
 const chrome = "C:/Program Files/Google/Chrome/Application/chrome.exe";
-const clients = ["https://accounts.google.com/gsi/client", "https://token.dcap.com/v1/client"], pageUrl = "https://example.org/tee-times";
+const clients = ["https://accounts.google.com/gsi/client", "https://token.dcap.com/v1/client", "https://token.dcap.com/v1/client/hosted"], pageUrl = "https://example.org/tee-times";
 const input = { date: "2026-10-23", timeZone: "America/New_York", players: 2, startTime: "08:00", endTime: "18:00" };
 const recipe = () => parseAccessRecipe({ schemaVersion: 1, engine: "BROWSER_DOM", browserTransport: "PINNED_HTTP",
   target: { kind: "OUTDOOR", courseId: "fixture-course" },
@@ -65,8 +65,8 @@ describe.runIf(existsSync(chrome))("optional account and payment clients supply 
   it.each(clients)("retains the access-required outcome for an actual rendered sign-in gate with %s", async client => {
     expect(await run(client, "access")).toMatchObject({ status: "ACCESS_REQUIRED", complete: false, slots: [], evidence: { reason: "ACCESS_REQUIRED" } });
   }, 15_000);
-  it("refuses to enter an actual payment control even when it is mislabeled as a search step", async () => {
-    expect(await run(clients[1], "payment")).toMatchObject({ status: "FAILED", complete: false, slots: [], evidence: { reason: "UNSAFE_CONTROL" } });
+  it.each(clients.slice(1))("refuses an actual payment control even when mislabeled as search with %s", async client => {
+    expect(await run(client, "payment")).toMatchObject({ status: "FAILED", complete: false, slots: [], evidence: { reason: "UNSAFE_CONTROL" } });
   }, 15_000);
   it.each([
     ["https://kit.fontawesome.com/7aa4bc216c.js", "script"],

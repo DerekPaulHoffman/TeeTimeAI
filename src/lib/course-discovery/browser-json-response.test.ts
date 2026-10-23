@@ -45,7 +45,7 @@ describe("finite observed calendar-prefetch classification, no read admission", 
     expect(browserJsonAncillaryCalendarRequestMatches(ancillary(`${path}?${query.split("&").reverse().join("&")}`), primary(), entry, input, isSafeRecipeUrl)).toBe(true);
   });
   it.each([
-    ["party_size=2", "party_size=3"], ["picked_duration=60", "picked_duration=90"], ["time_slot=18:00", "time_slot=17:00"],
+    ["party_size=2", "party_size=3"], ["picked_duration=60", "picked_duration=90"],
     ["halo_size_interval=64", "halo_size_interval=63"], ["channel=web", "channel=OTHER"], ["selected_lang_code=en", "selected_lang_code=fr"],
     ["venue=examplegolf", "venue=other"], ["num_days=3", "num_days=1"], ["num_days=3", "num_days=2"],
     ["start_date=10-24-2030", "start_date=10-23-2030"], ["start_date=10-24-2030", "start_date=10-25-2030"],

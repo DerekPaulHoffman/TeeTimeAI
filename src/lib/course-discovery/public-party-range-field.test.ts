@@ -70,6 +70,39 @@ describe("current DOM authority for a public party range", () => {
     await page.setContent(partyField());
     expect(await readPublicPartyRangeField(page.locator(".party"))).toBe("2 to 4 players");
   });
+  it("reads the actual visible decorative person icon with only its own aria-hidden flag", async () => {
+    await page.setContent(partyField().replace('role="img"', 'role="img" aria-hidden="true"'));
+    expect(await readPublicPartyRangeField(page.locator(".party"))).toBe("2 to 4 players");
+  });
+  it.each([
+    'hidden', 'inert', 'style="display:none"', 'style="visibility:hidden"', 'style="opacity:0"',
+    'href="/account"', 'form="filters"', 'tabindex="0"', 'onclick="void 0"', 'aria-controls="menu"', 'aria-expanded="false"',
+    'aria-label="Account profile"', 'title="Payment details"', 'aria-labelledby="missing"',
+    'aria-describedby="private"', 'contenteditable="true"',
+  ])("keeps decorative icon %s unsafe despite self aria-hidden", async attributes => {
+    await page.setContent(partyField().replace('role="img"', `role="img" aria-hidden="true" ${attributes}`));
+    await expect(readPublicPartyRangeField(page.locator(".party"))).rejects.toThrow("PUBLIC_PARTY_RANGE_ICON_CONTEXT");
+  });
+  it.each([
+    `<section aria-hidden="true">${partyField().replace('role="img"', 'role="img" aria-hidden="true"')}</section>`,
+    `<section hidden>${partyField().replace('role="img"', 'role="img" aria-hidden="true"')}</section>`,
+    `<section inert>${partyField().replace('role="img"', 'role="img" aria-hidden="true"')}</section>`,
+    `<section aria-label="Account">${partyField().replace('role="img"', 'role="img" aria-hidden="true"')}</section>`,
+    partyField().replace('role="img"', 'role="img" aria-hidden="true"').replace('class="party"', 'class="party" aria-hidden="true"'),
+  ])("retains every leaf and ancestor veto around a decorative icon", async html => {
+    await page.setContent(html);
+    await expect(readPublicPartyRangeField(page.locator(".party"))).rejects.toThrow("PUBLIC_PARTY_RANGE_LEAF_CONTEXT");
+  });
+  it.each([
+    partyField().replace('role="img"', 'role="button" aria-hidden="true"'),
+    partyField().replace('role="img"', 'role="img" aria-hidden="true"').replace('>person<', '>players<'),
+    partyField().replace('role="img"', 'role="img" aria-hidden="true"').replace('>person<', '>person<input><'),
+    partyField().replace('role="img"', 'role="img" aria-hidden="true"').replace('>person<', '>person<span></span><'),
+    partyField().replace('<mat-icon role="img">person</mat-icon>', '<button type="button" role="img" aria-hidden="true">person</button>'),
+  ])("does not turn an interactive, nested or unrelated caption into a decorative person", async html => {
+    await page.setContent(html);
+    await expect(readPublicPartyRangeField(page.locator(".party"))).rejects.toThrow("PUBLIC_PARTY_RANGE_ICON_CONTEXT");
+  });
   it.each([`<form>${partyField()}</form>`, filterForm('method="GET" target="_self"')])(
     "reads a public leaf inside only a bounded read-only filter form", async html => {
       await page.setContent(html);
@@ -123,7 +156,7 @@ describe("current DOM authority for a public party range", () => {
   });
   it.each([
     [partyField("4-1"), "RANGE_INVALID"], [partyField("2-4 hours"), "RANGE_INVALID"],
-    [partyField().replace('role="img"', 'role="img" aria-hidden="true"'), "ICON_CONTEXT"],
+    [partyField().replace('role="img"', 'role="img" aria-hidden="true" hidden'), "ICON_CONTEXT"],
     [partyField().replace('</mat-icon>', '</mat-icon><span>Other</span>'), "PARENT_SHAPE"],
     [`<section aria-label="Login">${partyField()}</section>`, "LEAF_CONTEXT"],
   ])("retains closed precise rejection %s -> %s", async (html, reason) => {
@@ -136,7 +169,9 @@ describe("current DOM authority for a public party range", () => {
       `import{readPublicPartyRangeField as read}from ${JSON.stringify(path)};void read({evaluate:async(fn)=>{process.stdout.write(fn.toString());throw Error('CAPTURE_DONE')}}).catch(()=>{});`],
       { encoding: "utf8", timeout: 10_000, maxBuffer: 100_000 });
     expect(serialized).not.toMatch(/\b__name\s*\(/u);
-    await page.setContent(filterForm());
+    // Retained actual shape: a physically visible static person adornment is
+    // intentionally absent from the accessibility tree, not from the layout.
+    await page.setContent(filterForm("", "", partyField().replace('role="img"', 'role="img" aria-hidden="true"')));
     const callback = new Function(`return (${serialized});`)();
     expect(await page.locator(".party").evaluate(callback)).toBe("2 to 4 players");
   });

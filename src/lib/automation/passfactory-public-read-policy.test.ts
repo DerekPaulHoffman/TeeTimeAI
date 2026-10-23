@@ -110,6 +110,23 @@ it("quietly denies only the exact Datacap card-tokenization script without a pay
     expect(isNonEvidenceBrowserResource(url, "script")).toBe(false);
 });
 
+it("quietly denies only the exact documented Datacap hosted card-tokenization script", () => {
+  const client = "https://token.dcap.com/v1/client/hosted";
+  expect(isNonEvidenceBrowserResource(client, "script")).toBe(true);
+  expect(isIncidentalBrowserRequest(client)).toBe(false);
+  for (const type of ["document", "xhr", "fetch", "other", "stylesheet"])
+    expect(isNonEvidenceBrowserResource(client, type)).toBe(false);
+  // Existing decorative-resource denial remains independent of this script rule.
+  expect(isNonEvidenceBrowserResource(client, "image")).toBe(true);
+  for (const value of [client + "?mode=payment", client + "?", client + "#payment", client + "#", client + "/",
+    "https://token.dcap.com/v1/client/%68osted", "https://token.dcap.com/v1/client/hosted/availability", "https://token.dcap.com/v1/otu",
+    "https://token.dcap.com/v1/view/i", "https://token.dcap.com/v1/client/other", "https://token.dcap.com/checkout",
+    "https://token.dcap.com.evil.test/v1/client/hosted", "https://other.example/v1/client/hosted", "http://token.dcap.com/v1/client/hosted",
+    "https://u:p@token.dcap.com/v1/client/hosted", "https://token.dcap.com:443/v1/client/hosted", "https://token.dcap.com:444/v1/client/hosted",
+    "https://TOKEN.dcap.com/v1/client/hosted", " " + client, "not a URL"])
+    expect(isNonEvidenceBrowserResource(value, "script")).toBe(false);
+});
+
 it("quietly denies bounded Font Awesome icon clients without hiding an availability request", () => {
   for (const value of [
     "https://kit.fontawesome.com/7aa4bc216c.js",

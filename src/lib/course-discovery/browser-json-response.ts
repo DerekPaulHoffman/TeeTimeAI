@@ -19,6 +19,14 @@ function field(value: unknown, path: string): unknown {
   return value;
 }
 
+function coversRequestedWindow(url: URL, input: Input) {
+  const minutes = (time: string) => Number(time.slice(0, 2)) * 60 + Number(time.slice(3));
+  const center = minutes(url.searchParams.get("time_slot")!), radius = Number(url.searchParams.get("halo_size_interval")) * 15;
+  // The pinned public client divides a minute halo by 15 for the wire and
+  // compares the same halo with moment.add/subtract(..., "minutes").
+  return center - radius <= minutes(input.startTime) && center + radius >= minutes(input.endTime);
+}
+
 /** This is the published public range role only. It grants no URL, credential,
  * transport or transaction permission; callers still apply every normal fence. */
 export function browserJsonParticipantRequestMatches(request: { url: string; method: string }, bookingUrl: string,
@@ -33,12 +41,19 @@ export function browserJsonParticipantRequestMatches(request: { url: string; met
         url.searchParams.get("party_size") !== String(input.players) || url.searchParams.get("picked_duration") !== String(input.durationMinutes) ||
         url.searchParams.get("start_date") !== `${input.date.slice(5, 7)}-${input.date.slice(8)}-${input.date.slice(0, 4)}` ||
         url.searchParams.get("num_days") !== "1") return false;
-    const minutes = (time: string) => Number(time.slice(0, 2)) * 60 + Number(time.slice(3));
-    const center = minutes(url.searchParams.get("time_slot")!), radius = Number(url.searchParams.get("halo_size_interval")) * 15;
-    // The pinned public client divides a minute halo by 15 for the wire and
-    // compares the same halo with moment.add/subtract(..., "minutes").
-    return center - radius <= minutes(input.startTime) && center + radius >= minutes(input.endTime);
+    return coversRequestedWindow(url, input);
   } catch { return false; }
+}
+
+/** The public client chooses its clock center dynamically. Only that scalar may
+ * differ from the saved primary fence, and both halos must cover the full input.
+ * All other original URL bytes remain exact; this is not request admission. */
+export function browserJsonPrimaryRequestMatches(request: { url: string; method: string }, primary: { url: string; method: string },
+  bookingUrl: string, input: Input, strictUrl: (value: string) => boolean) {
+  if (!browserJsonParticipantRequestMatches(request, bookingUrl, input, strictUrl) ||
+      !browserJsonParticipantRequestMatches(primary, bookingUrl, input, strictUrl)) return false;
+  const withoutCenter = (url: string) => url.replace(/([?&]time_slot=)\d{2}:\d{2}(?=&|$)/u, "$1PUBLIC_CLOCK");
+  return withoutCenter(request.url) === withoutCenter(primary.url);
 }
 
 /** A finite observed calendar-prefetch shape, not a provider range limit or
@@ -51,7 +66,7 @@ export function browserJsonAncillaryCalendarRequestMatches(request: { url: strin
   try {
     const candidate = new URL(request.url), planned = new URL(primary.url);
     if (candidate.origin !== planned.origin || candidate.pathname !== planned.pathname || candidate.searchParams.get("num_days") !== "3") return false;
-    const pairs = (url: URL) => [...url.searchParams.entries()].filter(([key]) => !["start_date", "num_days"].includes(key))
+    const pairs = (url: URL) => [...url.searchParams.entries()].filter(([key]) => !["start_date", "num_days", "time_slot"].includes(key))
       .sort(([a, av], [b, bv]) => a.localeCompare(b) || av.localeCompare(bv));
     if (JSON.stringify(pairs(candidate)) !== JSON.stringify(pairs(planned))) return false;
     const day = (value: string) => {
@@ -62,7 +77,10 @@ export function browserJsonAncillaryCalendarRequestMatches(request: { url: strin
     // These eight offsets were observed across a month boundary; no claim is
     // made about a universal client loop or provider maximum.
     const offset = (day(candidate.searchParams.get("start_date")!) - day(planned.searchParams.get("start_date")!)) / 86_400_000;
-    return [1, 4, 7, 10, 13, 16, 19, 22].includes(offset);
+    // The published range caller passes its searchDateCursor moment to the
+    // same builder. Its original clock may differ, but its unchanged halo must
+    // independently cover the full input; the calendar response proves no rows.
+    return [1, 4, 7, 10, 13, 16, 19, 22].includes(offset) && coversRequestedWindow(candidate, input);
   } catch { return false; }
 }
 

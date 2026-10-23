@@ -43,7 +43,7 @@ import { inspectPublicDatePickerInput, openPublicDatePickerInput } from "./publi
 import { continuePublicRentalService, selectPublicRentalService, type PublicRentalServiceSelection } from "./public-service-control";
 import { parsePublicPlayerOptions } from "./public-player-options";
 import { matchesPublicVenueGreeting } from "./public-venue-greeting";
-import { browserJsonAncillaryCalendarRequestMatches, browserJsonParticipantRequestMatches, extractBrowserJsonRows } from "./browser-json-response";
+import { browserJsonAncillaryCalendarRequestMatches, browserJsonPrimaryRequestMatches, extractBrowserJsonRows } from "./browser-json-response";
 import { describeBrowserJsonRequestMismatch } from "./browser-json-request-diagnostics";
 
 type ExtractedAccessRecipe = Exclude<CourseAccessRecipeData, { engine: "EXISTING_ADAPTER" }>;
@@ -107,9 +107,10 @@ function matchesAvailabilityRequest(recipe: BrowserAccessRecipe, input: AccessEx
   // Public setup data is ancillary even if a recipe mistakenly names it as
   // the response fence. It cannot prove dated inventory or an empty result.
   if (isSafeBrowserBootstrapReadUrl(request.url, "fetch", request.method)) return false;
-  if (request.method !== fence.method || request.url !== expandRecipeTemplate(fence.url, input, true)) return false;
-  if (recipe.engine === "BROWSER_JSON" && recipe.requestBinding === "SEVENROOMS_PUBLIC_PARTICIPANTS" &&
-      !browserJsonParticipantRequestMatches(request, recipe.source.bookingUrl, input, isSafeRecipeUrl)) return false;
+  const primary = { url: expandRecipeTemplate(fence.url, input, true), method: fence.method };
+  if (recipe.engine === "BROWSER_JSON" && recipe.requestBinding === "SEVENROOMS_PUBLIC_PARTICIPANTS") {
+    if (!browserJsonPrimaryRequestMatches(request, primary, recipe.source.bookingUrl, input, isSafeRecipeUrl)) return false;
+  } else if (request.method !== primary.method || request.url !== primary.url) return false;
   try {
     const url = new URL(request.url), segments = url.pathname.slice(1).split("/");
     if (fence.date.source === "PATH" && (request.method !== "GET" || segments.some(segment => !segment) || /%(?:2f|5c)/iu.test(url.pathname))) return false;
