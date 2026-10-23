@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import { chromium, type Page, type Route } from "@playwright/test";
 import { describe, expect, it, vi } from "vitest";
 import { authorizePublicClientReadHeaders, installNativeRedirectRouting, isCurrentPublicClientReadHeaders,
-  publicClientReadHeaderProofFailure, nativeSourceLoadingFailedCorsErrors, nativePublicClientPreflightMethod, isNativeReadSupersededFailure, isNativeReadTerminalFailure, type NativeReadRoute, type NativeRequestDiagnostic } from "./native-redirect-routing";
+  publicClientReadHeaderProofFailure, nativeSourceLoadingFailedCorsErrors, nativePublicClientPreflightMethod, isNativeReadSupersededFailure, isNativeReadTerminalFailure, nativeMindbodyBootstrapSource, type NativeReadRoute, type NativeRequestDiagnostic } from "./native-redirect-routing";
 import { continueNativeBrowserRead, isObservedNativeRedirect, isObservedNativeRedirectTarget, nativeReadPreflightMethod } from "./native-public-browser";
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
 
@@ -1143,6 +1143,92 @@ describe("native document-generation retirement", () => {
       await expect(test.guard.beginDocumentNavigation(test.main as never)).rejects.toThrow(mode === "hang" ? "NATIVE_REDIRECT_ABORT_TIMEOUT" : "offline abort rejection");
       expect(test.close).toHaveBeenCalledOnce();
       expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "queued")).toBe(false);
+    } finally { await test.guard.close(); }
+  });
+});
+
+describe("native anonymous Mindbody bootstrap ownership", () => {
+  const source = "https://clients.mindbodyonline.com/classic/ws?studioid=685163&stype=-9", target = "https://clients.mindbodyonline.com/classic/home";
+  const headers = { "Content-Type": "application/x-www-form-urlencoded", Origin: "https://clients.mindbodyonline.com" };
+  const fields = "tg vt lvl qParam view page catid prodid prodGroupId sSU optForwardingLink singleUseToken oAuthToken launchGUID launchUID launchPWDChange launchPWDChangeKey launchLostPWD launchResetPWD launchBizModeLogin launchBizModeLoginWithRedirectLink key consumerModeRedirect extLink giftCardID".split(" ");
+  const body = new URLSearchParams([...fields.map(key => [key, ""]), ["studioId", "685163"], ["stype", "-9"], ["trn", "0"], ["classid", "0"], ["date", "10/23/2026"]]).toString();
+  type Test = Awaited<ReturnType<typeof installed>>;
+  const intent = (test: Test, changes: object = {}) => test.events.get("Page.frameRequestedNavigation")!({ frameId: "main", reason: "formSubmissionPost", disposition: "currentTab", url: target, ...changes });
+  const network = (test: Test, changes: object = {}) => test.events.get("Network.requestWillBeSent")!({ requestId: "network-bootstrap", loaderId: "loader-post", frameId: "main", type: "Document",
+    request: { url: target, method: "POST", headers, hasPostData: true, postData: body }, ...changes });
+  const post = (test: Test, changes: object = {}) => test.request("bootstrap", { resourceType: "Document", request: { url: target, method: "POST", headers, hasPostData: true, postData: body }, ...changes });
+  const prepare = async (test: Test, commit = true, ack?: ReturnType<typeof deferred<object>>) => {
+    const send = test.cdp.send.getMockImplementation()!;
+    if (ack) test.cdp.send.mockImplementation((name, values) => name === "Fetch.continueResponse" && values?.requestId === "document" ? ack.promise : send(name, values));
+    await test.guard.beginDocumentNavigation(test.main as never);
+    test.events.get("Network.requestWillBeSent")!({ requestId: "network-document", loaderId: "loader-source", frameId: "main", type: "Document", request: { url: source, method: "GET", headers: {} } });
+    test.request("document", { resourceType: "Document", request: { url: source, method: "GET", headers: {} } }); await test.routes[0].continue();
+    test.response("document", { resourceType: "Document", request: { url: source, method: "GET", headers: {} }, responseHeaders: [{ name: "Content-Type", value: "text/html" }] });
+    if (!ack) await test.routes[0].request().response();
+    else await vi.waitFor(() => expect(test.cdp.send.mock.calls.some(([name]) => name === "Fetch.continueResponse")).toBe(true));
+    if (commit) test.events.get("Page.frameNavigated")!({ frame: { id: "main", loaderId: "loader-source", url: source } });
+  };
+
+  it.each([false, true])("attests one public form successor only after source completion and ACK (held=%s)", async held => {
+    const test = await installed(), ack = deferred<object>();
+    try {
+      await prepare(test, true, held ? ack : undefined); intent(test); network(test); post(test);
+      if (held) { await new Promise(resolve => setTimeout(resolve, 5)); expect(test.routes).toHaveLength(1); ack.resolve({}); }
+      await vi.waitFor(() => expect(test.routes).toHaveLength(2));
+      const request = test.routes[1].request(), proof = nativeMindbodyBootstrapSource(request);
+      expect(proof).toEqual({ sourceUrl: source }); expect(Object.isFrozen(proof)).toBe(true);
+      expect(nativeMindbodyBootstrapSource({ ...request })).toBeNull();
+      expect(request.redirectedFrom()).toBeNull(); expect(test.routes[0].request().signal?.aborted).toBe(true);
+      await test.routes[1].continue(); expect(test.failures).toEqual([]);
+      expect(test.cdp.send.mock.calls.find(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "bootstrap"))
+        .toEqual(["Fetch.continueRequest", { requestId: "bootstrap" }]);
+      test.response("bootstrap", { resourceType: "Document", request: { url: target, method: "POST", headers, hasPostData: true, postData: body } });
+      await request.response();
+      await test.guard.beginDocumentNavigation(test.main as never); expect(nativeMindbodyBootstrapSource(request)).toBeNull();
+    } finally { ack.resolve({}); await test.guard.close(); }
+  });
+  it.each(["missing intent", "script intent", "foreign frame", "new tab", "uncommitted", "changed document", "network body", "missing network body", "fetch body", "fetch origin", "network origin", "nonempty launch"])(
+    "rejects a public-looking bootstrap with %s", async mode => {
+      const test = await installed();
+      try {
+        await prepare(test, mode !== "uncommitted");
+        if (mode === "changed document") test.events.get("Page.navigatedWithinDocument")!({ frameId: "main", url: source + "&extra=1" });
+        if (mode !== "missing intent") intent(test, mode === "script intent" ? { reason: "scriptInitiated" } : mode === "foreign frame" ? { frameId: "child" } : mode === "new tab" ? { disposition: "newTab" } : {});
+        const changed = body.replace("launchUID=", "launchUID=private");
+        network(test, { request: { url: target, method: "POST", headers: mode === "network origin" ? { "Content-Type": headers["Content-Type"] } : headers,
+          hasPostData: true, ...(mode === "missing network body" ? {} : { postData: mode === "network body" ? body.replace("10%2F23", "10%2F24") : mode === "nonempty launch" ? changed : body }) } });
+        post(test, { request: { url: target, method: "POST", headers: mode === "fetch origin" ? { "Content-Type": headers["Content-Type"] } : headers,
+          hasPostData: true, postData: mode === "fetch body" ? body.replace("10%2F23", "10%2F24") : mode === "nonempty launch" ? changed : body } });
+        await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce()); expect(test.routes).toHaveLength(1);
+        expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "bootstrap")).toBe(false);
+      } finally { await test.guard.close(); }
+    });
+  it("does not attest an ordinary same-loader POST or reuse another request's source", async () => {
+    const test = await installed();
+    try { await prepare(test); network(test, { loaderId: "loader-source" }); post(test); await vi.waitFor(() => expect(test.routes).toHaveLength(2));
+      expect(nativeMindbodyBootstrapSource(test.routes[1].request())).toBeNull();
+    } finally { await test.guard.close(); }
+  });
+  it.each(["source URL changes", "cancelled"] as const)("does not transfer bootstrap ownership while source ACK waits and %s", async mode => {
+    const cancelled = new AbortController(), test = await installed(undefined, cancelled.signal), ack = deferred<object>();
+    try {
+      await prepare(test, true, ack); intent(test); network(test); post(test);
+      await new Promise(resolve => setTimeout(resolve, 5)); expect(test.routes).toHaveLength(1);
+      if (mode === "cancelled") cancelled.abort();
+      else test.events.get("Page.navigatedWithinDocument")!({ frameId: "main", url: source + "&changed=1" });
+      ack.resolve({}); await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce()); expect(test.routes).toHaveLength(1);
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "bootstrap")).toBe(false);
+    } finally { ack.resolve({}); await test.guard.close(); }
+  });
+  it("keeps POST document redirects including 303 denied", async () => {
+    const test = await installed();
+    try {
+      await prepare(test); intent(test); network(test); post(test); await vi.waitFor(() => expect(test.routes).toHaveLength(2)); await test.routes[1].continue();
+      test.response("bootstrap", { resourceType: "Document", request: { url: target, method: "POST", headers, hasPostData: true, postData: body }, responseStatusCode: 303, responseHeaders: [{ name: "Location", value: source }] });
+      await test.routes[1].request().response();
+      test.events.get("Network.requestWillBeSent")!({ requestId: "network-bootstrap", loaderId: "loader-post", frameId: "main", type: "Document", request: { url: source, method: "GET", headers: {} } });
+      test.request("redirected", { networkId: "network-bootstrap", redirectedRequestId: "bootstrap", resourceType: "Document", request: { url: source, method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce()); expect(test.routes).toHaveLength(2); expect(test.failures).toContain("NATIVE_REDIRECT_PROVENANCE_REJECTED");
     } finally { await test.guard.close(); }
   });
 });

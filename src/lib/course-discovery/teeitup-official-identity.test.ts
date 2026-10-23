@@ -14,6 +14,99 @@ const facility = { id: 5319, courseId: "public-course", name: "Mystery Valley Go
   address: "6094 Shadow Rock Drive, Lithonia, GA 30058, GA 30058, US", timeZone: source.timeZone, isSimulator: false };
 
 describe("official source/address identity attestation", () => {
+  it("accepts the retained Emerald title and exact welcome heading with independently complete visible address evidence", () => {
+    // Reconstructs the retained public text and links; this is not a raw HTML capture.
+    const identity = { officialUrl: "https://www.golfemeraldlakes.com/", bookingUrl: "https://emerald-lakes-golf-course.book.teeitup.com/",
+      venueName: "Emerald Lakes Golf Course", venueAddress: "10651 E. Stockton Blvd, Elk Grove, CA 95624, USA", timeZone: "America/Los_Angeles" };
+    const document = { url: identity.officialUrl,
+      html: `<html><head><title>Home - Emerald Lakes Golf Course</title></head><body><h1>WELCOME TO EMERALD LAKES GOLF COURSE</h1>
+        <div>10651 E. Stockton Blvd.<br>Elk Grove, CA 95624</div>
+        <a href="${identity.bookingUrl}">BOOK A TEE TIME</a><a href="${identity.bookingUrl}">TEE TIMES</a></body></html>`,
+      visibleEvidence: { title: "Home - Emerald Lakes Golf Course", headings: ["WELCOME TO EMERALD LAKES GOLF COURSE"],
+        linkUrls: [identity.bookingUrl], addressTexts: ["10651 E. Stockton Blvd., Elk Grove, CA 95624"] } };
+    const proof = deriveTeeItUpOfficialIdentityProof(identity, document, { requireVisibleEvidence: true });
+    expect(proof.venueName).toBe("emerald lakes golf course");
+    expect(proof.alternateAddress).toEqual({ street: "10651 e stockton blvd", locality: "elk grove", region: "CA", postalCode: "95624", country: "US" });
+    expect(proof.bookingUrl).toBe(identity.bookingUrl);
+    expect(() => deriveTeeItUpOfficialIdentityProof(identity, { ...document, visibleEvidence: { ...document.visibleEvidence,
+      headings: ["Welcome to another golf course"] } }, { requireVisibleEvidence: true })).toThrow("OFFICIAL_IDENTITY_UNVERIFIED");
+    expect(() => deriveTeeItUpOfficialIdentityProof(identity, { ...document, visibleEvidence: { ...document.visibleEvidence,
+      addressTexts: ["10651 E. Stockton Blvd., Elk Grove, CA 95625"] } }, { requireVisibleEvidence: true })).toThrow("OFFICIAL_IDENTITY_UNVERIFIED");
+  });
+  it.each(["Home - Mystery Valley Golf Club", "Mystery Valley Golf Club - Home"])("recognizes the exact spaced ASCII title segment %s", pageTitle => {
+    expect(deriveTeeItUpOfficialIdentityProof(source, page(undefined, pageTitle)).venueName).toBe("mystery valley golf course");
+  });
+  it("keeps hyphens inside a full venue name rather than treating them as title delimiters", () => {
+    const identity = { ...source, venueName: "Twin-Creek Golf Course" };
+    expect(deriveTeeItUpOfficialIdentityProof(identity, page(undefined, "Home - Twin-Creek Golf Course - Official Site", "<h1>Welcome to Twin-Creek Golf Course</h1>"))
+      .venueName).toBe("twin creek golf course");
+  });
+  it.each(["Cedar Valley - East Golf Course", "Cedar Valley - East Golf Course | Official Site"])
+    ("preserves a previously accepted full venue title containing a spaced hyphen: %s", pageTitle => {
+      expect(deriveTeeItUpOfficialIdentityProof({ ...source, venueName: "Cedar Valley - East Golf Course" },
+        page(undefined, pageTitle, "<h1>Cedar Valley - East Golf Course</h1>")).venueName).toBe("cedar valley east golf course");
+    });
+  it.each(["<h1>Welcome to Mystery Valley Golf Club</h1>", "<h2>WELCOME TO MYSTERY VALLEY GOLF COURSE</h2>"])("recognizes only an exact welcome heading wrapper %s", headings => {
+    const wrapped = deriveTeeItUpOfficialIdentityProof(source, page(undefined, undefined, headings));
+    expect(wrapped.venueName).toBe("mystery valley golf course");
+    expect(wrapped.markupWitnessSha256).not.toBe(deriveTeeItUpOfficialIdentityProof(source, page()).markupWitnessSha256);
+  });
+  it("preserves an exact full course name that itself begins with Welcome to", () => {
+    expect(deriveTeeItUpOfficialIdentityProof({ ...source, venueName: "Welcome To Golf Club" },
+      page(undefined, "Welcome To Golf Club", "<h1>Welcome To Golf Club</h1>")).venueName).toBe("welcome to golf course");
+  });
+  it.each([
+    page(undefined, "Home-Mystery Valley Golf Club"),
+    page(undefined, "Home - Visit Mystery Valley Golf Club"),
+    page(undefined, "A - B - Mystery Valley Golf Club - D"),
+    page(undefined, undefined, "<h1>Welcome to the Mystery Valley Golf Club</h1>"),
+    page(undefined, undefined, "<h1>Welcome back to Mystery Valley Golf Club</h1>"),
+    page(undefined, undefined, "<h1>Welcome to Mystery Valley Golf Clubhouse</h1>"),
+    page(undefined, undefined, "<h1>Welcome to Mystery Valley Golf Club</h1><h1>Other Resort</h1>"),
+    page(undefined, undefined, "<h1>Welcome to Another Golf Course</h1><h2>Mystery Valley Golf Club</h2>"),
+    page(undefined, undefined, "<h1>Welcome to Mystery Valley Golf Club</h1><h2>Welcome to Another Golf Course</h2>"),
+  ])("rejects broader promotional, contradictory or missing exact title/heading evidence %#", document => {
+    expect(() => deriveTeeItUpOfficialIdentityProof(source, document)).toThrow("OFFICIAL_IDENTITY_UNVERIFIED");
+  });
+  it.each(["", "?course=5319", "?course=5319,5320&date=2030-10-23"])("accepts only the same legacy tenant and exact public URL descriptor across com/golf aliases %s", query => {
+    const bookingUrl = `https://mystery-valley.book.teeitup.com/${query}`, aliasUrl = `https://mystery-valley.book.teeitup.golf/${query}`;
+    const identity = { ...source, bookingUrl };
+    const document = page(address + `<a href="${bookingUrl}">Tee Times</a><a href="${aliasUrl}">Book</a>`);
+    const proof = deriveTeeItUpOfficialIdentityProof(identity, document);
+    expect(proof.bookingUrl).toBe(bookingUrl);
+    expect(proof.markupWitnessSha256).not.toBe(deriveTeeItUpOfficialIdentityProof(identity, page(address + `<a href="${bookingUrl}">Tee Times</a>`)).markupWitnessSha256);
+    expect(() => deriveTeeItUpOfficialIdentityProof(identity, page(address + `<a href="${aliasUrl}">Tee Times</a>`))).toThrow("OFFICIAL_IDENTITY_UNVERIFIED");
+    expect(deriveTeeItUpOfficialIdentityProof({ ...identity, bookingUrl: aliasUrl }, document).bookingUrl).toBe(aliasUrl);
+  });
+  it.each([
+    "https://another.book.teeitup.com/?course=5319",
+    "https://mystery-valley.book.teeitup.golf/?course=5320",
+    "https://mystery-valley.book.teeitup.golf/",
+    "https://mystery-valley.book.teeitup.golf/?course=5319&date=2030-10-23",
+    "https://mystery-valley.book.teeitup.golf/other?course=5319",
+    "http://mystery-valley.book.teeitup.golf/?course=5319",
+    "https://u:p@mystery-valley.book.teeitup.golf/?course=5319",
+    "https://mystery-valley.book.teeitup.golf:8443/?course=5319",
+    "https://mystery-valley.book.teeitup.golf/?course=5319#other",
+    "https://mystery-valley.book-v2.teeitup.golf/?course=5319",
+  ])("rejects a second conflicting or noncanonical booking descriptor %s", other => {
+    const bookingUrl = "https://mystery-valley.book.teeitup.com/?course=5319";
+    expect(() => deriveTeeItUpOfficialIdentityProof({ ...source, bookingUrl }, page(address + `<a href="${bookingUrl}">Tee Times</a><a href="${other}">Book</a>`)))
+      .toThrow("OFFICIAL_IDENTITY_UNVERIFIED");
+  });
+  it.each(["?course=5319&course=5319", "?course=5319,5319", "?course=2147483648", "?course=0", "?date=2030-02-30", "?token=opaque"])
+    ("does not equate matching malformed or nonpublic legacy alias descriptors %s", query => {
+      const bookingUrl = `https://mystery-valley.book.teeitup.com/${query}`, aliasUrl = `https://mystery-valley.book.teeitup.golf/${query}`;
+      expect(() => deriveTeeItUpOfficialIdentityProof({ ...source, bookingUrl }, page(address + `<a href="${bookingUrl}">Tee Times</a><a href="${aliasUrl}">Book</a>`)))
+        .toThrow("OFFICIAL_IDENTITY_UNVERIFIED");
+    });
+  it("does not infer alias equivalence from reordered or differently encoded queries", () => {
+    const bookingUrl = "https://mystery-valley.book.teeitup.com/?course=5319,5320&date=2030-10-23";
+    for (const aliasUrl of ["https://mystery-valley.book.teeitup.golf/?date=2030-10-23&course=5319,5320",
+      "https://mystery-valley.book.teeitup.golf/?course=5319%2C5320&date=2030-10-23"])
+      expect(() => deriveTeeItUpOfficialIdentityProof({ ...source, bookingUrl }, page(address + `<a href="${bookingUrl}">Tee Times</a><a href="${aliasUrl}">Book</a>`)))
+        .toThrow("OFFICIAL_IDENTITY_UNVERIFIED");
+  });
   it("accepts the entire title segment plus standalone heading and a unique printed alternate address", () => {
     const proof = deriveTeeItUpOfficialIdentityProof(source, page());
     expect(proof).toEqual({ kind: "OFFICIAL_SOURCE_ADDRESS", officialPageUrl: source.officialUrl, bookingUrl: source.bookingUrl, markupWitnessSha256: expect.stringMatching(/^[a-f0-9]{64}$/u),

@@ -1,5 +1,6 @@
 import type { Frame, Page, Response, Route } from "@playwright/test";
 import { isNonEvidenceBrowserResource } from "@/lib/automation/passfactory-public-read-policy";
+import { isMindbodyClassicPublicBootstrapPost, mindbodyClassicPublicBootstrapSource } from "@/lib/automation/mindbody-public-read-policy";
 import { canonicalPublicReadUrl } from "./public-request-url";
 import { PUBLIC_BROWSER_TOTAL_BYTES, publicBrowserResponseLimit } from "./browser-resource-limits";
 import { isSafeBrowserAssetUrl, isSafeRecipeUrl } from "./recipe";
@@ -72,6 +73,7 @@ type RecordEntry = {
   failureCode?: string; failure?: Error;
   generation: DocumentGeneration; loaderId?: string; networkIdentityRevision?: number; responseStatus?: number; responseMimeType?: string;
   preflight?: PreflightSource;
+  mindbodyBootstrapSource?: NativeMindbodyBootstrapSource;
   cancellation: AbortController; handlerDone: boolean; responsePaused: boolean;
   retirementAck?: Promise<void>;
   retirementAcks?: Partial<Record<"request" | "response", Promise<void>>>;
@@ -88,8 +90,10 @@ type PendingInitialPause = { id: string; generation: DocumentGeneration; retired
   successorIdentity?: NetworkIdentity; terminalFailed?: boolean;
   retirementAck?: Promise<void>; cancelled: ReturnType<typeof pending<void>> };
 type CommittedDocument = { record: RecordEntry; loaderId: string };
-type DocumentIntent = { source: CommittedDocument; target: string; networkRevision: number; createdAt: number; used: boolean };
-type NativeRecordOwner = { closed: boolean; authorizeHeaders?: (record: RecordEntry) => Promise<PublicClientReadHeaderProof | null> };
+type DocumentIntent = { source: CommittedDocument; target: string; reason: "scriptInitiated" | "formSubmissionPost"; networkRevision: number; createdAt: number; used: boolean };
+export type NativeMindbodyBootstrapSource = Readonly<{ sourceUrl: string }>;
+type NativeRecordOwner = { closed: boolean; authorizeHeaders?: (record: RecordEntry) => Promise<PublicClientReadHeaderProof | null>;
+  mindbodyBootstrapSource?: (record: RecordEntry) => NativeMindbodyBootstrapSource | null };
 // Only adapters minted by this controller have redirect provenance. A model,
 // Playwright lookalike, diagnostic or caller-supplied redirectedFrom chain does
 // not gain authority by exposing the same methods or URL strings.
@@ -124,6 +128,12 @@ function rejectPublicHeaderProof(proof: PublicClientReadHeaderProof, failure: Na
 export async function authorizePublicClientReadHeaders(request: NativeReadRequest): Promise<PublicClientReadHeaderProof | null> {
   const value = nativeRequestRecords.get(request);
   return value && !value.owner.closed ? await value.owner.authorizeHeaders?.(value.record) ?? null : null;
+}
+/** Immutable source metadata for one privately attested bootstrap successor.
+ * It grants no read permission and expires with that exact native generation. */
+export function nativeMindbodyBootstrapSource(request: NativeReadRequest): NativeMindbodyBootstrapSource | null {
+  const value = nativeRequestRecords.get(request);
+  return value && !value.owner.closed ? value.owner.mindbodyBootstrapSource?.(value.record) ?? null : null;
 }
 export function isCurrentPublicClientReadHeaders(proof: PublicClientReadHeaderProof) {
   const value = publicHeaderProofs.get(proof);
@@ -222,6 +232,15 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
   let closing: Promise<void> | undefined, closed = false, enabled = false, lastFailure: string | undefined, firstFatal: NativeFirstFatal | undefined;
   let interceptedRequests = 0, pendingReads = 0, responseBytes = 0, networkIdentityRevision = 0;
   const failure = (code: string) => { lastFailure = code; try { options.onFailure?.(code); } catch { /* Diagnostics cannot authorize work. */ } };
+  owner.mindbodyBootstrapSource = record => {
+    const identity = networkIdentities.get(record.networkId);
+    return record.mindbodyBootstrapSource && !closed && !options.signal?.aborted && !boundaryPending && !record.failed &&
+      !record.cancellation.signal.aborted && record.kind === "document" && record.method === "POST" && record.generation === generation && !generation.retired &&
+      record.loaderId !== undefined && loaderOwners.get(record.loaderId) === generation && identity !== undefined &&
+      !failedNetworkIdentities.has(identity) && identity.revision === record.networkIdentityRevision && identity.frameId === rootFrameId &&
+      identity.loaderId === record.loaderId && identity.url === record.url && identity.method === "POST" && identity.kind === "document" &&
+      identity.hasBody && identity.body === record.body ? record.mindbodyBootstrapSource : null;
+  };
   const retireHeaderContext = () => { headerContext?.scope.close(); headerContext = undefined; };
   const liveHeaderDocument = (context: HeaderContext) => !closed && !options.signal?.aborted && !boundaryPending &&
     committedDocument?.record === context.document && context.document.generation === generation && !generation.retired &&
@@ -458,10 +477,13 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
     documentIntent = undefined;
     if (!generationTracking || closed || boundaryPending || awaitingDocument || !committedDocument ||
       committedDocument.record.generation !== generation || generation.retired || committedDocument.record.failed ||
-      event.reason !== "scriptInitiated" || event.disposition !== "currentTab" || typeof event.url !== "string" || event.url.length > 2048) return;
+      !["scriptInitiated", "formSubmissionPost"].includes(event.reason) || event.disposition !== "currentTab" || typeof event.url !== "string" || event.url.length > 2048) return;
+    if (event.reason === "formSubmissionPost" && (committedDocument.record.method !== "GET" || committedDocument.record.body !== null ||
+        currentDocumentUrl !== committedDocument.record.transportUrl || !mindbodyClassicPublicBootstrapSource(currentDocumentUrl, event.url))) return;
     // This private one-use event binds ownership, never navigation permission.
     // The exact successor still passes the caller's ordinary public-read guard.
-    documentIntent = { source: committedDocument, target: event.url, networkRevision: networkIdentityRevision, createdAt: Date.now(), used: false };
+    documentIntent = { source: committedDocument, target: event.url, reason: event.reason === "formSubmissionPost" ? "formSubmissionPost" : "scriptInitiated",
+      networkRevision: networkIdentityRevision, createdAt: Date.now(), used: false };
   });
   const publishNetworkIdentity = (id: string, identity: NetworkIdentity) => {
     networkIdentities.set(id, identity); networkWaiters.get(id)?.settle();
@@ -741,6 +763,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
       let requestLoaderId: string | undefined;
       let requestIdentityRevision: number | undefined;
       let requestPreflight: PreflightSource | undefined;
+      let mindbodyBootstrapSource: NativeMindbodyBootstrapSource | undefined;
       let denyResourceKind = false;
       pendingInitialPause = { id: event.requestId, generation: parent?.generation ?? generation, retired: false, cancelled: pending(),
         networkId: event.networkId!, url: event.request.url, method: event.request.method, kind, networkFailed: pending() };
@@ -817,11 +840,18 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
           generation.loaderId = identity.loaderId; loaderOwners.set(identity.loaderId, generation); awaitingDocument = false;
         } else if (!known) {
           const intent = documentIntent;
+          const publicBootstrap = intent?.reason === "formSubmissionPost" && event.request.url === intent.target && event.request.method === "POST" && identity.hasBody &&
+            event.request.hasPostData === true && typeof event.request.postData === "string" && identity.body === event.request.postData &&
+            intent.source.record.method === "GET" && intent.source.record.body === null &&
+            currentDocumentUrl === intent.source.record.transportUrl && /^text\/html(?:\s*;|$)/iu.test(intent.source.record.responseMimeType ?? "") &&
+            isMindbodyClassicPublicBootstrapPost(new URL(event.request.url), new Headers(headers(event.request.headers)), event.request.postData, intent.source.record.transportUrl) &&
+            isMindbodyClassicPublicBootstrapPost(new URL(identity.url), new Headers(identity.headerEntries), identity.body, intent.source.record.transportUrl);
+          const publicGet = intent?.reason === "scriptInitiated" && ["GET", "HEAD"].includes(event.request.method) &&
+            event.request.hasPostData !== true && event.request.postData === undefined;
           const eligible = kind === "document" && !parent && !boundaryPending && !awaitingDocument && intent && !intent.used &&
             intent.source === committedDocument && intent.source.record.generation === generation && !generation.retired &&
             !intent.source.record.failed && loaderOwners.get(intent.source.loaderId) === generation &&
-            event.request.url === intent.target && ["GET", "HEAD"].includes(event.request.method) &&
-            event.request.hasPostData !== true && event.request.postData === undefined &&
+            event.request.url === intent.target && (publicGet || publicBootstrap) &&
             identity.revision > intent.networkRevision && Date.now() - intent.createdAt <= timeoutMs;
           if (!eligible || !intent) {
             firstFatal ??= diagnostic("LOADER_OWNER"); await reject(); await close("NATIVE_REDIRECT_LOADER_MISMATCH"); return;
@@ -838,15 +868,18 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
             if (pendingInitialPause.terminalFailed) throw new Error("NATIVE_REDIRECT_NETWORK_FAILED");
             if (!sourceResponse || sourceResponse instanceof Error || !intent.source.record.complete || intent.source.record.failed ||
               sourceResponse.status() < 200 || sourceResponse.status() >= 300 || committedDocument !== intent.source || documentIntent !== intent ||
-              generation !== previous || previous.retired || closed || options.signal?.aborted)
+              generation !== previous || previous.retired || closed || options.signal?.aborted ||
+              publicBootstrap && currentDocumentUrl !== intent.source.record.transportUrl)
               throw new Error("NATIVE_REDIRECT_LOADER_MISMATCH");
             phase = "DOCUMENT_DRAIN";
             await retireGeneration(previous, false);
             if (pendingInitialPause.terminalFailed) throw new Error("NATIVE_REDIRECT_NETWORK_FAILED");
             if (closed || options.signal?.aborted || pendingInitialPause.retired || generation !== previous ||
-              committedDocument !== intent.source || documentIntent !== intent || networkIdentities.get(networkId) !== identity)
+              committedDocument !== intent.source || documentIntent !== intent || networkIdentities.get(networkId) !== identity ||
+              publicBootstrap && currentDocumentUrl !== intent.source.record.transportUrl)
               throw new Error("NATIVE_REDIRECT_LOADER_MISMATCH");
             generation = successor; loaderOwners.set(identity.loaderId, successor); awaitingDocument = false;
+            if (publicBootstrap) mindbodyBootstrapSource = Object.freeze({ sourceUrl: intent.source.record.transportUrl });
             committedDocument = undefined; documentIntent = undefined;
           } catch (error) {
             const code = error instanceof Error && /^[A-Z_0-9]+$/u.test(error.message) ? error.message : "NATIVE_REDIRECT_LOADER_MISMATCH";
@@ -918,7 +951,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
       const record: RecordEntry = { id: event.requestId, networkId, url: event.request.url, transportUrl: event.request.url,
         method: event.request.method, headers: headers(event.request.headers), headerEntries: rawHeaderEntries(event.request.headers), body: event.request.postData ?? null, kind,
         parent: parent ?? null, depth: parent ? parent.depth + 1 : 0, paused: true, admitted: false, failed: false, responseStarted: false, complete: false,
-        generation: requestGeneration, loaderId: requestLoaderId, networkIdentityRevision: requestIdentityRevision, preflight: requestPreflight,
+        generation: requestGeneration, loaderId: requestLoaderId, networkIdentityRevision: requestIdentityRevision, preflight: requestPreflight, mindbodyBootstrapSource,
         cancellation: new AbortController(), handlerDone: false, responsePaused: false,
         response: pending(), adapter: undefined as unknown as NativeReadRequest };
       record.adapter = { signal: record.cancellation.signal, url: () => record.url, method: () => record.method, headers: () => ({ ...record.headers }), postData: () => record.body,
@@ -943,6 +976,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
             throw new Error("NATIVE_REDIRECT_RETIRED_DISPATCH");
           }
           if (!record.paused || closed || record.failed || options.signal?.aborted || values && Object.keys(values).some(key => key !== "url") ||
+              record.mindbodyBootstrapSource && !owner.mindbodyBootstrapSource?.(record) ||
               record.publicHeaderProof && !isCurrentPublicClientReadHeaders(record.publicHeaderProof) ||
               record.preflight && (failedNetworkIdentities.has(record.preflight.identity) || networkIdentities.get(record.preflight.networkId) !== record.preflight.identity || record.preflight.generation !== generation ||
                 record.generation.retired || loaderOwners.get(record.preflight.identity.loaderId) !== record.generation) ||

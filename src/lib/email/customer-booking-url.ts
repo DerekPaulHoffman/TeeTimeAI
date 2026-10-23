@@ -126,7 +126,7 @@ function hasSensitiveUrlState(url: URL, nestingDepth: number) {
     return true;
   }
 
-  return [decodedPath, decodedFragment].some((part) => {
+  return [decodedPath, decodedFragment].some((part, partIndex) => {
     const segments = part
       .split(/[/;=?&]+/u)
       .map((segment) => segment.trim())
@@ -138,7 +138,8 @@ function hasSensitiveUrlState(url: URL, nestingDepth: number) {
         !isAllowlistedPublicProviderBookingPath(url)) ||
       segments.some(
         (segment, index) =>
-          (isOpaqueCredentialValue(segment) ||
+          ((isOpaqueCredentialValue(segment) &&
+            !(nestingDepth === 0 && partIndex === 0 && isSegmentedPublicTitleCasePathSegment(segment))) ||
             isOpaqueRedirectPathSegment(segments, index)) &&
           !isAllowedProviderIdentifier(segments, index)
       )
@@ -531,6 +532,16 @@ function getSecurityTokens(value: string) {
     .toLowerCase()
     .split(/[^a-z0-9]+/)
     .filter(Boolean);
+}
+
+/** A few full TitleCase words form a readable path, not an opaque identifier.
+ * Call only for pathname segments; query, fragment and redirect guards remain
+ * independent, and no decoded URL or transport bytes are rewritten here. */
+export function isSegmentedPublicTitleCasePathSegment(value: string) {
+  if (value.length > 96 || !/^(?:[A-Z][a-z]{3,15}){3,6}$/u.test(value)) return false;
+  return !getSecurityTokens(value).some(word =>
+    isRestrictedPathSegment(word) || isSensitiveUrlKey(word) ||
+    /^(?:private|secure|security|admin|staff|user|customer|portal|payments?|pay|cart|purchase|orders?|bookings?|reservations?|reserve|hold|cancel|confirm|email|phone|identity|access)$/u.test(word));
 }
 
 function isOpaqueCredentialValue(value: string) {

@@ -6,7 +6,7 @@ import { isAnonymousBrowserReadPost } from "@/lib/automation/simulator-interacti
 import { isMemberSportsPublicTeeSheetPost } from "@/lib/automation/membersports-public-read-policy";
 import { isRexAnonymousPlaceholderRead, isRexNamespace, isRexPublicBrowserReadPost } from "@/lib/automation/rex-public-read-policy";
 import { createPublicCatalogTileScope, openPublicCatalogTile, type PublicCatalogTileProof } from "./public-catalog-tile";
-import { addVerifiedMindbodyReadHeaders } from "@/lib/automation/mindbody-public-read-policy";
+import { addVerifiedMindbodyReadHeaders, isMindbodyClassicPublicBootstrapPost } from "@/lib/automation/mindbody-public-read-policy";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
 import { getTimeZoneOffsetMinutes } from "@/lib/timezones";
@@ -16,7 +16,7 @@ import { accessExecutionDiagnosticSchema, accessExecutionInputSchema, accessExec
   isSafeRecipeUrl, isSafeBrowserAvailabilityReadUrl,
   type AccessExecutionDiagnostic, type CourseAccessRecipeData, type RecipeDateParts, type RecipeField } from "./recipe";
 import { continueNativeBrowserRead, createNativePublicBrowserProxy, nativeReadPreflightMethod, type NativePublicProxy } from "./native-public-browser";
-import { installNativeRedirectRouting, authorizePublicClientReadHeaders, isCurrentPublicClientReadHeaders, nativePublicClientPreflightMethod, publicClientReadHeaderProofFailure, type NativeReadRoute } from "./native-redirect-routing";
+import { installNativeRedirectRouting, authorizePublicClientReadHeaders, isCurrentPublicClientReadHeaders, nativePublicClientPreflightMethod, publicClientReadHeaderProofFailure, nativeMindbodyBootstrapSource, type NativeReadRoute } from "./native-redirect-routing";
 import { launchPublicReadBrowser } from "./public-browser-launch";
 import { requestFamilyForUrl } from "./request-family";
 import { canonicalPublicReadUrl } from "./public-request-url";
@@ -701,6 +701,14 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
         for (const key of ["accept", "content-type", "origin"]) if (requestHeaders[key]) headers.set(key, requestHeaders[key]);
         if (!addVerifiedMindbodyReadHeaders(new URL(requestUrl), request.method(), requestHeaders, headers, request.postData() ?? "")) throw new Error("UNSCOPED_REQUEST");
         if (nativeProxy) {
+          const mindbodySource = nativeMindbodyBootstrapSource(request);
+          const assertMindbodyBootstrapRead = () => {
+            if (mindbodySource && (nativeMindbodyBootstrapSource(request) !== mindbodySource || request.method() !== "POST" ||
+                !recipeAllowsRequest(recipe, mindbodySource.sourceUrl, "GET", "document") ||
+                !isMindbodyClassicPublicBootstrapPost(new URL(requestUrl), new Headers(requestHeaders), request.postData() ?? "", mindbodySource.sourceUrl)))
+              throw new Error("UNSCOPED_REQUEST");
+          };
+          assertMindbodyBootstrapRead();
           const publicHeaderProof = request.method() === "OPTIONS" || Object.keys(requestHeaders).some(key => /^(?:authorization|x-api-key)$/iu.test(key))
             ? await authorizePublicClientReadHeaders(request) : null;
           const ordinaryPreflightMethod = request.method() === "OPTIONS" ? nativeReadPreflightMethod(requestHeaders) : null;
@@ -712,6 +720,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
           if (!recipeAllowsRequest(recipe, requestUrl, preflight ?? request.method(), preflight ? "fetch" : request.resourceType()) ||
             !rexPlaceholder && !publicHeaderProof && Object.keys(requestHeaders).some(key => /^(?:authorization|proxy-authorization|x-api-key)$/iu.test(key)) ||
             request.method() === "POST" && !(allowsPost(new URL(requestUrl), headers, request.postData() ?? "") ||
+              mindbodySource ||
               publicHeaderProof && isMemberSportsPublicTeeSheetPost(new URL(requestUrl), headers, request.postData() ?? "", frameUrl))) {
             if (request.method() === "OPTIONS" && !preflight || !publicHeaderProof && Object.keys(requestHeaders).some(key => /^(?:authorization|proxy-authorization|x-api-key)$/iu.test(key)))
               publicHeaderDiagnostic = publicHeaderFailureDiagnostic("HEADER_PROOF_MISSING", request.method(), requestHeaders, ordinaryPreflightMethod,
@@ -720,6 +729,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
           }
           const responseLimit = publicBrowserResponseLimit(request.resourceType());
           const native = await requestQueue.run(requestFamilyForUrl(requestUrl), () => {
+            assertMindbodyBootstrapRead();
             if (publicHeaderProof && !isCurrentPublicClientReadHeaders(publicHeaderProof)) {
               publicHeaderDiagnostic = publicHeaderFailureDiagnostic("HEADER_PROOF_REVOKED_AFTER_QUEUE", request.method(), requestHeaders, ordinaryPreflightMethod,
                 publicClientReadHeaderProofFailure(publicHeaderProof));

@@ -45,6 +45,28 @@ export function fullCourseName(value: string) {
   return clean(value).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim()
     .replace(/\bgolf (?:club|course)$/u, "golf course");
 }
+function headingCourseName(value: string, expected: string) {
+  const exact = fullCourseName(value);
+  return exact === expected ? exact : fullCourseName(clean(value).replace(/^welcome to /iu, ""));
+}
+/** Only the legacy public host suffix may vary. Tenant, selected courses, date
+ * and serialized query stay exact; this does not equate V2 or other paths. */
+function legacyBookingDescriptor(value: string) {
+  const url = new URL(value), tenant = /^([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\.book\.teeitup\.(?:com|golf)$/u.exec(url.hostname);
+  if (!tenant || url.protocol !== "https:" || url.username || url.password || url.port || url.hash || url.pathname !== "/") return null;
+  const keys = [...url.searchParams.keys()];
+  if (keys.some(key => !["course", "date"].includes(key)) || new Set(keys).size !== keys.length) return null;
+  const course = url.searchParams.get("course"), date = url.searchParams.get("date");
+  if (course !== null) {
+    if (!/^[1-9]\d{0,9}(?:,[1-9]\d{0,9}){0,19}$/u.test(course)) return null;
+    const ids = course.split(",").map(Number);
+    if (ids.some(id => id > 2_147_483_647) || new Set(ids).size !== ids.length) return null;
+  }
+  if (date !== null && (!/^\d{4}-\d{2}-\d{2}$/u.test(date) || !Number.isFinite(Date.parse(`${date}T00:00:00Z`)) ||
+    new Date(`${date}T00:00:00Z`).toISOString().slice(0, 10) !== date)) return null;
+  url.hostname = `${tenant[1]}.book.teeitup.com`;
+  return url.href;
+}
 function streetKey(value: string) {
   const types: Record<string, string> = { drive: "dr", road: "rd", street: "st", avenue: "ave", boulevard: "blvd", lane: "ln", court: "ct", parkway: "pkwy", highway: "hwy", circle: "cir", trail: "trl", terrace: "ter" };
   return clean(value).toLowerCase().replace(/\b(?:drive|road|street|avenue|boulevard|lane|court|parkway|highway|circle|trail|terrace)\b/gu, word => types[word])
@@ -88,15 +110,20 @@ export function deriveTeeItUpOfficialIdentityProof(source: OfficialIdentitySourc
   if (!canonical || expected.replace(/\bgolf course\b/gu, "").trim().length < 5) return fail();
   const entries = nodes(parse(page.html));
   const titleNodes = entries.filter(node => node.tagName === "title");
-  const titles = titleNodes.map(node => clean(text(node)).split(/\s*[|–—]\s*/u));
-  const headings = entries.filter(node => ["h1", "h2"].includes(node.tagName)).map(node => fullCourseName(text(node))).filter(Boolean);
+  const titles = titleNodes.map(node => clean(text(node)).split(/\s*[|–—]\s*/u)
+    .flatMap(part => fullCourseName(part) === expected ? [part] : part.split(/ - /u)));
+  const headings = entries.filter(node => ["h1", "h2"].includes(node.tagName)).map(node => headingCourseName(text(node), expected)).filter(Boolean);
   if (titles.length !== 1 || titles[0].length > 3 || !titles[0].some(part => fullCourseName(part) === expected) || !headings.includes(expected)) return fail();
-  if (entries.filter(node => node.tagName === "h1").some(node => fullCourseName(text(node)) !== expected)) return fail();
+  if (entries.filter(node => node.tagName === "h1").some(node => headingCourseName(text(node), expected) !== expected)) return fail();
   if (headings.some(name => /\bgolf course$/u.test(name) && name !== expected)) return fail();
   const linkNodes = entries.filter(node => node.tagName === "a" && /\b(?:tee\s*times?|book|reservations?)\b/iu.test(text(node))).flatMap(node => {
     try { const url = new URL(attr(node, "href") ?? "", current); return /^[a-z0-9-]+\.book\.teeitup\.(?:com|golf)$/u.test(url.hostname) || parseTeeItUpV2PublicSource(url.href) ? [{ node, url: url.href }] : []; } catch { return []; }
   });
-  if (!linkNodes.some(value => value.url === booking.href) || new Set(linkNodes.map(value => value.url)).size !== 1) return fail();
+  if (!linkNodes.some(value => value.url === booking.href)) return fail();
+  if (new Set(linkNodes.map(value => value.url)).size !== 1) {
+    const descriptor = legacyBookingDescriptor(booking.href);
+    if (!descriptor || linkNodes.some(value => legacyBookingDescriptor(value.url) !== descriptor)) return fail();
+  }
   const addresses = new Map<string, z.infer<typeof addressSchema>>();
   const addressNodes: Element[] = [];
   for (const node of entries.filter(node => ["address", "p", "div", "li", "td"].includes(node.tagName))) {
@@ -108,10 +135,10 @@ export function deriveTeeItUpOfficialIdentityProof(source: OfficialIdentitySourc
   if (addresses.size !== 1) return fail();
   const alternateAddress = [...addresses.values()][0];
   if (alternateAddress.locality !== canonical.locality || alternateAddress.region !== canonical.region || alternateAddress.postalCode !== canonical.postalCode) return fail();
-  const headingNodes = entries.filter(node => ["h1", "h2"].includes(node.tagName) && fullCourseName(text(node)) === expected);
+  const headingNodes = entries.filter(node => ["h1", "h2"].includes(node.tagName) && headingCourseName(text(node), expected) === expected);
   if (options.requireVisibleEvidence) {
     const visible = page.visibleEvidence;
-    if (!visible || clean(visible.title) !== clean(text(titleNodes[0])) || !visible.headings.some(value => fullCourseName(value) === expected) ||
+    if (!visible || clean(visible.title) !== clean(text(titleNodes[0])) || !visible.headings.some(value => headingCourseName(value, expected) === expected) ||
       !visible.linkUrls.includes(booking.href) || !visible.addressTexts.some(value => JSON.stringify(completeUSAddress(value)) === JSON.stringify(alternateAddress))) return fail();
   }
   const markupWitnessSha256 = createHash("sha256").update(JSON.stringify([...titleNodes, ...headingNodes, ...addressNodes, ...linkNodes.map(value => value.node)].map(markupWitness))).digest("hex");

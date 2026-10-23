@@ -3,6 +3,7 @@ import type {
   BookingAccessMode,
   BookingMethod
 } from "@/lib/courses/intelligence";
+import { isSegmentedPublicTitleCasePathSegment } from "@/lib/email/customer-booking-url";
 import {
   getAgilysysBookingIdentity,
   normalizeAgilysysBookingUrl
@@ -5284,7 +5285,7 @@ function hasSensitiveManualUrlState(url: URL, nestingDepth = 0) {
     hasForbiddenAdjacentManualPathSegments(pathSegments) ||
     hasRestrictedManualBookingPathSegments(pathSegments) ||
     pathSegments.some((segment, index) =>
-      (isOpaqueCredentialValue(segment) ||
+      ((isOpaqueCredentialValue(segment) && !(nestingDepth === 0 && isSegmentedPublicTitleCasePathSegment(segment))) ||
         isOpaqueManualRedirectPathSegment(pathSegments, index)) &&
       !isAllowedPublicOpaquePathSegment(pathSegments, index)
     ) ||

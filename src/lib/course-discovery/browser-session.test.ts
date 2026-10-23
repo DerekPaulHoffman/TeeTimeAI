@@ -110,6 +110,46 @@ describe("discovery browser public protocol", () => {
 
 const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
+  it.each(["valid", "missing", "revoked", "invalid body"] as const)("independently checks a native classic bootstrap before queued transport: %s", async mode => {
+    const entry = "https://clients.mindbodyonline.com/classic/ws?studioid=685163&stype=-9", target = "https://clients.mindbodyonline.com/classic/home";
+    const empty = "tg vt lvl qParam view page catid prodid prodGroupId sSU optForwardingLink singleUseToken oAuthToken launchGUID launchUID launchPWDChange launchPWDChangeKey launchLostPWD launchResetPWD launchBizModeLogin launchBizModeLoginWithRedirectLink key consumerModeRedirect extLink giftCardID".split(" ");
+    const fields = new URLSearchParams([...empty.map(key => [key, ""]), ["studioId", "685163"], ["stype", "-9"], ["trn", "0"], ["classid", "0"], ["date", "10/23/2026"]]);
+    if (mode === "invalid body") fields.set("launchUID", "unapproved");
+    const html = '<link rel="icon" href="data:,"><h1>Public site entry</h1><form method="post" action="/classic/home">' +
+      [...fields].map(([key, value]) => `<input type="hidden" name="${key}" value="${value}">`).join("") + '</form><script>onload=()=>document.forms[0].submit()</script>';
+    const proof = Object.freeze({ sourceUrl: entry }), reads: string[] = [], failures: string[] = [];
+    let postRequest: nativeRouting.NativeReadRequest | undefined, live = true, leases = 0, release!: () => void, held!: () => void;
+    const released = new Promise<void>(resolve => { release = resolve; }), queued = new Promise<void>(resolve => { held = resolve; });
+    const proxy = vi.spyOn(nativeBrowser, "createNativePublicBrowserProxy").mockResolvedValue({ server: "http://127.0.0.1:9", close: async () => {}, allowHostConnections: () => {}, cancelHostConnections: async () => {}, stats: () => ({ connections: 0, activeSockets: 0, bytes: 0 }) });
+    const sourceProof = vi.spyOn(nativeRouting, "nativeMindbodyBootstrapSource").mockImplementation(request => request === postRequest && live && mode !== "missing" ? proof : null);
+    const routing = vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, handler) => ({
+      prepare: () => {}, beginDocumentNavigation: async () => {}, close: async () => {}, pendingReads: 0, lastFailure: undefined,
+      releasePlaywrightRoute: async route => {
+        const raw = route.request(), request: nativeRouting.NativeReadRequest = { url: () => raw.url(), method: () => raw.method(), headers: () => raw.headers(), postData: () => raw.postData(),
+          resourceType: () => raw.resourceType(), isNavigationRequest: () => raw.isNavigationRequest(), frame: () => raw.frame(), redirectedFrom: () => null, response: () => raw.response() };
+        if (raw.url() === target) postRequest = request;
+        await handler({ request: () => request, continue: options => route.continue(options), abort: reason => route.abort(reason), fulfill: options => route.fulfill(options) });
+      },
+    }));
+    const native = vi.spyOn(nativeBrowser, "continueNativeBrowserRead").mockImplementation(async route => {
+      reads.push(`${route.request().method()} ${route.request().url()}`); const body = Buffer.from(route.request().url() === entry ? html : '<link rel="icon" href="data:,"><h1>Public schedule</h1>'), headers = { "content-type": "text/html" };
+      await route.fulfill({ status: 200, headers, body }); return { status: 200, url: route.request().url(), headers, body };
+    });
+    const session = await createCourseDiscoveryBrowserSession({ initialUrls: [entry], deadlineAt: new Date(Date.now() + 15_000) }, {
+      browserTransport: "NATIVE_CHROME", launchBrowser: () => chromium.launch({ executablePath, headless: true }),
+      requestLease: async (_family, work) => { if (++leases === 2 && mode === "revoked") { held(); await released; } return { acquired: true, value: await work() }; },
+      onRequestFailure: value => { failures.push(value.reason); },
+    });
+    try {
+      const opening = session.execute({ id: 1, action: "open", url: entry });
+      if (mode === "revoked") { await queued; live = false; release(); }
+      await opening;
+      await vi.waitFor(() => expect(mode === "valid" ? reads.length === 2 : failures.length > 0).toBe(true));
+      expect(reads).toEqual(mode === "valid" ? [`GET ${entry}`, `POST ${target}`] : [`GET ${entry}`]);
+      if (mode !== "valid") expect(failures).toContain(mode === "missing" ? "UNSAFE_METHOD" : "MINDBODY_BOOTSTRAP_READ_REJECTED");
+    } finally { release(); await session.close(); native.mockRestore(); routing.mockRestore(); sourceProof.mockRestore(); proxy.mockRestore(); }
+  }, 20_000);
+
   it.each(["missing", "revoked"] as const)("classifies native public header proof failure without changing denial: %s", async mode => {
     // Synthetic private-proof/native bridge; real Chrome uses only in-memory replies.
     const entry = "https://example.org/header-diagnostic", data = "https://example.org/public-data";

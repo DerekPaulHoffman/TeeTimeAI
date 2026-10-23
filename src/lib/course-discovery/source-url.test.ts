@@ -8,6 +8,7 @@ describe("HTTPS discovery identity projection", () => {
     ["http://golf.example.com/", "https://golf.example.com/"],
     ["HTTP://Golf.Example.com/Public-Times?course=12&date=2026-10-23", "https://Golf.Example.com/Public-Times?course=12&date=2026-10-23"],
     ["http://golf.example.com/A%20Public/Path?utm_source=official", "https://golf.example.com/A%20Public/Path?utm_source=official"],
+    ["http://www.cityofwestminster.us/ParksRecreation/GolfWestminster/WalnutCreekGolfPreserve", "https://www.cityofwestminster.us/ParksRecreation/GolfWestminster/WalnutCreekGolfPreserve"],
   ])("changes only the scheme of the safe public source %s", (raw, expected) => {
     expect(normalizeDiscoverySourceUrl(raw)).toBe(expected);
     expect(isSafeRecipeUrl(expected)).toBe(true);
@@ -25,6 +26,9 @@ describe("HTTPS discovery identity projection", () => {
     "http://golf.example.com/login", "http://golf.example.com/account", "http://golf.example.com/checkout",
     "http://golf.example.com/reservations/hold", "http://golf.example.com/session/private-id", "http://golf.example.com/%6cogin",
     "http://golf.example.com/times?token=secret", "http://golf.example.com/times?api_key=secret", "http://golf.example.com/times?email=a%40example.com",
+    "http://golf.example.com/AbCdEfGhIjKlMnOpQrStUvWx", "http://golf.example.com/PublicPrivateCalendar",
+    "http://golf.example.com/path?label=WalnutCreekGolfPreserve", "http://golf.example.com/path#/WalnutCreekGolfPreserve",
+    "http://golf.example.com/redirect/WalnutCreekGolfPreserve",
     "http://golf.example.com./", "http://golf..example.com/", "http://golf.example.com/{date}", "http://golf.example.com/%ZZ",
     "http:///golf.example.com/", "http://golf.example.com\\other", "http://golf.example.com/has space", "http://golf.example.com/\n",
     " http://golf.example.com/", "http://golf.example.com/times?x=" + "a".repeat(2048),

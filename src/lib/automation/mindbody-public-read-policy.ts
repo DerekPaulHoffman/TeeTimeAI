@@ -78,3 +78,55 @@ export function addVerifiedMindbodyReadHeaders(url: URL, method: string, origina
   headers.set("referer", proposed.get("referer")!);
   return true;
 }
+
+// Observed 2026-10-23 before transmission: the public /classic/ws entry
+// automatically submits wsLaunch to /classic/home. This only displays the
+// public site; it is not permission for other classic forms or availability.
+const classicBootstrapFields = ["tg", "vt", "lvl", "stype", "qParam", "view", "trn", "page", "catid", "prodid", "prodGroupId", "date", "classid",
+  "sSU", "optForwardingLink", "singleUseToken", "oAuthToken", "launchGUID", "launchUID", "launchPWDChange", "launchPWDChangeKey", "launchLostPWD",
+  "launchResetPWD", "launchBizModeLogin", "launchBizModeLoginWithRedirectLink", "key", "studioId", "consumerModeRedirect", "extLink", "giftCardID"] as const;
+
+/** Pure URL binding. Only a current, completed native document can attest it. */
+export function mindbodyClassicPublicBootstrapSource(sourceUrl: string, targetUrl: string): { studioId: string } | null {
+  try {
+    const source = new URL(sourceUrl), target = new URL(targetUrl);
+    if (source.protocol !== "https:" || source.hostname !== "clients.mindbodyonline.com" || source.username || source.password || source.port ||
+        source.pathname !== "/classic/ws" || source.hash || target.href !== "https://clients.mindbodyonline.com/classic/home") return null;
+    const parts = source.search.slice(1).split("&");
+    // Require literal keys/values: percent aliases and duplicate keys cannot
+    // borrow the public source's routing identity.
+    if (parts.length !== 2 || !parts.every(part => /^(?:studioid=[1-9]\d{0,9}|stype=-9)$/u.test(part)) ||
+        source.searchParams.getAll("studioid").length !== 1 || source.searchParams.getAll("stype").length !== 1) return null;
+    return { studioId: source.searchParams.get("studioid")! };
+  } catch { return null; }
+}
+
+function publicUsCalendarDate(value: string) {
+  const match = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/u.exec(value);
+  if (!match) return false;
+  const month = Number(match[1]), day = Number(match[2]), year = Number(match[3]);
+  if (year < 1900 || year > 2100 || month < 1 || month > 12 || day < 1 || day > 31) return false;
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
+/** Fixed anonymous display bootstrap, independently rechecked by the handler.
+ * Source ownership is private native metadata, never Referer or a form claim. */
+export function isMindbodyClassicPublicBootstrapPost(url: URL, headers: Headers, body: string, sourceUrl: string) {
+  const source = mindbodyClassicPublicBootstrapSource(sourceUrl, url.href);
+  if (!source || Buffer.byteLength(body) > 2048 || headers.get("origin") !== url.origin ||
+      !/^application\/x-www-form-urlencoded(?:;\s*charset=utf-8)?$/iu.test(headers.get("content-type") ?? "") ||
+      [...headers.keys()].some(key => /^(?:authorization|proxy-authorization|x-api-key|api-key|x-auth-token|next-action)$/iu.test(key))) return false;
+  const form = new URLSearchParams(body), keys = [...form.keys()];
+  if (keys.length !== classicBootstrapFields.length || new Set(keys).size !== keys.length ||
+      !keys.every(key => (classicBootstrapFields as readonly string[]).includes(key)) || form.toString() !== body) return false;
+  for (const key of classicBootstrapFields) {
+    const value = form.get(key);
+    if (key === "studioId") { if (value !== source.studioId) return false; }
+    else if (key === "stype") { if (value !== "-9") return false; }
+    else if (key === "trn" || key === "classid") { if (value !== "0") return false; }
+    else if (key === "date") { if (!value || !publicUsCalendarDate(value)) return false; }
+    else if (value !== "") return false;
+  }
+  return true;
+}

@@ -310,6 +310,35 @@ describe.runIf(existsSync(chromeExecutable))("isolated browser recipe replay", (
     fetch: vi.fn(async () => new Response(injectFence ? browserHtml(page) : page, { headers: { "content-type": "text/html" } })) as unknown as typeof fetch,
     requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
   });
+  it.each(["valid", "missing", "revoked", "invalid body", "unscoped"] as const)("revalidates the native classic bootstrap in deterministic replay: %s", async mode => {
+    const entry = "https://clients.mindbodyonline.com/classic/ws?studioid=685163&stype=-9", target = "https://clients.mindbodyonline.com/classic/home", origin = "https://clients.mindbodyonline.com";
+    const fields = new URLSearchParams([..."tg vt lvl qParam view page catid prodid prodGroupId sSU optForwardingLink singleUseToken oAuthToken launchGUID launchUID launchPWDChange launchPWDChangeKey launchLostPWD launchResetPWD launchBizModeLogin launchBizModeLoginWithRedirectLink key consumerModeRedirect extLink giftCardID".split(" ").map(key => [key, ""]),
+      ["studioId", "685163"], ["stype", "-9"], ["trn", "0"], ["classid", "0"], ["date", "10/23/2026"]]);
+    if (mode === "invalid body") fields.set("oAuthToken", "unapproved");
+    const landing = '<link rel="icon" href="data:,"><form method="post" action="/classic/home">' + [...fields].map(([key, value]) => `<input type="hidden" name="${key}" value="${value}">`).join("") + '</form><script>onload=()=>document.forms[0].submit()</script>';
+    const base = recipe(), selected = parseAccessRecipe({ ...base, source: { ...base.source, officialUrl: entry, bookingUrl: entry }, pageUrl: entry, browserTransport: "NATIVE_CHROME",
+      availabilityResponse: { url: origin + "/availability?date={{date}}", method: "GET", date: { source: "QUERY", path: "date" } },
+      permittedRoutes: [{ origin, path: "/classic/ws", methods: ["GET"], queryKeys: ["studioid", "stype"] }, { origin, path: "/classic/home", methods: mode === "unscoped" ? ["GET"] : ["GET", "POST"], queryKeys: [] },
+        { origin, path: "/availability", methods: ["GET"], queryKeys: ["date"] }] });
+    const proof = Object.freeze({ sourceUrl: entry }), reads: string[] = []; let live = true, leases = 0, release!: () => void, held!: () => void;
+    const released = new Promise<void>(resolve => { release = resolve; }), queued = new Promise<void>(resolve => { held = resolve; });
+    const controller = nativeControllerFixture(), sourceProof = vi.spyOn(nativeRouting, "nativeMindbodyBootstrapSource").mockImplementation(request => request.url() === target && live && mode !== "missing" ? proof : null);
+    const proxy = vi.spyOn(nativeBrowser, "createNativePublicBrowserProxy").mockResolvedValue({ server: "http://127.0.0.1:9", close: async () => {}, allowHostConnections: () => {}, cancelHostConnections: async () => {}, stats: () => ({ connections: 0, activeSockets: 0, bytes: 0 }) });
+    const native = vi.spyOn(nativeBrowser, "continueNativeBrowserRead").mockImplementation(async route => {
+      const request = route.request(); reads.push(`${request.method()} ${request.url()}`);
+      const data = request.url().includes("/availability?"), body = Buffer.from(request.url() === entry ? landing : data ? "{}" : browserHtml(html)), headers = { "content-type": data ? "application/json" : "text/html" };
+      await route.fulfill({ status: 200, headers, body }); return { url: request.url(), status: 200, headers, body };
+    });
+    const deps = browserDeps(landing, false); delete deps.fetch;
+    deps.requestLease = async (_family, work) => { if (++leases === 2 && mode === "revoked") { held(); await released; } return { acquired: true, value: await work() }; };
+    try {
+      const replay = executeAccessRecipe(selected, executionInput, deps);
+      if (mode === "revoked") { await queued; live = false; release(); }
+      const result = await replay;
+      if (mode === "valid") { expect(result.status, JSON.stringify({ evidence: result.evidence, reads })).toBe("AVAILABLE"); expect(reads).toContain(`POST ${target}`); }
+      else { expect(result.complete).toBe(false); expect(result.slots).toEqual([]); expect(reads).not.toContain(`POST ${target}`); }
+    } finally { release(); native.mockRestore(); proxy.mockRestore(); sourceProof.mockRestore(); controller.mockRestore(); }
+  }, 20_000);
   it("replays a safe select and extracts visible proof in a fresh real browser", async () => {
     const result = await executeAccessRecipe(recipe(), executionInput, browserDeps(html));
     expect(result.status).toBe("AVAILABLE"); expect(result.slots[0].startsAt).toBe("2026-10-22T13:00:00.000Z");

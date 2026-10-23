@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { existsSync } from "node:fs";
 import { chromium } from "@playwright/test";
-import { addVerifiedMindbodyReadHeaders, isMindbodyPublicReadPost, MINDBODY_PUBLIC_READ_ACTIONS } from "./mindbody-public-read-policy";
+import { addVerifiedMindbodyReadHeaders, isMindbodyPublicReadPost, MINDBODY_PUBLIC_READ_ACTIONS, isMindbodyClassicPublicBootstrapPost, mindbodyClassicPublicBootstrapSource } from "./mindbody-public-read-policy";
 import { isAnonymousBrowserReadPost } from "./simulator-interactive-browser";
 
 // Captured with unknown POSTs blocked before transmission. The public client
@@ -16,6 +16,49 @@ const headers = (action: string, url = source) => new Headers({ "content-type": 
   referer: url, "next-action": action, accept: "text/x-component" });
 const check = (action: string, body: unknown, url = source, requestHeaders = headers(action, url)) =>
   isMindbodyPublicReadPost(new URL(url), requestHeaders, JSON.stringify(body));
+
+describe("Mindbody anonymous classic display bootstrap", () => {
+  const entry = "https://clients.mindbodyonline.com/classic/ws?studioid=685163&stype=-9", target = "https://clients.mindbodyonline.com/classic/home";
+  const emptyFields = "tg vt lvl qParam view page catid prodid prodGroupId sSU optForwardingLink singleUseToken oAuthToken launchGUID launchUID launchPWDChange launchPWDChangeKey launchLostPWD launchResetPWD launchBizModeLogin launchBizModeLoginWithRedirectLink key consumerModeRedirect extLink giftCardID".split(" ");
+  const form = () => new URLSearchParams([...emptyFields.map(key => [key, ""]), ["studioId", "685163"], ["stype", "-9"], ["trn", "0"], ["classid", "0"], ["date", "10/23/2026"]]);
+  const readHeaders = () => new Headers({ "content-type": "application/x-www-form-urlencoded", origin: "https://clients.mindbodyonline.com" });
+  const allows = (body = form().toString(), sourceUrl = entry, url = target, h = readHeaders()) => isMindbodyClassicPublicBootstrapPost(new URL(url), h, body, sourceUrl);
+
+  it("accepts only the captured anonymous bootstrap and binds public studio routing", () => {
+    expect(allows()).toBe(true);
+    const other = form(); other.set("studioId", "12345"); other.set("date", "2/29/2028");
+    expect(allows(other.toString(), entry.replace("685163", "12345"))).toBe(true);
+    expect(allows(other.toString())).toBe(false);
+    // A public-shaped body without private native source ownership still
+    // cannot pass the generic anonymous POST classifier.
+    expect(isAnonymousBrowserReadPost(new URL(target), readHeaders(), form().toString())).toBe(false);
+  });
+  it.each(emptyFields)("requires the %s launch/contact/forwarding field to remain literally empty", field => {
+    const value = form(); value.set(field, "nonempty"); expect(allows(value.toString())).toBe(false);
+  });
+  it("rejects duplicate/unknown/missing keys and encoded aliases", () => {
+    const value = form(); value.delete("tg"); expect(allows(value.toString())).toBe(false);
+    expect(allows(form().toString() + "&tg=")).toBe(false);
+    expect(allows(form().toString() + "&query=%7Bslots%7D")).toBe(false);
+    expect(allows(form().toString().replace("studioId=", "studio%49d="))).toBe(false);
+    expect(allows(form().toString().replace("studioId=685163", "studioId=%3685163"))).toBe(false);
+  });
+  it("rejects unobserved action defaults, date sentinels and invalid calendar dates", () => {
+    for (const [key, values] of [["stype", ["-8", "1"]], ["trn", ["1", "false", "true"]], ["classid", ["1", "false"]],
+      ["date", ["0", "-1", "null", "2026-10-23", "2/29/2025", "2/30/2026", "13/1/2026", "1/1/1899", "1/1/2101"]]] as const) {
+      for (const replacement of values) { const value = form(); value.set(key, replacement); expect(allows(value.toString())).toBe(false); }
+    }
+  });
+  it("requires the exact public source, destination, encoding and anonymous headers", () => {
+    for (const bad of [entry + "&studioid=685163", entry + "&other=", entry.replace("studioid=", "studio%69d="), entry + "#private",
+      entry.replace("https:", "http:"), entry.replace("/ws?", "/home?"), entry.replace("stype=-9", "stype=1")]) expect(allows(undefined, bad)).toBe(false);
+    for (const bad of [target + "?studioid=685163", target + "#view", target.replace("/home", "/checkout"), target.replace("clients.", "evil.")]) expect(allows(undefined, entry, bad)).toBe(false);
+    for (const [key, value] of [["origin", "https://other.example"], ["content-type", "application/json"], ["authorization", "Bearer null"], ["next-action", "public-looking"], ["x-auth-token", "opaque"]]) {
+      const h = readHeaders(); h.set(key, value); expect(allows(undefined, entry, target, h)).toBe(false);
+    }
+    expect(mindbodyClassicPublicBootstrapSource(entry, target)).toEqual({ studioId: "685163" });
+  });
+});
 
 describe("Mindbody inspected public server actions", () => {
   it("allows only the four independently inspected read handlers and their argument shapes", () => {

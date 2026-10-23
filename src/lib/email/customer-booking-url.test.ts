@@ -5,6 +5,55 @@ import { getSafeCustomerBookingUrl } from "./customer-booking-url";
 
 describe("getSafeCustomerBookingUrl", () => {
   it.each([
+    "http://www.cityofwestminster.us/ParksRecreation/GolfWestminster/WalnutCreekGolfPreserve",
+    "https://public.example.org/CedarValleyNaturePreserve",
+    "https://another.example.org/NorthRiverCommunityGolf"
+  ])("keeps a clearly segmented public TitleCase path: %s", url => {
+    expect(getSafeCustomerBookingUrl(url)).toBe(url);
+  });
+
+  it.each([
+    "https://public.example.org/AbCdEfGhIjKlMnOpQrStUvWx",
+    "https://public.example.org/AbcDefGhiJklMnoPqrStu",
+    "https://public.example.org/AbcdefghijklmnopqrStuvwx",
+    "https://public.example.org/walnutCreekGolfPreserve",
+    "https://public.example.org/WalnutCREEKGolfPreserve",
+    "https://public.example.org/WalnutCreekGolfPreserve123",
+    "https://public.example.org/PublicPrivateCalendar",
+    "https://public.example.org/PublicPaymentHistory",
+    "https://public.example.org/PublicSecureCalendar",
+    "https://public.example.org/PublicPortalCalendar",
+    "https://public.example.org/PublicEmailCalendar",
+    "https://public.example.org/PublicPhoneDirectory",
+    "https://public.example.org/PublicAccountRecovery",
+    "https://public.example.org/PublicSessionHistory",
+    "https://public.example.org/PublicSecretCalendar",
+    "https://public.example.org/PublicTokenCalendar",
+    "https://public.example.org/PublicCredentialStore",
+    "https://public.example.org/PublicNonceCalendar",
+    "https://public.example.org/PublicCodeDirectory",
+    "https://public.example.org/AlphaBravoCharlieDeltaEchoFoxtrotGolf",
+    "https://public.example.org/AnexcessivelylongwordPublicCalendar",
+    "https://public.example.org/PublicBookingConfirm",
+    "https://public.example.org/redirect/WalnutCreekGolfPreserve",
+    "https://public.example.org/go/WalnutCreekGolfPreserve",
+    "https://public.example.org/link/WalnutCreekGolfPreserve",
+    "https://public.example.org/%50ublic%54oken%43alendar",
+    "https://public.example.org/path?label=WalnutCreekGolfPreserve",
+    "https://public.example.org/path?next=/WalnutCreekGolfPreserve",
+    "https://public.example.org/path#/WalnutCreekGolfPreserve",
+    "https://public.example.org/WalnutCreekGolfPreserve?session=private",
+    "https://public.example.org/WalnutCreekGolfPreserve/sk_live_abcdefghijklmnopqrst",
+    "https://public.example.org/WalnutCreekGolfPreserve/abcdefgh.ijklmnop.qrstuvwx",
+    "https://public.example.org/WalnutCreekGolfPreserve/AbcdefghijklmnopQrst==",
+    "https://user:secret@public.example.org/WalnutCreekGolfPreserve",
+    "https://127.0.0.1/WalnutCreekGolfPreserve",
+    "https://private.internal/WalnutCreekGolfPreserve"
+  ])("retains opaque, security and non-path rejection around TitleCase: %s", url => {
+    expect(getSafeCustomerBookingUrl(url)).toBeUndefined();
+  });
+
+  it.each([
     "http://localhost/tee-times",
     "http://127.0.0.1/tee-times",
     "http://10.0.0.4/tee-times",

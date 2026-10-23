@@ -5,7 +5,7 @@ import { z } from "zod";
 import { createAddressPinnedPublicFetchTransport } from "@/lib/automation/address-pinned-public-fetch";
 import { createPassfactoryPublicReadPolicy, isIncidentalBrowserRequest, isNonEvidenceBrowserResource } from "@/lib/automation/passfactory-public-read-policy";
 import { interactiveControlKind, isAnonymousBrowserReadPost } from "@/lib/automation/simulator-interactive-browser";
-import { addVerifiedMindbodyReadHeaders } from "@/lib/automation/mindbody-public-read-policy";
+import { addVerifiedMindbodyReadHeaders, isMindbodyClassicPublicBootstrapPost } from "@/lib/automation/mindbody-public-read-policy";
 import { isRexAnonymousPlaceholderRead, isRexNamespace, isRexPublicBrowserReadPost, rexProjectedPublicReadRejection, rexPublicBrowserReadRejection } from "@/lib/automation/rex-public-read-policy";
 import { createUSchedulePublicReadPolicy } from "@/lib/automation/uschedule-public-read-policy";
 import { isMemberSportsPublicTeeSheetPost } from "@/lib/automation/membersports-public-read-policy";
@@ -14,7 +14,7 @@ import { runWithProviderRequestLease } from "@/lib/automation/provider-request-l
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
 import { isActiveBrowserAccessChallenge, isSafeBrowserAssetUrl, isSafeBrowserBootstrapReadUrl, isSafeBrowserAvailabilityReadUrl, isSafeRecipeUrl, recipeSelectorSchema } from "./recipe";
 import { continueNativeBrowserRead, createNativePublicBrowserProxy, isObservedNativeRedirect, isObservedNativeRedirectTarget, nativeReadPreflightMethod } from "./native-public-browser";
-import { installNativeRedirectRouting, isNativeReadSupersededFailure, authorizePublicClientReadHeaders, isCurrentPublicClientReadHeaders, nativePublicClientPreflightMethod,
+import { installNativeRedirectRouting, isNativeReadSupersededFailure, authorizePublicClientReadHeaders, isCurrentPublicClientReadHeaders, nativePublicClientPreflightMethod, nativeMindbodyBootstrapSource,
   publicClientReadHeaderProofFailure, type NativeFirstFatal, type NativeReadRoute, type NativeRequestDiagnostic } from "./native-redirect-routing";
 import { publicHeaderFailureDiagnostic } from "./public-header-diagnostic";
 export { publicHeaderFailureDiagnostic } from "./public-header-diagnostic";
@@ -443,6 +443,16 @@ export async function createCourseDiscoveryBrowserSession(input: {
       if (isSafeRecipeUrl(frameUrl)) passfactory.observeWidgetUrl(frameUrl);
       const headers = new Headers();
       const body = request.postData() ?? undefined;
+      const mindbodySource = nativeProxy ? nativeMindbodyBootstrapSource(request) : null;
+      const assertMindbodyBootstrapRead = () => {
+        if (mindbodySource && (nativeMindbodyBootstrapSource(request) !== mindbodySource || method !== "POST" || !body ||
+            !isMindbodyClassicPublicBootstrapPost(url, new Headers(requestHeaders), body, mindbodySource.sourceUrl)))
+          throw new Error("MINDBODY_BOOTSTRAP_READ_REJECTED");
+      };
+      // The source document intentionally retired during the native ownership
+      // transfer. Only its immutable, privately attested successor metadata
+      // can bind this independently checked public bootstrap schema.
+      assertMindbodyBootstrapRead();
       if (nativeProxy && isRexNamespace(url) && method === "POST" &&
           !isRexPublicBrowserReadPost(url, method, requestHeaders, body ?? "", frameUrl))
         throw new Error(rexPublicBrowserReadRejection(url, method, requestHeaders, body ?? "", frameUrl));
@@ -467,6 +477,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       if (!addVerifiedMindbodyReadHeaders(url, method, requestHeaders, headers, body ?? "")) throw new Error("UNSAFE_METHOD");
       if (!uschedule.addReadHeaders(url, method, requestHeaders, headers, body ?? "")) throw new Error("UNSAFE_METHOD");
       if (!["GET", "HEAD"].includes(method) && !preflight && !(method === "POST" && body && (readPost(url, headers, body) ||
+          nativeProxy && mindbodySource ||
           nativeProxy && publicHeaderProof && isMemberSportsPublicTeeSheetPost(url, headers, body, frameUrl))))
         throw new Error(!nativeProxy && method === "POST" && isRexNamespace(url) ? rexProjectedPublicReadRejection(url, headers, body ?? "", frameUrl) : "UNSAFE_METHOD");
       if (method === "POST" && body) {
@@ -483,6 +494,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       requestCount++;
       const responseLimit = publicBrowserResponseLimit(request.resourceType());
       const reply = await queue.run(requestFamilyForUrl(url.href), async () => {
+        assertMindbodyBootstrapRead();
         // A same-document script read can retire the completion contract while
         // this exact POST waits for the shared provider lease.
         assertEzReadContract(ezWitness, ezCall?.contractVersion);
