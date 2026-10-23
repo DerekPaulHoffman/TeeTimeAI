@@ -19,8 +19,92 @@ const deps = { now: () => new Date("2030-01-01T12:00:00Z"), recipeHash: "a".repe
   toInstant: recipeTimeToInstant, requestLease: async <T>(_family: string, work: () => Promise<T>) => ({ acquired: true as const, value: await work() }) };
 const bind = (rows: unknown = directory, officialPage: OfficialIdentityPage = page) =>
   bindTeeItUpPostalConflictProof(source, officialPage, rows, { requireVisibleEvidence: true });
+const brandBody = `<p class="site-title"><a href="${source.officialUrl}">${source.venueName}</a></p>` +
+  `<p><strong>Address:</strong><br>10 Harbor Dr.<br>Example, NY 12345</p><a href="${source.bookingUrl}">Tee Times</a>` +
+  '<a class="course-contact" href="tel:916-555-4653">916-555-4653</a>';
+const nativePage: OfficialIdentityPage = { ...page, html: html(brandBody), browserTransport: "NATIVE_CHROME",
+  visibleEvidence: { ...page.visibleEvidence!, headings: [], brandLinks: [{ href: source.officialUrl, text: source.venueName }],
+    addressTexts: ["Address:, 10 Harbor Dr., Example, NY 12345"] } };
 
 describe("independent official postal-conflict corroboration", () => {
+  it("binds exact root brand and title with a labelled BR address, requiring rendered refresh on every native warm read", () => {
+    expect(bind(directory, nativePage)).toMatchObject({ warmTransport: "NATIVE_CHROME", requiredCapability: "LOCAL_CHROME",
+      warmVisibility: "RENDERED_CONTROLLER_OBSERVATION", officialSourceProof: { kind: "OFFICIAL_WHOLE_BRAND_ADDRESS",
+        alternateAddress: { postalCode: "12345" } } });
+    expect(() => bind(directory, { ...nativePage, browserTransport: "PINNED_HTTP" })).toThrow();
+    expect(() => bindTeeItUpPostalConflictProof({ ...source, venueAddress: source.venueAddress.replace("12345", "12346") }, nativePage, directory,
+      { requireVisibleEvidence: true })).toThrow();
+  });
+  it.each([
+    brandBody.replace(source.officialUrl, "https://unrelated.example/"),
+    brandBody.replace('class="site-title"', 'class="site-title" hidden'),
+    brandBody.replace(source.venueName, "Unrelated Golf Club"),
+    brandBody.replace("10 Harbor Dr.", "11 Harbor Dr."),
+    brandBody.replace("NY 12345", "CA 12345"),
+    brandBody.replace("<p><strong>Address:", '<p class="billing"><strong>Address:'),
+    brandBody.replace('class="course-contact"', 'class="fax"'),
+    brandBody + '<p>11 Harbor Dr., Example, NY 12345</p>',
+    brandBody + '<p class="site-title"><a href="https://unrelated.example/">Unrelated Golf Club</a></p>',
+  ])("rejects conflicting, hidden or unrelated brand/address/contact markup", content => {
+    expect(() => bind(directory, { ...nativePage, html: html(content) })).toThrow();
+  });
+  it.each([
+    { ...nativePage, html: html(brandBody).replace(`Home - ${source.venueName}`, `Other Golf Club - ${source.venueName}`) },
+    { ...nativePage, visibleEvidence: { ...nativePage.visibleEvidence!, brandLinks: [] } },
+    { ...nativePage, visibleEvidence: { ...nativePage.visibleEvidence!, addressTexts: [] } },
+    { ...nativePage, visibleEvidence: undefined },
+  ])("requires fresh visible whole identity for the separate native attestation", current => expect(() => bind(directory, current)).toThrow());
+
+  it.each(["Mailing Address", "Corporate Address", "Billing Address", "Headquarters"])(
+    "rejects a canonical-looking address inside a nonphysical %s heading context", label => {
+      const content = brandBody.replace('<p><strong>Address:</strong><br>10 Harbor Dr.<br>Example, NY 12345</p>',
+        `<section><h2>${label}</h2><div><p>10 Harbor Dr., Example, NY 12345</p></div></section>`);
+      expect(() => bind(directory, { ...nativePage, html: html(content), visibleEvidence: { ...nativePage.visibleEvidence!,
+        headings: [label], addressTexts: ["10 Harbor Dr., Example, NY 12345"] } })).toThrow("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
+    });
+  it("retains the observed public footer/Get In Touch address grammar", () => {
+    const content = brandBody.replace('<p><strong>Address:</strong><br>10 Harbor Dr.<br>Example, NY 12345</p>',
+      '<footer><h2>Footer</h2><section><h3>Get In Touch</h3><div><p><strong>Address:</strong><br>10 Harbor Dr.<br>Example, NY 12345</p></div></section></footer>');
+    expect(bind(directory, { ...nativePage, html: html(content), visibleEvidence: { ...nativePage.visibleEvidence!,
+      headings: ["Footer", "Get In Touch"] } }).officialSourceProof.kind).toBe("OFFICIAL_WHOLE_BRAND_ADDRESS");
+  });
+  it.each(["aria-label", "title"])("rejects a nonphysical address context expressed by %s", attribute => {
+    const content = brandBody.replace('<p><strong>Address:', `<section ${attribute}="Corporate headquarters"><p><strong>Address:`)
+      .replace('Example, NY 12345</p>', 'Example, NY 12345</p></section>');
+    expect(() => bind(directory, { ...nativePage, html: html(content) })).toThrow("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
+  });
+
+  it("requires local capability before network access and refreshes the native official source before fixed provider reads", async () => {
+    const proof = bind(directory, nativePage);
+    const recipe = parseAccessRecipe({ schemaVersion: 1, engine: "EXISTING_ADAPTER", target: { courseId: "owned-course", kind: "OUTDOOR" },
+      source, adapter: { family: "TEEITUP", alias: proof.alias, facilityIds: [31], officialPostalConflictProof: proof } });
+    if (recipe.engine !== "EXISTING_ADAPTER") throw new Error("WRONG_ENGINE");
+    const calls: string[] = [];
+    const fetch = vi.fn<typeof globalThis.fetch>(async url => {
+      calls.push(String(url));
+      if (String(url).endsWith("/facilities")) return Response.json(directory);
+      return Response.json([{ courseId: directory[0].courseId, teetimes: [] }]);
+    });
+    expect(await executeExistingAdapterRecipe(recipe, input, { ...deps, fetch })).toMatchObject({ complete: false, evidence: { reason: "LOCAL_CHROME_REQUIRED" } });
+    expect(fetch).not.toHaveBeenCalled();
+    let leaseHeld = false;
+    const requestLease = async <T>(_family: string, work: () => Promise<T>) => {
+      if (leaseHeld) throw new Error("NESTED_SAME_FAMILY_LEASE");
+      leaseHeld = true;
+      try { return { acquired: true as const, value: await work() }; } finally { leaseHeld = false; }
+    };
+    const readNativeOfficialPage = vi.fn(async () => (await requestLease("TEEITUP", async () => { calls.push("native-source"); return nativePage; })).value);
+    const nativeDeps = { ...deps, fetch, requestLease, localCapabilities: ["LOCAL_CHROME"] as const, readNativeOfficialPage };
+    for (const players of [2, 3]) expect(await executeExistingAdapterRecipe(recipe, { ...input, players }, nativeDeps)).toMatchObject({ complete: true });
+    expect(readNativeOfficialPage).toHaveBeenCalledTimes(2);
+    expect(calls[0]).toBe("native-source");
+    expect(calls).not.toContain(source.officialUrl);
+    expect(leaseHeld).toBe(false);
+    calls.length = 0;
+    readNativeOfficialPage.mockResolvedValueOnce({ ...nativePage, visibleEvidence: { ...nativePage.visibleEvidence!, phoneTexts: [] } });
+    expect(await executeExistingAdapterRecipe(recipe, input, nativeDeps)).toMatchObject({ complete: false });
+    expect(calls.some(url => url.includes("/v2/tee-times"))).toBe(false);
+  });
   it("retains canonical identity and the discrepancy while binding a unique public facility and independent phone", () => {
     const proof = bind();
     expect(proof).toMatchObject({ kind: "OFFICIAL_POSTAL_CONFLICT", alias: "harbor-ridge", facilityId: 31, courseId: "provider-course-31",

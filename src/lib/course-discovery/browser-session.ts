@@ -929,6 +929,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     if (!blockedAccess && officialIdentityDocument && sameDiscoveryMainDocument(officialIdentityDocument.url, currentUrl)) {
         const visibleEvidence = await page.evaluate(() => {
           const headings: string[] = [], linkUrls: string[] = [], addressTexts: string[] = [], phoneTexts: string[] = [];
+          const brandLinks: Array<{ href: string; text: string }> = [];
           for (const node of Array.from(document.querySelectorAll('h1,h2,a[href],address,p,div,li,td')).slice(0, 3000)) {
             if (!(node instanceof HTMLElement) || node.closest('script,template,noscript,iframe,input,textarea,select,button,[contenteditable],[hidden],[inert],[aria-hidden="true"]') ||
                 node.querySelector('input,textarea,select,button,[contenteditable]')) continue;
@@ -945,6 +946,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
             const value = node.innerText.replace(/\n+/gu, ', ').replace(/\s+/gu, ' ').trim();
             if (/^H[12]$/u.test(node.tagName) && value.length <= 300 && headings.length < 80) headings.push(value);
             if (node instanceof HTMLAnchorElement && linkUrls.length < 120) linkUrls.push(node.href);
+            if (node instanceof HTMLAnchorElement && !form && value.length <= 200 && brandLinks.length < 20 &&
+                [node, node.parentElement].some(value => value?.classList.contains("site-title"))) brandLinks.push({ href: node.href, text: value });
             if (node instanceof HTMLAnchorElement && /^tel:/u.test(node.getAttribute("href") ?? "") && !form && value.length <= 40 && phoneTexts.length < 20) {
               let context: HTMLElement | null = node, publicContact = true;
               while (context) {
@@ -956,9 +959,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
             }
             if (value.length >= 15 && value.length <= 500 && addressTexts.length < 160 && /\b\d{5}(?:-\d{4})?\b/u.test(value)) addressTexts.push(value);
           }
-          return { title: document.title.slice(0, 500), headings, linkUrls, addressTexts, phoneTexts };
+          return { title: document.title.slice(0, 500), headings, linkUrls, addressTexts, phoneTexts, brandLinks };
         });
-        officialIdentityPage = { ...officialIdentityDocument, visibleEvidence, observedAt: Date.now() };
+        officialIdentityPage = { ...officialIdentityDocument, visibleEvidence, observedAt: Date.now(), browserTransport: deps.browserTransport ?? "PINNED_HTTP" };
     }
     const visible: DiscoveryBrowserSnapshot["controls"] = [];
     const candidates: Array<{ locator: Locator; date?: string; dropdown?: PublicDropdownProof; menuButton?: PublicMenuButtonProof }> = (await controlCandidates()).map(locator => ({ locator }));
@@ -1188,6 +1191,14 @@ export async function createCourseDiscoveryBrowserSession(input: {
   };
   return {
     // Controller-only methods; intentionally absent from action/tool schemas.
+    async readOfficialIdentityPage(): Promise<OfficialIdentityPage> {
+      const current = await snapshot();
+      if (current.accessRequirementObserved || current.nativeFirstFatal || current.navigationStatus !== 200 || current.loading ||
+          !officialIdentityPage || officialIdentityPage.url !== current.url || Date.now() - officialIdentityPage.observedAt > 5000 ||
+          !sameDiscoveryMainDocument(officialIdentityPage.url, page.url())) throw new Error("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
+      return structuredClone({ url: officialIdentityPage.url, html: officialIdentityPage.html,
+        visibleEvidence: officialIdentityPage.visibleEvidence, browserTransport: officialIdentityPage.browserTransport });
+    },
     readEzLinksConfiguration,
     readEzLinksReadContract,
     async readEzLinksAvailability(body: unknown) {

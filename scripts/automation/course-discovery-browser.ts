@@ -9,6 +9,7 @@ import { createAddressPinnedPublicFetchTransport } from "../../src/lib/automatio
 import { requestFamilyForUrl } from "../../src/lib/course-discovery/request-family";
 import { inspectSevenRoomsPublicProtocol, sevenRoomsPublicRangeUrl, sevenRoomsPublicRequests } from "../../src/lib/course-discovery/sevenrooms-public-direct";
 import { safeBrowserActionIssues } from "./course-discovery-diagnostics.mjs";
+import { readNativeOfficialIdentityPage } from "../../src/lib/course-discovery/native-official-page-reader";
 
 function publicFailureCode(error: unknown) {
   if (error instanceof z.ZodError) return "BROWSER_ACTION_SCHEMA_INVALID";
@@ -52,6 +53,8 @@ async function main() {
   const deadlineAt = new Date(at >= 0 ? args[at + 1] : "");
   if (!Number.isFinite(deadlineAt.getTime()) || deadlineAt.getTime() <= Date.now()) throw new Error("INVALID_DEADLINE");
   const requestLease = remoteProviderLease();
+  const configuredTransport = process.env.COURSE_DISCOVERY_BROWSER_TRANSPORT ?? "PINNED_HTTP";
+  if (!["PINNED_HTTP", "NATIVE_CHROME"].includes(configuredTransport)) throw new Error("INVALID_BROWSER_TRANSPORT");
   if (args.includes("--inspect-public-protocol")) {
     const lineInput = createInterface({ input: process.stdin, crlfDelay: Infinity });
     let id: number | null = null;
@@ -119,15 +122,15 @@ async function main() {
       if (source.length > 131_072) throw new Error("REQUEST_TOO_LARGE");
     }
     const value = JSON.parse(source) as { recipe: unknown; input: unknown };
-    const result = await executeAccessRecipe(parseAccessRecipe(value.recipe), accessExecutionInputSchema.parse(value.input), { deadlineAt, requestLease });
+    const result = await executeAccessRecipe(parseAccessRecipe(value.recipe), accessExecutionInputSchema.parse(value.input), { deadlineAt, requestLease,
+      ...(configuredTransport === "NATIVE_CHROME" ? { localCapabilities: ["LOCAL_CHROME"] as const,
+        readNativeOfficialPage: (source, url, deadline) => readNativeOfficialIdentityPage(source, url, deadline, { requestLease }) } : {}) });
     process.stdout.write(`${JSON.stringify(result)}\n`);
     return;
   }
   const initialAt = args.indexOf("--initial-urls");
   const initialUrls: unknown = JSON.parse(initialAt >= 0 ? args[initialAt + 1] : "[]");
   if (!Array.isArray(initialUrls) || !initialUrls.every(value => typeof value === "string")) throw new Error("INVALID_INITIAL_URLS");
-  const configuredTransport = process.env.COURSE_DISCOVERY_BROWSER_TRANSPORT ?? "PINNED_HTTP";
-  if (!["PINNED_HTTP", "NATIVE_CHROME"].includes(configuredTransport)) throw new Error("INVALID_BROWSER_TRANSPORT");
   const timeZoneAt = args.indexOf("--time-zone");
   const timeZone = timeZoneAt >= 0 ? args[timeZoneAt + 1] : "UTC";
   const venueNameAt = args.indexOf("--venue-name");

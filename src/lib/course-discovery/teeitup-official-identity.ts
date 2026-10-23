@@ -15,7 +15,8 @@ export type TeeItUpOfficialIdentityProof = z.infer<typeof teeItUpOfficialIdentit
 export type OfficialIdentitySource = { officialUrl?: string; bookingUrl: string; venueName: string; venueAddress?: string; timeZone: string };
 export type OfficialIdentityPage = { url: string; html: string; visibleEvidence?: {
   title: string; headings: string[]; linkUrls: string[]; addressTexts: string[]; phoneTexts?: string[];
-} };
+  brandLinks?: Array<{ href: string; text: string }>;
+}; browserTransport?: "PINNED_HTTP" | "NATIVE_CHROME" };
 type Node = DefaultTreeAdapterMap["node"];
 type Element = DefaultTreeAdapterMap["element"];
 const clean = (value: string) => value.normalize("NFKC").replace(/\s+/gu, " ").trim();

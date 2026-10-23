@@ -40,6 +40,7 @@ import { bindTeeItUpOfficialBookingFacility, type TeeItUpOfficialBookingSourcePr
 import { readTeeItUpOfficialBookingChain } from "./teeitup-official-booking-reader";
 import type { OfficialSourceDiagnostic } from "./official-source-diagnostics";
 import { bindTeeItUpPostalConflictProof, type TeeItUpPostalConflictProof } from "./teeitup-postal-conflict-proof";
+import type { NativeOfficialPageReader } from "./native-official-page-reader";
 
 type Dependencies = {
   fetch?: typeof fetch;
@@ -48,6 +49,8 @@ type Dependencies = {
   requestLease?: <T>(family: string, work: () => Promise<T>) => Promise<{ acquired: true; value: T } | { acquired: false }>;
   venueMatches: (expected: string, observed: unknown) => boolean;
   officialIdentityPage?: OfficialIdentityPage;
+  localCapabilities?: readonly "LOCAL_CHROME"[];
+  readNativeOfficialPage?: NativeOfficialPageReader;
   officialBookingSourceToken?: TeeItUpOfficialBookingToken;
   onOfficialSourceDiagnostic?: (value: OfficialSourceDiagnostic) => void;
 };
@@ -100,6 +103,9 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
   }
   if (adapter && adapter.family !== family) fail("ADAPTER_SOURCE_MISMATCH");
   if (family === "TEEITUP" && !source.venueAddress) fail("ADAPTER_IDENTITY_MISSING");
+  const savedPostalProof = adapter?.family === "TEEITUP" ? adapter.officialPostalConflictProof : undefined;
+  if (savedPostalProof?.warmTransport === "NATIVE_CHROME" &&
+      (!deps.localCapabilities?.includes("LOCAL_CHROME") || !deps.readNativeOfficialPage)) fail("LOCAL_CHROME_REQUIRED");
   const clock = deps.now ?? (() => new Date());
   const deadline = Math.min(deps.deadlineAt?.getTime() ?? Infinity, clock().getTime() + 120_000);
   if (deadline <= clock().getTime()) fail("DEADLINE_EXCEEDED");
@@ -118,7 +124,6 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
   let preparingBookingChain: Promise<void> | undefined;
   const initialBookingToken = !adapter && family === "TEEITUP" ? deps.officialBookingSourceToken : undefined;
   const savedBookingProof = adapter?.family === "TEEITUP" ? adapter.officialBookingSourceProof : undefined;
-  const savedPostalProof = adapter?.family === "TEEITUP" ? adapter.officialPostalConflictProof : undefined;
   function validateInitialBookingToken() {
     if (initialBookingToken) observedTeeItUpOfficialBookingChain(initialBookingToken);
   }
@@ -273,6 +278,15 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
     });
   };
   return { read, family, teeitup, teeitupFacilities: () => teeitupFacilities, officialIdentityProof: () => officialIdentityProof,
+    async refreshPostalSource() {
+      if (!savedPostalProof) return;
+      const url = savedPostalProof.officialSourceProof.officialPageUrl;
+      if (savedPostalProof.warmTransport === "NATIVE_CHROME") {
+        postalOfficialPage = await deps.readNativeOfficialPage!(source, url, new Date(deadline));
+        if (postalOfficialPage.url !== url || postalOfficialPage.browserTransport !== "NATIVE_CHROME" || !postalOfficialPage.visibleEvidence)
+          fail("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
+      } else await read(url);
+    },
     officialBookingSourceProof: () => { validateInitialBookingToken(); return officialBookingSourceProof; },
     officialPostalConflictProof: () => officialPostalConflictProof,
     teeitupSimulatorSlots: () => teeitupSimulatorSlots,
@@ -464,7 +478,7 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
     }
     if (adapter.family === "TEEITUP") {
       if (adapter.officialIdentityProof) await session!.read(adapter.officialIdentityProof.officialPageUrl);
-      if (adapter.officialPostalConflictProof) await session!.read(adapter.officialPostalConflictProof.officialSourceProof.officialPageUrl);
+      if (adapter.officialPostalConflictProof) await session!.refreshPostalSource();
       if (adapter.offeringKind === "SIMULATOR") {
         const origin = new URL(recipe.source.bookingUrl).origin;
         const headers = { accept: "application/json", "x-be-alias": adapter.alias, origin, referer: `${origin}/` };
