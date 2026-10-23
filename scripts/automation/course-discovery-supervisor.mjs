@@ -9,6 +9,7 @@ export const DISCOVERY_HEARTBEAT_MS = 15_000;
 export const DISCOVERY_CONCURRENCY = 3;
 export const DISCOVERY_WORK_BUDGET_MS = 12 * 60_000;
 export const DISCOVERY_CLOCK_SKEW_MS = 5_000;
+export const DISCOVERY_MODEL_OVERLOAD_COOLDOWN_MS = 45_000;
 export function discoveryWorkDeadline(job) {
   const firstPickup = Date.parse(job.firstPickedUpAt);
   const absolute = Date.parse(job.deadlineAt);
@@ -172,6 +173,22 @@ export function createCourseDiscoverySupervisor({ client, startWorker, executeRe
           activatedEvent = { ...jobEvent, completedAt: new Date(now()).toISOString(), metrics: outcome.metrics };
         }
       } catch (error) {
+        if (!execution && !activationAcknowledgedAt && job.attempts === 1 && error?.code === "DISCOVERY_TURN_FAILED" &&
+            error?.discoveryMetrics?.modelFailure?.errorCategory === "serverOverloaded") {
+          // Delay only the existing retry. Keep this owned lease and heartbeat
+          // live; cancellation and the original work deadline still win.
+          let cooldownTimer;
+          try {
+            assertLiveActivationFences();
+            await Promise.race([
+              new Promise(done => { cooldownTimer = timers.setTimeout(done,
+                Math.min(DISCOVERY_MODEL_OVERLOAD_COOLDOWN_MS, discoveryWorkDeadline(job) - now())); }),
+              cancelled, postActivationCleanup,
+            ]);
+            if (!activationAcknowledgedAt) assertLiveActivationFences();
+          } catch (cooldownError) { error = cooldownError; }
+          finally { timers.clearTimeout(cooldownTimer); }
+        }
         if (activationAcknowledgedAt) {
           // The backend activation is durable even if local cleanup fails or
           // exceeds its own budget. Never send fail after its acknowledged CAS.

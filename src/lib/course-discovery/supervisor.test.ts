@@ -387,6 +387,104 @@ describe("bounded discovery supervisor", () => {
   });
 });
 
+describe("first-attempt model overload cooldown", () => {
+  const overloaded = (category: string | undefined = "serverOverloaded", code = "DISCOVERY_TURN_FAILED") =>
+    Object.assign(new Error("provider details must remain private"), { code,
+      discoveryMetrics: { tokenUsage: {}, modelFailure: { turnStatus: "failed", ...(category ? { errorCategory: category } : {}) } } });
+  async function setup(assigned = job(), error = overloaded(), heartbeat = vi.fn(async () => ({ job: { leaseExpiresAt: new Date(Date.now() + 90_000).toISOString() } }))) {
+    vi.useFakeTimers(); vi.setSystemTime(now);
+    const client = { next: vi.fn().mockResolvedValueOnce({ job: assigned }).mockResolvedValue({ job: null }), heartbeat, fail: vi.fn(async () => ({})) };
+    const startWorker = vi.fn(async (options: { signal: AbortSignal }) => { expect(options.signal).toBeInstanceOf(AbortSignal); throw error; }), onEvent = vi.fn();
+    const supervisor = createCourseDiscoverySupervisor({ client, startWorker, onEvent });
+    await supervisor.start(); await vi.advanceTimersByTimeAsync(0);
+    return { supervisor, client, startWorker, onEvent, assigned, error };
+  }
+  it("retains lease heartbeats for 45 seconds before the ordinary first-attempt failure is queued", async () => {
+    const assigned = { ...job(), leaseExpiresAt: new Date(now + 31_000).toISOString() }, original = structuredClone(assigned);
+    const f = await setup(assigned);
+    expect(f.client.fail).not.toHaveBeenCalled(); expect(f.supervisor.activeCount).toBe(1);
+    await vi.advanceTimersByTimeAsync(44_999);
+    expect(f.client.fail).not.toHaveBeenCalled(); expect(f.startWorker).toHaveBeenCalledOnce();
+    expect(f.client.heartbeat.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(f.startWorker.mock.calls[0][0].signal.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.client.fail).toHaveBeenCalledExactlyOnceWith(assigned.id, assigned.leaseToken, "TOOL_FAILURE", true);
+    expect(f.supervisor.activeCount).toBe(0); expect(assigned).toEqual(original);
+    expect(f.onEvent).toHaveBeenCalledWith(expect.objectContaining({ event: "attempt_ended", completedAt: new Date(now + 45_000).toISOString(),
+      deadlineAt: original.deadlineAt, metrics: { tokenUsage: {}, modelFailure: { turnStatus: "failed", errorCategory: "serverOverloaded" } } }));
+    await f.supervisor.stop();
+  });
+  it("does not delay or create another model turn on the second allowed attempt", async () => {
+    const f = await setup({ ...job(), attempts: 2 });
+    expect(f.client.fail).toHaveBeenCalledExactlyOnceWith(f.assigned.id, f.assigned.leaseToken, "TOOL_FAILURE", true);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(f.startWorker).toHaveBeenCalledOnce(); expect(f.client.fail).toHaveBeenCalledOnce();
+    expect(() => validateClaimedDiscoveryJob({ ...job(), attempts: 3 }, now)).toThrow("DISCOVERY_JOB_INVALID");
+    await f.supervisor.stop();
+  });
+  it.each([
+    ["rateLimitExceeded", "DISCOVERY_TURN_FAILED"], ["", "DISCOVERY_TURN_FAILED"], ["serverOverloaded", "DISCOVERY_NO_VERIFIED_RECIPE"],
+  ])("leaves another model failure unchanged: %s / %s", async (category, code) => {
+    const f = await setup(job(), overloaded(category, code));
+    expect(f.client.fail).toHaveBeenCalledExactlyOnceWith(f.assigned.id, f.assigned.leaseToken, "TOOL_FAILURE", true);
+    expect(f.supervisor.activeCount).toBe(0); await f.supervisor.stop();
+  });
+  it("cancels the cooldown on supervisor stop without sending fail or leaving a delayed retry", async () => {
+    const f = await setup(); await vi.advanceTimersByTimeAsync(1000);
+    await f.supervisor.stop(); await vi.advanceTimersByTimeAsync(60_000);
+    expect(f.client.fail).not.toHaveBeenCalled(); expect(f.supervisor.activeCount).toBe(0);
+    expect(f.startWorker.mock.calls[0][0].signal.aborted).toBe(true);
+  });
+  it.each(["expired", "rejected"])("never fails or requeues a lease that becomes %s during cooldown", async kind => {
+    const assigned = { ...job(), leaseExpiresAt: new Date(now + (kind === "expired" ? 10_000 : 90_000)).toISOString() };
+    const f = await setup(assigned, overloaded(), vi.fn(async () => { throw Object.assign(new Error("lease"), { status: 409 }); }));
+    await vi.advanceTimersByTimeAsync(kind === "expired" ? 10_000 : 15_000);
+    expect(f.client.fail).not.toHaveBeenCalled(); expect(f.supervisor.activeCount).toBe(0);
+    expect(f.onEvent).toHaveBeenCalledWith(expect.objectContaining({ event: "attempt_ended", code: kind === "expired" ? "DISCOVERY_LEASE_EXPIRED" : "DISCOVERY_LEASE_REJECTED" }));
+    await vi.advanceTimersByTimeAsync(60_000); expect(f.client.fail).not.toHaveBeenCalled(); await f.supervisor.stop();
+  });
+  it.each(["absolute", "work"])("caps the cooldown at the original %s deadline without queuing a retry", async kind => {
+    const assigned = kind === "absolute" ? { ...job(), deadlineAt: new Date(now + 20_000).toISOString() }
+      : { ...job(), firstPickedUpAt: new Date(now - 710_000).toISOString(), deadlineAt: new Date(now + 190_000).toISOString() };
+    const duration = kind === "absolute" ? 20_000 : 10_000, f = await setup(assigned), original = structuredClone(assigned);
+    await vi.advanceTimersByTimeAsync(duration - 1); expect(f.client.fail).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.client.fail).toHaveBeenCalledExactlyOnceWith(assigned.id, assigned.leaseToken, "DEADLINE", false);
+    expect(assigned).toEqual(original); expect(f.supervisor.activeCount).toBe(0); await f.supervisor.stop();
+  });
+  it("never delays or fails an already acknowledged activation", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(now);
+    const assigned = job(), client = { next: vi.fn().mockResolvedValueOnce({ job: assigned }).mockResolvedValue({ job: null }), heartbeat: vi.fn(), fail: vi.fn() }, onEvent = vi.fn();
+    const supervisor = createCourseDiscoverySupervisor({ client, onEvent, startWorker: async ({ beforeActivate, afterActivate }) => {
+      await beforeActivate(); afterActivate({ metrics: { tokenUsage: {} } }); throw overloaded();
+    } });
+    await supervisor.start(); await vi.advanceTimersByTimeAsync(0);
+    expect(client.fail).not.toHaveBeenCalled(); expect(supervisor.activeCount).toBe(0);
+    expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ event: "activated" })); await supervisor.stop();
+  });
+  it("never sends fail when a previously prepared activation is acknowledged during cooldown", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(now);
+    let acknowledge = () => {};
+    const assigned = job(), client = { next: vi.fn().mockResolvedValueOnce({ job: assigned }).mockResolvedValue({ job: null }), heartbeat: vi.fn(), fail: vi.fn() }, onEvent = vi.fn();
+    const supervisor = createCourseDiscoverySupervisor({ client, onEvent, startWorker: async ({ beforeActivate, afterActivate }) => {
+      await beforeActivate(); acknowledge = () => afterActivate({ metrics: { tokenUsage: {} } }); throw overloaded();
+    } });
+    await supervisor.start(); await vi.advanceTimersByTimeAsync(1000);
+    expect(client.fail).not.toHaveBeenCalled(); acknowledge(); await vi.advanceTimersByTimeAsync(5000);
+    expect(client.fail).not.toHaveBeenCalled(); expect(supervisor.activeCount).toBe(0);
+    expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ event: "activated", activationAcknowledgedAt: new Date(now + 1000).toISOString() }));
+    await vi.advanceTimersByTimeAsync(60_000); expect(client.fail).not.toHaveBeenCalled(); await supervisor.stop();
+  });
+  it("does not apply discovery cooldown to a warm execution error", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(now);
+    const client = { nextExecution: vi.fn().mockResolvedValueOnce({ job: { id: "warm", leaseToken: "private", recipe: {}, input: {}, deadlineAt: new Date(now + 60_000).toISOString() } })
+      .mockResolvedValue({ job: null }), next: vi.fn(async () => ({ job: null })), executionResult: vi.fn(), fail: vi.fn() };
+    const startWorker = vi.fn(), supervisor = createCourseDiscoverySupervisor({ client, startWorker, executeRecipe: async () => { throw overloaded(); } });
+    await supervisor.start(); await vi.advanceTimersByTimeAsync(0);
+    expect(supervisor.activeCount).toBe(0); expect(client.fail).not.toHaveBeenCalled(); expect(startWorker).not.toHaveBeenCalled(); await supervisor.stop();
+  });
+});
+
 describe("controller-only verification", () => {
   it("retries temporary Windows file locks after removing copied credentials", async () => {
     const path = join(tmpdir(), "tee-discovery-worker-fixture");
