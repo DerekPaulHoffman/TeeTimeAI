@@ -144,6 +144,36 @@ describe("full-date public calendar choices", () => {
     await expect(selectPublicDateChoice({ locator: () => candidates } as unknown as Page, "button", "2026-10-23")).rejects.toThrow("AMBIGUOUS_DATE_CHOICE");
     expect(node.click).not.toHaveBeenCalled();
   });
+  it("attests only the native fully validated date button's exact pressed state", () => {
+    expect(inspect(grid().replace('id="selected"', 'id="selected" aria-pressed="true"'))).toEqual({ date: "2026-10-23", alreadySelected: true });
+    for (const value of ["false", "TRUE", "1", ""])
+      expect(inspect(grid().replace('id="selected"', `id="selected" aria-pressed="${value}"`))).toEqual({ date: "2026-10-23" });
+    expect(inspect(presentationTable().replace('id="selected"', 'id="selected" aria-pressed="true"'))).toEqual({ date: "2026-10-23" });
+  });
+  it("runs an optional synchronous callback after same-handle proof and clicks only that handle", async () => {
+    const order: string[] = [];
+    const handle = { evaluate: vi.fn(async () => ({ date: "2026-10-23", alreadySelected: true })),
+      click: vi.fn(async () => { order.push("click"); }), dispose: vi.fn() };
+    const node = { evaluate: vi.fn(async () => ({ date: "2026-10-23" })), elementHandle: vi.fn(async () => handle), click: vi.fn() };
+    const candidates = { count: async () => 1, evaluateAll: async () => [{ index: 0, text: "Oct 23, 2026 Friday" }], nth: () => node };
+    await selectPublicDateChoice({ locator: () => candidates } as unknown as Page, "button", "2026-10-23", proof => {
+      expect(proof).toEqual({ date: "2026-10-23", alreadySelected: true }); order.push("callback");
+    });
+    expect(order).toEqual(["callback", "click"]); expect(node.click).not.toHaveBeenCalled(); expect(handle.dispose).toHaveBeenCalledOnce();
+  });
+  it("cannot carry or click when the captured date handle loses its final proof", async () => {
+    const handle = { evaluate: vi.fn(async () => undefined), click: vi.fn(), dispose: vi.fn() };
+    const node = { evaluate: vi.fn(async () => ({ date: "2026-10-23" })), elementHandle: vi.fn(async () => handle), click: vi.fn() };
+    const candidates = { count: async () => 1, evaluateAll: async () => [{ index: 0, text: "Oct 23, 2026 Friday" }], nth: () => node };
+    const callback = vi.fn();
+    await expect(selectPublicDateChoice({ locator: () => candidates } as unknown as Page, "button", "2026-10-23", callback)).rejects.toThrow("AMBIGUOUS_DATE_CHOICE");
+    expect(callback).not.toHaveBeenCalled(); expect(handle.click).not.toHaveBeenCalled(); expect(node.click).not.toHaveBeenCalled();
+    expect(handle.dispose).toHaveBeenCalledOnce();
+  });
+  it("rejects a duplicate requested date in the final callback-scoped same-handle proof", () => {
+    document.body.innerHTML = grid().replace('id="selected"', 'id="selected" aria-pressed="true"') + grid();
+    expect(inspectPublicDateChoiceElement(document.querySelector("#selected")!, { selector: "button", date: "2026-10-23" })).toBeUndefined();
+  });
 });
 
 describe.runIf(existsSync(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? "C:/Program Files/Google/Chrome/Application/chrome.exe"))("serialized presentation calendar", () => {

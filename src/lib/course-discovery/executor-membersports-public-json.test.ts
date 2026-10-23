@@ -20,14 +20,16 @@ const parametersUrl = api + "/api/v1/golfclubs/123/golfCourses/456/types/0/teesh
 const publicKey = "synthetic-public-literal";
 const baseline = { date: "2026-10-23", timeZone: "America/New_York", players: 2, startTime: "08:00", endTime: "18:00" };
 type Mode = "valid" | "missing-address" | "wrong-link" | "missing-post-route" | "profile-body" | "metadata-date" | "new-document" | "malformed-row" | "dom-parity" | "restricted" | "latest-500" | "latest-429" | "later-wrong-date" | "overlap-wrong-date";
+type DateSelection = "already-selected" | "changed" | "unselected-no-read" | "no-current" | "wrong-current-date" | "retired-document" | "later-post";
 
 function countsUrl(date: string) { return `${api}/api/v1/teesheets/golfclubs/123/courses/456/types/0/dates/${date}/${date}/1046/profiles/0/bookingCounts`; }
 function body(date: string) { return { configurationTypeId: 0, date, golfClubGroupId: 0, golfClubId: 123, golfCourseId: 456, groupSheetTypeId: 0 }; }
-function recipe(mode: Mode) {
+function recipe(mode: Mode, dateSelection?: DateSelection) {
   return parseAccessRecipe({ schemaVersion: 1, engine: "BROWSER_JSON", browserTransport: "NATIVE_CHROME",
     target: { courseId: "public-tee-sheet-fixture", kind: "OUTDOOR" },
     source: { officialUrl: "https://example.org/", bookingUrl: booking, venueName: "Canonical Example Golf", venueAddress: "1005 Richardson Drive, Groveport, OH 43125, USA", providerFamily: "MEMBERSPORTS", timeZone: baseline.timeZone },
-    pageUrl: official, steps: [{ action: "openOfficialBooking", addressSelector: "#address", bookingLinkSelector: "#booking" }, { action: "waitFor", selector: ".teeTimes" }],
+    pageUrl: official, steps: [{ action: "openOfficialBooking", addressSelector: "#address", bookingLinkSelector: "#booking" },
+      ...(dateSelection ? [{ action: "selectDateChoice", selector: "#calendar button" }] : []), { action: "waitFor", selector: ".teeTimes" }],
     permittedRoutes: [
       { origin: "https://example.org", path: "/rates", methods: ["GET"], queryKeys: [] },
       { origin, path: "/tee-times/123/456/0", methods: ["GET"], queryKeys: [] },
@@ -54,11 +56,11 @@ function dom(date: string, mode: Mode) {
   const dateText = `${weekdays[day.getUTCDay()]}, Oct ${day.getUTCDate()}, ${day.getUTCFullYear()}`;
   return `<p class="dateFormat">${dateText}</p><div class="teeTimes"><div class="teeTime"><div class="timeCol">1:30 PM</div><div class="availableBookings">
     <app-tee-time-card class="bookingCard"><div class="teeTimeCard${mode === "restricted" ? " restricted" : ""}"><div class="name">Front</div>
-    <div class="rightCells"><div class="iconCell first"><span>1-${mode === "dom-parity" ? "3" : "4"}</span></div><div class="iconCell holes9"></div></div>
+    <div class="rightCells"><div class="iconCell first"><span>1-${mode === "dom-parity" ? "3" : "4"}</span></div><div class="iconCell"><div class="holes9"></div></div></div>
     </div></app-tee-time-card></div></div></div>`;
 }
 
-async function run(mode: Mode, input = baseline) {
+async function run(mode: Mode, input = baseline, dateSelection?: DateSelection) {
   let pending = 0, postCount = 0, bookingDocuments = 0, optionsCompleted = 0;
   let laterPostEntered = false, firstResponseHeld = false;
   let releaseFirst: () => void = () => {};
@@ -121,14 +123,20 @@ async function run(mode: Mode, input = baseline) {
     } else if (url === booking) {
       bookingDocuments++;
       contentType = "text/html";
-      const postBody = { ...body(input.date), ...(mode === "profile-body" ? { memberProfileId: 0 } : {}) };
+      const initialDate = dateSelection === "changed" ? baseline.date : dateSelection === "wrong-current-date" ? "2026-10-24" : input.date;
+      const postBody = { ...body(initialDate), ...(mode === "profile-body" ? { memberProfileId: 0 } : {}) };
       const postRequest = (value: unknown) => `fetch(${JSON.stringify(endpoint)},{method:'POST',headers:{'content-type':'application/json','authorization':'Bearer null','x-api-key':${JSON.stringify(publicKey)}},body:JSON.stringify(${JSON.stringify(value)})})`;
       const post = postRequest(postBody);
       const wrong = postRequest({ ...postBody, date: "2026-10-24" });
       const following = mode === "latest-500" || mode === "latest-429" ? `.then(()=>${post})`
         : mode === "later-wrong-date" ? `.then(()=>${wrong})` : mode === "new-document" ? ".then(()=>location.reload())" : "";
-      const requests = mode === "overlap-wrong-date" ? `Promise.all([${post},${wrong}])` : post;
-      payload = dom(input.date, mode) + (mode === "new-document" && bookingDocuments > 1 ? "" : `<script>
+      const requests = dateSelection === "no-current" ? "Promise.resolve()" : mode === "overlap-wrong-date" ? `Promise.all([${post},${wrong}])` : post;
+      const calendar = dateSelection ? `<div id="calendar" role="grid"><div role="gridcell"><button aria-label="Fri, Oct 23, 2026" aria-pressed="${dateSelection === "unselected-no-read" ? "false" : "true"}">23</button></div><div role="gridcell"><button aria-label="Sat, Oct 24, 2026" aria-pressed="false">24</button></div></div>` : "";
+      const selectedPost = `fetch(${JSON.stringify(endpoint)},{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer null','x-api-key':${JSON.stringify(publicKey)}},body:JSON.stringify(${JSON.stringify(body(dateSelection === "later-post" ? "2026-10-24" : input.date))})})`;
+      const selectAction = dateSelection ? `document.querySelectorAll('#calendar button').forEach(button=>button.onclick=()=>{
+        document.querySelector('#calendar').remove();${dateSelection === "changed" ? `document.querySelector('.dateFormat').textContent='Sat, Oct 24, 2026';` : ""}
+        ${["changed", "later-post"].includes(dateSelection) ? selectedPost + ".catch(()=>{});" : ""}});` : "";
+      payload = dom(initialDate, mode) + calendar + `<script>${selectAction}</script>` + (mode === "new-document" && bookingDocuments > 1 ? "" : `<script>
         Promise.all([${JSON.stringify([coursesUrl, parametersUrl, counts])}.map(url=>fetch(url).then(r=>r.json()))]).then(()=>${requests})${following}.catch(()=>{});
         </script>`);
     } else if (url === coursesUrl) payload = [{ golfCourseId: 456, name: "Example Municipal Course", holes: 18 }];
@@ -150,7 +158,7 @@ async function run(mode: Mode, input = baseline) {
   });
   const fetcher = vi.fn(async () => { throw Error("PINNED_TRANSPORT_MUST_NOT_RUN"); });
   const now = new Date("2026-10-20T12:00:00Z");
-  const result = await executeAccessRecipe(recipe(mode), input, { now: () => now, deadlineAt: new Date(now.getTime() + 6500),
+  const result = await executeAccessRecipe(recipe(mode, dateSelection), input, { now: () => now, deadlineAt: new Date(now.getTime() + 6500),
     launchBrowser: () => chromium.launch({ executablePath: chrome, headless: true }), fetch: fetcher,
     requestLease: async (_family, work) => ({ acquired: true, value: await work() }) });
   expect(fetcher).not.toHaveBeenCalled(); expect(pending).toBe(0); expect(JSON.stringify(result)).not.toContain(publicKey);
@@ -159,6 +167,22 @@ async function run(mode: Mode, input = baseline) {
 
 describe.runIf(existsSync(chrome))("MemberSports browser JSON complete executor composition", () => {
   afterEach(() => vi.restoreAllMocks());
+  it("carries only an accepted current read when an already-selected date emits no request", async () => {
+    const { result, posts } = await run("valid", baseline, "already-selected");
+    expect(posts).toHaveLength(1); expect(result, JSON.stringify(result.evidence)).toMatchObject({ status: "AVAILABLE", complete: true });
+    expect(result.slots).toHaveLength(1);
+  }, 12_000);
+  it("requires a new response after a changed date choice", async () => {
+    const { result, posts } = await run("valid", { ...baseline, date: "2026-10-24", players: 3 }, "changed");
+    expect(posts.map(post => JSON.parse(post.body!).date)).toEqual([baseline.date, "2026-10-24"]);
+    expect(result, JSON.stringify(result.evidence)).toMatchObject({ status: "AVAILABLE", complete: true }); expect(result.slots).toHaveLength(1);
+  }, 12_000);
+  it.each<DateSelection>(["unselected-no-read", "no-current", "wrong-current-date", "retired-document", "later-post"])(
+    "never uses an unproven or retired already-selected-date carry: %s", async dateSelection => {
+      const { result, posts } = await run(dateSelection === "retired-document" ? "new-document" : "valid", baseline, dateSelection);
+      expect(result.complete, JSON.stringify(result.evidence)).toBe(false); expect(result.slots).toEqual([]); expect(result.status).not.toBe("EMPTY");
+      expect(posts).toHaveLength(dateSelection === "no-current" ? 0 : dateSelection === "later-post" ? 2 : 1);
+    }, 12_000);
   it("proves the baseline and a changed date/P3 in separate fresh executions", async () => {
     for (const input of [baseline, { ...baseline, date: "2026-10-24", players: 3 }]) {
       const { result, posts, optionsCompleted } = await run("valid", input);

@@ -834,13 +834,14 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
             throw new Error("UNVERIFIED_CLIENT_DURATION");
           carryDurationFence = true; previousAvailabilityRequests = passfactoryAvailabilityRequests;
         }
-        if (step.action === "openOfficialBooking" || step.action === "followLink" || step.action === "selectDateChoice" || step.action === "selectDate" || step.action === "selectProduct" ||
-          step.action === "selectRentalService" || step.action === "continueToAvailability" || step.action === "select" || step.action === "fill" ||
-          step.action === "clickFilter" && ["SELECT_DATE", "APPLY_DATE", "SELECT_FILTER", "RUN_SEARCH"].includes(step.purpose)) {
+        const invalidateAvailability = () => {
           mutationGeneration++; responseGeneration = undefined; rejectedResponseGeneration = undefined; browserJson = undefined;
           memberSportsRead = undefined;
           carriedDurationGeneration = carryDurationFence ? mutationGeneration : undefined;
-        }
+        };
+        if (step.action === "openOfficialBooking" || step.action === "followLink" || step.action === "selectDateChoice" && !memberSports || step.action === "selectDate" || step.action === "selectProduct" ||
+          step.action === "selectRentalService" || step.action === "continueToAvailability" || step.action === "select" || step.action === "fill" ||
+          step.action === "clickFilter" && ["SELECT_DATE", "APPLY_DATE", "SELECT_FILTER", "RUN_SEARCH"].includes(step.purpose)) invalidateAvailability();
         if (step.action === "openOfficialBooking") {
           if (!memberSports || !recipe.source.venueAddress) throw new Error("OFFICIAL_BOOKING_IDENTITY_UNVERIFIED");
           await waitForQuietReads();
@@ -873,7 +874,19 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
           continue;
         }
         if (step.action === "selectDateChoice") {
-          selectedDateDay = await selectPublicDateChoice(page, step.selector, input.date);
+          selectedDateDay = await selectPublicDateChoice(page, step.selector, input.date, memberSports ? choice => {
+            const current = memberSportsRead, identity = memberSportsIdentity;
+            // A validated already-pressed date only closes this public calendar.
+            // Preserve an independently accepted exact current read, never an
+            // unproved response or a promise that the click will fetch one.
+            const carry = choice.alreadySelected && choice.date === input.date && current && identity &&
+              !signal.aborted && !blocked && !providerThrottled && !pendingReadCount() &&
+              responseGeneration === mutationGeneration && rejectedResponseGeneration !== mutationGeneration &&
+              current.generation === mutationGeneration && current.documentSequence === mainDocumentSequence &&
+              current.readSequence === latestBrowserJsonRead && identity.bookingDocumentSequence === mainDocumentSequence &&
+              canonicalCpsPublicUrl(page.url()) === identity.proof.bookingUrl && matchesAvailabilityRequest(recipe, input, current.request);
+            if (!carry) invalidateAvailability();
+          } : undefined);
           selectedRequestedDate = true;
           continue;
         }

@@ -1,7 +1,8 @@
 import type { Locator, Page } from "@playwright/test";
 
 /** A dated calendar choice is a complete date, never a dated time/product card. */
-export function inspectPublicDateChoiceElement(value: Element | string): { date: string } | undefined {
+export function inspectPublicDateChoiceElement(value: Element | string,
+  currentChoice?: { selector: string; date: string }): { date: string; alreadySelected?: true } | undefined {
   const helpers = {
     parse(text: string) {
       if (text.length > 100 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(text)) return undefined;
@@ -76,6 +77,14 @@ export function inspectPublicDateChoiceElement(value: Element | string): { date:
       return selected && dates.length >= 2 && dates.length <= 42 && new Set(dates).size === dates.length ? { date: selected } : undefined;
     },
   };
+  if (currentChoice) {
+    if (typeof value === "string") return undefined;
+    const candidates = Array.from(value.ownerDocument.querySelectorAll(currentChoice.selector));
+    if (candidates.length > 1000) return undefined;
+    const matching = candidates.filter(node => [node.getAttribute("aria-label") ?? "", helpers.text(node)]
+      .some(text => (helpers.parse(text) ?? helpers.parseAvailable(text)) === currentChoice.date));
+    if (matching.length !== 1 || matching[0] !== value) return undefined;
+  }
   if (typeof value === "string") { const date = helpers.parse(value) ?? helpers.parseAvailable(value); return date ? { date } : undefined; }
   if (value.tagName === "TD") return helpers.presentationDate(value);
   const numericDay = /^\d{1,2}$/u.test(helpers.text(value));
@@ -102,7 +111,7 @@ export function inspectPublicDateChoiceElement(value: Element | string): { date:
       if (ancestor.getAttribute("aria-disabled") === "true" || /\b(?:book|booking|reserve|reservation|checkout|payment|purchase|confirm|cart|password|login|contact|email|phone|birth|birthday|dob|account|membership)\b/iu.test(
         `${ancestor.getAttribute("aria-label") ?? ""} ${ancestor.getAttribute("title") ?? ""}`)) return undefined;
     }
-    return ancestor ? undefined : { date };
+    return ancestor ? undefined : { date, ...(value.getAttribute("aria-pressed") === "true" ? { alreadySelected: true as const } : {}) };
   }
   const parent = value.parentElement;
   if (!parent || ["BODY", "HTML", "FORM"].includes(parent.tagName) || parent.querySelector("input,select,textarea") || parent.querySelectorAll("*").length > 620) return undefined;
@@ -114,7 +123,7 @@ export function inspectPublicDateChoiceElement(value: Element | string): { date:
   for (let depth = 0; ancestor && depth < 16; depth++, ancestor = ancestor.parentElement) {
     if (/\b(?:checkout|payment|purchase|confirm|cart|password|login|contact|email|phone|birth|birthday|dob|account|membership)\b/iu.test(`${ancestor.getAttribute("aria-label") ?? ""} ${ancestor.getAttribute("title") ?? ""}`)) return undefined;
   }
-  return { date };
+  return { date, ...(value.getAttribute("aria-pressed") === "true" ? { alreadySelected: true as const } : {}) };
 }
 
 export function parsePublicDateChoice(value: string) { return inspectPublicDateChoiceElement(value)?.date; }
@@ -137,7 +146,8 @@ export async function observedPublicDateChoices(page: Page): Promise<Array<{ loc
   return choices;
 }
 
-export async function selectPublicDateChoice(page: Page, selector: string, date: string): Promise<Locator> {
+export async function selectPublicDateChoice(page: Page, selector: string, date: string,
+  beforeClick?: (proof: { date: string; alreadySelected: boolean }) => void): Promise<Locator> {
   const candidates = page.locator(selector);
   if (await candidates.count() > 1000) throw new Error("AMBIGUOUS_DATE_CHOICE");
   const text = await candidates.evaluateAll(elements => elements.map((element, index) => ({ index,
@@ -150,6 +160,17 @@ export async function selectPublicDateChoice(page: Page, selector: string, date:
     if ((await node.evaluate(inspectPublicDateChoiceElement, undefined, { timeout: 1000 }))?.date === date) matching.push(node);
   }
   if (matching.length !== 1 || (await matching[0].evaluate(inspectPublicDateChoiceElement, undefined, { timeout: 1000 }))?.date !== date) throw new Error("AMBIGUOUS_DATE_CHOICE");
-  await matching[0].click();
+  if (beforeClick) {
+    const handle = await matching[0].elementHandle();
+    if (!handle) throw new Error("AMBIGUOUS_DATE_CHOICE");
+    try {
+      const proof = await handle.evaluate(inspectPublicDateChoiceElement, { selector, date });
+      if (proof?.date !== date) throw new Error("AMBIGUOUS_DATE_CHOICE");
+      // Synchronous controller work runs after the same handle's full proof.
+      // Never resolve the selector again after deciding whether to carry a read.
+      beforeClick({ date: proof.date, alreadySelected: proof.alreadySelected === true });
+      await handle.click();
+    } finally { await handle.dispose(); }
+  } else await matching[0].click();
   return matching[0];
 }
