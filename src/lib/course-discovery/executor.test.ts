@@ -310,15 +310,15 @@ describe.runIf(existsSync(chromeExecutable))("isolated browser recipe replay", (
     fetch: vi.fn(async () => new Response(injectFence ? browserHtml(page) : page, { headers: { "content-type": "text/html" } })) as unknown as typeof fetch,
     requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
   });
-  it.each(["valid", "missing", "revoked", "invalid body", "unscoped"] as const)("revalidates the native classic bootstrap in deterministic replay: %s", async mode => {
-    const entry = "https://clients.mindbodyonline.com/classic/ws?studioid=685163&stype=-9", target = "https://clients.mindbodyonline.com/classic/home", origin = "https://clients.mindbodyonline.com";
+  it.each(["valid", "valid query", "unscoped query", "missing", "revoked", "invalid body", "unscoped"] as const)("revalidates the native classic bootstrap in deterministic replay: %s", async mode => {
+    const entry = "https://clients.mindbodyonline.com/classic/ws?studioid=685163&stype=-9", target = "https://clients.mindbodyonline.com/classic/home" + (mode === "valid query" || mode === "unscoped query" ? "?studioid=685163" : ""), origin = "https://clients.mindbodyonline.com";
     const fields = new URLSearchParams([..."tg vt lvl qParam view page catid prodid prodGroupId sSU optForwardingLink singleUseToken oAuthToken launchGUID launchUID launchPWDChange launchPWDChangeKey launchLostPWD launchResetPWD launchBizModeLogin launchBizModeLoginWithRedirectLink key consumerModeRedirect extLink giftCardID".split(" ").map(key => [key, ""]),
       ["studioId", "685163"], ["stype", "-9"], ["trn", "0"], ["classid", "0"], ["date", "10/23/2026"]]);
     if (mode === "invalid body") fields.set("oAuthToken", "unapproved");
-    const landing = '<link rel="icon" href="data:,"><form method="post" action="/classic/home">' + [...fields].map(([key, value]) => `<input type="hidden" name="${key}" value="${value}">`).join("") + '</form><script>onload=()=>document.forms[0].submit()</script>';
+    const landing = `<link rel="icon" href="data:,"><form method="post" action="${target}">` + [...fields].map(([key, value]) => `<input type="hidden" name="${key}" value="${value}">`).join("") + '</form><script>onload=()=>document.forms[0].submit()</script>';
     const base = recipe(), selected = parseAccessRecipe({ ...base, source: { ...base.source, officialUrl: entry, bookingUrl: entry }, pageUrl: entry, browserTransport: "NATIVE_CHROME",
       availabilityResponse: { url: origin + "/availability?date={{date}}", method: "GET", date: { source: "QUERY", path: "date" } },
-      permittedRoutes: [{ origin, path: "/classic/ws", methods: ["GET"], queryKeys: ["studioid", "stype"] }, { origin, path: "/classic/home", methods: mode === "unscoped" ? ["GET"] : ["GET", "POST"], queryKeys: [] },
+      permittedRoutes: [{ origin, path: "/classic/ws", methods: ["GET"], queryKeys: ["studioid", "stype"] }, { origin, path: "/classic/home", methods: mode === "unscoped" ? ["GET"] : ["GET", "POST"], queryKeys: mode === "valid query" ? ["studioid"] : [] },
         { origin, path: "/availability", methods: ["GET"], queryKeys: ["date"] }] });
     const proof = Object.freeze({ sourceUrl: entry }), reads: string[] = []; let live = true, leases = 0, release!: () => void, held!: () => void;
     const released = new Promise<void>(resolve => { release = resolve; }), queued = new Promise<void>(resolve => { held = resolve; });
@@ -335,7 +335,7 @@ describe.runIf(existsSync(chromeExecutable))("isolated browser recipe replay", (
       const replay = executeAccessRecipe(selected, executionInput, deps);
       if (mode === "revoked") { await queued; live = false; release(); }
       const result = await replay;
-      if (mode === "valid") { expect(result.status, JSON.stringify({ evidence: result.evidence, reads })).toBe("AVAILABLE"); expect(reads).toContain(`POST ${target}`); }
+      if (mode === "valid" || mode === "valid query") { expect(result.status, JSON.stringify({ evidence: result.evidence, reads })).toBe("AVAILABLE"); expect(reads).toContain(`POST ${target}`); }
       else { expect(result.complete).toBe(false); expect(result.slots).toEqual([]); expect(reads).not.toContain(`POST ${target}`); }
     } finally { release(); native.mockRestore(); proxy.mockRestore(); sourceProof.mockRestore(); controller.mockRestore(); }
   }, 20_000);

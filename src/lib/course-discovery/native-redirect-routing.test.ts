@@ -1170,10 +1170,13 @@ describe("native anonymous Mindbody bootstrap ownership", () => {
     if (commit) test.events.get("Page.frameNavigated")!({ frame: { id: "main", loaderId: "loader-source", url: source } });
   };
 
-  it.each([false, true])("attests one public form successor only after source completion and ACK (held=%s)", async held => {
+  it.each([{ held: false, queried: false }, { held: true, queried: false }, { held: false, queried: true }, { held: true, queried: true }])("attests one public form successor only after source completion and ACK (held=$held query=$queried)", async ({ held, queried }) => {
     const test = await installed(), ack = deferred<object>();
+    const actualTarget = queried ? target + "?studioid=685163" : target;
     try {
-      await prepare(test, true, held ? ack : undefined); intent(test); network(test); post(test);
+      await prepare(test, true, held ? ack : undefined); intent(test, { url: actualTarget });
+      network(test, { request: { url: actualTarget, method: "POST", headers, hasPostData: true, postData: body } });
+      post(test, { request: { url: actualTarget, method: "POST", headers, hasPostData: true, postData: body } });
       if (held) { await new Promise(resolve => setTimeout(resolve, 5)); expect(test.routes).toHaveLength(1); ack.resolve({}); }
       await vi.waitFor(() => expect(test.routes).toHaveLength(2));
       const request = test.routes[1].request(), proof = nativeMindbodyBootstrapSource(request);
@@ -1183,7 +1186,7 @@ describe("native anonymous Mindbody bootstrap ownership", () => {
       await test.routes[1].continue(); expect(test.failures).toEqual([]);
       expect(test.cdp.send.mock.calls.find(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "bootstrap"))
         .toEqual(["Fetch.continueRequest", { requestId: "bootstrap" }]);
-      test.response("bootstrap", { resourceType: "Document", request: { url: target, method: "POST", headers, hasPostData: true, postData: body } });
+      test.response("bootstrap", { resourceType: "Document", request: { url: actualTarget, method: "POST", headers, hasPostData: true, postData: body } });
       await request.response();
       await test.guard.beginDocumentNavigation(test.main as never); expect(nativeMindbodyBootstrapSource(request)).toBeNull();
     } finally { ack.resolve({}); await test.guard.close(); }
@@ -1249,7 +1252,7 @@ describe("native anonymous Mindbody bootstrap ownership", () => {
     } finally { ack.resolve({}); await test.guard.close(); }
   });
   it.each(["target query", "source method", "source body", "current URL"] as const)("retains the rejected callback facts even without an intent: %s", async mode => {
-    const test = await installed(), attemptedTarget = mode === "target query" ? target + "?studioid=685163" : target;
+    const test = await installed(), attemptedTarget = mode === "target query" ? target + "?studioid=12345" : target;
     try {
       await prepare(test, true, undefined, mode === "source method" ? "HEAD" : "GET", mode === "source body" ? "" : undefined);
       if (mode === "current URL") test.events.get("Page.navigatedWithinDocument")!({ frameId: "main", url: source + "&extra=1" });
@@ -1263,7 +1266,7 @@ describe("native anonymous Mindbody bootstrap ownership", () => {
         intentCallbackKnownSourceEndpoint: true, intentCallbackSourceQueryCount: mode === "current URL" ? 3 : 2,
         intentCallbackTargetOriginMatches: true, intentCallbackTargetPathMatches: true, intentCallbackTargetQueryPresent: mode === "target query", intentCallbackTargetFragmentPresent: false,
         intentCallbackTargetQueryCount: mode === "target query" ? 1 : 0,
-        intentCallbackTargetQuery: mode === "target query" ? [{ key: "studioid", occurrences: 1, canonicalKeys: true, valueClasses: ["MATCHES_SOURCE_STUDIO"] }] : [] });
+        intentCallbackTargetQuery: mode === "target query" ? [{ key: "studioid", occurrences: 1, canonicalKeys: true, valueClasses: ["NONEMPTY"] }] : [] });
       expect(JSON.stringify(test.guard.firstFatal?.intentCallbackTargetQuery)).not.toContain("685163");
     } finally { await test.guard.close(); }
   });

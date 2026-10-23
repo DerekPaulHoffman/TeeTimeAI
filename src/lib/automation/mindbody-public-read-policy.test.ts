@@ -34,6 +34,17 @@ describe("Mindbody anonymous classic display bootstrap", () => {
     // cannot pass the generic anonymous POST classifier.
     expect(isAnonymousBrowserReadPost(new URL(target), readHeaders(), form().toString())).toBe(false);
   });
+  it("accepts the observed bound studio routing query without granting other target state", () => {
+    expect(allows(undefined, entry, target + "?studioid=685163")).toBe(true);
+    const other = form(); other.set("studioId", "12345");
+    expect(allows(other.toString(), entry.replace("685163", "12345"), target + "?studioid=12345")).toBe(true);
+    for (const query of ["?studioid=12345", "?studioid=", "?studioId=685163", "?%73tudioid=685163", "?studioid=%3685163", "?studioid=0685163",
+      "?studioid=685163&studioid=685163", "?studioid=685163&stype=-9", "?studioid=685163&", "?studioid=685163+", "?studioid=685163#private"]) {
+      expect(allows(undefined, entry, target + query)).toBe(false);
+    }
+    for (const url of [target.replace("https:", "http:") + "?studioid=685163", target.replace("clients.", "user:private@clients.") + "?studioid=685163",
+      target.replace("/classic", "/%63lassic") + "?studioid=685163"]) expect(allows(undefined, entry, url)).toBe(false);
+  });
   it.each(emptyFields)("requires the %s launch/contact/forwarding field to remain literally empty", field => {
     const value = form(); value.set(field, "nonempty"); expect(allows(value.toString())).toBe(false);
   });
@@ -53,7 +64,7 @@ describe("Mindbody anonymous classic display bootstrap", () => {
   it("requires the exact public source, destination, encoding and anonymous headers", () => {
     for (const bad of [entry + "&studioid=685163", entry + "&other=", entry.replace("studioid=", "studio%69d="), entry + "#private",
       entry.replace("https:", "http:"), entry.replace("/ws?", "/home?"), entry.replace("stype=-9", "stype=1")]) expect(allows(undefined, bad)).toBe(false);
-    for (const bad of [target + "?studioid=685163", target + "#view", target.replace("/home", "/checkout"), target.replace("clients.", "evil.")]) expect(allows(undefined, entry, bad)).toBe(false);
+    for (const bad of [target + "?studioid=12345", target + "#view", target.replace("/home", "/checkout"), target.replace("clients.", "evil.")]) expect(allows(undefined, entry, bad)).toBe(false);
     for (const [key, value] of [["origin", "https://other.example"], ["content-type", "application/json"], ["authorization", "Bearer null"], ["next-action", "public-looking"], ["x-auth-token", "opaque"]]) {
       const h = readHeaders(); h.set(key, value); expect(allows(undefined, entry, target, h)).toBe(false);
     }
@@ -79,12 +90,12 @@ describe("Mindbody anonymous classic display bootstrap", () => {
       expect(JSON.stringify(diagnostic)).not.toContain("private-");
     }
   });
-  it("classifies every source binding condition without admitting a queried target", () => {
+  it("classifies every source binding condition without admitting an unbound queried target", () => {
     const cases: Array<[typeof mindbodyClassicBootstrapSourceOutcomes[number], string, string]> = [
       ["VALID", entry, target], ["URL_PARSE", "not-url", target], ["SOURCE_ORIGIN", entry.replace("https:", "http:"), target],
       ["SOURCE_PATH", entry.replace("/ws?", "/other?"), target], ["SOURCE_QUERY_COUNT", entry + "&extra=1", target],
       ["SOURCE_QUERY_KEYS", entry.replace("studioid=", "studio%69d="), target], ["SOURCE_QUERY_VALUES", entry.replace("-9", "-8"), target],
-      ["TARGET", entry, target + "?studioid=685163"],
+      ["TARGET", entry, target + "?studioid=12345"],
     ];
     expect(cases.map(([outcome]) => outcome)).toEqual(mindbodyClassicBootstrapSourceOutcomes);
     for (const [outcome, sourceUrl, targetUrl] of cases) {

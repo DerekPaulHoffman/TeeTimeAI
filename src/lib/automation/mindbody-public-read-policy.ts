@@ -101,7 +101,10 @@ export function mindbodyClassicPublicBootstrapSourceDiagnostic(sourceUrl: string
     const source = new URL(sourceUrl), target = new URL(targetUrl);
     if (source.protocol !== "https:" || source.hostname !== "clients.mindbodyonline.com" || source.username || source.password || source.port) return "SOURCE_ORIGIN";
     if (source.pathname !== "/classic/ws" || source.hash) return "SOURCE_PATH";
-    if (target.href !== "https://clients.mindbodyonline.com/classic/home") return "TARGET";
+    const home = "https://clients.mindbodyonline.com/classic/home", studioId = source.searchParams.get("studioid");
+    // The observed launch preserves its public studio in one literal routing
+    // key. No additional target state, alias, fragment or different ID is read.
+    if (target.href !== home && !(studioId && /^[1-9]\d{0,9}$/u.test(studioId) && target.href === `${home}?studioid=${studioId}`)) return "TARGET";
     const parts = source.search.slice(1).split("&");
     // Require literal keys/values: percent aliases and duplicate keys cannot
     // borrow the public source's routing identity.
