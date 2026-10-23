@@ -1,0 +1,3292 @@
+{
+  "purpose": "ACTUAL_PUBLIC_INERT_QUERY_PROJECTION_NOT_NATIVE_COMPLETION_PROOF",
+  "source": {
+    "file": "mindbody-native-cold-two-warm-dev-r6-public-grid-2.json",
+    "sha256": "d5ee0d45890559b9d9e9e4cb964728b010003ee7bd098518e382b7f1eaf681bd",
+    "capturedAt": "2026-10-23T22:37:44.669Z",
+    "note": "Original relative href bytes were not persisted. Tests derive relative codec vectors from observed ordered query names/values; this fixture grants no completion authority."
+  },
+  "captionDates": [
+    "Saturday  10/24/2026"
+  ],
+  "anchorCount": 126,
+  "resourceCount": 6,
+  "anchors": [
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000001",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "9:00:00 AM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000002",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "9:00:00 AM",
+        "Etime": "12:30:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000003",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "9:00:00 AM",
+        "Etime": "10:00:00 AM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "4",
+        "trnid": "100000006",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "9:00:00 AM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "5",
+        "trnid": "100000007",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "9:00:00 AM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000001",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "9:30:00 AM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000002",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "9:30:00 AM",
+        "Etime": "12:30:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000003",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "9:30:00 AM",
+        "Etime": "10:00:00 AM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "4",
+        "trnid": "100000006",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "9:30:00 AM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "5",
+        "trnid": "100000007",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "9:30:00 AM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000001",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "10:00:00 AM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000002",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "10:00:00 AM",
+        "Etime": "12:30:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "4",
+        "trnid": "100000006",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "10:00:00 AM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "5",
+        "trnid": "100000007",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "10:00:00 AM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000001",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "10:30:00 AM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000002",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "10:30:00 AM",
+        "Etime": "12:30:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "4",
+        "trnid": "100000006",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "10:30:00 AM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "5",
+        "trnid": "100000007",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "10:30:00 AM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000001",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "11:00:00 AM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000002",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "11:00:00 AM",
+        "Etime": "12:30:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "4",
+        "trnid": "100000006",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "11:00:00 AM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "5",
+        "trnid": "100000007",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "11:00:00 AM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000001",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "11:30:00 AM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000002",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "11:30:00 AM",
+        "Etime": "12:30:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "4",
+        "trnid": "100000006",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "11:30:00 AM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "5",
+        "trnid": "100000007",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "11:30:00 AM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000001",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "12:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000002",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "12:00:00 PM",
+        "Etime": "12:30:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000003",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "12:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "4",
+        "trnid": "100000006",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "12:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "5",
+        "trnid": "100000007",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "12:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000001",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "12:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000003",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "12:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "4",
+        "trnid": "100000006",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "12:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "5",
+        "trnid": "100000007",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "12:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000001",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "1:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000003",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "1:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "4",
+        "trnid": "100000006",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "1:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "5",
+        "trnid": "100000007",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "1:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000001",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "1:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000003",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "1:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "4",
+        "trnid": "100000006",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "1:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "5",
+        "trnid": "100000007",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "1:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000001",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "2:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000003",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "2:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000004",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "2:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "4",
+        "trnid": "100000006",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "2:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "5",
+        "trnid": "100000007",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "2:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000001",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "2:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000002",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "2:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000003",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "2:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000004",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "2:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "4",
+        "trnid": "100000006",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "2:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "5",
+        "trnid": "100000007",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "2:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000001",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "3:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000002",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "3:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000003",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "3:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000004",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "3:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "4",
+        "trnid": "100000006",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "3:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "5",
+        "trnid": "100000007",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "3:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000001",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "3:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000002",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "3:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000003",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "3:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000004",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "3:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "4",
+        "trnid": "100000006",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "3:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "5",
+        "trnid": "100000007",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "3:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000001",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "4:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000002",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "4:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000003",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "4:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000004",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "4:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "4",
+        "trnid": "100000006",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "4:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "5",
+        "trnid": "100000007",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "4:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000001",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "4:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000002",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "4:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000003",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "4:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000004",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "4:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "4",
+        "trnid": "100000006",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "4:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "5",
+        "trnid": "100000007",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "4:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000001",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "5:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000002",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "5:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000003",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "5:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000004",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "5:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "4",
+        "trnid": "100000006",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "5:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "5",
+        "trnid": "100000007",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "5:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000001",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "5:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000002",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "5:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000003",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "5:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000004",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "5:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "4",
+        "trnid": "100000006",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "5:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "5",
+        "trnid": "100000007",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "5:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000001",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "6:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000002",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "6:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000003",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "6:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000004",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "6:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "4",
+        "trnid": "100000006",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "6:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "5",
+        "trnid": "100000007",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "6:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000001",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "6:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000002",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "6:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000003",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "6:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000004",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "6:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "4",
+        "trnid": "100000006",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "6:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "5",
+        "trnid": "100000007",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "6:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000001",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "7:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000002",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "7:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000003",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "7:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000004",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "7:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "4",
+        "trnid": "100000006",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "7:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "5",
+        "trnid": "100000007",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "7:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000001",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "7:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000002",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "7:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000003",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "7:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000004",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "7:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "4",
+        "trnid": "100000006",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "7:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "5",
+        "trnid": "100000007",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "7:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000001",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "8:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000002",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "8:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000003",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "8:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000004",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "8:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "4",
+        "trnid": "100000006",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "8:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "5",
+        "trnid": "100000007",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "8:00:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000001",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "8:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000002",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "8:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000003",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "8:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "2",
+        "trnid": "100000004",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "8:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "4",
+        "trnid": "100000006",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "8:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    },
+    {
+      "attributeForm": "RELATIVE",
+      "expectedHost": true,
+      "expectedPath": true,
+      "queryKeyNames": [
+        "loc",
+        "tgid",
+        "trnid",
+        "date",
+        "mask",
+        "Stime",
+        "Etime",
+        "localDate"
+      ],
+      "values": {
+        "loc": "1",
+        "tgid": "5",
+        "trnid": "100000007",
+        "date": "10/24/2026",
+        "mask": "False",
+        "Stime": "8:30:00 PM",
+        "Etime": "9:00:00 PM",
+        "localDate": "10/24/2026"
+      },
+      "visible": true
+    }
+  ]
+}

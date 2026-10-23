@@ -504,6 +504,18 @@ describe("controller-only verification", () => {
       initialUrls: ["https://example.org/"], timeZone: "America/Los_Angeles", venueOfficialUrl: "https://example.org/", processFactory });
     expect(configurations[0].args.slice(-2)).toEqual(["--time-zone", "America/Los_Angeles"]);
     expect(configurations[0].args).toEqual(expect.arrayContaining(["--venue-official-url", "https://example.org/"]));
+    expect(configurations[0].args).not.toContain("--requested-input");
+    await browser.close();
+  });
+  it("passes canonical requested input only through the fixed browser constructor", async () => {
+    const requestedInput = { date: "2030-01-02", players: 3, durationMinutes: 60, startTime: "08:00", endTime: "18:00", timeZone: "America/New_York" };
+    const configurations: Array<{ args: string[] }> = [];
+    const processFactory = vi.fn((options: { args: string[] }) => { configurations.push(options); return { request: vi.fn(async () => ({})), close: vi.fn(async () => {}) }; });
+    const browser = createDiscoveryBrowser({ cwd: process.cwd(), deadlineAt: new Date(now + 60000).toISOString(), initialUrls: ["https://example.org/"],
+      timeZone: requestedInput.timeZone, requestedInput, processFactory });
+    const args = configurations[0].args;
+    expect(JSON.parse(args[args.indexOf("--requested-input") + 1])).toEqual(requestedInput);
+    expect(JSON.stringify(DISCOVERY_BROWSER_INPUT_SCHEMA)).not.toContain('"requestedInput"');
     await browser.close();
   });
 

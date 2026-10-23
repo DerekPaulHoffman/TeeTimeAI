@@ -2,7 +2,8 @@ import { existsSync } from "node:fs";
 import { chromium } from "@playwright/test";
 import { describe, expect, it, vi } from "vitest";
 import { createAddressPinnedPublicFetchTransport } from "@/lib/automation/address-pinned-public-fetch";
-import { createCourseDiscoveryBrowserSession, discoveryBrowserActionSchema, discoveryPublicAnchorKind, discoveryPublicChoiceKind, normalizeDiscoveryNavigationUrl, publicHeaderFailureDiagnostic, redactDiscoveryFailureUrl, redactDiscoveryJson, redactDiscoveryRequestUrl, sameDiscoveryMainDocument } from "./browser-session";
+import { createCourseDiscoveryBrowserSession, discoveryBrowserRequestLimit, discoveryBrowserActionSchema, discoveryPublicAnchorKind, discoveryPublicChoiceKind, normalizeDiscoveryNavigationUrl, publicHeaderFailureDiagnostic, redactDiscoveryFailureUrl, redactDiscoveryJson, redactDiscoveryRequestUrl, sameDiscoveryMainDocument } from "./browser-session";
+import mindbodyObserved from "./fixtures/mindbody-appointment-grid-observed.json";
 import * as nativeBrowser from "./native-public-browser";
 import * as nativeRouting from "./native-redirect-routing";
 import { deriveTeeItUpOfficialIdentityProof } from "./teeitup-official-identity";
@@ -12,6 +13,49 @@ vi.mock("@/lib/automation/provider-request-lease", () => ({ runWithProviderReque
 vi.mock("@/lib/automation/address-pinned-public-fetch", () => ({ createAddressPinnedPublicFetchTransport: vi.fn() }));
 
 describe("discovery browser public protocol", () => {
+  it("keeps the generic request allocation and grants only the private fixed Mindbody profile", () => {
+    const source = mindbodyObserved.source, input = { initialUrls: [source.bookingUrl], timeZone: source.timeZone, venueName: source.venueName,
+      venueAddress: source.venueAddress, venueOfficialUrl: source.officialUrl, requestedInput: mindbodyObserved.input };
+    expect(discoveryBrowserRequestLimit(input, {})).toBe(192);
+    expect(discoveryBrowserRequestLimit(input, { browserTransport: "NATIVE_CHROME", localCapabilities: ["LOCAL_CHROME"] })).toBe(192);
+    expect(discoveryBrowserRequestLimit(input, { fixedReaderProfile: "MINDBODY_APPOINTMENTS", browserTransport: "NATIVE_CHROME", localCapabilities: ["LOCAL_CHROME"] })).toBe(512);
+    expect(discoveryBrowserRequestLimit({ initialUrls: ["https://example.org/"] }, {})).toBe(192);
+  });
+  it.each(["unknown profile", "numeric profile", "pinned", "no capability", "no context", "no duration", "bad duration", "timezone", "other provider", "malformed source", "extra source", "missing identity"])(
+    "rejects fixed Mindbody profile %s before any browser launch", async mode => {
+      const source = mindbodyObserved.source, input = { initialUrls: [source.bookingUrl], timeZone: source.timeZone, venueName: source.venueName,
+        venueAddress: source.venueAddress, venueOfficialUrl: source.officialUrl, requestedInput: structuredClone(mindbodyObserved.input), deadlineAt: new Date(Date.now() + 20_000) };
+      const launchBrowser = vi.fn(), deps = { fixedReaderProfile: "MINDBODY_APPOINTMENTS", browserTransport: "NATIVE_CHROME", localCapabilities: ["LOCAL_CHROME"], launchBrowser };
+      if (mode === "unknown profile") deps.fixedReaderProfile = "OTHER";
+      if (mode === "numeric profile") (deps as Record<string, unknown>).fixedReaderProfile = 512;
+      if (mode === "pinned") deps.browserTransport = "PINNED_HTTP";
+      if (mode === "no capability") deps.localCapabilities = [];
+      if (mode === "no context") (input as Record<string, unknown>).requestedInput = undefined;
+      if (mode === "no duration") (input.requestedInput as Record<string, unknown>).durationMinutes = undefined;
+      if (mode === "bad duration") input.requestedInput.durationMinutes = 0;
+      if (mode === "timezone") input.timeZone = "America/Los_Angeles";
+      if (mode === "other provider") input.initialUrls = ["https://example.org/"];
+      if (mode === "malformed source") input.initialUrls = ["https://clients.mindbodyonline.com/classic/ws?studioid=invalid&stype=-9"];
+      if (mode === "extra source") input.initialUrls.push(source.bookingUrl);
+      if (mode === "missing identity") input.venueName = "";
+      expect(() => discoveryBrowserRequestLimit(input, deps as Parameters<typeof discoveryBrowserRequestLimit>[1])).toThrow("INVALID_FIXED_READER_PROFILE");
+      await expect(createCourseDiscoveryBrowserSession(input, deps as Parameters<typeof createCourseDiscoveryBrowserSession>[1])).rejects.toThrow();
+      expect(launchBrowser).not.toHaveBeenCalled();
+    });
+  it("does not accept a request allocation/profile/capability through model actions", () => {
+    for (const extra of [{ fixedReaderProfile: "MINDBODY_APPOINTMENTS" }, { requestLimit: 512 }, { localCapabilities: ["LOCAL_CHROME"] }])
+      expect(discoveryBrowserActionSchema.safeParse({ id: 1, action: "open", url: mindbodyObserved.source.bookingUrl, ...extra }).success).toBe(false);
+  });
+  it("rejects invalid fixed inspection context before starting a browser and does not admit it as a model action", async () => {
+    const requestedInput = { date: "2030-01-02", players: 2, durationMinutes: 60, startTime: "08:00", endTime: "18:00", timeZone: "America/New_York" };
+    const launchBrowser = vi.fn();
+    const base = { initialUrls: ["https://example.org/"], deadlineAt: new Date(Date.now() + 20_000), timeZone: "America/New_York" };
+    await expect(createCourseDiscoveryBrowserSession({ ...base, requestedInput: { ...requestedInput, durationMinutes: 0 } }, { launchBrowser })).rejects.toThrow();
+    await expect(createCourseDiscoveryBrowserSession({ ...base, requestedInput: { ...requestedInput, timeZone: "America/Los_Angeles" } }, { launchBrowser }))
+      .rejects.toThrow("REQUEST_CONTEXT_TIME_ZONE_MISMATCH");
+    expect(launchBrowser).not.toHaveBeenCalled();
+    expect(discoveryBrowserActionSchema.safeParse({ id: 1, action: "inspect_adapter", url: base.initialUrls[0], requestedInput }).success).toBe(false);
+  });
   it("projects header-denial facts as closed categories without header names, values or digests", () => {
     const diagnostic = publicHeaderFailureDiagnostic("HEADER_PROOF_MISSING", "OPTIONS", {
       Authorization: "Bearer null", "x-api-key": "private-key-value", "x-ms-request-id": "private-correlation-value",
@@ -110,6 +154,25 @@ describe("discovery browser public protocol", () => {
 
 const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
+  it.each([true, false])("forwards only immutable constructor fixed inspection context when present: %s", async supplied => {
+    const source = "https://example.org/";
+    const requestedInput = { date: "2030-01-02", players: 2, durationMinutes: 60, startTime: "08:00", endTime: "18:00", timeZone: "America/New_York" };
+    const inspectAdapter = vi.fn(async () => ({ adapter: { family: "FOREUP" as const, facilityId: 1, scheduleId: 2, bookingClassId: 3 } }));
+    const session = await createCourseDiscoveryBrowserSession({ initialUrls: [source], venueName: "Public venue", timeZone: requestedInput.timeZone,
+      deadlineAt: new Date(Date.now() + 20_000), ...(supplied ? { requestedInput } : {}) }, {
+      inspectAdapter, fetch: vi.fn(async () => new Response("<html><body><h1>Public venue</h1></body></html>", { headers: { "content-type": "text/html" } })) as unknown as typeof fetch,
+      launchBrowser: () => chromium.launch({ executablePath, headless: true }),
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    requestedInput.durationMinutes = 120;
+    try {
+      await session.execute({ id: 1, action: "open", url: source });
+      await session.execute({ id: 2, action: "inspect_adapter", url: source });
+      const received = inspectAdapter.mock.calls[0] as unknown as [unknown, { requestedInput?: typeof requestedInput }];
+      if (supplied) expect(received[1].requestedInput).toEqual({ ...requestedInput, durationMinutes: 60 });
+      else expect(received[1]).not.toHaveProperty("requestedInput");
+    } finally { await session.close(); }
+  });
   it.each(["valid", "valid query", "wrong query", "missing", "revoked", "invalid body", "redirect 302", "redirect 303", "redirect unproven", "redirect 307"] as const)("independently checks a native classic bootstrap before queued transport: %s", async mode => {
     const entry = "https://clients.mindbodyonline.com/classic/ws?studioid=685163&stype=-9", target = "https://clients.mindbodyonline.com/classic/home" + (mode === "valid query" ? "?studioid=685163" : mode === "wrong query" ? "?studioid=12345" : "");
     const empty = "tg vt lvl qParam view page catid prodid prodGroupId sSU optForwardingLink singleUseToken oAuthToken launchGUID launchUID launchPWDChange launchPWDChangeKey launchLostPWD launchResetPWD launchBizModeLogin launchBizModeLoginWithRedirectLink key consumerModeRedirect extLink giftCardID".split(" ");

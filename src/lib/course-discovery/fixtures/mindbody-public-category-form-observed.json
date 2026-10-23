@@ -1,0 +1,89 @@
+{
+  "provenance": {
+    "path": "mindbody-owned-fresh-public-capture-v3/01-fresh-public-categories.json",
+    "sha256": "9eccec998f1c5ef6d5d2514966924043495fc4823d6a7f0c16ac1f8ee149d4b4",
+    "privateToken": "Synthetic replacement; real token omitted by capture",
+    "chosenCategory": "Actual observed simulator radio value; development fixture only"
+  },
+  "sourceUrl": "https://clients.mindbodyonline.com/ASP/adm/adm_appt_search.asp?studioid=685163&lvl=&catid=&prodid=&date=10%2F23%2F2026&classid=0&stype=%2D9&loc=1&tg=&vt=&justloggedin=&pMode=0&view=&sSU=&qParam=&trn=0&page=&prodGroupId=&optForwardingLink=&nLgIn=",
+  "targetUrl": "https://clients.mindbodyonline.com/ASP/adm/adm_appt_search.asp?reSchedule=",
+  "method": "post",
+  "fields": [
+    {
+      "name": "CSRFToken",
+      "value": "<SYNTHETIC_CSRF_TOKEN>"
+    },
+    {
+      "name": "optDay1",
+      "value": ""
+    },
+    {
+      "name": "optDay2",
+      "value": ""
+    },
+    {
+      "name": "optDay3",
+      "value": ""
+    },
+    {
+      "name": "optDay4",
+      "value": ""
+    },
+    {
+      "name": "optDay5",
+      "value": ""
+    },
+    {
+      "name": "optDay6",
+      "value": ""
+    },
+    {
+      "name": "optDay7",
+      "value": ""
+    },
+    {
+      "name": "frmApptRefNo",
+      "value": ""
+    },
+    {
+      "name": "frmTabID",
+      "value": "9"
+    },
+    {
+      "name": "alertGen",
+      "value": ""
+    },
+    {
+      "name": "scrollTop",
+      "value": "0"
+    },
+    {
+      "name": "origTrn",
+      "value": ""
+    },
+    {
+      "name": "origDate",
+      "value": ""
+    },
+    {
+      "name": "cType",
+      "value": ""
+    },
+    {
+      "name": "origId",
+      "value": ""
+    },
+    {
+      "name": "fromTabby",
+      "value": ""
+    },
+    {
+      "name": "optLoc",
+      "value": "1"
+    },
+    {
+      "name": "optTG",
+      "value": "2"
+    }
+  ]
+}

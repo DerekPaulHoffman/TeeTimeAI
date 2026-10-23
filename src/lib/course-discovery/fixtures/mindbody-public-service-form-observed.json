@@ -1,0 +1,128 @@
+{
+  "provenance": "mindbody-owned-fresh-public-capture-v4/03-selected-public-hour-form-contract.json",
+  "sha256": "ddd89051681ed4daf6320a457c7c33dd5facd0e9df1f95e634ac143348ce5da1",
+  "sourceUrl": "https://clients.mindbodyonline.com/ASP/adm/adm_appt_search.asp?reSchedule=",
+  "targetUrl": "https://clients.mindbodyonline.com/ASP/adm/adm_appt_search.asp?reSchedule=",
+  "fields": [
+    {
+      "name": "CSRFToken",
+      "value": "<SYNTHETIC_CSRF_TOKEN>"
+    },
+    {
+      "name": "frmApptRefNo",
+      "value": ""
+    },
+    {
+      "name": "frmTabID",
+      "value": "9"
+    },
+    {
+      "name": "alertGen",
+      "value": ""
+    },
+    {
+      "name": "scrollTop",
+      "value": "0"
+    },
+    {
+      "name": "origTrn",
+      "value": ""
+    },
+    {
+      "name": "origDate",
+      "value": ""
+    },
+    {
+      "name": "cType",
+      "value": ""
+    },
+    {
+      "name": "origId",
+      "value": ""
+    },
+    {
+      "name": "fromTabby",
+      "value": ""
+    },
+    {
+      "name": "optLoc",
+      "value": "1"
+    },
+    {
+      "name": "optTG",
+      "value": "2"
+    },
+    {
+      "name": "optVT",
+      "value": "5"
+    },
+    {
+      "name": "optTrnID",
+      "value": ""
+    },
+    {
+      "name": "optDay1",
+      "value": "on"
+    },
+    {
+      "name": "optDay2",
+      "value": "on"
+    },
+    {
+      "name": "optDay3",
+      "value": "on"
+    },
+    {
+      "name": "optDay4",
+      "value": "on"
+    },
+    {
+      "name": "optDay5",
+      "value": "on"
+    },
+    {
+      "name": "optDay6",
+      "value": "on"
+    },
+    {
+      "name": "optDay7",
+      "value": "on"
+    },
+    {
+      "name": "optDates",
+      "value": "1"
+    },
+    {
+      "name": "optPreDateRange",
+      "value": ""
+    },
+    {
+      "name": "optDateRange",
+      "value": "0"
+    },
+    {
+      "name": "requiredtxtDateStart",
+      "value": "10/23/2026"
+    },
+    {
+      "name": "requiredtxtDateEnd",
+      "value": "10/23/2026"
+    },
+    {
+      "name": "optTimes",
+      "value": "0"
+    },
+    {
+      "name": "optTimeRange",
+      "value": "0"
+    },
+    {
+      "name": "optStartTime",
+      "value": "5:00:00 AM"
+    },
+    {
+      "name": "optEndTime",
+      "value": "5:00:00 AM"
+    }
+  ]
+}

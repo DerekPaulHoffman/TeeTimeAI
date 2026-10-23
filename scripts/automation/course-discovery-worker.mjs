@@ -94,7 +94,7 @@ function canonicalDataKey(value) {
 /** This observation is controller memory only; checkpoints cannot restore it. */
 export function createDiscoveryAdapterObservation(job, bookingUrl, adapter, contextUrl) {
   if (!safeObservedUrl(job?.request?.identity?.officialUrl) || !safeObservedUrl(bookingUrl) || !safeObservedUrl(contextUrl) ||
-      !["FOREUP", "ACUITY", "TEEITUP", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS", "REX", "CPS"].includes(adapter?.family)) return undefined;
+      !["FOREUP", "ACUITY", "TEEITUP", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS", "REX", "CPS", "MINDBODY"].includes(adapter?.family)) return undefined;
   const adapterKey = canonicalDataKey(adapter), identityKey = canonicalDataKey(job.request.identity),
     targetKey = canonicalDataKey(job.request.target), inputKey = canonicalDataKey(job.request.input);
   if (!adapterKey || !identityKey || !targetKey || !inputKey) return undefined;
@@ -685,11 +685,12 @@ export function createDiscoveryProcess({ executable, args, cwd, environment, sig
   };
 }
 
-export function createDiscoveryBrowser({ cwd, deadlineAt, initialUrls, timeZone = "UTC", venueName, venueAddress, venueOfficialUrl, helperEnvironment = {}, signal, processFactory = createDiscoveryProcess }) {
+export function createDiscoveryBrowser({ cwd, deadlineAt, initialUrls, timeZone = "UTC", venueName, venueAddress, venueOfficialUrl, requestedInput, helperEnvironment = {}, signal, processFactory = createDiscoveryProcess }) {
   const channel = processFactory({ executable: process.execPath,
     args: [join(cwd, "node_modules/tsx/dist/cli.mjs"), join(cwd, "scripts/automation/course-discovery-browser.ts"), "--deadline", deadlineAt, "--initial-urls", JSON.stringify(initialUrls),
       ...(venueName ? ["--venue-name", venueName] : []), ...(venueAddress ? ["--venue-address", venueAddress] : []),
       ...(venueOfficialUrl ? ["--venue-official-url", venueOfficialUrl] : []),
+      ...(requestedInput === undefined ? [] : ["--requested-input", JSON.stringify(requestedInput)]),
       "--time-zone", timeZone],
     cwd, environment: { ...discoveryProcessEnvironment(), ...helperEnvironment }, signal, timeoutMs: Math.min(90_000, Math.max(1, Date.parse(deadlineAt) - Date.now())),
   });
@@ -1009,6 +1010,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
               adapterObservation = undefined;
               browserStartedAt ??= new Date().toISOString(); lastRequestCount = 0; lastResponseBytes = 0;
               browser = browserFactory({ cwd, deadlineAt: job.deadlineAt, timeZone: job.request.input.timeZone, venueName: job.request.identity.name,
+                requestedInput: job.request.input,
                 venueAddress: job.request.identity.address,
                 venueOfficialUrl: job.request.identity.officialUrl, initialUrls: initialUrls(),
                 helperEnvironment: browserEnvironment(), signal });
@@ -1040,6 +1042,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
               }
               lastRequestCount = 0; lastResponseBytes = 0; compactSnapshot = createDiscoverySnapshotCompactor();
               browser = browserFactory({ cwd, deadlineAt: job.deadlineAt, timeZone: job.request.input.timeZone, venueName: job.request.identity.name,
+                requestedInput: job.request.input,
                 venueAddress: job.request.identity.address, venueOfficialUrl: job.request.identity.officialUrl,
                 initialUrls: initialUrls(), helperEnvironment: browserEnvironment(), signal });
               publicAssets.begin(browser, browserTransport);
@@ -1061,6 +1064,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
               publicAssets.clear();
               await browser.close(); lastRequestCount = 0; lastResponseBytes = 0;
               browser = browserFactory({ cwd, deadlineAt: job.deadlineAt, timeZone: job.request.input.timeZone, venueName: job.request.identity.name,
+                requestedInput: job.request.input,
                 venueAddress: job.request.identity.address,
                 venueOfficialUrl: job.request.identity.officialUrl,
                 initialUrls: [...new Set([...initialUrls(), snapshot.url])].slice(-16), helperEnvironment: browserEnvironment(), signal });

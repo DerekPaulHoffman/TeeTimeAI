@@ -41,6 +41,8 @@ import { readTeeItUpOfficialBookingChain } from "./teeitup-official-booking-read
 import type { OfficialSourceDiagnostic } from "./official-source-diagnostics";
 import { bindTeeItUpPostalConflictProof, type TeeItUpPostalConflictProof } from "./teeitup-postal-conflict-proof";
 import type { NativeOfficialPageReader } from "./native-official-page-reader";
+import { parseMindbodyAppointmentSource } from "./mindbody-appointment-grid";
+import { executeMindbodyAppointments, inspectMindbodyAppointments, type MindbodyAppointmentReaderDeps } from "./mindbody-appointment-reader";
 
 type Dependencies = {
   fetch?: typeof fetch;
@@ -49,8 +51,12 @@ type Dependencies = {
   requestLease?: <T>(family: string, work: () => Promise<T>) => Promise<{ acquired: true; value: T } | { acquired: false }>;
   venueMatches: (expected: string, observed: unknown) => boolean;
   officialIdentityPage?: OfficialIdentityPage;
+  /** Canonical controller request, unavailable to model action arguments. */
+  requestedInput?: AccessExecutionInput;
   localCapabilities?: readonly "LOCAL_CHROME"[];
   readNativeOfficialPage?: NativeOfficialPageReader;
+  /** Controller test seam, never recipe metadata or model input. */
+  createMindbodySession?: MindbodyAppointmentReaderDeps["createSession"];
   officialBookingSourceToken?: TeeItUpOfficialBookingToken;
   onOfficialSourceDiagnostic?: (value: OfficialSourceDiagnostic) => void;
 };
@@ -296,6 +302,21 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
 /** For a controller-observed provider URL only. Reads typed public configuration
  * and returns bounded IDs; availability and activation remain separate proofs. */
 export async function inspectExistingAdapter(source: Source, deps: Dependencies): Promise<{ adapter: ExistingAdapterMetadata }> {
+  if (parseMindbodyAppointmentSource(source.bookingUrl)) {
+    if (!source.officialUrl || !source.venueAddress) fail("ADAPTER_IDENTITY_MISSING");
+    if (!deps.localCapabilities?.includes("LOCAL_CHROME")) fail("LOCAL_CHROME_REQUIRED");
+    if (!deps.requestedInput) fail("MINDBODY_REQUEST_CONTEXT_REQUIRED");
+    const input = accessExecutionInputSchema.parse(deps.requestedInput);
+    if (input.timeZone !== source.timeZone || !input.durationMinutes) fail("ADAPTER_TARGET_MISMATCH");
+    const adapter = await inspectMindbodyAppointments({ ...source, officialUrl: source.officialUrl, venueAddress: source.venueAddress }, input,
+      { ...deps, ...(deps.createMindbodySession ? { createSession: deps.createMindbodySession } : {}) });
+    if (adapter.durationMinutes !== input.durationMinutes || adapter.capacity < input.players || adapter.timeZone !== input.timeZone)
+      fail("ADAPTER_TARGET_MISMATCH");
+    return { adapter: existingAdapterMetadataSchema.parse(adapter) };
+  }
+  // A different Mindbody URL cannot fall through to a self-hosted plugin.
+  try { if (/(?:^|\.)mindbodyonline\.com$/u.test(new URL(source.bookingUrl).hostname)) fail("UNSUPPORTED_ADAPTER_SOURCE"); }
+  catch (error) { if (error instanceof FixedAdapterFailure) throw error; }
   if (parseRexSource(source.bookingUrl)) {
     if (!source.officialUrl || !source.venueAddress) fail("ADAPTER_IDENTITY_MISSING");
     return { adapter: await inspectRex({ ...source, officialUrl: source.officialUrl, venueAddress: source.venueAddress }, deps) };
@@ -392,7 +413,7 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
   let uscheduleSession: ReturnType<typeof createUSchedulePublicSession> | undefined;
   try {
     const adapter = existingAdapterMetadataSchema.parse(recipe.adapter);
-    const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "GOLFVX", "REX"].includes(adapter.family) || adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR";
+    const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "GOLFVX", "REX", "MINDBODY"].includes(adapter.family) || adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR";
     if (input.timeZone !== recipe.source.timeZone || recipe.source.providerFamily.toUpperCase() !== adapter.family ||
         (recipe.target.kind === "SIMULATOR") !== simulator || simulator && (!recipe.target.offeringId || !input.durationMinutes) ||
         adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR" && (adapter.facilityIds.length !== 1 || adapter.officialIdentityProof || adapter.officialBookingSourceProof || adapter.officialPostalConflictProof)) fail("ADAPTER_TARGET_MISMATCH");
@@ -401,12 +422,22 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
       fail("ADAPTER_TARGET_MISMATCH");
     if (["REX", "CPS"].includes(adapter.family) && (!recipe.source.officialUrl || !recipe.source.venueAddress ||
         adapter.family === "CPS" && input.durationMinutes !== undefined)) fail("ADAPTER_TARGET_MISMATCH");
-    if (!["USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS", "REX", "CPS"].includes(adapter.family)) session = reader(recipe.source, deps, adapter, input);
+    if (adapter.family === "MINDBODY") {
+      if (!recipe.source.officialUrl || !recipe.source.venueAddress || parseMindbodyAppointmentSource(recipe.source.bookingUrl)?.studioId !== adapter.studioId ||
+          adapter.timeZone !== input.timeZone || adapter.durationMinutes !== input.durationMinutes || input.players > adapter.capacity) fail("ADAPTER_TARGET_MISMATCH");
+      if (!deps.localCapabilities?.includes("LOCAL_CHROME")) fail("LOCAL_CHROME_REQUIRED");
+    }
+    if (!["USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS", "REX", "CPS", "MINDBODY"].includes(adapter.family)) session = reader(recipe.source, deps, adapter, input);
     const start = deps.toInstant(`${input.date}T${input.startTime}:00`, input);
     const next = new Date(`${input.date}T00:00:00Z`); next.setUTCDate(next.getUTCDate() + 1);
     const end = deps.toInstant(`${input.endTime === "24:00" ? next.toISOString().slice(0, 10) : input.date}T${input.endTime === "24:00" ? "00:00" : input.endTime}:00`, input);
     const now = clock();
     if (end <= now) fail("INVALID_REQUEST_DATE_OR_ZONE");
+    if (adapter.family === "MINDBODY") {
+      const slots = await executeMindbodyAppointments({ ...recipe.source, venueAddress: recipe.source.venueAddress! }, adapter, recipe.target, input,
+        { ...deps, ...(deps.createMindbodySession ? { createSession: deps.createMindbodySession } : {}) });
+      return result(slots.filter(slot => new Date(slot.startsAt) > now && new Date(slot.startsAt) >= start && new Date(slot.endsAt!) <= end));
+    }
     if (adapter.family === "REX") {
       const slots = await executeRex(recipe.source, adapter, { courseId: recipe.target.courseId, offeringId: recipe.target.offeringId! }, input, deps);
       return result(slots.filter(slot => new Date(slot.startsAt) > now && new Date(slot.startsAt) >= start && new Date(slot.endsAt!) <= end));

@@ -11,6 +11,7 @@ import { golfVxMetadataSchema } from "./golfvx-source";
 import { ezlinksMetadataSchema } from "./ezlinks-source";
 import { rexMetadataSchema } from "./rex-source";
 import { cpsMetadataSchema } from "./cps-source";
+import { mindbodyAppointmentMetadataSchema } from "./mindbody-appointment-grid";
 import { isUScheduleNonMemberRental, uschedulePublicLocationProofSchema } from "@/lib/simulators/providers/uschedule-location-source";
 
 const numericId = z.number().int().min(1).max(2_147_483_647);
@@ -45,6 +46,7 @@ export const existingAdapterMetadataSchema = z.discriminatedUnion("family", [
   ezlinksMetadataSchema,
   rexMetadataSchema,
   cpsMetadataSchema,
+  mindbodyAppointmentMetadataSchema,
 ]);
 
 export type ExistingAdapterMetadata = z.infer<typeof existingAdapterMetadataSchema>;

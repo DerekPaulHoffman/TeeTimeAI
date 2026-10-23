@@ -11,6 +11,7 @@ import { isSafePublicAvailabilityReadUrl } from "./public-availability-read-url"
 import { isPublicRentalLabel } from "./public-rental-label";
 import { sevenRoomsPublicRequests, sevenRoomsPublicRows } from "./sevenrooms-public-direct";
 import { publicHeaderFailureDiagnosticSchema } from "./public-header-diagnostic";
+import { parseMindbodyAppointmentSource } from "./mindbody-appointment-grid";
 export { expandRecipeTemplate, recipeTemplateSchema } from "./recipe-template";
 
 const secret = /(?:password|secret|token|cookie|session|credential|authorization|api.?key|email|phone)/iu;
@@ -21,6 +22,7 @@ export function isSafeRecipeUrl(value: string) {
     return Boolean(getSafeCustomerBookingUrl(value)) && !hasCpsSessionState(value) && !/[{}]/u.test(value) && url.protocol === "https:" && !url.username && !url.password && !url.port &&
       !isIP(url.hostname) && /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/iu.test(url.hostname) && !url.hostname.includes("..") && url.hostname.includes(".") && !/(?:^|\.)(?:localhost|local|internal|test|invalid)$/iu.test(url.hostname) &&
       !forbiddenPath.test(decodeURIComponent(url.pathname)) &&
+      !(url.hostname === "clients.mindbodyonline.com" && /^\/ASP\/appt_req\.asp$/iu.test(decodeURIComponent(url.pathname))) &&
       [...url.searchParams].every(([key, item]) => !secret.test(key) && !/[\r\n]/u.test(item));
   } catch { return false; }
 }
@@ -271,12 +273,15 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
     return;
   }
   if (recipe.engine === "EXISTING_ADAPTER") {
-    const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "GOLFVX", "REX"].includes(recipe.adapter.family) ||
+    const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "GOLFVX", "REX", "MINDBODY"].includes(recipe.adapter.family) ||
       recipe.adapter.family === "TEEITUP" && recipe.adapter.offeringKind === "SIMULATOR";
     if (recipe.source.providerFamily !== recipe.adapter.family ||
       (recipe.target.kind === "SIMULATOR") !== simulator ||
-      recipe.target.kind === "SIMULATOR" && !recipe.target.offeringId || ["TEEITUP", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS", "REX", "CPS"].includes(recipe.adapter.family) && !recipe.source.venueAddress)
+      recipe.target.kind === "SIMULATOR" && !recipe.target.offeringId || ["TEEITUP", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS", "REX", "CPS", "MINDBODY"].includes(recipe.adapter.family) && !recipe.source.venueAddress)
       ctx.addIssue({ code: "custom", message: "Supported adapter metadata must match the source and target kind" });
+    if (recipe.adapter.family === "MINDBODY" && (parseMindbodyAppointmentSource(recipe.source.bookingUrl)?.studioId !== recipe.adapter.studioId ||
+        recipe.source.timeZone !== recipe.adapter.timeZone))
+      ctx.addIssue({ code: "custom", message: "Public appointment metadata requires the exact canonical studio and timezone" });
     if (recipe.adapter.family === "USCHEDULE" && recipe.adapter.publicLocationProof && !recipe.source.venueAddress)
       ctx.addIssue({ code: "custom", message: "A public location rental requires canonical venue address context" });
     if (recipe.adapter.family === "TEEITUP" && simulator &&

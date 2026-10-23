@@ -168,53 +168,59 @@ async function currentDemand(tx: Tx, source: Source, now: Date, searchId?: strin
 /** Demand and source are re-read here; the caller cannot grant ownership or supply identity. */
 export async function ensureDiscoveryJob(input: { courseId: string; offeringId?: string; searchId: string; request?: DiscoveryRequest }) {
   if (!await isDiscoveryPilotSearch(input.searchId)) return null;
-  return transaction(async tx => {
-    const now = await databaseNow(tx);
-    await lockSource(tx, input.courseId);
-    const source = await loadSource(tx, input);
-    const demand = await currentDemand(tx, source, now, input.searchId);
-    if (!demand) return null;
-    if (await hasLegacyDiscoveryOwner(tx, source.target)) return null;
-    const request = requestFor(source, demand);
-    if (input.request && (canonical(input.request.target) !== canonical(request.target) || canonical(input.request.input) !== canonical(request.input))) conflict();
-    if (source.activeRecipeId) {
-      const previous = await tx.courseAccessRecipe.findUnique({ where: { id: source.activeRecipeId } });
-      if (previous && previous.targetKey === targetKey(input) && previous.sourceFingerprint === source.sourceFingerprint) {
-        try {
-          const recipe = parseAccessRecipe(previous.payload);
-          bindRecipe(recipe, source);
-          if (hashAccessRecipe(recipe) === previous.hash) return null;
-        } catch (error) {
-          if (!(error instanceof z.ZodError) && !(error instanceof DiscoveryConflictError)) throw error;
-        }
+  return transaction(tx => ensureDiscoveryJobInTransaction(tx, input));
+}
+
+/** Reuse admission inside an operator-owned transaction without a nested commit.
+ * The caller owns isolation/retries; pilot authorization and current demand still
+ * come from this transaction, never a caller-supplied approval or source snapshot. */
+export async function ensureDiscoveryJobInTransaction(tx: Tx, input: { courseId: string; offeringId?: string; searchId: string; request?: DiscoveryRequest }) {
+  if (!await isDiscoveryPilotSearch(input.searchId, process.env, tx)) return null;
+  const now = await databaseNow(tx);
+  await lockSource(tx, input.courseId);
+  const source = await loadSource(tx, input);
+  const demand = await currentDemand(tx, source, now, input.searchId);
+  if (!demand) return null;
+  if (await hasLegacyDiscoveryOwner(tx, source.target)) return null;
+  const request = requestFor(source, demand);
+  if (input.request && (canonical(input.request.target) !== canonical(request.target) || canonical(input.request.input) !== canonical(request.input))) conflict();
+  if (source.activeRecipeId) {
+    const previous = await tx.courseAccessRecipe.findUnique({ where: { id: source.activeRecipeId } });
+    if (previous && previous.targetKey === targetKey(input) && previous.sourceFingerprint === source.sourceFingerprint) {
+      try {
+        const recipe = parseAccessRecipe(previous.payload);
+        bindRecipe(recipe, source);
+        if (hashAccessRecipe(recipe) === previous.hash) return null;
+      } catch (error) {
+        if (!(error instanceof z.ZodError) && !(error instanceof DiscoveryConflictError)) throw error;
       }
-      const cleared = source.offering
-        ? await tx.courseOffering.updateMany({ where: { id: source.offering.id, activeAccessRecipeId: source.activeRecipeId }, data: { activeAccessRecipeId: null, monitoringRevision: { increment: 1 } } })
-        : await tx.course.updateMany({ where: { id: source.course.id, activeAccessRecipeId: source.activeRecipeId }, data: { activeAccessRecipeId: null } });
-      if (cleared.count !== 1) conflict();
-      source.activeRecipeId = null;
     }
-    const key = targetKey(input);
-    const existing = await tx.courseDiscoveryJob.findUnique({ where: { activeTargetKey: key } });
-    if (existing && existing.sourceFingerprint === source.sourceFingerprint && existing.baseRecipeId === source.activeRecipeId) return existing;
-    if (existing) await tx.courseDiscoveryJob.update({ where: { id: existing.id }, data: {
-      status: "CANCELLED", activeTargetKey: null, leaseToken: null, leaseExpiresAt: null,
-      outcome: "SOURCE_CHANGED", completedAt: now,
-    } });
-    const prior = await tx.courseDiscoveryJob.findFirst({ where: { targetKey: key,
-      sourceFingerprint: source.sourceFingerprint, baseRecipeId: source.activeRecipeId,
-      status: { in: ["FAILED", "TIMED_OUT", "CANCELLED"] },
-      AND: [
-        { request: { path: ["demand", "searchId"], equals: demand.id } },
-        { request: { path: ["demand", "alertGeneration"], equals: demand.alertGeneration } },
-      ],
-    }, orderBy: { createdAt: "desc" } });
-    // An ordinary scheduled check cannot turn an exhausted incident into a new
-    // first attempt. A new alert generation or changed source is required.
-    if (prior) return prior;
-    return tx.courseDiscoveryJob.create({ data: { targetKey: key, activeTargetKey: key, courseId: source.course.id,
-      offeringId: source.offering?.id, sourceFingerprint: source.sourceFingerprint, baseRecipeId: source.activeRecipeId, request: json(request) } });
-  });
+    const cleared = source.offering
+      ? await tx.courseOffering.updateMany({ where: { id: source.offering.id, activeAccessRecipeId: source.activeRecipeId }, data: { activeAccessRecipeId: null, monitoringRevision: { increment: 1 } } })
+      : await tx.course.updateMany({ where: { id: source.course.id, activeAccessRecipeId: source.activeRecipeId }, data: { activeAccessRecipeId: null } });
+    if (cleared.count !== 1) conflict();
+    source.activeRecipeId = null;
+  }
+  const key = targetKey(input);
+  const existing = await tx.courseDiscoveryJob.findUnique({ where: { activeTargetKey: key } });
+  if (existing && existing.sourceFingerprint === source.sourceFingerprint && existing.baseRecipeId === source.activeRecipeId) return existing;
+  if (existing) await tx.courseDiscoveryJob.update({ where: { id: existing.id }, data: {
+    status: "CANCELLED", activeTargetKey: null, leaseToken: null, leaseExpiresAt: null,
+    outcome: "SOURCE_CHANGED", completedAt: now,
+  } });
+  const prior = await tx.courseDiscoveryJob.findFirst({ where: { targetKey: key,
+    sourceFingerprint: source.sourceFingerprint, baseRecipeId: source.activeRecipeId,
+    status: { in: ["FAILED", "TIMED_OUT", "CANCELLED"] },
+    AND: [
+      { request: { path: ["demand", "searchId"], equals: demand.id } },
+      { request: { path: ["demand", "alertGeneration"], equals: demand.alertGeneration } },
+    ],
+  }, orderBy: { createdAt: "desc" } });
+  // An ordinary scheduled check cannot turn an exhausted incident into a new
+  // first attempt. A new alert generation or changed source is required.
+  if (prior) return prior;
+  return tx.courseDiscoveryJob.create({ data: { targetKey: key, activeTargetKey: key, courseId: source.course.id,
+    offeringId: source.offering?.id, sourceFingerprint: source.sourceFingerprint, baseRecipeId: source.activeRecipeId, request: json(request) } });
 }
 
 export async function claimNextDiscoveryJob(workerId: string) {

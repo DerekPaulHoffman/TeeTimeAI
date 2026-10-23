@@ -1,0 +1,20 @@
+{
+  "provenance": "mindbody-owned-headed-public-shape-v4/03-selected-public-hour.json",
+  "sha256": "19cdee0a5d4a21403c3583de7cc651cb02cbc83ab9bbdde47ed22d13c088ae79",
+  "rows": [
+    {
+      "name": "optTG",
+      "value": "2",
+      "checked": true,
+      "visible": false,
+      "rowHtml": "<tr class=\"selectProgramRow evenRow selected-row\" ncwce=\"true\">\n                                                    <td colspan=\"4\">\n                                                        <input class=\"td-radio\" style=\"display: none;\" onclick=\"selectTG(0);\" type=\"radio\" name=\"optTG\" id=\"optTG0\" value=\"2\" checked=\"\">\n                                                        <span href=\"javascript:selectTG(0);\">\n                                                                <label for=\"optTG0\"> TrackMan Simulator</label>\n                                                        </span>\n                                                        \n                                                            <span class=\"editButtonSpan\"><a class=\"button editButton  editTGButton\" href=\"javascript:resetTG();\"> Edit </a></span>\n                                                        \n                                                    </td>\n                                                </tr>"
+    },
+    {
+      "name": "optVT",
+      "value": "5",
+      "checked": true,
+      "visible": false,
+      "rowHtml": "<tr class=\" evenRowselected-row \" ncwce=\"true\">\n\t\t\t\t\t\t\t\t\t\t\t\t\t\t<td colspan=\"4\" class=\"alignedRadio\">\n\t\t\t\t\t\t\t\t\t\t\t\t\t\t\n\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<div class=\"editButtonSpan\"><a class=\"button editButton editVTButton\" href=\"javascript:resetVT(0);\">Edit</a></div>\n\t\t\t\t\t\t\t\t\t\t\t\t\t\t\n\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<input class=\"td-radio\" style=\" display: none; \" onclick=\"selectVT(1);\" name=\"optVT\" type=\"radio\" value=\"5\" checked=\"\">\n\n\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<div class=\"sessionType group\">\n\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<span class=\"sessionTypeName\">\n\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<a href=\"javascript:selectVT(1);\">TrackMan Simulator - 1 hour session</a>\n\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t</span>\n\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<span class=\"sessionTypeDescription userHTML\" onclick=\"selectVT(1);\">\n\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<div>Trackman is committed to making you a better golfer. No more guesswork! Exceptionally precise measurements are instantly translated into actionable knowledge. At OnPar Now we help you embrace the data to drastically improve your game, whether you are new to the sport or an experienced player.<br>With TrackMan the possibilities are endless! Get your practice rounds in on the range, play 18 on one of over 300 of the best courses in the world, or have fun with our many target games. Bring 3 guests at no additional charge.</div>\n\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t</span>\n\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t</div>\n\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t</td>\n\t\t\t\t\t\t\t\t\t\t\t\t\t\t</tr>"
+    }
+  ]
+}

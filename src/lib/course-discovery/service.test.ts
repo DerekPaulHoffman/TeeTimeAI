@@ -18,7 +18,7 @@ vi.mock("@/lib/prisma", () => ({ prisma: mocks.db }));
 vi.mock("./config", () => ({ isDiscoveryPilotSearch: mocks.pilot, activeDiscoveryPilotSearchIds: mocks.pilotIds }));
 import {
   activateDiscoveryRecipe, checkpointDiscoveryJob, claimNextDiscoveryJob, degradeRecipe,
-  DiscoveryConflictError, ensureDiscoveryJob, failDiscoveryJob, getActiveAccessRecipe,
+  DiscoveryConflictError, ensureDiscoveryJob, ensureDiscoveryJobInTransaction, failDiscoveryJob, getActiveAccessRecipe,
   heartbeatDiscoveryJob, proposeDiscoveryRecipe, recordDiscoveryVerification, assertActiveAccessRecipeInTransaction,
 } from "./service";
 
@@ -80,6 +80,72 @@ beforeEach(() => {
 });
 
 describe("bounded course discovery persistence", () => {
+  it("admits canonical demand on the supplied transaction without opening a nested transaction", async () => {
+    const transactionCourse = { ...course, name: "Transaction-owned Golf" };
+    const transactionCreate = vi.fn(async ({ data }) => ({ id: "atomic-job", ...data, status: "QUEUED", attempts: 0,
+      firstPickedUpAt: null, deadlineAt: null }));
+    const tx = { ...mocks.db, course: { ...mocks.db.course, findUnique: vi.fn(async () => transactionCourse) },
+      courseDiscoveryJob: { ...mocks.db.courseDiscoveryJob, create: transactionCreate } } as unknown as Prisma.TransactionClient;
+    const created = await ensureDiscoveryJobInTransaction(tx, { courseId: "course1", searchId: "search1" });
+    expect(created).toMatchObject({ id: "atomic-job", status: "QUEUED", attempts: 0, firstPickedUpAt: null, deadlineAt: null,
+      baseRecipeId: null, request: { identity: { name: "Transaction-owned Golf" }, demand: { searchId: "search1", alertGeneration: 0 }, input } });
+    expect(mocks.pilot).toHaveBeenCalledWith("search1", process.env, tx);
+    expect(mocks.pilotIds).toHaveBeenCalledWith(process.env, tx);
+    expect(mocks.db.course.findUnique).not.toHaveBeenCalled();
+    expect(mocks.db.courseDiscoveryJob.create).not.toHaveBeenCalled();
+    expect(mocks.db.$transaction).not.toHaveBeenCalled();
+  });
+
+  it("does not accept transaction admission as authorization for a non-pilot", async () => {
+    mocks.pilot.mockResolvedValue(false);
+    expect(await ensureDiscoveryJobInTransaction(mocks.db as unknown as Prisma.TransactionClient,
+      { courseId: "course1", searchId: "search1" })).toBeNull();
+    expect(mocks.db.$queryRaw).not.toHaveBeenCalled();
+    expect(mocks.db.courseDiscoveryJob.create).not.toHaveBeenCalled();
+  });
+
+  it("rechecks pilot authorization inside the ordinary wrapper transaction", async () => {
+    mocks.pilot.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    expect(await ensureDiscoveryJob({ courseId: "course1", searchId: "search1" })).toBeNull();
+    expect(mocks.db.$transaction).toHaveBeenCalledTimes(1);
+    expect(mocks.pilot).toHaveBeenLastCalledWith("search1", process.env, mocks.db);
+    expect(mocks.db.courseDiscoveryJob.create).not.toHaveBeenCalled();
+  });
+
+  it("transaction admission preserves a valid active recipe instead of forcing replacement", async () => {
+    const stored = { id: "active-recipe", targetKey: "course:course1", sourceFingerprint: "current", hash: hashAccessRecipe(recipe), payload: recipe };
+    // Read the real current fingerprint from the first ordinary admission.
+    const first = await ensureDiscoveryJob({ courseId: "course1", searchId: "search1" });
+    stored.sourceFingerprint = first!.sourceFingerprint;
+    course.activeAccessRecipeId = stored.id;
+    mocks.db.courseAccessRecipe.findUnique.mockResolvedValue(stored);
+    mocks.db.courseDiscoveryJob.create.mockClear(); mocks.db.course.updateMany.mockClear();
+    expect(await ensureDiscoveryJobInTransaction(mocks.db as unknown as Prisma.TransactionClient,
+      { courseId: "course1", searchId: "search1" })).toBeNull();
+    expect(mocks.db.course.updateMany).not.toHaveBeenCalled();
+    expect(mocks.db.courseDiscoveryJob.create).not.toHaveBeenCalled();
+  });
+
+  it("transaction admission returns an exhausted incident without resetting its attempt or clock", async () => {
+    const exhausted = { id: "old-job", status: "TIMED_OUT", attempts: 2, firstPickedUpAt: now,
+      deadlineAt: new Date(now.getTime() + 900_000), completedAt: new Date(now.getTime() + 900_001) };
+    mocks.db.courseDiscoveryJob.findFirst.mockResolvedValue(exhausted);
+    expect(await ensureDiscoveryJobInTransaction(mocks.db as unknown as Prisma.TransactionClient,
+      { courseId: "course1", searchId: "search1" })).toEqual(exhausted);
+    expect(mocks.db.courseDiscoveryJob.create).not.toHaveBeenCalled();
+    expect(mocks.db.courseDiscoveryJob.update).not.toHaveBeenCalled();
+  });
+
+  it("transaction admission rejects changed requested input and respects another owner", async () => {
+    await expect(ensureDiscoveryJobInTransaction(mocks.db as unknown as Prisma.TransactionClient,
+      { courseId: "course1", searchId: "search1", request: { target: recipe.target, identity: {
+        name: "Untrusted", officialUrl: null, bookingUrl: null, timeZone: "UTC", providerFamily: null }, input: { ...input, players: 2 } } })).rejects.toBeInstanceOf(DiscoveryConflictError);
+    mocks.db.courseSupportBatch.findFirst.mockResolvedValue({ id: "legacy-owner" });
+    expect(await ensureDiscoveryJobInTransaction(mocks.db as unknown as Prisma.TransactionClient,
+      { courseId: "course1", searchId: "search1" })).toBeNull();
+    expect(mocks.db.courseDiscoveryJob.create).not.toHaveBeenCalled();
+  });
+
   it("issues HTTPS discovery identity from raw HTTP sources through verification, activation and current reuse", async () => {
     course.website = "http://golf.example.com/";
     course.detectedBookingUrl = "http://golf.example.com/times";

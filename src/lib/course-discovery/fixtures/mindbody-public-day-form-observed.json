@@ -1,0 +1,55 @@
+{
+  "provenance": "mindbody-owned-fresh-public-capture-v4/04-complete-public-calendar.json",
+  "sha256": "2b3aba7a7f0a04422f7b403168882ae9fc70ed68be3d7e604bd01d53d75dccd8",
+  "sourceUrl": "https://clients.mindbodyonline.com/ASP/main_appts.asp?load=sched",
+  "targetUrl": "https://clients.mindbodyonline.com/ASP/main_appts.asp",
+  "method": "post",
+  "currentDate": "2026-10-23",
+  "observedNextDate": "2026-10-24",
+  "fields": [
+    {
+      "name": "CSRFToken",
+      "value": "<SYNTHETIC_CSRF_TOKEN>"
+    },
+    {
+      "name": "pageNum",
+      "value": "1"
+    },
+    {
+      "name": "requiredtxtUserName",
+      "value": ""
+    },
+    {
+      "name": "requiredtxtPassword",
+      "value": ""
+    },
+    {
+      "name": "optForwardingLink",
+      "value": ""
+    },
+    {
+      "name": "optRememberMe",
+      "value": ""
+    },
+    {
+      "name": "tabID",
+      "value": "9"
+    },
+    {
+      "name": "txtDate",
+      "value": "10/23/2026"
+    },
+    {
+      "name": "optTG",
+      "value": "0"
+    },
+    {
+      "name": "optInstructor",
+      "value": "0"
+    },
+    {
+      "name": "optView",
+      "value": "day"
+    }
+  ]
+}

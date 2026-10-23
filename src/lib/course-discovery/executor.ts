@@ -49,6 +49,7 @@ import { sevenRoomsPublicRangeUrl } from "./sevenrooms-public-direct";
 import { verifySevenRoomsPublicIdentity } from "./sevenrooms-public-identity";
 import { publicHeaderFailureDiagnostic } from "./public-header-diagnostic";
 import type { NativeOfficialPageReader } from "./native-official-page-reader";
+import type { MindbodyAppointmentReaderDeps } from "./mindbody-appointment-reader";
 
 type ExtractedAccessRecipe = Exclude<CourseAccessRecipeData, { engine: "EXISTING_ADAPTER" }>;
 type BrowserAccessRecipe = Extract<CourseAccessRecipeData, { engine: "BROWSER_DOM" | "BROWSER_JSON" }>;
@@ -60,6 +61,7 @@ export type AccessExecutorDependencies = {
   launchBrowser?: () => Promise<Browser>;
   localCapabilities?: readonly "LOCAL_CHROME"[];
   readNativeOfficialPage?: NativeOfficialPageReader;
+  createMindbodySession?: MindbodyAppointmentReaderDeps["createSession"];
   requestLease?: <T>(family: string, work: () => Promise<T>) => Promise<{ acquired: true; value: T } | { acquired: false }>;
 };
 type Extracted = { venue: unknown; date: unknown; complete: unknown; empty: unknown; players: unknown; duration: unknown;

@@ -12,9 +12,9 @@ import { isMemberSportsPublicTeeSheetPost } from "@/lib/automation/membersports-
 import { sanitizeResponderText } from "@/lib/automation/course-support-responder-policy";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
-import { isActiveBrowserAccessChallenge, isSafeBrowserAssetUrl, isSafeBrowserBootstrapReadUrl, isSafeBrowserAvailabilityReadUrl, isSafeRecipeUrl, recipeSelectorSchema } from "./recipe";
+import { accessExecutionInputSchema, type AccessExecutionInput, isActiveBrowserAccessChallenge, isSafeBrowserAssetUrl, isSafeBrowserBootstrapReadUrl, isSafeBrowserAvailabilityReadUrl, isSafeRecipeUrl, recipeSelectorSchema } from "./recipe";
 import { continueNativeBrowserRead, createNativePublicBrowserProxy, isObservedNativeRedirect, isObservedNativeRedirectTarget, nativeReadPreflightMethod } from "./native-public-browser";
-import { installNativeRedirectRouting, isNativeReadSupersededFailure, authorizePublicClientReadHeaders, isCurrentPublicClientReadHeaders, nativePublicClientPreflightMethod, nativeMindbodyBootstrapSource,
+import { installNativeRedirectRouting, isNativeReadSupersededFailure, authorizePublicClientReadHeaders, isCurrentPublicClientReadHeaders, nativePublicClientPreflightMethod, nativeMindbodyBootstrapSource, nativeMindbodyControllerForm,
   publicClientReadHeaderProofFailure, type NativeFirstFatal, type NativeReadRoute, type NativeRequestDiagnostic } from "./native-redirect-routing";
 import { publicHeaderFailureDiagnostic } from "./public-header-diagnostic";
 export { publicHeaderFailureDiagnostic } from "./public-header-diagnostic";
@@ -23,7 +23,7 @@ import { canonicalPublicReadUrl } from "./public-request-url";
 import { inspectExistingAdapter } from "./existing-adapter-executor";
 import { isPublicCalendarApply } from "./public-calendar-apply";
 import { isObservedPublicCalendarDay, observedPublicCalendarDays } from "./public-calendar-day";
-import { PUBLIC_BROWSER_REQUEST_LIMIT, PUBLIC_BROWSER_TOTAL_BYTES, publicBrowserResponseLimit } from "./browser-resource-limits";
+import { PUBLIC_BROWSER_REQUEST_LIMIT, MINDBODY_APPOINTMENT_REQUEST_LIMIT, assertPublicBrowserRequestBudget, PUBLIC_BROWSER_TOTAL_BYTES, publicBrowserResponseLimit } from "./browser-resource-limits";
 import { observedPublicDropdowns, selectPublicDropdown, type PublicDropdownProof } from "./public-dropdown-control";
 import { observedPublicMenuButtons, selectPublicMenuButton, type PublicMenuButtonProof } from "./public-duration-button";
 import { venueProofMatches } from "./executor";
@@ -42,6 +42,8 @@ import { observedPublicFrameSources } from "./public-frame-source";
 import { launchPublicReadBrowser } from "./public-browser-launch";
 import { createPublicBookingParentScope, readPublicBookingParentIdentity } from "./public-booking-parent";
 import { createEzLinksPublicReadPolicy, type EzLinksDocumentToken } from "./ezlinks-public-read-policy";
+import { createMindbodyAppointmentNativeCapture } from "./mindbody-appointment-native-capture";
+import { parseMindbodyAppointmentSource, validateMindbodyAppointmentSource } from "./mindbody-appointment-grid";
 import { inspectPublicRentalService, openPublicRentalService, selectPublicRentalService, inspectPublicServiceContinuation,
   continuePublicRentalService, type PublicRentalServiceProof, type PublicRentalServiceSelection, type PublicServiceContinuationMode } from "./public-service-control";
 
@@ -151,9 +153,24 @@ export type DiscoveryBrowserSessionDependencies = {
   launchBrowser?: () => Promise<Browser>;
   requestLease?: typeof runWithProviderRequestLease;
   browserTransport?: "PINNED_HTTP" | "NATIVE_CHROME";
+  /** Fixed controller reader only. Never accepted from actions or recipes. */
+  fixedReaderProfile?: "MINDBODY_APPOINTMENTS";
+  localCapabilities?: readonly string[];
   onRequestFailure?: (failure: { url: string; resourceType: string; reason: string }) => void;
   inspectAdapter?: typeof inspectExistingAdapter;
 };
+export function discoveryBrowserRequestLimit(input: { initialUrls: string[]; timeZone?: string; venueName?: string; venueAddress?: string; venueOfficialUrl?: string;
+  requestedInput?: AccessExecutionInput }, deps: Pick<DiscoveryBrowserSessionDependencies, "fixedReaderProfile" | "browserTransport" | "localCapabilities">) {
+  if (deps.fixedReaderProfile === undefined) return PUBLIC_BROWSER_REQUEST_LIMIT;
+  if (deps.fixedReaderProfile !== "MINDBODY_APPOINTMENTS" || deps.browserTransport !== "NATIVE_CHROME" ||
+      !deps.localCapabilities?.includes("LOCAL_CHROME") || input.initialUrls.length !== 1 || !parseMindbodyAppointmentSource(input.initialUrls[0]))
+    throw new Error("INVALID_FIXED_READER_PROFILE");
+  const requested = accessExecutionInputSchema.safeParse(input.requestedInput);
+  if (!requested.success || !requested.data.durationMinutes || requested.data.timeZone !== input.timeZone) throw new Error("INVALID_FIXED_READER_PROFILE");
+  try { validateMindbodyAppointmentSource({ bookingUrl: input.initialUrls[0], officialUrl: input.venueOfficialUrl ?? "", venueName: input.venueName ?? "",
+    venueAddress: input.venueAddress ?? "", timeZone: input.timeZone ?? "" }); } catch { throw new Error("INVALID_FIXED_READER_PROFILE"); }
+  return MINDBODY_APPOINTMENT_REQUEST_LIMIT;
+}
 const sensitive = /password|secret|token|cookie|session|credential|authorization|api.?key|email|phone|contact|card|customer|user|person|attendee/iu;
 /** URL metadata may contain a site's public API key; it is not model input. */
 export function redactDiscoveryRequestUrl(value: string) {
@@ -188,10 +205,15 @@ export function redactDiscoveryJson(value: unknown, depth = 0): unknown {
  * control IDs; it never receives browser/CDP access or a JavaScript evaluator. */
 export async function createCourseDiscoveryBrowserSession(input: {
   deadlineAt: Date; initialUrls: string[]; timeZone?: string; venueName?: string; venueAddress?: string; venueOfficialUrl?: string;
+  /** Trusted constructor context, never a browser action or model proof. */
+  requestedInput?: AccessExecutionInput;
 }, deps: DiscoveryBrowserSessionDependencies = {}) {
   const startupStartedAt = Date.now();
+  const requestedInput = input.requestedInput === undefined ? undefined : accessExecutionInputSchema.parse(input.requestedInput);
+  if (requestedInput && requestedInput.timeZone !== (input.timeZone ?? "UTC")) throw new Error("REQUEST_CONTEXT_TIME_ZONE_MISMATCH");
   const initialUrls = input.initialUrls.map(normalizeDiscoveryNavigationUrl);
   if (!initialUrls.length || initialUrls.length > 16 || !initialUrls.every(isSafeRecipeUrl)) throw new Error("INVALID_INITIAL_URLS");
+  const requestLimit = discoveryBrowserRequestLimit({ ...input, initialUrls }, deps);
   try { new Intl.DateTimeFormat("en-US", { timeZone: input.timeZone ?? "UTC" }); } catch { throw new Error("INVALID_TIME_ZONE"); }
   const remaining = input.deadlineAt.getTime() - Date.now();
   if (!Number.isFinite(remaining) || remaining <= 0 || remaining > 20 * 60_000) throw new Error("INVALID_DEADLINE");
@@ -292,6 +314,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
   let serviceSelection: PublicRentalServiceSelection | undefined;
   const observedElements = new Map<string, { locator: Locator; signature: string }>();
   let closed = false, requestCount = 0, interceptCount = 0, responseBytes = 0, blockedRequests = 0, pendingRequests = 0, actions = 0, observations = 0;
+  const admittedRequestCounts: Record<string, number> = Object.create(null);
   // Native CDP owns every guarded read and its response capture. Its pending
   // work may outlive handleRoute; pinned HTTP uses the local handler count.
   const pendingReadCount = () => Math.max(pendingRequests, redirectRouting?.pendingReads ?? 0);
@@ -345,6 +368,15 @@ export async function createCourseDiscoveryBrowserSession(input: {
       await new Promise(resolve => setTimeout(resolve, Math.min(25, Math.max(1, until - Date.now()))));
     }
   };
+  const mindbodySources = initialUrls.filter(value => parseMindbodyAppointmentSource(value));
+  const mindbodyCapture = createMindbodyAppointmentNativeCapture({ page, native: Boolean(nativeProxy), requestedInput,
+    ...(mindbodySources.length === 1 && input.venueOfficialUrl && input.venueName && input.venueAddress && input.timeZone ? { source: {
+      officialUrl: input.venueOfficialUrl, bookingUrl: mindbodySources[0], venueName: input.venueName, venueAddress: input.venueAddress, timeZone: input.timeZone } } : {}),
+    deadlineAt: input.deadlineAt.getTime(), pendingReads: pendingReadCount,
+    assertActive: () => { deadline.throwIfAborted(); if (closed) throw new Error("BROWSER_CLOSED"); if (terminalFailure) throw new Error(terminalFailure); } });
+  // Dispose private provider HTML/tokens even when the ordinary session closes
+  // before a fixed reader is entered. Neither is returned by snapshots.
+  deadline.addEventListener("abort", () => mindbodyCapture.close(), { once: true });
   const handleRoute = async (route: NativeReadRoute) => {
     const request = route.request();
     const transportUrl = canonicalPublicReadUrl(request.url(), request.method());
@@ -363,10 +395,12 @@ export async function createCourseDiscoveryBrowserSession(input: {
     let ezAsset: typeof ezLinksReadContractAssets[number] | undefined, ezAssetRead: { complete: boolean; sha256?: string } | undefined;
     let ezInitRequest = false;
     let teeRequestToken: TeeItUpSourceRequestToken | undefined;
+    let mindbodyDocumentVersion: number | undefined;
     let catalogDocument: ReturnType<typeof catalogTiles.beginDocument>;
     let catalogRead: ReturnType<typeof catalogTiles.beginRead>;
     try {
       deadline.throwIfAborted();
+      if (new URL(requestUrl).pathname.toLowerCase() === "/asp/appt_req.asp") throw new Error("MINDBODY_APPOINTMENT_TRANSACTION_DENIED");
       if (request.frame().page() !== page) throw new Error("UNSUPPORTED_BROWSER_PAGE");
       redirectRouting?.prepare(request.frame());
       if (!cpsScope.authorize(transportUrl, request.redirectedFrom()?.url())) throw new Error("UNOBSERVED_CPS_SESSION");
@@ -398,6 +432,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
       if (request.frame() === page.mainFrame() && ["xhr", "fetch"].includes(request.resourceType()))
         catalogRead = catalogTiles.beginRead(requestUrl, request.method(), request.postData(), request.frame().url());
       if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+        mindbodyCapture.assertNavigation(url.href, method);
+        mindbodyDocumentVersion = mindbodyCapture.beginDocument();
         catalogDocument = catalogTiles.beginDocument(requestUrl);
         officialSourceDiagnostic = undefined;
         teeRequestToken = nativeProxy ? teeBookingScope.beginMainDocument(request, { url: request.url(), method: request.method(), parent: request.redirectedFrom() ?? undefined }) : undefined;
@@ -444,10 +480,13 @@ export async function createCourseDiscoveryBrowserSession(input: {
       const headers = new Headers();
       const body = request.postData() ?? undefined;
       const mindbodySource = nativeProxy ? nativeMindbodyBootstrapSource(request) : null;
+      const mindbodyForm = nativeProxy ? nativeMindbodyControllerForm(request) : null;
       const assertMindbodyBootstrapRead = () => {
         if (mindbodySource && (nativeMindbodyBootstrapSource(request) !== mindbodySource || method !== "POST" || !body ||
             !isMindbodyClassicPublicBootstrapPost(url, new Headers(requestHeaders), body, mindbodySource.sourceUrl)))
           throw new Error("MINDBODY_BOOTSTRAP_READ_REJECTED");
+        if (mindbodyForm && (nativeMindbodyControllerForm(request) !== mindbodyForm || method !== "POST" || !body ||
+            !mindbodyForm.matches(body, requestHeaders["content-type"] ?? ""))) throw new Error("MINDBODY_PUBLIC_FORM_REJECTED");
       };
       // The source document intentionally retired during the native ownership
       // transfer. Only its immutable, privately attested successor metadata
@@ -478,6 +517,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       if (!uschedule.addReadHeaders(url, method, requestHeaders, headers, body ?? "")) throw new Error("UNSAFE_METHOD");
       if (!["GET", "HEAD"].includes(method) && !preflight && !(method === "POST" && body && (readPost(url, headers, body) ||
           nativeProxy && mindbodySource ||
+          nativeProxy && mindbodyForm ||
           nativeProxy && publicHeaderProof && isMemberSportsPublicTeeSheetPost(url, headers, body, frameUrl))))
         throw new Error(!nativeProxy && method === "POST" && isRexNamespace(url) ? rexProjectedPublicReadRejection(url, headers, body ?? "", frameUrl) : "UNSAFE_METHOD");
       if (method === "POST" && body) {
@@ -489,9 +529,10 @@ export async function createCourseDiscoveryBrowserSession(input: {
           }
         } catch { /* Non-JSON public reads remain opaque; never return raw text. */ }
       }
-      if (requestCount >= PUBLIC_BROWSER_REQUEST_LIMIT) throw new Error("PUBLIC_READ_REQUEST_LIMIT");
+      assertPublicBrowserRequestBudget(requestCount, requestLimit);
       if (responseBytes >= PUBLIC_BROWSER_TOTAL_BYTES) throw new Error("PUBLIC_READ_BYTE_LIMIT");
       requestCount++;
+      admittedRequestCounts[request.resourceType()] = (admittedRequestCounts[request.resourceType()] ?? 0) + 1;
       const responseLimit = publicBrowserResponseLimit(request.resourceType());
       const reply = await queue.run(requestFamilyForUrl(url.href), async () => {
         assertMindbodyBootstrapRead();
@@ -536,6 +577,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
       }
       metadata.status = reply.status;
       if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+        if (mindbodyDocumentVersion !== undefined) mindbodyCapture.completeDocument(mindbodyDocumentVersion, url.href,
+          reply.status, reply.headers["content-type"] ?? "", reply.buffer);
         catalogTiles.completeDocument(catalogDocument, reply.status, reply.headers["content-type"] ?? "");
         if (teeRequestToken) teeBookingScope.completeMainDocument(teeRequestToken, { status: reply.status,
           location: reply.headers.location, contentType: reply.headers["content-type"] });
@@ -697,6 +740,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     try {
       redirectRouting = await installNativeRedirectRouting(page, handleRoute, {
         signal: deadline, maxRequests: 1024,
+        controllerFormIntent: (sourceUrl, targetUrl) => mindbodyCapture.formIntent(sourceUrl, targetUrl),
         onSubframeBlocked: recordSubframe,
         onRequestRejected: request => {
           blockedRequests++;
@@ -1201,6 +1245,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
     },
     readEzLinksConfiguration,
     readEzLinksReadContract,
+    async readMindbodyPublicCatalog() { return mindbodyCapture.readCatalog(); },
+    async readMindbodyPublicGrid() { return mindbodyCapture.readGrid(); },
     async readEzLinksAvailability(body: unknown) {
       const witness = await currentEzDocument(), binding = ezConfigurationRead;
       if (!binding || binding.document !== witness || binding.token !== witness.token || binding.version !== witness.initVersion)
@@ -1214,6 +1260,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
       // Available even when navigation throws or the page has already closed.
       // This contains transport facts only, never page text or response bodies.
       return { loading: pendingReadCount() > 0, pendingRequestCount: pendingReadCount(),
+        admittedRequestCounts: { ...admittedRequestCounts }, requestLimit,
+        mindbodyCapture: mindbodyCapture.diagnostics(),
         officialSourceDiagnostic: officialDiagnostics(), ...(navigationFailureKind ? { navigationFailureKind } : {}),
         ...(redirectRouting?.firstFatal ? { nativeFirstFatal: redirectRouting.firstFatal } : {}),
         ...(redirectRouting?.rejectedRequests?.length ? { nativeRejectedRequests: redirectRouting.rejectedRequests } : {}),
@@ -1308,6 +1356,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
         const officialBookingSourceToken = teeBookingScope.tokenFor(action.url, page.url());
         const result = await (deps.inspectAdapter ?? inspectExistingAdapter)({ officialUrl: input.venueOfficialUrl, bookingUrl: action.url, venueName: input.venueName, venueAddress: input.venueAddress, timeZone: input.timeZone ?? "UTC" },
           { venueMatches: venueProofMatches, requestLease: deps.requestLease ?? runWithProviderRequestLease, deadlineAt: input.deadlineAt,
+            ...(deps.browserTransport === "NATIVE_CHROME" ? { localCapabilities: ["LOCAL_CHROME"] as const } : {}),
+            ...(requestedInput === undefined ? {} : { requestedInput: structuredClone(requestedInput) }),
             onOfficialSourceDiagnostic: value => { officialSourceDiagnostic = safeOfficialSourceDiagnostic(value); },
             ...(officialIdentityPage && Date.now() - officialIdentityPage.observedAt <= 5 * 60_000 ? { officialIdentityPage } : {}),
             ...(officialBookingSourceToken ? { officialBookingSourceToken } : {}) });
