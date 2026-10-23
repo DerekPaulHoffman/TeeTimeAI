@@ -208,7 +208,7 @@ describe.runIf(existsSync(executable))("server-document raw/live fence in isolat
     // Isolate the executor's raw/live proof seam. Actual native interception is
     // qualified separately; its CDP routes intentionally cannot fulfill bytes.
     vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, handler) => ({
-      prepare() {}, pendingReads: 0, lastFailure: undefined, close: async () => {},
+      prepare() {}, beginDocumentNavigation: async () => {}, pendingReads: 0, lastFailure: undefined, close: async () => {},
       releasePlaywrightRoute: async route => { await handler(route); },
     }));
     vi.spyOn(native, "continueNativeBrowserRead").mockImplementation(async route => {

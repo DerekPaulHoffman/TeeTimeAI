@@ -53,7 +53,7 @@ describe.runIf(existsSync(chrome))("REX fixed replay native policy boundary", ()
       close: async () => {}, allowHostConnections: () => {}, cancelHostConnections: async () => {},
       stats: () => ({ connections: 0, activeSockets: 0, bytes: 0 }) });
     vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, handler) => ({
-      prepare: () => {}, close: async () => {}, lastFailure: undefined, get pendingReads() { return pending; },
+      prepare: () => {}, beginDocumentNavigation: async () => {}, close: async () => {}, lastFailure: undefined, get pendingReads() { return pending; },
       releasePlaywrightRoute: async route => {
         pending++;
         try {

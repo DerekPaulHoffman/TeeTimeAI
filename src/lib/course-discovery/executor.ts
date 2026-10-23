@@ -812,6 +812,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
     try {
       const pageUrl = expandRecipeTemplate(recipe.pageUrl, input, true);
       activity = { url: pageUrl, method: "GET", resourceType: "document" };
+      await redirectRouting?.beginDocumentNavigation(page.mainFrame());
       await page.goto(pageUrl, { waitUntil: "domcontentloaded", timeout: Math.min(30_000, Math.max(1, deadline - clock().getTime())) });
       for (const [stepIndex, step] of recipe.steps.entries()) {
         activity = { stepIndex, url: canonicalCpsPublicUrl(page.url()), method: "GET", resourceType: "document" };
@@ -849,6 +850,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
           if (sequence !== mainDocumentSequence || pendingReadCount() || canonicalCpsPublicUrl(page.url()) !== proof.officialDocumentUrl ||
               !recipeAllowsRequest(recipe, proof.bookingUrl, "GET")) throw new Error("OFFICIAL_BOOKING_IDENTITY_UNVERIFIED");
           memberSportsIdentity = { proof, bookingDocumentSequence: sequence + 1 };
+          await redirectRouting?.beginDocumentNavigation(page.mainFrame());
           await page.goto(proof.bookingUrl, { waitUntil: "domcontentloaded", timeout: Math.min(30_000, Math.max(1, deadline - clock().getTime())) });
           if (mainDocumentSequence !== sequence + 1 || canonicalCpsPublicUrl(page.url()) !== proof.bookingUrl)
             throw new Error("OFFICIAL_BOOKING_IDENTITY_UNVERIFIED");

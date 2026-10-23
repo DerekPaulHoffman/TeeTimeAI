@@ -30,7 +30,7 @@ describe.runIf(existsSync(executable))("venue greeting interpretation after full
     // These fixtures isolate executor source/live proof. Actual CDP network
     // identity is covered by the separate native TLS/browser test lane.
     vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, handler) => ({
-      prepare() {}, pendingReads: 0, lastFailure: undefined, close: async () => {},
+      prepare() {}, beginDocumentNavigation: async () => {}, pendingReads: 0, lastFailure: undefined, close: async () => {},
       releasePlaywrightRoute: async route => { await handler(route); },
     }));
     vi.spyOn(native, "continueNativeBrowserRead").mockImplementation(async route => {

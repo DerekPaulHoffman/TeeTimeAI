@@ -52,7 +52,7 @@ describe.runIf(existsSync(chrome))("public tee-sheet fixed replay native caller 
     vi.spyOn(nativeBrowser, "createNativePublicBrowserProxy").mockResolvedValue({ server: "http://127.0.0.1:9", close: async () => {},
       allowHostConnections: () => {}, cancelHostConnections: async () => {}, stats: () => ({ connections: 0, activeSockets: 0, bytes: 0 }) });
     vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, handler) => ({
-      prepare: () => {}, close: async () => {}, lastFailure: undefined, get pendingReads() { return pending; },
+      prepare: () => {}, beginDocumentNavigation: async () => {}, close: async () => {}, lastFailure: undefined, get pendingReads() { return pending; },
       releasePlaywrightRoute: async route => {
         pending++;
         try {

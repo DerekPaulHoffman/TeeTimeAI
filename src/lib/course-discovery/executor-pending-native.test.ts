@@ -56,7 +56,7 @@ describe.runIf(existsSync(chromePath))("native executor pending reads", () => {
       cancelHostConnections: async () => {}, stats: () => ({ connections: 0, activeSockets: 0, bytes: 0 }),
     });
     const routing = vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, handler) => ({
-      prepare: () => {}, close: async () => {}, lastFailure: undefined,
+      prepare: () => {}, beginDocumentNavigation: async () => {}, close: async () => {}, lastFailure: undefined,
       get pendingReads() { if (pendingReads) pendingCountReads++; return pendingReads; },
       // This fixture drives the controller's policy callback separately from
       // the Playwright wrapper. Actual CDP dispatch/capture is exercised by the

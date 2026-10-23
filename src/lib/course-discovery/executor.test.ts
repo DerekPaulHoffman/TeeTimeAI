@@ -31,7 +31,7 @@ const payload = () => ({ venue: "Example Golf", date: executionInput.date, compl
 function nativeControllerFixture() {
   let pending = 0;
   return vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, handler) => ({
-    prepare: () => {}, close: async () => {}, lastFailure: undefined,
+    prepare: () => {}, beginDocumentNavigation: async () => {}, close: async () => {}, lastFailure: undefined,
     get pendingReads() { return pending; },
     releasePlaywrightRoute: async route => {
       pending++;
@@ -387,7 +387,7 @@ describe.runIf(existsSync(chromeExecutable))("isolated browser recipe replay", (
     const routing = vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, handler, options) => {
       if (mode === "denied-script" || mode === "denied-resource-kind") options?.onRequestRejected?.(rejected);
       else if (mode === "unknown-fatal") options?.onFailure?.("NATIVE_REDIRECT_PROVENANCE_REJECTED");
-      return { prepare: () => {}, close: async () => {}, lastFailure: undefined, pendingReads: 0,
+      return { prepare: () => {}, beginDocumentNavigation: async () => {}, close: async () => {}, lastFailure: undefined, pendingReads: 0,
         releasePlaywrightRoute: route => handler(route) };
     });
     const native = vi.spyOn(nativeBrowser, "continueNativeBrowserRead").mockImplementation(async route => {
@@ -407,9 +407,9 @@ describe.runIf(existsSync(chromeExecutable))("isolated browser recipe replay", (
         return;
       }
       expect(result).toMatchObject({ status: "INCOMPLETE", complete: false, slots: [] });
-      expect(result.evidence.diagnostic).toEqual(mode === "denied-script" || mode === "denied-resource-kind"
+      expect(result.evidence.diagnostic).toEqual({ ...(mode === "denied-script" || mode === "denied-resource-kind"
         ? { code: rejected.code, url: "https://cdn.example.net/public.js", method: "GET", resourceType: "script" }
-        : { code: "NATIVE_REDIRECT_PROVENANCE_REJECTED" });
+        : { code: "NATIVE_REDIRECT_PROVENANCE_REJECTED" }), requestState: { pendingReads: 0, currentDocumentPendingHandlers: 0 } });
     } finally { native.mockRestore(); routing.mockRestore(); }
   }, 20_000);
   it("matches only a successful exact date-bound query or JSON availability response", () => {
@@ -787,7 +787,7 @@ describe.runIf(existsSync(chromeExecutable))("isolated browser recipe replay", (
     selected.browserTransport = "NATIVE_CHROME";
     selected.steps = [{ action: "select", selector: "#missing-players", value: "{{players}}", purpose: "PLAYERS" }];
     const controller = vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, handler, options) => ({
-      prepare: () => {}, close: async () => { options?.onFailure?.("NATIVE_REDIRECT_CLOSE_FAILED"); }, lastFailure: undefined, pendingReads: 0,
+      prepare: () => {}, beginDocumentNavigation: async () => {}, close: async () => { options?.onFailure?.("NATIVE_REDIRECT_CLOSE_FAILED"); }, lastFailure: undefined, pendingReads: 0,
       releasePlaywrightRoute: async route => { await handler(route); },
     }));
     const native = vi.spyOn(nativeBrowser, "continueNativeBrowserRead").mockImplementation(async route => {

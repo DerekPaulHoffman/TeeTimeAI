@@ -74,7 +74,7 @@ async function run(mode: Mode, input = baseline) {
     allowHostConnections: () => {}, cancelHostConnections: async () => {}, stats: () => ({ connections: 0, activeSockets: 0, bytes: 0 }) });
   const counts = countsUrl(mode === "metadata-date" ? "2026-10-22" : input.date);
   const allowed = new Set([official, booking, coursesUrl, parametersUrl, counts, endpoint]);
-  vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, handler) => ({ prepare: () => {}, close: async () => {}, lastFailure: undefined,
+  vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, handler) => ({ prepare: () => {}, beginDocumentNavigation: async () => {}, close: async () => {}, lastFailure: undefined,
     get pendingReads() { return pending; },
     releasePlaywrightRoute: async route => {
       pending++;
