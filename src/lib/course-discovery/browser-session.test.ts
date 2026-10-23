@@ -1110,8 +1110,9 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       await expect(session.execute({ id: 3, action: "select", target: duration.target, option: "private" })).rejects.toThrow("UNOBSERVED_OPTION");
       const linked = await session.execute({ id: 4, action: "open", url: "https://example.org/times" });
       expect(linked.url).toBe("https://example.org/times");
-      const observedRead = await session.execute({ id: 5, action: "open", url: "https://example.org/api/public" });
-      expect(observedRead.url).toBe("https://example.org/api/public");
+      const beforeDataNavigation = fetcher.mock.calls.length;
+      await expect(session.execute({ id: 5, action: "open", url: "https://example.org/api/public" })).rejects.toThrow("UNOBSERVED_NAVIGATION");
+      expect(fetcher).toHaveBeenCalledTimes(beforeDataNavigation);
     } finally { await session.close(); }
   }, 25_000);
   it("inspects only a current observed element and returns bounded real parent structure", async () => {
