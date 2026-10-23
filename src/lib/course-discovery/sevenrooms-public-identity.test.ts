@@ -12,6 +12,16 @@ const matches = (expected: string, actual: unknown) => expected === actual;
 const verify = (fields: Record<string, unknown> = venue()) => verifySevenRoomsPublicIdentity(body(fields), source, request, matches);
 
 describe("same-container current SevenRooms public identity", () => {
+  it("accepts the observed full-state suite address and preserves its actual unit in the witness", () => {
+    const greensSource = { ...source, bookingUrl: "https://www.sevenrooms.com/reservations/thegreensindoorgolfbar?duration-picker=true",
+      venueName: "The Greens Indoor Golf & Bar", venueAddress: "9101 International Dr, Orlando, FL 32819, USA" };
+    const greensRequest = { ...request, url: request.url.replace("examplegolf", "thegreensindoorgolfbar") };
+    const actual = { ...venue(), name: greensSource.venueName, url_key: "thegreensindoorgolfbar", address: "9101 International Drive, Ste 2410",
+      city: "Orlando", state: "Florida", postal_code: "32819" };
+    const verified = verifySevenRoomsPublicIdentity(body(actual), greensSource, greensRequest, matches);
+    expect(verified).toMatchObject({ canonicalAddress: { street: "9101 international dr", locality: "orlando", region: "FL", postalCode: "32819", country: "US" },
+      actualUnit: { kind: "SUITE", identifier: "2410" } });
+  });
   it("proves only actual current name, tenant, IANA zone and complete composed postal parts", () => {
     const actual = verify();
     expect(actual).toMatchObject({ venueName: venue().name, timeZone: venue().timezone, tenant: "examplegolf",
@@ -44,7 +54,7 @@ describe("same-container current SevenRooms public identity", () => {
     { name: "Other Golf & Social" }, { url_key: "other" }, { venue_url_key: "other" }, { timezone: "America/Chicago" },
     { address: "10530 Fairway Dr" }, { city: "Orlando" }, { state: "GA" }, { postal_code: "33627" }, { country: "CA" },
     { country_code: "CA" }, { country: "" }, { address2: "Suite 5" }, { address2: null }, { address1: "Another Road" },
-    { zip_code: "33627" }, { state: "Florida" }, { postal_code: "33626 bad" }, { address: "PO Box 123" },
+    { zip_code: "33627" }, { state: "Georgia" }, { postal_code: "33626 bad" }, { address: "PO Box 123" },
   ])("rejects changed, ambiguous or unsupported actual identity %j", extra => {
     expect(() => verify({ ...venue(), ...extra })).toThrow();
   });
@@ -90,5 +100,25 @@ describe("same-container current SevenRooms public identity", () => {
     const first = verify(), next = verify({ ...venue(), availability: ["dynamic"], price: 200, date: "2030-10-24" });
     expect(next.witnessSha256).toBe(first.witnessSha256);
     expect(verify({ ...venue(), address2: "", address1: venue().address, zip_code: "33626-1234" }).canonicalAddress).toEqual(first.canonicalAddress);
+  });
+  it("keeps current suite metadata descriptive when the canonical job address is coarse", () => {
+    const first = verify({ ...venue(), address: "10529 Fairway Dr, Ste 2410", state: "Florida" });
+    const changed = verify({ ...venue(), address: "10529 Fairway Drive, Suite 2411", state: "FL" });
+    expect(first.actualUnit).toEqual({ kind: "SUITE", identifier: "2410" }); expect(changed.actualUnit?.identifier).toBe("2411");
+    expect(first.canonicalAddress).toEqual(changed.canonicalAddress); expect(first.witnessSha256).not.toBe(changed.witnessSha256);
+    expect(Object.isFrozen(first.actualUnit)).toBe(true);
+    expect(verify({ ...venue(), address: "10529 Fairway Drive, Suite 2410" }).witnessSha256).toBe(first.witnessSha256);
+  });
+  it("requires exact actual unit when the canonical job source includes a unit", () => {
+    const withUnit = { ...source, venueAddress: "10529 Fairway Dr, Suite 2410, Tampa, Florida 33626, US" };
+    expect(verifySevenRoomsPublicIdentity(body({ ...venue(), address: "10529 Fairway Drive, Ste 2410" }), withUnit, request, matches).actualUnit?.identifier).toBe("2410");
+    for (const address of ["10529 Fairway Dr", "10529 Fairway Dr, Suite 2411", "10529 Fairway Dr, Suite A1"])
+      expect(() => verifySevenRoomsPublicIdentity(body({ ...venue(), address }), withUnit, request, matches)).toThrow("ADDRESS_UNVERIFIED");
+  });
+  it("does not hide conflicting actual unit lines, aliases, private prose or wrong base identity", () => {
+    for (const extra of [{ address: "10529 Fairway Dr, Ste 2410, Suite 2411" }, { address: "10529 Fairway Dr, Unit 2410" },
+      { address: "10529 Fairway Dr, Ste 2410 unknown" }, { address: "10530 Fairway Dr, Ste 2410" },
+      { address: "10529 Fairway Dr, Ste 2410", address2: "Suite 2410" }, { address: "10529 Fairway Dr, Ste 2410", address1: "10529 Fairway Dr" }])
+      expect(() => verify({ ...venue(), ...extra })).toThrow("ADDRESS_UNVERIFIED");
   });
 });
