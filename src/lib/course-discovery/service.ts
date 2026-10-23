@@ -332,7 +332,8 @@ export async function proposeDiscoveryRecipe(jobId: string, leaseToken: string, 
     bindRecipe(recipe, source, sourceEvidence);
     const input = accessExecutionInputSchema.parse((job.request as unknown as DiscoveryRequest).input);
     // Verification inputs never become customer demand or customer matches.
-    const alternate = { ...input, players: source.offering ? input.players : input.players === 1 ? 2 : 1 };
+    // A neighboring outdoor party tests parameterization, not universal party support.
+    const alternate = { ...input, players: source.offering ? input.players : input.players < 4 ? input.players + 1 : input.players - 1 };
     if (source.offering) {
       const next = new Date(`${input.date}T12:00:00.000Z`);
       next.setUTCDate(next.getUTCDate() + 1);

@@ -276,6 +276,44 @@ describe("bounded course discovery persistence", () => {
     expect(job!.activeTargetKey).toBeNull();
   });
 
+  it.each([[1, 2], [2, 3], [3, 4], [4, 3], [5, 4], [20, 19]])(
+    "issues the requested party %i and a neighboring outdoor party %i without changing other inputs", async (players, alternatePlayers) => {
+      preferences = [{ teeSearch: { ...(preferences[0] as { teeSearch: object }).teeSearch, players } }];
+      const owner = (await claimed())!;
+      const candidate = await proposeDiscoveryRecipe(owner.id, owner.leaseToken!, recipe);
+      const requested = { ...input, players };
+      expect(candidate.challenges.map(challenge => challenge.input)).toEqual([requested, { ...requested, players: alternatePlayers }]);
+      expect(new Set(candidate.challenges.map(challenge => challenge.id)).size).toBe(2);
+      expect(candidate.challenges.every(challenge => challenge.recipeHash === candidate.recipeHash && !challenge.completed)).toBe(true);
+      expect((job!.request as { input: AccessExecutionInput }).input).toEqual(requested);
+    });
+
+  it("keeps the P1 baseline mandatory and rejects an incomplete capacity proof despite a valid neighbor", async () => {
+    const owner = (await claimed())!, candidate = await proposeDiscoveryRecipe(owner.id, owner.leaseToken!, recipe);
+    expect(candidate.challenges.map(challenge => challenge.input.players)).toEqual([1, 2]);
+    const [baseline, alternate] = candidate.challenges;
+    await recordDiscoveryVerification({ jobId: owner.id, leaseToken: owner.leaseToken!, challengeId: alternate.id,
+      recipeHash: candidate.recipeHash, input: alternate.input, result: result(2) });
+    await expect(recordDiscoveryVerification({ jobId: owner.id, leaseToken: owner.leaseToken!, challengeId: baseline.id,
+      recipeHash: candidate.recipeHash, input: baseline.input,
+      result: { ...result(), status: "INCOMPLETE", complete: false, slots: [], evidence: { ...result().evidence,
+        capacityVerified: false, reason: "PUBLIC_PARTY_RANGE_RANGE_INVALID" } } })).rejects.toBeInstanceOf(DiscoveryConflictError);
+    await expect(activateDiscoveryRecipe(owner.id, owner.leaseToken!)).rejects.toBeInstanceOf(DiscoveryConflictError);
+    expect(mocks.db.courseAccessRecipe.create).not.toHaveBeenCalled();
+  });
+
+  it("accepts a complete EMPTY neighboring-party proof with all existing evidence gates", async () => {
+    preferences = [{ teeSearch: { ...(preferences[0] as { teeSearch: object }).teeSearch, players: 2 } }];
+    const owner = (await claimed())!, candidate = await proposeDiscoveryRecipe(owner.id, owner.leaseToken!, recipe);
+    const [baseline, alternate] = candidate.challenges;
+    expect([baseline.input.players, alternate.input.players]).toEqual([2, 3]);
+    await recordDiscoveryVerification({ jobId: owner.id, leaseToken: owner.leaseToken!, challengeId: baseline.id,
+      recipeHash: candidate.recipeHash, input: baseline.input, result: result(2) });
+    await recordDiscoveryVerification({ jobId: owner.id, leaseToken: owner.leaseToken!, challengeId: alternate.id,
+      recipeHash: candidate.recipeHash, input: alternate.input, result: { ...result(3), status: "EMPTY", slots: [] } });
+    expect((await activateDiscoveryRecipe(owner.id, owner.leaseToken!)).recipeId).toBe("recipe1");
+  });
+
   it.each([-2100, 2100])("accepts fresh client proof with %ims clock skew and retains its timestamp", async offset => {
     const owner = (await claimed())!;
     const candidate = await proposeDiscoveryRecipe(owner.id, owner.leaseToken!, recipe);
@@ -433,6 +471,10 @@ describe("bounded course discovery persistence", () => {
     const simulatorRecipe = parseAccessRecipe({ ...recipe, target: { courseId: "course1", offeringId: "offering1", kind: "SIMULATOR" },
       proof: { ...recipe.proof, durationMinutes: { path: "durationMinutes" } }, slots: { ...recipe.slots, endsAt: { path: "end" } } });
     const candidate = await proposeDiscoveryRecipe(owner.id, owner.leaseToken!, simulatorRecipe);
+    expect(candidate.challenges.map(challenge => challenge.input)).toEqual([
+      { ...input, players: 4, startTime: "23:00", endTime: "24:00", durationMinutes: 60 },
+      { ...input, date: "2030-01-03", players: 4, startTime: "23:00", endTime: "24:00", durationMinutes: 60 },
+    ]);
     const challenge = candidate.challenges[0];
     const evidence = { ...result(), evidence: { ...result().evidence, recipeHash: candidate.recipeHash },
       slots: [{ sourceId: "bay", startsAt: "2030-01-02T23:30:00.000Z", endsAt: "2030-01-03T00:30:00.000Z",
