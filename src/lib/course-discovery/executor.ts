@@ -16,7 +16,7 @@ import { accessExecutionDiagnosticSchema, accessExecutionInputSchema, accessExec
   isSafeRecipeUrl, isSafeBrowserAvailabilityReadUrl,
   type AccessExecutionDiagnostic, type CourseAccessRecipeData, type RecipeDateParts, type RecipeField } from "./recipe";
 import { continueNativeBrowserRead, createNativePublicBrowserProxy, nativeReadPreflightMethod, type NativePublicProxy } from "./native-public-browser";
-import { installNativeRedirectRouting, authorizePublicClientReadHeaders, isCurrentPublicClientReadHeaders, nativePublicClientPreflightMethod, type NativeReadRoute } from "./native-redirect-routing";
+import { installNativeRedirectRouting, authorizePublicClientReadHeaders, isCurrentPublicClientReadHeaders, nativePublicClientPreflightMethod, publicClientReadHeaderProofFailure, type NativeReadRoute } from "./native-redirect-routing";
 import { launchPublicReadBrowser } from "./public-browser-launch";
 import { requestFamilyForUrl } from "./request-family";
 import { canonicalPublicReadUrl } from "./public-request-url";
@@ -45,6 +45,9 @@ import { parsePublicPlayerOptions } from "./public-player-options";
 import { matchesPublicVenueGreeting } from "./public-venue-greeting";
 import { browserJsonAncillaryCalendarRequestMatches, browserJsonPrimaryRequestMatches, extractBrowserJsonRows } from "./browser-json-response";
 import { describeBrowserJsonRequestMismatch } from "./browser-json-request-diagnostics";
+import { sevenRoomsPublicRangeUrl } from "./sevenrooms-public-direct";
+import { verifySevenRoomsPublicIdentity } from "./sevenrooms-public-identity";
+import { publicHeaderFailureDiagnostic } from "./public-header-diagnostic";
 
 type ExtractedAccessRecipe = Exclude<CourseAccessRecipeData, { engine: "EXISTING_ADAPTER" }>;
 type BrowserAccessRecipe = Extract<CourseAccessRecipeData, { engine: "BROWSER_DOM" | "BROWSER_JSON" }>;
@@ -97,9 +100,10 @@ export function recipeExecutionDiagnostic(error: unknown, context: { stepIndex?:
   return diagnostic;
 }
 function requestFailureFields(diagnostic: AccessExecutionDiagnostic): NonNullable<AccessExecutionDiagnostic["earlierRequestFailure"]> {
-  const { code, url, method, resourceType, requestUrlFingerprint } = diagnostic;
+  const { code, url, method, resourceType, requestUrlFingerprint, publicHeaderDiagnostic } = diagnostic;
   return { code, ...(url === undefined ? {} : { url }), ...(method === undefined ? {} : { method }),
-    ...(resourceType === undefined ? {} : { resourceType }), ...(requestUrlFingerprint === undefined ? {} : { requestUrlFingerprint }) };
+    ...(resourceType === undefined ? {} : { resourceType }), ...(requestUrlFingerprint === undefined ? {} : { requestUrlFingerprint }),
+    ...(publicHeaderDiagnostic === undefined ? {} : { publicHeaderDiagnostic }) };
 }
 function matchesAvailabilityRequest(recipe: BrowserAccessRecipe, input: AccessExecutionInput,
   request: { url: string; method: string; body?: string | null }) {
@@ -147,7 +151,7 @@ function jsonField(root: unknown, field: RecipeField | undefined): unknown {
   }
   return readRecipeFieldFormat(field, value);
 }
-function extractJson(recipe: Extract<CourseAccessRecipeData, { engine: "HTTP_JSON" }>, body: unknown): Extracted {
+function extractJson(recipe: Extract<CourseAccessRecipeData, { engine: "HTTP_JSON"; requestBinding?: undefined }>, body: unknown): Extracted {
   const p = recipe.proof;
   const collection = "path" in recipe.slots.collection ? jsonField(body, recipe.slots.collection) : undefined;
   if (!Array.isArray(collection) || collection.length > 500) throw new Error("INCOMPLETE_COLLECTION");
@@ -238,7 +242,8 @@ function normalize(recipe: ExtractedAccessRecipe, input: AccessExecutionInput, d
   // bay; public capacity, when known, remains descriptive metadata only.
   if (!simulator && data.players !== undefined && boundedNumber(data.players, 100) !== input.players) return result("INCOMPLETE", "PLAYER_FILTER_MISMATCH");
   if (recipe.target.kind === "SIMULATOR") {
-    if (recipe.engine === "BROWSER_JSON" && data.duration === undefined) return result("INCOMPLETE", "DURATION_PROOF_MISMATCH");
+    if ((recipe.engine === "BROWSER_JSON" || recipe.engine === "HTTP_JSON" && recipe.requestBinding === "SEVENROOMS_PUBLIC_PARTICIPANTS") && data.duration === undefined)
+      return result("INCOMPLETE", "DURATION_PROOF_MISMATCH");
     if (!input.durationMinutes || boundedNumber(data.duration, 480) !== input.durationMinutes) return result("INCOMPLETE", "DURATION_PROOF_MISMATCH");
     evidence.durationVerified = true;
   }
@@ -263,7 +268,8 @@ function normalize(recipe: ExtractedAccessRecipe, input: AccessExecutionInput, d
     const capacity = /^\d+$/u.test(capacityText) && Number(capacityText) >= 1 && Number(capacityText) <= 100 ? Number(capacityText) : null;
     if (minimumPlayers > availableSpots || playerOptions && row.minimumPlayers !== undefined && minimumPlayers !== playerOptions.minPlayers)
       return result("INCOMPLETE", "INVALID_CAPACITY_RANGE");
-    const endField = recipe.engine === "BROWSER_JSON" ? simulator ? { derive: "ADD_REQUESTED_DURATION" } : undefined : recipe.slots.endsAt;
+    const endField = recipe.engine === "BROWSER_JSON" || recipe.engine === "HTTP_JSON" && recipe.requestBinding === "SEVENROOMS_PUBLIC_PARTICIPANTS"
+      ? simulator ? { derive: "ADD_REQUESTED_DURATION" } : undefined : recipe.slots.endsAt;
     const end = endField && "derive" in endField
       ? new Date(start.getTime() + input.durationMinutes! * 60_000)
       : row.endsAt === undefined ? undefined : recipeTimeToInstant(row.endsAt, input);
@@ -448,6 +454,24 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
   let nativeProxy: NativePublicProxy | undefined;
   try {
     if (recipe.engine === "HTTP_JSON") {
+      if (recipe.requestBinding === "SEVENROOMS_PUBLIC_PARTICIPANTS") {
+        const url = sevenRoomsPublicRangeUrl(recipe.source.bookingUrl, input, isSafeRecipeUrl);
+        if (expandRecipeTemplate(recipe.request.url, input, true) !== url) throw new Error("SEVENROOMS_INPUT_UNVERIFIED");
+        const readJson = async (value: string) => {
+          activity = { url: value, method: "GET", resourceType: "fetch" };
+          const { response, buffer } = await read(value, "GET", undefined, new Headers({ accept: "application/json" }), "fetch");
+          if (response.status !== 200 || !/^application\/(?:[a-z0-9.+-]*\+)?json(?:;|$)/iu.test(response.headers.get("content-type") ?? ""))
+            throw new Error("SEVENROOMS_PUBLIC_JSON_REQUIRED");
+          return { body: JSON.parse(Buffer.from(buffer).toString("utf8")), status: response.status };
+        };
+        const metadata = await readJson(recipe.metadataRequest.url);
+        const identity = verifySevenRoomsPublicIdentity(metadata.body, recipe.source,
+          { url: recipe.metadataRequest.url, method: "GET", status: metadata.status }, venueProofMatches);
+        const availability = await readJson(url);
+        if (jsonField(availability.body, { path: "status" }) !== 200) throw new Error("SEVENROOMS_AVAILABILITY_UNVERIFIED");
+        const extracted = extractBrowserJsonRows(availability.body, recipe.responseRows, input);
+        return normalize(recipe, input, { ...extracted, venue: identity.venueName }, clock());
+      }
       const url = expandRecipeTemplate(recipe.request.url, input, true);
       activity = { url, method: recipe.request.method };
       const body = recipe.request.body ? JSON.stringify(Object.fromEntries(Object.entries(recipe.request.body).map(([key, value]) => {
@@ -659,6 +683,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
           responseGeneration = undefined; lastSuccessfulAvailabilityRequest = undefined;
         }
       }
+      let publicHeaderDiagnostic: AccessExecutionDiagnostic["publicHeaderDiagnostic"] | undefined;
       try {
         if (++requests > 128 || signal.aborted) throw new Error("REQUEST_LIMIT");
         if (request.frame().page() !== page) throw new Error("UNSUPPORTED_BROWSER_PAGE");
@@ -677,7 +702,8 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
         if (nativeProxy) {
           const publicHeaderProof = request.method() === "OPTIONS" || Object.keys(requestHeaders).some(key => /^(?:authorization|x-api-key)$/iu.test(key))
             ? await authorizePublicClientReadHeaders(request) : null;
-          const preflight = request.method() === "OPTIONS" ? nativeReadPreflightMethod(requestHeaders) ||
+          const ordinaryPreflightMethod = request.method() === "OPTIONS" ? nativeReadPreflightMethod(requestHeaders) : null;
+          const preflight = request.method() === "OPTIONS" ? ordinaryPreflightMethod ||
             publicHeaderProof && nativePublicClientPreflightMethod(request, publicHeaderProof) : null;
           if (isRexNamespace(new URL(requestUrl)) && request.method() === "POST" &&
               !isRexPublicBrowserReadPost(new URL(requestUrl), request.method(), requestHeaders, request.postData() ?? "", frameUrl)) throw new Error("UNSCOPED_REQUEST");
@@ -685,10 +711,19 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
           if (!recipeAllowsRequest(recipe, requestUrl, preflight ?? request.method(), preflight ? "fetch" : request.resourceType()) ||
             !rexPlaceholder && !publicHeaderProof && Object.keys(requestHeaders).some(key => /^(?:authorization|proxy-authorization|x-api-key)$/iu.test(key)) ||
             request.method() === "POST" && !(allowsPost(new URL(requestUrl), headers, request.postData() ?? "") ||
-              publicHeaderProof && isMemberSportsPublicTeeSheetPost(new URL(requestUrl), headers, request.postData() ?? "", frameUrl))) throw new Error("UNSCOPED_REQUEST");
+              publicHeaderProof && isMemberSportsPublicTeeSheetPost(new URL(requestUrl), headers, request.postData() ?? "", frameUrl))) {
+            if (request.method() === "OPTIONS" && !preflight || !publicHeaderProof && Object.keys(requestHeaders).some(key => /^(?:authorization|proxy-authorization|x-api-key)$/iu.test(key)))
+              publicHeaderDiagnostic = publicHeaderFailureDiagnostic("HEADER_PROOF_MISSING", request.method(), requestHeaders, ordinaryPreflightMethod,
+                publicHeaderProof ? publicClientReadHeaderProofFailure(publicHeaderProof) : null);
+            throw new Error("UNSCOPED_REQUEST");
+          }
           const responseLimit = publicBrowserResponseLimit(request.resourceType());
           const native = await requestQueue.run(requestFamilyForUrl(requestUrl), () => {
-            if (publicHeaderProof && !isCurrentPublicClientReadHeaders(publicHeaderProof)) throw new Error("UNSCOPED_REQUEST");
+            if (publicHeaderProof && !isCurrentPublicClientReadHeaders(publicHeaderProof)) {
+              publicHeaderDiagnostic = publicHeaderFailureDiagnostic("HEADER_PROOF_REVOKED_AFTER_QUEUE", request.method(), requestHeaders, ordinaryPreflightMethod,
+                publicClientReadHeaderProofFailure(publicHeaderProof));
+              throw new Error("UNSCOPED_REQUEST");
+            }
             const hostname = new URL(requestUrl).hostname;
             nativeProxy!.allowHostConnections(hostname);
             return continueNativeBrowserRead(route, signal, responseLimit, () => nativeProxy!.cancelHostConnections(hostname), transportUrl);
@@ -723,7 +758,8 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
           { main: mainDocument, sequence: capturedDocumentSequence, dataSequence: capturedDataSequence, contentType: response.headers.get("content-type") ?? "", sourceMainFrame: request.frame() === page.mainFrame() });
       } catch (error) {
         blocked = true;
-        const diagnostic = recipeExecutionDiagnostic(error, { url: requestUrl, method: request.method(), resourceType: request.resourceType() });
+        const diagnostic = { ...recipeExecutionDiagnostic(error, { url: requestUrl, method: request.method(), resourceType: request.resourceType() }),
+          ...(publicHeaderDiagnostic === undefined ? {} : { publicHeaderDiagnostic }) };
         failure ??= diagnostic; observeOwnedFailure(diagnostic, diagnosticOwner);
         await route.abort().catch(() => {});
       } finally {
@@ -1022,6 +1058,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
     terminalFailure = !providerThrottled && (activity.stepIndex !== undefined || !failure) ? terminalDiagnostic : undefined;
     const message = error instanceof Error ? error.message : "";
     const reason = providerThrottled ? "PROVIDER_THROTTLED" : /^[A-Z_0-9]{1,80}$/u.test(message) ? message : terminalDiagnostic.code;
+    if (reason.startsWith("SEVENROOMS_")) return fail("INCOMPLETE", reason);
     return fail(reason === "ACCESS_REQUIRED" ? "ACCESS_REQUIRED" : reason.startsWith("BROWSER_JSON_") || reason.startsWith("MEMBERSPORTS_") || reason.startsWith("PUBLIC_PARTY_RANGE_") || ["OFFICIAL_BOOKING_IDENTITY_UNVERIFIED", "INVALID_SLOT_TIME", "AMBIGUOUS_OR_INVALID_LOCAL_TIME", "INCOMPLETE_COLLECTION", "INVALID_CAPACITY_OR_DURATION", "UNSETTLED_REQUESTS", "AMBIGUOUS_PROOF_FIELD", "RESOURCE_IDENTITY_MISMATCH", "AMBIGUOUS_RESOURCE_SCOPE", "INVALID_RESOURCE_SCOPE", "RESOURCE_SCOPE_NOT_CARD", "AVAILABILITY_RESPONSE_UNCONFIRMED", "AVAILABILITY_RESPONSE_FAILED", "UNVERIFIED_CLIENT_DURATION", "DURATION_PROOF_MISMATCH", "UNVERIFIED_PUBLIC_CATALOG_TILE", "PUBLIC_CATALOG_SELECTION_UNCONFIRMED"].includes(reason) ? "INCOMPLETE" : "FAILED",
       reason);
   } finally { cancellation.abort("EXECUTION_FINISHED"); requestQueue.dispose(); await browser?.close().catch(() => {}); await nativeProxy?.close(); }

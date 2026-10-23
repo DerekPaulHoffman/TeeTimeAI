@@ -8,6 +8,9 @@ import { hasCpsSessionState } from "./cps-public-navigation";
 import { expandRecipeTemplate, recipeLocalDateSchema as localDate, recipeTemplateSchema } from "./recipe-template";
 import { isSafePublicBootstrapReadUrl } from "./public-bootstrap-read-url";
 import { isSafePublicAvailabilityReadUrl } from "./public-availability-read-url";
+import { isPublicRentalLabel } from "./public-rental-label";
+import { sevenRoomsPublicRequests, sevenRoomsPublicRows } from "./sevenrooms-public-direct";
+import { publicHeaderFailureDiagnosticSchema } from "./public-header-diagnostic";
 export { expandRecipeTemplate, recipeTemplateSchema } from "./recipe-template";
 
 const secret = /(?:password|secret|token|cookie|session|credential|authorization|api.?key|email|phone)/iu;
@@ -101,10 +104,7 @@ export type RecipeDateParts = z.infer<typeof recipeDatePartsSchema>;
 export const recipeResourceScopeSchema = z.object({
   selector: recipeSelectorSchema.refine(value => !/^(?:html|body|main|:root)(?:$|[\s>+.#[:])/iu.test(value.trim()), "Use resource cards, not the page root"),
   label: recipeFieldSchema,
-  expectedLabel: z.string().trim().min(2).max(200).refine(value =>
-    /(?:^|\W)(?:simulators?|rentals?|bays?|rooms?)(?:\W|\d|$)/iu.test(value) &&
-    !/\b(?:members?[-\s]+only|lessons?|fittings?|leagues?|classes?|coaching)\b/iu.test(value) &&
-    (!/\b(?:multi[-\s]?sport|baseball|soccer|hockey|tennis)\b/iu.test(value) || /\bgolf\b/iu.test(value)), "Use a public golf rental resource"),
+  expectedLabel: z.string().trim().min(2).max(200).refine(isPublicRentalLabel, "Use a public golf rental resource"),
 }).strict().describe("SIMULATOR DOM only: reusable selector matching resource cards, a visible label reader relative to each card, and its exact observed public rental label. The executor chooses the unique matching card and reads slots and proof.empty only inside it; card order is not identity. Venue/date/duration/complete proof stays global.");
 const routeOrigin = safeUrl.refine(value => new URL(value).origin === value, "Use an exact origin");
 const routeQueryKeys = z.array(z.string().min(1).max(80).regex(/^[a-zA-Z0-9_\[\].-]+$/u).refine(value => !secret.test(value))).max(30).default([]);
@@ -205,18 +205,31 @@ const common = {
   }).strict(),
 };
 const browserJsonPath = jsonPath.refine(value => !/contact|card|customer|user|person|attendee|member|profile|account|notes?|payment/iu.test(value), "Private response paths are not inventory readers");
-const browserJsonRowsSchema = z.object({
+const browserJsonRows = {
   path: browserJsonPath, dateKey: z.literal("REQUESTED_DATE"), rowsPath: browserJsonPath,
   typePath: browserJsonPath, excludeType: z.literal("request"),
   availableTypes: z.array(z.string().regex(/^[A-Za-z][A-Za-z_-]{0,31}$/u)).min(1).max(8)
     .refine(values => !values.includes("request") && new Set(values).size === values.length), accessIdPath: browserJsonPath,
-  labelPath: browserJsonPath, expectedRentalLabel: recipeResourceScopeSchema.shape.expectedLabel,
+  labelPath: browserJsonPath,
   startsAtPath: browserJsonPath, durationMinutesPath: browserJsonPath,
-}).strict().describe("Original completed JSON only: requested own date key -> group array -> one child-array path, at most 500 groups plus rows. Every non-request row needs a nonempty public access identity, exact observed public rental label, actual time and duration. Request rows never become instant availability; malformed rows never disappear. No literal IDs, scripts, recursive wildcards or sampled-schema completion.");
+};
+const browserJsonRowsSchema = z.union([
+  z.object({ ...browserJsonRows, expectedRentalLabel: recipeResourceScopeSchema.shape.expectedLabel }).strict(),
+  z.object({ ...browserJsonRows, expectedRentalLabels: z.array(recipeResourceScopeSchema.shape.expectedLabel).min(1).max(8)
+    .refine(values => new Set(values).size === values.length, "Use distinct observed rental labels") }).strict(),
+]).describe("Original completed JSON only: requested own date key -> group array -> one child-array path, at most 500 groups plus rows. Every non-request row needs a nonempty public access identity, one exact observed public rental label from the saved finite set, actual time and duration. Request rows never become instant availability; malformed or unknown rows never disappear. Use exactly one legacy expectedRentalLabel or expectedRentalLabels with 1 to 8 distinct observed labels. No literal IDs, scripts, recursive wildcards or sampled-schema completion.");
 export const accessRecipeSchema = z.discriminatedUnion("engine", [
-  z.object({ ...common, engine: z.literal("HTTP_JSON"), request: z.object({ url: urlTemplate,
+  z.discriminatedUnion("requestBinding", [z.object({ ...common, engine: z.literal("HTTP_JSON"), requestBinding: z.undefined().optional(), request: z.object({ url: urlTemplate,
     method: z.enum(["GET", "POST"]), body: z.record(z.string().max(80).refine(value => !secret.test(value)),
       z.union([recipeTemplateSchema, z.number().finite(), z.boolean()])).optional() }).strict() }).strict(),
+  z.object({ schemaVersion: common.schemaVersion, target: common.target, source: common.source, permittedRoutes: common.permittedRoutes,
+    engine: z.literal("HTTP_JSON"), requestBinding: z.literal("SEVENROOMS_PUBLIC_PARTICIPANTS"),
+    request: z.object({ url: availabilityUrlTemplate, method: z.literal("GET") }).strict(),
+    metadataRequest: z.object({ url: z.string().max(2048).refine(value => isSafeBrowserBootstrapReadUrl(value, "fetch", "GET")) }).strict(),
+    responseRows: browserJsonRowsSchema,
+    proof: z.object({ venue: z.object({ publicVenueMetadata: z.literal(true) }).strict(), date: z.object({ availabilityDateKey: z.literal(true) }).strict(),
+      complete: z.object({ availabilityResponse: z.literal(true) }).strict() }).strict(),
+  }).strict()]),
   z.object({ ...common, proof: common.proof.extend({ venue: venueProofFieldSchema }), engine: z.literal("BROWSER_DOM"), browserTransport: z.enum(["PINNED_HTTP", "NATIVE_CHROME"]).default("PINNED_HTTP"), pageUrl: urlTemplate,
     availabilityResponse: availabilityResponseSchema, steps: z.array(stepSchema).max(32) }).strict(),
   z.discriminatedUnion("requestBinding", [z.object({ schemaVersion: common.schemaVersion, target: common.target, source: common.source, permittedRoutes: common.permittedRoutes,
@@ -237,6 +250,21 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
 ]).superRefine((recipe, ctx) => {
   if (recipe.engine === "HTTP_JSON" && recipe.permittedRoutes.some(route => "resourceTypes" in route))
     ctx.addIssue({ code: "custom", message: "Public asset routes require a browser recipe" });
+  if (recipe.engine === "HTTP_JSON" && recipe.requestBinding === "SEVENROOMS_PUBLIC_PARTICIPANTS") {
+    try {
+      const protocol = sevenRoomsPublicRequests(recipe.source.bookingUrl);
+      const labels = "expectedRentalLabels" in recipe.responseRows ? recipe.responseRows.expectedRentalLabels : [recipe.responseRows.expectedRentalLabel];
+      const expectedRows = sevenRoomsPublicRows(labels);
+      const comparable = (value: unknown) => JSON.stringify(value);
+      const rowPlan = { ...recipe.responseRows, expectedRentalLabels: labels };
+      Reflect.deleteProperty(rowPlan, "expectedRentalLabel");
+      if (recipe.target.kind !== "SIMULATOR" || !recipe.target.offeringId || recipe.source.providerFamily !== "SEVENROOMS" || !recipe.source.venueAddress ||
+          recipe.request.url !== protocol.rangeTemplate || recipe.metadataRequest.url !== protocol.metadataUrl ||
+          comparable(recipe.permittedRoutes) !== comparable(protocol.permittedRoutes) || canonical(rowPlan) !== canonical(expectedRows))
+        ctx.addIssue({ code: "custom", message: "Direct public rentals require the exact SevenRooms metadata/range protocol, canonical identity and observed rental rows" });
+    } catch { ctx.addIssue({ code: "custom", message: "Invalid direct public rental protocol" }); }
+    return;
+  }
   if (recipe.engine === "EXISTING_ADAPTER") {
     const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "GOLFVX", "REX"].includes(recipe.adapter.family) ||
       recipe.adapter.family === "TEEITUP" && recipe.adapter.offeringKind === "SIMULATOR";
@@ -360,8 +388,21 @@ function canonical(value: unknown): string {
 export function hashAccessRecipe(recipe: CourseAccessRecipeData) { return createHash("sha256").update(canonical(parseAccessRecipe(recipe))).digest("hex"); }
 export function recipeAllowsRequest(recipe: CourseAccessRecipeData, value: string, method: string, resourceType?: string) {
   if (recipe.engine === "EXISTING_ADAPTER") return false; // Fixed adapter transport owns its exact routes.
+  if (recipe.engine === "HTTP_JSON" && recipe.requestBinding === "SEVENROOMS_PUBLIC_PARTICIPANTS") {
+    if (method !== "GET" || resourceType !== "fetch") return false;
+    try {
+      const protocol = sevenRoomsPublicRequests(recipe.source.bookingUrl);
+      if (value !== protocol.metadataUrl) {
+        if (!isSafeBrowserAvailabilityReadUrl(value, "fetch", "GET")) return false;
+        const query = new URL(value).searchParams;
+        const planned = protocol.rangeTemplate.replace("{{players}}", query.get("party_size") ?? "")
+          .replace("{{dateMdy}}", query.get("start_date") ?? "").replace("{{durationMinutes}}", query.get("picked_duration") ?? "");
+        if (value !== planned) return false;
+      }
+    } catch { return false; }
+  }
   if (!isSafeRecipeUrl(value) && !isSafeBrowserAssetUrl(value, resourceType ?? "", method) &&
-    !((recipe.engine === "BROWSER_DOM" || recipe.engine === "BROWSER_JSON") && (isSafeBrowserBootstrapReadUrl(value, resourceType ?? "", method) ||
+    !((recipe.engine === "BROWSER_DOM" || recipe.engine === "BROWSER_JSON" || recipe.engine === "HTTP_JSON" && recipe.requestBinding === "SEVENROOMS_PUBLIC_PARTICIPANTS") && (isSafeBrowserBootstrapReadUrl(value, resourceType ?? "", method) ||
       isSafeBrowserAvailabilityReadUrl(value, resourceType ?? "", method)))) return false;
   const url = new URL(value);
   return recipe.permittedRoutes.some(route => route.origin === url.origin && route.methods.some(allowed => allowed === method) &&
@@ -381,6 +422,7 @@ const accessRequestFailureDiagnosticSchema = z.object({
   method: z.enum(["GET", "HEAD", "POST", "OPTIONS"]).optional(),
   resourceType: z.enum(["document", "stylesheet", "image", "media", "font", "script", "xhr", "fetch", "other"]).optional(),
   requestUrlFingerprint: requestUrlFingerprintSchema.optional().describe("Opaque hashes of the parsed HTTPS origin and exact pathname when a GET script or stylesheet failure has no safe diagnostic URL. No query, fragment, or request authority."),
+  publicHeaderDiagnostic: publicHeaderFailureDiagnosticSchema.optional().describe("Closed facts captured at an unchanged native public-read header denial. These facts never authorize requests or prove the cause of a later timeout."),
 }).strict();
 export const accessExecutionDiagnosticSchema = accessRequestFailureDiagnosticSchema.extend({
   stepIndex: z.number().int().min(0).max(31).optional(),

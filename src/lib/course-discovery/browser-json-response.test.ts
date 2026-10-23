@@ -4,7 +4,7 @@ import { chromium } from "@playwright/test";
 import { describe, expect, it } from "vitest";
 import { parseAccessRecipe, type AccessExecutionInput } from "./recipe";
 import { executeAccessRecipe } from "./executor";
-import { browserJsonAncillaryCalendarRequestMatches, browserJsonParticipantRequestMatches, extractBrowserJsonRows } from "./browser-json-response";
+import { browserJsonAncillaryCalendarRequestMatches, browserJsonParticipantRequestMatches, extractBrowserJsonRows, type BrowserJsonResponseRows } from "./browser-json-response";
 import { isSafeRecipeUrl } from "./recipe";
 
 const input: AccessExecutionInput = { date: "2030-10-23", timeZone: "America/New_York", players: 2, durationMinutes: 60, startTime: "10:00", endTime: "20:00" };
@@ -72,6 +72,34 @@ describe("finite observed calendar-prefetch classification, no read admission", 
 });
 
 describe("bounded browser JSON response contract", () => {
+  it("retains all rows across a finite exact rental label set without filtering a second rental product", () => {
+    const { expectedRentalLabel: _single, ...common } = plan; void _single;
+    const labels = { ...common, expectedRentalLabels: ["Happy Hour Rental", "Peak Rental"] };
+    const response = body([row({ public_time_slot_description: "Happy Hour Rental" }), row({ type: "request" })]);
+    response.data.availability["2030-10-23"].push({ times: [row({ public_time_slot_description: "Peak Rental", access_persistent_id: "public-access-2" })] });
+    const actual = extractBrowserJsonRows(response, labels, input);
+    expect(actual.rows).toHaveLength(2); expect(actual.duration).toBe(60);
+    expect(JSON.stringify(actual)).not.toContain("public-access-");
+    expect(() => extractBrowserJsonRows(response, { ...common, expectedRentalLabels: ["Peak Rental"] }, input)).toThrow("MALFORMED_ROW");
+    expect(() => extractBrowserJsonRows(response, { ...plan, expectedRentalLabel: "Peak Rental" }, input)).toThrow("MALFORMED_ROW");
+  });
+  it.each([
+    {}, { expectedRentalLabels: [] }, { expectedRentalLabels: ["Peak Rental", "Peak Rental"] },
+    { expectedRentalLabels: Array.from({ length: 9 }, (_, index) => `Rental ${index}`) },
+    { expectedRentalLabels: ["Peak Rental", "Lesson Rental"] }, { expectedRentalLabels: [" Peak Rental"] },
+    { expectedRentalLabels: ["Peak"] }, { expectedRentalLabels: ["Peak Rental", 1] },
+    { expectedRentalLabel: "Golf Rental", expectedRentalLabels: ["Peak Rental"] },
+  ])("rejects invalid finite rental label plans before interpreting any response %j", labels => {
+    const { expectedRentalLabel: _single, ...common } = plan; void _single;
+    expect(() => extractBrowserJsonRows(body(), { ...common, ...labels } as BrowserJsonResponseRows, input)).toThrow("INVALID_RENTAL_LABELS");
+  });
+  it("keeps unknown and malformed original rows fatal even with a finite rental label set", () => {
+    const { expectedRentalLabel: _single, ...common } = plan; void _single;
+    const labels = { ...common, expectedRentalLabels: ["Happy Hour Rental", "Peak Rental"] };
+    for (const extra of [{ public_time_slot_description: "Other Rental" }, { duration: 120 }, { type: "unknown" }, { access_persistent_id: "" }])
+      expect(() => extractBrowserJsonRows(body([row({ public_time_slot_description: "Peak Rental" }), row(extra)]), labels, input)).toThrow();
+    expect(extractBrowserJsonRows(body([{ type: "request" }]), labels, input).duration).toBeUndefined();
+  });
   it("parses the explicit response mode with no fake DOM slots", () => { expect(parseAccessRecipe(recipe()).engine).toBe("BROWSER_JSON"); });
   it.each(["missing-success", "private-success", "server-document", "outdoor", "foreign-role", "foreign-page", "different-entry", "private-path", "request-as-available", "players-in-page", "fake-slots"])("keeps the new schema closed: %s", mode => {
     const value = recipe();

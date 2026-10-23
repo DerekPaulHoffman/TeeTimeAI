@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import { isSafePublicAvailabilityReadUrl } from "./public-availability-read-url";
+import { isPublicRentalLabel } from "./public-rental-label";
 
 export type BrowserJsonResponseRows = {
   path: string; dateKey: "REQUESTED_DATE"; rowsPath: string;
   typePath: string; excludeType: "request"; availableTypes: string[]; accessIdPath: string;
-  labelPath: string; expectedRentalLabel: string; startsAtPath: string; durationMinutesPath: string;
-};
+  labelPath: string; startsAtPath: string; durationMinutesPath: string;
+} & ({ expectedRentalLabel: string; expectedRentalLabels?: never } | { expectedRentalLabel?: never; expectedRentalLabels: string[] });
 type Input = { date: string; players: number; durationMinutes?: number; startTime: string; endTime: string };
 const object = (value: unknown): value is Record<string, unknown> => Boolean(value && typeof value === "object" && !Array.isArray(value));
 function field(value: unknown, path: string): unknown {
@@ -87,6 +88,11 @@ export function browserJsonAncillaryCalendarRequestMatches(request: { url: strin
 /** Full original response interpretation, never the model's sampled schema.
  * Only the requested own date key and one group/child-array level are read. */
 export function extractBrowserJsonRows(body: unknown, plan: BrowserJsonResponseRows, input: Input) {
+  const single = Object.hasOwn(plan, "expectedRentalLabel"), multiple = Object.hasOwn(plan, "expectedRentalLabels");
+  const labels: unknown = single && !multiple ? [plan.expectedRentalLabel] : multiple && !single ? plan.expectedRentalLabels : undefined;
+  if (!Array.isArray(labels) || labels.length < 1 || labels.length > 8 ||
+      labels.some(label => typeof label !== "string" || label.trim() !== label || label.length < 2 || label.length > 200 || !isPublicRentalLabel(label)) ||
+      new Set(labels).size !== labels.length) throw new Error("BROWSER_JSON_INVALID_RENTAL_LABELS");
   const dates = field(body, plan.path);
   if (!object(dates) || !Object.prototype.hasOwnProperty.call(dates, input.date)) throw new Error("BROWSER_JSON_DATE_MISSING");
   const groups = dates[input.date];
@@ -108,7 +114,7 @@ export function extractBrowserJsonRows(body: unknown, plan: BrowserJsonResponseR
       const identity = field(child, plan.accessIdPath), label = field(child, plan.labelPath);
       const startsAt = field(child, plan.startsAtPath), duration = field(child, plan.durationMinutesPath);
       if (typeof identity !== "string" || !identity || identity.length > 256 || identity.trim() !== identity || /\p{Cc}/u.test(identity) ||
-          typeof label !== "string" || label !== plan.expectedRentalLabel ||
+          typeof label !== "string" || !labels.includes(label) ||
           typeof startsAt !== "string" || !startsAt || startsAt.length > 100 ||
           !Number.isInteger(duration) || Number(duration) < 15 || Number(duration) > 480 || duration !== input.durationMinutes)
         throw new Error("BROWSER_JSON_MALFORMED_ROW");

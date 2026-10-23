@@ -1,9 +1,13 @@
 import { createInterface } from "node:readline";
 import { z } from "zod";
 import { createCourseDiscoveryBrowserSession } from "../../src/lib/course-discovery/browser-session";
-import { executeAccessRecipe } from "../../src/lib/course-discovery/executor";
-import { accessExecutionInputSchema, accessRecipeSchema, parseAccessRecipe, SERVER_DOCUMENT_SELECTOR_MESSAGE } from "../../src/lib/course-discovery/recipe";
+import { executeAccessRecipe, venueProofMatches } from "../../src/lib/course-discovery/executor";
+import { accessExecutionInputSchema, accessRecipeSchema, isSafeRecipeUrl, isSafeBrowserAvailabilityReadUrl, isSafeBrowserBootstrapReadUrl,
+  parseAccessRecipe, SERVER_DOCUMENT_SELECTOR_MESSAGE } from "../../src/lib/course-discovery/recipe";
 import { remoteProviderLease } from "../../src/lib/course-discovery/remote-provider-lease";
+import { createAddressPinnedPublicFetchTransport } from "../../src/lib/automation/address-pinned-public-fetch";
+import { requestFamilyForUrl } from "../../src/lib/course-discovery/request-family";
+import { inspectSevenRoomsPublicProtocol, sevenRoomsPublicRangeUrl, sevenRoomsPublicRequests } from "../../src/lib/course-discovery/sevenrooms-public-direct";
 import { safeBrowserActionIssues } from "./course-discovery-diagnostics.mjs";
 
 function publicFailureCode(error: unknown) {
@@ -24,7 +28,7 @@ async function main() {
       source += chunk;
       if (Buffer.byteLength(source, "utf8") > 131_072) throw new Error("REQUEST_TOO_LARGE");
     }
-    const knownPaths = new Set("schemaVersion target courseId offeringId kind source officialUrl bookingUrl venueName venueAddress providerFamily timeZone engine browserTransport pageUrl availabilityResponse serverDocument endDatePath success equals permittedRoutes origin path methods queryKeys steps action selector monthYearSelector nextSelector previousSelector daySelector productSelector text purpose value proof venue date monthYear day complete empty players durationMinutes slots scope label expectedLabel collection startsAt endsAt derive availableSpots minimumPlayers capacity holes resourceId productId request url method body adapter family facilityId facilityIds alias scheduleId bookingClassId ownerKey businessId rentalProductIds tenant serviceId serviceName clubSlug facilitySlug clubId courseBuckets courseIds name companyId services locationIds durations minutes variationId id".split(" "));
+    const knownPaths = new Set("schemaVersion target courseId offeringId kind source officialUrl bookingUrl venueName venueAddress providerFamily timeZone engine browserTransport pageUrl availabilityResponse serverDocument endDatePath success equals permittedRoutes origin path methods queryKeys steps action selector monthYearSelector nextSelector previousSelector daySelector productSelector text purpose value proof venue date monthYear day complete empty players durationMinutes slots scope label expectedLabel collection startsAt endsAt derive availableSpots minimumPlayers capacity holes resourceId productId request url method body adapter family facilityId facilityIds alias scheduleId bookingClassId ownerKey businessId rentalProductIds tenant serviceId serviceName clubSlug facilitySlug clubId courseBuckets courseIds name companyId services locationIds durations minutes variationId id requestBinding metadataRequest responseRows dateKey rowsPath typePath excludeType availableTypes accessIdPath labelPath expectedRentalLabel expectedRentalLabels startsAtPath durationMinutesPath publicVenueMetadata availabilityDateKey".split(" "));
     const safeMessages = new Set([SERVER_DOCUMENT_SELECTOR_MESSAGE, "Expected a bounded public display selector", "Unknown or malformed template parameter", "Field readers must match the engine", "Outdoor recipes require available-player evidence", "Simulator recipes require offering, duration and end-time proof", "Simulator player count is saved context and cannot parameterize availability", "Simulator availability may request only one bay; saved players are context"]);
     try {
       const value = JSON.parse(source) as { recipe: unknown };
@@ -48,6 +52,66 @@ async function main() {
   const deadlineAt = new Date(at >= 0 ? args[at + 1] : "");
   if (!Number.isFinite(deadlineAt.getTime()) || deadlineAt.getTime() <= Date.now()) throw new Error("INVALID_DEADLINE");
   const requestLease = remoteProviderLease();
+  if (args.includes("--inspect-public-protocol")) {
+    const lineInput = createInterface({ input: process.stdin, crlfDelay: Infinity });
+    let id: number | null = null;
+    try {
+      for await (const line of lineInput) {
+        if (Buffer.byteLength(line, "utf8") > 16_384) throw new Error("REQUEST_TOO_LARGE");
+        const candidate = JSON.parse(line) as { id?: unknown };
+        if (Number.isInteger(candidate?.id) && Number(candidate.id) >= 1 && Number(candidate.id) <= 1_000_000) id = Number(candidate.id);
+        const value = z.object({ id: z.number().int().min(1).max(1_000_000), source: z.object({
+          bookingUrl: z.string().max(2048).refine(isSafeRecipeUrl), venueName: z.string().min(2).max(200),
+          venueAddress: z.string().trim().min(3).max(1024), timeZone: z.string().min(1).max(100),
+        }).strict(), input: accessExecutionInputSchema }).strict().parse(candidate);
+        id = value.id;
+        const { source, input } = value;
+        if (source.timeZone !== input.timeZone || /[\u0000-\u001f\u007f]/u.test(source.venueName + source.venueAddress))
+          throw new Error("SEVENROOMS_INPUT_UNVERIFIED");
+        const requests = sevenRoomsPublicRequests(source.bookingUrl);
+        const expected = [requests.metadataUrl, sevenRoomsPublicRangeUrl(source.bookingUrl, input, isSafeRecipeUrl)];
+        const workDeadline = Math.min(deadlineAt.getTime(), Date.now() + 40_000);
+        let readCount = 0, totalBytes = 0;
+        const readJson = async (url: string) => {
+          const position = readCount;
+          if (position >= 2 || url !== expected[position] || Date.now() >= workDeadline ||
+              !(position === 0 ? isSafeBrowserBootstrapReadUrl(url, "fetch", "GET") : isSafeBrowserAvailabilityReadUrl(url, "fetch", "GET")))
+            throw new Error("PUBLIC_PROTOCOL_REQUEST_REJECTED");
+          readCount++;
+          const transport = createAddressPinnedPublicFetchTransport({
+            parseUrl: candidate => { if (candidate !== url) throw new Error("PUBLIC_PROTOCOL_REQUEST_REJECTED"); return new URL(candidate); },
+            maxResponseBytes: 2_000_000, timeoutMs: 15_000, redirectLimit: 0,
+          });
+          const result = await requestLease(requestFamilyForUrl(url), async () => {
+            if (Date.now() >= workDeadline) throw new Error("PUBLIC_PROTOCOL_DEADLINE");
+            const response = await transport(url, { method: "GET", credentials: "omit", redirect: "error",
+              signal: AbortSignal.timeout(Math.max(1, Math.min(15_000, workDeadline - Date.now()))) });
+            const bytes = await response.arrayBuffer();
+            totalBytes += bytes.byteLength;
+            if (bytes.byteLength > 2_000_000 || totalBytes > 4_000_000) throw new Error("PUBLIC_PROTOCOL_RESPONSE_LIMIT");
+            if (response.status === 429) throw new Error("PROVIDER_THROTTLED");
+            if (response.status !== 200) return { status: response.status, body: null };
+            if (!/^application\/(?:[a-z0-9.+-]*\+)?json(?:;|$)/iu.test(response.headers.get("content-type") ?? ""))
+              throw new Error("PUBLIC_PROTOCOL_NOT_JSON");
+            return { status: response.status, body: JSON.parse(Buffer.from(bytes).toString("utf8")) as unknown };
+          });
+          if (!result.acquired) throw new Error("PROVIDER_COORDINATION_UNAVAILABLE");
+          return result.value;
+        };
+        const descriptor = await inspectSevenRoomsPublicProtocol(source, input, readJson, venueProofMatches, isSafeRecipeUrl);
+        if (readCount !== 2 || Date.now() >= workDeadline) throw new Error("PUBLIC_PROTOCOL_INCOMPLETE");
+        const measured = { ...descriptor, observation: { ...descriptor.observation, publicRequests: readCount, publicResponseBytes: totalBytes } };
+        const result = JSON.stringify({ id, ok: true, result: measured });
+        if (Buffer.byteLength(result, "utf8") > 32_768) throw new Error("PUBLIC_PROTOCOL_OUTPUT_LIMIT");
+        process.stdout.write(`${result}\n`);
+        return;
+      }
+      throw new Error("PUBLIC_PROTOCOL_INPUT_REQUIRED");
+    } catch (error) {
+      process.stdout.write(`${JSON.stringify({ id, ok: false, error: publicFailureCode(error) })}\n`);
+    } finally { lineInput.close(); }
+    return;
+  }
   if (args.includes("--execute-recipe")) {
     let source = "";
     for await (const chunk of process.stdin) {
