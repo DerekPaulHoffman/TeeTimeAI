@@ -539,9 +539,11 @@ function getSecurityTokens(value: string) {
  * independent, and no decoded URL or transport bytes are rewritten here. */
 export function isSegmentedPublicTitleCasePathSegment(value: string) {
   if (value.length > 96 || !/^(?:[A-Z][a-z]{3,15}){3,6}$/u.test(value)) return false;
+  // Readable configuration/RPC names still belong to separate data-read
+  // contracts; this exception must not make them navigation or slot sources.
   return !getSecurityTokens(value).some(word =>
     isRestrictedPathSegment(word) || isSensitiveUrlKey(word) ||
-    /^(?:private|secure|security|admin|staff|user|customer|portal|payments?|pay|cart|purchase|orders?|bookings?|reservations?|reserve|hold|cancel|confirm|email|phone|identity|access)$/u.test(word));
+    /^(?:private|secure|security|admin|staff|user|customer|portal|payments?|pay|cart|purchase|orders?|bookings?|reservations?|reserve|hold|cancel|confirm|email|phone|identity|access|settings?|configs?|configurations?|metadata|bootstrap|procedures?)$/u.test(word));
 }
 
 function isOpaqueCredentialValue(value: string) {
