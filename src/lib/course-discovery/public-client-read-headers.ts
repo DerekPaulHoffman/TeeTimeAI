@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { parse, type Node } from "acorn";
-import { isSafeBrowserAssetUrl, isSafeBrowserAvailabilityReadUrl, isSafeRecipeUrl } from "./recipe";
+import { isSafeBrowserAssetUrl, isSafeBrowserAvailabilityReadUrl, isSafeBrowserMemberSportsEventsReadUrl, isSafeRecipeUrl } from "./recipe";
 import { isMemberSportsPublicTeeSheetPost } from "@/lib/automation/membersports-public-read-policy";
 
 /** These facts must come from controller-private token maps, never a model,
@@ -215,7 +215,8 @@ export function createPublicClientReadHeaderScope(document: object, attestors: P
     const headers = headerMap(facts.headers);
     if (!headers) return null;
     const effectiveMethod = method === "preflight" ? headers.get("access-control-request-method") : facts.method;
-    if (!isSafeRecipeUrl(facts.url) && !isSafeBrowserAvailabilityReadUrl(facts.url, String(facts.resourceType), String(effectiveMethod))) return null;
+    if (!isSafeRecipeUrl(facts.url) && !isSafeBrowserAvailabilityReadUrl(facts.url, String(facts.resourceType), String(effectiveMethod)) &&
+        !isSafeBrowserMemberSportsEventsReadUrl(facts.url, String(facts.resourceType), String(effectiveMethod))) return null;
     const noBody = facts.hasBody === false && (facts.body === undefined || facts.body === null);
     if (method === "preflight") return facts.method === "OPTIONS" && noBody ? { facts, headers } : null;
     if (["GET", "HEAD"].includes(String(facts.method))) return noBody ? { facts, headers } : null;

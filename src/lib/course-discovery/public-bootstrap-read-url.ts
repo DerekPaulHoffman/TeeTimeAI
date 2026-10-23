@@ -1,7 +1,23 @@
+/** Exact observed anonymous dated-course event read, separate from inventory.
+ * Only the fixed opaque basename is masked for unchanged strict validation;
+ * the caller retains the original URL and all request/header authority. */
+export function isSafePublicMemberSportsEventsReadUrl(value: string, resourceType: string, method: string,
+  strictUrl: (value: string) => boolean) {
+  if (value.length > 2048 || value.trim() !== value || method !== "GET" || !["xhr", "fetch"].includes(resourceType)) return false;
+  const match = /^https:\/\/api\.membersports\.com\/api\/v1\/Events\/eventsByDateForCourses\/golfClubId\/([1-9][0-9]{0,9})\/searchDate\/([1-9][0-9]{3})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])\?golfCourseIds=([1-9][0-9]{0,9})$/u.exec(value);
+  if (!match || Number(match[1]) > 2_147_483_647 || Number(match[5]) > 2_147_483_647) return false;
+  const year = Number(match[2]), month = Number(match[3]), day = Number(match[4]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return false;
+  try { return strictUrl(value.replace("/eventsByDateForCourses/", "/public-course-events/")) === true; }
+  catch { return false; }
+}
+
 /** Validation-only copies for anonymous browser metadata reads. This function
  * never returns a rewritten transport URL or grants navigation/recipe proof. */
 export function isSafePublicBootstrapReadUrl(value: string, resourceType: string, method: string,
   strictUrl: (value: string) => boolean) {
+  if (isSafePublicMemberSportsEventsReadUrl(value, resourceType, method, strictUrl)) return true;
   if (value.length > 2048 || value.trim() !== value || method !== "GET" || !["xhr", "fetch"].includes(resourceType)) return false;
   try {
     const url = new URL(value), rawPath = /^https:\/\/[^/?#]+([^?#]*)/u.exec(value)?.[1] || "/";

@@ -6,7 +6,7 @@ import { existingAdapterMetadataSchema } from "./existing-adapter-schema";
 import { isServerDocumentSelector } from "./server-document-proof";
 import { hasCpsSessionState } from "./cps-public-navigation";
 import { expandRecipeTemplate, recipeLocalDateSchema as localDate, recipeTemplateSchema } from "./recipe-template";
-import { isSafePublicBootstrapReadUrl } from "./public-bootstrap-read-url";
+import { isSafePublicBootstrapReadUrl, isSafePublicMemberSportsEventsReadUrl } from "./public-bootstrap-read-url";
 import { isSafePublicAvailabilityReadUrl } from "./public-availability-read-url";
 import { isPublicRentalLabel } from "./public-rental-label";
 import { sevenRoomsPublicRequests, sevenRoomsPublicRows } from "./sevenrooms-public-direct";
@@ -28,6 +28,11 @@ export function isSafeRecipeUrl(value: string) {
  * availability-response URLs. Actual transport bytes always remain unchanged. */
 export function isSafeBrowserBootstrapReadUrl(value: string, resourceType: string, method: string) {
   return isSafePublicBootstrapReadUrl(value, resourceType, method, isSafeRecipeUrl);
+}
+/** This exact ancillary event role can use a separately attested public header
+ * proof. Other bootstrap roles gain no header authority from this predicate. */
+export function isSafeBrowserMemberSportsEventsReadUrl(value: string, resourceType: string, method: string) {
+  return isSafePublicMemberSportsEventsReadUrl(value, resourceType, method, isSafeRecipeUrl);
 }
 /** A public inventory read is separate from customer/source navigation. */
 export function isSafeBrowserAvailabilityReadUrl(value: string, resourceType: string, method: string) {

@@ -242,6 +242,22 @@ describe("course access recipes", () => {
     expect(() => parseAccessRecipe({ ...serverDocumentRecipe(), availabilityResponse: { ...serverDocumentRecipe().availabilityResponse, url } })).toThrow();
     expect(url).toBe("https://public.example.org/api-yoa/dining/venue_info?venue_url_key=public-golf-studio&widget_type=embedded&modify_upgrades=false");
   });
+  it("keeps public course events route-scoped and outside navigation, inventory response and HTTP authority", () => {
+    const url = "https://api.membersports.com/api/v1/Events/eventsByDateForCourses/golfClubId/12679/searchDate/2026-10-23?golfCourseIds=15654";
+    const route = { origin: "https://api.membersports.com", path: "/api/v1/Events/eventsByDateForCourses/golfClubId/12679/searchDate/*", methods: ["GET"], queryKeys: ["golfCourseIds"] };
+    const base = serverDocumentRecipe(), recipe = parseAccessRecipe({ ...base, permittedRoutes: [...base.permittedRoutes, route] });
+    expect(recipeAllowsRequest(recipe, url, "GET", "xhr")).toBe(true);
+    expect(recipeAllowsRequest(recipe, url, "GET", "fetch")).toBe(true);
+    expect(recipeAllowsRequest(parseAccessRecipe(base), url, "GET", "fetch")).toBe(false);
+    for (const kind of ["document", "script", "stylesheet", "other", undefined]) expect(recipeAllowsRequest(recipe, url, "GET", kind)).toBe(false);
+    for (const method of ["HEAD", "POST", "OPTIONS"]) expect(recipeAllowsRequest(recipe, url, method, "fetch")).toBe(false);
+    expect(recipeAllowsRequest(recipe, url.replace("/12679/", "/12680/"), "GET", "fetch")).toBe(false);
+    expect(recipeAllowsRequest(recipe, url + "&memberProfileId=1", "GET", "fetch")).toBe(false);
+    expect(recipeAllowsRequest(parseAccessRecipe({ ...httpRecipe(), permittedRoutes: [...httpRecipe().permittedRoutes, route] }), url, "GET", "fetch")).toBe(false);
+    expect(() => parseAccessRecipe({ ...base, source: { ...base.source, bookingUrl: url } })).toThrow();
+    expect(() => parseAccessRecipe({ ...base, pageUrl: url })).toThrow();
+    expect(() => parseAccessRecipe({ ...base, availabilityResponse: { url, method: "GET", date: { source: "PATH", path: "7" } } })).toThrow();
+  });
   it("requires an explicit HEAD route and keeps it separate from GET and availability proof", () => {
     const source = serverDocumentRecipe();
     const url = "https://example.org/public-resource";

@@ -101,6 +101,41 @@ describe("source-bound public tee-sheet POST header proofs", () => {
     });
 });
 
+describe("exact public course events header proofs", () => {
+  const events = "https://api.membersports.com/api/v1/Events/eventsByDateForCourses/golfClubId/21/searchDate/2026-10-23?golfCourseIds=34";
+  function eventFixture() {
+    const f = fixture(); f.documentFacts.url = "https://app.membersports.com/tee-times/21/34/0";
+    f.scriptFacts.url = "https://app.membersports.com/main.js"; f.requestFacts.url = events;
+    f.optionsFacts.url = events; f.optionsFacts.headers = f.optionsFacts.headers.map(([key, value]) =>
+      [key, key === "Origin" ? "https://app.membersports.com" : value]);
+    f.capture(); return f;
+  }
+  it("requires the published value and exact linked GET, retaining current signature checks", () => {
+    const f = eventFixture(), before = JSON.stringify([f.requestFacts, f.optionsFacts]);
+    const read = f.scope.proveRead(f.request), options = f.scope.provePreflight(f.options, f.request);
+    expect(read).not.toBeNull(); expect(options).not.toBeNull();
+    expect(f.scope.isCurrent(read!)).toBe(true); expect(f.scope.isCurrent(options!)).toBe(true);
+    expect(JSON.stringify([f.requestFacts, f.optionsFacts])).toBe(before);
+    f.requestFacts.url = events.replace("golfCourseIds=34", "golfCourseIds=35");
+    expect(f.scope.isCurrent(read!)).toBe(false); expect(f.scope.isCurrent(options!)).toBe(false);
+  });
+  it.each(["body", "auth", "key", "source", "loader", "query", "link", "method", "bootstrap"] as const)(
+    "does not expand existing proof authority: %s", fault => {
+      const f = eventFixture();
+      if (fault === "body") f.requestFacts.hasBody = true;
+      if (fault === "auth") replaceHeader(f, "authorization", "Bearer real-account-token");
+      if (fault === "key") replaceHeader(f, "x-api-key", "not-published");
+      if (fault === "source") f.scriptFacts.live = false;
+      if (fault === "loader") f.requestFacts.loader = {};
+      if (fault === "query") f.requestFacts.url += "&golfCourseIds=34";
+      if (fault === "link") f.optionsFacts.sourceRequest = {};
+      if (fault === "method") f.requestFacts.method = "HEAD";
+      if (fault === "bootstrap") f.requestFacts.url = "https://api.membersports.com/App/AuthenticationSettings";
+      if (fault !== "link") expect(f.scope.proveRead(f.request)).toBeNull();
+      expect(f.scope.provePreflight(f.options, f.request)).toBeNull();
+    });
+});
+
 describe("public client read header value publicity", () => {
   it("keeps only opaque RAM proofs and supports attested GET/HEAD, without claiming API-base or merge causality", () => {
     const f = fixture();
