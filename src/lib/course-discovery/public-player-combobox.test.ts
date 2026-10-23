@@ -75,6 +75,29 @@ describe("public player combobox without invented option values", () => {
     await expect(selectPublicFilter(page.locator("#players"), { value: "2", purpose: "PLAYERS", simulator: false })).rejects.toThrow("UNSAFE_CONTROL");
     expect(await page.locator("#opened").textContent()).toBe("");
   });
+  it.each(['<public-collection id="public-card-list" role="listbox" tabindex="0"><span>Views</span></public-collection>',
+    '<div id="public-card-list" role="listbox" tabindex="0"></div>'])(
+    "ignores only the standalone card ID hint of an unselected collection (%s)", async collection => {
+      await page.setContent(formFixture("", collection));
+      await selectPublicFilter(page.locator("#players"), { value: "2", purpose: "PLAYERS", simulator: false });
+      expect(await page.locator("#picked").textContent()).toBe("2 Players");
+    });
+  it.each([
+    '<select id="card" role="listbox" tabindex="0"><option>View</option></select>',
+    '<button type="button" id="card" role="listbox" tabindex="0">View</button>',
+    '<div id="card-number" role="listbox" tabindex="0"></div>', '<div id="credit-card" role="listbox" tabindex="0"></div>',
+    '<div id="card" role="listbox" tabindex="0" aria-label="Payment"></div>', '<div id="card" role="listbox" tabindex="0" name="card"></div>',
+    '<div id="card" role="listbox" tabindex="0" aria-controls="other"></div>',
+    '<div id="card" role="listbox" tabindex="0" aria-haspopup="listbox"></div>',
+    '<div id="card" role="listbox" tabindex="0" aria-expanded="false"></div>',
+    '<div id="card" role="listbox" tabindex="0" href="/other"></div>',
+    '<div id="card" role="listbox" tabindex="0" onclick="void 0"></div>',
+    '<div id="card" role="listbox" tabindex="1"></div>',
+  ])("does not broaden the unrelated collection exception into native, private or actionable controls (%s)", async extra => {
+    await page.setContent(formFixture("", extra));
+    await expect(selectPublicFilter(page.locator("#players"), { value: "2", purpose: "PLAYERS", simulator: false })).rejects.toThrow("UNSAFE_CONTROL");
+    expect(await page.locator("#opened").textContent()).toBe("");
+  });
   it.each([
     ['method="POST"', ""], ['action="/search"', ""], ['target="_blank"', ""], ['enctype="text/plain"', ""],
     ['onsubmit="window.privateSubmit=true"', ""], ['aria-label="Account filters"', ""],
@@ -159,6 +182,15 @@ describe("public player combobox without invented option values", () => {
     await page.setContent(fixture().replace('2 Players</mat-option>', '3 Players</mat-option>') +
       '<div role="combobox" aria-label="Players" aria-controls="other" aria-expanded="true">4 Players</div><div id="other" role="listbox"><mat-option role="option">2 Players</mat-option></div>');
     await expect(selectPublicFilter(page.locator("#players"), { value: "2", purpose: "PLAYERS", simulator: false })).rejects.toThrow();
+    expect(await page.locator("#picked").textContent()).toBe("");
+  });
+  it.each([
+    fixture() + '<div id="choices" role="listbox" hidden></div>',
+    fixture() + '<div role="combobox" aria-controls="choices" aria-expanded="true">Other players</div>',
+    fixture().replace('menu.hidden=false}', "menu.hidden=false;trigger.replaceWith(trigger.cloneNode(true))}"),
+  ])("does not pick after duplicate popup identity, duplicate ownership or trigger replacement", async html => {
+    await page.setContent(html);
+    await expect(selectPublicFilter(page.locator("#players"), { value: "2", purpose: "PLAYERS", simulator: false })).rejects.toThrow(/UNSAFE_CONTROL/u);
     expect(await page.locator("#picked").textContent()).toBe("");
   });
 });

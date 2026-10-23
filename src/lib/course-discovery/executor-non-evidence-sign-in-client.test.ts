@@ -1,0 +1,51 @@
+// @vitest-environment node
+import { existsSync } from "node:fs";
+import { chromium } from "@playwright/test";
+import { describe, expect, it, vi } from "vitest";
+import { executeAccessRecipe, type AccessExecutorDependencies } from "./executor";
+import { isSafeBrowserAssetUrl, isSafeRecipeUrl, parseAccessRecipe, recipeAllowsRequest } from "./recipe";
+
+vi.mock("@/lib/automation/provider-request-lease", () => ({ runWithProviderRequestLease: vi.fn() }));
+const chrome = "C:/Program Files/Google/Chrome/Application/chrome.exe";
+const client = "https://accounts.google.com/gsi/client", pageUrl = "https://example.org/tee-times";
+const input = { date: "2026-10-23", timeZone: "America/New_York", players: 2, startTime: "08:00", endTime: "18:00" };
+const recipe = () => parseAccessRecipe({ schemaVersion: 1, engine: "BROWSER_DOM", browserTransport: "PINNED_HTTP",
+  target: { kind: "OUTDOOR", courseId: "fixture-course" },
+  source: { officialUrl: pageUrl, bookingUrl: pageUrl, venueName: "Example Golf", providerFamily: "EXAMPLE", timeZone: input.timeZone },
+  pageUrl, permittedRoutes: [{ origin: "https://example.org", path: "/tee-times", methods: ["GET"] },
+    { origin: "https://example.org", path: "/availability", methods: ["GET"], queryKeys: ["date"] }], steps: [{ action: "waitFor", selector: "h1" }],
+  availabilityResponse: { url: "https://example.org/availability?date={{date}}", method: "GET", date: { source: "QUERY", path: "date" } },
+  proof: { venue: { selector: "h1" }, date: { selector: "#date" }, complete: { selector: "#ready" } },
+  slots: { collection: { selector: ".slot" }, startsAt: { selector: ".time" }, availableSpots: { selector: ".players" } },
+});
+
+/** Synthetic caller fixture: real isolated Chrome, in-memory wire and leases.
+ * The optional client is never fetched or executed; no real provider proof. */
+describe.runIf(existsSync(chrome))("optional sign-in client supplies no inventory or access authority", () => {
+  const run = async (challenge: boolean) => {
+    const html = `<!doctype html><html><body><h1>Example Golf</h1><p id="date">2026-10-23</p><p id="ready">Ready</p>` +
+      `<div class="slot"><span class="time">09:00</span><span class="players">4</span></div>` +
+      (challenge ? "<p>You must sign in to view availability</p>" : "") +
+      `<script src="${client}"></script><script>fetch('/availability?date=2026-10-23')</script></body></html>`;
+    const fetch = vi.fn(async url => new Response(String(url) === pageUrl ? html : '{"ok":true}',
+      { headers: { "content-type": String(url) === pageUrl ? "text/html" : "application/json" } })) as typeof globalThis.fetch;
+    const families: string[] = [];
+    const deps: AccessExecutorDependencies = { fetch, now: () => new Date("2026-10-20T12:00:00Z"),
+      launchBrowser: () => chromium.launch({ executablePath: chrome, headless: true }),
+      requestLease: async (family, work) => { families.push(family); return { acquired: true, value: await work() }; } };
+    const selected = recipe(), result = await executeAccessRecipe(selected, input, deps);
+    expect(isSafeRecipeUrl(client)).toBe(false);
+    expect(isSafeBrowserAssetUrl(client, "script", "GET")).toBe(false);
+    expect(recipeAllowsRequest(selected, client, "GET", "script")).toBe(false);
+    expect(vi.mocked(fetch).mock.calls.map(([url]) => String(url))).not.toContain(client);
+    expect(new Set(families)).toEqual(new Set(["example.org"]));
+    return result;
+  };
+  it("certifies complete public inventory while denying the optional account client without its wire or lease", async () => {
+    expect(await run(false)).toMatchObject({ status: "AVAILABLE", complete: true,
+      slots: [{ startsAt: "2026-10-23T13:00:00.000Z", availableSpots: 4 }] });
+  }, 15_000);
+  it("retains the access-required outcome for an actual rendered sign-in gate", async () => {
+    expect(await run(true)).toMatchObject({ status: "ACCESS_REQUIRED", complete: false, slots: [], evidence: { reason: "ACCESS_REQUIRED" } });
+  }, 15_000);
+});

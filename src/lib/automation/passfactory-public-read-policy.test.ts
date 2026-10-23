@@ -83,6 +83,20 @@ it("aborts decorative preloads reported as other without hiding application read
   expect(isNonEvidenceBrowserResource("https://example.org/api/times.png", "fetch")).toBe(false);
 });
 
+it("quietly denies only the exact optional Google sign-in script without an account or availability grant", () => {
+  const client = "https://accounts.google.com/gsi/client";
+  expect(isNonEvidenceBrowserResource(client, "script")).toBe(true);
+  expect(isIncidentalBrowserRequest(client)).toBe(false);
+  for (const type of ["document", "xhr", "fetch", "other", "stylesheet"])
+    expect(isNonEvidenceBrowserResource(client, type)).toBe(false);
+  for (const url of ["https://accounts.google.com/gsi/client?mode=signin", "https://accounts.google.com/gsi/client#signin",
+    "https://accounts.google.com/gsi/other", "https://accounts.google.com/gsi/client/", "https://accounts.google.com/gsi/%63lient",
+    "https://accounts.google.com/login", "https://accounts.google.com/", "https://accounts.google.com.evil.test/gsi/client",
+    "https://other.example/gsi/client", "http://accounts.google.com/gsi/client", "https://u:p@accounts.google.com/gsi/client",
+    "https://accounts.google.com:444/gsi/client"])
+    expect(isNonEvidenceBrowserResource(url, "script")).toBe(false);
+});
+
 it("quietly denies observed analytics without hiding availability or an access wall", () => {
   for (const url of [
     "https://e.clarity.ms/collect", "https://q.clarity.ms/collect",

@@ -50,6 +50,33 @@ describe("public role option ownership", () => {
     await expect(trySelectPublicFilterOption(page.locator("custom-item"), "2 Players", { simulator: false })).rejects.toThrow("UNSAFE_CONTROL");
     expect(await page.locator("#picked").textContent()).toBe("");
   });
+  it.each(['<public-collection id="public-card-list" role="listbox" tabindex="0"></public-collection>',
+    '<div id="public-card-list" role="listbox" tabindex="0"></div>'])(
+    "permits an unrelated nonnative card-list collection without selecting it (%s)", async collection => {
+      await page.setContent(formMenu("", collection));
+      expect(await trySelectPublicFilterOption(page.locator("custom-item"), "2 Players", { simulator: false })).toBe(true);
+      expect(await page.locator("#picked").textContent()).toBe("2 Players");
+    });
+  it("keeps the actual owned listbox subject to the full ID guard", async () => {
+    const parts = menu.replaceAll('="menu"', '="card-list"').replace('id="card-list" role="listbox"', 'id="card-list" role="listbox" tabindex="0"').split('<output');
+    await page.setContent('<form>' + parts[0] + '</form><output' + parts[1]);
+    await expect(trySelectPublicFilterOption(page.locator("custom-item"), "2 Players", { simulator: false })).rejects.toThrow("UNSAFE_CONTROL");
+    expect(await page.locator("#picked").textContent()).toBe("");
+  });
+  it.each([
+    '<select id="card" role="listbox" tabindex="0"><option>View</option></select>',
+    '<div id="card-input" role="listbox" tabindex="0"></div>', '<div id="payment-card" role="listbox" tabindex="0"></div>',
+    '<div id="card" role="listbox" tabindex="0" aria-label="Card"></div>', '<div id="card" role="listbox" tabindex="0" name="card"></div>',
+    '<div id="card" role="listbox" tabindex="0" aria-controls="other"></div>',
+    '<div id="card" role="listbox" tabindex="0" aria-owns="other"></div>',
+    '<div id="card" role="listbox" tabindex="0" aria-selected="false"></div>',
+    '<div id="card" role="listbox" tabindex="0" href="/other"></div>',
+    '<div id="card" role="listbox" tabindex="0" onclick="void 0"></div>',
+  ])("does not let an outside option weaken the unselected collection predicate (%s)", async extra => {
+    await page.setContent(formMenu("", extra));
+    await expect(trySelectPublicFilterOption(page.locator("custom-item"), "2 Players", { simulator: false })).rejects.toThrow("UNSAFE_CONTROL");
+    expect(await page.locator("#picked").textContent()).toBe("");
+  });
   it.each([
     ['method="POST"', ""], ['action="/search"', ""], ['target="_blank"', ""], ['enctype="text/plain"', ""],
     ['aria-label="Login filters"', ""], ["", '<label>Account profile</label>'], ["", '<input type="hidden" value="private-never-read">'],

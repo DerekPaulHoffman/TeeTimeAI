@@ -93,6 +93,9 @@ export function isNonEvidenceBrowserResource(value: string, resourceType: string
   // This grants no read and cannot hide an application availability request.
   if (isIncidentalBrowserRequest(value)) return true;
   if (resourceType === "script") {
+    // This exact optional Google Sign-In client is denied, never executed or
+    // treated as inventory evidence. Rendered access gates remain separate.
+    if (value === "https://accounts.google.com/gsi/client") return true;
     try {
       const url = new URL(value);
       // Never execute this injected detection script or give it loader/source

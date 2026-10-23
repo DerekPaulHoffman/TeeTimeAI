@@ -42,6 +42,11 @@ function playerTriggerProof(element: Element) {
           [null, "presentation", "none"].includes(child.getAttribute("role")) &&
           !child.getAttributeNames().some(name => /^on/iu.test(name) ||
             /^aria-(?:haspopup|controls|owns|expanded|pressed|checked|selected)$/iu.test(name));
+        const unselectedListboxId = child instanceof HTMLElement && child !== node && child !== form &&
+          !child.matches("input,select,textarea,button,option,optgroup,output,label,legend,a,area,summary,details,audio,video") &&
+          child.getAttribute("role") === "listbox" && child.tabIndex === 0 && child.getAttribute("tabindex") === "0" &&
+          !child.hasAttribute("href") && !child.getAttributeNames().some(name => /^on/iu.test(name) ||
+            /^aria-(?:haspopup|controls|owns|expanded|pressed|checked|selected)$/iu.test(name));
         const privateHint = /password|secret|credential|email|phone|contact|customer|account|member|profile|birth|bday|dob|checkout|payment|purchase|confirm|reserve|\b(?:login|logon|sign[ -]?(?:in|up)|auth(?:entication|orization)?|book|pay|submit|continue|credit|debit|card|cc|cvv|cvc|expiry|expiration|ssn)\b/iu;
         // A passive layout ID can name a card view; field/label/context hints
         // still use the full privacy pattern, as do card-number/input IDs.
@@ -49,7 +54,9 @@ function playerTriggerProof(element: Element) {
         const hints = `${child.getAttribute("name") ?? ""} ${child.getAttribute("aria-label") ?? ""} ${child.getAttribute("title") ?? ""} ${child.getAttribute("placeholder") ?? ""} ` +
           references.map(id => document.getElementById(id)?.textContent ?? "").join(" ") +
           (/^(?:LABEL|LEGEND|BUTTON)$/u.test(child.tagName) || child.getAttribute("role") === "button" ? child.textContent ?? "" : "");
-        if (rawId.length + 1 + hints.length > 500 || (layoutId ? privateLayoutId : privateHint).test(normalizedId) || privateHint.test(
+        // An unrelated collection ID is likewise not a selected field. This
+        // supplies no click, option, request or capacity proof for that listbox.
+        if (rawId.length + 1 + hints.length > 500 || (layoutId || unselectedListboxId ? privateLayoutId : privateHint).test(normalizedId) || privateHint.test(
           hints.replace(/([a-z])([A-Z])/gu, "$1 $2").replace(/[_-]/gu, " "))) return false;
         // Passive siblings supply no selection, date, party or request authority.
         // In particular, neither input.value nor radio.checked is read here.
@@ -119,11 +126,34 @@ export async function tryOpenPublicPlayerCombobox(node: Locator, expected: strin
   if (!proof) return false;
   if (proof.expanded || proof.text !== expected || JSON.stringify(await node.evaluate(playerTriggerProof)) !== JSON.stringify(proof))
     throw new Error("UNSAFE_CONTROL");
-  await node.click();
-  await node.page().getByRole("listbox").filter({ visible: true }).waitFor({ state: "visible", timeout: 3000 });
-  const opened = await node.evaluate(playerTriggerProof);
-  if (!opened?.expanded || opened.text !== proof.text || opened.label !== proof.label) throw new Error("UNSAFE_CONTROL");
-  return true;
+  const trigger = await node.elementHandle();
+  if (!trigger) throw new Error("UNSAFE_CONTROL");
+  try {
+    if (JSON.stringify(await trigger.evaluate(playerTriggerProof)) !== JSON.stringify(proof)) throw new Error("UNSAFE_CONTROL");
+    await trigger.click();
+    await node.page().waitForFunction(element => {
+      if (!(element instanceof HTMLElement) || !element.isConnected || element.getAttribute("role") !== "combobox")
+        throw new Error("UNSAFE_CONTROL");
+      if (element.getAttribute("aria-expanded") !== "true") return false;
+      const id = element.getAttribute("aria-controls");
+      if (!id) return false;
+      if (!/^[A-Za-z][\w:-]{0,127}$/u.test(id)) throw new Error("UNSAFE_CONTROL");
+      const matches = document.querySelectorAll('[id="' + CSS.escape(id) + '"]');
+      if (matches.length > 1) throw new Error("UNSAFE_CONTROL");
+      const menu = matches[0];
+      if (!menu) return false;
+      if (menu.getAttribute("role") !== "listbox") throw new Error("UNSAFE_CONTROL");
+      const box = menu.getBoundingClientRect(), style = getComputedStyle(menu);
+      return box.width > 0 && box.height > 0 && style.display !== "none" && style.visibility !== "hidden" &&
+        !menu.closest('[hidden],[inert],[aria-hidden="true"]');
+    }, trigger, { timeout: 3000 });
+    const opened = await trigger.evaluate(playerTriggerProof);
+    if (!opened?.expanded || opened.text !== proof.text || opened.label !== proof.label) throw new Error("UNSAFE_CONTROL");
+    return true;
+  } catch (error) {
+    if (error instanceof Error && error.name === "TimeoutError") throw new Error("UNSAFE_CONTROL");
+    throw error;
+  } finally { await trigger.dispose(); }
 }
 
 export async function trySelectPublicPlayerCombobox(node: Locator, value: string, simulator: boolean) {
