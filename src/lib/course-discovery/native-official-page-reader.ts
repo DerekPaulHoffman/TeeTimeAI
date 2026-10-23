@@ -1,5 +1,5 @@
 import type { OfficialIdentityPage, OfficialIdentitySource } from "./teeitup-official-identity";
-import { createCourseDiscoveryBrowserSession, type DiscoveryBrowserSessionDependencies } from "./browser-session";
+import { createCourseDiscoveryBrowserSession, type DiscoveryBrowserSessionDependencies, type DiscoveryBrowserSnapshot } from "./browser-session";
 import { isSafeRecipeUrl } from "./recipe";
 
 export type NativeOfficialPageReader = (source: OfficialIdentitySource, pageUrl: string, deadlineAt: Date) => Promise<OfficialIdentityPage>;
@@ -22,9 +22,17 @@ export async function readNativeOfficialIdentityPage(source: OfficialIdentitySou
     venueAddress: source.venueAddress, venueOfficialUrl: source.officialUrl, timeZone: source.timeZone },
   { requestLease: deps.requestLease, launchBrowser: deps.launchBrowser, browserTransport: "NATIVE_CHROME" });
   try {
+    // loading covers every admitted resource, including ancillary reads. Wait
+    // for this official document's rendered witness, then capture it afresh;
+    // these diagnostic readiness facts never substitute for identity proof.
+    const ready = (current: DiscoveryBrowserSnapshot) => current.officialSourceDiagnostic?.rawOfficialCaptured === true &&
+      current.officialSourceDiagnostic.currentOfficialDocument === true && current.officialSourceDiagnostic.officialProvenance === true &&
+      current.officialSourceDiagnostic.renderedAddressesPresent === true && current.officialSourceDiagnostic.renderedLinksPresent === true;
+    const readable = (current: DiscoveryBrowserSnapshot) => current.url === pageUrl && current.navigationStatus === 200 &&
+      current.browserTransport === "NATIVE_CHROME" && !current.accessRequirementObserved && !current.nativeFirstFatal;
     let current = await session.execute({ id: 1, action: "open", url: pageUrl });
-    for (let count = 0; current.loading && count < 4 && Date.now() < deadline.getTime(); count++) current = await session.execute({ id: count + 2, action: "observe" });
-    if (current.url !== pageUrl || current.navigationStatus !== 200 || current.loading || current.accessRequirementObserved || current.nativeFirstFatal)
+    for (let count = 0; readable(current) && !ready(current) && count < 4 && Date.now() < deadline.getTime(); count++) current = await session.execute({ id: count + 2, action: "observe" });
+    if (!readable(current) || !ready(current))
       throw new Error("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
     const page = await session.readOfficialIdentityPage();
     if (page.url !== pageUrl || page.browserTransport !== "NATIVE_CHROME" || !page.visibleEvidence || Date.now() >= deadline.getTime())

@@ -229,7 +229,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     venueAddress: input.venueAddress, timeZone: input.timeZone ?? "UTC" }, deadline);
   let teeDocumentToken: TeeItUpSourceRequestToken | undefined;
   type OfficialDocumentProof = { kind: "VERIFIED_OFFICIAL_DOCUMENT"; officialUrl: string; documentUrl: string };
-  let officialIdentityPage: (OfficialIdentityPage & { observedAt: number; officialDocumentProof: OfficialDocumentProof }) | undefined;
+  let officialIdentityPage: (OfficialIdentityPage & { observedAt: number; documentStartedAt: number; officialDocumentProof: OfficialDocumentProof }) | undefined;
   let officialIdentityDocument: { url: string; html: string; officialDocumentProof: OfficialDocumentProof } | undefined;
   let officialSourceDiagnostic: OfficialSourceDiagnostic | undefined, navigationFailureKind: NavigationFailureKind | undefined;
   const officialDiagnostics = () => safeOfficialSourceDiagnostic({ ...teeBookingScope.diagnostics(page.url()), ...officialSourceDiagnostic,
@@ -1005,7 +1005,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
           }
           return { title: document.title.slice(0, 500), headings, linkUrls, addressTexts, phoneTexts, brandLinks };
         });
-        officialIdentityPage = { ...officialIdentityDocument, visibleEvidence, observedAt: Date.now(), browserTransport: deps.browserTransport ?? "PINNED_HTTP" };
+        officialIdentityPage = { ...officialIdentityDocument, visibleEvidence, observedAt: Date.now(), documentStartedAt,
+          browserTransport: deps.browserTransport ?? "PINNED_HTTP" };
     }
     const visible: DiscoveryBrowserSnapshot["controls"] = [];
     const candidates: Array<{ locator: Locator; date?: string; dropdown?: PublicDropdownProof; menuButton?: PublicMenuButtonProof }> = (await controlCandidates()).map(locator => ({ locator }));
@@ -1237,8 +1238,17 @@ export async function createCourseDiscoveryBrowserSession(input: {
     // Controller-only methods; intentionally absent from action/tool schemas.
     async readOfficialIdentityPage(): Promise<OfficialIdentityPage> {
       const current = await snapshot();
-      if (current.accessRequirementObserved || current.nativeFirstFatal || current.navigationStatus !== 200 || current.loading ||
+      // Fresh raw/current-document and rendered capture own this witness.
+      // Unrelated admitted resources may still be pending; network idle is
+      // neither identity proof nor a prerequisite for this one-page read.
+      const timeOrigin = await page.evaluate(() => performance.timeOrigin);
+      deadline.throwIfAborted();
+      if (terminalFailure || closed || current.accessRequirementObserved || current.nativeFirstFatal || current.navigationStatus !== 200 ||
+          current.browserTransport !== "NATIVE_CHROME" ||
           !officialIdentityPage || officialIdentityPage.url !== current.url || Date.now() - officialIdentityPage.observedAt > 5000 ||
+          officialIdentityPage.browserTransport !== "NATIVE_CHROME" || officialIdentityPage.documentStartedAt !== timeOrigin ||
+          officialIdentityPage.officialDocumentProof.kind !== "VERIFIED_OFFICIAL_DOCUMENT" ||
+          !officialIdentityPage.visibleEvidence?.addressTexts.length || !officialIdentityPage.visibleEvidence.linkUrls.length ||
           !sameDiscoveryMainDocument(officialIdentityPage.url, page.url())) throw new Error("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
       return structuredClone({ url: officialIdentityPage.url, html: officialIdentityPage.html,
         visibleEvidence: officialIdentityPage.visibleEvidence, browserTransport: officialIdentityPage.browserTransport });
