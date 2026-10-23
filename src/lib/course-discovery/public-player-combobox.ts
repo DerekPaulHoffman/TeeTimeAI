@@ -9,13 +9,57 @@ function playerTriggerProof(element: Element) {
       return box.width > 0 && box.height > 0 && style.display !== "none" && style.visibility !== "hidden" &&
         !node.closest('[hidden],[inert],[aria-hidden="true"]');
     },
+    publicFilterForm(node: Element) {
+      const form = node.closest("form");
+      if (!form) return true;
+      if (!(form instanceof HTMLFormElement) || form.ownerDocument !== document || form.parentElement?.closest("form") ||
+          (form.getAttribute("action") ?? "").trim() || !["", "get"].includes((form.getAttribute("method") ?? "").trim().toLowerCase()) ||
+          !["", "_self"].includes((form.getAttribute("target") ?? "").trim().toLowerCase()) ||
+          form.getAttributeNames().some(name => /^(?:enctype|accept-charset|rel|onsubmit|onreset|formaction|formmethod|formtarget|formenctype|formnovalidate)$/iu.test(name))) return false;
+      const nodes = [form, ...form.querySelectorAll("*")];
+      if (nodes.length > 250 || Array.from(form.elements).some(control => !form.contains(control) || control.hasAttribute("form"))) return false;
+      for (const child of nodes) {
+        const staticSvg = child instanceof SVGElement && ["svg", "path"].includes(child.localName);
+        if (!(child instanceof HTMLElement) && !staticSvg || child.ownerDocument !== document ||
+            child instanceof HTMLElement && child.isContentEditable ||
+            child.hasAttribute("contenteditable") || child.hasAttribute("form") ||
+            child.getAttributeNames().some(name => /^(?:formaction|formmethod|formtarget|formenctype|formnovalidate)$/iu.test(name) ||
+              name === "autocomplete" && child.getAttribute(name) !== "off") ||
+            child.matches("textarea,a[href],iframe,object,embed,script,style") || child !== form && child.tagName === "FORM") return false;
+        if (staticSvg && (child.getAttributeNames().some(name => /^on|(?:^|:)href$/iu.test(name)) ||
+            child.hasAttribute("tabindex") || ![null, "false"].includes(child.getAttribute("focusable")) ||
+            ![null, "img", "presentation", "none"].includes(child.getAttribute("role")))) return false;
+        const attributes = ["aria-labelledby", "aria-describedby"];
+        if (attributes.some(name => child.hasAttribute(name) && !(child.getAttribute(name) ?? "").trim())) return false;
+        const references = attributes.flatMap(name => (child.getAttribute(name) ?? "").split(/\s+/u).filter(Boolean));
+        if (references.length > 8 || new Set(references).size !== references.length ||
+            references.some(id => id.length > 128 || document.querySelectorAll(`[id="${CSS.escape(id)}"]`).length !== 1)) return false;
+        const hints = `${child.getAttribute("id") ?? ""} ${child.getAttribute("name") ?? ""} ${child.getAttribute("aria-label") ?? ""} ${child.getAttribute("title") ?? ""} ${child.getAttribute("placeholder") ?? ""} ` +
+          references.map(id => document.getElementById(id)?.textContent ?? "").join(" ") +
+          (/^(?:LABEL|LEGEND|BUTTON)$/u.test(child.tagName) || child.getAttribute("role") === "button" ? child.textContent ?? "" : "");
+        if (hints.length > 500 || /password|secret|credential|email|phone|contact|customer|account|member|profile|birth|bday|dob|checkout|payment|purchase|confirm|reserve|\b(?:login|logon|sign[ -]?(?:in|up)|auth(?:entication|orization)?|book|pay|submit|continue|credit|debit|card|cc|cvv|cvc|expiry|expiration|ssn)\b/iu.test(
+          hints.replace(/([a-z])([A-Z])/gu, "$1 $2").replace(/[_-]/gu, " "))) return false;
+        // Passive siblings supply no selection, date, party or request authority.
+        // In particular, neither input.value nor radio.checked is read here.
+        if (child instanceof HTMLInputElement &&
+            (!["date", "number", "range", "radio"].includes(child.type) && !(child.type === "text" && child.readOnly) ||
+              child.type !== "radio" && (!check.visible(child) || getComputedStyle(child).opacity === "0"))) return false;
+        if (child instanceof HTMLButtonElement && child.type !== "button" &&
+            (child.type !== "submit" || child.innerText.replace(/\s+/gu, " ").trim() !== "Search" ||
+              ["aria-label", "title"].some(name => child.hasAttribute(name) && child.getAttribute(name) !== "Search") ||
+              references.some(id => document.getElementById(id)?.textContent?.trim() !== "Search") ||
+              child.querySelector("input,textarea,select,button,a,[role],[contenteditable]"))) return false;
+      }
+      return true;
+    },
     unsafe(node: Element) {
       for (let parent: Element | null = node, depth = 0; parent; parent = parent.parentElement, depth++) {
         if (parent.hasAttribute("contenteditable") && parent.getAttribute("contenteditable")?.toLowerCase() !== "false") return true;
         if (depth < 8 && parent.tagName !== "BODY" && /password|secret|credential|email|phone|contact|account|member|profile|birth|bday|dob|checkout|payment|purchase|confirm|reserve|\b(?:login|logon|sign[ -]?(?:in|up)|auth(?:entication|orization)?)\b/iu.test(
           `${parent.getAttribute("aria-label") ?? ""} ${parent.getAttribute("name") ?? ""} ${parent.getAttribute("title") ?? ""}`)) return true;
       }
-      return Boolean(node.closest("form,a[href]") || node.hasAttribute("form") || node.hasAttribute("href") ||
+      return Boolean(node instanceof HTMLButtonElement && node.form && node.type !== "button" ||
+        node.closest("a[href]") || !check.publicFilterForm(node) || node.hasAttribute("form") || node.hasAttribute("href") ||
         node.querySelector("input,textarea,select,button,a[href],[contenteditable]")) ||
         node.getAttribute("aria-disabled") === "true" || node.hasAttribute("disabled") || node.classList.contains("disabled");
     },

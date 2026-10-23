@@ -1,5 +1,7 @@
 // @vitest-environment node
 import { existsSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { resolve } from "node:path";
 import { chromium, type Browser, type Page } from "@playwright/test";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { executeAccessRecipe } from "./executor";
@@ -14,9 +16,59 @@ describe("public role option ownership", () => {
   beforeEach(async () => { await page?.close(); page = await browser.newPage(); page.setDefaultTimeout(1000); await page.route("**/*", route => route.abort()); });
   afterAll(async () => { await browser?.close(); });
   const menu = `<div role="combobox" aria-label="Players" aria-controls="menu" aria-expanded="true">4 Players</div><div id="menu" role="listbox"><custom-item role="option">1 Player</custom-item><custom-item role="option">2 Players</custom-item><custom-item role="option">3 Players</custom-item></div><output id="picked"></output><script>document.querySelectorAll('[role=option]').forEach(node=>node.onclick=()=>document.querySelector('#picked').textContent=node.textContent)</script>`;
+  const formMenu = (attributes = "", extra = "") => menu.replace(/<div role="combobox"[^>]*>4 Players<\/div>/u,
+    node => `<form ${attributes}>${node}${extra}</form>`);
   it("uses exact text and an expanded related public control without data-value", async () => {
     await page.setContent(menu); expect(await trySelectPublicFilterOption(page.locator("custom-item"), "2 Players", { simulator: false })).toBe(true);
     expect(await page.locator("#picked").textContent()).toBe("2 Players");
+  });
+  it("rechecks the owned trigger's benign native GET filter form before selecting the outside overlay option", async () => {
+    await page.setContent(formMenu('action="" method="GET" target="_self"', '<input readonly aria-haspopup="dialog" placeholder="Choose date" autocomplete="off"><input readonly><input readonly autocomplete="off"><label><input type="radio" hidden>Closest</label><label><input type="radio" style="opacity:0">After</label><svg aria-hidden="true"><path></path></svg><button>Search</button>'));
+    await page.locator("input").evaluateAll(nodes => nodes.forEach(node => {
+      Object.defineProperty(node, "value", { get() { throw Error("PASSIVE_VALUE_READ"); } });
+      Object.defineProperty(node, "checked", { get() { throw Error("PASSIVE_CHECKED_READ"); } });
+    }));
+    expect(await trySelectPublicFilterOption(page.locator("custom-item"), "2 Players", { simulator: false })).toBe(true);
+    expect(await page.locator("#picked").textContent()).toBe("2 Players");
+  });
+  it.each([
+    ['method="POST"', ""], ['action="/search"', ""], ['target="_blank"', ""], ['enctype="text/plain"', ""],
+    ['aria-label="Login filters"', ""], ["", '<label>Account profile</label>'], ["", '<input type="hidden" value="private-never-read">'],
+    ["", '<input type="password">'], ["", '<input type="number" autocomplete="on">'], ["", '<input type="number" name="cardNumber">'],
+    ["", '<input type="number" name="customerId">'], ["", '<input type="number" hidden>'],
+    ["", '<button>Other</button>'], ["", '<button type="button" formtarget="_blank">Search</button>'],
+    ["", '<button type="button">Confirm booking</button>'], ["", '<a href="/other">Other</a>'], ["", '<span contenteditable=""></span>'],
+    ["", '<input type="text">'], ["", '<input readonly aria-label="DOB">'], ["", '<input readonly placeholder="Date of birth">'], ["", '<input readonly autocomplete="email">'],
+    ["", '<svg role="button"><path></path></svg>'], ["", '<svg><path onclick="void 0"></path></svg>'],
+    ["", '<svg><path href="/other"></path></svg>'], ["", '<svg><foreignObject></foreignObject></svg>'],
+  ])("does not let an outside overlay bypass unsafe trigger form semantics (%s %s)", async (attributes, extra) => {
+    await page.setContent(formMenu(attributes, extra));
+    await expect(trySelectPublicFilterOption(page.locator("custom-item"), "2 Players", { simulator: false })).rejects.toThrow("UNSAFE_CONTROL");
+    expect(await page.locator("#picked").textContent()).toBe("");
+  });
+  it.each(['aria-describedby="account"', 'aria-describedby="missing"', 'aria-describedby="account account"', 'aria-describedby=""'])(
+    "does not let an outside overlay bypass unproved or private descriptions (%s)", async attributes => {
+      await page.setContent(formMenu(attributes) + '<p id="account">Account details</p>');
+      await expect(trySelectPublicFilterOption(page.locator("custom-item"), "2 Players", { simulator: false })).rejects.toThrow("UNSAFE_CONTROL");
+      expect(await page.locator("#picked").textContent()).toBe("");
+    });
+  it("rejects a submitting native trigger and a submitting native option", async () => {
+    await page.setContent(formMenu().replace('<div role="combobox"', '<button role="combobox"').replace('4 Players</div>', '4 Players</button>'));
+    await expect(trySelectPublicFilterOption(page.locator("custom-item"), "2 Players", { simulator: false })).rejects.toThrow("UNSAFE_CONTROL");
+    expect(await page.locator("#picked").textContent()).toBe("");
+    await page.setContent(menu.replace('<custom-item role="option">2 Players</custom-item>', '<form><button role="option">2 Players</button></form>'));
+    await expect(trySelectPublicFilterOption(page.locator('[role="option"]'), "2 Players", { simulator: false })).rejects.toThrow("UNSAFE_CONTROL");
+    expect(await page.locator("#picked").textContent()).toBe("");
+  });
+  it("runs the actual tsx-serialized option/trigger form proof without a named-helper dependency", async () => {
+    const path = resolve(process.cwd(), "src/lib/course-discovery/public-filter-option.ts");
+    const serialized = execFileSync(process.execPath, [resolve(process.cwd(), "node_modules/tsx/dist/cli.mjs"), "-e",
+      `import{trySelectPublicFilterOption as select}from ${JSON.stringify(path)};const option={isVisible:async()=>true,getAttribute:async()=> 'option',evaluate:async(fn)=>{process.stdout.write(fn.toString());throw Error('CAPTURE_DONE')}};void select({count:async()=>1,filter:()=>({all:async()=>[option]})},'2 Players',{simulator:false}).catch(()=>{});`],
+    { encoding: "utf8", timeout: 10_000, maxBuffer: 100_000 });
+    expect(serialized).not.toMatch(/\b__name\s*\(/u);
+    await page.setContent(formMenu("", '<input readonly aria-haspopup="dialog" placeholder="Choose date" autocomplete="off"><input type="radio" hidden><svg aria-hidden="true"><path></path></svg><button>Search</button>'));
+    const callback = new Function(`return (${serialized});`)();
+    expect(await page.locator("custom-item").filter({ hasText: "2 Players" }).evaluate(callback)).toMatchObject({ purpose: "PLAYERS", text: "2 Players" });
   });
   it("supports an explicitly labelled duration menu and ignores hidden duplicates", async () => {
     await page.setContent(menu.replaceAll("Players", "Duration").replaceAll("Player", "Duration").replaceAll("2 Duration", "60 minutes") + '<custom-item role="option" hidden>60 minutes</custom-item>');
@@ -27,7 +79,7 @@ describe("public role option ownership", () => {
     menu.replace('aria-controls="menu"', 'aria-controls="other"'), menu.replace('aria-expanded="true"', 'aria-expanded="false"'),
     menu.replace('aria-label="Players"', 'aria-label="Account players"'), menu.replace('aria-label="Players"', 'aria-label="Other"').replace('4 Players', 'Other'),
     menu.replace('id="menu"', 'id="menu" aria-label="Confirm purchase"'),
-    `<form>${menu}</form>`, menu.replace('<custom-item role="option">2', '<custom-item role="option" form="external">2'),
+    `<form method="POST">${menu}</form>`, menu.replace('<custom-item role="option">2', '<custom-item role="option" form="external">2'),
     `<section aria-label="Login">${menu}</section>`, `<section aria-label="Sign in">${menu}</section>`,
     menu.replace('<custom-item role="option">2', '<custom-item role="option" aria-disabled="true">2'),
     menu.replace('<custom-item role="option">2', '<custom-item role="option" href="https://example.org/book">2'),
