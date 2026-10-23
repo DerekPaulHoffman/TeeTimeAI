@@ -38,6 +38,23 @@ function readOfficialDocument(root: Element, selectors: Selectors & { bookingUrl
       const box = node.getBoundingClientRect();
       return !ancestor && box.width > 0 && box.height > 0;
     },
+    addressText(node: HTMLElement) {
+      if (!node.classList.contains("h-adr")) return check.text(node);
+      if (node.tagName !== "DIV" || node.getAttributeNames().some(name => name !== "class") ||
+          Array.from(node.childNodes).some(child => child.nodeType === Node.TEXT_NODE && !/^[\s,]*$/u.test(child.textContent ?? ""))) return null;
+      const parts = Array.from(node.children);
+      if (parts.length !== 7 || parts.map(child => child.tagName).join(",") !== "STRONG,BR,SPAN,BR,SPAN,SPAN,SPAN") return null;
+      for (const child of parts) {
+        if (child.children.length || child.tagName === "BR" && child.getAttributeNames().length ||
+            child.tagName !== "BR" && !check.safe(child)) return null;
+      }
+      if (parts[0].getAttributeNames().length || check.text(parts[0] as HTMLElement) !== "Physical Address") return null;
+      const roles = ["p-street-address", "locality", "p-region", "p-postal-code"];
+      const values = [parts[2], parts[4], parts[5], parts[6]];
+      if (values.some((part, index) => part.getAttributeNames().some(name => name !== "class") ||
+          part.classList.length !== 1 || !part.classList.contains(roles[index]))) return null;
+      return `${check.text(values[0] as HTMLElement)}, ${check.text(values[1] as HTMLElement)}, ${check.text(values[2] as HTMLElement)} ${check.text(values[3] as HTMLElement)}`;
+    },
   };
   if (root !== document.documentElement || root.ownerDocument !== document || !root.isConnected || document.querySelectorAll("*").length > 6000) return null;
   const selectedAddresses = document.querySelectorAll(selectors.addressSelector), selectedLinks = document.querySelectorAll(selectors.bookingLinkSelector);
@@ -53,8 +70,8 @@ function readOfficialDocument(root: Element, selectors: Selectors & { bookingUrl
   const addresses: Array<{ node: HTMLElement; text: string }> = [];
   for (const node of candidates) {
     if (!(node instanceof HTMLElement) || node.closest("a[href]") || !check.safe(node)) continue;
-    const text = check.text(node);
-    if (text.length > 500) continue;
+    const text = check.addressText(node);
+    if (!text || text.length > 500) continue;
     if (/^(?:Address\s*:\s*)?\d{1,7}[A-Za-z]?\s+.+,\s*[A-Za-z .'-]{2,80},\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?(?:,|$)/iu.test(text)) addresses.push({ node, text });
     if (addresses.length > 160) return null;
   }
@@ -70,7 +87,7 @@ function readOfficialDocument(root: Element, selectors: Selectors & { bookingUrl
       bookingLinks++;
     }
   }
-  return { documentUrl: document.URL, addressText: check.text(address),
+  return { documentUrl: document.URL, addressText: check.addressText(address),
     addresses: leaves.map(candidate => ({ text: candidate.text, selected: candidate.node === address || address.contains(candidate.node) })),
     bookingLinks, href: link.href, label };
 }
@@ -89,7 +106,7 @@ export async function attestMemberSportsOfficialBookingIdentity(page: Page, sour
   if (!documentRoot) return fail();
   try {
     const evidence = await documentRoot.evaluate(readOfficialDocument, { ...selectors, bookingUrl: source.bookingUrl });
-    if (!evidence || evidence.documentUrl !== current || evidence.bookingLinks !== 1 || evidence.addresses.length !== 1 || !evidence.addresses[0].selected ||
+    if (!evidence || !evidence.addressText || evidence.documentUrl !== current || evidence.bookingLinks !== 1 || evidence.addresses.length !== 1 || !evidence.addresses[0].selected ||
         JSON.stringify(completeUSAddress(evidence.addressText)) !== JSON.stringify(address) ||
         JSON.stringify(completeUSAddress(evidence.addresses[0].text)) !== JSON.stringify(address) || page.url() !== current ||
         JSON.stringify(await documentRoot.evaluate(readOfficialDocument, { ...selectors, bookingUrl: source.bookingUrl })) !== JSON.stringify(evidence)) return fail();

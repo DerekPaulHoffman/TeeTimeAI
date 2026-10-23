@@ -13,6 +13,11 @@ const selectors = { addressSelector: "#address", bookingLinkSelector: "#booking"
 const current = "https://example.org/rates";
 const fixture = () => `<h1>Example Municipal Golf</h1><section><p id="address">1005 Richardson Dr<br>Groveport, OH 43125</p></section>
   <nav><a id="booking" target="_blank" href="${source.bookingUrl}" onclick="window.linkClicked=true">BOOK A TEE TIME</a></nav>`;
+const postalSource = { ...source, venueAddress: "1005 Richardson Rd, Groveport, OH 43125, USA" };
+const postalSelectors = { ...selectors, addressSelector: ".h-adr" };
+const postalFixture = () => fixture().replace('<p id="address">1005 Richardson Dr<br>Groveport, OH 43125</p>',
+  '<div class="field h-adr"><strong>Physical Address</strong><br><span class="p-street-address">1005 Richardson Road</span><br>' +
+  '<span class="locality">Groveport</span>, <span class="p-region">OH</span> <span class="p-postal-code">43125</span></div>');
 
 describe("strict public MemberSports official source inputs", () => {
   it.each([
@@ -65,6 +70,46 @@ describe.runIf(existsSync(chrome))("fresh official address and exact public book
   it("treats nested address formatting and repeated empty line delimiters as formatting only", async () => {
     await load(fixture().replace("1005 Richardson Dr<br>Groveport, OH 43125", "<span>1005 Richardson Drive,</span><br><span>Groveport, OH 43125, US</span>"));
     await expect(attestMemberSportsOfficialBookingIdentity(page, source, selectors)).resolves.toMatchObject({ bookingUrl: source.bookingUrl });
+  });
+  it("attests the observed direct structured physical-address siblings without interpreting heading text as street data", async () => {
+    await load(postalFixture());
+    await expect(attestMemberSportsOfficialBookingIdentity(page, postalSource, postalSelectors)).resolves.toMatchObject({
+      officialDocumentUrl: current, bookingUrl: source.bookingUrl, clubId: 42, courseId: 84,
+    });
+    expect(requests).toEqual([current]);
+  });
+  it.each([
+    postalFixture().replace('<span class="p-region">OH</span>', ""),
+    postalFixture().replace('class="p-region"', 'class="locality"'),
+    postalFixture().replace('class="p-region"', 'class="p-region extra"'),
+    postalFixture().replace('class="locality"', 'class="locality" hidden'),
+    postalFixture().replace('class="p-street-address"', 'class="p-street-address" style="opacity:0"'),
+    `<section aria-label="Corporate mailing address">${postalFixture()}</section>`,
+    `<section contenteditable="plaintext-only">${postalFixture()}</section>`,
+    `<form>${postalFixture()}</form>`,
+    postalFixture().replace("1005 Richardson Road", "1006 Richardson Road"),
+    postalFixture().replace("Groveport</span>", "Grove City</span>"),
+    postalFixture().replace("OH</span>", "NC</span>"),
+    postalFixture().replace("43125</span>", "43126</span>"),
+    postalFixture().replace("Physical Address", "Billing Address"),
+    postalFixture().replace("<br><span class=\"p-street-address\">", "unrelated text<br><span class=\"p-street-address\">"),
+    postalFixture().replace("1005 Richardson Road", "<span>1005 Richardson Road</span>"),
+    postalFixture().replace("1005 Richardson Road", "<input value='private-never-read'>"),
+    postalFixture().replace('class="locality"', 'class="locality" tabindex="0"'),
+    postalFixture().replace('class="locality"', 'class="locality" onclick="window.privateClicked=true"'),
+    postalFixture().replace('class="field h-adr"', 'class="field h-adr" aria-label="Account"'),
+    postalFixture() + '<p>1200 Other Street, Groveport, OH 43125</p>',
+  ])("rejects changed, incomplete, hidden, private or extra structured address content", async html => {
+    await load(html);
+    await expect(attestMemberSportsOfficialBookingIdentity(page, postalSource, postalSelectors)).rejects.toThrow("OFFICIAL_BOOKING_IDENTITY_UNVERIFIED");
+    expect(requests).toEqual([current]);
+  });
+  it("uses the same structured address projection for the global ambiguity census", async () => {
+    const duplicate = postalFixture().match(/<div class="field h-adr">.*?<\/div>/u)?.[0];
+    if (!duplicate) throw Error("fixture address");
+    await load(postalFixture() + duplicate.replace("1005 Richardson Road", "1200 Other Street"));
+    await expect(attestMemberSportsOfficialBookingIdentity(page, postalSource,
+      { ...postalSelectors, addressSelector: "section .h-adr" })).rejects.toThrow("OFFICIAL_BOOKING_IDENTITY_UNVERIFIED");
   });
   it.each([
     fixture().replace("1005 Richardson Dr", "1006 Richardson Dr"),
