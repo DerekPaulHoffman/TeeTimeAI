@@ -113,20 +113,32 @@ function publicUsCalendarDate(value: string) {
 /** Fixed anonymous display bootstrap, independently rechecked by the handler.
  * Source ownership is private native metadata, never Referer or a form claim. */
 export function isMindbodyClassicPublicBootstrapPost(url: URL, headers: Headers, body: string, sourceUrl: string) {
+  return mindbodyClassicPublicBootstrapPostDiagnostic(url, headers, body, sourceUrl) === "VALID";
+}
+
+export const mindbodyClassicBootstrapPostOutcomes = ["VALID", "SOURCE_BINDING", "BODY_SIZE", "ORIGIN", "CONTENT_TYPE", "CREDENTIAL_HEADER", "FORM_KEYS",
+  "FORM_ENCODING", "STUDIO", "STYPE", "DISPLAY_FLAGS", "DATE", "NONEMPTY_FIELD"] as const;
+export type MindbodyClassicBootstrapPostOutcome = typeof mindbodyClassicBootstrapPostOutcomes[number];
+
+/** Closed predicates only: never include a field value, URL or header. */
+export function mindbodyClassicPublicBootstrapPostDiagnostic(url: URL, headers: Headers, body: string, sourceUrl: string): MindbodyClassicBootstrapPostOutcome {
   const source = mindbodyClassicPublicBootstrapSource(sourceUrl, url.href);
-  if (!source || Buffer.byteLength(body) > 2048 || headers.get("origin") !== url.origin ||
-      !/^application\/x-www-form-urlencoded(?:;\s*charset=utf-8)?$/iu.test(headers.get("content-type") ?? "") ||
-      [...headers.keys()].some(key => /^(?:authorization|proxy-authorization|x-api-key|api-key|x-auth-token|next-action)$/iu.test(key))) return false;
+  if (!source) return "SOURCE_BINDING";
+  if (Buffer.byteLength(body) > 2048) return "BODY_SIZE";
+  if (headers.get("origin") !== url.origin) return "ORIGIN";
+  if (!/^application\/x-www-form-urlencoded(?:;\s*charset=utf-8)?$/iu.test(headers.get("content-type") ?? "")) return "CONTENT_TYPE";
+  if ([...headers.keys()].some(key => /^(?:authorization|proxy-authorization|x-api-key|api-key|x-auth-token|next-action)$/iu.test(key))) return "CREDENTIAL_HEADER";
   const form = new URLSearchParams(body), keys = [...form.keys()];
   if (keys.length !== classicBootstrapFields.length || new Set(keys).size !== keys.length ||
-      !keys.every(key => (classicBootstrapFields as readonly string[]).includes(key)) || form.toString() !== body) return false;
+      !keys.every(key => (classicBootstrapFields as readonly string[]).includes(key))) return "FORM_KEYS";
+  if (form.toString() !== body) return "FORM_ENCODING";
   for (const key of classicBootstrapFields) {
     const value = form.get(key);
-    if (key === "studioId") { if (value !== source.studioId) return false; }
-    else if (key === "stype") { if (value !== "-9") return false; }
-    else if (key === "trn" || key === "classid") { if (value !== "0") return false; }
-    else if (key === "date") { if (!value || !publicUsCalendarDate(value)) return false; }
-    else if (value !== "") return false;
+    if (key === "studioId") { if (value !== source.studioId) return "STUDIO"; }
+    else if (key === "stype") { if (value !== "-9") return "STYPE"; }
+    else if (key === "trn" || key === "classid") { if (value !== "0") return "DISPLAY_FLAGS"; }
+    else if (key === "date") { if (!value || !publicUsCalendarDate(value)) return "DATE"; }
+    else if (value !== "") return "NONEMPTY_FIELD";
   }
-  return true;
+  return "VALID";
 }

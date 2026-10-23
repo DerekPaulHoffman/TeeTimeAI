@@ -1,6 +1,6 @@
 import type { Frame, Page, Response, Route } from "@playwright/test";
 import { isNonEvidenceBrowserResource } from "@/lib/automation/passfactory-public-read-policy";
-import { isMindbodyClassicPublicBootstrapPost, mindbodyClassicPublicBootstrapSource } from "@/lib/automation/mindbody-public-read-policy";
+import { isMindbodyClassicPublicBootstrapPost, mindbodyClassicPublicBootstrapSource, mindbodyClassicPublicBootstrapPostDiagnostic, type MindbodyClassicBootstrapPostOutcome } from "@/lib/automation/mindbody-public-read-policy";
 import { canonicalPublicReadUrl } from "./public-request-url";
 import { PUBLIC_BROWSER_TOTAL_BYTES, publicBrowserResponseLimit } from "./browser-resource-limits";
 import { isSafeBrowserAssetUrl, isSafeRecipeUrl } from "./recipe";
@@ -32,6 +32,12 @@ export type NativeRequestDiagnostic = {
   parentPresent?: boolean; awaitingDocument?: boolean; parentCurrentGeneration?: boolean;
   documentCommitted?: boolean; documentIntentPresent?: boolean; documentIntentUsed?: boolean;
   sourceResponseComplete?: boolean; successorTerminalFailed?: boolean;
+  documentIntentKind?: "NONE" | "SCRIPT_GET" | "PUBLIC_FORM_POST";
+  documentIntentStatus?: "NO_EVENT" | "NO_COMMITTED_SOURCE" | "SOURCE_NOT_CURRENT" | "NAVIGATION_NOT_ELIGIBLE" | "PUBLIC_SOURCE_NOT_ELIGIBLE" | "RETAINED";
+  networkHasBody?: boolean; networkBodyPresent?: boolean; networkBodyMatches?: boolean;
+  intentSourceIsGet?: boolean; intentSourceBodyAbsent?: boolean; intentSourceHtml?: boolean;
+  intentSourceUrlCurrent?: boolean; intentSourceBindingValid?: boolean; intentRevisionFresh?: boolean; intentWithinDeadline?: boolean;
+  fetchBootstrapPolicy?: MindbodyClassicBootstrapPostOutcome; networkBootstrapPolicy?: MindbodyClassicBootstrapPostOutcome;
 };
 export type NativeFirstFatal = NativeRequestDiagnostic;
 export type NativeRedirectRouting = {
@@ -222,6 +228,8 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
   const loaderOwners = new Map<string, DocumentGeneration>();
   let generation: DocumentGeneration = { id: 0, retired: false }, generationTracking = false, boundaryPending = false, awaitingDocument = false;
   let committedDocument: CommittedDocument | undefined, documentIntent: DocumentIntent | undefined;
+  // Last root navigation callback outcome only; never consulted for authority.
+  let documentIntentStatus: NonNullable<NativeRequestDiagnostic["documentIntentStatus"]> = "NO_EVENT";
   let currentDocumentUrl = "";
   const owner: NativeRecordOwner = { closed: false };
   type HeaderContext = { document: RecordEntry; loader: object; scope: ReturnType<typeof createPublicClientReadHeaderScope> };
@@ -475,15 +483,20 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
   cdp.on("Page.frameRequestedNavigation", event => {
     if (event.frameId !== rootFrameId) return;
     documentIntent = undefined;
+    documentIntentStatus = !committedDocument ? "NO_COMMITTED_SOURCE" :
+      !generationTracking || closed || boundaryPending || awaitingDocument || committedDocument.record.generation !== generation || generation.retired || committedDocument.record.failed
+        ? "SOURCE_NOT_CURRENT" : "NAVIGATION_NOT_ELIGIBLE";
     if (!generationTracking || closed || boundaryPending || awaitingDocument || !committedDocument ||
       committedDocument.record.generation !== generation || generation.retired || committedDocument.record.failed ||
       !["scriptInitiated", "formSubmissionPost"].includes(event.reason) || event.disposition !== "currentTab" || typeof event.url !== "string" || event.url.length > 2048) return;
+    documentIntentStatus = "PUBLIC_SOURCE_NOT_ELIGIBLE";
     if (event.reason === "formSubmissionPost" && (committedDocument.record.method !== "GET" || committedDocument.record.body !== null ||
         currentDocumentUrl !== committedDocument.record.transportUrl || !mindbodyClassicPublicBootstrapSource(currentDocumentUrl, event.url))) return;
     // This private one-use event binds ownership, never navigation permission.
     // The exact successor still passes the caller's ordinary public-read guard.
     documentIntent = { source: committedDocument, target: event.url, reason: event.reason === "formSubmissionPost" ? "formSubmissionPost" : "scriptInitiated",
       networkRevision: networkIdentityRevision, createdAt: Date.now(), used: false };
+    documentIntentStatus = "RETAINED";
   });
   const publishNetworkIdentity = (id: string, identity: NetworkIdentity) => {
     networkIdentities.set(id, identity); networkWaiters.get(id)?.settle();
@@ -778,7 +791,33 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
           const identity = networkIdentities.get(networkId);
           const candidate = pendingPreflightIdentities.get(networkId);
           const preflightSource = candidate ? networkIdentities.get(candidate.sourceNetworkId) : identity?.preflight?.identity;
+          const intent = documentIntent;
+          const bootstrapDiagnostic: Partial<NativeRequestDiagnostic> = {};
+          if (kind === "document" && event.request.method === "POST") {
+            Object.assign(bootstrapDiagnostic, {
+              documentIntentKind: !intent ? "NONE" : intent.reason === "formSubmissionPost" ? "PUBLIC_FORM_POST" : "SCRIPT_GET",
+              documentIntentStatus,
+              networkHasBody: identity?.hasBody === true, networkBodyPresent: typeof identity?.body === "string",
+              networkBodyMatches: typeof event.request.postData === "string" && identity?.body === event.request.postData,
+              intentSourceIsGet: intent?.source.record.method === "GET", intentSourceBodyAbsent: intent?.source.record.body === null,
+              intentSourceHtml: /^text\/html(?:\s*;|$)/iu.test(intent?.source.record.responseMimeType ?? ""),
+              intentSourceUrlCurrent: Boolean(intent && currentDocumentUrl === intent.source.record.transportUrl),
+              intentSourceBindingValid: Boolean(intent && mindbodyClassicPublicBootstrapSource(intent.source.record.transportUrl, event.request.url)),
+              intentRevisionFresh: Boolean(intent && identity && identity.revision > intent.networkRevision),
+              intentWithinDeadline: Boolean(intent && Date.now() - intent.createdAt <= timeoutMs),
+            });
+            if (intent?.reason === "formSubmissionPost") {
+              // Diagnostics cannot create intent or alter any admission predicate.
+              try {
+                if (typeof event.request.postData === "string") bootstrapDiagnostic.fetchBootstrapPolicy = mindbodyClassicPublicBootstrapPostDiagnostic(
+                  new URL(event.request.url), new Headers(headers(event.request.headers)), event.request.postData, intent.source.record.transportUrl);
+                if (typeof identity?.body === "string") bootstrapDiagnostic.networkBootstrapPolicy = mindbodyClassicPublicBootstrapPostDiagnostic(
+                  new URL(identity.url), new Headers(identity.headerEntries), identity.body, intent.source.record.transportUrl);
+              } catch { /* Invalid metadata remains rejected without adding raw diagnostic data. */ }
+            }
+          }
           return { ...requestDiagnostic("NATIVE_REDIRECT_LOADER_MISMATCH"), phase,
+            ...bootstrapDiagnostic,
             ...(event.request.method === "OPTIONS" ? {
               preflightCandidatePresent: Boolean(candidate),
               ...(candidate ? { preflightCandidateInvalid: candidate.invalid } : {}),

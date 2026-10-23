@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { existsSync } from "node:fs";
 import { chromium } from "@playwright/test";
-import { addVerifiedMindbodyReadHeaders, isMindbodyPublicReadPost, MINDBODY_PUBLIC_READ_ACTIONS, isMindbodyClassicPublicBootstrapPost, mindbodyClassicPublicBootstrapSource } from "./mindbody-public-read-policy";
+import { addVerifiedMindbodyReadHeaders, isMindbodyPublicReadPost, MINDBODY_PUBLIC_READ_ACTIONS, isMindbodyClassicPublicBootstrapPost, mindbodyClassicPublicBootstrapSource, mindbodyClassicPublicBootstrapPostDiagnostic, mindbodyClassicBootstrapPostOutcomes } from "./mindbody-public-read-policy";
 import { isAnonymousBrowserReadPost } from "./simulator-interactive-browser";
 
 // Captured with unknown POSTs blocked before transmission. The public client
@@ -57,6 +57,26 @@ describe("Mindbody anonymous classic display bootstrap", () => {
       const h = readHeaders(); h.set(key, value); expect(allows(undefined, entry, target, h)).toBe(false);
     }
     expect(mindbodyClassicPublicBootstrapSource(entry, target)).toEqual({ studioId: "685163" });
+  });
+  it("reports only closed predicate outcomes while preserving the boolean policy", () => {
+    const changed = (key: string, value: string) => { const body = form(); body.set(key, value); return body.toString(); };
+    const cases: Array<{ outcome: typeof mindbodyClassicBootstrapPostOutcomes[number]; body?: string; source?: string; headers?: Headers }> = [
+      { outcome: "VALID" }, { outcome: "SOURCE_BINDING", source: entry.replace("-9", "-8") }, { outcome: "BODY_SIZE", body: "x".repeat(2049) },
+      { outcome: "ORIGIN", headers: new Headers({ "content-type": "application/x-www-form-urlencoded" }) },
+      { outcome: "CONTENT_TYPE", headers: new Headers({ origin: new URL(target).origin, "content-type": "application/json" }) },
+      { outcome: "CREDENTIAL_HEADER", headers: new Headers({ ...Object.fromEntries(readHeaders()), "x-auth-token": "private-header-value" }) },
+      { outcome: "FORM_KEYS", body: form().toString() + "&unknown=" }, { outcome: "FORM_ENCODING", body: form().toString().replaceAll("%2F", "%2f") },
+      { outcome: "STUDIO", body: changed("studioId", "12345") }, { outcome: "STYPE", body: changed("stype", "-8") },
+      { outcome: "DISPLAY_FLAGS", body: changed("trn", "1") }, { outcome: "DATE", body: changed("date", "2/30/2026") },
+      { outcome: "NONEMPTY_FIELD", body: changed("singleUseToken", "private-body-value") },
+    ];
+    expect(cases.map(value => value.outcome)).toEqual(mindbodyClassicBootstrapPostOutcomes);
+    for (const value of cases) {
+      const h = value.headers ?? readHeaders(), body = value.body ?? form().toString(), sourceUrl = value.source ?? entry;
+      const diagnostic = mindbodyClassicPublicBootstrapPostDiagnostic(new URL(target), h, body, sourceUrl);
+      expect(diagnostic).toBe(value.outcome); expect(allows(body, sourceUrl, target, h)).toBe(diagnostic === "VALID");
+      expect(JSON.stringify(diagnostic)).not.toContain("private-");
+    }
   });
 });
 

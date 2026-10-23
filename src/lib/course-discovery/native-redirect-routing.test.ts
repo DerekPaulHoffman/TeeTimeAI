@@ -1209,6 +1209,33 @@ describe("native anonymous Mindbody bootstrap ownership", () => {
       expect(nativeMindbodyBootstrapSource(test.routes[1].request())).toBeNull();
     } finally { await test.guard.close(); }
   });
+  it.each(["fetch flag", "network origin", "fetch origin", "encoding", "missing intent", "revision", "source binding", "no source", "navigation reason"] as const)("projects closed bootstrap predicates without changing denial: %s", async mode => {
+    const test = await installed();
+    try {
+      await prepare(test, mode !== "no source");
+      if (mode === "source binding") test.events.get("Page.navigatedWithinDocument")!({ frameId: "main", url: source + "&extra=1" });
+      const postBody = mode === "encoding" ? body.replaceAll("%2F", "%2f") : body;
+      const withoutOrigin = { "Content-Type": headers["Content-Type"] };
+      const identity = () => network(test, { request: { url: target, method: "POST", headers: mode === "network origin" ? withoutOrigin : headers, hasPostData: true, postData: postBody } });
+      if (mode === "revision") identity();
+      if (mode !== "missing intent") intent(test, mode === "navigation reason" ? { reason: "anchorClick" } : {});
+      if (mode !== "revision") identity();
+      post(test, { request: { url: target, method: "POST", headers: mode === "fetch origin" ? withoutOrigin : headers, ...(mode === "fetch flag" ? {} : { hasPostData: true }), postData: postBody } });
+      await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce()); expect(test.routes).toHaveLength(1);
+      const diagnostic = test.guard.firstFatal!;
+      const noIntent = ["missing intent", "source binding", "no source", "navigation reason"].includes(mode);
+      expect(diagnostic).toMatchObject({ phase: "LOADER_OWNER", documentIntentKind: noIntent ? "NONE" : "PUBLIC_FORM_POST",
+        documentIntentStatus: mode === "missing intent" ? "NO_EVENT" : mode === "source binding" ? "PUBLIC_SOURCE_NOT_ELIGIBLE" : mode === "no source" ? "NO_COMMITTED_SOURCE" : mode === "navigation reason" ? "NAVIGATION_NOT_ELIGIBLE" : "RETAINED",
+        networkHasBody: true, networkBodyPresent: true, networkBodyMatches: true, postDataPresent: true, hasPostData: mode !== "fetch flag" });
+      if (noIntent) { expect(diagnostic).not.toHaveProperty("fetchBootstrapPolicy"); expect(diagnostic).not.toHaveProperty("networkBootstrapPolicy"); }
+      else expect(diagnostic).toMatchObject({ intentSourceIsGet: true, intentSourceBodyAbsent: true, intentSourceHtml: true, intentSourceUrlCurrent: true,
+        intentSourceBindingValid: true, intentRevisionFresh: mode !== "revision", intentWithinDeadline: true,
+        fetchBootstrapPolicy: mode === "encoding" ? "FORM_ENCODING" : mode === "fetch origin" ? "ORIGIN" : "VALID",
+        networkBootstrapPolicy: mode === "encoding" ? "FORM_ENCODING" : mode === "network origin" ? "ORIGIN" : "VALID" });
+      expect(diagnostic).not.toHaveProperty("body"); expect(diagnostic).not.toHaveProperty("headers"); expect(diagnostic).not.toHaveProperty("sourceUrl");
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "bootstrap")).toBe(false);
+    } finally { await test.guard.close(); }
+  });
   it.each(["source URL changes", "cancelled"] as const)("does not transfer bootstrap ownership while source ACK waits and %s", async mode => {
     const cancelled = new AbortController(), test = await installed(undefined, cancelled.signal), ack = deferred<object>();
     try {
