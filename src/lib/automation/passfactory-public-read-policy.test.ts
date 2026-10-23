@@ -97,6 +97,19 @@ it("quietly denies only the exact optional Google sign-in script without an acco
     expect(isNonEvidenceBrowserResource(url, "script")).toBe(false);
 });
 
+it("quietly denies only the exact Datacap card-tokenization script without a payment or availability grant", () => {
+  const client = "https://token.dcap.com/v1/client";
+  expect(isNonEvidenceBrowserResource(client, "script")).toBe(true);
+  expect(isIncidentalBrowserRequest(client)).toBe(false);
+  for (const type of ["document", "xhr", "fetch", "other", "stylesheet"])
+    expect(isNonEvidenceBrowserResource(client, type)).toBe(false);
+  for (const url of [client + "?mode=payment", client + "#payment", client + "/", "https://token.dcap.com/v1/%63lient",
+    "https://token.dcap.com/v1/token", "https://token.dcap.com/v1/charge", "https://token.dcap.com/checkout", "https://token.dcap.com/",
+    "https://token.dcap.com.evil.test/v1/client", "https://other.example/v1/client", "http://token.dcap.com/v1/client",
+    "https://u:p@token.dcap.com/v1/client", "https://token.dcap.com:444/v1/client"])
+    expect(isNonEvidenceBrowserResource(url, "script")).toBe(false);
+});
+
 it("quietly denies observed analytics without hiding availability or an access wall", () => {
   for (const url of [
     "https://e.clarity.ms/collect", "https://q.clarity.ms/collect",

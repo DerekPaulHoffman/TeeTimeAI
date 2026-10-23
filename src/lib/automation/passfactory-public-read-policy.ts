@@ -96,6 +96,9 @@ export function isNonEvidenceBrowserResource(value: string, resourceType: string
     // This exact optional Google Sign-In client is denied, never executed or
     // treated as inventory evidence. Rendered access gates remain separate.
     if (value === "https://accounts.google.com/gsi/client") return true;
+    // The exact Datacap card-tokenization SDK is likewise never needed for
+    // reading availability. No payment endpoint or account route is admitted.
+    if (value === "https://token.dcap.com/v1/client") return true;
     try {
       const url = new URL(value);
       // Never execute this injected detection script or give it loader/source
