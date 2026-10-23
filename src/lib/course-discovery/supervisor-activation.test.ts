@@ -19,7 +19,7 @@ const cancelled = (signal: AbortSignal) => new Promise<never>((_, reject) => {
   if (signal.aborted) reject(signal.reason);
   else signal.addEventListener("abort", () => reject(signal.reason), { once: true });
 });
-const metrics = { model: "gpt-6-astra", tokenUsage: { totalTokens: 123, cachedInputTokens: 100 }, replayDurationsMs: [10, 20] };
+const metrics = { model: "gpt-6.1-sol", tokenUsage: { totalTokens: 123, cachedInputTokens: 100 }, replayDurationsMs: [10, 20] };
 const clientFor = (job: ReturnType<typeof assignedJob>, heartbeat: () => Promise<unknown> = vi.fn(async () => ({}))) => ({
   next: vi.fn().mockResolvedValueOnce({ job }).mockResolvedValue({ job: null }), heartbeat, fail: vi.fn(async () => ({})),
 });

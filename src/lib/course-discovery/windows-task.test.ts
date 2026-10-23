@@ -19,7 +19,7 @@ describe.runIf(process.platform === "win32")("Windows supervisor lifecycle dry r
       COURSE_DISCOVERY_BROWSER_TRANSPORT: "NATIVE_CHROME" }));
     const events = [
       { event: "activated", activationAcknowledgedAt, firstPickedUpAt: activationAcknowledgedAt, deadlineAt: "2026-10-21T20:15:00.000Z", private: "private-provider-data", metrics: {
-        model: "gpt-6-astra", ...browserTimes, metricsFinal: false, cleanupWarning: "POST_ACTIVATION_CLEANUP_PENDING", private: "private-provider-data" } },
+        model: "gpt-6.1-sol", ...browserTimes, metricsFinal: false, cleanupWarning: "POST_ACTIVATION_CLEANUP_PENDING", private: "private-provider-data" } },
       { event: "activated", metrics: { metricsFinal: "private-provider-data", cleanupWarning: "private-provider-data" } },
     ];
     // This fixture replaces the node executable only for this invocation. The
@@ -45,7 +45,7 @@ describe.runIf(process.platform === "win32")("Windows supervisor lifecycle dry r
       expect(new Date(browserStartedAt).toISOString()).toBe(browserTimes.browserStartedAt);
       expect(new Date(firstOpenStartedAt).toISOString()).toBe("2026-10-21T19:59:16.456Z");
       expect(new Date(firstOpenCompletedAt).toISOString()).toBe(browserTimes.firstOpenCompletedAt);
-      expect([{ ...first, metrics }, rows[1]]).toEqual([{ event: "activated", metrics: { model: "gpt-6-astra",
+      expect([{ ...first, metrics }, rows[1]]).toEqual([{ event: "activated", metrics: { model: "gpt-6.1-sol",
         metricsFinal: false, cleanupWarning: "POST_ACTIVATION_CLEANUP_PENDING" } }, { event: "activated", metrics: {} }]);
       expect(log).not.toContain("private-provider-data"); expect(log).not.toContain("fake-test-device-secret-never-print");
     } finally {

@@ -10,7 +10,8 @@ import { createDiscoveryPublicAssetInventory } from "./course-discovery-public-a
 const VERSION = "0.160.1";
 const BROWSER_ACTIONS = ["open", "observe", "click", "select", "fill", "scroll", "inspect_adapter", "inspect", "finish"];
 const FORBIDDEN_ITEMS = new Set(["commandExecution", "fileChange", "mcpToolCall", "webSearch", "imageGeneration", "collabAgentToolCall"]);
-export const DISCOVERY_MODEL = "gpt-6-astra";
+export const DISCOVERY_MODEL = "gpt-6.1-sol";
+export const DISCOVERY_REASONING_EFFORT = "medium";
 function safeObservedUrl(value) {
   if (typeof value !== "string" || value.length > 2048) return false;
   try {
@@ -362,6 +363,7 @@ function safeLastFeedback(value) {
   const details = value.details ?? {};
   return { code: value.code, details: {
     status: ["AVAILABLE", "EMPTY", "INCOMPLETE", "ACCESS_REQUIRED", "FAILED"].includes(details.status) ? details.status : "FAILED",
+    complete: false,
     reason: /^[A-Z_0-9]{1,80}$/u.test(details.reason ?? "") ? details.reason : "UNVERIFIED_REPLAY",
     proof: Object.fromEntries(["venueVerified", "dateVerified", "capacityVerified", "durationVerified", "completeVerified"].map(key => [key, details.proof?.[key] === true])),
     slotCount: Number.isInteger(details.slotCount) && details.slotCount >= 0 ? Math.min(details.slotCount, 500) : 0,
@@ -542,6 +544,7 @@ export function resolveDiscoveryCli(cwd, { platform = process.platform, arch = p
 }
 
 export function restrictedModelCatalog(catalog, model = DISCOVERY_MODEL) {
+  if (model !== DISCOVERY_MODEL) throw discoveryError("DISCOVERY_MODEL_NOT_ALLOWED");
   const source = Array.isArray(catalog?.models) ? catalog.models.find(entry => entry?.slug === model) : undefined;
   if (!source) throw discoveryError("DISCOVERY_MODEL_UNAVAILABLE");
   return { models: [{ ...source, shell_type: "disabled", apply_patch_tool_type: null, experimental_supported_tools: [],
@@ -560,6 +563,7 @@ export function prepareDiscoveryModelCatalog({ sourceHome = process.env.CODEX_HO
 }
 
 export const DISCOVERY_CONFIG = {
+  forced_login_method: "chatgpt", model_reasoning_effort: DISCOVERY_REASONING_EFFORT,
   "features.shell_tool": false, "features.apps": false, "features.plugins": false,
   "features.hooks": false, "features.memories": false, "features.multi_agent": false,
   "features.multi_agent_v2": false, "features.browser_use": false, "features.computer_use": false,
@@ -760,27 +764,40 @@ export async function validateDiscoveryRecipe({ cwd, recipe, signal, spawnProces
   });
 }
 
+/** Persistable replay feedback contains only closed diagnostics and bounded counts. */
+export function discoveryReplayDetails(result, error) {
+  const evidence = result?.evidence ?? {};
+  const code = error?.code;
+  const diagnostic = safeReplayDiagnostic(evidence.diagnostic);
+  const complete = result?.complete === true && ["AVAILABLE", "EMPTY"].includes(result?.status);
+  return {
+    status: ["AVAILABLE", "EMPTY", "INCOMPLETE", "ACCESS_REQUIRED", "FAILED"].includes(result?.status) ? result.status : "FAILED",
+    complete,
+    reason: typeof evidence.reason === "string" && /^[A-Z_0-9]{1,80}$/u.test(evidence.reason) ? evidence.reason
+      : complete ? "REPLAY_COMPLETE" : typeof code === "string" && /^[A-Z_0-9]{1,80}$/u.test(code) ? code : "UNVERIFIED_REPLAY",
+    proof: Object.fromEntries(["venueVerified", "dateVerified", "capacityVerified", "durationVerified", "completeVerified"].map(key => [key, evidence[key] === true])),
+    slotCount: Array.isArray(result?.slots) ? Math.min(result.slots.length, 500) : 0,
+    ...(diagnostic ? { diagnostic } : {}),
+  };
+}
+
 export async function verifyDiscoveryCandidate({ client, job, recipe, executeRecipe, signal, sourceEvidence, onReplay = () => {}, beforeActivate = async () => {}, afterActivate = async () => {} }) {
   const proposal = await client.candidate(job.id, job.leaseToken, recipe, signal, sourceEvidence);
   if (!/^[a-f0-9]{64}$/u.test(proposal.recipeHash ?? "") || !Array.isArray(proposal.challenges) || proposal.challenges.length !== 2 ||
       new Set(proposal.challenges.map(challenge => challenge.id)).size !== 2) throw discoveryError("DISCOVERY_CHALLENGES_INVALID");
-  for (const challenge of proposal.challenges) {
+  for (const [challengeIndex, challenge] of proposal.challenges.entries()) {
     if (challenge.recipeHash !== proposal.recipeHash || !challenge.input) throw discoveryError("DISCOVERY_CHALLENGES_INVALID");
     if (challenge.completed === true) continue;
     const replayStarted = Date.now();
     let result;
     try { result = await executeRecipe({ recipe, input: challenge.input, deadlineAt: job.deadlineAt, signal }); }
-    finally { onReplay({ elapsedMs: Date.now() - replayStarted }); }
-    if (!result?.complete || !["AVAILABLE", "EMPTY"].includes(result.status)) {
-      const evidence = result?.evidence ?? {};
-      throw discoveryError("DISCOVERY_REPLAY_INCOMPLETE", { details: {
-        status: ["AVAILABLE", "EMPTY", "INCOMPLETE", "ACCESS_REQUIRED", "FAILED"].includes(result?.status) ? result.status : "FAILED",
-        reason: typeof evidence.reason === "string" && /^[A-Z_]{1,80}$/u.test(evidence.reason) ? evidence.reason : "UNVERIFIED_REPLAY",
-        proof: Object.fromEntries(["venueVerified", "dateVerified", "capacityVerified", "durationVerified", "completeVerified"].map(key => [key, evidence[key] === true])),
-        slotCount: Array.isArray(result?.slots) ? Math.min(result.slots.length, 500) : 0,
-        ...(safeReplayDiagnostic(evidence.diagnostic) ? { diagnostic: safeReplayDiagnostic(evidence.diagnostic) } : {}),
-      } });
+    catch (error) {
+      onReplay({ elapsedMs: Date.now() - replayStarted, challengeIndex, result: discoveryReplayDetails(undefined, error) });
+      throw error;
     }
+    const details = discoveryReplayDetails(result);
+    onReplay({ elapsedMs: Date.now() - replayStarted, challengeIndex, result: details });
+    if (!details.complete) throw discoveryError("DISCOVERY_REPLAY_INCOMPLETE", { details });
     await client.verification(job.id, challenge.id, job.leaseToken, { recipeHash: proposal.recipeHash, input: challenge.input, result }, signal);
   }
   // Stop and drain lease heartbeats before the final compare-and-set retires
@@ -896,7 +913,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
     let catalog;
     try { catalog = restrictedModelCatalog(JSON.parse(snapshot), model); }
     catch (error) {
-      if (error?.code === "DISCOVERY_MODEL_UNAVAILABLE") throw error;
+      if (["DISCOVERY_MODEL_UNAVAILABLE", "DISCOVERY_MODEL_NOT_ALLOWED"].includes(error?.code)) throw error;
       throw discoveryError("DISCOVERY_MODEL_CATALOG_UNAVAILABLE");
     }
     const catalogPath = join(temporary, "model-catalog.json");
@@ -1146,6 +1163,8 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
             ...(feedback ? { details: feedback.details } : {}),
             ...(replayClosedBrowser ? { browserSessionClosed: true,
               hint: "Independent replay closed the discovery browser. Open an already observed public URL to obtain fresh controls before correcting the recipe; the original deadline is unchanged." } : {}),
+            ...(error?.code === "DISCOVERY_REPLAY_INCOMPLETE" && error?.details?.reason === "ADAPTER_IDENTITY_MISMATCH"
+              ? { continuation: "The adapter replay is incomplete because its fresh provider identity does not match the canonical venue. Preserve canonical identity and inspect fresh observed public evidence for a supported browser recipe. This failure does not prove the public surface unsupported or empty. Do not resubmit unchanged metadata or overwrite the canonical address." } : {}),
             ...(message.params.tool === "discovery_browser" && (message.params.arguments?.action === "finish" || error?.code === "BROWSER_SESSION_CLOSED")
               ? { hint: "The browser session is closed. Open an already observed public URL to start a fresh session within the original deadline." } : {}),
             ...(error?.code === "DISCOVERY_SOURCE_NOT_OBSERVED" ? { hint: "Open the official source and follow its public booking link before proposing a changed booking URL." } : {}) }) }] } });

@@ -124,7 +124,7 @@ const job = () => ({ id: "job", leaseToken: "synthetic-lease", attempts: 1, firs
 async function run(options: { engine?: string; actions?: Action[]; checkpoint?: unknown; replayFailure?: boolean;
   snapshot?: (config: Config, input: Record<string, unknown>, index: number) => Record<string, unknown> } = {}) {
   const home = mkdtempSync(join(tmpdir(), "worker-public-assets-")), original = job();
-  writeFileSync(join(home, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }));
+  writeFileSync(join(home, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6.1-sol" }] }));
   writeFileSync(join(home, "auth.json"), "synthetic-test-auth");
   const replies: unknown[] = [], checkpoints: unknown[] = [], browsers: object[] = [], closed: number[] = [];
   const client = { helperEnvironment: () => ({ COURSE_DISCOVERY_BROWSER_TRANSPORT: transport }),

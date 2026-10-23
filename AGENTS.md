@@ -4,8 +4,8 @@ This file is the operating contract for Codex and other coding agents working in
 
 ## Model Preference
 
-- When model choice is available, prefer GPT-6 Astra for inspecting websites and visually assessing browser state.
-- Prefer GPT-6 Sol for code implementation, debugging, tests, and repository changes.
+- Use Sol through the existing ChatGPT/Codex sign-in for browser inspection, implementation, debugging, tests, and workers. The current selected model is GPT-6.1 Sol.
+- Never use Astra or fall back to API-key authentication. Confirm the Sol model and ChatGPT sign-in before launching a worker.
 
 ## Installed Local Reader
 

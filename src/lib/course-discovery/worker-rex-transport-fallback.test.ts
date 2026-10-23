@@ -37,7 +37,7 @@ async function run(options: {
   replay?: () => Promise<unknown>;
 } = {}) {
   const home = mkdtempSync(join(tmpdir(), "rex-worker-fallback-"));
-  writeFileSync(join(home, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }));
+  writeFileSync(join(home, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6.1-sol" }] }));
   writeFileSync(join(home, "auth.json"), "synthetic-test-auth");
   const events: string[] = [], configs: Config[] = [], requests: Array<{ index: number; input: Record<string, unknown> }> = [];
   const checkpoints: Checkpoint[] = [], replies: unknown[] = [], closed: number[] = [];

@@ -199,7 +199,7 @@ describe("bounded discovery supervisor", () => {
     const supervisor = createCourseDiscoverySupervisor({ client, startWorker, prepareWorker, executeRecipe: vi.fn() });
     await supervisor.start();
     expect(client.next).not.toHaveBeenCalled(); expect(startWorker).not.toHaveBeenCalled(); expect(client.fail).not.toHaveBeenCalled();
-    catalog = { models: [{ slug: "gpt-6-astra" }] };
+    catalog = { models: [{ slug: "gpt-6.1-sol" }] };
     await supervisor.tick(); await supervisor.tick();
     expect(client.next).toHaveBeenCalledTimes(2);
     expect(prepareWorker).toHaveBeenCalledTimes(2); // One failed read, one successful immutable snapshot.
@@ -327,7 +327,7 @@ describe("bounded discovery supervisor", () => {
     const firstPickedUpAt = new Date(now - 10_000).toISOString();
     const assigned = { ...job(), firstPickedUpAt, deadlineAt: new Date(Date.parse(firstPickedUpAt) + 900_000).toISOString() };
     const onEvent = vi.fn();
-    const metrics = { model: "gpt-6-astra", tokenUsage: { totalTokens: 400 } };
+    const metrics = { model: "gpt-6.1-sol", tokenUsage: { totalTokens: 400 } };
     const error = Object.assign(new Error("failed"), { code: "DISCOVERY_NO_VERIFIED_RECIPE", discoveryMetrics: metrics });
     const client = { next: vi.fn().mockResolvedValueOnce({ job: assigned }).mockResolvedValue({ job: null }), heartbeat: vi.fn(), fail: vi.fn(async () => ({})) };
     const supervisor = createCourseDiscoverySupervisor({ client, startWorker: async () => { throw error; }, onEvent });
@@ -577,7 +577,7 @@ describe("controller-only verification", () => {
   });
 
   it("removes model execution capabilities and product secrets", () => {
-    const restricted = restrictedModelCatalog({ models: [{ slug: "gpt-6-astra", apply_patch_tool_type: "freeform", shell_type: "unified_exec", experimental_supported_tools: ["clock"] }] });
+    const restricted = restrictedModelCatalog({ models: [{ slug: "gpt-6.1-sol", apply_patch_tool_type: "freeform", shell_type: "unified_exec", experimental_supported_tools: ["clock"] }] });
     expect(restricted.models[0]).toMatchObject({ apply_patch_tool_type: null, shell_type: "disabled", experimental_supported_tools: [], supports_search_tool: false });
     expect(discoveryProcessEnvironment({ PATH: "bin", LOCAL_READER_DEVICE_TOKEN: "private", DATABASE_URL: "private", RESEND_API_KEY: "private", AUTOMATION_API_KEY: "private" })).toEqual({ PATH: "bin" });
   });
@@ -585,7 +585,7 @@ describe("controller-only verification", () => {
   it("pins one restricted catalog before three workers even if the shared cache is replaced", async () => {
     const sourceHome = mkdtempSync(join(tmpdir(), "discovery-catalog-test-"));
     const cache = join(sourceHome, "models_cache.json");
-    writeFileSync(cache, JSON.stringify({ models: [{ slug: "gpt-6-astra", shell_type: "unified_exec", experimental_supported_tools: ["shell"] }, { slug: "other-model" }] }));
+    writeFileSync(cache, JSON.stringify({ models: [{ slug: "gpt-6.1-sol", shell_type: "unified_exec", experimental_supported_tools: ["shell"] }, { slug: "other-model" }] }));
     writeFileSync(join(sourceHome, "auth.json"), "offline-auth-fixture");
     const read = vi.fn((path: string, encoding: BufferEncoding) => readFileSync(path, encoding));
     let modelCatalogJson: string;
@@ -607,7 +607,7 @@ describe("controller-only verification", () => {
       await supervisor.start(); await supervisor.stop();
       expect(prepareWorker).toHaveBeenCalledOnce(); expect(read).toHaveBeenCalledOnce(); expect(startWorker).toHaveBeenCalledTimes(3);
       expect(processFactory).toHaveBeenCalledTimes(3);
-      expect(catalogs).toEqual(Array(3).fill({ models: [expect.objectContaining({ slug: "gpt-6-astra", shell_type: "disabled", experimental_supported_tools: [] })] }));
+      expect(catalogs).toEqual(Array(3).fill({ models: [expect.objectContaining({ slug: "gpt-6.1-sol", shell_type: "disabled", experimental_supported_tools: [] })] }));
       expect(JSON.parse(modelCatalogJson!)).toEqual(catalogs[0]);
     } finally { await supervisor.stop(); rmSync(sourceHome, { recursive: true, force: true }); }
   });
@@ -681,7 +681,7 @@ describe("controller-only verification", () => {
 
   it("reports a redacted model failure without changing the worker failure outcome", async () => {
     const sourceHome = mkdtempSync(join(tmpdir(), "discovery-turn-failure-test-"));
-    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }));
+    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6.1-sol" }] }));
     writeFileSync(join(sourceHome, "auth.json"), "test-auth");
     const client = { candidate: vi.fn(), activate: vi.fn(), helperEnvironment: () => ({}) };
     const processFactory = options => ({ notify: vi.fn(), close: vi.fn(async () => {}), request: async (method: string) => {
@@ -712,7 +712,7 @@ describe("controller-only verification", () => {
 
   it("keeps controller credentials out of model input and rejects model-supplied verification", async () => {
     const sourceHome = mkdtempSync(join(tmpdir(), "discovery-source-test-"));
-    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }));
+    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6.1-sol" }] }));
     writeFileSync(join(sourceHome, "auth.json"), "AUTH_SECRET_SENTINEL");
     const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
     const replies: unknown[] = [];
@@ -751,7 +751,7 @@ describe("controller-only verification", () => {
 
   it("serializes legitimate batched tool calls before independent replay", async () => {
     const sourceHome = mkdtempSync(join(tmpdir(), "discovery-queue-test-"));
-    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }));
+    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6.1-sol" }] }));
     writeFileSync(join(sourceHome, "auth.json"), "test-auth");
     const order: string[] = [];
     const replies: unknown[] = [];
@@ -823,7 +823,7 @@ describe("controller-only verification", () => {
     { context: "one unsupported adapter", failureCode: "UNSUPPORTED_ADAPTER_SOURCE", loading: false },
   ])("cannot terminalize an unsupported report based on $context", async ({ failureCode, loading }) => {
     const sourceHome = mkdtempSync(join(tmpdir(), "discovery-unverified-limit-test-"));
-    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }));
+    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6.1-sol" }] }));
     writeFileSync(join(sourceHome, "auth.json"), "test-auth");
     const checkpoint = vi.fn(async () => ({}));
     const client = { helperEnvironment: () => ({}), checkpoint, candidate: vi.fn(), activate: vi.fn() };
@@ -872,7 +872,7 @@ describe("controller-only verification", () => {
   ])("requires current browser access evidence before an access checkpoint: %j", async ({ observed, failNavigation, reobserve }) => {
     const accessAllowed = observed && (!failNavigation || reobserve);
     const sourceHome = mkdtempSync(join(tmpdir(), "discovery-access-test-"));
-    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }));
+    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6.1-sol" }] }));
     writeFileSync(join(sourceHome, "auth.json"), "test-auth");
     const checkpoint = vi.fn(async () => ({}));
     const client = { helperEnvironment: () => ({}), checkpoint, candidate: vi.fn(), activate: vi.fn() };
@@ -917,7 +917,7 @@ describe("controller-only verification", () => {
 
   it("releases a failed finish and reopens within the original deadline while retaining metrics", async () => {
     const sourceHome = mkdtempSync(join(tmpdir(), "discovery-reset-test-"));
-    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }));
+    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6.1-sol" }] }));
     writeFileSync(join(sourceHome, "auth.json"), "test-auth");
     const inputJob = job();
     const checkpoint = vi.fn(async () => ({}));
@@ -963,7 +963,7 @@ describe("controller-only verification", () => {
   });
   it("retains only trusted iframe admission across reset and retry without granting proposal source proof", async () => {
     const sourceHome = mkdtempSync(join(tmpdir(), "discovery-frame-reset-test-"));
-    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }));
+    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6.1-sol" }] }));
     writeFileSync(join(sourceHome, "auth.json"), "test-auth");
     const official = "https://example.org/", entry = "https://booking.example.org/";
     const excluded = ["https://unmarked.example.org/", "https://diagnostic.example.org/", "https://model.example.org/"];
@@ -1031,7 +1031,7 @@ describe("controller-only verification", () => {
 
   it.each(["PUBLIC_BOOTSTRAP", "PUBLIC_AVAILABILITY"])("keeps %s and successful data reads out of navigation authority across reset and checkpoint resume", async readPurpose => {
     const sourceHome = mkdtempSync(join(tmpdir(), "discovery-bootstrap-authority-"));
-    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }));
+    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6.1-sol" }] }));
     writeFileSync(join(sourceHome, "auth.json"), "test-auth");
     const official = "https://example.org/", bootstrap = readPurpose === "PUBLIC_BOOTSTRAP" ? "https://example.org/App/GlobalTenantSettings" :
       "https://www.sevenrooms.com/api-yoa/availability/widget/range?venue=publicrental&time_slot=12:00&party_size=1&halo_size_interval=16&start_date=10-23-2026&num_days=1&channel=SEVENROOMS_WIDGET&selected_lang_code=en";
@@ -1113,7 +1113,7 @@ describe("controller-only verification", () => {
 
   it.each(["current", "open", "finish", "navigation", "failed-inspect", "failed-replay"])("uses only a current fixed inspection for source evidence (%s)", async invalidation => {
     const sourceHome = mkdtempSync(join(tmpdir(), "discovery-inspector-source-"));
-    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }));
+    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6.1-sol" }] }));
     writeFileSync(join(sourceHome, "auth.json"), "test-auth");
     const officialUrl = "https://example.org/", bookingUrl = "https://booking.example.org/calendar";
     const inputJob = { ...job(), request: { ...job().request, identity: { name: "Public golf", officialUrl, bookingUrl: null } } };
@@ -1174,7 +1174,7 @@ describe("controller-only verification", () => {
 
   it.each([false, true])("requires fresh controls after failed replay and bounds final activation (failure: %s)", async activationFails => {
     const sourceHome = mkdtempSync(join(tmpdir(), "discovery-replay-reopen-"));
-    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }));
+    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6.1-sol" }] }));
     writeFileSync(join(sourceHome, "auth.json"), "test-auth");
     const officialUrl = "https://example.org/";
     const inputJob = { ...job(), request: { ...job().request, identity: { name: "Public golf", officialUrl, bookingUrl: officialUrl } } };
@@ -1257,7 +1257,7 @@ describe("controller-only verification", () => {
 
   it("keeps observed controls usable when a proposal lacks booking-source evidence", async () => {
     const sourceHome = mkdtempSync(join(tmpdir(), "discovery-source-correction-"));
-    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }));
+    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6.1-sol" }] }));
     writeFileSync(join(sourceHome, "auth.json"), "test-auth");
     const inputJob = { ...job(), request: { ...job().request, identity: { name: "Public golf", officialUrl: "https://example.org/", bookingUrl: null } } };
     const candidate = vi.fn(), replies: unknown[] = [];
@@ -1294,7 +1294,7 @@ describe("controller-only verification", () => {
 
   it("keeps the browser open for local validation correction and carries safe feedback to the next attempt", async () => {
     const sourceHome = mkdtempSync(join(tmpdir(), "discovery-validation-test-"));
-    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }));
+    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6.1-sol" }] }));
     writeFileSync(join(sourceHome, "auth.json"), "test-auth");
     const checkpoint = vi.fn(async () => ({}));
     const candidate = vi.fn();
@@ -1352,7 +1352,7 @@ describe("controller-only verification", () => {
 
   it("persists the underlying inspector failure after an observation with passive denials and normal model completion", async () => {
     const sourceHome = mkdtempSync(join(tmpdir(), "discovery-terminal-diagnostic-"));
-    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }));
+    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6.1-sol" }] }));
     writeFileSync(join(sourceHome, "auth.json"), "test-auth");
     const checkpoint = vi.fn(async () => ({}));
     const client = { helperEnvironment: () => ({}), checkpoint };
@@ -1394,7 +1394,7 @@ describe("controller-only verification", () => {
 
   it.each([false, true])("uses only current-context fixed-inspector proof (context reopened: %s)", async reopened => {
     const sourceHome = mkdtempSync(join(tmpdir(), "discovery-proof-context-"));
-    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }));
+    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6.1-sol" }] }));
     writeFileSync(join(sourceHome, "auth.json"), "test-auth");
     const client = { helperEnvironment: () => ({}), checkpoint: vi.fn(async () => ({})) };
     const inputJob = { ...job(), request: { ...job().request, identity: { name: "Public golf", officialUrl: "https://example.org/", bookingUrl: "https://example.org/" } } };
@@ -1433,7 +1433,7 @@ describe("controller-only verification", () => {
 
   it.each([403, 429])("retries HTTP %i only when eligible, with a fixed alternate transport and persisted observations", async status => {
     const sourceHome = mkdtempSync(join(tmpdir(), "discovery-fallback-test-"));
-    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }));
+    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6.1-sol" }] }));
     writeFileSync(join(sourceHome, "auth.json"), "test-auth");
     const configured: Array<{ deadlineAt: string; helperEnvironment: Record<string, string> }> = [];
     const observedUrl = "https://example.org/#teetimes";

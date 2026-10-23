@@ -52,6 +52,15 @@ function reads(recipe: ExistingAdapterRecipe, payload: unknown, html?: string) {
 }
 
 describe("fixed existing adapter recipes", () => {
+  it("rejects a fresh postal-code identity discrepancy before reading availability", async () => {
+    const directory = teeitupDirectory.map(row => ({ ...row, address: row.address.replace("12345", "32801") }));
+    const fetch = teeitupReads([], directory);
+    const result = await executeExistingAdapterRecipe(teeitup, input, { ...deps, fetch });
+    expect(result).toMatchObject({ status: "INCOMPLETE", complete: false, slots: [],
+      evidence: { reason: "ADAPTER_IDENTITY_MISMATCH", venueVerified: false, completeVerified: false } });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(String(fetch.mock.calls[0][0])).toContain("/facilities");
+  });
   it.each(["/", "/teetimes", "/teetimes/"])("inspects and replays an observed V2 %s with exact identity, headers and edited party", async path => {
     const origin = "https://public.book-v2.teeitup.golf", source = { ...teeitup.source, bookingUrl: `${origin}${path}` };
     const fetch = vi.fn<typeof globalThis.fetch>(async (value, init) => {

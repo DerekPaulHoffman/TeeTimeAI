@@ -41,7 +41,7 @@ async function run(options: { actions?: Action[]; mutate?: (value: ReturnType<ty
   let toolsDone = Promise.resolve();
   try {
     const result = await runCourseDiscoveryWorker({ job: { ...original, ...(options.checkpoint ? { checkpoint: options.checkpoint } : {}) },
-      client, cwd: process.cwd(), sourceHome: home, recipeSchema: {}, modelCatalogJson: JSON.stringify({ models: [{ slug: "gpt-6-astra" }] }),
+      client, cwd: process.cwd(), sourceHome: home, recipeSchema: {}, modelCatalogJson: JSON.stringify({ models: [{ slug: "gpt-6.1-sol" }] }),
       resolveCli: () => "synthetic-no-process", inspectProtocol, validateRecipe, executeRecipe, browserFactory,
       processFactory: config => ({ close: async () => {}, notify: () => {}, request: async method => {
         if (method === "thread/start") return { thread: { id: "thread" }, approvalPolicy: "never", sandbox: { type: "readOnly" } };
