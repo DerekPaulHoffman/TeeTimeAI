@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { discoveryError } from "./course-discovery-client.mjs";
 import { safeBrowserActionIssues, safeDiscoveryTurnFailure, safePublicUrlRejectionDiagnostic } from "./course-discovery-diagnostics.mjs";
+import { createDiscoveryPublicAssetInventory } from "./course-discovery-public-assets.mjs";
 
 const VERSION = "0.160.1";
 const BROWSER_ACTIONS = ["open", "observe", "click", "select", "fill", "scroll", "inspect_adapter", "inspect", "finish"];
@@ -696,6 +697,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
   let app;
   let browser;
   let retiringBrowser;
+  const publicAssets = createDiscoveryPublicAssetInventory();
   let activated;
   let activationStarted = false;
   const restoredController = readDiscoveryControllerCheckpoint(job.checkpoint, job.request.identity.officialUrl);
@@ -854,6 +856,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
                 venueAddress: job.request.identity.address,
                 venueOfficialUrl: job.request.identity.officialUrl, initialUrls: initialUrls(),
                 helperEnvironment: browserEnvironment(), signal });
+              publicAssets.begin(browser, browserTransport);
             }
             if (input.action === "open") firstOpenStartedAt ??= new Date().toISOString();
             let snapshot = await browser.request(input);
@@ -868,6 +871,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
               browserTransportsTried.push(browserTransport);
               adapterObservation = undefined; lastBrowserSnapshot = undefined; browserControlsInvalidated = true; currentAccessRequirementObserved = false;
               observedReadUrls.delete(observedDocument); observedEntryUrls.delete(observedDocument); observedNavigationUrls.add(observedDocument); boundObservedUrls();
+              publicAssets.clear();
               retiringBrowser = browser; browser = null;
               try {
                 // Commit the one-way choice before creating or dispatching its
@@ -882,6 +886,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
               browser = browserFactory({ cwd, deadlineAt: job.deadlineAt, timeZone: job.request.input.timeZone, venueName: job.request.identity.name,
                 venueAddress: job.request.identity.address, venueOfficialUrl: job.request.identity.officialUrl,
                 initialUrls: initialUrls(), helperEnvironment: browserEnvironment(), signal });
+              publicAssets.begin(browser, browserTransport);
               browserActions++;
               snapshot = await browser.request({ action: "open", url: observedDocument });
               recordBrowserMetrics(snapshot);
@@ -897,11 +902,13 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
               browserTransport = browserTransport === "NATIVE_CHROME" ? "PINNED_HTTP" : "NATIVE_CHROME";
               browserTransportsTried.push(browserTransport);
               adapterObservation = undefined;
+              publicAssets.clear();
               await browser.close(); lastRequestCount = 0; lastResponseBytes = 0;
               browser = browserFactory({ cwd, deadlineAt: job.deadlineAt, timeZone: job.request.input.timeZone, venueName: job.request.identity.name,
                 venueAddress: job.request.identity.address,
                 venueOfficialUrl: job.request.identity.officialUrl,
                 initialUrls: [...new Set([...initialUrls(), snapshot.url])].slice(-16), helperEnvironment: browserEnvironment(), signal });
+              publicAssets.begin(browser, browserTransport);
               browserActions++;
               snapshot = await browser.request({ action: "open", url: snapshot.url });
               recordBrowserMetrics(snapshot);
@@ -934,6 +941,9 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
             if (input.action === "inspect_adapter")
               adapterObservation = createDiscoveryAdapterObservation(job, input.url, snapshot?.adapter, snapshot?.url);
             lastBrowserSnapshot = snapshot;
+            // Collect trusted completed metadata before model compaction. The
+            // private inventory never survives a browser/transport lifetime.
+            publicAssets.observe(browser, snapshot);
             if (input.action === "open") browserControlsInvalidated = false;
             currentAccessRequirementObserved = snapshot?.accessRequirementObserved === true;
             const browserFeedback = discoveryBrowserFeedback(snapshot, input.action);
@@ -944,6 +954,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
             if (input.action === "open") firstOpenCompletedAt ??= new Date().toISOString();
             result = compactSnapshot(snapshot);
             if (input.action === "finish") {
+              publicAssets.clear();
               await browser.close(); browser = null;
               browserControlsInvalidated = true; lastBrowserSnapshot = undefined; currentAccessRequirementObserved = false;
             }
@@ -971,7 +982,10 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
             if (!input?.recipe || Object.keys(input).some(key => key !== "recipe") || activated) throw discoveryError("DISCOVERY_PROPOSAL_INVALID");
             let recipe = bindDiscoveryRecipeIdentity(input.recipe, job, adapterObservation, lastBrowserSnapshot?.url);
             const actualBrowserTransport = browser && !browserControlsInvalidated && lastBrowserSnapshot?.browserTransport === browserTransport ? browserTransport : undefined;
-            if (["BROWSER_DOM", "BROWSER_JSON"].includes(recipe?.engine) && actualBrowserTransport) recipe = bindDiscoveryRecipeBrowserTransport(recipe, actualBrowserTransport);
+            if (["BROWSER_DOM", "BROWSER_JSON"].includes(recipe?.engine) && actualBrowserTransport) {
+              recipe = bindDiscoveryRecipeBrowserTransport(recipe, actualBrowserTransport);
+              recipe = publicAssets.enrich(recipe, browser, actualBrowserTransport);
+            }
             const validation = await validateRecipe({ recipe, signal });
             if (validation.valid !== true) throw discoveryError("DISCOVERY_RECIPE_INVALID", { details: { issues: validation.issues } });
             const proposedUrl = recipe.source?.bookingUrl;
@@ -983,6 +997,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
             // Schema/source rejection above leaves the current controls usable.
             // Independent replay closes discovery's session. Its opaque controls
             // and access observations cannot survive that close, even on failure.
+            publicAssets.clear();
             await browser?.close(); browser = null;
             replayClosedBrowser = true; browserControlsInvalidated = true;
             lastBrowserSnapshot = undefined; currentAccessRequirementObserved = false;
@@ -999,6 +1014,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
           else if (terminalOutcome) rejectTurn(discoveryError(`DISCOVERY_${terminalOutcome}`));
         } catch (error) {
           if (message.params.tool === "discovery_browser") adapterObservation = undefined;
+          if (error?.code === "BROWSER_SESSION_CLOSED") publicAssets.clear();
           const feedback = safeLastFeedback({ code: error?.code, details: error?.details }) ??
             (message.params.tool === "discovery_browser" ? discoveryBrowserFeedback(
               safeBrowserFailureDiagnostics(error?.details?.browserDiagnostics) ?? lastBrowserSnapshot, message.params.arguments?.action, error) : undefined);
@@ -1015,6 +1031,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
           // finish must release even a helper whose page closed before it could
           // produce its final snapshot. Keep the job clock and observed URLs.
           if (message.params.tool === "discovery_browser" && message.params.arguments?.action === "finish") {
+            publicAssets.clear();
             await browser?.close().catch(() => {}); browser = null;
             browserControlsInvalidated = true; lastBrowserSnapshot = undefined; currentAccessRequirementObserved = false;
           }
@@ -1034,7 +1051,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
         "Use public signed-out pages to identify the exact venue and requested offering. For simulator requests identify whole-bay golf rentals, excluding lessons, events and non-golf resources.",
         "The controller owns recipe target and source.venueName, source.venueAddress, source.officialUrl, and source.timeZone: it copies those fields exactly from this job before validation. Keep the job's canonical values; do not rename the venue to match a page heading. You discover the access method and observed public bookingUrl. Independent replay must still prove the canonical venue against the actual public page.",
         "For OUTDOOR availability, set the requested date and, when offered, the requested player filter before the final search; verify their displayed or actual request values. A default larger party filter can omit valid openings. Parameterize the player filter with {{players}}; a public count combobox can select exact visible '2 Players' options without invented DOM values. Use proof.players format INTEGER for a displayed '2 Players' count. If each public offered row displays a bare inclusive range such as 2-4 directly beside its person icon, slots.availableSpots may explicitly use PUBLIC_PARTY_RANGE; this DOM-only operation verifies that context and preserves both bounds. Sources without a player filter still require complete per-row eligible-party evidence. Input selection alone never proves capacity or completeness.",
-        "A public MemberSports /tee-times/<club>/<course>/0 page supports the closed BROWSER_JSON MEMBERSPORTS_PUBLIC_TEE_SHEET binding. It requires OUTDOOR, NATIVE_CHROME, canonical venueAddress, the exact public POST onlineBookingTeeTimes with ISO JSON_BODY date, and fresh official same-address/exact-booking-anchor proof via openOfficialBooking. Start at the observed official page (follow an observed same-site link if needed), wait for its observed address/link selectors, then openOfficialBooking navigates that actual href in this context. Afterwards use only date controls. The fixed runtime validates the full original root-array and current public metadata against all rendered groups/cards; it derives front/back capacity and minimum/singles restrictions, ignoring wire availableCount. It requires no fabricated success scalar or DOM ready flag and permits no voucher or account action. proof is venue {officialBookingLink:true}, date {availabilityRequestDate:true}, complete {publicTeeSheet:true}; there are no uploaded extraction paths or generic slots in this binding. Unsupported/malformed rules remain incomplete. Never infer this binding from a provider name alone; observe the exact official link, public request and rendered evidence.",
+        "A public MemberSports /tee-times/<club>/<course>/0 page supports the closed BROWSER_JSON MEMBERSPORTS_PUBLIC_TEE_SHEET binding. It requires OUTDOOR, NATIVE_CHROME, canonical venueAddress, the exact public POST onlineBookingTeeTimes with ISO JSON_BODY date, and fresh official same-address/exact-booking-anchor proof via openOfficialBooking. Start at the observed official page (follow an observed same-site link if needed), wait for its observed address/link selectors, then openOfficialBooking navigates that actual href in this context. The address selector may identify an observed flat full-address leaf or DIV.h-adr with a direct Physical Address STRONG and the four postal SPAN roles; use only observed selectors, never invent a split-address join. The complete canonical address and fresh unique exact booking href remain required. Afterwards use only date controls. The fixed runtime validates the full original root-array and current public metadata against all rendered groups/cards; it derives front/back capacity and minimum/singles restrictions, ignoring wire availableCount. It requires no fabricated success scalar or DOM ready flag and permits no voucher or account action. proof is venue {officialBookingLink:true}, date {availabilityRequestDate:true}, complete {publicTeeSheet:true}; there are no uploaded extraction paths or generic slots in this binding. Unsupported/malformed rules remain incomplete. Never infer this binding from a provider name alone; observe the exact official link, public request and rendered evidence.",
         "An observed native date button with one Date-labelled DIV and one bounded displayed-date DIV can use clickFilter OPEN_DATE_PICKER with static text Date. The changing display is not selected-date proof; subsequently use the independently verified full-date calendar operation. Do not hardcode today's date into the opener label.",
         "Simulator players are saved attendee context, not simultaneous tee-sheet spots or a number of bays. Select one bay if the widget requires a resource quantity. Generic recipes must not use players as a bay or availability quantity; fixed typed adapters and the explicit BROWSER_JSON verified participant binding apply attendee filters only when the fixed runtime proves that provider's people-versus-resource semantics. Respect a published whole-bay capacity when present, but never infer one: unknown capacity remains unknown and does not block observing whole-bay availability. Parameterize the requested duration.",
         `The initial browser transport is ${browserTransport}. A main-document HTTP403 or a fixed controller policy may trigger one shared trusted transport fallback. The controller binds BROWSER_DOM and BROWSER_JSON recipes to the actual latest browser transport, including after a fallback. HTTP429 does not trigger a fallback.`,
@@ -1049,7 +1066,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
         "Parameterize the request date and supported duration with {{date}}, {{day}}, {{month}}, {{year}}, {{durationMinutes}} and other schema templates. Do not hardcode today's calendar position or the sample day. Date proof must read an actual full-date element or supported attribute, not assume the requested date.",
         "A returned readonly calendar input opens with click, never fill; save clickFilter OPEN_DATE_PICKER with its exact observed label or placeholder. For explicit full date labels, use selectDateChoice with one reusable selector for sibling date buttons, numeric grid buttons, or observed TD role=button tabindex=0 cells inside a table role=presentation calendar. The TD form requires a full correct weekday/month/ordinal day/year aria-label ending ', Available', matching numeric text and a bounded consecutive calendar; it is not a button-only capability. Prefer this existing action when the full date is already proved; do not substitute selectDate or generic SELECT_DATE merely because the cell is a TD. Month-navigation controls must independently fit selectDate's own interpreter. For a supported calendar SELECT_DATE step, use its bounded reusable day selector and text {{day}}. The executor requires one visible requested date; do not use a fixed nth-position. If the picker requires Apply after the day, add clickFilter APPLY_DATE inside the same calendar. A generic confirmation dialog is not a date picker.",
         "The select step controls a native HTML select, a labelled public role=combobox, or a verified focusable dropdown with an adjacent PLAYERS/DURATION label. For a returned custom Duration filter use select with option equal to requested minutes (for example 60); the fixed driver opens its list, verifies the exact displayed option and reads back the selection. Simulator PLAYERS remains one bay. Other custom controls need explicit clickFilter open/option steps. Use selectDate when its bounded calendar interpreter fits the observed calendar.",
-        "BROWSER_DOM permittedRoutes must include every observed required document, script, stylesheet and public data bootstrap route, using exact origins, bounded path prefixes and query key names. Static assets are not implicitly permitted. Exclude incidental analytics where the page works without them. Public anonymous-read POST bodies are shown only after the fixed policy authorizes them; do not invent endpoints or body fields.",
+        "For BROWSER_DOM and BROWSER_JSON, declare observed required document and public data/bootstrap permittedRoutes with exact origins, bounded paths and query key names. The controller adds successful current-session public GET scripts/styles as exact-path, exact-resource-type routes before validation; do not guess asset hashes, wildcard prefixes or query values. That inventory is lost when the browser closes or changes transport. It grants no data or navigation route. Exclude incidental analytics where the page works without them. Public anonymous-read POST bodies are shown only after the fixed policy authorizes them; do not invent endpoints or body fields.",
         "Every BROWSER_DOM recipe requires availabilityResponse identifying the observed availability request URL, method, and date binding in QUERY or JSON_BODY. It must complete successfully for the exact requested date after input changes. Normally select duration/player filters before the final date-triggered read. For the exact public PassFactory widget only, ordinary select-DURATION may follow date selection: the fixed runtime independently verifies its pinned client code and prior successful day response before supporting that client-only filter. Do not invent a bypass flag. A changed sidebar date or visible body is not completion. Use proof.complete {availabilityResponse:true} only with an observed JSON success path/value in availabilityResponse.success (an HTTP200 alone does not prove application success), or read an explicit DOM ready/loaded/complete field. Simulator slots.scope must identify actual resource cards with a direct child label, not a broad ancestor wrapping multiple resources.",
         "BROWSER_JSON uses the same bounded browser actions and fresh completed availabilityResponse, then reads its actual JSON inventory through responseRows paths. Use it for an observed date-keyed map of groups and time arrays instead of inventing DOM resource cards. Supply the observed application success scalar, whole-venue visible identity, public rental label, start-time and per-row duration paths. The fixed runtime validates the requested date, every eligible row, resource identity and complete requested-window coverage; sampled schema counts alone cannot prove inventory or an empty result. The closed SEVENROOMS_PUBLIC_PARTICIPANTS binding verifies people, requested duration and coverage from the exact public range request; only that opt-in permits {{players}} as attendees. Include the observed attendee-selection actions so a different requested player count changes the real request; templating its expected URL alone does not change the browser's selected attendees. Request-only times never become bookable openings. Missing or malformed evidence remains incomplete.",
         "For an OUTDOOR page that returns its complete availability in the dated main-document HTML itself, availabilityResponse kind SERVER_DOCUMENT and proof.complete {serverDocument:true} are available. The interpreter requires a fresh successful full HTML document GET bound to the requested date, and compares venue, date, capacity and every extracted row against the inert original response. A client-rendered grid, a container alone, incomplete HTML, later data loads or pagination cannot use this proof. Do not invent per-slot player capacity when the page only states a general group limit.",
@@ -1088,6 +1105,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
     throw error;
   } finally {
     stopping = true;
+    publicAssets.clear();
     if (app && threadId && turnId) await app.request("turn/interrupt", { threadId, turnId }).catch(() => {});
     await retiringBrowser?.close().catch(() => {});
     await browser?.close();
