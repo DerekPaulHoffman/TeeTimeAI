@@ -93,7 +93,8 @@ export function recipeExecutionDiagnostic(error: unknown, context: { stepIndex?:
     const url = new URL(context.url ?? ""); url.search = ""; url.hash = "";
     if (accessExecutionDiagnosticSchema.safeParse({ code, url: url.href }).success) diagnostic.url = url.href;
     else if ((context.url?.length ?? 2049) <= 2048 && url.protocol === "https:" && !url.username && !url.password && !url.port &&
-        diagnostic.method === "GET" && ["script", "stylesheet"].includes(diagnostic.resourceType ?? ""))
+        (diagnostic.method === "GET" && ["script", "stylesheet"].includes(diagnostic.resourceType ?? "") ||
+          diagnostic.method === "OPTIONS" && ["xhr", "fetch"].includes(diagnostic.resourceType ?? "") && url.origin === "https://api.membersports.com"))
       diagnostic.requestUrlFingerprint = { originSha256: createHash("sha256").update(url.origin, "utf8").digest("hex"),
         pathnameSha256: createHash("sha256").update(url.pathname, "utf8").digest("hex") };
   } catch { /* No unsafe or unparseable URL enters diagnostic feedback. */ }

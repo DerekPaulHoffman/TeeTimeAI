@@ -421,7 +421,7 @@ const accessRequestFailureDiagnosticSchema = z.object({
   }).optional(),
   method: z.enum(["GET", "HEAD", "POST", "OPTIONS"]).optional(),
   resourceType: z.enum(["document", "stylesheet", "image", "media", "font", "script", "xhr", "fetch", "other"]).optional(),
-  requestUrlFingerprint: requestUrlFingerprintSchema.optional().describe("Opaque hashes of the parsed HTTPS origin and exact pathname when a GET script or stylesheet failure has no safe diagnostic URL. No query, fragment, or request authority."),
+  requestUrlFingerprint: requestUrlFingerprintSchema.optional().describe("Opaque hashes of the parsed HTTPS origin and exact pathname when a GET script/stylesheet or exact MemberSports API OPTIONS xhr/fetch failure has no safe diagnostic URL. No query, fragment, or request authority."),
   publicHeaderDiagnostic: publicHeaderFailureDiagnosticSchema.optional().describe("Closed facts captured at an unchanged native public-read header denial. These facts never authorize requests or prove the cause of a later timeout."),
 }).strict();
 export const accessExecutionDiagnosticSchema = accessRequestFailureDiagnosticSchema.extend({
@@ -439,9 +439,11 @@ export const accessExecutionDiagnosticSchema = accessRequestFailureDiagnosticSch
   }).strict().optional(),
 }).strict().superRefine((diagnostic, ctx) => {
   for (const [value, path] of [[diagnostic, []], [diagnostic.earlierRequestFailure, ["earlierRequestFailure"]]] as const)
-    if (value?.requestUrlFingerprint && (value.url !== undefined || value.method !== "GET" ||
-        !["script", "stylesheet"].includes(value.resourceType ?? "")))
-      ctx.addIssue({ code: "custom", message: "Opaque request fingerprints require an omitted URL and GET script or stylesheet context", path: [...path, "requestUrlFingerprint"] });
+    if (value?.requestUrlFingerprint && (value.url !== undefined ||
+        !(value.method === "GET" && ["script", "stylesheet"].includes(value.resourceType ?? "") ||
+          value.method === "OPTIONS" && ["xhr", "fetch"].includes(value.resourceType ?? "") &&
+            value.requestUrlFingerprint.originSha256 === "07d5b602615adc5f5bfe294da649ad8ea2bc56435231b8f0778cd4aeb73a667e")))
+      ctx.addIssue({ code: "custom", message: "Opaque request fingerprints require an omitted URL and eligible GET asset or exact MemberSports API OPTIONS data context", path: [...path, "requestUrlFingerprint"] });
 });
 export type AccessExecutionDiagnostic = z.infer<typeof accessExecutionDiagnosticSchema>;
 

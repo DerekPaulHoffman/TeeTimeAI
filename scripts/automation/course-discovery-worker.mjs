@@ -175,8 +175,12 @@ export function readDiscoveryControllerCheckpoint(checkpoint, officialUrl) {
 }
 function copyRequestUrlFingerprint(source, target) {
   const fingerprint = source.requestUrlFingerprint;
-  if (!target.url && target.method === "GET" && ["script", "stylesheet"].includes(target.resourceType) &&
+  if (!target.url &&
       fingerprint && typeof fingerprint === "object" && !Array.isArray(fingerprint) &&
+      (target.method === "GET" && ["script", "stylesheet"].includes(target.resourceType) ||
+        target.method === "OPTIONS" && ["xhr", "fetch"].includes(target.resourceType) &&
+          fingerprint.originSha256 === "07d5b602615adc5f5bfe294da649ad8ea2bc56435231b8f0778cd4aeb73a667e" &&
+          Object.keys(fingerprint).sort().join(",") === "originSha256,pathnameSha256") &&
       ["originSha256", "pathnameSha256"].every(key => Object.hasOwn(fingerprint, key) && typeof fingerprint[key] === "string" && /^[a-f0-9]{64}$/u.test(fingerprint[key])))
     target.requestUrlFingerprint = { originSha256: fingerprint.originSha256, pathnameSha256: fingerprint.pathnameSha256 };
 }
