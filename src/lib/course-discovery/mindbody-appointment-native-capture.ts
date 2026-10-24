@@ -75,6 +75,12 @@ function catalogComparisonDiagnostic(raw: CatalogProjection, rendered: CatalogPr
     resources: JSON.stringify(raw.resources) === JSON.stringify(rendered.resources) },
     rawCounts: counts(raw), renderedCounts: counts(rendered), rawTextLengths: lengths(raw), renderedTextLengths: lengths(rendered) };
 }
+function catalogSemanticKey(value: CatalogProjection) {
+  // Whole-page text includes unrelated client-rendered notices. Keep it in
+  // the raw parser and diagnostics; the bound catalog uses these exact fields.
+  return JSON.stringify({ title: value.title, locationId: value.locationId, studioId: value.studioId, venueAddress: value.venueAddress,
+    categories: value.categories, services: value.services, resources: value.resources });
+}
 /** Native bytes are interpreted outside the provider's JavaScript realm. */
 export function projectMindbodySearchCatalog(html: string): CatalogProjection {
   if (Buffer.byteLength(html) > 2_000_000 || !/<\/body\s*>/iu.test(html) || !/<\/html\s*>/iu.test(html)) throw new Error("MINDBODY_CATALOG_DOCUMENT_INCOMPLETE");
@@ -122,7 +128,7 @@ export function createMindbodyAppointmentNativeCapture(options: { page: Page; so
   let revision = 0, nativeDocument: NativeDocument | undefined, formIntent: MindbodyPublicFormIntent | undefined;
   let documentStartedAt = Date.now(), lastReadyTimeOrigin: number | undefined;
   let diagnostic: CaptureDiagnostic = { stage: "IDLE", elapsedMs: 0, nativeDocumentCurrent: false, pendingReads: 0 };
-  let catalog: MindbodyCatalogEvidence | undefined, catalogDocument: NativeDocument | undefined, savedCatalogProjection: string | undefined;
+  let catalog: MindbodyCatalogEvidence | undefined, catalogDocument: NativeDocument | undefined, savedCatalogSemanticKey: string | undefined;
   let catalogBusy = false, gridBusy = false, navigationPhase: "BROWSE" | "DAY" | undefined;
   function active() { options.assertActive(); if (!options.native || !source || !descriptor || !options.requestedInput?.durationMinutes)
     throw new Error("MINDBODY_NATIVE_CONTEXT_REQUIRED"); }
@@ -230,7 +236,7 @@ export function createMindbodyAppointmentNativeCapture(options: { page: Page; so
       // Closed scalar diagnostics identify divergence without retaining page
       // text, IDs, routing values, form values, URLs or provider credentials.
       diagnostic.catalogComparison = catalogComparisonDiagnostic(raw, visible);
-      if (JSON.stringify(raw) !== JSON.stringify(visible)) throw new Error("MINDBODY_CATALOG_RAW_VISIBLE_MISMATCH");
+      if (catalogSemanticKey(raw) !== catalogSemanticKey(visible)) throw new Error("MINDBODY_CATALOG_RAW_VISIBLE_MISMATCH");
       if (!current(doc)) return;
       doc.readyTimeOrigin = rendered.timeOrigin; lastReadyTimeOrigin = rendered.timeOrigin;
       diagnostic.stage = "CATALOG_READY";
@@ -283,7 +289,7 @@ export function createMindbodyAppointmentNativeCapture(options: { page: Page; so
   }
   async function currentCatalog() {
     const selected = await settledSearch();
-    if (!catalog || selected.doc !== catalogDocument || JSON.stringify(selected.projection) !== savedCatalogProjection)
+    if (!catalog || selected.doc !== catalogDocument || catalogSemanticKey(selected.projection) !== savedCatalogSemanticKey)
       throw new Error("MINDBODY_CATALOG_CHANGED");
     await assertRenderedCatalog(selected.projection);
     if (!current(selected.doc)) throw new Error("MINDBODY_CATALOG_CHANGED");
@@ -336,7 +342,7 @@ export function createMindbodyAppointmentNativeCapture(options: { page: Page; so
       catalog = { captureId, url: page.url(), venueName: selected.title, venueAddress: selected.venueAddress, studioId: selected.studioId,
         locationId: selected.locationId, category: category[0] as MindbodyCatalogEvidence["category"], service: service[0] as MindbodyCatalogEvidence["service"],
         resources: selected.resources as MindbodyCatalogEvidence["resources"] };
-      catalogDocument = completed.doc; savedCatalogProjection = JSON.stringify(selected);
+      catalogDocument = completed.doc; savedCatalogSemanticKey = catalogSemanticKey(selected);
       return structuredClone(catalog);
     } finally { catalogBusy = false; }
   }
@@ -454,6 +460,6 @@ export function createMindbodyAppointmentNativeCapture(options: { page: Page; so
       } finally { gridBusy = false; navigationPhase = undefined; }
     },
     close() { formIntent?.revoke(); formIntent = undefined; nativeDocument = undefined; catalog = undefined; catalogDocument = undefined;
-      savedCatalogProjection = undefined; navigationPhase = undefined; revision++; },
+      savedCatalogSemanticKey = undefined; navigationPhase = undefined; revision++; },
   };
 }

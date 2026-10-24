@@ -156,7 +156,7 @@ describe("native Mindbody private capture currency and rendered proof", () => {
     if (mode === "unchecked selection") await expect(f.capture.readCatalog()).rejects.toThrow();
     else await expect(f.capture.readCatalog()).rejects.toThrow("MINDBODY_CATALOG_NOT_VISIBLE"); f.close();
   });
-  it("exercises actual19-field category and30-field service transitions into the hidden checked rows", async () => {
+  it.each([false, true])("exercises actual19-field category and30-field service transitions with unrelated body text delta: %s", async withTextDelta => {
     const footer = '<footer>OnPar Now - Site ID: 685163<br>1669 Smallman Street The Terminal Building, Pittsburgh PA 15222</footer>';
     const wrap = (body: string) => '<html><head><title>OnPar Now</title></head><body>' + body + footer + '</body></html>';
     const categoryHtml = wrap('<form name="frmApptSearch" action="' + url + '" method="post">' + categoryObserved.fields.filter(row => row.name !== "optTG").map(row =>
@@ -168,15 +168,29 @@ describe("native Mindbody private capture currency and rendered proof", () => {
       '<table>' + selectedObserved.rows[0].rowHtml + (selected ? selectedObserved.rows[1].rowHtml : '<tr><td><input type="radio" name="optVT" value="" checked></td></tr>' +
         selectedObserved.rows[1].rowHtml.replace(/checked=""/u, "").replace(/style="[^"]*"/u, "")) + '</table>' +
       '<select name="optTrnID"><option value="">All instructors</option><option value="100000001">1 Simulator</option><option value="100000002">2 Simulator</option></select></form>');
-    load(categoryHtml); const f = fixture(); f.currentUrl(categoryObserved.sourceUrl); f.complete(undefined, categoryHtml); const shapes: number[] = [];
+    const addUnrelatedText = () => { if (withTextDelta) { const span = document.createElement("span"); span.textContent = "Public display message update"; document.querySelector("footer")!.before(span); } };
+    load(categoryHtml); addUnrelatedText(); const f = fixture(); f.currentUrl(categoryObserved.sourceUrl); f.complete(undefined, categoryHtml); const shapes: number[] = [];
+    const comparisons: NonNullable<ReturnType<typeof f.capture.diagnostics>["catalogComparison"]>[] = [];
     f.onClick(selector => {
+      comparisons.push(f.capture.diagnostics().catalogComparison!);
       const node = document.querySelector(selector) as HTMLInputElement; node.checked = true;
       const fields = new URLSearchParams(); for (const [key, value] of new FormData(node.form!)) fields.append(key, String(value));
       const intent = f.capture.formIntent(f.page.url(), url)!; expect(intent).toBeDefined(); expect(intent.matches(fields.toString(), "application/x-www-form-urlencoded")).toBe(true); expect(intent.consume()).toBe(true);
       shapes.push([...fields].length); const next = serviceHtml(node.name === "optVT"), prior = f.currentOrigin(); f.currentUrl(url); f.complete(undefined, next); const nextOrigin = f.currentOrigin();
-      f.ready("loading"); f.origin(prior); f.onWait(() => { load(next); f.ready("complete"); f.origin(nextOrigin); });
+      f.ready("loading"); f.origin(prior); f.onWait(() => { load(next); addUnrelatedText(); f.ready("complete"); f.origin(nextOrigin); });
     });
-    const value = await f.capture.readCatalog(); expect(shapes).toEqual([19, 30]); expect(value.service.id).toBe("5"); expect(value.category.id).toBe("2"); f.close();
+    const value = await f.capture.readCatalog(); expect(shapes).toEqual([19, 30]); expect(value.service.id).toBe("5"); expect(value.category.id).toBe("2");
+    if (withTextDelta) {
+      expect(comparisons[0]).toMatchObject({ fieldsEqual: { title: true, bodyText: false, locationId: true, studioId: true, venueAddress: true,
+        categories: true, services: true, resources: true }, rawCounts: { categories: 3, services: 0, resources: 0 }, renderedCounts: { categories: 3, services: 0, resources: 0 } });
+      expect(comparisons[0].renderedTextLengths.bodyText - comparisons[0].rawTextLengths.bodyText).toBe(30);
+      // Cached reads must use the same semantic key while retaining the exact
+      // native document, selected visibility and time-origin checks.
+      expect(await f.capture.readCatalog()).toEqual(value);
+      const nextNotice = document.createElement("span"); nextNotice.textContent = "Another public display notice"; document.querySelector("footer")!.before(nextNotice);
+      expect(await f.capture.readCatalog()).toEqual(value);
+    }
+    f.close();
   });
   it("waits for loading/interactive render transitions before projecting the new native catalog", async () => {
     const f = fixture(); f.complete(); f.ready("loading"); f.rendered("<html><head></head>"); let waits = 0;
@@ -231,7 +245,6 @@ describe("native Mindbody private capture currency and rendered proof", () => {
   });
   it.each([
     ["title", "<title>OnPar Now</title>", "<title>PRIVATE_DIAGNOSTIC_SENTINEL</title>"],
-    ["bodyText", "</form>", "</form><p>PRIVATE_DIAGNOSTIC_SENTINEL</p>"],
     ["locationId", 'name="optLoc" value="1"', 'name="optLoc" value="99"'],
     ["studioId", "Site ID: 685163", "Site ID: 685164"],
     ["venueAddress", "Pittsburgh PA 15222", "PRIVATE_DIAGNOSTIC_SENTINEL"],
@@ -252,10 +265,10 @@ describe("native Mindbody private capture currency and rendered proof", () => {
       for (const length of Object.values(lengths)) expect(Number.isSafeInteger(length) && length >= 0 && length <= 2_000_000).toBe(true);
     f.close();
   });
-  it("records only whole-text divergence for a changed public footer clock and keeps rejecting", async () => {
+  it("records whole-text-only divergence without rejecting an otherwise identical catalog", async () => {
     const html = searchHtml().replace("<footer>", "<p>6:05:14 pm</p><footer>"); load(html);
     const f = fixture(); f.complete(undefined, html.replace("6:05:14 pm", "6:05:15 pm"));
-    await expect(f.capture.readCatalog()).rejects.toThrow("MINDBODY_CATALOG_RAW_VISIBLE_MISMATCH");
+    expect((await f.capture.readCatalog()).service.id).toBe("5");
     const comparison = f.capture.diagnostics().catalogComparison!;
     expect(Object.entries(comparison.fieldsEqual).filter(([, equal]) => !equal).map(([field]) => field)).toEqual(["bodyText"]);
     expect(comparison.rawTextLengths).toEqual(comparison.renderedTextLengths); f.close();
