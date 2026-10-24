@@ -965,11 +965,10 @@ export async function createCourseDiscoveryBrowserSession(input: {
     }
     return Date.now() - startedAt;
   };
-  const snapshotOnce = async (settleInitialContent = false): Promise<DiscoveryBrowserSnapshot> => {
+  const snapshotOnce = async (settleInitialContent = false, officialIdentityOnly = false): Promise<DiscoveryBrowserSnapshot> => {
     deadline.throwIfAborted();
     if (closed) throw new Error("BROWSER_CLOSED");
-    controls.clear();
-    observedElements.clear();
+    if (!officialIdentityOnly) { controls.clear(); observedElements.clear(); }
     await page.waitForTimeout(Math.min(300, Math.max(1, input.deadlineAt.getTime() - Date.now())));
     const initialContentWaitMs = settleInitialContent ? await waitForInitialContent() : 0;
     // A public app may change its route without making a document request.
@@ -977,7 +976,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     const actualCurrentUrl = page.url();
     const documentStartedAt = await page.evaluate(() => performance.timeOrigin);
     const currentUrl = normalizeDiscoveryNavigationUrl(actualCurrentUrl);
-    if (isSafeRecipeUrl(currentUrl) && navigationOrigins.has(new URL(currentUrl).origin)) {
+    if (!officialIdentityOnly && isSafeRecipeUrl(currentUrl) && navigationOrigins.has(new URL(currentUrl).origin)) {
       allowedNavigation.add(currentUrl);
       passfactory.observeWidgetUrl(currentUrl);
     }
@@ -1024,6 +1023,19 @@ export async function createCourseDiscoveryBrowserSession(input: {
           addressTexts: [...visibleEvidence.addressTexts,...publicContactBlocks.map(block=>`${block.street}, ${block.locality}, ${block.region} ${block.postalCode}`)],
           ...(publicContactBlocks.length ? { publicContactBlocks } : {}) }, observedAt: Date.now(), documentStartedAt,
           browserTransport: deps.browserTransport ?? "PINNED_HTTP" };
+    }
+    if (officialIdentityOnly) {
+      // The private reader needs this fresh identity capture, not the public
+      // control/calendar inventory that can consume its five-second lifetime.
+      const finalDocumentStartedAt = await page.evaluate(() => performance.timeOrigin);
+      if (page.url() !== actualCurrentUrl || documentStartedAt !== finalDocumentStartedAt)
+        throw new Error("DISCOVERY_SNAPSHOT_CHANGED");
+      return { url: currentUrl, text, controls: [], elements: [], frames: [], responses: [], requests: [],
+        officialSourceDiagnostic: officialDiagnostics(), loading: pendingReadCount() > 0,
+        blockedRequests, requestCount, interceptCount, responseBytes, startupMs, pendingRequestCount: pendingReadCount(),
+        ...(redirectRouting?.firstFatal ? { nativeFirstFatal: redirectRouting.firstFatal } : {}),
+        ...(navigation && sameDiscoveryMainDocument(navigation.url, actualCurrentUrl) ? { navigationStatus: navigation.status } : {}),
+        browserTransport: deps.browserTransport ?? "PINNED_HTTP", accessRequirementObserved: blockedAccess };
     }
     const visible: DiscoveryBrowserSnapshot["controls"] = [];
     const candidates: Array<{ locator: Locator; date?: string; dropdown?: PublicDropdownProof; menuButton?: PublicMenuButtonProof }> = (await controlCandidates()).map(locator => ({ locator }));
@@ -1123,15 +1135,16 @@ export async function createCourseDiscoveryBrowserSession(input: {
       ...(navigation && sameDiscoveryMainDocument(navigation.url, actualCurrentUrl) ? { navigationStatus: navigation.status } : {}),
       browserTransport: deps.browserTransport ?? "PINNED_HTTP", accessRequirementObserved: blockedAccess };
   };
-  const snapshot = async (settleInitialContent = false): Promise<DiscoveryBrowserSnapshot> => {
+  const snapshot = async (settleInitialContent = false, officialIdentityOnly = false): Promise<DiscoveryBrowserSnapshot> => {
     for (let attempt = 0; ; attempt++) {
       try {
-        const result = await snapshotOnce(settleInitialContent);
+        const result = await snapshotOnce(settleInitialContent, officialIdentityOnly);
         // A committed page can be readable while resources are pending. That
         // does not permit a concurrent fatal guard or closed session to pass.
         if (terminalFailure) throw new Error(terminalFailure);
         deadline.throwIfAborted();
         if (closed) throw new Error("BROWSER_CLOSED");
+        if (officialIdentityOnly) return result;
         const safe = modelSafe(result);
         const entries = [...completedPublicAssets].filter(([key]) => !deliveredPublicAssets.has(key));
         // Snapshot retries and later inspect/adapter work cannot acknowledge
@@ -1258,7 +1271,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     // Controller-only methods; intentionally absent from action/tool schemas.
     async readOfficialIdentityPage(): Promise<OfficialIdentityPage> {
       lastOfficialIdentityReadDiagnostic = undefined;
-      const current = await snapshot();
+      const current = await snapshot(false, true);
       // Fresh raw/current-document and rendered capture own this witness.
       // Unrelated admitted resources may still be pending; network idle is
       // neither identity proof nor a prerequisite for this one-page read.

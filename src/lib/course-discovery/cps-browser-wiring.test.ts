@@ -237,7 +237,7 @@ describe.runIf(existsSync(chrome))("offline CPS discovery and deterministic brow
     } finally { await session.close(); }
   }, 30_000);
 
-  it("reports the unchanged private five-second freshness failure after slow current-document inventory without exposing proof values", async () => {
+  it("keeps private identity fresh while the unchanged general inventory is slow and rejects newly hidden identity", async () => {
     const bookingUrl = "https://sc.cps.golf/onlineresweb/search-teetime";
     respond = url => url === official ? { body: `<html><head><title>Offline Golf Course</title></head><body><h1>Offline Golf Course</h1><p>10 Harbor Drive, Example, NY 12345</p><a href="${bookingUrl}">Tee Times</a></body></html>` } : { status: 404, body: "Unexpected path" };
     const session = await createCourseDiscoveryBrowserSession({ initialUrls: [official], deadlineAt: new Date(Date.now() + 30_000),
@@ -247,11 +247,13 @@ describe.runIf(existsSync(chrome))("offline CPS discovery and deterministic brow
       await session.execute({ id: 1, action: "open", url: official });
       const ownedPage = browsers.flatMap(browser => browser.contexts()).flatMap(context => context.pages()).find(page => page.url() === official)!;
       const locate = ownedPage.locator.bind(ownedPage);
+      let delayedInventoryReads = 0;
       vi.spyOn(ownedPage, "locator").mockImplementation((selector, options) => {
         const locator = locate(selector, options);
         if (selector !== "body *") return locator;
         return new Proxy(locator, { get(target, key) {
           if (key === "evaluateAll") return async (...args: unknown[]) => {
+            delayedInventoryReads++;
             const result = await Reflect.apply(target.evaluateAll, target, args);
             // Delay only the bounded inventory after its fresh identity capture.
             await new Promise(resolve => setTimeout(resolve, 5100)); return result;
@@ -259,12 +261,22 @@ describe.runIf(existsSync(chrome))("offline CPS discovery and deterministic brow
           const value = Reflect.get(target, key); return typeof value === "function" ? value.bind(target) : value;
         } });
       });
-      await expect(session.readOfficialIdentityPage()).rejects.toThrow("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
+      const fresh = await session.readOfficialIdentityPage();
+      expect(fresh.visibleEvidence?.addressTexts.some(text => text.includes("10 Harbor Drive"))).toBe(true);
+      expect(delayedInventoryReads).toBe(0);
       const diagnostic = session.diagnostics().officialIdentityReadDiagnostic!;
-      expect(diagnostic.captureAgeMs).toBeGreaterThan(5000);
-      expect(diagnostic.gates.captureFreshWithin5s).toBe(false);
-      expect(Object.entries(diagnostic.gates).filter(([, passes]) => !passes).map(([gate]) => gate)).toEqual(["captureFreshWithin5s"]);
+      expect(diagnostic.captureAgeMs).toBeLessThanOrEqual(5000);
+      expect(Object.values(diagnostic.gates).every(Boolean)).toBe(true);
       expect(JSON.stringify(diagnostic)).not.toMatch(/https?:|html|Harbor|12345|timeOrigin/u);
+      const before = Date.now(), general = await session.execute({ id: 2, action: "observe" });
+      expect(Date.now() - before).toBeGreaterThanOrEqual(5100);
+      expect(delayedInventoryReads).toBe(1);
+      expect(general.controls.some(control => control.name === "Tee Times")).toBe(true);
+      // A new private read must recapture visibility, not restamp the old page.
+      await ownedPage.locator("p").evaluate(node => { (node as HTMLElement).style.display = "none"; });
+      await expect(session.readOfficialIdentityPage()).rejects.toThrow("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
+      expect(delayedInventoryReads).toBe(1);
+      expect(session.diagnostics().officialIdentityReadDiagnostic?.gates.visibleAddressesPresent).toBe(false);
     } finally { await session.close(); }
   }, 30_000);
 
