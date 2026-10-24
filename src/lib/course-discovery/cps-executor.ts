@@ -10,8 +10,12 @@ import { teeItUpInertDocumentContent } from "./teeitup-official-booking-source";
 import { requestFamilyForUrl } from "./request-family";
 import { CPS_API_PATH, cpsFailure as fail, cpsMetadataSchema, inspectCpsOfficialDocument, parseCpsCatalog, parseCpsConfiguration,
   parseCpsOptions, parseCpsSource, sameCpsOfficialSite, validateCpsIdentity, type CpsConfiguration, type CpsMetadata, type CpsOptions, type CpsSource } from "./cps-source";
+import { bindCpsPostalConflictProof, normalizeCanonicalCoursePhone, verifyCpsPostalContact, type CpsPostalConflictProof } from "./cps-postal-conflict-proof";
+import { readNativeOfficialIdentityPage, type NativeOfficialPageReader } from "./native-official-page-reader";
+import { CPS_ANONYMOUS_BUILD, createCps26PublicSession } from "./cps-public-session";
 
 export type CpsDependencies = { fetch?: typeof fetch; now?: () => Date; deadlineAt?: Date; signal?: AbortSignal;
+  trustedContext?: { canonicalCoursePhone?: string }; localCapabilities?: readonly "LOCAL_CHROME"[]; readNativeOfficialPage?: NativeOfficialPageReader;
   requestLease?: <T>(family: string, work: () => Promise<T>) => Promise<{ acquired: true; value: T } | { acquired: false }> };
 const MAX_RESPONSE_BYTES = 2_000_000, MAX_TOTAL_BYTES = 13_000_000;
 const uuid = (value: string) => /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u.test(value);
@@ -51,7 +55,10 @@ export function cpsAvailabilityQuery(date: string, courseIds: number[], transact
 }
 function publicHeaders(source: CpsSource, configuration: CpsConfiguration, options: CpsOptions | undefined, date: string) {
   const noon = cpsLocalInstant(`${date}T12:00:00`, source.timeZone);
-  return new Headers({ accept: "application/json, text/plain, */*", "x-apikey": configuration.apiKey, "client-id": configuration.clientId,
+  return new Headers({ accept: "application/json, text/plain, */*",
+    // The exact reviewed 26.3 public client supplies anonymous routing headers.
+    // Never forward an injected key/token on that protocol branch.
+    ...(configuration.buildNumber === CPS_ANONYMOUS_BUILD ? {} : { "x-apikey": configuration.apiKey! }), "client-id": configuration.clientId,
     "x-websiteid": options?.webSiteId ?? configuration.websiteId, "x-terminalid": String(options?.reservationOptions.terminalId ?? 1),
     "x-timezoneid": source.timeZone, "x-timezone-offset": String(Math.abs(getTimeZoneOffsetMinutes(noon, source.timeZone))),
     "x-siteid": "1", "x-moduleid": "7", "x-productid": "1", "x-componentid": "1", "x-ismobile": "false",
@@ -67,13 +74,19 @@ export function cpsBootstrapReadAllowed(url: URL, headers: Headers, body: string
   supplied.delete("accept-encoding");
   return JSON.stringify([...supplied].sort()) === JSON.stringify([...expected.headers].sort());
 }
-function createReader(source: CpsSource, deps: CpsDependencies, date: string) {
+function createReader(source: CpsSource, deps: CpsDependencies, date: string, savedPostalProof?: CpsPostalConflictProof) {
   validateCpsIdentity(source);
   const context = parseCpsSource(source.bookingUrl)!, deadline = Math.min(Date.now() + 120_000, deps.deadlineAt?.getTime() ?? Infinity);
   if (!Number.isFinite(deadline) || deadline <= Date.now()) fail("DEADLINE_EXCEEDED");
+  if(savedPostalProof){
+    if(!deps.localCapabilities?.includes("LOCAL_CHROME"))fail("LOCAL_CHROME_REQUIRED");
+    if(normalizeCanonicalCoursePhone(deps.trustedContext?.canonicalCoursePhone)!==savedPostalProof.canonicalCoursePhone)fail("CPS_CANONICAL_PHONE_CHANGED");
+    if(savedPostalProof.officialUrl!==source.officialUrl||savedPostalProof.bookingUrl!==source.bookingUrl||savedPostalProof.canonicalAddress!==source.venueAddress||savedPostalProof.venueName!==source.venueName||savedPostalProof.timeZone!==source.timeZone)fail("CPS_POSTAL_CONFLICT_CHANGED");
+  }
   const cancellation = new AbortController(), signal = AbortSignal.any([cancellation.signal, AbortSignal.timeout(deadline - Date.now()), ...(deps.signal ? [deps.signal] : [])]);
   const queue = createSimulatorBrowserRequestQueue(deps.requestLease ?? runWithProviderRequestLease, signal);
-  let requests = 0, bytes = 0, officialReads = 0, apiReads = 0;
+  let requests = 0, bytes = 0, officialReads = 0, apiReads = 0, bootstrapReads = 0;
+  let publicSession: ReturnType<typeof createCps26PublicSession> | undefined;
   const read = async (url: string, headers: Headers, kind: "html" | "json", post?: { transactionId: string }): Promise<{ status: number; headers: Headers; text: string }> => {
     if (++requests > 10 || kind === "html" && ++officialReads > 5 || kind === "json" && ++apiReads > 5) fail("ADAPTER_REQUEST_LIMIT");
     if (kind === "html" ? !sameCpsOfficialSite(url, source.officialUrl) : new URL(url).origin !== context.origin) fail("UNSCOPED_ADAPTER_REQUEST");
@@ -87,7 +100,7 @@ function createReader(source: CpsSource, deps: CpsDependencies, date: string) {
       maxResponseBytes: limit, timeoutMs: 15_000, redirectLimit: 0,
       ...(post ? { authorizeReadPost: (value: URL, actualHeaders: Headers, actualBody: string) =>
         cpsBootstrapReadAllowed(value, actualHeaders, actualBody, { url, headers, transactionId: post.transactionId }) } : {}) };
-    const transport = deps.fetch ?? createAddressPinnedPublicFetchTransport(policy);
+    const transport = kind === "json" && publicSession ? publicSession.fetchPublic : deps.fetch ?? createAddressPinnedPublicFetchTransport(policy);
     return queue.run(requestFamilyForUrl(url), async () => {
       signal.throwIfAborted(); if (Date.now() >= deadline) fail("DEADLINE_EXCEEDED");
       const response = await transport(url, { method, headers, ...(body ? { body } : {}), credentials: "omit", redirect: "manual", cache: "no-store", signal });
@@ -107,7 +120,7 @@ function createReader(source: CpsSource, deps: CpsDependencies, date: string) {
       } finally { if (!response.bodyUsed) await response.body?.cancel().catch(() => {}); }
     });
   };
-  const official = async () => {
+  const legacyOfficial = async () => {
     let links = 0, redirects = 0; const seen = new Set<string>(), pending = [source.officialUrl];
     for (let index = 0; index < 5 && pending.length; index++) {
       const url = pending.shift()!;
@@ -132,17 +145,54 @@ function createReader(source: CpsSource, deps: CpsDependencies, date: string) {
     }
     fail("OFFICIAL_BOOKING_SOURCE_UNVERIFIED");
   };
+  const official = async () => {
+    if(!savedPostalProof){
+      try{await legacyOfficial();return undefined;}catch(error){
+        const eligible=error instanceof Error&&["OFFICIAL_BOOKING_SOURCE_UNVERIFIED","OFFICIAL_IDENTITY_UNVERIFIED","OFFICIAL_BOOKING_SOURCE_MISMATCH","ACCESS_REQUIRED"].includes(error.message);
+        if(!eligible||!deps.localCapabilities?.includes("LOCAL_CHROME")||!normalizeCanonicalCoursePhone(deps.trustedContext?.canonicalCoursePhone))throw error;
+      }
+    }
+    // No provider lease is held while a fresh isolated native source reader
+    // takes its own bounded leases. The legacy path/default stays unchanged.
+    signal.throwIfAborted();
+    const nativeRead=deps.readNativeOfficialPage??((identity,pageUrl,until)=>readNativeOfficialIdentityPage(identity,pageUrl,until,{collectPublicCourseContacts:true,requestLease:deps.requestLease&&(async(family,work)=>{
+      const result=await deps.requestLease!(family,work);return result.acquired?{acquired:true,value:await result.value}:{acquired:false};
+    })}));
+    const page=await nativeRead(source,source.officialUrl,new Date(deadline));
+    signal.throwIfAborted();verifyCpsPostalContact(source,page,deps.trustedContext?.canonicalCoursePhone);return page;
+  };
   const json = async (url: string, headers: Headers, post?: { transactionId: string }): Promise<unknown> => {
     const response = await read(url, headers, "json", post);
     try { return JSON.parse(response.text) as unknown; } catch { fail("ADAPTER_RESPONSE_INVALID"); }
   };
   const configuration = async () => {
-    await official();
+    const nativeOfficialPage = await official();
     const config = parseCpsConfiguration(await json(context.origin + "/onlineresweb/Home/Configuration", new Headers({
       accept: "application/json", referer: context.origin + "/", "user-agent": "TeeTimeSpot/1.0 (+https://teetimespot.com)" })), source);
+    if (config.buildNumber === CPS_ANONYMOUS_BUILD) {
+      publicSession = createCps26PublicSession(source, config, date, { deadlineAt: new Date(deadline), signal,
+        bootstrapHeaders: publicHeaders(source, config, undefined, date), fetch: deps.fetch,
+        runBootstrap: work => {
+          // The fresh public env script and typed anonymous session share
+          // this invocation's original ten-request ceiling. The five API
+          // reads keep their existing ceiling; no provider lease is nested.
+          if (++requests > 10 || ++bootstrapReads > 2) fail("ADAPTER_REQUEST_LIMIT");
+          return queue.run(requestFamilyForUrl(config.authorityBaseUrl), async () => { signal.throwIfAborted(); return work(); });
+        },
+        accountBootstrapBytes: count => { bytes += count; if (bytes > MAX_TOTAL_BYTES) fail("ADAPTER_RESPONSE_LIMIT"); },
+      });
+      await publicSession.initialize();
+    }
     const options = parseCpsOptions(await json(context.origin + CPS_API_PATH + "/GetAllOptions/" + context.tenant + "?" +
       new URLSearchParams({ version: config.buildNumber, product: "3" }), publicHeaders(source, config, undefined, date)), config);
-    const metadata = parseCpsCatalog(await json(context.origin + CPS_API_PATH + "/OnlineCourses", publicHeaders(source, config, options, date)), options, source);
+    let providerVenueName=source.venueName;
+    let metadata = parseCpsCatalog(await json(context.origin + CPS_API_PATH + "/OnlineCourses", publicHeaders(source, config, options, date)), options, source,
+      nativeOfficialPage?{page:nativeOfficialPage,canonicalCoursePhone:deps.trustedContext?.canonicalCoursePhone,onSelectedLabel:label=>{providerVenueName=label;}}:undefined);
+    if(nativeOfficialPage){
+      const proof=bindCpsPostalConflictProof(source,nativeOfficialPage,deps.trustedContext?.canonicalCoursePhone,metadata,providerVenueName);
+      if(savedPostalProof&&JSON.stringify(proof)!==JSON.stringify(savedPostalProof))fail("CPS_POSTAL_CONFLICT_CHANGED");
+      metadata=cpsMetadataSchema.parse({...metadata,officialPostalConflictProof:proof});
+    }
     return { config, options, metadata };
   };
   return { configuration, availability: async (fresh: Awaited<ReturnType<typeof configuration>>, input: AccessExecutionInput) => {
@@ -152,7 +202,7 @@ function createReader(source: CpsSource, deps: CpsDependencies, date: string) {
     const value = await json(context.origin + CPS_API_PATH + "/TeeTimes?" + cpsAvailabilityQuery(input.date, fresh.metadata.courseIds, transactionId),
       publicHeaders(source, fresh.config, fresh.options, input.date));
     return normalizeCpsAvailability(value, transactionId, fresh.metadata, source, input, (deps.now ?? (() => new Date()))());
-  }, close: () => { cancellation.abort(); queue.dispose(); } };
+  }, close: () => { publicSession?.close(); cancellation.abort(); queue.dispose(); } };
 }
 
 const participant = z.number().int().min(1).max(4);
@@ -192,7 +242,7 @@ export async function executeCps(source: CpsSource, metadata: CpsMetadata, _targ
   deps: CpsDependencies = {}): Promise<AccessExecutionResult["slots"]> {
   validateInput(input, source); const saved = cpsMetadataSchema.parse(metadata);
   if (saved.tenant !== parseCpsSource(source.bookingUrl)?.tenant) fail("ADAPTER_SOURCE_MISMATCH");
-  const reader = createReader(source, deps, input.date);
+  const reader = createReader(source, deps, input.date, saved.officialPostalConflictProof);
   try {
     const fresh = await reader.configuration();
     if (JSON.stringify(fresh.metadata) !== JSON.stringify(saved)) fail("ADAPTER_CONFIGURATION_CHANGED");

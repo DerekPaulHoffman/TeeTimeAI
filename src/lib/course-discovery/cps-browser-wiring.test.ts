@@ -13,6 +13,8 @@ import * as nativeBrowser from "./native-public-browser";
 import { installNativeRedirectRouting, type NativeReadRoute } from "./native-redirect-routing";
 import { launchPublicReadBrowser } from "./public-browser-launch";
 import { parseAccessRecipe } from "./recipe";
+import { readNativeOfficialIdentityPage } from "./native-official-page-reader";
+import { bindCpsPostalConflictProof } from "./cps-postal-conflict-proof";
 
 vi.mock("@/lib/automation/provider-request-lease", () => ({ runWithProviderRequestLease: vi.fn() }));
 
@@ -179,6 +181,47 @@ describe.runIf(existsSync(chrome))("offline CPS discovery and deterministic brow
     expect(startup.every(value => !nativeSeen.includes(value))).toBe(true);
     expect(serverSeen.filter(value => !startup.includes(value))).toEqual(expected);
   }
+
+  it("captures an exact current official cross-host redirect from real Chrome and rejects direct reuse without fresh lineage", async () => {
+    const destination = "https://sc.cps.golf/new-official-course", bookingUrl = "https://sc.cps.golf/onlineresweb/search-teetime";
+    respond = url => url === official ? { status: 301, location: destination } : url === destination
+      ? { body: `<html><head><title>Offline Golf Course</title><link rel="icon" href="data:,"></head><body><h1>Offline Golf Course</h1>` +
+        `<ul><li class="widgetItem h-card"><h4 class="p-name">Unrelated Golf Course</h4><div class="p-tel">303-555-9999</div></li>` +
+        `<li class="widgetItem h-card"><h4 class="widgetTitle field p-name">Offline Golf Course</h4><div class="field h-adr"><strong>Physical Address</strong>` +
+        `<button>View Map</button><br><span class="p-street-address">10 Harbor Drive</span><br><span class="locality">Example</span>, ` +
+        `<span class="p-region">NY</span> <span class="p-postal-code">54321</span></div><div class="field p-tel"><a href="tel:9165554653">(916) 555-4653</a></div></li></ul>` +
+        `<a href="${bookingUrl}">Tee Times</a></body></html>` }
+      : { status: 404, body: "Unexpected fixture path" };
+    const session = await createCourseDiscoveryBrowserSession({ initialUrls: [official], deadlineAt: new Date(Date.now() + 30_000),
+      venueOfficialUrl: official, venueName: "Offline Golf Course", venueAddress: "10 Harbor Drive, Example, NY 12345, USA", timeZone: input.timeZone },
+    { launchBrowser, browserTransport: "NATIVE_CHROME", requestLease: lease, collectPublicCourseContacts: true });
+    try {
+      const snapshot = await session.execute({ id: 1, action: "open", url: official });
+      expect(snapshot.url).toBe(destination);
+      expect(snapshot.nativeDocumentRedirects).toEqual([{ fromUrl: official, toUrl: destination, status: 301, completed: true }]);
+      expect(snapshot.officialSourceDiagnostic).toMatchObject({ rawOfficialCaptured: true, currentOfficialDocument: true, officialProvenance: true,
+        renderedAddressesPresent: true, renderedLinksPresent: true });
+      const fresh = await session.readOfficialIdentityPage();
+      expect(fresh.url).toBe(destination); expect(fresh.html).toContain("10 Harbor Drive");
+      expect(fresh.visibleEvidence?.headings).toContain("Offline Golf Course");
+      expect(fresh.visibleEvidence?.publicContactBlocks).toEqual([{ venueName: "Offline Golf Course", street: "10 Harbor Drive", locality: "Example",
+        region: "NY", postalCode: "54321", country: "US", phone: "(916) 555-4653" }]);
+      const source = { officialUrl: official, bookingUrl, venueName: "Offline Golf Course", venueAddress: "10 Harbor Drive, Example, NY 12345, USA", timeZone: input.timeZone };
+      // The owned reader obtains a new actual DOM/raw capture from this same
+      // isolated native session. A serialized snapshot alone cannot mint proof.
+      const attested = await readNativeOfficialIdentityPage(source, official, new Date(Date.now() + 20_000), {
+        createSession: async () => ({ execute: async () => snapshot, readOfficialIdentityPage: () => session.readOfficialIdentityPage(), close: async () => {} }),
+      });
+      expect(bindCpsPostalConflictProof(source, attested, "+19165554653", { tenant: "sc", courseIds: [7], catalogHash: "a".repeat(64) }, "Offline Golf")).toMatchObject({
+        canonicalPostalCode: "12345", officialPostalCode: "54321", canonicalCoursePhone: "+19165554653", requiredCapability: "LOCAL_CHROME",
+      });
+      const replay = await session.execute({ id: 2, action: "open", url: destination });
+      expect(replay.nativeDocumentRedirects).toBeUndefined();
+      expect(replay.officialSourceDiagnostic?.rawOfficialCaptured).toBe(false);
+      await expect(session.readOfficialIdentityPage()).rejects.toThrow("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
+      expect(nativeSeen).toEqual([official, destination, destination]); expect(pinnedSeen).toEqual([]);
+    } finally { await session.close(); }
+  }, 30_000);
 
   it("follows an observed cross-host HTTP document redirect with a separate serialized lease for every hop", async () => {
     const observedEntry = "https://official.example.org/public-tee-times";

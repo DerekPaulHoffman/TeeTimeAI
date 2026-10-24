@@ -15,7 +15,7 @@ import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-b
 import { accessExecutionInputSchema, type AccessExecutionInput, isActiveBrowserAccessChallenge, isSafeBrowserAssetUrl, isSafeBrowserBootstrapReadUrl, isSafeBrowserAvailabilityReadUrl, isSafeRecipeUrl, recipeSelectorSchema } from "./recipe";
 import { continueNativeBrowserRead, createNativePublicBrowserProxy, isObservedNativeRedirect, isObservedNativeRedirectTarget, nativeReadPreflightMethod } from "./native-public-browser";
 import { installNativeRedirectRouting, isNativeReadSupersededFailure, authorizePublicClientReadHeaders, isCurrentPublicClientReadHeaders, nativePublicClientPreflightMethod, nativeMindbodyBootstrapSource, nativeMindbodyControllerForm,
-  publicClientReadHeaderProofFailure, type NativeFirstFatal, type NativeReadRoute, type NativeRequestDiagnostic } from "./native-redirect-routing";
+  publicClientReadHeaderProofFailure, attestedNativeDocumentRedirects, type NativeDocumentRedirect, type NativeFirstFatal, type NativeReadRoute, type NativeRequestDiagnostic } from "./native-redirect-routing";
 import { publicHeaderFailureDiagnostic } from "./public-header-diagnostic";
 export { publicHeaderFailureDiagnostic } from "./public-header-diagnostic";
 import { requestFamilyForUrl } from "./request-family";
@@ -41,6 +41,8 @@ import { isPublicAvailabilityNavigation } from "./public-navigation-control";
 import { observedPublicFrameSources } from "./public-frame-source";
 import { launchPublicReadBrowser } from "./public-browser-launch";
 import { createPublicBookingParentScope, readPublicBookingParentIdentity } from "./public-booking-parent";
+import { readVisiblePublicCourseContactBlocks } from "./public-course-contact-blocks";
+import { discoveryTrustedContextSchema, type DiscoveryTrustedContext } from "./trusted-context";
 import { createEzLinksPublicReadPolicy, type EzLinksDocumentToken } from "./ezlinks-public-read-policy";
 import { createMindbodyAppointmentNativeCapture } from "./mindbody-appointment-native-capture";
 import { parseMindbodyAppointmentSource, validateMindbodyAppointmentSource } from "./mindbody-appointment-grid";
@@ -131,6 +133,8 @@ export type DiscoveryBrowserSnapshot = {
   /** Controller-to-worker only; stripped before any model/tool response. */
   completedPublicAssetRequests?: Array<{ url: string; method: "GET"; resourceType: "script" | "stylesheet"; status: number }>;
   completedPublicAssetRequestsOverflow?: boolean;
+  /** Controller-only current native HTTP lineage; stripped from model input. */
+  nativeDocumentRedirects?: NativeDocumentRedirect[];
   requestFailures?: Array<{ reason: string; resourceType: string; method?: string; url?: string;
     urlRejection?: ReturnType<typeof safePublicUrlRejectionDiagnostic>; publicHeaderDiagnostic?: ReturnType<typeof publicHeaderFailureDiagnostic> }>;
   nativeFirstFatal?: NativeFirstFatal;
@@ -149,6 +153,8 @@ export type DiscoveryBrowserSnapshot = {
     attributes: Record<string, string>; href?: string; target?: string; children: Array<{ selector: string; tag: string; text: string; href?: string; target?: string }> }> };
 };
 export type DiscoveryBrowserSessionDependencies = {
+  /** Private fixed CPS source capture; never a model/browser action field. */
+  collectPublicCourseContacts?: true;
   fetch?: typeof fetch;
   launchBrowser?: () => Promise<Browser>;
   requestLease?: typeof runWithProviderRequestLease;
@@ -207,9 +213,11 @@ export async function createCourseDiscoveryBrowserSession(input: {
   deadlineAt: Date; initialUrls: string[]; timeZone?: string; venueName?: string; venueAddress?: string; venueOfficialUrl?: string;
   /** Trusted constructor context, never a browser action or model proof. */
   requestedInput?: AccessExecutionInput;
+  trustedContext?: DiscoveryTrustedContext;
 }, deps: DiscoveryBrowserSessionDependencies = {}) {
   const startupStartedAt = Date.now();
   const requestedInput = input.requestedInput === undefined ? undefined : accessExecutionInputSchema.parse(input.requestedInput);
+  const trustedContext = input.trustedContext === undefined ? undefined : discoveryTrustedContextSchema.parse(input.trustedContext);
   if (requestedInput && requestedInput.timeZone !== (input.timeZone ?? "UTC")) throw new Error("REQUEST_CONTEXT_TIME_ZONE_MISMATCH");
   const initialUrls = input.initialUrls.map(normalizeDiscoveryNavigationUrl);
   if (!initialUrls.length || initialUrls.length > 16 || !initialUrls.every(isSafeRecipeUrl)) throw new Error("INVALID_INITIAL_URLS");
@@ -231,6 +239,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
   type OfficialDocumentProof = { kind: "VERIFIED_OFFICIAL_DOCUMENT"; officialUrl: string; documentUrl: string };
   let officialIdentityPage: (OfficialIdentityPage & { observedAt: number; documentStartedAt: number; officialDocumentProof: OfficialDocumentProof }) | undefined;
   let officialIdentityDocument: { url: string; html: string; officialDocumentProof: OfficialDocumentProof } | undefined;
+  let nativeDocumentRedirects: { url: string; request: object } | undefined;
   let officialSourceDiagnostic: OfficialSourceDiagnostic | undefined, navigationFailureKind: NavigationFailureKind | undefined;
   const officialDiagnostics = () => safeOfficialSourceDiagnostic({ ...teeBookingScope.diagnostics(page.url()), ...officialSourceDiagnostic,
     rawOfficialCaptured: Boolean(officialIdentityDocument), currentOfficialDocument: Boolean(officialIdentityDocument && sameDiscoveryMainDocument(officialIdentityDocument.url, page.url())),
@@ -333,7 +342,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     // Private completed metadata is never model input and must retain its
     // exact observed URL through this public-response nonce sanitizer.
     if (value && typeof value === "object" && safe && typeof safe === "object") {
-      for (const key of ["completedPublicAssetRequests", "completedPublicAssetRequestsOverflow"] as const)
+      for (const key of ["completedPublicAssetRequests", "completedPublicAssetRequestsOverflow", "nativeDocumentRedirects"] as const)
         if (Object.hasOwn(value, key)) Object.assign(safe, { [key]: (value as Record<string, unknown>)[key] });
     }
     return safe;
@@ -432,6 +441,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       if (request.frame() === page.mainFrame() && ["xhr", "fetch"].includes(request.resourceType()))
         catalogRead = catalogTiles.beginRead(requestUrl, request.method(), request.postData(), request.frame().url());
       if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+        nativeDocumentRedirects = undefined;
         mindbodyCapture.assertNavigation(url.href, method);
         mindbodyDocumentVersion = mindbodyCapture.beginDocument();
         catalogDocument = catalogTiles.beginDocument(requestUrl);
@@ -585,7 +595,10 @@ export async function createCourseDiscoveryBrowserSession(input: {
         navigation = { url: request.url(), status: reply.status };
         // Only actual main-document response/redirect metadata can establish
         // parent provenance; model navigation arguments and XHRs cannot.
-        bookingParents.observeDocument({ url: request.url(), status: reply.status, redirectedFrom: request.redirectedFrom()?.url() });
+        bookingParents.observeDocument({ url: request.url(), status: reply.status, redirectedFrom: request.redirectedFrom()?.url(),
+          ...(nativeProxy ? { nativeRequest: request } : {}) });
+        if (nativeProxy && input.venueOfficialUrl && attestedNativeDocumentRedirects(request, new Set([input.venueOfficialUrl])))
+          nativeDocumentRedirects = { url: request.url(), request };
         if (ezWitness === ezDocument && ezWitness) {
           ezWitness.status = reply.status; ezWitness.settled = true; ezWitness.observedAt = Date.now();
           ezWitness.token = /^text\/html(?:;|$)/iu.test(reply.headers["content-type"] ?? "") ? ezlinks.observeDocument(url, reply.status) : undefined;
@@ -1005,7 +1018,10 @@ export async function createCourseDiscoveryBrowserSession(input: {
           }
           return { title: document.title.slice(0, 500), headings, linkUrls, addressTexts, phoneTexts, brandLinks };
         });
-        officialIdentityPage = { ...officialIdentityDocument, visibleEvidence, observedAt: Date.now(), documentStartedAt,
+        const publicContactBlocks = deps.collectPublicCourseContacts && input.venueName ? await readVisiblePublicCourseContactBlocks(page, input.venueName) : [];
+        officialIdentityPage = { ...officialIdentityDocument, visibleEvidence: { ...visibleEvidence,
+          addressTexts: [...visibleEvidence.addressTexts,...publicContactBlocks.map(block=>`${block.street}, ${block.locality}, ${block.region} ${block.postalCode}`)],
+          ...(publicContactBlocks.length ? { publicContactBlocks } : {}) }, observedAt: Date.now(), documentStartedAt,
           browserTransport: deps.browserTransport ?? "PINNED_HTTP" };
     }
     const visible: DiscoveryBrowserSnapshot["controls"] = [];
@@ -1093,7 +1109,10 @@ export async function createCourseDiscoveryBrowserSession(input: {
     const pendingMetadata = observedRequests.filter(request => pendingRequestMetadata.has(request));
     observedRequests.splice(0, observedRequests.length, ...pendingMetadata);
     requestMetadataBytes = pendingMetadata.reduce((total, request) => total + JSON.stringify(request).length + 120, 0);
+    const currentNativeRedirects = nativeDocumentRedirects && nativeDocumentRedirects.url === actualCurrentUrl && input.venueOfficialUrl
+      ? attestedNativeDocumentRedirects(nativeDocumentRedirects.request, new Set([input.venueOfficialUrl])) : undefined;
     return { url: currentUrl, text, controls: visible, elements, frames, responses: responses.splice(0), requests, requestFailures: requestFailures.map(failure => ({ ...failure })),
+      ...(currentNativeRedirects ? { nativeDocumentRedirects: currentNativeRedirects } : {}),
       ...(redirectRouting?.firstFatal ? { nativeFirstFatal: redirectRouting.firstFatal } : {}),
       ...(redirectRouting?.rejectedRequests?.length ? { nativeRejectedRequests: redirectRouting.rejectedRequests } : {}),
       officialSourceDiagnostic: officialDiagnostics(), ...(navigationFailureKind ? { navigationFailureKind } : {}),
@@ -1368,6 +1387,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
           { venueMatches: venueProofMatches, requestLease: deps.requestLease ?? runWithProviderRequestLease, deadlineAt: input.deadlineAt,
             ...(deps.browserTransport === "NATIVE_CHROME" ? { localCapabilities: ["LOCAL_CHROME"] as const } : {}),
             ...(requestedInput === undefined ? {} : { requestedInput: structuredClone(requestedInput) }),
+            ...(trustedContext === undefined ? {} : { trustedContext: structuredClone(trustedContext) }),
             onOfficialSourceDiagnostic: value => { officialSourceDiagnostic = safeOfficialSourceDiagnostic(value); },
             ...(officialIdentityPage && Date.now() - officialIdentityPage.observedAt <= 5 * 60_000 ? { officialIdentityPage } : {}),
             ...(officialBookingSourceToken ? { officialBookingSourceToken } : {}) });

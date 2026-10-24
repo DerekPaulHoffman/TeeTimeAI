@@ -53,6 +53,7 @@ type Dependencies = {
   officialIdentityPage?: OfficialIdentityPage;
   /** Canonical controller request, unavailable to model action arguments. */
   requestedInput?: AccessExecutionInput;
+  trustedContext?: { canonicalCoursePhone?: string };
   localCapabilities?: readonly "LOCAL_CHROME"[];
   readNativeOfficialPage?: NativeOfficialPageReader;
   /** Controller test seam, never recipe metadata or model input. */

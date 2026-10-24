@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import { createAddressPinnedPublicFetchTransport } from "@/lib/automation/address-pinned-public-fetch";
 import { CPS_API_PATH, CPS_PUBLIC_BUILD, parseCpsCatalog, parseCpsConfiguration, parseCpsOptions } from "./cps-source";
 import { cpsAvailabilityQuery, cpsBootstrapReadAllowed, cpsLocalInstant, executeCps, inspectCps, normalizeCpsAvailability, type CpsDependencies } from "./cps-executor";
+import { readNativeOfficialIdentityPage } from "./native-official-page-reader";
+import type { PublicCourseContactBlock } from "./public-course-contact-blocks";
 
 const source = { officialUrl: "https://www.thebobgc.com/", bookingUrl: "https://thebobgcpa.cps.golf/", venueName: "Bob O'Connor Golf Course",
   venueAddress: "5370 Schenley Dr, Pittsburgh, PA 15217, USA", timeZone: "America/New_York" };
@@ -20,7 +22,7 @@ const footer = "<footer>© 2022 Bob O'Connor Golf Course | 5370 Schenley Drive |
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
 type Change = (url: URL, init: RequestInit, normal: () => Response) => Response | Promise<Response>;
 function setup(change?: Change) {
-  const reads: Array<{ url: URL; init: RequestInit }> = [], families: string[] = []; let active = 0, maxActive = 0, transactionId = "";
+  const reads: Array<{ url: URL; init: RequestInit }> = [], families: string[] = []; let active = 0, maxActive = 0, transactionId = "", sessions = 0;
   const deps: CpsDependencies = { now: () => new Date("2026-10-22T00:00:00Z"),
     requestLease: async <T>(family: string, work: () => Promise<T>) => {
       active++; maxActive = Math.max(maxActive, active); families.push(family);
@@ -30,6 +32,10 @@ function setup(change?: Change) {
       expect(active).toBe(1); const url = new URL(String(value)), init = rawInit;
       reads.push({ url, init });
       const normal = () => {
+        if (url.pathname === "/onlineresweb/assets/env.js") return new Response('(function(window){window.__env=window.__env||{};window.__env.AUTH_CLIENT_ID="unused-account-client";window.__env.SHORT_LIVED_CLIENT_ID="separate-public-startup-client";window.__env.PRODUCTION="true";})(this);',{headers:{"content-type":"text/javascript"}});
+        if (url.pathname === "/identityapi/myconnect/token/short") {
+          sessions++; return json({ access_token: `synthetic-public-short-session-${sessions}`, token_type: "Bearer", expires_in: 60 });
+        }
         if (url.hostname === "thebobgc.com") return new Response(null, { status: 301, headers: { location: source.officialUrl } });
         if (url.hostname === "www.thebobgc.com") {
           if (url.pathname === "/teetimes") return new Response(null, { status: 302, headers: { location: "/bookteetimes" } });
@@ -48,11 +54,71 @@ function setup(change?: Change) {
       };
       return change ? change(url, init, normal) : normal();
     }) as typeof fetch };
-  return { deps, reads, families, get active() { return active; }, get maxActive() { return maxActive; } };
+  return { deps, reads, families, get active() { return active; }, get maxActive() { return maxActive; }, get sessions() { return sessions; } };
 }
 const execute = (deps: CpsDependencies, request = input) => executeCps(source, metadata(), { courseId: "course-1" }, request, deps);
 
 describe("CPS fixed fresh public reads", () => {
+  it.each([undefined,"injected-published-key"])("uses a fresh reviewed26 public RAM session and never an injected key/account token (%s)",async apiKey=>{
+    const fixture=setup((url,_init,normal)=>url.pathname.endsWith("/Configuration")
+      ?json({...config(),buildNumber:"26.3.0.34794395074\n",apiKey,authorization:"Bearer untrusted-input",accessToken:"untrusted-input"}):normal());
+    const saved=await inspectCps(source,fixture.deps);
+    const inspectionReads=fixture.reads.length;
+    expect(await executeCps(source,saved,{courseId:"course-1"},input,fixture.deps)).toHaveLength(1);
+    expect(fixture.reads.length-inspectionReads).toBe(10); // Three official reads + two public startup reads + five API reads.
+    expect(fixture.sessions).toBe(2);expect(fixture.maxActive).toBe(1);expect(fixture.active).toBe(0);
+    expect(JSON.stringify(saved)).not.toMatch(/synthetic-public|untrusted-input|injected-published/u);
+    const bootstrap=fixture.reads.filter(read=>read.url.pathname==="/identityapi/myconnect/token/short");expect(bootstrap).toHaveLength(2);
+    for(const read of bootstrap){const headers=new Headers(read.init.headers);expect(read.init.method).toBe("POST");expect(read.init.credentials).toBe("omit");expect(read.init.redirect).toBe("manual");
+      expect(headers.has("authorization")).toBe(false);expect(headers.has("cookie")).toBe(false);expect(headers.has("x-apikey")).toBe(false);
+      const form=await new Response(read.init.body,{headers:{"content-type":headers.get("content-type")!}}).formData();expect([...form.entries()]).toEqual([["client_id","separate-public-startup-client"]]);}
+    expect(fixture.reads.filter(read=>read.url.pathname==="/onlineresweb/assets/env.js")).toHaveLength(2);
+    const apiReads=fixture.reads.filter(read=>read.url.pathname.includes(CPS_API_PATH));expect(apiReads.length).toBeGreaterThan(3);
+    for(const read of apiReads){const headers=new Headers(read.init.headers);expect(headers.get("authorization")).toMatch(/^Bearer synthetic-public-short-session-[12]$/u);expect(headers.has("x-apikey")).toBe(false);
+      expect(headers.get("client-id")).toBe("public-client");expect(headers.get("x-websiteid")).toMatch(/^(?:public-site|00000000-0000-0000-0000-000000000000)$/u);
+      expect(headers.get("x-timezoneid")).toBe(source.timeZone);}
+  });
+  it("revalidates native postal contacts and full catalog on every cold/warm call outside the provider lease, preserving semantic identity across nonces", async () => {
+    const fixture=setup((url,_init,normal)=>url.hostname==="www.thebobgc.com"?new Response("public transport rejected",{status:403}):
+      url.pathname.endsWith("/Configuration")?json({...config(),buildNumber:"26.3.0.34794395074\n",apiKey:undefined}):normal());
+    let calls=0,wrongPhone=false;
+    const contact:PublicCourseContactBlock={venueName:source.venueName,street:"5370 Schenley Drive",locality:"Pittsburgh",region:"PA",postalCode:"15218",country:"US",phone:"412-622-6959"};
+    const nativeRead:CpsDependencies["readNativeOfficialPage"]=async(identity,pageUrl,until)=>{
+      expect(fixture.active).toBe(0);calls++;const c={...contact,phone:wrongPhone?"412-622-9999":contact.phone};
+      const html=`<html><body><script nonce="nonce-${calls}">var n=${calls};</script><a href="${source.bookingUrl}">Tee Times</a><section class="h-card"><h4 class="p-name">${c.venueName}</h4><div class="h-adr"><strong>Physical Address</strong><span class="p-street-address">${c.street}</span><span class="p-locality">${c.locality}</span><span class="p-region">${c.region}</span><span class="p-postal-code">${c.postalCode}</span></div><div class="p-tel">${c.phone}</div></section></body></html>`;
+      return readNativeOfficialIdentityPage(identity,pageUrl,until,{createSession:async()=>({execute:async()=>({url:source.officialUrl,navigationStatus:200,browserTransport:"NATIVE_CHROME",officialSourceDiagnostic:{stage:"CONTROLLER_CAPTURE",rawOfficialCaptured:true,currentOfficialDocument:true,officialProvenance:true,renderedAddressesPresent:true,renderedLinksPresent:true}}as never),readOfficialIdentityPage:async()=>({url:source.officialUrl,html,browserTransport:"NATIVE_CHROME",visibleEvidence:{title:source.venueName,headings:[source.venueName],addressTexts:[`${c.street}, ${c.locality}, ${c.region} ${c.postalCode}`],linkUrls:[source.bookingUrl],publicContactBlocks:[c]}}),close:async()=>{}})});
+    };
+    const deps:CpsDependencies={...fixture.deps,trustedContext:{canonicalCoursePhone:"+14126226959"},localCapabilities:["LOCAL_CHROME"],readNativeOfficialPage:nativeRead};
+    const saved=await inspectCps(source,deps);expect(saved.officialPostalConflictProof).toMatchObject({canonicalPostalCode:"15217",officialPostalCode:"15218",canonicalCoursePhone:"+14126226959"});
+    expect(calls).toBe(1);expect((await executeCps(source,saved,{courseId:"course-1"},input,deps))).toHaveLength(1);expect(calls).toBe(2);
+    expect(fixture.sessions).toBe(2);
+    fixture.reads.length=0;
+    await expect(executeCps(source,saved,{courseId:"course-1"},input,{...deps,localCapabilities:[]})).rejects.toThrow("LOCAL_CHROME_REQUIRED");expect(fixture.reads).toHaveLength(0);
+    await expect(executeCps(source,saved,{courseId:"course-1"},input,{...deps,trustedContext:{canonicalCoursePhone:"+14126229999"}})).rejects.toThrow("CPS_CANONICAL_PHONE_CHANGED");expect(fixture.reads).toHaveLength(0);
+    wrongPhone=true;await expect(executeCps(source,saved,{courseId:"course-1"},input,deps)).rejects.toThrow("CPS_POSTAL_CONFLICT_UNVERIFIED");
+    expect(fixture.reads.some(read=>read.init.method==="POST")).toBe(false);expect(fixture.active).toBe(0);
+  });
+  it("independently replays the exact observed routing query without replacing canonical input or taking transaction actions", async () => {
+    const queried = { ...source, bookingUrl: "https://thebobgcpa.cps.golf/onlineresweb/search-teetime?TeeOffTimeMin=0&TeeOffTimeMax=23.999722222222225" };
+    const fixture = setup((url, _init, normal) => url.hostname === "www.thebobgc.com"
+      ? new Response(`<body><a href="${queried.bookingUrl}">Book a Tee Time</a>${footer}</body>`, { headers: { "content-type": "text/html" } }) : normal());
+    const saved = await inspectCps(queried, fixture.deps);
+    expect(fixture.reads.every(read => read.init.method === "GET")).toBe(true);
+    fixture.reads.length = 0;
+    const slots = await executeCps(queried, saved, { courseId: "course-1" }, input, fixture.deps);
+    expect(slots).toHaveLength(1); expect(slots[0].bookingUrl).toBe(queried.bookingUrl);
+    expect(fixture.reads[0].url.href).toBe(source.officialUrl);
+    expect(fixture.reads.filter(read => read.init.method === "POST").map(read => read.url.pathname)).toEqual([CPS_API_PATH + "/RegisterTransactionId"]);
+    const availability = fixture.reads.at(-1)!.url;
+    expect(availability.pathname).toBe(CPS_API_PATH + "/TeeTimes");
+    expect(availability.searchParams.has("TeeOffTimeMin")).toBe(false);
+    expect(availability.searchParams.get("searchDate")).toBe("Fri Oct 23 2026");
+    expect(fixture.active).toBe(0);
+    const mismatch = setup((url, _init, normal) => url.hostname === "www.thebobgc.com"
+      ? new Response(`<body><a href="${source.bookingUrl}">Book a Tee Time</a>${footer}</body>`, { headers: { "content-type": "text/html" } }) : normal());
+    await expect(inspectCps(queried, mismatch.deps)).rejects.toThrow("OFFICIAL_BOOKING_SOURCE_MISMATCH");
+    expect(mismatch.reads).toHaveLength(1);
+  });
   it("inspects without registration and rederives fresh official/config/catalog facts on each execution", async () => {
     const fixture = setup(), saved = await inspectCps(source, fixture.deps);
     expect(saved).toEqual(metadata()); expect(fixture.reads).toHaveLength(6); expect(fixture.reads.every(read => read.init.method === "GET")).toBe(true);

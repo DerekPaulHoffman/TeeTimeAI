@@ -155,7 +155,7 @@ export function createCourseDiscoverySupervisor({ client, startWorker, executeRe
     entry.promise = (async () => {
       try {
         if (execution) {
-          running = Promise.resolve().then(() => executeRecipe({ recipe: job.recipe, input: job.input, deadlineAt: job.deadlineAt,
+          running = Promise.resolve().then(() => executeRecipe({ recipe: job.recipe, input: job.input, trustedContext: job.trustedContext, deadlineAt: job.deadlineAt,
             helperEnvironment: client.helperEnvironment?.("execution", job), signal: controller.signal }));
           const result = await Promise.race([running, cancelled]);
           await client.executionResult(job.id, job.leaseToken, result, controller.signal);

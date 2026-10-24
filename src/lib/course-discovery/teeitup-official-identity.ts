@@ -2,6 +2,7 @@ import { parse, type DefaultTreeAdapterMap } from "parse5";
 import { createHash } from "node:crypto";
 import { parseTeeItUpV2PublicSource } from "@/lib/adapters/teeitup-public-source";
 import { z } from "zod";
+import type { PublicCourseContactBlock } from "./public-course-contact-blocks";
 
 const publicUrl = z.string().url().max(2048).refine(value => {
   try { const url = new URL(value); return url.protocol === "https:" && !url.username && !url.password && !url.port; } catch { return false; }
@@ -16,6 +17,7 @@ export type OfficialIdentitySource = { officialUrl?: string; bookingUrl: string;
 export type OfficialIdentityPage = { url: string; html: string; visibleEvidence?: {
   title: string; headings: string[]; linkUrls: string[]; addressTexts: string[]; phoneTexts?: string[];
   brandLinks?: Array<{ href: string; text: string }>;
+  publicContactBlocks?: PublicCourseContactBlock[];
 }; browserTransport?: "PINNED_HTTP" | "NATIVE_CHROME" };
 type Node = DefaultTreeAdapterMap["node"];
 type Element = DefaultTreeAdapterMap["element"];

@@ -55,6 +55,7 @@ type ExtractedAccessRecipe = Exclude<CourseAccessRecipeData, { engine: "EXISTING
 type BrowserAccessRecipe = Extract<CourseAccessRecipeData, { engine: "BROWSER_DOM" | "BROWSER_JSON" }>;
 
 export type AccessExecutorDependencies = {
+  trustedContext?: import("./trusted-context").DiscoveryTrustedContext;
   fetch?: typeof fetch;
   now?: () => Date;
   deadlineAt?: Date;

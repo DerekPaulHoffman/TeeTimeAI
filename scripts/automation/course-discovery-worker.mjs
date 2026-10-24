@@ -99,7 +99,7 @@ export function createDiscoveryAdapterObservation(job, bookingUrl, adapter, cont
     targetKey = canonicalDataKey(job.request.target), inputKey = canonicalDataKey(job.request.input);
   if (!adapterKey || !identityKey || !targetKey || !inputKey) return undefined;
   return { jobId: job.id, officialUrl: job.request.identity.officialUrl, bookingUrl, contextUrl,
-    identityKey, targetKey, inputKey, adapter: JSON.parse(adapterKey) };
+    identityKey, targetKey, inputKey, trustedContextKey: canonicalDataKey(job.request.trustedContext ?? {}), adapter: JSON.parse(adapterKey) };
 }
 /** A fixed inspector reads public configuration; fresh replay still proves availability. */
 export function inspectedAdapterSourceEvidence(recipe, job, observation, officialSourceObserved, contextUrl) {
@@ -107,7 +107,8 @@ export function inspectedAdapterSourceEvidence(recipe, job, observation, officia
       observation.jobId !== job.id || observation.officialUrl !== job.request.identity.officialUrl ||
       observation.bookingUrl !== recipe.source?.bookingUrl || observation.contextUrl !== contextUrl ||
       observation.identityKey !== canonicalDataKey(job.request.identity) || observation.targetKey !== canonicalDataKey(job.request.target) ||
-      observation.inputKey !== canonicalDataKey(job.request.input)) return undefined;
+      observation.inputKey !== canonicalDataKey(job.request.input) ||
+      observation.adapter?.family === "CPS" && observation.trustedContextKey !== canonicalDataKey(job.request.trustedContext ?? {})) return undefined;
   const candidateKey = canonicalDataKey(recipe.adapter), observedKey = canonicalDataKey(observation.adapter);
   if (!candidateKey || candidateKey !== observedKey) return undefined;
   return { officialUrl: observation.officialUrl, observedBookingUrl: observation.bookingUrl };
@@ -124,6 +125,25 @@ export function bindDiscoveryRecipeIdentity(recipe, job, adapterObservation, con
     delete adapter.officialBookingSourceProof;
     delete adapter.officialPostalConflictProof;
     const observed = adapterObservation?.adapter;
+    if (adapter.family === "CPS" && observed?.family === "CPS" && adapterObservation.jobId === job.id &&
+        adapterObservation.officialUrl === job.request.identity.officialUrl && adapterObservation.bookingUrl === proposedSource.bookingUrl &&
+        adapterObservation.contextUrl === contextUrl && contextUrl === proposedSource.bookingUrl &&
+        adapterObservation.identityKey === canonicalDataKey(job.request.identity) && adapterObservation.targetKey === canonicalDataKey(job.request.target) &&
+        adapterObservation.inputKey === canonicalDataKey(job.request.input) &&
+        adapterObservation.trustedContextKey === canonicalDataKey(job.request.trustedContext ?? {}) && job.request.target.kind === "OUTDOOR") {
+      const inspected = { ...observed }; delete inspected.officialPostalConflictProof;
+      const proof = observed.officialPostalConflictProof, phone = job.request.trustedContext?.canonicalCoursePhone;
+      if (canonicalDataKey(inspected) === canonicalDataKey(adapter) && proof?.kind === "CANONICAL_PHONE_POSTAL_CONFLICT" &&
+          typeof phone === "string" && /^\+1[2-9]\d{2}[2-9]\d{6}$/u.test(phone) && proof.canonicalCoursePhone === phone &&
+          proof.officialUrl === job.request.identity.officialUrl && proof.bookingUrl === proposedSource.bookingUrl &&
+          proof.canonicalAddress === job.request.identity.address && proof.venueName === job.request.identity.name &&
+          proof.timeZone === job.request.input.timeZone && proof.tenant === adapter.tenant && proof.catalogHash === adapter.catalogHash &&
+          canonicalDataKey(proof.courseIds) === canonicalDataKey(adapter.courseIds) &&
+          proof.warmTransport === "NATIVE_CHROME" && proof.requiredCapability === "LOCAL_CHROME") {
+        try { const serialized = JSON.stringify(proof); if (Buffer.byteLength(serialized, "utf8") <= 16_000) adapter.officialPostalConflictProof = JSON.parse(serialized); }
+        catch { /* Only the current private inspector can confer phone-bound evidence. */ }
+      }
+    }
     if (adapter.family === "TEEITUP" && observed?.family === "TEEITUP" && observed.alias === adapter.alias &&
         adapterObservation.jobId === job.id && adapterObservation.officialUrl === job.request.identity.officialUrl && adapterObservation.bookingUrl === proposedSource.bookingUrl &&
         Array.isArray(adapter.facilityIds) && Array.isArray(observed.facilityIds) && adapter.facilityIds.length > 0 && adapter.facilityIds.length <= 100 &&
@@ -484,7 +504,13 @@ export function createDiscoverySnapshotCompactor() {
   return snapshot => {
     if (snapshot && typeof snapshot === "object") {
       const projected = { ...snapshot };
+      delete projected.trustedContext;
+      if (projected.adapter?.family === "CPS") {
+        projected.adapter = { ...projected.adapter };
+        delete projected.adapter.officialPostalConflictProof;
+      }
       delete projected.completedPublicAssetRequests; delete projected.completedPublicAssetRequestsOverflow;
+      delete projected.nativeDocumentRedirects;
       delete projected.nativeFirstFatal; delete projected.nativeRejectedRequests;
       delete projected.officialSourceDiagnostic; delete projected.navigationFailureKind;
       snapshot = { ...projected, ...safeNativeBrowserDiagnostics(snapshot), ...safeOfficialBrowserDiagnostics(snapshot) };
@@ -685,12 +711,13 @@ export function createDiscoveryProcess({ executable, args, cwd, environment, sig
   };
 }
 
-export function createDiscoveryBrowser({ cwd, deadlineAt, initialUrls, timeZone = "UTC", venueName, venueAddress, venueOfficialUrl, requestedInput, helperEnvironment = {}, signal, processFactory = createDiscoveryProcess }) {
+export function createDiscoveryBrowser({ cwd, deadlineAt, initialUrls, timeZone = "UTC", venueName, venueAddress, venueOfficialUrl, requestedInput, trustedContext, helperEnvironment = {}, signal, processFactory = createDiscoveryProcess }) {
   const channel = processFactory({ executable: process.execPath,
     args: [join(cwd, "node_modules/tsx/dist/cli.mjs"), join(cwd, "scripts/automation/course-discovery-browser.ts"), "--deadline", deadlineAt, "--initial-urls", JSON.stringify(initialUrls),
       ...(venueName ? ["--venue-name", venueName] : []), ...(venueAddress ? ["--venue-address", venueAddress] : []),
       ...(venueOfficialUrl ? ["--venue-official-url", venueOfficialUrl] : []),
       ...(requestedInput === undefined ? [] : ["--requested-input", JSON.stringify(requestedInput)]),
+      ...(trustedContext === undefined ? [] : ["--trusted-context", JSON.stringify(trustedContext)]),
       "--time-zone", timeZone],
     cwd, environment: { ...discoveryProcessEnvironment(), ...helperEnvironment }, signal, timeoutMs: Math.min(90_000, Math.max(1, Date.parse(deadlineAt) - Date.now())),
   });
@@ -718,7 +745,7 @@ export async function inspectDiscoveryPublicProtocol({ cwd, source, input, deadl
   finally { await channel.close(); }
 }
 
-export async function executeDiscoveryRecipe({ cwd, recipe, input, deadlineAt, helperEnvironment = {}, signal, spawnProcess = spawn }) {
+export async function executeDiscoveryRecipe({ cwd, recipe, input, trustedContext, deadlineAt, helperEnvironment = {}, signal, spawnProcess = spawn }) {
   return new Promise((resolveResult, reject) => {
     if (signal?.aborted) { reject(discoveryError("DISCOVERY_CANCELLED")); return; }
     const remaining = Math.min(90_000, Date.parse(deadlineAt) - Date.now());
@@ -745,7 +772,7 @@ export async function executeDiscoveryRecipe({ cwd, recipe, input, deadlineAt, h
       if (code !== 0) { complete(discoveryError("DISCOVERY_REPLAY_FAILED")); return; }
       try { complete(null, JSON.parse(output)); } catch { complete(discoveryError("DISCOVERY_REPLAY_INVALID")); }
     });
-    child.stdin.end(JSON.stringify({ recipe, input }));
+    child.stdin.end(JSON.stringify({ recipe, input, trustedContext }));
   });
 }
 
@@ -808,7 +835,7 @@ export async function verifyDiscoveryCandidate({ client, job, recipe, executeRec
     if (challenge.completed === true) continue;
     const replayStarted = Date.now();
     let result;
-    try { result = await executeRecipe({ recipe, input: challenge.input, deadlineAt: job.deadlineAt, signal }); }
+    try { result = await executeRecipe({ recipe, input: challenge.input, trustedContext: job.request?.trustedContext, deadlineAt: job.deadlineAt, signal }); }
     catch (error) {
       onReplay({ elapsedMs: Date.now() - replayStarted, challengeIndex, result: discoveryReplayDetails(undefined, error) });
       throw error;
@@ -1011,6 +1038,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
               browserStartedAt ??= new Date().toISOString(); lastRequestCount = 0; lastResponseBytes = 0;
               browser = browserFactory({ cwd, deadlineAt: job.deadlineAt, timeZone: job.request.input.timeZone, venueName: job.request.identity.name,
                 requestedInput: job.request.input,
+                trustedContext: job.request.trustedContext,
                 venueAddress: job.request.identity.address,
                 venueOfficialUrl: job.request.identity.officialUrl, initialUrls: initialUrls(),
                 helperEnvironment: browserEnvironment(), signal });
@@ -1043,6 +1071,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
               lastRequestCount = 0; lastResponseBytes = 0; compactSnapshot = createDiscoverySnapshotCompactor();
               browser = browserFactory({ cwd, deadlineAt: job.deadlineAt, timeZone: job.request.input.timeZone, venueName: job.request.identity.name,
                 requestedInput: job.request.input,
+                trustedContext: job.request.trustedContext,
                 venueAddress: job.request.identity.address, venueOfficialUrl: job.request.identity.officialUrl,
                 initialUrls: initialUrls(), helperEnvironment: browserEnvironment(), signal });
               publicAssets.begin(browser, browserTransport);
@@ -1065,6 +1094,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
               await browser.close(); lastRequestCount = 0; lastResponseBytes = 0;
               browser = browserFactory({ cwd, deadlineAt: job.deadlineAt, timeZone: job.request.input.timeZone, venueName: job.request.identity.name,
                 requestedInput: job.request.input,
+                trustedContext: job.request.trustedContext,
                 venueAddress: job.request.identity.address,
                 venueOfficialUrl: job.request.identity.officialUrl,
                 initialUrls: [...new Set([...initialUrls(), snapshot.url])].slice(-16), helperEnvironment: browserEnvironment(), signal });

@@ -19,6 +19,13 @@ function fixture(change: Partial<DiscoveryBrowserSnapshot> = {}) {
   return { execute, readOfficialIdentityPage, close, createSession };
 }
 describe("fixed native official source reader", () => {
+  it("preserves legacy capture defaults and enables physical contact capture only for the private fixed CPS caller",async()=>{
+    for(const collect of [false,true]){
+      const session=fixture();await readNativeOfficialIdentityPage(source,source.officialUrl,new Date(Date.now()+30_000),{...session,...(collect?{collectPublicCourseContacts:true as const}:{})});
+      const options=(session.createSession.mock.calls[0] as unknown as [unknown,Record<string,unknown>])[1];
+      if(collect)expect(options.collectPublicCourseContacts).toBe(true);else expect(options).not.toHaveProperty("collectPublicCourseContacts");
+    }
+  });
   it("admits only the official origin, owns a fresh native session and always closes it", async () => {
     const session = fixture();
     await readNativeOfficialIdentityPage(source, source.officialUrl, new Date(Date.now() + 120_000), session);
@@ -57,6 +64,27 @@ describe("fixed native official source reader", () => {
     const session = fixture();
     await expect(readNativeOfficialIdentityPage(source, "https://unrelated.example/", new Date(Date.now() + 30_000), session)).rejects.toThrow();
     expect(session.createSession).not.toHaveBeenCalled();
+  });
+  it("retains the actual redirected current URL only with the fixed native exact-root completed lineage", async () => {
+    const destination = "https://new-official.example/golf", nativeDocumentRedirects = [{ fromUrl: source.officialUrl, toUrl: destination, status: 301, completed: true as const }];
+    const session = fixture({ url: destination, nativeDocumentRedirects });
+    session.readOfficialIdentityPage.mockResolvedValueOnce({ ...(await fixture().readOfficialIdentityPage()), url: destination });
+    await expect(readNativeOfficialIdentityPage(source, source.officialUrl, new Date(Date.now()+30_000), session)).resolves.toMatchObject({ url: destination });
+    expect(session.close).toHaveBeenCalledOnce();
+  });
+  it.each(["missing", "wrong root", "wrong landing", "discontinuous", "uncompleted", "nonredirect", "unsafe", "pinned"])("rejects a %s native redirect witness without reading identity", async mode => {
+    const destination = "https://new-official.example/golf";
+    const hops = [{ fromUrl: source.officialUrl, toUrl: destination, status: 301, completed: true }];
+    if (mode === "wrong root") hops[0].fromUrl = "https://unrelated.example/";
+    if (mode === "wrong landing") hops[0].toUrl = "https://unrelated.example/";
+    if (mode === "discontinuous") hops.push({ fromUrl: "https://unrelated.example/", toUrl: destination, status: 302, completed: true });
+    if (mode === "uncompleted") hops[0].completed = false;
+    if (mode === "nonredirect") hops[0].status = 200;
+    if (mode === "unsafe") hops[0].fromUrl = "http://127.0.0.1/";
+    const session = fixture({ url: destination, browserTransport: mode === "pinned" ? "PINNED_HTTP" : "NATIVE_CHROME",
+      ...(mode === "missing" ? {} : { nativeDocumentRedirects: hops as DiscoveryBrowserSnapshot["nativeDocumentRedirects"] }) });
+    await expect(readNativeOfficialIdentityPage(source,source.officialUrl,new Date(Date.now()+30_000),session)).rejects.toThrow("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
+    expect(session.readOfficialIdentityPage).not.toHaveBeenCalled(); expect(session.close).toHaveBeenCalledOnce();
   });
 });
 

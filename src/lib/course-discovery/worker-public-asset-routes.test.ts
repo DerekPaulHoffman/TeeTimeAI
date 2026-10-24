@@ -248,9 +248,11 @@ describe("private completed asset channel", () => {
     const snapshot = { ...base, ...(kind === "no-text" ? { text: undefined } : {}),
       ...(kind === "structure" ? { structure: { selected: "#public" } } : {}), ...(kind === "adapter" ? { adapter: { family: "EXAMPLE" } } : {}),
       ...(kind === "response" ? { responses: [{ status: 200 }] } : {}),
-      completedPublicAssetRequests: [asset("https://cdn.example.org/site.js?build=private-channel-sentinel")], completedPublicAssetRequestsOverflow: true };
+      completedPublicAssetRequests: [asset("https://cdn.example.org/site.js?build=private-channel-sentinel")], completedPublicAssetRequestsOverflow: true,
+      nativeDocumentRedirects: [{ fromUrl: "https://official.example/private-lineage-sentinel", toUrl: "https://new-official.example/", status: 301, completed: true }] };
     const result = compact(snapshot);
     expect(result).not.toHaveProperty("completedPublicAssetRequests"); expect(result).not.toHaveProperty("completedPublicAssetRequestsOverflow");
+    expect(result).not.toHaveProperty("nativeDocumentRedirects"); expect(JSON.stringify(result)).not.toContain("private-lineage-sentinel");
     expect(JSON.stringify(result)).not.toContain("private-channel-sentinel"); expect(snapshot.completedPublicAssetRequests).toHaveLength(1);
   });
   it("accumulates private completed deltas, ignores uncompleted kinds and keeps overflow sticky until a new owner", () => {

@@ -10,6 +10,7 @@ import { requestFamilyForUrl } from "../../src/lib/course-discovery/request-fami
 import { inspectSevenRoomsPublicProtocol, sevenRoomsPublicRangeUrl, sevenRoomsPublicRequests } from "../../src/lib/course-discovery/sevenrooms-public-direct";
 import { safeBrowserActionIssues } from "./course-discovery-diagnostics.mjs";
 import { readNativeOfficialIdentityPage } from "../../src/lib/course-discovery/native-official-page-reader";
+import { discoveryTrustedContextSchema } from "../../src/lib/course-discovery/trusted-context";
 
 function publicFailureCode(error: unknown) {
   if (error instanceof z.ZodError) return "BROWSER_ACTION_SCHEMA_INVALID";
@@ -121,10 +122,14 @@ async function main() {
       source += chunk;
       if (source.length > 131_072) throw new Error("REQUEST_TOO_LARGE");
     }
-    const value = JSON.parse(source) as { recipe: unknown; input: unknown };
-    const result = await executeAccessRecipe(parseAccessRecipe(value.recipe), accessExecutionInputSchema.parse(value.input), { deadlineAt, requestLease,
+    const value = JSON.parse(source) as { recipe: unknown; input: unknown; trustedContext?: unknown };
+    const recipe = parseAccessRecipe(value.recipe);
+    const trustedContext = discoveryTrustedContextSchema.optional().parse(value.trustedContext);
+    const result = await executeAccessRecipe(recipe, accessExecutionInputSchema.parse(value.input), { deadlineAt, requestLease, trustedContext,
       ...(configuredTransport === "NATIVE_CHROME" ? { localCapabilities: ["LOCAL_CHROME"] as const,
-        readNativeOfficialPage: (source, url, deadline) => readNativeOfficialIdentityPage(source, url, deadline, { requestLease }) } : {}) });
+        readNativeOfficialPage: (source, url, deadline) => readNativeOfficialIdentityPage(source, url, deadline, { requestLease,
+          ...(recipe.engine === "EXISTING_ADAPTER" && recipe.adapter.family === "CPS" && recipe.adapter.officialPostalConflictProof
+            ? { collectPublicCourseContacts: true } : {}) }) } : {}) });
     process.stdout.write(`${JSON.stringify(result)}\n`);
     return;
   }
@@ -144,8 +149,12 @@ async function main() {
   const requestedInputText = requestedInputAt >= 0 ? args[requestedInputAt + 1] : undefined;
   if (requestedInputAt >= 0 && (!requestedInputText || Buffer.byteLength(requestedInputText) > 2048)) throw new Error("INVALID_REQUEST_CONTEXT");
   const requestedInput = requestedInputText === undefined ? undefined : accessExecutionInputSchema.parse(JSON.parse(requestedInputText));
+  const trustedAt = args.indexOf("--trusted-context");
+  const trustedText = trustedAt >= 0 ? args[trustedAt + 1] : undefined;
+  if (trustedAt >= 0 && (!trustedText || Buffer.byteLength(trustedText) > 1024)) throw new Error("INVALID_REQUEST_CONTEXT");
+  const trustedContext = trustedText === undefined ? undefined : discoveryTrustedContextSchema.parse(JSON.parse(trustedText));
   const session = await createCourseDiscoveryBrowserSession({ deadlineAt, initialUrls, timeZone, venueName, venueAddress, venueOfficialUrl,
-    ...(requestedInput === undefined ? {} : { requestedInput }) }, { requestLease,
+    ...(requestedInput === undefined ? {} : { requestedInput }), ...(trustedContext === undefined ? {} : { trustedContext }) }, { requestLease,
     browserTransport: configuredTransport as "PINNED_HTTP" | "NATIVE_CHROME" });
   const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
   const timer = setTimeout(() => { input.close(); void session.close(); }, Math.max(1, deadlineAt.getTime() - Date.now()));

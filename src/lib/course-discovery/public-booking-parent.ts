@@ -2,12 +2,13 @@ import type { Page } from "@playwright/test";
 import { isSafeRecipeUrl } from "./recipe";
 import { isPublicAvailabilityNavigation } from "./public-navigation-control";
 import { completeUSAddress, fullCourseName } from "./teeitup-official-identity";
+import { attestedNativeDocumentRedirects } from "./native-redirect-routing";
 
 export type PublicFrameParentProof = { officialUrl: string; documentUrl: string } & (
   { kind: "VERIFIED_OFFICIAL_DOCUMENT" } |
   { kind: "OBSERVED_PUBLIC_BOOKING_PARENT"; officialDocumentUrl: string; observedBookingHref: string });
 export type PublicBookingParentIdentity = { headings: string[]; addressTexts: string[]; truncated?: boolean };
-type Candidate = { kind: "OFFICIAL" } | { kind: "BOOKING"; officialDocumentUrl: string; observedBookingHref: string };
+type Candidate = { kind: "OFFICIAL"; nativeRedirectRequired?: true } | { kind: "BOOKING"; officialDocumentUrl: string; observedBookingHref: string };
 const stateNames: Record<string, string> = {
   AL:"Alabama",AK:"Alaska",AZ:"Arizona",AR:"Arkansas",CA:"California",CO:"Colorado",CT:"Connecticut",DE:"Delaware",DC:"District of Columbia",
   FL:"Florida",GA:"Georgia",HI:"Hawaii",ID:"Idaho",IL:"Illinois",IN:"Indiana",IA:"Iowa",KS:"Kansas",KY:"Kentucky",LA:"Louisiana",ME:"Maine",MD:"Maryland",
@@ -50,10 +51,20 @@ export function createPublicBookingParentScope(identity: { officialUrl?: string;
   };
   return {
     beginDocument(value: string) { const key = documentKey(value); if (key) verified.delete(key); },
-    observeDocument(input: { url: string; status: number; redirectedFrom?: string }) {
+    observeDocument(input: { url: string; status: number; redirectedFrom?: string; nativeRequest?: object }) {
       const url = documentKey(input.url), from = input.redirectedFrom && documentKey(input.redirectedFrom);
       if (!url) return;
       let candidate = candidates.get(url);
+      const nativeLineage = official && input.nativeRequest ? attestedNativeDocumentRedirects(input.nativeRequest, new Set([official])) : undefined;
+      if (candidate?.kind === "OFFICIAL" && candidate.nativeRedirectRequired && nativeLineage?.at(-1)?.toUrl !== url) {
+        verified.delete(url); return;
+      }
+      // Cross-host official migrations require the native router's completed
+      // exact-root lineage. Ordinary URLs/diagnostics cannot populate it.
+      if (!candidate && input.status === 200 && nativeLineage && nativeLineage.at(-1)?.toUrl === url) {
+        candidate = { kind: "OFFICIAL", nativeRedirectRequired: true };
+        if (!remember(url, candidate)) return;
+      }
       // redirectedFrom is actual browser HTTP redirect provenance. A similar
       // hostname, an observed diagnostic or a model URL alone is insufficient.
       if (!candidate && from && candidates.has(from) && sameHost(url, from)) {

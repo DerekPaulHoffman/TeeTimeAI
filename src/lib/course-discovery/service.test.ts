@@ -80,6 +80,60 @@ beforeEach(() => {
 });
 
 describe("bounded course discovery persistence", () => {
+  function phoneRecipe() {
+    const address = "100 Golf Road, Denver, CO 80001, USA", phone = "+13035551234";
+    course.address = address; course.phone = phone; course.timeZone = "America/Denver";
+    course.providerFamilyKey = "CPS"; course.detectedBookingUrl = "https://publicgolf.cps.golf/";
+    return parseAccessRecipe({ schemaVersion: 1, engine: "EXISTING_ADAPTER", target: recipe.target,
+      source: { ...recipe.source, bookingUrl: course.detectedBookingUrl, venueAddress: address, providerFamily: "CPS", timeZone: course.timeZone },
+      adapter: { family: "CPS", tenant: "publicgolf", courseIds: [1], catalogHash: "a".repeat(64), officialPostalConflictProof: {
+        kind: "CANONICAL_PHONE_POSTAL_CONFLICT", officialUrl: recipe.source.officialUrl, officialPageUrl: recipe.source.officialUrl,
+        bookingUrl: course.detectedBookingUrl, tenant: "publicgolf", canonicalAddress: address, officialAddress: "100 Golf Road, Denver, CO 80002, USA",
+        canonicalPostalCode: "80001", officialPostalCode: "80002", canonicalCoursePhone: phone, venueName: course.name, providerVenueName: course.name, timeZone: course.timeZone,
+        catalogHash: "a".repeat(64), courseIds: [1], markupWitnessSha256: "b".repeat(64), phoneWitnessSha256: "c".repeat(64),
+        warmTransport: "NATIVE_CHROME", requiredCapability: "LOCAL_CHROME" } } });
+  }
+  it("rebinds CPS phone proof at proposal, proof, activation and active read without changing source fingerprint", async () => {
+    const candidate = phoneRecipe(), owner = (await claimed())!;
+    const proposed = await proposeDiscoveryRecipe(owner.id, owner.leaseToken!, candidate);
+    const fingerprint = job!.sourceFingerprint;
+    course.phone = "+13035554321";
+    await expect(proposeDiscoveryRecipe(owner.id, owner.leaseToken!, candidate)).rejects.toBeInstanceOf(DiscoveryConflictError);
+    await expect(recordDiscoveryVerification({ jobId: owner.id, leaseToken: owner.leaseToken!, challengeId: proposed.challenges[0].id,
+      recipeHash: proposed.recipeHash, input: proposed.challenges[0].input, result: result() })).rejects.toBeInstanceOf(DiscoveryConflictError);
+    await expect(activateDiscoveryRecipe(owner.id, owner.leaseToken!)).rejects.toBeInstanceOf(DiscoveryConflictError);
+    course.activeAccessRecipeId = "recipe1";
+    mocks.db.courseAccessRecipe.findUnique.mockResolvedValue({ id: "recipe1", targetKey: "course:course1", sourceFingerprint: fingerprint, payload: candidate, hash: hashAccessRecipe(candidate) });
+    expect(await getActiveAccessRecipe({ courseId: "course1" })).toBeNull();
+    course.phone = "+13035551234";
+    expect(await getActiveAccessRecipe({ courseId: "course1" })).toMatchObject({ trustedContext: { canonicalCoursePhone: "+13035551234" } });
+    course.phone = null;
+    expect(await getActiveAccessRecipe({ courseId: "course1" })).toBeNull();
+    await expect(assertActiveAccessRecipeInTransaction(mocks.db as unknown as Prisma.TransactionClient, { courseId: "course1" }, "recipe1")).rejects.toBeInstanceOf(DiscoveryConflictError);
+  });
+  it("requires the claimed private context for phone proof while preserving old non-proof requests", async () => {
+    const candidate = phoneRecipe(), owner = (await claimed())!;
+    delete (job!.request as { trustedContext?: unknown }).trustedContext;
+    await expect(proposeDiscoveryRecipe(owner.id, owner.leaseToken!, candidate)).rejects.toBeInstanceOf(DiscoveryConflictError);
+    // A historical recipe without a phone proof does not acquire that requirement.
+    const ordinary = structuredClone(candidate);
+    if (ordinary.engine === "EXISTING_ADAPTER" && ordinary.adapter.family === "CPS") delete ordinary.adapter.officialPostalConflictProof;
+    await expect(proposeDiscoveryRecipe(owner.id, owner.leaseToken!, ordinary)).resolves.toHaveProperty("challenges");
+  });
+  it("derives claimed phone context from current durable course while ignoring caller context", async () => {
+    course.phone = "(303) 555-1234";
+    await ensureDiscoveryJob({ courseId: "course1", searchId: "search1", request: { target: recipe.target, input,
+      identity: { name: "forged", officialUrl: null, bookingUrl: null, timeZone: "UTC", providerFamily: null },
+      trustedContext: { canonicalCoursePhone: "+13035554321" } } });
+    expect((job!.request as { trustedContext: unknown }).trustedContext).toEqual({ canonicalCoursePhone: "+13035551234" });
+    course.phone = "303-555-5678";
+    const owner = await claimNextDiscoveryJob("worker-one");
+    expect((owner!.request as { trustedContext: unknown }).trustedContext).toEqual({ canonicalCoursePhone: "+13035555678" });
+    expect((owner!.request as { identity: object }).identity).not.toHaveProperty("phone");
+    course.phone = "303-555-9999";
+    await expect(heartbeatDiscoveryJob(owner!.id, owner!.leaseToken!)).rejects.toBeInstanceOf(DiscoveryConflictError);
+    await expect(proposeDiscoveryRecipe(owner!.id, owner!.leaseToken!, recipe)).rejects.toBeInstanceOf(DiscoveryConflictError);
+  });
   it("admits canonical demand on the supplied transaction without opening a nested transaction", async () => {
     const transactionCourse = { ...course, name: "Transaction-owned Golf" };
     const transactionCreate = vi.fn(async ({ data }) => ({ id: "atomic-job", ...data, status: "QUEUED", attempts: 0,

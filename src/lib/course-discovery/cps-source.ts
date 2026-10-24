@@ -3,6 +3,8 @@ import { parse, type DefaultTreeAdapterMap } from "parse5";
 import { z } from "zod";
 import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import { completeUSAddress, fullCourseName } from "./teeitup-official-identity";
+import { cpsPostalConflictProofSchema, verifyCpsPostalContact } from "./cps-postal-conflict-proof";
+import type { OfficialIdentityPage } from "./teeitup-official-identity";
 
 const id = z.number().int().min(1).max(2_147_483_647);
 const tenant = z.string().regex(/^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u)
@@ -13,22 +15,41 @@ export const CPS_API_PATH = "/onlineres/onlineapi/api/v1/onlinereservation";
 // This build's published 569/507/647 + main clients perform one unpaged GET;
 // the UI's load-more operation slices the already returned content locally.
 export const CPS_PUBLIC_BUILD = "25.3.4.21239412485";
+// 26.3.0.34794395074: reviewed public main 9b94214d3a50be69 and its
+// exact runtime-linked 569/507/647 modules. SearchTeetimes sends the same
+// unpaged dated GET; normal display pagination slices its complete array.
+const reviewedPublicBuilds = new Set([CPS_PUBLIC_BUILD, "26.3.0.34794395074"]);
 export const cpsMetadataSchema = z.object({ family: z.literal("CPS"), tenant,
   courseIds: z.array(id).min(1).max(40).refine(values => values.every((value, index) => !index || values[index - 1] < value)),
-  catalogHash: z.string().regex(/^[a-f0-9]{64}$/u) }).strict();
+  catalogHash: z.string().regex(/^[a-f0-9]{64}$/u), officialPostalConflictProof: cpsPostalConflictProofSchema.optional() }).strict()
+  .refine(value=>!value.officialPostalConflictProof||value.tenant===value.officialPostalConflictProof.tenant&&value.catalogHash===value.officialPostalConflictProof.catalogHash&&
+    value.courseIds.length===1&&JSON.stringify(value.courseIds)===JSON.stringify(value.officialPostalConflictProof.courseIds)&&
+    cpsCourseNameBase(value.officialPostalConflictProof.providerVenueName)===cpsCourseNameBase(value.officialPostalConflictProof.venueName)&&
+    cpsCourseNameBase(value.officialPostalConflictProof.venueName).replace(/\s/gu,"").length>=8);
 export type CpsMetadata = z.infer<typeof cpsMetadataSchema>;
 export type CpsSource = { officialUrl: string; bookingUrl: string; venueName: string; venueAddress?: string; timeZone: string };
 export function cpsFailure(code: string): never { throw new Error(code); }
-function safePublicUrl(value: string) {
+function safePublicUrl(value: string, allowRoutingQuery = false) {
   try { const url = new URL(value); return value.length <= 2048 && url.href === value && url.protocol === "https:" &&
-    !url.username && !url.password && !url.port && !url.search && !url.hash && Boolean(getSafeCustomerBookingUrl(value)); }
+    !url.username && !url.password && !url.port && (allowRoutingQuery || !url.search) && !url.hash && Boolean(getSafeCustomerBookingUrl(value)); }
   catch { return false; }
+}
+function publicRoutingQuery(url: URL) {
+  if (!url.search) return true;
+  // The public search link publishes decimal hour bounds. They identify the
+  // exact observed entry URL; they never alter our canonical requested window.
+  if (url.pathname !== "/onlineresweb/search-teetime") return false;
+  const fields = url.search.slice(1).split("&");
+  if (fields.length !== 2 || fields.some(field => !/^(?:TeeOffTimeMin|TeeOffTimeMax)=(?:0|[1-9]\d?)(?:\.\d{1,15})?$/u.test(field))) return false;
+  if (new Set([...url.searchParams.keys()]).size !== 2) return false;
+  const min = Number(url.searchParams.get("TeeOffTimeMin")), max = Number(url.searchParams.get("TeeOffTimeMax"));
+  return min >= 0 && min <= max && max < 24;
 }
 export function parseCpsSource(value: string): { bookingUrl: string; origin: string; tenant: string } | undefined {
   try {
-    if (!safePublicUrl(value)) return;
+    if (!safePublicUrl(value, true)) return;
     const url = new URL(value), match = /^([a-z][a-z0-9-]*)\.cps\.golf$/u.exec(url.hostname);
-    if (!match || !tenant.safeParse(match[1]).success || !["/", "/onlineresweb/search-teetime"].includes(url.pathname)) return;
+    if (!match || !tenant.safeParse(match[1]).success || !["/", "/onlineresweb/search-teetime"].includes(url.pathname) || !publicRoutingQuery(url)) return;
     return { bookingUrl: url.href, origin: url.origin, tenant: match[1] };
   } catch { return; }
 }
@@ -100,7 +121,7 @@ export function inspectCpsOfficialDocument(html: string, pageUrl: string, source
 }
 
 const configurationSchema = z.object({ siteName: tenant, onlineApi: publicValue, authorityBaseUrl: publicValue,
-  clientId: publicValue, websiteId: publicValue, apiKey: publicValue, buildNumber: z.string().trim() }).passthrough();
+  clientId: publicValue, websiteId: publicValue, apiKey: publicValue.optional(), buildNumber: z.string().trim() }).passthrough();
 export type CpsConfiguration = z.infer<typeof configurationSchema>;
 const optionCourse = z.object({ courseId: id, courseName: label, webSiteId: publicValue }).passthrough();
 const optionsSchema = z.object({ webSiteId: publicValue, courseOptions: z.array(optionCourse).min(1).max(40),
@@ -109,7 +130,8 @@ export type CpsOptions = z.infer<typeof optionsSchema>;
 export function parseCpsConfiguration(value: unknown, source: CpsSource): CpsConfiguration {
   const result = configurationSchema.safeParse(value), context = parseCpsSource(source.bookingUrl);
   if (!result.success || !context || result.data.siteName !== context.tenant || result.data.onlineApi !== context.origin + CPS_API_PATH ||
-      result.data.authorityBaseUrl !== context.origin + "/identityapi" || result.data.buildNumber !== CPS_PUBLIC_BUILD) cpsFailure("CPS_CONFIGURATION_UNVERIFIED");
+      result.data.authorityBaseUrl !== context.origin + "/identityapi" || !reviewedPublicBuilds.has(result.data.buildNumber) ||
+      result.data.buildNumber === CPS_PUBLIC_BUILD && !result.data.apiKey) cpsFailure("CPS_CONFIGURATION_UNVERIFIED");
   return result.data;
 }
 export function parseCpsOptions(value: unknown, configuration: CpsConfiguration): CpsOptions {
@@ -119,13 +141,32 @@ export function parseCpsOptions(value: unknown, configuration: CpsConfiguration)
       new Set(parsed.data.courseOptions.map(row => row.courseId)).size !== parsed.data.courseOptions.length) cpsFailure("CPS_OPTIONS_UNVERIFIED");
   return parsed.data;
 }
-export function parseCpsCatalog(value: unknown, options: CpsOptions, source: CpsSource): CpsMetadata {
+export function cpsCourseNameBase(value:string){return fullCourseName(value).replace(/\s+golf (?:course|club|preserve)$/u,"").trim();}
+export function parseCpsCatalog(value: unknown, options: CpsOptions, source: CpsSource,
+  nativeContact?:{page:OfficialIdentityPage;canonicalCoursePhone:unknown;onSelectedLabel:(label:string)=>void}): CpsMetadata {
   validateCpsIdentity(source);
   const rows = z.array(z.object({ courseId: id, courseName: label, timezoneId: label, websiteId: publicValue,
     active: z.literal(true), holes: z.union([z.literal(9), z.literal(18)]) }).passthrough()).min(1).max(40).safeParse(value);
   if (!rows.success) cpsFailure("CPS_CATALOG_UNVERIFIED");
   const name = fullCourseName(source.venueName), courses = [...rows.data].sort((a, b) => a.courseId - b.courseId);
   const ids = courses.map(row => row.courseId), declared = options.courseOptions.map(row => row.courseId).sort((a, b) => a - b);
+  if(nativeContact){
+    verifyCpsPostalContact(source,nativeContact.page,nativeContact.canonicalCoursePhone);
+    const base=cpsCourseNameBase(source.venueName);
+    if(base.replace(/\s/gu,"").length<8||new Set(ids).size!==ids.length||JSON.stringify(ids)!==JSON.stringify(declared)||
+      courses.some(row=>row.websiteId!==options.webSiteId||options.courseOptions.find(option=>option.courseId===row.courseId)?.courseName!==row.courseName))cpsFailure("ADAPTER_IDENTITY_MISMATCH");
+    for(const row of courses){try{new Intl.DateTimeFormat("en-US",{timeZone:row.timezoneId});}catch{cpsFailure("CPS_CATALOG_UNVERIFIED");}}
+    const matching=courses.filter(row=>cpsCourseNameBase(row.courseName)===base);
+    if(matching.length!==1)cpsFailure("ADAPTER_IDENTITY_MISMATCH");
+    const selected=matching[0],option=options.courseOptions.find(row=>row.courseId===selected.courseId);
+    if(!option||option.courseName!==selected.courseName||selected.timezoneId!==source.timeZone||cpsCourseNameBase(option.courseName)!==base)cpsFailure("ADAPTER_IDENTITY_MISMATCH");
+    const context=parseCpsSource(source.bookingUrl)!;
+    const stable={tenant:context.tenant,officialUrl:source.officialUrl,canonicalName:source.venueName,canonicalAddress:completeUSAddress(source.venueAddress!),timeZone:source.timeZone,
+      selectedCourseId:selected.courseId,courses:courses.map(row=>({id:row.courseId,name:row.courseName,timeZone:row.timezoneId,websiteId:row.websiteId,holes:row.holes})),
+      options:[...options.courseOptions].sort((a,b)=>a.courseId-b.courseId).map(row=>({id:row.courseId,name:row.courseName,websiteId:row.webSiteId}))};
+    nativeContact.onSelectedLabel(selected.courseName);
+    return cpsMetadataSchema.parse({family:"CPS",tenant:context.tenant,courseIds:[selected.courseId],catalogHash:createHash("sha256").update(JSON.stringify(stable)).digest("hex")});
+  }
   if (new Set(ids).size !== ids.length || JSON.stringify(ids) !== JSON.stringify(declared) ||
       courses.some(row => fullCourseName(row.courseName) !== name || row.timezoneId !== source.timeZone || row.websiteId !== options.webSiteId) ||
       options.courseOptions.some(row => fullCourseName(row.courseName) !== name)) cpsFailure("ADAPTER_IDENTITY_MISMATCH");

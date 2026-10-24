@@ -30,6 +30,27 @@ describe("CPS stable public source", () => {
     expect(inspectCpsOfficialDocument(page(`<h1>Book a Tee Time</h1><iframe src="${source.bookingUrl}" title="Book a Tee Time"></iframe>`),
       "https://www.thebobgc.com/bookteetimes", source)).toEqual({ bookingLinked: true });
   });
+  it("retains the full observed public decimal-hour search link and requires that exact official outlink", () => {
+    const bookingUrl = "https://thebobgcpa.cps.golf/onlineresweb/search-teetime?TeeOffTimeMin=0&TeeOffTimeMax=23.999722222222225";
+    expect(parseCpsSource(bookingUrl)).toEqual({ bookingUrl, origin: "https://thebobgcpa.cps.golf", tenant: "thebobgcpa" });
+    expect(() => validateCpsIdentity({ ...source, bookingUrl })).not.toThrow();
+    const html = page(`<a href="${bookingUrl}">Book a Tee Time</a>`);
+    expect(inspectCpsOfficialDocument(html, source.officialUrl, { ...source, bookingUrl })).toEqual({ bookingLinked: true });
+    expect(() => inspectCpsOfficialDocument(html, source.officialUrl, { ...source, bookingUrl: bookingUrl.split("?")[0] })).toThrow("OFFICIAL_BOOKING_SOURCE_MISMATCH");
+    expect(() => inspectCpsOfficialDocument(html, source.officialUrl, { ...source, bookingUrl: bookingUrl.replace("Min=0", "Min=1") })).toThrow("OFFICIAL_BOOKING_SOURCE_MISMATCH");
+  });
+  it.each(["TeeOffTimeMin=0", "TeeOffTimeMin=0&TeeOffTimeMin=1", "TeeOffTimeMin=0&TeeOffTimeMax=24", "TeeOffTimeMin=2&TeeOffTimeMax=1",
+    "TeeOffTimeMin=-1&TeeOffTimeMax=23", "TeeOffTimeMin=NaN&TeeOffTimeMax=23", "TeeOffTimeMin=0&TeeOffTimeMax=1e1", "TeeOffTimeMin=0&TeeOffTimeMax=Infinity",
+    "TeeOffTimeMin=0&TeeOffTimeMax=23&account=1", "TeeOffTimeMin=0&token=private", "teeofftimemin=0&TeeOffTimeMax=23", "TeeOffTimeMin=%30&TeeOffTimeMax=23",
+    "TeeOffTimeMin=0&TeeOffTimeMax=23.1234567890123456", "TeeOffTimeMin=0&TeeOffTimeMax=23#changed"])("rejects unobserved/ambiguous query grammar: %s", query => {
+    expect(parseCpsSource(`https://thebobgcpa.cps.golf/onlineresweb/search-teetime?${query}`)).toBeUndefined();
+  });
+  it("does not extend query permission to official identities, root pages, APIs or transactions", () => {
+    const query = "?TeeOffTimeMin=0&TeeOffTimeMax=23";
+    for (const path of ["/", CPS_API_PATH + "/TeeTimes", "/onlineresweb/checkout"])
+      expect(parseCpsSource(`https://thebobgcpa.cps.golf${path}${query}`)).toBeUndefined();
+    expect(() => validateCpsIdentity({ ...source, officialUrl: source.officialUrl + query })).toThrow();
+  });
   it.each([
     ["wrong venue", page(`<iframe src="${source.bookingUrl}" title="Book a Tee Time"></iframe>`).replaceAll("Bob O'Connor", "Another Venue")],
     ["wrong number", page(`<iframe src="${source.bookingUrl}" title="Book a Tee Time"></iframe>`).replace("5370", "5371")],
@@ -60,6 +81,14 @@ describe("CPS stable public source", () => {
       expect(() => parseCpsConfiguration(data, source)).toThrow();
     for (const data of [{ ...options(), webSiteId: "foreign" }, { ...options(), courseOptions: [...options().courseOptions, ...options().courseOptions] }])
       expect(() => parseCpsOptions(data, config)).toThrow();
+  });
+  it("accepts only the exact reviewed current public client build after existing whitespace normalization", () => {
+    expect(parseCpsConfiguration({ ...configuration(), buildNumber: "\ufeff26.3.0.34794395074\n" }, source).buildNumber).toBe("26.3.0.34794395074");
+    for (const buildNumber of ["26.3.0.34794395075", "26.3.1.34794395074", "26.3", "26.4.0.34794395074", "26.3.0.34794395074extra"])
+      expect(() => parseCpsConfiguration({ ...configuration(), buildNumber }, source)).toThrow("CPS_CONFIGURATION_UNVERIFIED");
+    expect(() => parseCpsConfiguration({ ...configuration(), buildNumber: "26.3.0.34794395074", siteName: "another" }, source)).toThrow();
+    expect(parseCpsConfiguration({ ...configuration(), apiKey: undefined, buildNumber: "26.3.0.34794395074" }, source).apiKey).toBeUndefined();
+    expect(() => parseCpsConfiguration({ ...configuration(), apiKey: undefined }, source)).toThrow("CPS_CONFIGURATION_UNVERIFIED");
   });
   it.each(["name", "timezoneId", "websiteId", "active", "duplicate", "missing", "unknown course"])("rejects changed whole-catalog %s", kind => {
     const rows: unknown[] = courses();

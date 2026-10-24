@@ -218,6 +218,26 @@ export function hasAttestedNativeDocumentRedirectTarget(request: object, target:
       value.record.mindbodyBootstrapSource && roots.has(value.record.mindbodyBootstrapSource.sourceUrl) &&
       releasedPublicBootstrapGetRedirect(value.record, target, "GET", false)));
 }
+export type NativeDocumentRedirect = { fromUrl: string; toUrl: string; status: number; completed: true };
+/** Read-only projection of this owner's exact, completed current document
+ * chain. A copied request, model URL, Location string, POST or old generation
+ * cannot mint this channel. It grants provenance, never venue identity. */
+export function attestedNativeDocumentRedirects(request: object, roots: ReadonlySet<string>): NativeDocumentRedirect[] | undefined {
+  const value = nativeRequestRecords.get(request);
+  if (!value || !value.record.parent || !trustedDocumentChain(value.record, value.owner, roots) ||
+      !value.record.complete || value.record.responseStatus !== 200) return;
+  const rows: NativeDocumentRedirect[] = [];
+  let current = value.record;
+  for (;;) {
+    if (!["GET", "HEAD"].includes(current.method) || current.body !== null || current.url !== current.transportUrl ||
+        !current.complete || current.failed || current.generation.retired || !isSafeRecipeUrl(current.url)) return;
+    const parent = current.parent;
+    if (!parent) return roots.has(current.url) && rows.length <= 5 ? rows.reverse() : undefined;
+    if (rows.length >= 5 || !parent.redirect || !redirectStatuses.has(parent.redirect.status) || !releasedRedirect(parent, current.url)) return;
+    rows.push({ fromUrl: parent.url, toUrl: current.url, status: parent.redirect.status, completed: true });
+    current = parent;
+  }
+}
 const resourceKinds: Record<string, string> = { Document: "document", Stylesheet: "stylesheet", Image: "image", Media: "media",
   Font: "font", Script: "script", XHR: "xhr", Fetch: "fetch", EventSource: "eventsource", WebSocket: "websocket",
   Manifest: "manifest", Other: "other", Ping: "ping", Preflight: "other" };

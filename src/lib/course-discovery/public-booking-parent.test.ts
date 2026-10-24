@@ -36,6 +36,14 @@ describe("context-local verified public booking parents", () => {
     value.observeDocument({ url: "https://venue.example.evil.org/", status: 200, redirectedFrom: official });
     expect(value.authorizeParent("https://venue.example.evil.org/")).toBeUndefined();
   });
+  it("does not confer cross-host official authority from redirect strings, pinned HTTP or forged native data", () => {
+    for (const nativeRequest of [undefined, {}, { url: () => "https://new-municipal.example/golf", redirectedFrom: () => ({ url: () => official }) }]) {
+      const value = scope(), destination = "https://new-municipal.example/golf";
+      value.observeDocument({ url: official, status: 301 });
+      value.observeDocument({ url: destination, status: 200, redirectedFrom: official, nativeRequest });
+      expect(value.authorizeParent(destination, visible)).toBeUndefined();
+    }
+  });
   it("can follow an actual same-origin official booking page before its observed provider link", () => {
     const value = scope(), intermediary = "https://www.venue.example/tee-times";
     value.observeDocument({ url: official, status: 200 });

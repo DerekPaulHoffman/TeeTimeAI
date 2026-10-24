@@ -12,6 +12,7 @@ import { isReaderObservationCurrent } from "./observation-clock";
 import { isTeeItUpRecipeSlotLink } from "./teeitup-recipe-source";
 import { isChronogolfRecipeSlotLink } from "./chronogolf-source";
 import { normalizeDiscoverySourceUrl } from "./source-url";
+import { deriveCourseTrustedContext, isCurrentTrustedContext, type DiscoveryTrustedContext } from "./trusted-context";
 import {
   accessExecutionInputSchema,
   accessExecutionResultSchema,
@@ -32,6 +33,7 @@ export type DiscoveryRequest = {
   identity: { name: string; officialUrl: string | null; bookingUrl: string | null; timeZone: string; providerFamily: string | null; address?: string };
   input: AccessExecutionInput;
   demand?: { searchId: string; alertGeneration: number };
+  trustedContext?: DiscoveryTrustedContext;
 };
 export class DiscoveryConflictError extends Error {
   constructor() { super("Course discovery state changed."); }
@@ -58,7 +60,7 @@ export function isRetryableDiscoveryTransactionError(error: unknown) {
 }
 
 const courseSelect = {
-  id: true, name: true, address: true, website: true, detectedBookingUrl: true, timeZone: true,
+  id: true, name: true, address: true, phone: true, website: true, detectedBookingUrl: true, timeZone: true,
   providerFamilyKey: true, bookingMetadata: true, isPublic: true, activeAccessRecipeId: true,
   bookingMethod: true, bookingAccessMode: true, automationEligibility: true, automationReason: true,
 } satisfies Prisma.CourseSelect;
@@ -78,7 +80,7 @@ type Tx = Prisma.TransactionClient;
 type Source = Awaited<ReturnType<typeof loadSource>>;
 type Search = Prisma.TeeSearchGetPayload<{ select: typeof searchSelect }>;
 
-type FingerprintCourse = Prisma.CourseGetPayload<{ select: typeof courseSelect }>;
+type FingerprintCourse = Omit<Prisma.CourseGetPayload<{ select: typeof courseSelect }>, "phone">;
 type FingerprintOffering = Prisma.CourseOfferingGetPayload<{ select: typeof offeringSelect }>;
 
 /** Pure current-source binding shared with the read-only customer projection. */
@@ -135,7 +137,7 @@ async function loadSource(tx: Tx, target: Pick<DiscoveryTarget, "courseId" | "of
   const identity = { ...fingerprintIdentity, officialUrl: normalizeDiscoverySourceUrl(fingerprintIdentity.officialUrl),
     bookingUrl: normalizeDiscoverySourceUrl(fingerprintIdentity.bookingUrl), ...(course.address ? { address: course.address } : {}) };
   const sourceFingerprint = getDiscoverySourceFingerprint(course, offering);
-  return { course, offering, identity, sourceFingerprint, activeRecipeId: offering ? offering.activeAccessRecipeId : course.activeAccessRecipeId,
+  return { course, offering, identity, trustedContext: deriveCourseTrustedContext(course), sourceFingerprint, activeRecipeId: offering ? offering.activeAccessRecipeId : course.activeAccessRecipeId,
     target: { courseId: course.id, ...(offering ? { offeringId: offering.id } : {}), kind: offering ? "SIMULATOR" as const : "OUTDOOR" as const } };
 }
 function activeSearch(search: Search, source: Source, now: Date) {
@@ -146,7 +148,7 @@ function activeSearch(search: Search, source: Source, now: Date) {
     isSearchWindowActive({ date: search.date, endTime: search.endTime, courseTimeZones: [source.identity.timeZone], fallbackTimeZone: search.userTimeZone, now });
 }
 function requestFor(source: Source, search: Search): DiscoveryRequest {
-  return { target: source.target, identity: source.identity, demand: { searchId: search.id, alertGeneration: search.alertGeneration }, input: accessExecutionInputSchema.parse({
+  return { target: source.target, identity: source.identity, ...(source.trustedContext.canonicalCoursePhone ? { trustedContext: source.trustedContext } : {}), demand: { searchId: search.id, alertGeneration: search.alertGeneration }, input: accessExecutionInputSchema.parse({
     date: search.date.toISOString().slice(0, 10), timeZone: source.identity.timeZone, players: search.players,
     startTime: search.startTime, endTime: search.endTime, ...(search.durationMinutes ? { durationMinutes: search.durationMinutes } : {}),
   }) };
@@ -268,6 +270,8 @@ async function owned(tx: Tx, jobId: string, leaseToken: string) {
   const job = await tx.courseDiscoveryJob.findUnique({ where: { id: jobId } });
   if (!job || job.status !== "RUNNING" || !job.activeTargetKey || job.leaseToken !== leaseToken || !job.leaseExpiresAt || job.leaseExpiresAt <= now || !job.deadlineAt || job.deadlineAt <= now) conflict();
   const source = await loadSource(tx, { courseId: job.courseId, offeringId: job.offeringId ?? undefined });
+  const claimedContext = (job.request as unknown as DiscoveryRequest).trustedContext;
+  if (claimedContext !== undefined && !isCurrentTrustedContext(claimedContext, source.trustedContext)) conflict();
   if (source.sourceFingerprint !== job.sourceFingerprint || source.activeRecipeId !== job.baseRecipeId || !await currentDemand(tx, source, now) || await hasLegacyDiscoveryOwner(tx, source.target)) conflict();
   return { job, now, source };
 }
@@ -312,7 +316,7 @@ function localSlotTime(iso: string, timeZone: string) {
     .formatToParts(new Date(iso)).map(part => [part.type, part.value]));
   return { date: `${parts.get("year")}-${parts.get("month")}-${parts.get("day")}`, time: `${parts.get("hour")}:${parts.get("minute")}` };
 }
-function bindRecipe(recipe: CourseAccessRecipeData, source: Source, sourceEvidence?: DiscoverySourceEvidence) {
+function bindRecipe(recipe: CourseAccessRecipeData, source: Source, sourceEvidence?: DiscoverySourceEvidence, request?: DiscoveryRequest) {
   const normalizeName = (value: string) => value.normalize("NFKC").replace(/\s+/gu, " ").trim().toLocaleLowerCase("en-US");
   if (canonical(recipe.target) !== canonical(source.target) || recipe.source.timeZone !== source.identity.timeZone ||
     normalizeName(recipe.source.venueName) !== normalizeName(source.identity.name) ||
@@ -321,6 +325,17 @@ function bindRecipe(recipe: CourseAccessRecipeData, source: Source, sourceEviden
   if (sourceEvidence && (sourceEvidence.officialUrl !== recipe.source.officialUrl ||
       sourceEvidence.observedBookingUrl !== recipe.source.bookingUrl)) conflict();
   if (source.identity.bookingUrl && recipe.source.bookingUrl !== source.identity.bookingUrl && !sourceEvidence) conflict();
+  if (recipe.engine === "EXISTING_ADAPTER" && recipe.adapter.family === "CPS") {
+    const proof = recipe.adapter.officialPostalConflictProof;
+    if (proof && (!source.trustedContext.canonicalCoursePhone ||
+        proof.canonicalCoursePhone !== source.trustedContext.canonicalCoursePhone ||
+        normalizeName(proof.canonicalAddress) !== normalizeName(source.identity.address ?? "") ||
+        proof.officialUrl !== recipe.source.officialUrl || proof.bookingUrl !== recipe.source.bookingUrl ||
+        normalizeName(proof.venueName) !== normalizeName(source.identity.name) || proof.timeZone !== source.identity.timeZone ||
+        proof.tenant !== recipe.adapter.tenant || proof.catalogHash !== recipe.adapter.catalogHash ||
+        canonical(proof.courseIds) !== canonical(recipe.adapter.courseIds) ||
+        request !== undefined && !isCurrentTrustedContext(request.trustedContext, source.trustedContext))) conflict();
+  }
 }
 
 export async function proposeDiscoveryRecipe(jobId: string, leaseToken: string, proposed: unknown, observedSource?: unknown) {
@@ -332,10 +347,10 @@ export async function proposeDiscoveryRecipe(jobId: string, leaseToken: string, 
     if (job.candidateHash === recipeHash && job.verification) {
       const verification = verificationSchema.parse(job.verification);
       if (sourceEvidence && canonical(sourceEvidence) !== canonical(verification.sourceEvidence)) conflict();
-      bindRecipe(recipe, source, verification.sourceEvidence);
+      bindRecipe(recipe, source, verification.sourceEvidence, job.request as unknown as DiscoveryRequest);
       return { recipeHash, challenges: verification.challenges.map(challenge => ({ id: challenge.id, recipeHash: challenge.recipeHash, input: challenge.input, issuedAt: challenge.issuedAt, completed: Boolean(challenge.result) })) };
     }
-    bindRecipe(recipe, source, sourceEvidence);
+    bindRecipe(recipe, source, sourceEvidence, job.request as unknown as DiscoveryRequest);
     const input = accessExecutionInputSchema.parse((job.request as unknown as DiscoveryRequest).input);
     // Verification inputs never become customer demand or customer matches.
     // A neighboring outdoor party tests parameterization, not universal party support.
@@ -359,7 +374,7 @@ export async function recordDiscoveryVerification(input: { jobId: string; leaseT
     const { job, now, source } = await owned(tx, input.jobId, input.leaseToken);
     const recipe = parseAccessRecipe(job.candidate);
     const verification = verificationSchema.parse(job.verification);
-    bindRecipe(recipe, source, verification.sourceEvidence);
+    bindRecipe(recipe, source, verification.sourceEvidence, job.request as unknown as DiscoveryRequest);
     const challenge = verification.challenges.find(item => item.id === input.challengeId);
     if (!challenge || input.recipeHash !== job.candidateHash || result.evidence.recipeHash !== job.candidateHash ||
       hashAccessRecipe(recipe) !== job.candidateHash || canonical(input.input) !== canonical(challenge.input)) conflict();
@@ -403,7 +418,7 @@ export async function activateDiscoveryRecipe(jobId: string, leaseToken: string)
     const { job, now, source } = await owned(tx, jobId, leaseToken);
     const recipe = parseAccessRecipe(job.candidate);
     const verification = verificationSchema.parse(job.verification);
-    bindRecipe(recipe, source, verification.sourceEvidence);
+    bindRecipe(recipe, source, verification.sourceEvidence, job.request as unknown as DiscoveryRequest);
     if (hashAccessRecipe(recipe) !== job.candidateHash || verification.challenges.some(challenge => !challenge.result || !challenge.receivedAt || challenge.recipeHash !== job.candidateHash)) conflict();
     const verifiedDurations = verification.challenges.flatMap(challenge => challenge.input.durationMinutes ? [challenge.input.durationMinutes] : []);
     if (source.offering && verifiedDurations.length !== verification.challenges.length) conflict();
@@ -446,7 +461,7 @@ export async function getActiveAccessRecipe(target: { courseId: string; offering
     try {
       const recipe = parseAccessRecipe(stored.payload);
       bindRecipe(recipe, source);
-      return hashAccessRecipe(recipe) === stored.hash ? { record: stored, recipe } : null;
+      return hashAccessRecipe(recipe) === stored.hash ? { record: stored, recipe, trustedContext: source.trustedContext } : null;
     } catch (error) {
       // An obsolete or invalid recipe is missing coverage. Let admission clear
       // its pointer and repair it, while database/runtime failures still surface.

@@ -11,13 +11,14 @@ import { accessExecutionInputSchema, accessExecutionResultSchema, type AccessExe
 import { isReaderObservationCurrent } from "./observation-clock";
 import { isTeeItUpRecipeSlotLink } from "./teeitup-recipe-source";
 import { isChronogolfRecipeSlotLink } from "./chronogolf-source";
+import { deriveCourseTrustedContext, discoveryTrustedContextSchema, isCurrentTrustedContext, type DiscoveryTrustedContext } from "./trusted-context";
 
 const EXECUTION_TTL_MS = 180_000;
 const RESULT_TTL_MS = 90_000;
 const contextSchema = accessExecutionInputSchema;
 export type ColdStartTrace = { discoveryJobId: string; firstPickedUpAt: string; deadlineAt: string; firstWarmQueuedAt: string;
   initialExecution: boolean; firstWarmExceeded: boolean; currentLateFromColdDeadline?: boolean; firstWarmFinishedAt?: string; firstWarmStatus?: string };
-type Context = { target: DiscoveryTarget; recipeId: string; recipeHash: string; input: AccessExecutionInput; alertGeneration: number;
+type Context = { target: DiscoveryTarget; recipeId: string; recipeHash: string; input: AccessExecutionInput; alertGeneration: number; trustedContext?: DiscoveryTrustedContext;
   queuedAt?: string; consumed?: { recipeHash: string; observedAt: string; consumedAt: string };
   coldStart?: ColdStartTrace; resumeScheduleVersion?: number };
 const json = (value: unknown): Prisma.InputJsonValue => JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
@@ -27,7 +28,13 @@ function readContext(value: unknown): Context {
   if (!context || typeof context.recipeId !== "string" || typeof context.recipeHash !== "string" ||
       !context.target?.courseId || !Number.isInteger(context.alertGeneration)) throw new Error("Invalid recipe execution context");
   contextSchema.parse(context.input);
+  if (context.trustedContext !== undefined) discoveryTrustedContextSchema.parse(context.trustedContext);
   return context;
+}
+
+function requiresPhoneContext(recipe: unknown) {
+  const value = recipe as { engine?: string; adapter?: { family?: string; officialPostalConflictProof?: unknown } };
+  return value?.engine === "EXISTING_ADAPTER" && value.adapter?.family === "CPS" && Boolean(value.adapter.officialPostalConflictProof);
 }
 
 export function recipeExecutionDeadline(now: Date, coldStart?: ColdStartTrace) {
@@ -85,6 +92,7 @@ export async function getOrQueueRecipeExecution(input: { searchId: string; targe
         firstWarmExceeded: origin.deadlineAt <= now, currentLateFromColdDeadline: origin.deadlineAt <= now };
     }
     const context: Context = { target: input.target, recipeId: active.record.id, recipeHash: active.record.hash, input: parameters, alertGeneration: search.alertGeneration, queuedAt: now.toISOString(),
+      ...(active.trustedContext ? { trustedContext: active.trustedContext } : {}),
       ...(coldStart ? { coldStart } : {}) };
     const data = { teeSearchId: search.id, courseId: input.target.courseId, scheduleVersion: search.scheduleVersion,
       purpose: "RECIPE_CHECK" as const, courseKey: `recipe:${active.record.id}`, targetDate: parameters.date, players: parameters.players,
@@ -109,6 +117,8 @@ export async function claimNextRecipeExecution(workerId: string) {
     const active = await getActiveAccessRecipe(context.target);
     const search = await prisma.teeSearch.findUnique({ where: { id: searchId }, include: { preferences: true } });
     if (!active || active.record.id !== context.recipeId || active.record.hash !== context.recipeHash || !search ||
+        requiresPhoneContext(active.recipe) && !isCurrentTrustedContext(context.trustedContext, active.trustedContext ?? {}) ||
+        context.trustedContext !== undefined && !isCurrentTrustedContext(context.trustedContext, active.trustedContext ?? {}) ||
         search.status !== "ACTIVE" || search.alertGeneration !== context.alertGeneration || search.scheduleVersion !== row.scheduleVersion ||
         !search.preferences.some(pref => pref.courseId === context.target.courseId && (!context.target.offeringId || pref.offeringId === context.target.offeringId)) ||
         !isSearchWindowActive({ date: search.date, endTime: search.endTime, courseTimeZones: [context.input.timeZone], fallbackTimeZone: search.userTimeZone, now: new Date() })) {
@@ -119,6 +129,7 @@ export async function claimNextRecipeExecution(workerId: string) {
     const claimed = await prisma.localReaderJob.updateMany({ where: { id: row.id, status: row.status, leaseToken: row.leaseToken, jobExpiresAt: { gt: new Date() } },
       data: { status: "LEASED", deviceId: workerId, leaseToken: token, claimedAt: new Date(), leaseExpiresAt: row.jobExpiresAt } });
     if (claimed.count === 1) return { id: row.id, leaseToken: token, deadlineAt: row.jobExpiresAt.toISOString(), recipe: active.recipe, input: context.input,
+      ...(active.trustedContext ? { trustedContext: active.trustedContext } : {}),
       ...(context.coldStart ? { coldStart: context.coldStart, firstPickedUpAt: context.coldStart.firstPickedUpAt } : {}) };
   }
   return null;
@@ -154,6 +165,8 @@ export async function completeRecipeExecution(id: string, leaseToken: string, va
     if (result.complete && (!result.evidence.venueVerified || !result.evidence.dateVerified || !result.evidence.capacityVerified ||
         !result.evidence.durationVerified || !result.evidence.completeVerified)) throw new Error("Incomplete recipe evidence");
     const stored = await tx.courseAccessRecipe.findUniqueOrThrow({ where: { id: context.recipeId } });
+    if (requiresPhoneContext(stored.payload) && !isCurrentTrustedContext(context.trustedContext, deriveCourseTrustedContext(target as { phone?: unknown })))
+      throw new Error("Recipe execution is no longer current");
     await assertActiveAccessRecipeInTransaction(tx, context.target, context.recipeId);
     const bookingUrl = (stored.payload as unknown as { source: { bookingUrl: string } }).source.bookingUrl;
     const storedRecipe = stored.payload as unknown as { engine: string; adapter?: { family: string; facilityIds?: number[] } };
@@ -231,7 +244,7 @@ export async function markRecipeObservationConsumed(tx: Prisma.TransactionClient
 
 export function recipeResultIsSuccessful(result: AccessExecutionResult) { return result.complete && ["AVAILABLE", "EMPTY"].includes(result.status); }
 export function recipeFailureIsRetryable(reason?: string) {
-  return ["BROWSER_UNAVAILABLE", "PROVIDER_THROTTLED", "PIPELINE_DEADLINE", "DEADLINE_EXCEEDED", "DISCOVERY_EXECUTION_TIMEOUT"].includes(reason ?? "");
+  return ["BROWSER_UNAVAILABLE", "LOCAL_CHROME_REQUIRED", "PROVIDER_THROTTLED", "PIPELINE_DEADLINE", "DEADLINE_EXCEEDED", "DISCOVERY_EXECUTION_TIMEOUT"].includes(reason ?? "");
 }
 
 /** A missing local capability does not invalidate a method already proven on

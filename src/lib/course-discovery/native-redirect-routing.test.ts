@@ -5,7 +5,8 @@ import type { AddressInfo } from "node:net";
 import { chromium, type Page, type Route } from "@playwright/test";
 import { describe, expect, it, vi } from "vitest";
 import { authorizePublicClientReadHeaders, installNativeRedirectRouting, isCurrentPublicClientReadHeaders,
-  publicClientReadHeaderProofFailure, nativeSourceLoadingFailedCorsErrors, nativePublicClientPreflightMethod, isNativeReadSupersededFailure, isNativeReadTerminalFailure, nativeMindbodyBootstrapSource, type NativeReadRoute, type NativeRequestDiagnostic } from "./native-redirect-routing";
+  publicClientReadHeaderProofFailure, nativeSourceLoadingFailedCorsErrors, nativePublicClientPreflightMethod, isNativeReadSupersededFailure, isNativeReadTerminalFailure, nativeMindbodyBootstrapSource, attestedNativeDocumentRedirects, type NativeReadRoute, type NativeRequestDiagnostic } from "./native-redirect-routing";
+import { createPublicBookingParentScope } from "./public-booking-parent";
 import { continueNativeBrowserRead, isObservedNativeRedirect, isObservedNativeRedirectTarget, nativeReadPreflightMethod } from "./native-public-browser";
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
 
@@ -2230,8 +2231,23 @@ describe("native exact request and response ownership", () => {
       expect(isObservedNativeRedirect(child, new Set([new URL(root).origin]))).toBe(false);
       expect(isObservedNativeRedirect(child, new Set([`${root}&different=1`]))).toBe(false);
       expect(isObservedNativeRedirect({ ...child }, roots)).toBe(false);
+      expect(attestedNativeDocumentRedirects(child, roots)).toBeUndefined();
+      await test.routes[1].continue();
+      test.response("child", { resourceType: "Document", request: { url: target, method: "GET", headers: {} }, responseHeaders: [{ name: "Content-Type", value: "text/html" }] });
+      await child.response();
+      expect(attestedNativeDocumentRedirects(child, roots)).toEqual([{ fromUrl: root, toUrl: target, status, completed: true }]);
+      expect(attestedNativeDocumentRedirects({ ...child }, roots)).toBeUndefined();
+      expect(attestedNativeDocumentRedirects(child, new Set([new URL(root).origin]))).toBeUndefined();
+      const scope = createPublicBookingParentScope({ officialUrl: root });
+      scope.observeDocument({ url: root, status });
+      scope.observeDocument({ url: target, status: 200, redirectedFrom: root, nativeRequest: child });
+      expect(scope.authorizeParent(target)).toEqual({ kind: "VERIFIED_OFFICIAL_DOCUMENT", officialUrl: root, documentUrl: target });
+      // Replaying a public URL or copied adapter cannot reuse that authority.
+      scope.beginDocument(target); scope.observeDocument({ url: target, status: 200, redirectedFrom: root, nativeRequest: { ...child } });
+      expect(scope.authorizeParent(target)).toBeUndefined();
       await test.guard.close();
       expect(isObservedNativeRedirect(child, roots)).toBe(false);
+      expect(attestedNativeDocumentRedirects(child, roots)).toBeUndefined();
       expect(isObservedNativeRedirectTarget(original, target, roots)).toBe(false);
     } finally { await test.guard.close(); }
   });
