@@ -320,21 +320,25 @@ export function createMindbodyAppointmentNativeCapture(options: { page: Page; so
     formIntent = createMindbodyPublicFormIntent({ sourceUrl: doc.url, ...form, studioId: descriptor!.studioId,
       deadlineAt: Math.min(options.deadlineAt, Date.now() + 15_000), sourceCurrent: () => current(doc) });
     try { await exact.click({ timeout: Math.max(1, Math.min(10_000, options.deadlineAt - Date.now())) });
-      const started = Date.now(); let selectionDocument: NativeDocument | undefined;
+      const started = Date.now(), ordinaryUntil = Math.min(options.deadlineAt, started + 12_000), pendingUntil = Math.min(options.deadlineAt, started + 45_000);
+      let selectionDocument: NativeDocument | undefined, correctNativeSelection = false, pendingContinuation = false;
       let selection: Pick<FilterSettlementDiagnostic, "categorySelected" | "serviceSelected" | "expectedControlPresent" | "expectedControlSelected"> = {
         categorySelected: null, serviceSelected: null, expectedControlPresent: null, expectedControlSelected: null };
-      await wait(async () => {
+      for (;;) {
+        active();
         const candidate = nativeDocument, changed = !!candidate && candidate !== doc, currentDocument = !!candidate && current(candidate), pendingReads = options.pendingReads();
         if (!changed || !currentDocument) {
-          selectionDocument = undefined;
+          selectionDocument = undefined; correctNativeSelection = false;
           selection = { categorySelected: null, serviceSelected: null, expectedControlPresent: null, expectedControlSelected: null };
         }
         if (changed && currentDocument && candidate !== selectionDocument) {
-          selectionDocument = candidate;
+          selectionDocument = candidate; correctNativeSelection = false;
           selection = { categorySelected: null, serviceSelected: null, expectedControlPresent: null, expectedControlSelected: null };
           // Diagnostics inspect only already captured native bytes. They never
           // substitute for the subsequent rendered/catalog/proof checks.
-          try { const parsed = projectMindbodySearchCatalog(candidate!.html), controls = name === "optTG" ? parsed.categories : parsed.services;
+          try { const parsed = projectMindbodySearchCatalog(candidate!.html), controls = name === "optTG" ? parsed.categories : parsed.services,
+              expected = controls.filter(row => row.id === value), selected = controls.filter(row => row.selected && row.enabled);
+            correctNativeSelection = expected.length === 1 && selected.length === 1 && expected[0] === selected[0];
             selection = { categorySelected: parsed.categories.filter(row => row.selected && row.enabled).length === 1,
               serviceSelected: parsed.services.filter(row => row.selected && row.enabled).length === 1,
               expectedControlPresent: controls.some(row => row.id === value), expectedControlSelected: controls.some(row => row.id === value && row.selected && row.enabled) };
@@ -344,8 +348,16 @@ export function createMindbodyAppointmentNativeCapture(options: { page: Page; so
           ...(candidate ? { documentVersion: candidate.version, rawBytes: Buffer.byteLength(candidate.html), rawBodyClosed: /<\/body\s*>/iu.test(candidate.html), rawHtmlClosed: /<\/html\s*>/iu.test(candidate.html) } : {}),
           filterSettlement: { sourceControlBound: true, newDocumentObserved: changed, currentDocument, controlIsCategory: name === "optTG",
             ...selection, pendingReads, elapsedMs: Math.max(0, Date.now() - started) } };
-        return changed && currentDocument && !pendingReads ? true : undefined;
-      }, "MINDBODY_PUBLIC_FILTER_UNSETTLED");
+        // The successful postback is already native/current and its exact
+        // intended control is selected. Only its still-pending public reads
+        // may use this bounded continuation; no POST, intent or clock renews.
+        const now = Date.now(), correctPostback = changed && currentDocument && correctNativeSelection;
+        if (correctPostback && pendingReads > 0 && now < ordinaryUntil) pendingContinuation = true;
+        const until = correctPostback && pendingContinuation ? pendingUntil : ordinaryUntil;
+        if (now >= until) throw new Error("MINDBODY_PUBLIC_FILTER_UNSETTLED");
+        if (changed && currentDocument && !pendingReads) break;
+        await page.waitForTimeout(Math.min(50, until - Date.now()));
+      }
     } finally { formIntent?.revoke(); formIntent = undefined; }
   }
   async function readCatalog(): Promise<MindbodyCatalogEvidence> {

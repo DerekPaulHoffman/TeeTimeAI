@@ -18,6 +18,11 @@ function searchHtml() { return '<html><head><title>OnPar Now</title></head><body
   '<footer>OnPar Now - Site ID: 685163<br>1669 Smallman Street The Terminal Building, Pittsburgh PA 15222</footer></body></html>'; }
 function load(html: string) { document.open(); document.write(html); document.close(); }
 const escape = (value: string) => value.replaceAll("&", "&amp;").replaceAll('"', "&quot;");
+function unselectedCategoryHtml(){return '<html><head><title>OnPar Now</title></head><body><form name="frmApptSearch" action="'+url+'" method="post">'+
+  categoryObserved.fields.filter(row=>row.name!=="optTG").map(row=>'<input type="hidden" name="'+row.name+'" value="'+escape(row.value)+'">').join("")+
+  '<table>'+[["2","TrackMan Simulator"],["4","PuttView Putting Green"],["5","Sand Trap/Chipping Area"]].map(([id,label])=>
+    '<tr><td><input type="radio" name="optTG" value="'+id+'"><label>'+label+'</label></td></tr>').join("")+'</table></form>'+
+  '<footer>OnPar Now - Site ID: 685163<br>1669 Smallman Street The Terminal Building, Pittsburgh PA 15222</footer></body></html>';}
 function dayHtml(date: string) {
   const display = Number(date.slice(5, 7)) + "/" + Number(date.slice(8)) + "/" + date.slice(0, 4);
   const weekday = new Intl.DateTimeFormat("en-US", { weekday: "long", timeZone: "UTC" }).format(new Date(date + "T12:00:00Z"));
@@ -28,7 +33,7 @@ function dayHtml(date: string) {
       '<tr><th><a class="instructorLink" href="' + escape(row.href) + '">' + row.label + '</a></th></tr>').join("") +
     '<tr><td><a class="apptLink" href="' + escape(observed.gridObserved.anchors[0].href) + '">TrackMan Simulator</a></td></tr></table>' + form + '</body></html>';
 }
-function fixture() {
+function fixture(deadlineMs=20_000) {
   let currentUrl = url, pending = 0, active = true, click: ((selector: string) => void) | undefined;
   let readyState = "complete", timeOrigin = 1_700_000_000_000, renderedOverride: string | undefined, wait: (() => void) | undefined;
   const locator = (selector: string) => {
@@ -50,7 +55,7 @@ function fixture() {
       return result && typeof result === "object" && "timeOrigin" in result ?
         { ...result, timeOrigin, ...("readyState" in result ? { readyState, html: renderedOverride ?? result.html } : {}) } : result;
     }, locator, waitForTimeout: async () => { if (wait) wait(); else throw new Error("FAKE_WAIT_NOT_READY"); } } as unknown as Page;
-  const capture = createMindbodyAppointmentNativeCapture({ page, source, requestedInput: input, native: true, deadlineAt: Date.now() + 20_000,
+  const capture = createMindbodyAppointmentNativeCapture({ page, source, requestedInput: input, native: true, deadlineAt: Date.now() + deadlineMs,
     pendingReads: () => pending, assertActive: () => { if (!active) throw new Error("BROWSER_CLOSED"); } });
   const complete = (version = capture.beginDocument(), html = searchHtml(), status = 200) => {
     capture.completeDocument(version, currentUrl, status, "text/html", Buffer.from(html)); timeOrigin++; return version;
@@ -72,8 +77,32 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); Reflect.deleteProperty(document, "elementFromPoint");
   if (originalInnerText) Object.defineProperty(HTMLElement.prototype, "innerText", originalInnerText); else Reflect.deleteProperty(HTMLElement.prototype, "innerText"); });
 describe("native Mindbody private capture currency and rendered proof", () => {
+  it.each(["visible", "hidden selected label"] as const)("waits for correct native postback reads beyond12s and still checks the fresh catalog: %s",async mode=>{
+    let now=Date.now();vi.spyOn(Date,"now").mockImplementation(()=>now);const started=now,initial=unselectedCategoryHtml();
+    load(initial);const f=fixture(60000);f.currentUrl(categoryObserved.sourceUrl);f.complete(undefined,initial);
+    f.onClick(()=>{const next=searchHtml();load(next);f.currentUrl(url);f.complete(undefined,next);f.pending(6);});
+    f.onWait(()=>{now+=1000;if(now-started>=14000){f.pending(0);if(mode==="hidden selected label")document.querySelector('input[name="optTG"]')!.closest("tr")!.style.display="none";}});
+    if(mode==="visible"){const result=await f.capture.readCatalog();expect(result.category.id).toBe("2");expect(result.service.id).toBe("5");
+      expect(f.capture.diagnostics()).toMatchObject({stage:"CATALOG_READY",nativeDocumentCurrent:true,pendingReads:0});}
+    else await expect(f.capture.readCatalog()).rejects.toThrow("MINDBODY_CATALOG_NOT_VISIBLE");
+    expect(now-started).toBe(14000);f.close();
+  });
+  it.each([60000,20000])("correct pending reads never extend the45s filter or original absolute deadline: %s",async deadline=>{
+    let now=Date.now();vi.spyOn(Date,"now").mockImplementation(()=>now);const started=now,initial=unselectedCategoryHtml();
+    load(initial);const f=fixture(deadline);f.currentUrl(categoryObserved.sourceUrl);f.complete(undefined,initial);
+    f.onClick(()=>{const next=searchHtml();load(next);f.currentUrl(url);f.complete(undefined,next);f.pending(6);});f.onWait(()=>{now+=1000;});
+    await expect(f.capture.readCatalog()).rejects.toThrow("MINDBODY_PUBLIC_FILTER_UNSETTLED");
+    expect(now-started).toBe(Math.min(45000,deadline));expect(f.capture.diagnostics().filterSettlement).toMatchObject({pendingReads:6,expectedControlSelected:true});f.close();
+  });
+  it("ambiguous native selected controls retain the12s bound despite pending reads",async()=>{
+    let now=Date.now();vi.spyOn(Date,"now").mockImplementation(()=>now);const started=now,initial=unselectedCategoryHtml();load(initial);
+    const f=fixture(60000);f.currentUrl(categoryObserved.sourceUrl);f.complete(undefined,initial);
+    f.onClick(()=>{const next=searchHtml().replace('</table>','<tr><td><input type="radio" name="optTG" value="2"><label>Duplicate category</label></td></tr></table>');
+      load(next);f.currentUrl(url);f.complete(undefined,next);f.pending(6);});f.onWait(()=>{now+=1000;});
+    await expect(f.capture.readCatalog()).rejects.toThrow("MINDBODY_PUBLIC_FILTER_UNSETTLED");expect(now-started).toBe(12000);f.close();
+  });
   it.each(["no new document", "stale document", "pending reads", "wrong selected control"] as const)(
-    "records exact closed filter settlement facts while retaining the same timeout: %s",async mode=>{
+    "records exact closed filter facts and keeps invalid postbacks on their original timeout: %s",async mode=>{
       let now=Date.now();vi.spyOn(Date,"now").mockImplementation(()=>now);
       const footer='<footer>OnPar Now - Site ID: 685163<br>1669 Smallman Street The Terminal Building, Pittsburgh PA 15222</footer>';
       const initial='<html><head><title>OnPar Now</title></head><body><form name="frmApptSearch" action="'+url+'" method="post">'+
@@ -87,10 +116,10 @@ describe("native Mindbody private capture currency and rendered proof", () => {
         load(next);f.currentUrl(url);f.complete(undefined,next);
         if(mode==="stale document")f.currentUrl(url+"changed");else f.pending(2);
       });
-      f.onWait(()=>{now+=3000;});
+      f.onWait(()=>{now+=1000;});
       await expect(f.capture.readCatalog()).rejects.toThrow("MINDBODY_PUBLIC_FILTER_UNSETTLED");
       const diagnostic=f.capture.diagnostics(),d=diagnostic.filterSettlement!;
-      expect(diagnostic.stage).toBe("FILTER_SETTLEMENT");expect(d.elapsedMs).toBe(12000);
+      expect(diagnostic.stage).toBe("FILTER_SETTLEMENT");expect(d.elapsedMs).toBe(mode==="pending reads"?20000:12000);
       expect(d).toMatchObject({sourceControlBound:true,controlIsCategory:true,newDocumentObserved:mode!=="no new document",currentDocument:mode!=="stale document",pendingReads:["pending reads","wrong selected control"].includes(mode)?2:0});
       expect(d.categorySelected).toBe(["pending reads","wrong selected control"].includes(mode)?true:null);
       expect(d.expectedControlPresent).toBe(mode==="pending reads"?true:mode==="wrong selected control"?false:null);
