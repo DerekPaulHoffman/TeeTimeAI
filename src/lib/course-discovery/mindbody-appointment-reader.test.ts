@@ -31,6 +31,17 @@ function fake() {
 }
 const metadata = () => inspectMindbodyPublicRentalCatalog(source, catalog()).metadata;
 describe("fixed native Mindbody appointment reader", () => {
+  it("preserves the original filter failure and its closed settlement snapshot across cleanup",async()=>{
+    const f=fake(),session=await f.createSession(),primary=new Error("MINDBODY_PUBLIC_FILTER_UNSETTLED");
+    const filterSettlement={sourceControlBound:true,newDocumentObserved:true,currentDocument:true,controlIsCategory:false,
+      categorySelected:true,serviceSelected:true,expectedControlPresent:true,expectedControlSelected:true,pendingReads:2,elapsedMs:12000,token:"PRIVATE"};
+    f.deps.createSession=async()=>({...session,diagnostics:()=>({mindbodyCapture:{stage:"FILTER_SETTLEMENT",filterSettlement}})});
+    f.readCatalog.mockRejectedValueOnce(primary);f.close.mockImplementationOnce(async()=>{filterSettlement.pendingReads=0;throw Error("PRIVATE_CLEANUP");});
+    await expect(inspectMindbodyAppointments(source,input,f.deps)).rejects.toBe(primary);
+    const d=getMindbodyAppointmentDiagnostic(primary)!;expect(d).toMatchObject({stage:"FILTER_SETTLEMENT",filterSettlement:{pendingReads:2,elapsedMs:12000}});
+    expect(JSON.stringify(d)).not.toMatch(/PRIVATE|token/u);d.filterSettlement!.pendingReads=99;
+    expect(getMindbodyAppointmentDiagnostic(primary)!.filterSettlement!.pendingReads).toBe(2);
+  });
   it("binds only closed nested capture diagnostics to the exact original failure before cleanup", async () => {
     const f = fake(), primary = new Error("MINDBODY_CATALOG_RAW_VISIBLE_MISMATCH"), session = await f.createSession();
     const comparison = { fieldsEqual: { title: true, bodyText: false, locationId: true, studioId: true, venueAddress: true, categories: true, services: true, resources: true },

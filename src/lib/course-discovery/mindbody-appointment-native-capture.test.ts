@@ -72,6 +72,33 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); Reflect.deleteProperty(document, "elementFromPoint");
   if (originalInnerText) Object.defineProperty(HTMLElement.prototype, "innerText", originalInnerText); else Reflect.deleteProperty(HTMLElement.prototype, "innerText"); });
 describe("native Mindbody private capture currency and rendered proof", () => {
+  it.each(["no new document", "stale document", "pending reads", "wrong selected control"] as const)(
+    "records exact closed filter settlement facts while retaining the same timeout: %s",async mode=>{
+      let now=Date.now();vi.spyOn(Date,"now").mockImplementation(()=>now);
+      const footer='<footer>OnPar Now - Site ID: 685163<br>1669 Smallman Street The Terminal Building, Pittsburgh PA 15222</footer>';
+      const initial='<html><head><title>OnPar Now</title></head><body><form name="frmApptSearch" action="'+url+'" method="post">'+
+        categoryObserved.fields.filter(row=>row.name!=="optTG").map(row=>'<input type="hidden" name="'+row.name+'" value="'+escape(row.value)+'">').join("")+
+        '<table>'+[["2","TrackMan Simulator"],["4","PuttView Putting Green"],["5","Sand Trap/Chipping Area"]].map(([id,label])=>
+          '<tr><td><input type="radio" name="optTG" value="'+id+'"><label>'+label+'</label></td></tr>').join("")+'</table></form>'+footer+'</body></html>';
+      load(initial);const f=fixture();f.currentUrl(categoryObserved.sourceUrl);f.complete(undefined,initial);
+      f.onClick(()=>{
+        if(mode==="no new document")return;
+        const next=mode==="wrong selected control"?searchHtml().replace('name="optTG" value="2"','name="optTG" value="4"'):searchHtml();
+        load(next);f.currentUrl(url);f.complete(undefined,next);
+        if(mode==="stale document")f.currentUrl(url+"changed");else f.pending(2);
+      });
+      f.onWait(()=>{now+=3000;});
+      await expect(f.capture.readCatalog()).rejects.toThrow("MINDBODY_PUBLIC_FILTER_UNSETTLED");
+      const diagnostic=f.capture.diagnostics(),d=diagnostic.filterSettlement!;
+      expect(diagnostic.stage).toBe("FILTER_SETTLEMENT");expect(d.elapsedMs).toBe(12000);
+      expect(d).toMatchObject({sourceControlBound:true,controlIsCategory:true,newDocumentObserved:mode!=="no new document",currentDocument:mode!=="stale document",pendingReads:["pending reads","wrong selected control"].includes(mode)?2:0});
+      expect(d.categorySelected).toBe(["pending reads","wrong selected control"].includes(mode)?true:null);
+      expect(d.expectedControlPresent).toBe(mode==="pending reads"?true:mode==="wrong selected control"?false:null);
+      expect(d.expectedControlSelected).toBe(d.expectedControlPresent);
+      expect(Object.values(d).every(value=>typeof value==="boolean"||value===null||Number.isSafeInteger(value))).toBe(true);
+      expect(JSON.stringify(d)).not.toMatch(/OnPar|http|CSRF|685163|1669|optTG|optVT/u);
+      d.pendingReads=99;expect(f.capture.diagnostics().filterSettlement!.pendingReads).not.toBe(99);f.close();
+    });
   it.each(["overlay", "button", "no hit"])("passively captures bounded public pointer identity: %s", async mode => {
     const f = fixture(); f.complete(); await f.capture.readCatalog();
     const overlay = document.createElement("div"); overlay.id = "loadingOverlay";

@@ -375,11 +375,20 @@ function safeFixedReaderFailureDiagnostics(value) {
   if (record(mindbody)) {
     const copy = booleans(mindbody, ["nativeDocumentCurrent", "rawBodyClosed", "rawHtmlClosed", "renderedBodyClosed", "renderedHtmlClosed",
       "timeOriginFinite", "timeOriginChangedFromPrior", "timeOriginMatchesAccepted"]) ?? {};
-    if (["IDLE", "WAIT_DOCUMENT", "WAIT_RENDERED", "RAW_CATALOG", "RENDERED_CATALOG", "COMPARE_CATALOG", "CATALOG_READY", "WAIT_GRID", "WAIT_GRID_RENDERED",
+    if (["IDLE", "WAIT_DOCUMENT", "WAIT_RENDERED", "RAW_CATALOG", "RENDERED_CATALOG", "COMPARE_CATALOG", "CATALOG_READY", "FILTER_SETTLEMENT", "WAIT_GRID", "WAIT_GRID_RENDERED",
       "RAW_GRID", "GRID_READY", "DAY_FORM", "BROWSE_LOCATE", "BROWSE_VALIDATE", "BROWSE_ACTION", "BROWSE_DONE", "DAY_ACTION"].includes(mindbody.stage)) copy.stage = mindbody.stage;
     if (["loading", "interactive", "complete", "UNKNOWN"].includes(mindbody.readyState)) copy.readyState = mindbody.readyState;
     for (const key of ["elapsedMs", "pendingReads", "documentVersion", "rawBytes", "renderedBytes"])
       if (Object.hasOwn(mindbody, key) && Number.isSafeInteger(mindbody[key]) && mindbody[key] >= 0 && mindbody[key] <= 4_000_000) copy[key] = mindbody[key];
+    const filter = mindbody.filterSettlement;
+    if (record(filter)) {
+      const booleans = ["sourceControlBound", "newDocumentObserved", "currentDocument", "controlIsCategory"],
+        nullable = ["categorySelected", "serviceSelected", "expectedControlPresent", "expectedControlSelected"];
+      if (booleans.every(key => typeof filter[key] === "boolean") && nullable.every(key => typeof filter[key] === "boolean" || filter[key] === null) &&
+          Number.isSafeInteger(filter.pendingReads) && filter.pendingReads >= 0 && filter.pendingReads <= 2048 &&
+          Number.isSafeInteger(filter.elapsedMs) && filter.elapsedMs >= 0 && filter.elapsedMs <= 90000)
+        copy.filterSettlement = Object.fromEntries([...booleans, ...nullable, "pendingReads", "elapsedMs"].map(key => [key, filter[key]]));
+    }
     if (record(mindbody.catalogComparison)) {
       const comparison = {}, allFields = ["title", "bodyText", "locationId", "studioId", "venueAddress", "categories", "services", "resources"];
       for (const [name, keys, boolean] of [["fieldsEqual", allFields, true], ["rawCounts", allFields.slice(5), false], ["renderedCounts", allFields.slice(5), false],

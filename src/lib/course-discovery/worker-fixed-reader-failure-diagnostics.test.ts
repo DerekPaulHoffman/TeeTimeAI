@@ -17,6 +17,28 @@ const mindbody = () => ({ stage: "COMPARE_CATALOG", rawBytes: 150000, renderedBy
     renderedTextLengths: { title: 9, bodyText: 410, locationId: 1, studioId: 6, venueAddress: 50 } } });
 
 describe("closed nested fixed-reader failure transport", () => {
+  it("carries closed filter facts through the actual helper decoder and checkpoint without raw fields",async()=>{
+    const filterSettlement={sourceControlBound:true,newDocumentObserved:true,currentDocument:true,controlIsCategory:false,
+      categorySelected:true,serviceSelected:null,expectedControlPresent:true,expectedControlSelected:false,pendingReads:2,elapsedMs:12000};
+    const mindbodyAppointment={stage:"FILTER_SETTLEMENT",filterSettlement};
+    const child=Object.assign(new EventEmitter(),{stdout:new PassThrough(),stderr:new PassThrough(),stdin:new PassThrough(),exitCode:0});
+    const channel=createDiscoveryProcess({executable:"unused",args:[],cwd:"unused",environment:{},spawnProcess:()=>child}),pending=channel.request({action:"inspect_adapter"});
+    child.stdout.write(JSON.stringify({id:1,ok:false,error:"MINDBODY_PUBLIC_FILTER_UNSETTLED",diagnostics:{mindbodyAppointment:{...mindbodyAppointment,filterSettlement:{...filterSettlement,token:"PRIVATE"}}}})+"\n");
+    await expect(pending).rejects.toMatchObject({code:"MINDBODY_PUBLIC_FILTER_UNSETTLED",details:{browserDiagnostics:{mindbodyAppointment}}});
+    const feedback=discoveryBrowserFeedback({mindbodyAppointment},"inspect_adapter",{code:"MINDBODY_PUBLIC_FILTER_UNSETTLED"});
+    const restored=readDiscoveryControllerCheckpoint({controller:{version:1,officialUrl:"https://official.example/",observedNavigationUrls:[],lastFailure:feedback}},"https://official.example/");
+    expect(restored.lastFailure.details.mindbodyAppointment).toEqual(mindbodyAppointment);filterSettlement.pendingReads=0;
+    expect(restored.lastFailure.details.mindbodyAppointment.filterSettlement.pendingReads).toBe(2);expect(JSON.stringify(restored)).not.toContain("PRIVATE");
+    await channel.close();child.stdout.destroy();child.stderr.destroy();child.stdin.destroy();
+  });
+  it.each(["missing", "string", "negative", "oversized", "fractional"])("drops malformed filter settlement as a unit: %s",mode=>{
+    const filter:Record<string,unknown>={sourceControlBound:true,newDocumentObserved:true,currentDocument:true,controlIsCategory:true,
+      categorySelected:null,serviceSelected:null,expectedControlPresent:null,expectedControlSelected:null,pendingReads:2,elapsedMs:12000};
+    if(mode==="missing")delete filter.sourceControlBound;else if(mode==="string")filter.categorySelected="PRIVATE";
+    else if(mode==="negative")filter.pendingReads=-1;else if(mode==="oversized")filter.elapsedMs=90001;else filter.pendingReads=1.5;
+    const safe=safeBrowserFailureDiagnostics({mindbodyAppointment:{stage:"FILTER_SETTLEMENT",filterSettlement:filter}});
+    expect(safe.mindbodyAppointment).toEqual({stage:"FILTER_SETTLEMENT"});expect(JSON.stringify(safe)).not.toContain("PRIVATE");
+  });
   it("retains only the 16 contact gates and 10 native flags and returns isolated copies", () => {
     const value = cps(), safe = safeBrowserFailureDiagnostics({ cpsPostalContact: { ...value, html: "PRIVATE", token: "PRIVATE" }, text: "PRIVATE" });
     expect(safe.cpsPostalContact).toEqual(value); expect(Object.keys(safe.cpsPostalContact.gates)).toHaveLength(16);

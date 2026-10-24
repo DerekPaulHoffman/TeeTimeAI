@@ -14,18 +14,27 @@ export type MindbodyAppointmentSession = Pick<Awaited<ReturnType<Factory>>, "exe
 type CaptureDiagnostic = ReturnType<ReturnType<typeof createMindbodyAppointmentNativeCapture>["diagnostics"]>;
 export type MindbodyAppointmentDiagnostic = Partial<Pick<CaptureDiagnostic, "stage" | "elapsedMs" | "nativeDocumentCurrent" | "pendingReads" |
   "documentVersion" | "rawBytes" | "rawBodyClosed" | "rawHtmlClosed" | "renderedBytes" | "renderedBodyClosed" | "renderedHtmlClosed" |
-  "readyState" | "timeOriginFinite" | "timeOriginChangedFromPrior" | "timeOriginMatchesAccepted" | "catalogComparison">>;
+  "readyState" | "timeOriginFinite" | "timeOriginChangedFromPrior" | "timeOriginMatchesAccepted" | "catalogComparison" | "filterSettlement">>;
 const failureDiagnostics = new WeakMap<object, MindbodyAppointmentDiagnostic>();
 function closedCaptureDiagnostic(value: unknown): MindbodyAppointmentDiagnostic | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const source = value as Record<string, unknown>, result: Record<string, unknown> = {};
-  if (typeof source.stage === "string" && ["IDLE", "WAIT_DOCUMENT", "WAIT_RENDERED", "RAW_CATALOG", "RENDERED_CATALOG", "COMPARE_CATALOG", "CATALOG_READY", "WAIT_GRID", "WAIT_GRID_RENDERED",
+  if (typeof source.stage === "string" && ["IDLE", "WAIT_DOCUMENT", "WAIT_RENDERED", "RAW_CATALOG", "RENDERED_CATALOG", "COMPARE_CATALOG", "CATALOG_READY", "FILTER_SETTLEMENT", "WAIT_GRID", "WAIT_GRID_RENDERED",
     "RAW_GRID", "GRID_READY", "DAY_FORM", "BROWSE_LOCATE", "BROWSE_VALIDATE", "BROWSE_ACTION", "BROWSE_DONE", "DAY_ACTION"].includes(source.stage)) result.stage = source.stage;
   for (const key of ["nativeDocumentCurrent", "rawBodyClosed", "rawHtmlClosed", "renderedBodyClosed", "renderedHtmlClosed",
     "timeOriginFinite", "timeOriginChangedFromPrior", "timeOriginMatchesAccepted"]) if (typeof source[key] === "boolean") result[key] = source[key];
   for (const key of ["elapsedMs", "pendingReads", "documentVersion", "rawBytes", "renderedBytes"])
     if (Number.isSafeInteger(source[key]) && Number(source[key]) >= 0 && Number(source[key]) <= 4_000_000) result[key] = source[key];
   if (typeof source.readyState === "string" && ["loading", "interactive", "complete", "UNKNOWN"].includes(source.readyState)) result.readyState = source.readyState;
+  const filter = source.filterSettlement;
+  if (filter && typeof filter === "object" && !Array.isArray(filter)) {
+    const values = filter as Record<string, unknown>, booleans = ["sourceControlBound", "newDocumentObserved", "currentDocument", "controlIsCategory"],
+      nullable = ["categorySelected", "serviceSelected", "expectedControlPresent", "expectedControlSelected"];
+    if (booleans.every(key => typeof values[key] === "boolean") && nullable.every(key => typeof values[key] === "boolean" || values[key] === null) &&
+        Number.isSafeInteger(values.pendingReads) && Number(values.pendingReads) >= 0 && Number(values.pendingReads) <= 2048 &&
+        Number.isSafeInteger(values.elapsedMs) && Number(values.elapsedMs) >= 0 && Number(values.elapsedMs) <= 90000)
+      result.filterSettlement = Object.fromEntries([...booleans, ...nullable, "pendingReads", "elapsedMs"].map(key => [key, values[key]]));
+  }
   const comparison = source.catalogComparison;
   if (comparison && typeof comparison === "object" && !Array.isArray(comparison)) {
     const groups = [["fieldsEqual", ["title", "bodyText", "locationId", "studioId", "venueAddress", "categories", "services", "resources"], true],

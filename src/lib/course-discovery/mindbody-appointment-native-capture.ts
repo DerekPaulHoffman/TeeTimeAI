@@ -108,10 +108,14 @@ export function projectMindbodySearchCatalog(html: string): CatalogProjection {
 type NativeDocument = { version: number; url: string; status: number; contentType: string; html: string;
   startedAt: number; priorTimeOrigin?: number; readyTimeOrigin?: number };
 type PointerElement = { tag: string; id?: string; classes: string[]; identifiersOmitted: boolean };
-type CaptureDiagnostic = { stage: "IDLE" | "WAIT_DOCUMENT" | "WAIT_RENDERED" | "RAW_CATALOG" | "RENDERED_CATALOG" | "COMPARE_CATALOG" | "CATALOG_READY" | "WAIT_GRID" | "WAIT_GRID_RENDERED" | "RAW_GRID" | "GRID_READY" | "DAY_FORM" | "BROWSE_LOCATE" | "BROWSE_VALIDATE" | "BROWSE_ACTION" | "BROWSE_DONE" | "DAY_ACTION";
+type FilterSettlementDiagnostic = { sourceControlBound: boolean; newDocumentObserved: boolean; currentDocument: boolean; controlIsCategory: boolean;
+  categorySelected: boolean | null; serviceSelected: boolean | null; expectedControlPresent: boolean | null; expectedControlSelected: boolean | null;
+  pendingReads: number; elapsedMs: number };
+type CaptureDiagnostic = { stage: "IDLE" | "WAIT_DOCUMENT" | "WAIT_RENDERED" | "RAW_CATALOG" | "RENDERED_CATALOG" | "COMPARE_CATALOG" | "CATALOG_READY" | "FILTER_SETTLEMENT" | "WAIT_GRID" | "WAIT_GRID_RENDERED" | "RAW_GRID" | "GRID_READY" | "DAY_FORM" | "BROWSE_LOCATE" | "BROWSE_VALIDATE" | "BROWSE_ACTION" | "BROWSE_DONE" | "DAY_ACTION";
   elapsedMs: number; nativeDocumentCurrent: boolean; pendingReads: number; documentVersion?: number;
   rawBytes?: number; rawBodyClosed?: boolean; rawHtmlClosed?: boolean; renderedBytes?: number; renderedBodyClosed?: boolean; renderedHtmlClosed?: boolean;
   catalogComparison?: CatalogComparisonDiagnostic;
+  filterSettlement?: FilterSettlementDiagnostic;
   readyState?: "loading" | "interactive" | "complete" | "UNKNOWN"; timeOriginFinite?: boolean; timeOriginChangedFromPrior?: boolean; timeOriginMatchesAccepted?: boolean;
   evaluationStage?: "READINESS" | "CATALOG_VISIBILITY" | "SEARCH_FORM" | "GRID" | "DAY_ARROW" | "DAY_FORM";
   evaluationFailure?: "SERIALIZATION" | "DOCUMENT_CHANGED" | "CLOSED_CONTRACT" | "OTHER";
@@ -296,6 +300,7 @@ export function createMindbodyAppointmentNativeCapture(options: { page: Page; so
     return selected;
   }
   async function selectRadio(name: "optTG" | "optVT", value: string) {
+    delete diagnostic.filterSettlement;
     if (!/^[1-9]\d{0,9}$/u.test(value) || Number(value) > 2_147_483_647) throw new Error("MINDBODY_PUBLIC_CHOICE_AMBIGUOUS");
     const { doc } = await settledSearch();
     const control = page.locator('form[name="frmApptSearch"] input[type="radio"][name="' + name + '"]');
@@ -315,7 +320,32 @@ export function createMindbodyAppointmentNativeCapture(options: { page: Page; so
     formIntent = createMindbodyPublicFormIntent({ sourceUrl: doc.url, ...form, studioId: descriptor!.studioId,
       deadlineAt: Math.min(options.deadlineAt, Date.now() + 15_000), sourceCurrent: () => current(doc) });
     try { await exact.click({ timeout: Math.max(1, Math.min(10_000, options.deadlineAt - Date.now())) });
-      await wait(async () => nativeDocument && nativeDocument !== doc && current(nativeDocument) && !options.pendingReads() ? true : undefined, "MINDBODY_PUBLIC_FILTER_UNSETTLED");
+      const started = Date.now(); let selectionDocument: NativeDocument | undefined;
+      let selection: Pick<FilterSettlementDiagnostic, "categorySelected" | "serviceSelected" | "expectedControlPresent" | "expectedControlSelected"> = {
+        categorySelected: null, serviceSelected: null, expectedControlPresent: null, expectedControlSelected: null };
+      await wait(async () => {
+        const candidate = nativeDocument, changed = !!candidate && candidate !== doc, currentDocument = !!candidate && current(candidate), pendingReads = options.pendingReads();
+        if (!changed || !currentDocument) {
+          selectionDocument = undefined;
+          selection = { categorySelected: null, serviceSelected: null, expectedControlPresent: null, expectedControlSelected: null };
+        }
+        if (changed && currentDocument && candidate !== selectionDocument) {
+          selectionDocument = candidate;
+          selection = { categorySelected: null, serviceSelected: null, expectedControlPresent: null, expectedControlSelected: null };
+          // Diagnostics inspect only already captured native bytes. They never
+          // substitute for the subsequent rendered/catalog/proof checks.
+          try { const parsed = projectMindbodySearchCatalog(candidate!.html), controls = name === "optTG" ? parsed.categories : parsed.services;
+            selection = { categorySelected: parsed.categories.filter(row => row.selected && row.enabled).length === 1,
+              serviceSelected: parsed.services.filter(row => row.selected && row.enabled).length === 1,
+              expectedControlPresent: controls.some(row => row.id === value), expectedControlSelected: controls.some(row => row.id === value && row.selected && row.enabled) };
+          } catch { /* Missing/incomplete native catalog facts remain unknown. */ }
+        }
+        diagnostic = { stage: "FILTER_SETTLEMENT", elapsedMs: Math.max(0, Date.now() - documentStartedAt), nativeDocumentCurrent: currentDocument, pendingReads,
+          ...(candidate ? { documentVersion: candidate.version, rawBytes: Buffer.byteLength(candidate.html), rawBodyClosed: /<\/body\s*>/iu.test(candidate.html), rawHtmlClosed: /<\/html\s*>/iu.test(candidate.html) } : {}),
+          filterSettlement: { sourceControlBound: true, newDocumentObserved: changed, currentDocument, controlIsCategory: name === "optTG",
+            ...selection, pendingReads, elapsedMs: Math.max(0, Date.now() - started) } };
+        return changed && currentDocument && !pendingReads ? true : undefined;
+      }, "MINDBODY_PUBLIC_FILTER_UNSETTLED");
     } finally { formIntent?.revoke(); formIntent = undefined; }
   }
   async function readCatalog(): Promise<MindbodyCatalogEvidence> {
@@ -365,7 +395,7 @@ export function createMindbodyAppointmentNativeCapture(options: { page: Page; so
         throw new Error("MINDBODY_PUBLIC_NAVIGATION_REJECTED");
     },
     readCatalog,
-    diagnostics(): CaptureDiagnostic { return { ...diagnostic, ...(diagnostic.catalogComparison ? {
+    diagnostics(): CaptureDiagnostic { return { ...diagnostic, ...(diagnostic.filterSettlement ? { filterSettlement: { ...diagnostic.filterSettlement } } : {}), ...(diagnostic.catalogComparison ? {
       catalogComparison: { fieldsEqual: { ...diagnostic.catalogComparison.fieldsEqual }, rawCounts: { ...diagnostic.catalogComparison.rawCounts },
         renderedCounts: { ...diagnostic.catalogComparison.renderedCounts }, rawTextLengths: { ...diagnostic.catalogComparison.rawTextLengths },
         renderedTextLengths: { ...diagnostic.catalogComparison.renderedTextLengths } },
