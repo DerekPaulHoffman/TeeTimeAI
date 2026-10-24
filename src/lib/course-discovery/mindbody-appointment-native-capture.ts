@@ -429,13 +429,31 @@ export function createMindbodyAppointmentNativeCapture(options: { page: Page; so
         });
         // The observed enabled public Browse button is the action; only its
         // actual browser-issued fixed display GET is admitted at the boundary.
+        const beforeBrowse = nativeDocument;
         navigationPhase = "BROWSE";
         await action("BROWSE_ACTION", () => browse.click({ timeout: Math.max(1, Math.min(10_000, options.deadlineAt - Date.now())) }));
         diagnostic.stage = "BROWSE_DONE";
-        const read = async (expectedDate?: string) => {
+        let rawDateDocument: NativeDocument | undefined, rawDate: string | undefined;
+        const nativeCalendarDate = (doc: NativeDocument) => {
+          if (rawDateDocument !== doc) {
+            const root = parse(doc.html); nodes(root);
+            const date = gridCaptionDate(clean(text(root)));
+            rawDateDocument = doc; rawDate = date;
+          }
+          return rawDate!;
+        };
+        const calendarBound = (doc: NativeDocument | undefined, previous: NativeDocument | undefined, expectedDate?: string) => {
+          if (!doc || doc === previous || !current(doc) || !isMindbodyPublicCalendarDocument(doc.url) ||
+              !/<\/body\s*>/iu.test(doc.html) || !/<\/html\s*>/iu.test(doc.html)) return false;
+          try { const date = nativeCalendarDate(doc); return expectedDate === undefined || date === expectedDate; }
+          catch { return false; }
+        };
+        let lastCalendarBound = false, lastPendingReads = 0;
+        const read = async (previous: NativeDocument | undefined, expectedDate?: string) => {
           const doc = nativeDocument;
           diagnostic = { stage: "WAIT_GRID", elapsedMs: Math.max(0, Date.now() - documentStartedAt), nativeDocumentCurrent: !!doc && current(doc), pendingReads: options.pendingReads(),
             ...(doc ? { documentVersion: doc.version, rawBytes: Buffer.byteLength(doc.html), rawBodyClosed: /<\/body\s*>/iu.test(doc.html), rawHtmlClosed: /<\/html\s*>/iu.test(doc.html) } : {}) };
+          lastCalendarBound = calendarBound(doc, previous, expectedDate); lastPendingReads = diagnostic.pendingReads;
           if (!doc || !current(doc) || !isMindbodyPublicCalendarDocument(doc.url) || diagnostic.pendingReads) return;
           const state = await evaluate("GRID", () => page.evaluate(() => {
             const grid = { visible(node: Element) { if (!node.getClientRects().length) return false;
@@ -451,17 +469,41 @@ export function createMindbodyAppointmentNativeCapture(options: { page: Page; so
             timeOriginFinite: finiteOrigin, ...(doc.priorTimeOrigin === undefined ? {} : { timeOriginChangedFromPrior: finiteOrigin && state.timeOrigin !== doc.priorTimeOrigin }),
             ...(doc.readyTimeOrigin === undefined ? {} : { timeOriginMatchesAccepted: finiteOrigin && state.timeOrigin === doc.readyTimeOrigin }),
             renderedBytes: Buffer.byteLength(state.html), renderedBodyClosed: /<\/body\s*>/iu.test(state.html), renderedHtmlClosed: /<\/html\s*>/iu.test(state.html) };
+          lastCalendarBound = calendarBound(doc, previous, expectedDate); lastPendingReads = options.pendingReads();
+          diagnostic.pendingReads = lastPendingReads;
+          if (lastPendingReads) return;
           if (!current(doc) || state.readyState !== "complete" || !finiteOrigin || doc.priorTimeOrigin !== undefined && state.timeOrigin === doc.priorTimeOrigin ||
               doc.readyTimeOrigin !== undefined && state.timeOrigin !== doc.readyTimeOrigin || !state.resourceHeaders.length || !diagnostic.renderedBodyClosed || !diagnostic.renderedHtmlClosed) return;
           diagnostic.stage = "RAW_GRID";
           if (!diagnostic.rawBodyClosed || !diagnostic.rawHtmlClosed) throw new Error("MINDBODY_GRID_DOCUMENT_INCOMPLETE");
-          const date = gridCaptionDate(state.text), rawRoot = parse(doc.html); nodes(rawRoot);
-          if (gridCaptionDate(clean(text(rawRoot))) !== date) throw new Error("MINDBODY_GRID_RAW_VISIBLE_MISMATCH");
+          const date = gridCaptionDate(state.text);
+          if (nativeCalendarDate(doc) !== date) throw new Error("MINDBODY_GRID_RAW_VISIBLE_MISMATCH");
           if (expectedDate && date !== expectedDate) return;
+          // DOM evaluation can admit more reads or finish on another document.
+          // Only this final owned snapshot may supply the completion witness.
+          const documentUnchanged = current(doc), pendingRelevantRequests = options.pendingReads();
+          lastCalendarBound = calendarBound(doc, previous, expectedDate); lastPendingReads = pendingRelevantRequests;
+          diagnostic = { ...diagnostic, nativeDocumentCurrent: documentUnchanged, pendingReads: pendingRelevantRequests };
+          if (!documentUnchanged || !lastCalendarBound || pendingRelevantRequests) return;
+          const completion = Object.freeze({ responseUrl: doc.url, status: doc.status, contentType: doc.contentType,
+            rawHtml: doc.html, renderedHtml: state.html, bodyComplete: diagnostic.rawBodyClosed === true && diagnostic.rawHtmlClosed === true,
+            documentUnchanged, pendingRelevantRequests, truncated: false, signedOut: true });
           doc.readyTimeOrigin = state.timeOrigin; lastReadyTimeOrigin = state.timeOrigin; diagnostic.stage = "GRID_READY";
-          return { doc, state };
+          return { doc, state, completion };
         };
-        let value = await wait(() => read(), "MINDBODY_PUBLIC_GRID_UNAVAILABLE");
+        const waitGrid = async (previous: NativeDocument | undefined, code: string, expectedDate?: string) => {
+          const started = Date.now(), ordinaryUntil = Math.min(options.deadlineAt, started + 12_000), pendingUntil = Math.min(options.deadlineAt, started + 45_000);
+          let pendingContinuation = false;
+          for (;;) {
+            active(); const value = await read(previous, expectedDate), now = Date.now();
+            if (now < ordinaryUntil && lastCalendarBound && lastPendingReads > 0) pendingContinuation = true;
+            const until = pendingContinuation && lastCalendarBound ? pendingUntil : ordinaryUntil;
+            if (now >= until) throw new Error(code);
+            if (value !== undefined) return value;
+            await page.waitForTimeout(Math.min(50, until - now));
+          }
+        };
+        let value = await waitGrid(beforeBrowse, "MINDBODY_PUBLIC_GRID_UNAVAILABLE");
         navigationPhase = "DAY";
         const requestedDate = options.requestedInput!.date;
         for (let steps = 0; ; steps++) {
@@ -491,14 +533,12 @@ export function createMindbodyAppointmentNativeCapture(options: { page: Page; so
           formIntent?.revoke(); formIntent = createMindbodyPublicDayFormIntent({ sourceUrl: before.url, targetUrl: renderedForm.targetUrl, body: fields.toString(),
             currentDate, direction: step, deadlineAt: Math.min(options.deadlineAt, Date.now() + 15_000), sourceCurrent: () => current(before) });
           try { await action("DAY_ACTION", () => arrow.click({ timeout: Math.max(1, Math.min(10_000, options.deadlineAt - Date.now())) }));
-            value = await wait(async () => { const next = await read(nextDate); return next && next.doc !== before ? next : undefined; }, "MINDBODY_GRID_DATE_UNSETTLED");
+            value = await waitGrid(before, "MINDBODY_GRID_DATE_UNSETTLED", nextDate);
           } finally { formIntent?.revoke(); formIntent = undefined; }
         }
-        const { doc, state } = value;
+        const { doc, state, completion } = value;
         return { captureId, url: doc.url, title: state.title, text: state.text, anchors: state.anchors, resourceHeaders: state.resourceHeaders,
-          completion: { responseUrl: doc.url, status: doc.status, contentType: doc.contentType, rawHtml: doc.html, renderedHtml: state.html,
-            bodyComplete: /<\/body\s*>/iu.test(doc.html) && /<\/html\s*>/iu.test(doc.html), documentUnchanged: current(doc),
-            pendingRelevantRequests: options.pendingReads(), truncated: false, signedOut: true } };
+          completion };
       } finally { gridBusy = false; navigationPhase = undefined; }
     },
     close() { formIntent?.revoke(); formIntent = undefined; nativeDocument = undefined; catalog = undefined; catalogDocument = undefined;

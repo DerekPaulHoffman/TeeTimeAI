@@ -7,6 +7,7 @@ import categoryObserved from "./fixtures/mindbody-public-category-form-observed.
 import serviceObserved from "./fixtures/mindbody-public-service-form-observed.json";
 import dayObserved from "./fixtures/mindbody-public-day-form-observed.json";
 import { createMindbodyAppointmentNativeCapture, projectMindbodySearchCatalog } from "./mindbody-appointment-native-capture";
+import { inspectMindbodyPublicRentalCatalog, readMindbodyPublicAppointmentGrid } from "./mindbody-appointment-grid";
 const source = observed.source, input = observed.input;
 const url = "https://clients.mindbodyonline.com/ASP/adm/adm_appt_search.asp?reSchedule=";
 function searchHtml() { return '<html><head><title>OnPar Now</title></head><body><form name="frmApptSearch" method="post"><input type="hidden" name="optLoc" value="1">' +
@@ -370,6 +371,82 @@ describe("native Mindbody private capture currency and rendered proof", () => {
     if (mode === "wrong day") await expect(f.capture.readGrid()).rejects.toThrow("MINDBODY_PUBLIC_DAY_REJECTED");
     else { const grid = await f.capture.readGrid(); expect(grid.anchors[0].visible).toBe(mode === "visible"); expect(grid.resourceHeaders[0].visible).toBe(mode === "visible"); }
     expect(clicks).toHaveLength(1); expect(clicks[0]).toContain("apptSchedBut"); f.close();
+  });
+  it.each([false, true])("retries reads admitted during grid evaluation and freezes only an actually drained witness: hidden=%s", async hidden => {
+    let now = Date.now(); vi.spyOn(Date, "now").mockImplementation(() => now); const started = now, f = fixture(60_000);
+    f.complete(); const catalog = await f.capture.readCatalog(); let evaluations = 0;
+    const original = f.page.evaluate.bind(f.page);
+    f.page.evaluate = (async (fn: () => unknown) => {
+      const result = await original(fn);
+      if (result && typeof result === "object" && "anchors" in result && ++evaluations === 1) f.pending(4);
+      return result;
+    }) as typeof f.page.evaluate;
+    f.onClick(() => { const html = dayHtml(input.date); load(html); f.currentUrl(dayObserved.sourceUrl); f.complete(undefined, html); });
+    f.onWait(() => { now += 1000; if (now - started >= 14_000) { f.pending(0);
+      if (hidden) (document.querySelector("a.apptLink") as HTMLElement).style.opacity = "0"; } });
+    const grid = await f.capture.readGrid();
+    expect(now - started).toBe(14_000); expect(evaluations).toBe(2); expect(Object.isFrozen(grid.completion)).toBe(true);
+    expect(grid.completion).toMatchObject({ pendingRelevantRequests: 0, documentUnchanged: true, bodyComplete: true });
+    expect(f.capture.diagnostics()).toMatchObject({ stage: "GRID_READY", nativeDocumentCurrent: true, pendingReads: 0 });
+    if (hidden) {
+      expect(grid.anchors[0].visible).toBe(false);
+      expect(() => readMindbodyPublicAppointmentGrid(source, inspectMindbodyPublicRentalCatalog(source, catalog), input, grid)).toThrow();
+    }
+    f.close();
+  });
+  it.each([60_000, 20_000])("never extends a pending current calendar beyond45s or the original absolute deadline: %s", async deadline => {
+    let now = Date.now(); vi.spyOn(Date, "now").mockImplementation(() => now); const started = now, f = fixture(deadline);
+    f.complete(); await f.capture.readCatalog();
+    f.onClick(() => { const html = dayHtml(input.date); load(html); f.currentUrl(dayObserved.sourceUrl); f.complete(undefined, html); f.pending(31); f.ready("loading"); });
+    f.onWait(() => { now += 1000; }); await expect(f.capture.readGrid()).rejects.toThrow("MINDBODY_PUBLIC_GRID_UNAVAILABLE");
+    expect(now - started).toBe(Math.min(45_000, deadline)); expect(f.capture.diagnostics()).toMatchObject({ stage: "WAIT_GRID", pendingReads: 31 }); f.close();
+  });
+  it.each(["no new document", "stale document", "wrong calendar", "bad raw"])("keeps unqualified grid %s on the original12s bound", async mode => {
+    let now = Date.now(); vi.spyOn(Date, "now").mockImplementation(() => now); const started = now, f = fixture(60_000);
+    f.complete(); await f.capture.readCatalog(); f.onClick(() => {
+      if (mode === "no new document") { f.pending(31); return; }
+      const html = dayHtml(input.date), raw = mode === "bad raw" ? html.replace("</body></html>", "") : html;
+      load(html); f.currentUrl(mode === "wrong calendar" ? url : dayObserved.sourceUrl); f.complete(undefined, raw); f.pending(31);
+      if (mode === "stale document") f.currentUrl(dayObserved.sourceUrl + "?stale=1");
+    });
+    f.onWait(() => { now += 1000; }); await expect(f.capture.readGrid()).rejects.toThrow("MINDBODY_PUBLIC_GRID_UNAVAILABLE"); expect(now - started).toBe(12_000); f.close();
+  });
+  it("expires the old bound immediately when a qualifying pending calendar loses document ownership after12s", async () => {
+    let now = Date.now(); vi.spyOn(Date, "now").mockImplementation(() => now); const started = now, f = fixture(60_000);
+    f.complete(); await f.capture.readCatalog(); f.onClick(() => { const html = dayHtml(input.date); load(html); f.currentUrl(dayObserved.sourceUrl); f.complete(undefined, html); f.pending(31); });
+    f.onWait(() => { now += 1000; if (now - started === 13_000) f.currentUrl(dayObserved.sourceUrl + "?changed=1"); });
+    await expect(f.capture.readGrid()).rejects.toThrow("MINDBODY_PUBLIC_GRID_UNAVAILABLE"); expect(now - started).toBe(13_000); f.close();
+  });
+  it.each(["wrong day", "old native"])("requires the exact new raw civil day before pending DAY navigation qualifies: %s", async mode => {
+    let now = Date.now(); vi.spyOn(Date, "now").mockImplementation(() => now); const started = now, f = fixture(60_000);
+    f.complete(); await f.capture.readCatalog();
+    f.onClick(selector => { if (!selector.includes("apptSchedBut") && mode === "old native") { f.pending(31); return; }
+      const html = dayHtml("2026-10-23"); load(html); f.currentUrl(selector.includes("apptSchedBut") ? dayObserved.sourceUrl : dayObserved.targetUrl); f.complete(undefined, html);
+      if (!selector.includes("apptSchedBut")) f.pending(31); });
+    f.onWait(() => { now += 1000; }); await expect(f.capture.readGrid()).rejects.toThrow("MINDBODY_GRID_DATE_UNSETTLED"); expect(now - started).toBe(12_000); f.close();
+  });
+  it("rechecks the actual final native document after the awaited grid DOM capture", async () => {
+    let now = Date.now(); vi.spyOn(Date, "now").mockImplementation(() => now); const started = now, f = fixture(60_000);
+    f.complete(); await f.capture.readCatalog(); const original = f.page.evaluate.bind(f.page);
+    f.page.evaluate = (async (fn: () => unknown) => { const result = await original(fn);
+      if (result && typeof result === "object" && "anchors" in result) f.currentUrl(dayObserved.sourceUrl + "?changed=1"); return result;
+    }) as typeof f.page.evaluate;
+    f.onClick(() => { const html = dayHtml(input.date); load(html); f.currentUrl(dayObserved.sourceUrl); f.complete(undefined, html); });
+    f.onWait(() => { now += 1000; }); await expect(f.capture.readGrid()).rejects.toThrow("MINDBODY_PUBLIC_GRID_UNAVAILABLE"); expect(now - started).toBe(12_000); f.close();
+  });
+  it("does not accept the old timeOrigin after qualifying pending reads drain", async () => {
+    let now = Date.now(); vi.spyOn(Date, "now").mockImplementation(() => now); const started = now, f = fixture(60_000);
+    f.complete(); await f.capture.readCatalog(); const prior = f.currentOrigin();
+    f.onClick(() => { const html = dayHtml(input.date); load(html); f.currentUrl(dayObserved.sourceUrl); f.complete(undefined, html); f.pending(31); });
+    f.onWait(() => { now += 1000; if (now - started >= 14_000) { f.pending(0); f.origin(prior); } });
+    await expect(f.capture.readGrid()).rejects.toThrow("MINDBODY_PUBLIC_GRID_UNAVAILABLE"); expect(now - started).toBe(45_000);
+    expect(f.capture.diagnostics()).toMatchObject({ stage: "WAIT_GRID_RENDERED", timeOriginChangedFromPrior: false }); f.close();
+  });
+  it.each(["raw end tags", "raw date"])("keeps malformed %s a proof failure instead of publishing a completion witness", async mode => {
+    const f = fixture(); f.complete(); await f.capture.readCatalog();
+    f.onClick(() => { const html = dayHtml(input.date), raw = mode === "raw end tags" ? html.replace("</body></html>", "") : dayHtml("2026-10-23");
+      load(html); f.currentUrl(dayObserved.sourceUrl); f.complete(undefined, raw); });
+    await expect(f.capture.readGrid()).rejects.toThrow(mode === "raw end tags" ? "MINDBODY_GRID_DOCUMENT_INCOMPLETE" : "MINDBODY_GRID_RAW_VISIBLE_MISMATCH"); f.close();
   });
   it("reads only the exact adjacent DAY POST and waits for the new same-URL DOM before returning", async () => {
     const f = fixture(); f.complete(); await f.capture.readCatalog(); const clicks: string[] = [];

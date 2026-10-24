@@ -122,6 +122,13 @@ describe("fixed native Mindbody appointment reader", () => {
     const expired = fake(); expired.deps.deadlineAt = new Date(Date.now() - 1);
     await expect(inspectMindbodyAppointments(source, input, expired.deps)).rejects.toThrow("DEADLINE_EXCEEDED"); expect(expired.createSession).not.toHaveBeenCalled();
   });
+  it.each([undefined, 180_000])("caps only the Mindbody reader at120s without extending a caller deadline: %s", async callerMs => {
+    const now = Date.now(); vi.spyOn(Date, "now").mockReturnValue(now); const f = fake();
+    if (callerMs !== undefined) f.deps.deadlineAt = new Date(now + callerMs);
+    await inspectMindbodyAppointments(source, input, f.deps);
+    const args = f.createSession.mock.calls[0] as unknown as [Record<string, unknown>, DiscoveryDeps];
+    expect(args[0].deadlineAt).toEqual(new Date(now + 120_000));
+  });
   it.each(["ACCESS_REQUIRED", "MINDBODY_GRID_CONTEXT_MISMATCH", "MINDBODY_GRID_DOCUMENT_INCOMPLETE"])("preserves primary %s across cleanup failure", async code => {
     const f = fake(); f.readCatalog.mockRejectedValueOnce(new Error(code)); f.close.mockRejectedValueOnce(new Error("cleanup"));
     await expect(inspectMindbodyAppointments(source, input, f.deps)).rejects.toThrow(code); expect(f.close).toHaveBeenCalledOnce();

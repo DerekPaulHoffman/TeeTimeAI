@@ -42,7 +42,8 @@ import type { OfficialSourceDiagnostic } from "./official-source-diagnostics";
 import { bindTeeItUpPostalConflictProof, type TeeItUpPostalConflictProof } from "./teeitup-postal-conflict-proof";
 import type { NativeOfficialPageReader } from "./native-official-page-reader";
 import { parseMindbodyAppointmentSource } from "./mindbody-appointment-grid";
-import { executeMindbodyAppointments, inspectMindbodyAppointments, type MindbodyAppointmentReaderDeps } from "./mindbody-appointment-reader";
+import { executeMindbodyAppointments, inspectMindbodyAppointments, getMindbodyAppointmentDiagnostic,
+  type MindbodyAppointmentDiagnostic, type MindbodyAppointmentReaderDeps } from "./mindbody-appointment-reader";
 
 type Dependencies = {
   fetch?: typeof fetch;
@@ -88,6 +89,16 @@ function simulatorErrorDiagnostic(error: unknown): AccessExecutionDiagnostic | u
     code: error.code, retryable: error.retryable === true,
     ...(Number.isInteger(error.httpStatus) && error.httpStatus! >= 100 && error.httpStatus! <= 599 ? { httpStatus: error.httpStatus } : {}),
   } });
+  return diagnostic.success ? diagnostic.data : undefined;
+}
+
+function mindbodyReplayDiagnostic(error: unknown): AccessExecutionDiagnostic | undefined {
+  const captured = getMindbodyAppointmentDiagnostic(error);
+  if (!captured) return;
+  const fields: (keyof MindbodyAppointmentDiagnostic)[] = ["stage", "elapsedMs", "pendingReads", "rawBytes", "renderedBytes", "nativeDocumentCurrent",
+    "rawBodyClosed", "rawHtmlClosed", "renderedBodyClosed", "renderedHtmlClosed", "timeOriginFinite", "timeOriginChangedFromPrior", "timeOriginMatchesAccepted", "readyState"];
+  const diagnostic = accessExecutionDiagnosticSchema.safeParse({ code: "MINDBODY_NATIVE_CAPTURE_FAILURE",
+    mindbodyReplay: Object.fromEntries(fields.filter(key => Object.hasOwn(captured, key)).map(key => [key, captured[key]])) });
   return diagnostic.success ? diagnostic.data : undefined;
 }
 
@@ -547,7 +558,7 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
       capacity: slot.maxPartySize, bookingUrl: recipe.source.bookingUrl, resourceId: slot.resourceId, productId: slot.productId,
     })));
   } catch (error) {
-    const diagnostic = simulatorErrorDiagnostic(error);
+    const diagnostic = recipe.adapter.family === "MINDBODY" ? mindbodyReplayDiagnostic(error) : simulatorErrorDiagnostic(error);
     const message = session?.failureReason() ?? uscheduleSession?.failureReason() ?? diagnostic?.simulatorError?.code ??
       (error instanceof FixedAdapterFailure || recipe.adapter.family !== "ACUITY" && error instanceof Error ? error.message : "");
     return result([], /^[A-Z_]{1,80}$/u.test(message) ? message : "ADAPTER_READ_FAILED", diagnostic);

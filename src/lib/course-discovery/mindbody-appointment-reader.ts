@@ -79,7 +79,7 @@ async function withCatalog<T>(source: MindbodyAppointmentSource, requested: Acce
   deps: MindbodyAppointmentReaderDeps, work: (session: MindbodyAppointmentSession, observation: ReturnType<typeof inspectMindbodyPublicRentalCatalog>,
     input: AccessExecutionInput & { durationMinutes: number }, deadline: number) => Promise<T>) {
   const input = requestContext(source, requested, deps), realNow = Date.now();
-  const deadline = Math.min(realNow + 90_000, deps.deadlineAt?.getTime() ?? Infinity);
+  const deadline = Math.min(realNow + 120_000, deps.deadlineAt?.getTime() ?? Infinity);
   if (!Number.isFinite(deadline) || deadline <= realNow) fail("DEADLINE_EXCEEDED");
   let session: MindbodyAppointmentSession | undefined, primary: unknown;
   try {

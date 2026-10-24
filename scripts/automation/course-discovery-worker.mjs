@@ -256,9 +256,24 @@ function safePublicHeaderDiagnostic(value) {
     return Object.fromEntries([...allowed].filter(key => Object.hasOwn(value, key) && value[key] !== undefined).map(key => [key, value[key]]));
   } catch { return undefined; }
 }
+function safeMindbodyReplay(value) {
+  const stages = ["IDLE", "WAIT_DOCUMENT", "WAIT_RENDERED", "RAW_CATALOG", "RENDERED_CATALOG", "COMPARE_CATALOG", "CATALOG_READY", "FILTER_SETTLEMENT",
+    "WAIT_GRID", "WAIT_GRID_RENDERED", "RAW_GRID", "GRID_READY", "DAY_FORM", "BROWSE_LOCATE", "BROWSE_VALIDATE", "BROWSE_ACTION", "BROWSE_DONE", "DAY_ACTION"];
+  const booleans = ["nativeDocumentCurrent", "rawBodyClosed", "rawHtmlClosed", "renderedBodyClosed", "renderedHtmlClosed",
+    "timeOriginFinite", "timeOriginChangedFromPrior", "timeOriginMatchesAccepted"];
+  const bounds = { elapsedMs: 180_000, pendingReads: 2048, rawBytes: 4_000_000, renderedBytes: 4_000_000 };
+  const allowed = new Set(["stage", "readyState", ...booleans, ...Object.keys(bounds)]);
+  if (!value || typeof value !== "object" || Array.isArray(value) || !stages.includes(value.stage) || Object.keys(value).some(key => !allowed.has(key)) ||
+      booleans.some(key => Object.hasOwn(value, key) && typeof value[key] !== "boolean") ||
+      Object.entries(bounds).some(([key, limit]) => Object.hasOwn(value, key) && (!Number.isSafeInteger(value[key]) || value[key] < 0 || value[key] > limit)) ||
+      Object.hasOwn(value, "readyState") && !["loading", "interactive", "complete", "UNKNOWN"].includes(value.readyState)) return undefined;
+  return Object.fromEntries([...allowed].filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]]));
+}
 function safeReplayDiagnostic(value) {
   if (!value || typeof value !== "object" || !/^[A-Z_0-9]{1,80}$/u.test(value.code ?? "")) return undefined;
   const result = { code: value.code };
+  const mindbodyReplay = value.code === "MINDBODY_NATIVE_CAPTURE_FAILURE" ? safeMindbodyReplay(value.mindbodyReplay) : undefined;
+  if (mindbodyReplay) result.mindbodyReplay = mindbodyReplay;
   if (Number.isInteger(value.stepIndex) && value.stepIndex >= 0 && value.stepIndex <= 31) result.stepIndex = value.stepIndex;
   if (safeObservedUrl(value.url)) { const url = new URL(value.url); url.search = ""; url.hash = ""; result.url = url.href; }
   if (["GET", "HEAD", "POST", "OPTIONS"].includes(value.method)) result.method = value.method;
@@ -799,10 +814,13 @@ export async function inspectDiscoveryPublicProtocol({ cwd, source, input, deadl
   finally { await channel.close(); }
 }
 
+export function discoveryRecipeExecutionBudgetMs(recipe) {
+  return recipe?.engine === "EXISTING_ADAPTER" && recipe.adapter?.family === "MINDBODY" ? 135_000 : 90_000;
+}
 export async function executeDiscoveryRecipe({ cwd, recipe, input, trustedContext, deadlineAt, helperEnvironment = {}, signal, spawnProcess = spawn }) {
   return new Promise((resolveResult, reject) => {
     if (signal?.aborted) { reject(discoveryError("DISCOVERY_CANCELLED")); return; }
-    const remaining = Math.min(90_000, Date.parse(deadlineAt) - Date.now());
+    const remaining = Math.min(discoveryRecipeExecutionBudgetMs(recipe), Date.parse(deadlineAt) - Date.now());
     if (!(remaining > 0)) { reject(discoveryError("DISCOVERY_DEADLINE")); return; }
     const child = spawnProcess(process.execPath,
       [join(cwd, "node_modules/tsx/dist/cli.mjs"), join(cwd, "scripts/automation/course-discovery-browser.ts"), "--execute-recipe", "--deadline", deadlineAt],

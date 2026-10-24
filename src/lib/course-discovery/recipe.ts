@@ -441,6 +441,16 @@ const accessRequestFailureDiagnosticSchema = z.object({
   publicHeaderDiagnostic: publicHeaderFailureDiagnosticSchema.optional().describe("Closed facts captured at an unchanged native public-read header denial. These facts never authorize requests or prove the cause of a later timeout."),
 }).strict();
 export const accessExecutionDiagnosticSchema = accessRequestFailureDiagnosticSchema.extend({
+  mindbodyReplay: z.object({
+    stage: z.enum(["IDLE", "WAIT_DOCUMENT", "WAIT_RENDERED", "RAW_CATALOG", "RENDERED_CATALOG", "COMPARE_CATALOG", "CATALOG_READY", "FILTER_SETTLEMENT",
+      "WAIT_GRID", "WAIT_GRID_RENDERED", "RAW_GRID", "GRID_READY", "DAY_FORM", "BROWSE_LOCATE", "BROWSE_VALIDATE", "BROWSE_ACTION", "BROWSE_DONE", "DAY_ACTION"]),
+    elapsedMs: z.number().int().min(0).max(180_000).optional(), pendingReads: z.number().int().min(0).max(2048).optional(),
+    rawBytes: z.number().int().min(0).max(4_000_000).optional(), renderedBytes: z.number().int().min(0).max(4_000_000).optional(),
+    nativeDocumentCurrent: z.boolean().optional(), rawBodyClosed: z.boolean().optional(), rawHtmlClosed: z.boolean().optional(),
+    renderedBodyClosed: z.boolean().optional(), renderedHtmlClosed: z.boolean().optional(),
+    timeOriginFinite: z.boolean().optional(), timeOriginChangedFromPrior: z.boolean().optional(), timeOriginMatchesAccepted: z.boolean().optional(),
+    readyState: z.enum(["loading", "interactive", "complete", "UNKNOWN"]).optional(),
+  }).strict().optional().describe("Closed native Mindbody replay failure facts captured before cleanup. Diagnostic only; never source, availability, request or proof authority."),
   stepIndex: z.number().int().min(0).max(31).optional(),
   // An observation from before terminal unwinding, not a cause or access verdict.
   earlierRequestFailure: accessRequestFailureDiagnosticSchema.optional()
@@ -454,6 +464,8 @@ export const accessExecutionDiagnosticSchema = accessRequestFailureDiagnosticSch
     retryable: z.boolean(), httpStatus: z.number().int().min(100).max(599).optional(),
   }).strict().optional(),
 }).strict().superRefine((diagnostic, ctx) => {
+  if (diagnostic.mindbodyReplay && diagnostic.code !== "MINDBODY_NATIVE_CAPTURE_FAILURE")
+    ctx.addIssue({ code: "custom", message: "Native Mindbody replay facts require their fixed diagnostic code", path: ["mindbodyReplay"] });
   for (const [value, path] of [[diagnostic, []], [diagnostic.earlierRequestFailure, ["earlierRequestFailure"]]] as const)
     if (value?.requestUrlFingerprint && (value.url !== undefined ||
         !(value.method === "GET" && ["script", "stylesheet"].includes(value.resourceType ?? "") ||
