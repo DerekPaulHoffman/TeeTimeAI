@@ -238,6 +238,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
   let teeDocumentToken: TeeItUpSourceRequestToken | undefined;
   type OfficialDocumentProof = { kind: "VERIFIED_OFFICIAL_DOCUMENT"; officialUrl: string; documentUrl: string };
   let officialIdentityPage: (OfficialIdentityPage & { observedAt: number; documentStartedAt: number; officialDocumentProof: OfficialDocumentProof }) | undefined;
+  let lastOfficialIdentityReadDiagnostic: { captureAgeMs: number | null; gates: Record<string, boolean> } | undefined;
   let officialIdentityDocument: { url: string; html: string; officialDocumentProof: OfficialDocumentProof } | undefined;
   let nativeDocumentRedirects: { url: string; request: object } | undefined;
   let officialSourceDiagnostic: OfficialSourceDiagnostic | undefined, navigationFailureKind: NavigationFailureKind | undefined;
@@ -1256,15 +1257,31 @@ export async function createCourseDiscoveryBrowserSession(input: {
   return {
     // Controller-only methods; intentionally absent from action/tool schemas.
     async readOfficialIdentityPage(): Promise<OfficialIdentityPage> {
+      lastOfficialIdentityReadDiagnostic = undefined;
       const current = await snapshot();
       // Fresh raw/current-document and rendered capture own this witness.
       // Unrelated admitted resources may still be pending; network idle is
       // neither identity proof nor a prerequisite for this one-page read.
       const timeOrigin = await page.evaluate(() => performance.timeOrigin);
       deadline.throwIfAborted();
+      const captureAgeMs = officialIdentityPage ? Date.now() - officialIdentityPage.observedAt : null;
+      // Controller-only failure facts. These never grant source/proof authority.
+      lastOfficialIdentityReadDiagnostic = { captureAgeMs, gates: {
+        noTerminalFailure: !terminalFailure, sessionOpen: !closed,
+        noAccessRequirement: !current.accessRequirementObserved, noNativeFatal: !current.nativeFirstFatal,
+        status200: current.navigationStatus === 200, snapshotNative: current.browserTransport === "NATIVE_CHROME",
+        capturedPagePresent: Boolean(officialIdentityPage), captureUrlMatches: officialIdentityPage?.url === current.url,
+        captureFreshWithin5s: captureAgeMs !== null && captureAgeMs <= 5000,
+        capturedNative: officialIdentityPage?.browserTransport === "NATIVE_CHROME",
+        capturedTimeOriginMatches: officialIdentityPage?.documentStartedAt === timeOrigin,
+        officialDocumentVerified: officialIdentityPage?.officialDocumentProof.kind === "VERIFIED_OFFICIAL_DOCUMENT",
+        visibleAddressesPresent: Boolean(officialIdentityPage?.visibleEvidence?.addressTexts.length),
+        visibleLinksPresent: Boolean(officialIdentityPage?.visibleEvidence?.linkUrls.length),
+        currentMainDocumentMatches: Boolean(officialIdentityPage && sameDiscoveryMainDocument(officialIdentityPage.url, page.url())),
+      } };
       if (terminalFailure || closed || current.accessRequirementObserved || current.nativeFirstFatal || current.navigationStatus !== 200 ||
           current.browserTransport !== "NATIVE_CHROME" ||
-          !officialIdentityPage || officialIdentityPage.url !== current.url || Date.now() - officialIdentityPage.observedAt > 5000 ||
+          !officialIdentityPage || officialIdentityPage.url !== current.url || captureAgeMs! > 5000 ||
           officialIdentityPage.browserTransport !== "NATIVE_CHROME" || officialIdentityPage.documentStartedAt !== timeOrigin ||
           officialIdentityPage.officialDocumentProof.kind !== "VERIFIED_OFFICIAL_DOCUMENT" ||
           !officialIdentityPage.visibleEvidence?.addressTexts.length || !officialIdentityPage.visibleEvidence.linkUrls.length ||
@@ -1289,6 +1306,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
       // Available even when navigation throws or the page has already closed.
       // This contains transport facts only, never page text or response bodies.
       return { loading: pendingReadCount() > 0, pendingRequestCount: pendingReadCount(),
+        ...(lastOfficialIdentityReadDiagnostic ? { officialIdentityReadDiagnostic: {
+          captureAgeMs: lastOfficialIdentityReadDiagnostic.captureAgeMs, gates: { ...lastOfficialIdentityReadDiagnostic.gates },
+        } } : {}),
         admittedRequestCounts: { ...admittedRequestCounts }, requestLimit,
         mindbodyCapture: mindbodyCapture.diagnostics(),
         officialSourceDiagnostic: officialDiagnostics(), ...(navigationFailureKind ? { navigationFailureKind } : {}),

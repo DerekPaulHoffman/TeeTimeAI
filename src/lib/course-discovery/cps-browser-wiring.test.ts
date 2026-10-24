@@ -202,6 +202,13 @@ describe.runIf(existsSync(chrome))("offline CPS discovery and deterministic brow
       expect(snapshot.officialSourceDiagnostic).toMatchObject({ rawOfficialCaptured: true, currentOfficialDocument: true, officialProvenance: true,
         renderedAddressesPresent: true, renderedLinksPresent: true });
       const fresh = await session.readOfficialIdentityPage();
+      const diagnostic = session.diagnostics().officialIdentityReadDiagnostic!;
+      expect(Object.values(diagnostic.gates).every(Boolean)).toBe(true);
+      expect(diagnostic.captureAgeMs).toBeGreaterThanOrEqual(0);
+      expect(diagnostic.captureAgeMs).toBeLessThanOrEqual(5000);
+      expect(JSON.stringify(diagnostic)).not.toMatch(/https?:|html|Harbor|916|54321|timeOrigin/u);
+      diagnostic.gates.capturedPagePresent = false;
+      expect(session.diagnostics().officialIdentityReadDiagnostic?.gates.capturedPagePresent).toBe(true);
       expect(fresh.url).toBe(destination); expect(fresh.html).toContain("10 Harbor Drive");
       expect(fresh.visibleEvidence?.headings).toContain("Offline Golf Course");
       expect(fresh.visibleEvidence?.publicContactBlocks).toEqual([{ venueName: "Offline Golf Course", street: "10 Harbor Drive", locality: "Example",
@@ -219,7 +226,45 @@ describe.runIf(existsSync(chrome))("offline CPS discovery and deterministic brow
       expect(replay.nativeDocumentRedirects).toBeUndefined();
       expect(replay.officialSourceDiagnostic?.rawOfficialCaptured).toBe(false);
       await expect(session.readOfficialIdentityPage()).rejects.toThrow("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
+      expect(session.diagnostics().officialIdentityReadDiagnostic).toMatchObject({ captureAgeMs: null,
+        gates: { capturedPagePresent: false, captureFreshWithin5s: false, officialDocumentVerified: false } });
+      const ownedPage = browsers.flatMap(browser => browser.contexts()).flatMap(context => context.pages()).find(page => page.url() === destination)!;
+      const failedSnapshot = vi.spyOn(ownedPage, "evaluate").mockRejectedValueOnce(new Error("OFFLINE_SNAPSHOT_FAILED"));
+      await expect(session.readOfficialIdentityPage()).rejects.toThrow("OFFLINE_SNAPSHOT_FAILED");
+      expect(session.diagnostics().officialIdentityReadDiagnostic).toBeUndefined();
+      failedSnapshot.mockRestore();
       expect(nativeSeen).toEqual([official, destination, destination]); expect(pinnedSeen).toEqual([]);
+    } finally { await session.close(); }
+  }, 30_000);
+
+  it("reports the unchanged private five-second freshness failure after slow current-document inventory without exposing proof values", async () => {
+    const bookingUrl = "https://sc.cps.golf/onlineresweb/search-teetime";
+    respond = url => url === official ? { body: `<html><head><title>Offline Golf Course</title></head><body><h1>Offline Golf Course</h1><p>10 Harbor Drive, Example, NY 12345</p><a href="${bookingUrl}">Tee Times</a></body></html>` } : { status: 404, body: "Unexpected path" };
+    const session = await createCourseDiscoveryBrowserSession({ initialUrls: [official], deadlineAt: new Date(Date.now() + 30_000),
+      venueOfficialUrl: official, venueName: "Offline Golf Course", venueAddress: "10 Harbor Drive, Example, NY 12345, USA", timeZone: input.timeZone },
+    { launchBrowser, browserTransport: "NATIVE_CHROME", requestLease: lease });
+    try {
+      await session.execute({ id: 1, action: "open", url: official });
+      const ownedPage = browsers.flatMap(browser => browser.contexts()).flatMap(context => context.pages()).find(page => page.url() === official)!;
+      const locate = ownedPage.locator.bind(ownedPage);
+      vi.spyOn(ownedPage, "locator").mockImplementation((selector, options) => {
+        const locator = locate(selector, options);
+        if (selector !== "body *") return locator;
+        return new Proxy(locator, { get(target, key) {
+          if (key === "evaluateAll") return async (...args: unknown[]) => {
+            const result = await Reflect.apply(target.evaluateAll, target, args);
+            // Delay only the bounded inventory after its fresh identity capture.
+            await new Promise(resolve => setTimeout(resolve, 5100)); return result;
+          };
+          const value = Reflect.get(target, key); return typeof value === "function" ? value.bind(target) : value;
+        } });
+      });
+      await expect(session.readOfficialIdentityPage()).rejects.toThrow("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
+      const diagnostic = session.diagnostics().officialIdentityReadDiagnostic!;
+      expect(diagnostic.captureAgeMs).toBeGreaterThan(5000);
+      expect(diagnostic.gates.captureFreshWithin5s).toBe(false);
+      expect(Object.entries(diagnostic.gates).filter(([, passes]) => !passes).map(([gate]) => gate)).toEqual(["captureFreshWithin5s"]);
+      expect(JSON.stringify(diagnostic)).not.toMatch(/https?:|html|Harbor|12345|timeOrigin/u);
     } finally { await session.close(); }
   }, 30_000);
 
