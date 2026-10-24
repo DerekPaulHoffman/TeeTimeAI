@@ -3,12 +3,53 @@ import { inspectMindbodyPublicRentalCatalog, mindbodyAppointmentMetadataSchema, 
   readMindbodyPublicAppointmentGrid, validateMindbodyAppointmentSource, type MindbodyAppointmentMetadata, type MindbodyAppointmentSource,
   type MindbodyCatalogEvidence, type MindbodyGridEvidence } from "./mindbody-appointment-grid";
 import type { DiscoveryBrowserSessionDependencies } from "./browser-session";
+import type { createMindbodyAppointmentNativeCapture } from "./mindbody-appointment-native-capture";
 
 type Factory = typeof import("./browser-session").createCourseDiscoveryBrowserSession;
 export type MindbodyAppointmentSession = Pick<Awaited<ReturnType<Factory>>, "execute" | "close"> & {
   readMindbodyPublicCatalog(): Promise<MindbodyCatalogEvidence>;
   readMindbodyPublicGrid(): Promise<MindbodyGridEvidence>;
+  diagnostics?(): { mindbodyCapture?: unknown };
 };
+type CaptureDiagnostic = ReturnType<ReturnType<typeof createMindbodyAppointmentNativeCapture>["diagnostics"]>;
+export type MindbodyAppointmentDiagnostic = Partial<Pick<CaptureDiagnostic, "stage" | "elapsedMs" | "nativeDocumentCurrent" | "pendingReads" |
+  "documentVersion" | "rawBytes" | "rawBodyClosed" | "rawHtmlClosed" | "renderedBytes" | "renderedBodyClosed" | "renderedHtmlClosed" |
+  "readyState" | "timeOriginFinite" | "timeOriginChangedFromPrior" | "timeOriginMatchesAccepted" | "catalogComparison">>;
+const failureDiagnostics = new WeakMap<object, MindbodyAppointmentDiagnostic>();
+function closedCaptureDiagnostic(value: unknown): MindbodyAppointmentDiagnostic | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const source = value as Record<string, unknown>, result: Record<string, unknown> = {};
+  if (typeof source.stage === "string" && ["IDLE", "WAIT_DOCUMENT", "WAIT_RENDERED", "RAW_CATALOG", "RENDERED_CATALOG", "COMPARE_CATALOG", "CATALOG_READY", "WAIT_GRID", "WAIT_GRID_RENDERED",
+    "RAW_GRID", "GRID_READY", "DAY_FORM", "BROWSE_LOCATE", "BROWSE_VALIDATE", "BROWSE_ACTION", "BROWSE_DONE", "DAY_ACTION"].includes(source.stage)) result.stage = source.stage;
+  for (const key of ["nativeDocumentCurrent", "rawBodyClosed", "rawHtmlClosed", "renderedBodyClosed", "renderedHtmlClosed",
+    "timeOriginFinite", "timeOriginChangedFromPrior", "timeOriginMatchesAccepted"]) if (typeof source[key] === "boolean") result[key] = source[key];
+  for (const key of ["elapsedMs", "pendingReads", "documentVersion", "rawBytes", "renderedBytes"])
+    if (Number.isSafeInteger(source[key]) && Number(source[key]) >= 0 && Number(source[key]) <= 4_000_000) result[key] = source[key];
+  if (typeof source.readyState === "string" && ["loading", "interactive", "complete", "UNKNOWN"].includes(source.readyState)) result.readyState = source.readyState;
+  const comparison = source.catalogComparison;
+  if (comparison && typeof comparison === "object" && !Array.isArray(comparison)) {
+    const groups = [["fieldsEqual", ["title", "bodyText", "locationId", "studioId", "venueAddress", "categories", "services", "resources"], true],
+      ["rawCounts", ["categories", "services", "resources"], false], ["renderedCounts", ["categories", "services", "resources"], false],
+      ["rawTextLengths", ["title", "bodyText", "locationId", "studioId", "venueAddress"], false],
+      ["renderedTextLengths", ["title", "bodyText", "locationId", "studioId", "venueAddress"], false]] as const;
+    const copy: Record<string, unknown> = {};
+    for (const [name, keys, boolean] of groups) {
+      const group = (comparison as Record<string, unknown>)[name];
+      if (!group || typeof group !== "object" || Array.isArray(group)) continue;
+      const values = group as Record<string, unknown>;
+      if (keys.every(key => Object.hasOwn(values, key) && (boolean ? typeof values[key] === "boolean" :
+        Number.isSafeInteger(values[key]) && Number(values[key]) >= 0 && Number(values[key]) <= 2_000_000)))
+        copy[name] = Object.fromEntries(keys.map(key => [key, values[key]]));
+    }
+    if (Object.keys(copy).length === groups.length) result.catalogComparison = copy;
+  }
+  return Object.keys(result).length ? result as MindbodyAppointmentDiagnostic : undefined;
+}
+/** Error identity is private authority; serialized/copy errors cannot restore it. */
+export function getMindbodyAppointmentDiagnostic(error: unknown): MindbodyAppointmentDiagnostic | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  return closedCaptureDiagnostic(failureDiagnostics.get(error));
+}
 export type MindbodyAppointmentReaderDeps = {
   now?: () => Date; deadlineAt?: Date; localCapabilities?: readonly string[]; requestedInput?: AccessExecutionInput;
   requestLease?: <T>(family: string, work: () => Promise<T>) => Promise<{ acquired: true; value: T } | { acquired: false }>;
@@ -52,7 +93,17 @@ async function withCatalog<T>(source: MindbodyAppointmentSource, requested: Acce
     if (input.durationMinutes !== observed.metadata.durationMinutes || input.players > observed.metadata.capacity) fail("ADAPTER_TARGET_MISMATCH");
     if (Date.now() >= deadline) fail("DEADLINE_EXCEEDED");
     return await work(session, observed, input, deadline);
-  } catch (error) { primary = error; throw error; }
+  } catch (error) {
+    primary = error;
+    // Diagnostics must neither replace the exact primary error nor prevent
+    // cleanup. No page/form data or arbitrary exception strings cross here.
+    try {
+      if (error && typeof error === "object") failureDiagnostics.delete(error);
+      const diagnostic = closedCaptureDiagnostic(session?.diagnostics?.().mindbodyCapture);
+      if (diagnostic && error && typeof error === "object") failureDiagnostics.set(error, diagnostic);
+    } catch { /* Preserve the original failure even if diagnostic collection fails. */ }
+    throw error;
+  }
   finally {
     try { await session?.close(); } catch (error) { if (primary === undefined) throw error; }
   }

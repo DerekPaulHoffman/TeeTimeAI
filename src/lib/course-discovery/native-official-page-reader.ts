@@ -1,7 +1,7 @@
 import type { OfficialIdentityPage, OfficialIdentitySource } from "./teeitup-official-identity";
 import { createCourseDiscoveryBrowserSession, type DiscoveryBrowserSessionDependencies, type DiscoveryBrowserSnapshot } from "./browser-session";
 import { isSafeRecipeUrl } from "./recipe";
-import { registerFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
+import { noteNativeOfficialIdentityPageCleanup, registerFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
 
 export type NativeOfficialPageReader = (source: OfficialIdentitySource, pageUrl: string, deadlineAt: Date) => Promise<OfficialIdentityPage>;
 type Session = Pick<Awaited<ReturnType<typeof createCourseDiscoveryBrowserSession>>, "execute" | "readOfficialIdentityPage" | "close">;
@@ -24,6 +24,7 @@ export async function readNativeOfficialIdentityPage(source: OfficialIdentitySou
     venueAddress: source.venueAddress, venueOfficialUrl: source.officialUrl, timeZone: source.timeZone },
   { requestLease: deps.requestLease, launchBrowser: deps.launchBrowser, browserTransport: "NATIVE_CHROME",
     ...(deps.collectPublicCourseContacts ? { collectPublicCourseContacts: true } : {}) });
+  let capturedPage: OfficialIdentityPage | undefined;
   try {
     // loading covers every admitted resource, including ancillary reads. Wait
     // for this official document's rendered witness, then capture it afresh;
@@ -47,6 +48,12 @@ export async function readNativeOfficialIdentityPage(source: OfficialIdentitySou
     const page = await session.readOfficialIdentityPage();
     if (page.url !== current.url || page.browserTransport !== "NATIVE_CHROME" || !page.visibleEvidence || Date.now() >= deadline.getTime())
       throw new Error("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
-    return registerFreshNativeOfficialIdentityPage(page, source.officialUrl, deadline);
-  } finally { await session.close(); }
+    capturedPage = registerFreshNativeOfficialIdentityPage(page, source.officialUrl, deadline);
+    return capturedPage;
+  } finally {
+    if (capturedPage) noteNativeOfficialIdentityPageCleanup(capturedPage, source.officialUrl, "BEFORE");
+    let succeeded = false;
+    try { await session.close(); succeeded = true; }
+    finally { if (capturedPage) noteNativeOfficialIdentityPageCleanup(capturedPage, source.officialUrl, "AFTER", succeeded); }
+  }
 }

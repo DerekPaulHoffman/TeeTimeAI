@@ -21,6 +21,8 @@ export { publicHeaderFailureDiagnostic } from "./public-header-diagnostic";
 import { requestFamilyForUrl } from "./request-family";
 import { canonicalPublicReadUrl } from "./public-request-url";
 import { inspectExistingAdapter } from "./existing-adapter-executor";
+import { getCpsPostalContactDiagnostic } from "./cps-postal-conflict-proof";
+import { getMindbodyAppointmentDiagnostic } from "./mindbody-appointment-reader";
 import { isPublicCalendarApply } from "./public-calendar-apply";
 import { isObservedPublicCalendarDay, observedPublicCalendarDays } from "./public-calendar-day";
 import { PUBLIC_BROWSER_REQUEST_LIMIT, MINDBODY_APPOINTMENT_REQUEST_LIMIT, assertPublicBrowserRequestBudget, PUBLIC_BROWSER_TOTAL_BYTES, publicBrowserResponseLimit } from "./browser-resource-limits";
@@ -242,6 +244,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
   let officialIdentityDocument: { url: string; html: string; officialDocumentProof: OfficialDocumentProof } | undefined;
   let nativeDocumentRedirects: { url: string; request: object } | undefined;
   let officialSourceDiagnostic: OfficialSourceDiagnostic | undefined, navigationFailureKind: NavigationFailureKind | undefined;
+  let cpsPostalContact: ReturnType<typeof getCpsPostalContactDiagnostic>;
+  let mindbodyAppointment: ReturnType<typeof getMindbodyAppointmentDiagnostic>;
   const officialDiagnostics = () => safeOfficialSourceDiagnostic({ ...teeBookingScope.diagnostics(page.url()), ...officialSourceDiagnostic,
     rawOfficialCaptured: Boolean(officialIdentityDocument), currentOfficialDocument: Boolean(officialIdentityDocument && sameDiscoveryMainDocument(officialIdentityDocument.url, page.url())),
     officialProvenance: officialIdentityDocument?.officialDocumentProof.kind === "VERIFIED_OFFICIAL_DOCUMENT",
@@ -1323,6 +1327,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
           captureAgeMs: lastOfficialIdentityReadDiagnostic.captureAgeMs, gates: { ...lastOfficialIdentityReadDiagnostic.gates },
         } } : {}),
         admittedRequestCounts: { ...admittedRequestCounts }, requestLimit,
+        ...(cpsPostalContact ? { cpsPostalContact: structuredClone(cpsPostalContact) } : {}),
+        ...(mindbodyAppointment ? { mindbodyAppointment: structuredClone(mindbodyAppointment) } : {}),
         mindbodyCapture: mindbodyCapture.diagnostics(),
         officialSourceDiagnostic: officialDiagnostics(), ...(navigationFailureKind ? { navigationFailureKind } : {}),
         ...(redirectRouting?.firstFatal ? { nativeFirstFatal: redirectRouting.firstFatal } : {}),
@@ -1411,12 +1417,16 @@ export async function createCourseDiscoveryBrowserSession(input: {
       }
       if (action.action === "inspect_adapter") {
         officialSourceDiagnostic = undefined;
+        cpsPostalContact = undefined;
+        mindbodyAppointment = undefined;
         if (!isSafeRecipeUrl(action.url) || !allowedNavigation.has(new URL(action.url).href)) throw new Error("UNOBSERVED_NAVIGATION");
         if (!input.venueName || input.venueName.length > 200) throw new Error("MISSING_VENUE_IDENTITY");
         discardStaleOfficialIdentity(normalizeDiscoveryNavigationUrl(page.url()));
         teeBookingScope.checkCurrentDocument(page.url(), await page.evaluate(() => performance.timeOrigin));
         const officialBookingSourceToken = teeBookingScope.tokenFor(action.url, page.url());
-        const result = await (deps.inspectAdapter ?? inspectExistingAdapter)({ officialUrl: input.venueOfficialUrl, bookingUrl: action.url, venueName: input.venueName, venueAddress: input.venueAddress, timeZone: input.timeZone ?? "UTC" },
+        let result: Awaited<ReturnType<typeof inspectExistingAdapter>>;
+        try {
+          result = await (deps.inspectAdapter ?? inspectExistingAdapter)({ officialUrl: input.venueOfficialUrl, bookingUrl: action.url, venueName: input.venueName, venueAddress: input.venueAddress, timeZone: input.timeZone ?? "UTC" },
           { venueMatches: venueProofMatches, requestLease: deps.requestLease ?? runWithProviderRequestLease, deadlineAt: input.deadlineAt,
             ...(deps.browserTransport === "NATIVE_CHROME" ? { localCapabilities: ["LOCAL_CHROME"] as const } : {}),
             ...(requestedInput === undefined ? {} : { requestedInput: structuredClone(requestedInput) }),
@@ -1424,6 +1434,13 @@ export async function createCourseDiscoveryBrowserSession(input: {
             onOfficialSourceDiagnostic: value => { officialSourceDiagnostic = safeOfficialSourceDiagnostic(value); },
             ...(officialIdentityPage && Date.now() - officialIdentityPage.observedAt <= 5 * 60_000 ? { officialIdentityPage } : {}),
             ...(officialBookingSourceToken ? { officialBookingSourceToken } : {}) });
+        } catch (error) {
+          // Preserve the same failure and only controller-owned closed facts.
+          // Nested reader pages and their private request material stay private.
+          try { cpsPostalContact = getCpsPostalContactDiagnostic(error); } catch { /* Diagnostics cannot replace the primary failure. */ }
+          try { mindbodyAppointment = getMindbodyAppointmentDiagnostic(error); } catch { /* Diagnostics cannot replace the primary failure. */ }
+          throw error;
+        }
         const inspectedSnapshot = await snapshot();
         if (result.adapter.family === "TEEITUP" && result.adapter.officialBookingSourceProof) {
           if (!officialBookingSourceToken) throw new Error("OFFICIAL_BOOKING_SOURCE_UNVERIFIED");

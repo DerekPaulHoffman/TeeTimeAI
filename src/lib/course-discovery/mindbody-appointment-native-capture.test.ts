@@ -229,6 +229,47 @@ describe("native Mindbody private capture currency and rendered proof", () => {
     const other = fixture(); other.complete(undefined, searchHtml(), 403);
     await expect(other.capture.readCatalog()).rejects.toThrow("FAKE_WAIT_NOT_READY"); f.close(); other.close();
   });
+  it.each([
+    ["title", "<title>OnPar Now</title>", "<title>PRIVATE_DIAGNOSTIC_SENTINEL</title>"],
+    ["bodyText", "</form>", "</form><p>PRIVATE_DIAGNOSTIC_SENTINEL</p>"],
+    ["locationId", 'name="optLoc" value="1"', 'name="optLoc" value="99"'],
+    ["studioId", "Site ID: 685163", "Site ID: 685164"],
+    ["venueAddress", "Pittsburgh PA 15222", "PRIVATE_DIAGNOSTIC_SENTINEL"],
+    ["categories", 'name="optTG" value="2"', 'name="optTG" value="3"'],
+    ["services", 'name="optVT" value="5"', 'name="optVT" value="6"'],
+    ["resources", 'value="100000001"', 'value="100000003"'],
+  ] as const)("identifies %s divergence without retaining projection values", async (field, from, to) => {
+    const f = fixture(); f.complete(undefined, searchHtml().replace(from, to));
+    await expect(f.capture.readCatalog()).rejects.toThrow("MINDBODY_CATALOG_RAW_VISIBLE_MISMATCH");
+    const diagnostic = f.capture.diagnostics();
+    expect(diagnostic).toMatchObject({ stage: "COMPARE_CATALOG", catalogComparison: { fieldsEqual: { [field]: false },
+      rawCounts: { categories: 1, services: 1, resources: 2 }, renderedCounts: { categories: 1, services: 1, resources: 2 } } });
+    expect(Object.keys(diagnostic.catalogComparison!.fieldsEqual).sort()).toEqual(
+      ["title", "bodyText", "locationId", "studioId", "venueAddress", "categories", "services", "resources"].sort());
+    const serialized = JSON.stringify(diagnostic);
+    expect(serialized).not.toMatch(/PRIVATE_DIAGNOSTIC_SENTINEL|685163|Pittsburgh|TrackMan|https?:|100000001/u);
+    for (const lengths of [diagnostic.catalogComparison!.rawTextLengths, diagnostic.catalogComparison!.renderedTextLengths])
+      for (const length of Object.values(lengths)) expect(Number.isSafeInteger(length) && length >= 0 && length <= 2_000_000).toBe(true);
+    f.close();
+  });
+  it("records only whole-text divergence for a changed public footer clock and keeps rejecting", async () => {
+    const html = searchHtml().replace("<footer>", "<p>6:05:14 pm</p><footer>"); load(html);
+    const f = fixture(); f.complete(undefined, html.replace("6:05:14 pm", "6:05:15 pm"));
+    await expect(f.capture.readCatalog()).rejects.toThrow("MINDBODY_CATALOG_RAW_VISIBLE_MISMATCH");
+    const comparison = f.capture.diagnostics().catalogComparison!;
+    expect(Object.entries(comparison.fieldsEqual).filter(([, equal]) => !equal).map(([field]) => field)).toEqual(["bodyText"]);
+    expect(comparison.rawTextLengths).toEqual(comparison.renderedTextLengths); f.close();
+  });
+  it("isolates diagnostic copies and clears old comparison facts before a new unsettled document", async () => {
+    const f = fixture(); f.complete(); await f.capture.readCatalog();
+    const comparison = f.capture.diagnostics().catalogComparison!;
+    comparison.fieldsEqual.services = false; comparison.rawCounts.services = 999; comparison.renderedCounts.categories = 999;
+    comparison.rawTextLengths.title = 999; comparison.renderedTextLengths.title = 999;
+    expect(f.capture.diagnostics().catalogComparison).toMatchObject({ fieldsEqual: { services: true }, rawCounts: { services: 1 }, renderedCounts: { categories: 1 },
+      rawTextLengths: { title: 9 }, renderedTextLengths: { title: 9 } });
+    f.complete(); f.pending(1); await expect(f.capture.readCatalog()).rejects.toThrow("FAKE_WAIT_NOT_READY");
+    expect(f.capture.diagnostics().catalogComparison).toBeUndefined(); f.close();
+  });
   it.each(["opacity", "visibility", "display", "hidden", "inert"])("refuses catalog evidence under an ancestor with %s", async kind => {
     const f = fixture(); const parent = document.createElement("div"); document.body.append(parent); parent.append(document.querySelector("form")!);
     if (kind === "opacity") parent.style.opacity = "0"; if (kind === "visibility") parent.style.visibility = "hidden";

@@ -6,6 +6,7 @@ import { createCourseDiscoveryBrowserSession, type DiscoveryBrowserSnapshot } fr
 import { bindTeeItUpPostalConflictProof } from "./teeitup-postal-conflict-proof";
 import * as nativeBrowser from "./native-public-browser";
 import * as nativeRouting from "./native-redirect-routing";
+import { getNativeOfficialIdentityPageDiagnostic, isFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
 
 const source = { officialUrl: "https://example.org/", bookingUrl: "https://harbor.book.teeitup.com/", venueName: "Harbor Golf Course",
   venueAddress: "10 Harbor Drive, Example, NY 12345, USA", timeZone: "America/New_York" };
@@ -19,6 +20,29 @@ function fixture(change: Partial<DiscoveryBrowserSnapshot> = {}) {
   return { execute, readOfficialIdentityPage, close, createSession };
 }
 describe("fixed native official source reader", () => {
+  it("records expiry during cleanup without renewing the attestation or replacing the returned object",async()=>{
+    let now=Date.parse("2026-10-24T02:00:00Z");const clock=vi.spyOn(Date,"now").mockImplementation(()=>now);
+    try{
+      const session=fixture(),page=await session.readOfficialIdentityPage();session.readOfficialIdentityPage.mockResolvedValueOnce(page);
+      session.close.mockImplementationOnce(async()=>{now+=30_001;});
+      const result=await readNativeOfficialIdentityPage(source,source.officialUrl,new Date(now+120_000),session);
+      expect(result).toBe(page);expect(isFreshNativeOfficialIdentityPage(result,source.officialUrl)).toBe(false);
+      const d=getNativeOfficialIdentityPageDiagnostic(result,source.officialUrl);
+      expect(d).toEqual({attestationPresent:true,officialRootMatches:true,expiresInFuture:false,nativeTransport:true,objectUnchanged:true,
+        cleanupStarted:true,cleanupSettled:true,cleanupSucceeded:true,freshBeforeCleanup:true,freshAfterCleanup:false});
+      d.cleanupSucceeded=false;expect(getNativeOfficialIdentityPageDiagnostic(result,source.officialUrl).cleanupSucceeded).toBe(true);
+      expect(Object.values(d).every(value=>value===null||typeof value==="boolean")).toBe(true);
+    }finally{clock.mockRestore();}
+  });
+  it("records a failed cleanup while rethrowing its exact original error and retaining object mutation rejection",async()=>{
+    const session=fixture(),page=await session.readOfficialIdentityPage(),primary=new Error("PRIVATE_TOKEN_ABC123");
+    session.readOfficialIdentityPage.mockResolvedValueOnce(page);session.close.mockImplementationOnce(async()=>{page.html+="changed";throw primary;});
+    await expect(readNativeOfficialIdentityPage(source,source.officialUrl,new Date(Date.now()+30_000),session)).rejects.toBe(primary);
+    const d=getNativeOfficialIdentityPageDiagnostic(page,source.officialUrl);
+    expect(d).toMatchObject({objectUnchanged:false,cleanupStarted:true,cleanupSettled:true,cleanupSucceeded:false,freshBeforeCleanup:true,freshAfterCleanup:false});
+    expect(JSON.stringify(d)).not.toMatch(/PRIVATE|example|html|https:/u);
+    expect(getNativeOfficialIdentityPageDiagnostic(structuredClone(page),source.officialUrl)).toMatchObject({attestationPresent:false,freshBeforeCleanup:null,freshAfterCleanup:null});
+  });
   it("preserves legacy capture defaults and enables physical contact capture only for the private fixed CPS caller",async()=>{
     for(const collect of [false,true]){
       const session=fixture();await readNativeOfficialIdentityPage(source,source.officialUrl,new Date(Date.now()+30_000),{...session,...(collect?{collectPublicCourseContacts:true as const}:{})});

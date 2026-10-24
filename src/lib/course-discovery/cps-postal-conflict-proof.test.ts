@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
-import { bindCpsPostalConflictProof, normalizeCanonicalCoursePhone } from "./cps-postal-conflict-proof";
+import { bindCpsPostalConflictProof, getCpsPostalContactDiagnostic, normalizeCanonicalCoursePhone } from "./cps-postal-conflict-proof";
 import { readNativeOfficialIdentityPage } from "./native-official-page-reader";
 import type { OfficialIdentityPage } from "./teeitup-official-identity";
 import { normalizePublicCourseContactPhone, type PublicCourseContactBlock } from "./public-course-contact-blocks";
@@ -21,6 +21,23 @@ async function freshPage(markup=html(),blocks:PublicCourseContactBlock[]=[contac
 }
 const bind=(page:OfficialIdentityPage,phone:unknown="+19165554653")=>bindCpsPostalConflictProof(source,page,phone,catalog,source.venueName);
 describe("CPS native physical contact postal corroboration",()=>{
+  it.each([
+    ["copy", "freshNativeOfficialPage"], ["wrong phone", "phoneMatches"], ["wrong street", "addressMatchesExceptPostal"],
+    ["missing raw", "rawContactsPresent"], ["missing rendered", "renderedContactsPresent"],
+    ["contradictory rendered", "uniqueNormalizedContact"], ["missing inert link", "inertBookingLink"],
+  ] as const)("retains only closed evaluated failure gates for %s without replacing the primary",async(mode,failed)=>{
+    const markup=mode==="missing raw"?html(card({},"hidden")):mode==="missing inert link"?html().replace(`<a href="${source.bookingUrl}">Book a Tee Time</a>`,""):mode==="wrong street"?html(card({street:"11 Harbor Drive"})):html();
+    const blocks=mode==="missing rendered"?[]:mode==="wrong street"?[{...contact,street:"11 Harbor Drive"}]:mode==="contradictory rendered"?[{...contact,phone:"916-555-9999"}]:[contact];
+    const original=await freshPage(markup,blocks),page=mode==="copy"?structuredClone(original):original;
+    let caught:unknown;try{bind(page,mode==="wrong phone"?"+19165559999":"+19165554653");}catch(error){caught=error;}
+    expect(caught).toBeInstanceOf(Error);expect((caught as Error).message).toBe("CPS_POSTAL_CONFLICT_UNVERIFIED");
+    const d=getCpsPostalContactDiagnostic(caught)!;expect(d.gates[failed]).toBe(false);
+    const values=Object.values(d.gates);expect(values.every(value=>value===null||typeof value==="boolean")).toBe(true);
+    expect(Object.values(d.native).every(value=>value===null||typeof value==="boolean")).toBe(true);
+    expect(JSON.stringify(d)).not.toMatch(/https:|Harbor|916|12345|54321|html/iu);
+    d.gates[failed]=true;expect(getCpsPostalContactDiagnostic(caught)!.gates[failed]).toBe(false);
+    expect(getCpsPostalContactDiagnostic(new Error("PRIVATE_TOKEN_ABC123"))).toBeUndefined();
+  });
   it("accepts the observed physical p-tel Phone: label without changing canonical phone validation or semantic proof",async()=>{
     const printed="303-469-2974", labeled=`Phone: ${printed}`, observed={...contact,phone:printed};
     const plain=await freshPage(html(card({phone:printed})),[observed]);

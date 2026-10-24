@@ -58,6 +58,23 @@ type CatalogProjection = { title: string; bodyText: string; locationId: string; 
   categories: Array<{ id: string; label: string; enabled: boolean; selected: boolean }>;
   services: Array<{ id: string; label: string; description: string; enabled: boolean; selected: boolean }>;
   resources: Array<{ id: string; label: string; enabled: boolean }> };
+type CatalogComparisonDiagnostic = {
+  fieldsEqual: Record<keyof CatalogProjection, boolean>;
+  rawCounts: { categories: number; services: number; resources: number };
+  renderedCounts: { categories: number; services: number; resources: number };
+  rawTextLengths: { title: number; bodyText: number; locationId: number; studioId: number; venueAddress: number };
+  renderedTextLengths: { title: number; bodyText: number; locationId: number; studioId: number; venueAddress: number };
+};
+function catalogComparisonDiagnostic(raw: CatalogProjection, rendered: CatalogProjection): CatalogComparisonDiagnostic {
+  const counts = (value: CatalogProjection) => ({ categories: value.categories.length, services: value.services.length, resources: value.resources.length });
+  const lengths = (value: CatalogProjection) => ({ title: value.title.length, bodyText: value.bodyText.length,
+    locationId: value.locationId.length, studioId: value.studioId.length, venueAddress: value.venueAddress.length });
+  return { fieldsEqual: { title: raw.title === rendered.title, bodyText: raw.bodyText === rendered.bodyText,
+    locationId: raw.locationId === rendered.locationId, studioId: raw.studioId === rendered.studioId, venueAddress: raw.venueAddress === rendered.venueAddress,
+    categories: JSON.stringify(raw.categories) === JSON.stringify(rendered.categories), services: JSON.stringify(raw.services) === JSON.stringify(rendered.services),
+    resources: JSON.stringify(raw.resources) === JSON.stringify(rendered.resources) },
+    rawCounts: counts(raw), renderedCounts: counts(rendered), rawTextLengths: lengths(raw), renderedTextLengths: lengths(rendered) };
+}
 /** Native bytes are interpreted outside the provider's JavaScript realm. */
 export function projectMindbodySearchCatalog(html: string): CatalogProjection {
   if (Buffer.byteLength(html) > 2_000_000 || !/<\/body\s*>/iu.test(html) || !/<\/html\s*>/iu.test(html)) throw new Error("MINDBODY_CATALOG_DOCUMENT_INCOMPLETE");
@@ -88,6 +105,7 @@ type PointerElement = { tag: string; id?: string; classes: string[]; identifiers
 type CaptureDiagnostic = { stage: "IDLE" | "WAIT_DOCUMENT" | "WAIT_RENDERED" | "RAW_CATALOG" | "RENDERED_CATALOG" | "COMPARE_CATALOG" | "CATALOG_READY" | "WAIT_GRID" | "WAIT_GRID_RENDERED" | "RAW_GRID" | "GRID_READY" | "DAY_FORM" | "BROWSE_LOCATE" | "BROWSE_VALIDATE" | "BROWSE_ACTION" | "BROWSE_DONE" | "DAY_ACTION";
   elapsedMs: number; nativeDocumentCurrent: boolean; pendingReads: number; documentVersion?: number;
   rawBytes?: number; rawBodyClosed?: boolean; rawHtmlClosed?: boolean; renderedBytes?: number; renderedBodyClosed?: boolean; renderedHtmlClosed?: boolean;
+  catalogComparison?: CatalogComparisonDiagnostic;
   readyState?: "loading" | "interactive" | "complete" | "UNKNOWN"; timeOriginFinite?: boolean; timeOriginChangedFromPrior?: boolean; timeOriginMatchesAccepted?: boolean;
   evaluationStage?: "READINESS" | "CATALOG_VISIBILITY" | "SEARCH_FORM" | "GRID" | "DAY_ARROW" | "DAY_FORM";
   evaluationFailure?: "SERIALIZATION" | "DOCUMENT_CHANGED" | "CLOSED_CONTRACT" | "OTHER";
@@ -209,6 +227,9 @@ export function createMindbodyAppointmentNativeCapture(options: { page: Page; so
       diagnostic.stage = "RENDERED_CATALOG";
       const visible = projectMindbodySearchCatalog(rendered.html);
       diagnostic.stage = "COMPARE_CATALOG";
+      // Closed scalar diagnostics identify divergence without retaining page
+      // text, IDs, routing values, form values, URLs or provider credentials.
+      diagnostic.catalogComparison = catalogComparisonDiagnostic(raw, visible);
       if (JSON.stringify(raw) !== JSON.stringify(visible)) throw new Error("MINDBODY_CATALOG_RAW_VISIBLE_MISMATCH");
       if (!current(doc)) return;
       doc.readyTimeOrigin = rendered.timeOrigin; lastReadyTimeOrigin = rendered.timeOrigin;
@@ -338,7 +359,11 @@ export function createMindbodyAppointmentNativeCapture(options: { page: Page; so
         throw new Error("MINDBODY_PUBLIC_NAVIGATION_REJECTED");
     },
     readCatalog,
-    diagnostics(): CaptureDiagnostic { return { ...diagnostic }; },
+    diagnostics(): CaptureDiagnostic { return { ...diagnostic, ...(diagnostic.catalogComparison ? {
+      catalogComparison: { fieldsEqual: { ...diagnostic.catalogComparison.fieldsEqual }, rawCounts: { ...diagnostic.catalogComparison.rawCounts },
+        renderedCounts: { ...diagnostic.catalogComparison.renderedCounts }, rawTextLengths: { ...diagnostic.catalogComparison.rawTextLengths },
+        renderedTextLengths: { ...diagnostic.catalogComparison.renderedTextLengths } },
+    } : {}) }; },
     async readGrid(): Promise<MindbodyGridEvidence> {
       active(); if (!catalog || catalogBusy || gridBusy) throw new Error("MINDBODY_CATALOG_REQUIRED"); gridBusy = true;
       try {

@@ -353,6 +353,48 @@ function safeOfficialBrowserDiagnostics(value) {
     result.navigationFailureKind = value.navigationFailureKind;
   return result;
 }
+function safeFixedReaderFailureDiagnostics(value) {
+  const record = item => item !== null && typeof item === "object" && !Array.isArray(item);
+  const booleans = (source, keys, nullable = []) => {
+    if (!record(source)) return undefined;
+    const copy = Object.fromEntries(keys.filter(key => Object.hasOwn(source, key) &&
+      (typeof source[key] === "boolean" || nullable.includes(key) && source[key] === null)).map(key => [key, source[key]]));
+    return Object.keys(copy).length ? copy : undefined;
+  };
+  const result = {}, cps = value?.cpsPostalContact;
+  if (record(cps)) {
+    const keys = ["freshNativeOfficialPage", "canonicalAddressPresent", "canonicalAddressValid", "canonicalPhoneValid", "rawContactsPresent",
+      "renderedContactsPresent", "contactCountBounded", "rawContactsNormalizable", "renderedContactsNormalizable", "uniqueNormalizedContact",
+      "venueMatches", "phoneMatches", "postalDiscrepancy", "addressMatchesExceptPostal", "visibleBookingLink", "inertBookingLink"];
+    const gates = booleans(cps.gates, keys, keys), native = booleans(cps.native, ["attestationPresent", "officialRootMatches", "expiresInFuture",
+      "nativeTransport", "objectUnchanged", "cleanupStarted", "cleanupSettled", "cleanupSucceeded", "freshBeforeCleanup", "freshAfterCleanup"],
+    ["freshBeforeCleanup", "freshAfterCleanup"]);
+    if (gates || native) result.cpsPostalContact = { ...(gates ? { gates } : {}), ...(native ? { native } : {}) };
+  }
+  const mindbody = value?.mindbodyAppointment;
+  if (record(mindbody)) {
+    const copy = booleans(mindbody, ["nativeDocumentCurrent", "rawBodyClosed", "rawHtmlClosed", "renderedBodyClosed", "renderedHtmlClosed",
+      "timeOriginFinite", "timeOriginChangedFromPrior", "timeOriginMatchesAccepted"]) ?? {};
+    if (["IDLE", "WAIT_DOCUMENT", "WAIT_RENDERED", "RAW_CATALOG", "RENDERED_CATALOG", "COMPARE_CATALOG", "CATALOG_READY", "WAIT_GRID", "WAIT_GRID_RENDERED",
+      "RAW_GRID", "GRID_READY", "DAY_FORM", "BROWSE_LOCATE", "BROWSE_VALIDATE", "BROWSE_ACTION", "BROWSE_DONE", "DAY_ACTION"].includes(mindbody.stage)) copy.stage = mindbody.stage;
+    if (["loading", "interactive", "complete", "UNKNOWN"].includes(mindbody.readyState)) copy.readyState = mindbody.readyState;
+    for (const key of ["elapsedMs", "pendingReads", "documentVersion", "rawBytes", "renderedBytes"])
+      if (Object.hasOwn(mindbody, key) && Number.isSafeInteger(mindbody[key]) && mindbody[key] >= 0 && mindbody[key] <= 4_000_000) copy[key] = mindbody[key];
+    if (record(mindbody.catalogComparison)) {
+      const comparison = {}, allFields = ["title", "bodyText", "locationId", "studioId", "venueAddress", "categories", "services", "resources"];
+      for (const [name, keys, boolean] of [["fieldsEqual", allFields, true], ["rawCounts", allFields.slice(5), false], ["renderedCounts", allFields.slice(5), false],
+        ["rawTextLengths", allFields.slice(0, 5), false], ["renderedTextLengths", allFields.slice(0, 5), false]]) {
+        const source = mindbody.catalogComparison[name];
+        if (!record(source) || !keys.every(key => Object.hasOwn(source, key) && (boolean ? typeof source[key] === "boolean" :
+          Number.isSafeInteger(source[key]) && source[key] >= 0 && source[key] <= 2_000_000))) continue;
+        comparison[name] = Object.fromEntries(keys.map(key => [key, source[key]]));
+      }
+      if (Object.keys(comparison).length === 5) copy.catalogComparison = comparison;
+    }
+    if (Object.keys(copy).length) result.mindbodyAppointment = copy;
+  }
+  return result;
+}
 export function safeBrowserFailureDiagnostics(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   return { requests: (Array.isArray(value.requests) ? value.requests : []).slice(-12).map(request => {
@@ -365,6 +407,7 @@ export function safeBrowserFailureDiagnostics(value) {
       ...(Number.isInteger(request.status) && request.status >= 100 && request.status <= 599 ? { status: request.status } : {}),
       ...(/^[A-Z_0-9]{1,80}$/u.test(request.blockedReason ?? "") ? { blockedReason: request.blockedReason } : {}) };
   }).filter(Boolean), requestFailures: safeBrowserRequestFailures(value.requestFailures), ...safeNativeBrowserDiagnostics(value), ...safeOfficialBrowserDiagnostics(value),
+  ...safeFixedReaderFailureDiagnostics(value),
   capabilityDiagnostics: (Array.isArray(value.capabilityDiagnostics) ? value.capabilityDiagnostics : []).slice(-12)
     .map(safeReplayDiagnostic).filter(item => item?.code === "SUBFRAME_UNSUPPORTED"),
   ...(typeof value.loading === "boolean" ? { loading: value.loading } : {}),
@@ -386,6 +429,7 @@ function safeLastFeedback(value) {
       requests: (Array.isArray(details.requests) ? details.requests : []).slice(0, 8).map(safeReplayDiagnostic).filter(Boolean),
       ...safeNativeBrowserDiagnostics(details),
       ...safeOfficialBrowserDiagnostics(details),
+      ...safeFixedReaderFailureDiagnostics(details),
     } };
   }
   if (value.code === "DISCOVERY_RECIPE_INVALID") {
@@ -456,7 +500,8 @@ export function discoveryBrowserFeedback(snapshot, action, error) {
       !(snapshot?.loading === true && snapshot?.pendingRequestCount > 0)) return undefined;
   return safeLastFeedback({ code: "DISCOVERY_BROWSER_INCOMPLETE", details: { action, failure,
     ...(error?.code === "BROWSER_ACTION_SCHEMA_INVALID" ? { issues: safeBrowserActionIssues(error.details?.issues) } : {}),
-    loading: snapshot?.loading, pendingRequestCount: snapshot?.pendingRequestCount, requests, ...nativeDiagnostics, ...officialDiagnostics } });
+    loading: snapshot?.loading, pendingRequestCount: snapshot?.pendingRequestCount, requests, ...nativeDiagnostics, ...officialDiagnostics,
+    ...safeFixedReaderFailureDiagnostics(snapshot) } });
 }
 
 /** Model reports may explain a failed attempt, never prove every engine unsupported. */

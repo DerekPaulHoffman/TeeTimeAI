@@ -2,7 +2,7 @@
 import { describe, expect, it, vi } from "vitest";
 import observed from "./fixtures/mindbody-appointment-grid-observed.json";
 import { inspectMindbodyPublicRentalCatalog, type MindbodyCatalogEvidence, type MindbodyGridEvidence } from "./mindbody-appointment-grid";
-import { executeMindbodyAppointments, inspectMindbodyAppointments, type MindbodyAppointmentReaderDeps } from "./mindbody-appointment-reader";
+import { executeMindbodyAppointments, getMindbodyAppointmentDiagnostic, inspectMindbodyAppointments, type MindbodyAppointmentReaderDeps } from "./mindbody-appointment-reader";
 
 const source = observed.source, input = observed.input;
 function catalog(): MindbodyCatalogEvidence { return { ...structuredClone(observed.catalogObserved), captureId: "fixed-capture",
@@ -31,6 +31,38 @@ function fake() {
 }
 const metadata = () => inspectMindbodyPublicRentalCatalog(source, catalog()).metadata;
 describe("fixed native Mindbody appointment reader", () => {
+  it("binds only closed nested capture diagnostics to the exact original failure before cleanup", async () => {
+    const f = fake(), primary = new Error("MINDBODY_CATALOG_RAW_VISIBLE_MISMATCH"), session = await f.createSession();
+    const comparison = { fieldsEqual: { title: true, bodyText: false, locationId: true, studioId: true, venueAddress: true, categories: true, services: true, resources: true },
+      rawCounts: { categories: 3, services: 0, resources: 0 }, renderedCounts: { categories: 3, services: 0, resources: 0 },
+      rawTextLengths: { title: 9, bodyText: 400, locationId: 1, studioId: 6, venueAddress: 50 },
+      renderedTextLengths: { title: 9, bodyText: 410, locationId: 1, studioId: 6, venueAddress: 50 } };
+    const capture = { stage: "COMPARE_CATALOG", readyState: "complete", nativeDocumentCurrent: true, rawBytes: 150000, catalogComparison: comparison,
+      text: "PRIVATE_VALUE", url: "https://private.example/?token=PRIVATE", CSRFToken: "PRIVATE" };
+    const diagnostics = vi.fn(() => ({ mindbodyCapture: capture }));
+    f.deps.createSession = async () => ({ ...session, diagnostics }); f.readCatalog.mockRejectedValueOnce(primary);
+    f.close.mockImplementationOnce(async () => { capture.stage = "PRIVATE_VALUE"; comparison.fieldsEqual.bodyText = true; throw Error("PRIVATE_CLEANUP"); });
+    await expect(inspectMindbodyAppointments(source, input, f.deps)).rejects.toBe(primary);
+    expect(diagnostics.mock.invocationCallOrder[0]).toBeLessThan(f.close.mock.invocationCallOrder[0]);
+    const result = getMindbodyAppointmentDiagnostic(primary)!;
+    expect(result).toMatchObject({ stage: "COMPARE_CATALOG", readyState: "complete", nativeDocumentCurrent: true, rawBytes: 150000,
+      catalogComparison: { fieldsEqual: { bodyText: false }, rawCounts: { categories: 3 } } });
+    expect(JSON.stringify(result)).not.toMatch(/PRIVATE|https|token|CSRF|url|text"/u);
+    result.catalogComparison!.fieldsEqual.bodyText = true; result.catalogComparison!.rawCounts.categories = 99;
+    expect(getMindbodyAppointmentDiagnostic(primary)?.catalogComparison).toMatchObject({ fieldsEqual: { bodyText: false }, rawCounts: { categories: 3 } });
+    expect(getMindbodyAppointmentDiagnostic(new Error(primary.message))).toBeUndefined(); expect(getMindbodyAppointmentDiagnostic({})).toBeUndefined();
+  });
+  it("preserves exact errors and cleanup when diagnostic collection throws or yields malformed values", async () => {
+    for (const bad of ["throws", "malformed"] as const) {
+      const f = fake(), primary = new Error("MINDBODY_CATALOG_RAW_VISIBLE_MISMATCH"), session = await f.createSession();
+      f.deps.createSession = async () => ({ ...session, diagnostics: () => {
+        if (bad === "throws") throw Error("PRIVATE_TOKEN");
+        return { mindbodyCapture: { stage: { toString: () => "COMPARE_CATALOG", private: "PRIVATE" }, rawBytes: "PRIVATE", catalogComparison: { fieldsEqual: "PRIVATE" } } };
+      } });
+      f.readCatalog.mockRejectedValueOnce(primary); await expect(inspectMindbodyAppointments(source, input, f.deps)).rejects.toBe(primary);
+      expect(f.close).toHaveBeenCalledOnce(); expect(getMindbodyAppointmentDiagnostic(primary)).toBeUndefined();
+    }
+  });
   it("requires native capability and trusted duration before any browser factory", async () => {
     const f = fake(); f.deps.localCapabilities = [];
     await expect(inspectMindbodyAppointments(source, input, f.deps)).rejects.toThrow("LOCAL_CHROME_REQUIRED");
