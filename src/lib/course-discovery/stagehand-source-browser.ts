@@ -39,6 +39,11 @@ export function canonicalStagehandHostEntry(value: string) {
   if (url.href !== value && !(value === url.origin && url.pathname === "/" && !url.search && !url.hash)) throw reject();
   return url.href;
 }
+export function stagehandSourceBrowserMode(platform: NodeJS.Platform = process.platform) {
+  // Extensions require the full browser's new headless mode. A bare headless
+  // launch selects Playwright's extension-less chromium-headless-shell.
+  return { headless: platform !== "win32", channel: platform === "win32" ? "chrome" : "chromium" };
+}
 export async function ownedStagehandExtension() {
   // The native helper runs in the same pinned npm checkout as the SDK driver.
   // No user extension directories, fallback installs, or global packages.
@@ -137,7 +142,7 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
   try {
     const extension = await ownedStagehandExtension();
     browser = await (deps.launchBrowser ?? (options => launchPublicReadBrowser(options, { localCdp: true })))({
-      headless: process.platform !== "win32", ...(process.platform === "win32" ? { channel: "chrome" } : {}),
+      ...stagehandSourceBrowserMode(),
       timeout: Math.min(15_000, remaining), proxy: { server: proxy.server },
       ignoreDefaultArgs: ["--disable-extensions"], args: ["--disable-quic", "--enable-unsafe-extension-debugging", `--remote-allow-origins=${extension.origin}`],
     });

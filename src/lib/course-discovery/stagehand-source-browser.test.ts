@@ -4,7 +4,7 @@ import { createServer } from "node:https";
 import { connect } from "node:net";
 import { chromium, type Browser } from "@playwright/test";
 import { expect, it } from "vitest";
-import { canonicalStagehandHostEntry, createGuardedStagehandSourceBrowser } from "./stagehand-source-browser";
+import { canonicalStagehandHostEntry, createGuardedStagehandSourceBrowser, stagehandSourceBrowserMode } from "./stagehand-source-browser";
 import { launchPublicReadBrowser } from "./public-browser-launch";
 import { requestFamilyForUrl } from "./request-family";
 
@@ -12,6 +12,12 @@ import { requestFamilyForUrl } from "./request-family";
 // browser profiles, local auth, production leases, or external provider data.
 const material = readFileSync("src/lib/course-discovery/cps-browser-wiring.test.ts", "utf8");
 const certificate = (name: string) => JSON.parse(new RegExp("const " + name + " = (\".*?\");").exec(material)![1]);
+
+it("uses the full extension-capable browser in headless Linux and macOS", () => {
+  expect(stagehandSourceBrowserMode("linux")).toEqual({ headless: true, channel: "chromium" });
+  expect(stagehandSourceBrowserMode("darwin")).toEqual({ headless: true, channel: "chromium" });
+  expect(stagehandSourceBrowserMode("win32")).toEqual({ headless: false, channel: "chrome" });
+});
 
 it("canonicalizes only a missing homepage slash without changing routes, queries, or input", () => {
   const input = { officialUrl: "https://public.example" };
