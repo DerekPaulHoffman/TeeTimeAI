@@ -70,6 +70,16 @@ function setup() {
 }
 
 describe("regular Stagehand source worker", () => {
+  it.each(["STAGEHAND_SOURCE_ACTION_UNAVAILABLE", "STAGEHAND_SOURCE_ACTION_REJECTED", "STAGEHAND_SOURCE_LOADING_INCOMPLETE"])("preserves emitted own unresolved diagnostic %s without admitting source or recipe authority", async code => {
+    const t = setup(); Object.assign(t.f.report, { outcome: "UNRESOLVED", adapterSourceProposal: null, frameworkFailureCode: code });
+    await expect(t.run()).rejects.toThrow(code);
+    expect(t.browserFactory).not.toHaveBeenCalled(); expect(t.client.candidate).not.toHaveBeenCalled();
+    expect(t.executeRecipe).not.toHaveBeenCalled(); expect(t.client.activate).not.toHaveBeenCalled();
+    const foreign = setup(); Object.assign(foreign.f.report, { jobId: "foreign-job", outcome: "UNRESOLVED", adapterSourceProposal: null, frameworkFailureCode: code });
+    await expect(foreign.run()).rejects.toThrow("STAGEHAND_SOURCE_REPORT_INVALID");
+    expect(foreign.browserFactory).not.toHaveBeenCalled(); expect(foreign.client.candidate).not.toHaveBeenCalled();
+  });
+
   it("preserves a closed startup cause through actual worker→source SDK→private host failure without any model constructor", async () => {
     for (const code of ["STAGEHAND_NATIVE_HOST_DEADLINE", "STAGEHAND_NATIVE_HOST_FAILED", "OWNED_STAGEHAND_CDP_UNAVAILABLE", "PRIVATE_UNKNOWN_TOKEN"]) {
       const t = setup(), current = Date.now();
