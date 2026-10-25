@@ -17736,7 +17736,8 @@ async function listParkedSourceCompleteFinalizationRecoveryCandidates(
 
 type CourseSupportClaimCandidateReadClient = Pick<
   Prisma.TransactionClient,
-  "courseSupportIncident" | "courseMonitoringEvent" | "coursePreference" | "courseDiscoveryPilotEnrollment" | "teeSearch"
+  "courseSupportIncident" | "courseMonitoringEvent" | "coursePreference" | "courseDiscoveryPilotEnrollment" | "teeSearch" |
+  "courseDiscoveryJob" | "course" | "courseOffering" | "courseAccessRecipe"
 >;
 
 async function listCourseSupportClaimCandidateIncidents(

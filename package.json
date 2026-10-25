@@ -8,6 +8,7 @@
     "start": "next start",
     "test": "vitest",
     "test:run": "vitest run",
+    "test:learning-worker": "node --test scripts/automation/stagehand/*.test.mjs",
     "check:cycles": "knip --no-progress --include cycles",
     "check:dead-code": "knip --no-progress --include files,dependencies,unlisted,unresolved",
     "typecheck": "prisma generate && tsc --noEmit -p tsconfig.ci.json",
@@ -73,6 +74,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@browserbasehq/stagehand": "4.3.0",
     "@openai/codex": "0.160.1",
     "@playwright/test": "^1.62.0",
     "@testing-library/react": "^16.3.2",

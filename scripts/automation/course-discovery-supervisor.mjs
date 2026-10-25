@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createCourseDiscoveryClient, discoveryError } from "./course-discovery-client.mjs";
-import { executeDiscoveryRecipe, noVerifiedRecipeDiagnostic, prepareDiscoveryModelCatalog, runCourseDiscoveryWorker } from "./course-discovery-worker.mjs";
+import { noVerifiedRecipeDiagnostic } from "./course-discovery-worker.mjs";
+import { createCourseDiscoveryHandlers } from "./course-discovery-handlers.mjs";
 
 export const DISCOVERY_POLL_MS = 15_000;
 export const DISCOVERY_HEARTBEAT_MS = 15_000;
@@ -292,11 +293,8 @@ async function main() {
     deviceToken: process.env.LOCAL_READER_DEVICE_TOKEN,
     browserTransport: process.env.COURSE_DISCOVERY_BROWSER_TRANSPORT ?? "PINNED_HTTP",
   });
-  let modelCatalogJson;
-  const supervisor = createCourseDiscoverySupervisor({ client,
-    prepareWorker: () => { modelCatalogJson = prepareDiscoveryModelCatalog(); },
-    startWorker: options => runCourseDiscoveryWorker({ ...options, client, cwd, modelCatalogJson }),
-    executeRecipe: options => executeDiscoveryRecipe({ ...options, cwd }),
+  const handlers = createCourseDiscoveryHandlers({ client, cwd, mode: process.env.COURSE_DISCOVERY_WORKER_MODE ?? "STAGEHAND_SOL" });
+  const supervisor = createCourseDiscoverySupervisor({ ...handlers,
     onEvent: event => process.stdout.write(`${JSON.stringify(event)}\n`),
   });
   const stop = () => { void supervisor.stop().then(() => { process.exitCode = 0; }); };

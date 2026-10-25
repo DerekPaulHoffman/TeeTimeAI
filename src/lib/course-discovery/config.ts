@@ -3,7 +3,20 @@ import type { Prisma } from "@prisma/client";
 
 type PilotReader = Pick<Prisma.TransactionClient, "courseDiscoveryPilotEnrollment" | "teeSearch">;
 
-/** Rollout is off until both the runtime and a bounded pilot are prepared. */
+/** GENERAL is a deliberate post-acceptance switch. Missing configuration keeps
+ * the bounded pilot behavior; an unknown mode never broadens admission. */
+export function isGeneralDiscoveryEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.COURSE_DISCOVERY_ENABLED === "true" && env.COURSE_DISCOVERY_ROLLOUT_MODE === "GENERAL";
+}
+
+function isPilotRollout(env: NodeJS.ProcessEnv) {
+  return env.COURSE_DISCOVERY_ROLLOUT_MODE === undefined || env.COURSE_DISCOVERY_ROLLOUT_MODE === "PILOT";
+}
+
+const realDemandWhere = { trafficClass: { notIn: ["TEST", "AUTOMATION"] }, syntheticMultiCycle: false,
+  mode: { in: ["OUTDOOR", "SIMULATOR"] } } satisfies Prisma.TeeSearchWhereInput;
+
+/** Rollout is off until the runtime and either bounded pilot or explicit general mode are prepared. */
 export function discoveryPilotSearchIds(env: NodeJS.ProcessEnv = process.env): string[] {
   const values = (env.COURSE_DISCOVERY_PILOT_SEARCH_IDS ?? "").split(",").map(value => value.trim()).filter(Boolean);
   if (values.length > 3 || values.some(value => !/^[A-Za-z0-9_-]{1,128}$/u.test(value))) return [];
@@ -17,7 +30,7 @@ export type DiscoveryPilotTargetSearch = { mode: string; preferences: Array<{
 
 /** Explicit search IDs retain precedence; the two enrollment modes never add up. */
 export function automaticDiscoveryPilot(env: NodeJS.ProcessEnv = process.env): AutomaticDiscoveryPilot | null {
-  if (env.COURSE_DISCOVERY_ENABLED !== "true" || env.COURSE_DISCOVERY_PILOT_SEARCH_IDS?.trim()) return null;
+  if (env.COURSE_DISCOVERY_ENABLED !== "true" || !isPilotRollout(env) || env.COURSE_DISCOVERY_PILOT_SEARCH_IDS?.trim()) return null;
   const ownerUserId = env.COURSE_DISCOVERY_PILOT_OWNER_USER_ID?.trim() ?? "";
   const runId = env.COURSE_DISCOVERY_PILOT_RUN_ID?.trim() ?? "";
   const targetKeys = (env.COURSE_DISCOVERY_PILOT_TARGET_KEYS ?? "").split(",").map(value => value.trim()).filter(Boolean).sort();
@@ -47,6 +60,12 @@ export function matchingDiscoveryPilotTargetKey(search: DiscoveryPilotTargetSear
 
 export async function isDiscoveryPilotSearch(searchId: string, env: NodeJS.ProcessEnv = process.env, reader?: PilotReader): Promise<boolean> {
   if (env.COURSE_DISCOVERY_ENABLED !== "true") return false;
+  if (isGeneralDiscoveryEnabled(env)) {
+    if (!/^[A-Za-z0-9_-]{1,128}$/u.test(searchId)) return false;
+    const client = await readerOrDefault(reader);
+    return Boolean(await client.teeSearch.findFirst({ where: { id: searchId, ...realDemandWhere }, select: { id: true } }));
+  }
+  if (!isPilotRollout(env)) return false;
   if (env.COURSE_DISCOVERY_PILOT_SEARCH_IDS?.trim()) return discoveryPilotSearchIds(env).includes(searchId);
   const pilot = automaticDiscoveryPilot(env);
   if (!pilot) return false;
@@ -63,6 +82,12 @@ export async function isDiscoveryPilotSearch(searchId: string, env: NodeJS.Proce
 /** Current existing searches only; quota receipts themselves are never deleted. */
 export async function activeDiscoveryPilotSearchIds(env: NodeJS.ProcessEnv = process.env, reader?: PilotReader): Promise<string[]> {
   if (env.COURSE_DISCOVERY_ENABLED !== "true") return [];
+  if (isGeneralDiscoveryEnabled(env)) {
+    const client = await readerOrDefault(reader);
+    const rows = await client.teeSearch.findMany({ where: { status: "ACTIVE", ...realDemandWhere }, select: { id: true } });
+    return rows.map(row => row.id);
+  }
+  if (!isPilotRollout(env)) return [];
   if (env.COURSE_DISCOVERY_PILOT_SEARCH_IDS?.trim()) return discoveryPilotSearchIds(env);
   const pilot = automaticDiscoveryPilot(env);
   if (!pilot) return [];
@@ -78,5 +103,6 @@ export async function activeDiscoveryPilotSearchIds(env: NodeJS.ProcessEnv = pro
 }
 
 export function isCourseDiscoveryEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env.COURSE_DISCOVERY_ENABLED === "true" && (discoveryPilotSearchIds(env).length > 0 || automaticDiscoveryPilot(env) !== null);
+  return isGeneralDiscoveryEnabled(env) || env.COURSE_DISCOVERY_ENABLED === "true" && isPilotRollout(env) &&
+    (discoveryPilotSearchIds(env).length > 0 || automaticDiscoveryPilot(env) !== null);
 }

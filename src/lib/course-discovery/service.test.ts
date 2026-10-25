@@ -18,7 +18,7 @@ vi.mock("@/lib/prisma", () => ({ prisma: mocks.db }));
 vi.mock("./config", () => ({ isDiscoveryPilotSearch: mocks.pilot, activeDiscoveryPilotSearchIds: mocks.pilotIds }));
 import {
   activateDiscoveryRecipe, checkpointDiscoveryJob, claimNextDiscoveryJob, degradeRecipe,
-  DiscoveryConflictError, ensureDiscoveryJob, ensureDiscoveryJobInTransaction, failDiscoveryJob, getActiveAccessRecipe,
+  DiscoveryConflictError, ensureDiscoveryJob, ensureDiscoveryJobInTransaction, failDiscoveryJob, getActiveAccessRecipe, getActiveAccessRecipeInTransaction,
   heartbeatDiscoveryJob, proposeDiscoveryRecipe, recordDiscoveryVerification, assertActiveAccessRecipeInTransaction,
 } from "./service";
 
@@ -498,6 +498,25 @@ describe("bounded course discovery persistence", () => {
     course.activeAccessRecipeId = "recipe1";
     mocks.db.courseAccessRecipe.findUnique.mockResolvedValue({ id: "recipe1", targetKey: "course:course1", sourceFingerprint: "old", payload: recipe });
     expect(await getActiveAccessRecipe({ courseId: "course1" })).toBeNull();
+  });
+
+  it("validates the current immutable method in the supplied reader without a nested transaction or writes", async () => {
+    const admitted = await ensureDiscoveryJob({ courseId: "course1", searchId: "search1" });
+    course.activeAccessRecipeId = "recipe1";
+    const stored = { id: "recipe1", targetKey: "course:course1", sourceFingerprint: admitted!.sourceFingerprint,
+      hash: hashAccessRecipe(recipe), payload: recipe };
+    mocks.db.courseAccessRecipe.findUnique.mockResolvedValue(stored);
+    vi.clearAllMocks();
+    const readOnlyReader = { course: mocks.db.course, courseOffering: mocks.db.courseOffering, courseAccessRecipe: mocks.db.courseAccessRecipe } as unknown as
+      Pick<Prisma.TransactionClient, "course" | "courseOffering" | "courseAccessRecipe">;
+    expect((await getActiveAccessRecipeInTransaction(readOnlyReader, { courseId: "course1" }))?.record).toEqual(stored);
+    mocks.db.courseAccessRecipe.findUnique.mockResolvedValue({ ...stored, hash: "0".repeat(64) });
+    expect(await getActiveAccessRecipeInTransaction(readOnlyReader, { courseId: "course1" })).toBeNull();
+    expect(mocks.db.$transaction).not.toHaveBeenCalled();
+    expect(mocks.db.$queryRaw).not.toHaveBeenCalled();
+    expect(mocks.db.course.updateMany).not.toHaveBeenCalled();
+    expect(mocks.db.courseDiscoveryJob.create).not.toHaveBeenCalled();
+    expect(mocks.db.courseAccessRecipe.update).not.toHaveBeenCalled();
   });
 
   it.each([

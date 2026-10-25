@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { isSimulatorModeEnabled } from "@/lib/simulators/config";
 import { getSimulatorBookingOpening } from "@/lib/simulators/booking-window";
 import { isCurrentSimulatorMatch } from "@/lib/simulators/current-availability";
+import { preserveSimulatorStatusDuringProgress } from "@/lib/simulators/status-progress";
 import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
 import { fetchSimulatorAvailability } from "@/lib/simulators/providers";
 import { SimulatorAvailabilityError } from "@/lib/simulators/providers/types";
@@ -429,8 +430,12 @@ async function prepareSimulatorStatus(search: ActiveAutomationSearch, lease: Sea
   const prior = unwrapAlertGenerationStatusSnapshot(search.statusEmailSnapshot);
   const priorVenues = prior && typeof prior === "object" && "venues" in prior
     ? (prior as { venues: unknown }).venues : undefined;
-  // Repeated checks do not send repeated unchanged status. Match alerts remain independent.
-  if (search.statusEmailSentAt && (!Array.isArray(priorVenues) || canonicalSearchEmailJson(priorVenues) === canonicalSearchEmailJson(report.venues))) return;
+  // A recurring browser read is progress, not a monitoring-status change.
+  // Compare its unchanged source with the last announced status. If another
+  // venue materially changed, the real report still describes pending work;
+  // no old availability is substituted into an email or persisted evidence.
+  const comparisonVenues = preserveSimulatorStatusDuringProgress(report.venues, priorVenues);
+  if (search.statusEmailSentAt && (!Array.isArray(priorVenues) || canonicalSearchEmailJson(priorVenues) === canonicalSearchEmailJson(comparisonVenues))) return;
   const kind = search.statusEmailSentAt ? "MONITORING_STATUS_UPDATE" as const : "SETUP" as const;
   const groupKey = kind === "SETUP" ? `simulator:setup:${search.alertGeneration}`
     : `simulator:status:${search.alertGeneration}:${createHash("sha256").update([

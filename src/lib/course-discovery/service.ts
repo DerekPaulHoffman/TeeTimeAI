@@ -123,7 +123,7 @@ async function databaseNow(tx: Tx) {
 async function lockSource(tx: Tx, courseId: string) {
   await tx.$queryRaw`SELECT "id" FROM "Course" WHERE "id" = ${courseId} FOR UPDATE`;
 }
-async function loadSource(tx: Tx, target: Pick<DiscoveryTarget, "courseId" | "offeringId">) {
+async function loadSource(tx: Pick<Tx, "course" | "courseOffering">, target: Pick<DiscoveryTarget, "courseId" | "offeringId">) {
   const course = await tx.course.findUnique({ where: { id: target.courseId }, select: courseSelect });
   if (!course || !target.offeringId && course.isPublic === false) conflict();
   const offering = target.offeringId ? await tx.courseOffering.findUnique({ where: { id: target.offeringId }, select: offeringSelect }) : null;
@@ -453,22 +453,26 @@ export async function activateDiscoveryRecipe(jobId: string, leaseToken: string)
 }
 
 export async function getActiveAccessRecipe(target: { courseId: string; offeringId?: string }) {
-  return transaction(async tx => {
-    const source = await loadSource(tx, target);
-    if (!source.activeRecipeId) return null;
-    const stored = await tx.courseAccessRecipe.findUnique({ where: { id: source.activeRecipeId } });
-    if (!stored || stored.targetKey !== targetKey(target) || stored.sourceFingerprint !== source.sourceFingerprint) return null;
-    try {
-      const recipe = parseAccessRecipe(stored.payload);
-      bindRecipe(recipe, source);
-      return hashAccessRecipe(recipe) === stored.hash ? { record: stored, recipe, trustedContext: source.trustedContext } : null;
-    } catch (error) {
-      // An obsolete or invalid recipe is missing coverage. Let admission clear
-      // its pointer and repair it, while database/runtime failures still surface.
-      if (error instanceof z.ZodError || error instanceof DiscoveryConflictError) return null;
-      throw error;
-    }
-  });
+  return transaction(tx => getActiveAccessRecipeInTransaction(tx, target));
+}
+
+/** Read the current method in the caller's transaction without acquiring ownership or mutating it. */
+export async function getActiveAccessRecipeInTransaction(tx: Pick<Tx, "course" | "courseOffering" | "courseAccessRecipe">,
+  target: { courseId: string; offeringId?: string }) {
+  const source = await loadSource(tx, target);
+  if (!source.activeRecipeId) return null;
+  const stored = await tx.courseAccessRecipe.findUnique({ where: { id: source.activeRecipeId } });
+  if (!stored || stored.targetKey !== targetKey(target) || stored.sourceFingerprint !== source.sourceFingerprint) return null;
+  try {
+    const recipe = parseAccessRecipe(stored.payload);
+    bindRecipe(recipe, source);
+    return hashAccessRecipe(recipe) === stored.hash ? { record: stored, recipe, trustedContext: source.trustedContext } : null;
+  } catch (error) {
+    // An obsolete or invalid recipe is missing coverage. Let admission clear
+    // its pointer and repair it, while database/runtime failures still surface.
+    if (error instanceof z.ZodError || error instanceof DiscoveryConflictError) return null;
+    throw error;
+  }
 }
 export const getActiveRecipe = getActiveAccessRecipe;
 

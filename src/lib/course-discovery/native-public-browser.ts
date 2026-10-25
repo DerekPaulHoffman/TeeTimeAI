@@ -52,6 +52,9 @@ export async function createNativePublicBrowserProxy(input: {
   signal: AbortSignal;
   maxBytes?: number;
   maxConnections?: number;
+  /** Owned source-browser launch only: deny background/default-context hosts
+   * until the guarded request controller enters its provider lease. */
+  requireHostAdmission?: boolean;
 }, dependencies: NativePublicProxyDependencies = {}): Promise<NativePublicProxy> {
   input.signal.throwIfAborted();
   const maxBytes = Math.min(24_000_000, Math.max(1, input.maxBytes ?? 24_000_000));
@@ -60,6 +63,7 @@ export async function createNativePublicBrowserProxy(input: {
   const socketHosts = new Map<Socket, string>();
   const hostGenerations = new Map<string, number>();
   const pausedHosts = new Set<string>();
+  const admittedHosts = new Set<string>();
   const cancellation = new AbortController();
   const signal = AbortSignal.any([input.signal, cancellation.signal]);
   let connections = 0, bytes = 0, closed = false;
@@ -95,7 +99,7 @@ export async function createNativePublicBrowserProxy(input: {
     }
     socketHosts.set(downstream, hostname);
     const generation = hostGenerations.get(hostname) ?? 0;
-    if (pausedHosts.has(hostname)) { downstream.destroy(); return; }
+    if (pausedHosts.has(hostname) || input.requireHostAdmission && !admittedHosts.has(hostname)) { downstream.destroy(); return; }
     void (async () => {
       try {
         const address = await resolvePinnedPublicAddress(hostname, { resolveAddresses: dependencies.resolveAddresses, signal });
@@ -126,7 +130,7 @@ export async function createNativePublicBrowserProxy(input: {
   if (signal.aborted) { await close(); throw new Error("NATIVE_PROXY_CLOSED"); }
   const port = (server.address() as AddressInfo).port;
   return { server: `http://127.0.0.1:${port}`, close: async () => { input.signal.removeEventListener("abort", abort); await close(); },
-    allowHostConnections: hostname => { pausedHosts.delete(hostname.toLowerCase()); },
+    allowHostConnections: hostname => { const host = hostname.toLowerCase(); admittedHosts.add(host); pausedHosts.delete(host); },
     cancelHostConnections: async hostname => {
       const host = hostname.toLowerCase();
       pausedHosts.add(host); hostGenerations.set(host, (hostGenerations.get(host) ?? 0) + 1);

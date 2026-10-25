@@ -85,7 +85,7 @@ try {
       }
       if ($record.metrics) {
         $metrics = [ordered]@{}
-        foreach ($key in @('model', 'browserActions', 'browserStartedAt', 'firstBrowserStartupMs', 'firstOpenStartedAt', 'firstOpenCompletedAt', 'firstOpenElapsedMs', 'providerRequestsObserved', 'responseBytesObserved')) {
+        foreach ($key in @('model', 'framework', 'frameworkRole', 'reasoningEffort', 'modelCalls', 'sourceElapsedMs', 'fixedInspectionModelCalls', 'replayModelCalls', 'browserActions', 'browserStartedAt', 'firstBrowserStartupMs', 'firstOpenStartedAt', 'firstOpenCompletedAt', 'firstOpenElapsedMs', 'providerRequestsObserved', 'responseBytesObserved')) {
           $value = $record.metrics.$key
           if ($key -in @('browserStartedAt', 'firstOpenStartedAt', 'firstOpenCompletedAt')) {
             if ($value -is [DateTimeOffset]) { $value = $value.ToUniversalTime().ToString('o') }
@@ -105,6 +105,8 @@ try {
           if ($durations.Count -eq $record.metrics.replayDurationsMs.Count) { $metrics.replayDurationsMs = $durations }
         }
         if ($record.metrics.metricsFinal -is [bool]) { $metrics.metricsFinal = $record.metrics.metricsFinal }
+        if ($record.metrics.sourceResumed -is [bool]) { $metrics.sourceResumed = $record.metrics.sourceResumed }
+        if ($record.metrics.sourceUsageRecordedLowerBound -is [bool]) { $metrics.sourceUsageRecordedLowerBound = $record.metrics.sourceUsageRecordedLowerBound }
         if ($record.metrics.cleanupWarning -in @('TEMP_DIRECTORY_RETAINED_WITHOUT_AUTH', 'TEMP_CREDENTIAL_CLEANUP_FAILED', 'POST_ACTIVATION_CLEANUP_PENDING')) {
           $metrics.cleanupWarning = $record.metrics.cleanupWarning
         }

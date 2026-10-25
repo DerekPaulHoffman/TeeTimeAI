@@ -3,9 +3,10 @@
 This change adds a disabled-by-default discovery path. It is implementation and
 test infrastructure, not evidence that three previously unseen venues have
 passed the delivery target. The acceptance clock starts at the database's
-immutable `CourseDiscoveryJob.firstPickedUpAt`; it ends only when the owner
-confirms receipt of the matching alert. Provider acceptance of an email is a
-separate timestamp.
+immutable `CourseDiscoveryJob.firstPickedUpAt`; it ends when the matching message
+is observed in the owner's mailbox or the owner confirms receipt. Provider
+acceptance is a separate timestamp. A mailbox observation does not by itself
+prove inbox placement or human reading.
 
 ## Runtime
 
@@ -16,10 +17,13 @@ separate timestamp.
    It runs at most three jobs, while the existing two global / one per-provider
    request leases still control provider traffic. Warm recipe checks have
    priority over new investigations.
-3. The fixed local controller starts the pinned Codex CLI with only browser,
-   checkpoint and recipe-proposal tools. The model cannot run a shell, write
-   files, access database credentials, send email, or supply executable code.
-   The trusted helper has the device credential needed for the private API.
+3. The normal local controller uses Stagehand4.3.0 with GPT-6.1 Sol through the
+   existing ChatGPT sign-in. Its source-only model session has no client tools,
+   shell, database, email or activation authority. Stagehand observes and follows
+   guarded public navigation for at most120 seconds from the original pickup;
+   its sole handoff is one exactly observed official-linked source. A fresh
+   fixed reader derives typed adapter metadata and availability independently.
+   The trusted controller retains the credential for the private API.
 4. A candidate is a versioned, hashed data-only `HTTP_JSON`, `BROWSER_DOM` or
    `EXISTING_ADAPTER`
    recipe. The controller runs two server-issued challenges in fresh runtimes

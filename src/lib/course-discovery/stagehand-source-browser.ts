@@ -1,0 +1,352 @@
+import type { Browser, BrowserContext, CDPSession, Frame, LaunchOptions, Page } from "@playwright/test";
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { launchPublicReadBrowser, ownedPublicBrowserCdp } from "./public-browser-launch";
+import { connectOwnedSourceCdp, type OwnedCdpSession } from "./stagehand-owned-cdp";
+import { createNativePublicBrowserProxy, continueNativeBrowserRead, isObservedNativeRedirect, nativeReadPreflightMethod, type NativePublicProxyDependencies } from "./native-public-browser";
+import { installNativeRedirectRouting, authorizePublicClientReadHeaders, isCurrentPublicClientReadHeaders, nativePublicClientPreflightMethod,
+  nativeMindbodyBootstrapSource, type NativeReadRoute, type NativeRedirectRouting } from "./native-redirect-routing";
+import { isSafeRecipeUrl, isSafeBrowserAssetUrl, isSafeBrowserBootstrapReadUrl, isSafeBrowserAvailabilityReadUrl } from "./recipe";
+import { canonicalPublicReadUrl } from "./public-request-url";
+import { requestFamilyForUrl } from "./request-family";
+import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
+import { isIncidentalBrowserRequest, isNonEvidenceBrowserResource } from "@/lib/automation/passfactory-public-read-policy";
+import { isAnonymousBrowserReadPost } from "@/lib/automation/simulator-interactive-browser";
+import { isMindbodyClassicPublicBootstrapPost } from "@/lib/automation/mindbody-public-read-policy";
+import { PUBLIC_BROWSER_REQUEST_LIMIT, PUBLIC_BROWSER_TOTAL_BYTES, publicBrowserResponseLimit, assertPublicBrowserRequestBudget } from "./browser-resource-limits";
+
+type Lease = <T>(family: string, work: () => Promise<T>) => Promise<{ acquired: true; value: T } | { acquired: false }>;
+type Target = { id: string; contextId: string; cdp: OwnedCdpSession; page: Page; frame: Frame; currentUrl: string; router?: NativeRedirectRouting; ready: Promise<void>; installed?: boolean; discarded?: boolean; initialization?: "NETWORK" | "FETCH" | "RESUME" | "ROUTER" | "READY" };
+type PopupGrant = { url: string; until: number; used: boolean };
+type PopupRead = { id: string; networkId: string; url: string; method: string; frameId: string; hop: number; complete: boolean;
+  redirect?: string; response: Promise<Record<string, unknown>>; resolve(value: Record<string, unknown>): void };
+type Dependencies = { requestLease: Lease; proxyDependencies?: NativePublicProxyDependencies; launchBrowser?: (options: LaunchOptions) => Promise<Browser>;
+  contextOptions?: { ignoreHTTPSErrors?: boolean } };
+const record = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+const reject = () => new Error("STAGEHAND_GUARDED_SOURCE_REJECTED");
+function transactionUrl(value: string) {
+  try {
+    let path = new URL(value).pathname;
+    for (let i = 0; i < 4; i++) { const next = decodeURIComponent(path); if (next === path) break; path = next; }
+    path = new URL(path.replace(/\\/gu, "/"), "https://public.example").pathname;
+    return /^\/ASP\/appt_req\.asp\/?$/iu.test(path);
+  } catch { return true; }
+}
+export function canonicalStagehandHostEntry(value: string) {
+  if (!isSafeRecipeUrl(value) || transactionUrl(value)) throw reject();
+  const url = new URL(value);
+  if (url.href !== value && !(value === url.origin && url.pathname === "/" && !url.search && !url.hash)) throw reject();
+  return url.href;
+}
+export async function ownedStagehandExtension() {
+  // The native helper runs in the same pinned npm checkout as the SDK driver.
+  // No user extension directories, fallback installs, or global packages.
+  const extensionPath = resolve(process.cwd(), "node_modules/@browserbasehq/stagehand/dist/extension");
+  const packageValue = JSON.parse(await readFile(join(extensionPath, "../../package.json"), "utf8"));
+  const manifest = JSON.parse(await readFile(join(extensionPath, "manifest.json"), "utf8"));
+  if (packageValue.version !== "4.3.0" || manifest.manifest_version !== 3 || manifest.key ||
+      !Array.isArray(manifest.permissions) || !manifest.permissions.includes("debugger")) throw reject();
+  // Chromium hashes FilePath native bytes (UTF-16 on Windows), with an upper
+  // drive letter. This is the packaged extension identity, never a user ID.
+  const nativePath = process.platform === "win32" ? extensionPath[0].toUpperCase() + extensionPath.slice(1) : extensionPath;
+  const id = createHash("sha256").update(Buffer.from(nativePath, process.platform === "win32" ? "utf16le" : "utf8")).digest("hex").slice(0, 32)
+    .replace(/[0-9a-f]/gu, value => String.fromCharCode(97 + parseInt(value, 16)));
+  return { path: extensionPath, id, origin: `chrome-extension://${id}` };
+}
+
+/** This browser is source-routing only. It has no adapter/proof/recipe/backend mutation surface.
+ * Its private CDP attachment belongs only to the trusted SDK driver, never model data. */
+export async function createGuardedStagehandSourceBrowser(input: { initialUrl: string; timeZone: string; deadlineAt: Date; signal?: AbortSignal }, deps: Dependencies) {
+  const initialUrl = canonicalStagehandHostEntry(input.initialUrl);
+  if (typeof deps.requestLease !== "function") throw reject();
+  const remaining = input.deadlineAt.getTime() - Date.now();
+  if (!(remaining > 0 && remaining <= 120_000)) throw reject();
+  new Intl.DateTimeFormat("en-US", { timeZone: input.timeZone });
+  const cancellation = new AbortController(), signal = AbortSignal.any([cancellation.signal, AbortSignal.timeout(remaining), ...(input.signal ? [input.signal] : [])]);
+  const queue = createSimulatorBrowserRequestQueue(deps.requestLease, signal);
+  const proxy = await createNativePublicBrowserProxy({ signal, requireHostAdmission: true }, deps.proxyDependencies);
+  const allowed = new Set([initialUrl]), roots = new Set(allowed), targets = new Map<string, Target>(), activeReads = new Set<Promise<unknown>>();
+  const popupGrants = new Map<string, PopupGrant>();
+  let browser: Browser | undefined, context: BrowserContext | undefined, cdp: Awaited<ReturnType<typeof connectOwnedSourceCdp>> | undefined;
+  let contextId = "", targetId = "", closing: Promise<{ browserClosed: boolean; providerRequestsDrained: boolean }> | undefined;
+  let closed = false, terminal = false, intercepted = 0, admitted = 0, rejected = 0, bytes = 0, popupCount = 0, deniedWorkers = 0;
+  const check = () => { signal.throwIfAborted(); if (closed || terminal) throw reject(); };
+  const close = () => closing ??= (async () => {
+    closed = true; cancellation.abort("STAGEHAND_SOURCE_CLOSED"); queue.dispose();
+    await Promise.allSettled([...targets.values()].map(target => target.router?.close()));
+    await context?.close().catch(() => {}); await browser?.close().catch(() => {}); await proxy.close(); cdp?.close();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try { await Promise.race([Promise.allSettled([...activeReads]), new Promise<void>(resolve => { timer = setTimeout(resolve, 4000); })]); }
+    finally { clearTimeout(timer); }
+    return { browserClosed: !browser?.isConnected() && activeReads.size === 0, providerRequestsDrained: activeReads.size === 0 };
+  })();
+  const abort = () => { void close(); };
+  signal.addEventListener("abort", abort, { once: true });
+
+  const handle = async (route: NativeReadRoute, target: Target) => {
+    if (++intercepted > 1024) { terminal = true; await route.abort().catch(() => {}); void close(); return; }
+    const request = route.request(), method = request.method(), transportUrl = canonicalPublicReadUrl(request.url(), method);
+    if (isIncidentalBrowserRequest(request.url()) || isNonEvidenceBrowserResource(request.url(), request.resourceType())) { rejected++; await route.abort(); return; }
+    try {
+      check();
+      if (transactionUrl(transportUrl)) throw reject();
+      if (request.frame().page() !== target.page || request.frame() !== target.frame) throw reject();
+      const url = new URL(transportUrl), headers = request.headers(), body = request.postData();
+      const publicHeaders = method === "OPTIONS" || Object.keys(headers).some(key => /^(?:authorization|x-api-key)$/iu.test(key))
+        ? await authorizePublicClientReadHeaders(request) : null;
+      const preflight = method === "OPTIONS" ? nativeReadPreflightMethod(headers) || publicHeaders && nativePublicClientPreflightMethod(request, publicHeaders) : null;
+      const purposeMethod = preflight || method, kind = preflight ? "fetch" : request.resourceType();
+      if (!isSafeRecipeUrl(transportUrl) && !isSafeBrowserAssetUrl(transportUrl, request.resourceType(), method) &&
+          !isSafeBrowserBootstrapReadUrl(transportUrl, kind, purposeMethod) && !isSafeBrowserAvailabilityReadUrl(transportUrl, kind, purposeMethod)) throw reject();
+      if (Object.keys(headers).some(key => /^(?:authorization|proxy-authorization|x-api-key)$/iu.test(key)) && !publicHeaders) throw reject();
+      const bootstrap = nativeMindbodyBootstrapSource(request);
+      const bootstrapPost = method === "POST" && body !== null && bootstrap && roots.has(bootstrap.sourceUrl) &&
+        isMindbodyClassicPublicBootstrapPost(url, new Headers(headers), body, bootstrap.sourceUrl);
+      if (request.isNavigationRequest()) {
+        if (!allowed.has(transportUrl) && !isObservedNativeRedirect(request, roots) && !bootstrapPost) throw reject();
+        if (!["GET", "HEAD"].includes(method) && !bootstrapPost) throw reject();
+      }
+      // Preserve policy-bearing headers such as Next-Action. Removing them
+      // could make a server mutation resemble an ordinary JSON read.
+      const projectedHeaders = new Headers(headers);
+      const publicPost = method === "POST" && body !== null && (isAnonymousBrowserReadPost(url, projectedHeaders, body) ||
+        bootstrapPost);
+      if (!["GET", "HEAD"].includes(method) && !preflight && !publicPost) throw reject();
+      assertPublicBrowserRequestBudget(admitted, PUBLIC_BROWSER_REQUEST_LIMIT);
+      if (bytes >= PUBLIC_BROWSER_TOTAL_BYTES) throw reject();
+      admitted++;
+      const operation = queue.run(requestFamilyForUrl(transportUrl), async () => {
+        check();
+        if (publicHeaders && !isCurrentPublicClientReadHeaders(publicHeaders)) throw reject();
+        if (bootstrap && (!body || !isMindbodyClassicPublicBootstrapPost(url, new Headers(headers), body, bootstrap.sourceUrl))) throw reject();
+        proxy.allowHostConnections(url.hostname);
+        const response = await continueNativeBrowserRead(route, signal, publicBrowserResponseLimit(request.resourceType()),
+          () => proxy.cancelHostConnections(url.hostname), transportUrl);
+        bytes += response.body.length;
+        if (bytes > PUBLIC_BROWSER_TOTAL_BYTES) throw reject();
+        return response;
+      }, request.signal);
+      activeReads.add(operation);
+      try { await operation; } finally { activeReads.delete(operation); }
+    } catch {
+      rejected++; await route.abort().catch(() => {});
+    }
+  };
+
+  try {
+    const extension = await ownedStagehandExtension();
+    browser = await (deps.launchBrowser ?? (options => launchPublicReadBrowser(options, { localCdp: true })))({
+      headless: process.platform !== "win32", ...(process.platform === "win32" ? { channel: "chrome" } : {}),
+      timeout: Math.min(15_000, remaining), proxy: { server: proxy.server },
+      ignoreDefaultArgs: ["--disable-extensions"], args: ["--disable-quic", "--enable-unsafe-extension-debugging", `--remote-allow-origins=${extension.origin}`],
+    });
+    const endpoint = ownedPublicBrowserCdp(browser);
+    cdp = await connectOwnedSourceCdp(endpoint, signal, () => { if (!closed) { terminal = true; void close(); } });
+    const root = cdp.root;
+    const installed = await root.send("Extensions.loadUnpacked", { path: extension.path, enableInIncognito: true });
+    if (installed.id !== extension.id) throw reject();
+    const before = new Set((record(await root.send("Target.getBrowserContexts")).browserContextIds as string[]) ?? []);
+    context = await browser.newContext({ serviceWorkers: "block", acceptDownloads: false, locale: "en-US", timezoneId: input.timeZone,
+      proxy: { server: proxy.server, bypass: `127.0.0.1:${new URL(endpoint).port}` }, ...deps.contextOptions });
+    const after = ((await root.send("Target.getBrowserContexts")).browserContextIds as string[]) ?? [];
+    const fresh = after.filter(value => !before.has(value));
+    if (fresh.length !== 1) throw reject(); contextId = fresh[0];
+    await context.routeWebSocket("**/*", route => { route.close(); });
+    const attachTarget = async (event: Record<string, unknown>) => {
+      const info = record(event.targetInfo), sessionId = event.sessionId;
+      if (typeof info.targetId !== "string" || typeof sessionId !== "string") throw reject();
+      const child = cdp!.session(sessionId);
+      if (info.type !== "page") {
+        if (info.type === "service_worker" && info.url === `chrome-extension://${extension.id}/service-worker.js`) {
+          await child.send("Runtime.runIfWaitingForDebugger").catch(() => {}); return;
+        }
+        deniedWorkers++; await root.send("Target.closeTarget", { targetId: info.targetId }); return;
+      }
+      child.on("Target.attachedToTarget", attachTarget);
+      if (info.browserContextId !== contextId) {
+        // SDK extension activation is internal control, never a public source page.
+        if (typeof info.url === "string" && info.url.startsWith(extension.origin + "/")) {
+          await child.send("Fetch.enable", { patterns: [{ urlPattern: "http://*", requestStage: "Request" }, { urlPattern: "https://*", requestStage: "Request" }] });
+          child.on("Fetch.requestPaused", value => { void child.send("Fetch.failRequest", { requestId: value.requestId, errorReason: "BlockedByClient" }).catch(() => {}); });
+          await child.send("Runtime.runIfWaitingForDebugger"); return;
+        }
+        // Leave the initial blank owned profile page until the guarded page exists.
+        if (!targetId && info.url === "about:blank") { await child.send("Runtime.runIfWaitingForDebugger"); return; }
+        await root.send("Target.closeTarget", { targetId: info.targetId }); return;
+      }
+      if (targets.size >= 8) { await root.send("Target.closeTarget", { targetId: info.targetId }); terminal = true; return; }
+      const item = { id: info.targetId, contextId, cdp: child, currentUrl: typeof info.url === "string" ? info.url : "about:blank" } as Target;
+      const opener = typeof info.openerId === "string" ? info.openerId : "";
+      const frame = { url: () => item.currentUrl, page: () => item.page } as unknown as Frame;
+      item.frame = frame;
+      // A paused popup cannot answer the router's first getFrameTree until it
+      // resumes. Pause ALL network first and retain the exact native events
+      // until the existing router has installed its listeners. No request is
+      // continued, synthesized, or admitted by this startup buffer.
+      const startup: Array<{ method: string; value: Record<string, unknown> }> = [];
+      const popupReads = new Map<string, PopupRead>();
+      const listeners = new Map<string, Set<(value: Record<string, unknown>) => unknown>>();
+      let buffering = true, startupBytes = 0;
+      const popupDocument = (event: Record<string, unknown>) => {
+        if (!opener || event.resourceType !== "Document" || typeof event.requestId !== "string") return false;
+        const existing = popupReads.get(event.requestId);
+        if (existing && (event.responseStatusCode !== undefined || event.responseErrorReason !== undefined)) {
+          existing.resolve(event); return true;
+        }
+        if (event.responseStatusCode !== undefined || event.responseErrorReason !== undefined) return false;
+        const request = record(event.request), method = request.method, url = request.url;
+        const headers = record(request.headers), parent = typeof event.redirectedRequestId === "string" ? popupReads.get(event.redirectedRequestId) : undefined;
+        const grant = popupGrants.get(opener), first = popupReads.size === 0;
+        const valid = typeof url === "string" && typeof event.networkId === "string" && event.frameId === item.id &&
+          (method === "GET" || method === "HEAD") && request.hasPostData !== true && request.postData === undefined &&
+          isSafeRecipeUrl(url) && !transactionUrl(url) && new URL(url).href === url &&
+          !Object.keys(headers).some(key => /^(?:authorization|proxy-authorization|x-api-key)$/iu.test(key)) &&
+          (first ? targets.has(opener) && grant && !grant.used && Date.now() <= grant.until && grant.url === url :
+            parent?.complete === true && parent.redirect === url && parent.frameId === event.frameId && parent.hop < 5);
+        if (!valid) {
+          rejected++; item.discarded = true; targets.delete(item.id);
+          void child.send("Fetch.failRequest", { requestId: event.requestId, errorReason: "BlockedByClient" }).catch(() => {});
+          void root.send("Target.closeTarget", { targetId: item.id }).catch(() => {}); return true;
+        }
+        if (first) grant!.used = true;
+        let resolve!: PopupRead["resolve"];
+        const response = new Promise<Record<string, unknown>>(done => { resolve = done; });
+        const entry: PopupRead = { id: event.requestId, networkId: event.networkId as string, url: url as string, method: method as string,
+          frameId: event.frameId as string, hop: parent ? parent.hop + 1 : 0, complete: false, response, resolve };
+        popupReads.set(entry.id, entry);
+        const operation = queue.run(requestFamilyForUrl(entry.url), async () => {
+          check(); assertPublicBrowserRequestBudget(admitted, PUBLIC_BROWSER_REQUEST_LIMIT); admitted++; intercepted++;
+          const host = new URL(entry.url).hostname; proxy.allowHostConnections(host);
+          let finished = false, timer: ReturnType<typeof setTimeout> | undefined;
+          try {
+            const bounded = new Promise<never>((_, fail) => { timer = setTimeout(() => fail(reject()), Math.min(15_000, Math.max(1, input.deadlineAt.getTime() - Date.now()))); });
+            await child.send("Fetch.continueRequest", { requestId: entry.id });
+            const value = await Promise.race([response, bounded]); check();
+            if (value.responseErrorReason || value.frameId !== entry.frameId || value.networkId !== entry.networkId ||
+                record(value.request).url !== entry.url || record(value.request).method !== entry.method) throw reject();
+            const status = value.responseStatusCode;
+            if (!Number.isInteger(status) || Number(status) < 100 || Number(status) > 599 || !Array.isArray(value.responseHeaders)) throw reject();
+            const fields = value.responseHeaders as Array<{ name: string; value: string }>;
+            if (fields.length > 256 || fields.some(field => typeof field.name !== "string" || typeof field.value !== "string")) throw reject();
+            const declared = fields.filter(field => field.name.toLowerCase() === "content-length");
+            if (declared.length > 1 || declared.length && (!/^\d{1,9}$/u.test(declared[0].value) || Number(declared[0].value) > publicBrowserResponseLimit("document"))) throw reject();
+            const redirect = [301, 302, 303, 307, 308].includes(Number(status));
+            const noBody = entry.method === "HEAD" || redirect || [204, 205, 304].includes(Number(status));
+            const captured = noBody ? Buffer.alloc(0) : await Promise.race([child.send("Fetch.getResponseBody", { requestId: entry.id }).then(body => {
+              if (typeof body.body !== "string") throw reject(); return Buffer.from(body.body, body.base64Encoded ? "base64" : "utf8");
+            }), bounded]);
+            bytes += captured.length;
+            if (captured.length > publicBrowserResponseLimit("document") || bytes > PUBLIC_BROWSER_TOTAL_BYTES) throw reject();
+            const locations = fields.filter(field => field.name.toLowerCase() === "location");
+            let next: string | undefined;
+            if (redirect) {
+              if (locations.length !== 1 || entry.hop >= 5) throw reject();
+              next = new URL(locations[0].value, entry.url).href;
+              if (!isSafeRecipeUrl(next) || transactionUrl(next)) throw reject();
+            }
+            check(); await child.send("Fetch.continueResponse", { requestId: entry.id });
+            entry.redirect = next; entry.complete = true; finished = true;
+          } finally {
+            clearTimeout(timer);
+            if (!finished) { await child.send("Fetch.failRequest", { requestId: entry.id, errorReason: "BlockedByClient" }).catch(() => {}); await proxy.cancelHostConnections(host); }
+          }
+        }, signal);
+        activeReads.add(operation);
+        void operation.catch(() => { if (!closed) { terminal = true; void close(); } }).finally(() => activeReads.delete(operation));
+        return true;
+      };
+      for (const method of ["Page.frameNavigated", "Page.navigatedWithinDocument", "Page.frameRequestedNavigation", "Network.requestWillBeSent", "Network.loadingFailed", "Fetch.requestPaused"]) {
+        child.on(method, value => {
+          if (buffering) {
+            if (method === "Fetch.requestPaused" && popupDocument(value)) return;
+            startupBytes += Buffer.byteLength(JSON.stringify(value));
+            if (startup.length >= 256 || startupBytes > 2_000_000) { terminal = true; void close(); return; }
+            startup.push({ method, value });
+          } else for (const listener of listeners.get(method) ?? []) listener(value);
+        });
+      }
+      const routedSession = { ...child,
+        on(method: string, listener: (value: Record<string, unknown>) => unknown) {
+          if (!listeners.has(method)) listeners.set(method, new Set()); listeners.get(method)!.add(listener);
+        },
+        off(method: string, listener: (value: Record<string, unknown>) => unknown) { listeners.get(method)?.delete(listener); },
+      };
+      item.page = { context: () => ({ newCDPSession: async () => routedSession as unknown as CDPSession }), mainFrame: () => frame,
+        close: async () => { await root.send("Target.closeTarget", { targetId: item.id }).catch(() => {}); } } as unknown as Page;
+      child.on("Page.frameNavigated", value => { const changed = record(value.frame); if (!changed.parentId && typeof changed.url === "string") item.currentUrl = changed.url; });
+      child.on("Page.navigatedWithinDocument", value => { if (typeof value.url === "string") item.currentUrl = value.url; });
+      item.ready = (async () => {
+        await child.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true,
+          filter: [{ type: "worker" }, { type: "shared_worker" }, { type: "service_worker" }] });
+        item.initialization = "FETCH";
+        await child.send("Fetch.enable", { patterns: [{ urlPattern: "*", requestStage: "Request" }, { urlPattern: "*", requestStage: "Response" }] });
+        item.initialization = "RESUME";
+        void child.send("Runtime.runIfWaitingForDebugger").catch(() => { if (!closed) { terminal = true; void close(); } });
+        item.initialization = "NETWORK";
+        await child.send("Network.enable", { maxTotalBufferSize: PUBLIC_BROWSER_TOTAL_BYTES, maxResourceBufferSize: 16_000_000, maxPostDataSize: 32768 });
+        item.initialization = "ROUTER";
+        item.router = await installNativeRedirectRouting(item.page, route => handle(route, item), { signal, maxRequests: 1024,
+          onSubframeBlocked: () => { rejected++; }, onFailure: () => { if (!closed) terminal = true; } });
+        item.installed = true;
+        item.initialization = "READY";
+        buffering = false;
+        for (const event of startup.splice(0)) {
+          if (event.method.startsWith("Network.") && [...popupReads.values()].some(entry => entry.networkId === event.value.requestId)) continue;
+          for (const listener of listeners.get(event.method) ?? []) listener(event.value);
+        }
+      })().catch(error => { if (!item.discarded && !closed) throw error; });
+      targets.set(item.id, item); if (targetId) popupCount++;
+      await item.ready;
+    };
+    root.on("Target.attachedToTarget", attachTarget);
+    await root.send("Target.setDiscoverTargets", { discover: true });
+    await root.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true,
+      filter: [{ type: "page" }, { type: "worker" }, { type: "shared_worker" }, { type: "service_worker" }] });
+    const created = await root.send("Target.createTarget", { url: "about:blank", browserContextId: contextId, newWindow: true, background: false });
+    if (typeof created.targetId !== "string") throw reject(); targetId = created.targetId;
+    const until = Math.min(input.deadlineAt.getTime(), Date.now() + 5000);
+    while (!targets.has(targetId) && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 10));
+    const initial = targets.get(targetId); if (!initial) throw reject(); await initial.ready; check();
+    // The unrouted default profile tab never becomes a discovery target.
+    const infos = ((await root.send("Target.getTargets")).targetInfos as Array<Record<string, unknown>>) ?? [];
+    for (const info of infos) if (info.type === "page" && info.browserContextId !== contextId && !String(info.url).startsWith(extension.origin + "/"))
+      await root.send("Target.closeTarget", { targetId: info.targetId });
+    const assertGuardedTargets = async (ids: string[]) => {
+      check();
+      if (!Array.isArray(ids) || !ids.length || ids.length > 8 || new Set(ids).size !== ids.length) return false;
+      if (ids.some(id => !targets.has(id))) return false;
+      await Promise.all(ids.map(id => targets.get(id)!.ready)); check();
+      const live = ((await root.send("Target.getTargets")).targetInfos as Array<Record<string, unknown>>) ?? [];
+      return ids.every(id => targets.get(id)?.installed === true && live.some(info => info.targetId === id && info.type === "page" && info.browserContextId === contextId));
+    };
+    return {
+      kind: "OWNED_GUARDED_STAGEHAND_CONTEXT" as const, cdpUrl: endpoint, targetId,
+      assertGuardedTargets,
+      async prepareNavigation(url: string) { check(); if (!allowed.has(canonicalStagehandHostEntry(url))) throw reject(); },
+      async beforeAction(id: string, actionHref?: string) {
+        if (!await assertGuardedTargets([id])) throw reject();
+        const target = targets.get(id)!; await target.ready; check();
+        const start = record((await target.cdp.send("Page.getFrameTree")).frameTree), startFrame = record(start.frame);
+        const result = await target.cdp.send("Runtime.evaluate", { expression: `(()=>{const v={visible(e){if(!e.getClientRects().length)return false;for(let n=e;n;n=n.parentElement){const s=getComputedStyle(n);if(n.hidden||n.inert||n.getAttribute('aria-hidden')==='true'||s.display==='none'||s.visibility==='hidden'||s.visibility==='collapse'||Number(s.opacity)===0)return false;}return true;}};return JSON.stringify({url:location.href,links:[...document.querySelectorAll('a[href]')].filter(e=>v.visible(e)).slice(0,160).map(e=>e.href),frames:[...document.querySelectorAll('iframe[src]')].filter(e=>v.visible(e)).slice(0,24).map(e=>e.src)});})()`, returnByValue: true });
+        const value = record(result.result).value;
+        if (typeof value !== "string" || value.length > 400_000) throw reject();
+        const observed = record(JSON.parse(value));
+        const end = record((await target.cdp.send("Page.getFrameTree")).frameTree), endFrame = record(end.frame);
+        if (startFrame.id !== endFrame.id || startFrame.loaderId !== endFrame.loaderId || startFrame.url !== endFrame.url || observed.url !== endFrame.url) throw reject();
+        popupGrants.delete(id);
+        if (actionHref !== undefined) {
+          if (typeof actionHref !== "string" || !Array.isArray(observed.links) || !observed.links.includes(actionHref) || !isSafeRecipeUrl(actionHref) || transactionUrl(actionHref)) throw reject();
+          popupGrants.set(id, { url: actionHref, until: Math.min(input.deadlineAt.getTime(), Date.now() + 5000), used: false });
+        }
+        for (const url of [...(Array.isArray(observed.links) ? observed.links : []), ...(Array.isArray(observed.frames) ? observed.frames : [])])
+          if (typeof url === "string" && isSafeRecipeUrl(url) && !transactionUrl(url)) { allowed.add(url); roots.add(url); }
+        if (allowed.size > 512) throw reject();
+      },
+      diagnostics: () => ({ interceptedRequests: intercepted, admittedRequests: admitted, rejectedRequests: rejected, responseBytes: bytes,
+        guardedPageCount: targets.size, installedPageCount: [...targets.values()].filter(target => target.installed).length,
+        initialization: [...targets.values()].map(target => target.initialization), deniedWorkerTargets: deniedWorkers, popupCount, activeRequests: activeReads.size, terminalFailure: terminal, closed }),
+      async close() { signal.removeEventListener("abort", abort); return close(); },
+    };
+  } catch (error) { await close(); throw error instanceof Error && error.message === "STAGEHAND_GUARDED_SOURCE_REJECTED" ? error : reject(); }
+}
