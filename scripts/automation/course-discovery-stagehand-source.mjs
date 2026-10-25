@@ -52,6 +52,24 @@ export function validateStagehandSourceProposal(proposal) {
 }
 
 /** A successful native report is still only routing evidence. */
+export function stagehandSourceFailureCode(report, job) {
+  const known = new Set(["STAGEHAND_NATIVE_HOST_DEADLINE", "STAGEHAND_NATIVE_HOST_SCOPE_INVALID", "STAGEHAND_NATIVE_HOST_INVALID",
+    "STAGEHAND_NATIVE_HOST_FAILED", "STAGEHAND_GUARDED_SOURCE_REJECTED", "OWNED_STAGEHAND_CDP_UNAVAILABLE", "OWNED_PUBLIC_CDP_UNAVAILABLE",
+    "PROVIDER_COORDINATION_UNAVAILABLE",
+    "STAGEHAND_SOURCE_BUDGET_EXHAUSTED", "SOURCE_DISCOVERY_ABORTED", "WORK_DEADLINE_EXPIRED", "ADAPTER_SOURCE_NOT_OBSERVED",
+    "FRAMEWORK_SOURCE_CANDIDATES_INVALID", "LOCAL_MODEL_EXISTING_CHATGPT_LOGIN_REQUIRED", "LOCAL_MODEL_TURN_FAILED",
+    "LOCAL_MODEL_ORIGINAL_DEADLINE", "LOCAL_MODEL_CALL_CANCELLED", "SOL_ONLY_MODEL_RESULT_REQUIRED", "STAGEHAND_VERSION_CHANGED",
+    "SOURCE_EVIDENCE_LIMIT", "STAGEHAND_GUARDED_BROWSER_REQUIRED", "STAGEHAND_UNGUARDED_CONTEXT", "STAGEHAND_GUARDED_TARGET_MISSING",
+    "STAGEHAND_SOURCE_OUTPUT_INVALID", "STAGEHAND_SOURCE_DISCOVERY_FAILED", "STAGEHAND_SOURCE_CLEANUP_UNCONFIRMED"]);
+  if (!plain(report) || report.outcome !== "UNRESOLVED" || !known.has(report.frameworkFailureCode) || report.jobId !== job.id ||
+      report.firstPickedUpAt !== job.firstPickedUpAt || report.deadlineAt !== job.deadlineAt || report.framework?.name !== "Stagehand" ||
+      report.framework.version !== "4.3.0" || report.frameworkMode !== STAGEHAND_SOURCE_MODE || report.frameworkRole !== "SOURCE_DISCOVERY_ONLY" ||
+      report.frameworkExtractedTimes !== false || report.adapterSourceProposal !== null || report.recipe !== null || report.recipeJson != null ||
+      report.result?.recipeJson != null || !Array.isArray(report.matchingSlots) || report.matchingSlots.length !== 0 ||
+      report.metrics?.model !== "gpt-6.1-sol" || report.metrics.reasoningEffort !== "medium") return undefined;
+  return report.frameworkFailureCode;
+}
+
 export function validateStagehandSourceReport(report, job) {
   requireFact(plain(report) && report.jobId === job.id && report.firstPickedUpAt === job.firstPickedUpAt && report.deadlineAt === job.deadlineAt &&
     report.framework?.name === "Stagehand" && report.framework.version === "4.3.0" && report.frameworkMode === STAGEHAND_SOURCE_MODE &&

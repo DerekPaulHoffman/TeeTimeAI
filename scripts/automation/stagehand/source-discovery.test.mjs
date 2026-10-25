@@ -4,6 +4,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { sourceDiscover, publicSourceJob, sourceRoutingContext, prepareSourceDiscovery } from './source-discovery.mjs';
 import { observedBookingSourceCandidates } from './source-provenance.mjs';
 import { publicEvidenceUrl } from './public-evidence.mjs';
+import { createStagehandGuardedBrowserHost } from '../course-discovery-stagehand-host.mjs';
 const official='https://public-course.example/', booking='https://public-provider.example/start?venue=public&kind=day', landing='https://public-provider.example/loading';
 function job(){const t=Date.now();return{id:'assigned-job',firstPickedUpAt:new Date(t).toISOString(),deadlineAt:new Date(t+900000).toISOString(),
  request:{identity:{name:'Public Course',officialUrl:official,timeZone:'America/New_York',address:'1 Public Road, Public Town, NY 10001, USA',canonicalCoursePhone:'PRIVATE_PHONE',bookingUrl:'PRIVATE_ROUTE'},
@@ -63,6 +64,34 @@ test('caller-private owned connection never enters model instructions, report, o
  const r=await sourceDiscover({job:job(),createGuardedBrowser:async()=>{created++;return owned;},sessionFactory:async options=>{assert.equal(options.ownedBrowser,owned);return f.session;}});
  assert.equal(created,1);assert.equal(r.outcome,'SOURCE_PROPOSED_UNVERIFIED');
  for(const text of[JSON.stringify(r),JSON.stringify(f.instructions)]){assert.equal(text.includes(endpoint),false);assert.equal(text.includes('PRIVATE_TARGET'),false);}
+});
+test('real source-to-host boundary accepts locally clamped work across tolerated server skew without resetting original clocks',async()=>{
+ const originalNow=Date.now,local=originalNow();Date.now=()=>local;
+ try{
+  for(const skew of[-5000,-2000,0,2000,5000]){
+   const raw=job(),first=local+skew;raw.firstPickedUpAt=new Date(first).toISOString();raw.deadlineAt=new Date(first+900000).toISOString();
+   const sourceDeadline=Math.min(first+120000,local+120000),f=fixture();let constructorCalls=0,closed=0;
+   const r=await sourceDiscover({job:raw,cwd:process.cwd(),deadlineAt:new Date(sourceDeadline).toISOString(),
+    createGuardedBrowser:({deadlineAt,signal})=>createStagehandGuardedBrowserHost({cwd:process.cwd(),initialUrl:official,timeZone:raw.request.input.timeZone,deadlineAt,signal,
+     helperEnvironment:{COURSE_DISCOVERY_BROWSER_TRANSPORT:'NATIVE_CHROME',COURSE_DISCOVERY_JOB_KIND:'discovery',COURSE_DISCOVERY_JOB_ID:raw.id,COURSE_DISCOVERY_LEASE_TOKEN:'offline-fixture-lease'},
+     processFactory:options=>{constructorCalls++;assert.equal(options.args[options.args.indexOf('--deadline')+1],new Date(sourceDeadline).toISOString());
+      return{request:async value=>value.action==='start'?{kind:'OWNED_GUARDED_STAGEHAND_CONTEXT',cdpUrl:'ws://127.0.0.1:12345/devtools/browser/12345678-1234-1234-1234-123456789abc',targetId:'fixture-target'}:{browserClosed:true,providerRequestsDrained:true},close:async()=>{closed++;}};}}),
+    sessionFactory:async options=>{const close=f.session.close;f.session.close=async()=>{await options.ownedBrowser.close();return close();};return f.session;}});
+   assert.equal(r.outcome,'SOURCE_PROPOSED_UNVERIFIED');assert.equal(constructorCalls,1);assert.equal(closed,1);
+   assert.equal(r.firstPickedUpAt,raw.firstPickedUpAt);assert.equal(r.deadlineAt,raw.deadlineAt);assert.equal(Date.parse(r.workDeadlineAt),sourceDeadline);
+  }
+  const future=job();future.firstPickedUpAt=new Date(local+5001).toISOString();future.deadlineAt=new Date(local+905001).toISOString();
+  assert.throws(()=>publicSourceJob(future,new Date(local+120000).toISOString()),/SOURCE_JOB_INVALID/);
+ }finally{Date.now=originalNow;}
+});
+test('closed native-host startup failures survive the real source report while unknown payloads remain redacted',async()=>{
+ for(const code of['STAGEHAND_NATIVE_HOST_DEADLINE','STAGEHAND_NATIVE_HOST_SCOPE_INVALID','STAGEHAND_NATIVE_HOST_INVALID','STAGEHAND_NATIVE_HOST_FAILED',
+  'STAGEHAND_GUARDED_SOURCE_REJECTED','OWNED_STAGEHAND_CDP_UNAVAILABLE','OWNED_PUBLIC_CDP_UNAVAILABLE','PROVIDER_COORDINATION_UNAVAILABLE','PRIVATE_UNKNOWN_PAYLOAD']){
+  let sessions=0;const report=await sourceDiscover({job:job(),createGuardedBrowser:async()=>{throw Error(code);},sessionFactory:async()=>{sessions++;throw Error('UNEXPECTED_SESSION');}});
+  assert.equal(sessions,0);assert.equal(report.frameworkFailureCode,code==='PRIVATE_UNKNOWN_PAYLOAD'?'STAGEHAND_SOURCE_DISCOVERY_FAILED':code);
+  assert.equal(report.outcome,'UNRESOLVED');assert.equal(report.adapterSourceProposal,null);assert.equal(report.metrics.completedLocalCodexCalls,0);
+  assert.equal(JSON.stringify(report).includes('PRIVATE_UNKNOWN_PAYLOAD'),false);
+ }
 });
 test('prepare is read-only readiness with no account RPC/model/browser or credential output',async()=>{
  const r=await prepareSourceDiscovery({cwd:process.cwd(),loadRuntime:async()=>{},loadHelpers:async()=>({prepareDiscoveryModelCatalog:()=>{},resolveDiscoveryCli:()=>'/trusted/codex'}),read:()=>JSON.stringify({auth_mode:'chatgpt',tokens:{access_token:'PRIVATE_AUTH'}})});

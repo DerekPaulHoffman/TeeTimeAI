@@ -5,6 +5,8 @@ import { createStagehandSourceCheckpoint, readStagehandSourceCheckpoint, stageha
   } from "../../../scripts/automation/course-discovery-stagehand-source.mjs";
 import { observedInspectionPath } from "../../../scripts/automation/course-discovery-stagehand-inspection.mjs";
 import { accessRecipeSchema } from "./recipe";
+import { createStagehandGuardedBrowserHost } from "../../../scripts/automation/course-discovery-stagehand-host.mjs";
+import { sourceDiscover as actualSourceDiscover } from "../../../scripts/automation/stagehand/source-discovery.mjs";
 
 const first = Date.parse("2030-01-02T12:00:00.000Z");
 const official = "https://unseen-course.example/";
@@ -68,6 +70,62 @@ function setup() {
 }
 
 describe("regular Stagehand source worker", () => {
+  it("preserves a closed startup cause through actual worker→source SDK→private host failure without any model constructor", async () => {
+    for (const code of ["STAGEHAND_NATIVE_HOST_DEADLINE", "STAGEHAND_NATIVE_HOST_FAILED", "OWNED_STAGEHAND_CDP_UNAVAILABLE", "PRIVATE_UNKNOWN_TOKEN"]) {
+      const t = setup(), current = Date.now();
+      t.f.clock = current; t.f.job.firstPickedUpAt = new Date(current + 2000).toISOString(); t.f.job.deadlineAt = new Date(current + 902000).toISOString();
+      const processFactory = vi.fn(() => { throw Error(code); });
+      await expect(t.run({ sourceDiscover: actualSourceDiscover, guardedBrowserFactory: args => createStagehandGuardedBrowserHost({ ...args, processFactory }) }))
+        .rejects.toThrow(code === "PRIVATE_UNKNOWN_TOKEN" ? "STAGEHAND_SOURCE_DISCOVERY_FAILED" : code);
+      expect(processFactory).toHaveBeenCalledOnce(); expect(t.browserFactory).not.toHaveBeenCalled(); expect(t.client.candidate).not.toHaveBeenCalled();
+    }
+  });
+  it.each([-5000, 0, 2000, 5000])("clamps a valid %sms database-clock offset through the actual private host wrapper before spawn", async offset => {
+    const t = setup(); t.f.clock = first - offset;
+    const clock = vi.spyOn(Date, "now").mockReturnValue(t.f.clock);
+    const request = vi.fn(async value => value.action === "start" ? { kind: "OWNED_GUARDED_STAGEHAND_CONTEXT",
+      cdpUrl: "ws://127.0.0.1:51515/devtools/browser/" + "a".repeat(32), targetId: "owned-only" } : { browserClosed: true, providerRequestsDrained: true });
+    const close = vi.fn(async () => {}), processFactory = vi.fn(() => ({ request, close }));
+    let supplied;
+    try {
+      await expect(t.run({ sourceDiscover: async args => {
+        supplied = args; const host = await args.createGuardedBrowser({ deadlineAt: args.deadlineAt, signal: args.signal });
+        await host.close();
+        return { ...t.f.report, outcome: "UNRESOLVED", adapterSourceProposal: null, frameworkFailureCode: "STAGEHAND_NATIVE_HOST_DEADLINE" };
+      }, guardedBrowserFactory: args => createStagehandGuardedBrowserHost({ ...args, processFactory }) })).rejects.toThrow("STAGEHAND_NATIVE_HOST_DEADLINE");
+      expect(Date.parse(supplied.deadlineAt)).toBe(Math.min(first + 120_000, t.f.clock + 120_000));
+      expect(supplied.job.firstPickedUpAt).toBe(t.f.job.firstPickedUpAt);
+      expect(supplied.job.deadlineAt).toBe(t.f.job.deadlineAt);
+      expect(processFactory).toHaveBeenCalledOnce(); expect(close).toHaveBeenCalledOnce();
+      expect(t.browserFactory).not.toHaveBeenCalled(); expect(t.client.candidate).not.toHaveBeenCalled();
+    } finally { clock.mockRestore(); }
+  });
+
+  it("rejects a database first pickup beyond the unchanged 5s allowance before source or host", async () => {
+    const t = setup(); t.f.clock = first - 5001;
+    await expect(t.run()).rejects.toThrow("DISCOVERY_JOB_INVALID"); expect(t.sourceDiscover).not.toHaveBeenCalled();
+  });
+
+  it("reproduces the old future-database-clock host guard without spawning, and never widens that guard", async () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(first - 2000), processFactory = vi.fn();
+    try {
+      await expect(createStagehandGuardedBrowserHost({ cwd: process.cwd(), initialUrl: official, timeZone: "UTC",
+        deadlineAt: new Date(first + 120_000).toISOString(), helperEnvironment: { COURSE_DISCOVERY_BROWSER_TRANSPORT: "NATIVE_CHROME",
+          COURSE_DISCOVERY_JOB_KIND: "discovery", COURSE_DISCOVERY_JOB_ID: "owned", COURSE_DISCOVERY_LEASE_TOKEN: "private" }, processFactory })).rejects.toThrow("STAGEHAND_NATIVE_HOST_DEADLINE");
+      expect(processFactory).not.toHaveBeenCalled();
+    } finally { clock.mockRestore(); }
+  });
+
+  it("never forwards an unknown private failure string or another job's failure as an own primary cause", async () => {
+    for (const change of ["unknown", "job", "recipe", "times"]) {
+      const t = setup(); Object.assign(t.f.report, { outcome: "UNRESOLVED", adapterSourceProposal: null, frameworkFailureCode: "STAGEHAND_NATIVE_HOST_DEADLINE" });
+      if (change === "unknown") t.f.report.frameworkFailureCode = "PRIVATE_TOKEN_ABC123";
+      if (change === "job") t.f.report.jobId = "other-job";
+      if (change === "recipe") t.f.report.recipe = { private: true };
+      if (change === "times") t.f.report.matchingSlots = [{ time: "10:00" }];
+      await expect(t.run()).rejects.toThrow("STAGEHAND_SOURCE_REPORT_INVALID"); expect(t.client.candidate).not.toHaveBeenCalled();
+    }
+  });
   it("routes once, freshly inspects, validates real schema, closes, then independently verifies both backend challenges and activates", async () => {
     const t = setup(), result = await t.run();
     expect(result.outcome).toBe("activated"); expect(result.metrics).toMatchObject({ model: "gpt-6.1-sol", modelCalls: 2,

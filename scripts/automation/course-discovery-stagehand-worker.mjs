@@ -2,7 +2,7 @@ import { discoveryError } from "./course-discovery-client.mjs";
 import { createDiscoveryBrowser, validateDiscoveryRecipe, createDiscoveryAdapterObservation,
   bindDiscoveryRecipeIdentity, inspectedAdapterSourceEvidence, executeDiscoveryRecipe, verifyDiscoveryCandidate } from "./course-discovery-worker.mjs";
 import { STAGEHAND_SOURCE_BUDGET_MS, stagehandWorkDeadline, publicStagehandJob, publicStagehandSourceUrl,
-  validateStagehandSourceReport, createStagehandSourceCheckpoint, readStagehandSourceCheckpoint } from "./course-discovery-stagehand-source.mjs";
+  validateStagehandSourceReport, createStagehandSourceCheckpoint, readStagehandSourceCheckpoint, stagehandSourceFailureCode } from "./course-discovery-stagehand-source.mjs";
 import { inspectStagehandAdapter } from "./course-discovery-stagehand-inspection.mjs";
 import { createStagehandGuardedBrowserHost } from "./course-discovery-stagehand-host.mjs";
 
@@ -64,7 +64,10 @@ export async function runCourseDiscoveryStagehandWorker({
       metrics.sourceResumed = true;
       report = reference.report;
     } else {
-      const sourceDeadline = Math.min(deadline, Date.parse(job.firstPickedUpAt) + STAGEHAND_SOURCE_BUDGET_MS);
+      // The database clock may be up to the admitted 5s ahead of this host.
+      // Narrow the local work allowance; never move either original clock or
+      // extend the source ceiling measured from the original first pickup.
+      const sourceDeadline = Math.min(deadline, Date.parse(job.firstPickedUpAt) + STAGEHAND_SOURCE_BUDGET_MS, now() + STAGEHAND_SOURCE_BUDGET_MS);
       if (now() >= sourceDeadline) throw discoveryError("STAGEHAND_SOURCE_BUDGET_EXHAUSTED");
       const sourceSignal = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(Math.max(1, sourceDeadline - now()))]);
       report = await sourceDiscover({ job: publicStagehandJob(job), cwd, deadlineAt: new Date(sourceDeadline).toISOString(), signal: sourceSignal,
@@ -76,6 +79,8 @@ export async function runCourseDiscoveryStagehandWorker({
       publishMetrics();
       check();
       if (sourceSignal.aborted || now() >= sourceDeadline) throw discoveryError("STAGEHAND_SOURCE_BUDGET_EXHAUSTED");
+      const sourceFailure = stagehandSourceFailureCode(report, job);
+      if (sourceFailure) throw discoveryError(sourceFailure);
       validateStagehandSourceReport(report, job);
       reference = createStagehandSourceCheckpoint(job, report);
       await checkpoint("SOURCE_EXPORTED");
