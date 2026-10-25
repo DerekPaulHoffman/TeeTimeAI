@@ -4,11 +4,50 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 
 describe.runIf(process.platform === "win32")("Windows supervisor lifecycle dry runs", () => {
   const interpreters = ["powershell.exe", "pwsh.exe"].filter(name => process.platform === "win32" &&
     spawnSync(name, ["-NoProfile", "-NonInteractive", "-Command", "exit 0"], { windowsHide: true }).status === 0);
+  it.each(interpreters)("keeps real Node stderr nonfatal, preserves its exit code, and keeps log failures fatal with %s", interpreter => {
+    const temporary = mkdtempSync(join(tmpdir(), "course-discovery-task-"));
+    const source = readFileSync(resolve("scripts/automation/run-course-discovery-supervisor.ps1"), "utf8");
+    const start = source.indexOf("  $supervisorResult = @{ ExitCode = 1 }"), end = source.indexOf("  exit $supervisorResult.ExitCode", start);
+    expect(start).toBeGreaterThan(0); expect(end).toBeGreaterThan(start);
+    // Execute the actual wrapper's complete native invocation and logger,
+    // replacing only its validated runtime paths with test-owned paths.
+    const pipeline = source.slice(start, end);
+    const quote = (value: string) => `'${value.replace(/'/gu, "''")}'`;
+    const entrypoint = join(temporary, "scripts", "automation", "course-discovery-supervisor.mjs");
+    mkdirSync(dirname(entrypoint), { recursive: true });
+    const harness = join(temporary, "pipeline.ps1");
+    try {
+      for (const exitCode of [0, 7]) {
+        const logs = join(temporary, `logs-${exitCode}`); mkdirSync(logs);
+        const sdkUrl = pathToFileURL(resolve("node_modules/@browserbasehq/stagehand/dist/index.mjs")).href;
+        writeFileSync(entrypoint, `console.log(JSON.stringify({event:'supervisor_started'}));const sdk=await import(${JSON.stringify(sdkUrl)});if(typeof sdk.Stagehand.create!=='function')process.exit(93);process.emitWarning('private-fixture-warning',{type:'DeprecationWarning',code:'DEP_FIXTURE'});setTimeout(()=>{console.log(JSON.stringify({event:'poll_completed',observedAt:'2030-01-01T00:00:00.000Z'}));process.exit(${exitCode});},30);`);
+        writeFileSync(harness, `$ErrorActionPreference='Stop'\n$runtime=@{NodePath=${quote(process.execPath)};WorkspacePath=${quote(temporary)}}\n$logs=${quote(logs)}\ntry {\n${pipeline}\nexit $supervisorResult.ExitCode\n} catch { [Console]::Error.WriteLine('TEST_LOG_WRITE_FAILED');exit 91 }`);
+        const result = spawnSync(interpreter, ["-NoProfile", "-NonInteractive", "-File", harness], { encoding: "utf8", windowsHide: true });
+        expect(result.status).toBe(exitCode);
+        const log = readFileSync(join(logs, `${new Date().toISOString().slice(0, 10)}.jsonl`), "utf8").replace(/^\uFEFF/u, "");
+        const events = log.trim().split(/\r?\n/u).map(line => JSON.parse(line).event);
+        expect(events).toContain("supervisor_started"); expect(events).toContain("poll_completed");
+        expect(events).toContain("supervisor_diagnostic_redacted");
+        expect(log + result.stdout + result.stderr).not.toContain("private-fixture-warning");
+      }
+      const blockedLogs = join(temporary, "blocked-logs"); mkdirSync(blockedLogs);
+      // An exclusively held logfile makes the actual Add-Content fail. The
+      // logger must still stop, independently of the child's stderr policy.
+      writeFileSync(harness, `$ErrorActionPreference='Stop'\n$runtime=@{NodePath=${quote(process.execPath)};WorkspacePath=${quote(temporary)}}\n$logs=${quote(blockedLogs)}\n$path=Join-Path $logs ((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd')+'.jsonl')\n$locked=[IO.File]::Open($path,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)\ntry {\n${pipeline}\nexit $supervisorResult.ExitCode\n} catch { [Console]::Error.WriteLine('TEST_LOG_WRITE_FAILED');exit 91 } finally {$locked.Dispose()}`);
+      const blocked = spawnSync(interpreter, ["-NoProfile", "-NonInteractive", "-File", harness], { encoding: "utf8", windowsHide: true });
+      expect(blocked.status).toBe(91); expect(blocked.stderr).toContain("TEST_LOG_WRITE_FAILED");
+      expect(blocked.stderr).not.toContain("private-fixture-warning");
+    } finally {
+      if (dirname(temporary) !== resolve(tmpdir()) || !temporary.startsWith(join(resolve(tmpdir()), "course-discovery-task-"))) throw new Error("Unsafe test cleanup path");
+      rmSync(temporary, { recursive: true, force: true });
+    }
+  }, 30_000);
   it.each(interpreters)("preserves acknowledged cleanup evidence and redacts unknown warning data with %s", interpreter => {
     const temporary = mkdtempSync(join(tmpdir(), "course-discovery-task-"));
     const config = join(temporary, "runtime.json"), fakeNode = join(temporary, "fixture-output.ps1"), logs = join(temporary, "logs");

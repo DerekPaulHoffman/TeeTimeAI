@@ -66,7 +66,17 @@ try {
   $logs = [IO.Path]::GetFullPath($LogDirectory)
   if ($logs.StartsWith($runtime.WorkspacePath + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'LOGS_MUST_BE_EXTERNAL' }
   $null = New-Item -Path $logs -ItemType Directory -Force
-  & $runtime.NodePath (Join-Path $runtime.WorkspacePath 'scripts\automation\course-discovery-supervisor.mjs') 2>&1 | ForEach-Object {
+  $supervisorResult = @{ ExitCode = 1 }
+  & {
+    # Windows PowerShell turns native stderr into ErrorRecords. Continue only
+    # inside the child invocation so a Node warning cannot stop supervision.
+    $ErrorActionPreference = 'Continue'
+    $PSNativeCommandUseErrorActionPreference = $false
+    & $runtime.NodePath (Join-Path $runtime.WorkspacePath 'scripts\automation\course-discovery-supervisor.mjs') 2>&1
+    $supervisorResult.ExitCode = $LASTEXITCODE
+  } | ForEach-Object {
+    # Keep file/path/logger failures terminating in both PowerShell versions.
+    $ErrorActionPreference = 'Stop'
     $line = [string]$_
     # Only the supervisor's bounded structured event stream is retained.
     try {
@@ -119,7 +129,7 @@ try {
       Add-Content -LiteralPath $log -Value $line -Encoding UTF8
     }
   }
-  exit $LASTEXITCODE
+  exit $supervisorResult.ExitCode
 } catch {
   # Do not echo exception messages: JSON/parser/path errors can contain secrets.
   [Console]::Error.WriteLine('COURSE_DISCOVERY_RUNTIME_START_FAILED')
