@@ -696,6 +696,9 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
         timeZone: input.timeZone, offering: { id: recipe.target.offeringId!, courseId: recipe.target.courseId, bookingUrl: recipe.source.bookingUrl,
           providerFamilyKey: "USCHEDULE", active: true, publicAccessStatus: "PUBLIC", providerMetadata: { tenant: adapter.tenant, serviceId: adapter.serviceId },
           maxPartySize: null, supportedDurationsMinutes: [input.durationMinutes!] } }, adapter, uscheduleSession.read);
+      // The fresh service/site upper limit does not establish per-suite
+      // capacity. Enforce both known limits while retaining one bay/null capacity.
+      if (available.publicPartyLimit != null && input.players > available.publicPartyLimit) fail("USCHEDULE_PUBLIC_PARTY_UNVERIFIED");
       return result(available.slots.filter(slot => slot.startsAt > now && slot.startsAt >= start && slot.endsAt <= end).map(slot => ({
         sourceId: slot.sourceId, startsAt: slot.startsAt.toISOString(), endsAt: slot.endsAt.toISOString(), availableSpots: 1,
         capacity, bookingUrl: recipe.source.bookingUrl, resourceId: slot.resourceId, productId: slot.productId,

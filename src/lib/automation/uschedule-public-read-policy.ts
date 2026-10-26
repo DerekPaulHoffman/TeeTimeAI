@@ -13,7 +13,7 @@ const excluded = /\b(?:lessons?|coaching|fitting|leagues?|classes?|members?|memb
 /** USCHEDULE simulator adapter only; recipe validation rejects OUTDOOR targets. */
 export function isUSchedulePublicRentalLabel(value: string) {
   const publicTeeTimes = /^public tee times$/iu.test(value.normalize("NFKC").replace(/\s+/gu, " ").trim());
-  return (rental.test(value) || publicTeeTimes) && !excluded.test(value);
+  return (rental.test(value) || /^suite rentals?$/iu.test(value.trim()) || publicTeeTimes) && !excluded.test(value);
 }
 function elements(node: Node): Element[] {
   return "childNodes" in node ? node.childNodes.flatMap(child => "tagName" in child ? [child, ...elements(child)] : elements(child)) : [];
@@ -21,6 +21,48 @@ function elements(node: Node): Element[] {
 function attr(node: Element, name: string) { return node.attrs.find(value => value.name === name)?.value; }
 function text(node: Node): string {
   return "value" in node ? node.value : "childNodes" in node ? node.childNodes.map(text).join(" ") : "";
+}
+/** The pinned bookingBS5 unitsToBookChanged handler sends units_to_book,
+ * not group_size. Its public unit quantity is never a golfer count. */
+export function readUSchedulePublicUnitsControl(html: string) {
+  const absent = { present: false, valid: false, selectedOne: false };
+  if (Buffer.byteLength(html) > 600_000) return { ...absent, present: true };
+  const nodes = elements(parse(html));
+  if (nodes.length > 20_000) return { ...absent, present: true };
+  const units = nodes.filter(n => n.tagName === "select" && attr(n, "id") === "select_units_to_book");
+  if (!units.length) return absent;
+  const invalid = { ...absent, present: true };
+  const clean = (n: Node) => text(n).normalize("NFKC").replace(/\s+/gu, " ").trim();
+  const unsafe = (n: Node) => {
+    let current: Node | undefined = n;
+    for (let depth = 0; current && depth < 64; depth++, current = "parentNode" in current ? current.parentNode ?? undefined : undefined) {
+      if (!("tagName" in current)) continue;
+      if (["form", "template", "script", "style", "noscript", "iframe"].includes(current.tagName) ||
+          current.attrs.some(a => ["hidden", "inert", "disabled", "onclick"].includes(a.name) || ["aria-hidden", "aria-disabled"].includes(a.name) && a.value === "true") ||
+          /display\s*:\s*none|visibility\s*:\s*(?:hidden|collapse)|(?:^|;)\s*opacity\s*:\s*0(?:\.0*)?\s*(?:!important\s*)?(?:;|$)/iu.test(attr(current, "style") ?? "") ||
+          /\b(?:hidden|d-none|invisible|visually-hidden|sr-only|private|members?|account|profile|checkout|payment|billing|login)\b/iu.test(["id", "class", "aria-label", "title"].map(k => attr(current as Element, k) ?? "").join(" "))) return true;
+    }
+    return current !== undefined;
+  };
+  const services = nodes.filter(n => n.tagName === "select" && attr(n, "id") === "select_service");
+  const selected = services.length === 1 ? elements(services[0]).filter(n => n.tagName === "option" && attr(n, "selected") !== undefined) : [];
+  const unit = selected.length === 1 ? /^(suite|bay|simulator) rentals?$/iu.exec(clean(selected[0]))?.[1].toLowerCase() : undefined;
+  const sections = nodes.filter(n => attr(n, "id") === "units_to_book_size_section");
+  if (units.length !== 1 || !unit || !publicId.test(attr(selected[0], "value") ?? "") || attr(selected[0], "value") === "0" || sections.length !== 1 || unsafe(units[0]) || unsafe(selected[0]) ||
+      nodes.some(n => n.tagName === "select" && (attr(n, "id") === "select_group_size" || (attr(n, "class") ?? "").split(/\s/u).includes("resSelect")))) return invalid;
+  const sectionNodes = elements(sections[0]);
+  const labels = sectionNodes.filter(n => n.tagName === "label");
+  // Some public templates point this label at select_group_size. Require the
+  // sole real units selector inside the exact same section instead of guessing.
+  if (!sectionNodes.includes(units[0]) || labels.length !== 1 || unsafe(labels[0]) ||
+      !["select_group_size", "select_units_to_book"].includes(attr(labels[0], "for") ?? "") ||
+      clean(labels[0]).toLowerCase() !== `number of ${unit}s to book` ||
+      (attr(units[0], "onchange") ?? "").replace(/\s/gu, "") !== "unitsToBookChanged();") return invalid;
+  const options = elements(units[0]).filter(n => n.tagName === "option"), values = options.map(n => attr(n, "value") ?? clean(n));
+  const chosen = options.filter(n => attr(n, "selected") !== undefined);
+  if (!options.length || options.length > 20 || options.some((n, i) => unsafe(n) || !/^[1-9]\d?$/u.test(values[i]) || clean(n) !== values[i]) ||
+      new Set(values).size !== values.length || !values.includes("1") || chosen.length !== 1) return invalid;
+  return { present: true, valid: true, selectedOne: (attr(chosen[0], "value") ?? clean(chosen[0])) === "1", unit };
 }
 function bookingUrl(value: string) {
   try {
@@ -89,7 +131,9 @@ export function createUSchedulePublicReadPolicy(context: { officialLocation?: US
         const selects = nodes.filter(node => node.tagName === "select" && attr(node, "id") === id);
         return selects.length === 1 ? elements(selects[0]).filter(node => node.tagName === "option") : [];
       };
-      const services = options("select_service").filter(node => isUSchedulePublicRentalLabel(text(node)) && publicId.test(attr(node, "value") ?? "") && attr(node, "value") !== "0");
+      const units = readUSchedulePublicUnitsControl(body);
+      const services = options("select_service").filter(node => isUSchedulePublicRentalLabel(text(node)) &&
+        (!/^suite rentals?$/iu.test(text(node).trim()) || units.valid && units.selectedOne) && publicId.test(attr(node, "value") ?? "") && attr(node, "value") !== "0");
       const lengths = options("select_length").filter(node => /^(?:[1-9]\d{0,2})$/u.test(attr(node, "value") ?? "") && Number(attr(node, "value")) >= 15 && Number(attr(node, "value")) <= 480);
       if (!services.length || !lengths.length) return false;
       const filters = new Map<string, Set<string>>([
@@ -97,6 +141,7 @@ export function createUSchedulePublicReadPolicy(context: { officialLocation?: US
         ["length", new Set(lengths.map(node => attr(node, "value")!))],
         ["group_size", new Set(options("select_group_size").some(node => (attr(node, "value") ?? text(node).trim()) === "1") ? ["1"] : [])],
       ]);
+      filters.set("units_to_book", new Set(units.valid && units.selectedOne ? ["1"] : []));
       // The public service-type handler is a catalog filter, never a booking.
       filters.set("service_type_id", new Set(options("select_service_type").filter(node => publicId.test(attr(node, "value") ?? "") &&
         (attr(node, "value") === "0" || isUSchedulePublicRentalLabel(text(node)))).map(node => attr(node, "value")!)));

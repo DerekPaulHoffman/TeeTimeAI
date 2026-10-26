@@ -4,7 +4,7 @@ import { z } from "zod";
 import { createHash } from "node:crypto";
 
 import { fetchWithProviderTimeout } from "@/lib/adapters/fetch-with-timeout";
-import { isUSchedulePublicRentalLabel } from "@/lib/automation/uschedule-public-read-policy";
+import { isUSchedulePublicRentalLabel, readUSchedulePublicUnitsControl } from "@/lib/automation/uschedule-public-read-policy";
 import { readUScheduleNextAvailableView } from "@/lib/automation/uschedule-public-view-control";
 import { simulatorPublicConfigurationSchema, uschedulePublicTenant, type USchedulePublicConfiguration } from "./public-configuration";
 import { SimulatorAvailabilityError, type SimulatorAvailabilityInput, type SimulatorAvailabilityResult,
@@ -73,6 +73,8 @@ function selectedRental(html: string, learned?: LearnedRental) {
   const services = options("select_service"), lengths = options("select_length");
   const selected = (node: Element) => node.attrs.some(item => item.name === "selected");
   if (learned) {
+    const units = readUSchedulePublicUnitsControl(html);
+    if (units.present && (!units.valid || !units.selectedOne)) throw sourceError("The selected public rental changed");
     const service = services.filter(selected), length = lengths.filter(selected);
     const groupSize = all.filter(node => node.tagName === "select" && attr(node, "id") === "select_group_size");
     const selectedGroup = groupSize.length === 1 ? elements(groupSize[0]).filter(node => node.tagName === "option" && selected(node)) : [];
@@ -115,7 +117,7 @@ function pooledRows(html: string) {
 
 /** A complete single-date simulator grid, not an interval grid or chosen bay.
  * The selected duration was independently refreshed and checked by listing(). */
-function publicTimeGrid(all: Element[], learned?: LearnedRental) {
+function publicTimeGrid(all: Element[], learned: LearnedRental | undefined, html: string) {
   const cls = (node: Element, value: string) => (attr(node, "class") ?? "").split(/\s+/u).includes(value);
   const grids = all.filter(node => cls(node, "time_choices")), allRows = all.filter(node => cls(node, "timeslot"));
   if (!grids.length && !allRows.length) return;
@@ -135,7 +137,8 @@ function publicTimeGrid(all: Element[], learned?: LearnedRental) {
     }
     return current !== undefined;
   };
-  if (!learned || learned.publicLocationProof || learned.serviceName !== "Public Tee Times" || grids.length !== 1 ||
+  const units = readUSchedulePublicUnitsControl(html), unitsProfile = units.present && units.valid && units.selectedOne;
+  if (!learned || learned.publicLocationProof || !(learned.serviceName === "Public Tee Times" && !units.present || unitsProfile) || grids.length !== 1 ||
       all.some(node => cls(node, "next_avail_results") || cls(node, "next_avail_item") || attr(node, "id") === "more_next_avail")) return invalid();
   const grid = grids[0], parent = "parentNode" in grid ? grid.parentNode : undefined;
   if (grid.tagName !== "div" || !parent || !("tagName" in parent) || !cls(parent, "choices") || !cls(parent, "full") || unsafe(grid) ||
@@ -144,8 +147,13 @@ function publicTimeGrid(all: Element[], learned?: LearnedRental) {
   if (!rows.length || rows.length > MAX_PUBLIC_GRID_STARTS || rows.length !== allRows.length || rows.filter(node => cls(node, "selected")).length > 1 ||
       children(grid).some(node => !rows.includes(node) && !["show-extra-row", "hide-extra-row"].includes(attr(node, "id") ?? ""))) return invalid();
   const lengthLabels = all.filter(node => node.tagName === "label" && attr(node, "for") === "select_length");
-  if (lengthLabels.length !== 1 || clean(lengthLabels[0]) !== "Choose Simulator Time" || unsafe(lengthLabels[0])) return invalid();
+  if (lengthLabels.length !== 1 || clean(lengthLabels[0]) !== (unitsProfile ? "Choose Time" : "Choose Simulator Time") || unsafe(lengthLabels[0])) return invalid();
   const pools = all.filter(node => node.tagName === "select" && cls(node, "resSelect"));
+  let resourceId: string;
+  if (unitsProfile) {
+    if (pools.length) return invalid();
+    resourceId = `uschedule-service:${learned.serviceId}:pooled`;
+  } else {
   if (pools.length !== 1 || unsafe(pools[0])) return invalid();
   const pool = pools[0], groupId = /^resource([1-9]\d{0,9})$/u.exec(attr(pool, "id") ?? "")?.[1];
   const poolLabels = all.filter(node => node.tagName === "label" && attr(node, "for") === attr(pool, "id"));
@@ -157,6 +165,24 @@ function publicTimeGrid(all: Element[], learned?: LearnedRental) {
       options.length < 2 || options.length > 21 || options.some(node => node.tagName !== "option" || children(node).length || unsafe(node) || !clean(node) || clean(node).length > 200) ||
       new Set(ids).size !== ids.length || ids.filter(id => id === "-1").length !== 1 || ids.some(id => id !== "-1" && !PUBLIC_ID.test(id)) ||
       selected.length !== 1 || attr(selected[0], "value") !== "-1" || clean(selected[0]) !== "Any Available") return invalid();
+  resourceId = `uschedule-resource-group:${groupId}:pooled`;
+  }
+  // These notes limit the public party, not the physical capacity of a suite.
+  // Only visible, control-free notes beside this current grid are considered.
+  let publicPartyLimit: number | null = null;
+  if (unitsProfile) {
+    const siblings = parent.parentNode && "childNodes" in parent.parentNode ? children(parent.parentNode) : [];
+    const cards = siblings.slice(siblings.indexOf(parent) + 1).filter(node => cls(node, "card"));
+    const notes = cards.flatMap(card => elements(card).filter(node => node.tagName === "li" && !elements(node).some(child => ["li", "input", "select", "button", "textarea"].includes(child.tagName)) && !unsafe(node)))
+      .map(clean).filter(value => /\b(?:maximum|max|up to|only)\b/iu.test(value) && /\b(?:people|players?|golfers?|persons?)\b/iu.test(value) && /\b(?:simulators?|suites?|bays?)\b/iu.test(value));
+    const limits = notes.map(value => {
+      const match = /^(?:A )?maximum of ([1-9]\d?) (?:people|players?|golfers?|persons?) can compete on simulators at one time(?: \(additional space for guests at (?:suite|bay|simulator) bars and main bar\))?\.?$/iu.exec(value) ??
+        /^(?:A )?maximum of ([1-9]\d?) (?:people|players?|golfers?|persons?) per (?:suite|bay|simulator)\.?$/iu.exec(value);
+      return match ? Number(match[1]) : undefined;
+    });
+    if (limits.some(value => value === undefined) || new Set(limits).size > 1) return invalid();
+    publicPartyLimit = limits[0] ?? null;
+  }
   const extras = rows.filter(node => cls(node, "extra"));
   const show = all.filter(node => attr(node, "id") === "show-extra-row"), hide = all.filter(node => attr(node, "id") === "hide-extra-row");
   if (extras.length) {
@@ -181,7 +207,7 @@ function publicTimeGrid(all: Element[], learned?: LearnedRental) {
     return time;
   });
   if (times.some((time, index) => index > 0 && time.order <= times[index - 1].order)) return invalid();
-  return { times, cursor: times.at(-1)!.value, morePresent: false, completeDate: true, resourceId: `uschedule-resource-group:${groupId}:pooled` };
+  return { times, cursor: times.at(-1)!.value, morePresent: false, completeDate: true, resourceId, publicPartyLimit };
 }
 
 /** Inert projection of the selected public rental only. No session or list data survives. */
@@ -268,7 +294,7 @@ function listing(html: string, expectedServiceId: string, learned?: LearnedRenta
       return !label || !new RegExp(`^${escaped} - \\$\\d+(?:\\.\\d{2})?$`, "u").test(visibleText(label).replace(/\s+/gu, " ").trim());
     })) throw schemaError("The public row rental identity changed");
   }
-  const grid = publicTimeGrid(all, learned);
+  const grid = publicTimeGrid(all, learned, html);
   if (grid) return grid;
   const times = pooledRows(html);
   if (times.some((time, index) => index > 0 && time.order <= times[index - 1].order))
@@ -335,7 +361,7 @@ async function publicResponse(url: URL, init: RequestInit, expectedType: string 
     throw schemaError("The public simulator scheduler returned an unexpected response type");
   return { response, body: await bounded(response, ceiling) };
 }
-async function refresh(url: URL, cookie: string, name: "start_date" | "more_next_avail" | "length" | "service_id" | "group_size" | "location_id" | "next_avail", value: string | undefined,
+async function refresh(url: URL, cookie: string, name: "start_date" | "more_next_avail" | "length" | "service_id" | "group_size" | "units_to_book" | "location_id" | "next_avail", value: string | undefined,
   fetchImpl: typeof fetch, signal: AbortSignal) {
   const endpoint = new URL(`${url.pathname}/changefield`, url.origin);
   const { body } = await publicResponse(endpoint, { method: "POST", headers: { Accept: "application/json",
@@ -372,6 +398,8 @@ export function inspectUScheduleRecipeConfiguration(html: string, sourceUrl: str
   if (!rentals.length || rentals.length > 20) return reject("RENTAL_CATALOG");
   if (current.length !== 1) return reject("SELECTED_RENTAL");
   if (!durations.length || durations.length > MAX_PUBLIC_DURATION_CHOICES || new Set(durations).size !== durations.length) return reject("DURATION_CATALOG");
+  const units = readUSchedulePublicUnitsControl(html);
+  if (units.present && (!units.valid || !units.selectedOne) || /^suite rentals?$/iu.test(current[0].serviceName) && !units.present) return reject("SELECTORS");
   return { tenant, rentals, durations, selected: current[0] };
 }
 
@@ -432,7 +460,7 @@ export async function prepareUScheduleLocationCatalog(official: UScheduleOfficia
 /** Fixed read-only learned path; every page proves selected product, one bay,
  * duration, chronological cursor progress and a later-day completeness witness. */
 export async function fetchUScheduleRecipeAvailability(input: SimulatorAvailabilityInput, service: { serviceId: string; serviceName: string; publicLocationProof?: USchedulePublicLocationProof },
-  fetchImpl: typeof fetch, diagnostics?: { onListingPage?: (html: string) => void }): Promise<SimulatorAvailabilityResult> {
+  fetchImpl: typeof fetch, diagnostics?: { onListingPage?: (html: string) => void }): Promise<SimulatorAvailabilityResult & { publicPartyLimit?: number | null }> {
   let url = new URL(service.publicLocationProof?.official.entryUrl ?? input.offering.bookingUrl);
   const signal = AbortSignal.timeout(90_000);
   if (!(service.publicLocationProof ? parseUScheduleLocationSource(url.href) : uschedulePublicTenant(url.href)) ||
@@ -452,13 +480,20 @@ export async function fetchUScheduleRecipeAvailability(input: SimulatorAvailabil
   const cookies = page.response.headers.getSetCookie();
   const cookie = location?.cookie ?? (cookies.length === 1 ? cookies[0].split(";", 1)[0] : "");
   if (!/^ASP\.NET_SessionId=[A-Za-z0-9]{8,100}$/u.test(cookie)) throw sourceError("Anonymous public session missing");
-  const filter = async (name: "service_id" | "length" | "group_size" | "start_date", value: string) => {
+  const filter = async (name: "service_id" | "length" | "group_size" | "units_to_book" | "start_date", value: string) => {
     await refresh(url, cookie, name, value, fetchImpl, signal);
     page = await publicResponse(url, { method: "GET", headers: { Accept: "text/html", Cookie: cookie } }, "text/html", MAX_HTML_BYTES, fetchImpl, signal);
   };
   if (!location && inspectUScheduleRecipeConfiguration(page.body, url.href)!.selected.serviceId !== service.serviceId) await filter("service_id", service.serviceId);
   await filter("length", String(input.durationMinutes));
   if (!location) {
+    const units = readUSchedulePublicUnitsControl(page.body);
+    if (units.present) {
+      if (!units.valid || !units.selectedOne) throw sourceError("The public single-unit selector is unavailable");
+      await filter("units_to_book", "1");
+      const selectedUnits = readUSchedulePublicUnitsControl(page.body);
+      if (!selectedUnits.valid || !selectedUnits.selectedOne) throw sourceError("The public single-unit selector changed");
+    }
     const group = readUScheduleGroupSizeControl(page.body);
     if (group.present) {
       if (!group.oneAvailable) throw sourceError("The public single-bay selector is unavailable");
@@ -497,7 +532,8 @@ export async function fetchUScheduleRecipeAvailability(input: SimulatorAvailabil
         productId: service.serviceId, startsAt, endsAt, maxPartySize: service.publicLocationProof?.maxPartySize ?? null, bookingUrl: url.href }); seen.add(time.value);
     }
     previousOrder = current.times.at(-1)!.order;
-    if (current.completeDate) return { slots, complete: true, observedAt: new Date(), evidenceUrl: url.href };
+    if (current.completeDate) return { slots, complete: true, observedAt: new Date(), evidenceUrl: url.href,
+      ...("publicPartyLimit" in current ? { publicPartyLimit: current.publicPartyLimit } : {}) };
     if (crossedDate) return { slots, complete: true, observedAt: new Date(), evidenceUrl: url.href };
     if (!current.morePresent || index === 15) throw schemaError("The public date list was not completely observed");
     await refresh(url, cookie, "more_next_avail", current.cursor, fetchImpl, signal);
