@@ -21,7 +21,8 @@ type Lease = <T>(family: string, work: () => Promise<T>) => Promise<{ acquired: 
 type Target = { id: string; contextId: string; cdp: OwnedCdpSession; page: Page; frame: Frame; currentUrl: string; documentRequest?: NativeReadRequest; documentStatus?: number; documentRead?: Promise<unknown>; router?: NativeRedirectRouting; ready: Promise<void>; installed?: boolean; discarded?: boolean; initialization?: "NETWORK" | "FETCH" | "RESUME" | "ROUTER" | "READY" };
 type PopupGrant = { url: string; until: number; used: boolean };
 type PopupRead = { id: string; networkId: string; url: string; method: string; frameId: string; hop: number; complete: boolean;
-  redirect?: string; response: Promise<Record<string, unknown>>; resolve(value: Record<string, unknown>): void };
+  redirect?: string; pendingRedirect?: string; successorId?: string; continuationAck?: Promise<void>; completion?: Promise<unknown>; queueComplete?: boolean;
+  response: Promise<Record<string, unknown>>; resolve(value: Record<string, unknown>): void };
 type Dependencies = { requestLease: Lease; proxyDependencies?: NativePublicProxyDependencies; launchBrowser?: (options: LaunchOptions) => Promise<Browser>;
   contextOptions?: { ignoreHTTPSErrors?: boolean } };
 const record = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -38,6 +39,22 @@ export async function registerStagehandSourceWorkerDenial(context: Pick<BrowserC
 export async function requireDeniedStagehandTargetClosed(root: Pick<OwnedCdpSession, "send">, targetId: string) {
   const closed = await root.send("Target.closeTarget", { targetId });
   if (record(closed).success !== true) throw reject();
+}
+/** Waiting for a native ACK grants no redirect authority. The original source
+ * deadline, cancellation and existing 15-second response bound still apply. */
+export async function awaitStagehandPopupContinuation(ack: Promise<unknown>, signal: AbortSignal, deadlineAt: number) {
+  void ack.catch(() => undefined); // Observe rejection even if cancellation already won.
+  signal.throwIfAborted();
+  let timer: ReturnType<typeof setTimeout> | undefined, abort: (() => void) | undefined;
+  try {
+    await Promise.race([ack, new Promise<never>((_, fail) => {
+      abort = () => fail(reject());
+      signal.addEventListener("abort", abort, { once: true });
+      timer = setTimeout(() => fail(reject()), Math.max(1, Math.min(15_000, deadlineAt - Date.now())));
+    })]);
+    signal.throwIfAborted();
+    if (Date.now() >= deadlineAt) throw reject();
+  } finally { clearTimeout(timer); if (abort) signal.removeEventListener("abort", abort); }
 }
 function transactionUrl(value: string) {
   try {
@@ -234,8 +251,9 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
       // continued, synthesized, or admitted by this startup buffer.
       const startup: Array<{ method: string; value: Record<string, unknown> }> = [];
       const popupReads = new Map<string, PopupRead>();
+      const deferredPopupIds = new Set<string>();
       const listeners = new Map<string, Set<(value: Record<string, unknown>) => unknown>>();
-      let buffering = true, startupBytes = 0;
+      let buffering = true, startupBytes = 0, deferredPopupBytes = 0;
       const popupDocument = (event: Record<string, unknown>) => {
         if (!opener || event.resourceType !== "Document" || typeof event.requestId !== "string") return false;
         const existing = popupReads.get(event.requestId);
@@ -246,18 +264,37 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
         const request = record(event.request), method = request.method, url = request.url;
         const headers = record(request.headers), parent = typeof event.redirectedRequestId === "string" ? popupReads.get(event.redirectedRequestId) : undefined;
         const grant = popupGrants.get(opener), first = popupReads.size === 0;
-        const valid = typeof url === "string" && typeof event.networkId === "string" && event.frameId === item.id &&
+        const uniqueSuccessor = !parent?.successorId || parent.successorId === event.requestId;
+        const eventBytes = Buffer.byteLength(JSON.stringify(event));
+        const safeRequest = typeof url === "string" && typeof event.networkId === "string" && event.frameId === item.id &&
           (method === "GET" || method === "HEAD") && request.hasPostData !== true && request.postData === undefined &&
           isSafeRecipeUrl(url) && !transactionUrl(url) && new URL(url).href === url &&
-          !Object.keys(headers).some(key => /^(?:authorization|proxy-authorization|x-api-key)$/iu.test(key)) &&
+          !Object.keys(headers).some(key => /^(?:authorization|proxy-authorization|x-api-key)$/iu.test(key));
+        if (safeRequest && uniqueSuccessor && !first && parent && !parent.queueComplete && parent.continuationAck && parent.completion && parent.pendingRedirect === url &&
+            parent.frameId === event.frameId && parent.hop < 5 && !popupReads.has(event.requestId) && !deferredPopupIds.has(event.requestId) && deferredPopupIds.size < 5 &&
+            startupBytes + deferredPopupBytes + eventBytes <= 2_000_000) {
+          // Chrome can pause the exact successor before the controller sees
+          // continueResponse's ACK. Retain that pause without dispatch/lease;
+          // only the acknowledged, complete parent can admit it below.
+          parent.successorId = event.requestId; deferredPopupIds.add(event.requestId); deferredPopupBytes += eventBytes;
+          const waiting = Promise.all([parent.continuationAck, parent.completion]).then(() => {
+            check(); deferredPopupIds.delete(event.requestId as string); popupDocument(event);
+          }).catch(() => { if (!closed) { terminal = true; void close(); } });
+          activeReads.add(waiting); void waiting.finally(() => {
+            deferredPopupIds.delete(event.requestId as string); deferredPopupBytes -= eventBytes; activeReads.delete(waiting);
+          });
+          return true;
+        }
+        const valid = safeRequest && uniqueSuccessor && !popupReads.has(event.requestId) && !deferredPopupIds.has(event.requestId) &&
           (first ? targets.has(opener) && grant && !grant.used && Date.now() <= grant.until && grant.url === url :
-            parent?.complete === true && parent.redirect === url && parent.frameId === event.frameId && parent.hop < 5);
+            parent?.complete === true && parent.queueComplete === true && parent.redirect === url && parent.frameId === event.frameId && parent.hop < 5);
         if (!valid) {
           rejected++; item.discarded = true; targets.delete(item.id);
           void child.send("Fetch.failRequest", { requestId: event.requestId, errorReason: "BlockedByClient" }).catch(() => {});
           void root.send("Target.closeTarget", { targetId: item.id }).catch(() => {}); return true;
         }
         if (first) grant!.used = true;
+        if (parent) parent.successorId = event.requestId;
         let resolve!: PopupRead["resolve"];
         const response = new Promise<Record<string, unknown>>(done => { resolve = done; });
         const entry: PopupRead = { id: event.requestId, networkId: event.networkId as string, url: url as string, method: method as string,
@@ -268,7 +305,8 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
           const host = new URL(entry.url).hostname; proxy.allowHostConnections(host);
           let finished = false, timer: ReturnType<typeof setTimeout> | undefined;
           try {
-            const bounded = new Promise<never>((_, fail) => { timer = setTimeout(() => fail(reject()), Math.min(15_000, Math.max(1, input.deadlineAt.getTime() - Date.now()))); });
+            const responseDeadline = Math.min(input.deadlineAt.getTime(), Date.now() + 15_000);
+            const bounded = new Promise<never>((_, fail) => { timer = setTimeout(() => fail(reject()), Math.max(1, responseDeadline - Date.now())); });
             await child.send("Fetch.continueRequest", { requestId: entry.id });
             const value = await Promise.race([response, bounded]); check();
             if (value.responseErrorReason || value.frameId !== entry.frameId || value.networkId !== entry.networkId ||
@@ -293,23 +331,29 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
               next = new URL(locations[0].value, entry.url).href;
               if (!isSafeRecipeUrl(next) || transactionUrl(next)) throw reject();
             }
-            check(); await child.send("Fetch.continueResponse", { requestId: entry.id });
-            entry.redirect = next; entry.complete = true; finished = true;
+            check(); entry.pendingRedirect = next;
+            entry.continuationAck = awaitStagehandPopupContinuation(child.send("Fetch.continueResponse", { requestId: entry.id }), signal,
+              responseDeadline).then(() => {
+              entry.redirect = next; entry.complete = true; finished = true;
+            });
+            await entry.continuationAck;
           } finally {
             clearTimeout(timer);
             if (!finished) { await child.send("Fetch.failRequest", { requestId: entry.id, errorReason: "BlockedByClient" }).catch(() => {}); await proxy.cancelHostConnections(host); }
           }
-        }, signal);
+        }, signal).then(value => { entry.queueComplete = true; return value; });
+        entry.completion = operation;
         activeReads.add(operation);
         void operation.catch(() => { if (!closed) { terminal = true; void close(); } }).finally(() => activeReads.delete(operation));
         return true;
       };
       for (const method of ["Page.frameNavigated", "Page.navigatedWithinDocument", "Page.frameRequestedNavigation", "Network.requestWillBeSent", "Network.loadingFailed", "Fetch.requestPaused"]) {
         child.on(method, value => {
+          if (method === "Fetch.requestPaused" && popupReads.has(value.requestId as string) && popupDocument(value)) return;
           if (buffering) {
             if (method === "Fetch.requestPaused" && popupDocument(value)) return;
             startupBytes += Buffer.byteLength(JSON.stringify(value));
-            if (startup.length >= 256 || startupBytes > 2_000_000) { terminal = true; void close(); return; }
+            if (startup.length >= 256 || startupBytes + deferredPopupBytes > 2_000_000) { terminal = true; void close(); return; }
             startup.push({ method, value });
           } else for (const listener of listeners.get(method) ?? []) listener(value);
         });

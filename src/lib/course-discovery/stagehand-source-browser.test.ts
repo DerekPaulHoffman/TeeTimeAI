@@ -3,10 +3,52 @@ import { readFileSync } from "node:fs";
 import { createServer } from "node:https";
 import { connect } from "node:net";
 import { chromium, type Browser } from "@playwright/test";
-import { expect, it } from "vitest";
-import { canonicalStagehandHostEntry, createGuardedStagehandSourceBrowser, stagehandSourceBrowserMode } from "./stagehand-source-browser";
+import { expect, it, vi } from "vitest";
+import { awaitStagehandPopupContinuation, canonicalStagehandHostEntry, createGuardedStagehandSourceBrowser, stagehandSourceBrowserMode } from "./stagehand-source-browser";
 import { launchPublicReadBrowser } from "./public-browser-launch";
 import { requestFamilyForUrl } from "./request-family";
+
+type AckMode = "NORMAL" | "DELAY" | "REJECT" | "NEVER" | "FORK" | "OVERSIZE";
+const popupAck = vi.hoisted(() => ({ mode: "NORMAL" as AckMode, armed: false, delayed: 0, pending: 0, earlySuccessor: false, forked: false, oversized: false }));
+vi.mock("./stagehand-owned-cdp", async importOriginal => {
+  const actual = await importOriginal<typeof import("./stagehand-owned-cdp")>();
+  return { ...actual, connectOwnedSourceCdp: async (...args: Parameters<typeof actual.connectOwnedSourceCdp>) => {
+    const connection = await actual.connectOwnedSourceCdp(...args);
+    return { ...connection, session: (id: string) => {
+      const session = connection.session(id);
+      return { ...session, on: (method: string, listener: (value: Record<string, unknown>) => unknown) => session.on(method, value => {
+        if (method === "Fetch.requestPaused" && popupAck.armed && popupAck.mode === "OVERSIZE" && !popupAck.oversized &&
+            typeof value.redirectedRequestId === "string" && value.responseStatusCode === undefined && value.responseErrorReason === undefined) {
+          popupAck.oversized = true;
+          const request = value.request as { headers: Record<string, string> };
+          return listener({ ...value, request: { ...request, headers: { ...request.headers, "x-owned-padding": "x".repeat(2_000_001) } } });
+        }
+        const result = listener(value);
+        if (method === "Fetch.requestPaused" && popupAck.armed && popupAck.mode === "FORK" && !popupAck.forked &&
+            typeof value.redirectedRequestId === "string" && value.responseStatusCode === undefined && value.responseErrorReason === undefined) {
+          popupAck.forked = true;
+          // A second purported successor is a fixture-only protocol fault.
+          // The original real request remains paused and must not dispatch.
+          listener({ ...value, requestId: String(value.requestId) + "-owned-fork" });
+        }
+        return result;
+      }), send: async (...command: Parameters<typeof session.send>) => {
+        const result = await session.send(...command);
+        if (command[0] === "Fetch.continueResponse" && popupAck.armed && popupAck.mode !== "NORMAL") {
+          popupAck.delayed++;
+          // Chrome receives the real command, while the trusted controller has
+          // not yet observed its ACK. A redirect may pause in this interval.
+          if (popupAck.mode === "REJECT") throw Error("OWNED_ACK_REJECTED");
+          if (popupAck.mode === "NEVER") return new Promise<never>(() => {});
+          popupAck.pending++;
+          try { await new Promise(resolve => setTimeout(resolve, 100)); }
+          finally { popupAck.pending--; }
+        }
+        return result;
+      } };
+    } };
+  } };
+});
 
 // Reuse the existing public throwaway localhost certificate; never user TLS,
 // browser profiles, local auth, production leases, or external provider data.
@@ -27,15 +69,20 @@ it("canonicalizes only a missing homepage slash without changing routes, queries
   for (const value of ["https://public.example/a/../route", "https://public.example/%2e%2e/route", "https://PUBLIC.example", "https://public.example:443", "https://public.example\\route", "https://user@public.example/", "http://public.example/", "https://public.example/ASP/appt_req.asp"]) expect(() => canonicalStagehandHostEntry(value)).toThrow();
 });
 
-it.each([false, true])("guards isolated popup/inline reads and per-family concurrency; worker-denial mode %s", async workerCase => {
+async function ownedPopupFixture(workerCase: boolean, ackMode: AckMode) {
+  popupAck.mode = ackMode; popupAck.armed = false; popupAck.pending = 0; popupAck.earlySuccessor = false; popupAck.forked = false; popupAck.oversized = false;
+  popupAck.delayed = 0;
   const hosts = new Set(["owned-source.example", "owned-booking.example", "owned-final.example", "owned-assets.example"]);
   const cancellation = new AbortController(), families = new Set<string>();
   let active = 0, maxGlobal = 0, maxFamily = 0, acquired = 0, released = 0, unleased = 0;
+  let successorBeforeParentRelease = false;
   const seen: string[] = [], concurrent: number[] = [];
   const server = createServer({ key: certificate("fixtureKey"), cert: certificate("fixtureCertificate") }, (request, response) => {
     const host = (request.headers.host ?? "").split(":")[0], path = request.url ?? "/";
     if (!hosts.has(host)) { response.writeHead(403).end(); return; }
     seen.push(host + path);
+    if (host === "owned-final.example" && popupAck.pending > 0) popupAck.earlySuccessor = true;
+    if (host === "owned-final.example" && families.has(requestFamilyForUrl("https://owned-booking.example/landing?keep=full"))) successorBeforeParentRelease = true;
     if (!families.has(requestFamilyForUrl("https://" + host + path))) unleased++;
     concurrent.push(active);
     if (host === "owned-booking.example") { response.writeHead(302, { location: "https://owned-final.example/calendar?keep=full" }).end(); return; }
@@ -59,7 +106,11 @@ it.each([false, true])("guards isolated popup/inline reads and per-family concur
         if (active >= 2 || families.has(family)) return { acquired: false };
         active++; families.add(family); acquired++; maxGlobal = Math.max(maxGlobal, active); maxFamily = Math.max(maxFamily, 1);
         try { return { acquired: true, value: await work() }; }
-        finally { active--; families.delete(family); released++; }
+        finally {
+          if (ackMode === "DELAY" && family === requestFamilyForUrl("https://owned-booking.example/landing?keep=full"))
+            await new Promise(resolve => setTimeout(resolve, 50));
+          active--; families.delete(family); released++;
+        }
       },
       proxyDependencies: { resolveAddresses: async name => { if (!hosts.has(name)) throw Error("NOT_OWNED_FIXTURE"); return [{ address: "93.184.216.34", family: 4 }]; }, connect: () => connect({ host: "127.0.0.1", port: address.port }) },
       launchBrowser: options => launchPublicReadBrowser({ ...options, args: [...options.args ?? [], "--ignore-certificate-errors"] }, { localCdp: true }),
@@ -90,7 +141,26 @@ it.each([false, true])("guards isolated popup/inline reads and per-family concur
     expect(Object.keys(witness!).sort()).toEqual(["documentHash", "kind", "links", "observedAt", "pageUrl"]);
     expect(Date.now() - Date.parse(witness!.observedAt)).toBeLessThan(5000);
     await host.beforeAction(host.targetId, "https://owned-booking.example/landing?keep=full");
-    const popupPromise = page.waitForEvent("popup"); await page.locator("#book span").click(); const popup = await popupPromise;
+    popupAck.armed = true;
+    const popupPromise = page.waitForEvent("popup"), clicking = page.locator("#book span").click();
+    void clicking.catch(() => {});
+    const popup = await popupPromise;
+    if (ackMode === "NEVER") {
+      for (let attempt = 0; !popupAck.delayed && attempt < 100; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+      expect(popupAck.delayed).toBeGreaterThan(0); cancellation.abort();
+    }
+    if (ackMode === "REJECT" || ackMode === "NEVER" || ackMode === "FORK" || ackMode === "OVERSIZE") {
+      await clicking.catch(() => {}); // Guardian closure may also end Playwright's click wait.
+      await expect(popup.waitForURL("https://owned-final.example/calendar?keep=full")).rejects.toThrow();
+      const closed = await host.close();
+      expect(closed).toMatchObject({ browserClosed: true, providerRequestsDrained: true });
+      expect(seen.some(value => value.startsWith("owned-final.example"))).toBe(false);
+      if (ackMode === "FORK") expect(popupAck.forked).toBe(true);
+      if (ackMode === "OVERSIZE") expect(popupAck.oversized).toBe(true);
+      expect(unleased).toBe(0); expect(active).toBe(0); expect(acquired).toBe(released);
+      return;
+    }
+    await clicking;
     await popup.waitForURL("https://owned-final.example/calendar?keep=full");
     await popup.waitForFunction(() => (globalThis as unknown as { inlineReadFinished?: boolean }).inlineReadFinished === true);
     const ids = await Promise.all(page.context().pages().map(async current => { const cdp = await current.context().newCDPSession(current); const value = await cdp.send("Target.getTargetInfo"); await cdp.detach(); return value.targetInfo.targetId; }));
@@ -131,8 +201,25 @@ it.each([false, true])("guards isolated popup/inline reads and per-family concur
       expect(JSON.stringify(closed.ownedCdpFailure)).not.toMatch(/targetId|sessionId|contextId|https?:|message|stack/u);
     }
     expect(unleased).toBe(0); expect(active).toBe(0); expect(acquired).toBe(released);
+    if (ackMode === "DELAY") {
+      expect(popupAck.delayed).toBeGreaterThan(0); expect(popupAck.earlySuccessor).toBe(false); expect(successorBeforeParentRelease).toBe(false);
+    }
   } finally {
     cancellation.abort(); await attached?.close().catch(() => {}); await host?.close();
     await new Promise<void>(resolve => server.close(() => resolve()));
+    popupAck.mode = "NORMAL"; popupAck.armed = false;
   }
-}, 90_000);
+}
+it.each([false, true])("guards isolated popup/inline reads and per-family concurrency; worker-denial mode %s",
+  workerCase => ownedPopupFixture(workerCase, workerCase ? "NORMAL" : "DELAY"), 90_000);
+it.each(["REJECT", "NEVER", "FORK", "OVERSIZE"] as const)("denies the paused successor and drains when its parent ACK is %s",
+  ackMode => ownedPopupFixture(false, ackMode), 90_000);
+it("bounds an absent continuation ACK and preserves cancellation or failed ACK without dispatch", async () => {
+  const dispatch = vi.fn(), error = Error("OWNED_ACK_REJECTED"), abort = new AbortController();
+  await expect(awaitStagehandPopupContinuation(Promise.reject(error), abort.signal, Date.now() + 1000).then(dispatch)).rejects.toBe(error);
+  await expect(awaitStagehandPopupContinuation(new Promise(() => {}), abort.signal, Date.now() + 20).then(dispatch)).rejects.toThrow("STAGEHAND_GUARDED_SOURCE_REJECTED");
+  const pending = awaitStagehandPopupContinuation(new Promise(() => {}), abort.signal, Date.now() + 1000).then(dispatch);
+  abort.abort(); await expect(pending).rejects.toThrow(); expect(dispatch).not.toHaveBeenCalled();
+  await expect(awaitStagehandPopupContinuation(Promise.reject(error), abort.signal, Date.now() + 1000).then(dispatch)).rejects.toThrow();
+  await new Promise(resolve => setTimeout(resolve, 0)); expect(dispatch).not.toHaveBeenCalled();
+});
