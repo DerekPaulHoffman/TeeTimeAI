@@ -503,33 +503,33 @@ model CourseDiscoveryPilotEnrollment {
 }
 
 model CourseDiscoveryJob {
-  id                 String                   @id @default(cuid())
-  targetKey          String
-  activeTargetKey    String?                  @unique
-  courseId           String
-  offeringId         String?
-  sourceFingerprint  String
-  baseRecipeId       String?
-  status             CourseDiscoveryJobStatus @default(QUEUED)
-  attempts           Int                      @default(0)
-  workerId           String?
-  firstPickedUpAt    DateTime?
-  deadlineAt         DateTime?
-  leaseToken         String?
-  leaseExpiresAt     DateTime?
-  checkpoint         Json?
-  request            Json
-  candidate          Json?
-  candidateHash      String?
+  id                String                   @id @default(cuid())
+  targetKey         String
+  activeTargetKey   String?                  @unique
+  courseId          String
+  offeringId        String?
+  sourceFingerprint String
+  baseRecipeId      String?
+  status            CourseDiscoveryJobStatus @default(QUEUED)
+  attempts          Int                      @default(0)
+  workerId          String?
+  firstPickedUpAt   DateTime?
+  deadlineAt        DateTime?
+  leaseToken        String?
+  leaseExpiresAt    DateTime?
+  checkpoint        Json?
+  request           Json
+  candidate         Json?
+  candidateHash     String?
   // Only the trusted coordinator's challenge/result endpoints write this field.
-  verification       Json?
-  outcome            String?
-  result             Json?
-  completedAt        DateTime?
-  createdAt          DateTime                 @default(now())
-  updatedAt          DateTime                 @updatedAt
-  course             Course                   @relation(fields: [courseId], references: [id], onDelete: Cascade)
-  offering           CourseOffering?          @relation(fields: [offeringId], references: [id], onDelete: Cascade)
+  verification      Json?
+  outcome           String?
+  result            Json?
+  completedAt       DateTime?
+  createdAt         DateTime                 @default(now())
+  updatedAt         DateTime                 @updatedAt
+  course            Course                   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  offering          CourseOffering?          @relation(fields: [offeringId], references: [id], onDelete: Cascade)
 
   @@index([status, leaseExpiresAt, createdAt])
   @@index([targetKey, createdAt])
