@@ -69,7 +69,12 @@ export function parseForeupPublicConfiguration(input: {
     !["", "#/teetimes", "#teetimes", "#/login"].includes(url.hash) ||
     input.html.length > MAX_DOCUMENT_BYTES) return null;
   const facilityId = Number(path[1] ?? path[2]);
-  const targetName = normalizeName(input.courseName);
+  // A comma-separated hospitality descriptor is not a tee-sheet identity.
+  // This one bounded suffix affects configuration comparison only; facility,
+  // unique schedule and explicit public-class gates below remain unchanged.
+  const comparisonName = typeof input.courseName === "string"
+    ? input.courseName.replace(/,[ \t]*restaurant[ \t]+and[ \t]+banquet[ \t]+facility[ \t]*$/iu, "") : input.courseName;
+  const targetName = normalizeName(comparisonName);
   const schedules = extractSchedulesJson(input.html);
   if (!targetName || !Array.isArray(schedules) || schedules.length < 1 ||
     schedules.length > MAX_SCHEDULES) return null;

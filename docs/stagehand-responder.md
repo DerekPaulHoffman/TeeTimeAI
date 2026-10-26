@@ -20,6 +20,11 @@ canonical matching, deduplication and the email outbox retain delivery ownership
 - `NATIVE_SOL` explicitly selects the prior Sol worker for rollback. A failed
   Stagehand run never silently switches strategies or resets a clock.
 
+The managed startup event records the validated handler's effective `workerMode`.
+Keep that event and the new process identity in the restart receipt; a requested
+environment value alone does not establish which mode actually started. The
+private runtime configuration retains its existing three keys.
+
 Source discovery receives ordinary public identity and alert parameters only.
 It cannot provide times, executable actions, identity proofs or recipe metadata.
 A bounded source-only checkpoint can resume trusted inspection on the one

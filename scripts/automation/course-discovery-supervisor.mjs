@@ -3,7 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createCourseDiscoveryClient, discoveryError } from "./course-discovery-client.mjs";
 import { noVerifiedRecipeDiagnostic } from "./course-discovery-worker.mjs";
-import { createCourseDiscoveryHandlers } from "./course-discovery-handlers.mjs";
+import { createCourseDiscoveryHandlers, DISCOVERY_WORKER_MODES } from "./course-discovery-handlers.mjs";
 
 export const DISCOVERY_POLL_MS = 15_000;
 export const DISCOVERY_HEARTBEAT_MS = 15_000;
@@ -41,8 +41,9 @@ export function validateClaimedRecipeExecution(job, now = Date.now()) {
 }
 
 /** Polling, leases and deadlines are controller-owned, independent of inference. */
-export function createCourseDiscoverySupervisor({ client, startWorker, executeRecipe, prepareWorker, workerId = `discovery-${randomUUID()}`,
+export function createCourseDiscoverySupervisor({ client, startWorker, executeRecipe, prepareWorker, mode, workerId = `discovery-${randomUUID()}`,
   now = Date.now, onEvent = () => {}, timers = { setInterval, clearInterval, setTimeout, clearTimeout } }) {
+  if (mode !== undefined && !DISCOVERY_WORKER_MODES.includes(mode)) throw discoveryError("DISCOVERY_WORKER_MODE_INVALID");
   const active = new Map();
   let stopped = false;
   let polling = false;
@@ -271,7 +272,7 @@ export function createCourseDiscoverySupervisor({ client, startWorker, executeRe
     tick() { pollPromise = tick(); return pollPromise; },
     start() {
       if (stopped || pollTimer) throw discoveryError("DISCOVERY_SUPERVISOR_ALREADY_STARTED");
-      emit("supervisor_started", { observedAt: new Date(now()).toISOString() });
+      emit("supervisor_started", { observedAt: new Date(now()).toISOString(), ...(mode ? { workerMode: mode } : {}) });
       pollTimer = timers.setInterval(() => { pollPromise = tick(); }, DISCOVERY_POLL_MS);
       pollPromise = tick();
       return pollPromise;

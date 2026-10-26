@@ -73,6 +73,30 @@ function setup() {
 }
 
 describe("regular Stagehand source worker", () => {
+  it.each([false, true])("persists only current closed adapter read facts alongside optional delegation (%s)", async combined => {
+    const t = setup(), adapterRead = { stage: "RESPONSE_HEADERS", role: "TEEITUP_DIRECTORY", httpStatus: 404,
+      responseRedirected: false, responseUrlMatches: true, elapsedMs: 170, responseBytes: null, transportCode: "NONE" };
+    const delegation = combined ? createDelegationDiagnostic("PROVIDER_BIND") : undefined;
+    const primary = Object.assign(Error("ADAPTER_TRANSPORT_FAILED"), { code: "ADAPTER_TRANSPORT_FAILED",
+      details: { browserDiagnostics: { adapterRead: { ...adapterRead, body: "PRIVATE", url: "PRIVATE" },
+        ...(delegation ? { teeItUpDelegation: delegation } : {}) } } });
+    const original = t.request.getMockImplementation()!;
+    t.request.mockImplementation(async action => { if (action.action === "inspect_adapter") throw primary; return original(action); });
+    await expect(t.run()).rejects.toBe(primary);
+    const diagnostic = { ...(delegation ? { teeItUpDelegation: delegation } : {}), adapterRead };
+    const saved = t.checkpoints.at(-1) as { stagehandFailure: { entries: Array<Record<string, unknown>> } };
+    expect(saved.stagehandFailure.entries[0]).toMatchObject({ phase: "FIXED_INSPECTION", code: "ADAPTER_TRANSPORT_FAILED",
+      fixedInspectionDiagnostic: diagnostic, fixedInspectionDiagnosticSha256: stagehandDataHash(diagnostic) });
+    expect(readStagehandFailure({ ...t.f.job, checkpoint: saved }, t.f.clock)).toEqual(saved.stagehandFailure);
+    expect(currentStagehandInspectionDiagnostic(primary, t.f.job, t.f.clock, t.f.clock)).toEqual(diagnostic);
+    expect(currentStagehandInspectionDiagnostic({ ...primary }, t.f.job, t.f.clock, t.f.clock)).toBeUndefined();
+    expect(currentStagehandInspectionDiagnostic(primary, { ...t.f.job }, t.f.clock, t.f.clock)).toBeUndefined();
+    expect(currentStagehandInspectionDiagnostic(primary, t.f.job, t.f.clock + 1, t.f.clock + 1)).toBeUndefined();
+    expect(JSON.stringify(saved)).not.toContain("PRIVATE");
+    expect(t.close).toHaveBeenCalledOnce(); expect(t.client.candidate).not.toHaveBeenCalled();
+    expect(t.executeRecipe).not.toHaveBeenCalled(); expect(t.client.activate).not.toHaveBeenCalled();
+  });
+
   it("retains the closed delegated gate in the failed inspection receipt without replacing its primary", async () => {
     const t = setup(), delegation = createDelegationDiagnostic("HOP_ONE_READ");
     delegation.gates.rootFresh = true; delegation.gates.hopStatus200 = false;

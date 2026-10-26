@@ -1,0 +1,50 @@
+import { z } from "zod";
+import { parse, type DefaultTreeAdapterMap } from "parse5";
+import { lightspeedFlightObjects } from "./lightspeed-source";
+import { fullCourseName } from "./teeitup-official-identity";
+
+/** Routing facts only. These never substitute for the real facility directory. */
+export const teeItUpBookingConfigurationSchema = z.object({
+  apiAlias: z.string().regex(/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u),
+  facilityIds: z.array(z.number().int().min(1).max(2_147_483_647)).min(1).max(20)
+    .refine(ids => new Set(ids).size === ids.length && ids.every((value, i) => i === 0 || ids[i - 1] < value)),
+}).strict();
+export type TeeItUpBookingConfiguration = z.infer<typeof teeItUpBookingConfigurationSchema>;
+
+/** Literal Next Flight JSON from the exact public booking document. No script
+ * execution, preceding-alias heuristic, guessed sibling tenant or partial rows. */
+export function parseTeeItUpBookingConfiguration(html: string, venueName: string): TeeItUpBookingConfiguration {
+  const reject = (): never => { throw new Error("ADAPTER_CONFIGURATION_UNVERIFIED"); };
+  if (Buffer.byteLength(html) > 600_000 || fullCourseName(venueName).length < 8) return reject();
+  const objects: Record<string, unknown>[] = [];
+  const decode = (document: string) => { try { objects.push(...lightspeedFlightObjects(document)); } catch { /* A literal chunk can contain only a non-JSON Flight record. */ } };
+  decode(html);
+  // Next may place a complete root record in its own literal chunk immediately
+  // after a text record without a newline. Decode that framing independently;
+  // also retain joined-stream support for records split across literal chunks.
+  type Node = DefaultTreeAdapterMap["node"];
+  const stack: Array<{ node: Node; depth: number }> = [{ node: parse(html), depth: 0 }];
+  let visits = 0, scripts = 0;
+  while (stack.length) {
+    const { node, depth } = stack.pop()!;
+    if (++visits > 20_000 || depth > 80 || objects.length > 60_000) return reject();
+    if ("tagName" in node && node.tagName === "script" && !node.attrs.some(attr => attr.name === "src")) {
+      if (++scripts > 400) return reject();
+      const script = node.childNodes.filter(child => child.nodeName === "#text").map(child => (child as DefaultTreeAdapterMap["textNode"]).value).join("").trim();
+      if (/^self\.__next_f\.push\(\[[\s\S]*\]\);?$/u.test(script)) decode(`<script>${script}</script>`);
+    }
+    if ("childNodes" in node) for (const child of node.childNodes) stack.push({ node: child, depth: depth + 1 });
+  }
+  const candidates = objects.filter(row => Object.hasOwn(row, "alias") && Object.hasOwn(row, "gnFacilityIds"));
+  if (!candidates.length || candidates.length > 20) return reject();
+  const parsed = candidates.map(row => {
+    if (typeof row.name !== "string" || fullCourseName(row.name) !== fullCourseName(venueName) || !Array.isArray(row.gnFacilityIds)) return reject();
+    const ids = row.gnFacilityIds;
+    if (!ids.every(value => Number.isSafeInteger(value) && Number(value) > 0 && Number(value) <= 2_147_483_647) || new Set(ids).size !== ids.length) return reject();
+    const value = teeItUpBookingConfigurationSchema.safeParse({ apiAlias: row.alias, facilityIds: [...ids].sort((a, b) => Number(a) - Number(b)) });
+    return value.success ? value.data : reject();
+  });
+  const unique = new Map(parsed.map(value => [JSON.stringify(value), value]));
+  if (unique.size !== 1) return reject();
+  return [...unique.values()][0];
+}

@@ -6,7 +6,7 @@ import { createRequire } from 'node:module';
 import { join, resolve, isAbsolute } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
-import { openStagehandSession, loadStagehandRuntime, assertPublicUrl, frameworkIdentity, observedActionSummary, observedTargetSummary } from './driver.mjs';
+import { openStagehandSession, loadStagehandRuntime, assertPublicUrl, isSourceRoutingUrl as sourceRoutingUrl, frameworkIdentity, observedActionSummary, observedTargetSummary } from './driver.mjs';
 import { installReadOnlyEvidence } from './read-only-evidence.mjs';
 import { prioritizedPublicEvidence, publicEvidenceUrl } from './public-evidence.mjs';
 import { observedBookingSourceCandidates, assertSourceCandidateBudget, nativeFrameNavigations } from './source-provenance.mjs';
@@ -15,7 +15,6 @@ import { sourceFailureDiagnostic, sourceGuardReasons, projectActionGuardDiagnost
 export const SOURCE_BUDGET_MS = 120000;
 export const SOURCE_FRAMEWORK_MODE = 'HYBRID_SOURCE_DISCOVERY';
 const fail = code => Object.assign(new Error(code), { code });
-function sourceRoutingUrl(value) { try { return publicEvidenceUrl(value) === value && assertPublicUrl(value) === value; } catch { return false; } }
 export const adapterSourceProposalSchema = z.object({schemaVersion:z.literal(1),kind:z.literal('EXISTING_ADAPTER_SOURCE'),
   bookingUrl:z.string().max(2048).refine(sourceRoutingUrl)}).strict();
 const identitySchema = z.object({ name: z.string().min(1).max(300), officialUrl: z.string().max(2048).refine(value => Boolean(publicEvidenceUrl(value))),
@@ -112,6 +111,31 @@ export async function pageEvidence(session) {
   return evidence;
 }
 
+/** Closed predicate diagnostics only; this does not sanitize or admit a witness. */
+export function nativeFrameWitnessFailure(witness, { pageUrl, visitedUrls, startedAt, workDeadline, selected, now = Date.now() }) {
+  const keys=value=>value&&typeof value==='object'&&!Array.isArray(value)?Object.keys(value).sort().join(','):'';
+  const stamp=Date.parse(witness?.observedAt);
+  if(keys(witness)!=='documentHash,frames,kind,observedAt,pageUrl')return 'SHAPE';
+  if(witness.kind!=='NATIVE_VISIBLE_FRAME')return 'KIND';
+  if(witness.pageUrl!==pageUrl)return 'PAGE_BINDING';
+  if(!sourceRoutingUrl(pageUrl))return 'PAGE_URL';
+  if(!visitedUrls.includes(pageUrl))return 'PAGE_NOT_VISITED';
+  if(!Number.isFinite(stamp)||new Date(stamp).toISOString()!==witness.observedAt)return 'TIMESTAMP';
+  if(stamp<startedAt)return 'STALE';
+  if(stamp>now+5000||stamp>workDeadline)return 'DEADLINE';
+  if(typeof witness.documentHash!=='string'||!/^[a-f0-9]{64}$/u.test(witness.documentHash))return 'DOCUMENT_HASH';
+  if(!Array.isArray(witness.frames)||witness.frames.length>24)return 'FRAME_ARRAY';
+  if(new Set(witness.frames.map(f=>f?.src)).size!==witness.frames.length)return 'DUPLICATE_FRAME';
+  for(const frame of witness.frames){
+    if(keys(frame)!=='src,visible')return 'FRAME_SHAPE';
+    if(frame.visible!==true)return 'FRAME_HIDDEN';
+    if(!sourceRoutingUrl(frame.src))return 'FRAME_URL';
+    if(frame.src===pageUrl)return 'FRAME_SELF';
+  }
+  if(selected!==undefined&&(witness.frames.length!==1||witness.frames[0].src!==selected))return 'SELECTION';
+  return null;
+}
+
 
 const safeReason = value => String(value ?? '').slice(0,2000)
   .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/giu,'[REDACTED_EMAIL]')
@@ -143,14 +167,8 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
   let finalDecision=null,stopCondition='RUNNING',activeAct,activeFrame;
   report.nativeFrameNavigations=[];
   const acceptNativeFrames = (witness,pageUrl,startedAt,selected) => {
-    const keys=value=>value&&typeof value==='object'&&!Array.isArray(value)?Object.keys(value).sort().join(','):'';
-    const stamp=Date.parse(witness?.observedAt);
-    if(keys(witness)!=='documentHash,frames,kind,observedAt,pageUrl'||witness.kind!=='NATIVE_VISIBLE_FRAME'||witness.pageUrl!==pageUrl||
-      !sourceRoutingUrl(pageUrl)||!report.visitedUrls.includes(pageUrl)||!Number.isFinite(stamp)||new Date(stamp).toISOString()!==witness.observedAt||
-      stamp<startedAt||stamp>Date.now()+5000||stamp>workDeadline||typeof witness.documentHash!=='string'||!/^[a-f0-9]{64}$/u.test(witness.documentHash)||
-      !Array.isArray(witness.frames)||witness.frames.length>24||new Set(witness.frames.map(f=>f?.src)).size!==witness.frames.length||
-      witness.frames.some(f=>keys(f)!=='src,visible'||f.visible!==true||!sourceRoutingUrl(f.src)||f.src===pageUrl)||
-      selected!==undefined&&(witness.frames.length!==1||witness.frames[0].src!==selected))throw fail('STAGEHAND_SOURCE_OUTPUT_INVALID');
+    const predicate=nativeFrameWitnessFailure(witness,{pageUrl,visitedUrls:report.visitedUrls,startedAt,workDeadline,selected});
+    if(predicate)throw Object.assign(fail('STAGEHAND_SOURCE_OUTPUT_INVALID'),{stagehandFrameWitnessFailure:predicate});
     report.frameLedger.push(structuredClone(witness));return witness.frames.map(f=>f.src);
   };
   const onNativeFrameSourceWitness=witness=>{

@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Prisma } from "@prisma/client";
+import { createHash } from "node:crypto";
 import { hashAccessRecipe, isSafeRecipeUrl, parseAccessRecipe, type AccessExecutionInput } from "./recipe";
 
 const mocks = vi.hoisted(() => ({
@@ -80,6 +81,44 @@ beforeEach(() => {
 });
 
 describe("bounded course discovery persistence", () => {
+  function streetOmissionRecipe() {
+    const address = "100 Public Vista, Denver, CO 80001, USA", phone = "+13035551234", bookingUrl = "https://public-course.book.teeitup.com/";
+    course.address = address;course.phone = phone;course.timeZone = "America/Denver";course.providerFamilyKey = "TEEITUP";course.detectedBookingUrl = bookingUrl;
+    const configuration = { apiAlias: "public-api", facilityIds: [71] };
+    const witness = {
+      kind: "OFFICIAL_STREET_TYPE_OMITTED", officialUrl: recipe.source.officialUrl, officialDocumentUrl: recipe.source.officialUrl, bookingUrl,
+      venueName: course.name, canonicalAddress: address, providerAddress: "100 Public Vista Drive, Denver, CO 80001, US", timeZone: course.timeZone,
+      alias: "public-course", facilityId: 71, courseId: "provider-71", configurationSha256: createHash("sha256").update(JSON.stringify(configuration)).digest("hex"),
+      canonicalStreetType: null, providerStreetType: "dr", publicCoursePhone: phone, requiredCapability: "LOCAL_CHROME", warmTransport: "NATIVE_CHROME" };
+    const semanticDigest = createHash("sha256").update(JSON.stringify(Object.fromEntries(Object.keys(witness).sort().map(key => [key, witness[key as keyof typeof witness]])))).digest("hex");
+    return parseAccessRecipe({ schemaVersion: 1, engine: "EXISTING_ADAPTER", target: recipe.target,
+      source: { ...recipe.source, bookingUrl, venueAddress: address, providerFamily: "TEEITUP", timeZone: course.timeZone },
+      adapter: { family: "TEEITUP", alias: "public-course", facilityIds: [71], publicBookingConfiguration: configuration,
+        officialStreetTypeOmittedProof: { ...witness, semanticDigest } } });
+  }
+  it("rebinds TeeItUp omission phone proof on proposal, verification, activation and active reads", async () => {
+    const candidate = streetOmissionRecipe(), owner = (await claimed())!, proposed = await proposeDiscoveryRecipe(owner.id, owner.leaseToken!, candidate), fingerprint = job!.sourceFingerprint;
+    course.phone = "+13035554321";
+    await expect(proposeDiscoveryRecipe(owner.id, owner.leaseToken!, candidate)).rejects.toBeInstanceOf(DiscoveryConflictError);
+    await expect(recordDiscoveryVerification({ jobId: owner.id, leaseToken: owner.leaseToken!, challengeId: proposed.challenges[0].id, recipeHash: proposed.recipeHash,
+      input: proposed.challenges[0].input, result: result() })).rejects.toBeInstanceOf(DiscoveryConflictError);
+    await expect(activateDiscoveryRecipe(owner.id, owner.leaseToken!)).rejects.toBeInstanceOf(DiscoveryConflictError);
+    course.activeAccessRecipeId = "recipe1";
+    mocks.db.courseAccessRecipe.findUnique.mockResolvedValue({ id: "recipe1", targetKey: "course:course1", sourceFingerprint: fingerprint, payload: candidate, hash: hashAccessRecipe(candidate) });
+    expect(await getActiveAccessRecipe({ courseId: "course1" })).toBeNull();
+    course.phone = "+13035551234";
+    expect(await getActiveAccessRecipe({ courseId: "course1" })).toMatchObject({ trustedContext: { canonicalCoursePhone: "+13035551234" } });
+    course.phone = null;expect(await getActiveAccessRecipe({ courseId: "course1" })).toBeNull();
+    await expect(assertActiveAccessRecipeInTransaction(mocks.db as unknown as Prisma.TransactionClient, { courseId: "course1" }, "recipe1")).rejects.toBeInstanceOf(DiscoveryConflictError);
+  });
+  it("requires the original claimed private context only for the new TeeItUp phone proof", async () => {
+    const candidate = streetOmissionRecipe(), owner = (await claimed())!;
+    delete (job!.request as { trustedContext?: unknown }).trustedContext;
+    await expect(proposeDiscoveryRecipe(owner.id, owner.leaseToken!, candidate)).rejects.toBeInstanceOf(DiscoveryConflictError);
+    const ordinary = structuredClone(candidate);
+    if (ordinary.engine === "EXISTING_ADAPTER" && ordinary.adapter.family === "TEEITUP") delete ordinary.adapter.officialStreetTypeOmittedProof;
+    await expect(proposeDiscoveryRecipe(owner.id, owner.leaseToken!, ordinary)).resolves.toHaveProperty("challenges");
+  });
   function phoneRecipe() {
     const address = "100 Golf Road, Denver, CO 80001, USA", phone = "+13035551234";
     course.address = address; course.phone = phone; course.timeZone = "America/Denver";

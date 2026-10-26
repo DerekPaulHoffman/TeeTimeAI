@@ -3,6 +3,7 @@ import { parse, type DefaultTreeAdapterMap } from "parse5";
 import { z } from "zod";
 import { fullCourseName, type OfficialIdentityPage, type OfficialIdentitySource } from "./teeitup-official-identity";
 import type { OfficialSourceDiagnostic } from "./official-source-diagnostics";
+import { normalizePublicUSState } from "./public-us-business-address";
 
 const sha = z.string().regex(/^[a-f0-9]{64}$/u);
 const url = z.string().max(2048).refine(value => Boolean(publicDocumentUrl(value)));
@@ -49,9 +50,12 @@ export function teeItUpCompleteStreetAddress(value: string) {
   const parts = clean(value).replace(/,(?:\s*,)+/gu, ",").split(/\s*,\s*/u);
   if (parts.length === 4 && /^(?:US|USA|United States(?: of America)?)$/iu.test(parts[3])) parts.pop();
   if (parts.length !== 3 || !/^[A-Za-z .'-]{2,80}$/u.test(parts[1])) return;
-  const region = /^([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$/iu.exec(parts[2]);
+  const region = /^(.{2,40})\s+(\d{5}(?:-\d{4})?)$/iu.exec(parts[2]);
+  // Preserve the existing two-letter region contract (including DC and US
+  // territories); only written-out names need the existing state dictionary.
+  const state = region && (/^[A-Z]{2}$/iu.test(region[1]) ? region[1].toUpperCase() : normalizePublicUSState(region[1]));
   const street = /^(\d{1,7})\s+(.+)$/u.exec(parts[0]);
-  if (!region || !street || /\b(?:mailing|corporate|billing|headquarters|p\s*o\s*box)\b/iu.test(value)) return;
+  if (!region || !state || !street || /\b(?:mailing|corporate|billing|headquarters|p\s*o\s*box)\b/iu.test(value)) return;
   const words = street[2].toLowerCase().replace(/\./gu, "").split(/\s+/u);
   let unit = "", unitType = "";
   const unitIndex = words.findIndex(word => /^(?:suite|ste|apt|apartment|unit|#)$/u.test(word) || /^#[a-z0-9-]+$/u.test(word));
@@ -65,7 +69,7 @@ export function teeItUpCompleteStreetAddress(value: string) {
   const type = streetTypes[words.pop()!];
   if (!type || !words.length || !words.every(word => /^[a-z0-9'-]+$/u.test(word))) return;
   return { number: street[1], before, street: words.join(" "), type, after, unitType, unit,
-    locality: parts[1].toLowerCase().replace(/\./gu, ""), region: region[1].toUpperCase(), postalCode: region[2], country: "US" };
+    locality: parts[1].toLowerCase().replace(/\./gu, ""), region: state, postalCode: region[2], country: "US" };
 }
 export function teeItUpNumberOnlyAddressConflict(canonical: string, provider: string) {
   const a = teeItUpCompleteStreetAddress(canonical), b = teeItUpCompleteStreetAddress(provider);

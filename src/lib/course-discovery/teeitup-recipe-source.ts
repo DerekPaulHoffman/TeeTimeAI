@@ -6,6 +6,8 @@ import { parseTeeItUpV2PublicSource } from "@/lib/adapters/teeitup-public-source
 import { bindTeeItUpOfficialBookingFacility, type TeeItUpOfficialBookingSourceProof } from "./teeitup-official-booking-source";
 import { normalizePublicCoursePhone, type TeeItUpPostalConflictProof } from "./teeitup-postal-conflict-proof";
 import { bindDelegatedFacility, type TeeItUpDelegatedBookingProof } from "./teeitup-delegated-booking-source";
+import { matchesTeeItUpStreetTypeOmittedDirectory, type TeeItUpStreetTypeOmittedProof } from "./teeitup-street-type-omitted-proof";
+import type { TeeItUpBookingConfiguration } from "./teeitup-booking-configuration";
 
 const id = z.number().int().min(1).max(2_147_483_647);
 const facility = z.object({ id, courseId: z.string().min(1).max(128), name: z.string().min(2).max(256),
@@ -51,11 +53,11 @@ export function isTeeItUpRecipeSlotLink(source: string, date: string, allowedIds
 
 export function resolveTeeItUpRecipeFacilities(source: { bookingUrl: string; venueName: string; venueAddress?: string; timeZone: string; officialUrl?: string }, value: unknown, officialProof?: TeeItUpOfficialIdentityProof,
   offeringKind: "OUTDOOR" | "SIMULATOR" | "AUTO" = "OUTDOOR", bookingProof?: TeeItUpOfficialBookingSourceProof, postalProof?: TeeItUpPostalConflictProof,
-  delegatedProof?: TeeItUpDelegatedBookingProof) {
+  delegatedProof?: TeeItUpDelegatedBookingProof, omittedProof?: TeeItUpStreetTypeOmittedProof, configuration?: TeeItUpBookingConfiguration) {
   const booking = parseTeeItUpRecipeSource(source.bookingUrl);
   const parsed = z.array(facility).min(1).max(100).safeParse(value);
-  if (offeringKind === "SIMULATOR" && (officialProof || bookingProof || postalProof || delegatedProof) ||
-      [officialProof, bookingProof, postalProof, delegatedProof].filter(Boolean).length > 1) throw new Error("ADAPTER_IDENTITY_MISMATCH");
+  if (offeringKind === "SIMULATOR" && (officialProof || bookingProof || postalProof || delegatedProof || omittedProof) ||
+      [officialProof, bookingProof, postalProof, delegatedProof, omittedProof].filter(Boolean).length > 1) throw new Error("ADAPTER_IDENTITY_MISMATCH");
   if (!booking || !source.venueAddress || !parsed.success ||
       new Set(parsed.data.map(row => row.id)).size !== parsed.data.length || new Set(parsed.data.map(row => row.courseId)).size !== parsed.data.length)
     throw new Error("ADAPTER_CONFIGURATION_UNVERIFIED");
@@ -82,11 +84,14 @@ export function resolveTeeItUpRecipeFacilities(source: { bookingUrl: string; ven
     throw new Error("OFFICIAL_BOOKING_SOURCE_CHANGED");
   if (delegatedProof && JSON.stringify(bindDelegatedFacility(source, delegatedProof, value)) !== JSON.stringify(delegatedProof))
     throw new Error("OFFICIAL_DELEGATED_SOURCE_CHANGED");
+  if (omittedProof && (!configuration || !matchesTeeItUpStreetTypeOmittedDirectory(omittedProof, source, value, configuration)))
+    throw new Error("OFFICIAL_STREET_TYPE_OMITTED_UNVERIFIED");
   if (officialProof && (alternate.length !== 1 || officialProof.bookingUrl !== source.bookingUrl)) throw new Error("ADAPTER_IDENTITY_MISMATCH");
   const accepted = (row: TeeItUpRecipeFacility) => matches(row) || officialProof !== undefined && alternate[0]?.id === row.id ||
     bookingProof !== undefined && row.id === bookingProof.facilityId && row.courseId === bookingProof.courseId ||
     postalProof !== undefined && row.id === postalProof.facilityId && row.courseId === postalProof.courseId ||
-    delegatedProof !== undefined && row.id === delegatedProof.facilityId && row.courseId === delegatedProof.courseId;
+    delegatedProof !== undefined && row.id === delegatedProof.facilityId && row.courseId === delegatedProof.courseId ||
+    omittedProof !== undefined && row.id === omittedProof.facilityId && row.courseId === omittedProof.courseId;
   const selected = booking.selectedIds ? parsed.data.filter(row => booking.selectedIds!.includes(row.id)) : parsed.data.filter(accepted);
   if (booking.selectedIds ? selected.length !== booking.selectedIds.length || !selected.every(accepted) : selected.length !== 1)
     throw new Error("ADAPTER_IDENTITY_MISMATCH");

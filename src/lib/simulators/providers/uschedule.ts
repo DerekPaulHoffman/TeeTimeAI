@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 
 import { fetchWithProviderTimeout } from "@/lib/adapters/fetch-with-timeout";
 import { isUSchedulePublicRentalLabel } from "@/lib/automation/uschedule-public-read-policy";
+import { readUScheduleNextAvailableView } from "@/lib/automation/uschedule-public-view-control";
 import { simulatorPublicConfigurationSchema, uschedulePublicTenant, type USchedulePublicConfiguration } from "./public-configuration";
 import { SimulatorAvailabilityError, type SimulatorAvailabilityInput, type SimulatorAvailabilityResult,
   type SimulatorAvailabilitySlot } from "./types";
@@ -14,6 +15,10 @@ import { parseUScheduleLocationSource, readUScheduleLocationCatalog, USCHEDULE_L
 type Node = DefaultTreeAdapterMap["node"];
 type Element = DefaultTreeAdapterMap["element"];
 const MAX_HTML_BYTES = 600_000, MAX_JSON_BYTES = 8_000, MAX_PAGES = 8;
+// One current public Next Available page has 25 directly owned rows. Keep a
+// fixed page ceiling; learned execution still has 16 pages, 40 session reads,
+// 8 MB aggregate and the existing later-day completeness requirement.
+const MAX_PUBLIC_ROWS_PER_PAGE = 25;
 const PUBLIC_ID = /^[1-9]\d{0,9}$/u;
 const metadataSchema = z.object({ tenant: z.string().regex(/^[a-z][a-z0-9-]{2,62}$/u),
   serviceId: z.string().regex(PUBLIC_ID) }).strict();
@@ -67,7 +72,7 @@ function selectedRental(html: string, learned?: LearnedRental) {
     const resources = all.filter(node => node.tagName === "select" && (attr(node, "class") ?? "").split(/\s/u).includes("resSelect"));
     if (service.length !== 1 || attr(service[0], "value") !== learned.serviceId || visibleText(service[0]).replace(/\s+/gu, " ").trim() !== learned.serviceName ||
         length.length !== 1 || Number(attr(length[0], "value")) !== learned.durationMinutes ||
-        selectedGroup.length !== 1 || (attr(selectedGroup[0], "value") ?? visibleText(selectedGroup[0]).trim()) !== "1" ||
+        groupSize.length > 1 || groupSize.length === 1 && (selectedGroup.length !== 1 || (attr(selectedGroup[0], "value") ?? visibleText(selectedGroup[0]).trim()) !== "1") ||
         resources.some(node => { const values = elements(node).filter(option => option.tagName === "option" && selected(option));
           return values.length !== 1 || attr(values[0], "value") !== "-1"; })) throw sourceError("The selected public rental changed");
     return { serviceId: learned.serviceId, durationMinutes: learned.durationMinutes };
@@ -84,7 +89,7 @@ function selectedRental(html: string, learned?: LearnedRental) {
 function pooledRows(html: string) {
   const all = elements(parse(html));
   const containers = all.filter(node => (attr(node, "class") ?? "").split(/\s+/u).includes("next_avail_results"));
-  if (!containers.length || containers.length > 10) throw schemaError("The public availability list is missing or ambiguous");
+  if (!containers.length || containers.length > MAX_PUBLIC_ROWS_PER_PAGE) throw schemaError("The public availability list is missing or ambiguous");
   // The public page renders one result container per start, with one direct
   // row inside each. An orphan or nested row would leave the page incomplete.
   const rows = containers.map(container => {
@@ -250,7 +255,7 @@ async function publicResponse(url: URL, init: RequestInit, expectedType: string 
     throw schemaError("The public simulator scheduler returned an unexpected response type");
   return { response, body: await bounded(response, ceiling) };
 }
-async function refresh(url: URL, cookie: string, name: "start_date" | "more_next_avail" | "length" | "service_id" | "group_size" | "location_id", value: string,
+async function refresh(url: URL, cookie: string, name: "start_date" | "more_next_avail" | "length" | "service_id" | "group_size" | "location_id" | "next_avail", value: string | undefined,
   fetchImpl: typeof fetch, signal: AbortSignal) {
   const endpoint = new URL(`${url.pathname}/changefield`, url.origin);
   const { body } = await publicResponse(endpoint, { method: "POST", headers: { Accept: "application/json",
@@ -283,6 +288,25 @@ export function inspectUScheduleRecipeConfiguration(html: string, sourceUrl: str
   const current = rentals.filter(row => row.selected);
   if (!rentals.length || rentals.length > 20 || current.length !== 1 || !durations.length || durations.length > 12 || new Set(durations).size !== durations.length) return;
   return { tenant, rentals, durations, selected: current[0] };
+}
+
+/** A missing public resource-quantity control is not an instruction to create
+ * one. Existing controls must still explicitly offer the single-bay value. */
+export function readUScheduleGroupSizeControl(html: string) {
+  if (Buffer.byteLength(html) > MAX_HTML_BYTES) throw sourceError("The public group selector is unbounded");
+  const groups = elements(parse(html)).filter(node => node.tagName === "select" && attr(node, "id") === "select_group_size");
+  if (groups.length > 1) throw sourceError("The public group selector is ambiguous");
+  if (!groups.length) return { present: false, oneAvailable: false };
+  let ancestor: Node | undefined = groups[0];
+  while (ancestor) {
+    if ("tagName" in ancestor && (ancestor.attrs.some(a => ["hidden", "inert"].includes(a.name) || a.name === "aria-hidden" && a.value === "true") ||
+        /display\s*:\s*none|visibility\s*:\s*hidden/iu.test(attr(ancestor, "style") ?? ""))) throw sourceError("The public group selector is hidden");
+    ancestor = "parentNode" in ancestor ? ancestor.parentNode ?? undefined : undefined;
+  }
+  const options = elements(groups[0]).filter(node => node.tagName === "option");
+  if (!options.length || options.length > 40) throw sourceError("The public group selector changed");
+  return { present: true, oneAvailable: options.filter(node => (attr(node, "value") ?? visibleText(node).trim()) === "1" &&
+    !node.attrs.some(a => ["hidden", "disabled", "inert"].includes(a.name))).length === 1 };
 }
 
 /** A separate fixed contract for an official location's included public rental.
@@ -323,7 +347,7 @@ export async function prepareUScheduleLocationCatalog(official: UScheduleOfficia
 /** Fixed read-only learned path; every page proves selected product, one bay,
  * duration, chronological cursor progress and a later-day completeness witness. */
 export async function fetchUScheduleRecipeAvailability(input: SimulatorAvailabilityInput, service: { serviceId: string; serviceName: string; publicLocationProof?: USchedulePublicLocationProof },
-  fetchImpl: typeof fetch): Promise<SimulatorAvailabilityResult> {
+  fetchImpl: typeof fetch, diagnostics?: { onListingPage?: (html: string) => void }): Promise<SimulatorAvailabilityResult> {
   let url = new URL(service.publicLocationProof?.official.entryUrl ?? input.offering.bookingUrl);
   const signal = AbortSignal.timeout(90_000);
   if (!(service.publicLocationProof ? parseUScheduleLocationSource(url.href) : uschedulePublicTenant(url.href)) ||
@@ -349,12 +373,28 @@ export async function fetchUScheduleRecipeAvailability(input: SimulatorAvailabil
   };
   if (!location && inspectUScheduleRecipeConfiguration(page.body, url.href)!.selected.serviceId !== service.serviceId) await filter("service_id", service.serviceId);
   await filter("length", String(input.durationMinutes));
-  if (!location) await filter("group_size", "1");
+  if (!location) {
+    const group = readUScheduleGroupSizeControl(page.body);
+    if (group.present) {
+      if (!group.oneAvailable) throw sourceError("The public single-bay selector is unavailable");
+      await filter("group_size", "1");
+    }
+  }
   await filter("start_date", `${input.date.slice(5, 7)}/${input.date.slice(8, 10)}/${input.date.slice(0, 4)}`);
   const tenant = location ? parseUScheduleLocationSource(url.href)!.tenant : uschedulePublicTenant(url.href)!;
+  if (!location) {
+    const view = readUScheduleNextAvailableView(page.body, tenant);
+    if (view.present && !view.selected) {
+      await refresh(url, cookie, "next_avail", undefined, fetchImpl, signal);
+      page = await publicResponse(url, { method: "GET", headers: { Accept: "text/html", Cookie: cookie } }, "text/html", MAX_HTML_BYTES, fetchImpl, signal);
+    }
+  }
   const learned = { ...service, durationMinutes: input.durationMinutes, date: input.date, tenant }, slots: SimulatorAvailabilitySlot[] = [], seen = new Set<string>();
   let previousOrder = -Infinity;
   for (let index = 0; index < 16; index++) {
+    // This is the already-consumed bounded body. Optional diagnostic capture
+    // never consumes a transport stream, changes requests or masks the guard.
+    try { diagnostics?.onListingPage?.(page.body); } catch { /* Diagnostic only. */ }
     const current = listing(page.body, service.serviceId, learned);
     if (current.times.at(-1)!.order <= previousOrder) throw schemaError("The public continuation did not advance");
     let crossedDate = false;

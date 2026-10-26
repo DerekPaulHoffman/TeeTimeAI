@@ -1,4 +1,5 @@
 import { spawn, execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -99,7 +100,20 @@ export function createDiscoveryAdapterObservation(job, bookingUrl, adapter, cont
     targetKey = canonicalDataKey(job.request.target), inputKey = canonicalDataKey(job.request.input);
   if (!adapterKey || !identityKey || !targetKey || !inputKey) return undefined;
   return { jobId: job.id, officialUrl: job.request.identity.officialUrl, bookingUrl, contextUrl,
-    identityKey, targetKey, inputKey, trustedContextKey: canonicalDataKey(job.request.trustedContext ?? {}), adapter: JSON.parse(adapterKey) };
+    identityKey, targetKey, inputKey, trustedContextKey: canonicalDataKey(job.request.trustedContext ?? {}), adapter: JSON.parse(adapterKey),
+    ...(adapter.officialStreetTypeOmittedProof ? { sourceFingerprint: job.sourceFingerprint, jobAttempt: job.attempts,
+      firstPickedUpAt: job.firstPickedUpAt, deadlineAt: job.deadlineAt } : {}) };
+}
+function currentStreetTypeObservation(job, observation) {
+  const first = Date.parse(job.firstPickedUpAt), end = Date.parse(job.deadlineAt);
+  return typeof job.sourceFingerprint === "string" && /^[a-f0-9]{64}$/u.test(job.sourceFingerprint) &&
+    Number.isInteger(job.attempts) && job.attempts >= 1 && Number.isFinite(first) && end === first + 900000 &&
+    observation.sourceFingerprint === job.sourceFingerprint && observation.jobAttempt === job.attempts &&
+    observation.firstPickedUpAt === job.firstPickedUpAt && observation.deadlineAt === job.deadlineAt;
+}
+export function shouldInvalidateDiscoveryAdapterObservation(action, observation) {
+  return ["open", "finish", "inspect_adapter"].includes(action) || Boolean(observation?.adapter?.officialBookingSourceProof ||
+    observation?.adapter?.officialDelegatedBookingProof || observation?.adapter?.officialStreetTypeOmittedProof);
 }
 /** A fixed inspector reads public configuration; fresh replay still proves availability. */
 export function inspectedAdapterSourceEvidence(recipe, job, observation, officialSourceObserved, contextUrl) {
@@ -108,8 +122,9 @@ export function inspectedAdapterSourceEvidence(recipe, job, observation, officia
       observation.bookingUrl !== recipe.source?.bookingUrl || observation.contextUrl !== contextUrl ||
       observation.identityKey !== canonicalDataKey(job.request.identity) || observation.targetKey !== canonicalDataKey(job.request.target) ||
       observation.inputKey !== canonicalDataKey(job.request.input) ||
-      (observation.adapter?.family === "CPS" || observation.adapter?.officialDelegatedBookingProof) &&
-        observation.trustedContextKey !== canonicalDataKey(job.request.trustedContext ?? {})) return undefined;
+      (observation.adapter?.family === "CPS" || observation.adapter?.officialDelegatedBookingProof || observation.adapter?.officialStreetTypeOmittedProof) &&
+        observation.trustedContextKey !== canonicalDataKey(job.request.trustedContext ?? {}) ||
+      observation.adapter?.officialStreetTypeOmittedProof && !currentStreetTypeObservation(job, observation)) return undefined;
   const candidateKey = canonicalDataKey(recipe.adapter), observedKey = canonicalDataKey(observation.adapter);
   if (!candidateKey || candidateKey !== observedKey) return undefined;
   return { officialUrl: observation.officialUrl, observedBookingUrl: observation.bookingUrl };
@@ -126,7 +141,46 @@ export function bindDiscoveryRecipeIdentity(recipe, job, adapterObservation, con
     delete adapter.officialBookingSourceProof;
     delete adapter.officialPostalConflictProof;
     delete adapter.officialDelegatedBookingProof;
+    delete adapter.officialStreetTypeOmittedProof;
     const observed = adapterObservation?.adapter;
+    if (adapter.family === "TEEITUP" && observed?.family === "TEEITUP" && adapterObservation.jobId === job.id &&
+        adapterObservation.officialUrl === job.request.identity.officialUrl && adapterObservation.bookingUrl === proposedSource.bookingUrl &&
+        adapterObservation.contextUrl === contextUrl && adapterObservation.identityKey === canonicalDataKey(job.request.identity) &&
+        adapterObservation.targetKey === canonicalDataKey(job.request.target) && adapterObservation.inputKey === canonicalDataKey(job.request.input) &&
+        adapterObservation.trustedContextKey === canonicalDataKey(job.request.trustedContext ?? {}) && currentStreetTypeObservation(job, adapterObservation) &&
+        job.request.target.kind === "OUTDOOR") {
+      try {
+        const inspected = { ...observed }; delete inspected.officialStreetTypeOmittedProof;
+        const proof = observed.officialStreetTypeOmittedProof, phone = job.request.trustedContext?.canonicalCoursePhone;
+        const semantic = { ...proof }; delete semantic.semanticDigest;
+        const semanticKey = canonicalDataKey(semantic);
+        const configuration = observed.publicBookingConfiguration, configurationKey = canonicalDataKey(configuration);
+        const sha = value => typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
+        const keys = value => value && typeof value === "object" && !Array.isArray(value) ? Object.keys(value).sort().join(",") : "";
+        if (canonicalDataKey(inspected) === canonicalDataKey(adapter) && proof?.kind === "OFFICIAL_STREET_TYPE_OMITTED" &&
+            keys(proof) === "alias,bookingUrl,canonicalAddress,canonicalStreetType,configurationSha256,courseId,facilityId,kind,officialDocumentUrl,officialUrl,providerAddress,providerStreetType,publicCoursePhone,requiredCapability,semanticDigest,timeZone,venueName,warmTransport" &&
+            proof.officialUrl === job.request.identity.officialUrl && proof.bookingUrl === proposedSource.bookingUrl &&
+            safeObservedUrl(proof.officialDocumentUrl) && new URL(proof.officialDocumentUrl).href === proof.officialDocumentUrl &&
+            new URL(proof.officialDocumentUrl).hostname.replace(/^www\./u, "") === new URL(proof.officialUrl).hostname.replace(/^www\./u, "") &&
+            [proof.officialDocumentUrl, proof.bookingUrl].includes(contextUrl) && proof.venueName === job.request.identity.name &&
+            proof.canonicalAddress === job.request.identity.address && proof.timeZone === job.request.input.timeZone &&
+            typeof phone === "string" && /^\+1[2-9]\d{2}[2-9]\d{6}$/u.test(phone) && proof.publicCoursePhone === phone &&
+            proof.alias === adapter.alias && typeof adapter.alias === "string" && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(adapter.alias) &&
+            adapter.facilityIds?.length === 1 && Number.isSafeInteger(proof.facilityId) && proof.facilityId > 0 && proof.facilityId <= 2147483647 && proof.facilityId === adapter.facilityIds[0] &&
+            typeof proof.courseId === "string" && proof.courseId.length > 0 && proof.courseId.length <= 128 &&
+            typeof proof.providerAddress === "string" && proof.providerAddress.length >= 15 && proof.providerAddress.length <= 1024 &&
+            proof.canonicalStreetType === null && ["rd", "st", "dr", "ave", "blvd", "ln", "ct", "pkwy", "hwy", "way", "cir", "trl", "ter"].includes(proof.providerStreetType) &&
+            keys(configuration) === "apiAlias,facilityIds" && typeof configuration.apiAlias === "string" && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(configuration.apiAlias) &&
+            Array.isArray(configuration.facilityIds) && configuration.facilityIds.length === 1 &&
+            configuration.facilityIds.every((id, index) => Number.isSafeInteger(id) && id > 0 && id <= 2147483647 && (index === 0 || configuration.facilityIds[index - 1] < id)) &&
+            configuration.facilityIds.includes(proof.facilityId) && configurationKey && sha(proof.configurationSha256) &&
+            proof.configurationSha256 === createHash("sha256").update(configurationKey).digest("hex") && sha(proof.semanticDigest) && semanticKey &&
+            proof.semanticDigest === createHash("sha256").update(semanticKey).digest("hex") &&
+            proof.warmTransport === "NATIVE_CHROME" && proof.requiredCapability === "LOCAL_CHROME") {
+          const bytes = JSON.stringify(proof); if (Buffer.byteLength(bytes, "utf8") <= 16_000) adapter.officialStreetTypeOmittedProof = JSON.parse(bytes);
+        }
+      } catch { /* Only the current private inspector can confer omission proof. */ }
+    }
     if (adapter.family === "TEEITUP" && observed?.family === "TEEITUP" && adapterObservation.jobId === job.id &&
         adapterObservation.officialUrl === job.request.identity.officialUrl && adapterObservation.bookingUrl === proposedSource.bookingUrl &&
         adapterObservation.contextUrl === contextUrl && adapterObservation.identityKey === canonicalDataKey(job.request.identity) &&
@@ -299,6 +353,7 @@ function safeMindbodyReplay(value) {
       Object.hasOwn(value, "readyState") && !["loading", "interactive", "complete", "UNKNOWN"].includes(value.readyState)) return undefined;
   return Object.fromEntries([...allowed].filter(key => Object.hasOwn(value, key)).map(key => [key, value[key]]));
 }
+const USCHEDULE_READ_GATES = new Set(["PUBLIC_SIMULATOR_SCHEDULER_NOW_REQUIRES_INTERACTIVE_ACCESS","PUBLIC_LOCATION_RENTAL_CHANGED","PUBLIC_SIMULATOR_RENTAL_SELECTORS_ARE_MISSING_OR_AMBIGUOUS","SELECTED_PUBLIC_RENTAL_CHANGED","REVIEWED_DEFAULT_ONE_HOUR_SIMULATOR_RENTAL_IS_NO_LONGER_UNAMBIGUOUS","PUBLIC_AVAILABILITY_LIST_IS_MISSING_OR_AMBIGUOUS","PUBLIC_AVAILABILITY_LIST_CHANGED_STRUCTURE","PUBLIC_AVAILABILITY_LIST_HAS_UNOWNED_ROWS","PUBLIC_POOLED_RESOURCE_IDENTITY_CHANGED","PUBLIC_SIMULATOR_START_ENCODING_CHANGED","PUBLIC_SIMULATOR_START_IS_INVALID","SIMULATOR_START_IS_INVALID","SIMULATOR_START_IS_AMBIGUOUS_IN_THE_VENUE_TIMEZONE","PUBLIC_SIMULATOR_RENTAL_CHANGED_IDENTITY","PUBLIC_RENTAL_TENANT_CHANGED","PUBLIC_DATE_DECLARATION_IS_UNBOUNDED","PUBLIC_SELECTED_DATE_CHANGED","PUBLIC_SELECTED_DATE_IS_INVALID","PUBLIC_SELECTED_DATE_IS_NOT_THE_REQUESTED_DATE","PUBLIC_ROW_RENTAL_IDENTITY_CHANGED","PUBLIC_AVAILABILITY_LIST_IS_NOT_STRICTLY_ORDERED","PUBLIC_CONTINUATION_CONTROL_IS_AMBIGUOUS","PUBLIC_CONTINUATION_DECLARATION_IS_UNBOUNDED","PUBLIC_CONTINUATION_DECLARATION_CHANGED","PUBLIC_CONTINUATION_CURSOR_IS_INVALID","PUBLIC_CONTINUATION_CURSOR_CHANGED","PUBLIC_SIMULATOR_RESPONSE_EXCEEDS_ITS_SIZE_LIMIT","PUBLIC_SIMULATOR_RESPONSE_ENCODING_CHANGED","PUBLIC_SIMULATOR_SCHEDULER_CHANGED_DESTINATION","ANONYMOUS_PUBLIC_SCHEDULER_SESSION_CHANGED","PUBLIC_SIMULATOR_SCHEDULER_RETURNED_AN_UNEXPECTED_RESPONSE_TYPE","PUBLIC_SIMULATOR_REFRESH_RESPONSE_IS_INVALID","PUBLIC_SIMULATOR_QUERY_DID_NOT_RETURN_A_SAFE_REFRESH","PUBLIC_GROUP_SELECTOR_IS_UNBOUNDED","PUBLIC_GROUP_SELECTOR_IS_AMBIGUOUS","PUBLIC_GROUP_SELECTOR_IS_HIDDEN","PUBLIC_GROUP_SELECTOR_CHANGED","OFFICIAL_PUBLIC_LOCATION_SOURCE_CHANGED","ANONYMOUS_PUBLIC_SESSION_CHANGED","ANONYMOUS_PUBLIC_SESSION_MISSING","PUBLIC_LOCATION_FILTER_CONTRACT_CHANGED","PUBLIC_LOCATION_DID_NOT_SELECT_THE_REQUESTED_VENUE","PUBLIC_RENTAL_DID_NOT_SELECT","INVALID_LEARNED_PUBLIC_RENTAL","PUBLIC_LOCATION_CATALOG_CHANGED","LEARNED_PUBLIC_RENTAL_IS_NO_LONGER_AVAILABLE","PUBLIC_SINGLE_BAY_SELECTOR_IS_UNAVAILABLE","PUBLIC_CONTINUATION_DID_NOT_ADVANCE","PUBLIC_DATE_LIST_LEFT_ITS_BOUNDS","PUBLIC_CONTINUATION_REGRESSED","PUBLIC_CONTINUATION_REPEATED_A_START","PUBLIC_DATE_LIST_REORDERED_DATES","PUBLIC_RENTAL_CROSSES_A_TIMEZONE_TRANSITION","PUBLIC_DATE_LIST_WAS_NOT_COMPLETELY_OBSERVED","REVIEWED_USCHEDULE_RENTAL_SOURCE_IS_NOT_BOUND","PUBLIC_SIMULATOR_SERVICE_CHANGED_IDENTITY","PUBLIC_CONTINUATION_LEFT_ITS_BOUNDED_CALENDAR_HORIZON","PUBLIC_CONTINUATION_INTRODUCED_AN_OLDER_START","PUBLIC_CONTINUATION_REPEATED_A_NEW_START","PUBLIC_AVAILABILITY_PAGE_REORDERED_DATES","PUBLIC_RENTAL_CROSSES_AN_AMBIGUOUS_TIMEZONE_TRANSITION"]);
 function safeReplayDiagnostic(value) {
   if (!value || typeof value !== "object" || !/^[A-Z_0-9]{1,80}$/u.test(value.code ?? "")) return undefined;
   const result = { code: value.code };
@@ -316,6 +371,7 @@ function safeReplayDiagnostic(value) {
   const simulatorError = value.simulatorError;
   if (simulatorError && ["INVALID_SOURCE", "INVALID_REQUEST", "UNSUPPORTED_PROVIDER", "UNSUPPORTED_DURATION", "PARTY_TOO_LARGE", "PUBLIC_SESSION_REQUIRED", "HTTP_ERROR", "SCHEMA_CHANGED"].includes(simulatorError.code) && typeof simulatorError.retryable === "boolean") {
     result.simulatorError = { code: simulatorError.code, retryable: simulatorError.retryable };
+    if (value.code === "SIMULATOR_PROVIDER_ERROR" && ["INVALID_SOURCE", "SCHEMA_CHANGED"].includes(simulatorError.code) && USCHEDULE_READ_GATES.has(simulatorError.uscheduleGate)) result.simulatorError.uscheduleGate = simulatorError.uscheduleGate;
     if (Number.isInteger(simulatorError.httpStatus) && simulatorError.httpStatus >= 100 && simulatorError.httpStatus <= 599)
       result.simulatorError.httpStatus = simulatorError.httpStatus;
   }
@@ -466,9 +522,22 @@ export function safeTeeItUpDelegationDiagnostic(value) {
     return { stage: value.stage, gates: Object.fromEntries(gates.map(key => [key, value.gates[key]])) };
   } catch { return undefined; }
 }
+export function safeFixedAdapterReadDiagnostic(value) {
+  try {
+    if (!value || typeof value !== "object" || Array.isArray(value) || value.role !== "TEEITUP_DIRECTORY" ||
+        !["TRANSPORT", "RESPONSE_HEADERS", "RESPONSE_BODY"].includes(value.stage) ||
+        !["NONE", "UNKNOWN", "ABORT", "TIMEOUT", "ENOTFOUND", "EAI_AGAIN", "ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "TLS_CERTIFICATE", "BODY_LIMIT"].includes(value.transportCode) ||
+        !(value.httpStatus === null || Number.isInteger(value.httpStatus) && value.httpStatus >= 100 && value.httpStatus <= 599) ||
+        !["responseRedirected", "responseUrlMatches"].every(key => value[key] === null || typeof value[key] === "boolean") ||
+        !Number.isSafeInteger(value.elapsedMs) || value.elapsedMs < 0 || value.elapsedMs > 120_000 ||
+        !(value.responseBytes === null || Number.isSafeInteger(value.responseBytes) && value.responseBytes >= 0 && value.responseBytes <= 600_000)) return undefined;
+    return Object.fromEntries(["stage", "role", "httpStatus", "responseRedirected", "responseUrlMatches", "elapsedMs", "responseBytes", "transportCode"].map(key => [key, value[key]]));
+  } catch { return undefined; }
+}
 export function safeBrowserFailureDiagnostics(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const teeItUpDelegation = safeTeeItUpDelegationDiagnostic(value.teeItUpDelegation);
+  const adapterRead = safeFixedAdapterReadDiagnostic(value.adapterRead);
   return { requests: (Array.isArray(value.requests) ? value.requests : []).slice(-12).map(request => {
     if (!request || typeof request !== "object" || Array.isArray(request)) return undefined;
     const safe = safeReplayDiagnostic({ ...request, code: "REQUEST_STATE" });
@@ -481,6 +550,7 @@ export function safeBrowserFailureDiagnostics(value) {
   }).filter(Boolean), requestFailures: safeBrowserRequestFailures(value.requestFailures), ...safeNativeBrowserDiagnostics(value), ...safeOfficialBrowserDiagnostics(value),
   ...safeFixedReaderFailureDiagnostics(value),
   ...(teeItUpDelegation ? { teeItUpDelegation } : {}),
+  ...(adapterRead ? { adapterRead } : {}),
   capabilityDiagnostics: (Array.isArray(value.capabilityDiagnostics) ? value.capabilityDiagnostics : []).slice(-12)
     .map(safeReplayDiagnostic).filter(item => item?.code === "SUBFRAME_UNSUPPORTED"),
   ...(typeof value.loading === "boolean" ? { loading: value.loading } : {}),
@@ -623,10 +693,11 @@ export function createDiscoverySnapshotCompactor() {
     if (snapshot && typeof snapshot === "object") {
       const projected = { ...snapshot };
       delete projected.trustedContext;
-      if (projected.adapter?.family === "CPS" || projected.adapter && Object.hasOwn(projected.adapter, "officialDelegatedBookingProof")) {
+      if (projected.adapter?.family === "CPS" || projected.adapter && (Object.hasOwn(projected.adapter, "officialDelegatedBookingProof") || Object.hasOwn(projected.adapter, "officialStreetTypeOmittedProof"))) {
         projected.adapter = { ...projected.adapter };
         if (projected.adapter.family === "CPS") delete projected.adapter.officialPostalConflictProof;
         delete projected.adapter.officialDelegatedBookingProof;
+        delete projected.adapter.officialStreetTypeOmittedProof;
       }
       delete projected.completedPublicAssetRequests; delete projected.completedPublicAssetRequestsOverflow;
       delete projected.nativeDocumentRedirects;
@@ -1141,7 +1212,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
             browserActions++;
             if (browserControlsInvalidated && !["open", "inspect_adapter", "finish"].includes(input.action))
               throw discoveryError("BROWSER_SESSION_CLOSED");
-            if (["open", "finish", "inspect_adapter"].includes(input.action) || adapterObservation?.adapter?.officialBookingSourceProof || adapterObservation?.adapter?.officialDelegatedBookingProof) adapterObservation = undefined;
+            if (shouldInvalidateDiscoveryAdapterObservation(input.action, adapterObservation)) adapterObservation = undefined;
             const directSource = discoveryDirectProtocolSource(job, input, { officialSourceObserved,
               officialUrl: job.request.identity.officialUrl, observedNavigationUrls });
             if (directSource) {

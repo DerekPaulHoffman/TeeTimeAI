@@ -1,4 +1,5 @@
 import { fetchForeupTeeSheet } from "@/lib/adapters/foreup";
+import { uscheduleReadGate } from "@/lib/simulators/providers/uschedule-read-diagnostic";
 import { fetchTeeItUpTeeSheet } from "@/lib/adapters/teeitup";
 import { createAddressPinnedPublicFetchTransport } from "@/lib/automation/address-pinned-public-fetch";
 import { createUSchedulePublicSession } from "@/lib/automation/uschedule-public-session";
@@ -35,6 +36,8 @@ import { parseCpsSource } from "./cps-source";
 import { executeCps, inspectCps } from "./cps-executor";
 import { deriveUScheduleOfficialLocation, parseUScheduleLocationSource } from "@/lib/simulators/providers/uschedule-location-source";
 import { executeUSchedulePublicLocation, inspectUSchedulePublicLocation } from "./uschedule-location-executor";
+import { deriveUSchedulePublicRentalParty } from "./uschedule-public-rental-party";
+import { isFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
 import { observedTeeItUpOfficialBookingChain, type TeeItUpOfficialBookingToken } from "./teeitup-official-booking-context";
 import { bindTeeItUpOfficialBookingFacility, type TeeItUpOfficialBookingSourceProof, type TeeItUpObservedSourceChain } from "./teeitup-official-booking-source";
 import { readTeeItUpOfficialBookingChain } from "./teeitup-official-booking-reader";
@@ -44,6 +47,9 @@ import type { NativeOfficialPageReader } from "./native-official-page-reader";
 import { readTeeItUpDelegatedBookingChain, type DelegatedReaderDependencies } from "./teeitup-delegated-booking-reader";
 import { currentNativeDelegatedChain, type NativeDelegatedChainToken } from "./teeitup-delegated-booking-context";
 import { bindDelegatedFacility, type TeeItUpDelegatedBookingProof } from "./teeitup-delegated-booking-source";
+import { fixedAdapterTransportCode, rememberFixedAdapterReadFailure, getFixedAdapterReadDiagnostic, type FixedAdapterReadDiagnostic } from "./fixed-adapter-read-diagnostic";
+import { parseTeeItUpBookingConfiguration, type TeeItUpBookingConfiguration } from "./teeitup-booking-configuration";
+import { bindTeeItUpStreetTypeOmittedProof, isTeeItUpStreetTypeOmissionCandidate, type TeeItUpStreetTypeOmittedProof } from "./teeitup-street-type-omitted-proof";
 import { parseMindbodyAppointmentSource } from "./mindbody-appointment-grid";
 import { executeMindbodyAppointments, inspectMindbodyAppointments, getMindbodyAppointmentDiagnostic,
   type MindbodyAppointmentDiagnostic, type MindbodyAppointmentReaderDeps } from "./mindbody-appointment-reader";
@@ -90,10 +96,11 @@ function exactKeys(url: URL, required: string[], optional: string[] = []) {
   return new Set(keys).size === keys.length && required.every(key => keys.includes(key)) && keys.every(key => required.includes(key) || optional.includes(key));
 }
 
-function simulatorErrorDiagnostic(error: unknown): AccessExecutionDiagnostic | undefined {
+function simulatorErrorDiagnostic(error: unknown, uschedule = false): AccessExecutionDiagnostic | undefined {
   if (!(error instanceof SimulatorAvailabilityError)) return;
   const diagnostic = accessExecutionDiagnosticSchema.safeParse({ code: "SIMULATOR_PROVIDER_ERROR", simulatorError: {
     code: error.code, retryable: error.retryable === true,
+    ...(uschedule && uscheduleReadGate(error) ? { uscheduleGate: uscheduleReadGate(error) } : {}),
     ...(Number.isInteger(error.httpStatus) && error.httpStatus! >= 100 && error.httpStatus! <= 599 ? { httpStatus: error.httpStatus } : {}),
   } });
   return diagnostic.success ? diagnostic.data : undefined;
@@ -111,7 +118,8 @@ function mindbodyReplayDiagnostic(error: unknown): AccessExecutionDiagnostic | u
 
 /** One fixed GET-only transport for existing public readers; model-supplied
  * routes, headers, bodies and provider mutex names never enter this contract. */
-function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMetadata, input?: AccessExecutionInput) {
+function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMetadata, input?: AccessExecutionInput,
+  readBudget = { requests: 0, dataBytes: 0, bookingConfigurationRequested: false }) {
   const family = familyForSource(source);
   let fixedReadFailure: string | undefined;
   // Keep controller-owned validation separate from provider prose even when a
@@ -130,6 +138,8 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
   if (family === "TEEITUP" && !source.venueAddress) fail("ADAPTER_IDENTITY_MISSING");
   const savedPostalProof = adapter?.family === "TEEITUP" ? adapter.officialPostalConflictProof : undefined;
   const savedDelegatedProof = adapter?.family === "TEEITUP" ? adapter.officialDelegatedBookingProof : undefined;
+  const savedOmittedProof = adapter?.family === "TEEITUP" ? adapter.officialStreetTypeOmittedProof : undefined;
+  if (savedOmittedProof && !deps.localCapabilities?.includes("LOCAL_CHROME")) fail("LOCAL_CHROME_REQUIRED");
   if (savedDelegatedProof && !deps.localCapabilities?.includes("LOCAL_CHROME")) fail("LOCAL_CHROME_REQUIRED");
   if (savedPostalProof?.warmTransport === "NATIVE_CHROME" &&
       (!deps.localCapabilities?.includes("LOCAL_CHROME") || !deps.readNativeOfficialPage)) fail("LOCAL_CHROME_REQUIRED");
@@ -147,6 +157,10 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
   let officialBookingSourceProof: TeeItUpOfficialBookingSourceProof | undefined;
   let officialPostalConflictProof: TeeItUpPostalConflictProof | undefined;
   let officialDelegatedBookingProof: TeeItUpDelegatedBookingProof | undefined;
+  let publicBookingConfiguration: TeeItUpBookingConfiguration | undefined;
+  let officialStreetTypeOmittedProof: TeeItUpStreetTypeOmittedProof | undefined;
+  let omissionOfficialPage: OfficialIdentityPage | undefined;
+  const apiAlias = () => publicBookingConfiguration?.apiAlias ?? teeitup?.alias;
   let delegatedToken = deps.nativeDelegatedChainToken;
   let preparingDelegation: Promise<void> | undefined;
   const prepareDelegation = async () => {
@@ -175,7 +189,6 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
     validateInitialBookingToken();
   }
   let availabilityWasArray = false;
-  let requests = 0, dataBytes = 0;
   const parseUrl = (value: string) => {
     if (!isSafeRecipeUrl(value)) return fail("UNSCOPED_ADAPTER_REQUEST");
     const url = new URL(value);
@@ -185,7 +198,7 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
     if (savedPostalProof && url.href === savedPostalProof.officialSourceProof.officialPageUrl &&
         source.officialUrl && savedPostalProof.officialUrl === source.officialUrl && url.origin === new URL(source.officialUrl).origin) return url;
     if (teeitup && url.origin === "https://phx-api-be-east-1b.kenna.io") {
-      if (url.pathname === `/alias/${teeitup.alias}/facilities` && !url.search) return url;
+      if (url.pathname === `/alias/${apiAlias()}/facilities` && !url.search) return url;
       if (input && adapter?.family === "TEEITUP" && teeitupFacilities && url.pathname === "/v2/tee-times" &&
           exactKeys(url, ["date", "facilityIds", "returnPromotedRates"]) && url.searchParams.get("date") === input.date &&
           url.searchParams.get("returnPromotedRates") === "true" &&
@@ -212,7 +225,7 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
   };
   const transport = deps.fetch ?? createAddressPinnedPublicFetchTransport({ parseUrl, maxResponseBytes: 600_000, timeoutMs: 15_000, redirectLimit: 0 });
   const read: typeof fetch = async (value, init) => {
-    if (++requests > (savedBookingProof || initialBookingToken ? 2 : 6)) fail("ADAPTER_REQUEST_LIMIT");
+    if (++readBudget.requests > (savedBookingProof || initialBookingToken ? readBudget.bookingConfigurationRequested ? 6 : 2 : 6)) fail("ADAPTER_REQUEST_LIMIT");
     const raw = value instanceof Request ? value.url : String(value);
     const method = (init?.method ?? (value instanceof Request ? value.method : "GET")).toUpperCase();
     const headers = new Headers(init?.headers ?? (value instanceof Request ? value.headers : undefined));
@@ -220,25 +233,33 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
         ["authorization", "proxy-authorization", "cookie", "x-api-key"].some(key => headers.has(key))) fail("UNSAFE_ADAPTER_REQUEST");
     const url = parseUrl(raw);
     if (teeitup && url.hostname === "phx-api-be-east-1b.kenna.io" &&
-        (headers.get("x-be-alias") !== teeitup.alias || headers.get("origin") !== teeitup.origin || headers.get("referer") !== `${teeitup.origin}/`))
+        (headers.get("x-be-alias") !== apiAlias() || headers.get("origin") !== teeitup.origin || headers.get("referer") !== `${teeitup.origin}/`))
       fail("UNSAFE_ADAPTER_REQUEST");
     // This independent source refresh runs before acquiring a data lease.
     // No nested queue/lease can deadlock on the same provider family.
     if (teeitup) await prepareBookingChain();
     if (teeitup) await prepareDelegation();
     return queue.run(requestFamilyForUrl(url.href), async () => {
+      const readStartedAt = Date.now();
+      const directoryRead = Boolean(teeitup && url.origin === "https://phx-api-be-east-1b.kenna.io" && url.pathname === `/alias/${apiAlias()}/facilities`);
+      let readDiagnostic: FixedAdapterReadDiagnostic = { stage: "TRANSPORT", role: "TEEITUP_DIRECTORY", httpStatus: null,
+        responseRedirected: null, responseUrlMatches: null, elapsedMs: 0, responseBytes: null, transportCode: "NONE" };
+      try {
       signal.throwIfAborted();
       validateInitialBookingToken();
       const response = await transport(url, { ...init, method: "GET", headers, signal: init?.signal ? AbortSignal.any([signal, init.signal]) : signal,
         credentials: "omit", redirect: "manual", cache: "no-store" });
+      readDiagnostic = { ...readDiagnostic, stage: "RESPONSE_HEADERS", httpStatus: response.status,
+        responseRedirected: response.redirected, responseUrlMatches: response.url ? response.url === url.href : null };
       if (response.status === 429) failHttp("PROVIDER_THROTTLED", response.status);
       if ([401, 403].includes(response.status)) failHttp("ACCESS_REQUIRED", response.status);
       if (!response.ok) failHttp("ADAPTER_TRANSPORT_FAILED", response.status);
       if (response.redirected || response.url && response.url !== url.href) fail("ADAPTER_TRANSPORT_FAILED");
       const bytes = await response.arrayBuffer();
+      readDiagnostic = { ...readDiagnostic, stage: "RESPONSE_BODY", responseBytes: bytes.byteLength <= 600_000 ? bytes.byteLength : null };
       if (bytes.byteLength > 600_000) fail("ADAPTER_RESPONSE_LIMIT");
-      dataBytes += bytes.byteLength;
-      if ((savedBookingProof || initialBookingToken) && dataBytes > 1_200_000) fail("ADAPTER_RESPONSE_LIMIT");
+      readBudget.dataBytes += bytes.byteLength;
+      if ((savedBookingProof || initialBookingToken) && readBudget.dataBytes > 1_200_000) fail("ADAPTER_RESPONSE_LIMIT");
       const text = Buffer.from(bytes).toString("utf8");
       if (adapter?.family === "TEEITUP" && adapter.officialIdentityProof && url.href === adapter.officialIdentityProof.officialPageUrl) {
         if (!/^text\/html(?:;|$)/iu.test(response.headers.get("content-type") ?? "")) fail("OFFICIAL_IDENTITY_UNVERIFIED");
@@ -250,7 +271,16 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
         if (!/^text\/html(?:;|$)/iu.test(response.headers.get("content-type") ?? "")) fail("OFFICIAL_POSTAL_CONFLICT_UNVERIFIED");
         postalOfficialPage = { url: url.href, html: text };
       }
-      if (teeitup && url.pathname === `/alias/${teeitup.alias}/facilities`) {
+      if (teeitup && url.pathname === `/alias/${apiAlias()}/facilities`) {
+        if (omissionOfficialPage) {
+          if (!publicBookingConfiguration) fail("ADAPTER_CONFIGURATION_UNVERIFIED");
+          officialStreetTypeOmittedProof = bindTeeItUpStreetTypeOmittedProof(source, omissionOfficialPage, JSON.parse(text),
+            publicBookingConfiguration!, deps.trustedContext?.canonicalCoursePhone);
+          if (savedOmittedProof && JSON.stringify(officialStreetTypeOmittedProof) !== JSON.stringify(savedOmittedProof)) fail("OFFICIAL_STREET_TYPE_OMITTED_CHANGED");
+          officialIdentityProof = undefined; officialBookingSourceProof = undefined; officialPostalConflictProof = undefined; officialDelegatedBookingProof = undefined;
+          teeitupFacilities = resolveTeeItUpRecipeFacilities(source, JSON.parse(text), undefined, "OUTDOOR", undefined, undefined, undefined,
+            officialStreetTypeOmittedProof, publicBookingConfiguration);
+        } else {
         if (delegatedToken) {
           officialDelegatedBookingProof = bindDelegatedFacility(source, currentNativeDelegatedChain(delegatedToken), JSON.parse(text));
           if (savedDelegatedProof && JSON.stringify(officialDelegatedBookingProof) !== JSON.stringify(savedDelegatedProof)) fail("OFFICIAL_DELEGATED_SOURCE_CHANGED");
@@ -285,10 +315,12 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
             }
           }
         }
+        }
         validateInitialBookingToken();
         if (adapter && (adapter.family !== "TEEITUP" || adapter.alias !== teeitup.alias ||
             JSON.stringify(adapter.facilityIds) !== JSON.stringify(teeitupFacilities.map(row => row.id)) ||
             (adapter.offeringKind === "SIMULATOR") !== teeitupFacilities.every(row => row.isSimulator === true))) fail("ADAPTER_CONFIGURATION_CHANGED");
+        if (publicBookingConfiguration && teeitupFacilities.some(row => !publicBookingConfiguration!.facilityIds.includes(row.id))) fail("ADAPTER_CONFIGURATION_CHANGED");
       }
       if (teeitup && input && url.pathname === "/v2/tee-times") {
         if (adapter?.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR")
@@ -317,9 +349,44 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
         }))) fail("ADAPTER_AVAILABILITY_SCHEMA_CHANGED");
       }
       return new Response(bytes, { status: response.status, headers: response.headers });
+      } catch (error) {
+        if (directoryRead) rememberFixedAdapterReadFailure(error, { ...readDiagnostic,
+          elapsedMs: Math.max(0, Math.min(120_000, Date.now() - readStartedAt)),
+          transportCode: readDiagnostic.stage === "TRANSPORT" ? fixedAdapterTransportCode(error) : "NONE" });
+        throw error;
+      }
     });
   };
-  return { read, family, teeitup, teeitupFacilities: () => teeitupFacilities, officialIdentityProof: () => officialIdentityProof,
+  return { read, family, teeitup, apiAlias, directoryUrl: () => `https://phx-api-be-east-1b.kenna.io/alias/${apiAlias()}/facilities`,
+    publicBookingConfiguration: () => publicBookingConfiguration ? structuredClone(publicBookingConfiguration) : undefined,
+    async refreshStreetTypeOmittedSource() {
+      if (!deps.localCapabilities?.includes("LOCAL_CHROME") || !source.officialUrl || !isTeeItUpStreetTypeOmissionCandidate(source.venueAddress ?? ""))
+        fail("LOCAL_CHROME_REQUIRED");
+      // No provider data lease is held here. The fixed reader retains its
+      // original native/current/raw/visible and capture-age checks.
+      const loaded = await import("./native-official-page-reader");
+      const native = typeof loaded.readNativeOfficialIdentityPage === "function" ? loaded :
+        (loaded as unknown as { default: typeof loaded }).default;
+      const requestLease: typeof runWithProviderRequestLease | undefined = deps.requestLease ? async (family, work) => {
+        const reply = await deps.requestLease!(family, work);
+        return reply.acquired ? { acquired: true, value: await reply.value } : { acquired: false };
+      } : undefined;
+      const factory: NativeOfficialPageReader = deps.readNativeOfficialPage ?? ((s, url, end) =>
+        native.readNativeOfficialIdentityPage(s, url, end, { requestLease }));
+      omissionOfficialPage = await factory(source, source.officialUrl!, new Date(deadline));
+      if (!isFreshNativeOfficialIdentityPage(omissionOfficialPage, source.officialUrl!)) fail("OFFICIAL_STREET_TYPE_OMITTED_UNVERIFIED");
+    },
+    async preparePublicBookingConfiguration() {
+      if (!teeitup) fail("ADAPTER_SOURCE_MISMATCH");
+      readBudget.bookingConfigurationRequested = true;
+      const response = await read(source.bookingUrl, { headers: { accept: "text/html,application/xhtml+xml;q=0.9" } });
+      if (!/^text\/html(?:;|$)/iu.test(response.headers.get("content-type") ?? "")) fail("ADAPTER_CONFIGURATION_UNVERIFIED");
+      const fresh = parseTeeItUpBookingConfiguration(await response.text(), source.venueName);
+      const saved = adapter?.family === "TEEITUP" ? adapter.publicBookingConfiguration : undefined;
+      if (saved && JSON.stringify(saved) !== JSON.stringify(fresh) || teeitup.selectedIds?.some(id => !fresh.facilityIds.includes(id))) fail("ADAPTER_CONFIGURATION_CHANGED");
+      publicBookingConfiguration = fresh;
+    },
+    teeitupFacilities: () => teeitupFacilities, officialIdentityProof: () => officialIdentityProof,
     async refreshPostalSource() {
       if (!savedPostalProof) return;
       const url = savedPostalProof.officialSourceProof.officialPageUrl;
@@ -332,6 +399,7 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
     officialBookingSourceProof: () => { validateInitialBookingToken(); return officialBookingSourceProof; },
     officialDelegatedBookingProof: () => officialDelegatedBookingProof,
     officialPostalConflictProof: () => officialPostalConflictProof,
+    officialStreetTypeOmittedProof: () => officialStreetTypeOmittedProof,
     teeitupSimulatorSlots: () => teeitupSimulatorSlots,
     dispose: () => queue.dispose(), availabilityWasArray: () => availabilityWasArray, failureReason: () => fixedReadFailure };
 }
@@ -406,36 +474,77 @@ export async function inspectExistingAdapter(source: Source, deps: Dependencies)
       const config = inspectUScheduleRecipeConfiguration(await response.text(), source.bookingUrl);
       const normalized = source.venueName.normalize("NFKC").toLowerCase().replace(/&/gu, "and").replace(/[^a-z0-9]/gu, "");
       if (!config || normalized.length < 8 || normalized !== config.tenant.replace(/-/gu, "")) fail("ADAPTER_IDENTITY_MISMATCH");
+      let publicRentalPartyProof;
+      if (deps.officialIdentityPage) {
+        try { publicRentalPartyProof = deriveUSchedulePublicRentalParty(source, deps.officialIdentityPage); }
+        catch { if ((deps.requestedInput?.players ?? 1) > 1) fail("USCHEDULE_PUBLIC_PARTY_UNVERIFIED"); }
+      }
+      if ((deps.requestedInput?.players ?? 1) > 1 && (!publicRentalPartyProof || deps.requestedInput!.players > publicRentalPartyProof.maxPartySize))
+        fail("USCHEDULE_PUBLIC_PARTY_UNVERIFIED");
       return { adapter: existingAdapterMetadataSchema.parse({ family: "USCHEDULE", tenant: config.tenant,
-        serviceId: config.selected.serviceId, serviceName: config.selected.serviceName }) };
+        serviceId: config.selected.serviceId, serviceName: config.selected.serviceName,
+        ...(publicRentalPartyProof ? { publicRentalPartyProof } : {}) }) };
     } finally { session.dispose(); }
   }
   const inspectDeadline = new Date(Math.min(deps.deadlineAt?.getTime() ?? Infinity, Date.now() + 120000));
-  let session = reader(source, deps);
+  const readBudget = { requests: 0, dataBytes: 0, bookingConfigurationRequested: false };
+  let session = reader(source, deps, undefined, undefined, readBudget);
   try {
     if (session.teeitup) {
-      const directoryUrl = `https://phx-api-be-east-1b.kenna.io/alias/${session.teeitup.alias}/facilities`;
-      const directoryHeaders = {
-        accept: "application/json", "x-be-alias": session.teeitup.alias, origin: session.teeitup.origin, referer: `${session.teeitup.origin}/`,
-      };
-      try { await session.read(directoryUrl, { headers: directoryHeaders }); }
+      const readDirectory = () => session.read(session.directoryUrl(), { headers: {
+        accept: "application/json", "x-be-alias": session.apiAlias()!, origin: session.teeitup!.origin, referer: `${session.teeitup!.origin}/`,
+      } });
+      try {
+        try { await readDirectory(); }
+        catch (error) {
+          const diagnostic = getFixedAdapterReadDiagnostic(error);
+          if (diagnostic?.role !== "TEEITUP_DIRECTORY" || diagnostic.httpStatus !== 404 || diagnostic.stage !== "RESPONSE_HEADERS") throw error;
+          await session.preparePublicBookingConfiguration();
+          await readDirectory();
+        }
+      }
       catch (error) {
+        if (isTeeItUpStreetTypeOmissionCandidate(source.venueAddress ?? "") && deps.localCapabilities?.includes("LOCAL_CHROME") &&
+            error instanceof Error && ["OFFICIAL_POSTAL_SOURCE_UNVERIFIED", "OFFICIAL_IDENTITY_UNVERIFIED", "ADAPTER_IDENTITY_MISMATCH"].includes(error.message)) {
+          const initialDirectoryDiagnostic = getFixedAdapterReadDiagnostic(error);
+          try {
+            if (!session.publicBookingConfiguration()) await session.preparePublicBookingConfiguration();
+            await session.refreshStreetTypeOmittedSource();
+            await readDirectory();
+          } catch (omissionError) {
+            if (initialDirectoryDiagnostic && !getFixedAdapterReadDiagnostic(omissionError)) rememberFixedAdapterReadFailure(omissionError, initialDirectoryDiagnostic);
+            throw omissionError;
+          }
+        } else {
         if (!deps.localCapabilities?.includes("LOCAL_CHROME") || deps.nativeDelegatedChainToken || !source.officialUrl ||
             !(error instanceof Error) || !["OFFICIAL_POSTAL_SOURCE_UNVERIFIED", "OFFICIAL_IDENTITY_UNVERIFIED", "ADAPTER_IDENTITY_MISMATCH"].includes(error.message)) throw error;
         // Earn the chain in a separate fixed native reader after the failed
         // provider lease has drained. No lease is held across nested reads.
         session.dispose();
-        const token = await readTeeItUpDelegatedBookingChain(source, { ...deps, deadlineAt: inspectDeadline });
-        session = reader(source, { ...deps, nativeDelegatedChainToken: token, deadlineAt: inspectDeadline });
-        await session.read(directoryUrl, { headers: directoryHeaders });
+        const initialDirectoryDiagnostic = getFixedAdapterReadDiagnostic(error);
+        try {
+          const token = await readTeeItUpDelegatedBookingChain(source, { ...deps, deadlineAt: inspectDeadline });
+          const configuration = session.publicBookingConfiguration();
+          session = reader(source, { ...deps, nativeDelegatedChainToken: token, deadlineAt: inspectDeadline }, undefined, undefined, readBudget);
+          if (configuration) await session.preparePublicBookingConfiguration();
+          await readDirectory();
+        } catch (fallbackError) {
+          // This projection belongs to this invocation's original directory
+          // read; retaining it never replaces the later primary exception.
+          if (initialDirectoryDiagnostic) rememberFixedAdapterReadFailure(fallbackError, initialDirectoryDiagnostic);
+          throw fallbackError;
+        }
+        }
       }
       return { adapter: existingAdapterMetadataSchema.parse({ family: "TEEITUP", alias: session.teeitup!.alias,
         facilityIds: session.teeitupFacilities()!.map(row => row.id),
+        ...(session.publicBookingConfiguration() ? { publicBookingConfiguration: session.publicBookingConfiguration() } : {}),
         ...(session.teeitupFacilities()!.every(row => row.isSimulator === true) ? { offeringKind: "SIMULATOR" } : {}),
         ...(session.officialIdentityProof() ? { officialIdentityProof: session.officialIdentityProof() } : {}),
         ...(session.officialBookingSourceProof() ? { officialBookingSourceProof: session.officialBookingSourceProof() } : {}),
         ...(session.officialDelegatedBookingProof() ? { officialDelegatedBookingProof: session.officialDelegatedBookingProof() } : {}),
-        ...(session.officialPostalConflictProof() ? { officialPostalConflictProof: session.officialPostalConflictProof() } : {}) }) };
+        ...(session.officialPostalConflictProof() ? { officialPostalConflictProof: session.officialPostalConflictProof() } : {}),
+        ...(session.officialStreetTypeOmittedProof() ? { officialStreetTypeOmittedProof: session.officialStreetTypeOmittedProof() } : {}) }) };
     }
     if (session.family === "FOREUP") {
       const config = await readForeupPublicConfiguration({ bookingUrl: source.bookingUrl, courseName: source.venueName,
@@ -468,7 +577,7 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
     const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "GOLFVX", "REX", "MINDBODY"].includes(adapter.family) || adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR";
     if (input.timeZone !== recipe.source.timeZone || recipe.source.providerFamily.toUpperCase() !== adapter.family ||
         (recipe.target.kind === "SIMULATOR") !== simulator || simulator && (!recipe.target.offeringId || !input.durationMinutes) ||
-        adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR" && (adapter.facilityIds.length !== 1 || adapter.officialIdentityProof || adapter.officialBookingSourceProof || adapter.officialPostalConflictProof || adapter.officialDelegatedBookingProof)) fail("ADAPTER_TARGET_MISMATCH");
+        adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR" && (adapter.facilityIds.length !== 1 || adapter.officialIdentityProof || adapter.officialBookingSourceProof || adapter.officialPostalConflictProof || adapter.officialDelegatedBookingProof || adapter.officialStreetTypeOmittedProof)) fail("ADAPTER_TARGET_MISMATCH");
     if (adapter.family === "EZLINKS" && (!recipe.source.officialUrl || !recipe.source.venueAddress ||
         parseEzLinksSource(recipe.source.bookingUrl)?.tenant !== adapter.tenant || input.durationMinutes !== undefined))
       fail("ADAPTER_TARGET_MISMATCH");
@@ -533,6 +642,19 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
       }
       const normalized = recipe.source.venueName.normalize("NFKC").toLowerCase().replace(/&/gu, "and").replace(/[^a-z0-9]/gu, "");
       if (uschedulePublicTenant(recipe.source.bookingUrl) !== adapter.tenant || normalized.length < 8 || normalized !== adapter.tenant.replace(/-/gu, "")) fail("ADAPTER_IDENTITY_MISMATCH");
+      let capacity: number | null = null;
+      if (adapter.publicRentalPartyProof) {
+        const proof = adapter.publicRentalPartyProof;
+        if (!deps.localCapabilities?.includes("LOCAL_CHROME") || !deps.readNativeOfficialPage || !recipe.source.officialUrl ||
+            proof.officialPageUrl !== recipe.source.officialUrl || proof.bookingUrl !== recipe.source.bookingUrl || proof.venueName !== recipe.source.venueName)
+          fail("USCHEDULE_PUBLIC_PARTY_UNVERIFIED");
+        const deadline = new Date(Math.min(deps.deadlineAt?.getTime() ?? Infinity, Date.now() + 90_000));
+        const fresh = await deps.readNativeOfficialPage(recipe.source, proof.officialPageUrl, deadline);
+        if (!isFreshNativeOfficialIdentityPage(fresh, recipe.source.officialUrl) ||
+            JSON.stringify(deriveUSchedulePublicRentalParty(recipe.source, fresh)) !== JSON.stringify(proof)) fail("USCHEDULE_PUBLIC_PARTY_UNVERIFIED");
+        capacity = proof.maxPartySize;
+      }
+      if (input.players > (capacity ?? 1)) fail("USCHEDULE_PUBLIC_PARTY_UNVERIFIED");
       uscheduleSession = createUSchedulePublicSession(recipe.source.bookingUrl, deps);
       const available = await fetchUScheduleRecipeAvailability({ date: input.date, durationMinutes: input.durationMinutes!, partySize: 1,
         timeZone: input.timeZone, offering: { id: recipe.target.offeringId!, courseId: recipe.target.courseId, bookingUrl: recipe.source.bookingUrl,
@@ -540,7 +662,7 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
           maxPartySize: null, supportedDurationsMinutes: [input.durationMinutes!] } }, adapter, uscheduleSession.read);
       return result(available.slots.filter(slot => slot.startsAt > now && slot.startsAt >= start && slot.endsAt <= end).map(slot => ({
         sourceId: slot.sourceId, startsAt: slot.startsAt.toISOString(), endsAt: slot.endsAt.toISOString(), availableSpots: 1,
-        capacity: null, bookingUrl: recipe.source.bookingUrl, resourceId: slot.resourceId, productId: slot.productId,
+        capacity, bookingUrl: recipe.source.bookingUrl, resourceId: slot.resourceId, productId: slot.productId,
       })));
     }
     if (adapter.family === "FOREUP") {
@@ -560,12 +682,14 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
       return result(slots);
     }
     if (adapter.family === "TEEITUP") {
+      if (adapter.publicBookingConfiguration) await session!.preparePublicBookingConfiguration();
+      if (adapter.officialStreetTypeOmittedProof) await session!.refreshStreetTypeOmittedSource();
       if (adapter.officialIdentityProof) await session!.read(adapter.officialIdentityProof.officialPageUrl);
       if (adapter.officialPostalConflictProof) await session!.refreshPostalSource();
       if (adapter.offeringKind === "SIMULATOR") {
         const origin = new URL(recipe.source.bookingUrl).origin;
-        const headers = { accept: "application/json", "x-be-alias": adapter.alias, origin, referer: `${origin}/` };
-        await session!.read(`https://phx-api-be-east-1b.kenna.io/alias/${adapter.alias}/facilities`, { headers });
+        const headers = { accept: "application/json", "x-be-alias": session!.apiAlias()!, origin, referer: `${origin}/` };
+        await session!.read(session!.directoryUrl(), { headers });
         const url = new URL("https://phx-api-be-east-1b.kenna.io/v2/tee-times");
         url.searchParams.set("date", input.date); url.searchParams.set("facilityIds", adapter.facilityIds.join(",")); url.searchParams.set("returnPromotedRates", "true");
         await session!.read(url, { headers });
@@ -576,7 +700,7 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
       const origin = new URL(recipe.source.bookingUrl).origin;
       const bookingBaseUrl = adapter.facilityIds.length === 1 ? `${origin}/?course=${adapter.facilityIds[0]}` : `${origin}/`;
       const available = await fetchTeeItUpTeeSheet({ courseId: recipe.target.courseId, date: new Date(`${input.date}T00:00:00Z`), players: input.players, timeZone: input.timeZone,
-        metadata: { aliases: [adapter.alias], bookingBaseUrl, facilityIds: adapter.facilityIds } }, session!.read);
+        metadata: { aliases: [adapter.alias], bookingBaseUrl, facilityIds: adapter.facilityIds } }, session!.read, session!.publicBookingConfiguration()?.apiAlias);
       if (!session!.availabilityWasArray()) fail("ADAPTER_EMPTY_UNPROVEN");
       return result(available.slots.map(slot => ({ ...slot, time: deps.toInstant(slot.startsAt, input) })).filter(slot =>
         slot.time > now && slot.time >= start && slot.time < end && slot.availableSpots >= input.players).map(slot => ({
@@ -598,7 +722,7 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
       capacity: slot.maxPartySize, bookingUrl: recipe.source.bookingUrl, resourceId: slot.resourceId, productId: slot.productId,
     })));
   } catch (error) {
-    const diagnostic = recipe.adapter.family === "MINDBODY" ? mindbodyReplayDiagnostic(error) : simulatorErrorDiagnostic(error);
+    const diagnostic = recipe.adapter.family === "MINDBODY" ? mindbodyReplayDiagnostic(error) : simulatorErrorDiagnostic(error, recipe.adapter.family === "USCHEDULE");
     const message = session?.failureReason() ?? uscheduleSession?.failureReason() ?? diagnostic?.simulatorError?.code ??
       (error instanceof FixedAdapterFailure || recipe.adapter.family !== "ACUITY" && error instanceof Error ? error.message : "");
     return result([], /^[A-Z_]{1,80}$/u.test(message) ? message : "ADAPTER_READ_FAILED", diagnostic);

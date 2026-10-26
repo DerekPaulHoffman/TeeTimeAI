@@ -5,6 +5,8 @@ import { teeItUpOfficialIdentityProofSchema } from "./teeitup-official-identity"
 import { teeItUpOfficialBookingSourceProofSchema } from "./teeitup-official-booking-source";
 import { teeItUpPostalConflictProofSchema } from "./teeitup-postal-conflict-proof";
 import { teeItUpDelegatedBookingProofSchema } from "./teeitup-delegated-booking-source";
+import { teeItUpBookingConfigurationSchema } from "./teeitup-booking-configuration";
+import { teeItUpStreetTypeOmittedProofSchema } from "./teeitup-street-type-omitted-proof";
 import { lightspeedMetadataSchema } from "./lightspeed-source";
 import { ameliaMetadataSchema } from "./amelia-source";
 import { chronogolfMetadataSchema } from "./chronogolf-source";
@@ -14,6 +16,7 @@ import { rexMetadataSchema } from "./rex-source";
 import { cpsMetadataSchema } from "./cps-source";
 import { mindbodyAppointmentMetadataSchema } from "./mindbody-appointment-grid";
 import { isUScheduleNonMemberRental, uschedulePublicLocationProofSchema } from "@/lib/simulators/providers/uschedule-location-source";
+import { uschedulePublicRentalPartyProofSchema } from "./uschedule-public-rental-party";
 
 const numericId = z.number().int().min(1).max(2_147_483_647);
 const publicId = z.string().regex(/^[1-9]\d{0,9}$/u);
@@ -27,11 +30,17 @@ export const existingAdapterMetadataSchema = z.discriminatedUnion("family", [
       .refine(ids => new Set(ids).size === ids.length) }).strict(),
   z.object({ family: z.literal("TEEITUP"), alias: z.string().regex(/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u),
     facilityIds: z.array(numericId).min(1).max(20).refine(ids => new Set(ids).size === ids.length),
+    publicBookingConfiguration: teeItUpBookingConfigurationSchema.optional(),
     offeringKind: z.literal("SIMULATOR").optional(),
     officialIdentityProof: teeItUpOfficialIdentityProofSchema.optional(),
     officialBookingSourceProof: teeItUpOfficialBookingSourceProofSchema.optional(),
     officialPostalConflictProof: teeItUpPostalConflictProofSchema.optional(),
-    officialDelegatedBookingProof: teeItUpDelegatedBookingProofSchema.optional() }).strict()
+    officialDelegatedBookingProof: teeItUpDelegatedBookingProofSchema.optional(),
+    officialStreetTypeOmittedProof: teeItUpStreetTypeOmittedProofSchema.optional() }).strict()
+    .refine(value => !value.officialStreetTypeOmittedProof || Boolean(value.publicBookingConfiguration) && !value.officialIdentityProof &&
+      !value.officialBookingSourceProof && !value.officialPostalConflictProof && !value.officialDelegatedBookingProof && !value.offeringKind &&
+      value.alias === value.officialStreetTypeOmittedProof.alias && value.facilityIds.length === 1 && value.facilityIds[0] === value.officialStreetTypeOmittedProof.facilityId)
+    .refine(value => !value.publicBookingConfiguration || value.facilityIds.every(id => value.publicBookingConfiguration!.facilityIds.includes(id)))
     .refine(value => !value.officialDelegatedBookingProof || !value.officialIdentityProof && !value.officialBookingSourceProof && !value.officialPostalConflictProof && !value.offeringKind &&
       value.alias === value.officialDelegatedBookingProof.alias && value.facilityIds.length === 1 && value.facilityIds[0] === value.officialDelegatedBookingProof.facilityId)
     .refine(value => !value.officialBookingSourceProof || !value.officialIdentityProof && !value.offeringKind &&
@@ -39,7 +48,9 @@ export const existingAdapterMetadataSchema = z.discriminatedUnion("family", [
     .refine(value => !value.officialPostalConflictProof || !value.officialIdentityProof && !value.officialBookingSourceProof && !value.officialDelegatedBookingProof && !value.offeringKind &&
       value.alias === value.officialPostalConflictProof.alias && value.facilityIds.length === 1 && value.facilityIds[0] === value.officialPostalConflictProof.facilityId),
   z.object({ family: z.literal("USCHEDULE"), tenant: z.string().regex(/^[a-z][a-z0-9-]{2,62}$/u),
-    serviceId: publicId, serviceName: z.string().trim().min(3).max(200), publicLocationProof: uschedulePublicLocationProofSchema.optional() }).strict()
+    serviceId: publicId, serviceName: z.string().trim().min(3).max(200), publicLocationProof: uschedulePublicLocationProofSchema.optional(),
+    publicRentalPartyProof: uschedulePublicRentalPartyProofSchema.optional() }).strict()
+    .refine(value => !value.publicLocationProof || !value.publicRentalPartyProof)
     .refine(value => value.publicLocationProof ? isUScheduleNonMemberRental(value.serviceName) : isUSchedulePublicRentalLabel(value.serviceName),
       "A public location rental needs its independently verified location contract"),
   whooshSimulatorMetadataSchema,

@@ -20,6 +20,20 @@ beforeEach(() => {
   mocks.db.teeSearch.findUnique.mockResolvedValue({ id: "search1", status: "ACTIVE", alertGeneration: 1, scheduleVersion: 2, date: new Date("2030-01-02"), endTime: "17:00", userTimeZone: "UTC", preferences: [{ courseId: "course1" }] });
 });
 describe("current durable phone context on warm claim", () => {
+  it("returns unchanged TeeItUp omission context only to the private executor", async () => {
+    active.recipe = { engine: "EXISTING_ADAPTER", adapter: { family: "TEEITUP", officialStreetTypeOmittedProof: {} } };
+    expect(await claimNextRecipeExecution("worker1")).toMatchObject({ trustedContext: active.trustedContext });
+  });
+  it.each(["changed", "absent"])("expires %s TeeItUp omission context before launch", async change => {
+    active.recipe = { engine: "EXISTING_ADAPTER", adapter: { family: "TEEITUP", officialStreetTypeOmittedProof: {} } };
+    if (change === "changed") context.trustedContext = { canonicalCoursePhone: "+13035554321" };else delete context.trustedContext;
+    expect(await claimNextRecipeExecution("worker1")).toBeNull();
+    expect(mocks.db.localReaderJob.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: { status: "EXPIRED" } }));
+  });
+  it("does not give historical ordinary TeeItUp methods a new phone requirement", async () => {
+    active.recipe = { engine: "EXISTING_ADAPTER", adapter: { family: "TEEITUP" } };delete context.trustedContext;delete active.trustedContext;
+    expect(await claimNextRecipeExecution("worker1")).toHaveProperty("id", "job1");
+  });
   it("returns only freshly server-derived context to the private executor", async () => {
     expect(await claimNextRecipeExecution("worker1")).toMatchObject({ trustedContext: active.trustedContext });
   });

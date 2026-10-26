@@ -1,4 +1,5 @@
 import { parse, type DefaultTreeAdapterMap } from "parse5";
+import { readUScheduleNextAvailableView } from "./uschedule-public-view-control";
 import { createHash } from "node:crypto";
 import { parseUScheduleLocationSource, readUScheduleLocationCatalog, USCHEDULE_LOCATION_CLIENT,
   type UScheduleOfficialLocationProof } from "@/lib/simulators/providers/uschedule-location-source";
@@ -41,6 +42,7 @@ function validDate(value: string, format: "US" | "ISO") {
  */
 export function createUSchedulePublicReadPolicy(context: { officialLocation?: UScheduleOfficialLocationProof } = {}) {
   const sources = new Map<string, Map<string, Set<string>>>();
+  const nextAvailableSources = new Set<string>();
   const locationSources = new Map<string, { filters: Map<string, Set<string>>; clientUrl: string }>();
   const verifiedClients = new Set<string>();
   const scopedBooking = (value: string) => {
@@ -63,7 +65,7 @@ export function createUSchedulePublicReadPolicy(context: { officialLocation?: US
         return false;
       }
       const url = scopedBooking(value);
-      if (url && method === "GET") locationSources.delete(url.href);
+      if (url && method === "GET") { locationSources.delete(url.href); nextAvailableSources.delete(url.href); }
       if (!url || method !== "GET" || status !== 200 || !/^text\/html(?:;|$)/iu.test(contentType) || Buffer.byteLength(body) > 2_000_000) return false;
       sources.delete(url.href);
       if (context.officialLocation) {
@@ -94,6 +96,8 @@ export function createUSchedulePublicReadPolicy(context: { officialLocation?: US
       filters.set("service_type_id", new Set(options("select_service_type").filter(node => publicId.test(attr(node, "value") ?? "") &&
         (attr(node, "value") === "0" || isUSchedulePublicRentalLabel(text(node)))).map(node => attr(node, "value")!)));
       sources.set(url.href, filters);
+      const tenant = parseUScheduleLocationSource(url.href)?.tenant;
+      if (tenant && readUScheduleNextAvailableView(body, tenant).present) nextAvailableSources.add(url.href);
       return true;
     },
     allows(url: URL, headers: Headers, body: string) {
@@ -110,6 +114,9 @@ export function createUSchedulePublicReadPolicy(context: { officialLocation?: US
       }
       if (url.pathname !== `${source.pathname}/changefield` || !Array.isArray(value) || value.length !== 1 || !value[0] || typeof value[0] !== "object") return false;
       const item = value[0] as Record<string, unknown>;
+      // A one-argument saveBookingDetail('next_avail') omits Value when
+      // serialized by the pinned public client. No aliases or extra fields.
+      if (Object.keys(item).length === 1 && item.Name === "next_avail") return nextAvailableSources.has(source.href);
       if (Object.keys(item).length !== 2 || typeof item.Name !== "string" || typeof item.Value !== "string") return false;
       return item.Name === "start_date" ? validDate(item.Value, "US") :
         (sources.get(source.href)?.get(item.Name) ?? locationReady(source.href)?.filters.get(item.Name))?.has(item.Value) === true;

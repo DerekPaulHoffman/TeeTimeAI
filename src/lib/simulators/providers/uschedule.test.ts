@@ -59,10 +59,10 @@ describe("USchedule exact public rental source", () => {
     const valid = html(firstTimes);
     expect(projectUSchedulePublicConfiguration(valid, bookingUrl)?.availabilityKind).toBe("OPAQUE_POOLED");
     for (const invalid of [
-      html([]), html([...firstTimes, day(21)]), html(firstTimes, { resource: "1" }),
+      html([]), html(Array.from({length:26},(_,i)=>day(Math.floor(i/2),i%2?30:0))), html(firstTimes, { resource: "1" }),
       valid.replace('data-empid="0"', 'data-empid="Bay 1"'),
       valid.replace('data-empid="0"', ''), valid.replace(`data-time="${firstTimes[0]}"`, 'data-time="unknown"'),
-      `${valid}<div class="next_avail_results"><div class="next_avail_item" data-time="${day(21)}" data-empid="0"></div></div>`,
+      `${valid}<div class="next_avail_item" data-time="${day(21)}" data-empid="0"></div>`,
       valid.replace('class="next_avail_results"', 'class="other_results"'),
       valid.replace('class="next_avail_item"', 'class="other_item"'),
     ]) expect(projectUSchedulePublicConfiguration(invalid, bookingUrl)).toBeUndefined();

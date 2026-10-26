@@ -129,10 +129,12 @@ export async function fetchTeeItUpTeeSheet(input: {
   players?: number;
   timeZone?: string;
   metadata: TeeItUpMetadata;
-}, fetchImpl: typeof fetch = fetch): Promise<TeeItUpTeeSheetResult> {
+}, fetchImpl: typeof fetch = fetch, resolvedPublicApiAlias?: string): Promise<TeeItUpTeeSheetResult> {
   if (!isTeeItUpMetadata(input.metadata)) {
     throw new Error("TeeItUp metadata is invalid or ambiguously scoped");
   }
+  if (resolvedPublicApiAlias !== undefined && (input.metadata.aliases.length !== 1 ||
+      !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(resolvedPublicApiAlias))) throw new Error("TeeItUp public configuration alias is invalid");
   if (input.players !== undefined && (!Number.isInteger(input.players) || input.players < 1 || input.players > 100)) {
     throw new Error("TeeItUp player count is invalid");
   }
@@ -145,7 +147,7 @@ export async function fetchTeeItUpTeeSheet(input: {
     const facilityResolution = await fetchFacilities(
       alias,
       aliasBookingBaseUrl,
-      input.timeZone ?? "America/New_York", fetchImpl
+      input.timeZone ?? "America/New_York", fetchImpl, resolvedPublicApiAlias
     );
     const discoveredFacilities = facilityResolution.facilities;
     const facilities = input.metadata.facilityIds
@@ -180,7 +182,7 @@ export async function fetchTeeItUpTeeSheet(input: {
       facilityResolution.apiAlias,
       input.date,
       facilityIds,
-      aliasBookingBaseUrl, fetchImpl
+      aliasBookingBaseUrl, fetchImpl, alias
     );
     const facilityByCourseId = new Map(
       facilities
@@ -328,21 +330,22 @@ function pickEarlierBookingWindow(
 async function fetchFacilities(
   alias: string,
   bookingBaseUrl: string,
-  timeZone: string, fetchImpl: typeof fetch
+  timeZone: string, fetchImpl: typeof fetch, resolvedPublicApiAlias?: string
 ): Promise<{ apiAlias: string; facilities: TeeItUpFacility[] }> {
-  const url = `${TEEITUP_API_BASE_URL}/alias/${alias}/facilities`;
+  const directoryAlias = resolvedPublicApiAlias ?? alias;
+  const url = `${TEEITUP_API_BASE_URL}/alias/${directoryAlias}/facilities`;
   const response = await fetchWithProviderTimeout(url, {
-    headers: teeItUpHeaders(alias, bookingBaseUrl)
+    headers: teeItUpHeaders(directoryAlias, bookingBaseUrl, alias)
   }, fetchImpl);
 
   if (response.ok) {
     return {
-      apiAlias: alias,
+      apiAlias: directoryAlias,
       facilities: (await response.json()) as TeeItUpFacility[]
     };
   }
 
-  if (response.status !== 404) {
+  if (response.status !== 404 || resolvedPublicApiAlias !== undefined) {
     throw providerHttpError("TeeItUp facilities", response);
   }
 
@@ -364,11 +367,11 @@ async function fetchFacilitySlots(
   alias: string,
   date: Date,
   facilityIds: number[],
-  bookingBaseUrl: string, fetchImpl: typeof fetch
+  bookingBaseUrl: string, fetchImpl: typeof fetch, publicAlias = alias
 ) {
   const url = buildTeeTimesUrl(date, facilityIds);
   const response = await fetchWithProviderTimeout(url.toString(), {
-    headers: teeItUpHeaders(alias, bookingBaseUrl)
+    headers: teeItUpHeaders(alias, bookingBaseUrl, publicAlias)
   }, fetchImpl);
 
   if (!response.ok) {
@@ -386,8 +389,8 @@ function buildTeeTimesUrl(date: Date, facilityIds: number[]) {
   return url;
 }
 
-function teeItUpHeaders(alias: string, bookingBaseUrl: string) {
-  const bookingOrigin = getBookingOrigin(alias, bookingBaseUrl);
+function teeItUpHeaders(alias: string, bookingBaseUrl: string, publicAlias = alias) {
+  const bookingOrigin = getBookingOrigin(publicAlias, bookingBaseUrl);
 
   return {
     accept: "application/json",

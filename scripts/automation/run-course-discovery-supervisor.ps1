@@ -93,6 +93,7 @@ try {
         }
         if ($null -ne $value -and ([string]$value) -match '^[A-Za-z0-9_.:+-]{1,200}$') { $safe[$key] = $value }
       }
+      if ($record.workerMode -cin @('STAGEHAND_SOL', 'NATIVE_SOL', 'REUSE_ONLY')) { $safe.workerMode = $record.workerMode }
       if ($record.metrics) {
         $metrics = [ordered]@{}
         foreach ($key in @('model', 'framework', 'frameworkRole', 'reasoningEffort', 'modelCalls', 'sourceElapsedMs', 'fixedInspectionModelCalls', 'replayModelCalls', 'browserActions', 'browserStartedAt', 'firstBrowserStartupMs', 'firstOpenStartedAt', 'firstOpenCompletedAt', 'firstOpenElapsedMs', 'providerRequestsObserved', 'responseBytesObserved')) {

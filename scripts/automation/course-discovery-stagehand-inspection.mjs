@@ -4,7 +4,7 @@ import { STAGEHAND_SOURCE_MODE, canonicalStagehandData as canonical, stagehandDa
   publicStagehandSourceUrl as publicUrl, validateStagehandSourceProposal as validateAdapterSourceProposal,
   validateStagehandSourceReport } from "./course-discovery-stagehand-source.mjs";
 import { observedBookingSourceCandidates, nativeLinkSource, corroboratedNativeLink, nativeFrameNavigations } from "./stagehand/source-provenance.mjs";
-import { safeTeeItUpDelegationDiagnostic } from "./course-discovery-worker.mjs";
+import { safeTeeItUpDelegationDiagnostic, safeFixedAdapterReadDiagnostic } from "./course-discovery-worker.mjs";
 const fail = code => discoveryError(code), HYBRID_SOURCE_DISCOVERY = STAGEHAND_SOURCE_MODE;
 const INSPECTION_ACTION_LIMIT = 6;
 const inspectionFailures = new WeakMap();
@@ -16,7 +16,10 @@ export function currentStagehandInspectionDiagnostic(error, job, startedAt, now)
         value.sourceFingerprint !== job.sourceFingerprint || value.firstPickedUpAt !== job.firstPickedUpAt || value.deadlineAt !== job.deadlineAt ||
         !Number.isFinite(startedAt) || !Number.isFinite(now) || value.startedAt < startedAt || value.startedAt > now) return undefined;
     const teeItUpDelegation = safeTeeItUpDelegationDiagnostic(value.teeItUpDelegation);
-    return teeItUpDelegation ? { teeItUpDelegation } : undefined;
+    const adapterRead = safeFixedAdapterReadDiagnostic(value.adapterRead);
+    return teeItUpDelegation || adapterRead ? {
+      ...(teeItUpDelegation ? { teeItUpDelegation } : {}), ...(adapterRead ? { adapterRead } : {}),
+    } : undefined;
   } catch { return undefined; }
 }
 function canonicalAdapterSourceRecipe(proposal, job) {
@@ -235,6 +238,10 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
           const delegation = safeTeeItUpDelegationDiagnostic(error?.details?.browserDiagnostics?.teeItUpDelegation);
           if (delegation) step.teeItUpDelegation = delegation;
         } catch { /* Diagnostic access cannot replace the primary failure. */ }
+        try {
+          const adapterRead = safeFixedAdapterReadDiagnostic(error?.details?.browserDiagnostics?.adapterRead);
+          if (adapterRead) step.adapterRead = adapterRead;
+        } catch { /* Diagnostic access cannot replace the primary failure. */ }
         throw error;
       }
       finally { step.elapsedMs = Math.max(0, now() - start); }
@@ -361,11 +368,13 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
   if (primary) {
     primary.inspectionReceipt = receipt;
     const failedAction = receipt.actions.at(-1);
-    if (primary && typeof primary === 'object' && failedAction?.action === 'inspect_adapter' && failedAction.error && failedAction.teeItUpDelegation) {
+    if (primary && typeof primary === 'object' && failedAction?.action === 'inspect_adapter' && failedAction.error &&
+        (failedAction.teeItUpDelegation || failedAction.adapterRead)) {
       try {
         inspectionFailures.set(primary, { job, attempt: job.attempts, requestSha256: hash(canonical(job.request)), sourceFingerprint: job.sourceFingerprint,
           firstPickedUpAt: job.firstPickedUpAt, deadlineAt: job.deadlineAt, startedAt,
-          teeItUpDelegation: safeTeeItUpDelegationDiagnostic(failedAction.teeItUpDelegation) });
+          teeItUpDelegation: safeTeeItUpDelegationDiagnostic(failedAction.teeItUpDelegation),
+          adapterRead: safeFixedAdapterReadDiagnostic(failedAction.adapterRead) });
       } catch { /* Optional diagnostics cannot replace the primary failure. */ }
     }
     throw primary;

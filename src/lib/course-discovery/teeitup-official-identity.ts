@@ -17,6 +17,7 @@ export type OfficialIdentitySource = { officialUrl?: string; bookingUrl: string;
 export type OfficialIdentityPage = { url: string; html: string; visibleEvidence?: {
   title: string; headings: string[]; linkUrls: string[]; addressTexts: string[]; phoneTexts?: string[];
   brandLinks?: Array<{ href: string; text: string }>;
+  publicRentalTexts?: string[];
   publicContactBlocks?: PublicCourseContactBlock[];
 }; browserTransport?: "PINNED_HTTP" | "NATIVE_CHROME" };
 type Node = DefaultTreeAdapterMap["node"];

@@ -6,6 +6,14 @@ import { sourceFailureDiagnostic } from "../../../scripts/automation/stagehand/s
 import { createDelegationDiagnostic } from "./teeitup-delegated-booking-diagnostic";
 
 const first = Date.parse("2030-01-02T12:00:00.000Z");
+it.each(["OFFICIAL_STREET_TYPE_OMITTED_UNVERIFIED", "OFFICIAL_STREET_TYPE_OMITTED_CHANGED"])("retains the closed physical-identity failure %s without copied proof facts", code => {
+  const f = fixture(), error = Object.assign(Error(code), { privateHtml: "PRIVATE_HTML" });
+  const saved = createStagehandFailureCheckpoint({ ...f, phase: "FIXED_INSPECTION", error });
+  expect(saved.stagehandFailure.entries[0].code).toBe(code);
+  expect(JSON.stringify(saved)).not.toContain("PRIVATE_HTML");
+  expect(saved.stagehandFailure.entries[0]).not.toHaveProperty("fixedInspectionDiagnostic");
+  expect(readStagehandFailure({ ...f.job, checkpoint: saved }, f.now)).toEqual(saved.stagehandFailure);
+});
 it("ignores forged error receipts and prior metrics rather than manufacturing current inspection facts", () => {
   const f = fixture(), diagnostic = { teeItUpDelegation: createDelegationDiagnostic("PROVIDER_BIND") };
   Object.assign(f.error, { fixedInspectionDiagnostic: diagnostic, inspectionReceipt: { actions: [{ teeItUpDelegation: diagnostic.teeItUpDelegation }] },
@@ -41,6 +49,25 @@ it("records the digest and omission explicitly when trimming replay diagnostics"
   const saved = packStagehandCheckpoint({ progress: { phase: "INDEPENDENT_REPLAY", replay: { result: { complete: false, diagnostic } } } });
   expect(saved.stagehandProgress.replay.result).toEqual({ complete: false, diagnosticSha256: stagehandDataHash(diagnostic), diagnosticOmittedForBudget: true });
   expect(Buffer.byteLength(JSON.stringify(saved))).toBeLessThan(32000);
+});
+it("rejects malformed or injected durable adapter read facts and preserves exact phase and hash binding", () => {
+  const f = fixture(), saved = createStagehandFailureCheckpoint(f);
+  const diagnostic = { adapterRead: { stage: "RESPONSE_HEADERS", role: "TEEITUP_DIRECTORY", httpStatus: 404,
+    responseRedirected: false, responseUrlMatches: true, elapsedMs: 170, responseBytes: null, transportCode: "NONE" } };
+  Object.assign(saved.stagehandFailure.entries[0], { phase: "FIXED_INSPECTION", fixedInspectionDiagnostic: diagnostic,
+    fixedInspectionDiagnosticSha256: stagehandDataHash(diagnostic) });
+  expect(readStagehandFailure({ ...f.job, checkpoint: saved }, f.now)).toEqual(saved.stagehandFailure);
+  expect(readStagehandSourceCheckpoint({ ...f.job, attempts: 2, checkpoint: saved }, undefined, f.now)).toBeUndefined();
+  for (const mutate of [v => { v.fixedInspectionDiagnostic.adapterRead.body = "PRIVATE"; },
+    v => { v.fixedInspectionDiagnostic.adapterRead.httpStatus = 999; },
+    v => { v.fixedInspectionDiagnostic.adapterRead.stage = "PRIVATE"; },
+    v => { v.fixedInspectionDiagnostic.adapterRead.responseUrlMatches = "PRIVATE"; },
+    v => { v.fixedInspectionDiagnostic.adapterRead.elapsedMs = 120001; },
+    v => { delete v.fixedInspectionDiagnostic.adapterRead.role; },
+    v => { v.fixedInspectionDiagnosticSha256 = "b".repeat(64); }, v => { v.phase = "REPLAY"; }]) {
+    const changed = structuredClone(saved); mutate(changed.stagehandFailure.entries[0]);
+    expect(readStagehandFailure({ ...f.job, checkpoint: changed }, f.now)).toBeUndefined();
+  }
 });
 function fixture() {
   const official = "https://public-course.example/", booking = "https://public-booking.example/start?venue=public";

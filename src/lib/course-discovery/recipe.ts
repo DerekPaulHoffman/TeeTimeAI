@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { isIP } from "node:net";
 import { z } from "zod";
+import { uscheduleReadGates } from "@/lib/simulators/providers/uschedule-read-diagnostic";
 import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import { existingAdapterMetadataSchema } from "./existing-adapter-schema";
 import { isServerDocumentSelector } from "./server-document-proof";
@@ -297,8 +298,14 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
           proof.hops[0].pageUrl !== recipe.source.officialUrl)
         ctx.addIssue({ code: "custom", message: "Native delegated booking proof must retain the exact canonical source" });
     }
+    if (recipe.adapter.family === "TEEITUP" && recipe.adapter.officialStreetTypeOmittedProof) {
+      const proof = recipe.adapter.officialStreetTypeOmittedProof;
+      if (recipe.target.kind !== "OUTDOOR" || proof.officialUrl !== recipe.source.officialUrl || proof.bookingUrl !== recipe.source.bookingUrl ||
+          proof.venueName !== recipe.source.venueName || proof.canonicalAddress !== recipe.source.venueAddress || proof.timeZone !== recipe.source.timeZone)
+        ctx.addIssue({ code: "custom", message: "Street-type omission proof must retain the exact canonical source" });
+    }
     if (recipe.adapter.family === "TEEITUP" && simulator &&
-        (recipe.adapter.facilityIds.length !== 1 || recipe.adapter.officialIdentityProof || recipe.adapter.officialBookingSourceProof || recipe.adapter.officialPostalConflictProof || recipe.adapter.officialDelegatedBookingProof))
+        (recipe.adapter.facilityIds.length !== 1 || recipe.adapter.officialIdentityProof || recipe.adapter.officialBookingSourceProof || recipe.adapter.officialPostalConflictProof || recipe.adapter.officialDelegatedBookingProof || recipe.adapter.officialStreetTypeOmittedProof))
       ctx.addIssue({ code: "custom", message: "Simulator adapter requires one exact directory identity" });
     return;
   }
@@ -468,9 +475,11 @@ export const accessExecutionDiagnosticSchema = accessRequestFailureDiagnosticSch
   }).strict().optional().describe("Counts captured before terminal cleanup. pendingReads is the existing global handler/native pending maximum; currentDocumentPendingHandlers counts only handlers with a captured current main-document owner, not a provider or network census."),
   simulatorError: z.object({
     code: z.enum(["INVALID_SOURCE", "INVALID_REQUEST", "UNSUPPORTED_PROVIDER", "UNSUPPORTED_DURATION", "PARTY_TOO_LARGE", "PUBLIC_SESSION_REQUIRED", "HTTP_ERROR", "SCHEMA_CHANGED"]),
-    retryable: z.boolean(), httpStatus: z.number().int().min(100).max(599).optional(),
+    retryable: z.boolean(), httpStatus: z.number().int().min(100).max(599).optional(), uscheduleGate: z.enum(uscheduleReadGates).optional(),
   }).strict().optional(),
 }).strict().superRefine((diagnostic, ctx) => {
+  if (diagnostic.simulatorError?.uscheduleGate && (diagnostic.code !== "SIMULATOR_PROVIDER_ERROR" || !["INVALID_SOURCE", "SCHEMA_CHANGED"].includes(diagnostic.simulatorError.code)))
+    ctx.addIssue({ code: "custom", message: "USchedule gate requires its provider failure classification", path: ["simulatorError", "uscheduleGate"] });
   if (diagnostic.mindbodyReplay && diagnostic.code !== "MINDBODY_NATIVE_CAPTURE_FAILURE")
     ctx.addIssue({ code: "custom", message: "Native Mindbody replay facts require their fixed diagnostic code", path: ["mindbodyReplay"] });
   for (const [value, path] of [[diagnostic, []], [diagnostic.earlierRequestFailure, ["earlierRequestFailure"]]] as const)

@@ -1,3 +1,4 @@
+import { collectNativeOfficialPublicMetadata } from "./public-document-metadata";
 import { createHash, randomUUID } from "node:crypto";
 import { chargeDelegatedReadBudget, delegatedProxyAllocation, settleDelegatedProxyBudget, type DelegatedReadBudget } from "./teeitup-delegated-booking-context";
 import { createDelegationDiagnostic, rememberTeeItUpDelegationFailure, getTeeItUpDelegationDiagnostic } from "./teeitup-delegated-booking-diagnostic";
@@ -23,6 +24,7 @@ export { publicHeaderFailureDiagnostic } from "./public-header-diagnostic";
 import { requestFamilyForUrl } from "./request-family";
 import { canonicalPublicReadUrl } from "./public-request-url";
 import { inspectExistingAdapter } from "./existing-adapter-executor";
+import { getFixedAdapterReadDiagnostic } from "./fixed-adapter-read-diagnostic";
 import { getCpsPostalContactDiagnostic } from "./cps-postal-conflict-proof";
 import { getMindbodyAppointmentDiagnostic } from "./mindbody-appointment-reader";
 import { isPublicCalendarApply } from "./public-calendar-apply";
@@ -247,6 +249,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
   let officialIdentityPage: (OfficialIdentityPage & { observedAt: number; documentStartedAt: number; officialDocumentProof: OfficialDocumentProof }) | undefined;
   let lastOfficialIdentityReadDiagnostic: { captureAgeMs: number | null; gates: Record<string, boolean> } | undefined;
   let teeItUpDelegation: ReturnType<typeof getTeeItUpDelegationDiagnostic>;
+  let adapterRead: ReturnType<typeof getFixedAdapterReadDiagnostic>;
   let officialIdentityDocument: { url: string; html: string; officialDocumentProof: OfficialDocumentProof } | undefined;
   let delegatedIdentityDocument: { url: string; html: string } | undefined;
   let delegatedIdentityPage: (OfficialIdentityPage & { observedAt: number; documentStartedAt: number }) | undefined;
@@ -1024,40 +1027,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     const identityDocument = officialIdentityDocument && sameDiscoveryMainDocument(officialIdentityDocument.url, currentUrl) ? officialIdentityDocument :
       deps.captureDelegatedDocument && delegatedIdentityDocument && sameDiscoveryMainDocument(delegatedIdentityDocument.url, currentUrl) ? delegatedIdentityDocument : undefined;
     if (!blockedAccess && identityDocument) {
-        const visibleEvidence = await page.evaluate(() => {
-          const headings: string[] = [], linkUrls: string[] = [], addressTexts: string[] = [], phoneTexts: string[] = [];
-          const brandLinks: Array<{ href: string; text: string }> = [];
-          for (const node of Array.from(document.querySelectorAll('h1,h2,a[href],address,p,div,li,td')).slice(0, 3000)) {
-            if (!(node instanceof HTMLElement) || node.closest('script,template,noscript,iframe,input,textarea,select,button,[contenteditable],[hidden],[inert],[aria-hidden="true"]') ||
-                node.querySelector('input,textarea,select,button,[contenteditable]')) continue;
-            const form = node.closest("form");
-            if (form && (form.parentElement !== document.body || !form.querySelector("h1") || !form.querySelector('footer,[role="contentinfo"]'))) continue;
-            const rect = node.getBoundingClientRect();
-            let ancestor: HTMLElement | null = node, visible = Boolean(rect.width && rect.height), depth = 0;
-            while (ancestor && visible && depth++ < 32) {
-              const style = getComputedStyle(ancestor);
-              if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') visible = false;
-              ancestor = ancestor.parentElement;
-            }
-            if (!visible || ancestor) continue;
-            const value = node.innerText.replace(/\n+/gu, ', ').replace(/\s+/gu, ' ').trim();
-            if (/^H[12]$/u.test(node.tagName) && value.length <= 300 && headings.length < 80) headings.push(value);
-            if (node instanceof HTMLAnchorElement && linkUrls.length < 120) linkUrls.push(node.href);
-            if (node instanceof HTMLAnchorElement && !form && value.length <= 200 && brandLinks.length < 20 &&
-                [node, node.parentElement].some(value => value?.classList.contains("site-title"))) brandLinks.push({ href: node.href, text: value });
-            if (node instanceof HTMLAnchorElement && /^tel:/u.test(node.getAttribute("href") ?? "") && !form && value.length <= 40 && phoneTexts.length < 20) {
-              let context: HTMLElement | null = node, publicContact = true;
-              while (context) {
-                if (/(?:account|member|profile|customer|checkout|payment|billing|corporate|mailing|fax)/iu.test(
-                  ["id", "class", "aria-label", "title", "name"].map(key => context!.getAttribute(key) ?? "").join(" "))) publicContact = false;
-                context = context.parentElement;
-              }
-              if (publicContact) phoneTexts.push(value);
-            }
-            if (value.length >= 15 && value.length <= 500 && addressTexts.length < 160 && /\b\d{5}(?:-\d{4})?\b/u.test(value)) addressTexts.push(value);
-          }
-          return { title: document.title.slice(0, 500), headings, linkUrls, addressTexts, phoneTexts, brandLinks };
-        });
+        const visibleEvidence = await page.evaluate(collectNativeOfficialPublicMetadata, input.venueName ?? "");
         const publicContactBlocks = deps.collectPublicCourseContacts && input.venueName ? await readVisiblePublicCourseContactBlocks(page, input.venueName) : [];
         const captured = { ...identityDocument, visibleEvidence: { ...visibleEvidence,
           addressTexts: [...visibleEvidence.addressTexts,...publicContactBlocks.map(block=>`${block.street}, ${block.locality}, ${block.region} ${block.postalCode}`)],
@@ -1382,6 +1352,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       // This contains transport facts only, never page text or response bodies.
       return { loading: pendingReadCount() > 0, pendingRequestCount: pendingReadCount(), cleanupFailed,
         ...(teeItUpDelegation ? { teeItUpDelegation: structuredClone(teeItUpDelegation) } : {}),
+        ...(adapterRead ? { adapterRead: { ...adapterRead } } : {}),
         ...(lastOfficialIdentityReadDiagnostic ? { officialIdentityReadDiagnostic: {
           captureAgeMs: lastOfficialIdentityReadDiagnostic.captureAgeMs, gates: { ...lastOfficialIdentityReadDiagnostic.gates },
         } } : {}),
@@ -1476,6 +1447,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       }
       if (action.action === "inspect_adapter") {
         teeItUpDelegation = undefined;
+        adapterRead = undefined;
         officialSourceDiagnostic = undefined;
         cpsPostalContact = undefined;
         mindbodyAppointment = undefined;
@@ -1500,6 +1472,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
           try { cpsPostalContact = getCpsPostalContactDiagnostic(error); } catch { /* Diagnostics cannot replace the primary failure. */ }
           try { mindbodyAppointment = getMindbodyAppointmentDiagnostic(error); } catch { /* Diagnostics cannot replace the primary failure. */ }
           try { teeItUpDelegation = getTeeItUpDelegationDiagnostic(error); } catch { /* Diagnostics cannot replace the primary failure. */ }
+          try { adapterRead = getFixedAdapterReadDiagnostic(error); } catch { /* Diagnostics cannot replace the primary failure. */ }
           throw error;
         }
         const inspectedSnapshot = await snapshot();

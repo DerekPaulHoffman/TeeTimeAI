@@ -17,6 +17,27 @@ const schedules = [
 const html = `<html><script>SCHEDULES = ${JSON.stringify(schedules)};</script></html>`;
 
 describe("public ForeUp schedule configuration", () => {
+  it("compares a sole course schedule after only an anchored comma hospitality descriptor", () => {
+    const schedule = { ...schedules[0], title: "Harbor Golf Course", booking_classes: [
+      { ...schedules[0].booking_classes[0], name: "Public Tee Times" },
+    ] };
+    const parse = (courseName: string, rows: unknown[] = [schedule]) => parseForeupPublicConfiguration({
+      bookingUrl, courseName, html: `<script>SCHEDULES = ${JSON.stringify(rows)};</script>`,
+    });
+    for (const name of ["Harbor Golf Course, Restaurant and Banquet Facility", "Harbor Golf Course,  RESTAURANT and BANQUET facility  "])
+      expect(parse(name)).toMatchObject({ scheduleId: 792, bookingClassId: 4931 });
+    for (const name of ["Harbor Golf Course Restaurant and Banquet Facility", "Harbor Golf Course, Restaurant and Banquet Facility Annex",
+      "Harbor Golf Course, Restaurant and Banquet Facilities", "Harbor Golf Course, Restaurant", "Harbor Golf Course East, Restaurant and Banquet Facility",
+      "Harbor Golf Course, Private Members Course", "Another Venue, Restaurant and Banquet Facility"])
+      expect(parse(name)).toBeNull();
+    const name = "Harbor Golf Course, Restaurant and Banquet Facility";
+    expect(parse(name, [schedule, schedule])).toBeNull();
+    expect(parse(name, [{ ...schedule, course_id: "999" }])).toBeNull();
+    expect(parse(name, [{ ...schedule, booking_classes: [{ ...schedule.booking_classes[0], hidden: "1" }] }])).toBeNull();
+    expect(parse(name, [{ ...schedule, booking_classes: [{ ...schedule.booking_classes[0], teesheet_id: "781" }] }])).toBeNull();
+    expect(parse(name, [{ ...schedule, booking_classes: [schedule.booking_classes[0], { ...schedule.booking_classes[0], booking_class_id: "4932" }] }])).toBeNull();
+  });
+
   it("selects the sole exact Public Play class without treating other visible membership classes as public", () => {
     const publicPlay = { teesheet_id: "792", booking_class_id: "4931", active: "1", hidden: "0", name: "Public Play" };
     const document = (classes: object[]) => `<script>SCHEDULES = ${JSON.stringify([{ ...schedules[0], booking_classes: classes }])};</script>`;

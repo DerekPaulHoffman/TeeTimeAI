@@ -54,6 +54,12 @@ const deps = { now: () => new Date("2030-10-20T12:00:00Z"), venueMatches: venueP
 const input = { date: "2030-10-23", timeZone: source.timeZone, players: 2, startTime: "09:00", endTime: "18:00" };
 
 describe("official booking source proof", () => {
+  it("normalizes only an explicitly written US state while retaining every other full postal component", () => {
+    expect(teeItUpCompleteStreetAddress("565 Competition Road, Example, North Carolina 27603, USA")).toEqual(teeItUpCompleteStreetAddress(source.venueAddress));
+    for (const region of ["DC", "PR", "ZZ"]) expect(teeItUpCompleteStreetAddress(`565 Competition Road, Example, ${region} 27603, USA`)).toMatchObject({ region });
+    for (const changed of ["565 Competition Road, Example, California 27603, USA", "566 Competition Road, Example, North Carolina 27603, USA", "565 N Competition Road, Example, North Carolina 27603, USA", "565 Competition Road Ste 2, Example, North Carolina 27603, USA", "565 Competition Road, Other, North Carolina 27603, USA", "565 Competition Road, Example, North Carolina 27604, USA"]) expect(teeItUpCompleteStreetAddress(changed)).not.toEqual(teeItUpCompleteStreetAddress(source.venueAddress));
+    for (const changed of ["565 Competition Road, Example, Other 27603, USA", "565 Competition Road, Example, NC, USA", "565 Competition Road, Example, 27603, USA"]) expect(teeItUpCompleteStreetAddress(changed)).toBeUndefined();
+  });
   it("treats an existing comma followed by a printed line break as address formatting", () => {
     const html = homeHtml.replace(source.venueAddress, "565 Competition Road, Example,<br>\nNC 27603");
     expect(readTeeItUpOfficialHome(source, { ...home, html }, true).bookingPageUrl).toBe(bookingPage);

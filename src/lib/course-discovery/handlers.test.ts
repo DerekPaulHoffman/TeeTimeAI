@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
 import { createCourseDiscoveryHandlers } from "../../../scripts/automation/course-discovery-handlers.mjs";
+import { createCourseDiscoverySupervisor } from "../../../scripts/automation/course-discovery-supervisor.mjs";
 
 function setup(mode?: string) {
   const client = { next: vi.fn(async () => ({ job: "cold" })), nextExecution: vi.fn(async () => ({ job: "warm" })),
@@ -47,5 +48,16 @@ describe("normal learning worker and restart-only selection", () => {
   });
   it("does not accept arbitrary or misspelled worker strategies", () => {
     for (const mode of ["ASTRA", "stagehand", "*", "AUTO_FALLBACK"]) expect(() => setup(mode)).toThrow("DISCOVERY_WORKER_MODE_INVALID");
+  });
+  it("reports the effective model-disabled mode at startup without invoking cold authority", async () => {
+    const f = setup("REUSE_ONLY"), onEvent = vi.fn();
+    const supervisor = createCourseDiscoverySupervisor({ ...f.handlers,
+      client: { ...f.handlers.client, nextExecution: vi.fn(async () => ({ job: null })) }, onEvent });
+    try {
+      await supervisor.start();
+      expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ event: "supervisor_started", workerMode: "REUSE_ONLY" }));
+      for (const action of [f.client.next, f.prepareStagehand, f.runStagehand, f.prepareNative, f.runNative]) expect(action).not.toHaveBeenCalled();
+    } finally { await supervisor.stop(); }
+    expect(() => createCourseDiscoverySupervisor({ ...f.handlers, mode: "PRIVATE_UNRECOGNIZED_MODE" })).toThrow("DISCOVERY_WORKER_MODE_INVALID");
   });
 });

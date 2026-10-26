@@ -13,6 +13,9 @@ import { parseUScheduleLocationSource, type UScheduleOfficialLocationProof } fro
 export function createUSchedulePublicSession(sourceUrl: string, deps: {
   requestLease?: <T>(family: string, work: () => Promise<T>) => Promise<{ acquired: true; value: T } | { acquired: false }>; fetch?: typeof fetch; deadlineAt?: Date;
   officialLocation?: UScheduleOfficialLocationProof;
+  /** Private engineering capture only, after the existing bounded body read.
+   * No cookie/header/URL is exposed and no transport stream is read twice. */
+  onPublicRead?: (read: Readonly<{ method: "GET" | "POST"; requestBody?: string; status: number; responseText: string }>) => unknown;
 } = {}) {
   const source = new URL(sourceUrl);
   const locationEntry = deps.officialLocation && parseUScheduleLocationSource(deps.officialLocation.entryUrl);
@@ -77,6 +80,10 @@ export function createUSchedulePublicSession(sourceUrl: string, deps: {
         const cursors = [...text.matchAll(/(?:^|\n)\s*var\s+lastAvailTime\s*=\s*'(\d{12})';/gu)];
         cursor = cursors.length === 1 ? cursors[0][1] : undefined;
       }
+      try {
+        const observation = deps.onPublicRead?.({ method: method === "GET" ? "GET" : "POST", ...(body === undefined ? {} : { requestBody: body }), status: response.status, responseText: text });
+        if (observation instanceof Promise) void observation.catch(() => undefined);
+      } catch { /* Diagnostic capture cannot alter read admission or mask its result. */ }
       return new Response(buffer, { status: response.status, headers: response.headers });
       } finally { if (response.body && !response.bodyUsed) await response.body.cancel().catch(() => {}); }
     });

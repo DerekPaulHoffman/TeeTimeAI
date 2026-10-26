@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createStagehandCodexModel } from './codex-model.mjs';
 import { classifyNavigationError, projectActionGuardDiagnostic } from './source-diagnostic.mjs';
+import { publicEvidenceUrl } from './public-evidence.mjs';
 
 export async function loadStagehandRuntime() {
   let directory = dirname(fileURLToPath(import.meta.resolve('@browserbasehq/stagehand')));
@@ -99,6 +100,21 @@ export function assertPublicUrl(value) {
   const url = new URL(value);
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.port || !url.hostname.includes('.') || /(?:^|\.)(?:localhost|local|internal|invalid|test)$/iu.test(url.hostname) || /^\d+(?:\.\d+){3}$/u.test(url.hostname) || forbidden.test(decodeURIComponent(url.pathname)) || [...url.searchParams].some(([key]) => /password|secret|token|credential|authorization|api.?key|email|phone/iu.test(key))) throw new Error('PUBLIC_NAVIGATION_REJECTED');
   return url.href;
+}
+
+export function isSourceRoutingUrl(value) {
+  try { return publicEvidenceUrl(value) === value && assertPublicUrl(value) === value; } catch { return false; }
+}
+
+// The native host observes all rendered frames under its transport policy.
+// Exclude ineligible source URLs before presenting an enum to the source model.
+// Malformed witnesses still reach the unchanged strict controller rejection.
+export function sourceRoutingFrameWitness(witness) {
+  const keys=value=>value&&typeof value==='object'&&!Array.isArray(value)?Object.keys(value).sort().join(','):'';
+  if(keys(witness)!=='documentHash,frames,kind,observedAt,pageUrl'||witness.kind!=='NATIVE_VISIBLE_FRAME'||
+    !Array.isArray(witness.frames)||witness.frames.length>24||new Set(witness.frames.map(frame=>frame?.src)).size!==witness.frames.length||
+    witness.frames.some(frame=>keys(frame)!=='src,visible'||typeof frame.src!=='string'||frame.visible!==true))return witness;
+  return {...witness,frames:witness.frames.filter(frame=>isSourceRoutingUrl(frame.src))};
 }
 
 export function observedActionSummary(action) {
@@ -241,11 +257,11 @@ export async function openStagehandSession({ model, deadline, cwd, signal, onMet
       observe: instruction => guarded(() => stagehand.observe(instruction, sourceReadOptions()),'OBSERVE'),
       observeFrameSources: () => guarded(async()=>{
         if(!sourceRoutingOnly||typeof owned.observeFrameSources!=='function')throw Error('STAGEHAND_SOURCE_OUTPUT_INVALID');
-        return checked(owned.observeFrameSources(page.pageId));
+        return sourceRoutingFrameWitness(await checked(owned.observeFrameSources(page.pageId)));
       },'EVIDENCE'),
       openObservedFrameSource: url => guarded(async()=>{
         if(!sourceRoutingOnly||typeof owned.prepareFrameNavigation!=='function'||typeof owned.completeFrameNavigation!=='function')throw Error('STAGEHAND_SOURCE_OUTPUT_INVALID');
-        assertPublicUrl(url);
+        if(!isSourceRoutingUrl(url))throw Error('STAGEHAND_SOURCE_OUTPUT_INVALID');
         const witness=await checked(owned.prepareFrameNavigation(page.pageId,url));
         if(typeof onNativeFrameSourceWitness==='function')await checked(onNativeFrameSourceWitness(witness));
         await checked(page.goto(url,{waitUntil:'domcontentloaded',timeout:Math.min(30000,Math.max(1,deadline-Date.now()))}));

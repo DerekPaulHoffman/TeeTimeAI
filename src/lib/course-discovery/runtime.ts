@@ -33,8 +33,9 @@ function readContext(value: unknown): Context {
 }
 
 function requiresPhoneContext(recipe: unknown) {
-  const value = recipe as { engine?: string; adapter?: { family?: string; officialPostalConflictProof?: unknown } };
-  return value?.engine === "EXISTING_ADAPTER" && value.adapter?.family === "CPS" && Boolean(value.adapter.officialPostalConflictProof);
+  const value = recipe as { engine?: string; adapter?: { family?: string; officialPostalConflictProof?: unknown; officialStreetTypeOmittedProof?: unknown } };
+  return value?.engine === "EXISTING_ADAPTER" && (value.adapter?.family === "CPS" && Boolean(value.adapter.officialPostalConflictProof) ||
+    value.adapter?.family === "TEEITUP" && Boolean(value.adapter.officialStreetTypeOmittedProof));
 }
 
 export function recipeExecutionDeadline(now: Date, coldStart?: ColdStartTrace) {

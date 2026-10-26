@@ -1,12 +1,14 @@
 import { discoveryError } from "./course-discovery-client.mjs";
 import { canonicalStagehandData as canonical, stagehandDataHash as hash, createStagehandSourceCheckpoint } from "./course-discovery-stagehand-source.mjs";
 import { projectSourceDiagnostic, sourceTransportCodes } from "./stagehand/source-diagnostic.mjs";
-import { safeTeeItUpDelegationDiagnostic } from "./course-discovery-worker.mjs";
+import { safeTeeItUpDelegationDiagnostic, safeFixedAdapterReadDiagnostic } from "./course-discovery-worker.mjs";
 import { currentStagehandInspectionDiagnostic } from "./course-discovery-stagehand-inspection.mjs";
 
 const LIMIT = 32000, KIND = "OWN_STAGEHAND_FAILURE_DIAGNOSTIC";
 const phases = new Set(["SOURCE_RESUME", "SOURCE_DISCOVERY", "SOURCE_VALIDATION", "FIXED_INSPECTION", "RECIPE_VALIDATION", "REPLAY", "ACTIVATION", "UNKNOWN"]);
 const codes = new Set([...sourceTransportCodes, "OFFICIAL_DELEGATED_SOURCE_UNVERIFIED", "UNSUPPORTED_ADAPTER_SOURCE", "ADAPTER_CONFIGURATION_UNVERIFIED", "STAGEHAND_WORKER_FAILED", "STAGEHAND_SOURCE_DISCOVERY_FAILED", "STAGEHAND_SOURCE_OUTPUT_INVALID",
+  "ADAPTER_TRANSPORT_FAILED", "ADAPTER_CONFIGURATION_CHANGED", "ADAPTER_IDENTITY_MISMATCH", "USCHEDULE_PUBLIC_PARTY_UNVERIFIED", "OFFICIAL_POSTAL_SOURCE_UNVERIFIED",
+  "OFFICIAL_STREET_TYPE_OMITTED_UNVERIFIED", "OFFICIAL_STREET_TYPE_OMITTED_CHANGED",
   "STAGEHAND_SOURCE_CLEANUP_UNCONFIRMED", "STAGEHAND_SOURCE_UNRESOLVED", "STAGEHAND_SOURCE_REPORT_INVALID", "STAGEHAND_SOURCE_CLOCK_INVALID", "STAGEHAND_SOURCE_NOT_OBSERVED",
   "STAGEHAND_SOURCE_PROPOSAL_INVALID", "STAGEHAND_SOURCE_GRAPH_LIMIT", "STAGEHAND_SOURCE_CHECKPOINT_LIMIT", "STAGEHAND_SOURCE_RESUME_INVALID",
   "STAGEHAND_SOURCE_RESUME_DEADLINE", "DISCOVERY_WORK_DEADLINE", "DISCOVERY_RECIPE_INVALID", "DISCOVERY_REPLAY_INCOMPLETE", "DISCOVERY_CHALLENGE_INVALID",
@@ -41,7 +43,10 @@ function validEntry(value, job, now) {
   }
   if (value.fixedInspectionDiagnostic !== undefined) {
     const teeItUpDelegation = safeTeeItUpDelegationDiagnostic(value.fixedInspectionDiagnostic?.teeItUpDelegation);
-    const diagnostic = teeItUpDelegation ? { teeItUpDelegation } : undefined;
+    const adapterRead = safeFixedAdapterReadDiagnostic(value.fixedInspectionDiagnostic?.adapterRead);
+    const diagnostic = teeItUpDelegation || adapterRead ? {
+      ...(teeItUpDelegation ? { teeItUpDelegation } : {}), ...(adapterRead ? { adapterRead } : {}),
+    } : undefined;
     if (value.phase !== "FIXED_INSPECTION" || !diagnostic || canonical(diagnostic) !== canonical(value.fixedInspectionDiagnostic) ||
         value.fixedInspectionDiagnosticSha256 !== hash(diagnostic)) return false;
     projected.fixedInspectionDiagnostic = diagnostic; projected.fixedInspectionDiagnosticSha256 = value.fixedInspectionDiagnosticSha256;
