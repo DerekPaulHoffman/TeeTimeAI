@@ -7,6 +7,13 @@ export const sourceGuardReasons=['TARGET_MISSING','HIDDEN','CREDENTIAL_CONTROL',
 export const sourceGuardTerms=['CHECKOUT','PAYMENT','PAY_NOW','PURCHASE','RESERVE','HOLD','SIGN_IN','LOG_IN','LOGIN','CREATE_ACCOUNT','REGISTER','VERIFICATION','CAPTCHA','SEND_EMAIL','CONTACT_US'];
 export const sourceGuardFields=['TEXT','LABEL','HREF','FORM_ACTION','COMBINED'];
 export const sourceFrameWitnessFailures=['SHAPE','KIND','PAGE_BINDING','PAGE_URL','PAGE_NOT_VISITED','TIMESTAMP','STALE','DEADLINE','DOCUMENT_HASH','FRAME_ARRAY','DUPLICATE_FRAME','FRAME_SHAPE','FRAME_HIDDEN','FRAME_URL','FRAME_SELF','SELECTION'];
+export const sourceStopDecisions=['CONTINUE','WAIT','SOURCE_FOUND','UNRESOLVED','OPEN_FRAME'];
+export const sourceStopConditions=['RUNNING','SOURCE_FOUND','EXPLICIT_UNRESOLVED','WAIT_LIMIT','EMPTY_CONTINUE','ACTION_UNAVAILABLE_LIMIT','ACTION_REJECTED_LIMIT','ERROR','STEP_LIMIT','CLEANUP_UNCONFIRMED'];
+export const sourceActionKinds=['INITIAL_NAVIGATION','click','fill','type','selectOptionFromDropdown','press','scrollTo','nextChunk','prevChunk','hover','openObservedFrameSource'];
+const sourceStopSchema=z.object({finalDecision:z.enum(sourceStopDecisions).nullable(),condition:z.enum(sourceStopConditions),lastActionKind:z.enum(sourceActionKinds).nullable()}).strict();
+const sourceDocumentSchema=z.object({readyState:z.enum(['loading','interactive','complete','UNKNOWN']),bodyPresent:z.boolean(),mainDocumentCurrent:z.boolean(),mainDocumentComplete:z.boolean(),
+  mainReadPending:z.boolean(),pendingReads:z.number().int().min(0).max(2048),mainDocumentStatus:z.number().int().min(100).max(599).nullable()}).strict();
+export function projectSourceDocumentReadiness(value){const result=sourceDocumentSchema.safeParse(value);return result.success?result.data:undefined;}
 const sourceGuardTags=['A','BUTTON','INPUT','SELECT','FORM','SPAN','IMG','OTHER'];
 const guardProjection=z.object({guardReason:z.enum(sourceGuardReasons),guardTerm:z.enum(sourceGuardTerms).optional(),guardField:z.enum(sourceGuardFields).optional(),
   guardTag:z.enum(sourceGuardTags).optional(),guardHasHref:z.boolean().optional()}).strict();
@@ -89,9 +96,10 @@ const nativeRouterCodes=['NATIVE_REDIRECT_ABORT_TIMEOUT','NATIVE_REDIRECT_BODY_T
  'NATIVE_RESPONSE_LIMIT','OWNED_STAGEHAND_CDP_UNAVAILABLE','UNKNOWN'];
 const nativeRouterBooleanKeys=['framePresent','rootFrame','networkIdPresent','duplicateRequestId','hasPostData','postDataPresent','identityPresent','loaderPresent','loaderKnown','identityFresh',
  'identityUrlMatches','identityMethodMatches','identityKindMatches','identityFrameMatches','parentPresent','awaitingDocument','parentCurrentGeneration','documentCommitted',
- 'documentIntentPresent','documentIntentUsed','sourceResponseComplete','successorTerminalFailed','declaredLengthPresent','documentResponse','ancillaryResponse'];
+ 'documentIntentPresent','documentIntentUsed','sourceResponseComplete','successorTerminalFailed','declaredLengthPresent','documentResponse','ancillaryResponse',
+ 'recordGenerationCurrent','recordGenerationRetired','recordAdmitted','recordPaused','recordResponsePaused','recordFailed','recordComplete','recordHandlerDone','recordTerminalObserved'];
 const nativeRouterFailureSchema=z.object({code:z.enum(nativeRouterCodes),
- phase:z.enum(['RESPONSE_WAIT','CONTINUE_RESPONSE_ACK','LOADER_IDENTITY_WAIT','LOADER_IDENTITY','LOADER_OWNER','REDIRECT_GENERATION','REDIRECT_PROVENANCE','DOCUMENT_INTENT','DOCUMENT_DRAIN']).optional(),
+ phase:z.enum(['RESPONSE_WAIT','CONTINUE_REQUEST_ACK','CONTINUE_RESPONSE_ACK','LOADER_IDENTITY_WAIT','LOADER_IDENTITY','LOADER_OWNER','REDIRECT_GENERATION','REDIRECT_PROVENANCE','DOCUMENT_INTENT','DOCUMENT_DRAIN']).optional(),
  method:z.enum(['GET','HEAD','POST','OPTIONS','PUT','PATCH','DELETE','CONNECT','TRACE','OTHER']).optional(),
  resourceType:z.enum(['document','stylesheet','script','image','media','font','xhr','fetch','preflight','other','ping','websocket','eventsource']).optional(),
  limitKind:z.enum(['DECLARED_INVALID','DECLARED_TOO_LARGE','DECODED_BODY','TOTAL_DECODED']).optional(),
@@ -120,6 +128,8 @@ export const sourceDiagnosticSchema = z.object({
   ownedCdpFailure:ownedCdpFailureSchema.optional(),
   nativeRouterFailure:nativeRouterFailureSchema.optional(),
   frameWitnessFailure:z.enum(sourceFrameWitnessFailures).optional(),
+  sourceStop:sourceStopSchema.optional(),
+  sourceDocumentReadiness:sourceDocumentSchema.optional(),
   rpcCode:z.number().int().min(-2147483648).max(2147483647).optional(),httpStatus:z.number().int().min(100).max(599).optional(),
   elapsedMs:z.number().int().min(0).max(900000),
   counts:z.object({completedSteps:count,actionAttempts:count,executedActions:count,rejectedActions:count,eligibleCandidates:count,
@@ -134,7 +144,7 @@ export function projectSourceDiagnostic(value) {
   return parsed.data;
 }
 const boundedCount=value=>Number.isSafeInteger(value)&&value>=0&&value<=1000000?value:0;
-export function sourceFailureDiagnostic({error,phase,report,startedAt,cleanup,modelAttempts,modelFailure,ownedCdpFailure,nativeRouterFailure}={}) {
+export function sourceFailureDiagnostic({error,phase,report,startedAt,cleanup,modelAttempts,modelFailure,ownedCdpFailure,nativeRouterFailure,sourceStop,documentReadiness}={}) {
   const rows=(value,max)=>Array.isArray(value)?value.slice(0,max):[];
   const safe=value=>publicEvidenceUrl(value);
   const ledger=rows(report?.officialLinkLedger,512).map(row=>({pageUrl:safe(row.pageUrl),links:rows(row.links,512).map(link=>({href:safe(link.href),visible:link.visible===true})).filter(link=>link.href)}));
@@ -168,6 +178,8 @@ export function sourceFailureDiagnostic({error,phase,report,startedAt,cleanup,mo
     ...Object.fromEntries(['guardTerm','guardField','guardTag','guardHasHref'].filter(key=>attempt?.[key]!==undefined).map(key=>[key,attempt[key]]))});
   if(guard)Object.assign(value,guard);
   if(sourceFrameWitnessFailures.includes(error?.stagehandFrameWitnessFailure))value.frameWitnessFailure=error.stagehandFrameWitnessFailure;
+  const stop=sourceStopSchema.safeParse(sourceStop);if(stop.success)value.sourceStop=stop.data;
+  const document=projectSourceDocumentReadiness(error?.stagehandDocumentReadiness??documentReadiness);if(document)value.sourceDocumentReadiness=document;
   if(effectivePhase==='OPEN'){
     const annotated=navigationProjection.safeParse(error?.stagehandNavigation);
     Object.assign(value,annotated.success?annotated.data:classifyNavigationError(error));

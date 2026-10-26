@@ -1,7 +1,8 @@
 import type { OfficialIdentityPage } from "./teeitup-official-identity";
-import { isFreshNativeDelegatedDocument, isFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
+import { freshNativeCanonicalRootDocument, isFreshNativeDelegatedDocument, isFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
 import { delegatedBookingHop, type DelegatedHop } from "./teeitup-delegated-booking-source";
 import type { DelegatedDiagnosticGate } from "./teeitup-delegated-booking-diagnostic";
+import type { NativePhysicalContactSource } from "./teeitup-physical-contact-proof";
 
 declare const grantBrand: unique symbol;
 export type DelegatedGetGrant = object & { readonly [grantBrand]: true };
@@ -59,9 +60,9 @@ export function consumeDelegatedGet(token: DelegatedGetGrant) {
 declare const chainBrand: unique symbol;
 export type NativeDelegatedChainToken = object & { readonly [chainBrand]: true };
 const chains = new WeakMap<NativeDelegatedChainToken, { root: OfficialIdentityPage; final: OfficialIdentityPage; officialUrl: string;
-  bookingUrl: string; rootWitnessSha256: string; hops: DelegatedHop[]; deadline: number }>();
+  bookingUrl: string; rootWitnessSha256: string; hops: DelegatedHop[]; deadline: number; physicalContactSource?: NativePhysicalContactSource; physicalContactRequired?: true }>();
 export function registerNativeDelegatedChain(value: { root: OfficialIdentityPage; final: OfficialIdentityPage; officialUrl: string;
-  bookingUrl: string; rootWitnessSha256: string; hops: DelegatedHop[]; deadline: number }) {
+  bookingUrl: string; rootWitnessSha256: string; hops: DelegatedHop[]; deadline: number; physicalContactSource?: NativePhysicalContactSource; physicalContactRequired?: true }) {
   const token = Object.freeze({}) as NativeDelegatedChainToken;
   chains.set(token, value); return token;
 }
@@ -69,5 +70,7 @@ export function currentNativeDelegatedChain(token: NativeDelegatedChainToken) {
   const value = chains.get(token);
   if (!value || Date.now() >= value.deadline || !isFreshNativeOfficialIdentityPage(value.root, value.officialUrl) ||
       !isFreshNativeDelegatedDocument(value.final, value.officialUrl) || value.final.url !== value.bookingUrl) return fail();
-  return { rootWitnessSha256: value.rootWitnessSha256, hops: value.hops.map(hop => ({ ...hop })) };
+  const rootDocumentProof = freshNativeCanonicalRootDocument(value.root, value.officialUrl)?.rootDocumentProof;
+  return { rootWitnessSha256: value.rootWitnessSha256, hops: value.hops.map(hop => ({ ...hop })), ...(rootDocumentProof ? { rootDocumentProof } : {}),
+    ...(value.physicalContactSource ? { physicalContactSource: structuredClone(value.physicalContactSource) } : {}), ...(value.physicalContactRequired ? { physicalContactRequired: true as const } : {}) };
 }

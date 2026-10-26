@@ -11,6 +11,7 @@ import { interactiveControlKind, isAnonymousBrowserReadPost } from "@/lib/automa
 import { addVerifiedMindbodyReadHeaders, isMindbodyClassicPublicBootstrapPost } from "@/lib/automation/mindbody-public-read-policy";
 import { isRexAnonymousPlaceholderRead, isRexNamespace, isRexPublicBrowserReadPost, rexProjectedPublicReadRejection, rexPublicBrowserReadRejection } from "@/lib/automation/rex-public-read-policy";
 import { createUSchedulePublicReadPolicy } from "@/lib/automation/uschedule-public-read-policy";
+import { isUSchedulePublicHost } from "@/lib/simulators/providers/public-configuration";
 import { isMemberSportsPublicTeeSheetPost } from "@/lib/automation/membersports-public-read-policy";
 import { sanitizeResponderText } from "@/lib/automation/course-support-responder-policy";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
@@ -657,7 +658,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
           reply.status >= 200 && reply.status < 400 && isSafeRecipeUrl(url.href)) allowedNavigation.add(url.href);
       responseBytes += reply.buffer.length;
       if (deps.delegatedReadBudget) chargeDelegatedReadBudget(deps.delegatedReadBudget, "bytes", reply.buffer.length);
-      if (url.hostname === "clients.uschedule.com" && method === "GET" && /^text\/html(?:;|$)/iu.test(reply.headers["content-type"] ?? ""))
+      if (isUSchedulePublicHost(url.hostname) && method === "GET" && /^text\/html(?:;|$)/iu.test(reply.headers["content-type"] ?? ""))
         uschedule.observeResponse(url.href, method, reply.status, reply.headers["content-type"] ?? "", reply.buffer.toString("utf8"));
       if (responseBytes > PUBLIC_BROWSER_TOTAL_BYTES) { cancellation.abort("PUBLIC_READ_BYTE_LIMIT"); throw new Error("PUBLIC_READ_BYTE_LIMIT"); }
       catalogTiles.completeRead(catalogRead, reply.status, reply.headers["content-type"] ?? "", reply.buffer);

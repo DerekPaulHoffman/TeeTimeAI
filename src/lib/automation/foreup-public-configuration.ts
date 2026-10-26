@@ -83,9 +83,15 @@ export function parseForeupPublicConfiguration(input: {
     const entry = schedule as Record<string, unknown>;
     // A provider's structural schedule suffix is not part of venue identity.
     const title = normalizeName(entry.title).replace(/\btee sheet$/u, "").trim();
+    // course_name and title can carry different legitimate facility/business
+    // labels. Either identity match belongs to this same route-owned row.
+    const hasOwnerName = Object.hasOwn(entry, "course_name");
+    const validOwnerName = typeof entry.course_name === "string" && entry.course_name.trim().length > 0 &&
+      entry.course_name.length <= 300 && !/[\u0000-\u001f\u007f]/u.test(entry.course_name);
+    const ownerName = validOwnerName ? normalizeName(entry.course_name) : "";
     return positiveProviderId(entry.course_id) === facilityId &&
-      title.length >= 5 &&
-      (targetName === title || targetName.endsWith(` ${title}`));
+      title.length >= 5 && (!hasOwnerName || validOwnerName) &&
+      (hasOwnerName && targetName === ownerName || targetName === title || targetName.endsWith(` ${title}`));
   });
   if (matching.length !== 1) return null;
   const selected = matching[0] as Record<string, unknown>;

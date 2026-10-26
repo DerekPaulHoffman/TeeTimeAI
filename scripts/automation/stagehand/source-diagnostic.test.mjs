@@ -3,6 +3,16 @@ import assert from 'node:assert/strict';
 import { projectSourceDiagnostic, projectActionGuardDiagnostic, sourceFailureDiagnostic, captureModelFailure, classifyNavigationError, SOURCE_DIAGNOSTIC_MAX_BYTES } from './source-diagnostic.mjs';
 const report=()=>({metrics:{completedSteps:2,localCodexCalls:[{},{},{}]},actions:[],actionAttempts:[{status:'REJECTED',guardReason:'HIDDEN',selector:'SECRET_SELECTOR',reason:'PRIVATE_MESSAGE'}],
  officialLinkLedger:[{pageUrl:'https://public.example/',links:[{href:'https://provider.example/start?tenant=one',visible:true}]}],frameLedger:[],eligibleBookingSourceUrls:[]});
+test('closed stopping facts distinguish ordinary unresolved without retaining model reason or action target',()=>{
+ const stop={finalDecision:'UNRESOLVED',condition:'EXPLICIT_UNRESOLVED',lastActionKind:'click'};
+ const d=sourceFailureDiagnostic({phase:'EXTRACT',report:report(),sourceStop:stop});
+ assert.deepEqual(d.sourceStop,stop);assert.equal(d.errorClass,'NONE');
+ assert.equal(projectSourceDiagnostic({...d,sourceStop:{...stop,reason:'PRIVATE'}}),undefined);
+ assert.equal(projectSourceDiagnostic({...d,sourceStop:{...stop,lastActionKind:'https://private.example/'}}),undefined);
+ assert.equal(sourceFailureDiagnostic({sourceStop:{...stop,private:'SECRET'}}).sourceStop,undefined);
+ assert.deepEqual(sourceFailureDiagnostic({sourceStop:{finalDecision:null,condition:'ERROR',lastActionKind:null}}).sourceStop,{finalDecision:null,condition:'ERROR',lastActionKind:null});
+ assert.doesNotMatch(JSON.stringify(d),/SECRET|PRIVATE|https:|selector|url/iu);
+});
 test('failure diagnostics preserve static transport/phase/numeric partial facts and never raw error payloads',()=>{
  const error=Object.assign(Error('PRIVATE_MESSAGE https://private.example/?token=SECRET'),{code:'LOCAL_MODEL_RPC_FAILED',stagehandFailureStage:'SDK_INITIALIZE',
   diagnostics:{phase:'turn/start',rpcCode:-32600,httpStatusCode:429,usage:{totalTokens:90,inputTokens:80,outputTokens:10,private:'SECRET'},message:'PRIVATE_MESSAGE',body:'SECRET'}});

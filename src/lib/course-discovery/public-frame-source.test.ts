@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { publicFrameSource } from "./public-frame-source";
 import { createPublicBookingParentScope } from "./public-booking-parent";
+import { JSDOM } from "jsdom";
+import type { Page } from "@playwright/test";
+import { observedPublicFrameSources } from "./public-frame-source";
 
 describe("official public iframe source navigation", () => {
   const document = "https://venue.example/book-a-bay/", official = "https://venue.example/";
@@ -9,6 +12,40 @@ describe("official public iframe source navigation", () => {
   it("exposes an exact visible known public booking source for a separately guarded main-frame read", () => {
     expect(read()).toBe(entry.src);
     expect(read({ ...entry, src: "/availability", label: "Tee time booking" })).toBe("https://venue.example/availability");
+  });
+  it("exposes only exact public USchedule roots even when their visible iframe has no title", () => {
+    for (const host of ["clients.uschedule.com", "iframe.uschedule.com"]) {
+      const src = `https://${host}/public-rental/booking`;
+      expect(read({ ...entry, src })).toBe(src);
+      for (const unsafe of [src + "?date=2026-10-27", src + "#slot", src + "/checkout", src.replace(host, host + ".evil.example"),
+        src.replace("https://", "http://"), src.replace("https://", "https://user:secret@"), src.replace(".com/", ".com:8443/")])
+        expect(read({ ...entry, src: unsafe })).toBeUndefined();
+      for (const delta of [{ visible: false }, { srcdoc: true }, { label: "Sign in to book" }, { label: "Confirm 10:00 am" }])
+        expect(read({ ...entry, src, ...delta })).toBeUndefined();
+    }
+  });
+  it("keeps a fresh native same-host redirect and exact official link as the bare/www parent authority", () => {
+    const root = "https://www.venue.example/", bare = "https://venue.example/", booking = bare + "booking/";
+    const scope = createPublicBookingParentScope({ officialUrl: root });
+    scope.observeDocument({ url: root, status: 301 });scope.observeDocument({ url: bare, status: 200, redirectedFrom: root });
+    scope.observeOfficialLink(bare, booking, "Book now");scope.observeDocument({ url: booking, status: 200 });
+    const frame = { ...entry, src: "https://iframe.uschedule.com/public-rental/booking" };
+    expect(scope.authorizeParent(booking)?.kind).toBe("VERIFIED_OFFICIAL_DOCUMENT");
+    expect(publicFrameSource(frame, booking, root, booking, scope.authorizeParent(booking))).toBe(frame.src);
+    expect(publicFrameSource(frame, booking, root, booking)).toBeUndefined();
+    expect(publicFrameSource(frame, booking, root, bare, scope.authorizeParent(booking))).toBeUndefined();
+    scope.beginDocument(booking);expect(publicFrameSource(frame, booking, root, booking, scope.authorizeParent(booking))).toBeUndefined();
+    const unknown = createPublicBookingParentScope({ officialUrl: root });unknown.observeDocument({ url: booking, status: 200 });
+    expect(unknown.authorizeParent(booking)).toBeUndefined();
+  });
+  it("collects the actual visible source attribute, excluding hidden, form, srcdoc and child redirects", async () => {
+    const src = "https://iframe.uschedule.com/public-rental/booking";
+    const dom = new JSDOM(`<iframe src="${src}"></iframe><div hidden><iframe src="${src}"></iframe></div><form><iframe src="${src}"></iframe></form><iframe src="${src}" srcdoc=""></iframe><iframe src="https://iframe.uschedule.com.evil.example/public-rental/booking"></iframe>`, { url: document, runScripts: "outside-only" });
+    dom.window.Element.prototype.getBoundingClientRect = () => ({ width: 800, height: 999 } as DOMRect);
+    const page = { url: () => document, locator: () => ({ evaluateAll: async (fn: (nodes: Element[]) => unknown) => dom.window.eval(`(${fn.toString()})`)([...dom.window.document.querySelectorAll("iframe[src]")]) }) } as unknown as Page;
+    try { expect(await observedPublicFrameSources(page, official, document)).toEqual([src]);
+      expect(await observedPublicFrameSources(page, official, official)).toEqual([]);
+    } finally { dom.window.close(); }
   });
   it("accepts the observed simulator-bay iframe title while preserving source and public-entry fences", () => {
     const src = "https://app.acuityscheduling.com/schedule.php?owner=35639488";

@@ -19,6 +19,9 @@ const MAX_HTML_BYTES = 600_000, MAX_JSON_BYTES = 8_000, MAX_PAGES = 8;
 // fixed page ceiling; learned execution still has 16 pages, 40 session reads,
 // 8 MB aggregate and the existing later-day completeness requirement.
 const MAX_PUBLIC_ROWS_PER_PAGE = 25;
+// One observed public catalog publishes twenty distinct 15..300 minute choices.
+// Only catalog cardinality changes; requested duration and read budgets do not.
+const MAX_PUBLIC_DURATION_CHOICES = 20;
 const PUBLIC_ID = /^[1-9]\d{0,9}$/u;
 const metadataSchema = z.object({ tenant: z.string().regex(/^[a-z][a-z0-9-]{2,62}$/u),
   serviceId: z.string().regex(PUBLIC_ID) }).strict();
@@ -286,7 +289,7 @@ export function inspectUScheduleRecipeConfiguration(html: string, sourceUrl: str
   const durations = elements(lengths[0]).filter(node => node.tagName === "option").map(node => Number(attr(node, "value")))
     .filter(value => Number.isInteger(value) && value >= 15 && value <= 480);
   const current = rentals.filter(row => row.selected);
-  if (!rentals.length || rentals.length > 20 || current.length !== 1 || !durations.length || durations.length > 12 || new Set(durations).size !== durations.length) return;
+  if (!rentals.length || rentals.length > 20 || current.length !== 1 || !durations.length || durations.length > MAX_PUBLIC_DURATION_CHOICES || new Set(durations).size !== durations.length) return;
   return { tenant, rentals, durations, selected: current[0] };
 }
 

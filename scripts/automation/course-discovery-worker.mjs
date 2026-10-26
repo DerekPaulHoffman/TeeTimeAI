@@ -92,6 +92,51 @@ function canonicalDataKey(value) {
     return JSON.stringify(sort(JSON.parse(serialized)));
   } catch { return undefined; }
 }
+const currentNativeProofRequired = adapter => Boolean(adapter?.officialStreetTypeOmittedProof ||
+  adapter?.officialDelegatedBookingProof?.rootDocumentProof || adapter?.officialDelegatedBookingProof?.physicalContactProof);
+function dataHash(value) { const key = canonicalDataKey(value); return key ? createHash("sha256").update(key).digest("hex") : undefined; }
+function nativeRootDocumentData(proof, canonicalUrl, documentUrl) {
+  try {
+    if (!proof || Object.keys(proof).sort().join(",") !== "canonicalUrl,documentUrl,kind,redirects,witnessSha256" ||
+        proof.kind !== "NATIVE_CANONICAL_ROOT_REDIRECT" || proof.canonicalUrl !== canonicalUrl || proof.documentUrl !== documentUrl || canonicalUrl === documentUrl ||
+        !Array.isArray(proof.redirects) || proof.redirects.length < 1 || proof.redirects.length > 5) return false;
+    const host = new URL(canonicalUrl).hostname.replace(/^www\./u, "");
+    const publicUrl = value => safeObservedUrl(value) && new URL(value).href === value && new URL(value).hostname.replace(/^www\./u, "") === host;
+    return proof.redirects[0].fromUrl === canonicalUrl && proof.redirects.at(-1).toUrl === documentUrl &&
+      new Set([canonicalUrl, ...proof.redirects.map(hop => hop.toUrl)]).size === proof.redirects.length + 1 &&
+      proof.redirects.every((hop, i) => hop && Object.keys(hop).sort().join(",") === "completed,fromUrl,status,toUrl" &&
+        publicUrl(hop.fromUrl) && publicUrl(hop.toUrl) && hop.completed === true && [301, 302, 303, 307, 308].includes(hop.status) &&
+        (i === 0 || proof.redirects[i - 1].toUrl === hop.fromUrl)) &&
+      proof.witnessSha256 === dataHash({ canonicalUrl, documentUrl, redirects: proof.redirects });
+  } catch { return false; }
+}
+function physicalContactData(proof, outer, job) {
+  try {
+    const sourceKeys = ["officialUrl", "officialDocumentUrl", "bookingUrl", "canonicalName", "officialBrandName", "publicLocationName", "brandLocationLabel",
+      "canonicalNameRelation", "serviceRemainder", "observedServiceLabel", "canonicalAddress", "officialAddress", "canonicalLocality", "officialLocality", "publicCoursePhone", "warmTransport", "requiredCapability"];
+    const extraKeys = ["kind", "providerName", "providerAddress", "providerLocality", "providerLocalityRelation", "sourceWitnessSha256", "semanticDigest"];
+    const keys = value => value && typeof value === "object" && !Array.isArray(value) ? Object.keys(value).sort().join(",") : "";
+    const bounded = (value, min, max) => typeof value === "string" && value.length >= min && value.length <= max && !/[\u0000-\u001f\u007f]/u.test(value);
+    const semantic = { ...proof }; delete semantic.semanticDigest;
+    const source = Object.fromEntries(sourceKeys.map(key => [key, proof?.[key]]));
+    const phone = job.request.trustedContext?.canonicalCoursePhone;
+    return keys(proof) === [...sourceKeys, ...extraKeys].sort().join(",") && proof.kind === "OFFICIAL_PHYSICAL_CONTACT_BINDING_V1" &&
+      proof.officialUrl === outer.officialUrl && proof.officialDocumentUrl === outer.hops[0].pageUrl && proof.bookingUrl === outer.bookingUrl &&
+      proof.canonicalName === job.request.identity.name && proof.canonicalAddress === job.request.identity.address && proof.providerAddress === outer.providerAddress &&
+      typeof phone === "string" && /^\+1[2-9]\d{2}[2-9]\d{6}$/u.test(phone) && proof.publicCoursePhone === phone &&
+      ["officialBrandName", "publicLocationName", "providerName"].every(key => bounded(proof[key], 3, 200)) &&
+      ["canonicalAddress", "officialAddress", "providerAddress"].every(key => bounded(proof[key], 15, 1024)) &&
+      ["canonicalLocality", "officialLocality", "providerLocality"].every(key => bounded(proof[key], 2, 80)) &&
+      proof.canonicalLocality === proof.officialLocality &&
+      proof.providerLocalityRelation === (proof.officialLocality === proof.providerLocality ? "SAME_RECORDED" : "DIFFERENT_RECORDED") &&
+      (proof.brandLocationLabel === null || typeof proof.brandLocationLabel === "string" && /^[A-Z0-9]{2,8}$/u.test(proof.brandLocationLabel)) &&
+      (proof.canonicalNameRelation === "EXACT_PUBLIC_LOCATION_NAME" && proof.serviceRemainder === null && proof.observedServiceLabel === null ||
+        proof.canonicalNameRelation === "PUBLIC_LOCATION_AND_OBSERVED_SERVICE" && bounded(proof.serviceRemainder, 2, 40) && bounded(proof.observedServiceLabel, 2, 120)) &&
+      safeObservedUrl(proof.officialDocumentUrl) && new URL(proof.officialDocumentUrl).href === proof.officialDocumentUrl &&
+      proof.warmTransport === "NATIVE_CHROME" && proof.requiredCapability === "LOCAL_CHROME" &&
+      proof.sourceWitnessSha256 === dataHash(source) && proof.semanticDigest === dataHash(semantic);
+  } catch { return false; }
+}
 /** This observation is controller memory only; checkpoints cannot restore it. */
 export function createDiscoveryAdapterObservation(job, bookingUrl, adapter, contextUrl) {
   if (!safeObservedUrl(job?.request?.identity?.officialUrl) || !safeObservedUrl(bookingUrl) || !safeObservedUrl(contextUrl) ||
@@ -101,10 +146,10 @@ export function createDiscoveryAdapterObservation(job, bookingUrl, adapter, cont
   if (!adapterKey || !identityKey || !targetKey || !inputKey) return undefined;
   return { jobId: job.id, officialUrl: job.request.identity.officialUrl, bookingUrl, contextUrl,
     identityKey, targetKey, inputKey, trustedContextKey: canonicalDataKey(job.request.trustedContext ?? {}), adapter: JSON.parse(adapterKey),
-    ...(adapter.officialStreetTypeOmittedProof ? { sourceFingerprint: job.sourceFingerprint, jobAttempt: job.attempts,
+    ...(currentNativeProofRequired(adapter) ? { sourceFingerprint: job.sourceFingerprint, jobAttempt: job.attempts,
       firstPickedUpAt: job.firstPickedUpAt, deadlineAt: job.deadlineAt } : {}) };
 }
-function currentStreetTypeObservation(job, observation) {
+function currentNativeProofObservation(job, observation) {
   const first = Date.parse(job.firstPickedUpAt), end = Date.parse(job.deadlineAt);
   return typeof job.sourceFingerprint === "string" && /^[a-f0-9]{64}$/u.test(job.sourceFingerprint) &&
     Number.isInteger(job.attempts) && job.attempts >= 1 && Number.isFinite(first) && end === first + 900000 &&
@@ -124,7 +169,7 @@ export function inspectedAdapterSourceEvidence(recipe, job, observation, officia
       observation.inputKey !== canonicalDataKey(job.request.input) ||
       (observation.adapter?.family === "CPS" || observation.adapter?.officialDelegatedBookingProof || observation.adapter?.officialStreetTypeOmittedProof) &&
         observation.trustedContextKey !== canonicalDataKey(job.request.trustedContext ?? {}) ||
-      observation.adapter?.officialStreetTypeOmittedProof && !currentStreetTypeObservation(job, observation)) return undefined;
+      currentNativeProofRequired(observation.adapter) && !currentNativeProofObservation(job, observation)) return undefined;
   const candidateKey = canonicalDataKey(recipe.adapter), observedKey = canonicalDataKey(observation.adapter);
   if (!candidateKey || candidateKey !== observedKey) return undefined;
   return { officialUrl: observation.officialUrl, observedBookingUrl: observation.bookingUrl };
@@ -147,7 +192,7 @@ export function bindDiscoveryRecipeIdentity(recipe, job, adapterObservation, con
         adapterObservation.officialUrl === job.request.identity.officialUrl && adapterObservation.bookingUrl === proposedSource.bookingUrl &&
         adapterObservation.contextUrl === contextUrl && adapterObservation.identityKey === canonicalDataKey(job.request.identity) &&
         adapterObservation.targetKey === canonicalDataKey(job.request.target) && adapterObservation.inputKey === canonicalDataKey(job.request.input) &&
-        adapterObservation.trustedContextKey === canonicalDataKey(job.request.trustedContext ?? {}) && currentStreetTypeObservation(job, adapterObservation) &&
+        adapterObservation.trustedContextKey === canonicalDataKey(job.request.trustedContext ?? {}) && currentNativeProofObservation(job, adapterObservation) &&
         job.request.target.kind === "OUTDOOR") {
       try {
         const inspected = { ...observed }; delete inspected.officialStreetTypeOmittedProof;
@@ -191,8 +236,9 @@ export function bindDiscoveryRecipeIdentity(recipe, job, adapterObservation, con
       const sha = value => typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
       const keys = value => value && typeof value === "object" && !Array.isArray(value) ? Object.keys(value).sort().join(",") : "";
       const publicUrl = value => safeObservedUrl(value) && new URL(value).href === value;
+      const optionalKeys = ["rootDocumentProof", "physicalContactProof"].filter(key => proof?.[key] !== undefined);
       if (canonicalDataKey(inspected) === canonicalDataKey(adapter) && proof?.kind === "OFFICIAL_DELEGATED_BOOKING_SOURCE" &&
-          keys(proof) === "alias,bookingUrl,canonicalAddress,courseId,facilityId,hops,kind,officialUrl,providerAddress,requiredCapability,rootWitnessSha256,timeZone,venueName,warmTransport" &&
+          keys(proof) === ["alias", "bookingUrl", "canonicalAddress", "courseId", "facilityId", "hops", "kind", "officialUrl", "providerAddress", "requiredCapability", "rootWitnessSha256", "timeZone", "venueName", "warmTransport", ...optionalKeys].sort().join(",") &&
           proof.officialUrl === job.request.identity.officialUrl && proof.bookingUrl === proposedSource.bookingUrl &&
           proof.venueName === job.request.identity.name && proof.canonicalAddress === job.request.identity.address && proof.timeZone === job.request.input.timeZone &&
           proof.alias === adapter.alias && typeof adapter.alias === "string" && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(adapter.alias) &&
@@ -201,9 +247,12 @@ export function bindDiscoveryRecipeIdentity(recipe, job, adapterObservation, con
           typeof proof.providerAddress === "string" && proof.providerAddress.length >= 3 && proof.providerAddress.length <= 1024 &&
           sha(proof.rootWitnessSha256) && Array.isArray(proof.hops) && proof.hops.length >= 1 && proof.hops.length <= 2 &&
           proof.hops.every((hop, index) => keys(hop) === "nextUrl,pageUrl,witnessSha256" && publicUrl(hop.pageUrl) && publicUrl(hop.nextUrl) && sha(hop.witnessSha256) &&
-            (index === 0 ? hop.pageUrl === proof.officialUrl : proof.hops[index - 1].nextUrl === hop.pageUrl)) &&
+            (index === 0 ? hop.pageUrl === (proof.rootDocumentProof?.documentUrl ?? proof.officialUrl) : proof.hops[index - 1].nextUrl === hop.pageUrl)) &&
           proof.hops.at(-1).nextUrl === proof.bookingUrl && new Set([proof.hops[0].pageUrl, ...proof.hops.map(hop => hop.nextUrl)]).size === proof.hops.length + 1 &&
           [...proof.hops.map(hop => hop.pageUrl), proof.bookingUrl].includes(contextUrl) &&
+          (!currentNativeProofRequired(observed) || currentNativeProofObservation(job, adapterObservation)) &&
+          (!proof.rootDocumentProof || nativeRootDocumentData(proof.rootDocumentProof, proof.officialUrl, proof.hops[0].pageUrl)) &&
+          (!proof.physicalContactProof || proof.hops.length === 1 && physicalContactData(proof.physicalContactProof, proof, job)) &&
           proof.warmTransport === "NATIVE_CHROME" && proof.requiredCapability === "LOCAL_CHROME") {
         try { const bytes = JSON.stringify(proof); if (Buffer.byteLength(bytes, "utf8") <= 16_000) adapter.officialDelegatedBookingProof = JSON.parse(bytes); }
         catch { /* Only the current private native observation can confer this proof. */ }
@@ -509,8 +558,8 @@ function safeFixedReaderFailureDiagnostics(value) {
 export function safeTeeItUpDelegationDiagnostic(value) {
   const stages = ["CAPABILITY", "SOURCE", "ROOT_READ", "ROOT_FRESH", "ROOT_IDENTITY", "ROOT_LINK", "HOP_ONE_READ", "NATIVE_DOCUMENT_READ",
     "HOP_ONE_FRESH", "HOP_TWO_LINK", "HOP_TWO_READ", "ROOT_REFRESH", "FINAL_FRESH", "CHAIN_REGISTER", "PROVIDER_BIND"];
-  const gates = ["capabilityAvailable", "sourceValid", "deadlineCurrent", "rootReadReturned", "rootFresh", "rootUrlExact",
-    "canonicalAddressValid", "rootRawVenue", "rootRenderedVenue", "rootRawAddress", "rootRenderedAddress", "rootLinkVerified", "hopNative",
+  const gates = ["capabilityAvailable", "sourceValid", "deadlineCurrent", "rootReadReturned", "rootFresh", "rootUrlExact", "rootDocumentProvenance",
+    "canonicalAddressValid", "rootRawVenue", "rootRenderedVenue", "rootRawAddress", "rootRenderedAddress", "physicalRaw", "physicalRendered", "physicalNameRelation", "physicalPhone", "rootLinkVerified", "hopNative",
     "hopRawBounded", "hopRawLinkPresent", "hopRenderedLinkPresent", "hopUnique", "firstReadReturned", "firstFresh", "secondLinkVerified",
     "secondReadReturned", "rootRefreshRequired", "rootRefreshReturned", "rootRefreshIdentityMatches", "rootRefreshLinkMatches", "finalFresh", "finalUrlMatches",
     "directoryValid", "directoryIdsUnique", "providerUniqueMatch", "hopSessionOpen", "hopNoAccess", "hopNoFatal", "hopStatus200", "hopCaptured",

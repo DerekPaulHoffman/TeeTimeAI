@@ -295,7 +295,8 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
       const proof = recipe.adapter.officialDelegatedBookingProof;
       if (recipe.target.kind !== "OUTDOOR" || proof.officialUrl !== recipe.source.officialUrl || proof.bookingUrl !== recipe.source.bookingUrl ||
           proof.venueName !== recipe.source.venueName || proof.canonicalAddress !== recipe.source.venueAddress || proof.timeZone !== recipe.source.timeZone ||
-          proof.hops[0].pageUrl !== recipe.source.officialUrl)
+          (proof.rootDocumentProof ? proof.rootDocumentProof.canonicalUrl !== recipe.source.officialUrl || proof.rootDocumentProof.documentUrl !== proof.hops[0].pageUrl :
+            proof.hops[0].pageUrl !== recipe.source.officialUrl))
         ctx.addIssue({ code: "custom", message: "Native delegated booking proof must retain the exact canonical source" });
     }
     if (recipe.adapter.family === "TEEITUP" && recipe.adapter.officialStreetTypeOmittedProof) {

@@ -28,6 +28,43 @@ function fixture({invalid=false,closeReject=false,afterAct}={}){
  close:async()=>{closes++;if(closeReject)throw Error('PRIVATE_CLOSE_MESSAGE');return{browserClosed:true,modelClosed:true};}};
  return{session,instructions,get closes(){return closes;},get acts(){return acts;}};
 }
+
+const completeDocument={readyState:'interactive',bodyPresent:true,mainDocumentCurrent:true,mainDocumentComplete:true,mainReadPending:false,pendingReads:1,mainDocumentStatus:200};
+test('source settles the current main parser before collecting evidence or invoking a model',async()=>{
+ const f=fixture(),order=[];const evaluate=f.session.page.evaluate,extract=f.session.extract;
+ f.session.settleSourceDocument=async()=>{order.push('settled');return completeDocument;};
+ f.session.page.evaluate=async(...args)=>{order.push('evidence');return evaluate(...args);};
+ f.session.extract=async(...args)=>{order.push('model');return extract(...args);};
+ const r=await sourceDiscover({job:job(),sessionFactory:async()=>f.session});
+ assert.equal(r.outcome,'SOURCE_PROPOSED_UNVERIFIED');assert.equal(order[0],'settled');
+ assert.equal(order.filter(value=>value==='settled').length,2);
+ for(let i=0;i<order.length;i++)if(order[i]==='model')assert.ok(order.lastIndexOf('settled',i)<order.lastIndexOf('evidence',i));
+});
+test('unsettled main document expires without model evidence and retains closed last readiness',async()=>{
+ const f=fixture();let evaluations=0;const readiness={...completeDocument,readyState:'loading',mainReadPending:true,mainDocumentComplete:false};
+ f.session.settleSourceDocument=async()=>{throw Object.assign(Error('STAGEHAND_SOURCE_LOADING_INCOMPLETE'),{stagehandDocumentReadiness:readiness});};
+ f.session.page.evaluate=async()=>{evaluations++;throw Error('UNSETTLED_EVIDENCE');};
+ const r=await sourceDiscover({job:job(),sessionFactory:async()=>f.session});
+ assert.equal(r.frameworkFailureCode,'STAGEHAND_SOURCE_LOADING_INCOMPLETE');assert.equal(evaluations,0);assert.equal(r.metrics.completedLocalCodexCalls,0);
+ assert.equal(r.sourceDiagnostic.phase,'EVIDENCE');assert.deepEqual(r.sourceDiagnostic.sourceDocumentReadiness,readiness);assert.equal(r.browserClosed,true);
+});
+test('explicit unresolved must revalidate current settled document before stopping',async()=>{
+ const f=fixture();let settled=0,extracts=0,reads=0;
+ f.session.settleSourceDocument=async()=>{settled++;return completeDocument;};
+ f.session.readSourceDocumentReadiness=async()=>{reads++;return reads===1?{...completeDocument,readyState:'loading',mainReadPending:true}:completeDocument;};
+ f.session.extract=async(_instruction,schema)=>{extracts++;return{data:schema.parse({decision:'UNRESOLVED',reason:'No routing source',nextActionInstruction:'',bookingUrl:null})};};
+ const r=await sourceDiscover({job:job(),sessionFactory:async()=>f.session});
+ assert.equal(extracts,2);assert.equal(settled,2);assert.equal(reads,2);assert.equal(r.sourceDiagnostic.sourceStop.condition,'EXPLICIT_UNRESOLVED');
+});
+test('explicit unresolved from an old page is recaptured after an actual URL change',async()=>{
+ const f=fixture();let current=official,extracts=0,evaluations=0;
+ f.session.page.url=async()=>current;
+ f.session.settleSourceDocument=async()=>completeDocument;f.session.readSourceDocumentReadiness=async()=>completeDocument;
+ f.session.page.evaluate=async()=>++evaluations%2===0?[]:({url:current,links:[],frames:[],dom:[],network:{requests:[]}});
+ f.session.extract=async(_instruction,schema)=>{extracts++;if(extracts===1)current=landing;return{data:schema.parse({decision:'UNRESOLVED',reason:'No source',nextActionInstruction:'',bookingUrl:null})};};
+ const r=await sourceDiscover({job:job(),sessionFactory:async()=>f.session});
+ assert.equal(extracts,2);assert.equal(r.sourceDiagnostic.sourceStop.condition,'EXPLICIT_UNRESOLVED');
+});
 test('ordinary job projection strips private/currentmethod hints and binds original clock/sourcecap',()=>{
  const raw=job(),p=publicSourceJob(raw);assert.deepEqual(Object.keys(p.identity),['name','officialUrl','timeZone','address']);
  assert.equal(JSON.stringify(p).includes('PRIVATE'),false);assert.equal(p.jobId,raw.id);assert.equal(Date.parse(p.deadlineAt)-Date.parse(p.firstPickedUpAt),900000);
@@ -36,6 +73,20 @@ test('ordinary job projection strips private/currentmethod hints and binds origi
  assert.throws(()=>publicSourceJob({...raw,deadlineAt:new Date(Date.parse(raw.deadlineAt)+1).toISOString()}),/SOURCE_JOB_INVALID/);
  assert.throws(()=>publicSourceJob(raw,new Date(Date.parse(raw.deadlineAt)+1).toISOString()),/SOURCE_JOB_INVALID/);
  const old=Date.now()-121000;assert.throws(()=>publicSourceJob({...raw,firstPickedUpAt:new Date(old).toISOString(),deadlineAt:new Date(old+900000).toISOString()}),/BUDGET_EXHAUSTED/);
+});
+test('ordinary explicit unresolved persists closed decision/stop/action facts',async()=>{
+ const f=fixture();f.session.extract=async(_instruction,schema)=>({data:schema.parse({decision:'UNRESOLVED',reason:'PRIVATE_MODEL_REASON',nextActionInstruction:'',bookingUrl:null})});
+ const r=await sourceDiscover({job:job(),sessionFactory:async()=>f.session});
+ assert.equal(r.outcome,'UNRESOLVED');assert.equal(r.frameworkFailureCode,undefined);
+ assert.deepEqual(r.sourceDiagnostic.sourceStop,{finalDecision:'UNRESOLVED',condition:'EXPLICIT_UNRESOLVED',lastActionKind:'INITIAL_NAVIGATION'});
+ assert.equal(r.sourceDiagnostic.errorClass,'NONE');assert.doesNotMatch(JSON.stringify(r.sourceDiagnostic),/PRIVATE_MODEL_REASON|https:/u);
+});
+test('empty continue is distinguishable from explicit unresolved and an early guarded failure',async()=>{
+ const f=fixture();f.session.extract=async(_instruction,schema)=>({data:schema.parse({decision:'CONTINUE',reason:'',nextActionInstruction:'',bookingUrl:null})});
+ const r=await sourceDiscover({job:job(),sessionFactory:async()=>f.session});assert.equal(r.sourceDiagnostic.sourceStop.condition,'EMPTY_CONTINUE');
+ const fail=fixture();fail.session.goto=async()=>{throw Error('STAGEHAND_GUARDED_SOURCE_REJECTED');};
+ const rejected=await sourceDiscover({job:job(),sessionFactory:async()=>fail.session});
+ assert.deepEqual(rejected.sourceDiagnostic.sourceStop,{finalDecision:null,condition:'ERROR',lastActionKind:'INITIAL_NAVIGATION'});
 });
 test('actual SDK-shaped extract/observe/act routes exact ancestor then exports only strict source with completed usage',async()=>{
  const f=fixture(),updates=[];const r=await sourceDiscover({job:job(),sessionFactory:async options=>{assert.equal(options.model,'gpt-6.1-sol');assert.equal(options.sourceRoutingOnly,true);return f.session;},onMetrics:m=>updates.push(m)});

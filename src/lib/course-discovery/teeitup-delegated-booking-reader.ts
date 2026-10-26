@@ -6,11 +6,13 @@ import { delegatedCanonicalVenueWitness, delegatedBookingHop } from "./teeitup-d
 import { authorizeDelegatedGet, freshDelegatedPage, registerNativeDelegatedChain, createDelegatedReadBudget, type DelegatedGetGrant } from "./teeitup-delegated-booking-context";
 import { teeItUpBookAlias } from "./teeitup-official-booking-source";
 import { createDelegationDiagnostic, rememberTeeItUpDelegationFailure, type DelegatedDiagnosticGate } from "./teeitup-delegated-booking-diagnostic";
+import { deriveNativePhysicalContactSource, getTeeItUpPhysicalContactDiagnostic, type NativePhysicalContactSource } from "./teeitup-physical-contact-proof";
 
 export type DelegatedReaderDependencies = {
   deadlineAt?: Date; localCapabilities?: readonly "LOCAL_CHROME"[];
   requestLease?: <T>(family: string, work: () => Promise<T>) => Promise<{ acquired: true; value: T } | { acquired: false }>;
   readDelegatedRoot?: NativeOfficialPageReader;
+  trustedContext?: { canonicalCoursePhone?: string };
   /** Fixed controller test seam, never model or serialized recipe authority. */
   readDelegatedDocument?: (source: OfficialIdentitySource, grant: DelegatedGetGrant) => Promise<OfficialIdentityPage>;
 };
@@ -43,7 +45,23 @@ export async function readTeeItUpDelegatedBookingChain(source: OfficialIdentityS
   diagnostic.stage = "ROOT_FRESH"; note("rootFresh", isFreshNativeOfficialIdentityPage(root, source.officialUrl));
   if (!isFreshNativeOfficialIdentityPage(root, source.officialUrl)) throw new Error("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
   diagnostic.stage = "ROOT_IDENTITY";
-  const rootWitnessSha256 = delegatedCanonicalVenueWitness(source, root, note);
+  let physicalContactSource: NativePhysicalContactSource | undefined;
+  let physicalContactRequired = false;
+  const rootWitness = (page: OfficialIdentityPage) => {
+    try {
+      const legacy = delegatedCanonicalVenueWitness(source, page, note);
+      physicalContactRequired = false;
+      physicalContactSource = undefined;
+      try { physicalContactSource = deriveNativePhysicalContactSource(source, page, deps.trustedContext?.canonicalCoursePhone); } catch { /* Legacy source evidence remains unchanged. */ }
+      return legacy;
+    } catch (error) {
+      if (!deps.trustedContext?.canonicalCoursePhone) throw error;
+      physicalContactSource = deriveNativePhysicalContactSource(source, page, deps.trustedContext.canonicalCoursePhone);
+      physicalContactRequired = true;
+      return physicalContactSource.sourceWitnessSha256;
+    }
+  };
+  const rootWitnessSha256 = rootWitness(root);
   // Prefer an exact direct link if present, otherwise require one unambiguous
   // public booking delegation from the canonical venue document.
   let first;
@@ -72,7 +90,7 @@ export async function readTeeItUpDelegatedBookingChain(source: OfficialIdentityS
     root = await rootRead(source, source.officialUrl, deadline);
     note("rootRefreshReturned", true);
     if (!isFreshNativeOfficialIdentityPage(root, source.officialUrl) ||
-        !(diagnostic.gates.rootRefreshIdentityMatches = delegatedCanonicalVenueWitness(source, root, note) === rootWitnessSha256) ||
+        !(diagnostic.gates.rootRefreshIdentityMatches = rootWitness(root) === rootWitnessSha256) ||
         !(diagnostic.gates.rootRefreshLinkMatches = JSON.stringify(delegatedBookingHop(root, hops[0].nextUrl, note)) === JSON.stringify(hops[0]))) throw new Error("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
   }
   diagnostic.stage = "FINAL_FRESH";
@@ -82,6 +100,16 @@ export async function readTeeItUpDelegatedBookingChain(source: OfficialIdentityS
     throw new Error("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
   diagnostic.stage = "CHAIN_REGISTER";
   return registerNativeDelegatedChain({ root, final, officialUrl: source.officialUrl, bookingUrl: source.bookingUrl,
-    rootWitnessSha256, hops, deadline: deadline.getTime() });
-  } catch (error) { rememberTeeItUpDelegationFailure(error, diagnostic); throw error; }
+    rootWitnessSha256, hops, deadline: deadline.getTime(), ...(physicalContactSource ? { physicalContactSource } : {}), ...(physicalContactRequired ? { physicalContactRequired: true } : {}) });
+  } catch (error) {
+    const physical = getTeeItUpPhysicalContactDiagnostic(error);
+    if (physical) {
+      const group = (...keys: Array<keyof typeof physical.gates>) => keys.some(key => physical.gates[key] === false) ? false : keys.every(key => physical.gates[key] === true) ? true : null;
+      diagnostic.gates.physicalRaw = group("rawTitleUnique", "rawBrandUnique", "titleBrandBinding", "physicalBlockUnique", "canonicalAddressExact", "rawBookingLinkPresent");
+      diagnostic.gates.physicalRendered = group("titleRawVisibleEqual", "brandRawVisibleMatch", "visiblePhysicalBlockMatches", "visibleBookingLinkPresent");
+      diagnostic.gates.physicalNameRelation = physical.gates.observedServiceBinding;
+      diagnostic.gates.physicalPhone = group("canonicalPhoneValid", "rawPhonesPresent", "rawPhoneHrefsMatch", "rawPhoneTextsMatch", "visiblePhonesPresent", "visiblePhonesMatch");
+    }
+    rememberTeeItUpDelegationFailure(error, diagnostic); throw error;
+  }
 }

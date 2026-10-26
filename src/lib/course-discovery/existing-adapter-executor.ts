@@ -36,7 +36,7 @@ import { parseCpsSource } from "./cps-source";
 import { executeCps, inspectCps } from "./cps-executor";
 import { deriveUScheduleOfficialLocation, parseUScheduleLocationSource } from "@/lib/simulators/providers/uschedule-location-source";
 import { executeUSchedulePublicLocation, inspectUSchedulePublicLocation } from "./uschedule-location-executor";
-import { deriveUSchedulePublicRentalParty } from "./uschedule-public-rental-party";
+import { deriveUSchedulePublicRentalParty, isUSchedulePublicRentalPartyAbsent } from "./uschedule-public-rental-party";
 import { isFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
 import { observedTeeItUpOfficialBookingChain, type TeeItUpOfficialBookingToken } from "./teeitup-official-booking-context";
 import { bindTeeItUpOfficialBookingFacility, type TeeItUpOfficialBookingSourceProof, type TeeItUpObservedSourceChain } from "./teeitup-official-booking-source";
@@ -477,9 +477,13 @@ export async function inspectExistingAdapter(source: Source, deps: Dependencies)
       let publicRentalPartyProof;
       if (deps.officialIdentityPage) {
         try { publicRentalPartyProof = deriveUSchedulePublicRentalParty(source, deps.officialIdentityPage); }
-        catch { if ((deps.requestedInput?.players ?? 1) > 1) fail("USCHEDULE_PUBLIC_PARTY_UNVERIFIED"); }
+        catch (error) {
+          // An unstated limit stays unknown. A published but unverified limit
+          // must never be downgraded to absence by the optional proof path.
+          if (!isUSchedulePublicRentalPartyAbsent(error)) throw error;
+        }
       }
-      if ((deps.requestedInput?.players ?? 1) > 1 && (!publicRentalPartyProof || deps.requestedInput!.players > publicRentalPartyProof.maxPartySize))
+      if (publicRentalPartyProof && (deps.requestedInput?.players ?? 1) > publicRentalPartyProof.maxPartySize)
         fail("USCHEDULE_PUBLIC_PARTY_UNVERIFIED");
       return { adapter: existingAdapterMetadataSchema.parse({ family: "USCHEDULE", tenant: config.tenant,
         serviceId: config.selected.serviceId, serviceName: config.selected.serviceName,
@@ -654,7 +658,7 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
             JSON.stringify(deriveUSchedulePublicRentalParty(recipe.source, fresh)) !== JSON.stringify(proof)) fail("USCHEDULE_PUBLIC_PARTY_UNVERIFIED");
         capacity = proof.maxPartySize;
       }
-      if (input.players > (capacity ?? 1)) fail("USCHEDULE_PUBLIC_PARTY_UNVERIFIED");
+      if (capacity !== null && input.players > capacity) fail("USCHEDULE_PUBLIC_PARTY_UNVERIFIED");
       uscheduleSession = createUSchedulePublicSession(recipe.source.bookingUrl, deps);
       const available = await fetchUScheduleRecipeAvailability({ date: input.date, durationMinutes: input.durationMinutes!, partySize: 1,
         timeZone: input.timeZone, offering: { id: recipe.target.offeringId!, courseId: recipe.target.courseId, bookingUrl: recipe.source.bookingUrl,

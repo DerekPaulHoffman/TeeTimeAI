@@ -9,13 +9,14 @@ export const stagehandNativeRouterCodes = ["NATIVE_REDIRECT_ABORT_TIMEOUT", "NAT
   "NATIVE_REDIRECT_RESPONSE_PRIOR_FAILURE", "NATIVE_REDIRECT_RESPONSE_REQUEST_PAUSED", "NATIVE_REDIRECT_RESPONSE_STATUS_INVALID", "NATIVE_REDIRECT_RESPONSE_TIMEOUT",
   "NATIVE_REDIRECT_RESPONSE_UNADMITTED", "NATIVE_REDIRECT_RESPONSE_UNKNOWN", "NATIVE_REDIRECT_RESPONSE_URL_MISMATCH", "NATIVE_REDIRECT_RETIRED_DISPATCH", "NATIVE_REDIRECT_ROUTING_FAILED",
   "NATIVE_RESPONSE_LIMIT", "OWNED_STAGEHAND_CDP_UNAVAILABLE", "UNKNOWN"] as const;
-const phases = ["RESPONSE_WAIT", "CONTINUE_RESPONSE_ACK", "LOADER_IDENTITY_WAIT", "LOADER_IDENTITY", "LOADER_OWNER", "REDIRECT_GENERATION", "REDIRECT_PROVENANCE", "DOCUMENT_INTENT", "DOCUMENT_DRAIN"] as const;
+const phases = ["RESPONSE_WAIT", "CONTINUE_REQUEST_ACK", "CONTINUE_RESPONSE_ACK", "LOADER_IDENTITY_WAIT", "LOADER_IDENTITY", "LOADER_OWNER", "REDIRECT_GENERATION", "REDIRECT_PROVENANCE", "DOCUMENT_INTENT", "DOCUMENT_DRAIN"] as const;
 const methods = ["GET", "HEAD", "POST", "OPTIONS", "PUT", "PATCH", "DELETE", "CONNECT", "TRACE", "OTHER"] as const;
 const kinds = ["document", "stylesheet", "script", "image", "media", "font", "xhr", "fetch", "preflight", "other", "ping", "websocket", "eventsource"] as const;
 export const stagehandNativeRouterBooleanKeys = ["framePresent", "rootFrame", "networkIdPresent", "duplicateRequestId", "hasPostData", "postDataPresent",
   "identityPresent", "loaderPresent", "loaderKnown", "identityFresh", "identityUrlMatches", "identityMethodMatches", "identityKindMatches", "identityFrameMatches",
   "parentPresent", "awaitingDocument", "parentCurrentGeneration", "documentCommitted", "documentIntentPresent", "documentIntentUsed", "sourceResponseComplete", "successorTerminalFailed",
-  "declaredLengthPresent", "documentResponse", "ancillaryResponse"] as const;
+  "declaredLengthPresent", "documentResponse", "ancillaryResponse", "recordGenerationCurrent", "recordGenerationRetired", "recordAdmitted", "recordPaused", "recordResponsePaused",
+  "recordFailed", "recordComplete", "recordHandlerDone", "recordTerminalObserved"] as const;
 const limitKinds = ["DECLARED_INVALID", "DECLARED_TOO_LARGE", "DECODED_BODY", "TOTAL_DECODED"] as const;
 const byteKeys = ["allowedBytes", "declaredBytes", "bodyBytes", "totalBytes"] as const;
 export type StagehandNativeRouterFailure = { code: typeof stagehandNativeRouterCodes[number]; phase?: typeof phases[number]; method?: typeof methods[number]; resourceType?: typeof kinds[number]; limitKind?: typeof limitKinds[number] } &

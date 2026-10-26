@@ -3,6 +3,7 @@ import { parse, type DefaultTreeAdapterMap } from "parse5";
 import { z } from "zod";
 import type { OfficialIdentityPage } from "@/lib/course-discovery/teeitup-official-identity";
 import type { OfficialSourceDiagnostic } from "@/lib/course-discovery/official-source-diagnostics";
+import { isUSchedulePublicHost } from "./public-configuration";
 
 type Node = DefaultTreeAdapterMap["node"];
 type Element = DefaultTreeAdapterMap["element"];
@@ -20,7 +21,8 @@ export function parseUScheduleLocationSource(value: string) {
   if (typeof value !== "string" || value.length > 2048 || /[\u0000-\u0020\u007f]/u.test(value)) return;
   try {
     const url = new URL(value), tenant = /^\/([a-z](?:[a-z0-9-]{1,61}[a-z0-9]))\/booking$/u.exec(url.pathname)?.[1];
-    if (!tenant || url.protocol !== "https:" || url.hostname !== "clients.uschedule.com" || url.port || url.username || url.password || url.hash) return;
+    if (!tenant || url.protocol !== "https:" || !isUSchedulePublicHost(url.hostname) || url.port || url.username || url.password || url.hash ||
+        url.hostname === "iframe.uschedule.com" && url.search) return;
     const keys = [...url.searchParams.keys()];
     if (keys.length > 1 || keys.some(key => key !== "filter")) return;
     const filter = url.searchParams.get("filter");
@@ -227,7 +229,7 @@ export function readUScheduleLocationCatalog(html: string, sourceUrl: string, of
         clean(text(node)) === "Non-members reservations include 1 guest, for free.").length !== 1) return fail();
   const scripts = all.filter(node => node.tagName === "script" && attr(node, "src")).flatMap(node => {
     try { const url = new URL(attr(node, "src")!, source.url);
-      return url.origin === "https://clients.uschedule.com" && url.pathname === USCHEDULE_LOCATION_CLIENT.path && !url.username && !url.password && !url.port && !url.hash &&
+      return url.origin === new URL(source.url).origin && url.pathname === USCHEDULE_LOCATION_CLIENT.path && !url.username && !url.password && !url.port && !url.hash &&
         (url.search === "" || url.searchParams.size === 1 && /^[A-Za-z0-9_-]{44}$/u.test(url.searchParams.get("v") ?? "")) ? [url.href] : []; } catch { return []; }
   });
   if (scripts.length !== 1) return fail();

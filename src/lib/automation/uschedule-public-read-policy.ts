@@ -1,6 +1,7 @@
 import { parse, type DefaultTreeAdapterMap } from "parse5";
 import { readUScheduleNextAvailableView } from "./uschedule-public-view-control";
 import { createHash } from "node:crypto";
+import { isUSchedulePublicHost } from "@/lib/simulators/providers/public-configuration";
 import { parseUScheduleLocationSource, readUScheduleLocationCatalog, USCHEDULE_LOCATION_CLIENT,
   type UScheduleOfficialLocationProof } from "@/lib/simulators/providers/uschedule-location-source";
 
@@ -20,7 +21,7 @@ function text(node: Node): string {
 function bookingUrl(value: string) {
   try {
     const url = new URL(value);
-    return url.protocol === "https:" && url.hostname === "clients.uschedule.com" && !url.port && !url.username && !url.password &&
+    return url.protocol === "https:" && isUSchedulePublicHost(url.hostname) && !url.port && !url.username && !url.password &&
       !url.search && !url.hash && /^\/[a-z][a-z0-9-]{2,62}\/booking$/u.test(url.pathname) ? url : undefined;
   } catch { return undefined; }
 }
@@ -122,7 +123,7 @@ export function createUSchedulePublicReadPolicy(context: { officialLocation?: US
         (sources.get(source.href)?.get(item.Name) ?? locationReady(source.href)?.filters.get(item.Name))?.has(item.Value) === true;
     },
     addReadHeaders(url: URL, method: string, original: Record<string, string>, headers: Headers, body: string) {
-      if (url.hostname !== "clients.uschedule.com" || method !== "POST") return true;
+      if (!isUSchedulePublicHost(url.hostname) || method !== "POST") return true;
       const proposed = new Headers(headers);
       proposed.set("referer", original.referer ?? "");
       if (!this.allows(url, proposed, body)) return false;

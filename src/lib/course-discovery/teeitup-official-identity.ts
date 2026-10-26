@@ -18,6 +18,8 @@ export type OfficialIdentityPage = { url: string; html: string; visibleEvidence?
   title: string; headings: string[]; linkUrls: string[]; addressTexts: string[]; phoneTexts?: string[];
   brandLinks?: Array<{ href: string; text: string }>;
   publicRentalTexts?: string[];
+  /** Computed-visible public business/service labels, never field values. */
+  publicBusinessLabels?: string[];
   publicContactBlocks?: PublicCourseContactBlock[];
 }; browserTransport?: "PINNED_HTTP" | "NATIVE_CHROME" };
 type Node = DefaultTreeAdapterMap["node"];

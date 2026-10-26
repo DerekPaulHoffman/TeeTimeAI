@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { deriveUSchedulePublicRentalParty, publicRentalPartySize } from "./uschedule-public-rental-party";
+import { deriveUSchedulePublicRentalParty, isUSchedulePublicRentalPartyAbsent, publicRentalPartySize } from "./uschedule-public-rental-party";
 import { inspectExistingAdapter, executeExistingAdapterRecipe } from "./existing-adapter-executor";
 import { existingAdapterMetadataSchema } from "./existing-adapter-schema";
 import { registerFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
@@ -63,18 +63,61 @@ describe("USchedule independently published public bay party size", () => {
   if (change === "conflict") p.visibleEvidence!.publicRentalTexts!.push(rental.replace("3 golfers", "2 golfers"));
   expect(() => deriveUSchedulePublicRentalParty(source, p)).toThrow("USCHEDULE_PUBLIC_PARTY_UNVERIFIED");
  });
- it("new immutable inspection metadata contains observed party proof; unsupported party cannot be admitted", async () => {
+ it("retains a verified published golfer limit while allowing public bay rentals with an unknown limit", async () => {
   const deps = { venueMatches: venueProofMatches, officialIdentityPage: page(), requestedInput: input, requestLease: lease, fetch: vi.fn().mockImplementation(async () => response()) };
   const observed = await inspectExistingAdapter(source, deps);
   expect(observed.adapter).toMatchObject({ family: "USCHEDULE", publicRentalPartyProof: { maxPartySize: 3 } });
   await expect(inspectExistingAdapter(source, { ...deps, requestedInput: { ...input, players: 4 } })).rejects.toThrow("USCHEDULE_PUBLIC_PARTY_UNVERIFIED");
-  const noVisible = page(); noVisible.visibleEvidence!.publicRentalTexts = [];
-  await expect(inspectExistingAdapter(source, { ...deps, officialIdentityPage: noVisible })).rejects.toThrow("USCHEDULE_PUBLIC_PARTY_UNVERIFIED");
+  const absent = page(); absent.html = absent.html.replace("Up to 3 golfers", "Golfer limit not stated"); absent.visibleEvidence!.publicRentalTexts = [];
+  const unknown = await inspectExistingAdapter(source, { ...deps, officialIdentityPage: absent });
+  expect(unknown.adapter).toMatchObject({ family: "USCHEDULE", serviceId: "73" });
+  expect(unknown.adapter).not.toHaveProperty("publicRentalPartyProof");
  });
- it("old recipe cannot claim a two-person proof and does not call provider", async () => {
-  const fetch = vi.fn(), recipe = { schemaVersion: 1 as const, engine: "EXISTING_ADAPTER" as const, source, target: { courseId: "c", offeringId: "o", kind: "SIMULATOR" as const },
-   adapter: existingAdapterMetadataSchema.parse({ family: "USCHEDULE", tenant: "examplegolfstudio", serviceId: "73", serviceName: "Simulator Rental" }) };
-  const result = await executeExistingAdapterRecipe(recipe, input, { fetch, requestLease: lease, venueMatches: venueProofMatches,
+ it("permits only actual absence and never treats hidden, account or unrelated department limits as public bay capacity", async () => {
+  const p = page(); p.html = p.html.replace("Up to 3 golfers", "Golfer limit not stated").replace("</body>",
+   '<section hidden>Public simulator rental per bay Up to 2 golfers</section><section class="account">Public simulator rental per bay Up to 2 golfers</section><p>Restaurant maximum 20 guests</p></body>');
+  p.visibleEvidence!.publicRentalTexts = ["Public Simulator Rental — $45/hour per bay"];
+  let absent: unknown; try { deriveUSchedulePublicRentalParty(source, p); } catch (error) { absent = error; }
+  expect(isUSchedulePublicRentalPartyAbsent(absent)).toBe(true);
+  expect(isUSchedulePublicRentalPartyAbsent(Object.assign(new Error("USCHEDULE_PUBLIC_PARTY_UNVERIFIED"), { statement: "ABSENT" }))).toBe(false);
+  const observed = await inspectExistingAdapter(source, { venueMatches: venueProofMatches, officialIdentityPage: p,
+   requestedInput: { ...input, players: 4 }, requestLease: lease, fetch: vi.fn().mockImplementation(async () => response()) });
+  expect(observed.adapter).not.toHaveProperty("publicRentalPartyProof");
+ });
+ it("leaves a current redirected official document's absent limit unknown without granting its present unbound maximum", async () => {
+  const redirectedSource = { ...source, officialUrl: "https://www.example.org/" }, p = page();
+  p.html = p.html.replace("Up to 3 golfers", "Golfer limit not stated"); p.visibleEvidence!.publicRentalTexts = [];
+  const deps = { venueMatches: venueProofMatches, requestedInput: input, requestLease: lease,
+   fetch: vi.fn().mockImplementation(async () => response()) };
+  const unknown = await inspectExistingAdapter(redirectedSource, { ...deps, officialIdentityPage: p });
+  expect(unknown.adapter).not.toHaveProperty("publicRentalPartyProof");
+  await expect(inspectExistingAdapter(redirectedSource, { ...deps, officialIdentityPage: page() })).rejects.toThrow("USCHEDULE_PUBLIC_PARTY_UNVERIFIED");
+ });
+ it.each(["Up to 0 golfers", "Maximum of two people", "Up to 3 golfers Up to 2 players", "Up to 6 golfers", "Up to 2 golfers; not including guests"])("rejects a malformed public people maximum rather than omitting %s", async statement => {
+  const p = page(); p.html = p.html.replace("Up to 3 golfers", statement);
+  p.visibleEvidence!.publicRentalTexts = [rental.replace("Up to 3 golfers", statement)];
+  await expect(inspectExistingAdapter(source, { venueMatches: venueProofMatches, officialIdentityPage: p,
+   requestedInput: input, requestLease: lease, fetch: vi.fn().mockImplementation(async () => response()) })).rejects.toThrow("USCHEDULE_PUBLIC_PARTY_UNVERIFIED");
+ });
+ it.each(["rendered", "raw", "conflicting", "malformed", "native", "identity", "link"])("never downgrades a present but %s public maximum to an unknown limit during real inspection", async mode => {
+  const p = page();
+  if (mode === "rendered") p.visibleEvidence!.publicRentalTexts = [];
+  if (mode === "raw") p.html = p.html.replace("Up to 3 golfers", "Golfer limit not stated");
+  if (mode === "conflicting") p.html = p.html.replace("</body>", "<p>Public simulator rental per bay Up to 2 golfers</p></body>");
+  if (mode === "malformed") { p.html = p.html.replace("Up to 3 golfers", "Up to 6 golfers"); p.visibleEvidence!.publicRentalTexts = [rental.replace("3 golfers", "6 golfers")]; }
+  if (mode === "native") p.browserTransport = "PINNED_HTTP";
+  if (mode === "identity") p.html = p.html.replaceAll("Example Golf Studio", "Foreign Golf Studio");
+  if (mode === "link") p.visibleEvidence!.linkUrls = [];
+  const fetch = vi.fn().mockImplementation(async () => response());
+  await expect(inspectExistingAdapter(source, { venueMatches: venueProofMatches, officialIdentityPage: p,
+   requestedInput: { ...input, players: 4 }, requestLease: lease, fetch })).rejects.toThrow("USCHEDULE_PUBLIC_PARTY_UNVERIFIED");
+  expect(fetch).toHaveBeenCalledTimes(1);
+ });
+ it("rejects a party above a freshly verified explicit golfer limit before availability reads", async () => {
+  const fetch = vi.fn(), proof = deriveUSchedulePublicRentalParty(source, page()), recipe = { schemaVersion: 1 as const, engine: "EXISTING_ADAPTER" as const, source, target: { courseId: "c", offeringId: "o", kind: "SIMULATOR" as const },
+   adapter: existingAdapterMetadataSchema.parse({ family: "USCHEDULE", tenant: "examplegolfstudio", serviceId: "73", serviceName: "Simulator Rental", publicRentalPartyProof: proof }) };
+  const result = await executeExistingAdapterRecipe(recipe, { ...input, players: 4 }, { fetch, requestLease: lease, venueMatches: venueProofMatches,
+   localCapabilities: ["LOCAL_CHROME"], readNativeOfficialPage: async () => registerFreshNativeOfficialIdentityPage(page(), source.officialUrl, new Date(Date.now() + 30000)),
    recipeHash: "a".repeat(64), toInstant: recipeTimeToInstant, now: () => new Date("2026-10-26T00:00:00Z") });
   expect(result.complete).toBe(false); expect(result.evidence.reason).toBe("USCHEDULE_PUBLIC_PARTY_UNVERIFIED"); expect(fetch).not.toHaveBeenCalled();
  });

@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Prisma } from "@prisma/client";
 import { createHash } from "node:crypto";
 import { hashAccessRecipe, isSafeRecipeUrl, parseAccessRecipe, type AccessExecutionInput } from "./recipe";
+import { physicalContactDigest } from "./teeitup-physical-contact-proof";
 
 const mocks = vi.hoisted(() => ({
   db: {
@@ -81,6 +82,42 @@ beforeEach(() => {
 });
 
 describe("bounded course discovery persistence", () => {
+  function physicalContactRecipe() {
+    const phone = "+13035551234", address = "100 Public Road, Denver, CO 80001, USA", bookingUrl = "https://public-course.book.teeitup.com/";
+    course.address = address;course.phone = phone;course.timeZone = "America/Denver";course.providerFamilyKey = "TEEITUP";course.detectedBookingUrl = bookingUrl;
+    const source = { officialUrl: recipe.source.officialUrl, officialDocumentUrl: recipe.source.officialUrl, bookingUrl, canonicalName: course.name,
+      officialBrandName: course.name, publicLocationName: course.name, brandLocationLabel: null, canonicalNameRelation: "EXACT_PUBLIC_LOCATION_NAME",
+      serviceRemainder: null, observedServiceLabel: null, canonicalAddress: address, officialAddress: address, canonicalLocality: "denver", officialLocality: "denver",
+      publicCoursePhone: phone, warmTransport: "NATIVE_CHROME", requiredCapability: "LOCAL_CHROME" };
+    const semantic = { ...source, kind: "OFFICIAL_PHYSICAL_CONTACT_BINDING_V1", providerName: course.name, providerAddress: address,
+      providerLocality: "denver", providerLocalityRelation: "SAME_RECORDED", sourceWitnessSha256: physicalContactDigest(source) };
+    return parseAccessRecipe({ schemaVersion: 1, engine: "EXISTING_ADAPTER", target: recipe.target,
+      source: { ...recipe.source, bookingUrl, venueAddress: address, providerFamily: "TEEITUP", timeZone: course.timeZone },
+      adapter: { family: "TEEITUP", alias: "public-course", facilityIds: [71], officialDelegatedBookingProof: {
+        kind: "OFFICIAL_DELEGATED_BOOKING_SOURCE", officialUrl: recipe.source.officialUrl, bookingUrl, venueName: course.name, canonicalAddress: address,
+        timeZone: course.timeZone, rootWitnessSha256: "a".repeat(64), hops: [{ pageUrl: recipe.source.officialUrl, nextUrl: bookingUrl, witnessSha256: "b".repeat(64) }],
+        alias: "public-course", facilityId: 71, courseId: "provider-71", providerAddress: address, warmTransport: "NATIVE_CHROME", requiredCapability: "LOCAL_CHROME",
+        physicalContactProof: { ...semantic, semanticDigest: physicalContactDigest(semantic) } } } });
+  }
+  it("rebinds delegated physical phone on proposal, verification, activation and active reads", async () => {
+    const candidate = physicalContactRecipe(), owner = (await claimed())!, proposed = await proposeDiscoveryRecipe(owner.id, owner.leaseToken!, candidate), fingerprint = job!.sourceFingerprint;
+    course.phone = "+13035554321";
+    await expect(proposeDiscoveryRecipe(owner.id, owner.leaseToken!, candidate)).rejects.toBeInstanceOf(DiscoveryConflictError);
+    await expect(recordDiscoveryVerification({ jobId: owner.id, leaseToken: owner.leaseToken!, challengeId: proposed.challenges[0].id, recipeHash: proposed.recipeHash,
+      input: proposed.challenges[0].input, result: result() })).rejects.toBeInstanceOf(DiscoveryConflictError);
+    await expect(activateDiscoveryRecipe(owner.id, owner.leaseToken!)).rejects.toBeInstanceOf(DiscoveryConflictError);
+    course.activeAccessRecipeId = "recipe1";mocks.db.courseAccessRecipe.findUnique.mockResolvedValue({ id: "recipe1", targetKey: "course:course1", sourceFingerprint: fingerprint, payload: candidate, hash: hashAccessRecipe(candidate) });
+    expect(await getActiveAccessRecipe({ courseId: "course1" })).toBeNull();course.phone = "+13035551234";
+    expect(await getActiveAccessRecipe({ courseId: "course1" })).toMatchObject({ trustedContext: { canonicalCoursePhone: "+13035551234" } });
+    course.phone = null;expect(await getActiveAccessRecipe({ courseId: "course1" })).toBeNull();
+    await expect(assertActiveAccessRecipeInTransaction(mocks.db as unknown as Prisma.TransactionClient, { courseId: "course1" }, "recipe1")).rejects.toBeInstanceOf(DiscoveryConflictError);
+  });
+  it("requires the claimed physical private context while preserving legacy delegated proof compatibility", async () => {
+    const candidate = physicalContactRecipe(), owner = (await claimed())!;delete (job!.request as { trustedContext?: unknown }).trustedContext;
+    await expect(proposeDiscoveryRecipe(owner.id, owner.leaseToken!, candidate)).rejects.toBeInstanceOf(DiscoveryConflictError);
+    const legacy = structuredClone(candidate);if (legacy.engine === "EXISTING_ADAPTER" && legacy.adapter.family === "TEEITUP") delete legacy.adapter.officialDelegatedBookingProof!.physicalContactProof;
+    await expect(proposeDiscoveryRecipe(owner.id, owner.leaseToken!, legacy)).resolves.toHaveProperty("challenges");
+  });
   function streetOmissionRecipe() {
     const address = "100 Public Vista, Denver, CO 80001, USA", phone = "+13035551234", bookingUrl = "https://public-course.book.teeitup.com/";
     course.address = address;course.phone = phone;course.timeZone = "America/Denver";course.providerFamilyKey = "TEEITUP";course.detectedBookingUrl = bookingUrl;

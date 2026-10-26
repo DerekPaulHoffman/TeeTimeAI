@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createStagehandCodexModel } from './codex-model.mjs';
-import { classifyNavigationError, projectActionGuardDiagnostic } from './source-diagnostic.mjs';
+import { classifyNavigationError, projectActionGuardDiagnostic, projectSourceDocumentReadiness } from './source-diagnostic.mjs';
 import { publicEvidenceUrl } from './public-evidence.mjs';
 
 export async function loadStagehandRuntime() {
@@ -189,6 +189,30 @@ export async function settleNativeLinkNavigation({ browser, page, initialPageIds
   return { page, changed: false, samples, waitedMs: Math.max(0, now() - start) };
 }
 
+export const sourceDocumentSettled = value => {
+  const row=projectSourceDocumentReadiness(value);
+  return Boolean(row?.bodyPresent&&row.mainDocumentCurrent&&row.mainDocumentComplete&&!row.mainReadPending&&['interactive','complete'].includes(row.readyState)&&row.mainDocumentStatus===200);
+};
+/** Source-only parser completion. Ancillary/network idle is not required. */
+export async function settleSourceDocument(read,{deadline,signal,now=Date.now,sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms)),onObservation=()=>{}}){
+  let last;
+  while(now()<deadline){
+    signal?.throwIfAborted();
+    let timer,abort;
+    try { last=projectSourceDocumentReadiness(await Promise.race([Promise.resolve().then(read),new Promise((_,reject)=>{
+      timer=setTimeout(()=>reject(Object.assign(Error('STAGEHAND_SOURCE_LOADING_INCOMPLETE'),{stagehandDocumentReadiness:last})),Math.max(1,deadline-now()));
+      abort=()=>reject(signal.reason??Error('SOURCE_DISCOVERY_ABORTED'));
+      signal?.addEventListener('abort',abort,{once:true});
+      if(signal?.aborted)abort();
+    })])); } finally { clearTimeout(timer);if(abort)signal?.removeEventListener('abort',abort); }
+    if(!last)throw Error('STAGEHAND_NATIVE_HOST_INVALID');
+    try{onObservation(last);}catch{ /* Diagnostics cannot change source readiness. */ }
+    if(now()<deadline&&sourceDocumentSettled(last))return last;
+    await sleep(Math.min(50,Math.max(0,deadline-now())));
+  }
+  throw Object.assign(Error('STAGEHAND_SOURCE_LOADING_INCOMPLETE'),{stagehandDocumentReadiness:last});
+}
+
 export async function openStagehandSession({ model, deadline, cwd, signal, onMetrics, onNativeSourceWitness, onNativeFrameSourceWitness, modelDisabled = false, sourceRoutingOnly = false, ownedBrowser }, { loadRuntime = loadStagehandRuntime, createModel = createStagehandCodexModel } = {}) {
   if (!modelDisabled && model !== 'gpt-6.1-sol') throw new Error('SOL_ONLY_MODEL_REQUIRED');
   if (!Number.isFinite(deadline) || deadline <= Date.now()) throw new Error('ORIGINAL_DEADLINE_EXPIRED');
@@ -229,7 +253,7 @@ export async function openStagehandSession({ model, deadline, cwd, signal, onMet
     // All operations below explicitly bind this attested CDP page. UI tab
     // activation is unnecessary and is unavailable for some off-record tabs.
     const checked = withinDeadline;
-    let operationModelStart=0,lastOperationModelFailure,ownedCdpFailure,nativeRouterFailure;
+    let operationModelStart=0,lastOperationModelFailure,ownedCdpFailure,nativeRouterFailure,documentReadiness;
     const unchangedAnchorNavigations=new Set();
     const annotate = (error, phase) => {
       const failure=codexModel?.lastFailure;
@@ -255,6 +279,16 @@ export async function openStagehandSession({ model, deadline, cwd, signal, onMet
       snapshot: () => guarded(() => page.snapshot({ includeIframes: true, timeout: Math.min(15000, Math.max(1, deadline - Date.now())) })),
       extract: (instruction, schema) => guarded(() => stagehand.extract(instruction, schema, sourceReadOptions()),'EXTRACT'),
       observe: instruction => guarded(() => stagehand.observe(instruction, sourceReadOptions()),'OBSERVE'),
+      readSourceDocumentReadiness: () => guarded(async()=>{
+        if(!sourceRoutingOnly||typeof owned.observeSourceReadiness!=='function')throw Error('STAGEHAND_SOURCE_OUTPUT_INVALID');
+        const value=projectSourceDocumentReadiness(await checked(owned.observeSourceReadiness(page.pageId)));
+        if(!value)throw Error('STAGEHAND_NATIVE_HOST_INVALID');documentReadiness=value;return value;
+      },'EVIDENCE'),
+      settleSourceDocument: () => guarded(async()=>{
+        if(!sourceRoutingOnly||typeof owned.observeSourceReadiness!=='function')throw Error('STAGEHAND_SOURCE_OUTPUT_INVALID');
+        documentReadiness=undefined;
+        return settleSourceDocument(()=>checked(owned.observeSourceReadiness(page.pageId)),{deadline:Math.min(deadline,Date.now()+30000),signal,onObservation:value=>{documentReadiness=value;}});
+      },'EVIDENCE'),
       observeFrameSources: () => guarded(async()=>{
         if(!sourceRoutingOnly||typeof owned.observeFrameSources!=='function')throw Error('STAGEHAND_SOURCE_OUTPUT_INVALID');
         return sourceRoutingFrameWitness(await checked(owned.observeFrameSources(page.pageId)));
@@ -318,6 +352,7 @@ export async function openStagehandSession({ model, deadline, cwd, signal, onMet
       get lastModelFailure() { return lastOperationModelFailure?structuredClone(lastOperationModelFailure):undefined; },
       get ownedCdpFailure() { return ownedCdpFailure?structuredClone(ownedCdpFailure):undefined; },
       get nativeRouterFailure() { return nativeRouterFailure?structuredClone(nativeRouterFailure):undefined; },
+      get sourceDocumentReadiness() { return documentReadiness?structuredClone(documentReadiness):undefined; },
       get disabledModelCalls() { return disabledModelCalls; },
       async close() {
         signal?.removeEventListener('abort', onAbort);

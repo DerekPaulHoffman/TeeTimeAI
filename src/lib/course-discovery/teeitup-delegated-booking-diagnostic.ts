@@ -1,7 +1,7 @@
 export const delegatedDiagnosticStages = ["CAPABILITY", "SOURCE", "ROOT_READ", "ROOT_FRESH", "ROOT_IDENTITY", "ROOT_LINK", "HOP_ONE_READ", "NATIVE_DOCUMENT_READ",
   "HOP_ONE_FRESH", "HOP_TWO_LINK", "HOP_TWO_READ", "ROOT_REFRESH", "FINAL_FRESH", "CHAIN_REGISTER", "PROVIDER_BIND"] as const;
-export const delegatedDiagnosticGates = ["capabilityAvailable", "sourceValid", "deadlineCurrent", "rootReadReturned", "rootFresh", "rootUrlExact",
-  "canonicalAddressValid", "rootRawVenue", "rootRenderedVenue", "rootRawAddress", "rootRenderedAddress", "rootLinkVerified", "hopNative",
+export const delegatedDiagnosticGates = ["capabilityAvailable", "sourceValid", "deadlineCurrent", "rootReadReturned", "rootFresh", "rootUrlExact", "rootDocumentProvenance",
+  "canonicalAddressValid", "rootRawVenue", "rootRenderedVenue", "rootRawAddress", "rootRenderedAddress", "physicalRaw", "physicalRendered", "physicalNameRelation", "physicalPhone", "rootLinkVerified", "hopNative",
   "hopRawBounded", "hopRawLinkPresent", "hopRenderedLinkPresent", "hopUnique", "firstReadReturned", "firstFresh", "secondLinkVerified",
   "secondReadReturned", "rootRefreshRequired", "rootRefreshReturned", "rootRefreshIdentityMatches", "rootRefreshLinkMatches", "finalFresh", "finalUrlMatches",
   "directoryValid", "directoryIdsUnique", "providerUniqueMatch", "hopSessionOpen", "hopNoAccess", "hopNoFatal", "hopStatus200", "hopCaptured",

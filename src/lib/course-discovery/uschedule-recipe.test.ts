@@ -33,17 +33,21 @@ function responses(options: { ignoreDate?: boolean; ignoreDuration?: boolean; ch
   };
 }
 const deps = { now: () => new Date("2030-10-19T12:00:00Z"), requestLease: async <T>(_family: string, work: () => Promise<T>) => ({ acquired: true as const, value: await work() }) };
-// This legacy fixture proves one available bay, not multi-attendee capacity.
-const input = { date: "2030-10-23", durationMinutes: 60, timeZone: "America/New_York", players: 1, startTime: "09:00", endTime: "18:00" };
+// A rental is one available continuous bay; its unstated golfer limit stays unknown.
+const input = { date: "2030-10-23", durationMinutes: 60, timeZone: "America/New_York", players: 2, startTime: "09:00", endTime: "18:00" };
 describe("learned USchedule fixed public reader", () => {
-  it.each([2, 3, 4])("rejects unproven %i-attendee use before any provider read", async players => {
+  it.each([1, 2, 4])("verifies a complete public bay rental for %i golfers without inventing a golfer limit", async players => {
     const fetch = vi.fn(responses());
     const result = await executeAccessRecipe(recipe, { ...input, players }, { ...deps, fetch });
-    expect(result).toMatchObject({ status: "INCOMPLETE", complete: false, slots: [], evidence: {
-      reason: "USCHEDULE_PUBLIC_PARTY_UNVERIFIED", venueVerified: false, dateVerified: false, capacityVerified: false,
-      durationVerified: false, completeVerified: false,
+    expect(result).toMatchObject({ status: "AVAILABLE", complete: true, evidence: {
+      venueVerified: true, dateVerified: true, capacityVerified: true, durationVerified: true, completeVerified: true,
     } });
-    expect(fetch).not.toHaveBeenCalled();
+    expect(result.slots).toHaveLength(3);
+    expect(result.slots.every(slot => slot.availableSpots === 1 && slot.capacity === null &&
+      Date.parse(slot.endsAt!) - Date.parse(slot.startsAt) === 60 * 60_000)).toBe(true);
+    const partyWrites = fetch.mock.calls.filter(([, init]) => init?.method === "POST" && String(init.body).includes("group_size"));
+    expect(partyWrites.every(([, init]) => JSON.parse(String(init?.body)).every((field: { Name: string; Value?: string }) =>
+      field.Name !== "group_size" || field.Value === "1"))).toBe(true);
   });
   it("discovers selected rental metadata only from the matching public tenant", async () => {
     const inspected = await inspectExistingAdapter(recipe.source, { ...deps, fetch: responses(), venueMatches: () => true });

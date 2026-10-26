@@ -28,7 +28,9 @@ export type NativeRequestDiagnostic = {
   preflightSourceMethod?: "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "CONNECT" | "TRACE" | "OTHER";
   preflightSourceCurrentGeneration?: boolean; preflightSourceFailed?: boolean; preflightSourceBodyPresent?: boolean;
   preflightSourceRootFrame?: boolean; preflightSourceLoaderKnown?: boolean; preflightSourceUrlMatches?: boolean;
-  phase?: "RESPONSE_WAIT" | "CONTINUE_RESPONSE_ACK" | "LOADER_IDENTITY_WAIT" | "LOADER_IDENTITY" | "LOADER_OWNER" | "REDIRECT_GENERATION" | "REDIRECT_PROVENANCE" | "DOCUMENT_INTENT" | "DOCUMENT_DRAIN";
+  phase?: "RESPONSE_WAIT" | "CONTINUE_REQUEST_ACK" | "CONTINUE_RESPONSE_ACK" | "LOADER_IDENTITY_WAIT" | "LOADER_IDENTITY" | "LOADER_OWNER" | "REDIRECT_GENERATION" | "REDIRECT_PROVENANCE" | "DOCUMENT_INTENT" | "DOCUMENT_DRAIN";
+  recordGenerationCurrent?: boolean; recordGenerationRetired?: boolean; recordAdmitted?: boolean; recordPaused?: boolean; recordResponsePaused?: boolean;
+  recordFailed?: boolean; recordComplete?: boolean; recordHandlerDone?: boolean; recordTerminalObserved?: boolean;
   interceptedRequests?: number; recordCount?: number; requestLimit?: number; postDataBytes?: number;
   framePresent?: boolean; rootFrame?: boolean; networkIdPresent?: boolean; duplicateRequestId?: boolean;
   hasPostData?: boolean; postDataPresent?: boolean;
@@ -268,6 +270,7 @@ function responseHeaders(values: Array<{ name: string; value: string }>) {
 
 export async function installNativeRedirectRouting(page: Page, handler: (route: NativeReadRoute) => Promise<void>, options: {
   signal?: AbortSignal; maxRequests?: number; timeoutMs?: number; onFailure?: (code: string) => void;
+  onCommandFailure?: (diagnostic: NativeRequestDiagnostic) => void;
   /** Fixed owned source controller only; ordinary/typed readers omit this. */
   responseProfile?: PublicBrowserResponseProfile;
   onRequestRejected?: (request: NativeRequestDiagnostic) => void;
@@ -1201,8 +1204,20 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
           // Chrome may terminate this exact read while its continuation command
           // is pending. End only that wait on a controller-branded terminal
           // failure; an unknown command failure or hang retains bounded cleanup.
-          await recordCommand(record, cdp.send("Fetch.continueRequest", { requestId: record.id, ...(record.transportUrl !== record.url ? { url: record.transportUrl } : {}) }),
-            "NATIVE_REDIRECT_REQUEST_TIMEOUT");
+          try {
+            await recordCommand(record, cdp.send("Fetch.continueRequest", { requestId: record.id, ...(record.transportUrl !== record.url ? { url: record.transportUrl } : {}) }),
+              "NATIVE_REDIRECT_REQUEST_TIMEOUT");
+          } catch (error) {
+            // Observe this exact failed continuation before a host/SDK wrapper
+            // hides its role. No diagnostic can resume, ignore or close a read.
+            try { if (error instanceof Error && error.message === "OWNED_STAGEHAND_CDP_UNAVAILABLE") options.onCommandFailure?.({ code: "OWNED_STAGEHAND_CDP_UNAVAILABLE", phase: "CONTINUE_REQUEST_ACK", method: record.method, resourceType: record.kind,
+              rootFrame: true, networkIdPresent: Boolean(record.networkId), recordGenerationCurrent: record.generation === generation,
+              recordGenerationRetired: record.generation.retired, recordAdmitted: record.admitted, recordPaused: record.paused,
+              recordResponsePaused: record.responsePaused === true, recordFailed: record.failed, recordComplete: record.complete,
+              recordHandlerDone: record.handlerDone, recordTerminalObserved: Boolean(record.failure && isNativeReadTerminalFailure(record.failure)) }); }
+            catch { /* Diagnostic listeners never replace the same exception. */ }
+            throw error;
+          }
         },
         abort: async () => {
           if (record.generation.retired && record.retirementAck) { await record.retirementAck; return; }

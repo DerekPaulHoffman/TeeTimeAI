@@ -52,7 +52,7 @@ export async function readNativeOfficialIdentityPage(source: OfficialIdentitySou
     const page = await session.readOfficialIdentityPage();
     if (page.url !== current.url || page.browserTransport !== "NATIVE_CHROME" || !page.visibleEvidence || Date.now() >= deadline.getTime())
       throw new Error("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
-    capturedPage = registerFreshNativeOfficialIdentityPage(page, source.officialUrl, deadline);
+    capturedPage = registerFreshNativeOfficialIdentityPage(page, source.officialUrl, deadline, { requestedUrl: pageUrl, redirects: current.nativeDocumentRedirects ?? [] });
     return capturedPage;
   } finally {
     if (capturedPage) noteNativeOfficialIdentityPageCleanup(capturedPage, source.officialUrl, "BEFORE");

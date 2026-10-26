@@ -6,7 +6,7 @@ import { createRequire } from 'node:module';
 import { join, resolve, isAbsolute } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
-import { openStagehandSession, loadStagehandRuntime, assertPublicUrl, isSourceRoutingUrl as sourceRoutingUrl, frameworkIdentity, observedActionSummary, observedTargetSummary } from './driver.mjs';
+import { openStagehandSession, loadStagehandRuntime, assertPublicUrl, isSourceRoutingUrl as sourceRoutingUrl, frameworkIdentity, observedActionSummary, observedTargetSummary, sourceDocumentSettled } from './driver.mjs';
 import { installReadOnlyEvidence } from './read-only-evidence.mjs';
 import { prioritizedPublicEvidence, publicEvidenceUrl } from './public-evidence.mjs';
 import { observedBookingSourceCandidates, assertSourceCandidateBudget, nativeFrameNavigations } from './source-provenance.mjs';
@@ -149,7 +149,7 @@ const closedFailure = error => {
     'STAGEHAND_UNGUARDED_CONTEXT','STAGEHAND_GUARDED_TARGET_MISSING','STAGEHAND_NATIVE_HOST_DEADLINE',
     'STAGEHAND_NATIVE_HOST_SCOPE_INVALID','STAGEHAND_NATIVE_HOST_INVALID','STAGEHAND_NATIVE_HOST_FAILED',
     'STAGEHAND_GUARDED_SOURCE_REJECTED','OWNED_STAGEHAND_CDP_UNAVAILABLE','OWNED_PUBLIC_CDP_UNAVAILABLE',
-    'PROVIDER_COORDINATION_UNAVAILABLE','STAGEHAND_SOURCE_OUTPUT_INVALID'].includes(code) ? code :
+    'PROVIDER_COORDINATION_UNAVAILABLE','STAGEHAND_SOURCE_OUTPUT_INVALID','STAGEHAND_SOURCE_LOADING_INCOMPLETE'].includes(code) ? code :
     error?.name === 'ZodError' ? 'STAGEHAND_SOURCE_OUTPUT_INVALID' : 'STAGEHAND_SOURCE_DISCOVERY_FAILED';
 };
 /** Finds an unverified route only. No method, inventory, identity proof or backend capability enters this module. */
@@ -164,7 +164,7 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
     visitedUrls:[], officialLinkLedger:[], frameLedger:[], actions:[], actionAttempts:[], plannerFeedback:[],
     metrics:{model:'gpt-6.1-sol',reasoningEffort:'medium',modelTransport:'CODEX_APP_SERVER_CLIENT_LLM',completedSteps:0,calls:0,completedLocalCodexCalls:0,localCodexCalls:[]}, browserClosed:false, modelClosed:false };
   let session, startup, ownedBrowser, sourceError, phase='GUARDED_HOST', completed = false, consecutiveWaits = 0, rejections = 0;
-  let finalDecision=null,stopCondition='RUNNING',activeAct,activeFrame;
+  let finalDecision=null,stopCondition='RUNNING',lastActionKind=null,activeAct,activeFrame;
   report.nativeFrameNavigations=[];
   const acceptNativeFrames = (witness,pageUrl,startedAt,selected) => {
     const predicate=nativeFrameWitnessFailure(witness,{pageUrl,visitedUrls:report.visitedUrls,startedAt,workDeadline,selected});
@@ -220,11 +220,14 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
     report.metrics.browserStartupMs=session.startupMs;
     phase='INITIAL_SCRIPT';await bounded(()=>session.browser.context.addInitScript(installReadOnlyEvidence));
     phase='OPEN';
+    lastActionKind='INITIAL_NAVIGATION';
     const response=await bounded(()=>session.goto(request.identity.officialUrl)), finalUrl=assertPublicUrl(await bounded(()=>session.page.url()));
     report.initialNavigation={requestedUrl:request.identity.officialUrl,finalUrl,status:response?.status()??null,redirectChainAvailable:false};
     report.visitedUrls.push(request.identity.officialUrl);if(!report.visitedUrls.includes(finalUrl))report.visitedUrls.push(finalUrl);
     for(let step=0;step<45;step++){
-      phase='EVIDENCE';const evidence=await bounded(()=>pageEvidence(session));
+      phase='EVIDENCE';
+      if(typeof session.settleSourceDocument==='function')await bounded(()=>session.settleSourceDocument());
+      const evidence=await bounded(()=>pageEvidence(session));
       if(evidence.links.length>512)throw fail('SOURCE_EVIDENCE_LIMIT');
       if(evidence.url&&!report.visitedUrls.includes(evidence.url))report.visitedUrls.push(evidence.url);
       report.officialLinkLedger.push({kind:'NATIVE_VISIBLE_DOM',pageUrl:evidence.url,observedAt:evidence.observedAt,links:evidence.links});report.frameLedger.push({pageUrl:evidence.url,frames:evidence.frames});
@@ -241,8 +244,15 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
       phase='EXTRACT';const extraction=await bounded(()=>session.extract(instruction,sourceDecisionFor(candidates,frames))),decision=sourceDecisionFor(candidates,frames).parse(extraction.data);
       finalDecision=decision.decision;report.metrics.completedSteps=step+1;report.evidenceSummary=safeReason(decision.reason);await persist();
       if(decision.decision==='SOURCE_FOUND'){report.adapterSourceProposal=readHybridSourceExport(decision,candidates);report.outcome='SOURCE_PROPOSED_UNVERIFIED';stopCondition='SOURCE_FOUND';break;}
-      if(decision.decision==='UNRESOLVED'){stopCondition='EXPLICIT_UNRESOLVED';break;}
+      if(decision.decision==='UNRESOLVED'){
+        // A model's old snapshot cannot close discovery while the same native
+        // document is still parsing, or a new main document has since arrived.
+        if(typeof session.readSourceDocumentReadiness==='function'&&(!sourceDocumentSettled(await bounded(()=>session.readSourceDocumentReadiness()))||
+          await bounded(()=>session.page.url())!==evidence.url))continue;
+        stopCondition='EXPLICIT_UNRESOLVED';break;
+      }
       if(decision.decision==='OPEN_FRAME'){
+        lastActionKind='openObservedFrameSource';
         if(!frames.includes(decision.bookingUrl)||report.nativeFrameNavigations.length>=2||typeof session.openObservedFrameSource!=='function')throw fail('STAGEHAND_SOURCE_OUTPUT_INVALID');
         activeFrame={pageUrl:evidence.url,url:decision.bookingUrl,startedAt:Date.now()};
         let entry;try{phase='OPEN';entry=await bounded(()=>session.openObservedFrameSource(decision.bookingUrl));if(!activeFrame.witnessed)throw fail('STAGEHAND_SOURCE_OUTPUT_INVALID');}finally{activeFrame=undefined;}
@@ -262,6 +272,7 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
       phase='OBSERVE';const observation=await bounded(()=>session.observe(instructionText+'. Return one supported read-only navigation action only. Opening an official public availability link labelled Book is permitted. Never select an individual time, filter date/player/duration, authenticate, transact, contact anyone, or solve a challenge.')),action=observation.data?.[0];
       if(!action){if(++rejections>=3){report.frameworkFailureCode='STAGEHAND_SOURCE_ACTION_UNAVAILABLE';stopCondition='ACTION_UNAVAILABLE_LIMIT';break;}continue;}
       const attempt={action:observedActionSummary(action),sourceUrl:evidence.url,status:'OBSERVED'};report.actionAttempts.push(attempt);
+      lastActionKind=['click','fill','type','selectOptionFromDropdown','press','scrollTo','nextChunk','prevChunk','hover'].includes(action.method)?action.method:null;
       try{
         phase='ACT';activeAct={pageUrl:evidence.url,startedAt:Date.now()};
         let result;try{result=await bounded(()=>session.act(action));}finally{activeAct=undefined;}
@@ -284,7 +295,8 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
     else if(ownedBrowser){try{report.browserClosed=(await ownedBrowser.close()).browserClosed===true;}catch{report.browserClosed=false;}}
     if(!report.browserClosed||!report.modelClosed){if(report.outcome==='SOURCE_PROPOSED_UNVERIFIED'&&!sourceError)sourceError=Object.assign(Error('STAGEHAND_SOURCE_CLEANUP_UNCONFIRMED'),{stagehandPhase:'CLOSE'});report.outcome='UNRESOLVED';report.adapterSourceProposal=null;report.frameworkFailureCode??='STAGEHAND_SOURCE_CLEANUP_UNCONFIRMED';stopCondition='CLEANUP_UNCONFIRMED';}
     if(report.outcome!=='SOURCE_PROPOSED_UNVERIFIED')report.sourceDiagnostic=sourceFailureDiagnostic({error:sourceError,phase,report,startedAt:sourceStartedAt,
-      cleanup:{browserClosed:report.browserClosed,modelClosed:report.modelClosed},modelAttempts:report.metrics.attemptedLocalCodexCalls,modelFailure:session?.lastModelFailure,ownedCdpFailure:session?.ownedCdpFailure,nativeRouterFailure:session?.nativeRouterFailure});
+      cleanup:{browserClosed:report.browserClosed,modelClosed:report.modelClosed},modelAttempts:report.metrics.attemptedLocalCodexCalls,modelFailure:session?.lastModelFailure,ownedCdpFailure:session?.ownedCdpFailure,nativeRouterFailure:session?.nativeRouterFailure,
+      sourceStop:{finalDecision,condition:stopCondition,lastActionKind},documentReadiness:session?.sourceDocumentReadiness});
     report.finishedAt=new Date().toISOString();report.elapsedFromFirstPickupMs=Date.now()-Date.parse(request.firstPickedUpAt);
     await persist();
   }

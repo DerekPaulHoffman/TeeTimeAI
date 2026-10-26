@@ -18,10 +18,10 @@ import { isMindbodyClassicPublicBootstrapPost } from "@/lib/automation/mindbody-
 import { PUBLIC_BROWSER_REQUEST_LIMIT, PUBLIC_BROWSER_TOTAL_BYTES, SOURCE_ROUTING_RESPONSE_PROFILE, publicBrowserResponseLimit, assertPublicBrowserRequestBudget } from "./browser-resource-limits";
 
 type Lease = <T>(family: string, work: () => Promise<T>) => Promise<{ acquired: true; value: T } | { acquired: false }>;
-type Target = { id: string; contextId: string; cdp: OwnedCdpSession; page: Page; frame: Frame; currentUrl: string; documentRequest?: NativeReadRequest; documentStatus?: number; documentRead?: Promise<unknown>; router?: NativeRedirectRouting; ready: Promise<void>; installed?: boolean; discarded?: boolean; initialization?: "NETWORK" | "FETCH" | "RESUME" | "ROUTER" | "READY" };
+type Target = { id: string; contextId: string; cdp: OwnedCdpSession; page: Page; frame: Frame; currentUrl: string; documentRequest?: NativeReadRequest; documentStatus?: number; documentRead?: Promise<unknown>; documentReadPending?: boolean; popupReads?: Map<string, PopupRead>; router?: NativeRedirectRouting; ready: Promise<void>; installed?: boolean; discarded?: boolean; initialization?: "NETWORK" | "FETCH" | "RESUME" | "ROUTER" | "READY" };
 type PopupGrant = { url: string; until: number; used: boolean };
 type PopupRead = { id: string; networkId: string; url: string; method: string; frameId: string; hop: number; complete: boolean;
-  redirect?: string; pendingRedirect?: string; successorId?: string; continuationAck?: Promise<void>; completion?: Promise<unknown>; queueComplete?: boolean;
+  redirect?: string; pendingRedirect?: string; successorId?: string; continuationAck?: Promise<void>; completion?: Promise<unknown>; queueComplete?: boolean; status?: number;
   response: Promise<Record<string, unknown>>; resolve(value: Record<string, unknown>): void };
 type Dependencies = { requestLease: Lease; proxyDependencies?: NativePublicProxyDependencies; launchBrowser?: (options: LaunchOptions) => Promise<Browser>;
   contextOptions?: { ignoreHTTPSErrors?: boolean } };
@@ -69,6 +69,11 @@ export function canonicalStagehandHostEntry(value: string) {
   const url = new URL(value);
   if (url.href !== value && !(value === url.origin && url.pathname === "/" && !url.search && !url.hash)) throw reject();
   return url.href;
+}
+/** Fragments name a location in the same document; they never enter its native request. */
+export function sameStagehandDocumentReadUrl(requestUrl: unknown, documentUrl: unknown) {
+  if (typeof requestUrl !== "string" || typeof documentUrl !== "string") return false;
+  return requestUrl.split("#", 1)[0] === documentUrl.split("#", 1)[0];
 }
 export function stagehandSourceBrowserMode(platform: NodeJS.Platform = process.platform) {
   // Extensions require the full browser's new headless mode. A bare headless
@@ -176,12 +181,12 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
         if (bytes > PUBLIC_BROWSER_TOTAL_BYTES) throw reject();
         return response;
       }, request.signal);
-      if (request.isNavigationRequest() && method === "GET") { target.documentRequest = request; target.documentStatus = undefined; target.documentRead = operation; }
+      if (request.isNavigationRequest() && method === "GET") { target.documentRequest = request; target.documentStatus = undefined; target.documentRead = operation; target.documentReadPending = true; }
       activeReads.add(operation);
       try {
         const response = await operation;
         if (target.documentRequest === request) target.documentStatus = response.status;
-      } finally { activeReads.delete(operation); }
+      } finally { activeReads.delete(operation); if (target.documentRead === operation) target.documentReadPending = false; }
     } catch {
       rejected++; await route.abort().catch(() => {});
     }
@@ -251,6 +256,7 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
       // continued, synthesized, or admitted by this startup buffer.
       const startup: Array<{ method: string; value: Record<string, unknown> }> = [];
       const popupReads = new Map<string, PopupRead>();
+      item.popupReads = popupReads;
       const deferredPopupIds = new Set<string>();
       const listeners = new Map<string, Set<(value: Record<string, unknown>) => unknown>>();
       let buffering = true, startupBytes = 0, deferredPopupBytes = 0;
@@ -313,6 +319,7 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
                 record(value.request).url !== entry.url || record(value.request).method !== entry.method) throw reject();
             const status = value.responseStatusCode;
             if (!Number.isInteger(status) || Number(status) < 100 || Number(status) > 599 || !Array.isArray(value.responseHeaders)) throw reject();
+            entry.status = Number(status);
             const fields = value.responseHeaders as Array<{ name: string; value: string }>;
             if (fields.length > 256 || fields.some(field => typeof field.name !== "string" || typeof field.value !== "string")) throw reject();
             const declared = fields.filter(field => field.name.toLowerCase() === "content-length");
@@ -379,6 +386,7 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
         await child.send("Network.enable", { maxTotalBufferSize: PUBLIC_BROWSER_TOTAL_BYTES, maxResourceBufferSize: 16_000_000, maxPostDataSize: 32768 });
         item.initialization = "ROUTER";
         item.router = await installNativeRedirectRouting(item.page, route => handle(route, item), { signal, maxRequests: 1024, responseProfile: SOURCE_ROUTING_RESPONSE_PROFILE,
+          onCommandFailure: facts => { if (!closed) nativeFailure.record(facts.code, facts); },
           onSubframeBlocked: () => { rejected++; }, onFailure: code => {
             if (!closed) {
               try { nativeFailure.record(code, item.router?.firstFatal); } catch { /* Diagnostics cannot alter guardian failure. */ }
@@ -417,18 +425,19 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
       const live = ((await root.send("Target.getTargets")).targetInfos as Array<Record<string, unknown>>) ?? [];
       return ids.every(id => targets.get(id)?.installed === true && live.some(info => info.targetId === id && info.type === "page" && info.browserContextId === contextId));
     };
-    const captureSourceDom = async (id: string) => {
+    const captureSourceDom = async (id: string, readinessOnly = false) => {
       if (!await assertGuardedTargets([id])) throw reject();
       const target = targets.get(id)!; await target.ready; check();
       const start = record((await target.cdp.send("Page.getFrameTree")).frameTree), startFrame = record(start.frame);
-      const result = await target.cdp.send("Runtime.evaluate", { expression: `(()=>{const v={visible(e){if(!e.getClientRects().length)return false;for(let n=e;n;n=n.parentElement){const s=getComputedStyle(n);if(n.hidden||n.inert||n.getAttribute('aria-hidden')==='true'||s.display==='none'||s.visibility==='hidden'||s.visibility==='collapse'||Number(s.opacity)===0)return false;}return true;}};return JSON.stringify({url:location.href,links:[...document.querySelectorAll('a[href]')].filter(e=>v.visible(e)).slice(0,160).map(e=>e.href),frames:[...document.querySelectorAll('iframe[src]')].filter(e=>!e.hasAttribute('srcdoc')&&v.visible(e)).slice(0,24).map(e=>e.src)});})()`, returnByValue: true });
+      const result = await target.cdp.send("Runtime.evaluate", { expression: `(()=>{const v={visible(e){if(!e.getClientRects().length)return false;for(let n=e;n;n=n.parentElement){const s=getComputedStyle(n);if(n.hidden||n.inert||n.getAttribute('aria-hidden')==='true'||s.display==='none'||s.visibility==='hidden'||s.visibility==='collapse'||Number(s.opacity)===0)return false;}return true;}};return JSON.stringify({url:location.href,readyState:document.readyState,bodyPresent:Boolean(document.body),links:[...document.querySelectorAll('a[href]')].filter(e=>v.visible(e)).slice(0,160).map(e=>e.href),frames:[...document.querySelectorAll('iframe[src]')].filter(e=>!e.hasAttribute('srcdoc')&&v.visible(e)).slice(0,24).map(e=>e.src)});})()`, returnByValue: true });
       const value = record(result.result).value;
       if (typeof value !== "string" || value.length > 400_000) throw reject();
       const observed = record(JSON.parse(value));
       const end = record((await target.cdp.send("Page.getFrameTree")).frameTree), endFrame = record(end.frame);
       check();
       if (typeof startFrame.id !== "string" || !startFrame.id || typeof startFrame.loaderId !== "string" || !startFrame.loaderId ||
-          startFrame.id !== endFrame.id || startFrame.loaderId !== endFrame.loaderId || startFrame.url !== endFrame.url || observed.url !== endFrame.url) throw reject();
+          startFrame.id !== endFrame.id || startFrame.loaderId !== endFrame.loaderId || startFrame.url !== endFrame.url ||
+          (readinessOnly ? !sameStagehandDocumentReadUrl(observed.url, endFrame.url) : observed.url !== endFrame.url)) throw reject();
       return { target, observed, documentHash: createHash("sha256").update(JSON.stringify([startFrame.id, startFrame.loaderId, startFrame.url, value])).digest("hex") };
     };
     const frameWitness = (capture: Awaited<ReturnType<typeof captureSourceDom>>, selected?: string) => ({
@@ -440,6 +449,17 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
     return {
       kind: "OWNED_GUARDED_STAGEHAND_CONTEXT" as const, cdpUrl: endpoint, targetId,
       assertGuardedTargets,
+      async observeSourceReadiness(id: string) {
+        const { target, observed } = await captureSourceDom(id, true);
+        const normal = sameStagehandDocumentReadUrl(target.documentRequest?.url(), observed.url);
+        const bridge = [...(target.popupReads?.values() ?? [])].find(entry => sameStagehandDocumentReadUrl(entry.url, observed.url) && !entry.redirect);
+        const mainDocumentStatus = normal ? target.documentStatus ?? null : bridge?.status ?? null;
+        const mainReadPending = normal ? target.documentReadPending === true : Boolean(bridge && !(bridge.complete && bridge.queueComplete));
+        return { readyState: ["loading", "interactive", "complete"].includes(String(observed.readyState)) ? observed.readyState as "loading" | "interactive" | "complete" : "UNKNOWN",
+          bodyPresent: observed.bodyPresent === true, mainDocumentCurrent: normal || Boolean(bridge),
+          mainDocumentComplete: normal ? target.documentReadPending === false && target.documentStatus !== undefined : Boolean(bridge?.complete && bridge.queueComplete),
+          mainReadPending, pendingReads: activeReads.size, mainDocumentStatus };
+      },
       async prepareNavigation(url: string) { check(); if (!allowed.has(canonicalStagehandHostEntry(url))) throw reject(); },
       async observeFrameSources(id: string) { return frameWitness(await captureSourceDom(id)); },
       async prepareFrameNavigation(id: string, url: string) {

@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { parse, type DefaultTreeAdapterMap } from "parse5";
 import { z } from "zod";
+import { freshNativeCanonicalRootDocument, nativeCanonicalRootDocumentProofSchema, type NativeCanonicalRootDocumentProof } from "./native-official-page-attestation";
+import { bindTeeItUpPhysicalContactFacility, physicalContactSourceData, teeItUpPhysicalContactProofSchema, type NativePhysicalContactSource, type TeeItUpPhysicalContactProof } from "./teeitup-physical-contact-proof";
 import { completeUSAddress, fullCourseName, matchesOfficialFacility, type OfficialIdentityPage, type OfficialIdentitySource } from "./teeitup-official-identity";
 import { publicDocumentUrl, teeItUpBookAlias, teeItUpCompleteStreetAddress } from "./teeitup-official-booking-source";
 import { createDelegationDiagnostic, rememberTeeItUpDelegationFailure, type DelegatedDiagnosticGate } from "./teeitup-delegated-booking-diagnostic";
@@ -20,13 +22,17 @@ const url = z.string().max(2048).refine(safeDelegatedBookingUrl);
 export const teeItUpDelegatedBookingProofSchema = z.object({
   kind: z.literal("OFFICIAL_DELEGATED_BOOKING_SOURCE"), officialUrl: url, bookingUrl: url,
   venueName: z.string().min(3).max(200), canonicalAddress: z.string().min(15).max(1024), timeZone: z.string().min(1).max(100),
-  rootWitnessSha256: sha,
+  rootWitnessSha256: sha, rootDocumentProof: nativeCanonicalRootDocumentProofSchema.optional(), physicalContactProof: teeItUpPhysicalContactProofSchema.optional(),
   hops: z.array(z.object({ pageUrl: url, nextUrl: url, witnessSha256: sha }).strict()).min(1).max(2),
   alias: z.string().regex(/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u),
   facilityId: z.number().int().min(1).max(2147483647), courseId: z.string().min(1).max(128),
   providerAddress: z.string().min(3).max(1024),
   warmTransport: z.literal("NATIVE_CHROME"), requiredCapability: z.literal("LOCAL_CHROME"),
 }).strict().refine(value => value.hops.at(-1)?.nextUrl === value.bookingUrl &&
+  (!value.rootDocumentProof || value.rootDocumentProof.canonicalUrl === value.officialUrl && value.rootDocumentProof.documentUrl === value.hops[0].pageUrl) &&
+  (!value.physicalContactProof || value.hops.length === 1 && value.physicalContactProof.officialUrl === value.officialUrl && value.physicalContactProof.bookingUrl === value.bookingUrl &&
+    value.physicalContactProof.officialDocumentUrl === value.hops[0].pageUrl && value.physicalContactProof.canonicalName === value.venueName &&
+    value.physicalContactProof.canonicalAddress === value.canonicalAddress && value.physicalContactProof.providerAddress === value.providerAddress) &&
   value.hops.every((hop, index) => index === 0 || value.hops[index - 1].nextUrl === hop.pageUrl) &&
   new Set([value.hops[0].pageUrl, ...value.hops.map(hop => hop.nextUrl)]).size === value.hops.length + 1 &&
   teeItUpBookAlias(value.bookingUrl) === value.alias);
@@ -76,8 +82,8 @@ function physicalContext(node: Element) {
 export function delegatedCanonicalVenueWitness(source: OfficialIdentitySource, page: OfficialIdentityPage,
   onGate?: (key: DelegatedDiagnosticGate, value: boolean) => void) {
   const gate = (key: DelegatedDiagnosticGate, value: boolean) => { try { onGate?.(key, value); } catch { /* Observation cannot change validation. */ } return value; };
-  if (!source.officialUrl || !source.venueAddress || page.url !== source.officialUrl) { gate("rootUrlExact", false); return fail(); }
-  gate("rootUrlExact", true);
+  gate("rootUrlExact", page.url === source.officialUrl);
+  if (!source.officialUrl || !source.venueAddress || !gate("rootDocumentProvenance", page.url === source.officialUrl || Boolean(freshNativeCanonicalRootDocument(page, source.officialUrl)?.rootDocumentProof))) return fail();
   const all = entries(page), expected = fullCourseName(source.venueName), address = teeItUpCompleteStreetAddress(source.venueAddress);
   if (!gate("canonicalAddressValid", Boolean(address && expected.replace(/\bgolf course$/u, "").trim().length >= 5))) return fail();
   const headings = all.filter(node => /^(?:h1|h2)$/u.test(node.tagName)).map(node => fullCourseName(clean(text(node)).replace(/^Welcome to\s+/iu, "")));
@@ -116,7 +122,7 @@ export function delegatedBookingHop(page: OfficialIdentityPage, requestedNext?: 
 
 /** Physical directory matching uses the existing official-facility predicate.
  * Delegation does not excuse any street, ZIP, name or timezone discrepancy. */
-export function bindDelegatedFacility(source: OfficialIdentitySource, chain: { rootWitnessSha256: string; hops: DelegatedHop[] }, directory: unknown): TeeItUpDelegatedBookingProof {
+export function bindDelegatedFacility(source: OfficialIdentitySource, chain: { rootWitnessSha256: string; hops: DelegatedHop[]; rootDocumentProof?: NativeCanonicalRootDocumentProof; physicalContactSource?: NativePhysicalContactSource; physicalContactProof?: TeeItUpPhysicalContactProof; physicalContactRequired?: true }, directory: unknown): TeeItUpDelegatedBookingProof {
   const diagnostic = createDelegationDiagnostic("PROVIDER_BIND");
   try {
   const rows = z.array(z.object({ id: z.number().int().min(1).max(2147483647), courseId: z.string().min(1).max(128), name: z.string().min(3).max(256),
@@ -129,11 +135,17 @@ export function bindDelegatedFacility(source: OfficialIdentitySource, chain: { r
       new Set(rows.data.map(row => row.courseId)).size !== rows.data.length) return fail();
   const matching = rows.data.filter(row => row.isSimulator === false && matchesOfficialFacility({ venueName: fullCourseName(source.venueName), alternateAddress: address }, source, row));
   diagnostic.gates.providerUniqueMatch = matching.length === 1;
-  if (matching.length !== 1) return fail();
-  const selected = matching[0];
+  let physical;
+  const physicalSource = chain.physicalContactSource ?? (chain.physicalContactProof ? physicalContactSourceData(chain.physicalContactProof) : undefined);
+  const requirePhysical = chain.physicalContactRequired || Boolean(chain.physicalContactProof);
+  if ((matching.length !== 1 || requirePhysical) && physicalSource && chain.hops.length === 1) physical = bindTeeItUpPhysicalContactFacility(source, physicalSource, directory);
+  if (requirePhysical && !physical) return fail();
+  if (matching.length !== 1 && !physical) return fail();
+  const selected = physical ? rows.data.find(row => row.id === physical.facilityId && row.courseId === physical.courseId)! : matching[0];
   return teeItUpDelegatedBookingProofSchema.parse({ kind: "OFFICIAL_DELEGATED_BOOKING_SOURCE", officialUrl: source.officialUrl, bookingUrl: source.bookingUrl,
     venueName: source.venueName, canonicalAddress: source.venueAddress, timeZone: source.timeZone,
-    rootWitnessSha256: chain.rootWitnessSha256, hops: chain.hops, alias,
+    rootWitnessSha256: chain.rootWitnessSha256, hops: chain.hops, ...(chain.rootDocumentProof ? { rootDocumentProof: chain.rootDocumentProof } : {}),
+    ...(physical ? { physicalContactProof: physical.physicalContactProof } : {}), alias,
     facilityId: selected.id, courseId: selected.courseId, providerAddress: selected.address, warmTransport: "NATIVE_CHROME", requiredCapability: "LOCAL_CHROME" });
   } catch (error) { rememberTeeItUpDelegationFailure(error, diagnostic); throw error; }
 }

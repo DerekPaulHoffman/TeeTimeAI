@@ -1,11 +1,39 @@
 // @vitest-environment node
 import { expect, it } from "vitest";
 import { createStagehandFailureCheckpoint, readStagehandFailure, packStagehandCheckpoint } from "../../../scripts/automation/course-discovery-stagehand-failure.mjs";
-import { createStagehandSourceCheckpoint, readStagehandSourceCheckpoint, stagehandDataHash } from "../../../scripts/automation/course-discovery-stagehand-source.mjs";
+import { createStagehandSourceCheckpoint, readStagehandSourceCheckpoint, stagehandDataHash, stagehandSourceFailureCode } from "../../../scripts/automation/course-discovery-stagehand-source.mjs";
 import { sourceFailureDiagnostic } from "../../../scripts/automation/stagehand/source-diagnostic.mjs";
 import { createDelegationDiagnostic } from "./teeitup-delegated-booking-diagnostic";
+import { deriveNativePhysicalContactSource } from "./teeitup-physical-contact-proof";
 
 const first = Date.parse("2030-01-02T12:00:00.000Z");
+it("retains the actual native physical rejection without admitting it as a source report or proof", () => {
+  let error: unknown;
+  try { deriveNativePhysicalContactSource({ venueName: "Public Club", venueAddress: "12 Public Road, Denver, CO 80001, US", officialUrl: "https://public.example/", bookingUrl: "https://public.book.teeitup.com/", timeZone: "America/Denver" },
+    { url: "https://public.example/", html: "PRIVATE_HTML", browserTransport: "NATIVE_CHROME" }, "+13035551234"); } catch (failure) { error = failure; }
+  expect(error).toBeInstanceOf(Error);expect((error as Error).message).toBe("OFFICIAL_PHYSICAL_CONTACT_UNVERIFIED");
+  const f = fixture(), saved = createStagehandFailureCheckpoint({ ...f, phase: "FIXED_INSPECTION", error });
+  expect(saved.stagehandFailure.entries[0].code).toBe("OFFICIAL_PHYSICAL_CONTACT_UNVERIFIED");expect(readStagehandFailure({ ...f.job, checkpoint: saved }, f.now)).toEqual(saved.stagehandFailure);
+  expect(saved.stagehandFailure.entries[0]).not.toHaveProperty("fixedInspectionDiagnostic");expect(JSON.stringify(saved)).not.toContain("PRIVATE_HTML");
+  const forged = { ...f.report, outcome: "UNRESOLVED", adapterSourceProposal: null, frameworkFailureCode: "OFFICIAL_PHYSICAL_CONTACT_UNVERIFIED" };
+  expect(stagehandSourceFailureCode(forged, f.job)).toBeUndefined();expect(readStagehandSourceCheckpoint({ ...f.job, attempts: 2, checkpoint: saved }, undefined, f.now)).toBeUndefined();
+});
+it("retains current closed source stopping and native request lifecycle facts through the exact checkpoint hash", () => {
+  const f = fixture();
+  f.report.sourceDiagnostic = sourceFailureDiagnostic({ phase: "EXTRACT", report: f.report,
+    sourceStop: { finalDecision: "UNRESOLVED", condition: "EXPLICIT_UNRESOLVED", lastActionKind: "openObservedFrameSource" },
+    documentReadiness: { readyState: "loading", bodyPresent: true, mainDocumentCurrent: true, mainDocumentComplete: true, mainReadPending: false, pendingReads: 1, mainDocumentStatus: 200 },
+    nativeRouterFailure: { code: "OWNED_STAGEHAND_CDP_UNAVAILABLE", phase: "CONTINUE_REQUEST_ACK", method: "GET", resourceType: "document",
+      rootFrame: true, recordGenerationCurrent: true, recordGenerationRetired: false, recordAdmitted: true, recordPaused: false, recordFailed: false, recordComplete: false } });
+  const saved = createStagehandFailureCheckpoint(f), entry = saved.stagehandFailure.entries[0];
+  expect(entry.diagnostic.sourceStop.condition).toBe("EXPLICIT_UNRESOLVED");
+  expect(entry.diagnostic.nativeRouterFailure.recordGenerationCurrent).toBe(true);
+  expect(entry.diagnostic.sourceDocumentReadiness.readyState).toBe("loading");
+  expect(entry.diagnosticSha256).toBe(stagehandDataHash(entry.diagnostic));
+  expect(readStagehandFailure({ ...f.job, checkpoint: saved }, f.now)).toEqual(saved.stagehandFailure);
+  const forged = structuredClone(saved); forged.stagehandFailure.entries[0].diagnostic.sourceStop.reason = "PRIVATE";
+  expect(readStagehandFailure({ ...f.job, checkpoint: forged }, f.now)).toBeUndefined();
+});
 it.each(["OFFICIAL_STREET_TYPE_OMITTED_UNVERIFIED", "OFFICIAL_STREET_TYPE_OMITTED_CHANGED"])("retains the closed physical-identity failure %s without copied proof facts", code => {
   const f = fixture(), error = Object.assign(Error(code), { privateHtml: "PRIVATE_HTML" });
   const saved = createStagehandFailureCheckpoint({ ...f, phase: "FIXED_INSPECTION", error });

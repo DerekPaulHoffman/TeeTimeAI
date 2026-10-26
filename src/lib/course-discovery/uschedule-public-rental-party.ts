@@ -11,6 +11,15 @@ export const uschedulePublicRentalPartyProofSchema = z.object({
   maxPartySize: z.number().int().min(1).max(4), markupWitnessSha256: z.string().regex(/^[a-f0-9]{64}$/u),
 }).strict();
 export type USchedulePublicRentalPartyProof = z.infer<typeof uschedulePublicRentalPartyProofSchema>;
+class PublicRentalPartyFailure extends Error {
+  constructor(readonly statement: "ABSENT" | "PRESENT_BUT_UNVERIFIED" = "PRESENT_BUT_UNVERIFIED") {
+    super("USCHEDULE_PUBLIC_PARTY_UNVERIFIED");
+  }
+}
+/** Only this parser's explicit absence result permits an optional unknown limit. */
+export function isUSchedulePublicRentalPartyAbsent(error: unknown): boolean {
+  return error instanceof PublicRentalPartyFailure && error.statement === "ABSENT";
+}
 type Node = DefaultTreeAdapterMap["node"];
 type Element = DefaultTreeAdapterMap["element"];
 const clean = (v: string) => v.normalize("NFKC").replace(/\s+/gu, " ").trim();
@@ -51,15 +60,18 @@ export function publicRentalPartySize(value: string): number | undefined {
   if (matches.length !== 1) return;
   return Number(matches[0][1]);
 }
+function publicRentalPartyStatement(value: string): boolean {
+  const v = clean(value);
+  return /\bpublic simulator rental\b/iu.test(v) && /\bper bay\b/iu.test(v) &&
+    /\b(?:up to|max(?:imum)?)\b/iu.test(v) && /\b(?:golfers?|players?|people|persons?|guests?)\b/iu.test(v);
+}
 /** Initial proof uses independently captured native raw and computed-visible
  * official evidence. Warm reads recheck the same bounded public witnesses. */
 export function deriveUSchedulePublicRentalParty(source: OfficialIdentitySource, page: OfficialIdentityPage, requireVisible = true): USchedulePublicRentalPartyProof {
-  const fail = (): never => { throw new Error("USCHEDULE_PUBLIC_PARTY_UNVERIFIED"); };
-  if (!source.officialUrl || !source.venueAddress || Buffer.byteLength(page.html) > 600_000 || page.url !== source.officialUrl) return fail();
+  const fail = (): never => { throw new PublicRentalPartyFailure(); };
+  if (Buffer.byteLength(page.html) > 600_000) return fail();
   const current = new URL(page.url), booking = parseUScheduleLocationSource(source.bookingUrl);
-  if (current.protocol !== "https:" || current.username || current.password || current.port || current.hash || !booking || booking.locationId || booking.url !== booking.canonicalUrl) return fail();
-  const canonicalAddress = parsePublicUSBusinessAddress(source.venueAddress), expectedName = fullCourseName(source.venueName);
-  if (!canonicalAddress || expectedName.length < 8) return fail();
+  const expectedName = fullCourseName(source.venueName);
   const entries: Element[] = [], stack: Array<{ node: Node; depth: number }> = [{ node: parse(page.html), depth: 0 }];
   while (stack.length) {
     const { node, depth } = stack.pop()!;
@@ -79,6 +91,18 @@ export function deriveUSchedulePublicRentalParty(source: OfficialIdentitySource,
     } catch { /* A form action cannot supply missing document identity. */ }
   }
   const readText = (n: Node) => text(n, publicForm), eligible = (n: Element) => !hidden(n, publicForm) && !containsControl(n);
+  const rawStatements = entries.filter(n => ["p", "div", "section", "li"].includes(n.tagName) && eligible(n))
+    .map(n => clean(readText(n))).filter(publicRentalPartyStatement);
+  const renderedStatements = (page.visibleEvidence?.publicRentalTexts ?? []).filter(publicRentalPartyStatement);
+  // Absence supplies neither identity nor a numeric maximum. In particular,
+  // the caller's currently verified redirected document need not pretend to
+  // have the canonical URL merely to leave its unstated people limit unknown.
+  if (!rawStatements.length && !renderedStatements.length) throw new PublicRentalPartyFailure("ABSENT");
+  if (!source.officialUrl || !source.venueAddress || page.url !== source.officialUrl ||
+      current.protocol !== "https:" || current.username || current.password || current.port || current.hash || !booking || booking.locationId || booking.url !== booking.canonicalUrl) return fail();
+  const canonicalAddress = parsePublicUSBusinessAddress(source.venueAddress);
+  if (!canonicalAddress || expectedName.length < 8) return fail();
+  if ([...rawStatements, ...renderedStatements].some(value => publicRentalPartySize(value) === undefined)) return fail();
   const title = entries.filter(n => n.tagName === "title"), headings = entries.filter(n => ["h1", "h2"].includes(n.tagName) && eligible(n));
   if (title.length !== 1 || !clean(readText(title[0])).split(/\s*[|–—]\s*/u).some(v => fullCourseName(v) === expectedName) ||
       !headings.some(n => headingName(readText(n)) === expectedName)) return fail();

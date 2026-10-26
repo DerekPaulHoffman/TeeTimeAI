@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { delegatedBookingHop, delegatedCanonicalVenueWitness, bindDelegatedFacility, safeDelegatedBookingUrl } from "./teeitup-delegated-booking-source";
 import { authorizeDelegatedGet, consumeDelegatedGet, currentNativeDelegatedChain, createDelegatedReadBudget, chargeDelegatedReadBudget, delegatedProxyAllocation, type DelegatedGetGrant } from "./teeitup-delegated-booking-context";
-import { registerFreshNativeOfficialIdentityPage, registerFreshNativeDelegatedDocument, isFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
+import { registerFreshNativeOfficialIdentityPage, registerFreshNativeDelegatedDocument, isFreshNativeOfficialIdentityPage, freshNativeCanonicalRootDocument } from "./native-official-page-attestation";
 import { readTeeItUpDelegatedBookingChain } from "./teeitup-delegated-booking-reader";
 import { readNativeDelegatedDocument } from "./native-official-page-reader";
 import { inspectExistingAdapter, executeExistingAdapterRecipe } from "./existing-adapter-executor";
@@ -30,6 +30,31 @@ function readers() {
 afterEach(() => vi.restoreAllMocks());
 
 describe("fresh native delegated TeeItUp source", () => {
+  it("keeps canonical source distinct from the exact fresh native redirect document through the earned booking chain", async () => {
+    const current = "https://www.public.example/venue", deps = readers();
+    deps.readDelegatedRoot.mockImplementation(async () => registerFreshNativeOfficialIdentityPage(page(current, operator, true), source.officialUrl, new Date(Date.now() + 30000),
+      { requestedUrl: source.officialUrl, redirects: [{ fromUrl: source.officialUrl, toUrl: current, status: 301, completed: true }] }));
+    const token = await readTeeItUpDelegatedBookingChain(source, deps), chain = currentNativeDelegatedChain(token), proof = bindDelegatedFacility(source, chain, directory);
+    expect(proof.officialUrl).toBe(source.officialUrl); expect(proof.hops[0].pageUrl).toBe(current);
+    expect(proof.rootDocumentProof).toMatchObject({ kind: "NATIVE_CANONICAL_ROOT_REDIRECT", canonicalUrl: source.officialUrl, documentUrl: current });
+    const recipe = parseAccessRecipe({ schemaVersion: 1, engine: "EXISTING_ADAPTER", target: { courseId: "owned", kind: "OUTDOOR" },
+      source: { ...source, providerFamily: "TEEITUP" }, adapter: { family: "TEEITUP", alias: "harbor", facilityIds: [71], officialDelegatedBookingProof: proof } });
+    expect(recipe.source.officialUrl).toBe(source.officialUrl);
+    const raw = await deps.readDelegatedRoot(source, source.officialUrl, new Date(Date.now() + 30000));
+    expect(freshNativeCanonicalRootDocument(structuredClone(raw), source.officialUrl)).toBeUndefined();
+    raw.html += " "; expect(freshNativeCanonicalRootDocument(raw, source.officialUrl)).toBeUndefined();
+  });
+  it.each(["absent", "wrongRequest", "crossHost", "uncompleted", "wrongStatus", "cyclic", "discontinuous"])("does not substitute same-host membership or malformed %s redirect data for native provenance", async variant => {
+    const current = variant === "crossHost" ? "https://foreign.example/venue" : "https://www.public.example/venue";
+    const redirects = [{ fromUrl: source.officialUrl, toUrl: current, status: variant === "wrongStatus" ? 200 : 301, completed: variant !== "uncompleted" }];
+    if (variant === "cyclic") redirects.push({ fromUrl: current, toUrl: source.officialUrl, status: 301, completed: true }, { fromUrl: source.officialUrl, toUrl: current, status: 301, completed: true });
+    if (variant === "discontinuous") redirects.unshift({ fromUrl: source.officialUrl, toUrl: "https://public.example/other", status: 301, completed: true });
+    const p = registerFreshNativeOfficialIdentityPage(page(current, operator, true), source.officialUrl, new Date(Date.now() + 30000), variant === "absent" ? undefined :
+      { requestedUrl: variant === "wrongRequest" ? current : source.officialUrl, redirects });
+    expect(freshNativeCanonicalRootDocument(p, source.officialUrl)).toBeUndefined();
+    const deps = readers(); deps.readDelegatedRoot.mockResolvedValue(p);
+    await expect(readTeeItUpDelegatedBookingChain(source, deps)).rejects.toThrow("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
+  });
   it("retains the exact failing root predicate as copied closed facts without replacing the primary error", async () => {
     const deps = readers();
     deps.readDelegatedRoot.mockImplementation(async () => {

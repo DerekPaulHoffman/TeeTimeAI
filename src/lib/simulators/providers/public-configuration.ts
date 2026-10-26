@@ -39,10 +39,14 @@ export function yourGolfBookingPublicSource(sourceUrl: string) {
   } catch { return undefined; }
 }
 
+/** Distinct public origins. A source keeps its observed host; no alias rewrite. */
+export function isUSchedulePublicHost(hostname: string) {
+  return hostname === "clients.uschedule.com" || hostname === "iframe.uschedule.com";
+}
 export function uschedulePublicTenant(sourceUrl: string) {
   try {
     const url = new URL(sourceUrl);
-    return url.protocol === "https:" && url.hostname === "clients.uschedule.com" && !url.port &&
+    return url.protocol === "https:" && isUSchedulePublicHost(url.hostname) && !url.port &&
       !url.username && !url.password && !url.search && !url.hash
       ? uschedulePath.exec(url.pathname)?.[1] : undefined;
   } catch { return undefined; }

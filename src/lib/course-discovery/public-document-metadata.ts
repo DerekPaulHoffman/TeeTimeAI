@@ -17,7 +17,9 @@ export function collectNativeOfficialPublicMetadata(expectedVenueName: string) {
         });
     } catch { return false; }
   } };
-  const headings: string[] = [], linkUrls: string[] = [], addressTexts: string[] = [], phoneTexts: string[] = [], publicRentalTexts: string[] = [];
+  const headings: string[] = [], linkUrls: string[] = [], addressTexts: string[] = [], phoneTexts: string[] = [], publicRentalTexts: string[] = [], publicBusinessLabels: string[] = [];
+  const service = /\s(?:and|&)\s+([\p{L}][\p{L} -]{1,39})$/iu.exec(expectedVenueName)?.[1];
+  const serviceWords = service?.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim().split(/\s+/u) ?? [];
   const brandLinks: Array<{ href: string; text: string }> = [];
   for (const node of Array.from(document.querySelectorAll('h1,h2,a[href],address,p,div,li,td')).slice(0, 3000)) {
     if (!(node instanceof HTMLElement) || node.closest('script,template,noscript,iframe,input,textarea,select,button,label,[contenteditable],[hidden],[inert],[aria-hidden="true"]') ||
@@ -37,6 +39,10 @@ export function collectNativeOfficialPublicMetadata(expectedVenueName: string) {
     const value = node.innerText.replace(/\n+/gu, ', ').replace(/\s+/gu, ' ').trim();
     if (/^H[12]$/u.test(node.tagName) && value.length <= 300 && headings.length < 80) headings.push(value);
     if (node instanceof HTMLAnchorElement && linkUrls.length < 120) linkUrls.push(node.href);
+    if (node instanceof HTMLAnchorElement && !form && value.length <= 120 && publicBusinessLabels.length < 20 && serviceWords.length) {
+      const words = value.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim().split(/\s+/u);
+      if (words.length <= 8 && words.some((_, index) => serviceWords.every((word, offset) => words[index + offset] === word))) publicBusinessLabels.push(value);
+    }
     if (node instanceof HTMLAnchorElement && !form && value.length <= 200 && brandLinks.length < 20 &&
         [node, node.parentElement].some(v => v?.classList.contains("site-title"))) brandLinks.push({ href: node.href, text: value });
     if (node instanceof HTMLAnchorElement && /^tel:/u.test(node.getAttribute("href") ?? "") && !form && value.length <= 40 && phoneTexts.length < 20) {
@@ -52,5 +58,5 @@ export function collectNativeOfficialPublicMetadata(expectedVenueName: string) {
     if (value.length <= 500 && publicRentalTexts.length < 40 && /\bpublic simulator rental\b/iu.test(value) &&
         /\bper bay\b/iu.test(value) && /\b(?:up to|max(?:imum)?(?: of)?)\s+[1-4]\s+(?:golfers|players|people)\b/iu.test(value)) publicRentalTexts.push(value);
   }
-  return { title: document.title.slice(0, 500), headings, linkUrls, addressTexts, phoneTexts, brandLinks, publicRentalTexts };
+  return { title: document.title.slice(0, 500), headings, linkUrls, addressTexts, phoneTexts, brandLinks, publicRentalTexts, publicBusinessLabels };
 }

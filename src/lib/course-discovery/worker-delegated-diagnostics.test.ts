@@ -6,9 +6,10 @@ import { createDiscoveryProcess, safeBrowserFailureDiagnostics, safeTeeItUpDeleg
 import { createDelegationDiagnostic, delegatedDiagnosticGates, delegatedDiagnosticStages } from "./teeitup-delegated-booking-diagnostic";
 
 describe("closed delegated failure bridge", () => {
-  it.each(delegatedDiagnosticStages)("mirrors the actual native stage and all forty nullable gates: %s", stage => {
+  it.each(delegatedDiagnosticStages)("mirrors the actual native stage and every current nullable gate: %s", stage => {
     const value = createDelegationDiagnostic(stage);
-    value.gates.rootFresh = true; value.gates.hopStatus200 = false;
+    value.gates.rootFresh = true; value.gates.hopStatus200 = false; value.gates.rootDocumentProvenance = true;
+    value.gates.physicalRaw = true; value.gates.physicalRendered = false; value.gates.physicalNameRelation = null; value.gates.physicalPhone = true;
     const copied = safeBrowserFailureDiagnostics({ teeItUpDelegation: { ...value, url: "PRIVATE", gates: { ...value.gates, cookie: "PRIVATE" } } }).teeItUpDelegation;
     expect(copied).toEqual(value); expect(Object.keys(copied.gates)).toEqual([...delegatedDiagnosticGates]);
     value.gates.rootFresh = false; expect(copied.gates.rootFresh).toBe(true);

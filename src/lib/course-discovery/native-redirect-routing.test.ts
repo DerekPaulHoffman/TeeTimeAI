@@ -12,7 +12,8 @@ import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-b
 import { type PublicBrowserResponseProfile } from "./browser-resource-limits";
 
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; }
-async function installed(maxRequests?: number, signal?: AbortSignal, afterRoute?: (route: NativeReadRoute) => Promise<void>, responseProfile?: PublicBrowserResponseProfile) {
+async function installed(maxRequests?: number, signal?: AbortSignal, afterRoute?: (route: NativeReadRoute) => Promise<void>, responseProfile?: PublicBrowserResponseProfile,
+  onCommandFailure?: (diagnostic: NativeRequestDiagnostic) => void) {
   const events = new Map<string, (event: unknown) => void>(), routes: NativeReadRoute[] = [];
   const close = vi.fn(async () => {}), detach = vi.fn(async () => {}), failures: string[] = [], subframes: object[] = [], rejections: NativeRequestDiagnostic[] = [];
   const main = { page: () => page };
@@ -21,7 +22,7 @@ async function installed(maxRequests?: number, signal?: AbortSignal, afterRoute?
       : name === "Fetch.getResponseBody" ? { body: `body-${value?.requestId}`, base64Encoded: false } : {}), detach };
   const page = { context: () => ({ newCDPSession: async () => cdp }), mainFrame: () => main, close } as unknown as Page;
   const handler = vi.fn(async (route: NativeReadRoute) => { routes.push(route); await afterRoute?.(route); });
-  const guard = await installNativeRedirectRouting(page, handler, { timeoutMs: 100, maxRequests, signal, responseProfile,
+  const guard = await installNativeRedirectRouting(page, handler, { timeoutMs: 100, maxRequests, signal, responseProfile, onCommandFailure,
     onFailure: code => failures.push(code), onSubframeBlocked: request => subframes.push(request), onRequestRejected: request => rejections.push(request) });
   const request = (id: string, values: object = {}) => events.get("Fetch.requestPaused")!({ requestId: id, networkId: `network-${id}`,
     frameId: "main", resourceType: "XHR", request: { url: "https://example.org/data", method: "GET", headers: {} }, ...values });
@@ -31,6 +32,33 @@ async function installed(maxRequests?: number, signal?: AbortSignal, afterRoute?
 function playwrightRoute(test: Awaited<ReturnType<typeof installed>>) {
   return { request: () => ({ frame: () => test.main }), continue: vi.fn(async () => {}), abort: vi.fn(async () => {}), fulfill: vi.fn() } as unknown as Route;
 }
+
+describe("closed continuation request lifecycle diagnostics", () => {
+  it("captures exact failed request role before wrapping without changing the thrown error", async () => {
+    const facts: NativeRequestDiagnostic[] = [], test = await installed(undefined, undefined, undefined, "SOURCE_ROUTING", value => facts.push(value));
+    const original = new Error("OWNED_STAGEHAND_CDP_UNAVAILABLE"), send = test.cdp.send.getMockImplementation()!;
+    test.cdp.send.mockImplementation((name, value) => name === "Fetch.continueRequest" ? Promise.reject(original) : send(name, value));
+    try {
+      test.request("closed-request"); await vi.waitFor(() => expect(test.routes).toHaveLength(1));
+      await expect(test.routes[0].continue()).rejects.toBe(original);
+      expect(facts).toHaveLength(1); expect(facts[0]).toMatchObject({ code: "OWNED_STAGEHAND_CDP_UNAVAILABLE", phase: "CONTINUE_REQUEST_ACK", method: "GET", resourceType: "xhr", rootFrame: true,
+        recordGenerationCurrent: true, recordGenerationRetired: false, recordAdmitted: true, recordPaused: false, recordFailed: false, recordComplete: false, recordTerminalObserved: false });
+      expect(JSON.stringify(facts)).not.toMatch(/example.org|closed-request|"networkId":|"url":|"headers":/u);
+      expect(test.close).not.toHaveBeenCalled(); expect(test.failures).toEqual([]);
+    } finally { await test.guard.close(); }
+  });
+  it("never lets a diagnostic listener replace the primary continuation failure or invent a CDP cause", async () => {
+    const facts = vi.fn(() => { throw Error("PRIVATE_LISTENER"); }), test = await installed(undefined, undefined, undefined, "SOURCE_ROUTING", facts);
+    const original = new Error("OWNED_STAGEHAND_CDP_UNAVAILABLE"), send = test.cdp.send.getMockImplementation()!;
+    test.cdp.send.mockImplementation((name, value) => name === "Fetch.continueRequest" ? Promise.reject(original) : send(name, value));
+    try {
+      test.request("one"); await vi.waitFor(() => expect(test.routes).toHaveLength(1)); await expect(test.routes[0].continue()).rejects.toBe(original); expect(facts).toHaveBeenCalledOnce();
+      facts.mockClear(); const unknown = new Error("PRIVATE_UNKNOWN_COMMAND_ERROR");
+      test.cdp.send.mockImplementation((name, value) => name === "Fetch.continueRequest" ? Promise.reject(unknown) : send(name, value));
+      test.request("two"); await vi.waitFor(() => expect(test.routes).toHaveLength(2)); await expect(test.routes[1].continue()).rejects.toBe(unknown); expect(facts).not.toHaveBeenCalled();
+    } finally { await test.guard.close(); }
+  });
+});
 
 describe("source-only confirmed uncorrelated denial", () => {
   const unknown = { networkId: undefined, request: { url: "https://example.org/unclassified?private=not-retained", method: "POST", headers: {}, hasPostData: true, postData: "not-availability-evidence" } };

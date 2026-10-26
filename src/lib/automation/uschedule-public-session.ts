@@ -5,6 +5,7 @@ import { runWithProviderRequestLease } from "./provider-request-lease";
 import { createUSchedulePublicReadPolicy } from "./uschedule-public-read-policy";
 import { requestFamilyForUrl } from "@/lib/course-discovery/request-family";
 import { parseUScheduleLocationSource, type UScheduleOfficialLocationProof } from "@/lib/simulators/providers/uschedule-location-source";
+import { isUSchedulePublicHost } from "@/lib/simulators/providers/public-configuration";
 
 /** A per-execution anonymous ASP.NET session. The cookie can only originate
  * from the exact public booking GET, remains in memory, and is injected below
@@ -21,7 +22,7 @@ export function createUSchedulePublicSession(sourceUrl: string, deps: {
   const locationEntry = deps.officialLocation && parseUScheduleLocationSource(deps.officialLocation.entryUrl);
   const parsed = parseUScheduleLocationSource(sourceUrl);
   const filteredLocation = parsed && locationEntry && parsed.canonicalUrl === locationEntry.canonicalUrl && parsed.locationId === locationEntry.locationId;
-  if (source.protocol !== "https:" || source.hostname !== "clients.uschedule.com" || source.port || source.username || source.password || source.search && !filteredLocation || source.hash ||
+  if (source.protocol !== "https:" || !isUSchedulePublicHost(source.hostname) || source.port || source.username || source.password || source.search && !filteredLocation || source.hash ||
       !/^\/[a-z][a-z0-9-]{2,62}\/booking$/u.test(source.pathname) || deps.officialLocation && !filteredLocation) throw new Error("INVALID_ADAPTER_SOURCE");
   const controller = new AbortController();
   const timeout = AbortSignal.timeout(Math.max(1, Math.min(120_000, (deps.deadlineAt?.getTime() ?? Date.now() + 120_000) - Date.now())));

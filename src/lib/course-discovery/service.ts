@@ -344,6 +344,14 @@ function bindRecipe(recipe: CourseAccessRecipeData, source: Source, sourceEviden
         recipe.adapter.facilityIds.length !== 1 || proof.facilityId !== recipe.adapter.facilityIds[0] ||
         request !== undefined && !isCurrentTrustedContext(request.trustedContext, source.trustedContext)) conflict();
   }
+  if (recipe.engine === "EXISTING_ADAPTER" && recipe.adapter.family === "TEEITUP" && recipe.adapter.officialDelegatedBookingProof?.physicalContactProof) {
+    const outer = recipe.adapter.officialDelegatedBookingProof, proof = outer.physicalContactProof!;
+    if (!source.trustedContext.canonicalCoursePhone || proof.publicCoursePhone !== source.trustedContext.canonicalCoursePhone ||
+        proof.canonicalAddress !== source.identity.address || proof.canonicalName !== source.identity.name || proof.officialUrl !== recipe.source.officialUrl ||
+        proof.bookingUrl !== recipe.source.bookingUrl || outer.timeZone !== source.identity.timeZone || outer.alias !== recipe.adapter.alias ||
+        recipe.adapter.facilityIds.length !== 1 || outer.facilityId !== recipe.adapter.facilityIds[0] ||
+        request !== undefined && !isCurrentTrustedContext(request.trustedContext, source.trustedContext)) conflict();
+  }
 }
 
 export async function proposeDiscoveryRecipe(jobId: string, leaseToken: string, proposed: unknown, observedSource?: unknown) {

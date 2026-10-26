@@ -1,6 +1,17 @@
 import { expect, it } from "vitest";
 import { createStagehandNativeRouterFailureCapture, projectStagehandNativeRouterFailure, stagehandNativeRouterBooleanKeys, stagehandNativeRouterCodes } from "./stagehand-native-router-diagnostic";
 import { sourceFailureDiagnostic } from "../../../scripts/automation/stagehand/source-diagnostic.mjs";
+it("preserves only actual closed continuation role/lifecycle booleans", () => {
+  const facts = { phase: "CONTINUE_REQUEST_ACK", method: "GET", resourceType: "document", rootFrame: true,
+    recordGenerationCurrent: false, recordGenerationRetired: true, recordAdmitted: true, recordPaused: false,
+    recordResponsePaused: false, recordFailed: true, recordComplete: false, recordHandlerDone: false, recordTerminalObserved: true,
+    url: "https://private.example/", requestId: "PRIVATE", headers: { cookie: "PRIVATE" } };
+  const d = projectStagehandNativeRouterFailure("OWNED_STAGEHAND_CDP_UNAVAILABLE", facts);
+  expect(d.phase).toBe("CONTINUE_REQUEST_ACK"); expect(d.recordGenerationRetired).toBe(true);
+  expect(sourceFailureDiagnostic({ nativeRouterFailure: d }).nativeRouterFailure).toEqual(d);
+  expect(JSON.stringify(d)).not.toMatch(/PRIVATE|https:|requestId|headers/u);
+  expect(projectStagehandNativeRouterFailure("UNKNOWN", { recordGenerationCurrent: "true" })).not.toHaveProperty("recordGenerationCurrent");
+});
 
 it("captures the earliest native callback before page teardown and keeps a later socket observation separate", () => {
   const capture = createStagehandNativeRouterFailureCapture(), order: string[] = [];

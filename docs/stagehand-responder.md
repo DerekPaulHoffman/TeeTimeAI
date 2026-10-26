@@ -32,6 +32,14 @@ automatic retry, using the same job, request, source fingerprint and original
 deadlines. The fixed inspection and independent backend challenges stay fresh.
 Incomplete reads never become an empty availability result.
 
+Outdoor checks verify enough golfer spots. Simulator checks verify one continuous
+public rental resource for the requested duration and local window; an unstated
+golfer limit remains `null`, rather than becoming a one-golfer restriction. A
+saved, independently verified published golfer maximum is still freshly checked
+and enforced. The provider's bay quantity remains one regardless of the alert's
+golfer count. Mailbox correlation uses the same distinction and never treats a
+bay count as proof of golfer capacity.
+
 The Stagehand browser connects to a private, owned and guarded local browser
 context. Its loopback endpoint stays inside the trusted host/driver boundary;
 it is absent from model input, public evidence, logs and recipes. Provider reads
@@ -49,6 +57,20 @@ guarded target. Native parent-frame and loader checks run immediately before
 navigation. Hidden, stale, foreign and `srcdoc` frames are rejected; ordinary
 subframe networking remains denied. Repeated unchanged anchor navigation is
 rejected. These observations confer no venue, availability or method proof.
+
+Before extraction, the source controller waits for its current owned main
+document to finish parsing and acknowledge its successful public response.
+Each wait is bounded by 30 seconds and the original 120-second source allowance.
+Ancillary pending reads do not require network idle. Fragment-only navigation
+can reuse that same document; its path, query, target and loader stay bound.
+An unparsed document cannot become an explicit unresolved model conclusion.
+
+The fixed reader recognizes visible, untitled USchedule embeds through the same
+strict public tenant grammar as its adapter. Both supported USchedule origins
+retain the exact observed origin throughout source, session and availability
+reads, and share one provider mutex. The finite duration-choice catalog permits
+20 public options; requested duration, public rental selection, one-bay quantity,
+date verification and request/body budgets remain independently enforced.
 
 Source GET XHR/fetch responses use the existing 16 MB script allocation. Other
 data/documents retain 2 MB, stylesheets 6 MB, aggregate decoded resources 48 MB,

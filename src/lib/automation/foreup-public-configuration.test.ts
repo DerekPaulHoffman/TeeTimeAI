@@ -17,6 +17,38 @@ const schedules = [
 const html = `<html><script>SCHEDULES = ${JSON.stringify(schedules)};</script></html>`;
 
 describe("public ForeUp schedule configuration", () => {
+  const ownerName = "Harbor Golf Course at Lakeside";
+  const ownerSchedule = { ...schedules[0], course_name: ownerName, title: "North Tee Sheet", booking_classes: [
+    { ...schedules[0].booking_classes[0], name: "Public Tee Times" },
+  ] };
+  const ownerParse = (rows: unknown[] = [ownerSchedule], courseName = ownerName) => parseForeupPublicConfiguration({
+    bookingUrl, courseName, html: `<script>SCHEDULES = ${JSON.stringify(rows)};</script>`,
+  });
+  it("binds the explicit same-facility owner name independently of its tee-sheet title", () => {
+    expect(ownerParse()).toMatchObject({ scheduleId: 792, bookingClassId: 4931 });
+    expect(ownerParse([{ ...ownerSchedule, course_name: " HARBOR Golf Club at Lakeside " }])).toMatchObject({ scheduleId: 792 });
+    expect(ownerParse([{ ...ownerSchedule, course_name: "Harbor Golf Course" }])).toBeNull();
+    expect(ownerParse([{ ...ownerSchedule, course_id: "999" }])).toBeNull();
+    expect(ownerParse([{ ...ownerSchedule, title: "" }])).toBeNull();
+    expect(ownerParse([ownerSchedule, { ...ownerSchedule, teesheet_id: "793" }])).toBeNull();
+    expect(ownerParse([{ ...ownerSchedule, booking_classes: [ownerSchedule.booking_classes[0], { ...ownerSchedule.booking_classes[0], booking_class_id: "4932" }] }])).toBeNull();
+    expect(ownerParse([{ ...ownerSchedule, booking_classes: [{ ...ownerSchedule.booking_classes[0], hidden: "1" }] }])).toBeNull();
+    expect(ownerParse([{ ...ownerSchedule, booking_classes: [{ ...ownerSchedule.booking_classes[0], teesheet_id: "781" }] }])).toBeNull();
+  });
+  it.each([null, 42, {}, [], "", "   ", "x".repeat(301), "Harbor\u0000 at Lakeside"])
+  ("rejects a present malformed owner even with an otherwise matching title: %j", course_name => {
+    expect(ownerParse([{ ...ownerSchedule, title: ownerName, course_name }])).toBeNull();
+  });
+  it("accepts a legitimate different owner descriptor with the matching same-facility tee-sheet title", () => {
+    for (const course_name of ["Harbor Leisure Company", "Harbor at Lakeside Annex", "City"])
+      expect(ownerParse([{ ...ownerSchedule, title: ownerName, course_name }])).toMatchObject({ scheduleId: 792 });
+    expect(ownerParse([{ ...ownerSchedule, title: "Another North Tee Sheet", course_name: "Another Harbor at Lakeside" }])).toBeNull();
+    expect(ownerParse([{ ...ownerSchedule, course_id: "999", title: ownerName, course_name: "Harbor Leisure Company" }])).toBeNull();
+  });
+  it("retains the absent-owner legacy title path without accepting malformed owner data", () => {
+    expect(parseForeupPublicConfiguration({ bookingUrl, courseName: "Columbia Bridges", html })).toMatchObject({ scheduleId: 792 });
+    expect(ownerParse([{ ...ownerSchedule, title: ownerName, course_name: null }])).toBeNull();
+  });
   it("compares a sole course schedule after only an anchored comma hospitality descriptor", () => {
     const schedule = { ...schedules[0], title: "Harbor Golf Course", booking_classes: [
       { ...schedules[0].booking_classes[0], name: "Public Tee Times" },
