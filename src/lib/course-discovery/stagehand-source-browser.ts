@@ -24,6 +24,7 @@ type Target = { id: string; contextId: string; cdp: OwnedCdpSession; page: Page;
 type PopupGrant = { url: string; until: number; used: boolean };
 type PopupRead = { id: string; networkId: string; url: string; method: string; frameId: string; hop: number; complete: boolean;
   redirect?: string; pendingRedirect?: string; successorId?: string; continuationAck?: Promise<void>; completion?: Promise<unknown>; queueComplete?: boolean; status?: number;
+  readinessRetired?: boolean; nativeDocument?: { frameId: string; loaderId: string; currentUrl: string };
   response: Promise<Record<string, unknown>>; resolve(value: Record<string, unknown>): void };
 type Dependencies = { requestLease: Lease; proxyDependencies?: NativePublicProxyDependencies; launchBrowser?: (options: LaunchOptions) => Promise<Browser>;
   contextOptions?: { ignoreHTTPSErrors?: boolean } };
@@ -432,11 +433,21 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
         close: async () => { await root.send("Target.closeTarget", { targetId: item.id }).catch(() => {}); } } as unknown as Page;
       child.on("Page.frameNavigated", value => { const changed = record(value.frame); if (!changed.parentId && typeof changed.id === "string" && typeof changed.url === "string") {
         anchorIntents.delete(item.id);
+        for (const entry of popupReads.values()) if (entry.nativeDocument && (changed.id !== entry.nativeDocument.frameId ||
+            changed.loaderId !== entry.nativeDocument.loaderId || changed.url !== entry.nativeDocument.currentUrl)) entry.readinessRetired = true;
         item.mainFrameId = changed.id; item.mainLoaderId = typeof changed.loaderId === "string" ? changed.loaderId : undefined; item.currentUrl = changed.url;
       } });
       child.on("Page.navigatedWithinDocument", value => { if (typeof item.mainFrameId === "string" && value.frameId === item.mainFrameId && typeof value.url === "string") {
         anchorIntents.delete(item.id); item.currentUrl = value.url;
+        for (const entry of popupReads.values()) if (entry.nativeDocument && !entry.readinessRetired) {
+          if (entry.nativeDocument.frameId !== value.frameId || entry.nativeDocument.loaderId !== item.mainLoaderId ||
+              !isSafeRecipeUrl(value.url) || transactionUrl(value.url) || new URL(value.url).origin !== new URL(entry.url).origin) entry.readinessRetired = true;
+          else entry.nativeDocument.currentUrl = value.url;
+        }
       } });
+      child.on("Network.loadingFailed", value => {
+        for (const entry of popupReads.values()) if (entry.networkId === value.requestId) entry.readinessRetired = true;
+      });
       item.ready = (async () => {
         await child.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true,
           filter: [{ type: "worker" }, { type: "shared_worker" }, { type: "service_worker" }] });
@@ -506,6 +517,18 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
       if (typeof startFrame.id !== "string" || !startFrame.id || typeof startFrame.loaderId !== "string" || !startFrame.loaderId ||
           startFrame.id !== endFrame.id || startFrame.loaderId !== endFrame.loaderId || startFrame.url !== endFrame.url ||
           (readinessOnly ? !sameStagehandDocumentReadUrl(observed.url, endFrame.url) : observed.url !== endFrame.url)) throw reject();
+      // The popup may commit before its listener is installed. Only this paired
+      // native root capture can initialize its frame/loader, never DOM alone.
+      if (target.mainFrameId === undefined) {
+        target.mainFrameId = startFrame.id; target.mainLoaderId = startFrame.loaderId; target.currentUrl = String(startFrame.url);
+      }
+      if (!target.popupReadinessRetired) for (const entry of target.popupReads?.values() ?? []) {
+        if (!entry.readinessRetired && !entry.nativeDocument && entry.method === "GET" && entry.frameId === startFrame.id &&
+            entry.url === startFrame.url && target.currentUrl === startFrame.url && target.mainFrameId === startFrame.id && target.mainLoaderId === startFrame.loaderId) {
+          // Inert until that exact read's unchanged response ACK and queue drain.
+          entry.nativeDocument = { frameId: startFrame.id, loaderId: startFrame.loaderId, currentUrl: entry.url };
+        }
+      }
       return { target, observed, frameId: startFrame.id, loaderId: startFrame.loaderId, documentIdentityHash: createHash("sha256").update(JSON.stringify([startFrame.id,startFrame.loaderId,startFrame.url])).digest("hex"),
         documentHash: createHash("sha256").update(JSON.stringify([startFrame.id, startFrame.loaderId, startFrame.url, value])).digest("hex") };
     };
@@ -515,12 +538,23 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
         .filter((url): url is string => typeof url === "string" && isSafeRecipeUrl(url) && !transactionUrl(url) && url !== capture.observed.url && (selected === undefined || url === selected))
         .map(src => ({ src, visible: true as const })),
     });
+    const popupReadForCapture = (capture: Awaited<ReturnType<typeof captureSourceDom>>) => {
+      const { target, observed } = capture;
+      if (target.popupReadinessRetired || typeof observed.url !== "string" || !isSafeRecipeUrl(observed.url) || transactionUrl(observed.url)) return;
+      const pageUrl = observed.url;
+      const matching = [...(target.popupReads?.values() ?? [])].filter(entry => !entry.readinessRetired && !entry.redirect && entry.method === "GET" &&
+        entry.status === 200 && entry.complete && entry.queueComplete && entry.continuationAck && entry.nativeDocument &&
+        entry.nativeDocument.frameId === capture.frameId && entry.nativeDocument.loaderId === capture.loaderId &&
+        entry.nativeDocument.currentUrl === pageUrl && target.currentUrl === pageUrl && target.mainFrameId === capture.frameId &&
+        target.mainLoaderId === capture.loaderId && new URL(entry.url).origin === new URL(pageUrl).origin);
+      return matching.length === 1 ? matching[0] : undefined;
+    };
     const sourceSettled = (capture: Awaited<ReturnType<typeof captureSourceDom>>) => {
       const { target, observed } = capture;
       const normal = sameStagehandDocumentReadUrl(target.documentRequest?.url(), observed.url) || Boolean(target.documentRequest &&
         typeof observed.url === "string" && !transactionUrl(observed.url) && target.router?.isCurrentCompletedDocumentRead(target.documentRequest, target.frame,
           { frameId: capture.frameId, loaderId: capture.loaderId, url: observed.url }));
-      const bridge = target.popupReadinessRetired ? undefined : [...(target.popupReads?.values() ?? [])].find(entry => sameStagehandDocumentReadUrl(entry.url, observed.url) && !entry.redirect);
+      const bridge = popupReadForCapture(capture);
       return observed.bodyPresent === true && ["interactive", "complete"].includes(String(observed.readyState)) &&
         (normal ? target.documentReadPending === false && target.documentStatus === 200 : Boolean(bridge?.complete && bridge.queueComplete && bridge.status === 200));
     };
@@ -552,7 +586,7 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
         const normal = sameStagehandDocumentReadUrl(target.documentRequest?.url(), observed.url) || Boolean(target.documentRequest &&
         typeof observed.url === "string" && !transactionUrl(observed.url) && target.router?.isCurrentCompletedDocumentRead(target.documentRequest, target.frame,
           { frameId: capture.frameId, loaderId: capture.loaderId, url: observed.url }));
-        const bridge = target.popupReadinessRetired ? undefined : [...(target.popupReads?.values() ?? [])].find(entry => sameStagehandDocumentReadUrl(entry.url, observed.url) && !entry.redirect);
+        const bridge = popupReadForCapture(capture);
         const mainDocumentStatus = normal ? target.documentStatus ?? null : bridge?.status ?? null;
         const mainReadPending = normal ? target.documentReadPending === true : Boolean(bridge && !(bridge.complete && bridge.queueComplete));
         return { readyState: ["loading", "interactive", "complete"].includes(String(observed.readyState)) ? observed.readyState as "loading" | "interactive" | "complete" : "UNKNOWN",

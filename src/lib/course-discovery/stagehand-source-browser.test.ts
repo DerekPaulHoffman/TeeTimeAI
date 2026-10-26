@@ -324,13 +324,15 @@ it("admits an observed native anchor GET and drains its pending old script befor
   }
 }, 60_000);
 
-async function ownedPopupFixture(workerCase: boolean, ackMode: AckMode) {
+async function ownedPopupFixture(workerCase: boolean, ackMode: AckMode, popupSpa = false) {
   popupAck.mode = ackMode; popupAck.armed = false; popupAck.pending = 0; popupAck.earlySuccessor = false; popupAck.forked = false; popupAck.oversized = false;
   popupAck.delayed = 0;
   const hosts = new Set(["owned-source.example", "owned-booking.example", "owned-final.example", "owned-assets.example"]);
   const cancellation = new AbortController(), families = new Set<string>();
   let active = 0, maxGlobal = 0, maxFamily = 0, acquired = 0, released = 0, unleased = 0;
   let successorBeforeParentRelease = false;
+  let releasePopupQueue!: () => void, popupQueueHeld = false, popupQueueReleased = false;
+  const popupQueueGate = new Promise<void>(resolve => { releasePopupQueue = () => { popupQueueReleased = true; resolve(); }; });
   const seen: string[] = [], concurrent: number[] = [];
   const server = createServer({ key: certificate("fixtureKey"), cert: certificate("fixtureCertificate") }, (request, response) => {
     const host = (request.headers.host ?? "").split(":")[0], path = request.url ?? "/";
@@ -362,6 +364,9 @@ async function ownedPopupFixture(workerCase: boolean, ackMode: AckMode) {
         active++; families.add(family); acquired++; maxGlobal = Math.max(maxGlobal, active); maxFamily = Math.max(maxFamily, 1);
         try { return { acquired: true, value: await work() }; }
         finally {
+          if (popupSpa && !popupQueueReleased && family === requestFamilyForUrl("https://owned-final.example/calendar?keep=full")) {
+            popupQueueHeld = true; await popupQueueGate;
+          }
           if (ackMode === "DELAY" && family === requestFamilyForUrl("https://owned-booking.example/landing?keep=full"))
             await new Promise(resolve => setTimeout(resolve, 50));
           active--; families.delete(family); released++;
@@ -417,16 +422,51 @@ async function ownedPopupFixture(workerCase: boolean, ackMode: AckMode) {
     }
     await clicking;
     await popup.waitForURL("https://owned-final.example/calendar?keep=full");
-    await popup.waitForFunction(() => (globalThis as unknown as { inlineReadFinished?: boolean }).inlineReadFinished === true);
+    if (!popupSpa) await popup.waitForFunction(() => (globalThis as unknown as { inlineReadFinished?: boolean }).inlineReadFinished === true);
     const ids = await Promise.all(page.context().pages().map(async current => { const cdp = await current.context().newCDPSession(current); const value = await cdp.send("Target.getTargetInfo"); await cdp.detach(); return value.targetInfo.targetId; }));
     expect(await host.assertGuardedTargets(ids)).toBe(true);
     const popupCdp = await popup.context().newCDPSession(popup), popupId = (await popupCdp.send("Target.getTargetInfo")).targetInfo.targetId;
+    if (!popupSpa) await expect.poll(() => host!.observeSourceReadiness(popupId)).toMatchObject({ mainDocumentCurrent: true, mainDocumentComplete: true, mainDocumentStatus: 200, pendingReads: 0 });
+    let popupPageUrl = "https://owned-final.example/calendar?keep=full";
+    if (popupSpa) {
+      await expect.poll(() => popupQueueHeld).toBe(true);
+      // This native original-URL pair is retained while its lease is still held;
+      // it must remain inert across SPA until the original queue really drains.
+      expect(await host.observeSourceReadiness(popupId)).toMatchObject({ mainDocumentCurrent: false, mainDocumentComplete: false, mainDocumentStatus: null });
+      const documentReads = () => seen.filter(value => value.startsWith("owned-final.example/") && !value.endsWith(".json")).length;
+      const before = (await popupCdp.send("Page.getFrameTree")).frameTree.frame, requestsBefore = documentReads();
+      const historyEvents: Array<{ frameId: string; url: string }> = [];
+      await popupCdp.send("Page.enable");
+      popupCdp.on("Page.navigatedWithinDocument", event => historyEvents.push(event));
+      popupPageUrl = "https://owned-final.example/public/calendar?date=2026-11-01#times";
+      await popup.evaluate(url => { history.pushState({}, "", url); }, popupPageUrl);
+      await expect.poll(() => historyEvents.some(event => event.frameId === before.id && event.url === popupPageUrl)).toBe(true);
+      expect(await host.observeSourceReadiness(popupId)).toMatchObject({ mainDocumentCurrent: false, mainDocumentComplete: false, mainDocumentStatus: null });
+      releasePopupQueue();
+      await popup.waitForFunction(() => (globalThis as unknown as { inlineReadFinished?: boolean }).inlineReadFinished === true);
+      await expect.poll(() => host!.observeSourceReadiness(popupId)).toMatchObject({ mainDocumentCurrent: true, mainDocumentComplete: true, mainDocumentStatus: 200, pendingReads: 0 });
+      expect((await popupCdp.send("Page.getFrameTree")).frameTree.frame).toMatchObject({ id: before.id, loaderId: before.loaderId, url: popupPageUrl.split("#", 1)[0] });
+      expect(popup.url()).toBe(popupPageUrl);
+      expect(documentReads()).toBe(requestsBefore);
+      // Keep the separate existing frame-source proof's exact URL contract.
+      popupPageUrl = popupPageUrl.split("#", 1)[0];
+      await popup.evaluate(url => { history.replaceState({}, "", url); }, popupPageUrl);
+      await expect.poll(() => host!.observeSourceReadiness(popupId)).toMatchObject({ mainDocumentCurrent: true, mainDocumentStatus: 200 });
+      await popup.evaluate(() => { const iframe = document.createElement("iframe"); iframe.srcdoc = "<p>Popup child</p>"; document.body.append(iframe); });
+      await expect.poll(() => popup.frames().length).toBe(2);
+      const child = popup.frames().find(frame => frame !== popup.mainFrame())!; await child.waitForLoadState("load");
+      const childUrl = await child.evaluate(() => { history.pushState({}, "", location.href + "#foreign-history"); return location.href; });
+      await expect.poll(() => historyEvents.some(event => event.frameId !== before.id && event.url === childUrl)).toBe(true);
+      expect((await host.observeFrameSources(popupId)).pageUrl).toBe(popupPageUrl);
+      await expect(host.observeSourceReadiness("foreign-owned-target")).rejects.toThrow();
+      expect(await host.observeSourceReadiness(popupId)).toMatchObject({ mainDocumentCurrent: true, mainDocumentStatus: 200 });
+      expect(documentReads()).toBe(requestsBefore);
+    }
     await popupCdp.detach();
-    await expect.poll(() => host!.observeSourceReadiness(popupId)).toMatchObject({ mainDocumentCurrent: true, mainDocumentComplete: true, mainDocumentStatus: 200, pendingReads: 0 });
     const nextPopupUrl = "https://owned-final.example/second-calendar?keep=full";
     await popup.evaluate(url => { const iframe = document.createElement("iframe"); iframe.src = url; iframe.style.cssText = "width:300px;height:150px"; document.body.append(iframe); }, nextPopupUrl);
     const beforeExplicit = seen.length;
-    expect(await host.prepareFrameNavigation(popupId, nextPopupUrl)).toMatchObject({ pageUrl: "https://owned-final.example/calendar?keep=full", frames: [{ src: nextPopupUrl, visible: true }] });
+    expect(await host.prepareFrameNavigation(popupId, nextPopupUrl)).toMatchObject({ pageUrl: popupPageUrl, frames: [{ src: nextPopupUrl, visible: true }] });
     // The old bootstrap GET cannot attest readiness between the drained
     // boundary and the next actual main-document GET, even at its old URL.
     expect(await host.observeSourceReadiness(popupId)).toMatchObject({ mainDocumentCurrent: false, mainDocumentComplete: false, mainDocumentStatus: null, pendingReads: 0 });
@@ -474,6 +514,7 @@ async function ownedPopupFixture(workerCase: boolean, ackMode: AckMode) {
       expect(popupAck.delayed).toBeGreaterThan(0); expect(popupAck.earlySuccessor).toBe(false); expect(successorBeforeParentRelease).toBe(false);
     }
   } finally {
+    releasePopupQueue();
     cancellation.abort(); await attached?.close().catch(() => {}); await host?.close();
     await new Promise<void>(resolve => server.close(() => resolve()));
     popupAck.mode = "NORMAL"; popupAck.armed = false;
@@ -481,6 +522,7 @@ async function ownedPopupFixture(workerCase: boolean, ackMode: AckMode) {
 }
 it.each([false, true])("guards isolated popup/inline reads and per-family concurrency; worker-denial mode %s",
   workerCase => ownedPopupFixture(workerCase, workerCase ? "NORMAL" : "DELAY"), 90_000);
+it("retains only the exact completed startup popup GET across native same-loader SPA history", () => ownedPopupFixture(false, "NORMAL", true), 90_000);
 it.each(["REJECT", "NEVER", "FORK", "OVERSIZE"] as const)("denies the paused successor and drains when its parent ACK is %s",
   ackMode => ownedPopupFixture(false, ackMode), 90_000);
 it("bounds an absent continuation ACK and preserves cancellation or failed ACK without dispatch", async () => {
