@@ -1,6 +1,21 @@
 import { expect, it } from "vitest";
-import { createStagehandNativeRouterFailureCapture, projectStagehandNativeRouterFailure, stagehandNativeRouterBooleanKeys, stagehandNativeRouterCodes, stagehandSourceRequestGuards, recordStagehandSourceNavigationFailure } from "./stagehand-native-router-diagnostic";
+import { createStagehandNativeRouterFailureCapture, projectStagehandNativeRouterFailure, stagehandNativeRouterBooleanKeys, stagehandNativeRouterCodes, stagehandSourceRequestGuards, recordStagehandSourceNavigationFailure, stagehandRedirectRejections } from "./stagehand-native-router-diagnostic";
 import { sourceFailureDiagnostic } from "../../../scripts/automation/stagehand/source-diagnostic.mjs";
+it("preserves every closed redirect rejection before cleanup and strips forged or unrelated reasons", () => {
+  for (const redirectRejection of stagehandRedirectRejections) {
+    const capture = createStagehandNativeRouterFailureCapture();
+    capture.record("NATIVE_REDIRECT_PROVENANCE_REJECTED", { phase: "REDIRECT_PROVENANCE", redirectRejection, method: "GET", resourceType: "xhr",
+      url: "https://private.example/?token=SECRET", requestId: "PRIVATE", headers: { cookie: "PRIVATE" } });
+    capture.record("NATIVE_REDIRECT_CANCELLED", {});
+    const projected = capture.snapshot()!;
+    expect(projected.redirectRejection).toBe(redirectRejection);
+    expect(sourceFailureDiagnostic({ nativeRouterFailure: projected }).nativeRouterFailure).toEqual(projected);
+    expect(JSON.stringify(projected)).not.toMatch(/PRIVATE|SECRET|https:|requestId|headers/u);
+  }
+  expect(projectStagehandNativeRouterFailure("NATIVE_REDIRECT_PROVENANCE_REJECTED", { phase: "REDIRECT_PROVENANCE", redirectRejection: "PRIVATE" })).not.toHaveProperty("redirectRejection");
+  expect(projectStagehandNativeRouterFailure("NATIVE_REDIRECT_CANCELLED", { phase: "REDIRECT_PROVENANCE", redirectRejection: "CROSS_HOST" })).not.toHaveProperty("redirectRejection");
+  expect(projectStagehandNativeRouterFailure("NATIVE_REDIRECT_PROVENANCE_REJECTED", { phase: "RESPONSE_WAIT", redirectRejection: "CROSS_HOST" })).not.toHaveProperty("redirectRejection");
+});
 it("ignores subframe, foreign page, ancillary and teardown rejections before capturing an owned main navigation", () => {
   const capture = createStagehandNativeRouterFailureCapture(), frame = {}, page = {}, foreign = {};
   const state = { navigationRequest: true, frame, page, ownedFrame: frame, ownedPage: page, closed: false, aborted: false };

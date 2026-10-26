@@ -34,6 +34,66 @@ function playwrightRoute(test: Awaited<ReturnType<typeof installed>>) {
   return { request: () => ({ frame: () => test.main }), continue: vi.fn(async () => {}), abort: vi.fn(async () => {}), fulfill: vi.fn() } as unknown as Route;
 }
 
+describe("closed redirect rejection reasons", () => {
+  const root = "https://example.org/first", target = "https://example.org/next";
+  it.each(["missing", "unadmitted", "failed", "reserved"] as const)("records the exact initial parent guard: %s", async mode => {
+    const test = await installed();
+    try {
+      if (mode !== "missing") {
+        test.request("parent", { request: { url: root, method: "GET", headers: {} } });
+        if (mode !== "unadmitted") await test.routes[0].continue();
+        if (mode === "failed") test.events.get("Network.loadingFailed")!({ requestId: "network-parent" });
+        if (mode === "reserved") {
+          test.response("parent", { request: { url: root, method: "GET", headers: {} }, responseStatusCode: 302, responseHeaders: [{ name: "Location", value: target }] });
+          await test.routes[0].request().response();
+          test.request("first-child", { redirectedRequestId: "parent", request: { url: target, method: "GET", headers: {} } });
+          await vi.waitFor(() => expect(test.routes).toHaveLength(2));
+        }
+      }
+      test.request("child", { redirectedRequestId: "parent", request: { url: target, method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce());
+      expect(test.guard.firstFatal).toMatchObject({ code: "NATIVE_REDIRECT_PROVENANCE_REJECTED", phase: "REDIRECT_PROVENANCE",
+        redirectRejection: { missing: "PARENT_MISSING", unadmitted: "PARENT_UNADMITTED", failed: "PARENT_FAILED", reserved: "PARENT_CHILD_RESERVED" }[mode] });
+    } finally { await test.guard.close(); }
+  });
+  it.each(["missing location", "wrong location", "method", "document kind", "cross host"] as const)("records the exact released-parent gate: %s", async mode => {
+    const test = await installed(), next = mode === "cross host" ? "https://other.example.net/next" : target;
+    try {
+      test.request("parent", { request: { url: root, method: "GET", headers: {} } }); await test.routes[0].continue();
+      test.response("parent", { request: { url: root, method: "GET", headers: {} }, responseStatusCode: 302,
+        responseHeaders: mode === "missing location" ? [] : [{ name: "Location", value: mode === "wrong location" ? target + "/different" : next }] });
+      await test.routes[0].request().response();
+      test.request("child", { redirectedRequestId: "parent", resourceType: mode === "document kind" ? "Document" : "XHR",
+        request: { url: next, method: mode === "method" ? "HEAD" : "GET", headers: {} } });
+      await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce());
+      expect(test.guard.firstFatal).toMatchObject({ code: "NATIVE_REDIRECT_PROVENANCE_REJECTED", phase: "REDIRECT_PROVENANCE", duplicateRequestId: false,
+        redirectRejection: { "missing location": "LOCATION_MISSING", "wrong location": "LOCATION_MISMATCH", method: "METHOD_MISMATCH", "document kind": "DOCUMENT_PARENT_KIND", "cross host": "CROSS_HOST" }[mode] });
+      expect(test.routes).toHaveLength(1); expect(test.cdp.send.mock.calls.filter(([name]) => name === "Fetch.continueRequest")).toHaveLength(1);
+    } finally { await test.guard.close(); }
+  });
+  it("retains the parent depth guard and never dispatches a sixth redirected child", async () => {
+    const test = await installed();
+    try {
+      for (let n = 0; n <= 5; n++) {
+        test.request(`hop-${n}`, { ...(n ? { redirectedRequestId: `hop-${n - 1}` } : {}), request: { url: `${root}/${n}`, method: "GET", headers: {} } });
+        await vi.waitFor(() => expect(test.routes).toHaveLength(n + 1)); await test.routes[n].continue();
+        test.response(`hop-${n}`, { request: { url: `${root}/${n}`, method: "GET", headers: {} }, responseStatusCode: 302, responseHeaders: [{ name: "Location", value: `${root}/${n + 1}` }] });
+        await test.routes[n].request().response();
+      }
+      test.request("over-depth", { redirectedRequestId: "hop-5", request: { url: `${root}/6`, method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce()); expect(test.guard.firstFatal?.redirectRejection).toBe("PARENT_DEPTH_LIMIT"); expect(test.routes).toHaveLength(6);
+    } finally { await test.guard.close(); }
+  });
+  it("captures failed parent response while the exact child is waiting without inventing a redirect", async () => {
+    const test = await installed();
+    try {
+      test.request("parent"); await test.routes[0].continue(); test.request("child", { redirectedRequestId: "parent" });
+      test.events.get("Network.loadingFailed")!({ requestId: "network-parent" });
+      await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce()); expect(test.guard.firstFatal?.redirectRejection).toBe("PARENT_RESPONSE_FAILED"); expect(test.routes).toHaveLength(1);
+    } finally { await test.guard.close(); }
+  });
+});
+
 describe("current completed native main-document read", () => {
   const url = "https://booking.example.org/", spa = "https://booking.example.org/book-a-tee-time/";
   async function prepared(ack?: ReturnType<typeof deferred<object>>, drain?: ReturnType<typeof deferred<void>>) {

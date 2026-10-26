@@ -7,6 +7,7 @@ import { PUBLIC_BROWSER_TOTAL_BYTES, SOURCE_ROUTING_RESPONSE_PROFILE, publicBrow
 import { isSafeBrowserAssetUrl, isSafeRecipeUrl } from "./recipe";
 import { createPublicClientReadHeaderScope, type PublicClientReadHeaderProof, type PublicClientReadHeaderFailureReason } from "./public-client-read-headers";
 import type { MindbodyPublicFormIntent } from "./mindbody-public-form-read";
+import type { StagehandRedirectRejection } from "./stagehand-native-router-diagnostic";
 
 /** One CDP owner validates every initial/redirected read. Evidence comes from
  * that exact request's paused Chrome response, independently of page body use. */
@@ -20,6 +21,7 @@ export type NativeReadResponse = Pick<Response, "url" | "status" | "allHeaders" 
 export type NativeReadRoute = Pick<Route, "continue" | "abort" | "fulfill"> & { request(): NativeReadRequest };
 export type NativeRequestDiagnostic = {
   code: string; url?: string; method?: string; resourceType?: string;
+  redirectRejection?: StagehandRedirectRejection;
   limitKind?: "DECLARED_INVALID" | "DECLARED_TOO_LARGE" | "DECODED_BODY" | "TOTAL_DECODED";
   allowedBytes?: number; declaredBytes?: number; bodyBytes?: number; totalBytes?: number;
   declaredLengthPresent?: boolean; documentResponse?: boolean; ancillaryResponse?: boolean;
@@ -921,9 +923,12 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         await rejectInitial(rejection); return;
       }
       const parent = event.redirectedRequestId ? records.get(event.redirectedRequestId) : null;
-      const rejectProvenance = async () => {
+      const rejectProvenance = async (redirectRejection: StagehandRedirectRejection) => {
         const code = "NATIVE_REDIRECT_PROVENANCE_REJECTED";
-        firstFatal ??= { ...requestDiagnostic(code), phase: "REDIRECT_PROVENANCE", parentPresent: Boolean(parent),
+        firstFatal ??= { ...requestDiagnostic(code), phase: "REDIRECT_PROVENANCE", redirectRejection, parentPresent: Boolean(parent),
+          // This pause may already reserve initialPauses while awaiting its
+          // parent. Its own reservation is not a duplicate request fact.
+          duplicateRequestId: records.has(event.requestId) || sourceDeniedFetchIds.has(event.requestId),
           ...(parent ? { redirectParentMethod: ["GET", "HEAD", "POST"].includes(parent.method) ? parent.method as "GET" | "HEAD" | "POST" : "OTHER",
             ...(parent.responseStatus === undefined ? {} : { redirectParentStatus: parent.responseStatus }), redirectParentComplete: parent.complete,
             redirectLocationMatches: parent.redirect?.target === event.request.url, redirectNetworkMatches: parent.networkId === networkId,
@@ -932,7 +937,8 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         await reject(); await close(code);
       };
       if (event.redirectedRequestId && (!parent || !parent.admitted || parent.failed || parent.depth >= 5 || parent.redirectChildId)) {
-        await rejectProvenance(); return;
+        await rejectProvenance(!parent ? "PARENT_MISSING" : !parent.admitted ? "PARENT_UNADMITTED" : parent.failed ? "PARENT_FAILED" :
+          parent.depth >= 5 ? "PARENT_DEPTH_LIMIT" : "PARENT_CHILD_RESERVED"); return;
       }
       // Reserve the exact single child before waiting for independently ordered
       // Network metadata. A second pause cannot share this parent's authority.
@@ -1145,7 +1151,10 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         if (!result || result instanceof Error || records.has(event.requestId) || !releasedRedirect(parent, event.request.url) ||
             denyResourceKind && (parent.kind !== kind || networkId !== parent.networkId) ||
             !publicBootstrapGet && (event.request.method !== parent.method || document && (parent.kind !== "document" || !["GET", "HEAD"].includes(parent.method)))) {
-          await rejectProvenance(); return;
+          await rejectProvenance(!result ? "PARENT_RESPONSE_MISSING" : result instanceof Error ? "PARENT_RESPONSE_FAILED" : records.has(event.requestId) ? "CHILD_RECORD_EXISTS" :
+            !releasedRedirect(parent, event.request.url) ? !parent.admitted ? "PARENT_UNADMITTED" : !parent.complete ? "PARENT_RESPONSE_INCOMPLETE" : parent.failed ? "PARENT_FAILED" :
+              !parent.redirect ? "LOCATION_MISSING" : "LOCATION_MISMATCH" : denyResourceKind && (parent.kind !== kind || networkId !== parent.networkId) ? "KIND_NETWORK_MISMATCH" :
+                event.request.method !== parent.method ? "METHOD_MISMATCH" : parent.kind !== "document" ? "DOCUMENT_PARENT_KIND" : "DOCUMENT_PARENT_METHOD"); return;
         }
         if (!document && !sameHost) {
           // A genuine Script->Script CDN redirect still has no cross-host
@@ -1163,7 +1172,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
             try { options.onRequestRejected?.({ ...diagnostic }); } catch { /* Diagnostics cannot authorize work. */ }
             return;
           }
-          await rejectProvenance(); return;
+          await rejectProvenance("CROSS_HOST"); return;
         }
       }
       if (denyResourceKind) {

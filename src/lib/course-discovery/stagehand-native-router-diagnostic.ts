@@ -20,8 +20,12 @@ export const stagehandNativeRouterBooleanKeys = ["framePresent", "rootFrame", "n
   "declaredLengthPresent", "documentResponse", "ancillaryResponse", "recordGenerationCurrent", "recordGenerationRetired", "recordAdmitted", "recordPaused", "recordResponsePaused",
   "recordFailed", "recordComplete", "recordHandlerDone", "recordTerminalObserved"] as const;
 const limitKinds = ["DECLARED_INVALID", "DECLARED_TOO_LARGE", "DECODED_BODY", "TOTAL_DECODED"] as const;
+export const stagehandRedirectRejections = ["PARENT_MISSING", "PARENT_UNADMITTED", "PARENT_FAILED", "PARENT_DEPTH_LIMIT", "PARENT_CHILD_RESERVED",
+  "PARENT_RESPONSE_MISSING", "PARENT_RESPONSE_FAILED", "CHILD_RECORD_EXISTS", "PARENT_RESPONSE_INCOMPLETE", "LOCATION_MISSING", "LOCATION_MISMATCH",
+  "KIND_NETWORK_MISMATCH", "METHOD_MISMATCH", "DOCUMENT_PARENT_KIND", "DOCUMENT_PARENT_METHOD", "CROSS_HOST"] as const;
+export type StagehandRedirectRejection = typeof stagehandRedirectRejections[number];
 const byteKeys = ["allowedBytes", "declaredBytes", "bodyBytes", "totalBytes"] as const;
-export type StagehandNativeRouterFailure = { code: typeof stagehandNativeRouterCodes[number]; phase?: typeof phases[number]; method?: typeof methods[number]; resourceType?: typeof kinds[number]; limitKind?: typeof limitKinds[number]; sourceRequestGuard?: StagehandSourceRequestGuard } &
+export type StagehandNativeRouterFailure = { code: typeof stagehandNativeRouterCodes[number]; phase?: typeof phases[number]; method?: typeof methods[number]; resourceType?: typeof kinds[number]; limitKind?: typeof limitKinds[number]; sourceRequestGuard?: StagehandSourceRequestGuard; redirectRejection?: StagehandRedirectRejection } &
   Partial<Record<typeof byteKeys[number], number>> &
   Partial<Record<typeof stagehandNativeRouterBooleanKeys[number], boolean>>;
 const allowed = <T extends readonly string[]>(values: T, raw: unknown): T[number] | undefined => typeof raw === "string" && values.includes(raw) ? raw : undefined;
@@ -33,6 +37,8 @@ export function projectStagehandNativeRouterFailure(code: unknown, facts: unknow
   if (phase) value.phase = phase; if (method) value.method = method; if (resourceType) value.resourceType = resourceType;
   const sourceRequestGuard = allowed(stagehandSourceRequestGuards, source.sourceRequestGuard);
   if (value.code === "STAGEHAND_GUARDED_SOURCE_REJECTED" && phase === "SOURCE_HOST_REQUEST" && sourceRequestGuard) value.sourceRequestGuard = sourceRequestGuard;
+  const redirectRejection = allowed(stagehandRedirectRejections, source.redirectRejection);
+  if (value.code === "NATIVE_REDIRECT_PROVENANCE_REJECTED" && phase === "REDIRECT_PROVENANCE" && redirectRejection) value.redirectRejection = redirectRejection;
   if (value.code === "NATIVE_RESPONSE_LIMIT") {
     const limitKind = allowed(limitKinds, source.limitKind); if (limitKind) value.limitKind = limitKind;
     for (const key of byteKeys) if (typeof source[key] === "number" && Number.isFinite(source[key]) && source[key] >= 0 && source[key] <= Number.MAX_SAFE_INTEGER) value[key] = source[key];

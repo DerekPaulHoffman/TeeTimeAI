@@ -113,15 +113,19 @@ const nativeRouterBooleanKeys=['framePresent','rootFrame','networkIdPresent','du
  'identityUrlMatches','identityMethodMatches','identityKindMatches','identityFrameMatches','parentPresent','awaitingDocument','parentCurrentGeneration','documentCommitted',
  'documentIntentPresent','documentIntentUsed','sourceResponseComplete','successorTerminalFailed','declaredLengthPresent','documentResponse','ancillaryResponse',
  'recordGenerationCurrent','recordGenerationRetired','recordAdmitted','recordPaused','recordResponsePaused','recordFailed','recordComplete','recordHandlerDone','recordTerminalObserved'];
+export const stagehandRedirectRejections=['PARENT_MISSING','PARENT_UNADMITTED','PARENT_FAILED','PARENT_DEPTH_LIMIT','PARENT_CHILD_RESERVED',
+ 'PARENT_RESPONSE_MISSING','PARENT_RESPONSE_FAILED','CHILD_RECORD_EXISTS','PARENT_RESPONSE_INCOMPLETE','LOCATION_MISSING','LOCATION_MISMATCH',
+ 'KIND_NETWORK_MISMATCH','METHOD_MISMATCH','DOCUMENT_PARENT_KIND','DOCUMENT_PARENT_METHOD','CROSS_HOST'];
 const nativeRouterFailureSchema=z.object({code:z.enum(nativeRouterCodes),
  phase:z.enum(['RESPONSE_WAIT','CONTINUE_REQUEST_ACK','CONTINUE_RESPONSE_ACK','LOADER_IDENTITY_WAIT','LOADER_IDENTITY','LOADER_OWNER','REDIRECT_GENERATION','REDIRECT_PROVENANCE','DOCUMENT_INTENT','DOCUMENT_DRAIN','SOURCE_HOST_REQUEST']).optional(),
  sourceRequestGuard:z.enum(['STATE','TRANSACTION_URL','FRAME_OWNERSHIP','URL_POLICY','HEADER_POLICY','NAVIGATION_PROVENANCE','METHOD_POLICY','REQUEST_BUDGET','LEASE','NATIVE_RESPONSE']).optional(),
+ redirectRejection:z.enum(stagehandRedirectRejections).optional(),
  method:z.enum(['GET','HEAD','POST','OPTIONS','PUT','PATCH','DELETE','CONNECT','TRACE','OTHER']).optional(),
  resourceType:z.enum(['document','stylesheet','script','image','media','font','xhr','fetch','preflight','other','ping','websocket','eventsource']).optional(),
  limitKind:z.enum(['DECLARED_INVALID','DECLARED_TOO_LARGE','DECODED_BODY','TOTAL_DECODED']).optional(),
  allowedBytes:z.number().finite().min(0).max(Number.MAX_SAFE_INTEGER).optional(),declaredBytes:z.number().finite().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
  bodyBytes:z.number().finite().min(0).max(Number.MAX_SAFE_INTEGER).optional(),totalBytes:z.number().finite().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
- ...Object.fromEntries(nativeRouterBooleanKeys.map(key=>[key,z.boolean().optional()]))}).strict();
+ ...Object.fromEntries(nativeRouterBooleanKeys.map(key=>[key,z.boolean().optional()]))}).strict().refine(value=>value.redirectRejection===undefined||value.code==='NATIVE_REDIRECT_PROVENANCE_REJECTED'&&value.phase==='REDIRECT_PROVENANCE');
 /** Captured inside the actual model callback before the SDK can wrap its error. */
 export function captureModelFailure(error,attempt,completedCalls){
  const diagnostic=error?.diagnostics??{},value={attempt,completedCalls};

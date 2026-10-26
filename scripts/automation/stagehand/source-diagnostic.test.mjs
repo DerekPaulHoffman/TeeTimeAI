@@ -1,6 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { projectSourceDiagnostic, projectActionGuardDiagnostic, sourceFailureDiagnostic, captureModelFailure, classifyNavigationError, SOURCE_DIAGNOSTIC_MAX_BYTES } from './source-diagnostic.mjs';
+import { projectSourceDiagnostic, projectActionGuardDiagnostic, sourceFailureDiagnostic, captureModelFailure, classifyNavigationError, SOURCE_DIAGNOSTIC_MAX_BYTES, stagehandRedirectRejections } from './source-diagnostic.mjs';
+test('redirect rejection is one closed scoped enum and arbitrary/foreign/private fields cannot enter diagnostics',()=>{
+ for(const redirectRejection of stagehandRedirectRejections){
+  const native={code:'NATIVE_REDIRECT_PROVENANCE_REJECTED',phase:'REDIRECT_PROVENANCE',redirectRejection,method:'GET',resourceType:'xhr'};
+  const d=sourceFailureDiagnostic({phase:'EXTRACT',nativeRouterFailure:native});assert.deepEqual(d.nativeRouterFailure,native);assert.deepEqual(projectSourceDiagnostic(d),d);
+ }
+ for(const delta of[{redirectRejection:'https://private.example/?token=SECRET'},{redirectRejection:7},{redirectRejection:null},{redirectRejection:'PRIVATE'},
+  {redirectRejection:'CROSS_HOST',code:'NATIVE_REDIRECT_CANCELLED'},{redirectRejection:'CROSS_HOST',phase:'RESPONSE_WAIT'},{redirectRejection:'CROSS_HOST',headers:{cookie:'SECRET'}}]){
+  const d=sourceFailureDiagnostic({nativeRouterFailure:{code:'NATIVE_REDIRECT_PROVENANCE_REJECTED',phase:'REDIRECT_PROVENANCE',...delta}});assert.equal(d.nativeRouterFailure,undefined);assert.doesNotMatch(JSON.stringify(d),/PRIVATE|SECRET|https:/u);
+ }
+ assert.deepEqual(sourceFailureDiagnostic({nativeRouterFailure:{code:'NATIVE_REDIRECT_PROVENANCE_REJECTED',phase:'REDIRECT_PROVENANCE'}}).nativeRouterFailure,{code:'NATIVE_REDIRECT_PROVENANCE_REJECTED',phase:'REDIRECT_PROVENANCE'});
+});
 const report=()=>({metrics:{completedSteps:2,localCodexCalls:[{},{},{}]},actions:[],actionAttempts:[{status:'REJECTED',guardReason:'HIDDEN',selector:'SECRET_SELECTOR',reason:'PRIVATE_MESSAGE'}],
  officialLinkLedger:[{pageUrl:'https://public.example/',links:[{href:'https://provider.example/start?tenant=one',visible:true}]}],frameLedger:[],eligibleBookingSourceUrls:[]});
 test('closed stopping facts distinguish ordinary unresolved without retaining model reason or action target',()=>{
