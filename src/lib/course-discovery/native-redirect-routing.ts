@@ -1174,7 +1174,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
           event.request.hasPostData !== true && event.request.postData === undefined &&
           [parent.kind, kind].every(value => value === "xhr" || value === "fetch") && networkId === parent.networkId &&
           requestLoaderId !== undefined && requestLoaderId === parent.loaderId && requestGeneration === parent.generation &&
-          networkIdentities.get(networkId)?.hasBody === false && isSafeRecipeUrl(parent.transportUrl) && isSafeRecipeUrl(event.request.url);
+          networkIdentities.get(networkId)?.hasBody === false;
         if (!document && !sameHost && !sourceDataGet) {
           // A genuine Script->Script CDN redirect still has no cross-host
           // read permission. Deny that exact browser pause without destroying

@@ -11,6 +11,7 @@ import { continueNativeBrowserRead, isObservedNativeRedirect, isObservedNativeRe
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
 import { type PublicBrowserResponseProfile } from "./browser-resource-limits";
 import { canonicalStagehandHostEntry } from "./stagehand-source-browser";
+import { isSafeRecipeUrl, isSafeBrowserBootstrapReadUrl } from "./recipe";
 
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; }
 async function installed(maxRequests?: number, signal?: AbortSignal, afterRoute?: (route: NativeReadRoute) => Promise<void>, responseProfile?: PublicBrowserResponseProfile,
@@ -99,16 +100,17 @@ describe("source-only public data redirect provenance", () => {
   const network = (test: Awaited<ReturnType<typeof installed>>, id: string, url: string, kind: string, method = "GET", body = false) =>
     test.events.get("Network.requestWillBeSent")!({ requestId: id, frameId: "main", loaderId: "loader-source", type: kind,
       request: { url, method, ...(body ? { hasPostData: true, postData: "body" } : {}) } });
-  async function prepared(profile: PublicBrowserResponseProfile | undefined, rejectChild = false, parentKind = "XHR") {
-    const test = await installed(undefined, undefined, async route => { if (rejectChild && route.request().url() === target) await route.abort(); }, profile);
+  async function prepared(profile: PublicBrowserResponseProfile | undefined, rejectChild = false, parentKind = "XHR", parentUrl = source,
+    readPolicy?: (route: NativeReadRoute) => Promise<void>) {
+    const test = await installed(undefined, undefined, async route => { if (rejectChild && route.request().url() === target) await route.abort(); await readPolicy?.(route); }, profile);
     await test.guard.beginDocumentNavigation(test.main as never);
     network(test, "network-document", "https://example.org/", "Document");
     test.request("document", { resourceType: "Document", request: { url: "https://example.org/", method: "GET", headers: {} } });
     await test.routes[0].continue(); test.response("document", { resourceType: "Document", request: { url: "https://example.org/", method: "GET", headers: {} }, responseHeaders: [{ name: "Content-Type", value: "text/html" }] });
     await test.routes[0].request().response();
     test.events.get("Page.frameNavigated")!({ frame: { id: "main", loaderId: "loader-source", url: "https://example.org/" } });
-    network(test, "network-parent", source, parentKind);
-    test.request("parent", { networkId: "network-parent", resourceType: parentKind, request: { url: source, method: "GET", headers: {} } });
+    network(test, "network-parent", parentUrl, parentKind);
+    test.request("parent", { networkId: "network-parent", resourceType: parentKind, request: { url: parentUrl, method: "GET", headers: {} } });
     await vi.waitFor(() => expect(test.routes).toHaveLength(2)); await test.routes[1].continue();
     return test;
   }
@@ -136,8 +138,41 @@ describe("source-only public data redirect provenance", () => {
       expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "child")).toBe(false);
     } finally { await test.guard.close(); }
   });
-  it.each(["default", "HEAD", "POST", "body", "missing location", "wrong location", "network", "loader", "frame", "unsafe URL"])("still rejects %s before source data destination handler", async mode => {
-    const test = await prepared(mode === "default" ? undefined : "SOURCE_ROUTING"), url = mode === "unsafe URL" ? "https://data.example.net/account" : target;
+  it.each(["parent", "child", "both"])("delegates existing anonymous bootstrap URL policy for the redirect %s", async side => {
+    const from = side === "child" ? source : "https://example.org/AuthenticationSettings?AuthenticationType=",
+      to = side === "parent" ? target : "https://data.example.net/AuthenticationSettings?AuthenticationType=";
+    for (const url of [from, to].filter(value => value.includes("AuthenticationSettings"))) {
+      expect(isSafeRecipeUrl(url)).toBe(false); expect(isSafeBrowserBootstrapReadUrl(url, "xhr", "GET")).toBe(true);
+    }
+    const test = await prepared("SOURCE_ROUTING", false, "XHR", from);
+    try {
+      test.response("parent", { networkId: "network-parent", request: { url: from, method: "GET", headers: {} }, responseStatusCode: 302, responseHeaders: [{ name: "Location", value: to }] });
+      await test.routes[1].request().response(); network(test, "network-parent", to, "XHR");
+      test.request("child", { networkId: "network-parent", redirectedRequestId: "parent", request: { url: to, method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(test.routes).toHaveLength(3));
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "child")).toBe(false);
+      await test.routes[2].continue(); expect(test.failures).toEqual([]);
+    } finally { await test.guard.close(); }
+  });
+  it.each(["https://data.example.net/account", "https://data.example.net/checkout", "https://data.example.net/public?token=private", "https://127.0.0.1/public"])(
+    "leaves unsafe final URL rejection to caller before dispatch: %s", async url => {
+      const policy = vi.fn(async (route: NativeReadRoute) => {
+        const request = route.request();
+        if (!isSafeRecipeUrl(request.url()) && !isSafeBrowserBootstrapReadUrl(request.url(), request.resourceType(), request.method())) await route.abort();
+      });
+      const test = await prepared("SOURCE_ROUTING", false, "XHR", source, policy);
+      try {
+        test.response("parent", { networkId: "network-parent", request: { url: source, method: "GET", headers: {} }, responseStatusCode: 302, responseHeaders: [{ name: "Location", value: url }] });
+        await test.routes[1].request().response(); network(test, "network-parent", url, "XHR");
+        test.request("child", { networkId: "network-parent", redirectedRequestId: "parent", request: { url, method: "GET", headers: {} } });
+        await vi.waitFor(() => expect(test.routes).toHaveLength(3));
+        await vi.waitFor(() => expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.failRequest" && value?.requestId === "child")).toBe(true));
+        expect(policy).toHaveBeenCalledTimes(3); expect(test.close).not.toHaveBeenCalled();
+        expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "child")).toBe(false);
+      } finally { await test.guard.close(); }
+    });
+  it.each(["default", "HEAD", "POST", "body", "missing location", "wrong location", "network", "loader", "frame"])("still rejects %s before source data destination handler", async mode => {
+    const test = await prepared(mode === "default" ? undefined : "SOURCE_ROUTING"), url = target;
     try {
       test.response("parent", { networkId: "network-parent", request: { url: source, method: "GET", headers: {} }, responseStatusCode: 302,
         responseHeaders: mode === "missing location" ? [] : [{ name: "Location", value: mode === "wrong location" ? target + "/other" : url }] });

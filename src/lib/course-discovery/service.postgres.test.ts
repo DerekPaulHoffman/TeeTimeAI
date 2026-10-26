@@ -1,5 +1,7 @@
 // @vitest-environment node
 import { randomUUID } from "node:crypto";
+import { spawn, type ChildProcess } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { Prisma, PrismaClient } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -118,6 +120,109 @@ describe.skipIf(!url)("course discovery in isolated Postgres", () => {
     expect(await service.claimNextDiscoveryJob("third-worker")).toBeNull();
     expect((await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: first.id } })).status).toBe("FAILED");
   });
+
+  it("recovers a committed checkpoint after an owned OS process crash and natural lease expiry", async () => {
+    const f = await fixture(), queued = await f.ensure(), nonce = randomUUID();
+    const checkpoint = { schemaVersion: 1, fixture: "OWNED_PROCESS_CRASH", nonce };
+    const parsed = new URL(url!);
+    if (!["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname) || parsed.pathname !== "/course_discovery_test") throw Error("LOCAL_CRASH_DATABASE_REQUIRED");
+    // The children import the real service, not this file's Vitest mocks. No
+    // inherited application/model credentials or executable preloads survive.
+    const environment: NodeJS.ProcessEnv = Object.fromEntries(["PATH", "Path", "SystemRoot", "SYSTEMROOT", "ComSpec", "COMSPEC", "TEMP", "TMP", "PATHEXT"]
+      .filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]));
+    Object.assign(environment, { NODE_ENV: "test", CI: "true", TZ: "UTC", PRISMA_HIDE_UPDATE_MESSAGE: "true", CHECKPOINT_DISABLE: "1",
+      DATABASE_URL: url!, DATABASE_URL_UNPOOLED: url!, COURSE_DISCOVERY_TEST_DATABASE_URL: url!,
+      COURSE_DISCOVERY_ENABLED: "true", COURSE_DISCOVERY_ROLLOUT_MODE: "PILOT", COURSE_DISCOVERY_PILOT_SEARCH_IDS: f.search.id,
+      OWNED_CRASH_CHECKPOINT: JSON.stringify(checkpoint) });
+    const networkGuard = `import net from 'node:net';
+const u=new URL(process.env.COURSE_DISCOVERY_TEST_DATABASE_URL),port=Number(u.port||5432),local=h=>['localhost','127.0.0.1','::1','[::1]'].includes(String(h??'localhost').toLowerCase());
+if(!['postgres:','postgresql:'].includes(u.protocol)||!local(u.hostname)||u.pathname!=='/course_discovery_test'||process.env.DATABASE_URL!==u.href||process.env.DATABASE_URL_UNPOOLED!==u.href)throw Error('LOCAL_CRASH_DATABASE_REQUIRED');
+const original=net.Socket.prototype.connect;net.Socket.prototype.connect=function(...args){const first=Array.isArray(args[0])?args[0][0]:args[0],options=first&&typeof first==='object'?first:null,host=options?options.host:typeof args[1]==='string'?args[1]:'localhost',p=options?options.port:first;if(!local(host)||Number(p)!==port)throw Error('NONLOCAL_CRASH_NETWORK_FORBIDDEN');return Reflect.apply(original,this,args);};
+globalThis.fetch=async()=>{throw Error('CRASH_FETCH_FORBIDDEN');};`;
+    const childProgram = `const [role,serviceUrl]=process.argv.slice(1);let prisma;
+const send=value=>new Promise((resolve,reject)=>process.send(value,error=>error?reject(error):resolve()));
+try{if(!['crash','recover'].includes(role)||!process.send)throw Error('OWNED_CRASH_SCOPE_REQUIRED');
+const service=await import(serviceUrl);({prisma}=await import(new URL('../prisma.ts',serviceUrl).href));
+const job=await service.claimNextDiscoveryJob('os-crash-'+role+'-'+process.pid);if(!job)throw Error('OWNED_CRASH_CLAIM_REQUIRED');
+const marker=JSON.parse(process.env.OWNED_CRASH_CHECKPOINT);if(role==='crash')await service.checkpointDiscoveryJob(job.id,job.leaseToken,marker);
+let finishing=false;const commands=new Promise((resolve,reject)=>{process.on('message',message=>{if(role!=='recover'||finishing||message?.action!=='finish'||message?.nonce!==marker.nonce)return;finishing=true;(async()=>{await service.heartbeatDiscoveryJob(job.id,job.leaseToken);await service.failDiscoveryJob(job.id,job.leaseToken,'TOOL_FAILURE',true);await send({kind:'RECOVERY_FINISHED',pid:process.pid,jobId:job.id});resolve();})().catch(reject);});process.once('disconnect',()=>reject(Error('OWNED_PARENT_LOST')));});
+await send({kind:'CLAIM_COMMITTED',pid:process.pid,jobId:job.id,attempts:job.attempts});await commands;
+}catch{if(process.connected)await send({kind:'CHILD_ERROR',pid:process.pid}).catch(()=>{});process.exitCode=1;}
+finally{if(prisma)await prisma.$disconnect();if(process.connected)process.disconnect();}`;
+    const owned: Array<{ child: ChildProcess; closed: Promise<{ code: number | null; signal: NodeJS.Signals | null }>; exited: boolean }> = [];
+    const start = (role: "crash" | "recover") => {
+      // --import loads into this exact Node PID; tsx's CLI would add a launcher.
+      const child = spawn(process.execPath, ["--import", "data:text/javascript," + encodeURIComponent(networkGuard), "--import",
+        new URL("../../../node_modules/tsx/dist/loader.mjs", import.meta.url).href, "--input-type=module", "--eval", childProgram,
+        "--", role, new URL("./service.ts", import.meta.url).href], {
+        cwd: fileURLToPath(new URL("../../../", import.meta.url)), env: environment, windowsHide: true, shell: false,
+        stdio: ["ignore", "ignore", "ignore", "ipc"],
+      });
+      const row = { child, exited: false, closed: undefined as unknown as Promise<{ code: number | null; signal: NodeJS.Signals | null }> };
+      row.closed = new Promise(resolve => child.once("close", (code, signal) => { row.exited = true; resolve({ code, signal }); }));
+      owned.push(row); return row;
+    };
+    const message = (child: ChildProcess, kind: "CLAIM_COMMITTED" | "RECOVERY_FINISHED") => new Promise<Record<string, unknown>>((resolve, reject) => {
+      const cleanup = () => { clearTimeout(timer); child.off("message", receive); child.off("error", error); child.off("close", closed); };
+      const error = () => { cleanup(); reject(Error("OWNED_CRASH_CHILD_FAILED")); };
+      const closed = () => { cleanup(); reject(Error("OWNED_CRASH_CHILD_CLOSED_BEFORE_ACK")); };
+      const receive = (raw: unknown) => {
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) return;
+        const value = raw as Record<string, unknown>; if (value.pid !== child.pid) return;
+        if (value.kind === "CHILD_ERROR") return error();
+        if (value.kind === kind) { cleanup(); resolve(value); }
+      };
+      const timer = setTimeout(error, 15_000); child.on("message", receive); child.once("error", error); child.once("close", closed);
+    });
+    try {
+      const first = start("crash"), firstAck = await message(first.child, "CLAIM_COMMITTED");
+      expect(firstAck).toMatchObject({ jobId: queued!.id, attempts: 1, pid: first.child.pid });
+      const original = await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: queued!.id } });
+      expect(original).toMatchObject({ status: "RUNNING", attempts: 1, workerId: `os-crash-crash-${first.child.pid}`, checkpoint });
+      expect(original.leaseToken).toBeTruthy(); expect(original.firstPickedUpAt).not.toBeNull(); expect(original.deadlineAt).not.toBeNull(); expect(original.leaseExpiresAt).not.toBeNull();
+      expect(original.deadlineAt!.getTime() - original.firstPickedUpAt!.getTime()).toBe(900_000);
+      expect(original.leaseExpiresAt!.getTime() - original.firstPickedUpAt!.getTime()).toBe(90_000);
+      // Kill only the acknowledged direct child. No graceful service failure,
+      // heartbeat, database lease rewrite or JavaScript finally simulates this.
+      expect(first.child.kill("SIGKILL")).toBe(true);
+      const crashed = await first.closed; expect(crashed.code === 0 && crashed.signal === null).toBe(false);
+      const afterCrash = await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: original.id } });
+      expect(afterCrash).toMatchObject({ status: "RUNNING", attempts: 1, leaseToken: original.leaseToken, checkpoint });
+      expect(afterCrash.leaseExpiresAt).toEqual(original.leaseExpiresAt);
+      expect(await service.claimNextDiscoveryJob("before-natural-expiry")).toBeNull();
+      const waitUntil = Date.now() + 95_000;
+      for (;;) {
+        const [{ now }] = await client.$queryRaw<Array<{ now: Date }>>`SELECT clock_timestamp() AS now`;
+        const remaining = original.leaseExpiresAt!.getTime() - now.getTime(); if (remaining <= 0) break;
+        if (Date.now() >= waitUntil) throw Error("NATURAL_CRASH_LEASE_DID_NOT_EXPIRE");
+        await new Promise<void>(resolve => setTimeout(resolve, Math.min(30_000, remaining + 25)));
+      }
+      const second = start("recover"), secondAck = await message(second.child, "CLAIM_COMMITTED");
+      expect(second.child.pid).not.toBe(first.child.pid); expect(secondAck).toMatchObject({ jobId: original.id, attempts: 2 });
+      const recovered = await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: original.id } });
+      expect(recovered).toMatchObject({ status: "RUNNING", attempts: 2, workerId: `os-crash-recover-${second.child.pid}`, checkpoint, request: original.request });
+      expect(recovered.leaseToken).toBeTruthy(); expect(recovered.leaseToken).not.toBe(original.leaseToken);
+      expect(recovered.firstPickedUpAt).toEqual(original.firstPickedUpAt); expect(recovered.deadlineAt).toEqual(original.deadlineAt);
+      for (const stale of [() => service.heartbeatDiscoveryJob(original.id, original.leaseToken!),
+        () => service.checkpointDiscoveryJob(original.id, original.leaseToken!, { overwritten: true }),
+        () => service.failDiscoveryJob(original.id, original.leaseToken!, "TOOL_FAILURE", true)])
+        await expect(stale()).rejects.toBeInstanceOf(service.DiscoveryConflictError);
+      expect((await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: original.id } })).checkpoint).toEqual(checkpoint);
+      const deduped = await Promise.all([f.ensure(), f.ensure(), f.ensure()]); expect(deduped.map(job => job?.id)).toEqual([original.id, original.id, original.id]);
+      const finished = message(second.child, "RECOVERY_FINISHED"); second.child.send({ action: "finish", nonce });
+      expect(await finished).toMatchObject({ jobId: original.id }); expect(await second.closed).toEqual({ code: 0, signal: null });
+      expect(await service.claimNextDiscoveryJob("no-third-crash-attempt")).toBeNull();
+      const exhausted = await f.ensure(); expect(exhausted).toMatchObject({ id: original.id, status: "FAILED", attempts: 2, checkpoint });
+      expect(exhausted?.firstPickedUpAt).toEqual(original.firstPickedUpAt); expect(exhausted?.deadlineAt).toEqual(original.deadlineAt);
+      expect(await client.courseDiscoveryJob.count({ where: { courseId: f.course.id } })).toBe(1);
+      expect(await client.courseAccessRecipe.count({ where: { courseId: f.course.id } })).toBe(0);
+      expect(await client.teeTimeMatch.count({ where: { teeSearchId: f.search.id } })).toBe(0);
+      expect(await client.searchEmailDelivery.count({ where: { teeSearchId: f.search.id } })).toBe(0);
+    } finally {
+      for (const row of owned) if (!row.exited) row.child.kill("SIGKILL");
+      await Promise.all(owned.map(row => row.closed));
+    }
+  }, 115_000);
 
   it("does not reset exhausted attempts on ordinary checks or scheduler changes", async () => {
     const f = await fixture(); await f.ensure();

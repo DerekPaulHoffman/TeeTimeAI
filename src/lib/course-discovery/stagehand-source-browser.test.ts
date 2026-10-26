@@ -110,7 +110,10 @@ it("attests a unique native public source without dispatching provider frames an
 
 it("renders a public source from an anonymous cross-host fetch redirect under the destination lease and rejects private or transactional reads", async () => {
   const rootUrl = "https://owned-source.example/", bootstrapUrl = "https://owned-bootstrap.example/catalog.json";
-  const dataUrl = "https://owned-data.example/catalog.json", bookingUrl = "https://clients.uschedule.com/public-studio/booking";
+  // This existing anonymous metadata role intentionally has a broader URL
+  // policy than saved recipe navigation. Redirect ownership cannot replace
+  // the source handler's final public-read policy with the narrower one.
+  const dataUrl = "https://owned-data.example/AuthenticationSettings?AuthenticationType=", bookingUrl = "https://clients.uschedule.com/public-studio/booking";
   const hosts = new Set(["owned-source.example", "owned-bootstrap.example", "owned-data.example"]);
   const controller = new AbortController(), deadlineAt = new Date(Date.now() + 60_000), originalDeadline = deadlineAt.getTime();
   const families = new Set<string>(), leaseFamilies: string[] = [], seen: string[] = [];
@@ -157,7 +160,7 @@ it("renders a public source from an anonymous cross-host fetch redirect under th
     await page.locator("#public-booking").waitFor({ state: "visible" });
     await expect.poll(() => host!.observeSourceReadiness(host!.targetId)).toMatchObject({ mainDocumentCurrent: true, mainDocumentComplete: true, mainDocumentStatus: 200, pendingReads: 0 });
     expect(await host.observeUniqueSource(host.targetId)).toMatchObject({ kind: "NATIVE_UNIQUE_SUPPORTED_SOURCE", pageUrl: rootUrl, url: bookingUrl, family: "USCHEDULE", via: "LINK" });
-    expect(seen).toEqual(["GET owned-source.example/", "GET owned-bootstrap.example/catalog.json", "GET owned-data.example/catalog.json"]);
+    expect(seen).toEqual(["GET owned-source.example/", "GET owned-bootstrap.example/catalog.json", "GET owned-data.example/AuthenticationSettings?AuthenticationType="]);
     expect(leaseFamilies).toEqual([rootUrl, bootstrapUrl, dataUrl].map(requestFamilyForUrl));
     expect(destinationBeforeParentRelease).toBe(false); expect(unleased).toBe(0);
     await page.evaluate(async () => { await Promise.allSettled([
