@@ -4,6 +4,8 @@ import { z } from "zod";
 import type { OfficialIdentityPage } from "@/lib/course-discovery/teeitup-official-identity";
 import type { OfficialSourceDiagnostic } from "@/lib/course-discovery/official-source-diagnostics";
 import { isUSchedulePublicHost } from "./public-configuration";
+import { parsePublicUSBusinessAddress } from "@/lib/course-discovery/public-us-business-address";
+import { normalizePublicCoursePhone } from "@/lib/course-discovery/teeitup-postal-conflict-proof";
 
 type Node = DefaultTreeAdapterMap["node"];
 type Element = DefaultTreeAdapterMap["element"];
@@ -32,20 +34,35 @@ export function parseUScheduleLocationSource(value: string) {
   } catch { return; }
 }
 
-export const uscheduleOfficialLocationProofSchema = z.object({
+const legacyOfficialLocationProofSchema = z.object({
   kind: z.literal("OFFICIAL_PUBLIC_LOCATION_V1"), officialPageUrl: z.string().url().max(2048),
   entryUrl: z.string().max(2048).refine(value => Boolean(parseUScheduleLocationSource(value)?.locationId)),
   locationId: id, venueName: z.string().min(3).max(200), addressKey: z.string().min(15).max(1024), markupWitnessSha256: sha,
 }).strict();
+const contactOfficialLocationProofSchema = z.object({
+  kind: z.literal("OFFICIAL_PUBLIC_LOCATION_CONTACT_V1"), officialPageUrl: z.string().url().max(2048),
+  entryUrl: z.string().max(2048).refine(value => Boolean(parseUScheduleLocationSource(value)?.locationId)), locationId: id,
+  venueName: z.string().min(3).max(200), addressKey: z.string().min(15).max(1024), locality: z.string().min(2).max(80),
+  region: z.string().regex(/^[A-Z]{2}$/u), phoneSha256: sha, markupWitnessSha256: sha,
+}).strict();
+export const uscheduleOfficialLocationProofSchema = z.discriminatedUnion("kind", [legacyOfficialLocationProofSchema, contactOfficialLocationProofSchema]);
 export type UScheduleOfficialLocationProof = z.infer<typeof uscheduleOfficialLocationProofSchema>;
-export const uschedulePublicLocationProofSchema = z.object({
-  kind: z.literal("PUBLIC_LOCATION_RENTAL_V1"), official: uscheduleOfficialLocationProofSchema,
+const legacyPublicLocationProofSchema = z.object({
+  kind: z.literal("PUBLIC_LOCATION_RENTAL_V1"), official: legacyOfficialLocationProofSchema,
   locationId: id, locationName: z.string().min(3).max(200), catalogHash: sha,
   includedPartySize: z.literal(2), maxPartySize: z.literal(4),
   resourceGroups: z.array(z.object({ id, resources: z.array(z.object({ id, name: z.string().min(3).max(200) }).strict()).min(1).max(20) }).strict()).length(1),
   client: z.object({ path: z.literal("/bundles/js/bookingBS5"),
     sha256: z.literal("569c4665e02740090f39df0a016d0f6087edafce318836e62f876db5f9865a0e") }).strict(),
 }).strict();
+const publicLocationServicePoolProofSchema = z.object({
+  kind: z.literal("PUBLIC_LOCATION_SERVICE_POOL_V1"), official: contactOfficialLocationProofSchema,
+  locationId: id, locationName: z.string().min(3).max(200), catalogHash: sha,
+  serviceId: id, serviceName: z.string().min(3).max(200), maxPartySize: z.number().int().min(1).max(99).nullable(),
+  client: z.object({ path: z.literal("/bundles/js/bookingBS5"), sha256: z.literal("569c4665e02740090f39df0a016d0f6087edafce318836e62f876db5f9865a0e") }).strict(),
+}).strict().refine(value => value.locationId === value.official.locationId && nameKey(value.locationName) === nameKey(`${value.official.locality} - ${value.official.venueName}`) &&
+  nameKey(value.serviceName) === nameKey(`Simulator Rental - ${value.official.locality}`));
+export const uschedulePublicLocationProofSchema = z.discriminatedUnion("kind", [legacyPublicLocationProofSchema, publicLocationServicePoolProofSchema]);
 export type USchedulePublicLocationProof = z.infer<typeof uschedulePublicLocationProofSchema>;
 export function isUScheduleNonMemberRental(value: string) { return /^non-member hourly rental$/u.test(clean(value).toLowerCase()); }
 
@@ -98,6 +115,57 @@ function witness(node: Element) {
       .map(value => [value.name, value.value]).sort()]);
   return [clean(text(node)), ancestry];
 }
+/** A bounded suite spelling equivalence; the unit remains part of identity. */
+function contactAddress(value: string) {
+  const canonical = clean(value).replace(/\b((?:dr(?:ive)?|rd|road|st(?:reet)?|ave(?:nue)?|blvd|boulevard|ln|lane|ct|court|pkwy|parkway|hwy|highway|cir(?:cle)?|trl|trail|ter(?:race)?|way)\.?)\s+(?:(?:suite|ste)\.?\s+)?([A-Za-z]|\d{1,8}|[A-Za-z]\d{1,7})(?=\s*,)/iu,
+    (_all, suffix: string, unit: string) => /^[NSEW]$/iu.test(unit) ? `${suffix} ${unit}` : `${suffix}, Suite ${unit}`);
+  const parsed = parsePublicUSBusinessAddress(canonical), postal = /\b(\d{5}(?:-\d{4})?)(?:\s*,\s*(?:US|USA|United States(?: of America)?))?\s*$/iu.exec(canonical)?.[1];
+  return parsed && postal ? { ...parsed, postalCodeFull: postal } : null;
+}
+function deriveBranchContact(source: Source, page: UScheduleOfficialIdentityPage, all: Element[], phone: string | undefined) {
+  const address = source.venueAddress && contactAddress(source.venueAddress), canonicalPhone = normalizePublicCoursePhone(phone);
+  if (!address || !canonicalPhone || page.browserTransport !== "NATIVE_CHROME" || !page.visibleEvidence || !source.officialUrl) return fail();
+  const current = new URL(page.url), expectedName = nameKey(source.venueName), forms = all.filter(n => n.tagName === "form");
+  const allowedForm = forms.length === 1 && forms[0].parentNode && element(forms[0].parentNode) && forms[0].parentNode.tagName === "body" &&
+    (attr(forms[0], "method") ?? "get").toLowerCase() === "post" && new URL(attr(forms[0], "action") ?? current.href, current).href === current.href ? forms[0] : undefined;
+  const eligible = (n: Element) => {
+    let p: Node | undefined = n;
+    for (let depth = 0; p && depth < 80; depth++, p = "parentNode" in p ? p.parentNode ?? undefined : undefined) if (element(p) &&
+      (hidden(p) || p.tagName === "form" && p !== allowedForm || ["input", "select", "button", "textarea", "label"].includes(p.tagName) ||
+       /\b(?:private|members?|account|profile|checkout|payment|billing|mailing|corporate)\b/iu.test([attr(p, "id"), attr(p, "class"), attr(p, "aria-label")].join(" ")))) return false;
+    return p === undefined;
+  };
+  const branchHeading = (value: string) => [nameKey(address.canonicalAddress.locality), nameKey(`${address.canonicalAddress.locality} ${address.canonicalAddress.region}`)].includes(nameKey(value));
+  const headings = all.filter(n => n.tagName === "h1" && eligible(n));
+  if (expectedName.length < 8 || headings.length !== 1 || !branchHeading(text(headings[0]))) return fail();
+  const brands = all.filter(n => n.tagName === "a" && eligible(n)).filter(n => {
+    try { const u = new URL(attr(n, "href") ?? "", current); return u.origin === current.origin && u.pathname === "/" && !u.search && !u.hash &&
+      all.some(i => i.tagName === "img" && within(i, n) && eligible(i) && nameKey(attr(i, "alt") ?? "") === expectedName); } catch { return false; }
+  });
+  if (!brands.length || new Set(brands.map(n => new URL(attr(n, "href")!, current).href)).size !== 1) return fail();
+  const addressNodes = all.filter(n => ["p", "address", "div", "li", "td"].includes(n.tagName) && eligible(n) && clean(text(n)).length <= 500)
+    .map(node => ({ node, parsed: contactAddress(text(node)) })).filter(row => row.parsed !== null);
+  const addressIdentity = JSON.stringify(address), matching = addressNodes.filter(row => JSON.stringify(row.parsed) === addressIdentity);
+  if (!matching.length || addressNodes.some(row => JSON.stringify(row.parsed!.canonicalAddress) === JSON.stringify(address.canonicalAddress) && JSON.stringify(row.parsed) !== addressIdentity)) return fail();
+  const phones = all.filter(n => ["p", "a", "span", "div"].includes(n.tagName) && eligible(n) && clean(text(n)).length <= 40)
+    .map(node => ({ node, phone: normalizePublicCoursePhone(clean(text(node))) })).filter(row => row.phone !== undefined);
+  const contacts = all.filter(n => ["div", "section", "address", "li", "td"].includes(n.tagName) && eligible(n) && clean(text(n)).length <= 1200 &&
+    matching.some(a => within(a.node, n)) && phones.some(p => p.phone === canonicalPhone && within(p.node, n)) &&
+    !phones.some(p => p.phone !== canonicalPhone && within(p.node, n)));
+  if (!contacts.length) return fail();
+  const booking = parseUScheduleLocationSource(source.bookingUrl)!;
+  const links = all.filter(n => n.tagName === "a" && eligible(n) && /\b(?:tee\s*time|book|rental|reservation)/iu.test(text(n))).flatMap(node => {
+    try { const v = parseUScheduleLocationSource(new URL(attr(node, "href") ?? "", current).href); return v?.locationId && v.canonicalUrl === booking.canonicalUrl ? [{ node, value: v }] : []; } catch { return []; }
+  });
+  if (!links.length || new Set(links.map(l => l.value.url)).size !== 1 || booking.locationId !== links[0].value.locationId) return fail();
+  const visible = page.visibleEvidence;
+  if (!visible.headings.some(branchHeading) || !visible.brandLinks?.some(b => nameKey(b.text) === expectedName && b.href === new URL(attr(brands[0], "href")!, current).href) ||
+      !visible.addressTexts.some(v => JSON.stringify(contactAddress(v)) === addressIdentity) || !visible.phoneTexts?.some(v => normalizePublicCoursePhone(v) === canonicalPhone) || !visible.linkUrls.includes(links[0].value.url)) return fail();
+  return contactOfficialLocationProofSchema.parse({ kind: "OFFICIAL_PUBLIC_LOCATION_CONTACT_V1", officialPageUrl: current.href, entryUrl: links[0].value.url,
+    locationId: links[0].value.locationId, venueName: source.venueName, addressKey: addressIdentity, locality: address.canonicalAddress.locality,
+    region: address.canonicalAddress.region, phoneSha256: digest(canonicalPhone), markupWitnessSha256: digest({ address, phoneSha256: digest(canonicalPhone),
+      brand: new URL(attr(brands[0], "href")!, current).href, heading: clean(text(headings[0])), entry: links[0].value.url }) });
+}
 type Source = { officialUrl?: string; bookingUrl: string; venueName: string; venueAddress?: string; timeZone: string };
 export function sameUScheduleOfficialSite(left: string, right: string) {
   try {
@@ -110,7 +178,7 @@ export type UScheduleOfficialIdentityPage = OfficialIdentityPage & { officialDoc
   kind: "VERIFIED_OFFICIAL_DOCUMENT"; officialUrl: string; documentUrl: string;
 } };
 export function deriveUScheduleOfficialLocation(source: Source, page: UScheduleOfficialIdentityPage, requireVisibleEvidence = true,
-  onDiagnostic?: (value: OfficialSourceDiagnostic) => void): UScheduleOfficialLocationProof {
+  onDiagnostic?: (value: OfficialSourceDiagnostic) => void, context: { canonicalCoursePhone?: string } = {}): UScheduleOfficialLocationProof {
   const facts: OfficialSourceDiagnostic = { stage: "SOURCE_CONTEXT" };
   const emit = () => { try { onDiagnostic?.({ ...facts }); } catch { /* Diagnostics cannot change identity validation. */ } };
   const check = (condition: unknown, stage: OfficialSourceDiagnostic["stage"], key: Exclude<keyof OfficialSourceDiagnostic, "stage" | "uscheduleConfigurationGate">) => {
@@ -128,6 +196,9 @@ export function deriveUScheduleOfficialLocation(source: Source, page: UScheduleO
   facts.stage = "RAW_DOCUMENT"; emit();
   const all = nodes(page.html), expected = nameKey(source.venueName), canonicalAddress = addressKey(source.venueAddress);
   const headings = all.filter(node => node.tagName === "h1" && !hidden(node));
+  if (!(expected.length >= 8 && headings.length === 1 && nameKey(text(headings[0])) === expected) && requireVisibleEvidence && context.canonicalCoursePhone) {
+    const proof = deriveBranchContact(source, page, all, context.canonicalCoursePhone); facts.stage = "LOCATION_VERIFIED"; emit(); return proof;
+  }
   check(expected.length >= 8 && headings.length === 1 && nameKey(text(headings[0])) === expected, "RAW_VENUE", "rawVenueMatches");
   const links = all.filter(node => node.tagName === "a" && !hidden(node) && /\b(?:tee\s*time|book|rental|reservation)/iu.test(text(node))).flatMap(node => {
     try { const value = parseUScheduleLocationSource(new URL(attr(node, "href") ?? "", current).href);
@@ -173,6 +244,52 @@ export function readUScheduleLocationCatalog(html: string, sourceUrl: string, of
   if (locations.some(value => !id.safeParse(value.id).success) || services.some(value => !id.safeParse(value.id).success) ||
       lengths.some(value => !/^(?:[1-9]\d{0,2})$/u.test(value.id) || Number(value.id) < 15 || Number(value.id) > 480) ||
       all.some(node => node.tagName === "select" && attr(node, "id") === "select_group_size")) return fail();
+  if (official.kind === "OFFICIAL_PUBLIC_LOCATION_CONTACT_V1") {
+    const publicSurface = (n: Element) => {
+      let p: Node | undefined = n;
+      for (let depth = 0; p && depth < 80; depth++, p = "parentNode" in p ? p.parentNode ?? undefined : undefined) if (element(p) &&
+        (hidden(p) || ["form", "template", "script", "style", "noscript", "iframe"].includes(p.tagName) ||
+         p.attrs.some(a => ["disabled", "inert"].includes(a.name) || a.name === "aria-disabled" && a.value === "true") ||
+         /\b(?:private|members?|account|profile|checkout|payment|billing|login)\b/iu.test([attr(p, "id"), attr(p, "class"), attr(p, "aria-label")].join(" ")))) return false;
+      return p === undefined;
+    };
+    const location = locations.filter(v => v.id === official.locationId), branch = official.locality;
+    if (location.length !== 1 || !location[0].selected || nameKey(location[0].name) !== nameKey(`${branch} - ${official.venueName}`) ||
+        locations.filter(v => nameKey(v.name) === nameKey(location[0].name)).length !== 1 || services.length !== 1 || !services[0].selected ||
+        nameKey(services[0].name) !== nameKey(`Simulator Rental - ${branch}`) ||
+        all.some(n => n.tagName === "select" && (classes(n).includes("resSelect") || classes(n).includes("addOnSelect") || attr(n, "id") === "select_units_to_book"))) return fail();
+    const columns = all.filter(n => n.tagName === "div" && classes(n).includes("col-lg-4") && classes(n).includes("order-1"));
+    const columnsOwned = columns.filter(n => all.some(s => attr(s, "id") === "select_location" && within(s, n)) && all.some(s => attr(s, "id") === "select_service" && within(s, n)) && all.some(s => attr(s, "id") === "select_length" && within(s, n)));
+    if (columnsOwned.length !== 1 || !publicSurface(columnsOwned[0]) || ["select_location", "select_service", "select_length"].some(key => {
+      const controls = all.filter(n => attr(n, "id") === key && publicSurface(n));
+      return controls.length !== 1 || children(controls[0]).some(option => !publicSurface(option));
+    }) ||
+        ["location", "service"].some(part => all.filter(n => attr(n, "id") === `${part}_section` && n.parentNode === columnsOwned[0]).length !== 1)) return fail();
+    const labels = all.filter(n => n.tagName === "label" && attr(n, "for") === "select_length");
+    if (labels.length !== 1 || clean(text(labels[0])) !== "Choose Service Time" || hidden(labels[0])) return fail();
+    const grids = all.filter(n => classes(n).includes("time_choices")), choices = grids.length === 1 ? grids[0].parentNode : undefined;
+    if (!choices || !element(choices) || !classes(choices).includes("choices") || !choices.parentNode || !element(choices.parentNode) || !publicSurface(grids[0])) return fail();
+    const cards = children(choices.parentNode).slice(children(choices.parentNode).indexOf(choices) + 1).filter(n => classes(n).includes("card") && publicSurface(n));
+    const notes = all.filter(n => ["p", "li"].includes(n.tagName) && cards.some(c => within(n, c)) && !hidden(n) &&
+      /\b(?:maximum|max|up to|only)\b/iu.test(text(n)) && /\b(?:people|players?|golfers?|persons?)\b/iu.test(text(n)) && /\bbays?\b/iu.test(text(n)));
+    const limits = notes.map(n => {
+      if (all.some(c => within(c, n) && ["input", "select", "button", "textarea", "a"].includes(c.tagName))) return fail();
+      const match = /^\*{0,2}\s*Max of ([1-9]\d?) golfers playing per bay\s*\*{0,2}$/iu.exec(clean(text(n)));
+      return match ? Number(match[1]) : fail();
+    });
+    if (new Set(limits).size > 1) return fail();
+    const scripts = all.filter(n => n.tagName === "script" && attr(n, "src")).flatMap(n => {
+      try { const u = new URL(attr(n, "src")!, source.url); return u.origin === new URL(source.url).origin && u.pathname === USCHEDULE_LOCATION_CLIENT.path && !u.username && !u.password && !u.port && !u.hash &&
+        (!u.search || u.searchParams.size === 1 && /^[A-Za-z0-9_-]{44}$/u.test(u.searchParams.get("v") ?? "")) ? [u.href] : []; } catch { return []; }
+    });
+    if (scripts.length !== 1) return fail();
+    const facts = { tenant: source.tenant, locations: locations.map(({ id, name }) => ({ id, name })), service: { serviceId: services[0].id, serviceName: services[0].name },
+      durations: lengths.map(v => Number(v.id)), maxPartySize: limits[0] ?? null };
+    const proof = publicLocationServicePoolProofSchema.parse({ kind: "PUBLIC_LOCATION_SERVICE_POOL_V1", official, locationId: location[0].id,
+      locationName: location[0].name, catalogHash: digest(facts), ...facts.service, maxPartySize: facts.maxPartySize, client: USCHEDULE_LOCATION_CLIENT });
+    return { proof, locationSelected: true, selectedServiceId: services[0].id, selectedDuration: Number(lengths.find(v => v.selected)!.id), service: facts.service,
+      durations: facts.durations, clientUrl: scripts[0] };
+  }
   const location = locations.find(value => value.id === official.locationId), rentals = services.filter(value => isUScheduleNonMemberRental(value.name));
   if (!location || nameKey(location.name) !== nameKey(official.venueName) || locations.filter(value => nameKey(value.name) === nameKey(official.venueName)).length !== 1 || rentals.length !== 1) return fail();
   // Initial support covers this sole public rental. An unclassified additional

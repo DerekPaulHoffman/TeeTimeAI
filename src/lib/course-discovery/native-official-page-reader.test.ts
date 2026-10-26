@@ -20,6 +20,15 @@ function fixture(change: Partial<DiscoveryBrowserSnapshot> = {}) {
   return { execute, readOfficialIdentityPage, close, createSession };
 }
 describe("fixed native official source reader", () => {
+  it("passes only the caller's current private context into the warm native session and preserves absent legacy context",async()=>{
+    const trustedContext={canonicalCoursePhone:"+19165554653"};
+    for(const context of [undefined,trustedContext]){
+      const session=fixture();await readNativeOfficialIdentityPage(source,source.officialUrl,new Date(Date.now()+30_000),{...session,...(context?{trustedContext:context}:{})});
+      const input=(session.createSession.mock.calls[0] as unknown as [Record<string,unknown>])[0];
+      if(context){expect(input.trustedContext).toEqual(context);expect(input.trustedContext).not.toBe(context);}
+      else expect(input).not.toHaveProperty("trustedContext");
+    }
+  });
   it("records expiry during cleanup without renewing the attestation or replacing the returned object",async()=>{
     let now=Date.parse("2026-10-24T02:00:00Z");const clock=vi.spyOn(Date,"now").mockImplementation(()=>now);
     try{

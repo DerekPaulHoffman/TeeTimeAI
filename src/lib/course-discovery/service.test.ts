@@ -83,6 +83,52 @@ beforeEach(() => {
 });
 
 describe("bounded course discovery persistence", () => {
+  function locationContactRecipe() {
+    const phone = "+13035551234", bookingUrl = "https://clients.uschedule.com/examplegolf/booking?filter=loc[82]";
+    Object.assign(course, { phone, address: "100 Public Road, Suite C, Denver, CO 80001, USA", providerFamilyKey: "USCHEDULE", timeZone: "America/Denver" });
+    const offering = { id: "offering1", courseId: "course1", kind: "SIMULATOR", active: true, publicAccessStatus: "PUBLIC", bookingUrl,
+      providerFamilyKey: "USCHEDULE", activeAccessRecipeId: null as string | null, supportedDurationsMinutes: [60] };
+    mocks.db.courseOffering.findUnique.mockImplementation(async () => offering);
+    preferences = [{ teeSearch: { ...(preferences[0] as { teeSearch: object }).teeSearch, mode: "SIMULATOR", durationMinutes: 60 } }];
+    const official = { kind: "OFFICIAL_PUBLIC_LOCATION_CONTACT_V1", officialPageUrl: course.website, entryUrl: bookingUrl, locationId: "82", venueName: course.name,
+      addressKey: "complete full suite address witness", locality: "denver", region: "CO", phoneSha256: createHash("sha256").update(JSON.stringify(phone)).digest("hex"), markupWitnessSha256: "b".repeat(64) };
+    const candidate = parseAccessRecipe({ schemaVersion: 1, engine: "EXISTING_ADAPTER", target: { courseId: "course1", offeringId: "offering1", kind: "SIMULATOR" },
+      source: { officialUrl: course.website, bookingUrl, venueName: course.name, venueAddress: course.address, timeZone: course.timeZone, providerFamily: "USCHEDULE" },
+      adapter: { family: "USCHEDULE", tenant: "examplegolf", serviceId: "72", serviceName: "Simulator Rental - Denver", publicLocationProof: {
+        kind: "PUBLIC_LOCATION_SERVICE_POOL_V1", official, locationId: "82", locationName: "Denver - Example Golf", serviceId: "72", serviceName: "Simulator Rental - Denver",
+        catalogHash: "c".repeat(64), maxPartySize: null, client: { path: "/bundles/js/bookingBS5", sha256: "569c4665e02740090f39df0a016d0f6087edafce318836e62f876db5f9865a0e" } } } });
+    return { candidate, offering };
+  }
+  it("binds new location contact proof to current parent-course phone through proposal, verification, activation and reuse", async () => {
+    const { candidate, offering } = locationContactRecipe();
+    await ensureDiscoveryJob({ courseId: "course1", offeringId: "offering1", searchId: "search1" });
+    const owner = (await claimNextDiscoveryJob("worker-one"))!;
+    expect((owner.request as { trustedContext?: unknown }).trustedContext).toEqual({ canonicalCoursePhone: "+13035551234" });
+    const proposed = await proposeDiscoveryRecipe(owner.id, owner.leaseToken!, candidate);
+    offering.activeAccessRecipeId = "recipe1";
+    mocks.db.courseAccessRecipe.findUnique.mockResolvedValue({ id: "recipe1", targetKey: "offering:offering1", sourceFingerprint: job!.sourceFingerprint, payload: candidate, hash: hashAccessRecipe(candidate) });
+    expect(await getActiveAccessRecipe(candidate.target)).toHaveProperty("recipe");
+    course.phone = "+13035554321";
+    expect(await getActiveAccessRecipe(candidate.target)).toBeNull();
+    await expect(proposeDiscoveryRecipe(owner.id, owner.leaseToken!, candidate)).rejects.toBeInstanceOf(DiscoveryConflictError);
+    await expect(recordDiscoveryVerification({ jobId: owner.id, leaseToken: owner.leaseToken!, challengeId: proposed.challenges[0].id,
+      recipeHash: proposed.recipeHash, input: proposed.challenges[0].input, result: { ...result(), sourceUrl: candidate.source.bookingUrl,
+        evidence: { ...result().evidence, recipeHash: proposed.recipeHash } } })).rejects.toBeInstanceOf(DiscoveryConflictError);
+    await expect(activateDiscoveryRecipe(owner.id, owner.leaseToken!)).rejects.toBeInstanceOf(DiscoveryConflictError);
+    course.phone = null;
+    expect(await getActiveAccessRecipe(candidate.target)).toBeNull();
+    expect(mocks.db.courseAccessRecipe.create).not.toHaveBeenCalled();
+  });
+  it.each(["missing", "foreign", "wrong hash"])('rejects %s claimed location contact phone', async change => {
+    const { candidate } = locationContactRecipe();
+    await ensureDiscoveryJob({ courseId: "course1", offeringId: "offering1", searchId: "search1" });
+    const owner = (await claimNextDiscoveryJob("worker-one"))!;
+    if (change === "missing") delete (job!.request as { trustedContext?: unknown }).trustedContext;
+    if (change === "foreign") (job!.request as { trustedContext: unknown }).trustedContext = { canonicalCoursePhone: "+13035554321" };
+    if (change === "wrong hash" && candidate.engine === "EXISTING_ADAPTER" && candidate.adapter.family === "USCHEDULE" && candidate.adapter.publicLocationProof?.kind === "PUBLIC_LOCATION_SERVICE_POOL_V1")
+      candidate.adapter.publicLocationProof.official.phoneSha256 = createHash("sha256").update("+13035551234").digest("hex");
+    await expect(proposeDiscoveryRecipe(owner.id, owner.leaseToken!, candidate)).rejects.toBeInstanceOf(DiscoveryConflictError);
+  });
   function foreupOwnershipRecipe() {
     const phone = "+13035551234", address = "100 Public Road, Denver, CO 80001, USA", bookingUrl = "https://foreupsoftware.com/index.php/booking/12345/456#/teetimes";
     course.phone = phone;course.address = address;course.timeZone = "America/Denver";course.providerFamilyKey = "FOREUP";course.detectedBookingUrl = bookingUrl;

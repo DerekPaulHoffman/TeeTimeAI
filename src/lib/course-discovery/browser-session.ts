@@ -1040,7 +1040,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     const identityDocument = officialIdentityDocument && sameDiscoveryMainDocument(officialIdentityDocument.url, currentUrl) ? officialIdentityDocument :
       deps.captureDelegatedDocument && delegatedIdentityDocument && sameDiscoveryMainDocument(delegatedIdentityDocument.url, currentUrl) ? delegatedIdentityDocument : undefined;
     if (!blockedAccess && identityDocument) {
-        const visibleEvidence = await page.evaluate(collectNativeOfficialPublicMetadata, input.venueName ?? "");
+        const visibleEvidence = await page.evaluate(collectNativeOfficialPublicMetadata, trustedContext?.canonicalCoursePhone ? { venueName: input.venueName ?? "", venueAddress: input.venueAddress ?? "", canonicalCoursePhone: trustedContext.canonicalCoursePhone } : input.venueName ?? "");
         const publicContactBlocks = deps.collectPublicCourseContacts && input.venueName ? await readVisiblePublicCourseContactBlocks(page, input.venueName) : [];
         const captured = { ...identityDocument, visibleEvidence: { ...visibleEvidence,
           addressTexts: [...visibleEvidence.addressTexts,...publicContactBlocks.map(block=>`${block.street}, ${block.locality}, ${block.region} ${block.postalCode}`)],

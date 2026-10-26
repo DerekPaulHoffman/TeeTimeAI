@@ -127,7 +127,7 @@ async function main() {
     const trustedContext = discoveryTrustedContextSchema.optional().parse(value.trustedContext);
     const result = await executeAccessRecipe(recipe, accessExecutionInputSchema.parse(value.input), { deadlineAt, requestLease, trustedContext,
       ...(configuredTransport === "NATIVE_CHROME" ? { localCapabilities: ["LOCAL_CHROME"] as const,
-        readNativeOfficialPage: (source, url, deadline) => readNativeOfficialIdentityPage(source, url, deadline, { requestLease,
+        readNativeOfficialPage: (source, url, deadline) => readNativeOfficialIdentityPage(source, url, deadline, { requestLease, trustedContext,
           ...(recipe.engine === "EXISTING_ADAPTER" && recipe.adapter.family === "CPS" && recipe.adapter.officialPostalConflictProof
             ? { collectPublicCourseContacts: true } : {}) }) } : {}) });
     process.stdout.write(`${JSON.stringify(result)}\n`);

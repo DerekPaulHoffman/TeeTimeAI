@@ -54,7 +54,8 @@ export const existingAdapterMetadataSchema = z.discriminatedUnion("family", [
     serviceId: publicId, serviceName: z.string().trim().min(3).max(200), publicLocationProof: uschedulePublicLocationProofSchema.optional(),
     publicRentalPartyProof: uschedulePublicRentalPartyProofSchema.optional() }).strict()
     .refine(value => !value.publicLocationProof || !value.publicRentalPartyProof)
-    .refine(value => value.publicLocationProof ? isUScheduleNonMemberRental(value.serviceName) : isUSchedulePublicRentalLabel(value.serviceName),
+    .refine(value => value.publicLocationProof ? value.publicLocationProof.kind === "PUBLIC_LOCATION_SERVICE_POOL_V1" ?
+      value.serviceId === value.publicLocationProof.serviceId && value.serviceName === value.publicLocationProof.serviceName : isUScheduleNonMemberRental(value.serviceName) : isUSchedulePublicRentalLabel(value.serviceName),
       "A public location rental needs its independently verified location contract"),
   whooshSimulatorMetadataSchema,
   lightspeedMetadataSchema,

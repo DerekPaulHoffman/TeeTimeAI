@@ -144,14 +144,15 @@ function publicTimeGrid(all: Element[], learned: LearnedRental | undefined, html
   if (!grids.length && !allRows.length) return;
   const invalid = (): never => { throw schemaError("The public simulator time grid is unverified"); };
   const clean = (node: Node) => visibleText(node).replace(/\s+/gu, " ").trim();
-  const unsafe = (node: Element, expandable = false) => {
+  const unsafe = (node: Element, expandable = false, hiddenToggle = false) => {
     let current: Node | undefined = node;
     for (let depth = 0; current && depth < 64; depth++, current = "parentNode" in current ? current.parentNode ?? undefined : undefined) {
       if (!("tagName" in current)) continue;
       if (["form", "script", "style", "template", "noscript", "iframe"].includes(current.tagName) ||
           ["hidden", "inert", "disabled", "onclick"].some(key => attr(current as Element, key) !== undefined) ||
           ["aria-hidden", "aria-disabled"].some(key => attr(current as Element, key) === "true") ||
-          /display\s*:\s*none|visibility\s*:\s*(?:hidden|collapse)|(?:^|;)\s*opacity\s*:\s*0(?:\.0*)?\s*(?:!important\s*)?(?:;|$)/iu.test(attr(current, "style") ?? "") ||
+          !(current === node && hiddenToggle && (attr(current, "style") ?? "").replace(/\s|;/gu, "").toLowerCase() === "display:none") &&
+            /display\s*:\s*none|visibility\s*:\s*(?:hidden|collapse)|(?:^|;)\s*opacity\s*:\s*0(?:\.0*)?\s*(?:!important\s*)?(?:;|$)/iu.test(attr(current, "style") ?? "") ||
           /(?:^|\s)(?:hidden|invisible|visually-hidden|sr-only|disabled|booked|no_time)(?:\s|$)/u.test(attr(current, "class") ?? "") ||
           cls(current, "d-none") && !(current === node && expandable) ||
           /\b(?:account|profile|checkout|payment|billing|login|private|members?)\b/iu.test(["id", "class", "aria-label", "title"].map(key => attr(current as Element, key) ?? "").join(" "))) return true;
@@ -160,21 +161,22 @@ function publicTimeGrid(all: Element[], learned: LearnedRental | undefined, html
   };
   const units = readUSchedulePublicUnitsControl(html), unitsProfile = units.present && units.valid && units.selectedOne;
   const people = readUSchedulePublicPeopleControl(html), peopleProfile = people.valid && people.datedGridEligible;
-  if (!learned || learned.publicLocationProof || !(learned.serviceName === "Public Tee Times" && !units.present && !people.roleClaimed || unitsProfile || peopleProfile) || grids.length !== 1 ||
+  const locationPool = learned?.publicLocationProof?.kind === "PUBLIC_LOCATION_SERVICE_POOL_V1" ? learned.publicLocationProof : undefined;
+  if (!learned || learned.publicLocationProof && !locationPool || !(learned.serviceName === "Public Tee Times" && !units.present && !people.roleClaimed || unitsProfile || peopleProfile || locationPool) || grids.length !== 1 ||
       all.some(node => cls(node, "next_avail_results") || cls(node, "next_avail_item") || attr(node, "id") === "more_next_avail")) return invalid();
   const grid = grids[0], parent = "parentNode" in grid ? grid.parentNode : undefined;
-  if (grid.tagName !== "div" || !parent || !("tagName" in parent) || !cls(parent, "choices") || !peopleProfile && !cls(parent, "full") || unsafe(grid) ||
-      all.filter(node => cls(node, "choices") && (peopleProfile || cls(node, "full"))).length !== 1) return invalid();
+  if (grid.tagName !== "div" || !parent || !("tagName" in parent) || !cls(parent, "choices") || !peopleProfile && !locationPool && !cls(parent, "full") || unsafe(grid) ||
+      all.filter(node => cls(node, "choices") && (peopleProfile || locationPool || cls(node, "full"))).length !== 1) return invalid();
   const rows = children(grid).filter(node => cls(node, "timeslot"));
   if (!rows.length || rows.length > MAX_PUBLIC_GRID_STARTS || rows.length !== allRows.length || rows.filter(node => cls(node, "selected")).length > 1 ||
       children(grid).some(node => !rows.includes(node) && !["show-extra-row", "hide-extra-row"].includes(attr(node, "id") ?? ""))) return invalid();
   const lengthLabels = all.filter(node => node.tagName === "label" && attr(node, "for") === "select_length");
-  if (lengthLabels.length !== 1 || clean(lengthLabels[0]) !== (unitsProfile || peopleProfile ? "Choose Time" : "Choose Simulator Time") || unsafe(lengthLabels[0])) return invalid();
+  if (lengthLabels.length !== 1 || clean(lengthLabels[0]) !== (locationPool ? "Choose Service Time" : unitsProfile || peopleProfile ? "Choose Time" : "Choose Simulator Time") || unsafe(lengthLabels[0])) return invalid();
   const pools = all.filter(node => node.tagName === "select" && cls(node, "resSelect"));
   let resourceId: string;
-  if (unitsProfile || peopleProfile) {
+  if (unitsProfile || peopleProfile || locationPool) {
     if (pools.length) return invalid();
-    resourceId = `uschedule-service:${learned.serviceId}:pooled`;
+    resourceId = locationPool ? `uschedule-location:${locationPool.locationId}:service:${learned.serviceId}:pooled` : `uschedule-service:${learned.serviceId}:pooled`;
   } else {
   if (pools.length !== 1 || unsafe(pools[0])) return invalid();
   const pool = pools[0], groupId = /^resource([1-9]\d{0,9})$/u.exec(attr(pool, "id") ?? "")?.[1];
@@ -192,24 +194,31 @@ function publicTimeGrid(all: Element[], learned: LearnedRental | undefined, html
   // These notes limit the public party, not the physical capacity of a suite.
   // Only visible, control-free notes beside this current grid are considered.
   let publicPartyLimit: number | null = null;
-  if (unitsProfile || peopleProfile) {
+  if (locationPool) publicPartyLimit = locationPool.maxPartySize;
+  else if (unitsProfile || peopleProfile) {
     publicPartyLimit = publicRentalPartyLimit(html);
   }
   const extras = rows.filter(node => cls(node, "extra"));
   const show = all.filter(node => attr(node, "id") === "show-extra-row"), hide = all.filter(node => attr(node, "id") === "hide-extra-row");
-  if (extras.length || peopleProfile && (show.length || hide.length)) {
+  // This location profile can render its complete extras already expanded.
+  // The hidden toggle is inert text; row visibility must match the whole pair.
+  const expanded = Boolean(locationPool && extras.length && show.length === 1 && hide.length === 1 &&
+    (attr(show[0], "style") ?? "").replace(/\s|;/gu, "").toLowerCase() === "display:none" && attr(hide[0], "style") === undefined);
+  if (extras.length || (peopleProfile || locationPool) && (show.length || hide.length)) {
     const shownLabel = show.length === 1 ? children(show[0]) : [], hiddenLabel = hide.length === 1 ? children(hide[0]) : [];
-    if (show.length !== 1 || hide.length !== 1 || show[0].parentNode !== grid || hide[0].parentNode !== grid || unsafe(show[0]) ||
-        show[0].attrs.some(value => !["id", "class"].includes(value.name)) || hide[0].attrs.some(value => !["id", "class", "style"].includes(value.name)) ||
+    if (show.length !== 1 || hide.length !== 1 || show[0].parentNode !== grid || hide[0].parentNode !== grid || unsafe(show[0], false, expanded) ||
+        locationPool && unsafe(hide[0], false, !expanded) ||
+        show[0].attrs.some(value => !["id", "class", ...(expanded ? ["style"] : [])].includes(value.name)) ||
+        hide[0].attrs.some(value => !["id", "class", ...(expanded ? [] : ["style"])].includes(value.name)) ||
         shownLabel.length !== 1 || hiddenLabel.length !== 1 || [shownLabel[0], hiddenLabel[0]].some(node => node.tagName !== "span" || attr(node, "class") !== "no_time" || node.attrs.length !== 1) ||
         children(shownLabel[0]).length !== 1 || children(shownLabel[0])[0].tagName !== "text" || children(shownLabel[0])[0].attrs.length !== 0 || children(children(shownLabel[0])[0]).length !== 0 || children(hiddenLabel[0]).length !== 0 ||
         Number(/^Show Additional Times\s*\(\s*(0|[1-9]\d{0,2})\s+more\s*\)$/u.exec(clean(show[0]))?.[1]) !== extras.length || clean(hide[0]) !== "Hide Additional Times" ||
-        (attr(hide[0], "style") ?? "").replace(/\s|;/gu, "").toLowerCase() !== "display:none" || rows.length === extras.length) return invalid();
+        (!expanded && (attr(hide[0], "style") ?? "").replace(/\s|;/gu, "").toLowerCase() !== "display:none") || rows.length === extras.length) return invalid();
   } else if (show.length || hide.length) return invalid();
   let extraStarted = false;
   const times = rows.map(node => {
     const extra = cls(node, "extra"), classes = (attr(node, "class") ?? "").split(/\s+/u).filter(Boolean), labels = children(node);
-    if (node.tagName !== "div" || !cls(node, "col") || cls(node, "d-none") !== extra || unsafe(node, extra) ||
+    if (node.tagName !== "div" || !cls(node, "col") || cls(node, "d-none") !== (extra && !expanded) || unsafe(node, extra) ||
         classes.some(value => !["col", "timeslot", "selected", "d-none", "extra"].includes(value)) ||
         node.attrs.some(value => !["class", "data-time"].includes(value.name)) || labels.length !== 1 || labels[0].tagName !== "span" || labels[0].attrs.length || children(labels[0]).length ||
         extraStarted && !extra) return invalid();
@@ -515,6 +524,11 @@ export async function fetchUScheduleRecipeAvailability(input: SimulatorAvailabil
   const filter = async (name: "service_id" | "length" | "group_size" | "units_to_book" | "start_date", value: string) => {
     await refresh(url, cookie, name, value, fetchImpl, signal);
     page = await publicResponse(url, { method: "GET", headers: { Accept: "text/html", Cookie: cookie } }, "text/html", MAX_HTML_BYTES, fetchImpl, signal);
+    if (service.publicLocationProof?.kind === "PUBLIC_LOCATION_SERVICE_POOL_V1") {
+      const fresh = readUScheduleLocationCatalog(page.body, url.href, service.publicLocationProof.official);
+      if (!fresh.locationSelected || fresh.proof.catalogHash !== service.publicLocationProof.catalogHash || fresh.selectedServiceId !== service.serviceId ||
+          fresh.service.serviceName !== service.serviceName || fresh.selectedDuration !== input.durationMinutes) throw sourceError("The public location rental changed");
+    }
   };
   if (!location && inspectUScheduleRecipeConfiguration(page.body, url.href)!.selected.serviceId !== service.serviceId) await filter("service_id", service.serviceId);
   const quantityRole: LearnedRental["quantityRole"] = location ? undefined : readUSchedulePublicPeopleControl(page.body).roleClaimed ? "PEOPLE" : readUSchedulePublicUnitsControl(page.body).present ? "RENTAL_UNITS" : "LEGACY";

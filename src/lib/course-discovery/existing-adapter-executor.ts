@@ -491,10 +491,11 @@ export async function inspectExistingAdapter(source: Source, deps: Dependencies)
     let locationDiagnostic: OfficialSourceDiagnostic | undefined;
     const diagnostic = (value: OfficialSourceDiagnostic) => { try { deps.onOfficialSourceDiagnostic?.(value); } catch { /* Diagnostic sinks cannot change reader behavior. */ } };
     if (deps.officialIdentityPage) {
-      try { deriveUScheduleOfficialLocation(source, deps.officialIdentityPage, true, value => { locationDiagnostic = value; diagnostic(value); }); location = true; }
+      try { deriveUScheduleOfficialLocation(source, deps.officialIdentityPage, true, value => { locationDiagnostic = value; diagnostic(value); }, deps.trustedContext); location = true; }
       catch { diagnostic({ ...locationDiagnostic, stage: locationDiagnostic?.stage ?? "LOCATION_DERIVATION_REJECTED", derivationRejected: true, legacyFallback: true }); }
     }
     if (location) return { adapter: existingAdapterMetadataSchema.parse(await inspectUSchedulePublicLocation(source, deps)) };
+    if (parseUScheduleLocationSource(source.bookingUrl)?.locationId) fail("USCHEDULE_PUBLIC_LOCATION_UNVERIFIED");
     if (!deps.officialIdentityPage) diagnostic({ stage: "LEGACY_FALLBACK", derivationRejected: true, legacyFallback: true });
     const session = createUSchedulePublicSession(source.bookingUrl, deps);
     try {
@@ -706,7 +707,10 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
     }
     if (adapter.family === "FOREUP") {
       const path = foreupPath.exec(new URL(recipe.source.bookingUrl).pathname);
-      if (!path || Number(path[1] ?? path[3]) !== adapter.facilityId || path[2] && Number(path[2]) !== adapter.scheduleId) fail("ADAPTER_SOURCE_MISMATCH");
+      if (!path || Number(path[1] ?? path[3]) !== adapter.facilityId) fail("ADAPTER_SOURCE_MISMATCH");
+      // The observed entry may default to another sheet within this facility.
+      // Re-resolve the canonical venue and public class from that same current
+      // document before using any saved schedule/class for availability.
       const { config } = await inspectForeupConfiguration(recipe.source, deps, session!.read, adapter.officialRouteOwnershipProof);
       if (!config || config.scheduleId !== adapter.scheduleId || config.bookingClassId !== adapter.bookingClassId) fail("ADAPTER_CONFIGURATION_CHANGED");
       const available = await fetchForeupTeeSheet({ courseId: recipe.target.courseId, date: new Date(`${input.date}T00:00:00Z`), players: input.players,

@@ -147,6 +147,58 @@ describe("fixed existing adapter recipes", () => {
     expect(await inspectExistingAdapter(foreup.source, { ...deps, fetch })).toEqual({ adapter: foreup.adapter });
     expect(fetch).toHaveBeenCalledTimes(2);
   });
+  it("preserves an observed ForeUP entry while freshly resolving its canonical schedule for each replay", async () => {
+    const source = { ...foreup.source, bookingUrl: "https://foreupsoftware.com/index.php/booking/123/111#teetimes" };
+    const schedules = [{ title: "Other Golf", course_id: 123, teesheet_id: 111,
+      booking_classes: [{ teesheet_id: 111, active: 1, hidden: 0, booking_class_id: 222, name: "Public" }] },
+    { title: "Example Golf", course_id: 123, teesheet_id: 456,
+      booking_classes: [{ teesheet_id: 456, active: 1, hidden: 0, booking_class_id: 789, name: "Public" },
+        { teesheet_id: 456, active: 1, hidden: 0, booking_class_id: 790, name: "Members" }] }];
+    const html = `<script>SCHEDULES = ${JSON.stringify(schedules)};</script>`;
+    const { adapter } = await inspectExistingAdapter(source, { ...deps, fetch: reads(foreup, [], html) });
+    expect(adapter).toEqual(foreup.adapter);
+    const saved = JSON.stringify(parseAccessRecipe({ ...foreup, source, adapter }));
+    const recipe = parseAccessRecipe(JSON.parse(saved)) as ExistingAdapterRecipe;
+    for (const request of [input, { ...input, date: "2030-10-23", players: 3 }]) {
+      const fetch = reads(recipe, [{ time: `${request.date} 11:00`, available_spots: request.players,
+        schedule_id: 456, booking_class_id: 789 }], html);
+      const result = await executeExistingAdapterRecipe(recipe, request, { ...deps, fetch });
+      expect(result).toMatchObject({ status: "AVAILABLE", complete: true, sourceUrl: source.bookingUrl,
+        evidence: { venueVerified: true, dateVerified: true, capacityVerified: true, durationVerified: true, completeVerified: true } });
+      expect(result.slots).toHaveLength(1);
+      expect(result.slots[0]).toMatchObject({ sourceId: `foreup-456-${request.date} 11:00`, bookingUrl: source.bookingUrl,
+        availableSpots: request.players });
+      expect(String(fetch.mock.calls[0][0])).toBe(source.bookingUrl.split("#")[0]);
+      const api = fetch.mock.calls.slice(1).map(([url]) => new URL(String(url)));
+      expect(api).toHaveLength(2);
+      expect(api.every(url => url.searchParams.get("schedule_id") === "456" && url.searchParams.get("booking_class") === "789")).toBe(true);
+      expect(api.at(-1)!.searchParams.get("players")).toBe(String(request.players));
+      expect(JSON.stringify(recipe)).toBe(saved);
+    }
+  });
+  it.each(["facility", "name", "schedule", "public class", "duplicate", "multiple public classes", "hidden", "inactive", "members only", "stored schedule", "stored public class"])
+  ("rejects changed ForeUP %s configuration before requested-date availability despite a valid entry", async change => {
+    const source = { ...foreup.source, bookingUrl: "https://foreupsoftware.com/index.php/booking/123/111#teetimes" };
+    const recipe = parseAccessRecipe({ ...foreup, source }) as ExistingAdapterRecipe;
+    const schedule = { title: "Example Golf", course_id: 123, teesheet_id: 456,
+      booking_classes: [{ teesheet_id: 456, active: 1, hidden: 0, booking_class_id: 789, name: "Public" }] };
+    if (change === "facility") schedule.course_id = 999;
+    if (change === "name") schedule.title = "Other Golf";
+    if (change === "schedule") { schedule.teesheet_id = 457; schedule.booking_classes[0].teesheet_id = 457; }
+    if (change === "public class") schedule.booking_classes[0].booking_class_id = 791;
+    if (change === "hidden") schedule.booking_classes[0].hidden = 1;
+    if (change === "inactive") schedule.booking_classes[0].active = 0;
+    if (change === "members only") schedule.booking_classes[0].name = "Members";
+    if (change === "multiple public classes") schedule.booking_classes.push({ ...schedule.booking_classes[0], booking_class_id: 791 });
+    if (change === "stored schedule" && recipe.adapter.family === "FOREUP") recipe.adapter.scheduleId = 999;
+    if (change === "stored public class" && recipe.adapter.family === "FOREUP") recipe.adapter.bookingClassId = 999;
+    const html = `<script>SCHEDULES = ${JSON.stringify(change === "duplicate" ? [schedule, schedule] : [schedule])};</script>`;
+    const fetch = reads(recipe, [], html);
+    expect(await executeExistingAdapterRecipe(recipe, input, { ...deps, fetch }))
+      .toMatchObject({ status: "INCOMPLETE", complete: false, slots: [] });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(String(fetch.mock.calls[0][0])).toBe(source.bookingUrl.split("#")[0]);
+  });
   it("inspects and freshly replays an exact indexed ForeUP source with independent date/player inputs", async () => {
     const source = { ...foreup.source, bookingUrl: "https://foreupsoftware.com/index.php/booking/index/123#teetimes" };
     const publicPlayHtml = `<script>SCHEDULES = ${JSON.stringify([{ title: "Example Golf", course_id: 123, teesheet_id: 456,

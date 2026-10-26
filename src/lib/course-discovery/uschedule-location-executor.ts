@@ -8,9 +8,12 @@ import type { OfficialIdentityPage } from "./teeitup-official-identity";
 import type { AccessExecutionInput } from "./recipe";
 import { isSafeRecipeUrl } from "./recipe";
 import { requestFamilyForUrl } from "./request-family";
+import type { NativeOfficialPageReader } from "./native-official-page-reader";
+import { isFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
 
 type Source = { officialUrl?: string; bookingUrl: string; venueName: string; venueAddress?: string; timeZone: string };
 type Dependencies = { fetch?: typeof fetch; deadlineAt?: Date; officialIdentityPage?: OfficialIdentityPage;
+  trustedContext?: { canonicalCoursePhone?: string }; localCapabilities?: readonly "LOCAL_CHROME"[]; readNativeOfficialPage?: NativeOfficialPageReader;
   requestLease?: <T>(family: string, work: () => Promise<T>) => Promise<{ acquired: true; value: T } | { acquired: false }> };
 export type UScheduleLocationMetadata = { family: "USCHEDULE"; tenant: string; serviceId: string; serviceName: string;
   publicLocationProof: USchedulePublicLocationProof };
@@ -33,6 +36,14 @@ async function readOfficial(source: Source, metadata: UScheduleLocationMetadata,
   bound(source, metadata);
   const expected = metadata.publicLocationProof.official.officialPageUrl;
   if (!isSafeRecipeUrl(expected)) return fail("OFFICIAL_IDENTITY_UNVERIFIED");
+  if (metadata.publicLocationProof.kind === "PUBLIC_LOCATION_SERVICE_POOL_V1") {
+    if (!deps.localCapabilities?.includes("LOCAL_CHROME") || !deps.readNativeOfficialPage || !deps.trustedContext?.canonicalCoursePhone) return fail("LOCAL_CHROME_REQUIRED");
+    const page = await deps.readNativeOfficialPage(source, expected, new Date(Math.min(deps.deadlineAt?.getTime() ?? Infinity, Date.now() + 30_000)));
+    if (!isFreshNativeOfficialIdentityPage(page, source.officialUrl!)) return fail("OFFICIAL_IDENTITY_UNVERIFIED");
+    const proof = deriveUScheduleOfficialLocation(source, page, true, undefined, deps.trustedContext);
+    if (!equal(proof, metadata.publicLocationProof.official)) return fail("OFFICIAL_IDENTITY_CHANGED");
+    return proof;
+  }
   const transport = deps.fetch ?? createAddressPinnedPublicFetchTransport({ parseUrl: value => {
     if (value !== expected || !isSafeRecipeUrl(value)) return fail("UNSCOPED_ADAPTER_REQUEST"); return new URL(value);
   }, maxResponseBytes: 600_000, timeoutMs: 15_000, redirectLimit: 0 });
@@ -58,7 +69,7 @@ async function readOfficial(source: Source, metadata: UScheduleLocationMetadata,
 
 export async function inspectUSchedulePublicLocation(source: Source, deps: Dependencies): Promise<UScheduleLocationMetadata> {
   if (!deps.officialIdentityPage) return fail("OFFICIAL_IDENTITY_UNVERIFIED");
-  const official = deriveUScheduleOfficialLocation(source, deps.officialIdentityPage);
+  const official = deriveUScheduleOfficialLocation(source, deps.officialIdentityPage, true, undefined, deps.trustedContext);
   const parsed = parseUScheduleLocationSource(official.entryUrl)!;
   const session = createUSchedulePublicSession(official.entryUrl, { ...deps, officialLocation: official });
   try {
@@ -71,16 +82,20 @@ export async function inspectUSchedulePublicLocation(source: Source, deps: Depen
 export async function executeUSchedulePublicLocation(source: Source, metadata: UScheduleLocationMetadata,
   target: { courseId: string; offeringId: string }, input: AccessExecutionInput, deps: Dependencies) {
   bound(source, metadata);
-  if (input.players > metadata.publicLocationProof.includedPartySize || input.players < 1 || !input.durationMinutes || input.timeZone !== source.timeZone)
+  const partyLimit = metadata.publicLocationProof.kind === "PUBLIC_LOCATION_RENTAL_V1" ? metadata.publicLocationProof.includedPartySize : metadata.publicLocationProof.maxPartySize;
+  if (partyLimit !== null && input.players > partyLimit || input.players < 1 || input.players > 4 || !input.durationMinutes || input.timeZone !== source.timeZone)
     return fail("USCHEDULE_INCLUDED_PARTY_UNSUPPORTED");
   const official = await readOfficial(source, metadata, deps, signalFor(deps));
+  const freshProof = metadata.publicLocationProof.kind === "PUBLIC_LOCATION_SERVICE_POOL_V1" ?
+    official.kind === "OFFICIAL_PUBLIC_LOCATION_CONTACT_V1" ? { ...metadata.publicLocationProof, official } : fail("OFFICIAL_IDENTITY_CHANGED") :
+    official.kind === "OFFICIAL_PUBLIC_LOCATION_V1" ? { ...metadata.publicLocationProof, official } : fail("OFFICIAL_IDENTITY_CHANGED");
   const session = createUSchedulePublicSession(official.entryUrl, { ...deps, officialLocation: official });
   try {
     return await fetchUScheduleRecipeAvailability({ date: input.date, durationMinutes: input.durationMinutes, partySize: 1, timeZone: input.timeZone,
       offering: { id: target.offeringId, courseId: target.courseId, bookingUrl: source.bookingUrl, providerFamilyKey: "USCHEDULE", active: true,
         publicAccessStatus: "PUBLIC", providerMetadata: { tenant: metadata.tenant, serviceId: metadata.serviceId },
         maxPartySize: metadata.publicLocationProof.maxPartySize, supportedDurationsMinutes: [input.durationMinutes] } },
-    { serviceId: metadata.serviceId, serviceName: metadata.serviceName, publicLocationProof: { ...metadata.publicLocationProof, official } }, session.read);
+    { serviceId: metadata.serviceId, serviceName: metadata.serviceName, publicLocationProof: freshProof }, session.read);
   } catch (error) { if (session.failureReason()) return fail(session.failureReason()!); throw error; }
   finally { session.dispose(); }
 }

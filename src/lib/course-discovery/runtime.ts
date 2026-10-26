@@ -33,8 +33,9 @@ function readContext(value: unknown): Context {
 }
 
 function requiresPhoneContext(recipe: unknown) {
-  const value = recipe as { engine?: string; adapter?: { family?: string; officialRouteOwnershipProof?: unknown; officialPostalConflictProof?: unknown; officialStreetTypeOmittedProof?: unknown; officialDelegatedBookingProof?: { physicalContactProof?: unknown } } };
+  const value = recipe as { engine?: string; adapter?: { family?: string; publicLocationProof?: { kind?: string }; officialRouteOwnershipProof?: unknown; officialPostalConflictProof?: unknown; officialStreetTypeOmittedProof?: unknown; officialDelegatedBookingProof?: { physicalContactProof?: unknown } } };
   return value?.engine === "EXISTING_ADAPTER" && (value.adapter?.family === "CPS" && Boolean(value.adapter.officialPostalConflictProof) ||
+    value.adapter?.family === "USCHEDULE" && value.adapter.publicLocationProof?.kind === "PUBLIC_LOCATION_SERVICE_POOL_V1" ||
     value.adapter?.family === "FOREUP" && Boolean(value.adapter.officialRouteOwnershipProof) ||
     value.adapter?.family === "TEEITUP" && Boolean(value.adapter.officialStreetTypeOmittedProof || value.adapter.officialDelegatedBookingProof?.physicalContactProof));
 }
@@ -167,8 +168,12 @@ export async function completeRecipeExecution(id: string, leaseToken: string, va
     if (result.complete && (!result.evidence.venueVerified || !result.evidence.dateVerified || !result.evidence.capacityVerified ||
         !result.evidence.durationVerified || !result.evidence.completeVerified)) throw new Error("Incomplete recipe evidence");
     const stored = await tx.courseAccessRecipe.findUniqueOrThrow({ where: { id: context.recipeId } });
-    if (requiresPhoneContext(stored.payload) && !isCurrentTrustedContext(context.trustedContext, deriveCourseTrustedContext(target as { phone?: unknown })))
-      throw new Error("Recipe execution is no longer current");
+    if (requiresPhoneContext(stored.payload)) {
+      // A simulator offering inherits physical contact identity from its Course.
+      const phoneSource = context.target.offeringId ? await tx.course.findUnique({ where: { id: context.target.courseId }, select: { phone: true } }) : target;
+      if (!phoneSource || !isCurrentTrustedContext(context.trustedContext, deriveCourseTrustedContext(phoneSource as { phone?: unknown })))
+        throw new Error("Recipe execution is no longer current");
+    }
     await assertActiveAccessRecipeInTransaction(tx, context.target, context.recipeId);
     const bookingUrl = (stored.payload as unknown as { source: { bookingUrl: string } }).source.bookingUrl;
     const storedRecipe = stored.payload as unknown as { engine: string; adapter?: { family: string; facilityIds?: number[] } };

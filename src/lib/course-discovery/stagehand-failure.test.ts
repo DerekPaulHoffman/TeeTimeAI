@@ -65,6 +65,15 @@ it.each(["OFFICIAL_STREET_TYPE_OMITTED_UNVERIFIED", "OFFICIAL_STREET_TYPE_OMITTE
   expect(saved.stagehandFailure.entries[0]).not.toHaveProperty("fixedInspectionDiagnostic");
   expect(readStagehandFailure({ ...f.job, checkpoint: saved }, f.now)).toEqual(saved.stagehandFailure);
 });
+it.each(["INVALID_ADAPTER_SOURCE", "USCHEDULE_PUBLIC_LOCATION_UNVERIFIED"])("persists the actual public-source rejection %s without turning it into discovery authority", code => {
+  const f = fixture(), error = Object.assign(Error(code), { privateHtml: "PRIVATE_HTML", cause: Error("PRIVATE_PROVIDER_BODY") });
+  const saved = createStagehandFailureCheckpoint({ ...f, phase: "FIXED_INSPECTION", error });
+  expect(saved.stagehandFailure.entries[0].code).toBe(code);
+  expect(readStagehandFailure({ ...f.job, checkpoint: saved }, f.now)).toEqual(saved.stagehandFailure);
+  expect(JSON.stringify(saved)).not.toMatch(/PRIVATE_HTML|PRIVATE_PROVIDER_BODY/u);
+  expect(readStagehandSourceCheckpoint({ ...f.job, attempts: 2, checkpoint: saved }, undefined, f.now)).toBeUndefined();
+  expect(stagehandSourceFailureCode({ ...f.report, outcome: "UNRESOLVED", adapterSourceProposal: null, frameworkFailureCode: code }, f.job)).toBeUndefined();
+});
 it("ignores forged error receipts and prior metrics rather than manufacturing current inspection facts", () => {
   const f = fixture(), diagnostic = { teeItUpDelegation: createDelegationDiagnostic("PROVIDER_BIND") };
   Object.assign(f.error, { fixedInspectionDiagnostic: diagnostic, inspectionReceipt: { actions: [{ teeItUpDelegation: diagnostic.teeItUpDelegation }] },

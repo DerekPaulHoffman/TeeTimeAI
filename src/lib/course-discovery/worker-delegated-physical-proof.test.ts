@@ -38,6 +38,63 @@ function fixture(withEntry = false) {
 }
 const bind = (f: ReturnType<typeof fixture>, observation = f.observation, context: string | undefined = f.document) => bindDiscoveryRecipeIdentity(f.proposal, f.job, observation, context);
 
+function locationFixture() {
+  const official = "https://example.org/Locations/Example", booking = "https://clients.uschedule.com/examplegolf/booking?filter=loc[82]";
+  const job = { id: "location-job", sourceFingerprint: "a".repeat(64), attempts: 1, firstPickedUpAt: "2030-10-24T12:00:00.000Z", deadlineAt: "2030-10-24T12:15:00.000Z",
+    request: { target: { courseId: "course", offeringId: "offering", kind: "SIMULATOR" }, identity: { officialUrl: official, name: "Example Golf Club", address: "10 Main Drive, Suite C, Example, WA 98000, USA" },
+      input: { date: "2030-10-25", players: 2, durationMinutes: 60, startTime: "10:00", endTime: "20:00", timeZone: "America/Los_Angeles" },
+      trustedContext: { canonicalCoursePhone: "+14255550123" } } };
+  const proof = { kind: "PUBLIC_LOCATION_SERVICE_POOL_V1", official: { kind: "OFFICIAL_PUBLIC_LOCATION_CONTACT_V1", officialPageUrl: official, entryUrl: booking, locationId: "82",
+    venueName: job.request.identity.name, addressKey: "complete physical address with suite", locality: "example", region: "WA",
+    phoneSha256: createHash("sha256").update(JSON.stringify(job.request.trustedContext.canonicalCoursePhone)).digest("hex"), markupWitnessSha256: "b".repeat(64) },
+    locationId: "82", locationName: "Example - Example Golf Club", serviceId: "72", serviceName: "Simulator Rental - Example", catalogHash: "c".repeat(64), maxPartySize: null,
+    client: { path: "/bundles/js/bookingBS5", sha256: "569c4665e02740090f39df0a016d0f6087edafce318836e62f876db5f9865a0e" } };
+  const adapter = { family: "USCHEDULE", tenant: "examplegolf", serviceId: "72", serviceName: proof.serviceName, publicLocationProof: proof };
+  const proposal = { schemaVersion: 1, engine: "EXISTING_ADAPTER", target: job.request.target, source: { officialUrl: official, bookingUrl: booking,
+    venueName: job.request.identity.name, venueAddress: job.request.identity.address, providerFamily: "USCHEDULE", timeZone: job.request.input.timeZone }, adapter };
+  return { job, official, booking, adapter, proposal, observation: createDiscoveryAdapterObservation(job, booking, adapter, official)! };
+}
+
+describe("current native USchedule contact observation bridge", () => {
+  it("strips generated contact proof and adopts only the matching private current inspection", () => {
+    const f = locationFixture();
+    expect(bindDiscoveryRecipeIdentity(f.proposal, f.job).adapter).not.toHaveProperty("publicLocationProof");
+    const generated = structuredClone(f.proposal); generated.adapter.publicLocationProof.official.phoneSha256 = "f".repeat(64);
+    const bound = bindDiscoveryRecipeIdentity(generated, f.job, f.observation, f.official);
+    expect(bound.adapter.publicLocationProof).toEqual(f.adapter.publicLocationProof); expect(parseAccessRecipe(bound)).toEqual(bound);
+    expect(inspectedAdapterSourceEvidence(bound, f.job, f.observation, true, f.official)).toEqual({ officialUrl: f.official, observedBookingUrl: f.booking });
+  });
+  it.each(["jobId", "officialUrl", "bookingUrl", "contextUrl", "identityKey", "targetKey", "inputKey", "trustedContextKey", "sourceFingerprint", "jobAttempt", "firstPickedUpAt", "deadlineAt"])
+  ("rejects foreign/stale %s from contact inspection", field => {
+    const f = locationFixture(), observation = { ...f.observation, [field]: "foreign" };
+    expect(bindDiscoveryRecipeIdentity(f.proposal, f.job, observation, f.official).adapter).not.toHaveProperty("publicLocationProof");
+    expect(inspectedAdapterSourceEvidence(f.proposal, f.job, observation, true, f.official)).toBeUndefined();
+  });
+  it.each(["phone", "absent phone", "raw phone hash", "entry", "name"])("rejects %s without adopting serialized contact authority", change => {
+    const f = locationFixture(), observation = structuredClone(f.observation);
+    if (change === "phone") f.job.request.trustedContext.canonicalCoursePhone = "+14255550124";
+    if (change === "absent phone") delete (f.job.request as { trustedContext?: unknown }).trustedContext;
+    if (change === "raw phone hash") observation.adapter.publicLocationProof.official.phoneSha256 = createHash("sha256").update("+14255550123").digest("hex");
+    if (change === "entry") observation.adapter.publicLocationProof.official.entryUrl = "https://clients.uschedule.com/othergolf/booking?filter=loc[82]";
+    if (change === "name") observation.adapter.publicLocationProof.official.venueName = "Other Golf Club";
+    expect(bindDiscoveryRecipeIdentity(f.proposal, f.job, observation, f.official).adapter).not.toHaveProperty("publicLocationProof");
+  });
+  it("keeps contact witnesses out of model snapshots and invalidates them before another action", () => {
+    const f = locationFixture(), output = createDiscoverySnapshotCompactor()({ adapter: f.adapter, trustedContext: f.job.request.trustedContext });
+    expect(output.adapter).not.toHaveProperty("publicLocationProof"); expect(output).not.toHaveProperty("trustedContext");
+    expect(JSON.stringify(output)).not.toContain(f.adapter.publicLocationProof.official.phoneSha256);
+    expect(shouldInvalidateDiscoveryAdapterObservation("observe", f.observation)).toBe(true);
+  });
+  it("preserves the old public-location profile and its observation rules", () => {
+    const f = locationFixture(), legacy = { ...f.adapter, publicLocationProof: { kind: "PUBLIC_LOCATION_RENTAL_V1" } };
+    const proposal = { ...f.proposal, adapter: legacy };
+    expect(bindDiscoveryRecipeIdentity(proposal, f.job).adapter).toEqual(legacy);
+    const observation = createDiscoveryAdapterObservation(f.job, f.booking, legacy, f.official)!;
+    expect(observation).not.toHaveProperty("jobAttempt"); expect(shouldInvalidateDiscoveryAdapterObservation("observe", observation)).toBe(false);
+    expect(createDiscoverySnapshotCompactor()({ adapter: legacy }).adapter).toEqual(legacy);
+  });
+});
+
 describe("current native delegated physical proof bridge", () => {
   it("adopts the typed final native iframe edge only from the exact current observation", () => {
     const f = fixture(true), hop = { ...f.proof.hops[1], kind: "NATIVE_VISIBLE_IFRAME_SRC" };

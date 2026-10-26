@@ -77,3 +77,67 @@ it("captures bounded parent iframe src facts without child URLs or a srcdoc/form
  setup('<iframe src="https://one.example/"></iframe>'.repeat(25));
  expect(collectNativeOfficialPublicMetadata(venue).delegatedFrameSources).toEqual({rows:[],omitted:true});
 });
+
+const cmsContext={venueName:venue,venueAddress:"10 Example Rd C, Example, NY 12345, USA",canonicalCoursePhone:"+19165554653"};
+const branchHtml=()=>`<form method="post" action="${document.URL}"><input type="hidden" value="PRIVATE"><a href="/"><img alt="${venue}" src="/logo.png"></a><h1>Example, NY</h1><div><p>916-555-4653</p> <p>10 Example Road, Suite C, Example, NY 12345</p> <a href="https://booking.example/location">Book this location</a></div><footer>Public contact</footer></form>`;
+it("reads actual branch heading, root-logo alt and plain public phone only with trusted visible contact scope",()=>{
+ setup(branchHtml());
+ expect(collectNativeOfficialPublicMetadata(venue).headings).toEqual([]);
+ const got=collectNativeOfficialPublicMetadata(cmsContext);
+ expect(got.headings).toEqual(["Example, NY"]);
+ expect(got.headings).not.toContain(venue);
+ expect(got.brandLinks).toEqual([{href:location.origin+"/",text:venue}]);
+ expect(got.phoneTexts).toContain("916-555-4653");
+ expect(got.phoneTexts.every(v=>!v.startsWith("tel:"))).toBe(true);
+ expect(got.addressTexts).toContain("10 Example Road, Suite C, Example, NY 12345");
+ expect(got.linkUrls).toContain("https://booking.example/location");
+ expect(got.namedContactBlocks).toEqual([]);expect(JSON.stringify(got)).not.toContain("PRIVATE");
+});
+it.each(["brand","phone","street","house","zip","hiddenLogo","hiddenPhone","hiddenAddress","privateContact","foreignRoot","nonRoot","rootQuery","rootHash","rootCredentials","onclick","download","duplicateLogo","get","foreignAction","noFooter","multiple","nested","contactControl"])("does not expose the branch CMS contact alternative for %s",mode=>{
+ let markup=branchHtml();
+ if(mode==="brand")markup=markup.replace(`alt="${venue}"`,'alt="Different Studio"');
+ if(mode==="phone")markup=markup.replace("916-555-4653","916-555-4654");
+ if(mode==="street")markup=markup.replace("10 Example Road","10 Other Road");
+ if(mode==="house")markup=markup.replace("10 Example Road","11 Example Road");
+ if(mode==="zip")markup=markup.replace("12345","54321");
+ if(mode==="hiddenLogo")markup=markup.replace("<img ","<img hidden ");
+ if(mode==="hiddenPhone")markup=markup.replace("<p>916","<p hidden>916");
+ if(mode==="hiddenAddress")markup=markup.replace("<p>10","<p hidden>10");
+ if(mode==="privateContact")markup=markup.replace("<div>",'<div class="billing">');
+ if(mode==="foreignRoot")markup=markup.replace('href="/"','href="https://foreign.example/"');
+ if(mode==="nonRoot")markup=markup.replace('href="/"','href="/other"');
+ if(mode==="rootQuery")markup=markup.replace('href="/"','href="/?brand=public"');
+ if(mode==="rootHash")markup=markup.replace('href="/"','href="/#brand"');
+ if(mode==="rootCredentials")markup=markup.replace('href="/"','href="https://user:pass@official.example/"');
+ if(mode==="onclick")markup=markup.replace('href="/"','href="/" onclick="go()"');
+ if(mode==="download")markup=markup.replace('href="/"','href="/" download');
+ if(mode==="duplicateLogo")markup=markup.replace('</a>',`<img alt="${venue}"></a>`);
+ if(mode==="get")markup=markup.replace('method="post"','method="get"');
+ if(mode==="foreignAction")markup=markup.replace(`action="${document.URL}"`,'action="https://foreign.example/"');
+ if(mode==="noFooter")markup=markup.replaceAll("footer","section");
+ if(mode==="multiple")markup+="<form></form>";
+ if(mode==="nested")markup="<div>"+markup+"</div>";
+ if(mode==="contactControl")markup=markup.replace("<div>",'<div><input value="PRIVATE">');
+ setup(markup);const got=collectNativeOfficialPublicMetadata(cmsContext);
+ expect(got.headings).toEqual([]);expect(got.phoneTexts).toEqual([]);expect(got.addressTexts).toEqual([]);expect(got.brandLinks).toEqual([]);
+});
+it("production tsx serialization exercises the trusted CMS path in an isolated page context",()=>{
+ const moduleUrl=pathToFileURL(resolve("src/lib/course-discovery/public-document-metadata.ts")).href;
+ const script=`import {createRequire} from 'node:module';import {fileURLToPath} from 'node:url';import {runInContext} from 'node:vm';const req=createRequire(process.cwd()+'/package.json');const {JSDOM}=req('jsdom');const {collectNativeOfficialPublicMetadata:collect}=req(fileURLToPath(${JSON.stringify(moduleUrl)}));const dom=new JSDOM(${JSON.stringify(branchHtml())},{url:'https://official.example/',runScripts:'outside-only'});Object.defineProperty(dom.window.HTMLElement.prototype,'innerText',{get(){return this.textContent??'';}});dom.window.HTMLElement.prototype.getBoundingClientRect=function(){return {width:10,height:10};};const result=runInContext('('+collect.toString()+')('+${JSON.stringify(JSON.stringify(cmsContext))}+')',dom.getInternalVMContext());if(result.headings[0]!=='Example, NY'||result.brandLinks[0]?.text!==${JSON.stringify(venue)}||!result.phoneTexts.includes('916-555-4653'))throw Error('CMS_SERIALIZATION_INVALID');console.log('CMS_SERIALIZATION_OK');`;
+ const result=spawnSync(process.execPath,["--import",pathToFileURL(resolve("node_modules/tsx/dist/loader.mjs")).href,"--input-type=module","--eval",script],{encoding:"utf8",timeout:10000});
+ expect(result.status,result.stderr).toBe(0);expect(result.stdout.trim()).toBe("CMS_SERIALIZATION_OK");
+});
+it("keeps literal unit/contact facts without claiming complete identity or unit equivalence",()=>{
+ setup(branchHtml().replace("Suite C","Suite D"));const got=collectNativeOfficialPublicMetadata(cmsContext);
+ expect(got.addressTexts).toContain("10 Example Road, Suite D, Example, NY 12345");
+ expect(JSON.stringify(got)).not.toMatch(/identityVerified|unitVerified|sourceVerified/u);
+ setup(branchHtml());expect(collectNativeOfficialPublicMetadata({...cmsContext,canonicalCoursePhone:""}).headings).toEqual([]);
+ expect(collectNativeOfficialPublicMetadata({...cmsContext,venueAddress:"Example, NY"}).headings).toEqual([]);
+});
+it("takes the postal ZIP after a five-digit street number rather than treating the house as a ZIP",()=>{
+ const context={...cmsContext,venueAddress:"10410 Example Rd C, Example, NY 28078, USA"};
+ setup(branchHtml().replace("10 Example Road, Suite C, Example, NY 12345","10410 Example Road, Suite C, Example, NY 28078"));
+ expect(collectNativeOfficialPublicMetadata(context).headings).toContain("Example, NY");
+ setup(branchHtml().replace("10 Example Road, Suite C, Example, NY 12345","10410 Example Road, Suite C, Example, NY 10410"));
+ expect(collectNativeOfficialPublicMetadata(context).headings).toEqual([]);
+});

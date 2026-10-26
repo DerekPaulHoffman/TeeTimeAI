@@ -325,6 +325,13 @@ function bindRecipe(recipe: CourseAccessRecipeData, source: Source, sourceEviden
   if (sourceEvidence && (sourceEvidence.officialUrl !== recipe.source.officialUrl ||
       sourceEvidence.observedBookingUrl !== recipe.source.bookingUrl)) conflict();
   if (source.identity.bookingUrl && recipe.source.bookingUrl !== source.identity.bookingUrl && !sourceEvidence) conflict();
+  if (recipe.engine === "EXISTING_ADAPTER" && recipe.adapter.family === "USCHEDULE" &&
+      recipe.adapter.publicLocationProof?.kind === "PUBLIC_LOCATION_SERVICE_POOL_V1") {
+    const proof = recipe.adapter.publicLocationProof.official, phone = source.trustedContext.canonicalCoursePhone;
+    if (!phone || proof.phoneSha256 !== createHash("sha256").update(JSON.stringify(phone)).digest("hex") ||
+        proof.venueName !== source.identity.name || proof.entryUrl !== recipe.source.bookingUrl ||
+        request !== undefined && !isCurrentTrustedContext(request.trustedContext, source.trustedContext)) conflict();
+  }
   if (recipe.engine === "EXISTING_ADAPTER" && recipe.adapter.family === "CPS") {
     const proof = recipe.adapter.officialPostalConflictProof;
     if (proof && (!source.trustedContext.canonicalCoursePhone ||

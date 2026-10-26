@@ -4,12 +4,14 @@ import { isSafeRecipeUrl } from "./recipe";
 import { noteNativeOfficialIdentityPageCleanup, registerFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
 import { registerFreshNativeDelegatedDocument } from "./native-official-page-attestation";
 import { consumeDelegatedGet, type DelegatedGetGrant, type DelegatedReadBudget } from "./teeitup-delegated-booking-context";
+import type { DiscoveryTrustedContext } from "./trusted-context";
 
 export type NativeOfficialPageReader = (source: OfficialIdentitySource, pageUrl: string, deadlineAt: Date) => Promise<OfficialIdentityPage>;
 type Session = Pick<Awaited<ReturnType<typeof createCourseDiscoveryBrowserSession>>, "execute" | "readOfficialIdentityPage" | "close">;
 type Dependencies = Pick<DiscoveryBrowserSessionDependencies, "requestLease" | "launchBrowser"> & {
   delegatedReadBudget?: DelegatedReadBudget;
   collectPublicCourseContacts?: true;
+  trustedContext?: DiscoveryTrustedContext;
   createSession?: (input: Parameters<typeof createCourseDiscoveryBrowserSession>[0], deps: DiscoveryBrowserSessionDependencies) => Promise<Session>;
 };
 
@@ -24,7 +26,8 @@ export async function readNativeOfficialIdentityPage(source: OfficialIdentitySou
   if (!Number.isFinite(deadline.getTime()) || deadline.getTime() <= Date.now()) throw new Error("DEADLINE_EXCEEDED");
   const createSession = deps.createSession ?? createCourseDiscoveryBrowserSession;
   const session = await createSession({ deadlineAt: deadline, initialUrls: [pageUrl], venueName: source.venueName,
-    venueAddress: source.venueAddress, venueOfficialUrl: source.officialUrl, timeZone: source.timeZone },
+    venueAddress: source.venueAddress, venueOfficialUrl: source.officialUrl, timeZone: source.timeZone,
+    ...(deps.trustedContext === undefined ? {} : { trustedContext: structuredClone(deps.trustedContext) }) },
   { requestLease: deps.requestLease, launchBrowser: deps.launchBrowser, browserTransport: "NATIVE_CHROME",
     ...(deps.delegatedReadBudget ? { delegatedReadBudget: deps.delegatedReadBudget } : {}),
     ...(deps.collectPublicCourseContacts ? { collectPublicCourseContacts: true } : {}) });
