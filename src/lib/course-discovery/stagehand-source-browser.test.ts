@@ -108,6 +108,139 @@ it("attests a unique native public source without dispatching provider frames an
   } finally { controller.abort(); await host?.close(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
 }, 60_000);
 
+it("keeps the completed owned GET current across a real history navigation without granting iframe history ownership or a new budget", async () => {
+  const initialUrl = "https://owned-source.example/", bookingUrl = initialUrl + "book-a-time/";
+  const controller = new AbortController(), deadlineAt = new Date(Date.now() + 60_000), originalDeadline = deadlineAt.getTime();
+  let active = 0, acquired = 0, released = 0, foreignLookups = 0;
+  const requests: string[] = [];
+  const server = createServer({ key: certificate("fixtureKey"), cert: certificate("fixtureCertificate") }, (request, response) => {
+    requests.push(`${request.method} ${request.url}`);
+    response.writeHead(200, { "content-type": "text/html" }).end(`<!doctype html><html><head><link rel="icon" href="data:,"></head><body>
+      <a id="book" href="/book-a-time/">Book a time</a><script>
+      document.getElementById('book').addEventListener('click', event => {
+        event.preventDefault(); history.pushState({}, '', '/book-a-time/');
+      });</script></body></html>`);
+  });
+  let host: Awaited<ReturnType<typeof createGuardedStagehandSourceBrowser>> | undefined, attached: Browser | undefined;
+  try {
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address(); if (!address || typeof address === "string") throw Error("OWNED_FIXTURE_UNAVAILABLE");
+    host = await createGuardedStagehandSourceBrowser({ initialUrl, timeZone: "UTC", deadlineAt, signal: controller.signal }, {
+      requestLease: async (_family, work) => { active++; acquired++; try { return { acquired: true, value: await work() }; } finally { active--; released++; } },
+      proxyDependencies: { resolveAddresses: async name => { if (name !== "owned-source.example") { foreignLookups++; throw Error("NOT_OWNED_FIXTURE"); } return [{ address: "93.184.216.34", family: 4 }]; }, connect: () => connect({ host: "127.0.0.1", port: address.port }) },
+      launchBrowser: options => launchPublicReadBrowser({ ...options, args: [...options.args ?? [], "--ignore-certificate-errors"] }, { localCdp: true }), contextOptions: { ignoreHTTPSErrors: true },
+    });
+    attached = await chromium.connectOverCDP(host.cdpUrl);
+    const page = attached.contexts().flatMap(context => context.pages())[0], cdp = await page.context().newCDPSession(page);
+    const historyEvents: Array<{ frameId: string; url: string }> = [];
+    cdp.on("Page.navigatedWithinDocument", event => historyEvents.push(event));
+    await cdp.send("Page.enable");
+    await host.prepareNavigation(initialUrl); await page.goto(initialUrl, { waitUntil: "load" });
+    await expect.poll(() => host!.observeSourceReadiness(host!.targetId)).toMatchObject({
+      mainDocumentCurrent: true, mainDocumentComplete: true, mainDocumentStatus: 200, mainReadPending: false, pendingReads: 0,
+    });
+    const before = (await cdp.send("Page.getFrameTree")).frameTree.frame, leasesAfterGet = acquired;
+    expect(before.url).toBe(initialUrl); expect(before.loaderId).toBeTruthy(); expect(requests).toEqual(["GET /"]);
+    expect(await host.beforeAction(host.targetId, bookingUrl)).toMatchObject({ pageUrl: initialUrl, links: [{ href: bookingUrl, visible: true }] });
+    await page.locator("#book").click();
+    await expect.poll(() => historyEvents.some(event => event.frameId === before.id && event.url === bookingUrl)).toBe(true);
+    expect(page.url()).toBe(bookingUrl);
+    const after = (await cdp.send("Page.getFrameTree")).frameTree.frame;
+    expect({ id: after.id, loaderId: after.loaderId, url: after.url }).toEqual({ id: before.id, loaderId: before.loaderId, url: bookingUrl });
+    expect(await host.observeSourceReadiness(host.targetId)).toMatchObject({
+      readyState: "complete", bodyPresent: true, mainDocumentCurrent: true, mainDocumentComplete: true,
+      mainDocumentStatus: 200, mainReadPending: false, pendingReads: 0,
+    });
+    // This is an actual child-frame history event, not a fabricated main GET.
+    await page.evaluate(() => { const iframe = document.createElement("iframe"); iframe.srcdoc = "<p>Child frame</p>"; document.body.append(iframe); });
+    await expect.poll(() => page.frames().length).toBe(2);
+    const child = page.frames().find(frame => frame !== page.mainFrame())!;
+    await child.waitForLoadState("load");
+    const childUrl = await child.evaluate(() => { history.pushState({}, "", location.href + "#foreign-history"); return location.href; });
+    await expect.poll(() => historyEvents.some(event => event.frameId !== before.id && event.url === childUrl)).toBe(true);
+    expect(page.url()).toBe(bookingUrl);
+    expect((await cdp.send("Page.getFrameTree")).frameTree.frame).toMatchObject({ id: before.id, loaderId: before.loaderId, url: bookingUrl });
+    expect(await host.observeSourceReadiness(host.targetId)).toMatchObject({ mainDocumentCurrent: true, mainDocumentComplete: true, mainDocumentStatus: 200, pendingReads: 0 });
+    expect(await host.beforeAction(host.targetId, bookingUrl)).toMatchObject({ pageUrl: bookingUrl });
+    await expect(host.beforeAction("foreign-target", bookingUrl)).rejects.toThrow("STAGEHAND_GUARDED_SOURCE_REJECTED");
+    expect(await host.assertGuardedTargets([host.targetId])).toBe(true);
+    expect(requests).toEqual(["GET /"]); expect(acquired).toBe(leasesAfterGet); expect(host.diagnostics().admittedRequests).toBe(1);
+    expect(foreignLookups).toBe(0); expect(deadlineAt.getTime()).toBe(originalDeadline);
+    await cdp.detach();
+    // The existing absolute deadline and cancellation still own this session;
+    // neither history event opens another read or constructs a new host.
+    controller.abort();
+    await expect(host.observeSourceReadiness(host.targetId)).rejects.toThrow();
+    expect(await host.close()).toMatchObject({ browserClosed: true, providerRequestsDrained: true });
+    expect(active).toBe(0); expect(acquired).toBe(released);
+  } finally {
+    controller.abort(); await attached?.close().catch(() => {}); await host?.close();
+    server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+}, 60_000);
+
+it("admits an observed native anchor GET and drains its pending old script before an explicit witnessed document GET", async () => {
+  const rootUrl = "https://owned-source.example/", linkedUrl = rootUrl + "public-page/", nextUrl = rootUrl + "public-calendar/";
+  const controller = new AbortController(), deadlineAt = new Date(Date.now() + 60_000), originalDeadline = deadlineAt.getTime();
+  let active = 0, acquired = 0, released = 0, pendingClosed = false, pendingStarted = false, foreignLookups = 0;
+  const requests: string[] = [], families = new Set<string>();
+  const server = createServer({ key: certificate("fixtureKey"), cert: certificate("fixtureCertificate") }, (request, response) => {
+    requests.push(`${request.method} ${request.url}`);
+    if (request.url === "/pending-old.js") {
+      pendingStarted = true; response.on("close", () => { pendingClosed = true; });
+      response.writeHead(200, { "content-type": "application/javascript" }); response.flushHeaders(); return;
+    }
+    const body = request.url === "/" ? '<a id="next" href="/public-page/">Public times</a>' : request.url === "/public-page/"
+      ? '<iframe style="width:300px;height:150px" src="/public-calendar/"></iframe>' : "<p>Public calendar</p>";
+    response.writeHead(200, { "content-type": "text/html" }).end(`<!doctype html><html><head><link rel="icon" href="data:,"></head><body>${body}</body></html>`);
+  });
+  let host: Awaited<ReturnType<typeof createGuardedStagehandSourceBrowser>> | undefined, attached: Browser | undefined;
+  try {
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address(); if (!address || typeof address === "string") throw Error("OWNED_FIXTURE_UNAVAILABLE");
+    host = await createGuardedStagehandSourceBrowser({ initialUrl: rootUrl, timeZone: "UTC", deadlineAt, signal: controller.signal }, {
+      requestLease: async (family, work) => {
+        if (active >= 2 || families.has(family)) return { acquired: false };
+        active++; acquired++; families.add(family);
+        try { return { acquired: true, value: await work() }; } finally { active--; released++; families.delete(family); }
+      },
+      proxyDependencies: { resolveAddresses: async name => { if (name !== "owned-source.example") { foreignLookups++; throw Error("NOT_OWNED_FIXTURE"); } return [{ address: "93.184.216.34", family: 4 }]; }, connect: () => connect({ host: "127.0.0.1", port: address.port }) },
+      launchBrowser: options => launchPublicReadBrowser({ ...options, args: [...options.args ?? [], "--ignore-certificate-errors"] }, { localCdp: true }), contextOptions: { ignoreHTTPSErrors: true },
+    });
+    attached = await chromium.connectOverCDP(host.cdpUrl);
+    const page = attached.contexts().flatMap(context => context.pages())[0], cdp = await page.context().newCDPSession(page);
+    await host.prepareNavigation(rootUrl); await page.goto(rootUrl, { waitUntil: "load" });
+    await expect.poll(() => host!.observeSourceReadiness(host!.targetId)).toMatchObject({ mainDocumentCurrent: true, mainDocumentComplete: true, mainDocumentStatus: 200, pendingReads: 0 });
+    const originalFrame = (await cdp.send("Page.getFrameTree")).frameTree.frame;
+    await host.beforeAction(host.targetId, linkedUrl);
+    await page.locator("#next").click(); await page.waitForURL(linkedUrl);
+    await expect.poll(() => host!.observeSourceReadiness(host!.targetId)).toMatchObject({ mainDocumentCurrent: true, mainDocumentComplete: true, mainDocumentStatus: 200, pendingReads: 0 });
+    const linkedFrame = (await cdp.send("Page.getFrameTree")).frameTree.frame;
+    expect(linkedFrame.id).toBe(originalFrame.id); expect(linkedFrame.loaderId).not.toBe(originalFrame.loaderId);
+    expect(requests).toEqual(["GET /", "GET /public-page/"]);
+    await page.evaluate(() => { const script = document.createElement("script"); script.src = "/pending-old.js"; document.head.append(script); });
+    await expect.poll(() => pendingStarted).toBe(true); expect(active).toBe(1);
+    expect(await host.observeSourceReadiness(host.targetId)).toMatchObject({ mainDocumentCurrent: true, mainDocumentStatus: 200, pendingReads: 1 });
+    const witness = await host.prepareFrameNavigation(host.targetId, nextUrl);
+    expect(witness).toMatchObject({ pageUrl: linkedUrl, frames: [{ src: nextUrl, visible: true }] });
+    await expect.poll(() => pendingClosed).toBe(true);
+    expect(active).toBe(0); expect(acquired).toBe(released);
+    expect(requests).toEqual(["GET /", "GET /public-page/", "GET /pending-old.js"]);
+    expect(await host.observeSourceReadiness(host.targetId)).toMatchObject({ mainDocumentCurrent: false, mainDocumentComplete: false, mainDocumentStatus: null, pendingReads: 0 });
+    await page.goto(nextUrl, { waitUntil: "load" });
+    expect(await host.completeFrameNavigation(host.targetId, nextUrl)).toMatchObject({ pageUrl: linkedUrl, frameUrl: nextUrl, finalUrl: nextUrl, redirects: [] });
+    expect(await host.observeSourceReadiness(host.targetId)).toMatchObject({ mainDocumentCurrent: true, mainDocumentComplete: true, mainDocumentStatus: 200, pendingReads: 0 });
+    expect(requests).toEqual(["GET /", "GET /public-page/", "GET /pending-old.js", "GET /public-calendar/"]);
+    expect(deadlineAt.getTime()).toBe(originalDeadline); expect(foreignLookups).toBe(0);
+    await cdp.detach();
+    expect(await host.close()).toMatchObject({ browserClosed: true, providerRequestsDrained: true });
+    expect(active).toBe(0); expect(acquired).toBe(released);
+  } finally {
+    controller.abort(); await attached?.close().catch(() => {}); await host?.close();
+    server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+}, 60_000);
+
 async function ownedPopupFixture(workerCase: boolean, ackMode: AckMode) {
   popupAck.mode = ackMode; popupAck.armed = false; popupAck.pending = 0; popupAck.earlySuccessor = false; popupAck.forked = false; popupAck.oversized = false;
   popupAck.delayed = 0;
@@ -204,6 +337,20 @@ async function ownedPopupFixture(workerCase: boolean, ackMode: AckMode) {
     await popup.waitForFunction(() => (globalThis as unknown as { inlineReadFinished?: boolean }).inlineReadFinished === true);
     const ids = await Promise.all(page.context().pages().map(async current => { const cdp = await current.context().newCDPSession(current); const value = await cdp.send("Target.getTargetInfo"); await cdp.detach(); return value.targetInfo.targetId; }));
     expect(await host.assertGuardedTargets(ids)).toBe(true);
+    const popupCdp = await popup.context().newCDPSession(popup), popupId = (await popupCdp.send("Target.getTargetInfo")).targetInfo.targetId;
+    await popupCdp.detach();
+    await expect.poll(() => host!.observeSourceReadiness(popupId)).toMatchObject({ mainDocumentCurrent: true, mainDocumentComplete: true, mainDocumentStatus: 200, pendingReads: 0 });
+    const nextPopupUrl = "https://owned-final.example/second-calendar?keep=full";
+    await popup.evaluate(url => { const iframe = document.createElement("iframe"); iframe.src = url; iframe.style.cssText = "width:300px;height:150px"; document.body.append(iframe); }, nextPopupUrl);
+    const beforeExplicit = seen.length;
+    expect(await host.prepareFrameNavigation(popupId, nextPopupUrl)).toMatchObject({ pageUrl: "https://owned-final.example/calendar?keep=full", frames: [{ src: nextPopupUrl, visible: true }] });
+    // The old bootstrap GET cannot attest readiness between the drained
+    // boundary and the next actual main-document GET, even at its old URL.
+    expect(await host.observeSourceReadiness(popupId)).toMatchObject({ mainDocumentCurrent: false, mainDocumentComplete: false, mainDocumentStatus: null, pendingReads: 0 });
+    expect(seen.length).toBe(beforeExplicit);
+    await popup.goto(nextPopupUrl, { waitUntil: "load" });
+    expect(await host.completeFrameNavigation(popupId, nextPopupUrl)).toMatchObject({ finalUrl: nextPopupUrl, redirects: [] });
+    await expect.poll(() => host!.observeSourceReadiness(popupId)).toMatchObject({ mainDocumentCurrent: true, mainDocumentComplete: true, mainDocumentStatus: 200, pendingReads: 0 });
     const beforeDenied = seen.length;
     const deniedPopupPromise = page.waitForEvent("popup"); await page.locator("#book span").click(); const deniedPopup = await deniedPopupPromise;
     await deniedPopup.waitForLoadState("domcontentloaded").catch(() => {});

@@ -14,7 +14,7 @@ import { canonicalStagehandHostEntry } from "./stagehand-source-browser";
 
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; }
 async function installed(maxRequests?: number, signal?: AbortSignal, afterRoute?: (route: NativeReadRoute) => Promise<void>, responseProfile?: PublicBrowserResponseProfile,
-  onCommandFailure?: (diagnostic: NativeRequestDiagnostic) => void) {
+  onCommandFailure?: (diagnostic: NativeRequestDiagnostic) => void, controllerGetIntent?: (sourceUrl: string, targetUrl: string) => boolean) {
   const events = new Map<string, (event: unknown) => void>(), routes: NativeReadRoute[] = [];
   const close = vi.fn(async () => {}), detach = vi.fn(async () => {}), failures: string[] = [], subframes: object[] = [], rejections: NativeRequestDiagnostic[] = [];
   const main = { page: () => page };
@@ -23,7 +23,7 @@ async function installed(maxRequests?: number, signal?: AbortSignal, afterRoute?
       : name === "Fetch.getResponseBody" ? { body: `body-${value?.requestId}`, base64Encoded: false } : {}), detach };
   const page = { context: () => ({ newCDPSession: async () => cdp }), mainFrame: () => main, close } as unknown as Page;
   const handler = vi.fn(async (route: NativeReadRoute) => { routes.push(route); await afterRoute?.(route); });
-  const guard = await installNativeRedirectRouting(page, handler, { timeoutMs: 100, maxRequests, signal, responseProfile, onCommandFailure,
+  const guard = await installNativeRedirectRouting(page, handler, { timeoutMs: 100, maxRequests, signal, responseProfile, onCommandFailure, controllerGetIntent,
     onFailure: code => failures.push(code), onSubframeBlocked: request => subframes.push(request), onRequestRejected: request => rejections.push(request) });
   const request = (id: string, values: object = {}) => events.get("Fetch.requestPaused")!({ requestId: id, networkId: `network-${id}`,
     frameId: "main", resourceType: "XHR", request: { url: "https://example.org/data", method: "GET", headers: {} }, ...values });
@@ -33,6 +33,58 @@ async function installed(maxRequests?: number, signal?: AbortSignal, afterRoute?
 function playwrightRoute(test: Awaited<ReturnType<typeof installed>>) {
   return { request: () => ({ frame: () => test.main }), continue: vi.fn(async () => {}), abort: vi.fn(async () => {}), fulfill: vi.fn() } as unknown as Route;
 }
+
+describe("current completed native main-document read", () => {
+  const url = "https://booking.example.org/", spa = "https://booking.example.org/book-a-tee-time/";
+  async function prepared(ack?: ReturnType<typeof deferred<object>>, drain?: ReturnType<typeof deferred<void>>) {
+    const test = await installed(undefined, undefined, async () => { if (drain) await drain.promise; });
+    const send = test.cdp.send.getMockImplementation()!;
+    test.cdp.send.mockImplementation((name, value) => name === "Fetch.continueResponse" && ack ? ack.promise : send(name, value));
+    await test.guard.beginDocumentNavigation(test.main as never);
+    test.events.get("Network.requestWillBeSent")!({ requestId: "document-network", frameId: "main", loaderId: "document-loader", type: "Document",
+      request: { url, method: "GET", headers: {} } });
+    const values = { networkId: "document-network", resourceType: "Document", request: { url, method: "GET", headers: {} } };
+    test.request("document", values); await vi.waitFor(() => expect(test.routes).toHaveLength(1)); await test.routes[0].continue();
+    test.response("document", { ...values, responseHeaders: [{ name: "Content-Type", value: "text/html" }] });
+    await vi.waitFor(() => expect(test.cdp.send.mock.calls.some(([name]) => name === "Fetch.continueResponse")).toBe(true));
+    test.events.get("Page.frameNavigated")!({ frame: { id: "main", loaderId: "document-loader", url } });
+    const request = test.routes[0].request(), captured = (current = url) => ({ frameId: "main", loaderId: "document-loader", url: current });
+    const current = (value = captured()) => test.guard.isCurrentCompletedDocumentRead(request, test.main as never, value);
+    return { ...test, request, captured, current };
+  }
+  it("requires the actual response ACK and handler drain before retaining a same-loader history transition", async () => {
+    const ack = deferred<object>(), drain = deferred<void>(), test = await prepared(ack, drain);
+    try {
+      expect(test.current()).toBe(false); ack.resolve({}); await test.request.response(); expect(test.current()).toBe(false);
+      drain.resolve(); await vi.waitFor(() => expect(test.current()).toBe(true));
+      expect(test.current(test.captured(spa))).toBe(false);
+      test.events.get("Page.navigatedWithinDocument")!({ frameId: "foreign", url: spa }); expect(test.current(test.captured(spa))).toBe(false);
+      test.events.get("Page.navigatedWithinDocument")!({ frameId: "main", url: spa }); expect(test.current(test.captured(spa))).toBe(true);
+      expect(test.current()).toBe(false); expect(test.request.url()).toBe(url);
+      expect(attestedNativeDocumentRedirects(test.request, new Set([url]))).toBeUndefined();
+      expect(test.cdp.send.mock.calls.filter(([name]) => name === "Fetch.continueRequest")).toHaveLength(1);
+    } finally { ack.resolve({}); drain.resolve(); await test.guard.close(); }
+  });
+  it.each(["foreign frame", "foreign loader", "copied request", "foreign owner", "identity revised", "network failed", "unsafe", "foreign URL", "boundary", "closed"])(
+    "rejects %s without replacing transport evidence", async mode => {
+      const test = await prepared(), foreign = mode === "foreign owner" ? await installed() : undefined;
+      try {
+        await test.request.response(); await vi.waitFor(() => expect(test.current()).toBe(true));
+        test.events.get("Page.navigatedWithinDocument")!({ frameId: "main", url: spa }); const captured = test.captured(spa);
+        if (mode === "foreign frame") captured.frameId = "foreign";
+        if (mode === "foreign loader") captured.loaderId = "foreign";
+        if (mode === "identity revised") test.events.get("Network.requestWillBeSent")!({ requestId: "document-network", frameId: "main", loaderId: "document-loader", type: "Document", request: { url, method: "GET", headers: {} } });
+        if (mode === "network failed") test.events.get("Network.loadingFailed")!({ requestId: "document-network" });
+        if (mode === "unsafe" || mode === "foreign URL") { captured.url = mode === "unsafe" ? "https://booking.example.org/account" : "https://other.example.org/public";
+          test.events.get("Page.navigatedWithinDocument")!({ frameId: "main", url: captured.url }); }
+        if (mode === "boundary") await test.guard.beginDocumentNavigation(test.main as never);
+        if (mode === "closed") await test.guard.close();
+        const guard = foreign?.guard ?? test.guard;
+        const request = mode === "copied request" ? { ...test.request } : test.request;
+        expect(guard.isCurrentCompletedDocumentRead(request, test.main as never, captured)).toBe(false);
+      } finally { await test.guard.close(); await foreign?.guard.close(); }
+    });
+});
 
 describe("closed continuation request lifecycle diagnostics", () => {
   it("captures exact failed request role before wrapping without changing the thrown error", async () => {
@@ -1531,11 +1583,11 @@ describe("native one-shot renderer navigation ownership", () => {
     frameId: "main", reason: "scriptInitiated", disposition: "currentTab", url: target, ...values });
   const successor = (test: Test, id = "successor", values: object = {}) => test.request(id, { resourceType: "Document",
     request: { url: target, method: "GET", headers: {} }, ...values });
-  const prepare = async (test: Test, commit = true) => {
+  const prepare = async (test: Test, commit = true, html = false) => {
     await test.guard.beginDocumentNavigation(test.main as never);
     identity(test, "document", "loader-source", source);
     test.request("document", { resourceType: "Document" }); await test.routes[0].continue();
-    test.response("document", { resourceType: "Document" });
+    test.response("document", { resourceType: "Document", ...(html ? { responseHeaders: [{ name: "Content-Type", value: "text/html" }] } : {}) });
     await test.routes[0].request().response();
     if (commit) test.events.get("Page.frameNavigated")!({ frame: { id: "main", loaderId: "loader-source", url: source } });
   };
@@ -1559,6 +1611,65 @@ describe("native one-shot renderer navigation ownership", () => {
       expect(test.failures).toEqual([]);
     } finally { ack.resolve(); await test.guard.close(); }
   });
+
+  it("admits one exact observed anchor GET through native successor retirement without claiming an HTTP redirect", async () => {
+    let available = true;
+    const grant = vi.fn((from: string, to: string) => { const admitted = available && from === source && to === target; available = false; return admitted; });
+    const test = await installed(undefined, undefined, undefined, undefined, undefined, grant);
+    try {
+      await prepare(test, true, true); intent(test, { reason: "anchorClick" });
+      expect(grant).toHaveBeenCalledExactlyOnceWith(source, target);
+      identity(test, "successor", "loader-next"); successor(test);
+      await vi.waitFor(() => expect(test.routes).toHaveLength(2));
+      expect(test.routes[0].request().signal?.aborted).toBe(true);
+      expect(test.routes[1].request().url()).toBe(target);
+      expect(test.routes[1].request().redirectedFrom()).toBeNull();
+      expect(test.failures).toEqual([]);
+    } finally { await test.guard.close(); }
+  });
+
+  it.each(["current", "revised", "failed"])("checks completed anchor GET then same-loader SPA document ownership (%s)", async mode => {
+    const test = await installed(undefined, undefined, undefined, undefined, undefined, (from, to) => from === source && to === target);
+    try {
+      await prepare(test, true, true); intent(test, { reason: "anchorClick" });
+      identity(test, "successor", "loader-next"); successor(test);
+      await vi.waitFor(() => expect(test.routes).toHaveLength(2));
+      await test.routes[1].continue();
+      test.response("successor", { resourceType: "Document", request: { url: target, method: "GET", headers: {} }, responseHeaders: [{ name: "Content-Type", value: "text/html" }] });
+      await test.routes[1].request().response();
+      test.events.get("Page.frameNavigated")!({ frame: { id: "main", loaderId: "loader-next", url: target } });
+      const request = test.routes[1].request(), spa = target + "/public", captured = { frameId: "main", loaderId: "loader-next", url: spa };
+      test.events.get("Page.navigatedWithinDocument")!({ frameId: "main", url: spa });
+      await vi.waitFor(() => expect(test.guard.isCurrentCompletedDocumentRead(request, test.main as never, captured)).toBe(true));
+      if (mode === "revised") identity(test, "successor", "loader-next", target);
+      if (mode === "failed") test.events.get("Network.loadingFailed")!({ requestId: "network-successor" });
+      expect(test.guard.isCurrentCompletedDocumentRead(request, test.main as never, captured)).toBe(mode === "current");
+      expect(request.url()).toBe(target);
+      expect(test.guard.isCurrentCompletedDocumentRead(test.routes[0].request(), test.main as never, captured)).toBe(false);
+    } finally { await test.guard.close(); }
+  });
+
+  it.each(["denied", "foreign frame", "wrong target", "stale identity", "expired", "POST", "HEAD", "GET body", "reused"])(
+    "rejects an observed anchor with %s without dispatching its successor", async mode => {
+      let available = true;
+      const grant = vi.fn((from: string, to: string) => { const admitted = mode !== "denied" && available && from === source && to === target; available = false; return admitted; });
+      const test = await installed(undefined, undefined, undefined, undefined, undefined, grant);
+      let clock: ReturnType<typeof vi.spyOn> | undefined;
+      try {
+        await prepare(test, true, true);
+        if (mode === "stale identity") identity(test, "document", "loader-source", source);
+        intent(test, { reason: "anchorClick", ...(mode === "foreign frame" ? { frameId: "child" } : mode === "wrong target" ? { url: source + "/other" } : {}) });
+        if (mode === "foreign frame" || mode === "stale identity") expect(grant).not.toHaveBeenCalled();
+        if (mode === "reused") intent(test, { reason: "anchorClick" });
+        if (mode === "expired") clock = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 101);
+        const method = mode === "POST" ? "POST" : mode === "HEAD" ? "HEAD" : "GET";
+        identity(test, "successor", "loader-next", target, method);
+        successor(test, "successor", { request: { url: target, method, headers: {}, ...(mode === "GET body" ? { hasPostData: true, postData: "body" } : {}) } });
+        await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce());
+        expect(test.routes).toHaveLength(1);
+        expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "successor")).toBe(false);
+      } finally { clock?.mockRestore(); await test.guard.close(); }
+    });
 
   it.each(["missing", "wrong target", "foreign frame", "anchor", "new tab", "uncommitted", "wrong commit URL", "wrong commit loader", "expired", "network before intent", "POST", "GET body"])(
     "rejects unknown document ownership with %s intent", async mode => {
