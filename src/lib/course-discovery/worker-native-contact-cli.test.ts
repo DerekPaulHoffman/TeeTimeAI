@@ -6,7 +6,10 @@ import { describe, expect, it } from "vitest";
 import ts from "typescript";
 
 describe("actual warm CLI native contact forwarding", () => {
-  it("executes the CLI's actual callback under tsx, opting in only parsed CPS postal-proof recipes", () => {
+  it.each([
+    { name: "current private context", trustedContext: { canonicalCoursePhone: "+19165554653" } },
+    { name: "legacy undefined context", trustedContext: undefined },
+  ])("executes the CLI's actual callback under tsx with $name, opting in only parsed CPS postal-proof recipes", ({ trustedContext }) => {
     const path = resolve("scripts/automation/course-discovery-browser.ts");
     const text = readFileSync(path, "utf8"), tree = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true);
     const callbacks: string[] = [];
@@ -20,22 +23,24 @@ describe("actual warm CLI native contact forwarding", () => {
     // test callback. The real helper runtime must serialize no module helper.
     const expression = ts.transpile(callbacks[0], { target: ts.ScriptTarget.ES2022 }).trim().replace(/;$/u, "");
     expect(text).toContain("const recipe = parseAccessRecipe(value.recipe)");
+    expect(text).toContain("const trustedContext = discoveryTrustedContextSchema.optional().parse(value.trustedContext)");
     expect(text).toContain("executeAccessRecipe(recipe,");
-    const script = `const expression=${JSON.stringify(expression)};
+    const script = `const expression=${JSON.stringify(expression)},trustedContext=${JSON.stringify(trustedContext) ?? "undefined"};
       const cases=[{engine:'EXISTING_ADAPTER',adapter:{family:'CPS',officialPostalConflictProof:{kind:'CANONICAL_PHONE_POSTAL_CONFLICT'}}},
         {engine:'EXISTING_ADAPTER',adapter:{family:'CPS'}},
         {engine:'EXISTING_ADAPTER',adapter:{family:'TEEITUP',officialPostalConflictProof:{kind:'OFFICIAL_POSTAL_CONFLICT'}}},
         {engine:'HTTP_JSON'}];
-      const seen=[];for(const recipe of cases){const requestLease=()=>{};
-        const readNativeOfficialIdentityPage=async(source,url,deadline,options)=>{seen.push({contacts:options.collectPublicCourseContacts===true,lease:options.requestLease===requestLease,source,url,deadline:deadline.toISOString()});return{privatePage:true};};
-        const callback=Function('recipe','requestLease','readNativeOfficialIdentityPage','return ('+expression+')')(recipe,requestLease,readNativeOfficialIdentityPage);
+      const seen=[];for(const recipe of cases){const requestLease=()=>{},before=JSON.stringify(trustedContext);
+        const readNativeOfficialIdentityPage=async(source,url,deadline,options)=>{seen.push({contacts:options.collectPublicCourseContacts===true,lease:options.requestLease===requestLease,trustedContextForwarded:options.trustedContext===trustedContext,privateContextPresent:options.trustedContext!==undefined,source,url,deadline:deadline.toISOString()});return{privatePage:true};};
+        const callback=Function('recipe','requestLease','trustedContext','readNativeOfficialIdentityPage','return ('+expression+')')(recipe,requestLease,trustedContext,readNativeOfficialIdentityPage);
         const value=await callback({officialUrl:'https://official.example/'},'https://official.example/',new Date('2030-01-01T00:00:00Z'));
-        if(!value.privatePage)throw Error('ACTUAL_WRAPPER_RESULT_LOST');}
+        if(!value.privatePage)throw Error('ACTUAL_WRAPPER_RESULT_LOST');if(JSON.stringify(trustedContext)!==before)throw Error('PRIVATE_CONTEXT_MUTATED');}
       process.stdout.write(JSON.stringify(seen));`;
     const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], { cwd: process.cwd(), encoding: "utf8", windowsHide: true, timeout: 10_000 });
     expect(child.status, child.stderr).toBe(0);
     const seen = JSON.parse(child.stdout);
     expect(seen.map((row: { contacts: boolean }) => row.contacts)).toEqual([true, false, false, false]);
+    expect(seen.every((row: { trustedContextForwarded: boolean; privateContextPresent: boolean }) => row.trustedContextForwarded && row.privateContextPresent === (trustedContext !== undefined))).toBe(true);
     expect(seen.every((row: { lease: boolean; url: string; deadline: string }) => row.lease && row.url === "https://official.example/" && row.deadline === "2030-01-01T00:00:00.000Z")).toBe(true);
   });
 });

@@ -54,13 +54,14 @@ describe("closed official-source diagnostics", () => {
     expect(diagnostics.at(-1)).toMatchObject({ stage });
     expect(JSON.stringify(diagnostics)).not.toMatch(/https:|private|Main Street|Other Road|<h1>/u);
   });
-  it("retains derivation rejection rather than only the resulting legacy filtered-source error", async () => {
+  it("retains precise filtered-location derivation rejection without issuing a legacy request", async () => {
     const document = page(); document.visibleEvidence.addressTexts = [];
     const fetch = vi.fn<typeof globalThis.fetch>(), onOfficialSourceDiagnostic = vi.fn();
-    await expect(inspectExistingAdapter(source, { venueMatches: venueProofMatches, officialIdentityPage: document, fetch, onOfficialSourceDiagnostic })).rejects.toThrow("INVALID_ADAPTER_SOURCE");
+    await expect(inspectExistingAdapter(source, { venueMatches: venueProofMatches, officialIdentityPage: document, fetch, onOfficialSourceDiagnostic })).rejects.toThrow("USCHEDULE_PUBLIC_LOCATION_UNVERIFIED");
     expect(onOfficialSourceDiagnostic.mock.lastCall?.[0]).toMatchObject({ stage: "RENDERED_ADDRESS", rawVenueMatches: true, rawLinkMatches: true, rawAddressMatches: true,
       renderedVenueMatches: true, renderedLinkMatches: true, renderedAddressMatches: false, derivationRejected: true, legacyFallback: true });
     expect(fetch).not.toHaveBeenCalled();
+    expect(JSON.stringify(onOfficialSourceDiagnostic.mock.calls)).not.toMatch(/https:|Main Street|<h1>/u);
   });
   it("inert warm derivation never claims skipped rendered checks, and throwing callbacks cannot affect validation", () => {
     const values: unknown[] = [], document = page();
