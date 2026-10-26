@@ -108,6 +108,86 @@ it("attests a unique native public source without dispatching provider frames an
   } finally { controller.abort(); await host?.close(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
 }, 60_000);
 
+it("renders a public source from an anonymous cross-host fetch redirect under the destination lease and rejects private or transactional reads", async () => {
+  const rootUrl = "https://owned-source.example/", bootstrapUrl = "https://owned-bootstrap.example/catalog.json";
+  const dataUrl = "https://owned-data.example/catalog.json", bookingUrl = "https://clients.uschedule.com/public-studio/booking";
+  const hosts = new Set(["owned-source.example", "owned-bootstrap.example", "owned-data.example"]);
+  const controller = new AbortController(), deadlineAt = new Date(Date.now() + 60_000), originalDeadline = deadlineAt.getTime();
+  const families = new Set<string>(), leaseFamilies: string[] = [], seen: string[] = [];
+  let active = 0, acquired = 0, released = 0, maxGlobal = 0, unleased = 0, unexpectedLookup = 0, destinationBeforeParentRelease = false;
+  const server = createServer({ key: certificate("fixtureKey"), cert: certificate("fixtureCertificate") }, (request, response) => {
+    const name = (request.headers.host ?? "").split(":")[0], path = request.url ?? "/";
+    seen.push(`${request.method} ${name}${path}`);
+    if (!families.has(requestFamilyForUrl("https://" + name + path))) unleased++;
+    if (!hosts.has(name)) { response.writeHead(403).end(); return; }
+    const cors = { "access-control-allow-origin": "*" };
+    if (name === "owned-bootstrap.example") {
+      const location = path === "/transaction-redirect.json"
+        ? "https://owned-data.example/ASP/appt_req.asp?Stime=10" : dataUrl;
+      response.writeHead(302, { ...cors, location }).end(); return;
+    }
+    if (name === "owned-data.example") {
+      if (families.has(requestFamilyForUrl(bootstrapUrl))) destinationBeforeParentRelease = true;
+      response.writeHead(200, { ...cors, "content-type": "application/json" }).end(JSON.stringify({ href: bookingUrl })); return;
+    }
+    response.writeHead(200, { "content-type": "text/html" }).end(`<!doctype html><html><head><link rel="icon" href="data:,"></head><body>
+      <p>Public booking information</p><script>
+      fetch(${JSON.stringify(bootstrapUrl)}, { credentials: 'omit' }).then(response => {
+        if (!response.ok) throw Error('PUBLIC_BOOTSTRAP_FAILED'); return response.json();
+      }).then(value => { const link = document.createElement('a'); link.id = 'public-booking'; link.href = value.href;
+        link.textContent = 'Public booking'; document.body.append(link); });
+      </script></body></html>`);
+  });
+  let host: Awaited<ReturnType<typeof createGuardedStagehandSourceBrowser>> | undefined, attached: Browser | undefined;
+  try {
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address(); if (!address || typeof address === "string") throw Error("OWNED_FIXTURE_UNAVAILABLE");
+    host = await createGuardedStagehandSourceBrowser({ initialUrl: rootUrl, timeZone: "UTC", deadlineAt, signal: controller.signal }, {
+      requestLease: async (family, work) => {
+        if (active >= 2 || families.has(family)) return { acquired: false };
+        active++; acquired++; families.add(family); leaseFamilies.push(family); maxGlobal = Math.max(maxGlobal, active);
+        try { return { acquired: true, value: await work() }; } finally { active--; released++; families.delete(family); }
+      },
+      proxyDependencies: { resolveAddresses: async name => { if (!hosts.has(name)) { unexpectedLookup++; throw Error("NOT_OWNED_FIXTURE"); } return [{ address: "93.184.216.34", family: 4 }]; }, connect: () => connect({ host: "127.0.0.1", port: address.port }) },
+      launchBrowser: options => launchPublicReadBrowser({ ...options, args: [...options.args ?? [], "--ignore-certificate-errors"] }, { localCdp: true }), contextOptions: { ignoreHTTPSErrors: true },
+    });
+    attached = await chromium.connectOverCDP(host.cdpUrl);
+    const page = attached.contexts().flatMap(context => context.pages())[0];
+    await host.prepareNavigation(rootUrl); await page.goto(rootUrl, { waitUntil: "load" });
+    await page.locator("#public-booking").waitFor({ state: "visible" });
+    await expect.poll(() => host!.observeSourceReadiness(host!.targetId)).toMatchObject({ mainDocumentCurrent: true, mainDocumentComplete: true, mainDocumentStatus: 200, pendingReads: 0 });
+    expect(await host.observeUniqueSource(host.targetId)).toMatchObject({ kind: "NATIVE_UNIQUE_SUPPORTED_SOURCE", pageUrl: rootUrl, url: bookingUrl, family: "USCHEDULE", via: "LINK" });
+    expect(seen).toEqual(["GET owned-source.example/", "GET owned-bootstrap.example/catalog.json", "GET owned-data.example/catalog.json"]);
+    expect(leaseFamilies).toEqual([rootUrl, bootstrapUrl, dataUrl].map(requestFamilyForUrl));
+    expect(destinationBeforeParentRelease).toBe(false); expect(unleased).toBe(0);
+    await page.evaluate(async () => { await Promise.allSettled([
+      fetch("/forbidden-post", { method: "POST", body: "fixture=only" }),
+      // Deliberately synthetic header; no real credential or account is used.
+      fetch("/forbidden-header", { headers: { Authorization: "owned-fixture-only" } }),
+      fetch("https://127.0.0.1/private", { credentials: "omit" }),
+    ]); });
+    await expect.poll(() => host!.observeSourceReadiness(host!.targetId)).toMatchObject({ mainDocumentCurrent: true, mainDocumentStatus: 200, pendingReads: 0 });
+    expect(seen).toHaveLength(3); expect(leaseFamilies).toHaveLength(3); expect(host.diagnostics().closed).toBe(false);
+    // The public parent may run, never its transaction successor. Depending on
+    // the rejecting boundary, denial can be terminal or leave the source live.
+    await page.evaluate(async () => { await fetch("https://owned-bootstrap.example/transaction-redirect.json", { credentials: "omit" }).catch(() => undefined); }).catch(() => undefined);
+    await expect.poll(() => host!.diagnostics().activeRequests).toBe(0);
+    if (host.diagnostics().terminalFailure) await expect(host.observeUniqueSource(host.targetId)).rejects.toThrow();
+    else expect(await host.observeUniqueSource(host.targetId)).toMatchObject({ kind: "NATIVE_UNIQUE_SUPPORTED_SOURCE", pageUrl: rootUrl, url: bookingUrl, family: "USCHEDULE", via: "LINK" });
+    expect(await host.close()).toMatchObject({ browserClosed: true, providerRequestsDrained: true });
+    const deniedParents = seen.slice(3);
+    expect(deniedParents.length).toBeLessThanOrEqual(1);
+    expect(deniedParents.every(value => value === "GET owned-bootstrap.example/transaction-redirect.json")).toBe(true);
+    expect(leaseFamilies.slice(3)).toEqual(deniedParents.map(() => requestFamilyForUrl(bootstrapUrl)));
+    expect(unleased).toBe(0); expect(unexpectedLookup).toBe(0); expect(maxGlobal).toBeLessThanOrEqual(2);
+    expect(host.diagnostics().admittedRequests).toBe(3 + deniedParents.length); expect(deadlineAt.getTime()).toBe(originalDeadline);
+    expect(active).toBe(0); expect(acquired).toBe(released); expect(families.size).toBe(0);
+  } finally {
+    controller.abort(); await attached?.close().catch(() => {}); await host?.close();
+    server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+}, 60_000);
+
 it("keeps the completed owned GET current across a real history navigation without granting iframe history ownership or a new budget", async () => {
   const initialUrl = "https://owned-source.example/", bookingUrl = initialUrl + "book-a-time/";
   const controller = new AbortController(), deadlineAt = new Date(Date.now() + 60_000), originalDeadline = deadlineAt.getTime();

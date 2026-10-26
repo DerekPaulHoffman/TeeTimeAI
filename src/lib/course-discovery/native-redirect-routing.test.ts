@@ -94,6 +94,63 @@ describe("closed redirect rejection reasons", () => {
   });
 });
 
+describe("source-only public data redirect provenance", () => {
+  const source = "https://example.org/public-data", target = "https://data.example.net/public-data";
+  const network = (test: Awaited<ReturnType<typeof installed>>, id: string, url: string, kind: string, method = "GET", body = false) =>
+    test.events.get("Network.requestWillBeSent")!({ requestId: id, frameId: "main", loaderId: "loader-source", type: kind,
+      request: { url, method, ...(body ? { hasPostData: true, postData: "body" } : {}) } });
+  async function prepared(profile: PublicBrowserResponseProfile | undefined, rejectChild = false, parentKind = "XHR") {
+    const test = await installed(undefined, undefined, async route => { if (rejectChild && route.request().url() === target) await route.abort(); }, profile);
+    await test.guard.beginDocumentNavigation(test.main as never);
+    network(test, "network-document", "https://example.org/", "Document");
+    test.request("document", { resourceType: "Document", request: { url: "https://example.org/", method: "GET", headers: {} } });
+    await test.routes[0].continue(); test.response("document", { resourceType: "Document", request: { url: "https://example.org/", method: "GET", headers: {} }, responseHeaders: [{ name: "Content-Type", value: "text/html" }] });
+    await test.routes[0].request().response();
+    test.events.get("Page.frameNavigated")!({ frame: { id: "main", loaderId: "loader-source", url: "https://example.org/" } });
+    network(test, "network-parent", source, parentKind);
+    test.request("parent", { networkId: "network-parent", resourceType: parentKind, request: { url: source, method: "GET", headers: {} } });
+    await vi.waitFor(() => expect(test.routes).toHaveLength(2)); await test.routes[1].continue();
+    return test;
+  }
+  it.each([["XHR", "XHR"], ["Fetch", "Fetch"], ["XHR", "Fetch"], ["Fetch", "XHR"]])("reaches unchanged caller policy only for source-profile %s→%s GET", async (from, to) => {
+    const test = await prepared("SOURCE_ROUTING", false, from);
+    try {
+      test.response("parent", { networkId: "network-parent", resourceType: from, request: { url: source, method: "GET", headers: {} }, responseStatusCode: 302, responseHeaders: [{ name: "Location", value: target }] });
+      await test.routes[1].request().response(); network(test, "network-parent", target, to);
+      test.request("child", { networkId: "network-parent", redirectedRequestId: "parent", resourceType: to, request: { url: target, method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(test.routes).toHaveLength(3));
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "child")).toBe(false);
+      await test.routes[2].continue();
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "child")).toBe(true);
+      expect(test.failures).toEqual([]);
+    } finally { await test.guard.close(); }
+  });
+  it("retains caller denial before destination dispatch even with valid source redirect provenance", async () => {
+    const test = await prepared("SOURCE_ROUTING", true);
+    try {
+      test.response("parent", { networkId: "network-parent", request: { url: source, method: "GET", headers: {} }, responseStatusCode: 302, responseHeaders: [{ name: "Location", value: target }] });
+      await test.routes[1].request().response(); network(test, "network-parent", target, "XHR");
+      test.request("child", { networkId: "network-parent", redirectedRequestId: "parent", request: { url: target, method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(test.routes).toHaveLength(3));
+      await vi.waitFor(() => expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.failRequest" && value?.requestId === "child")).toBe(true));
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "child")).toBe(false);
+    } finally { await test.guard.close(); }
+  });
+  it.each(["default", "HEAD", "POST", "body", "missing location", "wrong location", "network", "loader", "frame", "unsafe URL"])("still rejects %s before source data destination handler", async mode => {
+    const test = await prepared(mode === "default" ? undefined : "SOURCE_ROUTING"), url = mode === "unsafe URL" ? "https://data.example.net/account" : target;
+    try {
+      test.response("parent", { networkId: "network-parent", request: { url: source, method: "GET", headers: {} }, responseStatusCode: 302,
+        responseHeaders: mode === "missing location" ? [] : [{ name: "Location", value: mode === "wrong location" ? target + "/other" : url }] });
+      await test.routes[1].request().response();
+      const id = mode === "network" ? "network-other" : "network-parent", method = mode === "HEAD" ? "HEAD" : mode === "POST" ? "POST" : "GET";
+      test.events.get("Network.requestWillBeSent")!({ requestId: id, frameId: mode === "frame" ? "foreign" : "main", loaderId: mode === "loader" ? "foreign" : "loader-source", type: "XHR", request: { url, method, ...(mode === "body" ? { hasPostData: true, postData: "body" } : {}) } });
+      test.request("child", { networkId: id, redirectedRequestId: "parent", request: { url, method, headers: {}, ...(mode === "body" ? { hasPostData: true, postData: "body" } : {}) } });
+      await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce()); expect(test.routes).toHaveLength(2);
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "child")).toBe(false);
+    } finally { await test.guard.close(); }
+  });
+});
+
 describe("current completed native main-document read", () => {
   const url = "https://booking.example.org/", spa = "https://booking.example.org/book-a-tee-time/";
   async function prepared(ack?: ReturnType<typeof deferred<object>>, drain?: ReturnType<typeof deferred<void>>) {
@@ -1249,6 +1306,28 @@ describe("native document-generation retirement", () => {
       ack.resolve({}); await boundary;
       expect(test.guard.pendingReads).toBe(0); expect(test.failures).toEqual([]); expect(test.rejections).toEqual([]);
     } finally { ack.resolve({}); await test.guard.close(); }
+  });
+
+  it.each(["exact", "no terminal", "foreign terminal", "revised identity", "foreign response"])("drains an independently terminal retired late response only for exact native identity (%s)", async mode => {
+    const test = await installed(), stopped = deferred<object>(), send = test.cdp.send.getMockImplementation()!;
+    let boundary: Promise<void> | undefined;
+    try {
+      await startDocument(test); await test.routes[0].continue(); test.response("document", { resourceType: "Document" }); await test.routes[0].request().response();
+      identity(test, "active", "loader-one", "Script"); test.request("active", { resourceType: "Script" }); await test.routes[1].continue();
+      test.cdp.send.mockImplementation((name, value) => name === "Page.stopLoading" ? stopped.promise : name === "Fetch.failRequest" && value?.requestId === "active" ? Promise.reject(new Error("Invalid InterceptionId")) : send(name, value));
+      boundary = test.guard.beginDocumentNavigation(test.main as never); boundary.catch(() => {});
+      await vi.waitFor(() => expect(test.cdp.send.mock.calls.some(([name]) => name === "Page.stopLoading")).toBe(true));
+      if (mode === "revised identity") identity(test, "active", "loader-one", "Script");
+      if (mode !== "no terminal") test.events.get("Network.loadingFailed")!({ requestId: mode === "foreign terminal" ? "network-foreign" : "network-active", canceled: true, errorText: "net::ERR_ABORTED" });
+      test.response("active", { resourceType: "Script", ...(mode === "foreign response" ? { frameId: "foreign" } : {}) });
+      if (mode === "exact") {
+        await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0)); stopped.resolve({}); await boundary;
+        expect(test.failures).toEqual([]); expect(test.guard.firstFatal).toBeUndefined();
+        expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.failRequest" && value?.requestId === "active")).toBe(false);
+      } else { await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce()); stopped.resolve({}); await boundary.catch(() => {}); }
+      expect(test.cdp.send.mock.calls.some(([name, value]) => ["Fetch.getResponseBody", "Fetch.continueResponse"].includes(name) && value?.requestId === "active")).toBe(false);
+      await expect(test.routes[1].request().response()).rejects.toThrow();
+    } finally { stopped.resolve({}); await boundary?.catch(() => {}); await test.guard.close(); }
   });
 
   it("deduplicates one retired response abort while the boundary awaits an initial pause", async () => {

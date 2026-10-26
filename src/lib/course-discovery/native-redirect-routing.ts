@@ -758,6 +758,17 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
               record.kind !== resourceKinds[event.resourceType] || event.frameId !== rootFrameId || record.responseStarted)
             { await close("NATIVE_REDIRECT_RESPONSE_MISMATCH"); return; }
           record.responseStarted = true; record.responsePaused = true;
+          const identity = networkIdentities.get(record.networkId);
+          // A prior exact Network terminal can outlive its interception ID.
+          // Local supersession or an abort ACK alone cannot supply this fact.
+          if (identity && failedNetworkIdentities.has(identity) && sourceLoadingFailures.has(identity) &&
+              identity.revision === record.networkIdentityRevision && identity.frameId === rootFrameId &&
+              identity.loaderId === record.loaderId && loaderOwners.get(identity.loaderId) === record.generation &&
+              identity.url === record.url && identity.method === record.method &&
+              (identity.kind === record.kind || [identity.kind, record.kind].every(kind => kind === "xhr" || kind === "fetch"))) {
+            record.paused = false; record.responsePaused = false;
+            return;
+          }
           await abortRetiredPause(record, "response", reject);
           return;
         }
@@ -1156,7 +1167,15 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
               !parent.redirect ? "LOCATION_MISSING" : "LOCATION_MISMATCH" : denyResourceKind && (parent.kind !== kind || networkId !== parent.networkId) ? "KIND_NETWORK_MISMATCH" :
                 event.request.method !== parent.method ? "METHOD_MISMATCH" : parent.kind !== "document" ? "DOCUMENT_PARENT_KIND" : "DOCUMENT_PARENT_METHOD"); return;
         }
-        if (!document && !sameHost) {
+        // Routing provenance only: the unchanged source handler still owns
+        // final URL/header/method policy, public-IP checks and destination lease.
+        const sourceDataGet = options.responseProfile === SOURCE_ROUTING_RESPONSE_PROFILE && generationTracking &&
+          parent.method === "GET" && parent.body === null && event.request.method === "GET" &&
+          event.request.hasPostData !== true && event.request.postData === undefined &&
+          [parent.kind, kind].every(value => value === "xhr" || value === "fetch") && networkId === parent.networkId &&
+          requestLoaderId !== undefined && requestLoaderId === parent.loaderId && requestGeneration === parent.generation &&
+          networkIdentities.get(networkId)?.hasBody === false && isSafeRecipeUrl(parent.transportUrl) && isSafeRecipeUrl(event.request.url);
+        if (!document && !sameHost && !sourceDataGet) {
           // A genuine Script->Script CDN redirect still has no cross-host
           // read permission. Deny that exact browser pause without destroying
           // unrelated public documents/data. This is not a fallback for bad
