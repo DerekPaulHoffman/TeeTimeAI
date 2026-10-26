@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { discoveryError } from "./course-discovery-client.mjs";
-import { observedBookingSourceCandidates, nativeFrameNavigations } from "./stagehand/source-provenance.mjs";
+import { observedBookingSourceCandidates, nativeFrameNavigations, nativeIntermediaryNavigations } from "./stagehand/source-provenance.mjs";
 import { sourceTransportCodes } from "./stagehand/source-diagnostic.mjs";
 
 export const STAGEHAND_SOURCE_MODE = "HYBRID_SOURCE_DISCOVERY";
@@ -103,6 +103,11 @@ export function validateStagehandSourceReport(report, job) {
   const proposal = validateStagehandSourceProposal(report.adapterSourceProposal);
   requireFact(report.nativeFrameNavigations === undefined || Array.isArray(report.nativeFrameNavigations) && report.nativeFrameNavigations.length <= 2 &&
     nativeFrameNavigations(report, publicStagehandSourceUrl).length === report.nativeFrameNavigations.length, "STAGEHAND_SOURCE_GRAPH_LIMIT");
+  requireFact(report.nativeIntermediaryNavigations === undefined || Array.isArray(report.nativeIntermediaryNavigations) && report.nativeIntermediaryNavigations.length <= 2 &&
+    nativeIntermediaryNavigations(report, publicStagehandSourceUrl).length === report.nativeIntermediaryNavigations.length, "STAGEHAND_SOURCE_GRAPH_LIMIT");
+  const intermediaries = nativeIntermediaryNavigations(report, publicStagehandSourceUrl);
+  requireFact(boundedRows(report.officialLinkLedger,512).filter(row=>row.kind==='NATIVE_PUBLIC_BOOKING_INTERMEDIARY').every(row=>
+    intermediaries.some(entry=>entry.pageUrl===row.pageUrl&&entry.observedAt===row.observedAt&&entry.documentHash===row.documentHash)), "STAGEHAND_SOURCE_GRAPH_LIMIT");
   requireFact(observedBookingSourceCandidates(report, job.request.identity.officialUrl, publicStagehandSourceUrl,
     { sourceDiscoveryOnly: true }).includes(proposal.bookingUrl), "STAGEHAND_SOURCE_NOT_OBSERVED");
   return proposal;
@@ -126,11 +131,11 @@ export function stagehandRoutingReport(report, job) {
     ...(report.decisionOrigin==='NATIVE_UNIQUE_SUPPORTED_SOURCE'?{decisionOrigin:report.decisionOrigin}:{}),
     visitedUrls: boundedRows(report.visitedUrls, 512).filter(publicStagehandSourceUrl),
     officialLinkLedger: boundedRows(report.officialLinkLedger, 512).map(row => ({
-      ...(row.kind === "NATIVE_VISIBLE_DOM" ? { kind: row.kind } : {}),
-      ...(row.kind === "NATIVE_VISIBLE_DOM" && typeof row.documentHash === "string" && /^[a-f0-9]{64}$/u.test(row.documentHash) ? { documentHash: row.documentHash } : {}),
+      ...(["NATIVE_VISIBLE_DOM", "NATIVE_PUBLIC_BOOKING_INTERMEDIARY"].includes(row.kind) ? { kind: row.kind } : {}),
+      ...(["NATIVE_VISIBLE_DOM", "NATIVE_PUBLIC_BOOKING_INTERMEDIARY"].includes(row.kind) && typeof row.documentHash === "string" && /^[a-f0-9]{64}$/u.test(row.documentHash) ? { documentHash: row.documentHash } : {}),
       ...(typeof row.observedAt === "string" && Number.isFinite(Date.parse(row.observedAt)) && new Date(row.observedAt).toISOString() === row.observedAt ? { observedAt: row.observedAt } : {}),
       pageUrl: urlField(row.pageUrl), links: boundedRows(row.links, 512).filter(item => publicStagehandSourceUrl(item.href))
-        .map(item => ({ href: item.href, ...(item.visible === true ? { visible: true } : {}) })),
+        .map(item => ({ href: item.href, ...(item.visible === true ? { visible: true } : row.kind === "NATIVE_PUBLIC_BOOKING_INTERMEDIARY" && item.visible === false ? { visible: false } : {}) })),
     })).filter(row => row.pageUrl),
     frameLedger: boundedRows(report.frameLedger, 512).map(row => ({
       ...(row.kind === "NATIVE_VISIBLE_FRAME" ? { kind: row.kind, observedAt: row.observedAt, documentHash: row.documentHash } : {}),
@@ -144,6 +149,7 @@ export function stagehandRoutingReport(report, job) {
     })).filter(row => row.sourceUrl && row.observedTarget.href && row.afterUrl),
   };
   if (report.nativeFrameNavigations !== undefined) projected.nativeFrameNavigations = structuredClone(nativeFrameNavigations(report, publicStagehandSourceUrl));
+  if (report.nativeIntermediaryNavigations !== undefined) projected.nativeIntermediaryNavigations = structuredClone(nativeIntermediaryNavigations(report, publicStagehandSourceUrl));
   if (report.initialNavigation) projected.initialNavigation = {
     requestedUrl: urlField(report.initialNavigation.requestedUrl), finalUrl: urlField(report.initialNavigation.finalUrl),
     status: Number.isInteger(report.initialNavigation.status) ? report.initialNavigation.status : 0,

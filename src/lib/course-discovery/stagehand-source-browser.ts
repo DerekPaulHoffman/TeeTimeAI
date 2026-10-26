@@ -4,8 +4,9 @@ import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { launchPublicReadBrowser, ownedPublicBrowserCdp } from "./public-browser-launch";
 import { connectOwnedSourceCdp, type OwnedCdpSession, type OwnedCdpFailure } from "./stagehand-owned-cdp";
-import { createStagehandNativeRouterFailureCapture } from "./stagehand-native-router-diagnostic";
+import { createStagehandNativeRouterFailureCapture, recordStagehandSourceNavigationFailure, type StagehandSourceRequestGuard } from "./stagehand-native-router-diagnostic";
 import { uniqueNativeSupportedSource, type NativeSourceChoiceCapture } from "./native-source-choice";
+import { collectPublicBookingLinks, uniqueNativePublicBookingIntermediary, uniquePublicBookingIntermediary, type PublicBookingLinks, type NativeIntermediaryPreparationDiagnostic } from "./public-booking-intermediary";
 import { createNativePublicBrowserProxy, continueNativeBrowserRead, isObservedNativeRedirect, nativeReadPreflightMethod, type NativePublicProxyDependencies } from "./native-public-browser";
 import { installNativeRedirectRouting, authorizePublicClientReadHeaders, isCurrentPublicClientReadHeaders, nativePublicClientPreflightMethod,
   nativeMindbodyBootstrapSource, attestedNativeDocumentRedirects, type NativeReadRoute, type NativeReadRequest, type NativeRedirectRouting } from "./native-redirect-routing";
@@ -50,7 +51,8 @@ export const stagehandNativeSourceDomExpression = `(() => {
     links: links.slice(0, 160).map(element => element.href), frames: frames.slice(0, 24).map(element => element.src),
     sourceLinkIndexes: links.slice(0, 160).map((element, index) => sourceVisible(element) ? index : -1).filter(index => index >= 0),
     sourceFrameIndexes: frames.slice(0, 24).map((element, index) => sourceVisible(element) ? index : -1).filter(index => index >= 0),
-    linksOverflow: links.length > 160, framesOverflow: frames.length > 24 });
+    linksOverflow: links.length > 160, framesOverflow: frames.length > 24,
+    publicBookingLinks: (${collectPublicBookingLinks.toString()})() });
 })()`;
 // Fixed controller source, never caller/model/site JavaScript. Install only on
 // the owned public context; the packaged SDK extension context is untouched.
@@ -85,7 +87,11 @@ function transactionUrl(value: string) {
   try {
     let path = new URL(value).pathname;
     for (let i = 0; i < 4; i++) { const next = decodeURIComponent(path); if (next === path) break; path = next; }
-    path = new URL(path.replace(/\\/gu, "/"), "https://public.example").pathname;
+    // This is a pathname comparison, not another URL resolution. A literal
+    // leading // must not become a network-path URL (or an invalid empty host).
+    // Normalize separators only for the forbidden transaction comparison;
+    // the observed request and every redirect retain their original bytes.
+    path = new URL(path.replace(/\\/gu, "/").replace(/\/+/gu, "/"), "https://public.example").pathname;
     return /^\/ASP\/appt_req\.asp\/?$/iu.test(path);
   } catch { return true; }
 }
@@ -136,6 +142,9 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
   const popupGrants = new Map<string, PopupGrant>();
   const frameEntries = new Map<string, { pageUrl: string; frameUrl: string; observedAt: string; documentHash: string; until: number }>();
   let frameEntryCount = 0;
+  const intermediaryEntries = new Map<string, { pageUrl: string; url: string; observedAt: string; documentHash: string; until: number }>();
+  const intermediaryUrls = new Set<string>(), officialOrigins = new Set([new URL(input.initialUrl).origin]);
+  let intermediaryAttempt = 0, intermediaryPreparation: NativeIntermediaryPreparationDiagnostic | undefined;
   const nativeFailure = createStagehandNativeRouterFailureCapture();
   let ownedPageCrashObserved = false, ownedPageCloseObserved = false, contextClosedObserved = false;
   let socketBoundaryState: { browserConnectedAtFailure: boolean; ownedPageCrashObserved: boolean; ownedPageCloseObserved: boolean; contextClosedObserved: boolean } | undefined;
@@ -167,23 +176,31 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
     if (++intercepted > 1024) { terminal = true; await route.abort().catch(() => {}); void close(); return; }
     const request = route.request(), method = request.method(), transportUrl = canonicalPublicReadUrl(request.url(), method);
     if (isIncidentalBrowserRequest(request.url()) || isNonEvidenceBrowserResource(request.url(), request.resourceType())) { rejected++; await route.abort(); return; }
+    let requestGuard: StagehandSourceRequestGuard = "STATE";
     try {
       check();
+      requestGuard = "TRANSACTION_URL";
       if (transactionUrl(transportUrl)) throw reject();
+      requestGuard = "FRAME_OWNERSHIP";
       if (request.frame().page() !== target.page || request.frame() !== target.frame) throw reject();
       const url = new URL(transportUrl), headers = request.headers(), body = request.postData();
+      requestGuard = "HEADER_POLICY";
       const publicHeaders = method === "OPTIONS" || Object.keys(headers).some(key => /^(?:authorization|x-api-key)$/iu.test(key))
         ? await authorizePublicClientReadHeaders(request) : null;
       const preflight = method === "OPTIONS" ? nativeReadPreflightMethod(headers) || publicHeaders && nativePublicClientPreflightMethod(request, publicHeaders) : null;
       const purposeMethod = preflight || method, kind = preflight ? "fetch" : request.resourceType();
+      requestGuard = "URL_POLICY";
       if (!isSafeRecipeUrl(transportUrl) && !isSafeBrowserAssetUrl(transportUrl, request.resourceType(), method) &&
           !isSafeBrowserBootstrapReadUrl(transportUrl, kind, purposeMethod) && !isSafeBrowserAvailabilityReadUrl(transportUrl, kind, purposeMethod)) throw reject();
+      requestGuard = "HEADER_POLICY";
       if (Object.keys(headers).some(key => /^(?:authorization|proxy-authorization|x-api-key)$/iu.test(key)) && !publicHeaders) throw reject();
       const bootstrap = nativeMindbodyBootstrapSource(request);
       const bootstrapPost = method === "POST" && body !== null && bootstrap && roots.has(bootstrap.sourceUrl) &&
         isMindbodyClassicPublicBootstrapPost(url, new Headers(headers), body, bootstrap.sourceUrl);
       if (request.isNavigationRequest()) {
+        requestGuard = "NAVIGATION_PROVENANCE";
         if (!allowed.has(transportUrl) && !isObservedNativeRedirect(request, roots) && !bootstrapPost) throw reject();
+        requestGuard = "METHOD_POLICY";
         if (!["GET", "HEAD"].includes(method) && !bootstrapPost) throw reject();
       }
       // Preserve policy-bearing headers such as Next-Action. Removing them
@@ -191,18 +208,25 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
       const projectedHeaders = new Headers(headers);
       const publicPost = method === "POST" && body !== null && (isAnonymousBrowserReadPost(url, projectedHeaders, body) ||
         bootstrapPost);
+      requestGuard = "METHOD_POLICY";
       if (!["GET", "HEAD"].includes(method) && !preflight && !publicPost) throw reject();
+      requestGuard = "REQUEST_BUDGET";
       assertPublicBrowserRequestBudget(admitted, PUBLIC_BROWSER_REQUEST_LIMIT);
       if (bytes >= PUBLIC_BROWSER_TOTAL_BYTES) throw reject();
       admitted++;
+      requestGuard = "LEASE";
       const operation = queue.run(requestFamilyForUrl(transportUrl), async () => {
+        requestGuard = "STATE";
         check();
+        requestGuard = "HEADER_POLICY";
         if (publicHeaders && !isCurrentPublicClientReadHeaders(publicHeaders)) throw reject();
         if (bootstrap && (!body || !isMindbodyClassicPublicBootstrapPost(url, new Headers(headers), body, bootstrap.sourceUrl))) throw reject();
         proxy.allowHostConnections(url.hostname);
+        requestGuard = "NATIVE_RESPONSE";
         const response = await continueNativeBrowserRead(route, signal, publicBrowserResponseLimit(request.resourceType(), method, SOURCE_ROUTING_RESPONSE_PROFILE),
           () => proxy.cancelHostConnections(url.hostname), transportUrl);
         bytes += response.body.length;
+        requestGuard = "REQUEST_BUDGET";
         if (bytes > PUBLIC_BROWSER_TOTAL_BYTES) throw reject();
         return response;
       }, request.signal);
@@ -213,6 +237,13 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
         if (target.documentRequest === request) target.documentStatus = response.status;
       } finally { activeReads.delete(operation); if (target.documentRead === operation) target.documentReadPending = false; }
     } catch {
+      // Preserve an actual main-navigation rejection before abort/teardown can
+      // replace its cause. Background denied resources do not become a fatal
+      // navigation fact, and this closed projection grants no read authority.
+      try { const frame = request.frame();
+        recordStagehandSourceNavigationFailure(nativeFailure, { navigationRequest: request.isNavigationRequest(), frame, page: frame.page(),
+          ownedFrame: target.frame, ownedPage: target.page, closed, aborted: signal.aborted }, requestGuard, method, request.resourceType()); }
+      catch { /* Diagnostics cannot alter the original denial. */ }
       rejected++; await route.abort().catch(() => {});
     }
   };
@@ -463,7 +494,8 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
       if (typeof startFrame.id !== "string" || !startFrame.id || typeof startFrame.loaderId !== "string" || !startFrame.loaderId ||
           startFrame.id !== endFrame.id || startFrame.loaderId !== endFrame.loaderId || startFrame.url !== endFrame.url ||
           (readinessOnly ? !sameStagehandDocumentReadUrl(observed.url, endFrame.url) : observed.url !== endFrame.url)) throw reject();
-      return { target, observed, documentHash: createHash("sha256").update(JSON.stringify([startFrame.id, startFrame.loaderId, startFrame.url, value])).digest("hex") };
+      return { target, observed, documentIdentityHash: createHash("sha256").update(JSON.stringify([startFrame.id,startFrame.loaderId,startFrame.url])).digest("hex"),
+        documentHash: createHash("sha256").update(JSON.stringify([startFrame.id, startFrame.loaderId, startFrame.url, value])).digest("hex") };
     };
     const frameWitness = (capture: Awaited<ReturnType<typeof captureSourceDom>>, selected?: string) => ({
       kind: "NATIVE_VISIBLE_FRAME" as const, pageUrl: capture.observed.url as string, observedAt: new Date().toISOString(), documentHash: capture.documentHash,
@@ -504,6 +536,67 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
         const startedAt = Date.now(), first = sourceChoiceCapture(await captureSourceDom(id));
         const second = sourceChoiceCapture(await captureSourceDom(id)); check();
         return uniqueNativeSupportedSource(first, second, { startedAt, now: Date.now(), deadline: input.deadlineAt.getTime() });
+      },
+      async preparePublicBookingIntermediary(id: string) {
+        const diagnostic: NativeIntermediaryPreparationDiagnostic = { attempt: ++intermediaryAttempt, stage: "BEGIN", reason: null,
+          firstRows: null, secondRows: null, firstOverflow: null, secondOverflow: null, firstSettled: null, secondSettled: null,
+          firstCandidatePresent: null, secondCandidatePresent: null, samePage: null, sameNativeDocument: null, sameDocumentHash: null,
+          sameReadinessState: null, sameRoutingInventory: null };
+        intermediaryPreparation = diagnostic;
+        try {
+        if (intermediaryUrls.size >= 2) { diagnostic.reason = "ENTRY_LIMIT"; return null; }
+        if (intermediaryEntries.has(id)) { diagnostic.reason = "PENDING_ENTRY"; return null; }
+        const startedAt = Date.now();diagnostic.stage = "FIRST_CAPTURE";
+        const first = await captureSourceDom(id), firstAt = Date.now();diagnostic.stage = "SECOND_CAPTURE";
+        const second = await captureSourceDom(id); check();
+        const a = first.observed.publicBookingLinks as PublicBookingLinks, b = second.observed.publicBookingLinks as PublicBookingLinks;
+        diagnostic.firstRows = Array.isArray(a?.rows) ? a.rows.length : null; diagnostic.secondRows = Array.isArray(b?.rows) ? b.rows.length : null;
+        diagnostic.firstOverflow = typeof a?.overflow === "boolean" ? a.overflow : null; diagnostic.secondOverflow = typeof b?.overflow === "boolean" ? b.overflow : null;
+        diagnostic.firstSettled = sourceSettled(first);diagnostic.secondSettled = sourceSettled(second);
+        diagnostic.firstCandidatePresent = Boolean(uniquePublicBookingIntermediary(a,String(first.observed.url)));
+        diagnostic.secondCandidatePresent = Boolean(uniquePublicBookingIntermediary(b,String(second.observed.url)));
+        diagnostic.samePage = first.observed.url === second.observed.url; diagnostic.sameNativeDocument = first.documentIdentityHash === second.documentIdentityHash;
+        diagnostic.sameDocumentHash = first.documentHash === second.documentHash;
+        diagnostic.sameReadinessState = JSON.stringify([first.observed.readyState,first.observed.bodyPresent]) === JSON.stringify([second.observed.readyState,second.observed.bodyPresent]);
+        const routing = (observed: Record<string,unknown>) => JSON.stringify([observed.links,observed.frames,observed.sourceLinkIndexes,observed.sourceFrameIndexes,observed.linksOverflow,observed.framesOverflow,observed.publicBookingLinks]);
+        diagnostic.sameRoutingInventory = routing(first.observed) === routing(second.observed);diagnostic.stage = "ORIGIN";
+        const pageUrl = String(second.observed.url), origin = new URL(pageUrl).origin;
+        if (!officialOrigins.has(origin)) {
+          const request = second.target.documentRequest;
+          const lineage = request && attestedNativeDocumentRedirects(request, new Set([input.initialUrl]));
+          if (!lineage || lineage.at(-1)?.toUrl !== pageUrl) { diagnostic.reason = "OFFICIAL_ORIGIN_UNVERIFIED"; return null; }
+          officialOrigins.add(origin);
+        }
+        const linkCapture = (value: typeof first, observedAt: number) => ({ pageUrl: String(value.observed.url), documentHash: value.documentHash,
+          observedAt, settled: sourceSettled(value), links: value.observed.publicBookingLinks as PublicBookingLinks });
+        diagnostic.stage = "SELECT";
+        const url = uniqueNativePublicBookingIntermediary(linkCapture(first, firstAt), linkCapture(second, Date.now()), { startedAt, now: Date.now(), deadline: input.deadlineAt.getTime() });
+        if (!url) { diagnostic.reason = !diagnostic.firstSettled || !diagnostic.secondSettled ? "DOCUMENT_UNSETTLED" :
+          !diagnostic.samePage || !diagnostic.sameNativeDocument ? "NATIVE_DOCUMENT_CHANGED" : !diagnostic.sameDocumentHash ? "DOM_CHANGED" :
+            !diagnostic.firstCandidatePresent || !diagnostic.secondCandidatePresent ? "NO_UNIQUE_GATEWAY" : "CLOCK_INVALID"; return null; }
+        if (intermediaryUrls.has(url)) { diagnostic.reason = "ALREADY_ENTERED"; return null; }
+        if (!isSafeRecipeUrl(url) || transactionUrl(url)) { diagnostic.reason = "URL_REJECTED"; return null; }
+        diagnostic.stage = "GRANT";
+        const entry = { pageUrl, url, observedAt: new Date().toISOString(), documentHash: second.documentHash,
+          until: Math.min(input.deadlineAt.getTime(), Date.now() + 30000) };
+        intermediaryUrls.add(url); intermediaryEntries.set(id, entry);
+        allowed.add(url); roots.add(url); if (allowed.size > 512) throw reject();
+        diagnostic.reason = "READY";
+        return { kind: "NATIVE_PUBLIC_BOOKING_INTERMEDIARY" as const, pageUrl, observedAt: entry.observedAt, documentHash: entry.documentHash,
+          links: [{ href: url, visible: false as const }] };
+        } catch (error) { diagnostic.reason = "THREW"; throw error; }
+      },
+      async completePublicBookingIntermediary(id: string) {
+        const entry = intermediaryEntries.get(id); intermediaryEntries.delete(id);
+        if (!entry || Date.now() >= entry.until) throw reject();
+        await targets.get(id)?.documentRead; check();
+        const capture = await captureSourceDom(id), finalUrl = capture.observed.url, request = capture.target.documentRequest;
+        if (typeof finalUrl !== "string" || !isSafeRecipeUrl(finalUrl) || !request || request.url() !== finalUrl || capture.target.documentStatus !== 200) throw reject();
+        const redirects = finalUrl === entry.url ? [] : attestedNativeDocumentRedirects(request, new Set([entry.url]));
+        if (!redirects) throw reject();
+        return { kind: "NATIVE_PUBLIC_BOOKING_INTERMEDIARY_OPEN" as const, pageUrl: entry.pageUrl, url: entry.url,
+          observedAt: entry.observedAt, documentHash: entry.documentHash, finalUrl, completedAt: new Date().toISOString(),
+          finalDocumentHash: capture.documentHash, redirects };
       },
       async prepareFrameNavigation(id: string, url: string) {
         const capture = await captureSourceDom(id), witness = frameWitness(capture, url);
@@ -547,7 +640,8 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
         guardedPageCount: targets.size, installedPageCount: [...targets.values()].filter(target => target.installed).length,
         initialization: [...targets.values()].map(target => target.initialization), deniedWorkerTargets: deniedWorkers, popupCount, activeRequests: activeReads.size, terminalFailure: terminal, closed }),
       snapshotFailure: () => cdpFailure(),
-      snapshotFailures: () => ({ ownedCdpFailure: cdpFailure(), nativeRouterFailure: nativeFailure.snapshot() }),
+      snapshotFailures: () => ({ ownedCdpFailure: cdpFailure(), nativeRouterFailure: nativeFailure.snapshot(),
+        ...(intermediaryPreparation ? { nativeIntermediaryPreparation: structuredClone(intermediaryPreparation) } : {}) }),
       async close() { signal.removeEventListener("abort", abort); return close(); },
     };
   } catch (error) { await close(); throw error instanceof Error && error.message === "STAGEHAND_GUARDED_SOURCE_REJECTED" ? error : reject(); }

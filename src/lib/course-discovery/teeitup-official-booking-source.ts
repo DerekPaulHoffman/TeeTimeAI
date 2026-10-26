@@ -131,7 +131,7 @@ export function readTeeItUpOfficialHome(source: TeeItUpSourceIdentity, page: Off
   onDiagnostic?: (value: OfficialSourceDiagnostic) => void) {
   const facts: OfficialSourceDiagnostic = { stage: "SOURCE_CONTEXT" };
   const emit = () => { try { onDiagnostic?.({ ...facts }); } catch { /* Diagnostics cannot change identity validation. */ } };
-  const check = (condition: unknown, stage: OfficialSourceDiagnostic["stage"], key: Exclude<keyof OfficialSourceDiagnostic, "stage">) => {
+  const check = (condition: unknown, stage: OfficialSourceDiagnostic["stage"], key: Exclude<keyof OfficialSourceDiagnostic, "stage" | "uscheduleConfigurationGate">) => {
     facts.stage = stage; facts[key] = Boolean(condition); emit(); if (!condition) return fail();
   };
   check(source.officialUrl && source.venueAddress, "SOURCE_CONTEXT", "sourceContextValid");

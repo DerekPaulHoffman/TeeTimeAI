@@ -2,6 +2,7 @@ import { SimulatorAvailabilityError } from "./types";
 
 /** Exact existing provider error messages become closed diagnostic gates only. */
 export const uscheduleReadGates = [
+  "PUBLIC_SIMULATOR_TIME_GRID_UNVERIFIED",
   "PUBLIC_SIMULATOR_SCHEDULER_NOW_REQUIRES_INTERACTIVE_ACCESS",
   "PUBLIC_LOCATION_RENTAL_CHANGED",
   "PUBLIC_SIMULATOR_RENTAL_SELECTORS_ARE_MISSING_OR_AMBIGUOUS",
@@ -66,6 +67,7 @@ export const uscheduleReadGates = [
 ] as const;
 export type UScheduleReadGate = typeof uscheduleReadGates[number];
 const messages: Readonly<Record<string, UScheduleReadGate>> = {
+  "The public simulator time grid is unverified": "PUBLIC_SIMULATOR_TIME_GRID_UNVERIFIED",
   "The public simulator scheduler now requires interactive access": "PUBLIC_SIMULATOR_SCHEDULER_NOW_REQUIRES_INTERACTIVE_ACCESS",
   "The public location rental changed": "PUBLIC_LOCATION_RENTAL_CHANGED",
   "The public simulator rental selectors are missing or ambiguous": "PUBLIC_SIMULATOR_RENTAL_SELECTORS_ARE_MISSING_OR_AMBIGUOUS",

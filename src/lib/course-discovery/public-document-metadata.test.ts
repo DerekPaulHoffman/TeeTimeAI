@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+// @vitest-environment-options {"url":"https://official.example/"}
 import { afterEach, expect, it, vi } from "vitest";
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
@@ -27,7 +28,7 @@ it.each(["hiddenName","hiddenAddress","hiddenPhone","mailing","form","input"])("
 const venue="Example Golf Studio",address="10 Example Road, Example, New York 12345",rental="Public Simulator Rental — per bay Up to 3 golfers";
 const html=()=>`<form method="post" action="${document.URL}"><input type="hidden" value="PRIVATE"><h2>${venue}</h2><p>${address}</p><p>${rental}</p><a href="https://booking.example/">Book public rental</a><footer>Public address</footer></form>`;
 function setup(markup:string){document.body.innerHTML=markup;vi.spyOn(HTMLElement.prototype,"getBoundingClientRect").mockImplementation(()=>({width:10,height:10,x:0,y:0,top:0,right:10,bottom:10,left:0,toJSON:()=>({})}));Object.defineProperty(HTMLElement.prototype,"innerText",{configurable:true,get(){return this.textContent??"";}});}
-afterEach(()=>{vi.restoreAllMocks();document.body.innerHTML="";});
+afterEach(()=>{vi.restoreAllMocks();document.body.innerHTML="";window.history.replaceState(null,"",location.origin+"/");});
 it("actual installed tsx serialization runs in a separate page-like VM without module helpers",()=>{
  const moduleUrl=pathToFileURL(resolve("src/lib/course-discovery/public-document-metadata.ts")).href;
  const script=`import {createRequire} from 'node:module';import {fileURLToPath} from 'node:url';import {runInNewContext} from 'node:vm';const {collectNativeOfficialPublicMetadata:collect}=createRequire(process.cwd()+'/package.json')(fileURLToPath(${JSON.stringify(moduleUrl)}));const result=runInNewContext('('+collect.toString()+')('+JSON.stringify('Example Golf Studio')+')',{document:{forms:[],querySelectorAll:()=>[],title:''}});if(result.headings.length||result.addressTexts.length)throw Error('INVALID');console.log('SERIALIZATION_OK');`;
@@ -35,6 +36,29 @@ it("actual installed tsx serialization runs in a separate page-like VM without m
  expect(result.status,result.stderr).toBe(0);expect(result.stdout.trim()).toBe("SERIALIZATION_OK");
 });
 it("reads static exact-venue H2 public metadata in the unique whole-document wrapper without field values",()=>{setup(html());const got=collectNativeOfficialPublicMetadata(venue);expect(got.headings).toContain(venue);expect(got.addressTexts).toContain(address);expect(got.publicRentalTexts).toContain(rental);expect(JSON.stringify(got)).not.toContain("PRIVATE");});
+it.each([["//","/"],["/","https://official.example//"]])("reads only static metadata for an HTTPS root form action %s → %s without rewriting either URL",(path,action)=>{
+ window.history.replaceState(null,"",location.origin+path);const current=document.URL;
+ setup(html().replace(`action="${current}"`,`action="${action}"`));const form=document.forms[0],literal=form.getAttribute("action"),got=collectNativeOfficialPublicMetadata(venue);
+ expect(got.headings).toContain(venue);expect(got.addressTexts).toContain(address);expect(got.linkUrls).toContain("https://booking.example/");expect(got.publicRentalTexts).toContain(rental);
+ expect(document.URL).toBe(current);expect(form.getAttribute("action")).toBe(literal);expect(JSON.stringify(got)).not.toContain("PRIVATE");
+});
+it.each([
+ ["//","/booking"],["/booking//","/booking/"],["///","/"],["//?view=public","/?view=public"],["//#public","/#public"],
+ ["//","/?view=public"],["//","/#public"],["//","https://foreign.example/"],["//","https://user:pass@official.example/"],["//","http://official.example/"],
+])("does not turn root equivalence into path/query/hash/origin/credential permission: %s → %s",(path,action)=>{
+ window.history.replaceState(null,"",location.origin+path);setup(html().replace(`action="${document.URL}"`,`action="${action}"`));const got=collectNativeOfficialPublicMetadata(venue);
+ expect(got.headings).not.toContain(venue);expect(got.addressTexts).not.toContain(address);expect(got.linkUrls).toEqual([]);expect(got.publicRentalTexts).toEqual([]);
+});
+it("retains legacy exact non-root self-actions without extending equivalence to them",()=>{
+ window.history.replaceState(null,"",location.origin+"/public?view=one#section");setup(html());expect(collectNativeOfficialPublicMetadata(venue).addressTexts).toContain(address);
+});
+it.each(["foreign","hidden","login","nested","nofooter","get","multiple","control","private"])("root equivalence preserves the %s rejection",mode=>{
+ window.history.replaceState(null,"",location.origin+"//");let markup=html().replace(`action="${document.URL}"`,'action="/"');
+ if(mode==="foreign")markup=markup.replace(venue,"Foreign Golf Studio");if(mode==="hidden")markup=markup.replace("<h2>","<h2 hidden>");if(mode==="login")markup=markup.replace('<form ', '<form class="login" ');
+ if(mode==="nested")markup="<div>"+markup+"</div>";if(mode==="nofooter")markup=markup.replaceAll("footer","section");if(mode==="get")markup=markup.replace('method="post"','method="get"');if(mode==="multiple")markup+="<form></form>";
+ if(mode==="control")markup=markup.replace(`<p>${rental}</p>`,`<p>${rental}<input value="PRIVATE"></p>`);if(mode==="private")markup=markup.replace(`<p>${rental}</p>`,`<section class="checkout"><p>${rental}</p></section>`);
+ setup(markup);const got=collectNativeOfficialPublicMetadata(venue);expect(got.publicRentalTexts).not.toContain(rental);expect(JSON.stringify(got)).not.toContain("PRIVATE");
+});
 it.each(["foreign","hidden","login","nested","nofooter","get","foreignaction","multiple"])("rejects %s wrapper admission",mode=>{let markup=html();if(mode==="foreign")markup=markup.replace(venue,"Foreign Golf Studio");if(mode==="hidden")markup=markup.replace("<h2>","<h2 hidden>");if(mode==="login")markup=markup.replace('<form ', '<form class="login" ');if(mode==="nested")markup='<div>'+markup+'</div>';if(mode==="nofooter")markup=markup.replaceAll("footer","section");if(mode==="get")markup=markup.replace('method="post"','method="get"');if(mode==="foreignaction")markup=markup.replace(`action="${document.URL}"`,'action="https://foreign.example/"');if(mode==="multiple")markup+='<form></form>';setup(markup);const got=collectNativeOfficialPublicMetadata(venue);expect(got.addressTexts).not.toContain(address);expect(got.publicRentalTexts).not.toContain(rental);});
 it("control values, labels and transaction subtrees cannot become static party evidence",()=>{setup(html().replace(`<p>${rental}</p>`,`<label>${rental}</label><p><input value="${rental}"></p><section class="checkout"><p>${rental}</p></section>`));const got=collectNativeOfficialPublicMetadata(venue);expect(got.publicRentalTexts).toEqual([]);});
 it("retains only bounded computed-visible standalone public service labels for an exact combined-business remainder",()=>{

@@ -1,6 +1,31 @@
 import { expect, it } from "vitest";
-import { createStagehandNativeRouterFailureCapture, projectStagehandNativeRouterFailure, stagehandNativeRouterBooleanKeys, stagehandNativeRouterCodes } from "./stagehand-native-router-diagnostic";
+import { createStagehandNativeRouterFailureCapture, projectStagehandNativeRouterFailure, stagehandNativeRouterBooleanKeys, stagehandNativeRouterCodes, stagehandSourceRequestGuards, recordStagehandSourceNavigationFailure } from "./stagehand-native-router-diagnostic";
 import { sourceFailureDiagnostic } from "../../../scripts/automation/stagehand/source-diagnostic.mjs";
+it("ignores subframe, foreign page, ancillary and teardown rejections before capturing an owned main navigation", () => {
+  const capture = createStagehandNativeRouterFailureCapture(), frame = {}, page = {}, foreign = {};
+  const state = { navigationRequest: true, frame, page, ownedFrame: frame, ownedPage: page, closed: false, aborted: false };
+  for (const delta of [{ frame: foreign }, { page: foreign }, { navigationRequest: false }, { closed: true }, { aborted: true }]) {
+    recordStagehandSourceNavigationFailure(capture, { ...state, ...delta }, "FRAME_OWNERSHIP", "GET", "document");
+    expect(capture.snapshot()).toBeUndefined();
+  }
+  recordStagehandSourceNavigationFailure(capture, state, "TRANSACTION_URL", "GET", "document");
+  expect(capture.snapshot()).toEqual({ code: "STAGEHAND_GUARDED_SOURCE_REJECTED", phase: "SOURCE_HOST_REQUEST", sourceRequestGuard: "TRANSACTION_URL", method: "GET", resourceType: "document", rootFrame: true });
+});
+it("retains only the actual earliest closed source navigation guard without URL or error payload", () => {
+  for (const guard of stagehandSourceRequestGuards) {
+    const capture = createStagehandNativeRouterFailureCapture();
+    capture.record("STAGEHAND_GUARDED_SOURCE_REJECTED", { phase: "SOURCE_HOST_REQUEST", sourceRequestGuard: guard, method: "GET", resourceType: "document", rootFrame: true,
+      url: "https://private.example/?token=SECRET", message: "PRIVATE", headers: { cookie: "PRIVATE" } });
+    capture.record("NATIVE_REDIRECT_CANCELLED", {});
+    const projected = capture.snapshot()!;
+    expect(projected.sourceRequestGuard).toBe(guard);
+    expect(sourceFailureDiagnostic({ phase: "OPEN", nativeRouterFailure: projected }).nativeRouterFailure).toEqual(projected);
+    expect(JSON.stringify(projected)).not.toMatch(/PRIVATE|SECRET|https:|headers|message|url/u);
+  }
+  expect(projectStagehandNativeRouterFailure("STAGEHAND_GUARDED_SOURCE_REJECTED", { phase: "SOURCE_HOST_REQUEST", sourceRequestGuard: "PRIVATE" })).not.toHaveProperty("sourceRequestGuard");
+  expect(projectStagehandNativeRouterFailure("NATIVE_REDIRECT_CANCELLED", { phase: "SOURCE_HOST_REQUEST", sourceRequestGuard: "STATE" })).not.toHaveProperty("sourceRequestGuard");
+  expect(sourceFailureDiagnostic({ nativeRouterFailure: { code: "STAGEHAND_GUARDED_SOURCE_REJECTED", phase: "SOURCE_HOST_REQUEST", sourceRequestGuard: "PRIVATE" } }).nativeRouterFailure).toBeUndefined();
+});
 it("preserves only actual closed continuation role/lifecycle booleans", () => {
   const facts = { phase: "CONTINUE_REQUEST_ACK", method: "GET", resourceType: "document", rootFrame: true,
     recordGenerationCurrent: false, recordGenerationRetired: true, recordAdmitted: true, recordPaused: false,

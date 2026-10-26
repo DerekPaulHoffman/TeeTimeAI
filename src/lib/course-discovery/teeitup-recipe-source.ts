@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { resolveTeeItUpFacilityIdentity } from "@/lib/adapters/teeitup-facility-identity";
 import { isSafeRecipeUrl } from "./recipe";
-import { fullCourseName, matchesOfficialFacility, type TeeItUpOfficialIdentityProof } from "./teeitup-official-identity";
+import { completeUSAddress, fullCourseName, matchesOfficialFacility, type TeeItUpOfficialIdentityProof } from "./teeitup-official-identity";
+import { normalizePublicUSState } from "./public-us-business-address";
 import { parseTeeItUpV2PublicSource } from "@/lib/adapters/teeitup-public-source";
 import { bindTeeItUpOfficialBookingFacility, type TeeItUpOfficialBookingSourceProof } from "./teeitup-official-booking-source";
 import { normalizePublicCoursePhone, type TeeItUpPostalConflictProof } from "./teeitup-postal-conflict-proof";
@@ -66,8 +67,19 @@ export function resolveTeeItUpRecipeFacilities(source: { bookingUrl: string; ven
   const matches = (row: TeeItUpRecipeFacility) => {
     if (row.isSimulator === true) return offeringKind !== "OUTDOOR" && nameKey(row.name) === nameKey(source.venueName) &&
       resolveTeeItUpFacilityIdentity(identity, [row]).status === "MATCHED";
-    return offeringKind !== "SIMULATOR" && resolveTeeItUpFacilityIdentity(identity,
-      [{ ...row, name: row.name.split(/\s+-\s+/u)[0] }]).status === "MATCHED";
+    if (offeringKind === "SIMULATOR") return false;
+    if (resolveTeeItUpFacilityIdentity(identity, [{ ...row, name: row.name.split(/\s+-\s+/u)[0] }]).status === "MATCHED") return true;
+    // Only an explicitly selected US facility may carry an exact terminal
+    // state qualifier. Region facts do not replace the existing whole-address
+    // comparison (including ZIP+4/unit), timezone or full course name.
+    const qualified = /^(.+), ([A-Z]{2})$/u.exec(row.name);
+    const canonical = completeUSAddress(source.venueAddress!), provider = completeUSAddress(row.address);
+    const raw = Array.isArray(value) ? value.find(item => item?.id === row.id) : undefined;
+    if (booking.selectedIds?.length !== 1 || booking.selectedIds[0] !== row.id || !qualified ||
+        /\p{Cc}/u.test(row.name) || /\p{Cc}/u.test(source.venueName) || raw?.country !== "US" ||
+        normalizePublicUSState(qualified[2]) !== qualified[2] || canonical?.region !== qualified[2] || provider?.region !== qualified[2] ||
+        raw.region !== undefined && raw.region !== qualified[2] || fullCourseName(qualified[1]) !== fullCourseName(source.venueName)) return false;
+    return resolveTeeItUpFacilityIdentity(identity, [{ ...row, name: qualified[1] }]).status === "MATCHED";
   };
   const alternate = officialProof ? parsed.data.filter(row => matchesOfficialFacility(officialProof, source, row)) : [];
   if (postalProof) {

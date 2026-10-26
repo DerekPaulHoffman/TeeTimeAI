@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { discoveryNavigationFailureKind, officialSourceBooleanKeys, officialSourceStages, safeOfficialSourceDiagnostic } from "./official-source-diagnostics";
+import { discoveryNavigationFailureKind, officialSourceBooleanKeys, officialSourceStages, safeOfficialSourceDiagnostic, uscheduleConfigurationGates } from "./official-source-diagnostics";
+import { inspectUScheduleRecipeConfiguration } from "@/lib/simulators/providers/uschedule";
 import { deriveUScheduleOfficialLocation } from "@/lib/simulators/providers/uschedule-location-source";
 import { inspectExistingAdapter } from "./existing-adapter-executor";
 import { venueProofMatches } from "./executor";
@@ -10,6 +11,29 @@ const source = { officialUrl: "https://example.org/", bookingUrl: entry, venueNa
 const page = () => ({ url: source.officialUrl, html: `<h1>${source.venueName}</h1><p>${source.venueAddress}</p><a href="${entry}">Tee Time</a>`,
   visibleEvidence: { title: source.venueName, headings: [source.venueName], linkUrls: [entry], addressTexts: [source.venueAddress] } });
 describe("closed official-source diagnostics", () => {
+  it("retains only actual closed configuration failure gates at inspector rejection and strips injected details", () => {
+    for (const gate of uscheduleConfigurationGates) {
+      const input = { stage: "INSPECTOR_REJECTED", uscheduleConfigurationGate: gate, html: "PRIVATE_HTML", service: "PRIVATE_SERVICE" };
+      const expected = { stage: "INSPECTOR_REJECTED", uscheduleConfigurationGate: gate };
+      expect(safeOfficialSourceDiagnostic(input)).toEqual(expected);
+      const safe = safeBrowserFailureDiagnostics({ officialSourceDiagnostic: input });
+      expect(safe.officialSourceDiagnostic).toEqual(expected);
+      const feedback = discoveryBrowserFeedback(safe, "inspect_adapter", { code: "ADAPTER_CONFIGURATION_UNVERIFIED" });
+      const checkpoint = readDiscoveryControllerCheckpoint({ controller: { version: 1, officialUrl: source.officialUrl, observedNavigationUrls: [], lastFeedback: feedback } }, source.officialUrl);
+      expect(checkpoint.lastFeedback.details.officialSourceDiagnostic).toEqual(expected);
+      expect(JSON.stringify(checkpoint)).not.toContain("PRIVATE");
+    }
+    for (const value of ["PRIVATE_SERVICE", [], {}, null]) expect(safeOfficialSourceDiagnostic({ stage: "INSPECTOR_REJECTED", uscheduleConfigurationGate: value })).toEqual({ stage: "INSPECTOR_REJECTED" });
+    expect(safeBrowserFailureDiagnostics({ officialSourceDiagnostic: { stage: "RAW_ADDRESS", uscheduleConfigurationGate: "RENTAL_CATALOG" } }).officialSourceDiagnostic).toEqual({ stage: "RAW_ADDRESS" });
+  });
+  it("reports the actual parser's first failure without allowing callback errors to change configuration acceptance", () => {
+    const url = "https://clients.uschedule.com/examplegolf/booking", html = '<body class="examplegolf"><select id="select_service"><option value="72" selected>Public Tee Times</option></select><select id="select_length"><option value="60">1 hour</option></select></body>';
+    const failures: string[] = [];
+    expect(inspectUScheduleRecipeConfiguration(html.replace("Public Tee Times", "Golf Lesson"), url, gate => failures.push(gate))).toBeUndefined();
+    expect(failures).toEqual(["RENTAL_CATALOG"]);
+    expect(inspectUScheduleRecipeConfiguration(html, url, () => { throw Error("PRIVATE"); })?.selected.serviceName).toBe("Public Tee Times");
+    expect(inspectUScheduleRecipeConfiguration(html.replace('class="examplegolf"', 'class="foreign"'), url, () => { throw Error("PRIVATE"); })).toBeUndefined();
+  });
   it("projects copied primitive facts only, never markup, URLs, tokens or unknown keys", () => {
     const input = { stage: "RAW_ADDRESS", rawOfficialCaptured: true, rawAddressMatches: false, renderedAddressMatches: "true", unknown: true, html: "private", url: "https://private.example/secret" };
     const result = safeOfficialSourceDiagnostic(input)!;

@@ -1,4 +1,5 @@
 import { collectNativeOfficialPublicMetadata } from "./public-document-metadata";
+import { observedPublicBookingIntermediary } from "./public-booking-intermediary";
 import { createHash, randomUUID } from "node:crypto";
 import { chargeDelegatedReadBudget, delegatedProxyAllocation, settleDelegatedProxyBudget, type DelegatedReadBudget } from "./teeitup-delegated-booking-context";
 import { createDelegationDiagnostic, rememberTeeItUpDelegationFailure, getTeeItUpDelegationDiagnostic } from "./teeitup-delegated-booking-diagnostic";
@@ -253,6 +254,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
   const observedNavigationRoots = new Set(allowedNavigation);
   const cpsScope = createCpsPublicSessionScope(initialUrls);
   const bookingParents = createPublicBookingParentScope({ officialUrl: input.venueOfficialUrl, venueName: input.venueName, venueAddress: input.venueAddress });
+  const publicIntermediaries = new Map<string, { pageUrl: string; documentStartedAt: number }>();
   const teeBookingScope = createTeeItUpOfficialBookingScope({ officialUrl: input.venueOfficialUrl, venueName: input.venueName ?? "",
     venueAddress: input.venueAddress, timeZone: input.timeZone ?? "UTC" }, deadline);
   let teeDocumentToken: TeeItUpSourceRequestToken | undefined;
@@ -1120,6 +1122,17 @@ export async function createCourseDiscoveryBrowserSession(input: {
     const parentProof = bookingParents.authorizeParent(currentUrl, bookingParentIdentity);
     const publicFrameSources = !blockedAccess && input.venueOfficialUrl && navigation?.status === 200
       ? await observedPublicFrameSources(page, input.venueOfficialUrl, navigation.url, parentProof) : [];
+    // This is an exact literal public document edge, not a visible control or
+    // a click capability. Rebuild from current DOM + captured official bytes.
+    const intermediary = !blockedAccess && !terminalFailure && !redirectRouting?.firstFatal && nativeProxy &&
+      navigation?.status === 200 && officialIdentityDocument?.url === actualCurrentUrl && parentProof?.kind === "VERIFIED_OFFICIAL_DOCUMENT"
+      ? await observedPublicBookingIntermediary(page, officialIdentityDocument.html, parentProof) : null;
+    if (intermediary && (publicIntermediaries.has(intermediary) || publicIntermediaries.size < 2)) {
+      publicIntermediaries.set(intermediary, { pageUrl: actualCurrentUrl, documentStartedAt });
+      allowedNavigation.add(intermediary); observedNavigationRoots.add(intermediary);
+      bookingParents.observeOfficialLink(currentUrl, intermediary, "Public tee time availability");
+      visible.push({ target: randomUUID(), selector: "a[href]", kind: "public-document-link", name: "Public booking document link", label: "", href: intermediary, readOnly: true });
+    }
     const frames: DiscoveryBrowserSnapshot["frames"] = publicFrameSources.map(url => ({ url, source: "OFFICIAL_IFRAME_SRC" }));
     for (const frame of page.frames()) {
       const url = normalizeDiscoveryNavigationUrl(frame.url());
@@ -1496,6 +1509,11 @@ export async function createCourseDiscoveryBrowserSession(input: {
       if (action.action === "open") {
         serviceSelection = undefined;
         if (!isSafeRecipeUrl(action.url) || !allowedNavigation.has(new URL(action.url).href)) throw new Error("UNOBSERVED_NAVIGATION");
+        const intermediary = publicIntermediaries.get(action.url);
+        if (intermediary && (page.url() !== intermediary.pageUrl || !officialIdentityDocument || officialIdentityDocument.url !== intermediary.pageUrl ||
+            await page.evaluate(() => performance.timeOrigin) !== intermediary.documentStartedAt ||
+            await observedPublicBookingIntermediary(page, officialIdentityDocument.html, bookingParents.authorizeParent(page.url())) !== action.url))
+          throw new Error("UNOBSERVED_NAVIGATION");
         navigationOrigins.add(new URL(action.url).origin); passfactory.observeWidgetUrl(action.url);
         await redirectRouting?.beginDocumentNavigation(page.mainFrame());
         responses.length = 0;

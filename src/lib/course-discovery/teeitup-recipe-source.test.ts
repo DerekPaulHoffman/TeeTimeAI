@@ -1,5 +1,8 @@
-import { describe, expect, it } from "vitest";
+// @vitest-environment node
+import { describe, expect, it, vi } from "vitest";
 import { isTeeItUpRecipeSlotLink, parseTeeItUpRecipeSource, resolveTeeItUpRecipeFacilities, teeItUpRecipeBookingUrl } from "./teeitup-recipe-source";
+import { inspectExistingAdapter, executeExistingAdapterRecipe } from "./existing-adapter-executor";
+import { recipeTimeToInstant, venueProofMatches } from "./executor";
 
 const source = { bookingUrl: "https://harbor.book.teeitup.com/?course=11,22&date=2030-10-22", venueName: "Harbor Golf Club",
   venueAddress: "10 Harbor Drive, Example, NY 12345, USA", timeZone: "America/New_York" };
@@ -7,6 +10,62 @@ const rows = [
   { id: 11, courseId: "north", name: "Harbor Golf Club - North", address: "10 Harbor Dr., Example, NY 12345, US", timeZone: source.timeZone },
   { id: 22, courseId: "south", name: "Harbor Golf Club - South", address: source.venueAddress, timeZone: source.timeZone },
 ];
+const selectedSource = { ...source, officialUrl: "https://harbor.example/", providerFamily: "TEEITUP", bookingUrl: "https://harbor.book.teeitup.com/?course=11" };
+const qualified = { ...rows[0], name: "Harbor Golf Club, NY", country: "US", region: "NY" };
+describe("selected US state-qualified outdoor identity", () => {
+  it("strips only the exact matching terminal state for comparison, preserving original directory facts", () => {
+    const result = resolveTeeItUpRecipeFacilities(selectedSource, [qualified]);
+    expect(result).toHaveLength(1); expect(result[0].name).toBe(qualified.name); expect(result[0].address).toBe(qualified.address);
+    expect(resolveTeeItUpRecipeFacilities(selectedSource, [rows[0]])[0].id).toBe(11);
+    expect(resolveTeeItUpRecipeFacilities(selectedSource, [{ ...rows[0], name: "Harbor Golf Club - NY" }])[0].id).toBe(11);
+  });
+  it.each([
+    { name: "Harbor Golf Club, NJ" }, { country: "CA" }, { country: "USA" }, { country: undefined }, { region: "NJ" },
+    { name: "Harbor Golf Club, New York" }, { name: "Harbor Golf Club, ny" }, { name: "Harbor Golf Club, NY, US" },
+    { name: "Harbor Golf Club, NY Extra" }, { name: "Harbor Golf Club (NY)" },
+    { name: "Harbor Golf Club Annex, NY" }, { name: "Harbor East Golf Club, NY" }, { name: "Harbor Golf Club 9 Holes, NY" },
+    { name: "Harbor\u0000 Golf Club, NY" }, { name: "Other Golf Club, NY" },
+    { address: "11 Harbor Dr., Example, NY 12345, US" }, { address: "10 W Harbor Dr., Example, NY 12345, US" },
+    { address: "10 Harbor Road, Example, NY 12345, US" }, { address: "10 Harbor Dr., Other, NY 12345, US" },
+    { address: "10 Harbor Dr., Example, NJ 12345, US" }, { address: "10 Harbor Dr., Example, NY 12346, US" },
+    { address: "10 Harbor Dr., Example, NY 12345-6789, US" }, { timeZone: "America/Chicago" }, { isSimulator: true },
+  ])("rejects contradictory, foreign or nonterminal facts %j", change => {
+    expect(() => resolveTeeItUpRecipeFacilities(selectedSource, [{ ...qualified, ...change }])).toThrow("ADAPTER_IDENTITY_MISMATCH");
+  });
+  it("requires recognized US region and both complete physical addresses, without generalizing bare/multiple selection", () => {
+    const unknown = { ...qualified, name: "Harbor Golf Club, ZZ", region: "ZZ", address: qualified.address.replace("NY", "ZZ") };
+    expect(() => resolveTeeItUpRecipeFacilities({ ...selectedSource, venueAddress: source.venueAddress.replace("NY", "ZZ") }, [unknown])).toThrow();
+    for (const change of [{ venueAddress: "Example, NY 12345, US" }, { venueAddress: source.venueAddress.replace("NY", "NJ") },
+      { venueName: "Harbor\nGolf Club" }, { bookingUrl: "https://harbor.book.teeitup.com/" },
+      { bookingUrl: "https://harbor.book.teeitup.com/?course=99" }, { bookingUrl: source.bookingUrl }])
+      expect(() => resolveTeeItUpRecipeFacilities({ ...selectedSource, ...change }, [qualified])).toThrow();
+    expect(() => resolveTeeItUpRecipeFacilities(selectedSource, [qualified, qualified])).toThrow("ADAPTER_CONFIGURATION_UNVERIFIED");
+    expect(() => resolveTeeItUpRecipeFacilities(selectedSource, [qualified, { ...qualified, id: 22 }])).toThrow("ADAPTER_CONFIGURATION_UNVERIFIED");
+    expect(() => resolveTeeItUpRecipeFacilities({ ...selectedSource, bookingUrl: source.bookingUrl }, [qualified, { ...qualified, id: 22, courseId: "south" }])).toThrow("ADAPTER_IDENTITY_MISMATCH");
+  });
+  it("rederives the same full physical state-qualified identity on both fresh dates and rejects warm changes", async () => {
+    const lease = async <T>(_family: string, work: () => Promise<T>) => ({ acquired: true as const, value: await work() });
+    const fetchFor = (directory: unknown = [qualified]) => vi.fn<typeof fetch>(async value => {
+      const url = new URL(String(value));
+      if (url.pathname.endsWith("/facilities")) return Response.json(directory);
+      expect(url.pathname).toBe("/v2/tee-times"); expect(url.searchParams.get("facilityIds")).toBe("11");
+      return Response.json([{ courseId: "north", teetimes: [{ courseId: "north", teetime: `${url.searchParams.get("date")}T15:00:00Z`, rates: [{ allowedPlayers: [2, 3, 4], holes: 18 }] }] }]);
+    });
+    const deps = { requestLease: lease, venueMatches: venueProofMatches }, inspected = await inspectExistingAdapter(selectedSource, { ...deps, fetch: fetchFor() });
+    const recipe = { schemaVersion: 1 as const, engine: "EXISTING_ADAPTER" as const, target: { courseId: "example", kind: "OUTDOOR" as const }, source: selectedSource, adapter: inspected.adapter };
+    const run = (date: string, fetch: typeof globalThis.fetch) => executeExistingAdapterRecipe(recipe,
+      { date, players: 2, startTime: "08:00", endTime: "18:00", timeZone: source.timeZone },
+      { ...deps, fetch, recipeHash: "a".repeat(64), toInstant: recipeTimeToInstant, now: () => new Date("2030-10-26T00:00:00Z") });
+    for (const date of ["2030-10-27", "2030-10-28"]) {
+      const result = await run(date, fetchFor()); expect(result.evidence.reason).toBeUndefined();
+      expect(result).toMatchObject({ complete: true, status: "AVAILABLE", evidence: { venueVerified: true, dateVerified: true, capacityVerified: true, durationVerified: true, completeVerified: true } });
+    }
+    for (const change of [{ country: "CA" }, { name: "Harbor Golf Club, NJ" }, { address: "99 Harbor Dr., Example, NY 12345, US" }, { timeZone: "America/Chicago" }]) {
+      const fetch = fetchFor([{ ...qualified, ...change }]), result = await run("2030-10-28", fetch);
+      expect(result.complete).toBe(false); expect(result.evidence.reason).toBe("ADAPTER_IDENTITY_MISMATCH"); expect(fetch).toHaveBeenCalledOnce();
+    }
+  });
+});
 describe("TeeItUp recipe source scope", () => {
   it("preserves an explicit multi-course scope only with matching parent name, full address and timezone", () => {
     expect(parseTeeItUpRecipeSource(source.bookingUrl)?.selectedIds).toEqual([11, 22]);

@@ -6,8 +6,20 @@ import { sourceFailureDiagnostic } from "../../../scripts/automation/stagehand/s
 import { createDelegationDiagnostic } from "./teeitup-delegated-booking-diagnostic";
 import { deriveNativePhysicalContactSource } from "./teeitup-physical-contact-proof";
 import { deriveForeupOfficialRouteContact } from "./foreup-official-route-ownership";
+import { createStagehandNativeRouterFailureCapture } from "./stagehand-native-router-diagnostic";
 
 const first = Date.parse("2030-01-02T12:00:00.000Z");
+it("round-trips the original source host navigation rejection through the bound failure checkpoint only", () => {
+  const f = fixture(), capture = createStagehandNativeRouterFailureCapture();
+  capture.record("STAGEHAND_GUARDED_SOURCE_REJECTED", { phase: "SOURCE_HOST_REQUEST", sourceRequestGuard: "TRANSACTION_URL", method: "GET", resourceType: "document", rootFrame: true,
+    url: "https://private.example/?token=SECRET", message: "PRIVATE_HTML" });
+  f.report.sourceDiagnostic = sourceFailureDiagnostic({ phase: "OPEN", report: f.report, nativeRouterFailure: capture.snapshot(), cleanup: { browserClosed: true, modelClosed: true } });
+  const saved = createStagehandFailureCheckpoint({ ...f, phase: "SOURCE_VALIDATION", sourceReport: f.report, error: Error("STAGEHAND_SOURCE_DISCOVERY_FAILED") });
+  expect(saved.stagehandFailure.entries[0].diagnostic.nativeRouterFailure).toEqual(capture.snapshot());
+  expect(readStagehandFailure({ ...f.job, checkpoint: saved }, f.now)).toEqual(saved.stagehandFailure);
+  expect(JSON.stringify(saved)).not.toMatch(/PRIVATE_HTML|SECRET|private.example/u);
+  expect(readStagehandSourceCheckpoint({ ...f.job, attempts: 2, checkpoint: saved }, undefined, f.now)).toBeUndefined();
+});
 it("retains the real ForeUP ownership rejection without granting source or resume authority", () => {
   let error: unknown;
   try { deriveForeupOfficialRouteContact({ venueName: "Public Golf Course", venueAddress: "12 Public Road, Denver, CO 80001, US", officialUrl: "https://public.example/", bookingUrl: "https://foreupsoftware.com/index.php/booking/12345/456#/teetimes", timeZone: "America/Denver" },

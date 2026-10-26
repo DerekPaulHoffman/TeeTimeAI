@@ -1,6 +1,15 @@
 // @vitest-environment node
 import { expect, it } from "vitest";
-import { sameStagehandDocumentReadUrl, createGuardedStagehandSourceBrowser } from "./stagehand-source-browser";
+import { sameStagehandDocumentReadUrl, createGuardedStagehandSourceBrowser, canonicalStagehandHostEntry } from "./stagehand-source-browser";
+it("preserves a literal repeated-slash public pathname without treating it as a network-path URL", () => {
+  for (const url of ["https://www.public.example//", "https://www.public.example///", "https://www.public.example//public?keep=one"])
+    expect(canonicalStagehandHostEntry(url)).toBe(url);
+});
+it("keeps forbidden transaction paths and private URL state rejected after separator comparison", () => {
+  for (const url of ["https://public.example//ASP/appt_req.asp", "https://public.example/%2fASP/appt_req.asp", "https://public.example/%5cASP/appt_req.asp",
+    "https://public.example///checkout", "https://public.example//login", "https://user:secret@public.example//", "https://public.example//?token=secret", "http://public.example//"])
+    expect(() => canonicalStagehandHostEntry(url)).toThrow("STAGEHAND_GUARDED_SOURCE_REJECTED");
+});
 it("readiness correlates only fragment changes of the same native document URL", () => {
   const url = "https://owned.example/public?venue=one&kind=day";
   expect(sameStagehandDocumentReadUrl(url, url + "#teetimes")).toBe(true);

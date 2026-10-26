@@ -5,13 +5,17 @@ export const officialSourceStages = ["CONTROLLER_CAPTURE", "SOURCE_CONTEXT", "OF
 export const officialSourceBooleanKeys = ["rawOfficialCaptured", "currentOfficialDocument", "officialProvenance", "sourceContextValid", "officialSiteMatches",
   "rawVenueMatches", "rawAddressMatches", "rawLinkMatches", "renderedVenueMatches", "renderedAddressMatches", "renderedLinkMatches", "renderedFrameObserved",
   "renderedHeadingsPresent", "renderedAddressesPresent", "renderedLinksPresent", "chainHome", "chainBookingPage", "chainRedirect", "chainFinalDocument", "chainTokenCurrent", "legacyFallback", "derivationRejected"] as const;
-export type OfficialSourceDiagnostic = { stage: typeof officialSourceStages[number] } & Partial<Record<typeof officialSourceBooleanKeys[number], boolean>>;
+export const uscheduleConfigurationGates = ["SOURCE_CONTEXT", "BODY_LIMIT", "ACCESS_REQUIRED", "TENANT_DOCUMENT", "SELECTORS", "RENTAL_CATALOG", "SELECTED_RENTAL", "DURATION_CATALOG"] as const;
+export type UScheduleConfigurationGate = typeof uscheduleConfigurationGates[number];
+export type OfficialSourceDiagnostic = { stage: typeof officialSourceStages[number]; uscheduleConfigurationGate?: UScheduleConfigurationGate } & Partial<Record<typeof officialSourceBooleanKeys[number], boolean>>;
 export function safeOfficialSourceDiagnostic(value: unknown): OfficialSourceDiagnostic | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
   const record = value as Record<string, unknown>;
   if (typeof record.stage !== "string" || !officialSourceStages.some(stage => stage === record.stage)) return;
   const result: OfficialSourceDiagnostic = { stage: record.stage as OfficialSourceDiagnostic["stage"] };
   for (const key of officialSourceBooleanKeys) if (typeof record[key] === "boolean") result[key] = record[key];
+  if (record.stage === "INSPECTOR_REJECTED" && uscheduleConfigurationGates.some(gate => gate === record.uscheduleConfigurationGate))
+    result.uscheduleConfigurationGate = record.uscheduleConfigurationGate as UScheduleConfigurationGate;
   return result;
 }
 export const navigationFailureKinds = ["TIMEOUT", "ABORTED", "DNS", "TLS", "NETWORK", "CLOSED", "UNKNOWN"] as const;

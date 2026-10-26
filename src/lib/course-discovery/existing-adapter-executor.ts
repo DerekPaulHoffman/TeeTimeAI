@@ -41,7 +41,7 @@ import { isFreshNativeOfficialIdentityPage } from "./native-official-page-attest
 import { observedTeeItUpOfficialBookingChain, type TeeItUpOfficialBookingToken } from "./teeitup-official-booking-context";
 import { bindTeeItUpOfficialBookingFacility, type TeeItUpOfficialBookingSourceProof, type TeeItUpObservedSourceChain } from "./teeitup-official-booking-source";
 import { readTeeItUpOfficialBookingChain } from "./teeitup-official-booking-reader";
-import type { OfficialSourceDiagnostic } from "./official-source-diagnostics";
+import type { OfficialSourceDiagnostic, UScheduleConfigurationGate } from "./official-source-diagnostics";
 import { bindTeeItUpPostalConflictProof, type TeeItUpPostalConflictProof } from "./teeitup-postal-conflict-proof";
 import type { NativeOfficialPageReader } from "./native-official-page-reader";
 import { readTeeItUpDelegatedBookingChain, type DelegatedReaderDependencies } from "./teeitup-delegated-booking-reader";
@@ -382,7 +382,7 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
       readBudget.bookingConfigurationRequested = true;
       const response = await read(source.bookingUrl, { headers: { accept: "text/html,application/xhtml+xml;q=0.9" } });
       if (!/^text\/html(?:;|$)/iu.test(response.headers.get("content-type") ?? "")) fail("ADAPTER_CONFIGURATION_UNVERIFIED");
-      const fresh = parseTeeItUpBookingConfiguration(await response.text(), source.venueName);
+      const fresh = parseTeeItUpBookingConfiguration(await response.text(), source.venueName, teeitup.selectedIds);
       const saved = adapter?.family === "TEEITUP" ? adapter.publicBookingConfiguration : undefined;
       if (saved && JSON.stringify(saved) !== JSON.stringify(fresh) || teeitup.selectedIds?.some(id => !fresh.facilityIds.includes(id))) fail("ADAPTER_CONFIGURATION_CHANGED");
       publicBookingConfiguration = fresh;
@@ -499,9 +499,14 @@ export async function inspectExistingAdapter(source: Source, deps: Dependencies)
     const session = createUSchedulePublicSession(source.bookingUrl, deps);
     try {
       const response = await session.read(source.bookingUrl);
-      const config = inspectUScheduleRecipeConfiguration(await response.text(), source.bookingUrl);
+      let configurationGate: UScheduleConfigurationGate | undefined;
+      const config = inspectUScheduleRecipeConfiguration(await response.text(), source.bookingUrl, gate => { configurationGate = gate; });
+      if (!config) {
+        diagnostic({ stage: "INSPECTOR_REJECTED", ...(configurationGate ? { uscheduleConfigurationGate: configurationGate } : {}) });
+        fail("ADAPTER_CONFIGURATION_UNVERIFIED");
+      }
       const normalized = source.venueName.normalize("NFKC").toLowerCase().replace(/&/gu, "and").replace(/[^a-z0-9]/gu, "");
-      if (!config || normalized.length < 8 || normalized !== config.tenant.replace(/-/gu, "")) fail("ADAPTER_IDENTITY_MISMATCH");
+      if (normalized.length < 8 || normalized !== config.tenant.replace(/-/gu, "")) fail("ADAPTER_IDENTITY_MISMATCH");
       let publicRentalPartyProof;
       if (deps.officialIdentityPage) {
         try { publicRentalPartyProof = deriveUSchedulePublicRentalParty(source, deps.officialIdentityPage); }

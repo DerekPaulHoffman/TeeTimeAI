@@ -33,6 +33,8 @@ export async function createStagehandGuardedBrowserHost({ cwd, initialUrl, timeZ
       beforeAction: async (targetId, href) => { const value = await channel.request({ action: "before", targetId, ...(href === undefined ? {} : { href }) }); if (value.ready !== true) throw discoveryError("STAGEHAND_NATIVE_HOST_INVALID"); return value.witness; },
       observeFrameSources: targetId => channel.request({ action: "frames", targetId }),
       observeUniqueSource: targetId => channel.request({ action: "unique_source", targetId }),
+      preparePublicBookingIntermediary: targetId => channel.request({ action: "intermediary_prepare", targetId }),
+      completePublicBookingIntermediary: targetId => channel.request({ action: "intermediary_complete", targetId }),
       observeSourceReadiness: targetId => channel.request({ action: "readiness", targetId }),
       prepareFrameNavigation: (targetId, url) => channel.request({ action: "frame_prepare", targetId, url }),
       completeFrameNavigation: (targetId, url) => channel.request({ action: "frame_complete", targetId, url }),

@@ -10,6 +10,24 @@ export function assertSourceCandidateBudget(candidates) {
 }
 const rows = (value, limit) => Array.isArray(value) ? value.slice(0, limit) : [];
 const norm = value => publicEvidenceUrl(value);
+/** Explicit non-visible document-link routing, never a synthetic click/frame. */
+export function nativeIntermediaryNavigations(report, isPublic = publicEvidenceUrl) {
+  const valid=value=>typeof value==='string'&&norm(value)===value&&Boolean(isPublic(value));
+  const sha=value=>typeof value==='string'&&/^[a-f0-9]{64}$/u.test(value);
+  const keys=value=>value&&typeof value==='object'&&!Array.isArray(value)?Object.keys(value).sort().join(','):'';
+  const started=Date.parse(report?.startedAt),finished=report?.finishedAt===undefined?Date.now()+5000:Date.parse(report.finishedAt);
+  return rows(report?.nativeIntermediaryNavigations,2).filter(row=>{
+    if(keys(row)!=='completedAt,documentHash,finalDocumentHash,finalUrl,kind,observedAt,pageUrl,redirects,url'||row.kind!=='NATIVE_PUBLIC_BOOKING_INTERMEDIARY_OPEN'||
+      ![row.pageUrl,row.url,row.finalUrl].every(valid)||new URL(row.pageUrl).origin!==new URL(row.url).origin||new URL(row.url).search||new URL(row.url).hash||row.url===row.pageUrl||
+      !sha(row.documentHash)||!sha(row.finalDocumentHash)||!Number.isFinite(started)||!Number.isFinite(finished)||
+      !Number.isFinite(Date.parse(row.observedAt))||!Number.isFinite(Date.parse(row.completedAt))||Date.parse(row.observedAt)<started||Date.parse(row.completedAt)<Date.parse(row.observedAt)||Date.parse(row.completedAt)>finished||
+      !Array.isArray(row.redirects)||row.redirects.length>5||!rows(report.officialLinkLedger,512).some(w=>w.kind==='NATIVE_PUBLIC_BOOKING_INTERMEDIARY'&&w.pageUrl===row.pageUrl&&w.observedAt===row.observedAt&&w.documentHash===row.documentHash&&
+        w.links?.length===1&&w.links[0].visible===false&&w.links[0].href===row.url))return false;
+    let current=row.url;const seen=new Set([current]);
+    for(const hop of row.redirects){if(keys(hop)!=='completed,fromUrl,status,toUrl'||hop.completed!==true||![301,302,303,307,308].includes(hop.status)||hop.fromUrl!==current||!valid(hop.toUrl)||seen.has(hop.toUrl))return false;current=hop.toUrl;seen.add(current);}
+    return current===row.finalUrl;
+  });
+}
 /** Private fixed-controller frame entries, never SDK/model action summaries. */
 export function nativeFrameNavigations(report, isPublic = publicEvidenceUrl) {
   const valid = value => typeof value === 'string' && norm(value) === value && Boolean(isPublic(value));
@@ -54,6 +72,7 @@ export function observedBookingSourceCandidates(report, officialUrl, isPublic = 
   if (!valid(officialUrl)) return [];
   const official = norm(officialUrl), observed = new Set(), edges = new Map();
   let edgeCount = 0;
+  const intermediaryEntries = sourceDiscoveryOnly ? nativeIntermediaryNavigations(report,isPublic) : [];
   const see = value => { if (valid(value)) observed.add(norm(value)); };
   const link = (from, to) => {
     if (!valid(from) || !valid(to) || edgeCount >= 2048) return;
@@ -63,6 +82,7 @@ export function observedBookingSourceCandidates(report, officialUrl, isPublic = 
   };
   for (const value of rows(report.visitedUrls, 512)) see(value);
   for (const row of rows(report.officialLinkLedger, 512)) {
+    if(row.kind==='NATIVE_PUBLIC_BOOKING_INTERMEDIARY'&&!intermediaryEntries.some(entry=>entry.pageUrl===row.pageUrl&&entry.observedAt===row.observedAt&&entry.documentHash===row.documentHash&&row.links?.length===1&&row.links[0].href===entry.url&&row.links[0].visible===false))continue;
     see(row.pageUrl);
     for (const item of rows(row.links, 512)) link(row.pageUrl, item.href);
   }
@@ -86,7 +106,7 @@ export function observedBookingSourceCandidates(report, officialUrl, isPublic = 
   const initial = report.initialNavigation;
   if (initial?.requestedUrl === officialUrl && Number.isInteger(initial.status) && initial.status >= 200 && initial.status < 400 &&
       valid(initial.finalUrl) && observed.has(norm(initial.finalUrl))) link(officialUrl, initial.finalUrl);
-  if(sourceDiscoveryOnly)for(const row of nativeFrameNavigations(report,isPublic)){
+  if(sourceDiscoveryOnly)for(const row of [...nativeFrameNavigations(report,isPublic),...nativeIntermediaryNavigations(report,isPublic)]){
     see(row.finalUrl);for(const hop of row.redirects){see(hop.fromUrl);see(hop.toUrl);link(hop.fromUrl,hop.toUrl);}
   }
   const reachable = new Set([official]);
@@ -126,6 +146,9 @@ export function observedBookingSourceCandidates(report, officialUrl, isPublic = 
     for(const action of nativeLinkActions(report))if(edges.get(norm(action.sourceUrl))?.has(norm(action.observedTarget.href))&&observed.has(norm(action.afterUrl))){visibleLink(action.sourceUrl,action.observedTarget.href);visibleLink(action.observedTarget.href,action.afterUrl);}
     if(initial?.requestedUrl===officialUrl&&Number.isInteger(initial.status)&&initial.status>=200&&initial.status<400&&observed.has(norm(initial.finalUrl)))visibleLink(officialUrl,initial.finalUrl);
     for(const row of nativeFrameNavigations(report,isPublic))for(const hop of row.redirects)visibleLink(hop.fromUrl,hop.toUrl);
+    // A distinct fixed-native raw public document edge can reach the next
+    // document; it never converts the hidden anchor into visible evidence.
+    for(const row of nativeIntermediaryNavigations(report,isPublic)){visibleLink(row.pageUrl,row.url);for(const hop of row.redirects)visibleLink(hop.fromUrl,hop.toUrl);}
     const visibleReachable=new Set([official]);for(const from of visibleReachable)for(const to of visibleEdges.get(from)??[])visibleReachable.add(to);
     const documentKey=value=>{const url=new URL(value);return url.origin+url.pathname+url.search;};
     const startupDocuments=new Set([...startup].map(documentKey));

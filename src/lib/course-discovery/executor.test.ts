@@ -241,7 +241,23 @@ describe("deterministic course recipe execution", () => {
     expect(result.slots[0].holes).toBeUndefined();
     const smallCapacity = await executeAccessRecipe(recipe, { ...executionInput, players: 4, durationMinutes: 60 }, dependencies({ ...body,
       slots: [{ ...body.slots[0], capacity: 2 }] }));
-    expect(smallCapacity.status).toBe("AVAILABLE"); expect(smallCapacity.slots[0].capacity).toBe(2);
+    expect(smallCapacity).toMatchObject({ status: "EMPTY", complete: true, slots: [], evidence: { venueVerified: true, dateVerified: true, capacityVerified: true, durationVerified: true, completeVerified: true } });
+    const mixedCapacity = await executeAccessRecipe(recipe, { ...executionInput, players: 4, durationMinutes: 60 }, dependencies({ ...body,
+      slots: [{ ...body.slots[0], bay: "too-small", capacity: 2 }, { ...body.slots[0], bay: "exact-party", capacity: 4 },
+        { ...body.slots[0], bay: "larger-party", capacity: 6 }, { ...body.slots[0], bay: "unspecified-party" },
+        { ...body.slots[0], bay: "unknown-party", capacity: null }] }));
+    expect(mixedCapacity.status).toBe("AVAILABLE"); expect(mixedCapacity.complete).toBe(true);
+    expect(mixedCapacity.slots.map(slot => slot.resourceId).sort()).toEqual(["exact-party", "larger-party", "unknown-party", "unspecified-party"]);
+    expect(mixedCapacity.slots.map(slot => slot.capacity).sort((a, b) => (a ?? 0) - (b ?? 0))).toEqual([null, null, 4, 6]);
+    expect(mixedCapacity.slots.every(slot => slot.availableSpots === 1 && slot.endsAt === "2026-10-22T14:00:00.000Z")).toBe(true);
+    for (const capacities of [[2, 6], [6, 2]]) {
+      const contradictory = await executeAccessRecipe(recipe, { ...executionInput, players: 4, durationMinutes: 60 }, dependencies({ ...body,
+        slots: capacities.map(capacity => ({ ...body.slots[0], capacity })) }));
+      expect(contradictory).toMatchObject({ status: "INCOMPLETE", complete: false, slots: [], evidence: { reason: "CONFLICTING_SLOT_EVIDENCE" } });
+    }
+    const invalidSmallRental = await executeAccessRecipe(recipe, { ...executionInput, players: 4, durationMinutes: 60 }, dependencies({ ...body,
+      slots: [{ ...body.slots[0], capacity: 2, end: "09:30" }] }));
+    expect(invalidSmallRental).toMatchObject({ status: "INCOMPLETE", evidence: { reason: "SLOT_DURATION_MISMATCH" } });
     expect((await executeAccessRecipe(recipe, { ...executionInput, players: 4, durationMinutes: 60 }, dependencies({ ...body, slots: [], empty: true }))).status).toBe("EMPTY");
     expect((await executeAccessRecipe(recipe, { ...executionInput, players: 4, durationMinutes: 60 }, dependencies({ ...body,
       slots: [{ ...body.slots[0], end: "09:30" }] }))).status).toBe("INCOMPLETE");

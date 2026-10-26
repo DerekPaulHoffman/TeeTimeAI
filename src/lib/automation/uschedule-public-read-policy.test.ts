@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createUSchedulePublicReadPolicy } from "./uschedule-public-read-policy";
+import { createUSchedulePublicReadPolicy, isUSchedulePublicRentalLabel } from "./uschedule-public-read-policy";
 
 const source = "https://clients.uschedule.com/example-golf/booking";
 const html = `<select id="select_service"><option value="72">Hourly Simulator Rental - Standard</option><option value="73">Golf Lessons</option></select>
@@ -14,6 +14,15 @@ function setup(url = source, document = html) {
   return policy;
 }
 describe("observed USchedule public filter reads", () => {
+  it("admits only the exact public tee-times label inside the existing simulator rental policy", () => {
+    for (const label of ["Public Tee Times", " public  tee times ", "PUBLIC TEE TIMES"]) expect(isUSchedulePublicRentalLabel(label)).toBe(true);
+    for (const label of ["Tee Times", "Private Public Tee Times", "Public Tee Times Lesson", "Public Tee Times Package", "Members Public Tee Times", "Public Tee Times Checkout"]) expect(isUSchedulePublicRentalLabel(label)).toBe(false);
+    const policy = setup(source, html.replace("Hourly Simulator Rental - Standard", "Public Tee Times")), endpoint = new URL(`${source}/changefield`);
+    expect(policy.allows(endpoint, headers(), body("service_id", "72"))).toBe(true);
+    expect(policy.allows(endpoint, headers(), body("service_id", "73"))).toBe(false);
+    expect(policy.allows(endpoint, headers(), body("group_size", "4"))).toBe(false);
+    expect(policy.allows(endpoint, headers(), body("time", "10:00"))).toBe(false);
+  });
   it("requires a successful actual booking document and generalizes tenant and service IDs", () => {
     const policy = createUSchedulePublicReadPolicy();
     const endpoint = new URL(`${source}/changefield`);

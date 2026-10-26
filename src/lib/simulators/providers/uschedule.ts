@@ -9,6 +9,7 @@ import { readUScheduleNextAvailableView } from "@/lib/automation/uschedule-publi
 import { simulatorPublicConfigurationSchema, uschedulePublicTenant, type USchedulePublicConfiguration } from "./public-configuration";
 import { SimulatorAvailabilityError, type SimulatorAvailabilityInput, type SimulatorAvailabilityResult,
   type SimulatorAvailabilitySlot } from "./types";
+import type { UScheduleConfigurationGate } from "@/lib/course-discovery/official-source-diagnostics";
 import { parseUScheduleLocationSource, readUScheduleLocationCatalog, USCHEDULE_LOCATION_CLIENT,
   type UScheduleOfficialLocationProof, type USchedulePublicLocationProof } from "./uschedule-location-source";
 
@@ -19,6 +20,9 @@ const MAX_HTML_BYTES = 600_000, MAX_JSON_BYTES = 8_000, MAX_PAGES = 8;
 // fixed page ceiling; learned execution still has 16 pages, 40 session reads,
 // 8 MB aggregate and the existing later-day completeness requirement.
 const MAX_PUBLIC_ROWS_PER_PAGE = 25;
+// Separate complete dated-grid profile: 44 starts were observed, including
+// all 32 locally expandable extras. This never changes the legacy list cap.
+const MAX_PUBLIC_GRID_STARTS = 64;
 // One observed public catalog publishes twenty distinct 15..300 minute choices.
 // Only catalog cardinality changes; requested duration and read budgets do not.
 const MAX_PUBLIC_DURATION_CHOICES = 20;
@@ -109,6 +113,77 @@ function pooledRows(html: string) {
   });
 }
 
+/** A complete single-date simulator grid, not an interval grid or chosen bay.
+ * The selected duration was independently refreshed and checked by listing(). */
+function publicTimeGrid(all: Element[], learned?: LearnedRental) {
+  const cls = (node: Element, value: string) => (attr(node, "class") ?? "").split(/\s+/u).includes(value);
+  const grids = all.filter(node => cls(node, "time_choices")), allRows = all.filter(node => cls(node, "timeslot"));
+  if (!grids.length && !allRows.length) return;
+  const invalid = (): never => { throw schemaError("The public simulator time grid is unverified"); };
+  const clean = (node: Node) => visibleText(node).replace(/\s+/gu, " ").trim();
+  const unsafe = (node: Element, expandable = false) => {
+    let current: Node | undefined = node;
+    for (let depth = 0; current && depth < 64; depth++, current = "parentNode" in current ? current.parentNode ?? undefined : undefined) {
+      if (!("tagName" in current)) continue;
+      if (["form", "script", "style", "template", "noscript", "iframe"].includes(current.tagName) ||
+          ["hidden", "inert", "disabled", "onclick"].some(key => attr(current as Element, key) !== undefined) ||
+          ["aria-hidden", "aria-disabled"].some(key => attr(current as Element, key) === "true") ||
+          /display\s*:\s*none|visibility\s*:\s*(?:hidden|collapse)|(?:^|;)\s*opacity\s*:\s*0(?:\.0*)?\s*(?:!important\s*)?(?:;|$)/iu.test(attr(current, "style") ?? "") ||
+          /(?:^|\s)(?:hidden|invisible|visually-hidden|sr-only|disabled|booked|no_time)(?:\s|$)/u.test(attr(current, "class") ?? "") ||
+          cls(current, "d-none") && !(current === node && expandable) ||
+          /\b(?:account|profile|checkout|payment|billing|login|private|members?)\b/iu.test(["id", "class", "aria-label", "title"].map(key => attr(current as Element, key) ?? "").join(" "))) return true;
+    }
+    return current !== undefined;
+  };
+  if (!learned || learned.publicLocationProof || learned.serviceName !== "Public Tee Times" || grids.length !== 1 ||
+      all.some(node => cls(node, "next_avail_results") || cls(node, "next_avail_item") || attr(node, "id") === "more_next_avail")) return invalid();
+  const grid = grids[0], parent = "parentNode" in grid ? grid.parentNode : undefined;
+  if (grid.tagName !== "div" || !parent || !("tagName" in parent) || !cls(parent, "choices") || !cls(parent, "full") || unsafe(grid) ||
+      all.filter(node => cls(node, "choices") && cls(node, "full")).length !== 1) return invalid();
+  const rows = children(grid).filter(node => cls(node, "timeslot"));
+  if (!rows.length || rows.length > MAX_PUBLIC_GRID_STARTS || rows.length !== allRows.length || rows.filter(node => cls(node, "selected")).length > 1 ||
+      children(grid).some(node => !rows.includes(node) && !["show-extra-row", "hide-extra-row"].includes(attr(node, "id") ?? ""))) return invalid();
+  const lengthLabels = all.filter(node => node.tagName === "label" && attr(node, "for") === "select_length");
+  if (lengthLabels.length !== 1 || clean(lengthLabels[0]) !== "Choose Simulator Time" || unsafe(lengthLabels[0])) return invalid();
+  const pools = all.filter(node => node.tagName === "select" && cls(node, "resSelect"));
+  if (pools.length !== 1 || unsafe(pools[0])) return invalid();
+  const pool = pools[0], groupId = /^resource([1-9]\d{0,9})$/u.exec(attr(pool, "id") ?? "")?.[1];
+  const poolLabels = all.filter(node => node.tagName === "label" && attr(node, "for") === attr(pool, "id"));
+  const sections = all.filter(node => attr(node, "id") === "res_section");
+  let poolAncestor: Node | undefined = pool;
+  while (poolAncestor && poolAncestor !== sections[0]) poolAncestor = "parentNode" in poolAncestor ? poolAncestor.parentNode ?? undefined : undefined;
+  const options = children(pool), ids = options.map(node => attr(node, "value") ?? ""), selected = options.filter(node => node.attrs.some(value => value.name === "selected"));
+  if (!groupId || sections.length !== 1 || poolAncestor !== sections[0] || poolLabels.length !== 1 || clean(poolLabels[0]) !== "Simulators" || unsafe(poolLabels[0]) ||
+      options.length < 2 || options.length > 21 || options.some(node => node.tagName !== "option" || children(node).length || unsafe(node) || !clean(node) || clean(node).length > 200) ||
+      new Set(ids).size !== ids.length || ids.filter(id => id === "-1").length !== 1 || ids.some(id => id !== "-1" && !PUBLIC_ID.test(id)) ||
+      selected.length !== 1 || attr(selected[0], "value") !== "-1" || clean(selected[0]) !== "Any Available") return invalid();
+  const extras = rows.filter(node => cls(node, "extra"));
+  const show = all.filter(node => attr(node, "id") === "show-extra-row"), hide = all.filter(node => attr(node, "id") === "hide-extra-row");
+  if (extras.length) {
+    const shownLabel = show.length === 1 ? children(show[0]) : [], hiddenLabel = hide.length === 1 ? children(hide[0]) : [];
+    if (show.length !== 1 || hide.length !== 1 || show[0].parentNode !== grid || hide[0].parentNode !== grid || unsafe(show[0]) ||
+        show[0].attrs.some(value => !["id", "class"].includes(value.name)) || hide[0].attrs.some(value => !["id", "class", "style"].includes(value.name)) ||
+        shownLabel.length !== 1 || hiddenLabel.length !== 1 || [shownLabel[0], hiddenLabel[0]].some(node => node.tagName !== "span" || attr(node, "class") !== "no_time" || node.attrs.length !== 1) ||
+        children(shownLabel[0]).length !== 1 || children(shownLabel[0])[0].tagName !== "text" || children(shownLabel[0])[0].attrs.length !== 0 || children(children(shownLabel[0])[0]).length !== 0 || children(hiddenLabel[0]).length !== 0 ||
+        Number(/^Show Additional Times\s*\(\s*([1-9]\d{0,2})\s+more\s*\)$/u.exec(clean(show[0]))?.[1]) !== extras.length || clean(hide[0]) !== "Hide Additional Times" ||
+        (attr(hide[0], "style") ?? "").replace(/\s|;/gu, "").toLowerCase() !== "display:none" || rows.length === extras.length) return invalid();
+  } else if (show.length || hide.length) return invalid();
+  let extraStarted = false;
+  const times = rows.map(node => {
+    const extra = cls(node, "extra"), classes = (attr(node, "class") ?? "").split(/\s+/u).filter(Boolean), labels = children(node);
+    if (node.tagName !== "div" || !cls(node, "col") || cls(node, "d-none") !== extra || unsafe(node, extra) ||
+        classes.some(value => !["col", "timeslot", "selected", "d-none", "extra"].includes(value)) ||
+        node.attrs.some(value => !["class", "data-time"].includes(value.name)) || labels.length !== 1 || labels[0].tagName !== "span" || labels[0].attrs.length || children(labels[0]).length ||
+        extraStarted && !extra) return invalid();
+    extraStarted ||= extra;
+    const time = decodeWall(attr(node, "data-time") ?? ""), hour = Number(time.wall.slice(11, 13));
+    if (time.date !== learned.date || clean(labels[0]) !== `${hour % 12 || 12}:${time.wall.slice(14, 16)} ${hour < 12 ? "AM" : "PM"}`) return invalid();
+    return time;
+  });
+  if (times.some((time, index) => index > 0 && time.order <= times[index - 1].order)) return invalid();
+  return { times, cursor: times.at(-1)!.value, morePresent: false, completeDate: true, resourceId: `uschedule-resource-group:${groupId}:pooled` };
+}
+
 /** Inert projection of the selected public rental only. No session or list data survives. */
 export function projectUSchedulePublicConfiguration(html: string, sourceUrl: string): USchedulePublicConfiguration | undefined {
   const tenant = uschedulePublicTenant(sourceUrl);
@@ -193,6 +268,8 @@ function listing(html: string, expectedServiceId: string, learned?: LearnedRenta
       return !label || !new RegExp(`^${escaped} - \\$\\d+(?:\\.\\d{2})?$`, "u").test(visibleText(label).replace(/\s+/gu, " ").trim());
     })) throw schemaError("The public row rental identity changed");
   }
+  const grid = publicTimeGrid(all, learned);
+  if (grid) return grid;
   const times = pooledRows(html);
   if (times.some((time, index) => index > 0 && time.order <= times[index - 1].order))
     throw schemaError("The public availability list is not strictly ordered");
@@ -225,7 +302,7 @@ function listing(html: string, expectedServiceId: string, learned?: LearnedRenta
     }
   }
   if (cursors.length !== 1 || cursors[0] !== times.at(-1)!.value) throw schemaError("The public continuation cursor changed");
-  return { times, cursor: cursors[0], morePresent: more.length === 1 };
+  return { times, cursor: cursors[0], morePresent: more.length === 1, completeDate: false, resourceId: undefined };
 }
 async function bounded(response: Response, ceiling: number) {
   const declared = Number(response.headers.get("content-length"));
@@ -274,22 +351,27 @@ async function refresh(url: URL, cookie: string, name: "start_date" | "more_next
 
 /** Inert public rental choices for the fixed learned adapter. The tenant alias
  * is independently present in the rendered document and must match its URL. */
-export function inspectUScheduleRecipeConfiguration(html: string, sourceUrl: string) {
+export function inspectUScheduleRecipeConfiguration(html: string, sourceUrl: string, onFailure?: (gate: UScheduleConfigurationGate) => void) {
+  const reject = (gate: UScheduleConfigurationGate) => { try { onFailure?.(gate); } catch { /* Diagnostics cannot change parser behavior. */ } return undefined; };
   const tenant = uschedulePublicTenant(sourceUrl);
-  if (!tenant || Buffer.byteLength(html) > MAX_HTML_BYTES || accessChanged(html)) return;
+  if (!tenant) return reject("SOURCE_CONTEXT");
+  if (Buffer.byteLength(html) > MAX_HTML_BYTES) return reject("BODY_LIMIT");
+  if (accessChanged(html)) return reject("ACCESS_REQUIRED");
   const all = elements(parse(html));
   const bodies = all.filter(node => node.tagName === "body");
-  if (bodies.length !== 1 || !(attr(bodies[0], "class") ?? "").split(/\s/u).includes(tenant)) return;
+  if (bodies.length !== 1 || !(attr(bodies[0], "class") ?? "").split(/\s/u).includes(tenant)) return reject("TENANT_DOCUMENT");
   const select = (id: string) => all.filter(node => node.tagName === "select" && attr(node, "id") === id);
   const services = select("select_service"), lengths = select("select_length");
-  if (services.length !== 1 || lengths.length !== 1) return;
+  if (services.length !== 1 || lengths.length !== 1) return reject("SELECTORS");
   const rentals = elements(services[0]).filter(node => node.tagName === "option").map(node => ({ serviceId: attr(node, "value") ?? "",
     serviceName: visibleText(node).replace(/\s+/gu, " ").trim(), selected: node.attrs.some(value => value.name === "selected") }))
     .filter(row => PUBLIC_ID.test(row.serviceId) && isUSchedulePublicRentalLabel(row.serviceName));
   const durations = elements(lengths[0]).filter(node => node.tagName === "option").map(node => Number(attr(node, "value")))
     .filter(value => Number.isInteger(value) && value >= 15 && value <= 480);
   const current = rentals.filter(row => row.selected);
-  if (!rentals.length || rentals.length > 20 || current.length !== 1 || !durations.length || durations.length > MAX_PUBLIC_DURATION_CHOICES || new Set(durations).size !== durations.length) return;
+  if (!rentals.length || rentals.length > 20) return reject("RENTAL_CATALOG");
+  if (current.length !== 1) return reject("SELECTED_RENTAL");
+  if (!durations.length || durations.length > MAX_PUBLIC_DURATION_CHOICES || new Set(durations).size !== durations.length) return reject("DURATION_CATALOG");
   return { tenant, rentals, durations, selected: current[0] };
 }
 
@@ -411,10 +493,11 @@ export async function fetchUScheduleRecipeAvailability(input: SimulatorAvailabil
       const endsAt = venueInstant(new Date(time.order + input.durationMinutes * 60_000).toISOString().slice(0, 19), input.timeZone);
       if (endsAt.getTime() - startsAt.getTime() !== input.durationMinutes * 60_000) throw schemaError("The public rental crosses a timezone transition");
       slots.push({ sourceId: `uschedule:${input.offering.id}:${service.serviceId}:${startsAt.toISOString()}`, offeringId: input.offering.id,
-        resourceId: service.publicLocationProof ? `uschedule-location:${service.publicLocationProof.locationId}:pooled` : "ANY",
+        resourceId: current.resourceId ?? (service.publicLocationProof ? `uschedule-location:${service.publicLocationProof.locationId}:pooled` : "ANY"),
         productId: service.serviceId, startsAt, endsAt, maxPartySize: service.publicLocationProof?.maxPartySize ?? null, bookingUrl: url.href }); seen.add(time.value);
     }
     previousOrder = current.times.at(-1)!.order;
+    if (current.completeDate) return { slots, complete: true, observedAt: new Date(), evidenceUrl: url.href };
     if (crossedDate) return { slots, complete: true, observedAt: new Date(), evidenceUrl: url.href };
     if (!current.morePresent || index === 15) throw schemaError("The public date list was not completely observed");
     await refresh(url, cookie, "more_next_avail", current.cursor, fetchImpl, signal);

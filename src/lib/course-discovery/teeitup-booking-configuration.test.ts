@@ -8,6 +8,9 @@ const source = { officialUrl: "https://example.org/", bookingUrl: "https://new-p
   venueAddress: "10 Example Road, Example, NY 12345, USA", timeZone: "America/New_York", providerFamily: "TEEITUP" };
 const row = { id: 11, courseId: "provider-11", name: source.venueName, address: source.venueAddress, timeZone: source.timeZone, isSimulator: false };
 const config = { alias: "older-public-api-name", gnFacilityIds: [11], name: source.venueName };
+const publicRate = { golfFacilityId: 11, gCPlayFacilityId: 11, gFName: source.venueName,
+  showOnBE: true, isMemberRate: false, membershipId: null, gFStatus: "Active", gCStatus: "Active" };
+const groupConfig = { ...config, name: "Example Regional Public Golf", entityType: "course", gnFacilityIds: [11, 22], rates: [publicRate] };
 const html = (values: unknown[] = [config]) => `<html><script>self.__next_f.push(${JSON.stringify([1, values.map((v, i) => `${i}:${JSON.stringify(v)}`).join("\n") + "\n"])})</script></html>`;
 const lease = async <T>(_family: string, work: () => Promise<T>) => ({ acquired: true as const, value: await work() });
 const deps = { requestLease: lease, venueMatches: venueProofMatches };
@@ -37,6 +40,76 @@ describe("strict public TeeItUp alias configuration", () => {
   it("handles an independently framed root chunk after a non-newline Flight record", () => {
     const prefixed = `<script>self.__next_f.push(${JSON.stringify([1, "1:T4,text"])})</script>` + html();
     expect(parseTeeItUpBookingConfiguration(prefixed, source.venueName)).toEqual({ apiAlias: config.alias, facilityIds: [11] });
+  });
+  it("uses a unique selected public course only to earn a multi-course operator's directory mapping", () => {
+    const hiddenRate = { ...publicRate, showOnBE: false, isMemberRate: true, membershipId: "members" };
+    const unrelatedRate = { ...publicRate, golfFacilityId: 33, gCPlayFacilityId: 33, gFName: "Other Golf Club", showOnBE: false };
+    expect(parseTeeItUpBookingConfiguration(html([{ ...groupConfig, rates: [publicRate, hiddenRate, unrelatedRate] }]), source.venueName, [11]))
+      .toEqual({ apiAlias: config.alias, facilityIds: [11, 22] });
+    expect(() => parseTeeItUpBookingConfiguration(html([groupConfig]), source.venueName)).toThrow("ADAPTER_CONFIGURATION_UNVERIFIED");
+    expect(() => parseTeeItUpBookingConfiguration(html([groupConfig]), source.venueName, [11, 22])).toThrow("ADAPTER_CONFIGURATION_UNVERIFIED");
+    expect(() => parseTeeItUpBookingConfiguration(html([groupConfig]), source.venueName, [22])).toThrow("ADAPTER_CONFIGURATION_UNVERIFIED");
+  });
+  it.each([
+    { ...publicRate, gFName: "Foreign Golf Club" }, { ...publicRate, golfFacilityId: 22 },
+    { ...publicRate, golfFacilityId: "11" }, { ...publicRate, gCPlayFacilityId: 22 },
+    { ...publicRate, showOnBE: false }, { ...publicRate, showOnBE: "true" },
+    { ...publicRate, isMemberRate: true }, { ...publicRate, membershipId: "member" },
+    { ...publicRate, membershipId: undefined }, { ...publicRate, gFStatus: "Inactive" },
+    { ...publicRate, gCStatus: "Inactive" }, { ...publicRate, gFName: {} },
+  ])("rejects unbound/private/malformed selected course routing %#", rate => {
+    expect(() => parseTeeItUpBookingConfiguration(html([{ ...groupConfig, rates: [rate] }]), source.venueName, [11]))
+      .toThrow("ADAPTER_CONFIGURATION_UNVERIFIED");
+  });
+  it("rejects duplicate published selected rows, contradictory identity, and conflicting/invalid aliases", () => {
+    for (const value of [
+      { ...groupConfig, rates: [publicRate, publicRate] },
+      { ...groupConfig, rates: [publicRate, { ...publicRate, showOnBE: false, gFName: "Foreign Golf Club" }] },
+      { ...groupConfig, gnFacilityIds: [11, 11] }, { ...groupConfig, alias: "../foreign" },
+      { ...groupConfig, entityType: "private" }, { ...groupConfig, rates: Array(501).fill(publicRate) },
+    ]) expect(() => parseTeeItUpBookingConfiguration(html([value]), source.venueName, [11])).toThrow("ADAPTER_CONFIGURATION_UNVERIFIED");
+    expect(() => parseTeeItUpBookingConfiguration(html([groupConfig, { ...groupConfig, alias: "foreign" }]), source.venueName, [11]))
+      .toThrow("ADAPTER_CONFIGURATION_UNVERIFIED");
+  });
+  it("does not let one valid selected row hide a malformed selected ID", () => {
+    expect(() => parseTeeItUpBookingConfiguration(html([{ ...groupConfig, rates: [publicRate, { ...publicRate, golfFacilityId: "11" }] }]), source.venueName, [11]))
+      .toThrow("ADAPTER_CONFIGURATION_UNVERIFIED");
+  });
+  it("real directory physical identity remains mandatory after selected course routing", async () => {
+    const selectedSource = { ...source, bookingUrl: source.bookingUrl + "?course=11" };
+    for (const directory of [[row], [{ ...row, address: "99 Foreign Road, Example, NY 12345, USA" }],
+      [{ ...row, timeZone: "America/Chicago" }], [{ ...row, name: "Foreign Golf Club" }],
+      [{ ...row, id: 22 }], [row, row]]) {
+      const base = transport(html([groupConfig]), directory);
+      const fetch = vi.fn<typeof globalThis.fetch>(async (value, init) => new URL(String(value)).origin === new URL(source.bookingUrl).origin
+        ? new Response(html([groupConfig]), { headers: { "content-type": "text/html" } }) : base(value, init));
+      if (directory[0] === row && directory.length === 1) {
+        const result = await inspectExistingAdapter(selectedSource, { ...deps, fetch });
+        expect(result.adapter).toMatchObject({ family: "TEEITUP", facilityIds: [11], publicBookingConfiguration: { apiAlias: config.alias, facilityIds: [11, 22] } });
+        expect(fetch).toHaveBeenCalledTimes(3);
+      } else await expect(inspectExistingAdapter(selectedSource, { ...deps, fetch })).rejects.toThrow();
+    }
+  });
+  it("rederives selected public routing on each warm date and rejects changed public binding before the API", async () => {
+    const selectedSource = { ...source, bookingUrl: source.bookingUrl + "?course=11" };
+    const fetchFor = (configuration = groupConfig) => {
+      const base = transport(html([configuration]));
+      return vi.fn<typeof globalThis.fetch>(async (value, init) => new URL(String(value)).origin === new URL(source.bookingUrl).origin
+        ? new Response(html([configuration]), { headers: { "content-type": "text/html" } }) : base(value, init));
+    };
+    const inspected = await inspectExistingAdapter(selectedSource, { ...deps, fetch: fetchFor() });
+    const recipe = { schemaVersion: 1 as const, engine: "EXISTING_ADAPTER" as const, target: { courseId: "example", kind: "OUTDOOR" as const }, source: selectedSource, adapter: inspected.adapter };
+    for (const date of ["2030-10-27", "2030-10-28"]) {
+      const result = await executeExistingAdapterRecipe(recipe, { date, players: 2, startTime: "08:00", endTime: "18:00", timeZone: source.timeZone },
+        { ...deps, fetch: fetchFor(), recipeHash: "a".repeat(64), toInstant: recipeTimeToInstant, now: () => new Date("2030-10-26T00:00:00Z") });
+      expect(result).toMatchObject({ complete: true, status: "AVAILABLE", evidence: { venueVerified: true, dateVerified: true, capacityVerified: true, durationVerified: true, completeVerified: true } });
+    }
+    for (const rate of [{ ...publicRate, showOnBE: false }, { ...publicRate, isMemberRate: true }, { ...publicRate, gFName: "Foreign Golf Club" }]) {
+      const fetch = fetchFor({ ...groupConfig, rates: [rate] });
+      const result = await executeExistingAdapterRecipe(recipe, { date: "2030-10-27", players: 2, startTime: "08:00", endTime: "18:00", timeZone: source.timeZone },
+        { ...deps, fetch, recipeHash: "a".repeat(64), toInstant: recipeTimeToInstant, now: () => new Date("2030-10-26T00:00:00Z") });
+      expect(result.complete).toBe(false); expect(result.evidence.reason).toBe("ADAPTER_CONFIGURATION_UNVERIFIED"); expect(fetch).toHaveBeenCalledOnce();
+    }
   });
   it.each([{}, { ...config, name: "Foreign Golf Club" }, { ...config, alias: "../../foreign" }, { ...config, gnFacilityIds: [11, 11] },
     { ...config, gnFacilityIds: ["11"] }, { ...config, gnFacilityIds: [] }])("rejects invalid or unbound literal configuration %#", value => {

@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createStagehandCodexModel } from './codex-model.mjs';
-import { classifyNavigationError, projectActionGuardDiagnostic, projectSourceDocumentReadiness } from './source-diagnostic.mjs';
+import { classifyNavigationError, projectActionGuardDiagnostic, projectSourceDocumentReadiness, projectNativeIntermediaryPreparation } from './source-diagnostic.mjs';
 import { publicEvidenceUrl } from './public-evidence.mjs';
 
 export async function loadStagehandRuntime() {
@@ -227,7 +227,7 @@ export async function settleSourceDocument(read,{deadline,signal,now=Date.now,sl
   throw Object.assign(Error('STAGEHAND_SOURCE_LOADING_INCOMPLETE'),{stagehandDocumentReadiness:last});
 }
 
-export async function openStagehandSession({ model, deadline, cwd, signal, onMetrics, onNativeSourceWitness, onNativeFrameSourceWitness, modelDisabled = false, sourceRoutingOnly = false, ownedBrowser }, { loadRuntime = loadStagehandRuntime, createModel = createStagehandCodexModel } = {}) {
+export async function openStagehandSession({ model, deadline, cwd, signal, onMetrics, onNativeSourceWitness, onNativeFrameSourceWitness, onNativeIntermediaryWitness, modelDisabled = false, sourceRoutingOnly = false, ownedBrowser }, { loadRuntime = loadStagehandRuntime, createModel = createStagehandCodexModel } = {}) {
   if (!modelDisabled && model !== 'gpt-6.1-sol') throw new Error('SOL_ONLY_MODEL_REQUIRED');
   if (!Number.isFinite(deadline) || deadline <= Date.now()) throw new Error('ORIGINAL_DEADLINE_EXPIRED');
   const owned = validateOwnedBrowserConnection(ownedBrowser);
@@ -267,7 +267,7 @@ export async function openStagehandSession({ model, deadline, cwd, signal, onMet
     // All operations below explicitly bind this attested CDP page. UI tab
     // activation is unnecessary and is unavailable for some off-record tabs.
     const checked = withinDeadline;
-    let operationModelStart=0,lastOperationModelFailure,ownedCdpFailure,nativeRouterFailure,documentReadiness;
+    let operationModelStart=0,lastOperationModelFailure,ownedCdpFailure,nativeRouterFailure,documentReadiness,intermediaryPreparation,intermediaryAttempted=false;
     const unchangedAnchorNavigations=new Set();
     const annotate = (error, phase) => {
       const failure=codexModel?.lastFailure;
@@ -313,6 +313,27 @@ export async function openStagehandSession({ model, deadline, cwd, signal, onMet
         const witness=sourceRoutingUniqueWitness(await checked(owned.observeUniqueSource(page.pageId)),{pageUrl:current,startedAt:began,deadline});
         return witness&&await checked(page.url())===current?witness:null;
       },'EVIDENCE'),
+      openPublicBookingIntermediary: () => guarded(async()=>{
+        if(!sourceRoutingOnly||typeof owned.preparePublicBookingIntermediary!=='function'||typeof owned.completePublicBookingIntermediary!=='function')return null;
+        const began=Date.now(),current=await checked(page.url());let witness;intermediaryPreparation=undefined;intermediaryAttempted=true;
+        try{witness=await checked(owned.preparePublicBookingIntermediary(page.pageId));}
+        finally{if(typeof owned.snapshotFailures==='function')try{intermediaryPreparation=projectNativeIntermediaryPreparation((await checked(owned.snapshotFailures()))?.nativeIntermediaryPreparation);}catch{ /* Diagnostic capture never replaces the original prepare failure. */ }}
+        if(witness===null)return null;
+        const keys=value=>value&&typeof value==='object'&&!Array.isArray(value)?Object.keys(value).sort().join(','):'';
+        const stamp=Date.parse(witness?.observedAt),href=witness?.links?.[0]?.href;
+        if(keys(witness)!=='documentHash,kind,links,observedAt,pageUrl'||witness.kind!=='NATIVE_PUBLIC_BOOKING_INTERMEDIARY'||
+          witness.pageUrl!==current||!isSourceRoutingUrl(href)||new URL(href).origin!==new URL(current).origin||new URL(href).search||new URL(href).hash||
+          witness.links.length!==1||keys(witness.links[0])!=='href,visible'||witness.links[0].visible!==false||
+          !/^[a-f0-9]{64}$/u.test(witness.documentHash)||!Number.isFinite(stamp)||new Date(stamp).toISOString()!==witness.observedAt||stamp<began||stamp>Date.now()||Date.now()>=deadline||
+          typeof onNativeIntermediaryWitness!=='function'||await checked(page.url())!==current)throw Error('STAGEHAND_NATIVE_HOST_INVALID');
+        assertPublicUrl(href);await checked(onNativeIntermediaryWitness(witness));
+        if(await checked(page.url())!==current)throw Error('STAGEHAND_NATIVE_HOST_INVALID');
+        await checked(page.goto(href,{waitUntil:'domcontentloaded',timeout:Math.min(30000,Math.max(1,deadline-Date.now()))}));
+        const result=await checked(owned.completePublicBookingIntermediary(page.pageId));
+        const pages=await checked(browser.context.pages());
+        if(!await checked(owned.assertGuardedTargets(pages.map(value=>value.pageId)))||result.finalUrl!==await checked(page.url()))throw Error('STAGEHAND_UNGUARDED_CONTEXT');
+        return result;
+      },'OPEN'),
       openObservedFrameSource: url => guarded(async()=>{
         if(!sourceRoutingOnly||typeof owned.prepareFrameNavigation!=='function'||typeof owned.completeFrameNavigation!=='function')throw Error('STAGEHAND_SOURCE_OUTPUT_INVALID');
         if(!isSourceRoutingUrl(url))throw Error('STAGEHAND_SOURCE_OUTPUT_INVALID');
@@ -373,6 +394,7 @@ export async function openStagehandSession({ model, deadline, cwd, signal, onMet
       get ownedCdpFailure() { return ownedCdpFailure?structuredClone(ownedCdpFailure):undefined; },
       get nativeRouterFailure() { return nativeRouterFailure?structuredClone(nativeRouterFailure):undefined; },
       get sourceDocumentReadiness() { return documentReadiness?structuredClone(documentReadiness):undefined; },
+      get nativeIntermediaryPreparation() { return intermediaryPreparation?structuredClone(intermediaryPreparation):undefined; },
       get disabledModelCalls() { return disabledModelCalls; },
       async close() {
         signal?.removeEventListener('abort', onAbort);
@@ -382,6 +404,7 @@ export async function openStagehandSession({ model, deadline, cwd, signal, onMet
         if(typeof owned.snapshotFailures==='function'){
           const failures=await boundedClose(Promise.resolve().then(()=>owned.snapshotFailures()),500);
           ownedCdpFailure=failures?.ownedCdpFailure;nativeRouterFailure=failures?.nativeRouterFailure;
+          if(intermediaryAttempted)intermediaryPreparation??=projectNativeIntermediaryPreparation(failures?.nativeIntermediaryPreparation);
         }else if(typeof owned.snapshotFailure==='function')ownedCdpFailure=await boundedClose(Promise.resolve().then(()=>owned.snapshotFailure()),500);
         const modelReceipt = codexModel ? await boundedClose(codexModel.close(), 4000) : null;
         await boundedClose(stagehand.close(), 2000);

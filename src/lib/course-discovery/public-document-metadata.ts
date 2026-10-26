@@ -7,8 +7,15 @@ export function collectNativeOfficialPublicMetadata(expectedVenueName: string) {
   const formRules = { eligible(form: HTMLFormElement) {
     try {
       const action = new URL(form.getAttribute("action") ?? "", document.URL);
+      const current = new URL(document.URL);
+      // Metadata comparison only: observed HTTPS root redirects may retain a second slash.
+      // Never change the form action, navigation URL, path/query evidence, or POST permission.
+      const sameRootDocument = action.protocol === "https:" && current.protocol === "https:" && action.origin === current.origin &&
+        !action.username && !action.password && !current.username && !current.password &&
+        /^\/{1,2}$/u.test(action.pathname) && /^\/{1,2}$/u.test(current.pathname) &&
+        !action.search && !current.search && !action.hash && !current.hash;
       return expected.length >= 8 && forms.length === 1 && form.parentElement === document.body && form.method.toLowerCase() === "post" &&
-        action.href === new URL(document.URL).href && Boolean(form.querySelector('footer,[role="contentinfo"]')) &&
+        (action.href === current.href || sameRootDocument) && Boolean(form.querySelector('footer,[role="contentinfo"]')) &&
         Array.from(form.querySelectorAll("h1,h2")).some(h => {
           if (!(h instanceof HTMLElement) || h.closest('[hidden],[inert],[aria-hidden="true"]') || h.querySelector('input,textarea,select,button,label,[contenteditable]')) return false;
           let node: HTMLElement | null = h, depth = 0;

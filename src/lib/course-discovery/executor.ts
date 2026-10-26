@@ -245,8 +245,8 @@ function normalize(recipe: ExtractedAccessRecipe, input: AccessExecutionInput, d
     accessExecutionResultSchema.parse({ status, complete: status === "AVAILABLE" || status === "EMPTY", observedAt: now.toISOString(),
       sourceUrl: recipe.source.bookingUrl, slots, evidence: { ...evidence, ...(reason ? { reason, diagnostic: { code: reason } } : {}) } });
   if (!evidence.venueVerified || !evidence.dateVerified || !evidence.completeVerified) return result("INCOMPLETE", "SOURCE_PROOF_MISMATCH");
-  // Simulator player count is saved context. A full rental is one available
-  // bay; public capacity, when known, remains descriptive metadata only.
+  // A full simulator rental is one available bay. Unknown golfer capacity
+  // remains eligible; a published capacity still limits the requested party.
   if (!simulator && data.players !== undefined && boundedNumber(data.players, 100) !== input.players) return result("INCOMPLETE", "PLAYER_FILTER_MISMATCH");
   if (recipe.target.kind === "SIMULATOR") {
     if ((recipe.engine === "BROWSER_JSON" || recipe.engine === "HTTP_JSON" && recipe.requestBinding === "SEVENROOMS_PUBLIC_PARTICIPANTS") && data.duration === undefined)
@@ -302,7 +302,10 @@ function normalize(recipe: ExtractedAccessRecipe, input: AccessExecutionInput, d
     if (byId.has(slot.sourceId) && JSON.stringify(byId.get(slot.sourceId)) !== JSON.stringify(slot)) return result("INCOMPLETE", "CONFLICTING_SLOT_EVIDENCE");
     byId.set(slot.sourceId, slot);
   }
-  const unique = [...byId.values()].sort((a, b) => a.startsAt.localeCompare(b.startsAt) || a.sourceId.localeCompare(b.sourceId));
+  // Keep contradictory same-slot capacity evidence visible to the conflict
+  // check before excluding otherwise valid rentals too small for the party.
+  const unique = [...byId.values()].filter(slot => !simulator || slot.capacity === null || slot.capacity !== undefined && slot.capacity >= input.players)
+    .sort((a, b) => a.startsAt.localeCompare(b.startsAt) || a.sourceId.localeCompare(b.sourceId));
   return result(unique.length ? "AVAILABLE" : "EMPTY", undefined, unique);
 }
 async function domField(root: Locator, field: RecipeField | undefined): Promise<unknown> {

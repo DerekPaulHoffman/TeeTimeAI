@@ -15,6 +15,14 @@ const sourceStopSchema=z.object({finalDecision:z.enum(sourceStopDecisions).nulla
 const sourceDocumentSchema=z.object({readyState:z.enum(['loading','interactive','complete','UNKNOWN']),bodyPresent:z.boolean(),mainDocumentCurrent:z.boolean(),mainDocumentComplete:z.boolean(),
   mainReadPending:z.boolean(),pendingReads:z.number().int().min(0).max(2048),mainDocumentStatus:z.number().int().min(100).max(599).nullable()}).strict();
 export function projectSourceDocumentReadiness(value){const result=sourceDocumentSchema.safeParse(value);return result.success?result.data:undefined;}
+export const intermediaryPreparationStages=['BEGIN','FIRST_CAPTURE','SECOND_CAPTURE','ORIGIN','SELECT','GRANT'];
+export const intermediaryPreparationReasons=['ENTRY_LIMIT','PENDING_ENTRY','DOCUMENT_UNSETTLED','NATIVE_DOCUMENT_CHANGED','DOM_CHANGED','OFFICIAL_ORIGIN_UNVERIFIED','NO_UNIQUE_GATEWAY','ALREADY_ENTERED','URL_REJECTED','CLOCK_INVALID','READY','THREW'];
+const nullableFact=z.boolean().nullable(),nullableRows=z.number().int().min(0).max(160).nullable();
+const intermediaryPreparationSchema=z.object({attempt:z.number().int().min(1).max(1000000),stage:z.enum(intermediaryPreparationStages),reason:z.enum(intermediaryPreparationReasons).nullable(),
+ firstRows:nullableRows,secondRows:nullableRows,firstOverflow:nullableFact,secondOverflow:nullableFact,firstSettled:nullableFact,secondSettled:nullableFact,
+ firstCandidatePresent:nullableFact,secondCandidatePresent:nullableFact,samePage:nullableFact,sameNativeDocument:nullableFact,sameDocumentHash:nullableFact,
+ sameReadinessState:nullableFact,sameRoutingInventory:nullableFact}).strict();
+export function projectNativeIntermediaryPreparation(value){const result=intermediaryPreparationSchema.safeParse(value);return result.success?result.data:undefined;}
 const sourceGuardTags=['A','BUTTON','INPUT','SELECT','FORM','SPAN','IMG','OTHER'];
 const guardProjection=z.object({guardReason:z.enum(sourceGuardReasons),guardTerm:z.enum(sourceGuardTerms).optional(),guardField:z.enum(sourceGuardFields).optional(),
   guardTag:z.enum(sourceGuardTags).optional(),guardHasHref:z.boolean().optional()}).strict();
@@ -100,13 +108,14 @@ const nativeRouterCodes=['NATIVE_REDIRECT_ABORT_TIMEOUT','NATIVE_REDIRECT_BODY_T
  'NATIVE_REDIRECT_RESPONSE_HEADERS_CONFLICT','NATIVE_REDIRECT_RESPONSE_METHOD_MISMATCH','NATIVE_REDIRECT_RESPONSE_MISMATCH','NATIVE_REDIRECT_RESPONSE_NETWORK_MISMATCH',
  'NATIVE_REDIRECT_RESPONSE_PRIOR_FAILURE','NATIVE_REDIRECT_RESPONSE_REQUEST_PAUSED','NATIVE_REDIRECT_RESPONSE_STATUS_INVALID','NATIVE_REDIRECT_RESPONSE_TIMEOUT',
  'NATIVE_REDIRECT_RESPONSE_UNADMITTED','NATIVE_REDIRECT_RESPONSE_UNKNOWN','NATIVE_REDIRECT_RESPONSE_URL_MISMATCH','NATIVE_REDIRECT_RETIRED_DISPATCH','NATIVE_REDIRECT_ROUTING_FAILED',
- 'NATIVE_RESPONSE_LIMIT','OWNED_STAGEHAND_CDP_UNAVAILABLE','UNKNOWN'];
+ 'NATIVE_RESPONSE_LIMIT','OWNED_STAGEHAND_CDP_UNAVAILABLE','STAGEHAND_GUARDED_SOURCE_REJECTED','UNKNOWN'];
 const nativeRouterBooleanKeys=['framePresent','rootFrame','networkIdPresent','duplicateRequestId','hasPostData','postDataPresent','identityPresent','loaderPresent','loaderKnown','identityFresh',
  'identityUrlMatches','identityMethodMatches','identityKindMatches','identityFrameMatches','parentPresent','awaitingDocument','parentCurrentGeneration','documentCommitted',
  'documentIntentPresent','documentIntentUsed','sourceResponseComplete','successorTerminalFailed','declaredLengthPresent','documentResponse','ancillaryResponse',
  'recordGenerationCurrent','recordGenerationRetired','recordAdmitted','recordPaused','recordResponsePaused','recordFailed','recordComplete','recordHandlerDone','recordTerminalObserved'];
 const nativeRouterFailureSchema=z.object({code:z.enum(nativeRouterCodes),
- phase:z.enum(['RESPONSE_WAIT','CONTINUE_REQUEST_ACK','CONTINUE_RESPONSE_ACK','LOADER_IDENTITY_WAIT','LOADER_IDENTITY','LOADER_OWNER','REDIRECT_GENERATION','REDIRECT_PROVENANCE','DOCUMENT_INTENT','DOCUMENT_DRAIN']).optional(),
+ phase:z.enum(['RESPONSE_WAIT','CONTINUE_REQUEST_ACK','CONTINUE_RESPONSE_ACK','LOADER_IDENTITY_WAIT','LOADER_IDENTITY','LOADER_OWNER','REDIRECT_GENERATION','REDIRECT_PROVENANCE','DOCUMENT_INTENT','DOCUMENT_DRAIN','SOURCE_HOST_REQUEST']).optional(),
+ sourceRequestGuard:z.enum(['STATE','TRANSACTION_URL','FRAME_OWNERSHIP','URL_POLICY','HEADER_POLICY','NAVIGATION_PROVENANCE','METHOD_POLICY','REQUEST_BUDGET','LEASE','NATIVE_RESPONSE']).optional(),
  method:z.enum(['GET','HEAD','POST','OPTIONS','PUT','PATCH','DELETE','CONNECT','TRACE','OTHER']).optional(),
  resourceType:z.enum(['document','stylesheet','script','image','media','font','xhr','fetch','preflight','other','ping','websocket','eventsource']).optional(),
  limitKind:z.enum(['DECLARED_INVALID','DECLARED_TOO_LARGE','DECODED_BODY','TOTAL_DECODED']).optional(),
@@ -141,6 +150,7 @@ export const sourceDiagnosticSchema = z.object({
   frameWitnessFailure:z.enum(sourceFrameWitnessFailures).optional(),
   sourceStop:sourceStopSchema.optional(),
   sourceDocumentReadiness:sourceDocumentSchema.optional(),
+  nativeIntermediaryPreparation:intermediaryPreparationSchema.optional(),
   rpcCode:z.number().int().min(-2147483648).max(2147483647).optional(),httpStatus:z.number().int().min(100).max(599).optional(),
   ...modelFailureFields,sdkRpcCode:z.number().int().min(-2147483648).max(2147483647).optional(),
   elapsedMs:z.number().int().min(0).max(900000),
@@ -156,7 +166,7 @@ export function projectSourceDiagnostic(value) {
   return parsed.data;
 }
 const boundedCount=value=>Number.isSafeInteger(value)&&value>=0&&value<=1000000?value:0;
-export function sourceFailureDiagnostic({error,phase,report,startedAt,cleanup,modelAttempts,modelFailure,ownedCdpFailure,nativeRouterFailure,sourceStop,documentReadiness}={}) {
+export function sourceFailureDiagnostic({error,phase,report,startedAt,cleanup,modelAttempts,modelFailure,ownedCdpFailure,nativeRouterFailure,sourceStop,documentReadiness,intermediaryPreparation}={}) {
   const rows=(value,max)=>Array.isArray(value)?value.slice(0,max):[];
   const safe=value=>publicEvidenceUrl(value);
   const ledger=rows(report?.officialLinkLedger,512).map(row=>({pageUrl:safe(row.pageUrl),links:rows(row.links,512).map(link=>({href:safe(link.href),visible:link.visible===true})).filter(link=>link.href)}));
@@ -192,6 +202,7 @@ export function sourceFailureDiagnostic({error,phase,report,startedAt,cleanup,mo
   if(sourceFrameWitnessFailures.includes(error?.stagehandFrameWitnessFailure))value.frameWitnessFailure=error.stagehandFrameWitnessFailure;
   const stop=sourceStopSchema.safeParse(sourceStop);if(stop.success)value.sourceStop=stop.data;
   const document=projectSourceDocumentReadiness(error?.stagehandDocumentReadiness??documentReadiness);if(document)value.sourceDocumentReadiness=document;
+  const intermediary=projectNativeIntermediaryPreparation(intermediaryPreparation);if(intermediary)value.nativeIntermediaryPreparation=intermediary;
   if(effectivePhase==='OPEN'){
     const annotated=navigationProjection.safeParse(error?.stagehandNavigation);
     Object.assign(value,annotated.success?annotated.data:classifyNavigationError(error));

@@ -10,7 +10,11 @@ type Element = DefaultTreeAdapterMap["element"];
 const publicId = /^(?:0|[1-9]\d{0,9})$/u;
 const rental = /\b(?:simulators?|bays?)\b.*\brentals?\b/iu;
 const excluded = /\b(?:lessons?|coaching|fitting|leagues?|classes?|members?|membership|package)\b/iu;
-export function isUSchedulePublicRentalLabel(value: string) { return rental.test(value) && !excluded.test(value); }
+/** USCHEDULE simulator adapter only; recipe validation rejects OUTDOOR targets. */
+export function isUSchedulePublicRentalLabel(value: string) {
+  const publicTeeTimes = /^public tee times$/iu.test(value.normalize("NFKC").replace(/\s+/gu, " ").trim());
+  return (rental.test(value) || publicTeeTimes) && !excluded.test(value);
+}
 function elements(node: Node): Element[] {
   return "childNodes" in node ? node.childNodes.flatMap(child => "tagName" in child ? [child, ...elements(child)] : elements(child)) : [];
 }

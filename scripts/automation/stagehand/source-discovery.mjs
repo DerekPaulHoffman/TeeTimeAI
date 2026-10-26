@@ -9,7 +9,7 @@ import { z } from 'zod';
 import { openStagehandSession, loadStagehandRuntime, assertPublicUrl, isSourceRoutingUrl as sourceRoutingUrl, frameworkIdentity, observedActionSummary, observedTargetSummary, sourceDocumentSettled, sourceRoutingUniqueWitness } from './driver.mjs';
 import { installReadOnlyEvidence } from './read-only-evidence.mjs';
 import { prioritizedPublicEvidence, publicEvidenceUrl } from './public-evidence.mjs';
-import { observedBookingSourceCandidates, assertSourceCandidateBudget, nativeFrameNavigations } from './source-provenance.mjs';
+import { observedBookingSourceCandidates, assertSourceCandidateBudget, nativeFrameNavigations, nativeIntermediaryNavigations } from './source-provenance.mjs';
 import { sourceFailureDiagnostic, sourceGuardReasons, projectActionGuardDiagnostic } from './source-diagnostic.mjs';
 
 export const SOURCE_BUDGET_MS = 240000;
@@ -85,14 +85,14 @@ export function sourceRoutingContext(report, candidates) {
     }));
   const completedAnchorClicks = rows.slice(-8);
   while (completedAnchorClicks.length && JSON.stringify({ initialNavigation, completedAnchorClicks }).length > 24000) completedAnchorClicks.shift();
-  const lastNavigationFeedback = report?.actionAttempts?.some(item=>item?.status==='REJECTED'&&item?.guardReason==='REPEATED_UNCHANGED_NAVIGATION')
-    ? 'REPEATED_UNCHANGED_NAVIGATION' : null;
+  const rejected = (report?.actionAttempts ?? []).at(-1);
+  const lastNavigationFeedback = rejected?.status==='REJECTED'&&['REPEATED_UNCHANGED_NAVIGATION','HIDDEN'].includes(rejected.guardReason) ? rejected.guardReason : null;
   const context = { initialNavigation, completedAnchorClicks, omittedClickCount: rows.length - completedAnchorClicks.length, lastNavigationFeedback };
   return { ...context, sha256: createHash('sha256').update(JSON.stringify(context)).digest('hex') };
 }
 export function buildSourceDiscoveryInstruction(ordinaryRequest, candidates, priorInspectionFeedback = null, routingContext = null, frames=[]) {
   return sourceDiscoveryCoreInstruction(ordinaryRequest, candidates, priorInspectionFeedback).replace('Return bookingUrl:null unless SOURCE_FOUND.', 'Return bookingUrl:null unless SOURCE_FOUND or OPEN_FRAME.') +
-    ` Recorded completed native routing observations from this same attempt: ${JSON.stringify(routingContext)}. This extraction is stateless: use this supplied history instead of assuming that the current DOM contains previous clicks. An eligibleBookingSource:true completed click with landingChanged:true records routing only, not that a terminal availability source was reached. If that destination is an informational operator homepage, choose CONTINUE and inspect its fresh visible public booking links. Select its exact eligible href only when current public evidence identifies an actual availability provider or self-hosted availability widget. Do not repeat a completed routing step merely because the current landing omits an earlier link. Repeated unchanged anchor navigation is mechanically rejected. Own-frame BODY extraction cannot see a cross-origin embed's contents. Fresh native visible iframe choices are ${JSON.stringify(frames)}. To investigate one, choose OPEN_FRAME with bookingUrl equal to exactly ONE listed frame URL; the fixed controller freshly rechecks it and opens it as MAIN in this same guarded context. No arbitrary URL, selector or code is accepted. Frame entry and its final main document are routing evidence only, never identity, availability, metadata or replay proof. At most two frame entries share the original source deadline and limits. Never choose OPEN_FRAME when the list is empty. This history grants no fresh identity, availability, adapter metadata or replay proof; the unchanged provenance validator and fixed inspector retain authority.`;
+    ` Recorded completed native routing observations from this same attempt: ${JSON.stringify(routingContext)}. This extraction is stateless: use this supplied history instead of assuming that the current DOM contains previous clicks. HIDDEN feedback means the last proposed selector was not a visible permitted target: do not repeat it; observe a different currently visible navigation control. An eligibleBookingSource:true completed click with landingChanged:true records routing only, not that a terminal availability source was reached. If that destination is an informational operator homepage, choose CONTINUE and inspect its fresh visible public booking links. Select its exact eligible href only when current public evidence identifies an actual availability provider or self-hosted availability widget. Do not repeat a completed routing step merely because the current landing omits an earlier link. Repeated unchanged anchor navigation is mechanically rejected. Own-frame BODY extraction cannot see a cross-origin embed's contents. Fresh native visible iframe choices are ${JSON.stringify(frames)}. To investigate one, choose OPEN_FRAME with bookingUrl equal to exactly ONE listed frame URL; the fixed controller freshly rechecks it and opens it as MAIN in this same guarded context. No arbitrary URL, selector or code is accepted. Frame entry and its final main document are routing evidence only, never identity, availability, metadata or replay proof. At most two frame entries share the original source deadline and limits. Never choose OPEN_FRAME when the list is empty. This history grants no fresh identity, availability, adapter metadata or replay proof; the unchanged provenance validator and fixed inspector retain authority.`;
 }
 function sourceDiscoveryCoreInstruction(ordinaryRequest, candidates, priorInspectionFeedback = null) {
   return `Discover only an official-linked signed-out public availability routing source for this ordinary input: ${JSON.stringify(ordinaryRequest)}. Use currently observed public links; never prior provider routes or guessed configuration. Do not extract times, build a recipe, select dates/players/duration, inspect private data, authenticate, solve challenges or select an available slot. This hybrid source-only choice is UNVERIFIED routing, not identity, inventory or method proof. The goal is a terminal public availability provider or a self-hosted availability widget, not merely another informational/operator homepage. A link labelled Book can lead to an intermediate operator site: choose CONTINUE there and follow its fresh visible public booking links. If the visible evidence does not establish a terminal source, navigate the observed link to investigate instead of returning SOURCE_FOUND prematurely. Exact links freshly observed as visible in the native DOM on an officially reachable page and visible embedded widgets are eligible before any click. Select an appropriate terminal availability href directly; do not click merely to qualify it. Successfully clicked observed ancestors also remain eligible but a completed click alone does not establish a terminal source. Never select the informational startup homepage or its redirect aliases. If no appropriate source is present, return one CONTINUE read-only navigation instruction, WAIT for a visible loader, or UNRESOLVED. Copy one eligibleBookingSourceUrls entry verbatim; never substitute a redirected/filtered/current URL or alter tenant/query parameters. The fixed reader must freshly follow and inspect the exact official-linked source, bind typed metadata and pass both independent server challenges before any method exists. eligibleBookingSourceUrls=${JSON.stringify(candidates)}. Return bookingUrl:null unless SOURCE_FOUND. Own same-job prior inspection failure: ${typeof priorInspectionFeedback==='string'?priorInspectionFeedback.slice(0,6000):'none'}. Historical feedback grants no current source or proof.`;
@@ -166,6 +166,17 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
   let session, startup, ownedBrowser, sourceError, phase='GUARDED_HOST', completed = false, consecutiveWaits = 0, rejections = 0;
   let finalDecision=null,stopCondition='RUNNING',lastActionKind=null,activeAct,activeFrame;
   report.nativeFrameNavigations=[];
+  report.nativeIntermediaryNavigations=[];
+  let activeIntermediary;
+  const onNativeIntermediaryWitness=witness=>{
+    const stamp=Date.parse(witness?.observedAt),keys=value=>value&&typeof value==='object'&&!Array.isArray(value)?Object.keys(value).sort().join(','):'';
+    if(!activeIntermediary||activeIntermediary.witnessed||keys(witness)!=='documentHash,kind,links,observedAt,pageUrl'||witness.kind!=='NATIVE_PUBLIC_BOOKING_INTERMEDIARY'||
+      witness.pageUrl!==activeIntermediary.pageUrl||!report.visitedUrls.includes(witness.pageUrl)||!sourceRoutingUrl(witness.pageUrl)||
+      !Number.isFinite(stamp)||new Date(stamp).toISOString()!==witness.observedAt||stamp<activeIntermediary.startedAt||stamp>Date.now()||Date.now()>=workDeadline||
+      !/^[a-f0-9]{64}$/u.test(witness.documentHash)||!Array.isArray(witness.links)||witness.links.length!==1||keys(witness.links[0])!=='href,visible'||witness.links[0].visible!==false||
+      !sourceRoutingUrl(witness.links[0].href)||new URL(witness.links[0].href).origin!==new URL(witness.pageUrl).origin)throw fail('STAGEHAND_SOURCE_OUTPUT_INVALID');
+    activeIntermediary.witnessed=true;report.officialLinkLedger.push(structuredClone(witness));
+  };
   const acceptNativeFrames = (witness,pageUrl,startedAt,selected) => {
     const predicate=nativeFrameWitnessFailure(witness,{pageUrl,visitedUrls:report.visitedUrls,startedAt,workDeadline,selected});
     if(predicate)throw Object.assign(fail('STAGEHAND_SOURCE_OUTPUT_INVALID'),{stagehandFrameWitnessFailure:predicate});
@@ -213,7 +224,7 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
       if(sessionFactory===openStagehandSession&&typeof createGuardedBrowser!=='function')throw fail('STAGEHAND_GUARDED_BROWSER_REQUIRED');
       if(createGuardedBrowser)ownedBrowser=await createGuardedBrowser({deadlineAt:request.workDeadlineAt,signal});
       if(completed||signal?.aborted||Date.now()>=workDeadline){await ownedBrowser?.close();throw fail('SOURCE_DISCOVERY_ABORTED');}
-      return sessionFactory({model:'gpt-6.1-sol',deadline:workDeadline,cwd:resolve(cwd),signal,onMetrics:()=>metrics(),onNativeSourceWitness,onNativeFrameSourceWitness,sourceRoutingOnly:true,ownedBrowser});
+      return sessionFactory({model:'gpt-6.1-sol',deadline:workDeadline,cwd:resolve(cwd),signal,onMetrics:()=>metrics(),onNativeSourceWitness,onNativeFrameSourceWitness,onNativeIntermediaryWitness,sourceRoutingOnly:true,ownedBrowser});
     });
     startup.then(value=>{if(completed)void value.close().catch(()=>{});}).catch(()=>{});
     session = await bounded(()=>startup);
@@ -258,6 +269,16 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
         report.outcome='SOURCE_PROPOSED_UNVERIFIED';report.decisionOrigin='NATIVE_UNIQUE_SUPPORTED_SOURCE';
         report.evidenceSummary='One freshly re-attested native public routing source; identity, configuration and availability remain unverified.';
         stopCondition='SOURCE_FOUND';await persist();break;
+      }
+      if(report.nativeIntermediaryNavigations.length<2&&typeof session.openPublicBookingIntermediary==='function'){
+        activeIntermediary={pageUrl:evidence.url,startedAt:Date.now()};let entry;
+        try{phase='OPEN';entry=await bounded(()=>session.openPublicBookingIntermediary());if(entry&&!activeIntermediary.witnessed)throw fail('STAGEHAND_SOURCE_OUTPUT_INVALID');}finally{activeIntermediary=undefined;}
+        if(entry){
+          report.nativeIntermediaryNavigations.push(entry);
+          if(nativeIntermediaryNavigations(report,sourceRoutingUrl).length!==report.nativeIntermediaryNavigations.length)throw fail('STAGEHAND_SOURCE_OUTPUT_INVALID');
+          if(!report.visitedUrls.includes(entry.finalUrl))report.visitedUrls.push(entry.finalUrl);
+          await persist();continue;
+        }
       }
       report.metrics.calls++;
       frames=frames.filter(value=>candidates.includes(value));
@@ -318,7 +339,7 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
     if(!report.browserClosed||!report.modelClosed){if(report.outcome==='SOURCE_PROPOSED_UNVERIFIED'&&!sourceError)sourceError=Object.assign(Error('STAGEHAND_SOURCE_CLEANUP_UNCONFIRMED'),{stagehandPhase:'CLOSE'});report.outcome='UNRESOLVED';report.adapterSourceProposal=null;report.frameworkFailureCode??='STAGEHAND_SOURCE_CLEANUP_UNCONFIRMED';stopCondition='CLEANUP_UNCONFIRMED';}
     if(report.outcome!=='SOURCE_PROPOSED_UNVERIFIED')report.sourceDiagnostic=sourceFailureDiagnostic({error:sourceError,phase,report,startedAt:sourceStartedAt,
       cleanup:{browserClosed:report.browserClosed,modelClosed:report.modelClosed},modelAttempts:report.metrics.attemptedLocalCodexCalls,modelFailure:session?.lastModelFailure,ownedCdpFailure:session?.ownedCdpFailure,nativeRouterFailure:session?.nativeRouterFailure,
-      sourceStop:{finalDecision,condition:stopCondition,lastActionKind},documentReadiness:session?.sourceDocumentReadiness});
+      sourceStop:{finalDecision,condition:stopCondition,lastActionKind},documentReadiness:session?.sourceDocumentReadiness,intermediaryPreparation:session?.nativeIntermediaryPreparation});
     report.finishedAt=new Date().toISOString();report.elapsedFromFirstPickupMs=Date.now()-Date.parse(request.firstPickedUpAt);
     await persist();
   }

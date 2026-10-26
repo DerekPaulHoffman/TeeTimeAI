@@ -10,6 +10,7 @@ import { createPublicBookingParentScope } from "./public-booking-parent";
 import { continueNativeBrowserRead, isObservedNativeRedirect, isObservedNativeRedirectTarget, nativeReadPreflightMethod } from "./native-public-browser";
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
 import { type PublicBrowserResponseProfile } from "./browser-resource-limits";
+import { canonicalStagehandHostEntry } from "./stagehand-source-browser";
 
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; }
 async function installed(maxRequests?: number, signal?: AbortSignal, afterRoute?: (route: NativeReadRoute) => Promise<void>, responseProfile?: PublicBrowserResponseProfile,
@@ -2369,6 +2370,30 @@ describe("native exact request and response ownership", () => {
       test.request("one"); await test.routes[0].continue(); test.response("one"); cancellation.abort(); body.resolve({ body: "late", base64Encoded: false });
       await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
       expect(test.cdp.send.mock.calls.some(([name]) => name === "Fetch.continueResponse")).toBe(false); expect(test.failures).toContain("NATIVE_REDIRECT_CANCELLED");
+    } finally { await test.guard.close(); }
+  });
+
+  it("preserves an exact released 302 repeated-slash document through the source host URL guard", async () => {
+    const test = await installed(), root = "https://public.example/", target = "https://www.public.example//", roots = new Set([root]);
+    try {
+      test.request("root", { resourceType: "Document", networkId: "same-native-document", request: { url: root, method: "GET", headers: {} } });
+      const original = test.routes[0].request(); await test.routes[0].continue();
+      test.response("root", { resourceType: "Document", networkId: "same-native-document", responseStatusCode: 302,
+        responseHeaders: [{ name: "Location", value: target }], request: { url: root, method: "GET", headers: {} } });
+      await original.response();
+      test.request("redirect", { resourceType: "Document", networkId: "same-native-document", redirectedRequestId: "root",
+        request: { url: target, method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(test.routes).toHaveLength(2));
+      const child = test.routes[1].request();
+      expect(isObservedNativeRedirect(child, roots)).toBe(true);
+      expect(isObservedNativeRedirect({ ...child }, roots)).toBe(false);
+      expect(canonicalStagehandHostEntry(child.url())).toBe(target);
+      await test.routes[1].continue();
+      test.response("redirect", { resourceType: "Document", networkId: "same-native-document", responseStatusCode: 200,
+        responseHeaders: [{ name: "Content-Type", value: "text/html" }], request: { url: target, method: "GET", headers: {} } });
+      await child.response();
+      expect(attestedNativeDocumentRedirects(child, roots)).toEqual([{ fromUrl: root, toUrl: target, status: 302, completed: true }]);
+      expect(test.failures).toEqual([]);
     } finally { await test.guard.close(); }
   });
 

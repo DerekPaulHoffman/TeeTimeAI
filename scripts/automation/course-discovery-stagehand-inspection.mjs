@@ -3,7 +3,7 @@ import { discoveryError } from "./course-discovery-client.mjs";
 import { STAGEHAND_SOURCE_MODE, canonicalStagehandData as canonical, stagehandDataHash as hash,
   publicStagehandSourceUrl as publicUrl, validateStagehandSourceProposal as validateAdapterSourceProposal,
   validateStagehandSourceReport } from "./course-discovery-stagehand-source.mjs";
-import { observedBookingSourceCandidates, nativeLinkSource, corroboratedNativeLink, nativeFrameNavigations } from "./stagehand/source-provenance.mjs";
+import { observedBookingSourceCandidates, nativeLinkSource, corroboratedNativeLink, nativeFrameNavigations, nativeIntermediaryNavigations } from "./stagehand/source-provenance.mjs";
 import { safeTeeItUpDelegationDiagnostic, safeFixedAdapterReadDiagnostic } from "./course-discovery-worker.mjs";
 const fail = code => discoveryError(code), HYBRID_SOURCE_DISCOVERY = STAGEHAND_SOURCE_MODE;
 const INSPECTION_ACTION_LIMIT = 6;
@@ -71,10 +71,14 @@ export function observedInspectionPath(report, officialUrl, bookingUrl) {
     }
   };
   for (const row of (report.officialLinkLedger ?? []).slice(0, 512))
-    for (const item of (row.links ?? []).slice(0, 512)) link(row.pageUrl, item.href);
+    for (const item of (row.links ?? []).slice(0, 512)) {
+      if(row.kind==='NATIVE_PUBLIC_BOOKING_INTERMEDIARY'&&!nativeIntermediaryNavigations(report,publicUrl).some(entry=>entry.pageUrl===row.pageUrl&&entry.observedAt===row.observedAt&&entry.documentHash===row.documentHash&&entry.url===item.href))continue;
+      link(row.pageUrl, item.href);
+    }
   for (const row of (report.frameLedger ?? []).slice(0, 512))
     for (const frame of (row.frames ?? []).slice(0, 32)) link(row.pageUrl, frame.src);
   for (const row of nativeFrameNavigations(report, publicUrl)) for (const hop of row.redirects) link(hop.fromUrl, hop.toUrl);
+  for (const row of nativeIntermediaryNavigations(report, publicUrl)) for (const hop of row.redirects) link(hop.fromUrl, hop.toUrl);
   for (const row of (report.observedSourceEvidence ?? []).slice(0, 1024)) {
     const source = row.kind === 'NATIVE_DOM_LINK_OBSERVED' ? nativeLinkSource(row) : row.url;
     if (['DOM_OBSERVED', 'NATIVE_DOM_LINK_OBSERVED'].includes(row.kind)) {
@@ -259,7 +263,7 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
       } else position = landed;
       const next = path[position + 1];
       const freshLinks = new Set([
-        ...(snapshot.controls ?? []).filter(row => row.kind === 'link').map(row => row.href),
+        ...(snapshot.controls ?? []).filter(row => ['link','public-document-link'].includes(row.kind)).map(row => row.href),
         ...(snapshot.frames ?? []).filter(row => row.source === 'OFFICIAL_IFRAME_SRC').map(row => row.url),
       ].filter(publicUrl).map(value => new URL(value).href));
       const missingLink = next !== undefined && !freshLinks.has(next);
