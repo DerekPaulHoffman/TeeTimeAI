@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
+import { createRequire } from 'node:module';
 import { join, resolve, isAbsolute } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
@@ -38,14 +39,23 @@ export function publicSourceJob(job, deadlineAt) {
 }
 
 /** File/catalog readiness only. The owned client additionally checks account/read before any model call. */
-export async function prepareSourceDiscovery({ cwd = process.cwd(), loadRuntime = loadStagehandRuntime, loadHelpers, read = readFileSync } = {}) {
+export async function prepareSourceDiscovery({ cwd = process.cwd(), loadRuntime = loadStagehandRuntime, loadHelpers, read = readFileSync,
+  loadGeneratedClient = root => createRequire(join(root, 'package.json'))(join(root, 'node_modules', '@prisma', 'client')) } = {}) {
+  // Import the installed/generated exports from this checkout only. A package
+  // stub or another checkout's client cannot make cold claims safe. Do not
+  // construct PrismaClient: this readiness gate has no database authority.
+  try {
+    const client = await loadGeneratedClient(resolve(cwd));
+    if (typeof client?.PrismaClient !== 'function' || !['CourseDiscoveryJob', 'CourseAccessRecipe', 'LocalReaderJob']
+      .every(name => client.Prisma?.ModelName?.[name] === name)) throw fail('LOCAL_GENERATED_PRISMA_CLIENT_UNAVAILABLE');
+  } catch { throw fail('LOCAL_GENERATED_PRISMA_CLIENT_UNAVAILABLE'); }
   await loadRuntime();
   const helpers = loadHelpers ? await loadHelpers() : await import(pathToFileURL(join(resolve(cwd),'scripts/automation/course-discovery-worker.mjs')).href);
   helpers.prepareDiscoveryModelCatalog({ model: 'gpt-6.1-sol' });
   helpers.resolveDiscoveryCli(resolve(cwd));
   const auth = JSON.parse(read(join(process.env.CODEX_HOME || join(homedir(),'.codex'),'auth.json'),'utf8'));
   if (auth.auth_mode !== 'chatgpt' || typeof auth.tokens?.access_token !== 'string' || !auth.tokens.access_token) throw fail('LOCAL_MODEL_EXISTING_CHATGPT_LOGIN_REQUIRED');
-  return { ready: true, model: 'gpt-6.1-sol', reasoningEffort: 'medium', framework: { name:'Stagehand',version:'4.3.0' }, chatgptSignInFileAvailable: true, readinessAccountRpcPerformed:false, accountTypeCheckedByClientBeforeModelCall:true };
+  return { ready: true, generatedClientReady: true, model: 'gpt-6.1-sol', reasoningEffort: 'medium', framework: { name:'Stagehand',version:'4.3.0' }, chatgptSignInFileAvailable: true, readinessAccountRpcPerformed:false, accountTypeCheckedByClientBeforeModelCall:true };
 }
 
 export const sourceDecision = z.object({ decision: z.enum(['CONTINUE', 'WAIT', 'SOURCE_FOUND', 'UNRESOLVED', 'OPEN_FRAME']), reason: z.string(), nextActionInstruction: z.string(), bookingUrl: z.string().nullable() }).strict();

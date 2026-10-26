@@ -91,6 +91,15 @@ managed worker's activation receipt bound to its actual clean deployed commit;
 stop it before changing the runtime checkout. Reuse the existing managed task
 and recovery supervisor rather than creating duplicate scheduled monitors.
 
+After the managed worker and its owned children have drained, update dependencies
+with `npm ci` and then run `npx prisma generate` in that maintained checkout.
+Require successful generated-client import readiness from the same clean
+checkout before cold claims. Readiness verifies the generated exports without
+constructing `PrismaClient` or making a database request; missing or stub exports
+fail with `LOCAL_GENERATED_PRISMA_CLIENT_UNAVAILABLE`. Installed dependencies
+alone are insufficient. This safeguard is not a diagnosis of an earlier pilot
+failure, and it never changes a job's original clocks or authority.
+
 ## Acceptance receipt
 
 Passing tests or deploying this code does not prove acceptance. Record the

@@ -675,6 +675,22 @@ describe("controller-only verification", () => {
     await connection.close();
   });
 
+  it.each(["STAGEHAND_NATIVE_HOST_FAILED", "STAGEHAND_NATIVE_HOST_SCOPE_INVALID", "STAGEHAND_NATIVE_HOST_DEADLINE", "STAGEHAND_NATIVE_HOST_INVALID",
+    "STAGEHAND_GUARDED_SOURCE_REJECTED", "OWNED_STAGEHAND_CDP_UNAVAILABLE", "OWNED_PUBLIC_CDP_UNAVAILABLE"])("retains emitted private Stagehand child startup code %s on process close", async code => {
+    const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), pid: 1, exitCode: 0, signalCode: null });
+    const connection = createDiscoveryProcess({ executable: "fixed", args: [], cwd: ".", environment: {}, spawnProcess: () => child });
+    const pending = expect(connection.request({ action: "start" })).rejects.toMatchObject({ code });
+    child.stderr.write(code + "\n"); child.emit("close", 1); await pending; await connection.close();
+  });
+
+  it.each(["PRIVATE_SECRET", "Error: STAGEHAND_NATIVE_HOST_FAILED private body", "STAGEHAND_NATIVE_HOST_FAILED\nPRIVATE_SECRET", "PREFIX_OWNED_PUBLIC_CDP_UNAVAILABLE"])("does not promote arbitrary child startup text %s", async text => {
+    const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), pid: 1, exitCode: 0, signalCode: null });
+    const connection = createDiscoveryProcess({ executable: "fixed", args: [], cwd: ".", environment: {}, spawnProcess: () => child });
+    const pending = connection.request({ action: "start" }).catch(error => error);
+    child.stderr.write(text); child.emit("close", 1); const error = await pending;
+    expect(error.code).toBe("DISCOVERY_PROCESS_CLOSED"); expect(JSON.stringify(error)).not.toContain("PRIVATE_SECRET"); await connection.close();
+  });
+
   it("carries bounded first-navigation diagnostics through a failed helper reply", async () => {
     const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), pid: 1, exitCode: 0, signalCode: null });
     const connection = createDiscoveryProcess({ executable: "fixed", args: [], cwd: ".", environment: {}, spawnProcess: () => child });

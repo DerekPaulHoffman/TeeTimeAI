@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { readFileSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sourceDiscover, publicSourceJob, sourceRoutingContext, prepareSourceDiscovery, pageEvidence, sourceDecisionFor, buildSourceDiscoveryInstruction } from './source-discovery.mjs';
@@ -10,6 +10,7 @@ import { publicEvidenceUrl } from './public-evidence.mjs';
 import { createStagehandGuardedBrowserHost } from '../course-discovery-stagehand-host.mjs';
 import { createStagehandCodexModel } from './codex-model.mjs';
 import { prepareReadOnlyAction } from './driver.mjs';
+import { createCourseDiscoverySupervisor } from '../course-discovery-supervisor.mjs';
 const official='https://public-course.example/', booking='https://public-provider.example/start?venue=public&kind=day', landing='https://public-provider.example/loading';
 function job(){const t=Date.now();return{id:'assigned-job',firstPickedUpAt:new Date(t).toISOString(),deadlineAt:new Date(t+900000).toISOString(),
  request:{identity:{name:'Public Course',officialUrl:official,timeZone:'America/New_York',address:'1 Public Road, Public Town, NY 10001, USA',canonicalCoursePhone:'PRIVATE_PHONE',bookingUrl:'PRIVATE_ROUTE'},
@@ -236,10 +237,47 @@ test('closed native-host startup failures survive the real source report while u
   assert.equal(JSON.stringify(report).includes('PRIVATE_UNKNOWN_PAYLOAD'),false);
  }
 });
+const generatedClientExports=()=>({PrismaClient:class{constructor(){throw Error('CLIENT_MUST_NOT_BE_CONSTRUCTED');}},Prisma:{ModelName:{CourseDiscoveryJob:'CourseDiscoveryJob',CourseAccessRecipe:'CourseAccessRecipe',LocalReaderJob:'LocalReaderJob'}}});
+function generatedClientWorkspace(generated=false){
+ const root=mkdtempSync(join(tmpdir(),'tts-source-client-readiness-'));
+ const pkg=join(root,'node_modules','@prisma','client');mkdirSync(pkg,{recursive:true});
+ writeFileSync(join(root,'package.json'),'{}');writeFileSync(join(pkg,'package.json'),JSON.stringify({name:'@prisma/client',main:'default.js'}));
+ writeFileSync(join(pkg,'default.js'),'module.exports={...require(".prisma/client/default")};');
+ if(generated){const directory=join(root,'node_modules','.prisma','client');mkdirSync(directory,{recursive:true});
+  writeFileSync(join(directory,'default.js'),`module.exports={PrismaClient:class{constructor(){throw Error('MUST_NOT_CONSTRUCT');}},Prisma:{ModelName:{CourseDiscoveryJob:'CourseDiscoveryJob',CourseAccessRecipe:'CourseAccessRecipe',LocalReaderJob:'LocalReaderJob'}}};`);}
+ return root;
+}
+const readinessMocks=()=>({loadRuntime:async()=>{},loadHelpers:async()=>({prepareDiscoveryModelCatalog:()=>{},resolveDiscoveryCli:()=>'/trusted/codex'}),read:()=>JSON.stringify({auth_mode:'chatgpt',tokens:{access_token:'PRIVATE_AUTH'}})});
 test('prepare is read-only readiness with no account RPC/model/browser or credential output',async()=>{
- const r=await prepareSourceDiscovery({cwd:process.cwd(),loadRuntime:async()=>{},loadHelpers:async()=>({prepareDiscoveryModelCatalog:()=>{},resolveDiscoveryCli:()=>'/trusted/codex'}),read:()=>JSON.stringify({auth_mode:'chatgpt',tokens:{access_token:'PRIVATE_AUTH'}})});
- assert.equal(r.ready,true);assert.equal(r.readinessAccountRpcPerformed,false);assert.equal(JSON.stringify(r).includes('PRIVATE'),false);
- await assert.rejects(prepareSourceDiscovery({loadRuntime:async()=>{},loadHelpers:async()=>({prepareDiscoveryModelCatalog:()=>{},resolveDiscoveryCli:()=>''}),read:()=>JSON.stringify({auth_mode:'apikey'})}),/EXISTING_CHATGPT_LOGIN_REQUIRED/);
+ const r=await prepareSourceDiscovery({cwd:process.cwd(),...readinessMocks(),loadGeneratedClient:generatedClientExports});
+ assert.equal(r.ready,true);assert.equal(r.generatedClientReady,true);assert.equal(r.readinessAccountRpcPerformed,false);assert.equal(JSON.stringify(r).includes('PRIVATE'),false);
+ await assert.rejects(prepareSourceDiscovery({...readinessMocks(),loadGeneratedClient:generatedClientExports,read:()=>JSON.stringify({auth_mode:'apikey'})}),/EXISTING_CHATGPT_LOGIN_REQUIRED/);
+});
+test('actual checkout-scoped package import rejects its missing generated Prisma client before any other preparation',async()=>{
+ const cwd=generatedClientWorkspace();let later=0;
+ try{await assert.rejects(prepareSourceDiscovery({cwd,loadRuntime:async()=>{later++;},loadHelpers:async()=>{later++;},read:()=>{later++;}}),
+  error=>error.code==='LOCAL_GENERATED_PRISMA_CLIENT_UNAVAILABLE'&&error.message===error.code&&!error.cause);
+  assert.equal(later,0);
+ }finally{rmSync(cwd,{recursive:true,force:true});}
+});
+test('actual generated export import stays local and never constructs PrismaClient',async()=>{
+ const cwd=generatedClientWorkspace(true);try{const r=await prepareSourceDiscovery({cwd,...readinessMocks()});assert.equal(r.generatedClientReady,true);}
+ finally{rmSync(cwd,{recursive:true,force:true});}
+});
+test('package stubs and malformed generated exports fail with only the closed readiness code',async()=>{
+ for(const value of[{}, {PrismaClient:function(){}}, {PrismaClient:function(){},Prisma:{ModelName:{}}}])
+  await assert.rejects(prepareSourceDiscovery({...readinessMocks(),loadGeneratedClient:()=>value}),{code:'LOCAL_GENERATED_PRISMA_CLIENT_UNAVAILABLE'});
+ await assert.rejects(prepareSourceDiscovery({...readinessMocks(),loadGeneratedClient:()=>{throw Error('PRIVATE_CLIENT_PATH');}}),
+  error=>error.message==='LOCAL_GENERATED_PRISMA_CLIENT_UNAVAILABLE'&&!JSON.stringify(error).includes('PRIVATE'));
+});
+test('normal supervisor does not claim cold work when the actual generated client import is unavailable',async()=>{
+ const cwd=generatedClientWorkspace(),events=[];let cold=0,workers=0,failed=0;
+ const supervisor=createCourseDiscoverySupervisor({client:{nextExecution:async()=>({job:null}),next:async()=>{cold++;return{job:null};},fail:async()=>{failed++;}},
+  prepareWorker:()=>prepareSourceDiscovery({cwd,...readinessMocks()}),startWorker:async()=>{workers++;},executeRecipe:async()=>{throw Error('NO_EXECUTION');},
+  timers:{setInterval:()=>1,clearInterval:()=>{}},onEvent:event=>events.push(event)});
+ try{await supervisor.start();assert.equal(cold,0);assert.equal(workers,0);assert.equal(failed,0);
+  assert.ok(events.some(e=>e.event==='poll_failed'&&e.code==='LOCAL_GENERATED_PRISMA_CLIENT_UNAVAILABLE'));
+ }finally{await supervisor.stop();rmSync(cwd,{recursive:true,force:true});}
 });
 test('portable directory contains no sealed cohort paths, historical venues, API fallback or raw prompt capture',()=>{
  const text=readdirSync(new URL('.',import.meta.url)).filter(f=>f.endsWith('.mjs')&&!f.endsWith('.test.mjs')).map(f=>readFileSync(new URL(f,import.meta.url),'utf8')).join('\n');
