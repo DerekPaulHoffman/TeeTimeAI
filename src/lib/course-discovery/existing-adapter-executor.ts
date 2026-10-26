@@ -41,6 +41,9 @@ import { readTeeItUpOfficialBookingChain } from "./teeitup-official-booking-read
 import type { OfficialSourceDiagnostic } from "./official-source-diagnostics";
 import { bindTeeItUpPostalConflictProof, type TeeItUpPostalConflictProof } from "./teeitup-postal-conflict-proof";
 import type { NativeOfficialPageReader } from "./native-official-page-reader";
+import { readTeeItUpDelegatedBookingChain, type DelegatedReaderDependencies } from "./teeitup-delegated-booking-reader";
+import { currentNativeDelegatedChain, type NativeDelegatedChainToken } from "./teeitup-delegated-booking-context";
+import { bindDelegatedFacility, type TeeItUpDelegatedBookingProof } from "./teeitup-delegated-booking-source";
 import { parseMindbodyAppointmentSource } from "./mindbody-appointment-grid";
 import { executeMindbodyAppointments, inspectMindbodyAppointments, getMindbodyAppointmentDiagnostic,
   type MindbodyAppointmentDiagnostic, type MindbodyAppointmentReaderDeps } from "./mindbody-appointment-reader";
@@ -60,11 +63,15 @@ type Dependencies = {
   /** Controller test seam, never recipe metadata or model input. */
   createMindbodySession?: MindbodyAppointmentReaderDeps["createSession"];
   officialBookingSourceToken?: TeeItUpOfficialBookingToken;
+  /** Opaque controller-only source witness; never accepted from recipe JSON. */
+  nativeDelegatedChainToken?: NativeDelegatedChainToken;
+  readDelegatedDocument?: DelegatedReaderDependencies["readDelegatedDocument"];
+  readDelegatedRoot?: DelegatedReaderDependencies["readDelegatedRoot"];
   onOfficialSourceDiagnostic?: (value: OfficialSourceDiagnostic) => void;
 };
 type Source = Pick<ExistingAdapterRecipe["source"], "bookingUrl" | "venueName" | "venueAddress" | "timeZone"> & { officialUrl?: string };
 const publicId = /^[1-9]\d{0,9}$/u;
-const foreupPath = /^\/index\.php\/booking\/([1-9]\d{0,9})(?:\/([1-9]\d{0,9}))?\/?$/u;
+const foreupPath = /^\/index\.php\/booking\/(?:([1-9]\d{0,9})(?:\/([1-9]\d{0,9}))?|index\/([1-9]\d{0,9}))\/?$/u;
 
 class FixedAdapterFailure extends Error {}
 function fail(code: string): never { throw new FixedAdapterFailure(code); }
@@ -122,6 +129,8 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
   if (adapter && adapter.family !== family) fail("ADAPTER_SOURCE_MISMATCH");
   if (family === "TEEITUP" && !source.venueAddress) fail("ADAPTER_IDENTITY_MISSING");
   const savedPostalProof = adapter?.family === "TEEITUP" ? adapter.officialPostalConflictProof : undefined;
+  const savedDelegatedProof = adapter?.family === "TEEITUP" ? adapter.officialDelegatedBookingProof : undefined;
+  if (savedDelegatedProof && !deps.localCapabilities?.includes("LOCAL_CHROME")) fail("LOCAL_CHROME_REQUIRED");
   if (savedPostalProof?.warmTransport === "NATIVE_CHROME" &&
       (!deps.localCapabilities?.includes("LOCAL_CHROME") || !deps.readNativeOfficialPage)) fail("LOCAL_CHROME_REQUIRED");
   const clock = deps.now ?? (() => new Date());
@@ -137,6 +146,16 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
   let officialIdentityProof: TeeItUpOfficialIdentityProof | undefined;
   let officialBookingSourceProof: TeeItUpOfficialBookingSourceProof | undefined;
   let officialPostalConflictProof: TeeItUpPostalConflictProof | undefined;
+  let officialDelegatedBookingProof: TeeItUpDelegatedBookingProof | undefined;
+  let delegatedToken = deps.nativeDelegatedChainToken;
+  let preparingDelegation: Promise<void> | undefined;
+  const prepareDelegation = async () => {
+    if (savedDelegatedProof) {
+      preparingDelegation ??= readTeeItUpDelegatedBookingChain(source, { ...deps, deadlineAt: new Date(deadline) }).then(value => { delegatedToken = value; });
+      await preparingDelegation;
+    }
+    if (delegatedToken) currentNativeDelegatedChain(delegatedToken);
+  };
   let postalOfficialPage: OfficialIdentityPage | undefined;
   let freshBookingChain: TeeItUpObservedSourceChain | undefined;
   let preparingBookingChain: Promise<void> | undefined;
@@ -206,6 +225,7 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
     // This independent source refresh runs before acquiring a data lease.
     // No nested queue/lease can deadlock on the same provider family.
     if (teeitup) await prepareBookingChain();
+    if (teeitup) await prepareDelegation();
     return queue.run(requestFamilyForUrl(url.href), async () => {
       signal.throwIfAborted();
       validateInitialBookingToken();
@@ -231,6 +251,10 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
         postalOfficialPage = { url: url.href, html: text };
       }
       if (teeitup && url.pathname === `/alias/${teeitup.alias}/facilities`) {
+        if (delegatedToken) {
+          officialDelegatedBookingProof = bindDelegatedFacility(source, currentNativeDelegatedChain(delegatedToken), JSON.parse(text));
+          if (savedDelegatedProof && JSON.stringify(officialDelegatedBookingProof) !== JSON.stringify(savedDelegatedProof)) fail("OFFICIAL_DELEGATED_SOURCE_CHANGED");
+        }
         if (adapter?.family === "TEEITUP" && adapter.officialIdentityProof && !officialIdentityProof) fail("OFFICIAL_IDENTITY_UNVERIFIED");
         const offeringKind = adapter?.family === "TEEITUP" ? adapter.offeringKind ?? "OUTDOOR" : "AUTO";
         if (savedBookingProof) {
@@ -243,7 +267,7 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
           officialPostalConflictProof = bindTeeItUpPostalConflictProof(source, postalOfficialPage, JSON.parse(text));
           if (JSON.stringify(officialPostalConflictProof) !== JSON.stringify(savedPostalProof)) fail("OFFICIAL_POSTAL_CONFLICT_CHANGED");
         }
-        try { teeitupFacilities = resolveTeeItUpRecipeFacilities(source, JSON.parse(text), officialIdentityProof, offeringKind, officialBookingSourceProof, officialPostalConflictProof); }
+        try { teeitupFacilities = resolveTeeItUpRecipeFacilities(source, JSON.parse(text), officialIdentityProof, offeringKind, officialBookingSourceProof, officialPostalConflictProof, officialDelegatedBookingProof); }
         catch (error) {
           if (adapter || !(error instanceof Error) || error.message !== "ADAPTER_IDENTITY_MISMATCH") throw error;
           if (freshBookingChain) {
@@ -306,6 +330,7 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
       } else await read(url);
     },
     officialBookingSourceProof: () => { validateInitialBookingToken(); return officialBookingSourceProof; },
+    officialDelegatedBookingProof: () => officialDelegatedBookingProof,
     officialPostalConflictProof: () => officialPostalConflictProof,
     teeitupSimulatorSlots: () => teeitupSimulatorSlots,
     dispose: () => queue.dispose(), availabilityWasArray: () => availabilityWasArray, failureReason: () => fixedReadFailure };
@@ -385,24 +410,39 @@ export async function inspectExistingAdapter(source: Source, deps: Dependencies)
         serviceId: config.selected.serviceId, serviceName: config.selected.serviceName }) };
     } finally { session.dispose(); }
   }
-  const session = reader(source, deps);
+  const inspectDeadline = new Date(Math.min(deps.deadlineAt?.getTime() ?? Infinity, Date.now() + 120000));
+  let session = reader(source, deps);
   try {
     if (session.teeitup) {
-      await session.read(`https://phx-api-be-east-1b.kenna.io/alias/${session.teeitup.alias}/facilities`, { headers: {
+      const directoryUrl = `https://phx-api-be-east-1b.kenna.io/alias/${session.teeitup.alias}/facilities`;
+      const directoryHeaders = {
         accept: "application/json", "x-be-alias": session.teeitup.alias, origin: session.teeitup.origin, referer: `${session.teeitup.origin}/`,
-      } });
-      return { adapter: existingAdapterMetadataSchema.parse({ family: "TEEITUP", alias: session.teeitup.alias,
+      };
+      try { await session.read(directoryUrl, { headers: directoryHeaders }); }
+      catch (error) {
+        if (!deps.localCapabilities?.includes("LOCAL_CHROME") || deps.nativeDelegatedChainToken || !source.officialUrl ||
+            !(error instanceof Error) || !["OFFICIAL_POSTAL_SOURCE_UNVERIFIED", "OFFICIAL_IDENTITY_UNVERIFIED", "ADAPTER_IDENTITY_MISMATCH"].includes(error.message)) throw error;
+        // Earn the chain in a separate fixed native reader after the failed
+        // provider lease has drained. No lease is held across nested reads.
+        session.dispose();
+        const token = await readTeeItUpDelegatedBookingChain(source, { ...deps, deadlineAt: inspectDeadline });
+        session = reader(source, { ...deps, nativeDelegatedChainToken: token, deadlineAt: inspectDeadline });
+        await session.read(directoryUrl, { headers: directoryHeaders });
+      }
+      return { adapter: existingAdapterMetadataSchema.parse({ family: "TEEITUP", alias: session.teeitup!.alias,
         facilityIds: session.teeitupFacilities()!.map(row => row.id),
         ...(session.teeitupFacilities()!.every(row => row.isSimulator === true) ? { offeringKind: "SIMULATOR" } : {}),
         ...(session.officialIdentityProof() ? { officialIdentityProof: session.officialIdentityProof() } : {}),
         ...(session.officialBookingSourceProof() ? { officialBookingSourceProof: session.officialBookingSourceProof() } : {}),
+        ...(session.officialDelegatedBookingProof() ? { officialDelegatedBookingProof: session.officialDelegatedBookingProof() } : {}),
         ...(session.officialPostalConflictProof() ? { officialPostalConflictProof: session.officialPostalConflictProof() } : {}) }) };
     }
     if (session.family === "FOREUP") {
       const config = await readForeupPublicConfiguration({ bookingUrl: source.bookingUrl, courseName: source.venueName,
         fetchImpl: session.read, rethrowError: () => true });
       if (!config) fail("ADAPTER_CONFIGURATION_UNVERIFIED");
-      return { adapter: existingAdapterMetadataSchema.parse({ family: "FOREUP", facilityId: Number(foreupPath.exec(new URL(source.bookingUrl).pathname)![1]),
+      const path = foreupPath.exec(new URL(source.bookingUrl).pathname)!;
+      return { adapter: existingAdapterMetadataSchema.parse({ family: "FOREUP", facilityId: Number(path[1] ?? path[3]),
         scheduleId: config.scheduleId, bookingClassId: config.bookingClassId }) };
     }
     const observed = await readAcuityPublicConfiguration({ bookingUrl: source.bookingUrl, fetchImpl: session.read });
@@ -428,7 +468,7 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
     const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "GOLFVX", "REX", "MINDBODY"].includes(adapter.family) || adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR";
     if (input.timeZone !== recipe.source.timeZone || recipe.source.providerFamily.toUpperCase() !== adapter.family ||
         (recipe.target.kind === "SIMULATOR") !== simulator || simulator && (!recipe.target.offeringId || !input.durationMinutes) ||
-        adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR" && (adapter.facilityIds.length !== 1 || adapter.officialIdentityProof || adapter.officialBookingSourceProof || adapter.officialPostalConflictProof)) fail("ADAPTER_TARGET_MISMATCH");
+        adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR" && (adapter.facilityIds.length !== 1 || adapter.officialIdentityProof || adapter.officialBookingSourceProof || adapter.officialPostalConflictProof || adapter.officialDelegatedBookingProof)) fail("ADAPTER_TARGET_MISMATCH");
     if (adapter.family === "EZLINKS" && (!recipe.source.officialUrl || !recipe.source.venueAddress ||
         parseEzLinksSource(recipe.source.bookingUrl)?.tenant !== adapter.tenant || input.durationMinutes !== undefined))
       fail("ADAPTER_TARGET_MISMATCH");
@@ -505,7 +545,7 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
     }
     if (adapter.family === "FOREUP") {
       const path = foreupPath.exec(new URL(recipe.source.bookingUrl).pathname);
-      if (!path || Number(path[1]) !== adapter.facilityId || path[2] && Number(path[2]) !== adapter.scheduleId) fail("ADAPTER_SOURCE_MISMATCH");
+      if (!path || Number(path[1] ?? path[3]) !== adapter.facilityId || path[2] && Number(path[2]) !== adapter.scheduleId) fail("ADAPTER_SOURCE_MISMATCH");
       const config = await readForeupPublicConfiguration({ bookingUrl: recipe.source.bookingUrl, courseName: recipe.source.venueName,
         fetchImpl: session!.read, rethrowError: () => true });
       if (!config || config.scheduleId !== adapter.scheduleId || config.bookingClassId !== adapter.bookingClassId) fail("ADAPTER_CONFIGURATION_CHANGED");

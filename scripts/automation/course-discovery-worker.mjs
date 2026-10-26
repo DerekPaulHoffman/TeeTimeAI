@@ -108,7 +108,8 @@ export function inspectedAdapterSourceEvidence(recipe, job, observation, officia
       observation.bookingUrl !== recipe.source?.bookingUrl || observation.contextUrl !== contextUrl ||
       observation.identityKey !== canonicalDataKey(job.request.identity) || observation.targetKey !== canonicalDataKey(job.request.target) ||
       observation.inputKey !== canonicalDataKey(job.request.input) ||
-      observation.adapter?.family === "CPS" && observation.trustedContextKey !== canonicalDataKey(job.request.trustedContext ?? {})) return undefined;
+      (observation.adapter?.family === "CPS" || observation.adapter?.officialDelegatedBookingProof) &&
+        observation.trustedContextKey !== canonicalDataKey(job.request.trustedContext ?? {})) return undefined;
   const candidateKey = canonicalDataKey(recipe.adapter), observedKey = canonicalDataKey(observation.adapter);
   if (!candidateKey || candidateKey !== observedKey) return undefined;
   return { officialUrl: observation.officialUrl, observedBookingUrl: observation.bookingUrl };
@@ -124,7 +125,36 @@ export function bindDiscoveryRecipeIdentity(recipe, job, adapterObservation, con
     delete adapter.officialIdentityProof;
     delete adapter.officialBookingSourceProof;
     delete adapter.officialPostalConflictProof;
+    delete adapter.officialDelegatedBookingProof;
     const observed = adapterObservation?.adapter;
+    if (adapter.family === "TEEITUP" && observed?.family === "TEEITUP" && adapterObservation.jobId === job.id &&
+        adapterObservation.officialUrl === job.request.identity.officialUrl && adapterObservation.bookingUrl === proposedSource.bookingUrl &&
+        adapterObservation.contextUrl === contextUrl && adapterObservation.identityKey === canonicalDataKey(job.request.identity) &&
+        adapterObservation.targetKey === canonicalDataKey(job.request.target) && adapterObservation.inputKey === canonicalDataKey(job.request.input) &&
+        adapterObservation.trustedContextKey === canonicalDataKey(job.request.trustedContext ?? {}) && job.request.target.kind === "OUTDOOR") {
+      const inspected = { ...observed }; delete inspected.officialDelegatedBookingProof;
+      const proof = observed.officialDelegatedBookingProof;
+      const sha = value => typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
+      const keys = value => value && typeof value === "object" && !Array.isArray(value) ? Object.keys(value).sort().join(",") : "";
+      const publicUrl = value => safeObservedUrl(value) && new URL(value).href === value;
+      if (canonicalDataKey(inspected) === canonicalDataKey(adapter) && proof?.kind === "OFFICIAL_DELEGATED_BOOKING_SOURCE" &&
+          keys(proof) === "alias,bookingUrl,canonicalAddress,courseId,facilityId,hops,kind,officialUrl,providerAddress,requiredCapability,rootWitnessSha256,timeZone,venueName,warmTransport" &&
+          proof.officialUrl === job.request.identity.officialUrl && proof.bookingUrl === proposedSource.bookingUrl &&
+          proof.venueName === job.request.identity.name && proof.canonicalAddress === job.request.identity.address && proof.timeZone === job.request.input.timeZone &&
+          proof.alias === adapter.alias && typeof adapter.alias === "string" && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(adapter.alias) &&
+          adapter.facilityIds?.length === 1 && Number.isSafeInteger(proof.facilityId) && proof.facilityId > 0 && proof.facilityId <= 2147483647 && proof.facilityId === adapter.facilityIds[0] &&
+          typeof proof.courseId === "string" && proof.courseId.length > 0 && proof.courseId.length <= 128 &&
+          typeof proof.providerAddress === "string" && proof.providerAddress.length >= 3 && proof.providerAddress.length <= 1024 &&
+          sha(proof.rootWitnessSha256) && Array.isArray(proof.hops) && proof.hops.length >= 1 && proof.hops.length <= 2 &&
+          proof.hops.every((hop, index) => keys(hop) === "nextUrl,pageUrl,witnessSha256" && publicUrl(hop.pageUrl) && publicUrl(hop.nextUrl) && sha(hop.witnessSha256) &&
+            (index === 0 ? hop.pageUrl === proof.officialUrl : proof.hops[index - 1].nextUrl === hop.pageUrl)) &&
+          proof.hops.at(-1).nextUrl === proof.bookingUrl && new Set([proof.hops[0].pageUrl, ...proof.hops.map(hop => hop.nextUrl)]).size === proof.hops.length + 1 &&
+          [...proof.hops.map(hop => hop.pageUrl), proof.bookingUrl].includes(contextUrl) &&
+          proof.warmTransport === "NATIVE_CHROME" && proof.requiredCapability === "LOCAL_CHROME") {
+        try { const bytes = JSON.stringify(proof); if (Buffer.byteLength(bytes, "utf8") <= 16_000) adapter.officialDelegatedBookingProof = JSON.parse(bytes); }
+        catch { /* Only the current private native observation can confer this proof. */ }
+      }
+    }
     if (adapter.family === "CPS" && observed?.family === "CPS" && adapterObservation.jobId === job.id &&
         adapterObservation.officialUrl === job.request.identity.officialUrl && adapterObservation.bookingUrl === proposedSource.bookingUrl &&
         adapterObservation.contextUrl === contextUrl && contextUrl === proposedSource.bookingUrl &&
@@ -419,8 +449,26 @@ function safeFixedReaderFailureDiagnostics(value) {
   }
   return result;
 }
+/** Mirror the native delegated reader's closed failure-only grammar. */
+export function safeTeeItUpDelegationDiagnostic(value) {
+  const stages = ["CAPABILITY", "SOURCE", "ROOT_READ", "ROOT_FRESH", "ROOT_IDENTITY", "ROOT_LINK", "HOP_ONE_READ", "NATIVE_DOCUMENT_READ",
+    "HOP_ONE_FRESH", "HOP_TWO_LINK", "HOP_TWO_READ", "ROOT_REFRESH", "FINAL_FRESH", "CHAIN_REGISTER", "PROVIDER_BIND"];
+  const gates = ["capabilityAvailable", "sourceValid", "deadlineCurrent", "rootReadReturned", "rootFresh", "rootUrlExact",
+    "canonicalAddressValid", "rootRawVenue", "rootRenderedVenue", "rootRawAddress", "rootRenderedAddress", "rootLinkVerified", "hopNative",
+    "hopRawBounded", "hopRawLinkPresent", "hopRenderedLinkPresent", "hopUnique", "firstReadReturned", "firstFresh", "secondLinkVerified",
+    "secondReadReturned", "rootRefreshRequired", "rootRefreshReturned", "rootRefreshIdentityMatches", "rootRefreshLinkMatches", "finalFresh", "finalUrlMatches",
+    "directoryValid", "directoryIdsUnique", "providerUniqueMatch", "hopSessionOpen", "hopNoAccess", "hopNoFatal", "hopStatus200", "hopCaptured",
+    "hopUrlMatches", "hopCaptureFresh", "hopTimeOriginMatches", "hopRawClosed", "hopNativeTransport"];
+  try {
+    if (!value || typeof value !== "object" || Array.isArray(value) || !stages.includes(value.stage) ||
+        !value.gates || typeof value.gates !== "object" || Array.isArray(value.gates) ||
+        !gates.every(key => Object.hasOwn(value.gates, key) && (typeof value.gates[key] === "boolean" || value.gates[key] === null))) return undefined;
+    return { stage: value.stage, gates: Object.fromEntries(gates.map(key => [key, value.gates[key]])) };
+  } catch { return undefined; }
+}
 export function safeBrowserFailureDiagnostics(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const teeItUpDelegation = safeTeeItUpDelegationDiagnostic(value.teeItUpDelegation);
   return { requests: (Array.isArray(value.requests) ? value.requests : []).slice(-12).map(request => {
     if (!request || typeof request !== "object" || Array.isArray(request)) return undefined;
     const safe = safeReplayDiagnostic({ ...request, code: "REQUEST_STATE" });
@@ -432,6 +480,7 @@ export function safeBrowserFailureDiagnostics(value) {
       ...(/^[A-Z_0-9]{1,80}$/u.test(request.blockedReason ?? "") ? { blockedReason: request.blockedReason } : {}) };
   }).filter(Boolean), requestFailures: safeBrowserRequestFailures(value.requestFailures), ...safeNativeBrowserDiagnostics(value), ...safeOfficialBrowserDiagnostics(value),
   ...safeFixedReaderFailureDiagnostics(value),
+  ...(teeItUpDelegation ? { teeItUpDelegation } : {}),
   capabilityDiagnostics: (Array.isArray(value.capabilityDiagnostics) ? value.capabilityDiagnostics : []).slice(-12)
     .map(safeReplayDiagnostic).filter(item => item?.code === "SUBFRAME_UNSUPPORTED"),
   ...(typeof value.loading === "boolean" ? { loading: value.loading } : {}),
@@ -574,9 +623,10 @@ export function createDiscoverySnapshotCompactor() {
     if (snapshot && typeof snapshot === "object") {
       const projected = { ...snapshot };
       delete projected.trustedContext;
-      if (projected.adapter?.family === "CPS") {
+      if (projected.adapter?.family === "CPS" || projected.adapter && Object.hasOwn(projected.adapter, "officialDelegatedBookingProof")) {
         projected.adapter = { ...projected.adapter };
-        delete projected.adapter.officialPostalConflictProof;
+        if (projected.adapter.family === "CPS") delete projected.adapter.officialPostalConflictProof;
+        delete projected.adapter.officialDelegatedBookingProof;
       }
       delete projected.completedPublicAssetRequests; delete projected.completedPublicAssetRequestsOverflow;
       delete projected.nativeDocumentRedirects;
@@ -1091,7 +1141,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
             browserActions++;
             if (browserControlsInvalidated && !["open", "inspect_adapter", "finish"].includes(input.action))
               throw discoveryError("BROWSER_SESSION_CLOSED");
-            if (["open", "finish", "inspect_adapter"].includes(input.action) || adapterObservation?.adapter?.officialBookingSourceProof) adapterObservation = undefined;
+            if (["open", "finish", "inspect_adapter"].includes(input.action) || adapterObservation?.adapter?.officialBookingSourceProof || adapterObservation?.adapter?.officialDelegatedBookingProof) adapterObservation = undefined;
             const directSource = discoveryDirectProtocolSource(job, input, { officialSourceObserved,
               officialUrl: job.request.identity.officialUrl, observedNavigationUrls });
             if (directSource) {

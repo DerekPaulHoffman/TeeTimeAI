@@ -8,13 +8,15 @@ import { z } from 'zod';
 import { openStagehandSession, loadStagehandRuntime, assertPublicUrl, frameworkIdentity, observedActionSummary, observedTargetSummary } from './driver.mjs';
 import { installReadOnlyEvidence } from './read-only-evidence.mjs';
 import { prioritizedPublicEvidence, publicEvidenceUrl } from './public-evidence.mjs';
-import { observedBookingSourceCandidates } from './source-provenance.mjs';
+import { observedBookingSourceCandidates, assertSourceCandidateBudget, nativeFrameNavigations } from './source-provenance.mjs';
+import { sourceFailureDiagnostic, sourceGuardReasons, projectActionGuardDiagnostic } from './source-diagnostic.mjs';
 
 export const SOURCE_BUDGET_MS = 120000;
 export const SOURCE_FRAMEWORK_MODE = 'HYBRID_SOURCE_DISCOVERY';
 const fail = code => Object.assign(new Error(code), { code });
+function sourceRoutingUrl(value) { try { return publicEvidenceUrl(value) === value && assertPublicUrl(value) === value; } catch { return false; } }
 export const adapterSourceProposalSchema = z.object({schemaVersion:z.literal(1),kind:z.literal('EXISTING_ADAPTER_SOURCE'),
-  bookingUrl:z.string().max(2048).refine(value=>Boolean(publicEvidenceUrl(value)))}).strict();
+  bookingUrl:z.string().max(2048).refine(sourceRoutingUrl)}).strict();
 const identitySchema = z.object({ name: z.string().min(1).max(300), officialUrl: z.string().max(2048).refine(value => Boolean(publicEvidenceUrl(value))),
   timeZone: z.string().min(1).max(100), address: z.string().min(1).max(1000).optional() }).strict();
 const inputSchema = z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/u), timeZone: z.string().min(1).max(100), players: z.number().int().min(1).max(20),
@@ -46,11 +48,15 @@ export async function prepareSourceDiscovery({ cwd = process.cwd(), loadRuntime 
   return { ready: true, model: 'gpt-6.1-sol', reasoningEffort: 'medium', framework: { name:'Stagehand',version:'4.3.0' }, chatgptSignInFileAvailable: true, readinessAccountRpcPerformed:false, accountTypeCheckedByClientBeforeModelCall:true };
 }
 
-export const sourceDecision = z.object({ decision: z.enum(['CONTINUE', 'WAIT', 'SOURCE_FOUND', 'UNRESOLVED']), reason: z.string(), nextActionInstruction: z.string(), bookingUrl: z.string().nullable() }).strict();
-export function sourceDecisionFor(candidates) {
-  if (!Array.isArray(candidates) || candidates.length > 32 || new Set(candidates).size !== candidates.length || candidates.some(url => !publicEvidenceUrl(url))) throw new Error('FRAMEWORK_SOURCE_CANDIDATES_INVALID');
-  return sourceDecision.extend({decision:z.enum(candidates.length?['CONTINUE','WAIT','SOURCE_FOUND','UNRESOLVED']:['CONTINUE','WAIT','UNRESOLVED']),
-    bookingUrl:candidates.length?z.enum(candidates).nullable():z.null()});
+export const sourceDecision = z.object({ decision: z.enum(['CONTINUE', 'WAIT', 'SOURCE_FOUND', 'UNRESOLVED', 'OPEN_FRAME']), reason: z.string(), nextActionInstruction: z.string(), bookingUrl: z.string().nullable() }).strict();
+export function sourceDecisionFor(candidates, frames=[]) {
+  assertSourceCandidateBudget(candidates);
+  if (new Set(candidates).size !== candidates.length || candidates.some(url => !sourceRoutingUrl(url))) throw new Error('FRAMEWORK_SOURCE_CANDIDATES_INVALID');
+  if(!Array.isArray(frames)||frames.length>24||new Set(frames).size!==frames.length||frames.some(value=>!candidates.includes(value)))throw fail('FRAMEWORK_SOURCE_CANDIDATES_INVALID');
+  return sourceDecision.extend({decision:z.enum([...(candidates.length?['CONTINUE','WAIT','SOURCE_FOUND','UNRESOLVED']:['CONTINUE','WAIT','UNRESOLVED']),...(frames.length?['OPEN_FRAME']:[])]),
+    bookingUrl:candidates.length?z.enum(candidates).nullable():z.null()}).superRefine((value,ctx)=>{
+      if(value.decision==='OPEN_FRAME'&&!frames.includes(value.bookingUrl))ctx.addIssue({code:'custom',message:'Frame choice must be one exact fresh native frame enum value'});
+    });
 }
 export function readHybridSourceExport(value, candidates) {
   const decision = sourceDecision.parse(value);
@@ -70,24 +76,27 @@ export function sourceRoutingContext(report, candidates) {
     }));
   const completedAnchorClicks = rows.slice(-8);
   while (completedAnchorClicks.length && JSON.stringify({ initialNavigation, completedAnchorClicks }).length > 24000) completedAnchorClicks.shift();
-  const context = { initialNavigation, completedAnchorClicks, omittedClickCount: rows.length - completedAnchorClicks.length };
+  const lastNavigationFeedback = report?.actionAttempts?.some(item=>item?.status==='REJECTED'&&item?.guardReason==='REPEATED_UNCHANGED_NAVIGATION')
+    ? 'REPEATED_UNCHANGED_NAVIGATION' : null;
+  const context = { initialNavigation, completedAnchorClicks, omittedClickCount: rows.length - completedAnchorClicks.length, lastNavigationFeedback };
   return { ...context, sha256: createHash('sha256').update(JSON.stringify(context)).digest('hex') };
 }
-export function buildSourceDiscoveryInstruction(ordinaryRequest, candidates, priorInspectionFeedback = null, routingContext = null) {
-  return sourceDiscoveryCoreInstruction(ordinaryRequest, candidates, priorInspectionFeedback) +
-    ` Recorded completed native routing observations from this same attempt: ${JSON.stringify(routingContext)}. This extraction is stateless: use this supplied history instead of assuming that the current DOM contains previous clicks. An eligibleBookingSource:true completed click with landingChanged:true records the already performed official-linked routing step. Select its exact eligible href when appropriate; do not repeat navigation or browse/filter actions merely because the current landing omits the earlier link. This history grants no fresh identity, availability, adapter metadata or replay proof; the unchanged provenance validator and fixed inspector retain authority.`;
+export function buildSourceDiscoveryInstruction(ordinaryRequest, candidates, priorInspectionFeedback = null, routingContext = null, frames=[]) {
+  return sourceDiscoveryCoreInstruction(ordinaryRequest, candidates, priorInspectionFeedback).replace('Return bookingUrl:null unless SOURCE_FOUND.', 'Return bookingUrl:null unless SOURCE_FOUND or OPEN_FRAME.') +
+    ` Recorded completed native routing observations from this same attempt: ${JSON.stringify(routingContext)}. This extraction is stateless: use this supplied history instead of assuming that the current DOM contains previous clicks. An eligibleBookingSource:true completed click with landingChanged:true records routing only, not that a terminal availability source was reached. If that destination is an informational operator homepage, choose CONTINUE and inspect its fresh visible public booking links. Select its exact eligible href only when current public evidence identifies an actual availability provider or self-hosted availability widget. Do not repeat a completed routing step merely because the current landing omits an earlier link. Repeated unchanged anchor navigation is mechanically rejected. Own-frame BODY extraction cannot see a cross-origin embed's contents. Fresh native visible iframe choices are ${JSON.stringify(frames)}. To investigate one, choose OPEN_FRAME with bookingUrl equal to exactly ONE listed frame URL; the fixed controller freshly rechecks it and opens it as MAIN in this same guarded context. No arbitrary URL, selector or code is accepted. Frame entry and its final main document are routing evidence only, never identity, availability, metadata or replay proof. At most two frame entries share the original source deadline and limits. Never choose OPEN_FRAME when the list is empty. This history grants no fresh identity, availability, adapter metadata or replay proof; the unchanged provenance validator and fixed inspector retain authority.`;
 }
 function sourceDiscoveryCoreInstruction(ordinaryRequest, candidates, priorInspectionFeedback = null) {
-  return `Discover only an official-linked signed-out public availability routing source for this ordinary input: ${JSON.stringify(ordinaryRequest)}. Follow currently observed public links; do not use prior provider routes or guessed configuration. This is a separately attributed hybrid source-discovery arm. Do not extract times, build a recipe, select dates/players/duration, inspect private data, authenticate, solve challenges or select an available slot. Eligibility is routing provenance only. Do not stop on the informational startup official homepage or its redirect aliases. Follow the actual visible public booking link, same-origin booking path or visible embedded booking widget first. After the native SDK actually clicks that official-linked source and observes its safe landing, select the corresponding exact eligible ancestor even if its application shell is blank, loading, or redirects to another public path. A hydrated booking interface is not required for this source-only proposal. Copy one eligibleBookingSourceUrls entry verbatim; never substitute the current filtered or redirected address. Return SOURCE_FOUND for an appropriate observed source and summarize its routing observation in reason. Otherwise return one CONTINUE navigation instruction, WAIT for a visible loader, or UNRESOLVED. Source choice grants no identity, availability or method proof. The fixed reader must freshly inspect the exact official-linked source and perform normal verification. eligibleBookingSourceUrls=${JSON.stringify(candidates)}. Never normalize, shorten, drop or change tenant/query parameters. Use only observed official links. Return bookingUrl:null unless SOURCE_FOUND. Own same-job prior inspection failure: ${typeof priorInspectionFeedback==='string'?priorInspectionFeedback.slice(0,6000):'none'}. This distinct historical inspection feedback is not an independent replay, source hint from another arm, or current proof; obtain fresh public observations and retain every identity/source guard.`;
+  return `Discover only an official-linked signed-out public availability routing source for this ordinary input: ${JSON.stringify(ordinaryRequest)}. Use currently observed public links; never prior provider routes or guessed configuration. Do not extract times, build a recipe, select dates/players/duration, inspect private data, authenticate, solve challenges or select an available slot. This hybrid source-only choice is UNVERIFIED routing, not identity, inventory or method proof. The goal is a terminal public availability provider or a self-hosted availability widget, not merely another informational/operator homepage. A link labelled Book can lead to an intermediate operator site: choose CONTINUE there and follow its fresh visible public booking links. If the visible evidence does not establish a terminal source, navigate the observed link to investigate instead of returning SOURCE_FOUND prematurely. Exact links freshly observed as visible in the native DOM on an officially reachable page and visible embedded widgets are eligible before any click. Select an appropriate terminal availability href directly; do not click merely to qualify it. Successfully clicked observed ancestors also remain eligible but a completed click alone does not establish a terminal source. Never select the informational startup homepage or its redirect aliases. If no appropriate source is present, return one CONTINUE read-only navigation instruction, WAIT for a visible loader, or UNRESOLVED. Copy one eligibleBookingSourceUrls entry verbatim; never substitute a redirected/filtered/current URL or alter tenant/query parameters. The fixed reader must freshly follow and inspect the exact official-linked source, bind typed metadata and pass both independent server challenges before any method exists. eligibleBookingSourceUrls=${JSON.stringify(candidates)}. Return bookingUrl:null unless SOURCE_FOUND. Own same-job prior inspection failure: ${typeof priorInspectionFeedback==='string'?priorInspectionFeedback.slice(0,6000):'none'}. Historical feedback grants no current source or proof.`;
 }
 
-async function pageEvidence(session) {
+export async function pageEvidence(session) {
   const evidence = await session.page.evaluate(() => {
     const sensitive = /password|secret|token|cookie|session|credential|authorization|api.?key|email|phone|customer|contact|attendee|payment|card|profile|account|member/iu;
     const safe = value => typeof globalThis.__ttsSafePublicEvidenceUrl === 'function' ? globalThis.__ttsSafePublicEvidenceUrl(value) : null;
-    const rendered = { visible(element) { if (!element?.isConnected || !element.getClientRects().length) return false; for (let node=element;node;node=node.parentElement) { const style=getComputedStyle(node); if(node.hidden || style.display==='none' || style.visibility==='hidden' || Number(style.opacity)===0)return false; } return true; } };
+    const rendered = { visible(element) { if (!element?.isConnected || !element.getClientRects().length) return false; for (let node=element;node;node=node.parentElement) { const style=getComputedStyle(node); if(node.hidden || node.inert || node.hasAttribute('inert') || node.getAttribute('aria-hidden')==='true' || style.display==='none' || style.visibility==='hidden' || style.visibility==='collapse' || Number(style.opacity)===0)return false; } return true; } };
     const visible = element => rendered.visible(element);
-    return { url: safe(location.href), title: document.title.slice(0, 300), links: [...document.querySelectorAll('a[href]')].filter(visible).slice(0, 160).map(element => ({ text: (element.innerText ?? '').trim().slice(0, 180), href: safe(element.href) })).filter(item => item.href), frames: [...document.querySelectorAll('iframe[src]')].slice(0, 24).map(element => ({ src: safe(element.src), visible: visible(element), title: (element.title ?? '').slice(0, 120) })), dom: [...document.querySelectorAll('body *')].filter(visible).filter(element => !['SCRIPT', 'STYLE', 'NOSCRIPT', 'IFRAME'].includes(element.tagName) && !sensitive.test(`${element.id} ${element.getAttribute('name') ?? ''} ${element.getAttribute('type') ?? ''}`)).slice(0, 800).map(element => ({ tag: element.tagName.toLowerCase(), id: element.id, class: String(element.className ?? '').slice(0, 180), text: element.children.length === 0 ? (element.textContent ?? '').trim().slice(0, 300) : '', attributes: Object.fromEntries([...element.attributes].filter(attr => ['name', 'type', 'role', 'aria-label', 'value', 'data-date', 'data-time', 'data-value', 'data-capacity', 'datetime'].includes(attr.name) && !sensitive.test(attr.value)).map(attr => [attr.name, attr.value.slice(0, 180)])) })), network: globalThis.__ttsFrameworkReadEvidence ?? null };
+    const links=[],seen=new Set();for(const element of document.querySelectorAll('a[href]')){const href=safe(element.href);if(!href||seen.has(href)||!visible(element))continue;seen.add(href);links.push({text:(element.innerText??'').trim().slice(0,180),href,visible:true});if(links.length>512)break;}
+    return { url: safe(location.href), observedAt:new Date().toISOString(), title: document.title.slice(0, 300), links, frames: [...document.querySelectorAll('iframe[src]')].filter(element=>!element.hasAttribute('srcdoc')).slice(0, 24).map(element => ({ src: safe(element.src), visible: visible(element), title: (element.title ?? '').slice(0, 120) })), dom: [...document.querySelectorAll('body *')].filter(visible).filter(element => !['SCRIPT', 'STYLE', 'NOSCRIPT', 'IFRAME'].includes(element.tagName) && !sensitive.test(`${element.id} ${element.getAttribute('name') ?? ''} ${element.getAttribute('type') ?? ''}`)).slice(0, 800).map(element => ({ tag: element.tagName.toLowerCase(), id: element.id, class: String(element.className ?? '').slice(0, 180), text: element.children.length === 0 ? (element.textContent ?? '').trim().slice(0, 300) : '', attributes: Object.fromEntries([...element.attributes].filter(attr => ['name', 'type', 'role', 'aria-label', 'value', 'data-date', 'data-time', 'data-value', 'data-capacity', 'datetime'].includes(attr.name) && !sensitive.test(attr.value)).map(attr => [attr.name, attr.value.slice(0, 180)])) })), network: globalThis.__ttsFrameworkReadEvidence ?? null };
   });
   evidence.publicControls = await session.page.evaluate(() => [...document.querySelectorAll('input,select')].filter(element => element.getClientRects().length && !['password', 'email', 'tel', 'file'].includes(element.type) && !/password|secret|token|credential|email|phone|contact|username/iu.test(`${element.name} ${element.id}`)).slice(0, 80).map(element => ({ tag: element.tagName.toLowerCase(), id: element.id, name: element.name, type: element.type, value: element.value.slice(0, 180), selectedLabel: element instanceof HTMLSelectElement ? [...element.selectedOptions].map(option => option.text.slice(0, 160)).join(' ') : null, options: element instanceof HTMLSelectElement ? [...element.options].slice(0, 64).map(option => ({ value: option.value.slice(0, 180), text: option.text.slice(0, 160), selected: option.selected, disabled: option.disabled })) : null })));
   return evidence;
@@ -100,13 +109,13 @@ const safeReason = value => String(value ?? '').slice(0,2000)
   .replace(/((?:token|password|secret|api.?key)\s*[:=]\s*)[^\s,;]+/giu,'$1[REDACTED]');
 const closedFailure = error => {
   const code = error?.code ?? error?.message;
-  return ['STAGEHAND_SOURCE_BUDGET_EXHAUSTED','SOURCE_DISCOVERY_ABORTED','WORK_DEADLINE_EXPIRED','ADAPTER_SOURCE_NOT_OBSERVED','FRAMEWORK_SOURCE_CANDIDATES_INVALID',
+  return ['STAGEHAND_SOURCE_BUDGET_EXHAUSTED','SOURCE_DISCOVERY_ABORTED','WORK_DEADLINE_EXPIRED','ADAPTER_SOURCE_NOT_OBSERVED','FRAMEWORK_SOURCE_CANDIDATES_INVALID','FRAMEWORK_SOURCE_CANDIDATES_LIMIT',
     'LOCAL_MODEL_EXISTING_CHATGPT_LOGIN_REQUIRED','LOCAL_MODEL_TURN_FAILED','LOCAL_MODEL_ORIGINAL_DEADLINE','LOCAL_MODEL_CALL_CANCELLED',
     'SOL_ONLY_MODEL_RESULT_REQUIRED','STAGEHAND_VERSION_CHANGED','SOURCE_EVIDENCE_LIMIT','STAGEHAND_GUARDED_BROWSER_REQUIRED',
     'STAGEHAND_UNGUARDED_CONTEXT','STAGEHAND_GUARDED_TARGET_MISSING','STAGEHAND_NATIVE_HOST_DEADLINE',
     'STAGEHAND_NATIVE_HOST_SCOPE_INVALID','STAGEHAND_NATIVE_HOST_INVALID','STAGEHAND_NATIVE_HOST_FAILED',
     'STAGEHAND_GUARDED_SOURCE_REJECTED','OWNED_STAGEHAND_CDP_UNAVAILABLE','OWNED_PUBLIC_CDP_UNAVAILABLE',
-    'PROVIDER_COORDINATION_UNAVAILABLE'].includes(code) ? code :
+    'PROVIDER_COORDINATION_UNAVAILABLE','STAGEHAND_SOURCE_OUTPUT_INVALID'].includes(code) ? code :
     error?.name === 'ZodError' ? 'STAGEHAND_SOURCE_OUTPUT_INVALID' : 'STAGEHAND_SOURCE_DISCOVERY_FAILED';
 };
 /** Finds an unverified route only. No method, inventory, identity proof or backend capability enters this module. */
@@ -120,7 +129,36 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
     adapterSourceProposal:null, matchingSlots:[], recipe:null, methodArtifactSaved:false, methodSaved:false, evidenceSummary:'',
     visitedUrls:[], officialLinkLedger:[], frameLedger:[], actions:[], actionAttempts:[], plannerFeedback:[],
     metrics:{model:'gpt-6.1-sol',reasoningEffort:'medium',modelTransport:'CODEX_APP_SERVER_CLIENT_LLM',completedSteps:0,calls:0,completedLocalCodexCalls:0,localCodexCalls:[]}, browserClosed:false, modelClosed:false };
-  let session, startup, ownedBrowser, completed = false, consecutiveWaits = 0, rejections = 0;
+  let session, startup, ownedBrowser, sourceError, phase='GUARDED_HOST', completed = false, consecutiveWaits = 0, rejections = 0;
+  let finalDecision=null,stopCondition='RUNNING',activeAct,activeFrame;
+  report.nativeFrameNavigations=[];
+  const acceptNativeFrames = (witness,pageUrl,startedAt,selected) => {
+    const keys=value=>value&&typeof value==='object'&&!Array.isArray(value)?Object.keys(value).sort().join(','):'';
+    const stamp=Date.parse(witness?.observedAt);
+    if(keys(witness)!=='documentHash,frames,kind,observedAt,pageUrl'||witness.kind!=='NATIVE_VISIBLE_FRAME'||witness.pageUrl!==pageUrl||
+      !sourceRoutingUrl(pageUrl)||!report.visitedUrls.includes(pageUrl)||!Number.isFinite(stamp)||new Date(stamp).toISOString()!==witness.observedAt||
+      stamp<startedAt||stamp>Date.now()+5000||stamp>workDeadline||typeof witness.documentHash!=='string'||!/^[a-f0-9]{64}$/u.test(witness.documentHash)||
+      !Array.isArray(witness.frames)||witness.frames.length>24||new Set(witness.frames.map(f=>f?.src)).size!==witness.frames.length||
+      witness.frames.some(f=>keys(f)!=='src,visible'||f.visible!==true||!sourceRoutingUrl(f.src)||f.src===pageUrl)||
+      selected!==undefined&&(witness.frames.length!==1||witness.frames[0].src!==selected))throw fail('STAGEHAND_SOURCE_OUTPUT_INVALID');
+    report.frameLedger.push(structuredClone(witness));return witness.frames.map(f=>f.src);
+  };
+  const onNativeFrameSourceWitness=witness=>{
+    if(!activeFrame||activeFrame.witnessed)throw fail('STAGEHAND_SOURCE_OUTPUT_INVALID');
+    acceptNativeFrames(witness,activeFrame.pageUrl,activeFrame.startedAt,activeFrame.url);activeFrame.witnessed=true;
+  };
+  // Only the private guarded-host callback may add this late native DOM edge.
+  // Model actions and their summaries are never self-corroborating evidence.
+  const onNativeSourceWitness = witness => {
+    const stamp=Date.parse(witness?.observedAt),keys=value=>value&&typeof value==='object'&&!Array.isArray(value)?Object.keys(value).sort().join(','):'';
+    if(!activeAct||activeAct.witnessed||keys(witness)!=='documentHash,kind,links,observedAt,pageUrl'||witness.kind!=='NATIVE_VISIBLE_DOM'||
+      witness.pageUrl!==activeAct.pageUrl||!sourceRoutingUrl(witness.pageUrl)||!report.visitedUrls.includes(witness.pageUrl)||
+      !Number.isFinite(stamp)||new Date(stamp).toISOString()!==witness.observedAt||stamp<activeAct.startedAt||stamp>Date.now()+5000||stamp>workDeadline||
+      typeof witness.documentHash!=='string'||!/^[a-f0-9]{64}$/u.test(witness.documentHash)||!Array.isArray(witness.links)||witness.links.length!==1||
+      keys(witness.links[0])!=='href,visible'||witness.links[0].visible!==true||!sourceRoutingUrl(witness.links[0].href))throw fail('STAGEHAND_SOURCE_OUTPUT_INVALID');
+    activeAct.witnessed=true;report.officialLinkLedger.push(structuredClone(witness));
+  };
+  const sourceStartedAt=Date.now();
   const bounded = operation => {
     if (signal?.aborted) throw fail('SOURCE_DISCOVERY_ABORTED');
     if (Date.now() >= workDeadline) throw fail('STAGEHAND_SOURCE_BUDGET_EXHAUSTED');
@@ -133,66 +171,92 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
   const metrics = () => {
     report.metrics.localCodexCalls = (session?.localCodexCalls ?? report.metrics.localCodexCalls).map(call=>({elapsedMs:call.elapsedMs,usage:call.usage,model:call.model,effort:call.effort}));
     report.metrics.completedLocalCodexCalls = report.metrics.localCodexCalls.length;
+    report.metrics.attemptedLocalCodexCalls = Math.max(report.metrics.completedLocalCodexCalls,session?.modelCallCounts?.attempted??0);
     try { onMetrics?.(structuredClone(report.metrics)); } catch { /* Metrics never authorize or interrupt discovery. */ }
   };
   const persist = async () => {
     metrics(); if (!outputDirectory) return;
     const text=JSON.stringify(report,null,2);if(Buffer.byteLength(text)>2000000)throw fail('SOURCE_EVIDENCE_LIMIT');
     await mkdir(outputDirectory,{recursive:true});await writeFile(join(outputDirectory,'source-report.json'),text);
+    await writeFile(join(outputDirectory,'source-stop.json'),JSON.stringify({schemaVersion:1,jobId:request.jobId,firstPickedUpAt:request.firstPickedUpAt,deadlineAt:request.deadlineAt,finalDecision,stopCondition}));
   };
   try {
     startup = Promise.resolve().then(async()=>{
       if(sessionFactory===openStagehandSession&&typeof createGuardedBrowser!=='function')throw fail('STAGEHAND_GUARDED_BROWSER_REQUIRED');
       if(createGuardedBrowser)ownedBrowser=await createGuardedBrowser({deadlineAt:request.workDeadlineAt,signal});
       if(completed||signal?.aborted||Date.now()>=workDeadline){await ownedBrowser?.close();throw fail('SOURCE_DISCOVERY_ABORTED');}
-      return sessionFactory({model:'gpt-6.1-sol',deadline:workDeadline,cwd:resolve(cwd),signal,onMetrics:()=>metrics(),ownedBrowser});
+      return sessionFactory({model:'gpt-6.1-sol',deadline:workDeadline,cwd:resolve(cwd),signal,onMetrics:()=>metrics(),onNativeSourceWitness,onNativeFrameSourceWitness,sourceRoutingOnly:true,ownedBrowser});
     });
     startup.then(value=>{if(completed)void value.close().catch(()=>{});}).catch(()=>{});
     session = await bounded(()=>startup);
     report.metrics.browserStartupMs=session.startupMs;
-    await bounded(()=>session.browser.context.addInitScript(installReadOnlyEvidence));
+    phase='INITIAL_SCRIPT';await bounded(()=>session.browser.context.addInitScript(installReadOnlyEvidence));
+    phase='OPEN';
     const response=await bounded(()=>session.goto(request.identity.officialUrl)), finalUrl=assertPublicUrl(await bounded(()=>session.page.url()));
     report.initialNavigation={requestedUrl:request.identity.officialUrl,finalUrl,status:response?.status()??null,redirectChainAvailable:false};
     report.visitedUrls.push(request.identity.officialUrl);if(!report.visitedUrls.includes(finalUrl))report.visitedUrls.push(finalUrl);
     for(let step=0;step<45;step++){
-      const evidence=await bounded(()=>pageEvidence(session));
+      phase='EVIDENCE';const evidence=await bounded(()=>pageEvidence(session));
+      if(evidence.links.length>512)throw fail('SOURCE_EVIDENCE_LIMIT');
       if(evidence.url&&!report.visitedUrls.includes(evidence.url))report.visitedUrls.push(evidence.url);
-      report.officialLinkLedger.push({pageUrl:evidence.url,links:evidence.links});report.frameLedger.push({pageUrl:evidence.url,frames:evidence.frames});
+      report.officialLinkLedger.push({kind:'NATIVE_VISIBLE_DOM',pageUrl:evidence.url,observedAt:evidence.observedAt,links:evidence.links});report.frameLedger.push({pageUrl:evidence.url,frames:evidence.frames});
+      let frames=[];
+      if(report.nativeFrameNavigations.length<2&&typeof session.observeFrameSources==='function'){
+        const began=Date.now(),witness=await bounded(()=>session.observeFrameSources());frames=acceptNativeFrames(witness,evidence.url,began);
+      }
       if(Buffer.byteLength(JSON.stringify(report))>1500000){report.officialLinkLedger.pop();report.frameLedger.pop();throw fail('SOURCE_EVIDENCE_LIMIT');}
-      const candidates=observedBookingSourceCandidates(report,request.identity.officialUrl,publicEvidenceUrl,{sourceDiscoveryOnly:true});
+      const candidates=observedBookingSourceCandidates(report,request.identity.officialUrl,sourceRoutingUrl,{sourceDiscoveryOnly:true});
       report.eligibleBookingSourceUrls=candidates;report.sourceRoutingContext=sourceRoutingContext(report,candidates);report.metrics.calls++;
-      const instruction=buildSourceDiscoveryInstruction({identity:request.identity,target:request.target,input:request.input},candidates,null,report.sourceRoutingContext)+
+      frames=frames.filter(value=>candidates.includes(value));
+      const instruction=buildSourceDiscoveryInstruction({identity:request.identity,target:request.target,input:request.input},candidates,null,report.sourceRoutingContext,frames)+
         ' Current bounded public evidence: '+JSON.stringify(prioritizedPublicEvidence(evidence,{maxCharacters:60000,includeDom:false}));
-      const extraction=await bounded(()=>session.extract(instruction,sourceDecisionFor(candidates))),decision=sourceDecision.parse(extraction.data);
-      report.metrics.completedSteps=step+1;report.evidenceSummary=safeReason(decision.reason);await persist();
-      if(decision.decision==='SOURCE_FOUND'){report.adapterSourceProposal=readHybridSourceExport(decision,candidates);report.outcome='SOURCE_PROPOSED_UNVERIFIED';break;}
-      if(decision.decision==='UNRESOLVED')break;
+      phase='EXTRACT';const extraction=await bounded(()=>session.extract(instruction,sourceDecisionFor(candidates,frames))),decision=sourceDecisionFor(candidates,frames).parse(extraction.data);
+      finalDecision=decision.decision;report.metrics.completedSteps=step+1;report.evidenceSummary=safeReason(decision.reason);await persist();
+      if(decision.decision==='SOURCE_FOUND'){report.adapterSourceProposal=readHybridSourceExport(decision,candidates);report.outcome='SOURCE_PROPOSED_UNVERIFIED';stopCondition='SOURCE_FOUND';break;}
+      if(decision.decision==='UNRESOLVED'){stopCondition='EXPLICIT_UNRESOLVED';break;}
+      if(decision.decision==='OPEN_FRAME'){
+        if(!frames.includes(decision.bookingUrl)||report.nativeFrameNavigations.length>=2||typeof session.openObservedFrameSource!=='function')throw fail('STAGEHAND_SOURCE_OUTPUT_INVALID');
+        activeFrame={pageUrl:evidence.url,url:decision.bookingUrl,startedAt:Date.now()};
+        let entry;try{phase='OPEN';entry=await bounded(()=>session.openObservedFrameSource(decision.bookingUrl));if(!activeFrame.witnessed)throw fail('STAGEHAND_SOURCE_OUTPUT_INVALID');}finally{activeFrame=undefined;}
+        report.nativeFrameNavigations.push(entry);
+        if(nativeFrameNavigations(report,sourceRoutingUrl).length!==report.nativeFrameNavigations.length)throw fail('STAGEHAND_SOURCE_OUTPUT_INVALID');
+        if(!report.visitedUrls.includes(entry.finalUrl))report.visitedUrls.push(entry.finalUrl);
+        report.actions.push({action:{method:'openObservedFrameSource'},sourceUrl:entry.pageUrl,observedTarget:{tag:'IFRAME',href:entry.frameUrl},afterUrl:entry.finalUrl,openedNewPage:false});
+        await persist();continue;
+      }
       if(decision.decision==='WAIT'){
-        if(++consecutiveWaits>3){report.frameworkFailureCode='STAGEHAND_SOURCE_LOADING_INCOMPLETE';break;}
+        if(++consecutiveWaits>3){report.frameworkFailureCode='STAGEHAND_SOURCE_LOADING_INCOMPLETE';stopCondition='WAIT_LIMIT';break;}
         await bounded(()=>new Promise(done=>setTimeout(done,Math.min(1500,Math.max(1,workDeadline-Date.now())))));continue;
       }
       consecutiveWaits=0;const instructionText=decision.nextActionInstruction;
-      if(!instructionText.trim())break;
+      if(!instructionText.trim()){stopCondition='EMPTY_CONTINUE';break;}
       report.metrics.calls++;
-      const observation=await bounded(()=>session.observe(instructionText+'. Return one supported read-only navigation action only. Opening an official public availability link labelled Book is permitted. Never select an individual time, filter date/player/duration, authenticate, transact, contact anyone, or solve a challenge.')),action=observation.data?.[0];
-      if(!action){if(++rejections>=3){report.frameworkFailureCode='STAGEHAND_SOURCE_ACTION_UNAVAILABLE';break;}continue;}
+      phase='OBSERVE';const observation=await bounded(()=>session.observe(instructionText+'. Return one supported read-only navigation action only. Opening an official public availability link labelled Book is permitted. Never select an individual time, filter date/player/duration, authenticate, transact, contact anyone, or solve a challenge.')),action=observation.data?.[0];
+      if(!action){if(++rejections>=3){report.frameworkFailureCode='STAGEHAND_SOURCE_ACTION_UNAVAILABLE';stopCondition='ACTION_UNAVAILABLE_LIMIT';break;}continue;}
       const attempt={action:observedActionSummary(action),sourceUrl:evidence.url,status:'OBSERVED'};report.actionAttempts.push(attempt);
       try{
-        const result=await bounded(()=>session.act(action));attempt.status='EXECUTED';attempt.afterUrl=result.afterUrl;
+        phase='ACT';activeAct={pageUrl:evidence.url,startedAt:Date.now()};
+        let result;try{result=await bounded(()=>session.act(action));}finally{activeAct=undefined;}
+        attempt.status='EXECUTED';attempt.afterUrl=result.afterUrl;
         if(!report.visitedUrls.includes(result.afterUrl))report.visitedUrls.push(result.afterUrl);
         report.actions.push({action:observedActionSummary(action),sourceUrl:evidence.url,observedTarget:observedTargetSummary(result.before),afterUrl:result.afterUrl,openedNewPage:result.openedNewPage});rejections=0;
       }catch(error){
         if(!['METHOD_NOT_PERMITTED','ARGUMENTS_NOT_PERMITTED','ACTION_TARGET_REJECTED','SDK_ACTION_FAILED','SDK_ACTION_POSTCONDITION_FAILED'].includes(error.message))throw error;
-        attempt.status='REJECTED';attempt.reason=error.message;if(++rejections>=3){report.frameworkFailureCode='STAGEHAND_SOURCE_ACTION_REJECTED';break;}
+        attempt.status='REJECTED';attempt.reason=error.message;if(sourceGuardReasons.includes(error.stagehandGuardReason))attempt.guardReason=error.stagehandGuardReason;
+        const guard=projectActionGuardDiagnostic(error.stagehandActionDiagnostic);if(guard)Object.assign(attempt,guard);
+        if(++rejections>=3){report.frameworkFailureCode='STAGEHAND_SOURCE_ACTION_REJECTED';stopCondition='ACTION_REJECTED_LIMIT';break;}
       }
       await persist();
     }
-  }catch(error){report.outcome='UNRESOLVED';report.adapterSourceProposal=null;report.frameworkFailureCode=closedFailure(error);}
+  }catch(error){sourceError=error;report.outcome='UNRESOLVED';report.adapterSourceProposal=null;report.frameworkFailureCode=closedFailure(error);stopCondition='ERROR';}
   finally{
     completed=true;metrics();
+    if(stopCondition==='RUNNING')stopCondition='STEP_LIMIT';
     if(session){try{const closed=await session.close();report.browserClosed=closed.browserClosed===true;report.modelClosed=closed.modelClosed===true;}catch{report.browserClosed=false;report.browserCleanupErrorCode='STAGEHAND_BROWSER_CLEANUP_FAILED';}}
     else if(ownedBrowser){try{report.browserClosed=(await ownedBrowser.close()).browserClosed===true;}catch{report.browserClosed=false;}}
-    if(!report.browserClosed||!report.modelClosed){report.outcome='UNRESOLVED';report.adapterSourceProposal=null;report.frameworkFailureCode??='STAGEHAND_SOURCE_CLEANUP_UNCONFIRMED';}
+    if(!report.browserClosed||!report.modelClosed){if(report.outcome==='SOURCE_PROPOSED_UNVERIFIED'&&!sourceError)sourceError=Object.assign(Error('STAGEHAND_SOURCE_CLEANUP_UNCONFIRMED'),{stagehandPhase:'CLOSE'});report.outcome='UNRESOLVED';report.adapterSourceProposal=null;report.frameworkFailureCode??='STAGEHAND_SOURCE_CLEANUP_UNCONFIRMED';stopCondition='CLEANUP_UNCONFIRMED';}
+    if(report.outcome!=='SOURCE_PROPOSED_UNVERIFIED')report.sourceDiagnostic=sourceFailureDiagnostic({error:sourceError,phase,report,startedAt:sourceStartedAt,
+      cleanup:{browserClosed:report.browserClosed,modelClosed:report.modelClosed},modelAttempts:report.metrics.attemptedLocalCodexCalls,modelFailure:session?.lastModelFailure,ownedCdpFailure:session?.ownedCdpFailure,nativeRouterFailure:session?.nativeRouterFailure});
     report.finishedAt=new Date().toISOString();report.elapsedFromFirstPickupMs=Date.now()-Date.parse(request.firstPickedUpAt);
     await persist();
   }

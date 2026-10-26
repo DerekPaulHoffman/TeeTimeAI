@@ -1,5 +1,5 @@
 /** Decoded public resources are bounded independently from request counts and
- * the native tunnel's encrypted-byte budget. Data/documents stay small. */
+ * the native tunnel's encrypted-byte budget. Ordinary data/documents stay small. */
 export const PUBLIC_BROWSER_REQUEST_LIMIT = 192;
 /** Fixed native appointment catalog/day transitions load their public script
  * and stylesheet set again. This separate protocol allocation never resets. */
@@ -10,6 +10,11 @@ export function assertPublicBrowserRequestBudget(count: number, limit: number) {
 }
 export const PUBLIC_BROWSER_TOTAL_BYTES = 48_000_000;
 export const PUBLIC_BROWSER_TUNNEL_BYTES = 24_000_000;
-export function publicBrowserResponseLimit(resourceType: string) {
-  return resourceType === "script" ? 16_000_000 : resourceType === "stylesheet" ? 6_000_000 : 2_000_000;
+/** Private owned source navigation only. Never a model, recipe or CLI setting. */
+export const SOURCE_ROUTING_RESPONSE_PROFILE = "SOURCE_ROUTING" as const;
+export type PublicBrowserResponseProfile = typeof SOURCE_ROUTING_RESPONSE_PROFILE;
+export function publicBrowserResponseLimit(resourceType: string, method = "GET", profile?: PublicBrowserResponseProfile) {
+  if (profile !== undefined && profile !== SOURCE_ROUTING_RESPONSE_PROFILE) throw new Error("PUBLIC_READ_RESPONSE_PROFILE_INVALID");
+  const sourceData = profile === SOURCE_ROUTING_RESPONSE_PROFILE && method === "GET" && ["xhr", "fetch"].includes(resourceType);
+  return resourceType === "script" || sourceData ? 16_000_000 : resourceType === "stylesheet" ? 6_000_000 : 2_000_000;
 }

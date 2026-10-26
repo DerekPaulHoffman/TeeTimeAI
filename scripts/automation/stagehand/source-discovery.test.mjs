@@ -1,10 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
-import { sourceDiscover, publicSourceJob, sourceRoutingContext, prepareSourceDiscovery } from './source-discovery.mjs';
+import { readFileSync, readdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { sourceDiscover, publicSourceJob, sourceRoutingContext, prepareSourceDiscovery, pageEvidence, sourceDecisionFor, buildSourceDiscoveryInstruction } from './source-discovery.mjs';
+import { JSDOM } from 'jsdom';
 import { observedBookingSourceCandidates } from './source-provenance.mjs';
 import { publicEvidenceUrl } from './public-evidence.mjs';
 import { createStagehandGuardedBrowserHost } from '../course-discovery-stagehand-host.mjs';
+import { createStagehandCodexModel } from './codex-model.mjs';
+import { prepareReadOnlyAction } from './driver.mjs';
 const official='https://public-course.example/', booking='https://public-provider.example/start?venue=public&kind=day', landing='https://public-provider.example/loading';
 function job(){const t=Date.now();return{id:'assigned-job',firstPickedUpAt:new Date(t).toISOString(),deadlineAt:new Date(t+900000).toISOString(),
  request:{identity:{name:'Public Course',officialUrl:official,timeZone:'America/New_York',address:'1 Public Road, Public Town, NY 10001, USA',canonicalCoursePhone:'PRIVATE_PHONE',bookingUrl:'PRIVATE_ROUTE'},
@@ -32,16 +37,140 @@ test('ordinary job projection strips private/currentmethod hints and binds origi
  const old=Date.now()-121000;assert.throws(()=>publicSourceJob({...raw,firstPickedUpAt:new Date(old).toISOString(),deadlineAt:new Date(old+900000).toISOString()}),/BUDGET_EXHAUSTED/);
 });
 test('actual SDK-shaped extract/observe/act routes exact ancestor then exports only strict source with completed usage',async()=>{
- const f=fixture(),updates=[];const r=await sourceDiscover({job:job(),sessionFactory:async options=>{assert.equal(options.model,'gpt-6.1-sol');return f.session;},onMetrics:m=>updates.push(m)});
+ const f=fixture(),updates=[];const r=await sourceDiscover({job:job(),sessionFactory:async options=>{assert.equal(options.model,'gpt-6.1-sol');assert.equal(options.sourceRoutingOnly,true);return f.session;},onMetrics:m=>updates.push(m)});
  assert.equal(r.outcome,'SOURCE_PROPOSED_UNVERIFIED',JSON.stringify({failure:r.frameworkFailureCode,actions:r.actions,eligible:r.eligibleBookingSourceUrls}));assert.deepEqual(r.adapterSourceProposal,{schemaVersion:1,kind:'EXISTING_ADAPTER_SOURCE',bookingUrl:booking});
  assert.equal(r.recipe,null);assert.deepEqual(r.matchingSlots,[]);assert.equal(r.frameworkExtractedTimes,false);assert.equal(r.browserClosed,true);assert.equal(f.closes,1);
  assert.equal(r.metrics.completedLocalCodexCalls,5);assert.equal(r.metrics.calls,3);assert.ok(updates.length>0);
  assert.ok(f.instructions[1].includes(booking));assert.ok(f.instructions[1].includes('completedAnchorClicks'));assert.ok(f.instructions[1].includes('"eligibleBookingSource":true'));
  assert.equal(JSON.stringify(f.instructions).includes('PRIVATE'),false);assert.deepEqual(observedBookingSourceCandidates(r,official,publicEvidenceUrl,{sourceDiscoveryOnly:true}),[booking]);
 });
+test('core and stateless-history prompt distinguish terminal availability from an intermediate operator labelled Book',()=>{
+ const history={completedAnchorClicks:[{href:booking,afterUrl:landing,eligibleBookingSource:true,landingChanged:true}]};
+ const text=buildSourceDiscoveryInstruction({identity:{name:'Public Course'},input:{players:2}},[booking],null,history);
+ assert.match(text,/terminal public availability provider or a self-hosted availability widget/);
+ assert.match(text,/link labelled Book can lead to an intermediate operator site: choose CONTINUE/);
+ assert.match(text,/completed click alone does not establish a terminal source/);
+ assert.match(text,/If that destination is an informational operator homepage, choose CONTINUE/);
+ assert.match(text,/do not click merely to qualify/);assert.match(text,/both independent server challenges/);
+ assert.ok(text.includes(JSON.stringify(history)));assert.ok(text.includes(`eligibleBookingSourceUrls=${JSON.stringify([booking])}`));
+});
+test('actual source OPEN failure retains closed navigation diagnosis before any model invocation',async()=>{
+ const f=fixture();f.session.goto=async()=>{throw Error('Page.navigate: net::ERR_BLOCKED_BY_CLIENT https://private.example/?secret=SECRET');};
+ const r=await sourceDiscover({job:job(),sessionFactory:async()=>f.session});
+ assert.equal(r.sourceDiagnostic.phase,'OPEN');assert.equal(r.sourceDiagnostic.navigationCode,'ERR_BLOCKED_BY_CLIENT');assert.equal(r.sourceDiagnostic.counts.completedModelCalls,0);
+ assert.equal(r.sourceDiagnostic.cleanup.browserClosed,true);assert.doesNotMatch(JSON.stringify(r.sourceDiagnostic),/private|SECRET|https:|Page.navigate/);
+});
+
+test('three actual pre-action guard rejections preserve the closed matched taxonomy in source failure',async()=>{
+ const f=fixture();let executions=0;
+ f.session.extract=async(_instruction,schema)=>({data:schema.parse({decision:'CONTINUE',reason:'Inspect public navigation',nextActionInstruction:'Open observed link',bookingUrl:null})});
+ f.session.act=async action=>{prepareReadOnlyAction(action,{tag:'A',visible:true,inForm:false,text:'Reserve checkout',label:'',href:booking,formAction:'',rowText:''},{sourceRoutingOnly:true});executions++;};
+ const r=await sourceDiscover({job:job(),sessionFactory:async()=>f.session});
+ assert.equal(r.frameworkFailureCode,'STAGEHAND_SOURCE_ACTION_REJECTED');assert.equal(executions,0);assert.equal(r.actionAttempts.length,3);
+ assert.equal(r.sourceDiagnostic.guardReason,'TRANSACTION_TEXT');assert.equal(r.sourceDiagnostic.guardTerm,'RESERVE');assert.equal(r.sourceDiagnostic.guardField,'TEXT');
+ assert.equal(r.sourceDiagnostic.guardTag,'A');assert.equal(r.sourceDiagnostic.guardHasHref,true);assert.equal(r.browserClosed,true);
+ assert.doesNotMatch(JSON.stringify(r.sourceDiagnostic),/https:|Reserve checkout|selector|PRIVATE/);
+});
+test('actual fixed DOM collector excludes hidden ancestors and directly exports an exact visible href without click',async()=>{
+ const html=`<a href="${booking}">Public tee times</a>`+['hidden','inert','aria-hidden="true"','style="opacity:0"','style="display:none"','style="visibility:collapse"'].map((attr,i)=>`<div ${attr}><a href="https://provider.example/hidden${i}">Hidden</a></div>`).join('');
+ const dom=new JSDOM(html,{url:official,runScripts:'outside-only'}),w=dom.window;
+ w.Element.prototype.getClientRects=function(){return[{width:50,height:20}];};
+ const computed=w.getComputedStyle.bind(w);w.getComputedStyle=e=>new Proxy(computed(e),{get(t,k){return k==='opacity'&&t.opacity===''?'1':Reflect.get(t,k);}});
+ w.__ttsSafePublicEvidenceUrl=publicEvidenceUrl;
+ const f=fixture();f.session.page.evaluate=async fn=>JSON.parse(JSON.stringify(w.eval('('+fn.toString()+')')()));
+ f.session.extract=async(_instruction,schema)=>({data:schema.parse({decision:'SOURCE_FOUND',reason:'Exact visible native link',nextActionInstruction:'',bookingUrl:booking})});
+ f.session.observe=async()=>{throw Error('UNNECESSARY_OBSERVE');};f.session.act=async()=>{throw Error('UNNECESSARY_CLICK');};
+ try{
+  const evidence=await pageEvidence(f.session);assert.deepEqual(evidence.links.map(item=>({href:item.href,visible:item.visible})),[{href:booking,visible:true}]);
+  const r=await sourceDiscover({job:job(),sessionFactory:async()=>f.session});assert.equal(r.outcome,'SOURCE_PROPOSED_UNVERIFIED');assert.equal(r.adapterSourceProposal.bookingUrl,booking);assert.deepEqual(r.actions,[]);
+  assert.equal(r.officialLinkLedger[0].kind,'NATIVE_VISIBLE_DOM');assert.ok(r.officialLinkLedger[0].observedAt);
+  assert.throws(()=>sourceDecisionFor([booking]).parse({decision:'SOURCE_FOUND',reason:'Changed query',nextActionInstruction:'',bookingUrl:booking+'&invented=1'}));
+  for(const href of['https://provider.example/ASP/appt_req.asp','https://provider.example/checkout','https://provider.example/login'])assert.throws(()=>sourceDecisionFor([href]),/CANDIDATES_INVALID/);
+ }finally{dom.window.close();}
+});
 test('unobserved/model-invented proposal cannot become source or method',async()=>{
  const f=fixture({invalid:true}),r=await sourceDiscover({job:job(),sessionFactory:async()=>f.session});assert.equal(r.outcome,'UNRESOLVED');
  assert.equal(r.adapterSourceProposal,null);assert.equal(r.frameworkFailureCode,'STAGEHAND_SOURCE_OUTPUT_INVALID');assert.equal(r.recipe,null);assert.equal(r.browserClosed,true);
+});
+
+test('fresh guarded before-action witness retains a link hydrated after the prior zero-link capture',async()=>{
+ const f=fixture();let current=official,evaluations=0,extracts=0,callback;
+ f.session.page.url=async()=>current;
+ f.session.page.evaluate=async()=>++evaluations%2?{url:current,links:[],frames:[],dom:[],network:{requests:[]}}:[];
+ f.session.extract=async(_instruction,schema)=>({data:schema.parse(++extracts===1?
+  {decision:'CONTINUE',reason:'Inspect visible navigation',nextActionInstruction:'Open public availability',bookingUrl:null}:
+  {decision:'SOURCE_FOUND',reason:'Native observed destination',nextActionInstruction:'',bookingUrl:booking})});
+ f.session.act=async()=>{
+  callback({kind:'NATIVE_VISIBLE_DOM',pageUrl:official,observedAt:new Date().toISOString(),documentHash:'a'.repeat(64),links:[{href:booking,visible:true}]});
+  current=booking;return{before:{tag:'A',href:booking},afterUrl:booking,openedNewPage:false};
+ };
+ const r=await sourceDiscover({job:job(),sessionFactory:async options=>{callback=options.onNativeSourceWitness;return f.session;}});
+ assert.equal(r.officialLinkLedger[0].links.length,0);assert.equal(r.outcome,'SOURCE_PROPOSED_UNVERIFIED');
+ const witness=r.officialLinkLedger.find(row=>row.documentHash);assert.equal(witness.pageUrl,official);assert.deepEqual(witness.links,[{href:booking,visible:true}]);
+ assert.deepEqual(observedBookingSourceCandidates(r,official,publicEvidenceUrl,{sourceDiscoveryOnly:true}),[booking]);
+ assert.equal(r.recipe,null);assert.deepEqual(r.matchingSlots,[]);
+ assert.throws(()=>callback({...witness}),/STAGEHAND_SOURCE_OUTPUT_INVALID/);
+});
+
+for(const mutation of['foreign','stale','hidden','bad-hash','hash-array','duplicate','model-only'])test(`late DOM witness rejects ${mutation} evidence without promoting SDK/model target`,async()=>{
+ const f=fixture();let evaluations=0,extracts=0,callback,current=official;
+ f.session.page.url=async()=>current;
+ f.session.page.evaluate=async()=>++evaluations%2?{url:current,links:[],frames:[],dom:[],network:{requests:[]}}:[];
+ f.session.extract=async(_instruction,schema)=>({data:schema.parse(++extracts===1?
+  {decision:'CONTINUE',reason:'Inspect navigation',nextActionInstruction:'Open public availability',bookingUrl:null}:
+  {decision:'SOURCE_FOUND',reason:'Model claims destination',nextActionInstruction:'',bookingUrl:booking})});
+ f.session.act=async()=>{
+  const witness={kind:'NATIVE_VISIBLE_DOM',pageUrl:official,observedAt:new Date().toISOString(),documentHash:'a'.repeat(64),links:[{href:booking,visible:true}]};
+  if(mutation==='foreign')witness.pageUrl='https://foreign.example/';
+  if(mutation==='stale')witness.observedAt=new Date(Date.now()-10000).toISOString();
+  if(mutation==='hidden')witness.links[0].visible=false;
+  if(mutation==='bad-hash')witness.documentHash='untrusted';
+  if(mutation==='hash-array')witness.documentHash=['a'.repeat(64)];
+  if(mutation!=='model-only')callback(witness);
+  if(mutation==='duplicate')callback(witness);
+  current=booking;return{before:{tag:'A',href:booking},afterUrl:booking,openedNewPage:false,nativeWitness:witness};
+ };
+ const r=await sourceDiscover({job:job(),sessionFactory:async options=>{callback=options.onNativeSourceWitness;return f.session;}});
+ assert.equal(r.outcome,'UNRESOLVED');assert.equal(r.adapterSourceProposal,null);assert.equal(r.recipe,null);assert.deepEqual(r.matchingSlots,[]);
+ assert.equal(r.frameworkFailureCode,'STAGEHAND_SOURCE_OUTPUT_INVALID');
+});
+test('source failure exposes closed phase, attempted but incomplete call and known partial usage after cleanup',async()=>{
+ const model=await createStagehandCodexModel({deadline:Date.now()+10000,clientFactory:async()=>({generate:async()=>{throw Object.assign(Error('PRIVATE_PROVIDER_TEXT'),{code:'LOCAL_MODEL_RPC_FAILED',diagnostics:{phase:'turn/start',rpcCode:-32600,httpStatusCode:400,usage:{inputTokens:17,totalTokens:17},message:'SECRET'}});},close:async()=>({})})});
+ const f=fixture();Object.defineProperty(f.session,'modelCallCounts',{get:()=>({attempted:model.attemptedCalls,completed:model.calls.length})});
+ f.session.extract=async()=>model.model.generate({systemPrompt:'Read only',messages:[{role:'user',content:{type:'text',text:'Public evidence'}}],responseFormat:{type:'json_schema',schema:{type:'object'}}});
+ const close=f.session.close;f.session.close=async()=>{await model.close();return close();};
+ const r=await sourceDiscover({job:job(),sessionFactory:async()=>f.session});
+ assert.equal(r.sourceDiagnostic.phase,'EXTRACT');assert.equal(r.sourceDiagnostic.transportCode,'LOCAL_MODEL_RPC_FAILED');assert.equal(r.sourceDiagnostic.rpcCode,-32600);
+ assert.equal(r.sourceDiagnostic.counts.attemptedModelCalls,1);assert.equal(r.sourceDiagnostic.counts.completedModelCalls,0);assert.equal(r.sourceDiagnostic.counts.failedModelCalls,1);
+ assert.deepEqual(r.sourceDiagnostic.failedCallUsage,{totalTokens:17,inputTokens:17});assert.equal(r.sourceDiagnostic.cleanup.browserClosed,true);assert.equal(r.metrics.completedLocalCodexCalls,0);
+ assert.doesNotMatch(JSON.stringify(r.sourceDiagnostic),/SECRET|PRIVATE|PROVIDER_TEXT/);
+});
+
+test('SDK-wrapped failed callback retains its private same-attempt model facts through source cleanup',async()=>{
+ const model=await createStagehandCodexModel({deadline:Date.now()+10000,clientFactory:async()=>({generate:async()=>{throw Object.assign(Error('PRIVATE_PROVIDER_TEXT'),{code:'LOCAL_MODEL_RPC_FAILED',diagnostics:{phase:'turn/start',rpcCode:-32600,httpStatusCode:400}});},close:async()=>({})})});
+ const f=fixture();Object.defineProperty(f.session,'modelCallCounts',{get:()=>({attempted:model.attemptedCalls,completed:model.calls.length})});
+ Object.defineProperty(f.session,'lastModelFailure',{get:()=>model.lastFailure});
+ f.session.extract=async()=>{try{await model.model.generate({systemPrompt:'Read',messages:[{role:'user',content:{type:'text',text:'Public'}}],responseFormat:{type:'json_schema',schema:{type:'object'}}});}catch{throw Error('WRAPPED_SDK_PRIVATE');}};
+ const close=f.session.close;f.session.close=async()=>{await model.close();return close();};
+ const r=await sourceDiscover({job:job(),sessionFactory:async()=>f.session});
+ assert.equal(r.sourceDiagnostic.transportCode,'LOCAL_MODEL_RPC_FAILED');assert.equal(r.sourceDiagnostic.transportPhase,'turn/start');assert.equal(r.sourceDiagnostic.rpcCode,-32600);assert.equal(r.sourceDiagnostic.httpStatus,400);
+ assert.equal(r.sourceDiagnostic.counts.attemptedModelCalls,1);assert.equal(r.sourceDiagnostic.counts.completedModelCalls,0);assert.equal(r.sourceDiagnostic.failedCallUsage,undefined);
+ assert.doesNotMatch(JSON.stringify(r.sourceDiagnostic),/PRIVATE|WRAPPED|https:|stack|message/);assert.equal(r.browserClosed,true);
+});
+
+test('private same-attempt host close facts survive a source failure without exposing the attachment or inferring a model failure',async()=>{
+ const f=fixture();let closed=false;
+ const failure={layer:'ASYNC_LISTENER',event:'Target.attachedToTarget',pendingRequests:2};
+ Object.defineProperty(f.session,'ownedCdpFailure',{get:()=>closed?failure:undefined});
+ const native={code:'NATIVE_REDIRECT_LOADER_MISMATCH',phase:'LOADER_OWNER',method:'GET',resourceType:'document',loaderKnown:false};
+ Object.defineProperty(f.session,'nativeRouterFailure',{get:()=>closed?native:undefined});
+ const close=f.session.close;f.session.close=async()=>{closed=true;return close();};
+ f.session.extract=async()=>{throw Error('OWNED_STAGEHAND_CDP_UNAVAILABLE');};
+ const r=await sourceDiscover({job:job(),sessionFactory:async()=>f.session});
+ assert.deepEqual(r.sourceDiagnostic.ownedCdpFailure,failure);assert.equal(r.sourceDiagnostic.counts.attemptedModelCalls,0);
+ assert.deepEqual(r.sourceDiagnostic.nativeRouterFailure,native);
+ assert.equal(r.sourceDiagnostic.transportCode,'OWNED_STAGEHAND_CDP_UNAVAILABLE');assert.equal(r.browserClosed,true);
+ assert.doesNotMatch(JSON.stringify(r.sourceDiagnostic),/https:|PRIVATE|targetId|sessionId|cdpUrl/);
 });
 test('abort and cleanup failure preserve completed lower-bound calls and never claim browser closed',async()=>{
  const controller=new AbortController(),f=fixture({closeReject:true,afterAct:()=>controller.abort()});
@@ -53,6 +182,20 @@ test('caller deadline bounds a hanging SDK await and cleans up the established s
  const f=fixture();f.session.extract=()=>new Promise(()=>{});
  const r=await sourceDiscover({job:job(),deadlineAt:new Date(Date.now()+30).toISOString(),sessionFactory:async()=>f.session});
  assert.equal(r.frameworkFailureCode,'STAGEHAND_SOURCE_BUDGET_EXHAUSTED');assert.equal(r.browserClosed,true);assert.equal(f.closes,1);
+});
+
+test('exact final decision and stop enum are private artifacts only; source-report stays the exact returned report',async()=>{
+ const path=mkdtempSync(join(tmpdir(),'stagehand-stop-test-'));
+ try{
+  const f=fixture();f.session.extract=async(_instruction,schema)=>({data:schema.parse({decision:'UNRESOLVED',reason:'Private model reason not for stop metadata',nextActionInstruction:'',bookingUrl:null})});
+  const report=await sourceDiscover({job:job(),sessionFactory:async()=>f.session,outputDirectory:path});
+  assert.equal(report.outcome,'UNRESOLVED');assert.equal(report.frameworkFailureCode,undefined);
+  assert.deepEqual(JSON.parse(readFileSync(join(path,'source-report.json'),'utf8')),JSON.parse(JSON.stringify(report)));
+  const stop=JSON.parse(readFileSync(join(path,'source-stop.json'),'utf8'));
+  assert.equal(stop.finalDecision,'UNRESOLVED');assert.equal(stop.stopCondition,'EXPLICIT_UNRESOLVED');assert.equal(stop.jobId,report.jobId);
+  assert.equal(stop.deadlineAt,report.deadlineAt);assert.equal(report.finalDecision,undefined);assert.equal(report.stopCondition,undefined);
+  assert.doesNotMatch(JSON.stringify(stop),/reason|text|Private model/);
+ }finally{rmSync(path,{recursive:true,force:true});}
 });
 test('failed click rows are excluded from completed routing context',()=>{
  const base={initialNavigation:{requestedUrl:official,finalUrl:official,status:200},actions:[{action:{method:'click'},sourceUrl:official,observedTarget:{tag:'A',href:booking},afterUrl:landing,openedNewPage:false,actionError:'failed'}]};

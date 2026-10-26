@@ -3,10 +3,11 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { launchPublicReadBrowser, ownedPublicBrowserCdp } from "./public-browser-launch";
-import { connectOwnedSourceCdp, type OwnedCdpSession } from "./stagehand-owned-cdp";
+import { connectOwnedSourceCdp, type OwnedCdpSession, type OwnedCdpFailure } from "./stagehand-owned-cdp";
+import { createStagehandNativeRouterFailureCapture } from "./stagehand-native-router-diagnostic";
 import { createNativePublicBrowserProxy, continueNativeBrowserRead, isObservedNativeRedirect, nativeReadPreflightMethod, type NativePublicProxyDependencies } from "./native-public-browser";
 import { installNativeRedirectRouting, authorizePublicClientReadHeaders, isCurrentPublicClientReadHeaders, nativePublicClientPreflightMethod,
-  nativeMindbodyBootstrapSource, type NativeReadRoute, type NativeRedirectRouting } from "./native-redirect-routing";
+  nativeMindbodyBootstrapSource, attestedNativeDocumentRedirects, type NativeReadRoute, type NativeReadRequest, type NativeRedirectRouting } from "./native-redirect-routing";
 import { isSafeRecipeUrl, isSafeBrowserAssetUrl, isSafeBrowserBootstrapReadUrl, isSafeBrowserAvailabilityReadUrl } from "./recipe";
 import { canonicalPublicReadUrl } from "./public-request-url";
 import { requestFamilyForUrl } from "./request-family";
@@ -14,10 +15,10 @@ import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-b
 import { isIncidentalBrowserRequest, isNonEvidenceBrowserResource } from "@/lib/automation/passfactory-public-read-policy";
 import { isAnonymousBrowserReadPost } from "@/lib/automation/simulator-interactive-browser";
 import { isMindbodyClassicPublicBootstrapPost } from "@/lib/automation/mindbody-public-read-policy";
-import { PUBLIC_BROWSER_REQUEST_LIMIT, PUBLIC_BROWSER_TOTAL_BYTES, publicBrowserResponseLimit, assertPublicBrowserRequestBudget } from "./browser-resource-limits";
+import { PUBLIC_BROWSER_REQUEST_LIMIT, PUBLIC_BROWSER_TOTAL_BYTES, SOURCE_ROUTING_RESPONSE_PROFILE, publicBrowserResponseLimit, assertPublicBrowserRequestBudget } from "./browser-resource-limits";
 
 type Lease = <T>(family: string, work: () => Promise<T>) => Promise<{ acquired: true; value: T } | { acquired: false }>;
-type Target = { id: string; contextId: string; cdp: OwnedCdpSession; page: Page; frame: Frame; currentUrl: string; router?: NativeRedirectRouting; ready: Promise<void>; installed?: boolean; discarded?: boolean; initialization?: "NETWORK" | "FETCH" | "RESUME" | "ROUTER" | "READY" };
+type Target = { id: string; contextId: string; cdp: OwnedCdpSession; page: Page; frame: Frame; currentUrl: string; documentRequest?: NativeReadRequest; documentStatus?: number; documentRead?: Promise<unknown>; router?: NativeRedirectRouting; ready: Promise<void>; installed?: boolean; discarded?: boolean; initialization?: "NETWORK" | "FETCH" | "RESUME" | "ROUTER" | "READY" };
 type PopupGrant = { url: string; until: number; used: boolean };
 type PopupRead = { id: string; networkId: string; url: string; method: string; frameId: string; hop: number; complete: boolean;
   redirect?: string; response: Promise<Record<string, unknown>>; resolve(value: Record<string, unknown>): void };
@@ -25,6 +26,19 @@ type Dependencies = { requestLease: Lease; proxyDependencies?: NativePublicProxy
   contextOptions?: { ignoreHTTPSErrors?: boolean } };
 const record = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const reject = () => new Error("STAGEHAND_GUARDED_SOURCE_REJECTED");
+// Fixed controller source, never caller/model/site JavaScript. Install only on
+// the owned public context; the packaged SDK extension context is untouched.
+export const stagehandSourceWorkerDenialScript = `(()=>{for(const name of ['Worker','SharedWorker']){Object.defineProperty(globalThis,name,{value:undefined,writable:false,configurable:false});const d=Object.getOwnPropertyDescriptor(globalThis,name);if(!d||d.value!==undefined||d.writable||d.configurable)throw new Error('STAGEHAND_WORKER_DENIAL_UNAVAILABLE');}})()`;
+export async function registerStagehandSourceWorkerDenial(context: Pick<BrowserContext, "addInitScript">) {
+  // Register once before this context has any pages. Playwright installs the
+  // fixed script for every later document, including a popup's first document.
+  // No command must evaluate/register in an already debugger-paused popup.
+  await context.addInitScript({ content: stagehandSourceWorkerDenialScript });
+}
+export async function requireDeniedStagehandTargetClosed(root: Pick<OwnedCdpSession, "send">, targetId: string) {
+  const closed = await root.send("Target.closeTarget", { targetId });
+  if (record(closed).success !== true) throw reject();
+}
 function transactionUrl(value: string) {
   try {
     let path = new URL(value).pathname;
@@ -73,18 +87,31 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
   const proxy = await createNativePublicBrowserProxy({ signal, requireHostAdmission: true }, deps.proxyDependencies);
   const allowed = new Set([initialUrl]), roots = new Set(allowed), targets = new Map<string, Target>(), activeReads = new Set<Promise<unknown>>();
   const popupGrants = new Map<string, PopupGrant>();
+  const frameEntries = new Map<string, { pageUrl: string; frameUrl: string; observedAt: string; documentHash: string; until: number }>();
+  let frameEntryCount = 0;
+  const nativeFailure = createStagehandNativeRouterFailureCapture();
+  let ownedPageCrashObserved = false, ownedPageCloseObserved = false, contextClosedObserved = false;
+  let socketBoundaryState: { browserConnectedAtFailure: boolean; ownedPageCrashObserved: boolean; ownedPageCloseObserved: boolean; contextClosedObserved: boolean } | undefined;
+  const cdpFailure = () => {
+    const first = cdp?.failureDiagnostic();
+    return first ? { ...first, ...socketBoundaryState } : undefined;
+  };
   let browser: Browser | undefined, context: BrowserContext | undefined, cdp: Awaited<ReturnType<typeof connectOwnedSourceCdp>> | undefined;
-  let contextId = "", targetId = "", closing: Promise<{ browserClosed: boolean; providerRequestsDrained: boolean }> | undefined;
+  let contextId = "", targetId = "", closing: Promise<{ browserClosed: boolean; providerRequestsDrained: boolean; ownedCdpFailure?: OwnedCdpFailure }> | undefined;
   let closed = false, terminal = false, intercepted = 0, admitted = 0, rejected = 0, bytes = 0, popupCount = 0, deniedWorkers = 0;
   const check = () => { signal.throwIfAborted(); if (closed || terminal) throw reject(); };
   const close = () => closing ??= (async () => {
+    // Preserve only facts observed before teardown; cleanup RPCs cannot become
+    // this attempt's recorded protocol failure.
+    const ownedCdpFailure = cdpFailure();
     closed = true; cancellation.abort("STAGEHAND_SOURCE_CLOSED"); queue.dispose();
     await Promise.allSettled([...targets.values()].map(target => target.router?.close()));
     await context?.close().catch(() => {}); await browser?.close().catch(() => {}); await proxy.close(); cdp?.close();
     let timer: ReturnType<typeof setTimeout> | undefined;
     try { await Promise.race([Promise.allSettled([...activeReads]), new Promise<void>(resolve => { timer = setTimeout(resolve, 4000); })]); }
     finally { clearTimeout(timer); }
-    return { browserClosed: !browser?.isConnected() && activeReads.size === 0, providerRequestsDrained: activeReads.size === 0 };
+    return { browserClosed: !browser?.isConnected() && activeReads.size === 0, providerRequestsDrained: activeReads.size === 0,
+      ...(ownedCdpFailure ? { ownedCdpFailure } : {}) };
   })();
   const abort = () => { void close(); };
   signal.addEventListener("abort", abort, { once: true });
@@ -126,14 +153,18 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
         if (publicHeaders && !isCurrentPublicClientReadHeaders(publicHeaders)) throw reject();
         if (bootstrap && (!body || !isMindbodyClassicPublicBootstrapPost(url, new Headers(headers), body, bootstrap.sourceUrl))) throw reject();
         proxy.allowHostConnections(url.hostname);
-        const response = await continueNativeBrowserRead(route, signal, publicBrowserResponseLimit(request.resourceType()),
+        const response = await continueNativeBrowserRead(route, signal, publicBrowserResponseLimit(request.resourceType(), method, SOURCE_ROUTING_RESPONSE_PROFILE),
           () => proxy.cancelHostConnections(url.hostname), transportUrl);
         bytes += response.body.length;
         if (bytes > PUBLIC_BROWSER_TOTAL_BYTES) throw reject();
         return response;
       }, request.signal);
+      if (request.isNavigationRequest() && method === "GET") { target.documentRequest = request; target.documentStatus = undefined; target.documentRead = operation; }
       activeReads.add(operation);
-      try { await operation; } finally { activeReads.delete(operation); }
+      try {
+        const response = await operation;
+        if (target.documentRequest === request) target.documentStatus = response.status;
+      } finally { activeReads.delete(operation); }
     } catch {
       rejected++; await route.abort().catch(() => {});
     }
@@ -147,13 +178,25 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
       ignoreDefaultArgs: ["--disable-extensions"], args: ["--disable-quic", "--enable-unsafe-extension-debugging", `--remote-allow-origins=${extension.origin}`],
     });
     const endpoint = ownedPublicBrowserCdp(browser);
-    cdp = await connectOwnedSourceCdp(endpoint, signal, () => { if (!closed) { terminal = true; void close(); } });
+    cdp = await connectOwnedSourceCdp(endpoint, signal, () => {
+      if (!closed) {
+        try { socketBoundaryState = { browserConnectedAtFailure: browser?.isConnected() === true, ownedPageCrashObserved, ownedPageCloseObserved, contextClosedObserved }; }
+        catch { /* Observations cannot prevent guardian shutdown. */ }
+        terminal = true; void close();
+      }
+    });
     const root = cdp.root;
     const installed = await root.send("Extensions.loadUnpacked", { path: extension.path, enableInIncognito: true });
     if (installed.id !== extension.id) throw reject();
     const before = new Set((record(await root.send("Target.getBrowserContexts")).browserContextIds as string[]) ?? []);
     context = await browser.newContext({ serviceWorkers: "block", acceptDownloads: false, locale: "en-US", timezoneId: input.timeZone,
       proxy: { server: proxy.server, bypass: `127.0.0.1:${new URL(endpoint).port}` }, ...deps.contextOptions });
+    await registerStagehandSourceWorkerDenial(context);
+    context.on("close", () => { contextClosedObserved = true; });
+    context.on("page", page => {
+      page.on("crash", () => { ownedPageCrashObserved = true; });
+      page.on("close", () => { ownedPageCloseObserved = true; });
+    });
     const after = ((await root.send("Target.getBrowserContexts")).browserContextIds as string[]) ?? [];
     const fresh = after.filter(value => !before.has(value));
     if (fresh.length !== 1) throw reject(); contextId = fresh[0];
@@ -166,7 +209,7 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
         if (info.type === "service_worker" && info.url === `chrome-extension://${extension.id}/service-worker.js`) {
           await child.send("Runtime.runIfWaitingForDebugger").catch(() => {}); return;
         }
-        deniedWorkers++; await root.send("Target.closeTarget", { targetId: info.targetId }); return;
+        deniedWorkers++; await requireDeniedStagehandTargetClosed(root, info.targetId); return;
       }
       child.on("Target.attachedToTarget", attachTarget);
       if (info.browserContextId !== contextId) {
@@ -178,7 +221,7 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
         }
         // Leave the initial blank owned profile page until the guarded page exists.
         if (!targetId && info.url === "about:blank") { await child.send("Runtime.runIfWaitingForDebugger"); return; }
-        await root.send("Target.closeTarget", { targetId: info.targetId }); return;
+        await requireDeniedStagehandTargetClosed(root, info.targetId); return;
       }
       if (targets.size >= 8) { await root.send("Target.closeTarget", { targetId: info.targetId }); terminal = true; return; }
       const item = { id: info.targetId, contextId, cdp: child, currentUrl: typeof info.url === "string" ? info.url : "about:blank" } as Target;
@@ -291,8 +334,13 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
         item.initialization = "NETWORK";
         await child.send("Network.enable", { maxTotalBufferSize: PUBLIC_BROWSER_TOTAL_BYTES, maxResourceBufferSize: 16_000_000, maxPostDataSize: 32768 });
         item.initialization = "ROUTER";
-        item.router = await installNativeRedirectRouting(item.page, route => handle(route, item), { signal, maxRequests: 1024,
-          onSubframeBlocked: () => { rejected++; }, onFailure: () => { if (!closed) terminal = true; } });
+        item.router = await installNativeRedirectRouting(item.page, route => handle(route, item), { signal, maxRequests: 1024, responseProfile: SOURCE_ROUTING_RESPONSE_PROFILE,
+          onSubframeBlocked: () => { rejected++; }, onFailure: code => {
+            if (!closed) {
+              try { nativeFailure.record(code, item.router?.firstFatal); } catch { /* Diagnostics cannot alter guardian failure. */ }
+              terminal = true;
+            }
+          } });
         item.installed = true;
         item.initialization = "READY";
         buffering = false;
@@ -316,7 +364,7 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
     // The unrouted default profile tab never becomes a discovery target.
     const infos = ((await root.send("Target.getTargets")).targetInfos as Array<Record<string, unknown>>) ?? [];
     for (const info of infos) if (info.type === "page" && info.browserContextId !== contextId && !String(info.url).startsWith(extension.origin + "/"))
-      await root.send("Target.closeTarget", { targetId: info.targetId });
+      await requireDeniedStagehandTargetClosed(root, String(info.targetId));
     const assertGuardedTargets = async (ids: string[]) => {
       check();
       if (!Array.isArray(ids) || !ids.length || ids.length > 8 || new Set(ids).size !== ids.length) return false;
@@ -325,20 +373,53 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
       const live = ((await root.send("Target.getTargets")).targetInfos as Array<Record<string, unknown>>) ?? [];
       return ids.every(id => targets.get(id)?.installed === true && live.some(info => info.targetId === id && info.type === "page" && info.browserContextId === contextId));
     };
+    const captureSourceDom = async (id: string) => {
+      if (!await assertGuardedTargets([id])) throw reject();
+      const target = targets.get(id)!; await target.ready; check();
+      const start = record((await target.cdp.send("Page.getFrameTree")).frameTree), startFrame = record(start.frame);
+      const result = await target.cdp.send("Runtime.evaluate", { expression: `(()=>{const v={visible(e){if(!e.getClientRects().length)return false;for(let n=e;n;n=n.parentElement){const s=getComputedStyle(n);if(n.hidden||n.inert||n.getAttribute('aria-hidden')==='true'||s.display==='none'||s.visibility==='hidden'||s.visibility==='collapse'||Number(s.opacity)===0)return false;}return true;}};return JSON.stringify({url:location.href,links:[...document.querySelectorAll('a[href]')].filter(e=>v.visible(e)).slice(0,160).map(e=>e.href),frames:[...document.querySelectorAll('iframe[src]')].filter(e=>!e.hasAttribute('srcdoc')&&v.visible(e)).slice(0,24).map(e=>e.src)});})()`, returnByValue: true });
+      const value = record(result.result).value;
+      if (typeof value !== "string" || value.length > 400_000) throw reject();
+      const observed = record(JSON.parse(value));
+      const end = record((await target.cdp.send("Page.getFrameTree")).frameTree), endFrame = record(end.frame);
+      check();
+      if (typeof startFrame.id !== "string" || !startFrame.id || typeof startFrame.loaderId !== "string" || !startFrame.loaderId ||
+          startFrame.id !== endFrame.id || startFrame.loaderId !== endFrame.loaderId || startFrame.url !== endFrame.url || observed.url !== endFrame.url) throw reject();
+      return { target, observed, documentHash: createHash("sha256").update(JSON.stringify([startFrame.id, startFrame.loaderId, startFrame.url, value])).digest("hex") };
+    };
+    const frameWitness = (capture: Awaited<ReturnType<typeof captureSourceDom>>, selected?: string) => ({
+      kind: "NATIVE_VISIBLE_FRAME" as const, pageUrl: capture.observed.url as string, observedAt: new Date().toISOString(), documentHash: capture.documentHash,
+      frames: [...new Set(Array.isArray(capture.observed.frames) ? capture.observed.frames : [])]
+        .filter((url): url is string => typeof url === "string" && isSafeRecipeUrl(url) && !transactionUrl(url) && url !== capture.observed.url && (selected === undefined || url === selected))
+        .map(src => ({ src, visible: true as const })),
+    });
     return {
       kind: "OWNED_GUARDED_STAGEHAND_CONTEXT" as const, cdpUrl: endpoint, targetId,
       assertGuardedTargets,
       async prepareNavigation(url: string) { check(); if (!allowed.has(canonicalStagehandHostEntry(url))) throw reject(); },
+      async observeFrameSources(id: string) { return frameWitness(await captureSourceDom(id)); },
+      async prepareFrameNavigation(id: string, url: string) {
+        const capture = await captureSourceDom(id), witness = frameWitness(capture, url);
+        if (frameEntryCount >= 2 || witness.frames.length !== 1 || witness.frames[0].src !== url || frameEntries.has(id)) throw reject();
+        frameEntryCount++;
+        frameEntries.set(id, { pageUrl: witness.pageUrl, frameUrl: url, observedAt: witness.observedAt, documentHash: witness.documentHash, until: Math.min(input.deadlineAt.getTime(), Date.now() + 30000) });
+        allowed.add(url); roots.add(url); if (allowed.size > 512) throw reject();
+        return witness;
+      },
+      async completeFrameNavigation(id: string, url: string) {
+        const entry = frameEntries.get(id); frameEntries.delete(id);
+        if (!entry || entry.frameUrl !== url || Date.now() >= entry.until) throw reject();
+        await targets.get(id)?.documentRead; check();
+        const capture = await captureSourceDom(id), finalUrl = capture.observed.url;
+        const request = capture.target.documentRequest;
+        if (typeof finalUrl !== "string" || !isSafeRecipeUrl(finalUrl) || !request || request.url() !== finalUrl || capture.target.documentStatus !== 200) throw reject();
+        const redirects = finalUrl === url ? [] : attestedNativeDocumentRedirects(request, new Set([url]));
+        if (!redirects) throw reject();
+        return { kind: "NATIVE_FRAME_SOURCE_OPEN" as const, pageUrl: entry.pageUrl, frameUrl: url, observedAt: entry.observedAt, documentHash: entry.documentHash,
+          finalUrl, completedAt: new Date().toISOString(), finalDocumentHash: capture.documentHash, redirects };
+      },
       async beforeAction(id: string, actionHref?: string) {
-        if (!await assertGuardedTargets([id])) throw reject();
-        const target = targets.get(id)!; await target.ready; check();
-        const start = record((await target.cdp.send("Page.getFrameTree")).frameTree), startFrame = record(start.frame);
-        const result = await target.cdp.send("Runtime.evaluate", { expression: `(()=>{const v={visible(e){if(!e.getClientRects().length)return false;for(let n=e;n;n=n.parentElement){const s=getComputedStyle(n);if(n.hidden||n.inert||n.getAttribute('aria-hidden')==='true'||s.display==='none'||s.visibility==='hidden'||s.visibility==='collapse'||Number(s.opacity)===0)return false;}return true;}};return JSON.stringify({url:location.href,links:[...document.querySelectorAll('a[href]')].filter(e=>v.visible(e)).slice(0,160).map(e=>e.href),frames:[...document.querySelectorAll('iframe[src]')].filter(e=>v.visible(e)).slice(0,24).map(e=>e.src)});})()`, returnByValue: true });
-        const value = record(result.result).value;
-        if (typeof value !== "string" || value.length > 400_000) throw reject();
-        const observed = record(JSON.parse(value));
-        const end = record((await target.cdp.send("Page.getFrameTree")).frameTree), endFrame = record(end.frame);
-        if (startFrame.id !== endFrame.id || startFrame.loaderId !== endFrame.loaderId || startFrame.url !== endFrame.url || observed.url !== endFrame.url) throw reject();
+        const capture = await captureSourceDom(id), { observed } = capture;
         popupGrants.delete(id);
         if (actionHref !== undefined) {
           if (typeof actionHref !== "string" || !Array.isArray(observed.links) || !observed.links.includes(actionHref) || !isSafeRecipeUrl(actionHref) || transactionUrl(actionHref)) throw reject();
@@ -347,10 +428,19 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
         for (const url of [...(Array.isArray(observed.links) ? observed.links : []), ...(Array.isArray(observed.frames) ? observed.frames : [])])
           if (typeof url === "string" && isSafeRecipeUrl(url) && !transactionUrl(url)) { allowed.add(url); roots.add(url); }
         if (allowed.size > 512) throw reject();
+        if (actionHref !== undefined) return {
+          kind: "NATIVE_VISIBLE_DOM" as const, pageUrl: observed.url as string, observedAt: new Date().toISOString(),
+          // Bind the stable native document identity and observed public DOM;
+          // private frame/loader identifiers never leave this host.
+          documentHash: capture.documentHash,
+          links: [{ href: actionHref, visible: true as const }],
+        };
       },
       diagnostics: () => ({ interceptedRequests: intercepted, admittedRequests: admitted, rejectedRequests: rejected, responseBytes: bytes,
         guardedPageCount: targets.size, installedPageCount: [...targets.values()].filter(target => target.installed).length,
         initialization: [...targets.values()].map(target => target.initialization), deniedWorkerTargets: deniedWorkers, popupCount, activeRequests: activeReads.size, terminalFailure: terminal, closed }),
+      snapshotFailure: () => cdpFailure(),
+      snapshotFailures: () => ({ ownedCdpFailure: cdpFailure(), nativeRouterFailure: nativeFailure.snapshot() }),
       async close() { signal.removeEventListener("abort", abort); return close(); },
     };
   } catch (error) { await close(); throw error instanceof Error && error.message === "STAGEHAND_GUARDED_SOURCE_REJECTED" ? error : reject(); }

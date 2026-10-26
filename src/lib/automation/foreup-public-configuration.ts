@@ -3,7 +3,7 @@ import { fetchWithProviderTimeout } from "@/lib/adapters/fetch-with-timeout";
 const MAX_DOCUMENT_BYTES = 512_000;
 const MAX_SCHEDULE_JSON_CHARS = 256_000;
 const MAX_SCHEDULES = 30;
-const FOREUP_BOOKING_PATH = /^\/index\.php\/booking\/([1-9]\d{0,9})(?:\/[1-9]\d{0,9})?\/?$/u;
+const FOREUP_BOOKING_PATH = /^\/index\.php\/booking\/(?:([1-9]\d{0,9})(?:\/[1-9]\d{0,9})?|index\/([1-9]\d{0,9}))\/?$/u;
 
 export type ForeupPublicConfiguration = {
   sourceBookingUrl: string;
@@ -68,7 +68,7 @@ export function parseForeupPublicConfiguration(input: {
     url.username || url.password || url.port || url.search || !path ||
     !["", "#/teetimes", "#teetimes", "#/login"].includes(url.hash) ||
     input.html.length > MAX_DOCUMENT_BYTES) return null;
-  const facilityId = Number(path[1]);
+  const facilityId = Number(path[1] ?? path[2]);
   const targetName = normalizeName(input.courseName);
   const schedules = extractSchedulesJson(input.html);
   if (!targetName || !Array.isArray(schedules) || schedules.length < 1 ||
@@ -96,7 +96,7 @@ export function parseForeupPublicConfiguration(input: {
   });
   const labelledPublic = visibleClasses.filter(bookingClass => {
     const name = (bookingClass as Record<string, unknown>).name;
-    return typeof name === "string" && /^(?:public|public tee times|online tee times)$/iu.test(name.trim());
+    return typeof name === "string" && /^(?:public|public play|public tee times|online tee times)$/iu.test(name.trim());
   });
   // Public and membership classes may share one public page. Select only its
   // sole explicit public class (including observed public tee-time labels);
@@ -106,8 +106,10 @@ export function parseForeupPublicConfiguration(input: {
   if (publicClasses.length !== 1) return null;
   const bookingClassId = positiveProviderId((publicClasses[0] as Record<string, unknown>).booking_class_id)!;
   return {
-    sourceBookingUrl: `https://foreupsoftware.com/index.php/booking/${facilityId}#/teetimes`,
-    bookingBaseUrl: `https://foreupsoftware.com/index.php/booking/${facilityId}/${scheduleId}#/teetimes`,
+    // The indexed public landing is itself the observed source. Its schedule
+    // comes from the fresh SCHEDULES document, never a rewritten URL.
+    sourceBookingUrl: path[2] ? input.bookingUrl : `https://foreupsoftware.com/index.php/booking/${facilityId}#/teetimes`,
+    bookingBaseUrl: path[2] ? input.bookingUrl : `https://foreupsoftware.com/index.php/booking/${facilityId}/${scheduleId}#/teetimes`,
     scheduleId,
     bookingClassId,
   };

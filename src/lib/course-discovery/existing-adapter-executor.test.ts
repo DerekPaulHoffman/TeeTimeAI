@@ -147,6 +147,45 @@ describe("fixed existing adapter recipes", () => {
     expect(await inspectExistingAdapter(foreup.source, { ...deps, fetch })).toEqual({ adapter: foreup.adapter });
     expect(fetch).toHaveBeenCalledTimes(2);
   });
+  it("inspects and freshly replays an exact indexed ForeUP source with independent date/player inputs", async () => {
+    const source = { ...foreup.source, bookingUrl: "https://foreupsoftware.com/index.php/booking/index/123#teetimes" };
+    const publicPlayHtml = `<script>SCHEDULES = ${JSON.stringify([{ title: "Example Golf", course_id: 123, teesheet_id: 456,
+      booking_classes: [{ teesheet_id: 456, active: 1, hidden: 0, booking_class_id: 789, name: "Public Play" },
+        { teesheet_id: 456, active: 1, hidden: 0, booking_class_id: 790, name: "Full Week Member" }] }])};</script>`;
+    const fetch = reads(foreup, [{ time: "2030-10-22 11:00", available_spots: 4 }], publicPlayHtml);
+    const { adapter } = await inspectExistingAdapter(source, { ...deps, fetch });
+    expect(adapter).toEqual(foreup.adapter);
+    const recipe = parseAccessRecipe({ ...foreup, source, adapter }) as ExistingAdapterRecipe;
+    expect(recipe.source.bookingUrl).toBe(source.bookingUrl);
+    for (const request of [input, { ...input, date: "2030-10-23", players: 3 }]) {
+      const replayFetch = reads(recipe, [{ time: `${request.date} 11:00`, available_spots: request.players }], publicPlayHtml);
+      const result = await executeExistingAdapterRecipe(recipe, request, { ...deps, fetch: replayFetch });
+      expect(result).toMatchObject({ status: "AVAILABLE", complete: true, sourceUrl: source.bookingUrl,
+        evidence: { venueVerified: true, dateVerified: true, capacityVerified: true, durationVerified: true, completeVerified: true } });
+      expect(result.slots).toHaveLength(1);
+      expect(result.slots[0]).toMatchObject({ bookingUrl: source.bookingUrl, availableSpots: request.players });
+      expect(String(replayFetch.mock.calls[0][0])).toBe(source.bookingUrl.split("#")[0]);
+      const availability = new URL(String(replayFetch.mock.calls.at(-1)![0]));
+      expect(availability.searchParams.get("players")).toBe(String(request.players));
+      expect(availability.searchParams.get("date")).toBe(request.date.split("-").slice(1).concat(request.date.slice(0, 4)).join("-"));
+    }
+    const changed = { ...recipe, adapter: { ...foreup.adapter, facilityId: 999 } } as ExistingAdapterRecipe;
+    const noRead = reads(recipe, []);
+    expect(await executeExistingAdapterRecipe(changed, input, { ...deps, fetch: noRead }))
+      .toMatchObject({ status: "INCOMPLETE", complete: false, slots: [], evidence: { reason: "ADAPTER_SOURCE_MISMATCH" } });
+    expect(noRead).not.toHaveBeenCalled();
+    expect(await executeExistingAdapterRecipe(recipe, input, { ...deps, fetch: reads(recipe, [], foreupHtml().replace('"course_id":123', '"course_id":999')) }))
+      .toMatchObject({ status: "INCOMPLETE", complete: false, slots: [] });
+  });
+  it.each(["https://foreupsoftware.com/index.php/booking/index/0#teetimes",
+    "https://foreupsoftware.com/index.php/booking/index/123/456#teetimes",
+    "https://foreupsoftware.com/index.php/booking/index/123?tenant=other#teetimes",
+    "https://other.example/index.php/booking/index/123#teetimes"])
+  ("rejects unsupported indexed source %s without provider reads", async bookingUrl => {
+    const fetch = vi.fn<typeof globalThis.fetch>();
+    await expect(inspectExistingAdapter({ ...foreup.source, bookingUrl }, { ...deps, fetch })).rejects.toThrow();
+    expect(fetch).not.toHaveBeenCalled();
+  });
   it("normalizes real ForeUP adapter output and applies date/window/player predicates", async () => {
     const fetch = reads(foreup, [
       { time: "2030-10-22 09:00", available_spots: 4 }, { time: "2030-10-22 11:00", available_spots: 4, holes: "9/18" },

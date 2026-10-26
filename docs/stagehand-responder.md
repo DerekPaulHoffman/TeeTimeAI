@@ -35,6 +35,42 @@ installed Tee Time Spot Local Reader and the user's Chrome profile are not
 modified. Authentication, interactive challenges and transaction flows remain
 unresolved outcomes rather than reasons to weaken the reader's controls.
 
+## Bounded public source navigation
+
+Fresh visible links can establish an unverified routing candidate before a
+click. Source discovery can also choose at most two freshly observed visible
+iframe URLs from an exact enum and open each as the main document in the same
+guarded target. Native parent-frame and loader checks run immediately before
+navigation. Hidden, stale, foreign and `srcdoc` frames are rejected; ordinary
+subframe networking remains denied. Repeated unchanged anchor navigation is
+rejected. These observations confer no venue, availability or method proof.
+
+Source GET XHR/fetch responses use the existing 16 MB script allocation. Other
+data/documents retain 2 MB, stylesheets 6 MB, aggregate decoded resources 48 MB,
+the native tunnel 24 MB, and CDP messages 32 MB. The existing 192-request limit,
+two global/one-family request coordination and original 120-second source
+allowance remain unchanged. A valid owned initial source pause without a
+Network ID is denied with a confirmed, bounded `Fetch.failRequest` ACK before
+any admission or data use; unrelated source DOM may remain usable. All other
+native readers retain fatal missing-ID handling. Abort failures, malformed or
+duplicate events, unknown responses and expired ownership remain fatal.
+
+Failure checkpoints retain closed, bounded source and fixed-inspection facts
+bound to the same job, request, source fingerprint, attempt and original clocks.
+Optional diagnostics may be omitted with an explicit flag and digest to preserve
+the source reference within 32 KB. They never restore source or method authority.
+Recorded completed model usage is a lower bound when a call fails partway.
+
+## Known development coverage gaps
+
+Engineering observations on October 26, 2026 UTC leave Onyx unresolved at the
+unchanged aggregate source limit and Ponkapoag unresolved because its provider
+directory omits the street required by the current physical-identity proof.
+Neither has a method or replay success from those runs. Do not raise limits,
+invent missing identity fields, turn these failures into empty inventory or
+classify the public sources as permanently inaccessible. Preserve their evidence
+separately from a new-venue pilot and disclose these limits in its receipt.
+
 ## Admission and rollout
 
 `COURSE_DISCOVERY_ENABLED=true` is required. The absence of

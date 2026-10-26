@@ -9,9 +9,10 @@ import { authorizePublicClientReadHeaders, installNativeRedirectRouting, isCurre
 import { createPublicBookingParentScope } from "./public-booking-parent";
 import { continueNativeBrowserRead, isObservedNativeRedirect, isObservedNativeRedirectTarget, nativeReadPreflightMethod } from "./native-public-browser";
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
+import { type PublicBrowserResponseProfile } from "./browser-resource-limits";
 
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; }
-async function installed(maxRequests?: number, signal?: AbortSignal, afterRoute?: (route: NativeReadRoute) => Promise<void>) {
+async function installed(maxRequests?: number, signal?: AbortSignal, afterRoute?: (route: NativeReadRoute) => Promise<void>, responseProfile?: PublicBrowserResponseProfile) {
   const events = new Map<string, (event: unknown) => void>(), routes: NativeReadRoute[] = [];
   const close = vi.fn(async () => {}), detach = vi.fn(async () => {}), failures: string[] = [], subframes: object[] = [], rejections: NativeRequestDiagnostic[] = [];
   const main = { page: () => page };
@@ -20,7 +21,7 @@ async function installed(maxRequests?: number, signal?: AbortSignal, afterRoute?
       : name === "Fetch.getResponseBody" ? { body: `body-${value?.requestId}`, base64Encoded: false } : {}), detach };
   const page = { context: () => ({ newCDPSession: async () => cdp }), mainFrame: () => main, close } as unknown as Page;
   const handler = vi.fn(async (route: NativeReadRoute) => { routes.push(route); await afterRoute?.(route); });
-  const guard = await installNativeRedirectRouting(page, handler, { timeoutMs: 100, maxRequests, signal,
+  const guard = await installNativeRedirectRouting(page, handler, { timeoutMs: 100, maxRequests, signal, responseProfile,
     onFailure: code => failures.push(code), onSubframeBlocked: request => subframes.push(request), onRequestRejected: request => rejections.push(request) });
   const request = (id: string, values: object = {}) => events.get("Fetch.requestPaused")!({ requestId: id, networkId: `network-${id}`,
     frameId: "main", resourceType: "XHR", request: { url: "https://example.org/data", method: "GET", headers: {} }, ...values });
@@ -30,6 +31,151 @@ async function installed(maxRequests?: number, signal?: AbortSignal, afterRoute?
 function playwrightRoute(test: Awaited<ReturnType<typeof installed>>) {
   return { request: () => ({ frame: () => test.main }), continue: vi.fn(async () => {}), abort: vi.fn(async () => {}), fulfill: vi.fn() } as unknown as Route;
 }
+
+describe("source-only confirmed uncorrelated denial", () => {
+  const unknown = { networkId: undefined, request: { url: "https://example.org/unclassified?private=not-retained", method: "POST", headers: {}, hasPostData: true, postData: "not-availability-evidence" } };
+  it("waits for exact abort ACK, grants no handler/data authority, and leaves independent public reads usable", async () => {
+    const test = await installed(undefined, undefined, undefined, "SOURCE_ROUTING"), ack = deferred<object>(), send = test.cdp.send.getMockImplementation()!;
+    test.cdp.send.mockImplementation((name, value) => name === "Fetch.failRequest" && value?.requestId === "uncorrelated" ? ack.promise : send(name, value));
+    try {
+      test.request("uncorrelated", unknown);
+      expect(test.guard.pendingReads).toBe(1); expect(test.handler).not.toHaveBeenCalled(); expect(test.rejections).toEqual([]);
+      expect(test.cdp.send.mock.calls.filter(([name]) => name === "Fetch.failRequest")).toEqual([["Fetch.failRequest", { requestId: "uncorrelated", errorReason: "BlockedByClient" }]]);
+      ack.resolve({}); await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+      expect(test.guard.firstFatal).toBeUndefined(); expect(test.failures).toEqual([]); expect(test.close).not.toHaveBeenCalled();
+      expect(test.rejections).toHaveLength(1); expect(test.rejections[0]).toMatchObject({ code: "NATIVE_REDIRECT_NETWORK_ID_MISSING", networkIdPresent: false, duplicateRequestId: false, recordCount: 0 });
+      expect(JSON.stringify(test.rejections)).not.toMatch(/example.org|unclassified|private|not-availability/);
+      test.request("independent"); await test.routes[0].continue(); const response = test.routes[0].request().response(); test.response("independent");
+      expect((await response)?.status()).toBe(200); expect(test.handler).toHaveBeenCalledOnce();
+      expect(test.cdp.send.mock.calls.filter(([name, value]) => ["Fetch.continueRequest", "Fetch.continueResponse", "Fetch.getResponseBody"].includes(name) && value?.requestId === "uncorrelated")).toEqual([]);
+      await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+    } finally { ack.resolve({}); await test.guard.close(); }
+  });
+  it("keeps the default native reader fatal for the same event", async () => {
+    const test = await installed(); try { test.request("uncorrelated", unknown); await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_NETWORK_ID_MISSING"));
+      expect(test.handler).not.toHaveBeenCalled(); expect(test.rejections).toEqual([]); expect(test.close).toHaveBeenCalledOnce();
+    } finally { await test.guard.close(); }
+  });
+  it.each(["concurrent", "reused", "late response"])("tombstone rejects %s work without any continuation", async mode => {
+    const test = await installed(undefined, undefined, undefined, "SOURCE_ROUTING"), ack = deferred<object>(), send = test.cdp.send.getMockImplementation()!;
+    test.cdp.send.mockImplementation((name, value) => name === "Fetch.failRequest" && value?.requestId === "uncorrelated" ? ack.promise : send(name, value));
+    try { test.request("uncorrelated", unknown); if (mode !== "concurrent") { ack.resolve({}); await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0)); }
+      if (mode === "late response") test.response("uncorrelated", unknown); else test.request("uncorrelated", unknown);
+      ack.resolve({}); await vi.waitFor(() => expect(test.failures).toContain(mode === "late response" ? "NATIVE_REDIRECT_RESPONSE_UNKNOWN" : "NATIVE_REDIRECT_DUPLICATE_FETCH_ID"));
+      if (mode !== "late response") expect(test.guard.firstFatal?.duplicateRequestId).toBe(true);
+      expect(test.handler).not.toHaveBeenCalled(); expect(test.close).toHaveBeenCalledOnce();
+      expect(test.cdp.send.mock.calls.some(([name]) => ["Fetch.continueRequest", "Fetch.continueResponse", "Fetch.getResponseBody"].includes(name))).toBe(false);
+    } finally { ack.resolve({}); await test.guard.close(); }
+  });
+  it.each(["reject", "hang", "abort"])("retains fatal cleanup for abort ACK %s", async mode => {
+    vi.useFakeTimers(); const control = new AbortController(), test = await installed(undefined, control.signal, undefined, "SOURCE_ROUTING"), send = test.cdp.send.getMockImplementation()!;
+    test.cdp.send.mockImplementation((name, value) => name === "Fetch.failRequest" ? mode === "reject" ? Promise.reject(Error("abort rejected")) : new Promise(() => {}) : send(name, value));
+    try { test.request("uncorrelated", unknown); if (mode === "abort") control.abort(); await vi.advanceTimersByTimeAsync(101);
+      expect(test.close).toHaveBeenCalledOnce(); expect(test.rejections).toEqual([]); expect(test.handler).not.toHaveBeenCalled(); expect(test.failures.length).toBeGreaterThan(0);
+    } finally { await test.guard.close(); vi.useRealTimers(); }
+  });
+  it.each(["empty id", "empty network", "redirect", "frame missing", "unknown resource", "unknown method", "body missing", "body malformed", "body overlimit", "headers overlimit", "headers malformed", "url malformed"])("keeps malformed/uncertain %s fatal", async mode => {
+    const test = await installed(undefined, undefined, undefined, "SOURCE_ROUTING");
+    const value = structuredClone(unknown) as Record<string, unknown> & { request: Record<string, unknown> };
+    if (mode === "empty network") value.networkId = "";
+    if (mode === "redirect") value.redirectedRequestId = "unknown-parent";
+    if (mode === "frame missing") value.frameId = undefined;
+    if (mode === "unknown resource") value.resourceType = "Unexpected";
+    if (mode === "unknown method") value.request.method = "UNEXPECTED";
+    if (mode === "body missing") delete value.request.postData;
+    if (mode === "body malformed") value.request.postData = {};
+    if (mode === "body overlimit") value.request.postData = "x".repeat(32769);
+    if (mode === "headers overlimit") value.request.headers = Object.fromEntries(Array.from({ length: 129 }, (_, i) => [`X-${i}`, "value"]));
+    if (mode === "headers malformed") value.request.headers = { Unexpected: {} };
+    if (mode === "url malformed") value.request.url = "not a URL";
+    try { test.request(mode === "empty id" ? "" : "uncorrelated", value); await vi.waitFor(() => expect(test.failures.length).toBeGreaterThan(0));
+      expect(test.close).toHaveBeenCalledOnce(); expect(test.rejections).toEqual([]); expect(test.handler).not.toHaveBeenCalled();
+    } finally { await test.guard.close(); }
+  });
+  it("retains intercept accounting for denied IDs and cannot hide a later actual fatal cause", async () => {
+    const test = await installed(2, undefined, undefined, "SOURCE_ROUTING");
+    try { test.request("one", unknown); test.request("two", unknown); await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+      expect(test.rejections).toHaveLength(2); expect(test.guard.firstFatal).toBeUndefined();
+      test.request("over", unknown); await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_INTERCEPT_LIMIT"));
+      expect(test.guard.firstFatal?.code).toBe("NATIVE_REDIRECT_INTERCEPT_LIMIT"); expect(test.handler).not.toHaveBeenCalled();
+    } finally { await test.guard.close(); }
+  });
+});
+
+describe("native response limit metadata", () => {
+  it.each([undefined, "SOURCE_ROUTING"] as const)("applies fixed source allocation only with explicit profile=%s", async profile => {
+    const test = await installed(undefined, undefined, undefined, profile), original = test.cdp.send.getMockImplementation()!;
+    test.cdp.send.mockImplementation(async (method, value) => method === "Fetch.getResponseBody" ? { body: "x".repeat(15_170_216), base64Encoded: false } : original(method, value));
+    try {
+      test.request("source-data"); await vi.waitFor(() => expect(test.routes).toHaveLength(1)); await test.routes[0].continue();
+      test.response("source-data", { responseHeaders: [{ name: "Content-Length", value: "1079018" }] });
+      if (profile) {
+        const response = await test.routes[0].request().response(); expect((await response!.body()).length).toBe(15_170_216);
+        expect(test.guard.firstFatal).toBeUndefined(); expect(test.close).not.toHaveBeenCalled();
+      } else {
+        await vi.waitFor(() => expect(test.guard.firstFatal?.limitKind).toBe("DECODED_BODY"));
+        expect(test.guard.firstFatal?.allowedBytes).toBe(2_000_000);
+      }
+    } finally { await test.guard.close(); }
+  });
+  it("still rejects source XHR above 16MB and rejects an unknown profile before creating a CDP session", async () => {
+    const context = vi.fn();
+    await expect(Reflect.apply(installNativeRedirectRouting, undefined, [{ context }, async () => {}, { responseProfile: "UNKNOWN" }])).rejects.toThrow("PUBLIC_READ_RESPONSE_PROFILE_INVALID");
+    expect(context).not.toHaveBeenCalled();
+    const test = await installed(undefined, undefined, undefined, "SOURCE_ROUTING"), original = test.cdp.send.getMockImplementation()!;
+    test.cdp.send.mockImplementation(async (method, value) => method === "Fetch.getResponseBody" ? { body: "x".repeat(16_000_001), base64Encoded: false } : original(method, value));
+    try {
+      test.request("large"); await vi.waitFor(() => expect(test.routes).toHaveLength(1)); await test.routes[0].continue(); test.response("large");
+      await vi.waitFor(() => expect(test.guard.firstFatal?.allowedBytes).toBe(16_000_000));
+      expect(test.guard.firstFatal?.limitKind).toBe("DECODED_BODY"); expect(test.guard.firstFatal?.bodyBytes).toBe(16_000_001);
+    } finally { await test.guard.close(); }
+  });
+  it.each(["not-a-number", "-1", "Infinity"])("records invalid declared length without preserving raw headers: %s", async length => {
+    const test = await installed();
+    try {
+      test.request("limit"); await vi.waitFor(() => expect(test.routes).toHaveLength(1)); await test.routes[0].continue();
+      test.response("limit", { responseHeaders: [{ name: "Content-Length", value: length }] });
+      await vi.waitFor(() => expect(test.guard.lastFailure).toBe("NATIVE_RESPONSE_LIMIT"));
+      expect(test.guard.firstFatal).toEqual({ code: "NATIVE_RESPONSE_LIMIT", limitKind: "DECLARED_INVALID", method: "GET", resourceType: "xhr", allowedBytes: 2_000_000,
+        totalBytes: 0, declaredLengthPresent: true, documentResponse: false, ancillaryResponse: false });
+      expect(test.cdp.send.mock.calls.some(([method]) => method === "Fetch.getResponseBody")).toBe(false);
+      expect(test.close).toHaveBeenCalledOnce();
+    } finally { await test.guard.close(); }
+  });
+  it("distinguishes declared per-resource rejection from a decoded body rejection without changing either cap", async () => {
+    for (const declared of [2_000_001, 128]) {
+      const test = await installed();
+      const original = test.cdp.send.getMockImplementation()!;
+      test.cdp.send.mockImplementation(async (method, value) => method === "Fetch.getResponseBody" ? { body: "x".repeat(2_000_001), base64Encoded: false } : original(method, value));
+      try {
+        test.request("limit"); await vi.waitFor(() => expect(test.routes).toHaveLength(1)); await test.routes[0].continue();
+        test.response("limit", { responseHeaders: [{ name: "Content-Length", value: String(declared) }] });
+        await vi.waitFor(() => expect(test.guard.lastFailure).toBe("NATIVE_RESPONSE_LIMIT"));
+        expect(test.guard.firstFatal).toEqual({ code: "NATIVE_RESPONSE_LIMIT", limitKind: declared > 2_000_000 ? "DECLARED_TOO_LARGE" : "DECODED_BODY",
+          method: "GET", resourceType: "xhr", allowedBytes: 2_000_000, declaredBytes: declared, ...(declared > 2_000_000 ? {} : { bodyBytes: 2_000_001 }),
+          totalBytes: declared > 2_000_000 ? 0 : 2_000_001, declaredLengthPresent: true, documentResponse: false, ancillaryResponse: false });
+        expect(test.cdp.send.mock.calls.some(([method]) => method === "Fetch.continueResponse")).toBe(false);
+      } finally { await test.guard.close(); }
+    }
+  });
+  it.each(["Script", "XHR"])("records the unchanged total decoded cap independently from source/script allocation: %s", async kind => {
+    const test = await installed(undefined, undefined, undefined, kind === "XHR" ? "SOURCE_ROUTING" : undefined); const original = test.cdp.send.getMockImplementation()!;
+    const body = "x".repeat(13_000_000);
+    test.cdp.send.mockImplementation(async (method, value) => method === "Fetch.getResponseBody" ? { body, base64Encoded: false } : original(method, value));
+    try {
+      for (let index = 0; index < 4; index++) {
+        const id = "script-" + index;
+        test.request(id, { resourceType: kind }); await vi.waitFor(() => expect(test.routes).toHaveLength(index + 1)); await test.routes[index].continue();
+        test.response(id, { resourceType: kind });
+        if (index < 3) await test.routes[index].request().response();
+      }
+      await vi.waitFor(() => expect(test.guard.lastFailure).toBe("NATIVE_RESPONSE_LIMIT"));
+      expect(test.guard.firstFatal).toEqual({ code: "NATIVE_RESPONSE_LIMIT", limitKind: "TOTAL_DECODED", method: "GET", resourceType: kind === "Script" ? "script" : "xhr", allowedBytes: 48_000_000,
+        declaredBytes: 0, bodyBytes: 13_000_000, totalBytes: 52_000_000, declaredLengthPresent: false, documentResponse: false, ancillaryResponse: kind === "Script" });
+      expect(test.cdp.send.mock.calls.filter(([method]) => method === "Fetch.continueResponse")).toHaveLength(3);
+    } finally { await test.guard.close(); }
+  });
+});
 
 describe("native private public-client header proofs", () => {
   it("projects exactly the installed structured CORS error union plus a closed OTHER category", () => {

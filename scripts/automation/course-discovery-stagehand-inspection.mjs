@@ -3,9 +3,22 @@ import { discoveryError } from "./course-discovery-client.mjs";
 import { STAGEHAND_SOURCE_MODE, canonicalStagehandData as canonical, stagehandDataHash as hash,
   publicStagehandSourceUrl as publicUrl, validateStagehandSourceProposal as validateAdapterSourceProposal,
   validateStagehandSourceReport } from "./course-discovery-stagehand-source.mjs";
-import { observedBookingSourceCandidates, nativeLinkSource, corroboratedNativeLink } from "./stagehand/source-provenance.mjs";
+import { observedBookingSourceCandidates, nativeLinkSource, corroboratedNativeLink, nativeFrameNavigations } from "./stagehand/source-provenance.mjs";
+import { safeTeeItUpDelegationDiagnostic } from "./course-discovery-worker.mjs";
 const fail = code => discoveryError(code), HYBRID_SOURCE_DISCOVERY = STAGEHAND_SOURCE_MODE;
 const INSPECTION_ACTION_LIMIT = 6;
+const inspectionFailures = new WeakMap();
+/** Current invocation only. Copied receipts and prior attempts cannot supply facts. */
+export function currentStagehandInspectionDiagnostic(error, job, startedAt, now) {
+  try {
+    const value = error && typeof error === 'object' ? inspectionFailures.get(error) : undefined;
+    if (!value || value.job !== job || value.attempt !== job.attempts || value.requestSha256 !== hash(canonical(job.request)) ||
+        value.sourceFingerprint !== job.sourceFingerprint || value.firstPickedUpAt !== job.firstPickedUpAt || value.deadlineAt !== job.deadlineAt ||
+        !Number.isFinite(startedAt) || !Number.isFinite(now) || value.startedAt < startedAt || value.startedAt > now) return undefined;
+    const teeItUpDelegation = safeTeeItUpDelegationDiagnostic(value.teeItUpDelegation);
+    return teeItUpDelegation ? { teeItUpDelegation } : undefined;
+  } catch { return undefined; }
+}
 function canonicalAdapterSourceRecipe(proposal, job) {
   return { schemaVersion: 1, engine: "EXISTING_ADAPTER", target: { ...job.request.target }, source: {
     officialUrl: job.request.identity.officialUrl, bookingUrl: proposal.bookingUrl,
@@ -58,6 +71,7 @@ export function observedInspectionPath(report, officialUrl, bookingUrl) {
     for (const item of (row.links ?? []).slice(0, 512)) link(row.pageUrl, item.href);
   for (const row of (report.frameLedger ?? []).slice(0, 512))
     for (const frame of (row.frames ?? []).slice(0, 32)) link(row.pageUrl, frame.src);
+  for (const row of nativeFrameNavigations(report, publicUrl)) for (const hop of row.redirects) link(hop.fromUrl, hop.toUrl);
   for (const row of (report.observedSourceEvidence ?? []).slice(0, 1024)) {
     const source = row.kind === 'NATIVE_DOM_LINK_OBSERVED' ? nativeLinkSource(row) : row.url;
     if (['DOM_OBSERVED', 'NATIVE_DOM_LINK_OBSERVED'].includes(row.kind)) {
@@ -213,7 +227,16 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
         if (['loading', 'interactive', 'complete'].includes(snapshot.readyState)) readiness.readyState = snapshot.readyState;
         if (Object.keys(readiness).length) step.readiness = readiness;
         return snapshot;
-      } catch (error) { step.error = inspectionErrorCode(error); const diagnostic=closedFilterDiagnostics(error); if(diagnostic)step.filterDiagnostic=diagnostic; throw error; }
+      } catch (error) {
+        step.error = inspectionErrorCode(error);
+        const diagnostic = closedFilterDiagnostics(error);
+        if (diagnostic) step.filterDiagnostic = diagnostic;
+        try {
+          const delegation = safeTeeItUpDelegationDiagnostic(error?.details?.browserDiagnostics?.teeItUpDelegation);
+          if (delegation) step.teeItUpDelegation = delegation;
+        } catch { /* Diagnostic access cannot replace the primary failure. */ }
+        throw error;
+      }
       finally { step.elapsedMs = Math.max(0, now() - start); }
     };
     let snapshot = await request('open', job.request.identity.officialUrl), position = 0;
@@ -335,6 +358,17 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
     if (primary) receipt.error = inspectionErrorCode(primary);
     try { onReceipt(receipt); } catch { primary ??= fail('FRAMEWORK_INSPECTION_RECEIPT_FAILED'); }
   }
-  if (primary) { primary.inspectionReceipt = receipt; throw primary; }
+  if (primary) {
+    primary.inspectionReceipt = receipt;
+    const failedAction = receipt.actions.at(-1);
+    if (primary && typeof primary === 'object' && failedAction?.action === 'inspect_adapter' && failedAction.error && failedAction.teeItUpDelegation) {
+      try {
+        inspectionFailures.set(primary, { job, attempt: job.attempts, requestSha256: hash(canonical(job.request)), sourceFingerprint: job.sourceFingerprint,
+          firstPickedUpAt: job.firstPickedUpAt, deadlineAt: job.deadlineAt, startedAt,
+          teeItUpDelegation: safeTeeItUpDelegationDiagnostic(failedAction.teeItUpDelegation) });
+      } catch { /* Optional diagnostics cannot replace the primary failure. */ }
+    }
+    throw primary;
+  }
   return { ...result, receipt };
 }

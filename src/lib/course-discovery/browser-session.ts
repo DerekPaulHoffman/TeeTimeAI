@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
+import { chargeDelegatedReadBudget, delegatedProxyAllocation, settleDelegatedProxyBudget, type DelegatedReadBudget } from "./teeitup-delegated-booking-context";
+import { createDelegationDiagnostic, rememberTeeItUpDelegationFailure, getTeeItUpDelegationDiagnostic } from "./teeitup-delegated-booking-diagnostic";
 import { describePublicUrlRejection, safePublicUrlRejectionDiagnostic } from "../../../scripts/automation/course-discovery-diagnostics.mjs";
 import type { Browser, Locator } from "@playwright/test";
 import { z } from "zod";
@@ -155,6 +157,9 @@ export type DiscoveryBrowserSnapshot = {
     attributes: Record<string, string>; href?: string; target?: string; children: Array<{ selector: string; tag: string; text: string; href?: string; target?: string }> }> };
 };
 export type DiscoveryBrowserSessionDependencies = {
+  delegatedReadBudget?: DelegatedReadBudget;
+  /** Private fixed delegated-source reader; never an action/recipe field. */
+  captureDelegatedDocument?: true;
   /** Private fixed CPS source capture; never a model/browser action field. */
   collectPublicCourseContacts?: true;
   fetch?: typeof fetch;
@@ -241,7 +246,10 @@ export async function createCourseDiscoveryBrowserSession(input: {
   type OfficialDocumentProof = { kind: "VERIFIED_OFFICIAL_DOCUMENT"; officialUrl: string; documentUrl: string };
   let officialIdentityPage: (OfficialIdentityPage & { observedAt: number; documentStartedAt: number; officialDocumentProof: OfficialDocumentProof }) | undefined;
   let lastOfficialIdentityReadDiagnostic: { captureAgeMs: number | null; gates: Record<string, boolean> } | undefined;
+  let teeItUpDelegation: ReturnType<typeof getTeeItUpDelegationDiagnostic>;
   let officialIdentityDocument: { url: string; html: string; officialDocumentProof: OfficialDocumentProof } | undefined;
+  let delegatedIdentityDocument: { url: string; html: string } | undefined;
+  let delegatedIdentityPage: (OfficialIdentityPage & { observedAt: number; documentStartedAt: number }) | undefined;
   let nativeDocumentRedirects: { url: string; request: object } | undefined;
   let officialSourceDiagnostic: OfficialSourceDiagnostic | undefined, navigationFailureKind: NavigationFailureKind | undefined;
   let cpsPostalContact: ReturnType<typeof getCpsPostalContactDiagnostic>;
@@ -266,7 +274,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
     ezlinks.handles(url) ? ezlinks.allows(url, headers, body) :
       isAnonymousBrowserReadPost(url, headers, body) || passfactory.allows(url, headers, body) || uschedule.allows(url, headers, body);
   const queue = createSimulatorBrowserRequestQueue(deps.requestLease ?? runWithProviderRequestLease, deadline);
-  const nativeProxy = deps.browserTransport === "NATIVE_CHROME" ? await createNativePublicBrowserProxy({ signal: deadline }) : undefined;
+  if (deps.delegatedReadBudget && deps.browserTransport !== "NATIVE_CHROME") throw new Error("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
+  const nativeProxy = deps.browserTransport === "NATIVE_CHROME" ? await createNativePublicBrowserProxy({ signal: deadline,
+    ...(deps.delegatedReadBudget ? delegatedProxyAllocation(deps.delegatedReadBudget) : {}) }) : undefined;
   let browser: Browser;
   try {
     browser = deps.launchBrowser ? await deps.launchBrowser() : await launchPublicReadBrowser({
@@ -333,6 +343,10 @@ export async function createCourseDiscoveryBrowserSession(input: {
   // work may outlive handleRoute; pinned HTTP uses the local handler count.
   const pendingReadCount = () => Math.max(pendingRequests, redirectRouting?.pendingReads ?? 0);
   let terminalFailure: string | undefined;
+  const sharedInterceptAllowed = () => {
+    try { if (deps.delegatedReadBudget) chargeDelegatedReadBudget(deps.delegatedReadBudget, "intercepts"); return true; }
+    catch { terminalFailure = "PUBLIC_READ_REQUEST_LIMIT"; return false; }
+  };
   let navigation: { url: string; status: number } | undefined;
   let navigationStartedAt: number | undefined;
   let ezDocument: EzLinksDocumentWitness | undefined, ezControllerRead: EzLinksControllerRead | undefined;
@@ -365,8 +379,22 @@ export async function createCourseDiscoveryBrowserSession(input: {
     const read = witness.readContractAssets.get(asset.path);
     return read?.complete && read.sha256 === asset.sha256;
   });
-  const close = async () => { if (closed) return; closed = true; completedPublicAssets.clear(); deliveredPublicAssets.clear(); teeBookingScope.close(); clearEzDocument(); await redirectRouting?.close(); cancellation.abort("BROWSER_CLOSED"); queue.dispose(); await context.close().catch(() => {}); await browser.close().catch(() => {}); await nativeProxy?.close(); };
-  const abort = () => { void close(); };
+  let closing: Promise<void> | undefined, cleanupFailed = false;
+  const close = () => closing ??= (async () => {
+    closed = true; completedPublicAssets.clear(); deliveredPublicAssets.clear(); teeBookingScope.close(); clearEzDocument();
+    try { await redirectRouting?.close(); } catch { cleanupFailed = true; }
+    cancellation.abort("BROWSER_CLOSED"); queue.dispose();
+    // Preserve the existing context -> browser -> proxy teardown order while
+    // ensuring one failed close cannot prevent the remaining drains.
+    try { await context.close(); } catch { cleanupFailed = true; }
+    try { await browser.close(); } catch { cleanupFailed = true; }
+    try { await nativeProxy?.close(); } catch { cleanupFailed = true; }
+    if (deps.delegatedReadBudget && nativeProxy) {
+      try { settleDelegatedProxyBudget(deps.delegatedReadBudget, nativeProxy.stats()); } catch { cleanupFailed = true; }
+    }
+    if (cleanupFailed) throw new Error("DISCOVERY_BROWSER_CLEANUP_FAILED");
+  })();
+  const abort = () => { void close().catch(() => {}); };
   deadline.addEventListener("abort", abort, { once: true });
   page.on("popup", popup => { void popup.close(); });
   context.on("page", opened => { if (opened !== page) void opened.close(); });
@@ -397,7 +425,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     const requestUrl = canonicalCpsPublicUrl(transportUrl);
     // Denied media/telemetry never spends the public-read budget. A separate
     // hard interception cap still bounds hostile pages that emit rejected work.
-    if (++interceptCount > 1024) { await route.abort().catch(() => {}); void close(); return; }
+    if (++interceptCount > 1024 || !sharedInterceptAllowed()) { await route.abort().catch(() => {}); void close().catch(() => {}); return; }
     if (isIncidentalBrowserRequest(request.url()) || isNonEvidenceBrowserResource(request.url(), request.resourceType())) { await route.abort(); return; }
     pendingRequests++;
     const metadata: DiscoveryBrowserSnapshot["requests"][number] = {
@@ -446,6 +474,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       if (request.frame() === page.mainFrame() && ["xhr", "fetch"].includes(request.resourceType()))
         catalogRead = catalogTiles.beginRead(requestUrl, request.method(), request.postData(), request.frame().url());
       if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+        delegatedIdentityDocument = undefined; delegatedIdentityPage = undefined;
         nativeDocumentRedirects = undefined;
         mindbodyCapture.assertNavigation(url.href, method);
         mindbodyDocumentVersion = mindbodyCapture.beginDocument();
@@ -545,6 +574,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
         } catch { /* Non-JSON public reads remain opaque; never return raw text. */ }
       }
       assertPublicBrowserRequestBudget(requestCount, requestLimit);
+      if (deps.delegatedReadBudget) chargeDelegatedReadBudget(deps.delegatedReadBudget, "requests");
       if (responseBytes >= PUBLIC_BROWSER_TOTAL_BYTES) throw new Error("PUBLIC_READ_BYTE_LIMIT");
       requestCount++;
       admittedRequestCounts[request.resourceType()] = (admittedRequestCounts[request.resourceType()] ?? 0) + 1;
@@ -613,6 +643,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
       // semantic markup is reproducible on warm reads; page.content() contains
       // transient browser mutations and must not define the saved witness.
       const officialDocumentProof = bookingParents.authorizeParent(url.href);
+      if (deps.captureDelegatedDocument && nativeProxy && request.method() === "GET" && request.isNavigationRequest() && request.frame() === page.mainFrame() &&
+          reply.status === 200 && reply.buffer.length <= 600_000 && /^text\/html(?:;|$)/iu.test(reply.headers["content-type"] ?? ""))
+        delegatedIdentityDocument = { url: url.href, html: reply.buffer.toString("utf8") };
       if (request.isNavigationRequest() && request.frame() === page.mainFrame() && officialDocumentProof?.kind === "VERIFIED_OFFICIAL_DOCUMENT" &&
           reply.status === 200 &&
           reply.buffer.length <= 600_000 && /^text\/html(?:;|$)/iu.test(reply.headers["content-type"] ?? ""))
@@ -620,6 +653,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       if (["GET", "HEAD"].includes(method) && request.isNavigationRequest() && request.resourceType() === "document" &&
           reply.status >= 200 && reply.status < 400 && isSafeRecipeUrl(url.href)) allowedNavigation.add(url.href);
       responseBytes += reply.buffer.length;
+      if (deps.delegatedReadBudget) chargeDelegatedReadBudget(deps.delegatedReadBudget, "bytes", reply.buffer.length);
       if (url.hostname === "clients.uschedule.com" && method === "GET" && /^text\/html(?:;|$)/iu.test(reply.headers["content-type"] ?? ""))
         uschedule.observeResponse(url.href, method, reply.status, reply.headers["content-type"] ?? "", reply.buffer.toString("utf8"));
       if (responseBytes > PUBLIC_BROWSER_TOTAL_BYTES) { cancellation.abort("PUBLIC_READ_BYTE_LIMIT"); throw new Error("PUBLIC_READ_BYTE_LIMIT"); }
@@ -731,7 +765,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
   };
   await context.route("**/*", async route => {
     if (route.request().frame() !== page.mainFrame()) {
-      if (++interceptCount > 1024) { await route.abort().catch(() => {}); void close(); return; }
+      if (++interceptCount > 1024 || !sharedInterceptAllowed()) { await route.abort().catch(() => {}); void close().catch(() => {}); return; }
       recordSubframe({ url: route.request().url(), resourceType: route.request().resourceType() });
       await route.abort().catch(() => {});
       return;
@@ -751,7 +785,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       requestFailures.push({ reason, resourceType: route.request().resourceType() });
       if (requestFailures.length > 12) requestFailures.shift();
       await route.abort().catch(() => {});
-      void close();
+      void close().catch(() => {});
     }
   });
   if (nativeProxy) {
@@ -987,7 +1021,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
     const text = sanitizeResponderText(await page.locator("body").innerText({ timeout: 1000 })).slice(0, 16_000);
     const blockedAccess = isActiveBrowserAccessChallenge(text, await page.title());
     discardStaleOfficialIdentity(currentUrl);
-    if (!blockedAccess && officialIdentityDocument && sameDiscoveryMainDocument(officialIdentityDocument.url, currentUrl)) {
+    const identityDocument = officialIdentityDocument && sameDiscoveryMainDocument(officialIdentityDocument.url, currentUrl) ? officialIdentityDocument :
+      deps.captureDelegatedDocument && delegatedIdentityDocument && sameDiscoveryMainDocument(delegatedIdentityDocument.url, currentUrl) ? delegatedIdentityDocument : undefined;
+    if (!blockedAccess && identityDocument) {
         const visibleEvidence = await page.evaluate(() => {
           const headings: string[] = [], linkUrls: string[] = [], addressTexts: string[] = [], phoneTexts: string[] = [];
           const brandLinks: Array<{ href: string; text: string }> = [];
@@ -1023,10 +1059,12 @@ export async function createCourseDiscoveryBrowserSession(input: {
           return { title: document.title.slice(0, 500), headings, linkUrls, addressTexts, phoneTexts, brandLinks };
         });
         const publicContactBlocks = deps.collectPublicCourseContacts && input.venueName ? await readVisiblePublicCourseContactBlocks(page, input.venueName) : [];
-        officialIdentityPage = { ...officialIdentityDocument, visibleEvidence: { ...visibleEvidence,
+        const captured = { ...identityDocument, visibleEvidence: { ...visibleEvidence,
           addressTexts: [...visibleEvidence.addressTexts,...publicContactBlocks.map(block=>`${block.street}, ${block.locality}, ${block.region} ${block.postalCode}`)],
           ...(publicContactBlocks.length ? { publicContactBlocks } : {}) }, observedAt: Date.now(), documentStartedAt,
           browserTransport: deps.browserTransport ?? "PINNED_HTTP" };
+        if (identityDocument === officialIdentityDocument) officialIdentityPage = captured as typeof officialIdentityPage;
+        if (deps.captureDelegatedDocument) delegatedIdentityPage = captured;
     }
     if (officialIdentityOnly) {
       // The private reader needs this fresh identity capture, not the public
@@ -1273,6 +1311,26 @@ export async function createCourseDiscoveryBrowserSession(input: {
   };
   return {
     // Controller-only methods; intentionally absent from action/tool schemas.
+    async readDelegatedSourceDocument(): Promise<OfficialIdentityPage> {
+      const diagnostic = createDelegationDiagnostic("NATIVE_DOCUMENT_READ");
+      try {
+      if (!deps.captureDelegatedDocument || deps.browserTransport !== "NATIVE_CHROME") throw new Error("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
+      const current = await snapshot(false, true), origin = await page.evaluate(() => performance.timeOrigin), captured = delegatedIdentityPage;
+      deadline.throwIfAborted();
+      Object.assign(diagnostic.gates, { hopSessionOpen: !terminalFailure && !closed, hopNoAccess: !current.accessRequirementObserved,
+        hopNoFatal: !current.nativeFirstFatal, hopStatus200: current.navigationStatus === 200, hopCaptured: Boolean(captured),
+        hopUrlMatches: Boolean(captured && captured.url === current.url && page.url() === captured.url),
+        hopCaptureFresh: Boolean(captured && Date.now() - captured.observedAt <= 5000), hopTimeOriginMatches: captured?.documentStartedAt === origin,
+        hopRawClosed: Boolean(captured && /<html(?:\s|>)/iu.test(captured.html) && /<body(?:\s|>)/iu.test(captured.html) && /<\/body\s*>/iu.test(captured.html) && /<\/html\s*>/iu.test(captured.html)),
+        hopNativeTransport: captured?.browserTransport === "NATIVE_CHROME" });
+      if (terminalFailure || closed || current.accessRequirementObserved || current.nativeFirstFatal || current.navigationStatus !== 200 ||
+          !captured || captured.browserTransport !== "NATIVE_CHROME" || captured.url !== current.url || page.url() !== captured.url ||
+          captured.documentStartedAt !== origin || Date.now() - captured.observedAt > 5000 || !captured.visibleEvidence ||
+          !/<html(?:\s|>)/iu.test(captured.html) || !/<body(?:\s|>)/iu.test(captured.html) || !/<\/body\s*>/iu.test(captured.html) || !/<\/html\s*>/iu.test(captured.html))
+        throw new Error("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
+      return structuredClone({ url: captured.url, html: captured.html, visibleEvidence: captured.visibleEvidence, browserTransport: captured.browserTransport });
+      } catch (error) { rememberTeeItUpDelegationFailure(error, diagnostic); throw error; }
+    },
     async readOfficialIdentityPage(): Promise<OfficialIdentityPage> {
       lastOfficialIdentityReadDiagnostic = undefined;
       const current = await snapshot(false, true);
@@ -1322,7 +1380,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
     diagnostics() {
       // Available even when navigation throws or the page has already closed.
       // This contains transport facts only, never page text or response bodies.
-      return { loading: pendingReadCount() > 0, pendingRequestCount: pendingReadCount(),
+      return { loading: pendingReadCount() > 0, pendingRequestCount: pendingReadCount(), cleanupFailed,
+        ...(teeItUpDelegation ? { teeItUpDelegation: structuredClone(teeItUpDelegation) } : {}),
         ...(lastOfficialIdentityReadDiagnostic ? { officialIdentityReadDiagnostic: {
           captureAgeMs: lastOfficialIdentityReadDiagnostic.captureAgeMs, gates: { ...lastOfficialIdentityReadDiagnostic.gates },
         } } : {}),
@@ -1416,6 +1475,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
         return modelSafe({ ...result, structure });
       }
       if (action.action === "inspect_adapter") {
+        teeItUpDelegation = undefined;
         officialSourceDiagnostic = undefined;
         cpsPostalContact = undefined;
         mindbodyAppointment = undefined;
@@ -1439,6 +1499,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
           // Nested reader pages and their private request material stay private.
           try { cpsPostalContact = getCpsPostalContactDiagnostic(error); } catch { /* Diagnostics cannot replace the primary failure. */ }
           try { mindbodyAppointment = getMindbodyAppointmentDiagnostic(error); } catch { /* Diagnostics cannot replace the primary failure. */ }
+          try { teeItUpDelegation = getTeeItUpDelegationDiagnostic(error); } catch { /* Diagnostics cannot replace the primary failure. */ }
           throw error;
         }
         const inspectedSnapshot = await snapshot();
@@ -1518,7 +1579,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
           } else await known.locator.click();
         }
       }
-      return snapshot(action.action === "open" || action.action === "observe" || documentNavigation);
+      return snapshot(action.action === "open" || action.action === "observe" || documentNavigation, deps.captureDelegatedDocument === true);
       } catch (error) {
         if (navigationAttempted) navigationFailureKind = discoveryNavigationFailureKind(error);
         if (terminalFailure) throw new Error(terminalFailure);

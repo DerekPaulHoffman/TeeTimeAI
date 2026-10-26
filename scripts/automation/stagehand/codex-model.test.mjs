@@ -22,7 +22,29 @@ test('SDK callback forwards the exact schema and instructions and closes the loc
   assert.equal(received.systemPrompt, 'Exact system instructions');
   assert.deepEqual(result.structuredContent, { ok: true });
   assert.equal(model.calls.length, 1);
+  assert.equal(model.attemptedCalls, 1);
   await model.close();
   assert.equal(closed, true);
   assert.equal(received.signal.aborted, true);
+});
+test('failed actual client invocation counts as attempted with no invented completed usage',async()=>{
+ const model=await createStagehandCodexModel({deadline:Date.now()+10000,clientFactory:async()=>({generate:async()=>{throw Object.assign(Error('LOCAL_MODEL_RPC_FAILED'),{diagnostics:{rpcCode:-32600,usage:{inputTokens:20}}});},close:async()=>({})})});
+ await assert.rejects(model.model.generate({systemPrompt:'Read only',messages:[{role:'user',content:{type:'text',text:'Public evidence'}}],responseFormat:{type:'json_schema',schema:{type:'object'}}}),/LOCAL_MODEL_RPC_FAILED/);
+ assert.equal(model.attemptedCalls,1);assert.equal(model.calls.length,0);await model.close();
+});
+
+test('model failure is captured before SDK wrapping, privately projected, and cleared before a later callback',async()=>{
+ let failing=true;
+ const model=await createStagehandCodexModel({deadline:Date.now()+10000,clientFactory:async()=>({generate:async()=>{
+  if(failing)throw Object.assign(Error('PRIVATE_MESSAGE https://private.example/?token=SECRET'),{code:'LOCAL_MODEL_RPC_FAILED',diagnostics:{phase:'turn/start',rpcCode:-32600,httpStatusCode:400,usage:{inputTokens:20,secret:'PRIVATE'},body:'PRIVATE'}});
+  return{value:{ok:true},model:'gpt-6.1-sol',effort:'medium',usage:{inputTokens:10},elapsedMs:1};
+ },close:async()=>({})})});
+ const params={systemPrompt:'Read',messages:[{role:'user',content:{type:'text',text:'Public'}}],responseFormat:{type:'json_schema',schema:{type:'object'}}};
+ await assert.rejects(model.model.generate(params));
+ assert.deepEqual(model.lastFailure,{attempt:1,completedCalls:0,transportCode:'LOCAL_MODEL_RPC_FAILED',transportPhase:'turn/start',rpcCode:-32600,httpStatus:400,failedCallUsage:{inputTokens:20}});
+ const cloned=model.lastFailure;cloned.transportCode='PRIVATE';assert.equal(model.lastFailure.transportCode,'LOCAL_MODEL_RPC_FAILED');
+ assert.doesNotMatch(JSON.stringify(model.lastFailure),/PRIVATE|SECRET|https:|message|body/);
+ failing=false;await model.model.generate(params);assert.equal(model.lastFailure,undefined);assert.equal(model.attemptedCalls,2);assert.equal(model.calls.length,1);
+ await assert.rejects(model.model.generate({...params,responseFormat:{type:'text'}}));assert.equal(model.lastFailure,undefined);
+ await model.close();
 });

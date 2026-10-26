@@ -148,7 +148,7 @@ export function deriveTeeItUpOfficialIdentityProof(source: OfficialIdentitySourc
   return teeItUpOfficialIdentityProofSchema.parse({ kind: "OFFICIAL_SOURCE_ADDRESS", officialPageUrl: current.href, bookingUrl: booking.href,
     venueName: expected, alternateAddress, markupWitnessSha256 });
 }
-export function matchesOfficialFacility(proof: TeeItUpOfficialIdentityProof, source: OfficialIdentitySource, row: { name: string; address: string; timeZone: string; isSimulator?: boolean }) {
+export function matchesOfficialFacility(proof: Pick<TeeItUpOfficialIdentityProof, "venueName" | "alternateAddress">, source: OfficialIdentitySource, row: { name: string; address: string; timeZone: string; isSimulator?: boolean }) {
   return row.isSimulator !== true && row.timeZone === source.timeZone && fullCourseName(row.name) === fullCourseName(source.venueName) &&
     fullCourseName(row.name) === proof.venueName && JSON.stringify(completeUSAddress(row.address)) === JSON.stringify(proof.alternateAddress);
 }

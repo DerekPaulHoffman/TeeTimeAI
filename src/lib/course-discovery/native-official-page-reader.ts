@@ -2,10 +2,13 @@ import type { OfficialIdentityPage, OfficialIdentitySource } from "./teeitup-off
 import { createCourseDiscoveryBrowserSession, type DiscoveryBrowserSessionDependencies, type DiscoveryBrowserSnapshot } from "./browser-session";
 import { isSafeRecipeUrl } from "./recipe";
 import { noteNativeOfficialIdentityPageCleanup, registerFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
+import { registerFreshNativeDelegatedDocument } from "./native-official-page-attestation";
+import { consumeDelegatedGet, type DelegatedGetGrant, type DelegatedReadBudget } from "./teeitup-delegated-booking-context";
 
 export type NativeOfficialPageReader = (source: OfficialIdentitySource, pageUrl: string, deadlineAt: Date) => Promise<OfficialIdentityPage>;
 type Session = Pick<Awaited<ReturnType<typeof createCourseDiscoveryBrowserSession>>, "execute" | "readOfficialIdentityPage" | "close">;
 type Dependencies = Pick<DiscoveryBrowserSessionDependencies, "requestLease" | "launchBrowser"> & {
+  delegatedReadBudget?: DelegatedReadBudget;
   collectPublicCourseContacts?: true;
   createSession?: (input: Parameters<typeof createCourseDiscoveryBrowserSession>[0], deps: DiscoveryBrowserSessionDependencies) => Promise<Session>;
 };
@@ -23,6 +26,7 @@ export async function readNativeOfficialIdentityPage(source: OfficialIdentitySou
   const session = await createSession({ deadlineAt: deadline, initialUrls: [pageUrl], venueName: source.venueName,
     venueAddress: source.venueAddress, venueOfficialUrl: source.officialUrl, timeZone: source.timeZone },
   { requestLease: deps.requestLease, launchBrowser: deps.launchBrowser, browserTransport: "NATIVE_CHROME",
+    ...(deps.delegatedReadBudget ? { delegatedReadBudget: deps.delegatedReadBudget } : {}),
     ...(deps.collectPublicCourseContacts ? { collectPublicCourseContacts: true } : {}) });
   let capturedPage: OfficialIdentityPage | undefined;
   try {
@@ -55,5 +59,37 @@ export async function readNativeOfficialIdentityPage(source: OfficialIdentitySou
     let succeeded = false;
     try { await session.close(); succeeded = true; }
     finally { if (capturedPage) noteNativeOfficialIdentityPageCleanup(capturedPage, source.officialUrl, "AFTER", succeeded); }
+  }
+}
+
+/** A delegated GET is a separately owned current source document. Its canonical
+ * official root is preserved, and it never receives an official identity tag. */
+export async function readNativeDelegatedDocument(source: OfficialIdentitySource, grant: DelegatedGetGrant, deps: Dependencies = {}) {
+  const admitted = consumeDelegatedGet(grant);
+  if (admitted.officialUrl !== source.officialUrl) throw new Error("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
+  const deadline = new Date(Math.min(admitted.deadlineAt.getTime(), Date.now() + 30_000));
+  const factory = deps.createSession ?? createCourseDiscoveryBrowserSession;
+  const session = await factory({ deadlineAt: deadline, initialUrls: [admitted.url], venueOfficialUrl: source.officialUrl,
+    venueName: source.venueName, venueAddress: source.venueAddress, timeZone: source.timeZone },
+  { requestLease: deps.requestLease, launchBrowser: deps.launchBrowser, browserTransport: "NATIVE_CHROME", captureDelegatedDocument: true,
+    ...(deps.delegatedReadBudget ? { delegatedReadBudget: deps.delegatedReadBudget } : {}) });
+  let failed = false;
+  try {
+    const current = await session.execute({ id: 1, action: "open", url: admitted.url });
+    if (current.url !== admitted.url || current.navigationStatus !== 200 || current.browserTransport !== "NATIVE_CHROME" ||
+        current.accessRequirementObserved || current.nativeFirstFatal) throw new Error("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
+    if (!("readDelegatedSourceDocument" in session) || typeof session.readDelegatedSourceDocument !== "function") throw new Error("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
+    let captured = await session.readDelegatedSourceDocument() as OfficialIdentityPage;
+    const renderingEnd = Math.min(deadline.getTime(), Date.now() + 12000);
+    let observationId = 2;
+    while (admitted.url !== source.bookingUrl && !captured.visibleEvidence?.linkUrls.includes(source.bookingUrl) && Date.now() < renderingEnd) {
+      await session.execute({ id: observationId++, action: "observe" });
+      captured = await session.readDelegatedSourceDocument() as OfficialIdentityPage;
+    }
+    if (captured.url !== admitted.url || Date.now() >= deadline.getTime()) throw new Error("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
+    return registerFreshNativeDelegatedDocument(captured, admitted.officialUrl, deadline);
+  } catch (error) { failed = true; throw error; }
+  finally {
+    try { await session.close(); } catch { if (!failed) throw new Error("OFFICIAL_DELEGATED_SOURCE_CLOSE_FAILED"); }
   }
 }

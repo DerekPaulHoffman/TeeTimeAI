@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { discoveryError } from "./course-discovery-client.mjs";
-import { observedBookingSourceCandidates } from "./stagehand/source-provenance.mjs";
+import { observedBookingSourceCandidates, nativeFrameNavigations } from "./stagehand/source-provenance.mjs";
+import { sourceTransportCodes } from "./stagehand/source-diagnostic.mjs";
 
 export const STAGEHAND_SOURCE_MODE = "HYBRID_SOURCE_DISCOVERY";
 export const STAGEHAND_SOURCE_BUDGET_MS = 120_000;
@@ -53,7 +54,7 @@ export function validateStagehandSourceProposal(proposal) {
 
 /** A successful native report is still only routing evidence. */
 export function stagehandSourceFailureCode(report, job) {
-  const known = new Set(["STAGEHAND_SOURCE_ACTION_UNAVAILABLE", "STAGEHAND_SOURCE_ACTION_REJECTED", "STAGEHAND_SOURCE_LOADING_INCOMPLETE",
+  const known = new Set([...sourceTransportCodes, "STAGEHAND_SOURCE_ACTION_UNAVAILABLE", "STAGEHAND_SOURCE_ACTION_REJECTED", "STAGEHAND_SOURCE_LOADING_INCOMPLETE",
     "STAGEHAND_NATIVE_HOST_DEADLINE", "STAGEHAND_NATIVE_HOST_SCOPE_INVALID", "STAGEHAND_NATIVE_HOST_INVALID",
     "STAGEHAND_NATIVE_HOST_FAILED", "STAGEHAND_GUARDED_SOURCE_REJECTED", "OWNED_STAGEHAND_CDP_UNAVAILABLE", "OWNED_PUBLIC_CDP_UNAVAILABLE",
     "PROVIDER_COORDINATION_UNAVAILABLE",
@@ -62,13 +63,25 @@ export function stagehandSourceFailureCode(report, job) {
     "LOCAL_MODEL_ORIGINAL_DEADLINE", "LOCAL_MODEL_CALL_CANCELLED", "SOL_ONLY_MODEL_RESULT_REQUIRED", "STAGEHAND_VERSION_CHANGED",
     "SOURCE_EVIDENCE_LIMIT", "STAGEHAND_GUARDED_BROWSER_REQUIRED", "STAGEHAND_UNGUARDED_CONTEXT", "STAGEHAND_GUARDED_TARGET_MISSING",
     "STAGEHAND_SOURCE_OUTPUT_INVALID", "STAGEHAND_SOURCE_DISCOVERY_FAILED", "STAGEHAND_SOURCE_CLEANUP_UNCONFIRMED"]);
-  if (!plain(report) || report.outcome !== "UNRESOLVED" || !known.has(report.frameworkFailureCode) || report.jobId !== job.id ||
+  if (!plain(report) || report.outcome !== "UNRESOLVED" || report.jobId !== job.id ||
       report.firstPickedUpAt !== job.firstPickedUpAt || report.deadlineAt !== job.deadlineAt || report.framework?.name !== "Stagehand" ||
       report.framework.version !== "4.3.0" || report.frameworkMode !== STAGEHAND_SOURCE_MODE || report.frameworkRole !== "SOURCE_DISCOVERY_ONLY" ||
       report.frameworkExtractedTimes !== false || report.adapterSourceProposal !== null || report.recipe !== null || report.recipeJson != null ||
       report.result?.recipeJson != null || !Array.isArray(report.matchingSlots) || report.matchingSlots.length !== 0 ||
       report.metrics?.model !== "gpt-6.1-sol" || report.metrics.reasoningEffort !== "medium") return undefined;
-  return report.frameworkFailureCode;
+  if (report.frameworkFailureCode !== undefined && report.frameworkFailureCode !== "STAGEHAND_SOURCE_UNRESOLVED")
+    return known.has(report.frameworkFailureCode) ? report.frameworkFailureCode : undefined;
+  // An ordinary, completed no-proposal decision is a scoped failure, not a
+  // malformed success report. This grants neither routing nor resume authority.
+  if (report.browserClosed !== true || report.modelClosed !== true || !Array.isArray(report.metrics.localCodexCalls) ||
+      !report.metrics.localCodexCalls.every(call => call?.model === "gpt-6.1-sol" && (call.effort === undefined || call.effort === "medium"))) return undefined;
+  try {
+    const sourceEnd = Math.min(Date.parse(job.firstPickedUpAt) + STAGEHAND_SOURCE_BUDGET_MS, stagehandWorkDeadline(job));
+    const started = Date.parse(report.startedAt), finished = Date.parse(report.finishedAt), work = Date.parse(report.workDeadlineAt);
+    if (!Number.isFinite(started) || !Number.isFinite(finished) || !Number.isFinite(work) ||
+        started < Date.parse(job.firstPickedUpAt) - 5000 || finished < started || finished > sourceEnd || work > sourceEnd || work <= started) return undefined;
+  } catch { return undefined; }
+  return "STAGEHAND_SOURCE_UNRESOLVED";
 }
 
 export function validateStagehandSourceReport(report, job) {
@@ -87,6 +100,8 @@ export function validateStagehandSourceReport(report, job) {
     completed >= started && completed <= sourceEnd && Date.parse(report.workDeadlineAt) <= sourceEnd &&
     Date.parse(report.workDeadlineAt) > started, "STAGEHAND_SOURCE_CLOCK_INVALID");
   const proposal = validateStagehandSourceProposal(report.adapterSourceProposal);
+  requireFact(report.nativeFrameNavigations === undefined || Array.isArray(report.nativeFrameNavigations) && report.nativeFrameNavigations.length <= 2 &&
+    nativeFrameNavigations(report, publicStagehandSourceUrl).length === report.nativeFrameNavigations.length, "STAGEHAND_SOURCE_GRAPH_LIMIT");
   requireFact(observedBookingSourceCandidates(report, job.request.identity.officialUrl, publicStagehandSourceUrl,
     { sourceDiscoveryOnly: true }).includes(proposal.bookingUrl), "STAGEHAND_SOURCE_NOT_OBSERVED");
   return proposal;
@@ -109,9 +124,14 @@ export function stagehandRoutingReport(report, job) {
     metrics: { model: "gpt-6.1-sol", reasoningEffort: "medium" },
     visitedUrls: boundedRows(report.visitedUrls, 512).filter(publicStagehandSourceUrl),
     officialLinkLedger: boundedRows(report.officialLinkLedger, 512).map(row => ({
-      pageUrl: urlField(row.pageUrl), links: boundedRows(row.links, 512).filter(item => publicStagehandSourceUrl(item.href)).map(item => ({ href: item.href })),
+      ...(row.kind === "NATIVE_VISIBLE_DOM" ? { kind: row.kind } : {}),
+      ...(row.kind === "NATIVE_VISIBLE_DOM" && typeof row.documentHash === "string" && /^[a-f0-9]{64}$/u.test(row.documentHash) ? { documentHash: row.documentHash } : {}),
+      ...(typeof row.observedAt === "string" && Number.isFinite(Date.parse(row.observedAt)) && new Date(row.observedAt).toISOString() === row.observedAt ? { observedAt: row.observedAt } : {}),
+      pageUrl: urlField(row.pageUrl), links: boundedRows(row.links, 512).filter(item => publicStagehandSourceUrl(item.href))
+        .map(item => ({ href: item.href, ...(item.visible === true ? { visible: true } : {}) })),
     })).filter(row => row.pageUrl),
     frameLedger: boundedRows(report.frameLedger, 512).map(row => ({
+      ...(row.kind === "NATIVE_VISIBLE_FRAME" ? { kind: row.kind, observedAt: row.observedAt, documentHash: row.documentHash } : {}),
       pageUrl: urlField(row.pageUrl), frames: boundedRows(row.frames, 32).filter(item => publicStagehandSourceUrl(item.src))
         .map(item => ({ src: item.src, visible: item.visible === true })),
     })).filter(row => row.pageUrl),
@@ -121,6 +141,7 @@ export function stagehandRoutingReport(report, job) {
       afterUrl: urlField(row.afterUrl), ...(row.error || row.actionError ? { error: true } : {}),
     })).filter(row => row.sourceUrl && row.observedTarget.href && row.afterUrl),
   };
+  if (report.nativeFrameNavigations !== undefined) projected.nativeFrameNavigations = structuredClone(nativeFrameNavigations(report, publicStagehandSourceUrl));
   if (report.initialNavigation) projected.initialNavigation = {
     requestedUrl: urlField(report.initialNavigation.requestedUrl), finalUrl: urlField(report.initialNavigation.finalUrl),
     status: Number.isInteger(report.initialNavigation.status) ? report.initialNavigation.status : 0,

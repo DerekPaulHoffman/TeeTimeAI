@@ -3,6 +3,7 @@ import { createServer as createTcpServer, connect, type AddressInfo, type Socket
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolvePinnedPublicAddress } from "@/lib/automation/address-pinned-public-fetch";
 import { continueNativeBrowserRead, createNativePublicBrowserProxy, isObservedNativeRedirect, isObservedNativeRedirectTarget, nativeReadPreflightMethod, type NativePublicProxy } from "./native-public-browser";
+import { publicBrowserResponseLimit, SOURCE_ROUTING_RESPONSE_PROFILE } from "./browser-resource-limits";
 import type { Route } from "@playwright/test";
 
 const opened: NativePublicProxy[] = [];
@@ -15,6 +16,22 @@ async function request(proxy: NativePublicProxy, line: string) {
   socket.write(`${line}\r\nHost: example.org\r\n\r\n`);
   return { response: await response, socket };
 }
+describe("fixed source routing response allocation", () => {
+  it.each([
+    [undefined, "GET", 15_170_216, false], [SOURCE_ROUTING_RESPONSE_PROFILE, "GET", 15_170_216, true],
+    [SOURCE_ROUTING_RESPONSE_PROFILE, "POST", 15_170_216, false], [SOURCE_ROUTING_RESPONSE_PROFILE, "GET", 16_000_001, false],
+  ] as const)("keeps the host continuation aligned with the fixed profile=%s method=%s bytes=%s", async (profile, method, size, accepted) => {
+    const body = Buffer.alloc(size);
+    const route = { continue: vi.fn(async () => {}), request: () => ({ response: async () => ({
+      status: () => 200, allHeaders: async () => ({ "content-length": "1079018" }), url: () => "https://public.example/config", finished: async () => null, body: async () => body,
+    }) }) } as unknown as Route;
+    const result = continueNativeBrowserRead(route, AbortSignal.timeout(1000), publicBrowserResponseLimit("fetch", method, profile));
+    if (accepted) expect((await result).body.length).toBe(size);
+    else await expect(result).rejects.toThrow("NATIVE_RESPONSE_LIMIT");
+    expect(route.continue).toHaveBeenCalledOnce();
+  });
+});
+
 describe("public-address native Chrome CONNECT transport", () => {
   it("admits only read preflights and keeps the requested method available for recipe checks", () => {
     expect(nativeReadPreflightMethod({ origin: "https://example.org", "access-control-request-method": "POST", "access-control-request-headers": "content-type,x-requested-with" })).toBe("POST");

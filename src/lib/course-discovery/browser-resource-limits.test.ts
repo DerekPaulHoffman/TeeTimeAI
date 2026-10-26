@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { assertPublicBrowserRequestBudget, PUBLIC_BROWSER_REQUEST_LIMIT, MINDBODY_APPOINTMENT_REQUEST_LIMIT,
-  PUBLIC_BROWSER_TOTAL_BYTES, PUBLIC_BROWSER_TUNNEL_BYTES, publicBrowserResponseLimit } from "./browser-resource-limits";
+  PUBLIC_BROWSER_TOTAL_BYTES, PUBLIC_BROWSER_TUNNEL_BYTES, SOURCE_ROUTING_RESPONSE_PROFILE, publicBrowserResponseLimit } from "./browser-resource-limits";
 describe("monotonic fixed public browser request budgets", () => {
   it.each([PUBLIC_BROWSER_REQUEST_LIMIT, MINDBODY_APPOINTMENT_REQUEST_LIMIT])("admits exactly %i requests without resetting on document transitions", limit => {
     let count = 0;
@@ -17,5 +17,16 @@ describe("monotonic fixed public browser request budgets", () => {
     expect(PUBLIC_BROWSER_TOTAL_BYTES).toBe(48_000_000); expect(PUBLIC_BROWSER_TUNNEL_BYTES).toBe(24_000_000);
     expect(publicBrowserResponseLimit("script")).toBe(16_000_000); expect(publicBrowserResponseLimit("stylesheet")).toBe(6_000_000);
     expect(publicBrowserResponseLimit("document")).toBe(2_000_000);
+  });
+  it("allocates the existing script bound only to owned source GET xhr/fetch and keeps default/POST/HEAD readers unchanged", () => {
+    for (const kind of ["xhr", "fetch"]) {
+      expect(publicBrowserResponseLimit(kind, "GET", SOURCE_ROUTING_RESPONSE_PROFILE)).toBe(publicBrowserResponseLimit("script"));
+      expect(publicBrowserResponseLimit(kind, "GET")).toBe(2_000_000);
+      for (const method of ["POST", "HEAD", "OPTIONS", "PUT", "get"]) expect(publicBrowserResponseLimit(kind, method, SOURCE_ROUTING_RESPONSE_PROFILE)).toBe(2_000_000);
+    }
+    for (const kind of ["document", "other", "image", "media", "font"]) expect(publicBrowserResponseLimit(kind, "GET", SOURCE_ROUTING_RESPONSE_PROFILE)).toBe(2_000_000);
+    expect(publicBrowserResponseLimit("stylesheet", "GET", SOURCE_ROUTING_RESPONSE_PROFILE)).toBe(6_000_000);
+    for (const profile of ["OTHER", 16_000_000, null, {}]) expect(() => Reflect.apply(publicBrowserResponseLimit, undefined, ["xhr", "GET", profile])).toThrow("PUBLIC_READ_RESPONSE_PROFILE_INVALID");
+    expect(PUBLIC_BROWSER_TOTAL_BYTES).toBe(48_000_000); expect(PUBLIC_BROWSER_TUNNEL_BYTES).toBe(24_000_000);
   });
 });

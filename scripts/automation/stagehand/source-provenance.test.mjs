@@ -15,3 +15,29 @@ test('native source aliases conflict failclosed and native-linked href requires 
 test('only actually visible embedded frame source may be proposed',()=>{
  const r={visitedUrls:[official],frameLedger:[{pageUrl:official,frames:[{src:source,visible:false}]}]};assert.deepEqual(candidate(r),[]);r.frameLedger[0].frames[0].visible=true;assert.deepEqual(candidate(r),[source]);
 });
+function visibleReport(links=[source]){const at=new Date().toISOString();return{startedAt:at,finishedAt:at,visitedUrls:[official],actions:[],officialLinkLedger:[{kind:'NATIVE_VISIBLE_DOM',observedAt:at,pageUrl:official,links:links.map(href=>({href,visible:true}))}]};}
+test('fresh native visible DOM href is eligible without click or visiting its landing, full/default stays unchanged',()=>{
+ const r=visibleReport();assert.deepEqual(candidate(r),[source]);
+ assert.deepEqual(observedBookingSourceCandidates(r,official),[official]);
+ assert.equal(r.visitedUrls.includes(source),false);assert.deepEqual(r.actions,[]);
+});
+test('missing/hidden/stale/foreign native DOM records and startup aliases cannot invent a source',()=>{
+ for(const mutate of[r=>delete r.officialLinkLedger[0].kind,r=>delete r.officialLinkLedger[0].observedAt,r=>r.officialLinkLedger[0].links[0].visible=false,
+  r=>r.officialLinkLedger[0].observedAt='2000-01-01T00:00:00Z',r=>r.officialLinkLedger[0].pageUrl='https://foreign.example/',r=>r.officialLinkLedger[0].links[0].href=official]){
+  const r=visibleReport();mutate(r);assert.deepEqual(candidate(r),[]);
+ }
+ const hiddenPath=visibleReport(['https://foreign.example/']);hiddenPath.officialLinkLedger[0].links[0].visible=false;
+ hiddenPath.officialLinkLedger.push({...visibleReport().officialLinkLedger[0],pageUrl:'https://foreign.example/'});hiddenPath.visitedUrls.push('https://foreign.example/');
+ assert.deepEqual(candidate(hiddenPath),[]);
+ const rootOnly=visibleReport([]);rootOnly.visitedUrls.push(source);assert.deepEqual(candidate(rootOnly),[]);
+ assert.deepEqual(candidate(visibleReport([official+'#footer'])),[]);
+ const query=official+'?public=booking&tenant=exact';assert.deepEqual(candidate(visibleReport([query])),[query]);
+});
+test('source-only exact query and 160/64KiB budgets fail explicitly; default full provenance still caps at32',()=>{
+ const urls=Array.from({length:160},(_,i)=>`https://provider.example/start?tenant=${i}&exact=keep`);
+ assert.deepEqual(candidate(visibleReport(urls)),urls);
+ assert.throws(()=>candidate(visibleReport([...urls,'https://provider.example/extra'])),/SOURCE_CANDIDATES_LIMIT/);
+ assert.throws(()=>candidate(visibleReport(Array.from({length:50},(_,i)=>`https://provider.example/start?tenant=${i}&data=${'x'.repeat(1500)}`))),/SOURCE_CANDIDATES_LIMIT/);
+ const r=report();r.officialLinkLedger=[{pageUrl:official,links:urls.map(href=>({href}))}];r.actions=urls.map(href=>({...report().actions[0],observedTarget:{tag:'A',href},afterUrl:href}));r.visitedUrls=[official,...urls];
+ assert.equal(observedBookingSourceCandidates(r,official).length,32);
+});

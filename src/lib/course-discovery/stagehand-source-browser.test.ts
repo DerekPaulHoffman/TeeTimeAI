@@ -82,6 +82,13 @@ it.each([false, true])("guards isolated popup/inline reads and per-family concur
     }), host.cdpUrl)).toBe(true);
     await expect(host.beforeAction(host.targetId, "https://owned-booking.example/hidden")).rejects.toThrow("STAGEHAND_GUARDED_SOURCE_REJECTED");
     await expect(host.beforeAction(host.targetId, "https://owned-source.example/ASP/appt_req.asp?Stime=10")).rejects.toThrow("STAGEHAND_GUARDED_SOURCE_REJECTED");
+    // The target can hydrate after an earlier source collector saw no link.
+    await page.evaluate(() => { const a = document.createElement("a"); a.href = "https://owned-booking.example/hydrated?exact=full"; a.textContent = "Public availability"; document.body.append(a); });
+    const witness = await host.beforeAction(host.targetId, "https://owned-booking.example/hydrated?exact=full");
+    expect(witness).toMatchObject({ kind: "NATIVE_VISIBLE_DOM", pageUrl: "https://owned-source.example/", links: [{ href: "https://owned-booking.example/hydrated?exact=full", visible: true }] });
+    expect(witness?.documentHash).toMatch(/^[a-f0-9]{64}$/u);
+    expect(Object.keys(witness!).sort()).toEqual(["documentHash", "kind", "links", "observedAt", "pageUrl"]);
+    expect(Date.now() - Date.parse(witness!.observedAt)).toBeLessThan(5000);
     await host.beforeAction(host.targetId, "https://owned-booking.example/landing?keep=full");
     const popupPromise = page.waitForEvent("popup"); await page.locator("#book span").click(); const popup = await popupPromise;
     await popup.waitForURL("https://owned-final.example/calendar?keep=full");
@@ -104,9 +111,11 @@ it.each([false, true])("guards isolated popup/inline reads and per-family concur
     expect(seen.filter(value => value.startsWith("owned-source.example/read"))).toHaveLength(3);
     expect(maxGlobal).toBe(2); expect(maxFamily).toBe(1); expect(concurrent).toContain(2);
     if (workerCase) {
-      await page.evaluate(() => { new Worker("/escape-worker.js"); new SharedWorker("/escape-worker.js"); });
-      for (let attempt = 0; host.diagnostics().deniedWorkerTargets < 2 && attempt < 100; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
-      expect(host.diagnostics().deniedWorkerTargets).toBeGreaterThanOrEqual(2);
+      expect(await page.evaluate(() => ["Worker", "SharedWorker"].map(name => {
+        const descriptor = Object.getOwnPropertyDescriptor(globalThis, name);
+        return Boolean(descriptor && descriptor.value === undefined && descriptor.configurable === false && descriptor.writable === false);
+      }))).toEqual([true, true]);
+      expect(host.diagnostics().deniedWorkerTargets).toBe(0);
       expect(seen.some(value => value.endsWith("/worker-escape"))).toBe(false);
     } else {
       const pending = page.evaluate(async () => { await Promise.allSettled([fetch("/slow-one"), fetch("/slow-two"), fetch("/slow-three")]); });
@@ -115,7 +124,12 @@ it.each([false, true])("guards isolated popup/inline reads and per-family concur
       expect(active, JSON.stringify(host.diagnostics())).toBeGreaterThan(0);
     }
     cancellation.abort();
-    expect(await host.close()).toEqual({ browserClosed: true, providerRequestsDrained: true });
+    const closed = await host.close();
+    expect(closed).toMatchObject({ browserClosed: true, providerRequestsDrained: true });
+    if (closed.ownedCdpFailure) {
+      expect(closed.ownedCdpFailure.pendingRequests).toBeLessThanOrEqual(256);
+      expect(JSON.stringify(closed.ownedCdpFailure)).not.toMatch(/targetId|sessionId|contextId|https?:|message|stack/u);
+    }
     expect(unleased).toBe(0); expect(active).toBe(0); expect(acquired).toBe(released);
   } finally {
     cancellation.abort(); await attached?.close().catch(() => {}); await host?.close();

@@ -3,7 +3,7 @@ import { isNonEvidenceBrowserResource } from "@/lib/automation/passfactory-publi
 import { isMindbodyClassicPublicBootstrapPost, mindbodyClassicPublicBootstrapSource, mindbodyClassicPublicBootstrapPostDiagnostic, mindbodyClassicPublicBootstrapSourceDiagnostic, mindbodyClassicBootstrapUrlDiagnostic,
   type MindbodyClassicBootstrapPostOutcome, type MindbodyClassicBootstrapSourceOutcome, type MindbodyClassicBootstrapQueryCount, type MindbodyClassicBootstrapQueryRow } from "@/lib/automation/mindbody-public-read-policy";
 import { canonicalPublicReadUrl } from "./public-request-url";
-import { PUBLIC_BROWSER_TOTAL_BYTES, publicBrowserResponseLimit } from "./browser-resource-limits";
+import { PUBLIC_BROWSER_TOTAL_BYTES, SOURCE_ROUTING_RESPONSE_PROFILE, publicBrowserResponseLimit, type PublicBrowserResponseProfile } from "./browser-resource-limits";
 import { isSafeBrowserAssetUrl, isSafeRecipeUrl } from "./recipe";
 import { createPublicClientReadHeaderScope, type PublicClientReadHeaderProof, type PublicClientReadHeaderFailureReason } from "./public-client-read-headers";
 import type { MindbodyPublicFormIntent } from "./mindbody-public-form-read";
@@ -20,6 +20,9 @@ export type NativeReadResponse = Pick<Response, "url" | "status" | "allHeaders" 
 export type NativeReadRoute = Pick<Route, "continue" | "abort" | "fulfill"> & { request(): NativeReadRequest };
 export type NativeRequestDiagnostic = {
   code: string; url?: string; method?: string; resourceType?: string;
+  limitKind?: "DECLARED_INVALID" | "DECLARED_TOO_LARGE" | "DECODED_BODY" | "TOTAL_DECODED";
+  allowedBytes?: number; declaredBytes?: number; bodyBytes?: number; totalBytes?: number;
+  declaredLengthPresent?: boolean; documentResponse?: boolean; ancillaryResponse?: boolean;
   requestedPreflightMethod?: "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "CONNECT" | "TRACE" | "OTHER";
   preflightCandidatePresent?: boolean; preflightCandidateInvalid?: boolean; preflightSourceKnown?: boolean;
   preflightSourceMethod?: "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "CONNECT" | "TRACE" | "OTHER";
@@ -265,17 +268,23 @@ function responseHeaders(values: Array<{ name: string; value: string }>) {
 
 export async function installNativeRedirectRouting(page: Page, handler: (route: NativeReadRoute) => Promise<void>, options: {
   signal?: AbortSignal; maxRequests?: number; timeoutMs?: number; onFailure?: (code: string) => void;
+  /** Fixed owned source controller only; ordinary/typed readers omit this. */
+  responseProfile?: PublicBrowserResponseProfile;
   onRequestRejected?: (request: NativeRequestDiagnostic) => void;
   onSubframeBlocked?: (request: { url: string; resourceType: string }) => void;
   /** Fixed controller only, never model/tool arguments. */
   controllerFormIntent?: (sourceUrl: string, targetUrl: string) => MindbodyPublicFormIntent | undefined;
 } = {}): Promise<NativeRedirectRouting> {
   options.signal?.throwIfAborted();
+  publicBrowserResponseLimit("document", "GET", options.responseProfile);
   const limit = Math.min(1024, Math.max(1, options.maxRequests ?? 256));
   const timeoutMs = Math.min(15_000, Math.max(100, options.timeoutMs ?? 15_000));
   const cdp = await page.context().newCDPSession(page);
   const rootFrameId = (await cdp.send("Page.getFrameTree")).frameTree.frame.id;
   const records = new Map<string, RecordEntry>();
+  // Source-only abort tombstones are not request adapters or data records.
+  // Retain their IDs through this owner lifetime to reject duplicate/late work.
+  const sourceDeniedFetchIds = new Set<string>();
   const networkIdentities = new Map<string, NetworkIdentity>();
   const failedNetworkIdentities = new WeakSet<NetworkIdentity>();
   const sourceLoadingFailures = new WeakMap<NetworkIdentity, Readonly<SourceLoadingFailure>>();
@@ -283,6 +292,8 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
   const preflightSources = new Set<NetworkIdentity>();
   const networkWaiters = new Map<string, ReturnType<typeof pending<void>>>();
   const initialPauses = new Map<string, PendingInitialPause>();
+  const duplicateFetchId = (id: string) => records.has(id) || sourceDeniedFetchIds.has(id) ||
+    options.responseProfile === SOURCE_ROUTING_RESPONSE_PROFILE && initialPauses.has(id);
   const loaderOwners = new Map<string, DocumentGeneration>();
   let generation: DocumentGeneration = { id: 0, retired: false }, generationTracking = false, boundaryPending = false, awaitingDocument = false;
   let committedDocument: CommittedDocument | undefined, documentIntent: DocumentIntent | undefined;
@@ -703,7 +714,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
           ...(requestedPreflightMethod ? { requestedPreflightMethod } : {}),
           interceptedRequests, recordCount: records.size, requestLimit: limit,
           framePresent: Boolean(event.frameId), rootFrame: event.frameId === rootFrameId,
-          networkIdPresent: Boolean(event.networkId), duplicateRequestId: records.has(event.requestId),
+          networkIdPresent: Boolean(event.networkId), duplicateRequestId: duplicateFetchId(event.requestId),
           hasPostData: event.request.hasPostData === true, postDataPresent: typeof event.request.postData === "string",
           postDataBytes: Math.min(1_000_000, typeof event.request.postData === "string" ? Buffer.byteLength(event.request.postData) : 0) };
       };
@@ -759,15 +770,28 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         try {
           const status = event.responseStatusCode!, values = responseHeaders(event.responseHeaders ?? []);
           record.responseStatus = status; record.responseMimeType = values["content-type"];
-          const maxBytes = publicBrowserResponseLimit(record.kind), declared = Number(values["content-length"] ?? 0);
-          if (!Number.isFinite(declared) || declared < 0 || declared > maxBytes) { await close("NATIVE_RESPONSE_LIMIT"); return; }
+          const maxBytes = publicBrowserResponseLimit(record.kind, record.method, options.responseProfile), declared = Number(values["content-length"] ?? 0);
+          const limitDiagnostic = (limitKind: NonNullable<NativeRequestDiagnostic["limitKind"]>, allowedBytes: number, bodyBytes?: number): NativeRequestDiagnostic => ({
+            code: "NATIVE_RESPONSE_LIMIT", limitKind, method: record.method, resourceType: record.kind, allowedBytes,
+            ...(Number.isFinite(declared) && declared >= 0 && declared <= Number.MAX_SAFE_INTEGER ? { declaredBytes: declared } : {}),
+            ...(bodyBytes === undefined ? {} : { bodyBytes }), totalBytes: responseBytes,
+            declaredLengthPresent: values["content-length"] !== undefined, documentResponse: record.kind === "document",
+            ancillaryResponse: ["script", "stylesheet", "image", "media", "font", "other", "ping"].includes(record.kind),
+          });
+          if (!Number.isFinite(declared) || declared < 0 || declared > maxBytes) {
+            firstFatal ??= limitDiagnostic(!Number.isFinite(declared) || declared < 0 ? "DECLARED_INVALID" : "DECLARED_TOO_LARGE", maxBytes);
+            await close("NATIVE_RESPONSE_LIMIT"); return;
+          }
           const noBody = record.method === "HEAD" || [204, 205, 304].includes(status) || status >= 300 && status < 400;
           // Network.loadingFinished can wait for page JavaScript to consume a
           // Fetch body, deadlocking Promise.all behind a serialized provider lease.
           const body = noBody ? Buffer.alloc(0) : await recordCommand(record, cdp.send("Fetch.getResponseBody", { requestId: record.id }), "NATIVE_REDIRECT_BODY_TIMEOUT")
             .then(value => Buffer.from(value.body, value.base64Encoded ? "base64" : "utf8"));
           responseBytes += body.length;
-          if (body.length > maxBytes || responseBytes > PUBLIC_BROWSER_TOTAL_BYTES) { await close("NATIVE_RESPONSE_LIMIT"); return; }
+          if (body.length > maxBytes || responseBytes > PUBLIC_BROWSER_TOTAL_BYTES) {
+            firstFatal ??= limitDiagnostic(body.length > maxBytes ? "DECODED_BODY" : "TOTAL_DECODED", body.length > maxBytes ? maxBytes : PUBLIC_BROWSER_TOTAL_BYTES, body.length);
+            await close("NATIVE_RESPONSE_LIMIT"); return;
+          }
           if (closed || options.signal?.aborted || record.failed || record.generation.retired) return;
           // Preserve the actual status, headers and body. Completion follows the
           // successful unchanged release, never a fabricated/fulfilled response.
@@ -803,7 +827,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         catch { /* A diagnostic must not change the denial. */ }
         return;
       }
-      const metadataRejection = records.size >= limit ? "NATIVE_REDIRECT_RECORD_LIMIT" : records.has(event.requestId) ? "NATIVE_REDIRECT_DUPLICATE_FETCH_ID" :
+      const metadataRejection = records.size + sourceDeniedFetchIds.size >= limit ? "NATIVE_REDIRECT_RECORD_LIMIT" : duplicateFetchId(event.requestId) ? "NATIVE_REDIRECT_DUPLICATE_FETCH_ID" :
         event.frameId !== rootFrameId ? "NATIVE_REDIRECT_FRAME_MISSING" : undefined;
       if (metadataRejection) { await rejectInitial(metadataRejection); return; }
       const excludedResource = isNonEvidenceBrowserResource(event.request.url, resourceKinds[event.resourceType] ?? "other");
@@ -824,7 +848,44 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         return;
       }
       const networkId = event.networkId;
-      if (!networkId) { await rejectInitial("NATIVE_REDIRECT_NETWORK_ID_MISSING"); return; }
+      if (!networkId) {
+        if (options.responseProfile !== SOURCE_ROUTING_RESPONSE_PROFILE || networkId !== undefined ||
+            closed || options.signal?.aborted || generation.retired || boundaryPending || awaitingDocument ||
+            event.redirectedRequestId !== undefined || initialPauses.has(event.requestId) ||
+            typeof event.requestId !== "string" || !event.requestId || event.requestId.length > 1024 || /[\u0000-\u0020\u007f]/u.test(event.requestId) ||
+            !Object.hasOwn(resourceKinds, event.resourceType) || !/^(?:GET|HEAD|POST|OPTIONS|PUT|PATCH|DELETE|CONNECT|TRACE)$/u.test(event.request.method) ||
+            typeof event.request.url !== "string" || event.request.url.length > 2048 || /[\u0000-\u0020\u007f]/u.test(event.request.url) ||
+            !event.request.headers || typeof event.request.headers !== "object" || Array.isArray(event.request.headers) ||
+            Object.values(event.request.headers).some(value => typeof value !== "string" && typeof value !== "number") ||
+            event.request.hasPostData !== undefined && typeof event.request.hasPostData !== "boolean") {
+          await rejectInitial("NATIVE_REDIRECT_NETWORK_ID_MISSING"); return;
+        }
+        // Metadata is inspected solely to reject malformed/oversized pauses.
+        // There is no adapter, header capability, lease, dispatch or body read.
+        try { new URL(event.request.url); rawHeaderEntries(event.request.headers); }
+        catch { await rejectInitial("NATIVE_REDIRECT_NETWORK_ID_MISSING"); return; }
+        const invalidBody = event.request.hasPostData === true && typeof event.request.postData !== "string" ||
+          event.request.postData !== undefined && typeof event.request.postData !== "string" ||
+          event.request.hasPostData === false && event.request.postData !== undefined;
+        if (invalidBody) { await rejectInitial("NATIVE_REDIRECT_POST_BODY_MISSING"); return; }
+        if (typeof event.request.postData === "string" && Buffer.byteLength(event.request.postData) > 32768) {
+          await rejectInitial("NATIVE_REDIRECT_POST_BODY_LIMIT"); return;
+        }
+        sourceDeniedFetchIds.add(event.requestId); // Reserve before awaiting ACK.
+        const deniedGeneration = generation;
+        await bounded(reject(), "NATIVE_REDIRECT_ABORT_TIMEOUT");
+        if (closed || options.signal?.aborted) return;
+        if (generation !== deniedGeneration || deniedGeneration.retired || boundaryPending || awaitingDocument) {
+          await close("NATIVE_REDIRECT_LOADER_MISMATCH"); return;
+        }
+        // Confirmed denial is explicitly nonfatal. It can never replace the
+        // first actual failure or become document/response completion evidence.
+        const diagnostic = { ...requestDiagnostic("NATIVE_REDIRECT_NETWORK_ID_MISSING"), duplicateRequestId: false };
+        delete diagnostic.url;
+        rejectedRequests.push(diagnostic); if (rejectedRequests.length > 12) rejectedRequests.shift();
+        try { options.onRequestRejected?.({ ...diagnostic }); } catch { /* Denial facts cannot authorize work. */ }
+        return;
+      }
       const rejection = event.request.hasPostData && event.request.postData === undefined ? "NATIVE_REDIRECT_POST_BODY_MISSING" :
         (typeof event.request.postData === "string" ? Buffer.byteLength(event.request.postData) : 0) > 32768 ? "NATIVE_REDIRECT_POST_BODY_LIMIT" : undefined;
       if (rejection) {

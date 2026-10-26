@@ -30,8 +30,13 @@ export async function createStagehandGuardedBrowserHost({ cwd, initialUrl, timeZ
     return {
       ...attachment,
       assertGuardedTargets: async ids => (await channel.request({ action: "assert", ids })).guarded === true,
-      beforeAction: async (targetId, href) => { if ((await channel.request({ action: "before", targetId, ...(href === undefined ? {} : { href }) })).ready !== true) throw discoveryError("STAGEHAND_NATIVE_HOST_INVALID"); },
+      beforeAction: async (targetId, href) => { const value = await channel.request({ action: "before", targetId, ...(href === undefined ? {} : { href }) }); if (value.ready !== true) throw discoveryError("STAGEHAND_NATIVE_HOST_INVALID"); return value.witness; },
+      observeFrameSources: targetId => channel.request({ action: "frames", targetId }),
+      prepareFrameNavigation: (targetId, url) => channel.request({ action: "frame_prepare", targetId, url }),
+      completeFrameNavigation: (targetId, url) => channel.request({ action: "frame_complete", targetId, url }),
       prepareNavigation: async url => { if ((await channel.request({ action: "navigate", url })).ready !== true) throw discoveryError("STAGEHAND_NATIVE_HOST_INVALID"); },
+      snapshotFailure: async () => (await channel.request({ action: "diagnostic" })).ownedCdpFailure,
+      snapshotFailures: async () => channel.request({ action: "diagnostic" }),
       close,
     };
   } catch (error) { await close(); throw error; }

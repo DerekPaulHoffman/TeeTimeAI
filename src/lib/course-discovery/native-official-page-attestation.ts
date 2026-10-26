@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { OfficialIdentityPage } from "./teeitup-official-identity";
 
 const pages = new WeakMap<OfficialIdentityPage, { officialUrl: string; expiresAt: number; hash: string }>();
+const delegatedPages = new WeakMap<OfficialIdentityPage, { officialUrl: string; expiresAt: number; hash: string }>();
 type CleanupFacts = { cleanupStarted: boolean; cleanupSettled: boolean; cleanupSucceeded: boolean;
   freshBeforeCleanup: boolean | null; freshAfterCleanup: boolean | null };
 const cleanupFacts = new WeakMap<OfficialIdentityPage, CleanupFacts>();
@@ -42,4 +43,14 @@ export function isFreshNativeOfficialIdentityPage(page: OfficialIdentityPage, of
   const proof = pages.get(page);
   return Boolean(proof && proof.officialUrl === officialUrl && proof.expiresAt > Date.now() &&
     page.browserTransport === "NATIVE_CHROME" && hash(page) === proof.hash);
+}
+
+/** A current owned delegated document is not a canonical official venue page. */
+export function registerFreshNativeDelegatedDocument(page: OfficialIdentityPage, officialUrl: string, deadlineAt: Date) {
+  delegatedPages.set(page, { officialUrl, expiresAt: Math.min(deadlineAt.getTime(), Date.now() + 30_000), hash: hash(page) });
+  return page;
+}
+export function isFreshNativeDelegatedDocument(page: OfficialIdentityPage, officialUrl: string) {
+  const value = delegatedPages.get(page);
+  return Boolean(value && value.officialUrl === officialUrl && value.expiresAt > Date.now() && page.browserTransport === "NATIVE_CHROME" && hash(page) === value.hash);
 }

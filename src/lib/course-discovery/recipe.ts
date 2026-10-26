@@ -290,8 +290,15 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
     }
     if (recipe.adapter.family === "USCHEDULE" && recipe.adapter.publicLocationProof && !recipe.source.venueAddress)
       ctx.addIssue({ code: "custom", message: "A public location rental requires canonical venue address context" });
+    if (recipe.adapter.family === "TEEITUP" && recipe.adapter.officialDelegatedBookingProof) {
+      const proof = recipe.adapter.officialDelegatedBookingProof;
+      if (recipe.target.kind !== "OUTDOOR" || proof.officialUrl !== recipe.source.officialUrl || proof.bookingUrl !== recipe.source.bookingUrl ||
+          proof.venueName !== recipe.source.venueName || proof.canonicalAddress !== recipe.source.venueAddress || proof.timeZone !== recipe.source.timeZone ||
+          proof.hops[0].pageUrl !== recipe.source.officialUrl)
+        ctx.addIssue({ code: "custom", message: "Native delegated booking proof must retain the exact canonical source" });
+    }
     if (recipe.adapter.family === "TEEITUP" && simulator &&
-        (recipe.adapter.facilityIds.length !== 1 || recipe.adapter.officialIdentityProof || recipe.adapter.officialBookingSourceProof || recipe.adapter.officialPostalConflictProof))
+        (recipe.adapter.facilityIds.length !== 1 || recipe.adapter.officialIdentityProof || recipe.adapter.officialBookingSourceProof || recipe.adapter.officialPostalConflictProof || recipe.adapter.officialDelegatedBookingProof))
       ctx.addIssue({ code: "custom", message: "Simulator adapter requires one exact directory identity" });
     return;
   }

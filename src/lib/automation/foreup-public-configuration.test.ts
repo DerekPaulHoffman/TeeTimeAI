@@ -17,6 +17,44 @@ const schedules = [
 const html = `<html><script>SCHEDULES = ${JSON.stringify(schedules)};</script></html>`;
 
 describe("public ForeUp schedule configuration", () => {
+  it("selects the sole exact Public Play class without treating other visible membership classes as public", () => {
+    const publicPlay = { teesheet_id: "792", booking_class_id: "4931", active: "1", hidden: "0", name: "Public Play" };
+    const document = (classes: object[]) => `<script>SCHEDULES = ${JSON.stringify([{ ...schedules[0], booking_classes: classes }])};</script>`;
+    const parse = (classes: object[]) => parseForeupPublicConfiguration({ bookingUrl, courseName: "Columbia Bridges", html: document(classes) });
+    expect(parse([publicPlay, { ...publicPlay, booking_class_id: "4932", name: "Twilight Member" }]))
+      .toMatchObject({ scheduleId: 792, bookingClassId: 4931 });
+    expect(parse([{ ...publicPlay, name: " public PLAY " }])).toMatchObject({ bookingClassId: 4931 });
+    for (const name of ["Public", "Public Play", "Public Tee Times", "Online Tee Times"])
+      expect(parse([publicPlay, { ...publicPlay, booking_class_id: "4932", name }])).toBeNull();
+    for (const name of ["Public Play Members", "Members Public Play", "Public Play (Residents)", "Public Play Special", "PublicPlay", "Under 25/Under 30/Under 35"])
+      expect(parse([{ ...publicPlay, name }])).toBeNull();
+    expect(parse([{ ...publicPlay, active: "0" }])).toBeNull();
+    expect(parse([{ ...publicPlay, hidden: "1" }])).toBeNull();
+    expect(parse([{ ...publicPlay, teesheet_id: "781" }])).toBeNull();
+  });
+
+  it("reads the exact indexed public landing and derives its schedule without rewriting the source", async () => {
+    const indexed = "https://foreupsoftware.com/index.php/booking/index/19021#teetimes";
+    const fetchImpl = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(html, { headers: { "content-type": "text/html" } }))
+      .mockResolvedValueOnce(Response.json([]));
+    expect(await readForeupPublicConfiguration({ bookingUrl: indexed, courseName: "Columbia Bridges", fetchImpl }))
+      .toEqual({ sourceBookingUrl: indexed, bookingBaseUrl: indexed, scheduleId: 792, bookingClassId: 4931 });
+    expect(String(fetchImpl.mock.calls[0][0])).toBe(indexed.split("#")[0]);
+    const api = new URL(String(fetchImpl.mock.calls[1][0]));
+    expect(api.searchParams.get("schedule_id")).toBe("792");
+    expect(api.searchParams.get("booking_class")).toBe("4931");
+    expect(parseForeupPublicConfiguration({ bookingUrl: indexed, courseName: "Other Venue", html })).toBeNull();
+    expect(parseForeupPublicConfiguration({ bookingUrl: indexed.replace("19021", "19022"), courseName: "Columbia Bridges", html })).toBeNull();
+  });
+
+  it.each(["index/0", "index/01", "index/-1", "index/19021/792", "index/index/19021", "Index/19021", "index/19021/checkout"])
+  ("rejects unobserved or malformed indexed route %s before fetching", async path => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    expect(await readForeupPublicConfiguration({ bookingUrl: `https://foreupsoftware.com/index.php/booking/${path}#teetimes`, courseName: "Columbia Bridges", fetchImpl })).toBeNull();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("selects only the exact course-specific schedule from a shared official landing", () => {
     expect(parseForeupPublicConfiguration({ bookingUrl, courseName: "Columbia Bridges", html })).toEqual({
       sourceBookingUrl: bookingUrl,
