@@ -55,6 +55,48 @@ function extractSchedulesJson(html: string): unknown {
   return null;
 }
 
+/** Managed single-sheet recipes cannot prove absence across other public
+ * sheets. A different provider ID alone does not prove a different venue. */
+export function hasCompleteForeupPublicScheduleScope(input: { html: string; facilityId: number; scheduleId: number;
+  isProvenForeignSchedule?: (schedule: Record<string, unknown>) => boolean }): boolean {
+  if (input.html.length > MAX_DOCUMENT_BYTES) return false;
+  const schedules = extractSchedulesJson(input.html);
+  if (!Array.isArray(schedules) || !schedules.length || schedules.length > MAX_SCHEDULES) return false;
+  const publicSheets = new Set<string>();
+  for (const raw of schedules) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+    const row = raw as Record<string, unknown>, facilityId = positiveProviderId(row.course_id), scheduleId = positiveProviderId(row.teesheet_id);
+    if (!facilityId || !scheduleId) return false;
+    if (input.isProvenForeignSchedule?.(row)) continue;
+    if (!Array.isArray(row.booking_classes) || row.booking_classes.length > 20) return false;
+    const visible: Record<string, unknown>[] = [];
+    for (const rawClass of row.booking_classes) {
+      if (!rawClass || typeof rawClass !== "object" || Array.isArray(rawClass)) return false;
+      const entry = rawClass as Record<string, unknown>;
+      if (positiveProviderId(entry.teesheet_id) !== scheduleId || !["0", "1"].includes(String(entry.active)) || !["0", "1"].includes(String(entry.hidden))) return false;
+      if (String(entry.active) === "0" || String(entry.hidden) === "1") continue;
+      if (!positiveProviderId(entry.booking_class_id)) return false;
+      visible.push(entry);
+    }
+    let isPublic = false;
+    for (const entry of visible) {
+      if (entry.name === undefined && visible.length === 1) { isPublic = true; continue; }
+      if (typeof entry.name !== "string" || entry.name.length > 300) return false;
+      const name = entry.name.trim();
+      if (/^(?:public|public play|public tee times|online tee times)$/iu.test(name)) isPublic = true;
+      // Only unequivocal membership labels exclude a visible class. Unknown
+      // labels may describe another public audience and cannot prove coverage.
+      else if (!/^(?:(?:full(?: week)?|twilight|junior|senior|annual|club|premium) )?(?:member|members|membership)(?: (?:only|tee times|play))?$/iu.test(name)) return false;
+    }
+    if (isPublic) {
+      const key = `${facilityId}:${scheduleId}`;
+      if (publicSheets.has(key)) return false;
+      publicSheets.add(key);
+    }
+  }
+  return publicSheets.size === 1 && publicSheets.has(`${input.facilityId}:${input.scheduleId}`);
+}
+
 export function parseForeupPublicConfiguration(input: {
   bookingUrl: string;
   courseName: string;

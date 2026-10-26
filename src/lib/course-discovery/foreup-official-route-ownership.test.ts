@@ -18,7 +18,8 @@ function provider() {
   const sheet = { course_id: "12345", course_name: course.name, course_timezone: source.timeZone, title: "Example East", teesheet_id: "456", booking_classes: [
     { teesheet_id: "456", booking_class_id: "12", name: "Public", active: "1", hidden: "0" },
     { teesheet_id: "456", booking_class_id: "13", name: "Members", active: "1", hidden: "0" } ] };
-  return { course, courses: [course], schedules: [sheet, { ...sheet, title: "Example West", teesheet_id: "457" }] };
+  return { course, courses: [course], schedules: [sheet, { ...sheet, title: "Example West", teesheet_id: "457", booking_classes: [
+    { teesheet_id: "457", booking_class_id: "14", name: "Members", active: "1", hidden: "0" } ] }] };
 }
 const html = (value = provider()) => `<html><body><script>var COURSES=${JSON.stringify(value.courses)};var COURSE=${JSON.stringify(value.course)};var SCHEDULES=${JSON.stringify(value.schedules)};</script></body></html>`;
 const input = { date: "2026-10-28", players: 2, startTime: "08:00", endTime: "18:00", timeZone: source.timeZone };
@@ -27,6 +28,24 @@ function deps() { return { localCapabilities: ["LOCAL_CHROME"] as const, trusted
   requestedInput: input, requestLease: lease, readNativeOfficialPage: vi.fn(async () => native()),
   fetch: vi.fn<typeof fetch>(async raw => String(raw).includes("/api/") ? Response.json([]) : new Response(html(), { headers: { "content-type": "text/html" } })) }; }
 describe("native official ForeUP route physical ownership", () => {
+  it.each(["same provider ID", "different provider ID", "same physical address"])("retains unresolved public sibling coverage despite selected-route ownership: %s", mode => {
+    const value = provider(), other = { ...value.course, course_id: mode === "same provider ID" ? value.course.course_id : "12346", phone: "555-555-0199" };
+    if (mode !== "same provider ID") value.courses.push(other);
+    value.schedules[1] = { ...value.schedules[1], course_id: other.course_id, booking_classes: [
+      { teesheet_id: "457", booking_class_id: "14", name: "Public", active: "1", hidden: "0" } ] };
+    const contact = deriveForeupOfficialRouteContact(source, native(), phone);
+    expect(() => bindForeupOfficialRouteConfiguration(contact, html(value))).toThrow("FOREUP_PUBLIC_SCHEDULE_COVERAGE_UNVERIFIED");
+  });
+  it("excludes a separate physical course only after current native canonical identity and complete provider identity agree", () => {
+    const value = provider(), other = { ...value.course, course_id: "12346", name: "Other Golf Course", address: "99 Other Street", city: "Elsewhere", zip: "54321", phone: "555-555-0199" };
+    value.courses.push(other);
+    value.schedules[1] = { ...value.schedules[1], course_id: other.course_id, course_name: other.name, booking_classes: [
+      { teesheet_id: "457", booking_class_id: "14", name: "Public", active: "1", hidden: "0" } ] };
+    const contact = deriveForeupOfficialRouteContact(source, native(), phone);
+    expect(bindForeupOfficialRouteConfiguration(contact, html(value)).config.scheduleId).toBe(456);
+    value.schedules[1].course_name = value.course.name;
+    expect(() => bindForeupOfficialRouteConfiguration(contact, html(value))).toThrow("FOREUP_PUBLIC_SCHEDULE_COVERAGE_UNVERIFIED");
+  });
   it("preserves distinct canonical/owner/sheet labels with exact minimal raw+visible contact and route-owned IDs", () => {
     const contact = deriveForeupOfficialRouteContact(source, native(), phone), result = bindForeupOfficialRouteConfiguration(contact, html());
     expect(result.config).toMatchObject({ sourceBookingUrl: source.bookingUrl, bookingBaseUrl: source.bookingUrl, scheduleId: 456, bookingClassId: 12 });

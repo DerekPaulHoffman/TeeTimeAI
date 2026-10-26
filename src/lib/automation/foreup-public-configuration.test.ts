@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  hasCompleteForeupPublicScheduleScope,
   parseForeupPublicConfiguration,
   readForeupPublicConfiguration,
 } from "./foreup-public-configuration";
@@ -15,6 +16,34 @@ const schedules = [
   ] },
 ];
 const html = `<html><script>SCHEDULES = ${JSON.stringify(schedules)};</script></html>`;
+
+describe("managed ForeUP single-sheet coverage", () => {
+  const selected = { ...schedules[0], booking_classes: [{ ...schedules[0].booking_classes[0], name: "Public" }] };
+  const other = { ...selected, title: "Another Nine", teesheet_id: "999", booking_classes: [{ ...selected.booking_classes[0], teesheet_id: "999", booking_class_id: "9999" }] };
+  const covered = (rows: unknown[]) => hasCompleteForeupPublicScheduleScope({ html: `SCHEDULES=${JSON.stringify(rows)};`, facilityId: 19021, scheduleId: 792 });
+  it("retains the unique public sheet and existing unlabelled legacy class", () => {
+    expect(covered([selected])).toBe(true); expect(covered([schedules[0]])).toBe(true);
+  });
+  it.each(["same ID", "different ID"])("does not infer a foreign physical venue from %s or a different sheet label", mode => {
+    expect(covered([selected, { ...other, course_id: mode === "same ID" ? selected.course_id : "19022", course_name: "Bridges" }])).toBe(false);
+  });
+  it.each(["Members", "Member Only", "Twilight Member"])("ignores an explicitly member-only sibling: %s", name => {
+    expect(covered([selected, { ...other, booking_classes: [{ ...other.booking_classes[0], name }] }])).toBe(true);
+  });
+  it.each(["hidden", "inactive"])("does not count a publicly labelled but %s sibling", mode => {
+    expect(covered([selected, { ...other, booking_classes: [{ ...other.booking_classes[0], ...(mode === "hidden" ? { hidden: "1" } : { active: "0" }) }] }])).toBe(true);
+  });
+  it.each(["Visitors", "Public Members", "General Tee Times", ""])("keeps ambiguous visible class %s unverified", name => {
+    expect(covered([selected, { ...other, booking_classes: [{ ...other.booking_classes[0], name }] }])).toBe(false);
+  });
+  it.each([undefined, null, {}, [{ ...other.booking_classes[0], hidden: "unknown" }]])("fails closed on unclassifiable sibling classes %j", booking_classes => {
+    expect(covered([selected, { ...other, booking_classes }])).toBe(false);
+  });
+  it("rejects duplicate public rows, absent selected scope and excessive schedules", () => {
+    expect(covered([selected, selected])).toBe(false); expect(covered([other])).toBe(false);
+    expect(covered(Array.from({ length: 31 }, () => selected))).toBe(false);
+  });
+});
 
 describe("public ForeUp schedule configuration", () => {
   const ownerName = "Harbor Golf Course at Lakeside";

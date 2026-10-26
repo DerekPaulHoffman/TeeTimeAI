@@ -147,10 +147,10 @@ describe("fixed existing adapter recipes", () => {
     expect(await inspectExistingAdapter(foreup.source, { ...deps, fetch })).toEqual({ adapter: foreup.adapter });
     expect(fetch).toHaveBeenCalledTimes(2);
   });
-  it("preserves an observed ForeUP entry while freshly resolving its canonical schedule for each replay", async () => {
+  it("preserves a member-default ForeUP entry while freshly resolving its sole public canonical schedule for each replay", async () => {
     const source = { ...foreup.source, bookingUrl: "https://foreupsoftware.com/index.php/booking/123/111#teetimes" };
     const schedules = [{ title: "Other Golf", course_id: 123, teesheet_id: 111,
-      booking_classes: [{ teesheet_id: 111, active: 1, hidden: 0, booking_class_id: 222, name: "Public" }] },
+      booking_classes: [{ teesheet_id: 111, active: 1, hidden: 0, booking_class_id: 222, name: "Members" }] },
     { title: "Example Golf", course_id: 123, teesheet_id: 456,
       booking_classes: [{ teesheet_id: 456, active: 1, hidden: 0, booking_class_id: 789, name: "Public" },
         { teesheet_id: 456, active: 1, hidden: 0, booking_class_id: 790, name: "Members" }] }];
@@ -253,6 +253,19 @@ describe("fixed existing adapter recipes", () => {
   it("distinguishes a validated empty array from an unknown ForeUP response", async () => {
     expect((await executeExistingAdapterRecipe(foreup, input, { ...deps, fetch: reads(foreup, []) })).status).toBe("EMPTY");
     expect(await executeExistingAdapterRecipe(foreup, input, { ...deps, fetch: reads(foreup, false) })).toMatchObject({ status: "INCOMPLETE", complete: false, slots: [] });
+  });
+  it.each([false, true])("keeps a single-sheet recipe incomplete before empty/nonempty availability when another public sheet exists (selected nonempty: %s)", async nonempty => {
+    for (const courseId of [123, 124]) {
+      const selected = { title: "Example Golf", course_id: 123, teesheet_id: 456, booking_classes: [{ teesheet_id: 456, active: 1, hidden: 0, booking_class_id: 789, name: "Public" }] };
+      const sibling = { ...selected, title: "Another Nine", course_id: courseId, teesheet_id: 457, booking_classes: [{ ...selected.booking_classes[0], teesheet_id: 457, booking_class_id: 790 }] };
+      const document = `<script>SCHEDULES=${JSON.stringify([selected, sibling])};</script>`;
+      const fetch = reads(foreup, nonempty ? [{ time: input.date + " 11:00", available_spots: 4 }] : [], document);
+      const result = await executeExistingAdapterRecipe(foreup, input, { ...deps, fetch });
+      expect(result).toMatchObject({ status: "INCOMPLETE", complete: false, slots: [], evidence: { venueVerified: false, dateVerified: false,
+        capacityVerified: false, durationVerified: false, completeVerified: false, reason: "FOREUP_PUBLIC_SCHEDULE_COVERAGE_UNVERIFIED" } });
+      expect(fetch).toHaveBeenCalledTimes(1); expect(String(fetch.mock.calls[0][0])).not.toContain("/api/");
+      await expect(inspectExistingAdapter(foreup.source, { ...deps, fetch: reads(foreup, [], document) })).rejects.toThrow("ADAPTER_CONFIGURATION_UNVERIFIED");
+    }
   });
   it.each([
     { time: "2030-10-23 11:00", available_spots: 4 },

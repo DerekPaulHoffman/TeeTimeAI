@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { parse, type DefaultTreeAdapterMap } from "parse5";
 import { z } from "zod";
-import type { ForeupPublicConfiguration } from "@/lib/automation/foreup-public-configuration";
+import { hasCompleteForeupPublicScheduleScope, type ForeupPublicConfiguration } from "@/lib/automation/foreup-public-configuration";
 import { fullCourseName, type OfficialIdentityPage, type OfficialIdentitySource } from "./teeitup-official-identity";
 import { parsePublicUSBusinessAddress } from "./public-us-business-address";
 import { normalizePublicCoursePhone } from "./teeitup-postal-conflict-proof";
@@ -138,6 +138,18 @@ export function bindForeupOfficialRouteConfiguration(contact: Contact, html: str
   const publicClasses = classes.filter(c => providerId(c.teesheet_id) === selectedRoute.scheduleId && String(c.active) === "1" && String(c.hidden) === "0" &&
     typeof c.name === "string" && /^(?:public|public play|public tee times|online tee times)$/iu.test(c.name.trim()));
   if (publicClasses.length !== 1) return failure();
+  if (!hasCompleteForeupPublicScheduleScope({ html, ...selectedRoute, isProvenForeignSchedule: row => {
+    if (providerId(row.course_id) === selectedRoute.facilityId) return false;
+    const candidates = courses.filter(course => record(course) && providerId(course.course_id) === providerId(row.course_id));
+    if (candidates.length !== 1 || !record(candidates[0])) return false;
+    const other = candidates[0], phone = normalizePublicCoursePhone(other.phone);
+    if (!label.safeParse(other.name).success || row.course_name !== other.name || row.course_timezone !== other.timezone ||
+        typeof other.timezone !== "string" || !["US", "USA", "United States"].includes(String(other.country)) || !phone || phone === contact.publicCoursePhone ||
+        ["address", "city", "state", "zip"].some(key => typeof other[key] !== "string" || String(other[key]).length > 200)) return false;
+    try { new Intl.DateTimeFormat("en-US", { timeZone: other.timezone }).format(); } catch { return false; }
+    const address = parsePublicUSBusinessAddress(`${other.address}, ${other.city}, ${other.state} ${other.zip}, ${other.country}`);
+    return Boolean(address && JSON.stringify(address) !== JSON.stringify(expected));
+  } })) throw new Error("FOREUP_PUBLIC_SCHEDULE_COVERAGE_UNVERIFIED");
   const bookingClassId = providerId(publicClasses[0].booking_class_id)!;
   const provider = { providerName: String(facility.name), sheetTitle: String(sheet.title), providerAddress, ...selectedRoute, bookingClassId };
   const body = { kind: "OFFICIAL_FOREUP_ROUTE_OWNERSHIP_V1" as const, ...contact, ...provider, providerWitnessSha256: foreupOwnershipDigest({ ...provider, phone: contact.publicCoursePhone, timeZone: contact.timeZone }) };
