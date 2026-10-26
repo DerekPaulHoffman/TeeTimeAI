@@ -11,7 +11,7 @@ import { interactiveControlKind, isAnonymousBrowserReadPost } from "@/lib/automa
 import { addVerifiedMindbodyReadHeaders, isMindbodyClassicPublicBootstrapPost } from "@/lib/automation/mindbody-public-read-policy";
 import { isRexAnonymousPlaceholderRead, isRexNamespace, isRexPublicBrowserReadPost, rexProjectedPublicReadRejection, rexPublicBrowserReadRejection } from "@/lib/automation/rex-public-read-policy";
 import { createUSchedulePublicReadPolicy } from "@/lib/automation/uschedule-public-read-policy";
-import { isUSchedulePublicHost } from "@/lib/simulators/providers/public-configuration";
+import { isUSchedulePublicHost, uschedulePublicTenant } from "@/lib/simulators/providers/public-configuration";
 import { isMemberSportsPublicTeeSheetPost } from "@/lib/automation/membersports-public-read-policy";
 import { sanitizeResponderText } from "@/lib/automation/course-support-responder-policy";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
@@ -70,7 +70,7 @@ export const discoveryBrowserActionSchema = z.discriminatedUnion("action", [
 ]);
 export type DiscoveryBrowserAction = z.infer<typeof discoveryBrowserActionSchema>;
 type ObservedControl = { tag: string; role: string; name: string; label: string; href?: string; calendar: boolean;
-  sensitiveForm: boolean; inputType: string; hasPopup: string; selector: string; options?: Array<{ value: string; label: string }>;
+  sensitiveForm: boolean; inForm: boolean; hasDownload: boolean; inputType: string; hasPopup: string; selector: string; options?: Array<{ value: string; label: string }>;
   currentValue?: string; product?: { selector: string; durationMinutes: number }; choiceValue?: string; choiceContext?: string; disabledChoice?: boolean;
   formSafeAnchor?: boolean; readOnlyFormDisplay?: boolean; documentNavigationOnly?: boolean; datePicker?: PublicDatePickerInputProof;
   service?: PublicRentalServiceProof; serviceContinuation?: PublicServiceContinuationMode; serviceMenuOption?: boolean; catalogTile?: boolean };
@@ -108,6 +108,16 @@ export function discoveryPublicAnchorKind(control: Pick<ObservedControl, "tag" |
       /\b\d{1,2}:\d{2}\s*(?:am|pm)?\b/iu.test(text)) return null;
   if (!isPublicAvailabilityNavigation(control.href, text.trim())) return null;
   return "link" as const;
+}
+/** A printed registration invitation may share a public availability entry.
+ * This admits only its exact known GET document, never its handler or a form. */
+export function discoveryPublicAvailabilityEntryNavigation(control: Pick<ObservedControl, "tag" | "name" | "label" | "href" | "sensitiveForm" | "inForm" | "hasDownload">) {
+  if (control.tag !== "a" || control.inForm !== false || control.sensitiveForm !== false || control.hasDownload !== false ||
+      !control.href || !isSafeRecipeUrl(control.href) || !uschedulePublicTenant(control.href)) return false;
+  const normalize = (value: string) => value.trim().replace(/\s+/gu, " ").toLowerCase();
+  const name = normalize(control.name), label = normalize(control.label);
+  return name.length <= 160 && (!label || label === name) &&
+    /^(?:click here to )?(?:check|view) availability\s*[,;]?\s*(?:and |& )?register\s*(?:and|&)\s*book(?: now)?[.!]?$/iu.test(name);
 }
 
 /** ForeUP's official login bookmark shares a documented public tee-sheet
@@ -874,7 +884,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     return { tag: node.tagName.toLowerCase(), role: node.getAttribute("role") ?? "", name,
       label: label.trim().slice(0, 200), href: node instanceof HTMLAnchorElement ? node.href : undefined,
       calendar: Boolean(node.closest('[role="grid"],[role="dialog"],[class*="calendar"],[class*="datepicker"]')),
-      sensitiveForm,
+      sensitiveForm, inForm: Boolean(form), hasDownload: node.hasAttribute("download"),
       ...(sensitiveForm && pageWrapperForm && node.tagName === "A" && independentDisplay && !node.hasAttribute("download") ? { formSafeAnchor: true } : {}),
       ...(sensitiveForm && pageWrapperForm && independentDisplay && /^(?:H[1-3]|ADDRESS|P|DIV|SPAN|LI|TD|TH|TIME)$/u.test(node.tagName) && name &&
         !/\b(?:login|log in|sign in|sign up|register|password|email|phone|subscribe|submit|checkout|payment|purchase|confirm|cancel|delete|send)\b/iu.test(name)
@@ -901,7 +911,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
         /^(?:Select\s+)?(?:Service|Activity|Product):?$/iu.test(trigger.getAttribute("aria-label") ?? ""));
     }, undefined, { timeout: 1000 });
     const href = control.href ? normalizeDiscoveryNavigationUrl(control.href) : undefined;
-    const documentNavigationOnly = Boolean(control.formSafeAnchor && href && !new URL(href).hash &&
+    const documentNavigationOnly = discoveryPublicAvailabilityEntryNavigation({ ...control, href }) || Boolean(control.formSafeAnchor && href && !new URL(href).hash &&
       discoveryPublicAnchorKind({ ...control, href, sensitiveForm: false }));
     return { ...control, ...(datePicker ? { datePicker, name: datePicker.label, label: datePicker.label, currentValue: datePicker.currentValue } : {}),
       ...(catalogTile ? { name: catalogTile.name, label: catalogTile.name, catalogTile: true } : {}), ...(documentNavigationOnly ? { documentNavigationOnly: true } : {}), ...(product ? { product } : {}), ...(service ? { service } : {}),
@@ -912,7 +922,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     if (!recipeSelectorSchema.safeParse(control.selector).success || blockedAccess || control.serviceMenuOption) return null;
     // The generic link fallback must retain the same transaction-parameter
     // exclusion as a labelled public availability link.
-    if (control.href && !isPublicAvailabilityNavigation(control.href, (control.name || control.label).trim())) return null;
+    if (control.href && !control.documentNavigationOnly && !isPublicAvailabilityNavigation(control.href, (control.name || control.label).trim())) return null;
     if (control.documentNavigationOnly) return "link";
     if (control.datePicker) return "calendar";
     const kind = control.catalogTile || control.service ? "filter" : control.serviceContinuation ? "service-continuation" : control.product ? "product" : discoveryPublicAnchorKind(control) ?? discoveryPublicChoiceKind(control) ?? interactiveControlKind(control) ?? (control.tag === "select" && !control.sensitiveForm ? "filter" : null);

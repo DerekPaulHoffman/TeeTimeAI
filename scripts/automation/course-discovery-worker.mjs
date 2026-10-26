@@ -92,9 +92,31 @@ function canonicalDataKey(value) {
     return JSON.stringify(sort(JSON.parse(serialized)));
   } catch { return undefined; }
 }
-const currentNativeProofRequired = adapter => Boolean(adapter?.officialStreetTypeOmittedProof ||
+const currentNativeProofRequired = adapter => Boolean(adapter?.officialRouteOwnershipProof || adapter?.officialStreetTypeOmittedProof ||
   adapter?.officialDelegatedBookingProof?.rootDocumentProof || adapter?.officialDelegatedBookingProof?.physicalContactProof);
 function dataHash(value) { const key = canonicalDataKey(value); return key ? createHash("sha256").update(key).digest("hex") : undefined; }
+function foreupOwnershipData(proof, adapter, job, contextUrl) {
+  try {
+    const sourceKeys = ["officialUrl","officialDocumentUrl","bookingUrl","venueName","officialTitle","publicLocationName","canonicalAddress","timeZone","publicCoursePhone","sourceWitnessSha256","requiredCapability","warmTransport"];
+    const keys = [...sourceKeys,"kind","providerName","sheetTitle","providerAddress","facilityId","scheduleId","bookingClassId","providerWitnessSha256","semanticDigest"];
+    if (!proof || Object.keys(proof).some(key => ![...keys,"rootDocumentProof"].includes(key)) || keys.some(key => !Object.hasOwn(proof,key)) ||
+        proof.kind !== "OFFICIAL_FOREUP_ROUTE_OWNERSHIP_V1" || proof.requiredCapability !== "LOCAL_CHROME" || proof.warmTransport !== "NATIVE_CHROME" ||
+        proof.officialUrl !== job.request.identity.officialUrl || proof.venueName !== job.request.identity.name || proof.canonicalAddress !== job.request.identity.address ||
+        proof.timeZone !== job.request.input.timeZone || proof.publicCoursePhone !== job.request.trustedContext?.canonicalCoursePhone ||
+        ![proof.officialDocumentUrl,proof.bookingUrl].includes(contextUrl) || ![proof.officialUrl,proof.officialDocumentUrl,proof.bookingUrl].every(safeObservedUrl) ||
+        !/^\+1[2-9]\d{9}$/u.test(proof.publicCoursePhone) || ["officialTitle","publicLocationName","providerName","sheetTitle"].some(key => typeof proof[key] !== "string" || proof[key].length < 3 || proof[key].length > 300) ||
+        typeof proof.providerAddress !== "string" || proof.providerAddress.length > 1024 ||
+        ["facilityId","scheduleId","bookingClassId"].some(key => !Number.isInteger(proof[key]) || proof[key] <= 0 || proof[key] > 2147483647 || proof[key] !== adapter[key])) return false;
+    const url = new URL(proof.bookingUrl), route = /^\/index\.php\/booking\/([1-9]\d{0,9})\/([1-9]\d{0,9})\/?$/u.exec(url.pathname);
+    if (url.hostname !== "foreupsoftware.com" || url.search || !["","#/teetimes","#teetimes"].includes(url.hash) || !route || Number(route[1]) !== proof.facilityId || Number(route[2]) !== proof.scheduleId) return false;
+    if (proof.officialUrl === proof.officialDocumentUrl ? proof.rootDocumentProof !== undefined : !nativeRootDocumentData(proof.rootDocumentProof,proof.officialUrl,proof.officialDocumentUrl)) return false;
+    const source = Object.fromEntries(sourceKeys.filter(key => key !== "sourceWitnessSha256").map(key => [key,proof[key]]));
+    if (proof.rootDocumentProof) source.rootDocumentProof = proof.rootDocumentProof;
+    const provider = Object.fromEntries(["providerName","sheetTitle","providerAddress","facilityId","scheduleId","bookingClassId"].map(key => [key,proof[key]]));
+    const { semanticDigest, ...body } = proof;
+    return proof.sourceWitnessSha256 === dataHash(source) && proof.providerWitnessSha256 === dataHash({...provider,phone:proof.publicCoursePhone,timeZone:proof.timeZone}) && semanticDigest === dataHash(body);
+  } catch { return false; }
+}
 function nativeRootDocumentData(proof, canonicalUrl, documentUrl) {
   try {
     if (!proof || Object.keys(proof).sort().join(",") !== "canonicalUrl,documentUrl,kind,redirects,witnessSha256" ||
@@ -158,7 +180,7 @@ function currentNativeProofObservation(job, observation) {
 }
 export function shouldInvalidateDiscoveryAdapterObservation(action, observation) {
   return ["open", "finish", "inspect_adapter"].includes(action) || Boolean(observation?.adapter?.officialBookingSourceProof ||
-    observation?.adapter?.officialDelegatedBookingProof || observation?.adapter?.officialStreetTypeOmittedProof);
+    observation?.adapter?.officialRouteOwnershipProof || observation?.adapter?.officialDelegatedBookingProof || observation?.adapter?.officialStreetTypeOmittedProof);
 }
 /** A fixed inspector reads public configuration; fresh replay still proves availability. */
 export function inspectedAdapterSourceEvidence(recipe, job, observation, officialSourceObserved, contextUrl) {
@@ -167,7 +189,7 @@ export function inspectedAdapterSourceEvidence(recipe, job, observation, officia
       observation.bookingUrl !== recipe.source?.bookingUrl || observation.contextUrl !== contextUrl ||
       observation.identityKey !== canonicalDataKey(job.request.identity) || observation.targetKey !== canonicalDataKey(job.request.target) ||
       observation.inputKey !== canonicalDataKey(job.request.input) ||
-      (observation.adapter?.family === "CPS" || observation.adapter?.officialDelegatedBookingProof || observation.adapter?.officialStreetTypeOmittedProof) &&
+      (observation.adapter?.family === "CPS" || observation.adapter?.officialRouteOwnershipProof || observation.adapter?.officialDelegatedBookingProof || observation.adapter?.officialStreetTypeOmittedProof) &&
         observation.trustedContextKey !== canonicalDataKey(job.request.trustedContext ?? {}) ||
       currentNativeProofRequired(observation.adapter) && !currentNativeProofObservation(job, observation)) return undefined;
   const candidateKey = canonicalDataKey(recipe.adapter), observedKey = canonicalDataKey(observation.adapter);
@@ -187,7 +209,20 @@ export function bindDiscoveryRecipeIdentity(recipe, job, adapterObservation, con
     delete adapter.officialPostalConflictProof;
     delete adapter.officialDelegatedBookingProof;
     delete adapter.officialStreetTypeOmittedProof;
+    delete adapter.officialRouteOwnershipProof;
     const observed = adapterObservation?.adapter;
+    if (adapter.family === "FOREUP" && observed?.family === "FOREUP" && adapterObservation.jobId === job.id &&
+        adapterObservation.officialUrl === job.request.identity.officialUrl && adapterObservation.bookingUrl === proposedSource.bookingUrl &&
+        adapterObservation.contextUrl === contextUrl && adapterObservation.identityKey === canonicalDataKey(job.request.identity) &&
+        adapterObservation.targetKey === canonicalDataKey(job.request.target) && adapterObservation.inputKey === canonicalDataKey(job.request.input) &&
+        adapterObservation.trustedContextKey === canonicalDataKey(job.request.trustedContext ?? {}) && currentNativeProofObservation(job, adapterObservation) && job.request.target.kind === "OUTDOOR") {
+      try {
+        const inspected = {...observed}; delete inspected.officialRouteOwnershipProof;
+        if (canonicalDataKey(inspected) === canonicalDataKey(adapter) && foreupOwnershipData(observed.officialRouteOwnershipProof,observed,job,contextUrl)) {
+          const bytes = JSON.stringify(observed.officialRouteOwnershipProof); if (Buffer.byteLength(bytes,"utf8") <= 16000) adapter.officialRouteOwnershipProof = JSON.parse(bytes);
+        }
+      } catch { /* Serialized/model data cannot supply current native ownership. */ }
+    }
     if (adapter.family === "TEEITUP" && observed?.family === "TEEITUP" && adapterObservation.jobId === job.id &&
         adapterObservation.officialUrl === job.request.identity.officialUrl && adapterObservation.bookingUrl === proposedSource.bookingUrl &&
         adapterObservation.contextUrl === contextUrl && adapterObservation.identityKey === canonicalDataKey(job.request.identity) &&
@@ -742,11 +777,12 @@ export function createDiscoverySnapshotCompactor() {
     if (snapshot && typeof snapshot === "object") {
       const projected = { ...snapshot };
       delete projected.trustedContext;
-      if (projected.adapter?.family === "CPS" || projected.adapter && (Object.hasOwn(projected.adapter, "officialDelegatedBookingProof") || Object.hasOwn(projected.adapter, "officialStreetTypeOmittedProof"))) {
+      if (projected.adapter?.family === "CPS" || projected.adapter && (Object.hasOwn(projected.adapter, "officialRouteOwnershipProof") || Object.hasOwn(projected.adapter, "officialDelegatedBookingProof") || Object.hasOwn(projected.adapter, "officialStreetTypeOmittedProof"))) {
         projected.adapter = { ...projected.adapter };
         if (projected.adapter.family === "CPS") delete projected.adapter.officialPostalConflictProof;
         delete projected.adapter.officialDelegatedBookingProof;
         delete projected.adapter.officialStreetTypeOmittedProof;
+        delete projected.adapter.officialRouteOwnershipProof;
       }
       delete projected.completedPublicAssetRequests; delete projected.completedPublicAssetRequestsOverflow;
       delete projected.nativeDocumentRedirects;

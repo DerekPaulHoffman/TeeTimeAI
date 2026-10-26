@@ -5,8 +5,19 @@ import { createStagehandSourceCheckpoint, readStagehandSourceCheckpoint, stageha
 import { sourceFailureDiagnostic } from "../../../scripts/automation/stagehand/source-diagnostic.mjs";
 import { createDelegationDiagnostic } from "./teeitup-delegated-booking-diagnostic";
 import { deriveNativePhysicalContactSource } from "./teeitup-physical-contact-proof";
+import { deriveForeupOfficialRouteContact } from "./foreup-official-route-ownership";
 
 const first = Date.parse("2030-01-02T12:00:00.000Z");
+it("retains the real ForeUP ownership rejection without granting source or resume authority", () => {
+  let error: unknown;
+  try { deriveForeupOfficialRouteContact({ venueName: "Public Golf Course", venueAddress: "12 Public Road, Denver, CO 80001, US", officialUrl: "https://public.example/", bookingUrl: "https://foreupsoftware.com/index.php/booking/12345/456#/teetimes", timeZone: "America/Denver" },
+    { url: "https://public.example/", html: "PRIVATE_HTML", browserTransport: "NATIVE_CHROME" }, "+13035551234"); } catch (failure) { error = failure; }
+  expect((error as Error).message).toBe("FOREUP_OFFICIAL_ROUTE_UNVERIFIED");
+  const f = fixture(), saved = createStagehandFailureCheckpoint({ ...f, phase: "FIXED_INSPECTION", error });
+  expect(saved.stagehandFailure.entries[0].code).toBe("FOREUP_OFFICIAL_ROUTE_UNVERIFIED");expect(readStagehandFailure({ ...f.job, checkpoint: saved }, f.now)).toEqual(saved.stagehandFailure);
+  expect(JSON.stringify(saved)).not.toContain("PRIVATE_HTML");expect(readStagehandSourceCheckpoint({ ...f.job, attempts: 2, checkpoint: saved }, undefined, f.now)).toBeUndefined();
+  expect(stagehandSourceFailureCode({ ...f.report, outcome: "UNRESOLVED", adapterSourceProposal: null, frameworkFailureCode: "FOREUP_OFFICIAL_ROUTE_UNVERIFIED" }, f.job)).toBeUndefined();
+});
 it("retains the actual native physical rejection without admitting it as a source report or proof", () => {
   let error: unknown;
   try { deriveNativePhysicalContactSource({ venueName: "Public Club", venueAddress: "12 Public Road, Denver, CO 80001, US", officialUrl: "https://public.example/", bookingUrl: "https://public.book.teeitup.com/", timeZone: "America/Denver" },

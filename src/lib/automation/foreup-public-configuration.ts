@@ -154,6 +154,8 @@ export async function readForeupPublicConfiguration(input: {
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
   rethrowError?: (error: unknown) => boolean;
+  /** Trusted fixed inspector hook, never a model/recipe option. */
+  parseDocument?: (html: string) => Promise<ForeupPublicConfiguration | null>;
 }): Promise<ForeupPublicConfiguration | null> {
   let source: URL;
   try { source = new URL(input.bookingUrl); }
@@ -171,7 +173,7 @@ export async function readForeupPublicConfiguration(input: {
       !response.headers.get("content-type")?.toLocaleLowerCase("en-US").includes("text/html")) return null;
     const html = await readBoundedText(response);
     if (!html) return null;
-    const config = parseForeupPublicConfiguration({ ...input, html });
+    const config = input.parseDocument ? await input.parseDocument(html) : parseForeupPublicConfiguration({ ...input, html });
     if (!config) return null;
     const today = new Date().toISOString().slice(0, 10);
     const [year, month, day] = today.split("-");

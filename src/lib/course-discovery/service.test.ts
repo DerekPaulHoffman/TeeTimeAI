@@ -4,6 +4,7 @@ import { Prisma } from "@prisma/client";
 import { createHash } from "node:crypto";
 import { hashAccessRecipe, isSafeRecipeUrl, parseAccessRecipe, type AccessExecutionInput } from "./recipe";
 import { physicalContactDigest } from "./teeitup-physical-contact-proof";
+import { foreupOwnershipDigest } from "./foreup-official-route-ownership";
 
 const mocks = vi.hoisted(() => ({
   db: {
@@ -82,6 +83,33 @@ beforeEach(() => {
 });
 
 describe("bounded course discovery persistence", () => {
+  function foreupOwnershipRecipe() {
+    const phone = "+13035551234", address = "100 Public Road, Denver, CO 80001, USA", bookingUrl = "https://foreupsoftware.com/index.php/booking/12345/456#/teetimes";
+    course.phone = phone;course.address = address;course.timeZone = "America/Denver";course.providerFamilyKey = "FOREUP";course.detectedBookingUrl = bookingUrl;
+    const source = { officialUrl: recipe.source.officialUrl, officialDocumentUrl: recipe.source.officialUrl, bookingUrl, venueName: course.name,
+      officialTitle: "Example Golf | County", publicLocationName: "Example Golf", canonicalAddress: address, timeZone: course.timeZone, publicCoursePhone: phone,
+      requiredCapability: "LOCAL_CHROME", warmTransport: "NATIVE_CHROME" };
+    const provider = { providerName: "Example Park Golf", sheetTitle: "Example East", providerAddress: address, facilityId: 12345, scheduleId: 456, bookingClassId: 12 };
+    const body = { kind: "OFFICIAL_FOREUP_ROUTE_OWNERSHIP_V1", ...source, ...provider, sourceWitnessSha256: foreupOwnershipDigest(source), providerWitnessSha256: foreupOwnershipDigest({ ...provider, phone, timeZone: course.timeZone }) };
+    return parseAccessRecipe({ schemaVersion: 1, engine: "EXISTING_ADAPTER", target: recipe.target,
+      source: { ...recipe.source, bookingUrl, venueAddress: address, providerFamily: "FOREUP", timeZone: course.timeZone },
+      adapter: { family: "FOREUP", facilityId: 12345, scheduleId: 456, bookingClassId: 12, officialRouteOwnershipProof: { ...body, semanticDigest: foreupOwnershipDigest(body) } } });
+  }
+  it("binds current ForeUP physical phone through proposal and active recipe reads", async () => {
+    const candidate = foreupOwnershipRecipe(), owner = (await claimed())!, proposed = await proposeDiscoveryRecipe(owner.id, owner.leaseToken!, candidate), fingerprint = job!.sourceFingerprint;
+    expect(proposed.challenges).toHaveLength(2);
+    course.activeAccessRecipeId = "recipe1";mocks.db.courseAccessRecipe.findUnique.mockResolvedValue({ id: "recipe1", targetKey: "course:course1", sourceFingerprint: fingerprint, payload: candidate, hash: hashAccessRecipe(candidate) });
+    expect(await getActiveAccessRecipe({ courseId: "course1" })).toMatchObject({ trustedContext: { canonicalCoursePhone: "+13035551234" } });
+    course.phone = "+13035554321";expect(await getActiveAccessRecipe({ courseId: "course1" })).toBeNull();
+    await expect(proposeDiscoveryRecipe(owner.id, owner.leaseToken!, candidate)).rejects.toBeInstanceOf(DiscoveryConflictError);
+    await expect(activateDiscoveryRecipe(owner.id, owner.leaseToken!)).rejects.toBeInstanceOf(DiscoveryConflictError);
+  });
+  it("requires claimed private phone for ForeUP ownership while keeping legacy ForeUP compatible", async () => {
+    const candidate = foreupOwnershipRecipe(), owner = (await claimed())!;delete (job!.request as { trustedContext?: unknown }).trustedContext;
+    await expect(proposeDiscoveryRecipe(owner.id, owner.leaseToken!, candidate)).rejects.toBeInstanceOf(DiscoveryConflictError);
+    const legacy = structuredClone(candidate);if (legacy.engine === "EXISTING_ADAPTER" && legacy.adapter.family === "FOREUP") delete legacy.adapter.officialRouteOwnershipProof;
+    await expect(proposeDiscoveryRecipe(owner.id, owner.leaseToken!, legacy)).resolves.toHaveProperty("challenges");
+  });
   function physicalContactRecipe() {
     const phone = "+13035551234", address = "100 Public Road, Denver, CO 80001, USA", bookingUrl = "https://public-course.book.teeitup.com/";
     course.address = address;course.phone = phone;course.timeZone = "America/Denver";course.providerFamilyKey = "TEEITUP";course.detectedBookingUrl = bookingUrl;

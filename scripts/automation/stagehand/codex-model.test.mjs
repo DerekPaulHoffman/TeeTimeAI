@@ -41,7 +41,7 @@ test('model failure is captured before SDK wrapping, privately projected, and cl
  },close:async()=>({})})});
  const params={systemPrompt:'Read',messages:[{role:'user',content:{type:'text',text:'Public'}}],responseFormat:{type:'json_schema',schema:{type:'object'}}};
  await assert.rejects(model.model.generate(params));
- assert.deepEqual(model.lastFailure,{attempt:1,completedCalls:0,transportCode:'LOCAL_MODEL_RPC_FAILED',transportPhase:'turn/start',rpcCode:-32600,httpStatus:400,failedCallUsage:{inputTokens:20}});
+ assert.deepEqual(model.lastFailure,{attempt:1,completedCalls:0,transportCode:'LOCAL_MODEL_RPC_FAILED',transportPhase:'turn/start',rpcCode:-32600,modelRpcCode:-32600,httpStatus:400,failedCallUsage:{inputTokens:20}});
  const cloned=model.lastFailure;cloned.transportCode='PRIVATE';assert.equal(model.lastFailure.transportCode,'LOCAL_MODEL_RPC_FAILED');
  assert.doesNotMatch(JSON.stringify(model.lastFailure),/PRIVATE|SECRET|https:|message|body/);
  failing=false;await model.model.generate(params);assert.equal(model.lastFailure,undefined);assert.equal(model.attemptedCalls,2);assert.equal(model.calls.length,1);

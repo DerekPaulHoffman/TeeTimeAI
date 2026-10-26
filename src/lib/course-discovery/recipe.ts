@@ -283,6 +283,12 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
     if (recipe.adapter.family === "MINDBODY" && (parseMindbodyAppointmentSource(recipe.source.bookingUrl)?.studioId !== recipe.adapter.studioId ||
         recipe.source.timeZone !== recipe.adapter.timeZone))
       ctx.addIssue({ code: "custom", message: "Public appointment metadata requires the exact canonical studio and timezone" });
+    if (recipe.adapter.family === "FOREUP" && recipe.adapter.officialRouteOwnershipProof) {
+      const proof = recipe.adapter.officialRouteOwnershipProof;
+      if (proof.officialUrl !== recipe.source.officialUrl || proof.bookingUrl !== recipe.source.bookingUrl || proof.venueName !== recipe.source.venueName ||
+          proof.canonicalAddress !== recipe.source.venueAddress || proof.timeZone !== recipe.source.timeZone || recipe.target.kind !== "OUTDOOR")
+        ctx.addIssue({ code: "custom", message: "Native ForeUP route ownership must match the exact canonical recipe source" });
+    }
     if(recipe.adapter.family==="CPS"&&recipe.adapter.officialPostalConflictProof){
       const proof=recipe.adapter.officialPostalConflictProof;
       if(proof.officialUrl!==recipe.source.officialUrl||proof.bookingUrl!==recipe.source.bookingUrl||proof.canonicalAddress!==recipe.source.venueAddress||

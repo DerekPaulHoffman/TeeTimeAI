@@ -336,6 +336,13 @@ function bindRecipe(recipe: CourseAccessRecipeData, source: Source, sourceEviden
         canonical(proof.courseIds) !== canonical(recipe.adapter.courseIds) ||
         request !== undefined && !isCurrentTrustedContext(request.trustedContext, source.trustedContext))) conflict();
   }
+  if (recipe.engine === "EXISTING_ADAPTER" && recipe.adapter.family === "FOREUP" && recipe.adapter.officialRouteOwnershipProof) {
+    const proof = recipe.adapter.officialRouteOwnershipProof;
+    if (!source.trustedContext.canonicalCoursePhone || proof.publicCoursePhone !== source.trustedContext.canonicalCoursePhone ||
+        proof.canonicalAddress !== source.identity.address || proof.officialUrl !== recipe.source.officialUrl || proof.bookingUrl !== recipe.source.bookingUrl ||
+        proof.venueName !== source.identity.name || proof.timeZone !== source.identity.timeZone ||
+        request !== undefined && !isCurrentTrustedContext(request.trustedContext, source.trustedContext)) conflict();
+  }
   if (recipe.engine === "EXISTING_ADAPTER" && recipe.adapter.family === "TEEITUP" && recipe.adapter.officialStreetTypeOmittedProof) {
     const proof = recipe.adapter.officialStreetTypeOmittedProof;
     if (!source.trustedContext.canonicalCoursePhone || proof.publicCoursePhone !== source.trustedContext.canonicalCoursePhone ||

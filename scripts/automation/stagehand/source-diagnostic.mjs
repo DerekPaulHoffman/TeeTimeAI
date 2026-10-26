@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { publicEvidenceUrl } from './public-evidence.mjs';
+import { discoveryTurnErrorCategories } from '../course-discovery-diagnostics.mjs';
 
 export const SOURCE_DIAGNOSTIC_MAX_BYTES = 4096;
 export const sourceGuardReasons=['TARGET_MISSING','HIDDEN','CREDENTIAL_CONTROL','PRIVATE_FIELD','TRANSACTION_TEXT','SLOT_TIME','REPEATED_UNCHANGED_NAVIGATION'];
@@ -68,9 +69,15 @@ export const sourceTransportCodes = [
 ];
 const count = z.number().int().min(0).max(1000000);
 const usage = z.object({ totalTokens:count.optional(),inputTokens:count.optional(),cachedInputTokens:count.optional(),outputTokens:count.optional(),reasoningOutputTokens:count.optional() }).strict();
+const modelTurnFailureSchema=z.object({turnStatus:z.enum(['failed','interrupted','inProgress']),errorCategory:z.enum(discoveryTurnErrorCategories).optional(),
+  httpStatusCode:z.number().int().min(100).max(599).optional()}).strict();
+const modelErrorNotificationSchema=modelTurnFailureSchema.omit({turnStatus:true}).extend({willRetry:z.boolean().optional(),
+  rpcCode:z.number().int().min(-2147483648).max(2147483647).optional()}).strict();
+const modelFailureFields={modelRpcCode:z.number().int().min(-2147483648).max(2147483647).optional(),
+  modelTurnFailure:modelTurnFailureSchema.optional(),modelErrorNotification:modelErrorNotificationSchema.optional()};
 const modelFailureSchema=z.object({attempt:count.min(1),completedCalls:count,transportCode:z.enum(sourceTransportCodes).optional(),
   transportPhase:z.enum(transportPhases).optional(),rpcCode:z.number().int().min(-2147483648).max(2147483647).optional(),
-  httpStatus:z.number().int().min(100).max(599).optional(),failedCallUsage:usage.optional()}).strict();
+  httpStatus:z.number().int().min(100).max(599).optional(),failedCallUsage:usage.optional(),...modelFailureFields}).strict();
 const ownedCdpFailureSchema=z.object({layer:z.enum(['RPC','ASYNC_LISTENER','SYNC_LISTENER','SEND','TIMEOUT','SOCKET_ERROR','SOCKET_CLOSE','OPEN_TIMEOUT','PROTOCOL','ABORT']),
  method:z.enum(['Extensions.loadUnpacked','Fetch.continueRequest','Fetch.continueResponse','Fetch.enable','Fetch.failRequest','Fetch.getResponseBody','Network.enable','Page.enable','Page.addScriptToEvaluateOnNewDocument','Page.getFrameTree','Page.stopLoading',
   'Runtime.enable','Runtime.evaluate','Runtime.runIfWaitingForDebugger','Target.closeTarget','Target.createTarget','Target.detachFromTarget','Target.getBrowserContexts','Target.getTargets','Target.setAutoAttach','Target.setDiscoverTargets','UNKNOWN']).optional(),
@@ -114,6 +121,10 @@ export function captureModelFailure(error,attempt,completedCalls){
  if(transportPhases.includes(diagnostic.phase))value.transportPhase=diagnostic.phase;
  for(const [field,raw]of[['rpcCode',diagnostic.rpcCode],['httpStatus',diagnostic.httpStatusCode]])
   if(Number.isInteger(raw)&&(field==='rpcCode'?raw>=-2147483648&&raw<=2147483647:raw>=100&&raw<=599))value[field]=raw;
+ if(value.rpcCode!==undefined)value.modelRpcCode=value.rpcCode;
+ for(const [key,schema]of[['modelTurnFailure',modelTurnFailureSchema],['modelErrorNotification',modelErrorNotificationSchema]]){
+  const result=schema.safeParse(diagnostic[key]);if(result.success)value[key]=result.data;
+ }
  const partial=usage.safeParse(Object.fromEntries(Object.entries(diagnostic.usage??{}).filter(([key,item])=>['totalTokens','inputTokens','cachedInputTokens','outputTokens','reasoningOutputTokens'].includes(key)&&Number.isSafeInteger(item)&&item>=0&&item<=1000000)));
  if(partial.success&&Object.keys(partial.data).length)value.failedCallUsage=partial.data;
  const result=modelFailureSchema.safeParse(value);return result.success?result.data:undefined;
@@ -131,6 +142,7 @@ export const sourceDiagnosticSchema = z.object({
   sourceStop:sourceStopSchema.optional(),
   sourceDocumentReadiness:sourceDocumentSchema.optional(),
   rpcCode:z.number().int().min(-2147483648).max(2147483647).optional(),httpStatus:z.number().int().min(100).max(599).optional(),
+  ...modelFailureFields,sdkRpcCode:z.number().int().min(-2147483648).max(2147483647).optional(),
   elapsedMs:z.number().int().min(0).max(900000),
   counts:z.object({completedSteps:count,actionAttempts:count,executedActions:count,rejectedActions:count,eligibleCandidates:count,
     completedModelCalls:count,attemptedModelCalls:count,failedModelCalls:count}).strict(),
@@ -191,8 +203,11 @@ export function sourceFailureDiagnostic({error,phase,report,startedAt,cleanup,mo
     if(Number.isInteger(raw)&&(field==='rpcCode'?raw>=-2147483648&&raw<=2147483647:raw>=100&&raw<=599))value[field]=raw;
   const failed=usage.safeParse(Object.fromEntries(Object.entries(diagnostics.usage??{}).filter(([key,item])=>['totalTokens','inputTokens','cachedInputTokens','outputTokens','reasoningOutputTokens'].includes(key)&&Number.isSafeInteger(item)&&item>=0&&item<=1000000)));
   if(failed.success&&Object.keys(failed.data).length)value.failedCallUsage=failed.data;
-  if(currentModel)for(const key of['transportCode','transportPhase','rpcCode','httpStatus','failedCallUsage'])
+  if(currentModel)for(const key of['transportCode','transportPhase','rpcCode','httpStatus','failedCallUsage',...Object.keys(modelFailureFields)])
     if(value[key]===undefined&&currentModel[key]!==undefined)value[key]=currentModel[key];
+  // A local transport error can itself have an inner cause. Only the SDK's
+  // wrapper (not that original transport error) supplies a wrapper RPC fact.
+  if(currentModel&&!code&&Number.isInteger(error?.cause?.code)&&error.cause.code>=-2147483648&&error.cause.code<=2147483647)value.sdkRpcCode=error.cause.code;
   if(value.transportCode&&value.errorClass==='SDK_ERROR')value.errorClass='STATIC_TRANSPORT';
   const cdp=ownedCdpFailureSchema.safeParse(ownedCdpFailure);
   if(cdp.success)value.ownedCdpFailure=cdp.data;

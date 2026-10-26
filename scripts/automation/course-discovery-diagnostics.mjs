@@ -89,6 +89,7 @@ const turnErrorCategories = new Set(['contextWindowExceeded', 'sessionBudgetExce
   'unauthorized', 'badRequest', 'threadRollbackFailed', 'sandboxError', 'other']);
 const structuredTurnErrors = new Set(['httpConnectionFailed', 'responseStreamConnectionFailed', 'responseStreamDisconnected',
   'responseTooManyFailedAttempts', 'activeTurnNotSteerable']);
+export const discoveryTurnErrorCategories = Object.freeze([...turnErrorCategories, ...structuredTurnErrors]);
 export function safeDiscoveryTurnFailure(turn) {
   if (!turn || typeof turn !== 'object' || Array.isArray(turn) || typeof turn.status !== 'string' ||
       !['failed', 'interrupted', 'inProgress'].includes(turn.status)) return undefined;

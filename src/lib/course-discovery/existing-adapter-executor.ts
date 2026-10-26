@@ -5,7 +5,7 @@ import { createAddressPinnedPublicFetchTransport } from "@/lib/automation/addres
 import { createUSchedulePublicSession } from "@/lib/automation/uschedule-public-session";
 import { fetchUScheduleRecipeAvailability, inspectUScheduleRecipeConfiguration } from "@/lib/simulators/providers/uschedule";
 import { uschedulePublicTenant } from "@/lib/simulators/providers/public-configuration";
-import { readForeupPublicConfiguration } from "@/lib/automation/foreup-public-configuration";
+import { parseForeupPublicConfiguration, readForeupPublicConfiguration } from "@/lib/automation/foreup-public-configuration";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
 import { fetchAcuitySimulatorAvailability, parseAcuityPublicConfigurationIdentity, readAcuityPublicConfiguration } from "@/lib/simulators/providers/acuity";
@@ -48,6 +48,7 @@ import { readTeeItUpDelegatedBookingChain, type DelegatedReaderDependencies } fr
 import { currentNativeDelegatedChain, type NativeDelegatedChainToken } from "./teeitup-delegated-booking-context";
 import { bindDelegatedFacility, type TeeItUpDelegatedBookingProof } from "./teeitup-delegated-booking-source";
 import { fixedAdapterTransportCode, rememberFixedAdapterReadFailure, getFixedAdapterReadDiagnostic, type FixedAdapterReadDiagnostic } from "./fixed-adapter-read-diagnostic";
+import { bindForeupOfficialRouteConfiguration, deriveForeupOfficialRouteContact, foreupOwnershipDigest, type ForeupOfficialRouteOwnershipProof } from "./foreup-official-route-ownership";
 import { parseTeeItUpBookingConfiguration, type TeeItUpBookingConfiguration } from "./teeitup-booking-configuration";
 import { bindTeeItUpStreetTypeOmittedProof, isTeeItUpStreetTypeOmissionCandidate, type TeeItUpStreetTypeOmittedProof } from "./teeitup-street-type-omitted-proof";
 import { parseMindbodyAppointmentSource } from "./mindbody-appointment-grid";
@@ -404,6 +405,33 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
     dispose: () => queue.dispose(), availabilityWasArray: () => availabilityWasArray, failureReason: () => fixedReadFailure };
 }
 
+async function inspectForeupConfiguration(source: Source, deps: Dependencies, fetchImpl: typeof fetch, expected?: ForeupOfficialRouteOwnershipProof) {
+  if (expected && !deps.localCapabilities?.includes("LOCAL_CHROME")) fail("LOCAL_CHROME_REQUIRED");
+  if (expected && (!source.officialUrl || !source.venueAddress || expected.officialUrl !== source.officialUrl || expected.bookingUrl !== source.bookingUrl ||
+      expected.venueName !== source.venueName || expected.canonicalAddress !== source.venueAddress || expected.timeZone !== source.timeZone ||
+      expected.publicCoursePhone !== deps.trustedContext?.canonicalCoursePhone)) fail("FOREUP_OFFICIAL_ROUTE_UNVERIFIED");
+  let proof: ForeupOfficialRouteOwnershipProof | undefined;
+  const config = await readForeupPublicConfiguration({ bookingUrl: source.bookingUrl, courseName: source.venueName,
+    fetchImpl, rethrowError: () => true, parseDocument: async html => {
+      if (!expected) { const legacy = parseForeupPublicConfiguration({ bookingUrl: source.bookingUrl, courseName: source.venueName, html }); if (legacy) return legacy; }
+      if (!deps.localCapabilities?.includes("LOCAL_CHROME") || !source.officialUrl || !source.venueAddress || !deps.trustedContext?.canonicalCoursePhone)
+        return null;
+      const end = new Date(Math.min(deps.deadlineAt?.getTime() ?? Infinity, Date.now() + 90_000));
+      const loaded = await import("./native-official-page-reader");
+      const native = typeof loaded.readNativeOfficialIdentityPage === "function" ? loaded : (loaded as unknown as { default: typeof loaded }).default;
+      const requestLease: typeof runWithProviderRequestLease | undefined = deps.requestLease ? async (family, work) => {
+        const reply = await deps.requestLease!(family, work); return reply.acquired ? { acquired: true, value: await reply.value } : { acquired: false };
+      } : undefined;
+      const read: NativeOfficialPageReader = deps.readNativeOfficialPage ?? ((s, url, deadline) => native.readNativeOfficialIdentityPage(s, url, deadline, { requestLease, collectPublicCourseContacts: true }));
+      const page = await read(source, source.officialUrl!, end);
+      const contact = deriveForeupOfficialRouteContact(source, page, deps.trustedContext?.canonicalCoursePhone);
+      const derived = bindForeupOfficialRouteConfiguration(contact, html);
+      if (expected && foreupOwnershipDigest(derived.proof) !== foreupOwnershipDigest(expected)) fail("ADAPTER_CONFIGURATION_CHANGED");
+      proof = derived.proof; return derived.config;
+    } });
+  return { config, proof };
+}
+
 /** For a controller-observed provider URL only. Reads typed public configuration
  * and returns bounded IDs; availability and activation remain separate proofs. */
 export async function inspectExistingAdapter(source: Source, deps: Dependencies): Promise<{ adapter: ExistingAdapterMetadata }> {
@@ -551,12 +579,11 @@ export async function inspectExistingAdapter(source: Source, deps: Dependencies)
         ...(session.officialStreetTypeOmittedProof() ? { officialStreetTypeOmittedProof: session.officialStreetTypeOmittedProof() } : {}) }) };
     }
     if (session.family === "FOREUP") {
-      const config = await readForeupPublicConfiguration({ bookingUrl: source.bookingUrl, courseName: source.venueName,
-        fetchImpl: session.read, rethrowError: () => true });
+      const { config, proof } = await inspectForeupConfiguration(source, deps, session.read);
       if (!config) fail("ADAPTER_CONFIGURATION_UNVERIFIED");
       const path = foreupPath.exec(new URL(source.bookingUrl).pathname)!;
       return { adapter: existingAdapterMetadataSchema.parse({ family: "FOREUP", facilityId: Number(path[1] ?? path[3]),
-        scheduleId: config.scheduleId, bookingClassId: config.bookingClassId }) };
+        scheduleId: config.scheduleId, bookingClassId: config.bookingClassId, ...(proof ? { officialRouteOwnershipProof: proof } : {}) }) };
     }
     const observed = await readAcuityPublicConfiguration({ bookingUrl: source.bookingUrl, fetchImpl: session.read });
     if (!observed) fail("ADAPTER_CONFIGURATION_UNVERIFIED");
@@ -672,8 +699,7 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
     if (adapter.family === "FOREUP") {
       const path = foreupPath.exec(new URL(recipe.source.bookingUrl).pathname);
       if (!path || Number(path[1] ?? path[3]) !== adapter.facilityId || path[2] && Number(path[2]) !== adapter.scheduleId) fail("ADAPTER_SOURCE_MISMATCH");
-      const config = await readForeupPublicConfiguration({ bookingUrl: recipe.source.bookingUrl, courseName: recipe.source.venueName,
-        fetchImpl: session!.read, rethrowError: () => true });
+      const { config } = await inspectForeupConfiguration(recipe.source, deps, session!.read, adapter.officialRouteOwnershipProof);
       if (!config || config.scheduleId !== adapter.scheduleId || config.bookingClassId !== adapter.bookingClassId) fail("ADAPTER_CONFIGURATION_CHANGED");
       const available = await fetchForeupTeeSheet({ courseId: recipe.target.courseId, date: new Date(`${input.date}T00:00:00Z`), players: input.players,
         metadata: { scheduleId: adapter.scheduleId, bookingClassId: adapter.bookingClassId, bookingBaseUrl: recipe.source.bookingUrl }, fetchImpl: session!.read });

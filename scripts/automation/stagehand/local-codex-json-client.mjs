@@ -5,6 +5,7 @@ import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'nod
 import { tmpdir, homedir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { safeDiscoveryTurnFailure } from '../course-discovery-diagnostics.mjs';
 const fail = (code, diagnostics = {}) => Object.assign(new Error(code), { code, diagnostics });
 const delay = ms => new Promise(done => setTimeout(done, ms));
 const safeCode = value => typeof value === 'string' && /^[A-Z_]{1,100}$/u.test(value) ? value : undefined;
@@ -231,12 +232,12 @@ export async function cleanupOwnedTemporary(temporary, processExited, { remove =
   return { removed: false, credentialsRemoved, residualPath: target, code: cleanupCode };
 }
 
-export async function createLocalCodexJsonClient({ deadlineAt, cwd = process.cwd(), signal, model = 'gpt-6.1-sol', effort = 'medium' }) {
+export async function createLocalCodexJsonClient({ deadlineAt, cwd = process.cwd(), signal, model = 'gpt-6.1-sol', effort = 'medium' }, dependencies = {}) {
   const deadline = Date.parse(deadlineAt);
   if (model !== 'gpt-6.1-sol' || effort !== 'medium' || !(deadline > Date.now()) || deadline - Date.now() > 15 * 60000 || signal?.aborted) throw fail('LOCAL_MODEL_CONFIGURATION_INVALID');
-  const workspace = resolve(cwd), sourceHome = process.env.CODEX_HOME || join(homedir(), '.codex');
+  const workspace = resolve(cwd), sourceHome = dependencies.sourceHome ?? (process.env.CODEX_HOME || join(homedir(), '.codex'));
   const { discoveryProcessEnvironment, DISCOVERY_CONFIG, prepareDiscoveryModelCatalog, resolveDiscoveryCli } =
-    await import(pathToFileURL(join(workspace, 'scripts/automation/course-discovery-worker.mjs')).href);
+    await (dependencies.loadWorkerHelpers ?? (() => import(pathToFileURL(join(workspace, 'scripts/automation/course-discovery-worker.mjs')).href)))();
   const temporary = mkdtempSync(join(tmpdir(), 'tts-stagehand-model-'));
   const working = join(temporary, 'workspace'); mkdirSync(working);
   const catalogPath = join(temporary, 'model-catalog.json');
@@ -266,7 +267,7 @@ export async function createLocalCodexJsonClient({ deadlineAt, cwd = process.cwd
     writeFileSync(catalogPath, prepareDiscoveryModelCatalog({ sourceHome, model }), { mode: 0o600 });
     copyFileSync(join(sourceHome, 'auth.json'), join(temporary, 'auth.json'));
     phase = 'spawn';
-    channel = createOwnedModelProcess({ executable: resolveDiscoveryCli(workspace),
+    channel = (dependencies.createProcess ?? createOwnedModelProcess)({ executable: resolveDiscoveryCli(workspace),
       args: ['app-server', '--stdio', ...Object.entries(config).flatMap(([name, value]) => ['-c', `${name}=${JSON.stringify(value)}`])],
       cwd: working, environment: { ...discoveryProcessEnvironment(), CODEX_HOME: temporary }, signal: lifetime.signal,
       timeoutMs: Math.min(60000, deadline - Date.now()),
@@ -287,13 +288,24 @@ export async function createLocalCodexJsonClient({ deadlineAt, cwd = process.cwd
           Object.assign(active.usage, Object.fromEntries(['totalTokens', 'inputTokens', 'cachedInputTokens', 'outputTokens', 'reasoningOutputTokens']
             .filter(name => Number.isSafeInteger(usage[name]) && usage[name] >= 0).map(name => [name, usage[name]])));
         }
-        if (message.method === 'error') active.lastModelError = sanitizedError(message.params?.error, 'model');
+        if (message.method === 'error' && (!message.params.turnId || message.params.turnId === active.turnId)) {
+          active.lastModelError = sanitizedError(message.params?.error, 'model');
+          const failure = safeDiscoveryTurnFailure({ status: 'inProgress', error: message.params?.error });
+          delete failure.turnStatus;
+          // An observed notification is separate from the terminal turn, never a retry instruction.
+          active.modelErrorNotification = { ...failure,
+            ...(Number.isInteger(active.lastModelError.rpcCode) ? { rpcCode: active.lastModelError.rpcCode } : {}),
+            ...(Number.isInteger(active.lastModelError.httpStatusCode) && failure.httpStatusCode === undefined ? { httpStatusCode: active.lastModelError.httpStatusCode } : {}),
+            ...(typeof message.params.willRetry === 'boolean' ? { willRetry: message.params.willRetry } : {}) };
+        }
         if (message.method === 'item/completed' && message.params.item?.type === 'agentMessage') active.text = message.params.item.text;
         if (message.method === 'turn/completed') {
           active.terminal = true;
           if (message.params.turn.status === 'completed') { active.completed = true; active.resolve(); }
           else active.reject(fail('LOCAL_MODEL_TURN_FAILED', { ...sanitizedError(message.params.turn.error, 'turn/completed'),
-            status: message.params.turn.status, ...(active.lastModelError ? { modelError: active.lastModelError } : {}) }));
+            status: message.params.turn.status, modelTurnFailure: safeDiscoveryTurnFailure(message.params.turn),
+            ...(active.lastModelError ? { modelError: active.lastModelError } : {}),
+            ...(active.modelErrorNotification ? { modelErrorNotification: active.modelErrorNotification } : {}) }));
         }
       } });
     phase = 'initialize';

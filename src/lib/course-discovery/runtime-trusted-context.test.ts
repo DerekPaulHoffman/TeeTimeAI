@@ -20,6 +20,16 @@ beforeEach(() => {
   mocks.db.teeSearch.findUnique.mockResolvedValue({ id: "search1", status: "ACTIVE", alertGeneration: 1, scheduleVersion: 2, date: new Date("2030-01-02"), endTime: "17:00", userTimeZone: "UTC", preferences: [{ courseId: "course1" }] });
 });
 describe("current durable phone context on warm claim", () => {
+  it.each(["unchanged", "changed", "absent"])("binds %s ForeUP ownership phone before warm launch", async change => {
+    active.recipe = { engine: "EXISTING_ADAPTER", adapter: { family: "FOREUP", officialRouteOwnershipProof: {} } };
+    if (change === "changed") context.trustedContext = { canonicalCoursePhone: "+13035554321" };if (change === "absent") delete context.trustedContext;
+    if (change === "unchanged") expect(await claimNextRecipeExecution("worker1")).toMatchObject({ trustedContext: active.trustedContext });
+    else expect(await claimNextRecipeExecution("worker1")).toBeNull();
+  });
+  it("keeps legacy ForeUP metadata free from a new private-phone requirement", async () => {
+    active.recipe = { engine: "EXISTING_ADAPTER", adapter: { family: "FOREUP" } };delete context.trustedContext;delete active.trustedContext;
+    expect(await claimNextRecipeExecution("worker1")).toHaveProperty("id", "job1");
+  });
   it.each(["unchanged", "changed", "absent"])("binds %s delegated physical context before a warm launch", async change => {
     active.recipe = { engine: "EXISTING_ADAPTER", adapter: { family: "TEEITUP", officialDelegatedBookingProof: { physicalContactProof: {} } } };
     if (change === "changed") context.trustedContext = { canonicalCoursePhone: "+13035554321" };if (change === "absent") delete context.trustedContext;

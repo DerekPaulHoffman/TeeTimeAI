@@ -17,6 +17,7 @@ import { cpsMetadataSchema } from "./cps-source";
 import { mindbodyAppointmentMetadataSchema } from "./mindbody-appointment-grid";
 import { isUScheduleNonMemberRental, uschedulePublicLocationProofSchema } from "@/lib/simulators/providers/uschedule-location-source";
 import { uschedulePublicRentalPartyProofSchema } from "./uschedule-public-rental-party";
+import { foreupOfficialRouteOwnershipProofSchema } from "./foreup-official-route-ownership";
 
 const numericId = z.number().int().min(1).max(2_147_483_647);
 const publicId = z.string().regex(/^[1-9]\d{0,9}$/u);
@@ -24,7 +25,9 @@ const publicId = z.string().regex(/^[1-9]\d{0,9}$/u);
 /** Identifiers from a supported public configuration, never executable code. */
 export const existingAdapterMetadataSchema = z.discriminatedUnion("family", [
   z.object({ family: z.literal("FOREUP"), facilityId: numericId, scheduleId: numericId,
-    bookingClassId: numericId }).strict(),
+    bookingClassId: numericId, officialRouteOwnershipProof: foreupOfficialRouteOwnershipProofSchema.optional() }).strict()
+    .refine(value => !value.officialRouteOwnershipProof || value.facilityId === value.officialRouteOwnershipProof.facilityId &&
+      value.scheduleId === value.officialRouteOwnershipProof.scheduleId && value.bookingClassId === value.officialRouteOwnershipProof.bookingClassId),
   z.object({ family: z.literal("ACUITY"), ownerKey: z.string().regex(/^[a-zA-Z0-9]{4,40}$/u),
     businessId: publicId, rentalProductIds: z.array(publicId).min(1).max(20)
       .refine(ids => new Set(ids).size === ids.length) }).strict(),
