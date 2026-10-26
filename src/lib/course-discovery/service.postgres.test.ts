@@ -139,15 +139,21 @@ const u=new URL(process.env.COURSE_DISCOVERY_TEST_DATABASE_URL),port=Number(u.po
 if(!['postgres:','postgresql:'].includes(u.protocol)||!local(u.hostname)||u.pathname!=='/course_discovery_test'||process.env.DATABASE_URL!==u.href||process.env.DATABASE_URL_UNPOOLED!==u.href)throw Error('LOCAL_CRASH_DATABASE_REQUIRED');
 const original=net.Socket.prototype.connect;net.Socket.prototype.connect=function(...args){const first=Array.isArray(args[0])?args[0][0]:args[0],options=first&&typeof first==='object'?first:null,host=options?options.host:typeof args[1]==='string'?args[1]:'localhost',p=options?options.port:first;if(!local(host)||Number(p)!==port)throw Error('NONLOCAL_CRASH_NETWORK_FORBIDDEN');return Reflect.apply(original,this,args);};
 globalThis.fetch=async()=>{throw Error('CRASH_FETCH_FORBIDDEN');};`;
-    const childProgram = `const [role,serviceUrl]=process.argv.slice(1);let prisma;
+    const childPhases = ["SCOPE", "SERVICE_IMPORT", "PRISMA_IMPORT", "CLAIM", "CHECKPOINT", "WAIT_FOR_PARENT", "HEARTBEAT", "FAIL", "FINISH_ACK"];
+    const childErrorNames = ["Error", "TypeError", "SyntaxError", "ReferenceError", "PrismaClientKnownRequestError", "PrismaClientInitializationError", "DiscoveryConflictError"];
+    const childErrorCodes = ["ERR_MODULE_NOT_FOUND", "MODULE_NOT_FOUND", "ERR_PACKAGE_PATH_NOT_EXPORTED", "ECONNREFUSED", "ETIMEDOUT", "P1000", "P1001", "P1002", "P2002", "P2025"];
+    const childProgram = `const [role,serviceUrl]=process.argv.slice(1);let prisma,phase='SCOPE';
+const names=${JSON.stringify(childErrorNames)},codes=${JSON.stringify(childErrorCodes)};
 const send=value=>new Promise((resolve,reject)=>process.send(value,error=>error?reject(error):resolve()));
 try{if(!['crash','recover'].includes(role)||!process.send)throw Error('OWNED_CRASH_SCOPE_REQUIRED');
-const service=await import(serviceUrl);({prisma}=await import(new URL('../prisma.ts',serviceUrl).href));
+phase='SERVICE_IMPORT';const serviceNamespace=await import(serviceUrl),service=serviceNamespace.default??serviceNamespace;
+phase='PRISMA_IMPORT';const prismaNamespace=await import(new URL('../prisma.ts',serviceUrl).href);({prisma}=prismaNamespace.default??prismaNamespace);
+phase='CLAIM';
 const job=await service.claimNextDiscoveryJob('os-crash-'+role+'-'+process.pid);if(!job)throw Error('OWNED_CRASH_CLAIM_REQUIRED');
-const marker=JSON.parse(process.env.OWNED_CRASH_CHECKPOINT);if(role==='crash')await service.checkpointDiscoveryJob(job.id,job.leaseToken,marker);
-let finishing=false;const commands=new Promise((resolve,reject)=>{process.on('message',message=>{if(role!=='recover'||finishing||message?.action!=='finish'||message?.nonce!==marker.nonce)return;finishing=true;(async()=>{await service.heartbeatDiscoveryJob(job.id,job.leaseToken);await service.failDiscoveryJob(job.id,job.leaseToken,'TOOL_FAILURE',true);await send({kind:'RECOVERY_FINISHED',pid:process.pid,jobId:job.id});resolve();})().catch(reject);});process.once('disconnect',()=>reject(Error('OWNED_PARENT_LOST')));});
+const marker=JSON.parse(process.env.OWNED_CRASH_CHECKPOINT);if(role==='crash'){phase='CHECKPOINT';await service.checkpointDiscoveryJob(job.id,job.leaseToken,marker);}
+phase='WAIT_FOR_PARENT';let finishing=false;const commands=new Promise((resolve,reject)=>{process.on('message',message=>{if(role!=='recover'||finishing||message?.action!=='finish'||message?.nonce!==marker.nonce)return;finishing=true;(async()=>{phase='HEARTBEAT';await service.heartbeatDiscoveryJob(job.id,job.leaseToken);phase='FAIL';await service.failDiscoveryJob(job.id,job.leaseToken,'TOOL_FAILURE',true);phase='FINISH_ACK';await send({kind:'RECOVERY_FINISHED',pid:process.pid,jobId:job.id});resolve();})().catch(reject);});process.once('disconnect',()=>reject(Error('OWNED_PARENT_LOST')));});
 await send({kind:'CLAIM_COMMITTED',pid:process.pid,jobId:job.id,attempts:job.attempts});await commands;
-}catch{if(process.connected)await send({kind:'CHILD_ERROR',pid:process.pid}).catch(()=>{});process.exitCode=1;}
+}catch(error){if(process.connected)await send({kind:'CHILD_ERROR',pid:process.pid,phase,errorName:names.includes(error?.name)?error.name:'UNKNOWN',errorCode:codes.includes(error?.code)?error.code:'UNKNOWN'}).catch(()=>{});process.exitCode=1;}
 finally{if(prisma)await prisma.$disconnect();if(process.connected)process.disconnect();}`;
     const owned: Array<{ child: ChildProcess; closed: Promise<{ code: number | null; signal: NodeJS.Signals | null }>; exited: boolean }> = [];
     const start = (role: "crash" | "recover") => {
@@ -169,7 +175,10 @@ finally{if(prisma)await prisma.$disconnect();if(process.connected)process.discon
       const receive = (raw: unknown) => {
         if (!raw || typeof raw !== "object" || Array.isArray(raw)) return;
         const value = raw as Record<string, unknown>; if (value.pid !== child.pid) return;
-        if (value.kind === "CHILD_ERROR") return error();
+        if (value.kind === "CHILD_ERROR") {
+          const safe = (values: string[], raw: unknown) => typeof raw === "string" && values.includes(raw) ? raw : "UNKNOWN";
+          cleanup(); reject(Error(`OWNED_CRASH_CHILD_FAILED:${safe(childPhases, value.phase)}:${safe(childErrorNames, value.errorName)}:${safe(childErrorCodes, value.errorCode)}`)); return;
+        }
         if (value.kind === kind) { cleanup(); resolve(value); }
       };
       const timer = setTimeout(error, 15_000); child.on("message", receive); child.once("error", error); child.once("close", closed);
