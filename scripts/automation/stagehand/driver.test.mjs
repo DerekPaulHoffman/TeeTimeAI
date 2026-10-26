@@ -148,7 +148,7 @@ test('exact driver retains inner wrapped model failure only for the failing oper
    close:async()=>{cleanupOrder.push('SDK');},metrics:async()=>({})})}}),
  });
  await assert.rejects(session.extract('Read',{}),error=>error.stagehandPhase==='EXTRACT');
- assert.deepEqual(session.lastModelFailure,{attempt:1,completedCalls:0,transportCode:'LOCAL_MODEL_RPC_FAILED',transportPhase:'turn/start',rpcCode:-32600});
+ assert.deepEqual(session.lastModelFailure,{attempt:1,completedCalls:0,transportCode:'LOCAL_MODEL_RPC_FAILED',transportPhase:'turn/start',rpcCode:-32600,modelRpcCode:-32600});
  const copy=session.lastModelFailure;copy.transportCode='SECRET';assert.equal(session.lastModelFailure.transportCode,'LOCAL_MODEL_RPC_FAILED');
  failNavigation=true;await assert.rejects(session.goto('https://owned.example/'),error=>error.stagehandPhase==='OPEN');assert.equal(session.lastModelFailure,undefined);
  failModel=false;await session.extract('Read',{});assert.equal(session.lastModelFailure,undefined);assert.deepEqual(session.modelCallCounts,{attempted:2,completed:1});
