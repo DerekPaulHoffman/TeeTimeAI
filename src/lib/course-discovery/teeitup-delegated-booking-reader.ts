@@ -47,16 +47,24 @@ export async function readTeeItUpDelegatedBookingChain(source: OfficialIdentityS
   diagnostic.stage = "ROOT_IDENTITY";
   let physicalContactSource: NativePhysicalContactSource | undefined;
   let physicalContactRequired = false;
+  const firstBookingHop = (page: OfficialIdentityPage) => {
+    try { return delegatedBookingHop(page, source.bookingUrl, note); } catch { return delegatedBookingHop(page, undefined, note); }
+  };
+  const physicalWitness = (page: OfficialIdentityPage) => {
+    const first = firstBookingHop(page);
+    return deriveNativePhysicalContactSource(source, page, deps.trustedContext?.canonicalCoursePhone,
+      first.nextUrl === source.bookingUrl ? undefined : first.nextUrl);
+  };
   const rootWitness = (page: OfficialIdentityPage) => {
     try {
       const legacy = delegatedCanonicalVenueWitness(source, page, note);
       physicalContactRequired = false;
       physicalContactSource = undefined;
-      try { physicalContactSource = deriveNativePhysicalContactSource(source, page, deps.trustedContext?.canonicalCoursePhone); } catch { /* Legacy source evidence remains unchanged. */ }
+      try { physicalContactSource = physicalWitness(page); } catch { /* Legacy source evidence remains unchanged. */ }
       return legacy;
     } catch (error) {
       if (!deps.trustedContext?.canonicalCoursePhone) throw error;
-      physicalContactSource = deriveNativePhysicalContactSource(source, page, deps.trustedContext.canonicalCoursePhone);
+      physicalContactSource = physicalWitness(page);
       physicalContactRequired = true;
       return physicalContactSource.sourceWitnessSha256;
     }
@@ -64,9 +72,8 @@ export async function readTeeItUpDelegatedBookingChain(source: OfficialIdentityS
   const rootWitnessSha256 = rootWitness(root);
   // Prefer an exact direct link if present, otherwise require one unambiguous
   // public booking delegation from the canonical venue document.
-  let first;
   diagnostic.stage = "ROOT_LINK";
-  try { first = delegatedBookingHop(root, source.bookingUrl, note); } catch { first = delegatedBookingHop(root, undefined, note); }
+  const first = firstBookingHop(root);
   note("rootLinkVerified", true);
   const admitted = authorizeDelegatedGet(root, source.officialUrl, deadline, first.nextUrl);
   diagnostic.stage = "HOP_ONE_READ";

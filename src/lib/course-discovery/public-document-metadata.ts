@@ -58,5 +58,53 @@ export function collectNativeOfficialPublicMetadata(expectedVenueName: string) {
     if (value.length <= 500 && publicRentalTexts.length < 40 && /\bpublic simulator rental\b/iu.test(value) &&
         /\bper bay\b/iu.test(value) && /\b(?:up to|max(?:imum)?(?: of)?)\s+[1-4]\s+(?:golfers|players|people)\b/iu.test(value)) publicRentalTexts.push(value);
   }
-  return { title: document.title.slice(0, 500), headings, linkUrls, addressTexts, phoneTexts, brandLinks, publicRentalTexts, publicBusinessLabels };
+  const contacts = {
+    clean(v: string) { return v.normalize("NFKC").replace(/\s+/gu, " ").trim(); },
+    visible(node: Element) {
+      if (!(node instanceof HTMLElement) || node.closest('form,script,style,template,noscript,iframe,[hidden],[inert],[aria-hidden="true"],[contenteditable]')) return false;
+      const rect = node.getBoundingClientRect(); if (!rect.width || !rect.height) return false;
+      let parent: Element | null = node, depth = 0;
+      while (parent && depth++ < 64) {
+        const style = getComputedStyle(parent);
+        if (style.display === "none" || ["hidden","collapse"].includes(style.visibility) || style.opacity === "0" ||
+          /\b(?:account|members?|profile|customer|checkout|payment|billing|mailing|corporate|headquarters|fax|login|sign-in)\b/iu.test(["id","class","title","aria-label"].map(k => parent!.getAttribute(k) ?? "").join(" ")) ||
+          Array.from(parent.children).some(c => /^H[1-6]$/u.test(c.tagName) && /\b(?:mailing|corporate|billing|headquarters|fax)\b/iu.test(c.textContent ?? ""))) return false;
+        parent = parent.parentElement;
+      }
+      return parent === null;
+    },
+  };
+  const namedContactBlocks: Array<{ name: string; addressText: string; phones: Array<{ href: string; text: string }> }> = [];
+  const contactCandidates: Array<{ node: Element; data: typeof namedContactBlocks[number] }> = [];
+  let namedContactBlocksOmitted = false;
+  const containers = Array.from(document.querySelectorAll('div,section,footer,p,li,td'));
+  if (containers.length > 3000) namedContactBlocksOmitted = true;
+  else for (const node of containers) {
+    if (!(node instanceof HTMLElement) || !contacts.visible(node) || node.querySelector('form,input,textarea,select,button,label,[contenteditable]') || contacts.clean(node.innerText).length > 600) continue;
+    const names = Array.from(node.children).filter(c => c instanceof HTMLElement && contacts.visible(c) && /^(?:P|SPAN|STRONG|A|H[1-6])$/u.test(c.tagName) && contacts.clean(c.innerText).toLowerCase() === contacts.clean(expectedVenueName).toLowerCase());
+    const addresses = Array.from(node.querySelectorAll('address')).filter(c => contacts.visible(c));
+    if (!names.length || !addresses.length) continue;
+    if (names.length !== 1 || addresses.length !== 1) { namedContactBlocksOmitted = true; continue; }
+    const phones = Array.from(node.querySelectorAll('a[href^="tel:"]')).filter(c => contacts.visible(c));
+    if (!phones.length || phones.length > 8) { namedContactBlocksOmitted = true; continue; }
+    contactCandidates.push({ node, data: { name: contacts.clean((names[0] as HTMLElement).innerText), addressText: contacts.clean((addresses[0] as HTMLElement).innerText.replace(/\n+/gu, ', ')),
+      phones: phones.map(c => ({ href: c.getAttribute('href')!, text: contacts.clean((c as HTMLElement).innerText) })) } });
+    if (contactCandidates.length > 40) { namedContactBlocksOmitted = true; break; }
+  }
+  if (!namedContactBlocksOmitted) for (const candidate of contactCandidates) if (!contactCandidates.some(other => other.node !== candidate.node && candidate.node.contains(other.node))) namedContactBlocks.push(candidate.data);
+  const frameNodes = Array.from(document.querySelectorAll('iframe[src]'));
+  const delegatedFrameSources: { rows: Array<{ src: string; visible: boolean; srcdoc: boolean; inForm: boolean }>; omitted: boolean } = { rows: [], omitted: frameNodes.length > 24 };
+  if (!delegatedFrameSources.omitted) for (const node of frameNodes) {
+    const src = node.getAttribute("src") ?? "";
+    if (src.length > 2048) { delegatedFrameSources.omitted = true; continue; }
+    const rect = node.getBoundingClientRect(); let parent: Element | null = node, visible = rect.width > 0 && rect.height > 0, depth = 0;
+    while (parent && depth++ < 64) {
+      const style = getComputedStyle(parent);
+      if (parent.hasAttribute("hidden") || parent.hasAttribute("inert") || parent.getAttribute("aria-hidden") === "true" ||
+          style.display === "none" || ["hidden","collapse"].includes(style.visibility) || style.opacity === "0") visible = false;
+      parent = parent.parentElement;
+    }
+    delegatedFrameSources.rows.push({ src, visible: visible && parent === null, srcdoc: node.hasAttribute("srcdoc"), inForm: Boolean(node.closest("form")) });
+  }
+  return { title: document.title.slice(0, 500), headings, linkUrls, addressTexts, phoneTexts, brandLinks, publicRentalTexts, publicBusinessLabels, namedContactBlocks, namedContactBlocksOmitted, delegatedFrameSources };
 }

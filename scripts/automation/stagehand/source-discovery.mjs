@@ -6,7 +6,7 @@ import { createRequire } from 'node:module';
 import { join, resolve, isAbsolute } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
-import { openStagehandSession, loadStagehandRuntime, assertPublicUrl, isSourceRoutingUrl as sourceRoutingUrl, frameworkIdentity, observedActionSummary, observedTargetSummary, sourceDocumentSettled } from './driver.mjs';
+import { openStagehandSession, loadStagehandRuntime, assertPublicUrl, isSourceRoutingUrl as sourceRoutingUrl, frameworkIdentity, observedActionSummary, observedTargetSummary, sourceDocumentSettled, sourceRoutingUniqueWitness } from './driver.mjs';
 import { installReadOnlyEvidence } from './read-only-evidence.mjs';
 import { prioritizedPublicEvidence, publicEvidenceUrl } from './public-evidence.mjs';
 import { observedBookingSourceCandidates, assertSourceCandidateBudget, nativeFrameNavigations } from './source-provenance.mjs';
@@ -235,9 +235,31 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
       if(report.nativeFrameNavigations.length<2&&typeof session.observeFrameSources==='function'){
         const began=Date.now(),witness=await bounded(()=>session.observeFrameSources());frames=acceptNativeFrames(witness,evidence.url,began);
       }
+      // A fresh native exact route can end routing without asking an LLM to
+      // restate it. The private host has counted all current supported choices
+      // (no truncated uniqueness) and re-attested the same document twice.
+      let nativeChoice=null;
+      if(typeof session.observeUniqueSource==='function'){
+        const began=Date.now(),value=await bounded(()=>session.observeUniqueSource());
+        nativeChoice=sourceRoutingUniqueWitness(value,{pageUrl:evidence.url,startedAt:began,deadline:workDeadline});
+        if(nativeChoice&&await bounded(()=>session.page.url())!==evidence.url)nativeChoice=null;
+        if(nativeChoice){
+          const base={pageUrl:nativeChoice.pageUrl,observedAt:nativeChoice.observedAt,documentHash:nativeChoice.documentHash};
+          if(nativeChoice.via!=='FRAME')report.officialLinkLedger.push({...base,kind:'NATIVE_VISIBLE_DOM',links:[{href:nativeChoice.url,visible:true}]});
+          if(nativeChoice.via!=='LINK')report.frameLedger.push({...base,kind:'NATIVE_VISIBLE_FRAME',frames:[{src:nativeChoice.url,visible:true}]});
+        }
+      }
       if(Buffer.byteLength(JSON.stringify(report))>1500000){report.officialLinkLedger.pop();report.frameLedger.pop();throw fail('SOURCE_EVIDENCE_LIMIT');}
       const candidates=observedBookingSourceCandidates(report,request.identity.officialUrl,sourceRoutingUrl,{sourceDiscoveryOnly:true});
-      report.eligibleBookingSourceUrls=candidates;report.sourceRoutingContext=sourceRoutingContext(report,candidates);report.metrics.calls++;
+      report.eligibleBookingSourceUrls=candidates;report.sourceRoutingContext=sourceRoutingContext(report,candidates);
+      if(nativeChoice&&candidates.includes(nativeChoice.url)){
+        finalDecision=null; // The stopping choice is native, not an earlier model decision.
+        report.adapterSourceProposal={schemaVersion:1,kind:'EXISTING_ADAPTER_SOURCE',bookingUrl:nativeChoice.url};
+        report.outcome='SOURCE_PROPOSED_UNVERIFIED';report.decisionOrigin='NATIVE_UNIQUE_SUPPORTED_SOURCE';
+        report.evidenceSummary='One freshly re-attested native public routing source; identity, configuration and availability remain unverified.';
+        stopCondition='SOURCE_FOUND';await persist();break;
+      }
+      report.metrics.calls++;
       frames=frames.filter(value=>candidates.includes(value));
       const instruction=buildSourceDiscoveryInstruction({identity:request.identity,target:request.target,input:request.input},candidates,null,report.sourceRoutingContext,frames)+
         ' Current bounded public evidence: '+JSON.stringify(prioritizedPublicEvidence(evidence,{maxCharacters:60000,includeDom:false}));

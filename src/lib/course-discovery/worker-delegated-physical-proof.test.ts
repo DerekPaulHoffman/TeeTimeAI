@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 import { bindDiscoveryRecipeIdentity, createDiscoveryAdapterObservation, createDiscoverySnapshotCompactor,
   inspectedAdapterSourceEvidence, shouldInvalidateDiscoveryAdapterObservation } from "../../../scripts/automation/course-discovery-worker.mjs";
 import { nativeCanonicalRootDocumentProofSchema } from "./native-official-page-attestation";
 import { physicalContactDigest, teeItUpPhysicalContactProofSchema } from "./teeitup-physical-contact-proof";
 import { parseAccessRecipe } from "./recipe";
 
-function fixture() {
+function fixture(withEntry = false) {
   const official = "https://public-course.example/", document = "https://www.public-course.example/", booking = "https://public-course.book.teeitup.com/";
   const job = { id: "owned-job", sourceFingerprint: "a".repeat(64), attempts: 1, firstPickedUpAt: "2030-10-24T12:00:00.000Z", deadlineAt: "2030-10-24T12:15:00.000Z",
     request: { target: { courseId: "canonical", kind: "OUTDOOR" }, identity: { name: "Public Golf Club and Restaurant", officialUrl: official,
@@ -14,7 +15,8 @@ function fixture() {
   const redirects = [{ fromUrl: official, toUrl: document, status: 301 as const, completed: true as const }];
   const rootDocumentProof = nativeCanonicalRootDocumentProofSchema.parse({ kind: "NATIVE_CANONICAL_ROOT_REDIRECT", canonicalUrl: official, documentUrl: document, redirects,
     witnessSha256: physicalContactDigest({ canonicalUrl: official, documentUrl: document, redirects }) });
-  const source = { officialUrl: official, officialDocumentUrl: document, bookingUrl: booking, canonicalName: job.request.identity.name,
+  const entry = "https://www.public-course.example/book-public-golf/";
+  const source = { officialUrl: official, officialDocumentUrl: document, bookingUrl: booking, ...(withEntry ? { bookingEntryUrl: entry } : {}), canonicalName: job.request.identity.name,
     officialBrandName: "Public Golf Club (NC)", publicLocationName: "Public Golf Club", brandLocationLabel: "NC", canonicalNameRelation: "PUBLIC_LOCATION_AND_OBSERVED_SERVICE",
     serviceRemainder: "Restaurant", observedServiceLabel: "Restaurant menu", canonicalAddress: job.request.identity.address,
     officialAddress: job.request.identity.address, canonicalLocality: "springfield", officialLocality: "springfield",
@@ -24,18 +26,94 @@ function fixture() {
   const physicalContactProof = teeItUpPhysicalContactProofSchema.parse({ ...semantic, semanticDigest: physicalContactDigest(semantic) });
   const proof = { kind: "OFFICIAL_DELEGATED_BOOKING_SOURCE", officialUrl: official, bookingUrl: booking, venueName: job.request.identity.name,
     canonicalAddress: job.request.identity.address, timeZone: job.request.input.timeZone, rootWitnessSha256: "b".repeat(64), rootDocumentProof, physicalContactProof,
-    hops: [{ pageUrl: document, nextUrl: booking, witnessSha256: "c".repeat(64) }], alias: "public-course", facilityId: 71, courseId: "provider-71",
+    hops: withEntry ? [{ pageUrl: document, nextUrl: entry, witnessSha256: "c".repeat(64) }, { pageUrl: entry, nextUrl: booking, witnessSha256: "d".repeat(64) }] :
+      [{ pageUrl: document, nextUrl: booking, witnessSha256: "c".repeat(64) }], alias: "public-course", facilityId: 71, courseId: "provider-71",
     providerAddress: physicalContactProof.providerAddress, warmTransport: "NATIVE_CHROME", requiredCapability: "LOCAL_CHROME" };
   const adapter = { family: "TEEITUP", alias: "public-course", facilityIds: [71], officialDelegatedBookingProof: proof };
   const proposal = { schemaVersion: 1, engine: "EXISTING_ADAPTER", target: job.request.target, source: { officialUrl: official, bookingUrl: booking,
     venueName: job.request.identity.name, venueAddress: job.request.identity.address, providerFamily: "TEEITUP", timeZone: job.request.input.timeZone },
     adapter: { ...adapter, officialDelegatedBookingProof: { forged: true } } };
   const observation = createDiscoveryAdapterObservation(job, booking, adapter, document)!;
-  return { official, document, booking, job, proof, adapter, proposal, observation };
+  return { official, document, booking, entry, job, proof, adapter, proposal, observation };
 }
 const bind = (f: ReturnType<typeof fixture>, observation = f.observation, context: string | undefined = f.document) => bindDiscoveryRecipeIdentity(f.proposal, f.job, observation, context);
 
 describe("current native delegated physical proof bridge", () => {
+  it("adopts the typed final native iframe edge only from the exact current observation", () => {
+    const f = fixture(true), hop = { ...f.proof.hops[1], kind: "NATIVE_VISIBLE_IFRAME_SRC" };
+    hop.witnessSha256 = createHash("sha256").update(JSON.stringify({ pageUrl: hop.pageUrl, nextUrl: hop.nextUrl, kind: hop.kind })).digest("hex");
+    Object.assign(f.proof.hops[1], hop);
+    const observation = createDiscoveryAdapterObservation(f.job, f.booking, f.adapter, f.entry)!;
+    const bound = bind(f, observation, f.entry);
+    expect(bound.adapter.officialDelegatedBookingProof).toEqual(f.proof);
+    expect(parseAccessRecipe(bound)).toEqual(bound);
+    expect(inspectedAdapterSourceEvidence(bound, f.job, observation, true, f.entry)).toEqual({ officialUrl: f.official, observedBookingUrl: f.booking });
+    expect(bindDiscoveryRecipeIdentity(f.proposal, f.job).adapter).not.toHaveProperty("officialDelegatedBookingProof");
+  });
+  it("requires current attempt and original clocks for iframe edges even without optional physical or redirect data", () => {
+    const f = fixture(true), p = f.adapter.officialDelegatedBookingProof;
+    delete p.physicalContactProof; delete p.rootDocumentProof; p.hops[0].pageUrl = f.official;
+    const hop = { ...p.hops[1], kind: "NATIVE_VISIBLE_IFRAME_SRC" };
+    hop.witnessSha256 = createHash("sha256").update(JSON.stringify({ pageUrl: hop.pageUrl, nextUrl: hop.nextUrl, kind: hop.kind })).digest("hex");
+    Object.assign(p.hops[1], hop);
+    const observation = createDiscoveryAdapterObservation(f.job, f.booking, f.adapter, f.entry)!;
+    expect(observation.jobAttempt).toBe(f.job.attempts); expect(observation.sourceFingerprint).toBe(f.job.sourceFingerprint);
+    expect(bind(f, observation, f.entry).adapter.officialDelegatedBookingProof).toEqual(p);
+    for (const key of ["jobAttempt", "sourceFingerprint", "firstPickedUpAt", "deadlineAt"]) {
+      expect(bind(f, { ...observation, [key]: "changed" }, f.entry).adapter).not.toHaveProperty("officialDelegatedBookingProof");
+    }
+  });
+  it.each(["firstHop", "directHop", "unknownKind", "hash", "anchorHash", "extra", "foreignAlias", "query", "fragment", "path", "port", "insecure", "nonfinal"])
+  ("rejects typed iframe edge %s rather than treating it as an anchor", change => {
+    const f = fixture(true), o = structuredClone(f.observation), p = o.adapter.officialDelegatedBookingProof;
+    const hop = p.hops[change === "firstHop" ? 0 : 1];
+    hop.kind = "NATIVE_VISIBLE_IFRAME_SRC";
+    if (change === "directHop") { p.hops = [{ ...hop, pageUrl: f.document }]; }
+    if (change === "unknownKind") hop.kind = "MODEL_FRAME";
+    if (change === "extra") hop.secret = "PRIVATE";
+    if (change === "nonfinal") p.bookingUrl = "https://public-course.book.teeitup.golf/";
+    if (["foreignAlias", "query", "fragment", "path", "port", "insecure"].includes(change)) {
+      const url = { foreignAlias: "https://other-course.book.teeitup.com/", query: f.booking + "?date=2030-10-25", fragment: f.booking + "#booking",
+        path: f.booking + "availability", port: "https://public-course.book.teeitup.com:444/", insecure: f.booking.replace("https:", "http:") }[change]!;
+      hop.nextUrl = url;
+      p.bookingUrl = url; o.bookingUrl = url; f.proposal.source.bookingUrl = url;
+      p.physicalContactProof.bookingUrl = url;
+      const nonSource = new Set(["kind", "providerName", "providerAddress", "providerLocality", "providerLocalityRelation", "sourceWitnessSha256", "semanticDigest"]);
+      p.physicalContactProof.sourceWitnessSha256 = physicalContactDigest(Object.fromEntries(Object.entries(p.physicalContactProof).filter(([key]) => !nonSource.has(key))));
+      p.physicalContactProof.semanticDigest = physicalContactDigest(Object.fromEntries(Object.entries(p.physicalContactProof).filter(([key]) => key !== "semanticDigest")));
+    }
+    hop.witnessSha256 = change === "hash" ? "e".repeat(64) : change === "anchorHash" ?
+      createHash("sha256").update(JSON.stringify({ pageUrl: hop.pageUrl, nextUrl: hop.nextUrl })).digest("hex") :
+      createHash("sha256").update(JSON.stringify({ pageUrl: hop.pageUrl, nextUrl: hop.nextUrl, kind: hop.kind })).digest("hex");
+    expect(bind(f, o).adapter).not.toHaveProperty("officialDelegatedBookingProof");
+  });
+  it("adopts only the exact native two-hop entry and retains its source and semantic digests", () => {
+    const f = fixture(true), bound = bind(f);
+    expect(bound.adapter.officialDelegatedBookingProof).toEqual(f.proof);
+    expect(parseAccessRecipe(bound)).toEqual(bound);
+    expect(bind(f, createDiscoveryAdapterObservation(f.job, f.booking, f.adapter, f.entry), f.entry).adapter.officialDelegatedBookingProof).toEqual(f.proof);
+    expect(inspectedAdapterSourceEvidence(bound, f.job, f.observation, true, f.document)).toEqual({ officialUrl: f.official, observedBookingUrl: f.booking });
+    expect(bindDiscoveryRecipeIdentity(f.proposal, f.job).adapter).not.toHaveProperty("officialDelegatedBookingProof");
+  });
+  it.each(["entry", "final", "document", "private", "querySecret", "oneHop", "fork", "thirdHop", "missingEntry", "sourceHash", "semanticHash"])
+  ("rejects nonbinding two-hop physical entry %s even with freshly recomputed data hashes", change => {
+    const f = fixture(true), o = structuredClone(f.observation), p = o.adapter.officialDelegatedBookingProof, physical = p.physicalContactProof;
+    if (change === "entry") physical.bookingEntryUrl = "https://www.public-course.example/another-entry/";
+    if (change === "final") physical.bookingEntryUrl = f.booking;
+    if (change === "document") physical.bookingEntryUrl = f.document;
+    if (change === "private") physical.bookingEntryUrl = "https://127.0.0.1/book/";
+    if (change === "querySecret") physical.bookingEntryUrl = `${f.entry}?token=secret`;
+    if (change === "oneHop") p.hops = [{ pageUrl: f.document, nextUrl: f.booking, witnessSha256: "c".repeat(64) }];
+    if (change === "fork") p.hops[1].pageUrl = "https://www.public-course.example/another-entry/";
+    if (change === "thirdHop") p.hops.splice(1, 0, { pageUrl: f.entry, nextUrl: f.entry, witnessSha256: "c".repeat(64) });
+    if (change === "missingEntry") delete physical.bookingEntryUrl;
+    const nonSource = new Set(["kind", "providerName", "providerAddress", "providerLocality", "providerLocalityRelation", "sourceWitnessSha256", "semanticDigest"]);
+    const source = Object.fromEntries(Object.entries(physical).filter(([key]) => !nonSource.has(key)));
+    physical.sourceWitnessSha256 = change === "sourceHash" ? "e".repeat(64) : physicalContactDigest(source);
+    const semantic = Object.fromEntries(Object.entries(physical).filter(([key]) => key !== "semanticDigest"));
+    physical.semanticDigest = change === "semanticHash" ? "f".repeat(64) : physicalContactDigest(semantic);
+    expect(bind(f, o).adapter).not.toHaveProperty("officialDelegatedBookingProof");
+  });
   it("strips model data and adopts the exact current schema-valid native observation", () => {
     const f = fixture();expect(bindDiscoveryRecipeIdentity(f.proposal, f.job).adapter).not.toHaveProperty("officialDelegatedBookingProof");
     const bound = bind(f);expect(bound.adapter.officialDelegatedBookingProof).toEqual(f.proof);expect(parseAccessRecipe(bound)).toEqual(bound);

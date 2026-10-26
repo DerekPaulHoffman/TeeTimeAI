@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { launchPublicReadBrowser, ownedPublicBrowserCdp } from "./public-browser-launch";
 import { connectOwnedSourceCdp, type OwnedCdpSession, type OwnedCdpFailure } from "./stagehand-owned-cdp";
 import { createStagehandNativeRouterFailureCapture } from "./stagehand-native-router-diagnostic";
+import { uniqueNativeSupportedSource, type NativeSourceChoiceCapture } from "./native-source-choice";
 import { createNativePublicBrowserProxy, continueNativeBrowserRead, isObservedNativeRedirect, nativeReadPreflightMethod, type NativePublicProxyDependencies } from "./native-public-browser";
 import { installNativeRedirectRouting, authorizePublicClientReadHeaders, isCurrentPublicClientReadHeaders, nativePublicClientPreflightMethod,
   nativeMindbodyBootstrapSource, attestedNativeDocumentRedirects, type NativeReadRoute, type NativeReadRequest, type NativeRedirectRouting } from "./native-redirect-routing";
@@ -27,6 +28,30 @@ type Dependencies = { requestLease: Lease; proxyDependencies?: NativePublicProxy
   contextOptions?: { ignoreHTTPSErrors?: boolean } };
 const record = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const reject = () => new Error("STAGEHAND_GUARDED_SOURCE_REJECTED");
+/** Fixed native collector. The stricter positive-area/form check applies only
+ * to the new early routing choice; existing action/frame admission is unchanged. */
+export const stagehandNativeSourceDomExpression = `(() => {
+  const visible = element => {
+    if (!element.getClientRects().length) return false;
+    for (let node = element; node; node = node.parentElement) {
+      const style = getComputedStyle(node);
+      if (node.hidden || node.inert || node.getAttribute("aria-hidden") === "true" ||
+        style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse" || Number(style.opacity) === 0) return false;
+    }
+    return true;
+  };
+  const sourceVisible = element => {
+    const rectangle = element.getBoundingClientRect();
+    return rectangle.width > 0 && rectangle.height > 0 && !element.closest("form") && visible(element);
+  };
+  const links = [...document.querySelectorAll("a[href]")].filter(visible);
+  const frames = [...document.querySelectorAll("iframe[src]")].filter(element => !element.hasAttribute("srcdoc") && visible(element));
+  return JSON.stringify({ url: location.href, readyState: document.readyState, bodyPresent: Boolean(document.body),
+    links: links.slice(0, 160).map(element => element.href), frames: frames.slice(0, 24).map(element => element.src),
+    sourceLinkIndexes: links.slice(0, 160).map((element, index) => sourceVisible(element) ? index : -1).filter(index => index >= 0),
+    sourceFrameIndexes: frames.slice(0, 24).map((element, index) => sourceVisible(element) ? index : -1).filter(index => index >= 0),
+    linksOverflow: links.length > 160, framesOverflow: frames.length > 24 });
+})()`;
 // Fixed controller source, never caller/model/site JavaScript. Install only on
 // the owned public context; the packaged SDK extension context is untouched.
 export const stagehandSourceWorkerDenialScript = `(()=>{for(const name of ['Worker','SharedWorker']){Object.defineProperty(globalThis,name,{value:undefined,writable:false,configurable:false});const d=Object.getOwnPropertyDescriptor(globalThis,name);if(!d||d.value!==undefined||d.writable||d.configurable)throw new Error('STAGEHAND_WORKER_DENIAL_UNAVAILABLE');}})()`;
@@ -429,7 +454,7 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
       if (!await assertGuardedTargets([id])) throw reject();
       const target = targets.get(id)!; await target.ready; check();
       const start = record((await target.cdp.send("Page.getFrameTree")).frameTree), startFrame = record(start.frame);
-      const result = await target.cdp.send("Runtime.evaluate", { expression: `(()=>{const v={visible(e){if(!e.getClientRects().length)return false;for(let n=e;n;n=n.parentElement){const s=getComputedStyle(n);if(n.hidden||n.inert||n.getAttribute('aria-hidden')==='true'||s.display==='none'||s.visibility==='hidden'||s.visibility==='collapse'||Number(s.opacity)===0)return false;}return true;}};return JSON.stringify({url:location.href,readyState:document.readyState,bodyPresent:Boolean(document.body),links:[...document.querySelectorAll('a[href]')].filter(e=>v.visible(e)).slice(0,160).map(e=>e.href),frames:[...document.querySelectorAll('iframe[src]')].filter(e=>!e.hasAttribute('srcdoc')&&v.visible(e)).slice(0,24).map(e=>e.src)});})()`, returnByValue: true });
+      const result = await target.cdp.send("Runtime.evaluate", { expression: stagehandNativeSourceDomExpression, returnByValue: true });
       const value = record(result.result).value;
       if (typeof value !== "string" || value.length > 400_000) throw reject();
       const observed = record(JSON.parse(value));
@@ -445,6 +470,19 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
       frames: [...new Set(Array.isArray(capture.observed.frames) ? capture.observed.frames : [])]
         .filter((url): url is string => typeof url === "string" && isSafeRecipeUrl(url) && !transactionUrl(url) && url !== capture.observed.url && (selected === undefined || url === selected))
         .map(src => ({ src, visible: true as const })),
+    });
+    const sourceSettled = (capture: Awaited<ReturnType<typeof captureSourceDom>>) => {
+      const { target, observed } = capture;
+      const normal = sameStagehandDocumentReadUrl(target.documentRequest?.url(), observed.url);
+      const bridge = [...(target.popupReads?.values() ?? [])].find(entry => sameStagehandDocumentReadUrl(entry.url, observed.url) && !entry.redirect);
+      return observed.bodyPresent === true && ["interactive", "complete"].includes(String(observed.readyState)) &&
+        (normal ? target.documentReadPending === false && target.documentStatus === 200 : Boolean(bridge?.complete && bridge.queueComplete && bridge.status === 200));
+    };
+    const sourceChoiceCapture = (capture: Awaited<ReturnType<typeof captureSourceDom>>): NativeSourceChoiceCapture => ({
+      pageUrl: String(capture.observed.url), observedAt: Date.now(), documentHash: capture.documentHash, settled: sourceSettled(capture),
+      links: (capture.observed.sourceLinkIndexes as number[]).map(index => (capture.observed.links as string[])[index]),
+      frames: (capture.observed.sourceFrameIndexes as number[]).map(index => (capture.observed.frames as string[])[index]),
+      linksOverflow: capture.observed.linksOverflow !== false, framesOverflow: capture.observed.framesOverflow !== false,
     });
     return {
       kind: "OWNED_GUARDED_STAGEHAND_CONTEXT" as const, cdpUrl: endpoint, targetId,
@@ -462,6 +500,11 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
       },
       async prepareNavigation(url: string) { check(); if (!allowed.has(canonicalStagehandHostEntry(url))) throw reject(); },
       async observeFrameSources(id: string) { return frameWitness(await captureSourceDom(id)); },
+      async observeUniqueSource(id: string) {
+        const startedAt = Date.now(), first = sourceChoiceCapture(await captureSourceDom(id));
+        const second = sourceChoiceCapture(await captureSourceDom(id)); check();
+        return uniqueNativeSupportedSource(first, second, { startedAt, now: Date.now(), deadline: input.deadlineAt.getTime() });
+      },
       async prepareFrameNavigation(id: string, url: string) {
         const capture = await captureSourceDom(id), witness = frameWitness(capture, url);
         if (frameEntryCount >= 2 || witness.frames.length !== 1 || witness.frames[0].src !== url || frameEntries.has(id)) throw reject();

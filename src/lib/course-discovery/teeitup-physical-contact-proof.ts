@@ -5,10 +5,11 @@ import { teeItUpCompleteStreetAddress, teeItUpBookAlias, publicDocumentUrl } fro
 import { normalizePublicCoursePhone } from "./teeitup-postal-conflict-proof";
 import { freshNativeCanonicalRootDocument } from "./native-official-page-attestation";
 import type { OfficialIdentityPage, OfficialIdentitySource } from "./teeitup-official-identity";
+import { parseNamedContactAddress, readNamedPublicContacts } from "./public-named-contact";
 
 const url = z.string().max(2048).refine(v => Boolean(publicDocumentUrl(v))), sha = z.string().regex(/^[a-f0-9]{64}$/u);
 const name = z.string().min(3).max(200), address = z.string().min(15).max(1024), locality = z.string().min(2).max(80);
-const sourceSchema = z.object({ officialUrl: url, officialDocumentUrl: url, bookingUrl: url,
+const sourceSchema = z.object({ officialUrl: url, officialDocumentUrl: url, bookingUrl: url, bookingEntryUrl: url.optional(),
   canonicalName: name, officialBrandName: name, publicLocationName: name, brandLocationLabel: z.string().regex(/^[A-Z0-9]{2,8}$/u).nullable(),
   canonicalNameRelation: z.enum(["EXACT_PUBLIC_LOCATION_NAME", "PUBLIC_LOCATION_AND_OBSERVED_SERVICE"]), serviceRemainder: z.string().min(2).max(40).nullable(), observedServiceLabel: z.string().min(2).max(120).nullable(),
   canonicalAddress: address, officialAddress: address, canonicalLocality: locality, officialLocality: locality,
@@ -22,9 +23,10 @@ export const teeItUpPhysicalContactProofSchema = sourceSchema.extend({ kind: z.l
 }).strict().refine(value => {
   const fields = Object.fromEntries(Object.keys(sourceSchema.shape).map(key => [key, value[key as keyof typeof value]]));
   const { semanticDigest, ...rest } = value;
-  const a = teeItUpCompleteStreetAddress(value.canonicalAddress), b = teeItUpCompleteStreetAddress(value.officialAddress), c = teeItUpCompleteStreetAddress(value.providerAddress);
+  const a = teeItUpCompleteStreetAddress(value.canonicalAddress), b = parseNamedContactAddress(value.officialAddress), c = teeItUpCompleteStreetAddress(value.providerAddress);
   const relation = nameRelation(value.canonicalName, value.publicLocationName, value.observedServiceLabel ? [value.observedServiceLabel] : []);
-  return value.sourceWitnessSha256 === physicalContactDigest(fields) && semanticDigest === physicalContactDigest(rest) && Boolean(a && b && c &&
+  return (!value.bookingEntryUrl || value.bookingEntryUrl !== value.bookingUrl && value.bookingEntryUrl !== value.officialDocumentUrl) &&
+    value.sourceWitnessSha256 === physicalContactDigest(fields) && semanticDigest === physicalContactDigest(rest) && Boolean(a && b && c &&
     sameExceptLocality(a, b) && sameExceptLocality(a, c) && a.locality === b.locality && a.locality === value.canonicalLocality && b.locality === value.officialLocality &&
     c.locality === value.providerLocality && value.providerLocalityRelation === (b.locality === c.locality ? "SAME_RECORDED" : "DIFFERENT_RECORDED") &&
     literal(value.providerName) === literal(value.officialBrandName) && brandLocation(value.officialBrandName, value.publicLocationName)?.label === value.brandLocationLabel &&
@@ -128,7 +130,7 @@ function brandLocation(brand: string, publicName: string) {
   const label = raw.slice(prefix.length, -1);
   return /^[A-Z0-9]{2,8}$/u.test(label) ? { label } : undefined;
 }
-export function deriveNativePhysicalContactSource(source: OfficialIdentitySource, page: OfficialIdentityPage, canonicalPhone: unknown): NativePhysicalContactSource {
+export function deriveNativePhysicalContactSource(source: OfficialIdentitySource, page: OfficialIdentityPage, canonicalPhone: unknown, bookingEntryUrl?: string): NativePhysicalContactSource {
   const diagnostic: PhysicalDiagnostic = { stage: "SOURCE", gates: Object.fromEntries(gateKeys.map(key => [key, null])) as PhysicalDiagnostic["gates"], rawCandidateCount: null, leafCandidateCount: null, distinctPhysicalCount: null };
   const gate = (key: typeof gateKeys[number], value: boolean) => { diagnostic.gates[key] = value; return value; };
   try {
@@ -144,6 +146,47 @@ export function deriveNativePhysicalContactSource(source: OfficialIdentitySource
     try { return new URL(attr(n, "href") ?? "", page.url).href === page.url && clean(text(n)).length <= 200 ? [clean(text(n))] : []; } catch { return []; }
   });
   const distinctBrands = [...new Set(brands.map(literal))];
+  if (brands.length === 0 && (visible.brandLinks?.length ?? 0) === 0) {
+    // A semantic named address/telephone contact is an independent identity
+    // path. Marketing headings and WordPress classes grant no authority here.
+    const titleParts = clean(text(titles[0])).split(/\s*(?:\||–|—| - )\s*/u);
+    if (!gate("titleBrandBinding", titleParts.length <= 3 && titleParts.some(v => literal(v) === literal(source.venueName)))) return reject();
+    diagnostic.stage = "PHYSICAL_BLOCK";
+    const raw = readNamedPublicContacts(page.html, source.venueName);
+    const blockSchema = z.object({ name, addressText: address, phones: z.array(z.object({ href: z.string().max(80), text: z.string().max(40) }).strict()).min(1).max(8) }).strict();
+    const rendered = z.array(blockSchema).min(1).max(40).safeParse(visible.namedContactBlocks);
+    if (visible.namedContactBlocksOmitted || !rendered.success || !raw.length) return reject();
+    const key = (row: typeof raw[number]) => physicalContactDigest({ name: literal(row.name), address: parseNamedContactAddress(row.addressText),
+      phones: row.phones.map(v => ({ href: normalizePublicCoursePhone(v.href.slice(4)), text: normalizePublicCoursePhone(v.text) })) });
+    const distinct = new Map(raw.map(row => [key(row), row]));
+    diagnostic.rawCandidateCount = raw.length; diagnostic.leafCandidateCount = raw.length; diagnostic.distinctPhysicalCount = distinct.size;
+    if (!gate("physicalBlockUnique", distinct.size === 1)) return reject();
+    const block = [...distinct.values()][0], parsedAddress = parseNamedContactAddress(block.addressText);
+    if (!gate("physicalBrandBinding", literal(block.name) === literal(source.venueName)) ||
+      !gate("canonicalAddressExact", Boolean(parsedAddress && physicalContactDigest(parsedAddress) === physicalContactDigest(canonicalAddress))) ||
+      !gate("visiblePhysicalBlockMatches", rendered.data.every(row => key(row) === key(block)) && new Set(rendered.data.map(key)).size === 1)) return reject();
+    diagnostic.stage = "PHONE";
+    const phoneMatch = (row: typeof raw[number]) => row.phones.length > 0 && row.phones.every(v => /^tel:/u.test(v.href) && normalizePublicCoursePhone(v.href.slice(4)) === phone && normalizePublicCoursePhone(v.text) === phone);
+    gate("rawPhonesPresent", block.phones.length > 0); gate("rawPhoneHrefsMatch", block.phones.every(v => /^tel:/u.test(v.href) && normalizePublicCoursePhone(v.href.slice(4)) === phone));
+    gate("rawPhoneTextsMatch", block.phones.every(v => normalizePublicCoursePhone(v.text) === phone)); gate("visiblePhonesPresent", rendered.data.every(v => v.phones.length > 0));
+    if (!gate("visiblePhonesMatch", raw.every(phoneMatch) && rendered.data.every(phoneMatch))) return reject();
+    diagnostic.stage = "BOOKING_EDGE";
+    const bookingEdge = bookingEntryUrl ?? source.bookingUrl;
+    if (bookingEntryUrl && (!publicDocumentUrl(bookingEntryUrl) || bookingEntryUrl === source.bookingUrl || bookingEntryUrl === page.url)) return reject();
+    const links = all.filter(n => n.tagName === "a" && /\b(?:tee\s*times?|book|reservations?|reserve)\b/iu.test(text(n)) &&
+      !/\b(?:lesson|member|login|sign in|checkout|purchase|payment|confirm|account)\b/iu.test(text(n))).filter(n => {
+      try { return new URL(attr(n, "href") ?? "", page.url).href === bookingEdge; } catch { return false; }
+    });
+    if (!gate("rawBookingLinkPresent", links.length > 0) || !gate("visibleBookingLinkPresent", visible.linkUrls.includes(bookingEdge))) return reject();
+    gate("observedServiceBinding", true);
+    const data = sourceSchema.parse({ officialUrl: source.officialUrl, officialDocumentUrl: page.url, bookingUrl: source.bookingUrl, ...(bookingEntryUrl ? { bookingEntryUrl } : {}),
+      canonicalName: source.venueName, officialBrandName: block.name, publicLocationName: block.name, brandLocationLabel: null,
+      canonicalNameRelation: "EXACT_PUBLIC_LOCATION_NAME", serviceRemainder: null, observedServiceLabel: null,
+      canonicalAddress: source.venueAddress, officialAddress: block.addressText, canonicalLocality: canonicalAddress.locality, officialLocality: parsedAddress!.locality,
+      publicCoursePhone: phone, warmTransport: "NATIVE_CHROME", requiredCapability: "LOCAL_CHROME" });
+    diagnostic.stage = "COMPLETE";
+    return { ...data, sourceWitnessSha256: physicalContactDigest(data) };
+  }
   if (!gate("rawBrandUnique", brands.length > 0 && distinctBrands.length === 1) || !gate("brandRawVisibleMatch", Boolean(visible.brandLinks?.some(v => v.href === page.url && literal(v.text) === distinctBrands[0])))) return reject();
   const brand = brands[0], titleParts = clean(text(titles[0])).split(/\s*(?:\||–|—| - )\s*/u);
   if (!gate("titleBrandBinding", titleParts.length <= 3 && titleParts.some(v => literal(v) === literal(brand)) && titleParts.every(v => [literal(brand), "home", "welcome"].includes(literal(v))))) return reject();

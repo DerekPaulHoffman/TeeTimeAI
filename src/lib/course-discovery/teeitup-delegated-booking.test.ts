@@ -30,6 +30,24 @@ function readers() {
 afterEach(() => vi.restoreAllMocks());
 
 describe("fresh native delegated TeeItUp source", () => {
+  it.each(["Tee Time Waitlist", "Tee Time Waitlist Don’t see the tee time you wanted? Sign up to be notified when your desired dates become available. Sign Up",
+    "Book Your Tournament", "Book Tee Time Alerts", "Reserve tee times: Notify me", "Book Your Group Outing", "Reserve Group Events"])
+  ("excludes explicit nonavailability link %s without selecting it via a requested URL", label => {
+    const good="https://public.example/tee-times/", bad="https://public.example/another/";
+    const p=page(source.officialUrl,good,true);
+    p.html += '<a href="'+bad+'">'+label+'</a>'; p.visibleEvidence!.linkUrls.push(bad);
+    expect(delegatedBookingHop(p).nextUrl).toBe(good);
+    expect(()=>delegatedBookingHop(p,bad)).toThrow("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
+    const only=page(source.officialUrl,undefined,true);only.html+='<a href="'+bad+'">'+label+'</a>';only.visibleEvidence!.linkUrls=[bad];
+    expect(()=>delegatedBookingHop(only)).toThrow("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
+  });
+  it("collapses ordinary booking captions for the same edge but preserves ambiguity between genuine different booking entries",()=>{
+    const p=page(source.officialUrl,operator,true);
+    for(const label of ["Book Today Book Your Tee Time","Book Your Tee Time","Book Tee Times"])p.html+='<a href="'+operator+'">'+label+'</a>';
+    expect(delegatedBookingHop(p).nextUrl).toBe(operator);
+    p.html+='<a href="https://public.example/other-tee-times/">Reserve Tee Times</a>';p.visibleEvidence!.linkUrls.push("https://public.example/other-tee-times/");
+    expect(()=>delegatedBookingHop(p)).toThrow("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
+  });
   it("keeps canonical source distinct from the exact fresh native redirect document through the earned booking chain", async () => {
     const current = "https://www.public.example/venue", deps = readers();
     deps.readDelegatedRoot.mockImplementation(async () => registerFreshNativeOfficialIdentityPage(page(current, operator, true), source.officialUrl, new Date(Date.now() + 30000),

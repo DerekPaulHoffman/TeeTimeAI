@@ -85,6 +85,7 @@ export function stagehandSourceFailureCode(report, job) {
 }
 
 export function validateStagehandSourceReport(report, job) {
+  requireFact(report?.decisionOrigin===undefined||report.decisionOrigin==='NATIVE_UNIQUE_SUPPORTED_SOURCE','STAGEHAND_SOURCE_REPORT_INVALID');
   requireFact(plain(report) && report.jobId === job.id && report.firstPickedUpAt === job.firstPickedUpAt && report.deadlineAt === job.deadlineAt &&
     report.framework?.name === "Stagehand" && report.framework.version === "4.3.0" && report.frameworkMode === STAGEHAND_SOURCE_MODE &&
     report.frameworkRole === "SOURCE_DISCOVERY_ONLY" && report.frameworkExtractedTimes === false &&
@@ -122,6 +123,7 @@ export function stagehandRoutingReport(report, job) {
     frameworkRole: "SOURCE_DISCOVERY_ONLY", frameworkExtractedTimes: false, outcome: "SOURCE_PROPOSED_UNVERIFIED",
     browserClosed: true, modelClosed: true, recipe: null, matchingSlots: [], adapterSourceProposal: validateStagehandSourceProposal(report.adapterSourceProposal),
     metrics: { model: "gpt-6.1-sol", reasoningEffort: "medium" },
+    ...(report.decisionOrigin==='NATIVE_UNIQUE_SUPPORTED_SOURCE'?{decisionOrigin:report.decisionOrigin}:{}),
     visitedUrls: boundedRows(report.visitedUrls, 512).filter(publicStagehandSourceUrl),
     officialLinkLedger: boundedRows(report.officialLinkLedger, 512).map(row => ({
       ...(row.kind === "NATIVE_VISIBLE_DOM" ? { kind: row.kind } : {}),

@@ -21,6 +21,10 @@ export type OfficialIdentityPage = { url: string; html: string; visibleEvidence?
   /** Computed-visible public business/service labels, never field values. */
   publicBusinessLabels?: string[];
   publicContactBlocks?: PublicCourseContactBlock[];
+  namedContactBlocks?: Array<{ name: string; addressText: string; phones: Array<{ href: string; text: string }> }>;
+  namedContactBlocksOmitted?: boolean;
+  /** Parent-document observations only; never child-document evidence. */
+  delegatedFrameSources?: { rows: Array<{ src: string; visible: boolean; srcdoc: boolean; inForm: boolean }>; omitted: boolean };
 }; browserTransport?: "PINNED_HTTP" | "NATIVE_CHROME" };
 type Node = DefaultTreeAdapterMap["node"];
 type Element = DefaultTreeAdapterMap["element"];

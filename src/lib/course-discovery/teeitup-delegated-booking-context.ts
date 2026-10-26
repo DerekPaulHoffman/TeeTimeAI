@@ -46,7 +46,7 @@ export function freshDelegatedPage(page: OfficialIdentityPage, root: string) {
 export function authorizeDelegatedGet(page: OfficialIdentityPage, officialUrl: string, deadline: Date, requestedNext?: string,
   onGate?: (key: DelegatedDiagnosticGate, value: boolean) => void) {
   if (!freshDelegatedPage(page, officialUrl) || !Number.isFinite(deadline.getTime()) || deadline.getTime() <= Date.now()) return fail();
-  const hop = delegatedBookingHop(page, requestedNext, onGate), token = Object.freeze({}) as DelegatedGetGrant;
+  const hop = delegatedBookingHop(page, requestedNext, onGate, officialUrl), token = Object.freeze({}) as DelegatedGetGrant;
   grants.set(token, { page, officialUrl, hop, deadline: deadline.getTime(), used: false });
   return { token, hop };
 }

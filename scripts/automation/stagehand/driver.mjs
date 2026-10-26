@@ -117,6 +117,20 @@ export function sourceRoutingFrameWitness(witness) {
   return {...witness,frames:witness.frames.filter(frame=>isSourceRoutingUrl(frame.src))};
 }
 
+/** This value can arrive only through the private owned-host controller pipe.
+ * A valid but no-longer-current result falls back; malformed host output fails. */
+export function sourceRoutingUniqueWitness(witness,{pageUrl,startedAt,deadline,now=Date.now()}) {
+  if(witness===null)return null;
+  const keys=value=>value&&typeof value==='object'&&!Array.isArray(value)?Object.keys(value).sort().join(','):'';
+  if(keys(witness)!=='documentHash,family,kind,observedAt,pageUrl,url,via'||witness.kind!=='NATIVE_UNIQUE_SUPPORTED_SOURCE'||
+    !['FOREUP','TEEITUP','USCHEDULE'].includes(witness.family)||!['LINK','FRAME','LINK_AND_FRAME'].includes(witness.via)||
+    !isSourceRoutingUrl(witness.pageUrl)||!isSourceRoutingUrl(witness.url)||witness.url===witness.pageUrl||
+    typeof witness.documentHash!=='string'||!/^[a-f0-9]{64}$/u.test(witness.documentHash))throw Error('STAGEHAND_NATIVE_HOST_INVALID');
+  const stamp=Date.parse(witness.observedAt);
+  if(!Number.isFinite(stamp)||new Date(stamp).toISOString()!==witness.observedAt||stamp<startedAt||stamp>now||now>=deadline||witness.pageUrl!==pageUrl)return null;
+  return witness;
+}
+
 export function observedActionSummary(action) {
   const safe = value => String(value ?? '').replace(/(?:sk-[A-Za-z0-9_-]+|Bearer\s+\S+|[^\s@]+@[^\s@]+\.[^\s@]+|eyJ[A-Za-z0-9_-]{20,})/gu, '[REDACTED]');
   return { selector: safe(action?.selector).slice(0, 1000), method: safe(action?.method).slice(0, 80), description: safe(action?.description).slice(0, 500), arguments: Array.isArray(action?.arguments) ? action.arguments.slice(0, 8).map(value => safe(value).slice(0, 500)) : null };
@@ -292,6 +306,12 @@ export async function openStagehandSession({ model, deadline, cwd, signal, onMet
       observeFrameSources: () => guarded(async()=>{
         if(!sourceRoutingOnly||typeof owned.observeFrameSources!=='function')throw Error('STAGEHAND_SOURCE_OUTPUT_INVALID');
         return sourceRoutingFrameWitness(await checked(owned.observeFrameSources(page.pageId)));
+      },'EVIDENCE'),
+      observeUniqueSource: () => guarded(async()=>{
+        if(!sourceRoutingOnly||typeof owned.observeUniqueSource!=='function')return null;
+        const began=Date.now(),current=await checked(page.url());
+        const witness=sourceRoutingUniqueWitness(await checked(owned.observeUniqueSource(page.pageId)),{pageUrl:current,startedAt:began,deadline});
+        return witness&&await checked(page.url())===current?witness:null;
       },'EVIDENCE'),
       openObservedFrameSource: url => guarded(async()=>{
         if(!sourceRoutingOnly||typeof owned.prepareFrameNavigation!=='function'||typeof owned.completeFrameNavigation!=='function')throw Error('STAGEHAND_SOURCE_OUTPUT_INVALID');

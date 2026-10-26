@@ -50,6 +50,14 @@ unresolved outcomes rather than reasons to weaken the reader's controls.
 
 ## Bounded public source navigation
 
+Before another model extraction, the controller can propose the one strict
+supported public source found in two stable, current native document captures.
+The URL, document, loader, visibility and original deadline remain bound.
+Ambiguous choices, stale captures or overflowing link/frame lists retain the
+existing Stagehand/Sol path. This shortcut supplies routing only; it cannot
+activate a method or provide identity or availability proof. Earlier model calls
+still count, and a native decision does not invent a model extraction result.
+
 Fresh visible links can establish an unverified routing candidate before a
 click. Source discovery can also choose at most two freshly observed visible
 iframe URLs from an exact enum and open each as the main document in the same
@@ -88,6 +96,21 @@ Optional diagnostics may be omitted with an explicit flag and digest to preserve
 the source reference within 32 KB. They never restore source or method authority.
 Recorded completed model usage is a lower bound when a call fails partway.
 
+The TeeItUp physical-contact path can verify a named public contact block using
+its complete raw and computed-visible address, scoped telephone and exact title
+name. It does not require a WordPress brand link or an exact marketing heading.
+When the official homepage delegates through a first-party booking page, the
+optional `bookingEntryUrl` records that exact first edge separately from the
+provider URL. The existing maximum-two-hop native chain must agree with it.
+The second and final edge can use the exact requested public TeeItUp iframe
+source when the original native parent capture proves its raw and computed-visible
+source together. Hidden, form-contained, `srcdoc`, stale, overflowing or ambiguous
+frame evidence is rejected. This does not permit child-frame browsing or confer
+identity or availability authority on a serialized frame observation.
+Provider identity remains unique, and every challenge and warm execution
+rebuilds the contact and all observed links. Missing, conflicting, stale or
+serialized evidence cannot substitute for that current native verification.
+
 ## Known development coverage gaps
 
 Engineering observations on October 26, 2026 UTC leave Onyx unresolved at the
@@ -97,6 +120,13 @@ Neither has a method or replay success from those runs. Do not raise limits,
 invent missing identity fields, turn these failures into empty inventory or
 classify the public sources as permanently inaccessible. Preserve their evidence
 separately from a new-venue pilot and disclose these limits in its receipt.
+
+Four Wood's observed service-filter entry remains unsupported. That particular
+entry selects a lesson, not simulator rental; it must not become a rental method
+or customer booking link. Its official site's whole-page form also needs separate
+identity handling. Retain the failed engineering observations as a coverage gap,
+without classifying the public source as empty, account-required or permanently
+inaccessible.
 
 ## Admission and rollout
 

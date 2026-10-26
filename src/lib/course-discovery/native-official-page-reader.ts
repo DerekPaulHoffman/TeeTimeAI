@@ -81,8 +81,14 @@ export async function readNativeDelegatedDocument(source: OfficialIdentitySource
     if (!("readDelegatedSourceDocument" in session) || typeof session.readDelegatedSourceDocument !== "function") throw new Error("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
     let captured = await session.readDelegatedSourceDocument() as OfficialIdentityPage;
     const renderingEnd = Math.min(deadline.getTime(), Date.now() + 12000);
+    const observedRequestedFrame = (page: OfficialIdentityPage) => {
+      const frames=page.visibleEvidence?.delegatedFrameSources;
+      if (!frames || frames.omitted || frames.rows.length !== 1) return false;
+      const row=frames.rows[0];
+      try { return row.visible && !row.srcdoc && !row.inForm && new URL(row.src,page.url).href === source.bookingUrl; } catch { return false; }
+    };
     let observationId = 2;
-    while (admitted.url !== source.bookingUrl && !captured.visibleEvidence?.linkUrls.includes(source.bookingUrl) && Date.now() < renderingEnd) {
+    while (admitted.url !== source.bookingUrl && !captured.visibleEvidence?.linkUrls.includes(source.bookingUrl) && !observedRequestedFrame(captured) && Date.now() < renderingEnd) {
       await session.execute({ id: observationId++, action: "observe" });
       captured = await session.readDelegatedSourceDocument() as OfficialIdentityPage;
     }

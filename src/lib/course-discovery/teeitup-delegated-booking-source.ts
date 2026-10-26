@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { parse, type DefaultTreeAdapterMap } from "parse5";
 import { z } from "zod";
-import { freshNativeCanonicalRootDocument, nativeCanonicalRootDocumentProofSchema, type NativeCanonicalRootDocumentProof } from "./native-official-page-attestation";
+import { freshNativeCanonicalRootDocument, isFreshNativeDelegatedDocument, nativeCanonicalRootDocumentProofSchema, type NativeCanonicalRootDocumentProof } from "./native-official-page-attestation";
 import { bindTeeItUpPhysicalContactFacility, physicalContactSourceData, teeItUpPhysicalContactProofSchema, type NativePhysicalContactSource, type TeeItUpPhysicalContactProof } from "./teeitup-physical-contact-proof";
 import { completeUSAddress, fullCourseName, matchesOfficialFacility, type OfficialIdentityPage, type OfficialIdentitySource } from "./teeitup-official-identity";
 import { publicDocumentUrl, teeItUpBookAlias, teeItUpCompleteStreetAddress } from "./teeitup-official-booking-source";
@@ -23,17 +23,20 @@ export const teeItUpDelegatedBookingProofSchema = z.object({
   kind: z.literal("OFFICIAL_DELEGATED_BOOKING_SOURCE"), officialUrl: url, bookingUrl: url,
   venueName: z.string().min(3).max(200), canonicalAddress: z.string().min(15).max(1024), timeZone: z.string().min(1).max(100),
   rootWitnessSha256: sha, rootDocumentProof: nativeCanonicalRootDocumentProofSchema.optional(), physicalContactProof: teeItUpPhysicalContactProofSchema.optional(),
-  hops: z.array(z.object({ pageUrl: url, nextUrl: url, witnessSha256: sha }).strict()).min(1).max(2),
+  hops: z.array(z.object({ pageUrl: url, nextUrl: url, witnessSha256: sha, kind: z.literal("NATIVE_VISIBLE_IFRAME_SRC").optional() }).strict()).min(1).max(2),
   alias: z.string().regex(/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u),
   facilityId: z.number().int().min(1).max(2147483647), courseId: z.string().min(1).max(128),
   providerAddress: z.string().min(3).max(1024),
   warmTransport: z.literal("NATIVE_CHROME"), requiredCapability: z.literal("LOCAL_CHROME"),
 }).strict().refine(value => value.hops.at(-1)?.nextUrl === value.bookingUrl &&
   (!value.rootDocumentProof || value.rootDocumentProof.canonicalUrl === value.officialUrl && value.rootDocumentProof.documentUrl === value.hops[0].pageUrl) &&
-  (!value.physicalContactProof || value.hops.length === 1 && value.physicalContactProof.officialUrl === value.officialUrl && value.physicalContactProof.bookingUrl === value.bookingUrl &&
+  (!value.physicalContactProof || (value.physicalContactProof.bookingEntryUrl ? value.hops.length === 2 && value.physicalContactProof.bookingEntryUrl === value.hops[0].nextUrl : value.hops.length === 1) &&
+    value.physicalContactProof.officialUrl === value.officialUrl && value.physicalContactProof.bookingUrl === value.bookingUrl &&
     value.physicalContactProof.officialDocumentUrl === value.hops[0].pageUrl && value.physicalContactProof.canonicalName === value.venueName &&
     value.physicalContactProof.canonicalAddress === value.canonicalAddress && value.physicalContactProof.providerAddress === value.providerAddress) &&
   value.hops.every((hop, index) => index === 0 || value.hops[index - 1].nextUrl === hop.pageUrl) &&
+  value.hops.every((hop,index) => !hop.kind || index === 1 && value.hops.length === 2 && hop.nextUrl === value.bookingUrl && Boolean(teeItUpBookAlias(hop.nextUrl)) &&
+    hop.witnessSha256 === delegatedWitnessHash({ pageUrl: hop.pageUrl, nextUrl: hop.nextUrl, kind: hop.kind })) &&
   new Set([value.hops[0].pageUrl, ...value.hops.map(hop => hop.nextUrl)]).size === value.hops.length + 1 &&
   teeItUpBookAlias(value.bookingUrl) === value.alias);
 export type TeeItUpDelegatedBookingProof = z.infer<typeof teeItUpDelegatedBookingProofSchema>;
@@ -45,8 +48,8 @@ const element = (node: Node): node is Element => "tagName" in node;
 const attr = (node: Element, name: string) => node.attrs.find(value => value.name === name)?.value;
 const fail = (): never => { throw new Error("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED"); };
 export const delegatedWitnessHash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
-function hidden(node: Element) {
-  return ["script", "style", "template", "noscript", "iframe", "form"].includes(node.tagName) ||
+function hidden(node: Element, includeIframe = false) {
+  return (!includeIframe && node.tagName === "iframe") || ["script", "style", "template", "noscript", "form"].includes(node.tagName) ||
     ["hidden", "inert"].some(key => attr(node, key) !== undefined) || attr(node, "aria-hidden") === "true" ||
     /display\s*:\s*none|visibility\s*:\s*(?:hidden|collapse)|(?:^|;)\s*opacity\s*:\s*0(?:\.0*)?\s*(?:!important\s*)?(?:;|$)/iu.test(attr(node, "style") ?? "") ||
     /(?:^|\s)(?:hidden|d-none|invisible|visually-hidden|sr-only|screen-reader-text|hide)(?:\s|$)/iu.test(attr(node, "class") ?? "");
@@ -57,13 +60,14 @@ function text(node: Node): string {
   if (element(node) && node.tagName === "br") return ", ";
   return "childNodes" in node ? node.childNodes.map(text).join(" ") : "";
 }
-function entries(page: OfficialIdentityPage) {
+function entries(page: OfficialIdentityPage, includeIframes = false) {
   if (page.html.length > 600000 || !page.visibleEvidence || page.browserTransport !== "NATIVE_CHROME") return fail();
   const all: Element[] = [];
   const visit = (node: Node) => {
-    if (element(node) && hidden(node)) return;
+    if (element(node) && hidden(node, includeIframes)) return;
     if (element(node)) all.push(node);
     if (all.length > 20000) fail();
+    if (element(node) && node.tagName === "iframe") return; // Never inspect child/fallback content.
     if ("childNodes" in node) for (const child of node.childNodes) visit(child);
   };
   visit(parse(page.html)); return all;
@@ -102,13 +106,14 @@ export function delegatedCanonicalVenueWitness(source: OfficialIdentitySource, p
 /** Every exact edge must occur in both nonhidden inert markup and its own
  * current rendered document; neither a report nor a URL set is authority. */
 export function delegatedBookingHop(page: OfficialIdentityPage, requestedNext?: string,
-  onGate?: (key: DelegatedDiagnosticGate, value: boolean) => void): DelegatedHop {
+  onGate?: (key: DelegatedDiagnosticGate, value: boolean) => void, canonicalRoot?: string): DelegatedHop {
   const note = (key: DelegatedDiagnosticGate, value: boolean) => { try { onGate?.(key, value); } catch { /* Observation cannot change validation. */ } };
   note("hopNative", page.browserTransport === "NATIVE_CHROME" && Boolean(page.visibleEvidence));
   note("hopRawBounded", page.html.length <= 600000);
   const all = entries(page);
   const links = all.filter(node => node.tagName === "a" && /\b(?:tee\s*times?|book|reservations?|reserve)\b/iu.test(text(node)) &&
-    !/\b(?:lesson|member|login|sign in|checkout|purchase|payment|confirm|account)\b/iu.test(text(node))).flatMap(node => {
+    !/\b(?:lesson|member|login|sign in|checkout|purchase|payment|confirm|account)\b/iu.test(text(node)) &&
+    !/\b(?:wait[\s-]?list|alerts?|notif(?:y|ied|ies|ications?)|tournaments?|group\s+(?:outings?|events?|bookings?|reservations?))\b/iu.test(text(node))).flatMap(node => {
     try { const next = new URL(attr(node, "href") ?? "", page.url).href; return safeDelegatedBookingUrl(next) && next !== page.url &&
       page.visibleEvidence!.linkUrls.includes(next) ? [next] : []; } catch { return []; }
   });
@@ -116,8 +121,23 @@ export function delegatedBookingHop(page: OfficialIdentityPage, requestedNext?: 
   note("hopRawLinkPresent", all.some(node => node.tagName === "a" && (() => { try { return requestedNext === undefined || new URL(attr(node, "href") ?? "", page.url).href === requestedNext; } catch { return false; } })()));
   note("hopRenderedLinkPresent", requestedNext === undefined ? Boolean(page.visibleEvidence?.linkUrls.length) : Boolean(page.visibleEvidence?.linkUrls.includes(requestedNext)));
   note("hopUnique", candidates.length === 1);
-  if (candidates.length !== 1) return fail();
-  return { pageUrl: page.url, nextUrl: candidates[0], witnessSha256: delegatedWitnessHash({ pageUrl: page.url, nextUrl: candidates[0] }) };
+  if (candidates.length === 1) return { pageUrl: page.url, nextUrl: candidates[0], witnessSha256: delegatedWitnessHash({ pageUrl: page.url, nextUrl: candidates[0] }) };
+  // A frame source is only the exact requested final provider on a separately
+  // owned current delegated parent. It grants one main GET, never child access.
+  if (candidates.length || !canonicalRoot || !requestedNext || !teeItUpBookAlias(requestedNext) ||
+      !isFreshNativeDelegatedDocument(page, canonicalRoot)) return fail();
+  const frameObservation = z.object({ rows: z.array(z.object({ src: z.string().max(2048), visible: z.boolean(), srcdoc: z.boolean(), inForm: z.boolean() }).strict()).max(24), omitted: z.literal(false) }).strict().safeParse(page.visibleEvidence?.delegatedFrameSources);
+  if (!frameObservation.success) return fail();
+  const rendered = frameObservation.data.rows.filter(row => row.visible && !row.srcdoc && !row.inForm);
+  const raw = entries(page, true).filter(node => node.tagName === "iframe" && attr(node,"src") !== undefined && attr(node,"srcdoc") === undefined);
+  let rawMatches = false, renderedMatches = false;
+  try { rawMatches = raw.length === 1 && new URL(attr(raw[0],"src")!,page.url).href === requestedNext;
+    renderedMatches = rendered.length === 1 && new URL(rendered[0].src,page.url).href === requestedNext && attr(raw[0],"src") === rendered[0].src; } catch { /* An invalid source cannot be observed authority. */ }
+  note("hopRawLinkPresent",rawMatches);note("hopRenderedLinkPresent",renderedMatches);
+  const unique = rawMatches && renderedMatches && links.length === 0;
+  note("hopUnique",unique);if (!unique) return fail();
+  const kind = "NATIVE_VISIBLE_IFRAME_SRC" as const;
+  return { pageUrl: page.url, nextUrl: requestedNext, kind, witnessSha256: delegatedWitnessHash({ pageUrl: page.url, nextUrl: requestedNext, kind }) };
 }
 
 /** Physical directory matching uses the existing official-facility predicate.
@@ -138,7 +158,9 @@ export function bindDelegatedFacility(source: OfficialIdentitySource, chain: { r
   let physical;
   const physicalSource = chain.physicalContactSource ?? (chain.physicalContactProof ? physicalContactSourceData(chain.physicalContactProof) : undefined);
   const requirePhysical = chain.physicalContactRequired || Boolean(chain.physicalContactProof);
-  if ((matching.length !== 1 || requirePhysical) && physicalSource && chain.hops.length === 1) physical = bindTeeItUpPhysicalContactFacility(source, physicalSource, directory);
+  if ((matching.length !== 1 || requirePhysical) && physicalSource &&
+      (physicalSource.bookingEntryUrl ? chain.hops.length === 2 && physicalSource.bookingEntryUrl === chain.hops[0].nextUrl : chain.hops.length === 1))
+    physical = bindTeeItUpPhysicalContactFacility(source, physicalSource, directory);
   if (requirePhysical && !physical) return fail();
   if (matching.length !== 1 && !physical) return fail();
   const selected = physical ? rows.data.find(row => row.id === physical.facilityId && row.courseId === physical.courseId)! : matching[0];

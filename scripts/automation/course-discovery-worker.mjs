@@ -93,7 +93,8 @@ function canonicalDataKey(value) {
   } catch { return undefined; }
 }
 const currentNativeProofRequired = adapter => Boolean(adapter?.officialRouteOwnershipProof || adapter?.officialStreetTypeOmittedProof ||
-  adapter?.officialDelegatedBookingProof?.rootDocumentProof || adapter?.officialDelegatedBookingProof?.physicalContactProof);
+  adapter?.officialDelegatedBookingProof?.rootDocumentProof || adapter?.officialDelegatedBookingProof?.physicalContactProof ||
+  Array.isArray(adapter?.officialDelegatedBookingProof?.hops) && adapter.officialDelegatedBookingProof.hops.some(hop => hop?.kind === "NATIVE_VISIBLE_IFRAME_SRC"));
 function dataHash(value) { const key = canonicalDataKey(value); return key ? createHash("sha256").update(key).digest("hex") : undefined; }
 function foreupOwnershipData(proof, adapter, job, contextUrl) {
   try {
@@ -136,6 +137,7 @@ function physicalContactData(proof, outer, job) {
   try {
     const sourceKeys = ["officialUrl", "officialDocumentUrl", "bookingUrl", "canonicalName", "officialBrandName", "publicLocationName", "brandLocationLabel",
       "canonicalNameRelation", "serviceRemainder", "observedServiceLabel", "canonicalAddress", "officialAddress", "canonicalLocality", "officialLocality", "publicCoursePhone", "warmTransport", "requiredCapability"];
+    if (Object.hasOwn(proof, "bookingEntryUrl")) sourceKeys.push("bookingEntryUrl");
     const extraKeys = ["kind", "providerName", "providerAddress", "providerLocality", "providerLocalityRelation", "sourceWitnessSha256", "semanticDigest"];
     const keys = value => value && typeof value === "object" && !Array.isArray(value) ? Object.keys(value).sort().join(",") : "";
     const bounded = (value, min, max) => typeof value === "string" && value.length >= min && value.length <= max && !/[\u0000-\u001f\u007f]/u.test(value);
@@ -144,6 +146,8 @@ function physicalContactData(proof, outer, job) {
     const phone = job.request.trustedContext?.canonicalCoursePhone;
     return keys(proof) === [...sourceKeys, ...extraKeys].sort().join(",") && proof.kind === "OFFICIAL_PHYSICAL_CONTACT_BINDING_V1" &&
       proof.officialUrl === outer.officialUrl && proof.officialDocumentUrl === outer.hops[0].pageUrl && proof.bookingUrl === outer.bookingUrl &&
+      (!Object.hasOwn(proof, "bookingEntryUrl") || safeObservedUrl(proof.bookingEntryUrl) && new URL(proof.bookingEntryUrl).href === proof.bookingEntryUrl &&
+        proof.bookingEntryUrl !== proof.bookingUrl && proof.bookingEntryUrl !== proof.officialDocumentUrl && proof.bookingEntryUrl === outer.hops[0].nextUrl) &&
       proof.canonicalName === job.request.identity.name && proof.canonicalAddress === job.request.identity.address && proof.providerAddress === outer.providerAddress &&
       typeof phone === "string" && /^\+1[2-9]\d{2}[2-9]\d{6}$/u.test(phone) && proof.publicCoursePhone === phone &&
       ["officialBrandName", "publicLocationName", "providerName"].every(key => bounded(proof[key], 3, 200)) &&
@@ -272,6 +276,17 @@ export function bindDiscoveryRecipeIdentity(recipe, job, adapterObservation, con
       const keys = value => value && typeof value === "object" && !Array.isArray(value) ? Object.keys(value).sort().join(",") : "";
       const publicUrl = value => safeObservedUrl(value) && new URL(value).href === value;
       const optionalKeys = ["rootDocumentProof", "physicalContactProof"].filter(key => proof?.[key] !== undefined);
+      const hopShape = (hop, index) => {
+        if (keys(hop) === "nextUrl,pageUrl,witnessSha256") return true;
+        if (keys(hop) !== "kind,nextUrl,pageUrl,witnessSha256" || hop.kind !== "NATIVE_VISIBLE_IFRAME_SRC" ||
+            index !== 1 || proof.hops.length !== 2 || hop.nextUrl !== proof.bookingUrl) return false;
+        try {
+          const url = new URL(hop.nextUrl);
+          return url.protocol === "https:" && !url.username && !url.password && !url.port && url.pathname === "/" && !url.search && !url.hash &&
+            /^([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\.book\.teeitup\.(?:com|golf)$/u.exec(url.hostname)?.[1] === adapter.alias &&
+            hop.witnessSha256 === createHash("sha256").update(JSON.stringify({ pageUrl: hop.pageUrl, nextUrl: hop.nextUrl, kind: hop.kind })).digest("hex");
+        } catch { return false; }
+      };
       if (canonicalDataKey(inspected) === canonicalDataKey(adapter) && proof?.kind === "OFFICIAL_DELEGATED_BOOKING_SOURCE" &&
           keys(proof) === ["alias", "bookingUrl", "canonicalAddress", "courseId", "facilityId", "hops", "kind", "officialUrl", "providerAddress", "requiredCapability", "rootWitnessSha256", "timeZone", "venueName", "warmTransport", ...optionalKeys].sort().join(",") &&
           proof.officialUrl === job.request.identity.officialUrl && proof.bookingUrl === proposedSource.bookingUrl &&
@@ -281,13 +296,13 @@ export function bindDiscoveryRecipeIdentity(recipe, job, adapterObservation, con
           typeof proof.courseId === "string" && proof.courseId.length > 0 && proof.courseId.length <= 128 &&
           typeof proof.providerAddress === "string" && proof.providerAddress.length >= 3 && proof.providerAddress.length <= 1024 &&
           sha(proof.rootWitnessSha256) && Array.isArray(proof.hops) && proof.hops.length >= 1 && proof.hops.length <= 2 &&
-          proof.hops.every((hop, index) => keys(hop) === "nextUrl,pageUrl,witnessSha256" && publicUrl(hop.pageUrl) && publicUrl(hop.nextUrl) && sha(hop.witnessSha256) &&
+          proof.hops.every((hop, index) => hopShape(hop, index) && publicUrl(hop.pageUrl) && publicUrl(hop.nextUrl) && sha(hop.witnessSha256) &&
             (index === 0 ? hop.pageUrl === (proof.rootDocumentProof?.documentUrl ?? proof.officialUrl) : proof.hops[index - 1].nextUrl === hop.pageUrl)) &&
           proof.hops.at(-1).nextUrl === proof.bookingUrl && new Set([proof.hops[0].pageUrl, ...proof.hops.map(hop => hop.nextUrl)]).size === proof.hops.length + 1 &&
           [...proof.hops.map(hop => hop.pageUrl), proof.bookingUrl].includes(contextUrl) &&
           (!currentNativeProofRequired(observed) || currentNativeProofObservation(job, adapterObservation)) &&
           (!proof.rootDocumentProof || nativeRootDocumentData(proof.rootDocumentProof, proof.officialUrl, proof.hops[0].pageUrl)) &&
-          (!proof.physicalContactProof || proof.hops.length === 1 && physicalContactData(proof.physicalContactProof, proof, job)) &&
+          (!proof.physicalContactProof || proof.hops.length === (Object.hasOwn(proof.physicalContactProof, "bookingEntryUrl") ? 2 : 1) && physicalContactData(proof.physicalContactProof, proof, job)) &&
           proof.warmTransport === "NATIVE_CHROME" && proof.requiredCapability === "LOCAL_CHROME") {
         try { const bytes = JSON.stringify(proof); if (Buffer.byteLength(bytes, "utf8") <= 16_000) adapter.officialDelegatedBookingProof = JSON.parse(bytes); }
         catch { /* Only the current private native observation can confer this proof. */ }

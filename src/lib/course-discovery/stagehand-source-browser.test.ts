@@ -69,6 +69,45 @@ it("canonicalizes only a missing homepage slash without changing routes, queries
   for (const value of ["https://public.example/a/../route", "https://public.example/%2e%2e/route", "https://PUBLIC.example", "https://public.example:443", "https://public.example\\route", "https://user@public.example/", "http://public.example/", "https://public.example/ASP/appt_req.asp"]) expect(() => canonicalStagehandHostEntry(value)).toThrow();
 });
 
+it("attests a unique native public source without dispatching provider frames and falls back for ambiguity or overflow", async () => {
+  const foreup = "https://foreupsoftware.com/index.php/booking/123/456#/teetimes", tee = "https://public-course.book.teeitup.com/";
+  const controller = new AbortController(); let active = 0, acquired = 0, released = 0, foreignLookups = 0;
+  const server = createServer({ key: certificate("fixtureKey"), cert: certificate("fixtureCertificate") }, (_request, response) => {
+    response.writeHead(200, { "content-type": "text/html" }).end(`<!doctype html><body><a id="source" href="${foreup}">Public times</a>
+      <iframe hidden src="${tee}"></iframe><iframe src="${tee}" srcdoc=""></iframe><iframe style="width:0;height:0;border:0" src="${tee}"></iframe></body>`);
+  });
+  let host: Awaited<ReturnType<typeof createGuardedStagehandSourceBrowser>> | undefined;
+  try {
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address(); if (!address || typeof address === "string") throw Error("OWNED_FIXTURE_UNAVAILABLE");
+    host = await createGuardedStagehandSourceBrowser({ initialUrl: "https://owned-source.example/", timeZone: "UTC", deadlineAt: new Date(Date.now() + 60_000), signal: controller.signal }, {
+      requestLease: async (_family, work) => { active++; acquired++; try { return { acquired: true, value: await work() }; } finally { active--; released++; } },
+      proxyDependencies: { resolveAddresses: async name => { if (name !== "owned-source.example") { foreignLookups++; throw Error("NOT_OWNED_FIXTURE"); } return [{ address: "93.184.216.34", family: 4 }]; }, connect: () => connect({ host: "127.0.0.1", port: address.port }) },
+      launchBrowser: options => launchPublicReadBrowser({ ...options, args: [...options.args ?? [], "--ignore-certificate-errors"] }, { localCdp: true }), contextOptions: { ignoreHTTPSErrors: true },
+    });
+    const attached = await chromium.connectOverCDP(host.cdpUrl), page = attached.contexts().flatMap(context => context.pages())[0];
+    await host.prepareNavigation("https://owned-source.example/"); await page.goto("https://owned-source.example/", { waitUntil: "load" });
+    const selected = await host.observeUniqueSource(host.targetId);
+    expect(selected).toMatchObject({ kind: "NATIVE_UNIQUE_SUPPORTED_SOURCE", url: foreup, family: "FOREUP", via: "LINK", pageUrl: "https://owned-source.example/" });
+    expect(selected?.documentHash).toMatch(/^[a-f0-9]{64}$/u); expect(Date.now() - Date.parse(selected!.observedAt)).toBeLessThan(5000);
+    await page.evaluate(url => { document.body.innerHTML = `<iframe style="width:200px;height:100px" src="${url}"></iframe>`; }, tee);
+    expect(await host.observeUniqueSource(host.targetId)).toMatchObject({ url: tee, via: "FRAME" });
+    await page.evaluate(url => { const a = document.createElement("a"); a.href = url; a.textContent = "Public times"; document.body.append(a); }, tee);
+    expect(await host.observeUniqueSource(host.targetId)).toMatchObject({ url: tee, via: "LINK_AND_FRAME" });
+    await page.evaluate(() => { const a = document.createElement("a"); a.id = "other"; a.href = "https://clients.uschedule.com/public-studio/booking"; a.textContent = "Other public source"; document.body.append(a); });
+    expect(await host.observeUniqueSource(host.targetId)).toBeNull();
+    await page.evaluate(() => { document.getElementById("other")!.remove(); for (let i = 0; i < 160; i++) { const a = document.createElement("a"); a.className = "overflow"; a.href = "https://owned-source.example/other"; a.textContent = "Public navigation"; document.body.append(a); } });
+    expect(await host.observeUniqueSource(host.targetId)).toBeNull();
+    await page.evaluate(url => { document.querySelectorAll("a").forEach(node => node.remove()); document.body.innerHTML = Array.from({ length: 25 }, () => `<iframe src="${url}"></iframe>`).join(""); }, tee);
+    expect(await host.observeUniqueSource(host.targetId)).toBeNull();
+    await expect(host.observeUniqueSource("foreign-target")).rejects.toThrow("STAGEHAND_GUARDED_SOURCE_REJECTED");
+    expect(foreignLookups).toBe(0); expect(host.diagnostics().admittedRequests).toBe(1);
+    controller.abort(); await expect(host.observeUniqueSource(host.targetId)).rejects.toThrow();
+    expect(await host.close()).toMatchObject({ browserClosed: true, providerRequestsDrained: true });
+    expect(active).toBe(0); expect(acquired).toBe(released);
+  } finally { controller.abort(); await host?.close(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
+}, 60_000);
+
 async function ownedPopupFixture(workerCase: boolean, ackMode: AckMode) {
   popupAck.mode = ackMode; popupAck.armed = false; popupAck.pending = 0; popupAck.earlySuccessor = false; popupAck.forked = false; popupAck.oversized = false;
   popupAck.delayed = 0;
