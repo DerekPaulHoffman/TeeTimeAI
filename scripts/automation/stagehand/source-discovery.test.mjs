@@ -68,11 +68,19 @@ test('explicit unresolved from an old page is recaptured after an actual URL cha
 test('ordinary job projection strips private/currentmethod hints and binds original clock/sourcecap',()=>{
  const raw=job(),p=publicSourceJob(raw);assert.deepEqual(Object.keys(p.identity),['name','officialUrl','timeZone','address']);
  assert.equal(JSON.stringify(p).includes('PRIVATE'),false);assert.equal(p.jobId,raw.id);assert.equal(Date.parse(p.deadlineAt)-Date.parse(p.firstPickedUpAt),900000);
- assert.equal(Date.parse(p.workDeadlineAt)-Date.parse(p.firstPickedUpAt),120000);
+ assert.equal(Date.parse(p.workDeadlineAt)-Date.parse(p.firstPickedUpAt),240000);
  const withoutAddress=job();delete withoutAddress.request.identity.address;assert.equal(publicSourceJob(withoutAddress).identity.address,undefined);
  assert.throws(()=>publicSourceJob({...raw,deadlineAt:new Date(Date.parse(raw.deadlineAt)+1).toISOString()}),/SOURCE_JOB_INVALID/);
  assert.throws(()=>publicSourceJob(raw,new Date(Date.parse(raw.deadlineAt)+1).toISOString()),/SOURCE_JOB_INVALID/);
- const old=Date.now()-121000;assert.throws(()=>publicSourceJob({...raw,firstPickedUpAt:new Date(old).toISOString(),deadlineAt:new Date(old+900000).toISOString()}),/BUDGET_EXHAUSTED/);
+ const old=Date.now()-241000;assert.throws(()=>publicSourceJob({...raw,firstPickedUpAt:new Date(old).toISOString(),deadlineAt:new Date(old+900000).toISOString()}),/BUDGET_EXHAUSTED/);
+});
+
+test('the shared source clock keeps only its remainder after prior work/cooldown and honors a narrower caller deadline',()=>{
+ const raw=job(),first=Date.now()-103000;raw.firstPickedUpAt=new Date(first).toISOString();raw.deadlineAt=new Date(first+900000).toISOString();
+ const projected=publicSourceJob(raw);assert.equal(Date.parse(projected.workDeadlineAt),first+240000);
+ assert.ok(Date.parse(projected.workDeadlineAt)-Date.now()<=137000);assert.ok(Date.parse(projected.workDeadlineAt)-Date.now()>136000);
+ assert.equal(publicSourceJob(raw,new Date(first+110000).toISOString()).workDeadlineAt,new Date(first+110000).toISOString());
+ assert.equal(projected.firstPickedUpAt,raw.firstPickedUpAt);assert.equal(projected.deadlineAt,raw.deadlineAt);
 });
 test('ordinary explicit unresolved persists closed decision/stop/action facts',async()=>{
  const f=fixture();f.session.extract=async(_instruction,schema)=>({data:schema.parse({decision:'UNRESOLVED',reason:'PRIVATE_MODEL_REASON',nextActionInstruction:'',bookingUrl:null})});
@@ -265,7 +273,7 @@ test('real source-to-host boundary accepts locally clamped work across tolerated
  try{
   for(const skew of[-5000,-2000,0,2000,5000]){
    const raw=job(),first=local+skew;raw.firstPickedUpAt=new Date(first).toISOString();raw.deadlineAt=new Date(first+900000).toISOString();
-   const sourceDeadline=Math.min(first+120000,local+120000),f=fixture();let constructorCalls=0,closed=0;
+   const sourceDeadline=Math.min(first+240000,local+240000),f=fixture();let constructorCalls=0,closed=0;
    const r=await sourceDiscover({job:raw,cwd:process.cwd(),deadlineAt:new Date(sourceDeadline).toISOString(),
     createGuardedBrowser:({deadlineAt,signal})=>createStagehandGuardedBrowserHost({cwd:process.cwd(),initialUrl:official,timeZone:raw.request.input.timeZone,deadlineAt,signal,
      helperEnvironment:{COURSE_DISCOVERY_BROWSER_TRANSPORT:'NATIVE_CHROME',COURSE_DISCOVERY_JOB_KIND:'discovery',COURSE_DISCOVERY_JOB_ID:raw.id,COURSE_DISCOVERY_LEASE_TOKEN:'offline-fixture-lease'},

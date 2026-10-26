@@ -4,7 +4,7 @@ import { observedBookingSourceCandidates, nativeFrameNavigations } from "./stage
 import { sourceTransportCodes } from "./stagehand/source-diagnostic.mjs";
 
 export const STAGEHAND_SOURCE_MODE = "HYBRID_SOURCE_DISCOVERY";
-export const STAGEHAND_SOURCE_BUDGET_MS = 120_000;
+export const STAGEHAND_SOURCE_BUDGET_MS = 240_000;
 export const STAGEHAND_CHECKPOINT_BYTES = 30_000;
 export const canonicalStagehandData = value => Array.isArray(value) ? `[${value.map(canonicalStagehandData).join(",")}]`
   : value && typeof value === "object" ? `{${Object.entries(value).filter(([, item]) => item !== undefined).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)

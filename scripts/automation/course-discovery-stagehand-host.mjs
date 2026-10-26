@@ -10,7 +10,7 @@ export async function createStagehandGuardedBrowserHost({ cwd, initialUrl, timeZ
       typeof helperEnvironment.COURSE_DISCOVERY_LEASE_TOKEN !== "string" || !helperEnvironment.COURSE_DISCOVERY_LEASE_TOKEN)
     throw discoveryError("STAGEHAND_NATIVE_HOST_SCOPE_INVALID");
   const remaining = Date.parse(deadlineAt) - Date.now();
-  if (!(remaining > 0 && remaining <= 120000)) throw discoveryError("STAGEHAND_NATIVE_HOST_DEADLINE");
+  if (!(remaining > 0 && remaining <= 240000)) throw discoveryError("STAGEHAND_NATIVE_HOST_DEADLINE");
   const channel = processFactory({ executable: process.execPath,
     args: [join(cwd, "node_modules/tsx/dist/cli.mjs"), join(cwd, "scripts/automation/course-discovery-stagehand-browser.ts"),
       "--deadline", deadlineAt, "--official-url", initialUrl, "--time-zone", timeZone], cwd,

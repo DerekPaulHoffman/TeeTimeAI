@@ -6,6 +6,7 @@ import { STAGEHAND_SOURCE_BUDGET_MS, stagehandWorkDeadline, publicStagehandJob, 
 import { inspectStagehandAdapter } from "./course-discovery-stagehand-inspection.mjs";
 import { createStagehandGuardedBrowserHost } from "./course-discovery-stagehand-host.mjs";
 import { createStagehandFailureCheckpoint, packStagehandCheckpoint, readStagehandFailure } from "./course-discovery-stagehand-failure.mjs";
+import { projectSourceDiagnostic } from "./stagehand/source-diagnostic.mjs";
 
 const defaultSourceDiscover = async args => (await import("./stagehand/source-discovery.mjs")).sourceDiscover(args);
 /** Readiness only; the supervisor performs this before claiming cold demand. */
@@ -21,6 +22,18 @@ function sourceMetrics(report) {
   for (const field of ["totalTokens", "inputTokens", "cachedInputTokens", "outputTokens", "reasoningOutputTokens"])
     tokenUsage[field] = calls.reduce((sum, call) => sum + (Number.isSafeInteger(call.usage[field]) && call.usage[field] >= 0 ? call.usage[field] : 0), 0);
   return { modelCalls: calls.length, tokenUsage };
+}
+
+function currentSourceModelFailure(report, job, sourceDeadline, now, invocationStarted) {
+  const diagnostic = projectSourceDiagnostic(report?.sourceDiagnostic), started = Date.parse(report?.startedAt),
+    finished = Date.parse(report?.finishedAt), supplied = Date.parse(report?.workDeadlineAt);
+  if (report?.jobId !== job.id || report.firstPickedUpAt !== job.firstPickedUpAt || report.deadlineAt !== job.deadlineAt ||
+      report.browserClosed !== true || report.modelClosed !== true || !Number.isFinite(started) || !Number.isFinite(finished) || !Number.isFinite(supplied) ||
+      started < Math.max(Date.parse(job.firstPickedUpAt), invocationStarted) - 5000 || finished < started || finished > Math.min(sourceDeadline, now + 5000) || supplied <= started || supplied > sourceDeadline ||
+      !["EXTRACT", "OBSERVE", "ACT"].includes(diagnostic?.phase) || diagnostic?.transportCode !== "LOCAL_MODEL_TURN_FAILED" || diagnostic?.modelTurnFailure?.turnStatus !== "failed" ||
+      diagnostic?.cleanup?.browserClosed !== true || diagnostic?.cleanup?.modelClosed !== true || !(diagnostic?.counts?.failedModelCalls >= 1) ||
+      !(diagnostic?.counts?.attemptedModelCalls > diagnostic?.counts?.completedModelCalls)) return undefined;
+  return structuredClone(diagnostic.modelTurnFailure);
 }
 
 /** Source routing has no customer, provider, identity, inventory, or activation authority.
@@ -81,7 +94,13 @@ export async function runCourseDiscoveryStagehandWorker({
       check();
       if (sourceSignal.aborted || now() >= sourceDeadline) throw discoveryError("STAGEHAND_SOURCE_BUDGET_EXHAUSTED");
       const sourceFailure = stagehandSourceFailureCode(report, job);
-      if (sourceFailure) throw discoveryError(sourceFailure);
+      if (sourceFailure) {
+        if (sourceFailure === "LOCAL_MODEL_TURN_FAILED") {
+          const modelFailure = currentSourceModelFailure(report, job, sourceDeadline, now(), started);
+          if (modelFailure) metrics.modelFailure = modelFailure;
+        }
+        throw discoveryError(sourceFailure);
+      }
       validateStagehandSourceReport(report, job);
       reference = createStagehandSourceCheckpoint(job, report);
       await checkpoint("SOURCE_EXPORTED");

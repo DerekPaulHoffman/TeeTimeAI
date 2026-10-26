@@ -4,6 +4,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { createCourseDiscoveryClient, discoveryError } from "./course-discovery-client.mjs";
 import { noVerifiedRecipeDiagnostic } from "./course-discovery-worker.mjs";
 import { createCourseDiscoveryHandlers, DISCOVERY_WORKER_MODES } from "./course-discovery-handlers.mjs";
+import { STAGEHAND_SOURCE_BUDGET_MS } from "./course-discovery-stagehand-source.mjs";
 
 export const DISCOVERY_POLL_MS = 15_000;
 export const DISCOVERY_HEARTBEAT_MS = 15_000;
@@ -11,6 +12,14 @@ export const DISCOVERY_CONCURRENCY = 3;
 export const DISCOVERY_WORK_BUDGET_MS = 12 * 60_000;
 export const DISCOVERY_CLOCK_SKEW_MS = 5_000;
 export const DISCOVERY_MODEL_OVERLOAD_COOLDOWN_MS = 45_000;
+function transientModelFailure(error) {
+  const failure = error?.discoveryMetrics?.modelFailure;
+  const stagehand = error?.code === "LOCAL_MODEL_TURN_FAILED" && error.discoveryMetrics?.framework === "Stagehand" &&
+    error.discoveryMetrics.frameworkRole === "SOURCE_DISCOVERY_ONLY" && error.discoveryMetrics.sourceResumed === false;
+  if (error?.code !== "DISCOVERY_TURN_FAILED" && !stagehand) return false;
+  return (!stagehand || failure?.turnStatus === "failed") && (failure?.errorCategory === "serverOverloaded" ||
+    failure?.turnStatus === "failed" && failure.errorCategory === "responseTooManyFailedAttempts" && failure.httpStatusCode === 429);
+}
 export function discoveryWorkDeadline(job) {
   const firstPickup = Date.parse(job.firstPickedUpAt);
   const absolute = Date.parse(job.deadlineAt);
@@ -175,19 +184,25 @@ export function createCourseDiscoverySupervisor({ client, startWorker, executeRe
           activatedEvent = { ...jobEvent, completedAt: new Date(now()).toISOString(), metrics: outcome.metrics };
         }
       } catch (error) {
-        if (!execution && !activationAcknowledgedAt && job.attempts === 1 && error?.code === "DISCOVERY_TURN_FAILED" &&
-            error?.discoveryMetrics?.modelFailure?.errorCategory === "serverOverloaded") {
+        let retryableFailure = error?.code !== "STAGEHAND_SOURCE_BUDGET_EXHAUSTED";
+        if (!execution && !activationAcknowledgedAt && job.attempts === 1 && transientModelFailure(error)) {
           // Delay only the existing retry. Keep this owned lease and heartbeat
           // live; cancellation and the original work deadline still win.
           let cooldownTimer;
           try {
             assertLiveActivationFences();
+            const cooldownDeadline = error.code === "LOCAL_MODEL_TURN_FAILED" ?
+              Math.min(discoveryWorkDeadline(job), Date.parse(job.firstPickedUpAt) + STAGEHAND_SOURCE_BUDGET_MS) : discoveryWorkDeadline(job);
             await Promise.race([
               new Promise(done => { cooldownTimer = timers.setTimeout(done,
-                Math.min(DISCOVERY_MODEL_OVERLOAD_COOLDOWN_MS, discoveryWorkDeadline(job) - now())); }),
+                Math.max(0, Math.min(DISCOVERY_MODEL_OVERLOAD_COOLDOWN_MS, cooldownDeadline - now()))); }),
               cancelled, postActivationCleanup,
             ]);
             if (!activationAcknowledgedAt) assertLiveActivationFences();
+            if (!activationAcknowledgedAt && now() >= cooldownDeadline && error.code === "LOCAL_MODEL_TURN_FAILED") {
+              retryableFailure = false;
+              error = Object.assign(discoveryError("STAGEHAND_SOURCE_BUDGET_EXHAUSTED"), { discoveryMetrics: error.discoveryMetrics });
+            }
           } catch (cooldownError) { error = cooldownError; }
           finally { timers.clearTimeout(cooldownTimer); }
         }
@@ -199,7 +214,7 @@ export function createCourseDiscoverySupervisor({ client, startWorker, executeRe
           if (!execution && !stopped && !["DISCOVERY_LEASE_REJECTED", "DISCOVERY_LEASE_EXPIRED"].includes(error?.code)) {
             if (error?.code === "DISCOVERY_ACCESS_REQUIRED") failureReason = "ACCESS_REQUIRED";
             else if (error?.code === "DISCOVERY_UNSUPPORTED") failureReason = "UNSUPPORTED";
-            try { await client.fail(job.id, job.leaseToken, failureReason, failureReason === "TOOL_FAILURE"); }
+            try { await client.fail(job.id, job.leaseToken, failureReason, failureReason === "TOOL_FAILURE" && retryableFailure); }
             catch { /* A stale lease must never be rebound or retried locally. */ }
           }
           endedEvent = { ...jobEvent, completedAt: new Date(now()).toISOString(),

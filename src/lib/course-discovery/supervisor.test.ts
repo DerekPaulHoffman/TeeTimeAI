@@ -391,6 +391,9 @@ describe("first-attempt model overload cooldown", () => {
   const overloaded = (category: string | undefined = "serverOverloaded", code = "DISCOVERY_TURN_FAILED") =>
     Object.assign(new Error("provider details must remain private"), { code,
       discoveryMetrics: { tokenUsage: {}, modelFailure: { turnStatus: "failed", ...(category ? { errorCategory: category } : {}) } } });
+  const stagehandFailure = () => Object.assign(Error("PRIVATE"), { code: "LOCAL_MODEL_TURN_FAILED", discoveryMetrics: {
+    framework: "Stagehand", frameworkRole: "SOURCE_DISCOVERY_ONLY", sourceResumed: false,
+    modelFailure: { turnStatus: "failed", errorCategory: "responseTooManyFailedAttempts", httpStatusCode: 429 } } });
   async function setup(assigned = job(), error = overloaded(), heartbeat = vi.fn(async () => ({ job: { leaseExpiresAt: new Date(Date.now() + 90_000).toISOString() } }))) {
     vi.useFakeTimers(); vi.setSystemTime(now);
     const client = { next: vi.fn().mockResolvedValueOnce({ job: assigned }).mockResolvedValue({ job: null }), heartbeat, fail: vi.fn(async () => ({})) };
@@ -399,6 +402,57 @@ describe("first-attempt model overload cooldown", () => {
     await supervisor.start(); await vi.advanceTimersByTimeAsync(0);
     return { supervisor, client, startWorker, onEvent, assigned, error };
   }
+  it("delays only the existing retry for a current Stagehand failed turn with explicit transient HTTP429", async () => {
+    const error = stagehandFailure();
+    const f = await setup(job(), error), original = structuredClone(f.assigned);
+    expect(f.client.fail).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(44_999); expect(f.client.fail).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.client.fail).toHaveBeenCalledExactlyOnceWith(f.assigned.id, f.assigned.leaseToken, "TOOL_FAILURE", true);
+    expect(f.client.heartbeat.mock.calls.length).toBeGreaterThanOrEqual(2); expect(f.startWorker).toHaveBeenCalledOnce();
+    expect(f.assigned).toEqual(original); await f.supervisor.stop();
+  });
+  it.each(["resumed", "category", "status", "missingStatus", "turn", "framework", "role", "code", "attempt2"])
+  ("does not delay an unbound or inapplicable Stagehand model failure: %s", async change => {
+    const error = stagehandFailure();
+    if (change === "resumed") error.discoveryMetrics.sourceResumed = true;
+    if (change === "category") error.discoveryMetrics.modelFailure.errorCategory = "rateLimitExceeded";
+    if (change === "status") error.discoveryMetrics.modelFailure.httpStatusCode = 400;
+    if (change === "missingStatus") delete (error.discoveryMetrics.modelFailure as { httpStatusCode?: number }).httpStatusCode;
+    if (change === "turn") error.discoveryMetrics.modelFailure.turnStatus = "inProgress";
+    if (change === "framework") error.discoveryMetrics.framework = "other";
+    if (change === "role") error.discoveryMetrics.frameworkRole = "other";
+    if (change === "code") error.code = "STAGEHAND_SOURCE_REPORT_INVALID";
+    const f = await setup({ ...job(), attempts: change === "attempt2" ? 2 : 1 }, error);
+    expect(f.client.fail).toHaveBeenCalledExactlyOnceWith(f.assigned.id, f.assigned.leaseToken, "TOOL_FAILURE", true);
+    expect(f.startWorker).toHaveBeenCalledOnce(); await f.supervisor.stop();
+  });
+  it.each(["stop", "leaseRejected"])("preserves Stagehand cooldown cancellation on %s", async change => {
+    const heartbeat = change === "leaseRejected" ? vi.fn(async () => { throw Object.assign(Error("lease"), { status: 409 }); }) :
+      vi.fn(async () => ({ job: { leaseExpiresAt: new Date(Date.now() + 90_000).toISOString() } }));
+    const f = await setup(job(), stagehandFailure(), heartbeat);
+    await vi.advanceTimersByTimeAsync(change === "stop" ? 1000 : 15000);
+    if (change === "stop") await f.supervisor.stop();
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(f.client.fail).not.toHaveBeenCalled(); expect(f.startWorker).toHaveBeenCalledOnce();
+    expect(f.supervisor.activeCount).toBe(0); await f.supervisor.stop();
+  });
+  it("clips a late Stagehand cooldown to the immutable source ceiling without queuing a doomed second source attempt", async () => {
+    const assigned = { ...job(), firstPickedUpAt: new Date(now - 230000).toISOString(), deadlineAt: new Date(now + 670000).toISOString() };
+    const f = await setup(assigned, stagehandFailure()), original = structuredClone(assigned);
+    await vi.advanceTimersByTimeAsync(9999); expect(f.client.fail).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.client.fail).toHaveBeenCalledExactlyOnceWith(assigned.id, assigned.leaseToken, "TOOL_FAILURE", false);
+    expect(f.onEvent).toHaveBeenCalledWith(expect.objectContaining({ event: "attempt_ended", code: "STAGEHAND_SOURCE_BUDGET_EXHAUSTED",
+      metrics: expect.objectContaining({ modelFailure: { turnStatus: "failed", errorCategory: "responseTooManyFailedAttempts", httpStatusCode: 429 } }) }));
+    await vi.advanceTimersByTimeAsync(60000); expect(f.startWorker).toHaveBeenCalledOnce(); expect(assigned).toEqual(original);
+    await f.supervisor.stop();
+  });
+  it("does not queue a second attempt when the worker directly reports the exhausted shared source budget", async () => {
+    const error = Object.assign(stagehandFailure(), { code: "STAGEHAND_SOURCE_BUDGET_EXHAUSTED" }), f = await setup(job(), error);
+    expect(f.client.fail).toHaveBeenCalledExactlyOnceWith(f.assigned.id, f.assigned.leaseToken, "TOOL_FAILURE", false);
+    await vi.advanceTimersByTimeAsync(60000); expect(f.startWorker).toHaveBeenCalledOnce(); await f.supervisor.stop();
+  });
   it("retains lease heartbeats for 45 seconds before the ordinary first-attempt failure is queued", async () => {
     const assigned = { ...job(), leaseExpiresAt: new Date(now + 31_000).toISOString() }, original = structuredClone(assigned);
     const f = await setup(assigned);

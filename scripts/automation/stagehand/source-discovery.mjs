@@ -12,7 +12,7 @@ import { prioritizedPublicEvidence, publicEvidenceUrl } from './public-evidence.
 import { observedBookingSourceCandidates, assertSourceCandidateBudget, nativeFrameNavigations } from './source-provenance.mjs';
 import { sourceFailureDiagnostic, sourceGuardReasons, projectActionGuardDiagnostic } from './source-diagnostic.mjs';
 
-export const SOURCE_BUDGET_MS = 120000;
+export const SOURCE_BUDGET_MS = 240000;
 export const SOURCE_FRAMEWORK_MODE = 'HYBRID_SOURCE_DISCOVERY';
 const fail = code => Object.assign(new Error(code), { code });
 export const adapterSourceProposalSchema = z.object({schemaVersion:z.literal(1),kind:z.literal('EXISTING_ADAPTER_SOURCE'),

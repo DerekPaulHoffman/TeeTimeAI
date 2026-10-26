@@ -127,7 +127,7 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
   const initialUrl = canonicalStagehandHostEntry(input.initialUrl);
   if (typeof deps.requestLease !== "function") throw reject();
   const remaining = input.deadlineAt.getTime() - Date.now();
-  if (!(remaining > 0 && remaining <= 120_000)) throw reject();
+  if (!(remaining > 0 && remaining <= 240_000)) throw reject();
   new Intl.DateTimeFormat("en-US", { timeZone: input.timeZone });
   const cancellation = new AbortController(), signal = AbortSignal.any([cancellation.signal, AbortSignal.timeout(remaining), ...(input.signal ? [input.signal] : [])]);
   const queue = createSimulatorBrowserRequestQueue(deps.requestLease, signal);

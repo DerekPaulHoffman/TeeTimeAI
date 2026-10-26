@@ -68,7 +68,8 @@ rejected. These observations confer no venue, availability or method proof.
 
 Before extraction, the source controller waits for its current owned main
 document to finish parsing and acknowledge its successful public response.
-Each wait is bounded by 30 seconds and the original 120-second source allowance.
+Each wait is bounded by 30 seconds and the shared 240-second source allowance,
+measured from the immutable first pickup across both allowed attempts.
 Ancillary pending reads do not require network idle. Fragment-only navigation
 can reuse that same document; its path, query, target and loader stay bound.
 An unparsed document cannot become an explicit unresolved model conclusion.
@@ -83,8 +84,9 @@ date verification and request/body budgets remain independently enforced.
 Source GET XHR/fetch responses use the existing 16 MB script allocation. Other
 data/documents retain 2 MB, stylesheets 6 MB, aggregate decoded resources 48 MB,
 the native tunnel 24 MB, and CDP messages 32 MB. The existing 192-request limit,
-two global/one-family request coordination and original 120-second source
-allowance remain unchanged. A valid owned initial source pause without a
+two global/one-family request coordination remain unchanged. The source
+allowance is 240 seconds from the original first pickup, clipped by the existing
+work deadline; it is never restarted per attempt. A valid owned initial source pause without a
 Network ID is denied with a confirmed, bounded `Fetch.failRequest` ACK before
 any admission or data use; unrelated source DOM may remain usable. All other
 native readers retain fatal missing-ID handling. Abort failures, malformed or
@@ -95,6 +97,16 @@ bound to the same job, request, source fingerprint, attempt and original clocks.
 Optional diagnostics may be omitted with an explicit flag and digest to preserve
 the source reference within 32 KB. They never restore source or method authority.
 Recorded completed model usage is a lower bound when a call fails partway.
+
+A current, closed Stagehand model-turn failure classified as service overload,
+or `responseTooManyFailedAttempts` with explicit HTTP 429, delays only the existing
+second job attempt by up to 45 seconds. The owned lease and heartbeats remain
+live; cancellation and original deadlines still win. This performs no internal
+generation retry, changes no model/action/resource cap and infers no account
+quota state. A cooldown that exhausts the shared source allowance ends without
+queuing a second source run. The four-minute source ceiling leaves less time
+for inspection and delivery than the prior two-minute ceiling, but keeps the
+original 12-minute work and 15-minute absolute job limits.
 
 The TeeItUp physical-contact path can verify a named public contact block using
 its complete raw and computed-visible address, scoped telephone and exact title

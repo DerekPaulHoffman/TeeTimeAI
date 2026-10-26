@@ -71,8 +71,46 @@ function setup() {
     client, cwd: process.cwd(), now: () => f.clock, sourceDiscover, browserFactory, validateRecipe, executeRecipe, beforeActivate, afterActivate, ...extra });
   return { f, events, checkpoints, sourceCalls, request, close, browserFactory, sourceDiscover, client, validateRecipe, executeRecipe, beforeActivate, afterActivate, run };
 }
+function modelFailureReport(t: ReturnType<typeof setup>) {
+  Object.assign(t.f.report, { outcome: "UNRESOLVED", adapterSourceProposal: null, frameworkFailureCode: "LOCAL_MODEL_TURN_FAILED" });
+  const diagnostic = sourceFailureDiagnostic({ error: Object.assign(Error("PRIVATE_PROVIDER_TEXT"), { code: "LOCAL_MODEL_TURN_FAILED" }),
+    phase: "EXTRACT", report: t.f.report, cleanup: { browserClosed: true, modelClosed: true }, modelAttempts: 3,
+    modelFailure: { attempt: 3, completedCalls: 2, modelTurnFailure: { turnStatus: "failed", errorCategory: "responseTooManyFailedAttempts", httpStatusCode: 429 } } });
+  (t.f.report as Record<string, unknown>).sourceDiagnostic = diagnostic;
+  return diagnostic!;
+}
 
 describe("regular Stagehand source worker", () => {
+  it.each(["EXTRACT", "OBSERVE", "ACT"])("propagates current closed %s model failure facts without provider text or inferred quota", async phase => {
+    const t = setup(); modelFailureReport(t).phase = phase;
+    const error = await t.run().catch(e => e);
+    expect(error.code).toBe("LOCAL_MODEL_TURN_FAILED");
+    expect(error.discoveryMetrics.modelFailure).toEqual({ turnStatus: "failed", errorCategory: "responseTooManyFailedAttempts", httpStatusCode: 429 });
+    expect(JSON.stringify(error.discoveryMetrics)).not.toMatch(/PRIVATE|quota/i);
+    expect(t.sourceDiscover).toHaveBeenCalledOnce(); expect(t.browserFactory).not.toHaveBeenCalled();
+  });
+  it.each(["foreign", "clock", "staleInvocation", "cleanup", "diagnosticCleanup", "phase", "evidencePhase", "transport", "private", "counts"])
+  ("does not propagate %s source diagnostics as current model retry facts", async change => {
+    const t = setup(), diagnostic = modelFailureReport(t);
+    if (change === "foreign") t.f.report.jobId = "foreign-job";
+    if (change === "clock") t.f.report.finishedAt = new Date(first + 240001).toISOString();
+    if (change === "staleInvocation") t.f.clock = first + 100000;
+    if (change === "cleanup") t.f.report.browserClosed = false;
+    if (change === "diagnosticCleanup") diagnostic.cleanup.modelClosed = false;
+    if (change === "phase") diagnostic.phase = "OPEN";
+    if (change === "evidencePhase") diagnostic.phase = "EVIDENCE";
+    if (change === "transport") diagnostic.transportCode = "LOCAL_MODEL_RPC_FAILED";
+    if (change === "private") (diagnostic as Record<string, unknown>).private = "PRIVATE";
+    if (change === "counts") diagnostic.counts.failedModelCalls = 0;
+    const error = await t.run().catch(e => e);
+    expect(error.discoveryMetrics).not.toHaveProperty("modelFailure");
+    expect(t.browserFactory).not.toHaveBeenCalled(); expect(t.client.activate).not.toHaveBeenCalled();
+  });
+  it("does not copy an upstream model failure when no current source report was returned", async () => {
+    const t = setup(); t.sourceDiscover.mockRejectedValue(Object.assign(Error("LOCAL_MODEL_TURN_FAILED"), { code: "LOCAL_MODEL_TURN_FAILED",
+      discoveryMetrics: { modelFailure: { turnStatus: "failed", errorCategory: "responseTooManyFailedAttempts", httpStatusCode: 429 } } }));
+    const error = await t.run().catch(e => e); expect(error.discoveryMetrics).not.toHaveProperty("modelFailure");
+  });
   it.each([false, true])("persists only current closed adapter read facts alongside optional delegation (%s)", async combined => {
     const t = setup(), adapterRead = { stage: "RESPONSE_HEADERS", role: "TEEITUP_DIRECTORY", httpStatus: 404,
       responseRedirected: false, responseUrlMatches: true, elapsedMs: 170, responseBytes: null, transportCode: "NONE" };
@@ -182,7 +220,7 @@ describe("regular Stagehand source worker", () => {
     const t = setup(); Object.assign(t.f.report, { outcome: "UNRESOLVED", adapterSourceProposal: null });
     const report = t.f.report as Record<string, unknown>;
     if (change === "foreign") report.jobId = "another-job";
-    if (change === "clock") report.finishedAt = new Date(first + 120001).toISOString();
+    if (change === "clock") report.finishedAt = new Date(first + 240001).toISOString();
     if (change === "cleanup") report.browserClosed = false;
     if (change === "model") report.metrics = { ...t.f.report.metrics, localCodexCalls: [{ model: "foreign-model" }] };
     if (change === "proposal") report.adapterSourceProposal = { schemaVersion: 1, kind: "EXISTING_ADAPTER_SOURCE", bookingUrl: booking };
@@ -337,7 +375,7 @@ describe("regular Stagehand source worker", () => {
         await host.close();
         return { ...t.f.report, outcome: "UNRESOLVED", adapterSourceProposal: null, frameworkFailureCode: "STAGEHAND_NATIVE_HOST_DEADLINE" };
       }, guardedBrowserFactory: args => createStagehandGuardedBrowserHost({ ...args, processFactory }) })).rejects.toThrow("STAGEHAND_NATIVE_HOST_DEADLINE");
-      expect(Date.parse(supplied.deadlineAt)).toBe(Math.min(first + 120_000, t.f.clock + 120_000));
+      expect(Date.parse(supplied.deadlineAt)).toBe(Math.min(first + 240_000, t.f.clock + 240_000));
       expect(supplied.job.firstPickedUpAt).toBe(t.f.job.firstPickedUpAt);
       expect(supplied.job.deadlineAt).toBe(t.f.job.deadlineAt);
       expect(processFactory).toHaveBeenCalledOnce(); expect(close).toHaveBeenCalledOnce();
@@ -350,11 +388,11 @@ describe("regular Stagehand source worker", () => {
     await expect(t.run()).rejects.toThrow("DISCOVERY_JOB_INVALID"); expect(t.sourceDiscover).not.toHaveBeenCalled();
   });
 
-  it("reproduces the old future-database-clock host guard without spawning, and never widens that guard", async () => {
+  it("rejects an unclipped future-database-clock deadline above the four-minute host ceiling without spawning", async () => {
     const clock = vi.spyOn(Date, "now").mockReturnValue(first - 2000), processFactory = vi.fn();
     try {
       await expect(createStagehandGuardedBrowserHost({ cwd: process.cwd(), initialUrl: official, timeZone: "UTC",
-        deadlineAt: new Date(first + 120_000).toISOString(), helperEnvironment: { COURSE_DISCOVERY_BROWSER_TRANSPORT: "NATIVE_CHROME",
+        deadlineAt: new Date(first + 240_000).toISOString(), helperEnvironment: { COURSE_DISCOVERY_BROWSER_TRANSPORT: "NATIVE_CHROME",
           COURSE_DISCOVERY_JOB_KIND: "discovery", COURSE_DISCOVERY_JOB_ID: "owned", COURSE_DISCOVERY_LEASE_TOKEN: "private" }, processFactory })).rejects.toThrow("STAGEHAND_NATIVE_HOST_DEADLINE");
       expect(processFactory).not.toHaveBeenCalled();
     } finally { clock.mockRestore(); }
@@ -390,14 +428,14 @@ describe("regular Stagehand source worker", () => {
     expect(Object.keys(args.job).sort()).toEqual(["deadlineAt", "firstPickedUpAt", "id", "request"]);
     expect(Object.keys(args.job.request).sort()).toEqual(["identity", "input", "target"]);
     expect(JSON.stringify(args)).not.toMatch(/PRIVATE_HINT|old-known|leaseToken|private-new|canonicalCoursePhone|15555550123|PRIVATE_BACKEND_TOKEN|owned-search/);
-    expect(args.deadlineAt).toBe(new Date(first + 120_000).toISOString());
+    expect(args.deadlineAt).toBe(new Date(first + 240_000).toISOString());
     expect(t.browserFactory.mock.calls[0][0]).toMatchObject({ requestedInput: t.f.job.request.input, trustedContext: t.f.job.request.trustedContext });
   });
 
-  it("uses same-job source checkpoint on attempt2 beyond120s, but runs a new native inspector and zero new models", async () => {
+  it("uses same-job source checkpoint on attempt2 beyond240s, but runs a new native inspector and zero new models", async () => {
     const t = setup(); t.f.job.attempts = 2;
     t.f.job["checkpoint"] = { stagehandSource: createStagehandSourceCheckpoint({ ...t.f.job, attempts: 1 }, t.f.report) };
-    t.f.clock = first + 140_000;
+    t.f.clock = first + 260_000;
     const result = await t.run();
     expect(t.sourceDiscover).not.toHaveBeenCalled(); expect(t.browserFactory).toHaveBeenCalledOnce();
     expect(result.metrics).toMatchObject({ sourceResumed: true, modelCalls: 0, sourceElapsedMs: 0, tokenUsage: {} });
@@ -419,14 +457,25 @@ describe("regular Stagehand source worker", () => {
     expect(t.browserFactory).not.toHaveBeenCalled(); expect(t.client.candidate).not.toHaveBeenCalled();
   });
 
-  it("missing checkpoint after source120s never starts another model run or resets original deadline", async () => {
-    const t = setup(); t.f.job.attempts = 2; t.f.clock = first + 121_000;
+  it("missing checkpoint after source240s never starts another model run or resets original deadline", async () => {
+    const t = setup(); t.f.job.attempts = 2; t.f.clock = first + 241_000;
     await expect(t.run()).rejects.toMatchObject({ code: "STAGEHAND_SOURCE_BUDGET_EXHAUSTED" });
     expect(t.sourceDiscover).not.toHaveBeenCalled(); expect(t.browserFactory).not.toHaveBeenCalled();
   });
+  it("leaves 137 seconds after a 58-second first source and 45-second cooldown, without restarting the shared clock", async () => {
+    const t = setup(); t.f.job.attempts = 2; t.f.clock = first + 103000;
+    t.sourceDiscover.mockImplementation(async args => {
+      const sourceArgs = args as { deadlineAt: string }; t.sourceCalls.push(args); expect(Date.parse(sourceArgs.deadlineAt) - t.f.clock).toBe(137000);
+      Object.assign(t.f.report, { startedAt: new Date(t.f.clock).toISOString(), finishedAt: new Date(t.f.clock + 1000).toISOString(), workDeadlineAt: sourceArgs.deadlineAt });
+      t.f.clock += 1000; return t.f.report;
+    });
+    const original = { firstPickedUpAt: t.f.job.firstPickedUpAt, deadlineAt: t.f.job.deadlineAt };
+    await t.run(); expect(t.sourceDiscover).toHaveBeenCalledOnce();
+    expect(t.f.job).toMatchObject(original); expect(t.f.job.attempts).toBe(2);
+  });
 
   it("retains returned completed-call lower bounds when source completes at the deadline without a metrics callback", async () => {
-    const t = setup(); t.sourceDiscover.mockImplementation(async () => { t.f.clock = first + 120_000; return t.f.report; });
+    const t = setup(); t.sourceDiscover.mockImplementation(async () => { t.f.clock = first + 240_000; return t.f.report; });
     await expect(t.run()).rejects.toMatchObject({ code: "STAGEHAND_SOURCE_BUDGET_EXHAUSTED", discoveryMetrics: {
       modelCalls: 2, tokenUsage: { totalTokens: 20, inputTokens: 16, outputTokens: 4 }, sourceUsageRecordedLowerBound: true } });
     expect(t.browserFactory).not.toHaveBeenCalled(); expect(t.client.candidate).not.toHaveBeenCalled();
