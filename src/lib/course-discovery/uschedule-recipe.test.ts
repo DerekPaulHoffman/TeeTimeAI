@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { executeAccessRecipe } from "./executor";
 import { inspectExistingAdapter } from "./existing-adapter-executor";
 import { hashAccessRecipe, parseAccessRecipe } from "./recipe";
@@ -33,8 +33,18 @@ function responses(options: { ignoreDate?: boolean; ignoreDuration?: boolean; ch
   };
 }
 const deps = { now: () => new Date("2030-10-19T12:00:00Z"), requestLease: async <T>(_family: string, work: () => Promise<T>) => ({ acquired: true as const, value: await work() }) };
-const input = { date: "2030-10-23", durationMinutes: 60, timeZone: "America/New_York", players: 4, startTime: "09:00", endTime: "18:00" };
+// This legacy fixture proves one available bay, not multi-attendee capacity.
+const input = { date: "2030-10-23", durationMinutes: 60, timeZone: "America/New_York", players: 1, startTime: "09:00", endTime: "18:00" };
 describe("learned USchedule fixed public reader", () => {
+  it.each([2, 3, 4])("rejects unproven %i-attendee use before any provider read", async players => {
+    const fetch = vi.fn(responses());
+    const result = await executeAccessRecipe(recipe, { ...input, players }, { ...deps, fetch });
+    expect(result).toMatchObject({ status: "INCOMPLETE", complete: false, slots: [], evidence: {
+      reason: "USCHEDULE_PUBLIC_PARTY_UNVERIFIED", venueVerified: false, dateVerified: false, capacityVerified: false,
+      durationVerified: false, completeVerified: false,
+    } });
+    expect(fetch).not.toHaveBeenCalled();
+  });
   it("discovers selected rental metadata only from the matching public tenant", async () => {
     const inspected = await inspectExistingAdapter(recipe.source, { ...deps, fetch: responses(), venueMatches: () => true });
     expect(inspected.adapter).toEqual(recipe.adapter);
@@ -57,8 +67,10 @@ describe("learned USchedule fixed public reader", () => {
     expect(second.slots.every(slot => slot.availableSpots === 1 && slot.capacity === null && slot.productId === "72" && slot.resourceId === "ANY")).toBe(true);
   });
   it.each([{ ignoreDate: true }, { ignoreDuration: true }, { changedService: true }, { neverComplete: true }])("never treats stale or partial listing as empty: %j", async options => {
-    const result = await executeAccessRecipe(recipe, { ...input, durationMinutes: 120 }, { ...deps, fetch: responses(options) });
+    const fetch = vi.fn(responses(options));
+    const result = await executeAccessRecipe(recipe, { ...input, durationMinutes: 120 }, { ...deps, fetch });
     expect(result.complete).toBe(false); expect(result.status).not.toBe("EMPTY"); expect(result.slots).toEqual([]);
+    expect(result.evidence.reason).not.toBe("USCHEDULE_PUBLIC_PARTY_UNVERIFIED"); expect(fetch).toHaveBeenCalled();
   });
   it.each(["Example Golf Annex", "Other Example Golf", "Example Golfer", "Example"]) ("rejects venue/tenant mismatch: %s", async venueName => {
     const result = await executeAccessRecipe({ ...recipe, source: { ...recipe.source, venueName } }, input, { ...deps, fetch: responses() });
