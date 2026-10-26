@@ -22,6 +22,61 @@ function attr(node: Element, name: string) { return node.attrs.find(value => val
 function text(node: Node): string {
   return "value" in node ? node.value : "childNodes" in node ? node.childNodes.map(text).join(" ") : "";
 }
+function publicControlUnsafe(n: Node) {
+  let current: Node | undefined = n;
+  for (let depth = 0; current && depth < 64; depth++, current = "parentNode" in current ? current.parentNode ?? undefined : undefined) {
+    if (!("tagName" in current)) continue;
+    if (["form", "template", "script", "style", "noscript", "iframe"].includes(current.tagName) ||
+        current.attrs.some(a => ["hidden", "inert", "disabled", "onclick"].includes(a.name) || ["aria-hidden", "aria-disabled"].includes(a.name) && a.value === "true") ||
+        /display\s*:\s*none|visibility\s*:\s*(?:hidden|collapse)|(?:^|;)\s*opacity\s*:\s*0(?:\.0*)?\s*(?:!important\s*)?(?:;|$)/iu.test(attr(current, "style") ?? "") ||
+        /\b(?:hidden|d-none|invisible|visually-hidden|sr-only|private|members?|account|profile|checkout|payment|billing|login)\b/iu.test(["id", "class", "aria-label", "title"].map(k => attr(current as Element, k) ?? "").join(" "))) return true;
+  }
+  return current !== undefined;
+}
+function rentalNotes(nodes: Element[]) {
+  const cls = (n: Element, name: string) => (attr(n, "class") ?? "").split(/\s/u).includes(name);
+  const grids = nodes.filter(n => cls(n, "time_choices")), parent = grids.length === 1 ? grids[0].parentNode : undefined;
+  if (!parent || !("tagName" in parent) || !cls(parent, "choices") || !parent.parentNode) return [];
+  const siblings = "childNodes" in parent.parentNode ? parent.parentNode.childNodes.filter((n): n is Element => "tagName" in n) : [];
+  // Inline spans may split a word in the source. DOM textContent concatenates
+  // those text nodes; insert no invented space inside an inline word.
+  const inline = (n: Node): string => "value" in n ? n.value : "tagName" in n && n.tagName === "br" ? " " : "childNodes" in n ? n.childNodes.map(inline).join("") : "";
+  return siblings.slice(siblings.indexOf(parent) + 1).filter(n => cls(n, "card"))
+    .flatMap(card => elements(card).filter(n => n.tagName === "li" && !publicControlUnsafe(n) && !elements(n).some(c => publicControlUnsafe(c) || ["li", "input", "select", "button", "textarea"].includes(c.tagName))))
+    .map(n => inline(n).normalize("NFKC").replace(/\s+/gu, " ").trim());
+}
+export function readUSchedulePublicRentalNotes(html: string) {
+  if (Buffer.byteLength(html) > 600_000) return [];
+  const nodes = elements(parse(html)); return nodes.length <= 20_000 ? rentalNotes(nodes) : [];
+}
+/** Only a literal public people selector plus explicit per-bay rental pricing
+ * changes group_size from the legacy one-unit interpretation. */
+export function readUSchedulePublicPeopleControl(html: string) {
+  const absent = { roleClaimed: false, valid: false, selectedPeople: undefined as number | undefined, values: [] as string[] };
+  if (Buffer.byteLength(html) > 600_000) return { ...absent, roleClaimed: true };
+  const nodes = elements(parse(html)); if (nodes.length > 20_000) return { ...absent, roleClaimed: true };
+  const groups = nodes.filter(n => n.tagName === "select" && attr(n, "id") === "select_group_size");
+  if (!groups.length) return absent;
+  const clean = (n: Node) => text(n).normalize("NFKC").replace(/\s+/gu, " ").trim();
+  const labels = nodes.filter(n => n.tagName === "label" && attr(n, "for") === "select_group_size");
+  const roleClaimed = labels.some(n => clean(n) === "Choose # of People") || nodes.some(n => attr(n, "id") === "group_size_section") &&
+    nodes.some(n => n.tagName === "label" && attr(n, "for") === "select_length" && clean(n) === "Choose Time");
+  if (!roleClaimed) return absent;
+  const invalid = { ...absent, roleClaimed: true };
+  const sections = nodes.filter(n => attr(n, "id") === "group_size_section"), services = nodes.filter(n => n.tagName === "select" && attr(n, "id") === "select_service");
+  const selected = services.length === 1 ? elements(services[0]).filter(n => n.tagName === "option" && attr(n, "selected") !== undefined) : [];
+  if (groups.length !== 1 || sections.length !== 1 || !elements(sections[0]).includes(groups[0]) || labels.length !== 1 ||
+      !elements(sections[0]).includes(labels[0]) || clean(labels[0]) !== "Choose # of People" || publicControlUnsafe(labels[0]) || elements(labels[0]).some(publicControlUnsafe) || publicControlUnsafe(groups[0]) ||
+      selected.length !== 1 || !isUSchedulePublicRentalLabel(clean(selected[0])) || /\b(?:private|members?|account|events?)\b/iu.test(clean(selected[0])) || publicControlUnsafe(selected[0]) || !/^[1-9]\d{0,9}$/u.test(attr(selected[0], "value") ?? "") ||
+      (attr(groups[0], "onchange") ?? "").replace(/\s/gu, "") !== "groupSizeChanged();" ||
+      nodes.some(n => n.tagName === "select" && (attr(n, "id") === "select_units_to_book" || (attr(n, "class") ?? "").split(/\s/u).includes("resSelect")))) return invalid;
+  const notes = rentalNotes(nodes), costs = notes.filter(v => /\b(?:costs?|pricing|prices?|charged)\b.*\bper (?:bay|player)\b/iu.test(v));
+  if (costs.length !== 1 || costs[0] !== "Playing costs are per bay, not per player.") return invalid;
+  const options = elements(groups[0]).filter(n => n.tagName === "option"), values = options.map(n => attr(n, "value") ?? clean(n));
+  const chosen = options.filter(n => attr(n, "selected") !== undefined);
+  if (!options.length || options.length > 20 || options.some((n, i) => publicControlUnsafe(n) || !/^[1-9]\d?$/u.test(values[i]) || clean(n) !== values[i]) || new Set(values).size !== values.length || chosen.length !== 1) return invalid;
+  return { roleClaimed: true, valid: true, selectedPeople: Number(attr(chosen[0], "value") ?? clean(chosen[0])), values };
+}
 /** The pinned bookingBS5 unitsToBookChanged handler sends units_to_book,
  * not group_size. Its public unit quantity is never a golfer count. */
 export function readUSchedulePublicUnitsControl(html: string) {
@@ -33,17 +88,7 @@ export function readUSchedulePublicUnitsControl(html: string) {
   if (!units.length) return absent;
   const invalid = { ...absent, present: true };
   const clean = (n: Node) => text(n).normalize("NFKC").replace(/\s+/gu, " ").trim();
-  const unsafe = (n: Node) => {
-    let current: Node | undefined = n;
-    for (let depth = 0; current && depth < 64; depth++, current = "parentNode" in current ? current.parentNode ?? undefined : undefined) {
-      if (!("tagName" in current)) continue;
-      if (["form", "template", "script", "style", "noscript", "iframe"].includes(current.tagName) ||
-          current.attrs.some(a => ["hidden", "inert", "disabled", "onclick"].includes(a.name) || ["aria-hidden", "aria-disabled"].includes(a.name) && a.value === "true") ||
-          /display\s*:\s*none|visibility\s*:\s*(?:hidden|collapse)|(?:^|;)\s*opacity\s*:\s*0(?:\.0*)?\s*(?:!important\s*)?(?:;|$)/iu.test(attr(current, "style") ?? "") ||
-          /\b(?:hidden|d-none|invisible|visually-hidden|sr-only|private|members?|account|profile|checkout|payment|billing|login)\b/iu.test(["id", "class", "aria-label", "title"].map(k => attr(current as Element, k) ?? "").join(" "))) return true;
-    }
-    return current !== undefined;
-  };
+  const unsafe = publicControlUnsafe;
   const services = nodes.filter(n => n.tagName === "select" && attr(n, "id") === "select_service");
   const selected = services.length === 1 ? elements(services[0]).filter(n => n.tagName === "option" && attr(n, "selected") !== undefined) : [];
   const unit = selected.length === 1 ? /^(suite|bay|simulator) rentals?$/iu.exec(clean(selected[0]))?.[1].toLowerCase() : undefined;
@@ -54,7 +99,7 @@ export function readUSchedulePublicUnitsControl(html: string) {
   const labels = sectionNodes.filter(n => n.tagName === "label");
   // Some public templates point this label at select_group_size. Require the
   // sole real units selector inside the exact same section instead of guessing.
-  if (!sectionNodes.includes(units[0]) || labels.length !== 1 || unsafe(labels[0]) ||
+  if (!sectionNodes.includes(units[0]) || labels.length !== 1 || unsafe(labels[0]) || elements(labels[0]).some(publicControlUnsafe) ||
       !["select_group_size", "select_units_to_book"].includes(attr(labels[0], "for") ?? "") ||
       clean(labels[0]).toLowerCase() !== `number of ${unit}s to book` ||
       (attr(units[0], "onchange") ?? "").replace(/\s/gu, "") !== "unitsToBookChanged();") return invalid;
@@ -87,7 +132,7 @@ function validDate(value: string, format: "US" | "ISO") {
  * are never authorized. Each instance is bound to successfully read public HTML
  * and its current rental options; it does not store or forward session cookies.
  */
-export function createUSchedulePublicReadPolicy(context: { officialLocation?: UScheduleOfficialLocationProof } = {}) {
+export function createUSchedulePublicReadPolicy(context: { officialLocation?: UScheduleOfficialLocationProof; requestedPlayers?: number } = {}) {
   const sources = new Map<string, Map<string, Set<string>>>();
   const nextAvailableSources = new Set<string>();
   const locationSources = new Map<string, { filters: Map<string, Set<string>>; clientUrl: string }>();
@@ -132,14 +177,16 @@ export function createUSchedulePublicReadPolicy(context: { officialLocation?: US
         return selects.length === 1 ? elements(selects[0]).filter(node => node.tagName === "option") : [];
       };
       const units = readUSchedulePublicUnitsControl(body);
+      const people = readUSchedulePublicPeopleControl(body), requested = context.requestedPlayers;
       const services = options("select_service").filter(node => isUSchedulePublicRentalLabel(text(node)) &&
-        (!/^suite rentals?$/iu.test(text(node).trim()) || units.valid && units.selectedOne) && publicId.test(attr(node, "value") ?? "") && attr(node, "value") !== "0");
+        (!/^suite rentals?$/iu.test(text(node).trim()) || units.valid && units.selectedOne || people.valid) && publicId.test(attr(node, "value") ?? "") && attr(node, "value") !== "0");
       const lengths = options("select_length").filter(node => /^(?:[1-9]\d{0,2})$/u.test(attr(node, "value") ?? "") && Number(attr(node, "value")) >= 15 && Number(attr(node, "value")) <= 480);
       if (!services.length || !lengths.length) return false;
       const filters = new Map<string, Set<string>>([
         ["service_id", new Set(services.map(node => attr(node, "value")!))],
         ["length", new Set(lengths.map(node => attr(node, "value")!))],
-        ["group_size", new Set(options("select_group_size").some(node => (attr(node, "value") ?? text(node).trim()) === "1") ? ["1"] : [])],
+        ["group_size", new Set(people.roleClaimed ? people.valid && Number.isInteger(requested) && requested! >= 1 && requested! <= 4 && people.values.includes(String(requested)) ? [String(requested)] : [] :
+          options("select_group_size").some(node => (attr(node, "value") ?? text(node).trim()) === "1") ? ["1"] : [])],
       ]);
       filters.set("units_to_book", new Set(units.valid && units.selectedOne ? ["1"] : []));
       // The public service-type handler is a catalog filter, never a booking.

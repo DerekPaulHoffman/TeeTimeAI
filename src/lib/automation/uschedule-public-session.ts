@@ -14,11 +14,14 @@ import { isUSchedulePublicHost } from "@/lib/simulators/providers/public-configu
 export function createUSchedulePublicSession(sourceUrl: string, deps: {
   requestLease?: <T>(family: string, work: () => Promise<T>) => Promise<{ acquired: true; value: T } | { acquired: false }>; fetch?: typeof fetch; deadlineAt?: Date;
   officialLocation?: UScheduleOfficialLocationProof;
+  /** Ordinary requested golfers, used only by a freshly proven PEOPLE control. */
+  requestedPlayers?: number;
   /** Private engineering capture only, after the existing bounded body read.
    * No cookie/header/URL is exposed and no transport stream is read twice. */
   onPublicRead?: (read: Readonly<{ method: "GET" | "POST"; requestBody?: string; status: number; responseText: string }>) => unknown;
 } = {}) {
   const source = new URL(sourceUrl);
+  if (deps.requestedPlayers !== undefined && (!Number.isInteger(deps.requestedPlayers) || deps.requestedPlayers < 1 || deps.requestedPlayers > 4)) throw new Error("INVALID_ADAPTER_SOURCE");
   const locationEntry = deps.officialLocation && parseUScheduleLocationSource(deps.officialLocation.entryUrl);
   const parsed = parseUScheduleLocationSource(sourceUrl);
   const filteredLocation = parsed && locationEntry && parsed.canonicalUrl === locationEntry.canonicalUrl && parsed.locationId === locationEntry.locationId;
@@ -28,7 +31,7 @@ export function createUSchedulePublicSession(sourceUrl: string, deps: {
   const timeout = AbortSignal.timeout(Math.max(1, Math.min(120_000, (deps.deadlineAt?.getTime() ?? Date.now() + 120_000) - Date.now())));
   const signal = AbortSignal.any([controller.signal, timeout]);
   const queue = createSimulatorBrowserRequestQueue(deps.requestLease ?? runWithProviderRequestLease, signal);
-  const policy = createUSchedulePublicReadPolicy({ officialLocation: deps.officialLocation });
+  const policy = createUSchedulePublicReadPolicy({ officialLocation: deps.officialLocation, requestedPlayers: deps.requestedPlayers });
   let cookie: string | undefined, cursor: string | undefined, requests = 0, bytes = 0, closed = false, failure: string | undefined;
   let canonicalDocument: string | undefined;
   const currentDocument = () => canonicalDocument ?? source.href;

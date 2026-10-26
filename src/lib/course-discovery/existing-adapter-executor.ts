@@ -691,8 +691,8 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
         capacity = proof.maxPartySize;
       }
       if (capacity !== null && input.players > capacity) fail("USCHEDULE_PUBLIC_PARTY_UNVERIFIED");
-      uscheduleSession = createUSchedulePublicSession(recipe.source.bookingUrl, deps);
-      const available = await fetchUScheduleRecipeAvailability({ date: input.date, durationMinutes: input.durationMinutes!, partySize: 1,
+      uscheduleSession = createUSchedulePublicSession(recipe.source.bookingUrl, { ...deps, requestedPlayers: input.players });
+      const available = await fetchUScheduleRecipeAvailability({ date: input.date, durationMinutes: input.durationMinutes!, partySize: 1, requestedPlayers: input.players,
         timeZone: input.timeZone, offering: { id: recipe.target.offeringId!, courseId: recipe.target.courseId, bookingUrl: recipe.source.bookingUrl,
           providerFamilyKey: "USCHEDULE", active: true, publicAccessStatus: "PUBLIC", providerMetadata: { tenant: adapter.tenant, serviceId: adapter.serviceId },
           maxPartySize: null, supportedDurationsMinutes: [input.durationMinutes!] } }, adapter, uscheduleSession.read);

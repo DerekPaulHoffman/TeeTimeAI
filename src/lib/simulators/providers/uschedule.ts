@@ -4,7 +4,7 @@ import { z } from "zod";
 import { createHash } from "node:crypto";
 
 import { fetchWithProviderTimeout } from "@/lib/adapters/fetch-with-timeout";
-import { isUSchedulePublicRentalLabel, readUSchedulePublicUnitsControl } from "@/lib/automation/uschedule-public-read-policy";
+import { isUSchedulePublicRentalLabel, readUSchedulePublicUnitsControl, readUSchedulePublicPeopleControl, readUSchedulePublicRentalNotes } from "@/lib/automation/uschedule-public-read-policy";
 import { readUScheduleNextAvailableView } from "@/lib/automation/uschedule-public-view-control";
 import { simulatorPublicConfigurationSchema, uschedulePublicTenant, type USchedulePublicConfiguration } from "./public-configuration";
 import { SimulatorAvailabilityError, type SimulatorAvailabilityInput, type SimulatorAvailabilityResult,
@@ -53,7 +53,7 @@ function accessChanged(html: string) {
       node.tagName === "input" && attr(node, "type") === "password" ||
       node.tagName === "iframe" && /recaptcha|hcaptcha|challenges\.cloudflare/iu.test(attr(node, "src") ?? ""));
 }
-type LearnedRental = { serviceId: string; serviceName: string; durationMinutes: number; date?: string; tenant?: string;
+type LearnedRental = { serviceId: string; serviceName: string; durationMinutes: number; date?: string; tenant?: string; requestedPlayers?: number;
   publicLocationProof?: USchedulePublicLocationProof };
 function selectedRental(html: string, learned?: LearnedRental) {
   if (accessChanged(html)) throw sourceError("The public simulator scheduler now requires interactive access");
@@ -75,13 +75,16 @@ function selectedRental(html: string, learned?: LearnedRental) {
   if (learned) {
     const units = readUSchedulePublicUnitsControl(html);
     if (units.present && (!units.valid || !units.selectedOne)) throw sourceError("The selected public rental changed");
+    const people = readUSchedulePublicPeopleControl(html);
+    if (people.roleClaimed && (!people.valid || !Number.isInteger(learned.requestedPlayers) || learned.requestedPlayers! < 1 || learned.requestedPlayers! > 4 || people.selectedPeople !== learned.requestedPlayers))
+      throw sourceError("The selected public rental changed");
     const service = services.filter(selected), length = lengths.filter(selected);
     const groupSize = all.filter(node => node.tagName === "select" && attr(node, "id") === "select_group_size");
     const selectedGroup = groupSize.length === 1 ? elements(groupSize[0]).filter(node => node.tagName === "option" && selected(node)) : [];
     const resources = all.filter(node => node.tagName === "select" && (attr(node, "class") ?? "").split(/\s/u).includes("resSelect"));
     if (service.length !== 1 || attr(service[0], "value") !== learned.serviceId || visibleText(service[0]).replace(/\s+/gu, " ").trim() !== learned.serviceName ||
         length.length !== 1 || Number(attr(length[0], "value")) !== learned.durationMinutes ||
-        groupSize.length > 1 || groupSize.length === 1 && (selectedGroup.length !== 1 || (attr(selectedGroup[0], "value") ?? visibleText(selectedGroup[0]).trim()) !== "1") ||
+        groupSize.length > 1 || !people.roleClaimed && groupSize.length === 1 && (selectedGroup.length !== 1 || (attr(selectedGroup[0], "value") ?? visibleText(selectedGroup[0]).trim()) !== "1") ||
         resources.some(node => { const values = elements(node).filter(option => option.tagName === "option" && selected(option));
           return values.length !== 1 || attr(values[0], "value") !== "-1"; })) throw sourceError("The selected public rental changed");
     return { serviceId: learned.serviceId, durationMinutes: learned.durationMinutes };
@@ -138,19 +141,20 @@ function publicTimeGrid(all: Element[], learned: LearnedRental | undefined, html
     return current !== undefined;
   };
   const units = readUSchedulePublicUnitsControl(html), unitsProfile = units.present && units.valid && units.selectedOne;
-  if (!learned || learned.publicLocationProof || !(learned.serviceName === "Public Tee Times" && !units.present || unitsProfile) || grids.length !== 1 ||
+  const people = readUSchedulePublicPeopleControl(html), peopleProfile = people.roleClaimed && people.valid;
+  if (!learned || learned.publicLocationProof || !(learned.serviceName === "Public Tee Times" && !units.present && !people.roleClaimed || unitsProfile || peopleProfile) || grids.length !== 1 ||
       all.some(node => cls(node, "next_avail_results") || cls(node, "next_avail_item") || attr(node, "id") === "more_next_avail")) return invalid();
   const grid = grids[0], parent = "parentNode" in grid ? grid.parentNode : undefined;
-  if (grid.tagName !== "div" || !parent || !("tagName" in parent) || !cls(parent, "choices") || !cls(parent, "full") || unsafe(grid) ||
-      all.filter(node => cls(node, "choices") && cls(node, "full")).length !== 1) return invalid();
+  if (grid.tagName !== "div" || !parent || !("tagName" in parent) || !cls(parent, "choices") || !peopleProfile && !cls(parent, "full") || unsafe(grid) ||
+      all.filter(node => cls(node, "choices") && (peopleProfile || cls(node, "full"))).length !== 1) return invalid();
   const rows = children(grid).filter(node => cls(node, "timeslot"));
   if (!rows.length || rows.length > MAX_PUBLIC_GRID_STARTS || rows.length !== allRows.length || rows.filter(node => cls(node, "selected")).length > 1 ||
       children(grid).some(node => !rows.includes(node) && !["show-extra-row", "hide-extra-row"].includes(attr(node, "id") ?? ""))) return invalid();
   const lengthLabels = all.filter(node => node.tagName === "label" && attr(node, "for") === "select_length");
-  if (lengthLabels.length !== 1 || clean(lengthLabels[0]) !== (unitsProfile ? "Choose Time" : "Choose Simulator Time") || unsafe(lengthLabels[0])) return invalid();
+  if (lengthLabels.length !== 1 || clean(lengthLabels[0]) !== (unitsProfile || peopleProfile ? "Choose Time" : "Choose Simulator Time") || unsafe(lengthLabels[0])) return invalid();
   const pools = all.filter(node => node.tagName === "select" && cls(node, "resSelect"));
   let resourceId: string;
-  if (unitsProfile) {
+  if (unitsProfile || peopleProfile) {
     if (pools.length) return invalid();
     resourceId = `uschedule-service:${learned.serviceId}:pooled`;
   } else {
@@ -170,14 +174,12 @@ function publicTimeGrid(all: Element[], learned: LearnedRental | undefined, html
   // These notes limit the public party, not the physical capacity of a suite.
   // Only visible, control-free notes beside this current grid are considered.
   let publicPartyLimit: number | null = null;
-  if (unitsProfile) {
-    const siblings = parent.parentNode && "childNodes" in parent.parentNode ? children(parent.parentNode) : [];
-    const cards = siblings.slice(siblings.indexOf(parent) + 1).filter(node => cls(node, "card"));
-    const notes = cards.flatMap(card => elements(card).filter(node => node.tagName === "li" && !elements(node).some(child => ["li", "input", "select", "button", "textarea"].includes(child.tagName)) && !unsafe(node)))
-      .map(clean).filter(value => /\b(?:maximum|max|up to|only)\b/iu.test(value) && /\b(?:people|players?|golfers?|persons?)\b/iu.test(value) && /\b(?:simulators?|suites?|bays?)\b/iu.test(value));
+  if (unitsProfile || peopleProfile) {
+    const notes = readUSchedulePublicRentalNotes(html).filter(value => /\b(?:maximum|max|up to|only)\b/iu.test(value) && /\b(?:people|players?|golfers?|persons?)\b/iu.test(value) && /\b(?:simulators?|suites?|bays?)\b/iu.test(value));
     const limits = notes.map(value => {
       const match = /^(?:A )?maximum of ([1-9]\d?) (?:people|players?|golfers?|persons?) can compete on simulators at one time(?: \(additional space for guests at (?:suite|bay|simulator) bars and main bar\))?\.?$/iu.exec(value) ??
-        /^(?:A )?maximum of ([1-9]\d?) (?:people|players?|golfers?|persons?) per (?:suite|bay|simulator)\.?$/iu.exec(value);
+        /^(?:A )?maximum of ([1-9]\d?) (?:people|players?|golfers?|persons?) per (?:suite|bay|simulator)\.?$/iu.exec(value) ??
+        /^Each (?:bay|suite|simulator) can accommodate up to ([1-9]\d?) (?:people|players?|golfers?|persons?) max(?: \(strictly enforced regardless of # of people golfing\))?\.?$/iu.exec(value);
       return match ? Number(match[1]) : undefined;
     });
     if (limits.some(value => value === undefined) || new Set(limits).size > 1) return invalid();
@@ -185,13 +187,13 @@ function publicTimeGrid(all: Element[], learned: LearnedRental | undefined, html
   }
   const extras = rows.filter(node => cls(node, "extra"));
   const show = all.filter(node => attr(node, "id") === "show-extra-row"), hide = all.filter(node => attr(node, "id") === "hide-extra-row");
-  if (extras.length) {
+  if (extras.length || peopleProfile && (show.length || hide.length)) {
     const shownLabel = show.length === 1 ? children(show[0]) : [], hiddenLabel = hide.length === 1 ? children(hide[0]) : [];
     if (show.length !== 1 || hide.length !== 1 || show[0].parentNode !== grid || hide[0].parentNode !== grid || unsafe(show[0]) ||
         show[0].attrs.some(value => !["id", "class"].includes(value.name)) || hide[0].attrs.some(value => !["id", "class", "style"].includes(value.name)) ||
         shownLabel.length !== 1 || hiddenLabel.length !== 1 || [shownLabel[0], hiddenLabel[0]].some(node => node.tagName !== "span" || attr(node, "class") !== "no_time" || node.attrs.length !== 1) ||
         children(shownLabel[0]).length !== 1 || children(shownLabel[0])[0].tagName !== "text" || children(shownLabel[0])[0].attrs.length !== 0 || children(children(shownLabel[0])[0]).length !== 0 || children(hiddenLabel[0]).length !== 0 ||
-        Number(/^Show Additional Times\s*\(\s*([1-9]\d{0,2})\s+more\s*\)$/u.exec(clean(show[0]))?.[1]) !== extras.length || clean(hide[0]) !== "Hide Additional Times" ||
+        Number(/^Show Additional Times\s*\(\s*(0|[1-9]\d{0,2})\s+more\s*\)$/u.exec(clean(show[0]))?.[1]) !== extras.length || clean(hide[0]) !== "Hide Additional Times" ||
         (attr(hide[0], "style") ?? "").replace(/\s|;/gu, "").toLowerCase() !== "display:none" || rows.length === extras.length) return invalid();
   } else if (show.length || hide.length) return invalid();
   let extraStarted = false;
@@ -399,7 +401,9 @@ export function inspectUScheduleRecipeConfiguration(html: string, sourceUrl: str
   if (current.length !== 1) return reject("SELECTED_RENTAL");
   if (!durations.length || durations.length > MAX_PUBLIC_DURATION_CHOICES || new Set(durations).size !== durations.length) return reject("DURATION_CATALOG");
   const units = readUSchedulePublicUnitsControl(html);
-  if (units.present && (!units.valid || !units.selectedOne) || /^suite rentals?$/iu.test(current[0].serviceName) && !units.present) return reject("SELECTORS");
+  const people = readUSchedulePublicPeopleControl(html);
+  if (units.present && (!units.valid || !units.selectedOne) || /^suite rentals?$/iu.test(current[0].serviceName) && !units.present && !people.valid) return reject("SELECTORS");
+  if (people.roleClaimed && !people.valid) return reject("SELECTORS");
   return { tenant, rentals, durations, selected: current[0] };
 }
 
@@ -459,7 +463,7 @@ export async function prepareUScheduleLocationCatalog(official: UScheduleOfficia
 
 /** Fixed read-only learned path; every page proves selected product, one bay,
  * duration, chronological cursor progress and a later-day completeness witness. */
-export async function fetchUScheduleRecipeAvailability(input: SimulatorAvailabilityInput, service: { serviceId: string; serviceName: string; publicLocationProof?: USchedulePublicLocationProof },
+export async function fetchUScheduleRecipeAvailability(input: SimulatorAvailabilityInput & { requestedPlayers?: number }, service: { serviceId: string; serviceName: string; publicLocationProof?: USchedulePublicLocationProof },
   fetchImpl: typeof fetch, diagnostics?: { onListingPage?: (html: string) => void }): Promise<SimulatorAvailabilityResult & { publicPartyLimit?: number | null }> {
   let url = new URL(service.publicLocationProof?.official.entryUrl ?? input.offering.bookingUrl);
   const signal = AbortSignal.timeout(90_000);
@@ -494,22 +498,33 @@ export async function fetchUScheduleRecipeAvailability(input: SimulatorAvailabil
       const selectedUnits = readUSchedulePublicUnitsControl(page.body);
       if (!selectedUnits.valid || !selectedUnits.selectedOne) throw sourceError("The public single-unit selector changed");
     }
+    const people = readUSchedulePublicPeopleControl(page.body);
+    if (people.roleClaimed) {
+      if (!people.valid || !Number.isInteger(input.requestedPlayers) || input.requestedPlayers! < 1 || input.requestedPlayers! > 4 || !people.values.includes(String(input.requestedPlayers)))
+        throw sourceError("The public people selector is unavailable");
+      await filter("group_size", String(input.requestedPlayers));
+      const selectedPeople = readUSchedulePublicPeopleControl(page.body);
+      if (!selectedPeople.valid || selectedPeople.selectedPeople !== input.requestedPlayers) throw sourceError("The public people selector changed");
+    } else {
     const group = readUScheduleGroupSizeControl(page.body);
     if (group.present) {
       if (!group.oneAvailable) throw sourceError("The public single-bay selector is unavailable");
       await filter("group_size", "1");
     }
+    }
   }
   await filter("start_date", `${input.date.slice(5, 7)}/${input.date.slice(8, 10)}/${input.date.slice(0, 4)}`);
   const tenant = location ? parseUScheduleLocationSource(url.href)!.tenant : uschedulePublicTenant(url.href)!;
-  if (!location) {
+  // An explicit PEOPLE dated grid already has complete date-bound starts.
+  // Retain Date Chosen instead of changing it to the legacy list view.
+  if (!location && !readUSchedulePublicPeopleControl(page.body).valid) {
     const view = readUScheduleNextAvailableView(page.body, tenant);
     if (view.present && !view.selected) {
       await refresh(url, cookie, "next_avail", undefined, fetchImpl, signal);
       page = await publicResponse(url, { method: "GET", headers: { Accept: "text/html", Cookie: cookie } }, "text/html", MAX_HTML_BYTES, fetchImpl, signal);
     }
   }
-  const learned = { ...service, durationMinutes: input.durationMinutes, date: input.date, tenant }, slots: SimulatorAvailabilitySlot[] = [], seen = new Set<string>();
+  const learned = { ...service, durationMinutes: input.durationMinutes, date: input.date, tenant, requestedPlayers: input.requestedPlayers }, slots: SimulatorAvailabilitySlot[] = [], seen = new Set<string>();
   let previousOrder = -Infinity;
   for (let index = 0; index < 16; index++) {
     // This is the already-consumed bounded body. Optional diagnostic capture
