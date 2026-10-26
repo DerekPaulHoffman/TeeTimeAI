@@ -54,6 +54,7 @@ function accessChanged(html: string) {
       node.tagName === "iframe" && /recaptcha|hcaptcha|challenges\.cloudflare/iu.test(attr(node, "src") ?? ""));
 }
 type LearnedRental = { serviceId: string; serviceName: string; durationMinutes: number; date?: string; tenant?: string; requestedPlayers?: number;
+  quantityRole?: "PEOPLE" | "RENTAL_UNITS" | "LEGACY";
   publicLocationProof?: USchedulePublicLocationProof };
 function selectedRental(html: string, learned?: LearnedRental) {
   if (accessChanged(html)) throw sourceError("The public simulator scheduler now requires interactive access");
@@ -76,6 +77,7 @@ function selectedRental(html: string, learned?: LearnedRental) {
     const units = readUSchedulePublicUnitsControl(html);
     if (units.present && (!units.valid || !units.selectedOne)) throw sourceError("The selected public rental changed");
     const people = readUSchedulePublicPeopleControl(html);
+    if (learned.quantityRole && learned.quantityRole !== (people.roleClaimed ? "PEOPLE" : units.present ? "RENTAL_UNITS" : "LEGACY")) throw sourceError("The selected public rental changed");
     if (people.roleClaimed && (!people.valid || !Number.isInteger(learned.requestedPlayers) || learned.requestedPlayers! < 1 || learned.requestedPlayers! > 4 || people.selectedPeople !== learned.requestedPlayers))
       throw sourceError("The selected public rental changed");
     const service = services.filter(selected), length = lengths.filter(selected);
@@ -98,10 +100,26 @@ function selectedRental(html: string, learned?: LearnedRental) {
   }
   return { serviceId: attr(services[0], "value")!, durationMinutes: 60 as const };
 }
-function pooledRows(html: string) {
+function pooledRows(html: string, peopleList = false) {
   const all = elements(parse(html));
   const containers = all.filter(node => (attr(node, "class") ?? "").split(/\s+/u).includes("next_avail_results"));
   if (!containers.length || containers.length > MAX_PUBLIC_ROWS_PER_PAGE) throw schemaError("The public availability list is missing or ambiguous");
+  if (peopleList) {
+    const parent = containers[0].parentNode;
+    const unsafe = (node: Element) => {
+      let current: Node | undefined = node;
+      for (let depth = 0; current && depth < 64; depth++, current = "parentNode" in current ? current.parentNode ?? undefined : undefined) {
+        if (!("tagName" in current)) continue;
+        if (["form", "template", "script", "style", "noscript", "iframe", "input", "select", "textarea", "button"].includes(current.tagName) ||
+            current.attrs.some(a => ["hidden", "inert", "disabled", "onclick"].includes(a.name) || ["aria-hidden", "aria-disabled"].includes(a.name) && a.value === "true") ||
+            /display\s*:\s*none|visibility\s*:\s*(?:hidden|collapse)|(?:^|;)\s*opacity\s*:\s*0(?:\.0*)?\s*(?:!important\s*)?(?:;|$)/iu.test(attr(current, "style") ?? "") ||
+            /\b(?:hidden|d-none|invisible|disabled|booked|no_time|private|members?|account|checkout|payment|billing|login)\b/iu.test(["id", "class", "aria-label", "title"].map(k => attr(current as Element, k) ?? "").join(" "))) return true;
+      }
+      return current !== undefined;
+    };
+    if (!parent || !("tagName" in parent) || !(attr(parent, "class") ?? "").split(/\s/u).includes("choices") || containers.some(n => n.parentNode !== parent || unsafe(n) || elements(n).some(unsafe)))
+      throw schemaError("The public availability list changed structure");
+  }
   // The public page renders one result container per start, with one direct
   // row inside each. An orphan or nested row would leave the page incomplete.
   const rows = containers.map(container => {
@@ -141,7 +159,7 @@ function publicTimeGrid(all: Element[], learned: LearnedRental | undefined, html
     return current !== undefined;
   };
   const units = readUSchedulePublicUnitsControl(html), unitsProfile = units.present && units.valid && units.selectedOne;
-  const people = readUSchedulePublicPeopleControl(html), peopleProfile = people.roleClaimed && people.valid;
+  const people = readUSchedulePublicPeopleControl(html), peopleProfile = people.valid && people.datedGridEligible;
   if (!learned || learned.publicLocationProof || !(learned.serviceName === "Public Tee Times" && !units.present && !people.roleClaimed || unitsProfile || peopleProfile) || grids.length !== 1 ||
       all.some(node => cls(node, "next_avail_results") || cls(node, "next_avail_item") || attr(node, "id") === "more_next_avail")) return invalid();
   const grid = grids[0], parent = "parentNode" in grid ? grid.parentNode : undefined;
@@ -175,15 +193,7 @@ function publicTimeGrid(all: Element[], learned: LearnedRental | undefined, html
   // Only visible, control-free notes beside this current grid are considered.
   let publicPartyLimit: number | null = null;
   if (unitsProfile || peopleProfile) {
-    const notes = readUSchedulePublicRentalNotes(html).filter(value => /\b(?:maximum|max|up to|only)\b/iu.test(value) && /\b(?:people|players?|golfers?|persons?)\b/iu.test(value) && /\b(?:simulators?|suites?|bays?)\b/iu.test(value));
-    const limits = notes.map(value => {
-      const match = /^(?:A )?maximum of ([1-9]\d?) (?:people|players?|golfers?|persons?) can compete on simulators at one time(?: \(additional space for guests at (?:suite|bay|simulator) bars and main bar\))?\.?$/iu.exec(value) ??
-        /^(?:A )?maximum of ([1-9]\d?) (?:people|players?|golfers?|persons?) per (?:suite|bay|simulator)\.?$/iu.exec(value) ??
-        /^Each (?:bay|suite|simulator) can accommodate up to ([1-9]\d?) (?:people|players?|golfers?|persons?) max(?: \(strictly enforced regardless of # of people golfing\))?\.?$/iu.exec(value);
-      return match ? Number(match[1]) : undefined;
-    });
-    if (limits.some(value => value === undefined) || new Set(limits).size > 1) return invalid();
-    publicPartyLimit = limits[0] ?? null;
+    publicPartyLimit = publicRentalPartyLimit(html);
   }
   const extras = rows.filter(node => cls(node, "extra"));
   const show = all.filter(node => attr(node, "id") === "show-extra-row"), hide = all.filter(node => attr(node, "id") === "hide-extra-row");
@@ -210,6 +220,18 @@ function publicTimeGrid(all: Element[], learned: LearnedRental | undefined, html
   });
   if (times.some((time, index) => index > 0 && time.order <= times[index - 1].order)) return invalid();
   return { times, cursor: times.at(-1)!.value, morePresent: false, completeDate: true, resourceId, publicPartyLimit };
+}
+
+function publicRentalPartyLimit(html: string) {
+  const notes = readUSchedulePublicRentalNotes(html).filter(value => /\b(?:maximum|max|up to|only)\b/iu.test(value) && /\b(?:people|players?|golfers?|persons?)\b/iu.test(value) && /\b(?:simulators?|suites?|bays?)\b/iu.test(value));
+  const limits = notes.map(value => {
+    const match = /^(?:A )?maximum of ([1-9]\d?) (?:people|players?|golfers?|persons?) can compete on simulators at one time(?: \(additional space for guests at (?:suite|bay|simulator) bars and main bar\))?\.?$/iu.exec(value) ??
+      /^(?:A )?maximum of ([1-9]\d?) (?:people|players?|golfers?|persons?) per (?:suite|bay|simulator)\.?$/iu.exec(value) ??
+      /^Each (?:bay|suite|simulator) can accommodate up to ([1-9]\d?) (?:people|players?|golfers?|persons?) max(?: \(strictly enforced regardless of # of people golfing\))?\.?$/iu.exec(value);
+    return match ? Number(match[1]) : undefined;
+  });
+  if (limits.some(value => value === undefined) || new Set(limits).size > 1) throw sourceError("The selected public rental changed");
+  return limits[0] ?? null;
 }
 
 /** Inert projection of the selected public rental only. No session or list data survives. */
@@ -298,7 +320,12 @@ function listing(html: string, expectedServiceId: string, learned?: LearnedRenta
   }
   const grid = publicTimeGrid(all, learned, html);
   if (grid) return grid;
-  const times = pooledRows(html);
+  const peopleList = Boolean(learned && readUSchedulePublicPeopleControl(html).valid);
+  if (peopleList) {
+    const view = readUScheduleNextAvailableView(html, learned!.tenant!);
+    if (!view.present || !view.selected) throw schemaError("The public availability list changed structure");
+  }
+  const times = pooledRows(html, peopleList);
   if (times.some((time, index) => index > 0 && time.order <= times[index - 1].order))
     throw schemaError("The public availability list is not strictly ordered");
   const more = all.filter(node => attr(node, "id") === "more_next_avail");
@@ -330,7 +357,8 @@ function listing(html: string, expectedServiceId: string, learned?: LearnedRenta
     }
   }
   if (cursors.length !== 1 || cursors[0] !== times.at(-1)!.value) throw schemaError("The public continuation cursor changed");
-  return { times, cursor: cursors[0], morePresent: more.length === 1, completeDate: false, resourceId: undefined };
+  return { times, cursor: cursors[0], morePresent: more.length === 1, completeDate: false,
+    resourceId: peopleList ? `uschedule-service:${learned!.serviceId}:pooled` : undefined, publicPartyLimit: peopleList ? publicRentalPartyLimit(html) : undefined };
 }
 async function bounded(response: Response, ceiling: number) {
   const declared = Number(response.headers.get("content-length"));
@@ -489,9 +517,12 @@ export async function fetchUScheduleRecipeAvailability(input: SimulatorAvailabil
     page = await publicResponse(url, { method: "GET", headers: { Accept: "text/html", Cookie: cookie } }, "text/html", MAX_HTML_BYTES, fetchImpl, signal);
   };
   if (!location && inspectUScheduleRecipeConfiguration(page.body, url.href)!.selected.serviceId !== service.serviceId) await filter("service_id", service.serviceId);
+  const quantityRole: LearnedRental["quantityRole"] = location ? undefined : readUSchedulePublicPeopleControl(page.body).roleClaimed ? "PEOPLE" : readUSchedulePublicUnitsControl(page.body).present ? "RENTAL_UNITS" : "LEGACY";
   await filter("length", String(input.durationMinutes));
   if (!location) {
     const units = readUSchedulePublicUnitsControl(page.body);
+    const peopleAfterLength = readUSchedulePublicPeopleControl(page.body);
+    if (quantityRole !== (peopleAfterLength.roleClaimed ? "PEOPLE" : units.present ? "RENTAL_UNITS" : "LEGACY")) throw sourceError("The selected public rental changed");
     if (units.present) {
       if (!units.valid || !units.selectedOne) throw sourceError("The public single-unit selector is unavailable");
       await filter("units_to_book", "1");
@@ -517,20 +548,22 @@ export async function fetchUScheduleRecipeAvailability(input: SimulatorAvailabil
   const tenant = location ? parseUScheduleLocationSource(url.href)!.tenant : uschedulePublicTenant(url.href)!;
   // An explicit PEOPLE dated grid already has complete date-bound starts.
   // Retain Date Chosen instead of changing it to the legacy list view.
-  if (!location && !readUSchedulePublicPeopleControl(page.body).valid) {
+  if (!location && !readUSchedulePublicPeopleControl(page.body).datedGridEligible) {
     const view = readUScheduleNextAvailableView(page.body, tenant);
     if (view.present && !view.selected) {
       await refresh(url, cookie, "next_avail", undefined, fetchImpl, signal);
       page = await publicResponse(url, { method: "GET", headers: { Accept: "text/html", Cookie: cookie } }, "text/html", MAX_HTML_BYTES, fetchImpl, signal);
     }
   }
-  const learned = { ...service, durationMinutes: input.durationMinutes, date: input.date, tenant, requestedPlayers: input.requestedPlayers }, slots: SimulatorAvailabilitySlot[] = [], seen = new Set<string>();
+  const learned = { ...service, durationMinutes: input.durationMinutes, date: input.date, tenant, requestedPlayers: input.requestedPlayers, quantityRole }, slots: SimulatorAvailabilitySlot[] = [], seen = new Set<string>();
   let previousOrder = -Infinity;
+  let observedPartyLimit: number | null | undefined;
   for (let index = 0; index < 16; index++) {
     // This is the already-consumed bounded body. Optional diagnostic capture
     // never consumes a transport stream, changes requests or masks the guard.
     try { diagnostics?.onListingPage?.(page.body); } catch { /* Diagnostic only. */ }
     const current = listing(page.body, service.serviceId, learned);
+    if (current.publicPartyLimit !== undefined) observedPartyLimit = current.publicPartyLimit === null ? observedPartyLimit ?? null : Math.min(observedPartyLimit ?? Infinity, current.publicPartyLimit);
     if (current.times.at(-1)!.order <= previousOrder) throw schemaError("The public continuation did not advance");
     let crossedDate = false;
     for (const time of current.times) {
@@ -548,8 +581,9 @@ export async function fetchUScheduleRecipeAvailability(input: SimulatorAvailabil
     }
     previousOrder = current.times.at(-1)!.order;
     if (current.completeDate) return { slots, complete: true, observedAt: new Date(), evidenceUrl: url.href,
-      ...("publicPartyLimit" in current ? { publicPartyLimit: current.publicPartyLimit } : {}) };
-    if (crossedDate) return { slots, complete: true, observedAt: new Date(), evidenceUrl: url.href };
+      ...(observedPartyLimit === undefined ? {} : { publicPartyLimit: observedPartyLimit }) };
+    if (crossedDate) return { slots, complete: true, observedAt: new Date(), evidenceUrl: url.href,
+      ...(observedPartyLimit === undefined ? {} : { publicPartyLimit: observedPartyLimit }) };
     if (!current.morePresent || index === 15) throw schemaError("The public date list was not completely observed");
     await refresh(url, cookie, "more_next_avail", current.cursor, fetchImpl, signal);
     page = await publicResponse(url, { method: "GET", headers: { Accept: "text/html", Cookie: cookie } }, "text/html", MAX_HTML_BYTES, fetchImpl, signal);

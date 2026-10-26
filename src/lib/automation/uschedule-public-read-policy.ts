@@ -35,47 +35,78 @@ function publicControlUnsafe(n: Node) {
 }
 function rentalNotes(nodes: Element[]) {
   const cls = (n: Element, name: string) => (attr(n, "class") ?? "").split(/\s/u).includes(name);
-  const grids = nodes.filter(n => cls(n, "time_choices")), parent = grids.length === 1 ? grids[0].parentNode : undefined;
+  const grids = nodes.filter(n => cls(n, "time_choices")), lists = nodes.filter(n => cls(n, "next_avail_results"));
+  const parent = grids.length === 1 ? grids[0].parentNode : !grids.length && lists.length && lists.every(n => n.parentNode === lists[0].parentNode) ? lists[0].parentNode : undefined;
   if (!parent || !("tagName" in parent) || !cls(parent, "choices") || !parent.parentNode) return [];
   const siblings = "childNodes" in parent.parentNode ? parent.parentNode.childNodes.filter((n): n is Element => "tagName" in n) : [];
   // Inline spans may split a word in the source. DOM textContent concatenates
   // those text nodes; insert no invented space inside an inline word.
   const inline = (n: Node): string => "value" in n ? n.value : "tagName" in n && n.tagName === "br" ? " " : "childNodes" in n ? n.childNodes.map(inline).join("") : "";
-  return siblings.slice(siblings.indexOf(parent) + 1).filter(n => cls(n, "card"))
+  const notes = siblings.slice(siblings.indexOf(parent) + 1).filter(n => cls(n, "card"))
     .flatMap(card => elements(card).filter(n => n.tagName === "li" && !publicControlUnsafe(n) && !elements(n).some(c => publicControlUnsafe(c) || ["li", "input", "select", "button", "textarea"].includes(c.tagName))))
     .map(n => inline(n).normalize("NFKC").replace(/\s+/gu, " ").trim());
+  const descriptions = nodes.filter(n => attr(n, "id") === "serv_desc_section");
+  if (descriptions.length > 1) throw new Error("USCHEDULE_PUBLIC_DESCRIPTION_AMBIGUOUS");
+  const description = descriptions[0];
+  if (description && !publicControlUnsafe(description)) {
+    const descendants = elements(description);
+    if (descendants.length > 1000 || Buffer.byteLength(inline(description)) > 20_000) throw new Error("USCHEDULE_PUBLIC_DESCRIPTION_UNBOUNDED");
+    const block = (n: Element) => ["div", "p", "li", "h1", "h2", "h3", "h4", "h5", "h6"].includes(n.tagName);
+    // A block may mix its own restriction with child paragraphs. Never drop
+    // that restriction and downgrade it to unknown while reading only leaves.
+    const outsideBlocks = (n: Node): string => "value" in n ? n.value : "tagName" in n && block(n) ? " " : "childNodes" in n ? n.childNodes.map(outsideBlocks).join("") : "";
+    for (const node of [description, ...descendants].filter(n => block(n) && !publicControlUnsafe(n) && elements(n).some(block))) {
+      const own = node.childNodes.map(outsideBlocks).join("").normalize("NFKC");
+      if (/\b(?:maximum|max|up to|only)\b/iu.test(own) && /\b(?:people|players?|golfers?|persons?)\b/iu.test(own) && /\b(?:simulators?|suites?|bays?)\b/iu.test(own) &&
+          (!/\b(?:events?|venue|site|building|total capacity)\b/iu.test(own) || /\b(?:per|each) (?:bay|suite|simulator)\b/iu.test(own))) throw new Error("USCHEDULE_PUBLIC_DESCRIPTION_UNVERIFIED");
+    }
+    for (const node of [description, ...descendants].filter(n => block(n) && !elements(n).some(block))) {
+      if (publicControlUnsafe(node)) continue;
+      const value = inline(node).normalize("NFKC").replace(/\s+/gu, " ").trim();
+      // Site/event totals cannot establish a simulator rental's party limit.
+      if (/\b(?:events?|venue|site|building|total capacity)\b/iu.test(value) && !/\b(?:per|each) (?:bay|suite|simulator)\b/iu.test(value)) continue;
+      if (elements(node).some(n => publicControlUnsafe(n) || ["a", "input", "select", "button", "textarea", "label"].includes(n.tagName))) {
+        if (/\b(?:maximum|max|up to|only)\b/iu.test(value) && /\b(?:people|players?|golfers?|persons?)\b/iu.test(value)) throw new Error("USCHEDULE_PUBLIC_DESCRIPTION_UNVERIFIED");
+        continue;
+      }
+      notes.push(value);
+    }
+  }
+  return notes;
 }
 export function readUSchedulePublicRentalNotes(html: string) {
   if (Buffer.byteLength(html) > 600_000) return [];
   const nodes = elements(parse(html)); return nodes.length <= 20_000 ? rentalNotes(nodes) : [];
 }
-/** Only a literal public people selector plus explicit per-bay rental pricing
- * changes group_size from the legacy one-unit interpretation. */
+/** Participant selection and dated-grid eligibility are distinct. Only the
+ * existing # of People grid also requires the explicit per-bay pricing note. */
 export function readUSchedulePublicPeopleControl(html: string) {
-  const absent = { roleClaimed: false, valid: false, selectedPeople: undefined as number | undefined, values: [] as string[] };
+  const absent = { roleClaimed: false, valid: false, datedGridEligible: false, selectedPeople: undefined as number | undefined, values: [] as string[] };
   if (Buffer.byteLength(html) > 600_000) return { ...absent, roleClaimed: true };
   const nodes = elements(parse(html)); if (nodes.length > 20_000) return { ...absent, roleClaimed: true };
   const groups = nodes.filter(n => n.tagName === "select" && attr(n, "id") === "select_group_size");
-  if (!groups.length) return absent;
   const clean = (n: Node) => text(n).normalize("NFKC").replace(/\s+/gu, " ").trim();
   const labels = nodes.filter(n => n.tagName === "label" && attr(n, "for") === "select_group_size");
-  const roleClaimed = labels.some(n => clean(n) === "Choose # of People") || nodes.some(n => attr(n, "id") === "group_size_section") &&
-    nodes.some(n => n.tagName === "label" && attr(n, "for") === "select_length" && clean(n) === "Choose Time");
+  if (!groups.length) return labels.some(n => ["Choose # of People", "Choose Party Size"].includes(clean(n))) ? { ...absent, roleClaimed: true } : absent;
+  const roleClaimed = labels.some(n => ["Choose # of People", "Choose Party Size"].includes(clean(n))) ||
+    nodes.some(n => attr(n, "id") === "group_size_section") && labels.length > 0;
   if (!roleClaimed) return absent;
   const invalid = { ...absent, roleClaimed: true };
   const sections = nodes.filter(n => attr(n, "id") === "group_size_section"), services = nodes.filter(n => n.tagName === "select" && attr(n, "id") === "select_service");
   const selected = services.length === 1 ? elements(services[0]).filter(n => n.tagName === "option" && attr(n, "selected") !== undefined) : [];
   if (groups.length !== 1 || sections.length !== 1 || !elements(sections[0]).includes(groups[0]) || labels.length !== 1 ||
-      !elements(sections[0]).includes(labels[0]) || clean(labels[0]) !== "Choose # of People" || publicControlUnsafe(labels[0]) || elements(labels[0]).some(publicControlUnsafe) || publicControlUnsafe(groups[0]) ||
+      !elements(sections[0]).includes(labels[0]) || !["Choose # of People", "Choose Party Size"].includes(clean(labels[0])) || publicControlUnsafe(labels[0]) || elements(labels[0]).some(publicControlUnsafe) || publicControlUnsafe(groups[0]) ||
       selected.length !== 1 || !isUSchedulePublicRentalLabel(clean(selected[0])) || /\b(?:private|members?|account|events?)\b/iu.test(clean(selected[0])) || publicControlUnsafe(selected[0]) || !/^[1-9]\d{0,9}$/u.test(attr(selected[0], "value") ?? "") ||
       (attr(groups[0], "onchange") ?? "").replace(/\s/gu, "") !== "groupSizeChanged();" ||
       nodes.some(n => n.tagName === "select" && (attr(n, "id") === "select_units_to_book" || (attr(n, "class") ?? "").split(/\s/u).includes("resSelect")))) return invalid;
   const notes = rentalNotes(nodes), costs = notes.filter(v => /\b(?:costs?|pricing|prices?|charged)\b.*\bper (?:bay|player)\b/iu.test(v));
-  if (costs.length !== 1 || costs[0] !== "Playing costs are per bay, not per player.") return invalid;
+  const gridLabel = clean(labels[0]) === "Choose # of People";
+  if (gridLabel && (costs.length !== 1 || costs[0] !== "Playing costs are per bay, not per player.")) return invalid;
   const options = elements(groups[0]).filter(n => n.tagName === "option"), values = options.map(n => attr(n, "value") ?? clean(n));
   const chosen = options.filter(n => attr(n, "selected") !== undefined);
   if (!options.length || options.length > 20 || options.some((n, i) => publicControlUnsafe(n) || !/^[1-9]\d?$/u.test(values[i]) || clean(n) !== values[i]) || new Set(values).size !== values.length || chosen.length !== 1) return invalid;
-  return { roleClaimed: true, valid: true, selectedPeople: Number(attr(chosen[0], "value") ?? clean(chosen[0])), values };
+  return { roleClaimed: true, valid: true, datedGridEligible: gridLabel && nodes.filter(n => (attr(n, "class") ?? "").split(/\s/u).includes("time_choices")).length === 1,
+    selectedPeople: Number(attr(chosen[0], "value") ?? clean(chosen[0])), values };
 }
 /** The pinned bookingBS5 unitsToBookChanged handler sends units_to_book,
  * not group_size. Its public unit quantity is never a golfer count. */
