@@ -78,7 +78,7 @@ async function check(design, mode, scenario, width, kind = 'morning', stress = f
   if (scenario === 'none') assert.match(got.text, /found no .*matching your saved request/);
   if (scenario === 'checking') assert.match(got.text, /haven’t confirmed any openings/);
   if (scenario === 'window') assert.match(got.text, /Wed, Oct 28 at 7:00 AM EDT/);
-  if (scenario === 'retry') { assert.match(got.text, /can’t confirm which openings/); assert.match(got.text, /try again automatically/); }
+  if (scenario === 'retry') { assert.match(got.text, /We’re checking on it/i); assert.match(got.text, /couldn’t confirm openings on our last check/); assert.match(got.text, /check again automatically/); assert.match(got.text, /You don’t need to do anything/); }
   if (scenario === 'support') assert.match(got.text, /can’t confirm openings here yet/);
   if (scenario === 'review') { assert.match(got.text, /needs a closer look/); assert.doesNotMatch(got.text, /our team reviews|WE’RE WORKING ON IT|try again automatically/); }
   if (scenario === 'direct') assert.match(got.text, /can’t check.*automatically/);

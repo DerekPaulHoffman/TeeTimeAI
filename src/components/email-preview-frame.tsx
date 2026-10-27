@@ -25,14 +25,9 @@ export function EmailPreviewFrame({
       return;
     }
 
-    const nextHeight = Math.ceil(
-      Math.max(
-        document.documentElement.scrollHeight,
-        document.documentElement.offsetHeight,
-        document.body?.scrollHeight ?? 0,
-        document.body?.offsetHeight ?? 0
-      )
-    );
+    // Root scrollHeight includes the iframe's old viewport height, preventing
+    // short state samples (or a wider layout) from ever shrinking again.
+    const nextHeight = Math.ceil(document.body?.getBoundingClientRect().height ?? 0);
 
     if (nextHeight > 0) {
       frame.style.height = `${nextHeight}px`;

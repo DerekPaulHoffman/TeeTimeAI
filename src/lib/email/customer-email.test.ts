@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import { renderCustomerEmail, type CustomerEmailRenderInput, type CustomerEmailVariant } from "./customer-email";
@@ -33,17 +32,38 @@ function simulatorInput(): CustomerEmailRenderInput {
 }
 
 describe("shared customer email rendering", () => {
-  // Captured from the existing renderer before adding the simulator mode. The
-  // outdoor default must preserve the customer-facing email in every variant.
-  it.each<[CustomerEmailVariant, string]>([
-    ["setup", "80408ccc62ada6d4c8842c2a9eed94d6d974b75384a5b07d4eab76489573b63e"],
-    ["morning", "40965314e5bf5fa057c0b1c54e8d39ba3483cdf33db30a2810cfe8c64db3a34f"],
-    ["instant", "cd1d84f13d45a675801100878edde19e6800f7aba2456744d28a27afb660adb8"],
-    ["outage", "2f77cc01e450b15e3518522f81239cd1c665bb317ed15fa9b8f86ba8233edbc5"],
-    ["recovery", "903061544cf81d04277bee517f1564361ec6c7877b4a8220f69456649af449f0"]
-  ])("preserves the existing outdoor %s email bytes", (variant, hash) => {
-    expect(createHash("sha256").update(renderCustomerEmail({ ...outdoorInput, variant })).digest("hex")).toBe(hash);
+  it("does not label unclassified availability as previously shared or mutate caller ordering", () => {
+    const input: CustomerEmailRenderInput = { ...outdoorInput, variant: "instant",
+      availabilityCourses: [
+        { ...outdoorInput.availabilityCourses[0], rank: 2, courseName: "Second course", times: [
+          { startsAt: "2026-10-10T15:00:00Z", availableSpots: 4 }
+        ] },
+        { ...outdoorInput.availabilityCourses[0], rank: 1, courseName: "First course", times: [
+          { startsAt: "2026-10-10T14:00:00Z", availableSpots: 4, isNew: true },
+          { startsAt: "2026-10-10T13:00:00Z", availableSpots: 4, isNew: false }
+        ] }
+      ] };
+    const before = structuredClone(input);
+    const html = renderCustomerEmail(input);
+    expect(input).toEqual(before);
+    expect(html.indexOf("First course")).toBeLessThan(html.indexOf("Second course"));
+    expect(html.indexOf("New since your last email")).toBeLessThan(html.indexOf("Still available · previously shared"));
+    expect(html.slice(html.indexOf("Second course"))).toContain("Also available");
+    expect(html.slice(html.indexOf("Second course"))).not.toContain("previously shared");
+    expect(html.match(/data-new-match="true"/g)).toHaveLength(1);
   });
+
+  it.each<CustomerEmailVariant>(["setup", "morning", "instant", "outage", "recovery"])(
+    "renders the selected design and preserves bounded actions for %s", (variant) => {
+      const html = renderCustomerEmail({ ...outdoorInput, variant });
+      expect(html).toContain('class="email-card"');
+      expect(html).not.toMatch(/PRIORITY|just opened/i);
+      expect(html).toContain("New since your last email");
+      expect(html).toContain("Still available · previously shared");
+      expect(html).toContain('href="https://teetimespot.com/alerts/stop?token=booked"');
+      expect(html).toContain('href="https://teetimespot.com/alerts/stop?token=cancelled"');
+    }
+  );
 
   it("shows the simulator search ending at midnight without calling it noon", () => {
     const input = simulatorInput();
@@ -57,12 +77,12 @@ describe("shared customer email rendering", () => {
     const html = renderCustomerEmail(simulatorInput());
     expect(html).toContain('class="email-card"');
     expect(html).toContain("Tee Time Spot");
-    expect(html).toContain("#f7f4eb");
+    expect(html).toContain("#f4efe5");
     expect(html).toContain("#14231d");
-    expect(html).toContain("#d9862f");
+    expect(html).toContain("#e28a2f");
     expect(html).toContain("NEW SIMULATOR ALERT");
-    expect(html).toContain("PRIORITY 1");
-    expect(html).toContain("PRIORITY 2");
+    expect(html).not.toContain("PRIORITY");
+    expect(html).toContain("indoor-golf-simulator-hero.webp");
     expect(html).toContain("SESSION");
     expect(html).toContain("60 minutes");
     expect(html).toContain("BOOKING");

@@ -5287,7 +5287,7 @@ button {
 }
 
 .email-browser-card .email-status-frame {
-  min-height: 1220px;
+  min-height: 0;
 }
 
 .preview-section-header {

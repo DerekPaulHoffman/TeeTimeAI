@@ -1,7 +1,8 @@
-# Tee Time Spot email design study — revision 4
+# Tee Time Spot email design study — selected design
 
 Twenty offline directions revised October 27, 2026 after the user rejected the first
-set. Production templates, transport, recipients, outbox and customer demand are unchanged.
+set. The selected photo-card design is integrated into the shared customer email
+renderer. Transport, recipients, outbox, scheduler and customer demand are unchanged.
 
 ## User-approved direction
 
@@ -14,7 +15,7 @@ be in. The first set removed too much of that recognizable visual design. The us
 
 - Visual thesis: familiar Tee Time Spot photo cards, dark-green mastheads, orange emphasis,
   rounded white surfaces on cream and strong, readable availability.
-- No priority/rank badges in any current preview. Venue order is only fixture display order; production search sorting and persistence are unchanged.
+- No priority/rank badges in customer emails or current previews. Production search sorting and persistence are unchanged.
 - All non-availability states use the same rounded card panel, brand colors, status icon, readable heading, What happens next row and action styling. No state is presented as NEW unless it has new verified matches.
 - Content plan: brand and mode, email purpose, requested date/window, photo headers,
   newly found matches, previously shared/reconfirmed matches, venue-specific states and
@@ -49,10 +50,11 @@ src/lib/email/customer-email.ts, search-status.ts, simulator-email.ts and
 src/lib/customer-monitoring-status.ts. The current public /search appearance was also
 visually inspected on October 27; dashboard cards were read from source.
 
-The source checkout base is 61ab2bd766b04bb245148792ed2aefe257693e3e.
-Changes are uncommitted on feature/improve-alert-email-designs. No runtime application
-paths changed. The old generator and verification are preserved outside the repository
-as revision-1-source.mjs and verification-v1.json.
+The work lives on feature/improve-alert-email-designs. The real /email-preview route
+uses the shared renderer and has a finite sample-state selector for both modes.
+The offline gallery remains a design study; its fixtures never become customer data.
+The old generator and verification are preserved outside the repository as
+revision-1-source.mjs and verification-v1.json.
 
 ## State fixtures
 
@@ -66,7 +68,7 @@ The interactive selector and states.html contain 18 scenarios for each mode:
 6. Booking not open (explicit sample release time).
 7. Temporary check failure with retry.
 8. Adding alert support.
-9. Our team needs to check the booking setup.
+9. Booking setup needs a closer look; check directly for now.
 10. Official site only.
 11. Phone/contact only.
 12. Provider account required.
@@ -104,22 +106,21 @@ It writes 40 layout screenshots, 36 individual state-card screenshots, an overvi
 image and verification.json outside the repository. Read the receipt for the current
 result rather than reusing revision 1's pass count.
 
-This is a reviewable browser-rendered prototype. Native Gmail/Outlook/Apple Mail and
-automatic dark-mode conversion remain unverified. A selected direction still needs
-integration with the existing shared renderer and actual delivery payload checks before
-release. No email is sent and no comprehensive runtime suite is claimed by this study.
+Native Gmail/Outlook/Apple Mail and automatic dark-mode conversion remain unverified.
+Runtime checks cover the shared template, persisted payload hydration, existing delivery
+boundaries and the real preview route at desktop and phone sizes. These checks never
+send an email. Per-release results live in the external verification receipt and CI.
 
 ## Customer wording contract
 
 - Trust comes from specific facts, named ownership and a clear next step.
 - Healthy completed checks say we are watching; no matches is different from an incomplete check.
 - Use No action needed for automatic follow-up that is actually scheduled/owned. Existing matches may still need the golfer to book; No action needed refers to keeping the alert running.
-- Retry copy acknowledges an incomplete attempt without presenting it as no availability.
+- Retry wording: We’re checking on it. Your alert is still active. We couldn’t confirm openings on our last check. We’ll check again automatically. You don’t need to do anything.
 - Working on it is reserved for active research/setup work. Waiting-for-review copy never implies an assigned person or active retry.
 - Manual, phone, account, verification and invalid-venue examples use Your next step. They do not promise automatic checks or claim nothing is needed.
 - State descriptions contain the known fact. A single next-step row owns the future action; do not repeat it in the description.
 - Use Updated for the report timestamp. Do not imply that every venue completed a successful check.
 - State-specific booking release times need actual evidence; no other retry or support ETA is invented.
-- Production integration must map active-work claims to current durable work ownership and automatic follow-up claims to scheduler state. These remain mock fixtures.
+- Runtime status mapping follows the existing durable monitoring classifications. A terminal access limit or human-review endpoint never promises automatic retry. Estimated inventory release dates remain estimates.
 - Copy edits do not authorize live email sends or changes to customer demand.
-

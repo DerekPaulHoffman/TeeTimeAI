@@ -22,6 +22,7 @@ import {
 } from "@/lib/email/customer-email";
 import { buildCourseFactLine } from "@/lib/email/course-facts";
 import type { EmailStopUrls } from "@/lib/email/search-actions";
+import { getCustomerStatusCopy, type CustomerEmailState } from "@/lib/email/customer-status-copy";
 import {
   DEFAULT_TIME_ZONE,
   normalizeTimeZone,
@@ -230,97 +231,25 @@ export function getChangedCourseNames(
 }
 
 export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
-  const currentSnapshot = buildSearchStatusSnapshot(input.courses);
-  const changedCourses = getChangedCourseNames(currentSnapshot, input.previousSnapshot);
-  const hasAvailability = input.courses.some((course) => {
+  const hasAvailability = input.courses.some(course => {
     const category = getBlockedMonitoringCategory(course);
-    return (
-      (course.matchingTimes?.length ?? 0) > 0 &&
-      category !== "IDENTITY_FINAL" &&
-      category !== "IDENTITY_RECHECK"
-    );
+    return (course.matchingTimes?.length ?? 0) > 0 && category !== "IDENTITY_FINAL" && category !== "IDENTITY_RECHECK";
   });
-  const hasIdentityRecheckCourse = input.courses.some(
-    (course) => getBlockedMonitoringCategory(course) === "IDENTITY_RECHECK"
+  const hasHumanReviewCourse = input.courses.some(course => getCustomerCourseMonitoringStatus(course) === "NEEDS_HUMAN_REVIEW");
+  const hasDirectAction = hasHumanReviewCourse || input.courses.some(course =>
+    ["MANUAL_FINAL", "TECHNICAL_FINAL", "IDENTITY_FINAL"].includes(getBlockedMonitoringCategory(course) ?? "")
   );
-  const hasDirectOnlyCourse = input.courses.some(
-    (course) => {
-      const category = getBlockedMonitoringCategory(course);
-      return (
-        category === "MANUAL_FINAL" ||
-        category === "TECHNICAL_FINAL" ||
-        category === "IDENTITY_FINAL"
-      );
-    }
-  );
-  const hasWorkInProgressCourse = input.courses.some(
-    (course) =>
-      getBlockedMonitoringCategory(course) === "POLICY_REMEDIATION" ||
-      getBlockedMonitoringCategory(course) === "IDENTITY_RECHECK"
-  );
-  const hasUnavailableCourse = input.courses.some(
-    (course) =>
-      course.outcome === "NEEDS_ADAPTER" ||
-      course.outcome === "FETCH_FAILED"
-  );
-  const hasHumanReviewCourse = input.courses.some(
-    (course) =>
-      getCustomerCourseMonitoringStatus(course) === "NEEDS_HUMAN_REVIEW"
-  );
-  const hasPendingCourse = input.courses.some(
-    (course) => course.outcome === "CHECK_PENDING"
-  );
-  const heading =
-    input.kind === "setup"
-      ? "Your tee-time alert is active"
-      : input.kind === "daily"
-        ? "Your morning tee-time update"
-        : input.kind === "outage"
-          ? hasHumanReviewCourse
-            ? "Manual review needed"
-            : "Automatic checks are still retrying"
-          : input.kind === "status-update"
-            ? "A course status has been confirmed"
-          : hasAvailability
-            ? "Automatic checks resumed — and tee times are available"
-            : "Automatic checks resumed";
-  const providerService = input.providerLabel
-    ? `${input.providerLabel}'s public tee-time service`
-    : "The public tee-time service";
-  const intro =
-    input.kind === "outage"
-      ? hasHumanReviewCourse
-        ? "Manual review needed; your alert remains active. Use the official site for current tee times while we review this course."
-        : `${providerService} is not responding to our checks. Your alert remains active. Use the official site for current tee times while Tee Time Spot keeps trying.`
-      : input.kind === "status-update"
-        ? "We confirmed the current status for one or more courses. Your alert remains active for the other selected courses. See the confirmed course details below."
-      : input.kind === "recovery"
-        ? hasAvailability
-          ? "A fresh public check succeeded. Automatic checks resumed, and matching tee times are available below."
-          : "A fresh public check succeeded. Automatic checks resumed, and your alert remains active."
-        : hasAvailability
-      ? "We found tee times matching your search. Book what's available now — we'll keep watching and alert you the moment one of your priorities opens up."
-      : input.kind === "setup"
-        ? hasPendingCourse
-          ? "Your alert is set. We're confirming current availability for one or more courses. See each course's status below."
-          : hasIdentityRecheckCourse
-            ? "Your alert is set. We're confirming the details for one or more courses; we'll keep checking the courses that are ready."
-            : hasDirectOnlyCourse
-              ? "Your alert is set. We'll keep checking supported courses; courses marked for direct booking are not automatically monitored."
-              : hasHumanReviewCourse
-                ? "Your alert is set. Manual review is needed for one or more courses; your alert remains active. Use the official site for current tee times."
-                : hasUnavailableCourse
-                  ? "Your alert is set. Every selected course has a result below. We'll monitor supported courses and keep retrying the others; use the official site for current tee times."
-                  : hasWorkInProgressCourse
-                    ? "Your alert is set. We checked every selected course. Please use the official link for any course Tee Time Spot cannot check automatically yet."
-                    : "Your alert is set. We checked every selected course and will keep watching automatically."
-        : changedCourses.length > 0
-          ? `Changed since your last email: ${changedCourses.join(", ")}.`
-          : hasIdentityRecheckCourse
-            ? "No course status changed since your last email. We're still confirming the details for one or more courses."
-            : hasDirectOnlyCourse
-              ? "No course status changed since your last email. We're still checking supported courses."
-              : "No course status changed since your last email. We're still checking.";
+  const heading = input.kind === "setup" ? "Your tee-time alert is active"
+    : input.kind === "daily" ? "Your morning tee-time update"
+    : input.kind === "outage" ? hasHumanReviewCourse ? "A course needs a closer look" : "We’re checking on it"
+    : input.kind === "status-update" ? "Your course update"
+    : hasAvailability ? "Back on track — matching tee times are available" : "Back on track";
+  const intro = input.kind === "outage" && !hasDirectAction
+    ? "Your alert is still active. We couldn’t confirm openings on our last check. We’ll check again automatically. You don’t need to do anything."
+    : hasAvailability ? "New openings are listed first. Earlier options are included when they were still available at this check. You book direct with the course."
+    : input.kind === "setup" ? "Your alert is saved. Each course below has its own latest update and next step."
+    : input.kind === "recovery" ? "The latest check worked. See each course below for current openings and status."
+    : "Here’s where your alert stands. Each course below has its own latest update and next step.";
   const availabilityCourses = input.courses
     .map((course, index) => ({ course, fallbackRank: index + 1 }))
     .filter(({ course }) => {
@@ -371,7 +300,7 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
           : input.kind === "status-update"
             ? "A course in your alert now has a confirmed current status."
           : input.kind === "outage"
-            ? "Your alert remains active while automatic checks retry."
+            ? hasHumanReviewCourse ? "Check the official site for this course’s current openings." : "We’re checking on it. Your alert is still active."
             : "Automatic checks have resumed for your alert.",
     summary: {
       targetDate: input.targetDate,
@@ -403,72 +332,35 @@ function toMonitoringCourse(
   const customerStatus = getCustomerCourseMonitoringStatus(course);
   const bookingAccess = identityBlocked ? undefined : getBookingAccess(course);
   const isAddingMonitoring = blockedCategory === "POLICY_REMEDIATION";
-  const presentation = identityBlocked
-    ? {
-        badgeLabel: description.monitoringLabel.toUpperCase(),
-        tone: "direct" as const,
-        detail: `${description.stateLabel}. ${description.detail}`
-      }
-    : course.outcome === "MATCH_FOUND"
-      ? {
-        badgeLabel: "TEE TIME FOUND",
-        tone: "monitored" as const,
-        detail: description.detail
-      }
-    : course.outcome === "NO_MATCH" && course.bookingWindow
-      ? {
-          badgeLabel: course.bookingWindow.basis === "OBSERVED_INVENTORY"
-            ? "TEE TIMES EXPECTED LATER"
-            : "BOOKING NOT OPEN YET",
-          tone: "scheduled" as const,
-          detail: `${description.stateLabel}. ${description.detail}`
-        }
-      : course.outcome === "NO_MATCH"
-        ? {
-            badgeLabel: "CHECKING FOR TEE TIMES",
-            tone: "monitored" as const,
-            detail: `${description.stateLabel}. ${description.detail}`
-          }
-        : course.outcome === "CHECK_PENDING"
-          ? {
-              badgeLabel: "CHECKING NOW",
-              tone: "scheduled" as const,
-              detail: `${description.stateLabel}. ${description.detail}`
-            }
-        : customerStatus === "NEEDS_HUMAN_REVIEW"
-          ? {
-              badgeLabel: "MANUAL REVIEW NEEDED",
-              tone: "direct" as const,
-              detail: `${description.stateLabel}. ${description.detail}`
-            }
-        : isAddingMonitoring
-          ? {
-              badgeLabel: "CHECK OFFICIAL WEBSITE",
-              tone: "adding" as const,
-              detail: `${description.stateLabel}. ${description.detail}`
-            }
-          : customerStatus === "RETRYING_AUTOMATICALLY"
-            ? {
-                badgeLabel: "AUTOMATIC CHECKS RETRYING",
-                tone: "retrying" as const,
-                detail: `${description.stateLabel}. ${description.detail}`
-              }
-            : {
-                badgeLabel: description.monitoringLabel.toUpperCase(),
-                tone: "direct" as const,
-                detail: `${description.stateLabel}. ${description.detail}`
-              };
   const bookingLinkLabel = bookingAccess === "BOOKING_PAGE"
     ? "Open official booking page"
     : "Open official site";
 
+  const state: CustomerEmailState = blockedCategory === "IDENTITY_FINAL" ? "invalid"
+    : blockedCategory === "IDENTITY_RECHECK" ? "identity"
+    : course.outcome === "CHECK_PENDING" ? "checking"
+    : course.outcome === "NO_MATCH" && course.bookingWindow ? course.bookingWindow.basis === "OBSERVED_INVENTORY" ? "expected" : "window"
+    : course.outcome === "NO_MATCH" && (course.availability?.closestBefore || course.availability?.closestAfter) ? "outside"
+    : course.outcome === "NO_MATCH" || course.outcome === "MATCH_FOUND" ? "watching"
+    : customerStatus === "NEEDS_HUMAN_REVIEW" ? "review"
+    : blockedCategory === "TECHNICAL_FINAL" ? course.bookingAccessMode === "ACCOUNT_STAFF_PROVISIONED" ? "phone" : course.automationReason === "ACCOUNT_REQUIRED" ? "account" : "verification"
+    : blockedCategory === "MANUAL_FINAL" ? ["PHONE_ONLY", "CONTACT_COURSE"].includes(course.bookingMethod ?? "") ? "phone" : "direct"
+    : isAddingMonitoring ? "adding"
+    : customerStatus === "RETRYING_AUTOMATICALLY" ? "retrying"
+    : "direct";
+
+  const facts = ["window", "expected", "watching", "outside", "invalid", "direct", "phone"].includes(state)
+    ? `${description.stateLabel}. ${description.detail}` : undefined;
+  const copy = getCustomerStatusCopy(state, { facts });
   return {
+    state,
+    facts,
     courseName: course.courseName,
     rank,
     courseAddress: course.courseAddress,
-    badgeLabel: presentation.badgeLabel,
-    detail: presentation.detail,
-    tone: presentation.tone,
+    badgeLabel: copy.badgeLabel,
+    detail: copy.detail,
+    tone: copy.tone,
     bookingUrl: identityBlocked ? undefined : course.bookingUrl,
     bookingLinkLabel,
     phone: identityBlocked ? undefined : course.phone,

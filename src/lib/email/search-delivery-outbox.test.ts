@@ -5119,7 +5119,7 @@ describe("search email delivery outbox", () => {
         await assertCurrentDelivery();
         const report = await hydrateSearchStatusEmailPayload(payload);
         const html = renderSearchStatusHtml({ searchId: "search-1", to: recipient, ...report });
-        expect(html).toContain("Current availability is not confirmed yet");
+        expect(html).toContain("We haven’t confirmed any openings here yet");
         expect(html).not.toContain("No matching tee times");
         expect(html).not.toContain("TEE TIME FOUND");
         expect(now.getTime() - startedAt.getTime()).toBeLessThan(10 * 60_000);

@@ -73,7 +73,7 @@ describe("persisted simulator email rendering data", () => {
     report.venues = [{ courseName: "New Simulator", availability: "SUPPORT_PENDING" }];
     const hydrated = hydrateSimulatorStatusPayload(payload);
     expect(hydrated.venues[0].bookingUrl).toBeUndefined();
-    expect(renderSimulatorStatusHtml(hydrated)).toContain("ADDING ALERT SUPPORT");
+    expect(renderSimulatorStatusHtml(hydrated)).toContain("WE’RE CHECKING THE SETUP");
   });
   it("retains the observation time, recipient timezone and ranked venue context", () => {
     const hydrated = hydrateSimulatorStatusPayload(statusPayload());
@@ -84,7 +84,7 @@ describe("persisted simulator email rendering data", () => {
     });
     const html = renderSimulatorStatusHtml(hydrated);
     expect(html).toContain("Fairfield, Connecticut");
-    expect(html).toContain("No matching session is available right now");
+    expect(html).toContain("found no sessions matching your saved request yet");
     expect(html).toContain("60 minutes");
   });
 
