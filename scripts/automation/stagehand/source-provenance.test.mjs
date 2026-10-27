@@ -1,5 +1,32 @@
 import test from'node:test';import assert from'node:assert/strict';
-import{observedBookingSourceCandidates,nativeLinkSource,corroboratedNativeLink,rootWidgetRoutingWitness}from'./source-provenance.mjs';
+import{observedBookingSourceCandidates,nativeGestureNavigations,nativeLinkSource,corroboratedNativeLink,rootWidgetRoutingWitness}from'./source-provenance.mjs';
+
+function gestureReport(){
+ const startedAt='2030-01-01T12:00:00.000Z',completedAt='2030-01-01T12:00:01.000Z',href=official+'#',target='https://public-provider.example/services?kind=public';
+ return{startedAt,finishedAt:completedAt,visitedUrls:[official,target],initialNavigation:{requestedUrl:official,finalUrl:official,status:200},
+  officialLinkLedger:[{kind:'NATIVE_VISIBLE_DOM',pageUrl:official,observedAt:startedAt,documentHash:'a'.repeat(64),links:[{href,visible:true,text:'Book Bay',label:''}]}],
+  actions:[{sourceUrl:official,action:{method:'click'},observedTarget:{tag:'A',href,text:'Book Bay',label:''},afterUrl:target,openedNewPage:false}],
+  nativeGestureNavigations:[{kind:'NATIVE_GESTURE_SOURCE_OPEN',pageUrl:official,href,text:'Book Bay',label:'',observedAt:startedAt,documentHash:'a'.repeat(64),targetUrl:target,finalUrl:target,finalStatus:200,completedAt,finalDocumentHash:'b'.repeat(64),redirects:[]}]};
+}
+test('only closed completed native JS witness exposes actual landing, never placeholder or a fabricated HTTP redirect',()=>{
+ const r=gestureReport(),w=r.nativeGestureNavigations[0];assert.deepEqual(candidate(r),[w.finalUrl]);
+ assert.deepEqual(candidate({...r,nativeGestureNavigations:[]}),[]);
+ assert.equal(observedBookingSourceCandidates(r,official).includes(w.finalUrl),false);
+ const redirected='https://public-provider.example/canonical';r.visitedUrls.push(redirected);r.actions[0].afterUrl=redirected;
+ w.finalUrl=redirected;w.redirects=[{fromUrl:w.targetUrl,toUrl:redirected,status:302,completed:true}];assert.deepEqual(candidate(r),[redirected]);
+ w.redirects.unshift({fromUrl:official,toUrl:w.targetUrl,status:302,completed:true});assert.deepEqual(candidate(r),[]);
+});
+for(const mode of['old clock','future clock','wrong source','wrong hash','no ledger','hidden ledger','wrong ledger descriptor','wrong action descriptor','no action','failed action','popup','wrong after','wrong target','wrong status','unknown key','copied duplicate','no visited']){
+ test('JS routing witness rejects '+mode,()=>{const r=gestureReport(),w=r.nativeGestureNavigations[0];
+  if(mode==='old clock')w.observedAt='2020-01-01T00:00:00.000Z';if(mode==='future clock')w.completedAt='2040-01-01T00:00:00.000Z';
+  if(mode==='wrong source')w.pageUrl='https://foreign.example/';if(mode==='wrong hash')w.documentHash='c'.repeat(64);if(mode==='no ledger')r.officialLinkLedger=[];if(mode==='hidden ledger')r.officialLinkLedger[0].links[0].visible=false;
+  if(mode==='wrong ledger descriptor')r.officialLinkLedger[0].links[0].text='Book Bay 2';if(mode==='wrong action descriptor')r.actions[0].observedTarget.text='Book Bay 2';
+  if(mode==='no action')r.actions=[];if(mode==='failed action')r.actions[0].error=true;if(mode==='popup')r.actions[0].openedNewPage=true;if(mode==='wrong after')r.actions[0].afterUrl=official;
+  if(mode==='wrong target')w.targetUrl='https://other.example/';if(mode==='wrong status')w.finalStatus=503;if(mode==='unknown key')w.loaderId='forged';
+  if(mode==='copied duplicate'){r.nativeGestureNavigations.push(structuredClone(w));assert.equal(nativeGestureNavigations(r).length,1);return;}
+  if(mode==='no visited')r.visitedUrls=[official];assert.deepEqual(nativeGestureNavigations(r),[]);assert.deepEqual(candidate(r),[]);
+ });
+}
 const official='https://course.example/',source='https://provider.example/start?tenant=public',landing='https://provider.example/loading';
 const candidate=r=>observedBookingSourceCandidates(r,official,undefined,{sourceDiscoveryOnly:true});
 test('root widget routing keeps startup exclusions and only the initial native document scope',()=>{

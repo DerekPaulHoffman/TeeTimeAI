@@ -7,6 +7,10 @@ import { hashAccessRecipe, parseAccessRecipe } from "./recipe";
 
 // Tiny inert clients qualify offline wiring only. Production verifies the
 // reviewed bytes; an unknown or changed body still hashes normally and fails.
+import { registerFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
+import type { OfficialIdentityPage } from "./teeitup-official-identity";
+import type { NativeOfficialPageReader } from "./native-official-page-reader";
+
 const clients = vi.hoisted(() => ["reviewed-chronogolf-view", "reviewed-chronogolf-serializer"]);
 vi.mock("node:crypto", async importOriginal => {
   const actual = await importOriginal<typeof import("node:crypto")>();
@@ -190,5 +194,88 @@ describe("Chronogolf fixed public all-round reader", () => {
       expect(result.slots[0].holes).toBeUndefined(); expect(result.slots[0]).not.toHaveProperty("priceCents");
       expect(deps.reads.at(-1)!.searchParams.get("free_slots")).toBe(String(requested.players));
     }
+  });
+});
+
+describe("Chronogolf canonical-root host corroboration on every configuration read", () => {
+  const outdated = () => ({ ...club(), website: "http://outdated-public.example.net/" });
+  function official(mutate?: (page: OfficialIdentityPage) => void) {
+    const page: OfficialIdentityPage = { url: source.officialUrl, browserTransport: "NATIVE_CHROME",
+      html: `<html><head><title>${source.venueName}</title></head><body><h1>${source.venueName}</h1><address>${source.venueAddress}</address><a href="${source.bookingUrl}">Book Tee Times</a></body></html>`,
+      visibleEvidence: { title: source.venueName, headings: [source.venueName], addressTexts: [source.venueAddress], linkUrls: [source.bookingUrl] } };
+    mutate?.(page);return registerFreshNativeOfficialIdentityPage(page, source.officialUrl, new Date(Date.now() + 30000));
+  }
+  const nativeReader = (mutate?: (page: OfficialIdentityPage) => void) => vi.fn<NativeOfficialPageReader>(async (identity, url, end) => {
+    expect(identity).toEqual(source);expect(url).toBe(source.officialUrl);expect(end.getTime()).toBeGreaterThan(Date.now());return official(mutate);
+  });
+  it("leaves same-host HTTP inspection unchanged and never invokes a native reader", async () => {
+    const readNativeOfficialPage = nativeReader(), deps = { ...dependencies(), readNativeOfficialPage };
+    expect(await inspectChronogolf(source, deps)).toEqual(metadata());expect(readNativeOfficialPage).not.toHaveBeenCalled();
+  });
+  it("uses the canonical root only after all other identity checks and returns unchanged typed metadata", async () => {
+    const readNativeOfficialPage = nativeReader(), deps = { ...dependencies({ profile: html(outdated()) }), now: () => new Date(), localCapabilities: ["LOCAL_CHROME"] as const, readNativeOfficialPage };
+    const adapter = await inspectChronogolf(source, deps);
+    expect(adapter).toMatchObject({ family: "CHRONOGOLF", clubId: club().id, profileUrl: source.bookingUrl });
+    expect(Object.keys(adapter).sort()).toEqual(Object.keys(metadata()).sort());
+    expect(readNativeOfficialPage).toHaveBeenCalledTimes(1);expect(deps.reads.every(url => url.origin === "https://www.chronogolf.com")).toBe(true);
+    expect(deps.reads.some(url => url.hostname === "outdated-public.example.net")).toBe(false);
+    const inspected = await inspectExistingAdapter(source, { ...deps, venueMatches: (a, b) => a === b });
+    expect(inspected.adapter).toEqual(adapter);
+  });
+  it("re-earns the official root for each warm date/player execution rather than trusting saved metadata", async () => {
+    const first = { ...dependencies({ profile: html(outdated()) }), now: () => new Date(), localCapabilities: ["LOCAL_CHROME"] as const, readNativeOfficialPage: nativeReader() };
+    const saved = await inspectChronogolf(source, first);
+    for (const requested of [input, { ...input, date: "2026-10-24", players: 3 }]) {
+      const readNativeOfficialPage = nativeReader(), deps = { ...dependencies({ profile: html(outdated()), pages: [[row(1, requested.date)]], perPage: 24 }), now: () => new Date(), localCapabilities: ["LOCAL_CHROME"] as const, readNativeOfficialPage };
+      expect(await executeChronogolf(source, saved, target, requested, deps)).toHaveLength(1);
+      expect(readNativeOfficialPage).toHaveBeenCalledTimes(1);
+      expect(deps.reads.at(-1)!.searchParams.get("start_date")).toBe(requested.date);expect(deps.reads.at(-1)!.searchParams.get("free_slots")).toBe(String(requested.players));
+    }
+    const readNativeOfficialPage = nativeReader(page => { page.visibleEvidence!.linkUrls = []; });
+    const deps = { ...dependencies({ profile: html(outdated()) }), now: () => new Date(), localCapabilities: ["LOCAL_CHROME"] as const, readNativeOfficialPage };
+    await expect(executeChronogolf(source, saved, target, input, deps)).rejects.toThrow("ADAPTER_IDENTITY_MISMATCH");
+    expect(deps.reads.every(url => !url.pathname.includes("/marketplace/"))).toBe(true);
+  });
+  it("inspects and re-earns a heading-free two-scalar footer through both fresh date/player reads", async () => {
+    const printedFooter = (page: OfficialIdentityPage) => {
+      page.html = `<html><head><title>Welcome to ${source.venueName}</title></head><body><footer><address><span class="h5">${source.venueName}</span><span>${source.venueAddress}</span></address></footer><a href="${source.bookingUrl}">Book Tee Times</a></body></html>`;
+      page.visibleEvidence!.headings = [];page.visibleEvidence!.publicBusinessLabels = [source.venueName];page.visibleEvidence!.addressTexts = [source.venueName + ", " + source.venueAddress];
+    };
+    const make = (requested = input) => ({ ...dependencies({ profile: html(outdated()), pages: [[row(1, requested.date)]], perPage: 24 }),
+      now: () => new Date(), localCapabilities: ["LOCAL_CHROME"] as const, readNativeOfficialPage: nativeReader(printedFooter) });
+    const inspection = make(), saved = await inspectChronogolf(source, inspection);expect(inspection.readNativeOfficialPage).toHaveBeenCalledTimes(1);
+    for (const requested of [input, { ...input, date: "2026-10-24", players: 3 }]) {
+      const deps = make(requested);expect(await executeChronogolf(source, saved, target, requested, deps)).toHaveLength(1);expect(deps.readNativeOfficialPage).toHaveBeenCalledTimes(1);
+      expect(deps.reads.at(-1)!.searchParams.get("start_date")).toBe(requested.date);expect(deps.reads.at(-1)!.searchParams.get("free_slots")).toBe(String(requested.players));
+    }
+    const changed = make();changed.readNativeOfficialPage = nativeReader(page => { printedFooter(page);page.visibleEvidence!.publicBusinessLabels = []; });
+    await expect(executeChronogolf(source, saved, target, input, changed)).rejects.toThrow("ADAPTER_IDENTITY_MISMATCH");
+    expect(changed.reads.every(url => !url.pathname.includes("/marketplace/"))).toBe(true);
+  });
+  it("requires local capability only for a host mismatch and does not ask native Chrome to repair other identity failures", async () => {
+    const readNativeOfficialPage = nativeReader(), deps = { ...dependencies({ profile: html(outdated()) }), readNativeOfficialPage };
+    await expect(inspectChronogolf(source, deps)).rejects.toThrow("LOCAL_CHROME_REQUIRED");expect(readNativeOfficialPage).not.toHaveBeenCalled();
+    for (const change of [{ name: "Other Public Club" }, { address: "124 Fairway Drive" }, { slug: "other-club" }, { timezone: "America/New_York" }]) {
+      const current = { ...dependencies({ profile: html({ ...outdated(), ...change }) }), now: () => new Date(), localCapabilities: ["LOCAL_CHROME"] as const, readNativeOfficialPage };
+      await expect(inspectChronogolf(source, current)).rejects.toThrow("ADAPTER_IDENTITY_MISMATCH");
+      expect(readNativeOfficialPage).not.toHaveBeenCalled();expect(current.reads).toHaveLength(1);
+    }
+    const duplicate = outdated();duplicate.courses.push(structuredClone(duplicate.courses[0]));
+    const ambiguous = { ...dependencies({ profile: html(duplicate) }), now: () => new Date(), localCapabilities: ["LOCAL_CHROME"] as const, readNativeOfficialPage };
+    await expect(inspectChronogolf(source, ambiguous)).rejects.toThrow("ADAPTER_CATALOG_AMBIGUOUS");expect(readNativeOfficialPage).not.toHaveBeenCalled();
+  });
+  it("can reuse only an already fresh original canonical-page object; a copy requires a new owned read", async () => {
+    const page = official(), readNativeOfficialPage = nativeReader(), deps = { ...dependencies({ profile: html(outdated()) }), now: () => new Date(), localCapabilities: ["LOCAL_CHROME"] as const, officialIdentityPage: page, readNativeOfficialPage };
+    await inspectChronogolf(source, deps);expect(readNativeOfficialPage).not.toHaveBeenCalled();
+    await inspectChronogolf(source, { ...deps, officialIdentityPage: structuredClone(page) });expect(readNativeOfficialPage).toHaveBeenCalledTimes(1);
+  });
+  it("preserves the existing deadline and propagates a failed owned native read before any client or date request", async () => {
+    const failed = { ...dependencies({ profile: html(outdated()) }), now: () => new Date(), localCapabilities: ["LOCAL_CHROME"] as const,
+      readNativeOfficialPage: vi.fn(async () => { throw new Error("OFFICIAL_POSTAL_SOURCE_UNVERIFIED"); }) };
+    await expect(inspectChronogolf(source, failed)).rejects.toThrow("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");expect(failed.reads).toHaveLength(1);
+    let now = Date.now();
+    const expired = { ...dependencies({ profile: html(outdated()) }), now: () => new Date(now), localCapabilities: ["LOCAL_CHROME"] as const,
+      readNativeOfficialPage: vi.fn(async () => { now += 90000;return official(); }) };
+    await expect(inspectChronogolf(source, expired)).rejects.toThrow("DEADLINE_EXCEEDED");expect(expired.reads).toHaveLength(1);
   });
 });

@@ -1,7 +1,10 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
 import { CHRONOGOLF_READ_CLIENTS, chronogolfAvailabilityPageSchema, chronogolfMetadataSchema, chronogolfRecipeBookingUrl, isChronogolfRecipeSlotLink,
-  normalizeChronogolfProfileUrl, parseChronogolfPagination, parseChronogolfProfile, parseChronogolfSource, verifyChronogolfReadClients } from "./chronogolf-source";
+  normalizeChronogolfProfileUrl, parseChronogolfPagination, parseChronogolfProfile, parseChronogolfSource, verifyChronogolfReadClients, chronogolfOfficialHostMismatch } from "./chronogolf-source";
+
+import { registerFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
+import type { OfficialIdentityPage } from "./teeitup-official-identity";
 
 const reviewedBodies = vi.hoisted(() => ["reviewed-1710-fixture", "reviewed-1805-fixture"]);
 vi.mock("node:crypto", async importOriginal => {
@@ -207,4 +210,103 @@ describe("typed canonical dated booking links", () => {
     expect(isChronogolfRecipeSlotLink(numeric, onlyNine, requestedDate, { ...slot(), holes: 18 })).toBe(false);
     expect(isChronogolfRecipeSlotLink(numeric, onlyNine, requestedDate, slot())).toBe(true);
   });
+});
+
+describe("fresh canonical root corroborates only a stale provider website host", () => {
+  function official(mutate?: (page: OfficialIdentityPage) => void) {
+    const page: OfficialIdentityPage = { url: source.officialUrl, browserTransport: "NATIVE_CHROME",
+      html: `<html><head><title>${source.venueName}</title></head><body><h1>${source.venueName}</h1><address>${source.venueAddress}</address><a href="${source.bookingUrl}">Book Tee Times</a></body></html>`,
+      visibleEvidence: { title: source.venueName, headings: [source.venueName], addressTexts: [source.venueAddress], linkUrls: [source.bookingUrl] } };
+    mutate?.(page);
+    return registerFreshNativeOfficialIdentityPage(page, source.officialUrl, new Date(Date.now() + 30000));
+  }
+  const outdated = () => ({ ...club(), website: "http://old-public-club.example.net/" });
+  it("requires a live native full-identity and exact profile edge, without rewriting either website", () => {
+    const value = outdated(), page = official();
+    expect(parseChronogolfProfile(html(value), source.bookingUrl, source, page)).toMatchObject({ family: "CHRONOGOLF", clubId: value.id, profileUrl: source.bookingUrl });
+    expect(value.website).toBe("http://old-public-club.example.net/"); expect(source.officialUrl).toBe("https://www.example.org/");
+    expect(parseChronogolfProfile(html(), source.bookingUrl, source)).toEqual(parseChronogolfProfile(html(), source.bookingUrl, source, page));
+  });
+  it("brands only an otherwise fully matching profile host mismatch, never error text or another failed predicate", () => {
+    const error = (value: ReturnType<typeof club>) => { try { parseChronogolfProfile(html(value), source.bookingUrl, source); } catch (e) { return e; } };
+    expect(chronogolfOfficialHostMismatch(error(outdated()))).toBe(true);
+    expect(chronogolfOfficialHostMismatch(new Error("ADAPTER_IDENTITY_MISMATCH"))).toBe(false);
+    for (const change of [{ name: "Another Golf Club" }, { address: "101 Fairway Boulevard" }, { city: "Another City" },
+      { postcode: "98276" }, { province: "Oregon" }, { country: "Canada" }, { timezone: "America/New_York" }, { id: 99, slug: "other-club" }, { website: "http://user:pass@example.org/" }]) {
+      const value = { ...outdated(), ...change };
+      expect(() => parseChronogolfProfile(html(value), source.bookingUrl, source, official())).toThrow("ADAPTER_IDENTITY_MISMATCH");
+      expect(chronogolfOfficialHostMismatch(error(value))).toBe(false);
+    }
+  });
+  it.each(["copy", "stale", "mutated", "unattested", "wrong-root"])("rejects %s official-page authority", mode => {
+    let page = official();
+    if (mode === "copy") page = structuredClone(page);
+    if (mode === "mutated") page.html += " ";
+    if (mode === "unattested") page = { ...page };
+    if (mode === "wrong-root") page = official(p => { p.url = "https://other.example.org/"; });
+    if (mode === "stale") {
+      const now = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 31000);
+      try { expect(() => parseChronogolfProfile(html(outdated()), source.bookingUrl, source, page)).toThrow("ADAPTER_IDENTITY_MISMATCH"); }
+      finally { now.mockRestore(); }
+    } else expect(() => parseChronogolfProfile(html(outdated()), source.bookingUrl, source, page)).toThrow("ADAPTER_IDENTITY_MISMATCH");
+  });
+  it.each(["hidden-link", "form-link", "missing-link", "other-club", "two-clubs", "wrong-raw-name", "wrong-rendered-name", "wrong-raw-address", "wrong-rendered-address", "conflicting-h1"])
+    ("rejects %s instead of adopting a stale website host", mode => {
+      const page = official(p => {
+        if (mode === "hidden-link") p.html = p.html.replace("<a ", '<a hidden ');
+        if (mode === "form-link") p.html = p.html.replace("<a ", "<form><a ").replace("</a>", "</a></form>");
+        if (mode === "missing-link") p.visibleEvidence!.linkUrls = [];
+        if (mode === "other-club") { p.html = p.html.replaceAll(source.bookingUrl, "https://www.chronogolf.com/club/another-club"); p.visibleEvidence!.linkUrls = ["https://www.chronogolf.com/club/another-club"]; }
+        if (mode === "two-clubs") p.visibleEvidence!.linkUrls.push("https://www.chronogolf.com/club/another-club");
+        if (mode === "wrong-raw-name") p.html = p.html.replaceAll(source.venueName, "Another Golf Club");
+        if (mode === "wrong-rendered-name") p.visibleEvidence!.headings = ["Another Golf Club"];
+        if (mode === "wrong-raw-address") p.html = p.html.replace(source.venueAddress, "101 Fairway Blvd, Example City, WA 98275, USA");
+        if (mode === "wrong-rendered-address") p.visibleEvidence!.addressTexts = ["101 Fairway Blvd, Example City, WA 98275, USA"];
+        if (mode === "conflicting-h1") p.html = p.html.replace("</body>", "<h1>Another Golf Club</h1></body>");
+      });
+      expect(() => parseChronogolfProfile(html(outdated()), source.bookingUrl, source, page)).toThrow("ADAPTER_IDENTITY_MISMATCH");
+    });
+  it("accepts only an actually attested initial canonical-root redirect", () => {
+    const page = official(), current = "https://example.org/home";
+    page.url = current;
+    const fresh = registerFreshNativeOfficialIdentityPage(page, source.officialUrl, new Date(Date.now() + 30000),
+      { requestedUrl: source.officialUrl, redirects: [{ fromUrl: source.officialUrl, toUrl: current, status: 302, completed: true }] });
+    expect(parseChronogolfProfile(html(outdated()), source.bookingUrl, source, fresh).clubId).toBe(club().id);
+    expect(() => parseChronogolfProfile(html(outdated()), source.bookingUrl, source, structuredClone(fresh))).toThrow("ADAPTER_IDENTITY_MISMATCH");
+  });
+});
+
+describe("heading-free named canonical footer corroboration", () => {
+  function footer(mutate?: (page: OfficialIdentityPage) => void) {
+    const page: OfficialIdentityPage = { url: source.officialUrl, browserTransport: "NATIVE_CHROME",
+      html: `<html><head><title>Welcome to ${source.venueName}</title></head><body><footer><address><span class="h5">${source.venueName}</span><span>${source.venueAddress}</span></address></footer><a href="${source.bookingUrl}">Book Tee Times</a></body></html>`,
+      visibleEvidence: { title: `Welcome to ${source.venueName}`, headings: [], publicBusinessLabels: [source.venueName], addressTexts: [source.venueName + ", " + source.venueAddress], linkUrls: [source.bookingUrl] } };
+    mutate?.(page);return registerFreshNativeOfficialIdentityPage(page, source.officialUrl, new Date(Date.now() + 30000));
+  }
+  const outdated = () => html({ ...club(), website: "http://outdated-public.example.net/" });
+  it("uses the actual business label and one two-scalar semantic footer without inventing a heading", () => {
+    const page = footer();expect(page.visibleEvidence!.headings).toEqual([]);
+    expect(parseChronogolfProfile(outdated(), source.bookingUrl, source, page).clubId).toBe(club().id);
+  });
+  it.each(["missing-name", "wrong-name", "wrong-raw-name", "wrong-address", "hidden", "private", "form", "outside-footer", "extra-span", "nested-control", "two-addresses", "raw-heading", "rendered-heading", "rendered-address", "postal-extension"])
+    ("rejects %s in a heading-free footer rather than dropping evidence", mode => {
+      const page = footer(p => {
+        if (mode === "missing-name") p.visibleEvidence!.publicBusinessLabels = [];
+        if (mode === "wrong-name") p.visibleEvidence!.publicBusinessLabels = ["Another Golf Club"];
+        if (mode === "wrong-raw-name") p.html = p.html.replace(`<span class="h5">${source.venueName}</span>`, '<span class="h5">Another Golf Club</span>');
+        if (mode === "wrong-address") p.html = p.html.replace(source.venueAddress, "101 Fairway Blvd, Example City, WA 98275, USA");
+        if (mode === "hidden") p.html = p.html.replace("<footer>", '<footer class="d-none">');
+        if (mode === "private") p.html = p.html.replace("<footer>", '<footer aria-label="Mailing address">');
+        if (mode === "form") p.html = p.html.replace("<address>", "<form><address>").replace("</address>", "</address></form>");
+        if (mode === "outside-footer") p.html = p.html.replaceAll("footer", "div");
+        if (mode === "extra-span") p.html = p.html.replace("</address>", "<span>Another field</span></address>");
+        if (mode === "nested-control") p.html = p.html.replace(source.venueAddress, `<input value="${source.venueAddress}">`);
+        if (mode === "two-addresses") p.html = p.html.replace("</footer>", `<address><span>${source.venueName}</span><span>${source.venueAddress}</span></address></footer>`);
+        if (mode === "raw-heading") p.html = p.html.replace("<body>", "<body><h1>Another Golf Club</h1>");
+        if (mode === "rendered-heading") p.visibleEvidence!.headings = ["Another Golf Club"];
+        if (mode === "rendered-address") p.visibleEvidence!.addressTexts = [source.venueName + ", 101 Fairway Blvd, Example City, WA 98275, USA"];
+        if (mode === "postal-extension") { p.html = p.html.replaceAll("98275", "98275-1234");p.visibleEvidence!.addressTexts = [source.venueName + ", " + source.venueAddress.replace("98275", "98275-1234")]; }
+      });
+      expect(() => parseChronogolfProfile(outdated(), source.bookingUrl, source, page)).toThrow("ADAPTER_IDENTITY_MISMATCH");
+    });
 });

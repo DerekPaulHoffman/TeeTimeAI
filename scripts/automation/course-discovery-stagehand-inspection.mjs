@@ -3,7 +3,7 @@ import { discoveryError } from "./course-discovery-client.mjs";
 import { STAGEHAND_SOURCE_MODE, canonicalStagehandData as canonical, stagehandDataHash as hash,
   publicStagehandSourceUrl as publicUrl, validateStagehandSourceProposal as validateAdapterSourceProposal,
   validateStagehandSourceReport } from "./course-discovery-stagehand-source.mjs";
-import { observedBookingSourceCandidates, nativeLinkSource, corroboratedNativeLink, nativeFrameNavigations, nativeIntermediaryNavigations } from "./stagehand/source-provenance.mjs";
+import { observedBookingSourceCandidates, nativeLinkSource, corroboratedNativeLink, nativeFrameNavigations, nativeIntermediaryNavigations, nativeGestureNavigations } from "./stagehand/source-provenance.mjs";
 import { safeTeeItUpDelegationDiagnostic, safeFixedAdapterReadDiagnostic, safeNativeMainDocumentContinuity } from "./course-discovery-worker.mjs";
 import { z } from "zod";
 import { projectNativeRouterFailure, safeNativeRouterFailure } from "./stagehand/source-diagnostic.mjs";
@@ -141,6 +141,10 @@ export function observedInspectionPath(report, officialUrl, bookingUrl) {
     for (const frame of (row.frames ?? []).slice(0, 32)) link(row.pageUrl, frame.src);
   for (const row of nativeFrameNavigations(report, publicUrl)) for (const hop of row.redirects) link(hop.fromUrl, hop.toUrl);
   for (const row of nativeIntermediaryNavigations(report, publicUrl)) for (const hop of row.redirects) link(hop.fromUrl, hop.toUrl);
+  for (const row of nativeGestureNavigations(report, publicUrl)) {
+    link(row.pageUrl, row.targetUrl);
+    for (const hop of row.redirects) link(hop.fromUrl, hop.toUrl);
+  }
   for (const row of (report.observedSourceEvidence ?? []).slice(0, 1024)) {
     const source = row.kind === 'NATIVE_DOM_LINK_OBSERVED' ? nativeLinkSource(row) : row.url;
     if (['DOM_OBSERVED', 'NATIVE_DOM_LINK_OBSERVED'].includes(row.kind)) {
@@ -273,7 +277,7 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
         (!documentBinding || current.capability.documentBindingSha256 === documentBinding));
     };
     const contextMatches = (snapshot, expectedUrl) => snapshot.url === expectedUrl || nativeContextMatches(snapshot, expectedUrl);
-    const request = async (action, url, observeReason, target) => {
+    const request = async (action, url, observeReason, target, expectedGesture) => {
       check();
       if (receipt.actions.length >= INSPECTION_ACTION_LIMIT) throw fail('FRAMEWORK_INSPECTION_ACTION_LIMIT');
       const start = now(), step = { action, urlSha256: hash(url), startedOffsetMs: Math.max(0, start - startedAt) };
@@ -292,21 +296,31 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
           throw fail('FRAMEWORK_INSPECTION_SOURCE_UNREADABLE');
         // An observation refreshes only the same public document. It cannot
         // become a second navigation lane or promote an ancillary response.
-        const expectedOriginal = ['observe','click'].includes(action) && previousContext?.currentUrl === url ? previousContext.originalUrl : url;
+        const completedGesture = expectedGesture ? browser.currentGestureCompletion?.(snapshot, now()) : undefined;
+        const gestureMatched = Boolean(expectedGesture && completedGesture && completedGesture.sourceUrl === expectedGesture.pageUrl &&
+          completedGesture.href === expectedGesture.href && completedGesture.text === expectedGesture.text && completedGesture.label === expectedGesture.label &&
+          completedGesture.targetUrl === expectedGesture.targetUrl && completedGesture.finalUrl === snapshot.url &&
+          canonical(completedGesture.redirects) === canonical(expectedGesture.redirects) &&
+          completedGesture.observedAt <= now() && now() - completedGesture.observedAt <= 5000 &&
+          snapshot.navigationStatus === 200 && !snapshot.accessRequirementObserved && !snapshot.nativeFirstFatal);
+        if (expectedGesture && !gestureMatched) throw fail('FRAMEWORK_INSPECTION_CONTEXT_CHANGED');
+        const expectedOriginal = gestureMatched ? snapshot.url : ['observe','click'].includes(action) && previousContext?.currentUrl === url ? previousContext.originalUrl : url;
         let originalUrl = expectedOriginal;
         let capability = browser.currentMainDocumentContinuity?.(snapshot, originalUrl, now());
         if (!capability && action === 'open' && path.includes(snapshot.url)) {
           originalUrl = snapshot.url; capability = browser.currentMainDocumentContinuity?.(snapshot, originalUrl, now());
         }
         const projected = safeNativeMainDocumentContinuity(capability);
-        const sameObservedDocument = !previousContext || action === 'open' || projected?.documentBindingSha256 === previousContext.capability.documentBindingSha256;
+        const sameObservedDocument = !previousContext || action === 'open' || gestureMatched || projected?.documentBindingSha256 === previousContext.capability.documentBindingSha256;
         if (projected && sameObservedDocument && projected.originalUrlSha256 === hash(originalUrl) && projected.currentUrlSha256 === hash(snapshot.url) &&
             projected.observedAt <= now() && now() - projected.observedAt <= 5000 && snapshot.navigationStatus === 200) {
           currentNativeContext = { originalUrl, currentUrl: snapshot.url, capability };
           nativeContexts.set(snapshot, currentNativeContext); step.nativeMainDocumentContinuity = projected;
         } else currentNativeContext = undefined;
+        if (gestureMatched && (!projected || projected.documentBindingSha256 !== completedGesture.documentBindingSha256))
+          throw fail('FRAMEWORK_INSPECTION_CONTEXT_CHANGED');
         if (['observe','click'].includes(action) && new URL(snapshot.url).href !== new URL(url).href &&
-            !(previousContext && nativeContextMatches(snapshot, previousContext.originalUrl, previousContext.capability.documentBindingSha256)))
+            !gestureMatched && !(previousContext && nativeContextMatches(snapshot, previousContext.originalUrl, previousContext.capability.documentBindingSha256)))
           throw fail('FRAMEWORK_INSPECTION_CONTEXT_CHANGED');
         step.contextUrlSha256 = hash(snapshot.url);
         if (Number.isInteger(snapshot.navigationStatus)) step.navigationStatus = snapshot.navigationStatus;
@@ -354,9 +368,15 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
         path[0]=current; position=0; receipt.freshPathSha256=hash(canonical(path));
       } else position = landed;
       const next = path[position + 1];
+      const gesture = next === undefined ? undefined : nativeGestureNavigations(report, publicUrl).find(row =>
+        row.pageUrl === snapshot.url && row.targetUrl === next && row.href === snapshot.url + '#');
+      const matchingGestureControls = gesture ? (snapshot.controls ?? []).filter(row => row.kind === 'link' && row.href === gesture.href &&
+        row.name?.replace(/\s+/gu,' ').trim() === gesture.text && row.label?.replace(/\s+/gu,' ').trim() === gesture.label &&
+        typeof row.target === 'string' && /^[a-f0-9-]{36}$/u.test(row.target)) : [];
       const freshLinks = new Set([
         ...(snapshot.controls ?? []).filter(row => ['link','public-document-link'].includes(row.kind)).map(row => row.href),
         ...(snapshot.frames ?? []).filter(row => row.source === 'OFFICIAL_IFRAME_SRC').map(row => row.url),
+        ...(matchingGestureControls.length === 1 ? [gesture.targetUrl] : []),
       ].filter(publicUrl).map(value => new URL(value).href));
       const missingLink = next !== undefined && !freshLinks.has(next);
       const disclosures = (snapshot.controls ?? []).filter(control => control.kind === 'public-entry-disclosure' &&
@@ -401,8 +421,10 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
       if (position === path.length - 1) break;
       // Inspect an admitted final source from its current public parent. This
       // retains the fixed official-document witness; it grants no availability proof.
-      if (position + 1 === path.length - 1) break;
-      snapshot = await request('open', next); position++;
+      if (position + 1 === path.length - 1 && !gesture) break;
+      snapshot = gesture ? await request('click', snapshot.url, 'NATIVE_GESTURE_SOURCE_OPEN', matchingGestureControls[0].target, gesture)
+        : await request('open', next);
+      position++;
     }
     // Only after the unchanged fresh path/last-link check may an exact reviewed
     // CPS source choose its genuine booking document before the first probe.

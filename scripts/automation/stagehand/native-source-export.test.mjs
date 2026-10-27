@@ -1,4 +1,37 @@
 import test from 'node:test';
+
+test('private JS completion becomes an exact routing source and survives only its own bounded checkpoint',async()=>{
+ const input=job(),destination='https://public-provider.example/services?kind=public',href=official+'#';
+ let current=official,evaluations=0,extracts=0,callback,prepared;
+ const done={bodyPresent:true,mainDocumentCurrent:true,mainDocumentComplete:true,mainReadPending:false,readyState:'complete',mainDocumentStatus:200,pendingReads:0};
+ const session={localCodexCalls:[],browser:{context:{addInitScript:async()=>{}}},page:{url:async()=>current,evaluate:async()=>++evaluations%2?{url:current,observedAt:new Date().toISOString(),links:current===official?[{href,text:'Book Bay',visible:true}]:[],frames:[],dom:[]}:[]},
+  goto:async()=>({status:()=>200}),settleSourceDocument:async()=>done,
+  extract:async(_instruction,schema)=>({data:schema.parse(++extracts===1?{decision:'CONTINUE',reason:'Follow actual visible public navigation',nextActionInstruction:'Open Book Bay',bookingUrl:null}:{decision:'SOURCE_FOUND',reason:'Actual completed public service document',nextActionInstruction:'',bookingUrl:destination})}),
+  observe:async()=>({data:[{method:'click',selector:'a',description:'Open public Book Bay',arguments:[]}]}),
+  act:async()=>{prepared={kind:'NATIVE_VISIBLE_DOM',pageUrl:official,observedAt:new Date().toISOString(),documentHash:'a'.repeat(64),links:[{href,visible:true,text:'Book Bay',label:''}]};callback(prepared);current=destination;
+   return{before:{tag:'A',href,text:'\n\t  Book Bay \n\t',label:''},afterUrl:destination,openedNewPage:false,nativeGestureNavigation:{kind:'NATIVE_GESTURE_SOURCE_OPEN',pageUrl:official,href,text:'Book Bay',label:'',observedAt:prepared.observedAt,documentHash:prepared.documentHash,targetUrl:destination,finalUrl:destination,finalStatus:200,completedAt:new Date().toISOString(),finalDocumentHash:'b'.repeat(64),redirects:[]}};},
+  close:async()=>({browserClosed:true,modelClosed:true})};
+ const report=await sourceDiscover({job:input,sessionFactory:async options=>{callback=options.onNativeSourceWitness;return session;}});
+ assert.equal(report.outcome,'SOURCE_PROPOSED_UNVERIFIED');assert.equal(report.adapterSourceProposal.bookingUrl,destination);assert.equal(report.nativeGestureNavigations.length,1);validateStagehandSourceReport(report,input);
+ const saved=createStagehandSourceCheckpoint(input,report),resumed=readStagehandSourceCheckpoint({...input,attempts:2,checkpoint:{stagehandSource:saved}},undefined,Date.now());
+ assert.equal(saved.report.actions[0].observedTarget.text,'Book Bay');
+ assert.deepEqual(resumed.report.nativeGestureNavigations,report.nativeGestureNavigations);assert.equal(resumed.report.actions[0].openedNewPage,false);
+ assert.equal(resumed.report.adapterSourceProposal.bookingUrl,destination);assert.equal(resumed.firstPickedUpAt,input.firstPickedUpAt);assert.equal(resumed.deadlineAt,input.deadlineAt);
+ assert.throws(()=>readStagehandSourceCheckpoint({...input,id:'copied-job',attempts:2,checkpoint:{stagehandSource:saved}},undefined,Date.now()));
+ for(const change of[{text:'Other Bay'},{text:''},{text:'Book Bay '.repeat(24)},{label:'forged'}]){
+  const mismatched=structuredClone(saved.report);Object.assign(mismatched.actions[0].observedTarget,change);
+  assert.throws(()=>validateStagehandSourceReport(mismatched,input),/STAGEHAND_SOURCE_GRAPH_LIMIT/);
+ }
+ const wrongRaw=structuredClone(report);wrongRaw.actions[0].observedTarget.text='\n\tOther Bay\n';
+ assert.throws(()=>validateStagehandSourceReport(wrongRaw,input),/STAGEHAND_SOURCE_GRAPH_LIMIT/);
+ const overlongRaw=structuredClone(report);overlongRaw.actions[0].observedTarget.text=' '.repeat(513)+'Book Bay';
+ validateStagehandSourceReport(overlongRaw,input);
+ assert.throws(()=>createStagehandSourceCheckpoint(input,overlongRaw),/STAGEHAND_SOURCE_GRAPH_LIMIT/);
+ for(const change of[{finalStatus:503},{targetUrl:'https://foreign.example/'},{href:official+'/other'},{loaderId:'forged'}]){
+  const forged=structuredClone(report);Object.assign(forged.nativeGestureNavigations[0],change);assert.throws(()=>validateStagehandSourceReport(forged,input));
+ }
+ const duplicated=structuredClone(report);duplicated.nativeGestureNavigations.push(structuredClone(duplicated.nativeGestureNavigations[0]));assert.throws(()=>validateStagehandSourceReport(duplicated,input));
+});
 import assert from 'node:assert/strict';
 import {mkdtempSync,readFileSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';

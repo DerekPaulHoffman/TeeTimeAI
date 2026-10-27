@@ -2,7 +2,7 @@
 import WebSocket from "ws";
 export type OwnedCdpEvent = Record<string, unknown>;
 type Listener = (value: OwnedCdpEvent) => unknown;
-type Pending = { method: string; resolve: (value: OwnedCdpEvent) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> };
+type Pending = { method: string; sessionId?: string; requestId?: string; resolve: (value: OwnedCdpEvent) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> };
 const methods = ["Extensions.loadUnpacked", "Fetch.continueRequest", "Fetch.continueResponse", "Fetch.enable", "Fetch.failRequest", "Fetch.getResponseBody",
   "Network.enable", "Page.enable", "Page.addScriptToEvaluateOnNewDocument", "Page.getFrameTree", "Page.stopLoading", "Runtime.enable", "Runtime.evaluate", "Runtime.runIfWaitingForDebugger",
   "Target.closeTarget", "Target.createTarget", "Target.detachFromTarget", "Target.getBrowserContexts", "Target.getTargets", "Target.setAutoAttach", "Target.setDiscoverTargets"] as const;
@@ -25,6 +25,8 @@ export function projectOwnedSocketError(error: unknown) {
 }
 export type OwnedCdpSession = {
   send(method: string, params?: Record<string, unknown>): Promise<OwnedCdpEvent>;
+  /** Private, one-use disposition after the router independently proves exact image-request termination. */
+  recoverTerminalExcludedImageAbort(error: unknown, requestId: string): boolean;
   on(method: string, listener: Listener): void;
   off(method: string, listener: Listener): void;
   detach(): Promise<void>;
@@ -36,17 +38,20 @@ export async function connectOwnedSourceCdp(endpoint: string, signal: AbortSigna
   const pending = new Map<number, Pending>(), listeners = new Map<string, Set<Listener>>();
   let sequence = 0, closed = false;
   let firstFailure: OwnedCdpFailure | undefined;
-  const remember = (layer: OwnedCdpFailure["layer"], method?: string, event?: string, error?: unknown) => {
-    if (firstFailure) return;
+  const recoverable = new Map<Error, { sessionId?: string; requestId: string; diagnostic: OwnedCdpFailure }>();
+  const projectFailure = (layer: OwnedCdpFailure["layer"], method?: string, event?: string, error?: unknown): OwnedCdpFailure => {
     const value = error && typeof error === "object" ? error as { code?: unknown; message?: unknown } : {};
     const message = typeof value.message === "string" ? value.message.slice(0, 4000) : "";
     const lifecycle = /\bSession with given id not found\b/u.test(message) ? "SESSION_NOT_FOUND" : /\b(?:Target|target) (?:has been )?closed\b/u.test(message) ? "TARGET_CLOSED"
       : /\b(?:Execution context was destroyed|Cannot find context with specified id)\b/u.test(message) ? "CONTEXT_DESTROYED" : /\b(?:Frame|frame) (?:with given id )?not found\b/u.test(message) ? "FRAME_NOT_FOUND" : "UNKNOWN";
-    firstFailure = { layer, pendingRequests: pending.size,
+    return { layer, pendingRequests: pending.size,
       ...(method ? { method: methods.includes(method as typeof methods[number]) ? method as typeof methods[number] : "UNKNOWN" } : {}),
       ...(event ? { event: events.includes(event as typeof events[number]) ? event as typeof events[number] : "UNKNOWN" } : {}),
       ...(layer === "RPC" ? { lifecycle } : {}),
       ...(Number.isInteger(value.code) && Number(value.code) >= -2147483648 && Number(value.code) <= 2147483647 ? { rpcCode: Number(value.code) } : {}) };
+  };
+  const remember = (layer: OwnedCdpFailure["layer"], method?: string, event?: string, error?: unknown) => {
+    firstFailure ??= projectFailure(layer, method, event, error);
   };
   const key = (session: string | undefined, method: string) => (session ?? "") + "\n" + method;
   const rejectAll = () => {
@@ -89,7 +94,15 @@ export async function connectOwnedSourceCdp(endpoint: string, signal: AbortSigna
     if (typeof value.id === "number") {
       const item = pending.get(value.id); if (!item) return;
       pending.delete(value.id); clearTimeout(item.timer);
-      if (value.error) { remember("RPC", item.method, undefined, value.error); item.reject(failure()); } else item.resolve(value.result ?? {});
+      if (value.error) {
+        const commandError = failure();
+        const rpcCode = value.error && typeof value.error === "object" ? (value.error as { code?: unknown }).code : undefined;
+        if (!firstFailure && item.method === "Fetch.failRequest" && rpcCode === -32602 && item.requestId)
+          recoverable.set(commandError, { sessionId: item.sessionId, requestId: item.requestId,
+            diagnostic: projectFailure("RPC", item.method, undefined, value.error) });
+        else remember("RPC", item.method, undefined, value.error);
+        item.reject(commandError);
+      } else item.resolve(value.result ?? {});
       return;
     }
     if (typeof value.method !== "string") return;
@@ -103,17 +116,29 @@ export async function connectOwnedSourceCdp(endpoint: string, signal: AbortSigna
     const id = ++sequence;
     return new Promise<OwnedCdpEvent>((resolve, reject) => {
       const timer = setTimeout(() => { remember("TIMEOUT", method); pending.delete(id); reject(failure()); }, 15_000);
-      pending.set(id, { method, resolve, reject, timer });
+      pending.set(id, { method, sessionId,
+        ...(method === "Fetch.failRequest" && typeof params.requestId === "string" && params.requestId.length > 0 && params.requestId.length <= 1024
+          ? { requestId: params.requestId } : {}), resolve, reject, timer });
       try { socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) })); }
       catch { remember("SEND", method); clearTimeout(timer); pending.delete(id); reject(failure()); }
     });
   };
   const session = (sessionId?: string): OwnedCdpSession => ({
     send: (method, params) => send(sessionId, method, params),
+    recoverTerminalExcludedImageAbort(error, requestId) {
+      if (closed || signal.aborted || firstFailure || !(error instanceof Error) || typeof requestId !== "string") return false;
+      const candidate = recoverable.get(error);
+      if (!candidate || candidate.sessionId !== sessionId || candidate.requestId !== requestId) return false;
+      recoverable.delete(error);
+      return true;
+    },
     on(method, listener) { const k = key(sessionId, method); if (!listeners.has(k)) listeners.set(k, new Set()); listeners.get(k)!.add(listener); },
     off(method, listener) { listeners.get(key(sessionId, method))?.delete(listener); },
     async detach() { if (sessionId && !closed) await send(undefined, "Target.detachFromTarget", { sessionId }); },
   });
-  return { root: session(), session, failureDiagnostic: () => firstFailure ? { ...firstFailure } : undefined,
+  return { root: session(), session, failureDiagnostic: () => {
+    const diagnostic = firstFailure ?? recoverable.values().next().value?.diagnostic;
+    return diagnostic ? { ...diagnostic } : undefined;
+  },
     close() { signal.removeEventListener("abort", aborted); rejectAll(); } };
 }

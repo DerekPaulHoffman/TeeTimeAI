@@ -20,7 +20,7 @@ import { runWithProviderRequestLease } from "@/lib/automation/provider-request-l
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
 import { accessExecutionInputSchema, type AccessExecutionInput, isActiveBrowserAccessChallenge, isSafeBrowserAssetUrl, isSafeBrowserBootstrapReadUrl, isSafeBrowserAvailabilityReadUrl, isSafeRecipeUrl, recipeSelectorSchema } from "./recipe";
 import { continueNativeBrowserRead, createNativePublicBrowserProxy, isObservedNativeRedirect, isObservedNativeRedirectTarget, nativeReadPreflightMethod } from "./native-public-browser";
-import { installNativeRedirectRouting, isNativeReadSupersededFailure, authorizePublicClientReadHeaders, isCurrentPublicClientReadHeaders, nativePublicClientPreflightMethod, nativeMindbodyBootstrapSource, nativeMindbodyControllerForm,
+import { installNativeRedirectRouting, isNativeReadSupersededFailure, authorizePublicClientReadHeaders, isCurrentPublicClientReadHeaders, nativePublicClientPreflightMethod, nativeMindbodyBootstrapSource, nativeMindbodyControllerForm, nativeGestureNavigationSource,
   publicClientReadHeaderProofFailure, attestedNativeDocumentRedirects, type NativeDocumentRedirect, type NativeFirstFatal, type NativeReadRequest, type NativeReadRoute, type NativeRequestDiagnostic, type NativeUncorrelatedPost } from "./native-redirect-routing";
 import { publicHeaderFailureDiagnostic } from "./public-header-diagnostic";
 export { publicHeaderFailureDiagnostic } from "./public-header-diagnostic";
@@ -163,6 +163,8 @@ export function sameDiscoveryMainDocument(observedUrl: string, currentUrl: strin
 
 type NativeMainDocumentContinuity = { kind: "NATIVE_MAIN_DOCUMENT_CONTINUITY_V1"; originalUrlSha256: string; currentUrlSha256: string;
   documentBindingSha256: string; observedAt: number; status: 200 };
+type NativeGestureCompletion = { kind: "NATIVE_GESTURE_COMPLETED_V1"; sourceUrl: string; href: string; text: string; label: string;
+  targetUrl: string; finalUrl: string; redirects: NativeDocumentRedirect[]; documentBindingSha256: string; observedAt: number };
 export type DiscoveryBrowserSnapshot = {
   url: string; text: string; controls: Array<{ target: string; selector: string; kind: string; name: string; label: string; href?: string; options?: Array<{ value: string; label: string }>; currentValue?: string; filterPurpose?: "DURATION" | "PLAYERS"; readOnly?: true; product?: { selector: string; durationMinutes: number } }>;
   responses: Array<{ url: string; status: number; method: string; body?: unknown; bodyOmitted?: true; schemaEvidence?: PublicResponseSchema; schemaEvidenceOmitted?: true }>;
@@ -175,6 +177,8 @@ export type DiscoveryBrowserSnapshot = {
   nativeDocumentRedirects?: NativeDocumentRedirect[];
   /** Controller-only current native read; removed before model/tool projection. */
   nativeMainDocumentContinuity?: NativeMainDocumentContinuity;
+  /** Controller-only freshly completed placeholder click; stripped before model input. */
+  nativeGestureCompletion?: NativeGestureCompletion;
   requestFailures?: Array<{ reason: string; resourceType: string; method?: string; url?: string;
     urlRejection?: ReturnType<typeof safePublicUrlRejectionDiagnostic>; publicHeaderDiagnostic?: ReturnType<typeof publicHeaderFailureDiagnostic> }>;
   nativeFirstFatal?: NativeFirstFatal;
@@ -277,7 +281,12 @@ export async function createCourseDiscoveryBrowserSession(input: {
   const cpsScope = createCpsPublicSessionScope(initialUrls);
   const bookingParents = createPublicBookingParentScope({ officialUrl: input.venueOfficialUrl, venueName: input.venueName, venueAddress: input.venueAddress });
   const publicIntermediaries = new Map<string, { pageUrl: string; documentStartedAt: number }>();
-  let nativeMainDocumentWitness: { request: NativeReadRequest; currentUrl: string; timeOrigin: number; proof: NativeMainDocumentContinuity } | undefined;
+  let nativeMainDocumentWitness: { request: NativeReadRequest; currentUrl: string; timeOrigin: number; frameId: string; loaderId: string;
+    proof: NativeMainDocumentContinuity } | undefined;
+  let gestureIntent: { sourceUrl: string; href: string; text: string; label: string; sourceRequest: NativeReadRequest;
+    sourceBinding: string; until: number; used: boolean } | undefined;
+  let pendingOfficialSubpage: { targetUrl: string; sourceRequest: NativeReadRequest; sourceBinding: string } | undefined;
+  let officialSubpage: { url: string; request: NativeReadRequest; frameId: string; loaderId: string; binding: string } | undefined;
   const teeBookingScope = createTeeItUpOfficialBookingScope({ officialUrl: input.venueOfficialUrl, venueName: input.venueName ?? "",
     venueAddress: input.venueAddress, timeZone: input.timeZone ?? "UTC" }, deadline, (request, currentUrl, timeOrigin) => Boolean(
       nativeMainDocumentWitness && nativeMainDocumentWitness.request === request && nativeMainDocumentWitness.currentUrl === currentUrl &&
@@ -375,12 +384,15 @@ export async function createCourseDiscoveryBrowserSession(input: {
       observedRequests.push(metadata); requestMetadataBytes += size;
     }
   };
-  const controls = new Map<string, { locator: Locator; signature: string; kind: string; href?: string; documentNavigationOnly?: boolean; calendarDay?: string; dropdown?: PublicDropdownProof; menuButton?: PublicMenuButtonProof; catalogTile?: boolean;
-    service?: boolean; serviceContinuation?: PublicServiceContinuationMode; datePicker?: PublicDatePickerInputProof; entryDisclosure?: PublicEntryDisclosure }>();
+  type ControlDocument = { url: string; timeOrigin: number; frameId?: string; loaderId?: string; binding?: string; request?: NativeReadRequest };
+  type ControlRecord = { locator: Locator; signature: string; kind: string; document?: ControlDocument; href?: string; documentNavigationOnly?: boolean; calendarDay?: string; dropdown?: PublicDropdownProof; menuButton?: PublicMenuButtonProof; catalogTile?: boolean;
+    service?: boolean; serviceContinuation?: PublicServiceContinuationMode; datePicker?: PublicDatePickerInputProof; entryDisclosure?: PublicEntryDisclosure };
+  const controls = new Map<string, ControlRecord>();
   let entryDisclosureUsed = false, disclosureGetOnly = false;
   let entryGetIntent: { sourceUrl: string; href: string; expiresAt: number; used: boolean } | undefined;
   let serviceSelection: PublicRentalServiceSelection | undefined;
   const observedElements = new Map<string, { locator: Locator; signature: string }>();
+  let controlsDocument: ControlDocument | undefined;
   let closed = false, requestCount = 0, interceptCount = 0, responseBytes = 0, blockedRequests = 0, pendingRequests = 0, actions = 0, observations = 0;
   const admittedRequestCounts: Record<string, number> = Object.create(null);
   // Native CDP owns every guarded read and its response capture. Its pending
@@ -413,13 +425,26 @@ export async function createCourseDiscoveryBrowserSession(input: {
       if (!redirectRouting.firstFatal && redirectRouting.isCurrentCompletedDocumentRead(read.request, page.mainFrame(),
         { frameId: before.id, loaderId: before.loaderId, url: currentUrl })) {
         const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
-        nativeMainDocumentWitness = { request: read.request, currentUrl, timeOrigin: documentStartedAt,
+        nativeMainDocumentWitness = { request: read.request, currentUrl, timeOrigin: documentStartedAt, frameId: before.id, loaderId: before.loaderId,
           proof: { kind: "NATIVE_MAIN_DOCUMENT_CONTINUITY_V1", originalUrlSha256: hash(read.url), currentUrlSha256: hash(currentUrl),
             documentBindingSha256: hash([read.documentNonce, before.id, before.loaderId, documentStartedAt, read.url]), observedAt: Date.now(), status: 200 } };
         return read.status;
       }
       return exactStatus;
     } catch { return exactStatus; }
+  };
+  const currentGestureCompletion = (currentUrl: string): NativeGestureCompletion | undefined => {
+    const witness = nativeMainDocumentWitness, proof = witness?.request && nativeGestureNavigationSource(witness.request);
+    if (!witness || !proof || !gestureIntent?.used || proof.sourceUrl !== gestureIntent.sourceUrl || proof.href !== gestureIntent.href ||
+        proof.text !== gestureIntent.text || proof.label !== gestureIntent.label || proof.targetUrl === proof.sourceUrl ||
+        witness.currentUrl !== currentUrl || !isSafeRecipeUrl(currentUrl) || !redirectRouting ||
+        !redirectRouting.isCurrentCompletedDocumentRead(witness.request, page.mainFrame(),
+          { frameId: witness.frameId, loaderId: witness.loaderId, url: currentUrl })) return undefined;
+    const redirects = currentUrl === proof.targetUrl ? [] : attestedNativeDocumentRedirects(witness.request, new Set([proof.targetUrl]));
+    if (!redirects || redirects.length > 5) return undefined;
+    return { kind: "NATIVE_GESTURE_COMPLETED_V1", sourceUrl: proof.sourceUrl, href: proof.href, text: proof.text, label: proof.label,
+      targetUrl: proof.targetUrl, finalUrl: currentUrl, redirects, documentBindingSha256: witness.proof.documentBindingSha256,
+      observedAt: witness.proof.observedAt };
   };
   let navigationStartedAt: number | undefined;
   let ezDocument: EzLinksDocumentWitness | undefined, ezControllerRead: EzLinksControllerRead | undefined;
@@ -434,7 +459,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     // Private completed metadata is never model input and must retain its
     // exact observed URL through this public-response nonce sanitizer.
     if (value && typeof value === "object" && safe && typeof safe === "object") {
-      for (const key of ["completedPublicAssetRequests", "completedPublicAssetRequestsOverflow", "nativeDocumentRedirects"] as const)
+      for (const key of ["completedPublicAssetRequests", "completedPublicAssetRequestsOverflow", "nativeDocumentRedirects", "nativeMainDocumentContinuity", "nativeGestureCompletion"] as const)
         if (Object.hasOwn(value, key)) Object.assign(safe, { [key]: (value as Record<string, unknown>)[key] });
     }
     return safe;
@@ -570,7 +595,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
           if (!cpsSessionKey(transportUrl) && !isObservedNativeRedirect(request, observedNavigationRoots)) throw new Error("UNSAFE_REDIRECT");
           allowedNavigation.add(url.href);
         }
-        if (!allowedNavigation.has(url.href) && !navigationOrigins.has(url.origin)) throw new Error("UNOBSERVED_NAVIGATION");
+        const nativeGestureTarget = nativeProxy && nativeGestureNavigationSource(request)?.targetUrl === url.href;
+        if (!allowedNavigation.has(url.href) && !navigationOrigins.has(url.origin) && !nativeGestureTarget) throw new Error("UNOBSERVED_NAVIGATION");
+        if (nativeGestureTarget) { allowedNavigation.add(url.href); observedNavigationRoots.add(url.href); }
         clearEzDocument();
         if (ezlinks.handles(url)) ezDocument = { url: url.href, settled: false, initVersion: 0, pendingInit: 0, initAttempted: false,
           readContractAssets: new Map(), readContractFailed: false, readContractVersion: 0 };
@@ -879,6 +906,19 @@ export async function createCourseDiscoveryBrowserSession(input: {
               nativeMainDocumentWitness.currentUrl !== sourceUrl) return false;
           entryGetIntent.used = true; return true;
         },
+        controllerScriptGetIntent: (sourceUrl, targetUrl) => {
+          const intent = gestureIntent, witness = nativeMainDocumentWitness;
+          const current = () => Boolean(intent && gestureIntent === intent && !intent.used && !closed && !deadline.aborted && !terminalFailure &&
+            Date.now() < intent.until && page.url() === sourceUrl && intent.sourceUrl === sourceUrl && witness &&
+            witness.request === intent.sourceRequest && witness.proof.documentBindingSha256 === intent.sourceBinding &&
+            redirectRouting?.isCurrentCompletedDocumentRead(witness.request, page.mainFrame(),
+              { frameId: witness.frameId, loaderId: witness.loaderId, url: sourceUrl }));
+          if (!intent || !current() || !isSafeRecipeUrl(targetUrl) || targetUrl === sourceUrl) return undefined;
+          return Object.freeze({ sourceUrl, href: intent.href, text: intent.text, label: intent.label, targetUrl,
+            observedAt: new Date(intent.until - 5000).toISOString(), documentHash: intent.sourceBinding,
+            active: () => gestureIntent === intent && !closed && !deadline.aborted,
+            consume: () => { if (!current()) return false; intent.used = true; return true; } });
+        },
         controllerFormIntent: (sourceUrl, targetUrl) => mindbodyCapture.formIntent(sourceUrl, targetUrl),
         onSubframeBlocked: recordSubframe,
         onRequestRejected: request => {
@@ -910,19 +950,76 @@ export async function createCourseDiscoveryBrowserSession(input: {
     // Assigned nested arrow functions would capture its module-only __name helper.
     const selectors = {
       quote(value: string) { return value.replace(/\\/gu, "\\\\").replace(/"/gu, '\\"'); },
+      exact(candidate: string, target: Element) {
+        return candidate.length <= 240 && document.querySelectorAll(candidate).length === 1 &&
+          document.querySelector(candidate) === target;
+      },
+      uniqueId(element: Element) {
+        if (!/^[A-Za-z0-9_-]{1,80}$/u.test(element.id)) return undefined;
+        const selector = `[id="${this.quote(element.id)}"]`;
+        return document.querySelectorAll(selector).length === 1 ? selector : undefined;
+      },
       for(target: Element): string {
-        if (target.id && document.querySelectorAll(`[id="${this.quote(target.id)}"]`).length === 1) return `[id="${this.quote(target.id)}"]`;
+        if (target === document.body) return "body";
+        const root = target.getRootNode();
+        if (root instanceof ShadowRoot) {
+          const host = root.host;
+          if (root.mode !== "open" || !host.tagName.includes("-") || host.shadowRoot !== root ||
+              host.closest("form,[hidden],[inert],[aria-hidden=true]") ||
+              host.hasAttribute("onclick") || host.getAttribute("aria-disabled") === "true" || host.hasAttribute("disabled")) return "";
+          let innerSelector: string;
+          if (target instanceof HTMLAnchorElement) {
+            innerSelector = "a[href]";
+            if (!host.hasAttribute("href") || host.getAttribute("href") !== target.getAttribute("href") ||
+                host.hasAttribute("type") || host.hasAttribute("download") || target.hasAttribute("download") || target.hasAttribute("onclick") ||
+                !["", "link"].includes(host.getAttribute("role") || "") ||
+                !["", "link"].includes(target.getAttribute("role") || "") ||
+                !["", "_self", "_top", "_parent"].includes(host.getAttribute("target") || "") ||
+                !["", "_self", "_top", "_parent"].includes(target.getAttribute("target") || "")) return "";
+          } else if (target instanceof HTMLButtonElement) {
+            innerSelector = 'button[type="button"]';
+            if (host.hasAttribute("href") || !["", "button"].includes(host.getAttribute("role") || "") ||
+                !["", "button"].includes(host.getAttribute("type") || "") ||
+                target.getAttribute("type") !== "button" || target.disabled || target.hasAttribute("onclick") ||
+                target.getAttribute("aria-disabled") === "true") return "";
+          } else return "";
+          if (target.closest("form") || root.querySelectorAll(innerSelector).length !== 1 ||
+              root.querySelector(innerSelector) !== target) return "";
+          const slots = Array.from(target.querySelectorAll("slot"));
+          if (slots.length > 0) {
+            if (slots.length > 8 || !(host instanceof HTMLElement)) return "";
+            const assigned = slots.flatMap(slot => Array.from(slot.assignedNodes({ flatten: true })).map(item => item.textContent ?? ""))
+              .join(" ").replace(/\s+/gu, " ").trim();
+            const rendered = host.innerText.replace(/\s+/gu, " ").trim();
+            const inner = target instanceof HTMLElement ? target.innerText.replace(/\s+/gu, " ").trim() : "";
+            if (!assigned || assigned !== rendered || inner && inner !== rendered || rendered.length > 160) return "";
+          }
+          const hostSelector = this.for(host);
+          const candidate = `${hostSelector} ${innerSelector}`;
+          return hostSelector && candidate.length <= 240 ? candidate : "";
+        }
+        if (target.id) {
+          const ownId = `[id="${this.quote(target.id)}"]`;
+          if (this.exact(ownId, target)) return ownId;
+        }
         const path: string[] = [];
         let current: Element | null = target;
         while (current && current.tagName !== "BODY" && path.length < 12) {
           const tag = current.tagName.toLowerCase();
           const siblings = current.parentElement ? Array.from(current.parentElement.children).filter(child => child.tagName === current!.tagName) : [current];
           path.unshift(`${tag}:nth-of-type(${siblings.indexOf(current) + 1})`);
+          const ancestorId = this.uniqueId(current);
+          if (ancestorId) {
+            const anchored = [ancestorId, ...path.slice(1)].join(" > ");
+            if (this.exact(anchored, target)) return anchored;
+          }
           const candidate = path.join(" > ");
-          if (document.querySelectorAll(candidate).length === 1 && document.querySelector(candidate) === target) return candidate;
+          if (this.exact(candidate, target)) return candidate;
           current = current.parentElement;
         }
-        return `body > ${path.join(" > ")}`;
+        const fallback = `body > ${path.join(" > ")}`;
+        // A truncated deep path must never identify a different element.
+        return path.length > 0 && this.exact(fallback, target) ? fallback : "";
       },
     };
     let label = [node.getAttribute("aria-label"), ...Array.from(field.labels ?? []).map(item => item.textContent),
@@ -948,8 +1045,21 @@ export async function createCourseDiscoveryBrowserSession(input: {
       }
       if (!label && choiceContext) label = choiceContext;
     }
-    const name = (node.innerText || node.getAttribute("aria-label") || node.querySelector("img")?.getAttribute("alt") || node.getAttribute("title") || "").trim().slice(0, 160);
-    const form = node.closest("form");
+    let slottedName = "";
+    const nodeRoot = node.getRootNode();
+    if (node instanceof HTMLAnchorElement && nodeRoot instanceof ShadowRoot && nodeRoot.host instanceof HTMLElement && selectors.for(node)) {
+      const slots = Array.from(node.querySelectorAll("slot"));
+      if (slots.length > 0 && slots.length <= 8) {
+        const assigned = slots.flatMap(slot => Array.from(slot.assignedNodes({ flatten: true })).map(item => item.textContent ?? ""))
+          .join(" ").replace(/\s+/gu, " ").trim();
+        const rendered = nodeRoot.host.innerText.replace(/\s+/gu, " ").trim();
+        if (assigned && assigned === rendered && rendered.length <= 160) slottedName = rendered;
+      }
+    }
+    const name = (slottedName || node.innerText || node.getAttribute("aria-label") || node.querySelector("img")?.getAttribute("alt") || node.getAttribute("title") || "").trim().slice(0, 160);
+    const shadowRoot = node.getRootNode();
+    const shadowHost = shadowRoot instanceof ShadowRoot ? shadowRoot.host : null;
+    const form = node.closest("form") ?? shadowHost?.closest("form");
     const sensitiveForm = Boolean(form?.querySelector('input[type=password],input[type=email],input[type=tel],[autocomplete^="cc-"]'));
     const pageWrapperForm = Boolean(form && form.parentElement === document.body && form.querySelector("h1") && form.querySelector('footer,[role="contentinfo"]'));
     const independentDisplay = !node.closest('input,textarea,select,button,[contenteditable],[role="button"],[role="combobox"]') &&
@@ -964,7 +1074,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
         ? { readOnlyFormDisplay: true } : {}),
       inputType: field.type ?? "", hasPopup: node.getAttribute("aria-haspopup") ?? "", selector: selectors.for(node),
       choiceValue: node.getAttribute("data-value") ?? undefined, choiceContext,
-      disabledChoice: node.getAttribute("aria-disabled") === "true" || node.classList.contains("disabled"),
+      disabledChoice: node.getAttribute("aria-disabled") === "true" || node.classList.contains("disabled") ||
+        shadowHost?.hasAttribute("disabled") || shadowHost?.getAttribute("aria-disabled") === "true",
       ...(!sensitiveForm && (node.tagName === "SELECT" || node.tagName === "INPUT" && ["date", "number"].includes(field.type)) ? { currentValue: field.value.slice(0, 200) } : {}),
       ...(node.tagName === "SELECT" && !sensitiveForm ? { options: Array.from((node as HTMLSelectElement).options).slice(0, 100).map(item => ({ value: item.value.slice(0, 200), label: (item.textContent ?? "").trim().slice(0, 200) })) } : {}) };
   }, undefined, { timeout: 1000 }).then(async control => {
@@ -1006,13 +1117,16 @@ export async function createCourseDiscoveryBrowserSession(input: {
     return kind;
   };
   const isRenderedControl = (locator: Locator) => locator.evaluate(element => {
-    if (!(element instanceof HTMLElement) || element.closest('[hidden],[inert],[aria-hidden="true"]')) return false;
+    if (!(element instanceof HTMLElement)) return false;
     const bounds = element.getBoundingClientRect();
     if (!bounds.width || !bounds.height) return false;
     let node: HTMLElement | null = element, depth = 0;
-    for (; node && depth < 32; node = node.parentElement, depth++) {
+    for (; node && depth < 32; depth++) {
       const style = getComputedStyle(node);
-      if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+      if (node.hasAttribute("hidden") || node.hasAttribute("inert") || node.getAttribute("aria-hidden") === "true" ||
+          style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+      const root = node.getRootNode();
+      node = node.parentElement ?? (root instanceof ShadowRoot && root.host instanceof HTMLElement ? root.host : null);
     }
     return !node;
   }, undefined, { timeout: 1000 });
@@ -1025,13 +1139,16 @@ export async function createCourseDiscoveryBrowserSession(input: {
       // still required before registration or returning an action target.
       for (let index = 0; index < Math.min(nodes.length, 3000); index++) {
         const element = nodes[index];
-        if (!(element instanceof HTMLElement) || element.closest('[hidden],[inert],[aria-hidden="true"]')) continue;
+        if (!(element instanceof HTMLElement)) continue;
         const bounds = element.getBoundingClientRect();
         if (!bounds.width || !bounds.height) continue;
         let node: HTMLElement | null = element, rendered = true, depth = 0;
-        for (; node && depth < 32; node = node.parentElement, depth++) {
+        for (; node && depth < 32; depth++) {
           const style = getComputedStyle(node);
-          if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') { rendered = false; break; }
+          if (node.hasAttribute("hidden") || node.hasAttribute("inert") || node.getAttribute("aria-hidden") === "true" ||
+              style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') { rendered = false; break; }
+          const root = node.getRootNode();
+          node = node.parentElement ?? (root instanceof ShadowRoot && root.host instanceof HTMLElement ? root.host : null);
         }
         if (!rendered || node) continue;
         // Avoid thousands of cross-process reads for plain decorative buttons.
@@ -1073,11 +1190,16 @@ export async function createCourseDiscoveryBrowserSession(input: {
     nativeMainDocumentWitness.currentUrl === page.url() && officialIdentityDocument?.officialDocumentProof.kind === "VERIFIED_OFFICIAL_DOCUMENT" &&
     officialIdentityDocument.url === page.url() && Date.now() >= nativeMainDocumentWitness.proof.observedAt && Date.now() - nativeMainDocumentWitness.proof.observedAt <= 5000 &&
     nativeMainDocumentWitness.proof.originalUrlSha256 === createHash("sha256").update(JSON.stringify(page.url())).digest("hex"));
-  const registerControl = (locator: Locator, control: ObservedControl, kind: string, extra: { date?: string; dropdown?: PublicDropdownProof; menuButton?: PublicMenuButtonProof; entryDisclosure?: PublicEntryDisclosure } = {}) => {
+  const registerControl = (locator: Locator, control: ObservedControl, kind: string, extra: { date?: string; dropdown?: PublicDropdownProof; menuButton?: PublicMenuButtonProof; entryDisclosure?: PublicEntryDisclosure } = {}, previous?: Map<string, ControlRecord>) => {
     if (control.href && !isSafeRecipeUrl(control.href)) throw new Error("UNSAFE_NAVIGATION");
     if (control.href && !extra.entryDisclosure) { allowedNavigation.add(control.href); observedNavigationRoots.add(control.href); passfactory.observeWidgetUrl(control.href); cpsScope.observeEntry(control.href); }
-    const target = randomUUID();
-    controls.set(target, { locator, signature: JSON.stringify(control), kind, href: control.href, ...(control.documentNavigationOnly ? { documentNavigationOnly: true } : {}),
+    const signature = JSON.stringify(control);
+    // An unchanged control in the same completed document keeps its opaque ID
+    // across observations. The newly observed locator replaces the old one;
+    // every action still rechecks the current DOM before it can click.
+    const target = [...(previous?.entries() ?? [])].find(([id, known]) => !controls.has(id) &&
+      known.kind === kind && known.signature === signature)?.[0] ?? randomUUID();
+    controls.set(target, { locator, signature, kind, document: controlsDocument, href: control.href, ...(control.documentNavigationOnly ? { documentNavigationOnly: true } : {}),
       ...(control.catalogTile ? { catalogTile: true } : {}),
       ...(control.datePicker ? { datePicker: control.datePicker } : {}),
       ...(extra.date ? { calendarDay: extra.date } : {}), ...(extra.dropdown ? { dropdown: extra.dropdown } : {}),
@@ -1117,6 +1239,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
   const snapshotOnce = async (settleInitialContent = false, officialIdentityOnly = false): Promise<DiscoveryBrowserSnapshot> => {
     deadline.throwIfAborted();
     if (closed) throw new Error("BROWSER_CLOSED");
+    const previousControls = new Map(controls);
     if (!officialIdentityOnly) { controls.clear(); observedElements.clear(); }
     await page.waitForTimeout(Math.min(300, Math.max(1, input.deadlineAt.getTime() - Date.now())));
     const initialContentWaitMs = settleInitialContent ? await waitForInitialContent() : 0;
@@ -1124,6 +1247,13 @@ export async function createCourseDiscoveryBrowserSession(input: {
     // Only its actually observed URL on an already admitted origin is reusable.
     const actualCurrentUrl = page.url();
     const documentStartedAt = await page.evaluate(() => performance.timeOrigin);
+    const currentNative = nativeMainDocumentWitness?.currentUrl === actualCurrentUrl && nativeMainDocumentWitness.timeOrigin === documentStartedAt
+      ? nativeMainDocumentWitness : undefined;
+    const reusableControls = controlsDocument?.url === actualCurrentUrl && controlsDocument.timeOrigin === documentStartedAt &&
+      (!nativeProxy || Boolean(currentNative && controlsDocument.frameId === currentNative.frameId &&
+        controlsDocument.loaderId === currentNative.loaderId && controlsDocument.binding === currentNative.proof.documentBindingSha256 &&
+        controlsDocument.request === currentNative.request))
+      ? previousControls : undefined;
     const currentUrl = normalizeDiscoveryNavigationUrl(actualCurrentUrl);
     if (!officialIdentityOnly && isSafeRecipeUrl(currentUrl) && navigationOrigins.has(new URL(currentUrl).origin)) {
       allowedNavigation.add(currentUrl);
@@ -1177,7 +1307,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
         (!blockedAccess && /^(?:Apply|Apply dates)$/iu.test(control.name) && await isPublicCalendarApply(locator) ? "calendar" : null);
       if (!kind) continue;
       if (control.href && !isSafeRecipeUrl(control.href)) continue;
-      visible.push(registerControl(locator, control, kind, { date, dropdown, menuButton }));
+      visible.push(registerControl(locator, control, kind, { date, dropdown, menuButton }, reusableControls));
       if (visible.length >= 180) break;
     }
     const elements: DiscoveryBrowserSnapshot["elements"] = [];
@@ -1265,13 +1395,33 @@ export async function createCourseDiscoveryBrowserSession(input: {
         const chosen = entries.find(entry => entry.viewport) ?? entries[0], control = await observeControl(chosen.locator);
         if (recipeSelectorSchema.safeParse(control.selector).success && await page.locator(control.selector).count() === 1) {
           for (let i = visible.length - 1; i >= 0; i--) if (visible[i].selector === control.selector) { controls.delete(visible[i].target); visible.splice(i, 1); }
-          visible.push(registerControl(chosen.locator, control, "public-entry-disclosure", { entryDisclosure: chosen.proof }));
+          visible.push(registerControl(chosen.locator, control, "public-entry-disclosure", { entryDisclosure: chosen.proof }, reusableControls));
         }
       }
     }
     const finalDocumentStartedAt = await page.evaluate(() => performance.timeOrigin);
     if (page.url() !== actualCurrentUrl || documentStartedAt !== finalDocumentStartedAt)
       throw new Error("DISCOVERY_SNAPSHOT_CHANGED");
+    const finalNative = nativeMainDocumentWitness?.currentUrl === actualCurrentUrl && nativeMainDocumentWitness.timeOrigin === documentStartedAt
+      ? nativeMainDocumentWitness : undefined;
+    if (reusableControls && nativeProxy && (!finalNative || finalNative.request !== currentNative?.request ||
+        finalNative.frameId !== currentNative?.frameId || finalNative.loaderId !== currentNative?.loaderId ||
+        finalNative.proof.documentBindingSha256 !== currentNative?.proof.documentBindingSha256))
+      throw new Error("DISCOVERY_SNAPSHOT_CHANGED");
+    controlsDocument = { url: actualCurrentUrl, timeOrigin: documentStartedAt,
+      ...(finalNative ? { frameId: finalNative.frameId, loaderId: finalNative.loaderId,
+        binding: finalNative.proof.documentBindingSha256, request: finalNative.request } : {}) };
+    if (pendingOfficialSubpage) {
+      officialSubpage = finalNative && navigation?.request === finalNative.request && navigation.status === 200 &&
+        actualCurrentUrl === pendingOfficialSubpage.targetUrl && finalNative.request !== pendingOfficialSubpage.sourceRequest
+        ? { url: actualCurrentUrl, request: finalNative.request, frameId: finalNative.frameId,
+          loaderId: finalNative.loaderId, binding: finalNative.proof.documentBindingSha256 } : undefined;
+      pendingOfficialSubpage = undefined;
+    } else if (officialSubpage && (!finalNative || actualCurrentUrl !== officialSubpage.url ||
+        finalNative.request !== officialSubpage.request || finalNative.frameId !== officialSubpage.frameId ||
+        finalNative.loaderId !== officialSubpage.loaderId || finalNative.proof.documentBindingSha256 !== officialSubpage.binding))
+      officialSubpage = undefined;
+    for (const known of controls.values()) known.document = controlsDocument;
     teeBookingScope.observeRenderedSnapshot(teeDocumentToken, { url: actualCurrentUrl, timeOrigin: documentStartedAt,
       ...(officialIdentityPage && officialIdentityPage.url === actualCurrentUrl ? { officialPage: officialIdentityPage, verifiedOfficial: officialIdentityPage.officialDocumentProof } : {}),
       frames: publicFrameSources, blocked: Boolean(blockedAccess || terminalFailure || redirectRouting?.firstFatal) });
@@ -1298,6 +1448,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       ...(navigationStartedAt === undefined ? {} : { navigationElapsedMs: Date.now() - navigationStartedAt }),
       ...(navigationStatus === undefined ? {} : { navigationStatus }),
       ...(nativeMainDocumentWitness ? { nativeMainDocumentContinuity: { ...nativeMainDocumentWitness.proof } } : {}),
+      ...(currentGestureCompletion(actualCurrentUrl) ? { nativeGestureCompletion: currentGestureCompletion(actualCurrentUrl) } : {}),
       browserTransport: deps.browserTransport ?? "PINNED_HTTP", accessRequirementObserved: blockedAccess };
   };
   const snapshot = async (settleInitialContent = false, officialIdentityOnly = false): Promise<DiscoveryBrowserSnapshot> => {
@@ -1641,6 +1792,40 @@ export async function createCourseDiscoveryBrowserSession(input: {
         serviceSelection = undefined;
         disclosureGetOnly = false; entryGetIntent = undefined;
         if (!isSafeRecipeUrl(action.url) || !allowedNavigation.has(new URL(action.url).href)) throw new Error("UNOBSERVED_NAVIGATION");
+        pendingOfficialSubpage = undefined; officialSubpage = undefined;
+        if (nativeProxy && input.venueOfficialUrl && page.url() !== "about:blank" &&
+            new URL(action.url).origin === new URL(page.url()).origin && !new URL(action.url).hash &&
+            action.url !== page.url() && navigation?.request && navigation.status === 200 &&
+            (page.url() === input.venueOfficialUrl ||
+              attestedNativeDocumentRedirects(navigation.request, new Set([input.venueOfficialUrl]))?.at(-1)?.toUrl === page.url())) {
+          const startedAt = await page.evaluate(() => performance.timeOrigin);
+          await currentNavigationStatus(page.url(), startedAt);
+          const source = nativeMainDocumentWitness;
+          const links = [...controls.values()].filter(known => known.kind === "link" && known.href === action.url &&
+            known.document?.url === page.url() && known.document.timeOrigin === startedAt &&
+            known.document.binding === source?.proof.documentBindingSha256 && known.document.request === source?.request);
+          if (source && links.length === 1 && await links[0].locator.count() === 1) {
+            const link = links[0];
+            const current = await link.locator.evaluate(element => ({ href: (element as HTMLAnchorElement).href,
+              rawHref: element.getAttribute("href"), target: element.getAttribute("target"), role: element.getAttribute("role"),
+              inForm: Boolean(element.closest("form")), download: element.hasAttribute("download"),
+              handler: element.hasAttribute("onclick"), disabled: element.getAttribute("aria-disabled") === "true" }),
+            undefined, { timeout: 1000 });
+            if (await isRenderedControl(link.locator) && await link.locator.isEnabled() &&
+                JSON.stringify(await observeControl(link.locator)) === link.signature && current.href === action.url &&
+                current.rawHref && !current.inForm && !current.download && !current.handler && !current.disabled &&
+                [null, "", "_self"].includes(current.target) && [null, "", "link"].includes(current.role)) {
+              const stillStartedAt = await page.evaluate(() => performance.timeOrigin);
+              await currentNavigationStatus(page.url(), stillStartedAt);
+              if (page.url() === source.currentUrl && stillStartedAt === startedAt && navigation?.request === source.request &&
+                  nativeMainDocumentWitness?.request === source.request &&
+                  nativeMainDocumentWitness.frameId === source.frameId && nativeMainDocumentWitness.loaderId === source.loaderId &&
+                  nativeMainDocumentWitness.proof.documentBindingSha256 === source.proof.documentBindingSha256)
+                pendingOfficialSubpage = { targetUrl: action.url, sourceRequest: source.request,
+                  sourceBinding: source.proof.documentBindingSha256 };
+            }
+          }
+        }
         const intermediary = publicIntermediaries.get(action.url);
         if (intermediary && (page.url() !== intermediary.pageUrl || !officialIdentityDocument || officialIdentityDocument.url !== intermediary.pageUrl ||
             await page.evaluate(() => performance.timeOrigin) !== intermediary.documentStartedAt ||
@@ -1656,7 +1841,18 @@ export async function createCourseDiscoveryBrowserSession(input: {
       else if (action.action === "scroll") await page.mouse.wheel(0, action.direction === "down" ? 600 : -600);
       else if (["click", "select", "fill"].includes(action.action) && "target" in action) {
         const known = controls.get(action.target);
-        if (!known || !await isRenderedControl(known.locator) || !await known.locator.isEnabled() || JSON.stringify(await observeControl(known.locator)) !== known.signature) throw new Error("STALE_OR_UNKNOWN_CONTROL");
+        if (!known?.document || known.document.url !== page.url() ||
+            known.document.timeOrigin !== await page.evaluate(() => performance.timeOrigin)) throw new Error("STALE_OR_UNKNOWN_CONTROL");
+        if (known.document.binding && nativeProxy) {
+          await currentNavigationStatus(known.document.url, known.document.timeOrigin);
+          const current = nativeMainDocumentWitness;
+          if (!current || current.currentUrl !== known.document.url || current.timeOrigin !== known.document.timeOrigin ||
+              current.frameId !== known.document.frameId || current.loaderId !== known.document.loaderId ||
+              current.proof.documentBindingSha256 !== known.document.binding || current.request !== known.document.request)
+            throw new Error("STALE_OR_UNKNOWN_CONTROL");
+        }
+        if (!await isRenderedControl(known.locator) || !await known.locator.isEnabled() ||
+            JSON.stringify(await observeControl(known.locator)) !== known.signature) throw new Error("STALE_OR_UNKNOWN_CONTROL");
         if (known.calendarDay && !await isObservedPublicCalendarDay(known.locator, known.calendarDay) &&
           !await isPublicDateChoice(known.locator, known.calendarDay)) throw new Error("STALE_OR_UNKNOWN_CONTROL");
         if (action.action === "select") {
@@ -1713,8 +1909,53 @@ export async function createCourseDiscoveryBrowserSession(input: {
             allowedNavigation.add(known.href); observedNavigationRoots.add(known.href); navigationOrigins.add(new URL(known.href).origin); navigationStartedAt = Date.now();
             const target = await known.locator.getAttribute("target");
             const rawHref = await known.locator.evaluate(element => (element as HTMLAnchorElement).href, undefined, { timeout: 1000 });
+            gestureIntent = undefined;
+            const officialGestureDocument = page.url() === input.venueOfficialUrl || Boolean(input.venueOfficialUrl && navigation?.request &&
+              attestedNativeDocumentRedirects(navigation.request, new Set([input.venueOfficialUrl]))?.at(-1)?.toUrl === page.url()) ||
+              Boolean(officialSubpage && navigation?.status === 200 && navigation.request === officialSubpage.request &&
+                page.url() === officialSubpage.url && nativeMainDocumentWitness?.request === officialSubpage.request &&
+                nativeMainDocumentWitness.frameId === officialSubpage.frameId && nativeMainDocumentWitness.loaderId === officialSubpage.loaderId &&
+                nativeMainDocumentWitness.proof.documentBindingSha256 === officialSubpage.binding);
+            if (nativeProxy && known.kind === "link" && !target && officialGestureDocument &&
+                known.href === page.url() + "#" && !new URL(page.url()).hash) {
+              await page.waitForLoadState("domcontentloaded", { timeout: Math.min(5000, Math.max(1, input.deadlineAt.getTime() - Date.now())) });
+              const descriptor = (locator: Locator) => locator.evaluate(element => {
+                if (!(element instanceof HTMLAnchorElement) || element.getAttribute("href") !== "#" || element.closest("form") ||
+                    element.hasAttribute("download") || element.hasAttribute("onclick") || element.getAttribute("aria-disabled") === "true" ||
+                    !["", "link"].includes(element.getAttribute("role") || "") ||
+                    !["", "_self", "_top", "_parent"].includes(element.getAttribute("target") || "")) return null;
+                const bounds = element.getBoundingClientRect();
+                if (bounds.width <= 0 || bounds.height <= 0) return null;
+                for (let node: Element | null = element; node; node = node.parentElement) {
+                  const style = getComputedStyle(node);
+                  if (node.hasAttribute("hidden") || node.hasAttribute("inert") || node.getAttribute("aria-hidden") === "true" ||
+                      style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse" || Number(style.opacity) === 0) return null;
+                }
+                return { href: element.href, text: element.innerText.replace(/\s+/gu, " ").trim(),
+                  label: (element.getAttribute("aria-label") || "").replace(/\s+/gu, " ").trim() };
+              }, undefined, { timeout: 1000 });
+              const selected = await descriptor(known.locator);
+              const text = selected?.text ?? "", label = selected?.label ?? "";
+              const anchors = page.locator("a[href]"), indexes = await anchors.evaluateAll((nodes, href) => nodes.length > 512 ? [] :
+                nodes.flatMap((node, index) => node instanceof HTMLAnchorElement && node.href === href ? [index] : []), known.href);
+              let matches = 0;
+              for (const index of indexes) {
+                const candidate = anchors.nth(index);
+                const observed = await descriptor(candidate);
+                if (observed && observed.href === known.href && observed.text === text && observed.label === label) matches++;
+              }
+              const timeOrigin = await page.evaluate(() => performance.timeOrigin);
+              await currentNavigationStatus(page.url(), timeOrigin);
+              const source = nativeMainDocumentWitness;
+              if (!selected || matches !== 1 || !source || source.currentUrl !== page.url() || !text || text.length > 160 || label.length > 160 ||
+                  !/\b(?:book|tee\s*times?|availability|calendar|bay|simulator)\b/iu.test(text + " " + label))
+                throw new Error("STALE_OR_UNKNOWN_CONTROL");
+              gestureIntent = { sourceUrl: page.url(), href: known.href, text, label, sourceRequest: source.request,
+                sourceBinding: source.proof.documentBindingSha256, until: Date.now() + 5000, used: false };
+            }
+            if (known.href === page.url() + "#" && !gestureIntent) throw new Error("STALE_OR_UNKNOWN_CONTROL");
             const canonicalBootstrap = rawHref !== known.href && normalizeDiscoveryNavigationUrl(rawHref) === known.href;
-            const ordinaryDocumentLink = !new URL(known.href).hash && !await known.locator.getAttribute("onclick");
+            const ordinaryDocumentLink = !new URL(known.href).hash && !gestureIntent && !await known.locator.getAttribute("onclick");
             if (known.documentNavigationOnly || canonicalBootstrap || ordinaryDocumentLink || target && !["_self", "_top", "_parent"].includes(target.toLowerCase())) {
               await redirectRouting?.beginDocumentNavigation(page.mainFrame());
               responses.length = 0;

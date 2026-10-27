@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { sourceDiscover, publicSourceJob, sourceRoutingContext, prepareSourceDiscovery, pageEvidence, sourceDecisionFor, buildSourceDiscoveryInstruction, routingOnlyFrameEntry } from './source-discovery.mjs';
+import { sourceDiscover as sourceDiscoverWithRealClock, publicSourceJob, sourceRoutingContext, prepareSourceDiscovery, pageEvidence, settleSourceRoutingEvidence, sourceDecisionFor, buildSourceDiscoveryInstruction, routingOnlyFrameEntry } from './source-discovery.mjs';
 import { JSDOM } from 'jsdom';
 import { observedBookingSourceCandidates } from './source-provenance.mjs';
 import { publicEvidenceUrl } from './public-evidence.mjs';
@@ -13,6 +13,10 @@ import { prepareReadOnlyAction } from './driver.mjs';
 import { createCourseDiscoverySupervisor } from '../course-discovery-supervisor.mjs';
 import { validateStagehandSourceReport } from '../course-discovery-stagehand-source.mjs';
 const official='https://public-course.example/', booking='https://public-provider.example/start?venue=public&kind=day', landing='https://public-provider.example/loading';
+const sourceDiscover = options => {
+ let clock=Date.now();
+ return sourceDiscoverWithRealClock({...options,sourceEvidenceWait:{now:()=>clock,sleep:async ms=>{clock+=ms;},...options.sourceEvidenceWait}});
+};
 const playEntry='https://public-course.play.teeitup.com/', bookEntry='https://public-course.book.teeitup.com/';
 function notFoundRoutingFixture({repeat=false,badRecovery=false}={}){
  const broken=official+'missing',alternative='https://fresh-provider.example/public';let current=official,evaluations=0,callback,recovered=false,extractions=0,recoveries=0,closed=0;
@@ -69,6 +73,53 @@ function fixture({invalid=false,closeReject=false,afterAct}={}){
 }
 
 const completeDocument={readyState:'interactive',bodyPresent:true,mainDocumentCurrent:true,mainDocumentComplete:true,mainReadPending:false,pendingReads:1,mainDocumentStatus:200};
+test('unsupported placeholder feedback asks for another current ordinary link without granting a route',()=>{
+ const context=sourceRoutingContext({actionAttempts:[{status:'REJECTED',guardReason:'UNSUPPORTED_PLACEHOLDER_ACTION'}]},[]);
+ assert.equal(context.lastNavigationFeedback,'UNSUPPORTED_PLACEHOLDER_ACTION');
+ assert.deepEqual(context.completedAnchorClicks,[]);
+ const instruction=buildSourceDiscoveryInstruction({identity:{name:'Public Course'},input:{players:2}},[],null,context);
+ assert.match(instruction,/Do not repeat that control/u);
+ assert.match(instruction,/ordinary link role and current-tab target/u);
+ assert.match(instruction,/eligibleBookingSourceUrls=\[\]/u);
+});
+test('completed empty client-rendered source waits for a fresh visible link before any model call',async()=>{
+ let clock=0,evaluations=0,modelCalls=0;
+ const session={page:{url:async()=>official,evaluate:async()=>++evaluations%2?{
+   url:official,observedAt:new Date().toISOString(),links:clock>=25000?[{href:booking,text:'Book public availability',visible:true}]:[],frames:[],dom:[{tag:'button',text:'Accept cookies'}]
+ }:[]},extract:async()=>{modelCalls++;throw Error('MODEL_BEFORE_PUBLIC_CONTROL');}};
+ const evidence=await settleSourceRoutingEvidence(session,{deadline:35000,now:()=>clock,sleep:async ms=>{clock+=ms;}});
+ assert.equal(clock,25000);assert.deepEqual(evidence.links.map(row=>row.href),[booking]);assert.equal(modelCalls,0);
+});
+test('empty client-rendered source stops polling at the smaller source budget without inventing a route',async()=>{
+ let clock=0,evaluations=0;
+ const session={page:{url:async()=>official,evaluate:async()=>++evaluations%2?{url:official,observedAt:new Date().toISOString(),links:[],frames:[],dom:[]}:[]}};
+ const evidence=await settleSourceRoutingEvidence(session,{deadline:35000,maxWaitMs:12000,now:()=>clock,sleep:async ms=>{clock+=ms;}});
+ assert.equal(clock,12000);assert.deepEqual(evidence.links,[]);assert.equal(evaluations,26);
+});
+test('a current visible button is enough to hand control to ordinary source observation immediately',async()=>{
+ let clock=0,evaluations=0;
+ const session={page:{url:async()=>official,evaluate:async()=>++evaluations%2?{url:official,observedAt:new Date().toISOString(),links:[],frames:[],dom:[{tag:'button',text:'Book public availability'}]}:[]}};
+ const evidence=await settleSourceRoutingEvidence(session,{deadline:35000,now:()=>clock,sleep:async ms=>{clock+=ms;}});
+ assert.equal(clock,0);assert.equal(evaluations,2);assert.equal(evidence.dom[0].tag,'button');
+});
+test('an invisible tracking frame cannot end the empty-source render wait',async()=>{
+ let clock=0,evaluations=0;
+ const session={page:{url:async()=>official,evaluate:async()=>++evaluations%2?{
+   url:official,observedAt:new Date().toISOString(),links:clock>=2000?[{href:booking,text:'Public booking',visible:true}]:[],
+   frames:[{src:'https://tracking.example/frame',visible:false,title:''}],dom:[]
+ }:[]}};
+ const evidence=await settleSourceRoutingEvidence(session,{deadline:35000,now:()=>clock,sleep:async ms=>{clock+=ms;}});
+ assert.equal(clock,2000);assert.equal(evidence.links[0].href,booking);
+});
+test('a changed page URL never promotes the preceding visible control snapshot',async()=>{
+ let clock=0,evaluations=0;
+ const session={page:{url:async()=>landing,evaluate:async()=>++evaluations%2?{
+   url:evaluations===1?official:landing,observedAt:new Date().toISOString(),
+   links:[{href:evaluations===1?booking:landing+'?current=1',text:'Book public availability',visible:true}],frames:[],dom:[]
+ }:[]}};
+ const evidence=await settleSourceRoutingEvidence(session,{deadline:35000,now:()=>clock,sleep:async ms=>{clock+=ms;}});
+ assert.equal(clock,1000);assert.equal(evidence.url,landing);assert.equal(evidence.links[0].href,landing+'?current=1');
+});
 test('source settles the current main parser before collecting evidence or invoking a model',async()=>{
  const f=fixture(),order=[];const evaluate=f.session.page.evaluate,extract=f.session.extract;
  f.session.settleSourceDocument=async()=>{order.push('settled');return completeDocument;};

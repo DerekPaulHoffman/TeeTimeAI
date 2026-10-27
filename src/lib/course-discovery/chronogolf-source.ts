@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
 import { parse, type DefaultTreeAdapterMap } from "parse5";
 import { z } from "zod";
-import { completeUSAddress, fullCourseName } from "./teeitup-official-identity";
+import { completeUSAddress, fullCourseName, type OfficialIdentityPage } from "./teeitup-official-identity";
+import { freshNativeCanonicalRootDocument } from "./native-official-page-attestation";
+import { delegatedCanonicalVenueWitness, delegatedBookingHop } from "./teeitup-delegated-booking-source";
 
 const id = z.number().int().min(1).max(2_147_483_647);
 const uuid = z.string().uuid();
@@ -10,6 +12,11 @@ const unique = <T>(values: T[]) => new Set(values).size === values.length;
 const holeOptions = z.array(holes).min(1).max(2).refine(unique);
 const timeZone = z.string().min(1).max(100).refine(value => { try { new Intl.DateTimeFormat("en-US", { timeZone: value }); return true; } catch { return false; } });
 function fail(code = "ADAPTER_CONFIGURATION_UNVERIFIED"): never { throw new Error(code); }
+// Only an actual otherwise-matching public profile may request a fresh official-root read.
+const officialHostMismatches = new WeakSet<Error>();
+export function chronogolfOfficialHostMismatch(error: unknown): boolean {
+  return error instanceof Error && officialHostMismatches.has(error);
+}
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
 const name = z.string().trim().min(3).max(200);
 /** The observed TeeTimeView passes every published round option, and the
@@ -138,18 +145,57 @@ function physicalAddress(value: string) {
     word => ({ north:"n",south:"s",east:"e",west:"w",northeast:"ne",northwest:"nw",southeast:"se",southwest:"sw" })[word]!);
   return { ...parsed, street };
 }
+/** A heading-free canonical site can print its full business identity in one
+ * semantic footer address. This is not title text or a provider-host alias. */
+function headlessCanonicalFooter(source: ChronogolfIdentitySource, page: OfficialIdentityPage): boolean {
+  const visible = page.visibleEvidence, expected = fullCourseName(source.venueName), canonical = physicalAddress(source.venueAddress ?? "");
+  const clean = (value: string) => value.normalize("NFKC").replace(/\s+/gu, " ").trim();
+  const literal = (value: string) => clean(value).replace(/\s*,\s*/gu, ", ").toLowerCase();
+  if (!canonical || !visible || visible.headings.length || !visible.publicBusinessLabels?.length || visible.publicBusinessLabels.length > 20 ||
+      visible.publicBusinessLabels.some(value => typeof value !== "string" || value.length > 200 || fullCourseName(value) !== expected) ||
+      visible.addressTexts.length > 160 || page.html.length > 600000) return false;
+  const excluded = (node: Element) => ["script", "style", "template", "noscript", "iframe", "form", "input", "textarea", "select", "button", "label"].includes(node.tagName) ||
+    node.attrs.some(value => ["hidden", "inert", "contenteditable"].includes(value.name)) || attr(node, "aria-hidden") === "true" ||
+    /display\s*:\s*none|visibility\s*:\s*(?:hidden|collapse)|(?:^|;)\s*opacity\s*:\s*0(?:\.0*)?\s*(?:!important\s*)?(?:;|$)/iu.test(attr(node, "style") ?? "") ||
+    /(?:^|\s)(?:hidden|d-none|invisible|visually-hidden|sr-only|screen-reader-only|screen-reader-text|hide)(?:\s|$)/u.test(attr(node, "class") ?? "") ||
+    /\b(?:account|members?|profile|customer|checkout|payment|billing|mailing|corporate|headquarters|fax|login|sign-in)\b/iu.test(["id", "class", "title", "aria-label"].map(key => attr(node, key) ?? "").join(" "));
+  const addresses: Element[] = []; let count = 0, heading = false;
+  const walk = (node: Node, depth: number, inFooter: boolean) => {
+    if (++count > 20000 || depth > 64) fail("ADAPTER_IDENTITY_MISMATCH");
+    if (element(node)) {
+      if (excluded(node)) return;
+      if (/^h[1-6]$/u.test(node.tagName)) heading = true;
+      inFooter ||= node.tagName === "footer";
+      if (inFooter && node.tagName === "address") addresses.push(node);
+    }
+    if ("childNodes" in node) for (const child of node.childNodes) walk(child, depth + 1, inFooter);
+  };
+  walk(parse(page.html), 0, false);
+  if (heading || addresses.length !== 1) return false;
+  const address = addresses[0], fields = address.childNodes.filter(element);
+  if (fields.length !== 2 || fields.some(node => node.tagName !== "span" || excluded(node) || node.childNodes.some(child => child.nodeName !== "#text")) ||
+      address.childNodes.some(node => node.nodeName === "#text" && clean((node as DefaultTreeAdapterMap["textNode"]).value))) return false;
+  const text = (node: Element) => clean(node.childNodes.map(child => (child as DefaultTreeAdapterMap["textNode"]).value).join(" "));
+  const name = text(fields[0]), printed = text(fields[1]);
+  if (name.length > 200 || printed.length > 500 || fullCourseName(name) !== expected || JSON.stringify(physicalAddress(printed)) !== JSON.stringify(canonical)) return false;
+  const postal = (value: string) => /,\s*[A-Z]{2}\s+(\d{5}(?:-\d{4})?)(?:,\s*(?:US|USA|United States(?: of America)?))?$/iu.exec(clean(value))?.[1];
+  if (!postal(printed) || postal(printed) !== postal(source.venueAddress ?? "")) return false;
+  return visible.addressTexts.some(value => typeof value === "string" && literal(value) === literal(name + ", " + printed));
+}
 /** Fresh complete public profile identity and catalog, not an availability or
  * all-rounds claim. Sales round lengths remain separate from physical layout. */
-export function parseChronogolfProfile(html: string, actualUrl: string, source: ChronogolfIdentitySource): ChronogolfMetadata {
+export function parseChronogolfProfile(html: string, actualUrl: string, source: ChronogolfIdentitySource,
+  officialPage?: OfficialIdentityPage): ChronogolfMetadata {
   const requested = parseChronogolfSource(source.bookingUrl), actual = parseChronogolfSource(actualUrl);
   if (!requested || !actual || !source.venueAddress || !officialHost(source.officialUrl)) fail("ADAPTER_IDENTITY_MISSING");
   const document = nextData(html), data = document.data;
   if (!object(data) || !object(data.props) || !object(data.props.pageProps)) fail("ADAPTER_PROFILE_SCHEMA_CHANGED");
   const parsed = profileClubSchema.safeParse(data.props.pageProps.club);
   if (!parsed.success) fail("ADAPTER_PROFILE_SCHEMA_CHANGED");
-  const club = parsed.data, expectedName = fullCourseName(source.venueName), canonical = physicalAddress(source.venueAddress);
+  const club = parsed.data, expectedName = fullCourseName(source.venueName), canonical = physicalAddress(source.venueAddress),
+    websiteHost = providerWebsiteIdentityHost(club.website);
   if (!canonical || expectedName.length < 8 || fullCourseName(club.name) !== expectedName || club.timezone !== source.timeZone ||
-      providerWebsiteIdentityHost(club.website) !== officialHost(source.officialUrl)) fail("ADAPTER_IDENTITY_MISMATCH");
+      !websiteHost) fail("ADAPTER_IDENTITY_MISMATCH");
   const province = Object.entries(stateNames).find(([code, region]) => [code.toLowerCase(), region.toLowerCase()].includes(club.province.toLowerCase()))?.[0];
   if (!province || !/^(?:United States(?: of America)?|USA?|US)$/iu.test(club.country)) fail("ADAPTER_IDENTITY_MISMATCH");
   const observed = physicalAddress(`${club.address}, ${club.city}, ${province} ${club.postcode}`);
@@ -159,6 +205,28 @@ export function parseChronogolfProfile(html: string, actualUrl: string, source: 
   const courses = club.courses.map(course => ({ id: course.id, uuid: course.uuid, name: course.name, layoutHoles: course.holes,
     bookableHoles: [...course.bookableHoles].sort((a, b) => a - b) })).sort((a, b) => a.id - b.id);
   if (!unique(courses.map(course => course.id)) || !unique(courses.map(course => course.uuid))) fail("ADAPTER_CATALOG_AMBIGUOUS");
+  if (websiteHost !== officialHost(source.officialUrl)) {
+    if (!officialPage) {
+      const error = new Error("ADAPTER_IDENTITY_MISMATCH");
+      officialHostMismatches.add(error); throw error;
+    }
+    try {
+      if (!freshNativeCanonicalRootDocument(officialPage, source.officialUrl)) fail("ADAPTER_IDENTITY_MISMATCH");
+      // Reuse full raw/rendered canonical venue identity; the provider's stale
+      // website text never becomes a fetch target or a domain-equivalence rule.
+      try { delegatedCanonicalVenueWitness(source, officialPage); }
+      catch (error) { if (!headlessCanonicalFooter(source, officialPage)) throw error; }
+      const links = officialPage.visibleEvidence?.linkUrls;
+      if (!links || links.length > 512) fail("ADAPTER_IDENTITY_MISMATCH");
+      const profiles = [...new Set(links)].flatMap(url => {
+        const parsed = parseChronogolfSource(url); return parsed ? [{ url, parsed }] : [];
+      });
+      if (profiles.length !== 1 || (profiles[0].parsed.numericClubId !== undefined ?
+        profiles[0].parsed.numericClubId !== club.id : profiles[0].parsed.profileUrl !== canonicalUrl)) fail("ADAPTER_IDENTITY_MISMATCH");
+      delegatedBookingHop(officialPage, profiles[0].url);
+      if (!freshNativeCanonicalRootDocument(officialPage, source.officialUrl)) fail("ADAPTER_IDENTITY_MISMATCH");
+    } catch { fail("ADAPTER_IDENTITY_MISMATCH"); }
+  }
   const catalog = { clubId: club.id, clubUuid: club.uuid, profileUrl: canonicalUrl, name: club.name, websiteHost: providerWebsiteIdentityHost(club.website),
     address: observed, timeZone: club.timezone, publicPlayerTypeId: club.defaultAffiliationTypeId, courses, clients: document.clients };
   return chronogolfMetadataSchema.parse({ family: "CHRONOGOLF", clubId: club.id, profileUrl: canonicalUrl, timeZone: club.timezone,

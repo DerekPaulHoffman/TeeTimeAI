@@ -174,6 +174,25 @@ export function safeNativeMainDocumentContinuity(value) {
       ![value.originalUrlSha256,value.currentUrlSha256,value.documentBindingSha256].every(v => typeof v === "string" && /^[a-f0-9]{64}$/u.test(v))) return undefined;
   return { ...value };
 }
+export function safeNativeGestureCompletion(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      Object.keys(value).sort().join(",") !== "documentBindingSha256,finalUrl,href,kind,label,observedAt,redirects,sourceUrl,targetUrl,text" ||
+      value.kind !== "NATIVE_GESTURE_COMPLETED_V1" || !Number.isSafeInteger(value.observedAt) ||
+      typeof value.documentBindingSha256 !== "string" || !/^[a-f0-9]{64}$/u.test(value.documentBindingSha256) ||
+      ![value.sourceUrl,value.href,value.targetUrl,value.finalUrl].every(safeObservedUrl) ||
+      value.href !== value.sourceUrl + "#" || value.targetUrl === value.sourceUrl ||
+      typeof value.text !== "string" || typeof value.label !== "string" || value.text.length > 160 || value.label.length > 160 ||
+      value.text !== value.text.replace(/\s+/gu," ").trim() || value.label !== value.label.replace(/\s+/gu," ").trim() ||
+      !Array.isArray(value.redirects) || value.redirects.length > 5) return undefined;
+  let previous = value.targetUrl;
+  for (const hop of value.redirects) {
+    if (!hop || Object.keys(hop).sort().join(",") !== "completed,fromUrl,status,toUrl" || hop.completed !== true ||
+        ![301,302,303,307,308].includes(hop.status) || hop.fromUrl !== previous || !safeObservedUrl(hop.toUrl)) return undefined;
+    previous = hop.toUrl;
+  }
+  if (previous !== value.finalUrl) return undefined;
+  return { ...value };
+}
 function currentNativeBookingContext(observation, contextUrl, bookingUrl) {
   const native = nativeObservationContexts.get(observation);
   return contextUrl === bookingUrl || Boolean(native?.live() && native.proof.originalUrlSha256 === nativeDocumentHash(bookingUrl) &&
@@ -801,7 +820,7 @@ export function discoveryCheckpointDisposition(outcome, currentAccessRequirement
 }
 const opaqueControlTarget = { type: "string", format: "uuid",
   pattern: "^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|[fF]{8}-[fF]{4}-[fF]{4}-[fF]{4}-[fF]{12})$",
-  description: "Opaque UUID target copied exactly from a control in the latest browser snapshot. Never put a CSS selector, label, URL or invented ID here; targets change after every observation." };
+  description: "Opaque UUID target copied exactly from a control in the latest browser snapshot. Never put a CSS selector, label, URL or invented ID here; controls are revalidated against the current document before every action." };
 const observedUrl = { type: "string", maxLength: 2048, description: "Exact permitted public URL from this job or an actual returned link, OFFICIAL_IFRAME_SRC or trusted resume URL. Never invent a route." };
 const browserActionInput = (action, properties = {}) => ({ type: "object", additionalProperties: false,
   required: ["action", ...Object.keys(properties)], properties: { action: { type: "string", const: action }, ...properties } });
@@ -828,7 +847,7 @@ export const DISCOVERY_TOOLS = [
     inputSchema: { type: "object", additionalProperties: false, required: ["recipe"], properties: { recipe: { type: "object" } } } },
 ];
 
-/** Opaque target IDs change on every observation; exclude them from progress. */
+/** Opaque target IDs are only current-snapshot capabilities; exclude them from progress. */
 export function createDiscoverySnapshotCompactor() {
   let previous;
   let unchanged = 0;
@@ -848,6 +867,7 @@ export function createDiscoverySnapshotCompactor() {
       delete projected.completedPublicAssetRequests; delete projected.completedPublicAssetRequestsOverflow;
       delete projected.nativeDocumentRedirects;
       delete projected.nativeMainDocumentContinuity;
+      delete projected.nativeGestureCompletion;
       delete projected.nativeFirstFatal; delete projected.nativeRejectedRequests;
       delete projected.officialSourceDiagnostic; delete projected.navigationFailureKind;
       snapshot = { ...projected, ...safeNativeBrowserDiagnostics(snapshot), ...safeOfficialBrowserDiagnostics(snapshot) };
@@ -1058,15 +1078,19 @@ export function createDiscoveryBrowser({ cwd, deadlineAt, initialUrls, timeZone 
       "--time-zone", timeZone],
     cwd, environment: { ...discoveryProcessEnvironment(), ...helperEnvironment }, signal, timeoutMs: Math.min(90_000, Math.max(1, Date.parse(deadlineAt) - Date.now())),
   });
-  let closed = false, lastSnapshot, lastProof;
+  let closed = false, lastSnapshot, lastProof, lastGesture;
   return { async request(value) {
-    lastSnapshot = undefined; lastProof = undefined;
+    lastSnapshot = undefined; lastProof = undefined; lastGesture = undefined;
     const snapshot = await channel.request(value);
     if (snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)) {
       const proof = safeNativeMainDocumentContinuity(snapshot.nativeMainDocumentContinuity);
+      const gesture = safeNativeGestureCompletion(snapshot.nativeGestureCompletion);
       delete snapshot.nativeMainDocumentContinuity;
+      delete snapshot.nativeGestureCompletion;
       if (proof && snapshot.browserTransport === "NATIVE_CHROME" && snapshot.navigationStatus === 200 && !snapshot.accessRequirementObserved && !snapshot.nativeFirstFatal && safeObservedUrl(snapshot.url) &&
-          proof.currentUrlSha256 === nativeDocumentHash(snapshot.url)) { lastSnapshot = snapshot; lastProof = proof; }
+          proof.currentUrlSha256 === nativeDocumentHash(snapshot.url)) { lastSnapshot = snapshot; lastProof = proof;
+            if (gesture && gesture.finalUrl === snapshot.url && gesture.documentBindingSha256 === proof.documentBindingSha256 &&
+                gesture.observedAt === proof.observedAt) lastGesture = gesture; }
     }
     return snapshot;
   }, currentMainDocumentContinuity(snapshot, expectedOriginalUrl, now = Date.now()) {
@@ -1080,8 +1104,14 @@ export function createDiscoveryBrowser({ cwd, deadlineAt, initialUrls, timeZone 
         snapshot.navigationStatus === 200 && !snapshot.accessRequirementObserved && !snapshot.nativeFirstFatal && lastProof?.documentBindingSha256 === proof.documentBindingSha256 &&
         Date.now() >= proof.observedAt && Date.now() - proof.observedAt <= 5000 && Date.now() < Date.parse(deadlineAt) });
     return capability;
+  }, currentGestureCompletion(snapshot, now = Date.now()) {
+    if (closed || signal?.aborted || snapshot !== lastSnapshot || !lastGesture || !lastProof ||
+        snapshot.url !== lastGesture.finalUrl || lastGesture.documentBindingSha256 !== lastProof.documentBindingSha256 ||
+        snapshot.browserTransport !== "NATIVE_CHROME" || snapshot.navigationStatus !== 200 || snapshot.accessRequirementObserved || snapshot.nativeFirstFatal ||
+        !Number.isFinite(now) || now < lastGesture.observedAt || now - lastGesture.observedAt > 5000 || now >= Date.parse(deadlineAt)) return undefined;
+    return { ...lastGesture };
   }, async close() {
-    closed = true; lastSnapshot = undefined; lastProof = undefined;
+    closed = true; lastSnapshot = undefined; lastProof = undefined; lastGesture = undefined;
     let timer;
     try { await Promise.race([channel.request({ action: "finish" }), new Promise(done => { timer = setTimeout(done, 3_000); })]); }
     catch { /* The job may already be cancelled or closed. */ }

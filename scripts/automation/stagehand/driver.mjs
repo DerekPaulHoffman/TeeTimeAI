@@ -176,7 +176,7 @@ export function readNativeActionTarget(selector) {
   let inlineHandler = false;
   for (let current=link;current;current=current.parentElement) if (current.hasAttribute('onclick') || typeof current.onclick === 'function') inlineHandler = true;
   const navigation = link ? { pageUrl: location.href, rawHref: link.getAttribute('href') ?? '', captionComplete: (link.textContent ?? '').length <= 160,
-    inlineHandler, download: link.hasAttribute('download'), role: (link.getAttribute('role') ?? '').toLowerCase(), ariaDisabled: link.getAttribute('aria-disabled') === 'true' } : null;
+    inlineHandler, download: link.hasAttribute('download'), role: (link.getAttribute('role') ?? '').toLowerCase(), target: link.getAttribute('target') ?? '', ariaDisabled: link.getAttribute('aria-disabled') === 'true' } : null;
   return { tag: link ? 'A' : node.tagName, leafTag: node.tagName, text: ((link ?? node).textContent ?? '').slice(0, 500), label: (link ?? node).getAttribute('aria-label') ?? '', fieldLabel: node instanceof HTMLSelectElement ? [...(node.labels ?? [])].map(label => label.textContent ?? '').join(' ').slice(0, 500) : '', visible: rendered.visible(node) && (!candidateLink || Boolean(link)), disabled: node instanceof HTMLSelectElement && node.disabled, multiple: node instanceof HTMLSelectElement && node.multiple, name: node.getAttribute('name') ?? '', id: node.id, type: node.getAttribute('type') ?? '', value: node instanceof HTMLSelectElement || node instanceof HTMLInputElement ? node.value : null, options: node instanceof HTMLSelectElement ? [...node.options].slice(0, 257).map(option => ({ value: option.value, label: option.label || option.textContent || '', disabled: option.disabled || option.parentElement instanceof HTMLOptGroupElement && option.parentElement.disabled })) : null, selectedLabels: node instanceof HTMLSelectElement ? [...node.selectedOptions].map(option => option.label || option.textContent || '') : null, href: link?.href ?? node.getAttribute('href') ?? '', inForm: Boolean(node.closest('form')), formAction: submitter?.getAttribute('formaction') || submitter?.form?.getAttribute('action') || node.closest('form')?.getAttribute('action') || '', rowText: (parent?.textContent ?? '').slice(0, 700), navigation };
 
 }
@@ -426,11 +426,38 @@ export async function openStagehandSession({ model, deadline, cwd, signal, onMet
         const anchorNavigation = action.method === 'click' && evidence.tag === 'A' && evidence.href && !evidence.href.startsWith('#') && !/^javascript:/iu.test(evidence.href);
         const sourceUrl=await checked(page.url()),routeKey=anchorNavigation?JSON.stringify([sourceUrl,new URL(evidence.href,sourceUrl).href]):null;
         if(sourceRoutingOnly&&routeKey&&unchangedAnchorNavigations.has(routeKey))throw Object.assign(Error('ACTION_TARGET_REJECTED'),{stagehandGuardReason:'REPEATED_UNCHANGED_NAVIGATION'});
-        const witness = await checked(owned.beforeAction(page.pageId, anchorNavigation ? new URL(evidence.href, await checked(page.url())).href : undefined));
+        const placeholder = sourceRoutingOnly && anchorNavigation && new URL(evidence.href, sourceUrl).href === sourceUrl + "#"
+          ? { text: evidence.text.replace(/\s+/gu, ' ').trim(), label: evidence.label.replace(/\s+/gu, ' ').trim() } : undefined;
+        if (placeholder) {
+          const nav=evidence.navigation;
+          if(!nav || nav.pageUrl!==sourceUrl || nav.rawHref!=='#' || nav.captionComplete!==true || nav.inlineHandler!==false || nav.download!==false ||
+              nav.ariaDisabled!==false || !['','link'].includes(nav.role) || !['','_self','_top','_parent'].includes(nav.target) || evidence.inForm!==false ||
+              !(placeholder.text || placeholder.label) || placeholder.text.length>160 || placeholder.label.length>160) {
+            const reason='UNSUPPORTED_PLACEHOLDER_ACTION';
+            throw Object.assign(Error('ACTION_TARGET_REJECTED'),{stagehandGuardReason:reason,
+              stagehandActionDiagnostic:projectActionGuardDiagnostic({guardReason:reason,guardTag:'A',guardHasHref:true})});
+          }
+        }
+        const witness = await checked(owned.beforeAction(page.pageId, anchorNavigation ? new URL(evidence.href, await checked(page.url())).href : undefined, placeholder));
         if (sourceRoutingOnly && anchorNavigation && typeof onNativeSourceWitness === 'function') await checked(onNativeSourceWitness(witness));
         const navigationBefore = anchorNavigation ? { initialUrl: await checked(page.url()),
           initialPageIds: (await checked(browser.context.pages())).map(candidate => candidate.pageId) } : null;
-        const result = await checked(stagehand.act(effectiveAction, boundOptions()));
+        // Stagehand 4.3 act sends another model request even for an observed
+        // action object. A placeholder's private gesture intent lasts five
+        // seconds, so execute that one exact observed selector immediately
+        // after the native before-action witness instead of re-planning it.
+        let result;
+        if (placeholder && sourceRoutingOnly && typeof onNativeSourceWitness === 'function') {
+          const freshUrlBefore = await checked(page.url());
+          const fresh = await checked(page.evaluate(readNativeActionTarget, effectiveAction.selector));
+          const freshUrlAfter = await checked(page.url());
+          if (freshUrlBefore !== sourceUrl || freshUrlAfter !== sourceUrl || JSON.stringify(fresh) !== JSON.stringify(evidence) ||
+              witness?.links?.[0]?.text !== placeholder.text || witness?.links?.[0]?.label !== placeholder.label ||
+              Date.now() >= deadline) throw Error('ACTION_TARGET_REJECTED');
+          prepareReadOnlyAction(effectiveAction, fresh, { sourceRoutingOnly, currentPageUrl: sourceUrl });
+          await checked(page.locator(effectiveAction.selector).click({ timeout: Math.min(4000, Math.max(1, deadline - Date.now())) }));
+          result = { data: { success: true } };
+        } else result = await checked(stagehand.act(effectiveAction, boundOptions()));
         if (result?.data?.success === false) throw new Error('SDK_ACTION_FAILED');
         if (action.method === 'selectOptionFromDropdown') {
           const selected = await checked(page.evaluate(selector => {
@@ -450,8 +477,16 @@ export async function openStagehandSession({ model, deadline, cwd, signal, onMet
         assertPublicUrl(url);
         const openedNewPage = selected.pageId !== page.pageId;
         if(sourceRoutingOnly&&routeKey&&!openedNewPage&&url===sourceUrl)unchangedAnchorNavigations.add(routeKey);
+        let nativeGestureNavigation = null;
+        if (sourceRoutingOnly && anchorNavigation && !openedNewPage && sourceUrl !== url &&
+            new URL(evidence.href, sourceUrl).href === sourceUrl + "#" && typeof owned.completeGestureNavigation === 'function') {
+          await settleSourceDocument(()=>checked(owned.observeSourceReadiness(selected.pageId)),{deadline:Math.min(deadline,Date.now()+30000),signal,onObservation:value=>{documentReadiness=value;}});
+          nativeGestureNavigation = await checked(owned.completeGestureNavigation(selected.pageId));
+          if (!nativeGestureNavigation || nativeGestureNavigation.finalUrl !== await checked(selected.url()) || nativeGestureNavigation.finalUrl !== url)
+            throw Error('STAGEHAND_SOURCE_OUTPUT_INVALID');
+        }
         page = selected;
-        return { result, before: evidence, afterUrl: url, openedNewPage,
+        return { result, before: evidence, afterUrl: url, openedNewPage, ...(nativeGestureNavigation ? { nativeGestureNavigation } : {}),
           ...(navigationSettlement ? { navigationSettlement: { changed: navigationSettlement.changed, samples: navigationSettlement.samples, waitedMs: navigationSettlement.waitedMs } } : {}) };
         }catch(error){return annotate(error,'ACT');}
       },

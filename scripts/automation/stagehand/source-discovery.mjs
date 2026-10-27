@@ -9,7 +9,7 @@ import { z } from 'zod';
 import { openStagehandSession, loadStagehandRuntime, assertPublicUrl, isSourceRoutingUrl as sourceRoutingUrl, frameworkIdentity, observedActionSummary, observedTargetSummary, sourceDocumentSettled, sourceRoutingUniqueWitness } from './driver.mjs';
 import { installReadOnlyEvidence } from './read-only-evidence.mjs';
 import { prioritizedPublicEvidence, publicEvidenceUrl } from './public-evidence.mjs';
-import { observedBookingSourceCandidates, assertSourceCandidateBudget, nativeFrameNavigations, nativeIntermediaryNavigations, rootWidgetWitness } from './source-provenance.mjs';
+import { observedBookingSourceCandidates, assertSourceCandidateBudget, nativeFrameNavigations, nativeIntermediaryNavigations, nativeGestureNavigations, rootWidgetWitness } from './source-provenance.mjs';
 import { sourceFailureDiagnostic, sourceGuardReasons, projectActionGuardDiagnostic } from './source-diagnostic.mjs';
 
 export const SOURCE_BUDGET_MS = 240000;
@@ -99,12 +99,14 @@ export function sourceRoutingContext(report, candidates) {
   const completedAnchorClicks = rows.slice(-8);
   while (completedAnchorClicks.length && JSON.stringify({ initialNavigation, completedAnchorClicks }).length > 24000) completedAnchorClicks.shift();
   const rejected = (report?.actionAttempts ?? []).at(-1);
-  const lastNavigationFeedback = rejected?.status==='REJECTED'&&['REPEATED_UNCHANGED_NAVIGATION','HIDDEN'].includes(rejected.guardReason) ? rejected.guardReason : null;
+  const lastNavigationFeedback = rejected?.status==='REJECTED'&&['REPEATED_UNCHANGED_NAVIGATION','HIDDEN','UNSUPPORTED_PLACEHOLDER_ACTION'].includes(rejected.guardReason) ? rejected.guardReason : null;
   const context = { initialNavigation, completedAnchorClicks, omittedClickCount: rows.length - completedAnchorClicks.length, lastNavigationFeedback };
   return { ...context, sha256: createHash('sha256').update(JSON.stringify(context)).digest('hex') };
 }
 export function buildSourceDiscoveryInstruction(ordinaryRequest, candidates, priorInspectionFeedback = null, routingContext = null, frames=[]) {
-  return sourceDiscoveryCoreInstruction(ordinaryRequest, candidates, priorInspectionFeedback).replace('Return bookingUrl:null unless SOURCE_FOUND.', 'Return bookingUrl:null unless SOURCE_FOUND or OPEN_FRAME.') +
+  const unsupported = routingContext?.lastNavigationFeedback === 'UNSUPPORTED_PLACEHOLDER_ACTION'
+    ? ' The last proposed href-# control required unsupported button or popup behavior. Do not repeat that control. Observe a different currently visible public navigation link in the same page with ordinary link role and current-tab target, if one exists.' : '';
+  return sourceDiscoveryCoreInstruction(ordinaryRequest, candidates, priorInspectionFeedback).replace('Return bookingUrl:null unless SOURCE_FOUND.', 'Return bookingUrl:null unless SOURCE_FOUND or OPEN_FRAME.') + unsupported +
     ` Recorded completed native routing observations from this same attempt: ${JSON.stringify(routingContext)}. This extraction is stateless: use this supplied history instead of assuming that the current DOM contains previous clicks. HIDDEN feedback means the last proposed selector was not a visible permitted target: do not repeat it; observe a different currently visible navigation control. An eligibleBookingSource:true completed click with landingChanged:true records routing only, not that a terminal availability source was reached. If that destination is an informational operator homepage, choose CONTINUE and inspect its fresh visible public booking links. Select its exact eligible href only when current public evidence identifies an actual availability provider or self-hosted availability widget. Do not repeat a completed routing step merely because the current landing omits an earlier link. Repeated unchanged anchor navigation is mechanically rejected. Own-frame BODY extraction cannot see a cross-origin embed's contents. Fresh native visible iframe choices are ${JSON.stringify(frames)}. To investigate one, choose OPEN_FRAME with bookingUrl equal to exactly ONE listed frame URL; the fixed controller freshly rechecks it and opens it as MAIN in this same guarded context. No arbitrary URL, selector or code is accepted. Frame entry and its final main document are routing evidence only, never identity, availability, metadata or replay proof. At most two frame entries share the original source deadline and limits. Never choose OPEN_FRAME when the list is empty. This history grants no fresh identity, availability, adapter metadata or replay proof; the unchanged provenance validator and fixed inspector retain authority.`;
 }
 function sourceDiscoveryCoreInstruction(ordinaryRequest, candidates, priorInspectionFeedback = null) {
@@ -118,10 +120,31 @@ export async function pageEvidence(session) {
     const rendered = { visible(element) { if (!element?.isConnected || !element.getClientRects().length) return false; for (let node=element;node;node=node.parentElement) { const style=getComputedStyle(node); if(node.hidden || node.inert || node.hasAttribute('inert') || node.getAttribute('aria-hidden')==='true' || style.display==='none' || style.visibility==='hidden' || style.visibility==='collapse' || Number(style.opacity)===0)return false; } return true; } };
     const visible = element => rendered.visible(element);
     const links=[],seen=new Set();for(const element of document.querySelectorAll('a[href]')){const href=safe(element.href);if(!href||seen.has(href)||!visible(element))continue;seen.add(href);links.push({text:(element.innerText??'').trim().slice(0,180),href,visible:true});if(links.length>512)break;}
-    return { url: safe(location.href), observedAt:new Date().toISOString(), title: document.title.slice(0, 300), links, frames: [...document.querySelectorAll('iframe[src]')].filter(element=>!element.hasAttribute('srcdoc')).slice(0, 24).map(element => ({ src: safe(element.src), visible: visible(element), title: (element.title ?? '').slice(0, 120) })), dom: [...document.querySelectorAll('body *')].filter(visible).filter(element => !['SCRIPT', 'STYLE', 'NOSCRIPT', 'IFRAME'].includes(element.tagName) && !sensitive.test(`${element.id} ${element.getAttribute('name') ?? ''} ${element.getAttribute('type') ?? ''}`)).slice(0, 800).map(element => ({ tag: element.tagName.toLowerCase(), id: element.id, class: String(element.className ?? '').slice(0, 180), text: element.children.length === 0 ? (element.textContent ?? '').trim().slice(0, 300) : '', attributes: Object.fromEntries([...element.attributes].filter(attr => ['name', 'type', 'role', 'aria-label', 'value', 'data-date', 'data-time', 'data-value', 'data-capacity', 'datetime'].includes(attr.name) && !sensitive.test(attr.value)).map(attr => [attr.name, attr.value.slice(0, 180)])) })), network: globalThis.__ttsFrameworkReadEvidence ?? null };
+    return { url: safe(location.href), observedAt:new Date().toISOString(), title: document.title.slice(0, 300), links, frames: [...document.querySelectorAll('iframe[src]')].filter(element=>!element.hasAttribute('srcdoc')).slice(0, 24).map(element => ({ src: safe(element.src), visible: visible(element), title: (element.title ?? '').slice(0, 120) })), dom: [...document.querySelectorAll('body *')].filter(visible).filter(element => !['SCRIPT', 'STYLE', 'NOSCRIPT', 'IFRAME'].includes(element.tagName) && !sensitive.test(`${element.id} ${element.getAttribute('name') ?? ''} ${element.getAttribute('type') ?? ''}`)).slice(0, 800).map(element => ({ tag: element.tagName.toLowerCase(), id: element.id, class: String(element.className ?? '').slice(0, 180), text: (element.children.length === 0 || element.tagName === 'BUTTON' || element.getAttribute('role') === 'button' ? (element.innerText ?? element.textContent ?? '').trim().slice(0, 300) : ''), attributes: Object.fromEntries([...element.attributes].filter(attr => ['name', 'type', 'role', 'aria-label', 'value', 'data-date', 'data-time', 'data-value', 'data-capacity', 'datetime'].includes(attr.name) && !sensitive.test(attr.value)).map(attr => [attr.name, attr.value.slice(0, 180)])) })), network: globalThis.__ttsFrameworkReadEvidence ?? null };
   });
   evidence.publicControls = await session.page.evaluate(() => [...document.querySelectorAll('input,select')].filter(element => element.getClientRects().length && !['password', 'email', 'tel', 'file'].includes(element.type) && !/password|secret|token|credential|email|phone|contact|username/iu.test(`${element.name} ${element.id}`)).slice(0, 80).map(element => ({ tag: element.tagName.toLowerCase(), id: element.id, name: element.name, type: element.type, value: element.value.slice(0, 180), selectedLabel: element instanceof HTMLSelectElement ? [...element.selectedOptions].map(option => option.text.slice(0, 160)).join(' ') : null, options: element instanceof HTMLSelectElement ? [...element.options].slice(0, 64).map(option => ({ value: option.value.slice(0, 180), text: option.text.slice(0, 160), selected: option.selected, disabled: option.disabled })) : null })));
   return evidence;
+}
+
+// A completed main document can still precede client-rendered public navigation.
+// Only fresh visible evidence can end this wait; elapsed time grants no route.
+export async function settleSourceRoutingEvidence(session, { deadline, now = Date.now, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), maxWaitMs = 30000 } = {}) {
+  if (!Number.isFinite(deadline) || !Number.isFinite(maxWaitMs) || maxWaitMs < 0 || maxWaitMs > 30000) throw fail('STAGEHAND_SOURCE_OUTPUT_INVALID');
+  const end = Math.min(deadline, now() + maxWaitMs);
+  let evidence;
+  while (now() < deadline) {
+    evidence = await pageEvidence(session);
+    const current = await session.page.url();
+    const routingWords = /\b(?:book|tee\s*times?|availability|calendar|bay|simulator)\b/iu;
+    const visibleControls = evidence.dom.some(row => (row.tag === 'button' || row.attributes?.role === 'button') &&
+      routingWords.test(`${row.text ?? ''} ${row.attributes?.['aria-label'] ?? ''}`)) ||
+      evidence.publicControls.some(row => /^(?:date|time|number)$/iu.test(row.type ?? '') &&
+        /date|time|players?|party|duration/iu.test(`${row.id ?? ''} ${row.name ?? ''} ${row.selectedLabel ?? ''}`));
+    if (current === evidence.url && (evidence.links.length || evidence.frames.some(frame => frame.visible === true && frame.src) || visibleControls)) return evidence;
+    if (now() >= end) return current === evidence.url ? evidence : null;
+    await sleep(Math.min(1000, Math.max(1, end - now())));
+  }
+  throw fail('STAGEHAND_SOURCE_BUDGET_EXHAUSTED');
 }
 
 /** Closed predicate diagnostics only; this does not sanitize or admit a witness. */
@@ -167,7 +190,7 @@ const closedFailure = error => {
     error?.name === 'ZodError' ? 'STAGEHAND_SOURCE_OUTPUT_INVALID' : 'STAGEHAND_SOURCE_DISCOVERY_FAILED';
 };
 /** Finds an unverified route only. No method, inventory, identity proof or backend capability enters this module. */
-export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, signal, onMetrics, outputDirectory, createGuardedBrowser, sessionFactory = openStagehandSession } = {}) {
+export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, signal, onMetrics, outputDirectory, createGuardedBrowser, sessionFactory = openStagehandSession, sourceEvidenceWait } = {}) {
   const request = publicSourceJob(job, deadlineAt), workDeadline = Date.parse(request.workDeadlineAt);
   if (signal?.aborted) throw fail('SOURCE_DISCOVERY_ABORTED');
   if (outputDirectory !== undefined && (typeof outputDirectory !== 'string' || !isAbsolute(outputDirectory))) throw fail('STAGEHAND_ARTIFACT_DIRECTORY_INVALID');
@@ -181,6 +204,7 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
   let finalDecision=null,stopCondition='RUNNING',lastActionKind=null,activeAct,activeFrame;
   report.nativeFrameNavigations=[];
   report.nativeIntermediaryNavigations=[];
+  report.nativeGestureNavigations=[];
   let activeIntermediary;
   const onNativeIntermediaryWitness=witness=>{
     const stamp=Date.parse(witness?.observedAt),keys=value=>value&&typeof value==='object'&&!Array.isArray(value)?Object.keys(value).sort().join(','):'';
@@ -208,7 +232,13 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
       witness.pageUrl!==activeAct.pageUrl||!sourceRoutingUrl(witness.pageUrl)||!report.visitedUrls.includes(witness.pageUrl)||
       !Number.isFinite(stamp)||new Date(stamp).toISOString()!==witness.observedAt||stamp<activeAct.startedAt||stamp>Date.now()+5000||stamp>workDeadline||
       typeof witness.documentHash!=='string'||!/^[a-f0-9]{64}$/u.test(witness.documentHash)||!Array.isArray(witness.links)||witness.links.length!==1||
-      keys(witness.links[0])!=='href,visible'||witness.links[0].visible!==true||!sourceRoutingUrl(witness.links[0].href))throw fail('STAGEHAND_SOURCE_OUTPUT_INVALID');
+      !['href,visible','href,label,text,visible'].includes(keys(witness.links[0]))||witness.links[0].visible!==true||!sourceRoutingUrl(witness.links[0].href)||
+      (keys(witness.links[0])==='href,label,text,visible' &&
+        (typeof witness.links[0].text!=='string'||typeof witness.links[0].label!=='string'||
+          witness.links[0].text.length>160||witness.links[0].label.length>160||
+          witness.links[0].text!==witness.links[0].text.replace(/\s+/gu,' ').trim()||
+          witness.links[0].label!==witness.links[0].label.replace(/\s+/gu,' ').trim()||
+          witness.links[0].href!==witness.pageUrl+'#')))throw fail('STAGEHAND_SOURCE_OUTPUT_INVALID');
     activeAct.witnessed=true;report.officialLinkLedger.push(structuredClone(witness));
   };
   const sourceStartedAt=Date.now();
@@ -269,7 +299,8 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
           await persist();continue;
         }
       }
-      const evidence=await bounded(()=>pageEvidence(session));
+      const evidence=await bounded(()=>settleSourceRoutingEvidence(session,{...sourceEvidenceWait,deadline:workDeadline}));
+      if(!evidence)continue;
       if(evidence.links.length>512)throw fail('SOURCE_EVIDENCE_LIMIT');
       if(evidence.url&&!report.visitedUrls.includes(evidence.url))report.visitedUrls.push(evidence.url);
       report.officialLinkLedger.push({kind:'NATIVE_VISIBLE_DOM',pageUrl:evidence.url,observedAt:evidence.observedAt,links:evidence.links});report.frameLedger.push({pageUrl:evidence.url,frames:evidence.frames});
@@ -366,7 +397,13 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
         let result;try{result=await bounded(()=>session.act(action));}finally{activeAct=undefined;}
         attempt.status='EXECUTED';attempt.afterUrl=result.afterUrl;
         if(!report.visitedUrls.includes(result.afterUrl))report.visitedUrls.push(result.afterUrl);
-        report.actions.push({action:observedActionSummary(action),sourceUrl:evidence.url,observedTarget:observedTargetSummary(result.before),afterUrl:result.afterUrl,openedNewPage:result.openedNewPage});rejections=0;
+        report.actions.push({action:observedActionSummary(action),sourceUrl:evidence.url,observedTarget:observedTargetSummary(result.before),afterUrl:result.afterUrl,openedNewPage:result.openedNewPage});
+        if(result.nativeGestureNavigation!==undefined){
+          if(report.nativeGestureNavigations.length>=2)throw fail('STAGEHAND_SOURCE_OUTPUT_INVALID');
+          report.nativeGestureNavigations.push(result.nativeGestureNavigation);
+          if(nativeGestureNavigations(report,sourceRoutingUrl).length!==report.nativeGestureNavigations.length)throw fail('STAGEHAND_SOURCE_OUTPUT_INVALID');
+        }
+        rejections=0;
       }catch(error){
         if(!['METHOD_NOT_PERMITTED','ARGUMENTS_NOT_PERMITTED','ACTION_TARGET_REJECTED','SDK_ACTION_FAILED','SDK_ACTION_POSTCONDITION_FAILED'].includes(error.message))throw error;
         attempt.status='REJECTED';attempt.reason=error.message;if(sourceGuardReasons.includes(error.stagehandGuardReason))attempt.guardReason=error.stagehandGuardReason;

@@ -998,6 +998,44 @@ describe("regular Stagehand source worker", () => {
     expect(t.close).toHaveBeenCalledOnce(); expect(t.client.candidate).not.toHaveBeenCalled();
   });
 
+  it.each(["valid", "ambiguous", "wrongCompletion", "missingCompletion"] as const)("fresh Bay 1 placeholder requires its private completed document: %s", async mode => {
+    const t = setup(), destination = "https://public-bay.example/services", href = official + "#", target = "a0000000-0000-4000-8000-000000000001";
+    const observedAt = t.f.report.startedAt, completedAt = t.f.report.finishedAt, rootBinding = "a".repeat(64), finalBinding = "b".repeat(64);
+    t.f.report.adapterSourceProposal.bookingUrl = destination;
+    t.f.report.visitedUrls = [official, destination];
+    t.f.report.officialLinkLedger = [{ kind: "NATIVE_VISIBLE_DOM", pageUrl: official, observedAt, documentHash: "c".repeat(64),
+      links: [{ href, visible: true, text: "Book Bay 1", label: "" }] }];
+    t.f.report.actions = [{ sourceUrl: official, action: { method: "click" },
+      observedTarget: { tag: "A", href, text: "Book Bay 1", label: "" }, afterUrl: destination, openedNewPage: false }];
+    t.f.report.nativeGestureNavigations = [{ kind: "NATIVE_GESTURE_SOURCE_OPEN", pageUrl: official, href, text: "Book Bay 1", label: "",
+      observedAt, documentHash: "c".repeat(64), targetUrl: destination, finalUrl: destination, finalStatus: 200, completedAt,
+      finalDocumentHash: "d".repeat(64), redirects: [] }];
+    expect(observedInspectionPath(t.f.report, official, destination)).toEqual([official, destination]);
+    const calls: unknown[] = [];
+    const processFactory = () => ({ request: async (action: { action: string; target?: string }) => {
+      calls.push(action);
+      const final = action.action === "click" || action.action === "inspect_adapter", url = final ? destination : official;
+      if (action.action === "click") expect(action.target).toBe(target);
+      return { url, browserTransport: "NATIVE_CHROME", navigationStatus: 200, accessRequirementObserved: false, loading: false,
+        controls: final ? [] : [{ kind: "link", href, target, name: "Book Bay 1", label: "" },
+          { kind: "link", href, target: "a0000000-0000-4000-8000-000000000002", name: mode === "ambiguous" ? "Book Bay 1" : "Book Bay 2", label: "" }],
+        nativeMainDocumentContinuity: { kind: "NATIVE_MAIN_DOCUMENT_CONTINUITY_V1", originalUrlSha256: stagehandDataHash(url),
+          currentUrlSha256: stagehandDataHash(url), documentBindingSha256: final ? finalBinding : rootBinding, observedAt: t.f.clock, status: 200 },
+        ...(action.action === "click" && mode !== "missingCompletion" ? { nativeGestureCompletion: { kind: "NATIVE_GESTURE_COMPLETED_V1", sourceUrl: official, href,
+          text: mode === "wrongCompletion" ? "Book Bay 2" : "Book Bay 1", label: "", targetUrl: destination, finalUrl: destination,
+          redirects: [], documentBindingSha256: finalBinding, observedAt: t.f.clock } } : {}),
+        adapter: action.action === "inspect_adapter" ? { family: "FOREUP", facilityId: 12, scheduleId: 34, bookingClassId: 56 } : undefined };
+    }, close: t.close });
+    t.browserFactory.mockImplementation(async options => createDiscoveryBrowser({ ...options, processFactory }));
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(t.f.clock);
+    try {
+      if (mode === "valid") await t.run();
+      else { await expect(t.run()).rejects.toThrow(); expect(t.client.candidate).not.toHaveBeenCalled(); }
+      expect(calls.filter((action: { action: string }) => action.action === "click")).toEqual(mode === "ambiguous" ? [] : [{ action: "click", target }]);
+      expect(calls.some((action: { action: string; url?: string }) => action.action === "open" && action.url === destination)).toBe(false);
+    } finally { vi.useRealTimers(); }
+  });
+
   it("treats an unclicked visible native DOM href only as routing and still requires two fresh server challenges", async () => {
     const t = setup(); t.f.report.actions = []; t.f.report.visitedUrls = [official];
     Object.assign(t.f.report.officialLinkLedger[0], { kind: "NATIVE_VISIBLE_DOM", observedAt: t.f.report.startedAt });

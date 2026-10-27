@@ -96,6 +96,15 @@ test('closed action taxonomy survives report failure without raw target text or 
  assert.equal(projectSourceDiagnostic({...d,guardTerm:'PRIVATE_TEXT'}),undefined);
 });
 
+test('unsupported placeholder action keeps only the closed reason',()=>{
+ const action={guardReason:'UNSUPPORTED_PLACEHOLDER_ACTION',guardTag:'A',guardHasHref:true};
+ assert.deepEqual(projectActionGuardDiagnostic(action),action);
+ const r=report();Object.assign(r.actionAttempts[0],action);
+ const diagnostic=sourceFailureDiagnostic({report:r,phase:'ACT'});
+ assert.equal(diagnostic.guardReason,'UNSUPPORTED_PLACEHOLDER_ACTION');
+ assert.doesNotMatch(JSON.stringify(diagnostic),/SECRET|PRIVATE|https:|selector|message/);
+});
+
 test('wrapped SDK failure adopts only the same latest failed model invocation, never stale or invented usage',()=>{
  const r=report();r.metrics.localCodexCalls=[];
  const modelFailure=captureModelFailure(Object.assign(Error('SECRET'),{code:'LOCAL_MODEL_RPC_FAILED',diagnostics:{phase:'turn/start',rpcCode:-32600,httpStatusCode:400,usage:{inputTokens:11}}}),1,0);

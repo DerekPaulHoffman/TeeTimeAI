@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Frame, Page, Response, Route } from "@playwright/test";
+import type { CDPSession, Frame, Page, Response, Route } from "@playwright/test";
 import { isNonEvidenceBrowserResource } from "@/lib/automation/passfactory-public-read-policy";
 import { isMindbodyClassicPublicBootstrapPost, mindbodyClassicPublicBootstrapSource, mindbodyClassicPublicBootstrapPostDiagnostic, mindbodyClassicPublicBootstrapSourceDiagnostic, mindbodyClassicBootstrapUrlDiagnostic,
   type MindbodyClassicBootstrapPostOutcome, type MindbodyClassicBootstrapSourceOutcome, type MindbodyClassicBootstrapQueryCount, type MindbodyClassicBootstrapQueryRow } from "@/lib/automation/mindbody-public-read-policy";
@@ -103,6 +103,7 @@ type RecordEntry = {
   preflight?: PreflightSource;
   mindbodyBootstrapSource?: NativeMindbodyBootstrapSource;
   controllerForm?: MindbodyPublicFormIntent;
+  gestureSource?: NativeGestureIntent;
   cancellation: AbortController; handlerDone: boolean; responsePaused: boolean;
   retirementAck?: Promise<void>;
   retirementAcks?: Partial<Record<"request" | "response", Promise<void>>>;
@@ -112,19 +113,25 @@ type RecordEntry = {
 type DocumentGeneration = { id: number; retired: boolean; loaderId?: string };
 type PreflightSource = { networkId: string; identity: NetworkIdentity; generation: DocumentGeneration; used: boolean };
 type NetworkIdentity = { id: string; revision: number; loaderId: string; frameId?: string; url: string; method: string; kind: string; kindKnown: boolean;
+  hasUserGesture: boolean; scriptInitiator: boolean;
   hasBody: boolean; body: string | null; headerEntries: Array<[string, string]>; generation: DocumentGeneration; preflight?: PreflightSource };
 type PendingPreflightIdentity = { identity: NetworkIdentity; sourceNetworkId: string; generation: DocumentGeneration; createdAt: number; invalid: boolean };
 type PendingInitialPause = { id: string; generation: DocumentGeneration; retired: boolean;
   networkId: string; url: string; method: string; kind: string; networkFailed: ReturnType<typeof pending<void>>;
   successorIdentity?: NetworkIdentity; terminalFailed?: boolean;
   retirementAck?: Promise<void>; cancelled: ReturnType<typeof pending<void>> };
+type ExcludedImageAbort = { fetchId: string; identity: NetworkIdentity; generation: DocumentGeneration; revision: number;
+  terminal: ReturnType<typeof pending<void>>; finished: boolean; responseSeen: boolean };
 type CommittedDocument = { record: RecordEntry; loaderId: string };
 type DocumentIntent = { source: CommittedDocument; target: string; reason: "scriptInitiated" | "anchorClick" | "formSubmissionPost"; networkRevision: number; createdAt: number; used: boolean;
   controllerForm?: MindbodyPublicFormIntent };
+export type NativeGestureIntent = Readonly<{ sourceUrl: string; href: string; text: string; label: string; targetUrl: string; observedAt: string; documentHash: string;
+  active(): boolean; consume(): boolean }>;
 export type NativeMindbodyBootstrapSource = Readonly<{ sourceUrl: string }>;
 type NativeRecordOwner = { closed: boolean; authorizeHeaders?: (record: RecordEntry) => Promise<PublicClientReadHeaderProof | null>;
   mindbodyBootstrapSource?: (record: RecordEntry) => NativeMindbodyBootstrapSource | null;
-  controllerForm?: (record: RecordEntry) => MindbodyPublicFormIntent | null };
+  controllerForm?: (record: RecordEntry) => MindbodyPublicFormIntent | null;
+  gestureSource?: (record: RecordEntry) => NativeGestureIntent | null };
 // Only adapters minted by this controller have redirect provenance. A model,
 // Playwright lookalike, diagnostic or caller-supplied redirectedFrom chain does
 // not gain authority by exposing the same methods or URL strings.
@@ -162,6 +169,10 @@ export async function authorizePublicClientReadHeaders(request: NativeReadReques
 }
 /** Immutable source metadata for one privately attested bootstrap successor.
  * It grants no read permission and expires with that exact native generation. */
+export function nativeGestureNavigationSource(request: NativeReadRequest): NativeGestureIntent | null {
+  const value = nativeRequestRecords.get(request);
+  return value && !value.owner.closed ? value.owner.gestureSource?.(value.record) ?? null : null;
+}
 export function nativeMindbodyBootstrapSource(request: NativeReadRequest): NativeMindbodyBootstrapSource | null {
   const value = nativeRequestRecords.get(request);
   return value && !value.owner.closed ? value.owner.mindbodyBootstrapSource?.(value.record) ?? null : null;
@@ -287,6 +298,8 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
   controllerFormIntent?: (sourceUrl: string, targetUrl: string) => MindbodyPublicFormIntent | undefined;
   /** Source controller's exact one-use observed anchor grant; never URL permission. */
   controllerGetIntent?: (sourceUrl: string, targetUrl: string) => boolean;
+  /** Caller-private placeholder click. Native gesture correlation still owns consumption. */
+  controllerScriptGetIntent?: (sourceUrl: string, targetUrl: string) => NativeGestureIntent | undefined;
   /** Fixed caller policy may only confirm denial; never dispatch or create read authority. */
   denyUncorrelatedPost?: (request: NativeUncorrelatedPost) => boolean;
 } = {}): Promise<NativeRedirectRouting> {
@@ -301,6 +314,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
   // Retain their IDs through this owner lifetime to reject duplicate/late work.
   const sourceDeniedFetchIds = new Set<string>();
   const networkIdentities = new Map<string, NetworkIdentity>();
+  const excludedImageAborts = new Map<string, ExcludedImageAbort>();
   const failedNetworkIdentities = new WeakSet<NetworkIdentity>();
   const sourceLoadingFailures = new WeakMap<NetworkIdentity, Readonly<SourceLoadingFailure>>();
   const pendingPreflightIdentities = new Map<string, PendingPreflightIdentity>();
@@ -347,6 +361,10 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
   let documentIntentCallback: { sourceUrl: string; targetUrl: string; sourceIsGet: boolean; sourceBodyAbsent: boolean; sourceUrlCurrent: boolean;
     sourceBinding: MindbodyClassicBootstrapSourceOutcome } | undefined;
   let currentDocumentUrl = "";
+  // A native same-document event may change the current route without a new
+  // GET. Keep its exact committed document identity for a later fresh gesture.
+  let sameDocumentRoute: { url: string; source: CommittedDocument; frameId: string; loaderId: string;
+    generation: DocumentGeneration; networkIdentityRevision: number } | undefined;
   const owner: NativeRecordOwner = { closed: false };
   type HeaderContext = { document: RecordEntry; loader: object; scope: ReturnType<typeof createPublicClientReadHeaderScope> };
   let headerContext: HeaderContext | undefined;
@@ -375,6 +393,15 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
       identity.hasBody && identity.body === record.body && record.body !== null && record.url === form.targetUrl &&
       new Headers(record.headerEntries).get("origin") === new URL(form.targetUrl).origin &&
       form.matches(record.body, new Headers(record.headerEntries).get("content-type") ?? "") ? form : null;
+  };
+  owner.gestureSource = record => {
+    const identity = networkIdentities.get(record.networkId), proof = record.gestureSource;
+    return proof && proof.active() && !closed && !options.signal?.aborted && !boundaryPending && !record.failed &&
+      !record.cancellation.signal.aborted && record.kind === "document" && record.method === "GET" && record.body === null &&
+      record.generation === generation && !generation.retired && record.loaderId !== undefined && loaderOwners.get(record.loaderId) === generation &&
+      identity !== undefined && !failedNetworkIdentities.has(identity) && identity.revision === record.networkIdentityRevision &&
+      identity.frameId === rootFrameId && identity.loaderId === record.loaderId && identity.url === record.url && identity.method === "GET" &&
+      identity.kind === "document" && !identity.hasBody ? proof : null;
   };
   const retireHeaderContext = () => { headerContext?.scope.close(); headerContext = undefined; };
   const liveHeaderDocument = (context: HeaderContext) => !closed && !options.signal?.aborted && !boundaryPending &&
@@ -494,6 +521,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
     if (code !== "NATIVE_REDIRECT_CLOSED") { firstFatal ??= { code }; failure(code); }
     options.signal?.removeEventListener("abort", onAbort);
     for (const record of records.values()) { record.failed = true; record.response.settle(new Error(code)); }
+    for (const image of excludedImageAborts.values()) image.terminal.settle();
     for (const waiter of networkWaiters.values()) waiter.settle();
     for (const pause of initialPauses.values()) pause.cancelled.settle();
     // Never detach interception while paused requests could resume.
@@ -605,6 +633,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
     }
     childFrames.clear(); childAssets.clear();
     documentIntent = undefined;
+    sameDocumentRoute = undefined;
     const matches = [...records.values()].filter(record => record.kind === "document" && record.admitted && !record.failed &&
       record.generation === generation && !record.generation.retired && record.loaderId === event.frame.loaderId &&
       record.transportUrl === event.frame.url && record.responseStatus !== undefined && record.responseStatus >= 200 && record.responseStatus < 300);
@@ -615,8 +644,21 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
   cdp.on("Page.frameDetached", event => { forgetChild(event.frameId); });
   cdp.on("Page.navigatedWithinDocument", event => {
     if (event.frameId !== rootFrameId || !committedDocument) return;
+    sameDocumentRoute = undefined;
     try {
       if (!isSafeRecipeUrl(event.url) || new URL(event.url).origin !== new URL(currentDocumentUrl).origin) { retireHeaderContext(); headerScripts.clear(); }
+      else {
+        const source = committedDocument, record = source.record, identity = networkIdentities.get(record.networkId);
+        if (!closed && !boundaryPending && !awaitingDocument && record.generation === generation && !generation.retired &&
+            loaderOwners.get(source.loaderId) === generation && record.loaderId === source.loaderId &&
+            record.admitted && record.complete && !record.failed && record.responseStatus === 200 &&
+            identity && !failedNetworkIdentities.has(identity) && identity.revision === record.networkIdentityRevision &&
+            identity.frameId === rootFrameId && identity.loaderId === source.loaderId && identity.url === record.url &&
+            new URL(event.url).origin === new URL(record.transportUrl).origin) {
+          sameDocumentRoute = { url: event.url, source, frameId: event.frameId, loaderId: source.loaderId,
+            generation, networkIdentityRevision: identity.revision };
+        }
+      }
     } catch { retireHeaderContext(); headerScripts.clear(); }
     currentDocumentUrl = event.url;
   });
@@ -712,7 +754,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
       url: event.request.url, method: event.request.method, kind: resourceKinds[event.type ?? ""] ?? "other",
       kindKnown: Object.hasOwn(resourceKinds, event.type ?? ""), hasBody: event.request.hasPostData === true || event.request.postData !== undefined,
       body: typeof event.request.postData === "string" && Buffer.byteLength(event.request.postData) <= 32_768 ? event.request.postData : null,
-      headerEntries: entries, generation };
+      headerEntries: entries, generation, hasUserGesture: event.hasUserGesture === true, scriptInitiator: event.initiator?.type === "script" };
     if (nativePreflight) {
       // Chrome can emit raw loaderless OPTIONS metadata before its exact read
       // initiator. Retain only bounded current-generation facts until that read
@@ -729,6 +771,8 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
     for (const [id, pending] of pendingPreflightIdentities) if (pending.sourceNetworkId === event.requestId) bindPendingPreflight(id, pending, identity);
   });
   cdp.on("Network.loadingFinished", event => {
+    const excluded = excludedImageAborts.get(event.requestId);
+    if (excluded) excluded.finished = true;
     const child = childAssets.get(event.requestId);
     if (child) { child.invalid = true; networkWaiters.get(event.requestId)?.settle(); }
   });
@@ -766,6 +810,12 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
       failRecord(record, record.generation.retired ? "NATIVE_READ_SUPERSEDED" : "NATIVE_REDIRECT_NETWORK_FAILED");
     const identity = networkIdentities.get(event.requestId);
     if (identity) failedNetworkIdentities.add(identity);
+    const excluded = excludedImageAborts.get(event.requestId);
+    if (excluded && identity === excluded.identity && identity.revision === excluded.revision &&
+        identity.generation === excluded.generation && identity.frameId === rootFrameId &&
+        loaderOwners.get(identity.loaderId) === excluded.generation && event.type === "Image" &&
+        event.canceled === true && ["net::ERR_ABORTED", "net::ERR_BLOCKED_BY_CLIENT"].includes(event.errorText) &&
+        !excluded.finished && !excluded.responseSeen) excluded.terminal.settle();
     for (const pause of initialPauses.values()) if (pause.successorIdentity && pause.networkId === event.requestId &&
       identity === pause.successorIdentity && identity.frameId === rootFrameId && identity.url === pause.url && identity.method === pause.method &&
       identity.kind === "document" && pause.kind === "document") {
@@ -780,6 +830,10 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
   });
   options.signal?.addEventListener("abort", onAbort, { once: true });
   cdp.on("Fetch.requestPaused", event => {
+    if (event.responseStatusCode !== undefined || event.responseErrorReason !== undefined) {
+      const excluded = [...excludedImageAborts.values()].find(item => item.fetchId === event.requestId);
+      if (excluded) excluded.responseSeen = true;
+    }
     // Include dispatch and capture before any await, so ready DOM cannot hide
     // an incomplete native read before the shared handler starts or resumes.
     pendingReads++;
@@ -957,7 +1011,43 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         // availability read nor model feedback. Unclassified Ping diagnostics
         // stay separate; known analytics remain a quiet denial for every kind.
         const diagnostic = event.resourceType === "Ping" && !excludedResource ? requestDiagnostic("NATIVE_REDIRECT_PING_UNSUPPORTED") : undefined;
-        await bounded(reject(), "NATIVE_REDIRECT_ABORT_TIMEOUT");
+        const networkId = event.networkId, identity = networkId && networkIdentities.get(networkId);
+        const image = options.responseProfile === SOURCE_ROUTING_RESPONSE_PROFILE && event.resourceType === "Image" &&
+          event.request.method === "GET" && event.request.hasPostData !== true && event.request.postData === undefined &&
+          typeof networkId === "string" && identity && identity.kind === "image" && identity.kindKnown &&
+          identity.url === event.request.url && identity.method === "GET" && identity.frameId === rootFrameId &&
+          identity.generation === generation && !generation.retired && loaderOwners.get(identity.loaderId) === generation &&
+          !failedNetworkIdentities.has(identity) && !excludedImageAborts.has(networkId) && !records.has(event.requestId) &&
+          !initialPauses.has(event.requestId)
+          ? { fetchId: event.requestId, identity, generation, revision: identity.revision, terminal: pending<void>(),
+            finished: false, responseSeen: false } satisfies ExcludedImageAbort : undefined;
+        if (image && networkId) excludedImageAborts.set(networkId, image);
+        try {
+          await bounded(reject(), "NATIVE_REDIRECT_ABORT_TIMEOUT");
+        } catch (error) {
+          if (!image || !networkId) throw error;
+          // A rejected abort is never its own evidence. The independent exact
+          // Network terminal must arrive under the unchanged command deadline.
+          if (closed || options.signal?.aborted) throw error;
+          let abortListener: (() => void) | undefined;
+          const aborted = new Promise<never>((_resolve, reject) => {
+            abortListener = () => reject(new Error("NATIVE_REDIRECT_CANCELLED"));
+            options.signal?.addEventListener("abort", abortListener, { once: true });
+            if (closed || options.signal?.aborted) abortListener();
+          });
+          try { await bounded(Promise.race([image.terminal.promise, aborted]), "NATIVE_REDIRECT_ABORT_TIMEOUT"); }
+          finally { if (abortListener) options.signal?.removeEventListener("abort", abortListener); }
+          const observed = sourceLoadingFailures.get(image.identity);
+          if (closed || options.signal?.aborted || image.finished || image.responseSeen ||
+              networkIdentities.get(networkId) !== image.identity || image.identity.revision !== image.revision ||
+              image.identity.generation !== image.generation || image.identity.frameId !== rootFrameId ||
+              loaderOwners.get(image.identity.loaderId) !== image.generation || !failedNetworkIdentities.has(image.identity) ||
+              observed?.nativeSourceFetchRecordPresent !== false || observed.nativeSourceLoadingFailedCanceled !== true ||
+              !["ABORTED", "BLOCKED_BY_CLIENT"].includes(observed.nativeSourceLoadingFailedErrorKind ?? "") ||
+              records.has(event.requestId) || initialPauses.has(event.requestId) ||
+              !(cdp as CDPSession & { recoverTerminalExcludedImageAbort?: (error: unknown, requestId: string) => boolean })
+                .recoverTerminalExcludedImageAbort?.(error, event.requestId)) throw error;
+        } finally { if (image && networkId && excludedImageAborts.get(networkId) === image) excludedImageAborts.delete(networkId); }
         if (diagnostic) {
           rejectedRequests.push(diagnostic);
           if (rejectedRequests.length > 12) rejectedRequests.shift();
@@ -1063,6 +1153,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
       let requestPreflight: PreflightSource | undefined;
       let mindbodyBootstrapSource: NativeMindbodyBootstrapSource | undefined;
       let controllerForm: MindbodyPublicFormIntent | undefined;
+      let gestureSource: NativeGestureIntent | undefined;
       let denyResourceKind = false;
       pendingInitialPause = { id: event.requestId, generation: parent?.generation ?? generation, retired: false, cancelled: pending(),
         networkId: event.networkId!, url: event.request.url, method: event.request.method, kind, networkFailed: pending() };
@@ -1231,6 +1322,23 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
           if (publicForm && !intent.controllerForm!.consume()) {
             firstFatal ??= diagnostic("LOADER_OWNER"); await reject(); await close("NATIVE_REDIRECT_LOADER_MISMATCH"); return;
           }
+          const gestureSourceIdentity = networkIdentities.get(intent.source.record.networkId);
+          if (intent.reason === "scriptInitiated" && options.controllerScriptGetIntent && kind === "document" &&
+              event.request.method === "GET" && identity.hasUserGesture && identity.scriptInitiator && !identity.hasBody &&
+              intent.source.record.method === "GET" && intent.source.record.body === null && intent.source.record.responseStatus === 200 &&
+              gestureSourceIdentity && !failedNetworkIdentities.has(gestureSourceIdentity) &&
+              gestureSourceIdentity.revision === intent.source.record.networkIdentityRevision && gestureSourceIdentity.frameId === rootFrameId &&
+              gestureSourceIdentity.loaderId === intent.source.loaderId && gestureSourceIdentity.url === intent.source.record.url &&
+              gestureSourceIdentity.method === "GET" && gestureSourceIdentity.kind === "document" && !gestureSourceIdentity.hasBody &&
+              /^text\/html(?:\s*;|$)/iu.test(intent.source.record.responseMimeType ?? "") &&
+              (currentDocumentUrl === intent.source.record.transportUrl || Boolean(sameDocumentRoute &&
+                sameDocumentRoute.url === currentDocumentUrl && sameDocumentRoute.source === intent.source &&
+                sameDocumentRoute.frameId === rootFrameId && sameDocumentRoute.loaderId === intent.source.loaderId &&
+                sameDocumentRoute.generation === generation && sameDocumentRoute.networkIdentityRevision === intent.source.record.networkIdentityRevision)) &&
+              Date.now() - intent.createdAt <= 5000) {
+            const proof = options.controllerScriptGetIntent(currentDocumentUrl, event.request.url);
+            if (proof && proof.sourceUrl === currentDocumentUrl && proof.targetUrl === event.request.url && proof.active() && proof.consume()) gestureSource = proof;
+          }
           intent.used = true; boundaryPending = true;
           const previous = generation, successor: DocumentGeneration = { id: previous.id + 1, retired: false, loaderId: identity.loaderId };
           // Protect this exact pause from old-generation retirement; it has no
@@ -1342,7 +1450,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
       const record: RecordEntry = { id: event.requestId, networkId, url: event.request.url, transportUrl: event.request.url,
         method: event.request.method, headers: headers(event.request.headers), headerEntries: rawHeaderEntries(event.request.headers), body: event.request.postData ?? null, kind,
         parent: parent ?? null, depth: parent ? parent.depth + 1 : 0, paused: true, admitted: false, failed: false, responseStarted: false, complete: false,
-        generation: requestGeneration, loaderId: requestLoaderId, networkIdentityRevision: requestIdentityRevision, preflight: requestPreflight, mindbodyBootstrapSource, controllerForm,
+        generation: requestGeneration, loaderId: requestLoaderId, networkIdentityRevision: requestIdentityRevision, preflight: requestPreflight, mindbodyBootstrapSource, controllerForm, gestureSource: gestureSource ?? parent?.gestureSource,
         cancellation: new AbortController(), handlerDone: false, responsePaused: false,
         response: pending(), adapter: undefined as unknown as NativeReadRequest };
       record.adapter = { signal: record.cancellation.signal, url: () => record.url, method: () => record.method, headers: () => ({ ...record.headers }), postData: () => record.body,

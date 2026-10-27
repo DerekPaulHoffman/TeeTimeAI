@@ -33,6 +33,7 @@ export const stagehandHostGuardReasons = {
   GUARDED_TARGETS: ["IDS_INVALID", "TARGET_MISSING", "TARGET_NOT_ATTESTED"],
   SOURCE_DOM: ["VALUE_INVALID", "JSON_INVALID", "FRAME_MISSING", "LOADER_MISSING", "FRAME_CHANGED", "LOADER_CHANGED", "NATIVE_URL_CHANGED", "DOM_URL_CHANGED"],
   BEFORE_ACTION: ["HREF_SHAPE", "LINK_INVENTORY_MISSING", "HREF_NOT_OBSERVED", "HREF_URL_POLICY", "HREF_TRANSACTION", "OBSERVED_URL_LIMIT"],
+  GESTURE: ["DESCRIPTOR_INVALID", "NOT_PLACEHOLDER", "DOCUMENT_REQUEST_MISSING", "SOURCE_NOT_SETTLED", "VISIBLE_LINK_MISSING", "INTENT_MISSING", "INTENT_EXPIRED", "INTENT_USED", "SOURCE_CHANGED", "NATIVE_PROVENANCE_MISSING"],
 } as const;
 export type StagehandHostGuardFailure = { [K in keyof typeof stagehandHostGuardReasons]: { stage: K; reason: typeof stagehandHostGuardReasons[K][number] } &
   (K extends "SOURCE_DOM" ? { nativeFrameHasFragment?: boolean; domHasFragment?: boolean } : object) }[keyof typeof stagehandHostGuardReasons];

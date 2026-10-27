@@ -4,9 +4,14 @@ import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-b
 import { accessExecutionInputSchema, isSafeBrowserAssetUrl, isSafeRecipeUrl, type AccessExecutionInput, type AccessExecutionResult } from "./recipe";
 import { requestFamilyForUrl } from "./request-family";
 import { chronogolfAvailabilityPageSchema, chronogolfMetadataSchema, parseChronogolfPagination, parseChronogolfProfile,
-  parseChronogolfSource, verifyChronogolfReadClients, chronogolfRecipeBookingUrl, type ChronogolfIdentitySource, type ChronogolfMetadata } from "./chronogolf-source";
+  parseChronogolfSource, chronogolfOfficialHostMismatch, verifyChronogolfReadClients, chronogolfRecipeBookingUrl, type ChronogolfIdentitySource, type ChronogolfMetadata } from "./chronogolf-source";
+
+import type { OfficialIdentityPage } from "./teeitup-official-identity";
+import type { NativeOfficialPageReader } from "./native-official-page-reader";
+import { freshNativeCanonicalRootDocument } from "./native-official-page-attestation";
 
 type Deps = { fetch?: typeof fetch; now?: () => Date; deadlineAt?: Date;
+  localCapabilities?: readonly "LOCAL_CHROME"[]; officialIdentityPage?: OfficialIdentityPage; readNativeOfficialPage?: NativeOfficialPageReader;
   requestLease?: <T>(family: string, work: () => Promise<T>) => Promise<{ acquired: true; value: T } | { acquired: false }> };
 const MAX_PAGES = 10, MAX_ROWS = 500, MAX_RESPONSE_BYTES = 2_000_000, MAX_TOTAL_BYTES = 16_000_000;
 function fail(code: string): never { throw new Error(code); }
@@ -63,7 +68,32 @@ function createReader(source: ChronogolfIdentitySource, deps: Deps) {
       const document = await read(url, "html", true);
       if (!document.text && document.url !== url) { if (hops === 2) fail("ADAPTER_PROFILE_REDIRECT_INVALID"); url = document.url; continue; }
       if (!document.text) fail("ADAPTER_PROFILE_REDIRECT_INVALID");
-      const metadata = parseChronogolfProfile(document.text, url, source), bodies: Record<string, string> = {};
+      let metadata: ChronogolfMetadata;
+      try { metadata = parseChronogolfProfile(document.text, url, source); }
+      catch (error) {
+        if (!chronogolfOfficialHostMismatch(error)) throw error;
+        if (!deps.localCapabilities?.includes("LOCAL_CHROME")) fail("LOCAL_CHROME_REQUIRED");
+        signal.throwIfAborted(); if (clock().getTime() >= deadline) fail("DEADLINE_EXCEEDED");
+        let page = deps.officialIdentityPage;
+        if (!page || !freshNativeCanonicalRootDocument(page, source.officialUrl)) {
+          const factory: NativeOfficialPageReader = deps.readNativeOfficialPage ?? (async (identity, pageUrl, end) => {
+            const loaded = await import("./native-official-page-reader");
+            const native = typeof loaded.readNativeOfficialIdentityPage === "function" ? loaded :
+              (loaded as unknown as { default: typeof loaded }).default;
+            const requestLease: typeof runWithProviderRequestLease | undefined = deps.requestLease ? async (family, work) => {
+              const reply = await deps.requestLease!(family, work);
+              return reply.acquired ? { acquired: true, value: await reply.value } : { acquired: false };
+            } : undefined;
+            return native.readNativeOfficialIdentityPage(identity, pageUrl, end, { requestLease });
+          });
+          // No provider data lease is held while this separately owned native
+          // reader re-earns the ordinary canonical root and its visible edge.
+          page = await factory(source, source.officialUrl, new Date(deadline));
+        }
+        signal.throwIfAborted(); if (clock().getTime() >= deadline) fail("DEADLINE_EXCEEDED");
+        metadata = parseChronogolfProfile(document.text, url, source, page);
+      }
+      const bodies: Record<string, string> = {};
       for (const client of metadata.clients) { allowed.add(client.url); bodies[client.url] = (await read(client.url, "script")).text; }
       verifyChronogolfReadClients(metadata, bodies);
       return metadata;

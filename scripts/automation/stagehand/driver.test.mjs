@@ -1,4 +1,22 @@
 import test from 'node:test';
+
+for(const mode of ['valid','label-only','missing','changed-current'])test('placeholder JS driver requires completed private native source: '+mode,async()=>{
+ const initial='https://official.example/',destination='https://provider.example/services';let current=initial;const order=[];
+  const placeholderText=mode==='label-only'?'':'Book Bay',placeholderLabel=mode==='label-only'?'Book Bay':'';
+  const prepared={kind:'NATIVE_VISIBLE_DOM',pageUrl:initial,observedAt:new Date().toISOString(),documentHash:'a'.repeat(64),links:[{href:initial+'#',visible:true,text:placeholderText,label:placeholderLabel}]};
+ const completed={kind:'NATIVE_GESTURE_SOURCE_OPEN',pageUrl:initial,href:initial+'#',observedAt:prepared.observedAt,documentHash:prepared.documentHash,targetUrl:destination,finalUrl:destination,finalStatus:200,completedAt:new Date().toISOString(),finalDocumentHash:'b'.repeat(64),redirects:[]};
+   const page={pageId:'owned',url:async()=>current,evaluate:async()=>({tag:'A',visible:true,inForm:false,text:placeholderText,label:placeholderLabel,href:initial+'#',formAction:'',rowText:'',navigation:{pageUrl:initial,rawHref:'#',captionComplete:true,inlineHandler:false,download:false,role:'',target:'',ariaDisabled:false}}),
+   locator:selector=>{assert.equal(selector,'a');return{click:async options=>{assert.ok(options.timeout>0&&options.timeout<=4000);order.push('DIRECT_CLICK');current=destination;}};}};
+ const browser={context:{pages:async()=>[page]},close:async()=>{}};
+ const owned={kind:'OWNED_GUARDED_STAGEHAND_CONTEXT',cdpUrl:'http://127.0.0.1:12345',targetId:'owned',assertGuardedTargets:async()=>true,prepareNavigation:async()=>{},
+   beforeAction:async()=>{order.push('BEFORE');return prepared;},
+  observeSourceReadiness:async()=>{order.push('CURRENT_200');return{readyState:'complete',bodyPresent:true,mainDocumentCurrent:true,mainDocumentComplete:true,mainReadPending:false,pendingReads:0,mainDocumentStatus:200};},
+  completeGestureNavigation:async()=>{order.push('COMPLETED');if(mode==='changed-current')current=destination+'/changed';return mode==='missing'?null:completed;},close:async()=>({browserClosed:true,providerRequestsDrained:true})};
+ const session=await openStagehandSession({deadline:Date.now()+5000,modelDisabled:true,sourceRoutingOnly:true,ownedBrowser:owned,onNativeSourceWitness:()=>order.push('PREPARED_WITNESS')},
+   {loadRuntime:async()=>({localBrowser:{connect:async()=>browser},Stagehand:{create:async()=>({act:async()=>{throw Error('SECOND_ACTION_MODEL_CALL');},close:async()=>{}})}})});
+ try{const result=session.act({method:'click',selector:'a',arguments:[]});if(mode==='valid'||mode==='label-only'){assert.deepEqual((await result).nativeGestureNavigation,completed);}else await assert.rejects(result,/STAGEHAND_SOURCE_OUTPUT_INVALID/u);
+  assert.deepEqual(order,['BEFORE','PREPARED_WITNESS','DIRECT_CLICK','CURRENT_200','COMPLETED']);assert.equal(session.disabledModelCalls,0);}finally{await session.close();}
+});
 import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
 import { prepareReadOnlyAction, readNativeActionTarget, assertNativeSelectReadback, isPublicFilterSelect, assertPublicUrl, settleNativeLinkNavigation, loadStagehandRuntime, validateOwnedBrowserConnection, openStagehandSession } from './driver.mjs';
@@ -245,7 +263,8 @@ test('serialized native anchor collector derives document and navigation safety 
  class Anchor extends Element {}
  const link=new Anchor({href:'/public-entry'});link.href='https://native.example/public-entry';
  const collect=()=>runInNewContext(`(${readNativeActionTarget.toString()})('a')`,{document:{querySelector:()=>link},location:{href:'https://native.example/'},Element,HTMLAnchorElement:Anchor,HTMLSelectElement:class{},HTMLInputElement:class{},HTMLOptGroupElement:class{},getComputedStyle:()=>({display:'block',visibility:'visible',opacity:'1'})});
- const got=collect();assert.equal(got.navigation.pageUrl,'https://native.example/');assert.equal(got.navigation.rawHref,'/public-entry');assert.equal(got.navigation.captionComplete,true);assert.equal(got.navigation.inlineHandler,false);assert.equal(got.navigation.download,false);assert.equal(got.navigation.ariaDisabled,false);
+  const got=collect();assert.equal(got.navigation.pageUrl,'https://native.example/');assert.equal(got.navigation.rawHref,'/public-entry');assert.equal(got.navigation.target,'');assert.equal(got.navigation.captionComplete,true);assert.equal(got.navigation.inlineHandler,false);assert.equal(got.navigation.download,false);assert.equal(got.navigation.ariaDisabled,false);
+  link.attrs.target='_blank';assert.equal(collect().navigation.target,'_blank');delete link.attrs.target;
  link.attrs.onclick='submitReservation()';assert.equal(collect().navigation.inlineHandler,true);delete link.attrs.onclick;
  link.attrs.download='';assert.equal(collect().navigation.download,true);delete link.attrs.download;
  link.textContent='Reserve Your Bay'+' '.repeat(161);assert.equal(collect().navigation.captionComplete,false);
@@ -308,4 +327,36 @@ test('exact driver retains inner wrapped model failure only for the failing oper
  assert.deepEqual(session.nativeRouterFailure,nativeFailure);const nativeCopy=session.nativeRouterFailure;nativeCopy.code='UNKNOWN';assert.equal(session.nativeRouterFailure.code,'NATIVE_REDIRECT_RESPONSE_TIMEOUT');
  assert.deepEqual(session.hostGuardFailure,hostFailure);const hostCopy=session.hostGuardFailure;hostCopy.reason='PRIVATE';assert.equal(session.hostGuardFailure.reason,'DOM_URL_CHANGED');
  assert.deepEqual(cleanupOrder,['snapshot','model','SDK','host']);
+});
+
+for(const mode of ['text','form','hidden','handler'])test('placeholder click rejects a target changed after the private witness: '+mode,async()=>{
+ const root='https://official.example/';let reads=0,directClicks=0,sdkCalls=0;
+ const initial={tag:'A',visible:true,inForm:false,text:'Book Bay',label:'',href:root+'#',formAction:'',rowText:'',navigation:{pageUrl:root,rawHref:'#',captionComplete:true,inlineHandler:false,download:false,role:'',target:'',ariaDisabled:false}};
+ const changed={...initial,...(mode==='text'?{text:'Book Other Bay'}:mode==='form'?{inForm:true}:mode==='hidden'?{visible:false}:{navigation:{inlineHandler:true}})};
+ const page={pageId:'owned',url:async()=>root,evaluate:async()=>++reads===1?initial:changed,
+  locator:()=>({click:async()=>{directClicks++;}})};
+ const owned={kind:'OWNED_GUARDED_STAGEHAND_CONTEXT',cdpUrl:'http://127.0.0.1:12345',targetId:'owned',assertGuardedTargets:async()=>true,
+  prepareNavigation:async()=>{},beforeAction:async()=>({kind:'NATIVE_VISIBLE_DOM',pageUrl:root,observedAt:new Date().toISOString(),
+    documentHash:'a'.repeat(64),links:[{href:root+'#',visible:true,text:'Book Bay',label:''}]}),close:async()=>({browserClosed:true})};
+ const session=await openStagehandSession({deadline:Date.now()+5000,modelDisabled:true,sourceRoutingOnly:true,ownedBrowser:owned,
+  onNativeSourceWitness:()=>{}},{loadRuntime:async()=>({localBrowser:{connect:async()=>({context:{pages:async()=>[page]},close:async()=>{}})},
+  Stagehand:{create:async()=>({act:async()=>{sdkCalls++;throw Error('SECOND_ACTION_MODEL_CALL');},close:async()=>{}})}})});
+ try{await assert.rejects(session.act({method:'click',selector:'a',arguments:[]}),/ACTION_TARGET_REJECTED/);
+  assert.equal(reads,2);assert.equal(directClicks,0);assert.equal(sdkCalls,0);assert.equal(session.disabledModelCalls,0);}finally{await session.close();}
+});
+
+for(const mode of ['button-role','popup-target','inline-handler','download','in-form','blank-caption'])test('unsupported placeholder rejects before native grant: '+mode,async()=>{
+ const root='https://official.example/';let nativeCalls=0,directClicks=0,sdkCalls=0;
+ const base={tag:'A',visible:true,inForm:mode==='in-form',text:mode==='blank-caption'?'':'Book Bay I',label:'',href:root+'#',formAction:'',rowText:'',
+  navigation:{pageUrl:root,rawHref:'#',captionComplete:true,inlineHandler:mode==='inline-handler',download:mode==='download',
+   role:mode==='button-role'?'button':'',target:mode==='popup-target'?'_blank':'',ariaDisabled:false}};
+ const page={pageId:'owned',url:async()=>root,evaluate:async()=>base,locator:()=>({click:async()=>{directClicks++;}})};
+ const owned={kind:'OWNED_GUARDED_STAGEHAND_CONTEXT',cdpUrl:'http://127.0.0.1:12345',targetId:'owned',assertGuardedTargets:async()=>true,
+  prepareNavigation:async()=>{},beforeAction:async()=>{nativeCalls++;throw Error('NATIVE_GRANT_MUST_NOT_RUN');},close:async()=>({browserClosed:true})};
+ const session=await openStagehandSession({deadline:Date.now()+5000,modelDisabled:true,sourceRoutingOnly:true,ownedBrowser:owned,
+  onNativeSourceWitness:()=>{}},{loadRuntime:async()=>({localBrowser:{connect:async()=>({context:{pages:async()=>[page]},close:async()=>{}})},
+  Stagehand:{create:async()=>({act:async()=>{sdkCalls++;throw Error('SECOND_ACTION_MODEL_CALL');},close:async()=>{}})}})});
+ try{await assert.rejects(session.act({method:'click',selector:'a',arguments:[]}),error=>error.message==='ACTION_TARGET_REJECTED'&&
+   error.stagehandGuardReason==='UNSUPPORTED_PLACEHOLDER_ACTION');
+  assert.equal(nativeCalls,0);assert.equal(directClicks,0);assert.equal(sdkCalls,0);assert.equal(session.disabledModelCalls,0);}finally{await session.close();}
 });

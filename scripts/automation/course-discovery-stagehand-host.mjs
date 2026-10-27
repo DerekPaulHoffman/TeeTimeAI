@@ -30,7 +30,8 @@ export async function createStagehandGuardedBrowserHost({ cwd, initialUrl, timeZ
     return {
       ...attachment,
       assertGuardedTargets: async ids => (await channel.request({ action: "assert", ids })).guarded === true,
-      beforeAction: async (targetId, href) => { const value = await channel.request({ action: "before", targetId, ...(href === undefined ? {} : { href }) }); if (value.ready !== true) throw discoveryError("STAGEHAND_NATIVE_HOST_INVALID"); return value.witness; },
+      completeGestureNavigation: targetId => channel.request({ action: "gesture_complete", targetId }),
+      beforeAction: async (targetId, href, placeholder) => { const value = await channel.request({ action: "before", targetId, ...(href === undefined ? {} : { href }), ...(placeholder === undefined ? {} : { placeholder }) }); if (value.ready !== true) throw discoveryError("STAGEHAND_NATIVE_HOST_INVALID"); return value.witness; },
       observeFrameSources: targetId => channel.request({ action: "frames", targetId }),
       observeUniqueSource: targetId => channel.request({ action: "unique_source", targetId }),
       observeRootPublicWidget: targetId => channel.request({ action: "root_widget", targetId }),

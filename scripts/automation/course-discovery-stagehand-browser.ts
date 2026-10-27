@@ -7,7 +7,8 @@ import { isSafeRecipeUrl } from "../../src/lib/course-discovery/recipe";
 const command = z.discriminatedUnion("action", [
   z.object({ id: z.number().int().positive(), action: z.literal("start") }).strict(),
   z.object({ id: z.number().int().positive(), action: z.literal("assert"), ids: z.array(z.string().regex(/^[A-Za-z0-9_-]{1,200}$/u)).min(1).max(8) }).strict(),
-  z.object({ id: z.number().int().positive(), action: z.literal("before"), targetId: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/u), href: z.string().max(2048).optional() }).strict(),
+  z.object({ id: z.number().int().positive(), action: z.literal("before"), targetId: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/u), href: z.string().max(2048).optional(), placeholder: z.object({ text: z.string().max(160), label: z.string().max(160) }).strict().refine(value => Boolean(value.text.trim() || value.label.trim())).optional() }).strict(),
+  z.object({ id: z.number().int().positive(), action: z.literal("gesture_complete"), targetId: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/u) }).strict(),
   z.object({ id: z.number().int().positive(), action: z.literal("frames"), targetId: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/u) }).strict(),
   z.object({ id: z.number().int().positive(), action: z.literal("unique_source"), targetId: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/u) }).strict(),
   z.object({ id: z.number().int().positive(), action: z.literal("root_widget"), targetId: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/u) }).strict(),
@@ -41,7 +42,8 @@ async function main() {
         const value = command.parse(JSON.parse(line)); id = value.id;
         const result = value.action === "start" ? { kind: host.kind, cdpUrl: host.cdpUrl, targetId: host.targetId }
           : value.action === "assert" ? { guarded: await host.assertGuardedTargets(value.ids) }
-          : value.action === "before" ? { ready: true, witness: await host.beforeAction(value.targetId, value.href) }
+          : value.action === "before" ? { ready: true, witness: await host.beforeAction(value.targetId, value.href, value.placeholder) }
+          : value.action === "gesture_complete" ? await host.completeGestureNavigation(value.targetId)
           : value.action === "frames" ? await host.observeFrameSources(value.targetId)
           : value.action === "unique_source" ? await host.observeUniqueSource(value.targetId)
           : value.action === "root_widget" ? await host.observeRootPublicWidget(value.targetId)

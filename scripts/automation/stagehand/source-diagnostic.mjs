@@ -4,7 +4,7 @@ import { publicEvidenceUrl } from './public-evidence.mjs';
 import { discoveryTurnErrorCategories } from '../course-discovery-diagnostics.mjs';
 
 export const SOURCE_DIAGNOSTIC_MAX_BYTES = 4096;
-export const sourceGuardReasons=['TARGET_MISSING','HIDDEN','CREDENTIAL_CONTROL','PRIVATE_FIELD','TRANSACTION_TEXT','SLOT_TIME','REPEATED_UNCHANGED_NAVIGATION'];
+export const sourceGuardReasons=['TARGET_MISSING','HIDDEN','CREDENTIAL_CONTROL','PRIVATE_FIELD','TRANSACTION_TEXT','SLOT_TIME','REPEATED_UNCHANGED_NAVIGATION','UNSUPPORTED_PLACEHOLDER_ACTION'];
 export const sourceGuardTerms=['CHECKOUT','PAYMENT','PAY_NOW','PURCHASE','RESERVE','HOLD','SIGN_IN','LOG_IN','LOGIN','CREATE_ACCOUNT','REGISTER','VERIFICATION','CAPTCHA','SEND_EMAIL','CONTACT_US'];
 export const sourceGuardFields=['TEXT','LABEL','HREF','FORM_ACTION','COMBINED'];
 export const sourceFrameWitnessFailures=['SHAPE','KIND','PAGE_BINDING','PAGE_URL','PAGE_NOT_VISITED','TIMESTAMP','STALE','DEADLINE','DOCUMENT_HASH','FRAME_ARRAY','DUPLICATE_FRAME','FRAME_SHAPE','FRAME_HIDDEN','FRAME_URL','FRAME_SELF','SELECTION'];
@@ -147,8 +147,9 @@ export function projectNativeRouterFailure(raw){
 export function safeNativeRouterFailure(raw){const parsed=nativeRouterFailureSchema.safeParse(raw);return parsed.success?parsed.data:undefined;}
 export const hostGuardReasons={CHECK:['ABORTED','CLOSED','TERMINAL'],GUARDED_TARGETS:['IDS_INVALID','TARGET_MISSING','TARGET_NOT_ATTESTED'],
  SOURCE_DOM:['VALUE_INVALID','JSON_INVALID','FRAME_MISSING','LOADER_MISSING','FRAME_CHANGED','LOADER_CHANGED','NATIVE_URL_CHANGED','DOM_URL_CHANGED'],
- BEFORE_ACTION:['HREF_SHAPE','LINK_INVENTORY_MISSING','HREF_NOT_OBSERVED','HREF_URL_POLICY','HREF_TRANSACTION','OBSERVED_URL_LIMIT']};
-const hostGuardFailureSchema=z.object({stage:z.enum(['CHECK','GUARDED_TARGETS','SOURCE_DOM','BEFORE_ACTION']),reason:z.string(),
+ BEFORE_ACTION:['HREF_SHAPE','LINK_INVENTORY_MISSING','HREF_NOT_OBSERVED','HREF_URL_POLICY','HREF_TRANSACTION','OBSERVED_URL_LIMIT'],
+ GESTURE:['DESCRIPTOR_INVALID','NOT_PLACEHOLDER','DOCUMENT_REQUEST_MISSING','SOURCE_NOT_SETTLED','VISIBLE_LINK_MISSING','INTENT_MISSING','INTENT_EXPIRED','INTENT_USED','SOURCE_CHANGED','NATIVE_PROVENANCE_MISSING']};
+const hostGuardFailureSchema=z.object({stage:z.enum(['CHECK','GUARDED_TARGETS','SOURCE_DOM','BEFORE_ACTION','GESTURE']),reason:z.string(),
  nativeFrameHasFragment:z.boolean().optional(),domHasFragment:z.boolean().optional()}).strict().refine(value=>hostGuardReasons[value.stage].includes(value.reason)&&
  (value.stage==='SOURCE_DOM'||value.nativeFrameHasFragment===undefined&&value.domHasFragment===undefined));
 export function projectHostGuardFailure(raw){const parsed=hostGuardFailureSchema.safeParse(raw);return parsed.success?parsed.data:undefined;}

@@ -14,6 +14,54 @@ vi.mock("ws", () => ({ default: FakeSocket }));
 const endpoint = "ws://127.0.0.1:12345/devtools/browser/" + "a".repeat(32);
 afterEach(() => vi.unstubAllGlobals());
 describe("owned CDP first-failure diagnostics", () => {
+  it("keeps an exact invalidated image-abort RPC recoverable only by its owning session and request", async () => {
+    vi.stubGlobal("WebSocket", FakeSocket);
+    const cdp = await connectOwnedSourceCdp(endpoint, new AbortController().signal);
+    const child = cdp.session("PRIVATE_CHILD"), other = cdp.session("OTHER_CHILD");
+    const failed = child.send("Fetch.failRequest", { requestId: "PRIVATE_IMAGE", errorReason: "BlockedByClient" });
+    FakeSocket.last.receive({ id: 1, error: { code: -32602, message: "Invalid interception id PRIVATE_IMAGE" } });
+    let commandError: unknown; try { await failed; } catch (error) { commandError = error; }
+    expect(commandError).toBeInstanceOf(Error);
+    expect(cdp.failureDiagnostic()).toEqual({ layer: "RPC", method: "Fetch.failRequest", rpcCode: -32602,
+      lifecycle: "UNKNOWN", pendingRequests: 0 });
+    expect(other.recoverTerminalExcludedImageAbort(commandError, "PRIVATE_IMAGE")).toBe(false);
+    expect(child.recoverTerminalExcludedImageAbort(commandError, "WRONG_IMAGE")).toBe(false);
+    expect(child.recoverTerminalExcludedImageAbort(Error("OWNED_STAGEHAND_CDP_UNAVAILABLE"), "PRIVATE_IMAGE")).toBe(false);
+    expect(child.recoverTerminalExcludedImageAbort(commandError, "PRIVATE_IMAGE")).toBe(true);
+    expect(child.recoverTerminalExcludedImageAbort(commandError, "PRIVATE_IMAGE")).toBe(false);
+    expect(cdp.failureDiagnostic()).toBeUndefined();
+    const later = child.send("Page.enable");
+    FakeSocket.last.receive({ id: 2, error: { code: -32001, message: "Session with given id not found PRIVATE_LATER" } });
+    await expect(later).rejects.toThrow("OWNED_STAGEHAND_CDP_UNAVAILABLE");
+    expect(cdp.failureDiagnostic()).toEqual({ layer: "RPC", method: "Page.enable", rpcCode: -32001,
+      lifecycle: "SESSION_NOT_FOUND", pendingRequests: 0 });
+    expect(JSON.stringify(cdp.failureDiagnostic())).not.toMatch(/PRIVATE|IMAGE|https:|requestId/u);
+    cdp.close();
+  });
+  it("never recovers a different RPC code, method, or a candidate after another hard failure", async () => {
+    vi.stubGlobal("WebSocket", FakeSocket);
+    const cdp = await connectOwnedSourceCdp(endpoint, new AbortController().signal);
+    const child = cdp.session("PRIVATE_CHILD");
+    const wrongCode = child.send("Fetch.failRequest", { requestId: "IMAGE_A" });
+    FakeSocket.last.receive({ id: 1, error: { code: -32601, message: "PRIVATE" } });
+    let wrongError: unknown; try { await wrongCode; } catch (error) { wrongError = error; }
+    expect(child.recoverTerminalExcludedImageAbort(wrongError, "IMAGE_A")).toBe(false);
+    const later = child.send("Fetch.failRequest", { requestId: "IMAGE_B" });
+    FakeSocket.last.receive({ id: 2, error: { code: -32602, message: "PRIVATE" } });
+    let laterError: unknown; try { await later; } catch (error) { laterError = error; }
+    expect(child.recoverTerminalExcludedImageAbort(laterError, "IMAGE_B")).toBe(false);
+    expect(cdp.failureDiagnostic()).toEqual({ layer: "RPC", method: "Fetch.failRequest", rpcCode: -32601,
+      lifecycle: "UNKNOWN", pendingRequests: 0 });
+    cdp.close();
+    const another = await connectOwnedSourceCdp(endpoint, new AbortController().signal);
+    const wrongMethod = another.root.send("Page.enable", { requestId: "IMAGE_C" });
+    FakeSocket.last.receive({ id: 1, error: { code: -32602, message: "PRIVATE" } });
+    let methodError: unknown; try { await wrongMethod; } catch (error) { methodError = error; }
+    expect(another.root.recoverTerminalExcludedImageAbort(methodError, "IMAGE_C")).toBe(false);
+    expect(another.failureDiagnostic()).toEqual({ layer: "RPC", method: "Page.enable", rpcCode: -32602,
+      lifecycle: "UNKNOWN", pendingRequests: 0 });
+    another.close();
+  });
   it("uses the pinned module with compression/redirects disabled and the unchanged 32MB payload cap", async () => {
     vi.stubGlobal("WebSocket", class { constructor() { throw Error("GLOBAL_WEBSOCKET_MUST_NOT_BE_USED"); } });
     const cdp = await connectOwnedSourceCdp(endpoint, new AbortController().signal);

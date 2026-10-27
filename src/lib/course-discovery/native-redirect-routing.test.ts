@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import { chromium, type Page, type Route } from "@playwright/test";
 import { describe, expect, it, vi } from "vitest";
 import { authorizePublicClientReadHeaders, installNativeRedirectRouting, isCurrentPublicClientReadHeaders,
-  publicClientReadHeaderProofFailure, nativeSourceLoadingFailedCorsErrors, nativePublicClientPreflightMethod, isNativeReadSupersededFailure, isNativeReadTerminalFailure, nativeMindbodyBootstrapSource, attestedNativeDocumentRedirects, type NativeReadRoute, type NativeRequestDiagnostic, type NativeUncorrelatedPost } from "./native-redirect-routing";
+  publicClientReadHeaderProofFailure, nativeSourceLoadingFailedCorsErrors, nativePublicClientPreflightMethod, isNativeReadSupersededFailure, isNativeReadTerminalFailure, nativeMindbodyBootstrapSource, nativeGestureNavigationSource, attestedNativeDocumentRedirects, type NativeGestureIntent, type NativeReadRoute, type NativeRequestDiagnostic, type NativeUncorrelatedPost } from "./native-redirect-routing";
 import { createPublicBookingParentScope } from "./public-booking-parent";
 import { continueNativeBrowserRead, isObservedNativeRedirect, isObservedNativeRedirectTarget, nativeReadPreflightMethod } from "./native-public-browser";
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
@@ -18,7 +18,7 @@ import { isAnonymousBrowserReadPost } from "@/lib/automation/simulator-interacti
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; }
 async function installed(maxRequests?: number, signal?: AbortSignal, afterRoute?: (route: NativeReadRoute) => Promise<void>, responseProfile?: PublicBrowserResponseProfile,
   onCommandFailure?: (diagnostic: NativeRequestDiagnostic) => void, controllerGetIntent?: (sourceUrl: string, targetUrl: string) => boolean,
-  denyUncorrelatedPost?: (request: NativeUncorrelatedPost) => boolean) {
+  denyUncorrelatedPost?: (request: NativeUncorrelatedPost) => boolean, controllerScriptGetIntent?: (sourceUrl: string, targetUrl: string) => NativeGestureIntent | undefined) {
   const events = new Map<string, (event: unknown) => void>(), routes: NativeReadRoute[] = [];
   const close = vi.fn(async () => {}), detach = vi.fn(async () => {}), failures: string[] = [], subframes: object[] = [], rejections: NativeRequestDiagnostic[] = [];
   const main = { page: () => page };
@@ -27,7 +27,7 @@ async function installed(maxRequests?: number, signal?: AbortSignal, afterRoute?
       : name === "Fetch.getResponseBody" ? { body: `body-${value?.requestId}`, base64Encoded: false } : {}), detach };
   const page = { context: () => ({ newCDPSession: async () => cdp }), mainFrame: () => main, close } as unknown as Page;
   const handler = vi.fn(async (route: NativeReadRoute) => { routes.push(route); await afterRoute?.(route); });
-  const guard = await installNativeRedirectRouting(page, handler, { timeoutMs: 100, maxRequests, signal, responseProfile, onCommandFailure, controllerGetIntent, denyUncorrelatedPost,
+  const guard = await installNativeRedirectRouting(page, handler, { timeoutMs: 100, maxRequests, signal, responseProfile, onCommandFailure, controllerGetIntent, controllerScriptGetIntent, denyUncorrelatedPost,
     onFailure: code => failures.push(code), onSubframeBlocked: request => subframes.push(request), onRequestRejected: request => rejections.push(request) });
   const request = (id: string, values: object = {}) => events.get("Fetch.requestPaused")!({ requestId: id, networkId: `network-${id}`,
     frameId: "main", resourceType: "XHR", request: { url: "https://example.org/data", method: "GET", headers: {} }, ...values });
@@ -73,8 +73,8 @@ describe("closed native initiating-failure diagnostics", () => {
 
 describe("native child-asset denial", () => {
   const root = "https://example.org/", asset = "https://assets.example.org/public.js";
-  async function prepared(profile: PublicBrowserResponseProfile | null = "SOURCE_ROUTING", maxRequests?: number) {
-    const t = await installed(maxRequests, undefined, undefined, profile ?? undefined);
+  async function prepared(profile: PublicBrowserResponseProfile | null = "SOURCE_ROUTING", maxRequests?: number, signal?: AbortSignal) {
+    const t = await installed(maxRequests, signal, undefined, profile ?? undefined);
     await t.guard.beginDocumentNavigation(t.main as never);
     t.events.get("Network.requestWillBeSent")!({ requestId: "network-document", frameId: "main", loaderId: "root-loader", type: "Document", request: { url: root, method: "GET" } });
     t.request("document", { resourceType: "Document", request: { url: root, method: "GET", headers: {} } });
@@ -94,6 +94,56 @@ describe("native child-asset denial", () => {
   }
   const proof = (t: Awaited<ReturnType<typeof prepared>>) => t.guard.isCurrentCompletedDocumentRead(t.routes[0].request(), t.main as never,
     { frameId: "main", loaderId: "root-loader", url: root });
+  it.each(["exact terminal", "missing terminal", "late terminal", "wrong network", "finished", "wrong kind", "not canceled", "unbranded RPC", "wrong loader", "wrong frame", "other profile"] as const)(
+    "drains only an exact source-profile excluded image whose failed abort has independent terminal proof: %s", async mode => {
+      const t = await prepared(mode === "other profile" ? null : "SOURCE_ROUTING"), url = "https://example.org/photo.jpg";
+      const abortError = Error("OWNED_STAGEHAND_CDP_UNAVAILABLE"), send = t.cdp.send.getMockImplementation()!;
+      const recover = vi.fn((error: unknown, id: string) => mode !== "unbranded RPC" && error === abortError && id === "decoration");
+      Object.assign(t.cdp, { recoverTerminalExcludedImageAbort: recover });
+      t.cdp.send.mockImplementation((name, value) => name === "Fetch.failRequest" && value?.requestId === "decoration"
+        ? Promise.reject(abortError) : send(name, value));
+      try {
+        t.events.get("Network.requestWillBeSent")!({ requestId: "network-decoration", frameId: mode === "wrong frame" ? "child" : "main",
+          loaderId: mode === "wrong loader" ? "other-loader" : "root-loader", type: "Image", request: { url, method: "GET" } });
+        t.request("decoration", { resourceType: "Image", networkId: "network-decoration", request: { url, method: "GET", headers: {} } });
+        await vi.waitFor(() => expect(t.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.failRequest" && value?.requestId === "decoration")).toBe(true));
+        if (mode === "finished") t.events.get("Network.loadingFinished")!({ requestId: "network-decoration" });
+        else if (mode !== "missing terminal" && mode !== "late terminal") t.events.get("Network.loadingFailed")!({ requestId: mode === "wrong network" ? "network-other" : "network-decoration",
+          type: mode === "wrong kind" ? "Script" : "Image", canceled: mode !== "not canceled", errorText: "net::ERR_ABORTED" });
+        await vi.waitFor(() => expect(t.guard.pendingReads).toBe(0), { timeout: 1000 });
+        if (mode === "late terminal") t.events.get("Network.loadingFailed")!({ requestId: "network-decoration", type: "Image", canceled: true, errorText: "net::ERR_ABORTED" });
+        if (mode === "exact terminal") {
+          expect(recover).toHaveBeenCalledOnce(); expect(t.close).not.toHaveBeenCalled(); expect(t.guard.firstFatal).toBeUndefined();
+          expect(t.handler).toHaveBeenCalledOnce(); expect(proof(t)).toBe(true);
+        } else {
+          expect(t.close).toHaveBeenCalledOnce(); expect(t.guard.firstFatal).toBeDefined();
+          expect(t.handler).toHaveBeenCalledOnce();
+        }
+        expect(t.cdp.send.mock.calls.filter(([name, value]) => name === "Fetch.failRequest" && value?.requestId === "decoration")).toHaveLength(1);
+        expect(t.cdp.send.mock.calls.filter(([name, value]) => ["Fetch.continueRequest", "Fetch.continueResponse", "Fetch.getResponseBody"].includes(name) &&
+          value?.requestId === "decoration")).toHaveLength(0);
+      } finally { await t.guard.close(); }
+    });
+  it("stops the excluded image terminal wait when the source aborts", async () => {
+    const cancellation = new AbortController(), t = await prepared("SOURCE_ROUTING", undefined, cancellation.signal);
+    const url = "https://example.org/photo.jpg", abortError = Error("OWNED_STAGEHAND_CDP_UNAVAILABLE");
+    const send = t.cdp.send.getMockImplementation()!, recover = vi.fn(() => true);
+    Object.assign(t.cdp, { recoverTerminalExcludedImageAbort: recover });
+    t.cdp.send.mockImplementation((name, value) => name === "Fetch.failRequest" && value?.requestId === "decoration"
+      ? Promise.reject(abortError) : send(name, value));
+    try {
+      t.events.get("Network.requestWillBeSent")!({ requestId: "network-decoration", frameId: "main", loaderId: "root-loader",
+        type: "Image", request: { url, method: "GET" } });
+      t.request("decoration", { resourceType: "Image", networkId: "network-decoration", request: { url, method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(t.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.failRequest" && value?.requestId === "decoration")).toBe(true));
+      cancellation.abort();
+      await vi.waitFor(() => expect(t.guard.pendingReads).toBe(0), { timeout: 500 });
+      expect(t.close).toHaveBeenCalledOnce(); expect(recover).not.toHaveBeenCalled();
+      expect(t.guard.firstFatal?.code).toBe("NATIVE_REDIRECT_CANCELLED");
+      expect(t.cdp.send.mock.calls.some(([name, value]) => ["Fetch.continueRequest", "Fetch.continueResponse", "Fetch.getResponseBody"].includes(name) &&
+        value?.requestId === "decoration")).toBe(false);
+    } finally { await t.guard.close(); }
+  });
   it.each([["Script", "SOURCE_ROUTING"], ["Stylesheet", "SOURCE_ROUTING"], ["Script", null], ["Stylesheet", null]] as const)(
     "denies a root-labelled %s in profile %s from a positively owned child Network event without poisoning the main read", async (resourceType, profile) => {
     const t = await prepared(profile);
@@ -3552,4 +3602,131 @@ describe("native exact request and response ownership", () => {
     expect(() => test.guard.prepare({} as Parameters<typeof test.guard.prepare>[0])).toThrow("NATIVE_REDIRECT_FRAME_UNGUARDED");
     await test.guard.close();
   });
+});
+
+describe("private placeholder-click native gesture provenance", () => {
+  const source = "https://example.org/data", target = "https://booking.example.org/services";
+  async function prepare(callback?: (sourceUrl: string, targetUrl: string) => NativeGestureIntent | undefined) {
+    const t = await installed(undefined, undefined, async route => {
+      if (route.request().url() !== source && !nativeGestureNavigationSource(route.request())) await route.abort();
+    }, "SOURCE_ROUTING", undefined, undefined, undefined, callback);
+    await t.guard.beginDocumentNavigation(t.main as never);
+    t.events.get("Network.requestWillBeSent")!({ requestId: "network-document", frameId: "main", loaderId: "source-loader", type: "Document", request: { url: source, method: "GET" } });
+    t.request("document", { resourceType: "Document", request: { url: source, method: "GET", headers: {} } });
+    await t.routes[0].continue();
+    t.response("document", { resourceType: "Document", request: { url: source, method: "GET", headers: {} }, responseHeaders: [{ name: "Content-Type", value: "text/html" }] });
+    await t.routes[0].request().response();
+    t.events.get("Page.frameNavigated")!({ frame: { id: "main", loaderId: "source-loader", url: source } });
+    return t;
+  }
+  const pageIntent = (t: Awaited<ReturnType<typeof prepare>>, extra = {}) => t.events.get("Page.frameRequestedNavigation")!({
+    frameId: "main", reason: "scriptInitiated", disposition: "currentTab", url: target, ...extra });
+  const network = (t: Awaited<ReturnType<typeof prepare>>, extra = {}) => t.events.get("Network.requestWillBeSent")!({
+    requestId: "network-next", frameId: "main", loaderId: "next-loader", type: "Document", hasUserGesture: true, initiator: { type: "script" }, request: { url: target, method: "GET" }, ...extra });
+  const pause = (t: Awaited<ReturnType<typeof prepare>>, extra = {}) => t.request("next", {
+    resourceType: "Document", request: { url: target, method: "GET", headers: {} }, ...extra });
+  function proof(from = source) {
+    let used = false, alive = true;
+    const value: NativeGestureIntent = { sourceUrl: from, href: from + "#", text: "Book Bay 1", label: "", targetUrl: target,
+      observedAt: new Date().toISOString(), documentHash: "a".repeat(64),
+      active: () => alive, consume: () => { if (used || !alive) return false; used = true; return true; } };
+    return { value, consumed: () => used, retire: () => { alive = false; } };
+  }
+  it("binds a fresh gesture after an attested same-document history navigation", async () => {
+    const spa = "https://example.org/leagues", p = proof(spa), callback = vi.fn(() => p.value), t = await prepare(callback);
+    try {
+      t.events.get("Page.navigatedWithinDocument")!({ frameId: "main", url: spa });
+      expect(t.guard.isCurrentCompletedDocumentRead(t.routes[0].request(), t.main as never,
+        { frameId: "main", loaderId: "source-loader", url: spa })).toBe(true);
+      pageIntent(t); network(t); pause(t);
+      await vi.waitFor(() => expect(t.routes).toHaveLength(2));
+      expect(callback).toHaveBeenCalledExactlyOnceWith(spa, target);
+      expect(p.consumed()).toBe(true);
+      expect(nativeGestureNavigationSource(t.routes[1].request())).toBe(p.value);
+    } finally { await t.guard.close(); }
+  });
+  it("carries that same-document gesture only through its exact released HTTP redirect", async () => {
+    const spa = "https://example.org/leagues", final = "https://booking.example.org/final";
+    const p = proof(spa), t = await prepare(() => p.value);
+    try {
+      t.events.get("Page.navigatedWithinDocument")!({ frameId: "main", url: spa });
+      pageIntent(t); network(t); pause(t);
+      await vi.waitFor(() => expect(t.routes).toHaveLength(2));
+      const first = t.routes[1].request();
+      expect(nativeGestureNavigationSource(first)).toBe(p.value);
+      await t.routes[1].continue();
+      t.response("next", { resourceType: "Document", request: { url: target, method: "GET", headers: {} }, responseStatusCode: 302,
+        responseHeaders: [{ name: "Location", value: final }] });
+      await first.response();
+      t.events.get("Network.requestWillBeSent")!({ requestId: "network-next", frameId: "main", loaderId: "next-loader", type: "Document",
+        redirectResponse: { status: 302 }, request: { url: final, method: "GET" } });
+      t.request("redirected", { networkId: "network-next", redirectedRequestId: "next", resourceType: "Document",
+        request: { url: final, method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(t.routes).toHaveLength(3));
+      const child = t.routes[2].request();
+      expect(child.redirectedFrom()).toBe(first);
+      expect(nativeGestureNavigationSource(child)).toBe(p.value);
+      expect(isObservedNativeRedirect(child, new Set([target]))).toBe(true);
+      await t.routes[2].continue();
+      t.response("redirected", { resourceType: "Document", networkId: "network-next", request: { url: final, method: "GET", headers: {} },
+        responseHeaders: [{ name: "Content-Type", value: "text/html" }] });
+      await child.response();
+      t.events.get("Page.frameNavigated")!({ frame: { id: "main", loaderId: "next-loader", url: final } });
+      expect(t.guard.isCurrentCompletedDocumentRead(child, t.main as never, { frameId: "main", loaderId: "next-loader", url: final })).toBe(true);
+      expect(attestedNativeDocumentRedirects(child, new Set([target]))).toEqual([{ fromUrl: target, toUrl: final, status: 302, completed: true }]);
+    } finally { await t.guard.close(); }
+  });
+  it.each(["foreign frame", "wrong origin", "unsafe route", "revised source", "replacement document"])(
+    "does not grant a same-document gesture from %s", async mode => {
+      const spa = "https://example.org/leagues", p = proof(spa), callback = vi.fn(() => p.value), t = await prepare(callback);
+      try {
+        t.events.get("Page.navigatedWithinDocument")!({ frameId: mode === "foreign frame" ? "child" : "main",
+          url: mode === "wrong origin" ? "https://foreign.example/leagues" : mode === "unsafe route" ? "https://example.org/account" : spa });
+        if (mode === "revised source") t.events.get("Network.requestWillBeSent")!({ requestId: "network-document", frameId: "main",
+          loaderId: "source-loader", type: "Document", request: { url: source, method: "GET" } });
+        if (mode === "replacement document") t.events.get("Page.frameNavigated")!({ frame: { id: "main", loaderId: "replacement-loader", url: spa } });
+        pageIntent(t); network(t); pause(t);
+        await vi.waitFor(() => expect(t.routes.length > 1 || t.close.mock.calls.length > 0).toBe(true));
+        expect(t.routes.slice(1).every(route => nativeGestureNavigationSource(route.request()) === null)).toBe(true);
+        expect(p.consumed()).toBe(false);
+        expect(t.cdp.send.mock.calls.some(([name, params]) => name === "Fetch.continueRequest" && params?.requestId === "next")).toBe(false);
+      } finally { await t.guard.close(); }
+    });
+  it("binds actual Page then gesture Network then Fetch to one private request; copied and second use grant nothing", async () => {
+    const p = proof(), callback = vi.fn(() => p.value), t = await prepare(callback);
+    try {
+      pageIntent(t); network(t); pause(t);
+      await vi.waitFor(() => expect(t.routes).toHaveLength(2));
+      const request = t.routes[1].request();
+      expect(p.consumed()).toBe(true); expect(nativeGestureNavigationSource(request)).toBe(p.value);
+      expect(nativeGestureNavigationSource({ ...request })).toBeNull();
+      expect(callback).toHaveBeenCalledExactlyOnceWith(source, target);
+      await t.routes[1].continue();
+      t.response("next", { resourceType: "Document", request: { url: target, method: "GET", headers: {} }, responseHeaders: [{ name: "Content-Type", value: "text/html" }] });
+      await request.response(); t.events.get("Page.frameNavigated")!({ frame: { id: "main", loaderId: "next-loader", url: target } });
+      expect(t.guard.isCurrentCompletedDocumentRead(request, t.main as never, { frameId: "main", loaderId: "next-loader", url: target })).toBe(true);
+      p.retire(); expect(nativeGestureNavigationSource(request)).toBeNull(); expect(p.value.consume()).toBe(false);
+      expect(t.failures).toEqual([]);
+    } finally { await t.guard.close(); }
+  });
+  for (const mode of ["no action", "inactive", "consumed", "no gesture", "no initiator", "wrong source", "wrong target", "no Page event", "foreign Page", "new window", "foreign Network", "wrong Network URL", "same loader", "body", "source revision"]) {
+    it("grants no placeholder provenance for " + mode, async () => {
+      const p = proof();
+      if (mode === "inactive") p.retire();
+      if (mode === "consumed") p.value.consume();
+      const t = await prepare(mode === "no action" ? undefined : () => mode === "wrong source" ? { ...p.value, sourceUrl: source + "/other" }
+        : mode === "wrong target" ? { ...p.value, targetUrl: target + "/other" } : p.value);
+      try {
+        if (mode === "source revision") t.events.get("Network.requestWillBeSent")!({ requestId: "network-document", frameId: "main", loaderId: "source-loader", type: "Document", request: { url: source, method: "GET" } });
+        if (mode !== "no Page event") pageIntent(t, mode === "foreign Page" ? { frameId: "child" } : mode === "new window" ? { disposition: "newWindow" } : {});
+        network(t, mode === "no gesture" ? { hasUserGesture: false } : mode === "no initiator" ? { initiator: { type: "other" } }
+          : mode === "foreign Network" ? { frameId: "child" } : mode === "wrong Network URL" ? { request: { url: target + "/different", method: "GET" } }
+          : mode === "same loader" ? { loaderId: "source-loader" } : mode === "body" ? { request: { url: target, method: "GET", hasPostData: true, postData: "x" } } : {});
+        pause(t, mode === "body" ? { request: { url: target, method: "GET", hasPostData: true, postData: "x", headers: {} } } : {});
+        await vi.waitFor(() => expect(t.routes.length > 1 || t.close.mock.calls.length > 0).toBe(true));
+        expect(t.routes.slice(1).every(route => nativeGestureNavigationSource(route.request()) === null)).toBe(true);
+        expect(t.cdp.send.mock.calls.some(([name, params]) => name === "Fetch.continueRequest" && params?.requestId === "next")).toBe(false);
+      } finally { await t.guard.close(); }
+    });
+  }
 });

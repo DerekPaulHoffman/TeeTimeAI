@@ -7,10 +7,11 @@ import { connectOwnedSourceCdp, type OwnedCdpSession, type OwnedCdpFailure } fro
 import { createStagehandNativeRouterFailureCapture, createStagehandHostGuardFailureCapture, recordStagehandSourceNavigationFailure, type StagehandSourceRequestGuard, type StagehandHostGuardFailure } from "./stagehand-native-router-diagnostic";
 import { uniqueNativeSupportedSource, type NativeSourceChoiceCapture } from "./native-source-choice";
 import { collectPublicRootWidget, pairedNativeRootWidget, publicRootWidgetKind, type PublicRootWidgetFacts } from "./public-root-widget";
+import { isPublicAvailabilityNavigation } from "./public-navigation-control";
 import { collectPublicBookingLinks, uniqueNativePublicBookingIntermediary, uniquePublicBookingIntermediary, type PublicBookingLinks, type NativeIntermediaryPreparationDiagnostic } from "./public-booking-intermediary";
 import { createNativePublicBrowserProxy, continueNativeBrowserRead, isObservedNativeRedirect, nativeReadPreflightMethod, type NativePublicProxyDependencies } from "./native-public-browser";
 import { installNativeRedirectRouting, authorizePublicClientReadHeaders, isCurrentPublicClientReadHeaders, nativePublicClientPreflightMethod,
-  nativeMindbodyBootstrapSource, attestedNativeDocumentRedirects, type NativeReadRoute, type NativeReadRequest, type NativeRedirectRouting } from "./native-redirect-routing";
+  nativeMindbodyBootstrapSource, nativeGestureNavigationSource, attestedNativeDocumentRedirects, type NativeReadRoute, type NativeReadRequest, type NativeRedirectRouting } from "./native-redirect-routing";
 import { isSafeRecipeUrl, isSafeBrowserAssetUrl, isSafeBrowserBootstrapReadUrl, isSafeBrowserAvailabilityReadUrl } from "./recipe";
 import { canonicalPublicReadUrl } from "./public-request-url";
 import { requestFamilyForUrl } from "./request-family";
@@ -31,6 +32,15 @@ type Dependencies = { requestLease: Lease; proxyDependencies?: NativePublicProxy
   contextOptions?: { ignoreHTTPSErrors?: boolean } };
 const record = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const reject = () => new Error("STAGEHAND_GUARDED_SOURCE_REJECTED");
+/** Closed private mint reason. No URL, selector, frame, loader or token is returned. */
+export function stagehandGestureMintFailure(facts: { placeholderHrefExact: boolean; sourceRequestPresent: boolean;
+  sourceSettled: boolean; visibleLinkIndexed: boolean }) {
+  if (!facts.placeholderHrefExact) return "NOT_PLACEHOLDER" as const;
+  if (!facts.sourceRequestPresent) return "DOCUMENT_REQUEST_MISSING" as const;
+  if (!facts.sourceSettled) return "SOURCE_NOT_SETTLED" as const;
+  if (!facts.visibleLinkIndexed) return "VISIBLE_LINK_MISSING" as const;
+  return null;
+}
 /** Fixed native collector. The stricter positive-area/form check applies only
  * to the new early routing choice; existing action/frame admission is unchanged. */
 export const stagehandNativeSourceDomExpression = `(() => {
@@ -51,6 +61,10 @@ export const stagehandNativeSourceDomExpression = `(() => {
   const frames = [...document.querySelectorAll("iframe[src]")].filter(element => !element.hasAttribute("srcdoc") && visible(element));
   return JSON.stringify({ url: location.href, readyState: document.readyState, bodyPresent: Boolean(document.body),
     links: links.slice(0, 160).map(element => element.href), frames: frames.slice(0, 24).map(element => element.src),
+    placeholderLinks: links.slice(0, 160).filter(element => sourceVisible(element) && element.getAttribute("href") === "#" &&
+      !element.hasAttribute("download") && !element.hasAttribute("onclick") && element.getAttribute("aria-disabled") !== "true" &&
+      ["", "link"].includes(element.getAttribute("role") || "") && ["", "_self", "_top", "_parent"].includes(element.getAttribute("target") || ""))
+      .map(element => ({ href: element.href, text: element.innerText.replace(/\\s+/gu, " ").trim().slice(0, 161), label: (element.getAttribute("aria-label") || "").replace(/\\s+/gu, " ").trim().slice(0, 161) })),
     sourceLinkIndexes: links.slice(0, 160).map((element, index) => sourceVisible(element) ? index : -1).filter(index => index >= 0),
     sourceFrameIndexes: frames.slice(0, 24).map((element, index) => sourceVisible(element) ? index : -1).filter(index => index >= 0),
     linksOverflow: links.length > 160, framesOverflow: frames.length > 24,
@@ -167,6 +181,8 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
   const allowed = new Set([initialUrl]), roots = new Set(allowed), targets = new Map<string, Target>(), activeReads = new Set<Promise<unknown>>();
   const popupGrants = new Map<string, PopupGrant>();
   const anchorIntents = new Map<string, { pageUrl: string; url: string; frameId: string; loaderId: string; until: number }>();
+  const gestureIntents = new Map<string, { pageUrl: string; href: string; text: string; label: string; observedAt: string; documentHash: string;
+    frameId: string; loaderId: string; request: NativeReadRequest; until: number; used: boolean; completed: boolean }>();
   const frameEntries = new Map<string, { pageUrl: string; frameUrl: string; observedAt: string; documentHash: string; until: number }>();
   let frameEntryCount = 0;
   const intermediaryEntries = new Map<string, { pageUrl: string; url: string; observedAt: string; documentHash: string; until: number }>();
@@ -193,7 +209,7 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
     // Preserve only facts observed before teardown; cleanup RPCs cannot become
     // this attempt's recorded protocol failure.
     const ownedCdpFailure = cdpFailure();
-    closed = true; anchorIntents.clear(); cancellation.abort("STAGEHAND_SOURCE_CLOSED"); queue.dispose();
+    closed = true; anchorIntents.clear(); gestureIntents.clear(); cancellation.abort("STAGEHAND_SOURCE_CLOSED"); queue.dispose();
     await Promise.allSettled([...targets.values()].map(target => target.router?.close()));
     await context?.close().catch(() => {}); await browser?.close().catch(() => {}); await proxy.close(); cdp?.close();
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -232,7 +248,18 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
         isMindbodyClassicPublicBootstrapPost(url, new Headers(headers), body, bootstrap.sourceUrl);
       if (request.isNavigationRequest()) {
         requestGuard = "NAVIGATION_PROVENANCE";
-        if (!allowed.has(transportUrl) && !isObservedNativeRedirect(request, roots) && !bootstrapPost) throw reject();
+        const gesture = nativeGestureNavigationSource(request);
+        // Admission precedes this child's response. The native parent chain
+        // attests its released Location now; full 200-chain proof follows at completion.
+        const gestureRedirects = gesture && isObservedNativeRedirect(request, new Set([gesture.targetUrl]));
+        const gestureNavigation = gesture && roots.has(gesture.sourceUrl) && gesture.href === gesture.sourceUrl + "#" &&
+          (request.url() === gesture.targetUrl || gestureRedirects);
+        if (!allowed.has(transportUrl) && !isObservedNativeRedirect(request, roots) && !bootstrapPost && !gestureNavigation) {
+          const intent = gestureIntents.get(target.id);
+          if (intent) guardFailure({ stage: "GESTURE", reason: Date.now() >= intent.until ? "INTENT_EXPIRED" :
+            intent.used ? "INTENT_USED" : "NATIVE_PROVENANCE_MISSING" });
+          throw reject();
+        }
         requestGuard = "METHOD_POLICY";
         if (!["GET", "HEAD"].includes(method) && !bootstrapPost) throw reject();
       }
@@ -491,6 +518,22 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
         await child.send("Network.enable", { maxTotalBufferSize: PUBLIC_BROWSER_TOTAL_BYTES, maxResourceBufferSize: 16_000_000, maxPostDataSize: 32768 });
         item.initialization = "ROUTER";
         item.router = await installNativeRedirectRouting(item.page, route => handle(route, item), { signal, maxRequests: 1024, responseProfile: SOURCE_ROUTING_RESPONSE_PROFILE,
+          controllerScriptGetIntent: (sourceUrl, targetUrl) => {
+            const intent = gestureIntents.get(item.id);
+            const current = () => Boolean(intent && gestureIntents.get(item.id) === intent && !intent.used && !closed && !signal.aborted &&
+              Date.now() < intent.until && intent.pageUrl === sourceUrl && item.currentUrl === sourceUrl &&
+              item.mainFrameId === intent.frameId && item.mainLoaderId === intent.loaderId && item.documentRequest === intent.request &&
+              item.documentStatus === 200 && item.documentReadPending === false && item.router?.isCurrentCompletedDocumentRead(intent.request, item.frame,
+                { frameId: intent.frameId, loaderId: intent.loaderId, url: sourceUrl }));
+            if (!current() || !intent || !isSafeRecipeUrl(targetUrl) || transactionUrl(targetUrl) || targetUrl === sourceUrl) {
+              guardFailure({ stage: "GESTURE", reason: !intent ? "INTENT_MISSING" : Date.now() >= intent.until ? "INTENT_EXPIRED" :
+                intent.used ? "INTENT_USED" : "SOURCE_CHANGED" });
+              return undefined;
+            }
+            return Object.freeze({ sourceUrl, href: intent.href, text: intent.text, label: intent.label, targetUrl, observedAt: intent.observedAt, documentHash: intent.documentHash,
+              active: () => gestureIntents.get(item.id) === intent && !closed && !signal.aborted,
+              consume: () => { if (!current()) return false; intent.used = true; return true; } });
+          },
           controllerGetIntent: (sourceUrl, targetUrl) => {
             const intent = anchorIntents.get(item.id); anchorIntents.delete(item.id);
             return Boolean(intent && !closed && !signal.aborted && Date.now() < intent.until &&
@@ -607,7 +650,7 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
       linksOverflow: capture.observed.linksOverflow !== false, framesOverflow: capture.observed.framesOverflow !== false,
     });
     const beginSourceDocumentNavigation = async (target: Target) => {
-      check(); anchorIntents.delete(target.id); popupGrants.delete(target.id);
+      check(); anchorIntents.delete(target.id); gestureIntents.delete(target.id); popupGrants.delete(target.id);
       if (!target.router) throw reject();
       // The bootstrap bridge owns its original popup read only. Revoke its
       // readiness authority, then await its actual ACK/queue completion before
@@ -750,9 +793,9 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
         return { kind: "NATIVE_FRAME_SOURCE_OPEN" as const, pageUrl: entry.pageUrl, frameUrl: url, observedAt: entry.observedAt, documentHash: entry.documentHash,
           finalUrl, completedAt: new Date().toISOString(), finalDocumentHash: capture.documentHash, redirects };
       },
-      async beforeAction(id: string, actionHref?: string) {
+      async beforeAction(id: string, actionHref?: string, placeholder?: { text: string; label: string }) {
         const capture = await captureSourceDom(id), { observed } = capture;
-        popupGrants.delete(id); anchorIntents.delete(id);
+        popupGrants.delete(id); anchorIntents.delete(id); gestureIntents.delete(id);
         if (actionHref !== undefined) {
           if (typeof actionHref !== "string" || !Array.isArray(observed.links) || !observed.links.includes(actionHref) || !isSafeRecipeUrl(actionHref) || transactionUrl(actionHref)) {
             const reason = typeof actionHref !== "string" ? "HREF_SHAPE" : !Array.isArray(observed.links) ? "LINK_INVENTORY_MISSING" :
@@ -768,13 +811,49 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
         for (const url of [...(Array.isArray(observed.links) ? observed.links : []), ...(Array.isArray(observed.frames) ? observed.frames : [])])
           if (typeof url === "string" && isSafeRecipeUrl(url) && !transactionUrl(url)) { allowed.add(url); roots.add(url); }
         if (allowed.size > 512) { guardFailure({ stage: "BEFORE_ACTION", reason: "OBSERVED_URL_LIMIT" }); throw reject(); }
+        const descriptors = Array.isArray(observed.placeholderLinks) ? observed.placeholderLinks.map(record).filter(row =>
+          row.href === actionHref && row.text === placeholder?.text && row.label === placeholder?.label) : [];
+        if (placeholder && (descriptors.length !== 1 || typeof placeholder.text !== "string" || typeof placeholder.label !== "string" ||
+            placeholder.text.length > 160 || placeholder.label.length > 160 || !actionHref ||
+            !/\b(?:book|tee\s*times?|availability|calendar|bay|simulator)\b/iu.test(placeholder.text + " " + placeholder.label) ||
+            !isPublicAvailabilityNavigation(actionHref, (placeholder.text + " " + placeholder.label).trim()))) {
+          popupGrants.delete(id); anchorIntents.delete(id); guardFailure({ stage: "GESTURE", reason: "DESCRIPTOR_INVALID" }); throw reject();
+        }
+        if (placeholder) {
+          const reason = stagehandGestureMintFailure({
+            placeholderHrefExact: actionHref !== undefined && typeof observed.url === "string" && !new URL(observed.url).hash && actionHref === observed.url + "#",
+            sourceRequestPresent: Boolean(capture.target.documentRequest), sourceSettled: sourceSettled(capture),
+            visibleLinkIndexed: Array.isArray(observed.sourceLinkIndexes) && observed.sourceLinkIndexes.some(index =>
+              Array.isArray(observed.links) && observed.links[Number(index)] === actionHref),
+          });
+          if (reason) { popupGrants.delete(id); anchorIntents.delete(id); guardFailure({ stage: "GESTURE", reason }); throw reject(); }
+          gestureIntents.set(id, { pageUrl: observed.url as string, href: actionHref as string, text: placeholder.text, label: placeholder.label, observedAt: new Date().toISOString(), documentHash: capture.documentHash,
+            frameId: capture.frameId, loaderId: capture.loaderId, request: capture.target.documentRequest!,
+            until: Math.min(input.deadlineAt.getTime(), Date.now() + 5000), used: false, completed: false });
+        }
         if (actionHref !== undefined) return {
-          kind: "NATIVE_VISIBLE_DOM" as const, pageUrl: observed.url as string, observedAt: new Date().toISOString(),
+          kind: "NATIVE_VISIBLE_DOM" as const, pageUrl: observed.url as string, observedAt: gestureIntents.get(id)?.observedAt ?? new Date().toISOString(),
           // Bind the stable native document identity and observed public DOM;
           // private frame/loader identifiers never leave this host.
           documentHash: capture.documentHash,
-          links: [{ href: actionHref, visible: true as const }],
+          links: [{ href: actionHref, visible: true as const,
+            ...(placeholder ? { text: placeholder.text, label: placeholder.label } : {}) }],
         };
+      },
+      async completeGestureNavigation(id: string) {
+        const capture = await captureSourceDom(id), request = capture.target.documentRequest;
+        const proof = request && nativeGestureNavigationSource(request), intent = gestureIntents.get(id);
+        if (!proof) return null;
+        if (!intent || !intent.used || intent.completed || intent.pageUrl !== proof.sourceUrl || intent.href !== proof.href ||
+            intent.documentHash !== proof.documentHash || intent.observedAt !== proof.observedAt || !sourceSettled(capture) ||
+            capture.observed.url !== request!.url() || !capture.target.router?.isCurrentCompletedDocumentRead(request!, capture.target.frame,
+              { frameId: capture.frameId, loaderId: capture.loaderId, url: String(capture.observed.url) })) throw reject();
+        const redirects = request!.url() === proof.targetUrl ? [] : attestedNativeDocumentRedirects(request!, new Set([proof.targetUrl]));
+        if (!redirects || !isSafeRecipeUrl(request!.url()) || transactionUrl(request!.url())) throw reject();
+        intent.completed = true;
+        return { kind: "NATIVE_GESTURE_SOURCE_OPEN" as const, pageUrl: proof.sourceUrl, href: proof.href, text: proof.text, label: proof.label,
+          observedAt: proof.observedAt, documentHash: proof.documentHash, targetUrl: proof.targetUrl,
+          finalUrl: request!.url(), finalStatus: 200 as const, completedAt: new Date().toISOString(), finalDocumentHash: capture.documentHash, redirects };
       },
       diagnostics: () => ({ interceptedRequests: intercepted, admittedRequests: admitted, rejectedRequests: rejected, responseBytes: bytes,
         guardedPageCount: targets.size, installedPageCount: [...targets.values()].filter(target => target.installed).length,

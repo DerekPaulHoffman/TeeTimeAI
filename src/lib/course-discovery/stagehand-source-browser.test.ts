@@ -4,9 +4,80 @@ import { createServer } from "node:https";
 import { connect } from "node:net";
 import { chromium, type Browser } from "@playwright/test";
 import { expect, it, vi } from "vitest";
-import { awaitStagehandPopupContinuation, canonicalStagehandHostEntry, createGuardedStagehandSourceBrowser, stagehandSourceBrowserMode } from "./stagehand-source-browser";
+import { awaitStagehandPopupContinuation, canonicalStagehandHostEntry, createGuardedStagehandSourceBrowser, stagehandGestureMintFailure, stagehandSourceBrowserMode } from "./stagehand-source-browser";
 import { launchPublicReadBrowser } from "./public-browser-launch";
 import { requestFamilyForUrl } from "./request-family";
+
+for (const mode of ["direct", "redirect", "independent-script"] as const) it(`earns one completed JS public source from a fresh placeholder native gesture: ${mode}`, async () => {
+  const initialUrl = "https://owned-source.example/", destination = "https://owned-booking.example/services?public=1";
+  const finalUrl = mode === "redirect" ? "https://owned-final.example/calendar?public=1" : destination;
+  const controller = new AbortController(), deadlineAt = new Date(Date.now() + 60_000);
+  let active = 0, acquired = 0, released = 0; const families = new Set<string>(), reads: string[] = [];
+  const server = createServer({ key: certificate("fixtureKey"), cert: certificate("fixtureCertificate") }, (request, response) => {
+    reads.push(request.url ?? "");
+    if (mode === "redirect" && request.headers.host === "owned-booking.example" && request.url === "/services?public=1") {
+      response.writeHead(302, { location: finalUrl }).end(); return;
+    }
+    const body = request.url === "/" ? '<a id="public" href="#">Book Bay</a><script>document.querySelector("#public").addEventListener("click",event=>{event.preventDefault();location.assign("https://owned-booking.example/services?public=1")});</script>' : '<h1>Public service calendar</h1>';
+    response.writeHead(200, { "content-type": "text/html" }).end('<!doctype html><html><head><link rel="icon" href="data:,"></head><body>' + body + '</body></html>');
+  });
+  let host: Awaited<ReturnType<typeof createGuardedStagehandSourceBrowser>> | undefined, attached: Browser | undefined;
+  try {
+    await new Promise<void>(done => server.listen(0, "127.0.0.1", done));
+    const address = server.address(); if (!address || typeof address === "string") throw Error("OWNED_FIXTURE_UNAVAILABLE");
+    host = await createGuardedStagehandSourceBrowser({ initialUrl, timeZone: "UTC", deadlineAt, signal: controller.signal }, {
+      requestLease: async (family, work) => { if (active >= 2 || families.has(family)) return { acquired: false }; acquired++; active++; families.add(family);
+        try { return { acquired: true, value: await work() }; } finally { active--; released++; families.delete(family); } },
+      proxyDependencies: { resolveAddresses: async name => { if (!["owned-source.example", "owned-booking.example", "owned-final.example"].includes(name)) throw Error("NOT_OWNED_FIXTURE"); return [{ address: "93.184.216.34", family: 4 }]; },
+        connect: () => connect({ host: "127.0.0.1", port: address.port }) },
+      launchBrowser: options => launchPublicReadBrowser({ ...options, args: [...options.args ?? [], "--ignore-certificate-errors"] }, { localCdp: true }), contextOptions: { ignoreHTTPSErrors: true },
+    });
+    attached = await chromium.connectOverCDP(host.cdpUrl);
+    const page = attached.contexts().flatMap(context => context.pages())[0];
+    await host.prepareNavigation(initialUrl); await page.goto(initialUrl, { waitUntil: "load" });
+    await expect.poll(() => host!.observeSourceReadiness(host!.targetId)).toMatchObject({ mainDocumentCurrent: true, mainDocumentComplete: true, mainDocumentStatus: 200, pendingReads: 0 });
+    expect(await host.completeGestureNavigation(host.targetId)).toBeNull();
+    const prepared = await host.beforeAction(host.targetId, initialUrl + "#", { text: "Book Bay", label: "" });
+    await page.locator("#public").click(); await page.waitForURL(finalUrl);
+    await expect.poll(() => host!.observeSourceReadiness(host!.targetId)).toMatchObject({ mainDocumentCurrent: true, mainDocumentComplete: true, mainDocumentStatus: 200, pendingReads: 0 });
+    const completed = await host.completeGestureNavigation(host.targetId);
+    expect(completed).toMatchObject({ kind: "NATIVE_GESTURE_SOURCE_OPEN", pageUrl: initialUrl, href: initialUrl + "#", targetUrl: destination, finalUrl, finalStatus: 200,
+      redirects: mode === "redirect" ? [{ fromUrl: destination, toUrl: finalUrl, status: 302, completed: true }] : [],
+      observedAt: prepared!.observedAt, documentHash: prepared!.documentHash });
+    expect(completed!.finalDocumentHash).toMatch(/^[a-f0-9]{64}$/u);
+    expect(JSON.stringify(completed)).not.toMatch(/frameId|loaderId|nonce|leaseToken/u);
+    await expect(host.completeGestureNavigation(host.targetId)).rejects.toThrow("STAGEHAND_GUARDED_SOURCE_REJECTED");
+    expect(reads).toEqual(mode === "redirect" ? ["/", "/services?public=1", "/calendar?public=1"] : ["/", "/services?public=1"]);
+    expect(host.snapshotFailures().nativeRouterFailure).toBeUndefined();
+    if (mode === "independent-script") {
+      await page.evaluate(() => { location.assign("https://owned-final.example/other"); });
+      await expect.poll(() => host!.snapshotFailures().nativeRouterFailure?.sourceRequestGuard).toBe("NAVIGATION_PROVENANCE");
+      expect(reads).toEqual(["/", "/services?public=1"]);
+      expect(await host.completeGestureNavigation(host.targetId).catch(() => null)).toBeNull();
+      return;
+    }
+    await host.prepareNavigation(initialUrl); await page.goto(initialUrl, { waitUntil: "load" });
+    await expect.poll(() => host!.observeSourceReadiness(host!.targetId)).toMatchObject({ mainDocumentCurrent: true, mainDocumentComplete: true, mainDocumentStatus: 200 });
+    await host.beforeAction(host.targetId, initialUrl + "#", { text: "Book Bay", label: "" });
+    const originalNow = Date.now, clock = vi.spyOn(Date, "now").mockImplementation(() => originalNow() + 6000);
+    try {
+      await page.locator("#public").click({ timeout: 3000 }).catch(() => {});
+      await expect.poll(() => host!.snapshotFailures().nativeRouterFailure).toMatchObject({ sourceRequestGuard: "NAVIGATION_PROVENANCE" });
+      expect(host.snapshotFailures().hostGuardFailure).toMatchObject({ stage: "GESTURE", reason: "INTENT_EXPIRED" });
+      expect(reads).toEqual(mode === "redirect" ? ["/", "/services?public=1", "/calendar?public=1", "/"] : ["/", "/services?public=1", "/"]);
+    } finally { clock.mockRestore(); }
+    expect(await host.close()).toMatchObject({ browserClosed: true, providerRequestsDrained: true }); expect(active).toBe(0); expect(acquired).toBe(released);
+  } finally { await host?.close(); await attached?.close().catch(() => {}); controller.abort(); server.closeAllConnections(); await new Promise<void>(done => server.close(() => done())); }
+}, 60_000);
+
+it("names only closed private reasons when a placeholder cannot mint a navigation intent", () => {
+  const ready = { placeholderHrefExact: true, sourceRequestPresent: true, sourceSettled: true, visibleLinkIndexed: true };
+  expect(stagehandGestureMintFailure(ready)).toBeNull();
+  expect(stagehandGestureMintFailure({ ...ready, placeholderHrefExact: false })).toBe("NOT_PLACEHOLDER");
+  expect(stagehandGestureMintFailure({ ...ready, sourceRequestPresent: false })).toBe("DOCUMENT_REQUEST_MISSING");
+  expect(stagehandGestureMintFailure({ ...ready, sourceSettled: false })).toBe("SOURCE_NOT_SETTLED");
+  expect(stagehandGestureMintFailure({ ...ready, visibleLinkIndexed: false })).toBe("VISIBLE_LINK_MISSING");
+});
 
 type AckMode = "NORMAL" | "DELAY" | "REJECT" | "NEVER" | "FORK" | "OVERSIZE";
 const popupAck = vi.hoisted(() => ({ mode: "NORMAL" as AckMode, armed: false, delayed: 0, pending: 0, earlySuccessor: false, forked: false, oversized: false }));

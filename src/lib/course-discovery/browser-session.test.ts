@@ -1,6 +1,9 @@
+import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { createServer } from "node:https";
 import { connect, type AddressInfo } from "node:net";
+import { resolve } from "node:path";
+import { promisify } from "node:util";
 import { chromium, type CDPSession } from "@playwright/test";
 import { describe, expect, it, vi } from "vitest";
 import { createAddressPinnedPublicFetchTransport } from "@/lib/automation/address-pinned-public-fetch";
@@ -12,6 +15,7 @@ import * as nativeRouting from "./native-redirect-routing";
 import { deriveTeeItUpOfficialIdentityProof } from "./teeitup-official-identity";
 import type { DiscoveryBrowserSnapshot } from "./browser-session";
 import { launchPublicReadBrowser } from "./public-browser-launch";
+import { discoveryProcessEnvironment } from "../../../scripts/automation/course-discovery-worker.mjs";
 
 vi.mock("@/lib/automation/provider-request-lease", () => ({ runWithProviderRequestLease: vi.fn() }));
 vi.mock("@/lib/automation/address-pinned-public-fetch", async importOriginal => ({
@@ -247,6 +251,222 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       expect(reads).toEqual(["/"]);
     } finally { await session?.close(); proxy?.mockRestore(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
     expect(foreign).toBe(0); expect(active).toBe(0); expect(acquired).toBeGreaterThan(0); expect(released).toBe(acquired);
+  }, 35_000);
+  it.each(["duplicateAncestorId", "noAncestorId"] as const)("omits deep links without a bounded exact selector: %s", async mode => {
+    const official = "https://public-layout.example/";
+    const deep = (name: string) => Array.from({ length: 14 }, (_, index) => index).reduce((html, index) =>
+      `<div${index === 9 && mode === "duplicateAncestorId" ? ' id="shared-navigation"' : ""}>${html}</div>`,
+      `<a href="#">${name}</a>`);
+    const html = `<!doctype html><link rel="icon" href="data:,"><body><h1>Public layout</h1>
+      ${deep("Book North")}${deep("Book South")}<a id="ordinary-link" href="/public">Book public page</a></body>`;
+    const session = await createCourseDiscoveryBrowserSession({ initialUrls: [official], venueOfficialUrl: official,
+      deadlineAt: new Date(Date.now() + 20_000) }, {
+      fetch: vi.fn(async () => new Response(html, { headers: { "content-type": "text/html" } })) as unknown as typeof fetch,
+      launchBrowser: () => chromium.launch({ executablePath, headless: true }),
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      const snapshot = await session.execute({ id: 1, action: "open", url: official });
+      expect(snapshot.controls.some(control => control.name === "Book North" || control.name === "Book South")).toBe(false);
+      expect(snapshot.controls.find(control => control.name === "Book public page")?.selector).toBe('[id="ordinary-link"]');
+    } finally { await session.close(); }
+  }, 25_000);
+  it("keeps deep public links when the real tsx runtime evaluates browser selectors", async () => {
+    const official = "https://tsx-public-layout.example/";
+    const deep = (name: string, id: string) => Array.from({ length: 14 }, (_, index) => index).reduce((html, index) =>
+      `<div${index === 9 ? ` id="${id}"` : ""}>${html}</div>`, `<a href="#">${name}</a>`);
+    const html = `<!doctype html><link rel="icon" href="data:,"><body><h1>Public layout</h1>
+      ${deep("Book North", "public-nav-north")}${deep("Book South", "public-nav-south")}
+      <a id="ordinary-link" href="/public">Book public page</a>
+      <public-choice id="shadow-service" href="/appointments/public/services/service-one">Bay 1, 1 hour, $55</public-choice>
+      <script>document.querySelector('#shadow-service').attachShadow({mode:'open'}).innerHTML =
+        '<a href="/appointments/public/services/service-one"><slot></slot></a>'</script></body>`;
+    const script = `
+      const { createCourseDiscoveryBrowserSession } = require('./src/lib/course-discovery/browser-session.ts');
+      const { chromium } = require('@playwright/test');
+      const official = ${JSON.stringify(official)}, html = ${JSON.stringify(html)};
+      let session, acquired = 0, released = 0;
+      (async () => {
+        try {
+          session = await createCourseDiscoveryBrowserSession({ initialUrls: [official], venueOfficialUrl: official,
+            deadlineAt: new Date(Date.now() + 20000) }, {
+            fetch: async () => new Response(html, { headers: { 'content-type': 'text/html' } }),
+            launchBrowser: () => chromium.launch({ executablePath: ${JSON.stringify(executablePath)}, headless: true }),
+            requestLease: async (_family, work) => { acquired++; try { return { acquired: true, value: await work() }; } finally { released++; } },
+          });
+          const snapshot = await session.execute({ id: 1, action: 'open', url: official });
+          const north = snapshot.controls.find(row => row.name === 'Book North');
+          const south = snapshot.controls.find(row => row.name === 'Book South');
+          const ordinary = snapshot.controls.find(row => row.name === 'Book public page');
+          const shadow = snapshot.controls.find(row => row.name === 'Bay 1, 1 hour, $55');
+          if (!north?.selector.startsWith('[id="public-nav-north"] > ') ||
+              !south?.selector.startsWith('[id="public-nav-south"] > ') ||
+              north.selector.length > 240 || south.selector.length > 240 || !ordinary ||
+              shadow?.selector !== '[id="shadow-service"] a[href]' || shadow.kind !== 'link') throw Error('DEEP_OR_SHADOW_CONTROL_MISSING');
+          process.stdout.write(JSON.stringify({ north: true, south: true, ordinary: true, shadow: true, acquired, released }) + '\\n');
+        } finally { await session?.close(); }
+      })().catch(error => { process.stderr.write(String(error?.message ?? 'TSX_RUNTIME_FAILED').slice(0, 100)); process.exitCode = 1; });
+    `;
+    const { stdout } = await promisify(execFile)(process.execPath,
+      [resolve("node_modules/tsx/dist/cli.mjs"), "-e", script], { cwd: process.cwd(),
+        env: discoveryProcessEnvironment(), timeout: 25_000, maxBuffer: 4096 });
+    const result = JSON.parse(stdout.trim());
+    expect(result).toMatchObject({ north: true, south: true, ordinary: true, shadow: true });
+    expect(result.acquired).toBeGreaterThan(0);
+    expect(result.released).toBe(result.acquired);
+  }, 30_000);
+  it.each(["valid", "stale", "mismatch", "mismatchedText", "duplicate", "disabled", "inForm", "hidden", "transparent", "submit", "unknownShadow"] as const)(
+    "exposes only an exact public native link forwarded by an open shadow host: %s", async mode => {
+      const official = "https://shadow-public-course.example/";
+      const href = "/appointments/public/services/service-one";
+      const host = `<public-choice id="service" href="${mode === "mismatch" ? "/appointments/public/services/other" : href}"
+        ${mode === "disabled" ? 'aria-disabled="true"' : ""} ${mode === "hidden" ? "hidden" : ""}
+        ${mode === "transparent" ? 'style="opacity:0"' : ""}
+        ${mode === "submit" ? 'type="submit"' : ""}>Bay 1, 1 hour of virtual golf, $55</public-choice>`;
+      const html = `<!doctype html><link rel="icon" href="data:,"><body><h1>Public services</h1>
+        ${mode === "inForm" ? `<form>${host}</form>` : host}
+        <script>
+          window.clicks = 0;
+          const host = document.querySelector('#service');
+          const root = host.attachShadow({mode:'open'});
+          root.innerHTML = '<a href="${href}"><slot></slot>${mode === "mismatchedText" ? "<b>Unassigned text</b>" : ""}</a>${mode === "duplicate" ? `<a href="${href}">Duplicate</a>` : ""}';
+          root.querySelector('a').addEventListener('click',event=>{event.preventDefault();window.clicks++});
+          ${mode === "unknownShadow" ? "root.querySelector('a').remove();root.innerHTML='<div role=link><slot></slot></div>';" : ""}
+        </script></body>`;
+      let fixtureBrowser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
+      const session = await createCourseDiscoveryBrowserSession({ initialUrls: [official], venueOfficialUrl: official,
+        deadlineAt: new Date(Date.now() + 20_000) }, {
+        fetch: vi.fn(async () => new Response(html, { headers: { "content-type": "text/html" } })) as unknown as typeof fetch,
+        launchBrowser: async () => fixtureBrowser = await chromium.launch({ executablePath, headless: true }),
+        requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+      });
+      try {
+        const snapshot = await session.execute({ id: 1, action: "open", url: official });
+        const service = snapshot.controls.find(control => control.href === official.slice(0, -1) + href);
+        if (!["valid", "stale"].includes(mode)) { expect(service).toBeUndefined(); return; }
+        expect(service).toMatchObject({ kind: "link", name: "Bay 1, 1 hour of virtual golf, $55" });
+        expect(service!.selector).toContain('[id="service"] a[href]');
+        const page = fixtureBrowser!.contexts()[0].pages()[0];
+        expect(await page.locator(service!.selector).count()).toBe(1);
+        if (mode === "stale") {
+          await page.locator("#service").evaluate(element => element.setAttribute("href", "/appointments/public/services/changed"));
+          await expect(session.execute({ id: 2, action: "click", target: service!.target })).rejects.toThrow("STALE_OR_UNKNOWN_CONTROL");
+          expect(await page.evaluate(() => (window as Window & { clicks: number }).clicks)).toBe(0);
+        } else {
+          const result = await session.execute({ id: 2, action: "click", target: service!.target });
+          expect(result.url).toBe(official.slice(0, -1) + href);
+        }
+      } finally { await session.close(); }
+    }, 25_000);
+  it.each(["valid", "redirected", "duplicate", "insideForm", "deepHeader"] as const)("requires one safe fresh native placeholder before a JS document GET: %s", async mode => {
+    const official = "https://owned-gesture-course.example/", destination = "https://owned-gesture-booking.example/services";
+    const finalUrl = mode === "redirected" ? "https://owned-gesture-booking.example/calendar" : destination;
+    const material = readFileSync("src/lib/course-discovery/cps-browser-wiring.test.ts", "utf8");
+    const tls = (name: string): string => JSON.parse(new RegExp(`^const ${name} = (".*");$`, "m").exec(material)![1]);
+    const reads: string[] = [];
+    const wrapDeep = (anchor: string, id: string) => Array.from({ length: 14 }, (_, index) => index).reduce((html, index) =>
+      `<div${index === 9 ? ` id="${id}"` : ""}>${html}</div>`, anchor);
+    const bay1 = mode === "deepHeader" ? '<a data-gesture="bay1" href="#">Book Bay 1</a>' : '<a id="bay1" href="#">Book Bay 1</a>';
+    const bay2 = mode === "duplicate" ? '<a id="bay2" href="#">Book Bay 1</a>' : mode === "deepHeader" ? '<a href="#">Book Bay 2</a>' : '<a id="bay2" href="#">Book Bay 2</a>';
+    const html = '<!doctype html><html><head><link rel="icon" href="data:,"></head><body><h1>Public indoor golf</h1>' +
+      (mode === "insideForm" ? `<form>${bay1}</form>` : mode === "deepHeader" ? wrapDeep(bay1, "public-nav-one") : bay1) +
+      (mode === "deepHeader" ? wrapDeep(bay2, "public-nav-two") : bay2) +
+      `<script>window.fixtureReady=true;document.querySelector('${mode === "deepHeader" ? "[data-gesture=bay1]" : "#bay1"}').addEventListener('click',event=>{window.fixtureClicked=true;event.preventDefault();location.assign('${destination}')})</script></body></html>`;
+    const server = createServer({ key: tls("fixtureKey"), cert: tls("fixtureCertificate") }, (request, response) => {
+      reads.push(String(request.url));
+      if (mode === "redirected" && request.url === "/services") { response.writeHead(302, { location: "/calendar" }).end(); return; }
+      response.writeHead(200, { "content-type": "text/html" }).end(request.url === "/" ? html : "<h1>Public services</h1>");
+    });
+    const originalProxy = nativeBrowser.createNativePublicBrowserProxy;
+    let session: Awaited<ReturnType<typeof createCourseDiscoveryBrowserSession>> | undefined, proxy: ReturnType<typeof vi.spyOn> | undefined;
+    let browser: Awaited<ReturnType<typeof launchPublicReadBrowser>> | undefined;
+    try {
+      await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve)); const port = (server.address() as AddressInfo).port;
+      proxy = vi.spyOn(nativeBrowser, "createNativePublicBrowserProxy").mockImplementation(input => originalProxy({ ...input, requireHostAdmission: true }, {
+        resolveAddresses: async hostname => { if (!["owned-gesture-course.example", "owned-gesture-booking.example"].includes(hostname)) throw Error("UNOWNED_FIXTURE_HOST");
+          return [{ address: "93.184.216.34", family: 4 }]; }, connect: () => connect({ host: "127.0.0.1", port }),
+      }));
+      session = await createCourseDiscoveryBrowserSession({ initialUrls: [official], venueOfficialUrl: official,
+        venueName: "Public indoor golf", deadlineAt: new Date(Date.now() + 25_000) }, {
+        browserTransport: "NATIVE_CHROME", requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+        launchBrowser: async () => browser = await launchPublicReadBrowser({ executablePath, headless: true, args: ["--ignore-certificate-errors"] }),
+      });
+      const initial = await session.execute({ id: 1, action: "open", url: official });
+      expect(await browser!.contexts().flatMap(context => context.pages()).find(page => page.url() === official)!
+        .evaluate(() => (window as Window & { fixtureReady?: boolean }).fixtureReady)).toBe(true);
+      const selected = initial.controls.find(control => control.name === "Book Bay 1"); expect(selected).toBeDefined();
+      if (mode === "deepHeader") {
+        expect(selected!.selector.startsWith('[id="public-nav-one"] > ')).toBe(true);
+        expect(selected!.selector.length).toBeLessThanOrEqual(240);
+        expect(await browser!.contexts().flatMap(context => context.pages()).find(page => page.url() === official)!
+          .locator(selected!.selector).count()).toBe(1);
+      }
+      if (mode === "valid" || mode === "redirected" || mode === "deepHeader") {
+        const refreshed = await session.execute({ id: 10, action: "observe" });
+        expect(refreshed.controls.find(control => control.name === "Book Bay 1")?.target).toBe(selected!.target);
+        const result = await session.execute({ id: 2, action: "click", target: selected!.target });
+        expect(result).toMatchObject({ url: finalUrl, navigationStatus: 200, nativeGestureCompletion: {
+          kind: "NATIVE_GESTURE_COMPLETED_V1", sourceUrl: official, href: official + "#", text: "Book Bay 1", label: "",
+          targetUrl: destination, finalUrl, redirects: mode === "redirected" ? [{ fromUrl: destination, toUrl: finalUrl, status: 302, completed: true }] : [] } });
+        expect(result.nativeGestureCompletion?.documentBindingSha256).toMatch(/^[a-f0-9]{64}$/u);
+        expect(reads).toEqual(mode === "redirected" ? ["/", "/services", "/calendar"] : ["/", "/services"]);
+      } else {
+        await expect(session.execute({ id: 2, action: "click", target: selected!.target })).rejects.toThrow("STALE_OR_UNKNOWN_CONTROL");
+        expect(reads).toEqual(["/"]);
+      }
+    } finally { await session?.close(); proxy?.mockRestore(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
+  }, 35_000);
+  it.each(["linked", "seeded", "removed", "replacement", "crossSite"] as const)("binds an official subpage placeholder to a fresh root link and exact completed document: %s", async mode => {
+    const official = "https://owned-subpage-course.example/";
+    const subpage = mode === "crossSite" ? "https://owned-subpage-other.example/lessons" : official + "lessons";
+    const destination = "https://owned-subpage-booking.example/services";
+    const material = readFileSync("src/lib/course-discovery/cps-browser-wiring.test.ts", "utf8");
+    const tls = (name: string): string => JSON.parse(new RegExp(`^const ${name} = (".*");$`, "m").exec(material)![1]);
+    const reads: string[] = [];
+    const root = '<!doctype html><html><head><link rel="icon" href="data:,"></head><body><h1>Official public course</h1>' +
+      `<a id="lessons" href="${subpage}">LESSONS</a></body></html>`;
+    const lesson = '<!doctype html><html><head><link rel="icon" href="data:,"></head><body><h1>Public lessons</h1>' +
+      '<a id="bay" href="#">Book Bay 1</a><script>document.querySelector("#bay").addEventListener("click",event=>{' +
+      `event.preventDefault();location.assign("${destination}")` + '})</script></body></html>';
+    const server = createServer({ key: tls("fixtureKey"), cert: tls("fixtureCertificate") }, (request, response) => {
+      reads.push(String(request.url));
+      response.writeHead(200, { "content-type": "text/html" }).end(request.url === "/" ? root : request.url === "/lessons" ? lesson : "<h1>Public services</h1>");
+    });
+    const originalProxy = nativeBrowser.createNativePublicBrowserProxy;
+    let session: Awaited<ReturnType<typeof createCourseDiscoveryBrowserSession>> | undefined, proxy: ReturnType<typeof vi.spyOn> | undefined;
+    let browser: Awaited<ReturnType<typeof launchPublicReadBrowser>> | undefined;
+    try {
+      await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve)); const port = (server.address() as AddressInfo).port;
+      proxy = vi.spyOn(nativeBrowser, "createNativePublicBrowserProxy").mockImplementation(input => originalProxy({ ...input, requireHostAdmission: true }, {
+        resolveAddresses: async hostname => { if (!["owned-subpage-course.example", "owned-subpage-other.example", "owned-subpage-booking.example"].includes(hostname)) throw Error("UNOWNED_FIXTURE_HOST");
+          return [{ address: "93.184.216.34", family: 4 }]; }, connect: () => connect({ host: "127.0.0.1", port }),
+      }));
+      session = await createCourseDiscoveryBrowserSession({ initialUrls: mode === "seeded" ? [official, subpage] : [official],
+        venueOfficialUrl: official, venueName: "Official public course", deadlineAt: new Date(Date.now() + 25_000) }, {
+        browserTransport: "NATIVE_CHROME", requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+        launchBrowser: async () => browser = await launchPublicReadBrowser({ executablePath, headless: true, args: ["--ignore-certificate-errors"] }),
+      });
+      if (mode !== "seeded") {
+        await session.execute({ id: 1, action: "open", url: official });
+        if (mode === "removed") {
+          const page = browser!.contexts().flatMap(context => context.pages()).find(value => value.url() === official)!;
+          await page.locator("#lessons").evaluate(element => element.remove());
+        }
+      }
+      const current = await session.execute({ id: 2, action: "open", url: subpage });
+      const bay = current.controls.find(control => control.name === "Book Bay 1"); expect(bay).toBeDefined();
+      if (mode === "replacement") await session.execute({ id: 3, action: "open", url: subpage });
+      if (mode === "linked") {
+        const result = await session.execute({ id: 4, action: "click", target: bay!.target });
+        expect(result).toMatchObject({ url: destination, navigationStatus: 200, nativeGestureCompletion: {
+          kind: "NATIVE_GESTURE_COMPLETED_V1", sourceUrl: subpage, href: subpage + "#", text: "Book Bay 1", label: "",
+          targetUrl: destination, finalUrl: destination, redirects: [] } });
+        expect(reads).toEqual(["/", "/lessons", "/services"]);
+      } else {
+        await expect(session.execute({ id: 4, action: "click", target: bay!.target })).rejects.toThrow("STALE_OR_UNKNOWN_CONTROL");
+        expect(reads).toEqual(mode === "seeded" ? ["/lessons"] : mode === "replacement" ? ["/", "/lessons", "/lessons"] : ["/", "/lessons"]);
+      }
+    } finally { await session?.close(); proxy?.mockRestore(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
   }, 35_000);
   it.each(["current", "loader", "foreignFrame", "differentRequest", "differentUrl", "pendingAck", "failedIdentity", "nonSuccess", "newDocument"] as const)
   ("retains only the completed native main GET status across an owned same-document path and query change: %s", async mode => {
@@ -1071,6 +1291,32 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       expect(fetch).toHaveBeenCalledTimes(1);
     } finally { await session.close(); }
   }, 30_000);
+  it("retains an unchanged current control across observe but rejects its ID after a new same-URL document", async () => {
+    const fixture = '<!doctype html><html><body><h1>Public golf</h1><a id="tee-times" href="/times">Book Tee Times</a></body></html>';
+    let browser: Awaited<ReturnType<typeof chromium.launch>>;
+    const session = await createCourseDiscoveryBrowserSession({ deadlineAt: new Date(Date.now() + 30_000), initialUrls: ['https://example.org/'] }, {
+      fetch: async () => new Response(fixture, { headers: { 'content-type': 'text/html' } }),
+      launchBrowser: async () => browser = await chromium.launch({ executablePath, headless: true }),
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      const opened = await session.execute({ id: 1, action: 'open', url: 'https://example.org/' });
+      const original = opened.controls.find(control => control.name === 'Book Tee Times')!;
+      const observed = await session.execute({ id: 2, action: 'observe' });
+      expect(observed.controls.find(control => control.name === 'Book Tee Times')?.target).toBe(original.target);
+      await browser!.contexts()[0].pages()[0].locator('#tee-times').evaluate(node => { node.textContent = 'View Tee Times'; });
+      const changed = await session.execute({ id: 6, action: 'observe' });
+      const changedControl = changed.controls.find(control => control.name === 'View Tee Times')!;
+      expect(changedControl.target).not.toBe(original.target);
+      await expect(session.execute({ id: 7, action: 'click', target: original.target })).rejects.toThrow('STALE_OR_UNKNOWN_CONTROL');
+      await browser!.contexts()[0].pages()[0].reload({ waitUntil: 'commit' });
+      await expect(session.execute({ id: 3, action: 'click', target: changedControl.target })).rejects.toThrow('STALE_OR_UNKNOWN_CONTROL');
+      const replacement = await session.execute({ id: 4, action: 'observe' });
+      const newControl = replacement.controls.find(control => control.name === 'Book Tee Times')!;
+      expect(newControl.target).not.toBe(changedControl.target);
+      expect((await session.execute({ id: 5, action: 'click', target: newControl.target })).url).toBe('https://example.org/times');
+    } finally { await session.close(); }
+  }, 35_000);
   it("finds a public booking link beyond 180 hidden, irrelevant and ordinary navigation controls", async () => {
     const fixture = '<html><body><h1>Public Golf</h1>' +
       Array.from({ length: 190 }, (_, i) => `<button hidden>Hidden${i}</button><button>Decorative${i}</button><a href="/section${i}">Section${i}</a>`).join('') +
@@ -1163,9 +1409,11 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
     const fixture = '<!doctype html><html><body><h1>Public simulator</h1><div data-testid="variable-week-calendar"><h2>October 2030</h2><div>Mo Tu We Th Fr Sa Su</div>' +
       '<div data-testid="calendar-day-2030-10-23" aria-label="2030-10-23 AvailabilityLoaded"><span>23</span></div></div><p id="result">Unselected</p>' +
       '<script>document.querySelector("[data-testid=calendar-day-2030-10-23]").onclick=()=>document.querySelector("#result").textContent="Selected October 23";</script></body></html>';
+    let fixtureBrowser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
     const session = await createCourseDiscoveryBrowserSession({ deadlineAt: new Date(Date.now() + 20_000), initialUrls: ["https://example.org/"] }, {
       fetch: (async () => new Response(fixture, { headers: { "content-type": "text/html" } })) as typeof fetch,
-      launchBrowser: () => chromium.launch({ executablePath, headless: true }), requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+      launchBrowser: async () => fixtureBrowser = await chromium.launch({ executablePath, headless: true }),
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
     });
     try {
       const snapshot = await session.execute({ id: 1, action: "open", url: "https://example.org/" });
@@ -1173,7 +1421,11 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       expect(dates).toHaveLength(1);
       const selected = await session.execute({ id: 2, action: "click", target: dates[0].target });
       expect(selected.text).toContain("Selected October 23");
-      await expect(session.execute({ id: 3, action: "click", target: dates[0].target })).rejects.toThrow("STALE_OR_UNKNOWN_CONTROL");
+      const repeated = await session.execute({ id: 3, action: "click", target: dates[0].target });
+      expect(repeated.text).toContain("Selected October 23");
+      await fixtureBrowser!.contexts()[0].pages()[0].locator('[data-testid="calendar-day-2030-10-23"]')
+        .evaluate(element => element.setAttribute("aria-label", "2030-10-24 AvailabilityLoaded"));
+      await expect(session.execute({ id: 4, action: "click", target: dates[0].target })).rejects.toThrow("STALE_OR_UNKNOWN_CONTROL");
     } finally { await session.close(); }
   }, 25_000);
   it.each([

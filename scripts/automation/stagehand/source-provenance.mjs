@@ -70,6 +70,36 @@ export function nativeFrameNavigations(report, isPublic = publicEvidenceUrl) {
     return current===row.finalUrl;
   });
 }
+/** Completed private native user-gesture navigation; the JS edge is never an HTTP redirect. */
+export function nativeGestureNavigations(report, isPublic = publicEvidenceUrl) {
+  const valid=value=>typeof value==='string'&&norm(value)===value&&Boolean(isPublic(value));
+  const keys=value=>value&&typeof value==='object'&&!Array.isArray(value)?Object.keys(value).sort().join(','):'';
+  const sha=value=>typeof value==='string'&&/^[a-f0-9]{64}$/u.test(value);
+  const stamp=value=>typeof value==='string'&&Number.isFinite(Date.parse(value))&&new Date(Date.parse(value)).toISOString()===value;
+  const started=Date.parse(report?.startedAt),finished=report?.finishedAt===undefined?Date.now()+5000:Date.parse(report.finishedAt);
+  const entries=rows(report?.nativeGestureNavigations,2),seenEntries=new Set();
+  return entries.filter(row=>{
+    if(keys(row)!=='completedAt,documentHash,finalDocumentHash,finalStatus,finalUrl,href,kind,label,observedAt,pageUrl,redirects,targetUrl,text'||
+      row.kind!=='NATIVE_GESTURE_SOURCE_OPEN'||row.finalStatus!==200||![row.pageUrl,row.href,row.targetUrl,row.finalUrl].every(valid)||
+      typeof row.text!=='string'||typeof row.label!=='string'||row.text.length>160||row.label.length>160||
+      row.text!==row.text.replace(/\s+/gu,' ').trim()||row.label!==row.label.replace(/\s+/gu,' ').trim()||
+      !/\b(?:book|tee\s*times?|availability|calendar|bay|simulator)\b/iu.test(row.text+' '+row.label)||
+      new URL(row.pageUrl).hash||row.href!==row.pageUrl+'#'||row.targetUrl===row.pageUrl||!sha(row.documentHash)||!sha(row.finalDocumentHash)||
+      !stamp(row.observedAt)||!stamp(row.completedAt)||!Number.isFinite(started)||!Number.isFinite(finished)||Date.parse(row.observedAt)<started||
+      Date.parse(row.completedAt)<Date.parse(row.observedAt)||Date.parse(row.completedAt)>finished||!Array.isArray(row.redirects)||row.redirects.length>5||
+      !rows(report.officialLinkLedger,512).some(w=>w.kind==='NATIVE_VISIBLE_DOM'&&w.pageUrl===row.pageUrl&&w.observedAt===row.observedAt&&w.documentHash===row.documentHash&&
+        rows(w.links,512).some(link=>link.href===row.href&&link.visible===true&&link.text===row.text&&link.label===row.label))||
+      !rows(report.actions,256).some(a=>a.action?.method==='click'&&!a.error&&!a.actionError&&a.sourceUrl===row.pageUrl&&a.observedTarget?.tag==='A'&&
+        a.observedTarget.href===row.href&&a.observedTarget.text?.replace(/\s+/gu,' ').trim()===row.text&&
+        a.observedTarget.label?.replace(/\s+/gu,' ').trim()===row.label&&a.afterUrl===row.finalUrl&&a.openedNewPage===false)||
+      !rows(report.visitedUrls,1024).includes(row.pageUrl)||!rows(report.visitedUrls,1024).includes(row.finalUrl))return false;
+    const key=JSON.stringify([row.pageUrl,row.observedAt,row.documentHash,row.href]);if(seenEntries.has(key))return false;
+    let current=row.targetUrl;const seen=new Set([current]);
+    for(const hop of row.redirects){if(keys(hop)!=='completed,fromUrl,status,toUrl'||hop.completed!==true||![301,302,303,307,308].includes(hop.status)||
+      hop.fromUrl!==current||!valid(hop.toUrl)||seen.has(hop.toUrl))return false;current=hop.toUrl;seen.add(current);}
+    if(current!==row.finalUrl)return false;seenEntries.add(key);return true;
+  });
+}
 export function nativeLinkSource(row) {
   if (row?.kind !== 'NATIVE_DOM_LINK_OBSERVED') return null;
   // v9 wrote url; v10 writes sourceUrl. Conflicting aliases never attest a source.
@@ -126,8 +156,8 @@ export function observedBookingSourceCandidates(report, officialUrl, isPublic = 
   const initial = report.initialNavigation;
   if (initial?.requestedUrl === officialUrl && Number.isInteger(initial.status) && initial.status >= 200 && initial.status < 400 &&
       valid(initial.finalUrl) && observed.has(norm(initial.finalUrl))) link(officialUrl, initial.finalUrl);
-  if(sourceDiscoveryOnly)for(const row of [...nativeFrameNavigations(report,isPublic),...nativeIntermediaryNavigations(report,isPublic)]){
-    see(row.finalUrl);for(const hop of row.redirects){see(hop.fromUrl);see(hop.toUrl);link(hop.fromUrl,hop.toUrl);}
+  if(sourceDiscoveryOnly)for(const row of [...nativeFrameNavigations(report,isPublic),...nativeIntermediaryNavigations(report,isPublic),...nativeGestureNavigations(report,isPublic)]){
+    see(row.finalUrl);if(row.kind==='NATIVE_GESTURE_SOURCE_OPEN'){see(row.targetUrl);link(row.pageUrl,row.targetUrl);}for(const hop of row.redirects){see(hop.fromUrl);see(hop.toUrl);link(hop.fromUrl,hop.toUrl);}
   }
   const reachable = new Set([official]);
   for (const source of reachable) for (const target of edges.get(source) ?? []) reachable.add(target);
@@ -136,7 +166,7 @@ export function observedBookingSourceCandidates(report, officialUrl, isPublic = 
   const startup = new Set([official, ...(valid(initial?.finalUrl) ? [norm(initial.finalUrl)] : [])]);
   for (const action of nativeLinkActions(report).reverse()) {
     const source = norm(action.sourceUrl), href = norm(action.observedTarget.href), after = norm(action.afterUrl);
-    if (sourceDiscoveryOnly && startup.has(href)) continue;
+    if (sourceDiscoveryOnly && (startup.has(href) || href === source + '#')) continue;
     if (!valid(href) || !reachable.has(source) || !edges.get(source)?.has(href) || !observed.has(after) || after === source) continue;
     const anchor = new URL(href), landing = new URL(after);
     const bareLanding = !anchor.search && !anchor.hash && !landing.hash && anchor.origin === landing.origin && anchor.pathname === landing.pathname;
@@ -159,6 +189,8 @@ export function observedBookingSourceCandidates(report, officialUrl, isPublic = 
     for(const entry of nativeFrameNavigations(report,isPublic))if(reachable.has(norm(entry.pageUrl))&&
       edges.get(norm(entry.pageUrl))?.has(norm(entry.frameUrl))&&reachable.has(norm(entry.finalUrl))&&
       observed.has(norm(entry.finalUrl))&&!startup.has(norm(entry.finalUrl)))append(norm(entry.finalUrl));
+    for(const entry of nativeGestureNavigations(report,isPublic))if(reachable.has(norm(entry.pageUrl))&&reachable.has(norm(entry.finalUrl))&&
+      observed.has(norm(entry.finalUrl))&&!startup.has(norm(entry.finalUrl)))append(norm(entry.finalUrl));
     // Only the fixed synchronous DOM collector can emit this visible-link
     // observation. The exact same-attempt href is an unverified routing choice;
     // it is not a visited landing, provider identity, method, or inventory proof.
@@ -175,6 +207,7 @@ export function observedBookingSourceCandidates(report, officialUrl, isPublic = 
     // A distinct fixed-native raw public document edge can reach the next
     // document; it never converts the hidden anchor into visible evidence.
     for(const row of nativeIntermediaryNavigations(report,isPublic)){visibleLink(row.pageUrl,row.url);for(const hop of row.redirects)visibleLink(hop.fromUrl,hop.toUrl);}
+    for(const row of nativeGestureNavigations(report,isPublic)){visibleLink(row.pageUrl,row.targetUrl);for(const hop of row.redirects)visibleLink(hop.fromUrl,hop.toUrl);}
     const visibleReachable=new Set([official]);for(const from of visibleReachable)for(const to of visibleEdges.get(from)??[])visibleReachable.add(to);
     const documentKey=value=>{const url=new URL(value);return url.origin+url.pathname+url.search;};
     const startupDocuments=new Set([...startup].map(documentKey));
