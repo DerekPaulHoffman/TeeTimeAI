@@ -29,6 +29,53 @@ test('current native exception facts strip private text while durable schema rej
  assert.deepEqual(projectNativeRouterFailure({code:'NATIVE_REDIRECT_ROUTING_FAILED',operation:'PRIVATE',errorName:'PRIVATE',requestUrlSha256:'PRIVATE'}),{code:'NATIVE_REDIRECT_ROUTING_FAILED'});
  assert.doesNotMatch(JSON.stringify(closed),/PRIVATE|https:|cookie|headers|message/u);
 });
+test('response metadata branch and terminal correlation remain closed across source projection',()=>{
+ const raw={code:'NATIVE_REDIRECT_ROUTING_FAILED',operation:'RESPONSE_METADATA',responseFailureBranch:'RETIRED_RESPONSE_ABORT',
+  recordGenerationRetired:true,responseIdentityMatched:true,correlatedNetworkLoadingFailed:false,correlatedNetworkLoadingFinished:false,
+  requestId:'PRIVATE',url:'https://private.example/?token=PRIVATE'};
+ const closed=projectNativeRouterFailure(raw);
+ assert.equal(closed.responseFailureBranch,'RETIRED_RESPONSE_ABORT');
+ assert.equal(closed.correlatedNetworkLoadingFailed,false);
+ assert.deepEqual(safeNativeRouterFailure(closed),closed);
+ assert.equal(projectNativeRouterFailure({...raw,operation:'REQUEST_METADATA'}).responseFailureBranch,undefined);
+ assert.equal(projectNativeRouterFailure({...raw,responseFailureBranch:'PRIVATE'}).responseFailureBranch,undefined);
+ assert.doesNotMatch(JSON.stringify(closed),/PRIVATE|requestId|https:/u);
+});
+test('missing network diagnosis retains finite caller gate only',()=>{
+ const raw={code:'NATIVE_REDIRECT_NETWORK_ID_MISSING',missingNetworkBoundaryPending:false,uncorrelatedPostCallerInvoked:true,
+  uncorrelatedPostCallerDenied:false,uncorrelatedPostDenialReason:'READ_POLICY_MAY_ALLOW',url:'https://private.example/?token=SECRET',body:'SECRET'};
+ const closed=projectNativeRouterFailure(raw);
+ assert.equal(closed.uncorrelatedPostDenialReason,'READ_POLICY_MAY_ALLOW');assert.equal(closed.uncorrelatedPostCallerInvoked,true);
+ assert.equal(safeNativeRouterFailure(closed).uncorrelatedPostCallerDenied,false);
+ assert.doesNotMatch(JSON.stringify(closed),/PRIVATE|SECRET|https:/u);
+ assert.equal(projectNativeRouterFailure({...raw,code:'NATIVE_REDIRECT_ROUTING_FAILED'}).uncorrelatedPostDenialReason,undefined);
+});
+test('native response limit retains exact bounded origin and admission evidence',()=>{
+ const raw={code:'NATIVE_RESPONSE_LIMIT',limitKind:'DECODED_BODY',limitOrigin:'NATIVE_ROUTER',officialRenderDataLimit:false,
+  recordGenerationCurrent:false,recordGenerationRetired:true,allowedBytes:2_000_000,declaredBytes:128,bodyBytes:15_187_944,totalBytes:17_000_000,
+  url:'https://private.example/?token=SECRET',headers:{cookie:'SECRET'}};
+ const closed=projectNativeRouterFailure(raw);
+ assert.equal(closed.limitOrigin,'NATIVE_ROUTER');assert.equal(closed.officialRenderDataLimit,false);
+ assert.equal(closed.bodyBytes,15_187_944);assert.deepEqual(safeNativeRouterFailure(closed),closed);
+ assert.doesNotMatch(JSON.stringify(closed),/PRIVATE|SECRET|https:/iu);
+ assert.equal(projectNativeRouterFailure({...raw,code:'NATIVE_REDIRECT_ROUTING_FAILED'}).limitOrigin,undefined);
+});
+test('native response limit retains only a complete closed official render gate',()=>{
+ const gate={nativeTransport:true,mainFrame:true,navigationRequestPresent:true,navigationStatus200:true,
+  witnessPresent:true,witnessRequestMatches:true,witnessUrlMatches:true,completedDocumentRead:true,
+  officialRootProof:false,officialSubpageProof:false,pendingSubpagePresent:false,subpageTokenPresent:false,
+  linkCount:'MULTIPLE',linkFailure:'LINK_COUNT',anchorFailure:'SIGNATURE_CHANGED',anchorOrdinal:'SECOND',
+  url:'https://private.example/?token=SECRET'};
+ const projected=projectNativeRouterFailure({code:'NATIVE_RESPONSE_LIMIT',officialRenderGate:gate});
+ assert.equal(projected.officialRenderGate.linkCount,'MULTIPLE');
+ assert.equal(projected.officialRenderGate.anchorFailure,'SIGNATURE_CHANGED');
+ assert.equal(projected.officialRenderGate.anchorOrdinal,'SECOND');
+ assert.deepEqual(sourceFailureDiagnostic({nativeRouterFailure:projected}).nativeRouterFailure,projected);
+ assert.doesNotMatch(JSON.stringify(projected),/SECRET|https:|"url":/u);
+ assert.equal(projectNativeRouterFailure({code:'NATIVE_RESPONSE_LIMIT',officialRenderGate:{...gate,mainFrame:'true'}}).officialRenderGate,undefined);
+ assert.equal(projectNativeRouterFailure({code:'NATIVE_RESPONSE_LIMIT',officialRenderGate:{...gate,anchorFailure:'PRIVATE'}}).officialRenderGate.anchorFailure,undefined);
+ assert.equal(projectNativeRouterFailure({code:'NATIVE_REDIRECT_ROUTING_FAILED',officialRenderGate:gate}).officialRenderGate,undefined);
+});
 test('redirect rejection is one closed scoped enum and arbitrary/foreign/private fields cannot enter diagnostics',()=>{
  for(const redirectRejection of stagehandRedirectRejections){
   const native={code:'NATIVE_REDIRECT_PROVENANCE_REJECTED',phase:'REDIRECT_PROVENANCE',redirectRejection,method:'GET',resourceType:'xhr'};

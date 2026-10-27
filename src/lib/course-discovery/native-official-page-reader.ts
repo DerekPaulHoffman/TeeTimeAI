@@ -6,11 +6,13 @@ import { registerFreshNativeDelegatedDocument } from "./native-official-page-att
 import { consumeDelegatedGet, type DelegatedGetGrant, type DelegatedReadBudget } from "./teeitup-delegated-booking-context";
 import type { DiscoveryTrustedContext } from "./trusted-context";
 
-export type NativeOfficialPageReader = (source: OfficialIdentitySource, pageUrl: string, deadlineAt: Date) => Promise<OfficialIdentityPage>;
+export type NativeOfficialPageReader = (source: OfficialIdentitySource, pageUrl: string, deadlineAt: Date,
+  mode?: "POSTAL" | "PHONE_LINK") => Promise<OfficialIdentityPage>;
 type Session = Pick<Awaited<ReturnType<typeof createCourseDiscoveryBrowserSession>>, "execute" | "readOfficialIdentityPage" | "close">;
 type Dependencies = Pick<DiscoveryBrowserSessionDependencies, "requestLease" | "launchBrowser"> & {
   delegatedReadBudget?: DelegatedReadBudget;
   collectPublicCourseContacts?: true;
+  allowCpsPhoneBookingContact?: true;
   trustedContext?: DiscoveryTrustedContext;
   createSession?: (input: Parameters<typeof createCourseDiscoveryBrowserSession>[0], deps: DiscoveryBrowserSessionDependencies) => Promise<Session>;
 };
@@ -30,7 +32,8 @@ export async function readNativeOfficialIdentityPage(source: OfficialIdentitySou
     ...(deps.trustedContext === undefined ? {} : { trustedContext: structuredClone(deps.trustedContext) }) },
   { requestLease: deps.requestLease, launchBrowser: deps.launchBrowser, browserTransport: "NATIVE_CHROME",
     ...(deps.delegatedReadBudget ? { delegatedReadBudget: deps.delegatedReadBudget } : {}),
-    ...(deps.collectPublicCourseContacts ? { collectPublicCourseContacts: true } : {}) });
+    ...(deps.collectPublicCourseContacts ? { collectPublicCourseContacts: true } : {}),
+    ...(deps.allowCpsPhoneBookingContact ? { allowCpsPhoneBookingContact: true } : {}) });
   let capturedPage: OfficialIdentityPage | undefined;
   try {
     // loading covers every admitted resource, including ancillary reads. Wait
@@ -38,7 +41,8 @@ export async function readNativeOfficialIdentityPage(source: OfficialIdentitySou
     // these diagnostic readiness facts never substitute for identity proof.
     const ready = (current: DiscoveryBrowserSnapshot) => current.officialSourceDiagnostic?.rawOfficialCaptured === true &&
       current.officialSourceDiagnostic.currentOfficialDocument === true && current.officialSourceDiagnostic.officialProvenance === true &&
-      current.officialSourceDiagnostic.renderedAddressesPresent === true && current.officialSourceDiagnostic.renderedLinksPresent === true;
+      (deps.allowCpsPhoneBookingContact ? current.officialSourceDiagnostic.renderedHeadingsPresent === true :
+        current.officialSourceDiagnostic.renderedAddressesPresent === true) && current.officialSourceDiagnostic.renderedLinksPresent === true;
     const readable = (current: DiscoveryBrowserSnapshot) => {
       const lineage = current.nativeDocumentRedirects;
       const redirected = lineage && lineage.length > 0 && lineage.length <= 5 && lineage[0].fromUrl === pageUrl &&
@@ -49,10 +53,15 @@ export async function readNativeOfficialIdentityPage(source: OfficialIdentitySou
         current.browserTransport === "NATIVE_CHROME" && !current.accessRequirementObserved && !current.nativeFirstFatal;
     };
     let current = await session.execute({ id: 1, action: "open", url: pageUrl });
-    for (let count = 0; readable(current) && !ready(current) && count < 4 && Date.now() < deadline.getTime(); count++) current = await session.execute({ id: count + 2, action: "observe" });
-    if (!readable(current) || !ready(current))
-      throw new Error("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
-    const page = await session.readOfficialIdentityPage();
+    let page: OfficialIdentityPage | undefined;
+    for (let count = 0; count <= 4 && readable(current) && Date.now() < deadline.getTime(); count++) {
+      if (ready(current)) {
+        try { page = await session.readOfficialIdentityPage(); break; }
+        catch (error) { if (!deps.allowCpsPhoneBookingContact || !(error instanceof Error) || error.message !== "OFFICIAL_POSTAL_SOURCE_UNVERIFIED") throw error; }
+      }
+      if (count < 4) current = await session.execute({ id: count + 2, action: "observe" });
+    }
+    if (!readable(current) || !ready(current) || !page) throw new Error("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
     if (page.url !== current.url || page.browserTransport !== "NATIVE_CHROME" || !page.visibleEvidence || Date.now() >= deadline.getTime())
       throw new Error("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
     capturedPage = registerFreshNativeOfficialIdentityPage(page, source.officialUrl, deadline, { requestedUrl: pageUrl, redirects: current.nativeDocumentRedirects ?? [] });

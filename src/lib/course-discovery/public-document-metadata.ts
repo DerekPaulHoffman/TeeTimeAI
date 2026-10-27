@@ -13,7 +13,10 @@ export function collectNativeOfficialPublicMetadata(input: string | { venueName:
       let parent: Element | null = node, depth = 0;
       while (parent && depth++ < 32) {
         const style = getComputedStyle(parent);
+        const box = parent.getBoundingClientRect();
         if (style.display === "none" || ["hidden", "collapse"].includes(style.visibility) || style.opacity === "0" ||
+            ([style.overflowX,style.overflow].some(value => value === "hidden" || value === "clip") && box.width <= 0) ||
+            ([style.overflowY,style.overflow].some(value => value === "hidden" || value === "clip") && box.height <= 0) ||
             /\b(?:account|members?|profile|customer|checkout|payment|billing|mailing|corporate|fax|login|sign-in)\b/iu.test(
               ["id", "class", "aria-label", "title"].map(k => parent!.getAttribute(k) ?? "").join(" "))) return false;
         parent = parent.parentElement;
@@ -72,10 +75,13 @@ export function collectNativeOfficialPublicMetadata(input: string | { venueName:
     } catch { return false; }
   } };
   const headings: string[] = [], linkUrls: string[] = [], addressTexts: string[] = [], phoneTexts: string[] = [], publicRentalTexts: string[] = [], publicBusinessLabels: string[] = [];
+  let phoneTextsOmitted = false;
   const service = /\s(?:and|&)\s+([\p{L}][\p{L} -]{1,39})$/iu.exec(expectedVenueName)?.[1];
   const serviceWords = service?.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim().split(/\s+/u) ?? [];
   const brandLinks: Array<{ href: string; text: string }> = [];
-  for (const node of Array.from(document.querySelectorAll('h1,h2,h3,h4,h5,h6,a[href],address,p,div,li,td')).slice(0, 3000)) {
+  const publicNodes = Array.from(document.querySelectorAll('h1,h2,h3,h4,h5,h6,a[href],address,p,div,li,td'));
+  if (publicNodes.length > 3000) phoneTextsOmitted = true;
+  for (const node of publicNodes.slice(0, 3000)) {
     if (!(node instanceof HTMLElement) || node.closest('script,template,noscript,iframe,input,textarea,select,button,label,[contenteditable],[hidden],[inert],[aria-hidden="true"]') ||
         node.querySelector('input,textarea,select,button,label,[contenteditable]')) continue;
     const form = node.closest("form");
@@ -102,14 +108,17 @@ export function collectNativeOfficialPublicMetadata(input: string | { venueName:
     if (node instanceof HTMLAnchorElement && form && typeof input !== "string" && brandLinks.length < 20) {
       const alt = cms.logo(node); if (alt !== undefined) brandLinks.push({ href: node.href, text: alt });
     }
-    if (node instanceof HTMLAnchorElement && /^tel:/u.test(node.getAttribute("href") ?? "") && !form && value.length <= 40 && phoneTexts.length < 20) {
+    if (node instanceof HTMLAnchorElement && /^tel:/u.test(node.getAttribute("href") ?? "") && !form && value.length <= 40) {
       let context: HTMLElement | null = node, publicContact = true;
       while (context) {
         if (/(?:account|member|profile|customer|checkout|payment|billing|corporate|mailing|fax)/iu.test(
           ['id','class','aria-label','title','name'].map(k => context!.getAttribute(k) ?? '').join(' '))) publicContact = false;
         context = context.parentElement;
       }
-      if (publicContact) phoneTexts.push(value);
+      if (publicContact) {
+        if (phoneTexts.length < 20) phoneTexts.push(value);
+        else phoneTextsOmitted = true;
+      }
     }
     if (form && typeof input !== "string" && phoneTexts.length < 20 && value.length <= 40 &&
         /^(?:\+?1[ .()-]*)?\(?\d{3}\)?[ .-]*\d{3}[ .-]*\d{4}$/u.test(value) &&
@@ -135,6 +144,44 @@ export function collectNativeOfficialPublicMetadata(input: string | { venueName:
     },
   };
   const namedContactBlocks: Array<{ name: string; addressText: string; phones: Array<{ href: string; text: string }> }> = [];
+  const contactPhoneLinks: Array<{ href: string; text: string }> = [];
+  const telAnchors = Array.from(document.querySelectorAll('a[href^="tel:"]'));
+  let contactPhoneLinksOmitted = telAnchors.length > 100;
+  if (!contactPhoneLinksOmitted) for (const anchor of telAnchors) {
+    if (!(anchor instanceof HTMLAnchorElement) || anchor.closest('form') || !cms.visible(anchor)) continue;
+    let group: Element | null = anchor.parentElement, depth = 0, contactGroup = false;
+    while (group && group !== document.body && depth++ < 8) {
+      if (Array.from(group.querySelectorAll('h1,h2,h3,h4,h5,h6')).some(heading => cms.visible(heading) &&
+          heading.textContent?.replace(/\s+/gu, ' ').trim().toLowerCase() === 'contact us')) { contactGroup = true; break; }
+      group = group.parentElement;
+    }
+    if (!contactGroup) continue;
+    const value = anchor.innerText.replace(/\s+/gu, ' ').trim(), href = anchor.getAttribute('href') ?? '';
+    if (value.length > 47 || href.length > 64) { contactPhoneLinksOmitted = true; continue; }
+    if (contactPhoneLinks.length >= 20) { contactPhoneLinksOmitted = true; break; }
+    contactPhoneLinks.push({ href, text: value });
+  }
+  const publicLinkLabels: Array<{ href: string; text: string }> = [];
+  const allPublicAnchors = Array.from(document.querySelectorAll('a[href]'));
+  let publicLinkLabelsOmitted = allPublicAnchors.length > 3000;
+  if (!publicLinkLabelsOmitted) for (const anchor of allPublicAnchors) {
+    if (!(anchor instanceof HTMLAnchorElement) || anchor.closest('form') || !cms.visible(anchor)) continue;
+    const text = anchor.innerText.normalize('NFKC').replace(/\s+/gu, ' ').trim();
+    let href: URL; try { href = new URL(anchor.href); } catch { continue; }
+    if (!text || text.length > 160 || /[\u0000-\u001f\u007f]/u.test(text) || href.protocol !== 'https:' || href.username || href.password || href.port || href.hash ||
+        !/^[a-z][a-z0-9-]*\.cps\.golf$/u.test(href.hostname) || !['/','/onlineresweb/search-teetime'].includes(href.pathname)) continue;
+    if (href.pathname === '/' && href.search) continue;
+    if (href.pathname === '/onlineresweb/search-teetime') {
+      const fields = href.search.slice(1).split('&');
+      let validFields = fields.length === 2;
+      for (const field of fields) if (!/^(?:TeeOffTimeMin|TeeOffTimeMax)=(?:0|[1-9]\d?)(?:\.\d{1,15})?$/u.test(field)) validFields = false;
+      if (!validFields || new Set([...href.searchParams.keys()]).size !== 2) continue;
+      const min=Number(href.searchParams.get('TeeOffTimeMin')), max=Number(href.searchParams.get('TeeOffTimeMax'));
+      if (min < 0 || min > max || max >= 24) continue;
+    }
+    if (publicLinkLabels.length >= 120) { publicLinkLabelsOmitted = true; publicLinkLabels.length = 0; break; }
+    publicLinkLabels.push({ href: href.href, text });
+  }
   const contactCandidates: Array<{ node: Element; data: typeof namedContactBlocks[number] }> = [];
   let namedContactBlocksOmitted = false;
   const containers = Array.from(document.querySelectorAll('div,section,footer,p,li,td'));
@@ -166,5 +213,7 @@ export function collectNativeOfficialPublicMetadata(input: string | { venueName:
     }
     delegatedFrameSources.rows.push({ src, visible: visible && parent === null, srcdoc: node.hasAttribute("srcdoc"), inForm: Boolean(node.closest("form")) });
   }
-  return { title: document.title.slice(0, 500), headings, linkUrls, addressTexts, phoneTexts, brandLinks, publicRentalTexts, publicBusinessLabels, namedContactBlocks, namedContactBlocksOmitted, delegatedFrameSources };
+  return { title: document.title.slice(0, 500), headings, linkUrls, addressTexts, phoneTexts, phoneTextsOmitted, contactPhoneLinks, contactPhoneLinksOmitted,
+    publicLinkLabels, publicLinkLabelsOmitted,
+    brandLinks, publicRentalTexts, publicBusinessLabels, namedContactBlocks, namedContactBlocksOmitted, delegatedFrameSources };
 }

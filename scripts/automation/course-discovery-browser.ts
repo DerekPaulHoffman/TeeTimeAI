@@ -11,6 +11,7 @@ import { inspectSevenRoomsPublicProtocol, sevenRoomsPublicRangeUrl, sevenRoomsPu
 import { safeBrowserActionIssues } from "./course-discovery-diagnostics.mjs";
 import { readNativeOfficialIdentityPage } from "../../src/lib/course-discovery/native-official-page-reader";
 import { discoveryTrustedContextSchema } from "../../src/lib/course-discovery/trusted-context";
+import { fixedInspectionFrameWitnessSchema } from "../../src/lib/course-discovery/fixed-inspection-frame-witness";
 
 function publicFailureCode(error: unknown) {
   if (error instanceof z.ZodError) return "BROWSER_ACTION_SCHEMA_INVALID";
@@ -127,9 +128,13 @@ async function main() {
     const trustedContext = discoveryTrustedContextSchema.optional().parse(value.trustedContext);
     const result = await executeAccessRecipe(recipe, accessExecutionInputSchema.parse(value.input), { deadlineAt, requestLease, trustedContext,
       ...(configuredTransport === "NATIVE_CHROME" ? { localCapabilities: ["LOCAL_CHROME"] as const,
-        readNativeOfficialPage: (source, url, deadline) => readNativeOfficialIdentityPage(source, url, deadline, { requestLease, trustedContext,
-          ...(recipe.engine === "EXISTING_ADAPTER" && recipe.adapter.family === "CPS" && recipe.adapter.officialPostalConflictProof
-            ? { collectPublicCourseContacts: true } : {}) }) } : {}) });
+        readNativeOfficialPage: (source, url, deadline, mode) => readNativeOfficialIdentityPage(source, url, deadline, { requestLease, trustedContext,
+          ...(recipe.engine === "EXISTING_ADAPTER" && recipe.adapter.family === "CPS" &&
+            (recipe.adapter.officialPostalConflictProof || recipe.adapter.officialPhoneBookingProof)
+            ? { collectPublicCourseContacts: true } : {}),
+          ...(recipe.engine === "EXISTING_ADAPTER" && recipe.adapter.family === "CPS" &&
+            recipe.adapter.officialPhoneBookingProof && mode === "PHONE_LINK"
+            ? { allowCpsPhoneBookingContact: true } : {}) }) } : {}) });
     process.stdout.write(`${JSON.stringify(result)}\n`);
     return;
   }
@@ -153,9 +158,14 @@ async function main() {
   const trustedText = trustedAt >= 0 ? args[trustedAt + 1] : undefined;
   if (trustedAt >= 0 && (!trustedText || Buffer.byteLength(trustedText) > 1024)) throw new Error("INVALID_REQUEST_CONTEXT");
   const trustedContext = trustedText === undefined ? undefined : discoveryTrustedContextSchema.parse(JSON.parse(trustedText));
+  const frameAt = args.indexOf("--fixed-inspection-frame-witness"), frameText = frameAt >= 0 ? args[frameAt + 1] : undefined;
+  if (frameAt >= 0 && (process.env.COURSE_DISCOVERY_FIXED_INSPECTION !== "1" || configuredTransport !== "NATIVE_CHROME" ||
+      !frameText || Buffer.byteLength(frameText) > 10_000)) throw new Error("FIXED_INSPECTION_FRAME_SCOPE_INVALID");
+  const fixedInspectionFrameWitness = frameText === undefined ? undefined : fixedInspectionFrameWitnessSchema.parse(JSON.parse(frameText));
   const session = await createCourseDiscoveryBrowserSession({ deadlineAt, initialUrls, timeZone, venueName, venueAddress, venueOfficialUrl,
     ...(requestedInput === undefined ? {} : { requestedInput }), ...(trustedContext === undefined ? {} : { trustedContext }) }, { requestLease,
-    browserTransport: configuredTransport as "PINNED_HTTP" | "NATIVE_CHROME" });
+    browserTransport: configuredTransport as "PINNED_HTTP" | "NATIVE_CHROME",
+    ...(fixedInspectionFrameWitness === undefined ? {} : { fixedInspectionFrameWitness }) });
   const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
   const timer = setTimeout(() => { input.close(); void session.close(); }, Math.max(1, deadlineAt.getTime() - Date.now()));
   try {

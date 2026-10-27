@@ -562,11 +562,21 @@ function safeBrowserRequestFailures(value) {
   }).filter(Boolean);
 }
 /** Native controller facts are diagnostic only, never navigation authority. */
+const officialRenderGateBooleanKeys = ["nativeTransport", "mainFrame", "navigationRequestPresent", "navigationStatus200", "witnessPresent",
+  "witnessRequestMatches", "witnessUrlMatches", "completedDocumentRead", "officialRootProof", "officialSubpageProof",
+  "pendingSubpagePresent", "subpageTokenPresent"];
+const officialRenderLinkCounts = ["ZERO", "ONE", "MULTIPLE", "NOT_EVALUATED"];
+const officialRenderLinkFailures = ["NONE", "ENTRY_PRECONDITION", "ROOT_WITNESS", "LINK_COUNT", "LINK_RENDERED", "DOCUMENT_CHANGED", "PENDING_SET"];
+const officialRenderAnchorFailures = ["NONE", "CANDIDATE_BOUND", "LOCATOR_COUNT", "NOT_RENDERED", "NOT_ENABLED", "SIGNATURE_CHANGED",
+  "HREF_MISMATCH", "RAW_HREF_MISSING", "IN_FORM", "DOWNLOAD", "HANDLER", "ARIA_DISABLED", "TARGET", "ROLE", "DOCUMENT_CHANGED"];
+const officialRenderAnchorOrdinals = ["NONE", "FIRST", "SECOND", "THIRD_TO_EIGHTH"];
 function safeNativeRequestDiagnostic(value) {
   if (!value || typeof value !== "object" || Array.isArray(value) || typeof value.code !== "string" || !/^NATIVE_[A-Z_0-9]{1,73}$/u.test(value.code)) return undefined;
   const result = { code: value.code };
   for (const [key, allowed] of [["operation", nativeRouterOperations], ["errorName", nativeRouterErrorNames], ["errorCategory", nativeRouterErrorCategories]])
     if (allowed.includes(value[key])) result[key] = value[key];
+  if (result.operation === "RESPONSE_METADATA" && ["RETIRED_RESPONSE_ABORT", "ACTIVE_RESPONSE_ERROR_ABORT", "OTHER_RESPONSE_METADATA"].includes(value.responseFailureBranch))
+    result.responseFailureBranch = value.responseFailureBranch;
   if (typeof value.requestUrlSha256 === "string" && /^[a-f0-9]{64}$/u.test(value.requestUrlSha256)) result.requestUrlSha256 = value.requestUrlSha256;
   if (["RESPONSE_WAIT", "CONTINUE_RESPONSE_ACK", "LOADER_IDENTITY_WAIT", "LOADER_IDENTITY", "LOADER_OWNER", "REDIRECT_GENERATION", "REDIRECT_PROVENANCE", "DOCUMENT_INTENT", "DOCUMENT_DRAIN"].includes(value.phase)) result.phase = value.phase;
   if (safeObservedUrl(value.url)) {
@@ -580,16 +590,36 @@ function safeNativeRequestDiagnostic(value) {
     } catch { /* Malformed encoded paths never enter diagnostics. */ }
   }
   if (["GET", "HEAD", "POST", "OPTIONS", "PUT", "PATCH", "DELETE", "CONNECT", "TRACE", "OTHER"].includes(value.method)) result.method = value.method;
+  if (value.code === "NATIVE_RESPONSE_LIMIT") {
+    if (["DECLARED_INVALID", "DECLARED_TOO_LARGE", "DECODED_BODY", "TOTAL_DECODED"].includes(value.limitKind)) result.limitKind = value.limitKind;
+    if (["NATIVE_ROUTER", "BROWSER_SESSION"].includes(value.limitOrigin)) result.limitOrigin = value.limitOrigin;
+    for (const [key, maximum] of Object.entries({ allowedBytes: 48_000_000, declaredBytes: Number.MAX_SAFE_INTEGER, bodyBytes: 100_000_000, totalBytes: 100_000_000 }))
+      if (Number.isSafeInteger(value[key]) && value[key] >= 0 && value[key] <= maximum) result[key] = value[key];
+    const gate = value.officialRenderGate;
+    if (gate && typeof gate === "object" && !Array.isArray(gate) && officialRenderGateBooleanKeys.every(key => typeof gate[key] === "boolean") &&
+        officialRenderLinkCounts.includes(gate.linkCount) && officialRenderLinkFailures.includes(gate.linkFailure))
+      result.officialRenderGate = { ...Object.fromEntries(officialRenderGateBooleanKeys.map(key => [key, gate[key]])),
+        linkCount: gate.linkCount, linkFailure: gate.linkFailure,
+        ...(officialRenderAnchorFailures.includes(gate.anchorFailure) && officialRenderAnchorOrdinals.includes(gate.anchorOrdinal)
+          ? { anchorFailure: gate.anchorFailure, anchorOrdinal: gate.anchorOrdinal } : {}) };
+  }
   if (["GET", "HEAD", "POST", "OTHER"].includes(value.redirectParentMethod)) result.redirectParentMethod = value.redirectParentMethod;
   if (Number.isInteger(value.redirectParentStatus) && value.redirectParentStatus >= 100 && value.redirectParentStatus <= 599) result.redirectParentStatus = value.redirectParentStatus;
   if (["document", "script", "stylesheet", "xhr", "fetch", "image", "media", "font", "eventsource", "websocket", "manifest", "ping", "other"].includes(value.resourceType)) result.resourceType = value.resourceType;
   for (const [key, maximum] of Object.entries({ interceptedRequests: 1025, recordCount: 1024, requestLimit: 1024, postDataBytes: 1_000_000 }))
     if (Number.isSafeInteger(value[key]) && value[key] >= 0 && value[key] <= maximum) result[key] = value[key];
   for (const key of ["framePresent", "rootFrame", "networkIdPresent", "duplicateRequestId", "hasPostData", "postDataPresent",
+    "missingNetworkClosed", "missingNetworkAborted", "missingNetworkGenerationRetired", "missingNetworkBoundaryPending", "missingNetworkAwaitingDocument",
+    "uncorrelatedPostCallerInvoked", "uncorrelatedPostCallerDenied",
+    "officialRenderDataLimit", "recordGenerationCurrent", "recordGenerationRetired", "recordAdmitted", "recordResponsePaused", "recordFailed", "recordComplete", "recordHandlerDone", "recordTerminalObserved",
+    "responseIdentityMatched", "correlatedNetworkLoadingFailed", "correlatedNetworkLoadingFinished", "declaredLengthPresent", "documentResponse", "ancillaryResponse",
     "identityPresent", "loaderPresent", "loaderKnown", "identityFresh", "identityUrlMatches", "identityMethodMatches", "identityKindMatches", "identityFrameMatches",
     "parentPresent", "awaitingDocument", "parentCurrentGeneration", "redirectParentComplete", "redirectLocationMatches", "redirectNetworkMatches", "redirectChildBodyAbsent", "redirectBootstrapAttested",
     "documentCommitted", "documentIntentPresent", "documentIntentUsed", "sourceResponseComplete", "successorTerminalFailed"])
     if (typeof value[key] === "boolean") result[key] = value[key];
+  if (value.code === "NATIVE_REDIRECT_NETWORK_ID_MISSING" && ["REQUEST_SHAPE", "BODY_LIMIT", "URL_POLICY", "FORBIDDEN_REQUEST_URL", "PROTECTED_NAMESPACE", "CALLER_SESSION_UNAVAILABLE",
+    "MINDBODY_HEADER_UNCERTAIN", "USCHEDULE_HEADER_UNCERTAIN", "READ_POLICY_MAY_ALLOW", "DEFINITELY_DENIED", "ERROR_UNCERTAIN"].includes(value.uncorrelatedPostDenialReason))
+    result.uncorrelatedPostDenialReason = value.uncorrelatedPostDenialReason;
   return result;
 }
 function safeNativeBrowserDiagnostics(value) {
@@ -668,6 +698,24 @@ function safeFixedReaderFailureDiagnostics(value) {
   }
   return result;
 }
+/** Failure-only, closed metadata from the owned browser. Never source authority. */
+export function safeFixedInspectionSourceDiagnostic(value) {
+  const result = {}, officialBrowser = safeOfficialBrowserDiagnostics(value), official = officialBrowser.officialSourceDiagnostic;
+  if (official) result.officialSourceDiagnostic = official;
+  if (officialBrowser.navigationFailureKind) result.navigationFailureKind = officialBrowser.navigationFailureKind;
+  const identity = value?.officialIdentityReadDiagnostic;
+  const keys = ["noTerminalFailure", "sessionOpen", "noAccessRequirement", "noNativeFatal", "status200", "snapshotNative",
+    "capturedPagePresent", "captureUrlMatches", "captureFreshWithin5s", "capturedNative", "capturedTimeOriginMatches",
+    "officialDocumentVerified", "visibleAddressesPresent", "visibleLinksPresent", "currentMainDocumentMatches"];
+  if (identity && typeof identity === "object" && !Array.isArray(identity) && identity.gates && typeof identity.gates === "object" &&
+      !Array.isArray(identity.gates) && keys.every(key => typeof identity.gates[key] === "boolean") &&
+      (identity.captureAgeMs === null || Number.isSafeInteger(identity.captureAgeMs) && identity.captureAgeMs >= 0 && identity.captureAgeMs <= 120_000))
+    result.officialIdentityReadDiagnostic = { captureAgeMs: identity.captureAgeMs,
+      gates: Object.fromEntries(keys.map(key => [key, identity.gates[key]])) };
+  const cps = safeFixedReaderFailureDiagnostics(value).cpsPostalContact;
+  if (cps) result.cpsPostalContact = cps;
+  return Object.keys(result).length ? result : undefined;
+}
 /** Mirror the native delegated reader's closed failure-only grammar. */
 export function safeTeeItUpDelegationDiagnostic(value) {
   const stages = ["CAPABILITY", "SOURCE", "ROOT_READ", "ROOT_FRESH", "ROOT_IDENTITY", "ROOT_LINK", "HOP_ONE_READ", "NATIVE_DOCUMENT_READ",
@@ -701,6 +749,7 @@ export function safeBrowserFailureDiagnostics(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const teeItUpDelegation = safeTeeItUpDelegationDiagnostic(value.teeItUpDelegation);
   const adapterRead = safeFixedAdapterReadDiagnostic(value.adapterRead);
+  const officialIdentityReadDiagnostic = safeFixedInspectionSourceDiagnostic(value)?.officialIdentityReadDiagnostic;
   return { requests: (Array.isArray(value.requests) ? value.requests : []).slice(-12).map(request => {
     if (!request || typeof request !== "object" || Array.isArray(request)) return undefined;
     const safe = safeReplayDiagnostic({ ...request, code: "REQUEST_STATE" });
@@ -711,6 +760,7 @@ export function safeBrowserFailureDiagnostics(value) {
       ...(Number.isInteger(request.status) && request.status >= 100 && request.status <= 599 ? { status: request.status } : {}),
       ...(/^[A-Z_0-9]{1,80}$/u.test(request.blockedReason ?? "") ? { blockedReason: request.blockedReason } : {}) };
   }).filter(Boolean), requestFailures: safeBrowserRequestFailures(value.requestFailures), ...safeNativeBrowserDiagnostics(value), ...safeOfficialBrowserDiagnostics(value),
+  ...(officialIdentityReadDiagnostic ? { officialIdentityReadDiagnostic } : {}),
   ...safeFixedReaderFailureDiagnostics(value),
   ...(teeItUpDelegation ? { teeItUpDelegation } : {}),
   ...(adapterRead ? { adapterRead } : {}),
@@ -1068,15 +1118,21 @@ export function createDiscoveryProcess({ executable, args, cwd, environment, sig
   };
 }
 
-export function createDiscoveryBrowser({ cwd, deadlineAt, initialUrls, timeZone = "UTC", venueName, venueAddress, venueOfficialUrl, requestedInput, trustedContext, helperEnvironment = {}, signal, processFactory = createDiscoveryProcess }) {
+export function createDiscoveryBrowser({ cwd, deadlineAt, initialUrls, timeZone = "UTC", venueName, venueAddress, venueOfficialUrl, requestedInput, trustedContext,
+  fixedInspection = false, fixedInspectionFrameWitness, helperEnvironment = {}, signal, processFactory = createDiscoveryProcess }) {
+  if (fixedInspectionFrameWitness !== undefined && (fixedInspection !== true || JSON.stringify(fixedInspectionFrameWitness).length > 10_000))
+    throw new Error("FIXED_INSPECTION_FRAME_SCOPE_INVALID");
   const channel = processFactory({ executable: process.execPath,
     args: [join(cwd, "node_modules/tsx/dist/cli.mjs"), join(cwd, "scripts/automation/course-discovery-browser.ts"), "--deadline", deadlineAt, "--initial-urls", JSON.stringify(initialUrls),
       ...(venueName ? ["--venue-name", venueName] : []), ...(venueAddress ? ["--venue-address", venueAddress] : []),
       ...(venueOfficialUrl ? ["--venue-official-url", venueOfficialUrl] : []),
       ...(requestedInput === undefined ? [] : ["--requested-input", JSON.stringify(requestedInput)]),
       ...(trustedContext === undefined ? [] : ["--trusted-context", JSON.stringify(trustedContext)]),
+      ...(fixedInspectionFrameWitness === undefined ? [] : ["--fixed-inspection-frame-witness", JSON.stringify(fixedInspectionFrameWitness)]),
       "--time-zone", timeZone],
-    cwd, environment: { ...discoveryProcessEnvironment(), ...helperEnvironment }, signal, timeoutMs: Math.min(90_000, Math.max(1, Date.parse(deadlineAt) - Date.now())),
+    cwd, environment: { ...discoveryProcessEnvironment(), ...helperEnvironment,
+      ...(fixedInspectionFrameWitness === undefined ? {} : { COURSE_DISCOVERY_FIXED_INSPECTION: "1" }) },
+    signal, timeoutMs: Math.min(90_000, Math.max(1, Date.parse(deadlineAt) - Date.now())),
   });
   let closed = false, lastSnapshot, lastProof, lastGesture;
   return { async request(value) {

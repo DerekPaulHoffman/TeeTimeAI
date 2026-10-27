@@ -3,7 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { runCourseDiscoveryStagehandWorker, prepareCourseDiscoveryStagehandWorker } from "../../../scripts/automation/course-discovery-stagehand-worker.mjs";
-import { createDiscoveryBrowser, createDiscoveryProcess, verifyDiscoveryCandidate } from "../../../scripts/automation/course-discovery-worker.mjs";
+import { createDiscoveryBrowser, createDiscoveryProcess, verifyDiscoveryCandidate, safeBrowserFailureDiagnostics,
+  safeFixedInspectionSourceDiagnostic } from "../../../scripts/automation/course-discovery-worker.mjs";
 import { createStagehandSourceCheckpoint, readStagehandSourceCheckpoint, stagehandDataHash, publicStagehandSourceUrl,
   } from "../../../scripts/automation/course-discovery-stagehand-source.mjs";
 import { observedInspectionPath, currentStagehandInspectionDiagnostic, inspectionReadability, safeInspectionReadability } from "../../../scripts/automation/course-discovery-stagehand-inspection.mjs";
@@ -602,6 +603,38 @@ describe("regular Stagehand source worker", () => {
     expect(JSON.stringify(saved)).not.toContain("PRIVATE");
     expect(t.close).toHaveBeenCalledOnce(); expect(t.client.candidate).not.toHaveBeenCalled();
     expect(t.executeRecipe).not.toHaveBeenCalled(); expect(t.client.activate).not.toHaveBeenCalled();
+  });
+
+  it("persists only bounded official identity, postal and configuration failure gates", async () => {
+    const t = setup(), original = t.request.getMockImplementation()!;
+    const keys = ["noTerminalFailure", "sessionOpen", "noAccessRequirement", "noNativeFatal", "status200", "snapshotNative",
+      "capturedPagePresent", "captureUrlMatches", "captureFreshWithin5s", "capturedNative", "capturedTimeOriginMatches",
+      "officialDocumentVerified", "visibleAddressesPresent", "visibleLinksPresent", "currentMainDocumentMatches"];
+    const gates = Object.fromEntries(keys.map(key => [key, key !== "visibleAddressesPresent"]));
+    const raw = { navigationFailureKind: "TIMEOUT", officialIdentityReadDiagnostic: { captureAgeMs: 5100, gates: { ...gates, token: "PRIVATE" }, url: "PRIVATE_URL" },
+      officialSourceDiagnostic: { stage: "INSPECTOR_REJECTED", uscheduleConfigurationGate: "SELECTORS", rawOfficialCaptured: true,
+        currentOfficialDocument: true, body: "PRIVATE_BODY" },
+      cpsPostalContact: { gates: { freshNativeOfficialPage: true, canonicalAddressValid: false, address: "PRIVATE_ADDRESS" },
+        native: { attestationPresent: true, officialRootMatches: false, token: "PRIVATE" } },
+      requests: [{ url: "https://private.example/?token=PRIVATE" }] };
+    const transported = safeBrowserFailureDiagnostics(raw);
+    expect(transported?.officialIdentityReadDiagnostic).toEqual({ captureAgeMs: 5100, gates });
+    const closed = safeFixedInspectionSourceDiagnostic(transported);
+    expect(closed).toEqual({ navigationFailureKind: "TIMEOUT", officialSourceDiagnostic: { stage: "INSPECTOR_REJECTED", uscheduleConfigurationGate: "SELECTORS",
+      rawOfficialCaptured: true, currentOfficialDocument: true }, officialIdentityReadDiagnostic: { captureAgeMs: 5100, gates },
+      cpsPostalContact: { gates: { freshNativeOfficialPage: true, canonicalAddressValid: false },
+        native: { attestationPresent: true, officialRootMatches: false } } });
+    const primary = Object.assign(Error("OFFICIAL_POSTAL_SOURCE_UNVERIFIED"), { code: "OFFICIAL_POSTAL_SOURCE_UNVERIFIED",
+      details: { browserDiagnostics: transported } });
+    t.request.mockImplementation(async action => { if (action.action === "inspect_adapter") throw primary; return original(action); });
+    await expect(t.run()).rejects.toBe(primary);
+    const saved = t.checkpoints.at(-1) as { stagehandFailure: { entries: Array<Record<string, unknown>> } };
+    expect(saved.stagehandFailure.entries[0]).toMatchObject({ phase: "FIXED_INSPECTION", code: "OFFICIAL_POSTAL_SOURCE_UNVERIFIED",
+      fixedInspectionDiagnostic: closed, fixedInspectionDiagnosticSha256: stagehandDataHash(closed) });
+    expect(readStagehandFailure({ ...t.f.job, checkpoint: saved }, t.f.clock)).toEqual(saved.stagehandFailure);
+    expect(currentStagehandInspectionDiagnostic(primary, t.f.job, t.f.clock, t.f.clock)).toEqual(closed);
+    expect(JSON.stringify(saved.stagehandFailure.entries[0].fixedInspectionDiagnostic)).not.toMatch(/PRIVATE|https:\/\//u);
+    expect(t.client.candidate).not.toHaveBeenCalled(); expect(t.client.activate).not.toHaveBeenCalled();
   });
 
   it("retains the closed delegated gate in the failed inspection receipt without replacing its primary", async () => {

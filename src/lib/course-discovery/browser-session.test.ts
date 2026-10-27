@@ -34,9 +34,24 @@ describe("discovery browser public protocol", () => {
     for (const uncertain of [() => undefined as never, () => { throw Error("POLICY_UNCERTAIN"); }])
       expect(discoveryDefiniteUncorrelatedPostDenial(request, "https://example.org/", uncertain, addHeaders)).toBe(false);
     expect(discoveryDefiniteUncorrelatedPostDenial(request, "https://example.org/", () => false, () => false)).toBe(false);
+    const reasons: string[] = [];
+    expect(discoveryDefiniteUncorrelatedPostDenial(request, "https://example.org/", isAnonymousBrowserReadPost, addHeaders, reason => reasons.push(reason))).toBe(true);
+    expect(reasons).toEqual(["DEFINITELY_DENIED"]);
+    expect(discoveryDefiniteUncorrelatedPostDenial(request, "https://example.org/", isAnonymousBrowserReadPost, addHeaders, () => { throw Error("DIAGNOSTIC_ONLY"); })).toBe(true);
+    const forbidden = { ...request, url: "https://example.org/checkout/submit" };
+    const forbiddenReasons: string[] = [];
+    expect(discoveryDefiniteUncorrelatedPostDenial(forbidden, "https://example.org/", () => true, addHeaders, reason => { forbiddenReasons.push(reason); })).toBe(true);
+    expect(forbiddenReasons).toEqual(["FORBIDDEN_REQUEST_URL"]);
+    expect(discoveryDefiniteUncorrelatedPostDenial(forbidden, "https://example.org/account/", () => false, addHeaders)).toBe(false);
+    expect(discoveryDefiniteUncorrelatedPostDenial({ ...request, url: "https://sc.cps.golf/Public/(S(abcdefghijklmnopqrstuvwx))/Home/Index" },
+      "https://example.org/", () => false, addHeaders)).toBe(false);
+    const typedReasons: string[] = [];
+    expect(discoveryDefiniteUncorrelatedPostDenial({ ...request, url: "https://api.membersports.com/api/v1/golfclubs/onlineBookingTeeTimes" },
+      "https://example.org/", () => false, addHeaders, reason => { typedReasons.push(reason); })).toBe(false);
+    expect(typedReasons).toEqual(["URL_POLICY"]);
   });
   it.each(["REX", "Membersports", "document", "OPTIONS", "GET", "body", "unsafe document", "unsafe URL", "Mindbody private header"])
-  ("does not classify a possible typed/private or uncertain %s request as definite denial", mode => {
+  ("classifies possible typed/uncertain %s without granting a read", mode => {
     const request = { url: "https://example.org/data", method: "POST" as const, resourceType: "xhr" as const, headers: { "content-type": "application/json" } as Record<string, string>, body: '{}' };
     let documentUrl = "https://example.org/";
     if (mode === "REX") request.url = "https://public.reservewithrex.com/api/venue/get";
@@ -52,7 +67,7 @@ describe("discovery browser public protocol", () => {
     if (mode === "unsafe URL") request.url = "https://example.org/checkout/";
     if (mode === "Mindbody private header") request.headers["next-action"] = "unverified-action";
     const readPost = vi.fn(() => false);
-    expect(discoveryDefiniteUncorrelatedPostDenial(request, documentUrl, readPost, () => true)).toBe(false);
+    expect(discoveryDefiniteUncorrelatedPostDenial(request, documentUrl, readPost, () => true)).toBe(mode === "unsafe URL");
     expect(readPost).not.toHaveBeenCalled();
   });
   it("keeps the generic request allocation and grants only the private fixed Mindbody profile", () => {
@@ -196,6 +211,53 @@ describe("discovery browser public protocol", () => {
 
 const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
+  it("admits only the current exact fixed inspection iframe on a verified official subpage", async () => {
+    const official = "https://fixed-frame.example/", subpage = `${official}golf`, frame = `${official}html/widget`;
+    const material = readFileSync("src/lib/course-discovery/cps-browser-wiring.test.ts", "utf8");
+    const tls = (key: string): string => JSON.parse(new RegExp(`^const ${key} = (".*");$`, "m").exec(material)![1]);
+    const html = (path: string) => path === "/" ? `<h1>Public Golf Course</h1><p>10 Public Road, Example, NY 12345, USA</p><a href="${subpage}">Golf Course</a>`
+      : path === "/golf" ? `<h1>Golf Course</h1><iframe src="${frame}" style="width:400px;height:300px" title="Embedded Content"></iframe>`
+        : "<h1>Public availability</h1>";
+    const server = createServer({ key: tls("fixtureKey"), cert: tls("fixtureCertificate") }, (request, response) => {
+      response.writeHead(200, { "content-type": "text/html" }).end(`<html><body>${html(String(request.url))}</body></html>`);
+    });
+    const originalProxy = nativeBrowser.createNativePublicBrowserProxy;
+    let session: Awaited<ReturnType<typeof createCourseDiscoveryBrowserSession>> | undefined;
+    let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
+    let proxy: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+      const port = (server.address() as AddressInfo).port;
+      proxy = vi.spyOn(nativeBrowser, "createNativePublicBrowserProxy").mockImplementation(input => originalProxy({ ...input, requireHostAdmission: true }, {
+        resolveAddresses: async hostname => {
+          if (hostname !== "fixed-frame.example") throw Error("UNOWNED_FIXTURE_HOST");
+          return [{ address: "93.184.216.34", family: 4 }];
+        }, connect: () => connect({ host: "127.0.0.1", port }),
+      }));
+      session = await createCourseDiscoveryBrowserSession({ initialUrls: [official], venueOfficialUrl: official,
+        venueName: "Public Golf Course", venueAddress: "10 Public Road, Example, NY 12345, USA",
+        deadlineAt: new Date(Date.now() + 30_000) }, { browserTransport: "NATIVE_CHROME",
+        fixedInspectionFrameWitness: { kind: "FIXED_INSPECTION_SOURCE_FRAME", officialUrl: official,
+          parentUrl: subpage, frameUrl: frame, sourceReportSha256: "a".repeat(64) },
+        requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+        launchBrowser: async () => browser = await launchPublicReadBrowser({ executablePath, headless: true, args: ["--ignore-certificate-errors"] }),
+      });
+      const home = await session.execute({ id: 1, action: "open", url: official });
+      expect(home.navigationStatus).toBe(200);
+      const golf = await session.execute({ id: 2, action: "open", url: home.controls.find(row => row.href === subpage)!.href });
+      expect(golf.frames).toContainEqual({ url: frame, source: "FIXED_INSPECTION_FRAME_SRC" });
+      const page = browser!.contexts().flatMap(context => context.pages()).find(page => page.url() === subpage)!;
+      await page.locator("iframe").evaluate(node => node.setAttribute("src", "/html/changed"));
+      await expect(session.execute({ id: 3, action: "open", url: frame })).rejects.toThrow("FIXED_INSPECTION_FRAME_STALE");
+      const refreshed = await session.execute({ id: 4, action: "observe" });
+      expect(refreshed.frames).not.toContainEqual({ url: frame, source: "FIXED_INSPECTION_FRAME_SRC" });
+      await page.locator("iframe").evaluate(node => node.setAttribute("src", "/html/widget"));
+      const restored = await session.execute({ id: 5, action: "observe" });
+      expect(restored.frames).toContainEqual({ url: frame, source: "FIXED_INSPECTION_FRAME_SRC" });
+      const opened = await session.execute({ id: 6, action: "open", url: frame });
+      expect(opened.text).toContain("Public availability");
+    } finally { await session?.close(); proxy?.mockRestore(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
+  }, 40_000);
   it.each(["duplicates", "differentDestination", "unsafeForm", "staleForm"] as const)
   ("earns one native public-entry disclosure and freshly reveals its exact public frame: %s", async mode => {
     const official = "https://owned-disclosure.example/", href = official + "public-entry", frame = "https://app.acuityscheduling.com/schedule.php?owner=123456&ref=embedded_csp";
@@ -416,15 +478,20 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       }
     } finally { await session?.close(); proxy?.mockRestore(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
   }, 35_000);
-  it.each(["linked", "seeded", "removed", "replacement", "crossSite"] as const)("binds an official subpage placeholder to a fresh root link and exact completed document: %s", async mode => {
+  it.each(["linked", "seeded", "removed", "replacement", "crossSite", "duplicateValid", "duplicateStale", "duplicateHidden", "duplicateForm", "duplicateHandler",
+    "duplicateInvalidFirst", "duplicateInvalidSecond", "duplicateAllInvalid", "duplicateAllHidden", "duplicateAllForm", "duplicateAllHandler",
+    "duplicateOtherHref", "duplicateExcess", "differentHrefOnly"] as const)("binds an official subpage placeholder to a fresh root link and exact completed document: %s", async mode => {
     const official = "https://owned-subpage-course.example/";
     const subpage = mode === "crossSite" ? "https://owned-subpage-other.example/lessons" : official + "lessons";
     const destination = "https://owned-subpage-booking.example/services";
     const material = readFileSync("src/lib/course-discovery/cps-browser-wiring.test.ts", "utf8");
     const tls = (name: string): string => JSON.parse(new RegExp(`^const ${name} = (".*");$`, "m").exec(material)![1]);
     const reads: string[] = [];
+    const extra = mode.startsWith("duplicate") ? mode === "duplicateExcess"
+      ? Array.from({ length: 8 }, (_, index) => `<a id="secondary-${index}" href="${subpage}">LESSONS ${index + 2}</a>`).join("")
+      : `<a id="secondary" href="${mode === "duplicateOtherHref" ? official + "other" : subpage}">GOLF COURSE</a>` : "";
     const root = '<!doctype html><html><head><link rel="icon" href="data:,"></head><body><h1>Official public course</h1>' +
-      `<a id="lessons" href="${subpage}">LESSONS</a></body></html>`;
+      `<a id="lessons" href="${mode === "differentHrefOnly" ? official + "other" : subpage}">LESSONS</a>${extra}</body></html>`;
     const lesson = '<!doctype html><html><head><link rel="icon" href="data:,"></head><body><h1>Public lessons</h1>' +
       '<a id="bay" href="#">Book Bay 1</a><script>document.querySelector("#bay").addEventListener("click",event=>{' +
       `event.preventDefault();location.assign("${destination}")` + '})</script></body></html>';
@@ -452,11 +519,35 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
           const page = browser!.contexts().flatMap(context => context.pages()).find(value => value.url() === official)!;
           await page.locator("#lessons").evaluate(element => element.remove());
         }
+        if (["duplicateStale", "duplicateHidden", "duplicateForm", "duplicateHandler", "duplicateInvalidFirst", "duplicateInvalidSecond",
+          "duplicateAllInvalid", "duplicateAllHidden", "duplicateAllForm", "duplicateAllHandler"].includes(mode)) {
+          const page = browser!.contexts().flatMap(context => context.pages()).find(value => value.url() === official)!;
+          await page.locator(mode === "duplicateInvalidFirst" ? "#lessons" : "#secondary").evaluate((element, change) => {
+            if (change === "duplicateStale") (element as HTMLAnchorElement).href = "/changed";
+            if (["duplicateHidden", "duplicateAllHidden"].includes(change)) (element as HTMLElement).style.display = "none";
+            if (["duplicateForm", "duplicateAllForm"].includes(change)) { const form = document.createElement("form"); element.parentElement?.insertBefore(form, element); form.appendChild(element); }
+            if (["duplicateHandler", "duplicateAllHandler"].includes(change)) element.setAttribute("onclick", "return false");
+            if (["duplicateInvalidFirst", "duplicateInvalidSecond", "duplicateAllInvalid"].includes(change)) element.setAttribute("target", "_blank");
+          }, mode);
+          if (["duplicateAllInvalid", "duplicateAllHidden", "duplicateAllForm", "duplicateAllHandler"].includes(mode))
+            await page.locator("#lessons").evaluate((element, change) => {
+              if (change === "duplicateAllInvalid") element.setAttribute("target", "_blank");
+              if (change === "duplicateAllHidden") (element as HTMLElement).style.display = "none";
+              if (change === "duplicateAllForm") { const form = document.createElement("form"); element.parentElement?.insertBefore(form, element); form.appendChild(element); }
+              if (change === "duplicateAllHandler") element.setAttribute("onclick", "return false");
+            }, mode);
+        }
+      }
+      if (mode === "differentHrefOnly") {
+        await expect(session.execute({ id: 2, action: "open", url: subpage })).rejects.toThrow("UNOBSERVED_NAVIGATION");
+        expect(reads).toEqual(["/"]);
+        return;
       }
       const current = await session.execute({ id: 2, action: "open", url: subpage });
       const bay = current.controls.find(control => control.name === "Book Bay 1"); expect(bay).toBeDefined();
       if (mode === "replacement") await session.execute({ id: 3, action: "open", url: subpage });
-      if (mode === "linked") {
+      if (["linked", "duplicateValid", "duplicateStale", "duplicateHidden", "duplicateForm", "duplicateHandler",
+        "duplicateInvalidFirst", "duplicateInvalidSecond", "duplicateOtherHref"].includes(mode)) {
         const result = await session.execute({ id: 4, action: "click", target: bay!.target });
         expect(result).toMatchObject({ url: destination, navigationStatus: 200, nativeGestureCompletion: {
           kind: "NATIVE_GESTURE_COMPLETED_V1", sourceUrl: subpage, href: subpage + "#", text: "Book Bay 1", label: "",

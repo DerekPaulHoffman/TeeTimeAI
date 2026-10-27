@@ -4,7 +4,7 @@ import { isNonEvidenceBrowserResource } from "@/lib/automation/passfactory-publi
 import { isMindbodyClassicPublicBootstrapPost, mindbodyClassicPublicBootstrapSource, mindbodyClassicPublicBootstrapPostDiagnostic, mindbodyClassicPublicBootstrapSourceDiagnostic, mindbodyClassicBootstrapUrlDiagnostic,
   type MindbodyClassicBootstrapPostOutcome, type MindbodyClassicBootstrapSourceOutcome, type MindbodyClassicBootstrapQueryCount, type MindbodyClassicBootstrapQueryRow } from "@/lib/automation/mindbody-public-read-policy";
 import { canonicalPublicReadUrl } from "./public-request-url";
-import { PUBLIC_BROWSER_TOTAL_BYTES, SOURCE_ROUTING_RESPONSE_PROFILE, publicBrowserResponseLimit, type PublicBrowserResponseProfile } from "./browser-resource-limits";
+import { PUBLIC_BROWSER_TOTAL_BYTES, SOURCE_ROUTING_RESPONSE_PROFILE, publicBrowserResponseLimit, publicOfficialRenderResponseLimit, type PublicBrowserResponseProfile } from "./browser-resource-limits";
 import { isSafeBrowserAssetUrl, isSafeRecipeUrl } from "./recipe";
 import { createPublicClientReadHeaderScope, type PublicClientReadHeaderProof, type PublicClientReadHeaderFailureReason } from "./public-client-read-headers";
 import type { MindbodyPublicFormIntent } from "./mindbody-public-form-read";
@@ -19,8 +19,45 @@ export interface NativeReadRequest {
   redirectedFrom(): NativeReadRequest | null; response(): Promise<NativeReadResponse | null>;
 }
 export type NativeReadResponse = Pick<Response, "url" | "status" | "allHeaders" | "finished" | "body">;
-export type NativeReadRoute = Pick<Route, "continue" | "abort" | "fulfill"> & { request(): NativeReadRequest };
+export type NativeReadRoute = Pick<Route, "continue" | "abort" | "fulfill"> & { request(): NativeReadRequest;
+  /** Private byte-only admission for one already-authorized official-page GET data read. */
+  admitOfficialRenderDataLimit?(): boolean;
+  /** Closed per-record diagnostic only; never changes route or byte admission. */
+  noteOfficialRenderGate?(facts: NativeOfficialRenderGate): void };
+export type NativeOfficialRenderGate = Readonly<{
+  nativeTransport: boolean; mainFrame: boolean; navigationRequestPresent: boolean; navigationStatus200: boolean;
+  witnessPresent: boolean; witnessRequestMatches: boolean; witnessUrlMatches: boolean; completedDocumentRead: boolean;
+  officialRootProof: boolean; officialSubpageProof: boolean; pendingSubpagePresent: boolean; subpageTokenPresent: boolean;
+  linkCount: "ZERO" | "ONE" | "MULTIPLE" | "NOT_EVALUATED";
+  linkFailure: "NONE" | "ENTRY_PRECONDITION" | "ROOT_WITNESS" | "LINK_COUNT" | "LINK_RENDERED" | "DOCUMENT_CHANGED" | "PENDING_SET";
+  anchorFailure?: "NONE" | "CANDIDATE_BOUND" | "LOCATOR_COUNT" | "NOT_RENDERED" | "NOT_ENABLED" | "SIGNATURE_CHANGED" |
+    "HREF_MISMATCH" | "RAW_HREF_MISSING" | "IN_FORM" | "DOWNLOAD" | "HANDLER" | "ARIA_DISABLED" | "TARGET" | "ROLE" | "DOCUMENT_CHANGED";
+  anchorOrdinal?: "NONE" | "FIRST" | "SECOND" | "THIRD_TO_EIGHTH";
+}>;
+const officialRenderGateBooleanKeys = ["nativeTransport", "mainFrame", "navigationRequestPresent", "navigationStatus200", "witnessPresent",
+  "witnessRequestMatches", "witnessUrlMatches", "completedDocumentRead", "officialRootProof", "officialSubpageProof",
+  "pendingSubpagePresent", "subpageTokenPresent"] as const;
+const officialRenderLinkCounts = ["ZERO", "ONE", "MULTIPLE", "NOT_EVALUATED"] as const;
+const officialRenderLinkFailures = ["NONE", "ENTRY_PRECONDITION", "ROOT_WITNESS", "LINK_COUNT", "LINK_RENDERED", "DOCUMENT_CHANGED", "PENDING_SET"] as const;
+const officialRenderAnchorFailures = ["NONE", "CANDIDATE_BOUND", "LOCATOR_COUNT", "NOT_RENDERED", "NOT_ENABLED", "SIGNATURE_CHANGED",
+  "HREF_MISMATCH", "RAW_HREF_MISSING", "IN_FORM", "DOWNLOAD", "HANDLER", "ARIA_DISABLED", "TARGET", "ROLE", "DOCUMENT_CHANGED"] as const;
+const officialRenderAnchorOrdinals = ["NONE", "FIRST", "SECOND", "THIRD_TO_EIGHTH"] as const;
+export function projectNativeOfficialRenderGate(value: unknown): NativeOfficialRenderGate | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const source = value as Record<string, unknown>;
+  if (!officialRenderGateBooleanKeys.every(key => typeof source[key] === "boolean") ||
+      !officialRenderLinkCounts.includes(source.linkCount as typeof officialRenderLinkCounts[number]) ||
+      !officialRenderLinkFailures.includes(source.linkFailure as typeof officialRenderLinkFailures[number]) ||
+      source.anchorFailure !== undefined && !officialRenderAnchorFailures.includes(source.anchorFailure as typeof officialRenderAnchorFailures[number]) ||
+      source.anchorOrdinal !== undefined && !officialRenderAnchorOrdinals.includes(source.anchorOrdinal as typeof officialRenderAnchorOrdinals[number])) return undefined;
+  return { ...Object.fromEntries(officialRenderGateBooleanKeys.map(key => [key, source[key]])),
+    linkCount: source.linkCount, linkFailure: source.linkFailure,
+    ...(source.anchorFailure !== undefined && source.anchorOrdinal !== undefined ?
+      { anchorFailure: source.anchorFailure, anchorOrdinal: source.anchorOrdinal } : {}) } as NativeOfficialRenderGate;
+}
 export type NativeUncorrelatedPost = Readonly<{ url: string; method: "POST"; resourceType: "xhr" | "fetch"; headers: Record<string, string>; body: string }>;
+export type NativeUncorrelatedPostDenialReason = "REQUEST_SHAPE" | "BODY_LIMIT" | "URL_POLICY" | "FORBIDDEN_REQUEST_URL" | "PROTECTED_NAMESPACE" | "CALLER_SESSION_UNAVAILABLE" |
+  "MINDBODY_HEADER_UNCERTAIN" | "USCHEDULE_HEADER_UNCERTAIN" | "READ_POLICY_MAY_ALLOW" | "DEFINITELY_DENIED" | "ERROR_UNCERTAIN";
 export type NativeRequestDiagnostic = {
   code: string; url?: string; method?: string; resourceType?: string;
   operation?: StagehandNativeRouterFailure["operation"]; errorName?: StagehandNativeRouterFailure["errorName"];
@@ -29,6 +66,8 @@ export type NativeRequestDiagnostic = {
   limitKind?: "DECLARED_INVALID" | "DECLARED_TOO_LARGE" | "DECODED_BODY" | "TOTAL_DECODED";
   allowedBytes?: number; declaredBytes?: number; bodyBytes?: number; totalBytes?: number;
   declaredLengthPresent?: boolean; documentResponse?: boolean; ancillaryResponse?: boolean;
+  officialRenderDataLimit?: boolean; limitOrigin?: "NATIVE_ROUTER" | "BROWSER_SESSION";
+  officialRenderGate?: NativeOfficialRenderGate;
   requestedPreflightMethod?: "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "CONNECT" | "TRACE" | "OTHER";
   preflightCandidatePresent?: boolean; preflightCandidateInvalid?: boolean; preflightSourceKnown?: boolean;
   preflightSourceMethod?: "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "CONNECT" | "TRACE" | "OTHER";
@@ -37,9 +76,15 @@ export type NativeRequestDiagnostic = {
   phase?: "RESPONSE_WAIT" | "CONTINUE_REQUEST_ACK" | "CONTINUE_RESPONSE_ACK" | "LOADER_IDENTITY_WAIT" | "LOADER_IDENTITY" | "LOADER_OWNER" | "REDIRECT_GENERATION" | "REDIRECT_PROVENANCE" | "DOCUMENT_INTENT" | "DOCUMENT_DRAIN";
   recordGenerationCurrent?: boolean; recordGenerationRetired?: boolean; recordAdmitted?: boolean; recordPaused?: boolean; recordResponsePaused?: boolean;
   recordFailed?: boolean; recordComplete?: boolean; recordHandlerDone?: boolean; recordTerminalObserved?: boolean;
+  responseFailureBranch?: "RETIRED_RESPONSE_ABORT" | "ACTIVE_RESPONSE_ERROR_ABORT" | "OTHER_RESPONSE_METADATA";
+  responseIdentityMatched?: boolean; correlatedNetworkLoadingFailed?: boolean; correlatedNetworkLoadingFinished?: boolean;
   interceptedRequests?: number; recordCount?: number; requestLimit?: number; postDataBytes?: number;
   framePresent?: boolean; rootFrame?: boolean; networkIdPresent?: boolean; duplicateRequestId?: boolean;
   hasPostData?: boolean; postDataPresent?: boolean;
+  missingNetworkClosed?: boolean; missingNetworkAborted?: boolean; missingNetworkGenerationRetired?: boolean;
+  missingNetworkBoundaryPending?: boolean; missingNetworkAwaitingDocument?: boolean;
+  uncorrelatedPostCallerInvoked?: boolean; uncorrelatedPostCallerDenied?: boolean;
+  uncorrelatedPostDenialReason?: NativeUncorrelatedPostDenialReason;
   identityPresent?: boolean; loaderPresent?: boolean; loaderKnown?: boolean; identityFresh?: boolean;
   identityUrlMatches?: boolean; identityMethodMatches?: boolean; identityKindMatches?: boolean; identityFrameMatches?: boolean;
   parentPresent?: boolean; awaitingDocument?: boolean; parentCurrentGeneration?: boolean;
@@ -97,7 +142,7 @@ function pending<T>() {
 type RecordEntry = {
   id: string; networkId: string; url: string; transportUrl: string; method: string; headers: Record<string, string>; body: string | null;
   headerEntries: Array<[string, string]>; publicHeaderProof?: PublicClientReadHeaderProof;
-  kind: string; parent: RecordEntry | null; depth: number; paused: boolean; admitted: boolean; failed: boolean; responseStarted: boolean; complete: boolean;
+  kind: string; parent: RecordEntry | null; depth: number; paused: boolean; admitted: boolean; officialRenderDataLimit?: boolean; officialRenderGate?: NativeOfficialRenderGate; failed: boolean; responseStarted: boolean; complete: boolean;
   failureCode?: string; failure?: Error;
   generation: DocumentGeneration; loaderId?: string; networkIdentityRevision?: number; responseStatus?: number; responseMimeType?: string;
   preflight?: PreflightSource;
@@ -301,7 +346,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
   /** Caller-private placeholder click. Native gesture correlation still owns consumption. */
   controllerScriptGetIntent?: (sourceUrl: string, targetUrl: string) => NativeGestureIntent | undefined;
   /** Fixed caller policy may only confirm denial; never dispatch or create read authority. */
-  denyUncorrelatedPost?: (request: NativeUncorrelatedPost) => boolean;
+  denyUncorrelatedPost?: (request: NativeUncorrelatedPost, onDecision?: (reason: NativeUncorrelatedPostDenialReason) => void) => boolean;
 } = {}): Promise<NativeRedirectRouting> {
   options.signal?.throwIfAborted();
   publicBrowserResponseLimit("document", "GET", options.responseProfile);
@@ -316,6 +361,8 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
   const networkIdentities = new Map<string, NetworkIdentity>();
   const excludedImageAborts = new Map<string, ExcludedImageAbort>();
   const failedNetworkIdentities = new WeakSet<NetworkIdentity>();
+  // Closed terminal facts for failure diagnostics only; never authorize a read.
+  const finishedNetworkIdentities = new WeakSet<NetworkIdentity>();
   const sourceLoadingFailures = new WeakMap<NetworkIdentity, Readonly<SourceLoadingFailure>>();
   const pendingPreflightIdentities = new Map<string, PendingPreflightIdentity>();
   const preflightSources = new Set<NetworkIdentity>();
@@ -771,6 +818,8 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
     for (const [id, pending] of pendingPreflightIdentities) if (pending.sourceNetworkId === event.requestId) bindPendingPreflight(id, pending, identity);
   });
   cdp.on("Network.loadingFinished", event => {
+    const identity = networkIdentities.get(event.requestId);
+    if (identity) finishedNetworkIdentities.add(identity);
     const excluded = excludedImageAborts.get(event.requestId);
     if (excluded) excluded.finished = true;
     const child = childAssets.get(event.requestId);
@@ -840,6 +889,8 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
     let pendingInitialPause: PendingInitialPause | undefined;
     let operation: NonNullable<StagehandNativeRouterFailure["operation"]> = event.responseStatusCode !== undefined || event.responseErrorReason !== undefined ? "RESPONSE_METADATA" : "REQUEST_METADATA";
     let failureContext: (() => NativeRequestDiagnostic) | undefined;
+    let responseRecord: RecordEntry | undefined;
+    let responseFailureBranch: NativeRequestDiagnostic["responseFailureBranch"] = "OTHER_RESPONSE_METADATA";
     void (async () => {
       if (closed) return;
       const reject = () => cdp.send("Fetch.failRequest", { requestId: event.requestId, errorReason: "BlockedByClient" });
@@ -875,7 +926,24 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
           hasPostData: event.request.hasPostData === true, postDataPresent: typeof event.request.postData === "string",
           postDataBytes: Math.min(1_000_000, typeof event.request.postData === "string" ? Buffer.byteLength(event.request.postData) : 0) };
       };
-      failureContext = () => requestDiagnostic("NATIVE_REDIRECT_ROUTING_FAILED");
+      failureContext = () => {
+        const diagnostic = requestDiagnostic("NATIVE_REDIRECT_ROUTING_FAILED");
+        if (operation !== "RESPONSE_METADATA") return diagnostic;
+        const record = responseRecord;
+        const identity = record?.networkId ? networkIdentities.get(record.networkId) : undefined;
+        const matched = Boolean(record && identity && identity.revision === record.networkIdentityRevision &&
+          identity.generation === record.generation && identity.frameId === rootFrameId &&
+          identity.loaderId === record.loaderId && loaderOwners.get(identity.loaderId) === record.generation &&
+          identity.url === record.url && identity.method === record.method &&
+          (identity.kind === record.kind || [identity.kind, record.kind].every(kind => kind === "xhr" || kind === "fetch")));
+        return { ...diagnostic, responseFailureBranch, recordGenerationCurrent: Boolean(record && record.generation === generation && !record.generation.retired),
+          recordGenerationRetired: Boolean(record?.generation.retired), recordAdmitted: Boolean(record?.admitted),
+          recordResponsePaused: Boolean(record?.responsePaused), recordFailed: Boolean(record?.failed),
+          recordComplete: Boolean(record?.complete), recordHandlerDone: Boolean(record?.handlerDone),
+          recordTerminalObserved: Boolean(identity && (failedNetworkIdentities.has(identity) || finishedNetworkIdentities.has(identity))), responseIdentityMatched: matched,
+          correlatedNetworkLoadingFailed: Boolean(matched && identity && failedNetworkIdentities.has(identity) && sourceLoadingFailures.has(identity)),
+          correlatedNetworkLoadingFinished: Boolean(matched && identity && finishedNetworkIdentities.has(identity)) };
+      };
       const responseTimeoutDiagnostic = (record: RecordEntry, phase: NonNullable<NativeRequestDiagnostic["phase"]>): NativeRequestDiagnostic => ({
         ...requestDiagnostic("NATIVE_REDIRECT_RESPONSE_TIMEOUT"), phase, method: record.method, resourceType: record.kind,
         ...(phase === "RESPONSE_WAIT" ? { operation: "RESPONSE_WAIT" as const } : {}),
@@ -884,13 +952,14 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         duplicateRequestId: false, hasPostData: record.body !== null, postDataPresent: record.body !== null,
         postDataBytes: Math.min(1_000_000, record.body === null ? 0 : Buffer.byteLength(record.body)),
       });
-      const rejectInitial = async (code: string) => {
+      const rejectInitial = async (code: string, diagnostic?: Partial<NativeRequestDiagnostic>) => {
         // Retain one initiating classification before awaiting rejection.
-        firstFatal ??= requestDiagnostic(code);
+        firstFatal ??= { ...requestDiagnostic(code), ...diagnostic };
         await reject(); await close(code);
       };
       if (event.responseStatusCode !== undefined || event.responseErrorReason !== undefined) {
         const record = records.get(event.requestId);
+        responseRecord = record;
         if (record?.generation.retired) {
           // Retired reads are tombstones, never response/redirect evidence.
           // An unrelated or malformed late event is still fatal.
@@ -909,6 +978,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
             record.paused = false; record.responsePaused = false;
             return;
           }
+          responseFailureBranch = "RETIRED_RESPONSE_ABORT";
           await abortRetiredPause(record, "response", reject);
           return;
         }
@@ -928,6 +998,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         if (mismatch || !record) { await close(mismatch ?? "NATIVE_REDIRECT_RESPONSE_UNKNOWN"); return; }
         record.responseStarted = true; record.responsePaused = true;
         if (event.responseErrorReason) {
+          responseFailureBranch = "ACTIVE_RESPONSE_ERROR_ABORT";
           // Chrome has failed this exact admitted read. Do not create response
           // evidence or close unrelated documents/reads because an optional
           // resource failed. The root page.goto still reports navigation failure.
@@ -940,9 +1011,15 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         try {
           const status = event.responseStatusCode!, values = responseHeaders(event.responseHeaders ?? []);
           record.responseStatus = status; record.responseMimeType = values["content-type"];
-          const maxBytes = publicBrowserResponseLimit(record.kind, record.method, options.responseProfile), declared = Number(values["content-length"] ?? 0);
+          const maxBytes = options.responseProfile === SOURCE_ROUTING_RESPONSE_PROFILE
+            ? publicBrowserResponseLimit(record.kind, record.method, options.responseProfile)
+            : publicOfficialRenderResponseLimit(record.kind, record.method, record.officialRenderDataLimit === true);
+          const declared = Number(values["content-length"] ?? 0);
           const limitDiagnostic = (limitKind: NonNullable<NativeRequestDiagnostic["limitKind"]>, allowedBytes: number, bodyBytes?: number): NativeRequestDiagnostic => ({
-            code: "NATIVE_RESPONSE_LIMIT", limitKind, method: record.method, resourceType: record.kind, allowedBytes,
+            code: "NATIVE_RESPONSE_LIMIT", limitKind, limitOrigin: "NATIVE_ROUTER", method: record.method, resourceType: record.kind, allowedBytes,
+            officialRenderDataLimit: record.officialRenderDataLimit === true, recordGenerationCurrent: record.generation === generation && !record.generation.retired,
+            recordGenerationRetired: record.generation.retired,
+            ...(record.officialRenderGate ? { officialRenderGate: record.officialRenderGate } : {}),
             ...(Number.isFinite(declared) && declared >= 0 && declared <= Number.MAX_SAFE_INTEGER ? { declaredBytes: declared } : {}),
             ...(bodyBytes === undefined ? {} : { bodyBytes }), totalBytes: responseBytes,
             declaredLengthPresent: values["content-length"] !== undefined, documentResponse: record.kind === "document",
@@ -1057,6 +1134,9 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
       }
       const networkId = event.networkId;
       if (!networkId) {
+        const lifecycle = { missingNetworkClosed: closed, missingNetworkAborted: options.signal?.aborted === true,
+          missingNetworkGenerationRetired: generation.retired, missingNetworkBoundaryPending: boundaryPending,
+          missingNetworkAwaitingDocument: awaitingDocument };
         if (options.responseProfile !== SOURCE_ROUTING_RESPONSE_PROFILE && !options.denyUncorrelatedPost || networkId !== undefined ||
             closed || options.signal?.aborted || generation.retired || boundaryPending || awaitingDocument ||
             event.redirectedRequestId !== undefined || initialPauses.has(event.requestId) ||
@@ -1066,12 +1146,12 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
             !event.request.headers || typeof event.request.headers !== "object" || Array.isArray(event.request.headers) ||
             Object.values(event.request.headers).some(value => typeof value !== "string" && typeof value !== "number") ||
             event.request.hasPostData !== undefined && typeof event.request.hasPostData !== "boolean") {
-          await rejectInitial("NATIVE_REDIRECT_NETWORK_ID_MISSING"); return;
+          await rejectInitial("NATIVE_REDIRECT_NETWORK_ID_MISSING", { ...lifecycle, uncorrelatedPostCallerInvoked: false }); return;
         }
         // Metadata is inspected solely to reject malformed/oversized pauses.
         // There is no adapter, header capability, lease, dispatch or body read.
         try { new URL(event.request.url); rawHeaderEntries(event.request.headers); }
-        catch { await rejectInitial("NATIVE_REDIRECT_NETWORK_ID_MISSING"); return; }
+        catch { await rejectInitial("NATIVE_REDIRECT_NETWORK_ID_MISSING", { ...lifecycle, uncorrelatedPostCallerInvoked: false }); return; }
         const invalidBody = event.request.hasPostData === true && typeof event.request.postData !== "string" ||
           event.request.postData !== undefined && typeof event.request.postData !== "string" ||
           event.request.hasPostData === false && event.request.postData !== undefined;
@@ -1079,18 +1159,23 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         if (typeof event.request.postData === "string" && Buffer.byteLength(event.request.postData) > 32768) {
           await rejectInitial("NATIVE_REDIRECT_POST_BODY_LIMIT"); return;
         }
-        let callerDenied = false;
+        let callerDenied = false, callerInvoked = false;
+        let denialReason: NativeUncorrelatedPostDenialReason | undefined;
         if (options.responseProfile !== SOURCE_ROUTING_RESPONSE_PROFILE) {
           // Missing identity can never grant a request adapter or invoke the
           // read handler. Only the fixed caller may confirm an already-denied
           // bounded data POST; unknown/typed reads retain the fatal guard.
           try {
-            callerDenied = ["xhr", "fetch"].includes(resourceKinds[event.resourceType]) && event.request.method === "POST" &&
-              event.request.hasPostData === true && typeof event.request.postData === "string" &&
-              options.denyUncorrelatedPost?.({ url: event.request.url, method: "POST", resourceType: resourceKinds[event.resourceType] as "xhr" | "fetch",
-                headers: headers(event.request.headers), body: event.request.postData }) === true;
+            if (["xhr", "fetch"].includes(resourceKinds[event.resourceType]) && event.request.method === "POST" &&
+                event.request.hasPostData === true && typeof event.request.postData === "string" && options.denyUncorrelatedPost) {
+              callerInvoked = true;
+              callerDenied = options.denyUncorrelatedPost({ url: event.request.url, method: "POST", resourceType: resourceKinds[event.resourceType] as "xhr" | "fetch",
+                headers: headers(event.request.headers), body: event.request.postData }, reason => { if (!denialReason) denialReason = reason; }) === true;
+            }
           } catch { /* An uncertain caller policy never weakens identity requirements. */ }
-          if (!callerDenied) { await rejectInitial("NATIVE_REDIRECT_NETWORK_ID_MISSING"); return; }
+          if (!callerDenied) { await rejectInitial("NATIVE_REDIRECT_NETWORK_ID_MISSING", { ...lifecycle,
+            uncorrelatedPostCallerInvoked: callerInvoked, uncorrelatedPostCallerDenied: false,
+            ...(denialReason ? { uncorrelatedPostDenialReason: denialReason } : {}) }); return; }
         }
         sourceDeniedFetchIds.add(event.requestId); // Reserve before awaiting ACK.
         const deniedGeneration = generation;
@@ -1467,6 +1552,16 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         failRecord(record, "NATIVE_READ_SUPERSEDED"); record.handlerDone = true; return;
       }
       const route: NativeReadRoute = { request: () => record.adapter,
+        noteOfficialRenderGate: facts => {
+          if (record.paused && !record.admitted && !record.failed && !record.responseStarted && !closed)
+            record.officialRenderGate = projectNativeOfficialRenderGate(facts);
+        },
+        admitOfficialRenderDataLimit: () => {
+          if (options.responseProfile !== undefined || closed || options.signal?.aborted || !record.paused || record.admitted ||
+              record.failed || record.responseStarted || record.generation.retired || record.method !== "GET" ||
+              !["xhr", "fetch"].includes(record.kind)) return false;
+          record.officialRenderDataLimit = true; return true;
+        },
         continue: async values => {
           if (record.failure && isNativeReadTerminalFailure(record.failure)) throw record.failure;
           if (record.generation.retired) {

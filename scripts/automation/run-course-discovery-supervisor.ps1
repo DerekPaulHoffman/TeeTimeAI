@@ -50,6 +50,29 @@ function Get-CourseDiscoveryRuntimeConfig {
   return @{ WorkspacePath = $root; ConfigPath = $configFile.FullName; NodePath = $nodeFile.FullName; Environment = $data }
 }
 
+function ConvertTo-SafeGenericFallbackUsage {
+  param([object]$Worker)
+  if (-not $Worker) { return $null }
+  $safe = [ordered]@{}
+  foreach ($key in @('attemptedModelTurns', 'completedModelTurns')) {
+    $value = $Worker.$key
+    if ($null -ne $value -and ([string]$value) -cmatch '^(0|[1-9]\d{0,5})$' -and [long]$value -le 100000) {
+      $safe[$key] = [long]$value
+    }
+  }
+  $tokens = [ordered]@{}
+  foreach ($key in @('totalTokens', 'inputTokens', 'cachedInputTokens', 'outputTokens', 'reasoningOutputTokens')) {
+    $value = $Worker.tokenUsage.$key
+    if ($null -ne $value -and ([string]$value) -cmatch '^(0|[1-9]\d{0,14})$') {
+      $tokens[$key] = [long]$value
+    }
+  }
+  if ($tokens.Count) { $safe.tokenUsage = $tokens }
+  if (-not $safe.Count) { return $null }
+  $safe.usageLowerBound = [bool]($tokens.Count -gt 0 -or $safe.Contains('completedModelTurns'))
+  return $safe
+}
+
 try {
   $runtime = Get-CourseDiscoveryRuntimeConfig -Workspace $WorkspacePath -Configuration $ConfigPath -Node $NodePath
   if ($ValidateOnly) {
@@ -118,6 +141,8 @@ try {
         if ($record.metrics.metricsFinal -is [bool]) { $metrics.metricsFinal = $record.metrics.metricsFinal }
         if ($record.metrics.sourceResumed -is [bool]) { $metrics.sourceResumed = $record.metrics.sourceResumed }
         if ($record.metrics.sourceUsageRecordedLowerBound -is [bool]) { $metrics.sourceUsageRecordedLowerBound = $record.metrics.sourceUsageRecordedLowerBound }
+        $genericUsage = ConvertTo-SafeGenericFallbackUsage -Worker $record.metrics.genericFallback.worker
+        if ($genericUsage) { $metrics.genericFallback = $genericUsage }
         if ($record.metrics.cleanupWarning -in @('TEMP_DIRECTORY_RETAINED_WITHOUT_AUTH', 'TEMP_CREDENTIAL_CLEANUP_FAILED', 'POST_ACTIVATION_CLEANUP_PENDING')) {
           $metrics.cleanupWarning = $record.metrics.cleanupWarning
         }

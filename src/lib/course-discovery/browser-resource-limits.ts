@@ -18,3 +18,11 @@ export function publicBrowserResponseLimit(resourceType: string, method = "GET",
   const sourceData = profile === SOURCE_ROUTING_RESPONSE_PROFILE && method === "GET" && ["xhr", "fetch"].includes(resourceType);
   return resourceType === "script" || sourceData ? 16_000_000 : resourceType === "stylesheet" ? 6_000_000 : 2_000_000;
 }
+
+/** Byte-only allowance for a privately admitted GET data read on a proven
+ * current official document. This does not select SOURCE_ROUTING behavior in
+ * the native router or authorize the URL, method, headers, or request. */
+export function publicOfficialRenderResponseLimit(resourceType: string, method: string, admittedOfficialDocumentRead: boolean) {
+  const dataGet = admittedOfficialDocumentRead === true && method === "GET" && ["xhr", "fetch"].includes(resourceType);
+  return publicBrowserResponseLimit(resourceType, method, dataGet ? SOURCE_ROUTING_RESPONSE_PROFILE : undefined);
+}

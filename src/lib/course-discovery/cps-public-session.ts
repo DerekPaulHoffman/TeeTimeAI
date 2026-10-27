@@ -16,8 +16,8 @@ function member(value: unknown, path: string[]): boolean {
   return path.length === 1 ? value.type === "Identifier" && value.name === path[0] : value.type === "MemberExpression" &&
     value.computed === false && node(value.property) && value.property.type === "Identifier" && value.property.name === path.at(-1) && member(value.object, path.slice(0, -1));
 }
-/** Parse, never execute, the exact public startup-env IIFE observed for26.
- * No storage/account token lookup or caller-configured client-id fallback. */
+/** Parse, never execute, the exact published startup-env IIFE. An optional
+ * inert CLIENT_SECRET literal is syntax only: it is never returned or used. */
 export function parseCps26PublicEnvironment(script: string): string {
   let program: Ast; try { program = parse(script, { ecmaVersion: "latest", sourceType: "script" }) as unknown as Ast; }
   catch { fail("CPS_PUBLIC_SESSION_ENV_UNVERIFIED"); }
@@ -27,15 +27,22 @@ export function parseCps26PublicEnvironment(script: string): string {
   if (!fn || fn.type !== "FunctionExpression" || fn.id !== null || fn.async || fn.generator || !Array.isArray(args) || args.length !== 1 || args[0].type !== "ThisExpression" ||
       !Array.isArray(fn.params) || fn.params.length !== 1 || !member(fn.params[0], ["window"]) || !node(fn.body)) fail("CPS_PUBLIC_SESSION_ENV_UNVERIFIED");
   const statements = fn.body.body as Ast[];
-  if (!Array.isArray(statements) || statements.length !== 4) fail("CPS_PUBLIC_SESSION_ENV_UNVERIFIED");
+  if (!Array.isArray(statements) || ![4, 5].includes(statements.length)) fail("CPS_PUBLIC_SESSION_ENV_UNVERIFIED");
   const assignments = statements.map(s => s.type === "ExpressionStatement" && node(s.expression) ? s.expression : undefined);
   const first = assignments[0], right = first?.right as Ast;
   if (first?.type !== "AssignmentExpression" || first.operator !== "=" || !member(first.left, ["window", "__env"]) ||
       right?.type !== "LogicalExpression" || right.operator !== "||" || !member(right.left, ["window", "__env"]) || !node(right.right) ||
       right.right.type !== "ObjectExpression" || !Array.isArray(right.right.properties) || right.right.properties.length) fail("CPS_PUBLIC_SESSION_ENV_UNVERIFIED");
+  const optionalSecret = statements.length === 5;
+  if (optionalSecret) {
+    const inert = assignments[2], literal = inert?.right;
+    if (inert?.type !== "AssignmentExpression" || inert.operator !== "=" || !member(inert.left, ["window", "__env", "CLIENT_SECRET"]) ||
+        !node(literal) || literal.type !== "Literal" || typeof literal.value !== "string" ||
+        literal.value.length < 1 || literal.value.length > 128) fail("CPS_PUBLIC_SESSION_ENV_UNVERIFIED");
+  }
   let clientId: string | undefined;
   for (const [i, key] of ["AUTH_CLIENT_ID", "SHORT_LIVED_CLIENT_ID", "PRODUCTION"].entries()) {
-    const assignment = assignments[i + 1];
+    const assignment = assignments[i + 1 + (optionalSecret && i > 0 ? 1 : 0)];
     if (assignment?.type !== "AssignmentExpression" || assignment.operator !== "=" || !member(assignment.left, ["window", "__env", key]) ||
         !node(assignment.right) || assignment.right.type !== "Literal" || typeof assignment.right.value !== "string") fail("CPS_PUBLIC_SESSION_ENV_UNVERIFIED");
     if (key === "SHORT_LIVED_CLIENT_ID") clientId = assignment.right.value;

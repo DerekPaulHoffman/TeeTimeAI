@@ -4,7 +4,8 @@ import { z } from "zod";
 import { createHash } from "node:crypto";
 
 import { fetchWithProviderTimeout } from "@/lib/adapters/fetch-with-timeout";
-import { isUSchedulePublicRentalLabel, readUSchedulePublicUnitsControl, readUSchedulePublicPeopleControl, readUSchedulePublicRentalNotes } from "@/lib/automation/uschedule-public-read-policy";
+import { isUSchedulePublicRentalLabel, isUScheduleSimBookingLabel, hasUScheduleSimBookingDescription,
+  readUSchedulePublicUnitsControl, readUSchedulePublicPeopleControl, readUSchedulePublicRentalNotes } from "@/lib/automation/uschedule-public-read-policy";
 import { readUScheduleNextAvailableView } from "@/lib/automation/uschedule-public-view-control";
 import { simulatorPublicConfigurationSchema, uschedulePublicTenant, type USchedulePublicConfiguration } from "./public-configuration";
 import { SimulatorAvailabilityError, type SimulatorAvailabilityInput, type SimulatorAvailabilityResult,
@@ -436,6 +437,7 @@ export function inspectUScheduleRecipeConfiguration(html: string, sourceUrl: str
   const current = rentals.filter(row => row.selected);
   if (!rentals.length || rentals.length > 20) return reject("RENTAL_CATALOG");
   if (current.length !== 1) return reject("SELECTED_RENTAL");
+  if (isUScheduleSimBookingLabel(current[0].serviceName) && !hasUScheduleSimBookingDescription(html)) return reject("RENTAL_CATALOG");
   if (!durations.length || durations.length > MAX_PUBLIC_DURATION_CHOICES || new Set(durations).size !== durations.length) return reject("DURATION_CATALOG");
   const units = readUSchedulePublicUnitsControl(html);
   const people = readUSchedulePublicPeopleControl(html);

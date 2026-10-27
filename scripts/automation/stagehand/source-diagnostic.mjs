@@ -109,39 +109,74 @@ const nativeRouterCodes=['NATIVE_REDIRECT_ABORT_TIMEOUT','NATIVE_REDIRECT_BODY_T
  'NATIVE_REDIRECT_RESPONSE_PRIOR_FAILURE','NATIVE_REDIRECT_RESPONSE_REQUEST_PAUSED','NATIVE_REDIRECT_RESPONSE_STATUS_INVALID','NATIVE_REDIRECT_RESPONSE_TIMEOUT',
  'NATIVE_REDIRECT_RESPONSE_UNADMITTED','NATIVE_REDIRECT_RESPONSE_UNKNOWN','NATIVE_REDIRECT_RESPONSE_URL_MISMATCH','NATIVE_REDIRECT_RETIRED_DISPATCH','NATIVE_REDIRECT_ROUTING_FAILED',
  'NATIVE_RESPONSE_LIMIT','OWNED_STAGEHAND_CDP_UNAVAILABLE','STAGEHAND_GUARDED_SOURCE_REJECTED','UNKNOWN'];
-const nativeRouterBooleanKeys=['framePresent','rootFrame','networkIdPresent','duplicateRequestId','hasPostData','postDataPresent','identityPresent','loaderPresent','loaderKnown','identityFresh',
+const nativeRouterBooleanKeys=['framePresent','rootFrame','networkIdPresent','duplicateRequestId','hasPostData','postDataPresent',
+ 'missingNetworkClosed','missingNetworkAborted','missingNetworkGenerationRetired','missingNetworkBoundaryPending','missingNetworkAwaitingDocument',
+ 'uncorrelatedPostCallerInvoked','uncorrelatedPostCallerDenied','identityPresent','loaderPresent','loaderKnown','identityFresh',
+ 'officialRenderDataLimit',
  'identityUrlMatches','identityMethodMatches','identityKindMatches','identityFrameMatches','parentPresent','awaitingDocument','parentCurrentGeneration','documentCommitted',
  'documentIntentPresent','documentIntentUsed','sourceResponseComplete','successorTerminalFailed','declaredLengthPresent','documentResponse','ancillaryResponse',
- 'recordGenerationCurrent','recordGenerationRetired','recordAdmitted','recordPaused','recordResponsePaused','recordFailed','recordComplete','recordHandlerDone','recordTerminalObserved'];
+ 'recordGenerationCurrent','recordGenerationRetired','recordAdmitted','recordPaused','recordResponsePaused','recordFailed','recordComplete','recordHandlerDone','recordTerminalObserved',
+ 'responseIdentityMatched','correlatedNetworkLoadingFailed','correlatedNetworkLoadingFinished'];
+const nativeResponseFailureBranches=['RETIRED_RESPONSE_ABORT','ACTIVE_RESPONSE_ERROR_ABORT','OTHER_RESPONSE_METADATA'];
 export const stagehandRedirectRejections=['PARENT_MISSING','PARENT_UNADMITTED','PARENT_FAILED','PARENT_DEPTH_LIMIT','PARENT_CHILD_RESERVED',
  'PARENT_RESPONSE_MISSING','PARENT_RESPONSE_FAILED','CHILD_RECORD_EXISTS','PARENT_RESPONSE_INCOMPLETE','LOCATION_MISSING','LOCATION_MISMATCH',
  'KIND_NETWORK_MISMATCH','METHOD_MISMATCH','DOCUMENT_PARENT_KIND','DOCUMENT_PARENT_METHOD','CROSS_HOST'];
 export const nativeRouterOperations=['REQUEST_METADATA','RESPONSE_METADATA','LOADER_CORRELATION','REDIRECT_PROVENANCE','RESPONSE_WAIT','RESPONSE_BODY','RESPONSE_RELEASE','REQUEST_RELEASE','HANDLER'];
 export const nativeRouterErrorNames=['Error','TypeError','RangeError','SyntaxError','TimeoutError','AbortError','ProtocolError','CDPError','UNKNOWN'];
 export const nativeRouterErrorCategories=['INVALID_INTERCEPTION_ID','REQUEST_NOT_PAUSED','TARGET_CLOSED','SESSION_CLOSED','CONTEXT_DESTROYED','BODY_UNAVAILABLE','PROTOCOL_ERROR','UNKNOWN'];
+const uncorrelatedPostDenialReasons=['REQUEST_SHAPE','BODY_LIMIT','URL_POLICY','FORBIDDEN_REQUEST_URL','PROTECTED_NAMESPACE','CALLER_SESSION_UNAVAILABLE','MINDBODY_HEADER_UNCERTAIN','USCHEDULE_HEADER_UNCERTAIN','READ_POLICY_MAY_ALLOW','DEFINITELY_DENIED','ERROR_UNCERTAIN'];
+const officialRenderGateBooleanKeys=['nativeTransport','mainFrame','navigationRequestPresent','navigationStatus200','witnessPresent',
+ 'witnessRequestMatches','witnessUrlMatches','completedDocumentRead','officialRootProof','officialSubpageProof',
+ 'pendingSubpagePresent','subpageTokenPresent'];
+const officialRenderLinkCounts=['ZERO','ONE','MULTIPLE','NOT_EVALUATED'];
+const officialRenderLinkFailures=['NONE','ENTRY_PRECONDITION','ROOT_WITNESS','LINK_COUNT','LINK_RENDERED','DOCUMENT_CHANGED','PENDING_SET'];
+const officialRenderAnchorFailures=['NONE','CANDIDATE_BOUND','LOCATOR_COUNT','NOT_RENDERED','NOT_ENABLED','SIGNATURE_CHANGED',
+ 'HREF_MISMATCH','RAW_HREF_MISSING','IN_FORM','DOWNLOAD','HANDLER','ARIA_DISABLED','TARGET','ROLE','DOCUMENT_CHANGED'];
+const officialRenderAnchorOrdinals=['NONE','FIRST','SECOND','THIRD_TO_EIGHTH'];
+const officialRenderGateSchema=z.object({...Object.fromEntries(officialRenderGateBooleanKeys.map(key=>[key,z.boolean()])),
+ linkCount:z.enum(officialRenderLinkCounts),linkFailure:z.enum(officialRenderLinkFailures),
+ anchorFailure:z.enum(officialRenderAnchorFailures).optional(),anchorOrdinal:z.enum(officialRenderAnchorOrdinals).optional()}).strict();
 const nativeRouterFields={code:z.enum(nativeRouterCodes),
  operation:z.enum(nativeRouterOperations).optional(),errorName:z.enum(nativeRouterErrorNames).optional(),errorCategory:z.enum(nativeRouterErrorCategories).optional(),
+ responseFailureBranch:z.enum(nativeResponseFailureBranches).optional(),
  requestUrlSha256:z.string().regex(/^[a-f0-9]{64}$/u).optional(),
  phase:z.enum(['RESPONSE_WAIT','CONTINUE_REQUEST_ACK','CONTINUE_RESPONSE_ACK','LOADER_IDENTITY_WAIT','LOADER_IDENTITY','LOADER_OWNER','REDIRECT_GENERATION','REDIRECT_PROVENANCE','DOCUMENT_INTENT','DOCUMENT_DRAIN','SOURCE_HOST_REQUEST']).optional(),
  sourceRequestGuard:z.enum(['STATE','TRANSACTION_URL','FRAME_OWNERSHIP','URL_POLICY','HEADER_POLICY','NAVIGATION_PROVENANCE','METHOD_POLICY','REQUEST_BUDGET','LEASE','NATIVE_RESPONSE']).optional(),
  redirectRejection:z.enum(stagehandRedirectRejections).optional(),
+ uncorrelatedPostDenialReason:z.enum(uncorrelatedPostDenialReasons).optional(),
  method:z.enum(['GET','HEAD','POST','OPTIONS','PUT','PATCH','DELETE','CONNECT','TRACE','OTHER']).optional(),
  resourceType:z.enum(['document','stylesheet','script','image','media','font','xhr','fetch','preflight','other','ping','websocket','eventsource']).optional(),
  limitKind:z.enum(['DECLARED_INVALID','DECLARED_TOO_LARGE','DECODED_BODY','TOTAL_DECODED']).optional(),
+ limitOrigin:z.enum(['NATIVE_ROUTER','BROWSER_SESSION']).optional(),
+ officialRenderGate:officialRenderGateSchema.optional(),
  allowedBytes:z.number().finite().min(0).max(Number.MAX_SAFE_INTEGER).optional(),declaredBytes:z.number().finite().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
  bodyBytes:z.number().finite().min(0).max(Number.MAX_SAFE_INTEGER).optional(),totalBytes:z.number().finite().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
  ...Object.fromEntries(nativeRouterBooleanKeys.map(key=>[key,z.boolean().optional()]))};
-const nativeRouterFailureSchema=z.object(nativeRouterFields).strict().refine(value=>value.redirectRejection===undefined||value.code==='NATIVE_REDIRECT_PROVENANCE_REJECTED'&&value.phase==='REDIRECT_PROVENANCE');
+const nativeRouterFailureSchema=z.object(nativeRouterFields).strict().refine(value=>value.redirectRejection===undefined||value.code==='NATIVE_REDIRECT_PROVENANCE_REJECTED'&&value.phase==='REDIRECT_PROVENANCE')
+ .refine(value=>value.responseFailureBranch===undefined||value.operation==='RESPONSE_METADATA');
 /** Raw current browser facts become closed diagnostics only, never read authority. */
 export function projectNativeRouterFailure(raw){
  if(!raw||typeof raw!=='object'||Array.isArray(raw)||typeof raw.code!=='string')return undefined;
  const value={code:nativeRouterCodes.includes(raw.code)?raw.code:'UNKNOWN'};
  for(const[key,schema]of Object.entries(nativeRouterFields)){
   if(key==='code'||!Object.hasOwn(raw,key))continue;
+  if(key==='officialRenderGate'){
+   const gate=raw[key];
+   if(gate&&typeof gate==='object'&&!Array.isArray(gate)&&officialRenderGateBooleanKeys.every(name=>typeof gate[name]==='boolean')&&
+      officialRenderLinkCounts.includes(gate.linkCount)&&officialRenderLinkFailures.includes(gate.linkFailure))
+    value[key]={...Object.fromEntries(officialRenderGateBooleanKeys.map(name=>[name,gate[name]])),linkCount:gate.linkCount,linkFailure:gate.linkFailure,
+     ...(officialRenderAnchorFailures.includes(gate.anchorFailure)&&officialRenderAnchorOrdinals.includes(gate.anchorOrdinal)?
+      {anchorFailure:gate.anchorFailure,anchorOrdinal:gate.anchorOrdinal}:{})};
+   continue;
+  }
   const parsed=schema.safeParse(raw[key]);if(parsed.success&&parsed.data!==undefined)value[key]=parsed.data;
  }
  if(value.code!=='NATIVE_REDIRECT_PROVENANCE_REJECTED'||value.phase!=='REDIRECT_PROVENANCE')delete value.redirectRejection;
  if(value.code!=='STAGEHAND_GUARDED_SOURCE_REJECTED'||value.phase!=='SOURCE_HOST_REQUEST')delete value.sourceRequestGuard;
+ if(value.code!=='NATIVE_REDIRECT_NETWORK_ID_MISSING')delete value.uncorrelatedPostDenialReason;
+ if(value.code!=='NATIVE_RESPONSE_LIMIT')delete value.limitOrigin;
+ if(value.code!=='NATIVE_RESPONSE_LIMIT')delete value.officialRenderGate;
+ if(value.operation!=='RESPONSE_METADATA')delete value.responseFailureBranch;
  const parsed=nativeRouterFailureSchema.safeParse(value);return parsed.success?parsed.data:undefined;
 }
 export function safeNativeRouterFailure(raw){const parsed=nativeRouterFailureSchema.safeParse(raw);return parsed.success?parsed.data:undefined;}

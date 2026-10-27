@@ -18,10 +18,10 @@ import { isMemberSportsPublicTeeSheetPost } from "@/lib/automation/membersports-
 import { sanitizeResponderText } from "@/lib/automation/course-support-responder-policy";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
-import { accessExecutionInputSchema, type AccessExecutionInput, isActiveBrowserAccessChallenge, isSafeBrowserAssetUrl, isSafeBrowserBootstrapReadUrl, isSafeBrowserAvailabilityReadUrl, isSafeRecipeUrl, recipeSelectorSchema } from "./recipe";
+import { accessExecutionInputSchema, type AccessExecutionInput, isActiveBrowserAccessChallenge, isSafeBrowserAssetUrl, isSafeBrowserBootstrapReadUrl, isSafeBrowserAvailabilityReadUrl, isSafeBrowserMemberSportsEventsReadUrl, isSafeRecipeUrl, recipeSelectorSchema } from "./recipe";
 import { continueNativeBrowserRead, createNativePublicBrowserProxy, isObservedNativeRedirect, isObservedNativeRedirectTarget, nativeReadPreflightMethod } from "./native-public-browser";
 import { installNativeRedirectRouting, isNativeReadSupersededFailure, authorizePublicClientReadHeaders, isCurrentPublicClientReadHeaders, nativePublicClientPreflightMethod, nativeMindbodyBootstrapSource, nativeMindbodyControllerForm, nativeGestureNavigationSource,
-  publicClientReadHeaderProofFailure, attestedNativeDocumentRedirects, type NativeDocumentRedirect, type NativeFirstFatal, type NativeReadRequest, type NativeReadRoute, type NativeRequestDiagnostic, type NativeUncorrelatedPost } from "./native-redirect-routing";
+  publicClientReadHeaderProofFailure, attestedNativeDocumentRedirects, type NativeDocumentRedirect, type NativeFirstFatal, type NativeReadRequest, type NativeReadRoute, type NativeRequestDiagnostic, type NativeOfficialRenderGate, type NativeUncorrelatedPost, type NativeUncorrelatedPostDenialReason } from "./native-redirect-routing";
 import { publicHeaderFailureDiagnostic } from "./public-header-diagnostic";
 export { publicHeaderFailureDiagnostic } from "./public-header-diagnostic";
 import { requestFamilyForUrl } from "./request-family";
@@ -32,7 +32,8 @@ import { getCpsPostalContactDiagnostic } from "./cps-postal-conflict-proof";
 import { getMindbodyAppointmentDiagnostic } from "./mindbody-appointment-reader";
 import { isPublicCalendarApply } from "./public-calendar-apply";
 import { isObservedPublicCalendarDay, observedPublicCalendarDays } from "./public-calendar-day";
-import { PUBLIC_BROWSER_REQUEST_LIMIT, MINDBODY_APPOINTMENT_REQUEST_LIMIT, assertPublicBrowserRequestBudget, PUBLIC_BROWSER_TOTAL_BYTES, publicBrowserResponseLimit } from "./browser-resource-limits";
+import { PUBLIC_BROWSER_REQUEST_LIMIT, MINDBODY_APPOINTMENT_REQUEST_LIMIT, assertPublicBrowserRequestBudget, PUBLIC_BROWSER_TOTAL_BYTES, publicOfficialRenderResponseLimit } from "./browser-resource-limits";
+import { registerPublicReadWorkerDenial } from "./public-read-worker-denial";
 import { observedPublicDropdowns, selectPublicDropdown, type PublicDropdownProof } from "./public-dropdown-control";
 import { observedPublicMenuButtons, selectPublicMenuButton, type PublicMenuButtonProof } from "./public-duration-button";
 import { venueProofMatches } from "./executor";
@@ -48,6 +49,7 @@ import { observedPublicDateChoices, isPublicDateChoice } from "./public-date-cho
 import { inspectPublicDatePickerInput, openPublicDatePickerInput, type PublicDatePickerInputProof } from "./public-date-picker-input";
 import { isPublicAvailabilityNavigation } from "./public-navigation-control";
 import { observedPublicFrameSources } from "./public-frame-source";
+import { exactFreshInspectionFrame, fixedInspectionFrameWitnessSchema, tagFreshInspectionFrame, visibleInspectionFrames, type FixedInspectionFrameWitness } from "./fixed-inspection-frame-witness";
 import { launchPublicReadBrowser } from "./public-browser-launch";
 import { createPublicBookingParentScope, readPublicBookingParentIdentity } from "./public-booking-parent";
 import { readVisiblePublicCourseContactBlocks } from "./public-course-contact-blocks";
@@ -62,19 +64,33 @@ const identifier = z.union([z.string().max(128), z.number().int()]);
 /** Denial only: reuse current caller policy without constructing any native read. */
 export function discoveryDefiniteUncorrelatedPostDenial(request: NativeUncorrelatedPost, documentUrl: string,
   readPost: (url: URL, headers: Headers, body: string) => boolean,
-  addReadHeaders: (url: URL, method: string, original: Record<string, string>, headers: Headers, body: string) => boolean) {
+  addReadHeaders: (url: URL, method: string, original: Record<string, string>, headers: Headers, body: string) => boolean,
+  onDecision?: (reason: NativeUncorrelatedPostDenialReason) => void) {
+  const decision = (reason: NativeUncorrelatedPostDenialReason, denied: boolean) => { try { onDecision?.(reason); } catch { /* Diagnostics never affect admission. */ } return denied; };
   try {
     if (request.method !== "POST" || !["xhr", "fetch"].includes(request.resourceType) || typeof request.body !== "string" ||
-        Buffer.byteLength(request.body) > 32768 || !isSafeRecipeUrl(request.url) || !isSafeRecipeUrl(documentUrl)) return false;
+        Buffer.byteLength(request.body) > 32768) return decision("REQUEST_SHAPE", false);
+    if (!isSafeRecipeUrl(documentUrl)) return decision("URL_POLICY", false);
+    if (!isSafeRecipeUrl(request.url)) {
+      // The normal browser handler rejects this exact POST URL before readPost.
+      // Only certify that denial when neither canonicalization nor a separately
+      // typed public read URL can change that conclusion. No read is minted.
+      const canonical = canonicalPublicReadUrl(request.url, "POST");
+      const definitelyForbidden = canonical === request.url && canonicalCpsPublicUrl(canonical) === canonical &&
+        !isSafeBrowserBootstrapReadUrl(canonical, request.resourceType, "POST") &&
+        !isSafeBrowserAvailabilityReadUrl(canonical, request.resourceType, "POST") &&
+        !isSafeBrowserMemberSportsEventsReadUrl(canonical, request.resourceType, "POST");
+      return decision(definitelyForbidden ? "FORBIDDEN_REQUEST_URL" : "URL_POLICY", definitelyForbidden);
+    }
     const url = new URL(request.url), headers = new Headers();
     for (const key of ["accept", "content-type", "origin"]) if (request.headers[key]) headers.set(key, request.headers[key]);
     // REX native placeholders and public header/form capabilities require the
     // original full identity path. Never classify their absence as denial.
-    if (isRexNamespace(url) || isMemberSportsPublicTeeSheetPost(url, headers, request.body, documentUrl)) return false;
-    if (!addVerifiedMindbodyReadHeaders(url, "POST", request.headers, headers, request.body) ||
-        !addReadHeaders(url, "POST", request.headers, headers, request.body)) return false;
-    return readPost(url, headers, request.body) === false;
-  } catch { return false; }
+    if (isRexNamespace(url) || isMemberSportsPublicTeeSheetPost(url, headers, request.body, documentUrl)) return decision("PROTECTED_NAMESPACE", false);
+    if (!addVerifiedMindbodyReadHeaders(url, "POST", request.headers, headers, request.body)) return decision("MINDBODY_HEADER_UNCERTAIN", false);
+    if (!addReadHeaders(url, "POST", request.headers, headers, request.body)) return decision("USCHEDULE_HEADER_UNCERTAIN", false);
+    return readPost(url, headers, request.body) === false ? decision("DEFINITELY_DENIED", true) : decision("READ_POLICY_MAY_ALLOW", false);
+  } catch { return decision("ERROR_UNCERTAIN", false); }
 }
 export const discoveryBrowserActionSchema = z.discriminatedUnion("action", [
   z.object({ id: identifier, action: z.literal("open"), url: z.string().max(2048) }).strict(),
@@ -186,7 +202,7 @@ export type DiscoveryBrowserSnapshot = {
   officialSourceDiagnostic?: OfficialSourceDiagnostic;
   navigationFailureKind?: NavigationFailureKind;
   capabilityDiagnostics?: Array<{ code: "SUBFRAME_UNSUPPORTED"; resourceType: string; url?: string }>;
-  frames: Array<{ url: string; source?: "OFFICIAL_IFRAME_SRC" }>;
+  frames: Array<{ url: string; source?: "OFFICIAL_IFRAME_SRC" | "FIXED_INSPECTION_FRAME_SRC" }>;
   elements: Array<{ selector: string; tag: string; text: string; attributes: Record<string, string> }>;
   loading: boolean; blockedRequests: number; requestCount: number; interceptCount: number; responseBytes: number; startupMs: number;
   navigationStatus?: number; navigationElapsedMs?: number; initialContentWaitMs?: number; pendingRequestCount?: number;
@@ -202,6 +218,8 @@ export type DiscoveryBrowserSessionDependencies = {
   captureDelegatedDocument?: true;
   /** Private fixed CPS source capture; never a model/browser action field. */
   collectPublicCourseContacts?: true;
+  /** Private CPS phone/link source read; postal reader remains the default. */
+  allowCpsPhoneBookingContact?: true;
   fetch?: typeof fetch;
   launchBrowser?: () => Promise<Browser>;
   requestLease?: typeof runWithProviderRequestLease;
@@ -211,6 +229,8 @@ export type DiscoveryBrowserSessionDependencies = {
   localCapabilities?: readonly string[];
   onRequestFailure?: (failure: { url: string; resourceType: string; reason: string }) => void;
   inspectAdapter?: typeof inspectExistingAdapter;
+  /** Private same-report fixed inspector witness; never an action or model field. */
+  fixedInspectionFrameWitness?: FixedInspectionFrameWitness;
 };
 export function discoveryBrowserRequestLimit(input: { initialUrls: string[]; timeZone?: string; venueName?: string; venueAddress?: string; venueOfficialUrl?: string;
   requestedInput?: AccessExecutionInput }, deps: Pick<DiscoveryBrowserSessionDependencies, "fixedReaderProfile" | "browserTransport" | "localCapabilities">) {
@@ -265,6 +285,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
   const startupStartedAt = Date.now();
   const requestedInput = input.requestedInput === undefined ? undefined : accessExecutionInputSchema.parse(input.requestedInput);
   const trustedContext = input.trustedContext === undefined ? undefined : discoveryTrustedContextSchema.parse(input.trustedContext);
+  const fixedInspectionFrameWitness = deps.fixedInspectionFrameWitness === undefined ? undefined : fixedInspectionFrameWitnessSchema.parse(deps.fixedInspectionFrameWitness);
+  if (fixedInspectionFrameWitness && (deps.browserTransport !== "NATIVE_CHROME" || input.venueOfficialUrl !== fixedInspectionFrameWitness.officialUrl))
+    throw new Error("FIXED_INSPECTION_FRAME_SCOPE_INVALID");
   if (requestedInput && requestedInput.timeZone !== (input.timeZone ?? "UTC")) throw new Error("REQUEST_CONTEXT_TIME_ZONE_MISMATCH");
   const initialUrls = input.initialUrls.map(normalizeDiscoveryNavigationUrl);
   if (!initialUrls.length || initialUrls.length > 16 || !initialUrls.every(isSafeRecipeUrl)) throw new Error("INVALID_INITIAL_URLS");
@@ -287,6 +310,10 @@ export async function createCourseDiscoveryBrowserSession(input: {
     sourceBinding: string; until: number; used: boolean } | undefined;
   let pendingOfficialSubpage: { targetUrl: string; sourceRequest: NativeReadRequest; sourceBinding: string } | undefined;
   let officialSubpage: { url: string; request: NativeReadRequest; frameId: string; loaderId: string; binding: string } | undefined;
+  let fixedInspectionFrameToken: { parentUrl: string; frameUrl: string; timeOrigin: number; request: NativeReadRequest;
+    frameId: string; loaderId: string; binding: string; issuedAt: number } | undefined;
+  let officialSubpageAttempt: Pick<NativeOfficialRenderGate, "linkCount" | "linkFailure" | "anchorFailure" | "anchorOrdinal"> =
+    { linkCount: "NOT_EVALUATED", linkFailure: "NONE", anchorFailure: "NONE", anchorOrdinal: "NONE" };
   const teeBookingScope = createTeeItUpOfficialBookingScope({ officialUrl: input.venueOfficialUrl, venueName: input.venueName ?? "",
     venueAddress: input.venueAddress, timeZone: input.timeZone ?? "UTC" }, deadline, (request, currentUrl, timeOrigin) => Boolean(
       nativeMainDocumentWitness && nativeMainDocumentWitness.request === request && nativeMainDocumentWitness.currentUrl === currentUrl &&
@@ -337,8 +364,11 @@ export async function createCourseDiscoveryBrowserSession(input: {
   } catch (error) { await nativeProxy?.close(); queue.dispose(); throw error; }
   const context = await browser.newContext({ serviceWorkers: "block", acceptDownloads: false, timezoneId: input.timeZone ?? "UTC", locale: "en-US",
     ...(nativeProxy ? { proxy: { server: nativeProxy.server, bypass: "<-loopback>" } } : {}) });
+  try { if (nativeProxy) await registerPublicReadWorkerDenial(context); }
+  catch (error) { await context.close().catch(() => {}); await browser.close().catch(() => {}); await nativeProxy?.close().catch(() => {}); queue.dispose(); throw error; }
   await context.routeWebSocket("**/*", route => { route.close(); });
   const page = await context.newPage();
+  const freshFixedInspectionFrames = () => page.locator("iframe[src]").evaluateAll(visibleInspectionFrames);
   let redirectRouting: Awaited<ReturnType<typeof installNativeRedirectRouting>> | undefined;
   const startupMs = Date.now() - startupStartedAt;
   page.setDefaultTimeout(Math.min(10_000, remaining));
@@ -399,11 +429,28 @@ export async function createCourseDiscoveryBrowserSession(input: {
   // work may outlive handleRoute; pinned HTTP uses the local handler count.
   const pendingReadCount = () => Math.max(pendingRequests, redirectRouting?.pendingReads ?? 0);
   let terminalFailure: string | undefined;
+  let browserSessionNativeLimit: NativeFirstFatal | undefined;
   const sharedInterceptAllowed = () => {
     try { if (deps.delegatedReadBudget) chargeDelegatedReadBudget(deps.delegatedReadBudget, "intercepts"); return true; }
     catch { terminalFailure = "PUBLIC_READ_REQUEST_LIMIT"; return false; }
   };
   let navigation: { url: string; status: number; request?: NativeReadRequest; documentNonce?: string } | undefined;
+  const officialRenderGate = (mainFrame: boolean): NativeOfficialRenderGate => {
+    const current=page.url(),read=navigation,witness=nativeMainDocumentWitness;
+    const completedDocumentRead=Boolean(read?.request && witness && redirectRouting?.isCurrentCompletedDocumentRead(read.request,page.mainFrame(),
+      {frameId:witness.frameId,loaderId:witness.loaderId,url:current}));
+    const root=Boolean(input.venueOfficialUrl && officialIdentityDocument?.officialDocumentProof.kind==="VERIFIED_OFFICIAL_DOCUMENT" &&
+      sameDiscoveryMainDocument(officialIdentityDocument.url,current) &&
+      (current===input.venueOfficialUrl || read?.request && attestedNativeDocumentRedirects(read.request,new Set([input.venueOfficialUrl]))?.at(-1)?.toUrl===current));
+    const subpage=Boolean(officialSubpage && officialSubpage.url===current && officialSubpage.request===read?.request &&
+      officialSubpage.frameId===witness?.frameId && officialSubpage.loaderId===witness?.loaderId &&
+      officialSubpage.binding===witness?.proof.documentBindingSha256);
+    return { nativeTransport: Boolean(nativeProxy), mainFrame, navigationRequestPresent: Boolean(read?.request), navigationStatus200: read?.status===200,
+      witnessPresent: Boolean(witness), witnessRequestMatches: Boolean(witness && read?.request && witness.request===read.request),
+      witnessUrlMatches: Boolean(witness && witness.currentUrl===current), completedDocumentRead,
+      officialRootProof: root, officialSubpageProof: subpage, pendingSubpagePresent: Boolean(pendingOfficialSubpage),
+      subpageTokenPresent: Boolean(officialSubpage), ...officialSubpageAttempt };
+  };
   let statusCdp: CDPSession | undefined;
   const currentNavigationStatus = async (currentUrl: string, documentStartedAt: number) => {
     const read = navigation;
@@ -534,6 +581,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     const metadata: DiscoveryBrowserSnapshot["requests"][number] = {
       url: redactDiscoveryRequestUrl(requestUrl), method: request.method(), resourceType: request.resourceType(),
     };
+    let responseLimitAdmission: { allowedBytes: number; officialRenderDataLimit: boolean; gate: NativeOfficialRenderGate } | undefined;
     recordRequest(metadata, ["xhr", "fetch", "document"].includes(metadata.resourceType));
     pendingRequestMetadata.add(metadata);
     let ezWitness: EzLinksDocumentWitness | undefined, ezToken: EzLinksDocumentToken | undefined, ezCall: EzLinksControllerRead | undefined;
@@ -684,7 +732,6 @@ export async function createCourseDiscoveryBrowserSession(input: {
       if (responseBytes >= PUBLIC_BROWSER_TOTAL_BYTES) throw new Error("PUBLIC_READ_BYTE_LIMIT");
       requestCount++;
       admittedRequestCounts[request.resourceType()] = (admittedRequestCounts[request.resourceType()] ?? 0) + 1;
-      const responseLimit = publicBrowserResponseLimit(request.resourceType());
       const reply = await queue.run(requestFamilyForUrl(url.href), async () => {
         assertMindbodyBootstrapRead();
         // A same-document script read can retire the completion contract while
@@ -695,6 +742,17 @@ export async function createCourseDiscoveryBrowserSession(input: {
             publicClientReadHeaderProofFailure(publicHeaderProof));
           throw new Error("CREDENTIAL_HEADERS");
         }
+        // Decide after acquiring the provider lease. A queued request cannot
+        // inherit a byte allowance from an official document that navigated away.
+        const renderGate=officialRenderGate(request.frame()===page.mainFrame());
+        route.noteOfficialRenderGate?.(renderGate);
+        const officialRenderDataGet=Boolean(renderGate.nativeTransport && method==="GET" && ["xhr","fetch"].includes(request.resourceType()) &&
+          renderGate.mainFrame && renderGate.navigationRequestPresent && renderGate.navigationStatus200 && renderGate.witnessPresent &&
+          renderGate.witnessRequestMatches && renderGate.witnessUrlMatches && renderGate.completedDocumentRead &&
+          (renderGate.officialRootProof || renderGate.officialSubpageProof));
+        if (officialRenderDataGet && route.admitOfficialRenderDataLimit?.()!==true) throw new Error("NATIVE_OFFICIAL_RENDER_LIMIT_UNAVAILABLE");
+        const responseLimit=publicOfficialRenderResponseLimit(request.resourceType(),method,officialRenderDataGet);
+        if (nativeProxy) responseLimitAdmission = { allowedBytes: responseLimit, officialRenderDataLimit: officialRenderDataGet, gate: renderGate };
         if (nativeProxy) {
           nativeProxy.allowHostConnections(url.hostname);
           const response = await continueNativeBrowserRead(route, deadline, responseLimit, async () => {
@@ -848,6 +906,11 @@ export async function createCourseDiscoveryBrowserSession(input: {
       if (!closed && !request.signal?.aborted && method === "GET" && !request.redirectedFrom() && !redirect)
         recordCompletedPublicAsset(url.href, request.resourceType(), reply.status);
     } catch (error) {
+      if (nativeProxy && error instanceof Error && error.message === "NATIVE_RESPONSE_LIMIT" && !redirectRouting?.firstFatal &&
+          responseLimitAdmission && !browserSessionNativeLimit)
+        browserSessionNativeLimit = { code: "NATIVE_RESPONSE_LIMIT", limitOrigin: "BROWSER_SESSION", method: request.method(), resourceType: request.resourceType(),
+          allowedBytes: responseLimitAdmission.allowedBytes, officialRenderDataLimit: responseLimitAdmission.officialRenderDataLimit,
+          officialRenderGate: responseLimitAdmission.gate };
       if (teeRequestToken) teeBookingScope.invalidate();
       if (ezAssetRead && ezWitness === ezDocument && ezWitness) {
         ezAssetRead.complete = true; ezWitness.readContractFailed = true; ezWitness.readContractVersion++;
@@ -898,8 +961,14 @@ export async function createCourseDiscoveryBrowserSession(input: {
     try {
       redirectRouting = await installNativeRedirectRouting(page, handleRoute, {
         signal: deadline, maxRequests: 1024,
-        denyUncorrelatedPost: request => !closed && !deadline.aborted && !terminalFailure && page.url() === page.mainFrame().url() &&
-          discoveryDefiniteUncorrelatedPostDenial(request, page.url(), readPost, (url, method, original, headers, body) => uschedule.addReadHeaders(url, method, original, headers, body)),
+        denyUncorrelatedPost: (request, onDecision) => {
+          if (closed || deadline.aborted || terminalFailure || page.url() !== page.mainFrame().url()) {
+            try { onDecision?.("CALLER_SESSION_UNAVAILABLE"); } catch { /* Diagnostics never affect admission. */ }
+            return false;
+          }
+          return discoveryDefiniteUncorrelatedPostDenial(request, page.url(), readPost,
+            (url, method, original, headers, body) => uschedule.addReadHeaders(url, method, original, headers, body), onDecision);
+        },
         controllerGetIntent: (sourceUrl, targetUrl) => {
           if (!entryGetIntent || entryGetIntent.used || Date.now() > entryGetIntent.expiresAt ||
               entryGetIntent.sourceUrl !== sourceUrl || entryGetIntent.href !== targetUrl || !nativeMainDocumentWitness ||
@@ -1239,6 +1308,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
   const snapshotOnce = async (settleInitialContent = false, officialIdentityOnly = false): Promise<DiscoveryBrowserSnapshot> => {
     deadline.throwIfAborted();
     if (closed) throw new Error("BROWSER_CLOSED");
+    fixedInspectionFrameToken = undefined;
     const previousControls = new Map(controls);
     if (!officialIdentityOnly) { controls.clear(); observedElements.clear(); }
     await page.waitForTimeout(Math.min(300, Math.max(1, input.deadlineAt.getTime() - Date.now())));
@@ -1284,7 +1354,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       return { url: currentUrl, text, controls: [], elements: [], frames: [], responses: [], requests: [],
         officialSourceDiagnostic: officialDiagnostics(), loading: pendingReadCount() > 0,
         blockedRequests, requestCount, interceptCount, responseBytes, startupMs, pendingRequestCount: pendingReadCount(),
-        ...(redirectRouting?.firstFatal ? { nativeFirstFatal: redirectRouting.firstFatal } : {}),
+        ...((redirectRouting?.firstFatal ?? browserSessionNativeLimit) ? { nativeFirstFatal: redirectRouting?.firstFatal ?? browserSessionNativeLimit } : {}),
         ...(navigationStatus === undefined ? {} : { navigationStatus }),
         ...(nativeMainDocumentWitness ? { nativeMainDocumentContinuity: { ...nativeMainDocumentWitness.proof } } : {}),
         browserTransport: deps.browserTransport ?? "PINNED_HTTP", accessRequirementObserved: blockedAccess };
@@ -1421,6 +1491,29 @@ export async function createCourseDiscoveryBrowserSession(input: {
         finalNative.request !== officialSubpage.request || finalNative.frameId !== officialSubpage.frameId ||
         finalNative.loaderId !== officialSubpage.loaderId || finalNative.proof.documentBindingSha256 !== officialSubpage.binding))
       officialSubpage = undefined;
+    if (fixedInspectionFrameWitness && !blockedAccess && !terminalFailure && !redirectRouting?.firstFatal &&
+        actualCurrentUrl === fixedInspectionFrameWitness.parentUrl && navigationStatus === 200 && finalNative &&
+        navigation?.request === finalNative.request && page.url() === actualCurrentUrl) {
+      const gate = officialRenderGate(true);
+      if (gate.completedDocumentRead && gate.witnessRequestMatches && gate.witnessUrlMatches &&
+          (gate.officialRootProof || gate.officialSubpageProof)) {
+        const freshFrames = await freshFixedInspectionFrames();
+        const afterTimeOrigin = await page.evaluate(() => performance.timeOrigin);
+        const afterWitness = nativeMainDocumentWitness, afterGate = officialRenderGate(true);
+        if (page.url() === actualCurrentUrl && afterTimeOrigin === documentStartedAt &&
+            navigation?.request === finalNative.request && afterWitness?.request === finalNative.request &&
+            afterWitness.frameId === finalNative.frameId && afterWitness.loaderId === finalNative.loaderId &&
+            afterWitness.proof.documentBindingSha256 === finalNative.proof.documentBindingSha256 &&
+            afterGate.completedDocumentRead && afterGate.witnessRequestMatches && afterGate.witnessUrlMatches &&
+            (afterGate.officialRootProof || afterGate.officialSubpageProof) &&
+            exactFreshInspectionFrame(freshFrames, fixedInspectionFrameWitness, actualCurrentUrl)) {
+        if (tagFreshInspectionFrame(frames, fixedInspectionFrameWitness.frameUrl))
+          fixedInspectionFrameToken = { parentUrl: actualCurrentUrl, frameUrl: fixedInspectionFrameWitness.frameUrl,
+            timeOrigin: documentStartedAt, request: finalNative.request, frameId: finalNative.frameId,
+            loaderId: finalNative.loaderId, binding: finalNative.proof.documentBindingSha256, issuedAt: Date.now() };
+        }
+      }
+    }
     for (const known of controls.values()) known.document = controlsDocument;
     teeBookingScope.observeRenderedSnapshot(teeDocumentToken, { url: actualCurrentUrl, timeOrigin: documentStartedAt,
       ...(officialIdentityPage && officialIdentityPage.url === actualCurrentUrl ? { officialPage: officialIdentityPage, verifiedOfficial: officialIdentityPage.officialDocumentProof } : {}),
@@ -1440,7 +1533,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       ? attestedNativeDocumentRedirects(nativeDocumentRedirects.request, new Set([input.venueOfficialUrl])) : undefined;
     return { url: currentUrl, text, controls: visible, elements, frames, responses: responses.splice(0), requests, requestFailures: requestFailures.map(failure => ({ ...failure })),
       ...(currentNativeRedirects ? { nativeDocumentRedirects: currentNativeRedirects } : {}),
-      ...(redirectRouting?.firstFatal ? { nativeFirstFatal: redirectRouting.firstFatal } : {}),
+      ...((redirectRouting?.firstFatal ?? browserSessionNativeLimit) ? { nativeFirstFatal: redirectRouting?.firstFatal ?? browserSessionNativeLimit } : {}),
       ...(redirectRouting?.rejectedRequests?.length ? { nativeRejectedRequests: redirectRouting.rejectedRequests } : {}),
       officialSourceDiagnostic: officialDiagnostics(), ...(navigationFailureKind ? { navigationFailureKind } : {}),
       ...(capabilityDiagnostics.length ? { capabilityDiagnostics: capabilityDiagnostics.map(value => ({ ...value })) } : {}), loading: pendingReadCount() > 0,
@@ -1633,7 +1726,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
           !officialIdentityPage || officialIdentityPage.url !== current.url || captureAgeMs! > 5000 ||
           officialIdentityPage.browserTransport !== "NATIVE_CHROME" || officialIdentityPage.documentStartedAt !== timeOrigin ||
           officialIdentityPage.officialDocumentProof.kind !== "VERIFIED_OFFICIAL_DOCUMENT" ||
-          !officialIdentityPage.visibleEvidence?.addressTexts.length || !officialIdentityPage.visibleEvidence.linkUrls.length ||
+          !(deps.allowCpsPhoneBookingContact ? officialIdentityPage.visibleEvidence?.headings.length &&
+            officialIdentityPage.visibleEvidence.contactPhoneLinks?.length : officialIdentityPage.visibleEvidence?.addressTexts.length) ||
+          !officialIdentityPage.visibleEvidence?.linkUrls.length ||
           !sameDiscoveryMainDocument(officialIdentityPage.url, page.url())) throw new Error("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
       return structuredClone({ url: officialIdentityPage.url, html: officialIdentityPage.html,
         visibleEvidence: officialIdentityPage.visibleEvidence, browserTransport: officialIdentityPage.browserTransport });
@@ -1665,7 +1760,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
         ...(mindbodyAppointment ? { mindbodyAppointment: structuredClone(mindbodyAppointment) } : {}),
         mindbodyCapture: mindbodyCapture.diagnostics(),
         officialSourceDiagnostic: officialDiagnostics(), ...(navigationFailureKind ? { navigationFailureKind } : {}),
-        ...(redirectRouting?.firstFatal ? { nativeFirstFatal: redirectRouting.firstFatal } : {}),
+        ...((redirectRouting?.firstFatal ?? browserSessionNativeLimit) ? { nativeFirstFatal: redirectRouting?.firstFatal ?? browserSessionNativeLimit } : {}),
         ...(redirectRouting?.rejectedRequests?.length ? { nativeRejectedRequests: redirectRouting.rejectedRequests } : {}),
         requests: observedRequests.map(request => ({ url: request.url, method: request.method, resourceType: request.resourceType,
           ...(request.readPurpose ? { readPurpose: request.readPurpose } : {}),
@@ -1791,8 +1886,35 @@ export async function createCourseDiscoveryBrowserSession(input: {
       if (action.action === "open") {
         serviceSelection = undefined;
         disclosureGetOnly = false; entryGetIntent = undefined;
+        if (fixedInspectionFrameWitness && action.url === fixedInspectionFrameWitness.frameUrl) {
+          const token = fixedInspectionFrameToken;
+          fixedInspectionFrameToken = undefined;
+          if (!token || token.frameUrl !== action.url || token.parentUrl !== page.url() ||
+              Date.now() - token.issuedAt > 5000 || Date.now() >= input.deadlineAt.getTime())
+            throw new Error("FIXED_INSPECTION_FRAME_STALE");
+          const startedAt = await page.evaluate(() => performance.timeOrigin);
+          await currentNavigationStatus(page.url(), startedAt);
+          const witness = nativeMainDocumentWitness, gate = officialRenderGate(true);
+          if (page.url() !== token.parentUrl || startedAt !== token.timeOrigin || navigation?.request !== token.request ||
+              witness?.request !== token.request || witness.frameId !== token.frameId || witness.loaderId !== token.loaderId ||
+              witness.proof.documentBindingSha256 !== token.binding || !gate.completedDocumentRead ||
+              !gate.witnessRequestMatches || !gate.witnessUrlMatches || !(gate.officialRootProof || gate.officialSubpageProof))
+            throw new Error("FIXED_INSPECTION_FRAME_STALE");
+          const freshFrames = await freshFixedInspectionFrames();
+          const afterTimeOrigin = await page.evaluate(() => performance.timeOrigin);
+          const afterWitness = nativeMainDocumentWitness, afterGate = officialRenderGate(true);
+          if (page.url() !== token.parentUrl || afterTimeOrigin !== token.timeOrigin || navigation?.request !== token.request ||
+              afterWitness?.request !== token.request || afterWitness.frameId !== token.frameId || afterWitness.loaderId !== token.loaderId ||
+              afterWitness.proof.documentBindingSha256 !== token.binding || !afterGate.completedDocumentRead ||
+              !afterGate.witnessRequestMatches || !afterGate.witnessUrlMatches ||
+              !(afterGate.officialRootProof || afterGate.officialSubpageProof) ||
+              !exactFreshInspectionFrame(freshFrames, fixedInspectionFrameWitness, token.parentUrl))
+            throw new Error("FIXED_INSPECTION_FRAME_STALE");
+          allowedNavigation.add(action.url); observedNavigationRoots.add(action.url);
+        }
         if (!isSafeRecipeUrl(action.url) || !allowedNavigation.has(new URL(action.url).href)) throw new Error("UNOBSERVED_NAVIGATION");
         pendingOfficialSubpage = undefined; officialSubpage = undefined;
+        officialSubpageAttempt = { linkCount: "NOT_EVALUATED", linkFailure: "ENTRY_PRECONDITION", anchorFailure: "NONE", anchorOrdinal: "NONE" };
         if (nativeProxy && input.venueOfficialUrl && page.url() !== "about:blank" &&
             new URL(action.url).origin === new URL(page.url()).origin && !new URL(action.url).hash &&
             action.url !== page.url() && navigation?.request && navigation.status === 200 &&
@@ -1801,28 +1923,57 @@ export async function createCourseDiscoveryBrowserSession(input: {
           const startedAt = await page.evaluate(() => performance.timeOrigin);
           await currentNavigationStatus(page.url(), startedAt);
           const source = nativeMainDocumentWitness;
+          officialSubpageAttempt = { linkCount: "NOT_EVALUATED", linkFailure: "ROOT_WITNESS", anchorFailure: "NONE", anchorOrdinal: "NONE" };
           const links = [...controls.values()].filter(known => known.kind === "link" && known.href === action.url &&
             known.document?.url === page.url() && known.document.timeOrigin === startedAt &&
             known.document.binding === source?.proof.documentBindingSha256 && known.document.request === source?.request);
-          if (source && links.length === 1 && await links[0].locator.count() === 1) {
-            const link = links[0];
-            const current = await link.locator.evaluate(element => ({ href: (element as HTMLAnchorElement).href,
-              rawHref: element.getAttribute("href"), target: element.getAttribute("target"), role: element.getAttribute("role"),
-              inForm: Boolean(element.closest("form")), download: element.hasAttribute("download"),
-              handler: element.hasAttribute("onclick"), disabled: element.getAttribute("aria-disabled") === "true" }),
-            undefined, { timeout: 1000 });
-            if (await isRenderedControl(link.locator) && await link.locator.isEnabled() &&
-                JSON.stringify(await observeControl(link.locator)) === link.signature && current.href === action.url &&
-                current.rawHref && !current.inForm && !current.download && !current.handler && !current.disabled &&
-                [null, "", "_self"].includes(current.target) && [null, "", "link"].includes(current.role)) {
+          officialSubpageAttempt = { linkCount: links.length === 0 ? "ZERO" : links.length === 1 ? "ONE" : "MULTIPLE",
+            linkFailure: "LINK_COUNT", anchorFailure: links.length > 8 ? "CANDIDATE_BOUND" : "NONE", anchorOrdinal: "NONE" };
+          // Several anchors may lead to the same exact official subpage.
+          // One current, safe public anchor proves that direct URL navigation;
+          // an invalid duplicate never supplies that proof itself.
+          if (source && links.length > 0 && links.length <= 8) {
+            let oneLinkFresh = false;
+            for (const [index, link] of links.entries()) {
+              const failAnchor = (anchorFailure: NonNullable<NativeOfficialRenderGate["anchorFailure"]>) => {
+                if (officialSubpageAttempt.anchorFailure === "NONE")
+                  officialSubpageAttempt = { ...officialSubpageAttempt, anchorFailure,
+                    anchorOrdinal: index === 0 ? "FIRST" : index === 1 ? "SECOND" : "THIRD_TO_EIGHTH" };
+              };
+              if (await link.locator.count() !== 1) { failAnchor("LOCATOR_COUNT"); continue; }
+              const current = await link.locator.evaluate(element => ({ href: (element as HTMLAnchorElement).href,
+                rawHref: element.getAttribute("href"), target: element.getAttribute("target"), role: element.getAttribute("role"),
+                inForm: Boolean(element.closest("form")), download: element.hasAttribute("download"),
+                handler: element.hasAttribute("onclick"), disabled: element.getAttribute("aria-disabled") === "true" }),
+              undefined, { timeout: 1000 });
+              if (!await isRenderedControl(link.locator)) { failAnchor("NOT_RENDERED"); continue; }
+              if (!await link.locator.isEnabled()) { failAnchor("NOT_ENABLED"); continue; }
+              if (JSON.stringify(await observeControl(link.locator)) !== link.signature) { failAnchor("SIGNATURE_CHANGED"); continue; }
+              if (current.href !== action.url) { failAnchor("HREF_MISMATCH"); continue; }
+              if (!current.rawHref) { failAnchor("RAW_HREF_MISSING"); continue; }
+              if (current.inForm) { failAnchor("IN_FORM"); continue; }
+              if (current.download) { failAnchor("DOWNLOAD"); continue; }
+              if (current.handler) { failAnchor("HANDLER"); continue; }
+              if (current.disabled) { failAnchor("ARIA_DISABLED"); continue; }
+              if (![null, "", "_self"].includes(current.target)) { failAnchor("TARGET"); continue; }
+              if (![null, "", "link"].includes(current.role)) { failAnchor("ROLE"); continue; }
+              oneLinkFresh = true;
+              officialSubpageAttempt = { ...officialSubpageAttempt, anchorFailure: "NONE", anchorOrdinal: "NONE" };
+              break;
+            }
+            if (oneLinkFresh) {
+              officialSubpageAttempt = { ...officialSubpageAttempt, linkFailure: "LINK_RENDERED" };
               const stillStartedAt = await page.evaluate(() => performance.timeOrigin);
               await currentNavigationStatus(page.url(), stillStartedAt);
+              officialSubpageAttempt = { ...officialSubpageAttempt, linkFailure: "DOCUMENT_CHANGED" };
               if (page.url() === source.currentUrl && stillStartedAt === startedAt && navigation?.request === source.request &&
                   nativeMainDocumentWitness?.request === source.request &&
                   nativeMainDocumentWitness.frameId === source.frameId && nativeMainDocumentWitness.loaderId === source.loaderId &&
-                  nativeMainDocumentWitness.proof.documentBindingSha256 === source.proof.documentBindingSha256)
+                  nativeMainDocumentWitness.proof.documentBindingSha256 === source.proof.documentBindingSha256) {
                 pendingOfficialSubpage = { targetUrl: action.url, sourceRequest: source.request,
                   sourceBinding: source.proof.documentBindingSha256 };
+                officialSubpageAttempt = { ...officialSubpageAttempt, linkFailure: "PENDING_SET" };
+              } else officialSubpageAttempt = { ...officialSubpageAttempt, anchorFailure: "DOCUMENT_CHANGED", anchorOrdinal: "NONE" };
             }
           }
         }

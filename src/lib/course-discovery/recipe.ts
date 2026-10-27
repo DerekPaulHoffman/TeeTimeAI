@@ -295,6 +295,13 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
         proof.venueName!==recipe.source.venueName||proof.timeZone!==recipe.source.timeZone)
         ctx.addIssue({code:"custom",message:"Native public source contact proof must match the exact canonical recipe source"});
     }
+    if(recipe.adapter.family==="CPS"&&recipe.adapter.officialPhoneBookingProof){
+      const proof=recipe.adapter.officialPhoneBookingProof;
+      if(proof.officialUrl!==recipe.source.officialUrl||proof.bookingUrl!==recipe.source.bookingUrl||
+        proof.canonicalAddressInput!==recipe.source.venueAddress||proof.venueName!==recipe.source.venueName||
+        proof.timeZone!==recipe.source.timeZone||recipe.target.kind!=="OUTDOOR")
+        ctx.addIssue({code:"custom",message:"Native public phone and booking proof must match the exact canonical recipe source"});
+    }
     if (recipe.adapter.family === "USCHEDULE" && recipe.adapter.publicLocationProof && !recipe.source.venueAddress)
       ctx.addIssue({ code: "custom", message: "A public location rental requires canonical venue address context" });
     if (recipe.adapter.family === "TEEITUP" && recipe.adapter.officialDelegatedBookingProof) {

@@ -16,6 +16,12 @@ export type TeeItUpOfficialIdentityProof = z.infer<typeof teeItUpOfficialIdentit
 export type OfficialIdentitySource = { officialUrl?: string; bookingUrl: string; venueName: string; venueAddress?: string; timeZone: string };
 export type OfficialIdentityPage = { url: string; html: string; visibleEvidence?: {
   title: string; headings: string[]; linkUrls: string[]; addressTexts: string[]; phoneTexts?: string[];
+  phoneTextsOmitted?: boolean;
+  contactPhoneLinks?: Array<{ href: string; text: string }>;
+  contactPhoneLinksOmitted?: boolean;
+  /** Exact computed-visible public anchor text paired with its URL. */
+  publicLinkLabels?: Array<{ href: string; text: string }>;
+  publicLinkLabelsOmitted?: boolean;
   brandLinks?: Array<{ href: string; text: string }>;
   publicRentalTexts?: string[];
   /** Computed-visible public business/service labels, never field values. */

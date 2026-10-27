@@ -4,8 +4,9 @@ import { STAGEHAND_SOURCE_MODE, canonicalStagehandData as canonical, stagehandDa
   publicStagehandSourceUrl as publicUrl, validateStagehandSourceProposal as validateAdapterSourceProposal,
   validateStagehandSourceReport } from "./course-discovery-stagehand-source.mjs";
 import { observedBookingSourceCandidates, nativeLinkSource, corroboratedNativeLink, nativeFrameNavigations, nativeIntermediaryNavigations, nativeGestureNavigations } from "./stagehand/source-provenance.mjs";
-import { safeTeeItUpDelegationDiagnostic, safeFixedAdapterReadDiagnostic, safeNativeMainDocumentContinuity } from "./course-discovery-worker.mjs";
+import { safeTeeItUpDelegationDiagnostic, safeFixedAdapterReadDiagnostic, safeFixedInspectionSourceDiagnostic, safeNativeMainDocumentContinuity } from "./course-discovery-worker.mjs";
 import { z } from "zod";
+import { setTimeout as waitForFrame } from "node:timers/promises";
 import { projectNativeRouterFailure, safeNativeRouterFailure } from "./stagehand/source-diagnostic.mjs";
 const fail = code => discoveryError(code), HYBRID_SOURCE_DISCOVERY = STAGEHAND_SOURCE_MODE;
 const INSPECTION_ACTION_LIMIT = 6;
@@ -77,10 +78,12 @@ export function currentStagehandInspectionDiagnostic(error, job, startedAt, now)
     const adapterRead = safeFixedAdapterReadDiagnostic(value.adapterRead);
     const readability = safeInspectionReadability(value.readability);
     const nativeRouterFailure = safeNativeRouterFailure(value.nativeRouterFailure);
-    return teeItUpDelegation || adapterRead || readability || nativeRouterFailure ? {
+    const fixedSource = safeFixedInspectionSourceDiagnostic(value);
+    return teeItUpDelegation || adapterRead || readability || nativeRouterFailure || fixedSource ? {
       ...(teeItUpDelegation ? { teeItUpDelegation } : {}), ...(adapterRead ? { adapterRead } : {}),
       ...(readability ? { readability } : {}),
       ...(nativeRouterFailure ? { nativeRouterFailure } : {}),
+      ...(fixedSource ?? {}),
     } : undefined;
   } catch { return undefined; }
 }
@@ -178,6 +181,32 @@ export function observedInspectionPath(report, officialUrl, bookingUrl) {
   throw fail('FRAMEWORK_INSPECTION_PATH_NOT_OBSERVED');
 }
 
+/** Report edges constrain one fixed inspection; a fresh native DOM match still owns admission. */
+export function fixedInspectionFrameWitness(report, path, officialUrl) {
+  if (!Array.isArray(path) || path.length < 2 || path.length > INSPECTION_ACTION_LIMIT ||
+      !publicUrl(officialUrl) || path[0] !== officialUrl) throw fail('FRAMEWORK_INSPECTION_SCOPE_INVALID');
+  const frames = nativeFrameNavigations(report, publicUrl).filter(row =>
+    path.some((url, index) => index + 1 < path.length && row.pageUrl === url && row.frameUrl === path[index + 1]));
+  if (frames.length > 1) throw fail('FRAMEWORK_INSPECTION_SCOPE_INVALID');
+  const frame = frames[0];
+  return frame ? { kind: 'FIXED_INSPECTION_SOURCE_FRAME', officialUrl, parentUrl: frame.pageUrl,
+    frameUrl: frame.frameUrl, sourceReportSha256: hash(canonical(report)) } : undefined;
+}
+
+/** A report edge never substitutes for the current child browser's private frame tag. */
+export function freshFixedInspectionFrameEdge(snapshot, witness, next) {
+  return Boolean(witness && next === witness.frameUrl && snapshot?.url === witness.parentUrl &&
+    (snapshot.frames ?? []).some(row => row.source === 'FIXED_INSPECTION_FRAME_SRC' && row.url === next));
+}
+
+export function incompleteInspectionOfficial(snapshot, completedNativeTerminal, freshFixedFrameEdge, exactNextPresent) {
+  const diagnostic = snapshot?.officialSourceDiagnostic;
+  return !freshFixedFrameEdge && !completedNativeTerminal && diagnostic?.rawOfficialCaptured === true &&
+    (diagnostic.currentOfficialDocument === false ||
+      diagnostic.renderedHeadingsPresent === false && diagnostic.renderedAddressesPresent === false &&
+      !(diagnostic.currentOfficialDocument === true && exactNextPresent));
+}
+
 
 /** The fresh owned native helper alone can attest these official document hops. */
 export function freshNativeOfficialRedirects(snapshot,expectedRoot,currentUrl){
@@ -256,6 +285,7 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
     observedSourceEvidence(report, job.request.identity, recipe, job.request.input,{sourceDiscoveryOnly:mode===HYBRID_SOURCE_DISCOVERY});
     if(mode===HYBRID_SOURCE_DISCOVERY&&!observedBookingSourceCandidates(report,job.request.identity.officialUrl,publicUrl,{sourceDiscoveryOnly:true}).includes(recipe.source.bookingUrl))throw fail('FRAMEWORK_HYBRID_SOURCE_NOT_ELIGIBLE');
     const path = observedInspectionPath(report, job.request.identity.officialUrl, recipe.source.bookingUrl);
+    const frameWitness = fixedInspectionFrameWitness(report, path, job.request.identity.officialUrl);
     const earlyCpsContext = mode === HYBRID_SOURCE_DISCOVERY && sourceOnly && isReviewedCpsSourceEntry(recipe.source.bookingUrl);
     receipt.pathSha256 = hash(canonical(path)); receipt.pathLength = path.length;
     const environment = client.helperEnvironment('discovery', job);
@@ -264,6 +294,7 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
         environment.COURSE_DISCOVERY_LEASE_TOKEN !== job.leaseToken) throw fail('FRAMEWORK_INSPECTION_SCOPE_INVALID');
     const inspectionSignal = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(Math.max(1, deadline - now()))]);
     browser = await worker.createDiscoveryBrowser({ cwd, deadlineAt: new Date(deadline).toISOString(),
+      ...(frameWitness ? { fixedInspection: true, fixedInspectionFrameWitness: frameWitness } : {}),
       initialUrls: [job.request.identity.officialUrl], timeZone: job.request.input.timeZone,
       requestedInput: job.request.input,
       ...(job.request.trustedContext!==undefined?{trustedContext:job.request.trustedContext}:{}),
@@ -288,6 +319,8 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
         const snapshot = await browser.request(action === 'observe' ? { action } : action === 'click' ? { action, target } : { action, url }); check();
         // Record before the unchanged guard: an unreadable snapshot must remain diagnosable.
         try { step.readability = inspectionReadability(snapshot, action, receipt.actions.length, job.request.identity.officialUrl, recipe.source.bookingUrl); }
+        catch { /* Optional diagnostic capture cannot replace the original guard. */ }
+        try { Object.assign(step, safeFixedInspectionSourceDiagnostic(snapshot)); }
         catch { /* Optional diagnostic capture cannot replace the original guard. */ }
         if (snapshot?.browserTransport !== 'NATIVE_CHROME') throw fail('FRAMEWORK_INSPECTION_TRANSPORT_CHANGED');
         if (!publicUrl(snapshot.url) || snapshot.accessRequirementObserved || snapshot.nativeFirstFatal ||
@@ -352,11 +385,13 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
           const adapterRead = safeFixedAdapterReadDiagnostic(error?.details?.browserDiagnostics?.adapterRead);
           if (adapterRead) step.adapterRead = adapterRead;
         } catch { /* Diagnostic access cannot replace the primary failure. */ }
+        try { Object.assign(step, safeFixedInspectionSourceDiagnostic(error?.details?.browserDiagnostics)); }
+        catch { /* Diagnostic access cannot replace the primary failure. */ }
         throw error;
       }
       finally { step.elapsedMs = Math.max(0, now() - start); }
     };
-    let snapshot = await request('open', job.request.identity.officialUrl), position = 0, publicEntryDisclosed = false;
+    let snapshot = await request('open', job.request.identity.officialUrl), position = 0, publicEntryDisclosed = false, frameWaitUsed = false;
     for (;;) {
       const current = new URL(nativeContexts.get(snapshot)?.originalUrl ?? snapshot.url).href;
       // Fresh browser redirects may traverse only the remainder of the observed routing path.
@@ -375,10 +410,14 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
         typeof row.target === 'string' && /^[a-f0-9-]{36}$/u.test(row.target)) : [];
       const freshLinks = new Set([
         ...(snapshot.controls ?? []).filter(row => ['link','public-document-link'].includes(row.kind)).map(row => row.href),
-        ...(snapshot.frames ?? []).filter(row => row.source === 'OFFICIAL_IFRAME_SRC').map(row => row.url),
+        ...(snapshot.frames ?? []).filter(row => row.source === 'OFFICIAL_IFRAME_SRC' ||
+          frameWitness && row.source === 'FIXED_INSPECTION_FRAME_SRC' && row.url === frameWitness.frameUrl &&
+          snapshot.url === frameWitness.parentUrl && next === row.url).map(row => row.url),
         ...(matchingGestureControls.length === 1 ? [gesture.targetUrl] : []),
       ].filter(publicUrl).map(value => new URL(value).href));
-      const missingLink = next !== undefined && !freshLinks.has(next);
+      const requiredFixedFrame = Boolean(frameWitness && next === frameWitness.frameUrl && snapshot.url === frameWitness.parentUrl);
+      const freshFixedFrameEdge = freshFixedInspectionFrameEdge(snapshot, frameWitness, next);
+      const missingLink = next !== undefined && (requiredFixedFrame ? !freshFixedFrameEdge : !freshLinks.has(next));
       const disclosures = (snapshot.controls ?? []).filter(control => control.kind === 'public-entry-disclosure' &&
         typeof control.target === 'string' && /^[a-f0-9-]{36}$/u.test(control.target));
       if (missingLink && !publicEntryDisclosed && disclosures.length === 1 &&
@@ -398,10 +437,7 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
       // A modal may hide background headings once its exact fresh frame exists.
       // At the final source, retained root metadata is not the provider document;
       // only its current private completed-main-read capability can replace this wait.
-      const incompleteOfficial = !completedNativeTerminal && diagnostic?.rawOfficialCaptured === true &&
-        (diagnostic.currentOfficialDocument === false ||
-          diagnostic.renderedHeadingsPresent === false && diagnostic.renderedAddressesPresent === false &&
-          !(diagnostic.currentOfficialDocument === true && exactNextPresent));
+      const incompleteOfficial = incompleteInspectionOfficial(snapshot, completedNativeTerminal, freshFixedFrameEdge, exactNextPresent);
       // loading includes ancillary scripts/styles. It is not document readiness
       // once the required current official facts or the exact next link exist.
       const completeOfficial = diagnostic?.rawOfficialCaptured === true && diagnostic.currentOfficialDocument === true &&
@@ -413,7 +449,15 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
       // spend the existing six-action budget and original90s clock; no reset.
       const reserved = Math.max(0, path.length - position - 2) + 1 +
         (earlyCpsContext && current !== recipe.source.bookingUrl ? 1 : 0);
+      if (reason && requiredFixedFrame && frameWaitUsed) throw fail('FRAMEWORK_INSPECTION_PATH_STALE');
       if (reason && receipt.actions.length + reserved < INSPECTION_ACTION_LIMIT) {
+        if (requiredFixedFrame) {
+          frameWaitUsed = true;
+          const waitMs = Math.min(8000, Math.max(0, deadline - now() - 1));
+          if (waitMs < 1) throw fail('FRAMEWORK_INSPECTION_DEADLINE');
+          await waitForFrame(waitMs, undefined, { signal: inspectionSignal }); check();
+          receipt.fixedFrameWaitMs = waitMs;
+        }
         snapshot = await request('observe', current, reason); continue;
       }
       if (unsettledRequiredSource) throw fail('FRAMEWORK_INSPECTION_SOURCE_NOT_SETTLED');
@@ -509,13 +553,15 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
     const failedAction = receipt.actions.at(-1);
     const readability = failedAction?.readability?.failedPredicates?.length ? safeInspectionReadability(receipt.actions.map(row => row.readability).filter(Boolean)) : undefined;
     if (primary && typeof primary === 'object' && failedAction?.error &&
-        (readability || failedAction.nativeRouterFailure || failedAction.action === 'inspect_adapter' && (failedAction.teeItUpDelegation || failedAction.adapterRead))) {
+        (readability || failedAction.nativeRouterFailure || failedAction.action === 'inspect_adapter' &&
+          (failedAction.teeItUpDelegation || failedAction.adapterRead || safeFixedInspectionSourceDiagnostic(failedAction)))) {
       try {
         inspectionFailures.set(primary, { job, attempt: job.attempts, requestSha256: hash(canonical(job.request)), sourceFingerprint: job.sourceFingerprint,
           firstPickedUpAt: job.firstPickedUpAt, deadlineAt: job.deadlineAt, startedAt,
           teeItUpDelegation: safeTeeItUpDelegationDiagnostic(failedAction.teeItUpDelegation),
           adapterRead: safeFixedAdapterReadDiagnostic(failedAction.adapterRead), ...(readability ? { readability } : {}),
-          nativeRouterFailure: safeNativeRouterFailure(failedAction.nativeRouterFailure) });
+          nativeRouterFailure: safeNativeRouterFailure(failedAction.nativeRouterFailure),
+          ...(safeFixedInspectionSourceDiagnostic(failedAction) ?? {}) });
       } catch { /* Optional diagnostics cannot replace the primary failure. */ }
     }
     throw primary;

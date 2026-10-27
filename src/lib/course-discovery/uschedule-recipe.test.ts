@@ -26,6 +26,7 @@ function responses(options: { ignoreDate?: boolean; ignoreDuration?: boolean; ch
     const serviceName = options.serviceName ?? "Hourly Simulator Rental";
     const body = `<body class="examplegolf"><select id="select_service"><option value="72" selected>${options.changedService ? "Golf Lessons" : serviceName}</option></select>
       <select id="select_length"><option value="60" ${duration === 60 ? "selected" : ""}>1 hour</option><option value="120" ${duration === 120 ? "selected" : ""}>2 hours</option></select>
+      ${serviceName === "Sim Booking" ? '<div id="serviceDescription"><div><span>Play or Practice for one hour on our SIMULATOR</span></div></div>' : ""}
       <select id="select_group_size"><option selected>1</option></select><select class="resSelect"><option value="-1" selected>Any Available</option></select>
       ${values.map(value => `<div class="next_avail_results"><div class="next_avail_item" data-time="${value}" data-empid="0"><strong>${serviceName}</strong></div></div>`).join("")}
       <a id="more_next_avail">Show more</a><script>var chosenDate = new Date(${Number(date.slice(0, 4))}, ${Number(date.slice(5, 7)) - 1}, ${Number(date.slice(8))});\nvar lastAvailTime = '${values.at(-1)}';</script></body>`;
@@ -50,6 +51,28 @@ describe("learned USchedule fixed public reader", () => {
       expect(fetch.mock.calls.filter(([, init]) => init?.method === "POST" && String(init.body).includes("group_size")).every(([, init]) => JSON.parse(String(init?.body))[0].Value === "1")).toBe(true);
       expect(hashAccessRecipe(learned)).toBe(immutable);
     }
+  });
+  it("learns a terse Sim Booking rental only with its current public simulator description", async () => {
+    const html = `<body class="examplegolf"><select id="select_service"><option value="25395" selected>Sim Booking</option>
+      <option value="25396">30 Minute Quick Practice Session</option></select>
+      <select id="select_length"><option value="60" selected>1 hour</option><option value="90">1.5 hours</option></select>
+      <div id="serviceDescription"><div><span>Play or Practice for one hour on our SIMULATOR</span></div></div></body>`;
+    const observed = inspectUScheduleRecipeConfiguration(html, source);
+    expect(observed?.selected).toMatchObject({ serviceId: "25395", serviceName: "Sim Booking" });
+    expect(observed?.rentals).toHaveLength(1);
+    for (const invalid of [html.replace(/<div id="serviceDescription">.*?<\/div><\/div>/u, ""),
+      html.replace("Play or Practice for one hour on our SIMULATOR", "A golf lesson on our simulator"),
+      html.replace("Play or Practice for one hour on our SIMULATOR", "Play at a private simulator event")]) {
+      const gates: string[] = [];
+      expect(inspectUScheduleRecipeConfiguration(invalid, source, gate => gates.push(gate))).toBeUndefined();
+      expect(gates).toEqual(["RENTAL_CATALOG"]);
+    }
+    const inspected = await inspectExistingAdapter(recipe.source, { ...deps, fetch: responses({ serviceName: "Sim Booking" }), venueMatches: () => true });
+    const learned = parseAccessRecipe({ ...recipe, adapter: inspected.adapter });
+    expect(learned.adapter).toMatchObject({ family: "USCHEDULE", serviceId: "72", serviceName: "Sim Booking" });
+    const result = await executeAccessRecipe(learned, { ...input, date: "2030-10-24", players: 2 }, { ...deps, fetch: responses({ serviceName: "Sim Booking" }) });
+    expect(result).toMatchObject({ status: "AVAILABLE", complete: true, evidence: { venueVerified: true, dateVerified: true, durationVerified: true } });
+    expect(result.slots.length).toBeGreaterThan(0);
   });
   it.each(["Public Tee Times Lesson", "Public Tee Times Membership", "Private Public Tee Times", "Public Tee Times Package", "Public Tee Times - Members Only", "Tee Times", "Public Tee Times Checkout"])("does not reinterpret a nonpublic or different service label: %s", async label => {
     expect(inspectUScheduleRecipeConfiguration(`<body class="examplegolf"><select id="select_service"><option value="72" selected>${label}</option></select><select id="select_length"><option value="60">1 hour</option></select></body>`, source)).toBeUndefined();

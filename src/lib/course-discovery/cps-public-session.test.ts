@@ -19,6 +19,9 @@ const routing = () => new Headers({ accept: "application/json, text/plain, */*",
   "x-productid": "1", "x-componentid": "1", "x-ismobile": "false", referer: origin + "/", "x-requestid": transactionId });
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
 const envScript = '(function(window){window.__env=window.__env||{};window.__env.AUTH_CLIENT_ID="separate-account-client";window.__env.SHORT_LIVED_CLIENT_ID="separate-published-short-client";window.__env.PRODUCTION="true";})(this);';
+const inertPublishedLiteral = "SYNTHETIC_UNUSED_PUBLIC_LITERAL";
+const envWithInertLiteral = envScript.replace('window.__env.SHORT_LIVED_CLIENT_ID=',
+  `window.__env.CLIENT_SECRET="${inertPublishedLiteral}";window.__env.SHORT_LIVED_CLIENT_ID=`);
 const envResponse = () => new Response(envScript, {headers:{"content-type":"text/javascript"}});
 const tokenResponse = () => json({ access_token: token, token_type: "Bearer", expires_in: 60 });
 function setup(change?: (url: string, init: RequestInit) => Response | Promise<Response>) {
@@ -35,12 +38,44 @@ beforeEach(() => { vi.restoreAllMocks(); mocks.resolve.mockReset(); mocks.reques
 describe("exact CPS26 anonymous public browsing session", () => {
   it("derives only a literal public short-lived id from the reviewed env shape, never routing/account/storage or executable code", () => {
     expect(parseCps26PublicEnvironment(envScript)).toBe("separate-published-short-client");
+    expect(parseCps26PublicEnvironment(envWithInertLiteral)).toBe("separate-published-short-client");
+    expect(parseCps26PublicEnvironment(envWithInertLiteral)).not.toContain(inertPublishedLiteral);
     expect(parseCps26PublicEnvironment(envScript)).not.toBe(config().clientId);
     for (const script of [envScript.replace('window.__env.SHORT_LIVED_CLIENT_ID="separate-published-short-client";', ''),
       envScript.replace('"separate-published-short-client"', 'localStorage.access_token'), envScript.replace('"separate-published-short-client"', 'document.cookie'),
       envScript.replace('window.__env.SHORT_LIVED_CLIENT_ID', 'window.__env.AUTH_CLIENT_ID'), envScript.replace('})(this)', '})(otherContext)'),
       envScript.replace('window.__env.PRODUCTION', 'window.__env.access_token'), envScript + 'fetch("https://private.example/");',
       envScript.replace('"separate-published-short-client"', '"bad id"')]) expect(() => parseCps26PublicEnvironment(script)).toThrow("CPS_PUBLIC_SESSION_ENV_UNVERIFIED");
+    for (const script of [
+      envWithInertLiteral.replace('window.__env.CLIENT_SECRET', 'window.__env.UNKNOWN'),
+      envWithInertLiteral.replace('window.__env.CLIENT_SECRET', 'window.__env.AUTH_CLIENT_ID'),
+      envWithInertLiteral.replace(`"${inertPublishedLiteral}"`, 'window.accountSecret'),
+      envWithInertLiteral.replace(`"${inertPublishedLiteral}"`, 'readSecret()'),
+      envWithInertLiteral.replace(`"${inertPublishedLiteral}"`, '({value:1})'),
+      envWithInertLiteral.replace(`"${inertPublishedLiteral}"`, '42'),
+      envWithInertLiteral.replace(`"${inertPublishedLiteral}"`, '""'),
+      envWithInertLiteral.replace(`"${inertPublishedLiteral}"`, `"${'x'.repeat(129)}"`),
+      envWithInertLiteral.replace('window.__env.CLIENT_SECRET', 'window["__env"].CLIENT_SECRET'),
+      envWithInertLiteral.replace('window.__env.CLIENT_SECRET', 'window.__env.__proto__.CLIENT_SECRET'),
+      envWithInertLiteral.replace('window.__env.SHORT_LIVED_CLIENT_ID=', `window.__env.CLIENT_SECRET="duplicate";window.__env.SHORT_LIVED_CLIENT_ID=`),
+      envWithInertLiteral.replace(`window.__env.CLIENT_SECRET="${inertPublishedLiteral}";`, '')
+        .replace('window.__env.PRODUCTION=', `window.__env.CLIENT_SECRET="${inertPublishedLiteral}";window.__env.PRODUCTION=`),
+    ]) expect(() => parseCps26PublicEnvironment(script)).toThrow("CPS_PUBLIC_SESSION_ENV_UNVERIFIED");
+  });
+  it("uses only SHORT_LIVED_CLIENT_ID for the anonymous bootstrap when the published inert literal is present", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const session = createCps26PublicSession(source, config(), date, { deadlineAt: new Date(Date.now() + 10_000),
+      bootstrapHeaders: routing(), runBootstrap: async work => work(), accountBootstrapBytes: () => {},
+      fetch: (async (url, init = {}) => { calls.push({ url: String(url), init }); return String(url).endsWith('/env.js')
+        ? new Response(envWithInertLiteral, { headers: { 'content-type': 'text/javascript' } }) : tokenResponse(); }) as typeof fetch });
+    await session.initialize();
+    expect(calls).toHaveLength(2);
+    const headers = new Headers(calls[1].init.headers);
+    expect(headers.has('authorization')).toBe(false);
+    const form = await new Response(calls[1].init.body, { headers }).formData();
+    expect([...form]).toEqual([["client_id", "separate-published-short-client"]]);
+    expect(JSON.stringify(calls[1])).not.toContain(inertPublishedLiteral);
+    session.close();
   });
   it("rejects an unavailable fresh env binding before token or API and does not guess the published main fallback", async () => {
     const calls: string[] = [];

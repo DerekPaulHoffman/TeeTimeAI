@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import { chromium, type Page, type Route } from "@playwright/test";
 import { describe, expect, it, vi } from "vitest";
 import { authorizePublicClientReadHeaders, installNativeRedirectRouting, isCurrentPublicClientReadHeaders,
-  publicClientReadHeaderProofFailure, nativeSourceLoadingFailedCorsErrors, nativePublicClientPreflightMethod, isNativeReadSupersededFailure, isNativeReadTerminalFailure, nativeMindbodyBootstrapSource, nativeGestureNavigationSource, attestedNativeDocumentRedirects, type NativeGestureIntent, type NativeReadRoute, type NativeRequestDiagnostic, type NativeUncorrelatedPost } from "./native-redirect-routing";
+  publicClientReadHeaderProofFailure, nativeSourceLoadingFailedCorsErrors, nativePublicClientPreflightMethod, isNativeReadSupersededFailure, isNativeReadTerminalFailure, nativeMindbodyBootstrapSource, nativeGestureNavigationSource, attestedNativeDocumentRedirects, projectNativeOfficialRenderGate, type NativeGestureIntent, type NativeReadRoute, type NativeRequestDiagnostic, type NativeUncorrelatedPost } from "./native-redirect-routing";
 import { createPublicBookingParentScope } from "./public-booking-parent";
 import { continueNativeBrowserRead, isObservedNativeRedirect, isObservedNativeRedirectTarget, nativeReadPreflightMethod } from "./native-public-browser";
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
@@ -16,6 +16,19 @@ import { discoveryDefiniteUncorrelatedPostDenial } from "./browser-session";
 import { isAnonymousBrowserReadPost } from "@/lib/automation/simulator-interactive-browser";
 
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; }
+it("retains only closed official render gate facts", () => {
+  const raw = { nativeTransport: true, mainFrame: true, navigationRequestPresent: true, navigationStatus200: true,
+    witnessPresent: true, witnessRequestMatches: true, witnessUrlMatches: true, completedDocumentRead: true,
+    officialRootProof: false, officialSubpageProof: false, pendingSubpagePresent: false, subpageTokenPresent: false,
+    linkCount: "MULTIPLE", linkFailure: "LINK_COUNT", anchorFailure: "SIGNATURE_CHANGED", anchorOrdinal: "SECOND",
+    url: "https://private.example/?token=SECRET" };
+  const projected = projectNativeOfficialRenderGate(raw);
+  expect(projected).toMatchObject({ linkCount: "MULTIPLE", linkFailure: "LINK_COUNT", anchorFailure: "SIGNATURE_CHANGED",
+    anchorOrdinal: "SECOND", officialSubpageProof: false });
+  expect(JSON.stringify(projected)).not.toMatch(/private|SECRET|https:|"url":/iu);
+  expect(projectNativeOfficialRenderGate({ ...raw, witnessPresent: "true" })).toBeUndefined();
+  expect(projectNativeOfficialRenderGate({ ...raw, anchorFailure: "https://private.example/" })).toBeUndefined();
+});
 async function installed(maxRequests?: number, signal?: AbortSignal, afterRoute?: (route: NativeReadRoute) => Promise<void>, responseProfile?: PublicBrowserResponseProfile,
   onCommandFailure?: (diagnostic: NativeRequestDiagnostic) => void, controllerGetIntent?: (sourceUrl: string, targetUrl: string) => boolean,
   denyUncorrelatedPost?: (request: NativeUncorrelatedPost) => boolean, controllerScriptGetIntent?: (sourceUrl: string, targetUrl: string) => NativeGestureIntent | undefined) {
@@ -282,6 +295,20 @@ describe("native child-asset denial", () => {
 describe("fixed caller deny-only uncorrelated POST", () => {
   const url = "https://example.org/public", body = "x".repeat(442);
   const denied = { networkId: undefined, request: { url, method: "POST", headers: { "Content-Type": "application/json" }, hasPostData: true, postData: body } };
+  it("aborts a categorically forbidden POST URL only after its exact ACK and without read authority", async () => {
+    const policy = vi.fn((request: NativeUncorrelatedPost) => discoveryDefiniteUncorrelatedPostDenial(request, url, isAnonymousBrowserReadPost, () => true));
+    const test = await installed(undefined, undefined, undefined, undefined, undefined, undefined, policy);
+    const ack = deferred<object>(), send = test.cdp.send.getMockImplementation()!;
+    test.cdp.send.mockImplementation((name, value) => name === "Fetch.failRequest" && value?.requestId === "forbidden" ? ack.promise : send(name, value));
+    try {
+      test.request("forbidden", { ...denied, request: { ...denied.request, url: "https://example.org/checkout/" } });
+      expect(test.guard.pendingReads).toBe(1); expect(test.handler).not.toHaveBeenCalled();
+      ack.resolve({}); await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+      expect(policy).toHaveBeenCalledOnce(); expect(test.guard.firstFatal).toBeUndefined(); expect(test.close).not.toHaveBeenCalled();
+      expect(test.rejections).toHaveLength(1);
+      expect(test.cdp.send.mock.calls.filter(([name, value]) => ["Fetch.continueRequest", "Fetch.continueResponse", "Fetch.getResponseBody"].includes(name) && value?.requestId === "forbidden")).toEqual([]);
+    } finally { ack.resolve({}); await test.guard.close(); }
+  });
   it("awaits exact denied POST abort ACK without handler authority while an independent native main GET remains provable", async () => {
     const policy = vi.fn((request: NativeUncorrelatedPost) => discoveryDefiniteUncorrelatedPostDenial(request, url, isAnonymousBrowserReadPost, () => true));
     const test = await installed(undefined, undefined, undefined, undefined, undefined, undefined, policy);
@@ -316,6 +343,8 @@ describe("fixed caller deny-only uncorrelated POST", () => {
       test.request("unknown", { ...denied, ...(mode === "documentPOST" ? { resourceType: "Document" } : {}),
         request: { ...denied.request, method: mode === "GET" ? "GET" : mode === "OPTIONS" ? "OPTIONS" : "POST" } });
       await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce()); expect(test.guard.firstFatal?.code).toBe("NATIVE_REDIRECT_NETWORK_ID_MISSING");
+      expect(test.guard.firstFatal).toMatchObject({ missingNetworkClosed: false, missingNetworkAborted: false,
+        uncorrelatedPostCallerInvoked: !["GET", "documentPOST", "OPTIONS"].includes(mode), uncorrelatedPostCallerDenied: false });
       expect(test.handler).not.toHaveBeenCalled(); expect(test.rejections).toEqual([]);
       if (["GET", "documentPOST", "OPTIONS"].includes(mode)) expect(policy).not.toHaveBeenCalled();
     } finally { await test.guard.close(); }
@@ -331,6 +360,8 @@ describe("fixed caller deny-only uncorrelated POST", () => {
       if (mode === "redirect") value.redirectedRequestId = "parent";
       if (mode === "empty network") value.networkId = "";
       test.request("denied", value); await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce());
+      if (["malformed headers", "redirect", "empty network"].includes(mode))
+        expect(test.guard.firstFatal).toMatchObject({ code: "NATIVE_REDIRECT_NETWORK_ID_MISSING", uncorrelatedPostCallerInvoked: false });
       expect(policy).not.toHaveBeenCalled(); expect(test.handler).not.toHaveBeenCalled(); expect(test.rejections).toEqual([]);
     } finally { await test.guard.close(); }
   });
@@ -678,6 +709,66 @@ describe("source-only confirmed uncorrelated denial", () => {
 });
 
 describe("native response limit metadata", () => {
+  it("captures one private official-render GET XHR byte cap before continuation without selecting source routing behavior", async () => {
+    const test=await installed(undefined,undefined,async route=>{ expect(route.admitOfficialRenderDataLimit?.()).toBe(true); });
+    const original=test.cdp.send.getMockImplementation()!;
+    test.cdp.send.mockImplementation(async(method,value)=>method==="Fetch.getResponseBody"
+      ? {body:"x".repeat(15_187_944),base64Encoded:false} : original(method,value));
+    try {
+      test.request("official-render");await vi.waitFor(()=>expect(test.routes).toHaveLength(1));
+      await test.routes[0].continue();expect(test.routes[0].admitOfficialRenderDataLimit?.()).toBe(false);
+      test.response("official-render",{responseHeaders:[{name:"Content-Length",value:"1082366"}]});
+      const response=await test.routes[0].request().response();expect((await response!.body()).length).toBe(15_187_944);
+      expect(test.guard.firstFatal).toBeUndefined();expect(test.close).not.toHaveBeenCalled();
+    } finally {await test.guard.close();}
+  });
+  it("does not accept a private cap bit when the source routing profile already owns the session",async()=>{
+    const test=await installed(undefined,undefined,async route=>{expect(route.admitOfficialRenderDataLimit?.()).toBe(false);},"SOURCE_ROUTING");
+    try{test.request("source");await vi.waitFor(()=>expect(test.routes).toHaveLength(1));await test.routes[0].abort();}
+    finally{await test.guard.close();}
+  });
+  it.each(["Document","Script"])("keeps private official-render cap unavailable for %s",async kind=>{
+    const test=await installed(undefined,undefined,async route=>{expect(route.admitOfficialRenderDataLimit?.()).toBe(false);});
+    try{test.request("other-kind",{resourceType:kind});await vi.waitFor(()=>expect(test.routes).toHaveLength(1));await test.routes[0].abort();}
+    finally{await test.guard.close();}
+  });
+  it("keeps the 16 MB response and 48 MB total caps after private byte admission",async()=>{
+    const gate = { nativeTransport: true, mainFrame: true, navigationRequestPresent: true, navigationStatus200: true,
+      witnessPresent: true, witnessRequestMatches: true, witnessUrlMatches: true, completedDocumentRead: true,
+      officialRootProof: true, officialSubpageProof: false, pendingSubpagePresent: false, subpageTokenPresent: false,
+      linkCount: "ONE", linkFailure: "PENDING_SET", url: "https://private.example/?token=SECRET" } as const;
+    const test=await installed(undefined,undefined,async route=>{
+      route.noteOfficialRenderGate?.(gate);
+      expect(route.admitOfficialRenderDataLimit?.()).toBe(true);
+    });
+    const original=test.cdp.send.getMockImplementation()!;
+    test.cdp.send.mockImplementation(async(method,value)=>method==="Fetch.getResponseBody"
+      ? {body:"x".repeat(16_000_001),base64Encoded:false} : original(method,value));
+    try{
+      test.request("over-cap");await vi.waitFor(()=>expect(test.routes).toHaveLength(1));await test.routes[0].continue();test.response("over-cap");
+      await vi.waitFor(()=>expect(test.guard.firstFatal?.limitKind).toBe("DECODED_BODY"));
+      expect(test.guard.firstFatal?.allowedBytes).toBe(16_000_000);expect(test.guard.firstFatal?.bodyBytes).toBe(16_000_001);
+      expect(test.guard.firstFatal).toMatchObject({ limitOrigin: "NATIVE_ROUTER", officialRenderDataLimit: true,
+        recordGenerationCurrent: true, recordGenerationRetired: false, officialRenderGate: { linkCount: "ONE", linkFailure: "PENDING_SET" } });
+      expect(JSON.stringify(test.guard.firstFatal)).not.toMatch(/SECRET|https:|"url":/u);
+    }finally{await test.guard.close();}
+  });
+  it("does not grant a larger body cap from closed anchor failure diagnostics",async()=>{
+    const gate = { nativeTransport: true, mainFrame: true, navigationRequestPresent: true, navigationStatus200: true,
+      witnessPresent: true, witnessRequestMatches: true, witnessUrlMatches: true, completedDocumentRead: true,
+      officialRootProof: false, officialSubpageProof: false, pendingSubpagePresent: false, subpageTokenPresent: false,
+      linkCount: "MULTIPLE", linkFailure: "LINK_COUNT", anchorFailure: "NOT_RENDERED", anchorOrdinal: "SECOND" } as const;
+    const test=await installed(undefined,undefined,async route=>{route.noteOfficialRenderGate?.(gate);});
+    const original=test.cdp.send.getMockImplementation()!;
+    test.cdp.send.mockImplementation(async(method,value)=>method==="Fetch.getResponseBody"
+      ? {body:"x".repeat(2_000_001),base64Encoded:false} : original(method,value));
+    try{
+      test.request("closed-only");await vi.waitFor(()=>expect(test.routes).toHaveLength(1));await test.routes[0].continue();test.response("closed-only");
+      await vi.waitFor(()=>expect(test.guard.firstFatal?.limitKind).toBe("DECODED_BODY"));
+      expect(test.guard.firstFatal).toMatchObject({allowedBytes:2_000_000,officialRenderDataLimit:false,
+        officialRenderGate:{anchorFailure:"NOT_RENDERED",anchorOrdinal:"SECOND"}});
+    }finally{await test.guard.close();}
+  });
   it.each([undefined, "SOURCE_ROUTING"] as const)("applies fixed source allocation only with explicit profile=%s", async profile => {
     const test = await installed(undefined, undefined, undefined, profile), original = test.cdp.send.getMockImplementation()!;
     test.cdp.send.mockImplementation(async (method, value) => method === "Fetch.getResponseBody" ? { body: "x".repeat(15_170_216), base64Encoded: false } : original(method, value));
@@ -711,7 +802,9 @@ describe("native response limit metadata", () => {
       test.request("limit"); await vi.waitFor(() => expect(test.routes).toHaveLength(1)); await test.routes[0].continue();
       test.response("limit", { responseHeaders: [{ name: "Content-Length", value: length }] });
       await vi.waitFor(() => expect(test.guard.lastFailure).toBe("NATIVE_RESPONSE_LIMIT"));
-      expect(test.guard.firstFatal).toEqual({ code: "NATIVE_RESPONSE_LIMIT", limitKind: "DECLARED_INVALID", method: "GET", resourceType: "xhr", allowedBytes: 2_000_000,
+      expect(test.guard.firstFatal).toEqual({ code: "NATIVE_RESPONSE_LIMIT", limitKind: "DECLARED_INVALID", limitOrigin: "NATIVE_ROUTER",
+        officialRenderDataLimit: false, recordGenerationCurrent: true, recordGenerationRetired: false,
+        method: "GET", resourceType: "xhr", allowedBytes: 2_000_000,
         totalBytes: 0, declaredLengthPresent: true, documentResponse: false, ancillaryResponse: false });
       expect(test.cdp.send.mock.calls.some(([method]) => method === "Fetch.getResponseBody")).toBe(false);
       expect(test.close).toHaveBeenCalledOnce();
@@ -727,6 +820,7 @@ describe("native response limit metadata", () => {
         test.response("limit", { responseHeaders: [{ name: "Content-Length", value: String(declared) }] });
         await vi.waitFor(() => expect(test.guard.lastFailure).toBe("NATIVE_RESPONSE_LIMIT"));
         expect(test.guard.firstFatal).toEqual({ code: "NATIVE_RESPONSE_LIMIT", limitKind: declared > 2_000_000 ? "DECLARED_TOO_LARGE" : "DECODED_BODY",
+          limitOrigin: "NATIVE_ROUTER", officialRenderDataLimit: false, recordGenerationCurrent: true, recordGenerationRetired: false,
           method: "GET", resourceType: "xhr", allowedBytes: 2_000_000, declaredBytes: declared, ...(declared > 2_000_000 ? {} : { bodyBytes: 2_000_001 }),
           totalBytes: declared > 2_000_000 ? 0 : 2_000_001, declaredLengthPresent: true, documentResponse: false, ancillaryResponse: false });
         expect(test.cdp.send.mock.calls.some(([method]) => method === "Fetch.continueResponse")).toBe(false);
@@ -745,7 +839,9 @@ describe("native response limit metadata", () => {
         if (index < 3) await test.routes[index].request().response();
       }
       await vi.waitFor(() => expect(test.guard.lastFailure).toBe("NATIVE_RESPONSE_LIMIT"));
-      expect(test.guard.firstFatal).toEqual({ code: "NATIVE_RESPONSE_LIMIT", limitKind: "TOTAL_DECODED", method: "GET", resourceType: kind === "Script" ? "script" : "xhr", allowedBytes: 48_000_000,
+      expect(test.guard.firstFatal).toEqual({ code: "NATIVE_RESPONSE_LIMIT", limitKind: "TOTAL_DECODED", limitOrigin: "NATIVE_ROUTER",
+        officialRenderDataLimit: false, recordGenerationCurrent: true, recordGenerationRetired: false,
+        method: "GET", resourceType: kind === "Script" ? "script" : "xhr", allowedBytes: 48_000_000,
         declaredBytes: 0, bodyBytes: 13_000_000, totalBytes: 52_000_000, declaredLengthPresent: false, documentResponse: false, ancillaryResponse: kind === "Script" });
       expect(test.cdp.send.mock.calls.filter(([method]) => method === "Fetch.continueResponse")).toHaveLength(3);
     } finally { await test.guard.close(); }
@@ -1770,6 +1866,9 @@ describe("native document-generation retirement", () => {
       test.response("queued", { resourceType: "Script", responseStatusCode: undefined, responseErrorReason: "Aborted" });
       await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce());
       expect(test.guard.firstFatal).toBeDefined();
+      if (mode === "reject") expect(test.guard.firstFatal).toMatchObject({ operation: "RESPONSE_METADATA",
+        responseFailureBranch: "RETIRED_RESPONSE_ABORT", recordGenerationRetired: true,
+        responseIdentityMatched: true, correlatedNetworkLoadingFailed: false, correlatedNetworkLoadingFinished: false });
       expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.getResponseBody" && value?.requestId === "queued")).toBe(false);
     } finally { await test.guard.close(); }
   });
@@ -2867,6 +2966,22 @@ describe("native exact request and response ownership", () => {
       test.response("root", { responseStatusCode: undefined, responseErrorReason: "Failed" }); await response;
       expect(test.cdp.send.mock.calls.some(([name]) => ["Fetch.getResponseBody", "Fetch.continueResponse"].includes(name))).toBe(false);
       expect(test.failures).toEqual([]);
+    } finally { await test.guard.close(); }
+  });
+
+  it("keeps a failed active response abort fatal while recording only closed terminal facts", async () => {
+    const test = await installed(), send = test.cdp.send.getMockImplementation()!;
+    try {
+      test.request("one"); await test.routes[0].continue();
+      test.cdp.send.mockImplementation((name, value) => name === "Fetch.failRequest" && value?.requestId === "one"
+        ? Promise.reject(new Error("Invalid InterceptionId")) : send(name, value));
+      test.response("one", { responseStatusCode: undefined, responseErrorReason: "Failed" });
+      await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce());
+      expect(test.guard.firstFatal).toMatchObject({ operation: "RESPONSE_METADATA", errorCategory: "INVALID_INTERCEPTION_ID",
+        responseFailureBranch: "ACTIVE_RESPONSE_ERROR_ABORT", recordGenerationCurrent: true,
+        recordGenerationRetired: false, responseIdentityMatched: false,
+        correlatedNetworkLoadingFailed: false, correlatedNetworkLoadingFinished: false });
+      expect(test.cdp.send.mock.calls.some(([name]) => ["Fetch.getResponseBody", "Fetch.continueResponse"].includes(name))).toBe(false);
     } finally { await test.guard.close(); }
   });
 

@@ -120,7 +120,7 @@ export async function pageEvidence(session) {
     const rendered = { visible(element) { if (!element?.isConnected || !element.getClientRects().length) return false; for (let node=element;node;node=node.parentElement) { const style=getComputedStyle(node); if(node.hidden || node.inert || node.hasAttribute('inert') || node.getAttribute('aria-hidden')==='true' || style.display==='none' || style.visibility==='hidden' || style.visibility==='collapse' || Number(style.opacity)===0)return false; } return true; } };
     const visible = element => rendered.visible(element);
     const links=[],seen=new Set();for(const element of document.querySelectorAll('a[href]')){const href=safe(element.href);if(!href||seen.has(href)||!visible(element))continue;seen.add(href);links.push({text:(element.innerText??'').trim().slice(0,180),href,visible:true});if(links.length>512)break;}
-    return { url: safe(location.href), observedAt:new Date().toISOString(), title: document.title.slice(0, 300), links, frames: [...document.querySelectorAll('iframe[src]')].filter(element=>!element.hasAttribute('srcdoc')).slice(0, 24).map(element => ({ src: safe(element.src), visible: visible(element), title: (element.title ?? '').slice(0, 120) })), dom: [...document.querySelectorAll('body *')].filter(visible).filter(element => !['SCRIPT', 'STYLE', 'NOSCRIPT', 'IFRAME'].includes(element.tagName) && !sensitive.test(`${element.id} ${element.getAttribute('name') ?? ''} ${element.getAttribute('type') ?? ''}`)).slice(0, 800).map(element => ({ tag: element.tagName.toLowerCase(), id: element.id, class: String(element.className ?? '').slice(0, 180), text: (element.children.length === 0 || element.tagName === 'BUTTON' || element.getAttribute('role') === 'button' ? (element.innerText ?? element.textContent ?? '').trim().slice(0, 300) : ''), attributes: Object.fromEntries([...element.attributes].filter(attr => ['name', 'type', 'role', 'aria-label', 'value', 'data-date', 'data-time', 'data-value', 'data-capacity', 'datetime'].includes(attr.name) && !sensitive.test(attr.value)).map(attr => [attr.name, attr.value.slice(0, 180)])) })), network: globalThis.__ttsFrameworkReadEvidence ?? null };
+    return { url: safe(location.href), observedAt:new Date().toISOString(), documentTimeOrigin:Number.isFinite(performance.timeOrigin)?performance.timeOrigin:null, title: document.title.slice(0, 300), links, frames: [...document.querySelectorAll('iframe[src]')].filter(element=>!element.hasAttribute('srcdoc')).slice(0, 24).map(element => ({ src: safe(element.src), visible: visible(element), title: (element.title ?? '').slice(0, 120) })), dom: [...document.querySelectorAll('body *')].filter(visible).filter(element => !['SCRIPT', 'STYLE', 'NOSCRIPT', 'IFRAME'].includes(element.tagName) && !sensitive.test(`${element.id} ${element.getAttribute('name') ?? ''} ${element.getAttribute('type') ?? ''}`)).slice(0, 800).map(element => ({ tag: element.tagName.toLowerCase(), id: element.id, class: String(element.className ?? '').slice(0, 180), text: (element.children.length === 0 || element.tagName === 'BUTTON' || element.getAttribute('role') === 'button' ? (element.innerText ?? element.textContent ?? '').trim().slice(0, 300) : ''), attributes: Object.fromEntries([...element.attributes].filter(attr => ['name', 'type', 'role', 'aria-label', 'value', 'data-date', 'data-time', 'data-value', 'data-capacity', 'datetime'].includes(attr.name) && !sensitive.test(attr.value)).map(attr => [attr.name, attr.value.slice(0, 180)])) })), network: globalThis.__ttsFrameworkReadEvidence ?? null };
   });
   evidence.publicControls = await session.page.evaluate(() => [...document.querySelectorAll('input,select')].filter(element => element.getClientRects().length && !['password', 'email', 'tel', 'file'].includes(element.type) && !/password|secret|token|credential|email|phone|contact|username/iu.test(`${element.name} ${element.id}`)).slice(0, 80).map(element => ({ tag: element.tagName.toLowerCase(), id: element.id, name: element.name, type: element.type, value: element.value.slice(0, 180), selectedLabel: element instanceof HTMLSelectElement ? [...element.selectedOptions].map(option => option.text.slice(0, 160)).join(' ') : null, options: element instanceof HTMLSelectElement ? [...element.options].slice(0, 64).map(option => ({ value: option.value.slice(0, 180), text: option.text.slice(0, 160), selected: option.selected, disabled: option.disabled })) : null })));
   return evidence;
@@ -145,6 +145,33 @@ export async function settleSourceRoutingEvidence(session, { deadline, now = Dat
     await sleep(Math.min(1000, Math.max(1, end - now())));
   }
   throw fail('STAGEHAND_SOURCE_BUDGET_EXHAUSTED');
+}
+
+const lateRoutingWords = /\b(?:book|tee\s*times?|availability|calendar|reserve|schedule|bay|simulator)\b/iu;
+export function lateSourceRoutingKeys(evidence) {
+  const keys=[];
+  for(const row of evidence?.links??[])if(row?.visible===true&&sourceRoutingUrl(row.href)&&lateRoutingWords.test(`${row.text??''} ${row.href??''}`))keys.push('L:'+row.href);
+  for(const row of evidence?.frames??[])if(row?.visible===true&&sourceRoutingUrl(row.src))keys.push('F:'+row.src);
+  for(const row of evidence?.dom??[])if((row?.tag==='button'||row?.attributes?.role==='button')&&lateRoutingWords.test(`${row.text??''} ${row.attributes?.['aria-label']??''}`))keys.push('C:'+`${row.text??''} ${row.attributes?.['aria-label']??''}`.slice(0,180));
+  for(const row of evidence?.publicControls??[])if(/^(?:date|time|number)$/iu.test(row?.type??'')&&/date|time|players?|party|duration/iu.test(`${row.id??''} ${row.name??''} ${row.selectedLabel??''}`))keys.push('I:'+`${row.type??''} ${row.id??''} ${row.name??''}`.slice(0,180));
+  return new Set(keys.slice(0,640));
+}
+// One bounded chance for late client rendering after an UNRESOLVED decision.
+// A new route only restarts the normal native-witness path; it grants no source.
+export async function waitForLateSourceRoutingEvidence(session, baseline, {deadline,now=Date.now,sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms)),maxWaitMs=8000}={}) {
+  if(!Number.isFinite(deadline)||!Number.isFinite(maxWaitMs)||maxWaitMs<0||maxWaitMs>8000)throw fail('STAGEHAND_SOURCE_OUTPUT_INVALID');
+  if(!Number.isFinite(baseline?.documentTimeOrigin)||!sourceRoutingUrl(baseline?.url))return 'UNSUPPORTED_DOCUMENT_IDENTITY';
+  const keys=lateSourceRoutingKeys(baseline),end=Math.min(deadline-1000,now()+maxWaitMs);
+  while(now()<end){
+    const current=await session.page.url();
+    if(current!==baseline.url)return 'DOCUMENT_CHANGED';
+    if(typeof session.readSourceDocumentReadiness==='function'&&!sourceDocumentSettled(await session.readSourceDocumentReadiness()))return 'DOCUMENT_CHANGED';
+    const fresh=await pageEvidence(session);
+    if(fresh.url!==baseline.url||fresh.documentTimeOrigin!==baseline.documentTimeOrigin||await session.page.url()!==baseline.url)return 'DOCUMENT_CHANGED';
+    if([...lateSourceRoutingKeys(fresh)].some(key=>!keys.has(key)))return 'NEW_ROUTING_EVIDENCE';
+    await sleep(Math.min(500,Math.max(1,end-now())));
+  }
+  return 'UNCHANGED';
 }
 
 /** Closed predicate diagnostics only; this does not sanitize or admit a witness. */
@@ -279,6 +306,7 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
     const response=await bounded(()=>session.goto(request.identity.officialUrl)), finalUrl=assertPublicUrl(await bounded(()=>session.page.url()));
     report.initialNavigation={requestedUrl:request.identity.officialUrl,finalUrl,status:response?.status()??null,redirectChainAvailable:false};
     report.visitedUrls.push(request.identity.officialUrl);if(!report.visitedUrls.includes(finalUrl))report.visitedUrls.push(finalUrl);
+    const lateRoutingRecheckedDocuments=new Set();
     for(let step=0;step<45;step++){
       phase='EVIDENCE';
       if(typeof session.settleSourceDocument==='function'){
@@ -368,6 +396,12 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
         // document is still parsing, or a new main document has since arrived.
         if(typeof session.readSourceDocumentReadiness==='function'&&(!sourceDocumentSettled(await bounded(()=>session.readSourceDocumentReadiness()))||
           await bounded(()=>session.page.url())!==evidence.url))continue;
+        const documentKey=Number.isFinite(evidence.documentTimeOrigin)?`${evidence.url}|${evidence.documentTimeOrigin}`:null;
+        if(documentKey&&!lateRoutingRecheckedDocuments.has(documentKey)){
+          lateRoutingRecheckedDocuments.add(documentKey);
+          const late=await bounded(()=>waitForLateSourceRoutingEvidence(session,evidence,{...sourceEvidenceWait,deadline:workDeadline}));
+          if(late==='NEW_ROUTING_EVIDENCE'||late==='DOCUMENT_CHANGED')continue;
+        }
         stopCondition='EXPLICIT_UNRESOLVED';break;
       }
       if(decision.decision==='OPEN_FRAME'||routingFrame){

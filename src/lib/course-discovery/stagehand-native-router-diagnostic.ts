@@ -15,11 +15,29 @@ export type StagehandSourceRequestGuard = typeof stagehandSourceRequestGuards[nu
 const methods = ["GET", "HEAD", "POST", "OPTIONS", "PUT", "PATCH", "DELETE", "CONNECT", "TRACE", "OTHER"] as const;
 const kinds = ["document", "stylesheet", "script", "image", "media", "font", "xhr", "fetch", "preflight", "other", "ping", "websocket", "eventsource"] as const;
 export const stagehandNativeRouterBooleanKeys = ["framePresent", "rootFrame", "networkIdPresent", "duplicateRequestId", "hasPostData", "postDataPresent",
+  "missingNetworkClosed", "missingNetworkAborted", "missingNetworkGenerationRetired", "missingNetworkBoundaryPending", "missingNetworkAwaitingDocument",
+  "uncorrelatedPostCallerInvoked", "uncorrelatedPostCallerDenied",
+  "officialRenderDataLimit",
   "identityPresent", "loaderPresent", "loaderKnown", "identityFresh", "identityUrlMatches", "identityMethodMatches", "identityKindMatches", "identityFrameMatches",
   "parentPresent", "awaitingDocument", "parentCurrentGeneration", "documentCommitted", "documentIntentPresent", "documentIntentUsed", "sourceResponseComplete", "successorTerminalFailed",
   "declaredLengthPresent", "documentResponse", "ancillaryResponse", "recordGenerationCurrent", "recordGenerationRetired", "recordAdmitted", "recordPaused", "recordResponsePaused",
-  "recordFailed", "recordComplete", "recordHandlerDone", "recordTerminalObserved"] as const;
+  "recordFailed", "recordComplete", "recordHandlerDone", "recordTerminalObserved", "responseIdentityMatched",
+  "correlatedNetworkLoadingFailed", "correlatedNetworkLoadingFinished"] as const;
+export const nativeResponseFailureBranches = ["RETIRED_RESPONSE_ABORT", "ACTIVE_RESPONSE_ERROR_ABORT", "OTHER_RESPONSE_METADATA"] as const;
 const limitKinds = ["DECLARED_INVALID", "DECLARED_TOO_LARGE", "DECODED_BODY", "TOTAL_DECODED"] as const;
+const officialRenderGateBooleanKeys = ["nativeTransport", "mainFrame", "navigationRequestPresent", "navigationStatus200", "witnessPresent",
+  "witnessRequestMatches", "witnessUrlMatches", "completedDocumentRead", "officialRootProof", "officialSubpageProof",
+  "pendingSubpagePresent", "subpageTokenPresent"] as const;
+const officialRenderLinkCounts = ["ZERO", "ONE", "MULTIPLE", "NOT_EVALUATED"] as const;
+const officialRenderLinkFailures = ["NONE", "ENTRY_PRECONDITION", "ROOT_WITNESS", "LINK_COUNT", "LINK_RENDERED", "DOCUMENT_CHANGED", "PENDING_SET"] as const;
+const officialRenderAnchorFailures = ["NONE", "CANDIDATE_BOUND", "LOCATOR_COUNT", "NOT_RENDERED", "NOT_ENABLED", "SIGNATURE_CHANGED",
+  "HREF_MISMATCH", "RAW_HREF_MISSING", "IN_FORM", "DOWNLOAD", "HANDLER", "ARIA_DISABLED", "TARGET", "ROLE", "DOCUMENT_CHANGED"] as const;
+const officialRenderAnchorOrdinals = ["NONE", "FIRST", "SECOND", "THIRD_TO_EIGHTH"] as const;
+type StagehandOfficialRenderGate = Record<typeof officialRenderGateBooleanKeys[number], boolean> & {
+  linkCount: typeof officialRenderLinkCounts[number]; linkFailure: typeof officialRenderLinkFailures[number];
+  anchorFailure?: typeof officialRenderAnchorFailures[number]; anchorOrdinal?: typeof officialRenderAnchorOrdinals[number] };
+const uncorrelatedPostDenialReasons = ["REQUEST_SHAPE", "BODY_LIMIT", "URL_POLICY", "FORBIDDEN_REQUEST_URL", "PROTECTED_NAMESPACE", "CALLER_SESSION_UNAVAILABLE",
+  "MINDBODY_HEADER_UNCERTAIN", "USCHEDULE_HEADER_UNCERTAIN", "READ_POLICY_MAY_ALLOW", "DEFINITELY_DENIED", "ERROR_UNCERTAIN"] as const;
 export const stagehandRedirectRejections = ["PARENT_MISSING", "PARENT_UNADMITTED", "PARENT_FAILED", "PARENT_DEPTH_LIMIT", "PARENT_CHILD_RESERVED",
   "PARENT_RESPONSE_MISSING", "PARENT_RESPONSE_FAILED", "CHILD_RECORD_EXISTS", "PARENT_RESPONSE_INCOMPLETE", "LOCATION_MISSING", "LOCATION_MISMATCH",
   "KIND_NETWORK_MISMATCH", "METHOD_MISMATCH", "DOCUMENT_PARENT_KIND", "DOCUMENT_PARENT_METHOD", "CROSS_HOST"] as const;
@@ -62,7 +80,7 @@ export function classifyNativeRouterError(error: unknown): Required<Pick<Stageha
   return { errorName: typeof value.name === "string" && nativeRouterErrorNames.includes(value.name as typeof nativeRouterErrorNames[number])
     ? value.name as typeof nativeRouterErrorNames[number] : "UNKNOWN" as const, errorCategory };
 }
-export type StagehandNativeRouterFailure = { code: typeof stagehandNativeRouterCodes[number]; phase?: typeof phases[number]; method?: typeof methods[number]; resourceType?: typeof kinds[number]; limitKind?: typeof limitKinds[number]; sourceRequestGuard?: StagehandSourceRequestGuard; redirectRejection?: StagehandRedirectRejection } &
+export type StagehandNativeRouterFailure = { code: typeof stagehandNativeRouterCodes[number]; phase?: typeof phases[number]; method?: typeof methods[number]; resourceType?: typeof kinds[number]; limitKind?: typeof limitKinds[number]; limitOrigin?: "NATIVE_ROUTER" | "BROWSER_SESSION"; officialRenderGate?: StagehandOfficialRenderGate; sourceRequestGuard?: StagehandSourceRequestGuard; redirectRejection?: StagehandRedirectRejection; uncorrelatedPostDenialReason?: typeof uncorrelatedPostDenialReasons[number]; responseFailureBranch?: typeof nativeResponseFailureBranches[number] } &
   { operation?: typeof nativeRouterOperations[number]; errorName?: typeof nativeRouterErrorNames[number]; errorCategory?: typeof nativeRouterErrorCategories[number]; requestUrlSha256?: string } &
   Partial<Record<typeof byteKeys[number], number>> &
   Partial<Record<typeof stagehandNativeRouterBooleanKeys[number], boolean>>;
@@ -75,13 +93,26 @@ export function projectStagehandNativeRouterFailure(code: unknown, facts: unknow
   if (phase) value.phase = phase; if (method) value.method = method; if (resourceType) value.resourceType = resourceType;
   const operation = allowed(nativeRouterOperations, source.operation), errorName = allowed(nativeRouterErrorNames, source.errorName), errorCategory = allowed(nativeRouterErrorCategories, source.errorCategory);
   if (operation) value.operation = operation; if (errorName) value.errorName = errorName; if (errorCategory) value.errorCategory = errorCategory;
+  const responseFailureBranch = allowed(nativeResponseFailureBranches, source.responseFailureBranch);
+  if (operation === "RESPONSE_METADATA" && responseFailureBranch) value.responseFailureBranch = responseFailureBranch;
   if (typeof source.requestUrlSha256 === "string" && /^[a-f0-9]{64}$/u.test(source.requestUrlSha256)) value.requestUrlSha256 = source.requestUrlSha256;
   const sourceRequestGuard = allowed(stagehandSourceRequestGuards, source.sourceRequestGuard);
   if (value.code === "STAGEHAND_GUARDED_SOURCE_REJECTED" && phase === "SOURCE_HOST_REQUEST" && sourceRequestGuard) value.sourceRequestGuard = sourceRequestGuard;
   const redirectRejection = allowed(stagehandRedirectRejections, source.redirectRejection);
   if (value.code === "NATIVE_REDIRECT_PROVENANCE_REJECTED" && phase === "REDIRECT_PROVENANCE" && redirectRejection) value.redirectRejection = redirectRejection;
+  const denialReason = allowed(uncorrelatedPostDenialReasons, source.uncorrelatedPostDenialReason);
+  if (value.code === "NATIVE_REDIRECT_NETWORK_ID_MISSING" && denialReason) value.uncorrelatedPostDenialReason = denialReason;
   if (value.code === "NATIVE_RESPONSE_LIMIT") {
     const limitKind = allowed(limitKinds, source.limitKind); if (limitKind) value.limitKind = limitKind;
+    const limitOrigin = allowed(["NATIVE_ROUTER", "BROWSER_SESSION"] as const, source.limitOrigin); if (limitOrigin) value.limitOrigin = limitOrigin;
+    const gate = source.officialRenderGate && typeof source.officialRenderGate === "object" && !Array.isArray(source.officialRenderGate)
+      ? source.officialRenderGate as Record<string, unknown> : undefined;
+    if (gate && officialRenderGateBooleanKeys.every(key => typeof gate[key] === "boolean")) {
+      const linkCount = allowed(officialRenderLinkCounts, gate.linkCount), linkFailure = allowed(officialRenderLinkFailures, gate.linkFailure);
+      const anchorFailure = allowed(officialRenderAnchorFailures, gate.anchorFailure), anchorOrdinal = allowed(officialRenderAnchorOrdinals, gate.anchorOrdinal);
+      if (linkCount && linkFailure) value.officialRenderGate = { ...Object.fromEntries(officialRenderGateBooleanKeys.map(key => [key, gate[key]])),
+        linkCount, linkFailure, ...(anchorFailure && anchorOrdinal ? { anchorFailure, anchorOrdinal } : {}) } as StagehandOfficialRenderGate;
+    }
     for (const key of byteKeys) if (typeof source[key] === "number" && Number.isFinite(source[key]) && source[key] >= 0 && source[key] <= Number.MAX_SAFE_INTEGER) value[key] = source[key];
   }
   for (const key of stagehandNativeRouterBooleanKeys) if (typeof source[key] === "boolean") value[key] = source[key];

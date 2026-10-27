@@ -3,6 +3,16 @@ import { bindDiscoveryRecipeIdentity, createDiscoveryAdapterObservation, createD
 import { describePublicUrlRejection, safeBrowserActionIssues } from "../../../scripts/automation/course-discovery-diagnostics.mjs";
 
 describe("durable discovery browser diagnostics", () => {
+  it("keeps only closed response abort and terminal facts in browser failure evidence", () => {
+    const raw = { code: "NATIVE_REDIRECT_ROUTING_FAILED", operation: "RESPONSE_METADATA", responseFailureBranch: "RETIRED_RESPONSE_ABORT",
+      recordGenerationRetired: true, responseIdentityMatched: true, correlatedNetworkLoadingFailed: false,
+      correlatedNetworkLoadingFinished: false, requestId: "PRIVATE", body: "PRIVATE" };
+    const closed = safeBrowserFailureDiagnostics({ nativeFirstFatal: raw }).nativeFirstFatal;
+    expect(closed).toMatchObject({ responseFailureBranch: "RETIRED_RESPONSE_ABORT", recordGenerationRetired: true,
+      responseIdentityMatched: true, correlatedNetworkLoadingFailed: false, correlatedNetworkLoadingFinished: false });
+    expect(JSON.stringify(closed)).not.toMatch(/PRIVATE|requestId|body/u);
+    expect(safeBrowserFailureDiagnostics({ nativeFirstFatal: { ...raw, operation: "REQUEST_METADATA" } }).nativeFirstFatal).not.toHaveProperty("responseFailureBranch");
+  });
   it.each(["script", "stylesheet"])("preserves only opaque GET %s fingerprints when no public URL survives", resourceType => {
     const requestUrlFingerprint = { originSha256: "a".repeat(64), pathnameSha256: "b".repeat(64) };
     const diagnostic = { code: "UNSCOPED_REQUEST", method: "GET", resourceType, url: "https://private.internal/opaque-path?secret=never-emitted",
@@ -199,6 +209,38 @@ describe("durable discovery browser diagnostics", () => {
       parentCurrentGeneration: {}, documentCommitted: [], documentIntentPresent: null, documentIntentUsed: 0,
       sourceResponseComplete: "true", successorTerminalFailed: "false" } });
     expect(malformed.nativeFirstFatal).toEqual({ code: "NATIVE_REDIRECT_LOADER_MISMATCH" });
+  });
+  it("projects only bounded native response-limit evidence and admission bits", () => {
+    const raw = { code: "NATIVE_RESPONSE_LIMIT", method: "GET", resourceType: "xhr", limitKind: "DECODED_BODY",
+      limitOrigin: "NATIVE_ROUTER", allowedBytes: 2_000_000, declaredBytes: 128, bodyBytes: 15_187_944, totalBytes: 17_000_000,
+      officialRenderDataLimit: false, recordGenerationCurrent: false, recordGenerationRetired: true,
+      url: "https://venue.example/private/?token=SECRET", headers: { cookie: "SECRET" } };
+    const projected = safeBrowserFailureDiagnostics({ nativeFirstFatal: raw }).nativeFirstFatal;
+    expect(projected).toMatchObject({ code: raw.code, limitKind: raw.limitKind, limitOrigin: raw.limitOrigin,
+      allowedBytes: raw.allowedBytes, bodyBytes: raw.bodyBytes, officialRenderDataLimit: false,
+      recordGenerationCurrent: false, recordGenerationRetired: true });
+    expect(JSON.stringify(projected)).not.toMatch(/private|SECRET|headers/iu);
+    const invalid = safeBrowserFailureDiagnostics({ nativeFirstFatal: { ...raw, limitOrigin: "PRIVATE", allowedBytes: -1,
+      bodyBytes: Infinity, officialRenderDataLimit: "true" } }).nativeFirstFatal;
+    expect(invalid.limitOrigin).toBeUndefined(); expect(invalid.allowedBytes).toBeUndefined();
+    expect(invalid.bodyBytes).toBeUndefined(); expect(invalid.officialRenderDataLimit).toBeUndefined();
+  });
+  it("keeps complete closed render gates and removes raw fields", () => {
+    const officialRenderGate = { nativeTransport: true, mainFrame: true, navigationRequestPresent: true, navigationStatus200: true,
+      witnessPresent: true, witnessRequestMatches: true, witnessUrlMatches: true, completedDocumentRead: true,
+      officialRootProof: false, officialSubpageProof: false, pendingSubpagePresent: false, subpageTokenPresent: false,
+      linkCount: "MULTIPLE", linkFailure: "LINK_COUNT", anchorFailure: "SIGNATURE_CHANGED", anchorOrdinal: "SECOND",
+      url: "https://private.example/?token=SECRET" };
+    const projected = safeBrowserFailureDiagnostics({ nativeFirstFatal: { code: "NATIVE_RESPONSE_LIMIT", officialRenderGate } }).nativeFirstFatal;
+    expect(projected.officialRenderGate).toMatchObject({ linkCount: "MULTIPLE", linkFailure: "LINK_COUNT",
+      anchorFailure: "SIGNATURE_CHANGED", anchorOrdinal: "SECOND" });
+    expect(JSON.stringify(projected)).not.toMatch(/private|SECRET|https:|"url":/iu);
+    const malformed = safeBrowserFailureDiagnostics({ nativeFirstFatal: { code: "NATIVE_RESPONSE_LIMIT",
+      officialRenderGate: { ...officialRenderGate, mainFrame: "true" } } }).nativeFirstFatal;
+    expect(malformed.officialRenderGate).toBeUndefined();
+    const invalidReason = safeBrowserFailureDiagnostics({ nativeFirstFatal: { code: "NATIVE_RESPONSE_LIMIT",
+      officialRenderGate: { ...officialRenderGate, anchorFailure: "PRIVATE" } } }).nativeFirstFatal;
+    expect(invalidReason.officialRenderGate?.anchorFailure).toBeUndefined();
   });
   it("preserves closed redirect provenance through feedback, checkpoint and compact snapshots", () => {
     const expected = { code: "NATIVE_REDIRECT_PROVENANCE_REJECTED", phase: "REDIRECT_PROVENANCE", method: "GET", resourceType: "document",

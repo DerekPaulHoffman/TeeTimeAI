@@ -65,6 +65,17 @@ it("carries only finite operation and exception facts through both native diagno
   expect(classifyNativeRouterError(new TypeError("PRIVATE https://private.example/?secret=PRIVATE"))).toEqual({ errorName: "TypeError", errorCategory: "UNKNOWN" });
   expect(classifyNativeRouterError(Error("Protocol error: No data found for resource with given identifier PRIVATE"))).toEqual({ errorName: "Error", errorCategory: "BODY_UNAVAILABLE" });
 });
+it("projects response abort branch and correlated terminal facts without private identities", () => {
+  const raw = { operation: "RESPONSE_METADATA", responseFailureBranch: "RETIRED_RESPONSE_ABORT",
+    recordGenerationRetired: true, responseIdentityMatched: true, correlatedNetworkLoadingFailed: false,
+    correlatedNetworkLoadingFinished: false, requestId: "PRIVATE", url: "https://private.example/?token=PRIVATE" };
+  const projected = projectStagehandNativeRouterFailure("NATIVE_REDIRECT_ROUTING_FAILED", raw);
+  expect(projected).toMatchObject({ code: "NATIVE_REDIRECT_ROUTING_FAILED", responseFailureBranch: "RETIRED_RESPONSE_ABORT",
+    recordGenerationRetired: true, responseIdentityMatched: true, correlatedNetworkLoadingFailed: false });
+  expect(JSON.stringify(projected)).not.toMatch(/PRIVATE|requestId|https:/u);
+  expect(projectStagehandNativeRouterFailure("NATIVE_REDIRECT_ROUTING_FAILED", { ...raw, operation: "REQUEST_METADATA" })).not.toHaveProperty("responseFailureBranch");
+  expect(projectStagehandNativeRouterFailure("NATIVE_REDIRECT_ROUTING_FAILED", { ...raw, responseFailureBranch: "PRIVATE" })).not.toHaveProperty("responseFailureBranch");
+});
 it("preserves every closed redirect rejection before cleanup and strips forged or unrelated reasons", () => {
   for (const redirectRejection of stagehandRedirectRejections) {
     const capture = createStagehandNativeRouterFailureCapture();
@@ -146,15 +157,40 @@ it("accepts every actual producer code/boolean in the source schema and rejects 
   for (const delta of [{ url: "https://private.example/" }, { code: "PRIVATE" }, { method: "PRIVATE" }, { loaderKnown: 1 }])
     expect(sourceFailureDiagnostic({ nativeRouterFailure: { code: "NATIVE_REDIRECT_RECORD_LIMIT", ...delta } }).nativeRouterFailure).toBeUndefined();
 });
+it("projects only closed missing-network denial facts", () => {
+  const raw = { missingNetworkClosed: false, missingNetworkBoundaryPending: true, uncorrelatedPostCallerInvoked: true,
+    uncorrelatedPostCallerDenied: false, uncorrelatedPostDenialReason: "READ_POLICY_MAY_ALLOW", url: "https://private.example/?token=SECRET", body: "SECRET" };
+  const projected = projectStagehandNativeRouterFailure("NATIVE_REDIRECT_NETWORK_ID_MISSING", raw);
+  expect(projected).toMatchObject({ code: "NATIVE_REDIRECT_NETWORK_ID_MISSING", missingNetworkBoundaryPending: true,
+    uncorrelatedPostCallerInvoked: true, uncorrelatedPostDenialReason: "READ_POLICY_MAY_ALLOW" });
+  expect(JSON.stringify(projected)).not.toMatch(/private|SECRET|https:/iu);
+  expect(projectStagehandNativeRouterFailure("NATIVE_REDIRECT_ROUTING_FAILED", raw).uncorrelatedPostDenialReason).toBeUndefined();
+});
 it("passes only finite nonnegative limit counters and closed limit kind through the existing private projection", () => {
-  const raw = { limitKind: "DECODED_BODY", allowedBytes: 2_000_000, declaredBytes: 128, bodyBytes: 6_000_000, totalBytes: 7_000_000,
+  const raw = { limitKind: "DECODED_BODY", limitOrigin: "NATIVE_ROUTER", officialRenderDataLimit: false, recordGenerationCurrent: true,
+    allowedBytes: 2_000_000, declaredBytes: 128, bodyBytes: 6_000_000, totalBytes: 7_000_000,
     method: "GET", resourceType: "document", documentResponse: true, ancillaryResponse: false, declaredLengthPresent: true,
     url: "https://private.example/?token=SECRET", headers: { secret: "PRIVATE" } };
   const projected = projectStagehandNativeRouterFailure("NATIVE_RESPONSE_LIMIT", raw);
   expect(sourceFailureDiagnostic({ nativeRouterFailure: projected }).nativeRouterFailure).toEqual(projected);
   expect(projected.limitKind).toBe("DECODED_BODY"); expect(projected.bodyBytes).toBe(6_000_000);
+  expect(projected.limitOrigin).toBe("NATIVE_ROUTER"); expect(projected.officialRenderDataLimit).toBe(false);
   const invalid = projectStagehandNativeRouterFailure("NATIVE_RESPONSE_LIMIT", { limitKind: "PRIVATE", allowedBytes: Infinity, declaredBytes: NaN, bodyBytes: -1, totalBytes: "SECRET" });
   expect(invalid).toEqual({ code: "NATIVE_RESPONSE_LIMIT" });
   expect(sourceFailureDiagnostic({ nativeRouterFailure: { code: "NATIVE_RESPONSE_LIMIT", bodyBytes: Infinity } }).nativeRouterFailure).toBeUndefined();
   expect(JSON.stringify(projected)).not.toMatch(/PRIVATE|SECRET|https:|headers|url/u);
 });
+ it("projects complete closed official render gates only for response limits", () => {
+   const gate = { nativeTransport: true, mainFrame: true, navigationRequestPresent: true, navigationStatus200: true,
+     witnessPresent: true, witnessRequestMatches: true, witnessUrlMatches: true, completedDocumentRead: true,
+     officialRootProof: false, officialSubpageProof: false, pendingSubpagePresent: false, subpageTokenPresent: false,
+     linkCount: "MULTIPLE", linkFailure: "LINK_COUNT", anchorFailure: "SIGNATURE_CHANGED", anchorOrdinal: "SECOND",
+     url: "https://private.example/?token=SECRET" };
+   const projected = projectStagehandNativeRouterFailure("NATIVE_RESPONSE_LIMIT", { officialRenderGate: gate });
+   expect(projected.officialRenderGate).toMatchObject({ linkCount: "MULTIPLE", linkFailure: "LINK_COUNT",
+     anchorFailure: "SIGNATURE_CHANGED", anchorOrdinal: "SECOND", officialSubpageProof: false });
+   expect(JSON.stringify(projected)).not.toMatch(/private|SECRET|https:|"url":/iu);
+   expect(projectStagehandNativeRouterFailure("NATIVE_RESPONSE_LIMIT", { officialRenderGate: { ...gate, mainFrame: "true" } }).officialRenderGate).toBeUndefined();
+   expect(projectStagehandNativeRouterFailure("NATIVE_RESPONSE_LIMIT", { officialRenderGate: { ...gate, anchorFailure: "PRIVATE" } }).officialRenderGate?.anchorFailure).toBeUndefined();
+   expect(projectStagehandNativeRouterFailure("NATIVE_REDIRECT_ROUTING_FAILED", { officialRenderGate: gate }).officialRenderGate).toBeUndefined();
+ });

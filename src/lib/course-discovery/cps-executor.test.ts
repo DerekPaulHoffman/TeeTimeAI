@@ -146,6 +146,44 @@ describe("CPS fixed fresh public reads", () => {
     wrongPhone=true;await expect(executeCps(source,saved,{courseId:"course-1"},input,deps)).rejects.toThrow("CPS_POSTAL_CONFLICT_UNVERIFIED");
     expect(fixture.reads.some(read=>read.init.method==="POST")).toBe(false);expect(fixture.active).toBe(0);
   });
+  it("uses an address-free official phone and booking link only through a fresh native reader on cold and warm calls", async () => {
+    const fixture = setup((url, _init, normal) => url.hostname === "www.thebobgc.com"
+      ? new Response("public transport rejected", { status: 403 }) : normal());
+    let calls = 0, wrongPhone = false;
+    const nativeRead: CpsDependencies["readNativeOfficialPage"] = async (identity, pageUrl, until, mode) => {
+      expect(fixture.active).toBe(0);
+      calls++;
+      const printed = wrongPhone ? "412-622-9999" : "412-622-6959";
+      const html = `<html><body><h1>${source.venueName}</h1><section><h2>CONTACT US</h2><a href="tel:${printed}">${printed}</a></section>
+        <a href="${source.bookingUrl}">Book a Tee Time</a><script nonce="${calls}">var n=${calls}</script></body></html>`;
+      return readNativeOfficialIdentityPage(identity, pageUrl, until, { allowCpsPhoneBookingContact: mode === "PHONE_LINK" ? true : undefined,
+        createSession: async () => ({ execute: async () => ({ url: source.officialUrl, navigationStatus: 200, browserTransport: "NATIVE_CHROME",
+          officialSourceDiagnostic: { stage: "CONTROLLER_CAPTURE", rawOfficialCaptured: true, currentOfficialDocument: true,
+            officialProvenance: true, renderedHeadingsPresent: true, renderedAddressesPresent: false, renderedLinksPresent: true } } as never),
+          readOfficialIdentityPage: async () => {
+            if (mode !== "PHONE_LINK") throw new Error("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
+            return { url: source.officialUrl, html, browserTransport: "NATIVE_CHROME", visibleEvidence: {
+              title: source.venueName, headings: [source.venueName, "CONTACT US"], addressTexts: [], linkUrls: [source.bookingUrl],
+              phoneTexts: [printed], contactPhoneLinks: [{ href: `tel:${printed}`, text: printed }] } };
+          }, close: async () => {} }) });
+    };
+    const deps: CpsDependencies = { ...fixture.deps, trustedContext: { canonicalCoursePhone: "+14126226959" },
+      localCapabilities: ["LOCAL_CHROME"], readNativeOfficialPage: nativeRead };
+    const saved = await inspectCps(source, deps);
+    expect(saved.officialPhoneBookingProof).toMatchObject({ kind: "OFFICIAL_PHONE_BOOKING_LINK", canonicalAddressInput: source.venueAddress,
+      canonicalCoursePhone: "+14126226959", courseIds: [1] });
+    expect(saved.officialPostalConflictProof).toBeUndefined();
+    expect(calls).toBe(2);
+    expect(await executeCps(source, saved, { courseId: "course-1" }, input, deps)).toHaveLength(1);
+    expect(calls).toBe(3);
+    expect(await executeCps(source, saved, { courseId: "course-1" }, { ...input, date: "2026-10-24" }, deps)).toHaveLength(1);
+    expect(calls).toBe(4);
+    fixture.reads.length = 0;
+    wrongPhone = true;
+    await expect(executeCps(source, saved, { courseId: "course-1" }, input, deps)).rejects.toThrow("CPS_PHONE_BOOKING_SOURCE_UNVERIFIED");
+    expect(fixture.reads.some(read => read.init.method === "POST")).toBe(false);
+    expect(fixture.active).toBe(0);
+  });
   it("independently replays the exact observed routing query without replacing canonical input or taking transaction actions", async () => {
     const queried = { ...source, bookingUrl: "https://thebobgcpa.cps.golf/onlineresweb/search-teetime?TeeOffTimeMin=0&TeeOffTimeMax=23.999722222222225" };
     const fixture = setup((url, _init, normal) => url.hostname === "www.thebobgc.com"

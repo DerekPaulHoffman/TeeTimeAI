@@ -20,6 +20,7 @@ import { isIncidentalBrowserRequest, isNonEvidenceBrowserResource } from "@/lib/
 import { isAnonymousBrowserReadPost } from "@/lib/automation/simulator-interactive-browser";
 import { isMindbodyClassicPublicBootstrapPost } from "@/lib/automation/mindbody-public-read-policy";
 import { PUBLIC_BROWSER_REQUEST_LIMIT, PUBLIC_BROWSER_TOTAL_BYTES, SOURCE_ROUTING_RESPONSE_PROFILE, publicBrowserResponseLimit, assertPublicBrowserRequestBudget } from "./browser-resource-limits";
+import { publicReadWorkerDenialScript, registerPublicReadWorkerDenial } from "./public-read-worker-denial";
 
 type Lease = <T>(family: string, work: () => Promise<T>) => Promise<{ acquired: true; value: T } | { acquired: false }>;
 type Target = { id: string; contextId: string; cdp: OwnedCdpSession; page: Page; frame: Frame; currentUrl: string; mainFrameId?: string; mainLoaderId?: string; documentRequest?: NativeReadRequest; documentStatus?: number; documentRead?: Promise<unknown>; documentReadPending?: boolean; popupReads?: Map<string, PopupRead>; popupReadinessRetired?: boolean; router?: NativeRedirectRouting; ready: Promise<void>; installed?: boolean; discarded?: boolean; initialization?: "NETWORK" | "FETCH" | "RESUME" | "ROUTER" | "READY" };
@@ -72,12 +73,12 @@ export const stagehandNativeSourceDomExpression = `(() => {
 })()`;
 // Fixed controller source, never caller/model/site JavaScript. Install only on
 // the owned public context; the packaged SDK extension context is untouched.
-export const stagehandSourceWorkerDenialScript = `(()=>{for(const name of ['Worker','SharedWorker']){Object.defineProperty(globalThis,name,{value:undefined,writable:false,configurable:false});const d=Object.getOwnPropertyDescriptor(globalThis,name);if(!d||d.value!==undefined||d.writable||d.configurable)throw new Error('STAGEHAND_WORKER_DENIAL_UNAVAILABLE');}})()`;
+export const stagehandSourceWorkerDenialScript = publicReadWorkerDenialScript;
 export async function registerStagehandSourceWorkerDenial(context: Pick<BrowserContext, "addInitScript">) {
   // Register once before this context has any pages. Playwright installs the
   // fixed script for every later document, including a popup's first document.
   // No command must evaluate/register in an already debugger-paused popup.
-  await context.addInitScript({ content: stagehandSourceWorkerDenialScript });
+  await registerPublicReadWorkerDenial(context);
 }
 export async function requireDeniedStagehandTargetClosed(root: Pick<OwnedCdpSession, "send">, targetId: string) {
   const closed = await root.send("Target.closeTarget", { targetId });

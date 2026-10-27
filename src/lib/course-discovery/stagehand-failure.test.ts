@@ -104,6 +104,33 @@ it("reads optional closed inspection diagnostics without changing old checkpoint
   delete entry.fixedInspectionDiagnosticSha256;
   expect(readStagehandFailure({ ...f.job, checkpoint: saved }, f.now)).toBeUndefined();
 });
+it("accepts only exact closed fixed source failure gates and rejects forged private fields", () => {
+  const f = fixture(), saved = createStagehandFailureCheckpoint(f);
+  const keys = ["noTerminalFailure", "sessionOpen", "noAccessRequirement", "noNativeFatal", "status200", "snapshotNative",
+    "capturedPagePresent", "captureUrlMatches", "captureFreshWithin5s", "capturedNative", "capturedTimeOriginMatches",
+    "officialDocumentVerified", "visibleAddressesPresent", "visibleLinksPresent", "currentMainDocumentMatches"];
+  const diagnostic = { navigationFailureKind: "TIMEOUT", officialSourceDiagnostic: { stage: "INSPECTOR_REJECTED", uscheduleConfigurationGate: "SELECTORS",
+      rawOfficialCaptured: true, currentOfficialDocument: true },
+    officialIdentityReadDiagnostic: { captureAgeMs: 5100, gates: Object.fromEntries(keys.map(key => [key, key !== "visibleAddressesPresent"])) },
+    cpsPostalContact: { gates: { freshNativeOfficialPage: true, canonicalAddressValid: false } } };
+  Object.assign(saved.stagehandFailure.entries[0], { phase: "FIXED_INSPECTION", fixedInspectionDiagnostic: diagnostic,
+    fixedInspectionDiagnosticSha256: stagehandDataHash(diagnostic) });
+  expect(readStagehandFailure({ ...f.job, checkpoint: saved }, f.now)).toEqual(saved.stagehandFailure);
+  expect(readStagehandSourceCheckpoint({ ...f.job, attempts: 2, checkpoint: saved }, undefined, f.now)).toBeUndefined();
+  for (const mutate of [
+    (d: typeof diagnostic) => { Object.assign(d.officialSourceDiagnostic, { privateUrl: "PRIVATE" }); },
+    (d: typeof diagnostic) => { d.navigationFailureKind = "PRIVATE"; },
+    (d: typeof diagnostic) => { d.officialSourceDiagnostic.uscheduleConfigurationGate = "PRIVATE"; },
+    (d: typeof diagnostic) => { Object.assign(d.officialIdentityReadDiagnostic.gates, { token: "PRIVATE" }); },
+    (d: typeof diagnostic) => { d.officialIdentityReadDiagnostic.captureAgeMs = 120001; },
+    (d: typeof diagnostic) => { Object.assign(d.cpsPostalContact.gates, { address: "PRIVATE" }); },
+  ]) {
+    const forged = structuredClone(saved), entry = forged.stagehandFailure.entries[0];
+    mutate(entry.fixedInspectionDiagnostic);
+    entry.fixedInspectionDiagnosticSha256 = stagehandDataHash(entry.fixedInspectionDiagnostic);
+    expect(readStagehandFailure({ ...f.job, checkpoint: forged }, f.now)).toBeUndefined();
+  }
+});
 it("requires exact closed native fixed-inspection fields, current binding and digest without source authority", () => {
   const f = fixture(), saved = createStagehandFailureCheckpoint(f);
   const diagnostic = { nativeRouterFailure: { code: "NATIVE_REDIRECT_ROUTING_FAILED", operation: "RESPONSE_BODY", errorName: "Error", errorCategory: "BODY_UNAVAILABLE",

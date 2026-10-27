@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { createUSchedulePublicReadPolicy, isUSchedulePublicRentalLabel } from "./uschedule-public-read-policy";
+import { createUSchedulePublicReadPolicy, hasUScheduleSimBookingDescription, isUSchedulePublicRentalLabel,
+  isUScheduleSimBookingLabel } from "./uschedule-public-read-policy";
 
 const source = "https://clients.uschedule.com/example-golf/booking";
 const html = `<select id="select_service"><option value="72">Hourly Simulator Rental - Standard</option><option value="73">Golf Lessons</option></select>
@@ -22,6 +23,34 @@ describe("observed USchedule public filter reads", () => {
     expect(policy.allows(endpoint, headers(), body("service_id", "73"))).toBe(false);
     expect(policy.allows(endpoint, headers(), body("group_size", "4"))).toBe(false);
     expect(policy.allows(endpoint, headers(), body("time", "10:00"))).toBe(false);
+  });
+  it("requires visible simulator play or practice corroboration for the exact generic Sim Booking option", () => {
+    const description = '<div id="serviceDescription" class="p-3 my-2"><div><span>Play or Practice for one hour on our SIMULATOR</span></div></div>';
+    const booking = `<body class="anotherstudio"><select id="select_service"><option value="25395" selected>Sim Booking</option>
+      <option value="25396">30 Minute Quick Practice Session</option></select><select id="select_length"><option value="60" selected>1 hour</option></select>${description}</body>`;
+    expect(isUScheduleSimBookingLabel(" sim   booking ")).toBe(true);
+    expect(isUSchedulePublicRentalLabel("Sim Booking")).toBe(true);
+    expect(hasUScheduleSimBookingDescription(booking)).toBe(true);
+    const bookingUrl = "https://clients.uschedule.com/anotherstudio/booking";
+    const policy = createUSchedulePublicReadPolicy();
+    expect(policy.observeResponse(bookingUrl, "GET", 200, "text/html", booking)).toBe(true);
+    const h = new Headers({ "content-type": "application/json", origin: new URL(bookingUrl).origin, referer: bookingUrl });
+    expect(policy.allows(new URL(`${bookingUrl}/changefield`), h, body("service_id", "25395"))).toBe(true);
+    expect(policy.allows(new URL(`${bookingUrl}/changefield`), h, body("service_id", "25396"))).toBe(false);
+    for (const label of ["Sim Booking Lesson", "Private Sim Booking", "Sim Booking Event", "Sim Booking Checkout", "Sim Booking Package", "Sim Booking Membership"])
+      expect(isUSchedulePublicRentalLabel(label)).toBe(false);
+    for (const invalid of [
+      booking.replace(description, ""),
+      booking.replace("Play or Practice for one hour on our SIMULATOR", "Golf lesson on our simulator"),
+      booking.replace("Play or Practice for one hour on our SIMULATOR", "Play or Practice for a private simulator event"),
+      booking.replace('id="serviceDescription"', 'id="otherDescription"'),
+      booking.replace('class="p-3 my-2"', 'hidden'),
+      booking.replace(description, description + description),
+    ]) {
+      expect(hasUScheduleSimBookingDescription(invalid)).toBe(false);
+      const denied = createUSchedulePublicReadPolicy();
+      expect(denied.observeResponse(bookingUrl, "GET", 200, "text/html", invalid)).toBe(false);
+    }
   });
   it("requires a successful actual booking document and generalizes tenant and service IDs", () => {
     const policy = createUSchedulePublicReadPolicy();

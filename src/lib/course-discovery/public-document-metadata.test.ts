@@ -19,6 +19,51 @@ it("captures a literal named semantic address/tel block independently of marketi
  expect(got.namedContactBlocks).toEqual([{name:venue,addressText:"10 Example Road, Example, New York.12345",phones:[{href:"tel:+19165554653",text:"916-555-4653"}]}]);
  expect(got.brandLinks).toEqual([]);
 });
+it("collects only visible Contact Us phone anchors outside forms for address-free official corroboration",()=>{
+ setup('<h1>Example Golf Studio</h1><div><h2>CONTACT US</h2><div><a href="tel:916-555-4653">916-555-4653</a></div></div>'+
+   '<div><h2>CONTACT US</h2><a href="tel:916-555-4653">916-555-4653</a></div>'+
+   '<div hidden><h2>CONTACT US</h2><a href="tel:555-555-5555">555-555-5555</a></div>'+
+   '<form><h2>CONTACT US</h2><a href="tel:555-555-5555">555-555-5555</a></form>');
+ const got=collectNativeOfficialPublicMetadata(venue);
+ expect(got.contactPhoneLinks).toEqual([{href:"tel:916-555-4653",text:"916-555-4653"},
+   {href:"tel:916-555-4653",text:"916-555-4653"}]);
+ expect(got.contactPhoneLinksOmitted).toBe(false);
+ expect(JSON.stringify(got.contactPhoneLinks)).not.toContain("555-555-5555");
+ setup('<div><h2>CONTACT US</h2>'+ '<a href="tel:916-555-4653">916-555-4653</a>'.repeat(21)+'</div>');
+ const overflow=collectNativeOfficialPublicMetadata(venue);
+ expect(overflow.contactPhoneLinksOmitted).toBe(true);
+ expect(overflow.phoneTextsOmitted).toBe(true);
+});
+it("pairs only bounded computed-visible public link labels with their exact href",()=>{
+ setup('<h1>Harbor Country Club</h1><a href="https://harbor.cps.golf/">Championship Course Tee Times</a>'+
+   '<a href="https://harbor-par3.cps.golf/">Par 3 Course Tee Times</a>'+
+   '<a hidden href="https://hidden.cps.golf/">Hidden Tee Times</a>'+
+   '<form><a href="https://form.cps.golf/">Form Tee Times</a></form>'+
+   '<a href="https://other.example/?token=private">Private route</a>'+
+   '<a href="https://harbor.cps.golf/?token=private">Private CPS query</a>'+
+   '<div style="opacity:0"><a href="https://opacity.cps.golf/">Invisible Tee Times</a></div>');
+ const value=collectNativeOfficialPublicMetadata("Harbor Country Club");
+ expect(value.publicLinkLabels).toEqual([
+   {href:"https://harbor.cps.golf/",text:"Championship Course Tee Times"},
+   {href:"https://harbor-par3.cps.golf/",text:"Par 3 Course Tee Times"}]);
+ expect(value.publicLinkLabelsOmitted).toBe(false);
+ expect(JSON.stringify(value.publicLinkLabels)).not.toContain("private");
+});
+it("ignores a same-href collapsed navigation label while retaining the visible course label",()=>{
+ setup('<h1>Harbor Country Club</h1><ul style="opacity:0;overflow:hidden;height:0">'+
+   '<li><a href="https://harbor.cps.golf/">Champion Course Tee Times</a></li></ul>'+
+   '<a href="https://harbor.cps.golf/">Championship Course Tee Times</a>');
+ const opacity=collectNativeOfficialPublicMetadata("Harbor Country Club");
+ expect(opacity.publicLinkLabels).toEqual([{href:"https://harbor.cps.golf/",text:"Championship Course Tee Times"}]);
+ const menu=document.querySelector("ul")!;
+ menu.style.opacity="1";
+ Object.defineProperty(menu,"getBoundingClientRect",{value:()=>({width:100,height:0})});
+ const collapsed=collectNativeOfficialPublicMetadata("Harbor Country Club");
+ expect(collapsed.publicLinkLabels).toEqual(opacity.publicLinkLabels);
+ menu.style.overflow="visible";
+ const visibleConflict=collectNativeOfficialPublicMetadata("Harbor Country Club");
+ expect(visibleConflict.publicLinkLabels).toHaveLength(2);
+});
 it.each(["hiddenName","hiddenAddress","hiddenPhone","mailing","form","input"])("does not grant named physical contact from %s metadata",which=>{
  let markup='<div><h5>Contact Us</h5><p>'+venue+'</p><address>10 Example Road, Example, New York.12345</address><a href="tel:+19165554653">916-555-4653</a></div>';
  if(which==="hiddenName")markup=markup.replace("<p>","<p hidden>");
@@ -40,6 +85,13 @@ it("actual installed tsx serialization runs in a separate page-like VM without m
  const script=`import {createRequire} from 'node:module';import {fileURLToPath} from 'node:url';import {runInNewContext} from 'node:vm';const {collectNativeOfficialPublicMetadata:collect}=createRequire(process.cwd()+'/package.json')(fileURLToPath(${JSON.stringify(moduleUrl)}));const result=runInNewContext('('+collect.toString()+')('+JSON.stringify('Example Golf Studio')+')',{document:{forms:[],querySelectorAll:()=>[],title:''}});if(result.headings.length||result.addressTexts.length)throw Error('INVALID');console.log('SERIALIZATION_OK');`;
  const result=spawnSync(process.execPath,["--import",pathToFileURL(resolve("node_modules/tsx/dist/loader.mjs")).href,"--input-type=module","--eval",script],{encoding:"utf8",timeout:10000});
  expect(result.status,result.stderr).toBe(0);expect(result.stdout.trim()).toBe("SERIALIZATION_OK");
+});
+it("actual Node and tsx serialization collects a visible CPS course link without module helpers",()=>{
+ const moduleUrl=pathToFileURL(resolve("src/lib/course-discovery/public-document-metadata.ts")).href;
+ const markup='<body><a href="https://harbor.cps.golf/">Championship Course Tee Times</a></body>';
+ const script=`import {createRequire} from 'node:module';import {fileURLToPath} from 'node:url';import {runInContext} from 'node:vm';const req=createRequire(process.cwd()+'/package.json');const {JSDOM}=req('jsdom');const {collectNativeOfficialPublicMetadata:collect}=req(fileURLToPath(${JSON.stringify(moduleUrl)}));const dom=new JSDOM(${JSON.stringify(markup)},{url:'https://official.example/',runScripts:'outside-only'});Object.defineProperty(dom.window.HTMLElement.prototype,'innerText',{get(){return this.textContent??'';}});dom.window.HTMLElement.prototype.getBoundingClientRect=function(){return {width:10,height:10};};const result=runInContext('('+collect.toString()+')('+JSON.stringify('Harbor Country Club')+')',dom.getInternalVMContext());if(result.publicLinkLabels.length!==1||result.publicLinkLabels[0].text!=='Championship Course Tee Times')throw Error('CPS_LINK_SERIALIZATION_INVALID');console.log('CPS_LINK_SERIALIZATION_OK');`;
+ const result=spawnSync(process.execPath,["--import",pathToFileURL(resolve("node_modules/tsx/dist/loader.mjs")).href,"--input-type=module","--eval",script],{encoding:"utf8",timeout:10000});
+ expect(result.status,result.stderr).toBe(0);expect(result.stdout.trim()).toBe("CPS_LINK_SERIALIZATION_OK");
 });
 it("reads static exact-venue H2 public metadata in the unique whole-document wrapper without field values",()=>{setup(html());const got=collectNativeOfficialPublicMetadata(venue);expect(got.headings).toContain(venue);expect(got.addressTexts).toContain(address);expect(got.publicRentalTexts).toContain(rental);expect(JSON.stringify(got)).not.toContain("PRIVATE");});
 it.each([["//","/"],["/","https://official.example//"]])("reads only static metadata for an HTTPS root form action %s → %s without rewriting either URL",(path,action)=>{

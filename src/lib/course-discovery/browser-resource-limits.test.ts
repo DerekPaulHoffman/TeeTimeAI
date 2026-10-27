@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { assertPublicBrowserRequestBudget, PUBLIC_BROWSER_REQUEST_LIMIT, MINDBODY_APPOINTMENT_REQUEST_LIMIT,
-  PUBLIC_BROWSER_TOTAL_BYTES, PUBLIC_BROWSER_TUNNEL_BYTES, SOURCE_ROUTING_RESPONSE_PROFILE, publicBrowserResponseLimit } from "./browser-resource-limits";
+  PUBLIC_BROWSER_TOTAL_BYTES, PUBLIC_BROWSER_TUNNEL_BYTES, SOURCE_ROUTING_RESPONSE_PROFILE, publicBrowserResponseLimit, publicOfficialRenderResponseLimit } from "./browser-resource-limits";
 describe("monotonic fixed public browser request budgets", () => {
   it.each([PUBLIC_BROWSER_REQUEST_LIMIT, MINDBODY_APPOINTMENT_REQUEST_LIMIT])("admits exactly %i requests without resetting on document transitions", limit => {
     let count = 0;
@@ -27,6 +27,16 @@ describe("monotonic fixed public browser request budgets", () => {
     for (const kind of ["document", "other", "image", "media", "font"]) expect(publicBrowserResponseLimit(kind, "GET", SOURCE_ROUTING_RESPONSE_PROFILE)).toBe(2_000_000);
     expect(publicBrowserResponseLimit("stylesheet", "GET", SOURCE_ROUTING_RESPONSE_PROFILE)).toBe(6_000_000);
     for (const profile of ["OTHER", 16_000_000, null, {}]) expect(() => Reflect.apply(publicBrowserResponseLimit, undefined, ["xhr", "GET", profile])).toThrow("PUBLIC_READ_RESPONSE_PROFILE_INVALID");
+    expect(PUBLIC_BROWSER_TOTAL_BYTES).toBe(48_000_000); expect(PUBLIC_BROWSER_TUNNEL_BYTES).toBe(24_000_000);
+  });
+  it("allows the existing 16 MB data cap only for a privately admitted official-page GET", () => {
+    for (const kind of ["xhr","fetch"]) {
+      expect(publicOfficialRenderResponseLimit(kind,"GET",true)).toBe(16_000_000);
+      expect(publicOfficialRenderResponseLimit(kind,"GET",false)).toBe(2_000_000);
+      for (const method of ["POST","HEAD","OPTIONS","get"]) expect(publicOfficialRenderResponseLimit(kind,method,true)).toBe(2_000_000);
+    }
+    for (const kind of ["document","other","image","media","font"]) expect(publicOfficialRenderResponseLimit(kind,"GET",true)).toBe(2_000_000);
+    expect(publicOfficialRenderResponseLimit("script","GET",true)).toBe(16_000_000);
     expect(PUBLIC_BROWSER_TOTAL_BYTES).toBe(48_000_000); expect(PUBLIC_BROWSER_TUNNEL_BYTES).toBe(24_000_000);
   });
 });

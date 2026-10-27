@@ -10,10 +10,14 @@ type Element = DefaultTreeAdapterMap["element"];
 const publicId = /^(?:0|[1-9]\d{0,9})$/u;
 const rental = /\b(?:simulators?|bays?)\b.*\brentals?\b/iu;
 const excluded = /\b(?:lessons?|coaching|fitting|leagues?|classes?|members?|membership|package)\b/iu;
+const simBooking = /^sim booking$/iu;
+const disallowedDescription = /\b(?:lessons?|coaching|fitting|leagues?|classes?|members?|membership|packages?|events?|parties?|birthdays?|clinics?|camps?|private|account|checkout|payment|purchase|gift)\b/iu;
+const normalizedLabel = (value: string) => value.normalize("NFKC").replace(/\s+/gu, " ").trim();
+export function isUScheduleSimBookingLabel(value: string) { return simBooking.test(normalizedLabel(value)); }
 /** USCHEDULE simulator adapter only; recipe validation rejects OUTDOOR targets. */
 export function isUSchedulePublicRentalLabel(value: string) {
-  const publicTeeTimes = /^public tee times$/iu.test(value.normalize("NFKC").replace(/\s+/gu, " ").trim());
-  return (rental.test(value) || /^suite rentals?$/iu.test(value.trim()) || publicTeeTimes) && !excluded.test(value);
+  const label = normalizedLabel(value), publicTeeTimes = /^public tee times$/iu.test(label);
+  return (rental.test(label) || /^suite rentals?$/iu.test(label) || publicTeeTimes || simBooking.test(label)) && !excluded.test(label);
 }
 function elements(node: Node): Element[] {
   return "childNodes" in node ? node.childNodes.flatMap(child => "tagName" in child ? [child, ...elements(child)] : elements(child)) : [];
@@ -21,6 +25,25 @@ function elements(node: Node): Element[] {
 function attr(node: Element, name: string) { return node.attrs.find(value => value.name === name)?.value; }
 function text(node: Node): string {
   return "value" in node ? node.value : "childNodes" in node ? node.childNodes.map(text).join(" ") : "";
+}
+/** One visible public service description corroborates the otherwise terse
+ * `Sim Booking` option. The option alone never establishes a rental method. */
+export function hasUScheduleSimBookingDescription(html: string) {
+  if (Buffer.byteLength(html) > 600_000) return false;
+  const nodes = elements(parse(html)); if (nodes.length > 20_000) return false;
+  const descriptions = nodes.filter(node => node.tagName === "div" && attr(node, "id") === "serviceDescription");
+  if (descriptions.length !== 1) return false;
+  const hidden = (node: Element) => node.attrs.some(a => ["hidden", "inert"].includes(a.name) ||
+    ["aria-hidden", "aria-disabled"].includes(a.name) && a.value === "true") ||
+    /display\s*:\s*none|visibility\s*:\s*(?:hidden|collapse)|(?:^|;)\s*opacity\s*:\s*0(?:\.0*)?\s*(?:!important\s*)?(?:;|$)/iu.test(attr(node, "style") ?? "");
+  for (let node: Node | undefined = descriptions[0]; node; node = "parentNode" in node ? node.parentNode ?? undefined : undefined)
+    if ("tagName" in node && hidden(node)) return false;
+  const visible = (node: Node): string => "value" in node ? node.value : "tagName" in node &&
+    (["script", "style", "template", "noscript", "textarea", "input"].includes(node.tagName) || hidden(node)) ? "" :
+    "childNodes" in node ? node.childNodes.map(visible).join(" ") : "";
+  const description = normalizedLabel(visible(descriptions[0]));
+  return description.length > 0 && description.length <= 500 && /\b(?:play|practice)\b/iu.test(description) &&
+    /\bsimulators?\b/iu.test(description) && !disallowedDescription.test(description);
 }
 function publicControlUnsafe(n: Node) {
   let current: Node | undefined = n;
@@ -210,6 +233,7 @@ export function createUSchedulePublicReadPolicy(context: { officialLocation?: US
       const units = readUSchedulePublicUnitsControl(body);
       const people = readUSchedulePublicPeopleControl(body), requested = context.requestedPlayers;
       const services = options("select_service").filter(node => isUSchedulePublicRentalLabel(text(node)) &&
+        (!isUScheduleSimBookingLabel(text(node)) || hasUScheduleSimBookingDescription(body)) &&
         (!/^suite rentals?$/iu.test(text(node).trim()) || units.valid && units.selectedOne || people.valid) && publicId.test(attr(node, "value") ?? "") && attr(node, "value") !== "0");
       const lengths = options("select_length").filter(node => /^(?:[1-9]\d{0,2})$/u.test(attr(node, "value") ?? "") && Number(attr(node, "value")) >= 15 && Number(attr(node, "value")) <= 480);
       if (!services.length || !lengths.length) return false;
