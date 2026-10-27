@@ -45,6 +45,7 @@ import type { OfficialSourceDiagnostic, UScheduleConfigurationGate } from "./off
 import { bindTeeItUpPostalConflictProof, type TeeItUpPostalConflictProof } from "./teeitup-postal-conflict-proof";
 import type { NativeOfficialPageReader } from "./native-official-page-reader";
 import { readTeeItUpDelegatedBookingChain, type DelegatedReaderDependencies } from "./teeitup-delegated-booking-reader";
+import { getTeeItUpDelegationDiagnostic, rememberTeeItUpDelegationFailure } from "./teeitup-delegated-booking-diagnostic";
 import { currentNativeDelegatedChain, type NativeDelegatedChainToken } from "./teeitup-delegated-booking-context";
 import { bindDelegatedFacility, type TeeItUpDelegatedBookingProof } from "./teeitup-delegated-booking-source";
 import { fixedAdapterTransportCode, rememberFixedAdapterReadFailure, getFixedAdapterReadDiagnostic, type FixedAdapterReadDiagnostic } from "./fixed-adapter-read-diagnostic";
@@ -663,15 +664,32 @@ export async function inspectExistingAdapter(source: Source, deps: Dependencies)
             if (initialDirectoryDiagnostic) rememberFixedAdapterReadFailure(fallbackError, initialDirectoryDiagnostic);
             throw fallbackError;
           }
+          let contactStage: "READ" | "DIRECTORY" = "READ";
           try {
             const contactPages = await (deps.readOfficialContactChain ?? ((identity, until) => readNativeTeeItUpContactChain(identity, until,
               { requestLease: deps.requestLease })))(source, inspectDeadline);
             session.dispose();
             session = reader(source, { ...deps, officialContactChainPages: contactPages, deadlineAt: inspectDeadline }, undefined, undefined, readBudget);
+            contactStage = "DIRECTORY";
             await readDirectory();
-          } catch {
-            if (initialDirectoryDiagnostic) rememberFixedAdapterReadFailure(fallbackError, initialDirectoryDiagnostic);
-            throw fallbackError;
+          } catch (contactError) {
+            // A failed fresh contact read is the current failure. The older
+            // delegated failure remains a closed diagnostic, not its reason.
+            const contactCode = contactError instanceof Error ? contactError.message : "";
+            const readCodes = ["OFFICIAL_CONTACT_SOURCE_UNVERIFIED", "OFFICIAL_CONTACT_READER_UNAVAILABLE",
+              "OFFICIAL_CONTACT_ROOT_READ_UNVERIFIED", "OFFICIAL_CONTACT_ROOT_LINK_UNVERIFIED",
+              "OFFICIAL_CONTACT_PAGE_READ_UNVERIFIED", "OFFICIAL_CONTACT_DOCUMENT_UNVERIFIED"];
+            const code = contactStage === "READ" ? readCodes.includes(contactCode) ? contactCode :
+              contactCode === "DEADLINE_EXCEEDED" ? "OFFICIAL_CONTACT_DEADLINE_EXCEEDED" : "OFFICIAL_CONTACT_CHAIN_READ_UNVERIFIED" :
+              contactCode === "OFFICIAL_CONTACT_CHAIN_UNVERIFIED" ? "OFFICIAL_CONTACT_DIRECTORY_BIND_UNVERIFIED" :
+                "OFFICIAL_CONTACT_DIRECTORY_READ_UNVERIFIED";
+            const failure = Object.assign(new Error(code), { code });
+            const priorDelegation = getTeeItUpDelegationDiagnostic(fallbackError);
+            if (priorDelegation) rememberTeeItUpDelegationFailure(failure, priorDelegation);
+            const contactDirectoryDiagnostic = getFixedAdapterReadDiagnostic(contactError);
+            if (contactDirectoryDiagnostic ?? initialDirectoryDiagnostic)
+              rememberFixedAdapterReadFailure(failure, contactDirectoryDiagnostic ?? initialDirectoryDiagnostic!);
+            throw failure;
           }
         }
         }

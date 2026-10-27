@@ -99,9 +99,44 @@ function rentalNotes(nodes: Element[]) {
   }
   return notes;
 }
+/** Some public booking layouts put the selected service, party control and
+ * hourly simulator note together in a sidebar before the separate dated grid.
+ * Require the note's card itself to contain no controls. */
+function standardSidebarNotes(nodes: Element[]) {
+  const cls = (n: Element, value: string) => (attr(n, "class") ?? "").split(/\s+/u).includes(value);
+  const services = nodes.filter(n => n.tagName === "select" && attr(n, "id") === "select_service");
+  const groups = nodes.filter(n => n.tagName === "select" && attr(n, "id") === "select_group_size");
+  const grids = nodes.filter(n => cls(n, "time_choices"));
+  if (services.length !== 1 || groups.length !== 1 || grids.length !== 1) return [];
+  const selected = elements(services[0]).filter(n => n.tagName === "option" && attr(n, "selected") !== undefined);
+  if (selected.length !== 1 || !isUScheduleStandardSimulatorBookingLabel(text(selected[0]))) return [];
+  const contains = (parent: Element, child: Element) => {
+    for (let node: Node | undefined = child; node; node = "parentNode" in node ? node.parentNode ?? undefined : undefined)
+      if (node === parent) return true;
+    return false;
+  };
+  const containers = nodes.filter(n => n.tagName === "div" && cls(n, "container") &&
+    contains(n, services[0]) && contains(n, groups[0]) && contains(n, grids[0]));
+  if (containers.length !== 1) return [];
+  const sidebars = elements(containers[0]).filter(n => n.tagName === "div" && cls(n, "col-lg-4") && cls(n, "order-1") &&
+    n.parentNode && "tagName" in n.parentNode && cls(n.parentNode, "row"));
+  if (sidebars.length !== 1 || !contains(sidebars[0], services[0]) || !contains(sidebars[0], groups[0]) || contains(sidebars[0], grids[0])) return [];
+  const cards = elements(sidebars[0]).filter(n => n.tagName === "div" && cls(n, "card") && cls(n, "my-3"));
+  const values: string[] = [];
+  for (const card of cards) {
+    if (publicControlUnsafe(card) || elements(card).some(n => ["a", "button", "input", "select", "textarea", "form"].includes(n.tagName))) continue;
+    const bodies = elements(card).filter(n => n.tagName === "div" && cls(n, "card-body"));
+    if (bodies.length !== 1) continue;
+    for (const heading of elements(bodies[0]).filter(n => n.tagName === "h3" && !publicControlUnsafe(n) && !elements(n).some(publicControlUnsafe))) {
+      const value = normalizedLabel(text(heading));
+      if (value.length > 0 && value.length <= 500 && /\b(?:rates?|prices?|pricing|costs?)\b/iu.test(value)) values.push(value);
+    }
+  }
+  return values;
+}
 export function readUSchedulePublicRentalNotes(html: string) {
   if (Buffer.byteLength(html) > 600_000) return [];
-  const nodes = elements(parse(html)); return nodes.length <= 20_000 ? rentalNotes(nodes) : [];
+  const nodes = elements(parse(html)); return nodes.length <= 20_000 ? [...rentalNotes(nodes), ...standardSidebarNotes(nodes)] : [];
 }
 /** A selected standard bay rental needs an independent public pricing witness.
  * The general service description can mention lessons and grants no authority. */
@@ -118,7 +153,7 @@ export function hasUScheduleStandardSimulatorBookingWitness(html: string) {
   if (labels.length !== 1 || normalizedLabel(text(labels[0])) !== "Choose Party Size (doesn't affect pricing)" ||
       publicControlUnsafe(labels[0]) || elements(labels[0]).some(publicControlUnsafe)) return false;
   let notes: string[];
-  try { notes = rentalNotes(nodes); } catch { return false; }
+  try { notes = [...rentalNotes(nodes), ...standardSidebarNotes(nodes)]; } catch { return false; }
   const pricing = notes.filter(v => /\b(?:rates?|prices?|pricing|costs?)\b/iu.test(v) && /\bper\s+(?:hour|hr)\b/iu.test(v) &&
     /\bper\s+(?:simulator|bay)\b/iu.test(v));
   const contradictory = notes.some(v => /\b(?:rates?|prices?|pricing|costs?)\b/iu.test(v) &&

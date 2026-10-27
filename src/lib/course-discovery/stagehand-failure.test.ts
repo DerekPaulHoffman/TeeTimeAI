@@ -7,6 +7,7 @@ import { createDelegationDiagnostic } from "./teeitup-delegated-booking-diagnost
 import { deriveNativePhysicalContactSource } from "./teeitup-physical-contact-proof";
 import { deriveForeupOfficialRouteContact } from "./foreup-official-route-ownership";
 import { createStagehandNativeRouterFailureCapture } from "./stagehand-native-router-diagnostic";
+import { inspectionErrorCode } from "../../../scripts/automation/course-discovery-stagehand-inspection.mjs";
 
 const first = Date.parse("2030-01-02T12:00:00.000Z");
 it("round-trips the original source host navigation rejection through the bound failure checkpoint only", () => {
@@ -64,6 +65,24 @@ it.each(["OFFICIAL_STREET_TYPE_OMITTED_UNVERIFIED", "OFFICIAL_STREET_TYPE_OMITTE
   expect(JSON.stringify(saved)).not.toContain("PRIVATE_HTML");
   expect(saved.stagehandFailure.entries[0]).not.toHaveProperty("fixedInspectionDiagnostic");
   expect(readStagehandFailure({ ...f.job, checkpoint: saved }, f.now)).toEqual(saved.stagehandFailure);
+});
+it.each(["OFFICIAL_CONTACT_ROOT_READ_UNVERIFIED", "OFFICIAL_CONTACT_ROOT_LINK_UNVERIFIED",
+  "OFFICIAL_CONTACT_PAGE_READ_UNVERIFIED", "OFFICIAL_CONTACT_DIRECTORY_BIND_UNVERIFIED",
+  "OFFICIAL_CONTACT_DIRECTORY_READ_UNVERIFIED"])("retains finite current contact failure %s across action and bound checkpoint", code => {
+  const f = fixture(), error = Object.assign(Error(code), { code, privateHtml: "PRIVATE_HTML" });
+  expect(inspectionErrorCode(error)).toBe(code);
+  const saved = createStagehandFailureCheckpoint({ ...f, phase: "FIXED_INSPECTION", error });
+  expect(saved.stagehandFailure.entries[0].code).toBe(code);
+  expect(readStagehandFailure({ ...f.job, checkpoint: saved }, f.now)).toEqual(saved.stagehandFailure);
+  expect(JSON.stringify(saved)).not.toContain("PRIVATE_HTML");
+  expect(readStagehandSourceCheckpoint({ ...f.job, attempts: 2, checkpoint: saved }, undefined, f.now)).toBeUndefined();
+});
+it("keeps arbitrary contact error text out of action and checkpoint diagnostics", () => {
+  const f = fixture(), error = Object.assign(Error("PRIVATE_PROVIDER_BODY"), { code: "OFFICIAL_CONTACT_PRIVATE_PROVIDER_BODY" });
+  expect(inspectionErrorCode(error)).toBe("STAGEHAND_FIXED_INSPECTION_FAILED");
+  const saved = createStagehandFailureCheckpoint({ ...f, phase: "FIXED_INSPECTION", error });
+  expect(saved.stagehandFailure.entries[0].code).toBe("STAGEHAND_WORKER_FAILED");
+  expect(JSON.stringify(saved)).not.toContain("PRIVATE_PROVIDER_BODY");
 });
 it.each(["INVALID_ADAPTER_SOURCE", "USCHEDULE_PUBLIC_LOCATION_UNVERIFIED"])("persists the actual public-source rejection %s without turning it into discovery authority", code => {
   const f = fixture(), error = Object.assign(Error(code), { privateHtml: "PRIVATE_HTML", cause: Error("PRIVATE_PROVIDER_BODY") });

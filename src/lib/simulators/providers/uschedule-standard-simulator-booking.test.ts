@@ -6,26 +6,30 @@ import { fetchUScheduleRecipeAvailability, inspectUScheduleRecipeConfiguration }
 
 const source = "https://clients.uschedule.com/publicstudio/booking";
 const note = "Rates are per hour per simulator and NOT per person. Plan for 1 hour per person to play a full 18 hole round.";
+const priceHeading = `<h3><span>${note}</span></h3>`;
 const day = "2030-10-23";
 const wall = (date: string, hour: number) => `${date.slice(5, 7)}${date.slice(8)}${date.slice(0, 4)}${hour}00`;
-function document(date = day, people = 2, duration = 30) {
-  return `<body class="publicstudio"><select id="select_service"><option value="27567" selected>Simulator Booking</option>
+function document(date = day, people = 1, duration = 30) {
+  return `<body class="publicstudio"><div class="main pt-3"><div class="container location-2641"><div class="row">
+    <div class="col-lg-4 order-1"><div id="service_section"><div class="select-container"><select id="select_service"><option value="27567" selected>Simulator Booking</option>
     <option value="27568">VIP SimBooking</option><option value="27569">Sim #4 Booking NO LH</option><option value="27570">Private Lessons</option></select>
-    <select id="select_service_type"><option value="0" selected>All Services</option><option value="41">Simulator Reservation</option><option value="42">Private Lessons</option></select>
+    </div></div><select id="select_service_type"><option value="0" selected>All Services</option><option value="41">Simulator Reservation</option><option value="42">Private Lessons</option></select>
     <label for="select_length">Choose Time</label><select id="select_length"><option value="30" ${duration === 30 ? "selected" : ""}>30 minutes</option><option value="60" ${duration === 60 ? "selected" : ""}>1 hour</option></select>
     <div id="group_size_section"><label for="select_group_size">Choose Party Size (doesn't affect pricing)</label><select id="select_group_size" onchange="groupSizeChanged();">
     ${Array.from({ length: 6 }, (_, i) => `<option ${people === i + 1 ? "selected" : ""}>${i + 1}</option>`).join("")}</select></div>
     <div id="serv_desc_section">Play a round, Practice or Take a Lesson on our X-Golf Simulator!</div>
+    <div class="card my-3"><div class="card-body pt-3 pb-2"><h3><span>${note}</span></h3></div></div></div>
+    <div class="col-lg-4 order-3 order-lg-2">
     <ul><li class="selected" onclick="return saveBookingDetail('single_date');">Date Chosen</li><li onclick="return saveBookingDetail('next_avail');">Next Available</li></ul>
     <div class="choices pt-2"><div class="row time_choices"><div class="col timeslot selected" data-time="${wall(date, 10)}"><span>10:00 AM</span></div></div></div>
-    <div class="card"><ul><li>${note}</li></ul></div><script>var chosenDate = new Date(${date.slice(0, 4)}, ${Number(date.slice(5, 7)) - 1}, ${Number(date.slice(8))});</script></body>`;
+    </div></div></div></div><script>var chosenDate = new Date(${date.slice(0, 4)}, ${Number(date.slice(5, 7)) - 1}, ${Number(date.slice(8))});</script></body>`;
 }
 const headers = new Headers({ "content-type": "application/json", origin: new URL(source).origin, referer: source });
 describe("selected standard public simulator booking", () => {
   it("requires exact selected service, hourly per-simulator pricing, and valid current party control", () => {
     const html = document();
     expect(inspectUScheduleRecipeConfiguration(html, source)?.selected).toMatchObject({ serviceId: "27567", serviceName: "Simulator Booking" });
-    expect(readUSchedulePublicPeopleControl(html)).toMatchObject({ valid: true, datedGridEligible: true, selectedPeople: 2 });
+    expect(readUSchedulePublicPeopleControl(html)).toMatchObject({ valid: true, datedGridEligible: true, selectedPeople: 1 });
     expect(hasUScheduleStandardSimulatorBookingWitness(html)).toBe(true);
     const policy = createUSchedulePublicReadPolicy({ requestedPlayers: 2 });
     expect(policy.observeResponse(source, "GET", 200, "text/html", html)).toBe(true);
@@ -41,8 +45,12 @@ describe("selected standard public simulator booking", () => {
   it.each([
     ["missing pricing", (h: string) => h.replace(note, "Rates vary.")],
     ["per-person pricing", (h: string) => h.replace(note, "Rates are per person per hour.")],
-    ["conflicting pricing", (h: string) => h.replace(note, `${note}</li><li>Rates are per person.`)],
-    ["hidden pricing", (h: string) => h.replace(`<li>${note}</li>`, `<li hidden>${note}</li>`)],
+    ["conflicting pricing", (h: string) => h.replace(priceHeading, `${priceHeading}<h3>Rates are per person.</h3>`) ],
+    ["hidden pricing", (h: string) => h.replace(priceHeading, `<h3 hidden><span>${note}</span></h3>`) ],
+    ["hidden price fragment", (h: string) => h.replace(priceHeading, `<h3><span hidden>${note}</span></h3>`) ],
+    ["missing shared container", (h: string) => h.replace('class="container location-2641"', 'class="location-2641"')],
+    ["control in pricing card", (h: string) => h.replace(priceHeading, `${priceHeading}<button>Reserve</button>`) ],
+    ["duplicate pricing card", (h: string) => h.replace(priceHeading, `${priceHeading}${priceHeading}`) ],
     ["wrong service", (h: string) => h.replace("Simulator Booking</option>", "VIP Simulator Booking</option>")],
     ["duplicate selection", (h: string) => h.replace('value="27568"', 'value="27568" selected')],
     ["duplicate service id", (h: string) => h.replace('value="27568"', 'value="27567"')],

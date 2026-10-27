@@ -1,4 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { spawnSync } from "node:child_process";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { inspectionErrorCode } from "../../../scripts/automation/course-discovery-stagehand-inspection.mjs";
 import { registerFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
 import { bindTeeItUpOfficialContactChain, observedTeeItUpContactUrl } from "./teeitup-official-contact-chain";
 import type { OfficialIdentityPage } from "./teeitup-official-identity";
@@ -28,6 +32,16 @@ function pair(change: { rootHtml?: string; contactHtml?: string; contactAddress?
   return { root, contact };
 }
 describe("TeeItUp official contact chain", () => {
+  it("loads the native reader through the real Node and tsx module namespace", () => {
+    const moduleUrl = pathToFileURL(resolve("src/lib/course-discovery/teeitup-official-contact-chain.ts")).href;
+    const script = `const imported = await import(${JSON.stringify(moduleUrl)}); const contact = imported.default ?? imported;
+      const reader = await contact.loadNativeOfficialContactReader();
+      if (typeof reader !== 'function') process.exitCode = 1; else process.stdout.write('NATIVE_READER_RESOLVED');`;
+    const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script],
+      { cwd: process.cwd(), encoding: "utf8", timeout: 10_000, maxBuffer: 16_000, windowsHide: true });
+    expect(child.status).toBe(0);
+    expect(child.stdout).toBe("NATIVE_READER_RESOLVED");
+  });
   it("binds a current public contact address and selected booking tenant without claiming the malformed directory address", () => {
     const { root, contact } = pair();
     expect(observedTeeItUpContactUrl(source, root)).toBe(contactUrl);
@@ -124,5 +138,21 @@ describe("TeeItUp official contact chain", () => {
       { ...deps, recipeHash: "a".repeat(64), now: () => new Date("2030-10-20T12:00:00Z"), toInstant: recipeTimeToInstant });
     expect(changed).toMatchObject({ complete: false, slots: [] });
     expect(readUrls.filter(url => url.includes("/v2/tee-times"))).toHaveLength(availabilityReads);
+  });
+  it.each([
+    ["native contact read", async () => { throw new Error("OFFICIAL_CONTACT_PAGE_READ_UNVERIFIED"); }, "OFFICIAL_CONTACT_PAGE_READ_UNVERIFIED"],
+    ["unexpected reader error", async () => { throw new TypeError("private runtime detail"); }, "OFFICIAL_CONTACT_CHAIN_READ_UNVERIFIED"],
+    ["directory binding", async () => pair({ contactAddress: "99 Other Lane, Harbor, MA 01030" }), "OFFICIAL_CONTACT_DIRECTORY_BIND_UNVERIFIED"],
+  ])("reports the current %s failure after the older delegated path fails", async (_label, readOfficialContactChain, code) => {
+    const fetch = async () => Response.json(directory);
+    let actual: unknown;
+    try { await inspectExistingAdapter(source, { fetch: fetch as typeof globalThis.fetch, venueMatches: venueProofMatches,
+      localCapabilities: ["LOCAL_CHROME"], officialIdentityPage: pair().root,
+      readDelegatedRoot: async () => { throw new Error("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED"); }, readOfficialContactChain,
+      requestLease: async <T>(_family: string, work: () => Promise<T>) => ({ acquired: true as const, value: await work() }),
+    }); } catch (error) { actual = error; }
+    expect(actual).toBeInstanceOf(Error);
+    expect((actual as Error).message).toBe(code);
+    expect(inspectionErrorCode(actual)).toBe(code);
   });
 });

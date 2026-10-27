@@ -59,6 +59,14 @@ export function matchesTeeItUpContactDirectory(proof: TeeItUpOfficialContactChai
 }
 export type TeeItUpContactChainReader = (source: OfficialIdentitySource, deadlineAt: Date) => Promise<{ root: OfficialIdentityPage; contact: OfficialIdentityPage }>;
 type ContactReaderDependencies = { requestLease?: <T>(family: string, work: () => Promise<T>) => Promise<{ acquired: true; value: T } | { acquired: false }> };
+/** Resolve the same Node/tsx CJS namespace shape as the delegated native reader. */
+export async function loadNativeOfficialContactReader() {
+  const loaded = await import("./native-official-page-reader");
+  const native = typeof loaded.readNativeOfficialIdentityPage === "function" ? loaded :
+    (loaded as unknown as { default?: typeof loaded }).default;
+  if (typeof native?.readNativeOfficialIdentityPage !== "function") throw new Error("OFFICIAL_CONTACT_READER_UNAVAILABLE");
+  return native.readNativeOfficialIdentityPage;
+}
 function legacyBooking(value: string) {
   try {
     const url = new URL(value), match = /^([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\.book\.teeitup\.(?:com|golf)$/u.exec(url.hostname);
@@ -73,17 +81,23 @@ function legacyBooking(value: string) {
 /** The second URL comes solely from a freshly captured public root anchor. */
 export async function readNativeTeeItUpContactChain(source: OfficialIdentitySource, deadlineAt: Date,
   deps: ContactReaderDependencies = {}) {
-  if (!source.officialUrl || !legacyBooking(source.bookingUrl)) throw new Error("OFFICIAL_CONTACT_CHAIN_UNVERIFIED");
-  const { readNativeOfficialIdentityPage } = await import("./native-official-page-reader");
+  if (!source.officialUrl || !legacyBooking(source.bookingUrl)) throw new Error("OFFICIAL_CONTACT_SOURCE_UNVERIFIED");
+  const readNativeOfficialIdentityPage = await loadNativeOfficialContactReader();
   const requestLease = deps.requestLease ? async <T>(family: string, work: () => Promise<T>) => {
     const reply = await deps.requestLease!(family, work);
     return reply.acquired ? { acquired: true as const, value: await reply.value } : { acquired: false as const };
   } : undefined;
-  const root = await readNativeOfficialIdentityPage(source, source.officialUrl, deadlineAt, { requestLease, allowTeeItUpContactChainRoot: true });
-  const url = observedTeeItUpContactUrl(source, root);
-  const contact = await readNativeOfficialIdentityPage(source, url, deadlineAt, { requestLease });
+  let root: OfficialIdentityPage;
+  try { root = await readNativeOfficialIdentityPage(source, source.officialUrl, deadlineAt, { requestLease, allowTeeItUpContactChainRoot: true }); }
+  catch { throw new Error("OFFICIAL_CONTACT_ROOT_READ_UNVERIFIED"); }
+  let url: string;
+  try { url = observedTeeItUpContactUrl(source, root); }
+  catch { throw new Error("OFFICIAL_CONTACT_ROOT_LINK_UNVERIFIED"); }
+  let contact: OfficialIdentityPage;
+  try { contact = await readNativeOfficialIdentityPage(source, url, deadlineAt, { requestLease }); }
+  catch { throw new Error("OFFICIAL_CONTACT_PAGE_READ_UNVERIFIED"); }
   if (!isFreshNativeOfficialIdentityPage(root, source.officialUrl) || !isFreshNativeOfficialIdentityPage(contact, source.officialUrl))
-    throw new Error("OFFICIAL_CONTACT_CHAIN_UNVERIFIED");
+    throw new Error("OFFICIAL_CONTACT_DOCUMENT_UNVERIFIED");
   return { root, contact };
 }
 
