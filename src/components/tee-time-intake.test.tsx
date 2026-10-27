@@ -184,15 +184,16 @@ describe("TeeTimeIntake", () => {
     expect(screen.getByLabelText("Date", { exact: true }).getAttribute("type")).toBe("date");
     const layout = within(screen.getByRole("group", { name: "Course layout" }));
     expect(layout.getByRole("button", { name: "18-hole" }).getAttribute("aria-pressed")).toBe("true");
-    expect(screen.queryByRole("button", { name: "Clear", exact: true })).toBeNull();
+    expect(screen.getByRole("button", { name: "Clear", exact: true }).hasAttribute("disabled")).toBe(true);
 
     fireEvent.click(layout.getByRole("button", { name: "Any", exact: true }));
+    expect(screen.getByRole("button", { name: "Clear", exact: true }).hasAttribute("disabled")).toBe(false);
     fireEvent.change(screen.getByRole("slider", { name: "Distance from me" }), { target: { value: "25" } });
     fireEvent.click(screen.getByRole("button", { name: "Clear", exact: true }));
 
     expect(layout.getByRole("button", { name: "18-hole" }).getAttribute("aria-pressed")).toBe("true");
     expect((screen.getByRole("slider", { name: "Distance from me" }) as HTMLInputElement).value).toBe("15");
-    expect(screen.queryByRole("button", { name: "Clear", exact: true })).toBeNull();
+    expect(screen.getByRole("button", { name: "Clear", exact: true }).hasAttribute("disabled")).toBe(true);
   });
 
   it("preserves an explicit Any layout selection instead of replacing it with the default", () => {

@@ -178,7 +178,10 @@
 .range input::-moz-range-thumb { background: #18332b; border: 3px solid #fff; border-radius: 50%; height: 18px; width: 18px; }
 .reset { align-items: center; align-self: flex-end; background: transparent; border: 0; color: #526b62; display: flex; gap: 4px; min-height: 44px; padding: 0 4px; }
 .toolbar :is(button, input, select):focus-visible { outline: 2px solid #b35f10; outline-offset: 3px; }
+.duration:focus-within { border-color: #b35f10; box-shadow: 0 0 0 2px #b35f1026; }
+.duration select:focus-visible { outline: none; }
 .toolbar button:disabled { cursor: wait; opacity: .65; }
+.reset:disabled { cursor: default; opacity: .45; }
 .toolbar [aria-invalid="true"] { outline: 2px solid var(--danger, #b43a32); }
 @media (max-width: 1120px) {
   .toolbar { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 1fr); }
