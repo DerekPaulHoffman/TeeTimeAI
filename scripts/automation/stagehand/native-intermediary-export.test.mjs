@@ -1,9 +1,11 @@
 import test from 'node:test';import assert from 'node:assert/strict';
-import {sourceDiscover,sourceRoutingContext,buildSourceDiscoveryInstruction} from './source-discovery.mjs';
+import {sourceDiscover as sourceDiscoverWithRealClock,sourceRoutingContext,buildSourceDiscoveryInstruction} from './source-discovery.mjs';
 import {openStagehandSession} from './driver.mjs';
 import {createStagehandSourceCheckpoint,validateStagehandSourceReport} from '../course-discovery-stagehand-source.mjs';
 import {observedInspectionPath} from '../course-discovery-stagehand-inspection.mjs';
 const root='https://official.example/',entry=root+'tee-times',provider='https://public-course.book.teeitup.com/';
+const sourceDiscover=options=>{let clock=Date.now();return sourceDiscoverWithRealClock({...options,
+ sourceEvidenceWait:{now:()=>clock,sleep:async ms=>{clock+=ms;},...options.sourceEvidenceWait}});};
 const hash='b'.repeat(64),witness=()=>({kind:'NATIVE_PUBLIC_BOOKING_INTERMEDIARY',pageUrl:root,documentHash:hash,observedAt:new Date().toISOString(),links:[{href:entry,visible:false}]});
 const completion=w=>({kind:'NATIVE_PUBLIC_BOOKING_INTERMEDIARY_OPEN',pageUrl:root,url:entry,documentHash:hash,observedAt:w.observedAt,completedAt:new Date().toISOString(),finalUrl:entry,finalDocumentHash:'c'.repeat(64),redirects:[]});
 const job=()=>{const t=Date.now();return{id:'native-intermediary-job',attempts:1,sourceFingerprint:'a'.repeat(64),firstPickedUpAt:new Date(t).toISOString(),deadlineAt:new Date(t+900000).toISOString(),request:{identity:{name:'Public Course',officialUrl:root,timeZone:'America/New_York',address:'10 Public Road, Town, NY 10001, USA'},target:{courseId:'course',kind:'OUTDOOR'},input:{date:'2026-11-01',timeZone:'America/New_York',players:2,startTime:'08:00',endTime:'18:00'}}};};

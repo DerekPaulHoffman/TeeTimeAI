@@ -1,12 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { nativeFrameWitnessFailure, sourceDiscover } from './source-discovery.mjs';
+import { nativeFrameWitnessFailure, sourceDiscover as sourceDiscoverWithRealClock } from './source-discovery.mjs';
 import { projectSourceDiagnostic, sourceFailureDiagnostic } from './source-diagnostic.mjs';
 import { isSourceRoutingUrl, sourceRoutingFrameWitness, openStagehandSession } from './driver.mjs';
 
 const pageUrl='https://public-course.example/';
 const frameUrl='https://public-provider.example/start';
 const stamp=Date.now();
+const sourceDiscover=options=>{let clock=Date.now();return sourceDiscoverWithRealClock({...options,
+ sourceEvidenceWait:{now:()=>clock,sleep:async ms=>{clock+=ms;},...options.sourceEvidenceWait}});};
 const witness=()=>({kind:'NATIVE_VISIBLE_FRAME',pageUrl,observedAt:new Date(stamp).toISOString(),documentHash:'a'.repeat(64),frames:[{src:frameUrl,visible:true}]});
 const context={pageUrl,visitedUrls:[pageUrl],startedAt:stamp,workDeadline:stamp+120000,now:stamp};
 test('closed frame witness predicates preserve exact validation, including source URL normalization',()=>{

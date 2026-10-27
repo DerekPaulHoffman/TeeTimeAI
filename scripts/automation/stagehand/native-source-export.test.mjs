@@ -36,10 +36,12 @@ import assert from 'node:assert/strict';
 import {mkdtempSync,readFileSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
-import {sourceDiscover} from './source-discovery.mjs';
+import {sourceDiscover as sourceDiscoverWithRealClock} from './source-discovery.mjs';
 import {sourceRoutingUniqueWitness,openStagehandSession} from './driver.mjs';
 import {validateStagehandSourceReport,createStagehandSourceCheckpoint,readStagehandSourceCheckpoint} from '../course-discovery-stagehand-source.mjs';
 const official='https://official.example/',booking='https://public-course.book.teeitup.com/';
+const sourceDiscover=options=>{let clock=Date.now();return sourceDiscoverWithRealClock({...options,
+ sourceEvidenceWait:{now:()=>clock,sleep:async ms=>{clock+=ms;},...options.sourceEvidenceWait}});};
 const job=()=>{const t=Date.now();return{id:'native-source-job',attempts:1,sourceFingerprint:'a'.repeat(64),firstPickedUpAt:new Date(t).toISOString(),deadlineAt:new Date(t+900000).toISOString(),request:{identity:{name:'Public Course',officialUrl:official,timeZone:'America/New_York',address:'10 Public Road, Town, NY 10001, USA'},target:{courseId:'public-course',kind:'OUTDOOR'},input:{date:'2026-11-01',timeZone:'America/New_York',players:2,startTime:'08:00',endTime:'18:00'}}};};
 function fixture(witness){let calls=0,evaluations=0;const current=official,completed=[];return{get calls(){return calls;},session:{startupMs:1,browser:{context:{addInitScript:async()=>{}}},page:{url:async()=>current,evaluate:async()=>++evaluations%2===0?[]:({url:current,observedAt:new Date().toISOString(),links:[],frames:[],dom:[]})},goto:async()=>({status:()=>200}),observeUniqueSource:async()=>typeof witness==='function'?witness():witness,extract:async(_instruction,schema)=>{calls++;completed.push({model:'gpt-6.1-sol',effort:'medium',usage:{totalTokens:1}});return{data:schema.parse({decision:'UNRESOLVED',reason:'No source',nextActionInstruction:'',bookingUrl:null})};},get localCodexCalls(){return completed;},get modelCallCounts(){return{attempted:calls};},close:async()=>({browserClosed:true,modelClosed:true})}};}
 const witness=(patch={})=>({kind:'NATIVE_UNIQUE_SUPPORTED_SOURCE',pageUrl:official,url:booking,family:'TEEITUP',via:'FRAME',documentHash:'b'.repeat(64),observedAt:new Date().toISOString(),...patch});

@@ -1,13 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { openStagehandSession } from './driver.mjs';
-import { sourceDiscover, sourceDecisionFor, sourceRoutingContext, pageEvidence } from './source-discovery.mjs';
+import { sourceDiscover as sourceDiscoverWithRealClock, sourceDecisionFor, sourceRoutingContext, pageEvidence } from './source-discovery.mjs';
 import { nativeFrameNavigations, observedBookingSourceCandidates } from './source-provenance.mjs';
 import { publicEvidenceUrl } from './public-evidence.mjs';
 import { JSDOM } from 'jsdom';
 
 const root='https://frame-course.example/', frame='https://wrapper.example/public?exact=one', inner='https://inner.example/public', final='https://provider.example/public';
 const hash='a'.repeat(64);
+const sourceDiscover=options=>{let clock=Date.now();return sourceDiscoverWithRealClock({...options,
+ sourceEvidenceWait:{now:()=>clock,sleep:async ms=>{clock+=ms;},...options.sourceEvidenceWait}});};
 const witness=(pageUrl=root,src=frame)=>({kind:'NATIVE_VISIBLE_FRAME',pageUrl,observedAt:new Date().toISOString(),documentHash:hash,frames:[{src,visible:true}]});
 const completed=w=>({kind:'NATIVE_FRAME_SOURCE_OPEN',pageUrl:w.pageUrl,frameUrl:w.frames[0].src,observedAt:w.observedAt,documentHash:w.documentHash,
   finalUrl:w.frames[0].src,completedAt:new Date().toISOString(),finalDocumentHash:'b'.repeat(64),redirects:[]});
