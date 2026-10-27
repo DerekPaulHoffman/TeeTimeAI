@@ -18,7 +18,6 @@ import { getCourseLocalDateStorageBoundary } from "./date-boundary";
 import {
   createIncidentReference,
   getCourseMonitoringEscalationDeadline,
-  inferHumanReviewReason,
   recordCourseMonitoringFailure,
   runSerializedCourseMonitoringWrite,
 } from "./course-monitoring";
@@ -144,57 +143,6 @@ export async function resolveCourseSupportIncident(input: {
   );
 
   return lease.acquired ? lease.value : null;
-}
-
-export async function escalateCourseSupportIncident(input: {
-  incidentId: string;
-  message: string;
-  nextAction: string;
-  now?: Date;
-}) {
-  const current = await prisma.courseSupportIncident.findUnique({
-    where: { id: input.incidentId },
-  });
-  if (!current || current.status === "RESOLVED") {
-    return current;
-  }
-
-  const now = input.now ?? new Date();
-  const lease = await withPostgresAdvisoryTextLease(
-    prisma,
-    `course-support:${current.courseId}`,
-    async () => {
-      const latest = await prisma.courseSupportIncident.findUnique({
-        where: { id: input.incidentId },
-      });
-      if (!latest || latest.status === "RESOLVED") {
-        return latest;
-      }
-      return prisma.courseSupportIncident.update({
-        where: { id: latest.id },
-        data: {
-          status: "NEEDS_HUMAN",
-          latestMessage: sanitizeResponderText(input.message).slice(0, 500),
-          nextAction: sanitizeResponderText(input.nextAction).slice(0, 500),
-          humanReviewReason:
-            latest.humanReviewReason ??
-            inferHumanReviewReason({
-              kind: latest.kind,
-              failureClass: latest.failureClass,
-            }),
-          nextReminderAt: now,
-          escalatedAt: latest.escalatedAt ?? now,
-          lastSeenAt: now,
-          revision: { increment: 1 },
-        },
-      });
-    },
-  );
-  if (!lease.acquired || !lease.value || lease.value.status === "RESOLVED") {
-    return lease.acquired ? lease.value : null;
-  }
-
-  return lease.value;
 }
 
 async function reportCourseSupportIssueWithLease(

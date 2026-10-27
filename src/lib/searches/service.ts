@@ -793,67 +793,6 @@ export async function getTeeSearchForUser(userId: string, searchId: string) {
   });
 }
 
-export async function updateTeeSearchStatusForUser(
-  userId: string,
-  searchId: string,
-  status: SearchStatus,
-) {
-  if (
-    QUEUED_SEARCH_STATUSES.includes(
-      status as (typeof QUEUED_SEARCH_STATUSES)[number],
-    )
-  ) {
-    await assertQueueCapacity(userId, searchId);
-  }
-
-  return runCustomerProjectionTransaction(async (transaction) => {
-    const lockedSearch = await lockSearchForAlertMutation(transaction, {
-      searchId,
-      userId,
-    });
-    if (status === "ACTIVE") {
-      const current = await transaction.teeSearch.findUniqueOrThrow({
-        where: { id: searchId, userId },
-        select: { mode: true, date: true, startTime: true, endTime: true, durationMinutes: true,
-          preferences: { select: { course: { select: { timeZone: true } } } } },
-      });
-      if (current.mode === "SIMULATOR") {
-        if (current.preferences.length === 0) throw new Error("Choose a simulator venue for this alert.");
-        assertSimulatorSessionFitsWindow({ date: current.date.toISOString().slice(0, 10),
-          startTime: current.startTime, endTime: current.endTime,
-          durationMinutes: current.durationMinutes,
-          timeZones: current.preferences.map((preference) => preference.course.timeZone) });
-      }
-    }
-    const nextAlertGeneration = lockedSearch.alertGeneration + 1;
-    const updatedSearch = await transaction.teeSearch.update({
-      where: {
-        id: searchId,
-        userId,
-      },
-      data: {
-        status,
-        scheduleVersion: { increment: 1 },
-        alertGeneration: { increment: 1 },
-        ...(status === "ACTIVE"
-          ? {
-              statusEmailSentAt: null,
-              statusEmailSnapshot: buildAlertGenerationStartMarker({
-                alertGeneration: nextAlertGeneration,
-              }),
-            }
-          : {}),
-        workflowRunId: null,
-        checkLeaseToken: null,
-        checkLeaseExpiresAt: null,
-        recheckRequestedAt: null,
-      },
-      include: searchInclude,
-    });
-    return projectCurrentCustomerSearch(transaction, updatedSearch);
-  });
-}
-
 export async function updateTeeSearchForUser(
   userId: string,
   searchId: string,

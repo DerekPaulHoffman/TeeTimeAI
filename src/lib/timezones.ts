@@ -83,14 +83,3 @@ export function getTimeZoneOffsetMinutes(date: Date, timeZone: string) {
 
   return Math.round((zonedAsUtc - date.getTime()) / 60_000);
 }
-
-export function formatTimeZoneLabel(timeZone: string, date = new Date()) {
-  const zoneName = new Intl.DateTimeFormat("en-US", {
-    timeZone: normalizeTimeZone(timeZone),
-    timeZoneName: "short"
-  })
-    .formatToParts(date)
-    .find((part) => part.type === "timeZoneName")?.value;
-
-  return zoneName ? `${zoneName} (${normalizeTimeZone(timeZone)})` : normalizeTimeZone(timeZone);
-}

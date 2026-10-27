@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { prisma } from "@/lib/prisma";
 import { SearchEmailDeliveryInProgressError } from "@/lib/users/pending-email";
-import { upsertClerkUser, upsertGuestUser } from "./service";
+import { upsertClerkUser } from "./service";
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
@@ -476,18 +476,4 @@ describe("user ownership", () => {
     expect(mockedPrisma.user.update).not.toHaveBeenCalled();
   });
 
-  it("keeps signed-out alerts under a normalized guest identity", async () => {
-    mockedPrisma.user.upsert.mockResolvedValue({ id: "guest-user" } as never);
-
-    await upsertGuestUser(" Golfer@Example.com ");
-
-    expect(mockedPrisma.user.upsert).toHaveBeenCalledWith({
-      where: { clerkUserId: "guest:golfer@example.com" },
-      update: { email: "golfer@example.com" },
-      create: {
-        clerkUserId: "guest:golfer@example.com",
-        email: "golfer@example.com"
-      }
-    });
-  });
 });

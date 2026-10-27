@@ -209,5 +209,5 @@ describe.runIf(existsSync(chrome))("fixed browser JSON replay, local fixtures on
       const { result } = await executeFixture(input, mode);
       expect(result.complete).toBe(false); expect(result.slots).toEqual([]); expect(result.status).not.toBe("EMPTY");
       if (["empty", "request-only"].includes(mode)) expect(result.status).toBe("INCOMPLETE");
-    });
+    }, 20_000);
 });

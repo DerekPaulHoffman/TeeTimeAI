@@ -642,15 +642,6 @@ function chunkAvailabilityTimes<
   return rows;
 }
 
-export function getRenderedAvailabilityStartTimes(
-  times: CustomerEmailAvailabilityTime[],
-  timeZone?: string
-) {
-  return getRenderedAvailabilityTimes(times, timeZone).map((match) =>
-    match.startsAtDate.getTime()
-  );
-}
-
 export function getRenderedAvailabilityTimes<
   T extends CustomerEmailAvailabilityTime
 >(times: T[], timeZone?: string) {

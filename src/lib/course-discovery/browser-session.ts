@@ -971,9 +971,11 @@ export async function createCourseDiscoveryBrowserSession(input: {
     const datePicker = !control.sensitiveForm && control.tag === "input" ? await inspectPublicDatePickerInput(locator) : undefined;
     const product = !control.sensitiveForm && ["a", "button"].includes(control.tag) ? await inspectPublicRentalProduct(locator) : undefined;
     const catalogTile = !control.sensitiveForm && control.tag === "article" ? await inspectPublicCatalogTile(locator, catalogTiles) : undefined;
-    const service = !control.sensitiveForm && (control.tag === "select" || control.role === "combobox") ? await inspectPublicRentalService(locator) : undefined;
+    // The service proof validates rendered fields itself, including hidden later
+    // wizard stages. Keep the generic sensitive-form exclusion for other controls.
+    const service = (control.tag === "select" || control.role === "combobox") ? await inspectPublicRentalService(locator) : undefined;
     let serviceContinuation: PublicServiceContinuationMode | undefined;
-    if (!control.sensitiveForm && serviceSelection && control.tag === "button") {
+    if (serviceSelection && control.tag === "button") {
       const mode = /^Skip packages and continue with (?:the )?selected service\b/iu.test(control.name) ? "SKIP_PACKAGES" : "SERVICE";
       if (await inspectPublicServiceContinuation(locator, serviceSelection, mode)) serviceContinuation = mode;
     }

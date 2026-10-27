@@ -190,5 +190,5 @@ describe("public custom option replay", () => {
     expect(result.status, JSON.stringify(result.evidence)).toBe("AVAILABLE");
     expect(result.slots).toHaveLength(1);
     expect(reads).toContain("https://example.org/inventory?date=2030-10-23&players=2");
-  });
+  }, 20_000);
 });

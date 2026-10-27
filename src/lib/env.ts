@@ -38,10 +38,6 @@ export function isVercelProduction() {
   return normalizeEnvValue(process.env.VERCEL_ENV) === "production";
 }
 
-export function hasAutomationApiKey() {
-  return Boolean(process.env.AUTOMATION_API_KEY);
-}
-
 function isClerkKeyPair(publishableKey?: string, secretKey?: string) {
   const publishableEnvironment = getClerkKeyEnvironment(publishableKey, "pk");
   const secretEnvironment = getClerkKeyEnvironment(secretKey, "sk");

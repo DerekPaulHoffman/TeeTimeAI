@@ -89,7 +89,7 @@ describe.runIf(existsSync(chrome))("actual native official-location provenance",
       }
       expect(link).toBeDefined(); expect(recipeSelectorSchema.safeParse(link!.selector).success).toBe(true);
       if (mode === "hidden-address") {
-        await expect(session.execute({ id: 2, action: "inspect_adapter", url: entry })).rejects.toThrow("INVALID_ADAPTER_SOURCE");
+        await expect(session.execute({ id: 2, action: "inspect_adapter", url: entry })).rejects.toThrow("USCHEDULE_PUBLIC_LOCATION_UNVERIFIED");
         expect(session.diagnostics().officialSourceDiagnostic).toMatchObject({ stage: "RENDERED_ADDRESS", rawOfficialCaptured: true, rawVenueMatches: true,
           rawAddressMatches: true, rawLinkMatches: true, renderedAddressMatches: false, derivationRejected: true, legacyFallback: true });
         expect(fixedFetch).not.toHaveBeenCalled(); return;

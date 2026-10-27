@@ -14,7 +14,6 @@ export type CoursePriceEstimate = {
   eighteenHoles?: CoursePriceRange;
 };
 
-export type CoursePriceView = "any" | "9" | "18";
 export type BookableHoleCount = 9 | 18;
 
 const EXTREME_PRICE_MULTIPLIER = 8;
@@ -87,14 +86,6 @@ export function summarizeBookableHoleCounts(slots: TeeTimeSlot[]) {
   return ([9, 18] as const).filter((holes) => observed.has(holes));
 }
 
-export function hasPriceForView(
-  estimate: CoursePriceEstimate | undefined,
-  priceView: CoursePriceView
-) {
-  if (priceView === "any") return true;
-  return priceView === "9" ? Boolean(estimate?.nineHoles) : Boolean(estimate?.eighteenHoles);
-}
-
 export function getHeadlineBookableHoleCount(holeCounts: readonly number[] | undefined) {
   if (holeCounts?.includes(18)) return 18 as const;
   if (holeCounts?.includes(9)) return 9 as const;
@@ -152,10 +143,6 @@ export function buildCoursePriceEstimate(
   );
 
   return mergePriceEstimateCoverage(durableEstimate, legacyEstimate);
-}
-
-export function buildObservedBookableHoleCounts(evidence: CoursePriceEvidence) {
-  return buildObservedBookableHoleSummary(evidence).holeCounts;
 }
 
 export function buildObservedBookableHoleSummary(evidence: CoursePriceEvidence) {

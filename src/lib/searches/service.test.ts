@@ -7,7 +7,6 @@ import {
   deleteTeeSearchForUser,
   listTeeSearchesForUser,
   updateTeeSearchForUser,
-  updateTeeSearchStatusForUser,
 } from "./service";
 
 const deliveryOutboxMocks = vi.hoisted(() => ({
@@ -2270,124 +2269,10 @@ describe("createTeeSearchForUser", () => {
   });
 });
 
-describe("updateTeeSearchStatusForUser", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    mockedPrisma.teeSearch.count.mockResolvedValue(0);
-    mockedPrisma.teeSearch.findUniqueOrThrow.mockResolvedValue({ mode: "OUTDOOR" } as never);
-  });
-
-  it("resumes a same-day simulator only while its inherited 120-minute session still fits", async () => {
-    const current = { mode: "SIMULATOR", date: new Date("2026-10-09T00:00:00.000Z"),
-      startTime: "18:00", endTime: "24:00", durationMinutes: 120,
-      preferences: [{ course: { timeZone: "America/New_York" } }] };
-    mockedPrisma.teeSearch.findUniqueOrThrow.mockResolvedValue(current as never);
-    mockedPrisma.teeSearch.update.mockResolvedValue({ mode: "SIMULATOR", preferences: [],
-      matches: [], probes: [], statusEmailSnapshot: null } as never);
-    vi.setSystemTime(new Date("2026-10-10T02:00:00.000Z"));
-    await expect(updateTeeSearchStatusForUser("user-1", "search-1", "ACTIVE"))
-      .resolves.toBeDefined();
-    expect(mockedPrisma.teeSearch.update).toHaveBeenCalledTimes(1);
-    vi.setSystemTime(new Date("2026-10-10T02:00:00.001Z"));
-    await expect(updateTeeSearchStatusForUser("user-1", "search-1", "ACTIVE"))
-      .rejects.toThrow(/complete session still available/);
-    expect(mockedPrisma.teeSearch.update).toHaveBeenCalledTimes(1);
-    await expect(updateTeeSearchStatusForUser("user-1", "search-1", "PAUSED"))
-      .resolves.toBeDefined();
-  });
-
-  it("excludes the current search when enforcing queue capacity on resume", async () => {
-    mockedPrisma.teeSearch.update.mockResolvedValue({
-      id: "search-1",
-      statusEmailSnapshot: {
-        schemaVersion: 1,
-        kind: "ALERT_GENERATION_START",
-        alertGeneration: 3,
-        generationStartedAt: "2026-08-11T20:00:00.000Z",
-      },
-      matches: [],
-    } as never);
-
-    const updated = await updateTeeSearchStatusForUser(
-      "user-1",
-      "search-1",
-      "ACTIVE",
-    );
-
-    expect(mockedPrisma.teeSearch.count).toHaveBeenCalledWith({
-      where: {
-        userId: "user-1",
-        status: { in: ["ACTIVE", "PAUSED"] },
-        id: { not: "search-1" },
-      },
-    });
-    expect(mockedPrisma.teeSearch.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          status: "ACTIVE",
-          alertGeneration: { increment: 1 },
-          statusEmailSentAt: null,
-          statusEmailSnapshot: expect.objectContaining({
-            schemaVersion: 1,
-            kind: "ALERT_GENERATION_START",
-            alertGeneration: 3,
-            generationStartedAt: expect.any(String),
-          }),
-        }),
-      }),
-    );
-    expect(updated.statusEmailSnapshot).toBeNull();
-  });
-
-  it("hides a current match after a newer unconsumed local-reader completion", async () => {
-    const confirmedAt = new Date("2026-08-31T14:00:00.000Z");
-    mockedPrisma.teeSearch.update.mockResolvedValue({
-      id: "search-1",
-      statusEmailSnapshot: null,
-      ...currentSearchSettings(),
-      matches: [
-        {
-          id: "match-reader-stale",
-          ...currentSlotSettings,
-          availabilityStatus: "AVAILABLE",
-          lastConfirmedAt: confirmedAt,
-          course: {
-            id: "course-1",
-            ...currentCourseSettings,
-            monitoringStatus: {
-              lastSuccessfulAt: confirmedAt,
-              lastFailureAt: null,
-            },
-          },
-        },
-      ],
-    } as never);
-    localReaderServiceMocks.getNewestCompletedLocalReaderProviderObservationsInTransaction.mockResolvedValue(
-      new Map([
-        [
-          "course-1",
-          {
-            providerObservedAt: new Date("2026-08-31T14:01:00.000Z"),
-            resultExpiresAt: new Date("2026-08-31T14:11:00.000Z"),
-            state: "FRESH_UNCONSUMED",
-          },
-        ],
-      ]),
-    );
-
-    const updated = await updateTeeSearchStatusForUser(
-      "user-1",
-      "search-1",
-      "PAUSED",
-    );
-
-    expect(updated.matches).toEqual([]);
-  });
-});
-
 describe("updateTeeSearchForUser", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockedPrisma.teeSearch.count.mockResolvedValue(0);
     mockedPrisma.googlePlaceReview.findMany.mockResolvedValue([]);
     mockedPrisma.teeSearch.findUniqueOrThrow
       .mockResolvedValueOnce({ id: "search-1" } as never)

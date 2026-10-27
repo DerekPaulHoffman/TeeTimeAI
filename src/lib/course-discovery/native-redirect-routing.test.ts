@@ -2079,7 +2079,8 @@ describe.runIf(existsSync(nativeChromePath))("offline Chrome document ownership"
       },
       send(name: string, values?: object) {
         if (name === "Page.stopLoading" && retiring && mode === "late old navigation") {
-          stopEntered.resolve(); return stopReleased.promise.then(() => cdp.send(name as never, values as never));
+          const stopped = cdp.send(name as never, values as never);
+          stopEntered.resolve(); return stopped.then(result => stopReleased.promise.then(() => result));
         }
         return cdp.send(name as never, values as never);
       }, detach: () => cdp.detach(),

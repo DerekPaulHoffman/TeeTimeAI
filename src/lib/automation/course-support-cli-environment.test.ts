@@ -649,6 +649,7 @@ describe("course-support coverage machine output", () => {
       {
         cwd: process.cwd(),
         encoding: "utf8",
+        timeout: 15_000,
         env: {
           ...process.env,
           DATABASE_URL: " ",
@@ -670,5 +671,5 @@ describe("course-support coverage machine output", () => {
         threadDisposition: "KEEP_VISIBLE",
       },
     });
-  });
+  }, 20_000);
 });

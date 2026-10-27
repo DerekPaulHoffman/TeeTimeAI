@@ -1,33 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  evaluateAutomationPolicy,
-  evaluateMonitoringGate
-} from "./policy";
+import { evaluateMonitoringGate } from "./policy";
 
-describe("evaluateAutomationPolicy", () => {
-  it("does not treat a booking automation prohibition as a public read blocker", () => {
-    const result = evaluateAutomationPolicy({
-      automationEligibility: "ALLOWED",
-      termsText: "No bots, scripts, or automated tee time booking may access this service.",
-      intendedAction: "ALERT_ONLY"
-    });
-
-    expect(result.allowed).toBe(true);
-    expect(result.reason).toMatch(/does not block/i);
-  });
-
-  it("revalidates a stored block instead of trusting it as a policy decision", () => {
-    const result = evaluateAutomationPolicy({
-      automationEligibility: "BLOCKED",
-      termsText: "Automated reservations are prohibited.",
-      intendedAction: "ALERT_ONLY"
-    });
-
-    expect(result.allowed).toBe(true);
-    expect(result.reason).toMatch(/public tee-time availability/i);
-  });
-
+describe("evaluateMonitoringGate", () => {
   it("keeps policy-only and generic blocked state actionable", () => {
     expect(
       evaluateMonitoringGate({

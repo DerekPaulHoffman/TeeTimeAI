@@ -31,7 +31,7 @@ describe.runIf(existsSync(chrome))("discovery public rental service parity", () 
       let view = await browser.execute({ id: 1, action: "open", url: "https://example.org/widget" });
       expect(view.controls.find(control => control.name === "Continue")).toBeUndefined();
       const initial = view.controls.find(control => control.name === "Select Service");
-      expect(initial?.kind).toBe("filter");
+      expect(initial?.kind, JSON.stringify(view)).toBe("filter");
       view = await browser.execute({ id: 2, action: "click", target: initial!.target });
       const service = view.controls.find(control => control.name === "Select Service");
       expect(service?.options).toEqual([{ value: "Golf Simulator $30.00", label: "Golf Simulator $30.00" }]);
@@ -73,6 +73,14 @@ describe.runIf(existsSync(chrome))("discovery public rental service parity", () 
       expect(service.options).toEqual([{ value: "Golf Simulator $30.00", label: "Golf Simulator $30.00" }]);
       view = await browser.execute({ id: 2, action: "select", target: service.target, option: service.options![0].value });
       expect(view.controls.some(control => control.kind === "service-continuation")).toBe(true);
+    } finally { await browser.close(); }
+  }, 20_000);
+  it.each(["email", "tel", "password"])("does not expose service actions beside a visible %s field", async type => {
+    const browser = await session(html.replace('<div hidden><input type="email"></div>', `<input type="${type}">`));
+    try {
+      const view = await browser.execute({ id: 1, action: "open", url: "https://example.org/widget" });
+      expect(view.controls.some(control => control.name === "Select Service" || control.kind === "service-continuation")).toBe(false);
+      expect(view.controls.find(control => control.name === "Continue")).toBeUndefined();
     } finally { await browser.close(); }
   }, 20_000);
 });

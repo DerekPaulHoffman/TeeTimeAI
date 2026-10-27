@@ -58,7 +58,7 @@ async function run(memberSports: boolean) {
   const postBody = { configurationTypeId: 0, date: input.date, golfClubGroupId: 0, golfClubId: 123, golfCourseId: 456, groupSheetTypeId: 0 };
   const bookingBody = `<p class="dateFormat">Fri, Oct 23, 2026</p><div class="teeTimes"><div class="teeTime"><div class="timeCol">1:30 PM</div><div class="availableBookings">
     <app-tee-time-card class="bookingCard"><div class="teeTimeCard"><div class="name">Front</div><div class="rightCells">
-    <div class="iconCell first"><span>1-4</span></div><div class="iconCell holes9"></div></div></div></app-tee-time-card></div></div></div><script>
+    <div class="iconCell first"><span>1-4</span></div><div class="iconCell"><div class="holes9"></div></div></div></div></app-tee-time-card></div></div></div><script>
     Promise.all(${JSON.stringify([courses, parameters, counts])}.map(url=>fetch(url).then(r=>r.json()))).then(()=>fetch(${JSON.stringify(endpoint)},
     {method:'POST',headers:{'content-type':'application/json',authorization:'Bearer null','x-api-key':'${literal}'},body:JSON.stringify(${JSON.stringify(postBody)})})).catch(()=>{});</script>`;
   const payloads = new Map<string, unknown>([

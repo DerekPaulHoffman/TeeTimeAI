@@ -27,10 +27,6 @@ const dbMocks = vi.hoisted(() => ({
 }));
 
 const emailMocks = vi.hoisted(() => ({
-  getRenderedTeeTimeAlertMatchIds: vi.fn(
-    (matches: Array<{ matchId: string }>) =>
-      matches.slice(0, 8).map((match) => match.matchId),
-  ),
   sendSearchStatusEmail: vi.fn(),
   sendTeeTimeAlert: vi.fn(),
 }));

@@ -160,19 +160,6 @@ export async function upsertClerkUser(input: {
   return result.user;
 }
 
-export function upsertGuestUser(email: string) {
-  const normalizedEmail = normalizeClerkEmail(email);
-
-  return prisma.user.upsert({
-    where: { clerkUserId: guestUserKey(normalizedEmail) },
-    update: { email: normalizedEmail },
-    create: {
-      clerkUserId: guestUserKey(normalizedEmail),
-      email: normalizedEmail
-    }
-  });
-}
-
 function guestUserKey(email: string) {
   return `guest:${email}`;
 }

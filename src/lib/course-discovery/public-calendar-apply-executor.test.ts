@@ -22,13 +22,14 @@ describe.runIf(existsSync(executablePath))("date Apply replay", () => {
   it("requires requested-day selection and then a fresh successful response before returning slots", async () => {
     const urls: string[] = [];
     const dependencies = {
+      now: () => new Date("2026-10-20T12:00:00Z"),
       launchBrowser: () => chromium.launch({ executablePath, headless: true }),
       requestLease: async (_family: string, work: () => Promise<unknown>) => ({ acquired: true as const, value: await work() }),
       fetch: (async (value: Parameters<typeof fetch>[0]) => { const url = String(value); urls.push(url);
         return new Response(url.includes("/availability?") ? JSON.stringify({ ok: true }) : html, { headers: { "content-type": url.includes("/availability?") ? "application/json" : "text/html" } }); }) as typeof fetch,
     };
     const good = await executeAccessRecipe(recipe(), input, dependencies as Parameters<typeof executeAccessRecipe>[2]);
-    expect(good.status).toBe("AVAILABLE"); expect(good.complete).toBe(true); expect(good.slots).toHaveLength(1);
+    expect(good.status, JSON.stringify(good.evidence)).toBe("AVAILABLE"); expect(good.complete).toBe(true); expect(good.slots).toHaveLength(1);
     expect(urls).toContain("https://example.org/availability?date=2026-10-23");
     urls.length = 0;
     const omitted = await executeAccessRecipe(recipe(false), input, dependencies as Parameters<typeof executeAccessRecipe>[2]);

@@ -15,7 +15,7 @@ vi.mock("@/lib/automation/provider-request-lease", () => ({ runWithProviderReque
 const contractFixture = vi.hoisted(() => ({ assets: [
   { path: "/assets/index-DsLbHQvf.js", sha256: "4e2bb6ea29fa910e04620c1551d737aecaff9df23bf6be99f9da6d72e9b1addb", body: 'void "offline-unpaged-loadData";' },
   { path: "/assets/index-CvL6jQuU.js", sha256: "6547b7841afb6945817f5c354437875bd5f1fb59031ed511cf16d30bca72262f", body: 'void "offline-public-search-model";' },
-], substitutions: [] as Array<{ actual: string; substituted: string }> }));
+], substitutions: [] as Array<{ path: string; actual: string; substituted: string }> }));
 vi.mock("node:crypto", async importOriginal => {
   const actual = await importOriginal<typeof import("node:crypto")>();
   return { ...actual, createHash: (...args: Parameters<typeof actual.createHash>) => {
@@ -33,7 +33,7 @@ vi.mock("node:crypto", async importOriginal => {
       const result = encoding ? digest(encoding) : digest();
       const fixture = contractFixture.assets.find(asset => Buffer.concat(chunks).equals(Buffer.from(asset.body)));
       if (!fixture || encoding !== "hex") return result;
-      contractFixture.substitutions.push({ actual: String(result), substituted: fixture.sha256 });
+      contractFixture.substitutions.push({ path: fixture.path, actual: String(result), substituted: fixture.sha256 });
       return fixture.sha256;
     }) as Hash["digest"];
     return hash;
@@ -199,7 +199,8 @@ describe.runIf(existsSync(chrome))("controller-only EZLinks native reads", () =>
       const count = seen.length, proof = await reader.readEzLinksReadContract();
       expect(proof).toEqual({ kind: "EZLINKS_UNPAGED_SEARCH_V1", assets: contractFixture.assets.map(({ path, sha256 }) => ({ path, sha256 })) });
       expect(maximum).toBe(1);
-      expect(contractFixture.substitutions).toHaveLength(2);
+      expect(new Set(contractFixture.substitutions.map(row => row.path)))
+        .toEqual(new Set(contractFixture.assets.map(asset => asset.path)));
       expect(contractFixture.substitutions.every(row => row.actual !== row.substituted && /^[a-f0-9]{64}$/u.test(row.actual))).toBe(true);
       proof.assets[0].sha256 = "changed caller copy";
       expect((await reader.readEzLinksReadContract()).assets[0].sha256).toBe(contractFixture.assets[0].sha256);

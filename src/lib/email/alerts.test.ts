@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 
+import { getRenderedAvailabilityTimes } from "./customer-email";
+
 import {
   buildContentScopedEmailIdempotencyKey,
-  getRenderedTeeTimeAlertMatchIds,
   getMatchAlertSubject,
   getSearchStatusEmailSubject,
   normalizeEmailEnvValue,
@@ -194,7 +195,9 @@ describe("renderAlertHtml", () => {
       isNew: true
     }));
 
-    expect(getRenderedTeeTimeAlertMatchIds(matches)).toEqual(
+    expect(
+      getRenderedAvailabilityTimes(matches, "America/New_York").map((match) => match.matchId)
+    ).toEqual(
       matches.slice(0, 16).map((match) => match.matchId)
     );
   });
@@ -217,7 +220,8 @@ describe("renderAlertHtml", () => {
       isNew: true
     };
 
-    const rendered = getRenderedTeeTimeAlertMatchIds([...older, opening]);
+    const rendered = getRenderedAvailabilityTimes([...older, opening], "America/New_York")
+      .map((match) => match.matchId);
 
     expect(rendered).toContain("new-opening");
     expect(rendered).not.toContain("old-16");

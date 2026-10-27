@@ -454,7 +454,8 @@ describe.runIf(existsSync(chrome))("offline CPS discovery and deterministic brow
       expect(nativeSeen).toContain(entry); expect(serverSeen).toContain(entry);
       if (action === "link-prefetch") {
         expect(discoveryFailures.length, JSON.stringify({ correlationEvents, requestEvents, responseEvents, nativeSeen, serverSeen, reached })).toBeGreaterThan(0);
-        expect(discoveryFailures.every(reason => reason === "UNSAFE_URL")).toBe(true);
+        // Native prefetch resource kinds are denied before generic URL routing.
+        expect(discoveryFailures.every(reason => reason === "NATIVE_REDIRECT_RESOURCE_KIND_REJECTED"), JSON.stringify(discoveryFailures)).toBe(true);
       } else expect(discoveryFailures).toEqual([]);
     } finally { await session.close(); }
     const replay = await executeAccessRecipe(recipe(), input, { launchBrowser, fetch: pinnedFetch, requestLease: lease,

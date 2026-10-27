@@ -27,7 +27,6 @@ const prismaMocks = vi.hoisted(() => ({
 vi.mock("@/lib/prisma", () => ({ prisma: prismaMocks }));
 
 import {
-  escalateCourseSupportIncident,
   reportCourseSupportIssue,
   resolveCourseSupportIncident
 } from "./support-incidents";
@@ -2429,61 +2428,6 @@ describe("course support incidents", () => {
 
     expect(prismaMocks.courseSupportIncident.updateMany).not.toHaveBeenCalled();
     expect(prismaMocks.courseSupportIncident.update).not.toHaveBeenCalled();
-  });
-
-  it("escalates a concrete blocker into the durable operator queue", async () => {
-    const blocked = incident({
-      status: "NEEDS_HUMAN",
-      latestMessage: "The provider requires a signed contract before public API access.",
-      nextAction: "Approve the provider agreement.",
-      escalatedAt: now
-    });
-    prismaMocks.courseSupportIncident.findUnique
-      .mockResolvedValueOnce(incident())
-      .mockResolvedValueOnce(incident());
-    prismaMocks.courseSupportIncident.update.mockResolvedValue(blocked);
-
-    const result = await escalateCourseSupportIncident({
-      incidentId: "incident-1",
-      message: "The provider requires a signed contract before public API access.",
-      nextAction: "Approve the provider agreement.",
-      now
-    });
-
-    expect(prismaMocks.courseSupportIncident.update).toHaveBeenCalledWith({
-      where: { id: "incident-1" },
-      data: expect.objectContaining({
-        status: "NEEDS_HUMAN",
-        escalatedAt: now,
-        lastSeenAt: now
-      })
-    });
-    expect(result).toEqual(blocked);
-  });
-
-  it("persists human review for an engineering-only incident", async () => {
-    const engineeringIncident = incident({ engineeringOnly: true });
-    const escalated = incident({
-      engineeringOnly: true,
-      status: "NEEDS_HUMAN",
-      latestMessage: "Provider access is unavailable.",
-      nextAction: "Persist the final direct-booking classification.",
-      escalatedAt: now
-    });
-    prismaMocks.courseSupportIncident.findUnique
-      .mockResolvedValueOnce(engineeringIncident)
-      .mockResolvedValueOnce(engineeringIncident);
-    prismaMocks.courseSupportIncident.update.mockResolvedValue(escalated);
-
-    const result = await escalateCourseSupportIncident({
-      incidentId: "incident-1",
-      message: "Provider access is unavailable.",
-      nextAction: "Persist the final direct-booking classification.",
-      now
-    });
-
-    expect(result).toEqual(escalated);
-    expect(prismaMocks.courseSupportIncident.update).toHaveBeenCalledOnce();
   });
 
   it("records resolution for the operator history without sending email", async () => {

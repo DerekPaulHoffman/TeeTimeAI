@@ -3641,18 +3641,6 @@ export function buildCourseSupportReleaseHistory(input: {
   } as Prisma.InputJsonValue;
 }
 
-export function shouldDispatchRemediatedCourseRechecks(input: {
-  persistedReleaseSha: string | null;
-  persistedDeployedAt: Date | null;
-  nextReleaseSha: string | null | undefined;
-  nextDeployedAt: Date | null | undefined;
-}) {
-  const releaseSha = input.nextReleaseSha ?? input.persistedReleaseSha;
-  return Boolean(
-    !input.persistedDeployedAt && releaseSha && input.nextDeployedAt,
-  );
-}
-
 export async function inspectCourseSupportQueue(input?: {
   now?: Date;
   requestingThreadId?: string;

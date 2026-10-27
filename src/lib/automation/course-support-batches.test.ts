@@ -201,7 +201,6 @@ import {
   selectCourseSupportAdmissionLane,
   selectCourseSupportBatch,
   selectCourseSupportRetryBatch,
-  shouldDispatchRemediatedCourseRechecks,
   shouldFinalizeSourceUnverified,
   shouldStartFreshExactRuntimeSourceCycle,
   shouldContinueSettledCourseSupportRemediation,
@@ -15492,43 +15491,6 @@ describe("fresh runtime verification", () => {
         },
       }).result,
     ).toBe("STALE_EVIDENCE");
-  });
-
-  it("dispatches rechecks only on the first persisted release transition", () => {
-    const releaseSha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const deployedAt = new Date("2026-07-15T20:05:00.000Z");
-    expect(
-      shouldDispatchRemediatedCourseRechecks({
-        persistedReleaseSha: releaseSha,
-        persistedDeployedAt: null,
-        nextReleaseSha: null,
-        nextDeployedAt: deployedAt,
-      }),
-    ).toBe(true);
-    expect(
-      shouldDispatchRemediatedCourseRechecks({
-        persistedReleaseSha: null,
-        persistedDeployedAt: null,
-        nextReleaseSha: releaseSha,
-        nextDeployedAt: deployedAt,
-      }),
-    ).toBe(true);
-    expect(
-      shouldDispatchRemediatedCourseRechecks({
-        persistedReleaseSha: releaseSha,
-        persistedDeployedAt: deployedAt,
-        nextReleaseSha: releaseSha,
-        nextDeployedAt: deployedAt,
-      }),
-    ).toBe(false);
-    expect(
-      shouldDispatchRemediatedCourseRechecks({
-        persistedReleaseSha: null,
-        persistedDeployedAt: null,
-        nextReleaseSha: releaseSha,
-        nextDeployedAt: null,
-      }),
-    ).toBe(false);
   });
 
   it("preserves an explicit human escalation across verification", () => {

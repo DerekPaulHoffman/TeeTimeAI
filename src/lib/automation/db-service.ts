@@ -97,7 +97,6 @@ import {
   type HourlyImprovementRunRecord,
 } from "./improvement";
 import {
-  withPostgresAdvisoryLease,
   withPostgresAdvisoryTextLease,
 } from "./lease";
 import { HOURLY_IMPROVEMENT_WRITER_LANE } from "./writer-lanes";
@@ -115,7 +114,6 @@ import { isSufficientNearbyCourseName } from "./generic-course-nearby-source";
 
 export { recordCourseBookingFacts };
 
-const AUTOMATION_POLL_LEASE_KEY = 917300120260709n;
 const REOPEN_ALERT_MINIMUM_ABSENCE_MS = 30 * 60 * 1000;
 const SEARCH_CHECK_LEASE_MS = 15 * 60 * 1000;
 const TRUSTED_DISCOVERY_FUTURE_TOLERANCE_MS = 60_000;
@@ -261,10 +259,6 @@ export type BrowserProbeTarget = {
   probeUrl: string;
   unprojectedSourceCandidate?: true;
 };
-
-export function runWithAutomationPollLease<T>(worker: () => Promise<T>) {
-  return withPostgresAdvisoryLease(prisma, AUTOMATION_POLL_LEASE_KEY, worker);
-}
 
 export type SearchCheckLease = {
   searchId: string;

@@ -4,8 +4,6 @@ import type {
 } from "@/lib/courses/intelligence";
 
 type AutomationEligibility = "UNKNOWN" | "ALLOWED" | "BLOCKED" | "NEEDS_REVIEW";
-type IntendedAction = "ALERT_ONLY";
-
 const MANUAL_BOOKING_METHODS = new Set<BookingMethod>([
   "PHONE_ONLY",
   "CONTACT_COURSE",
@@ -16,17 +14,6 @@ const TECHNICAL_ACCESS_REASONS = new Set<AutomationReason>([
   "CAPTCHA_OR_QUEUE"
 ]);
 const CURRENT_INTELLIGENCE_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
-
-type PolicyInput = {
-  automationEligibility?: AutomationEligibility;
-  termsText?: string | null;
-  intendedAction?: IntendedAction;
-};
-
-type PolicyResult = {
-  allowed: boolean;
-  reason: string;
-};
 
 export type MonitoringGateInput = {
   isPublic?: boolean | null;
@@ -55,16 +42,6 @@ export type MonitoringGateResult = {
   currentEvidence: boolean;
   reason: string;
 };
-
-export function evaluateAutomationPolicy(input: PolicyInput): PolicyResult {
-  return {
-    allowed: true,
-    reason:
-      input.intendedAction === "ALERT_ONLY" || !input.intendedAction
-        ? "Provider policy text does not block alert-only reads of public tee-time availability."
-        : "Provider policy text does not block reads of public tee-time availability."
-  };
-}
 
 export function evaluateMonitoringGate(
   input: MonitoringGateInput

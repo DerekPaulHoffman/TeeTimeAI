@@ -84,7 +84,9 @@ describe.runIf(existsSync(chrome))("actual official booking source controller li
         await document.evaluate(() => { history.pushState({}, "", "/different"); history.pushState({}, "", "/"); });
       }
       const result = session.execute({ id: 4, action: "inspect_adapter", url: book });
-      if (mode === "complete") {
+      // A fresh native witness may re-attest the same completed document after
+      // history changes; a change during inspection still invalidates its token.
+      if (mode === "complete" || mode === "history-before-inspect") {
         expect((await result).adapter).toMatchObject({ family: "TEEITUP", alias: "example-course", facilityIds: [31], officialBookingSourceProof: {
           kind: "OFFICIAL_BOOKING_SOURCE", officialUrl: official, officialDocumentUrl: normal, bookingPageUrl: bookingPage, iframeEntryUrl: play,
           bookingSourceUrl: book, canonicalAddress: venueAddress, providerAddress: "601 Competition Rd, Example, NC 27603, US", providerAddressVerified: false,

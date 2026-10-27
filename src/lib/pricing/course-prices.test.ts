@@ -1,11 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { TeeTimeSlot } from "@/lib/tee-times/matching";
 import {
-  buildObservedBookableHoleCounts,
+  buildObservedBookableHoleSummary,
   buildCoursePriceEstimate,
   getHeadlineBookableHoleCount,
   getHeadlineCoursePrice,
-  hasPriceForView,
   summarizeBookableHoleCounts,
   summarizeCourseSlotPrices
 } from "./course-prices";
@@ -98,7 +97,7 @@ describe("course prices", () => {
   });
 
   it("restores bookable options from probes, legacy pricing, and matches", () => {
-    expect(buildObservedBookableHoleCounts({
+    expect(buildObservedBookableHoleSummary({
       probes: [
         {
           observedAt: new Date("2026-07-10T14:00:00Z"),
@@ -114,7 +113,7 @@ describe("course prices", () => {
         }
       ],
       matches: [{ holes: 18, priceCents: null, lastConfirmedAt: new Date("2026-07-10T12:00:00Z") }]
-    })).toEqual([9, 18]);
+    }).holeCounts).toEqual([9, 18]);
   });
 
   it("keeps durable price and hole observations regardless of age", () => {
@@ -138,7 +137,7 @@ describe("course prices", () => {
       sampleSize: 6,
       observedAt: "2024-01-10T14:00:00.000Z"
     });
-    expect(buildObservedBookableHoleCounts(evidence)).toEqual([18]);
+    expect(buildObservedBookableHoleSummary(evidence).holeCounts).toEqual([18]);
   });
 
   it("uses legacy evidence for a hole count that has not been durably observed", () => {
@@ -237,11 +236,6 @@ describe("course prices", () => {
       probes: [],
       matches: [{ holes: 18, priceCents: 5500, lastConfirmedAt: new Date("2026-07-10T13:00:00Z") }]
     })?.eighteenHoles).toEqual({ minPriceCents: 5500, maxPriceCents: 5500, sampleSize: 1 });
-  });
-
-  it("keeps unknown-price courses in the all-courses view", () => {
-    expect(hasPriceForView(undefined, "any")).toBe(true);
-    expect(hasPriceForView(undefined, "9")).toBe(false);
   });
 
   it("uses the price matching a preferred observed booking option for the card headline", () => {

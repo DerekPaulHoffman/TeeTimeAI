@@ -1,17 +1,27 @@
 {
   "$schema": "https://unpkg.com/knip@5/schema.json",
   "entry": [
+    "scripts/automation/course-discovery-browser.ts",
+    "scripts/automation/course-discovery-diagnostics.d.mts",
+    "scripts/automation/course-discovery-stagehand-browser.ts",
+    "scripts/automation/inspect-course-support-acceptance-ledger.ts",
     "scripts/ci/preview-smoke-global-setup.ts",
+    "tests/ui/playwright.geometry.config.ts",
     "tools/local-chrome-reader/background.js",
     "tools/local-chrome-reader/chronogolf-reader.js",
     "tools/local-chrome-reader/content.js",
     "tools/local-chrome-reader/cps-reader.js",
     "tools/local-chrome-reader/ezlinks-reader.js",
+    "tools/local-chrome-reader/membersports-reader.js",
+    "tools/local-chrome-reader/official-source-content.js",
+    "tools/local-chrome-reader/official-source-reader.js",
     "tools/local-chrome-reader/options.js",
     "tools/local-chrome-reader/prophet-reader.js",
     "tools/local-chrome-reader/tenfore-reader.js",
+    "tools/local-chrome-reader/teeitup-reader.js",
     "tools/local-chrome-reader/webtrac-reader.js",
     "tools/public-tee-time-reader/devtools.js",
     "tools/public-tee-time-reader/panel.js"
-  ]
+  ],
+  "ignoreDependencies": ["@openai/codex", "vercel"]
 }
