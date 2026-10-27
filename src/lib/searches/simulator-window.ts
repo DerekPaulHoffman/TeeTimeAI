@@ -6,7 +6,7 @@ export function assertSimulatorSessionFitsWindow(input: {
   date: string;
   startTime: string;
   endTime: string;
-  durationMinutes: number;
+  durationMinutes: number | null;
   timeZones: readonly string[];
 }, now = new Date()) {
   if (!isValidSearchCalendarDate(input.date) || input.startTime === "24:00" ||
@@ -17,10 +17,10 @@ export function assertSimulatorSessionFitsWindow(input: {
     const start = parseCourseLocalDateTime(`${input.date}T${input.startTime}`, timeZone);
     const end = parseCourseLocalWindowEnd(input.date, input.endTime, timeZone);
     if (!Number.isFinite(start.getTime()) || !Number.isFinite(end.getTime()) ||
-        end.getTime() - start.getTime() < input.durationMinutes * 60_000) {
+        end.getTime() - start.getTime() < (input.durationMinutes ?? 30) * 60_000) {
       throw new Error("Choose a time window long enough for the complete simulator session at every venue.");
     }
-    if (Math.max(start.getTime(), now.getTime()) + input.durationMinutes * 60_000 > end.getTime()) {
+    if (Math.max(start.getTime(), now.getTime()) + (input.durationMinutes ?? 30) * 60_000 > end.getTime()) {
       throw new Error("Choose a future simulator window with a complete session still available at every venue.");
     }
   }

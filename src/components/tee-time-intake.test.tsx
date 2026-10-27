@@ -84,19 +84,23 @@ function simulatorTestVenue(name: string, distanceMeters: number, supported = tr
 }
 
 describe("TeeTimeIntake", () => {
-  it("allows exactly one outdoor layout or Simulator to be selected", () => {
+  it("separates venue type from layout and defaults simulator hours to Any", () => {
     vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
     render(<TeeTimeIntake {...signedInAccountProps} simulatorEnabled />);
-    const filters = within(screen.getByRole("group", { name: "Course layout" }));
-
-    for (const outdoor of ["Any", "9-hole", "18-hole"]) {
-      for (const selected of [outdoor, "Simulator", outdoor]) {
-        fireEvent.click(filters.getByRole("button", { name: selected, exact: true }));
-        expect(filters.getAllByRole("button", { pressed: true })).toEqual([
-          filters.getByRole("button", { name: selected, exact: true })
-        ]);
-      }
-    }
+    const venue = within(screen.getByRole("group", { name: "Venue type" }));
+    fireEvent.click(screen.getByRole("button", { name: "9-hole", exact: true }));
+    fireEvent.click(venue.getByRole("button", { name: "Simulator", exact: true }));
+    expect(screen.queryByRole("group", { name: "Course layout" })).toBeNull();
+    expect((screen.getByRole("combobox", { name: "Number of hours" }) as HTMLSelectElement).value).toBe("any");
+    fireEvent.change(screen.getByRole("combobox", { name: "Number of hours" }), { target: { value: "120" } });
+    fireEvent.click(venue.getByRole("button", { name: "Golf", exact: true }));
+    expect(screen.queryByRole("combobox", { name: "Number of hours" })).toBeNull();
+    expect(screen.getByRole("button", { name: "9-hole", exact: true }).getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(venue.getByRole("button", { name: "Simulator", exact: true }));
+    expect((screen.getByRole("combobox", { name: "Number of hours" }) as HTMLSelectElement).value).toBe("120");
+    fireEvent.click(screen.getByRole("button", { name: "Clear", exact: true }));
+    expect((screen.getByRole("combobox", { name: "Number of hours" }) as HTMLSelectElement).value).toBe("any");
+    expect(venue.getByRole("button", { name: "Simulator", exact: true }).getAttribute("aria-pressed")).toBe("true");
   });
 
   it("switches a direct simulator entry to the outdoor Any filter and keeps the heading in sync", () => {
@@ -105,6 +109,7 @@ describe("TeeTimeIntake", () => {
     render(<TeeTimeIntake {...signedInAccountProps} simulatorEnabled showPageHeader initialValues={{ mode: "SIMULATOR" }} />);
 
     expect(screen.getByRole("heading", { level: 1, name: "Find indoor golf simulators and set a free alert." })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Golf", exact: true }));
     const filters = screen.getByRole("group", { name: "Course layout" });
     fireEvent.click(within(filters).getByRole("button", { name: "Any", exact: true }));
 
@@ -181,7 +186,7 @@ describe("TeeTimeIntake", () => {
     expect(layout.getByRole("button", { name: "18-hole" }).getAttribute("aria-pressed")).toBe("true");
     expect(screen.queryByRole("button", { name: "Clear", exact: true })).toBeNull();
 
-    fireEvent.click(layout.getByRole("button", { name: "Simulator", exact: true }));
+    fireEvent.click(layout.getByRole("button", { name: "Any", exact: true }));
     fireEvent.change(screen.getByRole("slider", { name: "Distance from me" }), { target: { value: "25" } });
     fireEvent.click(screen.getByRole("button", { name: "Clear", exact: true }));
 
@@ -793,9 +798,8 @@ describe("TeeTimeIntake", () => {
     }));
     const fetchMock = mockDateBoundaryRequests();
     render(<TeeTimeIntake {...signedInAccountProps} simulatorEnabled initialValues={{ mode: "SIMULATOR" }} />);
-    const layout = screen.getByRole("group", { name: "Course layout" });
-    expect(within(layout).getAllByRole("button").map(button => button.textContent)).toEqual(["Any", "9-hole9H", "18-hole18H", "Simulator"]);
-    expect(screen.queryByRole("combobox", { name: "Session length" })).toBeNull();
+    expect(screen.queryByRole("group", { name: "Course layout" })).toBeNull();
+    expect((screen.getByRole("combobox", { name: "Number of hours" }) as HTMLSelectElement).value).toBe("any");
     expect(screen.queryByRole("button", { name: "Outdoor golf" })).toBeNull();
     await screen.findByRole("dialog", { name: "Notify me" });
     expect((screen.getByRole("combobox", { name: /^Players/ }) as HTMLSelectElement).value).toBe("4");
@@ -805,7 +809,7 @@ describe("TeeTimeIntake", () => {
     await screen.findByText("Your alert is created");
     const save = fetchMock.mock.calls.find(([input]) => input === "/api/searches");
     expect(JSON.parse(String(save?.[1]?.body))).toEqual(expect.objectContaining({
-      mode: "SIMULATOR", players: 4, durationMinutes: 60, requestedLayoutHoles: null,
+      mode: "SIMULATOR", players: 4, durationMinutes: null, requestedLayoutHoles: null,
       courses: [expect.objectContaining({ offeringId: "public-simulator-offering" })]
     }));
     await waitFor(() => expect(fetchMock.mock.calls.some(([input, init]) =>
@@ -870,7 +874,7 @@ describe("TeeTimeIntake", () => {
     expect(end.querySelector('option[value="24:00"]')?.textContent).toBe("Midnight");
     expect(end.value).toBe("24:00");
     expect(screen.getAllByText(/7 PM – 12 AM/).length).toBeGreaterThan(0);
-    fireEvent.click(screen.getByRole("button", { name: "Any" }));
+    fireEvent.click(screen.getByRole("button", { name: "Golf", exact: true }));
     expect(end.value).toBe("23:59");
     expect(end.querySelector('option[value="24:00"]')).toBeNull();
   });
@@ -902,7 +906,8 @@ describe("TeeTimeIntake", () => {
       initialValues={{ mode: "SIMULATOR" }}
     />);
     await screen.findByRole("heading", { name: simulator.name });
-    expect(screen.getByText("We’ll check this venue when you set up an alert.")).toBeTruthy();
+    expect(screen.getByText(rental.publicAccessStatus === "PUBLIC" && rental.offeringId
+      ? "Session alerts supported" : "We’ll check this venue when you set up an alert.")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Other nearby venues/ })).toBeNull();
     expect(screen.queryByText(/rental details are being verified|sessions are not available/i)).toBeNull();
     expect(screen.queryByRole("button", { name: /Alerts unavailable/ })).toBeNull();
@@ -931,7 +936,7 @@ describe("TeeTimeIntake", () => {
       await screen.findByText("Your alert is created");
       const save = fetchMock.mock.calls.find(([input]) => input === "/api/searches");
       expect(JSON.parse(String(save?.[1]?.body))).toEqual(expect.objectContaining({
-        mode: "SIMULATOR", durationMinutes: 60,
+        mode: "SIMULATOR", durationMinutes: null,
         courses: [expect.objectContaining({ googlePlaceId: simulator.googlePlaceId })]
       }));
       expect(signInMock).not.toHaveBeenCalled();
@@ -1110,7 +1115,7 @@ describe("TeeTimeIntake", () => {
     await screen.findByText("Your alert is created");
     const save = fetchMock.mock.calls.find(([input]) => input === "/api/searches");
     expect(JSON.parse(String(save?.[1]?.body))).toEqual(expect.objectContaining({
-      mode: "SIMULATOR", durationMinutes: 60,
+      mode: "SIMULATOR", durationMinutes: null,
       courses: [expect.objectContaining({ googlePlaceId: siteOnly.googlePlaceId, alertSupport: "OFFICIAL_SITE_ONLY" })]
     }));
   });
@@ -1158,6 +1163,7 @@ describe("TeeTimeIntake", () => {
     expect(screen.getByRole("heading", { name: "Current Simulator" })).toBeTruthy();
     expect(new URL(window.location.href).searchParams.get("mode")).toBe("SIMULATOR");
     expect((screen.getByLabelText("Location") as HTMLInputElement).value).toBe("Fairfield, CT");
+    fireEvent.click(screen.getByRole("button", { name: "Golf", exact: true }));
     fireEvent.click(screen.getByRole("button", { name: "9-hole", exact: true }));
     expect(screen.getByRole("heading", { level: 1, name: "Find public golf tee times and set a free alert." })).toBeTruthy();
     expect(new URL(window.location.href).searchParams.has("mode")).toBe(false);

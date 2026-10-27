@@ -22,7 +22,7 @@ export type CustomerEmailSearchSummary = {
   endTime: string;
   players: number;
   requestedLayoutHoles?: 9 | 18 | null;
-  durationMinutes?: number;
+  durationMinutes?: number | null;
 };
 
 export type CustomerEmailAvailabilityTime = {
@@ -271,7 +271,7 @@ function renderSearchSummary(summary: CustomerEmailSearchSummary, mode?: "SIMULA
   const cells = mode === "SIMULATOR" ? [
     ["DATE", formatSearchDate(summary.targetDate)],
     ["SEARCH WINDOW", `${formatClockTime(summary.startTime)} &ndash; ${formatClockTime(summary.endTime)} venue local`],
-    ["SESSION", `${getSimulatorDurationMinutes(summary.durationMinutes)} minutes`],
+    ["SESSION", summary.durationMinutes === null ? "Any length" : `${getSimulatorDurationMinutes(summary.durationMinutes)} minutes`],
     ["BOOKING", "One simulator bay"]
   ] : [
     ["DATE", formatSearchDate(summary.targetDate)],
@@ -303,7 +303,7 @@ function renderAvailabilityCard(
   userTimeZone?: string,
   assetBaseUrl?: string,
   mode?: "SIMULATOR",
-  durationMinutes?: number
+  durationMinutes?: number | null
 ) {
   const timeZone = normalizeTimeZone(course.courseTimeZone, DEFAULT_TIME_ZONE);
   const normalizedTimes = normalizeAvailabilityTimes(course.times, timeZone, mode, durationMinutes);
@@ -600,7 +600,7 @@ function normalizeAvailabilityTimes<T extends CustomerEmailAvailabilityTime>(
   times: T[],
   timeZone: string,
   mode?: "SIMULATOR",
-  durationMinutes?: number
+  durationMinutes?: number | null
 ): Array<T & { startsAtDate: Date; endsAtDate?: Date }> {
   return times
     .map((time) => {
@@ -673,8 +673,8 @@ function formatAvailabilityTime(
   });
 }
 
-function getSimulatorDurationMinutes(durationMinutes?: number) {
-  return durationMinutes !== undefined && Number.isFinite(durationMinutes) && durationMinutes > 0
+function getSimulatorDurationMinutes(durationMinutes?: number | null) {
+  return durationMinutes != null && Number.isFinite(durationMinutes) && durationMinutes > 0
     ? durationMinutes : 60;
 }
 

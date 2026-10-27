@@ -38,7 +38,7 @@ export type TeeTimeAlertMatch = {
 
 export type TeeTimeAlertInput = {
   mode?: "SIMULATOR";
-  durationMinutes?: number;
+  durationMinutes?: number | null;
   to: string;
   searchId: string;
   matches: TeeTimeAlertMatch[];
@@ -326,7 +326,7 @@ export function shouldDryRunRecipient(email: string) {
 
 export function renderAlertHtml(input: TeeTimeAlertInput) {
   if (input.mode === "SIMULATOR") {
-    if (!input.durationMinutes || input.matches.some((match) => !match.endsAt)) {
+    if (input.durationMinutes === undefined || input.matches.some((match) => !match.endsAt)) {
       throw new Error("Simulator alert needs complete session end times");
     }
     return renderSimulatorAlertHtml({ ...input, durationMinutes: input.durationMinutes });

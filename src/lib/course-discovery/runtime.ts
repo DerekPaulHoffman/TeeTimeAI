@@ -1,3 +1,4 @@
+import { simulatorDurationMatches } from "@/lib/searches/simulator-duration";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { Prisma } from "@prisma/client";
@@ -67,7 +68,7 @@ export async function getOrQueueRecipeExecution(input: { searchId: string; targe
       ...(input.target.offeringId ? { offeringId: input.target.offeringId } : {}) } });
     if (!preference || search.date.toISOString().slice(0, 10) !== parameters.date || search.players !== parameters.players ||
       search.startTime !== parameters.startTime || search.endTime !== parameters.endTime ||
-      (input.target.kind === "SIMULATOR" && search.durationMinutes !== parameters.durationMinutes)) return null;
+      (input.target.kind === "SIMULATOR" && !simulatorDurationMatches(search.durationMinutes, parameters.durationMinutes ?? 0))) return null;
     const key = createHash("sha256").update(JSON.stringify([search.id, search.alertGeneration, active.record.id, parameters])).digest("hex");
     const verificationKey = `recipe:${key}`;
     const now = new Date();
@@ -210,7 +211,7 @@ export async function attachRecipeResumeVersion(jobId: string, scheduleVersion: 
     if (!search || search.status !== "ACTIVE" || search.scheduleVersion !== scheduleVersion || search.alertGeneration !== context.alertGeneration ||
         search.date.toISOString().slice(0, 10) !== context.input.date || search.players !== context.input.players ||
         search.startTime !== context.input.startTime || search.endTime !== context.input.endTime ||
-        (context.target.kind === "SIMULATOR" && search.durationMinutes !== context.input.durationMinutes)) return false;
+        (context.target.kind === "SIMULATOR" && !simulatorDurationMatches(search.durationMinutes, context.input.durationMinutes ?? 0))) return false;
     const updated = await tx.localReaderJob.updateMany({ where: { id: jobId, purpose: "RECIPE_CHECK", status: "COMPLETED", resultExpiresAt: { gt: new Date() } },
       data: { sourceContext: json({ ...context, searchId, resumeScheduleVersion: scheduleVersion }) } });
     return updated.count === 1;
@@ -231,7 +232,7 @@ export async function assertRecipeObservationCurrent(tx: Prisma.TransactionClien
       (row.scheduleVersion !== search.scheduleVersion && context.resumeScheduleVersion !== search.scheduleVersion) ||
       search.date.toISOString().slice(0, 10) !== context.input.date || search.players !== context.input.players ||
       search.startTime !== context.input.startTime || search.endTime !== context.input.endTime ||
-      (expectedKind === "SIMULATOR" && search.durationMinutes !== context.input.durationMinutes)) throw new Error("Recipe observation demand changed");
+      (expectedKind === "SIMULATOR" && !simulatorDurationMatches(search.durationMinutes, context.input.durationMinutes ?? 0))) throw new Error("Recipe observation demand changed");
   const record = await assertActiveAccessRecipeInTransaction(tx, input, input.recipeId);
   const result = accessExecutionResultSchema.parse(row.result);
   if (record.hash !== context.recipeHash || result.evidence.recipeHash !== context.recipeHash || !recipeResultIsSuccessful(result)) throw new Error("Recipe observation version changed");

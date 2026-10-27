@@ -15,7 +15,7 @@ export function recipeExecutionBlocksDelivery(job: Execution, matches: DeliveryM
   if (!context || !target || !input || context.searchId !== demand.id || context.alertGeneration !== demand.alertGeneration ||
     target.kind !== demand.mode || input.date !== demand.date.toISOString().slice(0, 10) || input.startTime !== demand.startTime ||
     input.endTime !== demand.endTime || input.players !== demand.players ||
-    (demand.mode === "SIMULATOR" && input.durationMinutes !== demand.durationMinutes)) return false;
+    (demand.mode === "SIMULATOR" && demand.durationMinutes != null && input.durationMinutes !== demand.durationMinutes)) return false;
   const relevant = matches.filter(match => match.courseId === target.courseId && (match.offeringId ?? null) === (target.offeringId ?? null));
   if (!relevant.length) return false;
   const confirmedAt = Math.min(...relevant.map(match => match.lastConfirmedAt?.getTime() ?? 0));

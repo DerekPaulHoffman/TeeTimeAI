@@ -150,7 +150,8 @@ function activeSearch(search: Search, source: Source, now: Date) {
 function requestFor(source: Source, search: Search): DiscoveryRequest {
   return { target: source.target, identity: source.identity, ...(source.trustedContext.canonicalCoursePhone ? { trustedContext: source.trustedContext } : {}), demand: { searchId: search.id, alertGeneration: search.alertGeneration }, input: accessExecutionInputSchema.parse({
     date: search.date.toISOString().slice(0, 10), timeZone: source.identity.timeZone, players: search.players,
-    startTime: search.startTime, endTime: search.endTime, ...(search.durationMinutes ? { durationMinutes: search.durationMinutes } : {}),
+    startTime: search.startTime, endTime: search.endTime,
+    ...(search.mode === "SIMULATOR" ? { durationMinutes: search.durationMinutes ?? 60 } : {}),
   }) };
 }
 async function currentDemand(tx: Tx, source: Source, now: Date, searchId?: string) {

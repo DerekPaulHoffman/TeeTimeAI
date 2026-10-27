@@ -39,10 +39,10 @@ test("homepage promotion follows activation and opens the shared simulator searc
   await expect(page).toHaveURL(/\/search\?mode=SIMULATOR$/);
   await page.waitForLoadState("networkidle");
   await expect(page.getByRole("heading", { level: 1 })).toHaveAccessibleName("Find indoor golf simulators and set a free alert.");
-  const layouts = page.getByRole("group", { name: "Course layout", exact: true });
+  const layouts = page.getByRole("group", { name: "Venue type", exact: true });
   await expect(layouts.getByRole("button", { name: "Simulator", exact: true })).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator('link[rel="canonical"]')).toHaveAttribute("href", "https://teetimespot.com/search");
-  await layouts.getByRole("button", { name: "Any", exact: true }).click();
+  await layouts.getByRole("button", { name: "Golf", exact: true }).click();
   await expect(page.getByRole("heading", { level: 1 })).toHaveAccessibleName("Find public golf tee times and set a free alert.");
   await layouts.getByRole("button", { name: "Simulator", exact: true }).click();
   await expect(page.getByRole("heading", { level: 1 })).toHaveAccessibleName("Find indoor golf simulators and set a free alert.");

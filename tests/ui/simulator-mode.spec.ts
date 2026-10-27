@@ -55,7 +55,7 @@ async function mockPublicReads(page: Page, simulatorCourses: Record<string, unkn
     const publicFetch = window.fetch.bind(window);
     window.fetch = (input, options) => {
       const url = new URL(input instanceof Request ? input.url : String(input), window.location.href);
-      const activeButton = document.querySelector<HTMLButtonElement>(".figma-hole-options button[aria-pressed='true']");
+      const activeButton = document.querySelector<HTMLButtonElement>("[aria-label=\"Venue type\"] button[aria-pressed='true']");
       if (/known-times|check-times|local-reader/.test(url.pathname) && activeButton?.textContent?.trim() === "Simulator") {
         observedWindow.simulatorOutdoorReads.push(url.pathname);
       }
@@ -134,8 +134,8 @@ async function expectAndCloseRestoredNotificationEntry(page: Page, venueName: st
 }
 
 async function expectSharedControls(page: Page) {
-  const layout = page.getByRole("group", { name: "Course layout", exact: true });
-  for (const label of ["Any", "9-hole", "18-hole", "Simulator"]) {
+  const layout = page.getByRole("group", { name: "Venue type", exact: true });
+  for (const label of ["Golf", "Simulator"]) {
     await expect(layout.getByRole("button", { name: label, exact: true })).toBeVisible();
   }
   await expect(page.getByRole("button", { name: "Outdoor golf", exact: true })).toHaveCount(0);
@@ -155,7 +155,7 @@ async function expectNoHorizontalOverflow(page: Page) {
   const geometry = await page.evaluate(() => ({
     viewport: document.documentElement.clientWidth,
     width: document.documentElement.scrollWidth,
-    buttons: [...document.querySelectorAll<HTMLElement>(".figma-hole-options button")].map((button) => {
+    buttons: [...document.querySelectorAll<HTMLElement>("[aria-label=\"Venue type\"] button")].map((button) => {
       const rect = button.getBoundingClientRect();
       return {
         left: rect.left,
@@ -191,62 +191,28 @@ async function captureSimulatorScreenshot(page: Page, testInfo: TestInfo, name: 
 test.describe("simulator mode", () => {
   test.skip(process.env.SIMULATOR_MODE_ENABLED !== "true", "Simulator pilot is explicitly gated");
 
-  test("keeps the page still and highlights only one choice when switching golf and Simulator", async ({ page }, testInfo) => {
+  test("keeps the rail stable when switching between golf layout and simulator hours", async ({ page }, testInfo) => {
     await mockPublicReads(page);
     await page.goto("/search");
-    const layout = page.getByRole("group", { name: "Course layout", exact: true });
-    await layout.getByRole("button", { name: "Any", exact: true }).click();
-    await expect(layout.getByRole("button", { name: "Any", exact: true })).toHaveAttribute("aria-pressed", "true");
-    await layout.getByRole("button", { name: "18-hole", exact: true }).click();
-    await expect(layout.getByRole("button", { name: "18-hole", exact: true })).toHaveAttribute("aria-pressed", "true");
-    await page.evaluate(() => window.scrollTo({
-      top: Math.max(0, document.querySelector(".figma-search-toolbar")!.getBoundingClientRect().top + scrollY - 90),
-      behavior: "instant"
-    }));
-
-    const measure = () => page.evaluate(() => {
-      const toolbar = document.querySelector(".figma-search-toolbar")!.getBoundingClientRect();
-      return {
-        scrollY,
-        toolbarTop: toolbar.top + scrollY,
-        toolbarHeight: toolbar.height,
-        buttons: [...document.querySelectorAll<HTMLButtonElement>(".figma-hole-options button")].map(button => {
-          const rect = button.getBoundingClientRect();
-          return { top: rect.top, left: rect.left, width: rect.width, height: rect.height };
-        })
-      };
-    });
-    const before = await measure();
-    for (const name of ["Any", "Simulator", "9-hole", "Simulator", "18-hole", "Any", "18-hole"]) {
-      const chosen = layout.getByRole("button", { name, exact: true });
-      const bounds = await chosen.boundingBox();
-      expect(bounds).not.toBeNull();
-      // Use an already visible target so Playwright's auto-scroll cannot mask or create a jump.
-      const x = bounds!.x + bounds!.width / 2;
-      const y = bounds!.y + bounds!.height / 2;
-      expect(y).toBeGreaterThan(60);
-      expect(y).toBeLessThan(page.viewportSize()!.height);
-      if (testInfo.project.use.isMobile) await page.touchscreen.tap(x, y);
-      else await page.mouse.click(x, y);
-      await expect(chosen).toHaveAttribute("aria-pressed", "true");
-      await page.mouse.move(0, 0);
-      await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
-      await expect(layout.locator('button[aria-pressed="true"]')).toHaveCount(1);
-      const inactiveColors = await layout.locator('button[aria-pressed="false"]').evaluateAll(buttons =>
-        buttons.map(button => getComputedStyle(button).backgroundColor));
-      expect(new Set(inactiveColors).size).toBe(1);
-      const activeColor = await chosen.evaluate(button => getComputedStyle(button).backgroundColor);
-      expect(activeColor).not.toBe(inactiveColors[0]);
-      const simulatorBorder = await layout.getByRole("button", { name: "Simulator", exact: true })
-        .evaluate(button => getComputedStyle(button).borderColor);
-      expect(simulatorBorder).toBe("rgba(0, 0, 0, 0)");
-      const after = await measure();
-      expect(after.scrollY, `scroll position after choosing ${name}`).toBeCloseTo(before.scrollY, 0);
-      expect(after.toolbarTop).toBeCloseTo(before.toolbarTop, 0);
-      expect(after.toolbarHeight).toBeCloseTo(before.toolbarHeight, 0);
-      expect(after.buttons).toEqual(before.buttons);
+    const venue = page.getByRole("group", { name: "Venue type", exact: true });
+    await venue.scrollIntoViewIfNeeded();
+    const form = page.getByRole("form", { name: "Course search filters" });
+    const before = await form.boundingBox();
+    for (const name of ["Simulator", "Golf", "Simulator", "Golf"]) {
+      await venue.getByRole("button", { name, exact: true }).click();
+      await expect(venue.getByRole("button", { name, exact: true })).toHaveAttribute("aria-pressed", "true");
+      await expect(venue.locator('button[aria-pressed="true"]')).toHaveCount(1);
+      if (name === "Simulator") {
+        await expect(page.getByRole("combobox", { name: "Number of hours", exact: true })).toHaveValue("any");
+        await expect(page.getByRole("group", { name: "Course layout", exact: true })).toHaveCount(0);
+      } else {
+        await expect(page.getByRole("button", { name: "18-hole", exact: true })).toHaveAttribute("aria-pressed", "true");
+      }
+      const after = await form.boundingBox();
+      expect(after!.height).toBeCloseTo(before!.height, 0);
+      expect(after!.width).toBeCloseTo(before!.width, 0);
+      await expectNoHorizontalOverflow(page);
     }
-    // Full-page capture can reposition a mobile viewport, so capture only after the assertions.
     await captureSimulatorScreenshot(page, testInfo, "stable-selection");
   });
 
@@ -254,7 +220,7 @@ test.describe("simulator mode", () => {
     const requests = await mockPublicReads(page);
     await page.goto("/search?mode=SIMULATOR");
     await expectSharedControls(page);
-    const layout = page.getByRole("group", { name: "Course layout", exact: true });
+    const layout = page.getByRole("group", { name: "Venue type", exact: true });
     await expect(layout.getByRole("button", { name: "Simulator", exact: true })).toHaveAttribute("aria-pressed", "true");
     await page.getByLabel("Location", { exact: true }).fill("Fairfield, CT");
     await page.getByLabel("Date", { exact: true }).fill(futureDate);
@@ -273,13 +239,14 @@ test.describe("simulator mode", () => {
     await expectNoHorizontalOverflow(page);
     await captureSimulatorScreenshot(page, testInfo, "simulator-unified-form");
 
-    await layout.getByRole("button", { name: "9-hole", exact: true }).click();
-    await expect(layout.getByRole("button", { name: "9-hole", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await layout.getByRole("button", { name: "Golf", exact: true }).click();
+    await page.getByRole("button", { name: "9-hole", exact: true }).click();
+    await expect(page.getByRole("button", { name: "9-hole", exact: true })).toHaveAttribute("aria-pressed", "true");
     await expect(page.getByRole("heading", { name: outdoorVenue.name, exact: true })).toBeVisible();
     await expect(page.getByRole("heading", { name: simulatorVenue.name, exact: true })).toHaveCount(0);
     await expect(page.getByRole("heading", { name: eighteenHoleVenue.name, exact: true })).toHaveCount(0);
     await expectPreservedValues(page);
-    await layout.getByRole("button", { name: "Any", exact: true }).click();
+    await page.getByRole("button", { name: "Any", exact: true }).click();
     await expect(page.getByRole("heading", { name: eighteenHoleVenue.name, exact: true })).toBeVisible();
     await expectPreservedValues(page);
 
@@ -321,7 +288,7 @@ test.describe("simulator mode", () => {
 
     await page.reload();
     await expectPreservedValues(page);
-    await expect(page.getByRole("group", { name: "Course layout", exact: true }).getByRole("button", { name: "Simulator", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByRole("group", { name: "Venue type", exact: true }).getByRole("button", { name: "Simulator", exact: true })).toHaveAttribute("aria-pressed", "true");
     await expectAndCloseRestoredNotificationEntry(page, simulatorVenue.name);
     await expect(status).not.toContainText("Simulator alerts available");
     await expectNoHorizontalOverflow(page);
@@ -349,7 +316,8 @@ test.describe("simulator mode", () => {
     for (const venue of [unreviewed, unsupportedHour]) {
       const card = page.locator(".course-row").filter({ has: page.getByRole("heading", { name: venue.name, exact: true }) });
       await expect(card.getByRole("link", { name: `Open official site for ${venue.name}` })).toHaveAttribute("href", venue.website);
-      await expect(card.getByText("We’ll check this venue when you set up an alert.", { exact: true })).toBeVisible();
+      await expect(card.getByText(venue === unreviewed
+        ? "We’ll check this venue when you set up an alert." : "Session alerts supported", { exact: true })).toBeVisible();
       const notify = card.getByRole("button", { name: `Notify me for ${venue.name}`, exact: true });
       await expect(notify).toBeEnabled();
       await notify.click();

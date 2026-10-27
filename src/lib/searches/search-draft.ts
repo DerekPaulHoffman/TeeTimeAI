@@ -28,6 +28,7 @@ const MONITORING_SUPPORT_VALUES = new Set<CourseMonitoringSupport>([
 
 export type SearchDraft = {
   mode?: SearchMode;
+  durationMinutes?: number | null;
   location?: string;
   players?: number;
   date?: string;
@@ -103,7 +104,7 @@ export function sanitizeSearchDraft(value: unknown, mode: SearchMode = "OUTDOOR"
     holes: prefill.holes,
     radius: prefill.radius,
     coordinates: prefill.coordinates,
-    ...(mode === "SIMULATOR" ? { mode } : {}),
+    ...(mode === "SIMULATOR" ? { mode, durationMinutes: prefill.durationMinutes } : {}),
     courses: sanitizeCourseList(record.courses, MAX_STORED_COURSES, mode),
     selectedCourses: sanitizeCourseList(record.selectedCourses, MAX_COURSE_PREFERENCES, mode)
   };

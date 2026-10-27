@@ -9,6 +9,7 @@ import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-f
 import { fetchSimulatorAvailability } from "@/lib/simulators/providers";
 import { SimulatorAvailabilityError } from "@/lib/simulators/providers/types";
 import { filterSimulatorSessionsForSearch } from "@/lib/tee-times/matching";
+import { simulatorDurationMatches, simulatorDurationsForSearch } from "@/lib/searches/simulator-duration";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
 import { getAutomationRuntimeVersion } from "@/lib/automation/runtime-version";
 import { isSearchCheckLeaseCurrent, type ActiveAutomationSearch, type SearchCheckLease } from "@/lib/automation/db-service";
@@ -99,16 +100,16 @@ async function commitObservation(input: {
   search: ActiveAutomationSearch; lease: SearchCheckLease; offering: CourseOffering; token: string;
   runId: string; outcome: "MATCH_FOUND" | "NO_MATCH" | "FETCH_FAILED" | "NEEDS_ADAPTER";
   slots: SimulatorAvailabilitySlot[]; observedAt: Date; evidenceUrl: string;
-  accessRecipeObservation?: { jobId: string; recipeId: string; courseId: string; offeringId: string; searchId: string };
+  accessRecipeObservations?: Array<{ jobId: string; recipeId: string; courseId: string; offeringId: string; searchId: string }>;
 }) {
   return prisma.$transaction(async transaction => {
     await lockCurrentSearch(transaction, input.search, input.lease);
     await transaction.$queryRaw(Prisma.sql`SELECT "id" FROM "Course" WHERE "id" = ${input.offering.courseId} FOR UPDATE`);
     await transaction.$queryRaw(Prisma.sql`SELECT "id" FROM "CourseOffering" WHERE "id" = ${input.offering.id} FOR UPDATE`);
     const offering = await transaction.courseOffering.findUniqueOrThrow({ where: { id: input.offering.id } });
-    if (input.accessRecipeObservation) await assertRecipeObservationCurrent(transaction, input.accessRecipeObservation);
+    for (const observation of input.accessRecipeObservations ?? []) await assertRecipeObservationCurrent(transaction, observation);
     if (offering.observationToken !== input.token || !offering.observationExpiresAt || offering.observationExpiresAt <= new Date() ||
-      offering.monitoringRevision !== input.offering.monitoringRevision || !offering.active || (!input.accessRecipeObservation && offering.publicAccessStatus !== "PUBLIC") ||
+      offering.monitoringRevision !== input.offering.monitoringRevision || !offering.active || (!input.accessRecipeObservations?.length && offering.publicAccessStatus !== "PUBLIC") ||
       offering.bookingUrl !== input.offering.bookingUrl || offering.providerFamilyKey !== input.offering.providerFamilyKey ||
       JSON.stringify(offering.providerMetadata) !== JSON.stringify(input.offering.providerMetadata)) throw new SimulatorObservationSupersededError("Simulator provider observation was superseded");
     if (!Number.isFinite(input.observedAt.getTime()) || input.observedAt > new Date()) throw new Error("Simulator observation time is invalid");
@@ -148,7 +149,7 @@ async function commitObservation(input: {
       ...(success ? { automationEligibility: "ALLOWED", monitoringVerifiedAt: input.observedAt } : { lastFailureAt: input.observedAt }),
       monitoringRevision: { increment: 1 }
     } });
-    if (success && input.accessRecipeObservation) await markRecipeObservationConsumed(transaction, input.accessRecipeObservation);
+    if (success) for (const observation of input.accessRecipeObservations ?? []) await markRecipeObservationConsumed(transaction, observation);
     if (success) await resolveUnownedSimulatorSupportIncident(transaction, { offeringId: offering.id, now: input.observedAt });
     else await reconcileSimulatorSupportIncidentFailure(transaction, { offeringId: offering.id, reason: input.outcome,
       evidenceUrl: input.evidenceUrl, now: input.observedAt, eligible: isSimulatorSupportEligible(input.search) });
@@ -156,9 +157,37 @@ async function commitObservation(input: {
   });
 }
 
+async function learnedSimulatorAvailability(search: ActiveAutomationSearch, preference: ActiveAutomationSearch["preferences"][number]) {
+  const durations = search.durationMinutes == null
+    ? simulatorDurationsForSearch(null, preference.offering?.supportedDurationsMinutes ?? [], search.startTime, search.endTime)
+    : [search.durationMinutes];
+  // Even a too-short window needs real source evidence before recording a
+  // fresh NO_MATCH. Read one published length, then apply the full window.
+  if (!durations.length) durations.push(...simulatorDurationsForSearch(null,
+    preference.offering?.supportedDurationsMinutes ?? []).slice(0, 1));
+  // A still-unverified venue needs one bounded discovery request before its
+  // published rental lengths are known. Never manufacture availability.
+  const reads: Array<NonNullable<Awaited<ReturnType<typeof getLearnedAvailability>>>> = [];
+  for (const duration of durations.length ? durations : [60]) {
+    const read = await getLearnedAvailability({ ...search, durationMinutes: duration }, preference);
+    if (read) reads.push(read);
+  }
+  if (!reads.length) return null;
+  const incomplete = reads.find(read => read.state !== "ready");
+  if (incomplete) return { read: incomplete, observations: [] };
+  const ready = reads.filter(read => read.state === "ready");
+  const first = ready[0];
+  return { read: { ...first, result: { ...first.result,
+    slots: ready.flatMap(read => read.result.slots),
+    observedAt: new Date(Math.min(...ready.map(read => Date.parse(read.result.observedAt)))).toISOString(),
+  } }, observations: ready.map(read => ({ jobId: read.jobId, recipeId: read.recipeId,
+    courseId: preference.courseId, offeringId: preference.offering!.id, searchId: search.id })) };
+}
+
 export async function runSimulatorSearchCheck(search: ActiveAutomationSearch, runId: string, lease: SearchCheckLease): Promise<SearchCheckResult> {
   if (!isSimulatorModeEnabled()) throw new Error("Simulator checks are temporarily disabled");
-  if (search.mode !== "SIMULATOR" || !search.durationMinutes) throw new Error("Invalid simulator search intent");
+  if (search.mode !== "SIMULATOR" || (search.durationMinutes !== null &&
+    !simulatorDurationMatches(search.durationMinutes, search.durationMinutes))) throw new Error("Invalid simulator search intent");
   const date = search.date.toISOString().slice(0, 10);
   const courseResults: SearchCheckResult["courseResults"] = [];
   let availableMatches = 0;
@@ -166,14 +195,15 @@ export async function runSimulatorSearchCheck(search: ActiveAutomationSearch, ru
   for (const preference of search.preferences) {
     if (!(await isSearchCheckLeaseCurrent(lease))) throw new Error("Simulator search lease was lost");
     const offering = preference.offering;
-    let learned: Awaited<ReturnType<typeof getLearnedAvailability>>;
-    try { learned = offering ? await getLearnedAvailability(search, preference) : null; }
+    let learnedRead: Awaited<ReturnType<typeof learnedSimulatorAvailability>>;
+    try { learnedRead = offering ? await learnedSimulatorAvailability(search, preference) : null; }
     catch {
       retryNeeded = true;
       courseResults.push({ courseId: preference.courseId, courseName: preference.course.name, rank: preference.rank,
         outcome: "FETCH_FAILED", availableMatches: 0, bookingUrl: offering?.bookingUrl ?? preference.course.website ?? undefined });
       continue;
     }
+    const learned = learnedRead?.read;
     if (learned) {
       if (learned.state === "failed") {
         if (recipeFailureIsRetryable(learned.outcome ?? undefined)) retryNeeded = true;
@@ -205,10 +235,10 @@ export async function runSimulatorSearchCheck(search: ActiveAutomationSearch, ru
         const slots: SimulatorAvailabilitySlot[] = learned.result.slots.map(slot => ({
           sourceId: slot.sourceId, offeringId: offering!.id, resourceId: slot.resourceId ?? "ANY", productId: slot.productId ?? "rental",
           startsAt: new Date(slot.startsAt), endsAt: new Date(slot.endsAt!), maxPartySize: slot.capacity ?? null, bookingUrl: slot.bookingUrl,
-        }));
+        })).filter(slot => simulatorDurationMatches(search.durationMinutes, (slot.endsAt.getTime() - slot.startsAt.getTime()) / 60_000));
         const count = await commitObservation({ search, lease, offering: claimedRecipe.offering, token: claimedRecipe.token, runId,
           outcome: slots.length ? "MATCH_FOUND" : "NO_MATCH", slots, observedAt: new Date(learned.result.observedAt), evidenceUrl: learned.result.sourceUrl,
-          accessRecipeObservation: { jobId: learned.jobId, recipeId: learned.recipeId, courseId: preference.courseId, offeringId: offering!.id, searchId: search.id } });
+          accessRecipeObservations: learnedRead!.observations });
         availableMatches += count;
         courseResults.push({ courseId: preference.courseId, courseName: preference.course.name, rank: preference.rank,
           outcome: count ? "MATCH_FOUND" : "NO_MATCH", availableMatches: count, bookingUrl: learned.result.sourceUrl });
@@ -242,7 +272,7 @@ export async function runSimulatorSearchCheck(search: ActiveAutomationSearch, ru
     }
     if (!offering || offering.kind !== "SIMULATOR" || !offering.active || offering.publicAccessStatus !== "PUBLIC" || !offering.bookingUrl ||
       !offering.verifiedAt || !offering.evidenceUrl ||
-      !offering.supportedDurationsMinutes.includes(search.durationMinutes)) {
+      !simulatorDurationsForSearch(search.durationMinutes, offering.supportedDurationsMinutes).length) {
       const source = preference.course.website ?? offering?.bookingUrl ?? null;
       const sourceCheck = !search.lastCheckedAt
         ? await checkSimulatorOfficialSource(source)
@@ -278,13 +308,22 @@ export async function runSimulatorSearchCheck(search: ActiveAutomationSearch, ru
     let providerFailure: unknown = null;
     try {
       if (!claimed.offering.bookingUrl || !claimed.offering.verifiedAt || !claimed.offering.evidenceUrl ||
-        !claimed.offering.supportedDurationsMinutes.includes(search.durationMinutes)) throw new Error("Simulator rental details changed");
+        !simulatorDurationsForSearch(search.durationMinutes, claimed.offering.supportedDurationsMinutes).length) throw new Error("Simulator rental details changed");
       // The shared lease normalizer accepts known families or real hostnames;
       // synthetic mode prefixes would collapse every simulator into UNKNOWN.
       const read = await runWithProviderRequestLease(new URL(claimed.offering.bookingUrl).hostname, async () => {
         try {
-          return await fetchSimulatorAvailability({ offering: { ...claimed.offering, bookingUrl: claimed.offering.bookingUrl! },
-            date, durationMinutes: search.durationMinutes!, partySize: 1, timeZone: preference.course.timeZone });
+          const durations = simulatorDurationsForSearch(search.durationMinutes, claimed.offering.supportedDurationsMinutes, search.startTime, search.endTime);
+          if (!durations.length) durations.push(...simulatorDurationsForSearch(search.durationMinutes,
+            claimed.offering.supportedDurationsMinutes).slice(0, 1));
+          const results = [];
+          for (const durationMinutes of durations) {
+            results.push(await fetchSimulatorAvailability({ offering: { ...claimed.offering, bookingUrl: claimed.offering.bookingUrl! },
+              date, durationMinutes, partySize: 1, timeZone: preference.course.timeZone }));
+          }
+          return { complete: results.every(result => result.complete), slots: results.flatMap(result => result.slots),
+            observedAt: results.length ? new Date(Math.min(...results.map(result => result.observedAt.getTime()))) : new Date(),
+            evidenceUrl: results[0]?.evidenceUrl ?? claimed.offering.evidenceUrl! };
         } catch (error) { providerFailure = error; throw error; }
       });
       if (!read.acquired) throw new Error("Simulator provider is busy");
@@ -293,8 +332,8 @@ export async function runSimulatorSearchCheck(search: ActiveAutomationSearch, ru
       const sessions = result.slots.map(slot => ({ ...slot, startsAt: slot.startsAt.toISOString(), endsAt: slot.endsAt.toISOString(), capacity: slot.maxPartySize }));
       const matching = filterSimulatorSessionsForSearch({ date, startTime: search.startTime, endTime: search.endTime, players: search.players,
         durationMinutes: search.durationMinutes, preferredOfferings: [{ offeringId: offering.id, rank: preference.rank }] }, sessions, preference.course.timeZone);
-      const matchingIds = new Set(matching.map(slot => slot.sourceId));
-      const slots = result.slots.filter(slot => matchingIds.has(slot.sourceId) && slot.startsAt > new Date());
+      const matchingSessions = new Set(matching);
+      const slots = result.slots.filter((slot, index) => matchingSessions.has(sessions[index]) && slot.startsAt > new Date());
       const count = await commitObservation({ search, lease, offering: claimed.offering, token: claimed.token, runId,
         outcome: slots.length ? "MATCH_FOUND" : "NO_MATCH", slots, observedAt: result.observedAt, evidenceUrl: result.evidenceUrl });
       availableMatches += count;
@@ -360,7 +399,7 @@ export async function runSimulatorSearchCheck(search: ActiveAutomationSearch, ru
 async function getCurrentSimulatorMatches(search: ActiveAutomationSearch) {
   const candidates = await prisma.teeTimeMatch.findMany({ where: { teeSearchId: search.id, offeringId: { not: null }, availabilityStatus: "AVAILABLE", startsAt: { gt: new Date() } }, include: { offering: true, course: true }, orderBy: { startsAt: "asc" } });
   return candidates.filter(match => isCurrentSimulatorMatch(match, new Date()) &&
-    match.endsAt && (match.endsAt.getTime() - match.startsAt.getTime()) === search.durationMinutes! * 60_000 &&
+    match.endsAt && simulatorDurationMatches(search.durationMinutes, (match.endsAt.getTime() - match.startsAt.getTime()) / 60_000) &&
     search.preferences.some(preference => preference.offeringId === match.offeringId));
 }
 
@@ -419,7 +458,7 @@ function buildSimulatorStatusReport(search: ActiveAutomationSearch, results: Sea
           : result?.outcome === "MATCH_FOUND" ? "MATCH_FOUND"
           : result?.outcome === "NO_MATCH" ? "NO_MATCH"
           : result?.outcome === "CHECK_PENDING" && offering?.publicAccessStatus === "PUBLIC" &&
-            offering.verifiedAt && offering.evidenceUrl && offering.supportedDurationsMinutes.includes(search.durationMinutes!) &&
+            offering.verifiedAt && offering.evidenceUrl && simulatorDurationsForSearch(search.durationMinutes, offering.supportedDurationsMinutes).length > 0 &&
             opening && opening > new Date() ? "BOOKING_NOT_OPEN" : "CHECK_PENDING" };
     }) };
   return report;

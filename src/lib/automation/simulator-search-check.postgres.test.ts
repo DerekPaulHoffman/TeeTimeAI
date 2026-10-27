@@ -120,6 +120,57 @@ describe.skipIf(!databaseUrl)("simulator check against isolated Postgres", () =>
       endsAt: new Date(`${target}T16:00:00.000Z`), maxPartySize: 8, bookingUrl };
   }
 
+  it("checks all published lengths for Any and preserves their exact intervals through delivery", async () => {
+    const { search, venues, run, lease } = await fixture(1, { setupPending: true });
+    const venue = venues[0];
+    await client.teeSearch.update({ where: { id: search.id }, data: { durationMinutes: null } });
+    await client.courseOffering.update({ where: { id: venue.offering.id }, data: { supportedDurationsMinutes: [60, 120] } });
+    mocks.fetch.mockImplementation(async (input: { durationMinutes: number }) => {
+      const slot = providerSlot(venue.offering.id, venue.offering.bookingUrl!, search.date);
+      return { complete: true, observedAt: new Date(), evidenceUrl: venue.offering.evidenceUrl,
+        slots: [{ ...slot, productId: `rental-${input.durationMinutes}`,
+          endsAt: new Date(slot.startsAt.getTime() + input.durationMinutes * 60_000) }] };
+    });
+    const result = await runCheck((await getSearch(search.id))!, run.id, lease);
+    expect(result.availableMatches).toBe(2);
+    expect(mocks.fetch.mock.calls.map(([input]) => input.durationMinutes)).toEqual([60, 120]);
+    const saved = await client.teeTimeMatch.findMany({ where: { teeSearchId: search.id } });
+    expect(saved.map(match => (match.endsAt!.getTime() - match.startsAt.getTime()) / 60_000).sort((a, b) => a - b)).toEqual([60, 120]);
+    expect(mocks.sendMatch).toHaveBeenCalledOnce();
+    expect(mocks.sendMatch.mock.calls[0][0]).toMatchObject({ durationMinutes: null, matches: expect.any(Array) });
+    expect(mocks.sendMatch.mock.calls[0][0].matches).toHaveLength(2);
+    await runCheck((await getSearch(search.id))!, run.id, lease);
+    expect(mocks.sendMatch).toHaveBeenCalledOnce();
+  });
+
+  it("does not accept partial availability for an Any-length search", async () => {
+    const { search, venues, run, lease } = await fixture(1, { setupPending: true });
+    const venue = venues[0];
+    await client.teeSearch.update({ where: { id: search.id }, data: { durationMinutes: null } });
+    await client.courseOffering.update({ where: { id: venue.offering.id }, data: { supportedDurationsMinutes: [60, 120] } });
+    mocks.fetch.mockImplementation(async (input: { durationMinutes: number }) => ({
+      complete: input.durationMinutes === 60, observedAt: new Date(), evidenceUrl: venue.offering.evidenceUrl,
+      slots: [providerSlot(venue.offering.id, venue.offering.bookingUrl!, search.date)],
+    }));
+    const result = await runCheck((await getSearch(search.id))!, run.id, lease);
+    expect(result.courseResults[0].outcome).toBe("FETCH_FAILED");
+    expect(await client.teeTimeMatch.count({ where: { teeSearchId: search.id } })).toBe(0);
+    expect(mocks.sendMatch).not.toHaveBeenCalled();
+  });
+  it("keeps real provider evidence when no published length fits an Any window", async () => {
+    const { search, venues, run, lease } = await fixture(1, { setupPending: true });
+    const venue = venues[0];
+    await client.teeSearch.update({ where: { id: search.id }, data: { durationMinutes: null, startTime: "14:00", endTime: "14:30" } });
+    mocks.fetch.mockResolvedValue({ complete: true, observedAt: new Date(), evidenceUrl: venue.offering.evidenceUrl,
+      slots: [providerSlot(venue.offering.id, venue.offering.bookingUrl!, search.date)] });
+    const result = await runCheck((await getSearch(search.id))!, run.id, lease);
+    expect(mocks.fetch).toHaveBeenCalledOnce();
+    expect(mocks.fetch.mock.calls[0][0].durationMinutes).toBe(120);
+    expect(result.courseResults[0].outcome).toBe("NO_MATCH");
+    expect(result.availableMatches).toBe(0);
+    expect(mocks.sendMatch).not.toHaveBeenCalled();
+  });
+
   it("immediately checks an unknown venue, queues support and sends one truthful status without a booking URL", async () => {
     const { search, venues, run, lease } = await fixture(1, { setupPending: true });
     const venue = venues[0];

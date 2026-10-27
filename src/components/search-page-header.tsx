@@ -9,7 +9,7 @@ const copy = {
   },
   SIMULATOR: {
     title: "Find indoor golf simulators and set a free alert.",
-    description: "Find nearby simulator venues and get email alerts for matching one-hour sessions where supported. You book directly with the venue."
+    description: "Find nearby simulator venues and get email alerts for matching sessions where supported. You book directly with the venue."
   }
 } as const;
 

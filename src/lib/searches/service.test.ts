@@ -772,6 +772,10 @@ describe("createTeeSearchForUser", () => {
     expect(mockedPrisma.teeSearch.create).toHaveBeenLastCalledWith(expect.objectContaining({
       data: expect.objectContaining({ durationMinutes: 60 }),
     }));
+    await createTeeSearchForUser("user-1", { ...input, durationMinutes: null });
+    expect(mockedPrisma.teeSearch.create).toHaveBeenLastCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ durationMinutes: null }),
+    }));
     await expect(createTeeSearchForUser("user-1", { ...input, startTime: "13:00", endTime: "14:00" }))
       .rejects.toThrow(/time window long enough/i);
     expect(mockedPrisma.googlePlaceReview.findMany).toHaveBeenCalled();

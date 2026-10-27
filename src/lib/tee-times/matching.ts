@@ -1,3 +1,5 @@
+import { simulatorDurationMatches } from "@/lib/searches/simulator-duration";
+
 export type SearchPreference = {
   courseId: string;
   rank: number;
@@ -12,7 +14,7 @@ export type SearchWindow = {
 };
 
 export type SimulatorSearchWindow = Omit<SearchWindow, "preferredCourses"> & {
-  durationMinutes: number;
+  durationMinutes: number | null;
   preferredOfferings: Array<{ offeringId: string; rank: number }>;
 };
 
@@ -45,7 +47,7 @@ export function filterSimulatorSessionsForSearch<T extends SimulatorSession>(
     const endsAt = parseCourseLocalDateTime(session.endsAt, timeZone);
     if (!Number.isFinite(startsAt.getTime()) || !Number.isFinite(endsAt.getTime())) return false;
     const actualMinutes = (endsAt.getTime() - startsAt.getTime()) / 60_000;
-    return actualMinutes === search.durationMinutes && startsAt >= windowStart && endsAt <= windowEnd;
+    return simulatorDurationMatches(search.durationMinutes, actualMinutes) && startsAt >= windowStart && endsAt <= windowEnd;
   });
 }
 

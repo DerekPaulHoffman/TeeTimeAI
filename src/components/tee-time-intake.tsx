@@ -237,7 +237,7 @@ type AdditionalEmailField = { id: string; value: string };
 
 export type TeeTimeIntakeInitialValues = {
   mode?: SearchMode;
-  durationMinutes?: number;
+  durationMinutes?: number | null;
   location?: string;
   players?: number;
   date?: string;
@@ -302,6 +302,7 @@ function TeeTimeIntakeContent({
   showPageHeader?: boolean;
 }) {
   const [mode, setMode] = useState<SearchMode>(simulatorEnabled && initialValues.mode === "SIMULATOR" ? "SIMULATOR" : "OUTDOOR");
+  const [durationMinutes, setDurationMinutes] = useState<number | null>(initialValues.durationMinutes ?? null);
   const [locationText, setLocationText] = useState(initialValues.location ?? "");
   const [searchRadiusMiles, setSearchRadiusMiles] = useState(
     initialValues.radius ?? DEFAULT_COURSE_SEARCH_RADIUS_MILES
@@ -409,6 +410,7 @@ function TeeTimeIntakeContent({
         if (transferred.startTime !== undefined) setStartTime(transferred.startTime);
         if (transferred.endTime !== undefined) setEndTime(initialMode === "OUTDOOR" && transferred.endTime === "24:00" ? "23:59" : transferred.endTime);
         if (transferred.players !== undefined) setPlayers(transferred.players);
+        if (transferred.durationMinutes !== undefined) setDurationMinutes(transferred.durationMinutes);
         if (transferred.holes !== undefined) setHoleFilter(transferred.holes);
         if (transferred.coordinates !== undefined) setSearchCoordinates(transferred.coordinates);
         if (transferred.selectedCourse !== undefined) {
@@ -426,6 +428,7 @@ function TeeTimeIntakeContent({
         if (draft.startTime !== undefined) setStartTime(draft.startTime);
         if (draft.endTime !== undefined) setEndTime(initialMode === "OUTDOOR" && draft.endTime === "24:00" ? "23:59" : draft.endTime);
         if (draft.players !== undefined) setPlayers(draft.players);
+        if (draft.durationMinutes !== undefined) setDurationMinutes(draft.durationMinutes);
         if (draft.holes !== undefined) setHoleFilter(draft.holes);
         if (draft.coordinates !== undefined) setSearchCoordinates(draft.coordinates);
         setCourses(draft.courses.map(clearCourseMonitoringEvidence));
@@ -447,6 +450,7 @@ function TeeTimeIntakeContent({
     }
 
     storeSearchDraft({
+      durationMinutes,
       location: locationText,
       radius: searchRadiusMiles,
       date,
@@ -463,6 +467,7 @@ function TeeTimeIntakeContent({
     createdAlert,
     date,
     draftReady,
+    durationMinutes,
     endTime,
     holeFilter,
     locationText,
@@ -614,6 +619,7 @@ function TeeTimeIntakeContent({
     () =>
       JSON.stringify({
         mode,
+        durationMinutes: mode === "SIMULATOR" ? durationMinutes : null,
         alertEmail: alertEmail.trim().toLowerCase(),
         date,
         startTime,
@@ -629,6 +635,7 @@ function TeeTimeIntakeContent({
       }),
     [
       alertEmail,
+      durationMinutes,
       date,
       endTime,
       normalizedAdditionalEmails,
@@ -643,7 +650,7 @@ function TeeTimeIntakeContent({
   const isDateFuture = date >= getMinimumSearchDateInputValue(new Date(), selectedTimeZones, mode === "SIMULATOR");
   const windowMinutes = (Number(endTime.slice(0, 2)) * 60 + Number(endTime.slice(3))) -
     (Number(startTime.slice(0, 2)) * 60 + Number(startTime.slice(3)));
-  const isTimeWindowValid = endTime > startTime && (mode === "OUTDOOR" ? endTime !== "24:00" : windowMinutes >= 60);
+  const isTimeWindowValid = endTime > startTime && (mode === "OUTDOOR" ? endTime !== "24:00" : windowMinutes >= (durationMinutes ?? 30));
   const hasMonitorableCourse = mode === "SIMULATOR" || selected.some(
     (course) => !isManualOnlyAlertSupport(course.alertSupport)
   );
@@ -658,7 +665,7 @@ function TeeTimeIntakeContent({
   const saveBlocker = !isDateFuture
     ? "Choose a future date for alerts."
     : !isTimeWindowValid
-      ? mode === "SIMULATOR" ? "Choose a window long enough for a one-hour simulator session." : "Choose an end time after the start time."
+      ? mode === "SIMULATOR" ? "Choose a window long enough for your simulator session." : "Choose an end time after the start time."
       : hasInvalidAlertEmail
         ? "Enter a valid email for this alert."
       : hasInvalidAdditionalEmail
@@ -716,7 +723,7 @@ function TeeTimeIntakeContent({
         ? "Choose a future date for your search."
         : !isTimeWindowValid
           ? mode === "SIMULATOR"
-            ? "Choose a window long enough for a one-hour simulator session."
+            ? "Choose a window long enough for your simulator session."
             : "Choose an end time after the start time."
           : null;
     if (validationError) {
@@ -877,12 +884,14 @@ function TeeTimeIntakeContent({
     shouldScrollToResultsRef.current = false;
     discoveryRequestRef.current?.abort();
     lookupRequestRef.current?.abort();
-    storeSearchDraft({ location: locationText, radius: searchRadiusMiles, date, startTime, endTime, players,
+    storeSearchDraft({ location: locationText, radius: searchRadiusMiles, date, startTime, endTime, players, durationMinutes,
       holes: holeFilter, coordinates: searchCoordinates ?? undefined, courses, selectedCourses: selected }, mode);
     const nextDraft = readSearchDraft(nextMode);
     const sameLocation = nextDraft?.location === locationText;
     modeRef.current = nextMode;
     setMode(nextMode);
+    if (nextMode === "SIMULATOR") setDurationMinutes(nextDraft?.durationMinutes ?? null);
+    if (nextMode === "OUTDOOR" && nextDraft?.holes !== undefined) setHoleFilter(nextDraft.holes);
     if (nextMode === "OUTDOOR" && endTime === "24:00") setEndTime("23:59");
     const nextUrl = new URL(window.location.href);
     if (nextMode === "SIMULATOR") nextUrl.searchParams.set("mode", "SIMULATOR");
@@ -1204,7 +1213,7 @@ function TeeTimeIntakeContent({
         },
         body: JSON.stringify({
           mode,
-          ...(mode === "SIMULATOR" ? { durationMinutes: 60 } : {}),
+          ...(mode === "SIMULATOR" ? { durationMinutes } : {}),
           date,
           startTime,
           endTime,
@@ -1326,6 +1335,8 @@ function TeeTimeIntakeContent({
         mode={mode}
         simulatorEnabled={simulatorEnabled}
         onModeChange={selectMode}
+        durationMinutes={durationMinutes}
+        onDurationChange={setDurationMinutes}
         date={date}
         endTime={endTime}
         holeFilter={holeFilter}
@@ -1348,7 +1359,7 @@ function TeeTimeIntakeContent({
         onPlayersChange={setPlayers}
         onRadiusChange={setSearchRadiusMiles}
         onResetFilters={() => {
-          selectMode("OUTDOOR");
+          setDurationMinutes(null);
           setHoleFilter(DEFAULT_COURSE_LAYOUT_FILTER);
           setSearchRadiusMiles(DEFAULT_COURSE_SEARCH_RADIUS_MILES);
         }}
@@ -2141,11 +2152,11 @@ function CourseMonitoringStatus({
 }) {
   if (course.mode === "SIMULATOR") {
     const supported = Boolean(course.offeringId && course.publicAccessStatus === "PUBLIC" &&
-      course.supportedDurationsMinutes?.includes(60) && !isManualOnlyAlertSupport(course.alertSupport));
+      course.supportedDurationsMinutes?.length && !isManualOnlyAlertSupport(course.alertSupport));
     return <p className={`course-monitoring-status${supported ? "" : " is-unconfirmed"}${compact ? " is-compact" : ""}`}>
       <CourseStatusEmoji emoji={supported ? "✅" : "⏳"} />
       <span><strong>{supported ? "Session alerts supported" : "We’ll check this venue when you set up an alert."}</strong>
-        {!compact && supported ? <small>We check your date and email matching one-hour openings.</small> : null}
+        {!compact && supported ? <small>We check your date and email matching session openings.</small> : null}
       </span>
     </p>;
   }

@@ -1483,8 +1483,8 @@ async function getSimulatorDeliverySourceStates(
         !offering.bookingUrl ||
         !match.offeringSourceFingerprint ||
         match.offeringSourceFingerprint !== getSimulatorOfferingSourceFingerprint(offering) ||
-        !offering.supportedDurationsMinutes.includes(search.durationMinutes!) ||
-        ((match.endsAt.getTime() - match.startsAt.getTime()) / 60_000) !== search.durationMinutes ||
+        !offering.supportedDurationsMinutes.includes((match.endsAt.getTime() - match.startsAt.getTime()) / 60_000) ||
+        (search.durationMinutes != null && ((match.endsAt.getTime() - match.startsAt.getTime()) / 60_000) !== search.durationMinutes) ||
         preference.rank !== row.courseRank) {
       states.set(matchId, "terminal");
       continue;
@@ -2316,7 +2316,7 @@ export async function hydrateMatchAlertPayload(input: {
     if (input.payload.mode !== "SIMULATOR" || report.mode !== "SIMULATOR") {
       throw new Error("Simulator match report mode is invalid");
     }
-    const durationMinutes = requireNumber(report.durationMinutes, "session length");
+    const durationMinutes = report.durationMinutes === null ? null : requireNumber(report.durationMinutes, "session length");
     return {
       mode: "SIMULATOR",
       durationMinutes,
@@ -2325,7 +2325,7 @@ export async function hydrateMatchAlertPayload(input: {
         const startsAt = new Date(requireString(match.startsAtISO ?? match.startsAt, "session start"));
         const endsAt = new Date(requireString(match.endsAtISO ?? match.endsAt, "session end"));
         if (Number.isNaN(startsAt.getTime()) || Number.isNaN(endsAt.getTime()) ||
-            (endsAt.getTime() - startsAt.getTime()) / 60_000 !== durationMinutes) {
+            endsAt <= startsAt || (durationMinutes !== null && (endsAt.getTime() - startsAt.getTime()) / 60_000 !== durationMinutes)) {
           throw new Error("Persisted simulator session interval is invalid");
         }
         return {
@@ -2407,7 +2407,7 @@ export function hydrateSimulatorStatusPayload(payload: SearchEmailDeliveryPayloa
     targetDate: requireString(report.targetDate, "target date"),
     startTime: requireString(report.startTime, "start time"),
     endTime: requireString(report.endTime, "end time"),
-    durationMinutes: requireNumber(report.durationMinutes, "session length"),
+    durationMinutes: report.durationMinutes === null ? null : requireNumber(report.durationMinutes, "session length"),
     players: requireNumber(report.players, "players"),
     userTimeZone: optionalString(report.userTimeZone),
     checkedAt: new Date(payload.checkedAt),

@@ -6,6 +6,7 @@ import {
   type SearchEmailDeliveryPayload
 } from "./search-delivery-outbox";
 import { renderSimulatorStatusHtml } from "./simulator-email";
+import { renderAlertHtml } from "./alerts";
 
 vi.mock("@/lib/prisma", () => ({ prisma: {} }));
 
@@ -38,6 +39,34 @@ function statusPayload(): SearchEmailDeliveryPayload {
 }
 
 describe("persisted simulator email rendering data", () => {
+  it("preserves Any in saved status emails instead of claiming a one-hour request", () => {
+    const payload = statusPayload();
+    (payload.statusReport as Record<string, unknown>).durationMinutes = null;
+    const hydrated = hydrateSimulatorStatusPayload(payload);
+    expect(hydrated.durationMinutes).toBeNull();
+    const html = renderSimulatorStatusHtml(hydrated);
+    expect(html).toContain("Any length");
+    expect(html).toContain("sessions of any length");
+    expect(html).not.toContain("60 minutes");
+  });
+  it("hydrates and renders mixed session lengths for Any without changing either interval", async () => {
+    const result = await hydrateMatchAlertPayload({ searchId: "search-any", alertGeneration: 1,
+      payload: { schemaVersion: 3, mode: "SIMULATOR", checkedAt, matchReport: {
+        mode: "SIMULATOR", durationMinutes: null, targetDate: "2026-10-10", startTime: "09:00", endTime: "14:00",
+        players: 4, userTimeZone: "America/New_York", matches: [60, 120].map(duration => ({
+          offeringId: "offering", courseId: "venue", courseName: "Example Simulator", courseRank: 1,
+          courseTimeZone: "America/New_York", startsAt: "2026-10-10T13:00:00.000Z",
+          endsAt: new Date(Date.parse("2026-10-10T13:00:00.000Z") + duration * 60_000).toISOString(),
+          availableSpots: 1, bookingUrl: "https://example.com/book", isNew: true,
+        })),
+      } } });
+    expect(result.durationMinutes).toBeNull();
+    expect(result.matches.map(match => (match.endsAt!.getTime() - match.startsAt.getTime()) / 60_000)).toEqual([60, 120]);
+    const html = renderAlertHtml({ ...result, to: "test@example.com" });
+    expect(html).toContain("Any length");
+    expect(html).toContain("10:00");
+    expect(html).toContain("11:00");
+  });
   it("hydrates unknown venue status without inventing an official booking URL", () => {
     const payload = statusPayload();
     const report = payload.statusReport as Record<string, unknown>;

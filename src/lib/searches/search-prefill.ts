@@ -11,6 +11,7 @@ export const SEARCH_PREFILL_STORAGE_KEY = "tee-time-spot:search-prefill";
 
 export type SearchPrefill = {
   mode?: SearchMode;
+  durationMinutes?: number | null;
   location?: string;
   players?: number;
   date?: string;
@@ -81,6 +82,7 @@ export function readSearchPrefillFromUrl(search?: string): SearchPrefill | undef
   const params = new URLSearchParams(query);
   const supportedKeys = [
     "mode",
+    "durationMinutes",
     "location",
     "players",
     "date",
@@ -105,6 +107,7 @@ export function readSearchPrefillFromUrl(search?: string): SearchPrefill | undef
 
   return sanitizeSearchPrefill({
     mode: params.get("mode") ?? undefined,
+    durationMinutes: params.get("durationMinutes") === "any" ? null : numberParam(params, "durationMinutes"),
     location: params.get("location") ?? undefined,
     players: numberParam(params, "players"),
     date: params.get("date") ?? undefined,
@@ -153,6 +156,9 @@ export function sanitizeSearchPrefill(value: unknown): SearchPrefill {
     holes,
     coordinates,
     ...(mode ? { mode } : {}),
+    ...(mode === "SIMULATOR" && value.durationMinutes === null ? { durationMinutes: null } :
+      mode === "SIMULATOR" && safeInteger(value.durationMinutes, 30, 480) !== undefined && Number(value.durationMinutes) % 15 === 0
+        ? { durationMinutes: Number(value.durationMinutes) } : {}),
     ...(selectedCourse ? { selectedCourse } : {})
   };
 }

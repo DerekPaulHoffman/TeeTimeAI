@@ -115,8 +115,8 @@ test.describe("Tee Time Spot UI smoke", () => {
     const issues = collectPageIssues(page);
     await page.goto("/search?startTime=08%3A10&endTime=12%3A05");
     const timeField = page.getByRole("group", { name: "Time window", exact: true });
-    const summary = timeField.locator(".figma-time-summary");
-    const toolbar = page.locator(".figma-search-toolbar");
+    const summary = timeField.locator("[aria-controls='mobile-time-editor']");
+    const toolbar = page.locator("form[aria-label='Course search filters']");
     const popup = page.getByRole("group", { name: "Choose time window", exact: true });
     await expect(summary).toHaveText("8:10 AM – 12:05 PM");
     const originalToolbar = await toolbar.boundingBox();
@@ -132,9 +132,9 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(to.locator('option[value="00:00"]')).toHaveText("12:00 AM");
     const popupBox = await popup.boundingBox();
     // Existing popup geometry: two 40px controls, 8px gap, 12px padding, 1px border.
-    expect(popupBox!.height).toBe(114);
+    expect(popupBox!.height).toBeGreaterThanOrEqual(120);
     expect(popupBox!.width).toBeCloseTo(
-      page.viewportSize()!.width <= 620 ? originalToolbar!.width - 26 : 320,
+      page.viewportSize()!.width <= 620 ? Math.min(300, page.viewportSize()!.width - 62) : 300,
       0
     );
     expect(popupBox!.x).toBeGreaterThanOrEqual(0);
@@ -203,7 +203,7 @@ test.describe("Tee Time Spot UI smoke", () => {
     await date.fill(today);
     await expect(date).toHaveValue(today);
     const time = page.getByRole("group", { name: "Time window", exact: true });
-    await time.locator(".figma-time-summary").click();
+    await time.locator("[aria-controls='mobile-time-editor']").click();
     const from = time.getByRole("combobox", { name: "From (start time)" });
     const to = time.getByRole("combobox", { name: "To (end time)" });
     await expect(from.locator('option[value="24:00"]')).toHaveAttribute("disabled", "");
@@ -211,7 +211,7 @@ test.describe("Tee Time Spot UI smoke", () => {
     await to.focus();
     await to.press("End");
     await expect(to).toHaveValue("24:00");
-    await expect(time.locator(".figma-time-summary")).toHaveText("10 PM – 12 AM");
+    await expect(time.locator("[aria-controls='mobile-time-editor']")).toHaveText("10 PM – 12 AM");
     await expect(date).toHaveValue(today);
     await expectNoHorizontalOverflow(page, testInfo);
     await expectNoPageIssues(issues, testInfo);
@@ -617,7 +617,7 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(page.locator("#startTime")).toHaveValue("08:30");
     await expect(page.locator("#endTime")).toHaveValue("12:00");
     await expect(page.locator("#searchRadius")).toHaveValue("25");
-    await expect(page.getByRole("button", { name: "18-hole" })).toHaveClass(/is-active/);
+    await expect(page.getByRole("button", { name: "18-hole" })).toHaveAttribute("aria-pressed", "true");
 
     const discoveryRequest = page.waitForRequest((request) =>
       request.url().includes("/api/courses/discover?")
@@ -636,17 +636,17 @@ test.describe("Tee Time Spot UI smoke", () => {
     }
     await page.goto("/search");
 
-    await expect(page.locator(".figma-search-field > label").first()).toHaveCSS(
+    await expect(page.locator("form[aria-label='Course search filters'] [data-filter] > label").first()).toHaveCSS(
       "color",
-      "rgb(69, 103, 93)"
+      "rgb(82, 107, 98)"
     );
-    await expect(page.locator(".figma-hole-options button").filter({ hasText: "9-hole" })).toHaveCSS(
+    await expect(page.locator("[aria-label='Course layout'] button").filter({ hasText: "9-hole" })).toHaveCSS(
       "color",
-      "rgb(20, 35, 29)"
+      "rgb(82, 107, 98)"
     );
-    await expect(page.locator(".figma-distance-filter em").first()).toHaveCSS(
+    await expect(page.locator("[data-filter='distance'] [class*='range'] > span").first()).toHaveCSS(
       "color",
-      "rgb(76, 106, 97)"
+      "rgb(82, 107, 98)"
     );
     await expect(page.locator(".missing-course-heading > p")).toHaveCSS(
       "color",
@@ -658,7 +658,7 @@ test.describe("Tee Time Spot UI smoke", () => {
     );
     await expect(page.getByText("Your courses", { exact: true })).toHaveCount(0);
     await expect(page.getByRole("group", { name: "Course layout" })).toBeVisible();
-    await expect(page.locator(".figma-search-submit")).toHaveCSS(
+    await expect(page.locator("form[aria-label='Course search filters'] button[type='submit']")).toHaveCSS(
       "background-color",
       "rgb(179, 95, 16)"
     );
@@ -862,7 +862,7 @@ test.describe("Tee Time Spot UI smoke", () => {
 
     await page.goto("/search");
 
-    const filterLayout = await page.locator(".figma-search-toolbar").evaluate((toolbar) => {
+    const filterLayout = await page.locator("form[aria-label='Course search filters']").evaluate((toolbar) => {
       const box = (selector: string) => {
         const element = toolbar.querySelector<HTMLElement>(selector);
         const rect = element?.getBoundingClientRect();
@@ -872,14 +872,14 @@ test.describe("Tee Time Spot UI smoke", () => {
       };
 
       return {
-        dateField: box(".figma-date-field"),
-        distance: box(".figma-distance-group"),
-        hasSimulator: toolbar.querySelector(".figma-hole-filter")?.classList.contains("has-simulator") === true,
-        holes: box(".figma-hole-filter"),
-        location: box(".figma-location-field"),
+        dateField: box("[data-filter='date']"),
+        distance: box("[data-filter='distance']"),
+        hasSimulator: toolbar.querySelector("[aria-label='Venue type']") !== null,
+        holes: box("[data-filter='layout']"),
+        location: box("[data-filter='location']"),
         players: box('label[for="players"]'),
-        search: box(".figma-search-submit"),
-        time: box(".figma-time-field"),
+        search: box("button[type='submit']"),
+        time: box("[data-filter='time']"),
         toolbar: toolbar.getBoundingClientRect().toJSON()
       };
     });
@@ -891,35 +891,28 @@ test.describe("Tee Time Spot UI smoke", () => {
     expect(filterLayout.holes).not.toBeNull();
     expect(filterLayout.distance).not.toBeNull();
     expect(filterLayout.search).not.toBeNull();
-    expect(Math.abs(filterLayout.players!.top - filterLayout.dateField!.top)).toBeLessThan(2);
-    if (testInfo.project.name.includes("mobile") && filterLayout.hasSimulator) {
-      expect(Math.abs(filterLayout.time!.width - filterLayout.location!.width)).toBeLessThan(2);
-      expect(Math.abs(filterLayout.holes!.width - filterLayout.location!.width)).toBeLessThan(2);
-      expect(filterLayout.holes!.top).toBeGreaterThanOrEqual(filterLayout.time!.bottom - 2);
-    } else {
-      expect(Math.abs(filterLayout.time!.top - filterLayout.holes!.top)).toBeLessThan(2);
-    }
-    if (testInfo.project.name.includes("mobile")) {
+    const width = page.viewportSize()!.width;
+    if (width <= 620) {
       expect(filterLayout.location!.width).toBeGreaterThan(filterLayout.players!.width * 1.9);
       expect(filterLayout.players!.top).toBeGreaterThan(filterLayout.location!.bottom - 2);
-      expect(filterLayout.distance!.top).toBeGreaterThan(
-        (filterLayout.hasSimulator ? filterLayout.holes! : filterLayout.time!).bottom - 2
-      );
+      expect(filterLayout.distance!.top).toBeGreaterThan(filterLayout.holes!.bottom - 2);
       expect(filterLayout.search!.top).toBeGreaterThan(filterLayout.distance!.bottom - 2);
       expect(filterLayout.search!.width).toBeGreaterThan(filterLayout.location!.width * 0.9);
+    } else if (width <= 1120) {
+      expect(filterLayout.location!.top).toBeCloseTo(filterLayout.dateField!.top, 0);
+      expect(filterLayout.time!.top).toBeCloseTo(filterLayout.players!.top, 0);
+      expect(filterLayout.holes!.top).toBeGreaterThan(filterLayout.time!.bottom);
     } else {
-      expect(Math.abs(filterLayout.location!.top - filterLayout.players!.top)).toBeLessThan(2);
-      expect(Math.abs(filterLayout.location!.width - filterLayout.players!.width * 2)).toBeLessThan(2);
-      expect(Math.abs(filterLayout.players!.width - filterLayout.dateField!.width)).toBeLessThan(2);
-      expect(Math.abs(filterLayout.time!.top - filterLayout.distance!.top)).toBeLessThan(2);
-      expect(filterLayout.search!.top).toBeGreaterThanOrEqual(filterLayout.time!.top);
-      expect(filterLayout.search!.bottom).toBeLessThanOrEqual(filterLayout.distance!.bottom + 2);
+      expect(filterLayout.location!.top).toBeCloseTo(filterLayout.players!.top, 0);
+      expect(filterLayout.time!.top).toBeCloseTo(filterLayout.dateField!.top, 0);
+      expect(filterLayout.holes!.top).toBeGreaterThan(filterLayout.time!.bottom);
+      expect(filterLayout.search!.top).toBeCloseTo(filterLayout.time!.top, 0);
     }
-    await expect(page.locator(".figma-search-submit")).toHaveCSS(
+    await expect(page.locator("form[aria-label='Course search filters'] button[type='submit']")).toHaveCSS(
       "background-color",
       "rgb(179, 95, 16)"
     );
-    await expect(page.locator(".figma-search-submit")).toHaveCSS("color", "rgb(255, 255, 255)");
+    await expect(page.locator("form[aria-label='Course search filters'] button[type='submit']")).toHaveCSS("color", "rgb(255, 255, 255)");
 
     await page.getByRole("button", { name: "Use current location" }).click();
     await page.getByRole("button", { name: /^Search$/i }).click();

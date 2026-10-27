@@ -20,11 +20,12 @@ import SearchPage from "./page";
 describe("search entry mode", () => {
   afterEach(() => vi.unstubAllEnvs());
 
-  it("explains one-hour simulator sessions for a simulator entry link", async () => {
+  it("explains matching simulator sessions without assuming a one-hour preference", async () => {
     vi.stubEnv("SIMULATOR_MODE_ENABLED", "true");
     const html = renderToStaticMarkup(await SearchPage({ searchParams: Promise.resolve({ mode: "simulator" }) }));
     expect(html).toContain("Find indoor golf simulators and set a free alert.");
-    expect(html).toContain("one-hour sessions where supported");
+    expect(html).toContain("matching sessions where supported");
+    expect(html).not.toContain("one-hour sessions");
     expect(html).toContain('data-initial-mode="SIMULATOR"');
   });
 

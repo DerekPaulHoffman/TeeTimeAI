@@ -36,7 +36,7 @@ function uniqueDisplaySessions(matches: SimulatorMatch[]) {
 
 export type SimulatorEmailInput = {
   matches: SimulatorMatch[];
-  durationMinutes: number;
+  durationMinutes: number | null;
   players?: number;
   targetDate?: string;
   startTime?: string;
@@ -60,7 +60,9 @@ export function renderSimulatorAlertHtml(input: SimulatorEmailInput) {
   const durationMinutes = normalizeDuration(input.durationMinutes);
   const sessions = uniqueDisplaySessions(input.matches.map((match) => ({
     ...match,
-    endsAt: match.endsAt ?? new Date(match.startsAt.getTime() + durationMinutes * 60_000)
+    endsAt: match.endsAt ?? (durationMinutes === null
+      ? (() => { throw new Error("Any-length simulator alerts need complete session end times"); })()
+      : new Date(match.startsAt.getTime() + durationMinutes * 60_000))
   })));
   const groups = new Map<string, typeof sessions>();
   for (const match of sessions) {
@@ -121,7 +123,7 @@ export type SimulatorStatusInput = {
   targetDate: string;
   startTime: string;
   endTime: string;
-  durationMinutes: number;
+  durationMinutes: number | null;
   players: number;
   userTimeZone?: string;
   checkedAt?: Date;
@@ -155,8 +157,8 @@ export function renderSimulatorStatusHtml(input: SimulatorStatusInput) {
     variant: input.kind === "setup" ? "setup" : "morning",
     heading: input.kind === "setup" ? "Your simulator alert is saved" : "Your simulator alert update",
     intro: input.venues.some(venue => venue.availability === "SUPPORT_PENDING" || venue.availability === "OFFICIAL_SITE_ONLY")
-      ? `Your ${durationMinutes}-minute session request is saved. Each venue's current status is below. We will email matching openings from booking pages we can check. You book direct with the venue.`
-      : `We are watching for a ${durationMinutes}-minute simulator session in your requested window. When an opening matches, we will send its official booking link. You book direct with the venue.`,
+      ? `Your ${durationMinutes === null ? "any-length" : `${durationMinutes}-minute`} session request is saved. Each venue's current status is below. We will email matching openings from booking pages we can check. You book direct with the venue.`
+      : `We are watching for ${durationMinutes === null ? "simulator sessions of any length" : `a ${durationMinutes}-minute simulator session`} in your requested window. When an opening matches, we will send its official booking link. You book direct with the venue.`,
     preheader: input.kind === "setup"
       ? "Your simulator alert is saved. Here's the status of each venue."
       : "Here's the latest status of your Tee Time Spot simulator alert.",
@@ -202,7 +204,8 @@ function resolveStopUrls(input: { stopUrls?: EmailStopUrls; stopUrl?: string }):
   return input.stopUrls ?? (input.stopUrl ? { cancelled: input.stopUrl } : undefined);
 }
 
-function normalizeDuration(value: number) {
+function normalizeDuration(value: number | null) {
+  if (value === null) return null;
   if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
     throw new Error("Simulator email needs a valid session duration");
   }
