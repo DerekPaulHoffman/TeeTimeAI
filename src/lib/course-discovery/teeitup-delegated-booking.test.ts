@@ -240,13 +240,15 @@ describe("fresh native delegated TeeItUp source", () => {
     const routerClose = vi.fn(async () => { await draining; });
     const contextClose = vi.fn(async () => { if (failCleanup) throw Error("PRIVATE_CLOSE_ERROR"); });
     const browserClose = vi.fn(async () => {}), proxyClose = vi.fn(async () => {});
-    const context = { on: vi.fn(), routeWebSocket: vi.fn(async () => {}), route: vi.fn(async () => {}), newPage: vi.fn(async () => ({ on: vi.fn(), url: () => source.officialUrl, setDefaultTimeout: vi.fn() })), close: contextClose };
+    const context = { on: vi.fn(), addInitScript: vi.fn(async () => {}), routeWebSocket: vi.fn(async () => {}), route: vi.fn(async () => {}), newPage: vi.fn(async () => ({ on: vi.fn(), url: () => source.officialUrl, setDefaultTimeout: vi.fn() })), close: contextClose };
     vi.spyOn(nativeBrowser, "createNativePublicBrowserProxy").mockResolvedValue({ server: "http://127.0.0.1:9", close: proxyClose,
       allowHostConnections: vi.fn(), cancelHostConnections: vi.fn(async () => {}), stats: () => ({ connections: 3, activeSockets: 0, bytes: 1000 }) });
     vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockResolvedValue({ close: routerClose } as never);
     try {
       const session = await createCourseDiscoveryBrowserSession({ initialUrls: [source.officialUrl], venueOfficialUrl: source.officialUrl, deadlineAt: end },
         { browserTransport: "NATIVE_CHROME", delegatedReadBudget: budget, launchBrowser: async () => ({ newContext: async () => context, close: browserClose }) as never });
+      expect(context.addInitScript).toHaveBeenCalledOnce();
+      expect(context.addInitScript.mock.invocationCallOrder[0]).toBeLessThan(context.newPage.mock.invocationCallOrder[0]);
       expect(discoveryBrowserActionSchema.safeParse({ id: 1, action: "readDelegatedSourceDocument" }).success).toBe(false);
       await new Promise(resolve => setTimeout(resolve, 150));
       let settled = false;

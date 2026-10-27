@@ -293,8 +293,8 @@ describe("regular Stagehand source worker", () => {
     expect(failure.discoveryMetrics.genericFallback.worker).toMatchObject({ tokenUsage: { totalTokens: 13 }, completedModelTurns: 0 });
     expect(t.client.activate).not.toHaveBeenCalled();
   });
-  it.each(["current", "missing", "copied", "stale", "wrongOriginal", "changedBinding", "revoked", "noncurrentParent", "missingFrame", "invalidAdapter"] as const)
-  ("requires fresh private terminal readiness after a modal's exact native frame: %s", async mode => {
+  const terminalReadinessCase = async (mode: "current" | "missing" | "copied" | "stale" | "wrongOriginal" |
+    "changedBinding" | "revoked" | "noncurrentParent" | "missingFrame" | "invalidAdapter") => {
     const t = setup(), target = "a0000000-0000-4000-8000-000000000001";
     const frame = "https://public-course.play.teeitup.com/", source = "https://public-course.book.teeitup.com/";
     t.f.report.adapterSourceProposal.bookingUrl = source; t.f.report.visitedUrls = [official, source]; t.f.report.actions = [];
@@ -314,7 +314,7 @@ describe("regular Stagehand source worker", () => {
         officialSourceDiagnostic: { rawOfficialCaptured: true, currentOfficialDocument: terminal ? false : mode !== "noncurrentParent",
           renderedHeadingsPresent: !disclosed && !terminal, renderedAddressesPresent: false, renderedLinksPresent: true },
         controls: !disclosed ? [{ kind: "public-entry-disclosure", target }] : [],
-        frames: disclosed && !terminal && mode !== "missingFrame" ? [{ url: frame, source: "OFFICIAL_IFRAME_SRC" }] : [],
+        frames: disclosed && !terminal && mode !== "missingFrame" ? [{ url: frame, source: "FIXED_INSPECTION_FRAME_SRC" }] : [],
         adapter: action.action === "inspect_adapter" ? mode === "invalidAdapter" ? {} : { family: "TEEITUP", alias: "public-course", facilityIds: [91] } : undefined,
         ...(terminal && mode !== "missing" ? { nativeMainDocumentContinuity: { kind: "NATIVE_MAIN_DOCUMENT_CONTINUITY_V1",
           originalUrlSha256: stagehandDataHash(mode === "wrongOriginal" ? frame : source), currentUrlSha256: stagehandDataHash(url),
@@ -340,18 +340,22 @@ describe("regular Stagehand source worker", () => {
         expect((await t.run()).outcome).toBe("activated");
         expect(t.request.mock.calls.filter(([a]) => a.action !== "finish").map(([a]) => a)).toEqual([
           { action: "open", url: official }, { action: "click", target },
-          ...(mode === "noncurrentParent" ? [{ action: "observe" }, { action: "observe" }] : []),
           { action: "open", url: frame }, { action: "inspect_adapter", url: source },
         ]);
         expect(t.client.candidate.mock.calls[0][2].source.bookingUrl).toBe(source); expect(t.executeRecipe).toHaveBeenCalledTimes(2);
       } else {
-        await expect(t.run()).rejects.toThrow(mode === "invalidAdapter" ? "FRAMEWORK_INSPECTION_METADATA_INVALID" : "FRAMEWORK_INSPECTION_SOURCE_NOT_SETTLED");
+        await expect(t.run()).rejects.toThrow(mode === "invalidAdapter" ? "FRAMEWORK_INSPECTION_METADATA_INVALID" :
+          mode === "missingFrame" ? "FRAMEWORK_INSPECTION_PATH_STALE" : "FRAMEWORK_INSPECTION_SOURCE_NOT_SETTLED");
+        if (mode === "missingFrame") expect(t.request.mock.calls.filter(([a]) => a.action === "observe")).toHaveLength(1);
         expect(t.client.candidate).not.toHaveBeenCalled(); expect(t.executeRecipe).not.toHaveBeenCalled();
       }
       expect(t.request.mock.calls.filter(([a]) => a.action === "click")).toHaveLength(1);
       expect(t.request.mock.calls.filter(([a]) => a.action !== "finish").length).toBeLessThanOrEqual(6); expect(t.close).toHaveBeenCalledOnce();
     } finally { vi.useRealTimers(); }
-  });
+  };
+  it.each(["current", "missing", "copied", "stale", "wrongOriginal", "changedBinding", "revoked", "noncurrentParent", "invalidAdapter"] as const)
+  ("requires fresh private terminal readiness after a modal's exact native frame: %s", terminalReadinessCase);
+  it("requires fresh private terminal readiness after a modal's exact native frame: missingFrame", () => terminalReadinessCase("missingFrame"), 12_000);
   it.each(["current", "ambiguous", "stillMissing", "movedDocument"] as const)("uses one fresh opaque public-entry disclosure within the existing inspection budget: %s", async mode => {
     const t = setup(), target = "a0000000-0000-4000-8000-000000000001";
     let disclosed = false;
@@ -385,7 +389,7 @@ describe("regular Stagehand source worker", () => {
       if (action.action === "inspect_adapter") url = current;
       return { url, browserTransport: "NATIVE_CHROME", navigationStatus: 200, accessRequirementObserved: false,
         loading: url === bare, pendingRequestCount: url === bare ? 4 : 0,
-        controls: url === official ? [{ kind: "link", href: parent }] : [], frames: url === parent ? [{ url: play, source: "OFFICIAL_IFRAME_SRC" }] : [],
+        controls: url === official ? [{ kind: "link", href: parent }] : [], frames: url === parent ? [{ url: play, source: "FIXED_INSPECTION_FRAME_SRC" }] : [],
         adapter: action.action === "inspect_adapter" ? { family: "TEEITUP", alias: "public-course", facilityIds: [91] } : undefined,
         nativeMainDocumentContinuity: { kind: "NATIVE_MAIN_DOCUMENT_CONTINUITY_V1", originalUrlSha256: stagehandDataHash(originalUrl), currentUrlSha256: stagehandDataHash(url),
           documentBindingSha256: (replaced && action.action === "inspect_adapter" ? "c" : originalUrl === bare ? "b" : "a").repeat(64), observedAt: t.f.clock, status: 200 } } as never;
