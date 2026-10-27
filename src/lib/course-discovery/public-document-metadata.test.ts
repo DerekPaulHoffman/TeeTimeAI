@@ -49,6 +49,21 @@ it("pairs only bounded computed-visible public link labels with their exact href
  expect(value.publicLinkLabelsOmitted).toBe(false);
  expect(JSON.stringify(value.publicLinkLabels)).not.toContain("private");
 });
+it("captures only computed-visible same-site contact and public TeeItUp anchors without changing the CPS projection",()=>{
+ setup('<h1>Harbor Country Club</h1><a href="/contact/">Contact Us</a>'+
+   '<a href="https://harbor.book.teeitup.com/">Book Tee Times</a>'+
+   '<div style="opacity:0"><a href="/hidden/">Contact Us</a></div>'+
+   '<form><a href="/form/">Contact Us</a></form>'+
+   '<a href="https://other.example/contact/">Contact Us</a>');
+ const got=collectNativeOfficialPublicMetadata("Harbor Country Club");
+ expect(got.officialContactLinkLabels).toEqual([{href:"https://official.example/contact/",text:"Contact Us"},
+   {href:"https://harbor.book.teeitup.com/",text:"Book Tee Times"}]);
+ expect(got.publicLinkLabels).toEqual([]);
+ setup('<h1>Contact Us</h1><p>Harbor Country Club</p><span>781 Shore Lane, Harbor, MA 01030</span>');
+ const contact=collectNativeOfficialPublicMetadata("Harbor Country Club");
+ expect(contact.officialContactBusinessNames).toContain("Harbor Country Club");
+ expect(contact.addressTexts).toContain("781 Shore Lane, Harbor, MA 01030");
+});
 it("ignores a same-href collapsed navigation label while retaining the visible course label",()=>{
  setup('<h1>Harbor Country Club</h1><ul style="opacity:0;overflow:hidden;height:0">'+
    '<li><a href="https://harbor.cps.golf/">Champion Course Tee Times</a></li></ul>'+

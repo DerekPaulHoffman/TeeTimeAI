@@ -7,6 +7,7 @@ import { teeItUpPostalConflictProofSchema } from "./teeitup-postal-conflict-proo
 import { teeItUpDelegatedBookingProofSchema } from "./teeitup-delegated-booking-source";
 import { teeItUpBookingConfigurationSchema } from "./teeitup-booking-configuration";
 import { teeItUpStreetTypeOmittedProofSchema } from "./teeitup-street-type-omitted-proof";
+import { teeItUpOfficialContactChainProofSchema } from "./teeitup-official-contact-chain";
 import { lightspeedMetadataSchema } from "./lightspeed-source";
 import { ameliaMetadataSchema } from "./amelia-source";
 import { chronogolfMetadataSchema } from "./chronogolf-source";
@@ -45,7 +46,11 @@ export const existingAdapterMetadataSchema = z.discriminatedUnion("family", [
     officialBookingSourceProof: teeItUpOfficialBookingSourceProofSchema.optional(),
     officialPostalConflictProof: teeItUpPostalConflictProofSchema.optional(),
     officialDelegatedBookingProof: teeItUpDelegatedBookingProofSchema.optional(),
-    officialStreetTypeOmittedProof: teeItUpStreetTypeOmittedProofSchema.optional() }).strict()
+    officialStreetTypeOmittedProof: teeItUpStreetTypeOmittedProofSchema.optional(),
+    officialContactChainProof: teeItUpOfficialContactChainProofSchema.optional() }).strict()
+    .refine(value => !value.officialContactChainProof || !value.officialIdentityProof && !value.officialBookingSourceProof &&
+      !value.officialPostalConflictProof && !value.officialDelegatedBookingProof && !value.officialStreetTypeOmittedProof && !value.offeringKind &&
+      value.alias === value.officialContactChainProof.alias && value.facilityIds.length === 1 && value.facilityIds[0] === value.officialContactChainProof.facilityId)
     .refine(value => !value.officialStreetTypeOmittedProof || Boolean(value.publicBookingConfiguration) && !value.officialIdentityProof &&
       !value.officialBookingSourceProof && !value.officialPostalConflictProof && !value.officialDelegatedBookingProof && !value.offeringKind &&
       value.alias === value.officialStreetTypeOmittedProof.alias && value.facilityIds.length === 1 && value.facilityIds[0] === value.officialStreetTypeOmittedProof.facilityId)

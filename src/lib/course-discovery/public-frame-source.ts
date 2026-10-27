@@ -2,6 +2,7 @@ import type { Page } from "@playwright/test";
 import { isPublicAvailabilityNavigation } from "./public-navigation-control";
 import { parseTeeItUpRecipeSource } from "./teeitup-recipe-source";
 import { parseLightspeedSource } from "./lightspeed-source";
+import { parseChronogolfPublicWidget } from "./chronogolf-source";
 import { isSafeRecipeUrl } from "./recipe";
 import { cpsPublicEntryUrl } from "./cps-public-navigation";
 import { knownSimulatorPublicConfigurationFamily, uschedulePublicTenant } from "@/lib/simulators/providers/public-configuration";
@@ -41,6 +42,9 @@ export function publicFrameSource(input: { src: string; label: string; visible: 
     // it permits a separately guarded main-frame read, never iframe execution
     // or conversion into legacy provider metadata.
     const parsed = new URL(url);
+    // A labelled frame cannot turn a malformed same-family widget into the
+    // generic iframe route after the typed widget grammar rejects it.
+    if (parsed.hostname === "www.chronogolf.com" && /\/widget\/?$/u.test(parsed.pathname) && !parseChronogolfPublicWidget(url)) return;
     const teeItUpV2 = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.book-v2\.teeitup\.golf$/u.test(parsed.hostname) &&
       parsed.pathname === "/" && !parsed.search && !parsed.hash;
     // Legacy official embeds can omit a title on their public play entry.
@@ -50,7 +54,8 @@ export function publicFrameSource(input: { src: string; label: string; visible: 
     const teeItUpPlay = officialDocument && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.play\.teeitup\.com$/u.test(parsed.hostname) &&
       parsed.pathname === "/" && !parsed.search && !parsed.hash;
     const acuityEntry = officialDocument && isPublicAcuityFrameEntry(url);
-    const knownEntry = Boolean(parseTeeItUpRecipeSource(url) || parseLightspeedSource(url) || uschedulePublicTenant(url) || teeItUpV2 || teeItUpPlay || acuityEntry);
+    const chronogolfWidget = officialDocument && parseChronogolfPublicWidget(url);
+    const knownEntry = Boolean(parseTeeItUpRecipeSource(url) || parseLightspeedSource(url) || uschedulePublicTenant(url) || teeItUpV2 || teeItUpPlay || acuityEntry || chronogolfWidget);
     const labelled = /\b(?:tee\s*times?|booking|availability|book\s+(?:a\s+)?(?:simulator\s+)?bay|simulator\s+rentals?)\b/iu.test(input.label);
     if ((!knownEntry && !labelled) || !isPublicAvailabilityNavigation(url, input.label || "Public tee time availability")) return;
     return url;
@@ -71,5 +76,9 @@ export async function observedPublicFrameSources(page: Page, officialUrl: string
       label: `${node.getAttribute("title") ?? ""} ${node.getAttribute("aria-label") ?? ""}`.trim().slice(0, 161),
       visible: visible && !current && !node.closest("form"), srcdoc: node.hasAttribute("srcdoc") };
   }));
-  return [...new Set(frames.map(frame => publicFrameSource(frame, documentUrl, officialUrl, verifiedDocumentUrl, parentProof)).filter((url): url is string => Boolean(url)))].slice(0, 10);
+  const sources = [...new Set(frames.map(frame => publicFrameSource(frame, documentUrl, officialUrl, verifiedDocumentUrl, parentProof)).filter((url): url is string => Boolean(url)))];
+  // Two distinct public club embeds on one parent do not identify which one
+  // belongs to this venue. Do not expose either as a navigation source.
+  const widgetIds = new Set(sources.map(source => parseChronogolfPublicWidget(source)?.numericClubId).filter((id): id is number => id !== undefined));
+  return (widgetIds.size > 1 ? sources.filter(source => !parseChronogolfPublicWidget(source)) : sources).slice(0, 10);
 }

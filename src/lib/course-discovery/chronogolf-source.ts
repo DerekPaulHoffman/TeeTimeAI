@@ -41,7 +41,22 @@ export function normalizeChronogolfProfileUrl(value: string): string | null {
     return url.href;
   } catch { return null; }
 }
-export function parseChronogolfSource(value: string) {
+/** An observed public embed is a source identity, never a fetch target. The
+ * only accepted parameters are the published, non-customer widget markers. */
+export function parseChronogolfPublicWidget(value: string): { widgetUrl: string; profileUrl: string; numericClubId: number } | null {
+  try {
+    const url = new URL(value);
+    const match = /^\/club\/([1-9]\d{0,9})\/widget$/u.exec(url.pathname);
+    if (url.href !== value || url.protocol !== "https:" || url.hostname !== "www.chronogolf.com" || url.username || url.password || url.port || url.hash ||
+        !match || url.search !== "?target=_blank&source=chronogolf&medium=profile") return null;
+    const numericClubId = Number(match[1]);
+    if (!id.safeParse(numericClubId).success) return null;
+    return { widgetUrl: value, profileUrl: `https://www.chronogolf.com/club/${numericClubId}`, numericClubId };
+  } catch { return null; }
+}
+export function parseChronogolfSource(value: string): { profileUrl: string; slug: string; numericClubId?: number; widgetUrl?: string } | null {
+  const widget = parseChronogolfPublicWidget(value);
+  if (widget) return { profileUrl: widget.profileUrl, slug: String(widget.numericClubId), numericClubId: widget.numericClubId, widgetUrl: widget.widgetUrl };
   const profileUrl = normalizeChronogolfProfileUrl(value);
   if (!profileUrl) return null;
   const slug = new URL(profileUrl).pathname.slice("/club/".length);
@@ -51,8 +66,12 @@ export function parseChronogolfSource(value: string) {
 const metadataCourseSchema = z.object({ id, uuid, name, layoutHoles: holes, bookableHoles: holeOptions }).strict();
 export const chronogolfMetadataSchema = z.object({ family: z.literal("CHRONOGOLF"), clubId: id,
   profileUrl: z.string().refine(value => normalizeChronogolfProfileUrl(value) === value), timeZone, publicPlayerTypeId: id,
+  widgetSourceUrl: z.string().refine(value => parseChronogolfPublicWidget(value) !== null).optional(),
   courses: z.array(metadataCourseSchema).min(1).max(20).refine(values => unique(values.map(value => value.id)) && unique(values.map(value => value.uuid))),
-  clients: clientSchema, catalogHash: z.string().regex(/^[a-f0-9]{64}$/u) }).strict();
+  clients: clientSchema, catalogHash: z.string().regex(/^[a-f0-9]{64}$/u) }).strict().refine(value => {
+    const widget = value.widgetSourceUrl ? parseChronogolfPublicWidget(value.widgetSourceUrl) : null;
+    return !value.widgetSourceUrl || Boolean(widget && widget.numericClubId === value.clubId);
+  });
 export type ChronogolfMetadata = z.infer<typeof chronogolfMetadataSchema>;
 export type ChronogolfIdentitySource = { officialUrl: string; bookingUrl: string; venueName: string; venueAddress?: string; timeZone: string };
 
@@ -63,6 +82,7 @@ export function chronogolfRecipeBookingUrl(sourceBookingUrl: string, metadata: C
   if (!saved.success || !source || !dateOnlySchema.safeParse(requestedDate).success) fail("ADAPTER_SLOT_LINK_UNVERIFIED");
   const canonical = parseChronogolfSource(saved.data.profileUrl);
   if (!canonical || canonical.profileUrl !== saved.data.profileUrl ||
+      (source.widgetUrl ?? undefined) !== saved.data.widgetSourceUrl ||
       canonical.numericClubId !== undefined && canonical.numericClubId !== saved.data.clubId ||
       (source.numericClubId !== undefined ? source.numericClubId !== saved.data.clubId : source.profileUrl !== canonical.profileUrl)) fail("ADAPTER_SLOT_LINK_UNVERIFIED");
   const url = new URL(canonical.profileUrl);
@@ -187,7 +207,7 @@ function headlessCanonicalFooter(source: ChronogolfIdentitySource, page: Officia
 export function parseChronogolfProfile(html: string, actualUrl: string, source: ChronogolfIdentitySource,
   officialPage?: OfficialIdentityPage): ChronogolfMetadata {
   const requested = parseChronogolfSource(source.bookingUrl), actual = parseChronogolfSource(actualUrl);
-  if (!requested || !actual || !source.venueAddress || !officialHost(source.officialUrl)) fail("ADAPTER_IDENTITY_MISSING");
+  if (!requested || !actual || actual.widgetUrl || !source.venueAddress || !officialHost(source.officialUrl)) fail("ADAPTER_IDENTITY_MISSING");
   const document = nextData(html), data = document.data;
   if (!object(data) || !object(data.props) || !object(data.props.pageProps)) fail("ADAPTER_PROFILE_SCHEMA_CHANGED");
   const parsed = profileClubSchema.safeParse(data.props.pageProps.club);
@@ -227,9 +247,10 @@ export function parseChronogolfProfile(html: string, actualUrl: string, source: 
       if (!freshNativeCanonicalRootDocument(officialPage, source.officialUrl)) fail("ADAPTER_IDENTITY_MISMATCH");
     } catch { fail("ADAPTER_IDENTITY_MISMATCH"); }
   }
-  const catalog = { clubId: club.id, clubUuid: club.uuid, profileUrl: canonicalUrl, name: club.name, websiteHost: providerWebsiteIdentityHost(club.website),
+  const catalog = { clubId: club.id, clubUuid: club.uuid, profileUrl: canonicalUrl, ...(requested.widgetUrl ? { widgetSourceUrl: requested.widgetUrl } : {}), name: club.name, websiteHost: providerWebsiteIdentityHost(club.website),
     address: observed, timeZone: club.timezone, publicPlayerTypeId: club.defaultAffiliationTypeId, courses, clients: document.clients };
   return chronogolfMetadataSchema.parse({ family: "CHRONOGOLF", clubId: club.id, profileUrl: canonicalUrl, timeZone: club.timezone,
+    ...(requested.widgetUrl ? { widgetSourceUrl: requested.widgetUrl } : {}),
     publicPlayerTypeId: club.defaultAffiliationTypeId, courses, clients: document.clients, catalogHash: createHash("sha256").update(JSON.stringify(catalog)).digest("hex") });
 }
 export function verifyChronogolfReadClients(metadata: ChronogolfMetadata, bodies: Record<string, string>): void {

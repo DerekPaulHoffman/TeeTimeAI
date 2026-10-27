@@ -318,8 +318,14 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
           proof.venueName !== recipe.source.venueName || proof.canonicalAddress !== recipe.source.venueAddress || proof.timeZone !== recipe.source.timeZone)
         ctx.addIssue({ code: "custom", message: "Street-type omission proof must retain the exact canonical source" });
     }
+    if (recipe.adapter.family === "TEEITUP" && recipe.adapter.officialContactChainProof) {
+      const proof = recipe.adapter.officialContactChainProof;
+      if (recipe.target.kind !== "OUTDOOR" || proof.officialUrl !== recipe.source.officialUrl || proof.bookingUrl !== recipe.source.bookingUrl ||
+          proof.venueName !== recipe.source.venueName || proof.canonicalAddress !== recipe.source.venueAddress || proof.timeZone !== recipe.source.timeZone)
+        ctx.addIssue({ code: "custom", message: "Official contact chain must retain the exact canonical source" });
+    }
     if (recipe.adapter.family === "TEEITUP" && simulator &&
-        (recipe.adapter.facilityIds.length !== 1 || recipe.adapter.officialIdentityProof || recipe.adapter.officialBookingSourceProof || recipe.adapter.officialPostalConflictProof || recipe.adapter.officialDelegatedBookingProof || recipe.adapter.officialStreetTypeOmittedProof))
+        (recipe.adapter.facilityIds.length !== 1 || recipe.adapter.officialIdentityProof || recipe.adapter.officialBookingSourceProof || recipe.adapter.officialPostalConflictProof || recipe.adapter.officialDelegatedBookingProof || recipe.adapter.officialStreetTypeOmittedProof || recipe.adapter.officialContactChainProof))
       ctx.addIssue({ code: "custom", message: "Simulator adapter requires one exact directory identity" });
     return;
   }

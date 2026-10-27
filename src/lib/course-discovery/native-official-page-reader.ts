@@ -13,6 +13,7 @@ type Dependencies = Pick<DiscoveryBrowserSessionDependencies, "requestLease" | "
   delegatedReadBudget?: DelegatedReadBudget;
   collectPublicCourseContacts?: true;
   allowCpsPhoneBookingContact?: true;
+  allowTeeItUpContactChainRoot?: true;
   trustedContext?: DiscoveryTrustedContext;
   createSession?: (input: Parameters<typeof createCourseDiscoveryBrowserSession>[0], deps: DiscoveryBrowserSessionDependencies) => Promise<Session>;
 };
@@ -24,6 +25,7 @@ export async function readNativeOfficialIdentityPage(source: OfficialIdentitySou
   deps: Dependencies = {}): Promise<OfficialIdentityPage> {
   if (!source.officialUrl || !isSafeRecipeUrl(pageUrl) || !isSafeRecipeUrl(source.officialUrl) ||
       new URL(pageUrl).origin !== new URL(source.officialUrl).origin) throw new Error("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
+  if (deps.allowTeeItUpContactChainRoot && pageUrl !== source.officialUrl) throw new Error("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
   const deadline = new Date(Math.min(deadlineAt.getTime(), Date.now() + 30_000));
   if (!Number.isFinite(deadline.getTime()) || deadline.getTime() <= Date.now()) throw new Error("DEADLINE_EXCEEDED");
   const createSession = deps.createSession ?? createCourseDiscoveryBrowserSession;
@@ -33,7 +35,8 @@ export async function readNativeOfficialIdentityPage(source: OfficialIdentitySou
   { requestLease: deps.requestLease, launchBrowser: deps.launchBrowser, browserTransport: "NATIVE_CHROME",
     ...(deps.delegatedReadBudget ? { delegatedReadBudget: deps.delegatedReadBudget } : {}),
     ...(deps.collectPublicCourseContacts ? { collectPublicCourseContacts: true } : {}),
-    ...(deps.allowCpsPhoneBookingContact ? { allowCpsPhoneBookingContact: true } : {}) });
+    ...(deps.allowCpsPhoneBookingContact ? { allowCpsPhoneBookingContact: true } : {}),
+    ...(deps.allowTeeItUpContactChainRoot ? { allowTeeItUpContactChainRoot: true } : {}) });
   let capturedPage: OfficialIdentityPage | undefined;
   try {
     // loading covers every admitted resource, including ancillary reads. Wait
@@ -41,7 +44,7 @@ export async function readNativeOfficialIdentityPage(source: OfficialIdentitySou
     // these diagnostic readiness facts never substitute for identity proof.
     const ready = (current: DiscoveryBrowserSnapshot) => current.officialSourceDiagnostic?.rawOfficialCaptured === true &&
       current.officialSourceDiagnostic.currentOfficialDocument === true && current.officialSourceDiagnostic.officialProvenance === true &&
-      (deps.allowCpsPhoneBookingContact ? current.officialSourceDiagnostic.renderedHeadingsPresent === true :
+      (deps.allowCpsPhoneBookingContact || deps.allowTeeItUpContactChainRoot ? current.officialSourceDiagnostic.renderedHeadingsPresent === true :
         current.officialSourceDiagnostic.renderedAddressesPresent === true) && current.officialSourceDiagnostic.renderedLinksPresent === true;
     const readable = (current: DiscoveryBrowserSnapshot) => {
       const lineage = current.nativeDocumentRedirects;
@@ -57,7 +60,7 @@ export async function readNativeOfficialIdentityPage(source: OfficialIdentitySou
     for (let count = 0; count <= 4 && readable(current) && Date.now() < deadline.getTime(); count++) {
       if (ready(current)) {
         try { page = await session.readOfficialIdentityPage(); break; }
-        catch (error) { if (!deps.allowCpsPhoneBookingContact || !(error instanceof Error) || error.message !== "OFFICIAL_POSTAL_SOURCE_UNVERIFIED") throw error; }
+        catch (error) { if ((!deps.allowCpsPhoneBookingContact && !deps.allowTeeItUpContactChainRoot) || !(error instanceof Error) || error.message !== "OFFICIAL_POSTAL_SOURCE_UNVERIFIED") throw error; }
       }
       if (count < 4) current = await session.execute({ id: count + 2, action: "observe" });
     }

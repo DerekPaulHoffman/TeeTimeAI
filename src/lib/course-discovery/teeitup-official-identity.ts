@@ -22,6 +22,9 @@ export type OfficialIdentityPage = { url: string; html: string; visibleEvidence?
   /** Exact computed-visible public anchor text paired with its URL. */
   publicLinkLabels?: Array<{ href: string; text: string }>;
   publicLinkLabelsOmitted?: boolean;
+  officialContactLinkLabels?: Array<{ href: string; text: string }>;
+  officialContactLinkLabelsOmitted?: boolean;
+  officialContactBusinessNames?: string[];
   brandLinks?: Array<{ href: string; text: string }>;
   publicRentalTexts?: string[];
   /** Computed-visible public business/service labels, never field values. */

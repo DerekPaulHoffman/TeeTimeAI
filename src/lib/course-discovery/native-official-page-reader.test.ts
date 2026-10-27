@@ -20,6 +20,19 @@ function fixture(change: Partial<DiscoveryBrowserSnapshot> = {}) {
   return { execute, readOfficialIdentityPage, close, createSession };
 }
 describe("fixed native official source reader", () => {
+  it("admits an address-free canonical root only for the private contact-chain mode", async () => {
+    const session = fixture({ officialSourceDiagnostic: { stage: "CONTROLLER_CAPTURE", rawOfficialCaptured: true,
+      currentOfficialDocument: true, officialProvenance: true, renderedHeadingsPresent: true, renderedAddressesPresent: false,
+      renderedLinksPresent: true } });
+    session.readOfficialIdentityPage.mockResolvedValue({ url: source.officialUrl, html: "<h1>Harbor Golf Course</h1><a href='/contact/'>Contact Us</a>",
+      browserTransport: "NATIVE_CHROME", visibleEvidence: { title: source.venueName, headings: [source.venueName], addressTexts: [],
+        linkUrls: ["https://example.org/contact/"], officialContactLinkLabels: [{ href: "https://example.org/contact/", text: "Contact Us" }] } });
+    await expect(readNativeOfficialIdentityPage(source, source.officialUrl, new Date(Date.now() + 30_000),
+      { ...session, allowTeeItUpContactChainRoot: true })).resolves.toMatchObject({ visibleEvidence: { addressTexts: [] } });
+    expect((session.createSession.mock.calls[0] as unknown as [unknown, Record<string, unknown>])[1].allowTeeItUpContactChainRoot).toBe(true);
+    await expect(readNativeOfficialIdentityPage(source, "https://example.org/contact/", new Date(Date.now() + 30_000),
+      { ...fixture(), allowTeeItUpContactChainRoot: true })).rejects.toThrow("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
+  });
   it("passes only the caller's current private context into the warm native session and preserves absent legacy context",async()=>{
     const trustedContext={canonicalCoursePhone:"+19165554653"};
     for(const context of [undefined,trustedContext]){

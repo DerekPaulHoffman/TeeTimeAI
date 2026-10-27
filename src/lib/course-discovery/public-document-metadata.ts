@@ -74,12 +74,12 @@ export function collectNativeOfficialPublicMetadata(input: string | { venueName:
       formEligibility.set(form, eligible); return eligible;
     } catch { return false; }
   } };
-  const headings: string[] = [], linkUrls: string[] = [], addressTexts: string[] = [], phoneTexts: string[] = [], publicRentalTexts: string[] = [], publicBusinessLabels: string[] = [];
+  const headings: string[] = [], linkUrls: string[] = [], addressTexts: string[] = [], phoneTexts: string[] = [], publicRentalTexts: string[] = [], publicBusinessLabels: string[] = [], officialContactBusinessNames: string[] = [];
   let phoneTextsOmitted = false;
   const service = /\s(?:and|&)\s+([\p{L}][\p{L} -]{1,39})$/iu.exec(expectedVenueName)?.[1];
   const serviceWords = service?.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim().split(/\s+/u) ?? [];
   const brandLinks: Array<{ href: string; text: string }> = [];
-  const publicNodes = Array.from(document.querySelectorAll('h1,h2,h3,h4,h5,h6,a[href],address,p,div,li,td'));
+  const publicNodes = Array.from(document.querySelectorAll('h1,h2,h3,h4,h5,h6,a[href],address,p,div,li,td,span,strong'));
   if (publicNodes.length > 3000) phoneTextsOmitted = true;
   for (const node of publicNodes.slice(0, 3000)) {
     if (!(node instanceof HTMLElement) || node.closest('script,template,noscript,iframe,input,textarea,select,button,label,[contenteditable],[hidden],[inert],[aria-hidden="true"]') ||
@@ -97,6 +97,8 @@ export function collectNativeOfficialPublicMetadata(input: string | { venueName:
     }
     if (!visible || ancestor) continue;
     const value = node.innerText.replace(/\n+/gu, ', ').replace(/\s+/gu, ' ').trim();
+    if (!form && /^(?:P|SPAN|STRONG|DIV|ADDRESS)$/u.test(node.tagName) && value === expectedVenueName && officialContactBusinessNames.length < 20)
+      officialContactBusinessNames.push(value);
     if (/^H[1-6]$/u.test(node.tagName) && value.length <= 300 && headings.length < 80) headings.push(value);
     if (node instanceof HTMLAnchorElement && linkUrls.length < 120) linkUrls.push(node.href);
     if (node instanceof HTMLAnchorElement && !form && value.length <= 120 && publicBusinessLabels.length < 20 && serviceWords.length) {
@@ -163,11 +165,20 @@ export function collectNativeOfficialPublicMetadata(input: string | { venueName:
   }
   const publicLinkLabels: Array<{ href: string; text: string }> = [];
   const allPublicAnchors = Array.from(document.querySelectorAll('a[href]'));
+  const officialContactLinkLabels: Array<{ href: string; text: string }> = [];
+  let officialContactLinkLabelsOmitted = allPublicAnchors.length > 3000;
   let publicLinkLabelsOmitted = allPublicAnchors.length > 3000;
   if (!publicLinkLabelsOmitted) for (const anchor of allPublicAnchors) {
     if (!(anchor instanceof HTMLAnchorElement) || anchor.closest('form') || !cms.visible(anchor)) continue;
     const text = anchor.innerText.normalize('NFKC').replace(/\s+/gu, ' ').trim();
     let href: URL; try { href = new URL(anchor.href); } catch { continue; }
+    if (!officialContactLinkLabelsOmitted && text.length <= 160 && href.protocol === 'https:' && !href.username && !href.password && !href.port && !href.hash &&
+        !anchor.hasAttribute('onclick') && !anchor.hasAttribute('download') &&
+        (/^contact(?:\s+us)?$/iu.test(text) && href.origin === new URL(document.URL).origin && !href.search ||
+          /\b(?:tee\s*times?|book|reservations?)\b/iu.test(text) && /^[a-z0-9-]+\.book\.teeitup\.(?:com|golf)$/u.test(href.hostname) && href.pathname === '/')) {
+      if (officialContactLinkLabels.length < 120) officialContactLinkLabels.push({ href: href.href, text });
+      else { officialContactLinkLabelsOmitted = true; officialContactLinkLabels.length = 0; }
+    }
     if (!text || text.length > 160 || /[\u0000-\u001f\u007f]/u.test(text) || href.protocol !== 'https:' || href.username || href.password || href.port || href.hash ||
         !/^[a-z][a-z0-9-]*\.cps\.golf$/u.test(href.hostname) || !['/','/onlineresweb/search-teetime'].includes(href.pathname)) continue;
     if (href.pathname === '/' && href.search) continue;
@@ -214,6 +225,6 @@ export function collectNativeOfficialPublicMetadata(input: string | { venueName:
     delegatedFrameSources.rows.push({ src, visible: visible && parent === null, srcdoc: node.hasAttribute("srcdoc"), inForm: Boolean(node.closest("form")) });
   }
   return { title: document.title.slice(0, 500), headings, linkUrls, addressTexts, phoneTexts, phoneTextsOmitted, contactPhoneLinks, contactPhoneLinksOmitted,
-    publicLinkLabels, publicLinkLabelsOmitted,
-    brandLinks, publicRentalTexts, publicBusinessLabels, namedContactBlocks, namedContactBlocksOmitted, delegatedFrameSources };
+    publicLinkLabels, publicLinkLabelsOmitted, officialContactLinkLabels, officialContactLinkLabelsOmitted,
+    brandLinks, publicRentalTexts, publicBusinessLabels, officialContactBusinessNames, namedContactBlocks, namedContactBlocksOmitted, delegatedFrameSources };
 }

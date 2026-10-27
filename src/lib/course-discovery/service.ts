@@ -359,6 +359,12 @@ function bindRecipe(recipe: CourseAccessRecipeData, source: Source, sourceEviden
         recipe.adapter.facilityIds.length !== 1 || proof.facilityId !== recipe.adapter.facilityIds[0] ||
         request !== undefined && !isCurrentTrustedContext(request.trustedContext, source.trustedContext)) conflict();
   }
+  if (recipe.engine === "EXISTING_ADAPTER" && recipe.adapter.family === "TEEITUP" && recipe.adapter.officialContactChainProof) {
+    const proof = recipe.adapter.officialContactChainProof;
+    if (proof.canonicalAddress !== source.identity.address || proof.officialUrl !== recipe.source.officialUrl ||
+        proof.bookingUrl !== recipe.source.bookingUrl || proof.venueName !== source.identity.name || proof.timeZone !== source.identity.timeZone ||
+        proof.alias !== recipe.adapter.alias || recipe.adapter.facilityIds.length !== 1 || proof.facilityId !== recipe.adapter.facilityIds[0]) conflict();
+  }
   if (recipe.engine === "EXISTING_ADAPTER" && recipe.adapter.family === "TEEITUP" && recipe.adapter.officialDelegatedBookingProof?.physicalContactProof) {
     const outer = recipe.adapter.officialDelegatedBookingProof, proof = outer.physicalContactProof!;
     if (!source.trustedContext.canonicalCoursePhone || proof.publicCoursePhone !== source.trustedContext.canonicalCoursePhone ||

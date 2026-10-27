@@ -9,6 +9,27 @@ describe("official public iframe source navigation", () => {
   const document = "https://venue.example/book-a-bay/", official = "https://venue.example/";
   const entry = { src: "https://example-rental.book.teeitup.com/", label: "", visible: true, srcdoc: false };
   const read = (value = entry, page = document, proved = page) => publicFrameSource(value, page, official, proved);
+  it("exposes only a fresh exact public Chronogolf widget on the verified official parent", async () => {
+    const widget = "https://www.chronogolf.com/club/1234/widget?target=_blank&source=chronogolf&medium=profile";
+    const proof = { kind: "VERIFIED_OFFICIAL_DOCUMENT" as const, officialUrl: official, documentUrl: document };
+    const frame = { ...entry, src: widget, label: "ProfilePageBookingWidget" };
+    expect(publicFrameSource(frame, document, official, document, proof)).toBe(widget);
+    expect(publicFrameSource(frame, document, official, document)).toBeUndefined();
+    for (const changed of [{ visible: false }, { srcdoc: true }, { label: "Sign in to booking" },
+      { src: widget.replace("/1234/", "/other/") }, { src: widget + "&token=1" },
+      { src: widget.replace("www.chronogolf.com", "www.chronogolf.com.evil.example") }])
+      expect(publicFrameSource({ ...frame, ...changed }, document, official, document, proof)).toBeUndefined();
+    expect(publicFrameSource({ ...frame, src: widget + "&other=1", label: "Book tee times" }, document, official, document, proof)).toBeUndefined();
+    const dom = new JSDOM(`<iframe title="ProfilePageBookingWidget" src="${widget}"></iframe><div hidden><iframe title="ProfilePageBookingWidget" src="${widget}"></iframe></div><form><iframe title="ProfilePageBookingWidget" src="${widget}"></iframe></form><iframe title="ProfilePageBookingWidget" src="${widget}" srcdoc=""></iframe>`,
+      { url: document, runScripts: "outside-only" });
+    dom.window.Element.prototype.getBoundingClientRect = () => ({ width: 800, height: 500 } as DOMRect);
+    const page = { url: () => document, locator: () => ({ evaluateAll: async (fn: (nodes: Element[]) => unknown) => dom.window.eval(`(${fn.toString()})`)([...dom.window.document.querySelectorAll("iframe[src]")]) }) } as unknown as Page;
+    try {
+      expect(await observedPublicFrameSources(page, official, document, proof)).toEqual([widget]);
+      dom.window.document.body.insertAdjacentHTML("beforeend", `<iframe title="ProfilePageBookingWidget" src="${widget.replace("/1234/", "/5678/")}"></iframe>`);
+      expect(await observedPublicFrameSources(page, official, document, proof)).toEqual([]);
+    } finally { dom.window.close(); }
+  });
   it("exposes an exact visible known public booking source for a separately guarded main-frame read", () => {
     expect(read()).toBe(entry.src);
     expect(read({ ...entry, src: "/availability", label: "Tee time booking" })).toBe("https://venue.example/availability");

@@ -46,7 +46,7 @@ function createReader(source: ChronogolfIdentitySource, deps: Deps) {
       if (profileRedirect && [301, 302, 303, 307, 308].includes(response.status)) {
         const location = response.headers.get("location");
         const next = location ? parseChronogolfSource(new URL(location, url).href) : null;
-        if (!next) fail("ADAPTER_PROFILE_REDIRECT_INVALID");
+        if (!next || next.widgetUrl) fail("ADAPTER_PROFILE_REDIRECT_INVALID");
         return { text: "", headers: response.headers, url: next!.profileUrl };
       }
       if (response.status !== 200) fail("ADAPTER_TRANSPORT_FAILED");

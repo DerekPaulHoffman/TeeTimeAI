@@ -94,7 +94,7 @@ function canonicalDataKey(value) {
   } catch { return undefined; }
 }
 const nativeUScheduleContactRequired = adapter => adapter?.family === "USCHEDULE" && adapter.publicLocationProof?.kind === "PUBLIC_LOCATION_SERVICE_POOL_V1";
-const currentNativeProofRequired = adapter => Boolean(nativeUScheduleContactRequired(adapter) || adapter?.officialRouteOwnershipProof || adapter?.officialStreetTypeOmittedProof ||
+const currentNativeProofRequired = adapter => Boolean(nativeUScheduleContactRequired(adapter) || adapter?.officialRouteOwnershipProof || adapter?.officialStreetTypeOmittedProof || adapter?.officialContactChainProof ||
   adapter?.officialDelegatedBookingProof?.rootDocumentProof || adapter?.officialDelegatedBookingProof?.physicalContactProof ||
   Array.isArray(adapter?.officialDelegatedBookingProof?.hops) && adapter.officialDelegatedBookingProof.hops.some(hop => hop?.kind === "NATIVE_VISIBLE_IFRAME_SRC"));
 function dataHash(value) { const key = canonicalDataKey(value); return key ? createHash("sha256").update(key).digest("hex") : undefined; }
@@ -224,7 +224,7 @@ function currentNativeProofObservation(job, observation) {
 }
 export function shouldInvalidateDiscoveryAdapterObservation(action, observation) {
   return ["open", "finish", "inspect_adapter"].includes(action) || Boolean(nativeUScheduleContactRequired(observation?.adapter) || observation?.adapter?.officialBookingSourceProof ||
-    observation?.adapter?.officialRouteOwnershipProof || observation?.adapter?.officialDelegatedBookingProof || observation?.adapter?.officialStreetTypeOmittedProof);
+    observation?.adapter?.officialRouteOwnershipProof || observation?.adapter?.officialDelegatedBookingProof || observation?.adapter?.officialStreetTypeOmittedProof || observation?.adapter?.officialContactChainProof);
 }
 /** A fixed inspector reads public configuration; fresh replay still proves availability. */
 export function inspectedAdapterSourceEvidence(recipe, job, observation, officialSourceObserved, contextUrl) {
@@ -233,7 +233,7 @@ export function inspectedAdapterSourceEvidence(recipe, job, observation, officia
       observation.bookingUrl !== recipe.source?.bookingUrl || observation.contextUrl !== contextUrl ||
       observation.identityKey !== canonicalDataKey(job.request.identity) || observation.targetKey !== canonicalDataKey(job.request.target) ||
       observation.inputKey !== canonicalDataKey(job.request.input) ||
-      (nativeUScheduleContactRequired(observation.adapter) || observation.adapter?.family === "CPS" || observation.adapter?.officialRouteOwnershipProof || observation.adapter?.officialDelegatedBookingProof || observation.adapter?.officialStreetTypeOmittedProof) &&
+      (nativeUScheduleContactRequired(observation.adapter) || observation.adapter?.family === "CPS" || observation.adapter?.officialRouteOwnershipProof || observation.adapter?.officialDelegatedBookingProof || observation.adapter?.officialStreetTypeOmittedProof || observation.adapter?.officialContactChainProof) &&
         observation.trustedContextKey !== canonicalDataKey(job.request.trustedContext ?? {}) ||
       currentNativeProofRequired(observation.adapter) && !currentNativeProofObservation(job, observation)) return undefined;
   const candidateKey = canonicalDataKey(recipe.adapter), observedKey = canonicalDataKey(observation.adapter);
@@ -253,6 +253,7 @@ export function bindDiscoveryRecipeIdentity(recipe, job, adapterObservation, con
     delete adapter.officialPostalConflictProof;
     delete adapter.officialDelegatedBookingProof;
     delete adapter.officialStreetTypeOmittedProof;
+    delete adapter.officialContactChainProof;
     delete adapter.officialRouteOwnershipProof;
     if (nativeUScheduleContactRequired(adapter)) delete adapter.publicLocationProof;
     const observed = adapterObservation?.adapter;
@@ -282,6 +283,33 @@ export function bindDiscoveryRecipeIdentity(recipe, job, adapterObservation, con
           const bytes = JSON.stringify(observed.officialRouteOwnershipProof); if (Buffer.byteLength(bytes,"utf8") <= 16000) adapter.officialRouteOwnershipProof = JSON.parse(bytes);
         }
       } catch { /* Serialized/model data cannot supply current native ownership. */ }
+    }
+    if (adapter.family === "TEEITUP" && observed?.family === "TEEITUP" && adapterObservation.jobId === job.id &&
+        adapterObservation.officialUrl === job.request.identity.officialUrl && adapterObservation.bookingUrl === proposedSource.bookingUrl &&
+        adapterObservation.contextUrl === contextUrl && adapterObservation.identityKey === canonicalDataKey(job.request.identity) &&
+        adapterObservation.targetKey === canonicalDataKey(job.request.target) && adapterObservation.inputKey === canonicalDataKey(job.request.input) &&
+        adapterObservation.trustedContextKey === canonicalDataKey(job.request.trustedContext ?? {}) && currentNativeProofObservation(job, adapterObservation) &&
+        job.request.target.kind === "OUTDOOR") {
+      try {
+        const inspected = { ...observed }; delete inspected.officialContactChainProof;
+        const proof = observed.officialContactChainProof;
+        const keys = value => value && typeof value === "object" && !Array.isArray(value) ? Object.keys(value).sort().join(",") : "";
+        const expectedKeys = "alias,bookingUrl,canonicalAddress,contactUrl,contactWitnessSha256,courseId,directoryWitnessSha256,facilityId,kind,officialUrl,providerAddress,providerAddressVerified,rootWitnessSha256,timeZone,venueName";
+        if (canonicalDataKey(inspected) === canonicalDataKey(adapter) && keys(proof) === expectedKeys &&
+            proof.kind === "TEEITUP_OFFICIAL_CONTACT_CHAIN" && proof.officialUrl === job.request.identity.officialUrl &&
+            proof.bookingUrl === proposedSource.bookingUrl && proof.venueName === job.request.identity.name &&
+            proof.canonicalAddress === job.request.identity.address && proof.timeZone === job.request.input.timeZone &&
+            safeObservedUrl(proof.contactUrl) && new URL(proof.contactUrl).origin === new URL(proof.officialUrl).origin &&
+            proof.contactUrl !== proof.officialUrl && [proof.officialUrl, proof.contactUrl, proof.bookingUrl].includes(contextUrl) &&
+            proof.alias === adapter.alias && adapter.facilityIds?.length === 1 &&
+            proof.facilityId === adapter.facilityIds[0] && Number.isSafeInteger(proof.facilityId) && proof.facilityId > 0 &&
+            typeof proof.courseId === "string" && proof.courseId.length >= 1 && proof.courseId.length <= 128 &&
+            typeof proof.providerAddress === "string" && proof.providerAddress.length >= 3 && proof.providerAddress.length <= 1024 &&
+            proof.providerAddressVerified === false && [proof.rootWitnessSha256, proof.contactWitnessSha256, proof.directoryWitnessSha256]
+              .every(value => typeof value === "string" && /^[a-f0-9]{64}$/u.test(value))) {
+          const bytes = JSON.stringify(proof); if (Buffer.byteLength(bytes, "utf8") <= 16_000) adapter.officialContactChainProof = JSON.parse(bytes);
+        }
+      } catch { /* Only the current private fixed inspection can confer this proof. */ }
     }
     if (adapter.family === "TEEITUP" && observed?.family === "TEEITUP" && adapterObservation.jobId === job.id &&
         adapterObservation.officialUrl === job.request.identity.officialUrl && adapterObservation.bookingUrl === proposedSource.bookingUrl &&
@@ -924,12 +952,13 @@ export function createDiscoverySnapshotCompactor() {
     if (snapshot && typeof snapshot === "object") {
       const projected = { ...snapshot };
       delete projected.trustedContext;
-      if (nativeUScheduleContactRequired(projected.adapter) || projected.adapter?.family === "CPS" || projected.adapter && (Object.hasOwn(projected.adapter, "officialRouteOwnershipProof") || Object.hasOwn(projected.adapter, "officialDelegatedBookingProof") || Object.hasOwn(projected.adapter, "officialStreetTypeOmittedProof"))) {
+      if (nativeUScheduleContactRequired(projected.adapter) || projected.adapter?.family === "CPS" || projected.adapter && (Object.hasOwn(projected.adapter, "officialRouteOwnershipProof") || Object.hasOwn(projected.adapter, "officialDelegatedBookingProof") || Object.hasOwn(projected.adapter, "officialStreetTypeOmittedProof") || Object.hasOwn(projected.adapter, "officialContactChainProof"))) {
         projected.adapter = { ...projected.adapter };
         if (nativeUScheduleContactRequired(projected.adapter)) delete projected.adapter.publicLocationProof;
         if (projected.adapter.family === "CPS") delete projected.adapter.officialPostalConflictProof;
         delete projected.adapter.officialDelegatedBookingProof;
         delete projected.adapter.officialStreetTypeOmittedProof;
+        delete projected.adapter.officialContactChainProof;
         delete projected.adapter.officialRouteOwnershipProof;
       }
       delete projected.completedPublicAssetRequests; delete projected.completedPublicAssetRequestsOverflow;

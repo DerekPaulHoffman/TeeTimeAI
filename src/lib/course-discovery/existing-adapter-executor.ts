@@ -55,6 +55,8 @@ import { parseMindbodyAppointmentSource } from "./mindbody-appointment-grid";
 import { executeMindbodyAppointments, inspectMindbodyAppointments, getMindbodyAppointmentDiagnostic,
   type MindbodyAppointmentDiagnostic, type MindbodyAppointmentReaderDeps } from "./mindbody-appointment-reader";
 import { parsePublicUSBusinessAddress } from "./public-us-business-address";
+import { bindTeeItUpOfficialContactChain, readNativeTeeItUpContactChain, type TeeItUpContactChainReader,
+  type TeeItUpOfficialContactChainProof } from "./teeitup-official-contact-chain";
 
 type Dependencies = {
   fetch?: typeof fetch;
@@ -68,6 +70,9 @@ type Dependencies = {
   trustedContext?: { canonicalCoursePhone?: string };
   localCapabilities?: readonly "LOCAL_CHROME"[];
   readNativeOfficialPage?: NativeOfficialPageReader;
+  /** Controller-only fixed native chain; never supplied by recipe or model. */
+  readOfficialContactChain?: TeeItUpContactChainReader;
+  officialContactChainPages?: Awaited<ReturnType<TeeItUpContactChainReader>>;
   /** Controller test seam, never recipe metadata or model input. */
   createMindbodySession?: MindbodyAppointmentReaderDeps["createSession"];
   officialBookingSourceToken?: TeeItUpOfficialBookingToken;
@@ -153,6 +158,8 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
   const savedPostalProof = adapter?.family === "TEEITUP" ? adapter.officialPostalConflictProof : undefined;
   const savedDelegatedProof = adapter?.family === "TEEITUP" ? adapter.officialDelegatedBookingProof : undefined;
   const savedOmittedProof = adapter?.family === "TEEITUP" ? adapter.officialStreetTypeOmittedProof : undefined;
+  const savedContactProof = adapter?.family === "TEEITUP" ? adapter.officialContactChainProof : undefined;
+  if (savedContactProof && !deps.localCapabilities?.includes("LOCAL_CHROME")) fail("LOCAL_CHROME_REQUIRED");
   if (savedOmittedProof && !deps.localCapabilities?.includes("LOCAL_CHROME")) fail("LOCAL_CHROME_REQUIRED");
   if (savedDelegatedProof && !deps.localCapabilities?.includes("LOCAL_CHROME")) fail("LOCAL_CHROME_REQUIRED");
   if (savedPostalProof?.warmTransport === "NATIVE_CHROME" &&
@@ -173,6 +180,15 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
   let officialDelegatedBookingProof: TeeItUpDelegatedBookingProof | undefined;
   let publicBookingConfiguration: TeeItUpBookingConfiguration | undefined;
   let officialStreetTypeOmittedProof: TeeItUpStreetTypeOmittedProof | undefined;
+  let officialContactChainProof: TeeItUpOfficialContactChainProof | undefined;
+  let contactPages = !adapter ? deps.officialContactChainPages : undefined;
+  let preparingContactChain: Promise<void> | undefined;
+  const prepareContactChain = async () => {
+    if (!savedContactProof) return;
+    preparingContactChain ??= (deps.readOfficialContactChain ?? ((identity, until) => readNativeTeeItUpContactChain(identity, until,
+      { requestLease: deps.requestLease })))(source, new Date(deadline)).then(value => { contactPages = value; });
+    await preparingContactChain;
+  };
   let omissionOfficialPage: OfficialIdentityPage | undefined;
   const apiAlias = () => publicBookingConfiguration?.apiAlias ?? teeitup?.alias;
   let delegatedToken = deps.nativeDelegatedChainToken;
@@ -253,6 +269,7 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
     // No nested queue/lease can deadlock on the same provider family.
     if (teeitup) await prepareBookingChain();
     if (teeitup) await prepareDelegation();
+    if (teeitup) await prepareContactChain();
     return queue.run(requestFamilyForUrl(url.href), async () => {
       const readStartedAt = Date.now();
       const directoryRead = Boolean(teeitup && url.origin === "https://phx-api-be-east-1b.kenna.io" && url.pathname === `/alias/${apiAlias()}/facilities`);
@@ -286,6 +303,10 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
         postalOfficialPage = { url: url.href, html: text };
       }
       if (teeitup && url.pathname === `/alias/${apiAlias()}/facilities`) {
+        if (contactPages) {
+          officialContactChainProof = bindTeeItUpOfficialContactChain(source, contactPages.root, contactPages.contact, JSON.parse(text));
+          if (savedContactProof && JSON.stringify(officialContactChainProof) !== JSON.stringify(savedContactProof)) fail("OFFICIAL_CONTACT_CHAIN_CHANGED");
+        }
         if (omissionOfficialPage) {
           if (!publicBookingConfiguration) fail("ADAPTER_CONFIGURATION_UNVERIFIED");
           officialStreetTypeOmittedProof = bindTeeItUpStreetTypeOmittedProof(source, omissionOfficialPage, JSON.parse(text),
@@ -311,9 +332,11 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
           officialPostalConflictProof = bindTeeItUpPostalConflictProof(source, postalOfficialPage, JSON.parse(text));
           if (JSON.stringify(officialPostalConflictProof) !== JSON.stringify(savedPostalProof)) fail("OFFICIAL_POSTAL_CONFLICT_CHANGED");
         }
-        try { teeitupFacilities = resolveTeeItUpRecipeFacilities(source, JSON.parse(text), officialIdentityProof, offeringKind, officialBookingSourceProof, officialPostalConflictProof, officialDelegatedBookingProof); }
+        try { teeitupFacilities = resolveTeeItUpRecipeFacilities(source, JSON.parse(text), officialIdentityProof, offeringKind, officialBookingSourceProof, officialPostalConflictProof, officialDelegatedBookingProof,
+          undefined, undefined, officialContactChainProof); }
         catch (error) {
           if (adapter || !(error instanceof Error) || error.message !== "ADAPTER_IDENTITY_MISMATCH") throw error;
+          if (officialContactChainProof) throw error;
           if (freshBookingChain) {
             officialBookingSourceProof = bindTeeItUpOfficialBookingFacility(source, freshBookingChain, JSON.parse(text));
             teeitupFacilities = resolveTeeItUpRecipeFacilities(source, JSON.parse(text), undefined, "OUTDOOR", officialBookingSourceProof);
@@ -413,6 +436,7 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
     officialBookingSourceProof: () => { validateInitialBookingToken(); return officialBookingSourceProof; },
     officialDelegatedBookingProof: () => officialDelegatedBookingProof,
     officialPostalConflictProof: () => officialPostalConflictProof,
+    officialContactChainProof: () => officialContactChainProof,
     officialStreetTypeOmittedProof: () => officialStreetTypeOmittedProof,
     teeitupSimulatorSlots: () => teeitupSimulatorSlots,
     dispose: () => queue.dispose(), availabilityWasArray: () => availabilityWasArray, failureReason: () => fixedReadFailure };
@@ -627,8 +651,28 @@ export async function inspectExistingAdapter(source: Source, deps: Dependencies)
         } catch (fallbackError) {
           // This projection belongs to this invocation's original directory
           // read; retaining it never replaces the later primary exception.
-          if (initialDirectoryDiagnostic) rememberFixedAdapterReadFailure(fallbackError, initialDirectoryDiagnostic);
-          throw fallbackError;
+          const candidate = deps.officialIdentityPage;
+          // The separate fresh native reader earns all authority. This older
+          // controller observation only decides whether to attempt that
+          // bounded reader; ordinary failed delegations stay unchanged.
+          if (!candidate || candidate.url !== source.officialUrl || candidate.browserTransport !== "NATIVE_CHROME" ||
+              candidate.visibleEvidence?.addressTexts.length !== 0 || !candidate.visibleEvidence.officialContactLinkLabels?.some(link => {
+                try { return /^contact(?:\s+us)?$/iu.test(link.text) && new URL(link.href, candidate.url).origin === new URL(candidate.url).origin; }
+                catch { return false; }
+              })) {
+            if (initialDirectoryDiagnostic) rememberFixedAdapterReadFailure(fallbackError, initialDirectoryDiagnostic);
+            throw fallbackError;
+          }
+          try {
+            const contactPages = await (deps.readOfficialContactChain ?? ((identity, until) => readNativeTeeItUpContactChain(identity, until,
+              { requestLease: deps.requestLease })))(source, inspectDeadline);
+            session.dispose();
+            session = reader(source, { ...deps, officialContactChainPages: contactPages, deadlineAt: inspectDeadline }, undefined, undefined, readBudget);
+            await readDirectory();
+          } catch {
+            if (initialDirectoryDiagnostic) rememberFixedAdapterReadFailure(fallbackError, initialDirectoryDiagnostic);
+            throw fallbackError;
+          }
         }
         }
       }
@@ -640,7 +684,8 @@ export async function inspectExistingAdapter(source: Source, deps: Dependencies)
         ...(session.officialBookingSourceProof() ? { officialBookingSourceProof: session.officialBookingSourceProof() } : {}),
         ...(session.officialDelegatedBookingProof() ? { officialDelegatedBookingProof: session.officialDelegatedBookingProof() } : {}),
         ...(session.officialPostalConflictProof() ? { officialPostalConflictProof: session.officialPostalConflictProof() } : {}),
-        ...(session.officialStreetTypeOmittedProof() ? { officialStreetTypeOmittedProof: session.officialStreetTypeOmittedProof() } : {}) }) };
+        ...(session.officialStreetTypeOmittedProof() ? { officialStreetTypeOmittedProof: session.officialStreetTypeOmittedProof() } : {}),
+        ...(session.officialContactChainProof() ? { officialContactChainProof: session.officialContactChainProof() } : {}) }) };
     }
     if (session.family === "FOREUP") {
       const { config, proof, publicCatalogSha256, inventoryScope } = await inspectForeupConfiguration(source, deps, session.read,
@@ -676,7 +721,7 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
     const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "GOLFVX", "REX", "MINDBODY"].includes(adapter.family) || adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR";
     if (input.timeZone !== recipe.source.timeZone || recipe.source.providerFamily.toUpperCase() !== adapter.family ||
         (recipe.target.kind === "SIMULATOR") !== simulator || simulator && (!recipe.target.offeringId || !input.durationMinutes) ||
-        adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR" && (adapter.facilityIds.length !== 1 || adapter.officialIdentityProof || adapter.officialBookingSourceProof || adapter.officialPostalConflictProof || adapter.officialDelegatedBookingProof || adapter.officialStreetTypeOmittedProof)) fail("ADAPTER_TARGET_MISMATCH");
+        adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR" && (adapter.facilityIds.length !== 1 || adapter.officialIdentityProof || adapter.officialBookingSourceProof || adapter.officialPostalConflictProof || adapter.officialDelegatedBookingProof || adapter.officialStreetTypeOmittedProof || adapter.officialContactChainProof)) fail("ADAPTER_TARGET_MISMATCH");
     if (adapter.family === "EZLINKS" && (!recipe.source.officialUrl || !recipe.source.venueAddress ||
         parseEzLinksSource(recipe.source.bookingUrl)?.tenant !== adapter.tenant || input.durationMinutes !== undefined))
       fail("ADAPTER_TARGET_MISMATCH");

@@ -159,6 +159,31 @@ describe("Chronogolf fixed public all-round reader", () => {
     expect(deps.reads.slice(0, 2).map(url => url.href)).toEqual([numeric.bookingUrl, source.bookingUrl]);
     await expect(inspectChronogolf({ ...numeric, bookingUrl: "https://www.chronogolf.com/club/99" }, dependencies())).rejects.toThrow("ADAPTER_IDENTITY_MISMATCH");
   });
+  it("reads only the derived same-club profile for an observed public widget and rebinds it on warm replay", async () => {
+    const widgetUrl = "https://www.chronogolf.com/club/10/widget?target=_blank&source=chronogolf&medium=profile";
+    const widgetSource = { ...source, bookingUrl: widgetUrl };
+    const inspection = dependencies(), saved = await inspectChronogolf(widgetSource, inspection);
+    expect(saved).toMatchObject({ clubId: 10, profileUrl: source.bookingUrl, widgetSourceUrl: widgetUrl });
+    expect(inspection.reads.map(url => url.href)).toEqual(["https://www.chronogolf.com/club/10", ...CHRONOGOLF_READ_CLIENTS.map(client => client.url)]);
+    const fixed = await inspectExistingAdapter(widgetSource, { ...dependencies(), venueMatches: (a, b) => a === b });
+    expect(fixed.adapter).toEqual(saved);
+    const parsed = parseAccessRecipe({ schemaVersion: 1, engine: "EXISTING_ADAPTER", target: { courseId: target.courseId, kind: "OUTDOOR" },
+      source: { ...widgetSource, providerFamily: "CHRONOGOLF" }, adapter: fixed.adapter });
+    expect(parsed.engine).toBe("EXISTING_ADAPTER");
+    const changed = { ...input, date: "2026-10-24", players: 3 }, replay = dependencies({ pages: [[row(1, changed.date)]], total: 1, perPage: 24 });
+    const slots = await executeChronogolf(widgetSource, saved, target, changed, replay);
+    expect(slots).toHaveLength(1);
+    expect(slots[0].bookingUrl).toBe(`${source.bookingUrl}?date=${changed.date}&step=teetimes`);
+    expect(replay.reads.every(url => url.href !== widgetUrl)).toBe(true);
+    expect(replay.reads.at(-1)!.searchParams.get("free_slots")).toBe("3");
+    for (const changedSource of [{ ...widgetSource, bookingUrl: widgetUrl.replace("/10/", "/11/") },
+      { ...widgetSource, bookingUrl: source.bookingUrl },
+      { ...widgetSource, bookingUrl: widgetUrl.replace("medium=profile", "medium=booking") }]) {
+      const deps = dependencies();
+      await expect(executeChronogolf(changedSource, saved, target, input, deps)).rejects.toThrow();
+      expect(deps.reads.every(url => !url.pathname.includes("/marketplace/"))).toBe(true);
+    }
+  });
   it.each(["https://evil.example.org/club/public-pines", "/club/10/widget", "/club/public-pines-golf-club?account=1", "https://www.chronogolf.com/login", undefined, "/club/10"])
     ("rejects unsafe, missing or looping profile Location %s", async location => {
       const deps = dependencies({ response: (url, response) => url.pathname === "/club/10" ? new Response(null, { status: 302, headers: location ? { location } : {} }) : response });

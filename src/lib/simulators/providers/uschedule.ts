@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 
 import { fetchWithProviderTimeout } from "@/lib/adapters/fetch-with-timeout";
 import { isUSchedulePublicRentalLabel, isUScheduleSimBookingLabel, hasUScheduleSimBookingDescription,
+  isUScheduleStandardSimulatorBookingLabel, hasUScheduleStandardSimulatorBookingWitness,
   readUSchedulePublicUnitsControl, readUSchedulePublicPeopleControl, readUSchedulePublicRentalNotes } from "@/lib/automation/uschedule-public-read-policy";
 import { readUScheduleNextAvailableView } from "@/lib/automation/uschedule-public-view-control";
 import { simulatorPublicConfigurationSchema, uschedulePublicTenant, type USchedulePublicConfiguration } from "./public-configuration";
@@ -75,6 +76,8 @@ function selectedRental(html: string, learned?: LearnedRental) {
   const services = options("select_service"), lengths = options("select_length");
   const selected = (node: Element) => node.attrs.some(item => item.name === "selected");
   if (learned) {
+    if (isUScheduleStandardSimulatorBookingLabel(learned.serviceName) && !hasUScheduleStandardSimulatorBookingWitness(html))
+      throw sourceError("The standard public simulator rental witness changed");
     const units = readUSchedulePublicUnitsControl(html);
     if (units.present && (!units.valid || !units.selectedOne)) throw sourceError("The selected public rental changed");
     const people = readUSchedulePublicPeopleControl(html);
@@ -431,13 +434,15 @@ export function inspectUScheduleRecipeConfiguration(html: string, sourceUrl: str
   if (services.length !== 1 || lengths.length !== 1) return reject("SELECTORS");
   const rentals = elements(services[0]).filter(node => node.tagName === "option").map(node => ({ serviceId: attr(node, "value") ?? "",
     serviceName: visibleText(node).replace(/\s+/gu, " ").trim(), selected: node.attrs.some(value => value.name === "selected") }))
-    .filter(row => PUBLIC_ID.test(row.serviceId) && isUSchedulePublicRentalLabel(row.serviceName));
+    .filter(row => PUBLIC_ID.test(row.serviceId) && isUSchedulePublicRentalLabel(row.serviceName) &&
+      (!isUScheduleStandardSimulatorBookingLabel(row.serviceName) || row.selected && hasUScheduleStandardSimulatorBookingWitness(html)));
   const durations = elements(lengths[0]).filter(node => node.tagName === "option").map(node => Number(attr(node, "value")))
     .filter(value => Number.isInteger(value) && value >= 15 && value <= 480);
   const current = rentals.filter(row => row.selected);
   if (!rentals.length || rentals.length > 20) return reject("RENTAL_CATALOG");
   if (current.length !== 1) return reject("SELECTED_RENTAL");
   if (isUScheduleSimBookingLabel(current[0].serviceName) && !hasUScheduleSimBookingDescription(html)) return reject("RENTAL_CATALOG");
+  if (isUScheduleStandardSimulatorBookingLabel(current[0].serviceName) && !hasUScheduleStandardSimulatorBookingWitness(html)) return reject("RENTAL_CATALOG");
   if (!durations.length || durations.length > MAX_PUBLIC_DURATION_CHOICES || new Set(durations).size !== durations.length) return reject("DURATION_CATALOG");
   const units = readUSchedulePublicUnitsControl(html);
   const people = readUSchedulePublicPeopleControl(html);

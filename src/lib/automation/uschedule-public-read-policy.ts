@@ -11,13 +11,15 @@ const publicId = /^(?:0|[1-9]\d{0,9})$/u;
 const rental = /\b(?:simulators?|bays?)\b.*\brentals?\b/iu;
 const excluded = /\b(?:lessons?|coaching|fitting|leagues?|classes?|members?|membership|package)\b/iu;
 const simBooking = /^sim booking$/iu;
+const standardSimulatorBooking = /^simulator booking$/iu;
 const disallowedDescription = /\b(?:lessons?|coaching|fitting|leagues?|classes?|members?|membership|packages?|events?|parties?|birthdays?|clinics?|camps?|private|account|checkout|payment|purchase|gift)\b/iu;
 const normalizedLabel = (value: string) => value.normalize("NFKC").replace(/\s+/gu, " ").trim();
 export function isUScheduleSimBookingLabel(value: string) { return simBooking.test(normalizedLabel(value)); }
+export function isUScheduleStandardSimulatorBookingLabel(value: string) { return standardSimulatorBooking.test(normalizedLabel(value)); }
 /** USCHEDULE simulator adapter only; recipe validation rejects OUTDOOR targets. */
 export function isUSchedulePublicRentalLabel(value: string) {
   const label = normalizedLabel(value), publicTeeTimes = /^public tee times$/iu.test(label);
-  return (rental.test(label) || /^suite rentals?$/iu.test(label) || publicTeeTimes || simBooking.test(label)) && !excluded.test(label);
+  return (rental.test(label) || /^suite rentals?$/iu.test(label) || publicTeeTimes || simBooking.test(label) || standardSimulatorBooking.test(label)) && !excluded.test(label);
 }
 function elements(node: Node): Element[] {
   return "childNodes" in node ? node.childNodes.flatMap(child => "tagName" in child ? [child, ...elements(child)] : elements(child)) : [];
@@ -101,6 +103,29 @@ export function readUSchedulePublicRentalNotes(html: string) {
   if (Buffer.byteLength(html) > 600_000) return [];
   const nodes = elements(parse(html)); return nodes.length <= 20_000 ? rentalNotes(nodes) : [];
 }
+/** A selected standard bay rental needs an independent public pricing witness.
+ * The general service description can mention lessons and grants no authority. */
+export function hasUScheduleStandardSimulatorBookingWitness(html: string) {
+  if (Buffer.byteLength(html) > 600_000) return false;
+  const nodes = elements(parse(html)); if (nodes.length > 20_000) return false;
+  const services = nodes.filter(n => n.tagName === "select" && attr(n, "id") === "select_service");
+  const options = services.length === 1 ? elements(services[0]).filter(n => n.tagName === "option") : [];
+  const selected = options.filter(n => attr(n, "selected") !== undefined);
+  if (selected.length !== 1 || !isUScheduleStandardSimulatorBookingLabel(text(selected[0])) ||
+      !publicId.test(attr(selected[0], "value") ?? "") || attr(selected[0], "value") === "0" ||
+      options.filter(n => attr(n, "value") === attr(selected[0], "value")).length !== 1 || publicControlUnsafe(selected[0])) return false;
+  const labels = nodes.filter(n => n.tagName === "label" && attr(n, "for") === "select_group_size");
+  if (labels.length !== 1 || normalizedLabel(text(labels[0])) !== "Choose Party Size (doesn't affect pricing)" ||
+      publicControlUnsafe(labels[0]) || elements(labels[0]).some(publicControlUnsafe)) return false;
+  let notes: string[];
+  try { notes = rentalNotes(nodes); } catch { return false; }
+  const pricing = notes.filter(v => /\b(?:rates?|prices?|pricing|costs?)\b/iu.test(v) && /\bper\s+(?:hour|hr)\b/iu.test(v) &&
+    /\bper\s+(?:simulator|bay)\b/iu.test(v));
+  const contradictory = notes.some(v => /\b(?:rates?|prices?|pricing|costs?)\b/iu.test(v) &&
+    /\bper\s+(?:person|player|golfer)\b/iu.test(v) && !/\bnot\s+per\s+(?:person|player|golfer)\b/iu.test(v));
+  return pricing.length === 1 && !contradictory && /\bnot\s+per\s+(?:person|player|golfer)\b/iu.test(pricing[0]) &&
+    !/\b(?:members?|membership|private|vip|lessons?|coaching|events?|parties?|packages?)\b/iu.test(pricing[0]);
+}
 /** Participant selection and dated-grid eligibility are distinct. Only the
  * existing # of People grid also requires the explicit per-bay pricing note. */
 export function readUSchedulePublicPeopleControl(html: string) {
@@ -110,25 +135,28 @@ export function readUSchedulePublicPeopleControl(html: string) {
   const groups = nodes.filter(n => n.tagName === "select" && attr(n, "id") === "select_group_size");
   const clean = (n: Node) => text(n).normalize("NFKC").replace(/\s+/gu, " ").trim();
   const labels = nodes.filter(n => n.tagName === "label" && attr(n, "for") === "select_group_size");
-  if (!groups.length) return labels.some(n => ["Choose # of People", "Choose Party Size"].includes(clean(n))) ? { ...absent, roleClaimed: true } : absent;
-  const roleClaimed = labels.some(n => ["Choose # of People", "Choose Party Size"].includes(clean(n))) ||
+  const standardPartyLabel = "Choose Party Size (doesn't affect pricing)";
+  if (!groups.length) return labels.some(n => ["Choose # of People", "Choose Party Size", standardPartyLabel].includes(clean(n))) ? { ...absent, roleClaimed: true } : absent;
+  const roleClaimed = labels.some(n => ["Choose # of People", "Choose Party Size", standardPartyLabel].includes(clean(n))) ||
     nodes.some(n => attr(n, "id") === "group_size_section") && labels.length > 0;
   if (!roleClaimed) return absent;
   const invalid = { ...absent, roleClaimed: true };
   const sections = nodes.filter(n => attr(n, "id") === "group_size_section"), services = nodes.filter(n => n.tagName === "select" && attr(n, "id") === "select_service");
   const selected = services.length === 1 ? elements(services[0]).filter(n => n.tagName === "option" && attr(n, "selected") !== undefined) : [];
   if (groups.length !== 1 || sections.length !== 1 || !elements(sections[0]).includes(groups[0]) || labels.length !== 1 ||
-      !elements(sections[0]).includes(labels[0]) || !["Choose # of People", "Choose Party Size"].includes(clean(labels[0])) || publicControlUnsafe(labels[0]) || elements(labels[0]).some(publicControlUnsafe) || publicControlUnsafe(groups[0]) ||
+      !elements(sections[0]).includes(labels[0]) || !["Choose # of People", "Choose Party Size", standardPartyLabel].includes(clean(labels[0])) || publicControlUnsafe(labels[0]) || elements(labels[0]).some(publicControlUnsafe) || publicControlUnsafe(groups[0]) ||
       selected.length !== 1 || !isUSchedulePublicRentalLabel(clean(selected[0])) || /\b(?:private|members?|account|events?)\b/iu.test(clean(selected[0])) || publicControlUnsafe(selected[0]) || !/^[1-9]\d{0,9}$/u.test(attr(selected[0], "value") ?? "") ||
       (attr(groups[0], "onchange") ?? "").replace(/\s/gu, "") !== "groupSizeChanged();" ||
       nodes.some(n => n.tagName === "select" && (attr(n, "id") === "select_units_to_book" || (attr(n, "class") ?? "").split(/\s/u).includes("resSelect")))) return invalid;
   const notes = rentalNotes(nodes), costs = notes.filter(v => /\b(?:costs?|pricing|prices?|charged)\b.*\bper (?:bay|player)\b/iu.test(v));
   const gridLabel = clean(labels[0]) === "Choose # of People";
+  const standardGridLabel = clean(labels[0]) === standardPartyLabel;
+  if (standardGridLabel && !hasUScheduleStandardSimulatorBookingWitness(html)) return invalid;
   if (gridLabel && (costs.length !== 1 || costs[0] !== "Playing costs are per bay, not per player.")) return invalid;
   const options = elements(groups[0]).filter(n => n.tagName === "option"), values = options.map(n => attr(n, "value") ?? clean(n));
   const chosen = options.filter(n => attr(n, "selected") !== undefined);
   if (!options.length || options.length > 20 || options.some((n, i) => publicControlUnsafe(n) || !/^[1-9]\d?$/u.test(values[i]) || clean(n) !== values[i]) || new Set(values).size !== values.length || chosen.length !== 1) return invalid;
-  return { roleClaimed: true, valid: true, datedGridEligible: gridLabel && nodes.filter(n => (attr(n, "class") ?? "").split(/\s/u).includes("time_choices")).length === 1,
+  return { roleClaimed: true, valid: true, datedGridEligible: (gridLabel || standardGridLabel) && nodes.filter(n => (attr(n, "class") ?? "").split(/\s/u).includes("time_choices")).length === 1,
     selectedPeople: Number(attr(chosen[0], "value") ?? clean(chosen[0])), values };
 }
 /** The pinned bookingBS5 unitsToBookChanged handler sends units_to_book,
@@ -234,6 +262,7 @@ export function createUSchedulePublicReadPolicy(context: { officialLocation?: US
       const people = readUSchedulePublicPeopleControl(body), requested = context.requestedPlayers;
       const services = options("select_service").filter(node => isUSchedulePublicRentalLabel(text(node)) &&
         (!isUScheduleSimBookingLabel(text(node)) || hasUScheduleSimBookingDescription(body)) &&
+        (!isUScheduleStandardSimulatorBookingLabel(text(node)) || hasUScheduleStandardSimulatorBookingWitness(body) && people.valid) &&
         (!/^suite rentals?$/iu.test(text(node).trim()) || units.valid && units.selectedOne || people.valid) && publicId.test(attr(node, "value") ?? "") && attr(node, "value") !== "0");
       const lengths = options("select_length").filter(node => /^(?:[1-9]\d{0,2})$/u.test(attr(node, "value") ?? "") && Number(attr(node, "value")) >= 15 && Number(attr(node, "value")) <= 480);
       if (!services.length || !lengths.length) return false;
@@ -246,7 +275,8 @@ export function createUSchedulePublicReadPolicy(context: { officialLocation?: US
       filters.set("units_to_book", new Set(units.valid && units.selectedOne ? ["1"] : []));
       // The public service-type handler is a catalog filter, never a booking.
       filters.set("service_type_id", new Set(options("select_service_type").filter(node => publicId.test(attr(node, "value") ?? "") &&
-        (attr(node, "value") === "0" || isUSchedulePublicRentalLabel(text(node)))).map(node => attr(node, "value")!)));
+        (attr(node, "value") === "0" || isUSchedulePublicRentalLabel(text(node)) &&
+          (!isUScheduleStandardSimulatorBookingLabel(text(node)) || hasUScheduleStandardSimulatorBookingWitness(body) && people.valid))).map(node => attr(node, "value")!)));
       sources.set(url.href, filters);
       const tenant = parseUScheduleLocationSource(url.href)?.tenant;
       if (tenant && readUScheduleNextAvailableView(body, tenant).present) nextAvailableSources.add(url.href);

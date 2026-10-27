@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
 import { CHRONOGOLF_READ_CLIENTS, chronogolfAvailabilityPageSchema, chronogolfMetadataSchema, chronogolfRecipeBookingUrl, isChronogolfRecipeSlotLink,
-  normalizeChronogolfProfileUrl, parseChronogolfPagination, parseChronogolfProfile, parseChronogolfSource, verifyChronogolfReadClients, chronogolfOfficialHostMismatch } from "./chronogolf-source";
+  normalizeChronogolfProfileUrl, parseChronogolfPagination, parseChronogolfProfile, parseChronogolfSource, parseChronogolfPublicWidget, verifyChronogolfReadClients, chronogolfOfficialHostMismatch } from "./chronogolf-source";
 
 import { registerFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
 import type { OfficialIdentityPage } from "./teeitup-official-identity";
@@ -29,6 +29,7 @@ function row() { return { id: 517122664, uuid: "fecd4d39-bb67-478f-91fc-a0523a86
   departure: null, format: "normal", frozen: false }; }
 
 describe("canonical public profile sources", () => {
+  const widget = "https://www.chronogolf.com/club/1234/widget?target=_blank&source=chronogolf&medium=profile";
   it("normalizes www/trailing slash only and preserves proven numeric source identity", () => {
     expect(normalizeChronogolfProfileUrl("https://chronogolf.com/club/example-golf-club/")).toBe(source.bookingUrl);
     expect(parseChronogolfSource("https://www.chronogolf.com/club/1234")).toEqual({ profileUrl: "https://www.chronogolf.com/club/1234", slug: "1234", numericClubId: 1234 });
@@ -37,6 +38,32 @@ describe("canonical public profile sources", () => {
     "https://www.chronogolf.com/club/example/widget", "https://user:pass@www.chronogolf.com/club/example", "https://www.chronogolf.com:8443/club/example",
     "https://www.chronogolf.com/club/example?date=2026-10-23", "https://www.chronogolf.com/club/example#login", "https://www.chronogolf.com/club/%65xample"])("rejects noncanonical %s", value =>
     expect(normalizeChronogolfProfileUrl(value)).toBeNull());
+  it("derives only the same numeric public profile from an exact observed widget and retains provenance", () => {
+    expect(parseChronogolfPublicWidget(widget)).toEqual({ widgetUrl: widget, profileUrl: "https://www.chronogolf.com/club/1234", numericClubId: 1234 });
+    expect(parseChronogolfSource(widget)).toEqual({ widgetUrl: widget, profileUrl: "https://www.chronogolf.com/club/1234", slug: "1234", numericClubId: 1234 });
+    expect(normalizeChronogolfProfileUrl(widget)).toBeNull();
+    const observed = parseChronogolfProfile(html(), source.bookingUrl, { ...source, bookingUrl: widget });
+    expect(observed.widgetSourceUrl).toBe(widget);
+    expect(chronogolfRecipeBookingUrl(widget, observed, "2026-10-23")).toBe(`${source.bookingUrl}?date=2026-10-23&step=teetimes`);
+    expect(() => chronogolfRecipeBookingUrl(source.bookingUrl, observed, "2026-10-23")).toThrow("ADAPTER_SLOT_LINK_UNVERIFIED");
+    expect(() => parseChronogolfProfile(html(), widget, { ...source, bookingUrl: widget })).toThrow("ADAPTER_IDENTITY_MISSING");
+  });
+  it.each([
+    "http://www.chronogolf.com/club/1234/widget?target=_blank&source=chronogolf&medium=profile",
+    "https://chronogolf.com/club/1234/widget?target=_blank&source=chronogolf&medium=profile",
+    "https://www.chronogolf.com/club/1234/widget?target=_blank&source=chronogolf&medium=profile&account=1",
+    "https://www.chronogolf.com/club/1234/widget?target=_blank&source=chronogolf&medium=profile&medium=profile",
+    "https://www.chronogolf.com/club/1234/widget?source=chronogolf&medium=profile&target=_blank",
+    "https://www.chronogolf.com/club/1234/widget?target=_self&source=chronogolf&medium=profile",
+    "https://www.chronogolf.com/club/1234/widget?target=_blank&source=other&medium=profile",
+    "https://www.chronogolf.com/club/1234/widget?target=_blank&source=chronogolf&medium=booking",
+    "https://www.chronogolf.com/club/example/widget?target=_blank&source=chronogolf&medium=profile",
+    "https://www.chronogolf.com/club/2147483648/widget?target=_blank&source=chronogolf&medium=profile",
+    "https://www.chronogolf.com/club/1234/widget?target=_blank&source=chronogolf&medium=profile#x",
+  ])("rejects non-public or changed widget source %s", value => {
+    expect(parseChronogolfPublicWidget(value)).toBeNull();
+    expect(parseChronogolfSource(value)).toBeNull();
+  });
 });
 describe("fresh exact profile identity and complete UUID catalog", () => {
   it("binds identity, timezone, every course UUID and distinct sale-round options", () => {
