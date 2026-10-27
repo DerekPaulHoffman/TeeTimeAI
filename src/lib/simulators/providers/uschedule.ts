@@ -175,7 +175,12 @@ function publicTimeGrid(all: Element[], learned: LearnedRental | undefined, html
   if (!rows.length || rows.length > MAX_PUBLIC_GRID_STARTS || rows.length !== allRows.length || rows.filter(node => cls(node, "selected")).length > 1 ||
       children(grid).some(node => !rows.includes(node) && !["show-extra-row", "hide-extra-row"].includes(attr(node, "id") ?? ""))) return invalid();
   const lengthLabels = all.filter(node => node.tagName === "label" && attr(node, "for") === "select_length");
-  if (lengthLabels.length !== 1 || clean(lengthLabels[0]) !== (locationPool ? "Choose Service Time" : unitsProfile || peopleProfile ? "Choose Time" : "Choose Simulator Time") || unsafe(lengthLabels[0])) return invalid();
+  const lengthLabel = lengthLabels.length === 1 ? clean(lengthLabels[0]) : "";
+  const standardPublicServiceTime = peopleProfile && isUScheduleStandardSimulatorBookingLabel(learned.serviceName) &&
+    hasUScheduleStandardSimulatorBookingWitness(html) && lengthLabel === "Choose Service Time";
+  if (lengthLabels.length !== 1 ||
+      (lengthLabel !== (locationPool ? "Choose Service Time" : unitsProfile || peopleProfile ? "Choose Time" : "Choose Simulator Time") && !standardPublicServiceTime) ||
+      unsafe(lengthLabels[0])) return invalid();
   const pools = all.filter(node => node.tagName === "select" && cls(node, "resSelect"));
   let resourceId: string;
   if (unitsProfile || peopleProfile || locationPool) {
@@ -204,14 +209,16 @@ function publicTimeGrid(all: Element[], learned: LearnedRental | undefined, html
   }
   const extras = rows.filter(node => cls(node, "extra"));
   const show = all.filter(node => attr(node, "id") === "show-extra-row"), hide = all.filter(node => attr(node, "id") === "hide-extra-row");
-  // This location profile can render its complete extras already expanded.
+  // A current standard public PEOPLE rental can also render all of its
+  // accounted extras already expanded. The service and pricing witness above
+  // must be fresh; other PEOPLE layouts retain the collapsed-only rule.
   // The hidden toggle is inert text; row visibility must match the whole pair.
-  const expanded = Boolean(locationPool && extras.length && show.length === 1 && hide.length === 1 &&
+  const expanded = Boolean((locationPool || standardPublicServiceTime) && extras.length && show.length === 1 && hide.length === 1 &&
     (attr(show[0], "style") ?? "").replace(/\s|;/gu, "").toLowerCase() === "display:none" && attr(hide[0], "style") === undefined);
   if (extras.length || (peopleProfile || locationPool) && (show.length || hide.length)) {
     const shownLabel = show.length === 1 ? children(show[0]) : [], hiddenLabel = hide.length === 1 ? children(hide[0]) : [];
     if (show.length !== 1 || hide.length !== 1 || show[0].parentNode !== grid || hide[0].parentNode !== grid || unsafe(show[0], false, expanded) ||
-        locationPool && unsafe(hide[0], false, !expanded) ||
+        (locationPool || standardPublicServiceTime) && unsafe(hide[0], false, !expanded) ||
         show[0].attrs.some(value => !["id", "class", ...(expanded ? ["style"] : [])].includes(value.name)) ||
         hide[0].attrs.some(value => !["id", "class", ...(expanded ? [] : ["style"])].includes(value.name)) ||
         shownLabel.length !== 1 || hiddenLabel.length !== 1 || [shownLabel[0], hiddenLabel[0]].some(node => node.tagName !== "span" || attr(node, "class") !== "no_time" || node.attrs.length !== 1) ||

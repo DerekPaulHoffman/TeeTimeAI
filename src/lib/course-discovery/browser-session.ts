@@ -40,6 +40,7 @@ import { venueProofMatches } from "./executor";
 import type { ExistingAdapterMetadata } from "./existing-adapter-schema";
 import { publicResponseSchema, type PublicResponseSchema } from "./public-response-schema";
 import type { OfficialIdentityPage } from "./teeitup-official-identity";
+import { verifiedTeeItUpContactParent } from "./teeitup-official-contact-chain";
 import { createTeeItUpOfficialBookingScope, observedTeeItUpOfficialBookingChain, type TeeItUpSourceRequestToken } from "./teeitup-official-booking-context";
 import { discoveryNavigationFailureKind, safeOfficialSourceDiagnostic, type OfficialSourceDiagnostic, type NavigationFailureKind } from "./official-source-diagnostics";
 import { inspectPublicRentalProduct } from "./public-product-control";
@@ -227,6 +228,8 @@ export type DiscoveryBrowserSessionDependencies = {
   allowCpsPhoneBookingContact?: true;
   /** Private fixed TeeItUp reader: canonical root may prove only the contact edge. */
   allowTeeItUpContactChainRoot?: true;
+  /** Private exact Contact handoff from the original fresh native root object. */
+  officialContactParent?: OfficialIdentityPage;
   fetch?: typeof fetch;
   launchBrowser?: () => Promise<Browser>;
   requestLease?: typeof runWithProviderRequestLease;
@@ -298,6 +301,10 @@ export async function createCourseDiscoveryBrowserSession(input: {
   if (requestedInput && requestedInput.timeZone !== (input.timeZone ?? "UTC")) throw new Error("REQUEST_CONTEXT_TIME_ZONE_MISMATCH");
   const initialUrls = input.initialUrls.map(normalizeDiscoveryNavigationUrl);
   if (!initialUrls.length || initialUrls.length > 16 || !initialUrls.every(isSafeRecipeUrl)) throw new Error("INVALID_INITIAL_URLS");
+  const officialContactUrl = deps.officialContactParent && input.venueOfficialUrl && initialUrls.length === 1 &&
+    deps.browserTransport === "NATIVE_CHROME" && !deps.allowTeeItUpContactChainRoot &&
+    verifiedTeeItUpContactParent(deps.officialContactParent, input.venueOfficialUrl, initialUrls[0]) ? initialUrls[0] : undefined;
+  if (deps.officialContactParent && !officialContactUrl) throw new Error("OFFICIAL_CONTACT_CHAIN_UNVERIFIED");
   const requestLimit = discoveryBrowserRequestLimit({ ...input, initialUrls }, deps);
   try { new Intl.DateTimeFormat("en-US", { timeZone: input.timeZone ?? "UTC" }); } catch { throw new Error("INVALID_TIME_ZONE"); }
   const remaining = input.deadlineAt.getTime() - Date.now();
@@ -309,7 +316,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
   // Only exact explicit inputs and actually observed safe public links do.
   const observedNavigationRoots = new Set(allowedNavigation);
   const cpsScope = createCpsPublicSessionScope(initialUrls);
-  const bookingParents = createPublicBookingParentScope({ officialUrl: input.venueOfficialUrl, venueName: input.venueName, venueAddress: input.venueAddress });
+  const bookingParents = createPublicBookingParentScope({ officialUrl: input.venueOfficialUrl, venueName: input.venueName, venueAddress: input.venueAddress }, officialContactUrl);
   const publicIntermediaries = new Map<string, { pageUrl: string; documentStartedAt: number }>();
   let nativeMainDocumentWitness: { request: NativeReadRequest; currentUrl: string; timeOrigin: number; frameId: string; loaderId: string;
     proof: NativeMainDocumentContinuity } | undefined;
@@ -805,6 +812,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
         navigation = { url: request.url(), status: reply.status, ...(nativeProxy ? { request, documentNonce: randomUUID() } : {}) };
         // Only actual main-document response/redirect metadata can establish
         // parent provenance; model navigation arguments and XHRs cannot.
+      if (officialContactUrl && request.url() === officialContactUrl &&
+          !verifiedTeeItUpContactParent(deps.officialContactParent!, input.venueOfficialUrl!, officialContactUrl))
+        throw new Error("OFFICIAL_CONTACT_CHAIN_UNVERIFIED");
         bookingParents.observeDocument({ url: request.url(), status: reply.status, redirectedFrom: request.redirectedFrom()?.url(),
           ...(nativeProxy ? { nativeRequest: request } : {}) });
         if (nativeProxy && input.venueOfficialUrl && attestedNativeDocumentRedirects(request, new Set([input.venueOfficialUrl])))
@@ -1710,6 +1720,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
       } catch (error) { rememberTeeItUpDelegationFailure(error, diagnostic); throw error; }
     },
     async readOfficialIdentityPage(): Promise<OfficialIdentityPage> {
+      if (officialContactUrl && !verifiedTeeItUpContactParent(deps.officialContactParent!, input.venueOfficialUrl!, officialContactUrl))
+        throw new Error("OFFICIAL_CONTACT_CHAIN_UNVERIFIED");
       lastOfficialIdentityReadDiagnostic = undefined;
       const current = await snapshot(false, true);
       // Fresh raw/current-document and rendered capture own this witness.

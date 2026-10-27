@@ -5,6 +5,7 @@ import { noteNativeOfficialIdentityPageCleanup, registerFreshNativeOfficialIdent
 import { registerFreshNativeDelegatedDocument } from "./native-official-page-attestation";
 import { consumeDelegatedGet, type DelegatedGetGrant, type DelegatedReadBudget } from "./teeitup-delegated-booking-context";
 import type { DiscoveryTrustedContext } from "./trusted-context";
+import { verifiedTeeItUpContactParent } from "./teeitup-official-contact-chain";
 
 export type NativeOfficialPageReader = (source: OfficialIdentitySource, pageUrl: string, deadlineAt: Date,
   mode?: "POSTAL" | "PHONE_LINK") => Promise<OfficialIdentityPage>;
@@ -14,6 +15,8 @@ type Dependencies = Pick<DiscoveryBrowserSessionDependencies, "requestLease" | "
   collectPublicCourseContacts?: true;
   allowCpsPhoneBookingContact?: true;
   allowTeeItUpContactChainRoot?: true;
+  /** Private, original WeakMap-attested root; only its exact Contact link may be read. */
+  officialContactParent?: OfficialIdentityPage;
   trustedContext?: DiscoveryTrustedContext;
   createSession?: (input: Parameters<typeof createCourseDiscoveryBrowserSession>[0], deps: DiscoveryBrowserSessionDependencies) => Promise<Session>;
 };
@@ -26,6 +29,9 @@ export async function readNativeOfficialIdentityPage(source: OfficialIdentitySou
   if (!source.officialUrl || !isSafeRecipeUrl(pageUrl) || !isSafeRecipeUrl(source.officialUrl) ||
       new URL(pageUrl).origin !== new URL(source.officialUrl).origin) throw new Error("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
   if (deps.allowTeeItUpContactChainRoot && pageUrl !== source.officialUrl) throw new Error("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
+  if (deps.officialContactParent && (deps.allowTeeItUpContactChainRoot ||
+      !verifiedTeeItUpContactParent(deps.officialContactParent, source.officialUrl, pageUrl)))
+    throw new Error("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
   const deadline = new Date(Math.min(deadlineAt.getTime(), Date.now() + 30_000));
   if (!Number.isFinite(deadline.getTime()) || deadline.getTime() <= Date.now()) throw new Error("DEADLINE_EXCEEDED");
   const createSession = deps.createSession ?? createCourseDiscoveryBrowserSession;
@@ -36,7 +42,8 @@ export async function readNativeOfficialIdentityPage(source: OfficialIdentitySou
     ...(deps.delegatedReadBudget ? { delegatedReadBudget: deps.delegatedReadBudget } : {}),
     ...(deps.collectPublicCourseContacts ? { collectPublicCourseContacts: true } : {}),
     ...(deps.allowCpsPhoneBookingContact ? { allowCpsPhoneBookingContact: true } : {}),
-    ...(deps.allowTeeItUpContactChainRoot ? { allowTeeItUpContactChainRoot: true } : {}) });
+    ...(deps.allowTeeItUpContactChainRoot ? { allowTeeItUpContactChainRoot: true } : {}),
+    ...(deps.officialContactParent ? { officialContactParent: deps.officialContactParent } : {}) });
   let capturedPage: OfficialIdentityPage | undefined;
   try {
     // loading covers every admitted resource, including ancillary reads. Wait

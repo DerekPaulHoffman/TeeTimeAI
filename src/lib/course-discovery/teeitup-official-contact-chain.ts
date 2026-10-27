@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { parse, type DefaultTreeAdapterMap } from "parse5";
 import { z } from "zod";
-import { isFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
+import { getNativeOfficialIdentityPageDiagnostic, isFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
 import { completeUSAddress, fullCourseName, type OfficialIdentityPage, type OfficialIdentitySource } from "./teeitup-official-identity";
 
 type Node = DefaultTreeAdapterMap["node"];
@@ -94,7 +94,7 @@ export async function readNativeTeeItUpContactChain(source: OfficialIdentitySour
   try { url = observedTeeItUpContactUrl(source, root); }
   catch { throw new Error("OFFICIAL_CONTACT_ROOT_LINK_UNVERIFIED"); }
   let contact: OfficialIdentityPage;
-  try { contact = await readNativeOfficialIdentityPage(source, url, deadlineAt, { requestLease }); }
+  try { contact = await readNativeOfficialIdentityPage(source, url, deadlineAt, { requestLease, officialContactParent: root }); }
   catch { throw new Error("OFFICIAL_CONTACT_PAGE_READ_UNVERIFIED"); }
   if (!isFreshNativeOfficialIdentityPage(root, source.officialUrl) || !isFreshNativeOfficialIdentityPage(contact, source.officialUrl))
     throw new Error("OFFICIAL_CONTACT_DOCUMENT_UNVERIFIED");
@@ -139,7 +139,7 @@ function sameLegacyBooking(left: string, right: string) {
     x.hostname.replace(/\.book\.teeitup\.golf$/u, ".book.teeitup.com") ===
       y.hostname.replace(/\.book\.teeitup\.golf$/u, ".book.teeitup.com");
 }
-export function observedTeeItUpContactUrl(source: OfficialIdentitySource, root: OfficialIdentityPage) {
+export function observedTeeItUpContactUrl(source: Pick<OfficialIdentitySource, "officialUrl">, root: OfficialIdentityPage) {
   if (!source.officialUrl || root.html.length > 2_000_000 || !isFreshNativeOfficialIdentityPage(root, source.officialUrl)) throw new Error("OFFICIAL_CONTACT_CHAIN_UNVERIFIED");
   const official = new URL(source.officialUrl), current = new URL(root.url);
   if (current.href !== official.href || current.protocol !== "https:" || official.pathname !== "/" || official.search || official.hash)
@@ -148,6 +148,18 @@ export function observedTeeItUpContactUrl(source: OfficialIdentitySource, root: 
   const contact = sole(links.map(link => link.href));
   if (!contact || new URL(contact).origin !== official.origin || contact === root.url) throw new Error("OFFICIAL_CONTACT_CHAIN_UNVERIFIED");
   return contact;
+}
+/** A fresh native root authorizes exactly its corroborated public Contact link.
+ * The returned URL never comes from a model, recipe or same-origin guess. */
+export function verifiedTeeItUpContactParent(root: OfficialIdentityPage, officialUrl: string, targetUrl: string) {
+  if (!isFreshNativeOfficialIdentityPage(root, officialUrl)) return false;
+  const cleanup = getNativeOfficialIdentityPageDiagnostic(root, officialUrl);
+  if (!cleanup.cleanupSettled || !cleanup.cleanupSucceeded || !cleanup.freshAfterCleanup) return false;
+  try {
+    const official = new URL(officialUrl), target = new URL(targetUrl);
+    return official.protocol === "https:" && target.protocol === "https:" && target.origin === official.origin &&
+      observedTeeItUpContactUrl({ officialUrl }, root) === targetUrl;
+  } catch { return false; }
 }
 export function bindTeeItUpOfficialContactChain(source: OfficialIdentitySource, root: OfficialIdentityPage, contact: OfficialIdentityPage, directory: unknown) {
   const fail = (): never => { throw new Error("OFFICIAL_CONTACT_CHAIN_UNVERIFIED"); };

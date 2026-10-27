@@ -8,6 +8,19 @@ describe("context-local verified public booking parents", () => {
   const identity = { officialUrl: official, venueName: "Harbour Pointe Golf Club", venueAddress: "11817 Harbour Pointe Blvd, Mukilteo, WA 98275, USA" };
   const visible = { headings: [identity.venueName], addressTexts: ["11817 Harbour Pointe Blvd, Mukilteo, Washington, 98275"] };
   const scope = () => createPublicBookingParentScope(identity);
+  it("confines the private Contact handoff to one actual native 200 document", () => {
+    const contact = "https://www.venue.example/contact/";
+    const value = createPublicBookingParentScope(identity, contact);
+    expect(value.authorizeParent(contact)).toBeUndefined();
+    value.observeDocument({ url: contact, status: 200 });
+    expect(value.authorizeParent(contact)).toEqual({ kind: "VERIFIED_OFFICIAL_DOCUMENT", officialUrl: official, documentUrl: contact });
+    expect(value.authorizeParent("https://www.venue.example/other/")).toBeUndefined();
+    value.beginDocument(contact);
+    expect(value.authorizeParent(contact)).toBeUndefined();
+    value.observeDocument({ url: contact, status: 403 });
+    expect(value.authorizeParent(contact)).toBeUndefined();
+    expect(() => createPublicBookingParentScope(identity, "https://other.example/contact/")).toThrow("OFFICIAL_CONTACT_CHAIN_UNVERIFIED");
+  });
   const prepare = () => {
     const value = scope();
     value.observeDocument({ url: official, status: 301 });

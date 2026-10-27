@@ -41,9 +41,17 @@ function matchesIdentity(venueName: string, venueAddress: string | undefined, ev
 /** Context-local source provenance only. Neither a checkpoint nor a proposed
  * recipe can populate it. This permits standalone inspection of visible iframe
  * source markup; it never proves availability or permits iframe execution. */
-export function createPublicBookingParentScope(identity: { officialUrl?: string; venueName?: string; venueAddress?: string }) {
+export function createPublicBookingParentScope(identity: { officialUrl?: string; venueName?: string; venueAddress?: string }, privateOfficialContactUrl?: string) {
   const official = identity.officialUrl && documentKey(identity.officialUrl);
   const candidates = new Map<string, Candidate>(official ? [[official, { kind: "OFFICIAL" }]] : []);
+  // Only the browser session's private, independently attested Contact handoff
+  // supplies this exact URL. A same-origin URL alone is never admitted here.
+  if (official && privateOfficialContactUrl) {
+    const contact = documentKey(privateOfficialContactUrl);
+    if (!contact || contact === official || new URL(contact).origin !== new URL(official).origin ||
+        new URL(contact).protocol !== "https:") throw new Error("OFFICIAL_CONTACT_CHAIN_UNVERIFIED");
+    candidates.set(contact, { kind: "OFFICIAL" });
+  }
   const verified = new Map<string, Candidate>();
   const remember = (url: string, candidate: Candidate) => {
     if (!candidates.has(url) && candidates.size >= 32) return false;

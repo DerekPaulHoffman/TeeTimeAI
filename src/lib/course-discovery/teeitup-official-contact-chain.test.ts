@@ -3,8 +3,8 @@ import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { inspectionErrorCode } from "../../../scripts/automation/course-discovery-stagehand-inspection.mjs";
-import { registerFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
-import { bindTeeItUpOfficialContactChain, observedTeeItUpContactUrl } from "./teeitup-official-contact-chain";
+import { noteNativeOfficialIdentityPageCleanup, registerFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
+import { bindTeeItUpOfficialContactChain, observedTeeItUpContactUrl, verifiedTeeItUpContactParent } from "./teeitup-official-contact-chain";
 import type { OfficialIdentityPage } from "./teeitup-official-identity";
 import { resolveTeeItUpRecipeFacilities } from "./teeitup-recipe-source";
 import { parseAccessRecipe } from "./recipe";
@@ -32,6 +32,36 @@ function pair(change: { rootHtml?: string; contactHtml?: string; contactAddress?
   return { root, contact };
 }
 describe("TeeItUp official contact chain", () => {
+  it("hands off only the original fresh, closed root's exact Contact link", () => {
+    const { root } = pair();
+    expect(verifiedTeeItUpContactParent(root, source.officialUrl, contactUrl)).toBe(false);
+    noteNativeOfficialIdentityPageCleanup(root, source.officialUrl, "BEFORE");
+    noteNativeOfficialIdentityPageCleanup(root, source.officialUrl, "AFTER", true);
+    expect(verifiedTeeItUpContactParent(root, source.officialUrl, contactUrl)).toBe(true);
+    expect(verifiedTeeItUpContactParent(structuredClone(root), source.officialUrl, contactUrl)).toBe(false);
+    expect(verifiedTeeItUpContactParent(root, source.officialUrl, "https://harbor.example/other/")).toBe(false);
+    expect(verifiedTeeItUpContactParent(root, source.officialUrl, "https://other.example/contact/")).toBe(false);
+    root.visibleEvidence!.officialContactLinkLabels = [{ href: "https://harbor.example/other/", text: "Contact Us" }];
+    expect(verifiedTeeItUpContactParent(root, source.officialUrl, contactUrl)).toBe(false);
+  });
+  it.each([
+    ["hidden", `<h1>${source.venueName}</h1><div hidden><a href="/contact/">Contact Us</a></div>`],
+    ["form", `<h1>${source.venueName}</h1><form><a href="/contact/">Contact Us</a></form>`],
+  ])("rejects %s raw Contact links from a fresh root", (_label, html) => {
+    const { root } = pair({ rootHtml: html });
+    noteNativeOfficialIdentityPageCleanup(root, source.officialUrl, "BEFORE");
+    noteNativeOfficialIdentityPageCleanup(root, source.officialUrl, "AFTER", true);
+    expect(verifiedTeeItUpContactParent(root, source.officialUrl, contactUrl)).toBe(false);
+  });
+  it("rejects two rendered Contact destinations", () => {
+    const root = page(source.officialUrl,
+      `<h1>${source.venueName}</h1><a href="/contact/">Contact Us</a><a href="/contact-2/">Contact Us</a>`,
+      { title: source.venueName, headings: [source.venueName], addressTexts: [], linkUrls: [contactUrl, "https://harbor.example/contact-2/"],
+        officialContactLinkLabels: [{ href: contactUrl, text: "Contact Us" }, { href: "https://harbor.example/contact-2/", text: "Contact Us" }] });
+    noteNativeOfficialIdentityPageCleanup(root, source.officialUrl, "BEFORE");
+    noteNativeOfficialIdentityPageCleanup(root, source.officialUrl, "AFTER", true);
+    expect(verifiedTeeItUpContactParent(root, source.officialUrl, contactUrl)).toBe(false);
+  });
   it("loads the native reader through the real Node and tsx module namespace", () => {
     const moduleUrl = pathToFileURL(resolve("src/lib/course-discovery/teeitup-official-contact-chain.ts")).href;
     const script = `const imported = await import(${JSON.stringify(moduleUrl)}); const contact = imported.default ?? imported;

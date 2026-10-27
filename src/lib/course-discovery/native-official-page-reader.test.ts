@@ -6,7 +6,7 @@ import { createCourseDiscoveryBrowserSession, type DiscoveryBrowserSnapshot } fr
 import { bindTeeItUpPostalConflictProof } from "./teeitup-postal-conflict-proof";
 import * as nativeBrowser from "./native-public-browser";
 import * as nativeRouting from "./native-redirect-routing";
-import { getNativeOfficialIdentityPageDiagnostic, isFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
+import { getNativeOfficialIdentityPageDiagnostic, isFreshNativeOfficialIdentityPage, noteNativeOfficialIdentityPageCleanup, registerFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
 
 const source = { officialUrl: "https://example.org/", bookingUrl: "https://harbor.book.teeitup.com/", venueName: "Harbor Golf Course",
   venueAddress: "10 Harbor Drive, Example, NY 12345, USA", timeZone: "America/New_York" };
@@ -20,6 +20,30 @@ function fixture(change: Partial<DiscoveryBrowserSnapshot> = {}) {
   return { execute, readOfficialIdentityPage, close, createSession };
 }
 describe("fixed native official source reader", () => {
+  it("passes only a closed fresh root's exact Contact page to the private native session", async () => {
+    const contact = "https://example.org/contact/";
+    const root = registerFreshNativeOfficialIdentityPage({ url: source.officialUrl,
+      html: `<h1>${source.venueName}</h1><a href="/contact/">Contact Us</a>`, browserTransport: "NATIVE_CHROME",
+      visibleEvidence: { title: source.venueName, headings: [source.venueName], addressTexts: [], linkUrls: [contact],
+        officialContactLinkLabels: [{ href: contact, text: "Contact Us" }] } }, source.officialUrl, new Date(Date.now() + 30_000));
+    const mocked = fixture({ url: contact, officialSourceDiagnostic: { stage: "CONTROLLER_CAPTURE", rawOfficialCaptured: true,
+      currentOfficialDocument: true, officialProvenance: true, renderedAddressesPresent: true, renderedLinksPresent: true } });
+    mocked.readOfficialIdentityPage.mockResolvedValue({ url: contact, html: `<p>${source.venueAddress}</p>`, browserTransport: "NATIVE_CHROME",
+      visibleEvidence: { title: source.venueName, headings: ["Contact Us"], addressTexts: [source.venueAddress], linkUrls: [source.bookingUrl] } });
+    await expect(readNativeOfficialIdentityPage(source, contact, new Date(Date.now() + 30_000),
+      { ...mocked, officialContactParent: root })).rejects.toThrow("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
+    expect(mocked.createSession).not.toHaveBeenCalled();
+    noteNativeOfficialIdentityPageCleanup(root, source.officialUrl, "BEFORE");
+    noteNativeOfficialIdentityPageCleanup(root, source.officialUrl, "AFTER", true);
+    const result = await readNativeOfficialIdentityPage(source, contact, new Date(Date.now() + 30_000),
+      { ...mocked, officialContactParent: root });
+    expect(result.url).toBe(contact);
+    expect((mocked.createSession.mock.calls[0] as unknown as [unknown, Record<string, unknown>])[1].officialContactParent).toBe(root);
+    await expect(readNativeOfficialIdentityPage(source, "https://example.org/other/", new Date(Date.now() + 30_000),
+      { ...fixture(), officialContactParent: root })).rejects.toThrow("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
+    await expect(readNativeOfficialIdentityPage(source, contact, new Date(Date.now() + 30_000),
+      { ...fixture(), officialContactParent: structuredClone(root) })).rejects.toThrow("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
+  });
   it("admits an address-free canonical root only for the private contact-chain mode", async () => {
     const session = fixture({ officialSourceDiagnostic: { stage: "CONTROLLER_CAPTURE", rawOfficialCaptured: true,
       currentOfficialDocument: true, officialProvenance: true, renderedHeadingsPresent: true, renderedAddressesPresent: false,
@@ -136,6 +160,47 @@ describe("fixed native official source reader", () => {
 
 const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 describe.runIf(existsSync(executablePath))("fresh native official identity with pending ancillary fixtures", () => {
+  it("opens only a fresh root's exact Contact link in a second native browser session", async () => {
+    const contact = "https://example.org/contact/";
+    const rootHtml = `<html><head><title>${source.venueName}</title></head><body><h1>${source.venueName}</h1><a href="/contact/">Contact Us</a><a href="${source.bookingUrl}">Tee Times</a></body></html>`;
+    const contactHtml = `<html><head><title>Contact Us</title></head><body><h1>Contact Us</h1><p>${source.venueName}</p><address>${source.venueAddress}</address><a href="${source.bookingUrl}">Tee Times</a></body></html>`;
+    const proxy = vi.spyOn(nativeBrowser, "createNativePublicBrowserProxy").mockResolvedValue({ server: "http://127.0.0.1:9",
+      close: async () => {}, allowHostConnections: () => {}, cancelHostConnections: async () => {},
+      stats: () => ({ connections: 0, activeSockets: 0, bytes: 0 }) });
+    const routing = vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, handler) => ({
+      prepare: () => {}, beginDocumentNavigation: async () => {}, close: async () => {}, pendingReads: 0, lastFailure: undefined,
+      releasePlaywrightRoute: route => handler(route),
+    }));
+    const native = vi.spyOn(nativeBrowser, "continueNativeBrowserRead").mockImplementation(async route => {
+      const url = route.request().url();
+      if (url !== source.officialUrl && url !== contact) throw new Error("UNEXPECTED_LOCAL_FIXTURE_URL");
+      const headers = { "content-type": "text/html" }, body = Buffer.from(url === contact ? contactHtml : rootHtml);
+      await route.fulfill({ status: 200, headers, body }); return { status: 200, url, headers, body };
+    });
+    const browsers: Awaited<ReturnType<typeof chromium.launch>>[] = [];
+    const createSession = async (...args: Parameters<typeof createCourseDiscoveryBrowserSession>) =>
+      createCourseDiscoveryBrowserSession(args[0], { ...args[1], launchBrowser: async () => {
+        const browser = await chromium.launch({ executablePath, headless: true }); browsers.push(browser); return browser;
+      } });
+    try {
+      const root = await readNativeOfficialIdentityPage(source, source.officialUrl, new Date(Date.now() + 30_000),
+        { createSession, requestLease: async (_family, work) => ({ acquired: true, value: await work() }), allowTeeItUpContactChainRoot: true });
+      expect(getNativeOfficialIdentityPageDiagnostic(root, source.officialUrl)).toMatchObject({ cleanupSucceeded: true, freshAfterCleanup: true });
+      expect(root.visibleEvidence.officialContactLinkLabels).toContainEqual({ href: contact, text: "Contact Us" });
+      const page = await readNativeOfficialIdentityPage(source, contact, new Date(Date.now() + 30_000),
+        { createSession, requestLease: async (_family, work) => ({ acquired: true, value: await work() }), officialContactParent: root });
+      expect(page.url).toBe(contact);
+      expect(page.visibleEvidence.addressTexts).toContain(source.venueAddress);
+      expect(getNativeOfficialIdentityPageDiagnostic(page, source.officialUrl)).toMatchObject({ cleanupSucceeded: true, freshAfterCleanup: true });
+      await expect(readNativeOfficialIdentityPage(source, "https://example.org/other/", new Date(Date.now() + 30_000),
+        { createSession, officialContactParent: root })).rejects.toThrow("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
+      root.visibleEvidence.officialContactLinkLabels![0].href = "https://example.org/changed/";
+      await expect(readNativeOfficialIdentityPage(source, contact, new Date(Date.now() + 30_000),
+        { createSession, officialContactParent: root })).rejects.toThrow("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
+      expect(browsers).toHaveLength(2);
+      expect(browsers.every(browser => !browser.isConnected())).toBe(true);
+    } finally { for (const browser of browsers) await browser.close(); native.mockRestore(); routing.mockRestore(); proxy.mockRestore(); }
+  }, 30_000);
   it.each(["visible", "hidden address", "missing address", "changed document", "hidden phone"] as const)(
     "retains strict raw/rendered/phone proof while ancillary scripts remain pending: %s", async mode => {
       // Every browser read is fulfilled in memory. A dead loopback proxy and
