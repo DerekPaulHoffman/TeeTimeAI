@@ -29,7 +29,7 @@ function teeitupReads(payload: unknown, directory: unknown = teeitupDirectory) {
   return vi.fn<typeof fetch>(async value => Response.json(new URL(String(value)).pathname.includes("/facilities") ? directory : payload));
 }
 const foreupHtml = () => `<script>SCHEDULES = ${JSON.stringify([{ title: "Example Golf", course_id: 123, teesheet_id: 456,
-  booking_classes: [{ teesheet_id: 456, active: 1, hidden: 0, booking_class_id: 789 }] }])};</script>`;
+  booking_classes: [{ teesheet_id: 456, active: 1, hidden: 0, booking_class_id: 789, name: "Public" }] }])};</script>`;
 function acuityHtml(overrides: Record<string, unknown> = {}) {
   return `<script>var BUSINESS = ${JSON.stringify({ name: "Example Simulator", id: 345, ownerKey: "owner123", timezone: input.timeZone,
     includesAdminOnly: false, isExpired: false, description: "", calendars: { "Example Simulator": [{ id: 89, name: "Bay 1", timezone: input.timeZone }] },
@@ -155,14 +155,56 @@ describe("fixed existing adapter recipes", () => {
   });
   it("retains strict data-only metadata", () => {
     expect(existingAdapterMetadataSchema.safeParse({ ...foreup.adapter, code: "fetch(...)" }).success).toBe(false);
+    expect(existingAdapterMetadataSchema.safeParse({ ...foreup.adapter, inventoryScope: "STANDARD_PUBLIC_CLASS_V1" }).success).toBe(false);
+    expect(existingAdapterMetadataSchema.safeParse({ ...foreup.adapter, publicCatalogSha256: "a".repeat(64) }).success).toBe(false);
     expect(existingAdapterMetadataSchema.safeParse({ ...acuity.adapter, rentalProductIds: ["67", "67"] }).success).toBe(false);
     expect(parseAccessRecipe(teeitup).engine).toBe("EXISTING_ADAPTER");
     expect(() => parseAccessRecipe({ ...teeitup, source: { ...teeitup.source, venueAddress: undefined } })).toThrow();
   });
   it("independently discovers existing ForeUP configuration", async () => {
     const fetch = reads(foreup, []);
+    const { adapter } = await inspectExistingAdapter(foreup.source, { ...deps, fetch });
+    expect(adapter).toMatchObject({ ...foreup.adapter, inventoryScope: "STANDARD_PUBLIC_CLASS_V1" });
+    expect(adapter.family === "FOREUP" && adapter.publicCatalogSha256).toMatch(/^[a-f0-9]{64}$/u);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+  it("retains strict unscoped cold discovery for a sole unlabelled legacy class", async () => {
+    const unlabelled = `<script>SCHEDULES=${JSON.stringify([{ title: "Example Golf", course_id: 123, teesheet_id: 456,
+      booking_classes: [{ teesheet_id: 456, active: 1, hidden: 0, booking_class_id: 789 }] }])};</script>`;
+    const fetch = reads(foreup, [], unlabelled);
     expect(await inspectExistingAdapter(foreup.source, { ...deps, fetch })).toEqual({ adapter: foreup.adapter });
     expect(fetch).toHaveBeenCalledTimes(2);
+  });
+  it("binds Standard Public only to the fresh explicit class and catalog across cold and warm reads", async () => {
+    const publicClass = { teesheet_id: 456, active: 1, hidden: 0, booking_class_id: 789, name: "Public" };
+    const alternate = { ...publicClass, booking_class_id: 790, name: "MEMBER" };
+    const preferred = { ...publicClass, booking_class_id: 791, name: "PreferredPlayer" };
+    const document = (classes: object[], extra: object[] = []) => `<script>SCHEDULES=${JSON.stringify([
+      { title: "Example Golf", course_id: 123, teesheet_id: 456, booking_classes: classes }, ...extra])};</script>`;
+    const current = document([publicClass, alternate, preferred]);
+    const { adapter } = await inspectExistingAdapter(foreup.source, { ...deps, fetch: reads(foreup, [], current) });
+    expect(adapter).toMatchObject({ family: "FOREUP", bookingClassId: 789, inventoryScope: "STANDARD_PUBLIC_CLASS_V1" });
+    const recipe = parseAccessRecipe({ ...foreup, adapter }) as ExistingAdapterRecipe;
+    const available = await executeExistingAdapterRecipe(recipe, input, { ...deps,
+      fetch: reads(recipe, [{ time: `${input.date} 11:00`, available_spots: 2, schedule_id: 456, booking_class_id: 789 }], current) });
+    expect(available).toMatchObject({ status: "AVAILABLE", complete: true, slots: [{ availableSpots: 2 }] });
+    const insufficient = await executeExistingAdapterRecipe(recipe, { ...input, players: 3 }, { ...deps,
+      fetch: reads(recipe, [{ time: `${input.date} 11:00`, available_spots: 2, schedule_id: 456, booking_class_id: 789 }], current) });
+    expect(insufficient).toMatchObject({ status: "EMPTY", complete: true, slots: [] });
+    const unscoped = await executeExistingAdapterRecipe(foreup, input, { ...deps, fetch: reads(foreup, [], current) });
+    expect(unscoped).toMatchObject({ status: "INCOMPLETE", complete: false, slots: [] });
+    for (const changed of [document([publicClass, alternate, { ...preferred, name: "Preferred Guest" }]),
+      document([{ ...publicClass, booking_class_id: 999 }, alternate, preferred]),
+      document([publicClass, alternate, preferred], [{ title: "Another Sheet", course_id: 123, teesheet_id: 457,
+        booking_classes: [{ ...preferred, teesheet_id: 457 }] }])]) {
+      const fetch = reads(recipe, [], changed);
+      expect(await executeExistingAdapterRecipe(recipe, input, { ...deps, fetch }))
+        .toMatchObject({ status: "INCOMPLETE", complete: false, slots: [] });
+      expect(fetch).toHaveBeenCalledOnce();
+    }
+    await expect(inspectExistingAdapter(foreup.source, { ...deps,
+      fetch: reads(foreup, [], document([publicClass, { ...preferred, booking_class_id: 789 }])) }))
+      .rejects.toThrow("ADAPTER_CONFIGURATION_UNVERIFIED");
   });
   it("preserves a member-default ForeUP entry while freshly resolving its sole public canonical schedule for each replay", async () => {
     const source = { ...foreup.source, bookingUrl: "https://foreupsoftware.com/index.php/booking/123/111#teetimes" };
@@ -173,7 +215,8 @@ describe("fixed existing adapter recipes", () => {
         { teesheet_id: 456, active: 1, hidden: 0, booking_class_id: 790, name: "Members" }] }];
     const html = `<script>SCHEDULES = ${JSON.stringify(schedules)};</script>`;
     const { adapter } = await inspectExistingAdapter(source, { ...deps, fetch: reads(foreup, [], html) });
-    expect(adapter).toEqual(foreup.adapter);
+    expect(adapter).toMatchObject({ ...foreup.adapter, inventoryScope: "STANDARD_PUBLIC_CLASS_V1" });
+    expect(adapter.family === "FOREUP" && adapter.publicCatalogSha256).toMatch(/^[a-f0-9]{64}$/u);
     const saved = JSON.stringify(parseAccessRecipe({ ...foreup, source, adapter }));
     const recipe = parseAccessRecipe(JSON.parse(saved)) as ExistingAdapterRecipe;
     for (const request of [input, { ...input, date: "2030-10-23", players: 3 }]) {
@@ -223,7 +266,8 @@ describe("fixed existing adapter recipes", () => {
         { teesheet_id: 456, active: 1, hidden: 0, booking_class_id: 790, name: "Full Week Member" }] }])};</script>`;
     const fetch = reads(foreup, [{ time: "2030-10-22 11:00", available_spots: 4 }], publicPlayHtml);
     const { adapter } = await inspectExistingAdapter(source, { ...deps, fetch });
-    expect(adapter).toEqual(foreup.adapter);
+    expect(adapter).toMatchObject({ ...foreup.adapter, inventoryScope: "STANDARD_PUBLIC_CLASS_V1" });
+    expect(adapter.family === "FOREUP" && adapter.publicCatalogSha256).toMatch(/^[a-f0-9]{64}$/u);
     const recipe = parseAccessRecipe({ ...foreup, source, adapter }) as ExistingAdapterRecipe;
     expect(recipe.source.bookingUrl).toBe(source.bookingUrl);
     for (const request of [input, { ...input, date: "2030-10-23", players: 3 }]) {

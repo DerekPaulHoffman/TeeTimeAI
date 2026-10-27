@@ -256,13 +256,18 @@ test('routing-only entries cannot exceed the original two native frame operation
 });
 test('core and stateless-history prompt distinguish terminal availability from an intermediate operator labelled Book',()=>{
  const history={completedAnchorClicks:[{href:booking,afterUrl:landing,eligibleBookingSource:true,landingChanged:true}]};
- const text=buildSourceDiscoveryInstruction({identity:{name:'Public Course'},input:{players:2}},[booking],null,history);
+ const text=buildSourceDiscoveryInstruction({identity:{name:'Public Course'},target:{kind:'OUTDOOR'},input:{players:2}},[booking],null,history);
  assert.match(text,/terminal public availability provider or a self-hosted availability widget/);
+ assert.match(text,/Ordinary outdoor alerts cover Standard Public inventory only/u);
+ assert.match(text,/Member and Preferred Player inventory is excluded without trusted eligibility/u);
  assert.match(text,/link labelled Book can lead to an intermediate operator site: choose CONTINUE/);
  assert.match(text,/completed click alone does not establish a terminal source/);
  assert.match(text,/If that destination is an informational operator homepage, choose CONTINUE/);
  assert.match(text,/do not click merely to qualify/);assert.match(text,/both independent server challenges/);
  assert.ok(text.includes(JSON.stringify(history)));assert.ok(text.includes(`eligibleBookingSourceUrls=${JSON.stringify([booking])}`));
+ const simulator=buildSourceDiscoveryInstruction({identity:{name:'Public Simulator'},target:{kind:'SIMULATOR'},input:{players:2,durationMinutes:60}},[booking]);
+ assert.match(simulator,/public whole-bay golf rentals only/u);
+ assert.doesNotMatch(simulator,/Ordinary outdoor alerts cover Standard Public inventory/u);
 });
 test('actual source OPEN failure retains closed navigation diagnosis before any model invocation',async()=>{
  const f=fixture();f.session.goto=async()=>{throw Error('Page.navigate: net::ERR_BLOCKED_BY_CLIENT https://private.example/?secret=SECRET');};

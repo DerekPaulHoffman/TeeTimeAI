@@ -5,7 +5,7 @@ import { createAddressPinnedPublicFetchTransport } from "@/lib/automation/addres
 import { createUSchedulePublicSession } from "@/lib/automation/uschedule-public-session";
 import { fetchUScheduleRecipeAvailability, inspectUScheduleRecipeConfiguration } from "@/lib/simulators/providers/uschedule";
 import { uschedulePublicTenant } from "@/lib/simulators/providers/public-configuration";
-import { hasCompleteForeupPublicScheduleScope, parseForeupPublicConfiguration, readForeupPublicConfiguration } from "@/lib/automation/foreup-public-configuration";
+import { FOREUP_STANDARD_PUBLIC_SCOPE, foreupPublicScheduleCatalogSha256, hasCompleteForeupPublicScheduleScope, isExplicitForeupPublicClass, parseForeupPublicConfiguration, readForeupPublicConfiguration } from "@/lib/automation/foreup-public-configuration";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
 import { fetchAcuitySimulatorAvailability, parseAcuityPublicConfigurationIdentity, readAcuityPublicConfiguration } from "@/lib/simulators/providers/acuity";
@@ -418,20 +418,40 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
     dispose: () => queue.dispose(), availabilityWasArray: () => availabilityWasArray, failureReason: () => fixedReadFailure };
 }
 
-async function inspectForeupConfiguration(source: Source, deps: Dependencies, fetchImpl: typeof fetch, expected?: ForeupOfficialRouteOwnershipProof, warm = false) {
+async function inspectForeupConfiguration(source: Source, deps: Dependencies, fetchImpl: typeof fetch,
+  expected?: ForeupOfficialRouteOwnershipProof, warm = false, inventoryScope?: typeof FOREUP_STANDARD_PUBLIC_SCOPE,
+  expectedScope?: { scheduleId: number; bookingClassId: number; publicCatalogSha256: string }) {
   const coverageFailure = warm ? "FOREUP_PUBLIC_SCHEDULE_COVERAGE_UNVERIFIED" : "ADAPTER_CONFIGURATION_UNVERIFIED";
+  if (expected && expected.inventoryScope !== inventoryScope) fail("FOREUP_OFFICIAL_ROUTE_UNVERIFIED");
   if (expected && !deps.localCapabilities?.includes("LOCAL_CHROME")) fail("LOCAL_CHROME_REQUIRED");
   if (expected && (!source.officialUrl || !source.venueAddress || expected.officialUrl !== source.officialUrl || expected.bookingUrl !== source.bookingUrl ||
       expected.venueName !== source.venueName || expected.canonicalAddress !== source.venueAddress || expected.timeZone !== source.timeZone ||
       expected.publicCoursePhone !== deps.trustedContext?.canonicalCoursePhone)) fail("FOREUP_OFFICIAL_ROUTE_UNVERIFIED");
   let proof: ForeupOfficialRouteOwnershipProof | undefined;
+  let publicCatalogSha256: string | undefined;
+  let resolvedScope = inventoryScope;
   const config = await readForeupPublicConfiguration({ bookingUrl: source.bookingUrl, courseName: source.venueName,
     fetchImpl, rethrowError: () => true, parseDocument: async html => {
       if (!expected) {
         const legacy = parseForeupPublicConfiguration({ bookingUrl: source.bookingUrl, courseName: source.venueName, html });
         if (legacy) {
           const path = foreupPath.exec(new URL(source.bookingUrl).pathname)!;
-          if (!hasCompleteForeupPublicScheduleScope({ html, facilityId: Number(path[1] ?? path[3]), scheduleId: legacy.scheduleId })) fail(coverageFailure);
+          const facilityId = Number(path[1] ?? path[3]);
+          if (!hasCompleteForeupPublicScheduleScope({ html, facilityId, scheduleId: legacy.scheduleId, inventoryScope })) {
+            // A sole unlabelled legacy class retains the old strict path.
+            // An explicit Public label with a failed scoped proof cannot
+            // escape through that path.
+            if (!warm && inventoryScope && !isExplicitForeupPublicClass({ html, facilityId,
+                scheduleId: legacy.scheduleId, bookingClassId: legacy.bookingClassId }) &&
+                hasCompleteForeupPublicScheduleScope({ html, facilityId, scheduleId: legacy.scheduleId })) resolvedScope = undefined;
+            else fail(coverageFailure);
+          }
+          if (resolvedScope) {
+            publicCatalogSha256 = foreupPublicScheduleCatalogSha256(html) ?? undefined;
+            if (!publicCatalogSha256) fail(coverageFailure);
+            if (expectedScope && (legacy.scheduleId !== expectedScope.scheduleId || legacy.bookingClassId !== expectedScope.bookingClassId ||
+                publicCatalogSha256 !== expectedScope.publicCatalogSha256)) fail("ADAPTER_CONFIGURATION_CHANGED");
+          }
           return legacy;
         }
       }
@@ -447,15 +467,27 @@ async function inspectForeupConfiguration(source: Source, deps: Dependencies, fe
       const page = await read(source, source.officialUrl!, end);
       const contact = deriveForeupOfficialRouteContact(source, page, deps.trustedContext?.canonicalCoursePhone);
       let derived: ReturnType<typeof bindForeupOfficialRouteConfiguration>;
-      try { derived = bindForeupOfficialRouteConfiguration(contact, html); }
+      try { derived = bindForeupOfficialRouteConfiguration(contact, html, inventoryScope); }
       catch (error) {
-        if (error instanceof Error && error.message === "FOREUP_PUBLIC_SCHEDULE_COVERAGE_UNVERIFIED") fail(coverageFailure);
-        throw error;
+        if (!warm && !expected && inventoryScope && error instanceof Error &&
+            error.message === "FOREUP_PUBLIC_SCHEDULE_COVERAGE_UNVERIFIED") {
+          const legacy = bindForeupOfficialRouteConfiguration(contact, html);
+          const path = foreupPath.exec(new URL(source.bookingUrl).pathname)!;
+          if (isExplicitForeupPublicClass({ html, facilityId: Number(path[1] ?? path[3]),
+              scheduleId: legacy.config.scheduleId, bookingClassId: legacy.config.bookingClassId })) fail(coverageFailure);
+          derived = legacy;
+          resolvedScope = undefined;
+        } else if (error instanceof Error && error.message === "FOREUP_PUBLIC_SCHEDULE_COVERAGE_UNVERIFIED") fail(coverageFailure);
+        else throw error;
       }
       if (expected && foreupOwnershipDigest(derived.proof) !== foreupOwnershipDigest(expected)) fail("ADAPTER_CONFIGURATION_CHANGED");
-      proof = derived.proof; return derived.config;
+      proof = derived.proof;
+      publicCatalogSha256 = derived.proof.publicCatalogSha256;
+      if (expectedScope && (derived.config.scheduleId !== expectedScope.scheduleId || derived.config.bookingClassId !== expectedScope.bookingClassId ||
+          publicCatalogSha256 !== expectedScope.publicCatalogSha256)) fail("ADAPTER_CONFIGURATION_CHANGED");
+      return derived.config;
     } });
-  return { config, proof };
+  return { config, proof, publicCatalogSha256, inventoryScope: resolvedScope };
 }
 
 /** For a controller-observed provider URL only. Reads typed public configuration
@@ -611,11 +643,15 @@ export async function inspectExistingAdapter(source: Source, deps: Dependencies)
         ...(session.officialStreetTypeOmittedProof() ? { officialStreetTypeOmittedProof: session.officialStreetTypeOmittedProof() } : {}) }) };
     }
     if (session.family === "FOREUP") {
-      const { config, proof } = await inspectForeupConfiguration(source, deps, session.read);
+      const { config, proof, publicCatalogSha256, inventoryScope } = await inspectForeupConfiguration(source, deps, session.read,
+        undefined, false, FOREUP_STANDARD_PUBLIC_SCOPE);
       if (!config) fail("ADAPTER_CONFIGURATION_UNVERIFIED");
+      if (inventoryScope && !publicCatalogSha256) fail("ADAPTER_CONFIGURATION_UNVERIFIED");
       const path = foreupPath.exec(new URL(source.bookingUrl).pathname)!;
       return { adapter: existingAdapterMetadataSchema.parse({ family: "FOREUP", facilityId: Number(path[1] ?? path[3]),
-        scheduleId: config.scheduleId, bookingClassId: config.bookingClassId, ...(proof ? { officialRouteOwnershipProof: proof } : {}) }) };
+        scheduleId: config.scheduleId, bookingClassId: config.bookingClassId,
+        ...(inventoryScope && publicCatalogSha256 ? { inventoryScope, publicCatalogSha256 } : {}),
+        ...(proof ? { officialRouteOwnershipProof: proof } : {}) }) };
     }
     const observed = await readAcuityPublicConfiguration({ bookingUrl: source.bookingUrl, fetchImpl: session.read });
     if (!observed) fail("ADAPTER_CONFIGURATION_UNVERIFIED");
@@ -737,8 +773,12 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
       // The observed entry may default to another sheet within this facility.
       // Re-resolve the canonical venue and public class from that same current
       // document before using any saved schedule/class for availability.
-      const { config } = await inspectForeupConfiguration(recipe.source, deps, session!.read, adapter.officialRouteOwnershipProof, true);
+      const { config, publicCatalogSha256 } = await inspectForeupConfiguration(recipe.source, deps, session!.read,
+        adapter.officialRouteOwnershipProof, true, adapter.inventoryScope,
+        adapter.inventoryScope ? { scheduleId: adapter.scheduleId, bookingClassId: adapter.bookingClassId,
+          publicCatalogSha256: adapter.publicCatalogSha256! } : undefined);
       if (!config || config.scheduleId !== adapter.scheduleId || config.bookingClassId !== adapter.bookingClassId) fail("ADAPTER_CONFIGURATION_CHANGED");
+      if (adapter.inventoryScope && publicCatalogSha256 !== adapter.publicCatalogSha256) fail("ADAPTER_CONFIGURATION_CHANGED");
       const available = await fetchForeupTeeSheet({ courseId: recipe.target.courseId, date: new Date(`${input.date}T00:00:00Z`), players: input.players,
         metadata: { scheduleId: adapter.scheduleId, bookingClassId: adapter.bookingClassId, bookingBaseUrl: recipe.source.bookingUrl }, fetchImpl: session!.read });
       if (!session!.availabilityWasArray()) fail("ADAPTER_EMPTY_UNPROVEN");

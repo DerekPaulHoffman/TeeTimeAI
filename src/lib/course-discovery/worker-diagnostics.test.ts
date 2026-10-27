@@ -210,6 +210,28 @@ describe("durable discovery browser diagnostics", () => {
       sourceResponseComplete: "true", successorTerminalFailed: "false" } });
     expect(malformed.nativeFirstFatal).toEqual({ code: "NATIVE_REDIRECT_LOADER_MISMATCH" });
   });
+  it("retains only finite OPTIONS preflight categories in worker evidence", () => {
+    const safe = safeBrowserFailureDiagnostics({ nativeFirstFatal: { code: "NATIVE_REDIRECT_LOADER_TIMEOUT", method: "OPTIONS",
+      preflightOriginPresent: true, preflightOriginSafe: false, preflightRequestedHeadersCategory: "SENSITIVE",
+      headers: { authorization: "PRIVATE" }, origin: "https://private.invalid", networkId: "PRIVATE" } });
+    expect(safe.nativeFirstFatal).toEqual({ code: "NATIVE_REDIRECT_LOADER_TIMEOUT", method: "OPTIONS",
+      preflightOriginPresent: true, preflightOriginSafe: false, preflightRequestedHeadersCategory: "SENSITIVE" });
+    const invalid = safeBrowserFailureDiagnostics({ nativeFirstFatal: { code: "NATIVE_REDIRECT_LOADER_TIMEOUT",
+      preflightOriginPresent: "PRIVATE", preflightOriginSafe: 1, preflightRequestedHeadersCategory: "PRIVATE" } });
+    expect(invalid.nativeFirstFatal).toEqual({ code: "NATIVE_REDIRECT_LOADER_TIMEOUT" });
+  });
+  it("retains only finite exact preflight registration facts", () => {
+    const safe = safeBrowserFailureDiagnostics({ nativeFirstFatal: { code: "NATIVE_REDIRECT_LOADER_TIMEOUT", method: "OPTIONS",
+      preflightRegistrationGate: "SOURCE_LOADER", preflightGateGenerationCurrent: true,
+      preflightGateParentKnown: true, preflightGateParentLoaderCurrent: false,
+      sourceNetworkId: "PRIVATE", requestHeaders: { authorization: "SECRET" } } });
+    expect(safe.nativeFirstFatal).toEqual({ code: "NATIVE_REDIRECT_LOADER_TIMEOUT", method: "OPTIONS",
+      preflightRegistrationGate: "SOURCE_LOADER", preflightGateGenerationCurrent: true,
+      preflightGateParentKnown: true, preflightGateParentLoaderCurrent: false });
+    const invalid = safeBrowserFailureDiagnostics({ nativeFirstFatal: { code: "NATIVE_REDIRECT_LOADER_TIMEOUT",
+      preflightRegistrationGate: "PRIVATE", preflightGateParentKnown: "PRIVATE" } });
+    expect(invalid.nativeFirstFatal).toEqual({ code: "NATIVE_REDIRECT_LOADER_TIMEOUT" });
+  });
   it("projects only bounded native response-limit evidence and admission bits", () => {
     const raw = { code: "NATIVE_RESPONSE_LIMIT", method: "GET", resourceType: "xhr", limitKind: "DECODED_BODY",
       limitOrigin: "NATIVE_ROUTER", allowedBytes: 2_000_000, declaredBytes: 128, bodyBytes: 15_187_944, totalBytes: 17_000_000,

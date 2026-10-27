@@ -21,7 +21,7 @@ const job = () => ({ id: "current-job", leaseToken: "synthetic-lease", deadlineA
 
 /** Controller/process/transport boundaries are synthetic; no application, browser,
  * provider or database operation is performed by these worker flow fixtures. */
-async function run(options: { actions?: Action[]; mutate?: (value: ReturnType<typeof job>) => void; inspectError?: Error; checkpoint?: object; observation?: object;
+async function run(options: { actions?: Action[]; mutate?: (value: ReturnType<typeof job>) => void; inspectError?: Error; checkpoint?: object; observation?: object; adapter?: object;
   workerOptions?: Record<string, unknown>; resolveHook?: () => void; browserCloseThrows?: boolean; lateUsage?: number } = {}) {
   const home = mkdtempSync(join(tmpdir(), "worker-direct-protocol-")), original = job();
   options.mutate?.(original);
@@ -36,7 +36,8 @@ async function run(options: { actions?: Action[]; mutate?: (value: ReturnType<ty
   const inspectProtocol = vi.fn(async () => { if (options.inspectError) throw options.inspectError;
     return structuredClone({ ...descriptor, ...(options.observation ? { observation: options.observation } : {}) }); });
   const browserFactory = vi.fn(() => ({ close: async () => { if (options.browserCloseThrows) throw Error("synthetic close failure"); }, request: async input => ({ url: input.url, text: "Public page",
-    browserTransport: "NATIVE_CHROME", navigationStatus: 200, loading: false, requests: [], controls: [], frames: [] }) }));
+    browserTransport: "NATIVE_CHROME", navigationStatus: 200, loading: false, requests: [], controls: [], frames: [],
+    ...(input.action === "inspect_adapter" && options.adapter ? { adapter: options.adapter } : {}) }) }));
   const validateRecipe = vi.fn(async () => ({ valid: true }));
   const executeRecipe = vi.fn(async () => ({ status: "AVAILABLE", complete: true, slots: [{ sourceId: "synthetic-opening" }] }));
   let toolsDone = Promise.resolve(), processClosed = false, processStarted = false;
@@ -111,6 +112,47 @@ describe("unattended direct public protocol inspection", () => {
     expect(out.checkpoints.some(value => (value as { controller?: unknown }).controller)).toBe(true);
     for (const checkpoint of out.checkpoints) { expect(checkpoint).toMatchObject(envelope); expect(Buffer.byteLength(JSON.stringify(checkpoint))).toBeLessThanOrEqual(32768); }
     expect(out.executeRecipe).toHaveBeenCalledTimes(2); expect(out.client.activate).toHaveBeenCalledOnce(); expect(out.processClosed).toBe(true);
+  });
+  it("configuration repair rejects model-authored browser and JSON recipes before candidate admission", async () => {
+    const old = { controller: { version: 1, officialUrl: "https://examplegolf.org/", officialSourceObserved: true,
+      observedNavigationUrls: [booking], observedReadUrls: [], observedEntryUrls: [] } };
+    for (const engine of ["BROWSER_DOM", "BROWSER_JSON", "HTTP_JSON"]) {
+      const out = await run({ checkpoint: old,
+        workerOptions: { freshOfficialStart: true, recipeEngineConstraint: "EXISTING_ADAPTER" },
+        actions: [{ tool: "discovery_browser", arguments: { action: "open", url: "https://examplegolf.org/" } },
+          { tool: "discovery_propose_recipe", arguments: { recipe: { engine, source: { bookingUrl: "https://examplegolf.org/" } } } }] });
+      expect(out.replies.some(reply => JSON.stringify(reply).includes("DISCOVERY_RECIPE_ENGINE_NOT_ALLOWED"))).toBe(true);
+      expect(out.validateRecipe).not.toHaveBeenCalled(); expect(out.client.candidate).not.toHaveBeenCalled();
+      expect(out.client.verification).not.toHaveBeenCalled(); expect(out.client.activate).not.toHaveBeenCalled();
+      expect(out.processClosed).toBe(true);
+    }
+  });
+  it("configuration repair admits a different freshly observed typed recipe through both existing challenges", async () => {
+    const adapter = { family: "ACUITY", publicCatalog: "synthetic-current-config" };
+    const typed = { engine: "EXISTING_ADAPTER", source: { bookingUrl: "https://examplegolf.org/" }, adapter };
+    const out = await run({ adapter, workerOptions: { freshOfficialStart: true, recipeEngineConstraint: "EXISTING_ADAPTER" },
+      actions: [{ tool: "discovery_browser", arguments: { action: "open", url: "https://examplegolf.org/" } },
+        { tool: "discovery_browser", arguments: { action: "inspect_adapter", url: "https://examplegolf.org/" } },
+        { tool: "discovery_propose_recipe", arguments: { recipe: typed } }] });
+    expect(out.result.outcome).toBe("activated"); expect(out.client.candidate).toHaveBeenCalledOnce();
+    expect(out.client.verification).toHaveBeenCalledTimes(2); expect(out.client.activate).toHaveBeenCalledOnce();
+    expect(out.executeRecipe).toHaveBeenCalledTimes(2); expect(out.processClosed).toBe(true);
+  });
+  it("does not admit a typed recipe copied from a checkpoint without a current inspection", async () => {
+    const adapter = { family: "ACUITY", publicCatalog: "copied-old-config" };
+    const out = await run({ checkpoint: { controller: { version: 1, officialUrl: "https://examplegolf.org/", officialSourceObserved: true,
+      observedNavigationUrls: ["https://examplegolf.org/"], observedReadUrls: [], observedEntryUrls: [] } },
+      workerOptions: { freshOfficialStart: true, recipeEngineConstraint: "EXISTING_ADAPTER" },
+      actions: [{ tool: "discovery_browser", arguments: { action: "open", url: "https://examplegolf.org/" } },
+        { tool: "discovery_propose_recipe", arguments: { recipe: { engine: "EXISTING_ADAPTER", source: { bookingUrl: "https://examplegolf.org/" }, adapter } } }] });
+    expect(out.replies.some(reply => JSON.stringify(reply).includes("DISCOVERY_TYPED_INSPECTION_REQUIRED"))).toBe(true);
+    expect(out.validateRecipe).not.toHaveBeenCalled(); expect(out.client.candidate).not.toHaveBeenCalled();
+    expect(out.client.verification).not.toHaveBeenCalled(); expect(out.client.activate).not.toHaveBeenCalled();
+  });
+  it("rejects a typed-only constraint outside a fresh-root repair before model setup", async () => {
+    const out = await run({ workerOptions: { recipeEngineConstraint: "EXISTING_ADAPTER" } });
+    expect(out.result.code).toBe("DISCOVERY_RECIPE_ENGINE_CONSTRAINT_INVALID");
+    expect(out.processStarted).toBe(false); expect(out.client.candidate).not.toHaveBeenCalled();
   });
   it("rejects combined checkpoint overflow instead of dropping source provenance or writing oversized state", async () => {
     const out = await run({ workerOptions: { checkpointProvenance: { stagehandSource: { report: "x".repeat(33000) } } },

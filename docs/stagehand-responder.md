@@ -32,6 +32,21 @@ automatic retry, using the same job, request, source fingerprint and original
 deadlines. The fixed inspection and independent backend challenges stay fresh.
 Incomplete reads never become an empty availability result.
 
+Ordinary outdoor alerts cover standard Public inventory. Member, Preferred Player
+and other qualified programs are outside that scope unless trusted eligibility is
+available. Newly learned ForeUP methods declare `STANDARD_PUBLIC_CLASS_V1` and
+save the bounded public catalog digest. Inspection and every later execution
+re-read the current Public class, sheet and catalog before availability. Unknown
+alternative classes on that selected sheet do not broaden the declared scope;
+unresolved other sheets, malformed catalogs, duplicate Public classes and stale
+identifiers still fail. Existing unscoped methods retain their original checks.
+
+A clean fixed-inspection configuration failure can restart investigation from the
+fresh official root within the original clock. That repair accepts only an
+existing-adapter recipe backed by a new, matching typed inspection; browser,
+JSON and HTTP recipes cannot bypass the failed typed identity or inventory gate.
+Normal independent challenges and backend activation remain mandatory.
+
 Outdoor checks verify enough golfer spots. Simulator checks verify one continuous
 public rental resource for the requested duration and local window; an unstated
 golfer limit remains `null`, rather than becoming a one-golfer restriction. A

@@ -18,6 +18,7 @@ import { mindbodyAppointmentMetadataSchema } from "./mindbody-appointment-grid";
 import { isUScheduleNonMemberRental, uschedulePublicLocationProofSchema } from "@/lib/simulators/providers/uschedule-location-source";
 import { uschedulePublicRentalPartyProofSchema } from "./uschedule-public-rental-party";
 import { foreupOfficialRouteOwnershipProofSchema } from "./foreup-official-route-ownership";
+import { FOREUP_STANDARD_PUBLIC_SCOPE } from "@/lib/automation/foreup-public-configuration";
 
 const numericId = z.number().int().min(1).max(2_147_483_647);
 const publicId = z.string().regex(/^[1-9]\d{0,9}$/u);
@@ -25,9 +26,14 @@ const publicId = z.string().regex(/^[1-9]\d{0,9}$/u);
 /** Identifiers from a supported public configuration, never executable code. */
 export const existingAdapterMetadataSchema = z.discriminatedUnion("family", [
   z.object({ family: z.literal("FOREUP"), facilityId: numericId, scheduleId: numericId,
-    bookingClassId: numericId, officialRouteOwnershipProof: foreupOfficialRouteOwnershipProofSchema.optional() }).strict()
+    bookingClassId: numericId, inventoryScope: z.literal(FOREUP_STANDARD_PUBLIC_SCOPE).optional(),
+    publicCatalogSha256: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
+    officialRouteOwnershipProof: foreupOfficialRouteOwnershipProofSchema.optional() }).strict()
+    .refine(value => Boolean(value.inventoryScope) === Boolean(value.publicCatalogSha256))
     .refine(value => !value.officialRouteOwnershipProof || value.facilityId === value.officialRouteOwnershipProof.facilityId &&
-      value.scheduleId === value.officialRouteOwnershipProof.scheduleId && value.bookingClassId === value.officialRouteOwnershipProof.bookingClassId),
+      value.scheduleId === value.officialRouteOwnershipProof.scheduleId && value.bookingClassId === value.officialRouteOwnershipProof.bookingClassId &&
+      value.inventoryScope === value.officialRouteOwnershipProof.inventoryScope &&
+      value.publicCatalogSha256 === value.officialRouteOwnershipProof.publicCatalogSha256),
   z.object({ family: z.literal("ACUITY"), ownerKey: z.string().regex(/^[a-zA-Z0-9]{4,40}$/u),
     businessId: publicId, rentalProductIds: z.array(publicId).min(1).max(20)
       .refine(ids => new Set(ids).size === ids.length) }).strict(),

@@ -5,6 +5,7 @@ import { inspectExistingAdapter, executeExistingAdapterRecipe } from "./existing
 import { venueProofMatches, recipeTimeToInstant } from "./executor";
 import { hashAccessRecipe, parseAccessRecipe } from "./recipe";
 import type { OfficialIdentityPage } from "./teeitup-official-identity";
+import { FOREUP_STANDARD_PUBLIC_SCOPE } from "@/lib/automation/foreup-public-configuration";
 
 const source = { officialUrl: "https://official.example/", bookingUrl: "https://foreupsoftware.com/index.php/booking/12345/456#/teetimes",
   venueName: "Example Golf Course", venueAddress: "10 Example Road, Example, NY 12345, USA", timeZone: "America/New_York", providerFamily: "FOREUP" };
@@ -100,6 +101,32 @@ describe("native official ForeUP route physical ownership", () => {
     await expect(inspectExistingAdapter(source, { ...deps(), localCapabilities: [] })).rejects.toThrow("ADAPTER_CONFIGURATION_UNVERIFIED");
     await expect(inspectExistingAdapter(source, { ...deps(), trustedContext: {} })).rejects.toThrow("ADAPTER_CONFIGURATION_UNVERIFIED");
     await expect(inspectExistingAdapter(source, { ...deps(), readNativeOfficialPage: async () => page() })).rejects.toThrow("FOREUP_OFFICIAL_ROUTE_UNVERIFIED");
+  });
+  it("binds a declared Standard Public native proof while keeping an unknown same-sheet program outside scope", async () => {
+    const value = provider();
+    value.schedules[0].booking_classes.push({ teesheet_id: "456", booking_class_id: "15", name: "PreferredPlayer", active: "1", hidden: "0" });
+    const contact = deriveForeupOfficialRouteContact(source, native(), phone);
+    expect(() => bindForeupOfficialRouteConfiguration(contact, html(value))).toThrow("FOREUP_PUBLIC_SCHEDULE_COVERAGE_UNVERIFIED");
+    const bound = bindForeupOfficialRouteConfiguration(contact, html(value), FOREUP_STANDARD_PUBLIC_SCOPE);
+    expect(bound.proof).toMatchObject({ inventoryScope: FOREUP_STANDARD_PUBLIC_SCOPE, bookingClassId: 12 });
+    expect(bound.proof.publicCatalogSha256).toMatch(/^[a-f0-9]{64}$/u);
+    const d = deps();
+    d.fetch.mockImplementation(async raw => String(raw).includes("/api/") ? Response.json([]) :
+      new Response(html(value), { headers: { "content-type": "text/html" } }));
+    const observed = await inspectExistingAdapter(source, d);
+    expect(observed.adapter).toMatchObject({ inventoryScope: FOREUP_STANDARD_PUBLIC_SCOPE,
+      publicCatalogSha256: bound.proof.publicCatalogSha256,
+      officialRouteOwnershipProof: { inventoryScope: FOREUP_STANDARD_PUBLIC_SCOPE } });
+    const recipe = parseAccessRecipe({ schemaVersion: 1, engine: "EXISTING_ADAPTER", source,
+      target: { kind: "OUTDOOR", courseId: "owned" }, adapter: observed.adapter });
+    const altered = provider();altered.schedules[0].booking_classes.push({ teesheet_id: "456", booking_class_id: "15",
+      name: "Preferred Guest", active: "1", hidden: "0" });
+    const warm = deps();warm.fetch.mockImplementation(async raw => String(raw).includes("/api/") ? Response.json([]) :
+      new Response(html(altered), { headers: { "content-type": "text/html" } }));
+    const result = await executeExistingAdapterRecipe(recipe, input, { ...warm, recipeHash: hashAccessRecipe(recipe),
+      toInstant: recipeTimeToInstant, now: () => new Date("2026-10-26T00:00:00Z") });
+    expect(result).toMatchObject({ status: "INCOMPLETE", complete: false, slots: [] });
+    expect(warm.fetch).toHaveBeenCalledOnce();
   });
   it("two changed-date executions rederive the same immutable proof before availability; reassignment fails", async () => {
     const observed = await inspectExistingAdapter(source, deps()), recipe = parseAccessRecipe({ schemaVersion: 1, engine: "EXISTING_ADAPTER", source, target: { kind: "OUTDOOR", courseId: "owned" }, adapter: observed.adapter });

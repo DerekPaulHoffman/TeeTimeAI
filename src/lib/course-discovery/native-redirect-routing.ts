@@ -69,10 +69,18 @@ export type NativeRequestDiagnostic = {
   officialRenderDataLimit?: boolean; limitOrigin?: "NATIVE_ROUTER" | "BROWSER_SESSION";
   officialRenderGate?: NativeOfficialRenderGate;
   requestedPreflightMethod?: "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "CONNECT" | "TRACE" | "OTHER";
+  preflightOriginPresent?: boolean; preflightOriginSafe?: boolean;
+  preflightRequestedHeadersCategory?: "NONE" | "ORDINARY" | "SENSITIVE" | "MALFORMED" | "DUPLICATE";
   preflightCandidatePresent?: boolean; preflightCandidateInvalid?: boolean; preflightSourceKnown?: boolean;
   preflightSourceMethod?: "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "CONNECT" | "TRACE" | "OTHER";
   preflightSourceCurrentGeneration?: boolean; preflightSourceFailed?: boolean; preflightSourceBodyPresent?: boolean;
   preflightSourceRootFrame?: boolean; preflightSourceLoaderKnown?: boolean; preflightSourceUrlMatches?: boolean;
+  preflightRegistrationGate?: "NOT_SEEN" | "UNRECORDED_CAP" | "REGISTERED" | "SOURCE_NOT_PUBLISHED" | "SOURCE_FAILED" |
+    "SOURCE_ALREADY_USED" | "SOURCE_FRAME_OR_URL" | "SOURCE_LOADER" | "SOURCE_METHOD_OR_BODY" | "SOURCE_REPLACED" |
+    "PENDING_INVALID" | "PENDING_EXPIRED" | "RETIRED_GENERATION" | "BOUNDARY_PENDING" | "AWAITING_DOCUMENT" |
+    "NONROOT_FRAME" | "TYPE_METHOD_INVALID" | "INITIATOR_MISSING_OR_SELF" | "DUPLICATE";
+  preflightGateGenerationCurrent?: boolean; preflightGateRootFrame?: boolean; preflightGateParentKnown?: boolean;
+  preflightGateParentCurrentGeneration?: boolean; preflightGateParentLoaderCurrent?: boolean; preflightGateParentFailed?: boolean;
   phase?: "RESPONSE_WAIT" | "CONTINUE_REQUEST_ACK" | "CONTINUE_RESPONSE_ACK" | "LOADER_IDENTITY_WAIT" | "LOADER_IDENTITY" | "LOADER_OWNER" | "REDIRECT_GENERATION" | "REDIRECT_PROVENANCE" | "DOCUMENT_INTENT" | "DOCUMENT_DRAIN";
   recordGenerationCurrent?: boolean; recordGenerationRetired?: boolean; recordAdmitted?: boolean; recordPaused?: boolean; recordResponsePaused?: boolean;
   recordFailed?: boolean; recordComplete?: boolean; recordHandlerDone?: boolean; recordTerminalObserved?: boolean;
@@ -161,6 +169,8 @@ type NetworkIdentity = { id: string; revision: number; loaderId: string; frameId
   hasUserGesture: boolean; scriptInitiator: boolean;
   hasBody: boolean; body: string | null; headerEntries: Array<[string, string]>; generation: DocumentGeneration; preflight?: PreflightSource };
 type PendingPreflightIdentity = { identity: NetworkIdentity; sourceNetworkId: string; generation: DocumentGeneration; createdAt: number; invalid: boolean };
+type PreflightRegistrationGate = { reason: NonNullable<NativeRequestDiagnostic["preflightRegistrationGate"]>;
+  generation: DocumentGeneration; sourceNetworkId?: string; rootFrame: boolean };
 type PendingInitialPause = { id: string; generation: DocumentGeneration; retired: boolean;
   networkId: string; url: string; method: string; kind: string; networkFailed: ReturnType<typeof pending<void>>;
   successorIdentity?: NetworkIdentity; terminalFailed?: boolean;
@@ -378,6 +388,18 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
   const childFrames = new Map<string, { parentId: string; loaderId: string; generation: DocumentGeneration }>();
   const childAssets = new Map<string, { frameId: string; loaderId: string; url: string; kind: string; generation: DocumentGeneration; createdAt: number; invalid: boolean; abortingFetchId?: string }>();
   const nativeId = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 1024 && !/[\u0000-\u0020\u007f]/u.test(value);
+  // Bounded, diagnostic-only negative facts keyed by the exact CDP Network ID.
+  // They never publish an identity, attest a source, or authorize a read.
+  const preflightRegistrationGates = new Map<string, PreflightRegistrationGate>();
+  let preflightGateOverflow = false;
+  const markPreflightGate = (id: unknown, reason: PreflightRegistrationGate["reason"], sourceNetworkId?: string, rootFrame?: boolean) => {
+    if (!nativeId(id)) return;
+    if (!preflightRegistrationGates.has(id) && preflightRegistrationGates.size >= limit) { preflightGateOverflow = true; return; }
+    const prior = preflightRegistrationGates.get(id);
+    preflightRegistrationGates.set(id, { reason, generation: prior?.generation ?? generation,
+      ...(nativeId(sourceNetworkId) ? { sourceNetworkId } : prior?.sourceNetworkId ? { sourceNetworkId: prior.sourceNetworkId } : {}),
+      rootFrame: rootFrame ?? prior?.rootFrame ?? false });
+  };
   const childRootCurrent = () => generationTracking && !closed && !generation.retired &&
     !boundaryPending && !awaitingDocument && committedDocument?.record.generation === generation && committedDocument.record.admitted &&
     !committedDocument.record.failed && committedDocument.record.complete && committedDocument.record.responseStatus === 200 &&
@@ -642,7 +664,9 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
     childFrames.clear(); childAssets.clear();
     retireHeaderContext();
     for (const record of headerScripts.keys()) if (record.generation === previous) headerScripts.delete(record);
-    for (const [id, pending] of pendingPreflightIdentities) if (pending.generation === previous) pendingPreflightIdentities.delete(id);
+    for (const [id, pending] of pendingPreflightIdentities) if (pending.generation === previous) {
+      markPreflightGate(id, "RETIRED_GENERATION", pending.sourceNetworkId); pendingPreflightIdentities.delete(id);
+    }
     for (const record of records.values()) if (record.generation === previous && record.complete)
       record.cancellation.abort(supersededFailure());
     const old = [...records.values()].filter(record => record.generation === previous && !record.complete && !record.failed);
@@ -749,7 +773,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
     networkIdentities.set(id, identity); networkWaiters.get(id)?.settle();
   };
   const bindPendingPreflight = (id: string, pending: PendingPreflightIdentity, source: NetworkIdentity) => {
-    if (pending.invalid) return;
+    if (pending.invalid) { markPreflightGate(id, "PENDING_INVALID", pending.sourceNetworkId); return; }
     const identity = pending.identity;
     if (pending.generation !== generation || generation.retired || boundaryPending || awaitingDocument ||
         Date.now() - pending.createdAt > timeoutMs || networkIdentities.get(pending.sourceNetworkId) !== source ||
@@ -757,11 +781,21 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         source.frameId !== rootFrameId || source.url !== identity.url || !source.loaderId ||
         loaderOwners.get(source.loaderId) !== generation || identity.loaderId && identity.loaderId !== source.loaderId || preflightSources.has(source)) {
       // A first conflicting source revision cannot heal into later authority.
-      pending.invalid = true; return;
+      pending.invalid = true;
+      const reason: PreflightRegistrationGate["reason"] =
+        pending.generation !== generation || generation.retired ? "RETIRED_GENERATION" : boundaryPending ? "BOUNDARY_PENDING" :
+        awaitingDocument ? "AWAITING_DOCUMENT" : Date.now() - pending.createdAt > timeoutMs ? "PENDING_EXPIRED" :
+        networkIdentities.get(pending.sourceNetworkId) !== source ? "SOURCE_REPLACED" :
+        failedNetworkIdentities.has(source) ? "SOURCE_FAILED" : source.preflight || preflightSources.has(source) ? "SOURCE_ALREADY_USED" :
+        source.frameId !== rootFrameId || source.url !== identity.url ? "SOURCE_FRAME_OR_URL" :
+        !source.loaderId || loaderOwners.get(source.loaderId) !== generation || identity.loaderId && identity.loaderId !== source.loaderId ? "SOURCE_LOADER" :
+        "SOURCE_METHOD_OR_BODY";
+      markPreflightGate(id, reason, pending.sourceNetworkId); return;
     }
     if (preflightSources.size >= limit) { void close("NATIVE_REDIRECT_RECORD_LIMIT"); return; }
     preflightSources.add(source); pendingPreflightIdentities.delete(id);
     identity.preflight = { networkId: pending.sourceNetworkId, identity: source, generation, used: false };
+    markPreflightGate(id, "REGISTERED", pending.sourceNetworkId);
     publishNetworkIdentity(id, identity);
   };
   cdp.on("Network.requestWillBeSent", event => {
@@ -769,14 +803,24 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
     const previousChildAsset = childAssets.get(event.requestId);
     if (previousChildAsset) previousChildAsset.invalid = true;
     const existingPending = pendingPreflightIdentities.get(event.requestId);
-    if (existingPending) { existingPending.invalid = true; return; }
+    if (existingPending) { existingPending.invalid = true; markPreflightGate(event.requestId, "DUPLICATE", existingPending.sourceNetworkId); return; }
     const nativePreflight = event.request.method === "OPTIONS" && event.initiator?.type === "preflight";
     if (nativePreflight) {
       if (networkIdentities.has(event.requestId) || !event.initiator.requestId || event.initiator.requestId === event.requestId ||
           generation.retired || boundaryPending || awaitingDocument || event.frameId !== undefined && event.frameId !== rootFrameId ||
-          !["Other", "Preflight"].includes(event.type ?? "") || event.request.hasPostData || event.request.postData !== undefined) return;
+          !["Other", "Preflight"].includes(event.type ?? "") || event.request.hasPostData || event.request.postData !== undefined) {
+        const reason: PreflightRegistrationGate["reason"] = networkIdentities.has(event.requestId) ? "DUPLICATE" :
+          !event.initiator.requestId || event.initiator.requestId === event.requestId ? "INITIATOR_MISSING_OR_SELF" :
+          generation.retired ? "RETIRED_GENERATION" : boundaryPending ? "BOUNDARY_PENDING" :
+          awaitingDocument ? "AWAITING_DOCUMENT" : event.frameId !== undefined && event.frameId !== rootFrameId ? "NONROOT_FRAME" : "TYPE_METHOD_INVALID";
+        markPreflightGate(event.requestId, reason, event.initiator.requestId, event.frameId === rootFrameId);
+        return;
+      }
     } else if (event.frameId !== rootFrameId) {
-      for (const pending of pendingPreflightIdentities.values()) if (pending.sourceNetworkId === event.requestId) pending.invalid = true;
+      for (const [id, pending] of pendingPreflightIdentities) if (pending.sourceNetworkId === event.requestId) {
+        pending.invalid = true; markPreflightGate(id, "SOURCE_FRAME_OR_URL", pending.sourceNetworkId);
+      }
+      if (event.request.method === "OPTIONS") markPreflightGate(event.requestId, "TYPE_METHOD_INVALID");
       if (childRootCurrent() && nativeId(event.requestId) && nativeId(event.frameId) && nativeId(event.loaderId) &&
           currentChild(event.frameId, event.loaderId) && event.request.method === "GET" && ["Script", "Stylesheet"].includes(event.type ?? "") &&
           !event.redirectResponse && (event.request.hasPostData === undefined || event.request.hasPostData === false) && event.request.postData === undefined &&
@@ -792,6 +836,8 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
       }
       return;
     }
+    if (event.request.method === "OPTIONS" && !nativePreflight)
+      markPreflightGate(event.requestId, "TYPE_METHOD_INVALID", undefined, event.frameId === rootFrameId);
     if (!networkIdentities.has(event.requestId) && networkIdentities.size + pendingPreflightIdentities.size + childAssets.size >= limit) {
       void close("NATIVE_REDIRECT_RECORD_LIMIT"); return;
     }
@@ -810,6 +856,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
       // policy. It grants no body/header/readPost authority to the actual POST.
       const pending: PendingPreflightIdentity = { identity, sourceNetworkId: event.initiator.requestId!, generation, createdAt: Date.now(), invalid: false };
       pendingPreflightIdentities.set(event.requestId, pending);
+      markPreflightGate(event.requestId, "SOURCE_NOT_PUBLISHED", pending.sourceNetworkId, event.frameId === rootFrameId);
       const source = networkIdentities.get(pending.sourceNetworkId);
       if (source) bindPendingPreflight(event.requestId, pending, source);
       return;
@@ -854,7 +901,9 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
           typeof corsError === "string" && nativeSourceLoadingFailedCorsErrors.includes(corsError) ? corsError : "OTHER" } : {}) }));
     }
     for (const record of headerScripts.keys()) if (record.networkId === event.requestId && witnessedHeaderScripts.has(record)) headerContext?.scope.invalidate();
-    for (const [id, pending] of pendingPreflightIdentities) if (id === event.requestId || pending.sourceNetworkId === event.requestId) pending.invalid = true;
+    for (const [id, pending] of pendingPreflightIdentities) if (id === event.requestId || pending.sourceNetworkId === event.requestId) {
+      pending.invalid = true; markPreflightGate(id, "SOURCE_FAILED", pending.sourceNetworkId);
+    }
     for (const record of records.values()) if (record.networkId === event.requestId && !record.complete && !record.failed)
       failRecord(record, record.generation.retired ? "NATIVE_READ_SUPERSEDED" : "NATIVE_REDIRECT_NETWORK_FAILED");
     const identity = networkIdentities.get(event.requestId);
@@ -897,16 +946,25 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
       const requestDiagnostic = (code: string): NativeRequestDiagnostic => {
         let url: string | undefined, requestUrlSha256: string | undefined;
         let requestedPreflightMethod: NativeRequestDiagnostic["requestedPreflightMethod"];
+        let preflightOriginPresent: boolean | undefined, preflightOriginSafe: boolean | undefined;
+        let preflightRequestedHeadersCategory: NativeRequestDiagnostic["preflightRequestedHeadersCategory"];
         const kind = resourceKinds[event.resourceType] ?? "other";
         const method = /^(?:GET|HEAD|POST|OPTIONS|PUT|PATCH|DELETE|CONNECT|TRACE)$/u.test(event.request.method) ? event.request.method : "OTHER";
         if (event.request.method === "OPTIONS") try {
-          const entries = Object.entries(event.request.headers ?? {});
+          const entries = rawHeaderEntries(event.request.headers ?? {});
           const requested = entries.filter(([name]) => name.toLowerCase() === "access-control-request-method");
           if (requested.length) {
             const value = entries.length <= 128 && requested.length === 1 && typeof requested[0][1] === "string" ? requested[0][1] : "";
             requestedPreflightMethod = /^(?:GET|HEAD|POST|PUT|PATCH|DELETE|CONNECT|TRACE)$/u.test(value)
               ? value as NonNullable<NativeRequestDiagnostic["requestedPreflightMethod"]> : "OTHER";
           }
+          const origin = entries.filter(([name]) => name.toLowerCase() === "origin");
+          preflightOriginPresent = origin.length > 0;
+          preflightOriginSafe = origin.length === 1 && isSafeRecipeUrl(origin[0][1]);
+          const lists = entries.filter(([name]) => name.toLowerCase() === "access-control-request-headers");
+          preflightRequestedHeadersCategory = lists.length > 1 ? "DUPLICATE" : lists.length === 0 || !lists[0][1] ? "NONE" :
+            lists[0][1].length > 512 || !/^[a-z0-9_, -]+$/iu.test(lists[0][1]) ? "MALFORMED" :
+              /authorization|cookie|token|secret|api[-_]?key/iu.test(lists[0][1]) ? "SENSITIVE" : "ORDINARY";
         } catch { /* Diagnostic projection never changes request handling. */ }
         try {
           const value = new URL(event.request.url);
@@ -919,6 +977,8 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         // Never retain raw IDs, headers, body, query values or source events.
         return { code, operation, ...(requestUrlSha256 ? { requestUrlSha256 } : {}), ...(url ? { url } : {}), method, resourceType: kind,
           ...(requestedPreflightMethod ? { requestedPreflightMethod } : {}),
+          ...(preflightOriginPresent === undefined ? {} : { preflightOriginPresent, preflightOriginSafe }),
+          ...(preflightRequestedHeadersCategory ? { preflightRequestedHeadersCategory } : {}),
           interceptedRequests, recordCount: records.size, requestLimit: limit,
           framePresent: Boolean(event.frameId), rootFrame: event.frameId === rootFrameId,
           networkIdPresent: Boolean(event.networkId), duplicateRequestId: records.has(event.requestId) || sourceDeniedFetchIds.has(event.requestId) ||
@@ -1253,6 +1313,8 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
           const identity = networkIdentities.get(networkId);
           const candidate = pendingPreflightIdentities.get(networkId);
           const preflightSource = candidate ? networkIdentities.get(candidate.sourceNetworkId) : identity?.preflight?.identity;
+          const registrationGate = event.request.method === "OPTIONS" ? preflightRegistrationGates.get(networkId) : undefined;
+          const registrationParent = registrationGate?.sourceNetworkId ? networkIdentities.get(registrationGate.sourceNetworkId) : undefined;
           const intent = documentIntent;
           const bootstrapDiagnostic: Partial<NativeRequestDiagnostic> = {};
           if (kind === "document" && event.request.method === "POST") {
@@ -1290,6 +1352,12 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
           return { ...requestDiagnostic("NATIVE_REDIRECT_LOADER_MISMATCH"), phase,
             ...bootstrapDiagnostic,
             ...(event.request.method === "OPTIONS" ? {
+              preflightRegistrationGate: registrationGate?.reason ?? (preflightGateOverflow ? "UNRECORDED_CAP" : "NOT_SEEN"),
+              ...(registrationGate ? { preflightGateGenerationCurrent: registrationGate.generation === generation && !registrationGate.generation.retired,
+                preflightGateRootFrame: registrationGate.rootFrame, preflightGateParentKnown: Boolean(registrationParent),
+                ...(registrationParent ? { preflightGateParentCurrentGeneration: registrationParent.generation === generation && !generation.retired,
+                  preflightGateParentLoaderCurrent: loaderOwners.get(registrationParent.loaderId) === generation,
+                  preflightGateParentFailed: failedNetworkIdentities.has(registrationParent) } : {}) } : {}),
               preflightCandidatePresent: Boolean(candidate),
               ...(candidate ? { preflightCandidateInvalid: candidate.invalid } : {}),
               preflightSourceKnown: Boolean(preflightSource),

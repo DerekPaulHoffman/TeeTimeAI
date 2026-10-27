@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  FOREUP_STANDARD_PUBLIC_SCOPE,
+  foreupPublicScheduleCatalogSha256,
   hasCompleteForeupPublicScheduleScope,
   parseForeupPublicConfiguration,
   readForeupPublicConfiguration,
@@ -42,6 +44,32 @@ describe("managed ForeUP single-sheet coverage", () => {
   it("rejects duplicate public rows, absent selected scope and excessive schedules", () => {
     expect(covered([selected, selected])).toBe(false); expect(covered([other])).toBe(false);
     expect(covered(Array.from({ length: 31 }, () => selected))).toBe(false);
+  });
+});
+
+describe("declared Standard Public class inventory", () => {
+  const publicClass = { ...schedules[0].booking_classes[0], name: "Public" };
+  const alternate = (name: string, id = "4932") => ({ ...publicClass, booking_class_id: id, name });
+  const selected = { ...schedules[0], booking_classes: [publicClass, alternate("MEMBER"), alternate("PreferredPlayer", "4933")] };
+  const scoped = (rows: unknown[]) => hasCompleteForeupPublicScheduleScope({
+    html: `SCHEDULES=${JSON.stringify(rows)};`, facilityId: 19021, scheduleId: 792, inventoryScope: FOREUP_STANDARD_PUBLIC_SCOPE,
+  });
+  it("declares only the unique explicit Public class while leaving unscoped recipes strict", () => {
+    expect(scoped([selected])).toBe(true);
+    expect(hasCompleteForeupPublicScheduleScope({ html: `SCHEDULES=${JSON.stringify([selected])};`, facilityId: 19021, scheduleId: 792 })).toBe(false);
+    expect(foreupPublicScheduleCatalogSha256(`SCHEDULES=${JSON.stringify([selected])};`)).toMatch(/^[a-f0-9]{64}$/u);
+  });
+  it("rejects duplicate visible class IDs, ambiguous Public classes and malformed selected classes", () => {
+    expect(scoped([{ ...selected, booking_classes: [publicClass, alternate("PreferredPlayer", "4931")] }])).toBe(false);
+    expect(scoped([{ ...selected, booking_classes: [publicClass, alternate("Public")] }])).toBe(false);
+    expect(scoped([{ ...selected, booking_classes: [publicClass, { ...alternate("PreferredPlayer"), active: "unknown" }] }])).toBe(false);
+    expect(scoped([{ ...selected, booking_classes: [publicClass, alternate("Preferred\u0000Player")] }])).toBe(false);
+  });
+  it("keeps a different unresolved sheet strict, including unknown and malformed classes", () => {
+    const other = { ...selected, teesheet_id: "793", booking_classes: [{ ...alternate("PreferredPlayer"), teesheet_id: "793" }] };
+    expect(scoped([selected, other])).toBe(false);
+    expect(scoped([selected, { ...other, booking_classes: undefined }])).toBe(false);
+    expect(scoped([selected, { ...other, booking_classes: [{ ...other.booking_classes[0], name: "Public" }] }])).toBe(false);
   });
 });
 

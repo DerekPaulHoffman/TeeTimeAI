@@ -50,6 +50,31 @@ test('missing network diagnosis retains finite caller gate only',()=>{
  assert.doesNotMatch(JSON.stringify(closed),/PRIVATE|SECRET|https:/u);
  assert.equal(projectNativeRouterFailure({...raw,code:'NATIVE_REDIRECT_ROUTING_FAILED'}).uncorrelatedPostDenialReason,undefined);
 });
+test('OPTIONS preflight projects only finite header categories through the durable source schema',()=>{
+ const raw={code:'NATIVE_REDIRECT_LOADER_TIMEOUT',phase:'LOADER_IDENTITY_WAIT',method:'OPTIONS',
+  preflightOriginPresent:true,preflightOriginSafe:false,preflightRequestedHeadersCategory:'SENSITIVE',
+  origin:'https://private.invalid',headers:{authorization:'PRIVATE'},networkId:'PRIVATE'};
+ const closed=projectNativeRouterFailure(raw);
+ assert.deepEqual(closed,{code:raw.code,phase:raw.phase,method:'OPTIONS',preflightOriginPresent:true,
+  preflightOriginSafe:false,preflightRequestedHeadersCategory:'SENSITIVE'});
+ assert.deepEqual(safeNativeRouterFailure(closed),closed);
+ assert.equal(projectNativeRouterFailure({...raw,preflightRequestedHeadersCategory:'PRIVATE'}).preflightRequestedHeadersCategory,undefined);
+ assert.equal(projectNativeRouterFailure({...raw,preflightOriginSafe:'false'}).preflightOriginSafe,undefined);
+ assert.doesNotMatch(JSON.stringify(closed),/PRIVATE|https:|authorization|networkId|headers/u);
+});
+test('exact preflight registration gate is a closed category with no parent identity leakage',()=>{
+ const raw={code:'NATIVE_REDIRECT_LOADER_TIMEOUT',method:'OPTIONS',preflightRegistrationGate:'NONROOT_FRAME',
+  preflightGateGenerationCurrent:true,preflightGateRootFrame:false,preflightGateParentKnown:true,
+  preflightGateParentCurrentGeneration:true,preflightGateParentLoaderCurrent:true,preflightGateParentFailed:false,
+  sourceNetworkId:'PRIVATE',parentUrl:'https://private.invalid',requestHeaders:{authorization:'SECRET'}};
+ const projected=projectNativeRouterFailure(raw);
+ assert.deepEqual(safeNativeRouterFailure(projected),projected);
+ assert.equal(projected.preflightRegistrationGate,'NONROOT_FRAME');
+ assert.equal(projected.preflightGateParentLoaderCurrent,true);
+ assert.equal(projectNativeRouterFailure({...raw,preflightRegistrationGate:'PRIVATE'}).preflightRegistrationGate,undefined);
+ assert.equal(projectNativeRouterFailure({...raw,preflightGateParentKnown:'PRIVATE'}).preflightGateParentKnown,undefined);
+ assert.doesNotMatch(JSON.stringify(projected),/PRIVATE|SECRET|https:|sourceNetworkId|requestHeaders/u);
+});
 test('native response limit retains exact bounded origin and admission evidence',()=>{
  const raw={code:'NATIVE_RESPONSE_LIMIT',limitKind:'DECODED_BODY',limitOrigin:'NATIVE_ROUTER',officialRenderDataLimit:false,
   recordGenerationCurrent:false,recordGenerationRetired:true,allowedBytes:2_000_000,declaredBytes:128,bodyBytes:15_187_944,totalBytes:17_000_000,

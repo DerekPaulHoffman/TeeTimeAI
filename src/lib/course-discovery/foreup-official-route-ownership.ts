@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { parse, type DefaultTreeAdapterMap } from "parse5";
 import { z } from "zod";
-import { hasCompleteForeupPublicScheduleScope, type ForeupPublicConfiguration } from "@/lib/automation/foreup-public-configuration";
+import { FOREUP_STANDARD_PUBLIC_SCOPE, foreupPublicScheduleCatalogSha256, hasCompleteForeupPublicScheduleScope, type ForeupPublicConfiguration } from "@/lib/automation/foreup-public-configuration";
 import { fullCourseName, type OfficialIdentityPage, type OfficialIdentitySource } from "./teeitup-official-identity";
 import { parsePublicUSBusinessAddress } from "./public-us-business-address";
 import { normalizePublicCoursePhone } from "./teeitup-postal-conflict-proof";
@@ -21,13 +21,15 @@ const sourceSchema = z.object({ officialUrl: url, officialDocumentUrl: url, book
   sourceWitnessSha256: sha, requiredCapability: z.literal("LOCAL_CHROME"), warmTransport: z.literal("NATIVE_CHROME") }).strict();
 export const foreupOfficialRouteOwnershipProofSchema = sourceSchema.extend({ kind: z.literal("OFFICIAL_FOREUP_ROUTE_OWNERSHIP_V1"),
   providerName: label, sheetTitle: label, providerAddress: z.string().min(8).max(1024), facilityId: id, scheduleId: id, bookingClassId: id,
+  inventoryScope: z.literal(FOREUP_STANDARD_PUBLIC_SCOPE).optional(), publicCatalogSha256: sha.optional(),
   providerWitnessSha256: sha, semanticDigest: sha }).strict().refine(value => {
     const { semanticDigest, ...body } = value;
     const source = Object.fromEntries(Object.keys(sourceSchema.shape).filter(key => key !== "sourceWitnessSha256" && Object.hasOwn(value, key)).map(key => [key, value[key as keyof typeof value]]));
     const provider = { providerName: value.providerName, sheetTitle: value.sheetTitle, providerAddress: value.providerAddress,
       facilityId: value.facilityId, scheduleId: value.scheduleId, bookingClassId: value.bookingClassId, phone: value.publicCoursePhone, timeZone: value.timeZone };
     const selected = route(value.bookingUrl), physical = parsePublicUSBusinessAddress(value.providerAddress), canonicalAddress = parsePublicUSBusinessAddress(value.canonicalAddress);
-    return Boolean(selected && selected.facilityId === value.facilityId && selected.scheduleId === value.scheduleId && physical && canonicalAddress &&
+    return Boolean(Boolean(value.inventoryScope) === Boolean(value.publicCatalogSha256) &&
+      selected && selected.facilityId === value.facilityId && selected.scheduleId === value.scheduleId && physical && canonicalAddress &&
       JSON.stringify(physical) === JSON.stringify(canonicalAddress) && value.sourceWitnessSha256 === foreupOwnershipDigest(source) &&
       value.providerWitnessSha256 === foreupOwnershipDigest(provider) && semanticDigest === foreupOwnershipDigest(body));
   });
@@ -115,7 +117,8 @@ function assignment(html: string, name: string, open: "[" | "{"): unknown {
 }
 const record = (value: unknown): value is Record<string, unknown> => Boolean(value && typeof value === "object" && !Array.isArray(value));
 const providerId = (value: unknown) => { const result = id.safeParse(typeof value === "string" && /^[1-9]\d{0,9}$/u.test(value) ? Number(value) : value); return result.success ? result.data : undefined; };
-export function bindForeupOfficialRouteConfiguration(contact: Contact, html: string): { config: ForeupPublicConfiguration; proof: ForeupOfficialRouteOwnershipProof } {
+export function bindForeupOfficialRouteConfiguration(contact: Contact, html: string,
+  inventoryScope?: typeof FOREUP_STANDARD_PUBLIC_SCOPE): { config: ForeupPublicConfiguration; proof: ForeupOfficialRouteOwnershipProof } {
   const page = contacts.get(contact), selectedRoute = route(contact.bookingUrl);
   if (!page || !selectedRoute || !isFreshNativeOfficialIdentityPage(page, contact.officialUrl) || Buffer.byteLength(html) > 512_000) return failure();
   const { sourceWitnessSha256, ...sourceBody } = contact;
@@ -138,7 +141,7 @@ export function bindForeupOfficialRouteConfiguration(contact: Contact, html: str
   const publicClasses = classes.filter(c => providerId(c.teesheet_id) === selectedRoute.scheduleId && String(c.active) === "1" && String(c.hidden) === "0" &&
     typeof c.name === "string" && /^(?:public|public play|public tee times|online tee times)$/iu.test(c.name.trim()));
   if (publicClasses.length !== 1) return failure();
-  if (!hasCompleteForeupPublicScheduleScope({ html, ...selectedRoute, isProvenForeignSchedule: row => {
+  if (!hasCompleteForeupPublicScheduleScope({ html, ...selectedRoute, inventoryScope, isProvenForeignSchedule: row => {
     if (providerId(row.course_id) === selectedRoute.facilityId) return false;
     const candidates = courses.filter(course => record(course) && providerId(course.course_id) === providerId(row.course_id));
     if (candidates.length !== 1 || !record(candidates[0])) return false;
@@ -150,9 +153,13 @@ export function bindForeupOfficialRouteConfiguration(contact: Contact, html: str
     const address = parsePublicUSBusinessAddress(`${other.address}, ${other.city}, ${other.state} ${other.zip}, ${other.country}`);
     return Boolean(address && JSON.stringify(address) !== JSON.stringify(expected));
   } })) throw new Error("FOREUP_PUBLIC_SCHEDULE_COVERAGE_UNVERIFIED");
+  const publicCatalogSha256 = inventoryScope ? foreupPublicScheduleCatalogSha256(html) : null;
+  if (inventoryScope && !publicCatalogSha256) return failure();
   const bookingClassId = providerId(publicClasses[0].booking_class_id)!;
   const provider = { providerName: String(facility.name), sheetTitle: String(sheet.title), providerAddress, ...selectedRoute, bookingClassId };
-  const body = { kind: "OFFICIAL_FOREUP_ROUTE_OWNERSHIP_V1" as const, ...contact, ...provider, providerWitnessSha256: foreupOwnershipDigest({ ...provider, phone: contact.publicCoursePhone, timeZone: contact.timeZone }) };
+  const body = { kind: "OFFICIAL_FOREUP_ROUTE_OWNERSHIP_V1" as const, ...contact, ...provider,
+    ...(inventoryScope && publicCatalogSha256 ? { inventoryScope, publicCatalogSha256 } : {}),
+    providerWitnessSha256: foreupOwnershipDigest({ ...provider, phone: contact.publicCoursePhone, timeZone: contact.timeZone }) };
   return { proof: foreupOfficialRouteOwnershipProofSchema.parse({ ...body, semanticDigest: foreupOwnershipDigest(body) }),
     config: { sourceBookingUrl: contact.bookingUrl, bookingBaseUrl: contact.bookingUrl, scheduleId: selectedRoute.scheduleId, bookingClassId } };
 }

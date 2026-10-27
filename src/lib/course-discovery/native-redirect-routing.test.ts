@@ -1148,6 +1148,7 @@ describe("native root GET CORS preflight ownership", () => {
       await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_LOADER_TIMEOUT"));
       expect(test.guard.firstFatal).toMatchObject({ requestedPreflightMethod: "HEAD", phase: "LOADER_IDENTITY_WAIT",
         preflightCandidatePresent: true, preflightCandidateInvalid: true, preflightSourceKnown: true, preflightSourceMethod: "HEAD",
+        preflightRegistrationGate: "SOURCE_METHOD_OR_BODY", preflightGateParentKnown: true,
         preflightSourceCurrentGeneration: true, preflightSourceFailed: false, preflightSourceBodyPresent: true,
         preflightSourceRootFrame: true, preflightSourceLoaderKnown: true, preflightSourceUrlMatches: true });
       const serialized = JSON.stringify(test.guard.firstFatal);
@@ -1161,10 +1162,45 @@ describe("native root GET CORS preflight ownership", () => {
     try {
       pause(test, { request: { url, method: "OPTIONS", headers: { "Access-Control-Request-Method": "DELETE" } } });
       await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_LOADER_TIMEOUT"));
-      expect(test.guard.firstFatal).toMatchObject({ requestedPreflightMethod: "DELETE", preflightCandidatePresent: false, preflightSourceKnown: false });
+      expect(test.guard.firstFatal).toMatchObject({ requestedPreflightMethod: "DELETE", preflightCandidatePresent: false,
+        preflightSourceKnown: false, preflightRegistrationGate: "NOT_SEEN" });
       for (const field of ["preflightCandidateInvalid", "preflightSourceMethod", "preflightSourceCurrentGeneration", "preflightSourceFailed", "preflightSourceBodyPresent", "preflightSourceRootFrame", "preflightSourceLoaderKnown", "preflightSourceUrlMatches"])
         expect(test.guard.firstFatal).not.toHaveProperty(field);
       expect(test.routes).toHaveLength(1);
+    } finally { await test.guard.close(); }
+  });
+  it("projects only the exact rejected preflight registration gate and current source facts", async () => {
+    const test = await prepare();
+    try {
+      metadata(test, { frameId: "foreign", request: { url, method: "OPTIONS", headers: { "X-Private": "private-header-canary" } } });
+      pause(test);
+      await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_LOADER_TIMEOUT"));
+      expect(test.guard.firstFatal).toMatchObject({ phase: "LOADER_IDENTITY_WAIT", preflightRegistrationGate: "NONROOT_FRAME",
+        preflightGateGenerationCurrent: true, preflightGateRootFrame: false, preflightGateParentKnown: true,
+        preflightGateParentCurrentGeneration: true, preflightGateParentLoaderCurrent: true, preflightGateParentFailed: false,
+        preflightCandidatePresent: false, preflightSourceKnown: false });
+      expect(JSON.stringify(test.guard.firstFatal)).not.toMatch(/foreign|original-get|private-header-canary|preflight"/u);
+      expect(test.routes).toHaveLength(1);
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "options")).toBe(false);
+    } finally { await test.guard.close(); }
+  });
+  it.each([
+    { headers: { Origin: "https://example.org", "Access-Control-Request-Method": "POST",
+      "Access-Control-Request-Headers": "content-type,x-api-key" }, category: "SENSITIVE", originSafe: true },
+    { headers: { Origin: "https://private.invalid", "Access-Control-Request-Method": "DELETE",
+      "Access-Control-Request-Headers": "x-private\r\nsecret" }, category: "MALFORMED", originSafe: false },
+    { headers: { Origin: "https://example.org", "Access-Control-Request-Method": "GET",
+      "Access-Control-Request-Headers": "accept", "access-control-request-headers": "x-other" }, category: "DUPLICATE", originSafe: true },
+  ] as const)("projects closed OPTIONS header categories without changing the strict timeout: $category", async ({ headers, category, originSafe }) => {
+    const test = await prepare({}, false);
+    try {
+      pause(test, { request: { url, method: "OPTIONS", headers } });
+      await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_LOADER_TIMEOUT"));
+      expect(test.guard.firstFatal).toMatchObject({ code: "NATIVE_REDIRECT_LOADER_TIMEOUT", phase: "LOADER_IDENTITY_WAIT",
+        preflightOriginPresent: true, preflightOriginSafe: originSafe, preflightRequestedHeadersCategory: category });
+      expect(test.routes).toHaveLength(1);
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "options")).toBe(false);
+      expect(JSON.stringify(test.guard.firstFatal)).not.toMatch(/private\.invalid|x-private|x-other|x-api-key|secret/iu);
     } finally { await test.guard.close(); }
   });
   it.each([

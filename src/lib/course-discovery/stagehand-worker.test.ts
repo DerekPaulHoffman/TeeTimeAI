@@ -218,7 +218,7 @@ describe("clean native root widget handoff", () => {
 });
 
 describe("regular Stagehand source worker", () => {
-  it.each(["UNSUPPORTED_ADAPTER_SOURCE", "CPS_PUBLIC_BUILD_UNSUPPORTED"])("hands only a freshly closed %s inspection to generic Sol and activates exactly once", async code => {
+  it.each(["UNSUPPORTED_ADAPTER_SOURCE", "CPS_PUBLIC_BUILD_UNSUPPORTED", "ADAPTER_CONFIGURATION_UNVERIFIED"])("hands only a freshly closed %s inspection to generic Sol and activates exactly once", async code => {
     const t = setup(), before = structuredClone(t.f.job);
     const request = t.request.getMockImplementation()!;
     t.request.mockImplementation(async action => {
@@ -229,10 +229,12 @@ describe("regular Stagehand source worker", () => {
     const genericWorker = vi.fn(async options => {
       expect(t.close).toHaveBeenCalledOnce(); expect(options.job).toBe(t.f.job);
       expect(options.job).toEqual(before); expect(options.freshOfficialStart).toBe(true);
+      expect(options.recipeEngineConstraint).toBe(code === "ADAPTER_CONFIGURATION_UNVERIFIED" ? "EXISTING_ADAPTER" : undefined);
       expect(options.workDeadlineAt).toBe(new Date(first + 720000).toISOString());
       expect(options.checkpointProvenance.stagehandSource.jobId).toBe(t.f.job.id);
       expect(options.checkpointProvenance).not.toHaveProperty("controller");
-      const activation = await verifyDiscoveryCandidate({ client: options.client, job: options.job, recipe: { engine: "BROWSER_DOM" },
+      const activation = await verifyDiscoveryCandidate({ client: options.client, job: options.job,
+        recipe: { engine: code === "ADAPTER_CONFIGURATION_UNVERIFIED" ? "EXISTING_ADAPTER" : "BROWSER_DOM" },
         sourceEvidence: { officialUrl: official, observedBookingUrl: booking }, executeRecipe: t.executeRecipe,
         beforeActivate: options.beforeActivate, afterActivate: () => options.afterActivate({ metrics: genericMetrics }) });
       genericMetrics.tokenUsage.totalTokens = 10;
@@ -245,23 +247,43 @@ describe("regular Stagehand source worker", () => {
     expect(t.client.activate).toHaveBeenCalledOnce(); expect(t.beforeActivate).toHaveBeenCalledOnce(); expect(t.afterActivate).toHaveBeenCalledOnce();
     expect(t.validateRecipe).not.toHaveBeenCalled(); expect(t.f.job).toEqual(before);
   });
-  it.each(["ADAPTER_IDENTITY_MISMATCH", "ADAPTER_CONFIGURATION_UNVERIFIED", "CPS_CONFIGURATION_UNVERIFIED", "ACCESS_REQUIRED", "FRAMEWORK_INSPECTION_PATH_STALE", "NATIVE_REDIRECT_NETWORK_FAILED"])
+  it.each(["ADAPTER_IDENTITY_MISMATCH", "CPS_CONFIGURATION_UNVERIFIED", "ACCESS_REQUIRED", "FRAMEWORK_INSPECTION_PATH_STALE", "NATIVE_REDIRECT_NETWORK_FAILED"])
   ("never generic-falls back for %s", async code => {
     const t = setup(), request = t.request.getMockImplementation()!, genericWorker = vi.fn();
     t.request.mockImplementation(async action => { if (action.action === "inspect_adapter") throw Object.assign(Error(code), { code }); return request(action); });
     await expect(t.run({ genericWorker })).rejects.toMatchObject({ code }); expect(genericWorker).not.toHaveBeenCalled();
   });
-  it("does not generic-fall back when unsupported inspection cleanup failed or work expired", async () => {
+  it("keeps a ForeUP configuration denial inside typed-only repair with no unverified activation", async () => {
+    const t = setup(), genericWorker = vi.fn(), foreup = "https://foreupsoftware.com/index.php/booking/123/456";
+    t.f.report.adapterSourceProposal.bookingUrl = foreup;
+    t.f.report.visitedUrls = [official, foreup];
+    t.f.report.officialLinkLedger = [{ pageUrl: official, links: [{ href: foreup }] }];
+    t.f.report.actions = [{ sourceUrl: official, action: { method: "click" }, observedTarget: { tag: "A", href: foreup }, afterUrl: foreup }];
+    const request = t.request.getMockImplementation()!;
+    t.request.mockImplementation(async action => {
+      if (action.action === "inspect_adapter") throw Object.assign(Error("Public class coverage unverified"), { code: "ADAPTER_CONFIGURATION_UNVERIFIED" });
+      return { ...await request(action), url: action.action === "open" && action.url === foreup ? foreup : official,
+        controls: [{ kind: "link", href: foreup }] };
+    });
+    genericWorker.mockImplementation(async options => {
+      expect(options.recipeEngineConstraint).toBe("EXISTING_ADAPTER");
+      expect(options.freshOfficialStart).toBe(true);
+      throw Object.assign(Error("typed Public scope remained unverified"), { code: "DISCOVERY_NO_VERIFIED_RECIPE" });
+    });
+    await expect(t.run({ genericWorker })).rejects.toMatchObject({ code: "DISCOVERY_NO_VERIFIED_RECIPE" });
+    expect(genericWorker).toHaveBeenCalledOnce(); expect(t.client.candidate).not.toHaveBeenCalled();
+  });
+  it.each(["UNSUPPORTED_ADAPTER_SOURCE", "ADAPTER_CONFIGURATION_UNVERIFIED"])("does not generic-fall back when %s inspection cleanup failed or work expired", async code => {
     for (const mode of ["cleanup", "deadline"] as const) {
       const t = setup(), request = t.request.getMockImplementation()!, genericWorker = vi.fn();
-      t.request.mockImplementation(async action => { if (action.action === "inspect_adapter") throw Object.assign(Error("unsupported"), { code: "UNSUPPORTED_ADAPTER_SOURCE" }); return request(action); });
+      t.request.mockImplementation(async action => { if (action.action === "inspect_adapter") throw Object.assign(Error("fixed inspection failed"), { code }); return request(action); });
       t.close.mockImplementation(async () => { if (mode === "cleanup") throw Error("close failed"); t.f.clock = first + 720000; });
       await expect(t.run({ genericWorker })).rejects.toBeDefined(); expect(genericWorker).not.toHaveBeenCalled();
     }
   });
-  it("does not treat an unsupported error from source or opening a path as fixed-metadata fallback", async () => {
+  it.each(["UNSUPPORTED_ADAPTER_SOURCE", "ADAPTER_CONFIGURATION_UNVERIFIED"])("does not treat %s from source or opening a path as fixed-metadata fallback", async code => {
     for (const origin of ["source", "open"] as const) {
-      const t = setup(), genericWorker = vi.fn(), failure = Object.assign(Error("unsupported outside fixed metadata"), { code: "UNSUPPORTED_ADAPTER_SOURCE" });
+      const t = setup(), genericWorker = vi.fn(), failure = Object.assign(Error("outside fixed metadata"), { code });
       if (origin === "source") t.sourceDiscover.mockRejectedValue(failure); else t.request.mockRejectedValue(failure);
       await expect(t.run({ genericWorker })).rejects.toBe(failure); expect(genericWorker).not.toHaveBeenCalled();
     }
@@ -738,13 +760,20 @@ describe("regular Stagehand source worker", () => {
     expect(t.client.activate).not.toHaveBeenCalled();
   });
 
-  it.each(["ADAPTER_CONFIGURATION_UNVERIFIED"])("persists actual fixed-reader %s without admitting it as a source report", async code => {
+  it.each(["ADAPTER_CONFIGURATION_UNVERIFIED"])("routes actual fixed-reader %s through fresh-root generic without admitting metadata as source proof", async code => {
     const t = setup(), primary = Object.assign(Error(code), { code });
     const originalRequest = t.request.getMockImplementation()!;
     t.request.mockImplementation(async action => { if (action.action === "inspect_adapter") throw primary; return originalRequest(action); });
-    await expect(t.run()).rejects.toBe(primary);
-    const saved = t.checkpoints.at(-1) as { stagehandFailure: { entries: Array<{ phase: string; code: string }> } };
-    expect(saved.stagehandFailure.entries[0]).toMatchObject({ phase: "FIXED_INSPECTION", code });
+    const genericWorker = vi.fn(async options => {
+      expect(options.freshOfficialStart).toBe(true);
+      expect(options.workDeadlineAt).toBe(new Date(first + 720000).toISOString());
+      expect(options.checkpointProvenance.stagehandSource.report.adapterSourceProposal).toEqual(t.f.report.adapterSourceProposal);
+      expect(options.checkpointProvenance).not.toHaveProperty("controller");
+      throw Object.assign(Error("fresh generic could not prove a method"), { code: "DISCOVERY_NO_VERIFIED_RECIPE" });
+    });
+    await expect(t.run({ genericWorker })).rejects.toMatchObject({ code: "DISCOVERY_NO_VERIFIED_RECIPE" });
+    expect(genericWorker).toHaveBeenCalledOnce();
+    expect(t.checkpoints.at(-1)).toMatchObject({ stagehandSource: { jobId: t.f.job.id } });
     expect(t.close).toHaveBeenCalledOnce(); expect(t.client.candidate).not.toHaveBeenCalled();
     const forged = setup(); Object.assign(forged.f.report, { outcome: "UNRESOLVED", adapterSourceProposal: null, frameworkFailureCode: code });
     await expect(forged.run()).rejects.toThrow("STAGEHAND_SOURCE_REPORT_INVALID");

@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { chromium } from '@playwright/test';
-import { visibleInspectionFrames } from '../../../src/lib/course-discovery/fixed-inspection-frame-witness.ts';
+import { require as tsxRequire } from 'tsx/cjs/api';
+
+const { visibleInspectionFrames } = tsxRequire('../../../src/lib/course-discovery/fixed-inspection-frame-witness.ts', import.meta.url);
 
 test('production tsx serializes the self-contained iframe callback in real Playwright', async () => {
   const browser = await chromium.launch({ headless: true });

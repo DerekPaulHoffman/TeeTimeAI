@@ -1,8 +1,10 @@
 import { fetchWithProviderTimeout } from "@/lib/adapters/fetch-with-timeout";
+import { createHash } from "node:crypto";
 
 const MAX_DOCUMENT_BYTES = 512_000;
 const MAX_SCHEDULE_JSON_CHARS = 256_000;
 const MAX_SCHEDULES = 30;
+export const FOREUP_STANDARD_PUBLIC_SCOPE = "STANDARD_PUBLIC_CLASS_V1" as const;
 const FOREUP_BOOKING_PATH = /^\/index\.php\/booking\/(?:([1-9]\d{0,9})(?:\/[1-9]\d{0,9})?|index\/([1-9]\d{0,9}))\/?$/u;
 
 export type ForeupPublicConfiguration = {
@@ -58,7 +60,8 @@ function extractSchedulesJson(html: string): unknown {
 /** Managed single-sheet recipes cannot prove absence across other public
  * sheets. A different provider ID alone does not prove a different venue. */
 export function hasCompleteForeupPublicScheduleScope(input: { html: string; facilityId: number; scheduleId: number;
-  isProvenForeignSchedule?: (schedule: Record<string, unknown>) => boolean }): boolean {
+  isProvenForeignSchedule?: (schedule: Record<string, unknown>) => boolean;
+  inventoryScope?: typeof FOREUP_STANDARD_PUBLIC_SCOPE }): boolean {
   if (input.html.length > MAX_DOCUMENT_BYTES) return false;
   const schedules = extractSchedulesJson(input.html);
   if (!Array.isArray(schedules) || !schedules.length || schedules.length > MAX_SCHEDULES) return false;
@@ -67,7 +70,8 @@ export function hasCompleteForeupPublicScheduleScope(input: { html: string; faci
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
     const row = raw as Record<string, unknown>, facilityId = positiveProviderId(row.course_id), scheduleId = positiveProviderId(row.teesheet_id);
     if (!facilityId || !scheduleId) return false;
-    if (input.isProvenForeignSchedule?.(row)) continue;
+    const provenForeign = input.isProvenForeignSchedule?.(row) === true;
+    if (provenForeign && input.inventoryScope !== FOREUP_STANDARD_PUBLIC_SCOPE) continue;
     if (!Array.isArray(row.booking_classes) || row.booking_classes.length > 20) return false;
     const visible: Record<string, unknown>[] = [];
     for (const rawClass of row.booking_classes) {
@@ -79,7 +83,21 @@ export function hasCompleteForeupPublicScheduleScope(input: { html: string; faci
       visible.push(entry);
     }
     let isPublic = false;
+    let selectedExplicitPublicCount = 0;
+    const selectedClassIds = new Set<number>();
+    const selectedStandardPublic = input.inventoryScope === FOREUP_STANDARD_PUBLIC_SCOPE &&
+      facilityId === input.facilityId && scheduleId === input.scheduleId;
     for (const entry of visible) {
+      if (selectedStandardPublic) {
+        // The declared inventory is the sole explicit Public class. Other
+        // visible audiences on this exact sheet are outside that inventory.
+        const classId = positiveProviderId(entry.booking_class_id);
+        if (!classId || selectedClassIds.has(classId)) return false;
+        selectedClassIds.add(classId);
+        if (typeof entry.name !== "string" || entry.name.length > 300 || /[\u0000-\u001f\u007f]/u.test(entry.name)) return false;
+        if (/^(?:public|public play|public tee times|online tee times)$/iu.test(entry.name.trim())) selectedExplicitPublicCount += 1;
+        continue;
+      }
       if (entry.name === undefined && visible.length === 1) { isPublic = true; continue; }
       if (typeof entry.name !== "string" || entry.name.length > 300) return false;
       const name = entry.name.trim();
@@ -88,6 +106,11 @@ export function hasCompleteForeupPublicScheduleScope(input: { html: string; faci
       // labels may describe another public audience and cannot prove coverage.
       else if (!/^(?:(?:full(?: week)?|twilight|junior|senior|annual|club|premium) )?(?:member|members|membership)(?: (?:only|tee times|play))?$/iu.test(name)) return false;
     }
+    if (selectedStandardPublic) {
+      if (selectedExplicitPublicCount !== 1) return false;
+      isPublic = true;
+    }
+    if (provenForeign) continue;
     if (isPublic) {
       const key = `${facilityId}:${scheduleId}`;
       if (publicSheets.has(key)) return false;
@@ -95,6 +118,34 @@ export function hasCompleteForeupPublicScheduleScope(input: { html: string; faci
     }
   }
   return publicSheets.size === 1 && publicSheets.has(`${input.facilityId}:${input.scheduleId}`);
+}
+
+/** Exact bounded catalog evidence for a newly declared Standard Public recipe.
+ * Replay re-reads the public document and compares the same digest. */
+export function foreupPublicScheduleCatalogSha256(html: string): string | null {
+  if (html.length > MAX_DOCUMENT_BYTES) return null;
+  const schedules = extractSchedulesJson(html);
+  if (!Array.isArray(schedules) || !schedules.length || schedules.length > MAX_SCHEDULES) return null;
+  return createHash("sha256").update(JSON.stringify(schedules)).digest("hex");
+}
+
+/** Distinguishes a named Public class from the older sole unlabelled class.
+ * A failed scoped proof may use the legacy strict path only for the latter. */
+export function isExplicitForeupPublicClass(input: { html: string; facilityId: number; scheduleId: number; bookingClassId: number }): boolean {
+  if (input.html.length > MAX_DOCUMENT_BYTES) return false;
+  const schedules = extractSchedulesJson(input.html);
+  if (!Array.isArray(schedules) || schedules.length < 1 || schedules.length > MAX_SCHEDULES) return false;
+  const selected = schedules.filter(row => row && typeof row === "object" && !Array.isArray(row) &&
+    positiveProviderId((row as Record<string, unknown>).course_id) === input.facilityId &&
+    positiveProviderId((row as Record<string, unknown>).teesheet_id) === input.scheduleId);
+  if (selected.length !== 1) return false;
+  const classes = (selected[0] as Record<string, unknown>).booking_classes;
+  return Array.isArray(classes) && classes.some(raw => raw && typeof raw === "object" && !Array.isArray(raw) &&
+    positiveProviderId((raw as Record<string, unknown>).booking_class_id) === input.bookingClassId &&
+    positiveProviderId((raw as Record<string, unknown>).teesheet_id) === input.scheduleId &&
+    String((raw as Record<string, unknown>).active) === "1" && String((raw as Record<string, unknown>).hidden) === "0" &&
+    typeof (raw as Record<string, unknown>).name === "string" &&
+    /^(?:public|public play|public tee times|online tee times)$/iu.test(String((raw as Record<string, unknown>).name).trim()));
 }
 
 export function parseForeupPublicConfiguration(input: {
