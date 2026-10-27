@@ -29,7 +29,7 @@ function uniqueDisplaySessions(matches: SimulatorMatch[]) {
       match.endsAt?.toISOString() ?? "", match.bookingUrl].join("\u0000");
     const existing = sessions.get(key);
     sessions.set(key, existing
-      ? { ...existing, isNew: existing.isNew === true || match.isNew === true }
+      ? { ...existing, isNew: existing.isNew === true || match.isNew === true ? true : existing.isNew ?? match.isNew }
       : match);
   }
   return [...sessions.values()].sort((left, right) => left.startsAt.getTime() - right.startsAt.getTime());
@@ -86,7 +86,7 @@ export function renderSimulatorAlertHtml(input: SimulatorEmailInput) {
           startsAt: match.startsAt,
           endsAt: match.endsAt,
           availableSpots: 1,
-          isNew: match.isNew === true
+          isNew: match.isNew
         }))
       };
     });

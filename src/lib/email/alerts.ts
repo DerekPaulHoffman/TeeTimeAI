@@ -341,7 +341,7 @@ export function renderAlertHtml(input: TeeTimeAlertInput) {
           priceCents: match.priceCents,
           holes: match.holes,
           bookableHoleCounts: match.bookableHoleCounts,
-          isNew: match.isNew === true
+          isNew: match.isNew
         }))
       };
     })

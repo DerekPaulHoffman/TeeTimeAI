@@ -33,6 +33,8 @@ describe("renderAlertHtml", () => {
     expect(html).toContain("9:00 AM");
     expect(html).toContain("Sat 6:00 AM for you");
     expect(html).toContain("course local time");
+    expect(html).toContain("Also available");
+    expect(html).not.toContain("previously shared");
   });
 
   it("escapes dynamic email fields", () => {

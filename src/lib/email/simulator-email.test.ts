@@ -83,6 +83,8 @@ describe("simulator customer email", () => {
     expect((html.match(/href="https:\/\/venue.example\/book"/g) ?? [])).toHaveLength(1);
     expect(getSimulatorAlertSubject(sessions)).toContain("A simulator session opened");
     expect(sessions).toHaveLength(6);
+    expect(html).toContain("Also available");
+    expect(html).not.toContain("previously shared");
   });
 
   it("does not claim a pending setup has verified availability", () => {
