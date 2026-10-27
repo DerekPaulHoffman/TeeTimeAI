@@ -168,11 +168,11 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(html).toContain("MANUAL REVIEW NEEDED");
+    expect(html).toContain("CHECK DIRECTLY FOR NOW");
     expect(html).toContain(
-      "Manual review needed; your alert remains active"
+      "This venue needs a closer look"
     );
-    expect(html).toContain("Use the official site for current tee times");
+    expect(html).toContain("Check the official site for current openings");
     expect(html).toContain("Open official booking page");
     expect(html).not.toMatch(/engineering|adapter|automation incident/i);
   });
@@ -200,8 +200,8 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(html).toContain("AUTOMATIC CHECKS RETRYING");
-    expect(html).not.toContain("MANUAL REVIEW NEEDED");
+    expect(html).toContain("WE’RE CHECKING ON IT");
+    expect(html).not.toContain("CHECK DIRECTLY FOR NOW");
   });
 
   it("renders the explicitly proven automation-stalled endpoint as manual review", () => {
@@ -228,8 +228,8 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(html).toContain("MANUAL REVIEW NEEDED");
-    expect(html).toContain("Use the official site for current tee times");
+    expect(html).toContain("CHECK DIRECTLY FOR NOW");
+    expect(html).toContain("Check the official site for current openings");
   });
 
   it("renders one consolidated outage update after the planner releases it", () => {
@@ -255,9 +255,9 @@ describe("renderSearchStatusHtml", () => {
     });
 
     expect(html).toContain("STATUS UPDATE");
-    expect(html).toContain("Automatic checks are still retrying");
-    expect(html).toContain("Your alert remains active");
-    expect(html).toContain("official site");
+    expect(html).toContain("We’re checking on it");
+    expect(html).toContain("Your alert is still active");
+    expect(html).toContain("Open official booking page");
   });
 
   it("renders a clear factual-final monitoring status update", () => {
@@ -283,9 +283,9 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(html).toContain("A course status has been confirmed");
-    expect(html).toContain("Your alert remains active for the other selected courses");
-    expect(html).toContain("See the confirmed course details below");
+    expect(html).toContain("Your course update");
+    expect(html).toContain("Each course below has its own latest update and next step");
+    expect(html).toContain("Use the venue’s official contact details");
     expect(html).toContain("Open official site");
     expect(html).toContain("Call 555-0100");
     expect(html).not.toMatch(/adapter|probe|incident|playbook/i);
@@ -320,8 +320,8 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(html).toContain("AUTOMATIC CHECKS RESUMED");
-    expect(html).toContain("matching tee times are available below");
+    expect(html).toContain("BACK ON TRACK");
+    expect(html).toContain("matching tee times are available");
     expect(html).toContain("8:10 AM");
   });
 
@@ -401,12 +401,12 @@ describe("renderSearchStatusHtml", () => {
     ]) {
       expect(html.match(new RegExp(courseName, "g"))).toHaveLength(1);
     }
-    expect(html).toContain("PRIORITY 2");
-    expect(html).toContain("AVAILABLE NOW");
+    expect(html).not.toContain("PRIORITY");
+    expect(html).toContain("New since your last email");
     expect(html).toContain("11:04 AM");
-    expect(html.match(/AUTOMATIC CHECKS RETRYING/g)).toHaveLength(3);
+    expect(html.match(/data-email-state="retrying"/g)).toHaveLength(3);
     expect(html).not.toContain("SETTING UP MONITORING");
-    expect(html).toContain("Please check directly with the course");
+    expect(html).toContain("Contact the course for current openings");
     expect(html).toContain('href="tel:8605550100"');
   });
 
@@ -438,7 +438,7 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(html).toContain("BOOKING NOT OPEN YET");
+    expect(html).toContain("WAITING FOR BOOKING TO OPEN");
     expect(html).toContain("Booking opens Wednesday, July 15 at 5:00 AM EDT");
     expect(html).toContain("Booking for your date hasn&#39;t opened yet");
     expect(html).toContain("start checking at that time");
@@ -469,7 +469,7 @@ describe("renderSearchStatusHtml", () => {
       }]
     });
 
-    expect(html).toContain("BOOKING NOT OPEN YET");
+    expect(html).toContain("WAITING FOR BOOKING TO OPEN");
     expect(html).toContain("Booking expected to open Wednesday, October 7");
     expect(html).toContain("Booking for your date hasn&#39;t opened yet");
     expect(html).toContain("not published an exact release time");
@@ -506,8 +506,8 @@ describe("renderSearchStatusHtml", () => {
 
     expect(html).toContain("Online times usually appear around Wednesday, October 7");
     expect(html).toContain("Based on recent releases");
-    expect(html).toContain("TEE TIMES EXPECTED LATER");
-    expect(html).not.toContain("BOOKING NOT OPEN YET");
+    expect(html).toContain("TIMES EXPECTED LATER");
+    expect(html).not.toContain("WAITING FOR BOOKING TO OPEN");
     expect(html).not.toContain("Booking for your date hasn&#39;t opened yet");
   });
 
@@ -528,15 +528,15 @@ describe("renderSearchStatusHtml", () => {
     expect(html).toContain("Your tee-time alert is active");
     expect(html).toContain("7:10 AM EDT before your window");
     expect(html).toContain("booking window may not be open yet");
-    expect(html).not.toContain("BOOKING NOT OPEN YET");
-    expect(html).toContain("AUTOMATIC CHECKS RETRYING");
-    expect(html).toContain("Use the official site while we keep trying");
-    expect(html).toContain("Every selected course has a result below");
+    expect(html).not.toContain("WAITING FOR BOOKING TO OPEN");
+    expect(html).toContain("WE’RE CHECKING ON IT");
+    expect(html).toContain("We’ll check again automatically. You don’t need to do anything.");
+    expect(html).toContain("Each course below has its own latest update and next step");
     expect(html).not.toContain("keep watching automatically");
     expect(html).toContain("What we're watching for you");
     expect(html).toContain("COURSE LAYOUT");
     expect(html).toContain("18 Holes");
-    expect(html).toContain("CHECKING FOR TEE TIMES");
+    expect(html).toContain("WE’RE WATCHING");
     expect(html).not.toContain("at most one morning status update per day");
     expect(html).not.toContain("<Needs Adapter>");
     expect(html).toContain("Course &lt;Needs Adapter&gt;");
@@ -622,7 +622,7 @@ describe("renderSearchStatusHtml", () => {
     expect(html).toContain("9/18 holes");
     expect(html.match(/Tashua Knolls Golf Course/g)).toHaveLength(1);
     expect(html).toContain("What we're watching for you");
-    expect(html).toContain("PRIORITY 2 &middot; AUTOMATIC CHECKS RETRYING");
+    expect(html).toContain("WE’RE CHECKING ON IT");
   });
 
   it("revalidates a generic legacy block instead of treating it as final", () => {
@@ -654,9 +654,9 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(html).toContain("cannot check automatically yet");
-    expect(html).toContain("CHECK OFFICIAL WEBSITE");
-    expect(html).toContain("confirming how this course handles online booking");
+    expect(html).toContain("haven’t confirmed that we can check this booking site yet");
+    expect(html).toContain("WE’RE CHECKING THE SETUP");
+    expect(html).toContain("We’re checking whether we can watch this course");
     expect(html).toContain("Open official site &rarr;");
     expect(html).toContain("Call (860) 555-0102 &rarr;");
     expect(html).not.toContain("keep watching automatically");
@@ -686,10 +686,10 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(html).toContain("PRIORITY 1 &middot; CHECK OFFICIAL WEBSITE");
-    expect(html).toContain("confirming how this course handles online booking");
+    expect(html).toContain("WE’RE CHECKING THE SETUP");
+    expect(html).toContain("We’re checking whether we can watch this course");
     expect(html).toContain("Open official booking page &rarr;");
-    expect(html).toContain("while we finish checking");
+    expect(html).toContain("check the official site in the meantime");
   });
 
   it("gives phone-only courses a clear direct-booking action", () => {
@@ -717,7 +717,7 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(html).toContain("PRIORITY 1 &middot; CALL THE COURSE");
+    expect(html).toContain("CALL FOR OPENINGS");
     expect(html).toContain(
       "This course does not show tee-time availability online. Please call the course directly to check availability and book."
     );
@@ -728,8 +728,8 @@ describe("renderSearchStatusHtml", () => {
   });
 
   it.each([
-    ["ACCOUNT_REQUIRED", "SIGN IN ON OFFICIAL WEBSITE", "only shows tee times after golfers sign in"],
-    ["CAPTCHA_OR_QUEUE", "CHECK THE OFFICIAL WEBSITE", "booking website prevents Tee Time Spot"]
+    ["ACCOUNT_REQUIRED", "SIGN IN TO CHECK", "only visible after you sign in"],
+    ["CAPTCHA_OR_QUEUE", "CHECK DIRECTLY", "verification step or waiting room prevents us from checking"]
   ] as const)(
     "renders %s as a technical final even with the same booking page",
     (automationReason, badge, detail) => {
@@ -756,7 +756,8 @@ describe("renderSearchStatusHtml", () => {
         ]
       });
 
-      expect(html).toContain(`PRIORITY 1 &middot; ${badge}`);
+      expect(html).toContain(badge);
+      expect(html).not.toContain("PRIORITY");
       expect(html).toContain(detail);
       expect(html).not.toContain("ADDING MONITORING");
       expect(html).not.toContain("CAPTCHA OR QUEUE");
@@ -791,7 +792,7 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(html).toContain("PRIORITY 1 &middot; CONTACT THE COURSE FIRST");
+    expect(html).toContain("CALL FOR OPENINGS");
     expect(html).toContain(
       "requires staff to set up your online booking access"
     );
@@ -832,7 +833,7 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(html).toContain("PRIORITY 1 &middot; NOT AVAILABLE FOR ALERTS");
+    expect(html).toContain("CHOOSE ANOTHER VENUE");
     expect(html).toContain("This listing is not a public golf course we can check");
     expect(html).not.toContain("AVAILABLE NOW");
     expect(html).not.toContain("https://private.example/book");
@@ -875,9 +876,9 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(html).toContain("PRIORITY 1 &middot; CONFIRMING COURSE DETAILS");
-    expect(html).toContain("Checking whether this listing is a public golf course");
-    expect(html).toContain("after we confirm the course details");
+    expect(html).toContain("CONFIRMING THE DETAILS");
+    expect(html).toContain("confirm that this is a public golf course before showing any tee times");
+    expect(html).toContain("check the venues that are ready while these details are confirmed");
     expect(html).not.toContain("identity evidence");
     expect(html).not.toContain("AVAILABLE NOW");
     expect(html).not.toContain("https://private.example/book");
@@ -910,9 +911,9 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(html).toContain("PRIORITY 1 &middot; CHECK OFFICIAL WEBSITE");
-    expect(html).toContain("confirming how this course handles online booking");
-    expect(html).not.toContain("Please check directly with the course");
+    expect(html).toContain("WE’RE CHECKING THE SETUP");
+    expect(html).toContain("We’re checking whether we can watch this course");
+    expect(html).not.toContain("Contact the course for current openings");
   });
 
   it("does not infer a manual final from no-online metadata with an unknown method", () => {
@@ -937,8 +938,8 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(html).toContain("PRIORITY 1 &middot; CHECK OFFICIAL WEBSITE");
-    expect(html).not.toContain("Please check directly with the course");
+    expect(html).toContain("WE’RE CHECKING THE SETUP");
+    expect(html).not.toContain("Contact the course for current openings");
   });
 
   it("tells a first-time lookup golfer that automatic checks are still retrying", () => {
@@ -966,9 +967,9 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(html).toContain("AUTOMATIC CHECKS RETRYING");
-    expect(html).toContain("Use the official site while we keep trying");
-    expect(html).toContain("first time Tee Time Spot has checked this course");
+    expect(html).toContain("WE’RE CHECKING ON IT");
+    expect(html).toContain("We’ll check again automatically. You don’t need to do anything.");
+    expect(html).toContain("We couldn’t confirm openings on our last check.");
     expect(html).not.toMatch(/operator|engineering|adapter|coverage queue/i);
   });
 
@@ -993,9 +994,8 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(html).toContain("AUTOMATIC CHECKS RETRYING");
-    expect(html).toContain("Your alert remains active");
-    expect(html).toContain("official site");
+    expect(html).toContain("WE’RE CHECKING ON IT");
+    expect(html).toContain("Your alert is still active");
     expect(html).toContain("Open official booking page");
   });
 
@@ -1030,13 +1030,13 @@ describe("renderSearchStatusHtml", () => {
         ]
       });
 
-      expect(html).toContain("CHECKING NOW");
-      expect(html).toContain("confirming current public availability");
-      expect(html).toContain("Current availability is not confirmed yet");
-      expect(html).toContain("confirming current availability for one or more courses");
+      expect(html).toContain("GETTING STARTED");
+      expect(html).toContain("We’re checking this course for you");
+      expect(html).toContain("We haven’t confirmed any openings here yet.");
+      expect(html).toContain("Each course below has its own latest update and next step");
       expect(html).not.toContain("We checked every selected course");
       expect(html).not.toContain("fresh public-page check is in progress");
-      expect(html).not.toContain("AUTOMATIC CHECKS RETRYING");
+      expect(html).not.toContain("WE’RE CHECKING ON IT");
       expect(html).not.toContain("automatic alerts are unavailable");
     }
   );
@@ -1059,8 +1059,8 @@ describe("renderSearchStatusHtml", () => {
       }]
     });
 
-    expect(html).toContain("We checked every selected course and will keep watching automatically");
-    expect(html).not.toContain("confirming current availability for one or more courses");
+    expect(html).toContain("No action needed. We’ll keep looking and email you when we find a match.");
+    expect(html).not.toContain("GETTING STARTED");
   });
 
   it("uses the Figma shell, alternating course imagery, and availability-first order", () => {
@@ -1159,9 +1159,9 @@ describe("renderSearchStatusHtml", () => {
     });
 
     expect(html).toContain('width="680"');
-    expect(html).toContain("background:#f7f4eb");
+    expect(html).toContain("background:#f4efe5");
     expect(html).toContain("background:#14231d");
-    expect(html).toContain("background:#d9862f");
+    expect(html).toContain("background:#e28a2f");
     expect(html).toContain("MORNING UPDATE");
     expect(html).toContain("https://assets.example.com/email/course-card-1.png");
     expect(html).toContain("https://assets.example.com/email/course-card-2.png");

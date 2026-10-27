@@ -1,6 +1,53 @@
 import { expect, test } from "@playwright/test";
 import path from "node:path";
 
+test("changing filters keeps the rail and viewport still with one hours focus border", async ({ page }, testInfo) => {
+  // Exercise the tablet width where Clear previously wrapped onto another row.
+  if (testInfo.project.name === "chromium-compact-desktop") {
+    await page.setViewportSize({ width: 720, height: 900 });
+  }
+  await page.route("**/api/**", route => route.fulfill({ json: { courses: [] } }));
+  await page.goto("/search");
+  await page.evaluate(() => document.fonts.ready);
+  const form = page.getByRole("form", { name: "Course search filters" });
+  const layout = page.getByRole("group", { name: "Course layout", exact: true });
+  const nineHoles = layout.getByRole("button", { name: "9-hole", exact: true });
+  await nineHoles.scrollIntoViewIfNeeded();
+  const geometry = () => form.evaluate(element => ({
+    scroll: window.scrollY,
+    height: element.getBoundingClientRect().height,
+    top: element.getBoundingClientRect().top,
+    groups: [...element.querySelectorAll<HTMLElement>("[data-filter]")].map(group => ({
+      x: group.getBoundingClientRect().x,
+      y: group.getBoundingClientRect().y,
+      width: group.getBoundingClientRect().width,
+    })),
+  }));
+  const before = await geometry();
+  for (const name of ["9-hole", "Any", "18-hole", "9-hole"]) {
+    await layout.getByRole("button", { name, exact: true }).click();
+    await expect.poll(geometry).toEqual(before);
+  }
+  await page.getByRole("button", { name: "Clear", exact: true }).click();
+  await expect.poll(geometry).toEqual(before);
+  await expect(page.getByRole("button", { name: "Clear", exact: true })).toBeDisabled();
+
+  const venue = page.getByRole("group", { name: "Venue type", exact: true });
+  if (await venue.count() === 0) return;
+  await venue.getByRole("button", { name: "Simulator", exact: true }).click();
+  const hours = page.getByRole("combobox", { name: "Number of hours", exact: true });
+  await hours.scrollIntoViewIfNeeded();
+  const simulatorBefore = await geometry();
+  await hours.selectOption("120");
+  await expect.poll(geometry).toEqual(simulatorBefore);
+  await page.getByRole("button", { name: "Clear", exact: true }).click();
+  await expect(hours).toHaveValue("any");
+  await expect.poll(geometry).toEqual(simulatorBefore);
+  await hours.focus();
+  await expect(hours).toHaveCSS("outline-style", "none");
+  await expect(hours.locator("..")).toHaveCSS("border-color", "rgb(179, 95, 16)");
+});
+
 test("compact filters preserve mode-specific preferences on desktop and mobile", async ({ page }, testInfo) => {
   const unexpected: string[] = [];
   const errors: string[] = [];

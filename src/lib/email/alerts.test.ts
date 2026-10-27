@@ -33,6 +33,8 @@ describe("renderAlertHtml", () => {
     expect(html).toContain("9:00 AM");
     expect(html).toContain("Sat 6:00 AM for you");
     expect(html).toContain("course local time");
+    expect(html).toContain("Also available");
+    expect(html).not.toContain("previously shared");
   });
 
   it("escapes dynamic email fields", () => {
@@ -175,7 +177,7 @@ describe("renderAlertHtml", () => {
     );
     expect(html).not.toContain("9:00 AM EDT");
     expect(html.match(/6 time slots available/g)).toBeNull();
-    expect(html.match(/>NEW<\/span>/g)).toHaveLength(8);
+    expect(html.match(/data-new-match="true"/g)).toHaveLength(8);
     expect(html).toContain("38 more tee times are available on the official booking page");
     expect(html).toContain("9:00 AM");
     expect(html).toContain("12:10 PM");
@@ -244,7 +246,7 @@ describe("email alert delivery helpers", () => {
         kind: "status-update",
         courses: [humanCourse]
       })
-    ).toBe("Manual review needed; your alert remains active");
+    ).toBe("A course needs a closer look; your alert is saved");
     expect(
       getSearchStatusEmailSubject({
         kind: "status-update",
@@ -258,7 +260,7 @@ describe("email alert delivery helpers", () => {
           humanCourse
         ]
       })
-    ).toBe("Manual review needed; your alert remains active");
+    ).toBe("A course needs a closer look; your alert is saved");
   });
 
   it("scopes Resend idempotency keys to the exact email content", () => {

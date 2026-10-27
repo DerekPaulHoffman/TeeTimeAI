@@ -263,16 +263,16 @@ export function getSearchStatusEmailSubject(
         getCustomerCourseMonitoringStatus(course) === "NEEDS_HUMAN_REVIEW"
     )
   ) {
-    return "Manual review needed; your alert remains active";
+    return "A course needs a closer look; your alert is saved";
   }
   return input.kind === "setup"
     ? "Your Tee Time Spot alert is active"
     : input.kind === "daily"
       ? "Your morning Tee Time Spot update"
       : input.kind === "outage"
-        ? "Your alert is active while automatic checks retry"
+        ? "We’re checking on it — your alert is still active"
         : input.kind === "recovery"
-          ? "Automatic tee-time checks have resumed"
+          ? "Your tee-time alert is back on track"
           : "A course status has been confirmed";
 }
 
@@ -341,7 +341,7 @@ export function renderAlertHtml(input: TeeTimeAlertInput) {
           priceCents: match.priceCents,
           holes: match.holes,
           bookableHoleCounts: match.bookableHoleCounts,
-          isNew: match.isNew === true
+          isNew: match.isNew
         }))
       };
     })
@@ -350,11 +350,11 @@ export function renderAlertHtml(input: TeeTimeAlertInput) {
   const subjectMatches = newMatches.length > 0 ? newMatches : matches;
   const newWindowCount = groupAlertMatchesIntoWindows(subjectMatches).length;
   const courseCount = courseGroups.size;
-  const heading = newWindowCount === 1 ? "A tee time just opened!" : "New tee times just opened!";
+  const heading = newWindowCount === 1 ? "A tee time matches your alert" : "New tee times match your alert";
   const intro =
     matches.length === 1
       ? "We found a tee time matching your search. Open the course's official booking page before it's gone."
-      : `We found matching tee times across ${courseCount} course${courseCount === 1 ? "" : "s"}. Book what's available now — we'll keep watching your priorities.`;
+      : `We found matching tee times across ${courseCount} course${courseCount === 1 ? "" : "s"}. New openings are listed first. You book direct on the official site.`;
   const firstMatch = matches[0];
   const fallbackTimeZone = normalizeTimeZone(firstMatch?.courseTimeZone, DEFAULT_TIME_ZONE);
   const targetDate =

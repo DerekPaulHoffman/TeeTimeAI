@@ -387,17 +387,16 @@ export function TeeTimeSearchControls({
             <span>{MAX_COURSE_SEARCH_RADIUS_MILES} mi</span>
           </div>
         </div>
-          {(mode === "SIMULATOR" ? durationMinutes !== null : holeFilter !== DEFAULT_COURSE_LAYOUT_FILTER) ||
-          searchRadiusMiles !== DEFAULT_COURSE_SEARCH_RADIUS_MILES ? (
-            <button
-              className={styles.reset}
-              onClick={onResetFilters}
-              type="button"
-            >
-              <X size={10} />
-              Clear
-            </button>
-          ) : null}
+        <button
+          className={styles.reset}
+          disabled={(mode === "SIMULATOR" ? durationMinutes === null : holeFilter === DEFAULT_COURSE_LAYOUT_FILTER) &&
+            searchRadiusMiles === DEFAULT_COURSE_SEARCH_RADIUS_MILES}
+          onClick={onResetFilters}
+          type="button"
+        >
+          <X size={10} />
+          Clear
+        </button>
       </div>
       <button className={styles.submit} disabled={loading} type="submit">
         <Search aria-hidden="true" size={19} />

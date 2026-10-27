@@ -478,7 +478,7 @@ describe("completed reader source through ordinary match delivery", () => {
     expect(checked.courseResults[0].outcome).toBe("NO_MATCH");
     expect(boundary.send).toHaveBeenCalledTimes(2);
     expect(boundary.send.mock.calls.map(([email]) => email.to).sort()).toEqual([friend, owner]);
-    expect(boundary.send.mock.calls.every(([email]) => email.subject === "Automatic tee-time checks have resumed")).toBe(true);
+    expect(boundary.send.mock.calls.every(([email]) => email.subject === "Your tee-time alert is back on track")).toBe(true);
     expect(rows.searchEmailDelivery.filter(row => row.kind === "MONITORING_RECOVERY").map(row => row.status)).toEqual(["SENT", "SENT"]);
     vi.setSystemTime(new Date(now.getTime() + 1_000));
     const nextSourceAt = new Date();

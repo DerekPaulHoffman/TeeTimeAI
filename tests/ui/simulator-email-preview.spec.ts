@@ -29,7 +29,7 @@ test("simulator emails keep the branded design and complete session controls", a
   const setup = page.frameLocator("iframe[title='Rendered alert setup email']");
   await expect(setup.locator("body")).toContainText("Your simulator alert is saved");
   await expect(setup.locator("body")).toContainText("X-Golf Stratford");
-  await expect(setup.locator("body")).toContainText("No matching session is available right now");
+  await expect(setup.locator("body")).toContainText("found no sessions matching your saved request yet");
   await expect(setup.getByRole("link", { name: "Cancel this alert", exact: true })).toBeVisible();
   await page.locator("iframe[title='Rendered alert setup email']")
     .screenshot({ path: testInfo.outputPath("simulator-setup-email.png") });

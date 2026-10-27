@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Bell, ExternalLink, Mail } from "lucide-react";
 
 import { EmailPreviewFrame } from "@/components/email-preview-frame";
+import { emailPreviewStates, renderEmailStatePreview } from "@/lib/email/preview-states";
 import {
   renderAlertHtml,
   type TeeTimeAlertInput
@@ -32,6 +33,7 @@ type EmailPreviewPageProps = {
   searchParams: Promise<{
     variant?: string;
     mode?: string;
+    state?: string;
   }>;
 };
 
@@ -320,19 +322,22 @@ export default async function EmailPreviewPage({
     assetBaseUrl: "",
     venues: simulatorVenues
   };
-  const emailHtml = isSimulator
+  const selectedState = emailPreviewStates.some(state => state.value === params.state) ? params.state! : "mixed";
+  const stateEmailHtml = renderEmailStatePreview(selectedState, isSimulator);
+  const emailHtml = stateEmailHtml ?? (isSimulator
     ? isInstant
       ? renderSimulatorAlertHtml(simulatorPreview)
       : renderSimulatorStatusHtml(simulatorStatusPreview)
     : isInstant
       ? renderAlertHtml(previewAlert)
-      : renderSearchStatusHtml(statusPreview);
-  const title = variant === "setup"
+      : renderSearchStatusHtml(statusPreview));
+  const title = stateEmailHtml ? "Venue status" : variant === "setup"
     ? "Alert setup"
     : variant === "instant"
       ? "Instant alert"
       : "Retired morning update";
-  const subject = isSimulator
+  const stateQuery = selectedState === "mixed" ? "" : `&state=${selectedState}`;
+  const subject = stateEmailHtml ? "Your venue status — sample" : isSimulator
     ? variant === "setup"
       ? "Your simulator alert is saved"
       : isInstant
@@ -341,7 +346,7 @@ export default async function EmailPreviewPage({
     : variant === "setup"
       ? "Your Tee Time Spot search is active"
       : isInstant
-        ? "New tee times opened at your priority courses"
+        ? "Tee times match your alert"
         : "Your morning Tee Time Spot update";
 
   return (
@@ -353,7 +358,8 @@ export default async function EmailPreviewPage({
           </p>
           <h1>{title}</h1>
           <p className="meta">
-            {isInstant
+            {stateEmailHtml ? "A synthetic venue state rendered with the real email template. No email is sent."
+              : isInstant
               ? "This is the complete match-alert email used for production delivery."
               : variant === "setup"
                 ? `This is the setup email explaining your alert and each ${isSimulator ? "venue" : "course"}'s current status.`
@@ -369,7 +375,7 @@ export default async function EmailPreviewPage({
       <nav aria-label="Email variants" className="email-preview-tabs">
         <a
           className="button button-secondary"
-          href={`/email-preview?variant=${variant}${isSimulator ? "" : "&mode=SIMULATOR"}`}
+          href={`/email-preview?variant=${variant}${isSimulator ? "" : "&mode=SIMULATOR"}${stateQuery}`}
         >
           {isSimulator ? "View course emails" : "View simulator emails"}
         </a>
@@ -377,7 +383,7 @@ export default async function EmailPreviewPage({
           <a
             aria-current={variant === option ? "page" : undefined}
             className={variant === option ? "button button-dark" : "button button-secondary"}
-            href={`/email-preview?variant=${option}${isSimulator ? "&mode=SIMULATOR" : ""}`}
+            href={`/email-preview?variant=${option}${isSimulator ? "&mode=SIMULATOR" : ""}${stateQuery}`}
             key={option}
           >
             {option === "morning"
@@ -388,6 +394,18 @@ export default async function EmailPreviewPage({
           </a>
         ))}
       </nav>
+
+      <form action="/email-preview" method="get" style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "end", marginBottom: 20 }}>
+        <input name="variant" type="hidden" value={variant} />
+        {isSimulator ? <input name="mode" type="hidden" value="SIMULATOR" /> : null}
+        <label htmlFor="email-state" style={{ display: "grid", gap: 6, minWidth: 0, maxWidth: "100%" }}>
+          Sample venue state
+          <select defaultValue={selectedState} id="email-state" name="state" style={{ padding: 10, maxWidth: "100%" }}>
+            {emailPreviewStates.map(state => <option key={state.value} value={state.value}>{state.label}</option>)}
+          </select>
+        </label>
+        <button className="button button-secondary" type="submit">Show sample</button>
+      </form>
 
       <section className="preview-grid email-preview-layout" aria-label={`${title} email preview`}>
         <div className="preview-card email-browser-card">
@@ -400,7 +418,7 @@ export default async function EmailPreviewPage({
           <EmailPreviewFrame
             className="email-frame email-status-frame"
             initialHeight={isInstant ? 1320 : 2480}
-            key={`${isSimulator ? "simulator" : "course"}-${variant}`}
+            key={`${isSimulator ? "simulator" : "course"}-${variant}-${selectedState}`}
             srcDoc={emailHtml}
             title={`Rendered ${title.toLowerCase()} email`}
           />
@@ -426,7 +444,7 @@ export default async function EmailPreviewPage({
               <p className="meta">
                 Only persisted pending matches receive a NEW badge; {isSimulator
                   ? "simulator sessions show their full start and end times for one bay."
-                  : "earlier availability stays grouped into hourly windows."}
+                  : "previously shared times are shown separately when still available."}
               </p>
             </div>
           </div>

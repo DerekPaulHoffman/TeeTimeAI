@@ -83,6 +83,8 @@ describe("simulator customer email", () => {
     expect((html.match(/href="https:\/\/venue.example\/book"/g) ?? [])).toHaveLength(1);
     expect(getSimulatorAlertSubject(sessions)).toContain("A simulator session opened");
     expect(sessions).toHaveLength(6);
+    expect(html).toContain("Also available");
+    expect(html).not.toContain("previously shared");
   });
 
   it("does not claim a pending setup has verified availability", () => {
@@ -92,7 +94,7 @@ describe("simulator customer email", () => {
       venues: [{ courseName: "Venue <One>", bookingUrl: "https://venue.example/book", availability: "CHECK_PENDING" }],
     });
     expect(html).toContain("Your simulator alert is saved");
-    expect(html).toContain("We are checking current sessions");
+    expect(html).toContain("We’re checking this venue for you");
     expect(html).toContain("Venue &lt;One&gt;");
     expect(html).not.toContain("Venue <One>");
   });
@@ -103,9 +105,9 @@ describe("simulator customer email", () => {
       durationMinutes: 60, players: 4,
       venues: [{ courseName: "New Simulator", availability: "SUPPORT_PENDING" }],
     });
-    expect(html).toContain("ADDING ALERT SUPPORT");
-    expect(html).toContain("We have not verified this venue");
-    expect(html).toContain("We will update you when its alert status changes");
+    expect(html).toContain("WE’RE CHECKING THE SETUP");
+    expect(html).toContain("haven’t confirmed that we can check this booking site yet");
+    expect(html).toContain("We’ll update you when this venue’s alert status changes");
     expect(html).not.toContain("We are watching");
     expect(html).not.toContain("No matching session is available");
     expect(html).not.toContain("Open official booking page");
@@ -123,8 +125,8 @@ describe("simulator customer email", () => {
     expect(html).toContain('class="email-card"');
     expect(html).toContain('href="https://venue.example/"');
     expect(html).toContain("Visit official site");
-    expect(html).toContain("Current sessions were verified");
-    expect(html).toContain("We cannot check simulator sessions here automatically");
+    expect(html).toContain("Current sessions were checked");
+    expect(html).toContain("Tee Time Spot can’t check sessions here automatically");
     expect(html).not.toContain("We are watching");
   });
 
@@ -209,12 +211,12 @@ describe("simulator customer email", () => {
       ]
     });
     expect(html).toContain('class="email-card"');
-    expect(html).toContain("Current sessions were verified");
-    expect(html).toContain("No matching session is available right now");
-    expect(html).toContain("Booking has not opened yet");
-    expect(html).toContain("We could not verify current sessions yet");
-    expect(html).toContain("We have not verified availability for your requested window yet");
-    expect(html).toContain("Last checked on");
+    expect(html).toContain("Current sessions were checked");
+    expect(html).toContain("found no sessions matching your saved request yet");
+    expect(html).toContain("Your requested date hasn’t opened yet");
+    expect(html).toContain("We couldn’t confirm openings on our last check");
+    expect(html).toContain("We haven’t confirmed any openings here yet");
+    expect(html).toContain("Updated");
     expect((html.match(/I booked &mdash; stop these results/g) ?? [])).toHaveLength(1);
     expect((html.match(/Cancel this alert/g) ?? [])).toHaveLength(1);
     expect(html).not.toMatch(/player count|GOLFERS|COURSE LAYOUT|tee time alert|course-card-/i);

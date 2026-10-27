@@ -1,3 +1,4 @@
+import { getCustomerStatusCopy } from "@/lib/email/customer-status-copy";
 import {
   renderCustomerEmail,
   type CustomerEmailAvailabilityCourse,
@@ -28,7 +29,7 @@ function uniqueDisplaySessions(matches: SimulatorMatch[]) {
       match.endsAt?.toISOString() ?? "", match.bookingUrl].join("\u0000");
     const existing = sessions.get(key);
     sessions.set(key, existing
-      ? { ...existing, isNew: existing.isNew === true || match.isNew === true }
+      ? { ...existing, isNew: existing.isNew === true || match.isNew === true ? true : existing.isNew ?? match.isNew }
       : match);
   }
   return [...sessions.values()].sort((left, right) => left.startsAt.getTime() - right.startsAt.getTime());
@@ -85,7 +86,7 @@ export function renderSimulatorAlertHtml(input: SimulatorEmailInput) {
           startsAt: match.startsAt,
           endsAt: match.endsAt,
           availableSpots: 1,
-          isNew: match.isNew === true
+          isNew: match.isNew
         }))
       };
     });
@@ -96,7 +97,7 @@ export function renderSimulatorAlertHtml(input: SimulatorEmailInput) {
   return renderCustomerEmail({
     mode: "SIMULATOR",
     variant: "instant",
-    heading: sessions.length === 1 ? "A simulator session just opened!" : "New simulator sessions just opened!",
+    heading: sessions.length === 1 ? "A simulator session matches your alert" : "New simulator sessions match your alert",
     intro: sessions.length === 1
       ? "We found a simulator session matching your search. Open the venue's official booking page before it's gone. You book direct with the venue."
       : venueCount === 1
@@ -178,26 +179,15 @@ export function renderSimulatorStatusHtml(input: SimulatorStatusInput) {
   });
 }
 
-function monitoringStatus(availability: string): Pick<CustomerEmailMonitoringCourse, "badgeLabel" | "detail" | "tone"> {
-  if (availability === "SUPPORT_PENDING") {
-    return { badgeLabel: "ADDING ALERT SUPPORT", tone: "adding", detail: "Your request is saved. We have not verified this venue's simulator booking system yet, so we cannot confirm openings. We will update you when its alert status changes." };
-  }
-  if (availability === "OFFICIAL_SITE_ONLY") {
-    return { badgeLabel: "ALERTS UNAVAILABLE HERE", tone: "direct", detail: "We cannot check simulator sessions here automatically. Visit the venue's official site for current information." };
-  }
-  if (availability === "BOOKING_NOT_OPEN") {
-    return { badgeLabel: "BOOKING NOT OPEN", tone: "scheduled", detail: "Booking has not opened yet. We will check when sessions are released." };
-  }
-  if (availability === "NO_MATCH") {
-    return { badgeLabel: "CHECKED", tone: "monitored", detail: "No matching session is available right now. We will keep checking your requested window." };
-  }
-  if (availability === "UNAVAILABLE") {
-    return { badgeLabel: "CHECKS RETRYING", tone: "retrying", detail: "We could not verify current sessions yet. We will retry; you can also check the venue's official booking page." };
-  }
-  if (availability === "VERIFIED" || availability === "MATCH_FOUND") {
-    return { badgeLabel: "CHECKED", tone: "monitored", detail: "Current sessions were verified on the official booking page. Matching openings are included in your session alert." };
-  }
-  return { badgeLabel: "CHECKING SESSIONS", tone: "adding", detail: "We are checking current sessions. We have not verified availability for your requested window yet." };
+function monitoringStatus(availability: string): Pick<CustomerEmailMonitoringCourse, "badgeLabel" | "detail" | "tone" | "state"> {
+  const state = availability === "SUPPORT_PENDING" ? "adding"
+    : availability === "OFFICIAL_SITE_ONLY" ? "direct"
+    : availability === "BOOKING_NOT_OPEN" ? "window"
+    : availability === "NO_MATCH" ? "watching"
+    : availability === "UNAVAILABLE" ? "retrying"
+    : availability === "VERIFIED" || availability === "MATCH_FOUND" ? "confirmed"
+    : "checking";
+  return { ...getCustomerStatusCopy(state, { simulator: true }), state };
 }
 
 function resolveStopUrls(input: { stopUrls?: EmailStopUrls; stopUrl?: string }): CustomerEmailStopUrls | undefined {
