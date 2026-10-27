@@ -5,11 +5,47 @@ import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {sourceDiscover} from './source-discovery.mjs';
 import {sourceRoutingUniqueWitness,openStagehandSession} from './driver.mjs';
-import {validateStagehandSourceReport,createStagehandSourceCheckpoint} from '../course-discovery-stagehand-source.mjs';
+import {validateStagehandSourceReport,createStagehandSourceCheckpoint,readStagehandSourceCheckpoint} from '../course-discovery-stagehand-source.mjs';
 const official='https://official.example/',booking='https://public-course.book.teeitup.com/';
 const job=()=>{const t=Date.now();return{id:'native-source-job',attempts:1,sourceFingerprint:'a'.repeat(64),firstPickedUpAt:new Date(t).toISOString(),deadlineAt:new Date(t+900000).toISOString(),request:{identity:{name:'Public Course',officialUrl:official,timeZone:'America/New_York',address:'10 Public Road, Town, NY 10001, USA'},target:{courseId:'public-course',kind:'OUTDOOR'},input:{date:'2026-11-01',timeZone:'America/New_York',players:2,startTime:'08:00',endTime:'18:00'}}};};
 function fixture(witness){let calls=0,evaluations=0;const current=official,completed=[];return{get calls(){return calls;},session:{startupMs:1,browser:{context:{addInitScript:async()=>{}}},page:{url:async()=>current,evaluate:async()=>++evaluations%2===0?[]:({url:current,observedAt:new Date().toISOString(),links:[],frames:[],dom:[]})},goto:async()=>({status:()=>200}),observeUniqueSource:async()=>typeof witness==='function'?witness():witness,extract:async(_instruction,schema)=>{calls++;completed.push({model:'gpt-6.1-sol',effort:'medium',usage:{totalTokens:1}});return{data:schema.parse({decision:'UNRESOLVED',reason:'No source',nextActionInstruction:'',bookingUrl:null})};},get localCodexCalls(){return completed;},get modelCallCounts(){return{attempted:calls};},close:async()=>({browserClosed:true,modelClosed:true})}};}
 const witness=(patch={})=>({kind:'NATIVE_UNIQUE_SUPPORTED_SOURCE',pageUrl:official,url:booking,family:'TEEITUP',via:'FRAME',documentHash:'b'.repeat(64),observedAt:new Date().toISOString(),...patch});
+const widgetWitness=(patch={})=>({kind:'NATIVE_ROOT_PUBLIC_WIDGET',pageUrl:official,observedAt:new Date().toISOString(),documentHash:'c'.repeat(64),widgetKind:'CALENDAR',...patch});
+
+test('404 compact negative routing history survives own checkpoint and can only exclude, never grant a failed source',async()=>{
+ const input=job(),f=fixture(()=>witness()),r=await sourceDiscover({job:input,sessionFactory:async()=>f.session}),failed=official+'missing';
+ r.visitedUrls.push(failed);r.actions.push({sourceUrl:official,action:{method:'click'},observedTarget:{tag:'A',href:failed},afterUrl:failed,openedNewPage:false,error:true});
+ r.officialLinkLedger.push({kind:'NATIVE_VISIBLE_DOM',pageUrl:official,observedAt:r.startedAt,documentHash:'d'.repeat(64),links:[{href:failed,visible:true}]});
+ r.notFoundRecovery={sourceUrl:official,targetUrl:failed,failedUrl:failed,status:404,observedAt:r.startedAt,completedAt:r.finishedAt,recoveredTo:official,recoveredUrl:official};
+ const saved=createStagehandSourceCheckpoint(input,r),resumed=readStagehandSourceCheckpoint({...input,attempts:2,checkpoint:{stagehandSource:saved}},undefined,Date.now());
+ assert.deepEqual(saved.report.notFoundRecovery,r.notFoundRecovery);assert.deepEqual(resumed.report.notFoundRecovery,r.notFoundRecovery);assert.equal(saved.firstPickedUpAt,input.firstPickedUpAt);assert.equal(saved.deadlineAt,input.deadlineAt);
+ assert.throws(()=>validateStagehandSourceReport({...r,adapterSourceProposal:{schemaVersion:1,kind:'EXISTING_ADAPTER_SOURCE',bookingUrl:failed}},input),/STAGEHAND_SOURCE_NOT_OBSERVED/);
+ for(const change of [{status:200},{recoveredTo:'https://foreign.example/'},{targetUrl:'https://foreign.example/'},{completedAt:'2000-01-01T00:00:00.000Z'},{authority:true}])
+  assert.throws(()=>validateStagehandSourceReport({...r,notFoundRecovery:{...r.notFoundRecovery,...change}},input),/STAGEHAND_SOURCE_REPORT_INVALID/);
+ assert.throws(()=>validateStagehandSourceReport({...r,actions:[]},input),/STAGEHAND_SOURCE_REPORT_INVALID/);
+});
+
+for(const widgetKind of ['CALENDAR','SERVICE_CATALOG'])test('native root widget yields a distinct clean routing handoff and checkpoint without inventing a booking source '+widgetKind,async()=>{
+ const input=job(),f=fixture(null);f.session.observeRootPublicWidget=async()=>widgetWitness({widgetKind});
+ const r=await sourceDiscover({job:input,sessionFactory:async()=>f.session});
+ assert.equal(r.outcome,'ROOT_WIDGET_PROPOSED_UNVERIFIED');assert.equal(r.decisionOrigin,'NATIVE_PUBLIC_ROOT_WIDGET');assert.equal(r.adapterSourceProposal,null);
+ assert.equal(f.calls,0);assert.deepEqual(r.eligibleBookingSourceUrls,[]);assert.deepEqual(r.matchingSlots,[]);assert.equal(r.recipe,null);assert.equal(r.browserClosed,true);assert.equal(r.modelClosed,true);
+ assert.deepEqual(validateStagehandSourceReport(r,input),{schemaVersion:1,kind:'ROOT_PUBLIC_WIDGET'});
+ const saved=createStagehandSourceCheckpoint(input,r),resumed=readStagehandSourceCheckpoint({...input,attempts:2,checkpoint:{stagehandSource:saved}},undefined,Date.now());
+ assert.equal(resumed.report.rootWidgetWitness.kind,'NATIVE_ROOT_PUBLIC_WIDGET');assert.equal(resumed.report.adapterSourceProposal,null);assert.equal(resumed.firstPickedUpAt,input.firstPickedUpAt);
+ assert.equal(resumed.report.rootWidgetWitness.widgetKind,widgetKind);
+ for(const change of[{browserClosed:false},{modelClosed:false},{frameworkFailureCode:'STAGEHAND_GUARDED_SOURCE_REJECTED'},
+  {adapterSourceProposal:{schemaVersion:1,kind:'EXISTING_ADAPTER_SOURCE',bookingUrl:official}},
+  {rootWidgetWitness:{...r.rootWidgetWitness,pageUrl:'https://foreign.example/'}}])assert.throws(()=>validateStagehandSourceReport({...r,...change},input));
+});
+test('missing or forged root witness and failed closure never become a root handoff',async()=>{
+ for(const value of[()=>widgetWitness({widgetKind:'MODEL_SAYS_WIDGET'}),()=>widgetWitness({modelCaption:'calendar'}),()=>widgetWitness({observedAt:'2000-01-01T00:00:00.000Z'}),()=>widgetWitness({pageUrl:'https://foreign.example/'})]){
+  const f=fixture(null);f.session.observeRootPublicWidget=async()=>value();const r=await sourceDiscover({job:job(),sessionFactory:async()=>f.session});
+  assert.equal(r.outcome,'UNRESOLVED');assert.equal(r.adapterSourceProposal,null);assert.equal(f.calls,0);
+ }
+ const f=fixture(null);f.session.observeRootPublicWidget=async()=>widgetWitness();f.session.close=async()=>({browserClosed:false,modelClosed:true});
+ const r=await sourceDiscover({job:job(),sessionFactory:async()=>f.session});assert.equal(r.outcome,'UNRESOLVED');assert.equal(r.rootWidgetWitness,undefined);
+});
 test('fresh private native edge produces only unverified routing with zero fabricated model decisions and real checkpoint roundtrip',async()=>{
   const input=job(),f=fixture(()=>witness()),directory=mkdtempSync(join(tmpdir(),'tts-native-source-'));
   try{const r=await sourceDiscover({job:input,sessionFactory:async()=>f.session,outputDirectory:directory});
@@ -58,4 +94,12 @@ for(const sourceRoutingOnly of[false,true])test(`real driver uses the exact owne
 test('native choice cannot escape original deadline or a changed current page',()=>{
   const stamp=Date.now(),w=witness();assert.equal(sourceRoutingUniqueWitness(w,{pageUrl:official,startedAt:stamp-1,deadline:stamp,now:stamp}),null);
   assert.equal(sourceRoutingUniqueWitness(w,{pageUrl:'https://changed.example/',startedAt:stamp-1,deadline:stamp+1000,now:stamp}),null);
+});
+for(const sourceRoutingOnly of[false,true])test(`root widget uses only the current private owned target in source mode=${sourceRoutingOnly}`,async()=>{
+ let calls=0;const page={pageId:'owned-root',url:async()=>official},browser={context:{pages:async()=>[page]},close:async()=>{}};
+ const owned={kind:'OWNED_GUARDED_STAGEHAND_CONTEXT',cdpUrl:'http://127.0.0.1:12345',targetId:page.pageId,assertGuardedTargets:async()=>true,
+  beforeAction:async()=>{},prepareNavigation:async()=>{},close:async()=>({browserClosed:true}),observeRootPublicWidget:async id=>{assert.equal(id,page.pageId);calls++;return widgetWitness();}};
+ const session=await openStagehandSession({deadline:Date.now()+5000,modelDisabled:true,sourceRoutingOnly,ownedBrowser:owned},
+  {loadRuntime:async()=>({localBrowser:{connect:async()=>browser},Stagehand:{create:async()=>({close:async()=>{}})}})});
+ try{const result=await session.observeRootPublicWidget();assert.equal(calls,sourceRoutingOnly?1:0);assert.equal(result?.kind??null,sourceRoutingOnly?'NATIVE_ROOT_PUBLIC_WIDGET':null);assert.equal(result?.url,undefined);}finally{await session.close();}
 });

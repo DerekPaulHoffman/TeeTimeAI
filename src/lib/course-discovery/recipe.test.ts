@@ -242,6 +242,116 @@ describe("course access recipes", () => {
     expect(() => parseAccessRecipe({ ...serverDocumentRecipe(), availabilityResponse: { ...serverDocumentRecipe().availabilityResponse, url } })).toThrow();
     expect(url).toBe("https://public.example.org/api-yoa/dining/venue_info?venue_url_key=public-golf-studio&widget_type=embedded&modify_upgrades=false");
   });
+  it.each([
+    "/accounts/12345678-1234-4234-8234-123456789abc/config",
+    "/accounts/12345678-1234-4234-8234-123456789abc/hivemind",
+    "/v3/accounts/12345678-1234-4234-8234-123456789abc/services?per_page=80&with_category_ids=true",
+    "/v2/accounts/12345678-1234-4234-8234-123456789abc/categories",
+  ])("admits only browser GET metadata for the public service catalog role %s", path => {
+    const url = "https://api.ola.godaddy.com" + path;
+    expect(isSafeRecipeUrl(url)).toBe(false);
+    for (const kind of ["xhr", "fetch"]) expect(isSafeBrowserBootstrapReadUrl(url, kind, "GET")).toBe(true);
+    for (const kind of ["document", "script", "stylesheet", "other", ""]) expect(isSafeBrowserBootstrapReadUrl(url, kind, "GET")).toBe(false);
+    for (const method of ["HEAD", "POST", "OPTIONS", "DELETE"]) expect(isSafeBrowserBootstrapReadUrl(url, "fetch", method)).toBe(false);
+    const route = { origin: "https://api.ola.godaddy.com", path: path.split("?")[0], methods: ["GET"], queryKeys: path.includes("?") ? ["per_page", "with_category_ids"] : [] };
+    const base = serverDocumentRecipe(), browser = parseAccessRecipe({ ...base, permittedRoutes: [...base.permittedRoutes, route] });
+    expect(recipeAllowsRequest(browser, url, "GET", "fetch")).toBe(true);
+    expect(recipeAllowsRequest(parseAccessRecipe(base), url, "GET", "fetch")).toBe(false);
+    expect(recipeAllowsRequest(browser, url, "GET", "document")).toBe(false);
+    expect(recipeAllowsRequest(parseAccessRecipe({ ...httpRecipe(), permittedRoutes: [...httpRecipe().permittedRoutes, route] }), url, "GET", "fetch")).toBe(false);
+    expect(() => parseAccessRecipe({ ...base, source: { ...base.source, bookingUrl: url } })).toThrow();
+    expect(() => parseAccessRecipe({ ...base, pageUrl: url })).toThrow();
+    expect(() => parseAccessRecipe({ ...base, availabilityResponse: { ...base.availabilityResponse, url } })).toThrow();
+    expect(url).toBe("https://api.ola.godaddy.com" + path);
+  });
+  it("rejects public service metadata aliases, credentials, extra queries and customer endpoints", () => {
+    const root = "https://api.ola.godaddy.com", account = "/accounts/12345678-1234-4234-8234-123456789abc";
+    const config = root + account + "/config", services = root + "/v3" + account + "/services?per_page=80&with_category_ids=true";
+    for (const url of [
+      config.replace("https:", "http:"), config.replace("api.ola.godaddy.com", "api.ola.godaddy.com.example.org"),
+      config.replace("api.ola.godaddy.com", "other.godaddy.com"), config.replace(".com/", ".com:443/"),
+      config.replace("https://", "https://user:password@"), config.replace("789abc", "789ABC"),
+      config.replace("12345678-", "%31" + "2345678-"), config.replace("/accounts/", "/x/../accounts/"),
+      config.replace("/accounts/", "/accounts//"), config.replace("/config", "/%63onfig"), config + "/", config + "?", config + "#", config + "#fragment",
+      config + "?token=private", config + "?date=2030-01-02", config + "\n", config.replace("/config", "/customers"),
+      root + "/v2" + account + "/customers", root + account + "/contacts", root + account + "/services",
+      root + "/v3" + account + "/config", root + "/v2" + account + "/categories?per_page=80",
+      root + account + "/hivemind?", services.replace("80", "81"), services.replace("true", "false"),
+      services + "&per_page=80", services + "&date=2030-01-02", services.replace("per_page", "%70er_page"),
+      services.replace("=80", "=%38%30"), services.replace("&with_category_ids=true", ""),
+      services.replace("12345678-1234-4234-8234-123456789abc", "not-a-uuid"),
+    ]) expect(isSafeBrowserBootstrapReadUrl(url, "fetch", "GET"), url).toBe(false);
+  });
+  it("separates dated public service inventory from calendar and optional metadata", () => {
+    const account = "/accounts/12345678-1234-4234-8234-123456789abc", origin = "https://api.ola.godaddy.com";
+    const query = "?start_time=" + encodeURIComponent("2030-11-03T00:00:00.000-04:00") + "&end_time=" + encodeURIComponent("2030-11-03T23:59:59.999-05:00") + "&resource_ids[]=11&resource_ids[]=12";
+    const times = origin + "/v2" + account + "/services/73/available_times" + query;
+    const dates = origin + account + "/services/73/available_dates" + query;
+    const metadata = [dates, origin + account + "/config?fields[]=cart", origin + "/addons/v1" + account + "/services/73/addons"];
+    expect(isSafeBrowserAvailabilityReadUrl(times, "fetch", "GET")).toBe(true);
+    expect(isSafeBrowserBootstrapReadUrl(times, "fetch", "GET")).toBe(false);
+    for (const url of [times, ...metadata]) {
+      const inventory = url === times, predicate = inventory ? isSafeBrowserAvailabilityReadUrl : isSafeBrowserBootstrapReadUrl;
+      expect(isSafeRecipeUrl(url)).toBe(false);
+      for (const kind of ["xhr", "fetch"]) expect(predicate(url, kind, "GET")).toBe(true);
+      for (const kind of ["document", "script", "stylesheet", "other", ""]) expect(predicate(url, kind, "GET")).toBe(false);
+      for (const method of ["POST", "HEAD", "OPTIONS", "DELETE"]) expect(predicate(url, "fetch", method)).toBe(false);
+      if (!inventory) expect(isSafeBrowserAvailabilityReadUrl(url, "fetch", "GET")).toBe(false);
+      const base = serverDocumentRecipe(), parsed = new URL(url);
+      const route = { origin, path: parsed.pathname, methods: ["GET"], queryKeys: [...new Set(parsed.searchParams.keys())] };
+      const browser = parseAccessRecipe({ ...base, permittedRoutes: [...base.permittedRoutes, route] });
+      expect(recipeAllowsRequest(browser, url, "GET", "fetch")).toBe(true);
+      expect(recipeAllowsRequest(parseAccessRecipe(base), url, "GET", "fetch")).toBe(false);
+      expect(recipeAllowsRequest(browser, url, "GET", "document")).toBe(false);
+      expect(recipeAllowsRequest(parseAccessRecipe({ ...httpRecipe(), permittedRoutes: [...httpRecipe().permittedRoutes, route] }), url, "GET", "fetch")).toBe(false);
+      expect(() => parseAccessRecipe({ ...httpRecipe(), request: { url, method: "GET" } })).toThrow();
+      expect(() => parseAccessRecipe({ ...base, source: { ...base.source, bookingUrl: url } })).toThrow();
+      expect(() => parseAccessRecipe({ ...base, pageUrl: url })).toThrow();
+      if (!inventory) expect(() => parseAccessRecipe({ ...base, availabilityResponse: { ...base.availabilityResponse, url } })).toThrow();
+    }
+  });
+  it("validates public service calendar, offset, resource and finite raw query bounds", () => {
+    const root = "https://api.ola.godaddy.com", account = "/accounts/12345678-1234-4234-8234-123456789abc";
+    const dated = (role: "times" | "dates", start: string, end: string, resources = ["11", "12"]) => root + (role === "times" ? "/v2" : "") + account + "/services/73/available_" + role + "?start_time=" + encodeURIComponent(start) + "&end_time=" + encodeURIComponent(end) + resources.map(id => "&resource_ids[]=" + id).join("");
+    const check = (role: "times" | "dates", start: string, end: string, expected: boolean, resources?: string[]) => {
+      const url = dated(role, start, end, resources);
+      expect((role === "times" ? isSafeBrowserAvailabilityReadUrl : isSafeBrowserBootstrapReadUrl)(url, "fetch", "GET"), url).toBe(expected);
+    };
+    check("times", "2032-02-29T12:34:56.123-05:00", "2032-02-29T23:59:59.999-05:00", true);
+    check("times", "2030-11-03T00:00:00.000-04:00", "2030-11-03T23:59:59.999-05:00", true);
+    check("dates", "2030-11-01T12:00:00.000-04:00", "2030-12-02T23:59:59.999-05:00", true);
+    check("times", "2030-01-02T00:00:00.000+14:00", "2030-01-02T01:00:00.000+14:00", true, Array.from({ length: 32 }, (_, i) => String(i + 1)));
+    for (const [start, end] of [
+      ["2030-02-29T00:00:00.000-05:00", "2030-02-29T23:59:59.999-05:00"],
+      ["2030-04-31T00:00:00.000-05:00", "2030-04-31T23:59:59.999-05:00"],
+      ["2030-01-02T24:00:00.000-05:00", "2030-01-02T23:59:59.999-05:00"],
+      ["2030-01-02T00:60:00.000-05:00", "2030-01-02T23:59:59.999-05:00"],
+      ["2030-01-02T00:00:60.000-05:00", "2030-01-02T23:59:59.999-05:00"],
+      ["2030-01-02T00:00:00.000+14:01", "2030-01-02T23:59:59.999+14:01"],
+      ["2030-01-02T00:00:00.000-00:00", "2030-01-02T23:59:59.999-00:00"],
+      ["2030-01-02T00:00:00Z", "2030-01-02T23:59:59Z"],
+      ["2030-01-02T12:00:00.000-05:00", "2030-01-02T12:00:00.000-05:00"],
+      ["2030-01-02T13:00:00.000-05:00", "2030-01-02T12:00:00.000-05:00"],
+    ]) for (const role of ["times", "dates"] as const) check(role, start, end, false);
+    check("times", "2030-01-02T00:00:00.000-05:00", "2030-01-03T00:00:00.001-05:00", false);
+    check("times", "2030-01-02T00:00:00.000+14:00", "2030-01-02T23:59:59.999-14:00", false);
+    check("dates", "2030-11-01T00:00:00.000-04:00", "2030-12-02T23:59:59.999-05:00", false); // Over 32 elapsed days across DST.
+    check("dates", "2030-01-01T23:59:59.999-05:00", "2030-02-02T00:00:00.000-05:00", false); // 33 local dates.
+    for (const resources of [[], ["11", "11"], ["0"], ["01"], ["-1"], ["2147483648"], Array.from({ length: 33 }, (_, i) => String(i + 1))])
+      check("times", "2030-01-02T00:00:00.000-05:00", "2030-01-02T23:59:59.999-05:00", false, resources);
+    const good = dated("times", "2030-01-02T00:00:00.000-05:00", "2030-01-02T23:59:59.999-05:00");
+    for (const url of [good + "&start_time=x", good + "&end_time=x", good + "&token=private", good + "&party=2", good + "#", good + "&",
+      good.replace("resource_ids[]", "resource_ids%5B%5D"), good.replace("start_time", "%73tart_time"), good.replace("%3A", ":"), good.replace("%3A", "%3a"),
+      good.replace("services/73", "services/0"), good.replace("services/73", "services/2147483648"), good.replace("services/73", "services/073"),
+      good.replace("/v2/", "/"), good.replace("/accounts/", "/x/../accounts/"), good.replace("789abc", "789ABC"),
+      good.replace("https:", "http:"), good.replace(".com/", ".com:443/"), good.replace("https://", "https://user@"),
+      good.replace("api.ola.godaddy.com", "api.ola.godaddy.com.example.org"), good.replace("/available_times?", "/available_times/?")])
+      expect(isSafeBrowserAvailabilityReadUrl(url, "fetch", "GET"), url).toBe(false);
+    for (const url of [root + account + "/config?fields[]=customer", root + account + "/config?fields[]=cart&fields[]=cart",
+      root + account + "/config?%66ields[]=cart", root + account + "/config?fields%5B%5D=cart", root + account + "/config?fields[]=cart&token=x",
+      root + "/addons/v1" + account + "/services/0/addons", root + "/addons/v1" + account + "/services/73/addons?", root + account + "/customers"])
+      expect(isSafeBrowserBootstrapReadUrl(url, "fetch", "GET"), url).toBe(false);
+  });
   it("keeps public course events route-scoped and outside navigation, inventory response and HTTP authority", () => {
     const url = "https://api.membersports.com/api/v1/Events/eventsByDateForCourses/golfClubId/12679/searchDate/2026-10-23?golfCourseIds=15654";
     const route = { origin: "https://api.membersports.com", path: "/api/v1/Events/eventsByDateForCourses/golfClubId/12679/searchDate/*", methods: ["GET"], queryKeys: ["golfCourseIds"] };

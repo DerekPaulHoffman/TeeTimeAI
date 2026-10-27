@@ -1,3 +1,5 @@
+import { isSafePublicServiceReadUrl } from "./public-service-read-url";
+
 /** Exact observed anonymous dated-course event read, separate from inventory.
  * Only the fixed opaque basename is masked for unchanged strict validation;
  * the caller retains the original URL and all request/header authority. */
@@ -18,12 +20,23 @@ export function isSafePublicMemberSportsEventsReadUrl(value: string, resourceTyp
 export function isSafePublicBootstrapReadUrl(value: string, resourceType: string, method: string,
   strictUrl: (value: string) => boolean) {
   if (isSafePublicMemberSportsEventsReadUrl(value, resourceType, method, strictUrl)) return true;
+  if (isSafePublicServiceReadUrl(value, resourceType, method, "METADATA", strictUrl)) return true;
   if (value.length > 2048 || value.trim() !== value || method !== "GET" || !["xhr", "fetch"].includes(resourceType)) return false;
   try {
     const url = new URL(value), rawPath = /^https:\/\/[^/?#]+([^?#]*)/u.exec(value)?.[1] || "/";
     // Do not turn encoded, dot-normalized or otherwise aliased paths into an
     // exempt metadata role. Every parent path remains under the strict guard.
     if (rawPath !== url.pathname || url.hash) return false;
+    // These four observed anonymous service-catalog metadata reads are not
+    // customer/account actions or availability proof. Validate the entire raw
+    // role before masking its account path in a validation-only copy; retain
+    // the original transport URL and all caller header/session/route guards.
+    const publicCatalog = /^https:\/\/api\.ola\.godaddy\.com\/(?:accounts\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/(?:config|hivemind)|v2\/accounts\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/categories|v3\/accounts\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/services\?(?:per_page=80&with_category_ids=true|with_category_ids=true&per_page=80))$/u;
+    if (publicCatalog.test(value)) {
+      const checked = new URL(value);
+      checked.pathname = "/public-bootstrap-metadata";
+      return strictUrl(checked.href) === true;
+    }
     const role = rawPath.slice(rawPath.lastIndexOf("/") + 1);
     if (!["GlobalTenantSettings", "AuthenticationSettings", "venue_info", "GetReadOnlyTeeSheet"].includes(role)) return false;
     // This observed GET returns a UI configuration flag, not dated inventory.

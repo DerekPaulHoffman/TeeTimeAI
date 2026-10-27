@@ -74,9 +74,23 @@ export function inspectPublicRentalProductElement(node: Element): PublicRentalPr
     if (controls.length === 0 || controls.length > 32 || !controls.includes(node)) continue;
     if (action) {
       if (controls.length !== 1) continue;
-      const durations = Array.from(text.matchAll(/\b(\d+(?:\.\d+)?)\s*(hours?|hrs?|hr|minutes?|mins?|min)\b/giu))
-        .map(match => Number(match[1]) * (/^h/iu.test(match[2]) ? 60 : 1));
-      const unique = [...new Set(durations)];
+      const headings = Array.from(card.querySelectorAll("h1,h2,h3,h4,h5,h6")).filter(element => helpers.visible(element));
+      const publishedNodes = Array.from(card.querySelectorAll("p,span,div"));
+      let unique: number[] = [];
+      if (headings.length === 1 && publishedNodes.length <= 128) {
+        // A standalone advertised duration describes the rental. Heading text
+        // and narrative play/reset minutes do not redefine that interval.
+        unique = [...new Set(publishedNodes.filter(element => !element.contains(headings[0]) && !headings[0].contains(element) && helpers.visible(element) &&
+          !element.closest('button,a,[role="button"],[role="combobox"]') && !element.querySelector('button,a,[role="button"],input,select,textarea,[role="combobox"]'))
+          .map(element => helpers.text(element)).filter(value => value.length <= 200)
+          .map(value => helpers.duration(value)).filter((value): value is number => value !== undefined))];
+        if (unique.length > 1) continue;
+      }
+      if (!unique.length) {
+        const durations = Array.from(text.matchAll(/\b(\d+(?:\.\d+)?)\s*(hours?|hrs?|hr|minutes?|mins?|min)\b/giu))
+          .map(match => Number(match[1]) * (/^h/iu.test(match[2]) ? 60 : 1));
+        unique = [...new Set(durations)];
+      }
       if (unique.length !== 1 || !Number.isInteger(unique[0]) || unique[0] < 15 || unique[0] > 480) continue;
       const selector = helpers.selector(card);
       if (selector) return { selector, durationMinutes: unique[0] };

@@ -25,7 +25,44 @@ export const stagehandRedirectRejections = ["PARENT_MISSING", "PARENT_UNADMITTED
   "KIND_NETWORK_MISMATCH", "METHOD_MISMATCH", "DOCUMENT_PARENT_KIND", "DOCUMENT_PARENT_METHOD", "CROSS_HOST"] as const;
 export type StagehandRedirectRejection = typeof stagehandRedirectRejections[number];
 const byteKeys = ["allowedBytes", "declaredBytes", "bodyBytes", "totalBytes"] as const;
+export const nativeRouterOperations = ["REQUEST_METADATA", "RESPONSE_METADATA", "LOADER_CORRELATION", "REDIRECT_PROVENANCE", "RESPONSE_WAIT", "RESPONSE_BODY", "RESPONSE_RELEASE", "REQUEST_RELEASE", "HANDLER"] as const;
+export const nativeRouterErrorNames = ["Error", "TypeError", "RangeError", "SyntaxError", "TimeoutError", "AbortError", "ProtocolError", "CDPError", "UNKNOWN"] as const;
+export const nativeRouterErrorCategories = ["INVALID_INTERCEPTION_ID", "REQUEST_NOT_PAUSED", "TARGET_CLOSED", "SESSION_CLOSED", "CONTEXT_DESTROYED", "BODY_UNAVAILABLE", "PROTOCOL_ERROR", "UNKNOWN"] as const;
+export const stagehandHostGuardReasons = {
+  CHECK: ["ABORTED", "CLOSED", "TERMINAL"],
+  GUARDED_TARGETS: ["IDS_INVALID", "TARGET_MISSING", "TARGET_NOT_ATTESTED"],
+  SOURCE_DOM: ["VALUE_INVALID", "JSON_INVALID", "FRAME_MISSING", "LOADER_MISSING", "FRAME_CHANGED", "LOADER_CHANGED", "NATIVE_URL_CHANGED", "DOM_URL_CHANGED"],
+  BEFORE_ACTION: ["HREF_SHAPE", "LINK_INVENTORY_MISSING", "HREF_NOT_OBSERVED", "HREF_URL_POLICY", "HREF_TRANSACTION", "OBSERVED_URL_LIMIT"],
+} as const;
+export type StagehandHostGuardFailure = { [K in keyof typeof stagehandHostGuardReasons]: { stage: K; reason: typeof stagehandHostGuardReasons[K][number] } &
+  (K extends "SOURCE_DOM" ? { nativeFrameHasFragment?: boolean; domHasFragment?: boolean } : object) }[keyof typeof stagehandHostGuardReasons];
+export function createStagehandHostGuardFailureCapture() {
+  let first: StagehandHostGuardFailure | undefined;
+  return { record(value: StagehandHostGuardFailure) {
+    if (first || !value || !Object.hasOwn(stagehandHostGuardReasons, value.stage) || !(stagehandHostGuardReasons[value.stage] as readonly string[]).includes(value.reason)) return;
+    const projected = { stage: value.stage, reason: value.reason } as StagehandHostGuardFailure;
+    if (value.stage === "SOURCE_DOM" && projected.stage === "SOURCE_DOM") {
+      if (typeof value.nativeFrameHasFragment === "boolean") projected.nativeFrameHasFragment = value.nativeFrameHasFragment;
+      if (typeof value.domHasFragment === "boolean") projected.domHasFragment = value.domHasFragment;
+    }
+    first = projected;
+  }, snapshot: () => first ? { ...first } : undefined };
+}
+export function classifyNativeRouterError(error: unknown): Required<Pick<StagehandNativeRouterFailure, "errorName" | "errorCategory">> {
+  const value = error && typeof error === "object" ? error as { name?: unknown; message?: unknown } : {};
+  const message = typeof value.message === "string" ? value.message.slice(0, 4000) : "";
+  const errorCategory = /\bInvalid InterceptionId\b/iu.test(message) ? "INVALID_INTERCEPTION_ID" :
+    /\bCan only perform operation while paused\b/iu.test(message) ? "REQUEST_NOT_PAUSED" :
+    /\b(?:Target|page) (?:has been )?closed\b/iu.test(message) ? "TARGET_CLOSED" :
+    /\bSession (?:with given id not found|(?:has been )?closed)\b/iu.test(message) ? "SESSION_CLOSED" :
+    /\b(?:Execution context was destroyed|Cannot find context with specified id)\b/iu.test(message) ? "CONTEXT_DESTROYED" :
+    /\b(?:No resource with given identifier found|No data found for resource with given identifier|Could not load body for this request)\b/iu.test(message) ? "BODY_UNAVAILABLE" :
+    /\bProtocol error\b/iu.test(message) ? "PROTOCOL_ERROR" : "UNKNOWN";
+  return { errorName: typeof value.name === "string" && nativeRouterErrorNames.includes(value.name as typeof nativeRouterErrorNames[number])
+    ? value.name as typeof nativeRouterErrorNames[number] : "UNKNOWN" as const, errorCategory };
+}
 export type StagehandNativeRouterFailure = { code: typeof stagehandNativeRouterCodes[number]; phase?: typeof phases[number]; method?: typeof methods[number]; resourceType?: typeof kinds[number]; limitKind?: typeof limitKinds[number]; sourceRequestGuard?: StagehandSourceRequestGuard; redirectRejection?: StagehandRedirectRejection } &
+  { operation?: typeof nativeRouterOperations[number]; errorName?: typeof nativeRouterErrorNames[number]; errorCategory?: typeof nativeRouterErrorCategories[number]; requestUrlSha256?: string } &
   Partial<Record<typeof byteKeys[number], number>> &
   Partial<Record<typeof stagehandNativeRouterBooleanKeys[number], boolean>>;
 const allowed = <T extends readonly string[]>(values: T, raw: unknown): T[number] | undefined => typeof raw === "string" && values.includes(raw) ? raw : undefined;
@@ -35,6 +72,9 @@ export function projectStagehandNativeRouterFailure(code: unknown, facts: unknow
   const value: StagehandNativeRouterFailure = { code: allowed(stagehandNativeRouterCodes, code) ?? "UNKNOWN" };
   const phase = allowed(phases, source.phase), method = allowed(methods, source.method), resourceType = allowed(kinds, source.resourceType);
   if (phase) value.phase = phase; if (method) value.method = method; if (resourceType) value.resourceType = resourceType;
+  const operation = allowed(nativeRouterOperations, source.operation), errorName = allowed(nativeRouterErrorNames, source.errorName), errorCategory = allowed(nativeRouterErrorCategories, source.errorCategory);
+  if (operation) value.operation = operation; if (errorName) value.errorName = errorName; if (errorCategory) value.errorCategory = errorCategory;
+  if (typeof source.requestUrlSha256 === "string" && /^[a-f0-9]{64}$/u.test(source.requestUrlSha256)) value.requestUrlSha256 = source.requestUrlSha256;
   const sourceRequestGuard = allowed(stagehandSourceRequestGuards, source.sourceRequestGuard);
   if (value.code === "STAGEHAND_GUARDED_SOURCE_REJECTED" && phase === "SOURCE_HOST_REQUEST" && sourceRequestGuard) value.sourceRequestGuard = sourceRequestGuard;
   const redirectRejection = allowed(stagehandRedirectRejections, source.redirectRejection);

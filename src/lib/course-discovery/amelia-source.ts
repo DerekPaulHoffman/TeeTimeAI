@@ -64,6 +64,18 @@ function nodes(html: string) {
   };
   walk(parse(html), 0); return found;
 }
+/** Absence classification only, never configuration or request authority. Scan
+ * the complete bounded document, including hidden/malformed bootstrap evidence. */
+export function hasAmeliaBootstrapEvidence(html: string): boolean {
+  const entries = nodes(html);
+  const decodeMarkers = (value: string) => value.replace(/\\u\{([0-9a-f]{1,6})\}|\\u([0-9a-f]{4})|\\x([0-9a-f]{2})|%([0-9a-f]{2})/giu,
+    (literal, braced: string, unicode: string, hex: string, percent: string) => {
+      const code = Number.parseInt(braced ?? unicode ?? hex ?? percent, 16);
+      return code <= 0x7f ? String.fromCharCode(code) : literal;
+    });
+  const marker = /\b(?:wpamelia[a-z0-9_]*|ameliashortcode[a-z0-9_]*|ameliabooking|amelia[-_](?:v\d[-_])?booking)\b/iu;
+  return marker.test(decodeMarkers(html)) || entries.some(node => node.attrs.some(value => marker.test(decodeMarkers(value.value))));
+}
 function text(node: Node): string {
   if (node.nodeName === "#text") return (node as DefaultTreeAdapterMap["textNode"]).value;
   if (element(node) && excluded(node)) return "";

@@ -5,7 +5,7 @@ import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-b
 import { isSafeRecipeUrl } from "./recipe";
 import type { AccessExecutionInput, AccessExecutionResult } from "./recipe";
 import { requestFamilyForUrl } from "./request-family";
-import { ameliaMetadataSchema, parseAmeliaBookingPage, parseAmeliaPublicClient, verifyAmeliaOfficialPage,
+import { ameliaMetadataSchema, hasAmeliaBootstrapEvidence, parseAmeliaBookingPage, parseAmeliaPublicClient, verifyAmeliaOfficialPage,
   verifyAmeliaClients, parseAmeliaEntities, type AmeliaIdentitySource, type AmeliaMetadata } from "./amelia-source";
 
 type Target = { courseId: string; offeringId: string };
@@ -104,9 +104,9 @@ function createReader(source: Source, deps: Deps) {
   const cancellation = new AbortController(), signal = AbortSignal.any([cancellation.signal, AbortSignal.timeout(remaining)]);
   const queue = createSimulatorBrowserRequestQueue(deps.requestLease ?? runWithProviderRequestLease, signal);
   const allowed = new Set([source.officialUrl, source.bookingUrl]);
-  let requests = 0, bytes = 0;
+  let requests = 0, bytes = 0, coldBookingBodyComplete = false;
   const allow = (url: string) => { if (!isSafeRecipeUrl(url) || new URL(url).origin !== new URL(source.officialUrl).origin) throw new Error("UNSCOPED_ADAPTER_REQUEST"); allowed.add(url); };
-  const read = async (url: string, kind: "html" | "script" | "json") => {
+  const read = async (url: string, kind: "html" | "script" | "json", recordAbsenceCompleteness = false) => {
     if (!allowed.has(url) || ++requests > 64) throw new Error("ADAPTER_REQUEST_LIMIT");
     const parseUrl = (value: string) => {
       if (value !== url || !allowed.has(value) || !isSafeRecipeUrl(value)) throw new Error("UNSCOPED_ADAPTER_REQUEST");
@@ -127,15 +127,28 @@ function createReader(source: Source, deps: Deps) {
       if (!Number.isFinite(declared) || declared < 0 || declared > 2_000_000) throw new Error("ADAPTER_RESPONSE_LIMIT");
       const buffer = await response.arrayBuffer(); bytes += buffer.byteLength;
       if (buffer.byteLength > 2_000_000 || bytes > 16_000_000) throw new Error("ADAPTER_RESPONSE_LIMIT");
+      if (recordAbsenceCompleteness) {
+        let validUtf8 = true;
+        try { new TextDecoder("utf-8", { fatal: true }).decode(buffer); } catch { validUtf8 = false; }
+        // Only an absent bootstrap consumes this witness. Recognized Amelia
+        // keeps its existing parser behavior, including decoded fetch bodies.
+        coldBookingBodyComplete = validUtf8 && !response.headers.has("content-range") &&
+          ["", "identity"].includes((response.headers.get("content-encoding") ?? "").trim().toLowerCase()) &&
+          (!response.headers.has("content-length") || declared === buffer.byteLength);
+      }
       return Buffer.from(buffer).toString("utf8");
     });
   };
   const json = async (url: string) => { try { return JSON.parse(await read(url, "json")) as unknown; } catch (error) {
     if (error instanceof SyntaxError) throw new Error("ADAPTER_AVAILABILITY_SCHEMA_CHANGED"); throw error;
   } };
-  const configuration = async () => {
-    const official = await read(source.officialUrl, "html"); verifyAmeliaOfficialPage(identitySource, official);
-    const booking = source.bookingUrl === source.officialUrl ? official : await read(source.bookingUrl, "html");
+  const configuration = async (classifyUnknownSource = false) => {
+    const official = await read(source.officialUrl, "html", classifyUnknownSource && source.bookingUrl === source.officialUrl); verifyAmeliaOfficialPage(identitySource, official);
+    const booking = source.bookingUrl === source.officialUrl ? official : await read(source.bookingUrl, "html", classifyUnknownSource);
+    if (classifyUnknownSource && !hasAmeliaBootstrapEvidence(booking)) {
+      if (!coldBookingBodyComplete) throw new Error("ADAPTER_RESPONSE_INVALID");
+      throw new Error("UNSUPPORTED_ADAPTER_SOURCE");
+    }
     const page = parseAmeliaBookingPage(booking, source.bookingUrl, identitySource);
     allow(page.publicClientUrl);
     const witness = parseAmeliaPublicClient(await read(page.publicClientUrl, "script"), page.publicClientUrl);
@@ -152,7 +165,7 @@ function createReader(source: Source, deps: Deps) {
 
 export async function inspectAmelia(source: Source, deps: Deps): Promise<AmeliaMetadata> {
   const reader = createReader(source, deps);
-  try { return await reader.configuration(); } finally { reader.close(); }
+  try { return await reader.configuration(true); } finally { reader.close(); }
 }
 
 export async function executeAmelia(source: Source, metadata: AmeliaMetadata, target: Target, input: AccessExecutionInput, deps: Deps): Promise<AccessExecutionResult["slots"]> {

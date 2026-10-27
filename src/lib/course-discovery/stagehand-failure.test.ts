@@ -104,6 +104,24 @@ it("reads optional closed inspection diagnostics without changing old checkpoint
   delete entry.fixedInspectionDiagnosticSha256;
   expect(readStagehandFailure({ ...f.job, checkpoint: saved }, f.now)).toBeUndefined();
 });
+it("requires exact closed native fixed-inspection fields, current binding and digest without source authority", () => {
+  const f = fixture(), saved = createStagehandFailureCheckpoint(f);
+  const diagnostic = { nativeRouterFailure: { code: "NATIVE_REDIRECT_ROUTING_FAILED", operation: "RESPONSE_BODY", errorName: "Error", errorCategory: "BODY_UNAVAILABLE",
+    requestUrlSha256: "a".repeat(64), method: "GET", resourceType: "stylesheet", networkIdPresent: true, identityPresent: false } };
+  Object.assign(saved.stagehandFailure.entries[0], { phase: "FIXED_INSPECTION", fixedInspectionDiagnostic: diagnostic, fixedInspectionDiagnosticSha256: stagehandDataHash(diagnostic) });
+  expect(readStagehandFailure({ ...f.job, checkpoint: saved }, f.now)).toEqual(saved.stagehandFailure);
+  expect(readStagehandSourceCheckpoint({ ...f.job, attempts: 2, checkpoint: saved }, undefined, f.now)).toBeUndefined();
+  for (const key of ["operation", "errorName", "errorCategory", "requestUrlSha256", "headers"] as const) {
+    const changed = structuredClone(saved), entry = changed.stagehandFailure.entries[0];
+    entry.fixedInspectionDiagnostic.nativeRouterFailure[key] = "PRIVATE";
+    entry.fixedInspectionDiagnosticSha256 = stagehandDataHash(entry.fixedInspectionDiagnostic);
+    expect(readStagehandFailure({ ...f.job, checkpoint: changed }, f.now)).toBeUndefined();
+  }
+  for (const delta of [{ phase: "REPLAY" }, { fixedInspectionDiagnosticSha256: "b".repeat(64) }]) {
+    const changed = structuredClone(saved); Object.assign(changed.stagehandFailure.entries[0], delta);
+    expect(readStagehandFailure({ ...f.job, checkpoint: changed }, f.now)).toBeUndefined();
+  }
+});
 it("records the digest and omission explicitly when trimming replay diagnostics", () => {
   const diagnostic = { code: "BOUNDED_DIAGNOSTIC", padding: "x".repeat(33000) };
   const saved = packStagehandCheckpoint({ progress: { phase: "INDEPENDENT_REPLAY", replay: { result: { complete: false, diagnostic } } } });

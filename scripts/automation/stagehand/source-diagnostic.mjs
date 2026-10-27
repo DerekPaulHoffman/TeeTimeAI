@@ -116,7 +116,12 @@ const nativeRouterBooleanKeys=['framePresent','rootFrame','networkIdPresent','du
 export const stagehandRedirectRejections=['PARENT_MISSING','PARENT_UNADMITTED','PARENT_FAILED','PARENT_DEPTH_LIMIT','PARENT_CHILD_RESERVED',
  'PARENT_RESPONSE_MISSING','PARENT_RESPONSE_FAILED','CHILD_RECORD_EXISTS','PARENT_RESPONSE_INCOMPLETE','LOCATION_MISSING','LOCATION_MISMATCH',
  'KIND_NETWORK_MISMATCH','METHOD_MISMATCH','DOCUMENT_PARENT_KIND','DOCUMENT_PARENT_METHOD','CROSS_HOST'];
-const nativeRouterFailureSchema=z.object({code:z.enum(nativeRouterCodes),
+export const nativeRouterOperations=['REQUEST_METADATA','RESPONSE_METADATA','LOADER_CORRELATION','REDIRECT_PROVENANCE','RESPONSE_WAIT','RESPONSE_BODY','RESPONSE_RELEASE','REQUEST_RELEASE','HANDLER'];
+export const nativeRouterErrorNames=['Error','TypeError','RangeError','SyntaxError','TimeoutError','AbortError','ProtocolError','CDPError','UNKNOWN'];
+export const nativeRouterErrorCategories=['INVALID_INTERCEPTION_ID','REQUEST_NOT_PAUSED','TARGET_CLOSED','SESSION_CLOSED','CONTEXT_DESTROYED','BODY_UNAVAILABLE','PROTOCOL_ERROR','UNKNOWN'];
+const nativeRouterFields={code:z.enum(nativeRouterCodes),
+ operation:z.enum(nativeRouterOperations).optional(),errorName:z.enum(nativeRouterErrorNames).optional(),errorCategory:z.enum(nativeRouterErrorCategories).optional(),
+ requestUrlSha256:z.string().regex(/^[a-f0-9]{64}$/u).optional(),
  phase:z.enum(['RESPONSE_WAIT','CONTINUE_REQUEST_ACK','CONTINUE_RESPONSE_ACK','LOADER_IDENTITY_WAIT','LOADER_IDENTITY','LOADER_OWNER','REDIRECT_GENERATION','REDIRECT_PROVENANCE','DOCUMENT_INTENT','DOCUMENT_DRAIN','SOURCE_HOST_REQUEST']).optional(),
  sourceRequestGuard:z.enum(['STATE','TRANSACTION_URL','FRAME_OWNERSHIP','URL_POLICY','HEADER_POLICY','NAVIGATION_PROVENANCE','METHOD_POLICY','REQUEST_BUDGET','LEASE','NATIVE_RESPONSE']).optional(),
  redirectRejection:z.enum(stagehandRedirectRejections).optional(),
@@ -125,7 +130,28 @@ const nativeRouterFailureSchema=z.object({code:z.enum(nativeRouterCodes),
  limitKind:z.enum(['DECLARED_INVALID','DECLARED_TOO_LARGE','DECODED_BODY','TOTAL_DECODED']).optional(),
  allowedBytes:z.number().finite().min(0).max(Number.MAX_SAFE_INTEGER).optional(),declaredBytes:z.number().finite().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
  bodyBytes:z.number().finite().min(0).max(Number.MAX_SAFE_INTEGER).optional(),totalBytes:z.number().finite().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
- ...Object.fromEntries(nativeRouterBooleanKeys.map(key=>[key,z.boolean().optional()]))}).strict().refine(value=>value.redirectRejection===undefined||value.code==='NATIVE_REDIRECT_PROVENANCE_REJECTED'&&value.phase==='REDIRECT_PROVENANCE');
+ ...Object.fromEntries(nativeRouterBooleanKeys.map(key=>[key,z.boolean().optional()]))};
+const nativeRouterFailureSchema=z.object(nativeRouterFields).strict().refine(value=>value.redirectRejection===undefined||value.code==='NATIVE_REDIRECT_PROVENANCE_REJECTED'&&value.phase==='REDIRECT_PROVENANCE');
+/** Raw current browser facts become closed diagnostics only, never read authority. */
+export function projectNativeRouterFailure(raw){
+ if(!raw||typeof raw!=='object'||Array.isArray(raw)||typeof raw.code!=='string')return undefined;
+ const value={code:nativeRouterCodes.includes(raw.code)?raw.code:'UNKNOWN'};
+ for(const[key,schema]of Object.entries(nativeRouterFields)){
+  if(key==='code'||!Object.hasOwn(raw,key))continue;
+  const parsed=schema.safeParse(raw[key]);if(parsed.success&&parsed.data!==undefined)value[key]=parsed.data;
+ }
+ if(value.code!=='NATIVE_REDIRECT_PROVENANCE_REJECTED'||value.phase!=='REDIRECT_PROVENANCE')delete value.redirectRejection;
+ if(value.code!=='STAGEHAND_GUARDED_SOURCE_REJECTED'||value.phase!=='SOURCE_HOST_REQUEST')delete value.sourceRequestGuard;
+ const parsed=nativeRouterFailureSchema.safeParse(value);return parsed.success?parsed.data:undefined;
+}
+export function safeNativeRouterFailure(raw){const parsed=nativeRouterFailureSchema.safeParse(raw);return parsed.success?parsed.data:undefined;}
+export const hostGuardReasons={CHECK:['ABORTED','CLOSED','TERMINAL'],GUARDED_TARGETS:['IDS_INVALID','TARGET_MISSING','TARGET_NOT_ATTESTED'],
+ SOURCE_DOM:['VALUE_INVALID','JSON_INVALID','FRAME_MISSING','LOADER_MISSING','FRAME_CHANGED','LOADER_CHANGED','NATIVE_URL_CHANGED','DOM_URL_CHANGED'],
+ BEFORE_ACTION:['HREF_SHAPE','LINK_INVENTORY_MISSING','HREF_NOT_OBSERVED','HREF_URL_POLICY','HREF_TRANSACTION','OBSERVED_URL_LIMIT']};
+const hostGuardFailureSchema=z.object({stage:z.enum(['CHECK','GUARDED_TARGETS','SOURCE_DOM','BEFORE_ACTION']),reason:z.string(),
+ nativeFrameHasFragment:z.boolean().optional(),domHasFragment:z.boolean().optional()}).strict().refine(value=>hostGuardReasons[value.stage].includes(value.reason)&&
+ (value.stage==='SOURCE_DOM'||value.nativeFrameHasFragment===undefined&&value.domHasFragment===undefined));
+export function projectHostGuardFailure(raw){const parsed=hostGuardFailureSchema.safeParse(raw);return parsed.success?parsed.data:undefined;}
 /** Captured inside the actual model callback before the SDK can wrap its error. */
 export function captureModelFailure(error,attempt,completedCalls){
  const diagnostic=error?.diagnostics??{},value={attempt,completedCalls};
@@ -151,6 +177,7 @@ export const sourceDiagnosticSchema = z.object({
   navigationCode:z.enum(navigationFailureCodes).optional(),navigationErrorName:z.enum(navigationErrorNames).optional(),
   ownedCdpFailure:ownedCdpFailureSchema.optional(),
   nativeRouterFailure:nativeRouterFailureSchema.optional(),
+  hostGuardFailure:hostGuardFailureSchema.optional(),
   frameWitnessFailure:z.enum(sourceFrameWitnessFailures).optional(),
   sourceStop:sourceStopSchema.optional(),
   sourceDocumentReadiness:sourceDocumentSchema.optional(),
@@ -170,7 +197,7 @@ export function projectSourceDiagnostic(value) {
   return parsed.data;
 }
 const boundedCount=value=>Number.isSafeInteger(value)&&value>=0&&value<=1000000?value:0;
-export function sourceFailureDiagnostic({error,phase,report,startedAt,cleanup,modelAttempts,modelFailure,ownedCdpFailure,nativeRouterFailure,sourceStop,documentReadiness,intermediaryPreparation}={}) {
+export function sourceFailureDiagnostic({error,phase,report,startedAt,cleanup,modelAttempts,modelFailure,ownedCdpFailure,nativeRouterFailure,hostGuardFailure,sourceStop,documentReadiness,intermediaryPreparation}={}) {
   const rows=(value,max)=>Array.isArray(value)?value.slice(0,max):[];
   const safe=value=>publicEvidenceUrl(value);
   const ledger=rows(report?.officialLinkLedger,512).map(row=>({pageUrl:safe(row.pageUrl),links:rows(row.links,512).map(link=>({href:safe(link.href),visible:link.visible===true})).filter(link=>link.href)}));
@@ -228,5 +255,6 @@ export function sourceFailureDiagnostic({error,phase,report,startedAt,cleanup,mo
   if(cdp.success)value.ownedCdpFailure=cdp.data;
   const native=nativeRouterFailureSchema.safeParse(nativeRouterFailure);
   if(native.success)value.nativeRouterFailure=native.data;
+  const host=projectHostGuardFailure(hostGuardFailure);if(host)value.hostGuardFailure=host;
   return projectSourceDiagnostic(value);
 }

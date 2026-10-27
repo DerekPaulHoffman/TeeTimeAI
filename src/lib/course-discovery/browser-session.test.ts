@@ -855,6 +855,132 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       expect(JSON.stringify(snapshot.requestFailures)).not.toContain("private-fixture");
     } finally { await session.close(); }
   }, 25_000);
+  it.each(["PINNED_HTTP", "NATIVE_CHROME"] as const)("loads only exact public service-catalog metadata without inventory or navigation authority (%s)", async browserTransport => {
+    const official = "https://example.org/", account = "11111111-2222-4333-8444-555555555555";
+    const urls = [`https://api.ola.godaddy.com/accounts/${account}/config`, `https://api.ola.godaddy.com/accounts/${account}/hivemind`,
+      `https://api.ola.godaddy.com/v3/accounts/${account}/services?per_page=80&with_category_ids=true`, `https://api.ola.godaddy.com/v2/accounts/${account}/categories`];
+    const denied = urls[2] + "&unexpected=1", seen: { url: string; method: string; body: string | null }[] = [];
+    const render = (url: string) => new Response(url === official ? `<!doctype html><link rel="icon" href="data:,"><h1>Loading public services</h1><script>
+      (async()=>{for(const url of ${JSON.stringify(urls)})await fetch(url,{credentials:'omit'}).then(response=>response.json());
+      await fetch(${JSON.stringify(denied)},{credentials:'omit'}).catch(()=>{});document.querySelector('h1').textContent='Public services ready';})();
+      </script>` : JSON.stringify({ services: ["Public practice"], complete: true, empty: true }),
+    { headers: { "content-type": url === official ? "text/html" : "application/json", "access-control-allow-origin": "*" } });
+    const fetcher = vi.fn(async (value, init) => { const url = String(value); seen.push({ url, method: init?.method ?? "GET", body: typeof init?.body === "string" ? init.body : null }); return render(url); }) as unknown as typeof fetch;
+    const native = browserTransport === "NATIVE_CHROME" ? vi.spyOn(nativeBrowser, "continueNativeBrowserRead").mockImplementation(async route => {
+      const request = route.request(), url = request.url(), response = render(url), body = Buffer.from(await response.arrayBuffer()), headers = Object.fromEntries(response.headers);
+      seen.push({ url, method: request.method(), body: request.postData() });
+      await route.fulfill({ status: response.status, headers, body }); return { status: response.status, url, headers, body };
+    }) : undefined;
+    const routing = browserTransport === "NATIVE_CHROME" ? vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, handler) => ({
+      prepare: () => {}, beginDocumentNavigation: async () => {}, close: async () => {}, pendingReads: 0, lastFailure: undefined, releasePlaywrightRoute: route => handler(route),
+    })) : undefined;
+    const session = await createCourseDiscoveryBrowserSession({ initialUrls: [official], deadlineAt: new Date(Date.now() + 20_000) }, {
+      browserTransport, fetch: fetcher, launchBrowser: () => chromium.launch({ executablePath, headless: true }),
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      const snapshot = await session.execute({ id: 1, action: "open", url: official });
+      expect(snapshot.text).toContain("Public services ready");
+      expect(seen).toEqual([official, ...urls].map(url => ({ url, method: "GET", body: null })));
+      expect(snapshot.requests.filter(row => urls.includes(row.url))).toHaveLength(4);
+      expect(snapshot.requests.filter(row => urls.includes(row.url)).every(row => row.readPurpose === "PUBLIC_BOOTSTRAP")).toBe(true);
+      // Even deliberately misleading metadata cannot become an inventory or EMPTY response.
+      expect(snapshot.responses).toEqual([]);
+      expect(snapshot.requestFailures).toContainEqual(expect.objectContaining({ reason: "UNSAFE_URL" }));
+      for (const url of urls) await expect(session.execute({ id: url, action: "open", url })).rejects.toThrow();
+      if (browserTransport === "NATIVE_CHROME") expect(fetcher).not.toHaveBeenCalled();
+      else expect(fetcher).toHaveBeenCalledTimes(5);
+    } finally { await session.close(); native?.mockRestore(); routing?.mockRestore(); }
+  }, 25_000);
+  it.each(["PINNED_HTTP", "NATIVE_CHROME"] as const)("separates dated public service availability from date and optional metadata (%s)", async browserTransport => {
+    const official = "https://example.org/", account = "11111111-2222-4333-8444-555555555555", service = `accounts/${account}/services/71`;
+    const query = `?start_time=${encodeURIComponent("2030-01-02T00:00:00.000-05:00")}&end_time=${encodeURIComponent("2030-01-02T23:59:59.999-05:00")}&resource_ids[]=81&resource_ids[]=82`;
+    const times = `https://api.ola.godaddy.com/v2/${service}/available_times${query}`;
+    const dates = `https://api.ola.godaddy.com/${service}/available_dates${query}`, metadata = [dates,
+      `https://api.ola.godaddy.com/accounts/${account}/config?fields[]=cart`, `https://api.ola.godaddy.com/addons/v1/${service}/addons`];
+    const urls = [...metadata, times], denied = [times + "&customer_id=1", `https://api.ola.godaddy.com/accounts/${account}/customers`];
+    const seen: { url: string; method: string; body: string | null }[] = [];
+    const render = (url: string) => new Response(url === official ? `<!doctype html><link rel="icon" href="data:,"><h1>Loading public calendar</h1><script>
+      (async()=>{for(const url of ${JSON.stringify(urls)})await fetch(url,{credentials:'omit'}).then(response=>response.json());
+      for(const url of ${JSON.stringify(denied)})await fetch(url,{credentials:'omit'}).catch(()=>{});
+      await fetch(${JSON.stringify(times)},{method:'POST',body:'{}',credentials:'omit'}).catch(()=>{});document.querySelector('h1').textContent='Public calendar ready';})();
+      </script>` : JSON.stringify(url === times ? { data: { "2030-01-02T10:00:00-05:00": [{ resource_id: 81 }, { resource_id: 82 }] } } : { complete: true, empty: true, data: [] }),
+    { headers: { "content-type": url === official ? "text/html" : "application/json", "access-control-allow-origin": "*" } });
+    const fetcher = vi.fn(async (value, init) => { const url = String(value); seen.push({ url, method: init?.method ?? "GET", body: typeof init?.body === "string" ? init.body : null }); return render(url); }) as unknown as typeof fetch;
+    const native = browserTransport === "NATIVE_CHROME" ? vi.spyOn(nativeBrowser, "continueNativeBrowserRead").mockImplementation(async route => {
+      const request = route.request(), url = request.url(), response = render(url), body = Buffer.from(await response.arrayBuffer()), headers = Object.fromEntries(response.headers);
+      seen.push({ url, method: request.method(), body: request.postData() }); await route.fulfill({ status: response.status, headers, body }); return { status: response.status, url, headers, body };
+    }) : undefined;
+    const routing = browserTransport === "NATIVE_CHROME" ? vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, handler) => ({
+      prepare: () => {}, beginDocumentNavigation: async () => {}, close: async () => {}, pendingReads: 0, lastFailure: undefined, releasePlaywrightRoute: route => handler(route),
+    })) : undefined;
+    const session = await createCourseDiscoveryBrowserSession({ initialUrls: [official], deadlineAt: new Date(Date.now() + 20_000) }, {
+      browserTransport, fetch: fetcher, launchBrowser: () => chromium.launch({ executablePath, headless: true }), requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      const snapshot = await session.execute({ id: 1, action: "open", url: official }); expect(snapshot.text).toContain("Public calendar ready");
+      expect(seen).toEqual([official, ...urls].map(url => ({ url, method: "GET", body: null })));
+      for (const url of metadata) expect(snapshot.requests.find(row => row.url === url)).toMatchObject({ status: 200, readPurpose: "PUBLIC_BOOTSTRAP" });
+      expect(snapshot.requests.find(row => row.url === times)).toMatchObject({ status: 200, readPurpose: "PUBLIC_AVAILABILITY" });
+      // Calendar/optional metadata carrying false completeness hints cannot enter the candidate inventory channel.
+      expect(snapshot.responses).toHaveLength(1); expect(snapshot.responses[0]).toMatchObject({ url: times, status: 200, method: "GET", body: { data: expect.any(Object) } });
+      expect(snapshot.responses[0].body).not.toHaveProperty("complete"); expect(snapshot.responses[0].body).not.toHaveProperty("empty");
+      expect(snapshot.requestFailures.filter(row => row.reason === "UNSAFE_URL")).toHaveLength(3);
+      for (const url of urls) await expect(session.execute({ id: url, action: "open", url })).rejects.toThrow();
+      if (browserTransport === "NATIVE_CHROME") expect(fetcher).not.toHaveBeenCalled(); else expect(fetcher).toHaveBeenCalledTimes(5);
+    } finally { await session.close(); native?.mockRestore(); routing?.mockRestore(); }
+  }, 25_000);
+  it("denies date-metadata redirects and dated-availability redirects to customer routes", async () => {
+    const official = "https://example.org/", account = "11111111-2222-4333-8444-555555555555", service = `accounts/${account}/services/71`;
+    const query = `?start_time=${encodeURIComponent("2030-01-02T00:00:00.000-05:00")}&end_time=${encodeURIComponent("2030-01-02T23:59:59.999-05:00")}&resource_ids[]=81`;
+    const dates = `https://api.ola.godaddy.com/${service}/available_dates${query}`, times = `https://api.ola.godaddy.com/v2/${service}/available_times${query}`;
+    const urls = [dates, times], seen: string[] = [], destination = `https://api.ola.godaddy.com/accounts/${account}/customers`;
+    const native = vi.spyOn(nativeBrowser, "continueNativeBrowserRead").mockImplementation(async route => {
+      const url = route.request().url(); seen.push(url);
+      const status = url === official ? 200 : 302, body = Buffer.from(url === official ? `<!doctype html><link rel="icon" href="data:,"><h1>Public calendar</h1><script>
+        (async()=>{for(const url of ${JSON.stringify(urls)})await fetch(url,{credentials:'omit'}).catch(()=>{});document.querySelector('h1').textContent='Date redirects denied';})();</script>` : "");
+      const headers = url === official ? { "content-type": "text/html" } : { "content-type": "application/json", "access-control-allow-origin": "*", location: url === dates ? official + "unearned-date-data" : destination };
+      await route.fulfill({ status, headers, body }); return { status, url, headers, body };
+    });
+    const routing = vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, handler) => ({
+      prepare: () => {}, beginDocumentNavigation: async () => {}, close: async () => {}, pendingReads: 0, lastFailure: undefined, releasePlaywrightRoute: route => handler(route),
+    }));
+    const session = await createCourseDiscoveryBrowserSession({ initialUrls: [official], deadlineAt: new Date(Date.now() + 20_000) }, {
+      browserTransport: "NATIVE_CHROME", launchBrowser: () => chromium.launch({ executablePath, headless: true }), requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      const snapshot = await session.execute({ id: 1, action: "open", url: official }); expect(snapshot.text).toContain("Date redirects denied");
+      expect(seen).toEqual([official, ...urls]); expect(snapshot.responses).toEqual([]);
+      expect(snapshot.requestFailures.filter(row => row.reason === "UNSAFE_REDIRECT")).toHaveLength(2);
+      for (const url of [destination, official + "unearned-date-data"]) await expect(session.execute({ id: url, action: "open", url })).rejects.toThrow();
+    } finally { await session.close(); native.mockRestore(); routing.mockRestore(); }
+  }, 25_000);
+  it("rejects all four native public service-catalog redirects without dispatching their destination", async () => {
+    const official = "https://example.org/", account = "11111111-2222-4333-8444-555555555555", destination = "https://example.org/not-earned";
+    const urls = [`https://api.ola.godaddy.com/accounts/${account}/config`, `https://api.ola.godaddy.com/accounts/${account}/hivemind`,
+      `https://api.ola.godaddy.com/v3/accounts/${account}/services?per_page=80&with_category_ids=true`, `https://api.ola.godaddy.com/v2/accounts/${account}/categories`], seen: string[] = [];
+    const native = vi.spyOn(nativeBrowser, "continueNativeBrowserRead").mockImplementation(async route => {
+      const url = route.request().url(); seen.push(url);
+      const status = url === official ? 200 : 302, body = Buffer.from(url === official ? `<!doctype html><link rel="icon" href="data:,"><h1>Public services</h1><script>
+        (async()=>{for(const url of ${JSON.stringify(urls)})await fetch(url,{credentials:'omit'}).catch(()=>{});document.querySelector('h1').textContent='Redirects denied';})();</script>` : "");
+      const headers = url === official ? { "content-type": "text/html" } : { "content-type": "application/json", "access-control-allow-origin": "*", location: destination };
+      await route.fulfill({ status, headers, body }); return { status, url, headers, body };
+    });
+    const routing = vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (_page, handler) => ({
+      prepare: () => {}, beginDocumentNavigation: async () => {}, close: async () => {}, pendingReads: 0, lastFailure: undefined, releasePlaywrightRoute: route => handler(route),
+    }));
+    const session = await createCourseDiscoveryBrowserSession({ initialUrls: [official], deadlineAt: new Date(Date.now() + 20_000) }, {
+      browserTransport: "NATIVE_CHROME", launchBrowser: () => chromium.launch({ executablePath, headless: true }),
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      const snapshot = await session.execute({ id: 1, action: "open", url: official });
+      expect(snapshot.text).toContain("Redirects denied"); expect(seen).toEqual([official, ...urls]); expect(snapshot.responses).toEqual([]);
+      expect(snapshot.requestFailures.filter(row => row.reason === "UNSAFE_REDIRECT")).toHaveLength(4);
+      expect(snapshot.requestFailures.filter(row => row.reason === "UNSAFE_REDIRECT").every(row => row.method === "GET")).toBe(true);
+      await expect(session.execute({ id: 2, action: "open", url: destination })).rejects.toThrow("UNOBSERVED_NAVIGATION");
+    } finally { await session.close(); native.mockRestore(); routing.mockRestore(); }
+  }, 25_000);
   it("keeps native bootstrap redirects out of navigation and inventory authority", async () => {
     const official = "https://example.org/", bootstrap = `${official}App/GlobalTenantSettings`, redirected = `${official}public-data`;
     const seen: string[] = [];

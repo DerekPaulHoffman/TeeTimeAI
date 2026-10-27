@@ -9,7 +9,7 @@ import { z } from 'zod';
 import { openStagehandSession, loadStagehandRuntime, assertPublicUrl, isSourceRoutingUrl as sourceRoutingUrl, frameworkIdentity, observedActionSummary, observedTargetSummary, sourceDocumentSettled, sourceRoutingUniqueWitness } from './driver.mjs';
 import { installReadOnlyEvidence } from './read-only-evidence.mjs';
 import { prioritizedPublicEvidence, publicEvidenceUrl } from './public-evidence.mjs';
-import { observedBookingSourceCandidates, assertSourceCandidateBudget, nativeFrameNavigations, nativeIntermediaryNavigations } from './source-provenance.mjs';
+import { observedBookingSourceCandidates, assertSourceCandidateBudget, nativeFrameNavigations, nativeIntermediaryNavigations, rootWidgetWitness } from './source-provenance.mjs';
 import { sourceFailureDiagnostic, sourceGuardReasons, projectActionGuardDiagnostic } from './source-diagnostic.mjs';
 
 export const SOURCE_BUDGET_MS = 240000;
@@ -156,6 +156,7 @@ const safeReason = value => String(value ?? '').slice(0,2000)
   .replace(/((?:token|password|secret|api.?key)\s*[:=]\s*)[^\s,;]+/giu,'$1[REDACTED]');
 const closedFailure = error => {
   const code = error?.code ?? error?.message;
+  if(code==='STAGEHAND_SOURCE_NOT_FOUND')return 'STAGEHAND_SOURCE_LOADING_INCOMPLETE';
   return ['STAGEHAND_SOURCE_BUDGET_EXHAUSTED','SOURCE_DISCOVERY_ABORTED','WORK_DEADLINE_EXPIRED','ADAPTER_SOURCE_NOT_OBSERVED','FRAMEWORK_SOURCE_CANDIDATES_INVALID','FRAMEWORK_SOURCE_CANDIDATES_LIMIT',
     'LOCAL_MODEL_EXISTING_CHATGPT_LOGIN_REQUIRED','LOCAL_MODEL_TURN_FAILED','LOCAL_MODEL_ORIGINAL_DEADLINE','LOCAL_MODEL_CALL_CANCELLED',
     'SOL_ONLY_MODEL_RESULT_REQUIRED','STAGEHAND_VERSION_CHANGED','SOURCE_EVIDENCE_LIMIT','STAGEHAND_GUARDED_BROWSER_REQUIRED',
@@ -250,7 +251,24 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
     report.visitedUrls.push(request.identity.officialUrl);if(!report.visitedUrls.includes(finalUrl))report.visitedUrls.push(finalUrl);
     for(let step=0;step<45;step++){
       phase='EVIDENCE';
-      if(typeof session.settleSourceDocument==='function')await bounded(()=>session.settleSourceDocument());
+      if(typeof session.settleSourceDocument==='function'){
+        try{await bounded(()=>session.settleSourceDocument());}
+        catch(error){
+          if(error.message!=='STAGEHAND_SOURCE_NOT_FOUND'||report.notFoundRecovery||typeof session.recoverSourceNotFound!=='function')throw error;
+          const action=report.actions.at(-1),failedUrl=await bounded(()=>session.page.url());
+          if(action?.action?.method!=='click'||action.observedTarget?.tag!=='A'||action.openedNewPage!==false||action.afterUrl!==failedUrl||
+            !report.officialLinkLedger.some(row=>row.kind==='NATIVE_VISIBLE_DOM'&&row.pageUrl===action.sourceUrl&&/^[a-f0-9]{64}$/u.test(row.documentHash)&&
+              row.links?.some(link=>link.href===action.observedTarget.href&&link.visible===true)))throw error;
+          action.error=true;
+          const recovery=await bounded(()=>session.recoverSourceNotFound(request.identity.officialUrl,failedUrl)),stamp=Date.parse(recovery?.observedAt),end=Date.parse(recovery?.completedAt);
+          if(recovery?.status!==404||recovery.failedUrl!==failedUrl||recovery.recoveredTo!==request.identity.officialUrl||!sourceRoutingUrl(recovery.recoveredUrl)||
+            !Number.isFinite(stamp)||new Date(stamp).toISOString()!==recovery.observedAt||stamp<sourceStartedAt||!Number.isFinite(end)||end<stamp||
+            new Date(end).toISOString()!==recovery.completedAt||end>Date.now()||end>workDeadline||await bounded(()=>session.page.url())!==recovery.recoveredUrl)throw fail('STAGEHAND_SOURCE_OUTPUT_INVALID');
+          report.notFoundRecovery={sourceUrl:action.sourceUrl,targetUrl:action.observedTarget.href,...recovery};
+          if(!report.visitedUrls.includes(recovery.recoveredUrl))report.visitedUrls.push(recovery.recoveredUrl);
+          await persist();continue;
+        }
+      }
       const evidence=await bounded(()=>pageEvidence(session));
       if(evidence.links.length>512)throw fail('SOURCE_EVIDENCE_LIMIT');
       if(evidence.url&&!report.visitedUrls.includes(evidence.url))report.visitedUrls.push(evidence.url);
@@ -274,7 +292,8 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
         }
       }
       if(Buffer.byteLength(JSON.stringify(report))>1500000){report.officialLinkLedger.pop();report.frameLedger.pop();throw fail('SOURCE_EVIDENCE_LIMIT');}
-      const candidates=observedBookingSourceCandidates(report,request.identity.officialUrl,sourceRoutingUrl,{sourceDiscoveryOnly:true});
+      const failedRoutes=report.notFoundRecovery?[report.notFoundRecovery.failedUrl,report.notFoundRecovery.targetUrl]:[];
+      const candidates=observedBookingSourceCandidates(report,request.identity.officialUrl,sourceRoutingUrl,{sourceDiscoveryOnly:true}).filter(url=>!failedRoutes.includes(url));
       report.eligibleBookingSourceUrls=candidates;report.sourceRoutingContext=sourceRoutingContext(report,candidates);
       if(nativeChoice&&candidates.includes(nativeChoice.url)){
         finalDecision=null; // The stopping choice is native, not an earlier model decision.
@@ -282,6 +301,17 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
         report.outcome='SOURCE_PROPOSED_UNVERIFIED';report.decisionOrigin='NATIVE_UNIQUE_SUPPORTED_SOURCE';
         report.evidenceSummary='One freshly re-attested native public routing source; identity, configuration and availability remain unverified.';
         stopCondition='SOURCE_FOUND';await persist();break;
+      }
+      if(typeof session.observeRootPublicWidget==='function'){
+        const began=Date.now(),value=await bounded(()=>session.observeRootPublicWidget());
+        if(value!==null){
+          const witness=rootWidgetWitness(value,{pageUrl:evidence.url,startedAt:began,finishedAt:Date.now(),isPublic:sourceRoutingUrl});
+          if(!witness||await bounded(()=>session.page.url())!==evidence.url)throw fail('STAGEHAND_SOURCE_OUTPUT_INVALID');
+          finalDecision=null;report.rootWidgetWitness=witness;report.adapterSourceProposal=null;
+          report.outcome='ROOT_WIDGET_PROPOSED_UNVERIFIED';report.decisionOrigin='NATIVE_PUBLIC_ROOT_WIDGET';
+          report.evidenceSummary='Current official-root public widget presence only; generic discovery must independently reopen and verify the official site.';
+          stopCondition='ROOT_WIDGET_FOUND';await persist();break;
+        }
       }
       if(report.nativeIntermediaryNavigations.length<2&&typeof session.openPublicBookingIntermediary==='function'){
         activeIntermediary={pageUrl:evidence.url,startedAt:Date.now()};let entry;
@@ -296,6 +326,7 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
       report.metrics.calls++;
       frames=frames.filter(value=>candidates.includes(value));
       const instruction=buildSourceDiscoveryInstruction({identity:request.identity,target:request.target,input:request.input},candidates,null,report.sourceRoutingContext,frames)+
+        (report.notFoundRecovery?' A completed current main-document HTTP404 was observed for this failed routing edge: '+JSON.stringify(report.notFoundRecovery)+'. It is negative navigation evidence only, never availability/EMPTY or source authority. The exact original official root was freshly reopened. Do not repeat the failed edge; choose a different currently observed public navigation.':'')+
         ' Current bounded public evidence: '+JSON.stringify(prioritizedPublicEvidence(evidence,{maxCharacters:60000,includeDom:false}));
       phase='EXTRACT';const extraction=await bounded(()=>session.extract(instruction,sourceDecisionFor(candidates,frames))),decision=sourceDecisionFor(candidates,frames).parse(extraction.data);
       finalDecision=decision.decision;report.metrics.completedSteps=step+1;report.evidenceSummary=safeReason(decision.reason);await persist();
@@ -350,9 +381,9 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
     if(stopCondition==='RUNNING')stopCondition='STEP_LIMIT';
     if(session){try{const closed=await session.close();report.browserClosed=closed.browserClosed===true;report.modelClosed=closed.modelClosed===true;}catch{report.browserClosed=false;report.browserCleanupErrorCode='STAGEHAND_BROWSER_CLEANUP_FAILED';}}
     else if(ownedBrowser){try{report.browserClosed=(await ownedBrowser.close()).browserClosed===true;}catch{report.browserClosed=false;}}
-    if(!report.browserClosed||!report.modelClosed){if(report.outcome==='SOURCE_PROPOSED_UNVERIFIED'&&!sourceError)sourceError=Object.assign(Error('STAGEHAND_SOURCE_CLEANUP_UNCONFIRMED'),{stagehandPhase:'CLOSE'});report.outcome='UNRESOLVED';report.adapterSourceProposal=null;report.frameworkFailureCode??='STAGEHAND_SOURCE_CLEANUP_UNCONFIRMED';stopCondition='CLEANUP_UNCONFIRMED';}
-    if(report.outcome!=='SOURCE_PROPOSED_UNVERIFIED')report.sourceDiagnostic=sourceFailureDiagnostic({error:sourceError,phase,report,startedAt:sourceStartedAt,
-      cleanup:{browserClosed:report.browserClosed,modelClosed:report.modelClosed},modelAttempts:report.metrics.attemptedLocalCodexCalls,modelFailure:session?.lastModelFailure,ownedCdpFailure:session?.ownedCdpFailure,nativeRouterFailure:session?.nativeRouterFailure,
+    if(!report.browserClosed||!report.modelClosed){if(['SOURCE_PROPOSED_UNVERIFIED','ROOT_WIDGET_PROPOSED_UNVERIFIED'].includes(report.outcome)&&!sourceError)sourceError=Object.assign(Error('STAGEHAND_SOURCE_CLEANUP_UNCONFIRMED'),{stagehandPhase:'CLOSE'});report.outcome='UNRESOLVED';report.adapterSourceProposal=null;delete report.rootWidgetWitness;report.frameworkFailureCode??='STAGEHAND_SOURCE_CLEANUP_UNCONFIRMED';stopCondition='CLEANUP_UNCONFIRMED';}
+    if(!['SOURCE_PROPOSED_UNVERIFIED','ROOT_WIDGET_PROPOSED_UNVERIFIED'].includes(report.outcome))report.sourceDiagnostic=sourceFailureDiagnostic({error:sourceError,phase,report,startedAt:sourceStartedAt,
+      cleanup:{browserClosed:report.browserClosed,modelClosed:report.modelClosed},modelAttempts:report.metrics.attemptedLocalCodexCalls,modelFailure:session?.lastModelFailure,ownedCdpFailure:session?.ownedCdpFailure,nativeRouterFailure:session?.nativeRouterFailure,hostGuardFailure:session?.hostGuardFailure,
       sourceStop:{finalDecision,condition:stopCondition,lastActionKind},documentReadiness:session?.sourceDocumentReadiness,intermediaryPreparation:session?.nativeIntermediaryPreparation});
     report.finishedAt=new Date().toISOString();report.elapsedFromFirstPickupMs=Date.now()-Date.parse(request.firstPickedUpAt);
     await persist();

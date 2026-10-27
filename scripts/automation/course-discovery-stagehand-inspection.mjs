@@ -6,6 +6,7 @@ import { STAGEHAND_SOURCE_MODE, canonicalStagehandData as canonical, stagehandDa
 import { observedBookingSourceCandidates, nativeLinkSource, corroboratedNativeLink, nativeFrameNavigations, nativeIntermediaryNavigations } from "./stagehand/source-provenance.mjs";
 import { safeTeeItUpDelegationDiagnostic, safeFixedAdapterReadDiagnostic, safeNativeMainDocumentContinuity } from "./course-discovery-worker.mjs";
 import { z } from "zod";
+import { projectNativeRouterFailure, safeNativeRouterFailure } from "./stagehand/source-diagnostic.mjs";
 const fail = code => discoveryError(code), HYBRID_SOURCE_DISCOVERY = STAGEHAND_SOURCE_MODE;
 const INSPECTION_ACTION_LIMIT = 6;
 const inspectionFailures = new WeakMap();
@@ -75,9 +76,11 @@ export function currentStagehandInspectionDiagnostic(error, job, startedAt, now)
     const teeItUpDelegation = safeTeeItUpDelegationDiagnostic(value.teeItUpDelegation);
     const adapterRead = safeFixedAdapterReadDiagnostic(value.adapterRead);
     const readability = safeInspectionReadability(value.readability);
-    return teeItUpDelegation || adapterRead || readability ? {
+    const nativeRouterFailure = safeNativeRouterFailure(value.nativeRouterFailure);
+    return teeItUpDelegation || adapterRead || readability || nativeRouterFailure ? {
       ...(teeItUpDelegation ? { teeItUpDelegation } : {}), ...(adapterRead ? { adapterRead } : {}),
       ...(readability ? { readability } : {}),
+      ...(nativeRouterFailure ? { nativeRouterFailure } : {}),
     } : undefined;
   } catch { return undefined; }
 }
@@ -321,6 +324,10 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
         return snapshot;
       } catch (error) {
         step.error = inspectionErrorCode(error);
+        try {
+          const native = projectNativeRouterFailure(error?.details?.browserDiagnostics?.nativeFirstFatal);
+          if (native) step.nativeRouterFailure = native;
+        } catch { /* Diagnostic access cannot replace the primary failure. */ }
         const diagnostic = closedFilterDiagnostics(error);
         if (diagnostic) step.filterDiagnostic = diagnostic;
         try {
@@ -480,12 +487,13 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
     const failedAction = receipt.actions.at(-1);
     const readability = failedAction?.readability?.failedPredicates?.length ? safeInspectionReadability(receipt.actions.map(row => row.readability).filter(Boolean)) : undefined;
     if (primary && typeof primary === 'object' && failedAction?.error &&
-        (readability || failedAction.action === 'inspect_adapter' && (failedAction.teeItUpDelegation || failedAction.adapterRead))) {
+        (readability || failedAction.nativeRouterFailure || failedAction.action === 'inspect_adapter' && (failedAction.teeItUpDelegation || failedAction.adapterRead))) {
       try {
         inspectionFailures.set(primary, { job, attempt: job.attempts, requestSha256: hash(canonical(job.request)), sourceFingerprint: job.sourceFingerprint,
           firstPickedUpAt: job.firstPickedUpAt, deadlineAt: job.deadlineAt, startedAt,
           teeItUpDelegation: safeTeeItUpDelegationDiagnostic(failedAction.teeItUpDelegation),
-          adapterRead: safeFixedAdapterReadDiagnostic(failedAction.adapterRead), ...(readability ? { readability } : {}) });
+          adapterRead: safeFixedAdapterReadDiagnostic(failedAction.adapterRead), ...(readability ? { readability } : {}),
+          nativeRouterFailure: safeNativeRouterFailure(failedAction.nativeRouterFailure) });
       } catch { /* Optional diagnostics cannot replace the primary failure. */ }
     }
     throw primary;

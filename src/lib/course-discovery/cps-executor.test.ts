@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { createAddressPinnedPublicFetchTransport } from "@/lib/automation/address-pinned-public-fetch";
 import { CPS_API_PATH, CPS_PUBLIC_BUILD, parseCpsCatalog, parseCpsConfiguration, parseCpsOptions } from "./cps-source";
-import { cpsAvailabilityQuery, cpsBootstrapReadAllowed, cpsLocalInstant, executeCps, inspectCps, normalizeCpsAvailability, type CpsDependencies } from "./cps-executor";
+import { cpsAvailabilityQuery, cpsBootstrapReadAllowed, cpsLocalInstant, executeCps, inspectCps, normalizeCpsAvailability, decodeCpsOfficialHtml, type CpsDependencies } from "./cps-executor";
 import { readNativeOfficialIdentityPage } from "./native-official-page-reader";
 import type { PublicCourseContactBlock } from "./public-course-contact-blocks";
 
@@ -59,6 +59,54 @@ function setup(change?: Change) {
 const execute = (deps: CpsDependencies, request = input) => executeCps(source, metadata(), { courseId: "course-1" }, request, deps);
 
 describe("CPS fixed fresh public reads", () => {
+  it("uses only explicit supported WHATWG HTML charset labels and preserves exact decoded punctuation", () => {
+    const bytes = Uint8Array.from([60,112,62,0x93,0x63,0x61,0x66,0xe9,0x94,60,47,112,62]).buffer;
+    for (const label of ["windows-1252", "ISO-8859-1", "latin1", "cp1252", "us-ascii"])
+      expect(decodeCpsOfficialHtml(bytes, `text/html; charset=${label}`)).toBe("<p>“café”</p>");
+    const utf8 = new TextEncoder().encode("<p>Public café</p>").buffer;
+    for (const type of ["text/html", "text/html; charset=utf-8", 'text/html; charset="UTF8"'])
+      expect(decodeCpsOfficialHtml(utf8, type)).toBe("<p>Public café</p>");
+    const bom = Uint8Array.from([239,187,191,...new TextEncoder().encode("<p>Public</p>")]).buffer;
+    expect(decodeCpsOfficialHtml(bom, "text/html")).toBe("<p>Public</p>");
+    expect(decodeCpsOfficialHtml(bom, "text/html; charset=utf-8")).toBe("<p>Public</p>");
+  });
+  it("rejects ambiguous unsupported or malformed HTML encodings rather than guessing", () => {
+    const invalidUtf8 = Uint8Array.from([0xc3,0x28]).buffer;
+    for (const type of ["text/html", "text/html; charset=utf-8"])
+      expect(() => decodeCpsOfficialHtml(invalidUtf8, type)).toThrow(TypeError);
+    for (const type of ['text/html; charset=""', "text/html; charset=unknown", "text/html; charset=utf-16", "text/html; charset=shift_jis",
+      "text/html; charset=utf-8; charset=ISO-8859-1", "text/html; charset=utf-8; charset=utf-8", "text/html; charset=utf-8,iso-8859-1",
+      "text/html; charset=", 'text/html; charset="ISO-8859-1', "text/html; charset=ISO-8859-1\r\n", "text/html; " + "x".repeat(512), "application/json; charset=ISO-8859-1"])
+      expect(() => decodeCpsOfficialHtml(invalidUtf8, type)).toThrow("ADAPTER_RESPONSE_INVALID");
+    for (const bom of [[255,254,60,0],[254,255,0,60]])
+      expect(() => decodeCpsOfficialHtml(Uint8Array.from(bom).buffer, "text/html; charset=ISO-8859-1")).toThrow("ADAPTER_RESPONSE_INVALID");
+    expect(() => decodeCpsOfficialHtml(Uint8Array.from([239,187,191,60,112,62]).buffer, "text/html; charset=ISO-8859-1")).toThrow("ADAPTER_RESPONSE_INVALID");
+    expect(() => decodeCpsOfficialHtml(new ArrayBuffer(600001), "text/html; charset=ISO-8859-1")).toThrow("ADAPTER_RESPONSE_LIMIT");
+  });
+  it("does not apply HTML charset decoding to malformed public JSON or waive official identity", async () => {
+    const malformed = setup((url, _init, normal) => url.pathname.endsWith("/Configuration")
+      ? new Response(Uint8Array.from([123,34,120,34,58,34,0xe9,34,125]), { headers: { "content-type": "application/json; charset=ISO-8859-1" } }) : normal());
+    await expect(inspectCps(source, malformed.deps)).rejects.toThrow(TypeError);
+    expect(malformed.reads).toHaveLength(4); expect(malformed.active).toBe(0);
+    const wrong = setup((url, _init, normal) => url.hostname === "www.thebobgc.com"
+      ? new Response(Buffer.from(`<body>Another Public Course ${footer.replace(source.venueName, "Another Public Course")}</body>`, "latin1"), { headers: { "content-type": "text/html; charset=ISO-8859-1" } }) : normal());
+    await expect(inspectCps(source, wrong.deps)).rejects.toThrow("OFFICIAL_IDENTITY_UNVERIFIED");
+    expect(wrong.reads).toHaveLength(1); expect(wrong.active).toBe(0);
+  });
+  it("reads explicitly declared Latin-1 official HTML on cold and changed-parameter warm calls without extra requests", async () => {
+    const fixture = setup(async (url, _init, normal) => {
+      const response = normal();
+      if (url.hostname !== "www.thebobgc.com" || response.status !== 200) return response;
+      return new Response(Buffer.from(await response.text(), "latin1"), { headers: { "content-type": "text/html;  charset=ISO-8859-1" } });
+    });
+    const saved = await inspectCps(source, fixture.deps);
+    expect(saved).toEqual(metadata()); expect(fixture.reads).toHaveLength(6);
+    fixture.reads.length = 0;
+    const result = await executeCps(source, saved, { courseId: "course-1" }, { ...input, date: "2026-10-24", players: 3 }, fixture.deps);
+    expect(result).toHaveLength(1); expect(result[0].startsAt).toBe("2026-10-24T14:30:00.000Z");
+    expect(fixture.reads).toHaveLength(8); expect(fixture.active).toBe(0); expect(fixture.maxActive).toBe(1);
+    expect(fixture.reads.every(read => read.init.credentials === "omit" && read.init.redirect === "manual")).toBe(true);
+  });
   it.each([undefined,"injected-published-key"])("uses a fresh reviewed26 public RAM session and never an injected key/account token (%s)",async apiKey=>{
     const fixture=setup((url,_init,normal)=>url.pathname.endsWith("/Configuration")
       ?json({...config(),buildNumber:"26.3.0.34794395074\n",apiKey,authorization:"Bearer untrusted-input",accessToken:"untrusted-input"}):normal());

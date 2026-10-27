@@ -10,6 +10,26 @@ export function assertSourceCandidateBudget(candidates) {
 }
 const rows = (value, limit) => Array.isArray(value) ? value.slice(0, limit) : [];
 const norm = value => publicEvidenceUrl(value);
+/** Current-root presence is routing data, never a booking URL edge. */
+export function rootWidgetWitness(value, { pageUrl, startedAt, finishedAt, isPublic = publicEvidenceUrl } = {}) {
+  const keys = value && typeof value === 'object' && !Array.isArray(value) ? Object.keys(value).sort().join(',') : '';
+  if(keys!=='documentHash,kind,observedAt,pageUrl,widgetKind'||value.kind!=='NATIVE_ROOT_PUBLIC_WIDGET'||
+    !['CALENDAR','PUBLIC_FILTERS','SERVICE_CATALOG'].includes(value.widgetKind)||typeof value.documentHash!=='string'||!/^[a-f0-9]{64}$/u.test(value.documentHash)||
+    !isPublic(value.pageUrl)||value.pageUrl!==pageUrl)return null;
+  const stamp=Date.parse(value.observedAt);
+  if(!Number.isFinite(stamp)||new Date(stamp).toISOString()!==value.observedAt||!Number.isFinite(startedAt)||!Number.isFinite(finishedAt)||stamp<startedAt||stamp>finishedAt)return null;
+  return {...value};
+}
+export function rootWidgetRoutingWitness(report, officialUrl, isPublic = publicEvidenceUrl) {
+  const initial=report?.initialNavigation,witness=report?.rootWidgetWitness;
+  if(initial?.requestedUrl!==officialUrl||!isPublic(officialUrl)||!isPublic(initial.finalUrl)||initial.status!==200||
+    !Array.isArray(report.visitedUrls)||!report.visitedUrls.includes(witness?.pageUrl))return null;
+  try{
+    const root=new URL(initial.finalUrl),current=new URL(witness.pageUrl);
+    if(root.origin!==current.origin||root.pathname!==current.pathname||root.search!==current.search)return null;
+  }catch{return null;}
+  return rootWidgetWitness(witness,{pageUrl:witness.pageUrl,startedAt:Date.parse(report.startedAt),finishedAt:Date.parse(report.finishedAt),isPublic});
+}
 /** Explicit non-visible document-link routing, never a synthetic click/frame. */
 export function nativeIntermediaryNavigations(report, isPublic = publicEvidenceUrl) {
   const valid=value=>typeof value==='string'&&norm(value)===value&&Boolean(isPublic(value));

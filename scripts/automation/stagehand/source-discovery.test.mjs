@@ -14,6 +14,25 @@ import { createCourseDiscoverySupervisor } from '../course-discovery-supervisor.
 import { validateStagehandSourceReport } from '../course-discovery-stagehand-source.mjs';
 const official='https://public-course.example/', booking='https://public-provider.example/start?venue=public&kind=day', landing='https://public-provider.example/loading';
 const playEntry='https://public-course.play.teeitup.com/', bookEntry='https://public-course.book.teeitup.com/';
+function notFoundRoutingFixture({repeat=false,badRecovery=false}={}){
+ const broken=official+'missing',alternative='https://fresh-provider.example/public';let current=official,evaluations=0,callback,recovered=false,extractions=0,recoveries=0,closed=0;
+ const done={bodyPresent:true,mainDocumentCurrent:true,mainDocumentComplete:true,mainReadPending:false,readyState:'complete',mainDocumentStatus:200,pendingReads:0};
+ const session={localCodexCalls:[],browser:{context:{addInitScript:async()=>{}}},page:{url:async()=>current,evaluate:async()=>++evaluations%2?{url:current,observedAt:new Date().toISOString(),links:[{href:broken,text:'Public page',visible:true},{href:alternative,text:'Public availability',visible:true}],frames:[],dom:[]}:[]},
+  goto:async()=>({status:()=>200}),settleSourceDocument:async()=>{if(current===broken||repeat&&current===alternative)throw Object.assign(Error('STAGEHAND_SOURCE_NOT_FOUND'),{stagehandDocumentReadiness:{...done,mainDocumentStatus:404}});return done;},
+  recoverSourceNotFound:async(root,failed)=>{recoveries++;const observedAt=new Date().toISOString();if(badRecovery)throw Error('STAGEHAND_GUARDED_SOURCE_REJECTED');assert.equal(root,official);assert.equal(failed,broken);current=official;recovered=true;return{failedUrl:failed,recoveredTo:root,recoveredUrl:current,observedAt,completedAt:new Date().toISOString(),status:404};},
+  extract:async(instruction,schema)=>{extractions++;if(recovered){assert.ok(instruction.includes('404'));assert.ok(!schema.safeParse({decision:'SOURCE_FOUND',reason:'failed',nextActionInstruction:'',bookingUrl:broken}).success);return{data:schema.parse({decision:repeat?'CONTINUE':'SOURCE_FOUND',reason:'Fresh alternative',nextActionInstruction:'Open different current public link',bookingUrl:repeat?null:alternative})};}return{data:schema.parse({decision:'CONTINUE',reason:'Investigate observed link',nextActionInstruction:'Open current public link',bookingUrl:null})};},
+  observe:async()=>({data:[{method:'click',selector:'a',description:'Open currently observed public page',arguments:[]}]}),
+  act:async()=>{const href=recovered?alternative:broken;callback({kind:'NATIVE_VISIBLE_DOM',pageUrl:current,observedAt:new Date().toISOString(),documentHash:'a'.repeat(64),links:[{href,visible:true}]});current=href;return{before:{tag:'A',href},afterUrl:current,openedNewPage:false};},
+  close:async()=>{closed++;return{browserClosed:true,modelClosed:true};}};
+ return{session,bind:o=>{callback=o.onNativeSourceWitness;},get recoveries(){return recoveries;},get closed(){return closed;},get extractions(){return extractions;}};
+}
+test('404 negative is retained/excluded and one fresh originalroot allows a different newly observed source',async()=>{
+ const f=notFoundRoutingFixture(),input={...job(),attempts:1,sourceFingerprint:'a'.repeat(64)},r=await sourceDiscover({job:input,sessionFactory:async o=>{f.bind(o);return f.session;}});
+ assert.equal(r.outcome,'SOURCE_PROPOSED_UNVERIFIED');assert.equal(r.adapterSourceProposal.bookingUrl,'https://fresh-provider.example/public');assert.equal(f.recoveries,1);assert.equal(f.closed,1);assert.equal(r.notFoundRecovery.status,404);assert.equal(r.notFoundRecovery.recoveredTo,official);assert.equal(r.actions[0].error,true);assert.equal(r.firstPickedUpAt,input.firstPickedUpAt);assert.equal(r.deadlineAt,input.deadlineAt);
+});
+test('404 repeated or recovery guardfailure remains unresolved without another recovery or falseEMPTY',async()=>{
+ for(const options of [{repeat:true},{badRecovery:true}]){const f=notFoundRoutingFixture(options),r=await sourceDiscover({job:job(),sessionFactory:async o=>{f.bind(o);return f.session;}});assert.equal(r.outcome,'UNRESOLVED');assert.equal(r.adapterSourceProposal,null);assert.equal(f.recoveries,1);assert.equal(f.closed,1);assert.deepEqual(r.matchingSlots,[]);}
+});
 function routingFrameFixture(mode='valid',{entry=playEntry,final=bookEntry}={}) {
  let current=official,evaluations=0,callback,opens=0,extracts=0;
  const witness=(page=current,src=entry)=>({kind:'NATIVE_VISIBLE_FRAME',pageUrl:page,observedAt:new Date().toISOString(),documentHash:'a'.repeat(64),frames:[{src,visible:true}]});
@@ -304,11 +323,14 @@ test('private same-attempt host close facts survive a source failure without exp
  Object.defineProperty(f.session,'ownedCdpFailure',{get:()=>closed?failure:undefined});
  const native={code:'NATIVE_REDIRECT_LOADER_MISMATCH',phase:'LOADER_OWNER',method:'GET',resourceType:'document',loaderKnown:false};
  Object.defineProperty(f.session,'nativeRouterFailure',{get:()=>closed?native:undefined});
+ const host={stage:'SOURCE_DOM',reason:'DOM_URL_CHANGED',nativeFrameHasFragment:true,domHasFragment:true};
+ Object.defineProperty(f.session,'hostGuardFailure',{get:()=>closed?host:undefined});
  const close=f.session.close;f.session.close=async()=>{closed=true;return close();};
  f.session.extract=async()=>{throw Error('OWNED_STAGEHAND_CDP_UNAVAILABLE');};
  const r=await sourceDiscover({job:job(),sessionFactory:async()=>f.session});
  assert.deepEqual(r.sourceDiagnostic.ownedCdpFailure,failure);assert.equal(r.sourceDiagnostic.counts.attemptedModelCalls,0);
  assert.deepEqual(r.sourceDiagnostic.nativeRouterFailure,native);
+ assert.deepEqual(r.sourceDiagnostic.hostGuardFailure,host);
  assert.equal(r.sourceDiagnostic.transportCode,'OWNED_STAGEHAND_CDP_UNAVAILABLE');assert.equal(r.browserClosed,true);
  assert.doesNotMatch(JSON.stringify(r.sourceDiagnostic),/https:|PRIVATE|targetId|sessionId|cdpUrl/);
 });

@@ -38,6 +38,197 @@ function playwrightRoute(test: Awaited<ReturnType<typeof installed>>) {
   return { request: () => ({ frame: () => test.main }), continue: vi.fn(async () => {}), abort: vi.fn(async () => {}), fulfill: vi.fn() } as unknown as Route;
 }
 
+describe("closed native initiating-failure diagnostics", () => {
+  it("retains an orphan stylesheet correlation timeout before cleanup without dispatch or a duplicate claim", async () => {
+    const t = await installed(), url = "https://example.org/public.css?version=1";
+    try {
+      await t.guard.beginDocumentNavigation(t.main as never);
+      t.request("orphan-style", { resourceType: "Stylesheet", request: { url, method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(t.close).toHaveBeenCalledOnce());
+      expect(t.guard.firstFatal).toMatchObject({ code: "NATIVE_REDIRECT_LOADER_TIMEOUT", phase: "LOADER_IDENTITY_WAIT",
+        operation: "LOADER_CORRELATION", method: "GET", resourceType: "stylesheet", framePresent: true, networkIdPresent: true,
+        identityPresent: false, loaderPresent: false, duplicateRequestId: false, requestUrlSha256: expect.stringMatching(/^[a-f0-9]{64}$/u) });
+      expect(t.handler).not.toHaveBeenCalled();
+      expect(t.cdp.send.mock.calls.some(([name]) => name === "Fetch.continueRequest")).toBe(false);
+    } finally { await t.guard.close(); }
+  });
+  it("retains the actual body RPC failure operation while leaving its fatal behavior unchanged", async () => {
+    const t = await installed(), send = t.cdp.send.getMockImplementation()!;
+    t.cdp.send.mockImplementation(async (name, value) => {
+      if (name === "Fetch.getResponseBody") throw Error("Protocol error (Fetch.getResponseBody): No data found for resource with given identifier PRIVATE_BODY_COOKIE");
+      return send(name, value);
+    });
+    try {
+      t.request("style", { resourceType: "Stylesheet" }); await t.routes[0].continue();
+      t.response("style", { resourceType: "Stylesheet" });
+      await vi.waitFor(() => expect(t.close).toHaveBeenCalledOnce());
+      expect(t.failures).toEqual(["NATIVE_REDIRECT_ROUTING_FAILED"]);
+      expect(t.guard.firstFatal).toMatchObject({ code: "NATIVE_REDIRECT_ROUTING_FAILED", operation: "RESPONSE_BODY",
+        errorName: "Error", errorCategory: "BODY_UNAVAILABLE", method: "GET", resourceType: "stylesheet" });
+      expect(JSON.stringify(t.guard.firstFatal)).not.toMatch(/PRIVATE_BODY_COOKIE|Protocol error|postData"|headers"/u);
+      expect(t.cdp.send.mock.calls.some(([name]) => name === "Fetch.continueResponse")).toBe(false);
+    } finally { await t.guard.close(); }
+  });
+});
+
+describe("native child-asset denial", () => {
+  const root = "https://example.org/", asset = "https://assets.example.org/public.js";
+  async function prepared(profile: PublicBrowserResponseProfile | null = "SOURCE_ROUTING", maxRequests?: number) {
+    const t = await installed(maxRequests, undefined, undefined, profile ?? undefined);
+    await t.guard.beginDocumentNavigation(t.main as never);
+    t.events.get("Network.requestWillBeSent")!({ requestId: "network-document", frameId: "main", loaderId: "root-loader", type: "Document", request: { url: root, method: "GET" } });
+    t.request("document", { resourceType: "Document", request: { url: root, method: "GET", headers: {} } });
+    await t.routes[0].continue();
+    t.response("document", { resourceType: "Document", request: { url: root, method: "GET", headers: {} }, responseHeaders: [{ name: "Content-Type", value: "text/html" }] });
+    await t.routes[0].request().response();
+    t.events.get("Page.frameNavigated")!({ frame: { id: "main", loaderId: "root-loader", url: root } });
+    await vi.waitFor(() => expect(t.guard.pendingReads).toBe(0));
+    return t;
+  }
+  function child(t: Awaited<ReturnType<typeof prepared>>, values: object = {}) {
+    t.events.get("Page.frameNavigated")!({ frame: { id: "child", parentId: "main", loaderId: "child-loader", url: "about:srcdoc", ...values } });
+  }
+  function network(t: Awaited<ReturnType<typeof prepared>>, resourceType = "Script", values: object = {}) {
+    t.events.get("Network.requestWillBeSent")!({ requestId: "network-asset", frameId: "child", loaderId: "child-loader", type: resourceType,
+      request: { url: asset, method: "GET" }, ...values });
+  }
+  const proof = (t: Awaited<ReturnType<typeof prepared>>) => t.guard.isCurrentCompletedDocumentRead(t.routes[0].request(), t.main as never,
+    { frameId: "main", loaderId: "root-loader", url: root });
+  it.each([["Script", "SOURCE_ROUTING"], ["Stylesheet", "SOURCE_ROUTING"], ["Script", null], ["Stylesheet", null]] as const)(
+    "denies a root-labelled %s in profile %s from a positively owned child Network event without poisoning the main read", async (resourceType, profile) => {
+    const t = await prepared(profile);
+    try {
+      child(t);
+      // Chrome can label the Fetch pause with the root while its exact Network
+      // request belongs to a child. Network arrives independently one tick later.
+      t.request("asset", { resourceType, request: { url: asset, method: "GET", headers: {} } });
+      await new Promise(resolve => setTimeout(resolve, 1)); network(t, resourceType);
+      await vi.waitFor(() => expect(t.subframes).toHaveLength(1));
+      expect(t.cdp.send.mock.calls.filter(([name, value]) => name === "Fetch.failRequest" && value?.requestId === "asset")).toHaveLength(1);
+      expect(t.handler).toHaveBeenCalledOnce(); expect(t.routes).toHaveLength(1);
+      expect(t.cdp.send.mock.calls.filter(([name, value]) => ["Fetch.continueRequest", "Fetch.continueResponse", "Fetch.getResponseBody"].includes(name) && value?.requestId === "asset")).toEqual([]);
+      expect(t.guard.firstFatal).toBeUndefined(); expect(t.close).not.toHaveBeenCalled(); expect(proof(t)).toBe(true);
+    } finally { await t.guard.close(); }
+  });
+  it("requires the exact abort ACK and keeps the denied pause tombstoned against late responses", async () => {
+    const t = await prepared(), ack = deferred<object>(), send = t.cdp.send.getMockImplementation()!;
+    t.cdp.send.mockImplementation((name, value) => name === "Fetch.failRequest" && value?.requestId === "asset" ? ack.promise : send(name, value));
+    try {
+      child(t); network(t); t.request("asset", { resourceType: "Script", request: { url: asset, method: "GET", headers: {} } });
+      expect(t.subframes).toEqual([]); expect(t.guard.pendingReads).toBe(1); expect(proof(t)).toBe(true); expect(t.handler).toHaveBeenCalledOnce();
+      ack.resolve({}); await vi.waitFor(() => expect(t.subframes).toHaveLength(1));
+      expect(t.rejections).toEqual([expect.objectContaining({ code: "NATIVE_REDIRECT_FRAME_UNGUARDED", duplicateRequestId: false })]);
+      expect(JSON.stringify(t.rejections)).not.toMatch(/example\.org|"url"|"frameId"|"networkId"|"headers"/u);
+      t.response("asset", { resourceType: "Script", request: { url: asset, method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(t.close).toHaveBeenCalledOnce());
+      expect(t.handler).toHaveBeenCalledOnce();
+    } finally { ack.resolve({}); await t.guard.close(); }
+  });
+  it("accepts rooted nested-child negative ownership but never adopts its loader", async () => {
+    const t = await prepared();
+    try {
+      child(t, { id: "parent", loaderId: "parent-loader" }); child(t, { parentId: "parent" }); network(t);
+      t.request("asset", { resourceType: "Script", request: { url: asset, method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(t.subframes).toHaveLength(1)); expect(proof(t)).toBe(true);
+      t.events.get("Network.requestWillBeSent")!({ requestId: "network-root-impostor", frameId: "main", loaderId: "child-loader", type: "Script", request: { url: asset, method: "GET" } });
+      t.request("root-impostor", { resourceType: "Script", request: { url: asset, method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(t.close).toHaveBeenCalledOnce()); expect(t.handler).toHaveBeenCalledOnce();
+    } finally { await t.guard.close(); }
+  });
+  it.each(["SOURCE_ROUTING", null] as const)("requires abort ACK despite an exact child terminal while it is pending in profile %s", async profile => {
+    const t = await prepared(profile), ack = deferred<object>(), send = t.cdp.send.getMockImplementation()!;
+    t.cdp.send.mockImplementation((name, value) => name === "Fetch.failRequest" && value?.requestId === "asset" ? ack.promise : send(name, value));
+    try {
+      child(t); network(t); t.request("asset", { resourceType: "Script", request: { url: asset, method: "GET", headers: {} } });
+      t.events.get("Network.loadingFailed")!({ requestId: "network-asset", type: "Script", canceled: false, errorText: "net::ERR_BLOCKED_BY_CLIENT" });
+      await Promise.resolve(); expect(t.subframes).toEqual([]); expect(t.guard.pendingReads).toBe(1); expect(proof(t)).toBe(true);
+      ack.resolve({}); await vi.waitFor(() => expect(t.subframes).toHaveLength(1));
+      expect(t.close).not.toHaveBeenCalled(); expect(t.handler).toHaveBeenCalledOnce(); expect(t.guard.firstFatal).toBeUndefined(); expect(proof(t)).toBe(true);
+    } finally { ack.resolve({}); await t.guard.close(); }
+  });
+  it("does not use an exact child terminal as a substitute for a rejected abort ACK", async () => {
+    const t = await prepared(), ack = deferred<object>(), send = t.cdp.send.getMockImplementation()!;
+    t.cdp.send.mockImplementation((name, value) => name === "Fetch.failRequest" && value?.requestId === "asset" ? ack.promise.then(() => { throw Error("abort rejected"); }) : send(name, value));
+    try {
+      child(t); network(t); t.request("asset", { resourceType: "Script", request: { url: asset, method: "GET", headers: {} } });
+      t.events.get("Network.loadingFailed")!({ requestId: "network-asset", type: "Script", errorText: "net::ERR_BLOCKED_BY_CLIENT" });
+      ack.resolve({}); await vi.waitFor(() => expect(t.close).toHaveBeenCalledOnce()); expect(t.subframes).toEqual([]); expect(t.handler).toHaveBeenCalledOnce();
+    } finally { ack.resolve({}); await t.guard.close(); }
+  });
+  it.each(["no-child", "unrooted", "child-loader", "missing-loader", "root-loader", "detached", "parent-navigated", "wrong-network", "wrong-url", "wrong-method", "wrong-kind", "network-body", "fetch-body", "redirect", "conflict", "document", "XHR", "Fetch", "HEAD"])(
+    "does not replace strict correlation with denial-only ownership for %s", async mode => {
+      const t = await prepared();
+      try {
+        if (mode !== "no-child") child(t, mode === "unrooted" ? { parentId: "unknown" } : mode === "root-loader" ? { loaderId: "root-loader" } : {});
+        if (mode === "detached") t.events.get("Page.frameDetached")!({ frameId: "child" });
+        if (mode === "parent-navigated") {
+          child(t, { id: "parent", loaderId: "parent-loader" }); child(t, { parentId: "parent" });
+          child(t, { id: "parent", loaderId: "changed-parent-loader" });
+        }
+        const resourceType = ["document", "XHR", "Fetch"].includes(mode) ? mode === "document" ? "Document" : mode : "Script";
+        t.request("asset", { resourceType, ...(mode === "fetch-body" ? { request: { url: asset, method: "GET", headers: {}, hasPostData: true, postData: "x" } }
+          : { request: { url: asset, method: mode === "HEAD" ? "HEAD" : "GET", headers: {} } }), ...(mode === "redirect" ? { redirectedRequestId: "unknown" } : {}) });
+        network(t, mode === "wrong-kind" ? "Stylesheet" : resourceType, mode === "wrong-network" ? { requestId: "other-network" }
+          : mode === "child-loader" ? { loaderId: "unknown-loader" } : mode === "missing-loader" ? { loaderId: undefined }
+            : ["wrong-url", "wrong-method", "network-body"].includes(mode) ? { request: { url: mode === "wrong-url" ? asset + "?different" : asset,
+              method: mode === "wrong-method" ? "POST" : "GET", ...(mode === "network-body" ? { hasPostData: true, postData: "x" } : {}) } } : {});
+        if (mode === "conflict") network(t);
+        await vi.waitFor(() => expect(t.close).toHaveBeenCalledOnce());
+        expect(t.subframes).toEqual([]); expect(t.handler).toHaveBeenCalledOnce();
+        expect(t.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "asset")).toBe(false);
+      } finally { await t.guard.close(); }
+    });
+  it.each(["root-before", "root-after", "child-conflict", "finished", "failed"])("cannot heal conflicting or terminal negative facts for %s", async mode => {
+    const t = await prepared(null);
+    const rootNetwork = () => network(t, "Script", { frameId: "main", loaderId: "root-loader" });
+    try {
+      child(t); if (mode === "root-before") rootNetwork(); network(t);
+      if (mode === "root-after") rootNetwork();
+      if (mode === "child-conflict") network(t, "XHR");
+      if (mode === "finished") t.events.get("Network.loadingFinished")!({ requestId: "network-asset" });
+      if (mode === "failed") t.events.get("Network.loadingFailed")!({ requestId: "network-asset", errorText: "net::ERR_FAILED" });
+      t.request("asset", { resourceType: "Script", request: { url: asset, method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(t.close).toHaveBeenCalledOnce()); expect(t.subframes).toEqual([]); expect(t.handler).toHaveBeenCalledOnce();
+    } finally { await t.guard.close(); }
+  });
+  it("retains no child denial authority across an explicit document boundary", async () => {
+    const t = await prepared();
+    try {
+      child(t); network(t); await t.guard.beginDocumentNavigation(t.main as never);
+      t.request("asset", { resourceType: "Script", request: { url: asset, method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(t.close).toHaveBeenCalledOnce()); expect(t.subframes).toEqual([]); expect(t.handler).toHaveBeenCalledOnce();
+    } finally { await t.guard.close(); }
+  });
+  it("counts acknowledged child denials against the unchanged request cap", async () => {
+    const t = await prepared("SOURCE_ROUTING", 2);
+    try {
+      child(t); network(t); t.request("asset", { resourceType: "Script", request: { url: asset, method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(t.subframes).toHaveLength(1));
+      t.request("extra", { resourceType: "Script", request: { url: asset, method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(t.close).toHaveBeenCalledOnce()); expect(t.failures).toEqual(["NATIVE_REDIRECT_INTERCEPT_LIMIT"]);
+      expect(t.handler).toHaveBeenCalledOnce();
+    } finally { await t.guard.close(); }
+  });
+  it.each(["abort-reject", "duplicate", "boundary", "child-navigated", "terminal-wrong-kind", "conflict-after-terminal"])("fails closed on %s while an exact child abort is pending", async mode => {
+    const t = await prepared(), ack = deferred<object>(), send = t.cdp.send.getMockImplementation()!;
+    t.cdp.send.mockImplementation((name, value) => name === "Fetch.failRequest" && value?.requestId === "asset"
+      ? mode === "abort-reject" ? Promise.reject(Error("closed abort failure")) : ack.promise : send(name, value));
+    try {
+      child(t); network(t); t.request("asset", { resourceType: "Script", request: { url: asset, method: "GET", headers: {} } });
+      if (mode === "duplicate") t.request("asset", { resourceType: "Script", request: { url: asset, method: "GET", headers: {} } });
+      if (mode === "child-navigated") child(t, { loaderId: "new-child-loader" });
+      if (mode === "terminal-wrong-kind") t.events.get("Network.loadingFailed")!({ requestId: "network-asset", type: "XHR", errorText: "net::ERR_BLOCKED_BY_CLIENT" });
+      if (mode === "conflict-after-terminal") {
+        t.events.get("Network.loadingFailed")!({ requestId: "network-asset", type: "Script", errorText: "net::ERR_BLOCKED_BY_CLIENT" }); network(t);
+      }
+      const boundary = mode === "boundary" ? t.guard.beginDocumentNavigation(t.main as never).catch(() => {}) : undefined;
+      ack.resolve({}); await boundary;
+      await vi.waitFor(() => expect(t.close).toHaveBeenCalledOnce());
+      expect(t.subframes).toEqual([]); expect(t.handler).toHaveBeenCalledOnce();
+    } finally { ack.resolve({}); await t.guard.close(); }
+  });
+});
+
 describe("fixed caller deny-only uncorrelated POST", () => {
   const url = "https://example.org/public", body = "x".repeat(442);
   const denied = { networkId: undefined, request: { url, method: "POST", headers: { "Content-Type": "application/json" }, hasPostData: true, postData: body } };
@@ -2659,9 +2850,12 @@ describe("native exact request and response ownership", () => {
     const test = await installed();
     try {
       test.request("one"); await test.routes[0].continue(); const promise = test.routes[0].request().response();
+      let completed = false; void promise.then(() => { completed = true; });
+      test.events.get("Network.loadingFinished")!({ requestId: "network-one" });
+      await Promise.resolve(); expect(completed).toBe(false);
       test.response("one", { responseStatusCode: status }); const response = await promise;
       expect(response?.status()).toBe(status); expect(await response?.body()).toEqual(Buffer.alloc(0));
-      expect(test.events.has("Network.responseReceived")).toBe(false); expect(test.events.has("Network.loadingFinished")).toBe(false);
+      expect(test.events.has("Network.responseReceived")).toBe(false);
       expect(test.cdp.send.mock.calls.some(([name]) => name === "Fetch.getResponseBody")).toBe(false);
     } finally { await test.guard.close(); }
   });
@@ -2711,6 +2905,7 @@ describe("native exact request and response ownership", () => {
       const rejected = expect(test.routes[0].request().response()).rejects.toThrow("NATIVE_REDIRECT_RESPONSE_TIMEOUT");
       await vi.advanceTimersByTimeAsync(101); await rejected;
       expect(test.guard.firstFatal).toEqual({ code: "NATIVE_REDIRECT_RESPONSE_TIMEOUT", phase: "RESPONSE_WAIT",
+        operation: "RESPONSE_WAIT", requestUrlSha256: "860ee34a74d6bbff7e13256ff0cb0bdd104fcf2971e96c78d993afc3bb7cf594",
         url: "https://example.org/public.js", method: "GET", resourceType: "script", interceptedRequests: 1,
         recordCount: 1, requestLimit: 256, framePresent: true, rootFrame: true, networkIdPresent: true,
         duplicateRequestId: false, hasPostData: false, postDataPresent: false, postDataBytes: 0 });
@@ -3322,6 +3517,7 @@ describe("native exact request and response ownership", () => {
       } });
       await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce());
       expect(test.guard.firstFatal).toEqual({ code: "NATIVE_REDIRECT_POST_BODY_MISSING", url: "https://example.org/collect", method: "POST", resourceType: "xhr",
+        operation: "REQUEST_METADATA", requestUrlSha256: "c95c13f6859bf61e084f9b8bc977b2c7a02de60bd3d174a3c2fe617ee05f777a",
         interceptedRequests: 1, recordCount: 0, requestLimit: 256, framePresent: true, rootFrame: true, networkIdPresent: true,
         duplicateRequestId: false, hasPostData: true, postDataPresent: false, postDataBytes: 0 });
       const copy = test.guard.firstFatal!; copy.code = "MUTATED_COPY";

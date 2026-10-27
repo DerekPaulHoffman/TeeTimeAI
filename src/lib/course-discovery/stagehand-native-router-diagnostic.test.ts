@@ -1,6 +1,70 @@
 import { expect, it } from "vitest";
-import { createStagehandNativeRouterFailureCapture, projectStagehandNativeRouterFailure, stagehandNativeRouterBooleanKeys, stagehandNativeRouterCodes, stagehandSourceRequestGuards, recordStagehandSourceNavigationFailure, stagehandRedirectRejections } from "./stagehand-native-router-diagnostic";
+import { createStagehandNativeRouterFailureCapture, projectStagehandNativeRouterFailure, stagehandNativeRouterBooleanKeys, stagehandNativeRouterCodes, stagehandSourceRequestGuards, recordStagehandSourceNavigationFailure, stagehandRedirectRejections, classifyNativeRouterError, nativeRouterOperations, nativeRouterErrorNames, nativeRouterErrorCategories, createStagehandHostGuardFailureCapture, stagehandHostGuardReasons } from "./stagehand-native-router-diagnostic";
+import { stagehandSourceDomGuardReason, stagehandNativeFrameDocumentUrl } from "./stagehand-source-browser";
 import { sourceFailureDiagnostic } from "../../../scripts/automation/stagehand/source-diagnostic.mjs";
+it("captures only the first actual closed host guard separately from native failures", () => {
+  for (const [stage, reasons] of Object.entries(stagehandHostGuardReasons)) for (const reason of reasons) {
+    const capture = createStagehandHostGuardFailureCapture();
+    capture.record({ stage, reason } as Parameters<typeof capture.record>[0]);
+    capture.record({ stage: "CHECK", reason: "TERMINAL" });
+    const copy = capture.snapshot()!; copy.reason = "ABORTED";
+    const diagnostic = sourceFailureDiagnostic({ phase: "EVIDENCE", hostGuardFailure: capture.snapshot() });
+    expect(diagnostic.hostGuardFailure).toEqual({ stage, reason });
+    expect(diagnostic.nativeRouterFailure).toBeUndefined();
+  }
+  expect(createStagehandHostGuardFailureCapture().snapshot()).toBeUndefined();
+});
+it("matches the full paired native frame URL including its separately attested fragment", () => {
+  const frame = { id: "private-frame", loaderId: "private-loader", url: "https://public.example.org/" };
+  expect(stagehandSourceDomGuardReason(frame, frame, { url: frame.url }, false)).toBeUndefined();
+  for (const [changed, reason] of [[{ id: "" }, "FRAME_MISSING"], [{ loaderId: "" }, "LOADER_MISSING"]] as const)
+    expect(stagehandSourceDomGuardReason({ ...frame, ...changed }, frame, { url: frame.url }, false)).toBe(reason);
+  for (const [changed, reason] of [[{ id: "another-frame" }, "FRAME_CHANGED"], [{ loaderId: "another-loader" }, "LOADER_CHANGED"], [{ url: "https://public.example.org/next" }, "NATIVE_URL_CHANGED"]] as const)
+    expect(stagehandSourceDomGuardReason(frame, { ...frame, ...changed }, { url: frame.url }, false)).toBe(reason);
+  // Actual CDP shape: Page.Frame.url excludes its separate urlFragment, while
+  // native DOM location.href includes it. Both full values must agree exactly.
+  const native = { ...frame, urlFragment: "#public-section" }, dom = { url: frame.url + "#public-section" };
+  expect(stagehandSourceDomGuardReason(native, native, dom, false)).toBeUndefined();
+  expect(stagehandSourceDomGuardReason(native, native, dom, true)).toBeUndefined();
+  expect(stagehandSourceDomGuardReason(native, { ...native, urlFragment: "#changed" }, dom, false)).toBe("NATIVE_URL_CHANGED");
+  expect(stagehandSourceDomGuardReason(native, { ...native, urlFragment: "#changed" }, dom, true)).toBe("NATIVE_URL_CHANGED");
+  expect(stagehandSourceDomGuardReason(native, native, { url: frame.url }, false)).toBe("DOM_URL_CHANGED");
+  expect(stagehandSourceDomGuardReason(native, native, { url: frame.url + "#unobserved" }, false)).toBe("DOM_URL_CHANGED");
+  for (const url of ["https://foreign.example.org/", frame.url + "next", frame.url + "?changed=1"])
+    expect(stagehandSourceDomGuardReason(native, { ...native, url }, dom, false)).toBe("NATIVE_URL_CHANGED");
+  for (const changed of [{ id: "foreign-frame" }, { loaderId: "new-loader" }])
+    expect(stagehandSourceDomGuardReason(native, { ...native, ...changed }, dom, false)).not.toBeUndefined();
+  const capture = createStagehandHostGuardFailureCapture();
+  capture.record({ stage: "SOURCE_DOM", reason: "DOM_URL_CHANGED", nativeFrameHasFragment: true, domHasFragment: true });
+  expect(sourceFailureDiagnostic({ hostGuardFailure: capture.snapshot() }).hostGuardFailure).toEqual(capture.snapshot());
+});
+it("reconstructs only valid native frame fragment fields without stripping or guessing", () => {
+  const url = "https://public.example.org/path?view=public";
+  for (const fragment of [undefined, "", "#public-section", "#"])
+    expect(stagehandNativeFrameDocumentUrl({ url, ...(fragment === undefined ? {} : { urlFragment: fragment }) })).toBe(url + (fragment ?? ""));
+  expect(stagehandNativeFrameDocumentUrl({ url: url + "#already-complete" })).toBe(url + "#already-complete");
+  for (const frame of [{ url, urlFragment: null }, { url, urlFragment: 7 }, { url, urlFragment: "missing-hash" },
+    { url, urlFragment: "#bad\nfragment" }, { url, urlFragment: "#" + "x".repeat(2048) },
+    { url: url + "#first", urlFragment: "#first" }, { url: url + "#first", urlFragment: "" },
+    { url: "https://user:private@public.example.org/", urlFragment: "#public" },
+    { url: "javascript:void(0)", urlFragment: "#public" }, { url: "about:blank", urlFragment: "#public" },
+    { url: "https://public.example.org", urlFragment: "#public" }, { url: "https://public.example.org/\n", urlFragment: "#public" }])
+    expect(stagehandNativeFrameDocumentUrl(frame)).toBeUndefined();
+  // Neither a forged DOM fragment nor an invalid native fragment repairs the
+  // other side. The same native source must attest both captures exactly.
+  const native = { id: "frame", loaderId: "loader", url, urlFragment: "not-a-fragment" };
+  expect(stagehandSourceDomGuardReason(native, native, { url: url + "#from-dom" }, false)).toBe("NATIVE_URL_CHANGED");
+});
+it("carries only finite operation and exception facts through both native diagnostic projections", () => {
+  for (const operation of nativeRouterOperations) for (const errorName of nativeRouterErrorNames) for (const errorCategory of nativeRouterErrorCategories) {
+    const projected = projectStagehandNativeRouterFailure("NATIVE_REDIRECT_ROUTING_FAILED", { operation, errorName, errorCategory,
+      requestUrlSha256: "a".repeat(64), message: "PRIVATE", headers: { cookie: "PRIVATE" } });
+    expect(sourceFailureDiagnostic({ nativeRouterFailure: projected }).nativeRouterFailure).toEqual(projected);
+  }
+  expect(projectStagehandNativeRouterFailure("NATIVE_REDIRECT_ROUTING_FAILED", { operation: "PRIVATE", errorName: "PRIVATE", errorCategory: "PRIVATE", requestUrlSha256: "PRIVATE" })).toEqual({ code: "NATIVE_REDIRECT_ROUTING_FAILED" });
+  expect(classifyNativeRouterError(new TypeError("PRIVATE https://private.example/?secret=PRIVATE"))).toEqual({ errorName: "TypeError", errorCategory: "UNKNOWN" });
+  expect(classifyNativeRouterError(Error("Protocol error: No data found for resource with given identifier PRIVATE"))).toEqual({ errorName: "Error", errorCategory: "BODY_UNAVAILABLE" });
+});
 it("preserves every closed redirect rejection before cleanup and strips forged or unrelated reasons", () => {
   for (const redirectRejection of stagehandRedirectRejections) {
     const capture = createStagehandNativeRouterFailureCapture();

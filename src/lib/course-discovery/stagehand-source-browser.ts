@@ -4,8 +4,9 @@ import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { launchPublicReadBrowser, ownedPublicBrowserCdp } from "./public-browser-launch";
 import { connectOwnedSourceCdp, type OwnedCdpSession, type OwnedCdpFailure } from "./stagehand-owned-cdp";
-import { createStagehandNativeRouterFailureCapture, recordStagehandSourceNavigationFailure, type StagehandSourceRequestGuard } from "./stagehand-native-router-diagnostic";
+import { createStagehandNativeRouterFailureCapture, createStagehandHostGuardFailureCapture, recordStagehandSourceNavigationFailure, type StagehandSourceRequestGuard, type StagehandHostGuardFailure } from "./stagehand-native-router-diagnostic";
 import { uniqueNativeSupportedSource, type NativeSourceChoiceCapture } from "./native-source-choice";
+import { collectPublicRootWidget, pairedNativeRootWidget, publicRootWidgetKind, type PublicRootWidgetFacts } from "./public-root-widget";
 import { collectPublicBookingLinks, uniqueNativePublicBookingIntermediary, uniquePublicBookingIntermediary, type PublicBookingLinks, type NativeIntermediaryPreparationDiagnostic } from "./public-booking-intermediary";
 import { createNativePublicBrowserProxy, continueNativeBrowserRead, isObservedNativeRedirect, nativeReadPreflightMethod, type NativePublicProxyDependencies } from "./native-public-browser";
 import { installNativeRedirectRouting, authorizePublicClientReadHeaders, isCurrentPublicClientReadHeaders, nativePublicClientPreflightMethod,
@@ -53,7 +54,7 @@ export const stagehandNativeSourceDomExpression = `(() => {
     sourceLinkIndexes: links.slice(0, 160).map((element, index) => sourceVisible(element) ? index : -1).filter(index => index >= 0),
     sourceFrameIndexes: frames.slice(0, 24).map((element, index) => sourceVisible(element) ? index : -1).filter(index => index >= 0),
     linksOverflow: links.length > 160, framesOverflow: frames.length > 24,
-    publicBookingLinks: (${collectPublicBookingLinks.toString()})() });
+    publicBookingLinks: (${collectPublicBookingLinks.toString()})(), rootWidget: (${collectPublicRootWidget.toString()})() });
 })()`;
 // Fixed controller source, never caller/model/site JavaScript. Install only on
 // the owned public context; the packaged SDK extension context is untouched.
@@ -107,6 +108,21 @@ export function sameStagehandDocumentReadUrl(requestUrl: unknown, documentUrl: u
   if (typeof requestUrl !== "string" || typeof documentUrl !== "string") return false;
   return requestUrl.split("#", 1)[0] === documentUrl.split("#", 1)[0];
 }
+/** Native Page.Frame.url omits its separately supplied urlFragment. Recombine
+ * only those native fields; DOM text can neither supply nor repair them. */
+export function stagehandNativeFrameDocumentUrl(frame: Record<string, unknown>): string | undefined {
+  const url = frame.url, fragment = frame.urlFragment;
+  if (typeof url !== "string" || !url || url.length > 2048 || /[\u0000-\u0020\u007f]/u.test(url) ||
+      fragment !== undefined && (typeof fragment !== "string" || fragment.length > 2048 || /[\u0000-\u0020\u007f]/u.test(fragment) ||
+        fragment !== "" && !fragment.startsWith("#") || url.includes("#"))) return;
+  const combined = url + (fragment ?? "");
+  if (combined.length > 2048) return;
+  try {
+    const parsed = new URL(combined);
+    if (!["https:", "http:"].includes(parsed.protocol) || parsed.username || parsed.password || parsed.href !== combined) return;
+    return combined;
+  } catch { return; }
+}
 export function stagehandSourceBrowserMode(platform: NodeJS.Platform = process.platform) {
   // Extensions require the full browser's new headless mode. A bare headless
   // launch selects Playwright's extension-less chromium-headless-shell.
@@ -130,6 +146,15 @@ export async function ownedStagehandExtension() {
 
 /** This browser is source-routing only. It has no adapter/proof/recipe/backend mutation surface.
  * Its private CDP attachment belongs only to the trusted SDK driver, never model data. */
+export function stagehandSourceDomGuardReason(start: Record<string, unknown>, end: Record<string, unknown>, observed: Record<string, unknown>, readinessOnly: boolean): Extract<StagehandHostGuardFailure, { stage: "SOURCE_DOM" }>["reason"] | undefined {
+  if (typeof start.id !== "string" || !start.id) return "FRAME_MISSING";
+  if (typeof start.loaderId !== "string" || !start.loaderId) return "LOADER_MISSING";
+  if (start.id !== end.id) return "FRAME_CHANGED";
+  if (start.loaderId !== end.loaderId) return "LOADER_CHANGED";
+  const startUrl = stagehandNativeFrameDocumentUrl(start), endUrl = stagehandNativeFrameDocumentUrl(end);
+  if (!startUrl || !endUrl || startUrl !== endUrl) return "NATIVE_URL_CHANGED";
+  if (readinessOnly ? !sameStagehandDocumentReadUrl(observed.url, endUrl) : observed.url !== endUrl) return "DOM_URL_CHANGED";
+}
 export async function createGuardedStagehandSourceBrowser(input: { initialUrl: string; timeZone: string; deadlineAt: Date; signal?: AbortSignal }, deps: Dependencies) {
   const initialUrl = canonicalStagehandHostEntry(input.initialUrl);
   if (typeof deps.requestLease !== "function") throw reject();
@@ -148,6 +173,7 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
   const intermediaryUrls = new Set<string>(), officialOrigins = new Set([new URL(input.initialUrl).origin]);
   let intermediaryAttempt = 0, intermediaryPreparation: NativeIntermediaryPreparationDiagnostic | undefined;
   const nativeFailure = createStagehandNativeRouterFailureCapture();
+  const hostGuardFailure = createStagehandHostGuardFailureCapture();
   let ownedPageCrashObserved = false, ownedPageCloseObserved = false, contextClosedObserved = false;
   let socketBoundaryState: { browserConnectedAtFailure: boolean; ownedPageCrashObserved: boolean; ownedPageCloseObserved: boolean; contextClosedObserved: boolean } | undefined;
   const cdpFailure = () => {
@@ -157,7 +183,12 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
   let browser: Browser | undefined, context: BrowserContext | undefined, cdp: Awaited<ReturnType<typeof connectOwnedSourceCdp>> | undefined;
   let contextId = "", targetId = "", closing: Promise<{ browserClosed: boolean; providerRequestsDrained: boolean; ownedCdpFailure?: OwnedCdpFailure }> | undefined;
   let closed = false, terminal = false, intercepted = 0, admitted = 0, rejected = 0, bytes = 0, popupCount = 0, deniedWorkers = 0;
-  const check = () => { signal.throwIfAborted(); if (closed || terminal) throw reject(); };
+  const guardFailure = (value: StagehandHostGuardFailure) => { if (!closed && !closing) hostGuardFailure.record(value); };
+  const check = () => {
+    if (signal.aborted) guardFailure({ stage: "CHECK", reason: "ABORTED" });
+    signal.throwIfAborted();
+    if (closed || terminal) { guardFailure({ stage: "CHECK", reason: closed ? "CLOSED" : "TERMINAL" }); throw reject(); }
+  };
   const close = () => closing ??= (async () => {
     // Preserve only facts observed before teardown; cleanup RPCs cannot become
     // this attempt's recorded protocol failure.
@@ -432,10 +463,11 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
       item.page = { context: () => ({ newCDPSession: async () => routedSession as unknown as CDPSession }), mainFrame: () => frame,
         close: async () => { await root.send("Target.closeTarget", { targetId: item.id }).catch(() => {}); } } as unknown as Page;
       child.on("Page.frameNavigated", value => { const changed = record(value.frame); if (!changed.parentId && typeof changed.id === "string" && typeof changed.url === "string") {
+        const currentUrl = stagehandNativeFrameDocumentUrl(changed) ?? (changed.url === "about:blank" && changed.urlFragment === undefined ? changed.url : "");
         anchorIntents.delete(item.id);
         for (const entry of popupReads.values()) if (entry.nativeDocument && (changed.id !== entry.nativeDocument.frameId ||
-            changed.loaderId !== entry.nativeDocument.loaderId || changed.url !== entry.nativeDocument.currentUrl)) entry.readinessRetired = true;
-        item.mainFrameId = changed.id; item.mainLoaderId = typeof changed.loaderId === "string" ? changed.loaderId : undefined; item.currentUrl = changed.url;
+            changed.loaderId !== entry.nativeDocument.loaderId || currentUrl !== entry.nativeDocument.currentUrl)) entry.readinessRetired = true;
+        item.mainFrameId = changed.id; item.mainLoaderId = typeof changed.loaderId === "string" ? changed.loaderId : undefined; item.currentUrl = currentUrl;
       } });
       child.on("Page.navigatedWithinDocument", value => { if (typeof item.mainFrameId === "string" && value.frameId === item.mainFrameId && typeof value.url === "string") {
         anchorIntents.delete(item.id); item.currentUrl = value.url;
@@ -498,11 +530,13 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
       await requireDeniedStagehandTargetClosed(root, String(info.targetId));
     const assertGuardedTargets = async (ids: string[]) => {
       check();
-      if (!Array.isArray(ids) || !ids.length || ids.length > 8 || new Set(ids).size !== ids.length) return false;
-      if (ids.some(id => !targets.has(id))) return false;
+      if (!Array.isArray(ids) || !ids.length || ids.length > 8 || new Set(ids).size !== ids.length) { guardFailure({ stage: "GUARDED_TARGETS", reason: "IDS_INVALID" }); return false; }
+      if (ids.some(id => !targets.has(id))) { guardFailure({ stage: "GUARDED_TARGETS", reason: "TARGET_MISSING" }); return false; }
       await Promise.all(ids.map(id => targets.get(id)!.ready)); check();
       const live = ((await root.send("Target.getTargets")).targetInfos as Array<Record<string, unknown>>) ?? [];
-      return ids.every(id => targets.get(id)?.installed === true && live.some(info => info.targetId === id && info.type === "page" && info.browserContextId === contextId));
+      const guarded = ids.every(id => targets.get(id)?.installed === true && live.some(info => info.targetId === id && info.type === "page" && info.browserContextId === contextId));
+      if (!guarded) guardFailure({ stage: "GUARDED_TARGETS", reason: "TARGET_NOT_ATTESTED" });
+      return guarded;
     };
     const captureSourceDom = async (id: string, readinessOnly = false) => {
       if (!await assertGuardedTargets([id])) throw reject();
@@ -510,27 +544,35 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
       const start = record((await target.cdp.send("Page.getFrameTree")).frameTree), startFrame = record(start.frame);
       const result = await target.cdp.send("Runtime.evaluate", { expression: stagehandNativeSourceDomExpression, returnByValue: true });
       const value = record(result.result).value;
-      if (typeof value !== "string" || value.length > 400_000) throw reject();
-      const observed = record(JSON.parse(value));
+      if (typeof value !== "string" || value.length > 400_000) { guardFailure({ stage: "SOURCE_DOM", reason: "VALUE_INVALID" }); throw reject(); }
+      let observed: Record<string, unknown>;
+      try { observed = record(JSON.parse(value)); } catch (error) { guardFailure({ stage: "SOURCE_DOM", reason: "JSON_INVALID" }); throw error; }
       const end = record((await target.cdp.send("Page.getFrameTree")).frameTree), endFrame = record(end.frame);
       check();
+      const startDocumentUrl = stagehandNativeFrameDocumentUrl(startFrame), endDocumentUrl = stagehandNativeFrameDocumentUrl(endFrame);
       if (typeof startFrame.id !== "string" || !startFrame.id || typeof startFrame.loaderId !== "string" || !startFrame.loaderId ||
-          startFrame.id !== endFrame.id || startFrame.loaderId !== endFrame.loaderId || startFrame.url !== endFrame.url ||
-          (readinessOnly ? !sameStagehandDocumentReadUrl(observed.url, endFrame.url) : observed.url !== endFrame.url)) throw reject();
+          startFrame.id !== endFrame.id || startFrame.loaderId !== endFrame.loaderId || !startDocumentUrl || !endDocumentUrl || startDocumentUrl !== endDocumentUrl ||
+          (readinessOnly ? !sameStagehandDocumentReadUrl(observed.url, endDocumentUrl) : observed.url !== endDocumentUrl)) {
+        const reason = stagehandSourceDomGuardReason(startFrame, endFrame, observed, readinessOnly);
+        if (reason) guardFailure({ stage: "SOURCE_DOM", reason,
+          nativeFrameHasFragment: typeof endFrame.url === "string" && endFrame.url.includes("#") || typeof endFrame.urlFragment === "string" && endFrame.urlFragment.startsWith("#"),
+          domHasFragment: typeof observed.url === "string" && observed.url.includes("#") });
+        throw reject();
+      }
       // The popup may commit before its listener is installed. Only this paired
       // native root capture can initialize its frame/loader, never DOM alone.
       if (target.mainFrameId === undefined) {
-        target.mainFrameId = startFrame.id; target.mainLoaderId = startFrame.loaderId; target.currentUrl = String(startFrame.url);
+        target.mainFrameId = startFrame.id; target.mainLoaderId = startFrame.loaderId; target.currentUrl = startDocumentUrl;
       }
       if (!target.popupReadinessRetired) for (const entry of target.popupReads?.values() ?? []) {
         if (!entry.readinessRetired && !entry.nativeDocument && entry.method === "GET" && entry.frameId === startFrame.id &&
-            entry.url === startFrame.url && target.currentUrl === startFrame.url && target.mainFrameId === startFrame.id && target.mainLoaderId === startFrame.loaderId) {
+            entry.url === startDocumentUrl && target.currentUrl === startDocumentUrl && target.mainFrameId === startFrame.id && target.mainLoaderId === startFrame.loaderId) {
           // Inert until that exact read's unchanged response ACK and queue drain.
           entry.nativeDocument = { frameId: startFrame.id, loaderId: startFrame.loaderId, currentUrl: entry.url };
         }
       }
-      return { target, observed, frameId: startFrame.id, loaderId: startFrame.loaderId, documentIdentityHash: createHash("sha256").update(JSON.stringify([startFrame.id,startFrame.loaderId,startFrame.url])).digest("hex"),
-        documentHash: createHash("sha256").update(JSON.stringify([startFrame.id, startFrame.loaderId, startFrame.url, value])).digest("hex") };
+      return { target, observed, frameId: startFrame.id, loaderId: startFrame.loaderId, documentIdentityHash: createHash("sha256").update(JSON.stringify([startFrame.id,startFrame.loaderId,startDocumentUrl])).digest("hex"),
+        documentHash: createHash("sha256").update(JSON.stringify([startFrame.id, startFrame.loaderId, startDocumentUrl, value])).digest("hex") };
     };
     const frameWitness = (capture: Awaited<ReturnType<typeof captureSourceDom>>, selected?: string) => ({
       kind: "NATIVE_VISIBLE_FRAME" as const, pageUrl: capture.observed.url as string, observedAt: new Date().toISOString(), documentHash: capture.documentHash,
@@ -604,6 +646,26 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
         const startedAt = Date.now(), first = sourceChoiceCapture(await captureSourceDom(id));
         const second = sourceChoiceCapture(await captureSourceDom(id)); check();
         return uniqueNativeSupportedSource(first, second, { startedAt, now: Date.now(), deadline: input.deadlineAt.getTime() });
+      },
+      async observeRootPublicWidget(id: string) {
+        if (id !== targetId) return null;
+        const startedAt = Date.now();
+        const capture = async () => {
+          const value = await captureSourceDom(id), request = value.target.documentRequest;
+          if (!request || request.method() !== "GET" || !sourceSettled(value) || value.target.documentStatus !== 200 ||
+              !isSafeRecipeUrl(String(value.observed.url)) || transactionUrl(String(value.observed.url)) ||
+              !value.target.router?.isCurrentCompletedDocumentRead(request, value.target.frame,
+                { frameId: value.frameId, loaderId: value.loaderId, url: String(value.observed.url) })) return null;
+          const root = new URL(request.url()), current = new URL(String(value.observed.url));
+          if (root.origin !== current.origin || root.pathname !== current.pathname || root.search !== current.search ||
+              request.url() !== initialUrl && !attestedNativeDocumentRedirects(request, new Set([initialUrl]))) return null;
+          return { pageUrl: current.href, observedAt: Date.now(), documentHash: value.documentHash, documentIdentityHash: value.documentIdentityHash,
+            settled: true, widget: value.observed.rootWidget as PublicRootWidgetFacts };
+        };
+        const first = await capture();
+        if (!first || !publicRootWidgetKind(first.widget)) return null;
+        const second = await capture(); check(); if (!second) return null;
+        return pairedNativeRootWidget(first, second, { startedAt, now: Date.now(), deadline: input.deadlineAt.getTime() });
       },
       async preparePublicBookingIntermediary(id: string) {
         const diagnostic: NativeIntermediaryPreparationDiagnostic = { attempt: ++intermediaryAttempt, stage: "BEGIN", reason: null,
@@ -692,7 +754,11 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
         const capture = await captureSourceDom(id), { observed } = capture;
         popupGrants.delete(id); anchorIntents.delete(id);
         if (actionHref !== undefined) {
-          if (typeof actionHref !== "string" || !Array.isArray(observed.links) || !observed.links.includes(actionHref) || !isSafeRecipeUrl(actionHref) || transactionUrl(actionHref)) throw reject();
+          if (typeof actionHref !== "string" || !Array.isArray(observed.links) || !observed.links.includes(actionHref) || !isSafeRecipeUrl(actionHref) || transactionUrl(actionHref)) {
+            const reason = typeof actionHref !== "string" ? "HREF_SHAPE" : !Array.isArray(observed.links) ? "LINK_INVENTORY_MISSING" :
+              !observed.links.includes(actionHref) ? "HREF_NOT_OBSERVED" : !isSafeRecipeUrl(actionHref) ? "HREF_URL_POLICY" : "HREF_TRANSACTION";
+            guardFailure({ stage: "BEFORE_ACTION", reason }); throw reject();
+          }
           popupGrants.set(id, { url: actionHref, until: Math.min(input.deadlineAt.getTime(), Date.now() + 5000), used: false });
           // A native anchor event may become either a same-document transition
           // or a real GET. Do not retire the source before Chrome decides.
@@ -701,7 +767,7 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
         }
         for (const url of [...(Array.isArray(observed.links) ? observed.links : []), ...(Array.isArray(observed.frames) ? observed.frames : [])])
           if (typeof url === "string" && isSafeRecipeUrl(url) && !transactionUrl(url)) { allowed.add(url); roots.add(url); }
-        if (allowed.size > 512) throw reject();
+        if (allowed.size > 512) { guardFailure({ stage: "BEFORE_ACTION", reason: "OBSERVED_URL_LIMIT" }); throw reject(); }
         if (actionHref !== undefined) return {
           kind: "NATIVE_VISIBLE_DOM" as const, pageUrl: observed.url as string, observedAt: new Date().toISOString(),
           // Bind the stable native document identity and observed public DOM;
@@ -715,6 +781,7 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
         initialization: [...targets.values()].map(target => target.initialization), deniedWorkerTargets: deniedWorkers, popupCount, activeRequests: activeReads.size, terminalFailure: terminal, closed }),
       snapshotFailure: () => cdpFailure(),
       snapshotFailures: () => ({ ownedCdpFailure: cdpFailure(), nativeRouterFailure: nativeFailure.snapshot(),
+        ...(hostGuardFailure.snapshot() ? { hostGuardFailure: hostGuardFailure.snapshot() } : {}),
         ...(intermediaryPreparation ? { nativeIntermediaryPreparation: structuredClone(intermediaryPreparation) } : {}) }),
       async close() { signal.removeEventListener("abort", abort); return close(); },
     };

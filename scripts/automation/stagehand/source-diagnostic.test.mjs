@@ -1,6 +1,34 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { projectSourceDiagnostic, projectActionGuardDiagnostic, sourceFailureDiagnostic, captureModelFailure, classifyNavigationError, SOURCE_DIAGNOSTIC_MAX_BYTES, stagehandRedirectRejections } from './source-diagnostic.mjs';
+import { projectSourceDiagnostic, projectActionGuardDiagnostic, sourceFailureDiagnostic, captureModelFailure, classifyNavigationError, SOURCE_DIAGNOSTIC_MAX_BYTES, stagehandRedirectRejections, projectNativeRouterFailure, safeNativeRouterFailure, projectHostGuardFailure, hostGuardReasons } from './source-diagnostic.mjs';
+
+test('host guards retain only exact closed stage/reason pairs and optional DOM fragment presence',()=>{
+ for(const[stage,reasons]of Object.entries(hostGuardReasons))for(const reason of reasons){
+  const failure={stage,reason};assert.deepEqual(projectHostGuardFailure(failure),failure);
+  const d=sourceFailureDiagnostic({hostGuardFailure:failure});assert.deepEqual(d.hostGuardFailure,failure);assert.equal(d.nativeRouterFailure,undefined);
+  assert.deepEqual(projectSourceDiagnostic(d),d);
+ }
+ const dom={stage:'SOURCE_DOM',reason:'DOM_URL_CHANGED',nativeFrameHasFragment:true,domHasFragment:true};
+ assert.deepEqual(projectHostGuardFailure(dom),dom);
+ for(const raw of [{stage:'PRIVATE',reason:'DOM_URL_CHANGED'},{stage:'CHECK',reason:'DOM_URL_CHANGED'},
+  {...dom,reason:'PRIVATE'},{...dom,url:'https://private.example/?PRIVATE'},{...dom,domHasFragment:'PRIVATE'},
+  {stage:'CHECK',reason:'ABORTED',nativeFrameHasFragment:true}]){
+  assert.equal(projectHostGuardFailure(raw),undefined);assert.equal(sourceFailureDiagnostic({hostGuardFailure:raw}).hostGuardFailure,undefined);
+ }
+ assert.equal(sourceFailureDiagnostic({}).hostGuardFailure,undefined);
+});
+
+test('current native exception facts strip private text while durable schema rejects unknown or injected fields',()=>{
+ const raw={code:'NATIVE_REDIRECT_ROUTING_FAILED',operation:'RESPONSE_BODY',errorName:'Error',errorCategory:'BODY_UNAVAILABLE',requestUrlSha256:'a'.repeat(64),
+  method:'GET',resourceType:'stylesheet',url:'https://private.example/?token=PRIVATE',message:'PRIVATE',headers:{cookie:'PRIVATE'}};
+ const closed=projectNativeRouterFailure(raw);
+ assert.deepEqual(closed,{code:raw.code,operation:raw.operation,errorName:raw.errorName,errorCategory:raw.errorCategory,requestUrlSha256:raw.requestUrlSha256,method:raw.method,resourceType:raw.resourceType});
+ assert.deepEqual(safeNativeRouterFailure(closed),closed);
+ for(const delta of[{operation:'PRIVATE'},{errorName:'PRIVATE'},{errorCategory:'PRIVATE'},{requestUrlSha256:'PRIVATE'},{headers:{cookie:'PRIVATE'}}])assert.equal(safeNativeRouterFailure({...closed,...delta}),undefined);
+ assert.equal(projectNativeRouterFailure(undefined),undefined);
+ assert.deepEqual(projectNativeRouterFailure({code:'NATIVE_REDIRECT_ROUTING_FAILED',operation:'PRIVATE',errorName:'PRIVATE',requestUrlSha256:'PRIVATE'}),{code:'NATIVE_REDIRECT_ROUTING_FAILED'});
+ assert.doesNotMatch(JSON.stringify(closed),/PRIVATE|https:|cookie|headers|message/u);
+});
 test('redirect rejection is one closed scoped enum and arbitrary/foreign/private fields cannot enter diagnostics',()=>{
  for(const redirectRejection of stagehandRedirectRejections){
   const native={code:'NATIVE_REDIRECT_PROVENANCE_REJECTED',phase:'REDIRECT_PROVENANCE',redirectRejection,method:'GET',resourceType:'xhr'};

@@ -108,6 +108,51 @@ it("attests a unique native public source without dispatching provider frames an
   } finally { controller.abort(); await host?.close(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
 }, 60_000);
 
+it.each(["CALENDAR", "SERVICE_CATALOG"] as const)("attests only the current completed initial root widget, including a real initial redirect and same-document fragment (%s)", async widgetKind => {
+  const root = "https://owned-root.example/", alias = "https://owned-root-alias.example/", controller = new AbortController();
+  const deadlineAt = new Date(Date.now() + 60_000), originalDeadline = deadlineAt.getTime(), reads: string[] = [];
+  let active = 0, acquired = 0, released = 0, foreign = 0;
+  const widget = widgetKind === "SERVICE_CATALOG" ? '<main><div><h3>Public golf rentals</h3>' + [1, 2, 3].map(hours =>
+    `<div><h4>${hours} Hour Public Practice</h4><p>${hours === 1 ? '1 hr' : `${hours - 1} hr 55 mins`}</p><p>People in your party are welcome. Reset time is separate.</p><span role="button" aria-haspopup="menu"><span role="button" aria-haspopup="menu">More</span></span><div><button type="button">BOOK</button></div></div>`).join("") + '</div><a href="/operator/">Operator</a></main>' : '<main><h1>Public golf availability</h1><div role="grid">' +
+    ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map(day => '<span role="columnheader">' + day + '</span>').join("") +
+    Array.from({ length: 14 }, (_, i) => '<button type="button" role="gridcell">' + (i + 1) + '</button>').join("") + '</div><a href="/operator/">Operator</a></main>';
+  const server = createServer({ key: certificate("fixtureKey"), cert: certificate("fixtureCertificate") }, (request, response) => {
+    reads.push(request.method + " " + request.headers.host + request.url);
+    if (request.headers.host === "owned-root.example") { response.writeHead(302, { location: alias }).end(); return; }
+    response.writeHead(200, { "content-type": "text/html" }).end('<!doctype html><link rel="icon" href="data:,">' + widget);
+  });
+  let host: Awaited<ReturnType<typeof createGuardedStagehandSourceBrowser>> | undefined, attached: Browser | undefined;
+  try {
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address(); if (!address || typeof address === "string") throw Error("OWNED_FIXTURE_UNAVAILABLE");
+    host = await createGuardedStagehandSourceBrowser({ initialUrl: root, timeZone: "UTC", deadlineAt, signal: controller.signal }, {
+      requestLease: async (_family, work) => { active++; acquired++; try { return { acquired: true, value: await work() }; } finally { active--; released++; } },
+      proxyDependencies: { resolveAddresses: async name => { if (!["owned-root.example", "owned-root-alias.example"].includes(name)) { foreign++; throw Error("NOT_OWNED_FIXTURE"); } return [{ address: "93.184.216.34", family: 4 }]; }, connect: () => connect({ host: "127.0.0.1", port: address.port }) },
+      launchBrowser: options => launchPublicReadBrowser({ ...options, args: [...options.args ?? [], "--ignore-certificate-errors"] }, { localCdp: true }), contextOptions: { ignoreHTTPSErrors: true },
+    });
+    attached = await chromium.connectOverCDP(host.cdpUrl); const page = attached.contexts().flatMap(context => context.pages())[0];
+    await host.prepareNavigation(root); await page.goto(root, { waitUntil: "load" });
+    await expect.poll(() => host!.observeSourceReadiness(host!.targetId)).toMatchObject({ mainDocumentStatus: 200, mainDocumentCurrent: true, mainReadPending: false, pendingReads: 0 });
+    const before = [...reads], leases = acquired;
+    expect(await host.observeRootPublicWidget(host.targetId)).toMatchObject({ kind: "NATIVE_ROOT_PUBLIC_WIDGET", pageUrl: alias, widgetKind });
+    await page.evaluate(() => history.pushState({}, "", "#public-calendar"));
+    expect(await host.observeRootPublicWidget(host.targetId)).toMatchObject({ pageUrl: alias + "#public-calendar" });
+    await page.evaluate(() => history.pushState({}, "", "?different=1"));
+    expect(await host.observeRootPublicWidget(host.targetId)).toBeNull();
+    await page.evaluate(() => history.replaceState({}, "", "/"));
+    await page.evaluate(() => { document.querySelector("main")!.setAttribute("inert", ""); });
+    expect(await host.observeRootPublicWidget(host.targetId)).toBeNull();
+    await page.evaluate(() => { document.querySelector("main")!.removeAttribute("inert"); });
+    expect(await host.observeRootPublicWidget("foreign-target")).toBeNull();
+    expect(reads).toEqual(before); expect(acquired).toBe(leases);
+    await host.beforeAction(host.targetId, alias + "operator/");
+    await page.locator('a[href="/operator/"]').click(); await page.waitForLoadState("load");
+    expect(await host.observeRootPublicWidget(host.targetId)).toBeNull();
+    expect(deadlineAt.getTime()).toBe(originalDeadline); expect(Date.now()).toBeLessThan(originalDeadline); expect(foreign).toBe(0);
+    expect(await host.close()).toMatchObject({ browserClosed: true, providerRequestsDrained: true }); expect(active).toBe(0); expect(acquired).toBe(released);
+  } finally { controller.abort(); await host?.close(); await attached?.close().catch(() => {}); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
+}, 60_000);
+
 it("renders a public source from an anonymous cross-host fetch redirect under the destination lease and rejects private or transactional reads", async () => {
   const rootUrl = "https://owned-source.example/", bootstrapUrl = "https://owned-bootstrap.example/catalog.json";
   // This existing anonymous metadata role intentionally has a broader URL
@@ -189,6 +234,131 @@ it("renders a public source from an anonymous cross-host fetch redirect under th
     controller.abort(); await attached?.close().catch(() => {}); await host?.close();
     server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
   }
+}, 60_000);
+
+it("renders a current public service catalog from four exact anonymous metadata GETs and correlated content-type preflights", async () => {
+  const root = "https://owned-catalog.example/", account = "11111111-2222-4333-8444-555555555555";
+  const urls = [`https://api.ola.godaddy.com/accounts/${account}/config`, `https://api.ola.godaddy.com/accounts/${account}/hivemind`,
+    `https://api.ola.godaddy.com/v3/accounts/${account}/services?per_page=80&with_category_ids=true`, `https://api.ola.godaddy.com/v2/accounts/${account}/categories`];
+  const hosts = new Set(["owned-catalog.example", "api.ola.godaddy.com"]), controller = new AbortController();
+  const deadlineAt = new Date(Date.now() + 60_000), originalDeadline = deadlineAt.getTime();
+  const seen: { url: string; method: string; requestedMethod?: string; requestedHeaders?: string; authorization: boolean; cookie: boolean }[] = [], families = new Set<string>(), leaseFamilies: string[] = [];
+  let active = 0, acquired = 0, released = 0, maximumActive = 0, unleased = 0, unexpectedLookup = 0;
+  const server = createServer({ key: certificate("fixtureKey"), cert: certificate("fixtureCertificate") }, (request, response) => {
+    const name = (request.headers.host ?? "").split(":")[0], url = "https://" + name + (request.url ?? "/");
+    seen.push({ url, method: request.method ?? "", requestedMethod: request.headers["access-control-request-method"] as string | undefined,
+      requestedHeaders: request.headers["access-control-request-headers"] as string | undefined, authorization: request.headers.authorization !== undefined, cookie: request.headers.cookie !== undefined });
+    if (!families.has(requestFamilyForUrl(url))) unleased++;
+    if (!hosts.has(name)) { response.writeHead(403).end(); return; }
+    if (url !== root) {
+      const cors = { "access-control-allow-origin": root.slice(0, -1), "access-control-allow-methods": "GET", "access-control-allow-headers": "content-type" };
+      if (!urls.includes(url)) { response.writeHead(403, cors).end(); return; }
+      if (request.method === "OPTIONS") { response.writeHead(204, cors).end(); return; }
+      response.writeHead(200, { ...cors, "content-type": "application/json" }).end(JSON.stringify({ complete: true, empty: true, hours: [1, 2, 3] })); return;
+    }
+    response.writeHead(200, { "content-type": "text/html" }).end(`<!doctype html><link rel="icon" href="data:,"><main><h1>Loading public golf services</h1></main><script>
+      (async()=>{let catalog;for(const url of ${JSON.stringify(urls)})catalog=await fetch(url,{credentials:'omit',headers:{'content-type':'application/json'}}).then(response=>response.json());
+      const main=document.querySelector('main');main.innerHTML='<h3>Public golf rentals</h3>'+catalog.hours.map(hours=>'<div><h4>'+hours+' Hour Public Practice</h4><p>'+hours+' hr</p><p>Public hourly golf rental</p><button type="button">BOOK</button></div>').join('');})();
+      </script>`);
+  });
+  let host: Awaited<ReturnType<typeof createGuardedStagehandSourceBrowser>> | undefined, attached: Browser | undefined;
+  try {
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address(); if (!address || typeof address === "string") throw Error("OWNED_FIXTURE_UNAVAILABLE");
+    host = await createGuardedStagehandSourceBrowser({ initialUrl: root, timeZone: "UTC", deadlineAt, signal: controller.signal }, {
+      requestLease: async (family, work) => {
+        if (active >= 2 || families.has(family)) return { acquired: false };
+        active++; acquired++; maximumActive = Math.max(maximumActive, active); families.add(family); leaseFamilies.push(family);
+        try { return { acquired: true, value: await work() }; } finally { active--; released++; families.delete(family); }
+      },
+      proxyDependencies: { resolveAddresses: async name => { if (!hosts.has(name)) { unexpectedLookup++; throw Error("NOT_OWNED_FIXTURE"); } return [{ address: "93.184.216.34", family: 4 }]; }, connect: () => connect({ host: "127.0.0.1", port: address.port }) },
+      launchBrowser: options => launchPublicReadBrowser({ ...options, args: [...options.args ?? [], "--ignore-certificate-errors"] }, { localCdp: true }), contextOptions: { ignoreHTTPSErrors: true },
+    });
+    attached = await chromium.connectOverCDP(host.cdpUrl); const page = attached.contexts().flatMap(context => context.pages())[0];
+    await host.prepareNavigation(root); await page.goto(root, { waitUntil: "load" });
+    await page.getByRole("heading", { name: "Public golf rentals", exact: true }).waitFor({ state: "visible" });
+    await expect.poll(() => host!.observeSourceReadiness(host!.targetId)).toMatchObject({ mainDocumentCurrent: true, mainDocumentComplete: true, mainDocumentStatus: 200, pendingReads: 0 });
+    expect(seen.filter(row => row.method === "GET").map(row => row.url)).toEqual([root, ...urls]);
+    const preflights = seen.filter(row => row.method === "OPTIONS"); expect(preflights.length).toBeGreaterThan(0);
+    for (const row of preflights) { expect(urls).toContain(row.url); expect(row.requestedMethod).toBe("GET"); expect(row.requestedHeaders).toBe("content-type"); }
+    expect(seen.every(row => ["GET", "OPTIONS"].includes(row.method) && !row.authorization && !row.cookie)).toBe(true);
+    expect(leaseFamilies).toEqual(seen.map(row => requestFamilyForUrl(row.url))); expect(unleased).toBe(0);
+    // This is current-root routing presence only: no supported source, selected slot, recipe or availability result.
+    expect(await host.observeRootPublicWidget(host.targetId)).toMatchObject({ kind: "NATIVE_ROOT_PUBLIC_WIDGET", pageUrl: root, widgetKind: "SERVICE_CATALOG" });
+    expect(await host.observeUniqueSource(host.targetId)).toBeNull();
+    await expect(host.prepareNavigation(urls[0])).rejects.toThrow();
+    const reads = seen.length, leases = acquired;
+    await page.evaluate(async values => { await Promise.allSettled(values.map(url => fetch(url, { credentials: "omit" }))); },
+      [urls[0] + "?unexpected=1", `https://api.ola.godaddy.com/accounts/${account}/customers`, "https://127.0.0.1/private"]);
+    await expect.poll(() => host!.diagnostics().activeRequests).toBe(0);
+    expect(seen).toHaveLength(reads); expect(acquired).toBe(leases); expect(unexpectedLookup).toBe(0); expect(maximumActive).toBeLessThanOrEqual(2);
+    expect(deadlineAt.getTime()).toBe(originalDeadline); expect(Date.now()).toBeLessThan(originalDeadline);
+    expect(await host.close()).toMatchObject({ browserClosed: true, providerRequestsDrained: true }); expect(active).toBe(0); expect(acquired).toBe(released); expect(families.size).toBe(0);
+  } finally { controller.abort(); await attached?.close().catch(() => {}); await host?.close(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
+}, 60_000);
+
+it("renders a current native calendar through distinct public date-metadata and dated-availability GETs", async () => {
+  const root = "https://owned-calendar.example/", account = "11111111-2222-4333-8444-555555555555", service = `accounts/${account}/services/71`;
+  const query = `?start_time=${encodeURIComponent("2030-01-02T00:00:00.000-05:00")}&end_time=${encodeURIComponent("2030-01-02T23:59:59.999-05:00")}&resource_ids[]=81&resource_ids[]=82`;
+  const times = `https://api.ola.godaddy.com/v2/${service}/available_times${query}`;
+  const metadata = [`https://api.ola.godaddy.com/${service}/available_dates${query}`, `https://api.ola.godaddy.com/accounts/${account}/config?fields[]=cart`,
+    `https://api.ola.godaddy.com/addons/v1/${service}/addons`], urls = [...metadata, times];
+  const hosts = new Set(["owned-calendar.example", "api.ola.godaddy.com"]), controller = new AbortController(), families = new Set<string>();
+  const deadlineAt = new Date(Date.now() + 60_000), originalDeadline = deadlineAt.getTime(), leaseFamilies: string[] = [];
+  const seen: { url: string; method: string; requestedMethod?: string; requestedHeaders?: string; credentials: boolean }[] = [];
+  let active = 0, acquired = 0, released = 0, maximumActive = 0, unleased = 0, unexpectedLookup = 0;
+  const server = createServer({ key: certificate("fixtureKey"), cert: certificate("fixtureCertificate") }, (request, response) => {
+    const name = (request.headers.host ?? "").split(":")[0], url = "https://" + name + (request.url ?? "/");
+    seen.push({ url, method: request.method ?? "", requestedMethod: request.headers["access-control-request-method"] as string | undefined,
+      requestedHeaders: request.headers["access-control-request-headers"] as string | undefined, credentials: request.headers.authorization !== undefined || request.headers.cookie !== undefined });
+    if (!families.has(requestFamilyForUrl(url))) unleased++;
+    if (!hosts.has(name)) { response.writeHead(403).end(); return; }
+    if (url !== root) {
+      const cors = { "access-control-allow-origin": root.slice(0, -1), "access-control-allow-methods": "GET", "access-control-allow-headers": "content-type" };
+      if (!urls.includes(url)) { response.writeHead(403, cors).end(); return; }
+      if (request.method === "OPTIONS") { response.writeHead(204, cors).end(); return; }
+      response.writeHead(200, { ...cors, "content-type": "application/json" }).end(JSON.stringify(url === times ?
+        { data: { "2030-01-02T10:00:00-05:00": [{ resource_id: 81 }, { resource_id: 82 }] } } : { complete: true, empty: true, data: [] })); return;
+    }
+    response.writeHead(200, { "content-type": "text/html" }).end(`<!doctype html><link rel="icon" href="data:,"><main><h1>Loading public golf calendar</h1></main><script>
+      (async()=>{for(const url of ${JSON.stringify(urls)})await fetch(url,{credentials:'omit',headers:{'content-type':'application/json'}}).then(response=>response.json());
+      document.querySelector('main').innerHTML='<h1>Public golf calendar ready</h1><div role="grid">'+['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map(day=>'<span role="columnheader">'+day+'</span>').join('')+
+      Array.from({length:14},(_,i)=>'<button type="button" role="gridcell">'+(i+1)+'</button>').join('')+'</div>';})();</script>`);
+  });
+  let host: Awaited<ReturnType<typeof createGuardedStagehandSourceBrowser>> | undefined, attached: Browser | undefined;
+  try {
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address(); if (!address || typeof address === "string") throw Error("OWNED_FIXTURE_UNAVAILABLE");
+    host = await createGuardedStagehandSourceBrowser({ initialUrl: root, timeZone: "UTC", deadlineAt, signal: controller.signal }, {
+      requestLease: async (family, work) => {
+        if (active >= 2 || families.has(family)) return { acquired: false };
+        active++; acquired++; maximumActive = Math.max(maximumActive, active); families.add(family); leaseFamilies.push(family);
+        try { return { acquired: true, value: await work() }; } finally { active--; released++; families.delete(family); }
+      },
+      proxyDependencies: { resolveAddresses: async name => { if (!hosts.has(name)) { unexpectedLookup++; throw Error("NOT_OWNED_FIXTURE"); } return [{ address: "93.184.216.34", family: 4 }]; }, connect: () => connect({ host: "127.0.0.1", port: address.port }) },
+      launchBrowser: options => launchPublicReadBrowser({ ...options, args: [...options.args ?? [], "--ignore-certificate-errors"] }, { localCdp: true }), contextOptions: { ignoreHTTPSErrors: true },
+    });
+    attached = await chromium.connectOverCDP(host.cdpUrl); const page = attached.contexts().flatMap(context => context.pages())[0];
+    await host.prepareNavigation(root); await page.goto(root, { waitUntil: "load" });
+    await page.getByRole("heading", { name: "Public golf calendar ready", exact: true }).waitFor({ state: "visible" });
+    await expect.poll(() => host!.observeSourceReadiness(host!.targetId)).toMatchObject({ mainDocumentCurrent: true, mainDocumentComplete: true, mainDocumentStatus: 200, pendingReads: 0 });
+    expect(seen.filter(row => row.method === "GET").map(row => row.url)).toEqual([root, ...urls]);
+    const options = seen.filter(row => row.method === "OPTIONS"); expect(options.length).toBeGreaterThan(0);
+    for (const row of options) { expect(urls).toContain(row.url); expect(row.requestedMethod).toBe("GET"); expect(row.requestedHeaders).toBe("content-type"); }
+    expect(seen.every(row => !row.credentials && ["GET", "OPTIONS"].includes(row.method))).toBe(true);
+    expect(leaseFamilies).toEqual(seen.map(row => requestFamilyForUrl(row.url))); expect(unleased).toBe(0);
+    // Only actual current DOM presence is witnessed, never JSON completeness, dated inventory or an adapter.
+    expect(await host.observeRootPublicWidget(host.targetId)).toMatchObject({ kind: "NATIVE_ROOT_PUBLIC_WIDGET", pageUrl: root, widgetKind: "CALENDAR" });
+    expect(await host.observeUniqueSource(host.targetId)).toBeNull();
+    for (const url of urls) await expect(host.prepareNavigation(url)).rejects.toThrow();
+    const reads = seen.length, leases = acquired;
+    await page.evaluate(async values => { await Promise.allSettled(values.map(url => fetch(url, { credentials: "omit" }))); },
+      [times + "&customer_id=1", `https://api.ola.godaddy.com/accounts/${account}/customers`, "https://127.0.0.1/private"]);
+    await expect.poll(() => host!.diagnostics().activeRequests).toBe(0);
+    expect(seen).toHaveLength(reads); expect(acquired).toBe(leases); expect(unexpectedLookup).toBe(0); expect(maximumActive).toBeLessThanOrEqual(2);
+    expect(deadlineAt.getTime()).toBe(originalDeadline); expect(Date.now()).toBeLessThan(originalDeadline);
+    expect(await host.close()).toMatchObject({ browserClosed: true, providerRequestsDrained: true }); expect(active).toBe(0); expect(acquired).toBe(released); expect(families.size).toBe(0);
+  } finally { controller.abort(); await attached?.close().catch(() => {}); await host?.close(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
 }, 60_000);
 
 it("keeps the completed owned GET current across a real history navigation without granting iframe history ownership or a new budget", async () => {

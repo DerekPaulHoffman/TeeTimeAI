@@ -1,7 +1,9 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { runCourseDiscoveryStagehandWorker, prepareCourseDiscoveryStagehandWorker } from "../../../scripts/automation/course-discovery-stagehand-worker.mjs";
-import { createDiscoveryBrowser, verifyDiscoveryCandidate } from "../../../scripts/automation/course-discovery-worker.mjs";
+import { createDiscoveryBrowser, createDiscoveryProcess, verifyDiscoveryCandidate } from "../../../scripts/automation/course-discovery-worker.mjs";
 import { createStagehandSourceCheckpoint, readStagehandSourceCheckpoint, stagehandDataHash, publicStagehandSourceUrl,
   } from "../../../scripts/automation/course-discovery-stagehand-source.mjs";
 import { observedInspectionPath, currentStagehandInspectionDiagnostic, inspectionReadability, safeInspectionReadability } from "../../../scripts/automation/course-discovery-stagehand-inspection.mjs";
@@ -81,6 +83,138 @@ function modelFailureReport(t: ReturnType<typeof setup>) {
   (t.f.report as Record<string, unknown>).sourceDiagnostic = diagnostic;
   return diagnostic!;
 }
+function rootWidgetReport(t: ReturnType<typeof setup>, widgetKind = "PUBLIC_FILTERS") {
+  Object.assign(t.f.report, { outcome: "ROOT_WIDGET_PROPOSED_UNVERIFIED", decisionOrigin: "NATIVE_PUBLIC_ROOT_WIDGET", adapterSourceProposal: null,
+    visitedUrls: [official], officialLinkLedger: [], frameLedger: [], actions: [], rootWidgetWitness: { kind: "NATIVE_ROOT_PUBLIC_WIDGET", pageUrl: official,
+      observedAt: t.f.report.finishedAt, documentHash: "c".repeat(64), widgetKind } });
+}
+function cleanUnresolvedReport(t: ReturnType<typeof setup>) {
+  Object.assign(t.f.report, { schemaVersion: 1, outcome: "UNRESOLVED", adapterSourceProposal: null, methodSaved: false, methodArtifactSaved: false,
+    actionAttempts: [{ status: "EXECUTED" }] });
+  const diagnostic = sourceFailureDiagnostic({ phase: "EXTRACT", report: t.f.report, startedAt: first + 100,
+    cleanup: { browserClosed: true, modelClosed: true }, modelAttempts: 2,
+    sourceStop: { finalDecision: "UNRESOLVED", condition: "EXPLICIT_UNRESOLVED", lastActionKind: "click" },
+    documentReadiness: { readyState: "complete", bodyPresent: true, mainDocumentCurrent: true, mainDocumentComplete: true,
+      mainReadPending: false, pendingReads: 0, mainDocumentStatus: 200 } });
+  (t.f.report as Record<string, unknown>).sourceDiagnostic = diagnostic;
+  return diagnostic!;
+}
+
+describe("clean unresolved source fresh-root handoff", () => {
+  it("retains only typed failure provenance and lets the generic verifier own the sole two challenges and activation", async () => {
+    const t = setup(); cleanUnresolvedReport(t); const original = structuredClone(t.f.job), controller = new AbortController();
+    t.client.candidate.mockImplementation(async (id, token) => {
+      expect(id).toBe(original.id); expect(token).toBe(original.leaseToken);
+      return { recipeHash: "b".repeat(64), challenges: [
+        { id: "backend-one", recipeHash: "b".repeat(64), input: t.f.job.request.input },
+        { id: "backend-two", recipeHash: "b".repeat(64), input: { ...t.f.job.request.input, date: "2030-01-04", players: 3 } },
+      ] };
+    });
+    const genericWorker = vi.fn(async options => {
+      expect(options.job).toBe(t.f.job); expect(options.job).toEqual(original); expect(options.signal).toBe(controller.signal);
+      expect(options.freshOfficialStart).toBe(true); expect(options.workDeadlineAt).toBe(new Date(first + 720000).toISOString());
+      expect(options.checkpointProvenance.stagehandSource).toBeUndefined(); expect(options.checkpointProvenance.controller).toBeUndefined();
+      const failure = readStagehandFailure({ ...t.f.job, checkpoint: options.checkpointProvenance }, t.f.clock);
+      expect(failure?.entries[0]).toMatchObject({ code: "STAGEHAND_SOURCE_UNRESOLVED", phase: "SOURCE_VALIDATION", diagnostic: { errorClass: "NONE" } });
+      expect(t.client.checkpoint).toHaveBeenCalledOnce();
+      const activation = await verifyDiscoveryCandidate({ client: options.client, job: options.job, recipe: { engine: "BROWSER_DOM" },
+        sourceEvidence: { officialUrl: official, observedBookingUrl: booking }, executeRecipe: t.executeRecipe,
+        beforeActivate: options.beforeActivate, afterActivate: () => options.afterActivate({ metrics: { modelCalls: 3 } }) });
+      return { outcome: "activated", activation, metrics: { modelCalls: 3 } };
+    });
+    const result = await t.run({ genericWorker, signal: controller.signal });
+    expect(result.metrics.genericFallback.trigger).toBe("SOURCE_UNRESOLVED_PUBLIC_DOCUMENT");
+    expect(result.metrics.source.modelCalls).toBe(2); expect(result.metrics.genericFallback.worker.modelCalls).toBe(3);
+    expect(t.client.verification).toHaveBeenCalledTimes(2); expect(t.executeRecipe).toHaveBeenCalledTimes(2);
+    expect(t.client.activate).toHaveBeenCalledOnce(); expect(t.afterActivate).toHaveBeenCalledOnce(); expect(t.f.job).toEqual(original);
+    expect(t.browserFactory).not.toHaveBeenCalled(); expect(t.validateRecipe).not.toHaveBeenCalled();
+  });
+  it.each(["schema", "access", "native", "host", "cdp", "guard", "model-failed", "action-rejected", "not-current", "pending", "incomplete", "status404", "step-limit", "wrong-phase", "unknown-field", "model-cleanup", "artifact", "witness", "foreign", "foreign-root", "stale", "source-expired", "work-expired", "aborted"])(
+    "does not turn %s into generic exploration permission", async mode => {
+      const t = setup(), diagnostic = cleanUnresolvedReport(t), report = t.f.report as Record<string, unknown>, controller = new AbortController();
+      if (mode === "schema") report.schemaVersion = 2;
+      if (mode === "access") diagnostic.httpStatus = 403;
+      if (mode === "native") diagnostic.nativeRouterFailure = { code: "NATIVE_REDIRECT_LOADER_TIMEOUT" };
+      if (mode === "host") diagnostic.hostGuardFailure = { stage: "SOURCE_DOM", reason: "DOM_URL_CHANGED" };
+      if (mode === "cdp") diagnostic.ownedCdpFailure = { layer: "RPC", pendingRequests: 0 };
+      if (mode === "guard") diagnostic.guardReason = "ACTION_TARGET_REJECTED";
+      if (mode === "model-failed") { diagnostic.counts.failedModelCalls = 1; diagnostic.counts.attemptedModelCalls = 3; }
+      if (mode === "action-rejected") diagnostic.counts.rejectedActions = 1;
+      if (mode === "not-current") diagnostic.sourceDocumentReadiness.mainDocumentCurrent = false;
+      if (mode === "pending") diagnostic.sourceDocumentReadiness.mainReadPending = true;
+      if (mode === "incomplete") diagnostic.sourceDocumentReadiness.mainDocumentComplete = false;
+      if (mode === "status404") diagnostic.sourceDocumentReadiness.mainDocumentStatus = 404;
+      if (mode === "step-limit") diagnostic.sourceStop.condition = "STEP_LIMIT";
+      if (mode === "wrong-phase") diagnostic.phase = "OBSERVE";
+      if (mode === "unknown-field") diagnostic.private = "PRIVATE";
+      if (mode === "model-cleanup") report.modelClosed = false;
+      if (mode === "artifact") report.methodSaved = true;
+      if (mode === "witness") report.rootWidgetWitness = { forged: true };
+      if (mode === "foreign") report.jobId = "foreign-job";
+      if (mode === "foreign-root") report.initialNavigation = { requestedUrl: "https://foreign.example/", status: 200 };
+      if (mode === "stale") { report.startedAt = new Date(first - 10000).toISOString(); report.finishedAt = new Date(first - 9000).toISOString(); }
+      if (mode === "source-expired") t.f.clock = first + 240000;
+      if (mode === "work-expired") t.f.clock = first + 720000;
+      if (mode === "aborted") controller.abort();
+      const genericWorker = vi.fn(); await expect(t.run({ genericWorker, signal: controller.signal })).rejects.toBeDefined();
+      expect(genericWorker).not.toHaveBeenCalled(); expect(t.client.candidate).not.toHaveBeenCalled(); expect(t.client.activate).not.toHaveBeenCalled();
+    });
+  it("keeps generic failure and its checkpoint instead of overwriting it with source failure", async () => {
+    const t = setup(); cleanUnresolvedReport(t);
+    const genericWorker = vi.fn(async options => {
+      await options.client.checkpoint(options.job.id, options.job.leaseToken, { ...options.checkpointProvenance, controller: { officialObserved: true } });
+      throw Object.assign(Error("generic failed"), { code: "DISCOVERY_TURN_FAILED", discoveryMetrics: { modelCalls: 1 } });
+    });
+    const failure = await t.run({ genericWorker }).catch(error => error);
+    expect(failure.code).toBe("DISCOVERY_TURN_FAILED"); expect(failure.discoveryMetrics.genericFallback.worker.modelCalls).toBe(1);
+    expect(t.checkpoints.at(-1)).toMatchObject({ controller: { officialObserved: true } });
+    expect(t.client.checkpoint).toHaveBeenCalledTimes(2); expect(t.client.activate).not.toHaveBeenCalled();
+  });
+  it("does not hand off after provenance checkpoint loses the original lease", async () => {
+    const t = setup(); cleanUnresolvedReport(t); const genericWorker = vi.fn();
+    t.client.checkpoint.mockRejectedValue(Object.assign(Error("lease rejected"), { code: "DISCOVERY_LEASE_REJECTED" }));
+    await expect(t.run({ genericWorker })).rejects.toMatchObject({ code: "DISCOVERY_LEASE_REJECTED" });
+    expect(genericWorker).not.toHaveBeenCalled(); expect(t.client.checkpoint).toHaveBeenCalledOnce(); expect(t.client.activate).not.toHaveBeenCalled();
+  });
+  it("does not turn a generic activated label without the actual acknowledgement into success", async () => {
+    const t = setup(); cleanUnresolvedReport(t);
+    await expect(t.run({ genericWorker: async () => ({ outcome: "activated", metrics: {} }) })).rejects.toMatchObject({ code: "DISCOVERY_NO_VERIFIED_RECIPE" });
+    expect(t.client.activate).not.toHaveBeenCalled(); expect(t.afterActivate).not.toHaveBeenCalled();
+  });
+});
+
+describe("clean native root widget handoff", () => {
+  it.each([[false, "PUBLIC_FILTERS"], [true, "PUBLIC_FILTERS"], [false, "SERVICE_CATALOG"], [true, "SERVICE_CATALOG"]] as const)("hands only the original job and clean routing checkpoint to fresh generic discovery (resume=%s, kind=%s)", async (resumed, widgetKind) => {
+    const t = setup(); rootWidgetReport(t, widgetKind);
+    if (resumed) { t.f.job.checkpoint = { stagehandSource: createStagehandSourceCheckpoint(t.f.job, t.f.report) }; t.f.job.attempts = 2; }
+    const original = structuredClone(t.f.job), controller = new AbortController();
+    const genericWorker = vi.fn(async options => {
+      expect(options.job).toBe(t.f.job); expect(options.job).toEqual(original); expect(options.signal).toBe(controller.signal);
+      expect(options.freshOfficialStart).toBe(true); expect(options.workDeadlineAt).toBe(new Date(first + 720_000).toISOString());
+      expect(options.checkpointProvenance.stagehandSource.report.adapterSourceProposal).toBeNull();
+      expect(options.checkpointProvenance.stagehandSource.report.outcome).toBe("ROOT_WIDGET_PROPOSED_UNVERIFIED");
+      await options.beforeActivate(); await options.afterActivate({ metrics: { modelCalls: 2 } });
+      return { outcome: "activated", metrics: { modelCalls: 2 } };
+    });
+    const result = await t.run({ genericWorker, signal: controller.signal });
+    expect(result.outcome).toBe("activated"); expect(genericWorker).toHaveBeenCalledOnce(); expect(t.sourceDiscover).toHaveBeenCalledTimes(resumed ? 0 : 1);
+    expect(t.browserFactory).not.toHaveBeenCalled(); expect(t.client.candidate).not.toHaveBeenCalled(); expect(t.client.activate).not.toHaveBeenCalled();
+    expect(t.afterActivate).toHaveBeenCalledOnce(); expect(result.metrics.genericFallback.trigger).toBe("ROOT_PUBLIC_WIDGET");
+  });
+  it.each([{ browserClosed: false }, { modelClosed: false }, { frameworkFailureCode: "STAGEHAND_GUARDED_SOURCE_REJECTED" },
+    { sourceDiagnostic: { transportCode: "LOCAL_MODEL_TURN_FAILED" } }, { outcome: "UNRESOLVED", frameworkFailureCode: "STAGEHAND_GUARDED_SOURCE_REJECTED" }])
+  ("never treats a failed or unclosed root source as a handoff %#", async change => {
+    const t = setup(); rootWidgetReport(t); Object.assign(t.f.report, change); const genericWorker = vi.fn();
+    await expect(t.run({ genericWorker })).rejects.toBeDefined(); expect(genericWorker).not.toHaveBeenCalled();
+  });
+  it("keeps an expired original work clock and unacknowledged activation strict", async () => {
+    const expired = setup(); rootWidgetReport(expired); expired.f.clock = first + 720_000; const genericWorker = vi.fn();
+    await expect(expired.run({ genericWorker })).rejects.toMatchObject({ code: "DISCOVERY_WORK_DEADLINE" }); expect(genericWorker).not.toHaveBeenCalled();
+    const t = setup(); rootWidgetReport(t);
+    await expect(t.run({ genericWorker: async () => ({ outcome: "activated", metrics: {} }) })).rejects.toMatchObject({ code: "DISCOVERY_NO_VERIFIED_RECIPE" });
+    expect(t.client.activate).not.toHaveBeenCalled();
+  });
+});
 
 describe("regular Stagehand source worker", () => {
   it.each(["UNSUPPORTED_ADAPTER_SOURCE", "CPS_PUBLIC_BUILD_UNSUPPORTED"])("hands only a freshly closed %s inspection to generic Sol and activates exactly once", async code => {
@@ -294,6 +428,52 @@ describe("regular Stagehand source worker", () => {
         expect(t.client.candidate).not.toHaveBeenCalled(); expect(t.executeRecipe).not.toHaveBeenCalled();
       }
     } finally { vi.useRealTimers(); }
+  });
+  it("preserves closed native exception facts through the actual helper error reply projector", async () => {
+    const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), pid: 1, exitCode: 0, signalCode: null });
+    const channel = createDiscoveryProcess({ executable: "fixture-only", args: [], cwd: ".", environment: {}, spawnProcess: () => child });
+    try {
+      const pending = channel.request({ action: "open" }).catch(error => error);
+      child.stdout.write(JSON.stringify({ id: 1, ok: false, error: "NATIVE_REDIRECT_ROUTING_FAILED", diagnostics: { nativeFirstFatal: {
+        code: "NATIVE_REDIRECT_ROUTING_FAILED", operation: "RESPONSE_BODY", errorName: "Error", errorCategory: "BODY_UNAVAILABLE", requestUrlSha256: "a".repeat(64),
+        headers: { cookie: "PRIVATE" }, message: "PRIVATE", requestId: "PRIVATE" } } }) + "\n");
+      const error = await pending;
+      expect(error).toMatchObject({ code: "NATIVE_REDIRECT_ROUTING_FAILED", details: { browserDiagnostics: { nativeFirstFatal: {
+        code: "NATIVE_REDIRECT_ROUTING_FAILED", operation: "RESPONSE_BODY", errorName: "Error", errorCategory: "BODY_UNAVAILABLE", requestUrlSha256: "a".repeat(64) } } } });
+      expect(JSON.stringify(error.details)).not.toMatch(/PRIVATE|cookie|headers|message|requestId/u);
+    } finally { await channel.close(); }
+  });
+  it.each(["known", "unknown", "absent"] as const)("retains only actual current native facts on an open throw (%s)", async mode => {
+    const t = setup(), primary = Object.assign(Error("NATIVE_REDIRECT_ROUTING_FAILED"), { code: "NATIVE_REDIRECT_ROUTING_FAILED",
+      details: { browserDiagnostics: mode === "absent" ? {} : { nativeFirstFatal: mode === "unknown" ? {
+        code: "NATIVE_REDIRECT_ROUTING_FAILED", operation: "PRIVATE", errorName: "PRIVATE", headers: { cookie: "PRIVATE" },
+      } : { code: "NATIVE_REDIRECT_ROUTING_FAILED", operation: "RESPONSE_BODY", errorName: "Error", errorCategory: "BODY_UNAVAILABLE",
+        requestUrlSha256: "a".repeat(64), method: "GET", resourceType: "stylesheet", framePresent: true, networkIdPresent: true,
+        url: "https://private.example/?token=PRIVATE", message: "PRIVATE_BODY", headers: { cookie: "PRIVATE" } } } } });
+    t.request.mockRejectedValueOnce(primary);
+    const error = await t.run().catch(e => e), saved = t.checkpoints.at(-1) as { stagehandFailure: { entries: Array<Record<string, unknown>> } };
+    expect(error).toBe(primary); expect(t.close).toHaveBeenCalledOnce();
+    if (mode === "absent") expect(saved.stagehandFailure.entries[0]).not.toHaveProperty("fixedInspectionDiagnostic");
+    else {
+      const native = mode === "unknown" ? { code: "NATIVE_REDIRECT_ROUTING_FAILED" } : {
+        code: "NATIVE_REDIRECT_ROUTING_FAILED", operation: "RESPONSE_BODY", errorName: "Error", errorCategory: "BODY_UNAVAILABLE",
+        requestUrlSha256: "a".repeat(64), method: "GET", resourceType: "stylesheet", framePresent: true, networkIdPresent: true };
+      const diagnostic = { nativeRouterFailure: native };
+      expect(saved.stagehandFailure.entries[0]).toMatchObject({ fixedInspectionDiagnostic: diagnostic, fixedInspectionDiagnosticSha256: stagehandDataHash(diagnostic) });
+      expect(currentStagehandInspectionDiagnostic(error, t.f.job, t.f.clock, t.f.clock)).toEqual(diagnostic);
+      expect(currentStagehandInspectionDiagnostic({ ...error }, t.f.job, t.f.clock, t.f.clock)).toBeUndefined();
+      expect(currentStagehandInspectionDiagnostic(error, { ...t.f.job, attempts: 2 }, t.f.clock, t.f.clock)).toBeUndefined();
+      const forged = structuredClone(saved), injected = { nativeRouterFailure: { ...native, message: "PRIVATE" } };
+      Object.assign(forged.stagehandFailure.entries[0], { fixedInspectionDiagnostic: injected, fixedInspectionDiagnosticSha256: stagehandDataHash(injected) });
+      expect(readStagehandFailure({ ...t.f.job, checkpoint: forged }, t.f.clock)).toBeUndefined();
+    }
+    expect(readStagehandFailure({ ...t.f.job, checkpoint: saved }, t.f.clock)).toEqual(saved.stagehandFailure);
+    expect(JSON.stringify(saved)).not.toMatch(/PRIVATE|https:\/\/private|cookie|headers|message/u);
+    expect(t.client.candidate).not.toHaveBeenCalled(); expect(t.executeRecipe).not.toHaveBeenCalled(); expect(t.client.activate).not.toHaveBeenCalled();
+  });
+  it("does not invent a native failure during successful fixed inspection", async () => {
+    const t = setup(); expect((await t.run()).outcome).toBe("activated");
+    expect(t.checkpoints.every(value => !(value as { stagehandFailure?: unknown }).stagehandFailure)).toBe(true);
   });
   it.each([
     ["missingStatus", ["OPEN_STATUS_MISSING"]],

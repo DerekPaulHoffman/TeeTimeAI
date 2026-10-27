@@ -1,7 +1,18 @@
 import test from'node:test';import assert from'node:assert/strict';
-import{observedBookingSourceCandidates,nativeLinkSource,corroboratedNativeLink}from'./source-provenance.mjs';
+import{observedBookingSourceCandidates,nativeLinkSource,corroboratedNativeLink,rootWidgetRoutingWitness}from'./source-provenance.mjs';
 const official='https://course.example/',source='https://provider.example/start?tenant=public',landing='https://provider.example/loading';
 const candidate=r=>observedBookingSourceCandidates(r,official,undefined,{sourceDiscoveryOnly:true});
+test('root widget routing keeps startup exclusions and only the initial native document scope',()=>{
+ const at='2030-01-01T12:00:00.000Z',root={startedAt:at,finishedAt:at,visitedUrls:[official+'#calendar'],
+  initialNavigation:{requestedUrl:official,finalUrl:official,status:200},rootWidgetWitness:{kind:'NATIVE_ROOT_PUBLIC_WIDGET',pageUrl:official+'#calendar',observedAt:at,documentHash:'a'.repeat(64),widgetKind:'CALENDAR'}};
+ assert.equal(rootWidgetRoutingWitness(root,official).pageUrl,official+'#calendar');assert.deepEqual(candidate(root),[]);
+ assert.equal(rootWidgetRoutingWitness({...root,rootWidgetWitness:{...root.rootWidgetWitness,widgetKind:'SERVICE_CATALOG'}},official).widgetKind,'SERVICE_CATALOG');
+ assert.equal(rootWidgetRoutingWitness({...root,rootWidgetWitness:{...root.rootWidgetWitness,widgetKind:'SERVICE_CATALOG',serviceId:'FORGED'}},official),null);
+ for(const url of[official+'other/',official+'?private=1','https://operator.example/'])assert.equal(rootWidgetRoutingWitness({...root,visitedUrls:[url],rootWidgetWitness:{...root.rootWidgetWitness,pageUrl:url}},official),null);
+ for(const change of[{status:302},{requestedUrl:'https://foreign.example/'},{finalUrl:official+'other/'}])assert.equal(rootWidgetRoutingWitness({...root,initialNavigation:{...root.initialNavigation,...change}},official),null);
+ assert.equal(rootWidgetRoutingWitness({...root,rootWidgetWitness:{...root.rootWidgetWitness,caption:'MODEL'}},official),null);
+ const alias='https://www.course.example/';assert.equal(rootWidgetRoutingWitness({...root,visitedUrls:[alias],initialNavigation:{requestedUrl:official,finalUrl:alias,status:200},rootWidgetWitness:{...root.rootWidgetWitness,pageUrl:alias}},official).pageUrl,alias);
+});
 function report(){return{visitedUrls:[official,landing],initialNavigation:{requestedUrl:official,finalUrl:official,status:200},officialLinkLedger:[{pageUrl:official,links:[{href:source}]}],actions:[{sourceUrl:official,action:{method:'click'},observedTarget:{tag:'A',href:source},afterUrl:landing,openedNewPage:true}]};}
 test('exact clicked officially linked ancestor survives public redirect, without query rewrite or currentURL substitution',()=>{assert.deepEqual(candidate(report()),[source]);const r=report();r.actions[0].observedTarget.href=source.replace('public','other');assert.deepEqual(candidate(r),[]);});
 test('model-only/informational/unobserved/failed clicks never acquire native provenance',()=>{

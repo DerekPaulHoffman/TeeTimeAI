@@ -7,6 +7,7 @@ import { createInterface } from "node:readline";
 import { discoveryError } from "./course-discovery-client.mjs";
 import { safeBrowserActionIssues, safeDiscoveryTurnFailure, safePublicUrlRejectionDiagnostic } from "./course-discovery-diagnostics.mjs";
 import { createDiscoveryPublicAssetInventory } from "./course-discovery-public-assets.mjs";
+import { nativeRouterOperations, nativeRouterErrorNames, nativeRouterErrorCategories } from "./stagehand/source-diagnostic.mjs";
 
 const VERSION = "0.160.1";
 const BROWSER_ACTIONS = ["open", "observe", "click", "select", "fill", "scroll", "inspect_adapter", "inspect", "finish"];
@@ -545,6 +546,9 @@ function safeBrowserRequestFailures(value) {
 function safeNativeRequestDiagnostic(value) {
   if (!value || typeof value !== "object" || Array.isArray(value) || typeof value.code !== "string" || !/^NATIVE_[A-Z_0-9]{1,73}$/u.test(value.code)) return undefined;
   const result = { code: value.code };
+  for (const [key, allowed] of [["operation", nativeRouterOperations], ["errorName", nativeRouterErrorNames], ["errorCategory", nativeRouterErrorCategories]])
+    if (allowed.includes(value[key])) result[key] = value[key];
+  if (typeof value.requestUrlSha256 === "string" && /^[a-f0-9]{64}$/u.test(value.requestUrlSha256)) result.requestUrlSha256 = value.requestUrlSha256;
   if (["RESPONSE_WAIT", "CONTINUE_RESPONSE_ACK", "LOADER_IDENTITY_WAIT", "LOADER_IDENTITY", "LOADER_OWNER", "REDIRECT_GENERATION", "REDIRECT_PROVENANCE", "DOCUMENT_INTENT", "DOCUMENT_DRAIN"].includes(value.phase)) result.phase = value.phase;
   if (safeObservedUrl(value.url)) {
     try {

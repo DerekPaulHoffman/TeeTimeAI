@@ -2,8 +2,9 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createStagehandCodexModel } from './codex-model.mjs';
-import { classifyNavigationError, projectActionGuardDiagnostic, projectSourceDocumentReadiness, projectNativeIntermediaryPreparation } from './source-diagnostic.mjs';
+import { classifyNavigationError, projectActionGuardDiagnostic, projectSourceDocumentReadiness, projectNativeIntermediaryPreparation, projectHostGuardFailure } from './source-diagnostic.mjs';
 import { publicEvidenceUrl } from './public-evidence.mjs';
+import { rootWidgetWitness } from './source-provenance.mjs';
 
 export async function loadStagehandRuntime() {
   let directory = dirname(fileURLToPath(import.meta.resolve('@browserbasehq/stagehand')));
@@ -235,6 +236,10 @@ export const sourceDocumentSettled = value => {
   const row=projectSourceDocumentReadiness(value);
   return Boolean(row?.bodyPresent&&row.mainDocumentCurrent&&row.mainDocumentComplete&&!row.mainReadPending&&['interactive','complete'].includes(row.readyState)&&row.mainDocumentStatus===200);
 };
+export const sourceDocumentNotFound = value => {
+  const row=projectSourceDocumentReadiness(value);
+  return Boolean(row?.bodyPresent&&row.mainDocumentCurrent&&row.mainDocumentComplete&&!row.mainReadPending&&['interactive','complete'].includes(row.readyState)&&row.mainDocumentStatus===404);
+};
 /** Source-only parser completion. Ancillary/network idle is not required. */
 export async function settleSourceDocument(read,{deadline,signal,now=Date.now,sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms)),onObservation=()=>{}}){
   let last;
@@ -249,6 +254,7 @@ export async function settleSourceDocument(read,{deadline,signal,now=Date.now,sl
     })])); } finally { clearTimeout(timer);if(abort)signal?.removeEventListener('abort',abort); }
     if(!last)throw Error('STAGEHAND_NATIVE_HOST_INVALID');
     try{onObservation(last);}catch{ /* Diagnostics cannot change source readiness. */ }
+    if(now()<deadline&&sourceDocumentNotFound(last))throw Object.assign(Error('STAGEHAND_SOURCE_NOT_FOUND'),{stagehandDocumentReadiness:last});
     if(now()<deadline&&sourceDocumentSettled(last))return last;
     await sleep(Math.min(50,Math.max(0,deadline-now())));
   }
@@ -275,6 +281,7 @@ export async function openStagehandSession({ model, deadline, cwd, signal, onMet
   let browser;
   let stagehand;
   let codexModel;
+  let closing;
   let startupPhase = 'SDK_CONNECT';
   let disabledModelCalls = 0;
   const onAbort = () => { void browser?.close().catch(() => {}); void codexModel?.close().catch(() => {}); void owned.close().catch(() => {}); };
@@ -295,8 +302,9 @@ export async function openStagehandSession({ model, deadline, cwd, signal, onMet
     // All operations below explicitly bind this attested CDP page. UI tab
     // activation is unnecessary and is unavailable for some off-record tabs.
     const checked = withinDeadline;
-    let operationModelStart=0,lastOperationModelFailure,ownedCdpFailure,nativeRouterFailure,documentReadiness,intermediaryPreparation,intermediaryAttempted=false;
+    let operationModelStart=0,lastOperationModelFailure,ownedCdpFailure,nativeRouterFailure,hostGuardFailure,documentReadiness,intermediaryPreparation,intermediaryAttempted=false;
     const unchangedAnchorNavigations=new Set();
+    let initialSourceUrl,notFoundRecoveryUsed=false;
     const annotate = (error, phase) => {
       const failure=codexModel?.lastFailure;
       if(failure&&failure.attempt>operationModelStart&&failure.attempt===codexModel.attemptedCalls)lastOperationModelFailure=failure;
@@ -317,7 +325,28 @@ export async function openStagehandSession({ model, deadline, cwd, signal, onMet
     const sourceReadOptions = () => ({ ...boundOptions(), ...(sourceRoutingOnly ? { locator: page.locator('body') } : {}) });
     return {
       browser, stagehand, get page() { return page; }, startupMs: Date.now() - openedAt,
-      goto: value => guarded(async () => { assertPublicUrl(value); await checked(owned.prepareNavigation(value)); return page.goto(value, { waitUntil: 'domcontentloaded', timeout: Math.min(30000, Math.max(1, deadline - Date.now())) }); },'OPEN'),
+      goto: value => guarded(async () => { assertPublicUrl(value); await checked(owned.prepareNavigation(value)); if(sourceRoutingOnly&&initialSourceUrl===undefined)initialSourceUrl=value;return page.goto(value, { waitUntil: 'domcontentloaded', timeout: Math.min(30000, Math.max(1, deadline - Date.now())) }); },'OPEN'),
+      recoverSourceNotFound: (originalRoot,failedUrl) => guarded(async()=>{
+        if(!sourceRoutingOnly||notFoundRecoveryUsed||originalRoot!==initialSourceUrl||page.pageId!==owned.targetId||
+          typeof owned.observeSourceReadiness!=='function'||typeof owned.snapshotFailures!=='function')throw Error('STAGEHAND_SOURCE_NOT_FOUND');
+        assertPublicUrl(originalRoot);assertPublicUrl(failedUrl);
+        for(let sample=0;sample<2;sample++){
+          if(page.pageId!==owned.targetId||await checked(page.url())!==failedUrl)throw Error('STAGEHAND_SOURCE_NOT_FOUND');
+          const readiness=projectSourceDocumentReadiness(await checked(owned.observeSourceReadiness(page.pageId)));
+          const faults=await checked(owned.snapshotFailures());
+          // RPC remembers a past command rejection without closing the host.
+          // Fresh attestation/read failures still throw; retain that history.
+          if(!sourceDocumentNotFound(readiness)||!faults||faults.ownedCdpFailure&&faults.ownedCdpFailure.layer!=='RPC'||faults.nativeRouterFailure||faults.hostGuardFailure||
+            page.pageId!==owned.targetId||await checked(page.url())!==failedUrl)throw Error('STAGEHAND_SOURCE_NOT_FOUND');
+          documentReadiness=readiness;
+        }
+        const observedAt=new Date().toISOString();notFoundRecoveryUsed=true;
+        await checked(owned.prepareNavigation(originalRoot));
+        await checked(page.goto(originalRoot,{waitUntil:'domcontentloaded',timeout:Math.min(30000,Math.max(1,deadline-Date.now()))}));
+        await settleSourceDocument(()=>checked(owned.observeSourceReadiness(page.pageId)),{deadline:Math.min(deadline,Date.now()+30000),signal,onObservation:value=>{documentReadiness=value;}});
+        if(page.pageId!==owned.targetId)throw Error('STAGEHAND_SOURCE_NOT_FOUND');
+        return{failedUrl,recoveredTo:originalRoot,recoveredUrl:assertPublicUrl(await checked(page.url())),status:404,observedAt,completedAt:new Date().toISOString()};
+      },'OPEN'),
       snapshot: () => guarded(() => page.snapshot({ includeIframes: true, timeout: Math.min(15000, Math.max(1, deadline - Date.now())) })),
       extract: (instruction, schema) => guarded(() => stagehand.extract(instruction, schema, sourceReadOptions()),'EXTRACT'),
       observe: instruction => guarded(() => stagehand.observe(instruction, sourceReadOptions()),'OBSERVE'),
@@ -340,6 +369,14 @@ export async function openStagehandSession({ model, deadline, cwd, signal, onMet
         const began=Date.now(),current=await checked(page.url());
         const witness=sourceRoutingUniqueWitness(await checked(owned.observeUniqueSource(page.pageId)),{pageUrl:current,startedAt:began,deadline});
         return witness&&await checked(page.url())===current?witness:null;
+      },'EVIDENCE'),
+      observeRootPublicWidget: () => guarded(async()=>{
+        if(!sourceRoutingOnly||typeof owned.observeRootPublicWidget!=='function')return null;
+        const began=Date.now(),current=await checked(page.url()),value=await checked(owned.observeRootPublicWidget(page.pageId)),now=Date.now();
+        if(value===null)return null;
+        const witness=rootWidgetWitness(value,{pageUrl:current,startedAt:began,finishedAt:now,isPublic:isSourceRoutingUrl});
+        if(!witness||now>=deadline||now-began>5000||await checked(page.url())!==current)throw Error('STAGEHAND_SOURCE_OUTPUT_INVALID');
+        return witness;
       },'EVIDENCE'),
       openPublicBookingIntermediary: () => guarded(async()=>{
         if(!sourceRoutingOnly||typeof owned.preparePublicBookingIntermediary!=='function'||typeof owned.completePublicBookingIntermediary!=='function')return null;
@@ -424,25 +461,36 @@ export async function openStagehandSession({ model, deadline, cwd, signal, onMet
       get lastModelFailure() { return lastOperationModelFailure?structuredClone(lastOperationModelFailure):undefined; },
       get ownedCdpFailure() { return ownedCdpFailure?structuredClone(ownedCdpFailure):undefined; },
       get nativeRouterFailure() { return nativeRouterFailure?structuredClone(nativeRouterFailure):undefined; },
+      get hostGuardFailure() { return hostGuardFailure?structuredClone(hostGuardFailure):undefined; },
       get sourceDocumentReadiness() { return documentReadiness?structuredClone(documentReadiness):undefined; },
       get nativeIntermediaryPreparation() { return intermediaryPreparation?structuredClone(intermediaryPreparation):undefined; },
       get disabledModelCalls() { return disabledModelCalls; },
-      async close() {
+      close() { return closing ??= (async()=>{
         signal?.removeEventListener('abort', onAbort);
+        // The private host close includes its native finish ACK (at most 30s)
+        // and the existing Windows launcher termination (at most 5s). Share
+        // the original source deadline across every teardown phase; cleanup
+        // never creates a fresh source/job allowance or promotes a late ACK.
+        const closeWithin=(operation,maximum)=>{
+          const remaining=deadline-Date.now();
+          if(remaining<=0){Promise.resolve(operation).catch(()=>{});return Promise.resolve(undefined);}
+          return boundedClose(Promise.resolve(operation),Math.min(maximum,remaining));
+        };
         // Snapshot the owned guardian before any model/SDK/browser teardown can
         // itself retire targets or cancel protocol requests. Late finish facts
         // are never substituted for this attempt's pre-cleanup observation.
         if(typeof owned.snapshotFailures==='function'){
-          const failures=await boundedClose(Promise.resolve().then(()=>owned.snapshotFailures()),500);
+          const failures=await closeWithin(Promise.resolve().then(()=>owned.snapshotFailures()),500);
           ownedCdpFailure=failures?.ownedCdpFailure;nativeRouterFailure=failures?.nativeRouterFailure;
+          hostGuardFailure=projectHostGuardFailure(failures?.hostGuardFailure);
           if(intermediaryAttempted)intermediaryPreparation??=projectNativeIntermediaryPreparation(failures?.nativeIntermediaryPreparation);
-        }else if(typeof owned.snapshotFailure==='function')ownedCdpFailure=await boundedClose(Promise.resolve().then(()=>owned.snapshotFailure()),500);
-        const modelReceipt = codexModel ? await boundedClose(codexModel.close(), 4000) : null;
-        await boundedClose(stagehand.close(), 2000);
-        await boundedClose(browser.close(), 4000);
-        const hostReceipt = await boundedClose(owned.close(), 4000);
-        return { browserClosed: browser.closed && hostReceipt?.browserClosed === true, modelClosed: modelDisabled || modelReceipt?.processExited === true && modelReceipt?.cleanup?.credentialsRemoved === true };
-      },
+        }else if(typeof owned.snapshotFailure==='function')ownedCdpFailure=await closeWithin(Promise.resolve().then(()=>owned.snapshotFailure()),500);
+        const modelReceipt = codexModel ? await closeWithin(Promise.resolve().then(()=>codexModel.close()), 4000) : null;
+        await closeWithin(Promise.resolve().then(()=>stagehand.close()), 2000);
+        await closeWithin(Promise.resolve().then(()=>browser.close()), 4000);
+        const hostReceipt = await closeWithin(Promise.resolve().then(()=>owned.close()), 35000);
+        return { browserClosed: Date.now()<deadline&&!signal?.aborted&&browser.closed&&hostReceipt?.browserClosed === true, modelClosed: modelDisabled || modelReceipt?.processExited === true && modelReceipt?.cleanup?.credentialsRemoved === true };
+      })(); },
     };
   } catch (error) {
     error.stagehandFailureStage = startupPhase;

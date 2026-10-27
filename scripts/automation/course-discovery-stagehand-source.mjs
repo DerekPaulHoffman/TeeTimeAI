@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { discoveryError } from "./course-discovery-client.mjs";
-import { observedBookingSourceCandidates, nativeFrameNavigations, nativeIntermediaryNavigations } from "./stagehand/source-provenance.mjs";
+import { observedBookingSourceCandidates, nativeFrameNavigations, nativeIntermediaryNavigations, rootWidgetRoutingWitness } from "./stagehand/source-provenance.mjs";
 import { sourceTransportCodes } from "./stagehand/source-diagnostic.mjs";
 
 export const STAGEHAND_SOURCE_MODE = "HYBRID_SOURCE_DISCOVERY";
@@ -84,12 +84,29 @@ export function stagehandSourceFailureCode(report, job) {
   return "STAGEHAND_SOURCE_UNRESOLVED";
 }
 
+function notFoundRecovery(report,job) {
+  const value=report.notFoundRecovery;if(value===undefined)return undefined;
+  requireFact(plain(value)&&Object.keys(value).sort().join(',')==='completedAt,failedUrl,observedAt,recoveredTo,recoveredUrl,sourceUrl,status,targetUrl'&&
+    value.status===404&&value.recoveredTo===job.request.identity.officialUrl&&
+    [value.failedUrl,value.targetUrl,value.sourceUrl,value.recoveredTo,value.recoveredUrl].every(publicStagehandSourceUrl),'STAGEHAND_SOURCE_REPORT_INVALID');
+  const began=Date.parse(value.observedAt),ended=Date.parse(value.completedAt);
+  requireFact(Number.isFinite(began)&&new Date(began).toISOString()===value.observedAt&&Number.isFinite(ended)&&new Date(ended).toISOString()===value.completedAt&&
+    began>=Date.parse(report.startedAt)&&ended>=began&&ended<=Date.parse(report.finishedAt)&&ended<=Date.parse(report.workDeadlineAt)&&
+    [value.sourceUrl,value.failedUrl,value.recoveredUrl].every(url=>report.visitedUrls?.includes(url))&&
+    report.actions?.some(row=>row.sourceUrl===value.sourceUrl&&row.action?.method==='click'&&row.observedTarget?.tag==='A'&&
+      row.observedTarget.href===value.targetUrl&&row.afterUrl===value.failedUrl&&row.error===true)&&
+    report.officialLinkLedger?.some(row=>row.kind==='NATIVE_VISIBLE_DOM'&&row.pageUrl===value.sourceUrl&&/^[a-f0-9]{64}$/u.test(row.documentHash)&&
+      row.links?.some(link=>link.href===value.targetUrl&&link.visible===true)),'STAGEHAND_SOURCE_REPORT_INVALID');
+  return value;
+}
 export function validateStagehandSourceReport(report, job) {
-  requireFact(report?.decisionOrigin===undefined||report.decisionOrigin==='NATIVE_UNIQUE_SUPPORTED_SOURCE','STAGEHAND_SOURCE_REPORT_INVALID');
+  const rootWidget = report?.outcome === "ROOT_WIDGET_PROPOSED_UNVERIFIED";
+  requireFact(rootWidget ? report.decisionOrigin === "NATIVE_PUBLIC_ROOT_WIDGET" && report.frameworkFailureCode === undefined && report.sourceDiagnostic === undefined :
+    report?.decisionOrigin===undefined||report.decisionOrigin==='NATIVE_UNIQUE_SUPPORTED_SOURCE','STAGEHAND_SOURCE_REPORT_INVALID');
   requireFact(plain(report) && report.jobId === job.id && report.firstPickedUpAt === job.firstPickedUpAt && report.deadlineAt === job.deadlineAt &&
     report.framework?.name === "Stagehand" && report.framework.version === "4.3.0" && report.frameworkMode === STAGEHAND_SOURCE_MODE &&
     report.frameworkRole === "SOURCE_DISCOVERY_ONLY" && report.frameworkExtractedTimes === false &&
-    report.outcome === "SOURCE_PROPOSED_UNVERIFIED" && report.browserClosed === true && report.modelClosed === true &&
+    (rootWidget || report.outcome === "SOURCE_PROPOSED_UNVERIFIED") && report.browserClosed === true && report.modelClosed === true &&
     report.recipe === null && report.recipeJson == null && report.result?.recipeJson == null &&
     Array.isArray(report.matchingSlots) && report.matchingSlots.length === 0 &&
     report.metrics?.model === "gpt-6.1-sol" && report.metrics.reasoningEffort === "medium", "STAGEHAND_SOURCE_REPORT_INVALID");
@@ -100,7 +117,12 @@ export function validateStagehandSourceReport(report, job) {
   requireFact(Number.isFinite(started) && Number.isFinite(completed) && started >= Date.parse(job.firstPickedUpAt) - 5000 &&
     completed >= started && completed <= sourceEnd && Date.parse(report.workDeadlineAt) <= sourceEnd &&
     Date.parse(report.workDeadlineAt) > started, "STAGEHAND_SOURCE_CLOCK_INVALID");
-  const proposal = validateStagehandSourceProposal(report.adapterSourceProposal);
+  if (rootWidget) {
+    requireFact(report.adapterSourceProposal === null && rootWidgetRoutingWitness(report, job.request.identity.officialUrl, publicStagehandSourceUrl), "STAGEHAND_SOURCE_NOT_OBSERVED");
+  } else requireFact(report.rootWidgetWitness === undefined, "STAGEHAND_SOURCE_REPORT_INVALID");
+  const proposal = rootWidget ? null : validateStagehandSourceProposal(report.adapterSourceProposal);
+  const negative=notFoundRecovery(report,job);
+  requireFact(!proposal||!negative||![negative.targetUrl,negative.failedUrl].includes(proposal.bookingUrl),'STAGEHAND_SOURCE_NOT_OBSERVED');
   requireFact(report.nativeFrameNavigations === undefined || Array.isArray(report.nativeFrameNavigations) && report.nativeFrameNavigations.length <= 2 &&
     nativeFrameNavigations(report, publicStagehandSourceUrl).length === report.nativeFrameNavigations.length, "STAGEHAND_SOURCE_GRAPH_LIMIT");
   requireFact(report.nativeIntermediaryNavigations === undefined || Array.isArray(report.nativeIntermediaryNavigations) && report.nativeIntermediaryNavigations.length <= 2 &&
@@ -108,6 +130,7 @@ export function validateStagehandSourceReport(report, job) {
   const intermediaries = nativeIntermediaryNavigations(report, publicStagehandSourceUrl);
   requireFact(boundedRows(report.officialLinkLedger,512).filter(row=>row.kind==='NATIVE_PUBLIC_BOOKING_INTERMEDIARY').every(row=>
     intermediaries.some(entry=>entry.pageUrl===row.pageUrl&&entry.observedAt===row.observedAt&&entry.documentHash===row.documentHash)), "STAGEHAND_SOURCE_GRAPH_LIMIT");
+  if (rootWidget) return { schemaVersion: 1, kind: "ROOT_PUBLIC_WIDGET" };
   requireFact(observedBookingSourceCandidates(report, job.request.identity.officialUrl, publicStagehandSourceUrl,
     { sourceDiscoveryOnly: true }).includes(proposal.bookingUrl), "STAGEHAND_SOURCE_NOT_OBSERVED");
   return proposal;
@@ -120,15 +143,17 @@ function boundedRows(value, maximum) {
 const urlField = value => publicStagehandSourceUrl(value) ? value : undefined;
 /** Project original collector rows. No edges are synthesized and no oversized row list is truncated. */
 export function stagehandRoutingReport(report, job) {
-  validateStagehandSourceReport(report, job);
+  const route = validateStagehandSourceReport(report, job), rootWidget = route.kind === "ROOT_PUBLIC_WIDGET";
   const projected = {
     jobId: report.jobId, firstPickedUpAt: report.firstPickedUpAt, deadlineAt: report.deadlineAt,
     startedAt: report.startedAt, finishedAt: report.finishedAt, workDeadlineAt: report.workDeadlineAt,
     framework: { name: "Stagehand", version: "4.3.0" }, frameworkMode: STAGEHAND_SOURCE_MODE,
-    frameworkRole: "SOURCE_DISCOVERY_ONLY", frameworkExtractedTimes: false, outcome: "SOURCE_PROPOSED_UNVERIFIED",
-    browserClosed: true, modelClosed: true, recipe: null, matchingSlots: [], adapterSourceProposal: validateStagehandSourceProposal(report.adapterSourceProposal),
+    frameworkRole: "SOURCE_DISCOVERY_ONLY", frameworkExtractedTimes: false, outcome: report.outcome,
+    browserClosed: true, modelClosed: true, recipe: null, matchingSlots: [], adapterSourceProposal: rootWidget ? null : validateStagehandSourceProposal(report.adapterSourceProposal),
     metrics: { model: "gpt-6.1-sol", reasoningEffort: "medium" },
-    ...(report.decisionOrigin==='NATIVE_UNIQUE_SUPPORTED_SOURCE'?{decisionOrigin:report.decisionOrigin}:{}),
+    ...(['NATIVE_UNIQUE_SUPPORTED_SOURCE','NATIVE_PUBLIC_ROOT_WIDGET'].includes(report.decisionOrigin)?{decisionOrigin:report.decisionOrigin}:{}),
+    ...(rootWidget ? { rootWidgetWitness: rootWidgetRoutingWitness(report, job.request.identity.officialUrl, publicStagehandSourceUrl) } : {}),
+    ...(report.notFoundRecovery ? { notFoundRecovery: structuredClone(notFoundRecovery(report,job)) } : {}),
     visitedUrls: boundedRows(report.visitedUrls, 512).filter(publicStagehandSourceUrl),
     officialLinkLedger: boundedRows(report.officialLinkLedger, 512).map(row => ({
       ...(["NATIVE_VISIBLE_DOM", "NATIVE_PUBLIC_BOOKING_INTERMEDIARY"].includes(row.kind) ? { kind: row.kind } : {}),

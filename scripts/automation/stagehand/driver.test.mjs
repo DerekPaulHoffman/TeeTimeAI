@@ -4,6 +4,98 @@ import { runInNewContext } from 'node:vm';
 import { prepareReadOnlyAction, readNativeActionTarget, assertNativeSelectReadback, isPublicFilterSelect, assertPublicUrl, settleNativeLinkNavigation, loadStagehandRuntime, validateOwnedBrowserConnection, openStagehandSession } from './driver.mjs';
 import { createStagehandCodexModel } from './codex-model.mjs';
 
+const cleanupDeferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return{promise,resolve,reject};};
+const flushCleanup=async()=>{for(let i=0;i<24;i++)await Promise.resolve();};
+async function cleanupSession({deadline,signal,finish,launcher,receipt={browserClosed:true,providerRequestsDrained:true}}){
+ let hostCalls=0,browserCalls=0;
+ const page={pageId:'owned'},browser={closed:false,context:{pages:async()=>[page]},close:async()=>{browserCalls++;browser.closed=true;}};
+ const owned={kind:'OWNED_GUARDED_STAGEHAND_CONTEXT',cdpUrl:'http://127.0.0.1:12345',targetId:'owned',assertGuardedTargets:async()=>true,beforeAction:async()=>{},prepareNavigation:async()=>{},
+  close:async()=>{hostCalls++;await finish.promise;await launcher.promise;return receipt;}};
+ const session=await openStagehandSession({deadline,signal,modelDisabled:true,sourceRoutingOnly:true,ownedBrowser:owned},{loadRuntime:async()=>({localBrowser:{connect:async()=>browser},Stagehand:{create:async()=>({close:async()=>{}})}})});
+ return{session,hostCalls:()=>hostCalls,browserCalls:()=>browserCalls};
+}
+test('cleanup awaits one native finish and launcher drain beyond four seconds without replacing either acknowledgement',async t=>{
+ t.mock.timers.enable({apis:['Date','setTimeout'],now:1_900_000_000_000});
+ const finish=cleanupDeferred(),launcher=cleanupDeferred(),f=await cleanupSession({deadline:Date.now()+60000,finish,launcher});
+ let settled=false;const first=f.session.close(),pending=first.then(value=>{settled=true;return value;});const same=f.session.close();assert.equal(same,first);await flushCleanup();
+ t.mock.timers.tick(5000);await flushCleanup();assert.equal(settled,false);assert.equal(f.hostCalls(),1);assert.equal(f.browserCalls(),1);
+ finish.resolve();await flushCleanup();t.mock.timers.tick(5000);await flushCleanup();assert.equal(settled,false);launcher.resolve();assert.deepEqual(await pending,{browserClosed:true,modelClosed:true});assert.deepEqual(await same,{browserClosed:true,modelClosed:true});
+});
+test('cleanup rejects closure claims without the native receipt or successful launcher drain',async t=>{
+ t.mock.timers.enable({apis:['Date','setTimeout'],now:1_900_000_000_000});
+ for(const mode of ['finish-rejected','launcher-rejected','native-false']){
+  const finish=cleanupDeferred(),launcher=cleanupDeferred(),f=await cleanupSession({deadline:Date.now()+60000,finish,launcher,receipt:{browserClosed:mode!=='native-false',providerRequestsDrained:mode!=='native-false'}});
+  const pending=f.session.close();await flushCleanup();if(mode==='finish-rejected')finish.reject(Error('native finish failed'));else finish.resolve();await flushCleanup();if(mode==='launcher-rejected')launcher.reject(Error('launcher drain failed'));else launcher.resolve();
+  assert.deepEqual(await pending,{browserClosed:false,modelClosed:true});
+ }
+});
+test('cleanup timeout remains within its fixed host bound and cannot promote a late native receipt',async t=>{
+ t.mock.timers.enable({apis:['Date','setTimeout'],now:1_900_000_000_000});
+ const finish=cleanupDeferred(),launcher=cleanupDeferred(),f=await cleanupSession({deadline:Date.now()+60000,finish,launcher});let settled=false;
+ const pending=f.session.close().then(value=>{settled=true;return value;});await flushCleanup();t.mock.timers.tick(35001);await flushCleanup();assert.equal(settled,true);assert.deepEqual(await pending,{browserClosed:false,modelClosed:true});
+ finish.resolve();launcher.resolve();await flushCleanup();assert.deepEqual(await f.session.close(),{browserClosed:false,modelClosed:true});assert.equal(f.hostCalls(),1);
+});
+test('cleanup cannot extend the original source deadline or gain success from an aborted wait',async t=>{
+ t.mock.timers.enable({apis:['Date','setTimeout'],now:1_900_000_000_000});
+ for(const mode of ['deadline','abort','expired-before-close']){
+  const controller=new AbortController(),finish=cleanupDeferred(),launcher=cleanupDeferred(),deadline=Date.now()+3000,f=await cleanupSession({deadline,signal:controller.signal,finish,launcher});
+  if(mode==='expired-before-close')t.mock.timers.tick(3001);
+  const pending=f.session.close();await flushCleanup();if(mode==='abort')controller.abort();t.mock.timers.tick(3001);await flushCleanup();assert.deepEqual(await pending,{browserClosed:false,modelClosed:true});assert.equal(f.hostCalls(),1);assert.equal(f.browserCalls(),1);
+  finish.resolve();launcher.resolve();await flushCleanup();assert.deepEqual(await f.session.close(),{browserClosed:false,modelClosed:true});
+ }
+});
+
+test('404 completed current native document is an immediate distinct negative, never settled200',async()=>{
+ const {settleSourceDocument,sourceDocumentSettled}=await import('./driver.mjs');
+ const complete={bodyPresent:true,mainDocumentCurrent:true,mainDocumentComplete:true,mainReadPending:false,readyState:'complete',mainDocumentStatus:404,pendingReads:0};let reads=0;
+ assert.equal(sourceDocumentSettled(complete),false);
+ await assert.rejects(settleSourceDocument(async()=>{reads++;return complete;},{deadline:100,now:()=>0,sleep:async()=>{throw Error('404_MUST_NOT_WAIT');}}),error=>error.message==='STAGEHAND_SOURCE_NOT_FOUND'&&error.stagehandDocumentReadiness.mainDocumentStatus===404);
+ assert.equal(reads,1);
+});
+
+test('404 recovery rechecks original owned target/current read and uses one exact originalroot GET boundary',async t=>{
+ t.mock.timers.enable({apis:['Date'],now:Date.now()});
+ const root='https://owned.example/',failed=root+'missing',done={bodyPresent:true,mainDocumentCurrent:true,mainDocumentComplete:true,mainReadPending:false,readyState:'complete',mainDocumentStatus:404,pendingReads:0};
+ for(const mode of ['valid','popup','changed','pending','incomplete','noBody','loading','fatal','host','cdp','aborted','expired','status401','status403','status429','status500','foreign-root']){
+  let current=root,status=200,fault={},reads=0;const calls=[],controller=new AbortController();
+  const page={pageId:'owned',url:async()=>current,goto:async value=>{calls.push(['goto',value]);current=value;status=200;return{status:()=>200};}};
+  const browser={context:{pages:async()=>[page]},close:async()=>{}},owned={kind:'OWNED_GUARDED_STAGEHAND_CONTEXT',cdpUrl:'http://127.0.0.1:12345',targetId:'owned',assertGuardedTargets:async()=>true,beforeAction:async()=>{},prepareNavigation:async value=>calls.push(['prepare',value]),snapshotFailures:async()=>fault,observeSourceReadiness:async()=>{reads++;if(mode==='changed'&&reads===2)current=root+'changed';return{...done,mainDocumentStatus:mode.startsWith('status')?Number(mode.slice(6)):status,mainReadPending:mode==='pending',mainDocumentComplete:mode!=='incomplete',bodyPresent:mode!=='noBody',readyState:mode==='loading'?'loading':'complete'};},close:async()=>({browserClosed:true})};
+  const session=await openStagehandSession({deadline:Date.now()+10000,signal:controller.signal,modelDisabled:true,sourceRoutingOnly:true,ownedBrowser:owned},{loadRuntime:async()=>({localBrowser:{connect:async()=>browser},Stagehand:{create:async()=>({close:async()=>{}})}})});
+  await session.goto(root);calls.length=0;current=failed;status=404;if(mode==='popup')page.pageId='popup';if(mode==='fatal')fault={nativeRouterFailure:{code:'NATIVE_REDIRECT_ROUTING_FAILED'}};if(mode==='host')fault={hostGuardFailure:{stage:'SOURCE_DOM',reason:'DOM_URL_CHANGED'}};if(mode==='cdp')fault={ownedCdpFailure:{code:'OWNED_CDP_CLOSED'}};if(mode==='aborted')controller.abort();if(mode==='expired')t.mock.timers.tick(10001);
+  if(mode==='valid'){const result=await session.recoverSourceNotFound(root,failed);assert.equal(result.failedUrl,failed);assert.equal(result.status,404);assert.equal(result.recoveredTo,root);assert.deepEqual(calls,[['prepare',root],['goto',root]]);await assert.rejects(session.recoverSourceNotFound(root,failed));}
+  else{await assert.rejects(session.recoverSourceNotFound(mode==='foreign-root'?'https://foreign.example/':root,failed));assert.equal(calls.filter(row=>row[0]==='goto').length,0);}
+  await session.close();
+ }
+});
+
+test('404 recovery retains historical RPC facts but still rejects every current failure and other CDP layer',async()=>{
+ const root='https://owned.example/',failed=root+'missing',rpc={layer:'RPC',method:'Fetch.failRequest',rpcCode:-32602,lifecycle:'UNKNOWN',pendingRequests:13};
+ for(const mode of ['historical','current-read','attestation','native','host','drift','SOCKET_CLOSE','SOCKET_ERROR','PROTOCOL','TIMEOUT','SEND','ABORT']){
+  let current=root,status=200,reads=0,attested=true;const calls=[],currentError=Error('OWNED_STAGEHAND_CDP_UNAVAILABLE');
+  const fault={ownedCdpFailure:mode===mode.toUpperCase()?{layer:mode,pendingRequests:0}:rpc,
+   ...(mode==='native'?{nativeRouterFailure:{code:'NATIVE_REDIRECT_ROUTING_FAILED'}}:{}),
+   ...(mode==='host'?{hostGuardFailure:{stage:'SOURCE_DOM',reason:'DOM_URL_CHANGED'}}:{})};
+  const page={pageId:'owned',url:async()=>current,goto:async url=>{calls.push(['goto',url]);current=url;status=200;}};
+  const browser={context:{pages:async()=>[page]},close:async()=>{}};
+  const owned={kind:'OWNED_GUARDED_STAGEHAND_CONTEXT',cdpUrl:'http://127.0.0.1:12345',targetId:'owned',assertGuardedTargets:async()=>attested,beforeAction:async()=>{},
+   prepareNavigation:async url=>calls.push(['prepare',url]),snapshotFailures:async()=>fault,
+   observeSourceReadiness:async()=>{reads++;if(mode==='current-read'&&reads===2)throw currentError;if(mode==='drift'&&reads===2)current=root+'different';
+    return{bodyPresent:true,mainDocumentCurrent:true,mainDocumentComplete:true,mainReadPending:false,readyState:'complete',mainDocumentStatus:status,pendingReads:57};},
+   close:async()=>({browserClosed:true})};
+  const session=await openStagehandSession({deadline:Date.now()+10000,modelDisabled:true,sourceRoutingOnly:true,ownedBrowser:owned},
+   {loadRuntime:async()=>({localBrowser:{connect:async()=>browser},Stagehand:{create:async()=>({close:async()=>{}})}})});
+  await session.goto(root);calls.length=0;current=failed;status=404;if(mode==='attestation')attested=false;
+  if(mode==='historical'){
+   assert.equal((await session.recoverSourceNotFound(root,failed)).status,404);assert.equal(reads,3);
+   assert.deepEqual(calls,[['prepare',root],['goto',root]]);
+  }else{
+   await assert.rejects(session.recoverSourceNotFound(root,failed),error=>mode!=='current-read'||error===currentError);
+   assert.equal(calls.length,0);
+  }
+  await session.close();assert.deepEqual(session.ownedCdpFailure,fault.ownedCdpFailure);
+ }
+});
+
 const select = { tag: 'SELECT', type: '', visible: true, disabled: false, multiple: false, name: 'optStartTime', id: '', label: '',
   fieldLabel: 'Start time', href: '', formAction: '', text: '5:00 am 10:00 am 8:00 pm', rowText: '',
   options: [{ value: '5:00:00 AM', label: '5:00\u00a0am', disabled: false }, { value: '10:00:00 AM', label: '10:00\u00a0am', disabled: false }, { value: '8:00:00 PM', label: '8:00\u00a0pm', disabled: false }] };
@@ -192,10 +284,11 @@ test('exact driver retains inner wrapped model failure only for the failing oper
  const browser={closed:false,context:{pages:async()=>[page]},close:async()=>{browser.closed=true;}};
  const cdpFailure={layer:'RPC',method:'Target.closeTarget',rpcCode:-32001,lifecycle:'SESSION_NOT_FOUND',pendingRequests:0};
  const nativeFailure={code:'NATIVE_REDIRECT_RESPONSE_TIMEOUT',phase:'RESPONSE_WAIT',method:'GET',resourceType:'script',rootFrame:true};
+ const hostFailure={stage:'SOURCE_DOM',reason:'DOM_URL_CHANGED',nativeFrameHasFragment:true,domHasFragment:true};
  const cleanupOrder=[];
  const owned={kind:'OWNED_GUARDED_STAGEHAND_CONTEXT',cdpUrl:'http://127.0.0.1:12345',targetId:'owned',assertGuardedTargets:async()=>true,beforeAction:async()=>{},prepareNavigation:async()=>{},
   snapshotFailure:async()=>{throw Error('LEGACY_SNAPSHOT_MUST_NOT_REPLACE_NATIVE');},
-  snapshotFailures:async()=>{cleanupOrder.push('snapshot');return{ownedCdpFailure:cdpFailure,nativeRouterFailure:nativeFailure};},close:async()=>{cleanupOrder.push('host');return{browserClosed:true,ownedCdpFailure:{layer:'SOCKET_CLOSE',pendingRequests:0}};}};
+  snapshotFailures:async()=>{cleanupOrder.push('snapshot');return{ownedCdpFailure:cdpFailure,nativeRouterFailure:nativeFailure,hostGuardFailure:hostFailure};},close:async()=>{cleanupOrder.push('host');return{browserClosed:true,ownedCdpFailure:{layer:'SOCKET_CLOSE',pendingRequests:0}};}};
  const session=await openStagehandSession({model:'gpt-6.1-sol',deadline:Date.now()+10000,sourceRoutingOnly:true,ownedBrowser:owned},{
   createModel:options=>createStagehandCodexModel({...options,clientFactory:async()=>({generate:async()=>{
    if(failModel)throw Object.assign(Error('SECRET_INNER'),{code:'LOCAL_MODEL_RPC_FAILED',diagnostics:{phase:'turn/start',rpcCode:-32600}});
@@ -213,5 +306,6 @@ test('exact driver retains inner wrapped model failure only for the failing oper
  assert.equal(session.ownedCdpFailure,undefined);assert.deepEqual(await session.close(),{browserClosed:true,modelClosed:true});
  assert.deepEqual(session.ownedCdpFailure,cdpFailure);const cdpCopy=session.ownedCdpFailure;cdpCopy.method='UNKNOWN';assert.equal(session.ownedCdpFailure.method,'Target.closeTarget');
  assert.deepEqual(session.nativeRouterFailure,nativeFailure);const nativeCopy=session.nativeRouterFailure;nativeCopy.code='UNKNOWN';assert.equal(session.nativeRouterFailure.code,'NATIVE_REDIRECT_RESPONSE_TIMEOUT');
+ assert.deepEqual(session.hostGuardFailure,hostFailure);const hostCopy=session.hostGuardFailure;hostCopy.reason='PRIVATE';assert.equal(session.hostGuardFailure.reason,'DOM_URL_CHANGED');
  assert.deepEqual(cleanupOrder,['snapshot','model','SDK','host']);
 });

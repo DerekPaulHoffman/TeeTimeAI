@@ -91,6 +91,23 @@ describe("fixed existing adapter recipes", () => {
       .rejects.toThrow("UNSUPPORTED_ADAPTER_SOURCE");
     expect(fetch).not.toHaveBeenCalled();
   });
+  it("classifies an actually read same-origin public document without a supported bootstrap as unsupported, not malformed Amelia", async () => {
+    const source = { officialUrl: "https://unknown-public.example.org/", bookingUrl: "https://unknown-public.example.org/public-rentals/",
+      venueName: "Example Public Golf Studio", venueAddress: "100 Main Road, Example, NY 12345, USA", timeZone: input.timeZone };
+    const official = '<title>Example Public Golf Studio | Public rentals</title><h1>Example Public Golf Studio</h1><a href="/public-rentals/">Book golf</a><address>100 Main Road, Example, NY 12345</address>';
+    const fetch = vi.fn<typeof globalThis.fetch>(async (url, init) => {
+      expect(init).toMatchObject({ method: "GET", credentials: "omit", redirect: "manual" });
+      expect([source.officialUrl, source.bookingUrl]).toContain(String(url));
+      return new Response(String(url) === source.officialUrl ? official : '<main><h1>Public rental calendar</h1><div id="public-calendar">Choose a date</div></main>',
+        { headers: { "content-type": "text/html" } });
+    });
+    let active = 0, released = 0;
+    await expect(inspectExistingAdapter(source, { ...deps, fetch, requestLease: async (_family, work) => {
+      active++; try { return { acquired: true as const, value: await work() }; } finally { active--; released++; }
+    } })).rejects.toThrow("UNSUPPORTED_ADAPTER_SOURCE");
+    expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([source.officialUrl, source.bookingUrl]);
+    expect(active).toBe(0); expect(released).toBe(2);
+  });
   it("discovers and independently reuses a directory-proven simulator with explicit duration rates", async () => {
     const source = { ...teeitup.source, bookingUrl: "https://studio.book.teeitup.com/", venueName: "Example Swing Studio",
       venueAddress: "100 Main Road Ste A, Example, NY 12345, USA" };

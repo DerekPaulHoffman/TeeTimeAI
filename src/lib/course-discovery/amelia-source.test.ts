@@ -1,8 +1,29 @@
 // @vitest-environment node
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
-import { AMELIA_CLIENT_HASHES, ameliaMetadataSchema, parseAmeliaBookingPage, parseAmeliaEntities, parseAmeliaPublicClient,
+import { AMELIA_CLIENT_HASHES, ameliaMetadataSchema, hasAmeliaBootstrapEvidence, parseAmeliaBookingPage, parseAmeliaEntities, parseAmeliaPublicClient,
   verifyAmeliaClients, verifyAmeliaOfficialPage, type AmeliaIdentitySource } from "./amelia-source";
+
+describe("cold Amelia bootstrap absence classification", () => {
+  it("finds evidence anywhere in the complete bounded document without validating it", () => {
+    const markers = [
+      '<script>var wpAmeliaSettings = null;</script>',
+      '<script>var wpAmeliaSettings = {}; var wpAmeliaSettings = {};</script>',
+      '<div hidden id="amelia-v2-booking-7"></div>',
+      '<template><div class="amelia-v2-booking"></div></template>',
+      '<script src="https://foreign.example.org/wp-content/plugins/ameliabooking/public.js"></script>',
+      String.raw`<script>var wp\u0041meliaSettings = {};</script>`,
+      '<script src="/wp-content/plugins/%61meliabooking/public.js"></script>',
+      '<div id="&#97;melia-v2-booking-7"></div>',
+    ];
+    for (const marker of markers) expect(hasAmeliaBootstrapEvidence(`<main>${"unrelated ".repeat(20_000)}</main>${marker}`)).toBe(true);
+  });
+  it("classifies only complete bounded marker-free documents as absent", () => {
+    expect(hasAmeliaBootstrapEvidence('<main><h1>Public calendar</h1><div id="date-picker">Choose a date</div></main>')).toBe(false);
+    expect(() => hasAmeliaBootstrapEvidence(" ".repeat(2_000_001))).toThrow("ADAPTER_RESPONSE_LIMIT");
+    expect(() => hasAmeliaBootstrapEvidence("<div>".repeat(90))).toThrow("ADAPTER_DOCUMENT_LIMIT");
+  });
+});
 
 // Keep these tests small: the real inspected clients are hash-pinned in code,
 // while these exact inert fixtures stand in for those reviewed bytes only.

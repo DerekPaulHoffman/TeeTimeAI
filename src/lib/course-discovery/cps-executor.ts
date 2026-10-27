@@ -18,6 +18,29 @@ export type CpsDependencies = { fetch?: typeof fetch; now?: () => Date; deadline
   trustedContext?: { canonicalCoursePhone?: string }; localCapabilities?: readonly "LOCAL_CHROME"[]; readNativeOfficialPage?: NativeOfficialPageReader;
   requestLease?: <T>(family: string, work: () => Promise<T>) => Promise<{ acquired: true; value: T } | { acquired: false }> };
 const MAX_RESPONSE_BYTES = 2_000_000, MAX_TOTAL_BYTES = 13_000_000;
+/** Only an explicit HTTP label may select legacy HTML bytes. No meta sniffing
+ * or malformed-UTF8 fallback; API JSON retains its separate fatal UTF8 path. */
+export function decodeCpsOfficialHtml(buffer: ArrayBuffer, contentType: string): string {
+  if (buffer.byteLength > 600_000) fail("ADAPTER_RESPONSE_LIMIT");
+  if (contentType.length > 512 || /[\r\n\u0000]/u.test(contentType)) fail("ADAPTER_RESPONSE_INVALID");
+  const [mime, ...parameters] = contentType.split(";");
+  if (mime.trim().toLowerCase() !== "text/html" || parameters.length > 16) fail("ADAPTER_RESPONSE_INVALID");
+  let label: string | undefined;
+  for (const parameter of parameters) {
+    const match = /^\s*([a-z0-9!#$%&'*+.^_`|~-]+)\s*=\s*(?:"([^"\\]*)"|([a-z0-9!#$%&'*+.^_`|~-]+))\s*$/iu.exec(parameter);
+    if (!match) fail("ADAPTER_RESPONSE_INVALID");
+    if (match[1].toLowerCase() !== "charset") continue;
+    if (label !== undefined) fail("ADAPTER_RESPONSE_INVALID");
+    label = match[2] ?? match[3];
+  }
+  let encoding = "utf-8";
+  try { if (label !== undefined) encoding = new TextDecoder(label, { fatal: true }).encoding; }
+  catch { fail("ADAPTER_RESPONSE_INVALID"); }
+  if (!["utf-8", "windows-1252"].includes(encoding)) fail("ADAPTER_RESPONSE_INVALID");
+  const bytes = new Uint8Array(buffer), utf8Bom = bytes[0] === 239 && bytes[1] === 187 && bytes[2] === 191;
+  if (bytes[0] === 255 && bytes[1] === 254 || bytes[0] === 254 && bytes[1] === 255 || utf8Bom && encoding !== "utf-8") fail("ADAPTER_RESPONSE_INVALID");
+  return new TextDecoder(encoding, { fatal: true }).decode(buffer);
+}
 const uuid = (value: string) => /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u.test(value);
 const dateOnly = z.string().regex(/^\d{4}-\d{2}-\d{2}$/u).refine(value => {
   const time = Date.parse(`${value}T00:00:00Z`); return Number.isFinite(time) && new Date(time).toISOString().slice(0, 10) === value;
@@ -116,7 +139,7 @@ function createReader(source: CpsSource, deps: CpsDependencies, date: string, sa
         const buffer = await response.arrayBuffer(); bytes += buffer.byteLength;
         if (buffer.byteLength > limit || bytes > MAX_TOTAL_BYTES) fail("ADAPTER_RESPONSE_LIMIT");
         signal.throwIfAborted(); if (Date.now() >= deadline) fail("DEADLINE_EXCEEDED");
-        return { status: response.status, headers: response.headers, text: new TextDecoder("utf-8", { fatal: true }).decode(buffer) };
+        return { status: response.status, headers: response.headers, text: kind === "html" ? decodeCpsOfficialHtml(buffer, response.headers.get("content-type") ?? "") : new TextDecoder("utf-8", { fatal: true }).decode(buffer) };
       } finally { if (!response.bodyUsed) await response.body?.cancel().catch(() => {}); }
     });
   };

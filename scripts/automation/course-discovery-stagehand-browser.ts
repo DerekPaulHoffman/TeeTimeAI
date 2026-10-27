@@ -10,6 +10,7 @@ const command = z.discriminatedUnion("action", [
   z.object({ id: z.number().int().positive(), action: z.literal("before"), targetId: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/u), href: z.string().max(2048).optional() }).strict(),
   z.object({ id: z.number().int().positive(), action: z.literal("frames"), targetId: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/u) }).strict(),
   z.object({ id: z.number().int().positive(), action: z.literal("unique_source"), targetId: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/u) }).strict(),
+  z.object({ id: z.number().int().positive(), action: z.literal("root_widget"), targetId: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/u) }).strict(),
   z.object({ id: z.number().int().positive(), action: z.literal("intermediary_prepare"), targetId: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/u) }).strict(),
   z.object({ id: z.number().int().positive(), action: z.literal("intermediary_complete"), targetId: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/u) }).strict(),
   z.object({ id: z.number().int().positive(), action: z.literal("readiness"), targetId: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/u) }).strict(),
@@ -43,6 +44,7 @@ async function main() {
           : value.action === "before" ? { ready: true, witness: await host.beforeAction(value.targetId, value.href) }
           : value.action === "frames" ? await host.observeFrameSources(value.targetId)
           : value.action === "unique_source" ? await host.observeUniqueSource(value.targetId)
+          : value.action === "root_widget" ? await host.observeRootPublicWidget(value.targetId)
           : value.action === "intermediary_prepare" ? await host.preparePublicBookingIntermediary(value.targetId)
           : value.action === "intermediary_complete" ? await host.completePublicBookingIntermediary(value.targetId)
           : value.action === "readiness" ? await host.observeSourceReadiness(value.targetId)

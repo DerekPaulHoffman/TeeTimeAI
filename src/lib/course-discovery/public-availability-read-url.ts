@@ -1,3 +1,5 @@
+import { isSafePublicServiceReadUrl } from "./public-service-read-url";
+
 const rangePrefix = "https://www.sevenrooms.com/api-yoa/availability/widget/range?";
 const requiredKeys = ["venue", "time_slot", "party_size", "halo_size_interval", "start_date", "num_days", "channel"];
 const allowedKeys = new Set([...requiredKeys, "selected_lang_code", "picked_duration"]);
@@ -19,6 +21,7 @@ function calendarDate(value: string) {
  * not rewrite the wire URL, grant navigation, or prove inventory completeness. */
 export function isSafePublicAvailabilityReadUrl(value: string, resourceType: string, method: string,
   strictUrl: (value: string) => boolean) {
+  if (isSafePublicServiceReadUrl(value, resourceType, method, "AVAILABILITY", strictUrl)) return true;
   // This fixed public read basename resembles opaque state to the customer URL
   // guard. The exception grants only data-read URL validation, never navigation,
   // body/header authority or a changed wire URL.

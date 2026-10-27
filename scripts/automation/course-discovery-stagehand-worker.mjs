@@ -37,6 +37,31 @@ function currentSourceModelFailure(report, job, sourceDeadline, now, invocationS
   return structuredClone(diagnostic.modelTurnFailure);
 }
 
+/** A clean no-proposal decision permits a new attempt at the ordinary root,
+ * never adoption of the report's URLs, identity, inventory or source proof. */
+function currentPublicUnresolved(report, job, sourceDeadline, now, invocationStarted) {
+  const diagnostic = projectSourceDiagnostic(report?.sourceDiagnostic), started = Date.parse(report?.startedAt),
+    finished = Date.parse(report?.finishedAt), supplied = Date.parse(report?.workDeadlineAt);
+  const cleanFields = new Set(["schemaVersion", "phase", "errorClass", "sourceStop", "sourceDocumentReadiness",
+    "nativeIntermediaryPreparation", "elapsedMs", "counts", "completedUsageIsLowerBound", "cleanup", "graph"]);
+  const ready = diagnostic?.sourceDocumentReadiness, counts = diagnostic?.counts;
+  return stagehandSourceFailureCode(report, job) === "STAGEHAND_SOURCE_UNRESOLVED" &&
+    report.schemaVersion === 1 &&
+    report.methodSaved === false && report.methodArtifactSaved === false && report.rootWidgetWitness === undefined &&
+    report.decisionOrigin === undefined && report.result === undefined &&
+    report.initialNavigation?.requestedUrl === job.request.identity.officialUrl && report.initialNavigation.status === 200 &&
+    Number.isFinite(started) && Number.isFinite(finished) && Number.isFinite(supplied) &&
+    started >= Math.max(Date.parse(job.firstPickedUpAt), invocationStarted) - 5000 && finished >= started &&
+    finished <= Math.min(sourceDeadline, now + 5000) && supplied > started && supplied <= sourceDeadline &&
+    diagnostic?.phase === "EXTRACT" && diagnostic.errorClass === "NONE" && Object.keys(diagnostic).every(key => cleanFields.has(key)) &&
+    diagnostic.sourceStop?.finalDecision === "UNRESOLVED" && diagnostic.sourceStop.condition === "EXPLICIT_UNRESOLVED" &&
+    diagnostic.cleanup.browserClosed === true && diagnostic.cleanup.modelClosed === true &&
+    ready?.bodyPresent === true && ready.mainDocumentCurrent === true && ready.mainDocumentComplete === true &&
+    ready.mainReadPending === false && ready.mainDocumentStatus === 200 && ["interactive", "complete"].includes(ready.readyState) &&
+    counts.failedModelCalls === 0 && counts.rejectedActions === 0 && counts.actionAttempts === counts.executedActions &&
+    counts.attemptedModelCalls === counts.completedModelCalls && counts.completedModelCalls === report.metrics.localCodexCalls.length;
+}
+
 /** Source routing has no customer, provider, identity, inventory, or activation authority.
  * Only fresh native inspection and the existing server-issued verifier can create a method. */
 export async function runCourseDiscoveryStagehandWorker({
@@ -71,6 +96,30 @@ export async function runCourseDiscoveryStagehandWorker({
       throw error;
     });
   };
+  const runGenericFromFreshRoot = async trigger => {
+    check();
+    phase = "GENERIC_FALLBACK";
+    metrics.source = { ...sourceMetrics(report), elapsedMs: metrics.sourceElapsedMs, resumed: metrics.sourceResumed,
+      usageRecordedLowerBound: true, usageFromPriorAttempt: metrics.sourceResumed, browserClosed: report.browserClosed === true, modelClosed: report.modelClosed === true };
+    metrics.modelCallsMeaning = "SOURCE_COMPLETED_CALLS_ONLY_GENERIC_USAGE_SEPARATE";
+    metrics.genericFallback = { trigger, startedAt: now(), workDeadlineAt: new Date(deadline).toISOString(), freshOfficialStart: true };
+    const provenance = packStagehandCheckpoint({ reference, failure: failureEvidence, progress: { phase: "GENERIC_FALLBACK" } });
+    const fallbackStarted = now();
+    try {
+      const outcome = await genericWorker({ job, workDeadlineAt: new Date(deadline).toISOString(), client, cwd, signal, model,
+        freshOfficialStart: true, checkpointProvenance: provenance,
+        beforeActivate: async () => { check(); await beforeActivate(); },
+        afterActivate: async ({ metrics: genericMetrics } = {}) => {
+          activationAcknowledged = true; metrics.genericFallback.worker = genericMetrics; await afterActivate({ metrics });
+        } });
+      metrics.genericFallback.worker = outcome.metrics;
+      if (outcome.outcome !== "activated" || !activationAcknowledged) throw discoveryError("DISCOVERY_NO_VERIFIED_RECIPE");
+      return { ...outcome, metrics };
+    } catch (failure) {
+      if (failure?.discoveryMetrics) metrics.genericFallback.worker = failure.discoveryMetrics;
+      throw failure;
+    } finally { metrics.genericFallback.elapsedMs = Math.max(0, now() - fallbackStarted); publishMetrics(); }
+  };
   try {
     check();
     reference = readStagehandSourceCheckpoint(job, workDeadlineAt, now());
@@ -97,6 +146,14 @@ export async function runCourseDiscoveryStagehandWorker({
       if (sourceSignal.aborted || now() >= sourceDeadline) throw discoveryError("STAGEHAND_SOURCE_BUDGET_EXHAUSTED");
       const sourceFailure = stagehandSourceFailureCode(report, job);
       if (sourceFailure) {
+        if (sourceFailure === "STAGEHAND_SOURCE_UNRESOLVED" && currentPublicUnresolved(report, job, sourceDeadline, now(), started)) {
+          // Keep a typed negative diagnostic, not a resumable source export.
+          const negative = createStagehandFailureCheckpoint({ job, report, error: discoveryError(sourceFailure), phase,
+            metrics, previous: failureEvidence, now: now(), startedAt: started });
+          failureEvidence = negative.stagehandFailure;
+          await checkpoint("GENERIC_FALLBACK");
+          return await runGenericFromFreshRoot("SOURCE_UNRESOLVED_PUBLIC_DOCUMENT");
+        }
         if (sourceFailure === "LOCAL_MODEL_TURN_FAILED") {
           const modelFailure = currentSourceModelFailure(report, job, sourceDeadline, now(), started);
           if (modelFailure) metrics.modelFailure = modelFailure;
@@ -109,7 +166,8 @@ export async function runCourseDiscoveryStagehandWorker({
     }
     check();
     // Checkpoint rows are revalidated as routing evidence before EVERY fresh native inspection.
-    validateStagehandSourceReport(report, job);
+    const routing = validateStagehandSourceReport(report, job);
+    if (routing.kind === "ROOT_PUBLIC_WIDGET") return await runGenericFromFreshRoot("ROOT_PUBLIC_WIDGET");
     phase = "FIXED_INSPECTION";
     let prepared, fixedInspection;
     try { prepared = await inspectStagehandAdapter({ report, adapterSourceProposal: report.adapterSourceProposal,
@@ -120,28 +178,7 @@ export async function runCourseDiscoveryStagehandWorker({
     catch (error) {
       if (!GENERIC_RECIPE_FALLBACK_CODES.includes(error?.code) || fixedInspection?.browserClosed !== true || fixedInspection.cleanupError ||
           fixedInspection.outcome !== "FAILED" || fixedInspection.actions?.at(-1)?.action !== "inspect_adapter") throw error;
-      check();
-      phase = "GENERIC_FALLBACK";
-      metrics.source = { ...sourceMetrics(report), elapsedMs: metrics.sourceElapsedMs, resumed: metrics.sourceResumed,
-        usageRecordedLowerBound: true, usageFromPriorAttempt: metrics.sourceResumed, browserClosed: report.browserClosed === true, modelClosed: report.modelClosed === true };
-      metrics.modelCallsMeaning = "SOURCE_COMPLETED_CALLS_ONLY_GENERIC_USAGE_SEPARATE";
-      metrics.genericFallback = { trigger: error.code, startedAt: now(), workDeadlineAt: new Date(deadline).toISOString(), freshOfficialStart: true };
-      const provenance = packStagehandCheckpoint({ reference, failure: failureEvidence, progress: { phase: "GENERIC_FALLBACK" } });
-      const fallbackStarted = now();
-      try {
-        const outcome = await genericWorker({ job, workDeadlineAt: new Date(deadline).toISOString(), client, cwd, signal, model,
-          freshOfficialStart: true, checkpointProvenance: provenance,
-          beforeActivate: async () => { check(); await beforeActivate(); },
-          afterActivate: async ({ metrics: genericMetrics } = {}) => {
-            activationAcknowledged = true; metrics.genericFallback.worker = genericMetrics; await afterActivate({ metrics });
-          } });
-        metrics.genericFallback.worker = outcome.metrics;
-        if (outcome.outcome !== "activated" || !activationAcknowledged) throw discoveryError("DISCOVERY_NO_VERIFIED_RECIPE");
-        return { ...outcome, metrics };
-      } catch (failure) {
-        if (failure?.discoveryMetrics) metrics.genericFallback.worker = failure.discoveryMetrics;
-        throw failure;
-      } finally { metrics.genericFallback.elapsedMs = Math.max(0, now() - fallbackStarted); publishMetrics(); }
+      return await runGenericFromFreshRoot(error.code);
     }
     check();
     phase = "RECIPE_VALIDATION";

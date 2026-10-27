@@ -134,6 +134,55 @@ async function savedRecipe(deps = dependencies()) {
 }
 
 describe("fixed Amelia public transport and independent recipe replay", () => {
+  it("preserves recognized cold Amelia when decoded fetch bytes retain encoded wire headers", async () => {
+    const deps = dependencies({ response: (url, response) => {
+      if (url.href === source.bookingUrl) {
+        response.headers.set("content-encoding", "gzip"); response.headers.set("content-length", "17");
+      }
+      return response;
+    } });
+    expect(await inspectAmelia(source, deps)).toMatchObject({ family: "AMELIA", timeZone: input.timeZone });
+    expect(deps.reads).toHaveLength(6);
+  });
+  it("keeps identity and transport failures ahead of cold unsupported-source classification", async () => {
+    const booking = '<main><h1>Public calendar</h1><p>Choose a date</p></main>';
+    const wrongIdentity = dependencies({ booking, official: officialHtml.replace("29 East", "129 East") });
+    await expect(inspectAmelia(source, wrongIdentity)).rejects.toThrow("ADAPTER_IDENTITY_MISMATCH");
+    expect(wrongIdentity.reads.map(url => url.href)).toEqual([source.officialUrl]);
+    for (const status of [401, 403, 206, 429]) {
+      const deps = dependencies({ booking, response: (url, response) => url.href === source.bookingUrl ? new Response(booking, { status, headers: response.headers }) : response });
+      await expect(inspectAmelia(source, deps)).rejects.toThrow(status === 429 ? "PROVIDER_THROTTLED" : "ADAPTER_TRANSPORT_FAILED");
+      expect(deps.reads.map(url => url.href)).toEqual([source.officialUrl, source.bookingUrl]);
+    }
+  });
+  it("never treats partial, invalid UTF-8, oversized or failed body reads as absent bootstrap", async () => {
+    const booking = '<main>Public calendar</main>';
+    for (const changed of [
+      () => new Response(booking, { headers: { "content-type": "text/html", "content-range": "bytes 0-27/1000" } }),
+      () => new Response(booking, { headers: { "content-type": "text/html", "content-length": "1000" } }),
+      () => new Response(booking, { headers: { "content-type": "text/html", "content-encoding": "gzip" } }),
+      () => new Response(new Uint8Array([0xc3, 0x28]), { headers: { "content-type": "text/html" } }),
+      () => new Response(" ".repeat(2_000_001), { headers: { "content-type": "text/html" } }),
+      () => { const response = new Response(booking, { headers: { "content-type": "text/html" } }); response.arrayBuffer = async () => { throw new Error("BODY_READ_FAILED"); }; return response; },
+    ]) {
+      const deps = dependencies({ response: (url, response) => url.href === source.bookingUrl ? changed() : response });
+      await expect(inspectAmelia(source, deps)).rejects.not.toThrow("UNSUPPORTED_ADAPTER_SOURCE");
+      expect(deps.reads.map(url => url.href)).toEqual([source.officialUrl, source.bookingUrl]);
+    }
+  });
+  it("keeps malformed or hidden Amelia evidence strict instead of opening generic fallback", async () => {
+    for (const booking of ['<script>var wpAmeliaSettings = null;</script>', '<div hidden class="amelia-v2-booking"></div>',
+      '<script src="https://foreign.example.org/wp-content/plugins/ameliabooking/public.js"></script>', String.raw`<script>var wp\u0041meliaSettings = null;</script>`]) {
+      const deps = dependencies({ booking });
+      await expect(inspectAmelia(source, deps)).rejects.toThrow("ADAPTER_CONFIGURATION_UNVERIFIED");
+      expect(deps.reads).toHaveLength(2);
+    }
+  });
+  it("keeps a vanished bootstrap on warm execution a strict configuration failure", async () => {
+    const recipe = await savedRecipe(), deps = dependencies({ booking: '<main><h1>Public calendar</h1></main>' });
+    expect(await executeAccessRecipe(recipe, input, deps)).toMatchObject({ status: "INCOMPLETE", complete: false, slots: [], evidence: { reason: "ADAPTER_CONFIGURATION_UNVERIFIED" } });
+    expect(deps.reads.map(url => url.href)).toEqual([source.officialUrl, source.bookingUrl]);
+  });
   it("verifies source and pinned clients before API access, then independently replays every rental and provider", async () => {
     const deps = dependencies(), recipe = await savedRecipe(deps), hash = hashAccessRecipe(recipe);
     const result = await executeAccessRecipe(recipe, input, deps);
