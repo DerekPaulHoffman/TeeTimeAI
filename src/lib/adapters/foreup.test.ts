@@ -7,6 +7,46 @@ describe("ForeUP adapter", () => {
     vi.unstubAllGlobals();
   });
 
+  it("binds the ordinary Public request and rejects explicit conflicting row IDs", async () => {
+    const metadata = { scheduleId: 792, bookingClassId: 4931,
+      bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/19021#/teetimes" };
+    const slot = { time: "2026-08-10 13:40", available_spots: 4 };
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(JSON.stringify([slot]), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify([{ ...slot, booking_class_id: 4932 }]), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify([{ ...slot, schedule_id: 793 }]), { status: 200 }));
+    const input = { courseId: "course-1", date: new Date("2026-08-10T00:00:00Z"), players: 2,
+      metadata, requireMatchingIds: true, fetchImpl };
+    await expect(fetchForeupTeeSheet(input)).resolves.toMatchObject({ slots: [expect.objectContaining({ availableSpots: 4 })] });
+    expect(new URL(String(fetchImpl.mock.calls[0][0])).searchParams.get("booking_class")).toBe("4931");
+    await expect(fetchForeupTeeSheet(input)).rejects.toThrow(/conflicting/u);
+    await expect(fetchForeupTeeSheet(input)).rejects.toThrow(/conflicting/u);
+  });
+
+  it.each([false, { error: "unavailable" }, null, [null], [{}],
+    [{ time: "bad", available_spots: 4 }],
+    [{ time: "2026-02-30 13:40", available_spots: 4 }],
+    [{ time: "2026-08-10 13:40", available_spots: "4" }],
+    [{ time: "2026-08-10 13:40", available_spots: -1 }],
+  ])("keeps malformed Public availability %j incomplete rather than empty", async payload => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify(payload), { status: 200 }));
+    await expect(fetchForeupTeeSheet({ courseId: "course-1", date: new Date("2026-08-10T00:00:00Z"),
+      players: 2, metadata: { scheduleId: 792, bookingClassId: 4931,
+        bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/19021/792#/teetimes" },
+      requireMatchingIds: true, fetchImpl })).rejects.toThrow(/incomplete/u);
+  });
+
+  it("accepts a complete empty Public array and a valid zero-capacity row", async () => {
+    const fetchImpl = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response("[]", { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify([{ time: "2026-08-10 13:40", available_spots: 0 }]), { status: 200 }));
+    const input = { courseId: "course-1", date: new Date("2026-08-10T00:00:00Z"), players: 2,
+      metadata: { scheduleId: 792, bookingClassId: 4931,
+        bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/19021/792#/teetimes" },
+      requireMatchingIds: true, fetchImpl };
+    await expect(fetchForeupTeeSheet(input)).resolves.toMatchObject({ slots: [], targetDateStatus: "UNKNOWN" });
+    await expect(fetchForeupTeeSheet(input)).resolves.toMatchObject({ slots: [], targetDateStatus: "UNKNOWN" });
+  });
+
   it("normalizes every official ForeUP booking option", async () => {
     vi.stubGlobal(
       "fetch",

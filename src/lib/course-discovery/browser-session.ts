@@ -177,6 +177,11 @@ export function sameDiscoveryMainDocument(observedUrl: string, currentUrl: strin
   return Boolean(observedUrl && currentUrl) && observedUrl.split("#", 1)[0] === currentUrl.split("#", 1)[0];
 }
 
+type StaleControlReason = "TARGET_OR_DOCUMENT_CHANGED" | "NATIVE_DOCUMENT_CHANGED" | "CONTROL_NOT_RENDERED" |
+  "CONTROL_DISABLED" | "CONTROL_SIGNATURE_CHANGED" | "PUBLIC_DATE_CHOICE_CHANGED" | "ENTRY_DISCLOSURE_CHANGED" |
+  "GESTURE_CONTROL_MISSING" | "GESTURE_CONTROL_AMBIGUOUS" | "GESTURE_NATIVE_SOURCE_CHANGED" |
+  "GESTURE_LABEL_INVALID" | "GESTURE_BOOKING_INTENT_MISSING" | "GESTURE_INTENT_MISSING";
+
 type NativeMainDocumentContinuity = { kind: "NATIVE_MAIN_DOCUMENT_CONTINUITY_V1"; originalUrlSha256: string; currentUrlSha256: string;
   documentBindingSha256: string; observedAt: number; status: 200 };
 type NativeGestureCompletion = { kind: "NATIVE_GESTURE_COMPLETED_V1"; sourceUrl: string; href: string; text: string; label: string;
@@ -330,6 +335,10 @@ export async function createCourseDiscoveryBrowserSession(input: {
   let delegatedIdentityPage: (OfficialIdentityPage & { observedAt: number; documentStartedAt: number }) | undefined;
   let nativeDocumentRedirects: { url: string; request: object } | undefined;
   let officialSourceDiagnostic: OfficialSourceDiagnostic | undefined, navigationFailureKind: NavigationFailureKind | undefined;
+  let staleControlReason: StaleControlReason | undefined;
+  const staleControl: (reason: StaleControlReason) => never = reason => {
+    staleControlReason = reason; throw new Error("STALE_OR_UNKNOWN_CONTROL");
+  };
   let cpsPostalContact: ReturnType<typeof getCpsPostalContactDiagnostic>;
   let mindbodyAppointment: ReturnType<typeof getMindbodyAppointmentDiagnostic>;
   const officialDiagnostics = () => safeOfficialSourceDiagnostic({ ...teeBookingScope.diagnostics(page.url()), ...officialSourceDiagnostic,
@@ -1760,6 +1769,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
         ...(mindbodyAppointment ? { mindbodyAppointment: structuredClone(mindbodyAppointment) } : {}),
         mindbodyCapture: mindbodyCapture.diagnostics(),
         officialSourceDiagnostic: officialDiagnostics(), ...(navigationFailureKind ? { navigationFailureKind } : {}),
+        ...(staleControlReason ? { staleControlReason } : {}),
         ...((redirectRouting?.firstFatal ?? browserSessionNativeLimit) ? { nativeFirstFatal: redirectRouting?.firstFatal ?? browserSessionNativeLimit } : {}),
         ...(redirectRouting?.rejectedRequests?.length ? { nativeRejectedRequests: redirectRouting.rejectedRequests } : {}),
         requests: observedRequests.map(request => ({ url: request.url, method: request.method, resourceType: request.resourceType,
@@ -1773,6 +1783,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     },
     async execute(value: unknown): Promise<DiscoveryBrowserSnapshot> {
       const executeAction = async (): Promise<DiscoveryBrowserSnapshot> => {
+        staleControlReason = undefined;
       const action = discoveryBrowserActionSchema.parse(value);
       let documentNavigation = false, navigationAttempted = false;
       navigationFailureKind = undefined;
@@ -1993,19 +2004,20 @@ export async function createCourseDiscoveryBrowserSession(input: {
       else if (["click", "select", "fill"].includes(action.action) && "target" in action) {
         const known = controls.get(action.target);
         if (!known?.document || known.document.url !== page.url() ||
-            known.document.timeOrigin !== await page.evaluate(() => performance.timeOrigin)) throw new Error("STALE_OR_UNKNOWN_CONTROL");
+            known.document.timeOrigin !== await page.evaluate(() => performance.timeOrigin)) staleControl("TARGET_OR_DOCUMENT_CHANGED");
         if (known.document.binding && nativeProxy) {
           await currentNavigationStatus(known.document.url, known.document.timeOrigin);
           const current = nativeMainDocumentWitness;
           if (!current || current.currentUrl !== known.document.url || current.timeOrigin !== known.document.timeOrigin ||
               current.frameId !== known.document.frameId || current.loaderId !== known.document.loaderId ||
               current.proof.documentBindingSha256 !== known.document.binding || current.request !== known.document.request)
-            throw new Error("STALE_OR_UNKNOWN_CONTROL");
+            staleControl("NATIVE_DOCUMENT_CHANGED");
         }
-        if (!await isRenderedControl(known.locator) || !await known.locator.isEnabled() ||
-            JSON.stringify(await observeControl(known.locator)) !== known.signature) throw new Error("STALE_OR_UNKNOWN_CONTROL");
+        if (!await isRenderedControl(known.locator)) staleControl("CONTROL_NOT_RENDERED");
+        if (!await known.locator.isEnabled()) staleControl("CONTROL_DISABLED");
+        if (JSON.stringify(await observeControl(known.locator)) !== known.signature) staleControl("CONTROL_SIGNATURE_CHANGED");
         if (known.calendarDay && !await isObservedPublicCalendarDay(known.locator, known.calendarDay) &&
-          !await isPublicDateChoice(known.locator, known.calendarDay)) throw new Error("STALE_OR_UNKNOWN_CONTROL");
+          !await isPublicDateChoice(known.locator, known.calendarDay)) staleControl("PUBLIC_DATE_CHOICE_CHANGED");
         if (action.action === "select") {
           if (known.kind !== "filter") throw new Error("UNSAFE_CONTROL");
           if (known.service) { serviceSelection = undefined; serviceSelection = await selectPublicRentalService(known.locator, action.option); }
@@ -2028,7 +2040,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
             await currentNavigationStatus(page.url(), timeOrigin);
             if (entryDisclosureUsed || !currentOfficialEntryParent() ||
                 !revalidatePublicEntryDisclosure(known.entryDisclosure, await entryEvidence(known.locator, timeOrigin), entryContext(timeOrigin)))
-              throw new Error("STALE_OR_UNKNOWN_CONTROL");
+              staleControl("ENTRY_DISCLOSURE_CHANGED");
             const target = await known.locator.getAttribute("target");
             if (target && !["_self", "_top", "_parent"].includes(target.toLowerCase())) throw new Error("UNSAFE_CONTROL");
             entryDisclosureUsed = true; disclosureGetOnly = true;
@@ -2098,13 +2110,16 @@ export async function createCourseDiscoveryBrowserSession(input: {
               const timeOrigin = await page.evaluate(() => performance.timeOrigin);
               await currentNavigationStatus(page.url(), timeOrigin);
               const source = nativeMainDocumentWitness;
-              if (!selected || matches !== 1 || !source || source.currentUrl !== page.url() || !text || text.length > 160 || label.length > 160 ||
-                  !/\b(?:book|tee\s*times?|availability|calendar|bay|simulator)\b/iu.test(text + " " + label))
-                throw new Error("STALE_OR_UNKNOWN_CONTROL");
+              if (!selected) staleControl("GESTURE_CONTROL_MISSING");
+              if (matches !== 1) staleControl("GESTURE_CONTROL_AMBIGUOUS");
+              if (!source || source.currentUrl !== page.url()) staleControl("GESTURE_NATIVE_SOURCE_CHANGED");
+              if (!text || text.length > 160 || label.length > 160) staleControl("GESTURE_LABEL_INVALID");
+              if (!/\b(?:book|tee\s*times?|availability|calendar|bay|simulator)\b/iu.test(text + " " + label))
+                staleControl("GESTURE_BOOKING_INTENT_MISSING");
               gestureIntent = { sourceUrl: page.url(), href: known.href, text, label, sourceRequest: source.request,
                 sourceBinding: source.proof.documentBindingSha256, until: Date.now() + 5000, used: false };
             }
-            if (known.href === page.url() + "#" && !gestureIntent) throw new Error("STALE_OR_UNKNOWN_CONTROL");
+            if (known.href === page.url() + "#" && !gestureIntent) staleControl("GESTURE_INTENT_MISSING");
             const canonicalBootstrap = rawHref !== known.href && normalizeDiscoveryNavigationUrl(rawHref) === known.href;
             const ordinaryDocumentLink = !new URL(known.href).hash && !gestureIntent && !await known.locator.getAttribute("onclick");
             if (known.documentNavigationOnly || canonicalBootstrap || ordinaryDocumentLink || target && !["_self", "_top", "_parent"].includes(target.toLowerCase())) {
@@ -2122,7 +2137,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       return snapshot(action.action === "open" || action.action === "observe" || documentNavigation, deps.captureDelegatedDocument === true);
       } catch (error) {
         if (navigationAttempted) navigationFailureKind = discoveryNavigationFailureKind(error);
-        if (terminalFailure) throw new Error(terminalFailure);
+        if (terminalFailure) { staleControlReason = undefined; throw new Error(terminalFailure); }
         throw error;
       }
       };

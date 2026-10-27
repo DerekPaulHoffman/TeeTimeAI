@@ -74,6 +74,13 @@ const adapterMocks = vi.hoisted(() => ({
   isGolfBackMetadata: vi.fn(),
   isWebTracMetadata: vi.fn(),
 }));
+const foreupPublicMocks = vi.hoisted(() => ({
+  readForeupStandardPublicSchedule: vi.fn(),
+}));
+vi.mock("@/lib/automation/foreup-public-configuration", async importOriginal => ({
+  ...await importOriginal<typeof import("./foreup-public-configuration")>(),
+  readForeupStandardPublicSchedule: foreupPublicMocks.readForeupStandardPublicSchedule,
+}));
 
 const supportIncidentMocks = vi.hoisted(() => ({
   reportCourseSupportIssue: vi.fn(),
@@ -867,6 +874,9 @@ describe("runSearchCheck email cadence", () => {
       slots: [],
       targetDateStatus: "UNKNOWN",
       bookingWindowEvidence: null,
+    });
+    foreupPublicMocks.readForeupStandardPublicSchedule.mockResolvedValue({
+      bookingClassId: 4931, bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/19021/792#/teetimes"
     });
     adapterMocks.isGolfBackMetadata.mockReturnValue(false);
     adapterMocks.fetchGolfBackTeeSheet.mockResolvedValue({
@@ -2095,6 +2105,43 @@ describe("runSearchCheck email cadence", () => {
     expect(
       deliveryOutboxMocks.prepareSearchEmailDeliveryGroup,
     ).not.toHaveBeenCalled();
+    expect(emailMocks.sendTeeTimeAlert).not.toHaveBeenCalled();
+  });
+
+  it("does not emit a match when the ordinary ForeUP Public class is unverified", async () => {
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      statusEmailSentAt: new Date("2026-07-11T12:00:00.000Z"),
+      preferences: [{ rank: 1, course: {
+        ...search.preferences[0].course,
+        detectedPlatform: "FOREUP",
+        providerFamilyKey: "FOREUP",
+        detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/19021#/teetimes",
+        bookingMetadata: { scheduleId: 792, bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/19021#/teetimes" },
+        automationEligibility: "ALLOWED", automationReason: "NONE", policyNotes: null,
+      } }, { rank: 2, course: {
+        ...search.preferences[0].course,
+        id: "course-2",
+        name: "Second Public Course",
+        detectedPlatform: "FOREUP",
+        providerFamilyKey: "FOREUP",
+        detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/19022#/teetimes",
+        bookingMetadata: { scheduleId: 793, bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/19022#/teetimes" },
+        automationEligibility: "ALLOWED", automationReason: "NONE", policyNotes: null,
+      } }],
+    });
+    foreupPublicMocks.readForeupStandardPublicSchedule.mockResolvedValueOnce(null);
+    const result = await runSearchCheck("search-1", "test");
+    expect(result.supportRetryNeeded).toBe(true);
+    expect(dbMocks.recordCourseProbe).toHaveBeenCalledWith(expect.objectContaining({ outcome: "FETCH_FAILED" }));
+    expect(adapterMocks.fetchForeupTeeSheet).toHaveBeenCalledOnce();
+    expect(adapterMocks.fetchForeupTeeSheet).toHaveBeenCalledWith(expect.objectContaining({ courseId: "course-2" }));
+    expect(result.courseResults).toEqual(expect.arrayContaining([
+      expect.objectContaining({ courseId: "course-1", outcome: "FETCH_FAILED" }),
+      expect.objectContaining({ courseId: "course-2" }),
+    ]));
+    expect(dbMocks.recordTeeTimeMatch).not.toHaveBeenCalled();
+    expect(deliveryOutboxMocks.prepareSearchEmailDeliveryGroup).not.toHaveBeenCalled();
     expect(emailMocks.sendTeeTimeAlert).not.toHaveBeenCalled();
   });
 

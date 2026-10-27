@@ -13,6 +13,7 @@ import {
   isClubCaddieMetadata
 } from "@/lib/adapters/clubcaddie";
 import { fetchForeupTeeSheet, isForeupMetadata } from "@/lib/adapters/foreup";
+import { readForeupStandardPublicSchedule } from "@/lib/automation/foreup-public-configuration";
 import { fetchGolfBackTeeSheet, isGolfBackMetadata } from "@/lib/adapters/golfback";
 import { fetchGolfGeekTeeSheet, isGolfGeekMetadata } from "@/lib/adapters/golf-geek";
 import { fetchGolfNowTeeSheet, isGolfNowMetadata } from "@/lib/adapters/golfnow";
@@ -38,6 +39,7 @@ import type { TeeTimeSlot } from "@/lib/tee-times/matching";
 
 export type AutomationCourseProviderRead = {
   id: string;
+  name: string;
   timeZone: string;
   website: string | null;
   detectedBookingUrl: string | null;
@@ -53,7 +55,7 @@ export type CourseTeeSheetResult = {
   bookingWindowEvidence: BookingWindowEvidence | null;
 };
 
-export function fetchCourseTeeSheet(
+export async function fetchCourseTeeSheet(
   course: AutomationCourseProviderRead,
   date: Date,
   players: number,
@@ -61,18 +63,28 @@ export function fetchCourseTeeSheet(
 ): Promise<CourseTeeSheetResult> {
   const providerFamily = resolveProviderCapability(course).providerFamilyKey;
   if (providerFamily === "FOREUP" && isForeupMetadata(course.bookingMetadata)) {
+    if (!course.name) throw new Error("ForeUP course identity could not be verified");
     const metadata = course.bookingWindowEvidenceUrl
       ? {
           ...course.bookingMetadata,
           bookingWindowEvidenceUrl: course.bookingWindowEvidenceUrl
         }
       : course.bookingMetadata;
+    const publicSchedule = await readForeupStandardPublicSchedule({
+      bookingUrl: metadata.bookingBaseUrl,
+      courseName: course.name,
+      scheduleId: metadata.scheduleId,
+      bookingClassId: metadata.bookingClassId,
+    });
+    if (!publicSchedule) throw new Error("ForeUP Standard Public class could not be verified");
     return fetchForeupTeeSheet({
       courseId: course.id,
       date,
       players,
-      metadata,
-      discoverBookingWindow
+      metadata: { ...metadata, bookingClassId: publicSchedule.bookingClassId,
+        bookingBaseUrl: publicSchedule.bookingBaseUrl },
+      discoverBookingWindow,
+      requireMatchingIds: true,
     });
   }
   if (providerFamily === "TEEITUP" && isTeeItUpMetadata(course.bookingMetadata)) {

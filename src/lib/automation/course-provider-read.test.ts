@@ -34,6 +34,8 @@ const adapterMocks = vi.hoisted(() => ({
 const capabilityMocks = vi.hoisted(() => ({
   resolveProviderCapability: vi.fn()
 }));
+const foreupPublicMocks = vi.hoisted(() => ({ readForeupStandardPublicSchedule: vi.fn() }));
+vi.mock("@/lib/automation/foreup-public-configuration", () => foreupPublicMocks);
 
 vi.mock("@/lib/adapters/agilysys", () => ({
   fetchAgilysysTeeSheet: adapterMocks.fetchAgilysysTeeSheet,
@@ -112,6 +114,7 @@ function buildCourse(
 ): AutomationCourseProviderRead {
   return {
     id: "course-1",
+    name: "Test Golf Course",
     timeZone: "America/New_York",
     website: "https://course.example",
     detectedBookingUrl: "https://booking.example",
@@ -149,6 +152,9 @@ describe("fetchCourseTeeSheet", () => {
     adapterMocks.fetchChronogolfSlots.mockResolvedValue([]);
     adapterMocks.fetchClubCaddieTeeSheet.mockResolvedValue(providerResult);
     adapterMocks.fetchForeupTeeSheet.mockResolvedValue(providerResult);
+    foreupPublicMocks.readForeupStandardPublicSchedule.mockResolvedValue({
+      bookingClassId: 4931, bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/19021/792#/teetimes"
+    });
     adapterMocks.fetchGolfBackTeeSheet.mockResolvedValue(providerResult);
     adapterMocks.fetchGolfNowTeeSheet.mockResolvedValue(providerResult);
     adapterMocks.fetchQuick18TeeSheet.mockResolvedValue(providerResult);
@@ -157,6 +163,19 @@ describe("fetchCourseTeeSheet", () => {
     adapterMocks.fetchTeesnapTeeSheet.mockResolvedValue(providerResult);
     adapterMocks.fetchWebTracTeeSheet.mockResolvedValue(providerResult);
     adapterMocks.fetchWhooshTeeSheet.mockResolvedValue(providerResult);
+  });
+
+  it("does not turn an unverified ForeUP class into an empty tee sheet", async () => {
+    foreupPublicMocks.readForeupStandardPublicSchedule.mockResolvedValueOnce(null);
+    const course = buildCourse("FOREUP", { bookingMetadata: {
+      scheduleId: 792, bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/19021#/teetimes"
+    } });
+    await expect(fetchCourseTeeSheet(course, date, 2, false)).rejects.toThrow(/Public class could not be verified/u);
+    expect(foreupPublicMocks.readForeupStandardPublicSchedule).toHaveBeenCalledWith({
+      bookingUrl: course.bookingMetadata && (course.bookingMetadata as { bookingBaseUrl: string }).bookingBaseUrl,
+      courseName: course.name, scheduleId: 792, bookingClassId: undefined,
+    });
+    expect(adapterMocks.fetchForeupTeeSheet).not.toHaveBeenCalled();
   });
 
   it("delegates to every supported provider with the original input shape", async () => {
@@ -171,8 +190,11 @@ describe("fetchCourseTeeSheet", () => {
       courseId: "course-1",
       date,
       players: 3,
-      metadata: { ...metadata, bookingWindowEvidenceUrl: evidenceUrl },
-      discoverBookingWindow: true
+      metadata: { ...metadata, bookingClassId: 4931,
+        bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/19021/792#/teetimes",
+        bookingWindowEvidenceUrl: evidenceUrl },
+      discoverBookingWindow: true,
+      requireMatchingIds: true
     });
 
     await expect(

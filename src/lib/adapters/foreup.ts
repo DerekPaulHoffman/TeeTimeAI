@@ -18,8 +18,8 @@ type ForeupApiSlot = {
   available_spots?: number;
   green_fee?: number;
   holes?: number | string;
-  schedule_id?: number;
-  booking_class_id?: number;
+  schedule_id?: number | string;
+  booking_class_id?: number | string;
 };
 
 export type ForeupTeeSheetResult = {
@@ -58,6 +58,7 @@ export async function fetchForeupTeeSheet(input: {
   players: number;
   metadata: ForeupMetadata;
   discoverBookingWindow?: boolean;
+  requireMatchingIds?: boolean;
   fetchImpl?: typeof fetch;
 }): Promise<ForeupTeeSheetResult> {
   const availability = await fetchForeupAvailability(input);
@@ -72,6 +73,7 @@ async function fetchForeupAvailability(input: {
   date: Date;
   players: number;
   metadata: ForeupMetadata;
+  requireMatchingIds?: boolean;
   fetchImpl?: typeof fetch;
 }): Promise<Pick<ForeupTeeSheetResult, "slots" | "targetDateStatus">> {
   const dateParam = formatForeupDate(input.date);
@@ -97,7 +99,18 @@ async function fetchForeupAvailability(input: {
 
   const slots = (await response.json()) as ForeupApiSlot[] | false;
   if (!Array.isArray(slots)) {
+    if (input.requireMatchingIds) throw new Error("ForeUP Public availability response is incomplete");
     return { slots: [], targetDateStatus: "UNKNOWN" };
+  }
+  if (input.requireMatchingIds) {
+    if (input.metadata.bookingClassId === undefined || slots.some(slot =>
+      !slot || typeof slot !== "object" || Array.isArray(slot) ||
+      !validForeupTime(slot.time) ||
+      typeof slot.available_spots !== "number" || !Number.isSafeInteger(slot.available_spots) ||
+      slot.available_spots < 0 ||
+      (Object.hasOwn(slot, "schedule_id") && !matchesProviderId(slot.schedule_id, input.metadata.scheduleId)) ||
+      (Object.hasOwn(slot, "booking_class_id") && !matchesProviderId(slot.booking_class_id, input.metadata.bookingClassId!))
+    )) throw new Error("ForeUP Public availability response is incomplete or conflicting");
   }
 
   const normalizedSlots = slots
@@ -122,6 +135,18 @@ async function fetchForeupAvailability(input: {
     slots: normalizedSlots,
     targetDateStatus: normalizedSlots.length > 0 ? "OPEN" : "UNKNOWN"
   };
+}
+
+function matchesProviderId(value: unknown, expected: number): boolean {
+  return (typeof value === "number" || typeof value === "string") &&
+    /^[1-9]\d{0,9}$/u.test(String(value)) && Number(value) === expected;
+}
+
+function validForeupTime(value: unknown): value is string {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?$/u.test(value)) return false;
+  const normalized = value.replace(" ", "T");
+  const parsed = new Date(`${normalized}Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, normalized.length) === normalized;
 }
 
 async function fetchForeupBookingWindow(

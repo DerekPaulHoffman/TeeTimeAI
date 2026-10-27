@@ -41,6 +41,13 @@ alternative classes on that selected sheet do not broaden the declared scope;
 unresolved other sheets, malformed catalogs, duplicate Public classes and stale
 identifiers still fail. Existing unscoped methods retain their original checks.
 
+Ordinary ForeUP Course checks also verify the current Public class from a fresh,
+bounded public catalog before requesting times. Saved schedule, class and
+sheet-specific booking links must agree with that catalog. An unresolved scope
+or conflicting response remains a failed course check; it cannot become an
+empty result or a matching email. Verified times use the current Public booking
+link, and the check does not rewrite saved Course metadata.
+
 A clean fixed-inspection configuration failure can restart investigation from the
 fresh official root within the original clock. That repair accepts only an
 existing-adapter recipe backed by a new, matching typed inspection; browser,

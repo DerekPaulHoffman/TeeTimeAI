@@ -708,10 +708,17 @@ function safeFixedReaderFailureDiagnostics(value) {
   return result;
 }
 /** Failure-only, closed metadata from the owned browser. Never source authority. */
+const STALE_CONTROL_REASONS = ["TARGET_OR_DOCUMENT_CHANGED", "NATIVE_DOCUMENT_CHANGED", "CONTROL_NOT_RENDERED",
+  "CONTROL_DISABLED", "CONTROL_SIGNATURE_CHANGED", "PUBLIC_DATE_CHOICE_CHANGED", "ENTRY_DISCLOSURE_CHANGED",
+  "GESTURE_CONTROL_MISSING", "GESTURE_CONTROL_AMBIGUOUS", "GESTURE_NATIVE_SOURCE_CHANGED",
+  "GESTURE_LABEL_INVALID", "GESTURE_BOOKING_INTENT_MISSING", "GESTURE_INTENT_MISSING"];
+const safeStaleControlReason = value => STALE_CONTROL_REASONS.includes(value) ? value : undefined;
 export function safeFixedInspectionSourceDiagnostic(value) {
   const result = {}, officialBrowser = safeOfficialBrowserDiagnostics(value), official = officialBrowser.officialSourceDiagnostic;
   if (official) result.officialSourceDiagnostic = official;
   if (officialBrowser.navigationFailureKind) result.navigationFailureKind = officialBrowser.navigationFailureKind;
+  const staleControlReason = safeStaleControlReason(value?.staleControlReason);
+  if (staleControlReason) result.staleControlReason = staleControlReason;
   const identity = value?.officialIdentityReadDiagnostic;
   const keys = ["noTerminalFailure", "sessionOpen", "noAccessRequirement", "noNativeFatal", "status200", "snapshotNative",
     "capturedPagePresent", "captureUrlMatches", "captureFreshWithin5s", "capturedNative", "capturedTimeOriginMatches",
@@ -758,7 +765,8 @@ export function safeBrowserFailureDiagnostics(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const teeItUpDelegation = safeTeeItUpDelegationDiagnostic(value.teeItUpDelegation);
   const adapterRead = safeFixedAdapterReadDiagnostic(value.adapterRead);
-  const officialIdentityReadDiagnostic = safeFixedInspectionSourceDiagnostic(value)?.officialIdentityReadDiagnostic;
+  const fixedInspection = safeFixedInspectionSourceDiagnostic(value);
+  const officialIdentityReadDiagnostic = fixedInspection?.officialIdentityReadDiagnostic;
   return { requests: (Array.isArray(value.requests) ? value.requests : []).slice(-12).map(request => {
     if (!request || typeof request !== "object" || Array.isArray(request)) return undefined;
     const safe = safeReplayDiagnostic({ ...request, code: "REQUEST_STATE" });
@@ -770,6 +778,7 @@ export function safeBrowserFailureDiagnostics(value) {
       ...(/^[A-Z_0-9]{1,80}$/u.test(request.blockedReason ?? "") ? { blockedReason: request.blockedReason } : {}) };
   }).filter(Boolean), requestFailures: safeBrowserRequestFailures(value.requestFailures), ...safeNativeBrowserDiagnostics(value), ...safeOfficialBrowserDiagnostics(value),
   ...(officialIdentityReadDiagnostic ? { officialIdentityReadDiagnostic } : {}),
+  ...(fixedInspection?.staleControlReason ? { staleControlReason: fixedInspection.staleControlReason } : {}),
   ...safeFixedReaderFailureDiagnostics(value),
   ...(teeItUpDelegation ? { teeItUpDelegation } : {}),
   ...(adapterRead ? { adapterRead } : {}),

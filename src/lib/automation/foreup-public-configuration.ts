@@ -241,6 +241,60 @@ async function readBoundedText(response: Response): Promise<string | null> {
   return new TextDecoder().decode(merged);
 }
 
+async function readForeupPublicDocument(input: {
+  bookingUrl: string;
+  signal?: AbortSignal;
+  fetchImpl?: typeof fetch;
+}): Promise<{ html: string; facilityId: number } | null> {
+  let source: URL;
+  try { source = new URL(input.bookingUrl); }
+  catch { return null; }
+  const path = FOREUP_BOOKING_PATH.exec(source.pathname);
+  if (source.protocol !== "https:" || source.hostname !== "foreupsoftware.com" ||
+    source.username || source.password || source.port || source.search || !path ||
+    !["", "#/teetimes", "#teetimes", "#/login"].includes(source.hash)) return null;
+  source.hash = "";
+  const response = await fetchWithProviderTimeout(source, {
+    headers: { accept: "text/html,application/xhtml+xml" }, redirect: "manual", signal: input.signal,
+  }, input.fetchImpl);
+  if (response.status !== 200 ||
+    !response.headers.get("content-type")?.toLocaleLowerCase("en-US").includes("text/html")) return null;
+  const html = await readBoundedText(response);
+  return html ? { html, facilityId: Number(path[1] ?? path[2]) } : null;
+}
+
+/** One fresh bounded public catalog read for an ordinary Course check. The
+ * selected class is ephemeral; this function never updates stored metadata. */
+export async function readForeupStandardPublicSchedule(input: {
+  bookingUrl: string;
+  courseName: string;
+  scheduleId: number;
+  bookingClassId?: number;
+  signal?: AbortSignal;
+  fetchImpl?: typeof fetch;
+}): Promise<ForeupPublicConfiguration | null> {
+  try {
+    // A saved sheet-specific booking link must name the same sheet as the
+    // Course metadata. Facility-only and indexed landing links have no sheet
+    // segment and remain valid sources for the fresh catalog comparison.
+    const path = new URL(input.bookingUrl).pathname;
+    const linkedSheet = /^\/index\.php\/booking\/[1-9]\d{0,9}\/([1-9]\d{0,9})\/?$/u.exec(path);
+    if (linkedSheet && Number(linkedSheet[1]) !== input.scheduleId) return null;
+    const document = await readForeupPublicDocument(input);
+    if (!document) return null;
+    const config = parseForeupPublicConfiguration({ ...input, html: document.html });
+    if (!config || config.scheduleId !== input.scheduleId ||
+      (input.bookingClassId !== undefined && config.bookingClassId !== input.bookingClassId) ||
+      !isExplicitForeupPublicClass({ html: document.html, facilityId: document.facilityId,
+        scheduleId: config.scheduleId, bookingClassId: config.bookingClassId }) ||
+      !hasCompleteForeupPublicScheduleScope({ html: document.html, facilityId: document.facilityId,
+        scheduleId: config.scheduleId, inventoryScope: FOREUP_STANDARD_PUBLIC_SCOPE })) return null;
+    return config;
+  } catch {
+    return null;
+  }
+}
+
 export async function readForeupPublicConfiguration(input: {
   bookingUrl: string;
   courseName: string;
@@ -250,23 +304,11 @@ export async function readForeupPublicConfiguration(input: {
   /** Trusted fixed inspector hook, never a model/recipe option. */
   parseDocument?: (html: string) => Promise<ForeupPublicConfiguration | null>;
 }): Promise<ForeupPublicConfiguration | null> {
-  let source: URL;
-  try { source = new URL(input.bookingUrl); }
-  catch { return null; }
-  if (source.protocol !== "https:" || source.hostname !== "foreupsoftware.com" ||
-    source.username || source.password || source.port || source.search ||
-    !FOREUP_BOOKING_PATH.test(source.pathname) ||
-    !["", "#/teetimes", "#teetimes", "#/login"].includes(source.hash)) return null;
-  source.hash = "";
   try {
-    const response = await fetchWithProviderTimeout(source, {
-      headers: { accept: "text/html,application/xhtml+xml" }, redirect: "manual", signal: input.signal,
-    }, input.fetchImpl);
-    if (response.status !== 200 ||
-      !response.headers.get("content-type")?.toLocaleLowerCase("en-US").includes("text/html")) return null;
-    const html = await readBoundedText(response);
-    if (!html) return null;
-    const config = input.parseDocument ? await input.parseDocument(html) : parseForeupPublicConfiguration({ ...input, html });
+    const document = await readForeupPublicDocument(input);
+    if (!document) return null;
+    const config = input.parseDocument ? await input.parseDocument(document.html) :
+      parseForeupPublicConfiguration({ ...input, html: document.html });
     if (!config) return null;
     const today = new Date().toISOString().slice(0, 10);
     const [year, month, day] = today.split("-");

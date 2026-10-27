@@ -1,8 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { bindDiscoveryRecipeIdentity, createDiscoveryAdapterObservation, createDiscoverySnapshotCompactor, discoveryBrowserFeedback, discoveryCheckpointDisposition, inspectedAdapterSourceEvidence, noVerifiedRecipeDiagnostic, readDiscoveryControllerCheckpoint, safeBrowserFailureDiagnostics, verifyDiscoveryCandidate } from "../../../scripts/automation/course-discovery-worker.mjs";
+import { bindDiscoveryRecipeIdentity, createDiscoveryAdapterObservation, createDiscoverySnapshotCompactor, discoveryBrowserFeedback, discoveryCheckpointDisposition, inspectedAdapterSourceEvidence, noVerifiedRecipeDiagnostic, readDiscoveryControllerCheckpoint, safeBrowserFailureDiagnostics, safeFixedInspectionSourceDiagnostic, verifyDiscoveryCandidate } from "../../../scripts/automation/course-discovery-worker.mjs";
 import { describePublicUrlRejection, safeBrowserActionIssues } from "../../../scripts/automation/course-discovery-diagnostics.mjs";
 
 describe("durable discovery browser diagnostics", () => {
+  it("projects only a finite stale-control reason through browser and fixed-inspection failures", () => {
+    const raw = { staleControlReason: "CONTROL_SIGNATURE_CHANGED", target: "private-target", url: "https://private.example/?token=private" };
+    const browser = safeBrowserFailureDiagnostics(raw);
+    const fixed = safeFixedInspectionSourceDiagnostic(browser);
+    expect(browser?.staleControlReason).toBe("CONTROL_SIGNATURE_CHANGED");
+    expect(fixed?.staleControlReason).toBe("CONTROL_SIGNATURE_CHANGED");
+    expect(JSON.stringify({ browser, fixed })).not.toMatch(/private-target|private\.example|token/u);
+    expect(safeBrowserFailureDiagnostics({ ...raw, staleControlReason: "CONTROL_SIGNATURE_CHANGED:private" })).not.toHaveProperty("staleControlReason");
+    expect(safeFixedInspectionSourceDiagnostic({ ...raw, staleControlReason: { reason: "CONTROL_SIGNATURE_CHANGED" } })).toBeUndefined();
+  });
   it("keeps only closed response abort and terminal facts in browser failure evidence", () => {
     const raw = { code: "NATIVE_REDIRECT_ROUTING_FAILED", operation: "RESPONSE_METADATA", responseFailureBranch: "RETIRED_RESPONSE_ABORT",
       recordGenerationRetired: true, responseIdentityMatched: true, correlatedNetworkLoadingFailed: false,

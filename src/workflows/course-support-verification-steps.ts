@@ -138,6 +138,7 @@ async function runWithCourseSupportProviderObservation<T>(input: {
 
 const providerCourseSelect = {
   id: true,
+  name: true,
   timeZone: true,
   website: true,
   detectedBookingUrl: true,
@@ -1004,6 +1005,7 @@ async function executeOwnedProviderConfirmation(input: {
 
 type VerificationCourse = {
   id: string;
+  name: string;
   timeZone: string;
   website: string | null;
   detectedBookingUrl: string | null;

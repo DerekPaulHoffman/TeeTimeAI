@@ -6,6 +6,7 @@ import {
   hasCompleteForeupPublicScheduleScope,
   parseForeupPublicConfiguration,
   readForeupPublicConfiguration,
+  readForeupStandardPublicSchedule,
 } from "./foreup-public-configuration";
 
 const bookingUrl = "https://foreupsoftware.com/index.php/booking/19021#/teetimes";
@@ -44,6 +45,56 @@ describe("managed ForeUP single-sheet coverage", () => {
   it("rejects duplicate public rows, absent selected scope and excessive schedules", () => {
     expect(covered([selected, selected])).toBe(false); expect(covered([other])).toBe(false);
     expect(covered(Array.from({ length: 31 }, () => selected))).toBe(false);
+  });
+});
+
+describe("ordinary Standard Public schedule read", () => {
+  const publicClass = { teesheet_id: "792", booking_class_id: "4931", active: "1", hidden: "0", name: "Public" };
+  const memberClass = { ...publicClass, booking_class_id: "4932", name: "Members" };
+  const makeHtml = (classes: unknown[] = [publicClass, memberClass]) =>
+    `<script>SCHEDULES=${JSON.stringify([{ course_id: "19021", title: "Columbia Bridges", teesheet_id: "792", booking_classes: classes }])};</script>`;
+  const read = (fetchImpl: typeof fetch, overrides: Partial<Parameters<typeof readForeupStandardPublicSchedule>[0]> = {}) =>
+    readForeupStandardPublicSchedule({ bookingUrl, courseName: "Columbia Bridges", scheduleId: 792, fetchImpl, ...overrides });
+  const response = (body: string, status = 200) => new Response(body, { status, headers: { "content-type": "text/html" } });
+
+  it("selects only the explicit Public class from a fresh mixed catalog with one HTML request", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(response(makeHtml()));
+    await expect(read(fetchImpl)).resolves.toMatchObject({ scheduleId: 792, bookingClassId: 4931 });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(String(fetchImpl.mock.calls[0][0])).toBe("https://foreupsoftware.com/index.php/booking/19021");
+    expect(fetchImpl.mock.calls[0][1]).toMatchObject({ redirect: "manual" });
+  });
+
+  it("rejects absent, stale, duplicate, and unlabelled Public classes", async () => {
+    for (const [classes, overrides] of [
+      [[{ ...publicClass, name: "Member" }], {}],
+      [[publicClass, memberClass], { scheduleId: 793 }],
+      [[publicClass, memberClass], { bookingClassId: 4932 }],
+      [[publicClass, { ...publicClass, booking_class_id: "4933" }], {}],
+      [[{ ...publicClass, name: undefined }], {}],
+    ] as const) {
+      await expect(read(vi.fn<typeof fetch>().mockResolvedValue(response(makeHtml([...classes]))), overrides))
+        .resolves.toBeNull();
+    }
+  });
+
+  it("rejects a saved sheet-specific booking link to another schedule before any read", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(response(makeHtml()));
+    await expect(read(fetchImpl, { bookingUrl: "https://foreupsoftware.com/index.php/booking/19021/781#/teetimes" }))
+      .resolves.toBeNull();
+    expect(fetchImpl).not.toHaveBeenCalled();
+    await expect(read(fetchImpl, { bookingUrl: "https://foreupsoftware.com/index.php/booking/19021/792#/teetimes" }))
+      .resolves.toMatchObject({ scheduleId: 792, bookingClassId: 4931 });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it("does not follow redirects or read an untrusted booking host", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(response(makeHtml(), 302));
+    await expect(read(fetchImpl)).resolves.toBeNull();
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    await expect(read(fetchImpl, { bookingUrl: "https://foreupsoftware.com.evil.test/index.php/booking/19021" }))
+      .resolves.toBeNull();
+    expect(fetchImpl).toHaveBeenCalledOnce();
   });
 });
 
