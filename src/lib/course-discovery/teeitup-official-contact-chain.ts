@@ -39,14 +39,23 @@ export const teeItUpOfficialContactChainProofSchema = z.object({
   rootWitnessSha256: hex, contactWitnessSha256: hex, directoryWitnessSha256: hex,
 }).strict();
 export type TeeItUpOfficialContactChainProof = z.infer<typeof teeItUpOfficialContactChainProofSchema>;
+function directoryIdentity(row: Record<string, unknown>) {
+  return { id: row.id, courseId: row.courseId, name: fullCourseName(String(row.name)), address: clean(String(row.address)),
+    timeZone: row.timeZone, country: row.country, isSimulator: row.isSimulator };
+}
 export function matchesTeeItUpContactDirectory(proof: TeeItUpOfficialContactChainProof, source: OfficialIdentitySource, value: unknown) {
   if (!Array.isArray(value) || value.length < 1 || value.length > 100 || source.officialUrl !== proof.officialUrl ||
       source.bookingUrl !== proof.bookingUrl || source.venueName !== proof.venueName || source.venueAddress !== proof.canonicalAddress ||
-      source.timeZone !== proof.timeZone || witness(value) !== proof.directoryWitnessSha256) return false;
+      source.timeZone !== proof.timeZone) return false;
   const rows = value.filter(row => row && typeof row === "object" && !Array.isArray(row) && row.id === proof.facilityId &&
     row.courseId === proof.courseId && row.address === proof.providerAddress && row.timeZone === proof.timeZone &&
     row.country === "US" && row.isSimulator === false && fullCourseName(row.name) === fullCourseName(proof.venueName));
-  return rows.length === 1;
+  if (rows.length !== 1 || witness(directoryIdentity(rows[0])) !== proof.directoryWitnessSha256) return false;
+  return value.filter(row => row && typeof row === "object" && !Array.isArray(row) &&
+    row.timeZone === proof.timeZone && row.country === "US" && row.isSimulator === false &&
+    fullCourseName(row.name) === fullCourseName(proof.venueName)).length === 1 &&
+    !value.some(row => row && typeof row === "object" && !Array.isArray(row) && row !== rows[0] &&
+      (row.id === proof.facilityId || row.courseId === proof.courseId));
 }
 export type TeeItUpContactChainReader = (source: OfficialIdentitySource, deadlineAt: Date) => Promise<{ root: OfficialIdentityPage; contact: OfficialIdentityPage }>;
 type ContactReaderDependencies = { requestLease?: <T>(family: string, work: () => Promise<T>) => Promise<{ acquired: true; value: T } | { acquired: false }> };
@@ -96,6 +105,9 @@ function exactVisibleLinks(page: OfficialIdentityPage, predicate: (label: string
 }
 function sole<T>(values: T[]) { const unique = [...new Set(values)]; return unique.length === 1 ? unique[0] : null; }
 function witness(value: unknown) { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
+function linkWitness(links: Array<{ href: string; text: string }>) {
+  return [...new Set(links.map(link => `${link.href}\u0000${link.text}`))].sort();
+}
 function observedAddress(value: string) {
   const raw = clean(value);
   const direct = completeUSAddress(raw);
@@ -163,6 +175,7 @@ export function bindTeeItUpOfficialContactChain(source: OfficialIdentitySource, 
   return teeItUpOfficialContactChainProofSchema.parse({ kind: "TEEITUP_OFFICIAL_CONTACT_CHAIN", officialUrl: source.officialUrl,
     contactUrl, bookingUrl: source.bookingUrl, venueName: source.venueName, canonicalAddress: source.venueAddress, timeZone: source.timeZone,
     alias: parsed.alias, facilityId: id, courseId: row.courseId, providerAddress: row.address, providerAddressVerified: false,
-    rootWitnessSha256: witness([root.url, root.html, root.visibleEvidence]), contactWitnessSha256: witness([contact.url, contact.html, contact.visibleEvidence]),
-    directoryWitnessSha256: witness(directory) });
+    rootWitnessSha256: witness([root.url, contactUrl, linkWitness(exactVisibleLinks(root, label => /^contact(?:\s+us)?$/iu.test(label)))]),
+    contactWitnessSha256: witness([contact.url, fullCourseName(source.venueName), canonical, linkWitness(bookingLinks)]),
+    directoryWitnessSha256: witness(directoryIdentity(row)) });
 }

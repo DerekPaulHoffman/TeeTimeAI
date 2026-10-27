@@ -76,6 +76,20 @@ describe("TeeItUp official contact chain", () => {
     const fresh = pair();
     expect(bindTeeItUpOfficialContactChain(source, fresh.root, fresh.contact, directory)).toEqual(proof);
   });
+  it("keeps the saved proof when unrelated page scripts and directory pricing change", () => {
+    const original = pair(), proof = bindTeeItUpOfficialContactChain(source, original.root, original.contact, directory);
+    const fresh = pair({
+      rootHtml: `<html><script>window.nonce='new-root-value'</script><h1>${source.venueName}</h1><a href="/contact/">Contact Us</a><p>Seasonal news</p></html>`,
+      contactHtml: `<html><script>window.nonce='new-contact-value'</script><h1>Contact Us</h1><p>${source.venueName}</p><p>${source.venueAddress}</p><a href="${source.bookingUrl}">Book Tee Times</a><p>New hours</p></html>`,
+    });
+    const changedDirectory = [{ ...directory[0], pricing: { hourly: 42 }, description: "Updated public rates" }];
+    expect(bindTeeItUpOfficialContactChain(source, fresh.root, fresh.contact, changedDirectory)).toEqual(proof);
+    expect(resolveTeeItUpRecipeFacilities(source, changedDirectory, undefined, "OUTDOOR", undefined, undefined, undefined, undefined, undefined, proof)).toHaveLength(1);
+    expect(() => bindTeeItUpOfficialContactChain(source, fresh.root, fresh.contact,
+      [{ ...changedDirectory[0], country: "CA" }])).toThrow("OFFICIAL_CONTACT_CHAIN_UNVERIFIED");
+    expect(() => bindTeeItUpOfficialContactChain(source, fresh.root, fresh.contact,
+      [...changedDirectory, { ...directory[0], id: 32, courseId: "harbor-32" }])).toThrow("OFFICIAL_CONTACT_CHAIN_UNVERIFIED");
+  });
   it("persists only the inspected proof and rechecks a fresh contact chain before warm availability", async () => {
     let reads = 0, chains = 0, chainChange: Parameters<typeof pair>[0] = {};
     const readUrls: string[] = [];
