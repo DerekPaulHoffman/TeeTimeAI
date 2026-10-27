@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { prepareReadOnlyAction, assertNativeSelectReadback, isPublicFilterSelect, assertPublicUrl, settleNativeLinkNavigation, loadStagehandRuntime, validateOwnedBrowserConnection, openStagehandSession } from './driver.mjs';
+import { runInNewContext } from 'node:vm';
+import { prepareReadOnlyAction, readNativeActionTarget, assertNativeSelectReadback, isPublicFilterSelect, assertPublicUrl, settleNativeLinkNavigation, loadStagehandRuntime, validateOwnedBrowserConnection, openStagehandSession } from './driver.mjs';
 import { createStagehandCodexModel } from './codex-model.mjs';
 
 const select = { tag: 'SELECT', type: '', visible: true, disabled: false, multiple: false, name: 'optStartTime', id: '', label: '',
@@ -114,6 +115,63 @@ test('source-only Reserve exception requires the actual visible root anchor and 
   {type:'password'},{name:'username'},{text:'Reserve hold'}])
   assert.throws(()=>prepareReadOnlyAction(click,{...root,...delta},{sourceRoutingOnly:true}),/ACTION_TARGET_REJECTED/,JSON.stringify(delta));
  assert.throws(()=>prepareReadOnlyAction({...click,method:'press'},root,{sourceRoutingOnly:true}),/ACTION_TARGET_REJECTED/);
+});
+
+test('source-only public availability entry requires same-current native anchor proof for a nonroot document',()=>{
+ const click={method:'click',arguments:[]},currentPageUrl='https://official.example/';
+ const entry={tag:'A',visible:true,inForm:false,text:'Reserve Your Bay',label:'',href:'https://official.example/public-entry',formAction:'',rowText:'',type:'',name:'',id:'',
+  navigation:{pageUrl:currentPageUrl,rawHref:'/public-entry',captionComplete:true,inlineHandler:false,download:false,role:'',ariaDisabled:false}};
+ assert.equal(prepareReadOnlyAction(click,entry,{sourceRoutingOnly:true,currentPageUrl}),click);
+ assert.throws(()=>prepareReadOnlyAction(click,entry),/ACTION_TARGET_REJECTED/);
+ assert.throws(()=>prepareReadOnlyAction(click,entry,{sourceRoutingOnly:true}),/ACTION_TARGET_REJECTED/);
+ for(const text of ['Reserve Your Simulator','Reserve a Bay','Reserve tee times'])assert.equal(prepareReadOnlyAction(click,{...entry,text},{sourceRoutingOnly:true,currentPageUrl}),click);
+ for(const delta of [{tag:'BUTTON'},{visible:false},{inForm:true},{formAction:'/public-search'},{type:'password'},{name:'account'},
+  {text:'Reserve ReservationConfirm'},{text:'Reserve now'},{text:'Reserve Your Bay and Pay'},{label:'Confirm reservation'},
+  {rowText:'10:30 AM public bay'},{rowText:'10 AM public bay'},{rowText:'Selected reservation'},
+  {href:'https://foreign.example/public-entry'},{href:'https://official.example/public-entry?date=2026-11-01'},
+  {href:'https://official.example/public-entry#calendar'},{href:'https://user:secret@official.example/public-entry'},
+  {href:'https://127.0.0.1/public-entry'},{href:'javascript:void(0)'},{href:'https://official.example/slot/123'},
+  {href:'https://official.example/reservationConfirm'},{href:'https://official.example/reservationconfirm'},
+  {href:'https://official.example/checkout'},{href:'https://official.example/ASP/appt_req.asp'},
+  {href:'https://official.example/%70ublic-entry'}])
+  {const native={...entry.navigation};if(delta.href?.startsWith('https://')){const url=new URL(delta.href);native.rawHref=url.pathname+url.search+url.hash;}
+   assert.throws(()=>prepareReadOnlyAction(click,{...entry,...delta,navigation:native},{sourceRoutingOnly:true,currentPageUrl}),/ACTION_TARGET_REJECTED/,JSON.stringify(delta));}
+ for(const delta of [{pageUrl:'https://official.example/old-document'},{rawHref:'/different'},{rawHref:'/public-entry?token=private'},
+  {captionComplete:false},{inlineHandler:true},{download:true},{ariaDisabled:true},{role:'button'},{pageUrl:undefined}])
+  assert.throws(()=>prepareReadOnlyAction(click,{...entry,navigation:{...entry.navigation,...delta}},{sourceRoutingOnly:true,currentPageUrl}),/ACTION_TARGET_REJECTED/,JSON.stringify(delta));
+ assert.throws(()=>prepareReadOnlyAction({...click,currentPageUrl},entry,{sourceRoutingOnly:true}),/ACTION_TARGET_REJECTED/);
+});
+
+test('serialized native anchor collector derives document and navigation safety facts from the actual DOM',()=>{
+ class Element {
+  constructor(attrs={}){this.attrs=attrs;this.tagName='A';this.id='public-link';this.textContent='Reserve Your Bay';this.isConnected=true;this.parentElement=null;}
+  getAttribute(name){return Object.hasOwn(this.attrs,name)?this.attrs[name]:null;}
+  hasAttribute(name){return Object.hasOwn(this.attrs,name);}
+  getClientRects(){return [{}];}
+  closest(selector){return selector==='a[href]'?this:null;}
+ }
+ class Anchor extends Element {}
+ const link=new Anchor({href:'/public-entry'});link.href='https://native.example/public-entry';
+ const collect=()=>runInNewContext(`(${readNativeActionTarget.toString()})('a')`,{document:{querySelector:()=>link},location:{href:'https://native.example/'},Element,HTMLAnchorElement:Anchor,HTMLSelectElement:class{},HTMLInputElement:class{},HTMLOptGroupElement:class{},getComputedStyle:()=>({display:'block',visibility:'visible',opacity:'1'})});
+ const got=collect();assert.equal(got.navigation.pageUrl,'https://native.example/');assert.equal(got.navigation.rawHref,'/public-entry');assert.equal(got.navigation.captionComplete,true);assert.equal(got.navigation.inlineHandler,false);assert.equal(got.navigation.download,false);assert.equal(got.navigation.ariaDisabled,false);
+ link.attrs.onclick='submitReservation()';assert.equal(collect().navigation.inlineHandler,true);delete link.attrs.onclick;
+ link.attrs.download='';assert.equal(collect().navigation.download,true);delete link.attrs.download;
+ link.textContent='Reserve Your Bay'+' '.repeat(161);assert.equal(collect().navigation.captionComplete,false);
+});
+
+test('SDK availability navigation uses private native URL reads and still passes through the owned witness before act',async()=>{
+ for(const scenario of ['current','changed-during-read','forged-action-url']){
+  let current='https://owned.example/',reads=0,sdkCalls=0,nativeCalls=0;const destination='https://owned.example/public-entry';
+  const page={pageId:'owned',url:async()=>{reads++;return scenario==='changed-during-read'&&reads>=2?'https://owned.example/changed':current;},evaluate:async()=>({tag:'A',visible:true,inForm:false,text:'Reserve Your Bay',label:'',href:destination,formAction:'',rowText:'',type:'',name:'',id:'',navigation:{pageUrl:scenario==='forged-action-url'?'https://forged.example/':current,rawHref:'/public-entry',captionComplete:true,inlineHandler:false,download:false,role:'',ariaDisabled:false}})};
+  const owned={kind:'OWNED_GUARDED_STAGEHAND_CONTEXT',cdpUrl:'http://127.0.0.1:12345',targetId:page.pageId,assertGuardedTargets:async()=>true,prepareNavigation:async()=>{},beforeAction:async(id,href)=>{nativeCalls++;assert.equal(id,page.pageId);assert.equal(href,destination);return{kind:'NATIVE_VISIBLE_DOM',pageUrl:current,observedAt:new Date().toISOString(),documentHash:'a'.repeat(64),links:[{href:destination,visible:true}]};},close:async()=>({browserClosed:true})};
+  const browser={closed:false,context:{pages:async()=>[page]},close:async()=>{browser.closed=true;}};
+  const session=await openStagehandSession({deadline:Date.now()+5000,modelDisabled:true,sourceRoutingOnly:true,ownedBrowser:owned,onNativeSourceWitness:w=>{assert.equal(w.pageUrl,current);}},
+   {loadRuntime:async()=>({localBrowser:{connect:async()=>browser},Stagehand:{create:async()=>({act:async()=>{sdkCalls++;assert.equal(nativeCalls,1);current=destination;return{data:{success:true}};},close:async()=>{}})}})});
+  const click={method:'click',selector:'a',arguments:[],currentPageUrl:'https://owned.example/'};
+  if(scenario==='current'){const result=await session.act(click);assert.equal(result.afterUrl,destination);assert.equal(sdkCalls,1);assert.equal(nativeCalls,1);}
+  else {await assert.rejects(session.act(click),/ACTION_TARGET_REJECTED/);assert.equal(sdkCalls,0);assert.equal(nativeCalls,0);}
+  assert.deepEqual(await session.close(),{browserClosed:true,modelClosed:true});
+ }
 });
 
 test('action rejection diagnostics retain only closed matched term, field, tag and href presence',()=>{

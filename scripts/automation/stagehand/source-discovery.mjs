@@ -58,6 +58,19 @@ export async function prepareSourceDiscovery({ cwd = process.cwd(), loadRuntime 
 }
 
 export const sourceDecision = z.object({ decision: z.enum(['CONTINUE', 'WAIT', 'SOURCE_FOUND', 'UNRESOLVED', 'OPEN_FRAME']), reason: z.string(), nextActionInstruction: z.string(), bookingUrl: z.string().nullable() }).strict();
+// This observed embed is a routing entry, never a saved adapter source. Only
+// its actual guarded native frame navigation may earn a terminal destination.
+export function routingOnlyFrameEntry(value) {
+  try {
+    const url=new URL(value);
+    if(!sourceRoutingUrl(value)||url.protocol!=='https:'||url.hash)return false;
+    if(url.pathname==='/'&&!url.search&&/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.play\.teeitup\.com$/u.test(url.hostname))return true;
+    if(url.hostname!=='app.acuityscheduling.com'||url.pathname!=='/schedule.php')return false;
+    const fields=url.search.slice(1).split('&'),keys=[...url.searchParams.keys()];
+    return fields.length>=1&&fields.length<=2&&new Set(keys).size===fields.length&&keys.includes('owner')&&
+      fields.every(field=>/^(?:owner=[1-9]\d{0,9}|ref=embedded_csp)$/u.test(field));
+  } catch { return false; }
+}
 export function sourceDecisionFor(candidates, frames=[]) {
   assertSourceCandidateBudget(candidates);
   if (new Set(candidates).size !== candidates.length || candidates.some(url => !sourceRoutingUrl(url))) throw new Error('FRAMEWORK_SOURCE_CANDIDATES_INVALID');
@@ -286,7 +299,8 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
         ' Current bounded public evidence: '+JSON.stringify(prioritizedPublicEvidence(evidence,{maxCharacters:60000,includeDom:false}));
       phase='EXTRACT';const extraction=await bounded(()=>session.extract(instruction,sourceDecisionFor(candidates,frames))),decision=sourceDecisionFor(candidates,frames).parse(extraction.data);
       finalDecision=decision.decision;report.metrics.completedSteps=step+1;report.evidenceSummary=safeReason(decision.reason);await persist();
-      if(decision.decision==='SOURCE_FOUND'){report.adapterSourceProposal=readHybridSourceExport(decision,candidates);report.outcome='SOURCE_PROPOSED_UNVERIFIED';stopCondition='SOURCE_FOUND';break;}
+      const routingFrame=decision.decision==='SOURCE_FOUND'&&routingOnlyFrameEntry(decision.bookingUrl);
+      if(decision.decision==='SOURCE_FOUND'&&!routingFrame){report.adapterSourceProposal=readHybridSourceExport(decision,candidates);report.outcome='SOURCE_PROPOSED_UNVERIFIED';stopCondition='SOURCE_FOUND';break;}
       if(decision.decision==='UNRESOLVED'){
         // A model's old snapshot cannot close discovery while the same native
         // document is still parsing, or a new main document has since arrived.
@@ -294,7 +308,7 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
           await bounded(()=>session.page.url())!==evidence.url))continue;
         stopCondition='EXPLICIT_UNRESOLVED';break;
       }
-      if(decision.decision==='OPEN_FRAME'){
+      if(decision.decision==='OPEN_FRAME'||routingFrame){
         lastActionKind='openObservedFrameSource';
         if(!frames.includes(decision.bookingUrl)||report.nativeFrameNavigations.length>=2||typeof session.openObservedFrameSource!=='function')throw fail('STAGEHAND_SOURCE_OUTPUT_INVALID');
         activeFrame={pageUrl:evidence.url,url:decision.bookingUrl,startedAt:Date.now()};

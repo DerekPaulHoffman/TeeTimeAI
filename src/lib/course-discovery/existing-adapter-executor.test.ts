@@ -284,6 +284,55 @@ describe("fixed existing adapter recipes", () => {
     expect(await inspectExistingAdapter(acuity.source, { ...deps, fetch })).toEqual({ adapter: acuity.adapter });
     expect(fetch).toHaveBeenCalledOnce();
   });
+  it("binds an Acuity locality-qualified full name to the canonical address on cold and changed-input warm reads", async () => {
+    const source = { ...acuity.source, venueAddress: "10 Harbor Drive, Example, NY 12345, USA" };
+    const html = acuityHtml({ name: "Example Simulator, Example NY" });
+    expect(venueProofMatches(source.venueName, "Example Simulator, Example NY")).toBe(false);
+    const cold = reads(acuity, {}, html), { adapter } = await inspectExistingAdapter(source, { ...deps, fetch: cold });
+    expect(adapter).toEqual(acuity.adapter); expect(cold).toHaveBeenCalledOnce();
+    const recipe = parseAccessRecipe({ ...acuity, source, adapter }) as ExistingAdapterRecipe;
+    for (const request of [{ ...input, durationMinutes: 60 }, { ...input, durationMinutes: 60, date: "2030-10-23", players: 4 }]) {
+      const fetch = reads(recipe, { [request.date]: [{ time: `${request.date}T11:00:00-0400`, slotsAvailable: 1 }] }, html);
+      const result = await executeExistingAdapterRecipe(recipe, request, { ...deps, fetch });
+      expect(result).toMatchObject({ status: "AVAILABLE", complete: true, slots: [{ availableSpots: 1, capacity: null,
+        startsAt: `${request.date}T15:00:00.000Z`, endsAt: `${request.date}T16:00:00.000Z` }],
+        evidence: { venueVerified: true, dateVerified: true, capacityVerified: true, durationVerified: true, completeVerified: true } });
+      expect(fetch).toHaveBeenCalledTimes(3);
+      expect(recipe.source.venueName).toBe("Example Simulator");
+    }
+  });
+  it.each([
+    ["wrong locality", { name: "Example Simulator, Elsewhere NY" }, {}],
+    ["wrong state", { name: "Example Simulator, Example NJ" }, {}],
+    ["wrong brand", { name: "Other Simulator, Example NY" }, {}],
+    ["brand prefix", { name: "The Example Simulator, Example NY" }, {}],
+    ["brand qualifier", { name: "Example Simulator North, Example NY" }, {}],
+    ["extra suffix", { name: "Example Simulator, Example NY Public" }, {}],
+    ["missing comma", { name: "Example Simulator Example NY" }, {}],
+    ["extra comma", { name: "Example Simulator, Example, NY" }, {}],
+    ["state name", { name: "Example Simulator, Example New York" }, {}],
+    ["wrong timezone", { timezone: "America/Chicago" }, {}],
+    ["wrong owner", { ownerKey: "different123" }, {}],
+    ["bad postal code", {}, { venueAddress: "10 Harbor Drive, Example, NY 1234, USA" }],
+    ["missing street", {}, { venueAddress: "Example, NY 12345, USA" }],
+    ["mailing address", {}, { venueAddress: "PO Box 10, Example, NY 12345, USA" }],
+    ["extra address locality", {}, { venueAddress: "10 Harbor Drive, Example, Other, NY 12345, USA" }],
+    ["non-US address", {}, { venueAddress: "10 Harbor Drive, Example, NY 12345, Canada" }],
+    ["unknown postal state", {}, { venueAddress: "10 Harbor Drive, Example, ZZ 12345, USA" }],
+    ["missing address", {}, { venueAddress: undefined }],
+    ["missing official source", {}, { officialUrl: undefined }],
+    ["non-HTTPS official source", {}, { officialUrl: "http://example.org/" }],
+    ["credentialed official source", {}, { officialUrl: "https://user:pass@example.org/" }],
+  ] as const)("rejects Acuity locality-qualified %s before availability on cold and warm reads", async (_label, business, change) => {
+    const source = { ...acuity.source, venueAddress: "10 Harbor Drive, Example, NY 12345, USA", ...change };
+    const html = acuityHtml({ name: "Example Simulator, Example NY", ...business }), cold = reads(acuity, {}, html);
+    await expect(inspectExistingAdapter(source, { ...deps, fetch: cold })).rejects.toThrow("ADAPTER_IDENTITY_MISMATCH");
+    expect(cold).toHaveBeenCalledOnce();
+    const fetch = reads(acuity, {}, html);
+    const result = await executeExistingAdapterRecipe({ ...acuity, source }, { ...input, durationMinutes: 60 }, { ...deps, fetch });
+    expect(result).toMatchObject({ status: "INCOMPLETE", complete: false, slots: [], evidence: { reason: "ADAPTER_IDENTITY_MISMATCH", venueVerified: false, completeVerified: false } });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
   it("discovers and replays the exact independently verified TeeItUp facility set", async () => {
     const fetch = teeitupReads([{ teetimes: [
       { courseId: "provider-11", teetime: "2030-10-22T15:00:00Z", rates: [{ allowedPlayers: [1, 2, 3, 4], holes: 18 }] },

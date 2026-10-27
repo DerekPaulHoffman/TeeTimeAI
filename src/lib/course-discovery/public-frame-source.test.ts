@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { publicFrameSource } from "./public-frame-source";
+import { isPublicAcuityFrameEntry, publicFrameSource } from "./public-frame-source";
 import { createPublicBookingParentScope } from "./public-booking-parent";
 import { JSDOM } from "jsdom";
 import type { Page } from "@playwright/test";
@@ -23,6 +23,41 @@ describe("official public iframe source navigation", () => {
       for (const delta of [{ visible: false }, { srcdoc: true }, { label: "Sign in to book" }, { label: "Confirm 10:00 am" }])
         expect(read({ ...entry, src, ...delta })).toBeUndefined();
     }
+  });
+  it("retains the exact current official Acuity public entry without inventing a canonical managed URL", () => {
+    const proof = { kind: "VERIFIED_OFFICIAL_DOCUMENT" as const, officialUrl: official, documentUrl: document };
+    for (const src of ["https://app.acuityscheduling.com/schedule.php?owner=12345678", "https://app.acuityscheduling.com/schedule.php?owner=12345678&ref=embedded_csp", "https://app.acuityscheduling.com/schedule/AbCd1234?ref=embedded_csp"]) {
+      expect(isPublicAcuityFrameEntry(src)).toBe(true);
+      const frame = { ...entry, src, label: "Schedule Appointment" };
+      expect(publicFrameSource(frame, document, official, document, proof)).toBe(src);
+      expect(publicFrameSource(frame, document, official, document)).toBeUndefined();
+      for (const delta of [{ visible: false }, { srcdoc: true }, { label: "Confirm 10:00 AM" }, { label: "Sign in" }])
+        expect(publicFrameSource({ ...frame, ...delta }, document, official, document, proof)).toBeUndefined();
+      expect(publicFrameSource(frame, document, official, official, proof)).toBeUndefined();
+      expect(publicFrameSource(frame, document, official, document, { ...proof, documentUrl: official })).toBeUndefined();
+    }
+    for (const src of ["https://app.acuityscheduling.com/schedule.php", "https://app.acuityscheduling.com/schedule.php?owner=0",
+      "https://app.acuityscheduling.com/schedule.php?owner=0012", "https://app.acuityscheduling.com/schedule.php?owner=12345678901",
+      "https://app.acuityscheduling.com/schedule.php?owner=1234&owner=5678", "https://app.acuityscheduling.com/schedule.php?owner=1234&ref=private",
+      "https://app.acuityscheduling.com/schedule.php?owner=1234&appointmentType=5678", "https://app.acuityscheduling.com/schedule.php?owner=1234&date=2030-01-01",
+      "https://app.acuityscheduling.com/schedule.php?%6fwner=1234", "https://app.acuityscheduling.com/schedule.php?owner=1234#slot",
+      "http://app.acuityscheduling.com/schedule.php?owner=1234", "https://app.acuityscheduling.com.evil.example/schedule.php?owner=1234",
+      "https://app.acuityscheduling.com/checkout?owner=1234", "https://user:secret@app.acuityscheduling.com/schedule.php?owner=1234"])
+      expect(isPublicAcuityFrameEntry(src)).toBe(false);
+  });
+  it("requires newly visible current iframe markup after disclosure, not a copied modal or child redirect", async () => {
+    const src = "https://app.acuityscheduling.com/schedule.php?owner=12345678&ref=embedded_csp";
+    const dom = new JSDOM(`<div id="public-panel" hidden><iframe title="Schedule Appointment" src="${src}"></iframe></div><form><iframe title="Schedule Appointment" src="${src}"></iframe></form><iframe title="Schedule Appointment" src="${src}" srcdoc=""></iframe>`, { url: document, runScripts: "outside-only" });
+    dom.window.Element.prototype.getBoundingClientRect = () => ({ width: 800, height: 500 } as DOMRect);
+    const page = { url: () => document, locator: () => ({ evaluateAll: async (fn: (nodes: Element[]) => unknown) => dom.window.eval(`(${fn.toString()})`)([...dom.window.document.querySelectorAll("iframe[src]")]) }) } as unknown as Page;
+    const proof = { kind: "VERIFIED_OFFICIAL_DOCUMENT" as const, officialUrl: official, documentUrl: document };
+    try {
+      expect(await observedPublicFrameSources(page, official, document, proof)).toEqual([]);
+      dom.window.document.getElementById("public-panel")!.removeAttribute("hidden");
+      expect(await observedPublicFrameSources(page, official, document, proof)).toEqual([src]);
+      expect(await observedPublicFrameSources(page, official, official, proof)).toEqual([]);
+      expect(await observedPublicFrameSources(page, official, document)).toEqual([]);
+    } finally { dom.window.close(); }
   });
   it("keeps a fresh native same-host redirect and exact official link as the bare/www parent authority", () => {
     const root = "https://www.venue.example/", bare = "https://venue.example/", booking = bare + "booking/";

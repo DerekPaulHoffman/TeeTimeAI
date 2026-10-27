@@ -5,17 +5,20 @@ import type { AddressInfo } from "node:net";
 import { chromium, type Page, type Route } from "@playwright/test";
 import { describe, expect, it, vi } from "vitest";
 import { authorizePublicClientReadHeaders, installNativeRedirectRouting, isCurrentPublicClientReadHeaders,
-  publicClientReadHeaderProofFailure, nativeSourceLoadingFailedCorsErrors, nativePublicClientPreflightMethod, isNativeReadSupersededFailure, isNativeReadTerminalFailure, nativeMindbodyBootstrapSource, attestedNativeDocumentRedirects, type NativeReadRoute, type NativeRequestDiagnostic } from "./native-redirect-routing";
+  publicClientReadHeaderProofFailure, nativeSourceLoadingFailedCorsErrors, nativePublicClientPreflightMethod, isNativeReadSupersededFailure, isNativeReadTerminalFailure, nativeMindbodyBootstrapSource, attestedNativeDocumentRedirects, type NativeReadRoute, type NativeRequestDiagnostic, type NativeUncorrelatedPost } from "./native-redirect-routing";
 import { createPublicBookingParentScope } from "./public-booking-parent";
 import { continueNativeBrowserRead, isObservedNativeRedirect, isObservedNativeRedirectTarget, nativeReadPreflightMethod } from "./native-public-browser";
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
 import { type PublicBrowserResponseProfile } from "./browser-resource-limits";
 import { canonicalStagehandHostEntry } from "./stagehand-source-browser";
 import { isSafeRecipeUrl, isSafeBrowserBootstrapReadUrl } from "./recipe";
+import { discoveryDefiniteUncorrelatedPostDenial } from "./browser-session";
+import { isAnonymousBrowserReadPost } from "@/lib/automation/simulator-interactive-browser";
 
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; }
 async function installed(maxRequests?: number, signal?: AbortSignal, afterRoute?: (route: NativeReadRoute) => Promise<void>, responseProfile?: PublicBrowserResponseProfile,
-  onCommandFailure?: (diagnostic: NativeRequestDiagnostic) => void, controllerGetIntent?: (sourceUrl: string, targetUrl: string) => boolean) {
+  onCommandFailure?: (diagnostic: NativeRequestDiagnostic) => void, controllerGetIntent?: (sourceUrl: string, targetUrl: string) => boolean,
+  denyUncorrelatedPost?: (request: NativeUncorrelatedPost) => boolean) {
   const events = new Map<string, (event: unknown) => void>(), routes: NativeReadRoute[] = [];
   const close = vi.fn(async () => {}), detach = vi.fn(async () => {}), failures: string[] = [], subframes: object[] = [], rejections: NativeRequestDiagnostic[] = [];
   const main = { page: () => page };
@@ -24,7 +27,7 @@ async function installed(maxRequests?: number, signal?: AbortSignal, afterRoute?
       : name === "Fetch.getResponseBody" ? { body: `body-${value?.requestId}`, base64Encoded: false } : {}), detach };
   const page = { context: () => ({ newCDPSession: async () => cdp }), mainFrame: () => main, close } as unknown as Page;
   const handler = vi.fn(async (route: NativeReadRoute) => { routes.push(route); await afterRoute?.(route); });
-  const guard = await installNativeRedirectRouting(page, handler, { timeoutMs: 100, maxRequests, signal, responseProfile, onCommandFailure, controllerGetIntent,
+  const guard = await installNativeRedirectRouting(page, handler, { timeoutMs: 100, maxRequests, signal, responseProfile, onCommandFailure, controllerGetIntent, denyUncorrelatedPost,
     onFailure: code => failures.push(code), onSubframeBlocked: request => subframes.push(request), onRequestRejected: request => rejections.push(request) });
   const request = (id: string, values: object = {}) => events.get("Fetch.requestPaused")!({ requestId: id, networkId: `network-${id}`,
     frameId: "main", resourceType: "XHR", request: { url: "https://example.org/data", method: "GET", headers: {} }, ...values });
@@ -34,6 +37,104 @@ async function installed(maxRequests?: number, signal?: AbortSignal, afterRoute?
 function playwrightRoute(test: Awaited<ReturnType<typeof installed>>) {
   return { request: () => ({ frame: () => test.main }), continue: vi.fn(async () => {}), abort: vi.fn(async () => {}), fulfill: vi.fn() } as unknown as Route;
 }
+
+describe("fixed caller deny-only uncorrelated POST", () => {
+  const url = "https://example.org/public", body = "x".repeat(442);
+  const denied = { networkId: undefined, request: { url, method: "POST", headers: { "Content-Type": "application/json" }, hasPostData: true, postData: body } };
+  it("awaits exact denied POST abort ACK without handler authority while an independent native main GET remains provable", async () => {
+    const policy = vi.fn((request: NativeUncorrelatedPost) => discoveryDefiniteUncorrelatedPostDenial(request, url, isAnonymousBrowserReadPost, () => true));
+    const test = await installed(undefined, undefined, undefined, undefined, undefined, undefined, policy);
+    const ack = deferred<object>(), send = test.cdp.send.getMockImplementation()!;
+    test.cdp.send.mockImplementation((name, value) => name === "Fetch.failRequest" && value?.requestId === "denied" ? ack.promise : send(name, value));
+    try {
+      await test.guard.beginDocumentNavigation(test.main as never);
+      test.events.get("Network.requestWillBeSent")!({ requestId: "network-document", frameId: "main", loaderId: "loader-document", type: "Document", request: { url, method: "GET" } });
+      test.request("document", { resourceType: "Document", request: { url, method: "GET", headers: {} } });
+      await test.routes[0].continue(); test.response("document", { resourceType: "Document", request: { url, method: "GET", headers: {} }, responseHeaders: [{ name: "Content-Type", value: "text/html" }] });
+      await test.routes[0].request().response(); test.events.get("Page.frameNavigated")!({ frame: { id: "main", loaderId: "loader-document", url } });
+      await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+      test.request("denied", denied);
+      expect(test.guard.pendingReads).toBe(1); expect(test.handler).toHaveBeenCalledOnce(); expect(test.rejections).toEqual([]);
+      // The denied pause is diagnostic-only: no response record, proof or lease can be minted.
+      test.events.get("Network.requestWillBeSent")!({ requestId: "network-independent", frameId: "main", loaderId: "loader-document", type: "XHR", request: { url, method: "GET" } });
+      test.request("independent", { request: { url, method: "GET", headers: {} } }); await vi.waitFor(() => expect(test.routes).toHaveLength(2)); await test.routes[1].continue(); test.response("independent", { request: { url, method: "GET", headers: {} } });
+      await test.routes[1].request().response();
+      expect(test.guard.isCurrentCompletedDocumentRead(test.routes[0].request(), test.main as never, { frameId: "main", loaderId: "loader-document", url })).toBe(true);
+      ack.resolve({}); await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+      expect(policy).toHaveBeenCalledOnce(); expect(test.handler).toHaveBeenCalledTimes(2);
+      expect(test.cdp.send.mock.calls.filter(([name, value]) => ["Fetch.continueRequest", "Fetch.continueResponse", "Fetch.getResponseBody"].includes(name) && value?.requestId === "denied")).toEqual([]);
+      expect(test.rejections).toHaveLength(1); expect(test.rejections[0]).toMatchObject({ code: "NATIVE_REDIRECT_REQUEST_REJECTED", networkIdPresent: false, duplicateRequestId: false, recordCount: 2 });
+      expect(JSON.stringify(test.rejections)).not.toMatch(/example.org|"postData"|"headers"|"requestId"|"networkId"/u);
+      expect(test.guard.firstFatal).toBeUndefined(); expect(test.close).not.toHaveBeenCalled();
+    } finally { ack.resolve({}); await test.guard.close(); }
+  });
+  it.each(["allowed", "unknown", "throw", "GET", "documentPOST", "OPTIONS"])("retains missing-ID fatal cleanup for %s", async mode => {
+    const policy = vi.fn(() => { if (mode === "throw") throw Error("POLICY_UNKNOWN"); return mode === "allowed" ? false : mode === "unknown" ? undefined as never : true; });
+    const test = await installed(undefined, undefined, undefined, undefined, undefined, undefined, policy);
+    try {
+      test.request("unknown", { ...denied, ...(mode === "documentPOST" ? { resourceType: "Document" } : {}),
+        request: { ...denied.request, method: mode === "GET" ? "GET" : mode === "OPTIONS" ? "OPTIONS" : "POST" } });
+      await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce()); expect(test.guard.firstFatal?.code).toBe("NATIVE_REDIRECT_NETWORK_ID_MISSING");
+      expect(test.handler).not.toHaveBeenCalled(); expect(test.rejections).toEqual([]);
+      if (["GET", "documentPOST", "OPTIONS"].includes(mode)) expect(policy).not.toHaveBeenCalled();
+    } finally { await test.guard.close(); }
+  });
+  it.each(["missing frame", "malformed headers", "missing body", "large body", "redirect", "empty network"])("validates %s before calling the deny-only policy", async mode => {
+    const policy = vi.fn(() => true), test = await installed(undefined, undefined, undefined, undefined, undefined, undefined, policy);
+    try {
+      const value = structuredClone(denied) as Record<string, unknown> & { request: Record<string, unknown> };
+      if (mode === "missing frame") value.frameId = undefined;
+      if (mode === "malformed headers") value.request.headers = Array(129).fill("invalid");
+      if (mode === "missing body") delete value.request.postData;
+      if (mode === "large body") value.request.postData = "x".repeat(32769);
+      if (mode === "redirect") value.redirectedRequestId = "parent";
+      if (mode === "empty network") value.networkId = "";
+      test.request("denied", value); await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce());
+      expect(policy).not.toHaveBeenCalled(); expect(test.handler).not.toHaveBeenCalled(); expect(test.rejections).toEqual([]);
+    } finally { await test.guard.close(); }
+  });
+  it.each(["reject", "hang"])("requires the actual denied pause's abort ACK: %s", async mode => {
+    vi.useFakeTimers(); const test = await installed(undefined, undefined, undefined, undefined, undefined, undefined, () => true);
+    const send = test.cdp.send.getMockImplementation()!;
+    test.cdp.send.mockImplementation((name, value) => name === "Fetch.failRequest" ? mode === "reject" ? Promise.reject(Error("Protocol abort rejected")) : new Promise(() => {}) : send(name, value));
+    try {
+      test.request("denied", denied); await vi.advanceTimersByTimeAsync(101);
+      expect(test.close).toHaveBeenCalledOnce(); expect(test.rejections).toEqual([]); expect(test.handler).not.toHaveBeenCalled();
+      expect(test.guard.firstFatal?.code).toBe(mode === "hang" ? "NATIVE_REDIRECT_ABORT_TIMEOUT" : "NATIVE_REDIRECT_ROUTING_FAILED");
+    } finally { await test.guard.close(); vi.useRealTimers(); }
+  });
+  it.each(["duplicate", "late response", "rotation"])("never revives a policy-denied interception after %s", async mode => {
+    const test = await installed(undefined, undefined, undefined, undefined, undefined, undefined, () => true);
+    const ack = deferred<object>(), send = test.cdp.send.getMockImplementation()!;
+    test.cdp.send.mockImplementation((name, value) => name === "Fetch.failRequest" && value?.requestId === "denied" ? ack.promise : send(name, value));
+    try {
+      test.request("denied", denied);
+      if (mode === "duplicate") test.request("denied", denied);
+      if (mode === "rotation") await test.guard.beginDocumentNavigation(test.main as never);
+      ack.resolve({}); await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+      if (mode === "late response") test.response("denied", denied);
+      await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce()); expect(test.handler).not.toHaveBeenCalled();
+      expect(test.guard.firstFatal?.code).toBe(mode === "duplicate" ? "NATIVE_REDIRECT_DUPLICATE_FETCH_ID" : mode === "rotation" ? "NATIVE_REDIRECT_LOADER_MISMATCH" : "NATIVE_REDIRECT_RESPONSE_UNKNOWN");
+      expect(test.cdp.send.mock.calls.some(([name]) => ["Fetch.continueRequest", "Fetch.continueResponse", "Fetch.getResponseBody"].includes(name))).toBe(false);
+    } finally { ack.resolve({}); await test.guard.close(); }
+  });
+  it("keeps the original interception cap ahead of caller denial", async () => {
+    const policy = vi.fn(() => true), test = await installed(1, undefined, undefined, undefined, undefined, undefined, policy);
+    try {
+      test.request("first", denied); await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+      test.request("second", denied); await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce());
+      expect(policy).toHaveBeenCalledOnce(); expect(test.guard.firstFatal?.code).toBe("NATIVE_REDIRECT_INTERCEPT_LIMIT"); expect(test.handler).not.toHaveBeenCalled();
+    } finally { await test.guard.close(); }
+  });
+  it("never invokes caller policy or creates a read for an uncorrelated foreign frame", async () => {
+    const policy = vi.fn(() => true), test = await installed(undefined, undefined, undefined, undefined, undefined, undefined, policy);
+    try {
+      test.request("foreign", { ...denied, frameId: "foreign" }); await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+      expect(policy).not.toHaveBeenCalled(); expect(test.handler).not.toHaveBeenCalled(); expect(test.subframes).toHaveLength(1);
+      expect(test.close).not.toHaveBeenCalled(); expect(test.cdp.send.mock.calls.some(([name]) => name === "Fetch.continueRequest")).toBe(false);
+    } finally { await test.guard.close(); }
+  });
+});
 
 describe("closed redirect rejection reasons", () => {
   const root = "https://example.org/first", target = "https://example.org/next";

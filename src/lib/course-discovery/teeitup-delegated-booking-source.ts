@@ -4,7 +4,7 @@ import { z } from "zod";
 import { freshNativeCanonicalRootDocument, isFreshNativeDelegatedDocument, nativeCanonicalRootDocumentProofSchema, type NativeCanonicalRootDocumentProof } from "./native-official-page-attestation";
 import { bindTeeItUpPhysicalContactFacility, physicalContactSourceData, teeItUpPhysicalContactProofSchema, type NativePhysicalContactSource, type TeeItUpPhysicalContactProof } from "./teeitup-physical-contact-proof";
 import { completeUSAddress, fullCourseName, matchesOfficialFacility, type OfficialIdentityPage, type OfficialIdentitySource } from "./teeitup-official-identity";
-import { publicDocumentUrl, teeItUpBookAlias, teeItUpCompleteStreetAddress } from "./teeitup-official-booking-source";
+import { publicDocumentUrl, teeItUpBookAlias, teeItUpCompleteStreetAddress, teeItUpBrandedPipeAddressMatches } from "./teeitup-official-booking-source";
 import { createDelegationDiagnostic, rememberTeeItUpDelegationFailure, type DelegatedDiagnosticGate } from "./teeitup-delegated-booking-diagnostic";
 
 const sha = z.string().regex(/^[a-f0-9]{64}$/u);
@@ -81,6 +81,26 @@ function physicalContext(node: Element) {
   }
   return true;
 }
+/** Printed footer fields are delimiters, not authority to drop address words.
+ * Recover only the comma before the exact known locality, then reuse the full
+ * strict address parser. The phone is a complete field, never trusted context. */
+function brandedPipeFooterMatches(page: OfficialIdentityPage, all: Element[], expected: string,
+  canonical: NonNullable<ReturnType<typeof teeItUpCompleteStreetAddress>>) {
+  const rows = all.filter(node => ["p", "address"].includes(node.tagName) && physicalContext(node) && text(node).includes("|")).filter(node => {
+    let current: Node | undefined = node, footer = false;
+    for (let depth = 0; current && depth < 64; depth++, current = "parentNode" in current ? current.parentNode ?? undefined : undefined) {
+      if (!element(current)) continue;
+      if (/\b(?:mailing|corporate|billing|headquarters)\b/iu.test(["id", "class", "title", "aria-label"].map(key => attr(current as Element, key) ?? "").join(" "))) return false;
+      if (current.tagName === "footer") footer = true;
+    }
+    return footer && !current;
+  }).map(node => clean(text(node)));
+  const distinct = [...new Set(rows)];
+  const renderedKey = (value: string) => clean(value.normalize("NFKC")).toLowerCase();
+  if (!rows.length || rows.length > 40 || distinct.length !== 1 || distinct[0].length > 500 ||
+      !page.visibleEvidence?.addressTexts.some(value => renderedKey(value) === renderedKey(distinct[0]))) return false;
+  return teeItUpBrandedPipeAddressMatches(distinct[0], expected, canonical);
+}
 /** Canonical venue identity is proved only on the actual official root. This
  * does not assert that a delegated URL occurs directly on that document. */
 export function delegatedCanonicalVenueWitness(source: OfficialIdentitySource, page: OfficialIdentityPage,
@@ -90,7 +110,7 @@ export function delegatedCanonicalVenueWitness(source: OfficialIdentitySource, p
   if (!source.officialUrl || !source.venueAddress || !gate("rootDocumentProvenance", page.url === source.officialUrl || Boolean(freshNativeCanonicalRootDocument(page, source.officialUrl)?.rootDocumentProof))) return fail();
   const all = entries(page), expected = fullCourseName(source.venueName), address = teeItUpCompleteStreetAddress(source.venueAddress);
   if (!gate("canonicalAddressValid", Boolean(address && expected.replace(/\bgolf course$/u, "").trim().length >= 5))) return fail();
-  const headings = all.filter(node => /^(?:h1|h2)$/u.test(node.tagName)).map(node => fullCourseName(clean(text(node)).replace(/^Welcome to\s+/iu, "")));
+  const headings = all.filter(node => /^h[1-6]$/u.test(node.tagName)).map(node => fullCourseName(clean(text(node)).replace(/^Welcome to\s+/iu, "")));
   if (!gate("rootRawVenue", headings.includes(expected) && !all.some(node => node.tagName === "h1" && fullCourseName(clean(text(node)).replace(/^Welcome to\s+/iu, "")) !== expected)) ||
       !gate("rootRenderedVenue", page.visibleEvidence!.headings.some(value => fullCourseName(clean(value).replace(/^Welcome to\s+/iu, "")) === expected))) return fail();
   const addresses = all.filter(node => ["address", "p", "div", "li", "td"].includes(node.tagName) && physicalContext(node) && clean(text(node)).length <= 500)
@@ -99,8 +119,10 @@ export function delegatedCanonicalVenueWitness(source: OfficialIdentitySource, p
   // Preserve the existing official-home predicate: a public government page
   // may also display an unrelated agency footer address. Only the exact full
   // canonical physical address can corroborate this venue's identity.
-  if (!gate("rootRawAddress", addresses.some(value => JSON.stringify(value) === canonical)) ||
-      !gate("rootRenderedAddress", page.visibleEvidence!.addressTexts.some(value => JSON.stringify(teeItUpCompleteStreetAddress(clean(value).replace(/^Address\s*:\s*/iu, ""))) === canonical))) return fail();
+  const rawAddress = addresses.some(value => JSON.stringify(value) === canonical);
+  const renderedAddress = page.visibleEvidence!.addressTexts.some(value => JSON.stringify(teeItUpCompleteStreetAddress(clean(value).replace(/^Address\s*:\s*/iu, ""))) === canonical);
+  const pipeFooter = Boolean((!rawAddress || !renderedAddress) && address && brandedPipeFooterMatches(page, all, expected, address));
+  if (!gate("rootRawAddress", rawAddress || pipeFooter) || !gate("rootRenderedAddress", renderedAddress || pipeFooter)) return fail();
   return delegatedWitnessHash({ venueName: expected, address });
 }
 /** Every exact edge must occur in both nonhidden inert markup and its own
@@ -114,8 +136,9 @@ export function delegatedBookingHop(page: OfficialIdentityPage, requestedNext?: 
   const links = all.filter(node => node.tagName === "a" && /\b(?:tee\s*times?|book|reservations?|reserve)\b/iu.test(text(node)) &&
     !/\b(?:lesson|member|login|sign in|checkout|purchase|payment|confirm|account)\b/iu.test(text(node)) &&
     !/\b(?:wait[\s-]?list|alerts?|notif(?:y|ied|ies|ications?)|tournaments?|group\s+(?:outings?|events?|bookings?|reservations?))\b/iu.test(text(node))).flatMap(node => {
-    try { const next = new URL(attr(node, "href") ?? "", page.url).href; return safeDelegatedBookingUrl(next) && next !== page.url &&
-      page.visibleEvidence!.linkUrls.includes(next) ? [next] : []; } catch { return []; }
+    try { const next = new URL(attr(node, "href") ?? "", page.url), current = new URL(page.url);
+      const sameDocument = next.origin === current.origin && next.pathname === current.pathname && next.search === current.search;
+      return safeDelegatedBookingUrl(next.href) && !sameDocument && page.visibleEvidence!.linkUrls.includes(next.href) ? [next.href] : []; } catch { return []; }
   });
   const candidates = [...new Set(links)].filter(value => requestedNext === undefined || value === requestedNext);
   note("hopRawLinkPresent", all.some(node => node.tagName === "a" && (() => { try { return requestedNext === undefined || new URL(attr(node, "href") ?? "", page.url).href === requestedNext; } catch { return false; } })()));

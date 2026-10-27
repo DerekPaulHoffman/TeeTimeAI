@@ -1,10 +1,11 @@
 import { collectNativeOfficialPublicMetadata } from "./public-document-metadata";
 import { observedPublicBookingIntermediary } from "./public-booking-intermediary";
+import { classifyPublicEntryDisclosure, revalidatePublicEntryDisclosure, type PublicEntryDisclosure, type PublicEntryDisclosureEvidence } from "./public-entry-disclosure";
 import { createHash, randomUUID } from "node:crypto";
 import { chargeDelegatedReadBudget, delegatedProxyAllocation, settleDelegatedProxyBudget, type DelegatedReadBudget } from "./teeitup-delegated-booking-context";
 import { createDelegationDiagnostic, rememberTeeItUpDelegationFailure, getTeeItUpDelegationDiagnostic } from "./teeitup-delegated-booking-diagnostic";
 import { describePublicUrlRejection, safePublicUrlRejectionDiagnostic } from "../../../scripts/automation/course-discovery-diagnostics.mjs";
-import type { Browser, Locator } from "@playwright/test";
+import type { Browser, CDPSession, Locator } from "@playwright/test";
 import { z } from "zod";
 import { createAddressPinnedPublicFetchTransport } from "@/lib/automation/address-pinned-public-fetch";
 import { createPassfactoryPublicReadPolicy, isIncidentalBrowserRequest, isNonEvidenceBrowserResource } from "@/lib/automation/passfactory-public-read-policy";
@@ -20,7 +21,7 @@ import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-b
 import { accessExecutionInputSchema, type AccessExecutionInput, isActiveBrowserAccessChallenge, isSafeBrowserAssetUrl, isSafeBrowserBootstrapReadUrl, isSafeBrowserAvailabilityReadUrl, isSafeRecipeUrl, recipeSelectorSchema } from "./recipe";
 import { continueNativeBrowserRead, createNativePublicBrowserProxy, isObservedNativeRedirect, isObservedNativeRedirectTarget, nativeReadPreflightMethod } from "./native-public-browser";
 import { installNativeRedirectRouting, isNativeReadSupersededFailure, authorizePublicClientReadHeaders, isCurrentPublicClientReadHeaders, nativePublicClientPreflightMethod, nativeMindbodyBootstrapSource, nativeMindbodyControllerForm,
-  publicClientReadHeaderProofFailure, attestedNativeDocumentRedirects, type NativeDocumentRedirect, type NativeFirstFatal, type NativeReadRoute, type NativeRequestDiagnostic } from "./native-redirect-routing";
+  publicClientReadHeaderProofFailure, attestedNativeDocumentRedirects, type NativeDocumentRedirect, type NativeFirstFatal, type NativeReadRequest, type NativeReadRoute, type NativeRequestDiagnostic, type NativeUncorrelatedPost } from "./native-redirect-routing";
 import { publicHeaderFailureDiagnostic } from "./public-header-diagnostic";
 export { publicHeaderFailureDiagnostic } from "./public-header-diagnostic";
 import { requestFamilyForUrl } from "./request-family";
@@ -58,6 +59,23 @@ import { inspectPublicRentalService, openPublicRentalService, selectPublicRental
   continuePublicRentalService, type PublicRentalServiceProof, type PublicRentalServiceSelection, type PublicServiceContinuationMode } from "./public-service-control";
 
 const identifier = z.union([z.string().max(128), z.number().int()]);
+/** Denial only: reuse current caller policy without constructing any native read. */
+export function discoveryDefiniteUncorrelatedPostDenial(request: NativeUncorrelatedPost, documentUrl: string,
+  readPost: (url: URL, headers: Headers, body: string) => boolean,
+  addReadHeaders: (url: URL, method: string, original: Record<string, string>, headers: Headers, body: string) => boolean) {
+  try {
+    if (request.method !== "POST" || !["xhr", "fetch"].includes(request.resourceType) || typeof request.body !== "string" ||
+        Buffer.byteLength(request.body) > 32768 || !isSafeRecipeUrl(request.url) || !isSafeRecipeUrl(documentUrl)) return false;
+    const url = new URL(request.url), headers = new Headers();
+    for (const key of ["accept", "content-type", "origin"]) if (request.headers[key]) headers.set(key, request.headers[key]);
+    // REX native placeholders and public header/form capabilities require the
+    // original full identity path. Never classify their absence as denial.
+    if (isRexNamespace(url) || isMemberSportsPublicTeeSheetPost(url, headers, request.body, documentUrl)) return false;
+    if (!addVerifiedMindbodyReadHeaders(url, "POST", request.headers, headers, request.body) ||
+        !addReadHeaders(url, "POST", request.headers, headers, request.body)) return false;
+    return readPost(url, headers, request.body) === false;
+  } catch { return false; }
+}
 export const discoveryBrowserActionSchema = z.discriminatedUnion("action", [
   z.object({ id: identifier, action: z.literal("open"), url: z.string().max(2048) }).strict(),
   z.object({ id: identifier, action: z.literal("inspect_adapter"), url: z.string().max(2048) }).strict(),
@@ -143,6 +161,8 @@ export function sameDiscoveryMainDocument(observedUrl: string, currentUrl: strin
   return Boolean(observedUrl && currentUrl) && observedUrl.split("#", 1)[0] === currentUrl.split("#", 1)[0];
 }
 
+type NativeMainDocumentContinuity = { kind: "NATIVE_MAIN_DOCUMENT_CONTINUITY_V1"; originalUrlSha256: string; currentUrlSha256: string;
+  documentBindingSha256: string; observedAt: number; status: 200 };
 export type DiscoveryBrowserSnapshot = {
   url: string; text: string; controls: Array<{ target: string; selector: string; kind: string; name: string; label: string; href?: string; options?: Array<{ value: string; label: string }>; currentValue?: string; filterPurpose?: "DURATION" | "PLAYERS"; readOnly?: true; product?: { selector: string; durationMinutes: number } }>;
   responses: Array<{ url: string; status: number; method: string; body?: unknown; bodyOmitted?: true; schemaEvidence?: PublicResponseSchema; schemaEvidenceOmitted?: true }>;
@@ -153,6 +173,8 @@ export type DiscoveryBrowserSnapshot = {
   completedPublicAssetRequestsOverflow?: boolean;
   /** Controller-only current native HTTP lineage; stripped from model input. */
   nativeDocumentRedirects?: NativeDocumentRedirect[];
+  /** Controller-only current native read; removed before model/tool projection. */
+  nativeMainDocumentContinuity?: NativeMainDocumentContinuity;
   requestFailures?: Array<{ reason: string; resourceType: string; method?: string; url?: string;
     urlRejection?: ReturnType<typeof safePublicUrlRejectionDiagnostic>; publicHeaderDiagnostic?: ReturnType<typeof publicHeaderFailureDiagnostic> }>;
   nativeFirstFatal?: NativeFirstFatal;
@@ -255,8 +277,12 @@ export async function createCourseDiscoveryBrowserSession(input: {
   const cpsScope = createCpsPublicSessionScope(initialUrls);
   const bookingParents = createPublicBookingParentScope({ officialUrl: input.venueOfficialUrl, venueName: input.venueName, venueAddress: input.venueAddress });
   const publicIntermediaries = new Map<string, { pageUrl: string; documentStartedAt: number }>();
+  let nativeMainDocumentWitness: { request: NativeReadRequest; currentUrl: string; timeOrigin: number; proof: NativeMainDocumentContinuity } | undefined;
   const teeBookingScope = createTeeItUpOfficialBookingScope({ officialUrl: input.venueOfficialUrl, venueName: input.venueName ?? "",
-    venueAddress: input.venueAddress, timeZone: input.timeZone ?? "UTC" }, deadline);
+    venueAddress: input.venueAddress, timeZone: input.timeZone ?? "UTC" }, deadline, (request, currentUrl, timeOrigin) => Boolean(
+      nativeMainDocumentWitness && nativeMainDocumentWitness.request === request && nativeMainDocumentWitness.currentUrl === currentUrl &&
+      nativeMainDocumentWitness.timeOrigin === timeOrigin && Date.now() >= nativeMainDocumentWitness.proof.observedAt &&
+      Date.now() - nativeMainDocumentWitness.proof.observedAt <= 5000));
   let teeDocumentToken: TeeItUpSourceRequestToken | undefined;
   type OfficialDocumentProof = { kind: "VERIFIED_OFFICIAL_DOCUMENT"; officialUrl: string; documentUrl: string };
   let officialIdentityPage: (OfficialIdentityPage & { observedAt: number; documentStartedAt: number; officialDocumentProof: OfficialDocumentProof }) | undefined;
@@ -350,7 +376,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
     }
   };
   const controls = new Map<string, { locator: Locator; signature: string; kind: string; href?: string; documentNavigationOnly?: boolean; calendarDay?: string; dropdown?: PublicDropdownProof; menuButton?: PublicMenuButtonProof; catalogTile?: boolean;
-    service?: boolean; serviceContinuation?: PublicServiceContinuationMode; datePicker?: PublicDatePickerInputProof }>();
+    service?: boolean; serviceContinuation?: PublicServiceContinuationMode; datePicker?: PublicDatePickerInputProof; entryDisclosure?: PublicEntryDisclosure }>();
+  let entryDisclosureUsed = false, disclosureGetOnly = false;
+  let entryGetIntent: { sourceUrl: string; href: string; expiresAt: number; used: boolean } | undefined;
   let serviceSelection: PublicRentalServiceSelection | undefined;
   const observedElements = new Map<string, { locator: Locator; signature: string }>();
   let closed = false, requestCount = 0, interceptCount = 0, responseBytes = 0, blockedRequests = 0, pendingRequests = 0, actions = 0, observations = 0;
@@ -363,7 +391,36 @@ export async function createCourseDiscoveryBrowserSession(input: {
     try { if (deps.delegatedReadBudget) chargeDelegatedReadBudget(deps.delegatedReadBudget, "intercepts"); return true; }
     catch { terminalFailure = "PUBLIC_READ_REQUEST_LIMIT"; return false; }
   };
-  let navigation: { url: string; status: number } | undefined;
+  let navigation: { url: string; status: number; request?: NativeReadRequest; documentNonce?: string } | undefined;
+  let statusCdp: CDPSession | undefined;
+  const currentNavigationStatus = async (currentUrl: string, documentStartedAt: number) => {
+    const read = navigation;
+    nativeMainDocumentWitness = undefined;
+    // Preserve the exact-document branch, including actual non-2xx statuses.
+    const exactStatus = read && sameDiscoveryMainDocument(read.url, currentUrl) ? read.status : undefined;
+    if (!read || read.status !== 200 || !nativeProxy || !read.request || !read.documentNonce || !redirectRouting || !isSafeRecipeUrl(currentUrl)) return exactStatus;
+    try {
+      statusCdp ??= await context.newCDPSession(page);
+      const before = (await statusCdp.send("Page.getFrameTree")).frameTree.frame;
+      const dom = await page.evaluate(() => ({ url: location.href, startedAt: performance.timeOrigin }));
+      const after = (await statusCdp.send("Page.getFrameTree")).frameTree.frame;
+      deadline.throwIfAborted();
+      if (read !== navigation || closed || !before.id || !before.loaderId || before.id !== after.id || before.loaderId !== after.loaderId ||
+          before.url !== currentUrl || after.url !== currentUrl || dom.url !== currentUrl || dom.startedAt !== documentStartedAt || page.url() !== currentUrl)
+        return exactStatus;
+      // The controller requires this exact completed, ACKed main GET, current
+      // generation/loader/network revision and the actual native history URL.
+      if (!redirectRouting.firstFatal && redirectRouting.isCurrentCompletedDocumentRead(read.request, page.mainFrame(),
+        { frameId: before.id, loaderId: before.loaderId, url: currentUrl })) {
+        const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+        nativeMainDocumentWitness = { request: read.request, currentUrl, timeOrigin: documentStartedAt,
+          proof: { kind: "NATIVE_MAIN_DOCUMENT_CONTINUITY_V1", originalUrlSha256: hash(read.url), currentUrlSha256: hash(currentUrl),
+            documentBindingSha256: hash([read.documentNonce, before.id, before.loaderId, documentStartedAt, read.url]), observedAt: Date.now(), status: 200 } };
+        return read.status;
+      }
+      return exactStatus;
+    } catch { return exactStatus; }
+  };
   let navigationStartedAt: number | undefined;
   let ezDocument: EzLinksDocumentWitness | undefined, ezControllerRead: EzLinksControllerRead | undefined;
   let ezConfigurationRead: { document: EzLinksDocumentWitness; token: EzLinksDocumentToken; version: number } | undefined;
@@ -397,8 +454,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
   });
   let closing: Promise<void> | undefined, cleanupFailed = false;
   const close = () => closing ??= (async () => {
-    closed = true; completedPublicAssets.clear(); deliveredPublicAssets.clear(); teeBookingScope.close(); clearEzDocument();
+    closed = true; nativeMainDocumentWitness = undefined; completedPublicAssets.clear(); deliveredPublicAssets.clear(); teeBookingScope.close(); clearEzDocument();
     try { await redirectRouting?.close(); } catch { cleanupFailed = true; }
+    await statusCdp?.detach().catch(() => {});
     cancellation.abort("BROWSER_CLOSED"); queue.dispose();
     // Preserve the existing context -> browser -> proxy teardown order while
     // ensuring one failed close cannot prevent the remaining drains.
@@ -414,7 +472,11 @@ export async function createCourseDiscoveryBrowserSession(input: {
   deadline.addEventListener("abort", abort, { once: true });
   page.on("popup", popup => { void popup.close(); });
   context.on("page", opened => { if (opened !== page) void opened.close(); });
-  page.on("framenavigated", frame => { if (frame === page.mainFrame()) { teeBookingScope.checkCurrentDocument(frame.url()); catalogTiles.checkDocument(frame.url()); } });
+  page.on("framenavigated", frame => { if (frame === page.mainFrame()) {
+    nativeMainDocumentWitness = undefined;
+    if (nativeProxy) teeBookingScope.suspendCurrentDocument(frame.url()); else teeBookingScope.checkCurrentDocument(frame.url());
+    catalogTiles.checkDocument(frame.url());
+  } });
   const waitEz = async (ready: () => boolean, code: string, durationMs = 5_000) => {
     const until = Math.min(Date.now() + durationMs, input.deadlineAt.getTime());
     for (;;) {
@@ -575,6 +637,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       }
       if (!addVerifiedMindbodyReadHeaders(url, method, requestHeaders, headers, body ?? "")) throw new Error("UNSAFE_METHOD");
       if (!uschedule.addReadHeaders(url, method, requestHeaders, headers, body ?? "")) throw new Error("UNSAFE_METHOD");
+      if (disclosureGetOnly && method !== "GET") throw new Error("UNSAFE_METHOD");
       if (!["GET", "HEAD"].includes(method) && !preflight && !(method === "POST" && body && (readPost(url, headers, body) ||
           nativeProxy && mindbodySource ||
           nativeProxy && mindbodyForm ||
@@ -643,7 +706,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
         catalogTiles.completeDocument(catalogDocument, reply.status, reply.headers["content-type"] ?? "");
         if (teeRequestToken) teeBookingScope.completeMainDocument(teeRequestToken, { status: reply.status,
           location: reply.headers.location, contentType: reply.headers["content-type"] });
-        navigation = { url: request.url(), status: reply.status };
+        navigation = { url: request.url(), status: reply.status, ...(nativeProxy ? { request, documentNonce: randomUUID() } : {}) };
         // Only actual main-document response/redirect metadata can establish
         // parent provenance; model navigation arguments and XHRs cannot.
         bookingParents.observeDocument({ url: request.url(), status: reply.status, redirectedFrom: request.redirectedFrom()?.url(),
@@ -808,6 +871,14 @@ export async function createCourseDiscoveryBrowserSession(input: {
     try {
       redirectRouting = await installNativeRedirectRouting(page, handleRoute, {
         signal: deadline, maxRequests: 1024,
+        denyUncorrelatedPost: request => !closed && !deadline.aborted && !terminalFailure && page.url() === page.mainFrame().url() &&
+          discoveryDefiniteUncorrelatedPostDenial(request, page.url(), readPost, (url, method, original, headers, body) => uschedule.addReadHeaders(url, method, original, headers, body)),
+        controllerGetIntent: (sourceUrl, targetUrl) => {
+          if (!entryGetIntent || entryGetIntent.used || Date.now() > entryGetIntent.expiresAt ||
+              entryGetIntent.sourceUrl !== sourceUrl || entryGetIntent.href !== targetUrl || !nativeMainDocumentWitness ||
+              nativeMainDocumentWitness.currentUrl !== sourceUrl) return false;
+          entryGetIntent.used = true; return true;
+        },
         controllerFormIntent: (sourceUrl, targetUrl) => mindbodyCapture.formIntent(sourceUrl, targetUrl),
         onSubframeBlocked: recordSubframe,
         onRequestRejected: request => {
@@ -979,15 +1050,37 @@ export async function createCourseDiscoveryBrowserSession(input: {
     });
     return indexes.map(index => matches.nth(index));
   };
-  const registerControl = (locator: Locator, control: ObservedControl, kind: string, extra: { date?: string; dropdown?: PublicDropdownProof; menuButton?: PublicMenuButtonProof } = {}) => {
+  const entryEvidence = async (locator: Locator, documentStartedAt: number): Promise<PublicEntryDisclosureEvidence> => {
+    const value = await locator.evaluate(element => {
+      const node = element as HTMLAnchorElement, row = node.closest('tr,article,li,[role="row"]');
+      let ancestor: Element | null = node, inlineHandler = false, disabled = false;
+      for (let depth = 0; ancestor && depth < 40; depth++, ancestor = ancestor.parentElement) {
+        if (Array.from(ancestor.attributes).some(attribute => /^on/iu.test(attribute.name))) inlineHandler = true;
+        if (ancestor.hasAttribute("disabled") || ancestor.getAttribute("aria-disabled") === "true") disabled = true;
+      }
+      return { tag: node.tagName, href: node.href, rawHref: node.getAttribute("href") ?? "", text: node.innerText.slice(0, 161),
+        label: (node.getAttribute("aria-label") ?? "").slice(0, 161), rowText: ((row as HTMLElement | null)?.innerText ?? "").slice(0, 701),
+        inForm: Boolean(node.closest("form")), inlineHandler: inlineHandler || Boolean(ancestor), download: node.hasAttribute("download"), disabled,
+        role: node.getAttribute("role") ?? "" };
+    }, undefined, { timeout: 1000 });
+    return { ...value, pageUrl: page.url(), documentStartedAt, observedAt: Date.now(), visible: await isRenderedControl(locator) };
+  };
+  const entryContext = (documentStartedAt: number) => ({ officialUrl: input.venueOfficialUrl ?? "", currentUrl: page.url(),
+    documentStartedAt, now: Date.now(), deadline: input.deadlineAt.getTime() });
+  const currentOfficialEntryParent = () => Boolean(nativeProxy && nativeMainDocumentWitness &&
+    nativeMainDocumentWitness.currentUrl === page.url() && officialIdentityDocument?.officialDocumentProof.kind === "VERIFIED_OFFICIAL_DOCUMENT" &&
+    officialIdentityDocument.url === page.url() && Date.now() >= nativeMainDocumentWitness.proof.observedAt && Date.now() - nativeMainDocumentWitness.proof.observedAt <= 5000 &&
+    nativeMainDocumentWitness.proof.originalUrlSha256 === createHash("sha256").update(JSON.stringify(page.url())).digest("hex"));
+  const registerControl = (locator: Locator, control: ObservedControl, kind: string, extra: { date?: string; dropdown?: PublicDropdownProof; menuButton?: PublicMenuButtonProof; entryDisclosure?: PublicEntryDisclosure } = {}) => {
     if (control.href && !isSafeRecipeUrl(control.href)) throw new Error("UNSAFE_NAVIGATION");
-    if (control.href) { allowedNavigation.add(control.href); observedNavigationRoots.add(control.href); passfactory.observeWidgetUrl(control.href); cpsScope.observeEntry(control.href); }
+    if (control.href && !extra.entryDisclosure) { allowedNavigation.add(control.href); observedNavigationRoots.add(control.href); passfactory.observeWidgetUrl(control.href); cpsScope.observeEntry(control.href); }
     const target = randomUUID();
     controls.set(target, { locator, signature: JSON.stringify(control), kind, href: control.href, ...(control.documentNavigationOnly ? { documentNavigationOnly: true } : {}),
       ...(control.catalogTile ? { catalogTile: true } : {}),
       ...(control.datePicker ? { datePicker: control.datePicker } : {}),
       ...(extra.date ? { calendarDay: extra.date } : {}), ...(extra.dropdown ? { dropdown: extra.dropdown } : {}),
       ...(extra.menuButton ? { menuButton: extra.menuButton } : {}),
+      ...(extra.entryDisclosure ? { entryDisclosure: extra.entryDisclosure } : {}),
       ...(control.service ? { service: true } : {}), ...(control.serviceContinuation ? { serviceContinuation: control.serviceContinuation } : {}) });
     observedElements.set(control.selector, { locator, signature: JSON.stringify(control) });
     return { target, selector: control.selector, kind, name: sanitizeResponderText(control.name), label: sanitizeResponderText(extra.menuButton?.label ?? extra.dropdown?.label ?? control.label),
@@ -1052,6 +1145,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     if (officialIdentityOnly) {
       // The private reader needs this fresh identity capture, not the public
       // control/calendar inventory that can consume its five-second lifetime.
+      const navigationStatus = await currentNavigationStatus(actualCurrentUrl, documentStartedAt);
       const finalDocumentStartedAt = await page.evaluate(() => performance.timeOrigin);
       if (page.url() !== actualCurrentUrl || documentStartedAt !== finalDocumentStartedAt)
         throw new Error("DISCOVERY_SNAPSHOT_CHANGED");
@@ -1059,7 +1153,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
         officialSourceDiagnostic: officialDiagnostics(), loading: pendingReadCount() > 0,
         blockedRequests, requestCount, interceptCount, responseBytes, startupMs, pendingRequestCount: pendingReadCount(),
         ...(redirectRouting?.firstFatal ? { nativeFirstFatal: redirectRouting.firstFatal } : {}),
-        ...(navigation && sameDiscoveryMainDocument(navigation.url, actualCurrentUrl) ? { navigationStatus: navigation.status } : {}),
+        ...(navigationStatus === undefined ? {} : { navigationStatus }),
+        ...(nativeMainDocumentWitness ? { nativeMainDocumentContinuity: { ...nativeMainDocumentWitness.proof } } : {}),
         browserTransport: deps.browserTransport ?? "PINNED_HTTP", accessRequirementObserved: blockedAccess };
     }
     const visible: DiscoveryBrowserSnapshot["controls"] = [];
@@ -1141,6 +1236,37 @@ export async function createCourseDiscoveryBrowserSession(input: {
     }
     // A client navigation can replace the DOM while its old locator inventory
     // is being read. Never return controls and text from different documents.
+    const navigationStatus = await currentNavigationStatus(actualCurrentUrl, documentStartedAt);
+    if (!entryDisclosureUsed && !blockedAccess && currentOfficialEntryParent()) {
+      const anchors = page.locator("a[href]");
+      const selected = await anchors.evaluateAll(nodes => {
+        if (nodes.length > 512) return { omitted: true, indexes: [] as number[] };
+        const indexes: number[] = [];
+        for (let i = 0; i < nodes.length; i++) if (/^\s*reserve\s+(?:(?:your|a)\s+)?(?:bay|simulator|tee\s*time)/iu.test((nodes[i] as HTMLElement).innerText)) indexes.push(i);
+        return { omitted: indexes.length > 24, indexes: indexes.length > 24 ? [] : indexes };
+      });
+      const entries: Array<{ locator: Locator; proof: PublicEntryDisclosure; viewport: boolean }> = [];
+      let unsafe = selected.omitted;
+      for (const index of selected.indexes) {
+        const locator = anchors.nth(index); if (!await isRenderedControl(locator)) continue;
+        const evidence = await entryEvidence(locator, documentStartedAt), proof = classifyPublicEntryDisclosure(evidence, entryContext(documentStartedAt));
+        const target = await locator.getAttribute("target");
+        if (!proof || target && !["_self", "_top", "_parent"].includes(target.toLowerCase())) { unsafe = true; continue; }
+        const viewport = await locator.evaluate(node => { const r = node.getBoundingClientRect(); return r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth; });
+        entries.push({ locator, proof, viewport });
+      }
+      // Surrounding public prose may differ between hero/footer duplicates.
+      // Each row context passed the full classifier; the chosen row is still
+      // re-derived byte-for-byte immediately before the actual click.
+      const keys = new Set(entries.map(({ proof }) => JSON.stringify([proof.pageUrl,proof.documentStartedAt,proof.href,proof.rawHref,proof.text,proof.label])));
+      if (!unsafe && keys.size === 1) {
+        const chosen = entries.find(entry => entry.viewport) ?? entries[0], control = await observeControl(chosen.locator);
+        if (recipeSelectorSchema.safeParse(control.selector).success && await page.locator(control.selector).count() === 1) {
+          for (let i = visible.length - 1; i >= 0; i--) if (visible[i].selector === control.selector) { controls.delete(visible[i].target); visible.splice(i, 1); }
+          visible.push(registerControl(chosen.locator, control, "public-entry-disclosure", { entryDisclosure: chosen.proof }));
+        }
+      }
+    }
     const finalDocumentStartedAt = await page.evaluate(() => performance.timeOrigin);
     if (page.url() !== actualCurrentUrl || documentStartedAt !== finalDocumentStartedAt)
       throw new Error("DISCOVERY_SNAPSHOT_CHANGED");
@@ -1168,7 +1294,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
       ...(capabilityDiagnostics.length ? { capabilityDiagnostics: capabilityDiagnostics.map(value => ({ ...value })) } : {}), loading: pendingReadCount() > 0,
       blockedRequests, requestCount, interceptCount, responseBytes, startupMs, initialContentWaitMs, pendingRequestCount: pendingReadCount(),
       ...(navigationStartedAt === undefined ? {} : { navigationElapsedMs: Date.now() - navigationStartedAt }),
-      ...(navigation && sameDiscoveryMainDocument(navigation.url, actualCurrentUrl) ? { navigationStatus: navigation.status } : {}),
+      ...(navigationStatus === undefined ? {} : { navigationStatus }),
+      ...(nativeMainDocumentWitness ? { nativeMainDocumentContinuity: { ...nativeMainDocumentWitness.proof } } : {}),
       browserTransport: deps.browserTransport ?? "PINNED_HTTP", accessRequirementObserved: blockedAccess };
   };
   const snapshot = async (settleInitialContent = false, officialIdentityOnly = false): Promise<DiscoveryBrowserSnapshot> => {
@@ -1478,7 +1605,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
         if (!isSafeRecipeUrl(action.url) || !allowedNavigation.has(new URL(action.url).href)) throw new Error("UNOBSERVED_NAVIGATION");
         if (!input.venueName || input.venueName.length > 200) throw new Error("MISSING_VENUE_IDENTITY");
         discardStaleOfficialIdentity(normalizeDiscoveryNavigationUrl(page.url()));
-        teeBookingScope.checkCurrentDocument(page.url(), await page.evaluate(() => performance.timeOrigin));
+        const inspectionTimeOrigin = await page.evaluate(() => performance.timeOrigin);
+        await currentNavigationStatus(page.url(), inspectionTimeOrigin);
+        teeBookingScope.checkCurrentDocument(page.url(), inspectionTimeOrigin);
         const officialBookingSourceToken = teeBookingScope.tokenFor(action.url, page.url());
         let result: Awaited<ReturnType<typeof inspectExistingAdapter>>;
         try {
@@ -1508,6 +1637,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       }
       if (action.action === "open") {
         serviceSelection = undefined;
+        disclosureGetOnly = false; entryGetIntent = undefined;
         if (!isSafeRecipeUrl(action.url) || !allowedNavigation.has(new URL(action.url).href)) throw new Error("UNOBSERVED_NAVIGATION");
         const intermediary = publicIntermediaries.get(action.url);
         if (intermediary && (page.url() !== intermediary.pageUrl || !officialIdentityDocument || officialIdentityDocument.url !== intermediary.pageUrl ||
@@ -1544,6 +1674,20 @@ export async function createCourseDiscoveryBrowserSession(input: {
           if (known.kind !== "field" || !/^[\d\s/:.T-]{1,120}$/u.test(action.text)) throw new Error("UNSAFE_CONTROL");
           await known.locator.fill(action.text); await known.locator.dispatchEvent("change");
         } else {
+          if (known.entryDisclosure) {
+            const timeOrigin = await page.evaluate(() => performance.timeOrigin);
+            await currentNavigationStatus(page.url(), timeOrigin);
+            if (entryDisclosureUsed || !currentOfficialEntryParent() ||
+                !revalidatePublicEntryDisclosure(known.entryDisclosure, await entryEvidence(known.locator, timeOrigin), entryContext(timeOrigin)))
+              throw new Error("STALE_OR_UNKNOWN_CONTROL");
+            const target = await known.locator.getAttribute("target");
+            if (target && !["_self", "_top", "_parent"].includes(target.toLowerCase())) throw new Error("UNSAFE_CONTROL");
+            entryDisclosureUsed = true; disclosureGetOnly = true;
+            entryGetIntent = { sourceUrl: page.url(), href: known.entryDisclosure.href, expiresAt: Date.now() + 5000, used: false };
+            allowedNavigation.add(known.entryDisclosure.href); observedNavigationRoots.add(known.entryDisclosure.href);
+            try { await known.locator.click(); } finally { entryGetIntent = undefined; }
+            return snapshot(false, deps.captureDelegatedDocument === true);
+          }
           if (known.datePicker) {
             await openPublicDatePickerInput(known.locator, known.datePicker);
             return snapshot();

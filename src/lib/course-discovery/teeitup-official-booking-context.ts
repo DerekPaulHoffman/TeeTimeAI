@@ -19,14 +19,18 @@ export function observedTeeItUpOfficialBookingChain(token: TeeItUpOfficialBookin
 
 /** Controller-local exact object lineage. No JSON value or URL membership can
  * recreate request tokens, a completed edge or initial rendered visibility. */
-export function createTeeItUpOfficialBookingScope(source: TeeItUpSourceIdentity, signal: AbortSignal) {
+export function createTeeItUpOfficialBookingScope(source: TeeItUpSourceIdentity, signal: AbortSignal,
+  nativeCurrentDocument?: (request: object, currentUrl: string, timeOrigin: number) => boolean) {
   let active = true, epoch = 0, sequence = 0, current: Record | undefined;
   let records = new WeakMap<object, Record>(), tokens = new WeakMap<TeeItUpSourceRequestToken, Record>();
   let home: { record: Record; value: ReturnType<typeof readTeeItUpOfficialHome> } | undefined;
   let page: { record: Record; value: ReturnType<typeof readTeeItUpOfficialEmbed> } | undefined;
-  let finalSnapshot: { epoch: number; url: string; record: Record } | undefined;
+  let finalSnapshot: { epoch: number; url: string; currentUrl: string; record: Record } | undefined;
+  let contextPending = false;
   let homeDiagnostic: OfficialSourceDiagnostic | undefined;
-  function reset() { epoch++; sequence = 0; current = undefined; records = new WeakMap(); tokens = new WeakMap(); home = undefined; page = undefined; finalSnapshot = undefined; homeDiagnostic = undefined; }
+  function reset() { epoch++; sequence = 0; current = undefined; records = new WeakMap(); tokens = new WeakMap(); home = undefined; page = undefined; finalSnapshot = undefined; homeDiagnostic = undefined; contextPending = false; }
+  const nativeCurrent = (record: Record, url: string, timeOrigin: number | undefined) => Boolean(nativeCurrentDocument &&
+    teeItUpBookAlias(record.url) && Number.isFinite(timeOrigin) && nativeCurrentDocument(record.object, url, timeOrigin!));
   function invalidate() { reset(); }
   signal.addEventListener("abort", invalidate, { once: true });
   return {
@@ -34,19 +38,27 @@ export function createTeeItUpOfficialBookingScope(source: TeeItUpSourceIdentity,
       const final = finalSnapshot?.record, entry = final?.parent && records.get(final.parent);
       const chainRedirect = Boolean(entry && page && entry.url === page.value.iframeEntryUrl && entry.status !== undefined && redirects.has(entry.status) &&
         entry.location === final?.url && entry.order === page.record.order + 1 && final?.order === entry.order + 1);
-      const chainTokenCurrent = Boolean(active && !signal.aborted && home && page && finalSnapshot?.epoch === epoch && final === current &&
-        final?.url === currentUrl && teeItUpBookAlias(currentUrl) && final.status === 200 && final.html && chainRedirect);
+      const chainTokenCurrent = Boolean(active && !signal.aborted && !contextPending && home && page && finalSnapshot?.epoch === epoch && final === current &&
+        finalSnapshot?.currentUrl === currentUrl && teeItUpBookAlias(final?.url ?? "") && final?.status === 200 && final.html && chainRedirect);
       return { ...homeDiagnostic, stage: chainTokenCurrent ? "CHAIN_CURRENT" : homeDiagnostic?.stage ?? "CHAIN_INCOMPLETE",
         chainHome: Boolean(home), chainBookingPage: Boolean(page), renderedFrameObserved: Boolean(page), chainRedirect,
         chainFinalDocument: Boolean(final?.status === 200 && final.html), chainTokenCurrent };
     },
     checkCurrentDocument(url: string, timeOrigin?: number) {
-      if (current && (current.url !== url || timeOrigin !== undefined && current.timeOrigin !== undefined && current.timeOrigin !== timeOrigin)) reset();
+      if (current && (contextPending || current.url !== url || timeOrigin !== undefined && current.timeOrigin !== undefined && current.timeOrigin !== timeOrigin)) {
+        if (!nativeCurrent(current, url, timeOrigin) || current.timeOrigin !== undefined && current.timeOrigin !== timeOrigin) reset();
+        else { contextPending = false; if (finalSnapshot?.record === current) finalSnapshot = { ...finalSnapshot, epoch, currentUrl: url }; }
+      }
+    },
+    suspendCurrentDocument(url: string) {
+      // Keep private chain records, but revoke every previously issued token.
+      // Only a fresh same-request native attestation can re-earn authority.
+      if (current && (finalSnapshot?.currentUrl ?? current.url) !== url) { epoch++; contextPending = true; }
     },
     beginMainDocument(object: object, input: { url: string; method: string; parent?: object }): TeeItUpSourceRequestToken | undefined {
       if (!active || signal.aborted || input.method !== "GET" || !publicDocumentUrl(input.url)) { reset(); return; }
       if (input.url === source.officialUrl || home && input.url === home.record.url) reset();
-      epoch++; finalSnapshot = undefined;
+      epoch++; finalSnapshot = undefined; contextPending = false;
       if (++sequence > 8) { reset(); return; }
       const token = Object.freeze({}) as TeeItUpSourceRequestToken;
       const record: Record = { object, token, ...input, order: sequence, epoch };
@@ -68,9 +80,9 @@ export function createTeeItUpOfficialBookingScope(source: TeeItUpSourceIdentity,
       frames: string[]; blocked: boolean }) {
       if (!active || signal.aborted) return;
       const record = token && tokens.get(token);
-      if (!record || record !== current || record.status !== 200 || !record.html || record.url !== input.url || input.blocked ||
+      if (!record || record !== current || record.status !== 200 || !record.html || (contextPending || record.url !== input.url) && !nativeCurrent(record, input.url, input.timeOrigin) || input.blocked ||
           !Number.isFinite(input.timeOrigin) || record.timeOrigin !== undefined && record.timeOrigin !== input.timeOrigin) { reset(); return; }
-      record.timeOrigin = input.timeOrigin;
+      record.timeOrigin = input.timeOrigin; contextPending = false;
       if (input.officialPage && input.verifiedOfficial && input.verifiedOfficial.officialUrl === source.officialUrl && input.verifiedOfficial.documentUrl === input.url) {
         if (!home) {
           const root = source.officialUrl && publicDocumentUrl(source.officialUrl), actual = publicDocumentUrl(input.url);
@@ -85,10 +97,11 @@ export function createTeeItUpOfficialBookingScope(source: TeeItUpSourceIdentity,
           try { page = { record, value: readTeeItUpOfficialEmbed(input.officialPage, input.frames) }; } catch { page = undefined; }
         }
       }
-      if (teeItUpBookAlias(input.url)) finalSnapshot = { epoch, url: input.url, record };
+      if (teeItUpBookAlias(record.url)) finalSnapshot = { epoch, url: record.url, currentUrl: input.url, record };
     },
     tokenFor(bookingUrl: string, currentUrl: string): TeeItUpOfficialBookingToken | undefined {
-      if (!active || signal.aborted || !home || !page || !finalSnapshot || finalSnapshot.epoch !== epoch || finalSnapshot.url !== bookingUrl || currentUrl !== bookingUrl ||
+      if (!active || signal.aborted || contextPending || !home || !page || !finalSnapshot || finalSnapshot.epoch !== epoch || finalSnapshot.url !== bookingUrl ||
+          finalSnapshot.currentUrl !== currentUrl || currentUrl !== bookingUrl && !nativeCurrent(finalSnapshot.record, currentUrl, finalSnapshot.record.timeOrigin) ||
           !source.officialUrl || !teeItUpBookAlias(bookingUrl)) return;
       const final = finalSnapshot.record, entry = final.parent && records.get(final.parent);
       if (!entry || entry.url !== page.value.iframeEntryUrl || !isTeeItUpPlayEntry(entry.url) || entry.order !== page.record.order + 1 ||
@@ -99,7 +112,7 @@ export function createTeeItUpOfficialBookingScope(source: TeeItUpSourceIdentity,
         iframeRedirectStatus: entry.status as TeeItUpObservedSourceChain["iframeRedirectStatus"] };
       const observedEpoch = epoch;
       const token = Object.freeze({}) as TeeItUpOfficialBookingToken;
-      chains.set(token, { chain, live: () => active && !signal.aborted && epoch === observedEpoch && current === final && finalSnapshot?.record === final });
+      chains.set(token, { chain, live: () => active && !signal.aborted && !contextPending && epoch === observedEpoch && current === final && finalSnapshot?.record === final });
       return token;
     },
     invalidate,

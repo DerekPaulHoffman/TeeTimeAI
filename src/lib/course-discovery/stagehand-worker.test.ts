@@ -1,9 +1,11 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
 import { runCourseDiscoveryStagehandWorker, prepareCourseDiscoveryStagehandWorker } from "../../../scripts/automation/course-discovery-stagehand-worker.mjs";
+import { createDiscoveryBrowser, verifyDiscoveryCandidate } from "../../../scripts/automation/course-discovery-worker.mjs";
 import { createStagehandSourceCheckpoint, readStagehandSourceCheckpoint, stagehandDataHash, publicStagehandSourceUrl,
   } from "../../../scripts/automation/course-discovery-stagehand-source.mjs";
-import { observedInspectionPath, currentStagehandInspectionDiagnostic } from "../../../scripts/automation/course-discovery-stagehand-inspection.mjs";
+import { observedInspectionPath, currentStagehandInspectionDiagnostic, inspectionReadability, safeInspectionReadability } from "../../../scripts/automation/course-discovery-stagehand-inspection.mjs";
+import { stagehandNativeRouterCodes } from "./stagehand-native-router-diagnostic";
 import { accessRecipeSchema } from "./recipe";
 import { createStagehandGuardedBrowserHost } from "../../../scripts/automation/course-discovery-stagehand-host.mjs";
 import { sourceDiscover as actualSourceDiscover } from "../../../scripts/automation/stagehand/source-discovery.mjs";
@@ -81,6 +83,293 @@ function modelFailureReport(t: ReturnType<typeof setup>) {
 }
 
 describe("regular Stagehand source worker", () => {
+  it.each(["UNSUPPORTED_ADAPTER_SOURCE", "CPS_PUBLIC_BUILD_UNSUPPORTED"])("hands only a freshly closed %s inspection to generic Sol and activates exactly once", async code => {
+    const t = setup(), before = structuredClone(t.f.job);
+    const request = t.request.getMockImplementation()!;
+    t.request.mockImplementation(async action => {
+      if (action.action === "inspect_adapter") throw Object.assign(Error("unsupported public format"), { code });
+      return request(action);
+    });
+    const genericMetrics = { model: "gpt-6.1-sol", tokenUsage: { totalTokens: 7 }, cleanup: { browserClosed: true, modelClosed: true } };
+    const genericWorker = vi.fn(async options => {
+      expect(t.close).toHaveBeenCalledOnce(); expect(options.job).toBe(t.f.job);
+      expect(options.job).toEqual(before); expect(options.freshOfficialStart).toBe(true);
+      expect(options.workDeadlineAt).toBe(new Date(first + 720000).toISOString());
+      expect(options.checkpointProvenance.stagehandSource.jobId).toBe(t.f.job.id);
+      expect(options.checkpointProvenance).not.toHaveProperty("controller");
+      const activation = await verifyDiscoveryCandidate({ client: options.client, job: options.job, recipe: { engine: "BROWSER_DOM" },
+        sourceEvidence: { officialUrl: official, observedBookingUrl: booking }, executeRecipe: t.executeRecipe,
+        beforeActivate: options.beforeActivate, afterActivate: () => options.afterActivate({ metrics: genericMetrics }) });
+      genericMetrics.tokenUsage.totalTokens = 10;
+      return { outcome: "activated", activation, metrics: genericMetrics };
+    });
+    const out = await t.run({ genericWorker });
+    expect(out.metrics.source).toMatchObject({ modelCalls: 2, tokenUsage: { totalTokens: 20 } });
+    expect(out.metrics.genericFallback.worker.tokenUsage.totalTokens).toBe(10);
+    expect(t.client.candidate).toHaveBeenCalledOnce(); expect(t.client.verification).toHaveBeenCalledTimes(2);
+    expect(t.client.activate).toHaveBeenCalledOnce(); expect(t.beforeActivate).toHaveBeenCalledOnce(); expect(t.afterActivate).toHaveBeenCalledOnce();
+    expect(t.validateRecipe).not.toHaveBeenCalled(); expect(t.f.job).toEqual(before);
+  });
+  it.each(["ADAPTER_IDENTITY_MISMATCH", "ADAPTER_CONFIGURATION_UNVERIFIED", "CPS_CONFIGURATION_UNVERIFIED", "ACCESS_REQUIRED", "FRAMEWORK_INSPECTION_PATH_STALE", "NATIVE_REDIRECT_NETWORK_FAILED"])
+  ("never generic-falls back for %s", async code => {
+    const t = setup(), request = t.request.getMockImplementation()!, genericWorker = vi.fn();
+    t.request.mockImplementation(async action => { if (action.action === "inspect_adapter") throw Object.assign(Error(code), { code }); return request(action); });
+    await expect(t.run({ genericWorker })).rejects.toMatchObject({ code }); expect(genericWorker).not.toHaveBeenCalled();
+  });
+  it("does not generic-fall back when unsupported inspection cleanup failed or work expired", async () => {
+    for (const mode of ["cleanup", "deadline"] as const) {
+      const t = setup(), request = t.request.getMockImplementation()!, genericWorker = vi.fn();
+      t.request.mockImplementation(async action => { if (action.action === "inspect_adapter") throw Object.assign(Error("unsupported"), { code: "UNSUPPORTED_ADAPTER_SOURCE" }); return request(action); });
+      t.close.mockImplementation(async () => { if (mode === "cleanup") throw Error("close failed"); t.f.clock = first + 720000; });
+      await expect(t.run({ genericWorker })).rejects.toBeDefined(); expect(genericWorker).not.toHaveBeenCalled();
+    }
+  });
+  it("does not treat an unsupported error from source or opening a path as fixed-metadata fallback", async () => {
+    for (const origin of ["source", "open"] as const) {
+      const t = setup(), genericWorker = vi.fn(), failure = Object.assign(Error("unsupported outside fixed metadata"), { code: "UNSUPPORTED_ADAPTER_SOURCE" });
+      if (origin === "source") t.sourceDiscover.mockRejectedValue(failure); else t.request.mockRejectedValue(failure);
+      await expect(t.run({ genericWorker })).rejects.toBe(failure); expect(genericWorker).not.toHaveBeenCalled();
+    }
+  });
+  it("never writes another Stagehand checkpoint after generic activation retires the lease", async () => {
+    const t = setup(), request = t.request.getMockImplementation()!;
+    t.request.mockImplementation(async action => { if (action.action === "inspect_adapter") throw Object.assign(Error("unsupported"), { code: "UNSUPPORTED_ADAPTER_SOURCE" }); return request(action); });
+    let countAtActivation = 0;
+    const genericWorker = vi.fn(async options => {
+      await options.beforeActivate(); await options.client.activate(options.job.id, options.job.leaseToken);
+      await options.afterActivate({ metrics: { tokenUsage: { totalTokens: 4 } } }); countAtActivation = t.checkpoints.length;
+      throw Object.assign(Error("cleanup after durable activation"), { code: "DISCOVERY_PROCESS_CLOSE_FAILED" });
+    });
+    await expect(t.run({ genericWorker })).rejects.toMatchObject({ code: "DISCOVERY_PROCESS_CLOSE_FAILED" });
+    expect(t.client.activate).toHaveBeenCalledOnce(); expect(t.checkpoints).toHaveLength(countAtActivation);
+  });
+  it("retains generic failure checkpoints and separate partial usage after source resume beyond 240 seconds", async () => {
+    const t = setup(), request = t.request.getMockImplementation()!;
+    t.f.job.checkpoint = { stagehandSource: createStagehandSourceCheckpoint(t.f.job, t.f.report) }; t.f.job.attempts = 2; t.f.clock = first + 300000;
+    t.request.mockImplementation(async action => { if (action.action === "inspect_adapter") throw Object.assign(Error("unsupported"), { code: "UNSUPPORTED_ADAPTER_SOURCE" }); return request(action); });
+    const genericWorker = vi.fn(async options => {
+      expect(options.signal?.aborted).not.toBe(true);
+      await options.client.checkpoint(options.job.id, options.job.leaseToken, { ...options.checkpointProvenance, summary: "fresh generic observation", controller: { officialObserved: true } });
+      throw Object.assign(Error("partial generic turn"), { code: "DISCOVERY_TURN_FAILED", discoveryMetrics: { tokenUsage: { totalTokens: 13 }, attemptedModelTurns: 1, completedModelTurns: 0 } });
+    });
+    const failure = await t.run({ genericWorker }).catch(error => error);
+    expect(t.sourceDiscover).not.toHaveBeenCalled(); expect(genericWorker).toHaveBeenCalledOnce();
+    expect(t.checkpoints.at(-1)).toMatchObject({ summary: "fresh generic observation", controller: { officialObserved: true }, stagehandSource: { jobId: t.f.job.id } });
+    expect(failure.discoveryMetrics.genericFallback.worker).toMatchObject({ tokenUsage: { totalTokens: 13 }, completedModelTurns: 0 });
+    expect(t.client.activate).not.toHaveBeenCalled();
+  });
+  it.each(["current", "missing", "copied", "stale", "wrongOriginal", "changedBinding", "revoked", "noncurrentParent", "missingFrame", "invalidAdapter"] as const)
+  ("requires fresh private terminal readiness after a modal's exact native frame: %s", async mode => {
+    const t = setup(), target = "a0000000-0000-4000-8000-000000000001";
+    const frame = "https://public-course.play.teeitup.com/", source = "https://public-course.book.teeitup.com/";
+    t.f.report.adapterSourceProposal.bookingUrl = source; t.f.report.visitedUrls = [official, source]; t.f.report.actions = [];
+    t.f.report.officialLinkLedger = [];
+    Object.assign(t.f.report, { frameLedger: [{ kind: "NATIVE_VISIBLE_FRAME", pageUrl: official, observedAt: new Date(first + 1000).toISOString(),
+      documentHash: "a".repeat(64), frames: [{ src: frame, visible: true }] }], nativeFrameNavigations: [{ kind: "NATIVE_FRAME_SOURCE_OPEN",
+      pageUrl: official, frameUrl: frame, observedAt: new Date(first + 1000).toISOString(), documentHash: "a".repeat(64), finalUrl: source,
+      completedAt: new Date(first + 1200).toISOString(), finalDocumentHash: "b".repeat(64),
+      redirects: [{ fromUrl: frame, toUrl: source, status: 301, completed: true }] }] });
+    let url = official, disclosed = false;
+    t.request.mockImplementation(async action => {
+      if (action.action === "click") disclosed = true;
+      if (action.action === "open") url = action.url === frame ? source : action.url!;
+      const terminal = url === source;
+      return { url, browserTransport: "NATIVE_CHROME", navigationStatus: 200, accessRequirementObserved: false,
+        loading: disclosed || terminal, pendingRequestCount: disclosed || terminal ? 1 : 0,
+        officialSourceDiagnostic: { rawOfficialCaptured: true, currentOfficialDocument: terminal ? false : mode !== "noncurrentParent",
+          renderedHeadingsPresent: !disclosed && !terminal, renderedAddressesPresent: false, renderedLinksPresent: true },
+        controls: !disclosed ? [{ kind: "public-entry-disclosure", target }] : [],
+        frames: disclosed && !terminal && mode !== "missingFrame" ? [{ url: frame, source: "OFFICIAL_IFRAME_SRC" }] : [],
+        adapter: action.action === "inspect_adapter" ? mode === "invalidAdapter" ? {} : { family: "TEEITUP", alias: "public-course", facilityIds: [91] } : undefined,
+        ...(terminal && mode !== "missing" ? { nativeMainDocumentContinuity: { kind: "NATIVE_MAIN_DOCUMENT_CONTINUITY_V1",
+          originalUrlSha256: stagehandDataHash(mode === "wrongOriginal" ? frame : source), currentUrlSha256: stagehandDataHash(url),
+          documentBindingSha256: "b".repeat(64), observedAt: t.f.clock - (mode === "stale" ? 5001 : 0), status: 200 } } : {}) } as never;
+    });
+    if (mode !== "copied") t.browserFactory.mockImplementation(async options => {
+      const browser = createDiscoveryBrowser({ ...options, processFactory: () => ({ request: t.request, close: t.close }) });
+      const current = browser.currentMainDocumentContinuity.bind(browser);
+      let terminalReads = 0;
+      browser.currentMainDocumentContinuity = (snapshot, expected, clock) => {
+        const proof = current(snapshot, expected, clock);
+        if (snapshot.url === source && proof && ++terminalReads > 1) {
+          if (mode === "revoked") return undefined;
+          if (mode === "changedBinding" && terminalReads % 2 === 0) return { ...proof, documentBindingSha256: "c".repeat(64) };
+        }
+        return proof;
+      };
+      return browser;
+    });
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(t.f.clock);
+    try {
+      if (mode === "current" || mode === "noncurrentParent") {
+        expect((await t.run()).outcome).toBe("activated");
+        expect(t.request.mock.calls.filter(([a]) => a.action !== "finish").map(([a]) => a)).toEqual([
+          { action: "open", url: official }, { action: "click", target },
+          ...(mode === "noncurrentParent" ? [{ action: "observe" }, { action: "observe" }] : []),
+          { action: "open", url: frame }, { action: "inspect_adapter", url: source },
+        ]);
+        expect(t.client.candidate.mock.calls[0][2].source.bookingUrl).toBe(source); expect(t.executeRecipe).toHaveBeenCalledTimes(2);
+      } else {
+        await expect(t.run()).rejects.toThrow(mode === "invalidAdapter" ? "FRAMEWORK_INSPECTION_METADATA_INVALID" : "FRAMEWORK_INSPECTION_SOURCE_NOT_SETTLED");
+        expect(t.client.candidate).not.toHaveBeenCalled(); expect(t.executeRecipe).not.toHaveBeenCalled();
+      }
+      expect(t.request.mock.calls.filter(([a]) => a.action === "click")).toHaveLength(1);
+      expect(t.request.mock.calls.filter(([a]) => a.action !== "finish").length).toBeLessThanOrEqual(6); expect(t.close).toHaveBeenCalledOnce();
+    } finally { vi.useRealTimers(); }
+  });
+  it.each(["current", "ambiguous", "stillMissing", "movedDocument"] as const)("uses one fresh opaque public-entry disclosure within the existing inspection budget: %s", async mode => {
+    const t = setup(), target = "a0000000-0000-4000-8000-000000000001";
+    let disclosed = false;
+    t.request.mockImplementation(async action => {
+      if (action.action === "click") { expect(action).toEqual({ action: "click", target }); disclosed = true; }
+      return { url: disclosed && mode === "movedDocument" ? official + "other" : official, browserTransport: "NATIVE_CHROME", navigationStatus: 200,
+        accessRequirementObserved: false, loading: false,
+        controls: !disclosed ? [{ kind: "public-entry-disclosure", target }, ...(mode === "ambiguous" ? [{ kind: "public-entry-disclosure", target: "a0000000-0000-4000-8000-000000000002" }] : [])] : [{ kind: "public-entry-disclosure", target }],
+        frames: disclosed && mode !== "stillMissing" ? [{ url: booking, source: "OFFICIAL_IFRAME_SRC" }] : [],
+        adapter: action.action === "inspect_adapter" ? { family: "FOREUP", facilityId: 12, scheduleId: 34, bookingClassId: 56 } : undefined } as never;
+    });
+    if (mode === "current") { expect((await t.run()).outcome).toBe("activated"); expect(t.request.mock.calls.filter(([a]) => a.action === "click")).toHaveLength(1); }
+    else {
+      await expect(t.run()).rejects.toThrow(mode === "movedDocument" ? "FRAMEWORK_INSPECTION_CONTEXT_CHANGED" : "FRAMEWORK_INSPECTION_PATH_STALE");
+      expect(t.request.mock.calls.filter(([a]) => a.action === "click")).toHaveLength(mode === "ambiguous" ? 0 : 1);
+      expect(t.client.candidate).not.toHaveBeenCalled(); expect(t.executeRecipe).not.toHaveBeenCalled();
+    }
+    expect(t.request.mock.calls.length).toBeLessThanOrEqual(6); expect(t.close).toHaveBeenCalledOnce();
+  });
+  it.each([false, true])("inspects a native frame redirect's current query without changing its canonical source (new document=%s)", async replaced => {
+    const t = setup(), parent = official + "public-tee-times/", play = "https://public-course.play.teeitup.com/", bare = "https://public-course.book.teeitup.com/", current = bare + "?course=91&date=2030-01-03&max=4";
+    t.f.report.adapterSourceProposal.bookingUrl = bare; t.f.report.visitedUrls = [official, parent, bare]; t.f.report.actions = [];
+    t.f.report.officialLinkLedger = [{ pageUrl: official, links: [{ href: parent, visible: true }] }] as never;
+    Object.assign(t.f.report.officialLinkLedger[0], { kind: "NATIVE_VISIBLE_DOM", observedAt: new Date(first + 1000).toISOString() });
+    Object.assign(t.f.report, { frameLedger: [{ kind: "NATIVE_VISIBLE_FRAME", pageUrl: parent, observedAt: new Date(first + 1000).toISOString(), documentHash: "a".repeat(64), frames: [{ src: play, visible: true }] }],
+      nativeFrameNavigations: [{ kind: "NATIVE_FRAME_SOURCE_OPEN", pageUrl: parent, frameUrl: play, observedAt: new Date(first + 1000).toISOString(), documentHash: "a".repeat(64), finalUrl: bare,
+        completedAt: new Date(first + 1200).toISOString(), finalDocumentHash: "b".repeat(64), redirects: [{ fromUrl: play, toUrl: bare, status: 301, completed: true }] }] });
+    let url = official, originalUrl = official;
+    t.request.mockImplementation(async action => {
+      if (action.action === "open") { url = action.url === play ? bare : action.url!; originalUrl = url; }
+      if (action.action === "inspect_adapter") url = current;
+      return { url, browserTransport: "NATIVE_CHROME", navigationStatus: 200, accessRequirementObserved: false,
+        loading: url === bare, pendingRequestCount: url === bare ? 4 : 0,
+        controls: url === official ? [{ kind: "link", href: parent }] : [], frames: url === parent ? [{ url: play, source: "OFFICIAL_IFRAME_SRC" }] : [],
+        adapter: action.action === "inspect_adapter" ? { family: "TEEITUP", alias: "public-course", facilityIds: [91] } : undefined,
+        nativeMainDocumentContinuity: { kind: "NATIVE_MAIN_DOCUMENT_CONTINUITY_V1", originalUrlSha256: stagehandDataHash(originalUrl), currentUrlSha256: stagehandDataHash(url),
+          documentBindingSha256: (replaced && action.action === "inspect_adapter" ? "c" : originalUrl === bare ? "b" : "a").repeat(64), observedAt: t.f.clock, status: 200 } } as never;
+    });
+    t.browserFactory.mockImplementation(async options => createDiscoveryBrowser({ ...options, processFactory: () => ({ request: t.request, close: t.close }) }) as never);
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(t.f.clock);
+    try {
+      if (replaced) { await expect(t.run()).rejects.toThrow("FRAMEWORK_INSPECTION_CONTEXT_CHANGED"); expect(t.client.candidate).not.toHaveBeenCalled(); }
+      else { expect((await t.run()).outcome).toBe("activated"); expect(t.client.candidate.mock.calls[0][2].source.bookingUrl).toBe(bare);
+        expect(t.request.mock.calls.filter(([a]) => a.action !== "finish").map(([a]) => a)).toEqual([{ action: "open", url: official }, { action: "open", url: parent }, { action: "open", url: play }, { action: "inspect_adapter", url: bare }]); }
+    } finally { vi.useRealTimers(); }
+  });
+  it.each(["current", "copiedOnly", "newDocument", "wrongOriginal", "stale"] as const)
+  ("keeps canonical CPS source and accepts actual current context only with %s native continuity", async mode => {
+    const t = setup(), source = "https://public-course.cps.golf/", firstContext = source + "public-search?view=day", inspectedContext = source + "public-search?view=public";
+    t.f.report.adapterSourceProposal.bookingUrl = source; t.f.report.visitedUrls = [official];
+    t.f.report.officialLinkLedger = [{ pageUrl: official, links: [{ href: source, visible: true }] }] as never;
+    Object.assign(t.f.report.officialLinkLedger[0], { kind: "NATIVE_VISIBLE_DOM", observedAt: new Date(first + 1000).toISOString() }); t.f.report.actions = [];
+    let current = official, originalUrl = official;
+    t.request.mockImplementation(async action => {
+      if (action.action === "open") { originalUrl = action.url!; current = action.url === source ? firstContext : official; }
+      if (action.action === "inspect_adapter") current = inspectedContext;
+      return { url: current, browserTransport: "NATIVE_CHROME", navigationStatus: 200, accessRequirementObserved: false, loading: false,
+        controls: [{ kind: "link", href: source }], adapter: action.action === "inspect_adapter" ? { family: "CPS", tenant: "public-course", courseIds: [91], catalogHash: "c".repeat(64) } : undefined,
+        nativeMainDocumentContinuity: { kind: "NATIVE_MAIN_DOCUMENT_CONTINUITY_V1", originalUrlSha256: stagehandDataHash(mode === "wrongOriginal" ? source + "other" : originalUrl),
+          currentUrlSha256: stagehandDataHash(current), documentBindingSha256: (mode === "newDocument" && action.action === "inspect_adapter" ? "d" : originalUrl === source ? "b" : "a").repeat(64),
+          observedAt: t.f.clock - (mode === "stale" ? 5001 : 0), status: 200 } } as never;
+    });
+    if (mode !== "copiedOnly") t.browserFactory.mockImplementation(async options => createDiscoveryBrowser({ ...options,
+      processFactory: () => ({ request: t.request, close: t.close }) }) as never);
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(t.f.clock);
+    try {
+      if (mode === "current") {
+        const result = await t.run(); expect(result.outcome).toBe("activated");
+        expect(t.client.candidate.mock.calls[0][2].source.bookingUrl).toBe(source);
+        expect(t.request.mock.calls.filter(([a]) => a.action !== "finish").map(([a]) => a)).toEqual([
+          { action: "open", url: official }, { action: "open", url: source }, { action: "inspect_adapter", url: source },
+        ]);
+      } else {
+        await expect(t.run()).rejects.toThrow(mode === "newDocument" ? "FRAMEWORK_INSPECTION_CONTEXT_CHANGED" : "FRAMEWORK_INSPECTION_SOURCE_CONTEXT_CHANGED");
+        expect(t.client.candidate).not.toHaveBeenCalled(); expect(t.executeRecipe).not.toHaveBeenCalled();
+      }
+    } finally { vi.useRealTimers(); }
+  });
+  it.each([
+    ["missingStatus", ["OPEN_STATUS_MISSING"]],
+    ["badStatus", ["STATUS_REJECTED"]],
+    ["access", ["ACCESS_REQUIREMENT"]],
+    ["native", ["NATIVE_FATAL"]],
+    ["unsafeUrl", ["PUBLIC_URL_REJECTED"]],
+    ["transport", ["TRANSPORT_CHANGED"]],
+  ])("persists the current early %s readability failure before the unchanged guard", async (change, failures) => {
+    const t = setup();
+    const snapshot: Record<string, unknown> = { url: official, browserTransport: "NATIVE_CHROME", navigationStatus: 200,
+      accessRequirementObserved: false, readyState: "complete", pendingRequestCount: 0,
+      officialSourceDiagnostic: { currentOfficialDocument: true }, frameId: "PRIVATE_FRAME", loaderId: "PRIVATE_LOADER", text: "PRIVATE_BODY" };
+    if (change === "missingStatus") delete snapshot.navigationStatus;
+    if (change === "badStatus") snapshot.navigationStatus = 503;
+    if (change === "access") snapshot.accessRequirementObserved = true;
+    if (change === "native") snapshot.nativeFirstFatal = { code: "NATIVE_REDIRECT_RESPONSE_TIMEOUT", url: "https://private.example/?token=PRIVATE" };
+    if (change === "unsafeUrl") snapshot.url = "https://user:PRIVATE@private.example/login?token=PRIVATE";
+    if (change === "transport") snapshot.browserTransport = "PINNED_HTTP";
+    t.request.mockResolvedValue(snapshot as never);
+    const error = await t.run().catch(e => e);
+    expect(error.code).toBe(change === "transport" ? "FRAMEWORK_INSPECTION_TRANSPORT_CHANGED" : "FRAMEWORK_INSPECTION_SOURCE_UNREADABLE");
+    const expected = inspectionReadability(snapshot, "open", 1, official, booking);
+    expect(expected.failedPredicates).toEqual(failures);
+    const diagnostic = { readability: [expected] };
+    expect(error.inspectionReceipt.actions[0].readability).toEqual(expected);
+    const saved = t.checkpoints.at(-1) as { stagehandFailure: { entries: Array<Record<string, unknown>> } };
+    expect(saved.stagehandFailure.entries[0]).toMatchObject({ fixedInspectionDiagnostic: diagnostic, fixedInspectionDiagnosticSha256: stagehandDataHash(diagnostic) });
+    expect(readStagehandFailure({ ...t.f.job, checkpoint: saved }, t.f.clock)).toEqual(saved.stagehandFailure);
+    expect(currentStagehandInspectionDiagnostic(error, t.f.job, t.f.clock, t.f.clock)).toEqual(diagnostic);
+    expect(currentStagehandInspectionDiagnostic({ ...error }, t.f.job, t.f.clock, t.f.clock)).toBeUndefined();
+    expect(currentStagehandInspectionDiagnostic(error, { ...t.f.job }, t.f.clock, t.f.clock)).toBeUndefined();
+    expect(currentStagehandInspectionDiagnostic(error, t.f.job, t.f.clock + 1, t.f.clock + 1)).toBeUndefined();
+    for (const field of ["attempts", "sourceFingerprint", "firstPickedUpAt", "deadlineAt"] as const) {
+      const prior = t.f.job[field]; Object.assign(t.f.job, { [field]: field === "attempts" ? 2 : "changed" });
+      expect(currentStagehandInspectionDiagnostic(error, t.f.job, t.f.clock, t.f.clock)).toBeUndefined(); Object.assign(t.f.job, { [field]: prior });
+    }
+    expect(JSON.stringify(saved)).not.toMatch(/PRIVATE_FRAME|PRIVATE_LOADER|PRIVATE_BODY|user:PRIVATE|token=PRIVATE/u);
+    expect(t.close).toHaveBeenCalledOnce(); expect(t.client.candidate).not.toHaveBeenCalled();
+    expect(t.executeRecipe).not.toHaveBeenCalled(); expect(t.client.activate).not.toHaveBeenCalled();
+  });
+  it("retains preceding readable actions and exact closed redirect hashes without converting them into authority", async () => {
+    const t = setup(), original = t.request.getMockImplementation()!;
+    const snapshot = { url: official, browserTransport: "NATIVE_CHROME", navigationStatus: 200, accessRequirementObserved: false,
+      nativeFirstFatal: { code: "NATIVE_REDIRECT_RESPONSE_TIMEOUT" }, readyState: "complete", pendingRequestCount: 2,
+      nativeDocumentRedirects: [{ fromUrl: official, toUrl: "https://public-other.example/", status: 302, completed: true, raw: "PRIVATE" }] };
+    t.request.mockImplementation(async action => action.action === "inspect_adapter" ? snapshot as never : original(action));
+    const error = await t.run().catch(e => e), rows = error.inspectionReceipt.actions.map((row: { readability: ReturnType<typeof inspectionReadability> }) => row.readability);
+    expect(rows).toHaveLength(2); expect(rows[0].failedPredicates).toEqual([]); expect(rows[1].failedPredicates).toEqual(["NATIVE_FATAL"]);
+    expect(rows[1].redirectHashes).toEqual([{ fromSha256: stagehandDataHash(official), toSha256: stagehandDataHash("https://public-other.example/"), status: 302 }]);
+    expect(rows[1]).toMatchObject({ frameCorrelation: null, loaderCorrelation: null, redirectsOmitted: false });
+    const saved = t.checkpoints.at(-1) as { stagehandFailure: { entries: Array<Record<string, unknown>> } };
+    expect(saved.stagehandFailure.entries[0].fixedInspectionDiagnostic).toEqual({ readability: rows });
+    for (const change of ["unknown", "extra", "duplicate", "tooMany", "url", "hash"] as const) {
+      const forged = structuredClone(saved), diagnostic = forged.stagehandFailure.entries[0].fixedInspectionDiagnostic as { readability: Array<Record<string, unknown>> };
+      if (change === "unknown") diagnostic.readability[1].nativeFatalCode = "PRIVATE_ARBITRARY";
+      if (change === "extra") diagnostic.readability[1].body = "PRIVATE";
+      if (change === "duplicate") diagnostic.readability[1].actionIndex = 1;
+      if (change === "tooMany") diagnostic.readability = Array(7).fill(diagnostic.readability[0]);
+      if (change === "url") diagnostic.readability[1].currentUrlCategory = "PRIVATE_URL";
+      if (change === "hash") diagnostic.readability[1].currentUrlSha256 = "PRIVATE";
+      forged.stagehandFailure.entries[0].fixedInspectionDiagnosticSha256 = stagehandDataHash(diagnostic);
+      expect(readStagehandFailure({ ...t.f.job, checkpoint: forged }, t.f.clock)).toBeUndefined();
+    }
+    expect(JSON.stringify(saved.stagehandFailure)).not.toContain("https://"); expect(t.client.candidate).not.toHaveBeenCalled();
+  });
+  it("keeps native fatal codes finite and unreadable predicate truth exact", () => {
+    for (const code of stagehandNativeRouterCodes) expect(inspectionReadability({ url: official, nativeFirstFatal: { code } }, "observe", 1, official, booking).nativeFatalCode).toBe(code);
+    const row = inspectionReadability({ url: booking, browserTransport: "NATIVE_CHROME", navigationStatus: null,
+      accessRequirementObserved: "PRIVATE", nativeFirstFatal: { code: "PRIVATE_TOKEN" }, readyState: "PRIVATE", pendingRequestCount: 9999,
+      nativeDocumentRedirects: Array(6).fill({ fromUrl: "https://user:PRIVATE@public.example/", toUrl: official, status: 302, completed: true }) }, "open", 1, official, booking);
+    expect(row).toMatchObject({ currentUrlCategory: "BOOKING_ORIGIN", nativeFatalCode: "UNKNOWN", accessRequirementObserved: null,
+      navigationStatusPresent: true, navigationStatus: null, pendingRequestCount: null, readyState: null, redirectsOmitted: true, redirectHashes: [] });
+    expect(row.failedPredicates).toEqual(["ACCESS_REQUIREMENT", "NATIVE_FATAL", "OPEN_STATUS_MISSING", "STATUS_REJECTED"]);
+    expect(safeInspectionReadability([row])).toEqual([row]); expect(JSON.stringify(row)).not.toContain("PRIVATE");
+  });
   it.each(["EXTRACT", "OBSERVE", "ACT"])("propagates current closed %s model failure facts without provider text or inferred quota", async phase => {
     const t = setup(); modelFailureReport(t).phase = phase;
     const error = await t.run().catch(e => e);
@@ -232,7 +521,7 @@ describe("regular Stagehand source worker", () => {
     expect(t.client.activate).not.toHaveBeenCalled();
   });
 
-  it.each(["UNSUPPORTED_ADAPTER_SOURCE", "ADAPTER_CONFIGURATION_UNVERIFIED"])("persists actual fixed-reader %s without admitting it as a source report", async code => {
+  it.each(["ADAPTER_CONFIGURATION_UNVERIFIED"])("persists actual fixed-reader %s without admitting it as a source report", async code => {
     const t = setup(), primary = Object.assign(Error(code), { code });
     const originalRequest = t.request.getMockImplementation()!;
     t.request.mockImplementation(async action => { if (action.action === "inspect_adapter") throw primary; return originalRequest(action); });

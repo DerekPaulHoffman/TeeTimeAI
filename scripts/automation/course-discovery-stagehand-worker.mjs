@@ -1,6 +1,6 @@
 import { discoveryError } from "./course-discovery-client.mjs";
 import { createDiscoveryBrowser, validateDiscoveryRecipe, createDiscoveryAdapterObservation,
-  bindDiscoveryRecipeIdentity, inspectedAdapterSourceEvidence, executeDiscoveryRecipe, verifyDiscoveryCandidate } from "./course-discovery-worker.mjs";
+  bindDiscoveryRecipeIdentity, inspectedAdapterSourceEvidence, executeDiscoveryRecipe, verifyDiscoveryCandidate, runCourseDiscoveryWorker } from "./course-discovery-worker.mjs";
 import { STAGEHAND_SOURCE_BUDGET_MS, stagehandWorkDeadline, publicStagehandJob, publicStagehandSourceUrl,
   validateStagehandSourceReport, createStagehandSourceCheckpoint, readStagehandSourceCheckpoint, stagehandSourceFailureCode } from "./course-discovery-stagehand-source.mjs";
 import { inspectStagehandAdapter } from "./course-discovery-stagehand-inspection.mjs";
@@ -9,6 +9,7 @@ import { createStagehandFailureCheckpoint, packStagehandCheckpoint, readStagehan
 import { projectSourceDiagnostic } from "./stagehand/source-diagnostic.mjs";
 
 const defaultSourceDiscover = async args => (await import("./stagehand/source-discovery.mjs")).sourceDiscover(args);
+export const GENERIC_RECIPE_FALLBACK_CODES = Object.freeze(["UNSUPPORTED_ADAPTER_SOURCE", "CPS_PUBLIC_BUILD_UNSUPPORTED"]);
 /** Readiness only; the supervisor performs this before claiming cold demand. */
 export async function prepareCourseDiscoveryStagehandWorker({ cwd, prepareSourceDiscovery } = {}) {
   const prepare = prepareSourceDiscovery ?? (await import("./stagehand/source-discovery.mjs")).prepareSourceDiscovery;
@@ -44,6 +45,7 @@ export async function runCourseDiscoveryStagehandWorker({
   guardedBrowserFactory = args => createStagehandGuardedBrowserHost(args),
   validateRecipe = args => validateDiscoveryRecipe({ cwd, ...args }),
   executeRecipe = args => executeDiscoveryRecipe({ cwd, helperEnvironment: client.helperEnvironment("discovery", job), ...args }),
+  genericWorker = runCourseDiscoveryWorker,
   now = Date.now, model = "gpt-6.1-sol", onMetrics = () => {},
 }) {
   if (model !== "gpt-6.1-sol") throw discoveryError("DISCOVERY_MODEL_NOT_ALLOWED");
@@ -109,11 +111,38 @@ export async function runCourseDiscoveryStagehandWorker({
     // Checkpoint rows are revalidated as routing evidence before EVERY fresh native inspection.
     validateStagehandSourceReport(report, job);
     phase = "FIXED_INSPECTION";
-    const prepared = await inspectStagehandAdapter({ report, adapterSourceProposal: report.adapterSourceProposal,
+    let prepared, fixedInspection;
+    try { prepared = await inspectStagehandAdapter({ report, adapterSourceProposal: report.adapterSourceProposal,
       job, client, cwd, workDeadlineAt: new Date(deadline).toISOString(), signal, now,
       worker: { createDiscoveryBrowser: browserFactory, validateDiscoveryRecipe: ({ recipe, signal }) => validateRecipe({ recipe, signal }),
         createDiscoveryAdapterObservation, bindDiscoveryRecipeIdentity, inspectedAdapterSourceEvidence },
-      onReceipt: receipt => { metrics.inspection = receipt; publishMetrics(); } });
+      onReceipt: receipt => { fixedInspection = receipt; metrics.inspection = receipt; publishMetrics(); } }); }
+    catch (error) {
+      if (!GENERIC_RECIPE_FALLBACK_CODES.includes(error?.code) || fixedInspection?.browserClosed !== true || fixedInspection.cleanupError ||
+          fixedInspection.outcome !== "FAILED" || fixedInspection.actions?.at(-1)?.action !== "inspect_adapter") throw error;
+      check();
+      phase = "GENERIC_FALLBACK";
+      metrics.source = { ...sourceMetrics(report), elapsedMs: metrics.sourceElapsedMs, resumed: metrics.sourceResumed,
+        usageRecordedLowerBound: true, usageFromPriorAttempt: metrics.sourceResumed, browserClosed: report.browserClosed === true, modelClosed: report.modelClosed === true };
+      metrics.modelCallsMeaning = "SOURCE_COMPLETED_CALLS_ONLY_GENERIC_USAGE_SEPARATE";
+      metrics.genericFallback = { trigger: error.code, startedAt: now(), workDeadlineAt: new Date(deadline).toISOString(), freshOfficialStart: true };
+      const provenance = packStagehandCheckpoint({ reference, failure: failureEvidence, progress: { phase: "GENERIC_FALLBACK" } });
+      const fallbackStarted = now();
+      try {
+        const outcome = await genericWorker({ job, workDeadlineAt: new Date(deadline).toISOString(), client, cwd, signal, model,
+          freshOfficialStart: true, checkpointProvenance: provenance,
+          beforeActivate: async () => { check(); await beforeActivate(); },
+          afterActivate: async ({ metrics: genericMetrics } = {}) => {
+            activationAcknowledged = true; metrics.genericFallback.worker = genericMetrics; await afterActivate({ metrics });
+          } });
+        metrics.genericFallback.worker = outcome.metrics;
+        if (outcome.outcome !== "activated" || !activationAcknowledged) throw discoveryError("DISCOVERY_NO_VERIFIED_RECIPE");
+        return { ...outcome, metrics };
+      } catch (failure) {
+        if (failure?.discoveryMetrics) metrics.genericFallback.worker = failure.discoveryMetrics;
+        throw failure;
+      } finally { metrics.genericFallback.elapsedMs = Math.max(0, now() - fallbackStarted); publishMetrics(); }
+    }
     check();
     phase = "RECIPE_VALIDATION";
     const validation = await validateRecipe({ recipe: prepared.recipe, signal });
@@ -137,6 +166,7 @@ export async function runCourseDiscoveryStagehandWorker({
     // neither renew authority nor replace the original failure.
     checkpointTail = checkpointTail.then(async () => {
       if (activationAcknowledged || checkpointLeaseRetired) { metrics.failureCheckpoint = "SKIPPED_RETIRED"; return; }
+      if (phase === "GENERIC_FALLBACK") { metrics.failureCheckpoint = "GENERIC_FALLBACK_OWNS_CHECKPOINT"; return; }
       if (signal?.aborted) { metrics.failureCheckpoint = "SKIPPED_ABORTED"; return; }
       if (["DISCOVERY_LEASE_REJECTED", "DISCOVERY_LEASE_EXPIRED"].includes(error.code)) { metrics.failureCheckpoint = "SKIPPED_RETIRED"; return; }
       if (now() >= deadline) { metrics.failureCheckpoint = "SKIPPED_DEADLINE"; return; }

@@ -30,6 +30,112 @@ function readers() {
 afterEach(() => vi.restoreAllMocks());
 
 describe("fresh native delegated TeeItUp source", () => {
+  it("keeps a pipe footer with another physical street incomplete after sharing the exact field parser", () => {
+    const p = page(source.officialUrl, operator, true);
+    const row = `${source.venueName} | 11 Harbor Drive Example, NY 12345 | 212-555-1234`;
+    p.html = p.html.replace(`<address>${source.venueAddress}</address>`, `<footer><p>${row}</p></footer>`);
+    p.visibleEvidence!.addressTexts = [row.toUpperCase()];
+    expect(() => delegatedCanonicalVenueWitness(source, registerFreshNativeOfficialIdentityPage(p, source.officialUrl, new Date(Date.now() + 120000)))).toThrow("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
+  });
+  const pipeFooter = (address = "10 Harbor Drive Example, NY 12345", phone = "212-555-1234") => `${source.venueName} | ${address} | ${phone}`;
+  function pipePage(value = pipeFooter()) {
+    const p = page(source.officialUrl, operator, true);
+    p.html = p.html.replace(`<address>${source.venueAddress}</address>`, `<footer><p class="address">${value}</p></footer>`);
+    p.visibleEvidence!.addressTexts = [value]; return p;
+  }
+  it.each(["10 Harbor Drive Example, NY 12345", "10 Harbor Dr., Example, NY 12345, USA"])
+  ("binds an exact branded pipe footer without guessing street/locality components: %s", async address => {
+    const deps = readers();
+    deps.readDelegatedRoot.mockImplementation(async () => registerFreshNativeOfficialIdentityPage(pipePage(pipeFooter(address)), source.officialUrl, new Date(Date.now() + 120000)));
+    const chain = currentNativeDelegatedChain(await readTeeItUpDelegatedBookingChain(source, deps));
+    expect(bindDelegatedFacility(source, chain, directory)).toMatchObject({ facilityId: 71, canonicalAddress: source.venueAddress });
+  });
+  it("allows CSS uppercase rendering of the complete pipe row but never a changed token", async () => {
+    for (const changed of [false, true]) {
+      const deps = readers();
+      deps.readDelegatedRoot.mockImplementation(async () => {
+        const p = pipePage();
+        p.visibleEvidence!.addressTexts = [pipeFooter().toUpperCase().replace("HARBOR DRIVE", changed ? "OTHER DRIVE" : "HARBOR DRIVE")];
+        return registerFreshNativeOfficialIdentityPage(p, source.officialUrl, new Date(Date.now() + 120000));
+      });
+      if (changed) { await expect(readTeeItUpDelegatedBookingChain(source, deps)).rejects.toThrow("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED"); expect(deps.readDelegatedDocument).not.toHaveBeenCalled(); }
+      else expect(currentNativeDelegatedChain(await readTeeItUpDelegatedBookingChain(source, deps)).hops).toHaveLength(2);
+    }
+  });
+  it("preserves the complete canonical direction, unit and ZIP+4 in a printed pipe address", () => {
+    const scoped = { ...source, venueAddress: "10 N Harbor Drive Suite 2, Example, NY 12345-6789, USA" };
+    const make = (address: string) => registerFreshNativeOfficialIdentityPage(pipePage(pipeFooter(address)), source.officialUrl, new Date(Date.now() + 120000));
+    const printed = "10 N Harbor Dr. Suite 2 Example, NY 12345-6789, US";
+    expect(delegatedCanonicalVenueWitness(scoped, make(printed))).toMatch(/^[a-f0-9]{64}$/u);
+    for (const wrong of [printed.replace("N Harbor", "Harbor"), printed.replace("Suite 2", "Suite 3"), printed.replace("12345-6789", "12345")])
+      expect(() => delegatedCanonicalVenueWitness(scoped, make(wrong))).toThrow("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
+  });
+  it.each(["otherBrand", "extraField", "extraAddressText", "invalidPhone", "number", "street", "direction", "unit", "locality", "region", "postal", "zip4", "country",
+    "hidden", "form", "inert", "mailing", "corporate", "ambiguous", "differentPhone", "renderedMissing", "renderedChanged"])
+  ("rejects a branded pipe footer with %s before delegated GET", async variant => {
+    const deps = readers();
+    deps.readDelegatedRoot.mockImplementation(async () => {
+      let value = pipeFooter();
+      if (variant === "otherBrand") value = value.replace(source.venueName, "Other Golf Course");
+      if (variant === "extraField") value += " | Other business";
+      if (variant === "extraAddressText") value = pipeFooter("10 Harbor Drive Example, NY 12345 directions here");
+      if (variant === "invalidPhone") value = pipeFooter(undefined, "Call for details 212-555-1234");
+      if (variant === "number") value = pipeFooter("11 Harbor Drive Example, NY 12345");
+      if (variant === "street") value = pipeFooter("10 Other Drive Example, NY 12345");
+      if (variant === "direction") value = pipeFooter("10 N Harbor Drive Example, NY 12345");
+      if (variant === "unit") value = pipeFooter("10 Harbor Drive Suite 2 Example, NY 12345");
+      if (variant === "locality") value = pipeFooter("10 Harbor Drive New Example, NY 12345");
+      if (variant === "region") value = pipeFooter("10 Harbor Drive Example, NJ 12345");
+      if (variant === "postal") value = pipeFooter("10 Harbor Drive Example, NY 12346");
+      if (variant === "zip4") value = pipeFooter("10 Harbor Drive Example, NY 12345-6789");
+      if (variant === "country") value = pipeFooter("10 Harbor Drive Example, NY 12345, Canada");
+      const p = pipePage(value);
+      if (variant === "hidden") p.html = p.html.replace('class="address"', 'class="address" hidden');
+      if (variant === "form") p.html = p.html.replace("<footer>", "<footer><form>").replace("</footer>", "</form></footer>");
+      if (variant === "inert") p.html = p.html.replace("<footer>", "<footer inert>");
+      if (["mailing", "corporate"].includes(variant)) p.html = p.html.replace("<footer>", `<footer><h5>${variant} address</h5>`);
+      if (["ambiguous", "differentPhone"].includes(variant)) {
+        const other = variant === "ambiguous" ? value.replace(source.venueName, "Other Golf Course") : pipeFooter(undefined, "212-555-1235");
+        p.html = p.html.replace("</footer>", `<p>${other}</p></footer>`); p.visibleEvidence!.addressTexts.push(other);
+      }
+      if (variant === "renderedMissing") p.visibleEvidence!.addressTexts = [];
+      if (variant === "renderedChanged") p.visibleEvidence!.addressTexts = [pipeFooter(undefined, "212-555-1235")];
+      return registerFreshNativeOfficialIdentityPage(p, source.officialUrl, new Date(Date.now() + 120000));
+    });
+    await expect(readTeeItUpDelegatedBookingChain(source, deps)).rejects.toThrow("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
+    expect(deps.readDelegatedDocument).not.toHaveBeenCalled();
+  });
+  it.each([3, 4, 5, 6])("accepts an exact public H%s venue heading through the fresh delegated chain", async level => {
+    const deps = readers();
+    deps.readDelegatedRoot.mockImplementation(async () => {
+      const p = page(source.officialUrl, operator, true), heading = `Welcome to ${source.venueName}!`;
+      p.html = p.html.replace(`<h1>${source.venueName}</h1>`, `<h${level}>${heading}</h${level}>`);
+      p.visibleEvidence!.headings = [heading];
+      return registerFreshNativeOfficialIdentityPage(p, source.officialUrl, new Date(Date.now() + 120000));
+    });
+    const chain = currentNativeDelegatedChain(await readTeeItUpDelegatedBookingChain(source, deps));
+    expect(bindDelegatedFacility(source, chain, directory)).toMatchObject({ facilityId: 71, bookingUrl: source.bookingUrl });
+  });
+  it.each(["wrong", "hidden", "form", "inert", "conflictingH1", "rawAddress", "renderedAddress", "renderedName"])
+  ("does not admit an H4 venue witness with %s evidence", async variant => {
+    const deps = readers(), heading = `Welcome to ${source.venueName}!`;
+    deps.readDelegatedRoot.mockImplementation(async () => {
+      const p = page(source.officialUrl, operator, true);
+      let markup = `<h4>${heading}</h4>`;
+      if (variant === "wrong") markup = "<h4>Welcome to Other Golf Course!</h4>";
+      if (variant === "hidden") markup = `<h4 hidden>${heading}</h4>`;
+      if (variant === "form") markup = `<form>${markup}</form>`;
+      if (variant === "inert") markup = `<section inert>${markup}</section>`;
+      if (variant === "conflictingH1") markup += "<h1>Other Golf Course</h1>";
+      p.html = p.html.replace(`<h1>${source.venueName}</h1>`, markup);
+      p.visibleEvidence!.headings = variant === "renderedName" ? ["Other Golf Course"] : [heading];
+      if (variant === "rawAddress") p.html = p.html.replace(source.venueAddress, "11 Harbor Drive, Example, NY 12345");
+      if (variant === "renderedAddress") p.visibleEvidence!.addressTexts = ["11 Harbor Drive, Example, NY 12345"];
+      return registerFreshNativeOfficialIdentityPage(p, source.officialUrl, new Date(Date.now() + 120000));
+    });
+    await expect(readTeeItUpDelegatedBookingChain(source, deps)).rejects.toThrow("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
+    expect(deps.readDelegatedDocument).not.toHaveBeenCalled();
+  });
   it.each(["Tee Time Waitlist", "Tee Time Waitlist Don’t see the tee time you wanted? Sign up to be notified when your desired dates become available. Sign Up",
     "Book Your Tournament", "Book Tee Time Alerts", "Reserve tee times: Notify me", "Book Your Group Outing", "Reserve Group Events"])
   ("excludes explicit nonavailability link %s without selecting it via a requested URL", label => {
@@ -47,6 +153,21 @@ describe("fresh native delegated TeeItUp source", () => {
     expect(delegatedBookingHop(p).nextUrl).toBe(operator);
     p.html+='<a href="https://public.example/other-tee-times/">Reserve Tee Times</a>';p.visibleEvidence!.linkUrls.push("https://public.example/other-tee-times/");
     expect(()=>delegatedBookingHop(p)).toThrow("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
+  });
+  it.each(["#", source.officialUrl + "#", "#section"])("excludes a same-document %s anchor while retaining the exact real route", fragment => {
+    const p = page(source.officialUrl, operator, true), self = new URL(fragment, p.url).href;
+    p.html += `<a href="${fragment}">Tee Times</a>`; p.visibleEvidence!.linkUrls.push(self);
+    expect(delegatedBookingHop(p).nextUrl).toBe(operator);
+    expect(() => delegatedBookingHop(p, self)).toThrow("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
+    const only = page(source.officialUrl, undefined, true); only.html += `<a href="${fragment}">Tee Times</a>`; only.visibleEvidence!.linkUrls = [self];
+    expect(() => delegatedBookingHop(only)).toThrow("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
+  });
+  it.each([source.officialUrl + "?view=public", "https://public.example/other-path/", "https://other.example/public/"])
+  ("does not collapse a different public query, path or origin: %s", next => {
+    const p = page(source.officialUrl, next, true);
+    expect(delegatedBookingHop(p).nextUrl).toBe(next);
+    p.html += `<a href="${operator}">Book A Tee Time</a>`; p.visibleEvidence!.linkUrls.push(operator);
+    expect(() => delegatedBookingHop(p)).toThrow("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
   });
   it("keeps canonical source distinct from the exact fresh native redirect document through the earned booking chain", async () => {
     const current = "https://www.public.example/venue", deps = readers();

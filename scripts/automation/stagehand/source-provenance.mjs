@@ -133,6 +133,12 @@ export function observedBookingSourceCandidates(report, officialUrl, isPublic = 
     for(const frame of frames.reverse())if(valid(frame.url)&&reachable.has(norm(frame.source))&&edges.get(norm(frame.source))?.has(norm(frame.url))&&!startup.has(norm(frame.url))&&!output.includes(norm(frame.url))){
       append(norm(frame.url));
     }
+    // A completed private native frame entry may expose an exact redirect
+    // destination without that destination linking to itself. It remains only
+    // unverified routing; fixed inspection must independently re-earn the path.
+    for(const entry of nativeFrameNavigations(report,isPublic))if(reachable.has(norm(entry.pageUrl))&&
+      edges.get(norm(entry.pageUrl))?.has(norm(entry.frameUrl))&&reachable.has(norm(entry.finalUrl))&&
+      observed.has(norm(entry.finalUrl))&&!startup.has(norm(entry.finalUrl)))append(norm(entry.finalUrl));
     // Only the fixed synchronous DOM collector can emit this visible-link
     // observation. The exact same-attempt href is an unverified routing choice;
     // it is not a visited landing, provider identity, method, or inventory proof.

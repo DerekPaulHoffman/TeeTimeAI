@@ -6,6 +6,12 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { collectNativeOfficialPublicMetadata } from "./public-document-metadata";
 
+it("collects all six visible semantic heading levels without promoting hidden, inert or form headings",()=>{
+ const visible=Array.from({length:6},(_,i)=>`<h${i+1}>Public heading ${i+1}</h${i+1}>`).join("");
+ setup(visible+'<h4 hidden>Hidden venue</h4><section inert><h4>Inert venue</h4></section><form><h4>Form venue</h4></form><section style="display:none"><h4>CSS-hidden venue</h4></section>');
+ expect(collectNativeOfficialPublicMetadata(venue).headings).toEqual(Array.from({length:6},(_,i)=>`Public heading ${i+1}`));
+});
+
 it("captures a literal named semantic address/tel block independently of marketing headings and site-title classes",()=>{
  setup('<h1>A championship experience</h1><footer><div><h5>Contact Us</h5><p>'+venue+'</p><a href="https://maps.example/"><address>10 Example Road, Example, New York.12345</address></a><p>Telephone: <a href="tel:+19165554653">916-555-4653</a></p></div></footer>');
  const got=collectNativeOfficialPublicMetadata(venue);

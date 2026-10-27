@@ -1,18 +1,56 @@
-import { existsSync } from "node:fs";
-import { chromium } from "@playwright/test";
+import { existsSync, readFileSync } from "node:fs";
+import { createServer } from "node:https";
+import { connect, type AddressInfo } from "node:net";
+import { chromium, type CDPSession } from "@playwright/test";
 import { describe, expect, it, vi } from "vitest";
 import { createAddressPinnedPublicFetchTransport } from "@/lib/automation/address-pinned-public-fetch";
-import { createCourseDiscoveryBrowserSession, discoveryBrowserRequestLimit, discoveryBrowserActionSchema, discoveryPublicAnchorKind, discoveryPublicChoiceKind, normalizeDiscoveryNavigationUrl, publicHeaderFailureDiagnostic, redactDiscoveryFailureUrl, redactDiscoveryJson, redactDiscoveryRequestUrl, sameDiscoveryMainDocument } from "./browser-session";
+import { createCourseDiscoveryBrowserSession, discoveryDefiniteUncorrelatedPostDenial, discoveryBrowserRequestLimit, discoveryBrowserActionSchema, discoveryPublicAnchorKind, discoveryPublicChoiceKind, normalizeDiscoveryNavigationUrl, publicHeaderFailureDiagnostic, redactDiscoveryFailureUrl, redactDiscoveryJson, redactDiscoveryRequestUrl, sameDiscoveryMainDocument } from "./browser-session";
+import { isAnonymousBrowserReadPost } from "@/lib/automation/simulator-interactive-browser";
 import mindbodyObserved from "./fixtures/mindbody-appointment-grid-observed.json";
 import * as nativeBrowser from "./native-public-browser";
 import * as nativeRouting from "./native-redirect-routing";
 import { deriveTeeItUpOfficialIdentityProof } from "./teeitup-official-identity";
 import type { DiscoveryBrowserSnapshot } from "./browser-session";
+import { launchPublicReadBrowser } from "./public-browser-launch";
 
 vi.mock("@/lib/automation/provider-request-lease", () => ({ runWithProviderRequestLease: vi.fn() }));
-vi.mock("@/lib/automation/address-pinned-public-fetch", () => ({ createAddressPinnedPublicFetchTransport: vi.fn() }));
+vi.mock("@/lib/automation/address-pinned-public-fetch", async importOriginal => ({
+  ...await importOriginal<typeof import("@/lib/automation/address-pinned-public-fetch")>(), createAddressPinnedPublicFetchTransport: vi.fn(),
+}));
 
 describe("discovery browser public protocol", () => {
+  it("uses the current unchanged public POST policy only to confirm denial, never to accept an uncorrelated read", () => {
+    const request = { url: "https://example.org/data", method: "POST" as const, resourceType: "xhr" as const, headers: { "content-type": "application/json" }, body: '{"event":"page-view"}' };
+    const addHeaders = vi.fn(() => true);
+    expect(discoveryDefiniteUncorrelatedPostDenial(request, "https://example.org/", isAnonymousBrowserReadPost, addHeaders)).toBe(true);
+    expect(discoveryDefiniteUncorrelatedPostDenial({ ...request, body: '{"query":"query { availability { start } }"}' }, "https://example.org/", isAnonymousBrowserReadPost, addHeaders)).toBe(false);
+    const readPost = vi.fn((_url: URL, headers: Headers) => headers.get("referer") === "https://example.org/");
+    expect(discoveryDefiniteUncorrelatedPostDenial(request, "https://example.org/", readPost, (_url, _method, _original, headers) => { headers.set("referer", "https://example.org/"); return true; })).toBe(false);
+    expect(readPost).toHaveBeenCalledOnce();
+    for (const uncertain of [() => undefined as never, () => { throw Error("POLICY_UNCERTAIN"); }])
+      expect(discoveryDefiniteUncorrelatedPostDenial(request, "https://example.org/", uncertain, addHeaders)).toBe(false);
+    expect(discoveryDefiniteUncorrelatedPostDenial(request, "https://example.org/", () => false, () => false)).toBe(false);
+  });
+  it.each(["REX", "Membersports", "document", "OPTIONS", "GET", "body", "unsafe document", "unsafe URL", "Mindbody private header"])
+  ("does not classify a possible typed/private or uncertain %s request as definite denial", mode => {
+    const request = { url: "https://example.org/data", method: "POST" as const, resourceType: "xhr" as const, headers: { "content-type": "application/json" } as Record<string, string>, body: '{}' };
+    let documentUrl = "https://example.org/";
+    if (mode === "REX") request.url = "https://public.reservewithrex.com/api/venue/get";
+    if (mode === "Membersports") {
+      request.url = "https://api.membersports.com/api/v1/golfclubs/onlineBookingTeeTimes"; request.headers.origin = "https://app.membersports.com";
+      documentUrl = "https://app.membersports.com/tee-times/1/2/0";
+      request.body = JSON.stringify({ configurationTypeId: 1, date: "2030-01-03", golfClubGroupId: 1, golfClubId: 2, golfCourseId: 3, groupSheetTypeId: 4 });
+    }
+    if (mode === "document") request.resourceType = "document" as never;
+    if (["GET", "OPTIONS"].includes(mode)) request.method = mode as never;
+    if (mode === "body") request.body = "x".repeat(32769);
+    if (mode === "unsafe document") documentUrl = "https://example.org/account/";
+    if (mode === "unsafe URL") request.url = "https://example.org/checkout/";
+    if (mode === "Mindbody private header") request.headers["next-action"] = "unverified-action";
+    const readPost = vi.fn(() => false);
+    expect(discoveryDefiniteUncorrelatedPostDenial(request, documentUrl, readPost, () => true)).toBe(false);
+    expect(readPost).not.toHaveBeenCalled();
+  });
   it("keeps the generic request allocation and grants only the private fixed Mindbody profile", () => {
     const source = mindbodyObserved.source, input = { initialUrls: [source.bookingUrl], timeZone: source.timeZone, venueName: source.venueName,
       venueAddress: source.venueAddress, venueOfficialUrl: source.officialUrl, requestedInput: mindbodyObserved.input };
@@ -154,6 +192,160 @@ describe("discovery browser public protocol", () => {
 
 const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
+  it.each(["duplicates", "differentDestination", "unsafeForm", "staleForm"] as const)
+  ("earns one native public-entry disclosure and freshly reveals its exact public frame: %s", async mode => {
+    const official = "https://owned-disclosure.example/", href = official + "public-entry", frame = "https://app.acuityscheduling.com/schedule.php?owner=123456&ref=embedded_csp";
+    const name = "Public Indoor Golf", address = "10 Public Road, Example, NY 12345, USA";
+    const material = readFileSync("src/lib/course-discovery/cps-browser-wiring.test.ts", "utf8"), tls = (key: string): string => JSON.parse(new RegExp(`^const ${key} = (".*");$`, "m").exec(material)![1]);
+    const reads: string[] = [], families = new Set<string>(); let active = 0, acquired = 0, released = 0, foreign = 0;
+    const lease = async <T>(family: string, work: () => Promise<T>) => {
+      if (active >= 2 || families.has(family)) return { acquired: false } as const;
+      active++; acquired++; families.add(family); try { return { acquired: true, value: await work() } as const; }
+      finally { active--; released++; families.delete(family); }
+    };
+    const anchors = ["hero", "secondary", "sticky"].map((id, i) => `<a id="${id}" href="${mode === "differentDestination" && i === 1 ? official + "another-entry" : href}">Reserve Your Bay</a>`);
+    anchors[1] = `<article>Public indoor golf details. ${anchors[1]}</article>`;
+    if (mode === "unsafeForm") anchors[1] = `<form>${anchors[1]}</form>`;
+    const html = `<!doctype html><title>${name}</title><link rel="icon" href="data:,"><body><h1>${name}</h1><p>${address}</p>${anchors.join("")}
+      <div id="public-panel" hidden><iframe title="Schedule Appointment" src="${frame}" style="width:400px;height:300px"></iframe></div>
+      <script>window.disclosureCount=0;document.addEventListener('click',e=>{if(e.target.closest('a')){e.preventDefault();window.disclosureCount++;document.getElementById('public-panel').hidden=false;}})</script></body>`;
+    const server = createServer({ key: tls("fixtureKey"), cert: tls("fixtureCertificate") }, (request, response) => {
+      expect(active).toBeGreaterThan(0); reads.push(String(request.url));
+      if (request.method !== "GET" || request.url !== "/") { response.writeHead(500).end(); return; }
+      response.writeHead(200, { "content-type": "text/html" }).end(html);
+    });
+    const originalProxy = nativeBrowser.createNativePublicBrowserProxy;
+    let session: Awaited<ReturnType<typeof createCourseDiscoveryBrowserSession>> | undefined, browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
+    let proxy: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve)); const port = (server.address() as AddressInfo).port;
+      proxy = vi.spyOn(nativeBrowser, "createNativePublicBrowserProxy").mockImplementation(input => originalProxy({ ...input, requireHostAdmission: true }, {
+        resolveAddresses: async hostname => { if (hostname !== "owned-disclosure.example") { foreign++; throw Error("UNOWNED_FIXTURE_HOST"); } return [{ address: "93.184.216.34", family: 4 }]; },
+        connect: () => connect({ host: "127.0.0.1", port }),
+      }));
+      session = await createCourseDiscoveryBrowserSession({ initialUrls: [official], venueOfficialUrl: official, venueName: name, venueAddress: address, deadlineAt: new Date(Date.now() + 25_000) }, {
+        browserTransport: "NATIVE_CHROME", requestLease: lease, launchBrowser: async () => browser = await launchPublicReadBrowser({ executablePath, headless: true, args: ["--ignore-certificate-errors"] }),
+      });
+      const snapshot = await session.execute({ id: 1, action: "open", url: official }); expect(snapshot.navigationStatus).toBe(200);
+      expect(snapshot.frames.filter(row => row.source === "OFFICIAL_IFRAME_SRC")).toEqual([]);
+      const disclosures = snapshot.controls.filter(control => control.kind === "public-entry-disclosure");
+      if (["differentDestination", "unsafeForm"].includes(mode)) expect(disclosures).toEqual([]);
+      else {
+        expect(disclosures).toHaveLength(1); expect(disclosures[0].href).toBe(href);
+        const page = browser!.contexts().flatMap(context => context.pages()).find(page => page.url() === official)!;
+        if (mode === "staleForm") {
+          await page.locator(disclosures[0].selector).evaluate(node => { const form = document.createElement("form"); node.parentElement!.append(form); form.append(node); });
+          await expect(session.execute({ id: 2, action: "click", target: disclosures[0].target })).rejects.toThrow("STALE_OR_UNKNOWN_CONTROL");
+          expect(await page.evaluate(() => (window as Window & { disclosureCount: number }).disclosureCount)).toBe(0);
+        } else {
+          const opened = await session.execute({ id: 2, action: "click", target: disclosures[0].target });
+          expect(opened.url).toBe(official); expect(opened.navigationStatus).toBe(200); expect(opened.controls.some(control => control.kind === "public-entry-disclosure")).toBe(false);
+          expect(opened.frames).toContainEqual({ url: frame, source: "OFFICIAL_IFRAME_SRC" });
+          expect(await page.evaluate(() => (window as Window & { disclosureCount: number }).disclosureCount)).toBe(1);
+        }
+      }
+      expect(reads).toEqual(["/"]);
+    } finally { await session?.close(); proxy?.mockRestore(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
+    expect(foreign).toBe(0); expect(active).toBe(0); expect(acquired).toBeGreaterThan(0); expect(released).toBe(acquired);
+  }, 35_000);
+  it.each(["current", "loader", "foreignFrame", "differentRequest", "differentUrl", "pendingAck", "failedIdentity", "nonSuccess", "newDocument"] as const)
+  ("retains only the completed native main GET status across an owned same-document path and query change: %s", async mode => {
+    const entry = "https://owned-status.example/", current = entry + "public-search?view=day";
+    const material = readFileSync("src/lib/course-discovery/cps-browser-wiring.test.ts", "utf8");
+    const tls = (name: string): string => JSON.parse(new RegExp(`^const ${name} = (".*");$`, "m").exec(material)![1]);
+    const reads: string[] = [], families = new Set<string>(); let active = 0, acquired = 0, released = 0, foreign = 0;
+    const lease = async <T>(family: string, work: () => Promise<T>) => {
+      if (active >= 2 || families.has(family)) return { acquired: false } as const;
+      active++; acquired++; families.add(family);
+      try { return { acquired: true, value: await work() } as const; }
+      finally { active--; released++; families.delete(family); }
+    };
+    let releaseAck!: () => void, ackObserved = false, queryCalls = 0, statusSessions = 0, statusDetached = 0;
+    const statusSpies: Array<ReturnType<typeof vi.spyOn>> = [];
+    const ack = new Promise<void>(resolve => { releaseAck = resolve; });
+    const server = createServer({ key: tls("fixtureKey"), cert: tls("fixtureCertificate") }, (request, response) => {
+      expect(active).toBeGreaterThan(0); reads.push(String(request.url));
+      if (request.method !== "GET" || !["/", "/replacement"].includes(String(request.url))) { response.writeHead(500).end(); return; }
+      const replaced = request.url === "/replacement";
+      response.writeHead(mode === "nonSuccess" || replaced ? 503 : 200, { "content-type": "text/html" }).end('<!doctype html><link rel="icon" href="data:,"><body>Public document<a href="/replacement">Public booking</a>' +
+        (mode === "nonSuccess" || replaced ? "" : '<script>history.replaceState(null,"","/public-search?view=day");</script>') + '</body>');
+    });
+    const originalProxy = nativeBrowser.createNativePublicBrowserProxy;
+    const originalRouter = nativeRouting.installNativeRedirectRouting;
+    const routing = vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (page, handler, options) => {
+      const context = page.context(), newSession = context.newCDPSession.bind(context);
+      let ownerCdp: CDPSession | undefined, networkId: string | undefined;
+      const pending = ["pendingAck", "failedIdentity"].includes(mode) ? vi.spyOn(context, "newCDPSession").mockImplementation(async target => {
+        const cdp = await newSession(target), send = cdp.send.bind(cdp);
+        ownerCdp = cdp;
+        cdp.on("Network.requestWillBeSent", event => { if (event.type === "Document") networkId = event.requestId; });
+        cdp.send = (async (...args: Parameters<typeof cdp.send>) => {
+          const result = await send(...args);
+          if (mode === "pendingAck" && args[0] === "Fetch.continueResponse") { ackObserved = true; await ack; }
+          return result;
+        }) as typeof cdp.send;
+        return cdp;
+      }) : undefined;
+      let router: Awaited<ReturnType<typeof originalRouter>>;
+      try { router = await originalRouter(page, handler, options); } finally { pending?.mockRestore(); }
+      statusSpies.push(vi.spyOn(context, "newCDPSession").mockImplementation(async target => {
+        const cdp = await newSession(target), detach = cdp.detach.bind(cdp); statusSessions++;
+        statusSpies.push(vi.spyOn(cdp, "detach").mockImplementation(async () => { statusDetached++; await detach(); }));
+        return cdp;
+      }));
+      const currentRead = router.isCurrentCompletedDocumentRead.bind(router);
+      router.isCurrentCompletedDocumentRead = (request, frame, captured) => {
+        queryCalls++;
+        if (mode === "loader") return currentRead(request, frame, { ...captured, loaderId: captured.loaderId + "-foreign" });
+        if (mode === "foreignFrame") return currentRead(request, {} as typeof frame, captured);
+        if (mode === "differentRequest") return currentRead({ ...request }, frame, captured);
+        if (mode === "differentUrl") return currentRead(request, frame, { ...captured, url: "https://foreign.example/" });
+        if (mode === "failedIdentity") {
+          // Owned protocol-fault injection: a completed read's exact identity
+          // is subsequently failed; it cannot keep lending a successful status.
+          expect(networkId).toBeTruthy();
+          ownerCdp!.emit("Network.loadingFailed", { requestId: networkId!, timestamp: 0, type: "Document", errorText: "net::ERR_FAILED", canceled: false });
+        }
+        return currentRead(request, frame, captured);
+      };
+      return router;
+    });
+    let session: Awaited<ReturnType<typeof createCourseDiscoveryBrowserSession>> | undefined;
+    let proxy: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve)); const port = (server.address() as AddressInfo).port;
+      proxy = vi.spyOn(nativeBrowser, "createNativePublicBrowserProxy").mockImplementation(input => originalProxy({ ...input, requireHostAdmission: true }, {
+        resolveAddresses: async hostname => { if (hostname !== "owned-status.example") { foreign++; throw Error("UNOWNED_FIXTURE_HOST"); } return [{ address: "93.184.216.34", family: 4 }]; },
+        connect: () => connect({ host: "127.0.0.1", port }),
+      }));
+      session = await createCourseDiscoveryBrowserSession({ initialUrls: [entry], deadlineAt: new Date(Date.now() + 20_000) }, {
+        browserTransport: "NATIVE_CHROME", requestLease: lease,
+        launchBrowser: () => launchPublicReadBrowser({ executablePath, headless: true, args: ["--ignore-certificate-errors"] }),
+      });
+      const snapshot = await session.execute({ id: 1, action: "open", url: entry });
+      expect(snapshot.url).toBe(mode === "nonSuccess" ? entry : current); expect(snapshot.nativeFirstFatal).toBeUndefined(); expect(reads).toEqual(["/"]);
+      if (mode === "nonSuccess") { expect(snapshot.navigationStatus).toBe(503); expect(queryCalls).toBe(0); }
+      else {
+        if (mode !== "pendingAck") expect(queryCalls).toBeGreaterThan(0);
+        expect(snapshot.navigationStatus).toBe(["current", "newDocument"].includes(mode) ? 200 : undefined);
+        if (mode === "pendingAck") { expect(ackObserved).toBe(true); releaseAck(); expect((await session.execute({ id: 2, action: "observe" })).navigationStatus).toBe(200); expect(queryCalls).toBeGreaterThan(0); }
+        if (mode === "current") expect((await session.execute({ id: 2, action: "observe" })).navigationStatus).toBe(200);
+        if (mode === "newDocument") {
+          const next = await session.execute({ id: 2, action: "open", url: entry + "replacement" });
+          expect(next.url).toBe(entry + "replacement"); expect(next.navigationStatus).toBe(503); expect(reads).toEqual(["/", "/replacement"]);
+        }
+      }
+      if (["current", "newDocument"].includes(mode)) {
+        const proof = snapshot.nativeMainDocumentContinuity;
+        expect(proof).toMatchObject({ kind: "NATIVE_MAIN_DOCUMENT_CONTINUITY_V1", status: 200 });
+        expect(proof?.originalUrlSha256).toMatch(/^[a-f0-9]{64}$/u); expect(proof?.currentUrlSha256).toMatch(/^[a-f0-9]{64}$/u);
+        expect(proof?.documentBindingSha256).toMatch(/^[a-f0-9]{64}$/u);
+        expect(JSON.stringify(proof)).not.toMatch(/https:|frameId|loaderId|view=day/u);
+      } else expect(snapshot).not.toHaveProperty("nativeMainDocumentContinuity");
+    } finally { releaseAck(); await session?.close(); proxy?.mockRestore(); routing.mockRestore(); for (const spy of statusSpies) spy.mockRestore(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
+    expect(statusSessions).toBe(mode === "nonSuccess" ? 0 : 1); expect(statusDetached).toBe(statusSessions);
+    expect(foreign).toBe(0); expect(active).toBe(0); expect(acquired).toBeGreaterThan(0); expect(released).toBe(acquired);
+  }, 30_000);
   it.each([true, false])("forwards only immutable constructor fixed inspection context when present: %s", async supplied => {
     const source = "https://example.org/";
     const requestedInput = { date: "2030-01-02", players: 2, durationMinutes: 60, startTime: "08:00", endTime: "18:00", timeZone: "America/New_York" };

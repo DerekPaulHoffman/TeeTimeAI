@@ -75,6 +75,24 @@ export function teeItUpNumberOnlyAddressConflict(canonical: string, provider: st
   const a = teeItUpCompleteStreetAddress(canonical), b = teeItUpCompleteStreetAddress(provider);
   return Boolean(a && b && a.number !== b.number && JSON.stringify({ ...a, number: "" }) === JSON.stringify({ ...b, number: "" }));
 }
+/** Exact printed brand/address/phone fields. This parses identity text only;
+ * visibility and footer ownership remain the caller's current-document gate. */
+export function teeItUpBrandedPipeAddressMatches(value: string, expected: string,
+  canonical: NonNullable<ReturnType<typeof teeItUpCompleteStreetAddress>>) {
+  const fields = value.split(/\s*\|\s*/u);
+  if (value.length > 500 || fields.length !== 3 || fullCourseName(fields[0]) !== expected || fields[2].length > 40 ||
+      !/^(?:\+?1[ .-]?)?(?:\([2-9]\d{2}\)|[2-9]\d{2})[ .-]?[2-9]\d{2}[ .-]?\d{4}$/u.test(fields[2].trim())) return false;
+  let parsed = teeItUpCompleteStreetAddress(fields[1]);
+  if (!parsed) {
+    const parts = fields[1].split(/\s*,\s*/u);
+    if (parts.length !== 2 && !(parts.length === 3 && /^(?:US|USA|United States(?: of America)?)$/iu.test(parts[2]))) return false;
+    const locality = canonical.locality.split(/\s+/u).map(word => word.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")).join("\\s+");
+    const street = new RegExp(`^(.*\\S)\\s+${locality}$`, "iu").exec(parts[0]);
+    if (!street) return false;
+    parsed = teeItUpCompleteStreetAddress(`${street[1]}, ${canonical.locality}, ${parts.slice(1).join(", ")}`);
+  }
+  return Boolean(parsed && JSON.stringify(parsed) === JSON.stringify(canonical));
+}
 type Node = DefaultTreeAdapterMap["node"];
 type Element = DefaultTreeAdapterMap["element"];
 const element = (node: Node): node is Element => "tagName" in node;
@@ -127,6 +145,24 @@ function witness(entries: Element[]) {
   }))).digest("hex");
 }
 function headingName(value: string) { return fullCourseName(clean(value).replace(/^Welcome to\s+/iu, "")); }
+function brandedPipeFooter(page: OfficialIdentityPage, all: Element[], expected: string,
+  canonical: NonNullable<ReturnType<typeof teeItUpCompleteStreetAddress>>, rendered: boolean) {
+  const rows = all.filter(node => ["p", "address"].includes(node.tagName) && !hidden(node) && !restrictedContext(node) && text(node).includes("|")).filter(node => {
+    let current: Node | undefined = node, footer = false;
+    for (let depth = 0; current && depth < 64; depth++, current = "parentNode" in current ? current.parentNode ?? undefined : undefined) {
+      if (!element(current)) continue;
+      if (/\b(?:mailing|corporate|billing|headquarters)\b/iu.test(["id", "class", "title", "aria-label"].map(key => attr(current as Element, key) ?? "").join(" "))) return false;
+      if (current.tagName === "footer") footer = true;
+    }
+    return footer && !current;
+  });
+  const distinct = [...new Set(rows.map(node => clean(text(node))))];
+  const rowKey = (value: string) => clean(value).toLowerCase();
+  if (!rows.length || rows.length > 40 || distinct.length !== 1 ||
+      !teeItUpBrandedPipeAddressMatches(distinct[0], expected, canonical) ||
+      rendered && !page.visibleEvidence?.addressTexts.some(value => rowKey(value) === rowKey(distinct[0]))) return [];
+  return rows;
+}
 export function readTeeItUpOfficialHome(source: TeeItUpSourceIdentity, page: OfficialIdentityPage, rendered: boolean,
   onDiagnostic?: (value: OfficialSourceDiagnostic) => void) {
   const facts: OfficialSourceDiagnostic = { stage: "SOURCE_CONTEXT" };
@@ -140,22 +176,25 @@ export function readTeeItUpOfficialHome(source: TeeItUpSourceIdentity, page: Off
   facts.stage = "RAW_DOCUMENT"; emit();
   const canonical = teeItUpCompleteStreetAddress(source.venueAddress), all = nodes(page.html), expected = fullCourseName(source.venueName);
   check(canonical && expected.replace(/\bgolf course$/u, "").trim().length >= 5, "SOURCE_CONTEXT", "sourceContextValid");
-  const headings = all.filter(node => /^(?:h1|h2)$/u.test(node.tagName) && !hidden(node) && headingName(text(node)) === expected);
+  const headings = all.filter(node => /^h[1-6]$/u.test(node.tagName) && !hidden(node) && !restrictedContext(node) && headingName(text(node)) === expected);
   check(headings.length && !all.some(node => node.tagName === "h1" && !hidden(node) && headingName(text(node)) !== expected), "RAW_VENUE", "rawVenueMatches");
-  const addresses = all.filter(node => ["address", "p", "div", "li", "td"].includes(node.tagName) && !hidden(node) && !restrictedContext(node) && clean(text(node)).length <= 500 &&
+  let addresses = all.filter(node => ["address", "p", "div", "li", "td"].includes(node.tagName) && !hidden(node) && !restrictedContext(node) && clean(text(node)).length <= 500 &&
     JSON.stringify(teeItUpCompleteStreetAddress(clean(text(node)))) === JSON.stringify(canonical));
+  const pipe = canonical && brandedPipeFooter(page, all, expected, canonical, rendered);
+  if (!addresses.length && pipe) addresses = pipe;
   check(addresses.length, "RAW_ADDRESS", "rawAddressMatches");
   const links = all.filter(node => node.tagName === "a" && !hidden(node) && /\b(?:tee\s*times?|book|reservations?)\b/iu.test(text(node)) &&
     !/\b(?:lesson|member|login|sign in|checkout|purchase|payment|confirm)\b/iu.test(text(node))).flatMap(node => {
       try { const target = publicDocumentUrl(new URL(attr(node, "href") ?? "", page.url).href);
-        return target && !target.search && target.origin === new URL(page.url).origin && target.href !== page.url ? [{ node, url: target.href }] : []; } catch { return []; }
+        const current = new URL(page.url), sameDocument = target && target.origin === current.origin && target.pathname === current.pathname && target.search === current.search;
+        return target && !target.search && target.origin === current.origin && !sameDocument ? [{ node, url: target.href }] : []; } catch { return []; }
     });
   check(links.length && new Set(links.map(value => value.url)).size === 1, "RAW_LINK", "rawLinkMatches");
   const target = links[0].url, visible = page.visibleEvidence;
   if (rendered) {
     check(visible?.headings.some(value => headingName(value) === expected), "RENDERED_VENUE", "renderedVenueMatches");
     check(visible?.linkUrls.includes(target), "RENDERED_LINK", "renderedLinkMatches");
-    check(visible?.addressTexts.some(value => JSON.stringify(teeItUpCompleteStreetAddress(value)) === JSON.stringify(canonical)), "RENDERED_ADDRESS", "renderedAddressMatches");
+    check(visible?.addressTexts.some(value => JSON.stringify(teeItUpCompleteStreetAddress(value)) === JSON.stringify(canonical)) || pipe?.length, "RENDERED_ADDRESS", "renderedAddressMatches");
   }
   return { url: page.url, bookingPageUrl: target, witness: witness([...headings, ...addresses, ...links.map(value => value.node)]) };
 }

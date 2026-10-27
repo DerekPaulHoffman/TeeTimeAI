@@ -84,11 +84,53 @@ describe("CPS stable public source", () => {
   });
   it("accepts only the exact reviewed current public client build after existing whitespace normalization", () => {
     expect(parseCpsConfiguration({ ...configuration(), buildNumber: "\ufeff26.3.0.34794395074\n" }, source).buildNumber).toBe("26.3.0.34794395074");
-    for (const buildNumber of ["26.3.0.34794395075", "26.3.1.34794395074", "26.3", "26.4.0.34794395074", "26.3.0.34794395074extra"])
+    for (const buildNumber of ["99.1.2.12345678901", "99.2.3.42"])
+      expect(() => parseCpsConfiguration({ ...configuration(), buildNumber }, source)).toThrow("CPS_PUBLIC_BUILD_UNSUPPORTED");
+    for (const buildNumber of ["99.1", "99.1.2.12345678901extra"])
       expect(() => parseCpsConfiguration({ ...configuration(), buildNumber }, source)).toThrow("CPS_CONFIGURATION_UNVERIFIED");
     expect(() => parseCpsConfiguration({ ...configuration(), buildNumber: "26.3.0.34794395074", siteName: "another" }, source)).toThrow();
     expect(parseCpsConfiguration({ ...configuration(), apiKey: undefined, buildNumber: "26.3.0.34794395074" }, source).apiKey).toBeUndefined();
     expect(() => parseCpsConfiguration({ ...configuration(), apiKey: undefined }, source)).toThrow("CPS_CONFIGURATION_UNVERIFIED");
+  });
+  it.each(["99.1.2.12345678901", "\ufeff99.1.2.12345678901\n"])("classifies a bound unsupported public build without deriving version-specific configuration: %s", buildNumber => {
+    const current = { officialUrl: "https://public-course.example/", bookingUrl: "https://public-course.cps.golf/",
+      venueName: "Public Golf Course", venueAddress: "10 Public Road, Example, NY 12345, USA", timeZone: "America/New_York" };
+    const core = { siteName: "public-course", onlineApi: "https://public-course.cps.golf" + CPS_API_PATH,
+      authorityBaseUrl: "https://public-course.cps.golf/identityapi", buildNumber };
+    // Unknown protocols cannot borrow client IDs, keys or website routing from a reviewed version.
+    expect(() => parseCpsConfiguration(core, current)).toThrow("CPS_PUBLIC_BUILD_UNSUPPORTED");
+    expect(() => parseCpsConfiguration({ ...core, clientId: "synthetic-public-client", websiteId: "synthetic-site", apiKey: "synthetic-public-key" }, current))
+      .toThrow("CPS_PUBLIC_BUILD_UNSUPPORTED");
+  });
+  it.each([
+    { siteName: "foreign-course" }, { siteName: undefined }, { siteName: "public-course\u0000" },
+    { onlineApi: "https://foreign-course.cps.golf" + CPS_API_PATH }, { onlineApi: undefined },
+    { onlineApi: "https://public-course.cps.golf/another-api" }, { onlineApi: "https://public-course.cps.golf\u0000" + CPS_API_PATH },
+    { authorityBaseUrl: "https://foreign-course.cps.golf/identityapi" }, { authorityBaseUrl: undefined },
+    { authorityBaseUrl: "https://public-course.cps.golf/account" },
+    { buildNumber: undefined }, { buildNumber: null }, { buildNumber: 99 }, { buildNumber: "" },
+    { buildNumber: "99.1.2" }, { buildNumber: "099.1.2.3" }, { buildNumber: "99.1.2.3extra" },
+    { buildNumber: "99.1.2.3\u0000" }, { buildNumber: "99.1.\n2.3" },
+    { buildNumber: "99.1.2." + "1".repeat(21) }, { buildNumber: " ".repeat(65) + "99.1.2.3" },
+  ])("keeps malformed or mismatched unsupported public build core as configuration failure: %j", changed => {
+    const current = { officialUrl: "https://public-course.example/", bookingUrl: "https://public-course.cps.golf/",
+      venueName: "Public Golf Course", venueAddress: "10 Public Road, Example, NY 12345, USA", timeZone: "America/New_York" };
+    const value = { siteName: "public-course", onlineApi: "https://public-course.cps.golf" + CPS_API_PATH,
+      authorityBaseUrl: "https://public-course.cps.golf/identityapi", buildNumber: "99.1.2.12345678901",
+      clientId: "synthetic-public-client", websiteId: "synthetic-site", apiKey: "synthetic-public-key", ...changed };
+    expect(() => parseCpsConfiguration(value, current)).toThrow("CPS_CONFIGURATION_UNVERIFIED");
+  });
+  it("does not classify an unsafe source or invalid JSON shape as unsupported public build", () => {
+    for (const value of [null, [], "99.1.2.3", { ...configuration(), buildNumber: "99.1.2.3" }])
+      expect(() => parseCpsConfiguration(value, { ...source, bookingUrl: source.bookingUrl + "account" })).toThrow("CPS_CONFIGURATION_UNVERIFIED");
+  });
+  it.each([CPS_PUBLIC_BUILD, "26.3.0.34794395074"])("retains required version-specific fields for reviewed build %s", buildNumber => {
+    const value = { ...configuration(), buildNumber };
+    expect(parseCpsConfiguration(value, source).buildNumber).toBe(buildNumber);
+    for (const missing of [{ ...value, clientId: undefined }, { ...value, websiteId: undefined }])
+      expect(() => parseCpsConfiguration(missing, source)).toThrow("CPS_CONFIGURATION_UNVERIFIED");
+    if (buildNumber === CPS_PUBLIC_BUILD) expect(() => parseCpsConfiguration({ ...value, apiKey: undefined }, source)).toThrow("CPS_CONFIGURATION_UNVERIFIED");
+    else expect(parseCpsConfiguration({ ...value, apiKey: undefined }, source).apiKey).toBeUndefined();
   });
   it.each(["name", "timezoneId", "websiteId", "active", "duplicate", "missing", "unknown course"])("rejects changed whole-catalog %s", kind => {
     const rows: unknown[] = courses();

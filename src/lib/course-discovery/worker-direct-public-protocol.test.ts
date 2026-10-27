@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { discoveryDirectProtocolSource, inspectDiscoveryPublicProtocol, runCourseDiscoveryWorker } from "../../../scripts/automation/course-discovery-worker.mjs";
+import { discoveryDirectProtocolSource, inspectDiscoveryPublicProtocol, runCourseDiscoveryWorker, discoveryWorkerWorkDeadline } from "../../../scripts/automation/course-discovery-worker.mjs";
 
 const booking = "https://www.sevenrooms.com/reservations/examplegolf?duration-picker=true";
 const descriptor = { request: { url: "https://www.sevenrooms.com/public-range", method: "GET" },
@@ -21,7 +21,8 @@ const job = () => ({ id: "current-job", leaseToken: "synthetic-lease", deadlineA
 
 /** Controller/process/transport boundaries are synthetic; no application, browser,
  * provider or database operation is performed by these worker flow fixtures. */
-async function run(options: { actions?: Action[]; mutate?: (value: ReturnType<typeof job>) => void; inspectError?: Error; checkpoint?: object; observation?: object } = {}) {
+async function run(options: { actions?: Action[]; mutate?: (value: ReturnType<typeof job>) => void; inspectError?: Error; checkpoint?: object; observation?: object;
+  workerOptions?: Record<string, unknown>; resolveHook?: () => void; browserCloseThrows?: boolean; lateUsage?: number } = {}) {
   const home = mkdtempSync(join(tmpdir(), "worker-direct-protocol-")), original = job();
   options.mutate?.(original);
   writeFileSync(join(home, "auth.json"), "synthetic-test-auth");
@@ -34,16 +35,19 @@ async function run(options: { actions?: Action[]; mutate?: (value: ReturnType<ty
     ] })), verification: vi.fn(async () => ({})), activate: vi.fn(async () => ({ recipeId: "saved" })) };
   const inspectProtocol = vi.fn(async () => { if (options.inspectError) throw options.inspectError;
     return structuredClone({ ...descriptor, ...(options.observation ? { observation: options.observation } : {}) }); });
-  const browserFactory = vi.fn(() => ({ close: async () => {}, request: async input => ({ url: input.url, text: "Public page",
-    browserTransport: "NATIVE_CHROME", loading: false, requests: [], controls: [], frames: [] }) }));
+  const browserFactory = vi.fn(() => ({ close: async () => { if (options.browserCloseThrows) throw Error("synthetic close failure"); }, request: async input => ({ url: input.url, text: "Public page",
+    browserTransport: "NATIVE_CHROME", navigationStatus: 200, loading: false, requests: [], controls: [], frames: [] }) }));
   const validateRecipe = vi.fn(async () => ({ valid: true }));
   const executeRecipe = vi.fn(async () => ({ status: "AVAILABLE", complete: true, slots: [{ sourceId: "synthetic-opening" }] }));
-  let toolsDone = Promise.resolve();
+  let toolsDone = Promise.resolve(), processClosed = false, processStarted = false;
   try {
     const result = await runCourseDiscoveryWorker({ job: { ...original, ...(options.checkpoint ? { checkpoint: options.checkpoint } : {}) },
       client, cwd: process.cwd(), sourceHome: home, recipeSchema: {}, modelCatalogJson: JSON.stringify({ models: [{ slug: "gpt-6.1-sol" }] }),
-      resolveCli: () => "synthetic-no-process", inspectProtocol, validateRecipe, executeRecipe, browserFactory,
-      processFactory: config => ({ close: async () => {}, notify: () => {}, request: async method => {
+      resolveCli: () => { options.resolveHook?.(); return "synthetic-no-process"; }, inspectProtocol, validateRecipe, executeRecipe, browserFactory,
+      ...options.workerOptions,
+      processFactory: config => { processStarted = true; return ({ close: async () => { processClosed = true;
+        if (options.lateUsage !== undefined) await config.onMessage({ method: "thread/tokenUsage/updated", params: { threadId: "thread", tokenUsage: { total: { totalTokens: options.lateUsage } } } }, () => {});
+      }, notify: () => {}, request: async method => {
         if (method === "thread/start") return { thread: { id: "thread" }, approvalPolicy: "never", sandbox: { type: "readOnly" } };
         if (method === "turn/start") {
           toolsDone = Promise.resolve().then(async () => {
@@ -55,10 +59,10 @@ async function run(options: { actions?: Action[]; mutate?: (value: ReturnType<ty
           return { turn: { id: "turn" } };
         }
         return {};
-      } }),
+      } }); },
     }).catch(error => error);
     await toolsDone;
-    return { result, original, replies, checkpoints, client, inspectProtocol, browserFactory, validateRecipe, executeRecipe };
+    return { result, original, replies, checkpoints, client, inspectProtocol, browserFactory, validateRecipe, executeRecipe, processStarted, processClosed };
   } finally {
     if (dirname(home) !== resolve(tmpdir()) || !home.startsWith(join(tmpdir(), "worker-direct-protocol-"))) throw new Error("UNOWNED_TEST_DIRECTORY");
     rmSync(home, { recursive: true, force: true });
@@ -66,6 +70,76 @@ async function run(options: { actions?: Action[]; mutate?: (value: ReturnType<ty
 }
 
 describe("unattended direct public protocol inspection", () => {
+  it("uses an effective remaining deadline without rewriting original server proof clocks", async () => {
+    const picked = Date.now() - 700000, supplied = new Date(picked + 800000).toISOString();
+    const out = await run({ mutate: value => Object.assign(value, { firstPickedUpAt: new Date(picked).toISOString() }), workerOptions: { workDeadlineAt: supplied } });
+    expect(out.result.outcome).toBe("activated");
+    expect(out.original.deadlineAt).not.toBe(new Date(picked + 720000).toISOString());
+    expect(out.inspectProtocol.mock.calls[0][0].deadlineAt).toBe(new Date(picked + 720000).toISOString());
+    for (const [options] of out.executeRecipe.mock.calls) expect(options.deadlineAt).toBe(new Date(picked + 720000).toISOString());
+    expect(out.result.metrics.originalDeadlineAt).toBe(out.original.deadlineAt);
+    expect(out.result.metrics.workDeadlineAt).toBe(new Date(picked + 720000).toISOString());
+    expect(out.client.activate).toHaveBeenCalledOnce();
+  });
+  it("enforces the original absolute, pickup and supplied work boundaries before model setup", async () => {
+    const first = Date.parse("2030-01-01T00:00:00Z"), immutable = { firstPickedUpAt: new Date(first).toISOString(), deadlineAt: new Date(first + 900000).toISOString() };
+    expect(discoveryWorkerWorkDeadline(immutable)).toBe(first + 720000);
+    expect(discoveryWorkerWorkDeadline(immutable, new Date(first + 600000).toISOString())).toBe(first + 600000);
+    expect(discoveryWorkerWorkDeadline({ ...immutable, deadlineAt: new Date(first + 500000).toISOString() })).toBe(first + 500000);
+    const out = await run({ workerOptions: { workDeadlineAt: new Date(Date.now() - 1).toISOString() } });
+    expect(out.result.code).toBe("DISCOVERY_WORK_DEADLINE"); expect(out.processStarted).toBe(false);
+    expect(out.inspectProtocol).not.toHaveBeenCalled(); expect(out.client.candidate).not.toHaveBeenCalled();
+  });
+  it("counts setup elapsed time before any model process and preserves original demand", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const start = Date.now();
+      const out = await run({ workerOptions: { workDeadlineAt: new Date(start + 1000).toISOString() }, resolveHook: () => vi.setSystemTime(start + 1001) });
+      expect(out.result.code).toBe("DISCOVERY_WORK_DEADLINE"); expect(out.processStarted).toBe(false);
+      expect(out.client.candidate).not.toHaveBeenCalled(); expect(out.client.activate).not.toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
+  });
+  it("fresh fallback ignores restored source authority and requires an actual official-root open before proposal", async () => {
+    const old = { controller: { version: 1, officialUrl: "https://examplegolf.org/", officialSourceObserved: true,
+      observedNavigationUrls: [booking], observedReadUrls: [], observedEntryUrls: [] } };
+    const denied = await run({ checkpoint: old, workerOptions: { freshOfficialStart: true } });
+    expect(denied.inspectProtocol).not.toHaveBeenCalled(); expect(denied.client.candidate).not.toHaveBeenCalled();
+    const envelope = { stagehandSource: { kind: "OWN_STAGEHAND_SOURCE_EXPORT", reportSha256: "b".repeat(64) }, stagehandProgress: { phase: "GENERIC_FALLBACK" } };
+    const out = await run({ checkpoint: old, workerOptions: { freshOfficialStart: true, checkpointProvenance: envelope },
+      actions: [{ tool: "discovery_browser", arguments: { action: "open", url: "https://examplegolf.org/" } }, inspect(), proposal] });
+    expect(out.result.outcome).toBe("activated"); expect(out.browserFactory.mock.calls[0][0].initialUrls).toEqual(["https://examplegolf.org/"]);
+    expect(out.checkpoints.some(value => (value as { controller?: unknown }).controller)).toBe(true);
+    for (const checkpoint of out.checkpoints) { expect(checkpoint).toMatchObject(envelope); expect(Buffer.byteLength(JSON.stringify(checkpoint))).toBeLessThanOrEqual(32768); }
+    expect(out.executeRecipe).toHaveBeenCalledTimes(2); expect(out.client.activate).toHaveBeenCalledOnce(); expect(out.processClosed).toBe(true);
+  });
+  it("rejects combined checkpoint overflow instead of dropping source provenance or writing oversized state", async () => {
+    const out = await run({ workerOptions: { checkpointProvenance: { stagehandSource: { report: "x".repeat(33000) } } },
+      actions: [{ tool: "discovery_checkpoint", arguments: { summary: "bounded current generic state" } }] });
+    expect(out.client.checkpoint).not.toHaveBeenCalled(); expect(out.client.candidate).not.toHaveBeenCalled(); expect(out.processClosed).toBe(true);
+  });
+  it("retains a large source envelope alongside a bounded current generic checkpoint", async () => {
+    const provenance = { stagehandSource: { report: "x".repeat(30000) }, stagehandProgress: { phase: "GENERIC_FALLBACK" } };
+    const out = await run({ workerOptions: { checkpointProvenance: provenance }, actions: [{ tool: "discovery_checkpoint", arguments: { summary: "s".repeat(1000) } }] });
+    expect(out.checkpoints.length).toBeGreaterThan(0);
+    for (const checkpoint of out.checkpoints) { expect(checkpoint).toMatchObject(provenance); expect(checkpoint).toHaveProperty("controller"); expect(Buffer.byteLength(JSON.stringify(checkpoint))).toBeLessThanOrEqual(32768); }
+  });
+  it("keeps final generic token usage arriving during model cleanup", async () => {
+    const out = await run({ lateUsage: 77 });
+    expect(out.result.outcome).toBe("activated"); expect(out.result.metrics.tokenUsage.totalTokens).toBe(77);
+    expect(out.result.metrics).toMatchObject({ attemptedModelTurns: 1, completedModelTurns: 1,
+      cleanup: { browserClosed: true, modelClosed: true, credentialsRemoved: true, directoryRemoved: true } });
+  });
+  it("cannot checkpoint after generic activation has retired its lease", async () => {
+    const out = await run({ actions: [inspect(), proposal, { tool: "discovery_checkpoint", arguments: { summary: "too late" } }] });
+    expect(out.result.outcome).toBe("activated"); expect(out.client.activate).toHaveBeenCalledOnce();
+    expect(out.checkpoints.some(value => (value as { summary?: string }).summary === "too late")).toBe(false);
+  });
+  it("still closes the model and removes private credentials if browser cleanup throws", async () => {
+    const out = await run({ browserCloseThrows: true, actions: [{ tool: "discovery_browser", arguments: { action: "open", url: "https://examplegolf.org/" } }] });
+    expect(out.processClosed).toBe(true);
+    expect(out.result.discoveryMetrics.cleanup).toMatchObject({ browserClosed: false, modelClosed: true, credentialsRemoved: true, directoryRemoved: true });
+    expect(out.client.activate).not.toHaveBeenCalled();
+  });
   it("uses the current job before any browser and retains canonical validation plus both independent replay challenges", async () => {
     const out = await run();
     expect(out.browserFactory).not.toHaveBeenCalled();

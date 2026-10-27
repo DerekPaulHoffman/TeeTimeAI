@@ -4,8 +4,22 @@ import { parseTeeItUpRecipeSource } from "./teeitup-recipe-source";
 import { parseLightspeedSource } from "./lightspeed-source";
 import { isSafeRecipeUrl } from "./recipe";
 import { cpsPublicEntryUrl } from "./cps-public-navigation";
-import { uschedulePublicTenant } from "@/lib/simulators/providers/public-configuration";
+import { knownSimulatorPublicConfigurationFamily, uschedulePublicTenant } from "@/lib/simulators/providers/public-configuration";
 import type { PublicFrameParentProof } from "./public-booking-parent";
+
+/** A published scheduler entry is routing evidence only. The legacy public
+ * owner URL is never rewritten into a managed configuration/source URL. */
+export function isPublicAcuityFrameEntry(value: string): boolean {
+  try {
+    const url = new URL(value);
+    if (url.href !== value || !isSafeRecipeUrl(value) || url.hash) return false;
+    if (knownSimulatorPublicConfigurationFamily(value) === "ACUITY") return true;
+    if (url.hostname !== "app.acuityscheduling.com" || url.pathname !== "/schedule.php") return false;
+    const fields = url.search.slice(1).split("&"), keys = [...url.searchParams.keys()];
+    return fields.length >= 1 && fields.length <= 2 && new Set(keys).size === fields.length && keys.includes("owner") &&
+      fields.every(field => /^(?:owner=[1-9]\d{0,9}|ref=embedded_csp)$/u.test(field));
+  } catch { return false; }
+}
 
 /** Promote a source attribute, never a child frame's current/redirected URL. */
 export function publicFrameSource(input: { src: string; label: string; visible: boolean; srcdoc: boolean },
@@ -35,7 +49,8 @@ export function publicFrameSource(input: { src: string; label: string; visible: 
     const officialDocument = scopedParent && parentProof?.kind === "VERIFIED_OFFICIAL_DOCUMENT";
     const teeItUpPlay = officialDocument && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.play\.teeitup\.com$/u.test(parsed.hostname) &&
       parsed.pathname === "/" && !parsed.search && !parsed.hash;
-    const knownEntry = Boolean(parseTeeItUpRecipeSource(url) || parseLightspeedSource(url) || uschedulePublicTenant(url) || teeItUpV2 || teeItUpPlay);
+    const acuityEntry = officialDocument && isPublicAcuityFrameEntry(url);
+    const knownEntry = Boolean(parseTeeItUpRecipeSource(url) || parseLightspeedSource(url) || uschedulePublicTenant(url) || teeItUpV2 || teeItUpPlay || acuityEntry);
     const labelled = /\b(?:tee\s*times?|booking|availability|book\s+(?:a\s+)?(?:simulator\s+)?bay|simulator\s+rentals?)\b/iu.test(input.label);
     if ((!knownEntry && !labelled) || !isPublicAvailabilityNavigation(url, input.label || "Public tee time availability")) return;
     return url;

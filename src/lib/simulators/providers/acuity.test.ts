@@ -57,6 +57,96 @@ function minuteReservationInput(durationMinutes = 60): SimulatorAvailabilityInpu
     providerMetadata: { ownerKey: "pool1234", rentalProductIds: value.appointmentTypes[""].map(row => String(row.id)) } } };
 }
 
+const sessionUrl = "https://app.acuityscheduling.com/schedule/session1234";
+function sessionBusiness() {
+  const calendarIDs = [501, 502, 503, 504, 505, 506];
+  return { id: 901, name: "Example Indoor Golf", ownerKey: "session1234", timezone: input.timeZone,
+    includesAdminOnly: false, isExpired: false,
+    description: 'Please select your desired length of time, your simulator bay (or "Any Available"), and the desired date/time.',
+    calendars: { "": [{ id: "any" as string | number, name: "Any available", timezone: "" },
+      ...calendarIDs.map((id, index) => ({ id, name: `Bay ${index + 1}`, timezone: input.timeZone }))] },
+    appointmentTypes: { "Length of Simulator Session": Array.from({ length: 13 }, (_, index) => {
+      const duration = 60 + index * 15, hours = duration / 60;
+      return { id: 701 + index, name: `${hours} ${hours === 1 ? "Hour" : "Hours"}`, duration,
+        category: "Length of Simulator Session", active: true, private: false, type: "service", classSize: null as number | null,
+        canChooseQuantity: false, paddingBefore: 0, paddingAfter: 15, calendarIDs: [...calendarIDs] as (number | string)[] };
+    }) } };
+}
+function sessionLanding(value = sessionBusiness()) { return `<script>var BUSINESS = ${JSON.stringify(value)};</script>`; }
+function sessionInput(durationMinutes = 60): SimulatorAvailabilityInput {
+  return { ...input, durationMinutes, partySize: 2, offering: { ...input.offering, bookingUrl: sessionUrl,
+    maxPartySize: null, supportedDurationsMinutes: [60, 90, 120, 150, 180, 210, 240],
+    providerMetadata: { ownerKey: "session1234", rentalProductIds: [701, 703, 705, 707, 709, 711, 713].map(String) } } };
+}
+
+describe("duration-only products in an explicit simulator-session catalog", () => {
+  it.each([60, 90, 120, 150, 180, 210, 240])("rederives %imin against all named bays without adding booking padding", async durationMinutes => {
+    const configuration = projectAcuityPublicConfiguration(sessionLanding(), sessionUrl);
+    expect(configuration).toMatchObject({ family: "ACUITY", maxPartySize: null,
+      resources: [501, 502, 503, 504, 505, 506].map(id => ({ id: String(id), timeZone: input.timeZone })) });
+    expect(configuration?.rentals.map(row => row.durationMinutes)).toEqual([60, 90, 120, 150, 180, 210, 240]);
+    expect(configuration?.rentals.every(row => !row.calendarKind && row.calendarIds.length === 6)).toBe(true);
+    const fetch = mockReads(undefined, sessionLanding());
+    const result = await fetchAcuitySimulatorAvailability(sessionInput(durationMinutes), fetch);
+    expect(result).toMatchObject({ complete: true, slots: [{ maxPartySize: null }] });
+    expect(result.slots[0].endsAt.getTime() - result.slots[0].startsAt.getTime()).toBe(durationMinutes * 60_000);
+    expect(new URL(String(fetch.mock.calls[1][0])).searchParams.get("appointmentTypeId")).toBe(String(701 + (durationMinutes - 60) / 15));
+    expect(new URL(String(fetch.mock.calls[1][0])).searchParams.get("calendarId")).toBe("any");
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+  it.each([
+    ["wrong category", (v: ReturnType<typeof sessionBusiness>) => { v.appointmentTypes["Length of Simulator Session"][0].category = "Length of Lesson"; }],
+    ["wrong group", (v: ReturnType<typeof sessionBusiness>) => { Object.assign(v.appointmentTypes, { Other: v.appointmentTypes["Length of Simulator Session"] }); delete (v.appointmentTypes as Partial<typeof v.appointmentTypes>)["Length of Simulator Session"]; }],
+    ["missing description", (v: ReturnType<typeof sessionBusiness>) => { v.description = ""; }],
+    ["instruction description", (v: ReturnType<typeof sessionBusiness>) => { v.description += " Private lessons only."; }],
+    ["inert description", (v: ReturnType<typeof sessionBusiness>) => { v.description = `<script>${v.description}</script>`; }],
+    ["hidden description", (v: ReturnType<typeof sessionBusiness>) => { v.description = `<p hidden>${v.description}</p>`; }],
+    ["transparent description", (v: ReturnType<typeof sessionBusiness>) => { v.description = `<p style="opacity:0!important">${v.description}</p>`; }],
+    ["collapsed description", (v: ReturnType<typeof sessionBusiness>) => { v.description = `<p style="visibility:collapse">${v.description}</p>`; }],
+    ["unverified class ancestor", (v: ReturnType<typeof sessionBusiness>) => { v.description = `<div class="public-copy"><p>${v.description}</p></div>`; }],
+    ["wrong duration", (v: ReturnType<typeof sessionBusiness>) => { v.appointmentTypes["Length of Simulator Session"][0].name = "2 Hours"; }],
+    ["unverified numeric spelling", (v: ReturnType<typeof sessionBusiness>) => { v.appointmentTypes["Length of Simulator Session"][0].name = "1.0 Hour"; }],
+    ["extra product terms", (v: ReturnType<typeof sessionBusiness>) => { v.appointmentTypes["Length of Simulator Session"][0].name = "1 Hour Lesson"; }],
+    ["private", (v: ReturnType<typeof sessionBusiness>) => { v.appointmentTypes["Length of Simulator Session"][0].private = true; }],
+    ["inactive", (v: ReturnType<typeof sessionBusiness>) => { v.appointmentTypes["Length of Simulator Session"][0].active = false; }],
+    ["class", (v: ReturnType<typeof sessionBusiness>) => { v.appointmentTypes["Length of Simulator Session"][0].classSize = 2; }],
+    ["quantity", (v: ReturnType<typeof sessionBusiness>) => { v.appointmentTypes["Length of Simulator Session"][0].canChooseQuantity = true; }],
+    ["synthetic pool", (v: ReturnType<typeof sessionBusiness>) => { v.appointmentTypes["Length of Simulator Session"][0].calendarIDs = ["any"]; }],
+    ["missing bay", (v: ReturnType<typeof sessionBusiness>) => { v.appointmentTypes["Length of Simulator Session"][0].calendarIDs.pop(); }],
+    ["duplicate bay", (v: ReturnType<typeof sessionBusiness>) => { v.appointmentTypes["Length of Simulator Session"][0].calendarIDs.push(501); }],
+    ["unknown bay", (v: ReturnType<typeof sessionBusiness>) => { v.calendars[""][1].name = "Instructor"; }],
+    ["foreign bay timezone", (v: ReturnType<typeof sessionBusiness>) => { v.calendars[""][1].timezone = "America/Chicago"; }],
+    ["duplicate calendar", (v: ReturnType<typeof sessionBusiness>) => { v.calendars[""].push({ ...v.calendars[""][1] }); }],
+    ["duplicate selected product", (v: ReturnType<typeof sessionBusiness>) => { v.appointmentTypes["Length of Simulator Session"].push({ ...v.appointmentTypes["Length of Simulator Session"][0] }); }],
+    ["wrong owner", (v: ReturnType<typeof sessionBusiness>) => { v.ownerKey = "otherowner"; }],
+    ["admin-only", (v: ReturnType<typeof sessionBusiness>) => { v.includesAdminOnly = true; }],
+    ["expired", (v: ReturnType<typeof sessionBusiness>) => { v.isExpired = true; }],
+  ] as const)("rejects %s before availability, including on warm reuse", async (_label, mutate) => {
+    const value = sessionBusiness(); mutate(value);
+    expect(projectAcuityPublicConfiguration(sessionLanding(value), sessionUrl)?.rentals.some(row => row.id === "701")).not.toBe(true);
+    const fetch = mockReads(undefined, sessionLanding(value));
+    await expect(fetchAcuitySimulatorAvailability(sessionInput(), fetch)).rejects.toBeInstanceOf(SimulatorAvailabilityError);
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+  it.each([75, 105])("does not expand execution to the published %imin quarter-hour product", async durationMinutes => {
+    const fetch = mockReads(undefined, sessionLanding());
+    await expect(fetchAcuitySimulatorAvailability(sessionInput(durationMinutes), fetch)).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it("reuses the same projected products on a different date and party without inventing capacity", async () => {
+    const configuration = projectAcuityPublicConfiguration(sessionLanding(), sessionUrl)!;
+    const request = sessionInput();
+    request.date = "2026-10-11"; request.partySize = 4;
+    request.offering.providerMetadata = { ownerKey: configuration.ownerKey, rentalProductIds: configuration.rentals.map(row => row.id) };
+    const fetch = mockReads({ "2026-10-11": [{ time: "2026-10-11T09:00:00-0400", slotsAvailable: 1 }] }, sessionLanding());
+    const result = await fetchAcuitySimulatorAvailability(request, fetch);
+    expect(result.slots).toHaveLength(1);
+    expect(result.slots[0]).toMatchObject({ maxPartySize: null, productId: "701" });
+    expect(result.slots[0].endsAt.getTime() - result.slots[0].startsAt.getTime()).toBe(60 * 60_000);
+    expect(new URL(String(fetch.mock.calls[1][0])).searchParams.get("startDate")).toBe(request.date);
+  });
+});
+
 describe("explicit public simulator rentals on an opaque any-only pool", () => {
   it.each([30, 60, 90, 120, 150, 180, 210, 240])("corroborates the observed %i Minute Simulator Reservation pool with exact published duration", async durationMinutes => {
     const value = minuteReservationPool(), request = minuteReservationInput(durationMinutes);

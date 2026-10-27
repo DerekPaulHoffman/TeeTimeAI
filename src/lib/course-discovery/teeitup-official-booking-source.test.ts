@@ -16,14 +16,14 @@ const homeHtml = `<html><body><h2>Welcome to ${source.venueName}</h2><a href="${
 const pageHtml = `<html><body><main><iframe src="${entry}" title="Public tee times" width="800" height="600"></iframe></main></body></html>`;
 const home = { url: official, html: homeHtml, visibleEvidence: { title: source.venueName, headings: [`Welcome to ${source.venueName}`], linkUrls: [bookingPage], addressTexts: [source.venueAddress] } };
 const directory = [{ id: 31, courseId: "public-course-31", name: source.venueName, address: "601 Competition Rd, Example, NC 27603, US", timeZone: source.timeZone, isSimulator: false }];
-function observed(finalContentType = "text/html") {
-  const controller = new AbortController(), scope = createTeeItUpOfficialBookingScope(source, controller.signal);
+function observed(finalContentType = "text/html", nativeCurrentDocument?: (request: object, currentUrl: string, timeOrigin: number) => boolean, homePage = home) {
+  const controller = new AbortController(), scope = createTeeItUpOfficialBookingScope(source, controller.signal, nativeCurrentDocument);
   const root = {}, normal = {}, page = {}, play = {}, book = {};
   const begin = (object: object, url: string, parent?: object) => scope.beginMainDocument(object, { url, method: "GET", parent })!;
   scope.completeMainDocument(begin(root, source.officialUrl), { status: 302, location: official });
   const homeToken = begin(normal, official, root);
   scope.completeMainDocument(homeToken, { status: 200, contentType: "text/html" });
-  scope.observeRenderedSnapshot(homeToken, { url: official, timeOrigin: 1, officialPage: home, verifiedOfficial: { kind: "VERIFIED_OFFICIAL_DOCUMENT", officialUrl: source.officialUrl, documentUrl: official }, frames: [], blocked: false });
+  scope.observeRenderedSnapshot(homeToken, { url: official, timeOrigin: 1, officialPage: homePage, verifiedOfficial: { kind: "VERIFIED_OFFICIAL_DOCUMENT", officialUrl: source.officialUrl, documentUrl: official }, frames: [], blocked: false });
   const pageToken = begin(page, bookingPage);
   scope.completeMainDocument(pageToken, { status: 200, contentType: "text/html" });
   scope.observeRenderedSnapshot(pageToken, { url: bookingPage, timeOrigin: 2, officialPage: { url: bookingPage, html: pageHtml }, verifiedOfficial: { kind: "VERIFIED_OFFICIAL_DOCUMENT", officialUrl: source.officialUrl, documentUrl: bookingPage }, frames: [entry], blocked: false });
@@ -31,7 +31,7 @@ function observed(finalContentType = "text/html") {
   const bookToken = begin(book, source.bookingUrl, play);
   scope.completeMainDocument(bookToken, { status: 200, contentType: finalContentType });
   scope.observeRenderedSnapshot(bookToken, { url: source.bookingUrl, timeOrigin: 3, frames: [], blocked: false });
-  return { scope, controller, token: scope.tokenFor(source.bookingUrl, source.bookingUrl)!, bookToken };
+  return { scope, controller, token: scope.tokenFor(source.bookingUrl, source.bookingUrl)!, bookToken, book };
 }
 function fixtureFetch(options: { directory?: unknown; home?: string; page?: string; empty?: boolean; status?: number; entryLocation?: string } = {}) {
   return vi.fn<typeof fetch>(async (value, init) => {
@@ -54,6 +54,88 @@ const deps = { now: () => new Date("2030-10-20T12:00:00Z"), venueMatches: venueP
 const input = { date: "2030-10-23", timeZone: source.timeZone, players: 2, startTime: "09:00", endTime: "18:00" };
 
 describe("official booking source proof", () => {
+  const footerRow = `${source.venueName} | 565 Competition Road Example, NC 27603 | 212-555-1234`;
+  const shapedHome = (heading = "h4") => ({ ...home,
+    html: `<html><body><${heading}>Welcome to ${source.venueName}!</${heading}><a href="#">Tee Times</a><a href="${bookingPage}">Book A Tee Time</a><a href="${bookingPage}">Tee Times</a><footer><p class="address">${footerRow}</p></footer></body></html>`,
+    visibleEvidence: { ...home.visibleEvidence, headings: [`Welcome to ${source.venueName}!`], linkUrls: [official + "#", bookingPage], addressTexts: [footerRow.toUpperCase()] } });
+  it.each(["h1", "h2", "h3", "h4", "h5", "h6"])("recognizes a standard %s and the exact printed footer without treating a self fragment as another route", heading => {
+    expect(readTeeItUpOfficialHome(source, shapedHome(heading), true).bookingPageUrl).toBe(bookingPage);
+  });
+  it.each(["wrongHeading", "hiddenHeading", "formHeading", "inertHeading", "conflictingH1", "hiddenFooter", "formFooter", "inertFooter", "corporateFooter", "wrongBrand", "wrongStreet", "extraDirection", "missingUnit", "wrongZip", "wrongCountry", "invalidPhone", "renderedChanged", "ambiguousFooter", "otherRoute"])
+  ("rejects the ordinary home shape when %s prevents exact current identity or route", variant => {
+    const page = shapedHome();
+    if (variant === "wrongHeading") page.html = page.html.replace(`Welcome to ${source.venueName}!`, "Welcome to Other Golf Club!");
+    if (variant === "hiddenHeading") page.html = page.html.replace("<h4>", "<h4 hidden>");
+    if (variant === "formHeading") page.html = page.html.replace("<h4>", "<form><h4>").replace("</h4>", "</h4></form>");
+    if (variant === "inertHeading") page.html = page.html.replace("<h4>", "<h4 inert>");
+    if (variant === "conflictingH1") page.html = page.html.replace("<body>", "<body><h1>Other Golf Club</h1>");
+    if (variant === "hiddenFooter") page.html = page.html.replace("<footer>", "<footer hidden>");
+    if (variant === "formFooter") page.html = page.html.replace("<footer>", "<footer><form>").replace("</footer>", "</form></footer>");
+    if (variant === "inertFooter") page.html = page.html.replace("<footer>", "<footer inert>");
+    if (variant === "corporateFooter") page.html = page.html.replace("<footer>", "<footer><h5>Corporate Address</h5>");
+    const replacement = ({ wrongBrand: footerRow.replace(source.venueName, "Other Golf Club"), wrongStreet: footerRow.replace("Competition", "Other"), extraDirection: footerRow.replace("565 ", "565 N "), missingUnit: footerRow.replace("Road Example", "Road Suite 2 Example"), wrongZip: footerRow.replace("27603", "27604"), wrongCountry: footerRow.replace("27603", "27603, Canada"), invalidPhone: footerRow.replace("212-555-1234", "Call 212-555-1234") } as Record<string, string>)[variant];
+    if (replacement) { page.html = page.html.replace(footerRow, replacement); page.visibleEvidence.addressTexts = [replacement.toUpperCase()]; }
+    if (variant === "renderedChanged") page.visibleEvidence.addressTexts = [footerRow.toUpperCase().replace("COMPETITION", "OTHER")];
+    if (variant === "ambiguousFooter") { const other = footerRow.replace("212-555-1234", "212-555-1235"); page.html = page.html.replace("</footer>", `<p>${other}</p></footer>`); page.visibleEvidence.addressTexts.push(other); }
+    if (variant === "otherRoute") { const other = official + "other-booking/"; page.html = page.html.replace("</body>", `<a href="${other}">Tee Times</a></body>`); page.visibleEvidence.linkUrls.push(other); }
+    expect(() => readTeeItUpOfficialHome(source, page, true)).toThrow("OFFICIAL_BOOKING_SOURCE_UNVERIFIED");
+  });
+  it("earns the native chain and independently re-reads the unchanged method for two dates from the printed home shape", async () => {
+    const page = shapedHome(), seen = observed("text/html", undefined, page);
+    expect(observedTeeItUpOfficialBookingChain(seen.token)).toMatchObject({ iframeEntryUrl: entry, bookingSourceUrl: source.bookingUrl, iframeRedirectStatus: 302 });
+    const fetch = fixtureFetch({ home: page.html });
+    const { adapter } = await inspectExistingAdapter(source, { ...deps, fetch, officialBookingSourceToken: seen.token });
+    expect(adapter).toMatchObject({ family: "TEEITUP", officialBookingSourceProof: { iframeEntryUrl: entry, bookingSourceUrl: source.bookingUrl, providerAddressVerified: false } });
+    const recipe = parseAccessRecipe({ schemaVersion: 1, engine: "EXISTING_ADAPTER", target: { kind: "OUTDOOR", courseId: "course-example" }, source: { ...source, providerFamily: "TEEITUP" }, adapter }) as ExistingAdapterRecipe;
+    const saved = JSON.stringify(recipe);
+    for (const request of [input, { ...input, date: "2030-10-24", players: 4 }]) {
+      const read = fixtureFetch({ home: page.html });
+      const result = await executeExistingAdapterRecipe(recipe, request, { ...deps, fetch: read });
+      expect(result).toMatchObject({ status: "AVAILABLE", complete: true, evidence: { venueVerified: true, dateVerified: true, capacityVerified: true, durationVerified: true, completeVerified: true } });
+      expect(read.mock.calls.filter(([url]) => [source.officialUrl, official, bookingPage, entry, source.bookingUrl].includes(String(url)))).toHaveLength(5);
+      expect(JSON.stringify(recipe)).toBe(saved);
+    }
+  });
+  it("suspends old chain authority and re-earns only the same native request after a current-document URL change", () => {
+    const current = source.bookingUrl + "?course=public&date=2030-10-23&max=4";
+    const native = { request: undefined as object | undefined, admitted: true };
+    const seen = observed("text/html", (actual, url, timeOrigin) => native.admitted && actual === native.request && url === current && timeOrigin === 3);
+    native.request = seen.book;
+    seen.scope.suspendCurrentDocument(current);
+    expect(() => observedTeeItUpOfficialBookingChain(seen.token)).toThrow();
+    expect(seen.scope.tokenFor(source.bookingUrl, current)).toBeUndefined();
+    seen.scope.checkCurrentDocument(current, 3);
+    seen.scope.observeRenderedSnapshot(seen.bookToken, { url: current, timeOrigin: 3, frames: [], blocked: false });
+    const token = seen.scope.tokenFor(source.bookingUrl, current)!;
+    expect(observedTeeItUpOfficialBookingChain(token).bookingSourceUrl).toBe(source.bookingUrl);
+    expect(seen.scope.diagnostics(current).chainTokenCurrent).toBe(true);
+    native.admitted = false; seen.scope.suspendCurrentDocument(current); seen.scope.checkCurrentDocument(current, 3);
+    expect(seen.scope.tokenFor(source.bookingUrl, current)).toBeUndefined(); expect(() => observedTeeItUpOfficialBookingChain(token)).toThrow();
+  });
+  it.each(["otherRequest", "changedTimeOrigin", "newMainRead", "noNativeProof"] as const)("never re-earns pending native context from %s", change => {
+    const current = source.bookingUrl + "?course=public", native = { request: undefined as object | undefined };
+    const seen = observed("text/html", (actual, url, timeOrigin) => change !== "noNativeProof" && actual === native.request && url === current && timeOrigin === 3);
+    native.request = change === "otherRequest" ? {} : seen.book;
+    seen.scope.suspendCurrentDocument(current);
+    if (change === "newMainRead") seen.scope.beginMainDocument({}, { url: source.bookingUrl, method: "GET" });
+    seen.scope.checkCurrentDocument(current, change === "changedTimeOrigin" ? 4 : 3);
+    expect(seen.scope.tokenFor(source.bookingUrl, current)).toBeUndefined(); expect(() => observedTeeItUpOfficialBookingChain(seen.token)).toThrow();
+  });
+  it("retires a query-context token when native history returns to the canonical original URL", () => {
+    const current = source.bookingUrl + "?course=public", native = { request: undefined as object | undefined };
+    const seen = observed("text/html", (request, url, timeOrigin) => request === native.request && [current, source.bookingUrl].includes(url) && timeOrigin === 3);
+    native.request = seen.book;
+    seen.scope.suspendCurrentDocument(current); seen.scope.checkCurrentDocument(current, 3);
+    seen.scope.observeRenderedSnapshot(seen.bookToken, { url: current, timeOrigin: 3, frames: [], blocked: false });
+    const queryToken = seen.scope.tokenFor(source.bookingUrl, current)!;
+    expect(observedTeeItUpOfficialBookingChain(queryToken).bookingSourceUrl).toBe(source.bookingUrl);
+    seen.scope.suspendCurrentDocument(source.bookingUrl);
+    expect(() => observedTeeItUpOfficialBookingChain(queryToken)).toThrow(); expect(seen.scope.tokenFor(source.bookingUrl, source.bookingUrl)).toBeUndefined();
+    seen.scope.checkCurrentDocument(source.bookingUrl, 3);
+    seen.scope.observeRenderedSnapshot(seen.bookToken, { url: source.bookingUrl, timeOrigin: 3, frames: [], blocked: false });
+    expect(seen.scope.tokenFor(source.bookingUrl, source.bookingUrl)).toBeDefined();
+    expect(() => observedTeeItUpOfficialBookingChain(queryToken)).toThrow(); expect(() => observedTeeItUpOfficialBookingChain(seen.token)).toThrow();
+  });
   it("normalizes only an explicitly written US state while retaining every other full postal component", () => {
     expect(teeItUpCompleteStreetAddress("565 Competition Road, Example, North Carolina 27603, USA")).toEqual(teeItUpCompleteStreetAddress(source.venueAddress));
     for (const region of ["DC", "PR", "ZZ"]) expect(teeItUpCompleteStreetAddress(`565 Competition Road, Example, ${region} 27603, USA`)).toMatchObject({ region });

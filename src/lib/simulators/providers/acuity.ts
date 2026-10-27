@@ -74,11 +74,14 @@ function selectPublicRentalProduct(business: Record<string, unknown>, rentalIds:
   // An operator-reviewed ID still needs a current rental identity. League,
   // membership, instruction and fitting appointments are never rental stock.
   const namedBay = namedBayRental(name, durationMinutes);
+  const sessionRental = durationOnlySimulatorSession(business, product, durationMinutes);
   const aggregateHours = aggregateRentalHours(name);
   const aggregate = aggregateHours > 0 && aggregateHours * 60 === durationMinutes;
-  if (!namedBay && !aggregate) throw sourceError("The reviewed simulator product is not a public rental");
+  if (!namedBay && !aggregate && !sessionRental) throw sourceError("The reviewed simulator product is not a public rental");
   const calendarIds = Array.isArray(product.calendarIDs) ? product.calendarIDs.map(String) : [];
   if (calendarIds.includes("any")) {
+    if (sessionRental) throw resourceIdentityError(sourceError("The public simulator session needs named bay calendars"),
+      { reason: "RENTAL_CALENDARS_INVALID" });
     // This synthetic public resource is an opaque pool, never a named bay or
     // a numeric calendar. Its blank synthetic timezone inherits only the
     // independently verified business timezone under this exact contract.
@@ -104,6 +107,13 @@ function selectPublicRentalProduct(business: Record<string, unknown>, rentalIds:
   catch (error) {
     if (error instanceof SimulatorAvailabilityError) resourceIdentityFailures.set(error, { reason: "CALENDAR_CATALOG_INVALID" });
     throw error;
+  }
+  // A duration-only session label earns no opaque pool. Every current real
+  // calendar must be explicitly attached and pass the named-bay checks below.
+  if (sessionRental && (calendars.length !== calendarIds.length ||
+      calendars.some(item => !PUBLIC_ID.test(String(item.id)) || !calendarIds.includes(String(item.id))))) {
+    throw resourceIdentityError(sourceError("The public simulator session bay catalog is incomplete"),
+      { reason: "RENTAL_CALENDARS_INVALID" });
   }
   const businessName = normalizePlainName(business.name, 120);
   const venueRental = durationMinutes >= 60 && durationLabelledSimRental(name, durationMinutes) &&
@@ -146,6 +156,28 @@ function namedBayRental(name: string, durationMinutes: number) {
   if (/\b(?:simulator|bay)\b/iu.test(name) && /\b(?:booking|rental|reservation|time)\b/iu.test(name) &&
       !/\b(?:league|member|lesson|fitting|handicap)\b/iu.test(name)) return true;
   return durationLabelledSimRental(name, durationMinutes);
+}
+
+function durationOnlySimulatorSession(business: Record<string, unknown>, product: Record<string, unknown>, durationMinutes: number) {
+  // This is a named-bay catalog profile, not a duration-label or synthetic
+  // Any Available resource shortcut. Configuration and warm reads rederive it.
+  const hours = normalizePlainName(product.name, 80)?.match(/^([1-4](?:\.5)?) hours?$/u)?.[1];
+  if (hours === undefined || Number(hours) * 60 !== durationMinutes || durationMinutes % 30 !== 0 ||
+      product.category !== "Length of Simulator Session") return false;
+  const groups = record(business.appointmentTypes);
+  const group = groups?.["Length of Simulator Session"];
+  if (!Array.isArray(group) || group.filter(row => row === product).length !== 1 ||
+      Object.entries(groups!).some(([key, rows]) => key !== "Length of Simulator Session" && Array.isArray(rows) && rows.includes(product))) return false;
+  if (typeof business.description !== "string" || business.description.length > 4_000) return false;
+  const visibleText = (node: Node): string => {
+    if ("tagName" in node && (["script", "style", "noscript", "template", "form", "input", "textarea", "select"].includes(node.tagName) ||
+        node.attrs.some(attr => attr.name === "hidden" || attr.name === "inert" || attr.name === "class" || attr.name === "aria-hidden" && attr.value === "true" ||
+          attr.name === "style" && /(?:display\s*:\s*none|visibility\s*:\s*(?:hidden|collapse)|(?:^|;)\s*opacity\s*:\s*(?:0(?:\.0+)?|\.0+)%?\s*(?:!important\s*)?(?:;|$))/iu.test(attr.value)))) return "";
+    if ("value" in node) return node.nodeName === "#text" ? node.value : "";
+    return "childNodes" in node ? node.childNodes.map(visibleText).join(" ") : "";
+  };
+  const description = visibleText(parse(business.description)).replace(/\s+/gu, " ").trim();
+  return /^please select your desired length of time, your simulator bay \(or "any available"\), and the desired date\/time\.$/iu.test(description);
 }
 
 function numberedBayName(value: unknown) {
@@ -253,6 +285,7 @@ export function inspectAcuityPublicConfiguration(html: string, sourceUrl: string
       PUBLIC_ID.test(String(row.id)) && Number.isInteger(row.duration) && Number(row.duration) >= 30 && Number(row.duration) <= 240 && Number(row.duration) % 30 === 0 &&
       row.active === true && row.private === false && row.type === "service" && row.classSize === null && row.canChooseQuantity === false &&
       typeof row.name === "string" && (namedBayRental(row.name, Number(row.duration)) ||
+        durationOnlySimulatorSession(business, row, Number(row.duration)) ||
         aggregateRentalHours(row.name) > 0 && aggregateRentalHours(row.name) * 60 === Number(row.duration)));
     contractField = "RENTAL_IDENTITY";
     if (!candidates.length || candidates.length > 20) return rejected();

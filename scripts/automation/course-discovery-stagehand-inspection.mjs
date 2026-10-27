@@ -4,10 +4,67 @@ import { STAGEHAND_SOURCE_MODE, canonicalStagehandData as canonical, stagehandDa
   publicStagehandSourceUrl as publicUrl, validateStagehandSourceProposal as validateAdapterSourceProposal,
   validateStagehandSourceReport } from "./course-discovery-stagehand-source.mjs";
 import { observedBookingSourceCandidates, nativeLinkSource, corroboratedNativeLink, nativeFrameNavigations, nativeIntermediaryNavigations } from "./stagehand/source-provenance.mjs";
-import { safeTeeItUpDelegationDiagnostic, safeFixedAdapterReadDiagnostic } from "./course-discovery-worker.mjs";
+import { safeTeeItUpDelegationDiagnostic, safeFixedAdapterReadDiagnostic, safeNativeMainDocumentContinuity } from "./course-discovery-worker.mjs";
+import { z } from "zod";
 const fail = code => discoveryError(code), HYBRID_SOURCE_DISCOVERY = STAGEHAND_SOURCE_MODE;
 const INSPECTION_ACTION_LIMIT = 6;
 const inspectionFailures = new WeakMap();
+// Closed diagnostic mirror only; these values cannot admit a request or document.
+const nativeFatalCodes = ["NATIVE_REDIRECT_ABORT_TIMEOUT", "NATIVE_REDIRECT_BODY_TIMEOUT", "NATIVE_REDIRECT_CANCELLED", "NATIVE_REDIRECT_CONTINUE_REJECTED",
+  "NATIVE_REDIRECT_CROSS_HOST_RESOURCE_REJECTED", "NATIVE_REDIRECT_DRAIN_FAILED", "NATIVE_REDIRECT_DRAIN_TIMEOUT", "NATIVE_REDIRECT_DUPLICATE_FETCH_ID",
+  "NATIVE_REDIRECT_FRAME_MISSING", "NATIVE_REDIRECT_FRAME_UNGUARDED", "NATIVE_REDIRECT_FULFILL_REJECTED", "NATIVE_REDIRECT_HANDLER_FAILED", "NATIVE_REDIRECT_HEADERS_LIMIT",
+  "NATIVE_REDIRECT_INSTALL_FAILED", "NATIVE_REDIRECT_INTERCEPT_LIMIT", "NATIVE_REDIRECT_LOADER_MISMATCH", "NATIVE_REDIRECT_LOADER_TIMEOUT", "NATIVE_REDIRECT_NAVIGATION_REJECTED",
+  "NATIVE_REDIRECT_NETWORK_FAILED", "NATIVE_REDIRECT_NETWORK_ID_MISSING", "NATIVE_REDIRECT_PING_UNSUPPORTED", "NATIVE_REDIRECT_POST_BODY_LIMIT", "NATIVE_REDIRECT_POST_BODY_MISSING",
+  "NATIVE_REDIRECT_PROVENANCE_REJECTED", "NATIVE_REDIRECT_PROVENANCE_TIMEOUT", "NATIVE_REDIRECT_RECORD_LIMIT", "NATIVE_REDIRECT_REQUEST_REJECTED", "NATIVE_REDIRECT_REQUEST_TIMEOUT",
+  "NATIVE_REDIRECT_RESOURCE_KIND_REJECTED", "NATIVE_REDIRECT_RESOURCE_REJECTED", "NATIVE_REDIRECT_RESPONSE_DUPLICATE", "NATIVE_REDIRECT_RESPONSE_FRAME_MISMATCH",
+  "NATIVE_REDIRECT_RESPONSE_HEADERS_CONFLICT", "NATIVE_REDIRECT_RESPONSE_METHOD_MISMATCH", "NATIVE_REDIRECT_RESPONSE_MISMATCH", "NATIVE_REDIRECT_RESPONSE_NETWORK_MISMATCH",
+  "NATIVE_REDIRECT_RESPONSE_PRIOR_FAILURE", "NATIVE_REDIRECT_RESPONSE_REQUEST_PAUSED", "NATIVE_REDIRECT_RESPONSE_STATUS_INVALID", "NATIVE_REDIRECT_RESPONSE_TIMEOUT",
+  "NATIVE_REDIRECT_RESPONSE_UNADMITTED", "NATIVE_REDIRECT_RESPONSE_UNKNOWN", "NATIVE_REDIRECT_RESPONSE_URL_MISMATCH", "NATIVE_REDIRECT_RETIRED_DISPATCH", "NATIVE_REDIRECT_ROUTING_FAILED",
+  "NATIVE_RESPONSE_LIMIT", "OWNED_STAGEHAND_CDP_UNAVAILABLE", "STAGEHAND_GUARDED_SOURCE_REJECTED", "UNKNOWN"];
+const readabilityFailures = ["TRANSPORT_CHANGED", "PUBLIC_URL_REJECTED", "ACCESS_REQUIREMENT", "NATIVE_FATAL", "OPEN_STATUS_MISSING", "STATUS_REJECTED"];
+const nullableFact = z.boolean().nullable(), digest = z.string().regex(/^[a-f0-9]{64}$/u);
+const readabilitySchema = z.object({ action: z.enum(["open", "observe", "inspect_adapter", "click"]), actionIndex: z.number().int().min(1).max(6),
+  currentUrlCategory: z.enum(["OFFICIAL_ORIGIN", "BOOKING_ORIGIN", "OTHER_PUBLIC_HTTPS", "NON_PUBLIC_OR_INVALID"]), currentUrlSha256: digest.nullable(),
+  nativeTransport: nullableFact, navigationStatusPresent: z.boolean(), navigationStatus: z.number().int().min(100).max(599).nullable(),
+  accessRequirementObserved: nullableFact, nativeFatalPresent: z.boolean(), nativeFatalCode: z.enum(nativeFatalCodes).nullable(),
+  readyState: z.enum(["loading", "interactive", "complete"]).nullable(), pendingRequestCount: z.number().int().min(0).max(2048).nullable(),
+  officialDocumentCurrent: nullableFact, frameCorrelation: z.null(), loaderCorrelation: z.null(),
+  redirectHashes: z.array(z.object({ fromSha256: digest, toSha256: digest, status: z.number().int().min(300).max(399) }).strict()).max(5),
+  redirectsOmitted: z.boolean(), failedPredicates: z.array(z.enum(readabilityFailures)).max(6),
+}).strict();
+export function safeInspectionReadability(value) {
+  const result = z.array(readabilitySchema).min(1).max(INSPECTION_ACTION_LIMIT).safeParse(value);
+  return result.success && new Set(result.data.map(row => row.actionIndex)).size === result.data.length ? result.data : undefined;
+}
+/** Existing snapshot facts only. No frame/loader correlation is exposed by this protocol. */
+export function inspectionReadability(snapshot, action, actionIndex, officialUrl, bookingUrl) {
+  const safeUrl = publicUrl(snapshot?.url), fact = value => typeof value === "boolean" ? value : null;
+  let currentUrlCategory = "NON_PUBLIC_OR_INVALID";
+  if (safeUrl) {
+    currentUrlCategory = new URL(snapshot.url).origin === new URL(officialUrl).origin ? "OFFICIAL_ORIGIN" :
+      new URL(snapshot.url).origin === new URL(bookingUrl).origin ? "BOOKING_ORIGIN" : "OTHER_PUBLIC_HTTPS";
+  }
+  const failedPredicates = [];
+  if (snapshot?.browserTransport !== "NATIVE_CHROME") failedPredicates.push("TRANSPORT_CHANGED");
+  if (!safeUrl) failedPredicates.push("PUBLIC_URL_REJECTED");
+  if (snapshot?.accessRequirementObserved) failedPredicates.push("ACCESS_REQUIREMENT");
+  if (snapshot?.nativeFirstFatal) failedPredicates.push("NATIVE_FATAL");
+  if (action === "open" && !Number.isInteger(snapshot?.navigationStatus)) failedPredicates.push("OPEN_STATUS_MISSING");
+  if (snapshot?.navigationStatus !== undefined && !(snapshot.navigationStatus >= 200 && snapshot.navigationStatus < 400)) failedPredicates.push("STATUS_REJECTED");
+  const redirects = Array.isArray(snapshot?.nativeDocumentRedirects) ? snapshot.nativeDocumentRedirects : [];
+  const redirectHashes = redirects.slice(0, 5).filter(row => row?.completed === true && publicUrl(row.fromUrl) && publicUrl(row.toUrl) &&
+    Number.isInteger(row.status) && row.status >= 300 && row.status < 400).map(row => ({ fromSha256: hash(row.fromUrl), toSha256: hash(row.toUrl), status: row.status }));
+  return { action, actionIndex, currentUrlCategory, currentUrlSha256: safeUrl ? hash(snapshot.url) : null,
+    nativeTransport: typeof snapshot?.browserTransport === "string" ? snapshot.browserTransport === "NATIVE_CHROME" : null,
+    navigationStatusPresent: snapshot?.navigationStatus !== undefined,
+    navigationStatus: Number.isInteger(snapshot?.navigationStatus) && snapshot.navigationStatus >= 100 && snapshot.navigationStatus <= 599 ? snapshot.navigationStatus : null,
+    accessRequirementObserved: fact(snapshot?.accessRequirementObserved), nativeFatalPresent: Boolean(snapshot?.nativeFirstFatal),
+    nativeFatalCode: snapshot?.nativeFirstFatal ? nativeFatalCodes.includes(snapshot.nativeFirstFatal.code) ? snapshot.nativeFirstFatal.code : "UNKNOWN" : null,
+    readyState: ["loading", "interactive", "complete"].includes(snapshot?.readyState) ? snapshot.readyState : null,
+    pendingRequestCount: Number.isInteger(snapshot?.pendingRequestCount) && snapshot.pendingRequestCount >= 0 && snapshot.pendingRequestCount <= 2048 ? snapshot.pendingRequestCount : null,
+    officialDocumentCurrent: fact(snapshot?.officialSourceDiagnostic?.currentOfficialDocument), frameCorrelation: null, loaderCorrelation: null,
+    redirectHashes, redirectsOmitted: redirects.length !== redirectHashes.length, failedPredicates };
+}
 /** Current invocation only. Copied receipts and prior attempts cannot supply facts. */
 export function currentStagehandInspectionDiagnostic(error, job, startedAt, now) {
   try {
@@ -17,8 +74,10 @@ export function currentStagehandInspectionDiagnostic(error, job, startedAt, now)
         !Number.isFinite(startedAt) || !Number.isFinite(now) || value.startedAt < startedAt || value.startedAt > now) return undefined;
     const teeItUpDelegation = safeTeeItUpDelegationDiagnostic(value.teeItUpDelegation);
     const adapterRead = safeFixedAdapterReadDiagnostic(value.adapterRead);
-    return teeItUpDelegation || adapterRead ? {
+    const readability = safeInspectionReadability(value.readability);
+    return teeItUpDelegation || adapterRead || readability ? {
       ...(teeItUpDelegation ? { teeItUpDelegation } : {}), ...(adapterRead ? { adapterRead } : {}),
+      ...(readability ? { readability } : {}),
     } : undefined;
   } catch { return undefined; }
 }
@@ -203,14 +262,26 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
       ...(job.request.trustedContext!==undefined?{trustedContext:job.request.trustedContext}:{}),
       venueName: job.request.identity.name, venueAddress: job.request.identity.address,
       venueOfficialUrl: job.request.identity.officialUrl, helperEnvironment: environment, signal: inspectionSignal });
-    const request = async (action, url, observeReason) => {
+    const nativeContexts = new WeakMap();
+    let currentNativeContext;
+    const nativeContextMatches = (snapshot, expectedUrl, documentBinding) => {
+      const current = nativeContexts.get(snapshot);
+      return Boolean(current && current.originalUrl === expectedUrl && current.capability.currentUrlSha256 === hash(snapshot.url) &&
+        (!documentBinding || current.capability.documentBindingSha256 === documentBinding));
+    };
+    const contextMatches = (snapshot, expectedUrl) => snapshot.url === expectedUrl || nativeContextMatches(snapshot, expectedUrl);
+    const request = async (action, url, observeReason, target) => {
       check();
       if (receipt.actions.length >= INSPECTION_ACTION_LIMIT) throw fail('FRAMEWORK_INSPECTION_ACTION_LIMIT');
       const start = now(), step = { action, urlSha256: hash(url), startedOffsetMs: Math.max(0, start - startedAt) };
       if (observeReason) step.observeReason = observeReason;
       receipt.actions.push(step);
       try {
-        const snapshot = await browser.request(action === 'observe' ? { action } : { action, url }); check();
+        const previousContext = currentNativeContext;
+        const snapshot = await browser.request(action === 'observe' ? { action } : action === 'click' ? { action, target } : { action, url }); check();
+        // Record before the unchanged guard: an unreadable snapshot must remain diagnosable.
+        try { step.readability = inspectionReadability(snapshot, action, receipt.actions.length, job.request.identity.officialUrl, recipe.source.bookingUrl); }
+        catch { /* Optional diagnostic capture cannot replace the original guard. */ }
         if (snapshot?.browserTransport !== 'NATIVE_CHROME') throw fail('FRAMEWORK_INSPECTION_TRANSPORT_CHANGED');
         if (!publicUrl(snapshot.url) || snapshot.accessRequirementObserved || snapshot.nativeFirstFatal ||
             action === 'open' && !Number.isInteger(snapshot.navigationStatus) ||
@@ -218,7 +289,21 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
           throw fail('FRAMEWORK_INSPECTION_SOURCE_UNREADABLE');
         // An observation refreshes only the same public document. It cannot
         // become a second navigation lane or promote an ancillary response.
-        if (action === 'observe' && new URL(snapshot.url).href !== new URL(url).href)
+        const expectedOriginal = ['observe','click'].includes(action) && previousContext?.currentUrl === url ? previousContext.originalUrl : url;
+        let originalUrl = expectedOriginal;
+        let capability = browser.currentMainDocumentContinuity?.(snapshot, originalUrl, now());
+        if (!capability && action === 'open' && path.includes(snapshot.url)) {
+          originalUrl = snapshot.url; capability = browser.currentMainDocumentContinuity?.(snapshot, originalUrl, now());
+        }
+        const projected = safeNativeMainDocumentContinuity(capability);
+        const sameObservedDocument = !previousContext || action === 'open' || projected?.documentBindingSha256 === previousContext.capability.documentBindingSha256;
+        if (projected && sameObservedDocument && projected.originalUrlSha256 === hash(originalUrl) && projected.currentUrlSha256 === hash(snapshot.url) &&
+            projected.observedAt <= now() && now() - projected.observedAt <= 5000 && snapshot.navigationStatus === 200) {
+          currentNativeContext = { originalUrl, currentUrl: snapshot.url, capability };
+          nativeContexts.set(snapshot, currentNativeContext); step.nativeMainDocumentContinuity = projected;
+        } else currentNativeContext = undefined;
+        if (['observe','click'].includes(action) && new URL(snapshot.url).href !== new URL(url).href &&
+            !(previousContext && nativeContextMatches(snapshot, previousContext.originalUrl, previousContext.capability.documentBindingSha256)))
           throw fail('FRAMEWORK_INSPECTION_CONTEXT_CHANGED');
         step.contextUrlSha256 = hash(snapshot.url);
         if (Number.isInteger(snapshot.navigationStatus)) step.navigationStatus = snapshot.navigationStatus;
@@ -250,9 +335,9 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
       }
       finally { step.elapsedMs = Math.max(0, now() - start); }
     };
-    let snapshot = await request('open', job.request.identity.officialUrl), position = 0;
+    let snapshot = await request('open', job.request.identity.officialUrl), position = 0, publicEntryDisclosed = false;
     for (;;) {
-      const current = new URL(snapshot.url).href;
+      const current = new URL(nativeContexts.get(snapshot)?.originalUrl ?? snapshot.url).href;
       // Fresh browser redirects may traverse only the remainder of the observed routing path.
       const landed = path.indexOf(current, position);
       if (landed < position) {
@@ -267,15 +352,34 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
         ...(snapshot.frames ?? []).filter(row => row.source === 'OFFICIAL_IFRAME_SRC').map(row => row.url),
       ].filter(publicUrl).map(value => new URL(value).href));
       const missingLink = next !== undefined && !freshLinks.has(next);
+      const disclosures = (snapshot.controls ?? []).filter(control => control.kind === 'public-entry-disclosure' &&
+        typeof control.target === 'string' && /^[a-f0-9-]{36}$/u.test(control.target));
+      if (missingLink && !publicEntryDisclosed && disclosures.length === 1 &&
+          receipt.actions.length + Math.max(0,path.length-position-2) + 2 + (earlyCpsContext && current !== recipe.source.bookingUrl ? 1 : 0) <= INSPECTION_ACTION_LIMIT) {
+        publicEntryDisclosed = true;
+        snapshot = await request('click', snapshot.url, 'PUBLIC_ENTRY_DISCLOSURE', disclosures[0].target); continue;
+      }
       const diagnostic = snapshot.officialSourceDiagnostic;
-      const incompleteOfficial = diagnostic?.rawOfficialCaptured === true &&
+      const exactNextPresent = next !== undefined && !missingLink;
+      const storedContext = nativeContexts.get(snapshot);
+      const terminalProof = position === path.length - 1 && storedContext?.originalUrl === path[position]
+        ? safeNativeMainDocumentContinuity(browser.currentMainDocumentContinuity?.(snapshot, storedContext.originalUrl, now())) : undefined;
+      const completedNativeTerminal = Boolean(terminalProof && snapshot.navigationStatus === 200 &&
+        terminalProof.originalUrlSha256 === hash(storedContext.originalUrl) && terminalProof.currentUrlSha256 === hash(snapshot.url) &&
+        terminalProof.documentBindingSha256 === storedContext.capability.documentBindingSha256 &&
+        terminalProof.observedAt <= now() && now() - terminalProof.observedAt <= 5000);
+      // A modal may hide background headings once its exact fresh frame exists.
+      // At the final source, retained root metadata is not the provider document;
+      // only its current private completed-main-read capability can replace this wait.
+      const incompleteOfficial = !completedNativeTerminal && diagnostic?.rawOfficialCaptured === true &&
         (diagnostic.currentOfficialDocument === false ||
-          diagnostic.renderedHeadingsPresent === false && diagnostic.renderedAddressesPresent === false);
+          diagnostic.renderedHeadingsPresent === false && diagnostic.renderedAddressesPresent === false &&
+          !(diagnostic.currentOfficialDocument === true && exactNextPresent));
       // loading includes ancillary scripts/styles. It is not document readiness
       // once the required current official facts or the exact next link exist.
       const completeOfficial = diagnostic?.rawOfficialCaptured === true && diagnostic.currentOfficialDocument === true &&
         diagnostic.renderedAddressesPresent === true && diagnostic.renderedLinksPresent === true;
-      const unsettledRequiredSource = snapshot.loading === true && !completeOfficial && !(next !== undefined && !missingLink);
+      const unsettledRequiredSource = snapshot.loading === true && !completeOfficial && !exactNextPresent && !completedNativeTerminal;
       const reason = incompleteOfficial ? 'OFFICIAL_RENDERING_INCOMPLETE' : unsettledRequiredSource ? 'PUBLIC_READS_PENDING' :
         missingLink ? 'FRESH_LINK_MISSING' : undefined;
       // Reserve all remaining path opens plus the one inspection. Observations
@@ -295,20 +399,22 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
     }
     // Only after the unchanged fresh path/last-link check may an exact reviewed
     // CPS source choose its genuine booking document before the first probe.
-    if (earlyCpsContext && snapshot.url !== recipe.source.bookingUrl) {
+    if (earlyCpsContext && !contextMatches(snapshot, recipe.source.bookingUrl)) {
       if (receipt.actions.length + 2 > INSPECTION_ACTION_LIMIT) throw fail('FRAMEWORK_INSPECTION_ACTION_LIMIT');
       const started = now();
       receipt.earlyCpsSourceContext = { exactObservedSource: true, parentContextUrlSha256: hash(snapshot.url),
         bookingUrlSha256: hash(recipe.source.bookingUrl), startedOffsetMs: Math.max(0, started - startedAt), completed: false };
       try {
         snapshot = await request('open', recipe.source.bookingUrl);
-        if (snapshot.url !== recipe.source.bookingUrl || snapshot.navigationStatus !== 200)
+        if (!contextMatches(snapshot, recipe.source.bookingUrl) || snapshot.navigationStatus !== 200)
           throw fail('FRAMEWORK_INSPECTION_SOURCE_CONTEXT_CHANGED');
         receipt.earlyCpsSourceContext.completed = true;
       } finally { receipt.earlyCpsSourceContext.elapsedMs = Math.max(0, now() - started); }
     }
+    const inspectedFrom = nativeContexts.get(snapshot);
     let inspected = await request('inspect_adapter', recipe.source.bookingUrl);
-    if (new URL(inspected.url).href !== new URL(snapshot.url).href) throw fail('FRAMEWORK_INSPECTION_CONTEXT_CHANGED');
+    if (new URL(inspected.url).href !== new URL(snapshot.url).href &&
+        !(inspectedFrom && nativeContextMatches(inspected, inspectedFrom.originalUrl, inspectedFrom.capability.documentBindingSha256))) throw fail('FRAMEWORK_INSPECTION_CONTEXT_CHANGED');
     if (!inspected.adapter || typeof inspected.adapter !== 'object' || Array.isArray(inspected.adapter) ||
         typeof inspected.adapter.family !== 'string') throw fail('FRAMEWORK_INSPECTION_METADATA_INVALID');
     if (earlyCpsContext && inspected.adapter.family !== 'CPS') throw fail('FRAMEWORK_INSPECTION_METADATA_CONFLICT');
@@ -320,7 +426,7 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
     // CPS postal proof adoption requires the actual current booking document.
     // Never relabel the official-parent context or reuse its inspected proof.
     if (inspected.adapter.family === 'CPS' && inspected.adapter.officialPostalConflictProof &&
-        new URL(inspected.url).href !== recipe.source.bookingUrl) {
+        !contextMatches(inspected, recipe.source.bookingUrl)) {
       if (receipt.actions.length + 2 > INSPECTION_ACTION_LIMIT) throw fail('FRAMEWORK_INSPECTION_ACTION_LIMIT');
       const started = now();
       receipt.sourceContextReinspection = { required: true, firstResultDiscarded: true,
@@ -328,10 +434,10 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
         startedOffsetMs: Math.max(0, started - startedAt), completed: false };
       try {
         snapshot = await request('open', recipe.source.bookingUrl);
-        if (snapshot.url !== recipe.source.bookingUrl || snapshot.navigationStatus !== 200)
+        if (!contextMatches(snapshot, recipe.source.bookingUrl) || snapshot.navigationStatus !== 200)
           throw fail('FRAMEWORK_INSPECTION_SOURCE_CONTEXT_CHANGED');
         inspected = await request('inspect_adapter', recipe.source.bookingUrl);
-        if (inspected.url !== recipe.source.bookingUrl || inspected.navigationStatus !== 200)
+        if (!contextMatches(inspected, recipe.source.bookingUrl) || inspected.navigationStatus !== 200)
           throw fail('FRAMEWORK_INSPECTION_SOURCE_CONTEXT_CHANGED');
         if (!inspected.adapter || typeof inspected.adapter !== 'object' || Array.isArray(inspected.adapter) || inspected.adapter.family !== 'CPS' ||
             false)
@@ -345,7 +451,7 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
         receipt.sourceContextReinspection.completed = true;
       } finally { receipt.sourceContextReinspection.elapsedMs = Math.max(0, now() - started); }
     }
-    const observation = worker.createDiscoveryAdapterObservation(job, recipe.source.bookingUrl, inspected.adapter, inspected.url);
+    const observation = worker.createDiscoveryAdapterObservation(job, recipe.source.bookingUrl, inspected.adapter, inspected.url, nativeContexts.get(inspected)?.capability);
     const bound = worker.bindDiscoveryRecipeIdentity(actualRecipe, job, observation, inspected.url);
     if (!observation || canonical(bound.adapter) !== canonical(inspected.adapter)) throw fail('FRAMEWORK_INSPECTION_PROOF_NOT_BOUND');
     const sourceEvidence = worker.inspectedAdapterSourceEvidence(bound, job, observation, true, inspected.url);
@@ -372,13 +478,14 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
   if (primary) {
     primary.inspectionReceipt = receipt;
     const failedAction = receipt.actions.at(-1);
-    if (primary && typeof primary === 'object' && failedAction?.action === 'inspect_adapter' && failedAction.error &&
-        (failedAction.teeItUpDelegation || failedAction.adapterRead)) {
+    const readability = failedAction?.readability?.failedPredicates?.length ? safeInspectionReadability(receipt.actions.map(row => row.readability).filter(Boolean)) : undefined;
+    if (primary && typeof primary === 'object' && failedAction?.error &&
+        (readability || failedAction.action === 'inspect_adapter' && (failedAction.teeItUpDelegation || failedAction.adapterRead))) {
       try {
         inspectionFailures.set(primary, { job, attempt: job.attempts, requestSha256: hash(canonical(job.request)), sourceFingerprint: job.sourceFingerprint,
           firstPickedUpAt: job.firstPickedUpAt, deadlineAt: job.deadlineAt, startedAt,
           teeItUpDelegation: safeTeeItUpDelegationDiagnostic(failedAction.teeItUpDelegation),
-          adapterRead: safeFixedAdapterReadDiagnostic(failedAction.adapterRead) });
+          adapterRead: safeFixedAdapterReadDiagnostic(failedAction.adapterRead), ...(readability ? { readability } : {}) });
       } catch { /* Optional diagnostics cannot replace the primary failure. */ }
     }
     throw primary;

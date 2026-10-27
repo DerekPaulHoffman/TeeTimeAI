@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { sourceDiscover, publicSourceJob, sourceRoutingContext, prepareSourceDiscovery, pageEvidence, sourceDecisionFor, buildSourceDiscoveryInstruction } from './source-discovery.mjs';
+import { sourceDiscover, publicSourceJob, sourceRoutingContext, prepareSourceDiscovery, pageEvidence, sourceDecisionFor, buildSourceDiscoveryInstruction, routingOnlyFrameEntry } from './source-discovery.mjs';
 import { JSDOM } from 'jsdom';
 import { observedBookingSourceCandidates } from './source-provenance.mjs';
 import { publicEvidenceUrl } from './public-evidence.mjs';
@@ -11,7 +11,27 @@ import { createStagehandGuardedBrowserHost } from '../course-discovery-stagehand
 import { createStagehandCodexModel } from './codex-model.mjs';
 import { prepareReadOnlyAction } from './driver.mjs';
 import { createCourseDiscoverySupervisor } from '../course-discovery-supervisor.mjs';
+import { validateStagehandSourceReport } from '../course-discovery-stagehand-source.mjs';
 const official='https://public-course.example/', booking='https://public-provider.example/start?venue=public&kind=day', landing='https://public-provider.example/loading';
+const playEntry='https://public-course.play.teeitup.com/', bookEntry='https://public-course.book.teeitup.com/';
+function routingFrameFixture(mode='valid',{entry=playEntry,final=bookEntry}={}) {
+ let current=official,evaluations=0,callback,opens=0,extracts=0;
+ const witness=(page=current,src=entry)=>({kind:'NATIVE_VISIBLE_FRAME',pageUrl:page,observedAt:new Date().toISOString(),documentHash:'a'.repeat(64),frames:[{src,visible:true}]});
+ const session={localCodexCalls:[],browser:{context:{addInitScript:async()=>{}}},page:{url:async()=>current,evaluate:async()=>++evaluations%2?
+  {url:current,observedAt:new Date().toISOString(),links:[],frames:[],dom:[]}:[]},goto:async()=>({status:()=>200}),
+  observeFrameSources:async()=>{const w=witness();if(mode==='ambiguous')w.frames.push({src:'https://other.play.teeitup.com/',visible:true});return w;},
+  extract:async(_instruction,schema)=>{extracts++;return{data:schema.parse({decision:'SOURCE_FOUND',reason:'Observed public source',nextActionInstruction:'',bookingUrl:current===official?entry:final})};},
+  openObservedFrameSource:async url=>{opens++;assert.equal(url,entry);const w=witness();
+   if(mode==='foreign')w.pageUrl='https://foreign.example/';if(mode==='stale')w.observedAt='2000-01-01T00:00:00.000Z';
+   if(mode==='hidden')w.frames[0].visible=false;if(mode==='ambiguous')w.frames.push({src:'https://other.play.teeitup.com/',visible:true});
+   if(mode==='wrong')w.frames[0].src='https://app.acuityscheduling.com/schedule.php?owner=87654321';
+   if(mode!=='missing-callback')callback(w);current=final;
+   return{kind:'NATIVE_FRAME_SOURCE_OPEN',pageUrl:w.pageUrl,frameUrl:url,observedAt:w.observedAt,documentHash:w.documentHash,
+    finalUrl:final,completedAt:new Date().toISOString(),finalDocumentHash:'b'.repeat(64),
+    redirects:mode==='absent-redirect'||url===final?[]:[{fromUrl:mode==='redirect-gap'?'https://unobserved.example/':url,toUrl:final,status:302,completed:true}]};},
+  close:async()=>({browserClosed:true,modelClosed:true})};
+ return{session,bind:o=>{callback=o.onNativeFrameSourceWitness;},get opens(){return opens;},get extracts(){return extracts;}};
+}
 function job(){const t=Date.now();return{id:'assigned-job',firstPickedUpAt:new Date(t).toISOString(),deadlineAt:new Date(t+900000).toISOString(),
  request:{identity:{name:'Public Course',officialUrl:official,timeZone:'America/New_York',address:'1 Public Road, Public Town, NY 10001, USA',canonicalCoursePhone:'PRIVATE_PHONE',bookingUrl:'PRIVATE_ROUTE'},
  target:{courseId:'assigned-course',kind:'OUTDOOR'},input:{date:'2026-11-01',timeZone:'America/New_York',players:2,startTime:'08:00',endTime:'18:00'},trustedContext:{canonicalCoursePhone:'PRIVATE_PHONE'}},leaseToken:'PRIVATE_LEASE'};}
@@ -103,6 +123,66 @@ test('actual SDK-shaped extract/observe/act routes exact ancestor then exports o
  assert.equal(r.metrics.completedLocalCodexCalls,5);assert.equal(r.metrics.calls,3);assert.ok(updates.length>0);
  assert.ok(f.instructions[1].includes(booking));assert.ok(f.instructions[1].includes('completedAnchorClicks'));assert.ok(f.instructions[1].includes('"eligibleBookingSource":true'));
  assert.equal(JSON.stringify(f.instructions).includes('PRIVATE'),false);assert.deepEqual(observedBookingSourceCandidates(r,official,publicEvidenceUrl,{sourceDiscoveryOnly:true}),[booking]);
+});
+
+test('routing-only play frame is entered through native callback and actual redirect before terminal source export',async()=>{
+ const raw={...job(),attempts:1,sourceFingerprint:'a'.repeat(64)},f=routingFrameFixture();const r=await sourceDiscover({job:raw,sessionFactory:async o=>{f.bind(o);return f.session;}});
+ assert.equal(r.outcome,'SOURCE_PROPOSED_UNVERIFIED',r.frameworkFailureCode);assert.equal(r.adapterSourceProposal.bookingUrl,bookEntry);
+ assert.equal(f.opens,1);assert.equal(f.extracts,2);assert.equal(r.nativeFrameNavigations.length,1);
+ assert.equal(r.nativeFrameNavigations[0].frameUrl,playEntry);assert.equal(r.nativeFrameNavigations[0].finalUrl,bookEntry);
+ assert.equal(r.actions[0].action.method,'openObservedFrameSource');assert.equal(r.actions[0].observedTarget.href,playEntry);
+ assert.equal(r.firstPickedUpAt,raw.firstPickedUpAt);assert.equal(r.deadlineAt,raw.deadlineAt);
+ assert.equal(Date.parse(r.workDeadlineAt),Date.parse(raw.firstPickedUpAt)+240000);assert.equal(r.recipe,null);assert.deepEqual(r.matchingSlots,[]);
+ assert.equal(validateStagehandSourceReport(r,raw).bookingUrl,bookEntry);
+});
+
+for(const mode of ['ambiguous','foreign','stale','hidden','missing-callback','redirect-gap'])test(`routing-only frame cannot export through ${mode} native evidence`,async()=>{
+ const f=routingFrameFixture(mode),r=await sourceDiscover({job:job(),sessionFactory:async o=>{f.bind(o);return f.session;}});
+ assert.equal(r.outcome,'UNRESOLVED');assert.equal(r.adapterSourceProposal,null);assert.equal(r.frameworkFailureCode,'STAGEHAND_SOURCE_OUTPUT_INVALID');
+ assert.equal(r.browserClosed,true);assert.equal(r.modelClosed,true);
+});
+
+const legacyAcuity='https://app.acuityscheduling.com/schedule.php?owner=12345678&ref=embedded_csp',canonicalAcuity='https://app.acuityscheduling.com/schedule/AbCd1234?ref=embedded_csp';
+test('routing-only Acuity recognition is exact owner/ref syntax and grants no canonical URL mapping',()=>{
+ for(const value of [legacyAcuity,legacyAcuity.replace('&ref=embedded_csp',''),legacyAcuity.replace('owner=12345678&ref=embedded_csp','ref=embedded_csp&owner=12345678')])assert.equal(routingOnlyFrameEntry(value),true);
+ for(const value of [canonicalAcuity,legacyAcuity.replace('12345678','0'),legacyAcuity.replace('12345678','001234'),legacyAcuity.replace('12345678','12345678901'),
+  legacyAcuity.replace('owner=','%6fwner='),legacyAcuity.replace('embedded_csp','embedded%5fcsp'),legacyAcuity+'&owner=87654321',legacyAcuity+'&ref=embedded_csp',
+  legacyAcuity+'&date=2030-01-01',legacyAcuity+'&appointmentType=123',legacyAcuity+'&token=private',legacyAcuity+'#slot',legacyAcuity.replace('https:','http:'),
+  legacyAcuity.replace('.com/','.com:8443/'),legacyAcuity.replace('https://','https://user:secret@'),legacyAcuity.replace('.com/','.com.evil.example/'),
+  legacyAcuity.replace('/schedule.php','/schedule.php/'),legacyAcuity.replace('/schedule.php','/checkout'),legacyAcuity.replace('?owner=12345678&ref=embedded_csp','')])assert.equal(routingOnlyFrameEntry(value),false);
+});
+test('legacy Acuity frame requires actual native redirect to the opaque canonical key before export',async()=>{
+ for(const entry of [legacyAcuity,legacyAcuity.replace('&ref=embedded_csp','')]){
+  const raw={...job(),attempts:1,sourceFingerprint:'a'.repeat(64)},f=routingFrameFixture('valid',{entry,final:canonicalAcuity});
+  const r=await sourceDiscover({job:raw,sessionFactory:async o=>{f.bind(o);return f.session;}});
+  assert.equal(r.outcome,'SOURCE_PROPOSED_UNVERIFIED',r.frameworkFailureCode);assert.equal(r.adapterSourceProposal.bookingUrl,canonicalAcuity);
+  assert.equal(f.opens,1);assert.equal(f.extracts,2);assert.equal(r.nativeFrameNavigations[0].frameUrl,entry);assert.equal(r.nativeFrameNavigations[0].finalUrl,canonicalAcuity);
+  assert.deepEqual(r.nativeFrameNavigations[0].redirects,[{fromUrl:entry,toUrl:canonicalAcuity,status:302,completed:true}]);
+  assert.equal(validateStagehandSourceReport(r,raw).bookingUrl,canonicalAcuity);assert.equal(r.firstPickedUpAt,raw.firstPickedUpAt);assert.equal(r.deadlineAt,raw.deadlineAt);
+  assert.equal(Date.parse(r.workDeadlineAt),Date.parse(raw.firstPickedUpAt)+240000);assert.equal(r.browserClosed,true);assert.equal(r.modelClosed,true);
+ }
+});
+for(const mode of ['wrong','stale','hidden','missing-callback','redirect-gap','absent-redirect'])test(`legacy Acuity cannot fabricate a canonical key through ${mode} native evidence`,async()=>{
+ const f=routingFrameFixture(mode,{entry:legacyAcuity,final:canonicalAcuity}),r=await sourceDiscover({job:job(),sessionFactory:async o=>{f.bind(o);return f.session;}});
+ assert.equal(r.outcome,'UNRESOLVED');assert.equal(r.adapterSourceProposal,null);assert.equal(r.frameworkFailureCode,'STAGEHAND_SOURCE_OUTPUT_INVALID');assert.equal(r.browserClosed,true);assert.equal(r.modelClosed,true);
+});
+test('unchanged legacy Acuity entry cannot invent a canonical URL or exceed two frame operations',async()=>{
+ const f=routingFrameFixture('valid',{entry:legacyAcuity,final:legacyAcuity}),r=await sourceDiscover({job:job(),sessionFactory:async o=>{f.bind(o);return f.session;}});
+ assert.equal(f.opens,1);assert.equal(r.outcome,'UNRESOLVED');assert.equal(r.adapterSourceProposal,null);assert.equal(r.frameworkFailureCode,'STAGEHAND_SOURCE_OUTPUT_INVALID');
+});
+
+test('routing-only entries cannot exceed the original two native frame operations',async()=>{
+ let current=official,next=playEntry,callback,evaluations=0,opens=0;
+ const second='https://second-public-course.play.teeitup.com/';
+ const witness=()=>({kind:'NATIVE_VISIBLE_FRAME',pageUrl:current,observedAt:new Date().toISOString(),documentHash:'a'.repeat(64),frames:[{src:next,visible:true}]});
+ const session={localCodexCalls:[],browser:{context:{addInitScript:async()=>{}}},page:{url:async()=>current,evaluate:async()=>++evaluations%2?{url:current,observedAt:new Date().toISOString(),links:[],frames:[],dom:[]}:[]},
+  goto:async()=>({status:()=>200}),observeFrameSources:async()=>witness(),
+  extract:async(_i,schema)=>({data:schema.parse({decision:'SOURCE_FOUND',reason:'Public frame entry',nextActionInstruction:'',bookingUrl:next})}),
+  openObservedFrameSource:async url=>{opens++;const w=witness();callback(w);current=url;next=second;return{kind:'NATIVE_FRAME_SOURCE_OPEN',pageUrl:w.pageUrl,frameUrl:url,observedAt:w.observedAt,
+   documentHash:w.documentHash,finalUrl:url,completedAt:new Date().toISOString(),finalDocumentHash:'b'.repeat(64),redirects:[]};},close:async()=>({browserClosed:true,modelClosed:true})};
+ const r=await sourceDiscover({job:job(),sessionFactory:async o=>{callback=o.onNativeFrameSourceWitness;return session;}});
+ assert.equal(opens,2);assert.equal(r.nativeFrameNavigations.length,2);assert.equal(r.outcome,'UNRESOLVED');assert.equal(r.adapterSourceProposal,null);
+ assert.equal(r.frameworkFailureCode,'STAGEHAND_SOURCE_OUTPUT_INVALID');
 });
 test('core and stateless-history prompt distinguish terminal availability from an intermediate operator labelled Book',()=>{
  const history={completedAnchorClicks:[{href:booking,afterUrl:landing,eligibleBookingSource:true,landingChanged:true}]};

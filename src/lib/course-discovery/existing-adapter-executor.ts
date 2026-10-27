@@ -54,6 +54,7 @@ import { bindTeeItUpStreetTypeOmittedProof, isTeeItUpStreetTypeOmissionCandidate
 import { parseMindbodyAppointmentSource } from "./mindbody-appointment-grid";
 import { executeMindbodyAppointments, inspectMindbodyAppointments, getMindbodyAppointmentDiagnostic,
   type MindbodyAppointmentDiagnostic, type MindbodyAppointmentReaderDeps } from "./mindbody-appointment-reader";
+import { parsePublicUSBusinessAddress } from "./public-us-business-address";
 
 type Dependencies = {
   fetch?: typeof fetch;
@@ -90,6 +91,18 @@ function familyForSource(source: Source) {
   if (parseTeeItUpRecipeSource(source.bookingUrl)) return "TEEITUP" as const;
   if (uschedulePublicTenant(source.bookingUrl) || parseUScheduleLocationSource(source.bookingUrl)?.locationId) return "USCHEDULE" as const;
   return fail("UNSUPPORTED_ADAPTER_SOURCE");
+}
+function acuityVenueMatches(source: Source, observed: string, matches: Dependencies["venueMatches"]) {
+  if (matches(source.venueName, observed)) return true;
+  // Acuity may append its public city/state to the full business name. This
+  // exact alternate is derived from the ordinary canonical address, never
+  // stripped from arbitrary provider prose or applied to another family.
+  if (!source.officialUrl || !isSafeRecipeUrl(source.officialUrl) || new URL(source.officialUrl).protocol !== "https:" ||
+      !source.venueName || source.venueName.length > 200 || /[<>\p{Cc}]/u.test(source.venueName)) return false;
+  const address = parsePublicUSBusinessAddress(source.venueAddress)?.canonicalAddress;
+  if (!address) return false;
+  const normalize = (value: string) => value.normalize("NFKC").replace(/\s+/gu, " ").trim().toLocaleLowerCase("en-US");
+  return normalize(observed) === normalize(`${source.venueName}, ${address.locality} ${address.region}`);
 }
 function dateParameter(date: string) { const [year, month, day] = date.split("-"); return `${month}-${day}-${year}`; }
 function exactKeys(url: URL, required: string[], optional: string[] = []) {
@@ -331,7 +344,7 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
       }
       if (family === "ACUITY" && url.href === booking.href) {
         const observed = parseAcuityPublicConfigurationIdentity(text, source.bookingUrl);
-        if (!observed || !deps.venueMatches(source.venueName, observed.venueName) || observed.configuration.timeZone !== source.timeZone) fail("ADAPTER_IDENTITY_MISMATCH");
+        if (!observed || !acuityVenueMatches(source, observed.venueName, deps.venueMatches) || observed.configuration.timeZone !== source.timeZone) fail("ADAPTER_IDENTITY_MISMATCH");
         acuity = observed.configuration;
         if (adapter && (adapter.family !== "ACUITY" || adapter.ownerKey !== acuity.ownerKey || adapter.businessId !== acuity.businessId ||
             !adapter.rentalProductIds.every(id => acuity!.rentals.some(row => row.id === id)))) fail("ADAPTER_CONFIGURATION_CHANGED");

@@ -37,7 +37,30 @@ export function isPublicFilterSelect(evidence) {
   return /\b(?:start\s*time|end\s*time|from\s*time|to\s*time|time\s*(?:from|to)|date|month|year|players?|golfers?|duration|course|resource)\b/iu.test(labels);
 }
 
-export function prepareReadOnlyAction(action, evidence, { sourceRoutingOnly = false } = {}) {
+function reservePublicDocumentNavigation(action, evidence, currentPageUrl) {
+  const native = evidence?.navigation;
+  if (action.method !== 'click' || evidence?.tag !== 'A' || evidence.visible !== true || evidence.inForm !== false || evidence.formAction ||
+      !native || native.pageUrl !== currentPageUrl || native.captionComplete !== true || native.inlineHandler !== false || native.download !== false ||
+      native.ariaDisabled !== false || !['', 'link'].includes(native.role) || typeof evidence.text !== 'string' || evidence.text.length > 160 ||
+      typeof evidence.label !== 'string' || evidence.label.length > 160 || /password|secret|token|credential|email|phone|contact|username|account|member|customer/iu.test(`${evidence.name} ${evidence.id}`) ||
+      explicitTime.test(`${evidence.text} ${evidence.label} ${evidence.rowText}`) || /\b\d{1,2}\s*[ap]\.?m\.?\b/iu.test(evidence.rowText ?? '') ||
+      /\b(?:confirm|checkout|payment|purchase|hold|reservation|appointment|selected)\b/iu.test(evidence.rowText ?? '')) return false;
+  const caption = normalizedOption(evidence.text), label = normalizedOption(evidence.label);
+  const availability = /^reserve (?:your |a )?(?:bay|simulator|tee times?)$/u;
+  if (!availability.test(caption) || label && label !== 'reserve' && !availability.test(label)) return false;
+  try {
+    if (!isSourceRoutingUrl(currentPageUrl) || !isSourceRoutingUrl(evidence.href) || typeof native.rawHref !== 'string' ||
+        native.rawHref.length > 2048 || native.rawHref.trim() !== native.rawHref || /[\u0000-\u001f]/u.test(native.rawHref)) return false;
+    const current = new URL(currentPageUrl), target = new URL(evidence.href);
+    // A plain same-origin document edge is routing only. Numeric/encoded paths,
+    // filters, fragments, private routes and transaction endpoints stay denied.
+    return current.origin === target.origin && new URL(native.rawHref, current).href === target.href && !target.search && !target.hash &&
+      target.pathname.length <= 200 && /^\/[a-z]+(?:[/-][a-z]+)*\/?$/iu.test(target.pathname) &&
+      !/checkout|payment|purchase|reserve|reservation|confirm|hold|cart|order|submit|appointment|account|login|logout|signin|register|password|oauth|auth|token|credential|member|profile|slot|selected|cancel/iu.test(target.pathname);
+  } catch { return false; }
+}
+
+export function prepareReadOnlyAction(action, evidence, { sourceRoutingOnly = false, currentPageUrl = null } = {}) {
   const passive = passiveMethods.has(action.method);
   const filterSelect = isPublicFilterSelect(evidence);
   // A fresh, visible root anchor is navigation evidence only. This exception is
@@ -53,7 +76,8 @@ export function prepareReadOnlyAction(action, evidence, { sourceRoutingOnly = fa
         url.pathname === '/' && !url.search && !url.hash && !forbidden.test(evidence.href);
     } catch { /* The ordinary guard below remains authoritative. */ }
   }
-  const forbiddenTarget = forbidden.test([evidence?.text, evidence?.label, evidence?.href, evidence?.formAction].join(' ')) && !reserveRootNavigation;
+  const reserveDocumentNavigation = sourceRoutingOnly && reservePublicDocumentNavigation(action, evidence, currentPageUrl);
+  const forbiddenTarget = forbidden.test([evidence?.text, evidence?.label, evidence?.href, evidence?.formAction].join(' ')) && !reserveRootNavigation && !reserveDocumentNavigation;
   if (!passive && (!evidence || evidence.visible === false || ['password', 'email', 'tel', 'file'].includes(String(evidence.type).toLowerCase()) ||
       /password|secret|credential|email|phone|contact|username/iu.test(`${evidence.name} ${evidence.id}`) ||
       forbiddenTarget ||
@@ -148,7 +172,11 @@ export function readNativeActionTarget(selector) {
   const rendered = { visible(element) { if (!element?.isConnected || !element.getClientRects().length) return false; for (let current=element;current;current=current.parentElement) { const style=getComputedStyle(current); if(current.hidden || current.hasAttribute('inert') || current.getAttribute('aria-hidden')==='true' || style.display==='none' || style.visibility==='hidden' || style.visibility==='collapse' || Number(style.opacity)===0) return false; } return true; } };
   const parent = node.closest('tr,article,li,[role="row"]'), candidateLink = node.closest('a[href]'), submitter = node.closest('button,input');
   const link = candidateLink instanceof HTMLAnchorElement && rendered.visible(candidateLink) && rendered.visible(node) ? candidateLink : null;
-  return { tag: link ? 'A' : node.tagName, leafTag: node.tagName, text: ((link ?? node).textContent ?? '').slice(0, 500), label: (link ?? node).getAttribute('aria-label') ?? '', fieldLabel: node instanceof HTMLSelectElement ? [...(node.labels ?? [])].map(label => label.textContent ?? '').join(' ').slice(0, 500) : '', visible: rendered.visible(node) && (!candidateLink || Boolean(link)), disabled: node instanceof HTMLSelectElement && node.disabled, multiple: node instanceof HTMLSelectElement && node.multiple, name: node.getAttribute('name') ?? '', id: node.id, type: node.getAttribute('type') ?? '', value: node instanceof HTMLSelectElement || node instanceof HTMLInputElement ? node.value : null, options: node instanceof HTMLSelectElement ? [...node.options].slice(0, 257).map(option => ({ value: option.value, label: option.label || option.textContent || '', disabled: option.disabled || option.parentElement instanceof HTMLOptGroupElement && option.parentElement.disabled })) : null, selectedLabels: node instanceof HTMLSelectElement ? [...node.selectedOptions].map(option => option.label || option.textContent || '') : null, href: link?.href ?? node.getAttribute('href') ?? '', inForm: Boolean(node.closest('form')), formAction: submitter?.getAttribute('formaction') || submitter?.form?.getAttribute('action') || node.closest('form')?.getAttribute('action') || '', rowText: (parent?.textContent ?? '').slice(0, 700) };
+  let inlineHandler = false;
+  for (let current=link;current;current=current.parentElement) if (current.hasAttribute('onclick') || typeof current.onclick === 'function') inlineHandler = true;
+  const navigation = link ? { pageUrl: location.href, rawHref: link.getAttribute('href') ?? '', captionComplete: (link.textContent ?? '').length <= 160,
+    inlineHandler, download: link.hasAttribute('download'), role: (link.getAttribute('role') ?? '').toLowerCase(), ariaDisabled: link.getAttribute('aria-disabled') === 'true' } : null;
+  return { tag: link ? 'A' : node.tagName, leafTag: node.tagName, text: ((link ?? node).textContent ?? '').slice(0, 500), label: (link ?? node).getAttribute('aria-label') ?? '', fieldLabel: node instanceof HTMLSelectElement ? [...(node.labels ?? [])].map(label => label.textContent ?? '').join(' ').slice(0, 500) : '', visible: rendered.visible(node) && (!candidateLink || Boolean(link)), disabled: node instanceof HTMLSelectElement && node.disabled, multiple: node instanceof HTMLSelectElement && node.multiple, name: node.getAttribute('name') ?? '', id: node.id, type: node.getAttribute('type') ?? '', value: node instanceof HTMLSelectElement || node instanceof HTMLInputElement ? node.value : null, options: node instanceof HTMLSelectElement ? [...node.options].slice(0, 257).map(option => ({ value: option.value, label: option.label || option.textContent || '', disabled: option.disabled || option.parentElement instanceof HTMLOptGroupElement && option.parentElement.disabled })) : null, selectedLabels: node instanceof HTMLSelectElement ? [...node.selectedOptions].map(option => option.label || option.textContent || '') : null, href: link?.href ?? node.getAttribute('href') ?? '', inForm: Boolean(node.closest('form')), formAction: submitter?.getAttribute('formaction') || submitter?.form?.getAttribute('action') || node.closest('form')?.getAttribute('action') || '', rowText: (parent?.textContent ?? '').slice(0, 700), navigation };
 
 }
 
@@ -351,8 +379,11 @@ export async function openStagehandSession({ model, deadline, cwd, signal, onMet
         if (!allowedMethods.has(action?.method)) throw new Error('METHOD_NOT_PERMITTED');
         if (!Array.isArray(action.arguments ?? []) || (action.arguments ?? []).some(value => typeof value !== 'string' || value.length > 500 || forbidden.test(value))) throw new Error('ARGUMENTS_NOT_PERMITTED');
         const passive = passiveMethods.has(action.method);
+        const nativePageBefore = sourceRoutingOnly && !passive ? await checked(page.url()) : null;
         const evidence = passive ? { passiveRead: true } : await checked(page.evaluate(readNativeActionTarget, action.selector));
-        const effectiveAction = prepareReadOnlyAction(action, evidence, { sourceRoutingOnly });
+        const nativePageAfter = sourceRoutingOnly && !passive ? await checked(page.url()) : null;
+        const currentPageUrl = nativePageBefore === nativePageAfter ? nativePageAfter : null;
+        const effectiveAction = prepareReadOnlyAction(action, evidence, { sourceRoutingOnly, currentPageUrl });
         if (evidence.href && !evidence.href.startsWith('#') && !/^javascript:/iu.test(evidence.href)) assertPublicUrl(new URL(evidence.href, await page.url()).href);
         if (evidence.formAction && isAppointmentTransactionUrl(new URL(evidence.formAction, await page.url()).href)) throw new Error('PUBLIC_NAVIGATION_REJECTED');
         const anchorNavigation = action.method === 'click' && evidence.tag === 'A' && evidence.href && !evidence.href.startsWith('#') && !/^javascript:/iu.test(evidence.href);

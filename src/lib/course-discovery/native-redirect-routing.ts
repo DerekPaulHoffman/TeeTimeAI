@@ -19,6 +19,7 @@ export interface NativeReadRequest {
 }
 export type NativeReadResponse = Pick<Response, "url" | "status" | "allHeaders" | "finished" | "body">;
 export type NativeReadRoute = Pick<Route, "continue" | "abort" | "fulfill"> & { request(): NativeReadRequest };
+export type NativeUncorrelatedPost = Readonly<{ url: string; method: "POST"; resourceType: "xhr" | "fetch"; headers: Record<string, string>; body: string }>;
 export type NativeRequestDiagnostic = {
   code: string; url?: string; method?: string; resourceType?: string;
   redirectRejection?: StagehandRedirectRejection;
@@ -283,6 +284,8 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
   controllerFormIntent?: (sourceUrl: string, targetUrl: string) => MindbodyPublicFormIntent | undefined;
   /** Source controller's exact one-use observed anchor grant; never URL permission. */
   controllerGetIntent?: (sourceUrl: string, targetUrl: string) => boolean;
+  /** Fixed caller policy may only confirm denial; never dispatch or create read authority. */
+  denyUncorrelatedPost?: (request: NativeUncorrelatedPost) => boolean;
 } = {}): Promise<NativeRedirectRouting> {
   options.signal?.throwIfAborted();
   publicBrowserResponseLimit("document", "GET", options.responseProfile);
@@ -291,7 +294,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
   const cdp = await page.context().newCDPSession(page);
   const rootFrameId = (await cdp.send("Page.getFrameTree")).frameTree.frame.id;
   const records = new Map<string, RecordEntry>();
-  // Source-only abort tombstones are not request adapters or data records.
+  // Deny-only abort tombstones are not request adapters or data records.
   // Retain their IDs through this owner lifetime to reject duplicate/late work.
   const sourceDeniedFetchIds = new Set<string>();
   const networkIdentities = new Map<string, NetworkIdentity>();
@@ -879,7 +882,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
       }
       const networkId = event.networkId;
       if (!networkId) {
-        if (options.responseProfile !== SOURCE_ROUTING_RESPONSE_PROFILE || networkId !== undefined ||
+        if (options.responseProfile !== SOURCE_ROUTING_RESPONSE_PROFILE && !options.denyUncorrelatedPost || networkId !== undefined ||
             closed || options.signal?.aborted || generation.retired || boundaryPending || awaitingDocument ||
             event.redirectedRequestId !== undefined || initialPauses.has(event.requestId) ||
             typeof event.requestId !== "string" || !event.requestId || event.requestId.length > 1024 || /[\u0000-\u0020\u007f]/u.test(event.requestId) ||
@@ -901,6 +904,19 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         if (typeof event.request.postData === "string" && Buffer.byteLength(event.request.postData) > 32768) {
           await rejectInitial("NATIVE_REDIRECT_POST_BODY_LIMIT"); return;
         }
+        let callerDenied = false;
+        if (options.responseProfile !== SOURCE_ROUTING_RESPONSE_PROFILE) {
+          // Missing identity can never grant a request adapter or invoke the
+          // read handler. Only the fixed caller may confirm an already-denied
+          // bounded data POST; unknown/typed reads retain the fatal guard.
+          try {
+            callerDenied = ["xhr", "fetch"].includes(resourceKinds[event.resourceType]) && event.request.method === "POST" &&
+              event.request.hasPostData === true && typeof event.request.postData === "string" &&
+              options.denyUncorrelatedPost?.({ url: event.request.url, method: "POST", resourceType: resourceKinds[event.resourceType] as "xhr" | "fetch",
+                headers: headers(event.request.headers), body: event.request.postData }) === true;
+          } catch { /* An uncertain caller policy never weakens identity requirements. */ }
+          if (!callerDenied) { await rejectInitial("NATIVE_REDIRECT_NETWORK_ID_MISSING"); return; }
+        }
         sourceDeniedFetchIds.add(event.requestId); // Reserve before awaiting ACK.
         const deniedGeneration = generation;
         await bounded(reject(), "NATIVE_REDIRECT_ABORT_TIMEOUT");
@@ -910,7 +926,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         }
         // Confirmed denial is explicitly nonfatal. It can never replace the
         // first actual failure or become document/response completion evidence.
-        const diagnostic = { ...requestDiagnostic("NATIVE_REDIRECT_NETWORK_ID_MISSING"), duplicateRequestId: false };
+        const diagnostic = { ...requestDiagnostic(callerDenied ? "NATIVE_REDIRECT_REQUEST_REJECTED" : "NATIVE_REDIRECT_NETWORK_ID_MISSING"), duplicateRequestId: false };
         delete diagnostic.url;
         rejectedRequests.push(diagnostic); if (rejectedRequests.length > 12) rejectedRequests.shift();
         try { options.onRequestRejected?.({ ...diagnostic }); } catch { /* Denial facts cannot authorize work. */ }

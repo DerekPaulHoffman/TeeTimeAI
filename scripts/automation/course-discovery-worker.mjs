@@ -164,17 +164,36 @@ function physicalContactData(proof, outer, job) {
       proof.sourceWitnessSha256 === dataHash(source) && proof.semanticDigest === dataHash(semantic);
   } catch { return false; }
 }
+const nativeMainDocumentCapabilities = new WeakMap(), nativeObservationContexts = new WeakMap();
+const nativeDocumentHash = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+export function safeNativeMainDocumentContinuity(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      Object.keys(value).sort().join(",") !== "currentUrlSha256,documentBindingSha256,kind,observedAt,originalUrlSha256,status" ||
+      value.kind !== "NATIVE_MAIN_DOCUMENT_CONTINUITY_V1" || value.status !== 200 || !Number.isSafeInteger(value.observedAt) ||
+      ![value.originalUrlSha256,value.currentUrlSha256,value.documentBindingSha256].every(v => typeof v === "string" && /^[a-f0-9]{64}$/u.test(v))) return undefined;
+  return { ...value };
+}
+function currentNativeBookingContext(observation, contextUrl, bookingUrl) {
+  const native = nativeObservationContexts.get(observation);
+  return contextUrl === bookingUrl || Boolean(native?.live() && native.proof.originalUrlSha256 === nativeDocumentHash(bookingUrl) &&
+    native.proof.currentUrlSha256 === nativeDocumentHash(contextUrl));
+}
 /** This observation is controller memory only; checkpoints cannot restore it. */
-export function createDiscoveryAdapterObservation(job, bookingUrl, adapter, contextUrl) {
+export function createDiscoveryAdapterObservation(job, bookingUrl, adapter, contextUrl, nativeContinuity) {
   if (!safeObservedUrl(job?.request?.identity?.officialUrl) || !safeObservedUrl(bookingUrl) || !safeObservedUrl(contextUrl) ||
       !["FOREUP", "ACUITY", "TEEITUP", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS", "REX", "CPS", "MINDBODY"].includes(adapter?.family)) return undefined;
   const adapterKey = canonicalDataKey(adapter), identityKey = canonicalDataKey(job.request.identity),
     targetKey = canonicalDataKey(job.request.target), inputKey = canonicalDataKey(job.request.input);
   if (!adapterKey || !identityKey || !targetKey || !inputKey) return undefined;
-  return { jobId: job.id, officialUrl: job.request.identity.officialUrl, bookingUrl, contextUrl,
+  const observation = { jobId: job.id, officialUrl: job.request.identity.officialUrl, bookingUrl, contextUrl,
     identityKey, targetKey, inputKey, trustedContextKey: canonicalDataKey(job.request.trustedContext ?? {}), adapter: JSON.parse(adapterKey),
     ...(currentNativeProofRequired(adapter) ? { sourceFingerprint: job.sourceFingerprint, jobAttempt: job.attempts,
       firstPickedUpAt: job.firstPickedUpAt, deadlineAt: job.deadlineAt } : {}) };
+  const native = nativeMainDocumentCapabilities.get(nativeContinuity);
+  if (native?.live() && native.jobId === job.id && native.leaseToken === job.leaseToken &&
+      native.proof.originalUrlSha256 === nativeDocumentHash(bookingUrl) && native.proof.currentUrlSha256 === nativeDocumentHash(contextUrl))
+    nativeObservationContexts.set(observation, native);
+  return observation;
 }
 function currentNativeProofObservation(job, observation) {
   const first = Date.parse(job.firstPickedUpAt), end = Date.parse(job.deadlineAt);
@@ -316,7 +335,8 @@ export function bindDiscoveryRecipeIdentity(recipe, job, adapterObservation, con
           proof.hops.every((hop, index) => hopShape(hop, index) && publicUrl(hop.pageUrl) && publicUrl(hop.nextUrl) && sha(hop.witnessSha256) &&
             (index === 0 ? hop.pageUrl === (proof.rootDocumentProof?.documentUrl ?? proof.officialUrl) : proof.hops[index - 1].nextUrl === hop.pageUrl)) &&
           proof.hops.at(-1).nextUrl === proof.bookingUrl && new Set([proof.hops[0].pageUrl, ...proof.hops.map(hop => hop.nextUrl)]).size === proof.hops.length + 1 &&
-          [...proof.hops.map(hop => hop.pageUrl), proof.bookingUrl].includes(contextUrl) &&
+          ([...proof.hops.map(hop => hop.pageUrl), proof.bookingUrl].includes(contextUrl) ||
+            currentNativeBookingContext(adapterObservation, contextUrl, proof.bookingUrl)) &&
           (!currentNativeProofRequired(observed) || currentNativeProofObservation(job, adapterObservation)) &&
           (!proof.rootDocumentProof || nativeRootDocumentData(proof.rootDocumentProof, proof.officialUrl, proof.hops[0].pageUrl)) &&
           (!proof.physicalContactProof || proof.hops.length === (Object.hasOwn(proof.physicalContactProof, "bookingEntryUrl") ? 2 : 1) && physicalContactData(proof.physicalContactProof, proof, job)) &&
@@ -327,7 +347,7 @@ export function bindDiscoveryRecipeIdentity(recipe, job, adapterObservation, con
     }
     if (adapter.family === "CPS" && observed?.family === "CPS" && adapterObservation.jobId === job.id &&
         adapterObservation.officialUrl === job.request.identity.officialUrl && adapterObservation.bookingUrl === proposedSource.bookingUrl &&
-        adapterObservation.contextUrl === contextUrl && contextUrl === proposedSource.bookingUrl &&
+        adapterObservation.contextUrl === contextUrl && currentNativeBookingContext(adapterObservation, contextUrl, proposedSource.bookingUrl) &&
         adapterObservation.identityKey === canonicalDataKey(job.request.identity) && adapterObservation.targetKey === canonicalDataKey(job.request.target) &&
         adapterObservation.inputKey === canonicalDataKey(job.request.input) &&
         adapterObservation.trustedContextKey === canonicalDataKey(job.request.trustedContext ?? {}) && job.request.target.kind === "OUTDOOR") {
@@ -357,7 +377,7 @@ export function bindDiscoveryRecipeIdentity(recipe, job, adapterObservation, con
     }
     if (adapter.family === "TEEITUP" && observed?.family === "TEEITUP" && adapterObservation.jobId === job.id &&
         adapterObservation.officialUrl === job.request.identity.officialUrl && adapterObservation.bookingUrl === proposedSource.bookingUrl &&
-        adapterObservation.contextUrl === contextUrl && contextUrl === proposedSource.bookingUrl &&
+        adapterObservation.contextUrl === contextUrl && currentNativeBookingContext(adapterObservation, contextUrl, proposedSource.bookingUrl) &&
         adapterObservation.identityKey === canonicalDataKey(job.request.identity) && adapterObservation.targetKey === canonicalDataKey(job.request.target) &&
         adapterObservation.inputKey === canonicalDataKey(job.request.input) && job.request.target.kind === "OUTDOOR") {
       const inspected = { ...observed }; delete inspected.officialIdentityProof; delete inspected.officialBookingSourceProof; delete inspected.officialPostalConflictProof;
@@ -381,7 +401,8 @@ export function bindDiscoveryRecipeIdentity(recipe, job, adapterObservation, con
       const proof = observed.officialPostalConflictProof;
       if (canonicalDataKey(inspected) === canonicalDataKey(adapter) && proof?.kind === "OFFICIAL_POSTAL_CONFLICT" &&
           proof.officialUrl === job.request.identity.officialUrl && proof.officialSourceProof?.bookingUrl === proposedSource.bookingUrl &&
-          [proof.officialSourceProof?.officialPageUrl, proposedSource.bookingUrl].includes(contextUrl) && proof.alias === adapter.alias &&
+          ([proof.officialSourceProof?.officialPageUrl, proposedSource.bookingUrl].includes(contextUrl) ||
+            currentNativeBookingContext(adapterObservation, contextUrl, proposedSource.bookingUrl)) && proof.alias === adapter.alias &&
           adapter.facilityIds?.length === 1 && proof.facilityId === adapter.facilityIds[0] &&
           proof.canonicalAddress === job.request.identity.address && proof.timeZone === job.request.input.timeZone && proof.providerAddressVerified === false) {
         try { const serialized = JSON.stringify(proof); if (Buffer.byteLength(serialized, "utf8") <= 16_000) adapter.officialPostalConflictProof = JSON.parse(serialized); }
@@ -822,6 +843,7 @@ export function createDiscoverySnapshotCompactor() {
       }
       delete projected.completedPublicAssetRequests; delete projected.completedPublicAssetRequestsOverflow;
       delete projected.nativeDocumentRedirects;
+      delete projected.nativeMainDocumentContinuity;
       delete projected.nativeFirstFatal; delete projected.nativeRejectedRequests;
       delete projected.officialSourceDiagnostic; delete projected.navigationFailureKind;
       snapshot = { ...projected, ...safeNativeBrowserDiagnostics(snapshot), ...safeOfficialBrowserDiagnostics(snapshot) };
@@ -875,7 +897,7 @@ export function discoveryProcessEnvironment(environment = process.env) {
   return result;
 }
 
-export function resolveDiscoveryCli(cwd, { platform = process.platform, arch = process.arch, execute = execFileSync } = {}) {
+export function resolveDiscoveryCli(cwd, { platform = process.platform, arch = process.arch, execute = execFileSync, timeoutMs = 10_000 } = {}) {
   const targets = {
     "win32-x64": "x86_64-pc-windows-msvc", "win32-arm64": "aarch64-pc-windows-msvc",
     "linux-x64": "x86_64-unknown-linux-musl", "linux-arm64": "aarch64-unknown-linux-musl",
@@ -892,7 +914,7 @@ export function resolveDiscoveryCli(cwd, { platform = process.platform, arch = p
   if (pkg.version !== VERSION || pkg.optionalDependencies?.[alias] !== `npm:@openai/codex@${nativeVersion}` || native.version !== nativeVersion ||
       relative(modules, nativeRoot).startsWith("..")) throw discoveryError("DISCOVERY_CLI_VERSION_MISMATCH");
   const cliPath = realpathSync(join(nativeRoot, "vendor", target, "bin", platform === "win32" ? "codex.exe" : "codex"));
-  const version = execute(cliPath, ["--version"], { encoding: "utf8", windowsHide: true, timeout: 10_000 }).trim();
+  const version = execute(cliPath, ["--version"], { encoding: "utf8", windowsHide: true, timeout: Math.max(1, Math.min(10_000, timeoutMs)) }).trim();
   if (version !== `codex-cli ${VERSION}`) throw discoveryError("DISCOVERY_CLI_VERSION_MISMATCH");
   return cliPath;
 }
@@ -1032,7 +1054,30 @@ export function createDiscoveryBrowser({ cwd, deadlineAt, initialUrls, timeZone 
       "--time-zone", timeZone],
     cwd, environment: { ...discoveryProcessEnvironment(), ...helperEnvironment }, signal, timeoutMs: Math.min(90_000, Math.max(1, Date.parse(deadlineAt) - Date.now())),
   });
-  return { request: value => channel.request(value), async close() {
+  let closed = false, lastSnapshot, lastProof;
+  return { async request(value) {
+    lastSnapshot = undefined; lastProof = undefined;
+    const snapshot = await channel.request(value);
+    if (snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)) {
+      const proof = safeNativeMainDocumentContinuity(snapshot.nativeMainDocumentContinuity);
+      delete snapshot.nativeMainDocumentContinuity;
+      if (proof && snapshot.browserTransport === "NATIVE_CHROME" && snapshot.navigationStatus === 200 && !snapshot.accessRequirementObserved && !snapshot.nativeFirstFatal && safeObservedUrl(snapshot.url) &&
+          proof.currentUrlSha256 === nativeDocumentHash(snapshot.url)) { lastSnapshot = snapshot; lastProof = proof; }
+    }
+    return snapshot;
+  }, currentMainDocumentContinuity(snapshot, expectedOriginalUrl, now = Date.now()) {
+    if (closed || signal?.aborted || !safeObservedUrl(expectedOriginalUrl) || snapshot !== lastSnapshot || !lastProof || snapshot.accessRequirementObserved || snapshot.nativeFirstFatal ||
+        lastProof.currentUrlSha256 !== nativeDocumentHash(snapshot.url) || snapshot.browserTransport !== "NATIVE_CHROME" || snapshot.navigationStatus !== 200 ||
+        lastProof.originalUrlSha256 !== nativeDocumentHash(expectedOriginalUrl) || !Number.isFinite(now) ||
+        now < lastProof.observedAt || now - lastProof.observedAt > 5000 || now >= Date.parse(deadlineAt)) return undefined;
+    const proof = { ...lastProof }, capability = { ...proof }, capturedUrl = snapshot.url;
+    nativeMainDocumentCapabilities.set(capability, { proof, jobId: helperEnvironment.COURSE_DISCOVERY_JOB_ID, leaseToken: helperEnvironment.COURSE_DISCOVERY_LEASE_TOKEN,
+      live: () => !closed && !signal?.aborted && snapshot === lastSnapshot && snapshot.url === capturedUrl && snapshot.browserTransport === "NATIVE_CHROME" &&
+        snapshot.navigationStatus === 200 && !snapshot.accessRequirementObserved && !snapshot.nativeFirstFatal && lastProof?.documentBindingSha256 === proof.documentBindingSha256 &&
+        Date.now() >= proof.observedAt && Date.now() - proof.observedAt <= 5000 && Date.now() < Date.parse(deadlineAt) });
+    return capability;
+  }, async close() {
+    closed = true; lastSnapshot = undefined; lastProof = undefined;
     let timer;
     try { await Promise.race([channel.request({ action: "finish" }), new Promise(done => { timer = setTimeout(done, 3_000); })]); }
     catch { /* The job may already be cancelled or closed. */ }
@@ -1169,13 +1214,28 @@ export async function verifyDiscoveryCandidate({ client, job, recipe, executeRec
   return activation;
 }
 
+export function discoveryWorkerWorkDeadline(job, workDeadlineAt) {
+  const absolute = Date.parse(job?.deadlineAt), supplied = workDeadlineAt === undefined ? absolute : Date.parse(workDeadlineAt);
+  const first = job?.firstPickedUpAt === undefined ? undefined : Date.parse(job.firstPickedUpAt);
+  if (!Number.isFinite(absolute) || !Number.isFinite(supplied) || first !== undefined && !Number.isFinite(first)) throw discoveryError("DISCOVERY_WORK_DEADLINE");
+  return Math.min(absolute, supplied, first === undefined ? Infinity : first + 720_000);
+}
+
 export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineAt, client, cwd, signal, model = DISCOVERY_MODEL, beforeActivate = async () => {}, afterActivate = async () => {},
   processFactory = createDiscoveryProcess, browserFactory = createDiscoveryBrowser,
   inspectProtocol = args => inspectDiscoveryPublicProtocol({ cwd, helperEnvironment: client.helperEnvironment("discovery", originalJob), ...args }),
   validateRecipe = args => validateDiscoveryRecipe({ cwd, ...args }),
   executeRecipe = args => executeDiscoveryRecipe({ cwd, helperEnvironment: client.helperEnvironment("discovery", originalJob), ...args }), resolveCli = resolveDiscoveryCli,
-  sourceHome = process.env.CODEX_HOME || join(homedir(), ".codex"), recipeSchema, modelCatalogJson }) {
-  const job = { ...originalJob, deadlineAt: workDeadlineAt ?? originalJob.deadlineAt };
+  sourceHome = process.env.CODEX_HOME || join(homedir(), ".codex"), recipeSchema, modelCatalogJson, freshOfficialStart = false, checkpointProvenance = {} }) {
+  const job = originalJob, effectiveDeadline = discoveryWorkerWorkDeadline(job, workDeadlineAt), operationDeadlineAt = new Date(effectiveDeadline).toISOString();
+  const checkWork = () => { if (Date.now() >= effectiveDeadline) throw discoveryError("DISCOVERY_WORK_DEADLINE"); signal?.throwIfAborted(); };
+  checkWork();
+  if (workDeadlineAt !== undefined || job.firstPickedUpAt !== undefined)
+    signal = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(Math.max(1, effectiveDeadline - Date.now()))]);
+  if (!checkpointProvenance || typeof checkpointProvenance !== "object" || Array.isArray(checkpointProvenance) ||
+      Object.keys(checkpointProvenance).some(key => !["stagehandSource", "stagehandFailure", "stagehandProgress"].includes(key))) throw discoveryError("DISCOVERY_CHECKPOINT_INVALID");
+  const provenance = structuredClone(checkpointProvenance);
+  const checkpointBytes = Object.keys(provenance).length ? 32_768 : 30_000;
   const temporary = mkdtempSync(join(tmpdir(), "tee-discovery-worker-"));
   const working = join(temporary, "workspace");
   mkdirSync(working);
@@ -1185,7 +1245,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
   const publicAssets = createDiscoveryPublicAssetInventory();
   let activated;
   let activationStarted = false;
-  const restoredController = readDiscoveryControllerCheckpoint(job.checkpoint, job.request.identity.officialUrl);
+  const restoredController = readDiscoveryControllerCheckpoint(freshOfficialStart ? undefined : job.checkpoint, job.request.identity.officialUrl);
   const observedNavigationUrls = new Set(restoredController.urls);
   const observedReadUrls = new Set(restoredController.readUrls ?? []);
   // Admission is separate from evidence of a visited or successfully read URL.
@@ -1203,15 +1263,17 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
   const controllerCheckpoint = () => ({ version: 1, officialUrl: job.request.identity.officialUrl,
     officialSourceObserved, observedNavigationUrls: [...observedNavigationUrls], observedReadUrls: [...observedReadUrls], observedEntryUrls: [...observedEntryUrls], browserTransport, transportFallbackUsed, lastFeedback, lastFailure, terminalDiagnostic });
   const saveCheckpoint = extra => {
-    let payload = { summary: checkpointSummary, controller: controllerCheckpoint(), ...extra };
-    while (Buffer.byteLength(JSON.stringify(payload), "utf8") > 30_000 && (observedReadUrls.size || observedEntryUrls.size || observedNavigationUrls.size)) {
+    if (activationStarted || activated) throw discoveryError("DISCOVERY_ACTIVATION_FINISHED");
+    let payload = { ...provenance, summary: checkpointSummary, controller: controllerCheckpoint(), ...extra };
+    while (Buffer.byteLength(JSON.stringify(payload), "utf8") > checkpointBytes && (observedReadUrls.size || observedEntryUrls.size || observedNavigationUrls.size)) {
       const oldest = observedReadUrls.size ? observedReadUrls : observedEntryUrls.size ? observedEntryUrls : observedNavigationUrls;
       oldest.delete(oldest.values().next().value);
-      payload = { summary: checkpointSummary, controller: controllerCheckpoint(), ...extra };
+      payload = { ...provenance, summary: checkpointSummary, controller: controllerCheckpoint(), ...extra };
     }
+    if (Buffer.byteLength(JSON.stringify(payload), "utf8") > checkpointBytes) throw discoveryError("DISCOVERY_CHECKPOINT_INVALID");
     return client.checkpoint(job.id, job.leaseToken, payload, signal);
   };
-  const initialUrls = () => [...new Set([job.request.identity.officialUrl, job.request.identity.bookingUrl,
+  const initialUrls = () => freshOfficialStart && !officialSourceObserved ? [job.request.identity.officialUrl] : [...new Set([job.request.identity.officialUrl, job.request.identity.bookingUrl,
     ...observedNavigationUrls, ...observedEntryUrls].filter(Boolean))].slice(0, 16);
   const boundObservedUrls = () => {
     while (observedReadUrls.size + observedEntryUrls.size + observedNavigationUrls.size > 14) {
@@ -1239,7 +1301,9 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
   let browserThrottleObserved = false;
   let reportedMetrics;
   let modelFailure;
+  let attemptedModelTurns = 0, completedModelTurns = 0, primaryFailure;
   const metrics = () => (reportedMetrics = { model, tokenUsage, browserActions, replayDurationsMs, browserTransportsTried,
+    attemptedModelTurns, completedModelTurns, originalDeadlineAt: job.deadlineAt, workDeadlineAt: operationDeadlineAt,
     ...(modelFailure ? { modelFailure } : {}),
     ...(firstBrowserStartupMs !== undefined ? { firstBrowserStartupMs } : {}), ...(browserStartedAt ? { browserStartedAt } : {}),
     ...(firstOpenStartedAt ? { firstOpenStartedAt } : {}), ...(firstOpenCompletedAt ? { firstOpenCompletedAt,
@@ -1268,6 +1332,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
   // Early failures may occur before the turn completion is awaited.
   completion.catch(() => {});
   try {
+    checkWork();
     const snapshot = modelCatalogJson ?? prepareDiscoveryModelCatalog({ sourceHome, model });
     let catalog;
     try { catalog = restrictedModelCatalog(JSON.parse(snapshot), model); }
@@ -1277,12 +1342,15 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
     }
     const catalogPath = join(temporary, "model-catalog.json");
     writeFileSync(catalogPath, JSON.stringify(catalog), { mode: 0o600 });
+    checkWork();
     if (!existsSync(join(sourceHome, "auth.json"))) throw discoveryError("DISCOVERY_CODEX_AUTH_UNAVAILABLE");
     copyFileSync(join(sourceHome, "auth.json"), join(temporary, "auth.json"));
-    const cliPath = resolveCli(cwd);
+    const cliPath = resolveCli(cwd, { timeoutMs: Math.max(1, effectiveDeadline - Date.now()) });
+    checkWork();
     recipeSchema ??= JSON.parse(execFileSync(process.execPath,
       [join(cwd, "node_modules/tsx/dist/cli.mjs"), join(cwd, "scripts/automation/course-discovery-browser.ts"), "--recipe-schema"],
-      { cwd, env: discoveryProcessEnvironment(), encoding: "utf8", windowsHide: true, timeout: 15_000, maxBuffer: 500_000 }));
+      { cwd, env: discoveryProcessEnvironment(), encoding: "utf8", windowsHide: true, timeout: Math.max(1, Math.min(15_000, effectiveDeadline - Date.now())), maxBuffer: 500_000 }));
+    checkWork();
     const configuration = { ...DISCOVERY_CONFIG, model_catalog_json: catalogPath };
     const args = ["app-server", "--stdio", ...Object.entries(configuration).flatMap(([key, value]) => ["-c", `${key}=${JSON.stringify(value)}`])];
     app = processFactory({ executable: cliPath, args, cwd: working,
@@ -1300,7 +1368,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
           rejectTurn(discoveryError("DISCOVERY_FORBIDDEN_TOOL")); return;
         }
         if (message.method === "turn/completed" && message.params?.threadId === threadId && message.params?.turn?.id === turnId) {
-          if (message.params.turn.status === "completed") finish();
+          if (message.params.turn.status === "completed") { completedModelTurns++; finish(); }
           else {
             modelFailure = safeDiscoveryTurnFailure(message.params.turn);
             rejectTurn(discoveryError("DISCOVERY_TURN_FAILED"));
@@ -1318,6 +1386,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
         }
         queuedTools++;
         const run = async () => { let replayClosedBrowser = false; try {
+          checkWork();
           if (stopping || signal?.aborted) throw discoveryError("DISCOVERY_CANCELLED");
           if (activated) throw discoveryError("DISCOVERY_ALREADY_ACTIVATED");
           if (activationStarted) throw discoveryError("DISCOVERY_ACTIVATION_FINISHED");
@@ -1330,6 +1399,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
             // its access authorization after an unsuccessful browser action.
             currentAccessRequirementObserved = false;
             if (!input || !BROWSER_ACTIONS.includes(input.action) || Object.keys(input).some(key => !["action", "url", "target", "option", "text", "direction", "selector"].includes(key))) throw discoveryError("DISCOVERY_BROWSER_ACTION_INVALID");
+            if (freshOfficialStart && !officialSourceObserved && (input.action !== "open" || input.url !== job.request.identity.officialUrl)) throw discoveryError("DISCOVERY_SOURCE_NOT_OBSERVED");
             browserActions++;
             if (browserControlsInvalidated && !["open", "inspect_adapter", "finish"].includes(input.action))
               throw discoveryError("BROWSER_SESSION_CLOSED");
@@ -1337,7 +1407,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
             const directSource = discoveryDirectProtocolSource(job, input, { officialSourceObserved,
               officialUrl: job.request.identity.officialUrl, observedNavigationUrls });
             if (directSource) {
-              const descriptor = await inspectProtocol({ source: directSource, input: structuredClone(job.request.input), deadlineAt: job.deadlineAt, signal });
+              const descriptor = await inspectProtocol({ source: directSource, input: structuredClone(job.request.input), deadlineAt: operationDeadlineAt, signal });
               const measured = descriptor?.observation;
               if (Number.isSafeInteger(measured?.publicRequests) && measured.publicRequests >= 0 && measured.publicRequests <= 2)
                 providerRequestsObserved = (providerRequestsObserved ?? 0) + measured.publicRequests;
@@ -1350,7 +1420,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
             if (!browser) {
               adapterObservation = undefined;
               browserStartedAt ??= new Date().toISOString(); lastRequestCount = 0; lastResponseBytes = 0;
-              browser = browserFactory({ cwd, deadlineAt: job.deadlineAt, timeZone: job.request.input.timeZone, venueName: job.request.identity.name,
+              browser = browserFactory({ cwd, deadlineAt: operationDeadlineAt, timeZone: job.request.input.timeZone, venueName: job.request.identity.name,
                 requestedInput: job.request.input,
                 trustedContext: job.request.trustedContext,
                 venueAddress: job.request.identity.address,
@@ -1383,7 +1453,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
                 throw error?.code === "DISCOVERY_LEASE_REJECTED" ? error : discoveryError("DISCOVERY_TRANSPORT_FALLBACK_FAILED");
               }
               lastRequestCount = 0; lastResponseBytes = 0; compactSnapshot = createDiscoverySnapshotCompactor();
-              browser = browserFactory({ cwd, deadlineAt: job.deadlineAt, timeZone: job.request.input.timeZone, venueName: job.request.identity.name,
+              browser = browserFactory({ cwd, deadlineAt: operationDeadlineAt, timeZone: job.request.input.timeZone, venueName: job.request.identity.name,
                 requestedInput: job.request.input,
                 trustedContext: job.request.trustedContext,
                 venueAddress: job.request.identity.address, venueOfficialUrl: job.request.identity.officialUrl,
@@ -1406,7 +1476,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
               adapterObservation = undefined;
               publicAssets.clear();
               await browser.close(); lastRequestCount = 0; lastResponseBytes = 0;
-              browser = browserFactory({ cwd, deadlineAt: job.deadlineAt, timeZone: job.request.input.timeZone, venueName: job.request.identity.name,
+              browser = browserFactory({ cwd, deadlineAt: operationDeadlineAt, timeZone: job.request.input.timeZone, venueName: job.request.identity.name,
                 requestedInput: job.request.input,
                 trustedContext: job.request.trustedContext,
                 venueAddress: job.request.identity.address,
@@ -1440,10 +1510,12 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
             }
             boundObservedUrls();
             if (typeof job.request.identity.officialUrl === "string" &&
-                (snapshot?.url === job.request.identity.officialUrl || input.action === "open" && input.url === job.request.identity.officialUrl)) officialSourceObserved = true;
+                (snapshot?.url === job.request.identity.officialUrl || input.action === "open" && input.url === job.request.identity.officialUrl) &&
+                (!freshOfficialStart || snapshot?.browserTransport === "NATIVE_CHROME" && snapshot.navigationStatus === 200 && !snapshot.accessRequirementObserved && !snapshot.nativeFirstFatal)) officialSourceObserved = true;
             if (lastBrowserSnapshot?.url !== snapshot?.url) adapterObservation = undefined;
             if (input.action === "inspect_adapter")
-              adapterObservation = createDiscoveryAdapterObservation(job, input.url, snapshot?.adapter, snapshot?.url);
+              adapterObservation = createDiscoveryAdapterObservation(job, input.url, snapshot?.adapter, snapshot?.url,
+                browser.currentMainDocumentContinuity?.(snapshot, input.url));
             lastBrowserSnapshot = snapshot;
             // Collect trusted completed metadata before model compaction. The
             // private inventory never survives a browser/transport lifetime.
@@ -1484,6 +1556,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
               result = { saved: true };
             }
           } else {
+            if (freshOfficialStart && !officialSourceObserved) throw discoveryError("DISCOVERY_SOURCE_NOT_OBSERVED");
             if (!input?.recipe || Object.keys(input).some(key => key !== "recipe") || activated) throw discoveryError("DISCOVERY_PROPOSAL_INVALID");
             let recipe = bindDiscoveryRecipeIdentity(input.recipe, job, adapterObservation, lastBrowserSnapshot?.url);
             const actualBrowserTransport = browser && !browserControlsInvalidated && lastBrowserSnapshot?.browserTransport === browserTransport ? browserTransport : undefined;
@@ -1507,9 +1580,9 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
             replayClosedBrowser = true; browserControlsInvalidated = true;
             lastBrowserSnapshot = undefined; currentAccessRequirementObserved = false;
             adapterObservation = undefined;
-            activated = await verifyDiscoveryCandidate({ client, job, recipe, executeRecipe, signal, sourceEvidence,
+            activated = await verifyDiscoveryCandidate({ client, job, recipe, executeRecipe: options => executeRecipe({ ...options, deadlineAt: operationDeadlineAt }), signal, sourceEvidence,
               onReplay: ({ elapsedMs }) => replayDurationsMs.push(elapsedMs),
-              beforeActivate: async () => { activationStarted = true; await beforeActivate(); },
+              beforeActivate: async () => { checkWork(); activationStarted = true; await beforeActivate(); },
               afterActivate: () => afterActivate({ metrics: metrics() }) });
             result = { activated: true };
           }
@@ -1549,7 +1622,9 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
         return queued;
       },
     });
+    checkWork();
     await app.request("initialize", { clientInfo: { name: "tee_time_spot_discovery", version: "1.0" }, capabilities: { experimentalApi: true } });
+    checkWork();
     app.notify("initialized", {});
     const started = await app.request("thread/start", { model, cwd: working, ephemeral: true, approvalPolicy: "never", sandbox: "read-only",
       environments: [], runtimeWorkspaceRoots: [], dynamicTools: DISCOVERY_TOOLS, config: configuration,
@@ -1585,13 +1660,16 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
       ].join(" "),
     });
     if (started.approvalPolicy !== "never" || started.sandbox?.type !== "readOnly") throw discoveryError("DISCOVERY_SANDBOX_NOT_ACKNOWLEDGED");
+    checkWork();
     threadId = started.thread?.id;
     if (!threadId) throw discoveryError("DISCOVERY_THREAD_INVALID");
+    attemptedModelTurns++;
     const turn = await app.request("turn/start", { threadId, input: [{ type: "text", text: JSON.stringify({ identity: job.request.identity, target: job.request.target,
-      input: job.request.input, deadlineAt: job.deadlineAt, attempt: job.attempts,
+      input: job.request.input, deadlineAt: operationDeadlineAt, attempt: job.attempts,
       trustedResumeUrls: [...restoredController.urls, ...(restoredController.entryUrls ?? [])], activeBrowserTransport: browserTransport,
       previousDiagnostic: restoredController.lastFailure ?? restoredController.lastFeedback,
       previousCheckpoint: typeof job.checkpoint?.summary === "string" ? job.checkpoint.summary.slice(0, 2000) : undefined }) }] });
+    checkWork();
     turnId = turn.turn?.id ?? turnId;
     if (!turnId) throw discoveryError("DISCOVERY_TURN_INVALID");
     const aborted = new Promise((_, reject) => {
@@ -1609,20 +1687,24 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
     }
     return { outcome: "activated", activation: activated, metrics: metrics() };
   } catch (error) {
+    primaryFailure = error;
     if (error instanceof Error) error.discoveryMetrics = metrics();
     throw error;
   } finally {
     stopping = true;
     publicAssets.clear();
     if (app && threadId && turnId) await app.request("turn/interrupt", { threadId, turnId }).catch(() => {});
-    await retiringBrowser?.close().catch(() => {});
-    await browser?.close();
-    await app?.close();
+    let browserClosed = true, modelClosed = true;
+    try { await retiringBrowser?.close(); } catch { browserClosed = false; }
+    try { await browser?.close(); } catch { browserClosed = false; }
+    try { await app?.close(); } catch { modelClosed = false; }
     // Final usage may arrive while the completed turn is being interrupted or
     // the app-server transport is closing, after the result was constructed.
-    if (reportedMetrics) reportedMetrics.tokenUsage = { ...tokenUsage };
+    if (reportedMetrics) Object.assign(reportedMetrics, { tokenUsage: { ...tokenUsage }, attemptedModelTurns, completedModelTurns });
     // This directory is created by this invocation under the OS temp root only.
     const cleanup = await cleanupDiscoveryDirectory(temporary);
+    if (reportedMetrics) reportedMetrics.cleanup = { browserClosed, modelClosed, credentialsRemoved: cleanup.credentialsRemoved, directoryRemoved: cleanup.complete };
     if (!cleanup.complete && reportedMetrics) reportedMetrics.cleanupWarning = cleanup.credentialsRemoved ? "TEMP_DIRECTORY_RETAINED_WITHOUT_AUTH" : "TEMP_CREDENTIAL_CLEANUP_FAILED";
+    if ((!browserClosed || !modelClosed) && !primaryFailure && !activated) throw discoveryError("DISCOVERY_PROCESS_CLOSE_FAILED");
   }
 }

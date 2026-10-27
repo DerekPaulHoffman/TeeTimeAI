@@ -15,6 +15,18 @@ test('native source aliases conflict failclosed and native-linked href requires 
 test('only actually visible embedded frame source may be proposed',()=>{
  const r={visitedUrls:[official],frameLedger:[{pageUrl:official,frames:[{src:source,visible:false}]}]};assert.deepEqual(candidate(r),[]);r.frameLedger[0].frames[0].visible=true;assert.deepEqual(candidate(r),[source]);
 });
+
+test('only exact completed native frame redirect final URL becomes a source-only candidate',()=>{
+ const at=new Date().toISOString(),frame='https://public-course.play.teeitup.com/',final='https://public-course.book.teeitup.com/';
+ const make=()=>({startedAt:at,finishedAt:at,visitedUrls:[official,final],frameLedger:[{kind:'NATIVE_VISIBLE_FRAME',pageUrl:official,observedAt:at,documentHash:'a'.repeat(64),frames:[{src:frame,visible:true}]}],
+  nativeFrameNavigations:[{kind:'NATIVE_FRAME_SOURCE_OPEN',pageUrl:official,frameUrl:frame,observedAt:at,documentHash:'a'.repeat(64),finalUrl:final,completedAt:at,finalDocumentHash:'b'.repeat(64),redirects:[{fromUrl:frame,toUrl:final,status:302,completed:true}]}]});
+ assert.deepEqual(candidate(make()),[frame,final]);assert.deepEqual(observedBookingSourceCandidates(make(),official),[official]);
+ for(const mutate of[r=>r.nativeFrameNavigations[0].redirects[0].fromUrl='https://unobserved.example/',r=>r.nativeFrameNavigations[0].redirects[0].completed=false,
+  r=>r.nativeFrameNavigations[0].completedAt='2000-01-01T00:00:00.000Z',r=>r.nativeFrameNavigations[0].finalDocumentHash='bad',
+  r=>r.frameLedger[0].frames[0].visible=false,r=>{r.frameLedger[0].pageUrl='https://foreign.example/';r.nativeFrameNavigations[0].pageUrl='https://foreign.example/';}]){
+  const r=make();mutate(r);assert.equal(candidate(r).includes(final),false);
+ }
+});
 function visibleReport(links=[source]){const at=new Date().toISOString();return{startedAt:at,finishedAt:at,visitedUrls:[official],actions:[],officialLinkLedger:[{kind:'NATIVE_VISIBLE_DOM',observedAt:at,pageUrl:official,links:links.map(href=>({href,visible:true}))}]};}
 test('fresh native visible DOM href is eligible without click or visiting its landing, full/default stays unchanged',()=>{
  const r=visibleReport();assert.deepEqual(candidate(r),[source]);

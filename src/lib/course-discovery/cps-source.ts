@@ -122,13 +122,21 @@ export function inspectCpsOfficialDocument(html: string, pageUrl: string, source
 
 const configurationSchema = z.object({ siteName: tenant, onlineApi: publicValue, authorityBaseUrl: publicValue,
   clientId: publicValue, websiteId: publicValue, apiKey: publicValue.optional(), buildNumber: z.string().trim() }).passthrough();
+// Classification only. An unknown public build has no reviewed header/session
+// contract and must never inherit version-specific IDs, keys or read authority.
+const configurationCoreSchema = z.object({ siteName: tenant, onlineApi: publicValue, authorityBaseUrl: publicValue,
+  buildNumber: z.string().max(64).trim().regex(/^(?:0|[1-9]\d{0,2})\.(?:0|[1-9]\d{0,2})\.(?:0|[1-9]\d{0,2})\.(?:0|[1-9]\d{0,19})$/u) }).passthrough();
 export type CpsConfiguration = z.infer<typeof configurationSchema>;
 const optionCourse = z.object({ courseId: id, courseName: label, webSiteId: publicValue }).passthrough();
 const optionsSchema = z.object({ webSiteId: publicValue, courseOptions: z.array(optionCourse).min(1).max(40),
   reservationOptions: z.object({ terminalId: z.number().int().min(0).max(2_147_483_647) }).passthrough() }).passthrough();
 export type CpsOptions = z.infer<typeof optionsSchema>;
 export function parseCpsConfiguration(value: unknown, source: CpsSource): CpsConfiguration {
-  const result = configurationSchema.safeParse(value), context = parseCpsSource(source.bookingUrl);
+  const context = parseCpsSource(source.bookingUrl), core = configurationCoreSchema.safeParse(value);
+  if (core.success && context && core.data.siteName === context.tenant && core.data.onlineApi === context.origin + CPS_API_PATH &&
+      core.data.authorityBaseUrl === context.origin + "/identityapi" && !reviewedPublicBuilds.has(core.data.buildNumber))
+    cpsFailure("CPS_PUBLIC_BUILD_UNSUPPORTED");
+  const result = configurationSchema.safeParse(value);
   if (!result.success || !context || result.data.siteName !== context.tenant || result.data.onlineApi !== context.origin + CPS_API_PATH ||
       result.data.authorityBaseUrl !== context.origin + "/identityapi" || !reviewedPublicBuilds.has(result.data.buildNumber) ||
       result.data.buildNumber === CPS_PUBLIC_BUILD && !result.data.apiKey) cpsFailure("CPS_CONFIGURATION_UNVERIFIED");

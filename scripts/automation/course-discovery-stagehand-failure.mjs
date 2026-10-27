@@ -2,7 +2,7 @@ import { discoveryError } from "./course-discovery-client.mjs";
 import { canonicalStagehandData as canonical, stagehandDataHash as hash, createStagehandSourceCheckpoint } from "./course-discovery-stagehand-source.mjs";
 import { projectSourceDiagnostic, sourceTransportCodes } from "./stagehand/source-diagnostic.mjs";
 import { safeTeeItUpDelegationDiagnostic, safeFixedAdapterReadDiagnostic } from "./course-discovery-worker.mjs";
-import { currentStagehandInspectionDiagnostic } from "./course-discovery-stagehand-inspection.mjs";
+import { currentStagehandInspectionDiagnostic, safeInspectionReadability } from "./course-discovery-stagehand-inspection.mjs";
 
 const LIMIT = 32000, KIND = "OWN_STAGEHAND_FAILURE_DIAGNOSTIC";
 const phases = new Set(["SOURCE_RESUME", "SOURCE_DISCOVERY", "SOURCE_VALIDATION", "FIXED_INSPECTION", "RECIPE_VALIDATION", "REPLAY", "ACTIVATION", "UNKNOWN"]);
@@ -44,8 +44,10 @@ function validEntry(value, job, now) {
   if (value.fixedInspectionDiagnostic !== undefined) {
     const teeItUpDelegation = safeTeeItUpDelegationDiagnostic(value.fixedInspectionDiagnostic?.teeItUpDelegation);
     const adapterRead = safeFixedAdapterReadDiagnostic(value.fixedInspectionDiagnostic?.adapterRead);
-    const diagnostic = teeItUpDelegation || adapterRead ? {
+    const readability = safeInspectionReadability(value.fixedInspectionDiagnostic?.readability);
+    const diagnostic = teeItUpDelegation || adapterRead || readability ? {
       ...(teeItUpDelegation ? { teeItUpDelegation } : {}), ...(adapterRead ? { adapterRead } : {}),
+      ...(readability ? { readability } : {}),
     } : undefined;
     if (value.phase !== "FIXED_INSPECTION" || !diagnostic || canonical(diagnostic) !== canonical(value.fixedInspectionDiagnostic) ||
         value.fixedInspectionDiagnosticSha256 !== hash(diagnostic)) return false;

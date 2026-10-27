@@ -75,7 +75,7 @@ export function collectNativeOfficialPublicMetadata(input: string | { venueName:
   const service = /\s(?:and|&)\s+([\p{L}][\p{L} -]{1,39})$/iu.exec(expectedVenueName)?.[1];
   const serviceWords = service?.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim().split(/\s+/u) ?? [];
   const brandLinks: Array<{ href: string; text: string }> = [];
-  for (const node of Array.from(document.querySelectorAll('h1,h2,a[href],address,p,div,li,td')).slice(0, 3000)) {
+  for (const node of Array.from(document.querySelectorAll('h1,h2,h3,h4,h5,h6,a[href],address,p,div,li,td')).slice(0, 3000)) {
     if (!(node instanceof HTMLElement) || node.closest('script,template,noscript,iframe,input,textarea,select,button,label,[contenteditable],[hidden],[inert],[aria-hidden="true"]') ||
         node.querySelector('input,textarea,select,button,label,[contenteditable]')) continue;
     const form = node.closest("form");
@@ -91,7 +91,7 @@ export function collectNativeOfficialPublicMetadata(input: string | { venueName:
     }
     if (!visible || ancestor) continue;
     const value = node.innerText.replace(/\n+/gu, ', ').replace(/\s+/gu, ' ').trim();
-    if (/^H[12]$/u.test(node.tagName) && value.length <= 300 && headings.length < 80) headings.push(value);
+    if (/^H[1-6]$/u.test(node.tagName) && value.length <= 300 && headings.length < 80) headings.push(value);
     if (node instanceof HTMLAnchorElement && linkUrls.length < 120) linkUrls.push(node.href);
     if (node instanceof HTMLAnchorElement && !form && value.length <= 120 && publicBusinessLabels.length < 20 && serviceWords.length) {
       const words = value.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim().split(/\s+/u);
