@@ -1596,7 +1596,12 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
           const feedback = safeLastFeedback({ code: error?.code, details: error?.details }) ??
             (message.params.tool === "discovery_browser" ? discoveryBrowserFeedback(
               safeBrowserFailureDiagnostics(error?.details?.browserDiagnostics) ?? lastBrowserSnapshot, message.params.arguments?.action, error) : undefined);
-          if (feedback) { lastFeedback = feedback; lastFailure = retainMeaningfulFailure(lastFailure, feedback); await saveCheckpoint({}).catch(() => {}); }
+          if (feedback) {
+            lastFeedback = feedback; lastFailure = retainMeaningfulFailure(lastFailure, feedback);
+            if (!activationStarted && !activated) {
+              try { await saveCheckpoint({}); } catch { /* Feedback persistence is best effort before activation. */ }
+            }
+          }
           send({ id: message.id, result: { success: false, contentItems: [{ type: "inputText", text: JSON.stringify({ error: /^[A-Z_]+$/u.test(error?.code ?? "") ? error.code : "DISCOVERY_TOOL_FAILED",
             ...(feedback ? { details: feedback.details } : {}),
             ...(replayClosedBrowser ? { browserSessionClosed: true,

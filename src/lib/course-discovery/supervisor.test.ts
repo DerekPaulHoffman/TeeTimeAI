@@ -5,7 +5,7 @@ import { PassThrough } from "node:stream";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createCourseDiscoveryClient } from "../../../scripts/automation/course-discovery-client.mjs";
 import { isSafeRecipeUrl, SERVER_DOCUMENT_SELECTOR_MESSAGE } from "./recipe";
 import { createCourseDiscoverySupervisor, discoveryWorkDeadline, validateClaimedDiscoveryJob, validateClaimedRecipeExecution } from "../../../scripts/automation/course-discovery-supervisor.mjs";
@@ -13,6 +13,7 @@ import { cleanupDiscoveryDirectory, createDiscoveryBrowser, createDiscoveryProce
 
 afterEach(() => { vi.useRealTimers(); });
 const now = new Date("2026-10-20T14:00:00Z").getTime();
+const workerWorkDeadline = new Date(now + 12 * 60_000).toISOString();
 const job = (id = "job-1") => ({ id, leaseToken: "private-lease-value", attempts: 1,
   firstPickedUpAt: new Date(now).toISOString(),
   deadlineAt: new Date(now + 15 * 60_000).toISOString(),
@@ -540,6 +541,23 @@ describe("first-attempt model overload cooldown", () => {
 });
 
 describe("controller-only verification", () => {
+  beforeEach(() => {
+    // Worker fixtures share the immutable pickup above. Freeze its clock while
+    // leaving asynchronous process replies and cleanup timers genuinely live.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(now);
+  });
+
+  it.each([720_000, 900_000])("rejects the same original job after %ims instead of refreshing its deadline", async elapsed => {
+    const assigned = { ...job(), attempts: 2 }, original = structuredClone(assigned);
+    const processFactory = vi.fn(), browserFactory = vi.fn(), resolveCli = vi.fn();
+    vi.setSystemTime(now + elapsed);
+    await expect(runCourseDiscoveryWorker({ job: assigned, client: { helperEnvironment: vi.fn() }, cwd: process.cwd(),
+      recipeSchema: {}, processFactory, browserFactory, resolveCli })).rejects.toMatchObject({ code: "DISCOVERY_WORK_DEADLINE" });
+    expect(assigned).toEqual(original);
+    expect(processFactory).not.toHaveBeenCalled(); expect(browserFactory).not.toHaveBeenCalled(); expect(resolveCli).not.toHaveBeenCalled();
+  });
+
   it("retries temporary Windows file locks after removing copied credentials", async () => {
     const path = join(tmpdir(), "tee-discovery-worker-fixture");
     const remove = vi.fn().mockImplementationOnce(() => {}).mockImplementationOnce(() => { throw Object.assign(new Error("locked"), { code: "EBUSY" }); }).mockImplementation(() => {});
@@ -846,7 +864,7 @@ describe("controller-only verification", () => {
       adapter: { family: "FOREUP", facilityId: 1, scheduleId: 2, bookingClassId: 3 } };
     const expectedRecipe = { ...modelRecipe, target: inputJob.request.target,
       source: { ...modelRecipe.source, venueName: "Public golf", officialUrl: "https://example.org/", timeZone: "America/New_York" } };
-    const validateRecipe = vi.fn(async () => ({ valid: true }));
+    const validateRecipe = vi.fn<(input: { recipe: unknown; signal: AbortSignal }) => Promise<{ valid: boolean }>>(async () => ({ valid: true }));
     const client = {
       helperEnvironment: () => ({}),
       checkpoint: async () => { order.push("checkpoint"); },
@@ -887,8 +905,10 @@ describe("controller-only verification", () => {
         executeRecipe: async () => { order.push("replay"); return { status: "EMPTY", complete: true }; },
       });
       expect(result).toMatchObject({ outcome: "activated", metrics: { tokenUsage: { totalTokens: 200, uncachedInputTokens: 80, outputTokens: 20 } } });
-      expect(validateRecipe).toHaveBeenCalledWith({ recipe: expectedRecipe, signal: undefined });
-      expect(client.candidate).toHaveBeenCalledWith("job-1", "private-lease-value", expectedRecipe, undefined,
+      const workSignal = validateRecipe.mock.calls[0][0].signal;
+      expect(workSignal).toBeInstanceOf(AbortSignal); expect(workSignal.aborted).toBe(false);
+      expect(validateRecipe).toHaveBeenCalledWith({ recipe: expectedRecipe, signal: workSignal });
+      expect(client.candidate).toHaveBeenCalledWith("job-1", "private-lease-value", expectedRecipe, workSignal,
         { officialUrl: "https://example.org/", observedBookingUrl: "https://example.org/" });
       expect(modelRecipe.target.courseId).toBe("forged");
       expect(modelRecipe.source.timeZone).toBe("UTC");
@@ -987,7 +1007,7 @@ describe("controller-only verification", () => {
         } }),
       })).rejects.toMatchObject({ code: accessAllowed ? "DISCOVERY_ACCESS_REQUIRED" : "DISCOVERY_NO_VERIFIED_RECIPE" });
       expect(checkpoint).toHaveBeenCalledWith("job-1", "private-lease-value", expect.objectContaining(accessAllowed
-        ? { outcome: "ACCESS_REQUIRED" } : { reportedOutcome: "UNSUPPORTED" }), undefined);
+        ? { outcome: "ACCESS_REQUIRED" } : { reportedOutcome: "UNSUPPORTED" }), expect.any(AbortSignal));
       if (!accessAllowed) {
         expect(JSON.stringify(replies)).toContain("DISCOVERY_ACCESS_NOT_CONFIRMED");
         expect(checkpoint.mock.calls.some(call => call[2].outcome === "ACCESS_REQUIRED")).toBe(false);
@@ -1037,7 +1057,8 @@ describe("controller-only verification", () => {
       }).catch(error => error);
       expect(failure).toMatchObject({ code: "DISCOVERY_NO_VERIFIED_RECIPE", discoveryMetrics: { providerRequestsObserved: 3, responseBytesObserved: 250 } });
       expect(configurations).toHaveLength(2);
-      expect(configurations.every(config => config.deadlineAt === inputJob.deadlineAt)).toBe(true);
+      expect(configurations.every(config => config.deadlineAt === workerWorkDeadline)).toBe(true);
+      expect(inputJob.deadlineAt).toBe(new Date(now + 900_000).toISOString());
       expect(closes.every(close => close.mock.calls.length === 1)).toBe(true);
       expect(JSON.stringify(replies[1])).toContain("original deadline");
       expect(checkpoint.mock.calls.at(-1)![2]).toMatchObject({ controller: { observedNavigationUrls: ["https://example.org/"] } });
@@ -1101,7 +1122,7 @@ describe("controller-only verification", () => {
       expect(await run({ ...inputJob, attempts: 2, checkpoint: persisted })).toMatchObject({ code: "DISCOVERY_NO_VERIFIED_RECIPE" });
       expect(configurations).toHaveLength(3);
       for (const config of configurations) {
-        expect(config.deadlineAt).toBe(inputJob.deadlineAt);
+        expect(config.deadlineAt).toBe(workerWorkDeadline);
         expect(config.initialUrls[0]).toBe(official);
         expect(config.initialUrls.length).toBeLessThanOrEqual(16);
         for (const url of excluded) expect(config.initialUrls).not.toContain(url);
@@ -1182,7 +1203,7 @@ describe("controller-only verification", () => {
       expect(await run({ ...inputJob, attempts: 2, checkpoint: persisted })).toMatchObject({ code: "DISCOVERY_NO_VERIFIED_RECIPE" });
       expect(configurations).toHaveLength(3);
       for (const config of configurations) {
-        expect(config.deadlineAt).toBe(inputJob.deadlineAt);
+        expect(config.deadlineAt).toBe(workerWorkDeadline);
         expect(config.initialUrls.every(isSafeRecipeUrl)).toBe(true);
         expect(config.initialUrls).not.toContain(bootstrap);
       }
@@ -1240,7 +1261,7 @@ describe("controller-only verification", () => {
       }).catch(error => error);
       if (invalidation === "current") {
         expect(result.outcome).toBe("activated");
-        expect(client.candidate).toHaveBeenCalledWith(inputJob.id, inputJob.leaseToken, expect.anything(), undefined,
+        expect(client.candidate).toHaveBeenCalledWith(inputJob.id, inputJob.leaseToken, expect.anything(), expect.any(AbortSignal),
           { officialUrl, observedBookingUrl: bookingUrl });
         expect(executeRecipe).toHaveBeenCalledTimes(2); expect(client.verification).toHaveBeenCalledTimes(2);
         expect(client.activate).toHaveBeenCalledOnce();
@@ -1263,13 +1284,22 @@ describe("controller-only verification", () => {
     const recipe = { engine: "EXISTING_ADAPTER", source: { bookingUrl: officialUrl }, adapter: { family: "FOREUP", facilityId: 1, scheduleId: 2, bookingClassId: 3 } };
     const hash = "a".repeat(64), replies: unknown[] = [], browserRequests: unknown[] = [], configurations: unknown[] = [];
     const closed: boolean[] = [];
+    let checkpointsAtActivation: number | undefined;
+    let failFeedbackCheckpoint = true;
     let completeTools: () => void;
     const toolsCompleted = new Promise<void>(resolve => { completeTools = resolve; });
-    const client = { helperEnvironment: () => ({}), checkpoint: vi.fn(async () => ({})),
+    const client = { helperEnvironment: () => ({}), checkpoint: vi.fn((_id: string, _lease: string, payload: { controller?: { lastFeedback?: { code?: string } } }) => {
+      if (failFeedbackCheckpoint && payload.controller?.lastFeedback?.code === "DISCOVERY_REPLAY_INCOMPLETE") {
+        failFeedbackCheckpoint = false;
+        throw new Error("SYNC_CHECKPOINT_UNAVAILABLE");
+      }
+      return Promise.resolve({});
+    }),
       candidate: vi.fn(async () => ({ recipeHash: hash, challenges: [
         { id: "first", recipeHash: hash, input: { date: "2026-10-23" } },
         { id: "second", recipeHash: hash, input: { date: "2026-10-24" } },
       ] })), verification: vi.fn(async () => ({})), activate: vi.fn(async () => {
+        checkpointsAtActivation = client.checkpoint.mock.calls.length;
         if (activationFails) throw Object.assign(new Error("Final activation unavailable"), { code: "DISCOVERY_ACTIVATION_REJECTED" });
         return {};
       }) };
@@ -1314,9 +1344,13 @@ describe("controller-only verification", () => {
       else expect(result.outcome).toBe("activated");
       expect(client.candidate).toHaveBeenCalledTimes(2); expect(executeRecipe).toHaveBeenCalledTimes(3);
       expect(client.verification).toHaveBeenCalledTimes(2); expect(client.activate).toHaveBeenCalledOnce();
+      expect(client.checkpoint).toHaveBeenCalledTimes(checkpointsAtActivation!);
+      expect(failFeedbackCheckpoint).toBe(false);
+      expect(replies).toHaveLength(activationFails ? 7 : 6);
+      if (activationFails) expect(JSON.stringify(replies.at(-1))).toContain("DISCOVERY_CANCELLED");
       expect(browserRequests).toEqual([{ action: "open", url: officialUrl }, { action: "open", url: officialUrl }]);
       expect(configurations).toHaveLength(2);
-      for (const config of configurations) expect(config).toMatchObject({ deadlineAt: inputJob.deadlineAt, initialUrls: [officialUrl] });
+      for (const config of configurations) expect(config).toMatchObject({ deadlineAt: workerWorkDeadline, initialUrls: [officialUrl] });
       expect(JSON.stringify(replies)).toContain("browserSessionClosed");
       expect(JSON.stringify(replies)).toContain("BROWSER_SESSION_CLOSED");
       expect(JSON.stringify(replies)).toContain("DISCOVERY_ACCESS_NOT_CONFIRMED");
@@ -1547,9 +1581,10 @@ describe("controller-only verification", () => {
       expect(configured[0].helperEnvironment.COURSE_DISCOVERY_BROWSER_TRANSPORT).toBe("NATIVE_CHROME");
       if (status === 403) expect(configured[1].helperEnvironment.COURSE_DISCOVERY_BROWSER_TRANSPORT).toBe("PINNED_HTTP");
       expect(openedUrls).toEqual(Array.from({ length: status === 403 ? 2 : 1 }, () => observedUrl));
-      expect(configured.every(config => config.deadlineAt === inputJob.deadlineAt)).toBe(true);
+      expect(configured.every(config => config.deadlineAt === workerWorkDeadline)).toBe(true);
+      expect(inputJob.deadlineAt).toBe(new Date(now + 900_000).toISOString());
       expect(checkpoint).toHaveBeenLastCalledWith("job-1", "private-lease-value", expect.objectContaining({ controller: expect.objectContaining({ observedNavigationUrls: [observedUrl], officialSourceObserved: true,
-        browserTransport: status === 403 ? "PINNED_HTTP" : "NATIVE_CHROME", transportFallbackUsed: status === 403 }) }), undefined);
+        browserTransport: status === 403 ? "PINNED_HTTP" : "NATIVE_CHROME", transportFallbackUsed: status === 403 }) }), expect.any(AbortSignal));
     } finally { rmSync(sourceHome, { recursive: true, force: true }); }
   });
 });

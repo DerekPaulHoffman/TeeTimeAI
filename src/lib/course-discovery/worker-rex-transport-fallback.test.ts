@@ -2,7 +2,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { isRexPublicReadPost } from "../automation/rex-public-read-policy";
 import { bindDiscoveryRecipeBrowserTransport, runCourseDiscoveryWorker, shouldUseRexPinnedFallback } from "../../../scripts/automation/course-discovery-worker.mjs";
 
@@ -10,12 +10,14 @@ const official = "https://example.org/";
 const entry = "https://example.reservewithrex.com/package?venue=Example&date=2026-10-23&guests=2&currentPackage=Golf%20Simulator";
 const catalog = "https://example.reservewithrex.com/api/venue/get";
 const hash = "a".repeat(64);
+const firstPickup = "2026-10-22T14:00:00.000Z";
+const workDeadline = "2026-10-22T14:12:00.000Z";
 const denied = () => ({ url: catalog, method: "POST", resourceType: "xhr", blockedReason: "REX_READ_HEADER_COOKIE" });
 const native = () => ({ url: entry, browserTransport: "NATIVE_CHROME", navigationStatus: 200, accessRequirementObserved: false,
   loading: true, pendingRequestCount: 1, text: "Example", controls: [{ target: "old-native-control", label: "Calendar" }],
   requests: [denied()], requestFailures: [], requestCount: 10, responseBytes: 1000 });
 const inputJob = () => ({ id: "job-1", leaseToken: "private-test-lease", attempts: 1,
-  firstPickedUpAt: "2026-10-22T14:00:00.000Z", deadlineAt: "2026-10-22T14:15:00.000Z",
+  firstPickedUpAt: firstPickup, deadlineAt: "2026-10-22T14:15:00.000Z",
   request: { target: { courseId: "course-1", offeringId: "rental-1", kind: "SIMULATOR" },
     identity: { name: "Example", address: "123 Example St, Example, CA 95678", officialUrl: official, bookingUrl: null },
     input: { date: "2026-10-23", players: 2, windowStart: "10:00", windowEnd: "20:00", durationMinutes: 60, timeZone: "America/Los_Angeles" } } });
@@ -154,16 +156,28 @@ describe("trusted REX anonymous transport selection", () => {
 });
 
 describe("worker fallback persistence, lifetime and independent replay", () => {
+  // Keep real timers for asynchronous tool/checkpoint/close delivery. Only the
+  // fixture's wall clock is controlled, including explicit retry time advances.
+  beforeEach(() => { vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(firstPickup); });
+  afterEach(() => { vi.useRealTimers(); });
+
   it("persists the one-way choice and drains the old helper before dispatch, with original clocks and summed counters", async () => {
-    const signal = new AbortController().signal;
-    const outcome = await run({ signal });
+    const controller = new AbortController(), signal = controller.signal, job = inputJob(), originalJob = structuredClone(job);
+    const outcome = await run({ signal, job });
     expect(outcome.result.code).toBe("DISCOVERY_NO_VERIFIED_RECIPE");
     expect(outcome.events.indexOf("checkpoint:PINNED_HTTP:true")).toBeLessThan(outcome.events.indexOf("close:0"));
     expect(outcome.events.indexOf("close:0")).toBeLessThan(outcome.events.indexOf("create:1"));
     expect(outcome.requests).toEqual([{ index: 0, input: { action: "open", url: official } },
       { index: 0, input: { action: "open", url: entry } }, { index: 1, input: { action: "open", url: entry } }]);
-    for (const config of outcome.configs) expect(config).toMatchObject({ deadlineAt: inputJob().deadlineAt, signal,
+    for (const config of outcome.configs) expect(config).toMatchObject({ deadlineAt: workDeadline,
       venueName: inputJob().request.identity.name, venueAddress: inputJob().request.identity.address, venueOfficialUrl: official });
+    expect(job).toEqual(originalJob);
+    expect(outcome.configs[0].signal).toBeInstanceOf(AbortSignal);
+    expect(outcome.configs[0].signal).not.toBe(signal);
+    expect(outcome.configs[1].signal).toBe(outcome.configs[0].signal);
+    expect(outcome.configs[0].signal?.aborted).toBe(false);
+    controller.abort();
+    expect(outcome.configs.every(config => config.signal?.aborted)).toBe(true);
     expect(outcome.configs[1].initialUrls).toContain(entry);
     expect(outcome.checkpoints.find(checkpoint => checkpoint.controller.transportFallbackUsed)?.controller).toMatchObject({
       browserTransport: "PINNED_HTTP", observedNavigationUrls: [official, entry], transportFallbackUsed: true,
@@ -185,10 +199,13 @@ describe("worker fallback persistence, lifetime and independent replay", () => {
       close: async index => { if (index === 0) { closeStarted(); await closeWait; } }, created: (_config, index) => { created.push(index); } });
     await checkpointObserved;
     expect(created).toEqual([0]);
+    vi.setSystemTime(Date.parse(firstPickup) + 1000);
     releaseCheckpoint(); await closeObserved;
     expect(created).toEqual([0]);
-    releaseClose(); await running;
+    vi.setSystemTime(Date.parse(firstPickup) + 2000);
+    releaseClose(); const outcome = await running;
     expect(created).toEqual([0, 1]);
+    expect(outcome.configs.map(config => config.deadlineAt)).toEqual([workDeadline, workDeadline]);
   });
 
   it.each(["checkpoint", "close"])("never dispatches a successor after failed %s", async failure => {
@@ -203,10 +220,10 @@ describe("worker fallback persistence, lifetime and independent replay", () => {
     const outcome = await run({ actions: [open(official), open(entry), propose()] });
     expect(outcome.result.outcome).toBe("activated");
     expect(outcome.validateRecipe).toHaveBeenLastCalledWith(expect.objectContaining({ recipe: expect.objectContaining({ browserTransport: "PINNED_HTTP" }) }));
-    expect(outcome.client.candidate).toHaveBeenCalledWith("job-1", "private-test-lease", expect.objectContaining({ browserTransport: "PINNED_HTTP" }), undefined,
+    expect(outcome.client.candidate).toHaveBeenCalledWith("job-1", "private-test-lease", expect.objectContaining({ browserTransport: "PINNED_HTTP" }), outcome.configs[0].signal,
       { officialUrl: official, observedBookingUrl: entry });
     expect(outcome.executeRecipe).toHaveBeenCalledTimes(2);
-    for (const [args] of outcome.executeRecipe.mock.calls) expect(args).toMatchObject({ recipe: { browserTransport: "PINNED_HTTP" }, deadlineAt: inputJob().deadlineAt });
+    for (const [args] of outcome.executeRecipe.mock.calls) expect(args).toMatchObject({ recipe: { browserTransport: "PINNED_HTTP" }, deadlineAt: workDeadline, signal: outcome.configs[0].signal });
     expect(outcome.client.verification).toHaveBeenCalledTimes(2); expect(outcome.client.activate).toHaveBeenCalledOnce();
   });
 
@@ -260,13 +277,27 @@ describe("worker fallback persistence, lifetime and independent replay", () => {
       return { ...native(), url: action.url, requests: action.url === official ? [] : [denied()] };
     } });
     const saved = first.checkpoints.find(checkpoint => checkpoint.controller.transportFallbackUsed)!;
-    const resumed = await run({ job: { ...inputJob(), attempts: 2, checkpoint: saved }, actions: [open(entry)],
+    vi.setSystemTime(Date.parse(firstPickup) + 60000);
+    const job = { ...inputJob(), attempts: 2, checkpoint: saved }, originalJob = structuredClone(job);
+    const resumed = await run({ job, actions: [open(entry)],
       snapshot: config => ({ ...native(), browserTransport: config.helperEnvironment.COURSE_DISCOVERY_BROWSER_TRANSPORT, navigationStatus: 403 }) });
     expect(resumed.configs).toHaveLength(1);
     expect(resumed.configs[0].helperEnvironment.COURSE_DISCOVERY_BROWSER_TRANSPORT).toBe("PINNED_HTTP");
-    expect(resumed.configs[0].deadlineAt).toBe(inputJob().deadlineAt);
+    expect(resumed.configs[0].deadlineAt).toBe(workDeadline);
+    expect(job).toEqual(originalJob);
     expect(resumed.requests).toHaveLength(1);
     expect(resumed.result.discoveryMetrics.browserTransportsTried).toEqual(["PINNED_HTTP"]);
+  });
+
+  it("still refuses a resumed job at its original work deadline without creating a transport", async () => {
+    vi.setSystemTime(workDeadline);
+    const job = { ...inputJob(), attempts: 2 }, originalJob = structuredClone(job);
+    const outcome = await run({ job });
+    expect(outcome.result.code).toBe("DISCOVERY_WORK_DEADLINE");
+    expect(outcome.configs).toEqual([]);
+    expect(outcome.client.checkpoint).not.toHaveBeenCalled();
+    expect(outcome.client.candidate).not.toHaveBeenCalled();
+    expect(job).toEqual(originalJob);
   });
 
   it("does not forget a previously observed throttle when later incremental evidence only contains a cookie denial", async () => {
