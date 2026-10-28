@@ -71,6 +71,8 @@ import { getGooglePlacesApiKey, searchNearbyGolfCourses } from "@/lib/places/goo
 import { isSufficientNearbyCourseName, selectUniqueNearbyOfficialCourse, type NearbyOfficialCourse } from "@/lib/automation/generic-course-nearby-source";
 import { getLocalReaderCourseKey } from "@/lib/local-reader/service";
 import { prisma } from "@/lib/prisma";
+import { detectOfficialSharedFacility, type DetectedFacility } from "@/lib/courses/shared-facility-detection";
+import { detectAndSaveFacilityCourses } from "@/lib/courses/detect-and-save-facility";
 
 const DISCOVERY_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 const DISCOVERY_RETRY_DELAY_MS = 30 * 60 * 1000;
@@ -286,6 +288,7 @@ type CollectedPageEvidence = Pick<
   | "corroboratedAccessBarrier"
   | "teeItUpLegacyConfigurations"
 > & {
+  detectedFacility?: DetectedFacility;
   legacyProphetConfigurations: LegacyProphetConfiguration[];
   legacyProphetFollowupOutcomes: LegacyProphetFollowupOutcome[];
 };
@@ -1256,6 +1259,7 @@ export async function prepareSearchMonitoring(
             }
           };
           let discovery: BrowserDiscovery;
+          let detectedFacility: DetectedFacility | undefined;
           try {
             const officialWebsite = readSafePublicUrl(course.website);
             const verifiedLayoutHoleCounts = course.layoutHolesVerifiedAt
@@ -1297,6 +1301,7 @@ export async function prepareSearchMonitoring(
                 ? { verifiedLayoutHoleCounts }
                 : {})
             };
+            detectedFacility = collected.detectedFacility;
             const initialDiscovery = buildBrowserDiscovery(
               collectedWithCorroboration
             );
@@ -1370,6 +1375,8 @@ export async function prepareSearchMonitoring(
             discovery = forcedPolicyReconciliation
               ? markLegacyPolicyReconciliation(reasonAwareDiscovery)
               : reasonAwareDiscovery;
+            detectedFacility = discovery.evidence.detectedFacility ?? detectedFacility;
+            if (detectedFacility) discovery = { ...discovery, evidence: { ...discovery.evidence, detectedFacility } };
           } catch (error) {
             if (error instanceof ProviderDiscoveryLeaseDeferredError) {
               deferredCourseIds.push(course.id);
@@ -1487,6 +1494,7 @@ export async function prepareSearchMonitoring(
             applied = persisted?.applied ?? null;
           }
           if (applied) {
+            if (detectedFacility) await detectAndSaveFacilityCourses(course.id, detectedFacility);
             appliedCourseIds.push(course.id);
             if (replacesLegacyPolicy) {
               resolvedLegacyPolicyCourseIds.add(course.id);
@@ -2844,9 +2852,12 @@ export async function collectOfficialSiteEvidence(
         .filter((url) => !officialPageLinkKeys.has(normalizeSourceKey(url)))
         .slice(0, 200)
     : [];
+  const detectedFacility = courseName && expectedOfficialWebsite && haveSameReplayHostname(expectedOfficialWebsite, firstPage.finalUrl)
+    ? detectOfficialSharedFacility({ html: firstPage.html, sourceUrl: firstPage.finalUrl, courseName }) : null;
   return {
     sourceUrl,
     finalUrl: finalPage.finalUrl,
+    ...(detectedFacility ? { detectedFacility } : {}),
     observedUrls: uniqueStrings([
       ...pages.flatMap((page) => [page.finalUrl, ...page.evidence.observedUrls]),
       ...failedFollowupObservedUrls

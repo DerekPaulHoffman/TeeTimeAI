@@ -26,6 +26,7 @@ import {
 } from "@/lib/automation/provider-capabilities";
 import { evaluateMonitoringGate } from "@/lib/automation/policy";
 import { readForeupPublicConfiguration } from "@/lib/automation/foreup-public-configuration";
+import type { DetectedFacility } from "@/lib/courses/shared-facility-detection";
 import {
   haveCompatibleCourseNames,
   haveCompatibleOfficialPageCourseNames,
@@ -294,6 +295,7 @@ export type BrowserDiscovery = {
   };
   confidence: number;
   evidence: {
+    detectedFacility?: DetectedFacility;
     finalUrl?: string;
     observedUrls: string[];
     visibleText?: string;
@@ -550,6 +552,7 @@ export async function enrichForeupDiscovery(
         "https://foreupsoftware.com/index.php/api/booking/times",
       ])],
       learnedFrom: "foreup-public-schedules-configuration",
+      ...(configuration.detectedFacility ? { detectedFacility: configuration.detectedFacility } : {}),
     },
   };
 }

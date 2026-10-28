@@ -36,6 +36,9 @@ import {
 } from "@/lib/automation/provider-capabilities";
 import type { BookingWindowEvidence } from "@/lib/courses/booking-window";
 import type { TeeTimeSlot } from "@/lib/tee-times/matching";
+import type { CourseCandidate } from "@/lib/places/google";
+import { detectAndSaveFacilityCourses } from "@/lib/courses/detect-and-save-facility";
+import { readSharedFacilityScope } from "@/lib/courses/shared-facility-scope";
 
 export type AutomationCourseProviderRead = {
   id: string;
@@ -50,6 +53,7 @@ export type AutomationCourseProviderRead = {
 };
 
 export type CourseTeeSheetResult = {
+  facilityCourses?: CourseCandidate[];
   slots: TeeTimeSlot[];
   targetDateStatus: "OPEN" | "NOT_OPEN" | "UNKNOWN";
   bookingWindowEvidence: BookingWindowEvidence | null;
@@ -77,7 +81,7 @@ export async function fetchCourseTeeSheet(
       bookingClassId: metadata.bookingClassId,
     });
     if (!publicSchedule) throw new Error("ForeUP Standard Public class could not be verified");
-    return fetchForeupTeeSheet({
+    const result = await fetchForeupTeeSheet({
       courseId: course.id,
       date,
       players,
@@ -86,6 +90,10 @@ export async function fetchCourseTeeSheet(
       discoverBookingWindow,
       requireMatchingIds: true,
     });
+    const detection = publicSchedule.detectedFacility;
+    if (!detection || detection.courses.length < 2 && !readSharedFacilityScope(course.bookingMetadata, course.id)?.detectionMethod) return result;
+    const members = await detectAndSaveFacilityCourses(course.id, detection);
+    return members === undefined ? result : { ...result, facilityCourses: members };
   }
   if (providerFamily === "TEEITUP" && isTeeItUpMetadata(course.bookingMetadata)) {
     return fetchTeeItUpTeeSheet({

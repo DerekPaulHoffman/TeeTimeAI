@@ -1,5 +1,6 @@
 import { fetchWithProviderTimeout } from "@/lib/adapters/fetch-with-timeout";
 import { createHash } from "node:crypto";
+import { isPhysicalCourseName, type DetectedFacility } from "@/lib/courses/shared-facility-detection";
 
 const MAX_DOCUMENT_BYTES = 512_000;
 const MAX_SCHEDULE_JSON_CHARS = 256_000;
@@ -12,6 +13,7 @@ export type ForeupPublicConfiguration = {
   bookingBaseUrl: string;
   scheduleId: number;
   bookingClassId: number;
+  detectedFacility?: DetectedFacility;
 };
 
 function positiveProviderId(value: unknown): number | null {
@@ -314,7 +316,7 @@ export async function readForeupStandardPublicSchedule(input: {
     // This ordinary check covers only the named Course's exact sheet/class.
     // Managed recipes still use hasCompleteForeupPublicScheduleScope: checking
     // one course here never proves absence across a whole shared facility.
-    return config;
+    return withDetectedForeupFacility(config, input.courseName, document.html, document.facilityId);
   } catch {
     return null;
   }
@@ -350,9 +352,40 @@ export async function readForeupPublicConfiguration(input: {
     const payload = await readBoundedText(check);
     if (!payload) return null;
     const data = JSON.parse(payload) as unknown;
-    return Array.isArray(data) || data === false ? config : null;
+    return Array.isArray(data) || data === false ? withDetectedForeupFacility(config, input.courseName, document.html, document.facilityId) : null;
   } catch (error) {
     if (input.rethrowError?.(error)) throw error;
     return null;
   }
+}
+
+function withDetectedForeupFacility(config: ForeupPublicConfiguration, courseName: string, html: string, facilityId: number): ForeupPublicConfiguration {
+  const schedules = extractSchedulesJson(html);
+  if (!Array.isArray(schedules) || schedules.length > MAX_SCHEDULES) return config;
+  const primary = schedules.filter(row => row && positiveProviderId(row.course_id) === facilityId && positiveProviderId(row.teesheet_id) === config.scheduleId);
+  if (primary.length !== 1 || typeof primary[0].course_name !== "string") return config;
+  const courses: DetectedFacility["courses"] = [];
+  const seen = new Set<number>();
+  for (const raw of schedules) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return config;
+    const row = raw as Record<string, unknown>;
+    if (positiveProviderId(row.course_id) !== facilityId || normalizeName(row.course_name) !== normalizeName(primary[0].course_name)) continue;
+    const id = positiveProviderId(row.teesheet_id);
+    if (!id || seen.has(id)) return config;
+    seen.add(id);
+    if (typeof row.title !== "string") continue;
+    const name = id === config.scheduleId ? courseName : row.title.replace(/\s*\((?:9|18)\s*holes?\)\s*$/iu, "").replace(/\s+tee\s*sheet\s*$/iu, "").trim();
+    // The named public physical sheet is evidence; rates, audiences, and round
+    // products are not. Never infer a physical hole count from the catalog.
+    if (!isPhysicalCourseName(name) || id !== config.scheduleId && !/\b(?:golf|course|links)\b/iu.test(name)) continue;
+    const selected = parseForeupPublicConfiguration({ bookingUrl: config.sourceBookingUrl, courseName: name, html });
+    if (!selected || selected.scheduleId !== id || !isExplicitForeupPublicClass({ html, facilityId, scheduleId: id, bookingClassId: selected.bookingClassId })) continue;
+    courses.push({ key: String(id), name, url: selected.bookingBaseUrl, publicAccess: "PUBLIC", foreup: {
+      scheduleId: id, bookingClassId: selected.bookingClassId, bookingBaseUrl: selected.bookingBaseUrl,
+    } });
+  }
+  if (!courses.some(row => row.key === String(config.scheduleId)) || courses.length > 10 ||
+      new Set(courses.map(row => normalizeName(row.name))).size !== courses.length) return config;
+  return { ...config, detectedFacility: { method: "FOREUP_PUBLIC_CATALOG", sourceUrl: config.sourceBookingUrl,
+    observedAt: new Date().toISOString(), primaryKey: String(config.scheduleId), courses } };
 }

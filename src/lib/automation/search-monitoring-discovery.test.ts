@@ -62,6 +62,18 @@ const now = new Date("2026-07-13T20:00:00.000Z");
 const remediationDispatchedAt = new Date("2026-07-13T19:30:00.000Z");
 const remediationLeaseExpiresAt = new Date("2026-07-13T20:15:00.000Z");
 
+it("detects an official co-located course list during ordinary collection, only when bound to the persisted official site", async () => {
+  const sourceUrl = "https://official.example/";
+  const containsPlace = ["North", "South"].map((name, index) => ({ "@type": "GolfCourse", name: `Cedar ${name} Golf Course`,
+    url: `${sourceUrl}${name.toLowerCase()}`, geo: { latitude: 41.24 + index * 0.001, longitude: -73.2 } }));
+  const html = `<h1>Cedar North Golf Course</h1><script type="application/ld+json">${JSON.stringify({ "@type": "Place", containsPlace })}</script>`;
+  const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => new Response(html, { headers: { "content-type": "text/html" } }));
+  const collected = await collectOfficialSiteEvidence(sourceUrl, fetchImpl, containsPlace[0].name, new Map(), new Map(), sourceUrl);
+  expect(collected.detectedFacility?.courses.map(row => row.name)).toEqual(containsPlace.map(row => row.name));
+  expect((await collectOfficialSiteEvidence(sourceUrl, fetchImpl, containsPlace[0].name)).detectedFacility).toBeUndefined();
+  expect((await collectOfficialSiteEvidence(sourceUrl, fetchImpl, containsPlace[0].name, new Map(), new Map(), "https://unrelated.example/")).detectedFacility).toBeUndefined();
+});
+
 describe("official page corroboration for nearby generic course recovery", () => {
   const candidate = {
     googlePlaceId: "named-course", name: "Gateway National Golf Links",

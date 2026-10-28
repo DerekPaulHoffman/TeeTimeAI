@@ -4,7 +4,7 @@ One discovery/location card may show several independently monitored physical
 courses. Each Notify me action starts the normal alert-creation flow for exactly
 one canonical Course id. Saved demand, ranks, leases, probes, matches, recipients,
 and email outbox semantics remain unchanged. An existing Knolls alert is never
-expanded to Glen. The 1–5 course preference and 3 active/paused alert limits remain.
+expanded to Glen. The 1–5 course preference and 5 active/paused alert limits remain.
 
 The root keeps its Google Place identity and existing Course id. A second physical
 course uses its own reusable Course id with no duplicate Google Place id. The
@@ -19,6 +19,33 @@ The ordinary check proves only that named course. Managed access recipes still
 require their existing complete-inventory checks; those gates are unchanged.
 
 ## Operator preparation
+
+Normal operation detects groups automatically. Each ordinary ForeUP read reuses
+its fresh public catalog to identify distinct named physical courses sharing the
+exact facility and owner. Only an unambiguous visible active Public class qualifies;
+member categories, rates, practice facilities and round products are excluded.
+The catalog does not establish physical hole counts. Existing verified layout
+evidence is preserved; new courses show an unverified layout until separately proven.
+
+Official-site discovery also recognizes provider-independent schema.org
+`containsPlace` lists of distinct `GolfCourse` entries with explicit co-located
+coordinates and official page URLs. The existing course must match one member.
+Such children retain pending public access and unknown monitoring until their own
+normal first-check verification; Notify me can save that pending demand. A chain
+directory, shared hostname, or nearby location alone never establishes membership.
+Ambiguous pages remain ordinary discovery work rather than guessed course records.
+
+The automatic path saves reusable Course knowledge transactionally, reuses exact
+existing siblings, and returns the group to the current search card immediately.
+Repeated/concurrent checks are idempotent. It never adds courses to an existing
+alert, copies recipients, starts a workflow, activates a recipe, or sends email.
+New physical courses have independent monitoring and do not inherit rates, layouts,
+booking windows or successful-check claims. Removed automatic membership does not
+delete courses or demand; manual membership is never silently reduced.
+
+The explicit operator below remains an optional repair tool, not a required setup
+step for detected facilities. Automatic detection runs only on fresh fixed-parser
+observations from normal signed-out checks/discovery, not model-submitted manifests.
 
 `npx tsx scripts/automation/manage-shared-public-courses.ts --plan <file.json>`
 prepares a dry run against the configured database, verifies every exact public
@@ -62,7 +89,9 @@ and Glen sheet 6463/class 14911, both labelled Online Tee Times and both carryin
 the Knolls `course_name`. Those exact shapes are regression fixtures, not runtime
 hardcoded exceptions. Re-read the public catalog before applying the operator plan.
 
-Production enablement requires reviewing/applying the two-member plan and deploying
-the tested commit. Then verify both card rows, each independent Notify me flow,
+Production enablement requires deploying the tested commit. Normal course checks
+then detect and persist verified membership automatically; no per-facility plan is
+required. The reviewed operator plan remains available for deliberate repair.
+Verify both card rows, each independent Notify me flow,
 and exact-runtime read-only availability for both sheets. Do not create real
 customer alerts, send email, mutate customer demand, or restart workers to test it.

@@ -1,5 +1,6 @@
 import { normalizeTimeZone } from "@/lib/timezones";
 import { normalizeLayoutHoleCounts } from "@/lib/courses/course-layout";
+import { providerBookingMetadata } from "@/lib/courses/provider-booking-metadata";
 
 import { normalizeProviderFamilyKey } from "./provider-capabilities";
 
@@ -64,7 +65,7 @@ export function canonicalizeCourseProviderExecutionEvidence(
     bookingAccessMode: input.bookingAccessMode ?? null,
     isPublic: input.isPublic ?? null,
     intelligenceConfidence: input.intelligenceConfidence ?? null,
-    bookingMetadata: input.bookingMetadata ?? null,
+    bookingMetadata: providerBookingMetadata(input.bookingMetadata) ?? null,
     layoutHoleCounts: input.layoutHolesVerifiedAt
       ? normalizeLayoutHoleCounts(
           Array.isArray(input.layoutHoleCounts) ? input.layoutHoleCounts : []

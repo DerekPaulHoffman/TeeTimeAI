@@ -3,6 +3,7 @@ import { Prisma } from "@prisma/client";
 import { z } from "zod";
 
 import { prisma } from "@/lib/prisma";
+import { providerBookingMetadata } from "@/lib/courses/provider-booking-metadata";
 import { isSearchWindowActive } from "@/lib/automation/date-boundary";
 import { getSyntheticMultiCycleExpiresAt } from "@/lib/automation/synthetic-test-window";
 import { parseCourseLocalWindowEnd } from "@/lib/searches/window-end";
@@ -88,7 +89,7 @@ export function getDiscoverySourceFingerprint(course: FingerprintCourse, offerin
   return digest({ identity: {
     name: course.name, officialUrl: course.website, bookingUrl: offering ? offering.bookingUrl : course.detectedBookingUrl,
     timeZone: course.timeZone, providerFamily: offering ? offering.providerFamilyKey : course.providerFamilyKey,
-  }, metadata: offering ? offering.providerMetadata : course.bookingMetadata,
+  }, metadata: offering ? offering.providerMetadata : providerBookingMetadata(course.bookingMetadata),
   access: offering ? { publicAccessStatus: offering.publicAccessStatus, automationEligibility: offering.automationEligibility }
     : { bookingMethod: course.bookingMethod, bookingAccessMode: course.bookingAccessMode, automationEligibility: course.automationEligibility, automationReason: course.automationReason },
   offering: offering ? { id: offering.id, maxPartySize: offering.maxPartySize, supportedDurationsMinutes: offering.supportedDurationsMinutes } : null });

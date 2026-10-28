@@ -24,7 +24,7 @@ export function mapFacilityCourse(course: Course, root: Course, candidate?: Cour
     googlePlaceId: root.googlePlaceId ?? "", courseId: course.id, name: course.name,
     address: course.address ?? undefined, latitude: course.latitude, longitude: course.longitude,
     timeZone: course.timeZone, website: scopedBookingUrl(course),
-    publicAccessStatus: "PUBLIC", mode: "OUTDOOR",
+    publicAccessStatus: course.isPublic === true ? "PUBLIC" : "UNVERIFIED", mode: "OUTDOOR",
     layoutHoleCounts: course.layoutHolesVerifiedAt ? normalizeLayoutHoleCounts(course.layoutHoleCounts) : [],
     ...(course.layoutHolesEvidenceUrl ? { layoutHolesEvidenceUrl: course.layoutHolesEvidenceUrl } : {}),
     ...(course.layoutHolesVerifiedAt ? { layoutHolesVerifiedAt: course.layoutHolesVerifiedAt.toISOString() } : {}),
@@ -40,9 +40,9 @@ export async function loadSharedFacilityCourses(course: { id: string; bookingMet
   const root = rows.find(row => row.id === scope.rootCourseId);
   // All members must agree on the same stored group; partial/stale membership
   // never widens an existing alert or inherits the root's monitoring proof.
-  if (!root || rows.length !== scope.courseIds.length || rows.some(row => {
+  if (!root || root.isPublic !== true || rows.length !== scope.courseIds.length || rows.some(row => {
     const member = readSharedFacilityScope(row.bookingMetadata, row.id);
-    return row.isPublic !== true || !member || JSON.stringify(member) !== JSON.stringify(scope);
+    return row.isPublic === false || !member || JSON.stringify(member) !== JSON.stringify(scope);
   })) return [];
   return scope.courseIds.map(id => mapFacilityCourse(rows.find(row => row.id === id)!, root));
 }

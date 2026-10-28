@@ -40,3 +40,40 @@ test("keeps Tashua's two sheets and Notify me actions separate within the existi
   await page.screenshot({ path: `test-results/shared-facility-${test.info().project.name}.png`, fullPage: true });
   await page.locator(".course-row").screenshot({ path: `test-results/shared-facility-card-${test.info().project.name}.png` });
 });
+
+test("discovers course rows during the ordinary check and offers Notify me for the new course", async ({ page }) => {
+  const base = { googlePlaceId: "cedar-place", latitude: 41.24, longitude: -73.2, timeZone: "America/New_York", publicAccessStatus: "PUBLIC" };
+  const members = [
+    { ...base, courseId: "north", name: "Cedar Ridge North Course", layoutHoleCounts: [18], website: "https://official.example/north" },
+    { ...base, courseId: "south", name: "Cedar Ridge South Course", layoutHoleCounts: [], publicAccessStatus: "UNVERIFIED", website: "https://official.example/south" },
+  ];
+  const checked: string[] = [], writes: string[] = [];
+  await page.route("**/api/**", route => {
+    const request = route.request(), url = new URL(request.url());
+    if (["/api/analytics/events", "/api/feedback"].includes(url.pathname)) return route.fulfill({ json: { ok: true } });
+    if (request.method() !== "GET") { writes.push(url.pathname); return route.abort(); }
+    if (url.pathname === "/api/location/geocode") return route.fulfill({ json: { latitude: 41.24, longitude: -73.2 } });
+    if (url.pathname === "/api/courses/discover") return route.fulfill({ json: { courses: [members[0]] } });
+    if (url.pathname === "/api/courses/known-times") return route.fulfill({ json: { courses: {} } });
+    if (url.pathname === "/api/courses/check-times") {
+      checked.push(url.searchParams.get("courseId")!);
+      return route.fulfill({ json: url.searchParams.get("courseId") === "north" ? { status: "CHECKED", times: [], facilityCourses: members } : { status: "UNAVAILABLE", times: [] } });
+    }
+    return route.abort();
+  });
+  await page.goto("/search");
+  await page.getByRole("button", { name: "Any", exact: true }).click();
+  await page.getByRole("textbox", { name: "Location", exact: true }).fill("Trumbull, CT");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  const south = page.getByRole("region", { name: members[1].name, exact: true });
+  await expect(south).toContainText("Physical layout unverified");
+  await expect(south).not.toContainText("No tee times");
+  await expect.poll(() => checked.includes("south")).toBe(true);
+  await south.getByRole("button", { name: `Notify me for ${members[1].name}` }).click();
+  const dialog = page.getByRole("dialog", { name: "Notify me", exact: true });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText(members[1].name);
+  await expect(dialog).not.toContainText(members[0].name);
+  expect(writes).toEqual([]);
+  expect(checked.filter(id => id === "north").length).toBeLessThanOrEqual(3);
+});

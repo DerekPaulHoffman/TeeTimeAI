@@ -35,6 +35,8 @@ const capabilityMocks = vi.hoisted(() => ({
   resolveProviderCapability: vi.fn()
 }));
 const foreupPublicMocks = vi.hoisted(() => ({ readForeupStandardPublicSchedule: vi.fn() }));
+const facilityMocks = vi.hoisted(() => ({ save: vi.fn() }));
+vi.mock("@/lib/courses/detect-and-save-facility", () => ({ detectAndSaveFacilityCourses: facilityMocks.save }));
 vi.mock("@/lib/automation/foreup-public-configuration", () => foreupPublicMocks);
 
 vi.mock("@/lib/adapters/agilysys", () => ({
@@ -127,6 +129,16 @@ function buildCourse(
 }
 
 describe("fetchCourseTeeSheet", () => {
+  it("saves detected facility members after a successful ordinary read and returns their public card data", async () => {
+    const detection = { method: "FOREUP_PUBLIC_CATALOG", courses: [{ key: "792" }, { key: "793" }] };
+    foreupPublicMocks.readForeupStandardPublicSchedule.mockResolvedValueOnce({ bookingClassId: 4931,
+      bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/19021/792#/teetimes", detectedFacility: detection });
+    facilityMocks.save.mockResolvedValueOnce([{ courseId: "course-1" }, { courseId: "other-course" }]);
+    const result = await fetchCourseTeeSheet(buildCourse("FOREUP"), date, 2, false);
+    expect(facilityMocks.save).toHaveBeenCalledWith("course-1", detection);
+    expect(result).toMatchObject({ ...providerResult, facilityCourses: [{ courseId: "course-1" }, { courseId: "other-course" }] });
+    expect(adapterMocks.fetchForeupTeeSheet.mock.invocationCallOrder[0]).toBeLessThan(facilityMocks.save.mock.invocationCallOrder[0]);
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     capabilityMocks.resolveProviderCapability.mockImplementation((course) => ({

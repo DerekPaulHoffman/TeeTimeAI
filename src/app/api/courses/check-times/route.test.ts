@@ -52,3 +52,8 @@ it("does not publish unsafe destinations or describe them as an empty successful
   mocks.fetch.mockResolvedValue({ targetDateStatus: "OPEN", slots: [{ startsAt: "2026-10-03T09:15:00", availableSpots: 4, bookingUrl: "javascript:alert(1)" }] });
   expect(await (await GET(request())).json()).toEqual({ status: "FAILED", times: [] });
 });
+it("returns automatically verified course rows even when the selected date is not open", async () => {
+  const facilityCourses = [{ courseId: "glen", name: "Tashua Glen", googlePlaceId: "place", latitude: 41.24, longitude: -73.2, timeZone: "America/New_York" }];
+  mocks.fetch.mockResolvedValue({ slots: [], targetDateStatus: "NOT_OPEN", facilityCourses });
+  expect(await (await GET(request())).json()).toEqual({ status: "NOT_OPEN", times: [], facilityCourses });
+});

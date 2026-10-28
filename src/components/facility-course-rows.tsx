@@ -41,7 +41,7 @@ export function FacilityCourseRows({ courses, checks = {}, timeFilters, onNotify
           {check?.status === "CHECKED" && timeFilters ? <KnownTeeTimes times={check.times} timeZone={course.timeZone} {...timeFilters} showEmpty showDetails /> : null}
         </>}
         {savedStatuses && course.courseId && timeFilters && savedTimes[course.courseId]?.length ? <KnownTeeTimes times={savedTimes[course.courseId]} timeZone={course.timeZone} {...timeFilters} showDetails /> : null}
-        {course.website ? <a className="facility-booking-link" href={course.website} target="_blank" rel="noreferrer">Official booking page <ExternalLink aria-hidden="true" size={10} /></a> : null}
+        {course.website ? <a className="facility-booking-link" href={course.website} target="_blank" rel="noreferrer">{course.publicAccessStatus === "UNVERIFIED" ? "Official course site" : "Official booking page"} <ExternalLink aria-hidden="true" size={10} /></a> : null}
         {incompatible ? <p className="course-time-check-detail">Does not match your {requestedLayoutHoles}-hole course filter.</p> : null}
       </div>
       <div className="facility-course-action">{signInKey ? <DeferredSignInButton ariaLabel={`Notify me for ${course.name}`} className="figma-add-button" disabled={incompatible} onClick={() => notify(course)} publishableKey={signInKey} returnTo="/search">{content}</DeferredSignInButton> :

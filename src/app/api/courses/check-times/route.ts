@@ -9,10 +9,13 @@ import { evaluateMonitoringGate } from "@/lib/automation/policy";
 import { parseCourseLocalDateTime } from "@/lib/tee-times/matching";
 import { selectKnownTeeTimes } from "@/lib/courses/known-tee-times";
 import { getSafeOfficialBookingUrl } from "@/lib/email/search-delivery-outbox";
+import type { CourseCandidate } from "@/lib/places/google";
 
 export const maxDuration = 60;
 const inputSchema = z.object({ courseId: z.string().min(1).max(100), date: z.iso.date(), players: z.coerce.number().int().min(1).max(4) });
-const reply = (status: string, times: unknown[] = []) => NextResponse.json({ status, times }, { headers: { "Cache-Control": "no-store" } });
+const reply = (status: string, times: unknown[] = [], facilityCourses?: CourseCandidate[]) => NextResponse.json({ status, times,
+  ...(facilityCourses !== undefined ? { facilityCourses } : {}),
+}, { headers: { "Cache-Control": "no-store" } });
 
 // Public availability only. This path never creates demand, starts a workflow, or sends email.
 export async function GET(request: NextRequest) {
@@ -31,7 +34,7 @@ export async function GET(request: NextRequest) {
     if (!capability.isRunnable) return reply("UNAVAILABLE");
     const result = await runWithProviderRequestLease(capability.providerFamilyKey, () => fetchCourseTeeSheet(course, day, input.data.players, false));
     if (!result.acquired) return reply("BUSY");
-    if (result.value.targetDateStatus === "NOT_OPEN") return reply("NOT_OPEN");
+    if (result.value.targetDateStatus === "NOT_OPEN") return reply("NOT_OPEN", [], result.value.facilityCourses);
     const confirmedAt = new Date();
     const safeSlots = result.value.slots.flatMap(slot => {
       const bookingUrl = getSafeOfficialBookingUrl(slot.bookingUrl);
@@ -43,6 +46,6 @@ export async function GET(request: NextRequest) {
       holes: slot.holes ?? null, priceCents: slot.priceCents ?? null, bookingUrl: slot.bookingUrl,
       lastSeenAt: confirmedAt, lastConfirmedAt: confirmedAt, availabilityStatus: "AVAILABLE",
     })), course.timeZone, input.data.date, confirmedAt);
-    return reply("CHECKED", times);
+    return reply("CHECKED", times, result.value.facilityCourses);
   } catch { return reply("FAILED"); }
 }

@@ -344,8 +344,26 @@ function TeeTimeIntakeContent({
   const [submittedCourseLookupQuery, setSubmittedCourseLookupQuery] = useState("");
   const [courseLookupResults, setCourseLookupResults] = useState<CourseCandidate[]>([]);
   const [checkRevision, setCheckRevision] = useState(0);
+  const updateDetectedFacility = useCallback((id: string, members: CourseCandidate[]) => {
+    const update = (previous: CourseCandidate[]) => {
+      let changed = false;
+      const next = previous.map(course => {
+        if (course.courseId !== id) return course;
+        const enriched = members.map(member => ({ ...member, photoReference: course.photoReference,
+          photoAttributions: course.photoAttributions, distanceMeters: course.distanceMeters }));
+        if (JSON.stringify(course.facilityCourses ?? []) === JSON.stringify(enriched)) return course;
+        changed = true;
+        const updated = { ...course };
+        if (enriched.length) updated.facilityCourses = enriched; else delete updated.facilityCourses;
+        return updated;
+      });
+      return changed ? next : previous;
+    };
+    setCourses(update);
+    setCourseLookupResults(update);
+  }, []);
   const liveChecks = useCourseTimeChecks(
-    mode === "SIMULATOR" ? [] : [...courses, ...courseLookupResults].flatMap(getFacilityCourses).flatMap(course => course.courseId ? [course.courseId] : []), date, players, checkRevision,
+    mode === "SIMULATOR" ? [] : [...courses, ...courseLookupResults].flatMap(getFacilityCourses).flatMap(course => course.courseId ? [course.courseId] : []), date, players, checkRevision, updateDetectedFacility,
   );
   const knownTimes = useKnownTeeTimes(
     mode === "SIMULATOR" ? [] : [...courses, ...courseLookupResults].flatMap((course) => course.courseId ? [course.courseId] : []),

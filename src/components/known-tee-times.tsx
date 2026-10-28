@@ -5,9 +5,10 @@ import type { KnownTeeTime } from "@/lib/courses/known-tee-times";
 import type { CourseAlertSupport } from "@/lib/courses/intelligence";
 import { getDashboardCourseAction } from "@/lib/searches/dashboard-course-action";
 import { CourseStatusEmoji } from "@/components/course-status-emoji";
+import type { CourseCandidate } from "@/lib/places/google";
 
-export type CourseTimeCheck = { status: "LOADING" | "CHECKED" | "FAILED" | "UNAVAILABLE" | "BUSY" | "NOT_OPEN"; times: KnownTeeTime[] };
-export function useCourseTimeChecks(courseIds: string[], date: string, players: number, revision: number) {
+export type CourseTimeCheck = { status: "LOADING" | "CHECKED" | "FAILED" | "UNAVAILABLE" | "BUSY" | "NOT_OPEN"; times: KnownTeeTime[]; facilityCourses?: CourseCandidate[] };
+export function useCourseTimeChecks(courseIds: string[], date: string, players: number, revision: number, onFacility?: (id: string, courses: CourseCandidate[]) => void) {
   const ids = [...new Set(courseIds)].sort().slice(0, 60).join(",");
   const key = `${ids}|${date}|${players}|${revision}`;
   const [result, setResult] = useState<{ key: string; courses: Record<string, CourseTimeCheck> } | null>(null);
@@ -25,13 +26,16 @@ export function useCourseTimeChecks(courseIds: string[], date: string, players: 
         try {
           const response = await fetch(`/api/courses/check-times?${new URLSearchParams({ courseId: id, date, players: String(players) })}`, { signal: controller.signal });
           const data = response.ok ? await response.json() : { status: "FAILED", times: [] };
-          update(id, { status: data.status ?? "FAILED", times: data.times ?? [] });
+          if (!controller.signal.aborted && Array.isArray(data.facilityCourses)) onFacility?.(id, data.facilityCourses);
+          update(id, { status: data.status ?? "FAILED", times: data.times ?? [],
+            ...(Array.isArray(data.facilityCourses) ? { facilityCourses: data.facilityCourses } : {}),
+          });
         } catch { update(id, { status: "FAILED", times: [] }); }
       }
     }
     const timer = setTimeout(() => { void Promise.all([worker(), worker()]); }, 150);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [ids, date, players, revision, key]);
+  }, [ids, date, players, revision, key, onFacility]);
   return result?.key === key ? result.courses : {};
 }
 
