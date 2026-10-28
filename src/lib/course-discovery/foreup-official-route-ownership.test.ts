@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { deriveForeupOfficialRouteContact, bindForeupOfficialRouteConfiguration, foreupOfficialRouteOwnershipProofSchema } from "./foreup-official-route-ownership";
+import { deriveForeupOfficialRouteContact, bindForeupOfficialRouteConfiguration, foreupOfficialRouteOwnershipProofSchema, foreupOwnershipDigest, FOREUP_COMPACT_CONTACT_FACILITY_SCOPE } from "./foreup-official-route-ownership";
 import { registerFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
 import { inspectExistingAdapter, executeExistingAdapterRecipe } from "./existing-adapter-executor";
 import { venueProofMatches, recipeTimeToInstant } from "./executor";
@@ -53,6 +53,36 @@ describe("native official ForeUP route physical ownership", () => {
     expect(result.proof).toMatchObject({ venueName: source.venueName, providerName: "Example Park Golf Course", sheetTitle: "Example East", publicLocationName: "Example", facilityId: 12345 });
     expect(foreupOfficialRouteOwnershipProofSchema.parse(result.proof)).toEqual(result.proof);
   });
+  it.each([
+    `<section>Example<br>10 Example Rd<br>Example, NY 12345<br>Phone: <a href="tel:${phone}">${display}</a></section>`,
+    `<div><span>Example</span><div><address><span>10</span> <span>Example Rd</span><br><span>Example</span>, <span>NY</span> <span>12345</span></address></div><p><span>Phone:</span> <a href="tel:${phone}">${display}</a></p></div>`,
+    `<footer><div><div>Example</div><p><a href="tel:${phone}">${display}</a></p><address>10 Example Rd<br>Example, NY 12345</address></div></footer>`,
+  ])("binds the same complete physical contact across generic layout variants", markup => {
+    const p = page(); p.html = p.html.replace(card, markup);
+    p.visibleEvidence!.addressTexts = ["Example, 10 Example Rd, Example, NY 12345, Phone: 555-555-0123"];
+    expect(bindForeupOfficialRouteConfiguration(deriveForeupOfficialRouteContact(source, native(p), phone), html()).proof)
+      .toMatchObject({ publicLocationName: "Example", canonicalAddress: source.venueAddress, publicCoursePhone: phone });
+  });
+  it.each(["street", "town", "zip", "phone", "two-phones", "two-addresses", "wrong-name", "mailing", "private", "whole-page", "cross-sections", "long", "rendered-conflict"])(
+    "rejects conflicting or borrowed %s contact evidence in flexible layouts", mode => {
+      let markup = `<section>Example<br>10 Example Rd<br>Example, NY 12345<br>Phone: <a href="tel:${phone}">${display}</a></section>`;
+      const p = page(); p.visibleEvidence!.addressTexts = ["Example, 10 Example Rd, Example, NY 12345, Phone: 555-555-0123"];
+      if (mode === "street") markup = markup.replace("10 Example Rd", "11 Example Rd");
+      if (mode === "town") markup = markup.replace("Example, NY", "Elsewhere, NY");
+      if (mode === "zip") markup = markup.replace("12345", "12346");
+      if (mode === "phone") markup = markup.replaceAll(display, "555-555-9999");
+      if (mode === "two-phones") markup = markup.replace("</section>", `<a href="tel:${phone}">${display}</a></section>`);
+      if (mode === "two-addresses") markup = markup.replace("</section>", "<address>11 Example Rd, Example, NY 12345</address></section>");
+      if (mode === "wrong-name") markup = markup.replace("Example<br>", "Other Course<br>");
+      if (mode === "mailing") markup = markup.replace("<section>", '<section class="mailing">');
+      if (mode === "private") markup = markup.replace("<section>", '<section class="member">');
+      if (mode === "whole-page") markup = `<div><h1>Example</h1><address>10 Example Rd, Example, NY 12345</address><p><a href="tel:${phone}">${display}</a></p></div>`;
+      if (mode === "cross-sections") markup = `<div>Example<section><address>10 Example Rd, Example, NY 12345</address></section><section><a href="tel:${phone}">${display}</a></section></div>`;
+      if (mode === "long") markup = markup.replace("Example<br>", `Example<br>${"extra ".repeat(130)}`);
+      if (mode === "rendered-conflict") p.visibleEvidence!.addressTexts = ["Example, 11 Example Rd, Example, NY 12345, Phone: 555-555-0123"];
+      p.html = p.html.replace(card, markup);
+      expect(() => deriveForeupOfficialRouteContact(source, native(p), phone)).toThrow("FOREUP_OFFICIAL_ROUTE_UNVERIFIED");
+    });
   it.each(["raw", "visible", "both"])("rejects a second same-name conflicting %s physical card instead of filtering it out", mode => {
     const p = page(), other = card.replaceAll(phone,"+15555559999").replaceAll(display,"555-555-9999").replace("10 Example Rd","11 Example Rd");
     if (mode !== "visible") p.html = p.html.replace("</body>",other+"</body>");
@@ -157,5 +187,98 @@ describe("native official ForeUP route physical ownership", () => {
     expect(result.complete).toBe(false);expect(result.slots).toEqual([]);expect(Object.values(result.evidence).filter(value=>typeof value==="boolean")).toEqual([false,false,false,false,false]);
     expect(d.fetch.mock.calls.some(([value])=>String(value).includes("/api/"))).toBe(false);
     if (mode === "chrome" || mode === "phone") expect(d.fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe("canonical-root compact contact and public facility ownership", () => {
+  const facilitySource = { ...source, bookingUrl: "https://foreupsoftware.com/index.php/booking/12345#/teetimes" };
+  const compact = `<p>Phone: <a href="tel:${phone}">${display}</a><br>10 Example Rd, Example, NY 12345</p>`;
+  const compactPage = (): OfficialIdentityPage => { const p = page(); p.html = p.html.replace(card, compact).replaceAll(source.bookingUrl, facilitySource.bookingUrl);
+    p.visibleEvidence!.linkUrls = [facilitySource.bookingUrl]; p.visibleEvidence!.addressTexts = [`Phone: ${display}, 10 Example Rd, Example, NY 12345`]; return p; };
+  const contact = (p = compactPage()) => deriveForeupOfficialRouteContact(facilitySource, native(p), phone);
+  const compactDeps = () => ({ ...deps(), readNativeOfficialPage: vi.fn(async () => native(compactPage())) });
+
+  it("binds the published title and sole independently printed contact to the sole public schedule, not catalog order", () => {
+    const value = provider(); value.schedules.reverse();
+    const observed = contact(), bound = bindForeupOfficialRouteConfiguration(observed, html(value), FOREUP_STANDARD_PUBLIC_SCOPE);
+    expect(observed).toMatchObject({ contactScope: FOREUP_COMPACT_CONTACT_FACILITY_SCOPE, publicLocationName: "Example" });
+    expect(observed).not.toHaveProperty("rootDocumentProof");
+    const { sourceWitnessSha256, ...witnessBody } = observed;
+    expect(sourceWitnessSha256).toBe(foreupOwnershipDigest(witnessBody));
+    const { contactScope: _scope, ...withoutScope } = witnessBody;
+    expect(_scope).toBe(FOREUP_COMPACT_CONTACT_FACILITY_SCOPE);
+    expect(sourceWitnessSha256).not.toBe(foreupOwnershipDigest(withoutScope));
+    expect(bound.proof).toMatchObject({ contactScope: FOREUP_COMPACT_CONTACT_FACILITY_SCOPE, bookingUrl: facilitySource.bookingUrl,
+      scheduleId: 456, bookingClassId: 12, inventoryScope: FOREUP_STANDARD_PUBLIC_SCOPE });
+    expect(bound.proof.publicCatalogSha256).toMatch(/^[a-f0-9]{64}$/u);
+    expect(foreupOfficialRouteOwnershipProofSchema.parse(bound.proof)).toEqual(bound.proof);
+    expect(foreupOfficialRouteOwnershipProofSchema.safeParse({ ...bound.proof, contactScope: undefined }).success).toBe(false);
+    const old = bindForeupOfficialRouteConfiguration(deriveForeupOfficialRouteContact(source, native(), phone), html());
+    expect(bound.proof.providerWitnessSha256).toBe(old.proof.providerWitnessSha256);
+    expect(() => bindForeupOfficialRouteConfiguration(observed, html(value))).toThrow("FOREUP_OFFICIAL_ROUTE_UNVERIFIED");
+    expect(foreupOfficialRouteOwnershipProofSchema.safeParse({ ...old.proof, contactScope: FOREUP_COMPACT_CONTACT_FACILITY_SCOPE }).success).toBe(false);
+  });
+
+  it("collapses rendered wrapper repetitions without accepting multiple raw contacts", () => {
+    const p = compactPage(); p.visibleEvidence!.addressTexts.push(p.visibleEvidence!.addressTexts[0]);
+    expect(contact(p).contactScope).toBe(FOREUP_COMPACT_CONTACT_FACILITY_SCOPE);
+    p.html = p.html.replace("</body>", `${compact}</body>`);
+    expect(() => contact(p)).toThrow("FOREUP_OFFICIAL_ROUTE_UNVERIFIED");
+  });
+
+  it.each(["partial", "street", "zip", "phone", "tel-target", "two-contacts", "hidden", "mailing", "private", "rendered", "omitted", "title", "facility", "selected-route", "subpage"])(
+    "rejects %s root evidence without filling missing fields or changing the route scope", mode => {
+      const p = compactPage();
+      if (mode === "partial") p.html = p.html.replace("10 Example Rd, ", "");
+      if (mode === "street") p.html = p.html.replace("10 Example Rd", "11 Example Rd");
+      if (mode === "zip") p.html = p.html.replace("12345</p>", "12346</p>");
+      if (mode === "phone") p.html = p.html.replaceAll(display, "555-555-9999");
+      if (mode === "tel-target") p.html = p.html.replace(`tel:${phone}`, "tel:+15555559999");
+      if (mode === "two-contacts") p.html = p.html.replace("</body>", `${compact.replaceAll(display, "555-555-9999").replaceAll(phone, "+15555559999")}</body>`);
+      if (mode === "hidden") p.html = p.html.replace(compact, `<div hidden>${compact}</div>`);
+      if (mode === "mailing") p.html = p.html.replace(compact, `<div class="mailing">${compact}</div>`);
+      if (mode === "private") p.html = p.html.replace(compact, `<div class="member">${compact}</div>`);
+      if (mode === "rendered") p.visibleEvidence!.addressTexts = [`Phone: ${display}, 11 Example Rd, Example, NY 12345`];
+      if (mode === "omitted") p.visibleEvidence!.phoneTextsOmitted = true;
+      if (mode === "title") { p.html = p.html.replace("Example | County", "Other Course | County"); p.visibleEvidence!.title = "Other Course | County"; }
+      if (mode === "facility") p.html = p.html.replace(facilitySource.bookingUrl, facilitySource.bookingUrl.replace("12345", "54321"));
+      if (mode === "selected-route") p.html = p.html.replace(facilitySource.bookingUrl, source.bookingUrl);
+      if (mode === "subpage") p.url = `${source.officialUrl}contact/`;
+      expect(() => contact(p)).toThrow("FOREUP_OFFICIAL_ROUTE_UNVERIFIED");
+    });
+
+  it.each(["address", "phone", "zone", "two-public", "unknown-sibling", "duplicate-course", "duplicate-sheet", "current"])(
+    "rejects %s provider identity or whole-catalog ambiguity before accepting any schedule", mode => {
+      const value = provider();
+      if (mode === "address") value.course.address = "11 Example Rd";
+      if (mode === "phone") value.course.phone = "555-555-9999";
+      if (mode === "zone") value.course.timezone = "America/Chicago";
+      if (mode === "two-public") value.schedules[1].booking_classes[0].name = "Public";
+      if (mode === "unknown-sibling") value.schedules[1].booking_classes[0].name = "Unverified Audience";
+      if (mode === "duplicate-course") value.courses.push({ ...value.course });
+      if (mode === "duplicate-sheet") value.schedules.push(structuredClone(value.schedules[1]));
+      if (mode === "current") value.courses = [{ ...value.course, phone: "555-555-9999" }];
+      expect(() => bindForeupOfficialRouteConfiguration(contact(), html(value), FOREUP_STANDARD_PUBLIC_SCOPE)).toThrow();
+    });
+
+  it("rediscovers the scoped facility proof on each independent replay and rejects a changed public schedule", async () => {
+    const observed = await inspectExistingAdapter(facilitySource, compactDeps());
+    expect(observed.adapter).toMatchObject({ family: "FOREUP", scheduleId: 456, officialRouteOwnershipProof: { contactScope: FOREUP_COMPACT_CONTACT_FACILITY_SCOPE } });
+    const recipe = parseAccessRecipe({ schemaVersion: 1, engine: "EXISTING_ADAPTER", source: facilitySource,
+      target: { kind: "OUTDOOR", courseId: "synthetic-compact-course" }, adapter: observed.adapter });
+    const saved = JSON.stringify(recipe), hash = hashAccessRecipe(recipe);
+    for (const date of ["2026-10-28", "2026-10-29"]) {
+      const d = compactDeps(); d.fetch.mockImplementation(async raw => new URL(String(raw)).pathname.includes("/api/")
+        ? Response.json([{ time: `${date} 10:00`, available_spots: 3, schedule_id: 456, booking_class_id: 12, holes: 18 }])
+        : new Response(html(), { headers: { "content-type": "text/html" } }));
+      const result = await executeExistingAdapterRecipe(parseAccessRecipe(JSON.parse(saved)), { ...input, date },
+        { ...d, recipeHash: hash, toInstant: recipeTimeToInstant, now: () => new Date("2026-10-26T00:00:00Z") });
+      expect(result).toMatchObject({ complete: true, status: "AVAILABLE", slots: [{ availableSpots: 3, bookingUrl: facilitySource.bookingUrl }] });
+      expect(d.readNativeOfficialPage).toHaveBeenCalledOnce();
+    }
+    const d = compactDeps(), changed = provider(); changed.schedules[1].booking_classes[0].name = "Public";
+    d.fetch.mockImplementation(async () => new Response(html(changed), { headers: { "content-type": "text/html" } }));
+    expect(await executeExistingAdapterRecipe(recipe, input, { ...d, recipeHash: hash, toInstant: recipeTimeToInstant })).toMatchObject({ complete: false, slots: [] });
+    expect(d.fetch).toHaveBeenCalledOnce();
   });
 });

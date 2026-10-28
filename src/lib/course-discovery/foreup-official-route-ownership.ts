@@ -15,9 +15,11 @@ export const foreupOwnershipDigest = (value: unknown) => createHash("sha256").up
 const url = z.string().url().max(2048).refine(value => { try { const u = new URL(value); return u.protocol === "https:" && !u.username && !u.password && !u.port; } catch { return false; } });
 const label = z.string().min(3).max(300).refine(value => !/[\u0000-\u001f\u007f]/u.test(value));
 const sha = z.string().regex(/^[a-f0-9]{64}$/u), id = z.number().int().min(1).max(2_147_483_647);
+export const FOREUP_COMPACT_CONTACT_FACILITY_SCOPE = "CANONICAL_ROOT_COMPACT_CONTACT_FACILITY_V1" as const;
 const sourceSchema = z.object({ officialUrl: url, officialDocumentUrl: url, bookingUrl: url, venueName: label,
   officialTitle: label, publicLocationName: label, canonicalAddress: z.string().min(8).max(1024), timeZone: z.string().min(3).max(80),
   publicCoursePhone: z.string().regex(/^\+1[2-9]\d{9}$/u), rootDocumentProof: nativeCanonicalRootDocumentProofSchema.optional(),
+  contactScope: z.literal(FOREUP_COMPACT_CONTACT_FACILITY_SCOPE).optional(),
   sourceWitnessSha256: sha, requiredCapability: z.literal("LOCAL_CHROME"), warmTransport: z.literal("NATIVE_CHROME") }).strict();
 export const foreupOfficialRouteOwnershipProofSchema = sourceSchema.extend({ kind: z.literal("OFFICIAL_FOREUP_ROUTE_OWNERSHIP_V1"),
   providerName: label, sheetTitle: label, providerAddress: z.string().min(8).max(1024), facilityId: id, scheduleId: id, bookingClassId: id,
@@ -27,9 +29,14 @@ export const foreupOfficialRouteOwnershipProofSchema = sourceSchema.extend({ kin
     const source = Object.fromEntries(Object.keys(sourceSchema.shape).filter(key => key !== "sourceWitnessSha256" && Object.hasOwn(value, key)).map(key => [key, value[key as keyof typeof value]]));
     const provider = { providerName: value.providerName, sheetTitle: value.sheetTitle, providerAddress: value.providerAddress,
       facilityId: value.facilityId, scheduleId: value.scheduleId, bookingClassId: value.bookingClassId, phone: value.publicCoursePhone, timeZone: value.timeZone };
-    const selected = route(value.bookingUrl), physical = parsePublicUSBusinessAddress(value.providerAddress), canonicalAddress = parsePublicUSBusinessAddress(value.canonicalAddress);
+    const selected = route(value.bookingUrl), facility = facilityRoute(value.bookingUrl), physical = parsePublicUSBusinessAddress(value.providerAddress), canonicalAddress = parsePublicUSBusinessAddress(value.canonicalAddress);
+    const routeMatches = value.contactScope ? facility?.facilityId === value.facilityId && !value.rootDocumentProof &&
+      value.inventoryScope === FOREUP_STANDARD_PUBLIC_SCOPE && value.officialDocumentUrl === value.officialUrl && canonicalRootUrl(value.officialUrl) &&
+      value.officialTitle.split(/\s*[|–—]\s*/u).filter(part => fullCourseName(part) === coreName(value.venueName)).length === 1 &&
+      value.officialTitle.split(/\s*[|–—]\s*/u).includes(value.publicLocationName) && fullCourseName(value.publicLocationName) === coreName(value.venueName) :
+      selected?.facilityId === value.facilityId && selected.scheduleId === value.scheduleId;
     return Boolean(Boolean(value.inventoryScope) === Boolean(value.publicCatalogSha256) &&
-      selected && selected.facilityId === value.facilityId && selected.scheduleId === value.scheduleId && physical && canonicalAddress &&
+      routeMatches && physical && canonicalAddress &&
       JSON.stringify(physical) === JSON.stringify(canonicalAddress) && value.sourceWitnessSha256 === foreupOwnershipDigest(source) &&
       value.providerWitnessSha256 === foreupOwnershipDigest(provider) && semanticDigest === foreupOwnershipDigest(body));
   });
@@ -66,33 +73,118 @@ function route(value: string) {
       ["", "#/teetimes", "#teetimes"].includes(u.hash) && match ? { facilityId: Number(match[1]), scheduleId: Number(match[2]) } : undefined;
   } catch { return; }
 }
+function facilityRoute(value: string) {
+  try { const u = new URL(value), match = /^\/index\.php\/booking\/([1-9]\d{0,9})\/?$/u.exec(u.pathname);
+    return u.protocol === "https:" && u.hostname === "foreupsoftware.com" && !u.port && !u.username && !u.password && !u.search &&
+      ["", "#/teetimes", "#teetimes"].includes(u.hash) && match ? { facilityId: Number(match[1]) } : undefined;
+  } catch { return; }
+}
+function canonicalRootUrl(value: string) {
+  try { const u = new URL(value); return u.protocol === "https:" && u.pathname === "/" && !u.search && !u.hash && !u.username && !u.password && !u.port; } catch { return false; }
+}
 function coreName(name: string) { return fullCourseName(name).replace(/ golf course$/u, "").trim(); }
+const phoneScalar = /(?<!\d)(?:\+?1[ .-]?)?(?:\(\d{3}\)|\d{3})[ .-]?\d{3}[ .-]?\d{4}(?!\d)/gu;
+function contactText(node: Node): string {
+  if (node.nodeName === "#text") return (node as DefaultTreeAdapterMap["textNode"]).value;
+  if (element(node) && excluded(node)) return "";
+  if (element(node) && node.tagName === "br") return ", ";
+  const value = "childNodes" in node ? node.childNodes.map(child => {
+    const value = contactText(child);
+    return element(child) && blocks.has(child.tagName) && value ? `, ${value}, ` : value;
+  }).join(" ") : "";
+  return clean(value).replace(/(?:,\s*){2,}/gu, ", ").replace(/^,\s*|,\s*$/gu, "");
+}
+function cardName(value: string, expected: string) {
+  const separator = value.indexOf(",");
+  const location = separator < 0 ? "" : clean(value.slice(0, separator));
+  return location.length <= 200 && fullCourseName(location) === expected ? location : undefined;
+}
+/** All three independently printed scalars must occupy one bounded contact,
+ * never a canonical-field substitution or a search across the document. */
+function semanticCard(value: string, expected: string) {
+  const location = cardName(value, expected);
+  if (!location || value.length > 700) return;
+  const parsed = semanticCompactContact(value.slice(value.indexOf(",") + 1));
+  return parsed ? { location, ...parsed } : undefined;
+}
+function semanticCompactContact(remainder: string) {
+  if (remainder.length > 700 || /\b(?:mailing|corporate|billing|headquarters|private|members?|customer|account|fax)\b/iu.test(remainder)) return;
+  const phones = [...remainder.matchAll(phoneScalar)];
+  if (phones.length !== 1) return;
+  const phone = normalizePublicCoursePhone(phones[0][0]);
+  const physicalText = clean(remainder.replace(phones[0][0], "").replace(/(?:^|,\s*)(?:phone|tel(?:ephone)?)\s*:\s*(?:,\s*)?/iu, ", "))
+    .replace(/(?:,\s*){2,}/gu, ", ").replace(/^,\s*|,\s*$/gu, "").trim();
+  const address = parsePublicUSBusinessAddress(physicalText);
+  return phone && address ? { phone, address } : undefined;
+}
+function within(node: Node, ancestor: Node) {
+  let current: Node | undefined = node;
+  for (let depth = 0; current && depth < 80; depth++, current = "parentNode" in current ? current.parentNode ?? undefined : undefined)
+    if (current === ancestor) return true;
+  return false;
+}
 /** Native original-object ownership only; a copied page or serialized contact is not authority. */
 export function deriveForeupOfficialRouteContact(source: OfficialIdentitySource, page: OfficialIdentityPage, privatePhone: unknown): Contact {
-  if (!source.officialUrl || !source.venueAddress || !route(source.bookingUrl) || Buffer.byteLength(page.html) > 600_000 || !isFreshNativeOfficialIdentityPage(page, source.officialUrl)) return failure();
+  if (!source.officialUrl || !source.venueAddress || !route(source.bookingUrl) && !facilityRoute(source.bookingUrl) || Buffer.byteLength(page.html) > 600_000 || !isFreshNativeOfficialIdentityPage(page, source.officialUrl)) return failure();
   const root = freshNativeCanonicalRootDocument(page, source.officialUrl), phone = normalizePublicCoursePhone(privatePhone), address = parsePublicUSBusinessAddress(source.venueAddress);
   const visible = page.visibleEvidence, expected = coreName(source.venueName), entries = nodes(parse(page.html));
   if (!root || !phone || !address || !visible || expected.length < 3 || expected.length > 200) return failure();
   const titles = entries.filter(n => n.tagName === "title");
   if (titles.length !== 1 || clean(visible.title) !== text(titles[0]) || text(titles[0]).split(/\s*[|–—]\s*/u).filter(value => fullCourseName(value) === expected).length !== 1) return failure();
-  const cards: Array<{ value: string; location: string }> = [];
-  for (const node of entries.filter(n => blocks.has(n.tagName))) {
-    const children = node.childNodes.filter(element);
-    if (children.length !== 2 || node.childNodes.some(n => n.nodeName === "#text" && text(n).trim()) || fullCourseName(text(children[0])) !== expected) continue;
-    const descendants = nodes(children[1]), links = descendants.filter(n => n.tagName === "a" && (attr(n, "href") ?? "").startsWith("tel:"));
-    if (!links.length) continue;
+  if (facilityRoute(source.bookingUrl)) {
+    if (root.rootDocumentProof || !canonicalRootUrl(source.officialUrl) || page.url !== source.officialUrl || visible.phoneTextsOmitted ||
+        visible.contactPhoneLinksOmitted || visible.addressTexts.length >= 160) return failure();
+    const allPhones = entries.filter(node => node.tagName === "a" && (attr(node, "href") ?? "").startsWith("tel:"));
+    if (allPhones.length !== 1 || normalizePublicCoursePhone((attr(allPhones[0], "href") ?? "").slice(4)) !== phone ||
+        normalizePublicCoursePhone(text(allPhones[0])) !== phone) return failure();
+    const candidates = entries.filter(node => blocks.has(node.tagName) && semanticCompactContact(contactText(node)));
+    if (candidates.length > 40) return failure();
+    const minimal = candidates.filter(node => !candidates.some(other => other !== node && within(other, node)));
+    if (minimal.length !== 1 || !within(allPhones[0], minimal[0])) return failure();
+    const descendants = nodes(minimal[0]);
+    if (descendants.length > 80 || descendants.some(node => /^h[1-6]$/u.test(node.tagName) ||
+        node !== minimal[0] && ["section", "article", "footer"].includes(node.tagName) ||
+        node.tagName === "a" && node !== allPhones[0])) return failure();
+    const contact = semanticCompactContact(contactText(minimal[0]));
+    if (!contact || contact.phone !== phone || JSON.stringify(contact.address) !== JSON.stringify(address)) return failure();
+    const rendered = visible.addressTexts.map(value => semanticCompactContact(clean(value))).filter(value => value !== undefined);
+    if (!rendered.length || new Set(rendered.map(value => JSON.stringify(value))).size !== 1 ||
+        JSON.stringify(rendered[0]) !== JSON.stringify(contact) || !visible.phoneTexts?.length ||
+        visible.phoneTexts.some(value => normalizePublicCoursePhone(value) !== phone) || !visible.linkUrls.includes(source.bookingUrl)) return failure();
+    const bookingLinks = entries.filter(node => node.tagName === "a" && /\b(?:tee\s*times?|book(?:\s+(?:a|your))?|reservations?)\b/iu.test(text(node)))
+      .flatMap(node => { try { const href = new URL(attr(node, "href") ?? "", page.url).href; return facilityRoute(href) ? [href] : []; } catch { return []; } });
+    if (!bookingLinks.length || new Set(bookingLinks).size !== 1 || bookingLinks[0] !== source.bookingUrl) return failure();
+    const publicLocationName = text(titles[0]).split(/\s*[|–—]\s*/u).find(value => fullCourseName(value) === expected)!;
+    const body = { officialUrl: source.officialUrl, officialDocumentUrl: page.url, bookingUrl: source.bookingUrl, venueName: source.venueName,
+      officialTitle: clean(visible.title), publicLocationName, canonicalAddress: source.venueAddress, timeZone: source.timeZone,
+      publicCoursePhone: phone, contactScope: FOREUP_COMPACT_CONTACT_FACILITY_SCOPE,
+      requiredCapability: "LOCAL_CHROME" as const, warmTransport: "NATIVE_CHROME" as const };
+    const witness = sourceSchema.parse({ ...body, sourceWitnessSha256: foreupOwnershipDigest(body) }); contacts.set(witness, page); return witness;
+  }
+  const candidates = entries.filter(node => blocks.has(node.tagName) && contactText(node).length <= 700 && cardName(contactText(node), expected) &&
+    nodes(node).some(n => n.tagName === "a" && (attr(n, "href") ?? "").startsWith("tel:")));
+  if (candidates.length > 40) return failure();
+  // Wrappers around a contact do not create another card. Separate same-name
+  // contacts remain separate, including contradictory ones.
+  const minimal = candidates.filter(node => !candidates.some(other => other !== node && within(other, node)));
+  if (minimal.length !== 1) return failure();
+  const cards: Array<NonNullable<ReturnType<typeof semanticCard>>> = [];
+  for (const node of minimal) {
+    const descendants = nodes(node), links = descendants.filter(n => n.tagName === "a" && (attr(n, "href") ?? "").startsWith("tel:"));
+    // A page wrapper, navigation section or multiple business blocks cannot
+    // become a contact by collecting its individually convenient descendants.
+    if (descendants.some(n => n.tagName === "h1" || n !== node && ["section", "article", "footer"].includes(n.tagName) ||
+        n.tagName === "a" && !(attr(n, "href") ?? "").startsWith("tel:")) || descendants.length > 80) return failure();
     // A second named physical contact is contradictory evidence, not an
     // unrelated row to discard until one convenient match survives.
     if (links.length !== 1 || normalizePublicCoursePhone((attr(links[0], "href") ?? "").slice(4)) !== phone || normalizePublicCoursePhone(text(links[0])) !== phone) return failure();
-    const displayPhone = text(links[0]), body = text(children[1]);
-    if (!body.startsWith(displayPhone + ", ")) return failure();
-    const remainder = body.slice(displayPhone.length + 2), physical = parsePublicUSBusinessAddress(remainder);
-    if (!physical || JSON.stringify(physical) !== JSON.stringify(address)) return failure();
-    cards.push({ value: clean(text(children[0]) + ", " + body), location: text(children[0]) });
+    const parsed = semanticCard(contactText(node), expected);
+    if (!parsed || parsed.phone !== phone || JSON.stringify(parsed.address) !== JSON.stringify(address)) return failure();
+    cards.push(parsed);
   }
-  if (cards.length !== 1 || visible.addressTexts.filter(value => clean(value) === cards[0].value).length !== 1 ||
-      visible.addressTexts.some(value => { const parts = clean(value).split(/,\s*/u);
-        return fullCourseName(parts[0]) === expected && Boolean(normalizePublicCoursePhone(parts[1])) && clean(value) !== cards[0].value; }) ||
+  const visibleCards = visible.addressTexts.filter(value => cardName(clean(value), expected) && [...value.matchAll(phoneScalar)].length > 0);
+  if (cards.length !== 1 || visibleCards.length !== 1 ||
+      JSON.stringify(semanticCard(clean(visibleCards[0]), expected)) !== JSON.stringify(cards[0]) ||
       !visible.phoneTexts?.some(value => normalizePublicCoursePhone(value) === phone) || !visible.linkUrls.includes(source.bookingUrl)) return failure();
   const rawLinks = entries.filter(n => n.tagName === "a" && /\b(?:tee\s*times?|book(?:\s+(?:a|your))?|reservations?)\b/iu.test(text(n))).filter(n => {
     try { return new URL(attr(n, "href") ?? "", page.url).href === source.bookingUrl; } catch { return false; }
@@ -119,12 +211,28 @@ const record = (value: unknown): value is Record<string, unknown> => Boolean(val
 const providerId = (value: unknown) => { const result = id.safeParse(typeof value === "string" && /^[1-9]\d{0,9}$/u.test(value) ? Number(value) : value); return result.success ? result.data : undefined; };
 export function bindForeupOfficialRouteConfiguration(contact: Contact, html: string,
   inventoryScope?: typeof FOREUP_STANDARD_PUBLIC_SCOPE): { config: ForeupPublicConfiguration; proof: ForeupOfficialRouteOwnershipProof } {
-  const page = contacts.get(contact), selectedRoute = route(contact.bookingUrl);
-  if (!page || !selectedRoute || !isFreshNativeOfficialIdentityPage(page, contact.officialUrl) || Buffer.byteLength(html) > 512_000) return failure();
+  const page = contacts.get(contact), facilityOnly = facilityRoute(contact.bookingUrl);
+  let selectedRoute = route(contact.bookingUrl);
+  const facilityId = selectedRoute?.facilityId ?? facilityOnly?.facilityId;
+  if (!page || !facilityId || Boolean(contact.contactScope) !== Boolean(facilityOnly) ||
+      !isFreshNativeOfficialIdentityPage(page, contact.officialUrl) || Buffer.byteLength(html) > 512_000) return failure();
   const { sourceWitnessSha256, ...sourceBody } = contact;
   if (sourceWitnessSha256 !== foreupOwnershipDigest(sourceBody)) return failure();
   const courses = assignment(html, "COURSES", "["), current = assignment(html, "COURSE", "{"), schedules = assignment(html, "SCHEDULES", "[");
   if (!Array.isArray(courses) || courses.length < 1 || courses.length > 30 || !Array.isArray(schedules) || schedules.length < 1 || schedules.length > 30 || !record(current)) return failure();
+  if (contact.contactScope) {
+    if (inventoryScope !== FOREUP_STANDARD_PUBLIC_SCOPE || courses.some(row => !record(row) || !providerId(row.course_id)) ||
+        new Set(courses.map(row => providerId((row as Record<string, unknown>).course_id))).size !== courses.length ||
+        schedules.some(row => !record(row) || !providerId(row.course_id) || !providerId(row.teesheet_id)) ||
+        new Set(schedules.map(row => `${providerId((row as Record<string, unknown>).course_id)}:${providerId((row as Record<string, unknown>).teesheet_id)}`)).size !== schedules.length) return failure();
+    const candidates = schedules.filter(row => record(row) && providerId(row.course_id) === facilityId && Array.isArray(row.booking_classes) &&
+      row.booking_classes.filter(value => record(value) && providerId(value.teesheet_id) === providerId(row.teesheet_id) &&
+        String(value.active) === "1" && String(value.hidden) === "0" && typeof value.name === "string" &&
+        /^(?:public|public play|public tee times|online tee times)$/iu.test(value.name.trim())).length === 1);
+    if (candidates.length !== 1 || !record(candidates[0])) return failure();
+    selectedRoute = { facilityId, scheduleId: providerId(candidates[0].teesheet_id)! };
+  }
+  if (!selectedRoute) return failure();
   const facilities = courses.filter(row => record(row) && providerId(row.course_id) === selectedRoute.facilityId), sheets = schedules.filter(row => record(row) &&
     providerId(row.course_id) === selectedRoute.facilityId && providerId(row.teesheet_id) === selectedRoute.scheduleId);
   if (facilities.length !== 1 || sheets.length !== 1 || !record(facilities[0]) || !record(sheets[0])) return failure();

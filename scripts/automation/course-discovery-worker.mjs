@@ -7,6 +7,7 @@ import { createInterface } from "node:readline";
 import { discoveryError } from "./course-discovery-client.mjs";
 import { safeBrowserActionIssues, safeDiscoveryTurnFailure, safePublicUrlRejectionDiagnostic } from "./course-discovery-diagnostics.mjs";
 import { createDiscoveryPublicAssetInventory } from "./course-discovery-public-assets.mjs";
+import { compactDiscoveryRecipeSchema } from "./course-discovery-prompt-schema.mjs";
 import { nativeRouterOperations, nativeRouterErrorNames, nativeRouterErrorCategories, projectNativeRouterFailure } from "./stagehand/source-diagnostic.mjs";
 
 const VERSION = "0.160.1";
@@ -103,8 +104,14 @@ function dataHash(value) { const key = canonicalDataKey(value); return key ? cre
 function foreupOwnershipData(proof, adapter, job, contextUrl) {
   try {
     const sourceKeys = ["officialUrl","officialDocumentUrl","bookingUrl","venueName","officialTitle","publicLocationName","canonicalAddress","timeZone","publicCoursePhone","sourceWitnessSha256","requiredCapability","warmTransport"];
+    const compactFacility = proof?.contactScope === "CANONICAL_ROOT_COMPACT_CONTACT_FACILITY_V1";
     const keys = [...sourceKeys,"kind","providerName","sheetTitle","providerAddress","facilityId","scheduleId","bookingClassId","providerWitnessSha256","semanticDigest"];
-    if (!proof || Object.keys(proof).some(key => ![...keys,"rootDocumentProof"].includes(key)) || keys.some(key => !Object.hasOwn(proof,key)) ||
+    if (!proof || Object.keys(proof).some(key => ![...keys,"rootDocumentProof","contactScope","inventoryScope","publicCatalogSha256"].includes(key)) || keys.some(key => !Object.hasOwn(proof,key)) ||
+        Object.hasOwn(proof,"contactScope") && !compactFacility ||
+        Boolean(proof.inventoryScope) !== Boolean(proof.publicCatalogSha256) ||
+        proof.inventoryScope !== undefined && (proof.inventoryScope !== "STANDARD_PUBLIC_CLASS_V1" || !/^[a-f0-9]{64}$/u.test(proof.publicCatalogSha256 ?? "") ||
+          proof.inventoryScope !== adapter.inventoryScope || proof.publicCatalogSha256 !== adapter.publicCatalogSha256) ||
+        compactFacility && proof.inventoryScope !== "STANDARD_PUBLIC_CLASS_V1" ||
         proof.kind !== "OFFICIAL_FOREUP_ROUTE_OWNERSHIP_V1" || proof.requiredCapability !== "LOCAL_CHROME" || proof.warmTransport !== "NATIVE_CHROME" ||
         proof.officialUrl !== job.request.identity.officialUrl || proof.venueName !== job.request.identity.name || proof.canonicalAddress !== job.request.identity.address ||
         proof.timeZone !== job.request.input.timeZone || proof.publicCoursePhone !== job.request.trustedContext?.canonicalCoursePhone ||
@@ -112,10 +119,15 @@ function foreupOwnershipData(proof, adapter, job, contextUrl) {
         !/^\+1[2-9]\d{9}$/u.test(proof.publicCoursePhone) || ["officialTitle","publicLocationName","providerName","sheetTitle"].some(key => typeof proof[key] !== "string" || proof[key].length < 3 || proof[key].length > 300) ||
         typeof proof.providerAddress !== "string" || proof.providerAddress.length > 1024 ||
         ["facilityId","scheduleId","bookingClassId"].some(key => !Number.isInteger(proof[key]) || proof[key] <= 0 || proof[key] > 2147483647 || proof[key] !== adapter[key])) return false;
-    const url = new URL(proof.bookingUrl), route = /^\/index\.php\/booking\/([1-9]\d{0,9})\/([1-9]\d{0,9})\/?$/u.exec(url.pathname);
-    if (url.hostname !== "foreupsoftware.com" || url.search || !["","#/teetimes","#teetimes"].includes(url.hash) || !route || Number(route[1]) !== proof.facilityId || Number(route[2]) !== proof.scheduleId) return false;
+    const url = new URL(proof.bookingUrl), route = compactFacility
+      ? /^\/index\.php\/booking\/([1-9]\d{0,9})\/?$/u.exec(url.pathname)
+      : /^\/index\.php\/booking\/([1-9]\d{0,9})\/([1-9]\d{0,9})\/?$/u.exec(url.pathname);
+    if (url.hostname !== "foreupsoftware.com" || url.search || !["","#/teetimes","#teetimes"].includes(url.hash) || !route ||
+        Number(route[1]) !== proof.facilityId || !compactFacility && Number(route[2]) !== proof.scheduleId ||
+        compactFacility && (proof.officialUrl !== proof.officialDocumentUrl || proof.rootDocumentProof !== undefined)) return false;
     if (proof.officialUrl === proof.officialDocumentUrl ? proof.rootDocumentProof !== undefined : !nativeRootDocumentData(proof.rootDocumentProof,proof.officialUrl,proof.officialDocumentUrl)) return false;
     const source = Object.fromEntries(sourceKeys.filter(key => key !== "sourceWitnessSha256").map(key => [key,proof[key]]));
+    if (compactFacility) source.contactScope = proof.contactScope;
     if (proof.rootDocumentProof) source.rootDocumentProof = proof.rootDocumentProof;
     const provider = Object.fromEntries(["providerName","sheetTitle","providerAddress","facilityId","scheduleId","bookingClassId"].map(key => [key,proof[key]]));
     const { semanticDigest, ...body } = proof;
@@ -1537,6 +1549,10 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
     recipeSchema ??= JSON.parse(execFileSync(process.execPath,
       [join(cwd, "node_modules/tsx/dist/cli.mjs"), join(cwd, "scripts/automation/course-discovery-browser.ts"), "--recipe-schema"],
       { cwd, env: discoveryProcessEnvironment(), encoding: "utf8", windowsHide: true, timeout: Math.max(1, Math.min(15_000, effectiveDeadline - Date.now())), maxBuffer: 500_000 }));
+    // This is documentation for the model, never the backend validator.
+    // Repeated schemas use local references instead of consuming the first
+    // request's entire budget before a useful browser operation can run.
+    recipeSchema = compactDiscoveryRecipeSchema(recipeSchema);
     checkWork();
     const configuration = { ...DISCOVERY_CONFIG, model_catalog_json: catalogPath };
     const args = ["app-server", "--stdio", ...Object.entries(configuration).flatMap(([key, value]) => ["-c", `${key}=${JSON.stringify(value)}`])];

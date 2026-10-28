@@ -9,13 +9,30 @@ canonical matching, deduplication and the email outbox retain delivery ownership
 
 Public Teesnap outdoor methods can use the existing fixed reader when the
 canonical official URL is already the same HTTPS tenant root as the booking
-source. Inspection binds the full venue name, physical address, canonical
+source. The controller selects this fixed public-root transport before starting
+a source browser or model. Its private helper performs one bounded source read,
+closes, and then uses the ordinary backend challenges and activation path.
+Inspection binds the full venue name, physical address, canonical
 timezone and public course catalog. Each independent replay refreshes those
 facts before one fixed, credentialless day request with bound date and players.
 Held sections, booking joins and every returned row must be complete before an
 empty result is accepted. A changed catalog, ambiguous identity, partial day or
 unknown booking window remains incomplete. Marketing-site delegation is outside
 this reader's current scope; recipes cannot supply arbitrary routes or code.
+
+The generic model receives a compact reference-based copy of the recipe schema.
+Only descriptive annotations and repeated schema text are removed; the actual
+server validator, permitted actions, independent replay and token ceilings do
+not change. Unsupported schema reference scopes retain their original clone.
+
+An official ForeUP facility link may omit the selected schedule. A separately
+marked compact-contact proof can bind that observed facility anchor to one
+public schedule from the fresh provider catalog. It requires a unique canonical
+root title, a sole fully printed physical contact with exact address and phone,
+fresh raw/rendered agreement, and provider physical identity and timezone.
+Ambiguous contacts or multiple qualifying public sheets remain unverified.
+The recipe keeps the observed facility link and refreshes the complete proof on
+every replay. Existing named-contact proofs retain their prior scope.
 
 ## Local worker modes
 

@@ -12,6 +12,8 @@ import { safeBrowserActionIssues } from "./course-discovery-diagnostics.mjs";
 import { readNativeOfficialIdentityPage } from "../../src/lib/course-discovery/native-official-page-reader";
 import { discoveryTrustedContextSchema } from "../../src/lib/course-discovery/trusted-context";
 import { fixedInspectionFrameWitnessSchema } from "../../src/lib/course-discovery/fixed-inspection-frame-witness";
+import { inspectExistingAdapter } from "../../src/lib/course-discovery/existing-adapter-executor";
+import { parseTeesnapRecipeSource, teesnapMetadataSchema } from "../../src/lib/course-discovery/teesnap-source";
 
 function publicFailureCode(error: unknown) {
   if (error instanceof z.ZodError) return "BROWSER_ACTION_SCHEMA_INVALID";
@@ -55,6 +57,53 @@ async function main() {
   const deadlineAt = new Date(at >= 0 ? args[at + 1] : "");
   if (!Number.isFinite(deadlineAt.getTime()) || deadlineAt.getTime() <= Date.now()) throw new Error("INVALID_DEADLINE");
   const requestLease = remoteProviderLease();
+  if (args.includes("--inspect-official-adapter")) {
+    const inputLines = createInterface({ input: process.stdin, crlfDelay: Infinity });
+    let id: number | null = null;
+    try {
+      if (args.length !== 3 || args[0] !== "--inspect-official-adapter" || args[1] !== "--deadline") throw new Error("OFFICIAL_ADAPTER_SCOPE_INVALID");
+      for await (const line of inputLines) {
+        if (Buffer.byteLength(line) > 16_384) throw new Error("REQUEST_TOO_LARGE");
+        const raw = JSON.parse(line) as { id?: unknown };
+        if (Number.isInteger(raw?.id)) id = Number(raw.id);
+        const value = z.object({ id: z.number().int().min(1).max(1_000_000),
+          target: z.object({ kind: z.literal("OUTDOOR"), courseId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/u) }).strict(),
+          source: z.object({ officialUrl: z.string().max(2048), bookingUrl: z.string().max(2048), venueName: z.string().trim().min(3).max(200),
+            venueAddress: z.string().trim().min(3).max(1024), timeZone: z.string().min(1).max(100) }).strict(), input: accessExecutionInputSchema }).strict().parse(raw);
+        id = value.id;
+        const { source, input } = value, root = parseTeesnapRecipeSource(source.officialUrl);
+        if (!root || root.bookingUrl !== source.officialUrl || source.bookingUrl !== source.officialUrl || source.timeZone !== input.timeZone ||
+          input.durationMinutes !== undefined || /[\u0000-\u001f\u007f]/u.test(source.venueName + source.venueAddress)) throw new Error("OFFICIAL_ADAPTER_SCOPE_INVALID");
+        const workDeadline = Math.min(deadlineAt.getTime(), Date.now() + 25_000);
+        let reads = 0, bytesRead = 0;
+        const transport = createAddressPinnedPublicFetchTransport({ parseUrl: candidate => {
+          if (candidate !== root.bookingUrl) throw new Error("UNSCOPED_ADAPTER_REQUEST"); return new URL(candidate);
+        }, maxResponseBytes: 600_000, timeoutMs: 15_000, redirectLimit: 0 });
+        const scopedFetch: typeof fetch = async (url, init) => {
+          const href = url instanceof Request ? url.url : String(url);
+          if (href !== root.bookingUrl || (init?.method ?? "GET").toUpperCase() !== "GET" || init?.body != null || ++reads > 1 || Date.now() >= workDeadline)
+            throw new Error("UNSCOPED_ADAPTER_REQUEST");
+          const response = await transport(href, { ...init, credentials: "omit", redirect: "error",
+            signal: AbortSignal.any([...(init?.signal ? [init.signal] : []), AbortSignal.timeout(Math.max(1, Math.min(15_000, workDeadline - Date.now())))]) });
+          if (!response.ok) return response;
+          if (response.redirected || response.url && response.url !== root.bookingUrl) throw new Error("ADAPTER_TRANSPORT_FAILED");
+          const bytes = await response.arrayBuffer(); bytesRead += bytes.byteLength;
+          if (bytesRead < 1 || bytesRead > 600_000) throw new Error("ADAPTER_RESPONSE_LIMIT");
+          return new Response(bytes, { status: response.status, statusText: response.statusText, headers: response.headers });
+        };
+        const inspected = await inspectExistingAdapter(source, { fetch: scopedFetch, deadlineAt: new Date(workDeadline), requestLease,
+          requestedInput: input, venueMatches: venueProofMatches });
+        const adapter = teesnapMetadataSchema.parse(inspected.adapter);
+        if (reads !== 1 || Date.now() >= workDeadline) throw new Error("OFFICIAL_ADAPTER_INCOMPLETE");
+        const output = JSON.stringify({ id, ok: true, result: { adapter, observation: { transport: "FIXED_PUBLIC_ROOT", publicRequests: reads, publicResponseBytes: bytesRead } } });
+        if (Buffer.byteLength(output) > 16_384) throw new Error("OFFICIAL_ADAPTER_OUTPUT_LIMIT");
+        process.stdout.write(`${output}\n`); return;
+      }
+      throw new Error("OFFICIAL_ADAPTER_INPUT_REQUIRED");
+    } catch (error) { process.stdout.write(`${JSON.stringify({ id, ok: false, error: publicFailureCode(error) })}\n`); }
+    finally { inputLines.close(); }
+    return;
+  }
   const configuredTransport = process.env.COURSE_DISCOVERY_BROWSER_TRANSPORT ?? "PINNED_HTTP";
   if (!["PINNED_HTTP", "NATIVE_CHROME"].includes(configuredTransport)) throw new Error("INVALID_BROWSER_TRANSPORT");
   if (args.includes("--inspect-public-protocol")) {

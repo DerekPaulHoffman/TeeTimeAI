@@ -7,6 +7,7 @@ import { inspectStagehandAdapter } from "./course-discovery-stagehand-inspection
 import { createStagehandGuardedBrowserHost } from "./course-discovery-stagehand-host.mjs";
 import { createStagehandFailureCheckpoint, packStagehandCheckpoint, readStagehandFailure } from "./course-discovery-stagehand-failure.mjs";
 import { projectSourceDiagnostic } from "./stagehand/source-diagnostic.mjs";
+import { isOfficialAdapterJob, inspectOfficialAdapter } from "./course-discovery-official-adapter.mjs";
 
 const defaultSourceDiscover = async args => (await import("./stagehand/source-discovery.mjs")).sourceDiscover(args);
 export const GENERIC_RECIPE_FALLBACK_CODES = Object.freeze(["UNSUPPORTED_ADAPTER_SOURCE", "CPS_PUBLIC_BUILD_UNSUPPORTED", "ADAPTER_CONFIGURATION_UNVERIFIED"]);
@@ -71,6 +72,7 @@ export async function runCourseDiscoveryStagehandWorker({
   validateRecipe = args => validateDiscoveryRecipe({ cwd, ...args }),
   executeRecipe = args => executeDiscoveryRecipe({ cwd, helperEnvironment: client.helperEnvironment("discovery", job), ...args }),
   genericWorker = runCourseDiscoveryWorker,
+  officialAdapterInspector = inspectOfficialAdapter,
   now = Date.now, model = "gpt-6.1-sol", onMetrics = () => {},
 }) {
   if (model !== "gpt-6.1-sol") throw discoveryError("DISCOVERY_MODEL_NOT_ALLOWED");
@@ -91,6 +93,7 @@ export async function runCourseDiscoveryStagehandWorker({
     const progress = { phase, ...(replay ? { replay } : {}) };
     lastProgress = progress;
     const value = packStagehandCheckpoint({ reference, failure: failureEvidence, progress });
+    if (metrics.officialAdapterReceipt) value.officialAdapterReceipt = metrics.officialAdapterReceipt;
     return client.checkpoint(job.id, job.leaseToken, value, signal).catch(error => {
       if (["DISCOVERY_LEASE_REJECTED", "DISCOVERY_LEASE_EXPIRED"].includes(error?.code)) checkpointLeaseRetired = true;
       throw error;
@@ -123,6 +126,17 @@ export async function runCourseDiscoveryStagehandWorker({
   };
   try {
     check();
+    let prepared;
+    if (isOfficialAdapterJob(job)) {
+      phase = "FIXED_INSPECTION";
+      metrics.framework = "FixedPublicRoot"; metrics.frameworkRole = "FIXED_PUBLIC_ROOT";
+      prepared = await officialAdapterInspector({ job, cwd, deadlineAt: new Date(deadline).toISOString(),
+        helperEnvironment: client.helperEnvironment("discovery", job), signal });
+      metrics.officialAdapterReceipt = prepared.receipt;
+      if (prepared.receipt?.transport !== "FIXED_PUBLIC_ROOT" || prepared.receipt.helperClosed !== true || prepared.receipt.modelCalls !== 0)
+        throw discoveryError("OFFICIAL_ADAPTER_RESULT_INVALID");
+      publishMetrics();
+    } else {
     reference = readStagehandSourceCheckpoint(job, workDeadlineAt, now());
     if (reference) {
       metrics.sourceResumed = true;
@@ -170,7 +184,7 @@ export async function runCourseDiscoveryStagehandWorker({
     const routing = validateStagehandSourceReport(report, job);
     if (routing.kind === "ROOT_PUBLIC_WIDGET") return await runGenericFromFreshRoot("ROOT_PUBLIC_WIDGET");
     phase = "FIXED_INSPECTION";
-    let prepared, fixedInspection;
+    let fixedInspection;
     try { prepared = await inspectStagehandAdapter({ report, adapterSourceProposal: report.adapterSourceProposal,
       job, client, cwd, workDeadlineAt: new Date(deadline).toISOString(), signal, now,
       worker: { createDiscoveryBrowser: browserFactory, validateDiscoveryRecipe: ({ recipe, signal }) => validateRecipe({ recipe, signal }),
@@ -180,6 +194,7 @@ export async function runCourseDiscoveryStagehandWorker({
       if (!GENERIC_RECIPE_FALLBACK_CODES.includes(error?.code) || fixedInspection?.browserClosed !== true || fixedInspection.cleanupError ||
           fixedInspection.outcome !== "FAILED" || fixedInspection.actions?.at(-1)?.action !== "inspect_adapter") throw error;
       return await runGenericFromFreshRoot(error.code);
+    }
     }
     check();
     phase = "RECIPE_VALIDATION";
@@ -200,6 +215,7 @@ export async function runCourseDiscoveryStagehandWorker({
     return { outcome: "activated", activation, metrics };
   } catch (failure) {
     const error = failure instanceof Error ? failure : discoveryError("STAGEHAND_WORKER_FAILED");
+    if (error.officialAdapterReceipt) metrics.officialAdapterReceipt = error.officialAdapterReceipt;
     // Finish any queued replay checkpoint first. Diagnostic persistence can
     // neither renew authority nor replace the original failure.
     checkpointTail = checkpointTail.then(async () => {
@@ -209,6 +225,7 @@ export async function runCourseDiscoveryStagehandWorker({
       if (["DISCOVERY_LEASE_REJECTED", "DISCOVERY_LEASE_EXPIRED"].includes(error.code)) { metrics.failureCheckpoint = "SKIPPED_RETIRED"; return; }
       if (now() >= deadline) { metrics.failureCheckpoint = "SKIPPED_DEADLINE"; return; }
       const value = createStagehandFailureCheckpoint({ job, report, error, phase, metrics, reference, progress: lastProgress, previous: failureEvidence, now: now(), startedAt: started });
+      if (metrics.officialAdapterReceipt) value.officialAdapterReceipt = metrics.officialAdapterReceipt;
       await client.checkpoint(job.id, job.leaseToken, value, signal);
       failureEvidence = value.stagehandFailure; metrics.failureCheckpoint = "SAVED";
     }).catch(() => { metrics.failureCheckpoint = "NOT_PERSISTED"; });
