@@ -7,8 +7,9 @@ import { DeferredSignInButton } from "@/components/deferred-sign-in-button";
 import type { CourseCandidate } from "@/lib/places/google";
 import { getCourseLayoutCompatibility, getCourseLayoutLabel, type CourseLayoutHoleCount } from "@/lib/courses/course-layout";
 import { storeSearchPrefill } from "@/lib/searches/search-prefill";
+import type { KnownTeeTime } from "@/lib/courses/known-tee-times";
 
-export function FacilityCourseRows({ courses, checks = {}, timeFilters, onNotify, signInKey, requestedLayoutHoles = null, savedStatuses }: {
+export function FacilityCourseRows({ courses, checks = {}, timeFilters, onNotify, signInKey, requestedLayoutHoles = null, savedStatuses, savedTimes = {} }: {
   courses: CourseCandidate[];
   checks?: Record<string, CourseTimeCheck>;
   timeFilters?: { date: string; startTime: string; endTime: string; players: number };
@@ -16,6 +17,7 @@ export function FacilityCourseRows({ courses, checks = {}, timeFilters, onNotify
   signInKey?: string;
   requestedLayoutHoles?: CourseLayoutHoleCount | null;
   savedStatuses?: Record<string, { label: string; detail: string }>;
+  savedTimes?: Record<string, KnownTeeTime[]>;
 }) {
   const router = useRouter();
   function notify(course: CourseCandidate) {
@@ -38,6 +40,7 @@ export function FacilityCourseRows({ courses, checks = {}, timeFilters, onNotify
           <CourseTimeCheckStatus check={check} alertSupport={course.alertSupport} />
           {check?.status === "CHECKED" && timeFilters ? <KnownTeeTimes times={check.times} timeZone={course.timeZone} {...timeFilters} showEmpty showDetails /> : null}
         </>}
+        {savedStatuses && course.courseId && timeFilters && savedTimes[course.courseId]?.length ? <KnownTeeTimes times={savedTimes[course.courseId]} timeZone={course.timeZone} {...timeFilters} showDetails /> : null}
         {course.website ? <a className="facility-booking-link" href={course.website} target="_blank" rel="noreferrer">Official booking page <ExternalLink aria-hidden="true" size={10} /></a> : null}
         {incompatible ? <p className="course-time-check-detail">Does not match your {requestedLayoutHoles}-hole course filter.</p> : null}
       </div>

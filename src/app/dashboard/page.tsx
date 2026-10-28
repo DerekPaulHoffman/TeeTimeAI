@@ -23,6 +23,7 @@ import {
 import { DashboardSignInActions } from "@/components/dashboard-sign-in-actions";
 import { FacilityCourseRows } from "@/components/facility-course-rows";
 import { loadSharedFacilityCourses } from "@/lib/courses/shared-facility-store";
+import { selectKnownTeeTimes } from "@/lib/courses/known-tee-times";
 import { SearchStatusActions } from "@/components/search-status-actions";
 import { isCurrentSimulatorMatch } from "@/lib/simulators/current-availability";
 import { getSimulatorAlertSummary, getSimulatorDashboardStatus } from "@/lib/simulators/dashboard-status";
@@ -572,7 +573,12 @@ function DashboardSearchCard({
                     <MapPin size={12} />
                     {getCompactLocation(preference.course.address)} - {preference.course.timeZone}
                   </p>
-                  {facilityCourses.length ? <FacilityCourseRows courses={facilityCourses} savedStatuses={Object.fromEntries(search.preferences.map(member => {
+                  {facilityCourses.length ? <FacilityCourseRows courses={facilityCourses}
+                    timeFilters={{ date: formatDateInputValue(search.date), startTime: search.startTime, endTime: search.endTime, players: search.players }}
+                    savedTimes={Object.fromEntries(facilityCourses.map(member => [member.courseId!, search.status === "ACTIVE" ? selectKnownTeeTimes(
+                      availableSearchMatches.filter(match => match.courseId === member.courseId).map(match => ({ ...match, holes: match.holes ?? null, priceCents: match.priceCents ?? null, lastConfirmedAt: match.lastConfirmedAt ?? match.lastSeenAt })),
+                      member.timeZone, formatDateInputValue(search.date), now) : []]))}
+                    savedStatuses={Object.fromEntries(search.preferences.map(member => {
                     const status = courseStatusById.get(member.courseId)!;
                     const probe = search.probes.find(probe => probe.courseId === member.courseId);
                     return [member.courseId, { label: status.label, detail: status.detail + (probe ? ` Checked ${formatObservationDateTime(probe.observedAt, search.userTimeZone)}.` : "") }];

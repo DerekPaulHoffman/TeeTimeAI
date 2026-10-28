@@ -11,6 +11,13 @@ const glen: CourseCandidate = { ...knolls, courseId: "glen", name: "Tashua Glen"
 afterEach(() => { cleanup(); vi.clearAllMocks(); window.sessionStorage.clear(); });
 
 describe("individual course actions within one facility card", () => {
+  it("shows saved openings and prices only on the selected physical course", () => {
+    render(<FacilityCourseRows courses={[knolls, glen]} timeFilters={{ date: "2026-10-29", startTime: "06:00", endTime: "18:00", players: 4 }}
+      savedStatuses={{ knolls: { label: "Matching openings", detail: "Knolls is included" } }}
+      savedTimes={{ knolls: [{ startsAt: "2026-10-29T12:30:00Z", availableSpots: 4, holes: 9, priceCents: 2700, bookingUrl: knolls.website!, confirmedAt: "2026-10-28T16:44:55Z" }] }} />);
+    expect(screen.getByRole("region", { name: "Tashua Knolls" }).textContent).toContain("9-hole round · $27.00");
+    expect(screen.getByRole("region", { name: "Tashua Glen" }).textContent).not.toContain("$27");
+  });
   it("selects the named physical course and applies the physical-layout filter independently", () => {
     const notify = vi.fn();
     render(<FacilityCourseRows courses={[knolls, glen]} onNotify={notify} requestedLayoutHoles={9} />);
