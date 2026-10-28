@@ -340,6 +340,85 @@ describe("bounded course discovery persistence", () => {
     expect(mocks.db.courseDiscoveryJob.update).not.toHaveBeenCalled();
   });
 
+  async function activeMethod() {
+    const admitted = await ensureDiscoveryJob({ courseId: "course1", searchId: "search1" });
+    const stored = { id: "active-recipe", targetKey: "course:course1", sourceFingerprint: admitted!.sourceFingerprint,
+      hash: hashAccessRecipe(recipe), payload: recipe };
+    course.activeAccessRecipeId = stored.id;
+    mocks.db.courseAccessRecipe.findUnique.mockResolvedValue(stored);
+    job = null;
+    mocks.db.courseDiscoveryJob.create.mockClear(); mocks.db.course.updateMany.mockClear();
+    return stored;
+  }
+
+  it("repairs a failed read once while retaining the proven method after both repair attempts fail", async () => {
+    const stored = await activeMethod();
+    const admission = { courseId: "course1", searchId: "search1", failedRecipeId: stored.id };
+    const repair = await ensureDiscoveryJob(admission);
+    expect(repair).toMatchObject({ baseRecipeId: stored.id, status: "QUEUED", attempts: 0 });
+    expect(await ensureDiscoveryJob(admission)).toBe(repair);
+    expect(await ensureDiscoveryJob({ courseId: "course1", searchId: "search1" })).toBeNull();
+    const first = (await claimNextDiscoveryJob("repair-one"))!;
+    await failDiscoveryJob(first.id, first.leaseToken!, "TOOL_FAILURE", true);
+    const second = (await claimNextDiscoveryJob("repair-two"))!;
+    expect(second.deadlineAt).toEqual(first.deadlineAt);
+    expect(second.firstPickedUpAt).toEqual(first.firstPickedUpAt);
+    await failDiscoveryJob(second.id, second.leaseToken!, "TOOL_FAILURE", true);
+    const exhausted = structuredClone(job);
+    mocks.db.courseDiscoveryJob.findFirst.mockResolvedValue(job);
+    expect(await ensureDiscoveryJob(admission)).toEqual(exhausted);
+    expect(await ensureDiscoveryJob(admission)).toEqual(exhausted);
+    expect((await getActiveAccessRecipe(recipe.target))?.record).toEqual(stored);
+    expect(course.activeAccessRecipeId).toBe(stored.id);
+    expect(mocks.db.courseDiscoveryJob.create).toHaveBeenCalledTimes(1);
+    expect(mocks.db.course.updateMany).not.toHaveBeenCalled();
+    expect(mocks.db.courseAccessRecipe.update).not.toHaveBeenCalled();
+    expect(job).toEqual(exhausted);
+  });
+
+  it.each(["another-recipe", ""])("rejects stale failed-version admission %s without touching the current recipe", async failedRecipeId => {
+    const stored = await activeMethod();
+    await expect(ensureDiscoveryJob({ courseId: "course1", searchId: "search1", failedRecipeId })).rejects.toBeInstanceOf(DiscoveryConflictError);
+    expect(course.activeAccessRecipeId).toBe(stored.id);
+    expect(mocks.db.course.updateMany).not.toHaveBeenCalled();
+    expect(mocks.db.courseDiscoveryJob.create).not.toHaveBeenCalled();
+  });
+
+  it("still invalidates a changed source before admitting repair of its failed version", async () => {
+    const stored = await activeMethod();
+    course.bookingMetadata = { changedSource: true };
+    const repair = await ensureDiscoveryJob({ courseId: "course1", searchId: "search1", failedRecipeId: stored.id });
+    expect(course.activeAccessRecipeId).toBeNull();
+    expect(repair).toMatchObject({ baseRecipeId: null, status: "QUEUED" });
+    expect(repair!.sourceFingerprint).not.toBe(stored.sourceFingerprint);
+    expect(mocks.db.course.updateMany).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not admit failed-version repair after demand ends or while a legacy owner holds the target", async () => {
+    const stored = await activeMethod();
+    mocks.db.courseSupportBatch.findFirst.mockResolvedValue({ id: "legacy-owner" });
+    expect(await ensureDiscoveryJob({ courseId: "course1", searchId: "search1", failedRecipeId: stored.id })).toBeNull();
+    mocks.db.courseSupportBatch.findFirst.mockResolvedValue(null);
+    preferences = [];
+    expect(await ensureDiscoveryJob({ courseId: "course1", searchId: "search1", failedRecipeId: stored.id })).toBeNull();
+    expect(mocks.db.courseDiscoveryJob.create).not.toHaveBeenCalled();
+    expect(course.activeAccessRecipeId).toBe(stored.id);
+  });
+
+  it("rejects repair activation after a different recipe wins its base pointer", async () => {
+    const stored = await activeMethod();
+    await ensureDiscoveryJob({ courseId: "course1", searchId: "search1", failedRecipeId: stored.id });
+    const owner = (await claimNextDiscoveryJob("repair-owner"))!;
+    const proposed = await proposeDiscoveryRecipe(owner.id, owner.leaseToken!, recipe);
+    for (const challenge of proposed.challenges) await recordDiscoveryVerification({ jobId: owner.id, leaseToken: owner.leaseToken!,
+      challengeId: challenge.id, recipeHash: proposed.recipeHash, input: challenge.input, result: { ...result(challenge.input.players),
+        slots: [{ ...result(challenge.input.players).slots[0], startsAt: `${challenge.input.date}T10:00:00.000Z` }] } });
+    course.activeAccessRecipeId = "newer-recipe";
+    await expect(activateDiscoveryRecipe(owner.id, owner.leaseToken!)).rejects.toBeInstanceOf(DiscoveryConflictError);
+    expect(mocks.db.courseAccessRecipe.create).not.toHaveBeenCalled();
+    expect(course.activeAccessRecipeId).toBe("newer-recipe");
+  });
+
   it("transaction admission rejects changed requested input and respects another owner", async () => {
     await expect(ensureDiscoveryJobInTransaction(mocks.db as unknown as Prisma.TransactionClient,
       { courseId: "course1", searchId: "search1", request: { target: recipe.target, identity: {

@@ -8,7 +8,7 @@ import { RUNNABLE_SIMULATOR_PROVIDER_FAMILIES } from "@/lib/simulators/providers
 import { SimulatorAvailabilityError } from "@/lib/simulators/providers/types";
 import type { SearchCheckCourseResult } from "@/lib/automation/search-check";
 import { isDiscoveryPilotSearch } from "./config";
-import { degradeRecipe, ensureDiscoveryJob, getActiveAccessRecipe, type DiscoveryTarget } from "./service";
+import { ensureDiscoveryJob, getActiveAccessRecipe, type DiscoveryTarget } from "./service";
 import { assertRecipeObservationCurrent, getOrQueueRecipeExecution, recipeExecutionNeedsRepair, recipeFailureIsRetryable, recipeResultIsSuccessful } from "./runtime";
 import { refreshMissingDiscoverySource } from "./sources";
 import { prisma } from "@/lib/prisma";
@@ -49,8 +49,10 @@ export async function getLearnedAvailability(search: ActiveAutomationSearch, pre
   const execution = await getOrQueueRecipeExecution({ searchId: search.id, target, input: recipeRequestInput(search, preference) });
   if (execution?.state === "ready" && !recipeResultIsSuccessful(execution.result)) {
     if (!recipeExecutionNeedsRepair(execution.result)) return { state: "failed" as const, target, outcome: execution.result.evidence.reason ?? "LOCAL_CAPABILITY_UNAVAILABLE" };
-    await degradeRecipe(target, execution.recipeId);
-    const repair = await ensureDiscoveryJob({ ...target, searchId: search.id });
+    // A failed read supplies no availability evidence, but does not invalidate a verified
+    // immutable method. Repair that exact version while normal fresh reads can
+    // recover independently, including after the repair exhausts its attempts.
+    const repair = await ensureDiscoveryJob({ ...target, searchId: search.id, failedRecipeId: execution.recipeId });
     return repair && ["FAILED", "TIMED_OUT", "CANCELLED"].includes(repair.status)
       ? { state: "failed" as const, target, outcome: repair.outcome }
       : { state: "pending" as const, target };

@@ -318,6 +318,49 @@ describe.skipIf(!url)("learned recipe through durable execution and normal match
     expect(outcome.supportRetryAt!.getTime()).toBeLessThanOrEqual(Date.now() + 65_000);
   });
 
+  it.each([false, true])("recovers with the same proven method after a failed warm read and exhausted repair (simulator=%s)", async simulator => {
+    const f = await fixture(simulator);
+    const original = (await service.getActiveAccessRecipe(f.target))!.record;
+    await runtime.getOrQueueRecipeExecution({ searchId: f.search.id, target: f.target, input: f.input });
+    const execution = (await runtime.claimNextRecipeExecution("warm-failure-reader"))!;
+    const available = await f.run(execution.input);
+    await runtime.completeRecipeExecution(execution.id, execution.leaseToken, { ...available, status: "INCOMPLETE", complete: false, slots: [],
+      evidence: { ...available.evidence, reason: "INVALID_SOURCE", venueVerified: false, dateVerified: false,
+        capacityVerified: false, durationVerified: false, completeVerified: false } });
+    const { runSearchCheck } = await import("@/lib/automation/search-check");
+    const runTag = `isolated-warm-recovery-${f.search.id}`;
+    try {
+      expect((await runSearchCheck(f.search.id, runTag, f.lease)).courseResults[0].outcome).toBe("CHECK_PENDING");
+      const first = (await service.claimNextDiscoveryJob("repair-first"))!;
+      expect(first.baseRecipeId).toBe(original.id);
+      await service.failDiscoveryJob(first.id, first.leaseToken!, "TOOL_FAILURE", true);
+      const second = (await service.claimNextDiscoveryJob("repair-second"))!;
+      await service.failDiscoveryJob(second.id, second.leaseToken!, "TOOL_FAILURE", true);
+      const exhausted = await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: first.id } });
+      for (let check = 0; check < 2; check++) {
+        expect((await runSearchCheck(f.search.id, runTag, f.lease)).courseResults[0].outcome).toBe("FETCH_FAILED");
+      }
+      expect(await client.teeTimeMatch.count({ where: { teeSearchId: f.search.id } })).toBe(0);
+      expect(await client.searchEmailDelivery.count({ where: { teeSearchId: f.search.id, kind: "MATCH" } })).toBe(0);
+      expect(mail.match).not.toHaveBeenCalled();
+      expect((await service.getActiveAccessRecipe(f.target))!.record).toMatchObject({ id: original.id, hash: original.hash });
+      // Simulate expiry of the failed observation, not a new alert generation
+      // or repair retry. A real scheduler reaches this same freshness boundary.
+      await client.localReaderJob.update({ where: { id: execution.id }, data: { resultExpiresAt: new Date(Date.now() - 1) } });
+      expect(await runtime.getOrQueueRecipeExecution({ searchId: f.search.id, target: f.target, input: f.input })).toEqual({ state: "pending" });
+      const fresh = (await runtime.claimNextRecipeExecution("fresh-recovered-reader"))!;
+      await runtime.completeRecipeExecution(fresh.id, fresh.leaseToken, await f.run(fresh.input));
+      expect((await runSearchCheck(f.search.id, runTag, f.lease)).courseResults[0].outcome).toBe("MATCH_FOUND");
+      expect(await client.teeTimeMatch.count({ where: { teeSearchId: f.search.id, availabilityStatus: "AVAILABLE" } })).toBe(1);
+      expect(await client.courseDiscoveryJob.count({ where: { courseId: f.course.id } })).toBe(2);
+      expect(await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: first.id } })).toEqual(exhausted);
+      expect((await service.getActiveAccessRecipe(f.target))!.record).toMatchObject({ id: original.id, hash: original.hash });
+      expect(mail.match).toHaveBeenCalledTimes(1);
+    } finally {
+      ids.runs.push(...(await client.automationRun.findMany({ where: { notes: { contains: runTag } }, select: { id: true } })).map(run => run.id));
+    }
+  });
+
   it("still delivers another simulator when one recipe observation becomes stale", async () => {
     const first = await fixture(true);
     const second = await fixture(true);

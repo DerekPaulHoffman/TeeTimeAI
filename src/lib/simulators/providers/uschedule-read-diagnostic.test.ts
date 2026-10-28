@@ -12,6 +12,20 @@ const oversized=controls+Array.from({length:26},(_,i)=>`<div class="next_avail_r
 const input={date:"2026-10-27",durationMinutes:60,partySize:1,timeZone:"America/New_York",offering:{id:"o",courseId:"c",bookingUrl:url,providerFamilyKey:"USCHEDULE",providerMetadata:{},maxPartySize:null,supportedDurationsMinutes:[60]}};
 function fakeFetch(){let gets=0;return vi.fn<typeof fetch>(async(_url,init)=>init?.method==="POST"?Response.json({code:"refresh"}):new Response(++gets===3?oversized:controls+"</body>",{headers:{"content-type":"text/html",...(gets===1?{"set-cookie":cookie+"; Secure"}:{})}}));}
 describe("closed USchedule read gates",()=>{
+ it.each([
+  ["The standard public simulator rental witness changed", "STANDARD_PUBLIC_SIMULATOR_RENTAL_WITNESS_CHANGED"],
+  ["The public people selector is unavailable", "PUBLIC_PEOPLE_SELECTOR_IS_UNAVAILABLE"],
+  ["The public people selector changed", "PUBLIC_PEOPLE_SELECTOR_CHANGED"],
+  ["The public single-unit selector is unavailable", "PUBLIC_SINGLE_UNIT_SELECTOR_IS_UNAVAILABLE"],
+  ["The public single-unit selector changed", "PUBLIC_SINGLE_UNIT_SELECTOR_CHANGED"],
+ ])("preserves the finite source gate for %s without copying prose",(message,gate)=>{
+  const value=uscheduleReadGate(new SimulatorAvailabilityError("INVALID_SOURCE",message));
+  expect(value).toBe(gate);
+  const diagnostic=accessExecutionDiagnosticSchema.parse({code:"SIMULATOR_PROVIDER_ERROR",simulatorError:{code:"INVALID_SOURCE",retryable:false,uscheduleGate:value}});
+  expect(discoveryReplayDetails({evidence:{diagnostic}}).diagnostic?.simulatorError?.uscheduleGate).toBe(gate);
+  expect(JSON.stringify(diagnostic)).not.toContain(message);
+  expect(uscheduleReadGate(new SimulatorAvailabilityError("INVALID_SOURCE",message+" PRIVATE"))).toBeUndefined();
+ });
  it("maps only exact known static provider messages, never arbitrary content",()=>{
   expect(uscheduleReadGate(new SimulatorAvailabilityError("SCHEMA_CHANGED","The public availability list is missing or ambiguous"))).toBe("PUBLIC_AVAILABILITY_LIST_IS_MISSING_OR_AMBIGUOUS");
   for(const error of [Error("The public availability list is missing or ambiguous"),new SimulatorAvailabilityError("SCHEMA_CHANGED","PRIVATE https://secret.example/"),new SimulatorAvailabilityError("HTTP_ERROR","The public availability list is missing or ambiguous")])expect(uscheduleReadGate(error)).toBeUndefined();

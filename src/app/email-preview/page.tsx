@@ -398,9 +398,9 @@ export default async function EmailPreviewPage({
       <form action="/email-preview" method="get" style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "end", marginBottom: 20 }}>
         <input name="variant" type="hidden" value={variant} />
         {isSimulator ? <input name="mode" type="hidden" value="SIMULATOR" /> : null}
-        <label htmlFor="email-state" style={{ display: "grid", gap: 6, minWidth: 0, maxWidth: "100%" }}>
+        <label htmlFor="email-state" style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 6, minWidth: 0, maxWidth: "100%" }}>
           Sample venue state
-          <select defaultValue={selectedState} id="email-state" name="state" style={{ padding: 10, maxWidth: "100%" }}>
+          <select defaultValue={selectedState} id="email-state" name="state" style={{ padding: 10, minWidth: 0, width: "100%", maxWidth: "100%" }}>
             {emailPreviewStates.map(state => <option key={state.value} value={state.value}>{state.label}</option>)}
           </select>
         </label>

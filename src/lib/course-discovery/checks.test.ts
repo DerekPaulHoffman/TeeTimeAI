@@ -4,14 +4,14 @@ import { getLearnedAvailability, queueFailedOutdoorDiscovery, queueFailedSimulat
 import { SimulatorAvailabilityError } from "@/lib/simulators/providers/types";
 
 const mocked = vi.hoisted(() => ({ pilot: vi.fn(), activeRecipe: vi.fn(), activeJob: vi.fn(), ensure: vi.fn(), refresh: vi.fn(),
-  runnable: vi.fn(), readerKey: vi.fn() }));
+  runnable: vi.fn(), readerKey: vi.fn(), execution: vi.fn(), success: vi.fn(), needsRepair: vi.fn(), degrade: vi.fn() }));
 vi.mock("./config", () => ({ isDiscoveryPilotSearch: mocked.pilot }));
-vi.mock("./service", () => ({ getActiveAccessRecipe: mocked.activeRecipe, ensureDiscoveryJob: mocked.ensure, degradeRecipe: vi.fn() }));
+vi.mock("./service", () => ({ getActiveAccessRecipe: mocked.activeRecipe, ensureDiscoveryJob: mocked.ensure, degradeRecipe: mocked.degrade }));
 vi.mock("./sources", () => ({ refreshMissingDiscoverySource: mocked.refresh }));
 vi.mock("@/lib/prisma", () => ({ prisma: { courseDiscoveryJob: { findUnique: mocked.activeJob } } }));
 vi.mock("@/lib/automation/provider-capabilities", () => ({ resolveProviderCapability: mocked.runnable }));
 vi.mock("@/lib/local-reader/service", () => ({ getLocalReaderCourseKey: mocked.readerKey }));
-vi.mock("./runtime", () => ({ getOrQueueRecipeExecution: vi.fn(), recipeResultIsSuccessful: vi.fn(), recipeExecutionNeedsRepair: vi.fn(), assertRecipeObservationCurrent: vi.fn() }));
+vi.mock("./runtime", () => ({ getOrQueueRecipeExecution: mocked.execution, recipeResultIsSuccessful: mocked.success, recipeExecutionNeedsRepair: mocked.needsRepair, assertRecipeObservationCurrent: vi.fn() }));
 vi.mock("@/lib/automation/db-service", () => ({ commitCurrentCourseTeeTimeMatches: vi.fn(), recordCourseProbe: vi.fn() }));
 vi.mock("@/lib/automation/course-monitoring", () => ({ recordCourseMonitoringSuccess: vi.fn() }));
 vi.mock("@/lib/automation/runtime-version", () => ({ getAutomationRuntimeVersion: () => "test" }));
@@ -28,6 +28,22 @@ beforeEach(() => {
   mocked.refresh.mockResolvedValue(undefined); mocked.runnable.mockReturnValue({ isRunnable: true }); mocked.readerKey.mockReturnValue(null);
 });
 describe("failed established public-method learning", () => {
+  it("retains the same method for a fresh success after its bounded repair fails", async () => {
+    const demand = { ...simulator, date: new Date("2030-01-02T00:00:00Z"), players: 2, startTime: "10:00", endTime: "20:00" };
+    mocked.activeRecipe.mockResolvedValue({ record: { id: "recipe-1", hash: "same-hash" } });
+    const failure = { state: "ready", jobId: "execution-1", recipeId: "recipe-1", result: { status: "INCOMPLETE", complete: false,
+      slots: [], evidence: { reason: "INVALID_SOURCE", recipeHash: "same-hash" } } };
+    mocked.execution.mockResolvedValue(failure); mocked.success.mockReturnValue(false); mocked.needsRepair.mockReturnValue(true);
+    expect(await getLearnedAvailability(demand, demand.preferences[0])).toMatchObject({ state: "pending" });
+    expect(mocked.ensure).toHaveBeenCalledWith({ courseId: "course-1", offeringId: "offering-1", kind: "SIMULATOR", searchId: "search-1", failedRecipeId: "recipe-1" });
+    mocked.ensure.mockResolvedValue({ id: "job-1", status: "FAILED", attempts: 2, outcome: "TOOL_FAILURE" });
+    expect(await getLearnedAvailability(demand, demand.preferences[0])).toMatchObject({ state: "failed", outcome: "TOOL_FAILURE" });
+    const fresh = { ...failure, jobId: "execution-2", result: { status: "AVAILABLE", complete: true, slots: [{}], evidence: { recipeHash: "same-hash" } } };
+    mocked.execution.mockResolvedValue(fresh); mocked.success.mockReturnValue(true);
+    expect(await getLearnedAvailability(demand, demand.preferences[0])).toMatchObject({ ...fresh, target: { offeringId: "offering-1" } });
+    expect(mocked.ensure).toHaveBeenCalledTimes(2);
+    expect(mocked.degrade).not.toHaveBeenCalled();
+  });
   it("leaves a supported method on its established path before any actual failure", async () => {
     expect(await getLearnedAvailability(search, search.preferences[0])).toBeNull();
     expect(mocked.ensure).not.toHaveBeenCalled();

@@ -169,7 +169,9 @@ async function currentDemand(tx: Tx, source: Source, now: Date, searchId?: strin
 }
 
 /** Demand and source are re-read here; the caller cannot grant ownership or supply identity. */
-export async function ensureDiscoveryJob(input: { courseId: string; offeringId?: string; searchId: string; request?: DiscoveryRequest }) {
+type DiscoveryAdmission = { courseId: string; offeringId?: string; searchId: string; request?: DiscoveryRequest; failedRecipeId?: string };
+
+export async function ensureDiscoveryJob(input: DiscoveryAdmission) {
   if (!await isDiscoveryPilotSearch(input.searchId)) return null;
   return transaction(tx => ensureDiscoveryJobInTransaction(tx, input));
 }
@@ -177,7 +179,7 @@ export async function ensureDiscoveryJob(input: { courseId: string; offeringId?:
 /** Reuse admission inside an operator-owned transaction without a nested commit.
  * The caller owns isolation/retries; pilot authorization and current demand still
  * come from this transaction, never a caller-supplied approval or source snapshot. */
-export async function ensureDiscoveryJobInTransaction(tx: Tx, input: { courseId: string; offeringId?: string; searchId: string; request?: DiscoveryRequest }) {
+export async function ensureDiscoveryJobInTransaction(tx: Tx, input: DiscoveryAdmission) {
   if (!await isDiscoveryPilotSearch(input.searchId, process.env, tx)) return null;
   const now = await databaseNow(tx);
   await lockSource(tx, input.courseId);
@@ -187,22 +189,30 @@ export async function ensureDiscoveryJobInTransaction(tx: Tx, input: { courseId:
   if (await hasLegacyDiscoveryOwner(tx, source.target)) return null;
   const request = requestFor(source, demand);
   if (input.request && (canonical(input.request.target) !== canonical(request.target) || canonical(input.request.input) !== canonical(request.input))) conflict();
+  if (input.failedRecipeId !== undefined && input.failedRecipeId !== source.activeRecipeId) conflict();
   if (source.activeRecipeId) {
+    let valid = false;
     const previous = await tx.courseAccessRecipe.findUnique({ where: { id: source.activeRecipeId } });
     if (previous && previous.targetKey === targetKey(input) && previous.sourceFingerprint === source.sourceFingerprint) {
       try {
         const recipe = parseAccessRecipe(previous.payload);
         bindRecipe(recipe, source);
-        if (hashAccessRecipe(recipe) === previous.hash) return null;
+        valid = hashAccessRecipe(recipe) === previous.hash;
       } catch (error) {
         if (!(error instanceof z.ZodError) && !(error instanceof DiscoveryConflictError)) throw error;
       }
     }
-    const cleared = source.offering
-      ? await tx.courseOffering.updateMany({ where: { id: source.offering.id, activeAccessRecipeId: source.activeRecipeId }, data: { activeAccessRecipeId: null, monitoringRevision: { increment: 1 } } })
-      : await tx.course.updateMany({ where: { id: source.course.id, activeAccessRecipeId: source.activeRecipeId }, data: { activeAccessRecipeId: null } });
-    if (cleared.count !== 1) conflict();
-    source.activeRecipeId = null;
+    if (valid && input.failedRecipeId === undefined) return null;
+    // Runtime read failures may repair a current verified version without
+    // disabling future guarded executions. Invalid source/recipe bindings still
+    // clear the pointer through the existing compare-and-set invalidation path.
+    if (!valid) {
+      const cleared = source.offering
+        ? await tx.courseOffering.updateMany({ where: { id: source.offering.id, activeAccessRecipeId: source.activeRecipeId }, data: { activeAccessRecipeId: null, monitoringRevision: { increment: 1 } } })
+        : await tx.course.updateMany({ where: { id: source.course.id, activeAccessRecipeId: source.activeRecipeId }, data: { activeAccessRecipeId: null } });
+      if (cleared.count !== 1) conflict();
+      source.activeRecipeId = null;
+    }
   }
   const key = targetKey(input);
   const existing = await tx.courseDiscoveryJob.findUnique({ where: { activeTargetKey: key } });

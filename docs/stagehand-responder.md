@@ -32,6 +32,16 @@ automatic retry, using the same job, request, source fingerprint and original
 deadlines. The fixed inspection and independent backend challenges stay fresh.
 Incomplete reads never become an empty availability result.
 
+A failed execution retains a previously verified immutable method when its
+current source, identity and hash still agree. It opens one repair job based on
+that exact version while normal executions can retry the method with fresh
+verification. An exhausted repair does not erase the method or open another
+model investigation for the same alert generation. Failed reads cannot produce
+matches; a later successful read must pass the ordinary current-source, search,
+identity, date, capacity, duration and completeness checks. Source changes and
+invalid method bindings retain their existing invalidation behavior. Historical
+failures and their original deadlines remain failed even if monitoring recovers.
+
 Ordinary outdoor alerts cover standard Public inventory. Member, Preferred Player
 and other qualified programs are outside that scope unless trusted eligibility is
 available. Newly learned ForeUP methods declare `STANDARD_PUBLIC_CLASS_V1` and

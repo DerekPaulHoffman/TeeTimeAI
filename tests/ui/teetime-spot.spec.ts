@@ -1466,7 +1466,7 @@ test.describe("Tee Time Spot UI smoke", () => {
     await page.getByRole("link", { name: "Alert setup", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Alert setup" })).toBeVisible();
     const setupFrame = page.frameLocator("iframe[title='Rendered alert setup email']");
-    await expect(setupFrame.locator("body")).toContainText("BOOKING NOT OPEN YET");
+    await expect(setupFrame.locator("body")).toContainText("WAITING FOR BOOKING TO OPEN");
     await expect(setupFrame.locator("body")).toContainText("Booking opens Friday, July 17 at 7:00 AM EDT");
     await expect(setupFrame.locator("body")).toContainText("Booking for your date hasn't opened yet");
     await expect(setupFrame.locator("body")).toContainText("notify you by email when matching tee times are available");
