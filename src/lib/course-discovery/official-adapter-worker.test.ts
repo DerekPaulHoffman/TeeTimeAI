@@ -101,9 +101,9 @@ describe("private fixed inspection helper boundaries", () => {
   });
 });
 
-async function run(options: { helperError?: Error; rejectAt?: string; invalidRecipe?: boolean; mutate?: (value: ReturnType<typeof job>) => void } = {}) {
+async function run(options: { helperError?: Error; helperResult?: unknown; rejectAt?: string; invalidRecipe?: boolean; mutate?: (value: ReturnType<typeof job>) => void } = {}) {
   const current = job(); options.mutate?.(current);
-  const h = helper({ error: options.helperError }), sourceDiscover = vi.fn(), browserFactory = vi.fn(), guardedBrowserFactory = vi.fn(), genericWorker = vi.fn();
+  const h = helper({ error: options.helperError, result: options.helperResult }), sourceDiscover = vi.fn(), browserFactory = vi.fn(), guardedBrowserFactory = vi.fn(), genericWorker = vi.fn();
   let recipeHash = "";
   const client = { helperEnvironment: vi.fn(() => ({})), checkpoint: vi.fn(async () => ({})),
     candidate: vi.fn(async (_id, _lease, recipe) => {
@@ -123,6 +123,18 @@ async function run(options: { helperError?: Error; rejectAt?: string; invalidRec
 }
 
 describe("model-free official-root common verification path", () => {
+  it("verifies both independent challenges for a freshly inspected public property API method without model calls", async () => {
+    const value = descriptor(), result = { adapter: { ...value.adapter, publicApiVersion: "BOOKINGSITE_V1", supportedPlayers: [1, 2, 3, 4] },
+      observation: { ...value.observation, publicRequests: 2 } };
+    const t = await run({ helperResult: result });
+    expect(t.outcome.outcome).toBe("activated"); expect(t.client.verification).toHaveBeenCalledTimes(2);
+    expect(t.executeRecipe).toHaveBeenCalledTimes(2); expect(t.sourceDiscover).not.toHaveBeenCalled(); expect(t.genericWorker).not.toHaveBeenCalled();
+  });
+  it.each([[], [2, 2], [3, 2], [0], [5]].map(supportedPlayers => ({ supportedPlayers })))("rejects unsupported or ambiguous public property player binding $supportedPlayers", async ({ supportedPlayers }) => {
+    const value = descriptor(), t = await run({ helperResult: { adapter: { ...value.adapter, publicApiVersion: "BOOKINGSITE_V1", supportedPlayers },
+      observation: { ...value.observation, publicRequests: 2 } } });
+    expect(t.outcome).toBeInstanceOf(Error); expect(t.client.candidate).not.toHaveBeenCalled(); expect(t.sourceDiscover).not.toHaveBeenCalled();
+  });
   it("uses both backend challenges and activation after fixed inspection without starting a model or browser", async () => {
     const t = await run(); expect(t.outcome.outcome).toBe("activated");
     expect(t.client.candidate).toHaveBeenCalledOnce(); expect(t.client.verification).toHaveBeenCalledTimes(2);
@@ -143,6 +155,12 @@ describe("model-free official-root common verification path", () => {
       const t = await run(options); expect(t.outcome).toBeInstanceOf(Error); expect(t.client.candidate).not.toHaveBeenCalled(); expect(t.client.activate).not.toHaveBeenCalled();
       expect(t.sourceDiscover).not.toHaveBeenCalled(); expect(t.genericWorker).not.toHaveBeenCalled();
     }
+  });
+  it.each(["ACCESS_REQUIRED", "ADAPTER_CONFIGURATION_UNVERIFIED"])("keeps ordinary public browser discovery eligible after an owned HTTP %s failure", async code => {
+    const t = await run({ helperError: Object.assign(Error(code), { code }) });
+    expect(t.h.close).toHaveBeenCalledOnce(); expect(t.sourceDiscover).toHaveBeenCalledOnce();
+    expect(t.h.close.mock.invocationCallOrder[0]).toBeLessThan(t.sourceDiscover.mock.invocationCallOrder[0]);
+    expect(t.client.candidate).not.toHaveBeenCalled(); expect(t.client.activate).not.toHaveBeenCalled();
   });
   it("retains existing Stagehand selection for other ordinary roots", async () => {
     const t = await run({ mutate: value => { value.request.identity.officialUrl = "https://ordinary-fixture.example/"; } });

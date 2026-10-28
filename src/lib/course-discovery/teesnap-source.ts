@@ -3,7 +3,7 @@ import { parse as parseJavaScript, type Node as JavaScriptNode } from "acorn";
 import { parse, type DefaultTreeAdapterMap } from "parse5";
 import { z } from "zod";
 import { fullCourseName } from "./teeitup-official-identity";
-import { parsePublicUSBusinessAddress } from "./public-us-business-address";
+import { parsePublicUSBusinessAddress, parsePublicUSBusinessAddressParts } from "./public-us-business-address";
 
 const positiveId = z.number().int().min(1).max(2_147_483_647);
 const tenant = z
@@ -70,8 +70,11 @@ export const teesnapMetadataSchema = z
     defaultAddons: z.literal("off"),
     timeZone,
     catalogHash: z.string().regex(/^[a-f0-9]{64}$/u),
+    publicApiVersion: z.literal("BOOKINGSITE_V1").optional(),
+    supportedPlayers: z.array(z.number().int().min(1).max(4)).min(1).max(4)
+      .refine(values => values.every((value, index) => index === 0 || value > values[index - 1])).optional(),
   })
-  .strict();
+  .strict().refine(value => (value.publicApiVersion !== undefined) === (value.supportedPlayers !== undefined));
 export type TeesnapRecipeMetadata = z.infer<typeof teesnapMetadataSchema>;
 export type TeesnapIdentitySource = {
   officialUrl: string;
@@ -84,6 +87,14 @@ export type TeesnapIdentitySource = {
  * credentialless GET scope. This module never creates an unrestricted fetch. */
 export type TeesnapConfigurationRead = (url: string) => Promise<Response>;
 export type TeesnapVenueMatches = (expected: string, actual: string) => boolean;
+
+/** The observed public API role is derived from one exact ordinary tenant root;
+ * no API host, path, profile, query or credentials are accepted from metadata. */
+export function teesnapPublicPropertyUrl(bookingRoot: string): string {
+  const source = parseTeesnapRecipeSource(bookingRoot);
+  if (!source) fail("UNSUPPORTED_ADAPTER_SOURCE");
+  return `https://${source.tenant}.api.teesnap.net/api/bookingsite/property`;
+}
 
 type Node = DefaultTreeAdapterMap["node"];
 type Element = DefaultTreeAdapterMap["element"];
@@ -342,6 +353,114 @@ function sourceBinding(source: TeesnapIdentitySource) {
   return { ...booking, address };
 }
 
+const publicCourseSchema = z.object({ id: positiveId, name: z.string().trim().min(3).max(200), property_id: positiveId,
+  enabled: z.boolean(), course_type: z.union([z.string().max(100), z.null()]), holes_default: z.literal(18), addons_default: z.literal("off"),
+  players_array: z.array(z.number().int().min(1).max(4)).min(1).max(4).refine(values => new Set(values).size === values.length),
+  holes_array: z.array(z.union([z.literal(9), z.literal(18)])).min(1).max(2).refine(values => new Set(values).size === values.length && values.includes(18)),
+  addons_array: z.array(z.string().min(1).max(40)).min(1).max(8).refine(values => new Set(values).size === values.length && values.includes("off")),
+  min_players: z.number().int().min(1).max(4), max_players: z.number().int().min(1).max(4), default_players: z.number().int().min(1).max(4),
+}).passthrough().refine(value => Math.min(...value.players_array) === value.min_players && Math.max(...value.players_array) === value.max_players && value.players_array.includes(value.default_players));
+const publicPropertySchema = z.object({ success: z.literal(true), data: z.object({
+  id: positiveId, name: z.string().trim().min(3).max(200), enabled: z.boolean(),
+  address_street: z.string().min(1).max(500), address_city: z.string().min(1).max(80), address_region: z.string().min(1).max(40),
+  address_code: z.string().min(1).max(10), address_country: z.string().min(1).max(40), time_zone: z.string().min(1).max(100),
+  courses: z.array(publicCourseSchema).min(1).max(40),
+}).passthrough() }).strict();
+const semanticFlagKeys = ["customer_enabled", "private", "is_private", "members_only", "member_only", "requires_login", "login_required", "authenticated", "is_logged_in", "isLoggedIn", "access", "access_type", "visibility"] as const;
+function publicSemanticFlags(value: Record<string, unknown>) {
+  return Object.fromEntries(semanticFlagKeys.map(key => {
+    const actual = value[key];
+    if (actual !== undefined && (key === "access" || key === "access_type" || key === "visibility" ? typeof actual !== "string" : typeof actual !== "boolean")) fail();
+    return [key, actual ?? null];
+  }));
+}
+
+/** Fresh public-property data, not a guessed endpoint, page shell or user
+ * profile. Every physical component comes from this response independently. */
+export function parseTeesnapPublicProperty(source: TeesnapIdentitySource, payload: unknown,
+  venueMatches: TeesnapVenueMatches = (expected, actual) => fullCourseName(expected) === fullCourseName(actual)): TeesnapRecipeMetadata {
+  const binding = sourceBinding(source), parsed = publicPropertySchema.safeParse(payload);
+  if (!parsed.success) fail();
+  const property = parsed.data.data;
+  publicFlags(property);
+  const physical = parsePublicUSBusinessAddressParts({ address: property.address_street, city: property.address_city, state: property.address_region,
+    postalCode: property.address_code, country: property.address_country });
+  const namesMatch = (name: string) => fullCourseName(name) === fullCourseName(source.venueName) && venueMatches(source.venueName, name);
+  if (!namesMatch(property.name) || !physical || JSON.stringify(physical) !== JSON.stringify(binding.address) ||
+    canonicalTimeZone(property.time_zone) !== source.timeZone) fail("ADAPTER_IDENTITY_MISMATCH");
+  const ids = new Set<number>();
+  const catalog = property.courses.map(course => {
+    if (ids.has(course.id) || course.property_id !== property.id) fail();
+    ids.add(course.id);
+    for (const key of ["timeZone", "timezone", "time_zone"]) if (Object.hasOwn(course, key) &&
+      (typeof course[key] !== "string" || canonicalTimeZone(course[key]) !== source.timeZone)) fail("ADAPTER_IDENTITY_MISMATCH");
+    return { id: course.id, propertyId: course.property_id, name: fullCourseName(course.name), enabled: course.enabled,
+      courseType: course.course_type, holes: course.holes_default, addons: course.addons_default,
+      players: [...course.players_array].sort((a, b) => a - b), minPlayers: course.min_players, maxPlayers: course.max_players, defaultPlayers: course.default_players,
+      supportedHoles: [...course.holes_array].sort((a, b) => a - b), supportedAddons: [...course.addons_array].sort(), flags: publicSemanticFlags(course) };
+  }).sort((a, b) => a.id - b.id);
+  const matches = property.courses.filter(course => course.enabled && namesMatch(course.name));
+  if (matches.length !== 1) fail("ADAPTER_IDENTITY_MISMATCH");
+  const selected = matches[0]; publicFlags(selected);
+  if (/\b(?:activit(?:y|ies)|driving[\s_-]+range|events?|gift[\s_-]+cards?|leagues?|lessons?|mini[\s_-]+golf|putting|simulators?|top[\s_-]*tracer|disc[\s_-]*golf|private|members?|login|sign[\s_-]*in)\b/iu.test(`${selected.name} ${selected.course_type ?? ""}`.replace(/[_-]/gu, " "))) fail();
+  return teesnapMetadataSchema.parse({ family: "TEESNAP", tenant: binding.tenant, courseId: selected.id,
+    defaultHoles: 18, defaultAddons: "off", timeZone: source.timeZone, publicApiVersion: "BOOKINGSITE_V1", supportedPlayers: [...selected.players_array].sort((a, b) => a - b),
+    catalogHash: hash({ tenant: binding.tenant, publicApiVersion: "BOOKINGSITE_V1",
+      property: { id: property.id, name: fullCourseName(property.name), address: physical, timeZone: source.timeZone, enabled: property.enabled, flags: publicSemanticFlags(property) }, catalog }) });
+}
+
+/** A malformed, dynamic, shadowed or identity-conflicting legacy bootstrap may
+ * never acquire a second strategy merely because its strict parser rejected it. */
+function hasLegacyBootstrap(html: string): boolean {
+  const decoded = html.replace(/\\u\{([0-9a-f]{1,6})\}|\\u([0-9a-f]{4})|\\x([0-9a-f]{2})/giu,
+    (literal, braced: string, unicode: string, hex: string) => { const code = Number.parseInt(braced ?? unicode ?? hex, 16); return code <= 0x7f ? String.fromCharCode(code) : literal; });
+  return /\b(?:window|globalThis|self)\s*(?:\.\s*(?:courses|property)\b|\[\s*["'](?:courses|property)["']\s*\])|\b(?:courses|property)\s*=/u.test(decoded);
+}
+async function rootDocument(source: TeesnapIdentitySource, read: TeesnapConfigurationRead) {
+  const binding = sourceBinding(source), response = await read(binding.bookingUrl);
+  if (!response.ok || response.status !== 200) fail("ADAPTER_TRANSPORT_FAILED");
+  if (response.redirected || response.url && response.url !== binding.bookingUrl || !/^text\/html(?:\s*;|$)/iu.test(response.headers.get("content-type") ?? "")) fail();
+  const body = await response.text();
+  const nodes = documentNodes(body);
+  // A generic public SPA shell is eligible; an observed access/session wall is
+  // not converted into a public-source observation by reading another role.
+  const visible = clean(text(nodes.all.find(node => node.tagName === "body")!));
+  if (/you are being redirected|checking your browser|verify (?:that )?you are human|javascript is required|sign in to (?:continue|view availability)/iu.test(visible) ||
+    nodes.visible.some(node => node.tagName === "a" && /^(?:log\s*out|sign\s*out)$/iu.test(clean(text(node))))) fail();
+  return body;
+}
+async function publicProperty(source: TeesnapIdentitySource, read: TeesnapConfigurationRead, venueMatches?: TeesnapVenueMatches) {
+  const url = teesnapPublicPropertyUrl(source.bookingUrl), response = await read(url);
+  if (!response.ok || response.status !== 200) fail("ADAPTER_TRANSPORT_FAILED");
+  if (response.redirected || response.url && response.url !== url || !/^application\/json(?:\s*;|$)/iu.test(response.headers.get("content-type") ?? "")) fail();
+  const body = await response.text(); if (Buffer.byteLength(body) > 2_000_000) fail("ADAPTER_RESPONSE_LIMIT");
+  let payload: unknown;
+  try {
+    payload = JSON.parse(body);
+    // JSON.parse alone silently accepts duplicate identity/access keys. Acorn
+    // only parses inert JSON syntax here; nothing from the response is run.
+    const program = parseJavaScript(`(${body})`, { ecmaVersion: "latest" }) as unknown as ScriptNode;
+    let count = 0;
+    const visit = (node: ScriptNode, depth: number) => {
+      if (++count > 30_000 || depth > 80) fail();
+      if (node.type === "ObjectExpression") {
+        const keys = new Set<string>();
+        for (const value of node.properties as ScriptNode[]) {
+          const key = (value.key as ScriptNode).value;
+          if (typeof key !== "string" || keys.has(key)) fail();
+          keys.add(key);
+        }
+      }
+      for (const value of Object.values(node)) {
+        if (Array.isArray(value)) for (const child of value) { if (object(child) && typeof child.type === "string") visit(child as ScriptNode, depth + 1); }
+        else if (object(value) && typeof value.type === "string") visit(value as ScriptNode, depth + 1);
+      }
+    };
+    visit(program, 0);
+  } catch { fail(); }
+  return parseTeesnapPublicProperty(source, payload, venueMatches);
+}
+
 /** Pure bounded parser for the fetched public root; no JavaScript is executed. */
 export function parseTeesnapConfiguration(
   source: TeesnapIdentitySource,
@@ -501,16 +620,8 @@ export async function inspectTeesnapConfiguration(
   read: TeesnapConfigurationRead,
   venueMatches?: TeesnapVenueMatches,
 ): Promise<TeesnapRecipeMetadata> {
-  const binding = sourceBinding(source),
-    response = await read(binding.bookingUrl);
-  if (!response.ok || response.status !== 200) fail("ADAPTER_TRANSPORT_FAILED");
-  if (
-    response.redirected ||
-    (response.url && response.url !== binding.bookingUrl) ||
-    !/^text\/html(?:\s*;|$)/iu.test(response.headers.get("content-type") ?? "")
-  )
-    fail();
-  return parseTeesnapConfiguration(source, await response.text(), venueMatches);
+  const html = await rootDocument(source, read);
+  return hasLegacyBootstrap(html) ? parseTeesnapConfiguration(source, html, venueMatches) : publicProperty(source, read, venueMatches);
 }
 
 export async function revalidateTeesnapConfiguration(
@@ -527,7 +638,13 @@ export async function revalidateTeesnapConfiguration(
     parsed.data.timeZone !== source.timeZone
   )
     fail("ADAPTER_CONFIGURATION_CHANGED");
-  const current = await inspectTeesnapConfiguration(source, read, venueMatches);
+  let current: TeesnapRecipeMetadata;
+  if (parsed.data.publicApiVersion === "BOOKINGSITE_V1") current = await publicProperty(source, read, venueMatches);
+  else {
+    const html = await rootDocument(source, read);
+    if (!hasLegacyBootstrap(html)) fail("ADAPTER_CONFIGURATION_CHANGED");
+    current = parseTeesnapConfiguration(source, html, venueMatches);
+  }
   if (JSON.stringify(parsed.data) !== JSON.stringify(current))
     fail("ADAPTER_CONFIGURATION_CHANGED");
   return current;

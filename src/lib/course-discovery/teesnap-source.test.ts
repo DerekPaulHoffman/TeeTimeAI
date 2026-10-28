@@ -3,6 +3,8 @@ import {
   inspectTeesnapConfiguration,
   parseTeesnapConfiguration,
   parseTeesnapRecipeSource,
+  parseTeesnapPublicProperty,
+  teesnapPublicPropertyUrl,
   revalidateTeesnapConfiguration,
   teesnapMetadataSchema,
   type TeesnapIdentitySource,
@@ -448,4 +450,131 @@ describe("fresh execution configuration binding", () => {
       ).rejects.toThrow();
     },
   );
+});
+
+const spa = '<!doctype html><html><head><title>Public booking</title></head><body><div id="app"></div><script type="module" src="/booking.js"></script></body></html>';
+const publicCourse = () => ({ ...course(), property_id: 91, course_type: null as string | null,
+  players_array: [1, 2, 3, 4], holes_array: [9, 18], addons_array: ["on", "off"], min_players: 1, max_players: 4, default_players: 4 });
+const publicProperty = () => ({ success: true, data: { id: 91, name: source().venueName, enabled: true,
+  address_street: "731 Cedar Dr", address_city: "Fairhaven", address_region: "Massachusetts", address_code: "02719", address_country: "US",
+  time_zone: "America/New_York", phone: "555-0100", courses: [publicCourse()] } });
+const modernRead = (payload: unknown = publicProperty(), root = spa) => vi.fn(async (url: string) => {
+  if (url === source().bookingUrl) return new Response(root, { headers: { "content-type": "text/html" } });
+  expect(url).toBe(teesnapPublicPropertyUrl(source().bookingUrl)); return Response.json(payload);
+});
+
+describe("modern public property bootstrap", () => {
+  it("derives only the exact tenant-bound public property role", () => {
+    expect(teesnapPublicPropertyUrl(source().bookingUrl)).toBe("https://cedar-fixture.api.teesnap.net/api/bookingsite/property");
+    for (const url of ["https://unrelated.example/", "https://cedar-fixture.api.teesnap.net/", source().bookingUrl + "?profileId=7"])
+      expect(() => teesnapPublicPropertyUrl(url)).toThrow("UNSUPPORTED_ADAPTER_SOURCE");
+  });
+  it("uses exactly HTML then public-property GET when legacy bootstrap is absent", async () => {
+    const read = modernRead(), metadata = await inspectTeesnapConfiguration(source(), read);
+    expect(read.mock.calls.map(call => call[0])).toEqual([source().bookingUrl, teesnapPublicPropertyUrl(source().bookingUrl)]);
+    expect(metadata).toEqual({ family: "TEESNAP", tenant: "cedar-fixture", courseId: 731, defaultHoles: 18, defaultAddons: "off", timeZone: "America/New_York",
+      publicApiVersion: "BOOKINGSITE_V1", supportedPlayers: [1, 2, 3, 4], catalogHash: expect.stringMatching(/^[a-f0-9]{64}$/u) });
+  });
+  it("requires paired mode and supported-player metadata while preserving legacy shape", () => {
+    const legacy = parseTeesnapConfiguration(source(), html()), modern = parseTeesnapPublicProperty(source(), publicProperty());
+    expect(legacy).not.toHaveProperty("publicApiVersion"); expect(legacy).not.toHaveProperty("supportedPlayers");
+    expect(teesnapMetadataSchema.safeParse({ ...legacy, supportedPlayers: [1, 2] }).success).toBe(false);
+    const withoutPlayers = { ...modern } as Record<string, unknown>; delete withoutPlayers.supportedPlayers;
+    expect(teesnapMetadataSchema.safeParse(withoutPlayers).success).toBe(false);
+    for (const supportedPlayers of [[], [2, 1], [1, 1], [0, 2], [1, 5], ["2"]])
+      expect(teesnapMetadataSchema.safeParse({ ...modern, supportedPlayers }).success).toBe(false);
+  });
+  it("refreshes modern property directly and never rereads its shell on a saved execution", async () => {
+    const saved = parseTeesnapPublicProperty(source(), publicProperty()), read = modernRead();
+    await expect(revalidateTeesnapConfiguration(source(), saved, read)).resolves.toEqual(saved);
+    expect(read).toHaveBeenCalledExactlyOnceWith(teesnapPublicPropertyUrl(source().bookingUrl));
+  });
+  it("does not upgrade an old legacy saved method when the root changes format", async () => {
+    const saved = parseTeesnapConfiguration(source(), html()), read = modernRead();
+    await expect(revalidateTeesnapConfiguration(source(), saved, read)).rejects.toThrow("ADAPTER_CONFIGURATION_CHANGED");
+    expect(read).toHaveBeenCalledExactlyOnceWith(source().bookingUrl);
+  });
+  it.each([
+    html().replace('"id":731', '"id":"wrong"'), html().replace("window.courses =", "window.courses = loadCourses() ||"),
+    html().replace("Cedar Fixture Golf Club | Home", "Wrong Fixture | Home"),
+    html().replace("window.courses", "window['courses']"), html().replace("window.courses =", "window.\\u0063ourses = loadCourses() ||"),
+    html().replace("</script>", "window.property={};</script>"),
+  ])("does not treat malformed/dynamic/identity-failed legacy markup as absent", async root => {
+    const read = modernRead(publicProperty(), root); await expect(inspectTeesnapConfiguration(source(), read)).rejects.toThrow();
+    expect(read).toHaveBeenCalledExactlyOnceWith(source().bookingUrl);
+  });
+  it("retains the one-read strict legacy strategy when its bootstrap is present", async () => {
+    const read = modernRead(publicProperty(), html()), metadata = await inspectTeesnapConfiguration(source(), read);
+    expect(read).toHaveBeenCalledExactlyOnceWith(source().bookingUrl); expect(metadata).toEqual(parseTeesnapConfiguration(source(), html()));
+  });
+  it.each([{}, { success: false, data: publicProperty().data }, { data: publicProperty().data }, { success: true, data: [] },
+    { success: true, data: publicProperty().data, error: "unexpected" }])("requires the actual successful public wrapper (%j)", payload => {
+    expect(() => parseTeesnapPublicProperty(source(), payload)).toThrow("ADAPTER_CONFIGURATION_UNVERIFIED");
+  });
+  it.each(["name", "address_street", "address_city", "address_region", "address_code", "address_country", "time_zone", "id", "enabled"])(
+    "never invents missing property %s", key => {
+      const payload = publicProperty(); delete (payload.data as Record<string, unknown>)[key];
+      expect(() => parseTeesnapPublicProperty(source(), payload)).toThrow();
+    });
+  it.each([{ name: "Other Fixture Golf" }, { address_street: "732 Cedar Dr" }, { address_city: "Other Town" }, { address_region: "RI" },
+    { address_code: "02720" }, { address_country: "Canada" }, { time_zone: "America/Chicago" }, { enabled: false },
+    { private: true }, { members_only: true }, { requires_login: true }, { is_logged_in: true }])("rejects conflicting physical/public property facts (%j)", change => {
+    const payload = publicProperty(); Object.assign(payload.data, change); expect(() => parseTeesnapPublicProperty(source(), payload)).toThrow();
+  });
+  it.each([
+    [publicCourse(), publicCourse()], [publicCourse(), { ...publicCourse(), id: 732 }], [{ ...publicCourse(), id: 0 }],
+    [{ ...publicCourse(), property_id: 92 }], [{ ...publicCourse(), enabled: false }], [{ ...publicCourse(), name: "Wrong Fixture Golf" }],
+    [{ ...publicCourse(), private: true }], [{ ...publicCourse(), members_only: true }], [{ ...publicCourse(), requires_login: true }],
+    [{ ...publicCourse(), course_type: "simulator" }], [{ ...publicCourse(), course_type: "private" }],
+    [{ ...publicCourse(), course_type: "members_only" }], [{ ...publicCourse(), course_type: "login_required" }], [],
+  ].map(courses => ({ courses })))("requires a unique enabled exact physical course and property link (%j)", ({ courses }) => {
+    const payload = publicProperty(); payload.data.courses = courses;
+    expect(() => parseTeesnapPublicProperty(source(), payload)).toThrow();
+  });
+  it.each([
+    { players_array: [] }, { players_array: [1, 1, 2] }, { players_array: [0, 1] }, { players_array: [1, 5] },
+    { players_array: ["1", "2"] }, { min_players: 2 }, { max_players: 3 }, { default_players: 5 },
+    { players_array: [1, 2, 4], default_players: 3 }, { holes_default: 9 }, { addons_default: "on" },
+    { holes_array: [9] }, { holes_array: [18, 18] }, { addons_array: ["on"] }, { addons_array: ["off", "off"] },
+  ])("fails closed on malformed or inconsistent party/default support (%j)", change => {
+    const payload = publicProperty(); Object.assign(payload.data.courses[0], change);
+    expect(() => parseTeesnapPublicProperty(source(), payload)).toThrow("ADAPTER_CONFIGURATION_UNVERIFIED");
+  });
+  it("never fills a missing player count from min/max", () => {
+    const payload = publicProperty(); Object.assign(payload.data.courses[0], { players_array: [2, 4], min_players: 2, max_players: 4, default_players: 4 });
+    expect(parseTeesnapPublicProperty(source(), payload).supportedPlayers).toEqual([2, 4]);
+  });
+  it("normalizes equivalent player presentation order without changing metadata or catalog hash", () => {
+    const payload = publicProperty(), original = parseTeesnapPublicProperty(source(), payload);
+    payload.data.courses[0].players_array = [4, 3, 2, 1];
+    expect(parseTeesnapPublicProperty(source(), payload)).toEqual(original);
+  });
+  it("binds property identity, selected ID, public support and functional catalog in the digest", async () => {
+    const saved = parseTeesnapPublicProperty(source(), publicProperty());
+    for (const change of ["course", "property", "players", "catalog"]) {
+      const payload = publicProperty();
+      if (change === "course") payload.data.courses[0].id = 732;
+      if (change === "property") { payload.data.id = 92; payload.data.courses[0].property_id = 92; }
+      if (change === "players") Object.assign(payload.data.courses[0], { players_array: [2, 3, 4], min_players: 2 });
+      if (change === "catalog") payload.data.courses.push({ ...publicCourse(), id: 732, name: "Other Fixture Golf", enabled: false });
+      await expect(revalidateTeesnapConfiguration(source(), saved, modernRead(payload))).rejects.toThrow("ADAPTER_CONFIGURATION_CHANGED");
+    }
+  });
+  it("excludes volatile windows/rates/phone and unneeded private values from the semantic digest", () => {
+    const payload = publicProperty(), saved = parseTeesnapPublicProperty(source(), payload);
+    Object.assign(payload.data, { phone: "555-0200", private_note: "UNUSED_PRIVATE_SENTINEL" });
+    Object.assign(payload.data.courses[0], { advance: 21, start_availability_time: "06:00", date: "2030-05-18", price: 55, private_owner_email: "UNUSED_PRIVATE_SENTINEL" });
+    const refreshed = parseTeesnapPublicProperty(source(), payload); expect(refreshed).toEqual(saved);
+    expect(JSON.stringify(refreshed)).not.toContain("UNUSED_PRIVATE_SENTINEL");
+  });
+  it("rejects duplicate JSON keys and never executes a property response", async () => {
+    for (const body of [JSON.stringify(publicProperty()).replace('"enabled":true', '"enabled":false,"enabled":true'), 'JSON.parse("{}")', '{"success":true,"data":']) {
+      const read = vi.fn(async (url: string) => url === source().bookingUrl ? new Response(spa, { headers: { "content-type": "text/html" } }) : new Response(body, { headers: { "content-type": "application/json" } }));
+      await expect(inspectTeesnapConfiguration(source(), read)).rejects.toThrow("ADAPTER_CONFIGURATION_UNVERIFIED"); expect(read).toHaveBeenCalledTimes(2);
+    }
+  });
+  it("does not cross a visible access wall merely because a public API role is known", async () => {
+    const read = modernRead(publicProperty(), spa.replace('<div id="app"></div>', '<p>Javascript is required. You are being redirected</p>'));
+    await expect(inspectTeesnapConfiguration(source(), read)).rejects.toThrow(); expect(read).toHaveBeenCalledOnce();
+  });
 });

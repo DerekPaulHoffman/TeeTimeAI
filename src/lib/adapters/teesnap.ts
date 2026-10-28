@@ -13,7 +13,10 @@ export type TeesnapMetadata = {
   bookingBaseUrl: string;
   defaultHoles?: 9 | 18;
   defaultAddons?: string;
+  publicApiVersion?: "BOOKINGSITE_V1";
 };
+
+export const TEESNAP_PUBLIC_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36";
 
 type TeesnapBooking = {
   bookingId?: number;
@@ -80,7 +83,8 @@ export function isTeesnapMetadata(value: unknown): value is TeesnapMetadata {
     typeof metadata.courseId === "number" &&
     typeof metadata.bookingBaseUrl === "string" &&
     (metadata.defaultHoles === undefined || metadata.defaultHoles === 9 || metadata.defaultHoles === 18) &&
-    (metadata.defaultAddons === undefined || typeof metadata.defaultAddons === "string")
+    (metadata.defaultAddons === undefined || typeof metadata.defaultAddons === "string") &&
+    (metadata.publicApiVersion === undefined || metadata.publicApiVersion === "BOOKINGSITE_V1")
   );
 }
 
@@ -101,7 +105,11 @@ export async function fetchTeesnapTeeSheet(input: TeesnapTeeSheetInput, fetchImp
 }
 
 async function fetchTeesnapAvailability(input: TeesnapTeeSheetInput, fetchImpl: typeof fetch): Promise<Pick<TeesnapTeeSheetResult, "slots" | "targetDateStatus">> {
-  if (input.strictPublicEvidence && !Number.isFinite(input.date.getTime())) incomplete();
+  const modern = input.metadata.publicApiVersion === "BOOKINGSITE_V1";
+  if (input.metadata.publicApiVersion !== undefined && !modern) incomplete();
+  if ((input.strictPublicEvidence || modern) && !Number.isFinite(input.date.getTime())) incomplete();
+  if (modern && (!positiveId(input.metadata.courseId) || !Number.isInteger(input.players) || input.players < 1 || input.players > 4 ||
+      !isTeesnapMetadata(input.metadata))) incomplete();
   const holes = input.metadata.defaultHoles ?? 18;
   const url = buildTeeTimesUrl(input.metadata, input.date, input.players, holes);
   const response = await fetchWithProviderTimeout(url, {
@@ -110,15 +118,15 @@ async function fetchTeesnapAvailability(input: TeesnapTeeSheetInput, fetchImpl: 
   let payload = (await response.json().catch(() => null)) as TeesnapResponse | null;
 
   if (!response.ok) {
-    if (payload?.errors === "date_not_allowed") {
+    if (!modern && payload?.errors === "date_not_allowed") {
       return { slots: [], targetDateStatus: "NOT_OPEN" };
     }
     throw providerHttpError("Teesnap tee times", response);
   }
 
-  if (input.strictPublicEvidence) {
+  if (input.strictPublicEvidence || modern) {
     if (!/^application\/(?:[a-z0-9.+-]*\+)?json(?:;|$)/iu.test(response.headers.get("content-type") ?? "")) incomplete();
-    payload = strictPublicDay(payload, input.date);
+    payload = strictPublicDay(payload, input.date, modern);
   }
 
   const teeTimes = payload?.teeTimes?.teeTimes;
@@ -149,6 +157,7 @@ async function fetchTeesnapAvailability(input: TeesnapTeeSheetInput, fetchImpl: 
     }
 
     const priceOptions = getPriceOptions(teeTime.prices);
+    if (modern && !priceOptions.some(option => option.holes === holes && option.priceCents > 0)) continue;
 
     slots.push({
       courseId: input.courseId,
@@ -216,17 +225,29 @@ function record(value: unknown): value is Record<string, unknown> {
 function positiveId(value: unknown): value is number { return Number.isSafeInteger(value) && Number(value) > 0; }
 
 /** Validate every row before any legacy normalization can skip an invalid entry. */
-function strictPublicDay(value: unknown, date: Date): TeesnapResponse {
+function strictPublicDay(value: unknown, date: Date, modern = false): TeesnapResponse {
   if (!record(value) || value.errors !== undefined && value.errors !== "" || !record(value.teeTimes)) incomplete();
   const day = value.teeTimes;
+  const globalGolfers = new Set<number>();
+  if (modern) {
+    if (Object.keys(value).length !== 1 || Object.keys(day).sort().join(",") !== "bookings,golfers,teeSheetPriceOverrides,teeTimes" ||
+        !Array.isArray(day.golfers) || day.golfers.length > 8_000 ||
+        !Array.isArray(day.teeSheetPriceOverrides) || day.teeSheetPriceOverrides.length !== 0) incomplete();
+    // Only IDs are consumed. Personal roster fields never enter normalized evidence.
+    for (const golfer of day.golfers) {
+      if (!record(golfer) || !positiveId(golfer.id) || globalGolfers.has(golfer.id)) incomplete();
+      globalGolfers.add(golfer.id);
+    }
+  }
   if (!Array.isArray(day.bookings) || day.bookings.length > 2_000 || !Array.isArray(day.teeTimes) || day.teeTimes.length > 500) incomplete();
   const bookingSizes = new Map<number, number>();
   const bookingGolferIds = new Map<number, unknown[]>();
   for (const booking of day.bookings) {
     if (!record(booking) || !positiveId(booking.bookingId) || bookingSizes.has(booking.bookingId) ||
-        !Array.isArray(booking.golfers) || booking.golfers.length > 4 || !booking.golfers.every(record)) incomplete();
-    const golferIds = booking.golfers.filter(golfer => golfer.id !== undefined).map(golfer => golfer.id);
+        !Array.isArray(booking.golfers) || booking.golfers.length > 4 || !modern && !booking.golfers.every(record)) incomplete();
+    const golferIds = modern ? booking.golfers : booking.golfers.filter(golfer => golfer.id !== undefined).map(golfer => golfer.id);
     if (golferIds.some(id => !positiveId(id)) || new Set(golferIds).size !== golferIds.length) incomplete();
+    if (modern && golferIds.some(id => !globalGolfers.has(id))) incomplete();
     bookingSizes.set(booking.bookingId, booking.golfers.length);
     bookingGolferIds.set(booking.bookingId, golferIds);
   }
@@ -236,6 +257,7 @@ function strictPublicDay(value: unknown, date: Date): TeesnapResponse {
     if (!record(row) || typeof row.teeTime !== "string" ||
         !/^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d$/u.test(row.teeTime) ||
         row.teeTime.slice(0, 10) !== requestedDate || starts.has(row.teeTime.slice(0, 16)) ||
+        modern && (typeof row.squeezeTime !== "boolean" || typeof row.shotgun !== "boolean" || !Array.isArray(row.prices)) ||
         !Array.isArray(row.teeOffSections) || row.teeOffSections.length < 1 || row.teeOffSections.length > 2) incomplete();
     starts.add(row.teeTime.slice(0, 16));
     const sections = new Set<string>();
@@ -257,6 +279,7 @@ function strictPublicDay(value: unknown, date: Date): TeesnapResponse {
       for (const price of row.prices) {
         if (!record(price) || price.roundType !== "NINE_HOLE" && price.roundType !== "EIGHTEEN_HOLE" ||
             rounds.has(price.roundType) || typeof price.price !== "string" ||
+            modern && typeof price.taxInclusive !== "boolean" ||
             !/^\$?(?:0|[1-9]\d{0,6})(?:\.\d{1,2})?$/u.test(price.price) || Number(price.price.replace(/^\$/u, "")) <= 0) incomplete();
         rounds.add(price.roundType);
         price.price = price.price.replace(/^\$/u, "");
@@ -271,8 +294,7 @@ function teesnapHeaders(bookingBaseUrl: string) {
   return {
     accept: "application/json, text/plain, */*",
     referer: `${origin}/`,
-    "user-agent":
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
+    "user-agent": TEESNAP_PUBLIC_USER_AGENT
   };
 }
 
@@ -282,13 +304,22 @@ function buildTeeTimesUrl(
   players: number,
   holes: 9 | 18
 ) {
-  const url = new URL("/customer-api/teetimes-day", metadata.bookingBaseUrl);
+  const modern = metadata.publicApiVersion === "BOOKINGSITE_V1";
+  let base = metadata.bookingBaseUrl;
+  if (modern) {
+    const root = new URL(base), match = /^([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\.teesnap\.net$/u.exec(root.hostname);
+    if (!match || ["www", "api", "admin", "account", "login"].includes(match[1]) || root.protocol !== "https:" ||
+        root.username || root.password || root.port || root.pathname !== "/" || root.search || root.hash ||
+        ![root.href, root.href.slice(0, -1)].includes(base)) incomplete();
+    base = `https://${match[1]}.api.teesnap.net/`;
+  }
+  const url = new URL(modern ? "/api/bookingsite/teetimes-day" : "/customer-api/teetimes-day", base);
   url.searchParams.set("course", String(metadata.courseId));
   url.searchParams.set("date", date.toISOString().slice(0, 10));
   url.searchParams.set("players", String(players));
   url.searchParams.set("holes", String(holes));
   url.searchParams.set("addons", metadata.defaultAddons ?? "off");
-  url.searchParams.set("profileId", "");
+  if (!modern) url.searchParams.set("profileId", "");
   return url.toString();
 }
 

@@ -47,13 +47,19 @@ export async function inspectOfficialAdapter({ job, cwd, deadlineAt, helperEnvir
     signal?.throwIfAborted();
     if (Date.now() >= Date.parse(deadlineAt)) throw discoveryError("DISCOVERY_WORK_DEADLINE");
     const adapter = result?.adapter, root = officialRoot(source.officialUrl);
+    const modern = adapter?.publicApiVersion === "BOOKINGSITE_V1";
     if (!adapter || Object.keys(result).sort().join(",") !== "adapter,observation" ||
       Object.keys(result.observation ?? {}).sort().join(",") !== "publicRequests,publicResponseBytes,transport" ||
-      Object.keys(adapter).sort().join(",") !== "catalogHash,courseId,defaultAddons,defaultHoles,family,tenant,timeZone" ||
+      Object.keys(adapter).sort().join(",") !== (modern
+        ? "catalogHash,courseId,defaultAddons,defaultHoles,family,publicApiVersion,supportedPlayers,tenant,timeZone"
+        : "catalogHash,courseId,defaultAddons,defaultHoles,family,tenant,timeZone") ||
+      modern && (!Array.isArray(adapter.supportedPlayers) || adapter.supportedPlayers.length < 1 || adapter.supportedPlayers.length > 4 ||
+        adapter.supportedPlayers.some(value => !Number.isInteger(value) || value < 1 || value > 4) ||
+        new Set(adapter.supportedPlayers).size !== adapter.supportedPlayers.length || adapter.supportedPlayers.join(",") !== [...adapter.supportedPlayers].sort((a,b) => a-b).join(",")) ||
       adapter.family !== "TEESNAP" || adapter.tenant !== root.tenant || adapter.timeZone !== source.timeZone ||
       !Number.isSafeInteger(adapter.courseId) || adapter.courseId < 1 || adapter.courseId > 2147483647 ||
       adapter.defaultHoles !== 18 || adapter.defaultAddons !== "off" || !/^[a-f0-9]{64}$/u.test(adapter.catalogHash ?? "") ||
-      result.observation?.transport !== "FIXED_PUBLIC_ROOT" || result.observation.publicRequests !== 1 ||
+      result.observation?.transport !== "FIXED_PUBLIC_ROOT" || result.observation.publicRequests !== (modern ? 2 : 1) ||
       !Number.isSafeInteger(result.observation.publicResponseBytes) || result.observation.publicResponseBytes < 1 || result.observation.publicResponseBytes > 600_000)
       throw discoveryError("OFFICIAL_ADAPTER_RESULT_INVALID");
     Object.assign(receipt, result.observation, { outcome: "INSPECTED" });

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { fetchTeesnapSlots, fetchTeesnapTeeSheet, isTeesnapMetadata, TEESNAP_PUBLIC_EVIDENCE_INCOMPLETE, type TeesnapTeeSheetInput } from "./teesnap";
+import { fetchTeesnapSlots, fetchTeesnapTeeSheet, isTeesnapMetadata, TEESNAP_PUBLIC_EVIDENCE_INCOMPLETE, TEESNAP_PUBLIC_USER_AGENT, type TeesnapTeeSheetInput } from "./teesnap";
 
 describe("isTeesnapMetadata", () => {
   it("recognizes reusable Teesnap metadata", () => {
@@ -279,6 +279,116 @@ describe("strict learned Teesnap evidence", () => {
       new Response(JSON.stringify(day()), { headers: { "content-type": "text/html" } })]) {
       await expect(fetchTeesnapTeeSheet(input(), vi.fn<typeof fetch>().mockResolvedValue(response))).rejects.toThrow(/^TEESNAP_PUBLIC_EVIDENCE_INCOMPLETE$/u);
     }
+  });
+});
+
+describe("modern signed-out Teesnap public day", () => {
+  const input = (): TeesnapTeeSheetInput => ({ courseId: "synthetic-course", date: new Date("2030-06-12T00:00:00Z"), players: 2,
+    metadata: { provider: "TEESNAP", courseId: 81, bookingBaseUrl: "https://synthetic.teesnap.net/", publicApiVersion: "BOOKINGSITE_V1" } });
+  const row = (minute: number, bookings?: number[]) => ({ teeTime: `2030-06-12T12:${minute}:00`, squeezeTime: false, shotgun: false,
+    prices: [{ roundType: "EIGHTEEN_HOLE", price: "48.00", taxInclusive: false }],
+    teeOffSections: [{ teeOff: "FRONT_NINE", isHeld: false, ...(bookings === undefined ? {} : { bookings }) }] });
+  const day = () => ({ teeTimes: { bookings: [{ bookingId: 11, golfers: [1, 2] }, { bookingId: 12, golfers: [3] }],
+    golfers: [{ id: 1 }, { id: 2 }, { id: 3 }], teeSheetPriceOverrides: [] as unknown[], teeTimes: [row(30, [11])] } });
+  const read = (payload: unknown) => vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(payload));
+
+  it("recognizes only the explicit supported API version", () => {
+    expect(isTeesnapMetadata(input().metadata)).toBe(true);
+    for (const publicApiVersion of ["BOOKINGSITE_V2", "", null, 1]) expect(isTeesnapMetadata({ ...input().metadata, publicApiVersion })).toBe(false);
+  });
+
+  it.each([1, 2, 3, 4])("resolves numeric references for %i free spots using the exact public request", async free => {
+    const value = day();
+    value.teeTimes.bookings = [{ bookingId: 11, golfers: Array.from({ length: 4 - free }, (_, i) => i + 1) }];
+    value.teeTimes.teeTimes = [row(30, free === 4 ? undefined : [11])];
+    const fetch = read(value), result = await fetchTeesnapTeeSheet({ ...input(), players: free }, fetch);
+    expect(result).toMatchObject({ targetDateStatus: "OPEN", slots: [{ availableSpots: free, holes: 18, priceCents: 4800 }] });
+    expect(fetch).toHaveBeenCalledExactlyOnceWith("https://synthetic.api.teesnap.net/api/bookingsite/teetimes-day?course=81&date=2030-06-12&players=" + free + "&holes=18&addons=off",
+      expect.objectContaining({ headers: { accept: "application/json, text/plain, */*", referer: "https://synthetic.teesnap.net/", "user-agent": TEESNAP_PUBLIC_USER_AGENT } }));
+    const options = fetch.mock.calls[0][1]!;
+    expect(options).not.toHaveProperty("credentials");
+    expect(result).not.toHaveProperty("golfers");
+    expect(JSON.stringify(result)).not.toContain("bookingId");
+  });
+
+  it("uses maximum unheld section capacity and never adds front and back capacity", async () => {
+    const value = day();
+    value.teeTimes.teeTimes[0].teeOffSections.push({ teeOff: "BACK_NINE", bookings: [12], isHeld: false });
+    expect(await fetchTeesnapTeeSheet(input(), read(value))).toMatchObject({ slots: [{ availableSpots: 3 }] });
+    value.teeTimes.teeTimes[0].teeOffSections[1].isHeld = true;
+    expect(await fetchTeesnapTeeSheet(input(), read(value))).toMatchObject({ slots: [{ availableSpots: 2 }] });
+    value.teeTimes.teeTimes[0].teeOffSections[0].isHeld = true;
+    expect(await fetchTeesnapTeeSheet(input(), read(value))).toMatchObject({ targetDateStatus: "OPEN", slots: [] });
+  });
+
+  it("emits only rows priced for the requested round, including changed 9-hole inputs", async () => {
+    const value = day();
+    value.teeTimes.teeTimes = [row(30), row(40)];
+    value.teeTimes.teeTimes[0].prices[0].roundType = "NINE_HOLE";
+    expect(await fetchTeesnapTeeSheet(input(), read(value))).toMatchObject({ slots: [{ startsAt: "2030-06-12T12:40", holes: 18 }] });
+    expect(await fetchTeesnapTeeSheet({ ...input(), metadata: { ...input().metadata, defaultHoles: 9 } }, read(value)))
+      .toMatchObject({ slots: [{ startsAt: "2030-06-12T12:30", holes: 9 }] });
+    value.teeTimes.teeTimes.forEach(row => { row.prices = []; });
+    expect(await fetchTeesnapTeeSheet(input(), read(value))).toMatchObject({ targetDateStatus: "OPEN", slots: [] });
+  });
+
+  it("requires complete empty-day arrays and does not carry private roster fields into output", async () => {
+    const value = day(); Object.assign(value.teeTimes.golfers[0], { name: "unneeded-private-field", email: "unused@example.invalid" });
+    expect(JSON.stringify(await fetchTeesnapTeeSheet(input(), read(value)))).not.toMatch(/unneeded-private-field|unused@example/);
+    expect(await fetchTeesnapTeeSheet(input(), read({ teeTimes: { bookings: [], golfers: [], teeSheetPriceOverrides: [], teeTimes: [] } })))
+      .toMatchObject({ targetDateStatus: "OPEN", slots: [] });
+  });
+
+  const invalid: Array<[string, (value: ReturnType<typeof day>) => void]> = [
+    ["duplicate global golfer", value => { value.teeTimes.golfers.push({ id: 1 }); }],
+    ["negative global golfer", value => { value.teeTimes.golfers[0].id = -1; }],
+    ["fractional global golfer", value => { value.teeTimes.golfers[0].id = 1.5; }],
+    ["unknown golfer reference", value => { value.teeTimes.bookings[0].golfers = [99]; }],
+    ["duplicate golfer reference", value => { value.teeTimes.bookings[0].golfers = [1, 1]; }],
+    ["negative golfer reference", value => { value.teeTimes.bookings[0].golfers = [-1]; }],
+    ["duplicate booking", value => { value.teeTimes.bookings.push(value.teeTimes.bookings[0]); }],
+    ["unknown booking reference", value => { value.teeTimes.teeTimes[0].teeOffSections[0].bookings = [99]; }],
+    ["duplicate booking reference", value => { value.teeTimes.teeTimes[0].teeOffSections[0].bookings = [11, 11]; }],
+    ["duplicate joined golfer", value => { value.teeTimes.bookings[1].golfers = [1]; value.teeTimes.teeTimes[0].teeOffSections[0].bookings = [11, 12]; }],
+    ["overfull section", value => { value.teeTimes.bookings[0].golfers = [1, 2, 3]; value.teeTimes.teeTimes[0].teeOffSections[0].bookings = [11, 12]; value.teeTimes.bookings[1].golfers = [1, 2]; }],
+    ["foreign date", value => { value.teeTimes.teeTimes[0].teeTime = "2030-06-13T12:30:00"; }],
+    ["duplicate section", value => { value.teeTimes.teeTimes[0].teeOffSections.push(value.teeTimes.teeTimes[0].teeOffSections[0]); }],
+    ["zero price", value => { value.teeTimes.teeTimes[0].prices[0].price = "0"; }],
+    ["unverified price override", value => { value.teeTimes.teeSheetPriceOverrides.push({}); }],
+  ];
+  it.each(invalid)("rejects the entire joined day for %s", async (_name, mutate) => {
+    const value = day(); mutate(value);
+    await expect(fetchTeesnapTeeSheet(input(), read(value))).rejects.toThrow(/^TEESNAP_PUBLIC_EVIDENCE_INCOMPLETE$/u);
+  });
+
+  it.each(["golfers", "bookings", "teeSheetPriceOverrides", "teeTimes"])("rejects a missing required %s array", async key => {
+    const value = day(); delete (value.teeTimes as Record<string, unknown>)[key];
+    await expect(fetchTeesnapTeeSheet(input(), read(value))).rejects.toThrow(TEESNAP_PUBLIC_EVIDENCE_INCOMPLETE);
+  });
+  it.each(["bookings", "isHeld", "teeOff", "squeezeTime", "shotgun", "prices", "taxInclusive"])("does not mistake invalid %s for an empty section", async key => {
+    const value = day(), section = value.teeTimes.teeTimes[0].teeOffSections[0];
+    if (key === "bookings") Object.assign(section, { bookings: null });
+    else if (key === "isHeld" || key === "teeOff") delete (section as Record<string, unknown>)[key];
+    else if (key === "taxInclusive") delete (value.teeTimes.teeTimes[0].prices[0] as Record<string, unknown>)[key];
+    else delete (value.teeTimes.teeTimes[0] as Record<string, unknown>)[key];
+    await expect(fetchTeesnapTeeSheet(input(), read(value))).rejects.toThrow(TEESNAP_PUBLIC_EVIDENCE_INCOMPLETE);
+  });
+  it.each(["https://api.teesnap.net/", "https://synthetic.api.teesnap.net/", "https://synthetic.teesnap.net/not-root", "https://synthetic.teesnap.net/?profileId=1", "http://synthetic.teesnap.net/"])(
+    "rejects noncanonical modern roots before any read: %s", async bookingBaseUrl => {
+      const fetch = read(day());
+      await expect(fetchTeesnapTeeSheet({ ...input(), metadata: { ...input().metadata, bookingBaseUrl } }, fetch)).rejects.toThrow(TEESNAP_PUBLIC_EVIDENCE_INCOMPLETE);
+      expect(fetch).not.toHaveBeenCalled();
+    });
+  it("rejects unknown error/envelope fields, malformed JSON, wrong MIME and unobserved modern HTTP errors", async () => {
+    for (const payload of [{ ...day(), errors: "" }, { ...day(), hasMore: true }, { success: true, data: day() }, null]) {
+      await expect(fetchTeesnapTeeSheet(input(), read(payload))).rejects.toThrow(TEESNAP_PUBLIC_EVIDENCE_INCOMPLETE);
+    }
+    for (const response of [new Response('{"teeTimes":', { headers: { "content-type": "application/json" } }),
+      new Response(JSON.stringify(day()), { headers: { "content-type": "text/html" } })]) {
+      await expect(fetchTeesnapTeeSheet(input(), vi.fn<typeof fetch>().mockResolvedValue(response))).rejects.toThrow(TEESNAP_PUBLIC_EVIDENCE_INCOMPLETE);
+    }
+    await expect(fetchTeesnapTeeSheet(input(), vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({ errors: "date_not_allowed" }, { status: 400 }))))
+      .rejects.toThrow("returned 400");
   });
 });
 

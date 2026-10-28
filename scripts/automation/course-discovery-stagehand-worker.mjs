@@ -130,13 +130,27 @@ export async function runCourseDiscoveryStagehandWorker({
     if (isOfficialAdapterJob(job)) {
       phase = "FIXED_INSPECTION";
       metrics.framework = "FixedPublicRoot"; metrics.frameworkRole = "FIXED_PUBLIC_ROOT";
-      prepared = await officialAdapterInspector({ job, cwd, deadlineAt: new Date(deadline).toISOString(),
-        helperEnvironment: client.helperEnvironment("discovery", job), signal });
-      metrics.officialAdapterReceipt = prepared.receipt;
-      if (prepared.receipt?.transport !== "FIXED_PUBLIC_ROOT" || prepared.receipt.helperClosed !== true || prepared.receipt.modelCalls !== 0)
-        throw discoveryError("OFFICIAL_ADAPTER_RESULT_INVALID");
+      try {
+        prepared = await officialAdapterInspector({ job, cwd, deadlineAt: new Date(deadline).toISOString(),
+          helperEnvironment: client.helperEnvironment("discovery", job), signal });
+        metrics.officialAdapterReceipt = prepared.receipt;
+        if (prepared.receipt?.transport !== "FIXED_PUBLIC_ROOT" || prepared.receipt.helperClosed !== true || prepared.receipt.modelCalls !== 0)
+          throw discoveryError("OFFICIAL_ADAPTER_RESULT_INVALID");
+      } catch (error) {
+        const receipt = error?.officialAdapterReceipt;
+        // A rejected HTTP read or unsupported bootstrap is not evidence of a
+        // browser login/challenge. Only a closed, owned failed helper can defer
+        // to the ordinary source investigation; identity and scope failures stop.
+        if (!["ACCESS_REQUIRED", "ADAPTER_CONFIGURATION_UNVERIFIED"].includes(error?.code) ||
+            receipt?.transport !== "FIXED_PUBLIC_ROOT" || receipt.outcome !== "FAILED" ||
+            receipt.helperClosed !== true || receipt.modelCalls !== 0) throw error;
+        metrics.officialAdapterReceipt = { ...receipt, fallbackReason: error.code };
+        metrics.framework = "Stagehand"; metrics.frameworkRole = "SOURCE_DISCOVERY_ONLY";
+        check();
+      }
       publishMetrics();
-    } else {
+    }
+    if (!prepared) {
     reference = readStagehandSourceCheckpoint(job, workDeadlineAt, now());
     if (reference) {
       metrics.sourceResumed = true;

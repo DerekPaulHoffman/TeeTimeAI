@@ -75,18 +75,19 @@ async function main() {
         if (!root || root.bookingUrl !== source.officialUrl || source.bookingUrl !== source.officialUrl || source.timeZone !== input.timeZone ||
           input.durationMinutes !== undefined || /[\u0000-\u001f\u007f]/u.test(source.venueName + source.venueAddress)) throw new Error("OFFICIAL_ADAPTER_SCOPE_INVALID");
         const workDeadline = Math.min(deadlineAt.getTime(), Date.now() + 25_000);
+        const propertyUrl = `https://${root.tenant}.api.teesnap.net/api/bookingsite/property`;
         let reads = 0, bytesRead = 0;
         const transport = createAddressPinnedPublicFetchTransport({ parseUrl: candidate => {
-          if (candidate !== root.bookingUrl) throw new Error("UNSCOPED_ADAPTER_REQUEST"); return new URL(candidate);
+          if (candidate !== root.bookingUrl && candidate !== propertyUrl) throw new Error("UNSCOPED_ADAPTER_REQUEST"); return new URL(candidate);
         }, maxResponseBytes: 600_000, timeoutMs: 15_000, redirectLimit: 0 });
         const scopedFetch: typeof fetch = async (url, init) => {
           const href = url instanceof Request ? url.url : String(url);
-          if (href !== root.bookingUrl || (init?.method ?? "GET").toUpperCase() !== "GET" || init?.body != null || ++reads > 1 || Date.now() >= workDeadline)
+          if (![root.bookingUrl, propertyUrl].includes(href) || (init?.method ?? "GET").toUpperCase() !== "GET" || init?.body != null || ++reads > 2 || Date.now() >= workDeadline)
             throw new Error("UNSCOPED_ADAPTER_REQUEST");
           const response = await transport(href, { ...init, credentials: "omit", redirect: "error",
             signal: AbortSignal.any([...(init?.signal ? [init.signal] : []), AbortSignal.timeout(Math.max(1, Math.min(15_000, workDeadline - Date.now())))]) });
           if (!response.ok) return response;
-          if (response.redirected || response.url && response.url !== root.bookingUrl) throw new Error("ADAPTER_TRANSPORT_FAILED");
+          if (response.redirected || response.url && response.url !== href) throw new Error("ADAPTER_TRANSPORT_FAILED");
           const bytes = await response.arrayBuffer(); bytesRead += bytes.byteLength;
           if (bytesRead < 1 || bytesRead > 600_000) throw new Error("ADAPTER_RESPONSE_LIMIT");
           return new Response(bytes, { status: response.status, statusText: response.statusText, headers: response.headers });
@@ -94,7 +95,7 @@ async function main() {
         const inspected = await inspectExistingAdapter(source, { fetch: scopedFetch, deadlineAt: new Date(workDeadline), requestLease,
           requestedInput: input, venueMatches: venueProofMatches });
         const adapter = teesnapMetadataSchema.parse(inspected.adapter);
-        if (reads !== 1 || Date.now() >= workDeadline) throw new Error("OFFICIAL_ADAPTER_INCOMPLETE");
+        if (reads !== (adapter.publicApiVersion ? 2 : 1) || Date.now() >= workDeadline) throw new Error("OFFICIAL_ADAPTER_INCOMPLETE");
         const output = JSON.stringify({ id, ok: true, result: { adapter, observation: { transport: "FIXED_PUBLIC_ROOT", publicRequests: reads, publicResponseBytes: bytesRead } } });
         if (Buffer.byteLength(output) > 16_384) throw new Error("OFFICIAL_ADAPTER_OUTPUT_LIMIT");
         process.stdout.write(`${output}\n`); return;

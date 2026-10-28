@@ -1,5 +1,5 @@
 import { fetchForeupTeeSheet } from "@/lib/adapters/foreup";
-import { fetchTeesnapTeeSheet } from "@/lib/adapters/teesnap";
+import { fetchTeesnapTeeSheet, TEESNAP_PUBLIC_USER_AGENT } from "@/lib/adapters/teesnap";
 import { inspectTeesnapConfiguration, parseTeesnapRecipeSource, revalidateTeesnapConfiguration } from "./teesnap-source";
 import { uscheduleReadGate } from "@/lib/simulators/providers/uschedule-read-diagnostic";
 import { fetchTeeItUpTeeSheet } from "@/lib/adapters/teeitup";
@@ -174,6 +174,9 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
   const signal = AbortSignal.timeout(Math.max(1, deadline - clock().getTime()));
   const queue = createSimulatorBrowserRequestQueue(deps.requestLease ?? runWithProviderRequestLease, signal);
   const booking = new URL(source.bookingUrl); booking.hash = "";
+  const teesnapRoot = family === "TEESNAP" ? parseTeesnapRecipeSource(source.bookingUrl)! : undefined;
+  const teesnapApiOrigin = teesnapRoot ? `https://${teesnapRoot.tenant}.api.teesnap.net` : undefined;
+  const teesnapPropertyUrl = teesnapApiOrigin ? `${teesnapApiOrigin}/api/bookingsite/property` : undefined;
   let acuity: AcuityPublicConfiguration | undefined;
   const teeitup = family === "TEEITUP" ? parseTeeItUpRecipeSource(source.bookingUrl)! : undefined;
   let teeitupFacilities: TeeItUpRecipeFacility[] | undefined;
@@ -227,11 +230,14 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
     if (!isSafeRecipeUrl(value)) return fail("UNSCOPED_ADAPTER_REQUEST");
     const url = new URL(value);
     if (url.href === booking.href) return url;
-    if (family === "TEESNAP" && adapter?.family === "TEESNAP" && input && url.origin === booking.origin &&
-        url.pathname === "/customer-api/teetimes-day" && exactKeys(url, ["course", "date", "players", "holes", "addons", "profileId"]) &&
+    if (family === "TEESNAP" && url.href === teesnapPropertyUrl) return url;
+    const modernTeesnap = adapter?.family === "TEESNAP" && adapter.publicApiVersion === "BOOKINGSITE_V1";
+    if (family === "TEESNAP" && adapter?.family === "TEESNAP" && input && url.origin === (modernTeesnap ? teesnapApiOrigin : booking.origin) &&
+        url.pathname === (modernTeesnap ? "/api/bookingsite/teetimes-day" : "/customer-api/teetimes-day") &&
+        exactKeys(url, modernTeesnap ? ["course", "date", "players", "holes", "addons"] : ["course", "date", "players", "holes", "addons", "profileId"]) &&
         url.searchParams.get("course") === String(adapter.courseId) && url.searchParams.get("date") === input.date &&
         url.searchParams.get("players") === String(input.players) && url.searchParams.get("holes") === String(adapter.defaultHoles) &&
-        url.searchParams.get("addons") === adapter.defaultAddons && url.searchParams.get("profileId") === "") return url;
+        url.searchParams.get("addons") === adapter.defaultAddons && (modernTeesnap || url.searchParams.get("profileId") === "")) return url;
     if (adapter?.family === "TEEITUP" && adapter.officialIdentityProof && url.href === adapter.officialIdentityProof.officialPageUrl &&
         source.officialUrl && url.origin === new URL(source.officialUrl).origin) return url;
     if (savedPostalProof && url.href === savedPostalProof.officialSourceProof.officialPageUrl &&
@@ -271,6 +277,11 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
     if (method !== "GET" || init?.body || value instanceof Request && value.body ||
         ["authorization", "proxy-authorization", "cookie", "x-api-key"].some(key => headers.has(key))) fail("UNSAFE_ADAPTER_REQUEST");
     const url = parseUrl(raw);
+    if (family === "TEESNAP") {
+      headers.set("accept", url.href === booking.href ? "text/html" : "application/json, text/plain, */*");
+      headers.set("user-agent", TEESNAP_PUBLIC_USER_AGENT);
+      if (url.href !== booking.href) headers.set("referer", booking.href);
+    }
     if (teeitup && url.hostname === "phx-api-be-east-1b.kenna.io" &&
         (headers.get("x-be-alias") !== apiAlias() || headers.get("origin") !== teeitup.origin || headers.get("referer") !== `${teeitup.origin}/`))
       fail("UNSAFE_ADAPTER_REQUEST");
@@ -295,7 +306,7 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
       if ([401, 403].includes(response.status)) failHttp("ACCESS_REQUIRED", response.status);
       if (!response.ok) failHttp("ADAPTER_TRANSPORT_FAILED", response.status);
       if (response.redirected || response.url && response.url !== url.href) fail("ADAPTER_TRANSPORT_FAILED");
-      if (family === "TEESNAP" && url.pathname === "/customer-api/teetimes-day" &&
+      if (family === "TEESNAP" && (url.href === teesnapPropertyUrl || ["/customer-api/teetimes-day", "/api/bookingsite/teetimes-day"].includes(url.pathname)) &&
           !/^application\/json(?:\s*;|$)/iu.test(response.headers.get("content-type") ?? "")) fail("TEESNAP_PUBLIC_EVIDENCE_INCOMPLETE");
       const bytes = await response.arrayBuffer();
       readDiagnostic = { ...readDiagnostic, stage: "RESPONSE_BODY", responseBytes: bytes.byteLength <= 600_000 ? bytes.byteLength : null };
@@ -846,10 +857,12 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
     }
     if (adapter.family === "TEESNAP") {
       if (!recipe.source.venueAddress || recipe.target.offeringId || input.durationMinutes !== undefined) fail("ADAPTER_TARGET_MISMATCH");
+      if (adapter.publicApiVersion && !adapter.supportedPlayers?.includes(input.players)) fail("ADAPTER_TARGET_MISMATCH");
       await revalidateTeesnapConfiguration({ ...recipe.source, venueAddress: recipe.source.venueAddress }, adapter, session!.read, deps.venueMatches);
       const available = await fetchTeesnapTeeSheet({ courseId: recipe.target.courseId, date: new Date(`${input.date}T00:00:00Z`), players: input.players,
         metadata: { provider: "TEESNAP", courseId: adapter.courseId, bookingBaseUrl: recipe.source.bookingUrl,
-          defaultHoles: adapter.defaultHoles, defaultAddons: adapter.defaultAddons }, strictPublicEvidence: true }, session!.read);
+          defaultHoles: adapter.defaultHoles, defaultAddons: adapter.defaultAddons,
+          ...(adapter.publicApiVersion ? { publicApiVersion: adapter.publicApiVersion } : {}) }, strictPublicEvidence: true }, session!.read);
       if (available.targetDateStatus !== "OPEN") fail("TEESNAP_PUBLIC_EVIDENCE_INCOMPLETE");
       return result(available.slots.map(slot => ({ ...slot, time: deps.toInstant(slot.startsAt, input) })).filter(slot =>
         slot.time > now && slot.time >= start && slot.time < end && slot.availableSpots >= input.players).map(slot => ({

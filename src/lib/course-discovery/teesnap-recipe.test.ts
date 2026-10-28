@@ -5,6 +5,7 @@ import { type ExistingAdapterRecipe } from "./existing-adapter-schema";
 import { hashAccessRecipe, parseAccessRecipe, type AccessExecutionInput } from "./recipe";
 import { recipeTimeToInstant, venueProofMatches } from "./executor";
 
+
 const source = { officialUrl: "https://cedar-fixture.teesnap.net/", bookingUrl: "https://cedar-fixture.teesnap.net/",
   venueName: "Cedar Fixture Golf Club", venueAddress: "731 Cedar Drive, Fairhaven, MA 02719, USA", timeZone: "America/New_York", providerFamily: "TEESNAP" };
 const course = () => ({ id: 731, name: source.venueName, enabled: true, customer_enabled: true,
@@ -26,7 +27,10 @@ function session(options: { root?: string; availability?: (date: string) => Resp
     expect(init?.credentials).toBe("omit"); expect(init?.redirect).toBe("manual"); expect(init?.body).toBeUndefined();
     const headers = new Headers(init?.headers);
     for (const key of ["authorization", "proxy-authorization", "cookie", "x-api-key"]) expect(headers.has(key)).toBe(false);
-    if (url.pathname === "/") { expect(url.search).toBe(""); return new Response(options.root ?? html(), { headers: { "content-type": "text/html" } }); }
+    if (url.pathname === "/") {
+      expect(url.search).toBe(""); expect(headers.get("accept")).toBe("text/html"); expect(headers.get("user-agent")).toContain("Mozilla/5.0");
+      return new Response(options.root ?? html(), { headers: { "content-type": "text/html" } });
+    }
     expect(url.pathname).toBe("/customer-api/teetimes-day");
     expect([...url.searchParams.keys()]).toEqual(["course", "date", "players", "holes", "addons", "profileId"]);
     expect(url.searchParams.get("course")).toBe("731"); expect(url.searchParams.get("holes")).toBe("18");
