@@ -3,6 +3,7 @@
 import type { SearchMode } from "@/lib/searches/search-mode";
 import { getFacilityCourses, courseSelectionKey } from "@/lib/courses/shared-facility";
 import { FacilityCourseRows } from "@/components/facility-course-rows";
+import { CourseCheckSpinner } from "@/components/course-check-spinner";
 
 import Image from "next/image";
 import Link from "next/link";
@@ -1427,8 +1428,9 @@ function TeeTimeIntakeContent({
             </div>
           ) : null}
           {loading ? (
-            <div className="figma-results-banner" role="status" aria-atomic="true">
-              <strong>{mode === "SIMULATOR" ? "Searching simulators" : "Searching public courses"}</strong> within {searchRadiusMiles} miles…
+            <div className="figma-results-banner course-search-loading" role="status" aria-atomic="true">
+              <CourseCheckSpinner />
+              <span><strong>{mode === "SIMULATOR" ? "Searching simulators" : "Searching public courses"}</strong> within {searchRadiusMiles} miles…</span>
             </div>
           ) : mode === "SIMULATOR" && displayedCourseCount === 0 &&
             (courses.length > 0 || courseLookupResults.length > 0 || notice.type === "success") ? (
@@ -2083,8 +2085,8 @@ function MissingCourseLookup({
               value={query}
             />
           </div>
-          <button disabled={lookupState === "loading"} type="submit">
-            {lookupState === "loading" ? "Looking…" : mode === "SIMULATOR" ? "Find simulator" : "Find course"}
+          <button className={lookupState === "loading" ? "course-lookup-loading" : undefined} disabled={lookupState === "loading"} type="submit">
+            {lookupState === "loading" ? <><CourseCheckSpinner /><span>Looking…</span></> : mode === "SIMULATOR" ? "Find simulator" : "Find course"}
           </button>
         </div>
       </form>

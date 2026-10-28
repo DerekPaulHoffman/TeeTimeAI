@@ -3,12 +3,17 @@ import { expect, test } from "@playwright/test";
 test("shows existing times on course results", async ({ page }) => {
   await page.addInitScript(() => window.sessionStorage.setItem("tee-time-spot:traffic-class", "AUTOMATION"));
   await page.route("**/api/analytics/events", (route) => route.fulfill({ json: { event: { id: "test" } } }));
+  await page.route("**/api/courses/known-times?**", route => route.fulfill({ json: { courses: {} } }));
   await page.route("**/api/location/geocode?**", (route) => route.fulfill({ json: { formattedAddress: "Trumbull, CT", latitude: 41.24, longitude: -73.2 } }));
-  await page.route("**/api/courses/discover?**", (route) => route.fulfill({ json: { courses: [{
+  let finishDiscovery: (() => void) | undefined;
+  await page.route("**/api/courses/discover?**", async (route) => {
+    await new Promise<void>(resolve => { finishDiscovery = resolve; });
+    return route.fulfill({ json: { courses: [{
     courseId: "public-course", googlePlaceId: "public-place", name: "Public Golf Course",
     address: "Trumbull, CT", latitude: 41.24, longitude: -73.2, timeZone: "America/New_York",
     monitoringReadiness: "VERIFYING", monitoringReadinessObservedAt: "2026-08-30T11:55:33.756Z",
-  }] } }));
+    }] } });
+  });
   let finishCheck: (() => void) | undefined;
   await page.route("**/api/courses/check-times?**", async (route) => {
     const date = new URL(route.request().url()).searchParams.get("date");
@@ -21,11 +26,25 @@ test("shows existing times on course results", async ({ page }) => {
   await page.goto("/search");
   await page.getByRole("textbox", { name: "Location", exact: true }).fill("Trumbull, CT");
   await page.getByRole("button", { name: "Search", exact: true }).click();
-  await expect(page.getByText("Checking tee times…", { exact: true })).toBeVisible();
+  const discovery = page.getByRole("status").filter({ hasText: "Searching public courses" });
+  await expect(discovery.locator(".course-check-spinner")).toBeVisible();
+  await expect.poll(() => Boolean(finishDiscovery)).toBe(true);
+  finishDiscovery!();
+  const loading = page.getByRole("status").filter({ hasText: "Checking latest tee times…" });
+  await expect(loading).toBeVisible();
+  const spinner = loading.locator(".course-check-spinner");
+  await expect(spinner).toBeVisible();
+  await expect(spinner).toHaveAttribute("aria-hidden", "true");
+  expect(await spinner.evaluate(el => getComputedStyle(el).animationName)).toBe("course-check-spin");
+  await page.locator(".course-row").screenshot({ path: `test-results/course-loading-${test.info().project.name}.png` });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  expect(await spinner.evaluate(el => getComputedStyle(el).animationName)).toBe("none");
+  await page.emulateMedia({ reducedMotion: "no-preference" });
   await expect.poll(() => Boolean(finishCheck)).toBe(true);
   finishCheck!();
   const times = page.getByRole("region", { name: "Previously checked tee times" });
   await expect(page.getByText("Tee times checked just now", { exact: true })).toBeVisible();
+  await expect(spinner).toHaveCount(0);
   await expect(page.getByText("Alert availability after first check", { exact: true })).toHaveCount(0);
   await expect(times).toBeVisible();
   await expect(times.getByRole("link")).toHaveAttribute("href", "https://example.com/official-booking");

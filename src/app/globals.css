@@ -10849,7 +10849,12 @@ button {
 .course-status-emoji { display: inline-block; flex: 0 0 auto; font-size: 12px; line-height: 1; vertical-align: -1px; }
 .course-monitoring-status > .course-status-emoji { display: inline-block; }
 .course-time-check-detail { font-size: 12px; line-height: 1.5; color: var(--muted); margin: 6px 0; }
-.course-check-spinner { animation: course-check-spin 1s linear infinite; }
+.course-time-check.is-loading { color: var(--fairway-dark); gap: 8px; line-height: 18px; }
+.course-check-spinner { display: inline-block; flex: 0 0 auto; width: 14px; height: 14px; border: 2px solid rgb(31 122 77 / 18%); border-top-color: currentColor; border-right-color: currentColor; border-radius: 50%; color: var(--fairway); animation: course-check-spin 0.85s linear infinite; }
+.course-search-loading { display: flex; align-items: center; gap: 10px; }
+.course-search-loading > span { min-width: 0; }
+.course-lookup-loading { display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
+.course-lookup-loading .course-check-spinner { color: inherit; }
 @keyframes course-check-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .course-check-spinner { animation: none; } }
 

@@ -26,10 +26,13 @@ describe("known tee-time links", () => {
     }
     render(<Harness />);
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
-    expect(screen.getByTestId("good").textContent).toContain("Checking tee times");
+    expect(screen.getByTestId("good").textContent).toContain("Checking latest tee times");
+    expect(screen.getByTestId("good").querySelector(".course-check-spinner")?.getAttribute("aria-hidden")).toBe("true");
     expect(screen.getByTestId("bad").textContent).toContain("couldn't check");
+    expect(screen.getByTestId("bad").querySelector(".course-check-spinner")).toBeNull();
     await act(async () => complete!(Response.json({ status: "CHECKED", times: [time] })));
     await waitFor(() => expect(screen.getByTestId("good").textContent).toContain("checked just now"));
+    expect(screen.getByTestId("good").querySelector(".course-check-spinner")).toBeNull();
   });
   it("shows an honest empty result after a completed check", () => {
     render(<KnownTeeTimes {...props} players={4} showEmpty />);

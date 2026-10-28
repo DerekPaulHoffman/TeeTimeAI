@@ -12,8 +12,10 @@ test("keeps Tashua's two sheets and Notify me actions separate within the existi
   await page.route("**/api/location/geocode?**", route => route.fulfill({ json: { latitude: 41.24, longitude: -73.2 } }));
   await page.route("**/api/courses/discover?**", route => route.fulfill({ json: { courses: [{ ...members[0], name: "Tashua Knolls & Tashua Glen Golf Course", facilityCourses: members }] } }));
   await page.route("**/api/courses/known-times?**", route => route.fulfill({ json: { courses: {} } }));
-  await page.route("**/api/courses/check-times?**", route => {
+  const finishChecks: Record<string, () => void> = {};
+  await page.route("**/api/courses/check-times?**", async route => {
     const params = new URL(route.request().url()).searchParams;
+    await new Promise<void>(resolve => { finishChecks[params.get("courseId")!] = resolve; });
     return route.fulfill({ json: params.get("courseId") === "knolls" ? { status: "CHECKED", times: [{
       startsAt: `${params.get("date")}T15:00:00Z`, availableSpots: 4, holes: 9, priceCents: 2700,
       bookingUrl: members[0].website, confirmedAt: "2026-10-28T16:44:55Z",
@@ -26,8 +28,16 @@ test("keeps Tashua's two sheets and Notify me actions separate within the existi
   const knolls = page.getByRole("region", { name: "Tashua Knolls", exact: true });
   const glen = page.getByRole("region", { name: "Tashua Glen", exact: true });
   await expect(knolls).toContainText("18-hole course");
+  await expect(knolls.locator(".course-check-spinner")).toBeVisible();
+  await expect(glen.locator(".course-check-spinner")).toBeVisible();
+  await page.locator(".course-row").screenshot({ path: `test-results/shared-facility-loading-${test.info().project.name}.png` });
+  finishChecks.knolls();
   await expect(knolls).toContainText("9-hole round · $27.00");
+  await expect(knolls.locator(".course-check-spinner")).toHaveCount(0);
+  await expect(glen.locator(".course-check-spinner")).toBeVisible();
+  finishChecks.glen();
   await expect(glen).toContainText("couldn't check current tee times");
+  await expect(glen.locator(".course-check-spinner")).toHaveCount(0);
   await expect(glen).not.toContainText("$27");
   await expect(glen.getByRole("link", { name: "Official booking page", exact: true })).toHaveAttribute("href", members[1].website);
   await expect(page.getByRole("button", { name: /^Notify me for Tashua/ })).toHaveCount(2);

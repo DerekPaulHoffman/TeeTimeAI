@@ -6,6 +6,7 @@ import type { CourseAlertSupport } from "@/lib/courses/intelligence";
 import { getDashboardCourseAction } from "@/lib/searches/dashboard-course-action";
 import { CourseStatusEmoji } from "@/components/course-status-emoji";
 import type { CourseCandidate } from "@/lib/places/google";
+import { CourseCheckSpinner } from "@/components/course-check-spinner";
 
 export type CourseTimeCheck = { status: "LOADING" | "CHECKED" | "FAILED" | "UNAVAILABLE" | "BUSY" | "NOT_OPEN"; times: KnownTeeTime[]; facilityCourses?: CourseCandidate[] };
 export function useCourseTimeChecks(courseIds: string[], date: string, players: number, revision: number, onFacility?: (id: string, courses: CourseCandidate[]) => void) {
@@ -40,7 +41,10 @@ export function useCourseTimeChecks(courseIds: string[], date: string, players: 
 }
 
 export function CourseTimeCheckStatus({ check, alertSupport }: { check?: CourseTimeCheck; alertSupport?: CourseAlertSupport }) {
-  if (!check || check.status === "LOADING") return <p className="course-time-check" role="status"><CourseStatusEmoji emoji={check ? "🔎" : "⏳"} /><span>{check ? "Checking tee times…" : "Waiting to check tee times…"}</span></p>;
+  if (!check || check.status === "LOADING") return <p className={`course-time-check${check ? " is-loading" : ""}`} role="status" aria-atomic="true">
+    {check ? <CourseCheckSpinner /> : <CourseStatusEmoji emoji="⏳" />}
+    <span>{check ? "Checking latest tee times…" : "Waiting to check tee times…"}</span>
+  </p>;
   if (check.status === "CHECKED") return <p className="course-time-check">Tee times checked just now</p>;
   if (check.status === "UNAVAILABLE" && alertSupport) {
     const action = getDashboardCourseAction(alertSupport);
