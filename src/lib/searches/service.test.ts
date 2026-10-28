@@ -184,8 +184,8 @@ describe("listTeeSearchesForUser", () => {
     expect((await listTeeSearchesForUser("owner-1"))[0].preferences[0].discoveryStatus).toBeNull();
   });
 
-  it("bounds discovery status reads to fifteen active selected targets and skips inactive history", async () => {
-    const searches = Array.from({ length: 4 }, (_, index) => ({
+  it("bounds discovery status reads to twenty-five active selected targets and skips inactive history", async () => {
+    const searches = Array.from({ length: 6 }, (_, index) => ({
       id: `search-${index}`, status: "ACTIVE", alertGeneration: 0, mode: "OUTDOOR", durationMinutes: null,
       createdAt: new Date("2026-06-30T00:00:00Z"), statusEmailSnapshot: null, matches: [],
       ...currentSearchSettings(Array.from({ length: 5 }, (_, target) => `course-${index}-${target}`)),
@@ -195,7 +195,7 @@ describe("listTeeSearchesForUser", () => {
     mockedPrisma.$queryRaw.mockResolvedValue([]);
     mockedPrisma.courseDiscoveryJob.findFirst.mockClear();
     const projected = await listTeeSearchesForUser("owner-1");
-    expect(mockedPrisma.courseDiscoveryJob.findFirst).toHaveBeenCalledTimes(15);
+    expect(mockedPrisma.courseDiscoveryJob.findFirst).toHaveBeenCalledTimes(25);
     expect(projected.flatMap(search => search.preferences).every(preference => preference.discoveryStatus === null)).toBe(true);
     mockedPrisma.courseDiscoveryJob.findFirst.mockClear();
     mockedPrisma.teeSearch.findMany.mockResolvedValue(searches.map(search => ({ ...search, status: "PAUSED" })) as never);
@@ -2240,8 +2240,40 @@ describe("createTeeSearchForUser", () => {
     expect(mockedPrisma.teeSearch.create).toHaveBeenCalledOnce();
   });
 
-  it("rejects a fourth queued search for the same user", async () => {
-    mockedPrisma.teeSearch.count.mockResolvedValue(3);
+  it.each([3, 4])("allows another alert with %i active or paused searches", async (count) => {
+    mockedPrisma.teeSearch.count.mockResolvedValue(count);
+    mockedPrisma.course.findUnique.mockResolvedValue({
+      id: "course-1",
+      name: "Public Golf Course",
+      automationEligibility: "ALLOWED",
+      layoutHoleCounts: [],
+      layoutHolesVerifiedAt: null,
+    } as never);
+    mockedPrisma.teeSearch.create.mockResolvedValue({ id: "search-1" } as never);
+
+    await expect(createTeeSearchForUser("user-1", {
+      date: "2026-08-15",
+      startTime: "13:00",
+      endTime: "17:00",
+      players: 2,
+      cadenceMinutes: 15,
+      courses: [{
+        courseId: "course-1",
+        name: "Public Golf Course",
+        latitude: 41.242,
+        longitude: -73.209,
+        rank: 1,
+      }],
+    })).resolves.toEqual({ id: "search-1" });
+
+    expect(mockedPrisma.teeSearch.count).toHaveBeenCalledWith({
+      where: { userId: "user-1", status: { in: ["ACTIVE", "PAUSED"] } },
+    });
+    expect(mockedPrisma.teeSearch.create).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a sixth queued search for the same user", async () => {
+    mockedPrisma.teeSearch.count.mockResolvedValue(5);
 
     await expect(
       createTeeSearchForUser("user-1", {
@@ -2262,7 +2294,7 @@ describe("createTeeSearchForUser", () => {
         ],
       }),
     ).rejects.toThrow(
-      "You can keep up to 3 active or paused searches in the queue.",
+      "You can keep up to 5 active or paused searches in the queue.",
     );
 
     expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
@@ -2286,6 +2318,33 @@ describe("updateTeeSearchForUser", () => {
       statusEmailSnapshot: null,
       matches: [],
     } as never);
+  });
+
+  it("resumes an alert when four other active or paused alerts exist", async () => {
+    mockedPrisma.teeSearch.count.mockResolvedValue(4);
+
+    await expect(updateTeeSearchForUser("user-1", "search-1", {
+      status: "ACTIVE",
+    })).resolves.toBeDefined();
+
+    expect(mockedPrisma.teeSearch.count).toHaveBeenCalledWith({
+      where: {
+        userId: "user-1",
+        status: { in: ["ACTIVE", "PAUSED"] },
+        id: { not: "search-1" },
+      },
+    });
+    expect(mockedPrisma.teeSearch.update).toHaveBeenCalledOnce();
+  });
+
+  it("rejects resuming an alert when five other active or paused alerts exist", async () => {
+    mockedPrisma.teeSearch.count.mockResolvedValue(5);
+
+    await expect(updateTeeSearchForUser("user-1", "search-1", {
+      status: "ACTIVE",
+    })).rejects.toThrow("You can keep up to 5 active or paused searches in the queue.");
+
+    expect(mockedPrisma.teeSearch.update).not.toHaveBeenCalled();
   });
 
   it("lets a same-day simulator alert save its existing viable window and cadence", async () => {

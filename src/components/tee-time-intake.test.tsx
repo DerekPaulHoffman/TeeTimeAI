@@ -255,13 +255,13 @@ describe("TeeTimeIntake", () => {
     const fetchMock = mockDateBoundaryRequests();
     const fallback = fetchMock.getMockImplementation()!;
     fetchMock.mockImplementation(async (input, init) => {
-      if (String(input) === "/api/searches") return Response.json({ error: "You can keep up to 3 active or paused searches in the queue." }, { status: 400 });
+      if (String(input) === "/api/searches") return Response.json({ error: "You can keep up to 5 active or paused searches in the queue." }, { status: 400 });
       return fallback(input, init);
     });
     render(<TeeTimeIntake {...signedInAccountProps} />);
     await screen.findByRole("dialog", { name: "Notify me" });
     fireEvent.click(screen.getByRole("button", { name: "Start getting alerts" }));
-    await screen.findByText(/You already have 3 active or paused alerts/);
+    await screen.findByText(/You already have 5 active or paused alerts/);
     expect(screen.getByRole("dialog", { name: "Notify me" }).textContent).toContain("Limit Course");
     expect((document.querySelector("#date") as HTMLInputElement).value).toBe("2030-10-03");
     expect(screen.getByRole("link", { name: "Manage my alerts" }).getAttribute("href")).toBe("/dashboard");

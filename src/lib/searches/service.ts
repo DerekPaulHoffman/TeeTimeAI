@@ -744,7 +744,7 @@ export async function listTeeSearchesForUser(userId: string) {
     }
 
     // Only active owner-selected requests need this small read-only status.
-    // The product permits three alerts of five courses; cap legacy overflow too.
+    // Cap status reads at the product's alert and course limits, including legacy overflow.
     const discoveryTargets = searches.filter(search => search.status === "ACTIVE")
       .flatMap(search => search.preferences.map(preference => ({ search, preference })))
       .slice(0, MAX_QUEUED_SEARCHES_PER_USER * MAX_COURSE_PREFERENCES);
