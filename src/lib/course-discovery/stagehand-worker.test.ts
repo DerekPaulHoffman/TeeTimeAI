@@ -234,6 +234,39 @@ describe("clean native root widget handoff", () => {
 });
 
 describe("regular Stagehand source worker", () => {
+  it("retains the initial fixed-reader rejection when a later generic budget stop replaces controller feedback", async () => {
+    const t = setup(), request = t.request.getMockImplementation()!;
+    t.request.mockImplementation(async action => {
+      if (action.action === "inspect_adapter") throw Object.assign(Error("private provider response must not persist"), { code: "CPS_PUBLIC_BUILD_UNSUPPORTED" });
+      return request(action);
+    });
+    const genericWorker = vi.fn(async options => {
+      expect(t.checkpoints.at(-1)).toMatchObject({ stagehandProgress: { phase: "FIXED_INSPECTION_FAILED" } });
+      await options.client.checkpoint(options.job.id, options.job.leaseToken, { ...options.checkpointProvenance,
+        controller: { lastFailure: { code: "LATER_BROWSER_FAILURE" } }, genericGuard: { code: "DISCOVERY_GENERIC_BUDGET_EXHAUSTED" } });
+      throw Object.assign(Error("budget stopped"), { code: "DISCOVERY_GENERIC_BUDGET_EXHAUSTED" });
+    });
+    await expect(t.run({ genericWorker })).rejects.toMatchObject({ code: "DISCOVERY_GENERIC_BUDGET_EXHAUSTED" });
+    const initial = readStagehandFailure({ ...t.f.job, checkpoint: t.checkpoints.at(-1) }, t.f.clock);
+    expect(initial?.entries.at(-1)).toMatchObject({ phase: "FIXED_INSPECTION", code: "CPS_PUBLIC_BUILD_UNSUPPORTED" });
+    expect(JSON.stringify(initial)).not.toContain("private provider response");
+    expect(t.client.candidate).not.toHaveBeenCalled(); expect(t.client.activate).not.toHaveBeenCalled();
+  });
+
+  it("does not start a generic investigation after the fixed-inspection checkpoint loses its lease", async () => {
+    const t = setup(), request = t.request.getMockImplementation()!, save = t.client.checkpoint.getMockImplementation()!, genericWorker = vi.fn();
+    t.request.mockImplementation(async action => {
+      if (action.action === "inspect_adapter") throw Object.assign(Error("unverified"), { code: "ADAPTER_CONFIGURATION_UNVERIFIED" });
+      return request(action);
+    });
+    t.client.checkpoint.mockImplementation(async (...args) => {
+      if (args[2]?.stagehandProgress?.phase === "FIXED_INSPECTION_FAILED") throw Object.assign(Error("retired"), { code: "DISCOVERY_LEASE_REJECTED" });
+      return save(...args);
+    });
+    await expect(t.run({ genericWorker })).rejects.toMatchObject({ code: "DISCOVERY_LEASE_REJECTED" });
+    expect(genericWorker).not.toHaveBeenCalled(); expect(t.client.activate).not.toHaveBeenCalled();
+  });
+
   it.each(["UNSUPPORTED_ADAPTER_SOURCE", "CPS_PUBLIC_BUILD_UNSUPPORTED", "ADAPTER_CONFIGURATION_UNVERIFIED"])("hands only a freshly closed %s inspection to generic Sol and activates exactly once", async code => {
     const t = setup(), before = structuredClone(t.f.job);
     const request = t.request.getMockImplementation()!;
@@ -249,6 +282,9 @@ describe("regular Stagehand source worker", () => {
       expect(options.workDeadlineAt).toBe(new Date(first + 720000).toISOString());
       expect(options.checkpointProvenance.stagehandSource.jobId).toBe(t.f.job.id);
       expect(options.checkpointProvenance).not.toHaveProperty("controller");
+      const initialFailure = readStagehandFailure({ ...options.job, checkpoint: options.checkpointProvenance }, t.f.clock);
+      expect(initialFailure?.entries.at(-1)).toMatchObject({ phase: "FIXED_INSPECTION", code,
+        cleanup: { inspectionBrowserClosed: true } });
       const activation = await verifyDiscoveryCandidate({ client: options.client, job: options.job,
         recipe: { engine: code === "ADAPTER_CONFIGURATION_UNVERIFIED" ? "EXISTING_ADAPTER" : "BROWSER_DOM" },
         sourceEvidence: { officialUrl: official, observedBookingUrl: booking }, executeRecipe: t.executeRecipe,

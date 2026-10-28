@@ -107,9 +107,12 @@ describe("CPS fixed fresh public reads", () => {
     expect(fixture.reads).toHaveLength(8); expect(fixture.active).toBe(0); expect(fixture.maxActive).toBe(1);
     expect(fixture.reads.every(read => read.init.credentials === "omit" && read.init.redirect === "manual")).toBe(true);
   });
-  it.each([undefined,"injected-published-key"])("uses a fresh reviewed26 public RAM session and never an injected key/account token (%s)",async apiKey=>{
+  it.each(["26.1.2.26379768992", "26.3.0.34794395074"].flatMap(buildNumber =>
+    [undefined, "injected-published-key"].map(apiKey => ({ buildNumber, apiKey }))))("uses a fresh reviewed public RAM session and never an injected key/account token ($buildNumber, $apiKey)",async ({buildNumber, apiKey})=>{
     const fixture=setup((url,_init,normal)=>url.pathname.endsWith("/Configuration")
-      ?json({...config(),buildNumber:"26.3.0.34794395074\n",apiKey,authorization:"Bearer untrusted-input",accessToken:"untrusted-input"}):normal());
+      ?json({...config(),buildNumber:buildNumber+"\n",apiKey,authorization:"Bearer untrusted-input",accessToken:"untrusted-input"}):
+      buildNumber === "26.1.2.26379768992" && url.pathname.includes("/GetAllOptions/") ? json({ ...options(), reservationOptions: {
+        ...options().reservationOptions, clubName: source.venueName, clubAddress: source.venueAddress } }) : normal());
     const saved=await inspectCps(source,fixture.deps);
     const inspectionReads=fixture.reads.length;
     expect(await executeCps(source,saved,{courseId:"course-1"},input,fixture.deps)).toHaveLength(1);
@@ -125,6 +128,39 @@ describe("CPS fixed fresh public reads", () => {
     for(const read of apiReads){const headers=new Headers(read.init.headers);expect(headers.get("authorization")).toMatch(/^Bearer synthetic-public-short-session-[12]$/u);expect(headers.has("x-apikey")).toBe(false);
       expect(headers.get("client-id")).toBe("public-client");expect(headers.get("x-websiteid")).toMatch(/^(?:public-site|00000000-0000-0000-0000-000000000000)$/u);
       expect(headers.get("x-timezoneid")).toBe(source.timeZone);}
+    expect(apiReads.filter(read=>read.url.pathname.includes("/GetAllOptions/")).every(read=>read.url.searchParams.get("version")===buildNumber)).toBe(true);
+  });
+  it("rejects a newly unreviewed build before any anonymous startup or API role", async () => {
+    const fixture = setup((url, _init, normal) => url.pathname.endsWith("/Configuration")
+      ? json({ ...config(), buildNumber: "26.1.2.26379768993", apiKey: undefined }) : normal());
+    await expect(inspectCps(source, fixture.deps)).rejects.toThrow("CPS_PUBLIC_BUILD_UNSUPPORTED");
+    expect(fixture.sessions).toBe(0); expect(fixture.active).toBe(0);
+    expect(fixture.reads.some(read=>read.url.pathname.includes("/GetAllOptions/") || read.url.pathname.endsWith("/env.js"))).toBe(false);
+  });
+  it("freshly revalidates the venue-bound public set on changed-date/party reuse and rejects catalog, build or official-source changes", async () => {
+    let changedLegacy = false, changedBuild = false, changedAddress = false;
+    const fixture = setup((url, _init, normal) => {
+      if (url.pathname.endsWith("/Configuration")) return json({ ...config(), apiKey: undefined,
+        buildNumber: changedBuild ? "26.3.0.34794395074" : "26.1.2.26379768992" });
+      if (url.pathname.includes("/GetAllOptions/")) return json({ ...options(), courseOptions: [
+        { courseId: 7, courseName: changedLegacy ? "Changed Legacy" : "Legacy Back", webSiteId: "public-site" },
+        { courseId: 1, courseName: "Front 9", webSiteId: "public-site" },
+      ], reservationOptions: { ...options().reservationOptions, clubName: source.venueName, clubAddress: source.venueAddress } });
+      if (url.pathname.endsWith("/OnlineCourses")) return json([{ ...courses()[0], courseName: "Front 9" }]);
+      if (changedAddress && url.hostname === "www.thebobgc.com") return new Response(`<body>${footer.replace("5370", "5371")}<a href="${source.bookingUrl}">Tee Times</a></body>`, { headers: { "content-type": "text/html" } });
+      return normal();
+    });
+    const saved = await inspectCps(source, fixture.deps), immutable = JSON.stringify(saved);
+    expect(saved.publicCatalogMode).toBe("VENUE_BOUND_ONLINE_COURSES"); expect(saved.courseIds).toEqual([1]);
+    expect((await executeCps(source, saved, { courseId: "course-1" }, input, fixture.deps))).toHaveLength(1);
+    expect((await executeCps(source, saved, { courseId: "course-1" }, { ...input, date: "2026-10-24", players: 3 }, fixture.deps))[0].startsAt).toBe("2026-10-24T14:30:00.000Z");
+    expect(JSON.stringify(saved)).toBe(immutable); expect(fixture.sessions).toBe(3); expect(fixture.active).toBe(0);
+    for (const change of ["catalog", "build", "official"] as const) {
+      fixture.reads.length = 0; changedLegacy = change === "catalog"; changedBuild = change === "build"; changedAddress = change === "official";
+      await expect(executeCps(source, saved, { courseId: "course-1" }, input, fixture.deps)).rejects.toThrow(change === "official" ? "OFFICIAL_IDENTITY_UNVERIFIED" : "ADAPTER_CONFIGURATION_CHANGED");
+      expect(fixture.reads.some(read => read.url.pathname.endsWith("/RegisterTransactionId") || read.url.pathname.endsWith("/TeeTimes"))).toBe(false);
+      expect(fixture.active).toBe(0);
+    }
   });
   it("revalidates native postal contacts and full catalog on every cold/warm call outside the provider lease, preserving semantic identity across nonces", async () => {
     const fixture=setup((url,_init,normal)=>url.hostname==="www.thebobgc.com"?new Response("public transport rejected",{status:403}):

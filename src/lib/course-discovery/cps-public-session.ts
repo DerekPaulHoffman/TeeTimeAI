@@ -2,7 +2,7 @@ import { request as httpsRequest } from "node:https";
 import type { LookupFunction } from "node:net";
 import { parse } from "acorn";
 import { resolvePinnedPublicAddress } from "@/lib/automation/address-pinned-public-fetch";
-import { CPS_API_PATH, parseCpsConfiguration, parseCpsSource, type CpsConfiguration, type CpsSource } from "./cps-source";
+import { CPS_API_PATH, cpsPublicBuildProtocol, parseCpsConfiguration, parseCpsSource, type CpsConfiguration, type CpsSource } from "./cps-source";
 
 export const CPS_ANONYMOUS_BUILD = "26.3.0.34794395074";
 const BOOTSTRAP_LIMIT = 32_768, PUBLIC_LIMIT = 2_000_000;
@@ -64,7 +64,7 @@ type Dependencies = {
  * No account, cookie, storage, credential, generic header or generic POST lane. */
 export function createCps26PublicSession(source: CpsSource, configuration: CpsConfiguration, date: string, deps: Dependencies) {
   const context = parseCpsSource(source.bookingUrl), config = parseCpsConfiguration(configuration, source);
-  if (!context || config.buildNumber !== CPS_ANONYMOUS_BUILD || !/^\d{4}-\d{2}-\d{2}$/u.test(date) ||
+  if (!context || cpsPublicBuildProtocol(config.buildNumber) !== "ANONYMOUS_SHORT_SESSION" || !/^\d{4}-\d{2}-\d{2}$/u.test(date) ||
       !Number.isFinite(Date.parse(date + "T00:00:00Z")) || new Date(date + "T00:00:00Z").toISOString().slice(0, 10) !== date ||
       !Number.isFinite(deps.deadlineAt.getTime()) || deps.deadlineAt.getTime() <= Date.now()) fail("CPS_PUBLIC_SESSION_SCOPE_INVALID");
   const origin = context.origin, api = origin + CPS_API_PATH;

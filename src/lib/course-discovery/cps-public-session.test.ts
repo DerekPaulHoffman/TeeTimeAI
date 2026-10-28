@@ -24,9 +24,9 @@ const envWithInertLiteral = envScript.replace('window.__env.SHORT_LIVED_CLIENT_I
   `window.__env.CLIENT_SECRET="${inertPublishedLiteral}";window.__env.SHORT_LIVED_CLIENT_ID=`);
 const envResponse = () => new Response(envScript, {headers:{"content-type":"text/javascript"}});
 const tokenResponse = () => json({ access_token: token, token_type: "Bearer", expires_in: 60 });
-function setup(change?: (url: string, init: RequestInit) => Response | Promise<Response>) {
+function setup(change?: (url: string, init: RequestInit) => Response | Promise<Response>, buildNumber: string = CPS_ANONYMOUS_BUILD) {
   const calls: { url: string; init: RequestInit }[] = [], charged: number[] = []; let leases = 0;
-  const session = createCps26PublicSession(source, config(), date, { deadlineAt: new Date(Date.now() + 60_000), bootstrapHeaders: routing(),
+  const session = createCps26PublicSession(source, { ...config(), buildNumber }, date, { deadlineAt: new Date(Date.now() + 60_000), bootstrapHeaders: routing(),
     fetch: (async (url, init = {}) => { const value = String(url); calls.push({ url: value, init }); return value.endsWith("/assets/env.js") ? envResponse() : change ? change(value, init) : value.endsWith("/token/short") ? tokenResponse() : json({ complete: true }); }) as typeof fetch,
     runBootstrap: async work => { leases++; return work(); }, accountBootstrapBytes: count => charged.push(count) });
   return { session, calls, charged, get leases() { return leases; } };
@@ -106,6 +106,15 @@ describe("exact CPS26 anonymous public browsing session", () => {
     const h = new Headers(call.init.headers); expect(h.has("authorization")).toBe(false); expect(h.has("cookie")).toBe(false); expect(h.has("x-apikey")).toBe(false);
     const form = await new Response(call.init.body, { headers: h }).formData(); expect([...form]).toEqual([["client_id", "separate-published-short-client"]]);
     await expect(f.session.initialize()).rejects.toThrow("CPS_PUBLIC_SESSION_ALREADY_INITIALIZED"); expect(f.calls).toHaveLength(2); f.session.close();
+  });
+  it.each(["26.1.2.26379768992", CPS_ANONYMOUS_BUILD])("binds anonymous API scope to freshly reviewed build %s without granting another version", async buildNumber => {
+    const f = setup(undefined, buildNumber); await f.session.initialize();
+    const currentUrl = origin + CPS_API_PATH + "/GetAllOptions/publicgolf?" + new URLSearchParams({ version: buildNumber, product: "3" });
+    await expect(f.session.fetchPublic(currentUrl, init())).resolves.toBeInstanceOf(Response);
+    await expect(f.session.fetchPublic(currentUrl.replace(encodeURIComponent(buildNumber), "26.1.2.26379768993"), init())).rejects.toThrow("CPS_PUBLIC_SESSION_SCOPE_INVALID");
+    expect(f.calls).toHaveLength(3); expect(new Headers(f.calls[2].init.headers).get("authorization")).toBe("Bearer " + token);
+    expect(new Headers(f.calls[2].init.headers).has("x-apikey")).toBe(false);
+    f.session.close();
   });
   it("retains bearer only inside its closure for the exact public GET and UUID browse POST roles", async () => {
     const f = setup(); await f.session.initialize();

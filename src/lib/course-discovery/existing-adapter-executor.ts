@@ -483,6 +483,7 @@ async function inspectForeupConfiguration(source: Source, deps: Dependencies, fe
         if (legacy) {
           const path = foreupPath.exec(new URL(source.bookingUrl).pathname)!;
           const facilityId = Number(path[1] ?? path[3]);
+          let nativeCoverageRequired = false;
           if (!hasCompleteForeupPublicScheduleScope({ html, facilityId, scheduleId: legacy.scheduleId, inventoryScope })) {
             // A sole unlabelled legacy class retains the old strict path.
             // An explicit Public label with a failed scoped proof cannot
@@ -490,15 +491,22 @@ async function inspectForeupConfiguration(source: Source, deps: Dependencies, fe
             if (!warm && inventoryScope && !isExplicitForeupPublicClass({ html, facilityId,
                 scheduleId: legacy.scheduleId, bookingClassId: legacy.bookingClassId }) &&
                 hasCompleteForeupPublicScheduleScope({ html, facilityId, scheduleId: legacy.scheduleId })) resolvedScope = undefined;
+            else if (!warm && inventoryScope === FOREUP_STANDARD_PUBLIC_SCOPE && deps.localCapabilities?.includes("LOCAL_CHROME") &&
+                source.officialUrl && isSafeRecipeUrl(source.officialUrl) && source.venueAddress && parsePublicUSBusinessAddress(source.venueAddress) &&
+                /^\+1[2-9]\d{9}$/u.test(deps.trustedContext?.canonicalCoursePhone ?? "")) nativeCoverageRequired = true;
             else fail(coverageFailure);
           }
-          if (resolvedScope) {
-            publicCatalogSha256 = foreupPublicScheduleCatalogSha256(html) ?? undefined;
-            if (!publicCatalogSha256) fail(coverageFailure);
-            if (expectedScope && (legacy.scheduleId !== expectedScope.scheduleId || legacy.bookingClassId !== expectedScope.bookingClassId ||
-                publicCatalogSha256 !== expectedScope.publicCatalogSha256)) fail("ADAPTER_CONFIGURATION_CHANGED");
+          if (!nativeCoverageRequired) {
+            if (resolvedScope) {
+              publicCatalogSha256 = foreupPublicScheduleCatalogSha256(html) ?? undefined;
+              if (!publicCatalogSha256) fail(coverageFailure);
+              if (expectedScope && (legacy.scheduleId !== expectedScope.scheduleId || legacy.bookingClassId !== expectedScope.bookingClassId ||
+                  publicCatalogSha256 !== expectedScope.publicCatalogSha256)) fail("ADAPTER_CONFIGURATION_CHANGED");
+            }
+            return legacy;
           }
-          return legacy;
+          // A name match cannot establish sibling physical ownership. Keep the
+          // scoped coverage requirement and earn it through the native branch.
         }
       }
       if (!deps.localCapabilities?.includes("LOCAL_CHROME") || !source.officialUrl || !source.venueAddress || !deps.trustedContext?.canonicalCoursePhone)

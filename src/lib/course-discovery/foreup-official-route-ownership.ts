@@ -15,6 +15,12 @@ export const foreupOwnershipDigest = (value: unknown) => createHash("sha256").up
 const url = z.string().url().max(2048).refine(value => { try { const u = new URL(value); return u.protocol === "https:" && !u.username && !u.password && !u.port; } catch { return false; } });
 const label = z.string().min(3).max(300).refine(value => !/[\u0000-\u001f\u007f]/u.test(value));
 const sha = z.string().regex(/^[a-f0-9]{64}$/u), id = z.number().int().min(1).max(2_147_483_647);
+function titleParts(value: string, expected: string) {
+  const parts = value.split(/\s*[|–—]\s*/u);
+  // Preserve a canonical name containing a spaced hyphen before treating that
+  // punctuation as a title separator. Matching remains exact in either form.
+  return parts.some(part => fullCourseName(part) === expected) ? parts : parts.flatMap(part => part.split(/\s+-\s+/u));
+}
 export const FOREUP_COMPACT_CONTACT_FACILITY_SCOPE = "CANONICAL_ROOT_COMPACT_CONTACT_FACILITY_V1" as const;
 const sourceSchema = z.object({ officialUrl: url, officialDocumentUrl: url, bookingUrl: url, venueName: label,
   officialTitle: label, publicLocationName: label, canonicalAddress: z.string().min(8).max(1024), timeZone: z.string().min(3).max(80),
@@ -32,8 +38,8 @@ export const foreupOfficialRouteOwnershipProofSchema = sourceSchema.extend({ kin
     const selected = route(value.bookingUrl), facility = facilityRoute(value.bookingUrl), physical = parsePublicUSBusinessAddress(value.providerAddress), canonicalAddress = parsePublicUSBusinessAddress(value.canonicalAddress);
     const routeMatches = value.contactScope ? facility?.facilityId === value.facilityId && !value.rootDocumentProof &&
       value.inventoryScope === FOREUP_STANDARD_PUBLIC_SCOPE && value.officialDocumentUrl === value.officialUrl && canonicalRootUrl(value.officialUrl) &&
-      value.officialTitle.split(/\s*[|–—]\s*/u).filter(part => fullCourseName(part) === coreName(value.venueName)).length === 1 &&
-      value.officialTitle.split(/\s*[|–—]\s*/u).includes(value.publicLocationName) && fullCourseName(value.publicLocationName) === coreName(value.venueName) :
+      titleParts(value.officialTitle, coreName(value.venueName)).filter(part => fullCourseName(part) === coreName(value.venueName)).length === 1 &&
+      titleParts(value.officialTitle, coreName(value.venueName)).includes(value.publicLocationName) && fullCourseName(value.publicLocationName) === coreName(value.venueName) :
       selected?.facilityId === value.facilityId && selected.scheduleId === value.scheduleId;
     return Boolean(Boolean(value.inventoryScope) === Boolean(value.publicCatalogSha256) &&
       routeMatches && physical && canonicalAddress &&
@@ -101,7 +107,19 @@ function cardName(value: string, expected: string) {
 }
 /** All three independently printed scalars must occupy one bounded contact,
  * never a canonical-field substitution or a search across the document. */
-function semanticCard(value: string, expected: string) {
+function publicContactEmail(node: Element) {
+  if (node.tagName !== "a") return;
+  const match = /^mailto:([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,63})$/iu.exec(attr(node, "href") ?? "");
+  return match && match[1].length <= 254 && text(node).toLowerCase() === match[1].toLowerCase() ? match[1].toLowerCase() : undefined;
+}
+function withoutPublicContactEmail(value: string, email: string) {
+  const matches = [...value.matchAll(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,63}/giu)];
+  if (matches.length !== 1 || matches[0][0].toLowerCase() !== email) return;
+  const before = value.slice(0, matches[0].index).replace(/(?:^|[,\s])e-?mail\s*:?\s*$/iu, "");
+  return clean(`${before} ${value.slice(matches[0].index! + matches[0][0].length)}`).replace(/(?:,\s*){2,}/gu, ", ").replace(/^,\s*|,\s*$/gu, "");
+}
+function semanticCard(value: string, expected: string, email?: string) {
+  if (email) { const physicalContact = withoutPublicContactEmail(value, email); if (!physicalContact) return; value = physicalContact; }
   const location = cardName(value, expected);
   if (!location || value.length > 700) return;
   const parsed = semanticCompactContact(value.slice(value.indexOf(",") + 1));
@@ -130,7 +148,7 @@ export function deriveForeupOfficialRouteContact(source: OfficialIdentitySource,
   const visible = page.visibleEvidence, expected = coreName(source.venueName), entries = nodes(parse(page.html));
   if (!root || !phone || !address || !visible || expected.length < 3 || expected.length > 200) return failure();
   const titles = entries.filter(n => n.tagName === "title");
-  if (titles.length !== 1 || clean(visible.title) !== text(titles[0]) || text(titles[0]).split(/\s*[|–—]\s*/u).filter(value => fullCourseName(value) === expected).length !== 1) return failure();
+  if (titles.length !== 1 || clean(visible.title) !== text(titles[0]) || titleParts(text(titles[0]), expected).filter(value => fullCourseName(value) === expected).length !== 1) return failure();
   if (facilityRoute(source.bookingUrl)) {
     if (root.rootDocumentProof || !canonicalRootUrl(source.officialUrl) || page.url !== source.officialUrl || visible.phoneTextsOmitted ||
         visible.contactPhoneLinksOmitted || visible.addressTexts.length >= 160) return failure();
@@ -154,7 +172,7 @@ export function deriveForeupOfficialRouteContact(source: OfficialIdentitySource,
     const bookingLinks = entries.filter(node => node.tagName === "a" && /\b(?:tee\s*times?|book(?:\s+(?:a|your))?|reservations?)\b/iu.test(text(node)))
       .flatMap(node => { try { const href = new URL(attr(node, "href") ?? "", page.url).href; return facilityRoute(href) ? [href] : []; } catch { return []; } });
     if (!bookingLinks.length || new Set(bookingLinks).size !== 1 || bookingLinks[0] !== source.bookingUrl) return failure();
-    const publicLocationName = text(titles[0]).split(/\s*[|–—]\s*/u).find(value => fullCourseName(value) === expected)!;
+    const publicLocationName = titleParts(text(titles[0]), expected).find(value => fullCourseName(value) === expected)!;
     const body = { officialUrl: source.officialUrl, officialDocumentUrl: page.url, bookingUrl: source.bookingUrl, venueName: source.venueName,
       officialTitle: clean(visible.title), publicLocationName, canonicalAddress: source.venueAddress, timeZone: source.timeZone,
       publicCoursePhone: phone, contactScope: FOREUP_COMPACT_CONTACT_FACILITY_SCOPE,
@@ -169,22 +187,26 @@ export function deriveForeupOfficialRouteContact(source: OfficialIdentitySource,
   const minimal = candidates.filter(node => !candidates.some(other => other !== node && within(other, node)));
   if (minimal.length !== 1) return failure();
   const cards: Array<NonNullable<ReturnType<typeof semanticCard>>> = [];
+  let contactEmail: string | undefined;
   for (const node of minimal) {
     const descendants = nodes(node), links = descendants.filter(n => n.tagName === "a" && (attr(n, "href") ?? "").startsWith("tel:"));
+    const emails = descendants.filter(n => n.tagName === "a" && /^mailto:/iu.test(attr(n, "href") ?? ""));
+    if (emails.length > 1 || emails.some(n => !publicContactEmail(n))) return failure();
+    contactEmail = emails[0] ? publicContactEmail(emails[0]) : undefined;
     // A page wrapper, navigation section or multiple business blocks cannot
     // become a contact by collecting its individually convenient descendants.
     if (descendants.some(n => n.tagName === "h1" || n !== node && ["section", "article", "footer"].includes(n.tagName) ||
-        n.tagName === "a" && !(attr(n, "href") ?? "").startsWith("tel:")) || descendants.length > 80) return failure();
+        n.tagName === "a" && !(attr(n, "href") ?? "").startsWith("tel:") && !publicContactEmail(n)) || descendants.length > 80) return failure();
     // A second named physical contact is contradictory evidence, not an
     // unrelated row to discard until one convenient match survives.
     if (links.length !== 1 || normalizePublicCoursePhone((attr(links[0], "href") ?? "").slice(4)) !== phone || normalizePublicCoursePhone(text(links[0])) !== phone) return failure();
-    const parsed = semanticCard(contactText(node), expected);
+    const parsed = semanticCard(contactText(node), expected, contactEmail);
     if (!parsed || parsed.phone !== phone || JSON.stringify(parsed.address) !== JSON.stringify(address)) return failure();
     cards.push(parsed);
   }
   const visibleCards = visible.addressTexts.filter(value => cardName(clean(value), expected) && [...value.matchAll(phoneScalar)].length > 0);
   if (cards.length !== 1 || visibleCards.length !== 1 ||
-      JSON.stringify(semanticCard(clean(visibleCards[0]), expected)) !== JSON.stringify(cards[0]) ||
+      JSON.stringify(semanticCard(clean(visibleCards[0]), expected, contactEmail)) !== JSON.stringify(cards[0]) ||
       !visible.phoneTexts?.some(value => normalizePublicCoursePhone(value) === phone) || !visible.linkUrls.includes(source.bookingUrl)) return failure();
   const rawLinks = entries.filter(n => n.tagName === "a" && /\b(?:tee\s*times?|book(?:\s+(?:a|your))?|reservations?)\b/iu.test(text(n))).filter(n => {
     try { return new URL(attr(n, "href") ?? "", page.url).href === source.bookingUrl; } catch { return false; }

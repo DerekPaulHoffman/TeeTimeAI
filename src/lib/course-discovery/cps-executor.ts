@@ -8,12 +8,12 @@ import type { AccessExecutionInput, AccessExecutionResult } from "./recipe";
 import { isActiveBrowserAccessChallenge } from "./recipe";
 import { teeItUpInertDocumentContent } from "./teeitup-official-booking-source";
 import { requestFamilyForUrl } from "./request-family";
-import { CPS_API_PATH, cpsFailure as fail, cpsMetadataSchema, inspectCpsOfficialDocument, parseCpsCatalog, parseCpsConfiguration,
+import { CPS_API_PATH, CPS_VENUE_PUBLIC_CATALOG_BUILD, cpsFailure as fail, cpsMetadataSchema, cpsPublicBuildProtocol, inspectCpsOfficialDocument, parseCpsCatalog, parseCpsConfiguration,
   parseCpsOptions, parseCpsSource, sameCpsOfficialSite, validateCpsIdentity, type CpsConfiguration, type CpsMetadata, type CpsOptions, type CpsSource } from "./cps-source";
 import { bindCpsPostalConflictProof, normalizeCanonicalCoursePhone, verifyCpsPostalContact, type CpsPostalConflictProof } from "./cps-postal-conflict-proof";
 import { bindCpsPhoneBookingProof, verifyCpsPhoneBookingContact, type CpsPhoneBookingProof } from "./cps-phone-booking-proof";
 import { readNativeOfficialIdentityPage, type NativeOfficialPageReader } from "./native-official-page-reader";
-import { CPS_ANONYMOUS_BUILD, createCps26PublicSession } from "./cps-public-session";
+import { createCps26PublicSession } from "./cps-public-session";
 
 export type CpsDependencies = { fetch?: typeof fetch; now?: () => Date; deadlineAt?: Date; signal?: AbortSignal;
   trustedContext?: { canonicalCoursePhone?: string }; localCapabilities?: readonly "LOCAL_CHROME"[]; readNativeOfficialPage?: NativeOfficialPageReader;
@@ -80,9 +80,9 @@ export function cpsAvailabilityQuery(date: string, courseIds: number[], transact
 function publicHeaders(source: CpsSource, configuration: CpsConfiguration, options: CpsOptions | undefined, date: string) {
   const noon = cpsLocalInstant(`${date}T12:00:00`, source.timeZone);
   return new Headers({ accept: "application/json, text/plain, */*",
-    // The exact reviewed 26.3 public client supplies anonymous routing headers.
+    // Exact reviewed anonymous public clients supply routing headers.
     // Never forward an injected key/token on that protocol branch.
-    ...(configuration.buildNumber === CPS_ANONYMOUS_BUILD ? {} : { "x-apikey": configuration.apiKey! }), "client-id": configuration.clientId,
+    ...(cpsPublicBuildProtocol(configuration.buildNumber) === "ANONYMOUS_SHORT_SESSION" ? {} : { "x-apikey": configuration.apiKey! }), "client-id": configuration.clientId,
     "x-websiteid": options?.webSiteId ?? configuration.websiteId, "x-terminalid": String(options?.reservationOptions.terminalId ?? 1),
     "x-timezoneid": source.timeZone, "x-timezone-offset": String(Math.abs(getTimeZoneOffsetMinutes(noon, source.timeZone))),
     "x-siteid": "1", "x-moduleid": "7", "x-productid": "1", "x-componentid": "1", "x-ismobile": "false",
@@ -98,7 +98,8 @@ export function cpsBootstrapReadAllowed(url: URL, headers: Headers, body: string
   supplied.delete("accept-encoding");
   return JSON.stringify([...supplied].sort()) === JSON.stringify([...expected.headers].sort());
 }
-function createReader(source: CpsSource, deps: CpsDependencies, date: string, savedProof?: CpsPostalConflictProof | CpsPhoneBookingProof) {
+function createReader(source: CpsSource, deps: CpsDependencies, date: string, savedProof?: CpsPostalConflictProof | CpsPhoneBookingProof,
+  savedCatalogMode?: CpsMetadata["publicCatalogMode"]) {
   validateCpsIdentity(source);
   const context = parseCpsSource(source.bookingUrl)!, deadline = Math.min(Date.now() + 120_000, deps.deadlineAt?.getTime() ?? Infinity);
   if (!Number.isFinite(deadline) || deadline <= Date.now()) fail("DEADLINE_EXCEEDED");
@@ -208,7 +209,8 @@ function createReader(source: CpsSource, deps: CpsDependencies, date: string, sa
     const nativeOfficial = await official(), nativeOfficialPage=nativeOfficial?.page;
     const config = parseCpsConfiguration(await json(context.origin + "/onlineresweb/Home/Configuration", new Headers({
       accept: "application/json", referer: context.origin + "/", "user-agent": "TeeTimeSpot/1.0 (+https://teetimespot.com)" })), source);
-    if (config.buildNumber === CPS_ANONYMOUS_BUILD) {
+    if (savedCatalogMode && config.buildNumber !== CPS_VENUE_PUBLIC_CATALOG_BUILD) fail("ADAPTER_CONFIGURATION_CHANGED");
+    if (cpsPublicBuildProtocol(config.buildNumber) === "ANONYMOUS_SHORT_SESSION") {
       publicSession = createCps26PublicSession(source, config, date, { deadlineAt: new Date(deadline), signal,
         bootstrapHeaders: publicHeaders(source, config, undefined, date), fetch: deps.fetch,
         runBootstrap: work => {
@@ -227,8 +229,8 @@ function createReader(source: CpsSource, deps: CpsDependencies, date: string, sa
     let providerVenueName=source.venueName;
     let metadata = parseCpsCatalog(await json(context.origin + CPS_API_PATH + "/OnlineCourses", publicHeaders(source, config, options, date)), options, source,
       nativeOfficialPage?{page:nativeOfficialPage,canonicalCoursePhone:deps.trustedContext?.canonicalCoursePhone,
-        ...(nativeOfficial?.phoneBooking?{phoneBooking:true as const}:{}),onSelectedLabel:label=>{providerVenueName=label;}}:undefined);
-    if(nativeOfficialPage){
+        ...(nativeOfficial?.phoneBooking?{phoneBooking:true as const}:{}),onSelectedLabel:label=>{providerVenueName=label;}}:undefined, config.buildNumber);
+    if(nativeOfficialPage&&!metadata.publicCatalogMode){
       if(nativeOfficial?.phoneBooking){
         const proof=bindCpsPhoneBookingProof(source,nativeOfficialPage,deps.trustedContext?.canonicalCoursePhone,metadata,providerVenueName);
         if(savedProof&&JSON.stringify(proof)!==JSON.stringify(savedProof))fail("ADAPTER_CONFIGURATION_CHANGED");
@@ -288,7 +290,7 @@ export async function executeCps(source: CpsSource, metadata: CpsMetadata, _targ
   deps: CpsDependencies = {}): Promise<AccessExecutionResult["slots"]> {
   validateInput(input, source); const saved = cpsMetadataSchema.parse(metadata);
   if (saved.tenant !== parseCpsSource(source.bookingUrl)?.tenant) fail("ADAPTER_SOURCE_MISMATCH");
-  const reader = createReader(source, deps, input.date, saved.officialPostalConflictProof??saved.officialPhoneBookingProof);
+  const reader = createReader(source, deps, input.date, saved.officialPostalConflictProof??saved.officialPhoneBookingProof, saved.publicCatalogMode);
   try {
     const fresh = await reader.configuration();
     if (JSON.stringify(fresh.metadata) !== JSON.stringify(saved)) fail("ADAPTER_CONFIGURATION_CHANGED");

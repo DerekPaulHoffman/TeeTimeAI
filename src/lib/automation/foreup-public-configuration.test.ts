@@ -122,6 +122,35 @@ describe("declared Standard Public class inventory", () => {
     expect(scoped([selected, { ...other, booking_classes: undefined }])).toBe(false);
     expect(scoped([selected, { ...other, booking_classes: [{ ...other.booking_classes[0], name: "Public" }] }])).toBe(false);
   });
+  it("excludes an independently proven foreign physical course after validating its complete class shapes without changing the catalog digest", () => {
+    const other = { ...selected, course_id: "19022", teesheet_id: "793", booking_classes: [{ ...alternate("Visitor Program"), teesheet_id: "793" }] };
+    const document = `SCHEDULES=${JSON.stringify([selected, other])};`, digest = foreupPublicScheduleCatalogSha256(document);
+    expect(hasCompleteForeupPublicScheduleScope({ html: document, facilityId: 19021, scheduleId: 792,
+      inventoryScope: FOREUP_STANDARD_PUBLIC_SCOPE, isProvenForeignSchedule: row => row.course_id === "19022" })).toBe(true);
+    expect(scoped([selected, other])).toBe(false);
+    expect(foreupPublicScheduleCatalogSha256(document)).toBe(digest);
+    expect(foreupPublicScheduleCatalogSha256(`SCHEDULES=${JSON.stringify([selected])};`)).not.toBe(digest);
+  });
+  it.each(["classes", "join", "flags", "id", "duplicate-class", "name", "empty-name", "long-name", "control-name", "hidden-name", "duplicate-sheet"])(
+    "rejects malformed %s even for an independently proven foreign course", mode => {
+      const other = { ...selected, course_id: "19022", teesheet_id: "793", booking_classes: [{ ...alternate("Visitor Program"), teesheet_id: "793" }] };
+      const entry = other.booking_classes[0];
+      if (mode === "join") entry.teesheet_id = "794";
+      if (mode === "flags") entry.hidden = "unknown";
+      if (mode === "id") entry.booking_class_id = "0";
+      if (mode === "duplicate-class") other.booking_classes.push({ ...entry });
+      if (mode === "empty-name") entry.name = " ";
+      if (mode === "long-name") entry.name = "x".repeat(301);
+      if (mode === "control-name") entry.name = "Visitor\u0000Program";
+      const value: Record<string, unknown> = other;
+      if (mode === "classes") value.booking_classes = undefined;
+      if (mode === "name" || mode === "hidden-name") {
+        value.booking_classes = [{ ...entry, name: undefined, ...(mode === "hidden-name" ? { hidden: "1" } : {}) }];
+      }
+      const rows = mode === "duplicate-sheet" ? [selected, value, value] : [selected, value];
+      expect(hasCompleteForeupPublicScheduleScope({ html: `SCHEDULES=${JSON.stringify(rows)};`, facilityId: 19021, scheduleId: 792,
+        inventoryScope: FOREUP_STANDARD_PUBLIC_SCOPE, isProvenForeignSchedule: row => row.course_id === "19022" })).toBe(false);
+    });
 });
 
 describe("public ForeUp schedule configuration", () => {

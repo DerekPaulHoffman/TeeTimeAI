@@ -66,6 +66,7 @@ export function hasCompleteForeupPublicScheduleScope(input: { html: string; faci
   const schedules = extractSchedulesJson(input.html);
   if (!Array.isArray(schedules) || !schedules.length || schedules.length > MAX_SCHEDULES) return false;
   const publicSheets = new Set<string>();
+  const foreignSheets = new Set<string>();
   for (const raw of schedules) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
     const row = raw as Record<string, unknown>, facilityId = positiveProviderId(row.course_id), scheduleId = positiveProviderId(row.teesheet_id);
@@ -81,6 +82,21 @@ export function hasCompleteForeupPublicScheduleScope(input: { html: string; faci
       if (String(entry.active) === "0" || String(entry.hidden) === "1") continue;
       if (!positiveProviderId(entry.booking_class_id)) return false;
       visible.push(entry);
+    }
+    if (provenForeign) {
+      // Physical ownership was independently proved by the caller. Its audience
+      // names cannot expand this venue's inventory, but every catalog row must
+      // still have closed IDs, flags and bounded class-name scalars.
+      const key = `${facilityId}:${scheduleId}`, classIds = new Set<number>();
+      if (foreignSheets.has(key)) return false;
+      foreignSheets.add(key);
+      for (const entry of row.booking_classes as Record<string, unknown>[]) {
+        const classId = positiveProviderId(entry.booking_class_id);
+        if (!classId || classIds.has(classId) || typeof entry.name !== "string" || !entry.name.trim() ||
+            entry.name.length > 300 || /[\u0000-\u001f\u007f]/u.test(entry.name)) return false;
+        classIds.add(classId);
+      }
+      continue;
     }
     let isPublic = false;
     let selectedExplicitPublicCount = 0;
@@ -110,7 +126,6 @@ export function hasCompleteForeupPublicScheduleScope(input: { html: string; faci
       if (selectedExplicitPublicCount !== 1) return false;
       isPublic = true;
     }
-    if (provenForeign) continue;
     if (isPublic) {
       const key = `${facilityId}:${scheduleId}`;
       if (publicSheets.has(key)) return false;

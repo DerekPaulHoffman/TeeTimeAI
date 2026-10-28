@@ -207,6 +207,23 @@ export async function runCourseDiscoveryStagehandWorker({
     catch (error) {
       if (!GENERIC_RECIPE_FALLBACK_CODES.includes(error?.code) || fixedInspection?.browserClosed !== true || fixedInspection.cleanupError ||
           fixedInspection.outcome !== "FAILED" || fixedInspection.actions?.at(-1)?.action !== "inspect_adapter") throw error;
+      // Preserve this owned closed inspection before the generic worker starts
+      // its fresh browser. Later feedback must not erase the original rejection.
+      await checkpointTail;
+      check();
+      const failedInspection = createStagehandFailureCheckpoint({ job, report, error, phase: "FIXED_INSPECTION", metrics,
+        reference, progress: { phase: "FIXED_INSPECTION_FAILED" }, previous: failureEvidence, now: now(), startedAt: started });
+      failureEvidence = failedInspection.stagehandFailure;
+      try {
+        await client.checkpoint(job.id, job.leaseToken, failedInspection, signal);
+        metrics.inspectionFailureCheckpoint = "SAVED";
+      } catch (checkpointError) {
+        metrics.inspectionFailureCheckpoint = "NOT_PERSISTED";
+        if (["DISCOVERY_LEASE_REJECTED", "DISCOVERY_LEASE_EXPIRED"].includes(checkpointError?.code)) {
+          checkpointLeaseRetired = true;
+          throw checkpointError;
+        }
+      }
       return await runGenericFromFreshRoot(error.code);
     }
     }

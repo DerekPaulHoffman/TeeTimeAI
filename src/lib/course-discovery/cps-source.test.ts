@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import { CPS_API_PATH, CPS_PUBLIC_BUILD, cpsMetadataSchema, inspectCpsOfficialDocument, parseCpsCatalog,
+import { CPS_API_PATH, CPS_PUBLIC_BUILD, CPS_VENUE_PUBLIC_CATALOG_BUILD, cpsMetadataSchema, cpsPublicBuildProtocol, inspectCpsOfficialDocument, parseCpsCatalog,
   parseCpsConfiguration, parseCpsOptions, parseCpsSource, validateCpsIdentity } from "./cps-source";
 
 const source = { officialUrl: "https://www.thebobgc.com/", bookingUrl: "https://thebobgcpa.cps.golf/",
@@ -83,6 +83,7 @@ describe("CPS stable public source", () => {
       expect(() => parseCpsOptions(data, config)).toThrow();
   });
   it("accepts only the exact reviewed current public client build after existing whitespace normalization", () => {
+    expect(parseCpsConfiguration({ ...configuration(), apiKey: undefined, buildNumber: "\ufeff26.1.2.26379768992\n" }, source).buildNumber).toBe("26.1.2.26379768992");
     expect(parseCpsConfiguration({ ...configuration(), buildNumber: "\ufeff26.3.0.34794395074\n" }, source).buildNumber).toBe("26.3.0.34794395074");
     for (const buildNumber of ["99.1.2.12345678901", "99.2.3.42"])
       expect(() => parseCpsConfiguration({ ...configuration(), buildNumber }, source)).toThrow("CPS_PUBLIC_BUILD_UNSUPPORTED");
@@ -91,6 +92,13 @@ describe("CPS stable public source", () => {
     expect(() => parseCpsConfiguration({ ...configuration(), buildNumber: "26.3.0.34794395074", siteName: "another" }, source)).toThrow();
     expect(parseCpsConfiguration({ ...configuration(), apiKey: undefined, buildNumber: "26.3.0.34794395074" }, source).apiKey).toBeUndefined();
     expect(() => parseCpsConfiguration({ ...configuration(), apiKey: undefined }, source)).toThrow("CPS_CONFIGURATION_UNVERIFIED");
+  });
+  it("maps only exact reviewed builds to their independent public startup protocol", () => {
+    expect(cpsPublicBuildProtocol(CPS_PUBLIC_BUILD)).toBe("PUBLISHED_KEY");
+    for (const build of ["26.1.2.26379768992", "26.3.0.34794395074"])
+      expect(cpsPublicBuildProtocol(build)).toBe("ANONYMOUS_SHORT_SESSION");
+    for (const build of ["26.1.1.26379768992", "26.1.2.26379768991", "26.1.2.26379768993", "26.1.3.26379768992", "26.3.1.34794395074"])
+      expect(() => parseCpsConfiguration({ ...configuration(), buildNumber: build }, source)).toThrow("CPS_PUBLIC_BUILD_UNSUPPORTED");
   });
   it.each(["99.1.2.12345678901", "\ufeff99.1.2.12345678901\n"])("classifies a bound unsupported public build without deriving version-specific configuration: %s", buildNumber => {
     const current = { officialUrl: "https://public-course.example/", bookingUrl: "https://public-course.cps.golf/",
@@ -124,7 +132,7 @@ describe("CPS stable public source", () => {
     for (const value of [null, [], "99.1.2.3", { ...configuration(), buildNumber: "99.1.2.3" }])
       expect(() => parseCpsConfiguration(value, { ...source, bookingUrl: source.bookingUrl + "account" })).toThrow("CPS_CONFIGURATION_UNVERIFIED");
   });
-  it.each([CPS_PUBLIC_BUILD, "26.3.0.34794395074"])("retains required version-specific fields for reviewed build %s", buildNumber => {
+  it.each([CPS_PUBLIC_BUILD, "26.1.2.26379768992", "26.3.0.34794395074"])("retains required version-specific fields for reviewed build %s", buildNumber => {
     const value = { ...configuration(), buildNumber };
     expect(parseCpsConfiguration(value, source).buildNumber).toBe(buildNumber);
     for (const missing of [{ ...value, clientId: undefined }, { ...value, websiteId: undefined }])
@@ -139,5 +147,80 @@ describe("CPS stable public source", () => {
     else rows[0] = { ...courses()[0], ...(kind === "name" ? { courseName: "Another Golf Course" } : kind === "unknown course" ? { courseId: 2 } :
       kind === "active" ? { active: false } : { [kind]: "foreign" }) };
     expect(() => parseCpsCatalog(rows, parseCpsOptions(options(), parseCpsConfiguration(configuration(), source)), source)).toThrow();
+  });
+});
+
+describe("CPS venue-bound public OnlineCourses catalog", () => {
+  const venue = { officialUrl: "https://official.example.org/", bookingUrl: "https://maple-fixture.cps.golf/",
+    venueName: "Maple Lantern Country Club", venueAddress: "10 Public Road, Example, NY 12345, USA", timeZone: "America/New_York" };
+  const publicOptions = () => ({ webSiteId: "public-site", courseOptions: [
+    { courseId: 7, courseName: "Legacy Back", webSiteId: "public-site" },
+    { courseId: 11, courseName: "Front 9", webSiteId: "public-site" },
+    { courseId: 19, courseName: "Legacy Other", webSiteId: "public-site" },
+  ], reservationOptions: { terminalId: 1, clubName: "Maple Lantern Golf Club", clubAddress: "10 Public Rd Example NY 12345" } });
+  const online = () => [{ courseId: 11, courseName: "Front 9", timezoneId: venue.timeZone, websiteId: "public-site", active: true, holes: 9 }];
+  const inspect = (rows: unknown = online(), rawOptions: unknown = publicOptions(), identity = venue, build = CPS_VENUE_PUBLIC_CATALOG_BUILD) =>
+    parseCpsCatalog(rows, parseCpsOptions(rawOptions, { ...configuration(), websiteId: "public-site" }), identity, undefined, build);
+
+  it("uses the complete explicit unique online set without choosing first/default/order from raw options", () => {
+    const saved = inspect();
+    expect(saved).toMatchObject({ family: "CPS", tenant: "maple-fixture", courseIds: [11], publicCatalogMode: "VENUE_BOUND_ONLINE_COURSES" });
+    expect(Object.keys(saved).sort()).toEqual(["catalogHash", "courseIds", "family", "publicCatalogMode", "tenant"]);
+    const reversed = publicOptions(); reversed.courseOptions.reverse();
+    expect(inspect(online(), reversed)).toEqual(saved);
+    expect(inspect(online().map(row => ({ ...row, isDefaultSelected: false, order: 99 })))).toEqual(saved);
+  });
+  it.each(["Maple Lantern Country Club", "Maple Lantern Golf Club", "Maple Lantern Golf Course"])("requires full physical proof for bounded terminal category variance: %s", clubName => {
+    const value = publicOptions(); value.reservationOptions.clubName = clubName;
+    expect(inspect(online(), value).courseIds).toEqual([11]);
+  });
+  it.each(["10 Public Road, Example, NY 12345, USA", "10 Public Rd Example NY 12345"])("independently parses every full address component: %s", clubAddress => {
+    const value = publicOptions(); value.reservationOptions.clubAddress = clubAddress;
+    expect(inspect(online(), value).publicCatalogMode).toBe("VENUE_BOUND_ONLINE_COURSES");
+  });
+  it.each([
+    { clubName: "Maple Lantern West Golf Club" }, { clubName: "Maple Glen Golf Club" }, { clubName: "Maple" },
+    { clubName: "Public Golf Club" }, { clubAddress: "11 Public Rd Example NY 12345" }, { clubAddress: "10 Public Rd Example NY 12346" },
+    { clubAddress: "10 Public Rd Other NY 12345" }, { clubAddress: "10 Public Rd Example NJ 12345" },
+    { clubAddress: "10 Public Rd Example NY" }, { clubAddress: "Example NY 12345" }, { clubAddress: "10 Public Rd" },
+    { clubAddress: "PO Box 10 Example NY 12345" }, { clubAddress: "<span>10 Public Rd Example NY 12345</span>" },
+    { clubAddress: "10 Public Rd Example ZZ 12345" }, { clubAddress: undefined }, { clubName: undefined },
+  ])("rejects nearby brands, physical disagreements and missing/partial witnesses (%j)", change => {
+    const value = publicOptions(); Object.assign(value.reservationOptions, change);
+    expect(() => inspect(online(), value)).toThrow("ADAPTER_IDENTITY_MISMATCH");
+  });
+  it.each([
+    [{ ...online()[0], courseId: 99 }], [{ ...online()[0], courseName: "Other Sheet" }], [{ ...online()[0], websiteId: "foreign" }],
+    [{ ...online()[0], timezoneId: "America/Chicago" }], [{ ...online()[0], active: false }],
+    [online()[0], online()[0]], [online()[0], { ...online()[0], courseId: 7, courseName: "Legacy Back" }], [],
+    [{ ...online()[0], private: true }], [{ ...online()[0], members_only: true }], [{ ...online()[0], requires_login: true }],
+  ].map(rows => ({ rows })))("fails closed on unknown, extra, duplicate or contradictory online rows (%j)", ({ rows }) => {
+    expect(() => inspect(rows)).toThrow();
+  });
+  it("rejects conflicting raw-option identity and explicit selected/public access flags", () => {
+    for (const change of ["duplicate", "name", "website", "private", "property-private"]) {
+      const value = publicOptions();
+      if (change === "duplicate") value.courseOptions.push(value.courseOptions[1]);
+      if (change === "name") value.courseOptions[1].courseName = "Other Sheet";
+      if (change === "website") value.courseOptions[1].webSiteId = "foreign";
+      if (change === "private") Object.assign(value.courseOptions[1], { private: true });
+      if (change === "property-private") Object.assign(value.reservationOptions, { members_only: true });
+      expect(() => inspect(online(), value)).toThrow();
+    }
+  });
+  it("binds all raw option identities and active public facts in the semantic digest", () => {
+    const saved = inspect();
+    const changedLegacy = publicOptions(); changedLegacy.courseOptions[0].courseName = "Changed Legacy";
+    expect(inspect(online(), changedLegacy).catalogHash).not.toBe(saved.catalogHash);
+    expect(inspect([{ ...online()[0], holes: 18 }]).catalogHash).not.toBe(saved.catalogHash);
+    const extra = publicOptions(); extra.courseOptions.push({ courseId: 23, courseName: "Unselectable Extra", webSiteId: "public-site" });
+    expect(inspect(online(), extra).catalogHash).not.toBe(saved.catalogHash);
+  });
+  it("keeps old valid catalog hashes unchanged and does not grant this mode to another build", () => {
+    const raw = options(), parsed = parseCpsOptions(raw, parseCpsConfiguration(configuration(), source));
+    const saved = parseCpsCatalog(courses(), parsed, source);
+    expect(parseCpsCatalog(courses(), parsed, source, undefined, CPS_PUBLIC_BUILD)).toEqual(saved);
+    expect(parseCpsCatalog(courses(), parsed, source, undefined, "26.3.0.34794395074")).toEqual(saved);
+    expect(() => inspect(online(), publicOptions(), venue, "26.3.0.34794395074")).toThrow("ADAPTER_IDENTITY_MISMATCH");
   });
 });

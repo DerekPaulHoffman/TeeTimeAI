@@ -5,7 +5,7 @@ import { inspectExistingAdapter, executeExistingAdapterRecipe } from "./existing
 import { venueProofMatches, recipeTimeToInstant } from "./executor";
 import { hashAccessRecipe, parseAccessRecipe } from "./recipe";
 import type { OfficialIdentityPage } from "./teeitup-official-identity";
-import { FOREUP_STANDARD_PUBLIC_SCOPE } from "@/lib/automation/foreup-public-configuration";
+import { FOREUP_STANDARD_PUBLIC_SCOPE, parseForeupPublicConfiguration } from "@/lib/automation/foreup-public-configuration";
 
 const source = { officialUrl: "https://official.example/", bookingUrl: "https://foreupsoftware.com/index.php/booking/12345/456#/teetimes",
   venueName: "Example Golf Course", venueAddress: "10 Example Road, Example, NY 12345, USA", timeZone: "America/New_York", providerFamily: "FOREUP" };
@@ -47,11 +47,68 @@ describe("native official ForeUP route physical ownership", () => {
     value.schedules[1].course_name = value.course.name;
     expect(() => bindForeupOfficialRouteConfiguration(contact, html(value))).toThrow("FOREUP_PUBLIC_SCHEDULE_COVERAGE_UNVERIFIED");
   });
+  it.each(["valid", "same-phone", "same-address", "missing-phone", "missing-address", "name", "timezone", "ambiguous-course"])(
+    "keeps a foreign unknown-audience schedule outside Standard Public only with complete independent physical ownership: %s", mode => {
+      const value = provider(), other = { ...value.course, course_id: "12346", name: "Other Golf Course", address: "99 Other Street", city: "Elsewhere", zip: "54321", phone: "555-555-0199" };
+      if (mode === "same-phone") other.phone = value.course.phone;
+      if (mode === "same-address") Object.assign(other, { address: value.course.address, city: value.course.city, zip: value.course.zip });
+      if (mode === "missing-phone") other.phone = "";
+      if (mode === "missing-address") other.address = "";
+      value.courses.push(other);
+      if (mode === "ambiguous-course") value.courses.push({ ...other });
+      value.schedules[1] = { ...value.schedules[1], course_id: other.course_id, course_name: mode === "name" ? "Other Annex" : other.name,
+        course_timezone: mode === "timezone" ? "America/Chicago" : other.timezone,
+        booking_classes: [{ teesheet_id: "457", booking_class_id: "14", name: "Visitor Program", active: "1", hidden: "0" }] };
+      const contact = deriveForeupOfficialRouteContact(source, native(), phone);
+      if (mode === "valid") expect(bindForeupOfficialRouteConfiguration(contact, html(value), FOREUP_STANDARD_PUBLIC_SCOPE).proof)
+        .toMatchObject({ scheduleId: 456, inventoryScope: FOREUP_STANDARD_PUBLIC_SCOPE, publicCatalogSha256: expect.stringMatching(/^[a-f0-9]{64}$/u) });
+      else expect(() => bindForeupOfficialRouteConfiguration(contact, html(value), FOREUP_STANDARD_PUBLIC_SCOPE)).toThrow("FOREUP_PUBLIC_SCHEDULE_COVERAGE_UNVERIFIED");
+    });
   it("preserves distinct canonical/owner/sheet labels with exact minimal raw+visible contact and route-owned IDs", () => {
     const contact = deriveForeupOfficialRouteContact(source, native(), phone), result = bindForeupOfficialRouteConfiguration(contact, html());
     expect(result.config).toMatchObject({ sourceBookingUrl: source.bookingUrl, bookingBaseUrl: source.bookingUrl, scheduleId: 456, bookingClassId: 12 });
     expect(result.proof).toMatchObject({ venueName: source.venueName, providerName: "Example Park Golf Course", sheetTitle: "Example East", publicLocationName: "Example", facilityId: 12345 });
     expect(foreupOfficialRouteOwnershipProofSchema.parse(result.proof)).toEqual(result.proof);
+  });
+  it.each(["Example - Home", "Home - Example", "Example - Public Golf | County"])("accepts an exact canonical title segment with a spaced ASCII hyphen: %s", title => {
+    const p = page(); p.html = p.html.replace("Example | County", title); p.visibleEvidence!.title = title;
+    const result = bindForeupOfficialRouteConfiguration(deriveForeupOfficialRouteContact(source, native(p), phone), html());
+    expect(result.proof).toMatchObject({ officialTitle: title, publicLocationName: "Example" });
+    expect(foreupOfficialRouteOwnershipProofSchema.parse(result.proof)).toEqual(result.proof);
+  });
+  it("preserves a full canonical name that itself contains a spaced hyphen", () => {
+    const namedSource = { ...source, venueName: "Example - Pines Golf Course" }, p = page();
+    p.html = p.html.replaceAll("Example | County", "Example - Pines | County").replace(card, card.replace("<div>Example</div>", "<div>Example - Pines</div>"));
+    p.visibleEvidence!.title = "Example - Pines | County";
+    p.visibleEvidence!.addressTexts = [aggregate.replace("Example,", "Example - Pines,")];
+    const contact = deriveForeupOfficialRouteContact(namedSource, native(p), phone);
+    expect(contact.publicLocationName).toBe("Example - Pines");
+  });
+  it.each(["Example Annex - Home", "Home-Example", "Example - Example", "Example - Home | Example - County", "Other - Home"])("rejects missing, near or ambiguous canonical hyphen-title identity: %s", title => {
+    const p = page(); p.html = p.html.replace("Example | County", title); p.visibleEvidence!.title = title;
+    expect(() => deriveForeupOfficialRouteContact(source, native(p), phone)).toThrow("FOREUP_OFFICIAL_ROUTE_UNVERIFIED");
+  });
+  it.each(["", "Email: ", "E-mail "])("keeps complete named physical ownership when its same public contact also prints a literal mailto address with label %s", prefix => {
+    const p = page(), email = "golf@course.example";
+    p.html = p.html.replace(card, card.replace("</p>", `<span>${prefix}<a href="mailto:${email}">${email}</a></span></p>`));
+    p.visibleEvidence!.addressTexts = [`${aggregate}, ${prefix}${email}`];
+    const result = bindForeupOfficialRouteConfiguration(deriveForeupOfficialRouteContact(source, native(p), phone), html());
+    expect(result.proof).toMatchObject({ publicLocationName: "Example", canonicalAddress: source.venueAddress, publicCoursePhone: phone });
+    expect(JSON.stringify(result.proof)).not.toContain(email);
+  });
+  it.each(["label", "query", "multiple", "rendered", "missing-rendered", "phone", "address", "private"])("rejects ambiguous or incomplete %s public-contact email presentation", mode => {
+    const p = page(), email = "golf@course.example";
+    let link = `<a href="mailto:${email}">${email}</a>`;
+    if (mode === "label") link = link.replace(`>${email}<`, ">Email us<");
+    if (mode === "query") link = link.replace(`mailto:${email}`, `mailto:${email}?subject=Golf`);
+    if (mode === "multiple") link += link;
+    let markup = card.replace("</p>", `${link}</p>`);
+    if (mode === "phone") markup = markup.replaceAll(display, "555-555-9999");
+    if (mode === "address") markup = markup.replace("10 Example Rd", "11 Example Rd");
+    if (mode === "private") markup = `<section class="member">${markup}</section>`;
+    p.html = p.html.replace(card, markup);
+    p.visibleEvidence!.addressTexts = [mode === "missing-rendered" ? aggregate : `${aggregate}, ${mode === "rendered" ? "other@course.example" : email}`];
+    expect(() => deriveForeupOfficialRouteContact(source, native(p), phone)).toThrow("FOREUP_OFFICIAL_ROUTE_UNVERIFIED");
   });
   it.each([
     `<section>Example<br>10 Example Rd<br>Example, NY 12345<br>Phone: <a href="tel:${phone}">${display}</a></section>`,
@@ -132,6 +189,37 @@ describe("native official ForeUP route physical ownership", () => {
     await expect(inspectExistingAdapter(source, { ...deps(), trustedContext: {} })).rejects.toThrow("ADAPTER_CONFIGURATION_UNVERIFIED");
     await expect(inspectExistingAdapter(source, { ...deps(), readNativeOfficialPage: async () => page() })).rejects.toThrow("FOREUP_OFFICIAL_ROUTE_UNVERIFIED");
   });
+  function legacyCoverageFixture() {
+    const value = provider(); value.course.name = source.venueName; value.schedules[0].course_name = source.venueName;
+    const other = { ...value.course, course_id: "12346", name: "Other Golf Course", address: "99 Other Street", city: "Elsewhere", zip: "54321", phone: "555-555-0199" };
+    value.courses.push(other);
+    value.schedules[1] = { ...value.schedules[1], course_id: other.course_id, course_name: other.name,
+      booking_classes: [{ teesheet_id: "457", booking_class_id: "14", name: "Visitor Program", active: "1", hidden: "0" }] };
+    return value;
+  }
+  it("earns native whole-catalog ownership when a successful legacy name match alone cannot establish scoped coverage", async () => {
+    const value = legacyCoverageFixture(), document = html(value), d = deps();
+    expect(parseForeupPublicConfiguration({ bookingUrl: source.bookingUrl, courseName: source.venueName, html: document })).not.toBeNull();
+    d.fetch.mockImplementation(async raw => String(raw).includes("/api/") ? Response.json([]) : new Response(document, { headers: { "content-type": "text/html" } }));
+    const observed = await inspectExistingAdapter(source, d);
+    expect(observed.adapter).toMatchObject({ family: "FOREUP", scheduleId: 456, inventoryScope: FOREUP_STANDARD_PUBLIC_SCOPE,
+      officialRouteOwnershipProof: { publicCoursePhone: phone } });
+    expect(d.readNativeOfficialPage).toHaveBeenCalledOnce();
+  });
+  it.each(["capability", "phone", "official", "address"])("keeps legacy scoped coverage failure closed without native %s authority or extra source reads", async mode => {
+    const document = html(legacyCoverageFixture()), d = deps();
+    d.fetch.mockImplementation(async () => new Response(document, { headers: { "content-type": "text/html" } }));
+    await expect(inspectExistingAdapter({ ...source, ...(mode === "official" ? { officialUrl: undefined } : {}), ...(mode === "address" ? { venueAddress: "Example" } : {}) },
+      { ...d, localCapabilities: mode === "capability" ? [] : d.localCapabilities, trustedContext: mode === "phone" ? undefined : d.trustedContext }))
+      .rejects.toThrow("ADAPTER_CONFIGURATION_UNVERIFIED");
+    expect(d.readNativeOfficialPage).not.toHaveBeenCalled(); expect(d.fetch).toHaveBeenCalledOnce();
+  });
+  it("retains the successful legacy fast path without reading a native root", async () => {
+    const value = legacyCoverageFixture(); value.courses = [value.course]; value.schedules = [value.schedules[0]];
+    const d = deps(); d.fetch.mockImplementation(async raw => String(raw).includes("/api/") ? Response.json([]) : new Response(html(value), { headers: { "content-type": "text/html" } }));
+    expect((await inspectExistingAdapter(source, d)).adapter).not.toHaveProperty("officialRouteOwnershipProof");
+    expect(d.readNativeOfficialPage).not.toHaveBeenCalled();
+  });
   it("binds a declared Standard Public native proof while keeping an unknown same-sheet program outside scope", async () => {
     const value = provider();
     value.schedules[0].booking_classes.push({ teesheet_id: "456", booking_class_id: "15", name: "PreferredPlayer", active: "1", hidden: "0" });
@@ -197,6 +285,19 @@ describe("canonical-root compact contact and public facility ownership", () => {
     p.visibleEvidence!.linkUrls = [facilitySource.bookingUrl]; p.visibleEvidence!.addressTexts = [`Phone: ${display}, 10 Example Rd, Example, NY 12345`]; return p; };
   const contact = (p = compactPage()) => deriveForeupOfficialRouteContact(facilitySource, native(p), phone);
   const compactDeps = () => ({ ...deps(), readNativeOfficialPage: vi.fn(async () => native(compactPage())) });
+  it("uses the same exact hyphen-title segmentation in compact contact derivation and saved proof validation", () => {
+    const p = compactPage(), title = "Example - Home";
+    p.html = p.html.replace("Example | County", title); p.visibleEvidence!.title = title;
+    const actualContact = contact(p), result = bindForeupOfficialRouteConfiguration(actualContact, html(), FOREUP_STANDARD_PUBLIC_SCOPE);
+    expect(result.proof).toMatchObject({ officialTitle: title, publicLocationName: "Example", contactScope: FOREUP_COMPACT_CONTACT_FACILITY_SCOPE });
+    expect(foreupOfficialRouteOwnershipProofSchema.parse(result.proof)).toEqual(result.proof);
+    const { semanticDigest: _digest, ...body } = result.proof;
+    const changed = { ...body, officialTitle: "Example - Example" };
+    const sourceBody = Object.fromEntries(Object.entries(actualContact).filter(([key]) => key !== "sourceWitnessSha256").map(([key, value]) => [key, key === "officialTitle" ? changed.officialTitle : value]));
+    changed.sourceWitnessSha256 = foreupOwnershipDigest(sourceBody);
+    expect(_digest).toMatch(/^[a-f0-9]{64}$/u);
+    expect(foreupOfficialRouteOwnershipProofSchema.safeParse({ ...changed, semanticDigest: foreupOwnershipDigest(changed) }).success).toBe(false);
+  });
 
   it("binds the published title and sole independently printed contact to the sole public schedule, not catalog order", () => {
     const value = provider(); value.schedules.reverse();

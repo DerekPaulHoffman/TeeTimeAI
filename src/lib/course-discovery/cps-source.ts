@@ -7,6 +7,7 @@ import { cpsPostalConflictProofSchema, verifyCpsPostalContact } from "./cps-post
 import { cpsPhoneBookingProofSchema, cpsOfficialCourseDescriptor, cpsOfficialSelectedCourseName,
   selectedCpsOfficialBookingAnchor, hasCpsObservedSelectedCourseLabel, verifyCpsPhoneBookingContact } from "./cps-phone-booking-proof";
 import type { OfficialIdentityPage } from "./teeitup-official-identity";
+import { parsePublicUSBusinessAddress } from "./public-us-business-address";
 
 const id = z.number().int().min(1).max(2_147_483_647);
 const tenant = z.string().regex(/^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u)
@@ -17,15 +18,27 @@ export const CPS_API_PATH = "/onlineres/onlineapi/api/v1/onlinereservation";
 // This build's published 569/507/647 + main clients perform one unpaged GET;
 // the UI's load-more operation slices the already returned content locally.
 export const CPS_PUBLIC_BUILD = "25.3.4.21239412485";
+export const CPS_VENUE_PUBLIC_CATALOG_BUILD = "26.1.2.26379768992";
 // 26.3.0.34794395074: reviewed public main 9b94214d3a50be69 and its
 // exact runtime-linked 569/507/647 modules. SearchTeetimes sends the same
 // unpaged dated GET; normal display pagination slices its complete array.
-const reviewedPublicBuilds = new Set([CPS_PUBLIC_BUILD, "26.3.0.34794395074"]);
+export type CpsPublicBuildProtocol = "PUBLISHED_KEY" | "ANONYMOUS_SHORT_SESSION";
+// Each exact public build is reviewed for its own startup and complete-sheet
+// request contract. A version number alone never grants a neighboring build.
+const reviewedPublicBuilds = new Map<string, CpsPublicBuildProtocol>([
+  [CPS_PUBLIC_BUILD, "PUBLISHED_KEY"],
+  [CPS_VENUE_PUBLIC_CATALOG_BUILD, "ANONYMOUS_SHORT_SESSION"],
+  ["26.3.0.34794395074", "ANONYMOUS_SHORT_SESSION"],
+]);
+export function cpsPublicBuildProtocol(build: string): CpsPublicBuildProtocol | undefined {
+  return reviewedPublicBuilds.get(build);
+}
 export const cpsMetadataSchema = z.object({ family: z.literal("CPS"), tenant,
   courseIds: z.array(id).min(1).max(40).refine(values => values.every((value, index) => !index || values[index - 1] < value)),
-  catalogHash: z.string().regex(/^[a-f0-9]{64}$/u), officialPostalConflictProof: cpsPostalConflictProofSchema.optional(),
+  catalogHash: z.string().regex(/^[a-f0-9]{64}$/u), publicCatalogMode: z.literal("VENUE_BOUND_ONLINE_COURSES").optional(), officialPostalConflictProof: cpsPostalConflictProofSchema.optional(),
   officialPhoneBookingProof: cpsPhoneBookingProofSchema.optional() }).strict()
   .refine(value=>!(value.officialPostalConflictProof&&value.officialPhoneBookingProof)&&
+    !(value.publicCatalogMode&&(value.officialPostalConflictProof||value.officialPhoneBookingProof))&&
     (!value.officialPhoneBookingProof||value.tenant===value.officialPhoneBookingProof.tenant&&value.catalogHash===value.officialPhoneBookingProof.catalogHash&&
       value.courseIds.length===1&&JSON.stringify(value.courseIds)===JSON.stringify(value.officialPhoneBookingProof.courseIds)&&
       (value.officialPhoneBookingProof.selectedAnchorLabel ?
@@ -146,12 +159,12 @@ export type CpsOptions = z.infer<typeof optionsSchema>;
 export function parseCpsConfiguration(value: unknown, source: CpsSource): CpsConfiguration {
   const context = parseCpsSource(source.bookingUrl), core = configurationCoreSchema.safeParse(value);
   if (core.success && context && core.data.siteName === context.tenant && core.data.onlineApi === context.origin + CPS_API_PATH &&
-      core.data.authorityBaseUrl === context.origin + "/identityapi" && !reviewedPublicBuilds.has(core.data.buildNumber))
+      core.data.authorityBaseUrl === context.origin + "/identityapi" && !cpsPublicBuildProtocol(core.data.buildNumber))
     cpsFailure("CPS_PUBLIC_BUILD_UNSUPPORTED");
   const result = configurationSchema.safeParse(value);
   if (!result.success || !context || result.data.siteName !== context.tenant || result.data.onlineApi !== context.origin + CPS_API_PATH ||
-      result.data.authorityBaseUrl !== context.origin + "/identityapi" || !reviewedPublicBuilds.has(result.data.buildNumber) ||
-      result.data.buildNumber === CPS_PUBLIC_BUILD && !result.data.apiKey) cpsFailure("CPS_CONFIGURATION_UNVERIFIED");
+      result.data.authorityBaseUrl !== context.origin + "/identityapi" || !cpsPublicBuildProtocol(result.data.buildNumber) ||
+      cpsPublicBuildProtocol(result.data.buildNumber) === "PUBLISHED_KEY" && !result.data.apiKey) cpsFailure("CPS_CONFIGURATION_UNVERIFIED");
   return result.data;
 }
 export function parseCpsOptions(value: unknown, configuration: CpsConfiguration): CpsOptions {
@@ -162,14 +175,72 @@ export function parseCpsOptions(value: unknown, configuration: CpsConfiguration)
   return parsed.data;
 }
 export function cpsCourseNameBase(value:string){return fullCourseName(value).replace(/\s+golf (?:course|club|preserve)$/u,"").trim();}
+/** The public footer publishes either the existing complete-address grammar or
+ * one flat full US address. No source/expected component fills a missing part. */
+function publicClubAddress(value: unknown) {
+  const complete = parsePublicUSBusinessAddress(value);
+  if (complete) return complete;
+  if (typeof value !== "string" || value.length > 1024 || /[,<>\u0000-\u001f\u007f]/u.test(value)) return null;
+  const flat = /^(\d{1,7}[A-Za-z]?\s+[\p{L}\p{N} .#'’-]{1,135}\s+(?:dr(?:ive)?|rd|road|st(?:reet)?|ave(?:nue)?|blvd|boulevard|ln|lane|ct|court|pkwy|parkway|hwy|highway|cir(?:cle)?|trl|trail|ter(?:race)?|way)\.?)\s+([\p{L} .'-]{2,80})\s+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)(?:\s+(?:US|USA|United States))?$/iu.exec(value.trim());
+  return flat ? parsePublicUSBusinessAddress(`${flat[1]}, ${flat[2]}, ${flat[3]} ${flat[4]}, US`) : null;
+}
+function publicClubIdentity(options: CpsOptions, source: CpsSource) {
+  const name = label.safeParse(options.reservationOptions.clubName);
+  const address = publicClubAddress(options.reservationOptions.clubAddress);
+  const expectedAddress = parsePublicUSBusinessAddress(source.venueAddress);
+  // Category words may differ only after the independent entire physical
+  // address agrees. This local rule never changes the global venue predicate.
+  const core = (value: string) => fullCourseName(value).replace(/\s+(?:country club|golf course)$/u, "");
+  const expected = core(source.venueName), actual = name.success ? core(name.data) : "";
+  if (!name.success || !address || !expectedAddress || JSON.stringify(address) !== JSON.stringify(expectedAddress) ||
+      expected !== actual || expected.replace(/\s/gu, "").length < 8 ||
+      /^(?:the\s+)?(?:(?:golf|course|club|public|municipal|country)\s*)+$/u.test(expected)) cpsFailure("ADAPTER_IDENTITY_MISMATCH");
+  return { name: fullCourseName(name.data), address };
+}
+const publicAccessFlags = ["private", "is_private", "membersOnly", "members_only", "requiresLogin", "requires_login"] as const;
+function publicFlags(value: Record<string, unknown>) {
+  return Object.fromEntries(publicAccessFlags.map(key => {
+    if (Object.hasOwn(value, key) && typeof value[key] !== "boolean") cpsFailure("ADAPTER_IDENTITY_MISMATCH");
+    return [key, value[key] ?? null];
+  }));
+}
+function requirePublicFlags(value: Record<string, unknown>) {
+  if (Object.values(publicFlags(value)).some(flag => flag === true)) cpsFailure("ADAPTER_IDENTITY_MISMATCH");
+}
 export function parseCpsCatalog(value: unknown, options: CpsOptions, source: CpsSource,
-  nativeContact?:{page:OfficialIdentityPage;canonicalCoursePhone:unknown;onSelectedLabel:(label:string)=>void;phoneBooking?:true}): CpsMetadata {
+  nativeContact?:{page:OfficialIdentityPage;canonicalCoursePhone:unknown;onSelectedLabel:(label:string)=>void;phoneBooking?:true}, publicBuild?: string): CpsMetadata {
   validateCpsIdentity(source);
   const rows = z.array(z.object({ courseId: id, courseName: label, timezoneId: label, websiteId: publicValue,
     active: z.literal(true), holes: z.union([z.literal(9), z.literal(18)]) }).passthrough()).min(1).max(40).safeParse(value);
   if (!rows.success) cpsFailure("CPS_CATALOG_UNVERIFIED");
   const name = fullCourseName(source.venueName), courses = [...rows.data].sort((a, b) => a.courseId - b.courseId);
   const ids = courses.map(row => row.courseId), declared = options.courseOptions.map(row => row.courseId).sort((a, b) => a - b);
+  if (publicBuild === CPS_VENUE_PUBLIC_CATALOG_BUILD) {
+    // In this exact reviewed public client OnlineCourses populates the course
+    // selector; GetAllOptions also contains unselectable legacy options. Admit
+    // the complete explicit one-sheet public set, never a default/order/name
+    // guess from the wider options catalog.
+    const venue = publicClubIdentity(options, source);
+    requirePublicFlags(options.reservationOptions);
+    for (const course of courses) {
+      requirePublicFlags(course);
+      const option = options.courseOptions.find(row => row.courseId === course.courseId);
+      if (option) requirePublicFlags(option);
+    }
+    if (courses.length !== 1 || new Set(declared).size !== declared.length ||
+        courses.some(row => row.websiteId !== options.webSiteId || row.timezoneId !== source.timeZone ||
+          options.courseOptions.filter(option => option.courseId === row.courseId && option.courseName === row.courseName && option.webSiteId === row.websiteId).length !== 1) ||
+        /\b(?:private|members?|login|sign\s*in|simulator|practice|driving range|lesson|event|gift)\b/iu.test(courses[0].courseName.replace(/[_-]/gu, " ")))
+      cpsFailure("ADAPTER_IDENTITY_MISMATCH");
+    const context = parseCpsSource(source.bookingUrl)!;
+    const stable = { mode: "VENUE_BOUND_ONLINE_COURSES", buildNumber: publicBuild, tenant: context.tenant,
+      officialUrl: source.officialUrl, canonicalName: name, canonicalAddress: parsePublicUSBusinessAddress(source.venueAddress),
+      timeZone: source.timeZone, venue, publicFlags: publicFlags(options.reservationOptions), publicCourses: courses.map(row => ({ id: row.courseId, name: row.courseName,
+        timeZone: row.timezoneId, websiteId: row.websiteId, active: row.active, holes: row.holes, flags: publicFlags(row) })),
+      options: [...options.courseOptions].sort((a, b) => a.courseId - b.courseId).map(row => ({ id: row.courseId, name: row.courseName, websiteId: row.webSiteId, flags: publicFlags(row) })) };
+    return cpsMetadataSchema.parse({ family: "CPS", tenant: context.tenant, courseIds: ids,
+      publicCatalogMode: "VENUE_BOUND_ONLINE_COURSES", catalogHash: createHash("sha256").update(JSON.stringify(stable)).digest("hex") });
+  }
   if(nativeContact){
     if(nativeContact.phoneBooking)verifyCpsPhoneBookingContact(source,nativeContact.page,nativeContact.canonicalCoursePhone);
     else verifyCpsPostalContact(source,nativeContact.page,nativeContact.canonicalCoursePhone);
