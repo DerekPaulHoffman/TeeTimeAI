@@ -1,4 +1,6 @@
 import { fetchForeupTeeSheet } from "@/lib/adapters/foreup";
+import { fetchTeesnapTeeSheet } from "@/lib/adapters/teesnap";
+import { inspectTeesnapConfiguration, parseTeesnapRecipeSource, revalidateTeesnapConfiguration } from "./teesnap-source";
 import { uscheduleReadGate } from "@/lib/simulators/providers/uschedule-read-diagnostic";
 import { fetchTeeItUpTeeSheet } from "@/lib/adapters/teeitup";
 import { createAddressPinnedPublicFetchTransport } from "@/lib/automation/address-pinned-public-fetch";
@@ -94,6 +96,7 @@ function familyForSource(source: Source) {
   const url = new URL(source.bookingUrl);
   if (url.hostname === "foreupsoftware.com" && !url.search && foreupPath.test(url.pathname)) return "FOREUP" as const;
   if (isAcuityPublicBookingUrl(source.bookingUrl)) return "ACUITY" as const;
+  if (parseTeesnapRecipeSource(source.bookingUrl)) return "TEESNAP" as const;
   if (parseTeeItUpRecipeSource(source.bookingUrl)) return "TEEITUP" as const;
   if (uschedulePublicTenant(source.bookingUrl) || parseUScheduleLocationSource(source.bookingUrl)?.locationId) return "USCHEDULE" as const;
   return fail("UNSUPPORTED_ADAPTER_SOURCE");
@@ -224,6 +227,11 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
     if (!isSafeRecipeUrl(value)) return fail("UNSCOPED_ADAPTER_REQUEST");
     const url = new URL(value);
     if (url.href === booking.href) return url;
+    if (family === "TEESNAP" && adapter?.family === "TEESNAP" && input && url.origin === booking.origin &&
+        url.pathname === "/customer-api/teetimes-day" && exactKeys(url, ["course", "date", "players", "holes", "addons", "profileId"]) &&
+        url.searchParams.get("course") === String(adapter.courseId) && url.searchParams.get("date") === input.date &&
+        url.searchParams.get("players") === String(input.players) && url.searchParams.get("holes") === String(adapter.defaultHoles) &&
+        url.searchParams.get("addons") === adapter.defaultAddons && url.searchParams.get("profileId") === "") return url;
     if (adapter?.family === "TEEITUP" && adapter.officialIdentityProof && url.href === adapter.officialIdentityProof.officialPageUrl &&
         source.officialUrl && url.origin === new URL(source.officialUrl).origin) return url;
     if (savedPostalProof && url.href === savedPostalProof.officialSourceProof.officialPageUrl &&
@@ -287,6 +295,8 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
       if ([401, 403].includes(response.status)) failHttp("ACCESS_REQUIRED", response.status);
       if (!response.ok) failHttp("ADAPTER_TRANSPORT_FAILED", response.status);
       if (response.redirected || response.url && response.url !== url.href) fail("ADAPTER_TRANSPORT_FAILED");
+      if (family === "TEESNAP" && url.pathname === "/customer-api/teetimes-day" &&
+          !/^application\/json(?:\s*;|$)/iu.test(response.headers.get("content-type") ?? "")) fail("TEESNAP_PUBLIC_EVIDENCE_INCOMPLETE");
       const bytes = await response.arrayBuffer();
       readDiagnostic = { ...readDiagnostic, stage: "RESPONSE_BODY", responseBytes: bytes.byteLength <= 600_000 ? bytes.byteLength : null };
       if (bytes.byteLength > 600_000) fail("ADAPTER_RESPONSE_LIMIT");
@@ -716,6 +726,10 @@ export async function inspectExistingAdapter(source: Source, deps: Dependencies)
         ...(inventoryScope && publicCatalogSha256 ? { inventoryScope, publicCatalogSha256 } : {}),
         ...(proof ? { officialRouteOwnershipProof: proof } : {}) }) };
     }
+    if (session.family === "TEESNAP") {
+      if (!source.officialUrl || !source.venueAddress) fail("ADAPTER_IDENTITY_MISSING");
+      return { adapter: await inspectTeesnapConfiguration({ ...source, officialUrl: source.officialUrl, venueAddress: source.venueAddress }, session.read, deps.venueMatches) };
+    }
     const observed = await readAcuityPublicConfiguration({ bookingUrl: source.bookingUrl, fetchImpl: session.read });
     if (!observed) fail("ADAPTER_CONFIGURATION_UNVERIFIED");
     return { adapter: existingAdapterMetadataSchema.parse({ family: "ACUITY", ownerKey: observed.configuration.ownerKey,
@@ -828,6 +842,19 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
       return result(available.slots.filter(slot => slot.startsAt > now && slot.startsAt >= start && slot.endsAt <= end).map(slot => ({
         sourceId: slot.sourceId, startsAt: slot.startsAt.toISOString(), endsAt: slot.endsAt.toISOString(), availableSpots: 1,
         capacity, bookingUrl: recipe.source.bookingUrl, resourceId: slot.resourceId, productId: slot.productId,
+      })));
+    }
+    if (adapter.family === "TEESNAP") {
+      if (!recipe.source.venueAddress || recipe.target.offeringId || input.durationMinutes !== undefined) fail("ADAPTER_TARGET_MISMATCH");
+      await revalidateTeesnapConfiguration({ ...recipe.source, venueAddress: recipe.source.venueAddress }, adapter, session!.read, deps.venueMatches);
+      const available = await fetchTeesnapTeeSheet({ courseId: recipe.target.courseId, date: new Date(`${input.date}T00:00:00Z`), players: input.players,
+        metadata: { provider: "TEESNAP", courseId: adapter.courseId, bookingBaseUrl: recipe.source.bookingUrl,
+          defaultHoles: adapter.defaultHoles, defaultAddons: adapter.defaultAddons }, strictPublicEvidence: true }, session!.read);
+      if (available.targetDateStatus !== "OPEN") fail("TEESNAP_PUBLIC_EVIDENCE_INCOMPLETE");
+      return result(available.slots.map(slot => ({ ...slot, time: deps.toInstant(slot.startsAt, input) })).filter(slot =>
+        slot.time > now && slot.time >= start && slot.time < end && slot.availableSpots >= input.players).map(slot => ({
+        sourceId: slot.sourceId, startsAt: slot.time.toISOString(), availableSpots: slot.availableSpots, bookingUrl: recipe.source.bookingUrl,
+        ...(slot.holes === 9 || slot.holes === 18 ? { holes: slot.holes as 9 | 18 } : {}),
       })));
     }
     if (adapter.family === "FOREUP") {

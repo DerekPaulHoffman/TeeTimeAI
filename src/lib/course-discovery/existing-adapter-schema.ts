@@ -15,6 +15,7 @@ import { golfVxMetadataSchema } from "./golfvx-source";
 import { ezlinksMetadataSchema } from "./ezlinks-source";
 import { rexMetadataSchema } from "./rex-source";
 import { cpsMetadataSchema } from "./cps-source";
+import { teesnapMetadataSchema } from "./teesnap-source";
 import { mindbodyAppointmentMetadataSchema } from "./mindbody-appointment-grid";
 import { isUScheduleNonMemberRental, uschedulePublicLocationProofSchema } from "@/lib/simulators/providers/uschedule-location-source";
 import { uschedulePublicRentalPartyProofSchema } from "./uschedule-public-rental-party";
@@ -76,6 +77,7 @@ export const existingAdapterMetadataSchema = z.discriminatedUnion("family", [
   ezlinksMetadataSchema,
   rexMetadataSchema,
   cpsMetadataSchema,
+  teesnapMetadataSchema,
   mindbodyAppointmentMetadataSchema,
 ]);
 

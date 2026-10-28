@@ -57,6 +57,18 @@ export type TeesnapTeeSheetResult = {
   bookingWindowEvidence: BookingWindowEvidence | null;
 };
 
+export type TeesnapTeeSheetInput = {
+  courseId: string;
+  date: Date;
+  players: number;
+  metadata: TeesnapMetadata;
+  discoverBookingWindow?: boolean;
+  /** Learned recipes must prove the complete public day before returning slots. */
+  strictPublicEvidence?: true;
+};
+
+export const TEESNAP_PUBLIC_EVIDENCE_INCOMPLETE = "TEESNAP_PUBLIC_EVIDENCE_INCOMPLETE";
+
 export function isTeesnapMetadata(value: unknown): value is TeesnapMetadata {
   if (!value || typeof value !== "object") {
     return false;
@@ -72,25 +84,14 @@ export function isTeesnapMetadata(value: unknown): value is TeesnapMetadata {
   );
 }
 
-export async function fetchTeesnapSlots(input: {
-  courseId: string;
-  date: Date;
-  players: number;
-  metadata: TeesnapMetadata;
-}): Promise<TeeTimeSlot[]> {
-  return (await fetchTeesnapTeeSheet(input)).slots;
+export async function fetchTeesnapSlots(input: TeesnapTeeSheetInput, fetchImpl: typeof fetch = fetch): Promise<TeeTimeSlot[]> {
+  return (await fetchTeesnapTeeSheet(input, fetchImpl)).slots;
 }
 
-export async function fetchTeesnapTeeSheet(input: {
-  courseId: string;
-  date: Date;
-  players: number;
-  metadata: TeesnapMetadata;
-  discoverBookingWindow?: boolean;
-}): Promise<TeesnapTeeSheetResult> {
-  const availability = await fetchTeesnapAvailability(input);
+export async function fetchTeesnapTeeSheet(input: TeesnapTeeSheetInput, fetchImpl: typeof fetch = fetch): Promise<TeesnapTeeSheetResult> {
+  const availability = await fetchTeesnapAvailability(input, fetchImpl);
   const bookingWindowEvidence = input.discoverBookingWindow
-    ? await fetchTeesnapBookingWindow(input.metadata)
+    ? await fetchTeesnapBookingWindow(input.metadata, fetchImpl)
     : null;
 
   return {
@@ -99,24 +100,25 @@ export async function fetchTeesnapTeeSheet(input: {
   };
 }
 
-async function fetchTeesnapAvailability(input: {
-  courseId: string;
-  date: Date;
-  players: number;
-  metadata: TeesnapMetadata;
-}): Promise<Pick<TeesnapTeeSheetResult, "slots" | "targetDateStatus">> {
+async function fetchTeesnapAvailability(input: TeesnapTeeSheetInput, fetchImpl: typeof fetch): Promise<Pick<TeesnapTeeSheetResult, "slots" | "targetDateStatus">> {
+  if (input.strictPublicEvidence && !Number.isFinite(input.date.getTime())) incomplete();
   const holes = input.metadata.defaultHoles ?? 18;
   const url = buildTeeTimesUrl(input.metadata, input.date, input.players, holes);
   const response = await fetchWithProviderTimeout(url, {
     headers: teesnapHeaders(input.metadata.bookingBaseUrl)
-  });
-  const payload = (await response.json().catch(() => null)) as TeesnapResponse | null;
+  }, fetchImpl);
+  let payload = (await response.json().catch(() => null)) as TeesnapResponse | null;
 
   if (!response.ok) {
     if (payload?.errors === "date_not_allowed") {
       return { slots: [], targetDateStatus: "NOT_OPEN" };
     }
     throw providerHttpError("Teesnap tee times", response);
+  }
+
+  if (input.strictPublicEvidence) {
+    if (!/^application\/(?:[a-z0-9.+-]*\+)?json(?:;|$)/iu.test(response.headers.get("content-type") ?? "")) incomplete();
+    payload = strictPublicDay(payload, input.date);
   }
 
   const teeTimes = payload?.teeTimes?.teeTimes;
@@ -165,13 +167,14 @@ async function fetchTeesnapAvailability(input: {
 }
 
 async function fetchTeesnapBookingWindow(
-  metadata: TeesnapMetadata
+  metadata: TeesnapMetadata,
+  fetchImpl: typeof fetch
 ): Promise<BookingWindowEvidence | null> {
   try {
     const evidenceUrl = new URL("/", metadata.bookingBaseUrl).toString();
     const response = await fetchWithProviderTimeout(evidenceUrl, {
       headers: teesnapHeaders(metadata.bookingBaseUrl)
-    });
+    }, fetchImpl);
     if (!response.ok) {
       return null;
     }
@@ -204,6 +207,63 @@ async function fetchTeesnapBookingWindow(
   } catch {
     return null;
   }
+}
+
+function incomplete(): never { throw new Error(TEESNAP_PUBLIC_EVIDENCE_INCOMPLETE); }
+function record(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+function positiveId(value: unknown): value is number { return Number.isSafeInteger(value) && Number(value) > 0; }
+
+/** Validate every row before any legacy normalization can skip an invalid entry. */
+function strictPublicDay(value: unknown, date: Date): TeesnapResponse {
+  if (!record(value) || value.errors !== undefined && value.errors !== "" || !record(value.teeTimes)) incomplete();
+  const day = value.teeTimes;
+  if (!Array.isArray(day.bookings) || day.bookings.length > 2_000 || !Array.isArray(day.teeTimes) || day.teeTimes.length > 500) incomplete();
+  const bookingSizes = new Map<number, number>();
+  const bookingGolferIds = new Map<number, unknown[]>();
+  for (const booking of day.bookings) {
+    if (!record(booking) || !positiveId(booking.bookingId) || bookingSizes.has(booking.bookingId) ||
+        !Array.isArray(booking.golfers) || booking.golfers.length > 4 || !booking.golfers.every(record)) incomplete();
+    const golferIds = booking.golfers.filter(golfer => golfer.id !== undefined).map(golfer => golfer.id);
+    if (golferIds.some(id => !positiveId(id)) || new Set(golferIds).size !== golferIds.length) incomplete();
+    bookingSizes.set(booking.bookingId, booking.golfers.length);
+    bookingGolferIds.set(booking.bookingId, golferIds);
+  }
+  const requestedDate = date.toISOString().slice(0, 10);
+  const starts = new Set<string>();
+  for (const row of day.teeTimes) {
+    if (!record(row) || typeof row.teeTime !== "string" ||
+        !/^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d$/u.test(row.teeTime) ||
+        row.teeTime.slice(0, 10) !== requestedDate || starts.has(row.teeTime.slice(0, 16)) ||
+        !Array.isArray(row.teeOffSections) || row.teeOffSections.length < 1 || row.teeOffSections.length > 2) incomplete();
+    starts.add(row.teeTime.slice(0, 16));
+    const sections = new Set<string>();
+    for (const section of row.teeOffSections) {
+      if (!record(section) || typeof section.isHeld !== "boolean" ||
+          section.teeOff !== "FRONT_NINE" && section.teeOff !== "BACK_NINE" || sections.has(section.teeOff)) incomplete();
+      sections.add(section.teeOff);
+      // The public format omits bookings for an empty section.
+      const ids = section.bookings === undefined ? [] : section.bookings;
+      if (!Array.isArray(ids) || ids.length > 4 || new Set(ids).size !== ids.length ||
+          ids.some(id => !positiveId(id) || !bookingSizes.has(id))) incomplete();
+      if (ids.reduce((total: number, id: number) => total + bookingSizes.get(id)!, 0) > 4) incomplete();
+      const golferIds = ids.flatMap((id: number) => bookingGolferIds.get(id)!);
+      if (new Set(golferIds).size !== golferIds.length) incomplete();
+    }
+    if (row.prices !== undefined) {
+      if (!Array.isArray(row.prices) || row.prices.length > 2) incomplete();
+      const rounds = new Set<string>();
+      for (const price of row.prices) {
+        if (!record(price) || price.roundType !== "NINE_HOLE" && price.roundType !== "EIGHTEEN_HOLE" ||
+            rounds.has(price.roundType) || typeof price.price !== "string" ||
+            !/^\$?(?:0|[1-9]\d{0,6})(?:\.\d{1,2})?$/u.test(price.price) || Number(price.price.replace(/^\$/u, "")) <= 0) incomplete();
+        rounds.add(price.roundType);
+        price.price = price.price.replace(/^\$/u, "");
+      }
+    }
+  }
+  return value as TeesnapResponse;
 }
 
 function teesnapHeaders(bookingBaseUrl: string) {

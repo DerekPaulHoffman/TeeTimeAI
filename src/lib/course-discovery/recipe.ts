@@ -13,6 +13,7 @@ import { isPublicRentalLabel } from "./public-rental-label";
 import { sevenRoomsPublicRequests, sevenRoomsPublicRows } from "./sevenrooms-public-direct";
 import { publicHeaderFailureDiagnosticSchema } from "./public-header-diagnostic";
 import { parseMindbodyAppointmentSource } from "./mindbody-appointment-grid";
+import { parseTeesnapRecipeSource } from "./teesnap-source";
 export { expandRecipeTemplate, recipeTemplateSchema } from "./recipe-template";
 
 const secret = /(?:password|secret|token|cookie|session|credential|authorization|api.?key|email|phone)/iu;
@@ -278,8 +279,13 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
       recipe.adapter.family === "TEEITUP" && recipe.adapter.offeringKind === "SIMULATOR";
     if (recipe.source.providerFamily !== recipe.adapter.family ||
       (recipe.target.kind === "SIMULATOR") !== simulator ||
-      recipe.target.kind === "SIMULATOR" && !recipe.target.offeringId || ["TEEITUP", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS", "REX", "CPS", "MINDBODY"].includes(recipe.adapter.family) && !recipe.source.venueAddress)
+      recipe.target.kind === "SIMULATOR" && !recipe.target.offeringId || ["TEEITUP", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS", "REX", "CPS", "MINDBODY", "TEESNAP"].includes(recipe.adapter.family) && !recipe.source.venueAddress)
       ctx.addIssue({ code: "custom", message: "Supported adapter metadata must match the source and target kind" });
+    if (recipe.adapter.family === "TEESNAP" && (recipe.target.kind !== "OUTDOOR" || recipe.target.offeringId ||
+        parseTeesnapRecipeSource(recipe.source.bookingUrl)?.tenant !== recipe.adapter.tenant ||
+        parseTeesnapRecipeSource(recipe.source.officialUrl)?.bookingUrl !== parseTeesnapRecipeSource(recipe.source.bookingUrl)?.bookingUrl ||
+        recipe.source.timeZone !== recipe.adapter.timeZone))
+      ctx.addIssue({ code: "custom", message: "Public Teesnap metadata requires the exact official tenant root and canonical timezone" });
     if (recipe.adapter.family === "MINDBODY" && (parseMindbodyAppointmentSource(recipe.source.bookingUrl)?.studioId !== recipe.adapter.studioId ||
         recipe.source.timeZone !== recipe.adapter.timeZone))
       ctx.addIssue({ code: "custom", message: "Public appointment metadata requires the exact canonical studio and timezone" });

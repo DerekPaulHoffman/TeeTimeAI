@@ -7,6 +7,16 @@ Only backend-owned verification can activate an immutable recipe. Subsequent
 checks execute that recipe without model calls. Normal search workflows,
 canonical matching, deduplication and the email outbox retain delivery ownership.
 
+Public Teesnap outdoor methods can use the existing fixed reader when the
+canonical official URL is already the same HTTPS tenant root as the booking
+source. Inspection binds the full venue name, physical address, canonical
+timezone and public course catalog. Each independent replay refreshes those
+facts before one fixed, credentialless day request with bound date and players.
+Held sections, booking joins and every returned row must be complete before an
+empty result is accepted. A changed catalog, ambiguous identity, partial day or
+unknown booking window remains incomplete. Marketing-site delegation is outside
+this reader's current scope; recipes cannot supply arbitrary routes or code.
+
 ## Local worker modes
 
 `COURSE_DISCOVERY_WORKER_MODE` is local operator configuration:
