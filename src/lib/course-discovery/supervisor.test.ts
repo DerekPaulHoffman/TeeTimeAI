@@ -28,6 +28,27 @@ const untilCancelled = ({ signal }: { signal: AbortSignal }) => new Promise((_, 
   signal.addEventListener("abort", () => reject(signal.reason), { once: true });
 });
 
+describe("controller resource guard retry disposition", () => {
+  it.each(["DISCOVERY_NATIVE_TRANSPORT_FATAL", "DISCOVERY_GENERIC_BUDGET_EXHAUSTED"])("does not request a second model attempt after %s", async code => {
+    vi.useFakeTimers(); vi.setSystemTime(now);
+    const assigned = job("guarded-job"); let initial = true, retry = false;
+    const client = { next: vi.fn(async () => {
+      if (initial) { initial = false; return { job: assigned }; }
+      if (retry) { retry = false; return { job: { ...assigned, attempts: 2 } }; }
+      return { job: null };
+    }), heartbeat: vi.fn(async () => ({})), fail: vi.fn(async (_id, _lease, _reason, retryable) => { retry = retryable; }) };
+    const startWorker = vi.fn(async () => { throw Object.assign(Error(code), { code }); });
+    const supervisor = createCourseDiscoverySupervisor({ client, startWorker });
+    await supervisor.start(); await vi.advanceTimersByTimeAsync(1);
+    expect(client.fail).toHaveBeenCalledWith(assigned.id, assigned.leaseToken, "TOOL_FAILURE", false);
+    await supervisor.tick(); await vi.advanceTimersByTimeAsync(1);
+    expect(startWorker).toHaveBeenCalledOnce(); expect(assigned.attempts).toBe(1);
+    expect(assigned.firstPickedUpAt).toBe(new Date(now).toISOString());
+    expect(assigned.deadlineAt).toBe(new Date(now + 900000).toISOString());
+    await supervisor.stop();
+  });
+});
+
 describe("course discovery client authority", () => {
   it("signs the exact method, route, timestamp and body without disclosing the device token", async () => {
     const fetchImpl = vi.fn(async () => new Response('{"job":null}'));

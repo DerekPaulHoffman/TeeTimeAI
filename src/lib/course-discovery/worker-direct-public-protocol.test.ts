@@ -22,22 +22,37 @@ const job = () => ({ id: "current-job", leaseToken: "synthetic-lease", deadlineA
 /** Controller/process/transport boundaries are synthetic; no application, browser,
  * provider or database operation is performed by these worker flow fixtures. */
 async function run(options: { actions?: Action[]; mutate?: (value: ReturnType<typeof job>) => void; inspectError?: Error; checkpoint?: object; observation?: object; adapter?: object;
-  workerOptions?: Record<string, unknown>; resolveHook?: () => void; browserCloseThrows?: boolean; lateUsage?: number } = {}) {
+  workerOptions?: Record<string, unknown>; resolveHook?: () => void; browserCloseThrows?: boolean; lateUsage?: number;
+  browserSnapshot?: object; browserError?: Error; concurrentActions?: boolean; usageUpdates?: Record<string, number>[];
+  checkpointThrowsSynchronously?: boolean; firstCheckpointGate?: Promise<void>; usageDuringFirstCheckpoint?: Record<string, number>;
+  onProcessClose?: () => void; onCheckpointWrite?: (value: unknown) => void } = {}) {
   const home = mkdtempSync(join(tmpdir(), "worker-direct-protocol-")), original = job();
   options.mutate?.(original);
   writeFileSync(join(home, "auth.json"), "synthetic-test-auth");
   const replies: unknown[] = [], checkpoints: unknown[] = [];
+  let emitUsage: ((usage: Record<string, number>) => Promise<unknown>) | undefined;
+  let checkpointWrites = 0;
   const client = { helperEnvironment: () => ({ COURSE_DISCOVERY_BROWSER_TRANSPORT: "NATIVE_CHROME", COURSE_DISCOVERY_JOB_ID: original.id }),
-    checkpoint: vi.fn(async (_id, _lease, value) => { checkpoints.push(structuredClone(value)); return {}; }),
+    checkpoint: vi.fn((_id, _lease, value) => {
+      if (options.checkpointThrowsSynchronously) throw Error("synthetic synchronous checkpoint failure");
+      checkpoints.push(structuredClone(value)); options.onCheckpointWrite?.(value);
+      if (++checkpointWrites === 1 && options.firstCheckpointGate) {
+        if (options.usageDuringFirstCheckpoint) void emitUsage?.(options.usageDuringFirstCheckpoint);
+        return options.firstCheckpointGate.then(() => ({}));
+      }
+      return Promise.resolve({});
+    }),
     candidate: vi.fn(async () => ({ recipeHash: "a".repeat(64), challenges: [
       { id: "one", recipeHash: "a".repeat(64), input: original.request.input },
       { id: "two", recipeHash: "a".repeat(64), input: { ...original.request.input, date: "2030-01-03", players: 3 } },
     ] })), verification: vi.fn(async () => ({})), activate: vi.fn(async () => ({ recipeId: "saved" })) };
   const inspectProtocol = vi.fn(async () => { if (options.inspectError) throw options.inspectError;
     return structuredClone({ ...descriptor, ...(options.observation ? { observation: options.observation } : {}) }); });
-  const browserFactory = vi.fn(() => ({ close: async () => { if (options.browserCloseThrows) throw Error("synthetic close failure"); }, request: async input => ({ url: input.url, text: "Public page",
+  const browserClose = vi.fn(async () => { if (options.browserCloseThrows) throw Error("synthetic close failure"); });
+  const browserRequest = vi.fn(async input => { if (options.browserError) throw options.browserError; return ({ url: input.url, text: "Public page",
     browserTransport: "NATIVE_CHROME", navigationStatus: 200, loading: false, requests: [], controls: [], frames: [],
-    ...(input.action === "inspect_adapter" && options.adapter ? { adapter: options.adapter } : {}) }) }));
+    ...(input.action === "inspect_adapter" && options.adapter ? { adapter: options.adapter } : {}), ...options.browserSnapshot }); });
+  const browserFactory = vi.fn(() => ({ close: browserClose, request: browserRequest }));
   const validateRecipe = vi.fn(async () => ({ valid: true }));
   const executeRecipe = vi.fn(async () => ({ status: "AVAILABLE", complete: true, slots: [{ sourceId: "synthetic-opening" }] }));
   let toolsDone = Promise.resolve(), processClosed = false, processStarted = false;
@@ -46,15 +61,22 @@ async function run(options: { actions?: Action[]; mutate?: (value: ReturnType<ty
       client, cwd: process.cwd(), sourceHome: home, recipeSchema: {}, modelCatalogJson: JSON.stringify({ models: [{ slug: "gpt-6.1-sol" }] }),
       resolveCli: () => { options.resolveHook?.(); return "synthetic-no-process"; }, inspectProtocol, validateRecipe, executeRecipe, browserFactory,
       ...options.workerOptions,
-      processFactory: config => { processStarted = true; return ({ close: async () => { processClosed = true;
+      processFactory: config => { processStarted = true;
+        emitUsage = usage => config.onMessage({ method: "thread/tokenUsage/updated", params: { threadId: "thread", tokenUsage: { total: usage } } }, () => {});
+        return ({ close: async () => { processClosed = true; options.onProcessClose?.();
         if (options.lateUsage !== undefined) await config.onMessage({ method: "thread/tokenUsage/updated", params: { threadId: "thread", tokenUsage: { total: { totalTokens: options.lateUsage } } } }, () => {});
       }, notify: () => {}, request: async method => {
         if (method === "thread/start") return { thread: { id: "thread" }, approvalPolicy: "never", sandbox: { type: "readOnly" } };
         if (method === "turn/start") {
           toolsDone = Promise.resolve().then(async () => {
             await config.onMessage({ method: "turn/started", params: { threadId: "thread", turn: { id: "turn" } } }, () => {});
-            for (const [index, action] of (options.actions ?? [inspect(), proposal]).entries())
-              await config.onMessage({ id: index + 1, method: "item/tool/call", params: { threadId: "thread", turnId: "turn", ...action } }, value => replies.push(value));
+            for (const usage of options.usageUpdates ?? []) await config.onMessage({ method: "thread/tokenUsage/updated", params: { threadId: "thread", tokenUsage: { total: usage } } }, () => {});
+            const pending: Promise<unknown>[] = [];
+            for (const [index, action] of (options.actions ?? [inspect(), proposal]).entries()) {
+              const dispatched = config.onMessage({ id: index + 1, method: "item/tool/call", params: { threadId: "thread", turnId: "turn", ...action } }, value => replies.push(value));
+              if (options.concurrentActions) pending.push(dispatched); else await dispatched;
+            }
+            await Promise.all(pending);
             await config.onMessage({ method: "turn/completed", params: { threadId: "thread", turn: { id: "turn", status: "completed" } } }, () => {});
           });
           return { turn: { id: "turn" } };
@@ -63,7 +85,7 @@ async function run(options: { actions?: Action[]; mutate?: (value: ReturnType<ty
       } }); },
     }).catch(error => error);
     await toolsDone;
-    return { result, original, replies, checkpoints, client, inspectProtocol, browserFactory, validateRecipe, executeRecipe, processStarted, processClosed };
+    return { result, original, replies, checkpoints, client, inspectProtocol, browserFactory, browserRequest, browserClose, validateRecipe, executeRecipe, processStarted, processClosed };
   } finally {
     if (dirname(home) !== resolve(tmpdir()) || !home.startsWith(join(tmpdir(), "worker-direct-protocol-"))) throw new Error("UNOWNED_TEST_DIRECTORY");
     rmSync(home, { recursive: true, force: true });
@@ -71,6 +93,102 @@ async function run(options: { actions?: Action[]; mutate?: (value: ReturnType<ty
 }
 
 describe("unattended direct public protocol inspection", () => {
+  const open: Action = { tool: "discovery_browser", arguments: { action: "open", url: "https://examplegolf.org/" } };
+  const checkpoint: Action = { tool: "discovery_checkpoint", arguments: { summary: "bounded synthetic observation" } };
+  it.each(["snapshot", "error"])("stops trusted native fatal %s before queued work, proposal or activation", async origin => {
+    const nativeFirstFatal = { code: "NATIVE_REDIRECT_LOADER_MISMATCH", phase: "LOADER_OWNER", loaderKnown: false, privateBody: "must not persist" };
+    const out = await run({ concurrentActions: true, actions: [open, inspect(), proposal],
+      ...(origin === "snapshot" ? { browserSnapshot: { nativeFirstFatal } }
+        : { browserError: Object.assign(Error("native helper failed"), { code: "BROWSER_NAVIGATION_FAILED", details: { browserDiagnostics: { nativeFirstFatal } } }) }) });
+    expect(out.result.code).toBe("DISCOVERY_NATIVE_TRANSPORT_FATAL");
+    expect(out.browserRequest).toHaveBeenCalledOnce(); expect(out.inspectProtocol).not.toHaveBeenCalled();
+    expect(out.client.candidate).not.toHaveBeenCalled(); expect(out.client.activate).not.toHaveBeenCalled();
+    expect(out.browserClose).toHaveBeenCalledOnce(); expect(out.processClosed).toBe(true);
+    expect(out.result.discoveryMetrics).toMatchObject({ attemptedModelTurns: 1, completedModelTurns: 0,
+      genericBudget: { toolOperations: 1, stop: { code: "DISCOVERY_NATIVE_TRANSPORT_FATAL", nativeFirstFatal: { code: nativeFirstFatal.code } } } });
+    expect(out.checkpoints.some(value => (value as { genericGuard?: { code: string } }).genericGuard?.code === "DISCOVERY_NATIVE_TRANSPORT_FATAL")).toBe(true);
+    expect(JSON.stringify(out.checkpoints)).not.toContain("must not persist");
+    expect(out.replies).toHaveLength(0);
+  });
+  it.each(["native", "usage"])("keeps the %s guard authoritative when checkpoint invocation or packing throws synchronously", async origin => {
+    for (const packingFailure of [false, true]) {
+      const out = await run({ concurrentActions: true, actions: [open, inspect(), proposal],
+        ...(origin === "native" ? { browserSnapshot: { nativeFirstFatal: { code: "NATIVE_REDIRECT_LOADER_MISMATCH" } } }
+          : { usageUpdates: [{ totalTokens: 128001 }] }),
+        ...(packingFailure ? { workerOptions: { checkpointProvenance: { stagehandSource: { report: "x".repeat(32500) } } } }
+          : { checkpointThrowsSynchronously: true }) });
+      const code = origin === "native" ? "DISCOVERY_NATIVE_TRANSPORT_FATAL" : "DISCOVERY_GENERIC_BUDGET_EXHAUSTED";
+      expect(out.result.code).toBe(code); expect(out.result.discoveryMetrics.genericBudget.stop.code).toBe(code);
+      expect(out.result.discoveryMetrics.cleanup).toMatchObject({ browserClosed: true, modelClosed: true, credentialsRemoved: true, directoryRemoved: true });
+      expect(out.processClosed).toBe(true); expect(out.client.candidate).not.toHaveBeenCalled(); expect(out.client.activate).not.toHaveBeenCalled();
+      expect(out.replies).toHaveLength(0);
+      if (packingFailure) expect(out.client.checkpoint).not.toHaveBeenCalled();
+      else expect(out.client.checkpoint).toHaveBeenCalledOnce();
+    }
+  });
+  it.each([false, true])("serializes the guard receipt last while cleanup precedes an outstanding ordinary checkpoint (prior failure=%s)", async priorFailure => {
+    let release!: () => void, reject!: (error: Error) => void, closed = false;
+    const gate = new Promise<void>((resolve, fail) => { release = resolve; reject = fail; });
+    const writes: unknown[] = [];
+    const pending = run({ actions: [open, inspect(), proposal], firstCheckpointGate: gate,
+      usageDuringFirstCheckpoint: { totalTokens: 128001 }, onProcessClose: () => { closed = true; },
+      onCheckpointWrite: value => writes.push(structuredClone(value)) });
+    try {
+      await vi.waitFor(() => expect(closed).toBe(true));
+      expect(writes).toHaveLength(1); expect(writes[0]).not.toHaveProperty("genericGuard");
+    } finally {
+      if (priorFailure) reject(Error("synthetic first checkpoint failure")); else release();
+    }
+    const out = await pending;
+    expect(out.result.code).toBe("DISCOVERY_GENERIC_BUDGET_EXHAUSTED");
+    expect(writes).toHaveLength(2);
+    expect(writes.at(-1)).toHaveProperty("genericGuard.code", "DISCOVERY_GENERIC_BUDGET_EXHAUSTED");
+    expect(out.client.candidate).not.toHaveBeenCalled(); expect(out.client.activate).not.toHaveBeenCalled();
+    expect(out.browserClose).toHaveBeenCalledOnce(); expect(out.replies).toHaveLength(0);
+  });
+  it.each([{ text: "NATIVE_REDIRECT_LOADER_MISMATCH" }, { nativeFirstFatal: { code: "NATIVE_INVENTED_FAILURE" } }])(
+    "does not treat page prose or unknown native codes as fatal authority (%j)", async browserSnapshot => {
+      const out = await run({ browserSnapshot, actions: [open, inspect(), proposal] });
+      expect(out.result.outcome).toBe("activated"); expect(out.client.activate).toHaveBeenCalledOnce();
+    });
+  it("does not treat a bare error code as trusted native diagnostics", async () => {
+    const out = await run({ browserError: Object.assign(Error("unverified"), { code: "NATIVE_REDIRECT_LOADER_MISMATCH" }), actions: [open, inspect(), proposal] });
+    expect(out.result.outcome).toBe("activated");
+  });
+  it("allows eight total operations but blocks a ninth proposal even after earlier callbacks settle", async () => {
+    const allowed = await run({ actions: [...Array.from({ length: 6 }, () => checkpoint), inspect(), proposal] });
+    expect(allowed.result.outcome).toBe("activated"); expect(allowed.result.metrics.genericBudget.toolOperations).toBe(8);
+    const denied = await run({ actions: [...Array.from({ length: 7 }, () => checkpoint), inspect(), proposal] });
+    expect(denied.result.code).toBe("DISCOVERY_GENERIC_BUDGET_EXHAUSTED");
+    expect(denied.result.discoveryMetrics.genericBudget).toMatchObject({ toolOperations: 8, stop: { limit: "toolOperations" } });
+    expect(denied.client.candidate).not.toHaveBeenCalled(); expect(denied.processClosed).toBe(true);
+  });
+  it("stops an overfull parallel tool queue with the same nonretryable budget disposition", async () => {
+    const out = await run({ concurrentActions: true, actions: [...Array.from({ length: 8 }, () => checkpoint), proposal] });
+    expect(out.result.code).toBe("DISCOVERY_GENERIC_BUDGET_EXHAUSTED");
+    expect(out.result.discoveryMetrics.genericBudget.stop.limit).toBe("toolOperations");
+    expect(out.result.discoveryMetrics.genericBudget.toolOperations).toBeLessThanOrEqual(8);
+    expect(out.client.candidate).not.toHaveBeenCalled(); expect(out.processClosed).toBe(true);
+  });
+  it.each([
+    ["totalTokens", { totalTokens: 128000, inputTokens: 127900, cachedInputTokens: 120000, outputTokens: 100 }],
+    ["totalTokens", { inputTokens: 128001, cachedInputTokens: 128001, outputTokens: 0 }],
+    ["uncachedInputTokens", { totalTokens: 32000, inputTokens: 32000, cachedInputTokens: 0, outputTokens: 0 }],
+    ["outputTokens", { totalTokens: 8194, inputTokens: 2, cachedInputTokens: 2, outputTokens: 8192, reasoningOutputTokens: 43 }],
+  ] as const)("stops the %s threshold before any tool dispatch (%j)", async (limit, usage) => {
+    const out = await run({ usageUpdates: [usage] });
+    expect(out.result.code).toBe("DISCOVERY_GENERIC_BUDGET_EXHAUSTED");
+    expect(out.result.discoveryMetrics.genericBudget).toMatchObject({ toolOperations: 0, stop: { limit },
+      limits: { toolOperations: 8, totalTokens: 128000, uncachedInputTokens: 32000, outputTokens: 8192 } });
+    expect(out.inspectProtocol).not.toHaveBeenCalled(); expect(out.client.candidate).not.toHaveBeenCalled(); expect(out.processClosed).toBe(true);
+  });
+  it("replaces cumulative usage updates and does not add cached input or reasoning subsets twice", async () => {
+    const usage = { totalTokens: 100000, inputTokens: 92000, cachedInputTokens: 91000, outputTokens: 8000, reasoningOutputTokens: 7999 };
+    const out = await run({ usageUpdates: [usage, usage] });
+    expect(out.result.outcome).toBe("activated");
+    expect(out.result.metrics.tokenUsage).toEqual({ ...usage, uncachedInputTokens: 1000 });
+    expect(out.result.metrics.genericBudget).not.toHaveProperty("stop");
+  });
   it("uses an effective remaining deadline without rewriting original server proof clocks", async () => {
     const picked = Date.now() - 700000, supplied = new Date(picked + 800000).toISOString();
     const out = await run({ mutate: value => Object.assign(value, { firstPickedUpAt: new Date(picked).toISOString() }), workerOptions: { workDeadlineAt: supplied } });

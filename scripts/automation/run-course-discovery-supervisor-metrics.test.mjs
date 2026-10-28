@@ -15,8 +15,8 @@ if(-not $definition){throw 'PROJECTOR_NOT_FOUND'};
 $payload=[Console]::In.ReadToEnd() | ConvertFrom-Json;
 $result=ConvertTo-SafeGenericFallbackUsage -Worker $payload.genericFallback.worker;
 if($null -eq $result){[Console]::WriteLine('null')}else{[Console]::WriteLine(($result | ConvertTo-Json -Compress -Depth 8))}`;
-function project(value){
-  const run=spawnSync('pwsh',['-NoProfile','-NonInteractive','-Command',isolated],{
+function project(value,shell='pwsh'){
+  const run=spawnSync(shell,['-NoProfile','-NonInteractive','-Command',isolated],{
     cwd:dirname(sourcePath),input:JSON.stringify(value),encoding:'utf8',timeout:15_000,
     env:{...process.env,PROJECTOR_SOURCE:sourcePath},maxBuffer:100_000});
   assert.equal(run.status,0,run.stderr);return JSON.parse(run.stdout.trim());
@@ -45,4 +45,27 @@ test('unknown and malformed numbers cannot enter the supervisor diagnostic',()=>
       attemptedModelTurns:2,completedModelTurns:1,tokenUsage:{totalTokens:12},usageLowerBound:true});
   assert.deepEqual(project({genericFallback:{worker:{attemptedModelTurns:1}}}),{
     attemptedModelTurns:1,usageLowerBound:false});
+});
+
+test('generic budget logs bounded counters and closed stop codes without private diagnostics',()=>{
+  const canary='PRIVATE_NATIVE_URL_HEADER';
+  assert.deepEqual(project({genericFallback:{worker:{tokenUsage:{totalTokens:128001},genericBudget:{
+    toolOperations:3,usageMayIncludeInFlightResponse:true,limits:{private:canary},
+    stop:{code:'DISCOVERY_GENERIC_BUDGET_EXHAUSTED',limit:'totalTokens',nativeFirstFatal:{url:canary},message:canary}}}}}),{
+    tokenUsage:{totalTokens:128001},genericBudget:{toolOperations:3,usageMayIncludeInFlightResponse:true,
+      stop:{code:'DISCOVERY_GENERIC_BUDGET_EXHAUSTED',limit:'totalTokens'}},usageLowerBound:true});
+  const native=project({genericFallback:{worker:{genericBudget:{toolOperations:1,
+    stop:{code:'DISCOVERY_NATIVE_TRANSPORT_FATAL',limit:'not-an-authority',nativeFirstFatal:{url:canary}}}}}});
+  assert.deepEqual(native,{genericBudget:{toolOperations:1,stop:{code:'DISCOVERY_NATIVE_TRANSPORT_FATAL'}},usageLowerBound:false});
+  assert.equal(JSON.stringify(native).includes(canary),false);
+  assert.equal(project({genericFallback:{worker:{genericBudget:{toolOperations:-1,
+    usageMayIncludeInFlightResponse:canary,stop:{code:canary,limit:'totalTokens'}}}}}),null);
+});
+
+test('installed Windows PowerShell retains the same safe budget receipt',{skip:process.platform!=='win32'},()=>{
+  const value={genericFallback:{worker:{attemptedModelTurns:1,completedModelTurns:0,
+    tokenUsage:{totalTokens:128001,inputTokens:127999,cachedInputTokens:100000,outputTokens:2},
+    genericBudget:{toolOperations:4,usageMayIncludeInFlightResponse:true,
+      stop:{code:'DISCOVERY_GENERIC_BUDGET_EXHAUSTED',limit:'totalTokens'}}}}};
+  assert.deepEqual(project(value,'powershell.exe'),project(value));
 });

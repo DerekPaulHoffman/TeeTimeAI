@@ -171,6 +171,22 @@ describe("clean unresolved source fresh-root handoff", () => {
     expect(t.checkpoints.at(-1)).toMatchObject({ controller: { officialObserved: true } });
     expect(t.client.checkpoint).toHaveBeenCalledTimes(2); expect(t.client.activate).not.toHaveBeenCalled();
   });
+  it.each(["DISCOVERY_NATIVE_TRANSPORT_FATAL", "DISCOVERY_GENERIC_BUDGET_EXHAUSTED"])("preserves %s and its bounded generic stop receipt through fallback", async code => {
+    const t = setup(); cleanUnresolvedReport(t);
+    const stop = { code, toolOperations: 1, tokenUsage: { totalTokens: 77 } };
+    const failure = Object.assign(Error(code), { code, discoveryMetrics: { attemptedModelTurns: 1, completedModelTurns: 0,
+      tokenUsage: { totalTokens: 77 }, genericBudget: { stop } } });
+    const genericWorker = vi.fn(async options => {
+      await options.client.checkpoint(options.job.id, options.job.leaseToken, { ...options.checkpointProvenance, genericGuard: stop });
+      throw failure;
+    });
+    const actual = await t.run({ genericWorker }).catch(error => error);
+    expect(actual).toBe(failure); expect(actual.code).toBe(code);
+    expect(actual.discoveryMetrics.genericFallback.worker.genericBudget.stop).toEqual(stop);
+    expect(t.checkpoints.at(-1)).toHaveProperty("genericGuard", stop);
+    expect(genericWorker).toHaveBeenCalledOnce(); expect(t.client.activate).not.toHaveBeenCalled();
+    expect(t.client.checkpoint).toHaveBeenCalledTimes(2);
+  });
   it("does not hand off after provenance checkpoint loses the original lease", async () => {
     const t = setup(); cleanUnresolvedReport(t); const genericWorker = vi.fn();
     t.client.checkpoint.mockRejectedValue(Object.assign(Error("lease rejected"), { code: "DISCOVERY_LEASE_REJECTED" }));

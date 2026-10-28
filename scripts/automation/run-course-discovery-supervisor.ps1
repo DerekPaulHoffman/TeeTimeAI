@@ -68,6 +68,24 @@ function ConvertTo-SafeGenericFallbackUsage {
     }
   }
   if ($tokens.Count) { $safe.tokenUsage = $tokens }
+  if ($Worker.genericBudget) {
+    $budget = [ordered]@{}
+    $operations = $Worker.genericBudget.toolOperations
+    if ($null -ne $operations -and ([string]$operations) -cmatch '^(0|[1-9]\d{0,5})$' -and [long]$operations -le 100000) {
+      $budget.toolOperations = [long]$operations
+    }
+    if ($Worker.genericBudget.usageMayIncludeInFlightResponse -is [bool]) {
+      $budget.usageMayIncludeInFlightResponse = $Worker.genericBudget.usageMayIncludeInFlightResponse
+    }
+    if ($Worker.genericBudget.stop.code -cin @('DISCOVERY_NATIVE_TRANSPORT_FATAL', 'DISCOVERY_GENERIC_BUDGET_EXHAUSTED')) {
+      $stop = [ordered]@{ code = $Worker.genericBudget.stop.code }
+      if ($stop.code -ceq 'DISCOVERY_GENERIC_BUDGET_EXHAUSTED' -and $Worker.genericBudget.stop.limit -cin @('toolOperations', 'totalTokens', 'uncachedInputTokens', 'outputTokens')) {
+        $stop.limit = $Worker.genericBudget.stop.limit
+      }
+      $budget.stop = $stop
+    }
+    if ($budget.Count) { $safe.genericBudget = $budget }
+  }
   if (-not $safe.Count) { return $null }
   $safe.usageLowerBound = [bool]($tokens.Count -gt 0 -or $safe.Contains('completedModelTurns'))
   return $safe

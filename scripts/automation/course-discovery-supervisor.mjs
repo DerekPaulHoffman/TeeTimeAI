@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createCourseDiscoveryClient, discoveryError } from "./course-discovery-client.mjs";
-import { noVerifiedRecipeDiagnostic } from "./course-discovery-worker.mjs";
+import { noVerifiedRecipeDiagnostic, DISCOVERY_NONRETRYABLE_GUARD_CODES } from "./course-discovery-worker.mjs";
 import { createCourseDiscoveryHandlers, DISCOVERY_WORKER_MODES } from "./course-discovery-handlers.mjs";
 import { STAGEHAND_SOURCE_BUDGET_MS } from "./course-discovery-stagehand-source.mjs";
 
@@ -184,7 +184,7 @@ export function createCourseDiscoverySupervisor({ client, startWorker, executeRe
           activatedEvent = { ...jobEvent, completedAt: new Date(now()).toISOString(), metrics: outcome.metrics };
         }
       } catch (error) {
-        let retryableFailure = error?.code !== "STAGEHAND_SOURCE_BUDGET_EXHAUSTED";
+        let retryableFailure = error?.code !== "STAGEHAND_SOURCE_BUDGET_EXHAUSTED" && !DISCOVERY_NONRETRYABLE_GUARD_CODES.includes(error?.code);
         if (!execution && !activationAcknowledgedAt && job.attempts === 1 && transientModelFailure(error)) {
           // Delay only the existing retry. Keep this owned lease and heartbeat
           // live; cancellation and the original work deadline still win.

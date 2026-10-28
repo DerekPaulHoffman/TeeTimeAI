@@ -7,13 +7,15 @@ import { createInterface } from "node:readline";
 import { discoveryError } from "./course-discovery-client.mjs";
 import { safeBrowserActionIssues, safeDiscoveryTurnFailure, safePublicUrlRejectionDiagnostic } from "./course-discovery-diagnostics.mjs";
 import { createDiscoveryPublicAssetInventory } from "./course-discovery-public-assets.mjs";
-import { nativeRouterOperations, nativeRouterErrorNames, nativeRouterErrorCategories } from "./stagehand/source-diagnostic.mjs";
+import { nativeRouterOperations, nativeRouterErrorNames, nativeRouterErrorCategories, projectNativeRouterFailure } from "./stagehand/source-diagnostic.mjs";
 
 const VERSION = "0.160.1";
 const BROWSER_ACTIONS = ["open", "observe", "click", "select", "fill", "scroll", "inspect_adapter", "inspect", "finish"];
 const FORBIDDEN_ITEMS = new Set(["commandExecution", "fileChange", "mcpToolCall", "webSearch", "imageGeneration", "collabAgentToolCall"]);
 export const DISCOVERY_MODEL = "gpt-6.1-sol";
 export const DISCOVERY_REASONING_EFFORT = "medium";
+export const DISCOVERY_GENERIC_LIMITS = Object.freeze({ toolOperations: 8, totalTokens: 128_000, uncachedInputTokens: 32_000, outputTokens: 8_192 });
+export const DISCOVERY_NONRETRYABLE_GUARD_CODES = Object.freeze(["DISCOVERY_NATIVE_TRANSPORT_FATAL", "DISCOVERY_GENERIC_BUDGET_EXHAUSTED"]);
 function safeObservedUrl(value) {
   if (typeof value !== "string" || value.length > 2048) return false;
   try {
@@ -1370,8 +1372,9 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
   executeRecipe = args => executeDiscoveryRecipe({ cwd, helperEnvironment: client.helperEnvironment("discovery", originalJob), ...args }), resolveCli = resolveDiscoveryCli,
   sourceHome = process.env.CODEX_HOME || join(homedir(), ".codex"), recipeSchema, modelCatalogJson, freshOfficialStart = false, checkpointProvenance = {},
   recipeEngineConstraint }) {
+  let guardFailure;
   const job = originalJob, effectiveDeadline = discoveryWorkerWorkDeadline(job, workDeadlineAt), operationDeadlineAt = new Date(effectiveDeadline).toISOString();
-  const checkWork = () => { if (Date.now() >= effectiveDeadline) throw discoveryError("DISCOVERY_WORK_DEADLINE"); signal?.throwIfAborted(); };
+  const checkWork = () => { if (guardFailure) throw guardFailure; if (Date.now() >= effectiveDeadline) throw discoveryError("DISCOVERY_WORK_DEADLINE"); signal?.throwIfAborted(); };
   checkWork();
   if (recipeEngineConstraint !== undefined && (recipeEngineConstraint !== "EXISTING_ADAPTER" || freshOfficialStart !== true))
     throw discoveryError("DISCOVERY_RECIPE_ENGINE_CONSTRAINT_INVALID");
@@ -1405,10 +1408,12 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
   let browserControlsInvalidated = false;
   let adapterObservation;
   let currentAccessRequirementObserved = false;
+  let checkpointTail = Promise.resolve();
   const controllerCheckpoint = () => ({ version: 1, officialUrl: job.request.identity.officialUrl,
     officialSourceObserved, observedNavigationUrls: [...observedNavigationUrls], observedReadUrls: [...observedReadUrls], observedEntryUrls: [...observedEntryUrls], browserTransport, transportFallbackUsed, lastFeedback, lastFailure, terminalDiagnostic });
   const saveCheckpoint = extra => {
     if (activationStarted || activated) throw discoveryError("DISCOVERY_ACTIVATION_FINISHED");
+    if (guardFailure && !extra?.genericGuard) throw guardFailure;
     let payload = { ...provenance, summary: checkpointSummary, controller: controllerCheckpoint(), ...extra };
     while (Buffer.byteLength(JSON.stringify(payload), "utf8") > checkpointBytes && (observedReadUrls.size || observedEntryUrls.size || observedNavigationUrls.size)) {
       const oldest = observedReadUrls.size ? observedReadUrls : observedEntryUrls.size ? observedEntryUrls : observedNavigationUrls;
@@ -1416,7 +1421,15 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
       payload = { ...provenance, summary: checkpointSummary, controller: controllerCheckpoint(), ...extra };
     }
     if (Buffer.byteLength(JSON.stringify(payload), "utf8") > checkpointBytes) throw discoveryError("DISCOVERY_CHECKPOINT_INVALID");
-    return client.checkpoint(job.id, job.leaseToken, payload, signal);
+    // The backend replaces the whole checkpoint. Serialize writes so a pending
+    // ordinary snapshot cannot land after the terminal guard receipt. A failed
+    // prior write must not prevent that final diagnostic attempt.
+    const write = checkpointTail.catch(() => {}).then(() => {
+      if (activationStarted || activated) throw discoveryError("DISCOVERY_ACTIVATION_FINISHED");
+      return client.checkpoint(job.id, job.leaseToken, payload, signal);
+    });
+    checkpointTail = write.catch(() => {});
+    return write;
   };
   const initialUrls = () => freshOfficialStart && !officialSourceObserved ? [job.request.identity.officialUrl] : [...new Set([job.request.identity.officialUrl, job.request.identity.bookingUrl,
     ...observedNavigationUrls, ...observedEntryUrls].filter(Boolean))].slice(0, 16);
@@ -1447,8 +1460,12 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
   let reportedMetrics;
   let modelFailure;
   let attemptedModelTurns = 0, completedModelTurns = 0, primaryFailure;
+  let toolOperations = 0;
+  let guardReceipt;
+  let guardCheckpoint;
   const metrics = () => (reportedMetrics = { model, tokenUsage, browserActions, replayDurationsMs, browserTransportsTried,
     attemptedModelTurns, completedModelTurns, originalDeadlineAt: job.deadlineAt, workDeadlineAt: operationDeadlineAt,
+    genericBudget: { limits: DISCOVERY_GENERIC_LIMITS, toolOperations, ...(guardReceipt ? { stop: guardReceipt } : {}), usageMayIncludeInFlightResponse: true },
     ...(modelFailure ? { modelFailure } : {}),
     ...(firstBrowserStartupMs !== undefined ? { firstBrowserStartupMs } : {}), ...(browserStartedAt ? { browserStartedAt } : {}),
     ...(firstOpenStartedAt ? { firstOpenStartedAt } : {}), ...(firstOpenCompletedAt ? { firstOpenCompletedAt,
@@ -1476,6 +1493,31 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
   const completion = new Promise((resolveTurn, reject) => { finish = resolveTurn; rejectTurn = reject; });
   // Early failures may occur before the turn completion is awaited.
   completion.catch(() => {});
+  const stopForGuard = (code, detail) => {
+    if (guardFailure || activated || activationStarted) return;
+    guardReceipt = { code, ...detail, toolOperations, tokenUsage: { ...tokenUsage } };
+    guardFailure = discoveryError(code, { details: guardReceipt });
+    stopping = true;
+    terminalDiagnostic = { code, ...(detail.nativeFirstFatal ? { nativeFirstFatal: detail.nativeFirstFatal } : {}) };
+    // Start bounded persistence before rejecting the turn. Cleanup need not wait
+    // for that network call, and no tool result invites another model response.
+    guardCheckpoint = Promise.resolve().then(() => saveCheckpoint({ genericGuard: { ...guardReceipt, limits: DISCOVERY_GENERIC_LIMITS } })).catch(() => {});
+    rejectTurn(guardFailure);
+  };
+  const checkUsageBudget = () => {
+    // Input includes cached input and output includes reasoning. Neither subset
+    // is added again. Missing total cannot bypass the input/output sum bound.
+    const observed = { ...tokenUsage, totalTokens: Math.max(tokenUsage.totalTokens ?? 0, (tokenUsage.inputTokens ?? 0) + (tokenUsage.outputTokens ?? 0)) };
+    for (const key of ["totalTokens", "uncachedInputTokens", "outputTokens"])
+      if (observed[key] >= DISCOVERY_GENERIC_LIMITS[key]) {
+        stopForGuard("DISCOVERY_GENERIC_BUDGET_EXHAUSTED", { limit: key }); break;
+      }
+  };
+  const checkNativeFatal = snapshot => {
+    const fatal = projectNativeRouterFailure(snapshot?.nativeFirstFatal);
+    if (fatal && fatal.code !== "UNKNOWN") stopForGuard("DISCOVERY_NATIVE_TRANSPORT_FATAL", { nativeFirstFatal: fatal });
+    checkWork();
+  };
   try {
     checkWork();
     const snapshot = modelCatalogJson ?? prepareDiscoveryModelCatalog({ sourceHome, model });
@@ -1507,7 +1549,9 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
           tokenUsage = Object.fromEntries(["totalTokens", "inputTokens", "cachedInputTokens", "outputTokens", "reasoningOutputTokens"]
             .filter(key => Number.isSafeInteger(reported[key]) && reported[key] >= 0).map(key => [key, reported[key]]));
           if (Number.isSafeInteger(tokenUsage.inputTokens)) tokenUsage.uncachedInputTokens = Math.max(0, tokenUsage.inputTokens - (tokenUsage.cachedInputTokens ?? 0));
+          checkUsageBudget();
         }
+        if (guardFailure) return;
         if (message.method === "turn/started" && message.params?.threadId === threadId) turnId = message.params.turn.id;
         if (message.method === "item/started" && FORBIDDEN_ITEMS.has(message.params?.item?.type)) {
           rejectTurn(discoveryError("DISCOVERY_FORBIDDEN_TOOL")); return;
@@ -1526,8 +1570,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
           rejectTurn(discoveryError("DISCOVERY_FORBIDDEN_TOOL")); return;
         }
         if (queuedTools >= 8) {
-          send({ id: message.id, error: { code: -32000, message: "Discovery tool queue is full." } });
-          rejectTurn(discoveryError("DISCOVERY_TOOL_QUEUE_LIMIT")); return;
+          stopForGuard("DISCOVERY_GENERIC_BUDGET_EXHAUSTED", { limit: "toolOperations" }); return;
         }
         queuedTools++;
         const run = async () => { let replayClosedBrowser = false; try {
@@ -1535,6 +1578,11 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
           if (stopping || signal?.aborted) throw discoveryError("DISCOVERY_CANCELLED");
           if (activated) throw discoveryError("DISCOVERY_ALREADY_ACTIVATED");
           if (activationStarted) throw discoveryError("DISCOVERY_ACTIVATION_FINISHED");
+          checkUsageBudget(); checkWork();
+          if (toolOperations >= DISCOVERY_GENERIC_LIMITS.toolOperations) {
+            stopForGuard("DISCOVERY_GENERIC_BUDGET_EXHAUSTED", { limit: "toolOperations" }); checkWork();
+          }
+          toolOperations++;
           const input = message.params.arguments;
           let result;
           let terminalOutcome;
@@ -1553,6 +1601,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
               officialUrl: job.request.identity.officialUrl, observedNavigationUrls });
             if (directSource) {
               const descriptor = await inspectProtocol({ source: directSource, input: structuredClone(job.request.input), deadlineAt: operationDeadlineAt, signal });
+              checkWork();
               const measured = descriptor?.observation;
               if (Number.isSafeInteger(measured?.publicRequests) && measured.publicRequests >= 0 && measured.publicRequests <= 2)
                 providerRequestsObserved = (providerRequestsObserved ?? 0) + measured.publicRequests;
@@ -1575,6 +1624,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
             }
             if (input.action === "open") firstOpenStartedAt ??= new Date().toISOString();
             let snapshot = await browser.request(input);
+            checkNativeFatal(snapshot);
             recordBrowserMetrics(snapshot);
             browserThrottleObserved ||= snapshot?.navigationStatus === 429 ||
               Array.isArray(snapshot?.requests) && snapshot.requests.some(request => request?.status === 429 || request?.blockedReason === "PROVIDER_THROTTLED") ||
@@ -1606,6 +1656,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
               publicAssets.begin(browser, browserTransport);
               browserActions++;
               snapshot = await browser.request({ action: "open", url: observedDocument });
+              checkNativeFatal(snapshot);
               recordBrowserMetrics(snapshot);
               if (snapshot?.browserTransport !== "PINNED_HTTP") throw discoveryError("DISCOVERY_BROWSER_TRANSPORT_UNVERIFIED");
               browserControlsInvalidated = false;
@@ -1630,6 +1681,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
               publicAssets.begin(browser, browserTransport);
               browserActions++;
               snapshot = await browser.request({ action: "open", url: snapshot.url });
+              checkNativeFatal(snapshot);
               recordBrowserMetrics(snapshot);
               snapshot = { ...snapshot, transportFallback: "Retried this observed document once using the other public-read transport after HTTP 403." };
             }
@@ -1720,6 +1772,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
               recipe = publicAssets.enrich(recipe, browser, actualBrowserTransport);
             }
             const validation = await validateRecipe({ recipe, signal });
+            checkWork();
             if (validation.valid !== true) throw discoveryError("DISCOVERY_RECIPE_INVALID", { details: { issues: validation.issues } });
             const proposedUrl = recipe.source?.bookingUrl;
             const sourceEvidence = typedRepairEvidence ?? (officialSourceObserved && job.request.identity.officialUrl && typeof proposedUrl === "string" && observedNavigationUrls.has(proposedUrl)
@@ -1735,17 +1788,24 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
             replayClosedBrowser = true; browserControlsInvalidated = true;
             lastBrowserSnapshot = undefined; currentAccessRequirementObserved = false;
             adapterObservation = undefined;
-            activated = await verifyDiscoveryCandidate({ client, job, recipe, executeRecipe: options => executeRecipe({ ...options, deadlineAt: operationDeadlineAt }), signal, sourceEvidence,
+            activated = await verifyDiscoveryCandidate({ client, job, recipe, executeRecipe: options => { checkWork(); return executeRecipe({ ...options, deadlineAt: operationDeadlineAt }); }, signal, sourceEvidence,
               onReplay: ({ elapsedMs }) => replayDurationsMs.push(elapsedMs),
               beforeActivate: async () => { checkWork(); activationStarted = true; await beforeActivate(); },
               afterActivate: () => afterActivate({ metrics: metrics() }) });
             result = { activated: true };
           }
+          checkWork();
           send({ id: message.id, result: { success: true, contentItems: [{ type: "inputText", text: JSON.stringify(result) }] } });
           if (activated) finish();
           else if (retryableLimitation) rejectTurn(discoveryError("DISCOVERY_NO_VERIFIED_RECIPE", { discoveryDiagnostic: terminalDiagnostic }));
           else if (terminalOutcome) rejectTurn(discoveryError(`DISCOVERY_${terminalOutcome}`));
         } catch (error) {
+          if (message.params.tool === "discovery_browser" && !guardFailure) {
+            const diagnostics = safeBrowserFailureDiagnostics(error?.details?.browserDiagnostics);
+            const fatal = projectNativeRouterFailure(diagnostics?.nativeFirstFatal);
+            if (fatal && fatal.code !== "UNKNOWN") stopForGuard("DISCOVERY_NATIVE_TRANSPORT_FATAL", { nativeFirstFatal: fatal });
+          }
+          if (guardFailure) return;
           if (message.params.tool === "discovery_browser") adapterObservation = undefined;
           if (error?.code === "BROWSER_SESSION_CLOSED") publicAssets.clear();
           const feedback = safeLastFeedback({ code: error?.code, details: error?.details }) ??
@@ -1855,11 +1915,15 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
   } finally {
     stopping = true;
     publicAssets.clear();
-    if (app && threadId && turnId) await app.request("turn/interrupt", { threadId, turnId }).catch(() => {});
+    if (app && threadId && turnId) {
+      const interrupted = app.request("turn/interrupt", { threadId, turnId }).catch(() => {});
+      if (!guardFailure) await interrupted;
+    }
     let browserClosed = true, modelClosed = true;
     try { await retiringBrowser?.close(); } catch { browserClosed = false; }
     try { await browser?.close(); } catch { browserClosed = false; }
     try { await app?.close(); } catch { modelClosed = false; }
+    await guardCheckpoint;
     // Final usage may arrive while the completed turn is being interrupted or
     // the app-server transport is closing, after the result was constructed.
     if (reportedMetrics) Object.assign(reportedMetrics, { tokenUsage: { ...tokenUsage }, attemptedModelTurns, completedModelTurns });

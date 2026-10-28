@@ -32,6 +32,17 @@ automatic retry, using the same job, request, source fingerprint and original
 deadlines. The fixed inspection and independent backend challenges stay fresh.
 Incomplete reads never become an empty availability result.
 
+Generic fallback stops immediately when the trusted browser reports a finite
+native transport fatality. It does not send that dead browser back to the model
+or automatically spend a second attempt on it. Each generic attempt also allows
+at most eight tool operations, 128,000 total recorded tokens, 32,000 uncached
+input tokens and 8,192 output tokens. Usage updates replace cumulative totals;
+cached input and reasoning output are subsets, not additional charges. A
+threshold is enforced when usage is reported, so an in-flight response can
+overshoot it. Budget exhaustion is terminal for that job; original failed jobs
+and deadlines are preserved. This bounds investigation rather than claiming a
+provider access restriction or empty inventory.
+
 A failed execution retains a previously verified immutable method when its
 current source, identity and hash still agree. It opens one repair job based on
 that exact version while normal executions can retry the method with fresh
