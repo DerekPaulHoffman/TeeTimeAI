@@ -1,5 +1,6 @@
 import type { CourseAlertSupport, CourseMonitoringSupport } from "@/lib/courses/intelligence";
 import type { CourseCandidate } from "@/lib/places/google";
+import { courseSelectionKey } from "@/lib/courses/shared-facility";
 import { MAX_COURSE_PREFERENCES } from "@/lib/validation/search-constraints";
 
 import { sanitizeSearchPrefill } from "./search-prefill";
@@ -121,10 +122,10 @@ function sanitizeCourseList(value: unknown, maximum: number, mode: SearchMode) {
 
   for (const candidate of value.slice(0, maximum)) {
     const course = sanitizeCourseCandidate(candidate, mode);
-    if (!course || seenPlaceIds.has(course.googlePlaceId) || (course.offeringId && seenOfferingIds.has(course.offeringId))) {
+    if (!course || seenPlaceIds.has(courseSelectionKey(course)) || (course.offeringId && seenOfferingIds.has(course.offeringId))) {
       continue;
     }
-    seenPlaceIds.add(course.googlePlaceId);
+    seenPlaceIds.add(courseSelectionKey(course));
     if (course.offeringId) seenOfferingIds.add(course.offeringId);
     courses.push(course);
   }

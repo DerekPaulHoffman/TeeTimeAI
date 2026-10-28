@@ -9,6 +9,12 @@ vi.mock("@/lib/prisma", () => ({ prisma: { course: { findMany: vi.fn() } } }));
 const mockedPrisma = vi.mocked(prisma, { deep: true });
 
 describe("course alert support enrichment", () => {
+  it("does not retain stale shared-facility members from a discovery cache", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([]);
+    const candidate = { courseId: "knolls", googlePlaceId: "tashua", name: "Tashua", latitude: 41.24, longitude: -73.2, timeZone: "America/New_York" };
+    const [result] = await enrichCoursesWithAlertSupport([{ ...candidate, facilityCourses: [candidate, { ...candidate, courseId: "glen" }] }]);
+    expect(result).not.toHaveProperty("facilityCourses");
+  });
   beforeEach(() => vi.clearAllMocks());
 
   it("marks a known non-public course for review before selection", async () => {

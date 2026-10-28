@@ -14,6 +14,7 @@ vi.mock("@/lib/auth/current-user", () => ({ getRequiredAppUser: async () => ({ i
 vi.mock("@/lib/env", () => ({ hasClerkConfig: () => true, hasDatabaseConfig: () => true }));
 vi.mock("@/lib/searches/service", () => ({ listTeeSearchesForUser: vi.fn() }));
 vi.mock("@/lib/prisma", () => ({ prisma: {
+  course: { findMany: vi.fn() },
   searchEmailDelivery: { groupBy: async () => [] },
   teeSearch: { findMany: async () => [] }
 } }));
@@ -58,7 +59,7 @@ function fixture(mode: "SIMULATOR" | "GOLF", name: string) {
     alertEmail: null, alertGeneration: 1, requestedLayoutHoles: null, cadenceMinutes: 5,
     checkStatus: "WAITING", scheduleVersion: 1, lastCheckedAt: observedAt,
     nextCheckAt: new Date("2026-10-09T19:00:00Z"), createdAt: observedAt,
-    preferences: [{ id: `${name}-preference`, rank: 1, course, offering: mode === "SIMULATOR" ? offering : null }],
+    preferences: [{ id: `${name}-preference`, courseId: name, rank: 1, course, offering: mode === "SIMULATOR" ? offering : null }],
     probes: [{ courseId: name, offeringId: offering.id, outcome: mode === "SIMULATOR" ? "MATCH_FOUND" : "NO_MATCH",
       observedAt, rawSummary: { mode, sourceFingerprint: fingerprint, providerObservedAt: observedAt.toISOString() } }],
     matches: mode === "SIMULATOR" ? matches : []
@@ -66,6 +67,22 @@ function fixture(mode: "SIMULATOR" | "GOLF", name: string) {
 }
 
 describe("dashboard course and simulator presentation", () => {
+  it("shows both courses in a saved Knolls card without silently adding Glen to the alert", async () => {
+    const { prisma } = await import("@/lib/prisma");
+    const search = fixture("GOLF", "knolls");
+    const scope = { rootCourseId: "knolls", courseIds: ["knolls", "glen"] };
+    const primary = { ...search.preferences[0].course, bookingMetadata: { sharedFacility: scope }, layoutHolesVerifiedAt: observedAt };
+    search.preferences[0].course = primary;
+    const child = { ...primary, id: "glen", name: "Tashua Glen", googlePlaceId: null, layoutHoleCounts: [9] };
+    vi.mocked(prisma.course.findMany).mockResolvedValue([primary, child] as never);
+    vi.mocked(listTeeSearchesForUser).mockResolvedValue([search] as unknown as Awaited<ReturnType<typeof listTeeSearchesForUser>>);
+    const dom = document.createElement("div");
+    dom.innerHTML = renderToStaticMarkup(await DashboardPage());
+    expect(dom.querySelectorAll(".facility-course-row")).toHaveLength(2);
+    expect(dom.querySelector('[aria-label="Tashua Glen"]')?.textContent).toContain("Not included in this alert");
+    expect(dom.querySelectorAll(".facility-course-action button")).toHaveLength(2);
+    expect(search.preferences).toHaveLength(1);
+  });
   beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(now); });
   afterEach(() => { vi.useRealTimers(); vi.unstubAllEnvs(); });
 

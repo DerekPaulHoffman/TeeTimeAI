@@ -41,6 +41,13 @@ const simulator = {
 };
 
 describe("search draft storage", () => {
+  it("retains two independently selected physical courses sharing one Google Place", () => {
+    const restored = sanitizeSearchDraft({ courses: [], selectedCourses: [
+      { ...course, courseId: "knolls", name: "Tashua Knolls" },
+      { ...course, courseId: "glen", name: "Tashua Glen", layoutHoleCounts: [9] },
+    ] });
+    expect(restored.selectedCourses.map(course => course.courseId)).toEqual(["knolls", "glen"]);
+  });
   afterEach(() => {
     vi.restoreAllMocks();
     clearSearchDraft();

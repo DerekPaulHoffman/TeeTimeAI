@@ -15,6 +15,27 @@
   --soft-shadow: 0 12px 34px rgba(17, 29, 24, 0.12);
 }
 
+/* Shared location, independent physical courses. Reuse the existing card and
+   action styling; only the formerly combined availability area gains rows. */
+.facility-course-list { width: 100%; min-width: 0; }
+.facility-course-row { display: grid; grid-template-columns: minmax(0, 1fr) 108px; gap: 12px; align-items: center; padding: 9px 0 8px; border-top: 1px solid var(--line); }
+.facility-course-copy { min-width: 0; }
+.facility-course-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 6px; font-size: 11px; color: var(--muted); }
+.facility-course-heading strong { font-size: 12px; color: var(--ink); }
+.facility-course-action .figma-add-button { width: 100%; min-height: 32px; }
+.facility-booking-link { display: inline-flex; align-items: center; gap: 4px; min-height: 24px; font-size: 11px; color: var(--fairway); text-decoration: underline; }
+.facility-course-row .course-time-check { margin: 5px 0; }
+.facility-time-detail { display: block; font-size: 11px; font-weight: 400; }
+.facility-course-row .known-tee-time { border-radius: 10px; flex-direction: column; align-items: flex-start; gap: 2px; white-space: normal; }
+.search-page .figma-course-list .facility-course-action .figma-add-button { font-size: 11px; min-width: 108px; }
+.search-page .figma-course-list .facility-course-action .figma-add-button::after { content: none; }
+@media (max-width: 600px) {
+  .facility-course-row { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .facility-course-action .figma-add-button { width: auto; min-width: 108px; min-height: 44px; }
+  .search-page .figma-course-list .facility-course-action .figma-add-button { min-height: 44px; }
+  .facility-booking-link { min-height: 44px; }
+}
+
 * {
   box-sizing: border-box;
 }

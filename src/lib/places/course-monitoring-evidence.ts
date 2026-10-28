@@ -17,5 +17,6 @@ export function clearCourseMonitoringEvidence(course: CourseCandidate): CourseCa
   delete candidate.monitoringReadinessObservedAt;
   delete candidate.firstTimeLookup;
   delete candidate.profileUrl;
+  if (candidate.facilityCourses) candidate.facilityCourses = candidate.facilityCourses.map(clearCourseMonitoringEvidence);
   return candidate;
 }

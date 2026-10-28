@@ -190,7 +190,7 @@ export function parseForeupPublicConfiguration(input: {
     if (!schedule || typeof schedule !== "object" || Array.isArray(schedule)) return false;
     const entry = schedule as Record<string, unknown>;
     // A provider's structural schedule suffix is not part of venue identity.
-    const title = normalizeName(entry.title).replace(/\btee sheet$/u, "").trim();
+    const title = normalizeName(entry.title).replace(/\b(?:9|18) holes?$/u, "").replace(/\btee sheet$/u, "").trim();
     // course_name and title can carry different legitimate facility/business
     // labels. Either identity match belongs to this same route-owned row.
     const hasOwnerName = Object.hasOwn(entry, "course_name");
@@ -201,8 +201,17 @@ export function parseForeupPublicConfiguration(input: {
       title.length >= 5 && (!hasOwnerName || validOwnerName) &&
       (hasOwnerName && targetName === ownerName || targetName === title || targetName.endsWith(` ${title}`));
   });
-  if (matching.length !== 1) return null;
-  const selected = matching[0] as Record<string, unknown>;
+  // Shared facilities repeat course_name on every sheet. A unique physical
+  // course title is stronger evidence than that facility-wide owner label.
+  // Never use a saved schedule id to break an otherwise ambiguous identity.
+  const exactTitles = matching.filter(raw => {
+    const title = normalizeName((raw as Record<string, unknown>).title)
+      .replace(/\b(?:9|18) holes?$/u, "").replace(/\btee sheet$/u, "").trim();
+    return title === targetName;
+  });
+  const candidates = exactTitles.length ? exactTitles : matching;
+  if (candidates.length !== 1) return null;
+  const selected = candidates[0] as Record<string, unknown>;
   const scheduleId = positiveProviderId(selected.teesheet_id);
   const classes = selected.booking_classes;
   if (!scheduleId || !Array.isArray(classes) || classes.length > 20) return null;
@@ -301,9 +310,10 @@ export async function readForeupStandardPublicSchedule(input: {
     if (!config || config.scheduleId !== input.scheduleId ||
       (input.bookingClassId !== undefined && config.bookingClassId !== input.bookingClassId) ||
       !isExplicitForeupPublicClass({ html: document.html, facilityId: document.facilityId,
-        scheduleId: config.scheduleId, bookingClassId: config.bookingClassId }) ||
-      !hasCompleteForeupPublicScheduleScope({ html: document.html, facilityId: document.facilityId,
-        scheduleId: config.scheduleId, inventoryScope: FOREUP_STANDARD_PUBLIC_SCOPE })) return null;
+        scheduleId: config.scheduleId, bookingClassId: config.bookingClassId })) return null;
+    // This ordinary check covers only the named Course's exact sheet/class.
+    // Managed recipes still use hasCompleteForeupPublicScheduleScope: checking
+    // one course here never proves absence across a whole shared facility.
     return config;
   } catch {
     return null;

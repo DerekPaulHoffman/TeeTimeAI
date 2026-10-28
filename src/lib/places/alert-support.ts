@@ -26,10 +26,12 @@ import {
   type CustomerMonitoringStatusInput,
 } from "@/lib/customer-monitoring-status";
 import { clearCourseMonitoringEvidence } from "./course-monitoring-evidence";
+import { loadSharedFacilityCourses } from "@/lib/courses/shared-facility-store";
 
 const COURSE_MATCH_COORDINATE_TOLERANCE = 0.06;
 
 type KnownCourseRecord = CourseIdentity & {
+  bookingMetadata?: unknown;
   id: string;
   isPublic: boolean | null;
   rating?: number | null;
@@ -100,6 +102,7 @@ export async function enrichCoursesWithAlertSupport(candidates: CourseCandidate[
     take: 500,
     select: {
       id: true,
+      bookingMetadata: true,
       isPublic: true,
       googlePlaceId: true,
       name: true,
@@ -146,10 +149,19 @@ export async function enrichCoursesWithAlertSupport(candidates: CourseCandidate[
     }
   });
 
-  return candidates.map((course) => {
+  return Promise.all(candidates.map(async (course) => {
     const candidate = clearCourseMonitoringEvidence(course);
-    return mapCourseAlertSupport(candidate, findKnownCourse(candidate, knownCourses));
-  });
+    // Runtime-cache membership is not current authority. Rebuild it only from
+    // the current persisted manifest, including when a group was removed.
+    delete candidate.facilityCourses;
+    const known = findKnownCourse(candidate, knownCourses);
+    const result = mapCourseAlertSupport(candidate, known);
+    const members = known?.bookingMetadata ? await loadSharedFacilityCourses({ id: known.id, bookingMetadata: known.bookingMetadata }) : [];
+    return members.length ? { ...result, facilityCourses: members.map(member => ({ ...member,
+      photoReference: candidate.photoReference, photoAttributions: candidate.photoAttributions,
+      distanceMeters: candidate.distanceMeters,
+    })) } : result;
+  }));
 }
 
 function mapCourseAlertSupport(

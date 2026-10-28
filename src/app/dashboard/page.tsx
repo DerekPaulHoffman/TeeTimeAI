@@ -21,6 +21,8 @@ import {
 } from "lucide-react";
 
 import { DashboardSignInActions } from "@/components/dashboard-sign-in-actions";
+import { FacilityCourseRows } from "@/components/facility-course-rows";
+import { loadSharedFacilityCourses } from "@/lib/courses/shared-facility-store";
 import { SearchStatusActions } from "@/components/search-status-actions";
 import { isCurrentSimulatorMatch } from "@/lib/simulators/current-availability";
 import { getSimulatorAlertSummary, getSimulatorDashboardStatus } from "@/lib/simulators/dashboard-status";
@@ -103,13 +105,16 @@ export default async function DashboardPage() {
     throw error;
   }
   const searches = await listTeeSearchesForUser(user.id);
+  const distinctCourses = [...new Map(searches.filter(search => search.mode !== "SIMULATOR").flatMap(search => search.preferences).map(preference => [preference.courseId, preference.course])).values()];
+  const facilityById = new Map(await Promise.all(distinctCourses.map(async course => [course.id, await loadSharedFacilityCourses(course)] as const)));
   const [coursePhotos, ownerEmailStates] = await Promise.all([
-    loadDashboardCoursePhotos(searches),
+    loadDashboardCoursePhotos(searches, facilityById),
     loadOwnerEmailStates(user.id, searches),
   ]);
 
   return (
     <DashboardView
+      facilityById={facilityById}
       searches={searches}
       canManage
       coursePhotos={coursePhotos}
@@ -120,6 +125,7 @@ export default async function DashboardPage() {
 }
 
 function DashboardView({
+  facilityById,
   searches,
   canManage,
   coursePhotos,
@@ -127,6 +133,7 @@ function DashboardView({
   showRecipientEmail,
   notice
 }: {
+  facilityById: ReadonlyMap<string, import("@/lib/places/google").CourseCandidate[]>;
   searches: DashboardSearches;
   canManage: boolean;
   coursePhotos: ReadonlyMap<string, GooglePlacePhoto>;
@@ -182,6 +189,7 @@ function DashboardView({
             <div className="dashboard-list">
               {activeSearches.map((search) => (
                 <DashboardSearchCard
+                  facilityById={facilityById}
                   canManage={canManage}
                   coursePhotos={coursePhotos}
                   ownerEmailState={ownerEmailStates.get(search.id) ?? "FIRST_CHECK_PENDING"}
@@ -196,7 +204,7 @@ function DashboardView({
             <details className="dashboard-alert-history">
               <summary>Alert history <span>{historySearches.length} paused, past or finished alerts</span></summary>
               <div className="dashboard-list dashboard-list-inactive">
-                {historySearches.map(search => <DashboardSearchCard canManage={canManage} coursePhotos={coursePhotos} ownerEmailState={ownerEmailStates.get(search.id) ?? "FIRST_CHECK_PENDING"} key={search.id} search={search} showRecipientEmail={showRecipientEmail} />)}
+                {historySearches.map(search => <DashboardSearchCard facilityById={facilityById} canManage={canManage} coursePhotos={coursePhotos} ownerEmailState={ownerEmailStates.get(search.id) ?? "FIRST_CHECK_PENDING"} key={search.id} search={search} showRecipientEmail={showRecipientEmail} />)}
               </div>
             </details>
           ) : null}
@@ -231,12 +239,14 @@ function DashboardView({
 }
 
 function DashboardSearchCard({
+  facilityById,
   search,
   canManage,
   coursePhotos,
   ownerEmailState,
   showRecipientEmail
 }: {
+  facilityById: ReadonlyMap<string, import("@/lib/places/google").CourseCandidate[]>;
   search: DashboardSearches[number];
   canManage: boolean;
   coursePhotos: ReadonlyMap<string, GooglePlacePhoto>;
@@ -333,7 +343,7 @@ function DashboardSearchCard({
         className="dashboard-alert-accordion"
       >
         <summary className="dashboard-alert-summary">
-          <CourseImage name={search.preferences[0]?.course.name ?? "Course"} photo={coursePhotos.get(search.preferences[0]?.course.googlePlaceId ?? "")} />
+          <CourseImage name={search.preferences[0]?.course.name ?? "Course"} photo={coursePhotos.get(search.preferences[0]?.courseId ?? "") ?? coursePhotos.get(search.preferences[0]?.course.googlePlaceId ?? "")} />
           <div className="dashboard-alert-summary-heading">
             <span className={`status-pill ${search.status.toLowerCase()}`}>
               {search.status === "ACTIVE" ? <Play size={13} /> : <CirclePause size={13} />}
@@ -426,7 +436,11 @@ function DashboardSearchCard({
           )}
         </div>
         <div className="watch-course-list">
-          {search.preferences.map((preference) => {
+          {search.preferences.filter((preference, index) => {
+            const members = facilityById.get(preference.courseId) ?? [];
+            return !members.length || !search.preferences.slice(0, index).some(previous => members.some(member => member.courseId === previous.courseId));
+          }).map((preference) => {
+            const facilityCourses = facilityById.get(preference.courseId) ?? [];
             const isPublicCourse = preference.course.isPublic === true;
             const isPendingCourse = preference.course.isPublic === null;
             const monitoringGate = evaluateMonitoringGate({
@@ -486,9 +500,9 @@ function DashboardSearchCard({
                 <CourseImage
                   name={preference.course.name}
                   photo={
-                    preference.course.googlePlaceId
+                    coursePhotos.get(preference.courseId) ?? (preference.course.googlePlaceId
                       ? coursePhotos.get(preference.course.googlePlaceId)
-                      : undefined
+                      : undefined)
                   }
                   rank={search.preferences.length > 1 ? preference.rank : undefined}
                 />
@@ -530,7 +544,7 @@ function DashboardSearchCard({
                         {formatCourseDistance(preference.distanceMetersAtSelection)}
                       </span>
                     ) : null}
-                    {bookableHoleCount ? (
+                    {bookableHoleCount && !facilityCourses.length ? (
                       <span
                         className="figma-course-pill is-detail"
                         title={
@@ -544,7 +558,7 @@ function DashboardSearchCard({
                         {bookableHoleCount}H
                       </span>
                     ) : null}
-                    {headlinePrice ? (
+                    {headlinePrice && !facilityCourses.length ? (
                       <span
                         className="figma-course-pill is-price"
                         title={`Official ${headlinePrice.holes}-hole rates last observed ${formatObservationDate(headlinePrice.range.observedAt ?? priceEstimate?.observedAt)}`}
@@ -558,7 +572,11 @@ function DashboardSearchCard({
                     <MapPin size={12} />
                     {getCompactLocation(preference.course.address)} - {preference.course.timeZone}
                   </p>
-                  <div
+                  {facilityCourses.length ? <FacilityCourseRows courses={facilityCourses} savedStatuses={Object.fromEntries(search.preferences.map(member => {
+                    const status = courseStatusById.get(member.courseId)!;
+                    const probe = search.probes.find(probe => probe.courseId === member.courseId);
+                    return [member.courseId, { label: status.label, detail: status.detail + (probe ? ` Checked ${formatObservationDateTime(probe.observedAt, search.userTimeZone)}.` : "") }];
+                  }))} /> : <div
                     className={`watch-course-availability is-${courseStatus.tone}`}
                   >
                     <div className="watch-course-availability-heading">
@@ -579,7 +597,7 @@ function DashboardSearchCard({
                           )}.`
                         : ""}
                     </p>
-                  </div>
+                  </div>}
                 </div>
                 <div className="watch-course-links">
                   <a
@@ -905,16 +923,16 @@ async function loadOwnerEmailStates(userId: string, searches: DashboardSearches)
   return states;
 }
 
-async function loadDashboardCoursePhotos(searches: DashboardSearches) {
+async function loadDashboardCoursePhotos(searches: DashboardSearches, facilities: ReadonlyMap<string, import("@/lib/places/google").CourseCandidate[]>) {
   const googlePlaceIds = Array.from(
     new Set(
-      searches.flatMap((search) =>
+      [...searches.flatMap((search) =>
         search.preferences.flatMap((preference) =>
           preference.course.googlePlaceId && !preference.course.isManual
             ? [preference.course.googlePlaceId]
             : []
         )
-      )
+      ), ...[...facilities.values()].flat().map(course => course.googlePlaceId).filter(Boolean)]
     )
   );
   const photos = await Promise.all(
@@ -924,11 +942,16 @@ async function loadDashboardCoursePhotos(searches: DashboardSearches) {
     })
   );
 
-  return new Map(
+  const result = new Map(
     photos.filter(
       (entry): entry is readonly [string, GooglePlacePhoto] => entry[1] !== null
     )
   );
+  for (const courses of facilities.values()) for (const course of courses) {
+    const photo = result.get(course.googlePlaceId);
+    if (photo && course.courseId) result.set(course.courseId, photo);
+  }
+  return result;
 }
 
 function SetupState() {

@@ -1,6 +1,8 @@
 "use client";
 
 import type { SearchMode } from "@/lib/searches/search-mode";
+import { getFacilityCourses, courseSelectionKey } from "@/lib/courses/shared-facility";
+import { FacilityCourseRows } from "@/components/facility-course-rows";
 
 import Image from "next/image";
 import Link from "next/link";
@@ -343,7 +345,7 @@ function TeeTimeIntakeContent({
   const [courseLookupResults, setCourseLookupResults] = useState<CourseCandidate[]>([]);
   const [checkRevision, setCheckRevision] = useState(0);
   const liveChecks = useCourseTimeChecks(
-    mode === "SIMULATOR" ? [] : [...courses, ...courseLookupResults].flatMap(course => course.courseId ? [course.courseId] : []), date, players, checkRevision,
+    mode === "SIMULATOR" ? [] : [...courses, ...courseLookupResults].flatMap(getFacilityCourses).flatMap(course => course.courseId ? [course.courseId] : []), date, players, checkRevision,
   );
   const knownTimes = useKnownTeeTimes(
     mode === "SIMULATOR" ? [] : [...courses, ...courseLookupResults].flatMap((course) => course.courseId ? [course.courseId] : []),
@@ -570,8 +572,7 @@ function TeeTimeIntakeContent({
     );
     const compatibleOrUnknown = withinRadius.filter(
       (course) =>
-        getCourseLayoutCompatibility(course.layoutHoleCounts, requestedLayoutHoles) !==
-        "incompatible"
+        getFacilityCourses(course).some(member => getCourseLayoutCompatibility(member.layoutHoleCounts, requestedLayoutHoles) !== "incompatible")
     );
 
     const sortedCourses = [...compatibleOrUnknown].sort((a, b) => {
@@ -835,20 +836,21 @@ function TeeTimeIntakeContent({
       setSearchCoordinates(coordinates);
       const freshCourses = sortCoursesByDistance(data.courses);
       const freshCourseByPlaceId = new Map(
-        freshCourses.map((course) => [course.googlePlaceId, course])
+        freshCourses.flatMap(course => [[course.googlePlaceId, course] as const, [courseSelectionKey(course), course] as const,
+          ...(course.facilityCourses ?? []).map(member => [courseSelectionKey(member), member] as const)])
       );
       setCourses(freshCourses);
       setCheckRevision(value => value + 1);
       setSelected((current) =>
         current
           .map(
-            (course) => freshCourseByPlaceId.get(course.googlePlaceId) ?? course
+            (course) => freshCourseByPlaceId.get(courseSelectionKey(course)) ?? course
           )
           .filter((course) => course.publicAccessStatus !== "REVIEW_REQUIRED")
       );
       setCourseLookupResults((current) =>
         current.map(
-          (course) => freshCourseByPlaceId.get(course.googlePlaceId) ?? course
+          (course) => freshCourses.find(fresh => fresh.googlePlaceId === course.googlePlaceId) ?? course
         )
       );
       setVisibleCourseCount(INITIAL_VISIBLE_COURSE_COUNT);
@@ -1505,6 +1507,7 @@ function TeeTimeIntakeContent({
               >
                 {courseLookupResults.map((course) => (
                   <CourseResultCard
+                    facilityChecks={liveChecks}
                     course={course}
                     knownTimes={mode === "OUTDOOR" && course.courseId ? knownTimes[course.courseId] ?? [] : []}
                     liveCheck={mode === "OUTDOOR" && course.courseId ? liveChecks[course.courseId] : undefined}
@@ -1532,6 +1535,7 @@ function TeeTimeIntakeContent({
             <div className="course-list figma-course-list" role="list" aria-label={mode === "SIMULATOR" ? "Nearby simulators" : "Nearby courses"}>
               {visibleNearbyCourses.map((course) => (
                 <CourseResultCard
+                  facilityChecks={liveChecks}
                   course={course}
                   knownTimes={mode === "OUTDOOR" && course.courseId ? knownTimes[course.courseId] ?? [] : []}
                   liveCheck={mode === "OUTDOOR" && course.courseId ? liveChecks[course.courseId] : undefined}
@@ -1810,6 +1814,7 @@ function CourseResultsDivider({ children }: { children: ReactNode }) {
 }
 
 function CourseResultCard({
+  facilityChecks,
   course,
   knownTimes,
   liveCheck,
@@ -1820,6 +1825,7 @@ function CourseResultCard({
   requestedLayoutHoles,
   selectedIndex
 }: {
+  facilityChecks: Record<string, CourseTimeCheck>;
   course: CourseCandidate;
   knownTimes: KnownTeeTime[];
   liveCheck?: CourseTimeCheck;
@@ -1837,7 +1843,8 @@ function CourseResultCard({
     requestedLayoutHoles
   );
   const isIncompatible = !isSimulator && layoutCompatibility === "incompatible";
-  const cardHoleCount = isSimulator ? null : getCourseHeadlineHoleCount(
+  const hasFacilityCourses = !isSimulator && (course.facilityCourses?.length ?? 0) > 1;
+  const cardHoleCount = isSimulator || hasFacilityCourses ? null : getCourseHeadlineHoleCount(
     course.layoutHoleCounts,
     course.bookableHoleCounts
   );
@@ -1912,17 +1919,17 @@ function CourseResultCard({
               <span aria-hidden="true">·</span> {cardHoleCount}H
             </span>
           ) : null}
-          {!isSimulator && course.par ? (
+          {!isSimulator && !hasFacilityCourses && course.par ? (
             <span className="figma-course-pill is-detail">
               <span aria-hidden="true">·</span> Par {course.par}
             </span>
           ) : null}
-          {requestedLayoutHoles && layoutCompatibility === "unknown" ? (
+          {!hasFacilityCourses && requestedLayoutHoles && layoutCompatibility === "unknown" ? (
             <span className="figma-course-pill is-detail">
               <span aria-hidden="true">·</span> Layout unverified
             </span>
           ) : null}
-          {!isSimulator ? <CourseHeadlinePrice
+          {!isSimulator && !hasFacilityCourses ? <CourseHeadlinePrice
             estimate={course.priceEstimate}
             preferredHoleCounts={cardHoleCount ? [cardHoleCount] : undefined}
           /> : null}
@@ -1935,9 +1942,11 @@ function CourseResultCard({
           )}
         </h3>
         <CourseAddressLink course={course} />
-        {isSimulator ? <CourseMonitoringStatus course={course} /> : course.courseId ? <CourseTimeCheckStatus check={liveCheck} alertSupport={course.alertSupport} /> : <CourseMonitoringStatus course={course} />}
-        {!isSimulator ? course.courseId ? liveCheck?.status === "CHECKED" && <KnownTeeTimes times={liveCheck.times} timeZone={course.timeZone} {...timeFilters} showEmpty /> : <KnownTeeTimes times={knownTimes} timeZone={course.timeZone} {...timeFilters} /> : null}
-        {isIncompatible && requestedLayoutHoles ? (
+        {hasFacilityCourses ? <FacilityCourseRows courses={course.facilityCourses!} checks={facilityChecks} timeFilters={timeFilters} onNotify={onToggle} signInKey={signInKey} requestedLayoutHoles={requestedLayoutHoles} /> : <>
+          {isSimulator ? <CourseMonitoringStatus course={course} /> : course.courseId ? <CourseTimeCheckStatus check={liveCheck} alertSupport={course.alertSupport} /> : <CourseMonitoringStatus course={course} />}
+          {!isSimulator ? course.courseId ? liveCheck?.status === "CHECKED" && <KnownTeeTimes times={liveCheck.times} timeZone={course.timeZone} {...timeFilters} showEmpty /> : <KnownTeeTimes times={knownTimes} timeZone={course.timeZone} {...timeFilters} /> : null}
+        </>}
+        {!hasFacilityCourses && isIncompatible && requestedLayoutHoles ? (
           <p className="course-alert-support-note">
             Does not match an {requestedLayoutHoles}-hole course search
           </p>
@@ -1966,7 +1975,7 @@ function CourseResultCard({
             Official site
           </a>
         ) : null}
-        {requiresPublicAccessReview && !isSelected ? (
+        {hasFacilityCourses ? null : requiresPublicAccessReview && !isSelected ? (
           <button
             aria-label={`Report inaccuracy for ${course.name}`}
             className="figma-report-button"
@@ -2000,7 +2009,7 @@ function CourseResultCard({
             </button>
           )
         )}
-        {!isIncompatible && !(requiresPublicAccessReview && !isSelected) ? (
+        {!hasFacilityCourses && !isIncompatible && !(requiresPublicAccessReview && !isSelected) ? (
           <span className="course-notify-caption">
             when new {isSimulator ? "openings" : "tee times"} <br />become available
           </span>

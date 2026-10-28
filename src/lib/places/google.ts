@@ -72,6 +72,7 @@ export type GooglePlace = {
 };
 
 export type CourseCandidate = {
+  facilityCourses?: CourseCandidate[];
   mode?: "OUTDOOR" | "SIMULATOR";
   offeringId?: string;
   supportedDurationsMinutes?: number[];

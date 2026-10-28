@@ -76,9 +76,10 @@ export function filterVisibleTeeTimes(times: KnownTeeTime[], timeZone: string, s
     clock.format(new Date(time.startsAt)) >= startTime && clock.format(new Date(time.startsAt)) <= endTime);
 }
 
-export function KnownTeeTimes({ times, timeZone, date, startTime, endTime, players, showEmpty = false }: {
+export function KnownTeeTimes({ times, timeZone, date, startTime, endTime, players, showEmpty = false, showDetails = false }: {
   times: KnownTeeTime[]; timeZone: string; date: string; startTime: string; endTime: string; players: number;
   showEmpty?: boolean;
+  showDetails?: boolean;
 }) {
   const formatter = new Intl.DateTimeFormat("en-US", { timeZone, hour: "numeric", minute: "2-digit" });
   const zone = new Intl.DateTimeFormat("en-US", { timeZone, timeZoneName: "short" }).formatToParts(new Date(times[0]?.startsAt ?? `${date}T12:00:00Z`)).find(part => part.type === "timeZoneName")?.value;
@@ -91,6 +92,7 @@ export function KnownTeeTimes({ times, timeZone, date, startTime, endTime, playe
       title={`${time.availableSpots} spots${time.holes ? ` · ${time.holes} holes` : ""}${time.priceCents !== null ? ` · $${(time.priceCents / 100).toFixed(2)}` : ""}. Last checked ${new Intl.DateTimeFormat("en-US", { timeZone, dateStyle: "medium", timeStyle: "short" }).format(new Date(time.confirmedAt))}. You book direct on the official site.`}
     >
       <strong>{formatter.format(new Date(time.startsAt))}</strong>
+      {showDetails ? <span className="facility-time-detail">{time.availableSpots} spots{time.holes ? ` · ${time.holes}-hole round` : ""}{time.priceCents !== null ? ` · $${(time.priceCents / 100).toFixed(2)}` : " · Price unavailable"}</span> : null}
     </a>)}</div>
     <p>Availability can change. You book direct on the official site.</p>
   </section>;

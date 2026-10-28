@@ -724,6 +724,34 @@ describe("listTeeSearchesForUser", () => {
 });
 
 describe("createTeeSearchForUser", () => {
+  it("persists Glen's canonical id even when the shared place belongs to Knolls", async () => {
+    const group = { rootCourseId: "knolls", courseIds: ["knolls", "glen"] };
+    const root = { id: "knolls", googlePlaceId: "tashua-place", name: "Tashua Knolls", isPublic: true, automationEligibility: "BLOCKED", timeZone: "America/New_York", layoutHoleCounts: [18], layoutHolesVerifiedAt: new Date("2026-07-01"), bookingMetadata: { sharedFacility: group } };
+    const glen = { ...root, id: "glen", googlePlaceId: null, name: "Tashua Glen", automationEligibility: "ALLOWED", layoutHoleCounts: [9] };
+    mockedPrisma.course.findUnique.mockImplementation(async args => args.where.id === "glen" ? glen as never : root as never);
+    mockedPrisma.teeSearch.create.mockResolvedValue({ id: "shared-search" } as never);
+    await createTeeSearchForUser("owner", {
+      mode: "OUTDOOR", date: "2027-08-15", startTime: "08:00", endTime: "11:00", players: 4,
+      userTimeZone: "America/New_York", cadenceMinutes: 5, additionalEmails: ["friend@example.com"], requestedLayoutHoles: 9,
+      courses: [{ courseId: "glen", googlePlaceId: "tashua-place", name: "Tashua Glen", rank: 1, latitude: 41.24, longitude: -73.2 }],
+    });
+    expect(mockedPrisma.teeSearch.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
+      userId: "owner", additionalEmails: ["friend@example.com"], preferences: { create: [{ rank: 1, course: { connect: { id: "glen" } } }] },
+    }) }));
+  });
+
+  it.each(["wrong-place", "missing-group", "private-root"])("rejects %s instead of silently saving Knolls for a Glen selection", async mode => {
+    const group = { rootCourseId: "knolls", courseIds: ["knolls", "glen"] };
+    const root = { id: "knolls", googlePlaceId: "tashua-place", isPublic: mode !== "private-root", bookingMetadata: mode === "missing-group" ? {} : { sharedFacility: group } };
+    const child = { id: "glen", googlePlaceId: null, isPublic: true, bookingMetadata: { sharedFacility: group } };
+    mockedPrisma.course.findUnique.mockImplementation(async args => args.where.id === "glen" ? child as never : root as never);
+    await expect(createTeeSearchForUser("owner", {
+      mode: "OUTDOOR", date: "2027-08-15", startTime: "08:00", endTime: "11:00", players: 4,
+      userTimeZone: "America/New_York", cadenceMinutes: 5, additionalEmails: [],
+      courses: [{ courseId: "glen", googlePlaceId: mode === "wrong-place" ? "foreign" : "tashua-place", name: "Tashua Glen", rank: 1, latitude: 41.24, longitude: -73.2 }],
+    })).rejects.toThrow(/details do not match/);
+    expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     mockedPrisma.course.findMany.mockResolvedValue([]);

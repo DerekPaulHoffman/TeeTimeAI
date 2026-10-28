@@ -59,6 +59,7 @@ import { getSimulatorVenueForDemand } from "@/lib/places/simulator-google";
 import type { CourseCandidate } from "@/lib/places/google";
 import { enrollDiscoveryPilotInTransaction } from "@/lib/course-discovery/enrollment";
 import { dashboardDiscoveryJobSelect, getDashboardDiscoveryStatus } from "@/lib/searches/dashboard-discovery-status";
+import { readSharedFacilityScope } from "@/lib/courses/shared-facility-scope";
 
 const SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE = 0.06;
 const QUEUED_SEARCH_STATUSES = ["ACTIVE", "PAUSED"] as const;
@@ -101,7 +102,7 @@ export async function createTeeSearchForUser(
   const observedAt = new Date();
   const resolvedPreferences = await Promise.all(
     sortedCourses.map((course) =>
-      buildCoursePreferenceCreate(course, observedAt),
+      buildCoursePreferenceCreate(course, observedAt, placeReviews),
     ),
   );
   if (
@@ -370,8 +371,9 @@ function assertSimulatorPlaceReview(
 async function buildCoursePreferenceCreate(
   course: SelectedCourseInput,
   observedAt: Date,
+  reviews: GooglePlaceReviewIndex,
 ) {
-  const reusableCourse = await findReusableCourse(course);
+  const reusableCourse = await findReusableCourse(course, reviews);
 
   if (reusableCourse) {
     return {
@@ -450,7 +452,7 @@ async function buildCoursePreferenceCreate(
   };
 }
 
-async function findReusableCourse(course: SelectedCourseInput) {
+async function findReusableCourse(course: SelectedCourseInput, reviews: GooglePlaceReviewIndex) {
   const existingById = course.courseId
     ? await prisma.course.findUnique({
         where: { id: course.courseId },
@@ -458,6 +460,7 @@ async function findReusableCourse(course: SelectedCourseInput) {
           id: true,
           name: true,
           googlePlaceId: true,
+          bookingMetadata: true,
           address: true,
           latitude: true,
           longitude: true,
@@ -476,6 +479,20 @@ async function findReusableCourse(course: SelectedCourseInput) {
     throw new Error(
       "The selected course is no longer available. Refresh the course list and try again.",
     );
+  }
+
+  const facility = existingById && readSharedFacilityScope(existingById.bookingMetadata, existingById.id);
+  if (existingById && facility && facility.rootCourseId !== existingById.id) {
+    const root = await prisma.course.findUnique({ where: { id: facility.rootCourseId } });
+    const rootScope = root && readSharedFacilityScope(root.bookingMetadata, root.id);
+    if (!root || root.isPublic !== true || (course.googlePlaceId && root.googlePlaceId !== course.googlePlaceId) ||
+        JSON.stringify(rootScope) !== JSON.stringify(facility)) {
+      throw new Error("The selected course details do not match. Refresh the course list and try again.");
+    }
+    if (root.googlePlaceId) applyActivePlaceReview({ ...course, googlePlaceId: root.googlePlaceId }, reviews);
+    // Physical courses sharing a place are not aliases. A Knolls technical
+    // failure must not collapse Glen's independent selection back into Knolls.
+    return existingById;
   }
 
   const exactCourse = course.googlePlaceId
