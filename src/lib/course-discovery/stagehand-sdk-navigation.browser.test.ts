@@ -83,6 +83,7 @@ async function fixture(transport: "PLAYWRIGHT" | "STAGEHAND", mode: Mode) {
   });
   let host: Awaited<ReturnType<typeof createGuardedStagehandSourceBrowser>> | undefined, attached: Browser | undefined;
   let session: Awaited<ReturnType<typeof openStagehandSession>> | undefined;
+  const negative = mode === "INITIAL_RELOAD" || mode === "NON_REDIRECT_307_RELOAD";
   const receipt: Record<string, unknown> = { transport, mode, inferenceCalls: 0, startedAt: new Date().toISOString() };
   try {
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -100,6 +101,7 @@ async function fixture(transport: "PLAYWRIGHT" | "STAGEHAND", mode: Mode) {
       contextOptions: { ignoreHTTPSErrors: true },
     });
     trace.enabled = true;
+    let navigate: () => Promise<unknown>;
     if (transport === "STAGEHAND") {
       session = await openStagehandSession({ model: "gpt-6.1-sol", modelDisabled: true, sourceRoutingOnly: true,
         deadline: deadlineAt.getTime(), cwd: process.cwd(), signal: abort.signal, ownedBrowser: host }, {
@@ -108,19 +110,38 @@ async function fixture(transport: "PLAYWRIGHT" | "STAGEHAND", mode: Mode) {
       // Observing readiness on about:blank is outside the source-document
       // contract and would record an unrelated NATIVE_URL_CHANGED failure.
       receipt.beforeNavigation = { eventCount: trace.events.length };
-      await session.goto(root);
+      navigate = () => session!.goto(root);
     } else {
       attached = await chromium.connectOverCDP(host.cdpUrl);
       const page = attached.contexts().flatMap(context => context.pages())[0];
-      await host.prepareNavigation(root); await page.goto(root, { waitUntil: "domcontentloaded", timeout: 15_000 });
+      navigate = async () => { await host!.prepareNavigation(root); return page.goto(root, { waitUntil: "domcontentloaded", timeout: 15_000 }); };
     }
-    if (mode !== "INITIAL_RELOAD" && mode !== "NON_REDIRECT_307_RELOAD") {
+    try { await navigate(); receipt.gotoResolved = true; }
+    catch (error) {
+      receipt.gotoResolved = false;
+      receipt.gotoErrorName = error instanceof Error ? error.name : "UNKNOWN";
+      if (!negative) throw error;
+    }
+    if (negative) {
+      // DOMContentLoaded may resolve before the page's asynchronous reload is
+      // rejected. Navigation completion is independent from guard authority.
+      await expect.poll(() => host!.snapshotFailures().nativeRouterFailure, { timeout: 5000 }).toMatchObject({
+        code: "NATIVE_REDIRECT_LOADER_MISMATCH", phase: "LOADER_OWNER" });
+      await expect.poll(() => trace.events.some(value => value.method === "Fetch.failRequest" && value.phase === "SEND"), { timeout: 5000 }).toBe(true);
+      await expect.poll(async () => {
+        receipt.readiness = await host!.observeSourceReadiness(host!.targetId).catch(() => null);
+        const readiness = receipt.readiness as { mainDocumentCurrent?: boolean; mainDocumentComplete?: boolean; mainDocumentStatus?: number } | null;
+        receipt.acceptedCurrentProof = readiness?.mainDocumentCurrent === true && readiness.mainDocumentComplete === true && readiness.mainDocumentStatus === 200;
+        return receipt.acceptedCurrentProof;
+      }, { timeout: 5000 }).toBe(false);
+      receipt.guardRejected = true;
+    } else {
       await expect.poll(() => host!.observeSourceReadiness(host!.targetId), { timeout: 5000 }).toMatchObject({
         mainDocumentStatus: 200, mainDocumentCurrent: true, mainDocumentComplete: true, mainReadPending: false });
       if (session) await session.settleSourceDocument();
+      receipt.readiness = await host.observeSourceReadiness(host.targetId);
+      receipt.success = true;
     }
-    receipt.readiness = await host.observeSourceReadiness(host.targetId).catch(() => null);
-    receipt.success = true;
   } catch (error) {
     receipt.success = false;
     receipt.error = { name: error instanceof Error ? error.name : "UNKNOWN", code: error instanceof Error && /^[A-Z_0-9]{1,100}$/.test(error.message) ? error.message : "LOCAL_NAVIGATION_FAILED" };
@@ -163,7 +184,7 @@ it("compares an early native duplicate document against both real navigation cli
   // This is a diagnostic negative: a page-initiated unknown loader must never
   // become evidence merely because DOM content loaded or a client goto ended.
   for (const receipt of [plain, sdk]) {
-    expect(receipt.success).toBe(false);
+    expect(receipt).toMatchObject({ guardRejected: true, acceptedCurrentProof: false });
     expect(receipt.failure).toMatchObject({ nativeRouterFailure: {
       code: "NATIVE_REDIRECT_LOADER_MISMATCH", phase: "LOADER_OWNER", loaderKnown: false,
       awaitingDocument: false, documentCommitted: true, documentIntentPresent: false, sourceResponseComplete: true,
@@ -182,7 +203,7 @@ it("reproduces the observed non-2xx document followed by same-URL reload before 
   // grounded in the live trace. The public response body was not retained.
   for (const client of ["PLAYWRIGHT", "STAGEHAND"] as const) {
     const receipt = await fixture(client, "NON_REDIRECT_307_RELOAD");
-    expect(receipt.success).toBe(false);
+    expect(receipt).toMatchObject({ guardRejected: true, acceptedCurrentProof: false });
     expect(receipt.failure).toMatchObject({ nativeRouterFailure: {
       code: "NATIVE_REDIRECT_LOADER_MISMATCH", phase: "LOADER_OWNER", rootFrame: true,
       loaderKnown: false, awaitingDocument: false, documentCommitted: false, documentIntentPresent: false, sourceResponseComplete: false,
@@ -192,8 +213,9 @@ it("reproduces the observed non-2xx document followed by same-URL reload before 
     const frame = events.findIndex(value => value.method === "Page.frameNavigated" && value.loader === "loader-0");
     const reload = events.findIndex(value => value.method === "Page.frameRequestedNavigation" && value.reason === "reload");
     const successor = events.findIndex(value => value.method === "Network.requestWillBeSent" && value.loader === "loader-1" && value.redirectResponse === false);
+    const rejected = events.findIndex(value => value.method === "Fetch.failRequest" && value.phase === "SEND");
     expect(response).toBeGreaterThan(-1); expect(frame).toBeGreaterThan(response);
-    expect(reload).toBeGreaterThan(frame); expect(successor).toBeGreaterThan(reload);
+    expect(reload).toBeGreaterThan(frame); expect(successor).toBeGreaterThan(reload); expect(rejected).toBeGreaterThan(successor);
     expect(receipt.reads).toEqual(["GET owned-sdk-root.example/"]);
   }
 }, 120_000);
