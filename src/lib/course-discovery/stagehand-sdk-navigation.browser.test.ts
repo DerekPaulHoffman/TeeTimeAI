@@ -176,7 +176,6 @@ it("compares an early native duplicate document against both real navigation cli
     expect(receipt.reads).toEqual(["GET owned-sdk-root.example/"]);
   }
 }, 120_000);
-
 it("reproduces the observed non-2xx document followed by same-URL reload before any accepted source commit", async () => {
   // Synthetic response body: only its observed 307/reload event sequence is
   // grounded in the live trace. The public response body was not retained.
