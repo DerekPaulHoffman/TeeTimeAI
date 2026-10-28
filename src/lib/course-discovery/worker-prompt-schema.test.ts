@@ -1,14 +1,10 @@
 // @vitest-environment node
 import { execFileSync } from "node:child_process";
-import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 import Ajv from "ajv";
+import Ajv2020 from "ajv/dist/2020.js";
 import { compactDiscoveryRecipeSchema } from "../../../scripts/automation/course-discovery-prompt-schema.mjs";
 
-// Ajv2020 is already pinned by Prisma's installed dependency graph. No package
-// installation, provider request, model process or application DB is involved.
-const scopedRequire = createRequire(createRequire(import.meta.url).resolve("@prisma/streams-local"));
-const Ajv2020 = scopedRequire("ajv/dist/2020.js").default;
 const modern = () => new Ajv2020({ strict: false, validateFormats: false, logger: false, code: { optimize: 0 } });
 const freeze = (value: unknown): unknown => {
   if (value && typeof value === "object") { Object.values(value).forEach(freeze); Object.freeze(value); }
@@ -50,7 +46,7 @@ describe("model-facing schema compaction", () => {
       "a/b~description": { type: "array", items: [true, false], additionalItems: false }, title: true, description: false,
       nested: { type: "object", properties: { a: repeated(), b: repeated(), c: repeated(), d: repeated() }, dependencies: { a: ["b"], b: { required: ["c"] } } } },
       patternProperties: { "^extra": { type: "integer" } }, additionalProperties: false };
-    const compact = compactDiscoveryRecipeSchema(original), validateOriginal = new Ajv({ logger: false }).compile(original), validateCompact = new Ajv({ logger: false }).compile(compact);
+    const compact = compactDiscoveryRecipeSchema(original), validateOriginal = new Ajv({ strict: false, logger: false }).compile(original), validateCompact = new Ajv({ strict: false, logger: false }).compile(compact);
     for (const value of [{}, { "a/b~description": [1] }, { "a/b~description": [1, 2] }, { description: 1 }, { nested: { a: "abc" } },
       { nested: { a: "abc", b: "def", c: "ghi" } }, { extra: 1 }, { extra: "wrong" }, { unknown: 1 }]) expect(validateCompact(value)).toBe(validateOriginal(value));
     expect(compact.properties.title).toBe(true); expect(compact.properties.description).toBe(false);

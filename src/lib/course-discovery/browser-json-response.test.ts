@@ -209,5 +209,7 @@ describe.runIf(existsSync(chrome))("fixed browser JSON replay, local fixtures on
       const { result } = await executeFixture(input, mode);
       expect(result.complete).toBe(false); expect(result.slots).toEqual([]); expect(result.status).not.toBe("EMPTY");
       if (["empty", "request-only"].includes(mode)) expect(result.status).toBe("INCOMPLETE");
-    }, 20_000);
+    // The superseded-response case intentionally waits the real 15-second
+    // verification window; leave room for Chrome startup and cleanup under load.
+    }, 30_000);
 });

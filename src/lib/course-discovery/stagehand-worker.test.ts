@@ -2,6 +2,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
+import { setTimeout as waitForFrame } from "node:timers/promises";
 import { runCourseDiscoveryStagehandWorker, prepareCourseDiscoveryStagehandWorker } from "../../../scripts/automation/course-discovery-stagehand-worker.mjs";
 import { createDiscoveryBrowser, createDiscoveryProcess, verifyDiscoveryCandidate, safeBrowserFailureDiagnostics,
   safeFixedInspectionSourceDiagnostic } from "../../../scripts/automation/course-discovery-worker.mjs";
@@ -15,6 +16,11 @@ import { sourceDiscover as actualSourceDiscover } from "../../../scripts/automat
 import { sourceFailureDiagnostic } from "../../../scripts/automation/stagehand/source-diagnostic.mjs";
 import { readStagehandFailure } from "../../../scripts/automation/course-discovery-stagehand-failure.mjs";
 import { createDelegationDiagnostic } from "./teeitup-delegated-booking-diagnostic";
+
+vi.mock("node:timers/promises", async importOriginal => {
+  const timers = await importOriginal<typeof import("node:timers/promises")>();
+  return { ...timers, setTimeout: vi.fn(timers.setTimeout) };
+});
 
 const first = Date.parse("2030-01-02T12:00:00.000Z");
 const official = "https://unseen-course.example/";
@@ -409,6 +415,16 @@ describe("regular Stagehand source worker", () => {
       return browser;
     });
     vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(t.f.clock);
+    if (mode === "missingFrame") {
+      // Exercise the full production frame wait without sleeping in a mocked browser.
+      vi.mocked(waitForFrame).mockImplementationOnce(async (milliseconds, _value, options) => {
+        expect(milliseconds).toBe(8000);
+        expect(options?.signal?.aborted).toBe(false);
+        t.f.clock += milliseconds!;
+        vi.setSystemTime(t.f.clock);
+        return undefined;
+      });
+    }
     try {
       if (mode === "current" || mode === "noncurrentParent") {
         expect((await t.run()).outcome).toBe("activated");
@@ -420,16 +436,18 @@ describe("regular Stagehand source worker", () => {
       } else {
         await expect(t.run()).rejects.toThrow(mode === "invalidAdapter" ? "FRAMEWORK_INSPECTION_METADATA_INVALID" :
           mode === "missingFrame" ? "FRAMEWORK_INSPECTION_PATH_STALE" : "FRAMEWORK_INSPECTION_SOURCE_NOT_SETTLED");
-        if (mode === "missingFrame") expect(t.request.mock.calls.filter(([a]) => a.action === "observe")).toHaveLength(1);
+        if (mode === "missingFrame") {
+          expect(waitForFrame).toHaveBeenCalledOnce();
+          expect(t.request.mock.calls.filter(([a]) => a.action === "observe")).toHaveLength(1);
+        }
         expect(t.client.candidate).not.toHaveBeenCalled(); expect(t.executeRecipe).not.toHaveBeenCalled();
       }
       expect(t.request.mock.calls.filter(([a]) => a.action === "click")).toHaveLength(1);
       expect(t.request.mock.calls.filter(([a]) => a.action !== "finish").length).toBeLessThanOrEqual(6); expect(t.close).toHaveBeenCalledOnce();
-    } finally { vi.useRealTimers(); }
+    } finally { vi.mocked(waitForFrame).mockReset(); vi.useRealTimers(); }
   };
-  it.each(["current", "missing", "copied", "stale", "wrongOriginal", "changedBinding", "revoked", "noncurrentParent", "invalidAdapter"] as const)
+  it.each(["current", "missing", "copied", "stale", "wrongOriginal", "changedBinding", "revoked", "noncurrentParent", "invalidAdapter", "missingFrame"] as const)
   ("requires fresh private terminal readiness after a modal's exact native frame: %s", terminalReadinessCase);
-  it("requires fresh private terminal readiness after a modal's exact native frame: missingFrame", () => terminalReadinessCase("missingFrame"), 12_000);
   it.each(["current", "ambiguous", "stillMissing", "movedDocument"] as const)("uses one fresh opaque public-entry disclosure within the existing inspection budget: %s", async mode => {
     const t = setup(), target = "a0000000-0000-4000-8000-000000000001";
     let disclosed = false;

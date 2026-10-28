@@ -182,7 +182,9 @@ describe.runIf(existsSync(chrome))("MemberSports browser JSON complete executor 
       const { result, posts } = await run(dateSelection === "retired-document" ? "new-document" : "valid", baseline, dateSelection);
       expect(result.complete, JSON.stringify(result.evidence)).toBe(false); expect(result.slots).toEqual([]); expect(result.status).not.toBe("EMPTY");
       expect(posts).toHaveLength(dateSelection === "no-current" ? 0 : dateSelection === "later-post" ? 2 : 1);
-    }, 12_000);
+    // Retired documents can consume the full 6.5-second execution deadline;
+    // allow separate startup/cleanup time without changing that deadline.
+    }, 20_000);
   it("proves the baseline and a changed date/P3 in separate fresh executions", async () => {
     for (const input of [baseline, { ...baseline, date: "2026-10-24", players: 3 }]) {
       const { result, posts, optionsCompleted } = await run("valid", input);

@@ -1,6 +1,9 @@
 {
   "$schema": "https://unpkg.com/knip@5/schema.json",
   "entry": [
+    "scripts/design/email-design-lab.mjs",
+    "scripts/design/serve-email-designs.mjs",
+    "scripts/design/verify-email-designs.mjs",
     "scripts/automation/course-discovery-browser.ts",
     "scripts/automation/course-discovery-diagnostics.d.mts",
     "scripts/automation/course-discovery-stagehand-browser.ts",

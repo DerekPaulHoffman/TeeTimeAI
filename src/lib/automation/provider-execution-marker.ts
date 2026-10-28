@@ -2,8 +2,6 @@ import { createHash, randomUUID } from "node:crypto";
 
 import { Prisma } from "@prisma/client";
 
-import { prisma } from "@/lib/prisma";
-
 import { runSerializedCourseMonitoringWrite } from "./course-monitoring";
 
 export {
@@ -391,18 +389,6 @@ export async function getCourseProviderObservationFencesInTransaction(
     fences.set(courseId, row);
   }
   return fences;
-}
-
-/** Batch read for callers that do not already own a projection snapshot. */
-export async function getCourseProviderObservationFences(
-  courseIdValues: readonly string[],
-) {
-  return prisma.$transaction((transaction) =>
-    getCourseProviderObservationFencesInTransaction(
-      transaction,
-      courseIdValues,
-    ),
-  );
 }
 
 export function startCourseProviderObservationHeartbeat(

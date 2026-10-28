@@ -8,40 +8,12 @@ import { ZodError } from "zod";
 import { getCurrentOperator } from "@/lib/operator/auth";
 import {
   applyOperatorCourseDecision,
-  approveOperatorCourseTechnicalFinal,
-  correctOperatorCourseBookingLink,
-  humanReviewReasonSchema,
   operatorCourseDecisionRequiresEvidence,
   operatorCourseDecisionSchema,
-  reopenOperatorCourseTechnicalFinal,
   requestOperatorCourseRecheck,
   updateOperatorCourseOfficialLinks
 } from "@/lib/operator/course-monitoring";
 import { assertSameOriginOperatorMutation } from "@/lib/operator/mutation-security";
-
-export async function correctBookingLinkAction(formData: FormData) {
-  const operator = await requireOperatorMutation();
-  const reference = readField(formData, "reference");
-  await correctOperatorCourseBookingLink(
-    {
-      reference,
-      statusRevision: readInteger(formData, "statusRevision"),
-      incidentCycle: readOptionalInteger(formData, "incidentCycle"),
-      incidentRevision: readOptionalRevision(formData, "incidentRevision"),
-      bookingUrl: readField(formData, "bookingUrl"),
-      evidenceUrl: readField(formData, "evidenceUrl"),
-      note: readField(formData, "note"),
-      idempotencyKey: readField(formData, "idempotencyKey")
-    },
-    {
-      actorId: operator.clerkUserId,
-      source: "OPERATOR_DASHBOARD",
-      apply: true,
-      dispatchSearches: true
-    }
-  );
-  revalidateOperatorCourse(reference);
-}
 
 export type OperatorActionState = {
   status: "idle" | "error" | "success";
@@ -182,52 +154,6 @@ export async function requestRecheckAction(
       message: getRecheckErrorMessage(error)
     };
   }
-}
-
-export async function approveTechnicalFinalAction(formData: FormData) {
-  const operator = await requireOperatorMutation();
-  const reference = readField(formData, "reference");
-  await approveOperatorCourseTechnicalFinal(
-    {
-      reference,
-      statusRevision: readInteger(formData, "statusRevision"),
-      incidentCycle: readOptionalInteger(formData, "incidentCycle"),
-      incidentRevision: readOptionalRevision(formData, "incidentRevision"),
-      reason: humanReviewReasonSchema.parse(readField(formData, "reason")),
-      evidenceUrl: readField(formData, "evidenceUrl"),
-      note: readField(formData, "note"),
-      idempotencyKey: readField(formData, "idempotencyKey")
-    },
-    {
-      actorId: operator.clerkUserId,
-      source: "OPERATOR_DASHBOARD",
-      apply: true
-    }
-  );
-  revalidateOperatorCourse(reference);
-}
-
-export async function reopenTechnicalFinalAction(formData: FormData) {
-  const operator = await requireOperatorMutation();
-  const reference = readField(formData, "reference");
-  await reopenOperatorCourseTechnicalFinal(
-    {
-      reference,
-      statusRevision: readInteger(formData, "statusRevision"),
-      incidentCycle: readOptionalInteger(formData, "incidentCycle"),
-      incidentRevision: readOptionalRevision(formData, "incidentRevision"),
-      evidenceUrl: readField(formData, "evidenceUrl"),
-      note: readField(formData, "note"),
-      idempotencyKey: readField(formData, "idempotencyKey")
-    },
-    {
-      actorId: operator.clerkUserId,
-      source: "OPERATOR_DASHBOARD",
-      apply: true,
-      dispatchSearches: true
-    }
-  );
-  revalidateOperatorCourse(reference);
 }
 
 async function requireOperatorMutation() {

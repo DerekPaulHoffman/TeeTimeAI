@@ -2498,17 +2498,6 @@ export async function getNewestCompletedLocalReaderProviderObservationsInTransac
   return newestByCourseId;
 }
 
-export async function getNewestCompletedLocalReaderProviderObservations(
-  courseIdValues: readonly string[],
-) {
-  return prisma.$transaction((transaction) =>
-    getNewestCompletedLocalReaderProviderObservationsInTransaction(
-      transaction,
-      courseIdValues,
-    ),
-  );
-}
-
 function selectNewestCompletedLocalReaderProviderObservation(
   rows: Array<{
     result: Prisma.JsonValue | null;

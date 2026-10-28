@@ -1260,7 +1260,13 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       browserTransport: "NATIVE_CHROME", launchBrowser: () => chromium.launch({ executablePath, headless: true }), requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
     });
     try {
-      const snapshot = await session.execute({ id: 1, action: "open", url: official }); expect(snapshot.text).toContain("Date redirects denied");
+      let snapshot = await session.execute({ id: 1, action: "open", url: official });
+      // The initial document snapshot may precede the fixture's chained reads.
+      // Wait for their actual completion rather than assuming a render delay.
+      await expect.poll(async () => {
+        snapshot = await session.execute({ id: "settle-redirects", action: "observe" });
+        return snapshot.text;
+      }, { timeout: 8000 }).toContain("Date redirects denied");
       expect(seen).toEqual([official, ...urls]); expect(snapshot.responses).toEqual([]);
       expect(snapshot.requestFailures.filter(row => row.reason === "UNSAFE_REDIRECT")).toHaveLength(2);
       for (const url of [destination, official + "unearned-date-data"]) await expect(session.execute({ id: url, action: "open", url })).rejects.toThrow();

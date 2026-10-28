@@ -453,6 +453,17 @@ Common probe meaning:
 
 ## Verification
 
+`npm run test:run` runs both Vitest projects: `node` for server logic and
+`dom` for React and browser-state fixtures. Use `--project node` or
+`--project dom` with a focused file/directory while editing. Add new DOM fixtures
+to `domTests` in `vitest.config.ts`; tests using their own JSDOM or Playwright
+browser do not need an additional global jsdom. Per-file environment directives
+remain supported. Both projects keep file isolation and all existing assertions.
+
+Run `npm run check:dead-code` to check unused files and dependency declarations.
+Standalone operator/design tools must be registered as Knip entry points before
+treating an unreferenced file as obsolete.
+
 Before considering a code or UI change complete:
 
 ```powershell

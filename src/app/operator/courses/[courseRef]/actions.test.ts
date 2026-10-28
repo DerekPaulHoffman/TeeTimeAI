@@ -30,12 +30,8 @@ vi.mock("@/lib/operator/mutation-security", () => ({
 }));
 vi.mock("@/lib/operator/course-monitoring", () => ({
   applyOperatorCourseDecision: mocks.applyOperatorCourseDecision,
-  approveOperatorCourseTechnicalFinal: vi.fn(),
-  correctOperatorCourseBookingLink: vi.fn(),
-  humanReviewReasonSchema: { parse: vi.fn((value: string) => value) },
   operatorCourseDecisionRequiresEvidence: mocks.operatorCourseDecisionRequiresEvidence,
   operatorCourseDecisionSchema: { parse: vi.fn((value: string) => value) },
-  reopenOperatorCourseTechnicalFinal: vi.fn(),
   requestOperatorCourseRecheck: mocks.requestOperatorCourseRecheck,
   updateOperatorCourseOfficialLinks: mocks.updateOperatorCourseOfficialLinks
 }));
