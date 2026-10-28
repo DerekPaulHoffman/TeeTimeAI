@@ -364,7 +364,7 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
           const changed = error instanceof Error &&
             (/BROWSER_DOCUMENT_CHANGED|Execution context was destroyed|Cannot find context with specified id|Unable to retrieve content because the page is navigating/u.test(error.message) ||
               (generation !== viewGeneration || epoch !== documentEpoch) && error.name === "TimeoutError" ||
-              /Protocol error \(Page\.captureScreenshot\): Unable to capture screenshot/u.test(error.message) &&
+              /Protocol error \(Page\.captureScreenshot\): (?:Unable to capture screenshot|Not attached to an active page)/u.test(error.message) &&
                 (pendingNavigation || generation !== viewGeneration || epoch !== documentEpoch || Date.now() - lastNavigationAt < 1_000));
           if (attempt >= 3 || !changed || failure || deadline.aborted) throw error;
           // Retry observation only. No navigation or provider request is replayed;

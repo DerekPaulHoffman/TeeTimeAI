@@ -316,17 +316,22 @@ describe("interactive public research boundaries", () => {
   }, 90_000);
 
   it.each([
-    { loseOwnership: false, phase: "content" },
-    { loseOwnership: false, phase: "screenshot" },
-    { loseOwnership: true, phase: "content" },
-  ])("handles document changes without retrying lost ownership ($phase, lost=$loseOwnership)", async ({ loseOwnership, phase }) => {
+    { loseOwnership: false, phase: "content", screenshotError: "Unable to capture screenshot" },
+    { loseOwnership: false, phase: "screenshot", screenshotError: "Unable to capture screenshot" },
+    { loseOwnership: false, phase: "screenshot", screenshotError: "Not attached to an active page" },
+    { loseOwnership: true, phase: "content", screenshotError: "Unable to capture screenshot" },
+    { loseOwnership: true, phase: "screenshot", screenshotError: "Not attached to an active page" },
+    { loseOwnership: false, phase: "unchanged-screenshot", screenshotError: "Not attached to an active page" },
+  ])("handles document changes without retrying lost ownership ($phase, lost=$loseOwnership, $screenshotError)", async ({ loseOwnership, phase, screenshotError }) => {
     const channel = resolve(".codex-artifacts/browser", `fixture-${randomUUID()}`);
     await mkdir(channel, { recursive: true });
     const browser = await chromium.launch({ headless: true });
     const newContext = browser.newContext.bind(browser);
     let changed = false;
     let ownershipFailures = 0;
+    let screenshotAttempts = 0;
     const ownershipError = new Error("Fixture ownership lost");
+    const screenshotFailure = new Error(`page.screenshot: Protocol error (Page.captureScreenshot): ${screenshotError}`);
     vi.spyOn(browser, "newContext").mockImplementation(async options => {
       const context = await newContext(options);
       const newPage = context.newPage.bind(context);
@@ -339,10 +344,12 @@ describe("interactive public research boundaries", () => {
         });
         const screenshot = page.screenshot.bind(page);
         vi.spyOn(page, "screenshot").mockImplementation(async options => {
+          screenshotAttempts++;
+          if (phase === "unchanged-screenshot") throw screenshotFailure;
           if (!changed && phase === "screenshot") {
             changed = true;
             await page.goto("https://public.example.test/next");
-            throw new Error("page.screenshot: Protocol error (Page.captureScreenshot): Unable to capture screenshot");
+            throw screenshotFailure;
           }
           return screenshot(options);
         });
@@ -360,6 +367,13 @@ describe("interactive public research boundaries", () => {
       { fetch, lease, launch: async () => browser });
     const settled = task.then(value => ({ value }), error => ({ error }));
     try {
+      if (phase === "unchanged-screenshot") {
+        await expect(task).rejects.toBe(screenshotFailure);
+        expect(screenshotAttempts).toBeGreaterThan(0);
+        expect(screenshotAttempts).toBeLessThanOrEqual(4);
+        expect(fetch).toHaveBeenCalledOnce();
+        return;
+      }
       if (loseOwnership) {
         await expect(task).rejects.toBe(ownershipError);
         expect(ownershipFailures).toBe(1);
