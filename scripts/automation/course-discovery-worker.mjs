@@ -684,6 +684,16 @@ function safeNativeBrowserDiagnostics(value) {
     .map(safeNativeRequestDiagnostic).filter(Boolean);
   return { ...(firstFatal ? { nativeFirstFatal: firstFatal } : {}), ...(rejected.length ? { nativeRejectedRequests: rejected } : {}) };
 }
+/** The native router emits this exact metadata rejection only after aborting
+ * the Ping pause, without admitting a read record. This classification removes
+ * no denial and grants no source, transport or availability authority. */
+function blockedNonEvidencePing(value) {
+  return value?.code === "NATIVE_REDIRECT_PING_UNSUPPORTED" && value.operation === "REQUEST_METADATA" &&
+    value.resourceType === "ping" && value.method === "POST" && value.framePresent === true && value.rootFrame === true;
+}
+function hasEvidenceNativeRejection(value) {
+  return value?.nativeRejectedRequests?.some(rejection => !blockedNonEvidencePing(rejection)) === true;
+}
 /** Closed diagnostic copy only. These fields are never navigation/source proof. */
 function safeOfficialBrowserDiagnostics(value) {
   const result = {}, source = value?.officialSourceDiagnostic;
@@ -877,7 +887,7 @@ function safeLastFeedback(value) {
 function meaningfulFailure(feedback) {
   const safe = safeLastFeedback(feedback);
   if (!safe || safe.code === "DISCOVERY_BROWSER_INCOMPLETE" && !safe.details.failure && !safe.details.requests.length &&
-      !safe.details.nativeFirstFatal && !safe.details.nativeRejectedRequests?.length) return undefined;
+      !safe.details.nativeFirstFatal && !hasEvidenceNativeRejection(safe.details)) return undefined;
   return safe;
 }
 
@@ -911,13 +921,19 @@ export function discoveryBrowserFeedback(snapshot, action, error) {
     .filter(request => ["document", "script", "stylesheet", "xhr", "fetch"].includes(request.resourceType))
     .map(request => safeReplayDiagnostic({ code: request.blockedReason || "HTTP_ERROR",
       url: request.url, method: request.method, resourceType: request.resourceType, urlRejection: request.urlRejection })).filter(Boolean);
-  const recentFailures = safeBrowserRequestFailures(snapshot?.requestFailures).reverse()
+  // The browser session mirrors native rejections into requestFailures. Ignore
+  // that mirror only when its exact kind/code/path has the owned native abort
+  // diagnostic above; a model summary, bare reason or another resource cannot
+  // turn an unknown denied request into incidental traffic.
+  const recentFailures = safeBrowserRequestFailures((Array.isArray(snapshot?.requestFailures) ? snapshot.requestFailures : [])
+    .filter(failure => !(failure?.reason === "NATIVE_REDIRECT_PING_UNSUPPORTED" && failure.resourceType === "ping" &&
+      nativeDiagnostics.nativeRejectedRequests?.some(rejection => blockedNonEvidencePing(rejection) && rejection.url === failure.url)))).reverse()
     .map(failure => safeReplayDiagnostic({ code: failure.reason, url: failure.url, resourceType: failure.resourceType,
       method: failure.method, urlRejection: failure.urlRejection }));
   const requests = [...new Map([...currentRequests, ...recentFailures].map(failure => [JSON.stringify(failure), failure])).values()].slice(0, 8);
   const failure = error ? safeReplayDiagnostic({ code: /^[A-Z_0-9]{1,80}$/u.test(error.code ?? "")
     ? error.code : "BROWSER_ACTION_FAILED", url: snapshot?.url }) : undefined;
-  if (!failure && !requests.length && !nativeDiagnostics.nativeFirstFatal && !nativeDiagnostics.nativeRejectedRequests?.length &&
+  if (!failure && !requests.length && !nativeDiagnostics.nativeFirstFatal && !hasEvidenceNativeRejection(nativeDiagnostics) &&
       !(snapshot?.loading === true && snapshot?.pendingRequestCount > 0)) return undefined;
   return safeLastFeedback({ code: "DISCOVERY_BROWSER_INCOMPLETE", details: { action, failure,
     ...(error?.code === "BROWSER_ACTION_SCHEMA_INVALID" ? { issues: safeBrowserActionIssues(error.details?.issues) } : {}),

@@ -538,4 +538,64 @@ describe("durable discovery browser diagnostics", () => {
       { url: "https://venue.example/image", method: "GET", resourceType: "image", blockedReason: "DENIED" },
     ] }, "observe")).toBeUndefined();
   });
+
+  const blockedPing = { code: "NATIVE_REDIRECT_PING_UNSUPPORTED", operation: "REQUEST_METADATA", method: "POST",
+    resourceType: "ping", framePresent: true, rootFrame: true, hasPostData: true, postDataPresent: false, postDataBytes: 0,
+    url: "https://venue.example/collect" };
+  const pingSnapshot = () => ({ loading: false, pendingRequestCount: 0, nativeRejectedRequests: [{ ...blockedPing }],
+    requestFailures: [{ reason: blockedPing.code, resourceType: "ping", url: blockedPing.url }],
+    requests: [{ url: "https://venue.example/times", method: "GET", resourceType: "fetch", status: 200 }] });
+
+  it("keeps a native-blocked metadata Ping out of causal incomplete feedback without removing its raw denial", () => {
+    const snapshot = pingSnapshot(), before = structuredClone(snapshot);
+    expect(discoveryBrowserFeedback(snapshot, "observe")).toBeUndefined();
+    expect(snapshot).toEqual(before);
+    expect(safeBrowserFailureDiagnostics(snapshot).nativeRejectedRequests).toEqual([blockedPing]);
+    expect(noVerifiedRecipeDiagnostic({ code: "DISCOVERY_BROWSER_INCOMPLETE", details: {
+      action: "observe", requests: [], nativeRejectedRequests: [blockedPing] } })).toEqual({
+      code: "NO_VERIFIED_RECIPE", reason: "NO_RECIPE_VERIFIED" });
+  });
+
+  it.each([
+    { resourceType: "xhr" }, { resourceType: "fetch" }, { resourceType: "document" }, { resourceType: "other" },
+    { resourceType: "Ping" }, { resourceType: undefined }, { operation: "REQUEST_RELEASE" }, { operation: undefined },
+    { method: "GET" }, { method: "PUT" }, { method: undefined }, { rootFrame: false }, { rootFrame: undefined },
+    { framePresent: false }, { framePresent: undefined }, { code: "NATIVE_REDIRECT_POST_BODY_MISSING" },
+    { code: "NATIVE_REDIRECT_REQUEST_REJECTED" }, { code: "NATIVE_REDIRECT_ABORT_TIMEOUT" },
+  ])("does not quiet a denied request with incomplete or different native facts %j", change => {
+    const snapshot = { ...pingSnapshot(), nativeRejectedRequests: [{ ...blockedPing, ...change }] };
+    expect(discoveryBrowserFeedback(snapshot, "observe")).toMatchObject({ code: "DISCOVERY_BROWSER_INCOMPLETE" });
+  });
+
+  it.each([
+    { reason: "NATIVE_REDIRECT_PING_UNSUPPORTED", resourceType: "xhr", url: blockedPing.url },
+    { reason: "NATIVE_REDIRECT_PING_UNSUPPORTED", resourceType: "ping", url: "https://venue.example/other" },
+    { reason: "NATIVE_REDIRECT_PING_UNSUPPORTED", resourceType: "ping", url: blockedPing.url + "?unpaired=value#fragment" },
+    { reason: "NATIVE_REDIRECT_PING_UNSUPPORTED", resourceType: "ping" },
+    { reason: "UNSAFE_METHOD", resourceType: "fetch", url: blockedPing.url },
+  ])("keeps an unpaired or real request failure despite an incidental Ping %j", failure => {
+    expect(discoveryBrowserFeedback({ ...pingSnapshot(), requestFailures: [failure] }, "observe"))
+      .toMatchObject({ code: "DISCOVERY_BROWSER_INCOMPLETE", details: { requests: [expect.objectContaining({ code: failure.reason })] } });
+  });
+
+  it("does not infer an owned Ping abort from bare model-style reason or public-page text", () => {
+    const snapshot = { ...pingSnapshot(), nativeRejectedRequests: [], summary: blockedPing.code, text: JSON.stringify(blockedPing) };
+    expect(discoveryBrowserFeedback(snapshot, "observe")).toMatchObject({ code: "DISCOVERY_BROWSER_INCOMPLETE" });
+  });
+
+  it("retains fatal, pending, explicit action and availability failures beside the raw blocked Ping", () => {
+    const snapshot = pingSnapshot();
+    for (const changed of [
+      { nativeFirstFatal: { code: "NATIVE_REDIRECT_LOADER_MISMATCH" } },
+      { loading: true, pendingRequestCount: 1 },
+      { requests: [{ url: "https://venue.example/times", resourceType: "fetch", method: "POST", blockedReason: "UNSAFE_METHOD" }] },
+      { nativeRejectedRequests: [blockedPing, { code: "NATIVE_REDIRECT_POST_BODY_MISSING", resourceType: "xhr", method: "POST" }] },
+    ]) {
+      const feedback = discoveryBrowserFeedback({ ...snapshot, ...changed }, "observe");
+      expect(feedback).toMatchObject({ code: "DISCOVERY_BROWSER_INCOMPLETE" });
+      expect(feedback.details.nativeRejectedRequests).toContainEqual(blockedPing);
+    }
+    expect(discoveryBrowserFeedback(snapshot, "open", { code: "BROWSER_NAVIGATION_FAILED" }))
+      .toMatchObject({ details: { failure: { code: "BROWSER_NAVIGATION_FAILED" }, nativeRejectedRequests: [blockedPing] } });
+  });
 });

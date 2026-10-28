@@ -188,7 +188,30 @@ export function fixedInspectionFrameWitness(report, path, officialUrl) {
   const frames = nativeFrameNavigations(report, publicUrl).filter(row =>
     path.some((url, index) => index + 1 < path.length && row.pageUrl === url && row.frameUrl === path[index + 1]));
   if (frames.length > 1) throw fail('FRAMEWORK_INSPECTION_SCOPE_INVALID');
-  const frame = frames[0];
+  let frame = frames[0];
+  if (!frame) {
+    // Source discovery may stop at an unclicked private visible-frame witness.
+    // This constrains the fresh helper's existing exact DOM capability; it
+    // neither admits the historical frame nor supplies identity/availability.
+    const keys = value => value && typeof value === 'object' && !Array.isArray(value) ? Object.keys(value).sort().join(',') : '';
+    const started = Date.parse(report?.startedAt), finished = Date.parse(report?.finishedAt), candidates = new Map();
+    for (const row of (report.frameLedger ?? []).slice(0, 512)) {
+      if (row?.kind !== 'NATIVE_VISIBLE_FRAME') continue;
+      const stamp = Date.parse(row.observedAt);
+      if (keys(row) !== 'documentHash,frames,kind,observedAt,pageUrl' ||
+          !publicUrl(row.pageUrl) || new URL(row.pageUrl).href !== row.pageUrl || !report.visitedUrls?.includes(row.pageUrl) ||
+          !Number.isFinite(started) || !Number.isFinite(finished) || !Number.isFinite(stamp) ||
+          new Date(stamp).toISOString() !== row.observedAt || stamp < started || stamp > finished ||
+          !/^[a-f0-9]{64}$/u.test(row.documentHash ?? '') || !Array.isArray(row.frames) || row.frames.length > 24 ||
+          new Set(row.frames.map(item => item?.src)).size !== row.frames.length || row.frames.some(item =>
+            keys(item) !== 'src,visible' || item.visible !== true || !publicUrl(item.src) ||
+            new URL(item.src).href !== item.src || item.src === row.pageUrl)) continue;
+      for (const item of row.frames) if (path.some((url, index) => index + 1 < path.length && row.pageUrl === url && item.src === path[index + 1]))
+        candidates.set(canonical([row.pageUrl, item.src]), { pageUrl: row.pageUrl, frameUrl: item.src });
+    }
+    if (candidates.size > 1) throw fail('FRAMEWORK_INSPECTION_SCOPE_INVALID');
+    frame = candidates.values().next().value;
+  }
   return frame ? { kind: 'FIXED_INSPECTION_SOURCE_FRAME', officialUrl, parentUrl: frame.pageUrl,
     frameUrl: frame.frameUrl, sourceReportSha256: hash(canonical(report)) } : undefined;
 }
@@ -420,12 +443,13 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
         ...(matchingGestureControls.length === 1 ? [gesture.targetUrl] : []),
       ].filter(publicUrl).map(value => new URL(value).href));
       const requiredFixedFrame = Boolean(frameWitness && next === frameWitness.frameUrl && snapshot.url === frameWitness.parentUrl);
+      const finalFrameOpen = frameWitness && path.at(-1) === frameWitness.frameUrl && position < path.length - 1 ? 1 : 0;
       const freshFixedFrameEdge = freshFixedInspectionFrameEdge(snapshot, frameWitness, next);
       const missingLink = next !== undefined && (requiredFixedFrame ? !freshFixedFrameEdge : !freshLinks.has(next));
       const disclosures = (snapshot.controls ?? []).filter(control => control.kind === 'public-entry-disclosure' &&
         typeof control.target === 'string' && /^[a-f0-9-]{36}$/u.test(control.target));
       if (missingLink && !publicEntryDisclosed && disclosures.length === 1 &&
-          receipt.actions.length + Math.max(0,path.length-position-2) + 2 + (earlyCpsContext && current !== recipe.source.bookingUrl ? 1 : 0) <= INSPECTION_ACTION_LIMIT) {
+          receipt.actions.length + Math.max(0,path.length-position-2) + finalFrameOpen + 2 + (earlyCpsContext && current !== recipe.source.bookingUrl ? 1 : 0) <= INSPECTION_ACTION_LIMIT) {
         publicEntryDisclosed = true;
         snapshot = await request('click', snapshot.url, 'PUBLIC_ENTRY_DISCLOSURE', disclosures[0].target); continue;
       }
@@ -451,7 +475,7 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
         missingLink ? 'FRESH_LINK_MISSING' : undefined;
       // Reserve all remaining path opens plus the one inspection. Observations
       // spend the existing six-action budget and original90s clock; no reset.
-      const reserved = Math.max(0, path.length - position - 2) + 1 +
+      const reserved = Math.max(0, path.length - position - 2) + finalFrameOpen + 1 +
         (earlyCpsContext && current !== recipe.source.bookingUrl ? 1 : 0);
       if (reason && requiredFixedFrame && frameWaitUsed) throw fail('FRAMEWORK_INSPECTION_PATH_STALE');
       if (reason && receipt.actions.length + reserved < INSPECTION_ACTION_LIMIT) {
@@ -469,7 +493,9 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
       if (position === path.length - 1) break;
       // Inspect an admitted final source from its current public parent. This
       // retains the fixed official-document witness; it grants no availability proof.
-      if (position + 1 === path.length - 1 && !gesture) break;
+      // A fixed frame tag grants only its one fresh revalidated OPEN token;
+      // it does not itself admit inspect_adapter on the provider URL.
+      if (position + 1 === path.length - 1 && !gesture && !requiredFixedFrame) break;
       snapshot = gesture ? await request('click', snapshot.url, 'NATIVE_GESTURE_SOURCE_OPEN', matchingGestureControls[0].target, gesture)
         : await request('open', next);
       position++;

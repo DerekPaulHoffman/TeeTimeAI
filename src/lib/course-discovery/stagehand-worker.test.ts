@@ -1203,6 +1203,33 @@ describe("regular Stagehand source worker", () => {
     await t.run(); expect(t.client.activate).toHaveBeenCalledOnce(); expect(t.sourceDiscover).toHaveBeenCalledOnce();
   });
 
+  it("hands an unclicked private native frame witness to a fresh fixed inspector before two independent replays", async () => {
+    const t = setup(); t.f.report.actions = []; t.f.report.visitedUrls = [official]; t.f.report.officialLinkLedger = [];
+    Object.assign(t.f.report, { nativeFrameNavigations: [], frameLedger: [{ kind: "NATIVE_VISIBLE_FRAME", pageUrl: official,
+      observedAt: new Date(first + 1000).toISOString(), documentHash: "a".repeat(64), frames: [{ src: booking, visible: true }] }] });
+    t.browserFactory.mockImplementation(async options => {
+      expect(options).toMatchObject({ fixedInspection: true, fixedInspectionFrameWitness: {
+        kind: "FIXED_INSPECTION_SOURCE_FRAME", officialUrl: official, parentUrl: official, frameUrl: booking,
+        sourceReportSha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      } });
+      return createDiscoveryBrowser({ ...options, processFactory: () => ({ request: t.request, close: t.close }) }) as never;
+    });
+    let current = official;
+    t.request.mockImplementation(async action => {
+      if (action.action === "open") current = action.url!;
+      return { url: current, browserTransport: "NATIVE_CHROME", navigationStatus: 200, loading: false,
+        accessRequirementObserved: false, controls: [], frames: current === official ? [{ source: "FIXED_INSPECTION_FRAME_SRC", url: booking }] : [],
+        officialSourceDiagnostic: { rawOfficialCaptured: true, currentOfficialDocument: false },
+        nativeMainDocumentContinuity: { kind: "NATIVE_MAIN_DOCUMENT_CONTINUITY_V1", originalUrlSha256: stagehandDataHash(current),
+          currentUrlSha256: stagehandDataHash(current), documentBindingSha256: (current === official ? "a" : "b").repeat(64), observedAt: t.f.clock, status: 200 },
+        adapter: action.action === "inspect_adapter" ? { family: "FOREUP", facilityId: 12, scheduleId: 34, bookingClassId: 56 } : undefined } as never;
+    });
+    await t.run();
+    expect(t.request.mock.calls.filter(([action]) => action.action !== "finish").map(([action]) => action)).toEqual([{ action: "open", url: official }, { action: "open", url: booking }, { action: "inspect_adapter", url: booking }]);
+    expect(t.client.candidate).toHaveBeenCalledOnce(); expect(t.executeRecipe).toHaveBeenCalledTimes(2);
+    expect(t.client.verification).toHaveBeenCalledTimes(2); expect(t.client.activate).toHaveBeenCalledOnce();
+  });
+
   it("opens an exact fresh officially linked CPS context before its first inspector without relabelling the official parent", async () => {
     const t = setup(), source = "https://new-public-course.cps.golf/onlineresweb/search-teetime?TeeOffTimeMin=0&TeeOffTimeMax=23.999722222222225";
     t.f.report.adapterSourceProposal.bookingUrl = source; t.f.report.visitedUrls = [official, source];

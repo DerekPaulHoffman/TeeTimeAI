@@ -14,6 +14,7 @@ import { canonicalStagehandHostEntry } from "./stagehand-source-browser";
 import { isSafeRecipeUrl, isSafeBrowserBootstrapReadUrl } from "./recipe";
 import { discoveryDefiniteUncorrelatedPostDenial } from "./browser-session";
 import { isAnonymousBrowserReadPost } from "@/lib/automation/simulator-interactive-browser";
+import { discoveryBrowserFeedback } from "../../../scripts/automation/course-discovery-worker.mjs";
 
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; }
 it("retains only closed official render gate facts", () => {
@@ -3603,6 +3604,36 @@ describe("native exact request and response ownership", () => {
       expect(test.guard.rejectedRequests?.[0].code).toBe("NATIVE_REDIRECT_PING_UNSUPPORTED");
       expect(test.cdp.send.mock.calls.filter(([name]) => ["Fetch.continueRequest", "Fetch.getResponseBody", "Fetch.continueResponse"].includes(name))).toEqual([]);
     } finally { await test.guard.close(); }
+  });
+
+  it("keeps a successfully blocked metadata-only POST Ping non-causal while owned document and GET reads complete", async () => {
+    const test = await installed(), signal = new AbortController(), stop = vi.fn(async () => {}), bodies: string[] = [];
+    const queue = createSimulatorBrowserRequestQueue(async (_host, work) => ({ acquired: true as const, value: await work() }), signal.signal);
+    test.handler.mockImplementation(async route => {
+      bodies.push((await queue.run("example.org", () => continueNativeBrowserRead(route, signal.signal, 1000, stop))).body.toString());
+    });
+    try {
+      test.request("ping", { resourceType: "Ping", networkId: "network-ping", request: {
+        url: "https://example.org/collect?private=not-retained#not-retained", method: "POST", hasPostData: true, headers: {} } });
+      test.request("document", { resourceType: "Document" }); test.request("availability");
+      test.response("document");
+      await vi.waitFor(() => expect(test.cdp.send.mock.calls.filter(([name]) => name === "Fetch.continueRequest")
+        .map(([, value]) => value?.requestId)).toEqual(["document", "availability"]));
+      test.response("availability");
+      await vi.waitFor(() => { expect(test.guard.pendingReads).toBe(0); expect(bodies).toEqual(["body-document", "body-availability"]); });
+      expect(test.guard.rejectedRequests).toEqual([expect.objectContaining({ code: "NATIVE_REDIRECT_PING_UNSUPPORTED",
+        operation: "REQUEST_METADATA", method: "POST", resourceType: "ping", framePresent: true, rootFrame: true,
+        url: "https://example.org/collect", hasPostData: true, postDataPresent: false, postDataBytes: 0 })]);
+      const rejected = test.guard.rejectedRequests![0];
+      expect(JSON.stringify(rejected)).not.toContain("not-retained");
+      expect(discoveryBrowserFeedback({ loading: false, pendingRequestCount: 0, nativeRejectedRequests: [rejected],
+        requestFailures: [{ reason: rejected.code, resourceType: rejected.resourceType, url: rejected.url }] }, "observe")).toBeUndefined();
+      expect(test.cdp.send.mock.calls.filter(([name]) => name === "Fetch.failRequest").map(([, value]) => value?.requestId)).toEqual(["ping"]);
+      expect(test.cdp.send.mock.calls.filter(([name]) => ["Fetch.getResponseBody", "Fetch.continueResponse"].includes(name))
+        .map(([, value]) => value?.requestId)).not.toContain("ping");
+      expect(test.handler).toHaveBeenCalledTimes(2); expect(test.guard.firstFatal).toBeUndefined();
+      expect(test.failures).toEqual([]); expect(stop).not.toHaveBeenCalled(); expect(test.close).not.toHaveBeenCalled();
+    } finally { queue.dispose(); signal.abort(); await test.guard.close(); }
   });
 
   it("does not let a late response fabricate evidence for a denied Ping", async () => {
