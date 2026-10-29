@@ -2,7 +2,7 @@
 import { createHmac } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -870,7 +870,78 @@ describe("controller-only verification", () => {
     } finally { rmSync(sourceHome, { recursive: true, force: true }); }
   });
 
-  it("serializes legitimate batched tool calls before independent replay", async () => {
+  it.each([
+    { timing: "interrupt", inputTokens: 39533, nativeFatal: false },
+    { timing: "close", inputTokens: 39533, nativeFatal: false },
+    { timing: "close", inputTokens: 100, nativeFatal: false },
+    { timing: "close", inputTokens: 39533, nativeFatal: true },
+  ])("retains final trusted cleanup guard and supervisor retry disposition: %j", async ({ timing, inputTokens, nativeFatal }) => {
+    const sourceHome = mkdtempSync(join(tmpdir(), "discovery-late-usage-test-"));
+    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6.1-sol" }] }));
+    writeFileSync(join(sourceHome, "auth.json"), "test-auth");
+    const checkpoint = vi.fn(async () => ({})), closeBrowser = vi.fn(async () => {});
+    const client = { helperEnvironment: () => ({}), checkpoint, candidate: vi.fn(), activate: vi.fn() };
+    let workerHome = "", usageSent = false;
+    const processFactory = options => {
+      workerHome = options.environment.CODEX_HOME;
+      const emitUsage = async () => {
+        if (usageSent) return; usageSent = true;
+        await options.onMessage({ method: "thread/tokenUsage/updated", params: { threadId: "thread-1", tokenUsage: { total: {
+          totalTokens: inputTokens + 50, inputTokens, cachedInputTokens: 0, outputTokens: 50,
+        } } } }, () => {});
+      };
+      return { notify: vi.fn(), close: vi.fn(async () => { if (timing === "close") await emitUsage(); }), request: async (method: string) => {
+        if (method === "thread/start") return { thread: { id: "thread-1" }, approvalPolicy: "never", sandbox: { type: "readOnly" } };
+        if (method === "turn/start") {
+          queueMicrotask(async () => {
+            await options.onMessage({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1" } } }, () => {});
+            if (nativeFatal) await options.onMessage({ id: 1, method: "item/tool/call", params: { threadId: "thread-1", turnId: "turn-1",
+              tool: "discovery_browser", arguments: { action: "observe" } } }, () => {});
+            await options.onMessage({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } }, () => {});
+          });
+          return { turn: { id: "turn-1" } };
+        }
+        if (method === "turn/interrupt" && timing === "interrupt") await emitUsage();
+        return {};
+      } };
+    };
+    try {
+      const failure = await runCourseDiscoveryWorker({ job: job(), client, cwd: process.cwd(), sourceHome, recipeSchema: {},
+        resolveCli: () => "fake-codex", processFactory, browserFactory: () => ({ close: closeBrowser, request: async () => ({
+          url: "https://example.org/", nativeFirstFatal: { code: "NATIVE_REDIRECT_RESPONSE_TIMEOUT" },
+        }) }) }).catch(error => error);
+      const guarded = nativeFatal || inputTokens >= 32000;
+      const code = nativeFatal ? "DISCOVERY_NATIVE_TRANSPORT_FATAL" : guarded ? "DISCOVERY_GENERIC_BUDGET_EXHAUSTED" : "DISCOVERY_NO_VERIFIED_RECIPE";
+      expect(failure.code).toBe(code);
+      expect(failure.discoveryMetrics).toMatchObject({ tokenUsage: { uncachedInputTokens: inputTokens },
+        cleanup: { browserClosed: true, modelClosed: true, credentialsRemoved: true, directoryRemoved: true } });
+      expect(existsSync(workerHome)).toBe(false);
+      if (guarded) {
+        expect(failure.discoveryMetrics.genericBudget.stop).toMatchObject({ code });
+        expect(checkpoint.mock.calls.at(-1)?.[2]).toMatchObject({ genericGuard: { code } });
+      } else expect(failure.discoveryMetrics.genericBudget).not.toHaveProperty("stop");
+      expect(client.candidate).not.toHaveBeenCalled(); expect(client.activate).not.toHaveBeenCalled();
+      expect(closeBrowser).toHaveBeenCalledTimes(nativeFatal ? 1 : 0);
+
+      const ended = deferred(); let initial = true, retry = false;
+      const supervisorClient = { next: vi.fn(async () => {
+        if (initial) { initial = false; return { job: job() }; }
+        if (retry) { retry = false; return { job: { ...job(), attempts: 2 } }; }
+        return { job: null };
+      }), heartbeat: vi.fn(async () => ({})), fail: vi.fn(async (_id, _lease, _reason, retryable) => { retry = retryable; }) };
+      const startWorker = vi.fn(async () => { throw failure; });
+      const supervisor = createCourseDiscoverySupervisor({ client: supervisorClient, startWorker,
+        onEvent: event => { if (event.event === "attempt_ended") ended.resolve(event); } });
+      try {
+        await supervisor.start();
+        expect(await ended.promise).toMatchObject({ code, metrics: { tokenUsage: { uncachedInputTokens: inputTokens } } });
+        expect(supervisorClient.fail).toHaveBeenCalledWith("job-1", "private-lease-value", "TOOL_FAILURE", !guarded);
+        if (guarded) { await supervisor.tick(); expect(startWorker).toHaveBeenCalledOnce(); }
+      } finally { await supervisor.stop(); }
+    } finally { rmSync(sourceHome, { recursive: true, force: true }); }
+  });
+
+  it.each([false, true])("serializes legitimate batched tool calls before independent replay (late over-budget usage=%s)", async lateOverBudget => {
     const sourceHome = mkdtempSync(join(tmpdir(), "discovery-queue-test-"));
     writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6.1-sol" }] }));
     writeFileSync(join(sourceHome, "auth.json"), "test-auth");
@@ -897,7 +968,7 @@ describe("controller-only verification", () => {
     };
     const processFactory = (options) => ({ notify: vi.fn(), close: vi.fn(async () => {
       await options.onMessage({ method: "thread/tokenUsage/updated", params: { threadId: "thread-1", tokenUsage: { total: {
-        totalTokens: 200, inputTokens: 180, cachedInputTokens: 100, outputTokens: 20,
+        totalTokens: lateOverBudget ? 39583 : 200, inputTokens: lateOverBudget ? 39533 : 180, cachedInputTokens: lateOverBudget ? 0 : 100, outputTokens: lateOverBudget ? 50 : 20,
       } } } }, () => {});
     }), request: async (method: string) => {
       if (method === "thread/start") return { thread: { id: "thread-1" }, approvalPolicy: "never", sandbox: { type: "readOnly" } };
@@ -925,7 +996,10 @@ describe("controller-only verification", () => {
         browserFactory: () => ({ request: async () => { order.push("browser-start"); await Promise.resolve(); order.push("browser-end"); return { url: "https://example.org/" }; }, close: async () => {} }),
         executeRecipe: async () => { order.push("replay"); return { status: "EMPTY", complete: true }; },
       });
-      expect(result).toMatchObject({ outcome: "activated", metrics: { tokenUsage: { totalTokens: 200, uncachedInputTokens: 80, outputTokens: 20 } } });
+      expect(result).toMatchObject({ outcome: "activated", metrics: { tokenUsage: { totalTokens: lateOverBudget ? 39583 : 200,
+        uncachedInputTokens: lateOverBudget ? 39533 : 80, outputTokens: lateOverBudget ? 50 : 20 },
+        cleanup: { browserClosed: true, modelClosed: true, credentialsRemoved: true, directoryRemoved: true } } });
+      expect(result.metrics.genericBudget).not.toHaveProperty("stop");
       const workSignal = validateRecipe.mock.calls[0][0].signal;
       expect(workSignal).toBeInstanceOf(AbortSignal); expect(workSignal.aborted).toBe(false);
       expect(validateRecipe).toHaveBeenCalledWith({ recipe: expectedRecipe, signal: workSignal });

@@ -2048,11 +2048,19 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
     await guardCheckpoint;
     // Final usage may arrive while the completed turn is being interrupted or
     // the app-server transport is closing, after the result was constructed.
-    if (reportedMetrics) Object.assign(reportedMetrics, { tokenUsage: { ...tokenUsage }, attemptedModelTurns, completedModelTurns });
+    if (reportedMetrics) Object.assign(reportedMetrics, { tokenUsage: { ...tokenUsage }, attemptedModelTurns, completedModelTurns,
+      genericBudget: { ...reportedMetrics.genericBudget, ...(guardReceipt ? { stop: guardReceipt } : {}) } });
     // This directory is created by this invocation under the OS temp root only.
     const cleanup = await cleanupDiscoveryDirectory(temporary);
     if (reportedMetrics) reportedMetrics.cleanup = { browserClosed, modelClosed, credentialsRemoved: cleanup.credentialsRemoved, directoryRemoved: cleanup.complete };
     if (!cleanup.complete && reportedMetrics) reportedMetrics.cleanupWarning = cleanup.credentialsRemoved ? "TEMP_DIRECTORY_RETAINED_WITHOUT_AUTH" : "TEMP_CREDENTIAL_CLEANUP_FAILED";
+    // Trusted final usage can trip a guard after the primary failure was
+    // captured. Preserve that nonretryable cause only after owned cleanup;
+    // acknowledged/in-progress activation retains its existing outcome fence.
+    if (guardFailure && !activationStarted && !activated) {
+      guardFailure.discoveryMetrics = reportedMetrics ?? metrics();
+      throw guardFailure;
+    }
     if ((!browserClosed || !modelClosed) && !primaryFailure && !activated) throw discoveryError("DISCOVERY_PROCESS_CLOSE_FAILED");
   }
 }
