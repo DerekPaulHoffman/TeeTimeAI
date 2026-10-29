@@ -319,6 +319,40 @@ describe("private Windows worker runtime", () => {
     expect(JSON.stringify(receipt)).not.toContain("private-token");
   });
 
+  it.each(["dependencies", "browser"])("keeps the validated setup head when another worktree fetches during %s", (stage) => {
+    const { options, dependencies } = fixture();
+    let advanced = false;
+    const original = dependencies.runCommand.getMockImplementation()!;
+    dependencies.runCommand.mockImplementation((command, args) => {
+      if (stage === "dependencies" && args.includes("ci")) advanced = true;
+      if (advanced && command === "git" && args.join(" ") === "rev-parse origin/main") return { status: 0, stdout: "b".repeat(40) };
+      return original(command, args);
+    });
+    if (stage === "browser") dependencies.browserSmoke.mockImplementation(() => { advanced = true; return { status: "current" }; });
+    const receipt = prepareCourseSupportWorkerRuntime(options, dependencies);
+    expect(receipt).toMatchObject({ outcome: "prepared", guards: { atLocalOriginMain: false, setupHeadUnchanged: true, setupBranchUnchanged: true } });
+    // A new setup invocation still requires the current base; authority is
+    // private to the already validated preparation, never a CLI bypass.
+    expect(prepareCourseSupportWorkerRuntime(options, dependencies).outcome).toBe("guard_rejected");
+  });
+
+  it.each(["HEAD", "branch"])("rejects a different otherwise-valid worker %s during installation", (drift) => {
+    const { options, dependencies } = fixture();
+    let installed = false;
+    const original = dependencies.runCommand.getMockImplementation()!;
+    dependencies.runCommand.mockImplementation((command, args) => {
+      if (args.includes("ci")) installed = true;
+      if (installed && command === "git" && args.join(" ") === (drift === "HEAD" ? "rev-parse HEAD" : "branch --show-current")) {
+        return { status: 0, stdout: drift === "HEAD" ? "b".repeat(40) : "automation/course-support-another-worker" };
+      }
+      return original(command, args);
+    });
+    const receipt = prepareCourseSupportWorkerRuntime(options, dependencies);
+    expect(receipt.outcome).toBe("guard_changed");
+    expect(receipt.stages).toHaveLength(1);
+    expect(dependencies.browserSmoke).not.toHaveBeenCalled();
+  });
+
   it.each(["branch", "binding", "native_identity", "version"])("stops on %s drift after npm ci, before generation or browser execution", (drift) => {
     const { checkout, options, dependencies } = fixture();
     let installed = false;

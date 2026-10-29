@@ -153,7 +153,7 @@ function inspectBrowserFiles(checkout) {
   }
 }
 
-export function inspectCourseSupportWorkerRuntime(options = {}, dependencies = {}) {
+function inspectWorkerRuntimeState(options = {}, dependencies = {}, setupAuthority = null) {
   const checkout = canonical(options.checkout || process.cwd());
   const selectedCheckout = options.selectedCheckout ? canonical(options.selectedCheckout) : null;
   const environment = options.environment || process.env;
@@ -192,6 +192,10 @@ export function inspectCourseSupportWorkerRuntime(options = {}, dependencies = {
     bindingMatches,
     dependenciesPrivate
   };
+  if (setupAuthority) {
+    guards.setupHeadUnchanged = head === setupAuthority.head;
+    guards.setupBranchUnchanged = branch === setupAuthority.branch;
+  }
   const version = (command, args, pattern) => {
     const result = run(command, args, { cwd: checkout, env: inspectionEnv });
     const value = result.stdout.trim();
@@ -205,11 +209,17 @@ export function inspectCourseSupportWorkerRuntime(options = {}, dependencies = {
   const client = dependenciesPrivate ? (dependencies.inspectClient || inspectGeneratedPrismaClient)(checkout) : { status: "shared_output_rejected" };
   const browser = dependenciesPrivate ? (dependencies.inspectBrowser || inspectBrowserFiles)(checkout) : { moduleAvailable: false, executableAvailable: false, smoke: "not_run" };
   const vercel = dependenciesPrivate ? inspectCourseSupportWorkerVercel(checkout) : { status: "shared_output_rejected" };
-  return {
+  const receipt = {
     mode: "inspect", observedAt: new Date().toISOString(), runtime: runtimeReceipt, guards, client, browser, vercel,
-    prepareEligible: Object.values(guards).every(Boolean) && Boolean(runtimeReceipt.nodeVersion && runtimeReceipt.npmVersion),
+    prepareEligible: Object.entries(guards).every(([name, passed]) =>
+      (setupAuthority && name === "atLocalOriginMain") || passed) && Boolean(runtimeReceipt.nodeVersion && runtimeReceipt.npmVersion),
     setupRequired: runtime.status !== "available" || !runtimeReceipt.nodeVersion || !runtimeReceipt.npmVersion || !bindingMatches || !dependenciesPrivate || client.status !== "current" || !browser.executableAvailable || vercel.status !== "current"
   };
+  return { receipt, authority: { head, branch } };
+}
+
+export function inspectCourseSupportWorkerRuntime(options = {}, dependencies = {}) {
+  return inspectWorkerRuntimeState(options, dependencies).receipt;
 }
 
 /** Establish only a missing private worker binding; equivalent parsed IDs never rewrite a file. */
@@ -260,7 +270,7 @@ export function prepareCourseSupportWorkerRuntime(options = {}, dependencies = {
   const checkout = canonical(options.checkout || process.cwd());
   const environment = options.environment || process.env;
   const runtime = dependencies.runtime || resolveCourseSupportWorkerRuntime({ environment });
-  const initial = inspectCourseSupportWorkerRuntime(options, { ...dependencies, runtime });
+  const { receipt: initial, authority } = inspectWorkerRuntimeState(options, { ...dependencies, runtime });
   if (!initial.prepareEligible) return { ...initial, mode: "prepare", outcome: "guard_rejected", stages: [] };
   // Generation only. Never borrow live database configuration for installation.
   const localEnv = {
@@ -281,7 +291,11 @@ export function prepareCourseSupportWorkerRuntime(options = {}, dependencies = {
     stages.push({ stage, startedAt, completedAt: new Date().toISOString(), elapsedMs: Math.round(performance.now() - started), exitCode: result.status,
       ...(stage === "vercel_cli" ? { versionVerified: cliVersionVerified } : {}) });
     if (result.status !== 0 || !cliVersionVerified) return { ...initial, mode: "prepare", outcome: "setup_failed", stages };
-    fresh = inspectCourseSupportWorkerRuntime(options, { ...dependencies, runtime });
+    // origin/main is shared by all linked worktrees. A concurrent fetch may
+    // advance it during npm ci without changing this validated worker. Pin
+    // preparation to its initial HEAD and branch; durable claim/release fences
+    // still decide whether this assignment may perform product work.
+    fresh = inspectWorkerRuntimeState(options, { ...dependencies, runtime }, authority).receipt;
     if (!fresh.prepareEligible || (stage !== "dependencies" && fresh.vercel.status !== "current")) return { ...fresh, mode: "prepare", outcome: "guard_changed", stages };
   }
   const browserFiles = fresh.browser;
@@ -296,7 +310,7 @@ export function prepareCourseSupportWorkerRuntime(options = {}, dependencies = {
   const browser = browserFiles.executableAvailable
     ? { ...browserFiles, smoke: browserSmoke(checkout).status === "current" ? "passed" : "failed" }
     : browserFiles;
-  const final = inspectCourseSupportWorkerRuntime(options, { ...dependencies, runtime });
+  const final = inspectWorkerRuntimeState(options, { ...dependencies, runtime }, authority).receipt;
   if (!final.prepareEligible) return { ...final, mode: "prepare", outcome: "guard_changed", stages };
   const finalBrowser = { ...final.browser, smoke: browser.smoke };
   const ready = final.client.status === "current" && final.vercel.status === "current" && finalBrowser.executableAvailable && finalBrowser.smoke === "passed";

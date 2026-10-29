@@ -30,6 +30,7 @@
     "automation:simulator-offerings": "tsx scripts/automation/manage-simulator-offerings.ts",
     "automation:course-support": "tsx scripts/automation/course-support.ts",
     "automation:course-dispatch": "tsx scripts/automation/course-support-dispatch.ts",
+    "automation:course-chat-cleanup": "node scripts/automation/course-support-chat-cleanup.mjs",
     "automation:learn-courses": "node scripts/automation/course-discovery-supervisor.mjs",
     "automation:inspect-course-learning": "tsx scripts/automation/inspect-course-learning.ts",
     "automation:simulator-support": "tsx scripts/automation/simulator-support.ts",

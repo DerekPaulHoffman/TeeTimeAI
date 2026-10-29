@@ -96,6 +96,35 @@ recipient data, and credentials out of aggregate reports. Routine completed
 generated course chats may be archived after thirty minutes using the supported
 archive action; preserve their transcripts and database state.
 
+For generated workers, do not use `read_thread` as terminal proof: the installed
+legacy history store does not support `thread/items/list`. After each successful
+preflight and required health inspection, including no-action ticks, get a fresh
+supported chat inventory. Save all `pinnedThreads[].id` plus this parent chat ID
+as a JSON array in an exclusive ignored private file. Run the read-only helper:
+
+```powershell
+& 'C:\Program Files\nodejs\node.exe' <selected-checkout>\scripts\automation\course-support-chat-cleanup.mjs --selected-checkout <selected-checkout> --protected-thread-ids-file <absolute-private-json-file>
+```
+
+It inspects at most ten old original launcher receipts per invocation, uses
+the database-only active inventory (so archived receipts cannot consume the
+inspection budget), `thread/read` without turns and `thread/turns/list` with `itemsView=notLoaded`,
+and returns only original completed/error-null terminal turns at least thirty
+minutes old with no active descendants. Archive only its `eligible[].threadId`
+through the supported archive action. Retain every pinned, active, failed,
+interrupted, resumed, recent or unverifiable chat. The helper never resumes a
+chat, starts a turn, changes an assignment, sends email or archives a log itself.
+Do not repeat an unavailable item-history call. Archiving preserves transcripts
+and database state and is not evidence of course or customer recovery.
+
+Credential-free worker setup first requires a clean named worker branch at
+current `origin/main`. During that one preparation, the helper pins the exact
+validated HEAD and branch. Another worktree's fetch may advance the shared
+`origin/main` reference while dependencies install; that alone is not a worker
+change. Any worker HEAD, branch, binding, identity, privacy or runtime drift
+still stops setup. This does not renew an assignment or bypass the durable
+claim, expiry, source, implementation or release checks.
+
 If the parent finishes while the supervisor is still asynchronous, report
 "dispatched" or "bound as observed", not a healthy or successfully running
 worker. Include the observation time for an ongoing state. A later failed
