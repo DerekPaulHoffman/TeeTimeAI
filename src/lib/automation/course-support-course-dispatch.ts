@@ -35,6 +35,8 @@ import {
   withCourseSupportWriteConflictRetry,
 } from "./course-support-batches";
 import { retryCourseSupportWriterAdmission } from "./course-support-writer-admission";
+import { COURSE_DISPATCH_INCIDENT_SNAPSHOT_SELECT, isCourseDispatchIncidentSnapshotCurrent } from "./course-support-dispatch-snapshot";
+import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-verification";
 import { assertCourseSupportWriterCommitHeadroom, assertCourseSupportWriterTransactionStart, courseSupportWriterTransactionOptions } from "./course-support-writer-budget";
 import type { PostgresAdvisoryLeaseContext } from "./lease";
 
@@ -80,6 +82,7 @@ export type CourseDispatchAudit = {
     providerFamilyKey: string;
     failureFingerprint: string;
     updatedAt: string;
+    incidentFingerprint?: string;
     searchRefs: CourseDispatchSourceRef[];
     trafficClass: "REAL" | "SYNTHETIC";
     engineeringAuthority?: SimulatorEngineeringAuthority;
@@ -115,6 +118,7 @@ export function parseCourseDispatchAudit(value: unknown): CourseDispatchAudit | 
       (audit.launchStartedAt !== undefined && !Number.isFinite(Date.parse(audit.launchStartedAt))) ||
       (audit.boundAt !== undefined && !Number.isFinite(Date.parse(audit.boundAt))) ||
       !Number.isFinite(Date.parse(audit.target.updatedAt)) ||
+      (audit.target.incidentFingerprint !== undefined && (typeof audit.target.incidentFingerprint !== "string" || !/^[a-f0-9]{64}$/u.test(audit.target.incidentFingerprint))) ||
       audit.target.searchRefs.length < 1 || audit.target.searchRefs.length > 3 ||
       audit.target.searchRefs.some((ref) => !ref || typeof ref.id !== "string" || !ref.id ||
         !Number.isInteger(ref.scheduleVersion) || ref.scheduleVersion < 0 ||
@@ -362,15 +366,15 @@ async function revokeStaleBound(
     const incident = baseChanged ? null : await tx.courseSupportIncident.findUnique({
       where: { id: audit.target.incidentId },
       select: {
-        courseId: true, cycle: true, providerFamilyKey: true,
-        failureFingerprint: true, updatedAt: true, activeBatchId: true,
+        ...COURSE_DISPATCH_INCIDENT_SNAPSHOT_SELECT, updatedAt: true, course: true,
       },
     });
     let stale = baseChanged || !incident || incident.courseId !== audit.target.courseId ||
       incident.cycle !== audit.target.cycle ||
       incident.providerFamilyKey !== audit.target.providerFamilyKey ||
       incident.failureFingerprint !== audit.target.failureFingerprint ||
-      incident.updatedAt.toISOString() !== audit.target.updatedAt ||
+      !isCourseDispatchIncidentSnapshotCurrent(audit.target, incident, audit.target.incidentFingerprint
+        ? buildCourseSupportProviderSnapshotFingerprint(incident.course) : "") ||
       incident.activeBatchId !== null;
     if (!stale) {
       const searches = await tx.coursePreference.findMany({
@@ -556,6 +560,7 @@ export async function planCourseSupportCourseDispatch(input: {
             providerFamilyKey: candidate.providerFamilyKey,
             failureFingerprint: candidate.failureFingerprint,
             updatedAt: candidate.updatedAt,
+            ...("incidentFingerprint" in candidate && candidate.incidentFingerprint ? { incidentFingerprint: candidate.incidentFingerprint } : {}),
             searchRefs: "engineeringSearchRefs" in candidate && candidate.engineeringAuthority ? candidate.engineeringSearchRefs! : [{
               id: source!.id,
               scheduleVersion: source!.scheduleVersion,
