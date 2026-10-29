@@ -80,9 +80,17 @@ function setup() {
       venueVerified: true, dateVerified: true, capacityVerified: true, durationVerified: true, completeVerified: true } };
   });
   const beforeActivate = vi.fn(async () => { events.push("before"); }), afterActivate = vi.fn(async () => { events.push("after"); });
+  // Any newly eligible recovery must remain hermetic. Individual recovery
+  // tests supply their own verifier-backed fake; legacy tests record/reject it.
+  const genericWorker = vi.fn(async options => {
+    expect(options.freshOfficialStart).toBe(true); expect(options.job).toBe(f.job);
+    expect(options.checkpointProvenance).not.toHaveProperty("controller");
+    for (const key of ["recipe", "adapter", "sourceEvidence", "initialUrls", "trustedResumeUrls"]) expect(options).not.toHaveProperty(key);
+    throw Object.assign(Error("TEST_GENERIC_HANDOFF_REJECTED"), { code: "TEST_GENERIC_HANDOFF_REJECTED" });
+  });
   const run = (extra = {}) => runCourseDiscoveryStagehandWorker({ job: f.job, workDeadlineAt: new Date(first + 720_000).toISOString(),
-    client, cwd: process.cwd(), now: () => f.clock, sourceDiscover, browserFactory, validateRecipe, executeRecipe, beforeActivate, afterActivate, ...extra });
-  return { f, events, checkpoints, sourceCalls, request, close, browserFactory, sourceDiscover, client, validateRecipe, executeRecipe, beforeActivate, afterActivate, run };
+    client, cwd: process.cwd(), now: () => f.clock, sourceDiscover, browserFactory, validateRecipe, executeRecipe, genericWorker, beforeActivate, afterActivate, ...extra });
+  return { f, events, checkpoints, sourceCalls, request, close, browserFactory, sourceDiscover, client, validateRecipe, executeRecipe, genericWorker, beforeActivate, afterActivate, run };
 }
 function modelFailureReport(t: ReturnType<typeof setup>) {
   Object.assign(t.f.report, { outcome: "UNRESOLVED", adapterSourceProposal: null, frameworkFailureCode: "LOCAL_MODEL_TURN_FAILED" });
@@ -436,8 +444,12 @@ describe("regular Stagehand source worker", () => {
         ]);
         expect(t.client.candidate.mock.calls[0][2].source.bookingUrl).toBe(source); expect(t.executeRecipe).toHaveBeenCalledTimes(2);
       } else {
-        await expect(t.run()).rejects.toThrow(mode === "invalidAdapter" ? "FRAMEWORK_INSPECTION_METADATA_INVALID" :
+        const freshRootOnly = mode === "wrongOriginal" || mode === "changedBinding";
+        await expect(t.run()).rejects.toThrow(freshRootOnly ? "TEST_GENERIC_HANDOFF_REJECTED" : mode === "invalidAdapter" ? "FRAMEWORK_INSPECTION_METADATA_INVALID" :
           mode === "missingFrame" ? "FRAMEWORK_INSPECTION_PATH_STALE" : "FRAMEWORK_INSPECTION_SOURCE_NOT_SETTLED");
+        // Bad frame continuity never earns source/recipe authority. A separate
+        // clean current root may only request a new independent investigation.
+        expect(t.genericWorker).toHaveBeenCalledTimes(freshRootOnly ? 1 : 0);
         if (mode === "missingFrame") {
           expect(waitForFrame).toHaveBeenCalledOnce();
           expect(t.request.mock.calls.filter(([a]) => a.action === "observe")).toHaveLength(1);
@@ -1246,7 +1258,11 @@ describe("regular Stagehand source worker", () => {
     vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(t.f.clock);
     try {
       if (mode === "valid") await t.run();
-      else { await expect(t.run()).rejects.toThrow(); expect(t.client.candidate).not.toHaveBeenCalled(); }
+      else {
+        await expect(t.run()).rejects.toThrow(mode === "ambiguous" ? "TEST_GENERIC_HANDOFF_REJECTED" : undefined);
+        expect(t.genericWorker).toHaveBeenCalledTimes(mode === "ambiguous" ? 1 : 0);
+        expect(t.client.candidate).not.toHaveBeenCalled(); expect(t.executeRecipe).not.toHaveBeenCalled(); expect(t.client.activate).not.toHaveBeenCalled();
+      }
       expect(calls.filter((action: { action: string }) => action.action === "click")).toEqual(mode === "ambiguous" ? [] : [{ action: "click", target }]);
       expect(calls.some((action: { action: string; url?: string }) => action.action === "open" && action.url === destination)).toBe(false);
     } finally { vi.useRealTimers(); }

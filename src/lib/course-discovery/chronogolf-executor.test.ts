@@ -116,12 +116,21 @@ describe("Chronogolf fixed public all-round reader", () => {
     expect(slots.map(slot => slot.startsAt)).toEqual(["2026-10-23T15:30:00.000Z", "2026-10-23T16:33:00.000Z"]);
   });
   it("requires the observed anonymous public class label even when the numeric default class matches", async () => {
-    for (const affiliation_type of ["Members only", "VIP", "Visitors", "Public member"]) {
+    for (const affiliation_type of ["Members only", "VIP", "Visitors", "Public member", "Public - Preferred", "Public - Member", "Public - Resident",
+      "Public - Promotion", "Public - Other", "Public - Standard member", "Public - Standard*", "Publicly - Standard"]) {
       const value = row(1); value.default_price.affiliation_type = affiliation_type;
       await expect(execute(dependencies({ pages: [[value]], perPage: 24 }))).rejects.toThrow("ADAPTER_SLOT_MISMATCH");
     }
     const value = row(1); value.default_price.affiliation_type = " Public* ";
     expect(await execute(dependencies({ pages: [[value]], perPage: 24 }))).toHaveLength(1);
+  });
+  it("reads every page of the exact standard public class while retaining the profile's public type ID fence", async () => {
+    const rows = Array.from({ length: 27 }, (_, i) => { const value = row(i + 1); value.default_price.affiliation_type = "Public - Standard"; return value; });
+    const deps = dependencies({ pages: [rows.slice(0, 24), rows.slice(24)], perPage: 24 });
+    expect(await execute(deps)).toHaveLength(27);
+    expect(deps.reads.filter(url => url.pathname.includes("/marketplace/")).map(url => url.searchParams.get("page"))).toEqual(["1", "2"]);
+    const wrongType = structuredClone(rows[0]); wrongType.default_price.player_type_id++;
+    await expect(execute(dependencies({ pages: [[wrongType]], perPage: 24 }))).rejects.toThrow("ADAPTER_SLOT_MISMATCH");
   });
   it("replays the saved catalog with changed date and party using fresh reads", async () => {
     const changed = { ...input, date: "2026-10-24", players: 3 }, deps = dependencies({ pages: [[row(1, changed.date)]], perPage: 24 });

@@ -11,6 +11,7 @@ import { projectNativeRouterFailure, safeNativeRouterFailure } from "./stagehand
 const fail = code => discoveryError(code), HYBRID_SOURCE_DISCOVERY = STAGEHAND_SOURCE_MODE;
 const INSPECTION_ACTION_LIMIT = 6;
 const inspectionFailures = new WeakMap();
+const publicRoutingRecoveries = new WeakMap();
 // Closed diagnostic mirror only; these values cannot admit a request or document.
 const nativeFatalCodes = ["NATIVE_REDIRECT_ABORT_TIMEOUT", "NATIVE_REDIRECT_BODY_TIMEOUT", "NATIVE_REDIRECT_CANCELLED", "NATIVE_REDIRECT_CONTINUE_REJECTED",
   "NATIVE_REDIRECT_CROSS_HOST_RESOURCE_REJECTED", "NATIVE_REDIRECT_DRAIN_FAILED", "NATIVE_REDIRECT_DRAIN_TIMEOUT", "NATIVE_REDIRECT_DUPLICATE_FETCH_ID",
@@ -112,6 +113,18 @@ export function currentStagehandInspectionDiagnostic(error, job, startedAt, now)
       ...(fixedSource ?? {}),
     } : undefined;
   } catch { return undefined; }
+}
+/** Current private readability permits a fresh investigation, never a recipe. */
+export function currentStagehandPublicRoutingRecovery(error, job, startedAt, now) {
+  try {
+    const value = error && typeof error === 'object' ? publicRoutingRecoveries.get(error) : undefined;
+    if (!value || value.job !== job || value.jobId !== job.id || value.leaseTokenSha256 !== hash(job.leaseToken) || value.attempt !== job.attempts || value.requestSha256 !== hash(canonical(job.request)) ||
+        value.sourceFingerprint !== job.sourceFingerprint || value.firstPickedUpAt !== job.firstPickedUpAt || value.deadlineAt !== job.deadlineAt ||
+        !Number.isFinite(startedAt) || !Number.isFinite(now) || value.startedAt < startedAt || value.startedAt > now ||
+        !Number.isFinite(value.observedAt) || value.observedAt > now || now - value.observedAt > 5000 || now >= Date.parse(value.deadlineAt)) return;
+    const readability = safeInspectionReadability(value.readability);
+    return readability ? { code: value.code, lastAction: value.lastAction, readability } : undefined;
+  } catch { return; }
 }
 function canonicalAdapterSourceRecipe(proposal, job) {
   return { schemaVersion: 1, engine: "EXISTING_ADAPTER", target: { ...job.request.target }, source: {
@@ -355,7 +368,8 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
     firstPickedUpAt: job.firstPickedUpAt, originalDeadlineAt: job.deadlineAt,
     startedAt: new Date(startedAt).toISOString(), actionLimit: INSPECTION_ACTION_LIMIT, actions: [],
     modelCalls: 0, browserClosed: false, outcome: 'INCOMPLETE' };
-  let browser, primary, result;
+  let browser, primary, result, lastPublicRoutingRead;
+  let browserClosedClean = false;
   const check = () => {
     if (signal?.aborted) throw fail('FRAMEWORK_INSPECTION_CANCELLED');
     if (!Number.isFinite(deadline) || now() >= deadline) throw fail('FRAMEWORK_INSPECTION_DEADLINE');
@@ -392,6 +406,7 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
     const contextMatches = (snapshot, expectedUrl) => snapshot.url === expectedUrl || nativeContextMatches(snapshot, expectedUrl);
     const request = async (action, url, observeReason, target, expectedGesture) => {
       check();
+      lastPublicRoutingRead = undefined;
       if (receipt.actions.length >= INSPECTION_ACTION_LIMIT) throw fail('FRAMEWORK_INSPECTION_ACTION_LIMIT');
       const start = now(), step = { action, urlSha256: hash(url), startedOffsetMs: Math.max(0, start - startedAt) };
       if (observeReason) step.observeReason = observeReason;
@@ -450,6 +465,12 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
           if (typeof snapshot.officialSourceDiagnostic?.[field] === 'boolean') readiness[field] = snapshot.officialSourceDiagnostic[field];
         if (['loading', 'interactive', 'complete'].includes(snapshot.readyState)) readiness.readyState = snapshot.readyState;
         if (Object.keys(readiness).length) step.readiness = readiness;
+        if (['open', 'observe'].includes(action) && currentNativeContext && snapshot.navigationStatus === 200 &&
+            snapshot.accessRequirementObserved === false && !snapshot.nativeFirstFatal) {
+          const readability = safeInspectionReadability([step.readability]);
+          if (readability && readability[0].failedPredicates.length === 0)
+            lastPublicRoutingRead = { step, lastAction: action, readability, observedAt: projected.observedAt };
+        }
         return snapshot;
       } catch (error) {
         step.error = inspectionErrorCode(error);
@@ -650,7 +671,7 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
   finally {
     if (browser) {
       const closeStartedAt = now();
-      try { await browser.close(); receipt.browserClosed = true; }
+      try { await browser.close(); receipt.browserClosed = true; browserClosedClean = true; }
       catch (error) { receipt.cleanupError = inspectionErrorCode(error); primary ??= fail('FRAMEWORK_INSPECTION_CLOSE_FAILED'); }
       receipt.cleanupElapsedMs = Math.max(0, now() - closeStartedAt);
     }
@@ -663,6 +684,13 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
   if (primary) {
     primary.inspectionReceipt = receipt;
     const failedAction = receipt.actions.at(-1);
+    if (['FRAMEWORK_INSPECTION_PATH_STALE', 'FRAMEWORK_INSPECTION_SOURCE_NOT_SETTLED'].includes(primary.code) &&
+        browserClosedClean && !receipt.cleanupError && lastPublicRoutingRead?.step === failedAction && !failedAction.error &&
+        lastPublicRoutingRead.observedAt <= now() && now() - lastPublicRoutingRead.observedAt <= 5000) {
+      publicRoutingRecoveries.set(primary, { job, jobId: job.id, leaseTokenSha256: hash(job.leaseToken), attempt: job.attempts, requestSha256: hash(canonical(job.request)),
+        sourceFingerprint: job.sourceFingerprint, firstPickedUpAt: job.firstPickedUpAt, deadlineAt: job.deadlineAt, startedAt,
+        observedAt: lastPublicRoutingRead.observedAt, code: primary.code, lastAction: lastPublicRoutingRead.lastAction, readability: lastPublicRoutingRead.readability });
+    }
     const readability = failedAction?.readability?.failedPredicates?.length ? safeInspectionReadability(receipt.actions.map(row => row.readability).filter(Boolean)) : undefined;
     const landing = safeInspectionLandingDiagnostic(failedAction?.landing);
     if (primary && typeof primary === 'object' && failedAction?.error &&

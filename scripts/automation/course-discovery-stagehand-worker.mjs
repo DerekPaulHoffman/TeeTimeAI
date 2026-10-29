@@ -3,7 +3,7 @@ import { createDiscoveryBrowser, validateDiscoveryRecipe, createDiscoveryAdapter
   bindDiscoveryRecipeIdentity, inspectedAdapterSourceEvidence, executeDiscoveryRecipe, verifyDiscoveryCandidate, runCourseDiscoveryWorker } from "./course-discovery-worker.mjs";
 import { STAGEHAND_SOURCE_BUDGET_MS, stagehandWorkDeadline, publicStagehandJob, publicStagehandSourceUrl,
   validateStagehandSourceReport, createStagehandSourceCheckpoint, readStagehandSourceCheckpoint, stagehandSourceFailureCode } from "./course-discovery-stagehand-source.mjs";
-import { inspectStagehandAdapter } from "./course-discovery-stagehand-inspection.mjs";
+import { inspectStagehandAdapter, currentStagehandPublicRoutingRecovery } from "./course-discovery-stagehand-inspection.mjs";
 import { createStagehandGuardedBrowserHost } from "./course-discovery-stagehand-host.mjs";
 import { createStagehandFailureCheckpoint, packStagehandCheckpoint, readStagehandFailure } from "./course-discovery-stagehand-failure.mjs";
 import { projectSourceDiagnostic } from "./stagehand/source-diagnostic.mjs";
@@ -11,6 +11,7 @@ import { isOfficialAdapterJob, inspectOfficialAdapter } from "./course-discovery
 
 const defaultSourceDiscover = async args => (await import("./stagehand/source-discovery.mjs")).sourceDiscover(args);
 export const GENERIC_RECIPE_FALLBACK_CODES = Object.freeze(["UNSUPPORTED_ADAPTER_SOURCE", "CPS_PUBLIC_BUILD_UNSUPPORTED", "ADAPTER_CONFIGURATION_UNVERIFIED"]);
+export const PUBLIC_ROUTING_FALLBACK_CODES = Object.freeze(["FRAMEWORK_INSPECTION_PATH_STALE", "FRAMEWORK_INSPECTION_SOURCE_NOT_SETTLED"]);
 /** Readiness only; the supervisor performs this before claiming cold demand. */
 export async function prepareCourseDiscoveryStagehandWorker({ cwd, prepareSourceDiscovery } = {}) {
   const prepare = prepareSourceDiscovery ?? (await import("./stagehand/source-discovery.mjs")).prepareSourceDiscovery;
@@ -205,8 +206,21 @@ export async function runCourseDiscoveryStagehandWorker({
         createDiscoveryAdapterObservation, bindDiscoveryRecipeIdentity, inspectedAdapterSourceEvidence },
       onReceipt: receipt => { fixedInspection = receipt; metrics.inspection = receipt; publishMetrics(); } }); }
     catch (error) {
-      if (!GENERIC_RECIPE_FALLBACK_CODES.includes(error?.code) || fixedInspection?.browserClosed !== true || fixedInspection.cleanupError ||
-          fixedInspection.outcome !== "FAILED" || fixedInspection.actions?.at(-1)?.action !== "inspect_adapter") throw error;
+      const lastAction = fixedInspection?.actions?.at(-1)?.action;
+      const typedFallback = GENERIC_RECIPE_FALLBACK_CODES.includes(error?.code) && lastAction === "inspect_adapter";
+      // A missing public edge/readiness failure may restart only at the
+      // canonical official root. An uploaded receipt or error code cannot
+      // manufacture the inspector's current private completed-document proof.
+      const recovery = PUBLIC_ROUTING_FALLBACK_CODES.includes(error?.code)
+        ? currentStagehandPublicRoutingRecovery(error, job, started, now()) : undefined;
+      const read = recovery?.readability?.at(-1);
+      const publicRoutingFallback = recovery?.code === error?.code && recovery.lastAction === lastAction &&
+        ["open", "observe"].includes(lastAction) && read?.action === lastAction && read.actionIndex === fixedInspection?.actions?.length &&
+        read.nativeTransport === true && read.navigationStatusPresent === true && read.navigationStatus === 200 &&
+        read.accessRequirementObserved === false && read.nativeFatalPresent === false &&
+        Array.isArray(read.failedPredicates) && read.failedPredicates.length === 0;
+      if ((!typedFallback && !publicRoutingFallback) || fixedInspection?.browserClosed !== true || fixedInspection.cleanupError ||
+          fixedInspection.outcome !== "FAILED") throw error;
       // Preserve this owned closed inspection before the generic worker starts
       // its fresh browser. Later feedback must not erase the original rejection.
       await checkpointTail;

@@ -159,7 +159,7 @@ export async function executeChronogolf(source: ChronogolfIdentitySource, metada
         if (!course || row.course.id !== course.id || row.course.name !== course.name || row.course.holes !== course.layoutHoles ||
             JSON.stringify([...row.course.bookable_holes].sort((a, b) => a - b)) !== JSON.stringify(course.bookableHoles) ||
             !course.bookableHoles.includes(row.default_price.bookable_holes) || row.default_price.player_type_id !== saved.publicPlayerTypeId ||
-            !/^Public\*?$/iu.test(row.default_price.affiliation_type.trim()) ||
+            !/^(?:Public\*?|Public - Standard)$/iu.test(row.default_price.affiliation_type.trim()) ||
             row.hole > course.layoutHoles || row.date !== request.date || local.date !== row.date || local.time !== `${row.start_time}:00`)
           fail("ADAPTER_SLOT_MISMATCH");
         if (row.frozen || request.players < row.min_player_size || request.players > row.max_player_size ||
