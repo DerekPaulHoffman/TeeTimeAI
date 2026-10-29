@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 test("shows session availability and honest result states on every simulator card", async ({ page }, testInfo) => {
   test.skip(process.env.SIMULATOR_MODE_ENABLED !== "true", "Simulator mode is gated");
+  const appOrigin = new URL(testInfo.project.use.baseURL!).origin;
   const requests: URL[] = [];
   const unexpected: string[] = [];
   const errors: string[] = [];
@@ -14,7 +15,7 @@ test("shows session availability and honest result states on every simulator car
   let finish: (() => void) | undefined;
   let first = true;
   await page.addInitScript(() => sessionStorage.setItem("tee-time-spot:traffic-class", "AUTOMATION"));
-  await page.route("**/api/**", async route => {
+  await page.route(url => url.origin === appOrigin && url.pathname.startsWith("/api/"), async route => {
     const url = new URL(route.request().url());
     if (url.pathname === "/api/analytics/events") return route.fulfill({ json: { event: { id: "test" } } });
     if (url.pathname === "/api/location/geocode") return route.fulfill({ json: { latitude: 41.3, longitude: -73.2 } });
