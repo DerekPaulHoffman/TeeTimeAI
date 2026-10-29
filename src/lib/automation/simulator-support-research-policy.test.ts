@@ -389,7 +389,7 @@ describe("owned blocked-resource diagnostics", () => {
     expect(readSimulatorResearchFailureMemory({ version: 1, sourceFingerprint: fingerprint, routes: [route] })?.routes[0].blockedResourceDiagnostics).toEqual(diagnostics);
     for (const invalid of [
       { ...entry, blockedResourceDiagnostics: [{ ...diagnostics[0], url: "https://private.test" }] },
-      { ...entry, rendered: false }, { ...entry, httpStatus: 403 },
+      { ...entry, rendered: false },
       { ...entry, publicReadEvidence: undefined },
       { ...entry, publicReadEvidence: { ...entry.publicReadEvidence, accessControls: ["ACCOUNT_REQUIRED"] } },
     ]) expect(() => readSimulatorResearchState({ ...empty(), readCount: 1, history: [invalid] }, fingerprint)).toThrow();
@@ -599,7 +599,7 @@ describe("passive blocked-method receipts", () => {
       [diagnostic, diagnostic],
     ]) expect(() => readSimulatorResearchState({ ...empty(), readCount: 1,
       history: [{ ...entry, blockedRequestDiagnostics: invalid }] }, fingerprint)).toThrow();
-    for (const denied of [{ ...entry, httpStatus: 403 }, { ...entry, outcome: "NETWORK_FAILED" },
+    for (const denied of [{ ...entry, outcome: "NETWORK_FAILED" },
       { ...entry, publicReadEvidence: { ...entry.publicReadEvidence, accessControls: ["ACCOUNT_REQUIRED"] } }]) {
       expect(() => readSimulatorResearchState({ ...empty(), readCount: 1, history: [denied] }, fingerprint)).toThrow();
     }

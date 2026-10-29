@@ -61,6 +61,7 @@ async function readPriorFailedResearchRoutes(tx: Pick<Prisma.TransactionClient, 
         ...(entry.bodyLimitDiagnosticsTruncated ? { bodyLimitDiagnosticsTruncated: true as const } : {}),
         ...(entry.blockedResourceDiagnostics ? { blockedResourceDiagnostics: entry.blockedResourceDiagnostics } : {}),
         ...(entry.blockedResourceDiagnosticsTruncated ? { blockedResourceDiagnosticsTruncated: true as const } : {}),
+        ...(entry.failedReadDiagnostics ? { failedReadDiagnostics: entry.failedReadDiagnostics } : {}),
         ...(entry.outcome === "READ" ? {
           outcome: "READ" as const,
           ...(entry.publicReadEvidence ? { accessControlsObserved: entry.publicReadEvidence.accessControlsObserved,
@@ -462,7 +463,7 @@ export async function readSimulatorSupportSource(input: Owner & { source?: Simul
         }
       }
     }
-    const research: SimulatorResearchState = { ...state, inFlight: null, links: usableDocument ? navigationLinks : state.links,
+    const research = readSimulatorResearchState({ ...state, inFlight: null, links: usableDocument ? navigationLinks : state.links,
       bookingLinks: usableDocument ? [...roleEvidence.keys()] : state.bookingLinks,
       bookingLinkRoles: usableDocument ? [...roleEvidence].map(([url, observedAt]) => ({ url, observedAt })) : state.bookingLinkRoles,
       venueLinkRoles: usableDocument ? [...venueEvidence].filter(([url]) => !roleEvidence.has(url)).map(([url, observedAt]) => ({ url, observedAt })) : state.venueLinkRoles,
@@ -487,7 +488,7 @@ export async function readSimulatorSupportSource(input: Owner & { source?: Simul
           accessControlsObserved: true as const, accessControls: read.accessControls ?? [], method: read.method,
           ...(read.renderComplete !== undefined ? { renderComplete: read.renderComplete } : {}),
         } } : {}),
-        ...(knownFailure ? { failure: knownFailure } : {}) }] };
+        ...(knownFailure ? { failure: knownFailure } : {}) }] }, row.source.fingerprint);
     const saved = await saveClaim(tx, row, now);
     await tx.automationRun.update({ where: { id: row.runId }, data: { audit: { ...row.audit, simulatorClaim: { ...row.claim, revision: saved.revision, leaseExpiresAt: saved.leaseExpiresAt }, simulatorResearch: research } as unknown as Prisma.InputJsonValue } });
     const configurationCandidate = buildSimulatorResearchConfigurationCandidate({ course: row.source.offering.course, research,
@@ -718,7 +719,7 @@ export async function reconcileExpiredSimulatorResearchExecutions(tx: Prisma.Tra
     const sourceChanged = source && source.fingerprint !== claim.sourceFingerprint;
     const retryAt = !sourceWithdrawn && !sourceChanged ? new Date(now.getTime() + 15 * 60_000) : null;
     if (retryAt) await tx.simulatorSupportIncident.update({ where: { id: source!.incident.id }, data: { retryAt } });
-    const updated = { ...audit, simulatorResearch: research,
+    const updated = { ...audit, simulatorResearch: readSimulatorResearchState(research, claim.sourceFingerprint),
       simulatorFailureRecovery: { version: 1, reason: sourceWithdrawn ? "SOURCE_WITHDRAWN" : sourceChanged ? "SOURCE_CHANGED" : "EXECUTOR_LEASE_EXPIRED",
         settledAt: now.toISOString(), retryAt: retryAt?.toISOString() ?? null, readsUsed: research.readCount },
     };

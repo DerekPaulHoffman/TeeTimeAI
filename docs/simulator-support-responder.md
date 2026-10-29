@@ -53,6 +53,13 @@ request ends. Old identities, request attempts and diagnostics remain recorded.
 A revoked executor cannot write, read again, recheck or recover.
 
 Each observation retains the booking-source fingerprint actually checked.
+Rendered redirects and denied pages retain bounded blocked-request diagnostics
+under `failedReadDiagnostics`. The reader separates the known older top-level
+shape into that failure-only field before validation, keeping the HTTP outcome,
+request identity, timestamps, read count and access-denial evidence unchanged.
+These diagnostics never qualify as a successful public page or rental proof.
+The writer validates the complete state before saving it, and challenge-query
+credentials are removed from retained URLs while public selectors remain.
 Adoption preserves spent history and counters while clearing navigation; it
 cannot relabel old failures as observations of the corrected source. Replacement
 packets carry matching denied routes and sanitized failure diagnostics. They do

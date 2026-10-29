@@ -2274,6 +2274,38 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it.each([301, 403])("recovers an expired owner with retained failed-page %i diagnostics without resetting its history", async httpStatus => {
+    const f = await fixture();
+    const stored = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const audit = stored.audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    audit.simulatorClaim!.leaseExpiresAt = new Date(Date.now() - 1_000).toISOString();
+    const requestId = randomUUID(), observedAt = new Date(Date.now() - 2_000).toISOString();
+    const sourceUrl = "https://venue.example.test/booking";
+    const blocked = [{ state: "NOT_EXECUTED", resourceKind: "FETCH", method: "GET", reason: "UNSCOPED_DESTINATION",
+      originRelation: "OTHER_ORIGIN", pathShape: "/api/availability/:value", count: 1 }];
+    const fingerprint = audit.simulatorClaim!.sourceFingerprint;
+    const research = { version: 1, sourceFingerprint: fingerprint, readCount: 1, links: [], bookingLinks: [], linkBaseUrl: null, inFlight: null,
+      history: [{ source: "booking", requestedUrl: sourceUrl, sourceUrl: `${sourceUrl}?__cf_chl_rt_tk=private-test-challenge`,
+        requestId, observedAt, httpStatus, outcome: "READ", rendered: true, sourceFingerprint: fingerprint,
+        publicReadEvidence: { sourceFingerprint: fingerprint, accessControlsObserved: true, accessControls: [], method: "BROWSER", renderComplete: false },
+        blockedResourceDiagnostics: blocked }] };
+    await client.automationRun.update({ where: { id: f.run.id }, data: { audit: { ...audit, simulatorResearch: research } as unknown as Prisma.InputJsonValue } });
+    await client.teeSearch.update({ where: { id: f.search.id }, data: { status: "PAUSED" } });
+    const incidentBefore = await client.simulatorSupportIncident.findUniqueOrThrow({ where: { id: f.incident.id } });
+    const planned = await dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: "failed-page-recovery-parent", baseSha });
+    expect(planned.acquired).toBe(true);
+    const closed = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    expect(closed).toMatchObject({ status: "COMPLETED", outcome: "simulator_source_withdrawn" });
+    expect(closed.audit).toMatchObject({ simulatorClaim: { token: f.owner.token, revision: f.owner.revision },
+      simulatorResearch: { readCount: 1, history: [{ requestId, observedAt, httpStatus, outcome: "READ", sourceUrl,
+        failedReadDiagnostics: { blockedResourceDiagnostics: blocked } }] },
+      simulatorFailureRecovery: { reason: "SOURCE_WITHDRAWN", readsUsed: 1 } });
+    expect(JSON.stringify(closed.audit)).not.toContain("private-test-challenge");
+    expect(await client.simulatorSupportIncident.findUniqueOrThrow({ where: { id: f.incident.id } })).toEqual(incidentBefore);
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toMatchObject({ status: "PAUSED" });
+    await expect(lane.heartbeatSimulatorSupport(f.owner)).rejects.toThrow("unavailable");
+  });
+
   it("does not reclaim a still-bounded read or an expired implementation executor", async () => {
     const f = await fixture(); await seedExpiredUnfinishedRead(f);
     const stored = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });

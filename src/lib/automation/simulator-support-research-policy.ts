@@ -15,7 +15,15 @@ export function getSimulatorResearchImplementationVersion(url: string) {
 export const SIMULATOR_RESEARCH_SOURCE_NAMES = ["official", "booking", "booking-root", "evidence"] as const;
 export type SimulatorResearchSource = (typeof SIMULATOR_RESEARCH_SOURCE_NAMES)[number];
 const researchSource = z.enum([...SIMULATOR_RESEARCH_SOURCE_NAMES, "link"]);
-const safeUrl = z.string().refine(value => Boolean(getSafeCustomerBookingUrl(value)));
+const safeUrl = z.string().refine(value => Boolean(getSafeCustomerBookingUrl(value))).transform(value => {
+  const url = new URL(value);
+  // A challenge redirect is evidence of denial, never a reusable credential.
+  let changed = false;
+  for (const key of [...url.searchParams.keys()]) if (/^(?:__cf_chl_|cf_chl_)/iu.test(key)) {
+    url.searchParams.delete(key); changed = true;
+  }
+  return changed ? url.href : value;
+});
 function routeIdentity(value: string) { const url = new URL(value); url.hash = ""; return url.href; }
 const safeFailure = z.custom<SimulatorSupportFailure>(value => readSafeSimulatorSupportFailure(value) !== null)
   .transform(value => readSafeSimulatorSupportFailure(value)!);
@@ -153,6 +161,30 @@ const blockedRequestDiagnostic = z.object({
 const blockedRequestDiagnostics = z.array(blockedRequestDiagnostic).min(1).max(8).refine(entries =>
   entries.reduce((sum, entry) => sum + entry.count, 0) <= 32 &&
   new Set(entries.map(entry => `${entry.resourceKind}:${entry.method}:${entry.reason}:${entry.pathShape}`)).size === entries.length);
+const failedReadDiagnostics = z.object({
+  bodyLimitDiagnostics: bodyLimitDiagnostics.optional(), bodyLimitDiagnosticsTruncated: z.literal(true).optional(),
+  blockedRequestDiagnostics: blockedRequestDiagnostics.optional(), blockedRequestDiagnosticsTruncated: z.literal(true).optional(),
+  blockedResourceDiagnostics: blockedResourceDiagnosticsSchema.optional(), blockedResourceDiagnosticsTruncated: z.literal(true).optional(),
+}).strict().refine(value => Boolean(value.bodyLimitDiagnostics || value.blockedRequestDiagnostics || value.blockedResourceDiagnostics) &&
+  (!value.bodyLimitDiagnosticsTruncated || Boolean(value.bodyLimitDiagnostics)) &&
+  (!value.blockedRequestDiagnosticsTruncated || Boolean(value.blockedRequestDiagnostics)) &&
+  (!value.blockedResourceDiagnosticsTruncated || Boolean(value.blockedResourceDiagnostics)));
+
+/** Older writers attached successful-page diagnostics to rendered redirects or
+ * denials. Preserve those bounded facts separately, without changing the read
+ * outcome, HTTP status, source, counters, clocks, or admission predicates. */
+function separateFailedReadDiagnostics(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const entry = value as Record<string, unknown>;
+  if (entry.rendered !== true || entry.outcome !== "READ" || typeof entry.httpStatus !== "number" ||
+      entry.httpStatus < 300 || entry.httpStatus > 599 || entry.failedReadDiagnostics !== undefined) return value;
+  const keys = ["bodyLimitDiagnostics", "bodyLimitDiagnosticsTruncated", "blockedRequestDiagnostics",
+    "blockedRequestDiagnosticsTruncated", "blockedResourceDiagnostics", "blockedResourceDiagnosticsTruncated"];
+  if (!keys.some(key => Object.hasOwn(entry, key))) return value;
+  const normalized = { ...entry }, diagnostics: Record<string, unknown> = {};
+  for (const key of keys) if (Object.hasOwn(entry, key)) { diagnostics[key] = entry[key]; delete normalized[key]; }
+  return { ...normalized, failedReadDiagnostics: diagnostics };
+}
 const publicReadEvidence = z.object({
   sourceFingerprint: z.string().regex(/^[a-f0-9]{64}$/i),
   accessControlsObserved: z.literal(true),
@@ -172,6 +204,7 @@ const observation = z.object({
   bodyLimitDiagnostics: bodyLimitDiagnostics.optional(), bodyLimitDiagnosticsTruncated: z.literal(true).optional(),
   blockedRequestDiagnostics: blockedRequestDiagnostics.optional(), blockedRequestDiagnosticsTruncated: z.literal(true).optional(),
   blockedResourceDiagnostics: blockedResourceDiagnosticsSchema.optional(), blockedResourceDiagnosticsTruncated: z.literal(true).optional(),
+  failedReadDiagnostics: failedReadDiagnostics.optional(),
   publicConfiguration: simulatorPublicConfigurationSchema.optional(),
   pageSurfaces: simulatorPageSurfacesSchema.optional(),
   renderActivation: z.literal("PASSIVE_POINTER_AND_SCROLL").optional(),
@@ -180,6 +213,11 @@ const observation = z.object({
   .refine(entry => !entry.sourceFingerprint || !entry.publicReadEvidence || entry.sourceFingerprint === entry.publicReadEvidence.sourceFingerprint)
   .refine(entry => !entry.publicReadEvidence || Boolean(entry.requestId && entry.outcome === "READ" &&
     entry.publicReadEvidence.method === (entry.rendered ? "BROWSER" : "HTTP")))
+  .refine(entry => !entry.failedReadDiagnostics || Boolean(entry.rendered && entry.outcome === "READ" &&
+    entry.httpStatus >= 300 && entry.httpStatus <= 599 && entry.publicReadEvidence?.accessControlsObserved === true &&
+    !entry.publicReadEvidence.accessControls.length &&
+    (!entry.failedReadDiagnostics.bodyLimitDiagnostics || entry.renderWarning?.startsWith("SECONDARY_") &&
+      entry.publicReadEvidence.renderComplete === false)))
   .refine(entry => !entry.renderActivation || entry.rendered && entry.outcome === "READ")
   .refine(entry => !entry.pageSurfaces || Boolean(entry.outcome === "READ" && entry.httpStatus >= 200 && entry.httpStatus < 300 &&
     entry.publicReadEvidence?.accessControlsObserved === true && entry.publicReadEvidence.accessControls.length === 0))
@@ -225,11 +263,15 @@ const blockedResearchRoute = z.object({ url: safeUrl, rendered: z.boolean(), htt
   renderWarning: renderWarning.optional(), configurationDiagnostic: configurationDiagnostic.optional(),
   bodyLimitDiagnostics: bodyLimitDiagnostics.optional(), bodyLimitDiagnosticsTruncated: z.literal(true).optional(),
   blockedResourceDiagnostics: blockedResourceDiagnosticsSchema.optional(), blockedResourceDiagnosticsTruncated: z.literal(true).optional(),
+  failedReadDiagnostics: failedReadDiagnostics.optional(),
   observedAt: z.string().datetime().optional(), requestId: z.string().uuid().optional(), outcome: z.literal("READ").optional(),
   accessControlsObserved: z.literal(true).optional(),
   accessControls: z.array(z.enum(["CAPTCHA_OR_CHALLENGE", "ACCOUNT_REQUIRED", "QUEUE"])).max(3).optional(),
   renderComplete: z.boolean().optional(),
 }).strict().refine(route => !route.blockedResourceDiagnosticsTruncated || Boolean(route.blockedResourceDiagnostics))
+  .refine(route => !route.failedReadDiagnostics || Boolean(route.rendered && route.outcome === "READ" &&
+    route.httpStatus >= 300 && route.httpStatus <= 599 && route.accessControlsObserved === true && route.accessControls?.length === 0 &&
+    (!route.failedReadDiagnostics.bodyLimitDiagnostics || route.renderWarning?.startsWith("SECONDARY_") && route.renderComplete === false)))
   .refine(route => !route.blockedResourceDiagnostics || Boolean(route.rendered && route.outcome === "READ" &&
     route.httpStatus >= 200 && route.httpStatus < 300 && route.accessControlsObserved === true && route.accessControls?.length === 0))
   .refine(route => !route.bodyLimitDiagnosticsTruncated || Boolean(route.bodyLimitDiagnostics))
@@ -247,7 +289,11 @@ export const isProtectedSimulatorResearchDenial = (route: SimulatorResearchBlock
   (route.accessControls?.length ?? 0) > 0 || Boolean(route.failure && !isSimulatorResearchToolingFailure(route)) ||
   route.httpStatus === 0 && !isSimulatorResearchToolingFailure(route);
 export function readSimulatorResearchFailureMemory(value: unknown) {
-  return value === undefined ? undefined : researchFailureMemory.parse(value);
+  if (value === undefined) return undefined;
+  if (value && typeof value === "object" && !Array.isArray(value) && "routes" in value && Array.isArray(value.routes)) {
+    return researchFailureMemory.parse({ ...value, routes: value.routes.map(separateFailedReadDiagnostics) });
+  }
+  return researchFailureMemory.parse(value);
 }
 export function mergeSimulatorResearchBlockedRoutes(routes: readonly SimulatorResearchBlockedRoute[]) {
   // Callers put newer observations first. Never silently forget a denied route.
@@ -363,6 +409,9 @@ export function readSimulatorResearchState(value: unknown, fingerprint: string):
       source: legacy.source, requestedUrl: legacy.requestedUrl, sourceUrl: legacy.sourceUrl,
       observedAt: legacy.observedAt, httpStatus: legacy.httpStatus, rendered: false, outcome: "READ",
     }], links: [], bookingLinks: [], linkBaseUrl: null, inFlight: null };
+  }
+  if (value && typeof value === "object" && !Array.isArray(value) && "history" in value && Array.isArray(value.history)) {
+    return stateSchema.parse({ ...value, history: value.history.map(separateFailedReadDiagnostics) });
   }
   return stateSchema.parse(value);
 }
