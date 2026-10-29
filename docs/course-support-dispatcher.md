@@ -1,5 +1,16 @@
 # Ten-minute course dispatcher
 
+New outdoor assignments carry a material incident fingerprint as well as the
+original observation timestamp. Normal observations may refresh timestamps,
+counts and scheduling without revoking unchanged authority. The fingerprint
+retains exact incident identity, cycle, status, failure, human/engineering state,
+playbook ledger, attempts, active ownership and canonical provider-source proof.
+Planning reconciliation and locked claiming both check it. Legacy assignments
+without that proof retain their strict timestamp fence. Current due time,
+request intent, source, native child, base, capacity and lease expiry still gate
+every claim. A definite writer-lock refusal gets the existing bounded admission
+backoff; an acquired callback failure or ambiguous result is never replayed.
+
 Simulator offerings share this dispatcher, its start budget, occupied slots and native binding fences. A `mode: "SIMULATOR"` assignment uses the offering-scoped commands and original child prompt in [simulator-support-responder.md](simulator-support-responder.md); it must never consume an outdoor `CourseSupportIncident`.
 
 The sole `tee-time-spot-course-support-responder` automation dispatches course work every ten minutes. It starts at most five new course chats per ten-minute tick and may fill up to fifteen active course slots across three active future alerts, with at most five selected courses per alert. The product's existing three-alert limit per account remains unchanged. A shared course needs one worker even when several alerts select it.

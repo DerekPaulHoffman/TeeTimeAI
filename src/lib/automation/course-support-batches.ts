@@ -25,6 +25,8 @@ import {
   isCurrentCourseDispatchSource,
 } from "./course-support-dispatch-intent";
 import { readCustomerRecovery } from "./course-support-customer-recovery";
+import { createCourseDispatchIncidentFingerprint, isCourseDispatchIncidentSnapshotCurrent } from "./course-support-dispatch-snapshot";
+import { retryCourseSupportWriterAdmission } from "./course-support-writer-admission";
 import { appendCourseSupportLineage, createCourseSupportLineage } from "./course-support-lineage";
 
 import {
@@ -708,6 +710,7 @@ type SourceCompleteFinalizationRecovery = {
 };
 
 type CourseSupportClaimCandidate = CourseSupportCandidate & {
+  dispatchIncidentFingerprint?: string;
   courseUpdatedAt: Date;
   playbookEventCountAtClaim: number;
   sourceCompleteFinalizationRecovery?: SourceCompleteFinalizationRecovery;
@@ -4257,7 +4260,7 @@ export async function claimCourseSupportBatch(input: {
     : null;
   let candidateHistoryBlockedCount = 0;
 
-  const lease = await runWithCourseSupportWriterTransitionLease(
+  const lease = await retryCourseSupportWriterAdmission(() => runWithCourseSupportWriterTransitionLease(
     async (writerLease) => {
     const selectionDatabaseNow = await getCourseSupportDatabaseNow(prisma);
     const activeBatches = await prisma.courseSupportBatch.findMany({
@@ -4587,7 +4590,9 @@ export async function claimCourseSupportBatch(input: {
       selected.incidents[0]?.cycle !== assignment.target.cycle ||
       selected.providerFamilyKey !== assignment.target.providerFamilyKey ||
       selected.failureFingerprint !== assignment.target.failureFingerprint ||
-      selected.incidents[0]?.updatedAt.toISOString() !== assignment.target.updatedAt)) {
+      (assignment.target.incidentFingerprint !== undefined
+        ? (selected.incidents[0] as CourseSupportClaimCandidate).dispatchIncidentFingerprint !== assignment.target.incidentFingerprint
+        : selected.incidents[0]?.updatedAt.toISOString() !== assignment.target.updatedAt))) {
       throw new Error("Course dispatch target changed before claim.");
     }
     if (new Set([
@@ -5678,7 +5683,8 @@ export async function claimCourseSupportBatch(input: {
               current.cycle !== target.cycle ||
               current.providerFamilyKey !== target.providerFamilyKey ||
               current.failureFingerprint !== target.failureFingerprint ||
-              current.updatedAt.toISOString() !== target.updatedAt) {
+              !isCourseDispatchIncidentSnapshotCurrent(target, current, target.incidentFingerprint
+                ? buildCourseSupportProviderSnapshotFingerprint(current.course) : "")) {
             throw new Error("Course dispatch target changed before locked claim.");
           }
           const preferences = await tx.coursePreference.findMany({
@@ -6287,7 +6293,7 @@ export async function claimCourseSupportBatch(input: {
     };
     },
     { timeout: COURSE_SUPPORT_BATCH_CLAIM_WRITER_LEASE_TIMEOUT_MS },
-  ).catch((error: unknown) => {
+  ), { now: () => performance.now() }).catch((error: unknown) => {
     if (isCourseSupportClaimSnapshotDrift(error)) {
       throw new CourseSupportClaimReplanRequired(error as Error);
     }
@@ -17829,6 +17835,7 @@ export async function listCourseSupportDispatchCandidates(
       providerFamilyKey: candidate.providerFamilyKey,
       failureFingerprint: candidate.failureFingerprint,
       updatedAt: candidate.updatedAt.toISOString(),
+      incidentFingerprint: candidate.dispatchIncidentFingerprint,
       activeRealSearchCount: candidate.activeRealSearchCount,
       engineeringOnly: candidate.engineeringOnly,
     }));
@@ -19824,6 +19831,7 @@ function buildCourseSupportCandidates(
           : incident.attemptCount,
         updatedAt: incident.updatedAt,
         courseUpdatedAt: course.updatedAt,
+        dispatchIncidentFingerprint: createCourseDispatchIncidentFingerprint(incident, providerSnapshotFingerprint),
         remediationDirective:
           getCourseSupportRemediationDirective(remediationRoute),
         remediationRoute,

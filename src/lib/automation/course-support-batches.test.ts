@@ -2179,6 +2179,16 @@ describe("course-support closeout playbook decision basis", () => {
   });
 });
 
+describe("course-support claim writer admission", () => {
+  it("waits through a definite writer-lock refusal before revalidating the claim", async () => {
+    leaseMocks.withPostgresAdvisoryTextLease.mockResolvedValueOnce({ acquired: false });
+    const result = await claimCourseSupportBatch({ ownerThreadId: "claim-writer-owner", branch: "automation/course-support-writer-test", baseSha: "a".repeat(40) });
+    expect(result.outcome).toBe("no_due_work");
+    expect(leaseMocks.withPostgresAdvisoryTextLease.mock.calls.length).toBeGreaterThan(1);
+    expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+  });
+});
+
 describe("course-support path planning", () => {
   it("rejects exact and provider-family code scope collisions", () => {
     expect(
