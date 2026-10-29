@@ -8,6 +8,15 @@ export type PublicFrameParentProof = { officialUrl: string; documentUrl: string 
   { kind: "VERIFIED_OFFICIAL_DOCUMENT" } |
   { kind: "OBSERVED_PUBLIC_BOOKING_PARENT"; officialDocumentUrl: string; observedBookingHref: string });
 export type PublicBookingParentIdentity = { headings: string[]; addressTexts: string[]; truncated?: boolean };
+const currentOfficialParentProofs = new WeakMap<object, { officialUrl: string; documentUrl: string; current: () => boolean }>();
+
+/** Only this live scope can carry an official document across an attested
+ * host migration. Copied JSON and a historical redirect never mint it. */
+export function isCurrentOfficialFrameParent(proof: PublicFrameParentProof | undefined, officialUrl: string, documentUrl: string) {
+  if (!proof || proof.kind !== "VERIFIED_OFFICIAL_DOCUMENT" || proof.officialUrl !== officialUrl || proof.documentUrl !== documentUrl) return false;
+  const bound = currentOfficialParentProofs.get(proof);
+  return Boolean(bound && bound.officialUrl === officialUrl && bound.documentUrl === documentUrl && bound.current());
+}
 type Candidate = { kind: "OFFICIAL"; nativeRedirectRequired?: true } | { kind: "BOOKING"; officialDocumentUrl: string; observedBookingHref: string };
 const stateNames: Record<string, string> = {
   AL:"Alabama",AK:"Alaska",AZ:"Arizona",AR:"Arkansas",CA:"California",CO:"Colorado",CT:"Connecticut",DE:"Delaware",DC:"District of Columbia",
@@ -53,15 +62,19 @@ export function createPublicBookingParentScope(identity: { officialUrl?: string;
     candidates.set(contact, { kind: "OFFICIAL" });
   }
   const verified = new Map<string, Candidate>();
+  const documentGenerations = new Map<string, object>();
+  const documentNativeChecks = new Map<string, () => boolean>();
   const remember = (url: string, candidate: Candidate) => {
     if (!candidates.has(url) && candidates.size >= 32) return false;
     candidates.set(url, candidate); return true;
   };
   return {
-    beginDocument(value: string) { const key = documentKey(value); if (key) verified.delete(key); },
+    beginDocument(value: string) { const key = documentKey(value); if (key) { verified.delete(key); documentGenerations.delete(key); documentNativeChecks.delete(key); } },
     observeDocument(input: { url: string; status: number; redirectedFrom?: string; nativeRequest?: object }) {
       const url = documentKey(input.url), from = input.redirectedFrom && documentKey(input.redirectedFrom);
       if (!url) return;
+      documentGenerations.delete(url);
+      documentNativeChecks.delete(url);
       let candidate = candidates.get(url);
       const nativeLineage = official && input.nativeRequest ? attestedNativeDocumentRedirects(input.nativeRequest, new Set([official])) : undefined;
       if (candidate?.kind === "OFFICIAL" && candidate.nativeRedirectRequired && nativeLineage?.at(-1)?.toUrl !== url) {
@@ -80,7 +93,13 @@ export function createPublicBookingParentScope(identity: { officialUrl?: string;
         if (!remember(url, candidate)) return;
       }
       verified.delete(url);
-      if (candidate && input.status === 200) verified.set(url, candidate);
+      if (candidate && input.status === 200) {
+        verified.set(url, candidate); documentGenerations.set(url, {});
+        if (candidate.kind === "OFFICIAL" && candidate.nativeRedirectRequired && input.nativeRequest && official) {
+          const request = input.nativeRequest;
+          documentNativeChecks.set(url, () => attestedNativeDocumentRedirects(request, new Set([official]))?.at(-1)?.toUrl === url);
+        }
+      }
     },
     observeOfficialLink(documentUrl: string, href: string, label: string) {
       const parent = documentKey(documentUrl), target = documentKey(href);
@@ -95,8 +114,16 @@ export function createPublicBookingParentScope(identity: { officialUrl?: string;
     needsIdentity(documentUrl: string) { const key = documentKey(documentUrl); return key !== undefined && verified.get(key)?.kind === "BOOKING"; },
     authorizeParent(documentUrl: string, evidence?: PublicBookingParentIdentity): PublicFrameParentProof | undefined {
       const key = documentKey(documentUrl), candidate = key && verified.get(key);
-      if (!official || !candidate) return;
-      if (candidate.kind === "OFFICIAL") return { officialUrl: identity.officialUrl!, documentUrl, kind: "VERIFIED_OFFICIAL_DOCUMENT" };
+      if (!official || !key || !candidate) return;
+      if (candidate.kind === "OFFICIAL") {
+        const proof: PublicFrameParentProof = { officialUrl: identity.officialUrl!, documentUrl, kind: "VERIFIED_OFFICIAL_DOCUMENT" };
+        const generation = documentGenerations.get(key);
+        const nativeCurrent = documentNativeChecks.get(key);
+        if (!generation) return;
+        currentOfficialParentProofs.set(proof, { officialUrl: identity.officialUrl!, documentUrl,
+          current: () => verified.get(key) === candidate && documentGenerations.get(key) === generation && (!nativeCurrent || nativeCurrent()) });
+        return proof;
+      }
       if (!identity.venueName || !matchesIdentity(identity.venueName, identity.venueAddress, evidence)) return;
       return { officialUrl: identity.officialUrl!, documentUrl, kind: "OBSERVED_PUBLIC_BOOKING_PARENT",
         officialDocumentUrl: candidate.officialDocumentUrl, observedBookingHref: candidate.observedBookingHref };

@@ -6,7 +6,7 @@ import { parseChronogolfPublicWidget } from "./chronogolf-source";
 import { isSafeRecipeUrl } from "./recipe";
 import { cpsPublicEntryUrl } from "./cps-public-navigation";
 import { knownSimulatorPublicConfigurationFamily, uschedulePublicTenant } from "@/lib/simulators/providers/public-configuration";
-import type { PublicFrameParentProof } from "./public-booking-parent";
+import { isCurrentOfficialFrameParent, type PublicFrameParentProof } from "./public-booking-parent";
 
 /** A published scheduler entry is routing evidence only. The legacy public
  * owner URL is never rewritten into a managed configuration/source URL. */
@@ -29,7 +29,8 @@ export function publicFrameSource(input: { src: string; label: string; visible: 
     const current = new URL(documentUrl), official = new URL(officialUrl);
     const scopedParent = parentProof?.officialUrl === officialUrl && parentProof.documentUrl === documentUrl &&
       (parentProof.kind === "VERIFIED_OFFICIAL_DOCUMENT"
-        ? current.hostname.replace(/^www\./u, "") === official.hostname.replace(/^www\./u, "")
+        ? current.hostname.replace(/^www\./u, "") === official.hostname.replace(/^www\./u, "") ||
+          isCurrentOfficialFrameParent(parentProof, officialUrl, documentUrl)
         : parentProof.kind === "OBSERVED_PUBLIC_BOOKING_PARENT" && isSafeRecipeUrl(parentProof.officialDocumentUrl) && isSafeRecipeUrl(parentProof.observedBookingHref) &&
           new URL(parentProof.officialDocumentUrl).hostname.replace(/^www\./u, "") === official.hostname.replace(/^www\./u, "") &&
           new URL(parentProof.observedBookingHref).hostname.replace(/^www\./u, "") === current.hostname.replace(/^www\./u, ""));

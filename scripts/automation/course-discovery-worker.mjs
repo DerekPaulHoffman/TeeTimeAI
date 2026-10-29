@@ -2002,7 +2002,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
               try { await saveCheckpoint({}); } catch { /* Feedback persistence is best effort before activation. */ }
             }
           }
-          const modelText = JSON.stringify({ error: /^[A-Z_]+$/u.test(error?.code ?? "") ? error.code : "DISCOVERY_TOOL_FAILED",
+          const modelText = JSON.stringify(previewDiscoverySnapshot({ error: /^[A-Z_]+$/u.test(error?.code ?? "") ? error.code : "DISCOVERY_TOOL_FAILED",
             ...(feedback ? { details: feedback.details } : {}),
             ...(replayClosedBrowser ? { browserSessionClosed: true,
               hint: "Independent replay closed the discovery browser. Open an already observed public URL to obtain fresh controls before correcting the recipe; the original deadline is unchanged." } : {}),
@@ -2010,7 +2010,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
               ? { continuation: "The adapter replay is incomplete because its fresh provider identity does not match the canonical venue. Preserve canonical identity and inspect fresh observed public evidence for a supported browser recipe. This failure does not prove the public surface unsupported or empty. Do not resubmit unchanged metadata or overwrite the canonical address." } : {}),
             ...(message.params.tool === "discovery_browser" && (message.params.arguments?.action === "finish" || error?.code === "BROWSER_SESSION_CLOSED")
               ? { hint: "The browser session is closed. Open an already observed public URL to start a fresh session within the original deadline." } : {}),
-            ...(error?.code === "DISCOVERY_SOURCE_NOT_OBSERVED" ? { hint: "Open the official source and follow its public booking link before proposing a changed booking URL." } : {}) });
+            ...(error?.code === "DISCOVERY_SOURCE_NOT_OBSERVED" ? { hint: "Open the official source and follow its public booking link before proposing a changed booking URL." } : {}) }));
           send({ id: message.id, result: { success: false, contentItems: [{ type: "inputText", text: modelText }] } });
           toolTrace.record(message.params.tool, message.params.arguments, "ERROR", error?.code, modelText); replyTraced = true;
           if (activationStarted || ["DISCOVERY_LEASE_REJECTED", "DISCOVERY_NO_BROWSER_PROGRESS", "DISCOVERY_TRANSPORT_FALLBACK_FAILED"].includes(error?.code)) rejectTurn(error);

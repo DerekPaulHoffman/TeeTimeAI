@@ -9,9 +9,11 @@ import { chronogolfAvailabilityPageSchema, chronogolfMetadataSchema, parseChrono
 import type { OfficialIdentityPage } from "./teeitup-official-identity";
 import type { NativeOfficialPageReader } from "./native-official-page-reader";
 import { freshNativeCanonicalRootDocument } from "./native-official-page-attestation";
+import type { DiscoveryTrustedContext } from "./trusted-context";
 
 type Deps = { fetch?: typeof fetch; now?: () => Date; deadlineAt?: Date;
   localCapabilities?: readonly "LOCAL_CHROME"[]; officialIdentityPage?: OfficialIdentityPage; readNativeOfficialPage?: NativeOfficialPageReader;
+  trustedContext?: DiscoveryTrustedContext;
   requestLease?: <T>(family: string, work: () => Promise<T>) => Promise<{ acquired: true; value: T } | { acquired: false }> };
 const MAX_PAGES = 10, MAX_ROWS = 500, MAX_RESPONSE_BYTES = 2_000_000, MAX_TOTAL_BYTES = 16_000_000;
 function fail(code: string): never { throw new Error(code); }
@@ -69,7 +71,7 @@ function createReader(source: ChronogolfIdentitySource, deps: Deps) {
       if (!document.text && document.url !== url) { if (hops === 2) fail("ADAPTER_PROFILE_REDIRECT_INVALID"); url = document.url; continue; }
       if (!document.text) fail("ADAPTER_PROFILE_REDIRECT_INVALID");
       let metadata: ChronogolfMetadata;
-      try { metadata = parseChronogolfProfile(document.text, url, source); }
+      try { metadata = parseChronogolfProfile(document.text, url, source, undefined, deps.trustedContext); }
       catch (error) {
         if (!chronogolfOfficialHostMismatch(error)) throw error;
         if (!deps.localCapabilities?.includes("LOCAL_CHROME")) fail("LOCAL_CHROME_REQUIRED");
@@ -91,7 +93,7 @@ function createReader(source: ChronogolfIdentitySource, deps: Deps) {
           page = await factory(source, source.officialUrl, new Date(deadline));
         }
         signal.throwIfAborted(); if (clock().getTime() >= deadline) fail("DEADLINE_EXCEEDED");
-        metadata = parseChronogolfProfile(document.text, url, source, page);
+        metadata = parseChronogolfProfile(document.text, url, source, page, deps.trustedContext);
       }
       const bodies: Record<string, string> = {};
       for (const client of metadata.clients) { allowed.add(client.url); bodies[client.url] = (await read(client.url, "script")).text; }

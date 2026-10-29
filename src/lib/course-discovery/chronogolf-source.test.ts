@@ -142,6 +142,70 @@ describe("fresh exact profile identity and complete UUID catalog", () => {
     expect(() => parseChronogolfProfile('<script id="__NEXT_DATA__" type="application/json">sideEffect()</script>', source.bookingUrl, source)).toThrow();
   });
 });
+describe("canonical US postal serialization and exact public business suffix", () => {
+  const identity = { ...source, venueName: "Exampleton", venueAddress: "100 Fairway Blvd, Example City, MA 01234, USA", timeZone: "America/New_York" };
+  const trusted = { canonicalCoursePhone: "+14135550100" };
+  function published() { return { ...club(), name: "Exampleton Golf Links", province: "Massachusetts", postcode: "1234", timezone: identity.timeZone,
+    phone: "(413) 555-0100", courses: [{ ...club().courses[0], name: "Exampleton Golf Links" }] }; }
+  const parsePublished = (value = published(), context: { canonicalCoursePhone?: string } | undefined = trusted, canonical = identity) =>
+    parseChronogolfProfile(html(value), source.bookingUrl, canonical, undefined, context);
+
+  it("corroborates both serializer differences without replacing the canonical source", () => {
+    const actual = parsePublished();
+    expect(actual.courses[0].name).toBe("Exampleton Golf Links");
+    expect(identity.venueName).toBe("Exampleton");
+    expect(parsePublished({ ...published(), postcode: "01234" })).toEqual(actual);
+    expect(actual.catalogHash).toMatch(/^[a-f0-9]{64}$/u);
+  });
+  it("retains exact-name legacy acceptance without a phone requirement", () => {
+    const value = published();value.name = identity.venueName;Object.assign(value, { phone: undefined });
+    expect(() => parsePublished(value, {})).not.toThrow();
+  });
+  it.each(["missing", "wrong", "noncanonical", "extension", "provider-missing"])("rejects %s phone corroboration", mode => {
+    const value = published();
+    let context: { canonicalCoursePhone?: string } = trusted;
+    if (mode === "missing") context = {};
+    if (mode === "wrong") context = { canonicalCoursePhone: "+14135550101" };
+    if (mode === "noncanonical") context = { canonicalCoursePhone: "4135550100" };
+    if (mode === "extension") value.phone = "(413) 555-0100 ext 1";
+    if (mode === "provider-missing") Object.assign(value, { phone: undefined });
+    expect(() => parsePublished(value, context)).toThrow("ADAPTER_IDENTITY_MISMATCH");
+  });
+  it.each(["nearby-name", "longer-suffix", "short-brand", "generic-brand", "different-course", "multiple-courses", "foreign-host", "non-US", "wrong-street", "partial-address", "wrong-city", "wrong-state", "wrong-timezone"])
+    ("keeps %s identity closed", mode => {
+      const value = published(); let canonical = identity;
+      if (mode === "nearby-name") value.name = "Other Exampleton Golf Links";
+      if (mode === "longer-suffix") value.name = "Exampleton Golf Links Resort";
+      if (mode === "short-brand") { canonical = { ...identity, venueName: "Short" }; value.name = "Short Golf Links"; value.courses[0].name = value.name; }
+      if (mode === "generic-brand") { canonical = { ...identity, venueName: "The Golf Course" }; value.name = "The Golf Course Golf Links"; value.courses[0].name = value.name; }
+      if (mode === "different-course") value.courses[0].name = "Exampleton South";
+      if (mode === "multiple-courses") value.courses.push({ ...value.courses[0], id: 5679, uuid: "7657db51-4e0c-4bc7-8e98-bd0a705370af" });
+      if (mode === "foreign-host") value.website = "https://other.example.org/";
+      if (mode === "non-US") value.country = "Canada";
+      if (mode === "wrong-street") value.address = "101 Fairway Boulevard";
+      if (mode === "partial-address") value.address = "Fairway Boulevard";
+      if (mode === "wrong-city") value.city = "Other City";
+      if (mode === "wrong-state") value.province = "New York";
+      if (mode === "wrong-timezone") value.timezone = "America/Chicago";
+      expect(() => parsePublished(value, trusted, canonical)).toThrow();
+    });
+  it.each(["wrong-four-digits", "three-digits", "numeric", "zip-extension-missing", "canonical-no-leading-zero"])("does not guess %s postal identity", mode => {
+    const value = published(); let canonical = identity;
+    if (mode === "wrong-four-digits") value.postcode = "1235";
+    if (mode === "three-digits") value.postcode = "234";
+    if (mode === "numeric") Object.assign(value, { postcode: 1234 });
+    if (mode === "zip-extension-missing") canonical = { ...identity, venueAddress: identity.venueAddress.replace("01234", "01234-5678") };
+    if (mode === "canonical-no-leading-zero") canonical = { ...identity, venueAddress: identity.venueAddress.replace("01234", "11234") };
+    expect(() => parsePublished(value, trusted, canonical)).toThrow();
+  });
+  it("binds the corroborating private phone semantically and keeps its value out of metadata", () => {
+    const first = parsePublished(), changed = parsePublished({ ...published(), phone: "(413) 555-0101" }, { canonicalCoursePhone: "+14135550101" });
+    expect(changed.catalogHash).not.toBe(first.catalogHash);
+    expect(JSON.stringify(first)).not.toContain("4135550100");
+    expect(JSON.stringify(first)).not.toContain("(413)");
+  });
+});
+
 describe("reviewed full-hole-union client version witness", () => {
   it("requires both actual referenced URLs and exact reviewed bytes", () => {
     const parsed = parseChronogolfProfile(html(), source.bookingUrl, source), bodies = Object.fromEntries(CHRONOGOLF_READ_CLIENTS.map((client, index) => [client.url, reviewedBodies[index]]));

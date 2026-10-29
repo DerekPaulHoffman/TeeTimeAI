@@ -57,6 +57,36 @@ function dependencies(options: Options = {}) {
 const execute = (deps: ReturnType<typeof dependencies>, requested = input, saved = metadata(), identity = source) => executeChronogolf(identity, saved, target, requested, deps);
 
 describe("Chronogolf fixed public all-round reader", () => {
+  it("forwards private phone corroboration through the fixed inspector and revalidates it on replay", async () => {
+    const identity = { ...source, venueName: "Exampleton", venueAddress: "123 Fairway Drive, Example City, MA 01234, USA", timeZone: "America/New_York" };
+    const profile = { ...club(), name: "Exampleton Golf Links", city: "Example City", province: "Massachusetts", postcode: "1234",
+      timezone: identity.timeZone, phone: "(413) 555-0100", courses: [{ ...course, name: "Exampleton Golf Links" }] };
+    const trustedContext = { canonicalCoursePhone: "+14135550100" }, inspection = dependencies({ profile: html(profile) });
+    const saved = await inspectChronogolf(identity, { ...inspection, trustedContext });
+    expect(inspection.reads).toHaveLength(3);
+    expect(saved).toEqual(parseChronogolfProfile(html(profile), identity.bookingUrl, identity, undefined, trustedContext));
+    const bridge = await inspectExistingAdapter(identity, { ...dependencies({ profile: html(profile) }), trustedContext, venueMatches: (a, b) => a === b });
+    expect(bridge.adapter).toEqual(saved);
+    for (const context of [undefined, { canonicalCoursePhone: "+14135550101" }]) {
+      const rejected = dependencies({ profile: html(profile) });
+      await expect(inspectChronogolf(identity, { ...rejected, trustedContext: context })).rejects.toThrow("ADAPTER_IDENTITY_MISMATCH");
+      expect(rejected.reads).toHaveLength(1);
+      const rejectedReplay = dependencies({ profile: html(profile) });
+      await expect(executeChronogolf(identity, saved, target, { ...input, timeZone: identity.timeZone }, { ...rejectedReplay, trustedContext: context })).rejects.toThrow("ADAPTER_IDENTITY_MISMATCH");
+      expect(rejectedReplay.reads).toHaveLength(1);
+    }
+    const requested = { ...input, timeZone: identity.timeZone }, replay = dependencies({ profile: html(profile), pages: [[]], total: 0, perPage: 24 });
+    expect(await executeChronogolf(identity, saved, target, requested, { ...replay, trustedContext })).toEqual([]);
+    expect(replay.reads.at(-1)!.pathname).toBe("/marketplace/v2/teetimes");
+    const changedProfile = { ...profile, phone: "(413) 555-0101" }, changedContext = { canonicalCoursePhone: "+14135550101" };
+    const changed = dependencies({ profile: html(changedProfile) });
+    await expect(executeChronogolf(identity, saved, target, requested, { ...changed, trustedContext: changedContext })).rejects.toThrow("ADAPTER_CONFIGURATION_CHANGED");
+    expect(changed.reads.every(url => !url.pathname.includes("/marketplace/"))).toBe(true);
+    const changedSource = dependencies({ profile: html(profile) });
+    await expect(executeChronogolf({ ...identity, venueName: "Other Exampleton" }, saved, target, requested, { ...changedSource, trustedContext })).rejects.toThrow("ADAPTER_IDENTITY_MISMATCH");
+    expect(changedSource.reads).toHaveLength(1);
+    expect(identity.venueName).toBe("Exampleton");
+  });
   it("inspects fresh profile and both reviewed clients without availability or credentials", async () => {
     const deps = dependencies(); expect(await inspectChronogolf(source, deps)).toEqual(metadata()); expect(deps.reads).toHaveLength(3);
     expect(deps.inits.every(init => init.method === "GET" && init.credentials === "omit" && init.redirect === "manual" && !new Headers(init.headers).has("cookie"))).toBe(true);

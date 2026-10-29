@@ -269,6 +269,35 @@ export function freshNativeOfficialRedirects(snapshot,expectedRoot,currentUrl){
  return previous===currentUrl&&snapshot.url===currentUrl?hops:null;
 }
 
+/** A bare observed Acuity tenant is research routing, never an API owner key.
+ * Adopt only its current private completed same-origin HTTP destination, then
+ * reopen that exact URL for independent canonical inspection/replay binding. */
+export function currentAcuityInspectionRedirect(snapshot, root, context, browser, now) {
+  try {
+    const from = new URL(root), to = new URL(snapshot.url);
+    if (!publicUrl(root) || from.href !== root || from.protocol !== 'https:' || from.port || from.username || from.password ||
+        !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.as\.me$/u.test(from.hostname) || from.pathname !== '/' || from.search || from.hash ||
+        !publicUrl(snapshot.url) || to.href !== snapshot.url || to.origin !== from.origin || to.search || to.hash ||
+        !/^\/schedule\/[a-zA-Z0-9]{4,40}$/u.test(to.pathname) || snapshot.browserTransport !== 'NATIVE_CHROME' ||
+        snapshot.navigationStatus !== 200 || snapshot.accessRequirementObserved || snapshot.nativeFirstFatal ||
+        context?.originalUrl !== root || context.currentUrl !== snapshot.url) return;
+    const proof = safeNativeMainDocumentContinuity(browser.currentMainDocumentContinuity?.(snapshot, root, now));
+    if (!proof || proof.originalUrlSha256 !== hash(root) || proof.currentUrlSha256 !== hash(snapshot.url) ||
+        proof.documentBindingSha256 !== context.capability.documentBindingSha256 || proof.observedAt > now || now - proof.observedAt > 5000) return;
+    const hops = snapshot.nativeRoutingDocumentRedirects;
+    if (!Array.isArray(hops) || !hops.length || hops.length > 5) return;
+    let previous = root; const seen = new Set([root]);
+    for (const hop of hops) {
+      if (hop?.completed !== true || ![301,302,303,307,308].includes(hop.status) || hop.fromUrl !== previous ||
+          !publicUrl(hop.toUrl) || new URL(hop.toUrl).href !== hop.toUrl || new URL(hop.toUrl).origin !== from.origin || seen.has(hop.toUrl)) return;
+      const destination = new URL(hop.toUrl);
+      if (destination.search || destination.hash || !['/', '/schedule.php'].includes(destination.pathname) && !/^\/schedule\/[a-zA-Z0-9]{4,40}$/u.test(destination.pathname)) return;
+      seen.add(hop.toUrl); previous = hop.toUrl;
+    }
+    return previous === snapshot.url ? snapshot.url : undefined;
+  } catch { return; }
+}
+
 export function numericMetrics(value, depth = 0) {
   if (depth > 6) return undefined;
   if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
@@ -545,6 +574,16 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
         receipt.earlyCpsSourceContext.completed = true;
       } finally { receipt.earlyCpsSourceContext.elapsedMs = Math.max(0, now() - started); }
     }
+    const acuitySource = currentAcuityInspectionRedirect(snapshot, recipe.source.bookingUrl, nativeContexts.get(snapshot), browser, now());
+    if (acuitySource) {
+      if (receipt.actions.length + 2 > INSPECTION_ACTION_LIMIT) throw fail('FRAMEWORK_INSPECTION_ACTION_LIMIT');
+      const originalSource = recipe.source.bookingUrl;
+      snapshot = await request('open', acuitySource);
+      if (snapshot.url !== acuitySource || snapshot.navigationStatus !== 200 || !nativeContextMatches(snapshot, acuitySource))
+        throw fail('FRAMEWORK_INSPECTION_SOURCE_CONTEXT_CHANGED');
+      recipe = { ...recipe, source: { ...recipe.source, bookingUrl: acuitySource } };
+      receipt.canonicalAcuityRedirect = { originalSourceSha256: hash(originalSource), canonicalSourceSha256: hash(acuitySource), independentlyReopened: true };
+    }
     const inspectedFrom = nativeContexts.get(snapshot);
     let inspected = await request('inspect_adapter', recipe.source.bookingUrl);
     if (new URL(inspected.url).href !== new URL(snapshot.url).href &&
@@ -552,6 +591,7 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
     if (!inspected.adapter || typeof inspected.adapter !== 'object' || Array.isArray(inspected.adapter) ||
         typeof inspected.adapter.family !== 'string') throw fail('FRAMEWORK_INSPECTION_METADATA_INVALID');
     if (earlyCpsContext && inspected.adapter.family !== 'CPS') throw fail('FRAMEWORK_INSPECTION_METADATA_CONFLICT');
+    if (acuitySource && inspected.adapter.family !== 'ACUITY') throw fail('FRAMEWORK_INSPECTION_METADATA_CONFLICT');
 
     let actualRecipe = { ...recipe,
       source: { ...recipe.source, ...(sourceOnly ? { providerFamily: inspected.adapter.family } : {}) }, adapter: inspected.adapter };

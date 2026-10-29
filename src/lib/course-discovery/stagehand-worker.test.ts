@@ -1327,6 +1327,59 @@ describe("regular Stagehand source worker", () => {
     expect(t.client.candidate.mock.calls[0][2].source.bookingUrl).toBe(source);
   });
 
+  it.each(["valid", "unobservedRoot", "noPrivateProof", "noHttpChain", "arbitraryHop", "foreignHost", "checkout", "changedReopen", "staleProof", "incompleteReplay"])
+  ("adopts only a fresh private Acuity root HTTP destination and independently binds canonical inspection/replays: %s", async mode => {
+    const t = setup(), root = "https://public-rental.as.me/", canonical = root + "schedule/AbCd1234";
+    const final = mode === "foreignHost" ? "https://foreign-rental.as.me/schedule/AbCd1234" : mode === "checkout" ? root + "checkout" : canonical;
+    Object.assign(t.f.job.request.target, { kind: "SIMULATOR", offeringId: "unseen-offering" });
+    Object.assign(t.f.job.request.input, { durationMinutes: 60 });
+    t.f.report.adapterSourceProposal.bookingUrl = root; t.f.report.actions = []; t.f.report.visitedUrls = [official]; t.f.report.officialLinkLedger = [];
+    Object.assign(t.f.report, { nativeFrameNavigations: [], frameLedger: mode === "unobservedRoot" ? [] : [{ kind: "NATIVE_VISIBLE_FRAME", pageUrl: official,
+      observedAt: new Date(first + 1000).toISOString(), documentHash: "a".repeat(64), frames: [{ src: root, visible: true }] }] });
+    t.browserFactory.mockImplementation(async options => createDiscoveryBrowser({ ...options,
+      processFactory: () => ({ request: t.request, close: t.close }) }) as never);
+    let current = official, original = official;
+    t.request.mockImplementation(async action => {
+      if (action.action === "open") {
+        original = action.url!;
+        current = original === root ? final : mode === "changedReopen" && original === canonical ? root + "schedule/Changed9" : original;
+      }
+      if (action.action === "inspect_adapter" && action.url !== canonical)
+        throw Object.assign(Error("bare research root is not managed metadata"), { code: "INVALID_ADAPTER_SOURCE" });
+      return { url: current, browserTransport: "NATIVE_CHROME", navigationStatus: 200, loading: false,
+        accessRequirementObserved: false, controls: [], frames: current === official ? [{ source: "FIXED_INSPECTION_FRAME_SRC", url: root }] : [],
+        officialSourceDiagnostic: { rawOfficialCaptured: true, currentOfficialDocument: false },
+        ...(original === root && mode !== "noHttpChain" ? { nativeRoutingDocumentRedirects: mode === "arbitraryHop" ? [
+          { fromUrl: root, toUrl: root + "unreviewed-routing", status: 302, completed: true },
+          { fromUrl: root + "unreviewed-routing", toUrl: final, status: 302, completed: true },
+        ] : [{ fromUrl: root, toUrl: root + "schedule.php", status: 302, completed: true },
+          { fromUrl: root + "schedule.php", toUrl: final, status: 302, completed: true }] } : {}),
+        ...(mode === "noPrivateProof" && original === root ? {} : { nativeMainDocumentContinuity: {
+          kind: "NATIVE_MAIN_DOCUMENT_CONTINUITY_V1", originalUrlSha256: stagehandDataHash(original), currentUrlSha256: stagehandDataHash(current),
+          documentBindingSha256: (current === official ? "a" : "b").repeat(64), observedAt: t.f.clock - (mode === "staleProof" && original === root ? 5001 : 0), status: 200 } }),
+        adapter: action.action === "inspect_adapter" ? { family: "ACUITY", ownerKey: "AbCd1234", businessId: "123", rentalProductIds: ["456"] } : undefined } as never;
+    });
+    if (mode === "incompleteReplay") t.executeRecipe.mockResolvedValue({ status: "INCOMPLETE", complete: false, slots: [], evidence: { reason: "SOURCE_CHANGED" } });
+    const genericWorker = vi.fn(async () => { throw Error("UNEXPECTED_GENERIC_WORKER"); });
+    if (mode === "valid") {
+      await t.run({ genericWorker });
+      expect(t.request.mock.calls.filter(([a]) => a.action !== "finish").map(([a]) => a)).toEqual([
+        { action: "open", url: official }, { action: "open", url: root }, { action: "open", url: canonical }, { action: "inspect_adapter", url: canonical }]);
+      expect(t.client.candidate.mock.calls[0][2].source.bookingUrl).toBe(canonical);
+      expect(t.executeRecipe).toHaveBeenCalledTimes(2);
+      for (const index of [1, 2]) expect(t.executeRecipe).toHaveBeenNthCalledWith(index,
+        expect.objectContaining({ recipe: expect.objectContaining({ source: expect.objectContaining({ bookingUrl: canonical }) }) }));
+      expect(t.client.verification).toHaveBeenCalledTimes(2); expect(t.client.activate).toHaveBeenCalledOnce();
+      expect(genericWorker).not.toHaveBeenCalled();
+    } else {
+      await expect(t.run({ genericWorker })).rejects.toBeTruthy();
+      if (mode !== "incompleteReplay") expect(t.client.candidate).not.toHaveBeenCalled();
+      expect(t.client.activate).not.toHaveBeenCalled();
+    }
+    if (mode === "unobservedRoot") { expect(t.browserFactory).not.toHaveBeenCalled(); expect(t.close).not.toHaveBeenCalled(); }
+    else expect(t.close).toHaveBeenCalledOnce();
+  });
+
   it.each([true, false])("fresh official alias transition requires its exact native attestation (present=%s)", async present => {
     const t = setup(), alias = "https://fresh-official-alias.example/";
     t.request.mockImplementation(async action => ({ url: alias, browserTransport: "NATIVE_CHROME", navigationStatus: 200, loading: false,

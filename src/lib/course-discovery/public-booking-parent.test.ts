@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createPublicBookingParentScope } from "./public-booking-parent";
+import { createPublicBookingParentScope, isCurrentOfficialFrameParent } from "./public-booking-parent";
 import { publicFrameSource } from "./public-frame-source";
 
 describe("context-local verified public booking parents", () => {
@@ -8,6 +8,26 @@ describe("context-local verified public booking parents", () => {
   const identity = { officialUrl: official, venueName: "Harbour Pointe Golf Club", venueAddress: "11817 Harbour Pointe Blvd, Mukilteo, WA 98275, USA" };
   const visible = { headings: [identity.venueName], addressTexts: ["11817 Harbour Pointe Blvd, Mukilteo, Washington, 98275"] };
   const scope = () => createPublicBookingParentScope(identity);
+  it("binds an opaque official parent to its live scope and exact document generation only", () => {
+    const value = scope(); value.observeDocument({ url: official, status: 200 });
+    const first = value.authorizeParent(official)!;
+    expect(isCurrentOfficialFrameParent(first, official, official)).toBe(true);
+    for (const copied of [{ ...first }, JSON.parse(JSON.stringify(first))])
+      expect(isCurrentOfficialFrameParent(copied, official, official)).toBe(false);
+    expect(scope().authorizeParent(official)).toBeUndefined();
+    expect(isCurrentOfficialFrameParent(first, bare, official)).toBe(false);
+    expect(isCurrentOfficialFrameParent(first, official, bare)).toBe(false);
+    value.beginDocument(official); expect(isCurrentOfficialFrameParent(first, official, official)).toBe(false);
+    value.observeDocument({ url: official, status: 200 });
+    const second = value.authorizeParent(official)!;
+    expect(isCurrentOfficialFrameParent(second, official, official)).toBe(true);
+    expect(isCurrentOfficialFrameParent(first, official, official)).toBe(false);
+    value.observeDocument({ url: official, status: 200 });
+    expect(isCurrentOfficialFrameParent(second, official, official)).toBe(false);
+    const third = value.authorizeParent(official)!;
+    value.observeDocument({ url: official, status: 403 });
+    expect(isCurrentOfficialFrameParent(third, official, official)).toBe(false);
+  });
   it("confines the private Contact handoff to one actual native 200 document", () => {
     const contact = "https://www.venue.example/contact/";
     const value = createPublicBookingParentScope(identity, contact);

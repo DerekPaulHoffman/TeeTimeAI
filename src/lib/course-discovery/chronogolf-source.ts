@@ -4,6 +4,8 @@ import { z } from "zod";
 import { completeUSAddress, fullCourseName, type OfficialIdentityPage } from "./teeitup-official-identity";
 import { freshNativeCanonicalRootDocument } from "./native-official-page-attestation";
 import { delegatedCanonicalVenueWitness, delegatedBookingHop } from "./teeitup-delegated-booking-source";
+import { normalizePublicCoursePhone } from "./teeitup-postal-conflict-proof";
+import { discoveryTrustedContextSchema, type DiscoveryTrustedContext } from "./trusted-context";
 
 const id = z.number().int().min(1).max(2_147_483_647);
 const uuid = z.string().uuid();
@@ -115,7 +117,8 @@ const stateNames: Record<string, string> = {
 const profileCourseSchema = z.object({ id, uuid, name, holes, bookableHoles: holeOptions });
 const profileClubSchema = z.object({ id, uuid, name, slug: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/u), active: z.literal(true), state: z.literal("published"),
   website: z.string().url().max(2048), address: z.string().min(5).max(200), city: z.string().min(2).max(100),
-  province: z.string().min(2).max(100), postcode: z.string().regex(/^\d{5}(?:-\d{4})?$/u), country: z.string().min(2).max(100), timezone: timeZone,
+  province: z.string().min(2).max(100), postcode: z.string().regex(/^(?:[0-9]{4}|[0-9]{5}(?:-[0-9]{4})?)$/u), country: z.string().min(2).max(100), timezone: timeZone,
+  phone: z.unknown().optional(),
   defaultAffiliationTypeId: id, features: z.object({ onlineBookingEnabled: z.literal(true) }), courses: z.array(profileCourseSchema).min(1).max(20) });
 type Node = DefaultTreeAdapterMap["node"];
 type Element = DefaultTreeAdapterMap["element"];
@@ -205,7 +208,7 @@ function headlessCanonicalFooter(source: ChronogolfIdentitySource, page: Officia
 /** Fresh complete public profile identity and catalog, not an availability or
  * all-rounds claim. Sales round lengths remain separate from physical layout. */
 export function parseChronogolfProfile(html: string, actualUrl: string, source: ChronogolfIdentitySource,
-  officialPage?: OfficialIdentityPage): ChronogolfMetadata {
+  officialPage?: OfficialIdentityPage, trustedContext?: DiscoveryTrustedContext): ChronogolfMetadata {
   const requested = parseChronogolfSource(source.bookingUrl), actual = parseChronogolfSource(actualUrl);
   if (!requested || !actual || actual.widgetUrl || !source.venueAddress || !officialHost(source.officialUrl)) fail("ADAPTER_IDENTITY_MISSING");
   const document = nextData(html), data = document.data;
@@ -214,11 +217,24 @@ export function parseChronogolfProfile(html: string, actualUrl: string, source: 
   if (!parsed.success) fail("ADAPTER_PROFILE_SCHEMA_CHANGED");
   const club = parsed.data, expectedName = fullCourseName(source.venueName), canonical = physicalAddress(source.venueAddress),
     websiteHost = providerWebsiteIdentityHost(club.website);
-  if (!canonical || expectedName.length < 8 || fullCourseName(club.name) !== expectedName || club.timezone !== source.timeZone ||
+  const trusted = discoveryTrustedContextSchema.safeParse(trustedContext), canonicalPhone = trusted.success ? trusted.data.canonicalCoursePhone : undefined;
+  // A public profile may append this business suffix to a canonical brand.
+  // Only one exact course, the same official host, complete physical identity
+  // and the private canonical phone can corroborate that narrow spelling.
+  const publicBrandSuffix = fullCourseName(club.name) === `${expectedName} golf links` &&
+    !/\b(?:golf|links|club|course|country)$/u.test(expectedName) &&
+    expectedName.split(" ").filter(word => !["the", "golf", "links", "club", "course", "country"].includes(word)).join(" ").length >= 8 &&
+    club.courses.length === 1 && fullCourseName(club.courses[0].name) === fullCourseName(club.name) &&
+    websiteHost === officialHost(source.officialUrl) && canonicalPhone !== undefined && normalizePublicCoursePhone(club.phone) === canonicalPhone;
+  if (!canonical || expectedName.length < 8 || (fullCourseName(club.name) !== expectedName && !publicBrandSuffix) || club.timezone !== source.timeZone ||
       !websiteHost) fail("ADAPTER_IDENTITY_MISMATCH");
   const province = Object.entries(stateNames).find(([code, region]) => [code.toLowerCase(), region.toLowerCase()].includes(club.province.toLowerCase()))?.[0];
   if (!province || !/^(?:United States(?: of America)?|USA?|US)$/iu.test(club.country)) fail("ADAPTER_IDENTITY_MISMATCH");
-  const observed = physicalAddress(`${club.address}, ${club.city}, ${province} ${club.postcode}`);
+  // The public serializer can omit one leading zero. Recover it only from the
+  // exact canonical five-digit US ZIP; never fill another missing component.
+  const canonicalFiveDigitZip = /,\s*[A-Z]{2}\s+([0-9]{5})(?:,\s*(?:US|USA|United States(?: of America)?))?$/iu.exec(source.venueAddress)?.[1];
+  const postcode = /^[0-9]{4}$/u.test(club.postcode) && canonicalFiveDigitZip === `0${club.postcode}` ? canonicalFiveDigitZip : club.postcode;
+  const observed = physicalAddress(`${club.address}, ${club.city}, ${province} ${postcode}`);
   if (!observed || JSON.stringify(observed) !== JSON.stringify(canonical)) fail("ADAPTER_IDENTITY_MISMATCH");
   const canonicalUrl = `https://www.chronogolf.com/club/${club.slug}`;
   for (const url of [requested, actual]) if (url.numericClubId !== undefined ? url.numericClubId !== club.id : url.profileUrl !== canonicalUrl) fail("ADAPTER_IDENTITY_MISMATCH");
@@ -248,7 +264,9 @@ export function parseChronogolfProfile(html: string, actualUrl: string, source: 
     } catch { fail("ADAPTER_IDENTITY_MISMATCH"); }
   }
   const catalog = { clubId: club.id, clubUuid: club.uuid, profileUrl: canonicalUrl, ...(requested.widgetUrl ? { widgetSourceUrl: requested.widgetUrl } : {}), name: club.name, websiteHost: providerWebsiteIdentityHost(club.website),
-    address: observed, timeZone: club.timezone, publicPlayerTypeId: club.defaultAffiliationTypeId, courses, clients: document.clients };
+    address: observed, timeZone: club.timezone, publicPlayerTypeId: club.defaultAffiliationTypeId, courses, clients: document.clients,
+    ...(publicBrandSuffix ? { canonicalBrandScope: "EXACT_PUBLIC_GOLF_LINKS_SUFFIX_V1", canonicalName: expectedName,
+      canonicalPhoneSha256: createHash("sha256").update(JSON.stringify(canonicalPhone)).digest("hex") } : {}) };
   return chronogolfMetadataSchema.parse({ family: "CHRONOGOLF", clubId: club.id, profileUrl: canonicalUrl, timeZone: club.timezone,
     ...(requested.widgetUrl ? { widgetSourceUrl: requested.widgetUrl } : {}),
     publicPlayerTypeId: club.defaultAffiliationTypeId, courses, clients: document.clients, catalogHash: createHash("sha256").update(JSON.stringify(catalog)).digest("hex") });

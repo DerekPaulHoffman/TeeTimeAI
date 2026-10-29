@@ -50,6 +50,32 @@ function Get-CourseDiscoveryRuntimeConfig {
   return @{ WorkspacePath = $root; ConfigPath = $configFile.FullName; NodePath = $nodeFile.FullName; Environment = $data }
 }
 
+function ConvertTo-SafeDiscoveryToolTrace {
+  param([object]$Trace)
+  if (-not $Trace -or $Trace.entries -isnot [array]) { return $null }
+  $actions = @('BROWSER_OPEN', 'BROWSER_OBSERVE', 'BROWSER_CLICK', 'BROWSER_SELECT', 'BROWSER_FILL', 'BROWSER_SCROLL', 'BROWSER_INSPECT_ADAPTER', 'BROWSER_INSPECT', 'BROWSER_FINISH', 'BROWSER_UNKNOWN', 'SCHEMA', 'CHECKPOINT', 'PROPOSE_RECIPE', 'UNKNOWN_TOOL')
+  $codes = @('UNSUPPORTED_ADAPTER_SOURCE', 'STALE_OR_UNKNOWN_ELEMENT', 'STALE_OR_UNKNOWN_CONTROL', 'UNOBSERVED_NAVIGATION', 'BROWSER_SESSION_CLOSED', 'BROWSER_UNAVAILABLE', 'BROWSER_NAVIGATION_FAILED', 'DISCOVERY_SOURCE_NOT_OBSERVED', 'DISCOVERY_RECIPE_INVALID', 'DISCOVERY_REPLAY_INCOMPLETE', 'DISCOVERY_PROPOSAL_INVALID', 'DISCOVERY_RECIPE_ENGINE_NOT_ALLOWED', 'DISCOVERY_BROWSER_ACTION_INVALID', 'DISCOVERY_CHECKPOINT_INVALID', 'DISCOVERY_ACCESS_NOT_CONFIRMED', 'DISCOVERY_NO_BROWSER_PROGRESS', 'DISCOVERY_GENERIC_BUDGET_EXHAUSTED', 'DISCOVERY_NATIVE_TRANSPORT_FATAL', 'DISCOVERY_WORK_DEADLINE', 'DISCOVERY_CANCELLED', 'DISCOVERY_LEASE_REJECTED', 'DISCOVERY_TRANSPORT_FALLBACK_FAILED', 'OTHER_TOOL_ERROR')
+  if ($null -eq $Trace.lostEntries -or ([string]$Trace.lostEntries) -cnotmatch '^(0|[1-9]\d{0,5})$') { return $null }
+  $lost = [int]$Trace.lostEntries
+  $entries = @()
+  foreach ($entry in $Trace.entries) {
+    if ($entries.Count -ge 8 -or $entry.status -cnotin @('SUCCESS', 'ERROR', 'NO_REPLY') -or $entry.previewOmitted -isnot [bool] -or
+        $null -eq $entry.modelPreviewBytes -or ([string]$entry.modelPreviewBytes) -cnotmatch '^(0|[1-9]\d{0,7})$') {
+      $lost = [Math]::Min(999999, $lost + 1); continue
+    }
+    $action = 'UNKNOWN_TOOL'
+    if ($entry.action -cin $actions) { $action = $entry.action }
+    $safe = [ordered]@{ action = $action; status = $entry.status; modelPreviewBytes = [long]$entry.modelPreviewBytes; previewOmitted = $entry.previewOmitted }
+    if ($entry.status -cne 'SUCCESS') {
+      $safe.errorCode = 'OTHER_TOOL_ERROR'
+      if ($entry.errorCode -cin $codes) { $safe.errorCode = $entry.errorCode }
+    }
+    if ($action -ceq 'SCHEMA' -and $entry.schemaEngine -cin @('HTTP_JSON', 'BROWSER_DOM', 'BROWSER_JSON', 'EXISTING_ADAPTER')) { $safe.schemaEngine = $entry.schemaEngine }
+    $entries += $safe
+  }
+  return [ordered]@{ entries = @($entries); lostEntries = $lost }
+}
+
 function ConvertTo-SafeGenericFallbackUsage {
   param([object]$Worker)
   if (-not $Worker) { return $null }
@@ -86,39 +112,15 @@ function ConvertTo-SafeGenericFallbackUsage {
     }
     if ($budget.Count) { $safe.genericBudget = $budget }
   }
+  $trace = ConvertTo-SafeDiscoveryToolTrace -Trace $Worker.genericToolTrace
+  if ($trace) { $safe.genericToolTrace = $trace }
   if (-not $safe.Count) { return $null }
   $safe.usageLowerBound = [bool]($tokens.Count -gt 0 -or $safe.Contains('completedModelTurns'))
   return $safe
 }
 
-try {
-  $runtime = Get-CourseDiscoveryRuntimeConfig -Workspace $WorkspacePath -Configuration $ConfigPath -Node $NodePath
-  if ($ValidateOnly) {
-    [pscustomobject]@{ valid = $true; workspace = $runtime.WorkspacePath; config = $runtime.ConfigPath; node = $runtime.NodePath; credentialsPrinted = $false } | ConvertTo-Json -Compress
-    exit 0
-  }
-  # Credentials are inherited only by the supervisor process. The existing
-  # worker strips them before starting the model subprocess.
-  foreach ($property in $runtime.Environment.PSObject.Properties) {
-    [Environment]::SetEnvironmentVariable($property.Name, [string]$property.Value, 'Process')
-  }
-  Set-Location -LiteralPath $runtime.WorkspacePath
-  if (-not $LogDirectory) { $LogDirectory = Join-Path ([IO.Path]::GetDirectoryName($runtime.ConfigPath)) 'logs' }
-  $logs = [IO.Path]::GetFullPath($LogDirectory)
-  if ($logs.StartsWith($runtime.WorkspacePath + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'LOGS_MUST_BE_EXTERNAL' }
-  $null = New-Item -Path $logs -ItemType Directory -Force
-  $supervisorResult = @{ ExitCode = 1 }
-  & {
-    # Windows PowerShell turns native stderr into ErrorRecords. Continue only
-    # inside the child invocation so a Node warning cannot stop supervision.
-    $ErrorActionPreference = 'Continue'
-    $PSNativeCommandUseErrorActionPreference = $false
-    & $runtime.NodePath (Join-Path $runtime.WorkspacePath 'scripts\automation\course-discovery-supervisor.mjs') 2>&1
-    $supervisorResult.ExitCode = $LASTEXITCODE
-  } | ForEach-Object {
-    # Keep file/path/logger failures terminating in both PowerShell versions.
-    $ErrorActionPreference = 'Stop'
-    $line = [string]$_
+function ConvertTo-SafeDiscoveryLogLine {
+  param([string]$Line)
     # Only the supervisor's bounded structured event stream is retained.
     try {
       $record = $line | ConvertFrom-Json
@@ -159,6 +161,8 @@ try {
         if ($record.metrics.metricsFinal -is [bool]) { $metrics.metricsFinal = $record.metrics.metricsFinal }
         if ($record.metrics.sourceResumed -is [bool]) { $metrics.sourceResumed = $record.metrics.sourceResumed }
         if ($record.metrics.sourceUsageRecordedLowerBound -is [bool]) { $metrics.sourceUsageRecordedLowerBound = $record.metrics.sourceUsageRecordedLowerBound }
+        $trace = ConvertTo-SafeDiscoveryToolTrace -Trace $record.metrics.genericToolTrace
+        if ($trace) { $metrics.genericToolTrace = $trace }
         $genericUsage = ConvertTo-SafeGenericFallbackUsage -Worker $record.metrics.genericFallback.worker
         if ($genericUsage) { $metrics.genericFallback = $genericUsage }
         if ($record.metrics.cleanupWarning -in @('TEMP_DIRECTORY_RETAINED_WITHOUT_AUTH', 'TEMP_CREDENTIAL_CLEANUP_FAILED', 'POST_ACTIVATION_CLEANUP_PENDING')) {
@@ -168,6 +172,37 @@ try {
       }
       $line = $safe | ConvertTo-Json -Compress -Depth 6
     } catch { $line = '{"event":"supervisor_diagnostic_redacted"}' }
+  return $line
+}
+
+try {
+  $runtime = Get-CourseDiscoveryRuntimeConfig -Workspace $WorkspacePath -Configuration $ConfigPath -Node $NodePath
+  if ($ValidateOnly) {
+    [pscustomobject]@{ valid = $true; workspace = $runtime.WorkspacePath; config = $runtime.ConfigPath; node = $runtime.NodePath; credentialsPrinted = $false } | ConvertTo-Json -Compress
+    exit 0
+  }
+  # Credentials are inherited only by the supervisor process. The existing
+  # worker strips them before starting the model subprocess.
+  foreach ($property in $runtime.Environment.PSObject.Properties) {
+    [Environment]::SetEnvironmentVariable($property.Name, [string]$property.Value, 'Process')
+  }
+  Set-Location -LiteralPath $runtime.WorkspacePath
+  if (-not $LogDirectory) { $LogDirectory = Join-Path ([IO.Path]::GetDirectoryName($runtime.ConfigPath)) 'logs' }
+  $logs = [IO.Path]::GetFullPath($LogDirectory)
+  if ($logs.StartsWith($runtime.WorkspacePath + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'LOGS_MUST_BE_EXTERNAL' }
+  $null = New-Item -Path $logs -ItemType Directory -Force
+  $supervisorResult = @{ ExitCode = 1 }
+  & {
+    # Windows PowerShell turns native stderr into ErrorRecords. Continue only
+    # inside the child invocation so a Node warning cannot stop supervision.
+    $ErrorActionPreference = 'Continue'
+    $PSNativeCommandUseErrorActionPreference = $false
+    & $runtime.NodePath (Join-Path $runtime.WorkspacePath 'scripts\automation\course-discovery-supervisor.mjs') 2>&1
+    $supervisorResult.ExitCode = $LASTEXITCODE
+  } | ForEach-Object {
+    # Keep file/path/logger failures terminating in both PowerShell versions.
+    $ErrorActionPreference = 'Stop'
+    $line = ConvertTo-SafeDiscoveryLogLine -Line ([string]$_)
     $log = Join-Path $logs ((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd') + '.jsonl')
     if (-not (Test-Path -LiteralPath $log) -or (Get-Item -LiteralPath $log).Length -lt 8388608) {
       Add-Content -LiteralPath $log -Value $line -Encoding UTF8

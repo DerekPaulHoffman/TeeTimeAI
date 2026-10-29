@@ -186,23 +186,25 @@ export function discoveryPromptInstructions({ browserTransport, recipeEngineCons
   ].join(" ");
 }
 
-export const DISCOVERY_MODEL_SNAPSHOT_BYTES = 24_000;
+export const DISCOVERY_MODEL_SNAPSHOT_BYTES = 8_000;
+export const DISCOVERY_MODEL_SNAPSHOT_HARD_BYTES = 24_000;
 /** Model-only projection, after all controller evidence/private inventories have
  * consumed the original snapshot. Nothing here is execution or proof input. */
 export function previewDiscoverySnapshot(input) {
   const serialized = JSON.stringify(input);
   if (!serialized || Buffer.byteLength(serialized) <= DISCOVERY_MODEL_SNAPSHOT_BYTES) return input;
   const original = JSON.parse(serialized), truncations = [];
-  const record = (path, reason) => { if (truncations.length < 20) truncations.push({ path, reason }); };
-  const preview = (value, path, depth, arrayLimit = 4) => {
+  const record = (path, reason) => { if (truncations.length < 12) truncations.push({ path, reason }); };
+  const preview = (value, path, depth, arrayLimit = 2) => {
     if (typeof value === "string") {
-      const limit = path === "snapshot.text" ? 4_000 : 400;
+      const limit = path === "snapshot.text" ? 1_200 : 200;
       if (value.length <= limit) return value;
       record(path, "STRING_PREFIX_ONLY"); return value.slice(0, limit);
     }
     if (value === null || typeof value !== "object") return value;
     if (depth > 5) { record(path, "DEPTH_OMITTED"); return null; }
     if (Array.isArray(value)) {
+      if (path.endsWith(".options")) arrayLimit = 8;
       if (value.length > arrayLimit) record(path, "ARRAY_PREFIX_ONLY");
       return value.slice(0, arrayLimit).map((item, index) => preview(item, `${path}.${index}`, depth + 1));
     }
@@ -214,41 +216,73 @@ export function previewDiscoverySnapshot(input) {
   // Short catalog labels identify omitted detailed controls without inventing
   // selectors/options. Exact returned targets remain usable; proof never does.
   const controls = Array.isArray(original.controls) ? original.controls.slice(0, 180) : [];
-  let labelLength = 64;
+  let labelLength = 32;
   const currentTargets = controls.filter(c => typeof c.target === "string" && /^[A-Za-z0-9_-]{1,80}$/u.test(c.target));
-  let controlTargets = Object.fromEntries(currentTargets.map(c => [c.target, String(c.name ?? c.label ?? "").slice(0, labelLength)]));
-  while (Buffer.byteLength(JSON.stringify(controlTargets)) > 12_000 && labelLength > 0) {
-    labelLength = Math.max(0, labelLength - 8);
-    controlTargets = Object.fromEntries(currentTargets.map(c => [c.target, String(c.name ?? c.label ?? "").slice(0, labelLength)]));
-  }
-  const orderedControls = [...controls].sort((a, b) => Number(Boolean(b.filterPurpose || ["select", "input"].includes(b.tag))) - Number(Boolean(a.filterPurpose || ["select", "input"].includes(a.tag))));
+  const controlTargets = Object.fromEntries(currentTargets.map(c => [c.target, String(c.name ?? c.label ?? "").slice(0, labelLength)]));
+  const isFilter = c => Boolean(c.filterPurpose || ["select", "input"].includes(c.tag ?? c.kind));
+  const orderedControls = [...controls].sort((a, b) => Number(isFilter(b)) - Number(isFilter(a)));
   record("controls", "DETAILS_SAMPLED_FULL_TARGET_CATALOG_LABELS_MAY_BE_PREFIXES");
   // Critical state must survive even if it follows large response/structure
   // fields in the packet. It is diagnostic state, never availability proof.
   const state = Object.fromEntries(["url", "loading", "pendingRequestCount", "browserTransport", "navigationStatus", "accessRequirementObserved", "unchanged"]
-    .filter(key => key === "url" ? typeof original[key] === "string" && Buffer.byteLength(original[key]) <= 2048 :
+    .filter(key => key === "url" ? typeof original[key] === "string" && Buffer.byteLength(JSON.stringify(original[key])) <= 2050 :
       key === "browserTransport" ? ["NATIVE_CHROME", "PINNED_HTTP"].includes(original[key]) :
         ["pendingRequestCount", "navigationStatus"].includes(key) ? Number.isSafeInteger(original[key]) && original[key] >= 0 && original[key] <= 1024 :
           typeof original[key] === "boolean").map(key => [key, original[key]]));
   if (original.nativeFirstFatal) state.nativeFirstFatal = preview(original.nativeFirstFatal, "nativeFirstFatal", 0);
+  if (Object.hasOwn(original, "error")) state.error = /^[A-Z_]{1,120}$/u.test(original.error ?? "") ? original.error : "DISCOVERY_TOOL_FAILED";
+  if (typeof original.browserSessionClosed === "boolean") state.browserSessionClosed = original.browserSessionClosed;
+  for (const key of ["hint", "continuation"]) if (typeof original[key] === "string" && Buffer.byteLength(JSON.stringify(original[key])) <= 1024) state[key] = original[key];
+  const marker = { kind: "BOUNDED_MODEL_ONLY_PREVIEW", isAvailabilityEvidence: false, originalUtf8Bytes: Buffer.byteLength(serialized),
+    note: "Samples/prefixes are not completeness or availability proof. Private data/replay are unchanged; use current targets or inspect observed selectors.", truncations };
+  // Only the full target catalog and critical closed state earn a floor.
+  // Arbitrary control prose/options must fit the remaining fixed allowance.
+  const minimalState = { ...state, ...(original.nativeFirstFatal ? { nativeFirstFatal: {
+    code: /^[A-Z_0-9]{1,80}$/u.test(original.nativeFirstFatal.code ?? "") ? original.nativeFirstFatal.code : "UNKNOWN" } } : {}) };
+  const minimal = { ...minimalState, controlTargets: Object.fromEntries(currentTargets.map(c => [c.target, ""])), controls: [],
+    modelPreview: { ...marker, requiredCatalogFloorBytes: 0, budgetUtf8Bytes: 0,
+      truncations: [{ path: "snapshot", reason: "OMITTED_FOR_MODEL_BYTE_BOUND" }] } };
+  // Two passes stabilize the decimal widths in the explicit budget marker.
+  for (let index = 0; index < 3; index++) {
+    minimal.modelPreview.requiredCatalogFloorBytes = Buffer.byteLength(JSON.stringify(minimal));
+    minimal.modelPreview.budgetUtf8Bytes = Math.min(DISCOVERY_MODEL_SNAPSHOT_HARD_BYTES,
+      Math.max(DISCOVERY_MODEL_SNAPSHOT_BYTES, minimal.modelPreview.requiredCatalogFloorBytes + 1536));
+  }
+  const byteLimit = minimal.modelPreview.budgetUtf8Bytes;
+  marker.requiredCatalogFloorBytes = minimal.modelPreview.requiredCatalogFloorBytes;
+  marker.budgetUtf8Bytes = byteLimit;
   const result = { ...preview(original, "snapshot", 0), ...state, controlTargets,
-    ...(original.adapter && Buffer.byteLength(JSON.stringify(original.adapter)) <= 8_000 ? { adapter: original.adapter } : {}),
-    controls: orderedControls.slice(0, 12).map((c, i) => preview(c, `controls.${i}`, 0, 8)),
-    modelPreview: { kind: "BOUNDED_MODEL_ONLY_PREVIEW", isAvailabilityEvidence: false, originalUtf8Bytes: Buffer.byteLength(serialized),
-      note: "Samples/prefixes/omission counts are not completeness or availability proof. Full controller data and replay are unchanged. Use current targets or inspect observed selectors for more structure.", truncations } };
+    ...(original.adapter && Buffer.byteLength(JSON.stringify(original.adapter)) <= 2_000 ? { adapter: original.adapter } : {}),
+    controls: orderedControls.slice(0, 6).map((c, i) => preview(c, `controls.${i}`, 0, 8)),
+    modelPreview: marker };
+  while (Buffer.byteLength(JSON.stringify(result)) > byteLimit && labelLength > 0) {
+    labelLength = Math.max(0, labelLength - 8);
+    result.controlTargets = Object.fromEntries(currentTargets.map(c => [c.target, String(c.name ?? c.label ?? "").slice(0, labelLength)]));
+  }
   // UTF-8, escaping and nested schema examples vary. Trim only model fields in
   // a fixed order; never mutate or truncate the controller's original snapshot.
-  for (const key of ["elements", "text", "capabilityDiagnostics", "requests", "frames", "structure", "controls", "responses"]) {
-    if (Buffer.byteLength(JSON.stringify(result)) <= DISCOVERY_MODEL_SNAPSHOT_BYTES) break;
+  for (const key of ["elements", "text", "requests", "frames", "responses", "capabilityDiagnostics", "structure", "adapter"]) {
+    if (Buffer.byteLength(JSON.stringify(result)) <= byteLimit) break;
     if (Object.hasOwn(result, key)) { delete result[key]; record(key, "OMITTED_FOR_MODEL_BYTE_BOUND"); }
   }
-  if (Buffer.byteLength(JSON.stringify(result)) > DISCOVERY_MODEL_SNAPSHOT_BYTES) {
-    // A fatal/large diagnostic packet needs no detailed action catalog. Retain
-    // every target and critical state while explicitly omitting all samples.
-    const minimalState = { ...state, ...(original.nativeFirstFatal ? { nativeFirstFatal: {
-      code: /^[A-Z_0-9]{1,80}$/u.test(original.nativeFirstFatal.code ?? "") ? original.nativeFirstFatal.code : "UNKNOWN" } } : {}) };
-    return { ...minimalState, controlTargets: Object.fromEntries(Object.keys(controlTargets).map(target => [target, ""])),
-      modelPreview: { ...result.modelPreview, truncations: [{ path: "snapshot", reason: "OMITTED_FOR_MODEL_BYTE_BOUND" }] } };
+  if (Buffer.byteLength(JSON.stringify(result)) > byteLimit) {
+    // Re-admit useful filters within the fixed remainder. Rich option catalogs
+    // never increase the floor; an essential control summary retains its exact
+    // target and bounded action context when its options do not fit.
+    for (const [index, control] of orderedControls.filter(isFilter).slice(0, 12).entries()) {
+      const detail = preview(control, `controls.${index}`, 0, 8);
+      const essential = Object.fromEntries(Object.entries(detail).filter(([key]) =>
+        ["target", "selector", "kind", "tag", "name", "label", "filterPurpose", "currentValue", "readOnly"].includes(key)));
+      for (const candidate of [detail, essential]) {
+        const proposed = { ...minimal, controls: [...minimal.controls, candidate] };
+        if (Buffer.byteLength(JSON.stringify(proposed)) <= byteLimit) { minimal.controls.push(candidate); break; }
+      }
+    }
+    // Tiny private adapter descriptors remain optional presentation, never
+    // catalog authority or a reason to exceed the hard bound.
+    if (original.adapter && Buffer.byteLength(JSON.stringify(original.adapter)) <= 2_000 &&
+        Buffer.byteLength(JSON.stringify({ ...minimal, adapter: original.adapter })) <= byteLimit) minimal.adapter = original.adapter;
+    return minimal;
   }
   return result;
 }

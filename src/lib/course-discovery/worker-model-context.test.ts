@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
 import { createDiscoveryAdapterObservation, createDiscoverySnapshotCompactor, createDiscoveryToolTrace, DISCOVERY_GENERIC_LIMITS, fillCurrentInspectedAdapter, inspectedAdapterSourceEvidence, safeFixedInspectionSourceDiagnostic } from "../../../scripts/automation/course-discovery-worker.mjs";
-import { previewDiscoverySnapshot, selectDiscoveryRecipeSchema } from "../../../scripts/automation/course-discovery-prompt-schema.mjs";
+import { DISCOVERY_MODEL_SNAPSHOT_BYTES, DISCOVERY_MODEL_SNAPSHOT_HARD_BYTES, previewDiscoverySnapshot, selectDiscoveryRecipeSchema } from "../../../scripts/automation/course-discovery-prompt-schema.mjs";
 import { AMELIA_CLIENT_HASHES, ameliaMetadataSchema } from "./amelia-source";
 import { executeAccessRecipe, type AccessExecutorDependencies } from "./executor";
 import { parseAccessRecipe } from "./recipe";
@@ -49,7 +49,7 @@ describe("model-only discovery context bounds", () => {
   });
   it("bounds a full public response packet while preserving every opaque target, useful player options and original private data", () => {
     const original = bigSnapshot(), before = JSON.stringify(original), compact = createDiscoverySnapshotCompactor()(original);
-    expect(bytes(original)).toBeGreaterThan(280_000); expect(bytes(compact)).toBeLessThanOrEqual(24_000);
+    expect(bytes(original)).toBeGreaterThan(280_000); expect(bytes(compact)).toBeLessThan(10_000);
     expect(compact.modelPreview).toMatchObject({ kind: "BOUNDED_MODEL_ONLY_PREVIEW", isAvailabilityEvidence: false, originalUtf8Bytes: bytes(original) });
     expect(compact.modelPreview.truncations.length).toBeGreaterThan(0);
     expect(Object.keys(compact.controlTargets)).toEqual(original.controls.map(control => control.target));
@@ -106,9 +106,8 @@ describe("model-only discovery context bounds", () => {
     const original = { ...bigSnapshot(), adapter }, before = JSON.stringify(original), view = previewDiscoverySnapshot(original);
     expect(bytes(view)).toBeLessThanOrEqual(24_000); expect(view.adapter).not.toEqual(adapter);
     expect(view.modelPreview.isAvailabilityEvidence).toBe(false);
-    // A prefix can still satisfy the structural schema. Exact fresh observation
-    // equality below must reject it instead of treating that as source proof.
-    expect(ameliaMetadataSchema.safeParse(view.adapter).success).toBe(true);
+    // Catalogs may now be omitted entirely to keep action context small. Neither
+    // an omitted catalog nor a structurally valid prefix earns source proof.
     const job = { id: "large-catalog", request: { identity: { officialUrl: original.url }, target: { courseId: "fixture", kind: "SIMULATOR" }, input: {} } };
     const observation = createDiscoveryAdapterObservation(job, original.url, adapter, original.url);
     const recipe = { engine: "EXISTING_ADAPTER", source: { bookingUrl: original.url }, adapter };
@@ -156,7 +155,62 @@ describe("model-only discovery context bounds", () => {
   });
 
   it("does not change the existing operation, token or output guards", () => {
+    expect(DISCOVERY_MODEL_SNAPSHOT_BYTES).toBe(8_000);
     expect(DISCOVERY_GENERIC_LIMITS).toEqual({ toolOperations: 8, totalTokens: 128_000, uncachedInputTokens: 32_000, outputTokens: 8_192 });
+  });
+
+  it.each([7, 8])("cuts a %i-reply discovery sequence below half its former context without changing current controls or private evidence", count => {
+    const source = Array.from({ length: count }, (_, index) => ({ url: "https://context-fixture.example/public-times",
+      navigationStatus: 200, browserTransport: "NATIVE_CHROME", loading: false, pendingRequestCount: 0, accessRequirementObserved: false,
+      text: ("Published public date/player controls and availability rows. ").repeat(285),
+      controls: [{ ...controls(1)[0], kind: "input", tag: "input", name: "Date", readOnly: true, currentValue: "2030-01-02" }, controls()[179]],
+      responses: [{ status: 200, method: "GET", body: { date: "2030-01-02", players: 2, complete: true,
+        slots: [{ start: "10:00", spots: 4, publicRow: index }] } }] }));
+    const before = JSON.stringify(source), views = source.map(previewDiscoverySnapshot);
+    expect(source.every(s => bytes(s) > 16_000 && bytes(s) <= 24_000)).toBe(true); // Previously returned unchanged.
+    expect(views.every(s => bytes(s) <= 8_000)).toBe(true);
+    expect(views.reduce((sum, s) => sum + bytes(s), 0)).toBeLessThan(source.reduce((sum, s) => sum + bytes(s), 0) / 2);
+    for (const [index, view] of views.entries()) {
+      expect(Object.keys(view.controlTargets)).toEqual(source[index].controls.map(c => c.target));
+      expect(view.controls).toContainEqual(source[index].controls[0]); expect(view.controls).toContainEqual(source[index].controls[1]);
+      expect(view).toMatchObject({ loading: false, pendingRequestCount: 0, navigationStatus: 200, accessRequirementObserved: false,
+        modelPreview: { isAvailabilityEvidence: false } });
+    }
+    expect(JSON.stringify(source)).toBe(before); expect(source[0].responses[0].body.slots).toHaveLength(1);
+  });
+
+  it("bounds model-only error feedback while retaining the failure code and full private diagnostic", () => {
+    const original = { error: "UNOBSERVED_NAVIGATION", details: { action: "inspect_adapter", failure: { code: "UNOBSERVED_NAVIGATION" },
+      loading: false, pendingRequestCount: 0, officialSourceDiagnostic: { sourceContextValid: true, currentOfficialDocument: false },
+      nativeRejectedRequests: Array.from({ length: 20 }, () => ({ code: "NATIVE_REDIRECT_RESOURCE_KIND_REJECTED", operation: "REQUEST_METADATA", method: "GET", resourceType: "Image", publicExplanation: "Public resource diagnostic ".repeat(25) })) } };
+    const before = JSON.stringify(original), view = previewDiscoverySnapshot(original);
+    expect(bytes(original)).toBeGreaterThan(8_000); expect(bytes(view)).toBeLessThanOrEqual(8_000);
+    expect(view).toMatchObject({ error: original.error, details: { failure: { code: original.error }, officialSourceDiagnostic: { currentOfficialDocument: false } },
+      modelPreview: { isAvailabilityEvidence: false } });
+    expect(JSON.stringify(original)).toBe(before); expect(original.details.nativeRejectedRequests).toHaveLength(20);
+  });
+
+  it.each(["😀", "\\\"\n"])("never lets 180 long target IDs and twelve option-rich filters raise the hard ceiling (%j)", text => {
+    const richControls = controls().map((control, index) => ({ ...control,
+      target: `${"a".repeat(70)}${String(index).padStart(10, "0")}`,
+      ...(index < 12 ? { kind: "select", tag: "select", name: text.repeat(200), label: text.repeat(200),
+        options: Array.from({ length: 8 }, (_, option) => ({ value: String(option) + text.repeat(199), label: text.repeat(200) })),
+        ...Object.fromEntries(Array.from({ length: 24 }, (_, key) => [`extra${key}`, text.repeat(2000)])) } : {}) }));
+    const original = { ...bigSnapshot(), controls: richControls, error: "DISCOVERY_REPLAY_INCOMPLETE", browserSessionClosed: true,
+      hint: "Independent replay closed the discovery browser. Open an already observed public URL to obtain fresh controls before correcting the recipe; the original deadline is unchanged.",
+      continuation: "Preserve canonical identity and inspect fresh observed public evidence. Missing proof stays incomplete." };
+    const before = JSON.stringify(original), view = previewDiscoverySnapshot(original);
+    expect(bytes(view)).toBeLessThanOrEqual(24_000); expect(DISCOVERY_MODEL_SNAPSHOT_HARD_BYTES).toBe(24_000);
+    expect(view.modelPreview.budgetUtf8Bytes).toBeLessThanOrEqual(24_000);
+    expect(bytes(view)).toBeLessThanOrEqual(view.modelPreview.budgetUtf8Bytes);
+    expect(view.modelPreview.requiredCatalogFloorBytes).toBeGreaterThan(8_000);
+    expect(view.modelPreview.requiredCatalogFloorBytes).toBeLessThan(18_000);
+    expect(Object.keys(view.controlTargets)).toEqual(original.controls.map(control => control.target));
+    expect(view).toMatchObject({ error: original.error, browserSessionClosed: true, hint: original.hint, continuation: original.continuation,
+      loading: false, pendingRequestCount: 0, navigationStatus: 200, modelPreview: { isAvailabilityEvidence: false } });
+    const plain = previewDiscoverySnapshot({ ...original, controls: richControls.map(control => ({ target: control.target, kind: "select", name: "Public filter" })) });
+    expect(Math.abs(view.modelPreview.requiredCatalogFloorBytes - plain.modelPreview.requiredCatalogFloorBytes)).toBeLessThan(16);
+    expect(JSON.stringify(original)).toBe(before); expect(original.controls[0].options).toHaveLength(8);
   });
 
   it("fails documentation selection closed for reference scopes or nondiscriminated schema branches", () => {

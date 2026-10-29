@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { authorizePublicClientReadHeaders, installNativeRedirectRouting, isCurrentPublicClientReadHeaders,
   publicClientReadHeaderProofFailure, nativeSourceLoadingFailedCorsErrors, nativePublicClientPreflightMethod, isNativeReadSupersededFailure, isNativeReadTerminalFailure, nativeMindbodyBootstrapSource, nativeGestureNavigationSource, attestedNativeDocumentRedirects, projectNativeOfficialRenderGate, type NativeGestureIntent, type NativeReadRoute, type NativeRequestDiagnostic, type NativeUncorrelatedPost } from "./native-redirect-routing";
 import { createPublicBookingParentScope } from "./public-booking-parent";
+import { publicFrameSource } from "./public-frame-source";
 import { continueNativeBrowserRead, isObservedNativeRedirect, isObservedNativeRedirectTarget, nativeReadPreflightMethod } from "./native-public-browser";
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
 import { type PublicBrowserResponseProfile } from "./browser-resource-limits";
@@ -3225,10 +3226,26 @@ describe("native exact request and response ownership", () => {
       scope.observeDocument({ url: root, status });
       scope.observeDocument({ url: target, status: 200, redirectedFrom: root, nativeRequest: child });
       expect(scope.authorizeParent(target)).toEqual({ kind: "VERIFIED_OFFICIAL_DOCUMENT", officialUrl: root, documentUrl: target });
+      const proof = scope.authorizeParent(target)!;
+      const frameUrl = "https://public-course.book.teeitup.com/?course=11,22";
+      const frame = { src: ` \n${frameUrl}`, label: "", visible: true, srcdoc: false };
+      expect(publicFrameSource(frame, target, root, target, proof)).toBe(frameUrl);
+      expect(publicFrameSource(frame, target, root, target, { ...proof })).toBeUndefined();
+      expect(publicFrameSource(frame, target, root, target, JSON.parse(JSON.stringify(proof)))).toBeUndefined();
+      expect(publicFrameSource(frame, target, root, target)).toBeUndefined();
+      expect(publicFrameSource({ ...frame, visible: false }, target, root, target, proof)).toBeUndefined();
+      expect(publicFrameSource({ ...frame, srcdoc: true }, target, root, target, proof)).toBeUndefined();
+      expect(publicFrameSource(frame, target, root, root, proof)).toBeUndefined();
       // Replaying a public URL or copied adapter cannot reuse that authority.
       scope.beginDocument(target); scope.observeDocument({ url: target, status: 200, redirectedFrom: root, nativeRequest: { ...child } });
+      expect(publicFrameSource(frame, target, root, target, proof)).toBeUndefined();
       expect(scope.authorizeParent(target)).toBeUndefined();
+      const liveScope = createPublicBookingParentScope({ officialUrl: root });
+      liveScope.observeDocument({ url: target, status: 200, nativeRequest: child });
+      const liveProof = liveScope.authorizeParent(target)!;
+      expect(publicFrameSource(frame, target, root, target, liveProof)).toBe(frameUrl);
       await test.guard.close();
+      expect(publicFrameSource(frame, target, root, target, liveProof)).toBeUndefined();
       expect(isObservedNativeRedirect(child, roots)).toBe(false);
       expect(attestedNativeDocumentRedirects(child, roots)).toBeUndefined();
       expect(isObservedNativeRedirectTarget(original, target, roots)).toBe(false);
