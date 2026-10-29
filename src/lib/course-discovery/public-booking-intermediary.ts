@@ -16,7 +16,7 @@ export type NativeIntermediaryPreparationDiagnostic = {
   samePage: boolean | null; sameNativeDocument: boolean | null; sameDocumentHash: boolean | null;
   sameReadinessState: boolean | null; sameRoutingInventory: boolean | null;
 };
-const caption = /^(?:tee[ -]?times?|book (?:a )?tee[ -]?time|book online|check availability|availability)$/iu;
+const caption = /^(?:tee[ -]?times?|book (?:a )?tee[ -]?times?|book online|check availability|availability)$/iu;
 const denied = /\b(?:account|member|login|log[ -]?in|sign[ -]?in|register|checkout|payment|purchase|reserve|hold|confirm|cancel|password|private)\b/iu;
 /** Literal same-origin document navigation only. Hidden menu markup is not a
  * visible-control claim, provider source, identity or availability proof. */
@@ -30,7 +30,7 @@ export function uniquePublicBookingIntermediary(value: PublicBookingLinks, pageU
       const url = new URL(row.href, page);
       if (!isSafeRecipeUrl(url.href) || url.origin !== page.origin || url.href === page.href || url.search || url.hash ||
           denied.test(decodeURIComponent(url.pathname).replace(/[\/_-]+/gu, " ")) ||
-          !/(?:^|\/)(?:tee-times?|teetimes?|booking|book-online|availability)\/?$/iu.test(url.pathname)) continue;
+          !/(?:^|\/)(?:(?:book-)?tee-times?|teetimes?|booking|book-online|availability)\/?$/iu.test(url.pathname)) continue;
       // A fragment menu icon can contain a long SVG/style label. Only an
       // eligible gateway's caption can make that gateway unverified.
       if (row.text.length > 160 || row.label.length > 160) return null;

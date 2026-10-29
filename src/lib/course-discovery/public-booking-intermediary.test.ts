@@ -6,6 +6,19 @@ import { collectPublicBookingLinks, rawPublicBookingLinks, uniquePublicBookingIn
 const root = "https://public-course.example/", href = root + "tee-times";
 const html = '<div hidden role="dialog"><a href="/tee-times">Tee Times</a></div><a style="display:none" href="/tee-times">Book Online</a><a href="/tee-times">Book A Tee Time</a><a href="/other">Book Yours</a>';
 const proof = { kind: "VERIFIED_OFFICIAL_DOCUMENT" as const, officialUrl: root, documentUrl: root };
+it("recognizes one literal first-party book-tee-times document across repeated public links", () => {
+  const url = root + "book-tee-times/";
+  const source = '<a href="/book-tee-times/">Tee Times</a><a href="/book-tee-times/">Book Tee Times</a>';
+  expect(uniquePublicBookingIntermediary(rawPublicBookingLinks(source), root)).toBe(url);
+  for (const forbidden of [
+    '<a href="/book-tee-times/?time=0900">Tee Times</a>',
+    '<a href="/members/book-tee-times/">Tee Times</a>',
+    '<a href="/checkout/book-tee-times/">Tee Times</a>',
+    '<a href="https://foreign.example/book-tee-times/">Tee Times</a>',
+    '<a href="/book-tee-times/">Book 9:00 AM</a>',
+    '<a href="/book-tee-times/">Tee Times</a><a href="/booking">Book Online</a>',
+  ]) expect(uniquePublicBookingIntermediary(rawPublicBookingLinks(forbidden), root)).toBeNull();
+});
 function fixture(source = html) {
   const dom = new JSDOM(source, { url: root, runScripts: "outside-only" });let url = root, reads = 0;
   const page = { url: () => url, evaluate: async (fn: () => unknown) => { reads++;return dom.window.eval(`(${fn.toString()})()`); } } as unknown as Page;
