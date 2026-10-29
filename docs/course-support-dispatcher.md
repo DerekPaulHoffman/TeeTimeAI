@@ -1,5 +1,18 @@
 # Ten-minute course dispatcher
 
+Active assigned batches are unique by their existing course digest. Legacy
+grouped batches retain provider/failure uniqueness, and planner plus locked-claim
+guards preserve their full group ownership. Invalid assignment proof uses the
+legacy fence. The ownership-guard code must be live before migration
+`20261029214000_align_assigned_course_batch_uniqueness` is applied. It creates
+both replacement indexes before removing the old index in one bounded writer-
+serialized transaction; no batch, incident or request rows are edited. Reverting
+to the old group index requires draining conflicting assigned batches first.
+Before applying it, let the normal planner refresh to the guard release and
+verify zero older-base RESERVED/STARTING/BOUND assignments. Preserve consumed
+ownership. Apply only the reviewed pending migration and verify both resulting
+indexes and the migration receipt; do not manually revoke or renew assignments.
+
 New outdoor assignments carry a material incident fingerprint as well as the
 original observation timestamp. Normal observations may refresh timestamps,
 counts and scheduling without revoking unchanged authority. The fingerprint

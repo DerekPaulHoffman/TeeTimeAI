@@ -173,6 +173,7 @@ import {
   computeCourseSupportNextAttemptAt,
   countCourseSupportOperationalNoProgressAttempts,
   courseSupportRecoveryBatchesConflict,
+  courseSupportAssignedCandidateConflicts,
   deriveCourseSupportCurrentDemand,
   findConflictingResponderPaths,
   getCourseSupportBatchPacket,
@@ -2180,6 +2181,21 @@ describe("course-support closeout playbook decision basis", () => {
 });
 
 describe("course-support claim writer admission", () => {
+  it("keeps legacy group ownership and same-course ownership exclusive", () => {
+    const candidate = { courseId: "assigned-course", providerFamilyKey: "SAME", failureFingerprint: "failure" };
+    const legacy = { providerFamilyKey: "SAME", failureFingerprint: "other", summary: null };
+    expect(courseSupportAssignedCandidateConflicts(candidate, legacy)).toBe(true);
+    expect(courseSupportAssignedCandidateConflicts(candidate, { ...legacy, providerFamilyKey: "OTHER", failureFingerprint: "failure" })).toBe(true);
+    expect(courseSupportAssignedCandidateConflicts(candidate, { ...legacy, providerFamilyKey: "OTHER" })).toBe(false);
+    const assigned = (courseId: string) => ({ ...legacy, summary: { dispatchAssignmentRef: "course-assignment-11111111-1111-4111-8111-111111111111", dispatchCourseDigest: createHash("sha256").update(courseId).digest("hex") } });
+    expect(courseSupportAssignedCandidateConflicts(candidate, assigned("another-course"))).toBe(false);
+    expect(courseSupportAssignedCandidateConflicts(candidate, assigned(candidate.courseId))).toBe(true);
+    const uppercase = assigned(candidate.courseId);
+    uppercase.summary.dispatchCourseDigest = uppercase.summary.dispatchCourseDigest.toUpperCase();
+    expect(courseSupportAssignedCandidateConflicts(candidate, uppercase)).toBe(true);
+    expect(courseSupportAssignedCandidateConflicts(candidate, { ...assigned("another-course"), summary: { dispatchAssignmentRef: "invalid", dispatchCourseDigest: "a".repeat(64) } })).toBe(true);
+  });
+
   it("waits through a definite writer-lock refusal before revalidating the claim", async () => {
     leaseMocks.withPostgresAdvisoryTextLease.mockResolvedValueOnce({ acquired: false });
     const result = await claimCourseSupportBatch({ ownerThreadId: "claim-writer-owner", branch: "automation/course-support-writer-test", baseSha: "a".repeat(40) });

@@ -30,6 +30,7 @@ import {
 } from "./course-support-dispatch-intent";
 import {
   listCourseSupportDispatchCandidates,
+  courseSupportAssignedCandidateConflicts,
   MAX_CONCURRENT_COURSE_SUPPORT_BATCHES,
   runWithCourseSupportWriterTransitionLease,
   withCourseSupportWriteConflictRetry,
@@ -426,7 +427,7 @@ export async function planCourseSupportCourseDispatch(input: {
     const sameTick = runs.filter((run) => run.parsed?.tickRef === tick);
     const activeBatches = await tx.courseSupportBatch.findMany({
       where: { status: { in: ["CLAIMED", "IMPLEMENTING", "VERIFYING"] } },
-      select: { id: true, leaseExpiresAt: true, summary: true, incidents: { select: { courseId: true } } },
+      select: { id: true, leaseExpiresAt: true, providerFamilyKey: true, failureFingerprint: true, summary: true, incidents: { select: { courseId: true } } },
     });
     const live = runs.filter((run) => run.status === "RUNNING" &&
       (["RESERVED", "STARTING", "BOUND"].includes(run.parsed?.state ?? "") ||
@@ -448,7 +449,8 @@ export async function planCourseSupportCourseDispatch(input: {
     // launch budget. The legacy background fallback must not interpret a zero
     // launch list as evidence that no active-alert course is waiting.
     if (availableStarts > 0 || live.length === 0) {
-      const outdoorCandidates = await listCourseSupportDispatchCandidates(now, tx);
+      const outdoorCandidates = (await listCourseSupportDispatchCandidates(now, tx))
+        .filter(candidate => !activeBatches.some(batch => courseSupportAssignedCandidateConflicts(candidate, batch)));
       const dueSimulatorCandidates = await listSimulatorSupportDispatchCandidates(now, tx);
       const awakened = await reconcileSimulatorCapabilityWakeups(now, tx);
       const simulatorCandidates = (awakened ? await listSimulatorSupportDispatchCandidates(now, tx) : dueSimulatorCandidates)

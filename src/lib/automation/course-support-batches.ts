@@ -4287,10 +4287,12 @@ export async function claimCourseSupportBatch(input: {
       ...activeBatches.flatMap(ownedCourseIds),
       ...reservedCourses,
     ]);
+    const assignedOwnershipConflict = assignment && activeBatches.some(batch =>
+      courseSupportAssignedCandidateConflicts(assignment.target, batch));
     if ((assignment || activeBatches.length < MAX_CONCURRENT_COURSE_SUPPORT_BATCHES) &&
         (activeBatches.length + liveReservations.length - (assignment ? 1 : 0) >=
           MAX_CONCURRENT_COURSE_SUPPORT_BATCHES ||
-          occupiedCourses.size >= MAX_CONCURRENT_COURSE_SUPPORT_BATCHES)) {
+          occupiedCourses.size >= MAX_CONCURRENT_COURSE_SUPPORT_BATCHES || assignedOwnershipConflict)) {
       const recorded = await recordRoutineResponderObservation({
         outcome: "deferred_busy",
         now: selectionDatabaseNow,
@@ -5541,7 +5543,8 @@ export async function claimCourseSupportBatch(input: {
           currentActiveBatches.length + lockedReservations.length - (assignment ? 1 : 0) >=
             MAX_CONCURRENT_COURSE_SUPPORT_BATCHES ||
           lockedOccupiedCourses.size >= MAX_CONCURRENT_COURSE_SUPPORT_BATCHES ||
-          currentConflictingPaths.length > 0
+          currentConflictingPaths.length > 0 ||
+          (assignment && currentActiveBatches.some(batch => courseSupportAssignedCandidateConflicts(assignment.target, batch)))
         ) {
           throw new Error(
             "Course-support active ownership changed during locked claim; rerun selection.",
@@ -20282,7 +20285,17 @@ function readAssignedCourseDigest(summary: Prisma.JsonValue | null) {
     /^course-assignment-[0-9a-f-]{36}$/i.test(value.dispatchAssignmentRef) &&
     typeof value.dispatchCourseDigest === "string" &&
     /^[0-9a-f]{64}$/i.test(value.dispatchCourseDigest)
-    ? value.dispatchCourseDigest : null;
+    ? value.dispatchCourseDigest.toLowerCase() : null;
+}
+
+export function courseSupportAssignedCandidateConflicts(
+  candidate: { courseId: string; providerFamilyKey: string; failureFingerprint: string },
+  active: { providerFamilyKey: string; failureFingerprint: string; summary: Prisma.JsonValue | null },
+) {
+  const digest = readAssignedCourseDigest(active.summary);
+  if (digest) return digest === createHash("sha256").update(candidate.courseId).digest("hex");
+  // Legacy grouped ownership cannot be split or bypassed by a new course chat.
+  return candidate.providerFamilyKey === active.providerFamilyKey || candidate.failureFingerprint === active.failureFingerprint;
 }
 
 export function findConflictingResponderPaths(
