@@ -256,6 +256,13 @@ failure, and it never changes a job's original clocks or authority.
 
 ## Acceptance receipt
 
+Before opening a new cohort, verify the production deployment and managed worker
+against the frozen source version, then verify the exact pilot owner, target keys
+and run identifier. Pilot selector changes require a fresh Git deployment so the
+application reads the new environment snapshot. Arm the read-only observer before
+the first normal alert submission; neither an earlier deployment nor a running
+worker proves that the next cohort can enter discovery.
+
 Passing tests or deploying this code does not prove acceptance. Record the
 random selection process and every exclusion; independently confirm public
 inventory without supplying worker routes or configuration. Create three
