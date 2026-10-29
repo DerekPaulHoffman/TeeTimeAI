@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { parse, type DefaultTreeAdapterMap } from "parse5";
 import { z } from "zod";
-import { FOREUP_STANDARD_PUBLIC_SCOPE, foreupPublicScheduleCatalogSha256, hasCompleteForeupPublicScheduleScope, type ForeupPublicConfiguration } from "@/lib/automation/foreup-public-configuration";
+import { FOREUP_STANDARD_PUBLIC_SCOPE, foreupPublicScheduleCatalogSha256, hasCompleteForeupPublicScheduleScope, isStandardForeupPublicClassName, type ForeupPublicConfiguration } from "@/lib/automation/foreup-public-configuration";
 import { fullCourseName, type OfficialIdentityPage, type OfficialIdentitySource } from "./teeitup-official-identity";
 import { parsePublicUSBusinessAddress } from "./public-us-business-address";
 import { normalizePublicCoursePhone } from "./teeitup-postal-conflict-proof";
@@ -250,7 +250,7 @@ export function bindForeupOfficialRouteConfiguration(contact: Contact, html: str
     const candidates = schedules.filter(row => record(row) && providerId(row.course_id) === facilityId && Array.isArray(row.booking_classes) &&
       row.booking_classes.filter(value => record(value) && providerId(value.teesheet_id) === providerId(row.teesheet_id) &&
         String(value.active) === "1" && String(value.hidden) === "0" && typeof value.name === "string" &&
-        /^(?:public|public play|public tee times|online tee times)$/iu.test(value.name.trim())).length === 1);
+        isStandardForeupPublicClassName(value.name)).length === 1);
     if (candidates.length !== 1 || !record(candidates[0])) return failure();
     selectedRoute = { facilityId, scheduleId: providerId(candidates[0].teesheet_id)! };
   }
@@ -269,7 +269,7 @@ export function bindForeupOfficialRouteConfiguration(contact: Contact, html: str
   if (!Array.isArray(classes) || classes.length < 1 || classes.length > 20 || classes.some(c => !record(c) || !providerId(c.booking_class_id)) ||
       new Set(classes.map(c => providerId(c.booking_class_id))).size !== classes.length) return failure();
   const publicClasses = classes.filter(c => providerId(c.teesheet_id) === selectedRoute.scheduleId && String(c.active) === "1" && String(c.hidden) === "0" &&
-    typeof c.name === "string" && /^(?:public|public play|public tee times|online tee times)$/iu.test(c.name.trim()));
+    isStandardForeupPublicClassName(c.name));
   if (publicClasses.length !== 1) return failure();
   if (!hasCompleteForeupPublicScheduleScope({ html, ...selectedRoute, inventoryScope, isProvenForeignSchedule: row => {
     if (providerId(row.course_id) === selectedRoute.facilityId) return false;

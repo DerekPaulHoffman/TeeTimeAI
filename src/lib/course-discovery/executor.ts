@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { isSafePublicSwiftCatalogRedirect } from "./public-bootstrap-read-url";
+import { isSwiftAnonymousPlaceholderRead } from "./swift-public-read-policy";
 import type { Browser, Locator } from "@playwright/test";
 import { createAddressPinnedPublicFetchTransport } from "@/lib/automation/address-pinned-public-fetch";
 import { createPassfactoryPublicReadPolicy, isIncidentalBrowserRequest, isNonEvidenceBrowserResource } from "@/lib/automation/passfactory-public-read-policy";
@@ -701,7 +703,9 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
         if (!cpsScope.authorize(transportUrl, request.redirectedFrom()?.url())) throw new Error("UNOBSERVED_CPS_SESSION");
         if (cpsSessionKey(transportUrl) && !nativeProxy) throw new Error("CPS_NATIVE_BROWSER_REQUIRED");
         const parent = request.redirectedFrom();
-        if (parent && isSafeBrowserBootstrapReadUrl(parent.url(), parent.resourceType(), parent.method())) throw new Error("UNSCOPED_REQUEST");
+        if (parent && isSafeBrowserBootstrapReadUrl(parent.url(), parent.resourceType(), parent.method()) &&
+            !(nativeProxy && parent.method() === request.method() && isSafePublicSwiftCatalogRedirect(parent.url(), requestUrl,
+              (await parent.response())?.status() ?? 0, request.resourceType(), request.method(), isSafeRecipeUrl))) throw new Error("UNSCOPED_REQUEST");
         passfactory.observeWidgetUrl(requestUrl);
         const frameUrl = canonicalCpsPublicUrl(request.frame().url());
         if (recipeAllowsRequest(recipe, frameUrl, "GET")) passfactory.observeWidgetUrl(frameUrl);
@@ -726,8 +730,9 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
           if (isRexNamespace(new URL(requestUrl)) && request.method() === "POST" &&
               !isRexPublicBrowserReadPost(new URL(requestUrl), request.method(), requestHeaders, request.postData() ?? "", frameUrl)) throw new Error("UNSCOPED_REQUEST");
           const rexPlaceholder = isRexAnonymousPlaceholderRead(new URL(requestUrl), request.method(), requestHeaders, request.postData() ?? "", frameUrl);
+          const swiftPlaceholder = isSwiftAnonymousPlaceholderRead(requestUrl, request.method(), requestHeaders, frameUrl);
           if (!recipeAllowsRequest(recipe, requestUrl, preflight ?? request.method(), preflight ? "fetch" : request.resourceType()) ||
-            !rexPlaceholder && !publicHeaderProof && Object.keys(requestHeaders).some(key => /^(?:authorization|proxy-authorization|x-api-key)$/iu.test(key)) ||
+            !rexPlaceholder && !swiftPlaceholder && !publicHeaderProof && Object.keys(requestHeaders).some(key => /^(?:authorization|proxy-authorization|x-api-key)$/iu.test(key)) ||
             request.method() === "POST" && !(allowsPost(new URL(requestUrl), headers, request.postData() ?? "") ||
               mindbodySource ||
               publicHeaderProof && isMemberSportsPublicTeeSheetPost(new URL(requestUrl), headers, request.postData() ?? "", frameUrl))) {
@@ -750,7 +755,9 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
           });
           bytes += native.body.length;
           if (bytes > PUBLIC_BROWSER_TOTAL_BYTES) { cancellation.abort("RESPONSE_LIMIT"); throw new Error("RESPONSE_LIMIT"); }
-          if (native.headers.location && isSafeBrowserBootstrapReadUrl(requestUrl, request.resourceType(), request.method())) throw new Error("UNSCOPED_REQUEST");
+          if (native.headers.location && isSafeBrowserBootstrapReadUrl(requestUrl, request.resourceType(), request.method()) &&
+              !isSafePublicSwiftCatalogRedirect(requestUrl, new URL(native.headers.location, transportUrl).href,
+                native.status, request.resourceType(), request.method(), isSafeRecipeUrl)) throw new Error("UNSCOPED_REQUEST");
           if (native.status >= 400) {
             blocked = true;
             const diagnostic = recipeExecutionDiagnostic(`HTTP_${native.status}`, { url: requestUrl, method: request.method(), resourceType: request.resourceType() });

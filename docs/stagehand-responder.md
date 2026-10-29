@@ -62,13 +62,28 @@ Incomplete reads never become an empty availability result.
 Generic fallback stops immediately when the trusted browser reports a finite
 native transport fatality. It does not send that dead browser back to the model
 or automatically spend a second attempt on it. Each generic attempt also allows
-at most eight tool operations, 128,000 total recorded tokens, 32,000 uncached
+at most sixteen tool operations, 128,000 total recorded tokens, 32,000 uncached
 input tokens and 8,192 output tokens. Usage updates replace cumulative totals;
 cached input and reasoning output are subsets, not additional charges. A
 threshold is enforced when usage is reported, so an in-flight response can
 overshoot it. Budget exhaustion is terminal for that job; original failed jobs
 and deadlines are preserved. This bounds investigation rather than claiming a
 provider access restriction or empty inventory.
+
+The operation limit covers public category, product, overview and calendar
+transitions as well as recipe documentation and proposal. The token ceilings,
+original job deadline, request limits and independent replay stay unchanged.
+ForeUP's explicit seasonal Public Play labels use the same Standard Public
+inventory scope; Member and Preferred Player labels remain excluded.
+
+The isolated browser can load the observed public Swift catalogue and undated
+single-bay overview through to its availability calendar. Exact Next/facility
+metadata reads and the catalogue's same-query trailing-slash 308 remain
+ancillary, never source or inventory proof. Its signed-out price/calendar GETs
+may retain the literal null bearer plus zero-valued Clerk timestamp markers;
+real bearer/session cookies remain excluded. This is transport evidence only:
+complete product coverage, date-bound independent replay and alert delivery
+are still required before a Swift method can activate.
 
 A failed execution retains a previously verified immutable method when its
 current source, identity and hash still agree. It opens one repair job based on

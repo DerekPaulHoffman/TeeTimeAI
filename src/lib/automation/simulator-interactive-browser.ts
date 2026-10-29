@@ -36,6 +36,9 @@ const timeSlot = /\b\d{1,2}:\d{2}\s*(?:am|pm)?\b/iu;
 export function interactiveControlKind(input: { tag: string; role: string; name: string; label: string; href?: string; calendar?: boolean; verifiedCalendarDay?: boolean; sensitiveForm?: boolean; inputType?: string; hasPopup?: string }) {
   const name = `${input.name} ${input.label}`.trim();
   if (input.sensitiveForm || forbidden.test(name) || timeSlot.test(input.name)) return null;
+  if (input.tag === "button" && input.name.length <= 160 &&
+      (/^rentals$/iu.test(input.name.trim()) && !input.label.trim() ||
+       /^rentals$/iu.test(input.label.trim()) && /^rentals(?:\s|$)/iu.test(input.name.trim()))) return "filter" as const;
   if (input.tag === "a" && input.href && getSafeCustomerBookingUrl(input.href)) return "link" as const;
   if ((input.tag === "select" || input.role === "combobox" ||
       (input.tag === "button" || input.role === "button") && input.hasPopup === "listbox") && filterName.test(name)) return "filter" as const;

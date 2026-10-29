@@ -1,4 +1,6 @@
 import { collectNativeOfficialPublicMetadata } from "./public-document-metadata";
+import { isSafePublicSwiftCatalogRedirect } from "./public-bootstrap-read-url";
+import { isSwiftAnonymousPlaceholderRead } from "./swift-public-read-policy";
 import { observedPublicBookingIntermediary } from "./public-booking-intermediary";
 import { classifyPublicEntryDisclosure, revalidatePublicEntryDisclosure, type PublicEntryDisclosure, type PublicEntryDisclosureEvidence } from "./public-entry-disclosure";
 import { createHash, randomUUID } from "node:crypto";
@@ -525,7 +527,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       targetUrl: proof.targetUrl, finalUrl: currentUrl, redirects, documentBindingSha256: witness.proof.documentBindingSha256,
       observedAt: witness.proof.observedAt };
   };
-  let navigationStartedAt: number | undefined;
+  let navigationStartedAt: number | undefined, contentWaitStartedAt: number | undefined;
   let ezDocument: EzLinksDocumentWitness | undefined, ezControllerRead: EzLinksControllerRead | undefined;
   let ezConfigurationRead: { document: EzLinksDocumentWitness; token: EzLinksDocumentToken; version: number } | undefined;
   let ezReadContractRead: { document: EzLinksDocumentWitness; token: EzLinksDocumentToken; version: number } | undefined;
@@ -646,7 +648,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
       if (bootstrapRead) metadata.readPurpose = "PUBLIC_BOOTSTRAP";
       else if (availabilityRead) metadata.readPurpose = "PUBLIC_AVAILABILITY";
       const parent = request.redirectedFrom();
-      if (parent && isSafeBrowserBootstrapReadUrl(parent.url(), parent.resourceType(), parent.method())) throw new Error("UNSAFE_REDIRECT");
+      if (parent && isSafeBrowserBootstrapReadUrl(parent.url(), parent.resourceType(), parent.method()) &&
+          !(nativeProxy && parent.method() === method && isSafePublicSwiftCatalogRedirect(parent.url(), requestUrl,
+            (await parent.response())?.status() ?? 0, request.resourceType(), method, isSafeRecipeUrl))) throw new Error("UNSAFE_REDIRECT");
       if (!isSafeRecipeUrl(requestUrl) && !isSafeBrowserAssetUrl(requestUrl, request.resourceType(), method) && !bootstrapRead &&
           !availabilityRead) {
         metadata.urlRejection = describePublicUrlRejection(request.url(), requestUrl, request.method(), request.resourceType(), "BROWSER_REQUEST_URL",
@@ -725,7 +729,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
           !isRexPublicBrowserReadPost(url, method, requestHeaders, body ?? "", frameUrl))
         throw new Error(rexPublicBrowserReadRejection(url, method, requestHeaders, body ?? "", frameUrl));
       const rexPlaceholder = nativeProxy && isRexAnonymousPlaceholderRead(url, method, requestHeaders, body ?? "", frameUrl);
-      if (nativeProxy && !rexPlaceholder && !publicHeaderProof && Object.keys(requestHeaders).some(key => /^(?:authorization|proxy-authorization|x-api-key)$/iu.test(key))) {
+      const swiftPlaceholder = nativeProxy && isSwiftAnonymousPlaceholderRead(requestUrl, method, requestHeaders, frameUrl);
+      if (nativeProxy && !rexPlaceholder && !swiftPlaceholder && !publicHeaderProof && Object.keys(requestHeaders).some(key => /^(?:authorization|proxy-authorization|x-api-key)$/iu.test(key))) {
         metadata.publicHeaderDiagnostic = publicHeaderFailureDiagnostic("HEADER_PROOF_MISSING", method, requestHeaders, ordinaryPreflightMethod);
         throw new Error("CREDENTIAL_HEADERS");
       }
@@ -896,7 +901,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
       if (redirect) {
         // These exact public setup contracts are direct GETs. A Location must
         // not promote ancillary data into navigation or inventory authority.
-        if (bootstrapRead) throw new Error("UNSAFE_REDIRECT");
+        const catalogRedirect = bootstrapRead && isSafePublicSwiftCatalogRedirect(requestUrl,
+          new URL(redirect, transportUrl).href, reply.status, request.resourceType(), method, isSafeRecipeUrl);
+        if (bootstrapRead && !catalogRedirect) throw new Error("UNSAFE_REDIRECT");
         // Chromium skips Playwright's route handler for redirected requests.
         // Pinned HTTP must not release a Location into an unpinned browser read.
         if (!nativeProxy) throw new Error("PINNED_REDIRECT_UNSUPPORTED");
@@ -913,9 +920,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
         // Only the controller's exact anonymous bootstrap POST can attest its
         // released 302/303 to a same-origin bodyless GET. Other POSTs still fail.
         if (method === "POST" && !(nativeProxy && mindbodySource && observedDocumentRedirect) ||
-            !isSafeRecipeUrl(next.href) || !sameHost && !observedDocumentRedirect) throw new Error("UNSAFE_REDIRECT");
+            !catalogRedirect && !isSafeRecipeUrl(next.href) || !sameHost && !observedDocumentRedirect) throw new Error("UNSAFE_REDIRECT");
         responseHeaders.location = next.href;
-        allowedNavigation.add(next.href);
+        if (!catalogRedirect) allowedNavigation.add(next.href);
       }
       // Setup responses let the public page initialize, but never supply
       // model-visible inventory bodies, schemas, or availability authority.
@@ -1263,7 +1270,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
             !element.getAttribute('title') && !element.getAttribute('aria-haspopup') && !element.hasAttribute('data-value') &&
             element.getAttribute('role') !== 'option' && !element.closest('[role="grid"],[role="dialog"],[class*="calendar"],[class*="datepicker"]')) {
           const name = (element.innerText || element.querySelector('img')?.getAttribute('alt') || '').trim();
-          const candidateName = /\b(?:date|day|month|calendar|duration|length|party|players?|people|guests?|bay|resource|simulator|location|activity|availability|available|search|view times|next|previous|back|continue|apply)\b/iu.test(name);
+          const candidateName = /\b(?:date|day|month|calendar|duration|length|party|players?|people|guests?|bay|resource|simulator|golf sim|location|activity|availability|available|search|view times|next|previous|back|continue|apply)\b/iu.test(name);
           const productName = /^(?:book|select)$/iu.test(name) || /\b(?:hours?|hrs?|hr|minutes?|mins?|min)\b.*(?:\$|USD)|\d\s*h\s*(?:\$|USD)/iu.test(name);
           if (!candidateName && !productName) continue;
         }
@@ -1321,22 +1328,29 @@ export async function createCourseDiscoveryBrowserSession(input: {
   };
   const waitForInitialContent = async () => {
     const startedAt = Date.now();
-    // A blank shell is not a settled page. Keep the original navigation clock
-    // across observe calls; a slow request cannot create a fresh waiting budget.
-    while (navigationStartedAt !== undefined && pendingReadCount() > 0 && Date.now() < Math.min(navigationStartedAt + 30_000, input.deadlineAt.getTime())) {
+    // Keep one bounded clock per actual navigation/filter action. Observe does
+    // not renew it. Branding prose alone must not finish a loading public SPA.
+    const until = Math.min((contentWaitStartedAt ?? navigationStartedAt ?? startedAt) + 8_000, input.deadlineAt.getTime());
+    let idleSince: number | undefined;
+    while (Date.now() < until) {
       deadline.throwIfAborted();
       const text = sanitizeResponderText(await page.locator("body").innerText()).slice(0, 16_000);
-      if (text.replace(/[^\p{L}\p{N}]/gu, "").length >= 40 || isActiveBrowserAccessChallenge(text, await page.title())) break;
+      if (isActiveBrowserAccessChallenge(text, await page.title())) break;
       let usableControl = false;
       for (const node of await controlCandidates()) {
         if (!await node.isVisible() || !await node.isEnabled()) continue;
         const control = await observeControl(node);
-        if (/[\p{L}\p{N}]{2}/u.test(`${control.name} ${control.label}`) && publicControlKind(control, false)) {
+        const kind = publicControlKind(control, false), label = `${control.name} ${control.label}`;
+        if (/[\p{L}\p{N}]{2}/u.test(label) && kind && (kind !== "link" || /\b(?:book|reserve|tee.?times?|availability|view times|calendar)\b/iu.test(label))) {
           usableControl = true; break;
         }
       }
       if (usableControl) break;
-      await page.waitForTimeout(Math.min(250, Math.max(1, navigationStartedAt + 30_000 - Date.now()), Math.max(1, input.deadlineAt.getTime() - Date.now())));
+      if (pendingReadCount() === 0 && text.replace(/[^\p{L}\p{N}]/gu, "").length >= 40) {
+        idleSince ??= Date.now();
+        if (Date.now() - idleSince >= 250) break;
+      } else idleSince = undefined;
+      await page.waitForTimeout(Math.min(250, Math.max(1, until - Date.now())));
     }
     return Date.now() - startedAt;
   };
@@ -1820,6 +1834,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       const executeAction = async (): Promise<DiscoveryBrowserSnapshot> => {
         staleControlReason = undefined;
       const action = discoveryBrowserActionSchema.parse(value);
+      if (["open", "click", "select", "fill"].includes(action.action)) contentWaitStartedAt = Date.now();
       let documentNavigation = false, navigationAttempted = false;
       navigationFailureKind = undefined;
       try {
@@ -2180,7 +2195,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
           } else await known.locator.click();
         }
       }
-      return snapshot(action.action === "open" || action.action === "observe" || documentNavigation, deps.captureDelegatedDocument === true);
+      return snapshot(["open", "observe", "click", "select", "fill"].includes(action.action) || documentNavigation, deps.captureDelegatedDocument === true);
       } catch (error) {
         if (navigationAttempted) navigationFailureKind = discoveryNavigationFailureKind(error);
         if (terminalFailure) { staleControlReason = undefined; throw new Error(terminalFailure); }

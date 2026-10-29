@@ -15,7 +15,7 @@ const BROWSER_ACTIONS = ["open", "observe", "click", "select", "fill", "scroll",
 const FORBIDDEN_ITEMS = new Set(["commandExecution", "fileChange", "mcpToolCall", "webSearch", "imageGeneration", "collabAgentToolCall"]);
 export const DISCOVERY_MODEL = "gpt-6.1-sol";
 export const DISCOVERY_REASONING_EFFORT = "medium";
-export const DISCOVERY_GENERIC_LIMITS = Object.freeze({ toolOperations: 8, totalTokens: 128_000, uncachedInputTokens: 32_000, outputTokens: 8_192 });
+export const DISCOVERY_GENERIC_LIMITS = Object.freeze({ toolOperations: 16, totalTokens: 128_000, uncachedInputTokens: 32_000, outputTokens: 8_192 });
 export const DISCOVERY_NONRETRYABLE_GUARD_CODES = Object.freeze(["DISCOVERY_NATIVE_TRANSPORT_FATAL", "DISCOVERY_GENERIC_BUDGET_EXHAUSTED"]);
 const TRACE_ERROR_CODES = new Set(["UNSUPPORTED_ADAPTER_SOURCE", "STALE_OR_UNKNOWN_ELEMENT", "STALE_OR_UNKNOWN_CONTROL",
   "UNOBSERVED_NAVIGATION", "BROWSER_SESSION_CLOSED", "BROWSER_UNAVAILABLE", "BROWSER_NAVIGATION_FAILED", "DISCOVERY_SOURCE_NOT_OBSERVED",

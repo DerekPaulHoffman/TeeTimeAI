@@ -155,12 +155,12 @@ describe("unattended direct public protocol inspection", () => {
     const out = await run({ browserError: Object.assign(Error("unverified"), { code: "NATIVE_REDIRECT_LOADER_MISMATCH" }), actions: [open, inspect(), proposal] });
     expect(out.result.outcome).toBe("activated");
   });
-  it("allows eight total operations but blocks a ninth proposal even after earlier callbacks settle", async () => {
-    const allowed = await run({ actions: [...Array.from({ length: 6 }, () => checkpoint), inspect(), proposal] });
-    expect(allowed.result.outcome).toBe("activated"); expect(allowed.result.metrics.genericBudget.toolOperations).toBe(8);
-    const denied = await run({ actions: [...Array.from({ length: 7 }, () => checkpoint), inspect(), proposal] });
+  it("allows sixteen total operations but blocks a seventeenth proposal even after earlier callbacks settle", async () => {
+    const allowed = await run({ actions: [...Array.from({ length: 14 }, () => checkpoint), inspect(), proposal] });
+    expect(allowed.result.outcome).toBe("activated"); expect(allowed.result.metrics.genericBudget.toolOperations).toBe(16);
+    const denied = await run({ actions: [...Array.from({ length: 15 }, () => checkpoint), inspect(), proposal] });
     expect(denied.result.code).toBe("DISCOVERY_GENERIC_BUDGET_EXHAUSTED");
-    expect(denied.result.discoveryMetrics.genericBudget).toMatchObject({ toolOperations: 8, stop: { limit: "toolOperations" } });
+    expect(denied.result.discoveryMetrics.genericBudget).toMatchObject({ toolOperations: 16, stop: { limit: "toolOperations" } });
     expect(denied.client.candidate).not.toHaveBeenCalled(); expect(denied.processClosed).toBe(true);
   });
   it("stops an overfull parallel tool queue with the same nonretryable budget disposition", async () => {
@@ -179,7 +179,7 @@ describe("unattended direct public protocol inspection", () => {
     const out = await run({ usageUpdates: [usage] });
     expect(out.result.code).toBe("DISCOVERY_GENERIC_BUDGET_EXHAUSTED");
     expect(out.result.discoveryMetrics.genericBudget).toMatchObject({ toolOperations: 0, stop: { limit },
-      limits: { toolOperations: 8, totalTokens: 128000, uncachedInputTokens: 32000, outputTokens: 8192 } });
+      limits: { toolOperations: 16, totalTokens: 128000, uncachedInputTokens: 32000, outputTokens: 8192 } });
     expect(out.inspectProtocol).not.toHaveBeenCalled(); expect(out.client.candidate).not.toHaveBeenCalled(); expect(out.processClosed).toBe(true);
   });
   it("replaces cumulative usage updates and does not add cached input or reasoning subsets twice", async () => {

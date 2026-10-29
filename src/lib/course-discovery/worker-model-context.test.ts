@@ -154,9 +154,9 @@ describe("model-only discovery context bounds", () => {
     }
   });
 
-  it("does not change the existing operation, token or output guards", () => {
+  it("bounds longer public navigation while preserving token and output guards", () => {
     expect(DISCOVERY_MODEL_SNAPSHOT_BYTES).toBe(8_000);
-    expect(DISCOVERY_GENERIC_LIMITS).toEqual({ toolOperations: 8, totalTokens: 128_000, uncachedInputTokens: 32_000, outputTokens: 8_192 });
+    expect(DISCOVERY_GENERIC_LIMITS).toEqual({ toolOperations: 16, totalTokens: 128_000, uncachedInputTokens: 32_000, outputTokens: 8_192 });
   });
 
   it.each([7, 8])("cuts a %i-reply discovery sequence below half its former context without changing current controls or private evidence", count => {

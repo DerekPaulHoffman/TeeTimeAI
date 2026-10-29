@@ -1,5 +1,46 @@
 import { isSafePublicServiceReadUrl } from "./public-service-read-url";
 
+/** Exact anonymous facility metadata and published Next routing assets used
+ * by this public booking client. Build identifiers are asset versions.
+ * This grants metadata reads only; source, inventory and header guards remain
+ * separate, and the original transport URL is never rewritten. */
+export function isSafePublicSwiftBootstrapReadUrl(value: string, resourceType: string, method: string,
+  strictUrl: (value: string) => boolean) {
+  if (value.length > 2048 || !["xhr", "fetch"].includes(resourceType) || !["GET", "HEAD"].includes(method)) return false;
+  const manifest = /^https:\/\/book\.runswiftapp\.com\/_next\/static\/[A-Za-z0-9_-]{8,128}\/_buildManifest\.js$/u;
+  const page = /^https:\/\/book\.runswiftapp\.com\/_next\/data\/[A-Za-z0-9_-]{8,128}\/facilities\/([a-z0-9][a-z0-9-]{0,99})(?:\/rentals)?\.json$/u.exec(value);
+  const facility = method === "GET" && /^https:\/\/book\.runswiftapp\.com\/api\/facility\/getFacilityBySubdomain\?subdomain=([a-z0-9][a-z0-9-]{0,99})$/u.exec(value);
+  const eligibility = method === "GET" && /^https:\/\/book\.runswiftapp\.com\/api\/facility\/([1-9][0-9]{0,9})\/isEligibleForBooking$/u.exec(value);
+  const visibility = method === "GET" && /^https:\/\/book\.runswiftapp\.com\/api\/public\/service\/visibility\?facilityId=([1-9][0-9]{0,9})&userId=$/u.exec(value);
+  const rentalPage = method === "GET" && /^https:\/\/book\.runswiftapp\.com\/_next\/data\/[A-Za-z0-9_-]{8,128}\/book\/facilities\/([a-z0-9][a-z0-9-]{0,99})\/rentals\.json\?subdomain=\1&serviceType=rentals$/u.exec(value);
+  // These are the observed catalogue defaults, not dated slot filters.
+  const catalog = method === "GET" && /^https:\/\/book\.runswiftapp\.com\/api\/public\/rental\/?\?facilityId=([1-9][0-9]{0,9})&duration=0%2C480&price=0%2C500&startTime=4%2C23&dayOfWeek=0$/u.exec(value);
+  const collections = method === "GET" && /^https:\/\/book\.runswiftapp\.com\/api\/public\/facility\/([1-9][0-9]{0,9})\/service-collections\?type=RENTAL$/u.exec(value);
+  const price = method === "GET" && /^https:\/\/book\.runswiftapp\.com\/api\/public\/price\?facilityId=([1-9][0-9]{0,9})&serviceId=([1-9][0-9]{0,9})&packageId=&membershipId=&userId=$/u.exec(value);
+  if ([eligibility, visibility, catalog, collections, price].some(match => match && Number(match[1]) > 2_147_483_647) || price && Number(price[2]) > 2_147_483_647) return false;
+  if (!(method === "GET" && manifest.test(value)) && !page && !facility && !eligibility && !visibility && !rentalPage && !catalog && !collections && !price) return false;
+  try {
+    const checked = new URL(value);
+    if (checked.href !== value || checked.username || checked.password || checked.port ||
+        (!facility && !visibility && !rentalPage && !catalog && !collections && !price && checked.search) || checked.hash) return false;
+    const reference = page?.[1] || (rentalPage ? rentalPage[1] : undefined) || (facility ? facility[1] : undefined) ||
+      [eligibility, visibility, catalog, collections, price].find((match): match is RegExpExecArray => Boolean(match))?.[1];
+    checked.pathname = reference ? "/public-facility/" + reference : "/public-routing-metadata";
+    checked.search = "";
+    return strictUrl(checked.href) === true;
+  } catch { return false; }
+}
+
+/** The public catalogue canonicalizes its trailing slash with a 308. This
+ * preserves the exact anonymous catalogue query and grants no page route. */
+export function isSafePublicSwiftCatalogRedirect(from: string, to: string, status: number, resourceType: string, method: string,
+  strictUrl: (value: string) => boolean) {
+  return status === 308 && method === "GET" && from.startsWith("https://book.runswiftapp.com/api/public/rental/?") &&
+    to === from.replace("/api/public/rental/?", "/api/public/rental?") &&
+    isSafePublicSwiftBootstrapReadUrl(from, resourceType, method, strictUrl) &&
+    isSafePublicSwiftBootstrapReadUrl(to, resourceType, method, strictUrl);
+}
+
 /** Exact observed anonymous dated-course event read, separate from inventory.
  * Only the fixed opaque basename is masked for unchanged strict validation;
  * the caller retains the original URL and all request/header authority. */
@@ -19,6 +60,7 @@ export function isSafePublicMemberSportsEventsReadUrl(value: string, resourceTyp
  * never returns a rewritten transport URL or grants navigation/recipe proof. */
 export function isSafePublicBootstrapReadUrl(value: string, resourceType: string, method: string,
   strictUrl: (value: string) => boolean) {
+  if (isSafePublicSwiftBootstrapReadUrl(value, resourceType, method, strictUrl)) return true;
   if (isSafePublicMemberSportsEventsReadUrl(value, resourceType, method, strictUrl)) return true;
   if (isSafePublicServiceReadUrl(value, resourceType, method, "METADATA", strictUrl)) return true;
   if (value.length > 2048 || value.trim() !== value || method !== "GET" || !["xhr", "fetch"].includes(resourceType)) return false;

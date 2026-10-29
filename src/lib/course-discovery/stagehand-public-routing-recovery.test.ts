@@ -95,7 +95,7 @@ describe("private public-routing failure recovery", () => {
   it("never upgrades an incomplete independent replay or changes the normal budget caps", async () => {
     const t = setup("path"); t.executeRecipe.mockResolvedValue({ status: "INCOMPLETE", complete: false, slots: [], evidence: {} } as never);
     await expect(t.run()).rejects.toMatchObject({ code: "DISCOVERY_REPLAY_INCOMPLETE" }); expect(t.client.activate).not.toHaveBeenCalled();
-    expect(DISCOVERY_GENERIC_LIMITS).toEqual({ toolOperations: 8, totalTokens: 128000, uncachedInputTokens: 32000, outputTokens: 8192 });
+    expect(DISCOVERY_GENERIC_LIMITS).toEqual({ toolOperations: 16, totalTokens: 128000, uncachedInputTokens: 32000, outputTokens: 8192 });
     expect(PUBLIC_ROUTING_FALLBACK_CODES).toEqual(["FRAMEWORK_INSPECTION_PATH_STALE", "FRAMEWORK_INSPECTION_SOURCE_NOT_SETTLED"]);
   });
   it.each(PUBLIC_ROUTING_FALLBACK_CODES)("does not recover %s from source discovery or an uploaded receipt", async code => {

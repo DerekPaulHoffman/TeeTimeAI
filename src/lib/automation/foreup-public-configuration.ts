@@ -6,6 +6,10 @@ const MAX_DOCUMENT_BYTES = 512_000;
 const MAX_SCHEDULE_JSON_CHARS = 256_000;
 const MAX_SCHEDULES = 30;
 export const FOREUP_STANDARD_PUBLIC_SCOPE = "STANDARD_PUBLIC_CLASS_V1" as const;
+export function isStandardForeupPublicClassName(value: unknown): value is string {
+  return typeof value === "string" && value.length <= 300 && !/[\u0000-\u001f\u007f]/u.test(value) &&
+    /^(?:public|(?:(?:spring|summer|fall|winter) )?public play|public tee times|online tee times)$/iu.test(value.trim());
+}
 const FOREUP_BOOKING_PATH = /^\/index\.php\/booking\/(?:([1-9]\d{0,9})(?:\/[1-9]\d{0,9})?|index\/([1-9]\d{0,9}))\/?$/u;
 
 export type ForeupPublicConfiguration = {
@@ -113,13 +117,13 @@ export function hasCompleteForeupPublicScheduleScope(input: { html: string; faci
         if (!classId || selectedClassIds.has(classId)) return false;
         selectedClassIds.add(classId);
         if (typeof entry.name !== "string" || entry.name.length > 300 || /[\u0000-\u001f\u007f]/u.test(entry.name)) return false;
-        if (/^(?:public|public play|public tee times|online tee times)$/iu.test(entry.name.trim())) selectedExplicitPublicCount += 1;
+        if (isStandardForeupPublicClassName(entry.name)) selectedExplicitPublicCount += 1;
         continue;
       }
       if (entry.name === undefined && visible.length === 1) { isPublic = true; continue; }
       if (typeof entry.name !== "string" || entry.name.length > 300) return false;
       const name = entry.name.trim();
-      if (/^(?:public|public play|public tee times|online tee times)$/iu.test(name)) isPublic = true;
+      if (isStandardForeupPublicClassName(name)) isPublic = true;
       // Only unequivocal membership labels exclude a visible class. Unknown
       // labels may describe another public audience and cannot prove coverage.
       else if (!/^(?:(?:full(?: week)?|twilight|junior|senior|annual|club|premium) )?(?:member|members|membership)(?: (?:only|tee times|play))?$/iu.test(name)) return false;
@@ -162,7 +166,7 @@ export function isExplicitForeupPublicClass(input: { html: string; facilityId: n
     positiveProviderId((raw as Record<string, unknown>).teesheet_id) === input.scheduleId &&
     String((raw as Record<string, unknown>).active) === "1" && String((raw as Record<string, unknown>).hidden) === "0" &&
     typeof (raw as Record<string, unknown>).name === "string" &&
-    /^(?:public|public play|public tee times|online tee times)$/iu.test(String((raw as Record<string, unknown>).name).trim()));
+    isStandardForeupPublicClassName((raw as Record<string, unknown>).name));
 }
 
 export function parseForeupPublicConfiguration(input: {
@@ -226,7 +230,7 @@ export function parseForeupPublicConfiguration(input: {
   });
   const labelledPublic = visibleClasses.filter(bookingClass => {
     const name = (bookingClass as Record<string, unknown>).name;
-    return typeof name === "string" && /^(?:public|public play|public tee times|online tee times)$/iu.test(name.trim());
+    return isStandardForeupPublicClassName(name);
   });
   // Public and membership classes may share one public page. Select only its
   // sole explicit public class (including observed public tee-time labels);

@@ -1629,6 +1629,21 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       expect(result.navigationStatus).toBeUndefined();
     } finally { await session.close(); }
   }, 20_000);
+  it("waits beyond long branding text for a pending public availability control", async () => {
+    const fixture = '<!doctype html><html><body><h1>A public golf practice venue with a long marketing description</h1><script>fetch("/api/content").then(r=>r.json()).then(()=>{document.body.innerHTML="<h1>Public golf</h1><a href=\'/times\'>Book a tee time</a>";});</script></body></html>';
+    const session = await createCourseDiscoveryBrowserSession({ deadlineAt: new Date(Date.now() + 20_000), initialUrls: ["https://example.org/"] }, {
+      fetch: (async value => {
+        if (String(value).endsWith("/api/content")) { await new Promise(resolve => setTimeout(resolve, 1000)); return new Response("{}", { headers: { "content-type": "application/json" } }); }
+        return new Response(fixture, { headers: { "content-type": "text/html" } });
+      }) as typeof fetch,
+      launchBrowser: () => chromium.launch({ executablePath, headless: true }), requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      const snapshot = await session.execute({ id: 1, action: "open", url: "https://example.org/" });
+      expect(snapshot.controls).toContainEqual(expect.objectContaining({ name: "Book a tee time", kind: "link" }));
+      expect(snapshot.pendingRequestCount).toBe(0);
+    } finally { await session.close(); }
+  }, 20_000);
   it("waits for initial delayed public content without a manual observe or reload", async () => {
     const fixture = '<!doctype html><html><body><a href="#">×</a><script>fetch("/api/content").then(r=>r.json()).then(()=>{document.body.innerHTML="<h1>Public golf</h1><a href=\'/times\'>Book a tee time</a>";});</script></body></html>';
     const session = await createCourseDiscoveryBrowserSession({ deadlineAt: new Date(Date.now() + 20_000), initialUrls: ["https://example.org/"] }, {
@@ -2082,6 +2097,21 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       expect(observed.navigationStatus).toBe(200);
     } finally { await session.close(); }
   }, 25_000);
+  it("includes a named Golf Sim catalogue card in the browser's safe product scan", async () => {
+    const url = "https://book.runswiftapp.com/facilities/example-labs/rentals";
+    const fixture = '<!doctype html><html><body><h5>Rentals</h5><button id="bay" type="button"><h6>Golf Sim 1 (Peak)</h6><h5>$70</h5><p>3 pm to 7 pm Monday-Friday</p><span>1 hour</span></button>' +
+      '<button id="combined" type="button"><h6>Golf Sim 1 &amp; 2 (Peak)</h6><h5>$140</h5><span>1 hour</span></button></body></html>';
+    const session = await createCourseDiscoveryBrowserSession({ deadlineAt: new Date(Date.now() + 20_000), initialUrls: [url] }, {
+      fetch: vi.fn(async () => new Response(fixture, { headers: { "content-type": "text/html" } })) as unknown as typeof fetch,
+      launchBrowser: () => chromium.launch({ executablePath, headless: true }),
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      const result = await session.execute({ id: 1, action: "open", url });
+      expect(result.controls.find(control => control.selector === '[id="bay"]')).toMatchObject({ kind: "product", product: { durationMinutes: 60, selector: '[id="bay"]' } });
+      expect(result.controls.some(control => control.selector === '[id="combined"]')).toBe(false);
+    } finally { await session.close(); }
+  }, 20_000);
   it("exposes Book only inside a proved rental product, and labels adjacent unnamed comboboxes", async () => {
     const fixture = '<!doctype html><html><body><article id="product"><h2>Simulator rental</h2>1 hour<button id="choose">Book</button></article>' +
       '<div><span class="label">Party size</span><button id="party" role="combobox" aria-haspopup="listbox">2</button></div>' +

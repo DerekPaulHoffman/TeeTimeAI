@@ -23,6 +23,21 @@ function provider() {
     { teesheet_id: "457", booking_class_id: "14", name: "Members", active: "1", hidden: "0" } ] }] };
 }
 const html = (value = provider()) => `<html><body><script>var COURSES=${JSON.stringify(value.courses)};var COURSE=${JSON.stringify(value.course)};var SCHEDULES=${JSON.stringify(value.schedules)};</script></body></html>`;
+describe("seasonal standard public inventory", () => {
+  it.each(["Spring", "Summer", "Fall", "Winter"])("selects the sole published %s Public Play class", season => {
+    const value = provider(); value.schedules[0].booking_classes[0].name = `${season} Public Play`;
+    const result = bindForeupOfficialRouteConfiguration(deriveForeupOfficialRouteContact(source, native(), phone), html(value), FOREUP_STANDARD_PUBLIC_SCOPE);
+    expect(result.proof).toMatchObject({ bookingClassId: 12, inventoryScope: FOREUP_STANDARD_PUBLIC_SCOPE });
+  });
+  it.each(["Fall Public Play Members", "Preferred Public Play", "Public Play Tournament", "Fall Member Play"])("rejects qualified or nonstandard audiences: %s", name => {
+    const value = provider(); value.schedules[0].booking_classes[0].name = name;
+    expect(() => bindForeupOfficialRouteConfiguration(deriveForeupOfficialRouteContact(source, native(), phone), html(value), FOREUP_STANDARD_PUBLIC_SCOPE)).toThrow();
+  });
+  it("rejects two explicit standard public classes instead of selecting one", () => {
+    const value = provider(); value.schedules[0].booking_classes[1].name = "Fall Public Play";
+    expect(() => bindForeupOfficialRouteConfiguration(deriveForeupOfficialRouteContact(source, native(), phone), html(value), FOREUP_STANDARD_PUBLIC_SCOPE)).toThrow();
+  });
+});
 const input = { date: "2026-10-28", players: 2, startTime: "08:00", endTime: "18:00", timeZone: source.timeZone };
 const lease = async <T>(_family: string, work: () => Promise<T>) => ({ acquired: true as const, value: await work() });
 function deps() { return { localCapabilities: ["LOCAL_CHROME"] as const, trustedContext: { canonicalCoursePhone: phone }, venueMatches: venueProofMatches,

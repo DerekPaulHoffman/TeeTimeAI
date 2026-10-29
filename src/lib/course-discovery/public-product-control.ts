@@ -57,6 +57,41 @@ export function inspectPublicRentalProductElement(node: Element): PublicRentalPr
             /^(?:action|step)$/iu.test(key) && /^(?:review|checkout|confirm|pay|login|account)$/iu.test(value))) return undefined;
     } catch { return undefined; }
   }
+  // This public catalogue uses the whole rental card as its button. Opening
+  // that card, or its undated Overview, reveals a calendar; neither operation
+  // selects a time. Keep this distinct from dated slot buttons and checkout.
+  const swiftCatalogue = /^https:\/\/book\.runswiftapp\.com\/facilities\/[a-z0-9][a-z0-9-]{0,99}\/rentals$/u.test(document.location.href);
+  if (swiftCatalogue && node.tagName === "BUTTON" && node.getAttribute("type") === "button" && !node.hasAttribute("onclick")) {
+    const datedOrTransactional = /\b(?:checkout|check out|pay|payment|purchase|buy|reserve|confirm|submit|cancel|delete|password|sign in|sign up|log in|login|contact|email|phone|cart|membership)\b|\b\d{1,2}:\d{2}|\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b|\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d/iu;
+    const oneGolfBay = /^golf sim(?:ulator)?(?: bay)? [1-9]\d?(?: \((?:off )?peak\))?$/iu;
+    const dialog = node.closest('[role="dialog"]');
+    let container: Element | null = null;
+    if (dialog) {
+      const title = dialog.querySelector("h2"), names = Array.from(dialog.querySelectorAll("h5")).filter(helpers.visible);
+      const buttons = Array.from(dialog.querySelectorAll("button")).filter(helpers.visible);
+      if (/^book now$/iu.test(helpers.text(node)) && title && helpers.text(title) === "Overview" && names.length === 1 && oneGolfBay.test(helpers.text(names[0])) &&
+          buttons.length === 3 && buttons.every(button => button === node || /^(?:Back|Close)$/u.test(button.getAttribute("aria-label") ?? "")) &&
+          !dialog.querySelector('input,select,textarea,[role="combobox"],form')) container = dialog;
+    } else {
+      const titles = Array.from(node.querySelectorAll("h6")).filter(helpers.visible), prices = Array.from(node.querySelectorAll("h5")).filter(helpers.visible);
+      if (titles.length === 1 && oneGolfBay.test(helpers.text(titles[0])) && prices.length === 1 && /^\$\d{1,5}(?:\.\d{2})?$/u.test(helpers.text(prices[0])) &&
+          Array.from(document.querySelectorAll("h5")).some(heading => helpers.visible(heading) && helpers.text(heading) === "Rentals")) container = node;
+    }
+    if (container) {
+      const text = helpers.text(container), leaves = Array.from(container.querySelectorAll("p,span,div")).filter(element => element.childElementCount === 0 && helpers.visible(element));
+      if (text.length <= 2400 && leaves.length <= 128 && !datedOrTransactional.test(text) &&
+          !leaves.some(element => datedOrTransactional.test(helpers.text(element))) &&
+          !container.querySelector('input,select,textarea,[role="combobox"],form')) {
+        const durations = [...new Set(leaves.flatMap(element => {
+          const value = helpers.text(element).replace(/\s*[-–]\s*(?=\$)/u, " ");
+          const duration = helpers.duration(value) ?? helpers.pricedDuration(value);
+          return duration === undefined ? [] : [duration];
+        }))];
+        const selector = helpers.selector(node);
+        if (durations.length === 1 && durations[0] === 60 && selector) return { selector, durationMinutes: 60 };
+      }
+    }
+  }
   const selectedText = helpers.text(node), action = /^(?:book|select)$/iu.test(selectedText);
   const selectedDuration = helpers.pricedDuration(selectedText);
   if (!action && selectedDuration === undefined) return undefined;
