@@ -178,7 +178,7 @@ export function sameDiscoveryMainDocument(observedUrl: string, currentUrl: strin
   return Boolean(observedUrl && currentUrl) && observedUrl.split("#", 1)[0] === currentUrl.split("#", 1)[0];
 }
 
-type StaleControlReason = "TARGET_OR_DOCUMENT_CHANGED" | "NATIVE_DOCUMENT_CHANGED" | "CONTROL_NOT_RENDERED" |
+type StaleControlReason = "ELEMENT_NOT_OBSERVED" | "TARGET_OR_DOCUMENT_CHANGED" | "NATIVE_DOCUMENT_CHANGED" | "CONTROL_NOT_RENDERED" |
   "CONTROL_DISABLED" | "CONTROL_SIGNATURE_CHANGED" | "PUBLIC_DATE_CHOICE_CHANGED" | "ENTRY_DISCLOSURE_CHANGED" |
   "GESTURE_CONTROL_MISSING" | "GESTURE_CONTROL_AMBIGUOUS" | "GESTURE_NATIVE_SOURCE_CHANGED" |
   "GESTURE_LABEL_INVALID" | "GESTURE_BOOKING_INTENT_MISSING" | "GESTURE_INTENT_MISSING";
@@ -1825,8 +1825,11 @@ export async function createCourseDiscoveryBrowserSession(input: {
       if (action.action === "finish") { const result = await snapshot(); await close(); return result; }
       if (action.action === "inspect") {
         const known = observedElements.get(action.selector);
-        if (!known || !await isRenderedControl(known.locator) || JSON.stringify(await observeControl(known.locator)) !== known.signature)
-          throw new Error("STALE_OR_UNKNOWN_ELEMENT");
+        if (!known) { staleControlReason = "ELEMENT_NOT_OBSERVED"; throw new Error("STALE_OR_UNKNOWN_ELEMENT"); }
+        if (!await isRenderedControl(known.locator)) { staleControlReason = "CONTROL_NOT_RENDERED"; throw new Error("STALE_OR_UNKNOWN_ELEMENT"); }
+        if (JSON.stringify(await observeControl(known.locator)) !== known.signature) {
+          staleControlReason = "CONTROL_SIGNATURE_CHANGED"; throw new Error("STALE_OR_UNKNOWN_ELEMENT");
+        }
         const structure: NonNullable<DiscoveryBrowserSnapshot["structure"]> = { selected: action.selector, ancestors: [] };
         const returnedNodes: Array<{ locator: Locator; selector: string; signature: string }> = [];
         let node = known.locator;

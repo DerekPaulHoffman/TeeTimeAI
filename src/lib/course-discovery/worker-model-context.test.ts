@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
-import { createDiscoveryAdapterObservation, createDiscoverySnapshotCompactor, DISCOVERY_GENERIC_LIMITS, fillCurrentInspectedAdapter, inspectedAdapterSourceEvidence } from "../../../scripts/automation/course-discovery-worker.mjs";
+import { createDiscoveryAdapterObservation, createDiscoverySnapshotCompactor, createDiscoveryToolTrace, DISCOVERY_GENERIC_LIMITS, fillCurrentInspectedAdapter, inspectedAdapterSourceEvidence, safeFixedInspectionSourceDiagnostic } from "../../../scripts/automation/course-discovery-worker.mjs";
 import { previewDiscoverySnapshot, selectDiscoveryRecipeSchema } from "../../../scripts/automation/course-discovery-prompt-schema.mjs";
 import { AMELIA_CLIENT_HASHES, ameliaMetadataSchema } from "./amelia-source";
 import { executeAccessRecipe, type AccessExecutorDependencies } from "./executor";
@@ -21,6 +21,32 @@ const bigSnapshot = () => ({ url: "https://context-fixture.example/tee-times", n
 });
 
 describe("model-only discovery context bounds", () => {
+  it("records only closed reply metadata with exact UTF8 bytes, omission and selected engine", () => {
+    const trace = createDiscoveryToolTrace(), payload = JSON.stringify({ modelPreview: { kind: "BOUNDED_MODEL_ONLY_PREVIEW" }, text: "é😀 PRIVATE_BODY" });
+    trace.record("discovery_browser", { action: "observe", url: "https://private.example/?token=SECRET", selector: "PRIVATE_SELECTOR" }, "SUCCESS", undefined, payload);
+    trace.record("discovery_recipe_schema", { engine: "BROWSER_DOM", family: "PRIVATE_FAMILY" }, "SUCCESS", undefined, '{"schema":{}}');
+    trace.record("discovery_browser", { action: "inspect", selector: "PRIVATE_SELECTOR" }, "ERROR", "STALE_OR_UNKNOWN_ELEMENT", '{"error":"STALE_OR_UNKNOWN_ELEMENT","details":"PRIVATE_DETAIL"}');
+    expect(trace.snapshot()).toEqual({ lostEntries: 0, entries: [
+      { action: "BROWSER_OBSERVE", status: "SUCCESS", modelPreviewBytes: Buffer.byteLength(payload), previewOmitted: true },
+      { action: "SCHEMA", status: "SUCCESS", modelPreviewBytes: 13, previewOmitted: false, schemaEngine: "BROWSER_DOM" },
+      { action: "BROWSER_INSPECT", status: "ERROR", errorCode: "STALE_OR_UNKNOWN_ELEMENT", modelPreviewBytes: 63, previewOmitted: false },
+    ] });
+    expect(JSON.stringify(trace.snapshot())).not.toMatch(/PRIVATE|SECRET|https|selector|token|body/iu);
+    const copied = trace.snapshot(); copied.entries[0].action = "PRIVATE_MUTATION";
+    expect(trace.snapshot().entries[0].action).toBe("BROWSER_OBSERVE");
+  });
+  it("bounds trace entries and counts lost replies without retaining unknown errors, actions or schema values", () => {
+    const trace = createDiscoveryToolTrace();
+    for (let index = 0; index < 11; index++) trace.record("PRIVATE_TOOL", { action: "PRIVATE_ACTION", engine: "PRIVATE_ENGINE" }, "PRIVATE_STATUS", "PRIVATE_ERROR");
+    expect(trace.snapshot().lostEntries).toBe(3); expect(trace.snapshot().entries).toHaveLength(8);
+    expect(trace.snapshot().entries[0]).toEqual({ action: "UNKNOWN_TOOL", status: "NO_REPLY", errorCode: "OTHER_TOOL_ERROR", modelPreviewBytes: 0, previewOmitted: false });
+    expect(JSON.stringify(trace.snapshot())).not.toContain("PRIVATE");
+  });
+  it("projects only the three precise inspect-stale conjunct reasons", () => {
+    for (const staleControlReason of ["ELEMENT_NOT_OBSERVED", "CONTROL_NOT_RENDERED", "CONTROL_SIGNATURE_CHANGED"])
+      expect(safeFixedInspectionSourceDiagnostic({ staleControlReason, selector: "PRIVATE", body: "PRIVATE" })).toEqual({ staleControlReason });
+    expect(safeFixedInspectionSourceDiagnostic({ staleControlReason: "PRIVATE_ERROR" })).toBeUndefined();
+  });
   it("bounds a full public response packet while preserving every opaque target, useful player options and original private data", () => {
     const original = bigSnapshot(), before = JSON.stringify(original), compact = createDiscoverySnapshotCompactor()(original);
     expect(bytes(original)).toBeGreaterThan(280_000); expect(bytes(compact)).toBeLessThanOrEqual(24_000);

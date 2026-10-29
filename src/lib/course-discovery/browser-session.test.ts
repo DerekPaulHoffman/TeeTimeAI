@@ -1878,8 +1878,16 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       const continued = await session.execute({ id: 3, action: "inspect", selector: outer!.selector });
       expect(continued.structure?.ancestors[0].selector).toBe('[id="outer"]');
       await expect(session.execute({ id: 4, action: "inspect", selector: '[id="unseen"]' })).rejects.toThrow("STALE_OR_UNKNOWN_ELEMENT");
-      await browser!.contexts()[0].pages()[0].locator('[id="outer"]').evaluate(element => element.setAttribute("id", "changed"));
+      expect(session.diagnostics()).toMatchObject({ staleControlReason: "ELEMENT_NOT_OBSERVED" });
+      await browser!.contexts()[0].pages()[0].locator('[id="outer"]').evaluate(element => element.setAttribute("hidden", ""));
       await expect(session.execute({ id: 5, action: "inspect", selector: '[id="outer"]' })).rejects.toThrow("STALE_OR_UNKNOWN_ELEMENT");
+      expect(session.diagnostics()).toMatchObject({ staleControlReason: "CONTROL_NOT_RENDERED" });
+      await browser!.contexts()[0].pages()[0].locator('[id="outer"]').evaluate(element => { element.removeAttribute("hidden"); element.querySelector("span")!.textContent = "2 Hr"; });
+      await expect(session.execute({ id: 6, action: "inspect", selector: '[id="outer"]' })).rejects.toThrow("STALE_OR_UNKNOWN_ELEMENT");
+      expect(session.diagnostics()).toMatchObject({ staleControlReason: "CONTROL_SIGNATURE_CHANGED" });
+      await browser!.contexts()[0].pages()[0].locator('[id="outer"]').evaluate(element => element.setAttribute("id", "changed"));
+      await expect(session.execute({ id: 7, action: "inspect", selector: '[id="outer"]' })).rejects.toThrow("STALE_OR_UNKNOWN_ELEMENT");
+      expect(session.diagnostics()).toMatchObject({ staleControlReason: "CONTROL_SIGNATURE_CHANGED" });
     } finally { await session.close(); }
   }, 25_000);
   it("observes and inspects public time and rental leaves despite generated CSS without granting slot clicks", async () => {

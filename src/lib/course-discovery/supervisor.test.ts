@@ -498,6 +498,49 @@ describe("first-attempt model overload cooldown", () => {
     expect(() => validateClaimedDiscoveryJob({ ...job(), attempts: 3 }, now)).toThrow("DISCOVERY_JOB_INVALID");
     await f.supervisor.stop();
   });
+  it("retains the exact bounded generic tool reply trace after an unsupported checkpoint without page data", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(now);
+    const sourceHome = mkdtempSync(join(tmpdir(), "discovery-tool-trace-test-"));
+    writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6.1-sol" }] }));
+    writeFileSync(join(sourceHome, "auth.json"), "test-auth");
+    const checkpoint = vi.fn(async () => ({})), replies: Array<{ result: { contentItems: Array<{ text: string }> } }> = [];
+    const processFactory = options => ({ notify: vi.fn(), close: vi.fn(async () => {}), request: async (method: string) => {
+      if (method === "thread/start") return { thread: { id: "thread-1" }, approvalPolicy: "never", sandbox: { type: "readOnly" } };
+      if (method === "turn/start") {
+        queueMicrotask(async () => {
+          await options.onMessage({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1" } } }, () => {});
+          for (const [index, [tool, args]] of [
+            ["discovery_browser", { action: "observe" }], ["discovery_browser", { action: "inspect", selector: "#PRIVATE_SELECTOR" }],
+            ["discovery_recipe_schema", { engine: "BROWSER_DOM" }], ["discovery_checkpoint", { summary: "PRIVATE_SUMMARY", outcome: "UNSUPPORTED" }],
+          ].entries()) await options.onMessage({ id: index + 1, method: "item/tool/call", params: { threadId: "thread-1", turnId: "turn-1", tool, arguments: args } }, reply => replies.push(reply));
+        });
+        return { turn: { id: "turn-1" } };
+      }
+      return {};
+    } });
+    try {
+      const failure = await runCourseDiscoveryWorker({ job: job(), client: { helperEnvironment: () => ({}), checkpoint }, cwd: process.cwd(), sourceHome,
+        recipeSchema: { oneOf: [{ type: "object", required: ["engine"], properties: { engine: { const: "BROWSER_DOM" } } }] }, resolveCli: () => "fake-codex", processFactory,
+        browserFactory: () => ({ close: async () => {}, request: async action => {
+          if (action.action === "inspect") throw Object.assign(new Error("PRIVATE_ERROR_BODY"), { code: "STALE_OR_UNKNOWN_ELEMENT",
+            details: { browserDiagnostics: { staleControlReason: "CONTROL_SIGNATURE_CHANGED", selector: "#PRIVATE_SELECTOR" } } });
+          return { url: "https://example.org/", text: "PRIVATE_PAGE é😀".repeat(3000), controls: [] };
+        } }) }).catch(error => error);
+      expect(failure.code).toBe("DISCOVERY_NO_VERIFIED_RECIPE");
+      expect(failure.discoveryMetrics.genericBudget.toolOperations).toBe(4);
+      const trace = failure.discoveryMetrics.genericToolTrace;
+      expect(trace.lostEntries).toBe(0); expect(trace.entries.map(entry => [entry.action, entry.status])).toEqual([
+        ["BROWSER_OBSERVE", "SUCCESS"], ["BROWSER_INSPECT", "ERROR"], ["SCHEMA", "SUCCESS"], ["CHECKPOINT", "SUCCESS"],
+      ]);
+      expect(trace.entries[0].previewOmitted).toBe(true);
+      expect(trace.entries[1].errorCode).toBe("STALE_OR_UNKNOWN_ELEMENT"); expect(trace.entries[2].schemaEngine).toBe("BROWSER_DOM");
+      expect(trace.entries.map(entry => entry.modelPreviewBytes)).toEqual(replies.map(reply => Buffer.byteLength(reply.result.contentItems[0].text, "utf8")));
+      expect(JSON.stringify(trace)).not.toMatch(/PRIVATE|https|selector|summary|page|example/iu);
+      expect(JSON.parse(replies[1].result.contentItems[0].text).details.staleControlReason).toBe("CONTROL_SIGNATURE_CHANGED");
+      expect(checkpoint.mock.calls.at(-1)?.[2].genericToolTrace.entries).toHaveLength(3);
+    } finally { rmSync(sourceHome, { recursive: true, force: true }); }
+  });
+
   it.each([
     ["rateLimitExceeded", "DISCOVERY_TURN_FAILED"], ["", "DISCOVERY_TURN_FAILED"], ["serverOverloaded", "DISCOVERY_NO_VERIFIED_RECIPE"],
   ])("leaves another model failure unchanged: %s / %s", async (category, code) => {

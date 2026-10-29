@@ -17,6 +17,30 @@ export const DISCOVERY_MODEL = "gpt-6.1-sol";
 export const DISCOVERY_REASONING_EFFORT = "medium";
 export const DISCOVERY_GENERIC_LIMITS = Object.freeze({ toolOperations: 8, totalTokens: 128_000, uncachedInputTokens: 32_000, outputTokens: 8_192 });
 export const DISCOVERY_NONRETRYABLE_GUARD_CODES = Object.freeze(["DISCOVERY_NATIVE_TRANSPORT_FATAL", "DISCOVERY_GENERIC_BUDGET_EXHAUSTED"]);
+const TRACE_ERROR_CODES = new Set(["UNSUPPORTED_ADAPTER_SOURCE", "STALE_OR_UNKNOWN_ELEMENT", "STALE_OR_UNKNOWN_CONTROL",
+  "UNOBSERVED_NAVIGATION", "BROWSER_SESSION_CLOSED", "BROWSER_UNAVAILABLE", "BROWSER_NAVIGATION_FAILED", "DISCOVERY_SOURCE_NOT_OBSERVED",
+  "DISCOVERY_RECIPE_INVALID", "DISCOVERY_REPLAY_INCOMPLETE", "DISCOVERY_PROPOSAL_INVALID", "DISCOVERY_RECIPE_ENGINE_NOT_ALLOWED",
+  "DISCOVERY_BROWSER_ACTION_INVALID", "DISCOVERY_CHECKPOINT_INVALID", "DISCOVERY_ACCESS_NOT_CONFIRMED", "DISCOVERY_NO_BROWSER_PROGRESS",
+  "DISCOVERY_GENERIC_BUDGET_EXHAUSTED", "DISCOVERY_NATIVE_TRANSPORT_FATAL", "DISCOVERY_WORK_DEADLINE", "DISCOVERY_CANCELLED",
+  "DISCOVERY_LEASE_REJECTED", "DISCOVERY_TRANSPORT_FALLBACK_FAILED"]);
+/** Reply metadata only. Never retain arguments, page data or error text. */
+export function createDiscoveryToolTrace() {
+  const entries = []; let lostEntries = 0;
+  return {
+    record(tool, input, status, errorCode, modelText = "") {
+      if (entries.length >= 8) { lostEntries = Math.min(Number.MAX_SAFE_INTEGER, lostEntries + 1); return; }
+      const action = tool === "discovery_browser" ? BROWSER_ACTIONS.includes(input?.action) ? `BROWSER_${input.action.toUpperCase()}` : "BROWSER_UNKNOWN" :
+        tool === "discovery_recipe_schema" ? "SCHEMA" : tool === "discovery_checkpoint" ? "CHECKPOINT" : tool === "discovery_propose_recipe" ? "PROPOSE_RECIPE" : "UNKNOWN_TOOL";
+      let previewOmitted = false;
+      try { previewOmitted = JSON.parse(modelText)?.modelPreview?.kind === "BOUNDED_MODEL_ONLY_PREVIEW"; } catch { /* No reply body is retained. */ }
+      entries.push({ action, status: ["SUCCESS", "ERROR", "NO_REPLY"].includes(status) ? status : "NO_REPLY",
+        ...(status === "SUCCESS" ? {} : { errorCode: TRACE_ERROR_CODES.has(errorCode) ? errorCode : "OTHER_TOOL_ERROR" }),
+        modelPreviewBytes: typeof modelText === "string" ? Buffer.byteLength(modelText, "utf8") : 0, previewOmitted,
+        ...(tool === "discovery_recipe_schema" && ["HTTP_JSON", "BROWSER_DOM", "BROWSER_JSON", "EXISTING_ADAPTER"].includes(input?.engine) ? { schemaEngine: input.engine } : {}) });
+    },
+    snapshot: () => ({ entries: entries.map(entry => ({ ...entry })), lostEntries }),
+  };
+}
 function safeObservedUrl(value) {
   if (typeof value !== "string" || value.length > 2048) return false;
   try {
@@ -822,7 +846,7 @@ function safeFixedReaderFailureDiagnostics(value) {
   return result;
 }
 /** Failure-only, closed metadata from the owned browser. Never source authority. */
-const STALE_CONTROL_REASONS = ["TARGET_OR_DOCUMENT_CHANGED", "NATIVE_DOCUMENT_CHANGED", "CONTROL_NOT_RENDERED",
+const STALE_CONTROL_REASONS = ["ELEMENT_NOT_OBSERVED", "TARGET_OR_DOCUMENT_CHANGED", "NATIVE_DOCUMENT_CHANGED", "CONTROL_NOT_RENDERED",
   "CONTROL_DISABLED", "CONTROL_SIGNATURE_CHANGED", "PUBLIC_DATE_CHOICE_CHANGED", "ENTRY_DISCLOSURE_CHANGED",
   "GESTURE_CONTROL_MISSING", "GESTURE_CONTROL_AMBIGUOUS", "GESTURE_NATIVE_SOURCE_CHANGED",
   "GESTURE_LABEL_INVALID", "GESTURE_BOOKING_INTENT_MISSING", "GESTURE_INTENT_MISSING"];
@@ -918,6 +942,7 @@ function safeLastFeedback(value) {
       ...safeNativeBrowserDiagnostics(details),
       ...safeOfficialBrowserDiagnostics(details),
       ...safeFixedReaderFailureDiagnostics(details),
+      ...(safeStaleControlReason(details.staleControlReason) ? { staleControlReason: details.staleControlReason } : {}),
     } };
   }
   if (value.code === "DISCOVERY_RECIPE_INVALID") {
@@ -995,7 +1020,8 @@ export function discoveryBrowserFeedback(snapshot, action, error) {
   return safeLastFeedback({ code: "DISCOVERY_BROWSER_INCOMPLETE", details: { action, failure,
     ...(error?.code === "BROWSER_ACTION_SCHEMA_INVALID" ? { issues: safeBrowserActionIssues(error.details?.issues) } : {}),
     loading: snapshot?.loading, pendingRequestCount: snapshot?.pendingRequestCount, requests, ...nativeDiagnostics, ...officialDiagnostics,
-    ...safeFixedReaderFailureDiagnostics(snapshot) } });
+    ...safeFixedReaderFailureDiagnostics(snapshot),
+    ...(safeStaleControlReason(snapshot?.staleControlReason) ? { staleControlReason: snapshot.staleControlReason } : {}) } });
 }
 
 /** Model reports may explain a failed attempt, never prove every engine unsupported. */
@@ -1564,6 +1590,10 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
       payload = { ...provenance, summary: checkpointSummary, controller: controllerCheckpoint(), ...extra };
     }
     if (Buffer.byteLength(JSON.stringify(payload), "utf8") > checkpointBytes) throw discoveryError("DISCOVERY_CHECKPOINT_INVALID");
+    // Diagnostics cannot evict source authority or turn a previously valid
+    // checkpoint into an oversized write. Final metrics retain the full trace.
+    const traced = { ...payload, genericToolTrace: toolTrace.snapshot() };
+    if (Buffer.byteLength(JSON.stringify(traced), "utf8") <= checkpointBytes) payload = traced;
     // The backend replaces the whole checkpoint. Serialize writes so a pending
     // ordinary snapshot cannot land after the terminal guard receipt. A failed
     // prior write must not prevent that final diagnostic attempt.
@@ -1604,9 +1634,10 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
   let modelFailure;
   let attemptedModelTurns = 0, completedModelTurns = 0, primaryFailure;
   let toolOperations = 0;
+  const toolTrace = createDiscoveryToolTrace();
   let guardReceipt;
   let guardCheckpoint;
-  const metrics = () => (reportedMetrics = { model, tokenUsage, browserActions, replayDurationsMs, browserTransportsTried,
+  const metrics = () => (reportedMetrics = { model, tokenUsage, browserActions, replayDurationsMs, browserTransportsTried, genericToolTrace: toolTrace.snapshot(),
     attemptedModelTurns, completedModelTurns, originalDeadlineAt: job.deadlineAt, workDeadlineAt: operationDeadlineAt,
     genericBudget: { limits: DISCOVERY_GENERIC_LIMITS, toolOperations, ...(guardReceipt ? { stop: guardReceipt } : {}), usageMayIncludeInFlightResponse: true },
     ...(modelFailure ? { modelFailure } : {}),
@@ -1718,7 +1749,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
           stopForGuard("DISCOVERY_GENERIC_BUDGET_EXHAUSTED", { limit: "toolOperations" }); return;
         }
         queuedTools++;
-        const run = async () => { let replayClosedBrowser = false; try {
+        const run = async () => { let replayClosedBrowser = false, replyTraced = false; try {
           checkWork();
           if (stopping || signal?.aborted) throw discoveryError("DISCOVERY_CANCELLED");
           if (activated) throw discoveryError("DISCOVERY_ALREADY_ACTIVATED");
@@ -1947,7 +1978,9 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
             result = { activated: true };
           }
           checkWork();
-          send({ id: message.id, result: { success: true, contentItems: [{ type: "inputText", text: JSON.stringify(result) }] } });
+          const modelText = JSON.stringify(result);
+          send({ id: message.id, result: { success: true, contentItems: [{ type: "inputText", text: modelText }] } });
+          toolTrace.record(message.params.tool, input, "SUCCESS", undefined, modelText); replyTraced = true;
           if (activated) finish();
           else if (retryableLimitation) rejectTurn(discoveryError("DISCOVERY_NO_VERIFIED_RECIPE", { discoveryDiagnostic: terminalDiagnostic }));
           else if (terminalOutcome) rejectTurn(discoveryError(`DISCOVERY_${terminalOutcome}`));
@@ -1969,7 +2002,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
               try { await saveCheckpoint({}); } catch { /* Feedback persistence is best effort before activation. */ }
             }
           }
-          send({ id: message.id, result: { success: false, contentItems: [{ type: "inputText", text: JSON.stringify({ error: /^[A-Z_]+$/u.test(error?.code ?? "") ? error.code : "DISCOVERY_TOOL_FAILED",
+          const modelText = JSON.stringify({ error: /^[A-Z_]+$/u.test(error?.code ?? "") ? error.code : "DISCOVERY_TOOL_FAILED",
             ...(feedback ? { details: feedback.details } : {}),
             ...(replayClosedBrowser ? { browserSessionClosed: true,
               hint: "Independent replay closed the discovery browser. Open an already observed public URL to obtain fresh controls before correcting the recipe; the original deadline is unchanged." } : {}),
@@ -1977,9 +2010,12 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
               ? { continuation: "The adapter replay is incomplete because its fresh provider identity does not match the canonical venue. Preserve canonical identity and inspect fresh observed public evidence for a supported browser recipe. This failure does not prove the public surface unsupported or empty. Do not resubmit unchanged metadata or overwrite the canonical address." } : {}),
             ...(message.params.tool === "discovery_browser" && (message.params.arguments?.action === "finish" || error?.code === "BROWSER_SESSION_CLOSED")
               ? { hint: "The browser session is closed. Open an already observed public URL to start a fresh session within the original deadline." } : {}),
-            ...(error?.code === "DISCOVERY_SOURCE_NOT_OBSERVED" ? { hint: "Open the official source and follow its public booking link before proposing a changed booking URL." } : {}) }) }] } });
+            ...(error?.code === "DISCOVERY_SOURCE_NOT_OBSERVED" ? { hint: "Open the official source and follow its public booking link before proposing a changed booking URL." } : {}) });
+          send({ id: message.id, result: { success: false, contentItems: [{ type: "inputText", text: modelText }] } });
+          toolTrace.record(message.params.tool, message.params.arguments, "ERROR", error?.code, modelText); replyTraced = true;
           if (activationStarted || ["DISCOVERY_LEASE_REJECTED", "DISCOVERY_NO_BROWSER_PROGRESS", "DISCOVERY_TRANSPORT_FALLBACK_FAILED"].includes(error?.code)) rejectTurn(error);
         } finally {
+          if (!replyTraced) toolTrace.record(message.params.tool, message.params.arguments, "NO_REPLY", guardFailure?.code ?? "DISCOVERY_CANCELLED");
           // finish must release even a helper whose page closed before it could
           // produce its final snapshot. Keep the job clock and observed URLs.
           if (message.params.tool === "discovery_browser" && message.params.arguments?.action === "finish") {
@@ -2048,7 +2084,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
     await guardCheckpoint;
     // Final usage may arrive while the completed turn is being interrupted or
     // the app-server transport is closing, after the result was constructed.
-    if (reportedMetrics) Object.assign(reportedMetrics, { tokenUsage: { ...tokenUsage }, attemptedModelTurns, completedModelTurns,
+    if (reportedMetrics) Object.assign(reportedMetrics, { tokenUsage: { ...tokenUsage }, attemptedModelTurns, completedModelTurns, genericToolTrace: toolTrace.snapshot(),
       genericBudget: { ...reportedMetrics.genericBudget, ...(guardReceipt ? { stop: guardReceipt } : {}) } });
     // This directory is created by this invocation under the OS temp root only.
     const cleanup = await cleanupDiscoveryDirectory(temporary);
