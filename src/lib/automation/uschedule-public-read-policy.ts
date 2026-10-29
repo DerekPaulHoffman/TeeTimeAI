@@ -14,7 +14,7 @@ const simBooking = /^sim booking$/iu;
 const standardSimulatorBooking = /^simulator booking$/iu;
 const disallowedDescription = /\b(?:lessons?|coaching|fitting|leagues?|classes?|members?|membership|packages?|events?|parties?|birthdays?|clinics?|camps?|private|account|checkout|payment|purchase|gift)\b/iu;
 const normalizedLabel = (value: string) => value.normalize("NFKC").replace(/\s+/gu, " ").trim();
-const publicNonMemberRental = /^public\s*\/\s*non[- ]member\s+(?:simulators?|bays?)\s+rentals?$/iu;
+const publicNonMemberRental = /^(?:public\s*\/\s*)?non[- ]member\s+(?:simulators?|bays?)\s+rentals?$/iu;
 export function isUScheduleSimBookingLabel(value: string) { return simBooking.test(normalizedLabel(value)); }
 export function isUScheduleStandardSimulatorBookingLabel(value: string) { return standardSimulatorBooking.test(normalizedLabel(value)); }
 /** USCHEDULE simulator adapter only; recipe validation rejects OUTDOOR targets. */

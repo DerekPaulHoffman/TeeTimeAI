@@ -16,9 +16,9 @@ function setup(url = source, document = html) {
 }
 describe("observed USchedule public filter reads", () => {
   it("recognizes an explicitly public non-member rental without admitting member services", () => {
-    for (const label of ["Public/Non-Member Simulator Rental", "Public / Non Member Bay Rentals"])
+    for (const label of ["Public/Non-Member Simulator Rental", "Public / Non Member Bay Rentals", "Non-Member Simulator Rental", "non member bay rentals"])
       expect(isUSchedulePublicRentalLabel(label)).toBe(true);
-    for (const label of ["Member Simulator Rental", "Public Member Simulator Rental", "Non-Member Simulator Rental Membership", "Public/Non-Member Simulator Rental Lesson", "Private/Non-Member Simulator Rental"])
+    for (const label of ["Member Simulator Rental", "Public Member Simulator Rental", "Non-Member Simulator Rental Membership", "Non-Member Simulator Rental - members only", "Non-Member Simulator Rental Lesson", "Public/Non-Member Simulator Rental Lesson", "Private/Non-Member Simulator Rental"])
       expect(isUSchedulePublicRentalLabel(label)).toBe(false);
   });
   it("admits only the exact public tee-times label inside the existing simulator rental policy", () => {

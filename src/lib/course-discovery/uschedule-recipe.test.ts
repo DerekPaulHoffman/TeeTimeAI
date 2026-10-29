@@ -103,8 +103,7 @@ describe("learned USchedule fixed public reader", () => {
     expect(JSON.stringify(inspected)).not.toContain(cookie);
     await expect(inspectExistingAdapter({ ...recipe.source, venueName: "Different Golf" }, { ...deps, fetch: responses(), venueMatches: () => true })).rejects.toThrow("ADAPTER_IDENTITY_MISMATCH");
   });
-  it("learns and replays an explicitly public non-member rental", async () => {
-    const serviceName = "Public/Non-Member Simulator Rental";
+  it.each(["Public/Non-Member Simulator Rental", "Non-Member Simulator Rental"])("learns and replays an explicitly public non-member rental: %s", async serviceName => {
     const inspected = await inspectExistingAdapter(recipe.source, { ...deps, fetch: responses({ serviceName }), venueMatches: () => true });
     const learned = parseAccessRecipe({ ...recipe, adapter: inspected.adapter });
     expect(learned.adapter).toMatchObject({ serviceId: "72", serviceName });
