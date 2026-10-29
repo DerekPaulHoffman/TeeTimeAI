@@ -41,6 +41,26 @@ describe("strict public TeeItUp alias configuration", () => {
     const prefixed = `<script>self.__next_f.push(${JSON.stringify([1, "1:T4,text"])})</script>` + html();
     expect(parseTeeItUpBookingConfiguration(prefixed, source.venueName)).toEqual({ apiAlias: config.alias, facilityIds: [11] });
   });
+  it("accepts a published state suffix only when the complete canonical address binds that state", () => {
+    const located = html([{ ...config, name: `${source.venueName}, NY` }]);
+    expect(parseTeeItUpBookingConfiguration(located, source.venueName, undefined, source.venueAddress))
+      .toEqual({ apiAlias: config.alias, facilityIds: [11] });
+    for (const address of [undefined, "Example, NY 12345, USA", "10 Example Road, Example, MA 12345, USA"])
+      expect(() => parseTeeItUpBookingConfiguration(located, source.venueName, undefined, address)).toThrow("ADAPTER_CONFIGURATION_UNVERIFIED");
+    for (const name of ["Foreign Golf Club, NY", `${source.venueName}, NJ`, `${source.venueName}, New York`, `${source.venueName}, NY, NJ`])
+      expect(() => parseTeeItUpBookingConfiguration(html([{ ...config, name }]), source.venueName, undefined, source.venueAddress)).toThrow("ADAPTER_CONFIGURATION_UNVERIFIED");
+  });
+  it("replays a state-labelled routing profile while independently rejecting a foreign facility directory", async () => {
+    const configuration = html([{ ...config, name: `${source.venueName}, NY` }]);
+    const inspected = await inspectExistingAdapter(source, { ...deps, fetch: transport(configuration) });
+    const recipe = parseAccessRecipe({ schemaVersion: 1, engine: "EXISTING_ADAPTER", target: { courseId: "example", kind: "OUTDOOR" }, source, adapter: inspected.adapter });
+    const result = await executeExistingAdapterRecipe(recipe as Parameters<typeof executeExistingAdapterRecipe>[0],
+      { date: "2030-10-27", players: 3, startTime: "08:00", endTime: "18:00", timeZone: source.timeZone },
+      { ...deps, fetch: transport(configuration), now: () => new Date("2030-10-26T00:00:00Z"), recipeHash: "a".repeat(64), toInstant: recipeTimeToInstant });
+    expect(result).toMatchObject({ complete: true, status: "AVAILABLE", evidence: { venueVerified: true, dateVerified: true, capacityVerified: true } });
+    for (const directory of [[{ ...row, name: "Foreign Golf Club" }], [{ ...row, address: "99 Foreign Road, Example, NY 12345, USA" }], [{ ...row, timeZone: "America/Chicago" }]])
+      await expect(inspectExistingAdapter(source, { ...deps, fetch: transport(configuration, directory) })).rejects.toThrow();
+  });
   it("uses a unique selected public course only to earn a multi-course operator's directory mapping", () => {
     const hiddenRate = { ...publicRate, showOnBE: false, isMemberRate: true, membershipId: "members" };
     const unrelatedRate = { ...publicRate, golfFacilityId: 33, gCPlayFacilityId: 33, gFName: "Other Golf Club", showOnBE: false };

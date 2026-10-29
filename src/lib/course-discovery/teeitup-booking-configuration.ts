@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { parse, type DefaultTreeAdapterMap } from "parse5";
 import { lightspeedFlightObjects } from "./lightspeed-source";
-import { fullCourseName } from "./teeitup-official-identity";
+import { completeUSAddress, fullCourseName } from "./teeitup-official-identity";
 
 /** Routing facts only. These never substitute for the real facility directory. */
 export const teeItUpBookingConfigurationSchema = z.object({
@@ -13,7 +13,7 @@ export type TeeItUpBookingConfiguration = z.infer<typeof teeItUpBookingConfigura
 
 /** Literal Next Flight JSON from the exact public booking document. No script
  * execution, preceding-alias heuristic, guessed sibling tenant or partial rows. */
-export function parseTeeItUpBookingConfiguration(html: string, venueName: string, selectedFacilityIds?: readonly number[]): TeeItUpBookingConfiguration {
+export function parseTeeItUpBookingConfiguration(html: string, venueName: string, selectedFacilityIds?: readonly number[], venueAddress?: string): TeeItUpBookingConfiguration {
   const reject = (): never => { throw new Error("ADAPTER_CONFIGURATION_UNVERIFIED"); };
   if (Buffer.byteLength(html) > 600_000 || fullCourseName(venueName).length < 8) return reject();
   const objects: Record<string, unknown>[] = [];
@@ -41,7 +41,14 @@ export function parseTeeItUpBookingConfiguration(html: string, venueName: string
     if (typeof row.name !== "string" || !Array.isArray(row.gnFacilityIds)) return reject();
     const ids = row.gnFacilityIds;
     if (!ids.every(value => Number.isSafeInteger(value) && Number(value) > 0 && Number(value) <= 2_147_483_647) || new Set(ids).size !== ids.length) return reject();
-    if (fullCourseName(row.name) !== fullCourseName(venueName)) {
+    // Some public profiles append the location's state to the course label.
+    // Admit that routing label only against the complete saved address. The
+    // refreshed facility directory still owns name/address/timezone identity.
+    const locatedName = /^(.+), ([A-Z]{2})$/u.exec(row.name);
+    const region = venueAddress ? completeUSAddress(venueAddress)?.region : undefined;
+    const sameLocatedName = locatedName && region === locatedName[2] &&
+      fullCourseName(locatedName[1]) === fullCourseName(venueName);
+    if (fullCourseName(row.name) !== fullCourseName(venueName) && !sameLocatedName) {
       // A multi-course public profile names the operator. Only the one course
       // selected by the observed URL may earn its published directory alias.
       // This is routing, not identity: the real refreshed directory must still

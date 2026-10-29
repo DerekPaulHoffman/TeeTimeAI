@@ -482,7 +482,7 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
       readBudget.bookingConfigurationRequested = true;
       const response = await read(source.bookingUrl, { headers: { accept: "text/html,application/xhtml+xml;q=0.9" } });
       if (!/^text\/html(?:;|$)/iu.test(response.headers.get("content-type") ?? "")) fail("ADAPTER_CONFIGURATION_UNVERIFIED");
-      const fresh = parseTeeItUpBookingConfiguration(await response.text(), source.venueName, teeitup.selectedIds);
+      const fresh = parseTeeItUpBookingConfiguration(await response.text(), source.venueName, teeitup.selectedIds, source.venueAddress);
       const saved = adapter?.family === "TEEITUP" ? adapter.publicBookingConfiguration : undefined;
       if (saved && JSON.stringify(saved) !== JSON.stringify(fresh) || teeitup.selectedIds?.some(id => !fresh.facilityIds.includes(id))) fail("ADAPTER_CONFIGURATION_CHANGED");
       publicBookingConfiguration = fresh;
