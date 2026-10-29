@@ -1,4 +1,4 @@
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 import { isSafeRecipeUrl } from "./recipe";
 import { isPublicAvailabilityNavigation } from "./public-navigation-control";
 import { completeUSAddress, fullCourseName } from "./teeitup-official-identity";
@@ -6,9 +6,19 @@ import { attestedNativeDocumentRedirects } from "./native-redirect-routing";
 
 export type PublicFrameParentProof = { officialUrl: string; documentUrl: string } & (
   { kind: "VERIFIED_OFFICIAL_DOCUMENT" } |
-  { kind: "OBSERVED_PUBLIC_BOOKING_PARENT"; officialDocumentUrl: string; observedBookingHref: string });
+  { kind: "OBSERVED_PUBLIC_BOOKING_PARENT"; officialDocumentUrl: string; observedBookingHref: string } |
+  { kind: "PUBLIC_BOOKING_ROUTING_ONLY" });
 export type PublicBookingParentIdentity = { headings: string[]; addressTexts: string[]; truncated?: boolean };
 const currentOfficialParentProofs = new WeakMap<object, { officialUrl: string; documentUrl: string; current: () => boolean }>();
+const currentRoutingParentProofs = new WeakMap<object, { officialUrl: string; documentUrl: string; current: () => boolean }>();
+
+/** A private current public link chain authorizes only reading its iframe source.
+ * It is neither an official document nor proof of the requested venue. */
+export function isCurrentRoutingFrameParent(proof: PublicFrameParentProof | undefined, officialUrl: string, documentUrl: string) {
+  if (!proof || proof.kind !== "PUBLIC_BOOKING_ROUTING_ONLY" || proof.officialUrl !== officialUrl || proof.documentUrl !== documentUrl) return false;
+  const bound = currentRoutingParentProofs.get(proof);
+  return Boolean(bound && bound.officialUrl === officialUrl && bound.documentUrl === documentUrl && bound.current());
+}
 
 /** Only this live scope can carry an official document across an attested
  * host migration. Copied JSON and a historical redirect never mint it. */
@@ -17,7 +27,8 @@ export function isCurrentOfficialFrameParent(proof: PublicFrameParentProof | und
   const bound = currentOfficialParentProofs.get(proof);
   return Boolean(bound && bound.officialUrl === officialUrl && bound.documentUrl === documentUrl && bound.current());
 }
-type Candidate = { kind: "OFFICIAL"; nativeRedirectRequired?: true } | { kind: "BOOKING"; officialDocumentUrl: string; observedBookingHref: string };
+type Candidate = { kind: "OFFICIAL"; nativeRedirectRequired?: true } | { kind: "BOOKING"; officialDocumentUrl: string; observedBookingHref: string;
+  routingSource?: { documentUrl: string; generation: object; binding: string } };
 const stateNames: Record<string, string> = {
   AL:"Alabama",AK:"Alaska",AZ:"Arizona",AR:"Arkansas",CA:"California",CO:"Colorado",CT:"Connecticut",DE:"Delaware",DC:"District of Columbia",
   FL:"Florida",GA:"Georgia",HI:"Hawaii",ID:"Idaho",IL:"Illinois",IN:"Indiana",IA:"Iowa",KS:"Kansas",KY:"Kentucky",LA:"Louisiana",ME:"Maine",MD:"Maryland",
@@ -50,7 +61,8 @@ function matchesIdentity(venueName: string, venueAddress: string | undefined, ev
 /** Context-local source provenance only. Neither a checkpoint nor a proposed
  * recipe can populate it. This permits standalone inspection of visible iframe
  * source markup; it never proves availability or permits iframe execution. */
-export function createPublicBookingParentScope(identity: { officialUrl?: string; venueName?: string; venueAddress?: string }, privateOfficialContactUrl?: string) {
+export function createPublicBookingParentScope(identity: { officialUrl?: string; venueName?: string; venueAddress?: string }, privateOfficialContactUrl?: string,
+  currentNativeDocument?: (request: object, url: string) => string | undefined) {
   const official = identity.officialUrl && documentKey(identity.officialUrl);
   const candidates = new Map<string, Candidate>(official ? [[official, { kind: "OFFICIAL" }]] : []);
   // Only the browser session's private, independently attested Contact handoff
@@ -64,17 +76,19 @@ export function createPublicBookingParentScope(identity: { officialUrl?: string;
   const verified = new Map<string, Candidate>();
   const documentGenerations = new Map<string, object>();
   const documentNativeChecks = new Map<string, () => boolean>();
+  const nativeRequests = new Map<string, object>();
   const remember = (url: string, candidate: Candidate) => {
     if (!candidates.has(url) && candidates.size >= 32) return false;
     candidates.set(url, candidate); return true;
   };
   return {
-    beginDocument(value: string) { const key = documentKey(value); if (key) { verified.delete(key); documentGenerations.delete(key); documentNativeChecks.delete(key); } },
+    beginDocument(value: string) { const key = documentKey(value); if (key) { verified.delete(key); documentGenerations.delete(key); documentNativeChecks.delete(key); nativeRequests.delete(key); } },
     observeDocument(input: { url: string; status: number; redirectedFrom?: string; nativeRequest?: object }) {
       const url = documentKey(input.url), from = input.redirectedFrom && documentKey(input.redirectedFrom);
       if (!url) return;
       documentGenerations.delete(url);
       documentNativeChecks.delete(url);
+      nativeRequests.delete(url);
       let candidate = candidates.get(url);
       const nativeLineage = official && input.nativeRequest ? attestedNativeDocumentRedirects(input.nativeRequest, new Set([official])) : undefined;
       if (candidate?.kind === "OFFICIAL" && candidate.nativeRedirectRequired && nativeLineage?.at(-1)?.toUrl !== url) {
@@ -95,6 +109,7 @@ export function createPublicBookingParentScope(identity: { officialUrl?: string;
       verified.delete(url);
       if (candidate && input.status === 200) {
         verified.set(url, candidate); documentGenerations.set(url, {});
+        if (input.nativeRequest) nativeRequests.set(url, input.nativeRequest);
         if (candidate.kind === "OFFICIAL" && candidate.nativeRedirectRequired && input.nativeRequest && official) {
           const request = input.nativeRequest;
           documentNativeChecks.set(url, () => attestedNativeDocumentRedirects(request, new Set([official]))?.at(-1)?.toUrl === url);
@@ -109,7 +124,10 @@ export function createPublicBookingParentScope(identity: { officialUrl?: string;
       // Do not replace official-document provenance with a same-site link.
       if (candidates.get(target)?.kind === "OFFICIAL") return;
       if (new URL(target).origin === new URL(parent).origin) { remember(target, { kind: "OFFICIAL" }); return; }
-      remember(target, { kind: "BOOKING", officialDocumentUrl: documentUrl, observedBookingHref: href });
+      const sourceRequest = nativeRequests.get(parent), generation = documentGenerations.get(parent);
+      const binding = sourceRequest && currentNativeDocument?.(sourceRequest, documentUrl);
+      remember(target, { kind: "BOOKING", officialDocumentUrl: documentUrl, observedBookingHref: href,
+        ...(generation && binding ? { routingSource: { documentUrl: parent, generation, binding } } : {}) });
     },
     needsIdentity(documentUrl: string) { const key = documentKey(documentUrl); return key !== undefined && verified.get(key)?.kind === "BOOKING"; },
     authorizeParent(documentUrl: string, evidence?: PublicBookingParentIdentity): PublicFrameParentProof | undefined {
@@ -124,11 +142,52 @@ export function createPublicBookingParentScope(identity: { officialUrl?: string;
           current: () => verified.get(key) === candidate && documentGenerations.get(key) === generation && (!nativeCurrent || nativeCurrent()) });
         return proof;
       }
-      if (!identity.venueName || !matchesIdentity(identity.venueName, identity.venueAddress, evidence)) return;
+      if (!identity.venueName || !matchesIdentity(identity.venueName, identity.venueAddress, evidence)) {
+        const source = candidate.routingSource, request = nativeRequests.get(key), generation = documentGenerations.get(key);
+        const binding = request && currentNativeDocument?.(request, documentUrl);
+        if (!source || !generation || !binding || !/^[a-f0-9]{64}$/u.test(binding) || !/^[a-f0-9]{64}$/u.test(source.binding) ||
+            documentGenerations.get(source.documentUrl) !== source.generation) return;
+        const proof: PublicFrameParentProof = { kind: "PUBLIC_BOOKING_ROUTING_ONLY", officialUrl: identity.officialUrl!, documentUrl };
+        currentRoutingParentProofs.set(proof, { officialUrl: identity.officialUrl!, documentUrl,
+          current: () => verified.get(key) === candidate && documentGenerations.get(key) === generation &&
+            documentGenerations.get(source.documentUrl) === source.generation && nativeRequests.get(key) === request &&
+            currentNativeDocument?.(request!, documentUrl) === binding });
+        return proof;
+      }
       return { officialUrl: identity.officialUrl!, documentUrl, kind: "OBSERVED_PUBLIC_BOOKING_PARENT",
         officialDocumentUrl: candidate.officialDocumentUrl, observedBookingHref: candidate.observedBookingHref };
     },
   };
+}
+
+/** A current submenu link can inherit its own visible public-booking caption.
+ * This reads literal menu markup only, after the controller rechecks the clicked
+ * opaque control. It neither clicks the menu nor supplies venue identity. */
+export async function readPublicBookingMenuLabel(link: Locator): Promise<string | undefined> {
+  const observed = await link.evaluate(element => {
+    if (!(element instanceof HTMLAnchorElement) || element.closest("form,template,script,noscript,iframe")) return null;
+    const list = element.closest("ul"), group = list?.parentElement;
+    if (!list || !group || group.tagName !== "LI" || group.getAttribute("aria-haspopup") !== "true") return null;
+    const captions = [...group.children].filter(node => node instanceof HTMLAnchorElement);
+    if (captions.length !== 1) return null;
+    const caption = captions[0] as HTMLAnchorElement;
+    if (caption.getAttribute("href") !== "#" || caption.hasAttribute("onclick") || caption.hasAttribute("download") ||
+        caption.getAttribute("aria-disabled") === "true") return null;
+    for (const target of [element, caption]) {
+      const bounds = target.getBoundingClientRect();
+      if (bounds.width <= 0 || bounds.height <= 0) return null;
+      let node: Element | null = target;
+      for (let depth = 0; node && depth < 40; depth++, node = node.parentElement) {
+        const style = getComputedStyle(node);
+        if (node.hasAttribute("hidden") || node.hasAttribute("inert") || node.getAttribute("aria-hidden") === "true" ||
+            style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse" || Number(style.opacity) === 0) return null;
+      }
+      if (node) return null;
+    }
+    return { href: caption.href, label: caption.innerText.replace(/\s+/gu, " ").trim() };
+  }, undefined, { timeout: 1000 });
+  return observed && /\b(?:book|tee[\s-]*times?|availability|reservations?)\b/iu.test(observed.label) &&
+    isPublicAvailabilityNavigation(observed.href, observed.label) ? observed.label : undefined;
 }
 
 /** Fixed bounded DOM read, including computed ancestor visibility. It reads no

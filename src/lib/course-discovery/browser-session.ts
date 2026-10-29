@@ -52,7 +52,7 @@ import { isPublicAvailabilityNavigation } from "./public-navigation-control";
 import { observedPublicFrameSources } from "./public-frame-source";
 import { exactFreshInspectionFrame, fixedInspectionFrameWitnessSchema, tagFreshInspectionFrame, visibleInspectionFrames, type FixedInspectionFrameWitness } from "./fixed-inspection-frame-witness";
 import { launchPublicReadBrowser } from "./public-browser-launch";
-import { createPublicBookingParentScope, readPublicBookingParentIdentity } from "./public-booking-parent";
+import { createPublicBookingParentScope, readPublicBookingParentIdentity, readPublicBookingMenuLabel } from "./public-booking-parent";
 import { readVisiblePublicCourseContactBlocks } from "./public-course-contact-blocks";
 import { discoveryTrustedContextSchema, type DiscoveryTrustedContext } from "./trusted-context";
 import { createEzLinksPublicReadPolicy, type EzLinksDocumentToken } from "./ezlinks-public-read-policy";
@@ -317,7 +317,15 @@ export async function createCourseDiscoveryBrowserSession(input: {
   // Only exact explicit inputs and actually observed safe public links do.
   const observedNavigationRoots = new Set(allowedNavigation);
   const cpsScope = createCpsPublicSessionScope(initialUrls);
-  const bookingParents = createPublicBookingParentScope({ officialUrl: input.venueOfficialUrl, venueName: input.venueName, venueAddress: input.venueAddress }, officialContactUrl);
+  const bookingParents = createPublicBookingParentScope({ officialUrl: input.venueOfficialUrl, venueName: input.venueName, venueAddress: input.venueAddress }, officialContactUrl,
+    (request, url) => {
+      const witness = nativeMainDocumentWitness;
+      return nativeProxy && !closed && !terminalFailure && !deadline.aborted && !redirectRouting?.firstFatal &&
+        witness?.request === request && navigation?.request === request && navigation.status === 200 &&
+        witness.currentUrl === url && page.url() === url && Date.now() >= witness.proof.observedAt && Date.now() - witness.proof.observedAt <= 5000 &&
+        redirectRouting?.isCurrentCompletedDocumentRead(witness.request, page.mainFrame(), { frameId: witness.frameId, loaderId: witness.loaderId, url })
+        ? witness.proof.documentBindingSha256 : undefined;
+    });
   const publicIntermediaries = new Map<string, { pageUrl: string; documentStartedAt: number }>();
   let nativeMainDocumentWitness: { request: NativeReadRequest; currentUrl: string; timeOrigin: number; frameId: string; loaderId: string;
     proof: NativeMainDocumentContinuity } | undefined;
@@ -1442,6 +1450,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
         .map(attribute => [attribute.name, attribute.value.slice(0, 200)])), undefined, { timeout: 1000 });
       elements.push({ selector: control.selector, tag: control.tag, text: sanitizeResponderText(control.name).slice(0, 250), attributes });
     }
+    const navigationStatus = await currentNavigationStatus(actualCurrentUrl, documentStartedAt);
     const bookingParentIdentity = !blockedAccess && bookingParents.needsIdentity(currentUrl) ? await readPublicBookingParentIdentity(page) : undefined;
     const parentProof = bookingParents.authorizeParent(currentUrl, bookingParentIdentity);
     const publicFrameSources = !blockedAccess && input.venueOfficialUrl && navigation?.status === 200
@@ -1465,7 +1474,6 @@ export async function createCourseDiscoveryBrowserSession(input: {
     }
     // A client navigation can replace the DOM while its old locator inventory
     // is being read. Never return controls and text from different documents.
-    const navigationStatus = await currentNavigationStatus(actualCurrentUrl, documentStartedAt);
     if (!entryDisclosureUsed && !blockedAccess && currentOfficialEntryParent()) {
       const anchors = page.locator("a[href]");
       const selected = await anchors.evaluateAll(nodes => {
@@ -2101,6 +2109,12 @@ export async function createCourseDiscoveryBrowserSession(input: {
           if (known.kind === "field" || known.kind === "filter" && (known.menuButton || (await observeControl(known.locator)).tag === "select")) throw new Error("USE_TYPED_CONTROL_ACTION");
           if (known.href) {
             if (!isSafeRecipeUrl(known.href)) throw new Error("UNSAFE_NAVIGATION");
+            if (nativeProxy && known.kind === "link") {
+              let menuLabel: string | undefined;
+              try { menuLabel = await readPublicBookingMenuLabel(known.locator); }
+              catch { /* A missing optional route witness cannot change the existing click contract. */ }
+              if (menuLabel) bookingParents.observeOfficialLink(page.url(), known.href, menuLabel);
+            }
             allowedNavigation.add(known.href); observedNavigationRoots.add(known.href); navigationOrigins.add(new URL(known.href).origin); navigationStartedAt = Date.now();
             const target = await known.locator.getAttribute("target");
             const rawHref = await known.locator.evaluate(element => (element as HTMLAnchorElement).href, undefined, { timeout: 1000 });

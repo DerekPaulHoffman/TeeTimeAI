@@ -295,6 +295,14 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
           proof.canonicalAddress !== recipe.source.venueAddress || proof.timeZone !== recipe.source.timeZone || recipe.target.kind !== "OUTDOOR")
         ctx.addIssue({ code: "custom", message: "Native ForeUP route ownership must match the exact canonical recipe source" });
     }
+    if (recipe.adapter.family === "ACUITY" && recipe.adapter.officialContactProof) {
+      const proof = recipe.adapter.officialContactProof;
+      if (proof.officialUrl !== recipe.source.officialUrl || proof.bookingUrl !== recipe.source.bookingUrl ||
+          proof.venueName !== recipe.source.venueName || proof.venueAddress !== recipe.source.venueAddress ||
+          proof.timeZone !== recipe.source.timeZone || recipe.target.kind !== "SIMULATOR" ||
+          proof.entryUrl !== new URL("/", recipe.source.bookingUrl).href)
+        ctx.addIssue({ code: "custom", message: "Native public rental contact proof must match the exact canonical recipe source" });
+    }
     if(recipe.adapter.family==="CPS"&&recipe.adapter.officialPostalConflictProof){
       const proof=recipe.adapter.officialPostalConflictProof;
       if(proof.officialUrl!==recipe.source.officialUrl||proof.bookingUrl!==recipe.source.bookingUrl||proof.canonicalAddress!==recipe.source.venueAddress||

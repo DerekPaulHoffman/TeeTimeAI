@@ -58,6 +58,7 @@ import { parseMindbodyAppointmentSource } from "./mindbody-appointment-grid";
 import { executeMindbodyAppointments, inspectMindbodyAppointments, getMindbodyAppointmentDiagnostic,
   type MindbodyAppointmentDiagnostic, type MindbodyAppointmentReaderDeps } from "./mindbody-appointment-reader";
 import { parsePublicUSBusinessAddress } from "./public-us-business-address";
+import { deriveAcuityOfficialContact, type AcuityOfficialContactProof } from "./acuity-official-contact";
 import { bindTeeItUpOfficialContactChain, readNativeTeeItUpContactChain, type TeeItUpContactChainReader,
   type TeeItUpOfficialContactChainProof } from "./teeitup-official-contact-chain";
 
@@ -178,6 +179,8 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
   const teesnapApiOrigin = teesnapRoot ? `https://${teesnapRoot.tenant}.api.teesnap.net` : undefined;
   const teesnapPropertyUrl = teesnapApiOrigin ? `${teesnapApiOrigin}/api/bookingsite/property` : undefined;
   let acuity: AcuityPublicConfiguration | undefined;
+  let acuityContactProof: AcuityOfficialContactProof | undefined;
+  let acuityEntryNext: string | undefined;
   const teeitup = family === "TEEITUP" ? parseTeeItUpRecipeSource(source.bookingUrl)! : undefined;
   let teeitupFacilities: TeeItUpRecipeFacility[] | undefined;
   let teeitupSimulatorSlots: AccessExecutionResult["slots"] | undefined;
@@ -230,6 +233,8 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
     if (!isSafeRecipeUrl(value)) return fail("UNSCOPED_ADAPTER_REQUEST");
     const url = new URL(value);
     if (url.href === booking.href) return url;
+    if (family === "ACUITY" && acuityContactProof && url.href === acuityEntryNext && url.origin === booking.origin &&
+        !url.search && !url.hash && ["/", "/schedule.php"].includes(url.pathname)) return url;
     if (family === "TEESNAP" && url.href === teesnapPropertyUrl) return url;
     const modernTeesnap = adapter?.family === "TEESNAP" && adapter.publicApiVersion === "BOOKINGSITE_V1";
     if (family === "TEESNAP" && adapter?.family === "TEESNAP" && input && url.origin === (modernTeesnap ? teesnapApiOrigin : booking.origin) &&
@@ -304,6 +309,16 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
         responseRedirected: response.redirected, responseUrlMatches: response.url ? response.url === url.href : null };
       if (response.status === 429) failHttp("PROVIDER_THROTTLED", response.status);
       if ([401, 403].includes(response.status)) failHttp("ACCESS_REQUIRED", response.status);
+      if (family === "ACUITY" && acuityContactProof && url.href === acuityEntryNext && url.href !== booking.href) {
+        const location = response.headers.get("location");
+        const next = location ? new URL(location, url) : undefined;
+        if (![301,302,303,307,308].includes(response.status) || response.redirected || !next || next.origin !== booking.origin ||
+            next.search || next.hash || next.username || next.password || next.port ||
+            !(url.pathname === "/" && (next.pathname === "/schedule.php" || next.href === booking.href) ||
+              url.pathname === "/schedule.php" && next.href === booking.href)) fail("ACUITY_OFFICIAL_CONTACT_UNVERIFIED");
+        await response.body?.cancel();
+        return new Response(null, { status: response.status, headers: { location: next.href } });
+      }
       if (!response.ok) failHttp("ADAPTER_TRANSPORT_FAILED", response.status);
       if (response.redirected || response.url && response.url !== url.href) fail("ADAPTER_TRANSPORT_FAILED");
       if (family === "TEESNAP" && (url.href === teesnapPropertyUrl || ["/customer-api/teetimes-day", "/api/bookingsite/teetimes-day"].includes(url.pathname)) &&
@@ -389,10 +404,13 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
       }
       if (family === "ACUITY" && url.href === booking.href) {
         const observed = parseAcuityPublicConfigurationIdentity(text, source.bookingUrl);
-        if (!observed || !acuityVenueMatches(source, observed.venueName, deps.venueMatches) || observed.configuration.timeZone !== source.timeZone) fail("ADAPTER_IDENTITY_MISMATCH");
+        if (!observed || !(acuityVenueMatches(source, observed.venueName, deps.venueMatches) || acuityContactProof &&
+            observed.venueName === acuityContactProof.providerName) || observed.configuration.timeZone !== source.timeZone) fail("ADAPTER_IDENTITY_MISMATCH");
         acuity = observed.configuration;
         if (adapter && (adapter.family !== "ACUITY" || adapter.ownerKey !== acuity.ownerKey || adapter.businessId !== acuity.businessId ||
-            !adapter.rentalProductIds.every(id => acuity!.rentals.some(row => row.id === id)))) fail("ADAPTER_CONFIGURATION_CHANGED");
+            !adapter.rentalProductIds.every(id => acuity!.rentals.some(row => row.id === id)) ||
+            adapter.rentalScope !== acuity.rentalScope || adapter.publicCatalogSha256 !== acuity.publicCatalogSha256 ||
+            adapter.rentalScope && JSON.stringify([...adapter.rentalProductIds].sort()) !== JSON.stringify(acuity.rentals.map(row=>row.id).sort()))) fail("ADAPTER_CONFIGURATION_CHANGED");
       }
       if (family === "FOREUP" && input && url.pathname === "/index.php/api/booking/times" &&
           url.searchParams.get("date") === dateParameter(input.date) && url.searchParams.get("players") === String(input.players)) {
@@ -417,6 +435,30 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
     });
   };
   return { read, family, teeitup, apiAlias, directoryUrl: () => `https://phx-api-be-east-1b.kenna.io/alias/${apiAlias()}/facilities`,
+    acuityContactProof: () => acuityContactProof,
+    async prepareAcuityContact(initialFallback = false) {
+      if (family !== "ACUITY" || !(adapter?.family === "ACUITY" && adapter.officialContactProof) && !initialFallback) return;
+      if (!deps.localCapabilities?.includes("LOCAL_CHROME") || !source.officialUrl || !deps.trustedContext?.canonicalCoursePhone) fail("LOCAL_CHROME_REQUIRED");
+      const loaded = await import("./native-official-page-reader");
+      const native = typeof loaded.readNativeOfficialIdentityPage === "function" ? loaded : (loaded as unknown as {default:typeof loaded}).default;
+      const requestLease: typeof runWithProviderRequestLease | undefined = deps.requestLease ? async (family, work) => {
+        const reply = await deps.requestLease!(family, work);return reply.acquired ? { acquired:true,value:await reply.value } : { acquired:false };
+      } : undefined;
+      const factory:NativeOfficialPageReader = deps.readNativeOfficialPage ?? ((identity,url,end)=>native.readNativeOfficialIdentityPage(identity,url,end,{requestLease}));
+      const page = deps.officialIdentityPage && isFreshNativeOfficialIdentityPage(deps.officialIdentityPage,source.officialUrl) ? deps.officialIdentityPage :
+        await factory(source, source.officialUrl, new Date(deadline));
+      acuityContactProof = deriveAcuityOfficialContact(source,page,source.venueName.replace(/ Indoor Golf & Bar$/u,""),deps.trustedContext.canonicalCoursePhone);
+      if (adapter?.family === "ACUITY" && JSON.stringify(adapter.officialContactProof) !== JSON.stringify(acuityContactProof)) fail("ACUITY_OFFICIAL_CONTACT_CHANGED");
+      let next=acuityContactProof.entryUrl;
+      for(let i=0;i<2 && next!==booking.href;i++) {
+        acuityEntryNext=next;
+        const response=await read(next,{headers:{accept:"text/html"}});
+        next=response.headers.get("location")!;
+      }
+      acuityEntryNext=undefined;
+      if(next!==booking.href) fail("ACUITY_OFFICIAL_CONTACT_UNVERIFIED");
+      fixedReadFailure=undefined;
+    },
     publicBookingConfiguration: () => publicBookingConfiguration ? structuredClone(publicBookingConfiguration) : undefined,
     async refreshStreetTypeOmittedSource() {
       if (!deps.localCapabilities?.includes("LOCAL_CHROME") || !source.officialUrl || !isTeeItUpStreetTypeOmissionCandidate(source.venueAddress ?? ""))
@@ -749,10 +791,18 @@ export async function inspectExistingAdapter(source: Source, deps: Dependencies)
       if (!source.officialUrl || !source.venueAddress) fail("ADAPTER_IDENTITY_MISSING");
       return { adapter: await inspectTeesnapConfiguration({ ...source, officialUrl: source.officialUrl, venueAddress: source.venueAddress }, session.read, deps.venueMatches) };
     }
-    const observed = await readAcuityPublicConfiguration({ bookingUrl: source.bookingUrl, fetchImpl: session.read });
+    let observed;
+    try { observed = await readAcuityPublicConfiguration({ bookingUrl: source.bookingUrl, fetchImpl: session.read }); }
+    catch(error) {
+      if (!(error instanceof SimulatorAvailabilityError) || error.code !== "INVALID_SOURCE" || error.message !== "ADAPTER_IDENTITY_MISMATCH" || !/ Indoor Golf & Bar$/u.test(source.venueName)) throw error;
+      await session.prepareAcuityContact(true);
+      observed = await readAcuityPublicConfiguration({ bookingUrl: source.bookingUrl, fetchImpl: session.read });
+    }
     if (!observed) fail("ADAPTER_CONFIGURATION_UNVERIFIED");
     return { adapter: existingAdapterMetadataSchema.parse({ family: "ACUITY", ownerKey: observed.configuration.ownerKey,
-      businessId: observed.configuration.businessId, rentalProductIds: observed.configuration.rentals.map(row => row.id).sort() }) };
+      businessId: observed.configuration.businessId, rentalProductIds: observed.configuration.rentals.map(row => row.id).sort(),
+      ...(observed.configuration.rentalScope ? { rentalScope:observed.configuration.rentalScope,publicCatalogSha256:observed.configuration.publicCatalogSha256 } : {}),
+      ...(session.acuityContactProof() ? {officialContactProof:session.acuityContactProof()} : {}) }) };
   } finally { session.dispose(); }
 }
 
@@ -930,11 +980,13 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
       })));
     }
     if (adapter.family !== "ACUITY") fail("UNSUPPORTED_ADAPTER_SOURCE");
+    await session!.prepareAcuityContact();
     const observed = await readAcuityPublicConfiguration({ bookingUrl: recipe.source.bookingUrl, fetchImpl: session!.read });
     if (!observed) fail("ADAPTER_CONFIGURATION_UNVERIFIED");
     const available = await fetchAcuitySimulatorAvailability({ date: input.date, durationMinutes: input.durationMinutes!, partySize: 1,
       timeZone: input.timeZone, offering: { id: recipe.target.offeringId!, courseId: recipe.target.courseId, bookingUrl: recipe.source.bookingUrl,
-        providerFamilyKey: "ACUITY", providerMetadata: { ownerKey: adapter.ownerKey, rentalProductIds: adapter.rentalProductIds },
+        providerFamilyKey: "ACUITY", providerMetadata: { ownerKey: adapter.ownerKey, rentalProductIds: adapter.rentalProductIds,
+          ...(adapter.rentalScope ? { rentalScope:adapter.rentalScope,publicCatalogSha256:adapter.publicCatalogSha256 } : {}) },
         maxPartySize: observed.configuration.maxPartySize, supportedDurationsMinutes: [] } }, session!.read);
     return result(available.slots.filter(slot => slot.startsAt > now && slot.startsAt >= start && slot.endsAt <= end).map(slot => ({
       sourceId: slot.sourceId, startsAt: slot.startsAt.toISOString(), endsAt: slot.endsAt.toISOString(), availableSpots: 1,

@@ -121,10 +121,32 @@ function canonicalDataKey(value) {
   } catch { return undefined; }
 }
 const nativeUScheduleContactRequired = adapter => adapter?.family === "USCHEDULE" && adapter.publicLocationProof?.kind === "PUBLIC_LOCATION_SERVICE_POOL_V1";
-const currentNativeProofRequired = adapter => Boolean(nativeUScheduleContactRequired(adapter) || adapter?.officialEntryProof || adapter?.officialRouteOwnershipProof || adapter?.officialStreetTypeOmittedProof || adapter?.officialContactChainProof ||
+const nativeAcuityContactRequired = adapter => adapter?.family === "ACUITY" && Boolean(adapter.officialContactProof);
+const currentNativeProofRequired = adapter => Boolean(nativeUScheduleContactRequired(adapter) || nativeAcuityContactRequired(adapter) || adapter?.officialEntryProof || adapter?.officialRouteOwnershipProof || adapter?.officialStreetTypeOmittedProof || adapter?.officialContactChainProof ||
   adapter?.officialDelegatedBookingProof?.rootDocumentProof || adapter?.officialDelegatedBookingProof?.physicalContactProof ||
   Array.isArray(adapter?.officialDelegatedBookingProof?.hops) && adapter.officialDelegatedBookingProof.hops.some(hop => hop?.kind === "NATIVE_VISIBLE_IFRAME_SRC"));
 function dataHash(value) { const key = canonicalDataKey(value); return key ? createHash("sha256").update(key).digest("hex") : undefined; }
+function acuityContactData(proof, job, bookingUrl, contextUrl) {
+  try {
+    const fields = ["kind", "requiredCapability", "warmTransport", "officialUrl", "documentUrl", "bookingUrl", "entryUrl",
+      "venueName", "venueAddress", "timeZone", "providerName", "addressRepresentation", "canonicalPhoneSha256"];
+    const phone = job.request.trustedContext?.canonicalCoursePhone;
+    const short = job.request.identity.name.replace(/ Indoor Golf & Bar$/u, "");
+    const normalized = value => value.normalize("NFKC").replace(/\s+/gu, " ").trim().toLocaleLowerCase("en-US");
+    if (!proof || Object.keys(proof).sort().join(",") !== [...fields, "witnessSha256"].sort().join(",") ||
+        proof.kind !== "OFFICIAL_BASE_ADDRESS_PHONE_V1" || proof.requiredCapability !== "LOCAL_CHROME" || proof.warmTransport !== "NATIVE_CHROME" ||
+        proof.addressRepresentation !== "CANONICAL_UNIT_OMITTED" || proof.officialUrl !== job.request.identity.officialUrl ||
+        proof.venueName !== job.request.identity.name || proof.venueAddress !== job.request.identity.address || proof.timeZone !== job.request.input.timeZone ||
+        job.request.target.kind !== "SIMULATOR" || proof.bookingUrl !== bookingUrl || contextUrl !== bookingUrl ||
+        ![proof.officialUrl, proof.documentUrl, proof.bookingUrl, proof.entryUrl].every(safeObservedUrl) ||
+        proof.entryUrl !== new URL("/", bookingUrl).href ||
+        short === job.request.identity.name || short.length < 5 || typeof proof.providerName !== "string" || normalized(proof.providerName) !== normalized(short) ||
+        typeof phone !== "string" || !/^\+1[2-9]\d{2}[2-9]\d{6}$/u.test(phone) ||
+        proof.canonicalPhoneSha256 !== createHash("sha256").update(JSON.stringify(phone)).digest("hex")) return false;
+    const semantic = Object.fromEntries(fields.map(key => [key, proof[key]]));
+    return proof.witnessSha256 === createHash("sha256").update(JSON.stringify(semantic)).digest("hex");
+  } catch { return false; }
+}
 function foreupOwnershipData(proof, adapter, job, contextUrl) {
   try {
     const sourceKeys = ["officialUrl","officialDocumentUrl","bookingUrl","venueName","officialTitle","publicLocationName","canonicalAddress","timeZone","publicCoursePhone","sourceWitnessSha256","requiredCapability","warmTransport"];
@@ -281,8 +303,19 @@ function currentNativeProofObservation(job, observation) {
     observation.sourceFingerprint === job.sourceFingerprint && observation.jobAttempt === job.attempts &&
     observation.firstPickedUpAt === job.firstPickedUpAt && observation.deadlineAt === job.deadlineAt;
 }
+function currentAcuityContactProof(job, observation, contextUrl) {
+  const binding = observation && inspectedAdapterBindings.get(observation), native = observation && nativeObservationContexts.get(observation);
+  const jobKey = currentInspectionJobKey(job), adapter = observation?.adapter;
+  if (!binding?.browserOwner || !jobKey || binding.jobKey !== jobKey || binding.adapterKey !== canonicalDataKey(adapter) || !native?.live() ||
+      native.jobId !== job.id || native.leaseToken !== job.leaseToken || observation.jobId !== job.id ||
+      observation.contextUrl !== contextUrl || observation.identityKey !== canonicalDataKey(job.request.identity) ||
+      observation.targetKey !== canonicalDataKey(job.request.target) || observation.inputKey !== canonicalDataKey(job.request.input) ||
+      observation.trustedContextKey !== canonicalDataKey(job.request.trustedContext ?? {}) || !currentNativeProofObservation(job, observation) ||
+      !nativeAcuityContactRequired(adapter) || !acuityContactData(adapter.officialContactProof, job, observation.bookingUrl, contextUrl)) return undefined;
+  return adapter.officialContactProof;
+}
 export function shouldInvalidateDiscoveryAdapterObservation(action, observation) {
-  return ["open", "finish", "inspect_adapter"].includes(action) || Boolean(nativeUScheduleContactRequired(observation?.adapter) || observation?.adapter?.officialBookingSourceProof ||
+  return ["open", "finish", "inspect_adapter"].includes(action) || Boolean(nativeUScheduleContactRequired(observation?.adapter) || nativeAcuityContactRequired(observation?.adapter) || observation?.adapter?.officialBookingSourceProof ||
     observation?.adapter?.officialEntryProof || observation?.adapter?.officialRouteOwnershipProof || observation?.adapter?.officialDelegatedBookingProof || observation?.adapter?.officialStreetTypeOmittedProof || observation?.adapter?.officialContactChainProof);
 }
 function currentCpsOfficialEntryProof(job, observation, contextUrl) {
@@ -313,12 +346,13 @@ function currentCpsOfficialEntryProof(job, observation, contextUrl) {
 /** A fixed inspector reads public configuration; fresh replay still proves availability. */
 export function inspectedAdapterSourceEvidence(recipe, job, observation, officialSourceObserved, contextUrl) {
   const entryProof = currentCpsOfficialEntryProof(job, observation, contextUrl);
+  if (nativeAcuityContactRequired(observation?.adapter) && !currentAcuityContactProof(job, observation, contextUrl)) return undefined;
   if (recipe?.engine !== "EXISTING_ADAPTER" || officialSourceObserved !== true || !observation ||
       observation.jobId !== job.id || observation.officialUrl !== job.request.identity.officialUrl ||
       observation.bookingUrl !== recipe.source?.bookingUrl && entryProof?.bookingUrl !== recipe.source?.bookingUrl || observation.contextUrl !== contextUrl ||
       observation.identityKey !== canonicalDataKey(job.request.identity) || observation.targetKey !== canonicalDataKey(job.request.target) ||
       observation.inputKey !== canonicalDataKey(job.request.input) ||
-      (nativeUScheduleContactRequired(observation.adapter) || observation.adapter?.family === "CPS" || observation.adapter?.officialRouteOwnershipProof || observation.adapter?.officialDelegatedBookingProof || observation.adapter?.officialStreetTypeOmittedProof || observation.adapter?.officialContactChainProof) &&
+      (nativeUScheduleContactRequired(observation.adapter) || nativeAcuityContactRequired(observation.adapter) || observation.adapter?.family === "CPS" || observation.adapter?.officialRouteOwnershipProof || observation.adapter?.officialDelegatedBookingProof || observation.adapter?.officialStreetTypeOmittedProof || observation.adapter?.officialContactChainProof) &&
         observation.trustedContextKey !== canonicalDataKey(job.request.trustedContext ?? {}) ||
       currentNativeProofRequired(observation.adapter) && !currentNativeProofObservation(job, observation)) return undefined;
   const candidateKey = canonicalDataKey(recipe.adapter), observedKey = canonicalDataKey(observation.adapter);
@@ -341,8 +375,21 @@ export function bindDiscoveryRecipeIdentity(recipe, job, adapterObservation, con
     delete adapter.officialContactChainProof;
     delete adapter.officialRouteOwnershipProof;
     delete adapter.officialEntryProof;
+    delete adapter.officialContactProof;
     if (nativeUScheduleContactRequired(adapter)) delete adapter.publicLocationProof;
     const observed = adapterObservation?.adapter;
+    if (adapter.family === "ACUITY" && observed?.family === "ACUITY" && adapterObservation.jobId === job.id &&
+        adapterObservation.officialUrl === job.request.identity.officialUrl && adapterObservation.bookingUrl === proposedSource.bookingUrl &&
+        adapterObservation.contextUrl === contextUrl && adapterObservation.identityKey === canonicalDataKey(job.request.identity) &&
+        adapterObservation.targetKey === canonicalDataKey(job.request.target) && adapterObservation.inputKey === canonicalDataKey(job.request.input) &&
+        adapterObservation.trustedContextKey === canonicalDataKey(job.request.trustedContext ?? {}) && currentNativeProofObservation(job, adapterObservation)) {
+      const inspected = { ...observed }; delete inspected.officialContactProof;
+      const proof = currentAcuityContactProof(job, adapterObservation, contextUrl);
+      if (proof && canonicalDataKey(inspected) === canonicalDataKey(adapter)) {
+        const bytes = JSON.stringify(proof);
+        if (Buffer.byteLength(bytes, "utf8") <= 16_000) adapter.officialContactProof = JSON.parse(bytes);
+      }
+    }
     if (adapter.family === "CPS" && observed?.family === "CPS") {
       const inspected = { ...observed }; delete inspected.officialEntryProof;
       const proof = currentCpsOfficialEntryProof(job, adapterObservation, contextUrl);
@@ -1125,7 +1172,7 @@ export function createDiscoverySnapshotCompactor() {
     if (snapshot && typeof snapshot === "object") {
       const projected = { ...snapshot };
       delete projected.trustedContext;
-      if (nativeUScheduleContactRequired(projected.adapter) || projected.adapter?.family === "CPS" || projected.adapter && (Object.hasOwn(projected.adapter, "officialRouteOwnershipProof") || Object.hasOwn(projected.adapter, "officialDelegatedBookingProof") || Object.hasOwn(projected.adapter, "officialStreetTypeOmittedProof") || Object.hasOwn(projected.adapter, "officialContactChainProof"))) {
+      if (nativeUScheduleContactRequired(projected.adapter) || nativeAcuityContactRequired(projected.adapter) || projected.adapter?.family === "CPS" || projected.adapter && (Object.hasOwn(projected.adapter, "officialRouteOwnershipProof") || Object.hasOwn(projected.adapter, "officialDelegatedBookingProof") || Object.hasOwn(projected.adapter, "officialStreetTypeOmittedProof") || Object.hasOwn(projected.adapter, "officialContactChainProof"))) {
         projected.adapter = { ...projected.adapter };
         if (nativeUScheduleContactRequired(projected.adapter)) delete projected.adapter.publicLocationProof;
         if (projected.adapter.family === "CPS") delete projected.adapter.officialPostalConflictProof;
@@ -1134,6 +1181,7 @@ export function createDiscoverySnapshotCompactor() {
         delete projected.adapter.officialStreetTypeOmittedProof;
         delete projected.adapter.officialContactChainProof;
         delete projected.adapter.officialRouteOwnershipProof;
+        delete projected.adapter.officialContactProof;
       }
       delete projected.completedPublicAssetRequests; delete projected.completedPublicAssetRequestsOverflow;
       delete projected.nativeDocumentRedirects;

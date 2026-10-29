@@ -1,4 +1,5 @@
 import { parseExpressionAt } from "acorn";
+import { createHash } from "node:crypto";
 import { parse, type DefaultTreeAdapterMap } from "parse5";
 
 import { fetchWithProviderTimeout } from "@/lib/adapters/fetch-with-timeout";
@@ -11,6 +12,7 @@ const ORIGIN = "https://app.acuityscheduling.com";
 const PUBLIC_ID = /^[1-9]\d{0,9}$/u;
 const OWNER_KEY = /^[a-zA-Z0-9]{4,40}$/u;
 const MAX_RESPONSE_BYTES = 600_000;
+export const ACUITY_ONE_HOUR_VARIANTS = "PUBLIC_ONE_HOUR_POOLED_VARIANTS_V1" as const;
 type Node = DefaultTreeAdapterMap["node"];
 type PublicProduct = { id: string; calendarIds: string[]; calendarKind: "NAMED_BAY" | "OPAQUE_AGGREGATE" | "OPAQUE_POOLED";
   aggregateRentalIdentity?: "DURATION_LABELLED_SIM_RENTAL" };
@@ -49,7 +51,16 @@ export async function fetchAcuitySimulatorAvailability(input: SimulatorAvailabil
   const maxPartySize = capacity
     ? Math.min(liveCapacity, input.offering.maxPartySize ?? liveCapacity)
     : input.offering.maxPartySize;
-  const product = selectPublicRentalProduct(business, rentalIds.map(String), input.durationMinutes);
+  const scoped = oneHourVariants(business);
+  if (metadata?.rentalScope !== undefined && (metadata.rentalScope !== ACUITY_ONE_HOUR_VARIANTS || !scoped ||
+      metadata.publicCatalogSha256 !== scoped.publicCatalogSha256 || input.durationMinutes !== 60 ||
+      JSON.stringify([...rentalIds].map(String).sort()) !== JSON.stringify(scoped.ids))) throw sourceError("The scoped public rental catalog changed");
+  if (scoped && metadata?.rentalScope !== ACUITY_ONE_HOUR_VARIANTS) throw sourceError("The public rental variants require their complete scoped catalog");
+  const products = scoped ? scoped.ids.map(id => ({ id, calendarIds: ["any"], calendarKind: "OPAQUE_POOLED" as const })) :
+    [selectPublicRentalProduct(business, rentalIds.map(String), input.durationMinutes)];
+  const collected: SimulatorAvailabilityResult["slots"] = [];
+  let evidenceUrl = url.href;
+  for (const product of products) {
   const aggregate = product.calendarKind === "OPAQUE_AGGREGATE" || product.calendarKind === "OPAQUE_POOLED";
   const readUrl = new URL("/api/scheduling/v1/availability/times", aggregate ? url.origin : ORIGIN);
   readUrl.search = new URLSearchParams(aggregate
@@ -62,7 +73,42 @@ export async function fetchAcuitySimulatorAvailability(input: SimulatorAvailabil
   const envelope = record(payload);
   if (!envelope) throw schemaError("The public simulator calendar did not return a date-keyed response");
   const slots = aggregate ? parseAggregateDates(input, envelope, product.id, maxPartySize) : parseLegacyDate(input, envelope, product.id, maxPartySize);
-  return { slots, complete: true, observedAt: new Date(), evidenceUrl: readUrl.toString() };
+  collected.push(...slots); evidenceUrl = readUrl.href;
+  }
+  // These are alternatives in one opaque pool. Identical whole intervals are
+  // one opening, never extra bays; adjacent/partial intervals are not joined.
+  const slots = scoped ? [...new Map(collected.map(slot => {
+    const productId = "one-hour-public-pool";
+    return [`${slot.startsAt.toISOString()}|${slot.endsAt.toISOString()}`, { ...slot, productId,
+      sourceId: `acuity:${input.offering.id}:${productId}:${slot.startsAt.toISOString()}` }];
+  })).values()].sort((a,b) => a.startsAt.getTime()-b.startsAt.getTime()) : collected;
+  return { slots, complete: true, observedAt: new Date(), evidenceUrl };
+}
+
+/** A closed one-hour union, not normalization of contradictory longer labels.
+ * The complete published catalog remains hashed, including quarantined rows. */
+function oneHourVariants(business: Record<string, unknown>) {
+  const types = flattenPublicGroups(business.appointmentTypes);
+  // Preserve the legacy parser's existing typed calendar diagnostic when the
+  // catalog is malformed; this optional profile cannot preempt that path.
+  let calendars:Record<string,unknown>[];
+  try { calendars=flattenPublicGroups(business.calendars); } catch { return; }
+  if (calendars.length !== 1 || calendars[0].id !== "any" || calendars[0].name !== "Any available" || calendars[0].timezone !== "") return;
+  const description = typeof business.description === "string" && business.description.length <= 8_000 ? textContent(parse(business.description)) : "";
+  if (!/\bprivate\s+bay\b/iu.test(description) || /\b(?:members?[-\s]+only|membership required)\b/iu.test(description)) return;
+  const rentals = types.filter(row => typeof row.name === "string" && namedBayRental(row.name, Number(row.duration)));
+  if (rentals.length < 2 || rentals.length > 20 || rentals.some(row => !PUBLIC_ID.test(String(row.id)) ||
+      !/^(?:private )?simulator (?:booking|rental) [1-6] hours?$/u.test(normalizePlainName(row.name, 80) ?? "") ||
+      row.active !== true || row.private !== false || row.type !== "service" || row.classSize !== null || row.canChooseQuantity !== false ||
+      row.paddingBefore !== 0 || row.paddingAfter !== 0 || !Number.isInteger(row.duration) || Number(row.duration) < 60 || Number(row.duration) > 360 ||
+      !Array.isArray(row.calendarIDs) || row.calendarIDs.length !== 1 || row.calendarIDs[0] !== "any") ||
+      new Set(rentals.map(row=>String(row.id))).size !== rentals.length || new Set(rentals.map(row=>normalizePlainName(row.name,80))).size !== rentals.length) return;
+  const selected = rentals.filter(row => row.duration === 60);
+  if (selected.length !== 2 || !selected.some(row => /^simulator (?:booking|rental) 1 hour$/u.test(normalizePlainName(row.name,80)!)) ||
+      !selected.some(row => /^private simulator (?:booking|rental) 1 hour$/u.test(normalizePlainName(row.name,80)!))) return;
+  return { ids: selected.map(row=>String(row.id)).sort(), publicCatalogSha256: createHash("sha256").update(JSON.stringify({
+    appointmentTypes: business.appointmentTypes, calendars: business.calendars, description: business.description,
+    timezone: business.timezone, includesAdminOnly: business.includesAdminOnly, isExpired: business.isExpired })).digest("hex") };
 }
 
 function selectPublicRentalProduct(business: Record<string, unknown>, rentalIds: string[], durationMinutes: number): PublicProduct {
@@ -290,7 +336,8 @@ export function inspectAcuityPublicConfiguration(html: string, sourceUrl: string
     contractField = "RENTAL_IDENTITY";
     if (!candidates.length || candidates.length > 20) return rejected();
     contractField = "RESOURCE_IDENTITY";
-    const rentals = candidates.map(row => {
+    const scope = oneHourVariants(business);
+    const rentals = scope ? scope.ids.map(id => ({ id, durationMinutes: 60, calendarIds: ["any"], calendarKind: "OPAQUE_POOLED" as const })) : candidates.map(row => {
       const product = selectPublicRentalProduct(business, [String(row.id)], Number(row.duration));
       return { id: product.id, durationMinutes: Number(row.duration), calendarIds: product.calendarIds,
         ...(product.calendarKind !== "NAMED_BAY" ? { calendarKind: product.calendarKind } : {}),
@@ -302,6 +349,7 @@ export function inspectAcuityPublicConfiguration(html: string, sourceUrl: string
     contractField = "SETTINGS";
     const result = simulatorPublicConfigurationSchema.safeParse({ family: "ACUITY", ownerKey, businessId: String(business.id),
       timeZone: business.timezone, maxPartySize: capacity ? Number(capacity[1]) : null, rentals,
+      ...(scope ? { rentalScope: ACUITY_ONE_HOUR_VARIANTS, publicCatalogSha256: scope.publicCatalogSha256 } : {}),
       resources: resourceIds.map(id => ({ id, timeZone: business.timezone })) });
     return result.success && result.data.family === "ACUITY" ? { publicConfiguration: result.data } : rejected();
   } catch (error) {

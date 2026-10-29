@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { acuityOfficialContactProofSchema } from "./acuity-official-contact";
 import { isUSchedulePublicRentalLabel } from "@/lib/automation/uschedule-public-read-policy";
 import { whooshSimulatorMetadataSchema } from "./whoosh-simulator-source";
 import { teeItUpOfficialIdentityProofSchema } from "./teeitup-official-identity";
@@ -38,7 +39,11 @@ export const existingAdapterMetadataSchema = z.discriminatedUnion("family", [
       value.publicCatalogSha256 === value.officialRouteOwnershipProof.publicCatalogSha256),
   z.object({ family: z.literal("ACUITY"), ownerKey: z.string().regex(/^[a-zA-Z0-9]{4,40}$/u),
     businessId: publicId, rentalProductIds: z.array(publicId).min(1).max(20)
-      .refine(ids => new Set(ids).size === ids.length) }).strict(),
+      .refine(ids => new Set(ids).size === ids.length),
+    rentalScope: z.literal("PUBLIC_ONE_HOUR_POOLED_VARIANTS_V1").optional(),
+    publicCatalogSha256: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
+    officialContactProof: acuityOfficialContactProofSchema.optional(),
+  }).strict().refine(value=>Boolean(value.rentalScope)===Boolean(value.publicCatalogSha256)&&(!value.rentalScope||value.rentalProductIds.length===2)),
   z.object({ family: z.literal("TEEITUP"), alias: z.string().regex(/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u),
     facilityIds: z.array(numericId).min(1).max(20).refine(ids => new Set(ids).size === ids.length),
     publicBookingConfiguration: teeItUpBookingConfigurationSchema.optional(),

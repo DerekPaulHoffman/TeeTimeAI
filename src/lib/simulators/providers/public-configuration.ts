@@ -90,12 +90,16 @@ export const simulatorPublicConfigurationSchema = z.discriminatedUnion("family",
   z.object({
     family: z.literal("ACUITY"), ownerKey: z.string().regex(/^[a-zA-Z0-9]{4,40}$/u), businessId: publicId,
     timeZone, maxPartySize: z.number().int().min(1).max(20).nullable(),
+    rentalScope: z.literal("PUBLIC_ONE_HOUR_POOLED_VARIANTS_V1").optional(),
+    publicCatalogSha256: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
     rentals: z.array(z.object({ id: publicId, durationMinutes: duration,
       calendarIds: z.array(z.union([publicId, z.literal("any")])).min(1).max(40).refine(ids => new Set(ids).size === ids.length),
       calendarKind: z.enum(["OPAQUE_AGGREGATE", "OPAQUE_POOLED"]).optional(),
       aggregateRentalIdentity: z.literal("DURATION_LABELLED_SIM_RENTAL").optional() }).strict()).min(1).max(20),
     resources: z.array(z.object({ id: z.union([publicId, z.literal("any")]), timeZone }).strict()).min(1).max(40),
-  }).strict().refine(value => new Set(value.rentals.map(row => row.id)).size === value.rentals.length &&
+  }).strict().refine(value => (value.rentalScope ? Boolean(value.publicCatalogSha256) && value.rentals.length === 2 &&
+      value.rentals.every(row => row.durationMinutes === 60 && row.calendarKind === "OPAQUE_POOLED") : !value.publicCatalogSha256) &&
+    new Set(value.rentals.map(row => row.id)).size === value.rentals.length &&
     new Set(value.resources.map(row => row.id)).size === value.resources.length &&
     value.resources.every(row => row.timeZone === value.timeZone) &&
     value.rentals.every(row => row.calendarIds.every(id => value.resources.some(resource => resource.id === id)) &&

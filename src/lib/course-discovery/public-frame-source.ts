@@ -6,7 +6,7 @@ import { parseChronogolfPublicWidget } from "./chronogolf-source";
 import { isSafeRecipeUrl } from "./recipe";
 import { cpsPublicEntryUrl } from "./cps-public-navigation";
 import { knownSimulatorPublicConfigurationFamily, uschedulePublicTenant } from "@/lib/simulators/providers/public-configuration";
-import { isCurrentOfficialFrameParent, type PublicFrameParentProof } from "./public-booking-parent";
+import { isCurrentOfficialFrameParent, isCurrentRoutingFrameParent, type PublicFrameParentProof } from "./public-booking-parent";
 
 /** A published scheduler entry is routing evidence only. The legacy public
  * owner URL is never rewritten into a managed configuration/source URL. */
@@ -27,11 +27,12 @@ export function publicFrameSource(input: { src: string; label: string; visible: 
   documentUrl: string, officialUrl: string, verifiedDocumentUrl: string, parentProof?: PublicFrameParentProof): string | undefined {
   try {
     const current = new URL(documentUrl), official = new URL(officialUrl);
+    const routingOnly = isCurrentRoutingFrameParent(parentProof, officialUrl, documentUrl);
     const scopedParent = parentProof?.officialUrl === officialUrl && parentProof.documentUrl === documentUrl &&
       (parentProof.kind === "VERIFIED_OFFICIAL_DOCUMENT"
         ? current.hostname.replace(/^www\./u, "") === official.hostname.replace(/^www\./u, "") ||
           isCurrentOfficialFrameParent(parentProof, officialUrl, documentUrl)
-        : parentProof.kind === "OBSERVED_PUBLIC_BOOKING_PARENT" && isSafeRecipeUrl(parentProof.officialDocumentUrl) && isSafeRecipeUrl(parentProof.observedBookingHref) &&
+        : routingOnly || parentProof.kind === "OBSERVED_PUBLIC_BOOKING_PARENT" && isSafeRecipeUrl(parentProof.officialDocumentUrl) && isSafeRecipeUrl(parentProof.observedBookingHref) &&
           new URL(parentProof.officialDocumentUrl).hostname.replace(/^www\./u, "") === official.hostname.replace(/^www\./u, "") &&
           new URL(parentProof.observedBookingHref).hostname.replace(/^www\./u, "") === current.hostname.replace(/^www\./u, ""));
     if (!input.visible || input.srcdoc || ![documentUrl, officialUrl, verifiedDocumentUrl].every(isSafeRecipeUrl) || current.origin !== official.origin && !scopedParent || current.protocol !== "https:" ||
@@ -57,6 +58,7 @@ export function publicFrameSource(input: { src: string; label: string; visible: 
     const acuityEntry = officialDocument && isPublicAcuityFrameEntry(url);
     const chronogolfWidget = officialDocument && parseChronogolfPublicWidget(url);
     const knownEntry = Boolean(parseTeeItUpRecipeSource(url) || parseLightspeedSource(url) || uschedulePublicTenant(url) || teeItUpV2 || teeItUpPlay || acuityEntry || chronogolfWidget);
+    if (parentProof?.kind === "PUBLIC_BOOKING_ROUTING_ONLY" && (!routingOnly || !knownEntry)) return;
     const labelled = /\b(?:tee\s*times?|booking|availability|book\s+(?:a\s+)?(?:simulator\s+)?bay|simulator\s+rentals?)\b/iu.test(input.label);
     if ((!knownEntry && !labelled) || !isPublicAvailabilityNavigation(url, input.label || "Public tee time availability")) return;
     return url;

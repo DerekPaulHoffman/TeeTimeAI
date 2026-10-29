@@ -337,6 +337,14 @@ function bindRecipe(recipe: CourseAccessRecipeData, source: Source, sourceEviden
   if (sourceEvidence && (sourceEvidence.officialUrl !== recipe.source.officialUrl ||
       sourceEvidence.observedBookingUrl !== recipe.source.bookingUrl)) conflict();
   if (source.identity.bookingUrl && recipe.source.bookingUrl !== source.identity.bookingUrl && !sourceEvidence) conflict();
+  if (recipe.engine === "EXISTING_ADAPTER" && recipe.adapter.family === "ACUITY" && recipe.adapter.officialContactProof) {
+    const proof = recipe.adapter.officialContactProof, phone = source.trustedContext.canonicalCoursePhone;
+    if (!phone || proof.canonicalPhoneSha256 !== createHash("sha256").update(JSON.stringify(phone)).digest("hex") ||
+        proof.venueName !== source.identity.name || proof.venueAddress !== source.identity.address ||
+        proof.officialUrl !== recipe.source.officialUrl || proof.bookingUrl !== recipe.source.bookingUrl ||
+        proof.timeZone !== source.identity.timeZone ||
+        request !== undefined && !isCurrentTrustedContext(request.trustedContext, source.trustedContext)) conflict();
+  }
   if (recipe.engine === "EXISTING_ADAPTER" && recipe.adapter.family === "USCHEDULE" &&
       recipe.adapter.publicLocationProof?.kind === "PUBLIC_LOCATION_SERVICE_POOL_V1") {
     const proof = recipe.adapter.publicLocationProof.official, phone = source.trustedContext.canonicalCoursePhone;
