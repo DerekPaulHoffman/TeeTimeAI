@@ -234,14 +234,14 @@ describe("worker asset serialization before validation and independent replay", 
     expect(JSON.stringify(outcome.executeRecipe.mock.calls)).not.toContain("modelPreview");
   });
 
-  it("counts successful on-demand documentation against the same eight-operation guard", async () => {
+  it("counts successful on-demand documentation against the same sixteen-operation guard", async () => {
     const documentation = { tool: "discovery_recipe_schema", arguments: { engine: "BROWSER_DOM" } };
-    const outcome = await run({ actions: Array.from({ length: 9 }, () => documentation), recipeSchema: {
+    const outcome = await run({ actions: Array.from({ length: 17 }, () => documentation), recipeSchema: {
       oneOf: [{ type: "object", properties: { engine: { const: "BROWSER_DOM" } }, required: ["engine"], additionalProperties: false }],
     } });
     expect(outcome.result.code).toBe("DISCOVERY_GENERIC_BUDGET_EXHAUSTED");
-    expect(outcome.result.discoveryMetrics.genericBudget.toolOperations).toBe(8);
-    expect(outcome.replies.filter(reply => reply.result?.success)).toHaveLength(8);
+    expect(outcome.result.discoveryMetrics.genericBudget.toolOperations).toBe(16);
+    expect(outcome.replies.filter(reply => reply.result?.success)).toHaveLength(16);
     expect(outcome.client.candidate).not.toHaveBeenCalled(); expect(outcome.executeRecipe).not.toHaveBeenCalled();
     expect(outcome.browsers).toHaveLength(0);
   });

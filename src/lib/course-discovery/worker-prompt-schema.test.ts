@@ -153,7 +153,7 @@ describe("bounded initial discovery instructions", () => {
     const instructions = discoveryPromptInstructions({ browserTransport: "NATIVE_CHROME" });
     expect(size(instructions) + size(DISCOVERY_TOOLS) + 500).toBeLessThan(12_000);
     for (const rule of ["signed-out", "Never select/hold/reserve", "canonical", "Standard Public", "Players are attendee context", "fixed",
-      "modelPreview", "never prove", "two fresh independent challenges", "eight-operation", "INCOMPLETE"])
+      "modelPreview", "never prove", "two fresh independent challenges", "sixteen-operation", "INCOMPLETE"])
       expect(instructions).toContain(rule);
     expect(instructions).not.toContain('"$defs"'); expect(instructions).not.toContain("CPS .cps.golf");
     expect(discoveryPromptInstructions({ recipeEngineConstraint: "EXISTING_ADAPTER" })).toContain("Other engines and stale metadata/source reports are forbidden");
