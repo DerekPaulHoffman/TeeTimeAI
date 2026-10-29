@@ -332,7 +332,10 @@ export async function openStagehandSession({ model, deadline, cwd, signal, onMet
     const sourceReadOptions = () => ({ ...boundOptions(), ...(sourceRoutingOnly ? { locator: page.locator('body') } : {}) });
     return {
       browser, stagehand, get page() { return page; }, startupMs: Date.now() - openedAt,
-      goto: value => guarded(async () => { assertPublicUrl(value); await checked(owned.prepareNavigation(value)); if(sourceRoutingOnly&&initialSourceUrl===undefined)initialSourceUrl=value;return page.goto(value, { waitUntil: 'domcontentloaded', timeout: Math.min(30000, Math.max(1, deadline - Date.now())) }); },'OPEN'),
+      // The guarded provider queue can delay parser-blocking public assets.
+      // Keep this initial source navigation inside its original source budget;
+      // a 30s SDK timeout must not discard an otherwise live queued document.
+      goto: value => guarded(async () => { assertPublicUrl(value); await checked(owned.prepareNavigation(value)); if(sourceRoutingOnly&&initialSourceUrl===undefined)initialSourceUrl=value;return page.goto(value, { waitUntil: 'domcontentloaded', timeout: Math.min(sourceRoutingOnly ? 60000 : 30000, Math.max(1, deadline - Date.now())) }); },'OPEN'),
       recoverSourceNotFound: (originalRoot,failedUrl) => guarded(async()=>{
         if(!sourceRoutingOnly||notFoundRecoveryUsed||originalRoot!==initialSourceUrl||page.pageId!==owned.targetId||
           typeof owned.observeSourceReadiness!=='function'||typeof owned.snapshotFailures!=='function')throw Error('STAGEHAND_SOURCE_NOT_FOUND');

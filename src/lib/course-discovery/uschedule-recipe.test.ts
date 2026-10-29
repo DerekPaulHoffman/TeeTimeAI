@@ -103,6 +103,20 @@ describe("learned USchedule fixed public reader", () => {
     expect(JSON.stringify(inspected)).not.toContain(cookie);
     await expect(inspectExistingAdapter({ ...recipe.source, venueName: "Different Golf" }, { ...deps, fetch: responses(), venueMatches: () => true })).rejects.toThrow("ADAPTER_IDENTITY_MISMATCH");
   });
+  it("learns and replays an explicitly public non-member rental", async () => {
+    const serviceName = "Public/Non-Member Simulator Rental";
+    const inspected = await inspectExistingAdapter(recipe.source, { ...deps, fetch: responses({ serviceName }), venueMatches: () => true });
+    const learned = parseAccessRecipe({ ...recipe, adapter: inspected.adapter });
+    expect(learned.adapter).toMatchObject({ serviceId: "72", serviceName });
+    for (const [date, players] of [["2030-10-24", 2], ["2030-10-25", 3]] as const) {
+      const result = await executeAccessRecipe(learned, { ...input, date, players }, { ...deps, fetch: responses({ serviceName }) });
+      expect(result).toMatchObject({ status: "AVAILABLE", complete: true, evidence: {
+        venueVerified: true, dateVerified: true, durationVerified: true, completeVerified: true,
+      } });
+      expect(result.slots).toHaveLength(3);
+      expect(result.slots.every(slot => Date.parse(slot.endsAt!) - Date.parse(slot.startsAt) === 60 * 60_000)).toBe(true);
+    }
+  });
   it.each(["Simulator Rental Membership", "Members-only Simulator Rental", "Simulator Rental - members only", "Member Simulator Rental"])("rejects selected nonpublic rental even beside a public alternative: %s", label => {
     const html = `<body class="examplegolf"><select id="select_service"><option value="72" selected>${label}</option><option value="73">Public Simulator Rental</option></select>
       <select id="select_length"><option value="60">1 hour</option></select></body>`;

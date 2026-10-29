@@ -48,6 +48,10 @@ it("exempts only exact incidental telemetry destinations from completeness", () 
   expect(isIncidentalBrowserRequest("https://analytics.google.com/g/collect?v=2")).toBe(true);
   expect(isIncidentalBrowserRequest("https://www.google-analytics.com/analytics.js")).toBe(true);
   expect(isIncidentalBrowserRequest("https://www.google-analytics.com/j/collect?v=1")).toBe(true);
+  expect(isIncidentalBrowserRequest("https://cdn.parsely.com/keys/example.org/p.js?ver=3.5")).toBe(true);
+  expect(isNonEvidenceBrowserResource("https://cdn.parsely.com/keys/example.org/p.js", "script")).toBe(true);
+  expect(isIncidentalBrowserRequest("https://cdn.parsely.com.evil.test/keys/example.org/p.js")).toBe(false);
+  expect(isIncidentalBrowserRequest("https://cdn.parsely.com/api/availability")).toBe(false);
   expect(isIncidentalBrowserRequest("https://www.google-analytics.com.evil.test/analytics.js")).toBe(false);
   expect(isIncidentalBrowserRequest("https://passfactory.com/favicon/favicon-96x96.png")).toBe(true);
   expect(isIncidentalBrowserRequest("https://example.org/favicon.ico")).toBe(true);

@@ -4,6 +4,20 @@ import {settleSourceDocument,sourceDocumentSettled,openStagehandSession} from '.
 import {projectSourceDocumentReadiness,projectSourceDiagnostic,sourceFailureDiagnostic} from './source-diagnostic.mjs';
 const settled={readyState:'interactive',bodyPresent:true,mainDocumentCurrent:true,mainDocumentComplete:true,mainReadPending:false,pendingReads:0,mainDocumentStatus:200};
 
+test('initial source navigation allows queued assets but never extends its original deadline',async()=>{
+ for(const [sourceRoutingOnly,budget,ceiling] of [[true,120000,60000],[false,120000,30000],[true,500,500]]){
+  let options;const page={pageId:'owned',url:async()=>'https://owned.example/',goto:async(_url,value)=>{options=value;}};
+  const browser={context:{pages:async()=>[page]},close:async()=>{}};
+  const owned={kind:'OWNED_GUARDED_STAGEHAND_CONTEXT',cdpUrl:'http://127.0.0.1:12345',targetId:'owned',assertGuardedTargets:async()=>true,prepareNavigation:async()=>{},beforeAction:async()=>{},close:async()=>({browserClosed:true})};
+  const deadline=Date.now()+budget;
+  const session=await openStagehandSession({deadline,modelDisabled:true,sourceRoutingOnly,ownedBrowser:owned},{loadRuntime:async()=>({localBrowser:{connect:async()=>browser},Stagehand:{create:async()=>({close:async()=>{}})}})});
+  await session.goto('https://owned.example/');
+  assert.equal(options.waitUntil,'domcontentloaded');assert.ok(options.timeout>0&&options.timeout<=ceiling);
+  assert.ok(options.timeout>=ceiling-250);assert.ok(Date.now()<deadline);
+  await session.close();
+ }
+});
+
 test('parser completion waits for the exact current main read; ancillary activity need not become idle',async()=>{
  let time=1000,reads=0;const observations=[];
  const result=await settleSourceDocument(async()=>{reads++;return reads===1?{...settled,readyState:'loading',bodyPresent:false,mainReadPending:true,mainDocumentComplete:false}:{...settled,pendingReads:9};},

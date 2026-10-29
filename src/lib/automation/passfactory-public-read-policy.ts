@@ -69,6 +69,8 @@ export function isIncidentalBrowserRequest(value: string) {
     url.hostname === "js.stripe.com" ||
     url.hostname === "www.googletagmanager.com" && ["/gtag/js", "/gtm.js"].includes(url.pathname) ||
     ["analytics.google.com", "www.google-analytics.com", "region1.google-analytics.com", "stats.g.doubleclick.net"].includes(url.hostname) ||
+    // Parse.ly's documented client tracker is analytics, never availability.
+    url.hostname === "cdn.parsely.com" && /^\/keys\/[a-z0-9][a-z0-9.-]{0,252}\/p\.js$/iu.test(url.pathname) ||
     url.hostname === "www.google.com" && /^(?:\/g\/collect|\/ccm\/collect|\/rmkt\/collect\/\d+\/)$/u.test(url.pathname) ||
     url.hostname === "ad.doubleclick.net" && url.pathname === "/ccm/s/collect" ||
     url.hostname === "googleads.g.doubleclick.net" && /^\/pagead\/viewthroughconversion\/\d+\/$/u.test(url.pathname) ||
