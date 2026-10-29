@@ -172,6 +172,45 @@ export async function releaseCourseProviderObservationInTransaction(
   });
 }
 
+/** A complete later outdoor recipe may reconcile an abandoned predecessor.
+ * The caller owns the course writer lock and has already atomically consumed
+ * the exact authenticated execution. Active or overlapping reads retain their
+ * fence, including a predecessor whose lease extended into this execution. */
+export async function retireExpiredCourseProviderPredecessorInTransaction(
+  transaction: Prisma.TransactionClient,
+  input: { courseId: string; claimedAt: Date; observedAt: Date },
+): Promise<boolean> {
+  const courseId = requireNonEmptyCourseId(input.courseId);
+  if (![input.claimedAt, input.observedAt].every(value => value instanceof Date && Number.isFinite(value.getTime()))) return false;
+  const rows = await transaction.$queryRaw<Array<{ retired: number }>>(Prisma.sql`
+    WITH predecessor AS MATERIALIZED (
+      SELECT "providerFamilyKey", "slot", "leaseToken", "updatedAt", "leaseExpiresAt"
+      FROM "ProviderRequestLease"
+      WHERE "providerFamilyKey" = ${getCourseProviderObservationKey(courseId)}
+        AND "slot" = ${COURSE_PROVIDER_OBSERVATION_SLOT}
+      FOR UPDATE
+    ), retired AS (
+      DELETE FROM "ProviderRequestLease" AS marker USING predecessor
+      WHERE marker."providerFamilyKey" = predecessor."providerFamilyKey"
+        AND marker."slot" = predecessor."slot"
+        AND marker."leaseToken" = predecessor."leaseToken"
+        AND marker."updatedAt" = predecessor."updatedAt"
+        AND marker."leaseExpiresAt" = predecessor."leaseExpiresAt"
+        AND length(btrim(predecessor."leaseToken")) > 0
+        AND isfinite(predecessor."updatedAt") AND isfinite(predecessor."leaseExpiresAt")
+        AND predecessor."updatedAt" <= predecessor."leaseExpiresAt"
+        AND predecessor."leaseExpiresAt" <= statement_timestamp()
+        AND predecessor."updatedAt" < ${input.claimedAt}
+        AND predecessor."updatedAt" < ${input.observedAt}
+        AND predecessor."leaseExpiresAt" < ${input.claimedAt}
+        AND predecessor."leaseExpiresAt" < ${input.observedAt}
+      RETURNING 1
+    ) SELECT count(*)::int AS retired FROM retired
+  `);
+  if (rows.length !== 1 || ![0, 1].includes(rows[0].retired)) throw new Error("Invalid provider predecessor retirement");
+  return rows[0].retired === 1;
+}
+
 /**
  * Ends execution without declaring the provider source reconciled into the
  * canonical monitoring state. The durable row remains as an ambiguity fence;

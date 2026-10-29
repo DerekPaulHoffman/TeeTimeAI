@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -14,6 +14,7 @@ const mail = vi.hoisted(() => ({ match: vi.fn().mockResolvedValue({ deliveryStat
 vi.mock("@/lib/email/alerts", async original => ({ ...await original<object>(), sendTeeTimeAlert: mail.match, sendSearchStatusEmail: mail.status, sendSimulatorStatusEmail: mail.status }));
 const url = process.env.COURSE_DISCOVERY_TEST_DATABASE_URL;
 const ids = { users: [] as string[], courses: [] as string[], runs: [] as string[] };
+const markerKeys: string[] = [];
 let service: typeof import("./service");
 let runtime: typeof import("./runtime");
 
@@ -28,6 +29,8 @@ describe.skipIf(!url)("learned recipe through durable execution and normal match
   });
   afterEach(async () => {
     if (!client) return;
+    await client.providerRequestLease.deleteMany({ where: { providerFamilyKey: { in: markerKeys } } });
+    markerKeys.length = 0;
     await client.course.deleteMany({ where: { id: { in: ids.courses } } });
     await client.user.deleteMany({ where: { id: { in: ids.users } } });
     await client.automationRun.deleteMany({ where: { id: { in: ids.runs } } });
@@ -166,6 +169,101 @@ describe.skipIf(!url)("learned recipe through durable execution and normal match
       consumed: { recipeHash: expect.any(String), observedAt: expect.any(String), consumedAt: expect.any(String) },
     });
   });
+
+  async function predecessor(courseId: string, startedAt: Date, expiresAt: Date, token = randomUUID()) {
+    const key = `__COURSE_PROVIDER_OBSERVATION__:${createHash("sha256").update(courseId).digest("hex")}`;
+    markerKeys.push(key);
+    await client.providerRequestLease.create({ data: { providerFamilyKey: key, slot: 0, leaseToken: token,
+      updatedAt: startedAt, leaseExpiresAt: expiresAt } });
+    return key;
+  }
+
+  async function freshExecution(simulator = false) {
+    const f = await fixture(simulator);
+    await runtime.getOrQueueRecipeExecution({ searchId: f.search.id, target: f.target, input: f.input });
+    const job = (await runtime.claimNextRecipeExecution("predecessor-repair-reader"))!;
+    const claimedAt = new Date(Date.now() - 10_000);
+    await client.localReaderJob.update({ where: { id: job.id }, data: { claimedAt } });
+    const result = await f.run(job.input);
+    await runtime.completeRecipeExecution(job.id, job.leaseToken, result);
+    return { f, job, claimedAt, result };
+  }
+
+  it("reconciles an expired older provider ambiguity with a complete learned read and reaches the unchanged normal outbox", async () => {
+    const { f, job, claimedAt } = await freshExecution();
+    // Setup already reached the owner; this must exercise an ordinary MATCH.
+    await client.teeSearch.update({ where: { id: f.search.id }, data: { statusEmailSentAt: new Date() } });
+    const key = await predecessor(f.course.id, new Date(claimedAt.getTime() - 60_000), new Date(claimedAt.getTime() - 30_000));
+    const { runSearchCheck } = await import("@/lib/automation/search-check");
+    const outcome = await runSearchCheck(f.search.id, "isolated-marker-recovery-test", f.lease);
+    ids.runs.push(...(await client.automationRun.findMany({ where: { notes: { contains: "isolated-marker-recovery-test" } }, select: { id: true } })).map(run => run.id));
+    expect(outcome.courseResults[0]).toMatchObject({ outcome: "MATCH_FOUND", availableMatches: 1 });
+    expect(await client.providerRequestLease.count({ where: { providerFamilyKey: key } })).toBe(0);
+    expect((await client.localReaderJob.findUniqueOrThrow({ where: { id: job.id } })).sourceContext).toMatchObject({ consumed: { recipeHash: expect.any(String) } });
+    expect(mail.match.mock.calls.length + mail.status.mock.calls.length).toBe(1);
+    expect(await client.searchEmailDelivery.count({ where: { teeSearchId: f.search.id, status: "SENT", kind: "MATCH" } })).toBe(1);
+  });
+
+  it.each(["active", "equal-start", "equal-expiry", "newer", "overlap", "malformed-token"] as const)(
+    "retains a %s provider observation while consuming the learned read", async shape => {
+      const { f, job, claimedAt } = await freshExecution();
+      const start = new Date(claimedAt.getTime() - 60_000), expiry = new Date(claimedAt.getTime() - 30_000);
+      if (shape === "active") expiry.setTime(Date.now() + 60_000);
+      if (shape === "equal-start") { start.setTime(claimedAt.getTime()); expiry.setTime(claimedAt.getTime() + 1); }
+      if (shape === "equal-expiry") expiry.setTime(claimedAt.getTime());
+      if (shape === "newer") { start.setTime(claimedAt.getTime() + 1); expiry.setTime(claimedAt.getTime() + 2); }
+      if (shape === "overlap") expiry.setTime(claimedAt.getTime() + 1);
+      const token = shape === "malformed-token" ? " " : randomUUID(), key = await predecessor(f.course.id, start, expiry, token);
+      const { commitCurrentCourseTeeTimeMatches } = await import("@/lib/automation/db-service");
+      const { recordCourseMonitoringSuccess } = await import("@/lib/automation/course-monitoring");
+      const ready = await runtime.getOrQueueRecipeExecution({ searchId: f.search.id, target: f.target, input: f.input });
+      if (ready?.state !== "ready") throw new Error("Fixture execution not ready");
+      await recordCourseMonitoringSuccess({ courseId: f.course.id, outcome: "MATCH_FOUND", providerObservedAt: new Date(ready.result.observedAt) });
+      await commitCurrentCourseTeeTimeMatches({ searchId: f.search.id, alertGeneration: f.search.alertGeneration, checkLeaseToken: f.lease.token,
+        courseId: f.course.id, date: f.input.date, timeZone: "UTC", providerObservedAt: new Date(ready.result.observedAt), sourceKind: "SUCCESS",
+        accessRecipeObservation: { jobId: job.id, recipeId: ready.recipeId, courseId: f.course.id, searchId: f.search.id },
+        matches: ready.result.slots.map(slot => ({ ...slot, startsAt: new Date(slot.startsAt), endsAt: slot.endsAt ? new Date(slot.endsAt) : undefined })) });
+      expect(await client.providerRequestLease.findUnique({ where: { providerFamilyKey_slot: { providerFamilyKey: key, slot: 0 } } })).toMatchObject({ leaseToken: token, updatedAt: start, leaseExpiresAt: expiry });
+      expect((await client.localReaderJob.findUniqueOrThrow({ where: { id: job.id } })).sourceContext).toHaveProperty("consumed");
+    });
+
+  it("rolls back predecessor retirement with canonical consumption and never uses a simulator offering to retire outdoor ambiguity", async () => {
+    const { f, job, claimedAt } = await freshExecution();
+    const key = await predecessor(f.course.id, new Date(claimedAt.getTime() - 60_000), new Date(claimedAt.getTime() - 30_000));
+    const { runSerializedCourseMonitoringWrite } = await import("@/lib/automation/course-monitoring");
+    const { retireExpiredCourseProviderPredecessorInTransaction } = await import("@/lib/automation/provider-execution-marker");
+    await expect(runSerializedCourseMonitoringWrite(f.course.id, async tx => {
+      const consumed = await runtime.markRecipeObservationConsumed(tx, { jobId: job.id, recipeId: f.activated.recipeId, courseId: f.course.id, searchId: f.search.id });
+      expect(consumed).not.toBeNull();
+      expect(await retireExpiredCourseProviderPredecessorInTransaction(tx, { courseId: f.course.id, ...consumed! })).toBe(true);
+      throw new Error("Injected canonical rollback");
+    })).rejects.toThrow("Injected canonical rollback");
+    expect(await client.providerRequestLease.count({ where: { providerFamilyKey: key } })).toBe(1);
+    expect((await client.localReaderJob.findUniqueOrThrow({ where: { id: job.id } })).sourceContext).not.toHaveProperty("consumed");
+    const simulator = await freshExecution(true);
+    await client.$transaction(async tx => expect(await runtime.markRecipeObservationConsumed(tx, { jobId: simulator.job.id,
+      recipeId: simulator.f.activated.recipeId, courseId: simulator.f.course.id, offeringId: simulator.f.offering!.id, searchId: simulator.f.search.id })).toBeNull());
+  });
+
+  it.each(["failed", "partial", "malformed", "stale", "changed-generation", "changed-source"] as const)(
+    "does not retire a predecessor for a %s learned execution", async shape => {
+      const { f, job, claimedAt, result } = await freshExecution();
+      const key = await predecessor(f.course.id, new Date(claimedAt.getTime() - 60_000), new Date(claimedAt.getTime() - 30_000));
+      if (shape === "failed" || shape === "partial") await client.localReaderJob.update({ where: { id: job.id }, data: {
+        result: { ...result, status: shape === "failed" ? "FAILED" : "INCOMPLETE", complete: false, slots: [] } } });
+      if (shape === "malformed") await client.localReaderJob.update({ where: { id: job.id }, data: { result: { ...result, evidence: { ...result.evidence, completeVerified: false } } } });
+      if (shape === "stale") await client.localReaderJob.update({ where: { id: job.id }, data: { resultExpiresAt: new Date(0) } });
+      if (shape === "changed-generation") await client.teeSearch.update({ where: { id: f.search.id }, data: { alertGeneration: { increment: 1 } } });
+      if (shape === "changed-source") await client.course.update({ where: { id: f.course.id }, data: { website: "https://changed.example.com/" } });
+      const { runSerializedCourseMonitoringWrite } = await import("@/lib/automation/course-monitoring");
+      const { retireExpiredCourseProviderPredecessorInTransaction } = await import("@/lib/automation/provider-execution-marker");
+      await expect(runSerializedCourseMonitoringWrite(f.course.id, async tx => {
+        const consumed = await runtime.markRecipeObservationConsumed(tx, { jobId: job.id, recipeId: f.activated.recipeId, courseId: f.course.id, searchId: f.search.id });
+        if (consumed) await retireExpiredCourseProviderPredecessorInTransaction(tx, { courseId: f.course.id, ...consumed });
+      })).rejects.toThrow();
+      expect(await client.providerRequestLease.count({ where: { providerFamilyKey: key } })).toBe(1);
+      expect((await client.localReaderJob.findUniqueOrThrow({ where: { id: job.id } })).sourceContext).not.toHaveProperty("consumed");
+    });
 
   it.each([[false, "EMPTY"], [false, "FAILED"], [true, "EMPTY"], [true, "FAILED"]] as const)(
     "defers an actual outbox retry until a newer recipe result is consumed (simulator=%s, result=%s)", async (simulator, status) => {

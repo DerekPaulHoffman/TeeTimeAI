@@ -248,6 +248,13 @@ export async function markRecipeObservationConsumed(tx: Prisma.TransactionClient
     result: { equals: row.result as Prisma.InputJsonValue }, resultExpiresAt: { gt: new Date() } }, data: { sourceContext: json({ ...context, searchId: input.searchId,
       consumed: { recipeHash: context.recipeHash, observedAt: result.observedAt, consumedAt: new Date().toISOString() } }) } });
   if (marked.count !== 1) throw new Error("Recipe observation changed before canonical consumption");
+  // Only this original, fully validated outdoor execution can order an older
+  // course-wide fence. Simulator offerings do not settle outdoor ambiguity.
+  const observedAt = new Date(result.observedAt);
+  return context.target.kind === "OUTDOOR" && !context.target.offeringId &&
+    row.claimedAt instanceof Date && row.completedAt instanceof Date &&
+    isReaderObservationCurrent(observedAt.getTime(), row.claimedAt.getTime(), row.completedAt.getTime())
+    ? { claimedAt: new Date(row.claimedAt.getTime()), observedAt } : null;
 }
 
 export function recipeResultIsSuccessful(result: AccessExecutionResult) { return result.complete && ["AVAILABLE", "EMPTY"].includes(result.status); }

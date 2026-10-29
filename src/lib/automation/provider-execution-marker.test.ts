@@ -21,6 +21,7 @@ import {
   getCourseProviderObservationFenceInTransaction,
   markCourseProviderObservationUnreconciledInTransaction,
   releaseCourseProviderObservationInTransaction,
+  retireExpiredCourseProviderPredecessorInTransaction,
   startCourseProviderObservationHeartbeat,
 } from "./provider-execution-marker";
 
@@ -88,6 +89,34 @@ describe("provider execution marker", () => {
         leaseToken: "contender",
       }),
     ).resolves.toBeNull();
+  });
+
+  it("retires only the exact expired predecessor using both authenticated execution bounds and database time", async () => {
+    transactionMocks.$queryRaw.mockResolvedValue([{ retired: 1 }]);
+    const claimedAt = new Date("2026-09-01T12:30:00Z"), observedAt = new Date("2026-09-01T12:31:00Z");
+    await expect(retireExpiredCourseProviderPredecessorInTransaction(transactionMocks as never,
+      { courseId: "course-1", claimedAt, observedAt })).resolves.toBe(true);
+    const query = transactionMocks.$queryRaw.mock.calls[0][0] as { strings: string[]; values: unknown[] };
+    const sql = query.strings.join(" ");
+    expect(sql).toContain("FOR UPDATE");
+    expect(sql).toContain('marker."leaseToken" = predecessor."leaseToken"');
+    expect(sql).toContain('marker."updatedAt" = predecessor."updatedAt"');
+    expect(sql).toContain('marker."leaseExpiresAt" = predecessor."leaseExpiresAt"');
+    expect(sql).toContain('predecessor."leaseExpiresAt" <= statement_timestamp()');
+    expect(query.values.filter(value => value === claimedAt)).toHaveLength(2);
+    expect(query.values.filter(value => value === observedAt)).toHaveLength(2);
+    expect(transactionMocks.providerRequestLease.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("does not query for missing or malformed execution clocks and refuses malformed retirement receipts", async () => {
+    for (const claimedAt of [null, undefined, new Date(NaN), "2026-09-01T12:30:00Z"]) {
+      await expect(retireExpiredCourseProviderPredecessorInTransaction(transactionMocks as never,
+        { courseId: "course-1", claimedAt: claimedAt as Date, observedAt: new Date() })).resolves.toBe(false);
+    }
+    expect(transactionMocks.$queryRaw).not.toHaveBeenCalled();
+    transactionMocks.$queryRaw.mockResolvedValue([{ retired: 2 }]);
+    await expect(retireExpiredCourseProviderPredecessorInTransaction(transactionMocks as never,
+      { courseId: "course-1", claimedAt: new Date(), observedAt: new Date() })).rejects.toThrow("Invalid provider predecessor retirement");
   });
 
   it("releases only the token that owns the marker", async () => {

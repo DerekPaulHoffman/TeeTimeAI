@@ -59,6 +59,7 @@ import {
   runSerializedCourseMonitoringWrite,
 } from "./course-monitoring";
 import {
+  retireExpiredCourseProviderPredecessorInTransaction,
   releaseCourseProviderObservationInTransaction,
   renewCourseProviderObservationInTransaction,
   type CourseProviderObservationLease,
@@ -3690,7 +3691,10 @@ export async function commitCurrentCourseTeeTimeMatches(input: {
           input.providerObservation,
         );
       }
-      if (input.accessRecipeObservation) await markRecipeObservationConsumed(transaction, input.accessRecipeObservation);
+      if (input.accessRecipeObservation) {
+        const consumed = await markRecipeObservationConsumed(transaction, input.accessRecipeObservation);
+        if (consumed) await retireExpiredCourseProviderPredecessorInTransaction(transaction, { courseId: input.courseId, ...consumed });
+      }
       return {
         sourceEvidenceAccepted: true as const,
         persistedMatchStates,
