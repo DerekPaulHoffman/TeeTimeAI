@@ -261,7 +261,7 @@ describe("native official ForeUP route physical ownership", () => {
     }
     const d = deps(), changed = provider(); changed.course.name = "Reassigned Business"; changed.schedules[0].course_name = changed.course.name;
     d.fetch.mockImplementation(async () => new Response(html(changed), { headers: { "content-type": "text/html" } }));
-    const failed = await executeExistingAdapterRecipe(recipe, input, { ...d, recipeHash: hash, toInstant: recipeTimeToInstant });
+    const failed = await executeExistingAdapterRecipe(recipe, input, { ...d, recipeHash: hash, toInstant: recipeTimeToInstant, now: () => new Date("2026-10-26T00:00:00Z") });
     expect(failed.complete).toBe(false);expect(failed.slots).toEqual([]);expect(d.fetch).toHaveBeenCalledTimes(1);
   });
   it.each(["chrome", "phone", "copy", "link"])("rejects missing or stale %s on warm ownership before availability", async mode => {
@@ -379,7 +379,7 @@ describe("canonical-root compact contact and public facility ownership", () => {
     }
     const d = compactDeps(), changed = provider(); changed.schedules[1].booking_classes[0].name = "Public";
     d.fetch.mockImplementation(async () => new Response(html(changed), { headers: { "content-type": "text/html" } }));
-    expect(await executeExistingAdapterRecipe(recipe, input, { ...d, recipeHash: hash, toInstant: recipeTimeToInstant })).toMatchObject({ complete: false, slots: [] });
+    expect(await executeExistingAdapterRecipe(recipe, input, { ...d, recipeHash: hash, toInstant: recipeTimeToInstant, now: () => new Date("2026-10-26T00:00:00Z") })).toMatchObject({ complete: false, slots: [] });
     expect(d.fetch).toHaveBeenCalledOnce();
   });
 });
