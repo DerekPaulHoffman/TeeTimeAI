@@ -16,6 +16,8 @@ import { sourceDiscover as actualSourceDiscover } from "../../../scripts/automat
 import { sourceFailureDiagnostic } from "../../../scripts/automation/stagehand/source-diagnostic.mjs";
 import { readStagehandFailure } from "../../../scripts/automation/course-discovery-stagehand-failure.mjs";
 import { createDelegationDiagnostic } from "./teeitup-delegated-booking-diagnostic";
+import { cpsOfficialEntryProofSchema } from "./cps-official-entry-proof";
+import { parsePublicUSBusinessAddress } from "./public-us-business-address";
 
 vi.mock("node:timers/promises", async importOriginal => {
   const timers = await importOriginal<typeof import("node:timers/promises")>();
@@ -526,6 +528,49 @@ describe("regular Stagehand source worker", () => {
       }
     } finally { vi.useRealTimers(); }
   });
+  it.each(["current", "copiedOnly", "stale", "wrongOriginal", "wrongIdentity", "wrongPhone", "wrongCatalog", "unrelatedSource", "prefixPath", "newDocument"] as const)
+  ("adopts only the fresh privately bound CPS title/contact entry source: %s", async mode => {
+    const t = setup(), source = "https://entry-course.cps.golf/", canonical = source + "onlineresweb/search-teetime";
+    t.f.report.adapterSourceProposal.bookingUrl = source; t.f.report.visitedUrls = [official]; t.f.report.actions = [];
+    t.f.report.officialLinkLedger = [{ pageUrl: official, links: [{ href: source, visible: true }] }] as never;
+    Object.assign(t.f.report.officialLinkLedger[0], { kind: "NATIVE_VISIBLE_DOM", observedAt: new Date(first + 1000).toISOString() });
+    const proof = cpsOfficialEntryProofSchema.parse({ kind: "OFFICIAL_TITLE_PHYSICAL_ENTRY", officialUrl: official, officialPageUrl: official,
+      bookingDocumentUrl: official + "tee-times", bookingUrl: canonical, venueName: t.f.job.request.identity.name,
+      canonicalAddressInput: t.f.job.request.identity.address, timeZone: "UTC", canonicalCoursePhone: t.f.job.request.trustedContext.canonicalCoursePhone,
+      publishedTitle: t.f.job.request.identity.name, rootIdentitySha256: "1".repeat(64), rootEntrySha256: "2".repeat(64), widgetEntrySha256: "3".repeat(64),
+      entryKind: "CPS_CMS_PUBLIC_GET_V1", providerVenueName: t.f.job.request.identity.name, providerAddress: parsePublicUSBusinessAddress(t.f.job.request.identity.address),
+      tenant: "entry-course", courseIds: [91], catalogHash: "c".repeat(64), warmTransport: "NATIVE_CHROME", requiredCapability: "LOCAL_CHROME" });
+    const changed = { ...proof, ...(mode === "wrongIdentity" ? { venueName: "Other Public Course" } : {}),
+      ...(mode === "wrongPhone" ? { canonicalCoursePhone: "+15555550124" } : {}), ...(mode === "wrongCatalog" ? { catalogHash: "d".repeat(64) } : {}),
+      ...(mode === "unrelatedSource" ? { bookingUrl: "https://other-course.cps.golf/onlineresweb/search-teetime" } : {}),
+      ...(mode === "prefixPath" ? { bookingUrl: canonical + "/other" } : {}) };
+    let current = official, originalUrl = official;
+    t.request.mockImplementation(async action => {
+      if (action.action === "open") { originalUrl = action.url!; current = originalUrl; }
+      return { url: current, browserTransport: "NATIVE_CHROME", navigationStatus: 200, accessRequirementObserved: false, loading: false,
+        controls: [{ kind: "link", href: source }], adapter: action.action === "inspect_adapter" ? { family: "CPS", tenant: "entry-course", courseIds: [91], catalogHash: "c".repeat(64), officialEntryProof: changed } : undefined,
+        nativeMainDocumentContinuity: { kind: "NATIVE_MAIN_DOCUMENT_CONTINUITY_V1", originalUrlSha256: stagehandDataHash(mode === "wrongOriginal" ? source + "other" : originalUrl),
+          currentUrlSha256: stagehandDataHash(current), documentBindingSha256: (mode === "newDocument" && action.action === "inspect_adapter" ? "d" : originalUrl === source ? "b" : "a").repeat(64),
+          observedAt: t.f.clock - (mode === "stale" ? 5001 : 0), status: 200 } } as never;
+    });
+    if (mode !== "copiedOnly") t.browserFactory.mockImplementation(async options => createDiscoveryBrowser({ ...options,
+      processFactory: () => ({ request: t.request, close: t.close }) }) as never);
+    vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(t.f.clock);
+    try {
+      if (mode === "current") {
+        expect((await t.run()).outcome).toBe("activated"); const saved = t.client.candidate.mock.calls[0][2];
+        expect(saved.source.bookingUrl).toBe(canonical); expect(saved.adapter.officialEntryProof).toEqual(proof);
+        expect(t.client.candidate.mock.calls[0][4]).toEqual({ officialUrl: official, observedBookingUrl: canonical });
+        expect(t.executeRecipe).toHaveBeenCalledTimes(2);
+        expect(t.request.mock.calls.filter(([action]) => action.action !== "finish").map(([action]) => action)).toEqual([
+          { action: "open", url: official }, { action: "open", url: source }, { action: "inspect_adapter", url: source },
+        ]);
+      } else {
+        await expect(t.run()).rejects.toThrow(); expect(t.client.candidate).not.toHaveBeenCalled(); expect(t.executeRecipe).not.toHaveBeenCalled();
+      }
+      expect(t.close).toHaveBeenCalledOnce();
+    } finally { vi.useRealTimers(); }
+  });
   it("preserves closed native exception facts through the actual helper error reply projector", async () => {
     const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), pid: 1, exitCode: 0, signalCode: null });
     const channel = createDiscoveryProcess({ executable: "fixture-only", args: [], cwd: ".", environment: {}, spawnProcess: () => child });
@@ -636,6 +681,41 @@ describe("regular Stagehand source worker", () => {
       expect(readStagehandFailure({ ...t.f.job, checkpoint: forged }, t.f.clock)).toBeUndefined();
     }
     expect(JSON.stringify(saved.stagehandFailure)).not.toContain("https://"); expect(t.client.candidate).not.toHaveBeenCalled();
+  });
+  it("persists a closed current-invocation final-frame landing failure without granting source authority", async () => {
+    const t = setup(), final = "https://unseen-public-booking.example/changed";
+    t.f.report.actions = []; t.f.report.visitedUrls = [official]; t.f.report.officialLinkLedger = [];
+    t.f.report.frameLedger = [{ kind: "NATIVE_VISIBLE_FRAME", pageUrl: official, observedAt: new Date(first + 1000).toISOString(),
+      documentHash: "a".repeat(64), frames: [{ src: booking, visible: true }] }] as never;
+    t.request.mockImplementation(async action => ({ url: action.url === booking ? final : official,
+      browserTransport: "NATIVE_CHROME", navigationStatus: 200, accessRequirementObserved: false, loading: false,
+      controls: [], frames: action.url === booking ? [] : [{ source: "FIXED_INSPECTION_FRAME_SRC", url: booking }] }));
+    const error = await t.run().catch(e => e);
+    expect(error.code).toBe("FRAMEWORK_INSPECTION_LANDING_CHANGED");
+    const landing = error.inspectionReceipt.landingFailure;
+    expect(landing).toMatchObject({ position: 1, pathLength: 2, snapshotPathIndex: -1, logicalPathIndex: -1,
+      remainingPathIndex: -1, nativeContextPresent: false, frameParentPosition: 0, frameChildPosition: 1 });
+    const saved = t.checkpoints.at(-1) as { stagehandFailure: { entries: Array<Record<string, unknown>> } };
+    expect(saved.stagehandFailure.entries[0]).toMatchObject({ code: "FRAMEWORK_INSPECTION_LANDING_CHANGED",
+      fixedInspectionDiagnostic: { landing }, fixedInspectionDiagnosticSha256: stagehandDataHash({ landing }) });
+    expect(readStagehandFailure({ ...t.f.job, checkpoint: saved }, t.f.clock)).toEqual(saved.stagehandFailure);
+    expect(currentStagehandInspectionDiagnostic({ ...error }, t.f.job, t.f.clock, t.f.clock)).toBeUndefined();
+    expect(currentStagehandInspectionDiagnostic(error, { ...t.f.job }, t.f.clock, t.f.clock)).toBeUndefined();
+    const forged = structuredClone(saved), diagnostic = { landing: { ...landing, rawUrl: final } };
+    Object.assign(forged.stagehandFailure.entries[0], { fixedInspectionDiagnostic: diagnostic, fixedInspectionDiagnosticSha256: stagehandDataHash(diagnostic) });
+    expect(readStagehandFailure({ ...t.f.job, checkpoint: forged }, t.f.clock)).toBeUndefined();
+    expect(JSON.stringify(saved.stagehandFailure)).not.toContain("https:");
+    expect(t.client.candidate).not.toHaveBeenCalled(); expect(t.executeRecipe).not.toHaveBeenCalled(); expect(t.client.activate).not.toHaveBeenCalled();
+    expect(t.close).toHaveBeenCalledOnce();
+  });
+  it.each(["CPS_PHONE_BOOKING_SOURCE_UNVERIFIED", "CPS_OFFICIAL_ENTRY_UNVERIFIED"])("preserves the finite measured %s instead of masking it", async code => {
+    const t = setup(), error = Object.assign(Error("private source content"), { code });
+    t.request.mockRejectedValue(error);
+    await expect(t.run()).rejects.toBe(error);
+    const saved = t.checkpoints.at(-1) as { stagehandFailure: { entries: Array<Record<string, unknown>> } };
+    expect(saved.stagehandFailure.entries[0].code).toBe(code);
+    expect(readStagehandFailure({ ...t.f.job, checkpoint: saved }, t.f.clock)).toEqual(saved.stagehandFailure);
+    expect(t.client.candidate).not.toHaveBeenCalled(); expect(t.client.activate).not.toHaveBeenCalled();
   });
   it("keeps native fatal codes finite and unreadable predicate truth exact", () => {
     for (const code of stagehandNativeRouterCodes) expect(inspectionReadability({ url: official, nativeFirstFatal: { code } }, "observe", 1, official, booking).nativeFatalCode).toBe(code);

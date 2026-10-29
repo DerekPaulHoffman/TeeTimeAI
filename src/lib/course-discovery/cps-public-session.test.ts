@@ -107,7 +107,7 @@ describe("exact CPS26 anonymous public browsing session", () => {
     const form = await new Response(call.init.body, { headers: h }).formData(); expect([...form]).toEqual([["client_id", "separate-published-short-client"]]);
     await expect(f.session.initialize()).rejects.toThrow("CPS_PUBLIC_SESSION_ALREADY_INITIALIZED"); expect(f.calls).toHaveLength(2); f.session.close();
   });
-  it.each(["26.1.2.26379768992", CPS_ANONYMOUS_BUILD])("binds anonymous API scope to freshly reviewed build %s without granting another version", async buildNumber => {
+  it.each(["26.1.2.26379768992", "26.2.2.40425805601", CPS_ANONYMOUS_BUILD])("binds anonymous API scope to freshly reviewed build %s without granting another version", async buildNumber => {
     const f = setup(undefined, buildNumber); await f.session.initialize();
     const currentUrl = origin + CPS_API_PATH + "/GetAllOptions/publicgolf?" + new URLSearchParams({ version: buildNumber, product: "3" });
     await expect(f.session.fetchPublic(currentUrl, init())).resolves.toBeInstanceOf(Response);

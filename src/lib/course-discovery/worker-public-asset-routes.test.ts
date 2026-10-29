@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { createDiscoveryPublicAssetInventory } from "../../../scripts/automation/course-discovery-public-assets.mjs";
 import { createDiscoverySnapshotCompactor, runCourseDiscoveryWorker } from "../../../scripts/automation/course-discovery-worker.mjs";
+import { parseAccessRecipe } from "./recipe";
+import { AMELIA_CLIENT_HASHES, ameliaMetadataSchema } from "./amelia-source";
 
 const transport = "NATIVE_CHROME";
 const official = "https://example.org/";
@@ -115,13 +117,14 @@ const open = (url: string): Action => ({ tool: "discovery_browser", arguments: {
 const finish: Action = { tool: "discovery_browser", arguments: { action: "finish" } };
 const propose = (engine = "BROWSER_JSON"): Action => ({ tool: "discovery_propose_recipe", arguments: { recipe: proposal(engine) } });
 type Config = { helperEnvironment: Record<string, string> };
-const job = () => ({ id: "job", leaseToken: "synthetic-lease", attempts: 1, firstPickedUpAt: new Date().toISOString(), deadlineAt: new Date(Date.now() + 900_000).toISOString(),
+const job = () => { const picked = Date.now(); return { id: "job", leaseToken: "synthetic-lease", sourceFingerprint: "b".repeat(64), attempts: 1, firstPickedUpAt: new Date(picked).toISOString(), deadlineAt: new Date(picked + 900_000).toISOString(),
   request: { target: { courseId: "course", offeringId: "rental", kind: "SIMULATOR" },
     identity: { name: "Example", address: "123 Example St, Example, CA 95678", officialUrl: official, bookingUrl: null },
-    input: { date: "2026-10-23", players: 2, windowStart: "10:00", windowEnd: "20:00", durationMinutes: 60, timeZone: "America/Los_Angeles" } } });
+    input: { date: "2026-10-23", players: 2, windowStart: "10:00", windowEnd: "20:00", durationMinutes: 60, timeZone: "America/Los_Angeles" } } }; };
 
 /** All process, browser and service boundaries are in-memory doubles. */
-async function run(options: { engine?: string; actions?: Action[]; checkpoint?: unknown; replayFailure?: boolean;
+async function run(options: { engine?: string; actions?: Action[]; checkpoint?: unknown; replayFailure?: boolean; recipeSchema?: Record<string, unknown>;
+  validate?: (value: { recipe: unknown }) => { valid: boolean };
   snapshot?: (config: Config, input: Record<string, unknown>, index: number) => Record<string, unknown> } = {}) {
   const home = mkdtempSync(join(tmpdir(), "worker-public-assets-")), original = job();
   writeFileSync(join(home, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6.1-sol" }] }));
@@ -133,13 +136,13 @@ async function run(options: { engine?: string; actions?: Action[]; checkpoint?: 
       { id: "original", recipeHash: "a".repeat(64), input: original.request.input },
       { id: "changed", recipeHash: "a".repeat(64), input: { ...original.request.input, date: "2026-10-24", players: 3 } },
     ] })), verification: vi.fn(async () => ({})), activate: vi.fn(async () => ({ recipeId: "saved" })) };
-  const validateRecipe = vi.fn(async () => ({ valid: true }));
+  const validateRecipe = vi.fn(async value => options.validate?.(value) ?? { valid: true });
   const executeRecipe = vi.fn(async () => options.replayFailure ? { status: "INCOMPLETE", complete: false, slots: [] } :
     { status: "AVAILABLE", complete: true, slots: [{ sourceId: "opening" }] });
   let toolsDone = Promise.resolve();
   try {
     const result = await runCourseDiscoveryWorker({ job: { ...original, ...(options.checkpoint ? { checkpoint: options.checkpoint } : {}) }, client,
-      cwd: process.cwd(), sourceHome: home, recipeSchema: {}, resolveCli: () => "synthetic-no-process", validateRecipe, executeRecipe,
+      cwd: process.cwd(), sourceHome: home, recipeSchema: options.recipeSchema ?? {}, resolveCli: () => "synthetic-no-process", validateRecipe, executeRecipe,
       processFactory: config => ({ close: async () => {}, notify: () => {}, request: async method => {
         if (method === "thread/start") return { thread: { id: "thread" }, approvalPolicy: "never", sandbox: { type: "readOnly" } };
         if (method === "turn/start") {
@@ -162,6 +165,87 @@ async function run(options: { engine?: string; actions?: Action[]; checkpoint?: 
 }
 
 describe("worker asset serialization before validation and independent replay", () => {
+  it("fills a large current inspected adapter privately before full real schema validation, candidate saving and both replays", async () => {
+    const adapter = ameliaMetadataSchema.parse({ family: "AMELIA", apiUrl: `${official}api`, timeZone: "America/Los_Angeles",
+      shortcode: { form: "sbsNew", counter: "1000", category: null, service: null, employee: null, location: null, package: null },
+      settings: { timeZone: "America/Los_Angeles", showClientTimeZone: true, slotLengthSeconds: 1800, startOfWeek: 0,
+        bringingAnyoneLogic: "additional", bookMultipleTimes: false, employeeSelection: "random", isGloballyBusySlot: false },
+      ...Object.fromEntries(["public", "step", "event"].flatMap(kind => [[`${kind}ClientUrl`, `${official}${kind}.js`],
+        [`${kind}ClientSha256`, AMELIA_CLIENT_HASHES[kind as keyof typeof AMELIA_CLIENT_HASHES]]])),
+      services: Array.from({ length: 40 }, (_, index) => ({ id: index + 1, name: "Public golf simulator ".repeat(9), durationSeconds: 3600,
+        timeBeforeSeconds: 0, timeAfterSeconds: 0, minCapacity: 1, maxCapacity: 4, bringingAnyone: true, aggregatedPrice: false,
+        hasDurationExtras: false, providerIds: [1] })), providers: [{ id: 1, serviceIds: Array.from({ length: 40 }, (_, index) => index + 1) }],
+      catalogHash: "a".repeat(64) });
+    const outcome = await run({ actions: [open(official), { tool: "discovery_browser", arguments: { action: "inspect_adapter", url: booking } },
+      { tool: "discovery_propose_recipe", arguments: { recipe: { schemaVersion: 1, engine: "EXISTING_ADAPTER", source: { bookingUrl: booking, providerFamily: "AMELIA" } }, useCurrentInspectedAdapter: true } }],
+      validate: ({ recipe }) => ({ valid: Boolean(parseAccessRecipe(recipe)) }),
+      snapshot: (config, input) => ({ url: input.url, browserTransport: config.helperEnvironment.COURSE_DISCOVERY_BROWSER_TRANSPORT,
+        navigationStatus: 200, loading: false, text: "Public availability ".repeat(2000),
+        ...(input.action === "inspect_adapter" ? { adapter } : {}) }) });
+    expect(outcome.result.outcome).toBe("activated"); expect(outcome.executeRecipe).toHaveBeenCalledTimes(2);
+    const saved = outcome.client.candidate.mock.calls[0][2]; expect(saved.adapter).toEqual(adapter);
+    expect(parseAccessRecipe(saved).engine).toBe("EXISTING_ADAPTER"); expect(saved).not.toHaveProperty("useCurrentInspectedAdapter");
+    expect(outcome.validateRecipe.mock.calls[0][0].recipe).toEqual(saved);
+    for (const [args] of outcome.executeRecipe.mock.calls) expect(args.recipe).toEqual(saved);
+    const modelInspection = outcome.replies.filter(reply => reply.result?.success).map(reply => JSON.parse(reply.result.contentItems[0].text)).find(view => view.adapter);
+    expect(modelInspection.adapter).not.toEqual(adapter); expect(modelInspection.modelPreview.isAvailabilityEvidence).toBe(false);
+    expect(JSON.stringify(outcome.checkpoints)).not.toContain("Public golf simulator");
+  });
+
+  it.each(["missing", "navigation", "finish", "failed inspection", "changed context", "override", "other engine", "foreign source"])("rejects current-adapter wrapper after %s before validation/candidate/replay", async mode => {
+    const inspection: Action = { tool: "discovery_browser", arguments: { action: "inspect_adapter", url: booking } };
+    const args: Record<string, unknown> = { recipe: { engine: mode === "other engine" ? "BROWSER_DOM" : "EXISTING_ADAPTER",
+      source: { bookingUrl: mode === "foreign source" ? "https://foreign.example.org/" : booking }, ...(mode === "override" ? { adapter: { family: "ACUITY" } } : {}) }, useCurrentInspectedAdapter: true };
+    const between = mode === "navigation" ? [open(booking)] : mode === "finish" ? [finish] : mode === "failed inspection" ? [inspection] :
+      mode === "changed context" ? [{ tool: "discovery_browser", arguments: { action: "observe" } }] : [];
+    let inspections = 0;
+    const outcome = await run({ actions: [open(official), ...(mode === "missing" ? [] : [inspection]), ...between,
+      { tool: "discovery_propose_recipe", arguments: args }], snapshot: (config, input) => {
+      if (input.action === "inspect_adapter" && ++inspections === 2) throw new Error("ADAPTER_CONFIGURATION_UNVERIFIED");
+      return { url: input.url ?? `${booking}/changed`, browserTransport: config.helperEnvironment.COURSE_DISCOVERY_BROWSER_TRANSPORT,
+        navigationStatus: 200, loading: false, ...(input.action === "inspect_adapter" ? { adapter: { family: "ACUITY", ownerKey: "test", businessId: "1", rentalProductIds: ["1"] } } : {}) };
+    } });
+    expect(outcome.validateRecipe).not.toHaveBeenCalled(); expect(outcome.client.candidate).not.toHaveBeenCalled(); expect(outcome.executeRecipe).not.toHaveBeenCalled();
+    expect(JSON.stringify(outcome.replies)).toContain("DISCOVERY_CURRENT_INSPECTION_REQUIRED");
+  });
+
+  it("bounds all model snapshot early returns after the controller consumes full private asset and source evidence", async () => {
+    const snapshots: Record<string, unknown>[] = [];
+    const outcome = await run({ snapshot: (config, input) => {
+      const snapshot = { url: input.url ?? booking, text: "Public booking ".repeat(2000), controls: [], elements: [], frames: [],
+        browserTransport: config.helperEnvironment.COURSE_DISCOVERY_BROWSER_TRANSPORT, navigationStatus: 200, loading: false,
+        structure: { children: Array.from({ length: 100 }, (_, index) => ({ index, text: "Public structure ".repeat(100) })) },
+        requests: [], responses: [{ status: 200, body: { publicRows: Array.from({ length: 100 }, () => "Public row ".repeat(100)) } }],
+        completedPublicAssetRequests: input.url === booking ? [asset(parentAsset), asset(childAsset)] : [], completedPublicAssetRequestsOverflow: false };
+      snapshots.push(snapshot); return snapshot;
+    } });
+    expect(outcome.result.outcome).toBe("activated"); expect(outcome.executeRecipe).toHaveBeenCalledTimes(2);
+    expect(outcome.client.candidate.mock.calls[0][2].permittedRoutes).toContainEqual(routeOf(parentAsset));
+    expect(outcome.client.candidate.mock.calls[0][2].permittedRoutes).toContainEqual(routeOf(childAsset));
+    const previews = outcome.replies.filter(value => value.result?.success).map(reply => JSON.parse(reply.result.contentItems[0].text)).filter(view => view.modelPreview);
+    expect(previews).toHaveLength(2);
+    for (const view of previews) {
+      expect(Buffer.byteLength(JSON.stringify(view))).toBeLessThanOrEqual(24_000);
+      expect(view.modelPreview.isAvailabilityEvidence).toBe(false);
+    }
+    expect(snapshots[0].text).toHaveLength("Public booking ".length * 2000);
+    expect((snapshots[0].responses as Array<{ body: { publicRows: unknown[] } }>)[0].body.publicRows).toHaveLength(100);
+    expect(JSON.stringify(outcome.client.candidate.mock.calls)).not.toContain("modelPreview");
+    expect(JSON.stringify(outcome.executeRecipe.mock.calls)).not.toContain("modelPreview");
+  });
+
+  it("counts successful on-demand documentation against the same eight-operation guard", async () => {
+    const documentation = { tool: "discovery_recipe_schema", arguments: { engine: "BROWSER_DOM" } };
+    const outcome = await run({ actions: Array.from({ length: 9 }, () => documentation), recipeSchema: {
+      oneOf: [{ type: "object", properties: { engine: { const: "BROWSER_DOM" } }, required: ["engine"], additionalProperties: false }],
+    } });
+    expect(outcome.result.code).toBe("DISCOVERY_GENERIC_BUDGET_EXHAUSTED");
+    expect(outcome.result.discoveryMetrics.genericBudget.toolOperations).toBe(8);
+    expect(outcome.replies.filter(reply => reply.result?.success)).toHaveLength(8);
+    expect(outcome.client.candidate).not.toHaveBeenCalled(); expect(outcome.executeRecipe).not.toHaveBeenCalled();
+    expect(outcome.browsers).toHaveLength(0);
+  });
+
   it("uses completed private asset deltas before compaction without returning them to the model or checkpoint", async () => {
     const outcome = await run({ snapshot: (config, input) => ({ url: input.url ?? booking, text: "Public booking", controls: [], elements: [], frames: [],
       browserTransport: config.helperEnvironment.COURSE_DISCOVERY_BROWSER_TRANSPORT, navigationStatus: 200, loading: false,

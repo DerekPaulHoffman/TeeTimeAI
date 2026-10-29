@@ -22,6 +22,12 @@ export type OfficialIdentityPage = { url: string; html: string; visibleEvidence?
   /** Exact computed-visible public anchor text paired with its URL. */
   publicLinkLabels?: Array<{ href: string; text: string }>;
   publicLinkLabelsOmitted?: boolean;
+  /** Current ordinary public booking links; private native identity capture only. */
+  publicBookingEntryLinks?: Array<{ href: string; text: string }>;
+  publicBookingEntryLinksOmitted?: boolean;
+  /** Inert public CMS tee-time widget plus its actual visible GET form. */
+  cpsBookingWidgets?: Array<{ configuration: string; fields: Array<{ name: string; tag: string; type: string }> }>;
+  cpsBookingWidgetsOmitted?: boolean;
   officialContactLinkLabels?: Array<{ href: string; text: string }>;
   officialContactLinkLabelsOmitted?: boolean;
   officialContactBusinessNames?: string[];

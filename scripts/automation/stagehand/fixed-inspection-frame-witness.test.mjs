@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { fixedInspectionFrameWitness, freshFixedInspectionFrameEdge, incompleteInspectionOfficial } from '../course-discovery-stagehand-inspection.mjs';
+import { fixedInspectionFrameWitness, freshFixedInspectionFrameEdge, incompleteInspectionOfficial,
+  inspectionLandingDiagnostic, safeInspectionLandingDiagnostic } from '../course-discovery-stagehand-inspection.mjs';
 
 const witness = { parentUrl: 'https://course.example/golf', frameUrl: 'https://public.example/html/widget' };
 const snapshot = { url: witness.parentUrl, officialSourceDiagnostic: { rawOfficialCaptured: true,
@@ -65,4 +66,29 @@ test('two distinct privately witnessed frame edges on one path fail closed', () 
   report.visitedUrls.push(witness.frameUrl);
   report.frameLedger.push({ ...structuredClone(report.frameLedger[0]), pageUrl: witness.frameUrl, frames: [{ src: second, visible: true }] });
   assert.throws(() => fixedInspectionFrameWitness(report, [root, witness.frameUrl, second], root), /FRAMEWORK_INSPECTION_SCOPE_INVALID/u);
+});
+
+test('landing diagnostics distinguish an observed root alias from an unbound final frame document without exposing URLs', () => {
+  const alias = 'https://course.example/golf', frame = 'https://provider.example/widget', final = 'https://provider.example/public';
+  const path = [root, alias, frame], frameWitness = { parentUrl: alias, frameUrl: frame };
+  const first = inspectionLandingDiagnostic({ url: alias }, path, 0, undefined, frameWitness);
+  assert.deepEqual([first.position, first.snapshotPathIndex, first.logicalPathIndex, first.remainingPathIndex], [0, 1, 1, 1]);
+  const failed = inspectionLandingDiagnostic({ url: final }, path, 2, undefined, frameWitness);
+  assert.deepEqual([failed.position, failed.pathLength, failed.snapshotPathIndex, failed.logicalPathIndex,
+    failed.remainingPathIndex, failed.nativeContextPresent, failed.frameParentPosition, failed.frameChildPosition],
+  [2, 3, -1, -1, -1, false, 1, 2]);
+  assert.equal(failed.nativeOriginalUrlSha256, null);
+  assert.equal(JSON.stringify(failed).includes('https:'), false);
+  assert.deepEqual(safeInspectionLandingDiagnostic(failed), failed);
+  const bound = inspectionLandingDiagnostic({ url: final }, path, 2, { originalUrl: frame }, frameWitness);
+  assert.deepEqual([bound.snapshotPathIndex, bound.logicalPathIndex, bound.remainingPathIndex, bound.nativeContextPresent], [-1, 2, 2, true]);
+});
+
+test('landing diagnostic projection is finite, closed and cannot carry copied page content', () => {
+  const value = inspectionLandingDiagnostic({ url: 'https://provider.example/other' }, [root, witness.frameUrl], 1);
+  for (const change of [{ url: 'https://private.example/secret' }, { position: -1 }, { position: 2 },
+    { pathLength: 7 }, { snapshotPathIndex: 6 }, { expectedUrlSha256: 'bad' }, { nativeContextPresent: 'true' }])
+    assert.equal(safeInspectionLandingDiagnostic({ ...value, ...change }), undefined);
+  assert.equal(inspectionLandingDiagnostic({ url: 'file:///private' }, [root], 0), undefined);
+  assert.equal(inspectionLandingDiagnostic({ url: root }, [root], 1), undefined);
 });

@@ -14,9 +14,12 @@ import { bindCpsPostalConflictProof, normalizeCanonicalCoursePhone, verifyCpsPos
 import { bindCpsPhoneBookingProof, verifyCpsPhoneBookingContact, type CpsPhoneBookingProof } from "./cps-phone-booking-proof";
 import { readNativeOfficialIdentityPage, type NativeOfficialPageReader } from "./native-official-page-reader";
 import { createCps26PublicSession } from "./cps-public-session";
+import { deriveCpsRootEntry, type CpsOfficialEntryProof } from "./cps-official-entry-proof";
+import { readCpsOfficialEntry } from "./cps-official-entry-reader";
 
 export type CpsDependencies = { fetch?: typeof fetch; now?: () => Date; deadlineAt?: Date; signal?: AbortSignal;
   trustedContext?: { canonicalCoursePhone?: string }; localCapabilities?: readonly "LOCAL_CHROME"[]; readNativeOfficialPage?: NativeOfficialPageReader;
+  readOfficialEntry?: typeof readCpsOfficialEntry;
   requestLease?: <T>(family: string, work: () => Promise<T>) => Promise<{ acquired: true; value: T } | { acquired: false }> };
 const MAX_RESPONSE_BYTES = 2_000_000, MAX_TOTAL_BYTES = 13_000_000;
 /** Only an explicit HTTP label may select legacy HTML bytes. No meta sniffing
@@ -98,10 +101,12 @@ export function cpsBootstrapReadAllowed(url: URL, headers: Headers, body: string
   supplied.delete("accept-encoding");
   return JSON.stringify([...supplied].sort()) === JSON.stringify([...expected.headers].sort());
 }
-function createReader(source: CpsSource, deps: CpsDependencies, date: string, savedProof?: CpsPostalConflictProof | CpsPhoneBookingProof,
+function createReader(sourceInput: CpsSource, deps: CpsDependencies, date: string, savedProof?: CpsPostalConflictProof | CpsPhoneBookingProof | CpsOfficialEntryProof,
   savedCatalogMode?: CpsMetadata["publicCatalogMode"]) {
+  let source = { ...sourceInput };
   validateCpsIdentity(source);
-  const context = parseCpsSource(source.bookingUrl)!, deadline = Math.min(Date.now() + 120_000, deps.deadlineAt?.getTime() ?? Infinity);
+  let context = parseCpsSource(source.bookingUrl)!;
+  const deadline = Math.min(Date.now() + 120_000, deps.deadlineAt?.getTime() ?? Infinity);
   if (!Number.isFinite(deadline) || deadline <= Date.now()) fail("DEADLINE_EXCEEDED");
   if(savedProof){
     if(!deps.localCapabilities?.includes("LOCAL_CHROME"))fail("LOCAL_CHROME_REQUIRED");
@@ -174,6 +179,12 @@ function createReader(source: CpsSource, deps: CpsDependencies, date: string, sa
     fail("OFFICIAL_BOOKING_SOURCE_UNVERIFIED");
   };
   const official = async () => {
+    if (savedProof?.kind === "OFFICIAL_TITLE_PHYSICAL_ENTRY") {
+      const entry = await (deps.readOfficialEntry ?? readCpsOfficialEntry)(source, savedProof.canonicalCoursePhone, new Date(deadline),
+        { requestLease: deps.requestLease, readRoot: deps.readNativeOfficialPage });
+      if (entry.source.bookingUrl !== source.bookingUrl) fail("ADAPTER_CONFIGURATION_CHANGED");
+      return { page: entry.root, phoneBooking: false, officialEntry: entry };
+    }
     if(!savedProof){
       try{await legacyOfficial();return undefined;}catch(error){
         const eligible=error instanceof Error&&["OFFICIAL_BOOKING_SOURCE_UNVERIFIED","OFFICIAL_IDENTITY_UNVERIFIED","OFFICIAL_BOOKING_SOURCE_MISMATCH","ACCESS_REQUIRED"].includes(error.message);
@@ -195,10 +206,24 @@ function createReader(source: CpsSource, deps: CpsDependencies, date: string, sa
       phoneBooking=true;page=await nativeRead(source,source.officialUrl,new Date(deadline),"PHONE_LINK");
     }
     signal.throwIfAborted();
-    if(phoneBooking)verifyCpsPhoneBookingContact(source,page,deps.trustedContext?.canonicalCoursePhone);
+    const phoneOrEntry = async () => {
+      try { verifyCpsPhoneBookingContact(source,page,deps.trustedContext?.canonicalCoursePhone); return { page, phoneBooking: true }; }
+      catch (error) {
+        if (savedProof || !(error instanceof Error) || error.message !== "CPS_PHONE_BOOKING_SOURCE_UNVERIFIED") throw error;
+        // No new document read unless the additive title/full-contact root
+        // and its sole current visible same-origin booking link already prove.
+        try { deriveCpsRootEntry(source,page,deps.trustedContext?.canonicalCoursePhone); } catch { throw error; }
+        const entry = await (deps.readOfficialEntry ?? readCpsOfficialEntry)(source, normalizeCanonicalCoursePhone(deps.trustedContext?.canonicalCoursePhone)!,
+          new Date(deadline), { requestLease: deps.requestLease, readRoot: deps.readNativeOfficialPage }, page);
+        source = { ...entry.source }; context = parseCpsSource(source.bookingUrl)!;
+        if (!context) fail("CPS_OFFICIAL_ENTRY_UNVERIFIED");
+        return { page: entry.root, phoneBooking: false, officialEntry: entry };
+      }
+    };
+    if(phoneBooking)return phoneOrEntry();
     else try{verifyCpsPostalContact(source,page,deps.trustedContext?.canonicalCoursePhone);}
       catch(error){if(savedProof||!(error instanceof Error)||error.message!=="CPS_POSTAL_CONFLICT_UNVERIFIED")throw error;
-        verifyCpsPhoneBookingContact(source,page,deps.trustedContext?.canonicalCoursePhone);phoneBooking=true;}
+        return phoneOrEntry();}
     return {page,phoneBooking};
   };
   const json = async (url: string, headers: Headers, post?: { transactionId: string }): Promise<unknown> => {
@@ -229,8 +254,10 @@ function createReader(source: CpsSource, deps: CpsDependencies, date: string, sa
     let providerVenueName=source.venueName;
     let metadata = parseCpsCatalog(await json(context.origin + CPS_API_PATH + "/OnlineCourses", publicHeaders(source, config, options, date)), options, source,
       nativeOfficialPage?{page:nativeOfficialPage,canonicalCoursePhone:deps.trustedContext?.canonicalCoursePhone,
+        ...(nativeOfficial?.officialEntry?{officialEntry:nativeOfficial.officialEntry}:{}),
         ...(nativeOfficial?.phoneBooking?{phoneBooking:true as const}:{}),onSelectedLabel:label=>{providerVenueName=label;}}:undefined, config.buildNumber);
-    if(nativeOfficialPage&&!metadata.publicCatalogMode){
+    if (savedProof?.kind === "OFFICIAL_TITLE_PHYSICAL_ENTRY" && JSON.stringify(metadata.officialEntryProof) !== JSON.stringify(savedProof)) fail("ADAPTER_CONFIGURATION_CHANGED");
+    if(nativeOfficialPage&&!metadata.publicCatalogMode&&!metadata.officialEntryProof){
       if(nativeOfficial?.phoneBooking){
         const proof=bindCpsPhoneBookingProof(source,nativeOfficialPage,deps.trustedContext?.canonicalCoursePhone,metadata,providerVenueName);
         if(savedProof&&JSON.stringify(proof)!==JSON.stringify(savedProof))fail("ADAPTER_CONFIGURATION_CHANGED");
@@ -290,7 +317,7 @@ export async function executeCps(source: CpsSource, metadata: CpsMetadata, _targ
   deps: CpsDependencies = {}): Promise<AccessExecutionResult["slots"]> {
   validateInput(input, source); const saved = cpsMetadataSchema.parse(metadata);
   if (saved.tenant !== parseCpsSource(source.bookingUrl)?.tenant) fail("ADAPTER_SOURCE_MISMATCH");
-  const reader = createReader(source, deps, input.date, saved.officialPostalConflictProof??saved.officialPhoneBookingProof, saved.publicCatalogMode);
+  const reader = createReader(source, deps, input.date, saved.officialPostalConflictProof??saved.officialPhoneBookingProof??saved.officialEntryProof, saved.publicCatalogMode);
   try {
     const fresh = await reader.configuration();
     if (JSON.stringify(fresh.metadata) !== JSON.stringify(saved)) fail("ADAPTER_CONFIGURATION_CHANGED");

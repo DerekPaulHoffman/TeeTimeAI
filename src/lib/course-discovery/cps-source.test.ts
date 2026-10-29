@@ -84,6 +84,7 @@ describe("CPS stable public source", () => {
   });
   it("accepts only the exact reviewed current public client build after existing whitespace normalization", () => {
     expect(parseCpsConfiguration({ ...configuration(), apiKey: undefined, buildNumber: "\ufeff26.1.2.26379768992\n" }, source).buildNumber).toBe("26.1.2.26379768992");
+    expect(parseCpsConfiguration({ ...configuration(), apiKey: undefined, buildNumber: "\ufeff26.2.2.40425805601\n" }, source).buildNumber).toBe("26.2.2.40425805601");
     expect(parseCpsConfiguration({ ...configuration(), buildNumber: "\ufeff26.3.0.34794395074\n" }, source).buildNumber).toBe("26.3.0.34794395074");
     for (const buildNumber of ["99.1.2.12345678901", "99.2.3.42"])
       expect(() => parseCpsConfiguration({ ...configuration(), buildNumber }, source)).toThrow("CPS_PUBLIC_BUILD_UNSUPPORTED");
@@ -95,9 +96,9 @@ describe("CPS stable public source", () => {
   });
   it("maps only exact reviewed builds to their independent public startup protocol", () => {
     expect(cpsPublicBuildProtocol(CPS_PUBLIC_BUILD)).toBe("PUBLISHED_KEY");
-    for (const build of ["26.1.2.26379768992", "26.3.0.34794395074"])
+    for (const build of ["26.1.2.26379768992", "26.2.2.40425805601", "26.3.0.34794395074"])
       expect(cpsPublicBuildProtocol(build)).toBe("ANONYMOUS_SHORT_SESSION");
-    for (const build of ["26.1.1.26379768992", "26.1.2.26379768991", "26.1.2.26379768993", "26.1.3.26379768992", "26.3.1.34794395074"])
+    for (const build of ["26.1.1.26379768992", "26.1.2.26379768991", "26.1.2.26379768993", "26.1.3.26379768992", "26.2.1.40425805601", "26.2.2.40425805600", "26.2.2.40425805602", "26.2.3.40425805601", "26.3.1.34794395074"])
       expect(() => parseCpsConfiguration({ ...configuration(), buildNumber: build }, source)).toThrow("CPS_PUBLIC_BUILD_UNSUPPORTED");
   });
   it.each(["99.1.2.12345678901", "\ufeff99.1.2.12345678901\n"])("classifies a bound unsupported public build without deriving version-specific configuration: %s", buildNumber => {
@@ -132,7 +133,7 @@ describe("CPS stable public source", () => {
     for (const value of [null, [], "99.1.2.3", { ...configuration(), buildNumber: "99.1.2.3" }])
       expect(() => parseCpsConfiguration(value, { ...source, bookingUrl: source.bookingUrl + "account" })).toThrow("CPS_CONFIGURATION_UNVERIFIED");
   });
-  it.each([CPS_PUBLIC_BUILD, "26.1.2.26379768992", "26.3.0.34794395074"])("retains required version-specific fields for reviewed build %s", buildNumber => {
+  it.each([CPS_PUBLIC_BUILD, "26.1.2.26379768992", "26.2.2.40425805601", "26.3.0.34794395074"])("retains required version-specific fields for reviewed build %s", buildNumber => {
     const value = { ...configuration(), buildNumber };
     expect(parseCpsConfiguration(value, source).buildNumber).toBe(buildNumber);
     for (const missing of [{ ...value, clientId: undefined }, { ...value, websiteId: undefined }])

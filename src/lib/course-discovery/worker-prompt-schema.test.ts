@@ -3,7 +3,8 @@ import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import Ajv from "ajv";
 import Ajv2020 from "ajv/dist/2020.js";
-import { compactDiscoveryRecipeSchema } from "../../../scripts/automation/course-discovery-prompt-schema.mjs";
+import { compactDiscoveryRecipeSchema, discoveryPromptInstructions, selectDiscoveryRecipeSchema } from "../../../scripts/automation/course-discovery-prompt-schema.mjs";
+import { DISCOVERY_TOOLS, discoveryRecipeGuidance } from "../../../scripts/automation/course-discovery-worker.mjs";
 
 const modern = () => new Ajv2020({ strict: false, validateFormats: false, logger: false, code: { optimize: 0 } });
 const freeze = (value: unknown): unknown => {
@@ -124,5 +125,47 @@ describe("the actual CLI-generated recipe schema", () => {
     for (const value of ["", 0, false, {}, [], null]) for (const key of ["target", "source", "proof", "request", "slots", "permittedRoutes"]) cases.push({ ...http, [key]: value });
     for (const value of cases) expect(right(value), JSON.stringify(value)).toBe(left(value));
     expect(JSON.stringify(compactDiscoveryRecipeSchema(original))).toBe(JSON.stringify(compact));
+    const originalSchema = original as { oneOf: Array<{ properties?: { adapter?: { oneOf: Array<{ properties: { family: { const: string } } }> } } }> };
+    const selections: Array<{ engine: string; family?: string; requestBinding?: string }> = [{ engine: "HTTP_JSON" }, { engine: "HTTP_JSON", requestBinding: "SEVENROOMS_PUBLIC_PARTICIPANTS" },
+      { engine: "BROWSER_DOM" }, { engine: "BROWSER_JSON", requestBinding: "SEVENROOMS_PUBLIC_PARTICIPANTS" },
+      { engine: "BROWSER_JSON", requestBinding: "MEMBERSPORTS_PUBLIC_TEE_SHEET" },
+      ...originalSchema.oneOf[3].properties!.adapter!.oneOf.map(node => ({ engine: "EXISTING_ADAPTER", family: node.properties.family.const }))];
+    for (const selection of selections) {
+      const selected = selectDiscoveryRecipeSchema(original, selection), validate = modern().compile(selected);
+      expect(modern().validateSchema(selected)).toBe(true);
+      expect(size({ schema: selected, guidance: discoveryRecipeGuidance(selection) })).toBeLessThan(18_000);
+      for (const value of cases) {
+        const candidate = value as typeof http & { adapter?: { family?: string }; requestBinding?: string };
+        const inVariant = candidate?.engine === selection.engine && candidate.requestBinding === selection.requestBinding &&
+          (selection.family === undefined || candidate.adapter?.family === selection.family);
+        expect(validate(value), JSON.stringify({ selection, value })).toBe(inVariant && left(value));
+      }
+    }
+    expect(JSON.stringify(original)).toBe(before);
+    for (const selection of [{ engine: "UNSAFE" }, { engine: "EXISTING_ADAPTER" }, { engine: "EXISTING_ADAPTER", family: "UNKNOWN" },
+      { engine: "BROWSER_JSON" }, { engine: "BROWSER_DOM", family: "CPS" }, { engine: "BROWSER_DOM", unexpected: true }])
+      expect(() => selectDiscoveryRecipeSchema(original, selection)).toThrow("DISCOVERY_PROMPT_SCHEMA_SELECTION_UNAVAILABLE");
   }, 45_000);
+});
+
+describe("bounded initial discovery instructions", () => {
+  it("keeps every common safety/identity rule and all tool schemas below12k without eager recipe/provider documentation", () => {
+    const instructions = discoveryPromptInstructions({ browserTransport: "NATIVE_CHROME" });
+    expect(size(instructions) + size(DISCOVERY_TOOLS) + 500).toBeLessThan(12_000);
+    for (const rule of ["signed-out", "Never select/hold/reserve", "canonical", "Standard Public", "Players are attendee context", "fixed",
+      "modelPreview", "never prove", "two fresh independent challenges", "eight-operation", "INCOMPLETE"])
+      expect(instructions).toContain(rule);
+    expect(instructions).not.toContain('"$defs"'); expect(instructions).not.toContain("CPS .cps.golf");
+    expect(discoveryPromptInstructions({ recipeEngineConstraint: "EXISTING_ADAPTER" })).toContain("Other engines and stale metadata/source reports are forbidden");
+  });
+
+  it("returns long provider guidance only for the selected engine/family or binding", () => {
+    const browser = discoveryRecipeGuidance({ engine: "BROWSER_DOM" });
+    expect(browser).toContain("Every BROWSER_DOM recipe requires availabilityResponse");
+    expect(browser).not.toContain("CPS .cps.golf"); expect(browser).not.toContain("tenant.teesnap.net");
+    const cps = discoveryRecipeGuidance({ engine: "EXISTING_ADAPTER", family: "CPS" });
+    expect(cps).toContain("CPS .cps.golf"); expect(cps).not.toContain("tenant.teesnap.net");
+    const json = discoveryRecipeGuidance({ engine: "BROWSER_JSON", requestBinding: "MEMBERSPORTS_PUBLIC_TEE_SHEET" });
+    expect(json).toContain("A public MemberSports"); expect(json).not.toContain("CPS .cps.golf");
+  });
 });

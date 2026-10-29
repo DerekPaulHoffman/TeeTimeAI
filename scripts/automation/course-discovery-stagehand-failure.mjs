@@ -2,12 +2,12 @@ import { discoveryError } from "./course-discovery-client.mjs";
 import { canonicalStagehandData as canonical, stagehandDataHash as hash, createStagehandSourceCheckpoint } from "./course-discovery-stagehand-source.mjs";
 import { projectSourceDiagnostic, sourceTransportCodes, safeNativeRouterFailure } from "./stagehand/source-diagnostic.mjs";
 import { safeTeeItUpDelegationDiagnostic, safeFixedAdapterReadDiagnostic, safeFixedInspectionSourceDiagnostic } from "./course-discovery-worker.mjs";
-import { currentStagehandInspectionDiagnostic, safeInspectionReadability } from "./course-discovery-stagehand-inspection.mjs";
+import { currentStagehandInspectionDiagnostic, safeInspectionReadability, safeInspectionLandingDiagnostic } from "./course-discovery-stagehand-inspection.mjs";
 
 const LIMIT = 32000, KIND = "OWN_STAGEHAND_FAILURE_DIAGNOSTIC";
 const phases = new Set(["SOURCE_RESUME", "SOURCE_DISCOVERY", "SOURCE_VALIDATION", "FIXED_INSPECTION", "RECIPE_VALIDATION", "REPLAY", "ACTIVATION", "UNKNOWN"]);
 const codes = new Set([...sourceTransportCodes, "OFFICIAL_DELEGATED_SOURCE_UNVERIFIED", "OFFICIAL_PHYSICAL_CONTACT_UNVERIFIED", "FOREUP_OFFICIAL_ROUTE_UNVERIFIED", "UNSUPPORTED_ADAPTER_SOURCE", "CPS_PUBLIC_BUILD_UNSUPPORTED", "ADAPTER_CONFIGURATION_UNVERIFIED", "STAGEHAND_WORKER_FAILED", "STAGEHAND_SOURCE_DISCOVERY_FAILED", "STAGEHAND_SOURCE_OUTPUT_INVALID",
-  "ADAPTER_TRANSPORT_FAILED", "ADAPTER_CONFIGURATION_CHANGED", "ADAPTER_IDENTITY_MISMATCH", "INVALID_ADAPTER_SOURCE", "USCHEDULE_PUBLIC_LOCATION_UNVERIFIED", "USCHEDULE_PUBLIC_PARTY_UNVERIFIED", "OFFICIAL_POSTAL_SOURCE_UNVERIFIED",
+  "ADAPTER_TRANSPORT_FAILED", "ADAPTER_CONFIGURATION_CHANGED", "ADAPTER_IDENTITY_MISMATCH", "INVALID_ADAPTER_SOURCE", "USCHEDULE_PUBLIC_LOCATION_UNVERIFIED", "USCHEDULE_PUBLIC_PARTY_UNVERIFIED", "OFFICIAL_POSTAL_SOURCE_UNVERIFIED", "CPS_PHONE_BOOKING_SOURCE_UNVERIFIED", "CPS_OFFICIAL_ENTRY_UNVERIFIED",
   "OFFICIAL_STREET_TYPE_OMITTED_UNVERIFIED", "OFFICIAL_STREET_TYPE_OMITTED_CHANGED",
   "OFFICIAL_CONTACT_SOURCE_UNVERIFIED", "OFFICIAL_CONTACT_READER_UNAVAILABLE", "OFFICIAL_CONTACT_ROOT_READ_UNVERIFIED",
   "OFFICIAL_CONTACT_ROOT_LINK_UNVERIFIED", "OFFICIAL_CONTACT_PAGE_READ_UNVERIFIED", "OFFICIAL_CONTACT_DOCUMENT_UNVERIFIED",
@@ -49,11 +49,13 @@ function validEntry(value, job, now) {
     const teeItUpDelegation = safeTeeItUpDelegationDiagnostic(value.fixedInspectionDiagnostic?.teeItUpDelegation);
     const adapterRead = safeFixedAdapterReadDiagnostic(value.fixedInspectionDiagnostic?.adapterRead);
     const readability = safeInspectionReadability(value.fixedInspectionDiagnostic?.readability);
+    const landing = safeInspectionLandingDiagnostic(value.fixedInspectionDiagnostic?.landing);
     const nativeRouterFailure = safeNativeRouterFailure(value.fixedInspectionDiagnostic?.nativeRouterFailure);
     const fixedSource = safeFixedInspectionSourceDiagnostic(value.fixedInspectionDiagnostic);
-    const diagnostic = teeItUpDelegation || adapterRead || readability || nativeRouterFailure || fixedSource ? {
+    const diagnostic = teeItUpDelegation || adapterRead || readability || landing || nativeRouterFailure || fixedSource ? {
       ...(teeItUpDelegation ? { teeItUpDelegation } : {}), ...(adapterRead ? { adapterRead } : {}),
       ...(readability ? { readability } : {}),
+      ...(landing ? { landing } : {}),
       ...(nativeRouterFailure ? { nativeRouterFailure } : {}),
       ...(fixedSource ?? {}),
     } : undefined;

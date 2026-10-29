@@ -164,6 +164,8 @@ export function collectNativeOfficialPublicMetadata(input: string | { venueName:
     contactPhoneLinks.push({ href, text: value });
   }
   const publicLinkLabels: Array<{ href: string; text: string }> = [];
+  const publicBookingEntryLinks: Array<{ href: string; text: string }> = [];
+  let publicBookingEntryLinksOmitted = false;
   const allPublicAnchors = Array.from(document.querySelectorAll('a[href]'));
   const officialContactLinkLabels: Array<{ href: string; text: string }> = [];
   let officialContactLinkLabelsOmitted = allPublicAnchors.length > 3000;
@@ -172,6 +174,12 @@ export function collectNativeOfficialPublicMetadata(input: string | { venueName:
     if (!(anchor instanceof HTMLAnchorElement) || anchor.closest('form') || !cms.visible(anchor)) continue;
     const text = anchor.innerText.normalize('NFKC').replace(/\s+/gu, ' ').trim();
     let href: URL; try { href = new URL(anchor.href); } catch { continue; }
+    if (/^(?:book(?:\s+a)?\s+tee\s*time|tee\s*times?|online\s+reservations)$/iu.test(text) &&
+        href.protocol === "https:" && href.origin === new URL(document.URL).origin && !href.search && !href.hash &&
+        !href.username && !href.password && !href.port && !anchor.hasAttribute("onclick") && !anchor.hasAttribute("download")) {
+      if (publicBookingEntryLinks.length < 120) publicBookingEntryLinks.push({ href: href.href, text });
+      else { publicBookingEntryLinksOmitted = true; publicBookingEntryLinks.length = 0; }
+    }
     if (!officialContactLinkLabelsOmitted && text.length <= 160 && href.protocol === 'https:' && !href.username && !href.password && !href.port && !href.hash &&
         !anchor.hasAttribute('onclick') && !anchor.hasAttribute('download') &&
         (/^contact(?:\s+us)?$/iu.test(text) && href.origin === new URL(document.URL).origin && !href.search ||
@@ -224,7 +232,50 @@ export function collectNativeOfficialPublicMetadata(input: string | { venueName:
     }
     delegatedFrameSources.rows.push({ src, visible: visible && parent === null, srcdoc: node.hasAttribute("srcdoc"), inForm: Boolean(node.closest("form")) });
   }
+  const cpsBookingWidgets: Array<{ configuration: string; fields: Array<{ name: string; tag: string; type: string }> }> = [];
+  let cpsBookingWidgetsOmitted = false;
+  const entryVisibility = { visible(node: HTMLElement) {
+    const rect = node.getBoundingClientRect(); if (rect.width <= 0 || rect.height <= 0) return false;
+    let current: HTMLElement | null = node, depth = 0;
+    while (current && depth++ < 40) {
+      const style = getComputedStyle(current);
+      if (current.hasAttribute("hidden") || current.hasAttribute("inert") || current.getAttribute("aria-hidden") === "true" ||
+          style.display === "none" || ["hidden", "collapse"].includes(style.visibility) || style.opacity !== "" && Number(style.opacity) === 0 ||
+          /\b(?:account|member|profile|customer|checkout|payment|billing|login|password)\b/iu.test(
+            ["id", "class", "aria-label", "title"].map(key => current!.getAttribute(key) ?? "").join(" "))) return false;
+      current = current.parentElement;
+    }
+    return current === null;
+  } };
+  const widgetForms = Array.from(document.querySelectorAll('form.tee-time-form'));
+  if (widgetForms.length > 20) cpsBookingWidgetsOmitted = true;
+  else for (const candidate of widgetForms) {
+    if (!(candidate instanceof HTMLFormElement) || !entryVisibility.visible(candidate)) continue;
+    if (candidate.method.toLowerCase() !== "get" || candidate.hasAttribute("onsubmit") || candidate.hasAttribute("action") || candidate.closest('form form')) {
+      cpsBookingWidgetsOmitted = true; continue;
+    }
+    const widget = candidate.parentElement, configuration = widget?.getAttribute("data-widget-config");
+    if (!widget || !entryVisibility.visible(widget) || !configuration || configuration.length > 20000 || !/^[A-Za-z0-9+/]+={0,2}$/u.test(configuration)) {
+      cpsBookingWidgetsOmitted = true; continue;
+    }
+    try {
+      const value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(atob(configuration), character => character.charCodeAt(0))));
+      const url = new URL(value.baseURL);
+      if (!value || Array.isArray(value) || value.newBookingEngine !== true || url.protocol !== "https:" ||
+          !/^[a-z][a-z0-9-]*\.cps\.golf$/u.test(url.hostname) || url.pathname !== "/onlineresweb/search-teetime" ||
+          url.search || url.hash || url.username || url.password || url.port ||
+          Object.keys(value).some(key => /password|secret|token|cookie|session|credential|authorization|api.?key|email|phone|customer|profile|account/iu.test(key))) { cpsBookingWidgetsOmitted = true; continue; }
+      const controls = Array.from(candidate.querySelectorAll("input,textarea,select,button"));
+      if (controls.length > 10) { cpsBookingWidgetsOmitted = true; continue; }
+      const fields = controls.map(node => ({ name: node.getAttribute("name") ?? "", tag: node.tagName,
+        type: node.getAttribute("type") ?? "" }));
+      if (fields.some(field => !["course-id", "date", "time", "holes", "players", "submit"].includes(field.name)) ||
+          [widget, candidate, ...controls].some(node => node.getAttributeNames().some(name => name.startsWith("on")))) { cpsBookingWidgetsOmitted = true; continue; }
+      cpsBookingWidgets.push({ configuration, fields });
+    } catch { cpsBookingWidgetsOmitted = true; }
+  }
   return { title: document.title.slice(0, 500), headings, linkUrls, addressTexts, phoneTexts, phoneTextsOmitted, contactPhoneLinks, contactPhoneLinksOmitted,
+    publicBookingEntryLinks, publicBookingEntryLinksOmitted, cpsBookingWidgets, cpsBookingWidgetsOmitted,
     publicLinkLabels, publicLinkLabelsOmitted, officialContactLinkLabels, officialContactLinkLabelsOmitted,
     brandLinks, publicRentalTexts, publicBusinessLabels, officialContactBusinessNames, namedContactBlocks, namedContactBlocksOmitted, delegatedFrameSources };
 }

@@ -197,6 +197,7 @@ export type DiscoveryBrowserSnapshot = {
   completedPublicAssetRequestsOverflow?: boolean;
   /** Controller-only current native HTTP lineage; stripped from model input. */
   nativeDocumentRedirects?: NativeDocumentRedirect[];
+  nativeRoutingDocumentRedirects?: NativeDocumentRedirect[];
   /** Controller-only current native read; removed before model/tool projection. */
   nativeMainDocumentContinuity?: NativeMainDocumentContinuity;
   /** Controller-only freshly completed placeholder click; stripped before model input. */
@@ -343,6 +344,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
   let delegatedIdentityDocument: { url: string; html: string } | undefined;
   let delegatedIdentityPage: (OfficialIdentityPage & { observedAt: number; documentStartedAt: number }) | undefined;
   let nativeDocumentRedirects: { url: string; request: object } | undefined;
+  // Only a consumed, freshly revalidated fixed-frame OPEN can set this root.
+  // HTTP provenance below never promotes it to official identity metadata.
+  let nativeRoutingOpenRoot: string | undefined;
   let officialSourceDiagnostic: OfficialSourceDiagnostic | undefined, navigationFailureKind: NavigationFailureKind | undefined;
   let staleControlReason: StaleControlReason | undefined;
   const staleControl: (reason: StaleControlReason) => never = reason => {
@@ -490,8 +494,10 @@ export async function createCourseDiscoveryBrowserSession(input: {
       if (!redirectRouting.firstFatal && redirectRouting.isCurrentCompletedDocumentRead(read.request, page.mainFrame(),
         { frameId: before.id, loaderId: before.loaderId, url: currentUrl })) {
         const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+        const routing = nativeRoutingOpenRoot ? attestedNativeDocumentRedirects(read.request, new Set([nativeRoutingOpenRoot])) : undefined;
+        const originalUrl = routing?.at(-1)?.toUrl === currentUrl ? nativeRoutingOpenRoot! : read.url;
         nativeMainDocumentWitness = { request: read.request, currentUrl, timeOrigin: documentStartedAt, frameId: before.id, loaderId: before.loaderId,
-          proof: { kind: "NATIVE_MAIN_DOCUMENT_CONTINUITY_V1", originalUrlSha256: hash(read.url), currentUrlSha256: hash(currentUrl),
+          proof: { kind: "NATIVE_MAIN_DOCUMENT_CONTINUITY_V1", originalUrlSha256: hash(originalUrl), currentUrlSha256: hash(currentUrl),
             documentBindingSha256: hash([read.documentNonce, before.id, before.loaderId, documentStartedAt, read.url]), observedAt: Date.now(), status: 200 } };
         return read.status;
       }
@@ -524,7 +530,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     // Private completed metadata is never model input and must retain its
     // exact observed URL through this public-response nonce sanitizer.
     if (value && typeof value === "object" && safe && typeof safe === "object") {
-      for (const key of ["completedPublicAssetRequests", "completedPublicAssetRequestsOverflow", "nativeDocumentRedirects", "nativeMainDocumentContinuity", "nativeGestureCompletion"] as const)
+      for (const key of ["completedPublicAssetRequests", "completedPublicAssetRequestsOverflow", "nativeDocumentRedirects", "nativeRoutingDocumentRedirects", "nativeMainDocumentContinuity", "nativeGestureCompletion"] as const)
         if (Object.hasOwn(value, key)) Object.assign(safe, { [key]: (value as Record<string, unknown>)[key] });
     }
     return safe;
@@ -1552,8 +1558,13 @@ export async function createCourseDiscoveryBrowserSession(input: {
     requestMetadataBytes = pendingMetadata.reduce((total, request) => total + JSON.stringify(request).length + 120, 0);
     const currentNativeRedirects = nativeDocumentRedirects && nativeDocumentRedirects.url === actualCurrentUrl && input.venueOfficialUrl
       ? attestedNativeDocumentRedirects(nativeDocumentRedirects.request, new Set([input.venueOfficialUrl])) : undefined;
+    const routingRedirects = nativeRoutingOpenRoot && nativeMainDocumentWitness?.currentUrl === actualCurrentUrl &&
+      nativeMainDocumentWitness.request === navigation?.request && nativeMainDocumentWitness.timeOrigin === documentStartedAt
+      ? attestedNativeDocumentRedirects(nativeMainDocumentWitness.request, new Set([nativeRoutingOpenRoot])) : undefined;
+    const currentRoutingRedirects = routingRedirects?.at(-1)?.toUrl === actualCurrentUrl ? routingRedirects : undefined;
     return { url: currentUrl, text, controls: visible, elements, frames, responses: responses.splice(0), requests, requestFailures: requestFailures.map(failure => ({ ...failure })),
       ...(currentNativeRedirects ? { nativeDocumentRedirects: currentNativeRedirects } : {}),
+      ...(currentRoutingRedirects ? { nativeRoutingDocumentRedirects: currentRoutingRedirects } : {}),
       ...((redirectRouting?.firstFatal ?? browserSessionNativeLimit) ? { nativeFirstFatal: redirectRouting?.firstFatal ?? browserSessionNativeLimit } : {}),
       ...(redirectRouting?.rejectedRequests?.length ? { nativeRejectedRequests: redirectRouting.rejectedRequests } : {}),
       officialSourceDiagnostic: officialDiagnostics(), ...(navigationFailureKind ? { navigationFailureKind } : {}),
@@ -1913,6 +1924,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       if (action.action === "open") {
         serviceSelection = undefined;
         disclosureGetOnly = false; entryGetIntent = undefined;
+        nativeRoutingOpenRoot = undefined;
         if (fixedInspectionFrameWitness && action.url === fixedInspectionFrameWitness.frameUrl) {
           const token = fixedInspectionFrameToken;
           fixedInspectionFrameToken = undefined;
@@ -1938,6 +1950,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
               !exactFreshInspectionFrame(freshFrames, fixedInspectionFrameWitness, token.parentUrl))
             throw new Error("FIXED_INSPECTION_FRAME_STALE");
           allowedNavigation.add(action.url); observedNavigationRoots.add(action.url);
+          nativeRoutingOpenRoot = action.url;
         }
         if (!isSafeRecipeUrl(action.url) || !allowedNavigation.has(new URL(action.url).href)) throw new Error("UNOBSERVED_NAVIGATION");
         pendingOfficialSubpage = undefined; officialSubpage = undefined;

@@ -95,6 +95,22 @@ const venue="Example Golf Studio",address="10 Example Road, Example, New York 12
 const html=()=>`<form method="post" action="${document.URL}"><input type="hidden" value="PRIVATE"><h2>${venue}</h2><p>${address}</p><p>${rental}</p><a href="https://booking.example/">Book public rental</a><footer>Public address</footer></form>`;
 function setup(markup:string){document.body.innerHTML=markup;vi.spyOn(HTMLElement.prototype,"getBoundingClientRect").mockImplementation(()=>({width:10,height:10,x:0,y:0,top:0,right:10,bottom:10,left:0,toJSON:()=>({})}));Object.defineProperty(HTMLElement.prototype,"innerText",{configurable:true,get(){return this.textContent??"";}});}
 afterEach(()=>{vi.restoreAllMocks();document.body.innerHTML="";window.history.replaceState(null,"",location.origin+"/");});
+it("captures only current visible ordinary booking links and bounded inert public GET widgets",()=>{
+ const configuration=btoa(JSON.stringify({baseURL:"https://fixture.cps.golf/onlineresweb/search-teetime",newBookingEngine:true,locations:[{name:"Fixture Course",courseId:"0"}]}));
+ const form='<form class="tee-time-form"><select name="course-id"></select><input name="date" type="date"><select name="time"></select><select name="players"></select><button name="submit" type="submit">Search</button></form>';
+ setup('<a href="/tee-times">Book A Tee Time</a><a hidden href="https://hidden.cps.golf/">Book A Tee Time</a><div data-widget-config="'+configuration+'">'+form+'</div>');
+ const got=collectNativeOfficialPublicMetadata(venue);
+ expect(got.publicBookingEntryLinks).toEqual([{href:location.origin+"/tee-times",text:"Book A Tee Time"}]);
+ expect(got.cpsBookingWidgetsOmitted).toBe(false);expect(got.cpsBookingWidgets).toHaveLength(1);
+ expect(got.cpsBookingWidgets[0].configuration).toBe(configuration);expect(got.cpsBookingWidgets[0].fields.map(f=>f.name)).toEqual(["course-id","date","time","players","submit"]);
+});
+it("does not silently drop an unsafe visible competing tee-time widget or promote a hidden one",()=>{
+ const configuration=btoa(JSON.stringify({baseURL:"https://fixture.cps.golf/onlineresweb/search-teetime",newBookingEngine:true,locations:[{name:"Fixture Course",courseId:"0"}]}));
+ setup('<div data-widget-config="'+configuration+'"><form class="tee-time-form" method="post"><input name="email" type="email"></form></div>');
+ expect(collectNativeOfficialPublicMetadata(venue).cpsBookingWidgetsOmitted).toBe(true);
+ setup('<div hidden data-widget-config="'+configuration+'"><form class="tee-time-form"><input name="email" type="email"></form></div>');
+ const hidden=collectNativeOfficialPublicMetadata(venue);expect(hidden.cpsBookingWidgets).toEqual([]);expect(hidden.cpsBookingWidgetsOmitted).toBe(false);
+});
 it("actual installed tsx serialization runs in a separate page-like VM without module helpers",()=>{
  const moduleUrl=pathToFileURL(resolve("src/lib/course-discovery/public-document-metadata.ts")).href;
  const script=`import {createRequire} from 'node:module';import {fileURLToPath} from 'node:url';import {runInNewContext} from 'node:vm';const {collectNativeOfficialPublicMetadata:collect}=createRequire(process.cwd()+'/package.json')(fileURLToPath(${JSON.stringify(moduleUrl)}));const result=runInNewContext('('+collect.toString()+')('+JSON.stringify('Example Golf Studio')+')',{document:{forms:[],querySelectorAll:()=>[],title:''}});if(result.headings.length||result.addressTexts.length)throw Error('INVALID');console.log('SERIALIZATION_OK');`;

@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { createServer } from "node:https";
 import { connect, type AddressInfo } from "node:net";
@@ -211,6 +212,65 @@ describe("discovery browser public protocol", () => {
 
 const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
+  it.each(["redirect", "noFrameGrant", "incompleteChain", "staleLoader", "staleGeneration", "foreignFrame", "changedFinal", "clientNavigation"] as const)
+  ("binds a fresh fixed-frame OPEN only to its exact completed native redirect document: %s", async mode => {
+    const official = "https://routing-frame.example/", frame = official + "html/widget", final = official + "html/public?view=day";
+    const material = readFileSync("src/lib/course-discovery/cps-browser-wiring.test.ts", "utf8");
+    const tls = (key: string): string => JSON.parse(new RegExp(`^const ${key} = (".*");$`, "m").exec(material)![1]);
+    const server = createServer({ key: tls("fixtureKey"), cert: tls("fixtureCertificate") }, (request, response) => {
+      if (request.url === "/html/widget" && mode !== "clientNavigation") { response.writeHead(302, { location: final }).end(); return; }
+      const html = request.url === "/" ? `<h1>Public Golf Course</h1><p>10 Public Road, Example, NY 12345, USA</p><iframe src="${frame}" style="width:400px;height:300px" title="Embedded Content"></iframe>`
+        : request.url === "/html/widget" ? `<h1>Public source</h1><script>location.replace(${JSON.stringify(final)})</script>`
+          : `<h1>Public availability</h1>${mode === "changedFinal" ? '<script>history.replaceState(null,"","/html/public?view=other")</script>' : ''}`;
+      response.writeHead(200, { "content-type": "text/html" }).end(`<html><body>${html}</body></html>`);
+    });
+    const originalProxy = nativeBrowser.createNativePublicBrowserProxy, originalRouter = nativeRouting.installNativeRedirectRouting;
+    const originalRedirects = nativeRouting.attestedNativeDocumentRedirects;
+    const redirects = vi.spyOn(nativeRouting, "attestedNativeDocumentRedirects").mockImplementation((request, roots) =>
+      mode === "incompleteChain" && roots.has(frame) ? undefined : originalRedirects(request, roots));
+    const routing = vi.spyOn(nativeRouting, "installNativeRedirectRouting").mockImplementation(async (page, handler, options) => {
+      const router = await originalRouter(page, handler, options), current = router.isCurrentCompletedDocumentRead.bind(router);
+      let retired = false;
+      router.isCurrentCompletedDocumentRead = (request, sourceFrame, captured) => {
+        if (captured.url.startsWith(official + "html/public")) {
+          if (mode === "staleGeneration" && !retired) { retired = true; void router.beginDocumentNavigation(page.mainFrame()).catch(() => {}); }
+          if (mode === "staleLoader") return current(request, sourceFrame, { ...captured, loaderId: captured.loaderId + "-stale" });
+          if (mode === "foreignFrame") return current(request, {} as typeof sourceFrame, captured);
+        }
+        return current(request, sourceFrame, captured);
+      };
+      return router;
+    });
+    let session: Awaited<ReturnType<typeof createCourseDiscoveryBrowserSession>> | undefined;
+    let proxy: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve)); const port = (server.address() as AddressInfo).port;
+      proxy = vi.spyOn(nativeBrowser, "createNativePublicBrowserProxy").mockImplementation(input => originalProxy({ ...input, requireHostAdmission: true }, {
+        resolveAddresses: async hostname => { if (hostname !== "routing-frame.example") throw Error("UNOWNED_FIXTURE_HOST"); return [{ address: "93.184.216.34", family: 4 }]; },
+        connect: () => connect({ host: "127.0.0.1", port }),
+      }));
+      session = await createCourseDiscoveryBrowserSession({ initialUrls: mode === "noFrameGrant" ? [official, frame] : [official], venueOfficialUrl: official,
+        venueName: "Public Golf Course", venueAddress: "10 Public Road, Example, NY 12345, USA", deadlineAt: new Date(Date.now() + 30_000) }, {
+        browserTransport: "NATIVE_CHROME", requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+        ...(mode === "noFrameGrant" ? {} : { fixedInspectionFrameWitness: { kind: "FIXED_INSPECTION_SOURCE_FRAME" as const,
+          officialUrl: official, parentUrl: official, frameUrl: frame, sourceReportSha256: "a".repeat(64) } }),
+        launchBrowser: () => launchPublicReadBrowser({ executablePath, headless: true, args: ["--ignore-certificate-errors"] }),
+      });
+      const home = await session.execute({ id: 1, action: "open", url: official });
+      if (mode !== "noFrameGrant") expect(home.frames).toContainEqual({ url: frame, source: "FIXED_INSPECTION_FRAME_SRC" });
+      const opened = await session.execute({ id: 2, action: "open", url: frame });
+      const hash = (value: string) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+      if (mode === "redirect") {
+        expect(opened.url).toBe(final);
+        expect(opened.nativeRoutingDocumentRedirects).toEqual([{ fromUrl: frame, toUrl: final, status: 302, completed: true }]);
+        expect(opened.nativeMainDocumentContinuity).toMatchObject({ originalUrlSha256: hash(frame), currentUrlSha256: hash(final), status: 200 });
+        expect(opened.nativeDocumentRedirects).toBeUndefined();
+      } else {
+        expect(opened.nativeRoutingDocumentRedirects).toBeUndefined();
+        expect(opened.nativeMainDocumentContinuity?.originalUrlSha256).not.toBe(hash(frame));
+      }
+    } finally { await session?.close(); proxy?.mockRestore(); routing.mockRestore(); redirects.mockRestore(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
+  }, 40_000);
   it("admits only the current exact fixed inspection iframe on a verified official subpage", async () => {
     const official = "https://fixed-frame.example/", subpage = `${official}golf`, frame = `${official}html/widget`;
     const material = readFileSync("src/lib/course-discovery/cps-browser-wiring.test.ts", "utf8");

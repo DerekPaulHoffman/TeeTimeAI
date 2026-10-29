@@ -38,6 +38,30 @@ export function safeInspectionReadability(value) {
   const result = z.array(readabilitySchema).min(1).max(INSPECTION_ACTION_LIMIT).safeParse(value);
   return result.success && new Set(result.data.map(row => row.actionIndex)).size === result.data.length ? result.data : undefined;
 }
+const landingSchema = z.object({
+  position: z.number().int().min(0).max(5), pathLength: z.number().int().min(1).max(6),
+  snapshotPathIndex: z.number().int().min(-1).max(5), logicalPathIndex: z.number().int().min(-1).max(5),
+  remainingPathIndex: z.number().int().min(-1).max(5), nativeContextPresent: z.boolean(),
+  expectedUrlSha256: digest, snapshotUrlSha256: digest, logicalUrlSha256: digest,
+  nativeOriginalUrlSha256: digest.nullable(), frameParentPosition: z.number().int().min(-1).max(5),
+  frameChildPosition: z.number().int().min(-1).max(5),
+}).strict();
+export function safeInspectionLandingDiagnostic(value) {
+  const parsed = landingSchema.safeParse(value);
+  return parsed.success && parsed.data.position < parsed.data.pathLength ? parsed.data : undefined;
+}
+export function inspectionLandingDiagnostic(snapshot, path, position, nativeContext, frameWitness) {
+  if (!publicUrl(snapshot?.url) || !Array.isArray(path) || !path.every(publicUrl) || !path[position]) return undefined;
+  const actual = new URL(snapshot.url).href, logical = new URL(nativeContext?.originalUrl ?? actual).href;
+  return safeInspectionLandingDiagnostic({ position, pathLength: path.length,
+    snapshotPathIndex: path.indexOf(actual), logicalPathIndex: path.indexOf(logical),
+    remainingPathIndex: path.indexOf(logical, position), nativeContextPresent: Boolean(nativeContext),
+    expectedUrlSha256: hash(path[position]), snapshotUrlSha256: hash(actual), logicalUrlSha256: hash(logical),
+    nativeOriginalUrlSha256: nativeContext ? hash(nativeContext.originalUrl) : null,
+    frameParentPosition: frameWitness ? path.indexOf(frameWitness.parentUrl) : -1,
+    frameChildPosition: frameWitness ? path.indexOf(frameWitness.frameUrl) : -1,
+  });
+}
 /** Existing snapshot facts only. No frame/loader correlation is exposed by this protocol. */
 export function inspectionReadability(snapshot, action, actionIndex, officialUrl, bookingUrl) {
   const safeUrl = publicUrl(snapshot?.url), fact = value => typeof value === "boolean" ? value : null;
@@ -77,11 +101,13 @@ export function currentStagehandInspectionDiagnostic(error, job, startedAt, now)
     const teeItUpDelegation = safeTeeItUpDelegationDiagnostic(value.teeItUpDelegation);
     const adapterRead = safeFixedAdapterReadDiagnostic(value.adapterRead);
     const readability = safeInspectionReadability(value.readability);
+    const landing = safeInspectionLandingDiagnostic(value.landing);
     const nativeRouterFailure = safeNativeRouterFailure(value.nativeRouterFailure);
     const fixedSource = safeFixedInspectionSourceDiagnostic(value);
-    return teeItUpDelegation || adapterRead || readability || nativeRouterFailure || fixedSource ? {
+    return teeItUpDelegation || adapterRead || readability || landing || nativeRouterFailure || fixedSource ? {
       ...(teeItUpDelegation ? { teeItUpDelegation } : {}), ...(adapterRead ? { adapterRead } : {}),
       ...(readability ? { readability } : {}),
+      ...(landing ? { landing } : {}),
       ...(nativeRouterFailure ? { nativeRouterFailure } : {}),
       ...(fixedSource ?? {}),
     } : undefined;
@@ -272,7 +298,7 @@ const inspectionCodes = new Set(["FRAMEWORK_HYBRID_REPORT_INVALID","FRAMEWORK_SO
   "OFFICIAL_CONTACT_SOURCE_UNVERIFIED", "OFFICIAL_CONTACT_READER_UNAVAILABLE", "OFFICIAL_CONTACT_ROOT_READ_UNVERIFIED",
   "OFFICIAL_CONTACT_ROOT_LINK_UNVERIFIED", "OFFICIAL_CONTACT_PAGE_READ_UNVERIFIED", "OFFICIAL_CONTACT_DOCUMENT_UNVERIFIED",
   "OFFICIAL_CONTACT_DEADLINE_EXCEEDED", "OFFICIAL_CONTACT_CHAIN_READ_UNVERIFIED",
-  "OFFICIAL_CONTACT_DIRECTORY_BIND_UNVERIFIED", "OFFICIAL_CONTACT_DIRECTORY_READ_UNVERIFIED"]);
+  "OFFICIAL_CONTACT_DIRECTORY_BIND_UNVERIFIED", "OFFICIAL_CONTACT_DIRECTORY_READ_UNVERIFIED", "CPS_PHONE_BOOKING_SOURCE_UNVERIFIED", "CPS_OFFICIAL_ENTRY_UNVERIFIED"]);
 export const inspectionErrorCode = error => inspectionCodes.has(error?.code) ? error.code : "STAGEHAND_FIXED_INSPECTION_FAILED";
 export async function inspectStagehandAdapter({ report, adapterSourceProposal, job, worker, client, cwd, workDeadlineAt, signal,
   now = Date.now, onReceipt = () => {} }) {
@@ -425,7 +451,12 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
       const landed = path.indexOf(current, position);
       if (landed < position) {
         const hops=position===0?freshNativeOfficialRedirects(snapshot,path[0],current):null;
-        if(!hops)throw fail('FRAMEWORK_INSPECTION_LANDING_CHANGED');
+        if(!hops){
+          receipt.landingFailure = inspectionLandingDiagnostic(snapshot, path, position, nativeContexts.get(snapshot), frameWitness);
+          const step = receipt.actions.at(-1);
+          if (step) { step.error = 'FRAMEWORK_INSPECTION_LANDING_CHANGED'; step.landing = receipt.landingFailure; }
+          throw fail('FRAMEWORK_INSPECTION_LANDING_CHANGED');
+        }
         receipt.freshNativeOfficialRedirects=hops.map(h=>({fromUrlSha256:hash(h.fromUrl),toUrlSha256:hash(h.toUrl),status:h.status}));
         path[0]=current; position=0; receipt.freshPathSha256=hash(canonical(path));
       } else position = landed;
@@ -524,6 +555,17 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
 
     let actualRecipe = { ...recipe,
       source: { ...recipe.source, ...(sourceOnly ? { providerFamily: inspected.adapter.family } : {}) }, adapter: inspected.adapter };
+    // Only the exact private current inspection can adopt a fresh published
+    // CPS entry. This is not URL-prefix equivalence or a new navigation grant.
+    if (inspected.adapter.family === 'CPS' && inspected.adapter.officialEntryProof) {
+      const current = worker.createDiscoveryAdapterObservation(job, recipe.source.bookingUrl, inspected.adapter, inspected.url,
+        nativeContexts.get(inspected)?.capability, browser);
+      actualRecipe = worker.bindDiscoveryRecipeIdentity(actualRecipe, job, current, inspected.url);
+      if (canonical(actualRecipe.adapter) !== canonical(inspected.adapter) ||
+          actualRecipe.source.bookingUrl !== inspected.adapter.officialEntryProof.bookingUrl)
+        throw fail('FRAMEWORK_INSPECTION_PROOF_NOT_BOUND');
+      receipt.adoptedSourceSha256 = hash(actualRecipe.source.bookingUrl);
+    }
     const validation = await worker.validateDiscoveryRecipe({ cwd, recipe: actualRecipe, signal: inspectionSignal }); check();
     if (validation.valid !== true) throw fail('FRAMEWORK_INSPECTION_METADATA_INVALID');
     // CPS postal proof adoption requires the actual current booking document.
@@ -554,12 +596,12 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
         receipt.sourceContextReinspection.completed = true;
       } finally { receipt.sourceContextReinspection.elapsedMs = Math.max(0, now() - started); }
     }
-    const observation = worker.createDiscoveryAdapterObservation(job, recipe.source.bookingUrl, inspected.adapter, inspected.url, nativeContexts.get(inspected)?.capability);
+    const observation = worker.createDiscoveryAdapterObservation(job, recipe.source.bookingUrl, inspected.adapter, inspected.url, nativeContexts.get(inspected)?.capability, browser);
     const bound = worker.bindDiscoveryRecipeIdentity(actualRecipe, job, observation, inspected.url);
     if (!observation || canonical(bound.adapter) !== canonical(inspected.adapter)) throw fail('FRAMEWORK_INSPECTION_PROOF_NOT_BOUND');
     const sourceEvidence = worker.inspectedAdapterSourceEvidence(bound, job, observation, true, inspected.url);
     if (!sourceEvidence || sourceEvidence.officialUrl !== job.request.identity.officialUrl ||
-        sourceEvidence.observedBookingUrl !== recipe.source.bookingUrl) throw fail('FRAMEWORK_INSPECTION_OBSERVATION_INVALID');
+        sourceEvidence.observedBookingUrl !== bound.source.bookingUrl) throw fail('FRAMEWORK_INSPECTION_OBSERVATION_INVALID');
     receipt.actualAdapterSha256 = hash(canonical(inspected.adapter)); receipt.observationBound = true;
     receipt.controllerFilledKnownMetadata = sourceOnly;
     receipt.metadataAuthority = 'FRESH_FIXED_INSPECTOR';
@@ -582,14 +624,15 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
     primary.inspectionReceipt = receipt;
     const failedAction = receipt.actions.at(-1);
     const readability = failedAction?.readability?.failedPredicates?.length ? safeInspectionReadability(receipt.actions.map(row => row.readability).filter(Boolean)) : undefined;
+    const landing = safeInspectionLandingDiagnostic(failedAction?.landing);
     if (primary && typeof primary === 'object' && failedAction?.error &&
-        (readability || failedAction.nativeRouterFailure || failedAction.action === 'inspect_adapter' &&
+        (readability || landing || failedAction.nativeRouterFailure || failedAction.action === 'inspect_adapter' &&
           (failedAction.teeItUpDelegation || failedAction.adapterRead || safeFixedInspectionSourceDiagnostic(failedAction)))) {
       try {
         inspectionFailures.set(primary, { job, attempt: job.attempts, requestSha256: hash(canonical(job.request)), sourceFingerprint: job.sourceFingerprint,
           firstPickedUpAt: job.firstPickedUpAt, deadlineAt: job.deadlineAt, startedAt,
           teeItUpDelegation: safeTeeItUpDelegationDiagnostic(failedAction.teeItUpDelegation),
-          adapterRead: safeFixedAdapterReadDiagnostic(failedAction.adapterRead), ...(readability ? { readability } : {}),
+          adapterRead: safeFixedAdapterReadDiagnostic(failedAction.adapterRead), ...(readability ? { readability } : {}), ...(landing ? { landing } : {}),
           nativeRouterFailure: safeNativeRouterFailure(failedAction.nativeRouterFailure),
           ...(safeFixedInspectionSourceDiagnostic(failedAction) ?? {}) });
       } catch { /* Optional diagnostics cannot replace the primary failure. */ }

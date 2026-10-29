@@ -8,6 +8,7 @@ import { cpsPhoneBookingProofSchema, cpsOfficialCourseDescriptor, cpsOfficialSel
   selectedCpsOfficialBookingAnchor, hasCpsObservedSelectedCourseLabel, verifyCpsPhoneBookingContact } from "./cps-phone-booking-proof";
 import type { OfficialIdentityPage } from "./teeitup-official-identity";
 import { parsePublicUSBusinessAddress } from "./public-us-business-address";
+import { bindCpsOfficialEntryProof, cpsOfficialEntryProofSchema, verifyCpsOfficialEntryContext, type CpsOfficialEntryContext } from "./cps-official-entry-proof";
 
 const id = z.number().int().min(1).max(2_147_483_647);
 const tenant = z.string().regex(/^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u)
@@ -28,6 +29,9 @@ export type CpsPublicBuildProtocol = "PUBLISHED_KEY" | "ANONYMOUS_SHORT_SESSION"
 const reviewedPublicBuilds = new Map<string, CpsPublicBuildProtocol>([
   [CPS_PUBLIC_BUILD, "PUBLISHED_KEY"],
   [CPS_VENUE_PUBLIC_CATALOG_BUILD, "ANONYMOUS_SHORT_SESSION"],
+  // Exact published26.2.2 main777a9b24764cf162 + runtime-linked569/507/647:
+  // anonymous short session, one unpaged TeeTimes GET, local content slicing.
+  ["26.2.2.40425805601", "ANONYMOUS_SHORT_SESSION"],
   ["26.3.0.34794395074", "ANONYMOUS_SHORT_SESSION"],
 ]);
 export function cpsPublicBuildProtocol(build: string): CpsPublicBuildProtocol | undefined {
@@ -36,8 +40,11 @@ export function cpsPublicBuildProtocol(build: string): CpsPublicBuildProtocol | 
 export const cpsMetadataSchema = z.object({ family: z.literal("CPS"), tenant,
   courseIds: z.array(id).min(1).max(40).refine(values => values.every((value, index) => !index || values[index - 1] < value)),
   catalogHash: z.string().regex(/^[a-f0-9]{64}$/u), publicCatalogMode: z.literal("VENUE_BOUND_ONLINE_COURSES").optional(), officialPostalConflictProof: cpsPostalConflictProofSchema.optional(),
-  officialPhoneBookingProof: cpsPhoneBookingProofSchema.optional() }).strict()
+  officialPhoneBookingProof: cpsPhoneBookingProofSchema.optional(), officialEntryProof: cpsOfficialEntryProofSchema.optional() }).strict()
   .refine(value=>!(value.officialPostalConflictProof&&value.officialPhoneBookingProof)&&
+    !(value.officialEntryProof&&(value.officialPostalConflictProof||value.officialPhoneBookingProof||value.publicCatalogMode))&&
+    (!value.officialEntryProof||value.tenant===value.officialEntryProof.tenant&&value.catalogHash===value.officialEntryProof.catalogHash&&
+      JSON.stringify(value.courseIds)===JSON.stringify(value.officialEntryProof.courseIds))&&
     !(value.publicCatalogMode&&(value.officialPostalConflictProof||value.officialPhoneBookingProof))&&
     (!value.officialPhoneBookingProof||value.tenant===value.officialPhoneBookingProof.tenant&&value.catalogHash===value.officialPhoneBookingProof.catalogHash&&
       value.courseIds.length===1&&JSON.stringify(value.courseIds)===JSON.stringify(value.officialPhoneBookingProof.courseIds)&&
@@ -180,6 +187,16 @@ export function cpsCourseNameBase(value:string){return fullCourseName(value).rep
 function publicClubAddress(value: unknown) {
   const complete = parsePublicUSBusinessAddress(value);
   if (complete) return complete;
+  // A published street line followed by its complete city/state/postal line
+  // is the same physical address representation. No expected field fills it.
+  if (typeof value === "string" && value.length <= 1024) {
+    const lines = value.split(/\r?\n/u);
+    if (lines.length === 2 && !lines[0].includes(",") && lines.every(line => line.trim().length > 0 && !/[<>\u0000-\u001f\u007f]/u.test(line)) &&
+        /^[\p{L} .'-]{2,80},\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?$/iu.test(lines[1].trim())) {
+      const multiline = parsePublicUSBusinessAddress(`${lines[0].trim()}, ${lines[1].trim()}`);
+      if (multiline) return multiline;
+    }
+  }
   if (typeof value !== "string" || value.length > 1024 || /[,<>\u0000-\u001f\u007f]/u.test(value)) return null;
   const flat = /^(\d{1,7}[A-Za-z]?\s+[\p{L}\p{N} .#'’-]{1,135}\s+(?:dr(?:ive)?|rd|road|st(?:reet)?|ave(?:nue)?|blvd|boulevard|ln|lane|ct|court|pkwy|parkway|hwy|highway|cir(?:cle)?|trl|trail|ter(?:race)?|way)\.?)\s+([\p{L} .'-]{2,80})\s+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)(?:\s+(?:US|USA|United States))?$/iu.exec(value.trim());
   return flat ? parsePublicUSBusinessAddress(`${flat[1]}, ${flat[2]}, ${flat[3]} ${flat[4]}, US`) : null;
@@ -208,13 +225,35 @@ function requirePublicFlags(value: Record<string, unknown>) {
   if (Object.values(publicFlags(value)).some(flag => flag === true)) cpsFailure("ADAPTER_IDENTITY_MISMATCH");
 }
 export function parseCpsCatalog(value: unknown, options: CpsOptions, source: CpsSource,
-  nativeContact?:{page:OfficialIdentityPage;canonicalCoursePhone:unknown;onSelectedLabel:(label:string)=>void;phoneBooking?:true}, publicBuild?: string): CpsMetadata {
+  nativeContact?:{page:OfficialIdentityPage;canonicalCoursePhone:unknown;onSelectedLabel:(label:string)=>void;phoneBooking?:true;officialEntry?:CpsOfficialEntryContext}, publicBuild?: string): CpsMetadata {
   validateCpsIdentity(source);
   const rows = z.array(z.object({ courseId: id, courseName: label, timezoneId: label, websiteId: publicValue,
     active: z.literal(true), holes: z.union([z.literal(9), z.literal(18)]) }).passthrough()).min(1).max(40).safeParse(value);
   if (!rows.success) cpsFailure("CPS_CATALOG_UNVERIFIED");
   const name = fullCourseName(source.venueName), courses = [...rows.data].sort((a, b) => a.courseId - b.courseId);
   const ids = courses.map(row => row.courseId), declared = options.courseOptions.map(row => row.courseId).sort((a, b) => a - b);
+  if (nativeContact?.officialEntry) {
+    verifyCpsOfficialEntryContext(nativeContact.officialEntry, source, nativeContact.canonicalCoursePhone);
+    const venue = publicClubIdentity(options, source), base = (name: string) => fullCourseName(name).replace(/\s+(?:country club|golf course)$/u, "");
+    requirePublicFlags(options.reservationOptions);
+    for (const course of courses) requirePublicFlags(course);
+    for (const option of options.courseOptions) requirePublicFlags(option);
+    if (courses.length !== 1 || new Set(ids).size !== ids.length || new Set(declared).size !== declared.length ||
+        courses.some(row => row.websiteId !== options.webSiteId || row.timezoneId !== source.timeZone ||
+          base(row.courseName) !== base(source.venueName) || /\b(?:private|members?|login|sign\s*in|simulator|practice|driving range|lesson|event|gift)\b/iu.test(row.courseName.replace(/[_-]/gu, " ")) ||
+          options.courseOptions.filter(option => option.courseId === row.courseId && option.courseName === row.courseName && option.webSiteId === row.websiteId).length !== 1))
+      cpsFailure("ADAPTER_IDENTITY_MISMATCH");
+    const context = parseCpsSource(source.bookingUrl)!;
+    const stable = { mode: "OFFICIAL_TITLE_PHYSICAL_ENTRY", buildNumber: publicBuild, tenant: context.tenant, venue,
+      officialUrl: source.officialUrl, canonicalName: source.venueName, canonicalAddress: parsePublicUSBusinessAddress(source.venueAddress), timeZone: source.timeZone,
+      entry: { rootIdentitySha256: nativeContact.officialEntry.rootIdentitySha256, rootEntrySha256: nativeContact.officialEntry.rootEntrySha256, widgetEntrySha256: nativeContact.officialEntry.widgetEntrySha256 },
+      publicFlags: publicFlags(options.reservationOptions), publicCourses: courses.map(row => ({ id: row.courseId, name: row.courseName, timeZone: row.timezoneId,
+        websiteId: row.websiteId, active: row.active, holes: row.holes, flags: publicFlags(row) })),
+      options: [...options.courseOptions].sort((a, b) => a.courseId - b.courseId).map(row => ({ id: row.courseId, name: row.courseName, websiteId: row.webSiteId, flags: publicFlags(row) })) };
+    const metadata = { family: "CPS" as const, tenant: context.tenant, courseIds: ids, catalogHash: createHash("sha256").update(JSON.stringify(stable)).digest("hex") };
+    return cpsMetadataSchema.parse({ ...metadata, officialEntryProof: bindCpsOfficialEntryProof(nativeContact.officialEntry, source, nativeContact.canonicalCoursePhone,
+      metadata, courses[0].courseName, venue.address) });
+  }
   if (publicBuild === CPS_VENUE_PUBLIC_CATALOG_BUILD) {
     // In this exact reviewed public client OnlineCourses populates the course
     // selector; GetAllOptions also contains unselectable legacy options. Admit
