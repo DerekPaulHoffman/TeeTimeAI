@@ -64,6 +64,10 @@ async function mockPublicReads(page: Page, simulatorCourses: Record<string, unkn
   });
   await page.route((url) => url.origin === smokeOrigin && url.pathname.startsWith("/api/"), async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname === "/api/courses/check-sessions") {
+      await route.fulfill({ json: { status: "UNAVAILABLE", times: [], sessions: [] } });
+      return;
+    }
     if (/known-times|check-times|local-reader/.test(url.pathname)) {
       state.outdoorReads.push(url.pathname);
       if (url.pathname.endsWith("known-times")) {
@@ -230,7 +234,7 @@ test.describe("simulator mode", () => {
     const simulatorCard = page.locator(".course-row").filter({ has: page.getByRole("heading", { name: simulatorVenue.name, exact: true }) });
     await expect(simulatorCard).toBeVisible();
     await expect(page.getByRole("heading", { name: eighteenHoleVenue.name, exact: true })).toHaveCount(0);
-    await expect(simulatorCard.locator(".course-monitoring-status")).not.toContainText("Simulator alerts available");
+    await expect(simulatorCard.locator(".course-time-check")).toContainText("Live sessions aren't available here yet.");
     await expect(simulatorCard.getByRole("link", { name: `Open official site for ${simulatorVenue.name}` })).toHaveAttribute("href", simulatorVenue.website);
     const notify = simulatorCard.getByRole("button", { name: `Notify me for ${simulatorVenue.name}`, exact: true });
     await expect(notify).toBeEnabled();
@@ -280,7 +284,7 @@ test.describe("simulator mode", () => {
     await expectSharedControls(page);
     await expectPreservedValues(page);
     await expectAndCloseRestoredNotificationEntry(page, simulatorVenue.name);
-    const status = page.locator(".course-row .course-monitoring-status");
+    const status = page.locator(".course-row .course-time-check");
     await expect(status).toBeVisible();
     await expect(status).not.toContainText("Simulator alerts available");
     await expect(page.getByRole("heading", { name: outdoorVenue.name, exact: true })).toHaveCount(0);
@@ -316,8 +320,7 @@ test.describe("simulator mode", () => {
     for (const venue of [unreviewed, unsupportedHour]) {
       const card = page.locator(".course-row").filter({ has: page.getByRole("heading", { name: venue.name, exact: true }) });
       await expect(card.getByRole("link", { name: `Open official site for ${venue.name}` })).toHaveAttribute("href", venue.website);
-      await expect(card.getByText(venue === unreviewed
-        ? "We’ll check this venue when you set up an alert." : "Session alerts supported", { exact: true })).toBeVisible();
+      await expect(card.getByText("Live sessions aren't available here yet. Check the official site.", { exact: true })).toBeVisible();
       const notify = card.getByRole("button", { name: `Notify me for ${venue.name}`, exact: true });
       await expect(notify).toBeEnabled();
       await notify.click();
@@ -352,8 +355,7 @@ test.describe("simulator mode", () => {
     await expect(page.getByText("9 simulator locations found", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "See more locations", exact: true }).click();
     await expect(mainList.getByRole("heading")).toHaveText(allVenues.map((venue) => venue.name));
-    await expect(mainList.getByText("Session alerts supported", { exact: true })).toHaveCount(4);
-    await expect(mainList.getByText("We’ll check this venue when you set up an alert.", { exact: true })).toHaveCount(5);
+    await expect(mainList.getByText("Live sessions aren't available here yet. Check the official site.", { exact: true })).toHaveCount(9);
     await expect(mainList.getByText("Alert availability after first check", { exact: true })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "See more locations", exact: true })).toHaveCount(0);
     await mainList.getByRole("button", { name: `Notify me for ${other[2].name}`, exact: true }).click();
@@ -401,7 +403,7 @@ test.describe("simulator mode", () => {
     const directList = page.getByRole("list", { name: "Direct simulator matches", exact: true });
     await expect(directList.getByRole("heading", { name: unreviewed.name, exact: true })).toBeVisible();
     await expect(directList.getByRole("link", { name: `Open official site for ${unreviewed.name}` })).toHaveAttribute("href", unreviewed.website);
-    await expect(directList.getByText("We’ll check this venue when you set up an alert.", { exact: true })).toBeVisible();
+    await expect(directList.getByText("Live sessions aren't available here yet. Check the official site.", { exact: true })).toBeVisible();
     await expect(page.getByText("1 simulator location found", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: /Other nearby venues/ })).toHaveCount(0);
     await directList.getByRole("button", { name: `Notify me for ${unreviewed.name}`, exact: true }).click();

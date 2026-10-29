@@ -68,6 +68,9 @@ function mockDateBoundaryRequests() {
     if (url === "/api/analytics/events") {
       return Response.json({ event: { id: "event-1" } }, { status: 201 });
     }
+    if (url.startsWith("/api/courses/check-sessions?")) {
+      return Response.json({ status: "UNAVAILABLE", times: [], sessions: [] });
+    }
     throw new Error(`Unexpected request: ${url}`);
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -907,8 +910,8 @@ describe("TeeTimeIntake", () => {
       initialValues={{ mode: "SIMULATOR" }}
     />);
     await screen.findByRole("heading", { name: simulator.name });
-    expect(screen.getByText(rental.publicAccessStatus === "PUBLIC" && rental.offeringId
-      ? "Session alerts supported" : "We’ll check this venue when you set up an alert.")).toBeTruthy();
+    expect(screen.queryByText("Session alerts supported")).toBeNull();
+    if (!rental.offeringId) expect(screen.getByText("Live sessions aren't available here yet. Check the official site.")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Other nearby venues/ })).toBeNull();
     expect(screen.queryByText(/rental details are being verified|sessions are not available/i)).toBeNull();
     expect(screen.queryByRole("button", { name: /Alerts unavailable/ })).toBeNull();
@@ -968,8 +971,8 @@ describe("TeeTimeIntake", () => {
     expect(screen.getByText("11 simulator locations found")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "See more locations" }));
     expect(names()).toEqual(allVenues.map((venue) => venue.name));
-    expect(within(mainList).getAllByText("Session alerts supported")).toHaveLength(4);
-    expect(within(mainList).getAllByText("We’ll check this venue when you set up an alert.")).toHaveLength(7);
+    expect(within(mainList).queryByText("Session alerts supported")).toBeNull();
+    await waitFor(() => expect(within(mainList).getAllByText("Live sessions aren't available here yet. Check the official site.")).toHaveLength(11));
     expect(within(mainList).queryByText("Alert availability after first check")).toBeNull();
     for (const venue of allVenues) {
       expect((screen.getByRole("button", { name: `Notify me for ${venue.name}` }) as HTMLButtonElement).disabled).toBe(false);
@@ -1075,7 +1078,7 @@ describe("TeeTimeIntake", () => {
     const directList = await screen.findByRole("list", { name: "Direct simulator matches" });
     expect(within(directList).getByRole("heading", { name: venue.name })).toBeTruthy();
     expect(within(directList).getByRole("link", { name: `Open official site for ${venue.name}` }).getAttribute("href")).toBe(venue.website);
-    expect(within(directList).getByText("We’ll check this venue when you set up an alert.")).toBeTruthy();
+    expect(within(directList).getByText("Live sessions aren't available here yet. Check the official site.")).toBeTruthy();
     expect(screen.getByText("1 simulator location found")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Other nearby venues/ })).toBeNull();
     fireEvent.click(within(directList).getByRole("button", { name: `Notify me for ${venue.name}` }));
@@ -1103,8 +1106,8 @@ describe("TeeTimeIntake", () => {
     const directList = await screen.findByRole("list", { name: "Direct simulator matches" });
     expect((within(directList).getByRole("button", { name: `Notify me for ${verifying.name}` }) as HTMLButtonElement).disabled).toBe(false);
     expect((within(directList).getByRole("button", { name: `Notify me for ${siteOnly.name}` }) as HTMLButtonElement).disabled).toBe(false);
-    expect(within(directList).getByText("We’ll check this venue when you set up an alert.")).toBeTruthy();
-    expect(within(directList).getByText("Session alerts supported")).toBeTruthy();
+    expect(within(directList).queryByText("Session alerts supported")).toBeNull();
+    expect(within(directList).getAllByRole("status")).toHaveLength(2);
     expect(within(directList).getByRole("link", { name: `Open official site for ${siteOnly.name}` })).toBeTruthy();
     expect(screen.getByText("2 simulators")).toBeTruthy();
     expect(screen.getByText("2 simulator locations found")).toBeTruthy();

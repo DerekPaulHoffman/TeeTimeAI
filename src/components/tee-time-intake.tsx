@@ -62,7 +62,8 @@ import {
 import { getGoogleMapsSearchUrl } from "@/lib/maps";
 import { CURRENT_LOCATION_LABEL } from "@/lib/places/location-input";
 import type { CourseCandidate } from "@/lib/places/google";
-import { KnownTeeTimes, filterVisibleTeeTimes, useKnownTeeTimes, useCourseTimeChecks, CourseTimeCheckStatus, type CourseTimeCheck } from "@/components/known-tee-times";
+import { KnownTeeTimes, SimulatorSessions, filterVisibleTeeTimes, useKnownTeeTimes, useCourseTimeChecks, CourseTimeCheckStatus, type CourseTimeCheck } from "@/components/known-tee-times";
+import { filterVisibleSimulatorSessions } from "@/lib/simulators/public-sessions";
 import { CourseStatusEmoji } from "@/components/course-status-emoji";
 import { SearchPageHeader } from "@/components/search-page-header";
 import { getDashboardCourseAction } from "@/lib/searches/dashboard-course-action";
@@ -365,6 +366,10 @@ function TeeTimeIntakeContent({
   }, []);
   const liveChecks = useCourseTimeChecks(
     mode === "SIMULATOR" ? [] : [...courses, ...courseLookupResults].flatMap(getFacilityCourses).flatMap(course => course.courseId ? [course.courseId] : []), date, players, checkRevision, updateDetectedFacility,
+  );
+  const sessionChecks = useCourseTimeChecks(
+    mode === "SIMULATOR" ? [...courses, ...courseLookupResults].flatMap(course => course.offeringId ? [course.offeringId] : []) : [],
+    date, 1, checkRevision, undefined, { startTime, endTime, durationMinutes },
   );
   const knownTimes = useKnownTeeTimes(
     mode === "SIMULATOR" ? [] : [...courses, ...courseLookupResults].flatMap((course) => course.courseId ? [course.courseId] : []),
@@ -1530,8 +1535,8 @@ function TeeTimeIntakeContent({
                     facilityChecks={liveChecks}
                     course={course}
                     knownTimes={mode === "OUTDOOR" && course.courseId ? knownTimes[course.courseId] ?? [] : []}
-                    liveCheck={mode === "OUTDOOR" && course.courseId ? liveChecks[course.courseId] : undefined}
-                    timeFilters={{ date, startTime, endTime, players }}
+                    liveCheck={mode === "SIMULATOR" ? course.offeringId ? sessionChecks[course.offeringId] : { status: "UNAVAILABLE", times: [] } : course.courseId ? liveChecks[course.courseId] : undefined}
+                    timeFilters={{ date, startTime, endTime, players, durationMinutes }}
                     key={course.googlePlaceId}
                     onReportInaccuracy={reportCourseInaccuracy}
                     onToggle={notifyForCourse}
@@ -1558,8 +1563,8 @@ function TeeTimeIntakeContent({
                   facilityChecks={liveChecks}
                   course={course}
                   knownTimes={mode === "OUTDOOR" && course.courseId ? knownTimes[course.courseId] ?? [] : []}
-                  liveCheck={mode === "OUTDOOR" && course.courseId ? liveChecks[course.courseId] : undefined}
-                  timeFilters={{ date, startTime, endTime, players }}
+                  liveCheck={mode === "SIMULATOR" ? course.offeringId ? sessionChecks[course.offeringId] : { status: "UNAVAILABLE", times: [] } : course.courseId ? liveChecks[course.courseId] : undefined}
+                  timeFilters={{ date, startTime, endTime, players, durationMinutes }}
                   key={course.googlePlaceId}
                   onReportInaccuracy={reportCourseInaccuracy}
                   onToggle={notifyForCourse}
@@ -1849,7 +1854,7 @@ function CourseResultCard({
   course: CourseCandidate;
   knownTimes: KnownTeeTime[];
   liveCheck?: CourseTimeCheck;
-  timeFilters: { date: string; startTime: string; endTime: string; players: number };
+  timeFilters: { date: string; startTime: string; endTime: string; players: number; durationMinutes: number | null };
   onReportInaccuracy: (course: CourseCandidate) => void;
   onToggle: (course: CourseCandidate) => void;
   signInKey?: string;
@@ -1868,7 +1873,9 @@ function CourseResultCard({
     course.layoutHoleCounts,
     course.bookableHoleCounts
   );
-  const noCurrentTimes = (liveCheck?.status === "CHECKED" && filterVisibleTeeTimes(liveCheck.times, course.timeZone, timeFilters.startTime, timeFilters.endTime, timeFilters.players).length === 0) || liveCheck?.status === "NOT_OPEN";
+  const noCurrentTimes = (liveCheck?.status === "CHECKED" && (isSimulator
+    ? filterVisibleSimulatorSessions(liveCheck.sessions ?? [], course.timeZone, timeFilters.date, timeFilters.startTime, timeFilters.endTime, timeFilters.durationMinutes).length === 0
+    : filterVisibleTeeTimes(liveCheck.times, course.timeZone, timeFilters.startTime, timeFilters.endTime, timeFilters.players).length === 0)) || liveCheck?.status === "NOT_OPEN";
   const notifyLabel = noCurrentTimes ? "Notify me when new times become available" : "Notify me";
   const isPublicAccessUnverified = course.publicAccessStatus === "UNVERIFIED";
   const requiresPublicAccessReview =
@@ -1963,8 +1970,8 @@ function CourseResultCard({
         </h3>
         <CourseAddressLink course={course} />
         {hasFacilityCourses ? <FacilityCourseRows courses={course.facilityCourses!} checks={facilityChecks} timeFilters={timeFilters} onNotify={onToggle} signInKey={signInKey} requestedLayoutHoles={requestedLayoutHoles} /> : <>
-          {isSimulator ? <CourseMonitoringStatus course={course} /> : course.courseId ? <CourseTimeCheckStatus check={liveCheck} alertSupport={course.alertSupport} /> : <CourseMonitoringStatus course={course} />}
-          {!isSimulator ? course.courseId ? liveCheck?.status === "CHECKED" && <KnownTeeTimes times={liveCheck.times} timeZone={course.timeZone} {...timeFilters} showEmpty /> : <KnownTeeTimes times={knownTimes} timeZone={course.timeZone} {...timeFilters} /> : null}
+          {isSimulator ? <CourseTimeCheckStatus check={liveCheck} simulator /> : course.courseId ? <CourseTimeCheckStatus check={liveCheck} alertSupport={course.alertSupport} /> : <CourseMonitoringStatus course={course} />}
+          {isSimulator ? liveCheck?.status === "CHECKED" && <SimulatorSessions sessions={liveCheck.sessions ?? []} timeZone={course.timeZone} {...timeFilters} /> : course.courseId ? liveCheck?.status === "CHECKED" && <KnownTeeTimes times={liveCheck.times} timeZone={course.timeZone} {...timeFilters} showEmpty /> : <KnownTeeTimes times={knownTimes} timeZone={course.timeZone} {...timeFilters} />}
         </>}
         {!hasFacilityCourses && isIncompatible && requestedLayoutHoles ? (
           <p className="course-alert-support-note">
