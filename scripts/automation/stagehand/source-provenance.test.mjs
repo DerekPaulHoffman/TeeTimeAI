@@ -1,5 +1,18 @@
 import test from'node:test';import assert from'node:assert/strict';
-import{observedBookingSourceCandidates,nativeGestureNavigations,nativeLinkSource,corroboratedNativeLink,rootWidgetRoutingWitness}from'./source-provenance.mjs';
+import{observedBookingSourceCandidates,nativeGestureNavigations,nativeHistoryNavigations,nativeLinkSource,corroboratedNativeLink,rootWidgetRoutingWitness}from'./source-provenance.mjs';
+
+test('native same-document routing needs completed current private evidence and an officially reachable document',()=>{
+ const r=gestureReport(),documentUrl=r.nativeGestureNavigations[0].finalUrl,finalUrl=documentUrl+'/calendar',stamp=r.finishedAt;
+ const route={kind:'NATIVE_DOCUMENT_HISTORY_ROUTE',documentUrl,finalUrl,finalStatus:200,observedAt:stamp,completedAt:stamp,documentHash:'c'.repeat(64)};
+ r.visitedUrls.push(finalUrl);r.officialLinkLedger.push({kind:'NATIVE_VISIBLE_DOM',pageUrl:finalUrl,observedAt:stamp,documentHash:route.documentHash,links:[]});r.nativeHistoryNavigations=[route];
+ assert.deepEqual(nativeHistoryNavigations(r),[route]);assert.ok(candidate(r).includes(finalUrl));
+ assert.equal(observedBookingSourceCandidates(r,official).includes(finalUrl),false);
+ for(const change of[{finalStatus:503},{documentUrl:'https://foreign.example/'},{documentHash:'d'.repeat(64)},{observedAt:'2020-01-01T00:00:00.000Z'},{completedAt:'2040-01-01T00:00:00.000Z'},{loaderId:'forged'}]){
+  const forged=structuredClone(r);Object.assign(forged.nativeHistoryNavigations[0],change);assert.deepEqual(nativeHistoryNavigations(forged),[]);assert.equal(candidate(forged).includes(finalUrl),false);
+ }
+ const detached=structuredClone(r);detached.officialLinkLedger.shift();assert.equal(candidate(detached).includes(finalUrl),false);
+ const missing=structuredClone(r);missing.officialLinkLedger.pop();assert.deepEqual(nativeHistoryNavigations(missing),[]);
+});
 
 function gestureReport(){
  const startedAt='2030-01-01T12:00:00.000Z',completedAt='2030-01-01T12:00:01.000Z',href=official+'#',target='https://public-provider.example/services?kind=public';

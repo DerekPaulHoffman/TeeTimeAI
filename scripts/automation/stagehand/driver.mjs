@@ -5,6 +5,8 @@ import { createStagehandCodexModel } from './codex-model.mjs';
 import { classifyNavigationError, projectActionGuardDiagnostic, projectSourceDocumentReadiness, projectNativeIntermediaryPreparation, projectHostGuardFailure } from './source-diagnostic.mjs';
 import { publicEvidenceUrl } from './public-evidence.mjs';
 import { rootWidgetWitness } from './source-provenance.mjs';
+import { isWhooshClubGateway } from './public-source-gateway.mjs';
+import { createNativeAnchorPointer } from './native-anchor-pointer.mjs';
 
 export async function loadStagehandRuntime() {
   let directory = dirname(fileURLToPath(import.meta.resolve('@browserbasehq/stagehand')));
@@ -53,6 +55,11 @@ function reservePublicDocumentNavigation(action, evidence, currentPageUrl) {
     if (!isSourceRoutingUrl(currentPageUrl) || !isSourceRoutingUrl(evidence.href) || typeof native.rawHref !== 'string' ||
         native.rawHref.length > 2048 || native.rawHref.trim() !== native.rawHref || /[\u0000-\u001f]/u.test(native.rawHref)) return false;
     const current = new URL(currentPageUrl), target = new URL(evidence.href);
+    if (new URL(native.rawHref, current).href !== target.href) return false;
+    // A fresh visible "Reserve a Bay" link to this public provider gateway
+    // opens availability. The unchanged checks above exclude selected slots,
+    // forms, inline handlers and transactions; the gateway grants no method.
+    if (isWhooshClubGateway(target.href)) return true;
     // A plain same-origin document edge is routing only. Numeric/encoded paths,
     // filters, fragments, private routes and transaction endpoints stay denied.
     return current.origin === target.origin && new URL(native.rawHref, current).href === target.href && !target.search && !target.hash &&
@@ -261,7 +268,7 @@ export async function settleSourceDocument(read,{deadline,signal,now=Date.now,sl
   throw Object.assign(Error('STAGEHAND_SOURCE_LOADING_INCOMPLETE'),{stagehandDocumentReadiness:last});
 }
 
-export async function openStagehandSession({ model, deadline, cwd, signal, onMetrics, onNativeSourceWitness, onNativeFrameSourceWitness, onNativeIntermediaryWitness, modelDisabled = false, sourceRoutingOnly = false, ownedBrowser }, { loadRuntime = loadStagehandRuntime, createModel = createStagehandCodexModel } = {}) {
+export async function openStagehandSession({ model, deadline, cwd, signal, onMetrics, onNativeSourceWitness, onNativeFrameSourceWitness, onNativeIntermediaryWitness, modelDisabled = false, sourceRoutingOnly = false, ownedBrowser }, { loadRuntime = loadStagehandRuntime, createModel = createStagehandCodexModel, createNativePointer = createNativeAnchorPointer } = {}) {
   if (!modelDisabled && model !== 'gpt-6.1-sol') throw new Error('SOL_ONLY_MODEL_REQUIRED');
   if (!Number.isFinite(deadline) || deadline <= Date.now()) throw new Error('ORIGINAL_DEADLINE_EXPIRED');
   const owned = validateOwnedBrowserConnection(ownedBrowser);
@@ -278,13 +285,13 @@ export async function openStagehandSession({ model, deadline, cwd, signal, onMet
   };
   const { localBrowser, Stagehand } = await withinDeadline(loadRuntime());
   const launchPromise = localBrowser.connect({ cdpUrl: owned.cdpUrl });
-  let browser;
+  let browser, nativePointer;
   let stagehand;
   let codexModel;
   let closing;
   let startupPhase = 'SDK_CONNECT';
   let disabledModelCalls = 0;
-  const onAbort = () => { void browser?.close().catch(() => {}); void codexModel?.close().catch(() => {}); void owned.close().catch(() => {}); };
+  const onAbort = () => { void browser?.close().catch(() => {}); void nativePointer?.close().catch(() => {}); void codexModel?.close().catch(() => {}); void owned.close().catch(() => {}); };
   signal?.addEventListener('abort', onAbort, { once: true });
   try {
     browser = await withinDeadline(launchPromise);
@@ -364,6 +371,10 @@ export async function openStagehandSession({ model, deadline, cwd, signal, onMet
         if(!sourceRoutingOnly||typeof owned.observeFrameSources!=='function')throw Error('STAGEHAND_SOURCE_OUTPUT_INVALID');
         return sourceRoutingFrameWitness(await checked(owned.observeFrameSources(page.pageId)));
       },'EVIDENCE'),
+      observeHistorySource: () => guarded(async()=>{
+        if(!sourceRoutingOnly||typeof owned.observeHistorySource!=='function')return null;
+        return checked(owned.observeHistorySource(page.pageId));
+      },'EVIDENCE'),
       observeUniqueSource: () => guarded(async()=>{
         if(!sourceRoutingOnly||typeof owned.observeUniqueSource!=='function')return null;
         const began=Date.now(),current=await checked(page.url());
@@ -442,20 +453,23 @@ export async function openStagehandSession({ model, deadline, cwd, signal, onMet
         if (sourceRoutingOnly && anchorNavigation && typeof onNativeSourceWitness === 'function') await checked(onNativeSourceWitness(witness));
         const navigationBefore = anchorNavigation ? { initialUrl: await checked(page.url()),
           initialPageIds: (await checked(browser.context.pages())).map(candidate => candidate.pageId) } : null;
-        // Stagehand 4.3 act sends another model request even for an observed
-        // action object. A placeholder's private gesture intent lasts five
-        // seconds, so execute that one exact observed selector immediately
-        // after the native before-action witness instead of re-planning it.
+        // Stagehand 4.3 act re-plans even an already observed action. Execute
+        // this exact public source anchor after its private native witness
+        // and a second current DOM check, without another model request.
         let result;
-        if (placeholder && sourceRoutingOnly && typeof onNativeSourceWitness === 'function') {
+        if (anchorNavigation && sourceRoutingOnly && typeof onNativeSourceWitness === 'function') {
           const freshUrlBefore = await checked(page.url());
           const fresh = await checked(page.evaluate(readNativeActionTarget, effectiveAction.selector));
           const freshUrlAfter = await checked(page.url());
           if (freshUrlBefore !== sourceUrl || freshUrlAfter !== sourceUrl || JSON.stringify(fresh) !== JSON.stringify(evidence) ||
-              witness?.links?.[0]?.text !== placeholder.text || witness?.links?.[0]?.label !== placeholder.label ||
+              witness?.links?.[0]?.href !== new URL(evidence.href, sourceUrl).href || witness?.links?.[0]?.visible !== true ||
+              placeholder && (witness?.links?.[0]?.text !== placeholder.text || witness?.links?.[0]?.label !== placeholder.label) ||
               Date.now() >= deadline) throw Error('ACTION_TARGET_REJECTED');
           prepareReadOnlyAction(effectiveAction, fresh, { sourceRoutingOnly, currentPageUrl: sourceUrl });
-          await checked(page.locator(effectiveAction.selector).click({ timeout: Math.min(4000, Math.max(1, deadline - Date.now())) }));
+          nativePointer ??= await checked(createNativePointer({ cdpUrl: owned.cdpUrl, deadline,
+            assertGuardedTargets: ids => owned.assertGuardedTargets(ids) }));
+          await checked(nativePointer.click({ targetId: page.pageId, selector: effectiveAction.selector,
+            sourceUrl, evidence: fresh, readTarget: readNativeActionTarget }));
           result = { data: { success: true } };
         } else result = await checked(stagehand.act(effectiveAction, boundOptions()));
         if (result?.data?.success === false) throw new Error('SDK_ACTION_FAILED');
@@ -523,6 +537,7 @@ export async function openStagehandSession({ model, deadline, cwd, signal, onMet
         const modelReceipt = codexModel ? await closeWithin(Promise.resolve().then(()=>codexModel.close()), 4000) : null;
         await closeWithin(Promise.resolve().then(()=>stagehand.close()), 2000);
         await closeWithin(Promise.resolve().then(()=>browser.close()), 4000);
+        if (nativePointer) await closeWithin(Promise.resolve().then(()=>nativePointer.close()), 4000);
         const hostReceipt = await closeWithin(Promise.resolve().then(()=>owned.close()), 35000);
         return { browserClosed: Date.now()<deadline&&!signal?.aborted&&browser.closed&&hostReceipt?.browserClosed === true, modelClosed: modelDisabled || modelReceipt?.processExited === true && modelReceipt?.cleanup?.credentialsRemoved === true };
       })(); },
@@ -534,6 +549,7 @@ export async function openStagehandSession({ model, deadline, cwd, signal, onMet
     if (stagehand) await boundedClose(stagehand.close(), 2000);
     if (browser) await boundedClose(browser.close(), 4000);
     else launchPromise.then(value => value.close()).catch(() => {});
+    if (nativePointer) await boundedClose(nativePointer.close(), 4000);
     const hostReceipt = await boundedClose(owned.close(), 4000);
     error.browserClosed = Boolean(browser?.closed && hostReceipt?.browserClosed === true);
     throw error;

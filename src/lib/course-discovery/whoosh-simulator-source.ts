@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-const slug = z.string().regex(/^[a-z0-9](?:[a-z0-9_-]{0,126}[a-z0-9])?$/u);
+const slug = z.string().regex(/^[a-z0-9](?:[a-z0-9_'\-]{0,126}[a-z0-9])?$/u);
 const id = (kind: string) => z.string().regex(new RegExp(`^${kind}:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`, "iu"));
 export const whooshBucketSchema = z.object({ id: id("CourseBucket"), name: z.string().min(1).max(160),
   courseIds: z.array(id("Course")).min(1).max(40).refine(values => new Set(values).size === values.length) }).strict();
@@ -12,9 +12,10 @@ export function parseWhooshSimulatorSource(value: string) {
   try {
     const url = new URL(value);
     const match = /^\/patron\/club\/([^/]+)\/agenda\/([^/]+)\/(?:today|\d{4}-\d{2}-\d{2})\/?$/u.exec(url.pathname);
+    const clubSlug = match && decodeURIComponent(match[1]), facilitySlug = match && decodeURIComponent(match[2]);
     if (url.protocol !== "https:" || url.hostname !== "app.whoosh.io" || url.username || url.password || url.port || url.search || url.hash ||
-      !match || !slug.safeParse(match[1]).success || !slug.safeParse(match[2]).success) return;
-    return { clubSlug: match[1], facilitySlug: match[2] };
+      !match || !slug.safeParse(clubSlug).success || !slug.safeParse(facilitySlug).success) return;
+    return { clubSlug: clubSlug as string, facilitySlug: facilitySlug as string };
   } catch { return; }
 }
 

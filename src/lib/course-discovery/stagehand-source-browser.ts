@@ -23,7 +23,7 @@ import { PUBLIC_BROWSER_REQUEST_LIMIT, PUBLIC_BROWSER_TOTAL_BYTES, SOURCE_ROUTIN
 import { publicReadWorkerDenialScript, registerPublicReadWorkerDenial } from "./public-read-worker-denial";
 
 type Lease = <T>(family: string, work: () => Promise<T>) => Promise<{ acquired: true; value: T } | { acquired: false }>;
-type Target = { id: string; contextId: string; cdp: OwnedCdpSession; page: Page; frame: Frame; currentUrl: string; mainFrameId?: string; mainLoaderId?: string; documentRequest?: NativeReadRequest; documentStatus?: number; documentRead?: Promise<unknown>; documentReadPending?: boolean; popupReads?: Map<string, PopupRead>; popupReadinessRetired?: boolean; router?: NativeRedirectRouting; ready: Promise<void>; installed?: boolean; discarded?: boolean; initialization?: "NETWORK" | "FETCH" | "RESUME" | "ROUTER" | "READY" };
+type Target = { id: string; contextId: string; cdp: OwnedCdpSession; page: Page; frame: Frame; currentUrl: string; mainFrameId?: string; mainLoaderId?: string; historyRoute?: { fromUrl: string; toUrl: string; frameId: string; loaderId: string; observedAt: string; count: number }; documentRequest?: NativeReadRequest; documentStatus?: number; documentRead?: Promise<unknown>; documentReadPending?: boolean; popupReads?: Map<string, PopupRead>; popupReadinessRetired?: boolean; router?: NativeRedirectRouting; ready: Promise<void>; installed?: boolean; discarded?: boolean; initialization?: "NETWORK" | "FETCH" | "RESUME" | "ROUTER" | "READY" };
 type PopupGrant = { url: string; until: number; used: boolean };
 type PopupRead = { id: string; networkId: string; url: string; method: string; frameId: string; hop: number; complete: boolean;
   redirect?: string; pendingRedirect?: string; successorId?: string; continuationAck?: Promise<void>; completion?: Promise<unknown>; queueComplete?: boolean; status?: number;
@@ -492,12 +492,18 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
         close: async () => { await root.send("Target.closeTarget", { targetId: item.id }).catch(() => {}); } } as unknown as Page;
       child.on("Page.frameNavigated", value => { const changed = record(value.frame); if (!changed.parentId && typeof changed.id === "string" && typeof changed.url === "string") {
         const currentUrl = stagehandNativeFrameDocumentUrl(changed) ?? (changed.url === "about:blank" && changed.urlFragment === undefined ? changed.url : "");
-        anchorIntents.delete(item.id);
+        anchorIntents.delete(item.id); item.historyRoute = undefined;
         for (const entry of popupReads.values()) if (entry.nativeDocument && (changed.id !== entry.nativeDocument.frameId ||
             changed.loaderId !== entry.nativeDocument.loaderId || currentUrl !== entry.nativeDocument.currentUrl)) entry.readinessRetired = true;
         item.mainFrameId = changed.id; item.mainLoaderId = typeof changed.loaderId === "string" ? changed.loaderId : undefined; item.currentUrl = currentUrl;
       } });
       child.on("Page.navigatedWithinDocument", value => { if (typeof item.mainFrameId === "string" && value.frameId === item.mainFrameId && typeof value.url === "string") {
+        const previous = item.currentUrl, prior = item.historyRoute;
+        item.historyRoute = item.mainLoaderId && isSafeRecipeUrl(previous) && isSafeRecipeUrl(value.url) &&
+          !transactionUrl(previous) && !transactionUrl(value.url) && new URL(previous).origin === new URL(value.url).origin &&
+          (!prior || prior.toUrl === previous && prior.loaderId === item.mainLoaderId && prior.frameId === value.frameId && prior.count < 8)
+          ? { fromUrl: prior?.fromUrl ?? previous, toUrl: value.url, frameId: value.frameId as string, loaderId: item.mainLoaderId,
+            observedAt: prior?.observedAt ?? new Date().toISOString(), count: (prior?.count ?? 0) + 1 } : undefined;
         anchorIntents.delete(item.id); item.currentUrl = value.url;
         for (const entry of popupReads.values()) if (entry.nativeDocument && !entry.readinessRetired) {
           if (entry.nativeDocument.frameId !== value.frameId || entry.nativeDocument.loaderId !== item.mainLoaderId ||
@@ -686,6 +692,17 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
         await beginSourceDocumentNavigation(target);
       },
       async observeFrameSources(id: string) { return frameWitness(await captureSourceDom(id)); },
+      async observeHistorySource(id: string) {
+        const first = await captureSourceDom(id), second = await captureSourceDom(id), route = second.target.historyRoute;
+        if (!route || first.documentHash !== second.documentHash || first.frameId !== route.frameId || second.loaderId !== route.loaderId ||
+            route.toUrl !== second.observed.url || !sourceSettled(first) || !sourceSettled(second)) return null;
+        const bridge = popupReadForCapture(second), request = second.target.documentRequest;
+        const documentUrl = bridge?.url ?? (request && second.target.router?.isCurrentCompletedDocumentRead(request, second.target.frame,
+          { frameId: second.frameId, loaderId: second.loaderId, url: route.toUrl }) ? request.url() : undefined);
+        if (documentUrl !== route.fromUrl || documentUrl === route.toUrl) return null;
+        return { kind: "NATIVE_DOCUMENT_HISTORY_ROUTE" as const, documentUrl, finalUrl: route.toUrl, finalStatus: 200 as const,
+          observedAt: route.observedAt, completedAt: new Date().toISOString(), documentHash: second.documentHash };
+      },
       async observeUniqueSource(id: string) {
         const startedAt = Date.now(), first = sourceChoiceCapture(await captureSourceDom(id));
         const second = sourceChoiceCapture(await captureSourceDom(id)); check();

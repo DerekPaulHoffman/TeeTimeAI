@@ -674,6 +674,7 @@ async function ownedPopupFixture(workerCase: boolean, ackMode: AckMode, popupSpa
       // This native original-URL pair is retained while its lease is still held;
       // it must remain inert across SPA until the original queue really drains.
       expect(await host.observeSourceReadiness(popupId)).toMatchObject({ mainDocumentCurrent: false, mainDocumentComplete: false, mainDocumentStatus: null });
+      expect(await host.observeHistorySource(popupId)).toBeNull();
       const documentReads = () => seen.filter(value => value.startsWith("owned-final.example/") && !value.endsWith(".json")).length;
       const before = (await popupCdp.send("Page.getFrameTree")).frameTree.frame, requestsBefore = documentReads();
       const historyEvents: Array<{ frameId: string; url: string }> = [];
@@ -689,6 +690,10 @@ async function ownedPopupFixture(workerCase: boolean, ackMode: AckMode, popupSpa
       expect((await popupCdp.send("Page.getFrameTree")).frameTree.frame).toMatchObject({ id: before.id, loaderId: before.loaderId, url: popupPageUrl.split("#", 1)[0] });
       expect(popup.url()).toBe(popupPageUrl);
       expect(documentReads()).toBe(requestsBefore);
+      const route = await host.observeHistorySource(popupId);
+      expect(route).toMatchObject({ kind: "NATIVE_DOCUMENT_HISTORY_ROUTE", documentUrl: "https://owned-final.example/calendar?keep=full", finalUrl: popupPageUrl, finalStatus: 200 });
+      expect(route!.documentHash).toMatch(/^[a-f0-9]{64}$/u);
+      expect(JSON.stringify(route)).not.toMatch(/frameId|loaderId|nonce|leaseToken/u);
       // Keep the separate existing frame-source proof's exact URL contract.
       popupPageUrl = popupPageUrl.split("#", 1)[0];
       await popup.evaluate(url => { history.replaceState({}, "", url); }, popupPageUrl);

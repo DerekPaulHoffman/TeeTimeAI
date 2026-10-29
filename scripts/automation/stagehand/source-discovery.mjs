@@ -8,8 +8,9 @@ import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
 import { openStagehandSession, loadStagehandRuntime, assertPublicUrl, isSourceRoutingUrl as sourceRoutingUrl, frameworkIdentity, observedActionSummary, observedTargetSummary, sourceDocumentSettled, sourceRoutingUniqueWitness } from './driver.mjs';
 import { installReadOnlyEvidence } from './read-only-evidence.mjs';
+import { isWhooshClubGateway } from './public-source-gateway.mjs';
 import { prioritizedPublicEvidence, publicEvidenceUrl } from './public-evidence.mjs';
-import { observedBookingSourceCandidates, assertSourceCandidateBudget, nativeFrameNavigations, nativeIntermediaryNavigations, nativeGestureNavigations, rootWidgetWitness } from './source-provenance.mjs';
+import { observedBookingSourceCandidates, assertSourceCandidateBudget, nativeFrameNavigations, nativeIntermediaryNavigations, nativeGestureNavigations, nativeHistoryNavigations, rootWidgetWitness } from './source-provenance.mjs';
 import { sourceFailureDiagnostic, sourceGuardReasons, projectActionGuardDiagnostic } from './source-diagnostic.mjs';
 
 export const SOURCE_BUDGET_MS = 240000;
@@ -238,6 +239,7 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
   report.nativeFrameNavigations=[];
   report.nativeIntermediaryNavigations=[];
   report.nativeGestureNavigations=[];
+  report.nativeHistoryNavigations=[];
   let activeIntermediary;
   const onNativeIntermediaryWitness=witness=>{
     const stamp=Date.parse(witness?.observedAt),keys=value=>value&&typeof value==='object'&&!Array.isArray(value)?Object.keys(value).sort().join(','):'';
@@ -338,6 +340,15 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
       if(evidence.links.length>512)throw fail('SOURCE_EVIDENCE_LIMIT');
       if(evidence.url&&!report.visitedUrls.includes(evidence.url))report.visitedUrls.push(evidence.url);
       report.officialLinkLedger.push({kind:'NATIVE_VISIBLE_DOM',pageUrl:evidence.url,observedAt:evidence.observedAt,links:evidence.links});report.frameLedger.push({pageUrl:evidence.url,frames:evidence.frames});
+      if(typeof session.observeHistorySource==='function'){
+        const value=await bounded(()=>session.observeHistorySource());
+        if(value!==null&&!report.nativeHistoryNavigations.some(row=>row.documentUrl===value.documentUrl&&row.finalUrl===value.finalUrl)){
+          if(report.nativeHistoryNavigations.length>=4||value.finalUrl!==evidence.url||await bounded(()=>session.page.url())!==evidence.url)throw fail('STAGEHAND_SOURCE_OUTPUT_INVALID');
+          report.officialLinkLedger.push({kind:'NATIVE_VISIBLE_DOM',pageUrl:value.finalUrl,observedAt:value.completedAt,documentHash:value.documentHash,links:[]});
+          report.nativeHistoryNavigations.push(value);
+          if(nativeHistoryNavigations(report,sourceRoutingUrl).length!==report.nativeHistoryNavigations.length)throw fail('STAGEHAND_SOURCE_OUTPUT_INVALID');
+        }
+      }
       let frames=[];
       if(report.nativeFrameNavigations.length<2&&typeof session.observeFrameSources==='function'){
         const began=Date.now(),witness=await bounded(()=>session.observeFrameSources());frames=acceptNativeFrames(witness,evidence.url,began);
@@ -396,7 +407,8 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
       phase='EXTRACT';const extraction=await bounded(()=>session.extract(instruction,sourceDecisionFor(candidates,frames))),decision=sourceDecisionFor(candidates,frames).parse(extraction.data);
       finalDecision=decision.decision;report.metrics.completedSteps=step+1;report.evidenceSummary=safeReason(decision.reason);await persist();
       const routingFrame=decision.decision==='SOURCE_FOUND'&&routingOnlyFrameEntry(decision.bookingUrl);
-      if(decision.decision==='SOURCE_FOUND'&&!routingFrame){report.adapterSourceProposal=readHybridSourceExport(decision,candidates);report.outcome='SOURCE_PROPOSED_UNVERIFIED';stopCondition='SOURCE_FOUND';break;}
+      const routingGateway=decision.decision==='SOURCE_FOUND'&&isWhooshClubGateway(decision.bookingUrl);
+      if(decision.decision==='SOURCE_FOUND'&&!routingFrame&&!routingGateway){report.adapterSourceProposal=readHybridSourceExport(decision,candidates);report.outcome='SOURCE_PROPOSED_UNVERIFIED';stopCondition='SOURCE_FOUND';break;}
       if(decision.decision==='UNRESOLVED'){
         // A model's old snapshot cannot close discovery while the same native
         // document is still parsing, or a new main document has since arrived.
@@ -425,7 +437,9 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
         if(++consecutiveWaits>3){report.frameworkFailureCode='STAGEHAND_SOURCE_LOADING_INCOMPLETE';stopCondition='WAIT_LIMIT';break;}
         await bounded(()=>new Promise(done=>setTimeout(done,Math.min(1500,Math.max(1,workDeadline-Date.now())))));continue;
       }
-      consecutiveWaits=0;const instructionText=decision.nextActionInstruction;
+      consecutiveWaits=0;const instructionText=routingGateway
+        ? 'Open the currently visible public availability navigation link with this exact observed href: '+JSON.stringify(decision.bookingUrl)+'. Inspect the provider calendar after its navigation settles; this club gateway is not a terminal facility/date source.'
+        : decision.nextActionInstruction;
       if(!instructionText.trim()){stopCondition='EMPTY_CONTINUE';break;}
       report.metrics.calls++;
       phase='OBSERVE';const observation=await bounded(()=>session.observe(instructionText+'. Return one supported read-only navigation action only. Opening an official public availability link labelled Book is permitted. Never select an individual time, filter date/player/duration, authenticate, transact, contact anyone, or solve a challenge.')),action=observation.data?.[0];

@@ -7,6 +7,16 @@ Only backend-owned verification can activate an immutable recipe. Subsequent
 checks execute that recipe without model calls. Normal search workflows,
 canonical matching, deduplication and the email outbox retain delivery ownership.
 
+Source-only navigation executes an already observed public anchor through
+Playwright input on the same launch-owned, guarded Chrome target. The private
+controller rechecks its document and element immediately before input; Stagehand
+does not make another model request to re-plan that click. Request limits and
+transaction guards remain in force. A provider club gateway is routing only.
+An automatic same-document route requires native frame/loader continuity and a
+completed public document read. Independent inspection must observe that route
+again and reopen its exact URL before inspecting the adapter. Neither a model's
+reported URL nor a history event establishes identity or availability.
+
 Public Teesnap outdoor methods can use the existing fixed reader when the
 canonical official URL is already the same HTTPS tenant root as the booking
 source. The controller selects this fixed public-root transport before starting

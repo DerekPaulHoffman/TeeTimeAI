@@ -13,7 +13,7 @@ for(const mode of ['valid','label-only','missing','changed-current'])test('place
   observeSourceReadiness:async()=>{order.push('CURRENT_200');return{readyState:'complete',bodyPresent:true,mainDocumentCurrent:true,mainDocumentComplete:true,mainReadPending:false,pendingReads:0,mainDocumentStatus:200};},
   completeGestureNavigation:async()=>{order.push('COMPLETED');if(mode==='changed-current')current=destination+'/changed';return mode==='missing'?null:completed;},close:async()=>({browserClosed:true,providerRequestsDrained:true})};
  const session=await openStagehandSession({deadline:Date.now()+5000,modelDisabled:true,sourceRoutingOnly:true,ownedBrowser:owned,onNativeSourceWitness:()=>order.push('PREPARED_WITNESS')},
-   {loadRuntime:async()=>({localBrowser:{connect:async()=>browser},Stagehand:{create:async()=>({act:async()=>{throw Error('SECOND_ACTION_MODEL_CALL');},close:async()=>{}})}})});
+   {createNativePointer:async()=>({click:async({selector})=>page.locator(selector).click({timeout:4000}),close:async()=>{}}),loadRuntime:async()=>({localBrowser:{connect:async()=>browser},Stagehand:{create:async()=>({act:async()=>{throw Error('SECOND_ACTION_MODEL_CALL');},close:async()=>{}})}})});
  try{const result=session.act({method:'click',selector:'a',arguments:[]});if(mode==='valid'||mode==='label-only'){assert.deepEqual((await result).nativeGestureNavigation,completed);}else await assert.rejects(result,/STAGEHAND_SOURCE_OUTPUT_INVALID/u);
   assert.deepEqual(order,['BEFORE','PREPARED_WITNESS','DIRECT_CLICK','CURRENT_200','COMPLETED']);assert.equal(session.disabledModelCalls,0);}finally{await session.close();}
 });
@@ -156,18 +156,18 @@ test('permitted link completion observes actual delayed popup, excludes preexist
  assert.equal(r.page,popup);assert.equal(r.changed,true);assert.ok(r.samples>=3);assert.ok(r.waitedMs>0);
 });
 
-for(const sourceRoutingOnly of[false,true])test(`private native witness is emitted before SDK act only in source mode=${sourceRoutingOnly}`,async()=>{
+for(const sourceRoutingOnly of[false,true])test(`private native witness precedes deterministic source navigation only in source mode=${sourceRoutingOnly}`,async()=>{
  const order=[];let current='https://owned.example/';const destination='https://public-provider.example/start';
  const witness={kind:'NATIVE_VISIBLE_DOM',pageUrl:current,observedAt:new Date().toISOString(),documentHash:'a'.repeat(64),links:[{href:destination,visible:true}]};
- const page={pageId:'exact-owned',url:async()=>current,evaluate:async()=>({tag:'A',visible:true,inForm:false,text:'Public availability',label:'',href:destination,formAction:'',rowText:''})};
+ const page={pageId:'exact-owned',url:async()=>current,evaluate:async()=>({tag:'A',visible:true,inForm:false,text:'Public availability',label:'',href:destination,formAction:'',rowText:''}),locator:()=>({click:async()=>{order.push('CLICK');current=destination;}})};
  const browser={context:{pages:async()=>[page]},close:async()=>{}};
  const owned={kind:'OWNED_GUARDED_STAGEHAND_CONTEXT',cdpUrl:'http://127.0.0.1:12345',targetId:page.pageId,assertGuardedTargets:async()=>true,
   prepareNavigation:async()=>{},beforeAction:async(id,href)=>{assert.equal(id,page.pageId);assert.equal(href,destination);order.push('native');return witness;},close:async()=>({browserClosed:true})};
  const session=await openStagehandSession({deadline:Date.now()+5000,modelDisabled:true,sourceRoutingOnly,ownedBrowser:owned,
   onNativeSourceWitness:value=>{assert.deepEqual(value,witness);order.push('witness');}},
-  {loadRuntime:async()=>({localBrowser:{connect:async()=>browser},Stagehand:{create:async()=>({act:async()=>{order.push('SDK');current=destination;return{data:{success:true}};},close:async()=>{}})}})});
+  {createNativePointer:async()=>({click:async()=>page.locator('a').click(),close:async()=>{}}),loadRuntime:async()=>({localBrowser:{connect:async()=>browser},Stagehand:{create:async()=>({act:async()=>{order.push('SDK');current=destination;return{data:{success:true}};},close:async()=>{}})}})});
  await session.act({method:'click',selector:'a',arguments:[]});
- assert.deepEqual(order,sourceRoutingOnly?['native','witness','SDK']:['native','SDK']);await session.close();
+ assert.deepEqual(order,sourceRoutingOnly?['native','witness','CLICK']:['native','SDK']);await session.close();
 });
 
 test('rejected private witness aborts before SDK action without using model-supplied evidence',async()=>{
@@ -270,16 +270,16 @@ test('serialized native anchor collector derives document and navigation safety 
  link.textContent='Reserve Your Bay'+' '.repeat(161);assert.equal(collect().navigation.captionComplete,false);
 });
 
-test('SDK availability navigation uses private native URL reads and still passes through the owned witness before act',async()=>{
+test('observed availability navigation uses native URL, witness and DOM rechecks without another model act',async()=>{
  for(const scenario of ['current','changed-during-read','forged-action-url']){
-  let current='https://owned.example/',reads=0,sdkCalls=0,nativeCalls=0;const destination='https://owned.example/public-entry';
-  const page={pageId:'owned',url:async()=>{reads++;return scenario==='changed-during-read'&&reads>=2?'https://owned.example/changed':current;},evaluate:async()=>({tag:'A',visible:true,inForm:false,text:'Reserve Your Bay',label:'',href:destination,formAction:'',rowText:'',type:'',name:'',id:'',navigation:{pageUrl:scenario==='forged-action-url'?'https://forged.example/':current,rawHref:'/public-entry',captionComplete:true,inlineHandler:false,download:false,role:'',ariaDisabled:false}})};
+  let current='https://owned.example/',reads=0,sdkCalls=0,nativeCalls=0,nativeClicks=0;const destination='https://owned.example/public-entry';
+  const page={pageId:'owned',url:async()=>{reads++;return scenario==='changed-during-read'&&reads>=2?'https://owned.example/changed':current;},evaluate:async()=>({tag:'A',visible:true,inForm:false,text:'Reserve Your Bay',label:'',href:destination,formAction:'',rowText:'',type:'',name:'',id:'',navigation:{pageUrl:scenario==='forged-action-url'?'https://forged.example/':current,rawHref:'/public-entry',captionComplete:true,inlineHandler:false,download:false,role:'',ariaDisabled:false}}),locator:()=>({click:async()=>{assert.equal(nativeCalls,1);nativeClicks++;current=destination;}})};
   const owned={kind:'OWNED_GUARDED_STAGEHAND_CONTEXT',cdpUrl:'http://127.0.0.1:12345',targetId:page.pageId,assertGuardedTargets:async()=>true,prepareNavigation:async()=>{},beforeAction:async(id,href)=>{nativeCalls++;assert.equal(id,page.pageId);assert.equal(href,destination);return{kind:'NATIVE_VISIBLE_DOM',pageUrl:current,observedAt:new Date().toISOString(),documentHash:'a'.repeat(64),links:[{href:destination,visible:true}]};},close:async()=>({browserClosed:true})};
   const browser={closed:false,context:{pages:async()=>[page]},close:async()=>{browser.closed=true;}};
   const session=await openStagehandSession({deadline:Date.now()+5000,modelDisabled:true,sourceRoutingOnly:true,ownedBrowser:owned,onNativeSourceWitness:w=>{assert.equal(w.pageUrl,current);}},
-   {loadRuntime:async()=>({localBrowser:{connect:async()=>browser},Stagehand:{create:async()=>({act:async()=>{sdkCalls++;assert.equal(nativeCalls,1);current=destination;return{data:{success:true}};},close:async()=>{}})}})});
+   {createNativePointer:async()=>({click:async()=>page.locator('a').click(),close:async()=>{}}),loadRuntime:async()=>({localBrowser:{connect:async()=>browser},Stagehand:{create:async()=>({act:async()=>{sdkCalls++;assert.equal(nativeCalls,1);current=destination;return{data:{success:true}};},close:async()=>{}})}})});
   const click={method:'click',selector:'a',arguments:[],currentPageUrl:'https://owned.example/'};
-  if(scenario==='current'){const result=await session.act(click);assert.equal(result.afterUrl,destination);assert.equal(sdkCalls,1);assert.equal(nativeCalls,1);}
+  if(scenario==='current'){const result=await session.act(click);assert.equal(result.afterUrl,destination);assert.equal(sdkCalls,0);assert.equal(nativeCalls,1);assert.equal(nativeClicks,1);}
   else {await assert.rejects(session.act(click),/ACTION_TARGET_REJECTED/);assert.equal(sdkCalls,0);assert.equal(nativeCalls,0);}
   assert.deepEqual(await session.close(),{browserClosed:true,modelClosed:true});
  }

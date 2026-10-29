@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { discoveryError } from "./course-discovery-client.mjs";
-import { observedBookingSourceCandidates, nativeFrameNavigations, nativeIntermediaryNavigations, nativeGestureNavigations, rootWidgetRoutingWitness } from "./stagehand/source-provenance.mjs";
+import { observedBookingSourceCandidates, nativeFrameNavigations, nativeIntermediaryNavigations, nativeGestureNavigations, nativeHistoryNavigations, rootWidgetRoutingWitness } from "./stagehand/source-provenance.mjs";
+import { isWhooshClubGateway } from "./stagehand/public-source-gateway.mjs";
 import { sourceTransportCodes } from "./stagehand/source-diagnostic.mjs";
 
 export const STAGEHAND_SOURCE_MODE = "HYBRID_SOURCE_DISCOVERY";
@@ -48,7 +49,7 @@ export function publicStagehandJob(job) {
 export function validateStagehandSourceProposal(proposal) {
   requireFact(plain(proposal) && Reflect.ownKeys(proposal).length === 3 &&
     Object.keys(proposal).sort().join(",") === "bookingUrl,kind,schemaVersion" && proposal.schemaVersion === 1 &&
-    proposal.kind === "EXISTING_ADAPTER_SOURCE" && publicStagehandSourceUrl(proposal.bookingUrl), "STAGEHAND_SOURCE_PROPOSAL_INVALID");
+    proposal.kind === "EXISTING_ADAPTER_SOURCE" && publicStagehandSourceUrl(proposal.bookingUrl) && !isWhooshClubGateway(proposal.bookingUrl), "STAGEHAND_SOURCE_PROPOSAL_INVALID");
   return { schemaVersion: 1, kind: "EXISTING_ADAPTER_SOURCE", bookingUrl: proposal.bookingUrl };
 }
 
@@ -129,6 +130,8 @@ export function validateStagehandSourceReport(report, job) {
     nativeIntermediaryNavigations(report, publicStagehandSourceUrl).length === report.nativeIntermediaryNavigations.length, "STAGEHAND_SOURCE_GRAPH_LIMIT");
   requireFact(report.nativeGestureNavigations === undefined || Array.isArray(report.nativeGestureNavigations) && report.nativeGestureNavigations.length <= 2 &&
     nativeGestureNavigations(report, publicStagehandSourceUrl).length === report.nativeGestureNavigations.length, "STAGEHAND_SOURCE_GRAPH_LIMIT");
+  requireFact(report.nativeHistoryNavigations === undefined || Array.isArray(report.nativeHistoryNavigations) && report.nativeHistoryNavigations.length <= 4 &&
+    nativeHistoryNavigations(report, publicStagehandSourceUrl).length === report.nativeHistoryNavigations.length, "STAGEHAND_SOURCE_GRAPH_LIMIT");
   const intermediaries = nativeIntermediaryNavigations(report, publicStagehandSourceUrl);
   requireFact(boundedRows(report.officialLinkLedger,512).filter(row=>row.kind==='NATIVE_PUBLIC_BOOKING_INTERMEDIARY').every(row=>
     intermediaries.some(entry=>entry.pageUrl===row.pageUrl&&entry.observedAt===row.observedAt&&entry.documentHash===row.documentHash)), "STAGEHAND_SOURCE_GRAPH_LIMIT");
@@ -187,6 +190,7 @@ export function stagehandRoutingReport(report, job) {
     }).filter(row => row.sourceUrl && row.observedTarget.href && row.afterUrl),
   };
   if (report.nativeGestureNavigations !== undefined) projected.nativeGestureNavigations = structuredClone(gestureWitnesses);
+  if (report.nativeHistoryNavigations !== undefined) projected.nativeHistoryNavigations = structuredClone(nativeHistoryNavigations(report, publicStagehandSourceUrl));
   if (report.nativeFrameNavigations !== undefined) projected.nativeFrameNavigations = structuredClone(nativeFrameNavigations(report, publicStagehandSourceUrl));
   if (report.nativeIntermediaryNavigations !== undefined) projected.nativeIntermediaryNavigations = structuredClone(nativeIntermediaryNavigations(report, publicStagehandSourceUrl));
   if (report.initialNavigation) projected.initialNavigation = {

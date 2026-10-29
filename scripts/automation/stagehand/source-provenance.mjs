@@ -2,6 +2,23 @@
 import { publicEvidenceUrl } from './public-evidence.mjs';
 export const SOURCE_CANDIDATE_LIMIT = 160;
 export const SOURCE_CANDIDATE_URL_BYTES = 65536;
+/** Private controller history events on a completed, unchanged native document.
+ * A same-document route is neither an HTTP redirect nor availability proof. */
+export function nativeHistoryNavigations(report, isPublic = publicEvidenceUrl) {
+  const started=Date.parse(report?.startedAt),finished=report?.finishedAt===undefined?Date.now()+5000:Date.parse(report.finishedAt),seen=new Set();
+  return rows(report?.nativeHistoryNavigations,4).filter(row=>{
+    if(!row||Object.keys(row).sort().join(',')!=='completedAt,documentHash,documentUrl,finalStatus,finalUrl,kind,observedAt'||
+      row.kind!=='NATIVE_DOCUMENT_HISTORY_ROUTE'||row.finalStatus!==200||!isPublic(row.documentUrl)||!isPublic(row.finalUrl)||
+      norm(row.documentUrl)!==row.documentUrl||norm(row.finalUrl)!==row.finalUrl||row.documentUrl===row.finalUrl||
+      new URL(row.documentUrl).origin!==new URL(row.finalUrl).origin||!/^[a-f0-9]{64}$/u.test(row.documentHash??'')||
+      ![started,finished,Date.parse(row.observedAt),Date.parse(row.completedAt)].every(Number.isFinite)||
+      new Date(row.observedAt).toISOString()!==row.observedAt||new Date(row.completedAt).toISOString()!==row.completedAt||
+      Date.parse(row.observedAt)<started||Date.parse(row.completedAt)<Date.parse(row.observedAt)||Date.parse(row.completedAt)>finished||
+      ![row.documentUrl,row.finalUrl].every(url=>rows(report.visitedUrls,1024).includes(url))||
+      !rows(report.officialLinkLedger,512).some(w=>w.kind==='NATIVE_VISIBLE_DOM'&&w.pageUrl===row.finalUrl&&w.documentHash===row.documentHash&&w.observedAt===row.completedAt))return false;
+    const key=JSON.stringify([row.documentUrl,row.finalUrl]);if(seen.has(key))return false;seen.add(key);return true;
+  });
+}
 export function assertSourceCandidateBudget(candidates) {
   if (!Array.isArray(candidates) || candidates.length > SOURCE_CANDIDATE_LIMIT ||
       candidates.reduce((bytes, value) => bytes + (typeof value === 'string' ? Buffer.byteLength(value, 'utf8') : SOURCE_CANDIDATE_URL_BYTES + 1), 0) > SOURCE_CANDIDATE_URL_BYTES)
@@ -123,6 +140,7 @@ export function observedBookingSourceCandidates(report, officialUrl, isPublic = 
   const official = norm(officialUrl), observed = new Set(), edges = new Map();
   let edgeCount = 0;
   const intermediaryEntries = sourceDiscoveryOnly ? nativeIntermediaryNavigations(report,isPublic) : [];
+  const historyEntries = sourceDiscoveryOnly ? nativeHistoryNavigations(report,isPublic) : [];
   const see = value => { if (valid(value)) observed.add(norm(value)); };
   const link = (from, to) => {
     if (!valid(from) || !valid(to) || edgeCount >= 2048) return;
@@ -160,6 +178,7 @@ export function observedBookingSourceCandidates(report, officialUrl, isPublic = 
     see(row.finalUrl);if(row.kind==='NATIVE_GESTURE_SOURCE_OPEN'){see(row.targetUrl);link(row.pageUrl,row.targetUrl);}for(const hop of row.redirects){see(hop.fromUrl);see(hop.toUrl);link(hop.fromUrl,hop.toUrl);}
   }
   const reachable = new Set([official]);
+  for(const entry of historyEntries){see(entry.finalUrl);link(entry.documentUrl,entry.finalUrl);}
   for (const source of reachable) for (const target of edges.get(source) ?? []) reachable.add(target);
   const output = [];
   const append = value => { if (!output.includes(value)) output.push(value); if (sourceDiscoveryOnly) assertSourceCandidateBudget(output); };
@@ -177,6 +196,7 @@ export function observedBookingSourceCandidates(report, officialUrl, isPublic = 
     if (!sourceDiscoveryOnly && output.length === 32) break;
   }
   if(sourceDiscoveryOnly){
+    for(const entry of historyEntries)if(reachable.has(entry.documentUrl)&&reachable.has(entry.finalUrl))append(entry.finalUrl);
     // A visible embedded source is observed routing, never availability proof.
     const frames=[...rows(report.frameLedger,512).flatMap(row=>rows(row.frames,32).filter(f=>f.visible===true).map(f=>({source:row.pageUrl,url:f.src}))),
       ...rows(report.observedSourceEvidence,1024).filter(row=>row.kind==='DOM_OBSERVED').flatMap(row=>rows(row.exactObservedVisibleFrameUrls,32).map(url=>({source:row.url,url})))];
@@ -208,6 +228,7 @@ export function observedBookingSourceCandidates(report, officialUrl, isPublic = 
     // document; it never converts the hidden anchor into visible evidence.
     for(const row of nativeIntermediaryNavigations(report,isPublic)){visibleLink(row.pageUrl,row.url);for(const hop of row.redirects)visibleLink(hop.fromUrl,hop.toUrl);}
     for(const row of nativeGestureNavigations(report,isPublic)){visibleLink(row.pageUrl,row.targetUrl);for(const hop of row.redirects)visibleLink(hop.fromUrl,hop.toUrl);}
+    for(const row of historyEntries)visibleLink(row.documentUrl,row.finalUrl);
     const visibleReachable=new Set([official]);for(const from of visibleReachable)for(const to of visibleEdges.get(from)??[])visibleReachable.add(to);
     const documentKey=value=>{const url=new URL(value);return url.origin+url.pathname+url.search;};
     const startupDocuments=new Set([...startup].map(documentKey));

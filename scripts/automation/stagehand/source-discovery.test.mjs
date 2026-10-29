@@ -73,6 +73,20 @@ function fixture({invalid=false,closeReject=false,afterAct}={}){
 }
 
 const completeDocument={readyState:'interactive',bodyPresent:true,mainDocumentCurrent:true,mainDocumentComplete:true,mainReadPending:false,pendingReads:1,mainDocumentStatus:200};
+test('a model cannot finish at a public club gateway without opening its current observed navigation',async()=>{
+ const gateway="https://app.whoosh.io/patron/club/golfer's-lounge", terminal=gateway+'/agenda/simulators/2026-11-01';
+ let current=official,evaluations=0,extracts=0,acts=0,observedInstruction='';
+ const session={localCodexCalls:[],browser:{context:{addInitScript:async()=>{}}},
+  page:{url:async()=>current,evaluate:async()=>++evaluations%2?{url:current,observedAt:new Date().toISOString(),links:[{href:current===official?gateway:terminal,text:'Public booking',visible:true}],frames:[],dom:[]}:[]},
+  goto:async()=>({status:()=>200}),extract:async(_instruction,schema)=>({data:schema.parse({decision:'SOURCE_FOUND',reason:'Current public link',nextActionInstruction:'',bookingUrl:++extracts===1?gateway:terminal})}),
+  observe:async instruction=>{observedInstruction=instruction;return{data:[{method:'click',selector:'a',arguments:[]}]};},
+  act:async()=>{acts++;current=terminal;return{before:{tag:'A',href:gateway,text:'Public booking'},afterUrl:terminal,openedNewPage:false};},
+  close:async()=>({browserClosed:true,modelClosed:true})};
+ const report=await sourceDiscover({job:job(),sessionFactory:async()=>session});
+ assert.equal(acts,1,JSON.stringify({outcome:report.outcome,code:report.frameworkFailureCode,diagnostic:report.sourceDiagnostic}));assert.match(observedInstruction,/club gateway is not a terminal/u);
+ assert.equal(report.outcome,'SOURCE_PROPOSED_UNVERIFIED');assert.equal(report.adapterSourceProposal.bookingUrl,terminal);
+ assert.equal(report.methodSaved,false);assert.deepEqual(report.matchingSlots,[]);
+});
 test('unsupported placeholder feedback asks for another current ordinary link without granting a route',()=>{
  const context=sourceRoutingContext({actionAttempts:[{status:'REJECTED',guardReason:'UNSUPPORTED_PLACEHOLDER_ACTION'}]},[]);
  assert.equal(context.lastNavigationFeedback,'UNSUPPORTED_PLACEHOLDER_ACTION');

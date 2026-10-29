@@ -3,7 +3,7 @@ import { discoveryError } from "./course-discovery-client.mjs";
 import { STAGEHAND_SOURCE_MODE, canonicalStagehandData as canonical, stagehandDataHash as hash,
   publicStagehandSourceUrl as publicUrl, validateStagehandSourceProposal as validateAdapterSourceProposal,
   validateStagehandSourceReport } from "./course-discovery-stagehand-source.mjs";
-import { observedBookingSourceCandidates, nativeLinkSource, corroboratedNativeLink, nativeFrameNavigations, nativeIntermediaryNavigations, nativeGestureNavigations } from "./stagehand/source-provenance.mjs";
+import { observedBookingSourceCandidates, nativeLinkSource, corroboratedNativeLink, nativeFrameNavigations, nativeIntermediaryNavigations, nativeGestureNavigations, nativeHistoryNavigations } from "./stagehand/source-provenance.mjs";
 import { safeTeeItUpDelegationDiagnostic, safeFixedAdapterReadDiagnostic, safeFixedInspectionSourceDiagnostic, safeNativeMainDocumentContinuity } from "./course-discovery-worker.mjs";
 import { z } from "zod";
 import { setTimeout as waitForFrame } from "node:timers/promises";
@@ -187,6 +187,7 @@ export function observedInspectionPath(report, officialUrl, bookingUrl) {
     link(row.pageUrl, row.targetUrl);
     for (const hop of row.redirects) link(hop.fromUrl, hop.toUrl);
   }
+  for (const row of nativeHistoryNavigations(report, publicUrl)) link(row.documentUrl, row.finalUrl);
   for (const row of (report.observedSourceEvidence ?? []).slice(0, 1024)) {
     const source = row.kind === 'NATIVE_DOM_LINK_OBSERVED' ? nativeLinkSource(row) : row.url;
     if (['DOM_OBSERVED', 'NATIVE_DOM_LINK_OBSERVED'].includes(row.kind)) {
@@ -511,6 +512,18 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
         path[0]=current; position=0; receipt.freshPathSha256=hash(canonical(path));
       } else position = landed;
       const next = path[position + 1];
+      const historyRoute = next === undefined ? undefined : nativeHistoryNavigations(report, publicUrl).find(row=>
+        row.documentUrl===current&&row.finalUrl===next&&snapshot.url===next);
+      const historyContext = nativeContexts.get(snapshot);
+      const historyProof = historyRoute && historyContext && safeNativeMainDocumentContinuity(
+        browser.currentMainDocumentContinuity?.(snapshot,current,now()));
+      if(historyRoute&&historyProof&&snapshot.navigationStatus===200&&!snapshot.accessRequirementObserved&&!snapshot.nativeFirstFatal&&
+          historyProof.originalUrlSha256===hash(current)&&historyProof.currentUrlSha256===hash(next)&&
+          historyProof.documentBindingSha256===historyContext.capability.documentBindingSha256&&historyProof.observedAt<=now()&&now()-historyProof.observedAt<=5000){
+        // Re-earn the route in this independent browser, then reopen its exact
+        // observed URL. A historical report alone never admits a new URL.
+        snapshot=await request('open',next,'NATIVE_DOCUMENT_HISTORY_ROUTE');position++;continue;
+      }
       const gesture = next === undefined ? undefined : nativeGestureNavigations(report, publicUrl).find(row =>
         row.pageUrl === snapshot.url && row.targetUrl === next && row.href === snapshot.url + '#');
       const matchingGestureControls = gesture ? (snapshot.controls ?? []).filter(row => row.kind === 'link' && row.href === gesture.href &&
