@@ -121,7 +121,8 @@ const store = vi.hoisted(() => {
 });
 
 vi.mock("@/lib/prisma", () => ({ prisma: { ...store.tx, $transaction: store.transaction } }));
-vi.mock("./course-support-batches", () => ({
+vi.mock("./course-support-batches", async importOriginal => ({
+  courseSupportAssignedCandidateConflicts: (await importOriginal<typeof import("./course-support-batches")>()).courseSupportAssignedCandidateConflicts,
   MAX_CONCURRENT_COURSE_SUPPORT_BATCHES: 15,
   runWithCourseSupportWriterTransitionLease: store.lease,
   withCourseSupportWriteConflictRetry: (operation: () => Promise<unknown>) => operation(),

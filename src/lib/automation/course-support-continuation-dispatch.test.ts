@@ -43,7 +43,8 @@ const state = vi.hoisted(() => {
   return { runs, tx, transaction, lease, context, now, reset: () => { tail = Promise.resolve(); } };
 });
 vi.mock("@/lib/prisma", () => ({ prisma: { ...state.tx, $transaction: state.transaction } }));
-vi.mock("./course-support-batches", () => ({ runWithCourseSupportWriterTransitionLease: state.lease,
+vi.mock("./course-support-batches", async importOriginal => ({ runWithCourseSupportWriterTransitionLease: state.lease,
+  courseSupportAssignedCandidateConflicts: (await importOriginal<typeof import("./course-support-batches")>()).courseSupportAssignedCandidateConflicts,
   withCourseSupportWriteConflictRetry: (operation: () => Promise<unknown>) => operation(),
   MAX_CONCURRENT_COURSE_SUPPORT_BATCHES: 15, listCourseSupportDispatchCandidates: vi.fn(async () => []),
 }));
