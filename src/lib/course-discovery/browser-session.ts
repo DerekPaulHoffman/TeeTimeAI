@@ -1328,6 +1328,12 @@ export async function createCourseDiscoveryBrowserSession(input: {
   };
   const waitForInitialContent = async () => {
     const startedAt = Date.now();
+    // Head scripts can keep the parser ahead of <body> while bounded public
+    // resource reads drain. A committed response is not a rendered document.
+    // Keep this wait inside the original session deadline; never substitute
+    // raw response text for the rendered identity or controls.
+    await page.locator("body").waitFor({ state: "attached", timeout: Math.max(1,
+      Math.min(30_000, input.deadlineAt.getTime() - Date.now())) });
     // Keep one bounded clock per actual navigation/filter action. Observe does
     // not renew it. Branding prose alone must not finish a loading public SPA.
     const until = Math.min((contentWaitStartedAt ?? navigationStartedAt ?? startedAt) + 8_000, input.deadlineAt.getTime());

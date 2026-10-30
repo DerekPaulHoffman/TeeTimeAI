@@ -1644,6 +1644,28 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       expect(snapshot.pendingRequestCount).toBe(0);
     } finally { await session.close(); }
   }, 20_000);
+  it("waits for a parser-blocking public head script before reading the rendered body", async () => {
+    const fixture = '<!doctype html><html><head><script src="/assets/boot.js"></script></head><body><h1>Public golf</h1><a href="/times">Book a tee time</a></body></html>';
+    let documentReads = 0;
+    const session = await createCourseDiscoveryBrowserSession({ deadlineAt: new Date(Date.now() + 25_000), initialUrls: ["https://example.org/"] }, {
+      fetch: (async value => {
+        if (String(value).endsWith("/assets/boot.js")) {
+          await new Promise(resolve => setTimeout(resolve, 14_000));
+          return new Response("/* public bootstrap ready */", { headers: { "content-type": "application/javascript" } });
+        }
+        documentReads++;
+        return new Response(fixture, { headers: { "content-type": "text/html" } });
+      }) as typeof fetch,
+      launchBrowser: () => chromium.launch({ executablePath, headless: true }),
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      const snapshot = await session.execute({ id: 1, action: "open", url: "https://example.org/" });
+      expect(snapshot.text).toContain("Public golf");
+      expect(snapshot.controls).toContainEqual(expect.objectContaining({ name: "Book a tee time", kind: "link" }));
+      expect(documentReads).toBe(1);
+    } finally { await session.close(); }
+  }, 30_000);
   it("waits for initial delayed public content without a manual observe or reload", async () => {
     const fixture = '<!doctype html><html><body><a href="#">×</a><script>fetch("/api/content").then(r=>r.json()).then(()=>{document.body.innerHTML="<h1>Public golf</h1><a href=\'/times\'>Book a tee time</a>";});</script></body></html>';
     const session = await createCourseDiscoveryBrowserSession({ deadlineAt: new Date(Date.now() + 20_000), initialUrls: ["https://example.org/"] }, {

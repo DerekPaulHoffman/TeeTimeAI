@@ -165,6 +165,14 @@ export function delegatedBookingHop(page: OfficialIdentityPage, requestedNext?: 
 
 /** Physical directory matching uses the existing official-facility predicate.
  * Delegation does not excuse any street, ZIP, name or timezone discrepancy. */
+function matchesDelegatedLocality(source: OfficialIdentitySource, address: NonNullable<ReturnType<typeof completeUSAddress>>,
+  row: { name: string; address: string; timeZone: string }) {
+  // A city/state/ZIP-only directory is corroborated by the full official
+  // address and explicit native booking chain. Never ignore a published street.
+  const locality = /^([A-Za-z .'-]{2,80}),\s*([A-Z]{2})\s+(\d{5})(?:-\d{4})?(?:,\s*(?:US|USA|United States(?: of America)?))?$/iu.exec(clean(row.address));
+  return Boolean(locality && row.timeZone === source.timeZone && fullCourseName(row.name) === fullCourseName(source.venueName) &&
+    clean(locality[1]).toLowerCase() === address.locality && locality[2].toUpperCase() === address.region && locality[3] === address.postalCode);
+}
 export function bindDelegatedFacility(source: OfficialIdentitySource, chain: { rootWitnessSha256: string; hops: DelegatedHop[]; rootDocumentProof?: NativeCanonicalRootDocumentProof; physicalContactSource?: NativePhysicalContactSource; physicalContactProof?: TeeItUpPhysicalContactProof; physicalContactRequired?: true }, directory: unknown): TeeItUpDelegatedBookingProof {
   const diagnostic = createDelegationDiagnostic("PROVIDER_BIND");
   try {
@@ -176,7 +184,8 @@ export function bindDelegatedFacility(source: OfficialIdentitySource, chain: { r
   diagnostic.gates.directoryIdsUnique = rows.success ? new Set(rows.data.map(row => row.id)).size === rows.data.length && new Set(rows.data.map(row => row.courseId)).size === rows.data.length : null;
   if (!rows.success || !address || !alias || !source.officialUrl || new Set(rows.data.map(row => row.id)).size !== rows.data.length ||
       new Set(rows.data.map(row => row.courseId)).size !== rows.data.length) return fail();
-  const matching = rows.data.filter(row => row.isSimulator === false && matchesOfficialFacility({ venueName: fullCourseName(source.venueName), alternateAddress: address }, source, row));
+  const matching = rows.data.filter(row => row.isSimulator === false &&
+    (matchesOfficialFacility({ venueName: fullCourseName(source.venueName), alternateAddress: address }, source, row) || matchesDelegatedLocality(source, address, row)));
   diagnostic.gates.providerUniqueMatch = matching.length === 1;
   let physical;
   const physicalSource = chain.physicalContactSource ?? (chain.physicalContactProof ? physicalContactSourceData(chain.physicalContactProof) : undefined);

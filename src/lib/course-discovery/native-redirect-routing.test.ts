@@ -110,7 +110,7 @@ describe("native child-asset denial", () => {
   const proof = (t: Awaited<ReturnType<typeof prepared>>) => t.guard.isCurrentCompletedDocumentRead(t.routes[0].request(), t.main as never,
     { frameId: "main", loaderId: "root-loader", url: root });
   it.each(["exact terminal", "missing terminal", "late terminal", "wrong network", "finished", "wrong kind", "not canceled", "unbranded RPC", "wrong loader", "wrong frame", "other profile"] as const)(
-    "drains only an exact source-profile excluded image whose failed abort has independent terminal proof: %s", async mode => {
+    "drains only an exact excluded image whose failed abort has independent terminal proof: %s", async mode => {
       const t = await prepared(mode === "other profile" ? null : "SOURCE_ROUTING"), url = "https://example.org/photo.jpg";
       const abortError = Error("OWNED_STAGEHAND_CDP_UNAVAILABLE"), send = t.cdp.send.getMockImplementation()!;
       const recover = vi.fn((error: unknown, id: string) => mode !== "unbranded RPC" && error === abortError && id === "decoration");
@@ -127,7 +127,7 @@ describe("native child-asset denial", () => {
           type: mode === "wrong kind" ? "Script" : "Image", canceled: mode !== "not canceled", errorText: "net::ERR_ABORTED" });
         await vi.waitFor(() => expect(t.guard.pendingReads).toBe(0), { timeout: 1000 });
         if (mode === "late terminal") t.events.get("Network.loadingFailed")!({ requestId: "network-decoration", type: "Image", canceled: true, errorText: "net::ERR_ABORTED" });
-        if (mode === "exact terminal") {
+        if (mode === "exact terminal" || mode === "other profile") {
           expect(recover).toHaveBeenCalledOnce(); expect(t.close).not.toHaveBeenCalled(); expect(t.guard.firstFatal).toBeUndefined();
           expect(t.handler).toHaveBeenCalledOnce(); expect(proof(t)).toBe(true);
         } else {
@@ -137,6 +137,30 @@ describe("native child-asset denial", () => {
         expect(t.cdp.send.mock.calls.filter(([name, value]) => name === "Fetch.failRequest" && value?.requestId === "decoration")).toHaveLength(1);
         expect(t.cdp.send.mock.calls.filter(([name, value]) => ["Fetch.continueRequest", "Fetch.continueResponse", "Fetch.getResponseBody"].includes(name) &&
           value?.requestId === "decoration")).toHaveLength(0);
+      } finally { await t.guard.close(); }
+    });
+  it.each(["exact terminal", "late identity", "prior terminal", "retired terminal", "missing terminal", "wrong error", "wrong frame"] as const)(
+    "handles a local Playwright canceled decoration only with exact terminal proof: %s", async mode => {
+      const t = await prepared(null), url = "https://example.org/photo.jpg", send = t.cdp.send.getMockImplementation()!;
+      t.cdp.send.mockImplementation((name, value) => name === "Fetch.failRequest" && value?.requestId === "decoration"
+        ? Promise.reject(new Error(mode === "wrong error" ? "CDP transport unavailable" : "cdpSession.send: Protocol error (Fetch.failRequest): Invalid InterceptionId.")) : send(name, value));
+      try {
+        if (mode === "retired terminal") await t.guard.beginDocumentNavigation(t.main as never);
+        const identity = () => t.events.get("Network.requestWillBeSent")!({ requestId: "network-decoration", frameId: mode === "wrong frame" ? "child" : "main",
+          loaderId: "root-loader", type: "Image", request: { url, method: "GET" } });
+        const terminal = () => t.events.get("Network.loadingFailed")!({ requestId: "network-decoration", type: "Image", canceled: true, errorText: "net::ERR_ABORTED" });
+        if (mode !== "late identity") identity();
+        if (mode === "prior terminal") terminal();
+        t.request("decoration", { resourceType: "Image", networkId: "network-decoration", request: { url, method: "GET", headers: {} } });
+        if (mode === "late identity") identity();
+        await vi.waitFor(() => expect(t.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.failRequest" && value?.requestId === "decoration")).toBe(true));
+        if (mode !== "missing terminal" && mode !== "prior terminal") terminal();
+        await vi.waitFor(() => expect(t.guard.pendingReads).toBe(0), { timeout: 1000 });
+        if (["exact terminal", "late identity", "prior terminal", "retired terminal"].includes(mode)) {
+          expect(t.close).not.toHaveBeenCalled(); expect(proof(t)).toBe(mode !== "retired terminal");
+        }
+        else expect(t.close).toHaveBeenCalledOnce();
+        expect(t.cdp.send.mock.calls.some(([name, value]) => ["Fetch.continueRequest", "Fetch.continueResponse", "Fetch.getResponseBody"].includes(name) && value?.requestId === "decoration")).toBe(false);
       } finally { await t.guard.close(); }
     });
   it("stops the excluded image terminal wait when the source aborts", async () => {

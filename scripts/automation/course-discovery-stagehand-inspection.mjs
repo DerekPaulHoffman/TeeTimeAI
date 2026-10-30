@@ -355,7 +355,7 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
   if (!sourceOnly && adapterSourceProposal != null) throw fail('FRAMEWORK_SOURCE_PROPOSAL_WITH_RECIPE');
   recipe = canonicalAdapterSourceRecipe(proposal, job);
   const startedAt = now();
-  const deadline = Math.min(Date.parse(job.deadlineAt), Date.parse(workDeadlineAt), startedAt + 90_000);
+  const deadline = Math.min(Date.parse(job.deadlineAt), Date.parse(workDeadlineAt), startedAt + 180_000);
   const receipt = { schemaVersion: 1, jobSha256: hash(String(job.id)), requestSha256: hash(canonical(job.request)),
     sourceSha256: hash(canonical(recipe.source)),
     ...(sourceOnly ? { sourceProposalSha256: hash(canonical(proposal)) } : { proposedAdapterSha256: hash(canonical(recipe.adapter)) }),
@@ -391,7 +391,7 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
         environment.COURSE_DISCOVERY_LEASE_TOKEN !== job.leaseToken) throw fail('FRAMEWORK_INSPECTION_SCOPE_INVALID');
     const inspectionSignal = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(Math.max(1, deadline - now()))]);
     browser = await worker.createDiscoveryBrowser({ cwd, deadlineAt: new Date(deadline).toISOString(),
-      ...(frameWitness ? { fixedInspection: true, fixedInspectionFrameWitness: frameWitness } : {}),
+      fixedInspection: true, ...(frameWitness ? { fixedInspectionFrameWitness: frameWitness } : {}),
       initialUrls: [job.request.identity.officialUrl], timeZone: job.request.input.timeZone,
       requestedInput: job.request.input,
       ...(job.request.trustedContext!==undefined?{trustedContext:job.request.trustedContext}:{}),

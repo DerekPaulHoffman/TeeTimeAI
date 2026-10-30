@@ -435,6 +435,9 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
     });
   };
   return { read, family, teeitup, apiAlias, directoryUrl: () => `https://phx-api-be-east-1b.kenna.io/alias/${apiAlias()}/facilities`,
+    async prepareOfficialSources() {
+      await prepareBookingChain(); await prepareDelegation(); await prepareContactChain();
+    },
     acuityContactProof: () => acuityContactProof,
     async prepareAcuityContact(initialFallback = false) {
       if (family !== "ACUITY" || !(adapter?.family === "ACUITY" && adapter.officialContactProof) && !initialFallback) return;
@@ -951,6 +954,9 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
       return result(slots);
     }
     if (adapter.family === "TEEITUP") {
+      // Native provenance has its own bounded source budget. Complete it
+      // before the provider creates a fifteen-second HTTP request signal.
+      await session!.prepareOfficialSources();
       if (adapter.publicBookingConfiguration) await session!.preparePublicBookingConfiguration();
       if (adapter.officialStreetTypeOmittedProof) await session!.refreshStreetTypeOmittedSource();
       if (adapter.officialIdentityProof) await session!.read(adapter.officialIdentityProof.officialPageUrl);

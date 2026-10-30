@@ -235,7 +235,14 @@ export function parseChronogolfProfile(html: string, actualUrl: string, source: 
   const canonicalFiveDigitZip = /,\s*[A-Z]{2}\s+([0-9]{5})(?:,\s*(?:US|USA|United States(?: of America)?))?$/iu.exec(source.venueAddress)?.[1];
   const postcode = /^[0-9]{4}$/u.test(club.postcode) && canonicalFiveDigitZip === `0${club.postcode}` ? canonicalFiveDigitZip : club.postcode;
   const observed = physicalAddress(`${club.address}, ${club.city}, ${province} ${postcode}`);
-  if (!observed || JSON.stringify(observed) !== JSON.stringify(canonical)) fail("ADAPTER_IDENTITY_MISMATCH");
+  // These two complete street spellings denote the same English word. Accept
+  // only that exact substitution, with every other physical field unchanged,
+  // the same official host, and the independently supplied canonical phone.
+  const streetSpelling = observed && JSON.stringify(observed) !== JSON.stringify(canonical) &&
+    JSON.stringify({ ...observed, street: observed.street.replace(/\btheatre\b/gu, "theater") }) ===
+    JSON.stringify({ ...canonical, street: canonical.street.replace(/\btheatre\b/gu, "theater") }) &&
+    websiteHost === officialHost(source.officialUrl) && canonicalPhone !== undefined && normalizePublicCoursePhone(club.phone) === canonicalPhone;
+  if (!observed || JSON.stringify(observed) !== JSON.stringify(canonical) && !streetSpelling) fail("ADAPTER_IDENTITY_MISMATCH");
   const canonicalUrl = `https://www.chronogolf.com/club/${club.slug}`;
   for (const url of [requested, actual]) if (url.numericClubId !== undefined ? url.numericClubId !== club.id : url.profileUrl !== canonicalUrl) fail("ADAPTER_IDENTITY_MISMATCH");
   const courses = club.courses.map(course => ({ id: course.id, uuid: course.uuid, name: course.name, layoutHoles: course.holes,
@@ -265,6 +272,8 @@ export function parseChronogolfProfile(html: string, actualUrl: string, source: 
   }
   const catalog = { clubId: club.id, clubUuid: club.uuid, profileUrl: canonicalUrl, ...(requested.widgetUrl ? { widgetSourceUrl: requested.widgetUrl } : {}), name: club.name, websiteHost: providerWebsiteIdentityHost(club.website),
     address: observed, timeZone: club.timezone, publicPlayerTypeId: club.defaultAffiliationTypeId, courses, clients: document.clients,
+    ...(streetSpelling ? { canonicalStreetSpellingScope: "THEATRE_THEATER_WITH_CANONICAL_PHONE_V1",
+      canonicalPhoneSha256: createHash("sha256").update(JSON.stringify(canonicalPhone)).digest("hex") } : {}),
     ...(publicBrandSuffix ? { canonicalBrandScope: "EXACT_PUBLIC_GOLF_LINKS_SUFFIX_V1", canonicalName: expectedName,
       canonicalPhoneSha256: createHash("sha256").update(JSON.stringify(canonicalPhone)).digest("hex") } : {}) };
   return chronogolfMetadataSchema.parse({ family: "CHRONOGOLF", clubId: club.id, profileUrl: canonicalUrl, timeZone: club.timezone,

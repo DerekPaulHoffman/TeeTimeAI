@@ -1403,7 +1403,7 @@ export function createDiscoveryBrowser({ cwd, deadlineAt, initialUrls, timeZone 
       "--time-zone", timeZone],
     cwd, environment: { ...discoveryProcessEnvironment(), ...helperEnvironment,
       ...(fixedInspectionFrameWitness === undefined ? {} : { COURSE_DISCOVERY_FIXED_INSPECTION: "1" }) },
-    signal, timeoutMs: Math.min(90_000, Math.max(1, Date.parse(deadlineAt) - Date.now())),
+    signal, timeoutMs: Math.min(fixedInspection ? 180_000 : 90_000, Math.max(1, Date.parse(deadlineAt) - Date.now())),
   });
   let closed = false, lastSnapshot, lastProof, lastGesture;
   return { async request(value) {

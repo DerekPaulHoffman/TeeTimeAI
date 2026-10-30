@@ -74,7 +74,7 @@ export async function readNativeOfficialIdentityPage(source: OfficialIdentitySou
     if (!readable(current) || !ready(current) || !page) throw new Error("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
     if (page.url !== current.url || page.browserTransport !== "NATIVE_CHROME" || !page.visibleEvidence || Date.now() >= deadline.getTime())
       throw new Error("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
-    capturedPage = registerFreshNativeOfficialIdentityPage(page, source.officialUrl, deadline, { requestedUrl: pageUrl, redirects: current.nativeDocumentRedirects ?? [] });
+    capturedPage = registerFreshNativeOfficialIdentityPage(page, source.officialUrl, deadlineAt, { requestedUrl: pageUrl, redirects: current.nativeDocumentRedirects ?? [] });
     return capturedPage;
   } finally {
     if (capturedPage) noteNativeOfficialIdentityPageCleanup(capturedPage, source.officialUrl, "BEFORE");
@@ -115,7 +115,7 @@ export async function readNativeDelegatedDocument(source: OfficialIdentitySource
       captured = await session.readDelegatedSourceDocument() as OfficialIdentityPage;
     }
     if (captured.url !== admitted.url || Date.now() >= deadline.getTime()) throw new Error("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
-    return registerFreshNativeDelegatedDocument(captured, admitted.officialUrl, deadline);
+    return registerFreshNativeDelegatedDocument(captured, admitted.officialUrl, admitted.deadlineAt);
   } catch (error) { failed = true; throw error; }
   finally {
     try { await session.close(); } catch { if (!failed) throw new Error("OFFICIAL_DELEGATED_SOURCE_CLOSE_FAILED"); }

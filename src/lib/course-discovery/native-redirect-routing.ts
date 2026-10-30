@@ -374,6 +374,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
   // Closed terminal facts for failure diagnostics only; never authorize a read.
   const finishedNetworkIdentities = new WeakSet<NetworkIdentity>();
   const sourceLoadingFailures = new WeakMap<NetworkIdentity, Readonly<SourceLoadingFailure>>();
+  const terminalCanceledExcludedImages = new WeakSet<NetworkIdentity>();
   const pendingPreflightIdentities = new Map<string, PendingPreflightIdentity>();
   const preflightSources = new Set<NetworkIdentity>();
   const networkWaiters = new Map<string, ReturnType<typeof pending<void>>>();
@@ -847,7 +848,12 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
       url: event.request.url, method: event.request.method, kind: resourceKinds[event.type ?? ""] ?? "other",
       kindKnown: Object.hasOwn(resourceKinds, event.type ?? ""), hasBody: event.request.hasPostData === true || event.request.postData !== undefined,
       body: typeof event.request.postData === "string" && Buffer.byteLength(event.request.postData) <= 32_768 ? event.request.postData : null,
-      headerEntries: entries, generation, hasUserGesture: event.hasUserGesture === true, scriptInitiator: event.initiator?.type === "script" };
+      headerEntries: entries,
+      // A late decorative image retains its already-owned retired loader.
+      // This correlation permits denial cleanup only; it never admits a read.
+      generation: event.type === "Image" && event.request.method === "GET" && loaderOwners.get(event.loaderId)?.retired
+        ? loaderOwners.get(event.loaderId)! : generation,
+      hasUserGesture: event.hasUserGesture === true, scriptInitiator: event.initiator?.type === "script" };
     if (nativePreflight) {
       // Chrome can emit raw loaderless OPTIONS metadata before its exact read
       // initiator. Retain only bounded current-generation facts until that read
@@ -892,6 +898,10 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
       const errorKind = event.errorText === "net::ERR_ABORTED" ? "ABORTED" : event.errorText === "net::ERR_BLOCKED_BY_CLIENT" ? "BLOCKED_BY_CLIENT"
         : event.errorText === "net::ERR_TIMED_OUT" ? "TIMED_OUT" : event.errorText === "net::ERR_FAILED" ? "FAILED" : "OTHER";
       const corsError = event.corsErrorStatus?.corsError;
+      if (!sourceRecord && failedIdentity.kindKnown && failedIdentity.kind === "image" && event.type === "Image" &&
+          event.canceled === true && ["ABORTED", "BLOCKED_BY_CLIENT"].includes(errorKind) &&
+          !finishedNetworkIdentities.has(failedIdentity) && failedIdentity.frameId === rootFrameId &&
+          loaderOwners.get(failedIdentity.loaderId) === failedIdentity.generation) terminalCanceledExcludedImages.add(failedIdentity);
       sourceLoadingFailures.set(failedIdentity, Object.freeze({ nativeSourceFetchRecordPresent: Boolean(sourceRecord),
         ...(sourceRecord ? { nativeSourceFetchAdmitted: sourceRecord.admitted, nativeSourceFetchFailed: sourceRecord.failed,
           nativeSourceFetchHandlerDone: sourceRecord.handlerDone } : {}), nativeSourceLoadingFailedCanceledPresent: typeof event.canceled === "boolean",
@@ -1148,24 +1158,34 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         // availability read nor model feedback. Unclassified Ping diagnostics
         // stay separate; known analytics remain a quiet denial for every kind.
         const diagnostic = event.resourceType === "Ping" && !excludedResource ? requestDiagnostic("NATIVE_REDIRECT_PING_UNSUPPORTED") : undefined;
-        const networkId = event.networkId, identity = networkId && networkIdentities.get(networkId);
-        const image = options.responseProfile === SOURCE_ROUTING_RESPONSE_PROFILE && event.resourceType === "Image" &&
+        const networkId = event.networkId;
+        const excludedImage = () => {
+          const identity = networkId && networkIdentities.get(networkId);
+          return event.resourceType === "Image" &&
           event.request.method === "GET" && event.request.hasPostData !== true && event.request.postData === undefined &&
           typeof networkId === "string" && identity && identity.kind === "image" && identity.kindKnown &&
           identity.url === event.request.url && identity.method === "GET" && identity.frameId === rootFrameId &&
-          identity.generation === generation && !generation.retired && loaderOwners.get(identity.loaderId) === generation &&
-          !failedNetworkIdentities.has(identity) && !excludedImageAborts.has(networkId) && !records.has(event.requestId) &&
+          (identity.generation === generation && !generation.retired || identity.generation.retired) && loaderOwners.get(identity.loaderId) === identity.generation &&
+          (!failedNetworkIdentities.has(identity) || terminalCanceledExcludedImages.has(identity)) && !finishedNetworkIdentities.has(identity) &&
+          !excludedImageAborts.has(networkId) && !records.has(event.requestId) &&
           !initialPauses.has(event.requestId)
-          ? { fetchId: event.requestId, identity, generation, revision: identity.revision, terminal: pending<void>(),
+          ? { fetchId: event.requestId, identity, generation: identity.generation, revision: identity.revision, terminal: pending<void>(),
             finished: false, responseSeen: false } satisfies ExcludedImageAbort : undefined;
+        };
+        let image = excludedImage();
         if (image && networkId) excludedImageAborts.set(networkId, image);
         try {
           await bounded(reject(), "NATIVE_REDIRECT_ABORT_TIMEOUT");
         } catch (error) {
+          // Fetch and Network events may arrive in either order while an
+          // explicit navigation retires the old loader. Re-read only this
+          // exact denied image's native identity after the command fails.
+          if (!image) { image = excludedImage(); if (image && networkId) excludedImageAborts.set(networkId, image); }
           if (!image || !networkId) throw error;
           // A rejected abort is never its own evidence. The independent exact
           // Network terminal must arrive under the unchanged command deadline.
           if (closed || options.signal?.aborted) throw error;
+          if (terminalCanceledExcludedImages.has(image.identity)) image.terminal.settle();
           let abortListener: (() => void) | undefined;
           const aborted = new Promise<never>((_resolve, reject) => {
             abortListener = () => reject(new Error("NATIVE_REDIRECT_CANCELLED"));
@@ -1182,8 +1202,13 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
               observed?.nativeSourceFetchRecordPresent !== false || observed.nativeSourceLoadingFailedCanceled !== true ||
               !["ABORTED", "BLOCKED_BY_CLIENT"].includes(observed.nativeSourceLoadingFailedErrorKind ?? "") ||
               records.has(event.requestId) || initialPauses.has(event.requestId) ||
-              !(cdp as CDPSession & { recoverTerminalExcludedImageAbort?: (error: unknown, requestId: string) => boolean })
-                .recoverTerminalExcludedImageAbort?.(error, event.requestId)) throw error;
+              !((cdp as CDPSession & { recoverTerminalExcludedImageAbort?: (error: unknown, requestId: string) => boolean })
+                .recoverTerminalExcludedImageAbort?.(error, event.requestId) ||
+                // Local Playwright has no RPC channel to recover. This exact
+                // command error is harmless only AFTER the independent native
+                // terminal and all no-evidence/generation checks above pass.
+                !("recoverTerminalExcludedImageAbort" in cdp) && error instanceof Error &&
+                /^(?:cdpSession\.send: )?Protocol error \(Fetch\.failRequest\): Invalid InterceptionId\.?$/u.test(error.message))) throw error;
         } finally { if (image && networkId && excludedImageAborts.get(networkId) === image) excludedImageAborts.delete(networkId); }
         if (diagnostic) {
           rejectedRequests.push(diagnostic);

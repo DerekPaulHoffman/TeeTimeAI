@@ -40,7 +40,10 @@ export function registerFreshNativeOfficialIdentityPage(page: OfficialIdentityPa
   const rootDocumentProof = provenance?.requestedUrl === officialUrl && redirects && validRootRedirects(officialUrl, page.url, redirects) ?
     nativeCanonicalRootDocumentProofSchema.parse({ kind: "NATIVE_CANONICAL_ROOT_REDIRECT", canonicalUrl: officialUrl, documentUrl: page.url, redirects,
       witnessSha256: rootWitness(officialUrl, page.url, redirects) }) : undefined;
-  pages.set(page, { officialUrl, expiresAt: Math.min(deadlineAt.getTime(), Date.now() + 30_000), hash: hash(page), ...(rootDocumentProof ? { rootDocumentProof } : {}) });
+  // This is venue identity and its public source edge, never availability.
+  // Two bounded native child reads must fit after its actual capture; their
+  // own shorter attestations and the caller's original deadline still apply.
+  pages.set(page, { officialUrl, expiresAt: Math.min(deadlineAt.getTime(), Date.now() + 60_000), hash: hash(page), ...(rootDocumentProof ? { rootDocumentProof } : {}) });
   cleanupFacts.set(page, { cleanupStarted: false, cleanupSettled: false, cleanupSucceeded: false,
     freshBeforeCleanup: null, freshAfterCleanup: null });
   return page;

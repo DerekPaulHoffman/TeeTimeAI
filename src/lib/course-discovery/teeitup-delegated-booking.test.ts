@@ -305,14 +305,14 @@ describe("fresh native delegated TeeItUp source", () => {
     expect(() => authorizeDelegatedGet(p, "https://foreign.example/", new Date(now + 120000))).toThrow();
     const changed = authorizeDelegatedGet(p, source.officialUrl, new Date(now + 120000)); p.html += "changed";
     expect(() => consumeDelegatedGet(changed.token)).toThrow();
-    const expired = authorizeDelegatedGet(root(), source.officialUrl, new Date(now + 120000)); now += 30001;
+    const expired = authorizeDelegatedGet(root(), source.officialUrl, new Date(now + 120000)); now += 60001;
     expect(() => consumeDelegatedGet(expired.token)).toThrow();
   });
   it("actually recaptures an expired root without renewing an old object or final document", async () => {
     let now = Date.now(); vi.spyOn(Date, "now").mockImplementation(() => now);
     const deps = readers(), roots: OfficialIdentityPage[] = [];
     deps.readNativeOfficialPage.mockImplementation(async () => { const p = root(); roots.push(p); return p; });
-    deps.readDelegatedDocument.mockImplementation(async (_s, grant) => { const next = consumeDelegatedGet(grant); now += 20000; return delegated(next.url, next.url === operator ? source.bookingUrl : undefined); });
+    deps.readDelegatedDocument.mockImplementation(async (_s, grant) => { const next = consumeDelegatedGet(grant); now += 35000; return delegated(next.url, next.url === operator ? source.bookingUrl : undefined); });
     const token = await readTeeItUpDelegatedBookingChain(source, deps);
     expect(roots).toHaveLength(2); expect(roots[0]).not.toBe(roots[1]); expect(isFreshNativeOfficialIdentityPage(roots[0], source.officialUrl)).toBe(false);
     expect(currentNativeDelegatedChain(token).hops).toHaveLength(2);
@@ -325,6 +325,19 @@ describe("fresh native delegated TeeItUp source", () => {
     const copied = readers(); copied.readDelegatedDocument.mockImplementation(async (_s, grant) => { const next = consumeDelegatedGet(grant); return structuredClone(delegated(next.url, source.bookingUrl)); });
     await expect(readTeeItUpDelegatedBookingChain(source, copied)).rejects.toThrow();
   });
+  it("uses provider locality only behind a verified full-address native booking chain", async () => {
+    const chain = currentNativeDelegatedChain(await readTeeItUpDelegatedBookingChain(source, readers()));
+    const rows = [{ ...directory[0], address: "Example, NY 12345, US" }];
+    const proof = bindDelegatedFacility(source, chain, rows);
+    expect(proof.canonicalAddress).toBe(source.venueAddress);
+    expect(proof.providerAddress).toBe(rows[0].address);
+    for (const changed of [{ address: "Other, NY 12345, US" }, { address: "Example, NJ 12345, US" },
+      { address: "Example, NY 54321, US" }, { address: "11 Harbor Drive, Example, NY 12345, US" },
+      { address: "Example, NY 12345, Canada" }, { name: "Other Golf Course" }, { timeZone: "America/Chicago" }, { isSimulator: true }]) {
+      expect(() => bindDelegatedFacility(source, chain, [{ ...rows[0], ...changed }])).toThrow("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
+    }
+    expect(() => bindDelegatedFacility(source, chain, [rows[0], { ...rows[0], id: 72, courseId: "other" }])).toThrow();
+  });
   it.each(["street", "postal", "name", "timezone", "duplicate"])("delegation never excuses a provider identity discrepancy: %s", async change => {
     const chain = currentNativeDelegatedChain(await readTeeItUpDelegatedBookingChain(source, readers())), rows = structuredClone(directory);
     if (change === "street") rows[0].address = rows[0].address.replace("10 Harbor", "11 Harbor");
@@ -333,6 +346,27 @@ describe("fresh native delegated TeeItUp source", () => {
     if (change === "timezone") rows[0].timeZone = "America/Chicago";
     if (change === "duplicate") rows.push({ ...rows[0], id: 72, courseId: "provider-72" });
     expect(() => bindDelegatedFacility(source, chain, rows)).toThrow("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
+  });
+  it("finishes native source verification before starting the provider HTTP timeout", async () => {
+    const deps = readers(), events: string[] = [];
+    const fetcher = vi.fn<typeof fetch>(async value => { events.push("API"); return Response.json(String(value).includes("facilities") ? directory : [{ courseId: "provider-71", teetimes: [] }]); });
+    const lease = async <T>(_family: string, work: () => Promise<T>) => ({ acquired: true as const, value: await work() });
+    const inspected = await inspectExistingAdapter(source, { ...deps, fetch: fetcher, venueMatches: (a, b) => a === b, requestLease: lease });
+    const recipe = parseAccessRecipe({ schemaVersion: 1, engine: "EXISTING_ADAPTER", target: { courseId: "course", kind: "OUTDOOR" },
+      source: { ...source, providerFamily: "TEEITUP" }, adapter: inspected.adapter });
+    events.length = 0;
+    deps.readNativeOfficialPage.mockImplementation(async () => { events.push("ROOT"); return root(); });
+    deps.readDelegatedDocument.mockImplementation(async (_s, grant) => { const next = consumeDelegatedGet(grant); events.push("CHILD"); return delegated(next.url, next.url === operator ? source.bookingUrl : undefined); });
+    const timeout = AbortSignal.timeout.bind(AbortSignal);
+    const timer = vi.spyOn(AbortSignal, "timeout").mockImplementation(ms => { if (ms === 15_000) events.push("HTTP_TIMEOUT"); return timeout(ms); });
+    try {
+      const result = await executeExistingAdapterRecipe(recipe as never, { date: "2030-10-24", players: 2, startTime: "08:00", endTime: "18:00", timeZone: source.timeZone },
+        { ...deps, recipeHash: "a".repeat(64), fetch: fetcher, requestLease: lease, venueMatches: (a, b) => a === b, toInstant: value => new Date(String(value)) });
+      expect(result.complete).toBe(true);
+      expect(events.slice(0, 3)).toEqual(["ROOT", "CHILD", "CHILD"]);
+      expect(events.indexOf("HTTP_TIMEOUT")).toBeGreaterThan(2);
+      expect(events.indexOf("API")).toBeGreaterThan(events.indexOf("HTTP_TIMEOUT"));
+    } finally { timer.mockRestore(); }
   });
   it("keeps warm witnesses semantic across unrelated nonce changes, while rebuilding both native hops for two independent inputs", async () => {
     const deps = readers();

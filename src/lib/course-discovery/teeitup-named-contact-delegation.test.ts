@@ -61,7 +61,7 @@ describe("named canonical contact with independently native delegated booking ed
   it.each(["copied", "stale", "missingEdge"])("rejects %s current root before delegated reads", async which => {
     let now = Date.now(); vi.spyOn(Date,"now").mockImplementation(() => now);
     const d = deps(), p = root();
-    if (which === "stale") now += 31000;
+    if (which === "stale") now += 61000;
     if (which === "missingEdge") { p.html=p.html.replace('href="'+entry+'"','href="https://ordinary.example/other/"'); }
     d.readDelegatedRoot.mockResolvedValue(which === "copied" ? structuredClone(p) : p);
     await expect(readTeeItUpDelegatedBookingChain(source,d)).rejects.toThrow();
@@ -71,7 +71,8 @@ describe("named canonical contact with independently native delegated booking ed
     let now=Date.now(); vi.spyOn(Date,"now").mockImplementation(() => now);
     const d=deps(), original=d.readDelegatedDocument.getMockImplementation()!;
     d.readDelegatedRoot.mockResolvedValueOnce(root()).mockImplementation(async () => root("https://ordinary.example/other/"));
-    d.readDelegatedDocument.mockImplementation(async (...args) => { const p=await original(...args); now+=16000; return p; });
+    let reads = 0;
+    d.readDelegatedDocument.mockImplementation(async (...args) => { const p=await original(...args); now += ++reads === 1 ? 16000 : 46000; return p; });
     await expect(readTeeItUpDelegatedBookingChain(source,d)).rejects.toThrow();
     expect(d.readDelegatedRoot).toHaveBeenCalledTimes(2);
   });

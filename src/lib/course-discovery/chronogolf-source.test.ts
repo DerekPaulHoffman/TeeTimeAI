@@ -142,6 +142,27 @@ describe("fresh exact profile identity and complete UUID catalog", () => {
     expect(() => parseChronogolfProfile('<script id="__NEXT_DATA__" type="application/json">sideEffect()</script>', source.bookingUrl, source)).toThrow();
   });
 });
+describe("complete street spelling corroborated by the canonical public phone", () => {
+  const identity = { ...source, venueAddress: "100 Theatre Drive, Example City, WA 98275, USA" };
+  const trusted = { canonicalCoursePhone: "+14255550100" };
+  const published = () => ({ ...club(), address: "100 Theater Dr", phone: "(425) 555-0100" });
+  it("accepts only the complete Theatre/Theater spelling with matching host and phone", () => {
+    const result = parseChronogolfProfile(html(published()), source.bookingUrl, identity, undefined, trusted);
+    expect(result).toMatchObject({ family: "CHRONOGOLF", clubId: club().id });
+    expect(identity.venueAddress).toBe("100 Theatre Drive, Example City, WA 98275, USA");
+    const reverse = { ...identity, venueAddress: "100 Theater Drive, Example City, WA 98275, USA" };
+    expect(parseChronogolfProfile(html({ ...published(), address: "100 Theatre Dr" }), source.bookingUrl, reverse, undefined, trusted)).toMatchObject({ clubId: club().id });
+  });
+  it.each([{ address: "101 Theater Dr" }, { address: "100 Theater Road" }, { address: "100 Theatrical Dr" },
+    { city: "Other City" }, { postcode: "98276" }, { phone: "(425) 555-0101" }, { phone: undefined },
+    { website: "https://unrelated.example.org/" }])("rejects every other identity change %j", change => {
+    expect(() => parseChronogolfProfile(html({ ...published(), ...change }), source.bookingUrl, identity, undefined, trusted)).toThrow("ADAPTER_IDENTITY_MISMATCH");
+  });
+  it("requires the independently supplied canonical phone", () => {
+    expect(() => parseChronogolfProfile(html(published()), source.bookingUrl, identity)).toThrow("ADAPTER_IDENTITY_MISMATCH");
+    expect(() => parseChronogolfProfile(html(published()), source.bookingUrl, identity, undefined, { canonicalCoursePhone: "+14255550101" })).toThrow("ADAPTER_IDENTITY_MISMATCH");
+  });
+});
 describe("canonical US postal serialization and exact public business suffix", () => {
   const identity = { ...source, venueName: "Exampleton", venueAddress: "100 Fairway Blvd, Example City, MA 01234, USA", timeZone: "America/New_York" };
   const trusted = { canonicalCoursePhone: "+14135550100" };

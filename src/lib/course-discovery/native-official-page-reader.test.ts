@@ -20,6 +20,21 @@ function fixture(change: Partial<DiscoveryBrowserSnapshot> = {}) {
   return { execute, readOfficialIdentityPage, close, createSession };
 }
 describe("fixed native official source reader", () => {
+  it.each([35_000, 120_000])("starts captured identity freshness after acquisition while respecting the original %ims deadline", async remaining => {
+    const start = Date.now(); let clock = start;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+    const mocked = fixture();
+    const capture = mocked.readOfficialIdentityPage.getMockImplementation()!;
+    mocked.readOfficialIdentityPage.mockImplementation(async () => { clock = start + 28_000; return capture(); });
+    try {
+      const page = await readNativeOfficialIdentityPage(source, source.officialUrl, new Date(start + remaining), mocked);
+      clock = start + 31_000;
+      expect(isFreshNativeOfficialIdentityPage(page, source.officialUrl)).toBe(true);
+      clock = start + Math.min(remaining, 88_000) + 1;
+      expect(isFreshNativeOfficialIdentityPage(page, source.officialUrl)).toBe(false);
+      expect(mocked.close).toHaveBeenCalledOnce();
+    } finally { now.mockRestore(); }
+  });
   it("passes only a closed fresh root's exact Contact page to the private native session", async () => {
     const contact = "https://example.org/contact/";
     const root = registerFreshNativeOfficialIdentityPage({ url: source.officialUrl,
@@ -70,7 +85,7 @@ describe("fixed native official source reader", () => {
     let now=Date.parse("2026-10-24T02:00:00Z");const clock=vi.spyOn(Date,"now").mockImplementation(()=>now);
     try{
       const session=fixture(),page=await session.readOfficialIdentityPage();session.readOfficialIdentityPage.mockResolvedValueOnce(page);
-      session.close.mockImplementationOnce(async()=>{now+=30_001;});
+      session.close.mockImplementationOnce(async()=>{now+=60_001;});
       const result=await readNativeOfficialIdentityPage(source,source.officialUrl,new Date(now+120_000),session);
       expect(result).toBe(page);expect(isFreshNativeOfficialIdentityPage(result,source.officialUrl)).toBe(false);
       const d=getNativeOfficialIdentityPageDiagnostic(result,source.officialUrl);
