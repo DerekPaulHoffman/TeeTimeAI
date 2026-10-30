@@ -73,7 +73,7 @@ describe("course discovery client authority", () => {
     const client = createCourseDiscoveryClient({ baseUrl: "http://127.0.0.1:3000", deviceToken: "long-device-token", browserTransport: "NATIVE_CHROME" });
     expect(client.helperEnvironment("discovery", job())).toMatchObject({ COURSE_DISCOVERY_BROWSER_TRANSPORT: "NATIVE_CHROME" });
     expect(() => createCourseDiscoveryClient({ baseUrl: "http://127.0.0.1:3000", deviceToken: "long-device-token", browserTransport: "untrusted" })).toThrow("INVALID_DISCOVERY_BROWSER_TRANSPORT");
-    expect(discoveryProcessEnvironment(client.helperEnvironment("discovery", job()))).toEqual({});
+    expect(discoveryProcessEnvironment(client.helperEnvironment("discovery", job()))).toEqual({ TSX_DISABLE_CACHE: "1" });
   });
 });
 
@@ -727,7 +727,7 @@ describe("controller-only verification", () => {
   it("removes model execution capabilities and product secrets", () => {
     const restricted = restrictedModelCatalog({ models: [{ slug: "gpt-6.1-sol", apply_patch_tool_type: "freeform", shell_type: "unified_exec", experimental_supported_tools: ["clock"] }] });
     expect(restricted.models[0]).toMatchObject({ apply_patch_tool_type: null, shell_type: "disabled", experimental_supported_tools: [], supports_search_tool: false });
-    expect(discoveryProcessEnvironment({ PATH: "bin", LOCAL_READER_DEVICE_TOKEN: "private", DATABASE_URL: "private", RESEND_API_KEY: "private", AUTOMATION_API_KEY: "private" })).toEqual({ PATH: "bin" });
+    expect(discoveryProcessEnvironment({ PATH: "bin", TSX_DISABLE_CACHE: "", LOCAL_READER_DEVICE_TOKEN: "private", DATABASE_URL: "private", RESEND_API_KEY: "private", AUTOMATION_API_KEY: "private" })).toEqual({ PATH: "bin", TSX_DISABLE_CACHE: "1" });
   });
 
   it("pins one restricted catalog before three workers even if the shared cache is replaced", async () => {

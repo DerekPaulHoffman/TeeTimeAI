@@ -1235,7 +1235,9 @@ export async function cleanupDiscoveryDirectory(temporary, { remove = rmSync, pa
 }
 
 export function discoveryProcessEnvironment(environment = process.env) {
-  const result = {};
+  // Helper execution must use this release's source, independent of shared
+  // TypeScript transform caches left by other worktrees or older processes.
+  const result = { TSX_DISABLE_CACHE: "1" };
   for (const key of ["PATH", "Path", "SystemRoot", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP", "TMPDIR", "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "LANG", "LC_ALL", "TZ", "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR"]) {
     if (typeof environment[key] === "string") result[key] = environment[key];
   }
