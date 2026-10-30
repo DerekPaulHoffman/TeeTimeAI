@@ -48,6 +48,42 @@ async function execute(recipe: ExistingAdapterRecipe, hash: string, helper: Retu
     toInstant: recipeTimeToInstant, now: () => new Date("2030-05-16T00:00:00Z") });
 }
 describe("modern public Teesnap saved methods", () => {
+  it("replays an externally linked tenant through fresh bounded source reads and stops when that source changes", async () => {
+    const linked = { ...source, officialUrl: "https://www.cedar-fixture.example/" }, canonical = "https://cedar-fixture.example/";
+    let destination = linked.bookingUrl;
+    const property = { ...modernProperty(), data: { ...modernProperty().data, back_url: canonical as string | undefined } };
+    const base = session(property);
+    const fetch = vi.fn<typeof globalThis.fetch>(async (value, init) => {
+      const url = String(value);
+      expect(init).toMatchObject({ method: "GET", credentials: "omit", redirect: "manual" });
+      if (url === linked.officialUrl) return new Response(null, { status: 308, headers: { location: canonical } });
+      if (url === canonical) return new Response(`<title>${source.venueName}</title><a href="${destination}">Book</a>`, { headers: { "content-type": "text/html" } });
+      if (url === source.bookingUrl) return new Response('<title>Public booking</title><div id="app"></div>', { headers: { "content-type": "text/html" } });
+      return base.fetch(value, init);
+    });
+    const deps = { ...base, fetch, venueMatches: venueProofMatches };
+    const { adapter } = await inspectExistingAdapter(linked, deps);
+    const recipe = parseAccessRecipe({ schemaVersion: 1, engine: "EXISTING_ADAPTER", target: { courseId: "synthetic-linked", kind: "OUTDOOR" }, source: linked, adapter }) as ExistingAdapterRecipe;
+    const hash = hashAccessRecipe(recipe);
+    for (const request of [input(), input("2030-05-18", 3)]) {
+      fetch.mockClear();
+      const result = await executeExistingAdapterRecipe(recipe, request, { ...deps, recipeHash: hash, toInstant: recipeTimeToInstant, now: () => new Date("2030-05-16T00:00:00Z") });
+      expect(result).toMatchObject({ status: "AVAILABLE", complete: true, evidence: { recipeHash: hash, venueVerified: true, completeVerified: true } });
+      expect(fetch.mock.calls.map(([url]) => String(url)).slice(0, 4)).toEqual([linked.officialUrl, canonical, linked.bookingUrl, "https://cedar-fixture.api.teesnap.net/api/bookingsite/property"]);
+      expect(fetch).toHaveBeenCalledTimes(5); expect(hashAccessRecipe(recipe)).toBe(hash);
+    }
+    for (const backlink of [undefined, "https://other.example/", canonical + "?session=fixture"]) {
+      property.data.back_url = backlink; fetch.mockClear();
+      const incomplete = await executeExistingAdapterRecipe(recipe, input(), { ...deps, recipeHash: hash, toInstant: recipeTimeToInstant, now: () => new Date("2030-05-16T00:00:00Z") });
+      expect(incomplete).toMatchObject({ status: "INCOMPLETE", complete: false, slots: [] });
+      expect(fetch).toHaveBeenCalledTimes(4);
+    }
+    property.data.back_url = canonical;
+    destination = "https://other-fixture.teesnap.net/"; fetch.mockClear();
+    const changed = await executeExistingAdapterRecipe(recipe, input(), { ...deps, recipeHash: hash, toInstant: recipeTimeToInstant, now: () => new Date("2030-05-16T00:00:00Z") });
+    expect(changed).toMatchObject({ status: "INCOMPLETE", complete: false, slots: [] });
+    expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([linked.officialUrl, canonical]);
+  });
   it("learns once then reuses fresh property and complete inventory for changed dates and players", async () => {
     const { recipe, hash } = await saved();
     for (const request of [input(), input("2030-05-18", 3)]) {

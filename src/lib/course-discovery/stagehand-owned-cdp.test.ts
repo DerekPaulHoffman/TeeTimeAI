@@ -14,6 +14,25 @@ vi.mock("ws", () => ({ default: FakeSocket }));
 const endpoint = "ws://127.0.0.1:12345/devtools/browser/" + "a".repeat(32);
 afterEach(() => vi.unstubAllGlobals());
 describe("owned CDP first-failure diagnostics", () => {
+  it("keeps a retired target cleanup rejection local while another guarded target remains usable", async () => {
+    const cdp = await connectOwnedSourceCdp(endpoint, new AbortController().signal);
+    const cleanup = cdp.session("retired").detach();
+    FakeSocket.last.receive({ id: 1, error: { code: -32602, message: "No session with given id" } });
+    await expect(cleanup).rejects.toThrow("OWNED_STAGEHAND_CDP_UNAVAILABLE");
+    expect(cdp.failureDiagnostic()).toBeUndefined();
+    const active = cdp.session("active").send("Page.enable");
+    FakeSocket.last.receive({ id: 2, result: {} });
+    await expect(active).resolves.toEqual({});
+    const rawDetach = cdp.root.send("Target.detachFromTarget", { sessionId: "other" });
+    FakeSocket.last.receive({ id: 3, error: { code: -32602, message: "PRIVATE" } });
+    await expect(rawDetach).rejects.toThrow("OWNED_STAGEHAND_CDP_UNAVAILABLE");
+    expect(cdp.failureDiagnostic()).toMatchObject({ layer: "RPC", method: "Target.detachFromTarget", rpcCode: -32602 });
+    const laterCleanup = cdp.session("retired").detach();
+    FakeSocket.last.receive({ id: 4, error: { code: -32602, message: "PRIVATE" } });
+    await expect(laterCleanup).rejects.toThrow("OWNED_STAGEHAND_CDP_UNAVAILABLE");
+    expect(cdp.failureDiagnostic()).toMatchObject({ layer: "RPC", method: "Target.detachFromTarget", rpcCode: -32602 });
+    cdp.close();
+  });
   it("keeps an exact invalidated image-abort RPC recoverable only by its owning session and request", async () => {
     vi.stubGlobal("WebSocket", FakeSocket);
     const cdp = await connectOwnedSourceCdp(endpoint, new AbortController().signal);

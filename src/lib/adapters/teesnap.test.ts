@@ -210,6 +210,7 @@ describe("strict learned Teesnap evidence", () => {
   type Day = ReturnType<typeof day>;
   const read = (payload: unknown) => vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(payload));
 
+
   it("uses only the injected public reader and retains max-free section semantics", async () => {
     const fetch = read(day());
     const result = await fetchTeesnapTeeSheet(input(), fetch);
@@ -291,6 +292,42 @@ describe("modern signed-out Teesnap public day", () => {
   const day = () => ({ teeTimes: { bookings: [{ bookingId: 11, golfers: [1, 2] }, { bookingId: 12, golfers: [3] }],
     golfers: [{ id: 1 }, { id: 2 }, { id: 3 }], teeSheetPriceOverrides: [] as unknown[], teeTimes: [row(30, [11])] } });
   const read = (payload: unknown) => vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(payload));
+
+  function publicPaymentRule() {
+    return { id: 77, roundTypes: [], channel: "BOOKING_SITE", requiresPrepayment: true, startDate: "2030-06-01", endDate: "2030-06-30",
+      startTime: "05:30", endTime: "19:51", daysOfWeek: ["WEDNESDAY"], taxInclusive: false, restrictByProfile: false, profileIds: [] };
+  }
+  function publicPaymentDay() {
+    const value = day(); value.teeTimes.teeSheetPriceOverrides.push(publicPaymentRule());
+    Object.assign(value.teeTimes.teeTimes[0], { teeSheetPriceOverrideId: 77, teeSheetPriceOverride: { id: 77 } });
+    return value;
+  }
+  it.each([false, true])("keeps public times and published prices when the only override is public prepayment=%s", async requiresPrepayment => {
+    const value = publicPaymentDay();
+    Object.assign(value.teeTimes.teeSheetPriceOverrides[0] as object, { requiresPrepayment, createdBy: { name: "unneeded-private-field" } });
+    const result = await fetchTeesnapTeeSheet(input(), read(value));
+    expect(result).toMatchObject({ targetDateStatus: "OPEN", slots: [{ availableSpots: 2, priceCents: 4800, holes: 18 }] });
+    expect(JSON.stringify(result)).not.toMatch(/unneeded-private-field|createdBy|requiresPrepayment/u);
+  });
+  it.each(["profile restriction", "profile IDs", "price override", "member channel", "unknown rule", "wrong date", "wrong weekday", "wrong clock", "tax conflict", "malformed price", "missing slot reference", "foreign slot reference", "duplicate rule", "overlapping rule"])(
+    "does not claim a complete public day for an unverified booking override: %s", async mode => {
+      const value = publicPaymentDay(), rule = value.teeTimes.teeSheetPriceOverrides[0] as Record<string, unknown>, slot = value.teeTimes.teeTimes[0] as Record<string, unknown>;
+      if (mode === "profile restriction") rule.restrictByProfile = true;
+      if (mode === "profile IDs") rule.profileIds = [91];
+      if (mode === "price override") rule.roundTypes = [{ roundType: "EIGHTEEN_HOLE", price: "25.00" }];
+      if (mode === "member channel") rule.channel = "MEMBER";
+      if (mode === "unknown rule") rule.memberOnly = true;
+      if (mode === "wrong date") rule.startDate = "2030-06-13";
+      if (mode === "wrong weekday") rule.daysOfWeek = ["THURSDAY"];
+      if (mode === "wrong clock") rule.endTime = "11:00";
+      if (mode === "tax conflict") rule.taxInclusive = true;
+      if (mode === "malformed price") slot.prices = [null];
+      if (mode === "missing slot reference") { delete slot.teeSheetPriceOverrideId; delete slot.teeSheetPriceOverride; }
+      if (mode === "foreign slot reference") slot.teeSheetPriceOverride = { id: 78 };
+      if (mode === "duplicate rule") value.teeTimes.teeSheetPriceOverrides.push({ ...rule });
+      if (mode === "overlapping rule") value.teeTimes.teeSheetPriceOverrides.push({ ...rule, id: 78 });
+      await expect(fetchTeesnapTeeSheet(input(), read(value))).rejects.toThrow(TEESNAP_PUBLIC_EVIDENCE_INCOMPLETE);
+    });
 
   it("recognizes only the explicit supported API version", () => {
     expect(isTeesnapMetadata(input().metadata)).toBe(true);

@@ -1644,14 +1644,14 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       expect(snapshot.pendingRequestCount).toBe(0);
     } finally { await session.close(); }
   }, 20_000);
-  it.each(["head", "body"])("waits for a parser-blocking public %s script before reading the rendered body", async position => {
+  it.each([{ position: "head", delay: 14_000 }, { position: "body", delay: 14_000 }, { position: "head", delay: 31_000 }])("waits for a parser-blocking public $position script for $delay ms before reading the rendered body", async ({ position, delay }) => {
     const script = '<script src="/assets/boot.js"></script>';
     const fixture = `<!doctype html><html><head>${position === "head" ? script : ""}</head><body>${position === "body" ? script : ""}<h1>Public golf</h1><a href="/times">Book a tee time</a></body></html>`;
     let documentReads = 0;
-    const session = await createCourseDiscoveryBrowserSession({ deadlineAt: new Date(Date.now() + 25_000), initialUrls: ["https://example.org/"] }, {
+    const session = await createCourseDiscoveryBrowserSession({ deadlineAt: new Date(Date.now() + Math.max(25_000, delay + 10_000)), initialUrls: ["https://example.org/"] }, {
       fetch: (async value => {
         if (String(value).endsWith("/assets/boot.js")) {
-          await new Promise(resolve => setTimeout(resolve, 14_000));
+          await new Promise(resolve => setTimeout(resolve, delay));
           return new Response("/* public bootstrap ready */", { headers: { "content-type": "application/javascript" } });
         }
         documentReads++;
@@ -1666,7 +1666,7 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       expect(snapshot.controls).toContainEqual(expect.objectContaining({ name: "Book a tee time", kind: "link" }));
       expect(documentReads).toBe(1);
     } finally { await session.close(); }
-  }, 30_000);
+  }, 50_000);
   it("waits for initial delayed public content without a manual observe or reload", async () => {
     const fixture = '<!doctype html><html><body><a href="#">×</a><script>fetch("/api/content").then(r=>r.json()).then(()=>{document.body.innerHTML="<h1>Public golf</h1><a href=\'/times\'>Book a tee time</a>";});</script></body></html>';
     const session = await createCourseDiscoveryBrowserSession({ deadlineAt: new Date(Date.now() + 20_000), initialUrls: ["https://example.org/"] }, {

@@ -1,6 +1,6 @@
 import { fetchForeupTeeSheet } from "@/lib/adapters/foreup";
 import { fetchTeesnapTeeSheet, TEESNAP_PUBLIC_USER_AGENT } from "@/lib/adapters/teesnap";
-import { inspectTeesnapConfiguration, parseTeesnapRecipeSource, revalidateTeesnapConfiguration } from "./teesnap-source";
+import { inspectTeesnapConfiguration, parseTeesnapRecipeSource, revalidateTeesnapConfiguration, isTeesnapExternalOfficialReadUrl } from "./teesnap-source";
 import { uscheduleReadGate } from "@/lib/simulators/providers/uschedule-read-diagnostic";
 import { fetchTeeItUpTeeSheet } from "@/lib/adapters/teeitup";
 import { createAddressPinnedPublicFetchTransport } from "@/lib/automation/address-pinned-public-fetch";
@@ -236,6 +236,7 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
     if (family === "ACUITY" && acuityContactProof && url.href === acuityEntryNext && url.origin === booking.origin &&
         !url.search && !url.hash && ["/", "/schedule.php"].includes(url.pathname)) return url;
     if (family === "TEESNAP" && url.href === teesnapPropertyUrl) return url;
+    if (family === "TEESNAP" && source.officialUrl && isTeesnapExternalOfficialReadUrl(source.officialUrl, url.href)) return url;
     const modernTeesnap = adapter?.family === "TEESNAP" && adapter.publicApiVersion === "BOOKINGSITE_V1";
     if (family === "TEESNAP" && adapter?.family === "TEESNAP" && input && url.origin === (modernTeesnap ? teesnapApiOrigin : booking.origin) &&
         url.pathname === (modernTeesnap ? "/api/bookingsite/teetimes-day" : "/customer-api/teetimes-day") &&
@@ -283,7 +284,7 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
         ["authorization", "proxy-authorization", "cookie", "x-api-key"].some(key => headers.has(key))) fail("UNSAFE_ADAPTER_REQUEST");
     const url = parseUrl(raw);
     if (family === "TEESNAP") {
-      headers.set("accept", url.href === booking.href ? "text/html" : "application/json, text/plain, */*");
+      headers.set("accept", url.href === booking.href || source.officialUrl && isTeesnapExternalOfficialReadUrl(source.officialUrl, url.href) ? "text/html" : "application/json, text/plain, */*");
       headers.set("user-agent", TEESNAP_PUBLIC_USER_AGENT);
       if (url.href !== booking.href) headers.set("referer", booking.href);
     }
@@ -309,6 +310,13 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
         responseRedirected: response.redirected, responseUrlMatches: response.url ? response.url === url.href : null };
       if (response.status === 429) failHttp("PROVIDER_THROTTLED", response.status);
       if ([401, 403].includes(response.status)) failHttp("ACCESS_REQUIRED", response.status);
+      if (family === "TEESNAP" && source.officialUrl && isTeesnapExternalOfficialReadUrl(source.officialUrl, url.href) &&
+          [301, 302, 303, 307, 308].includes(response.status)) {
+        const location = response.headers.get("location"), next = location ? new URL(location, url).href : undefined;
+        if (response.redirected || !next || !isTeesnapExternalOfficialReadUrl(source.officialUrl, next)) fail("TEESNAP_OFFICIAL_SOURCE_UNVERIFIED");
+        await response.body?.cancel();
+        return new Response(null, { status: response.status, headers: { location: next } });
+      }
       if (family === "ACUITY" && acuityContactProof && url.href === acuityEntryNext && url.href !== booking.href) {
         const location = response.headers.get("location");
         const next = location ? new URL(location, url) : undefined;

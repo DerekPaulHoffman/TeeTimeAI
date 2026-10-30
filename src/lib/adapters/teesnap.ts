@@ -225,14 +225,41 @@ function record(value: unknown): value is Record<string, unknown> {
 function positiveId(value: unknown): value is number { return Number.isSafeInteger(value) && Number(value) > 0; }
 
 /** Validate every row before any legacy normalization can skip an invalid entry. */
+type PublicBookingOverride = { id: number; startDate: string; endDate: string; startTime: string; endTime: string; daysOfWeek: string[]; taxInclusive: boolean };
+const weekDays = ["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"];
+function publicBookingOverrides(value: unknown) {
+  if (!Array.isArray(value) || value.length > 500) incomplete();
+  const rules = new Map<number, PublicBookingOverride>();
+  const keys = new Set(["id", "roundTypes", "channel", "requiresPrepayment", "startDate", "endDate", "startTime", "endTime", "daysOfWeek", "taxInclusive", "restrictByProfile", "profileIds", "createdOn", "createdBy"]);
+  const localDate = (v: unknown): v is string => typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/u.test(v) &&
+    Number.isFinite(Date.parse(v + "T00:00:00Z")) && new Date(v + "T00:00:00Z").toISOString().slice(0, 10) === v;
+  const clock = (v: unknown): v is string => typeof v === "string" && /^(?:[01]\d|2[0-3]):[0-5]\d$/u.test(v);
+  for (const row of value) {
+    // Empty roundTypes leave published slot prices authoritative. Public
+    // prepayment settings affect the later booking, not golfer eligibility.
+    // Profile restrictions, price transformations and unknown rules stay closed.
+    if (!record(row) || Object.keys(row).some(key => !keys.has(key)) || !positiveId(row.id) || rules.has(row.id) ||
+        row.channel !== "BOOKING_SITE" || row.restrictByProfile !== false || !Array.isArray(row.profileIds) || row.profileIds.length ||
+        !Array.isArray(row.roundTypes) || row.roundTypes.length || typeof row.requiresPrepayment !== "boolean" ||
+        typeof row.taxInclusive !== "boolean" || !localDate(row.startDate) || !localDate(row.endDate) || row.startDate > row.endDate ||
+        !clock(row.startTime) || !clock(row.endTime) || row.startTime > row.endTime ||
+        !Array.isArray(row.daysOfWeek) || !row.daysOfWeek.length || row.daysOfWeek.length > 7 ||
+        new Set(row.daysOfWeek).size !== row.daysOfWeek.length || row.daysOfWeek.some(day => typeof day !== "string" || !weekDays.includes(day))) incomplete();
+    rules.set(row.id, { id: row.id, startDate: row.startDate, endDate: row.endDate, startTime: row.startTime, endTime: row.endTime,
+      daysOfWeek: row.daysOfWeek as string[], taxInclusive: row.taxInclusive });
+  }
+  return rules;
+}
 function strictPublicDay(value: unknown, date: Date, modern = false): TeesnapResponse {
   if (!record(value) || value.errors !== undefined && value.errors !== "" || !record(value.teeTimes)) incomplete();
   const day = value.teeTimes;
   const globalGolfers = new Set<number>();
+  let overrides = new Map<number, PublicBookingOverride>();
   if (modern) {
     if (Object.keys(value).length !== 1 || Object.keys(day).sort().join(",") !== "bookings,golfers,teeSheetPriceOverrides,teeTimes" ||
         !Array.isArray(day.golfers) || day.golfers.length > 8_000 ||
-        !Array.isArray(day.teeSheetPriceOverrides) || day.teeSheetPriceOverrides.length !== 0) incomplete();
+        !Array.isArray(day.teeSheetPriceOverrides)) incomplete();
+    overrides = publicBookingOverrides(day.teeSheetPriceOverrides);
     // Only IDs are consumed. Personal roster fields never enter normalized evidence.
     for (const golfer of day.golfers) {
       if (!record(golfer) || !positiveId(golfer.id) || globalGolfers.has(golfer.id)) incomplete();
@@ -260,6 +287,17 @@ function strictPublicDay(value: unknown, date: Date, modern = false): TeesnapRes
         modern && (typeof row.squeezeTime !== "boolean" || typeof row.shotgun !== "boolean" || !Array.isArray(row.prices)) ||
         !Array.isArray(row.teeOffSections) || row.teeOffSections.length < 1 || row.teeOffSections.length > 2) incomplete();
     starts.add(row.teeTime.slice(0, 16));
+    if (modern) {
+      const localClock = row.teeTime.slice(11, 16);
+      const applicable = [...overrides.values()].filter(rule => requestedDate >= rule.startDate && requestedDate <= rule.endDate &&
+        rule.daysOfWeek.includes(weekDays[date.getUTCDay()]) && localClock >= rule.startTime && localClock <= rule.endTime);
+      const id = row.teeSheetPriceOverrideId, reference = row.teeSheetPriceOverride;
+      if (id !== undefined && id !== null) {
+        if (!positiveId(id) || applicable.length !== 1 || applicable[0].id !== id || !record(reference) ||
+            Object.keys(reference).join(",") !== "id" || reference.id !== id ||
+            (row.prices as unknown[]).some(price => !record(price) || price.taxInclusive !== applicable[0].taxInclusive)) incomplete();
+      } else if (applicable.length || reference !== undefined && reference !== null) incomplete();
+    }
     const sections = new Set<string>();
     for (const section of row.teeOffSections) {
       if (!record(section) || typeof section.isHeld !== "boolean" ||

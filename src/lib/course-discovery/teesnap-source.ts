@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isIP } from "node:net";
 import { parse as parseJavaScript, type Node as JavaScriptNode } from "acorn";
 import { parse, type DefaultTreeAdapterMap } from "parse5";
 import { z } from "zod";
@@ -87,6 +88,35 @@ export type TeesnapIdentitySource = {
  * credentialless GET scope. This module never creates an unrestricted fetch. */
 export type TeesnapConfigurationRead = (url: string) => Promise<Response>;
 export type TeesnapVenueMatches = (expected: string, actual: string) => boolean;
+
+function externalOfficialRoot(value: string) {
+  try {
+    const u = new URL(value);
+    return u.protocol === "https:" && u.pathname === "/" && !u.search && !u.hash && !u.username && !u.password && !u.port &&
+      u.href === value && !isIP(u.hostname) && /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/iu.test(u.hostname) &&
+      u.hostname.includes(".") && !u.hostname.includes("..") &&
+      !/(?:^|\.)(?:localhost|local|internal|test|invalid|teesnap\.net)$/iu.test(u.hostname) ? u : undefined;
+  } catch { return undefined; }
+}
+/** Structural scope only. Inspection and every replay must still earn the
+ * fresh, bidirectional public link before provider data can prove anything. */
+export function isTeesnapOfficialSourceBinding(officialUrl: string, bookingUrl: string) {
+  const booking = parseTeesnapRecipeSource(bookingUrl), official = parseTeesnapRecipeSource(officialUrl);
+  return Boolean(booking && (official ? official.bookingUrl === booking.bookingUrl : externalOfficialRoot(officialUrl)));
+}
+export function isTeesnapExternalOfficialReadUrl(officialUrl: string, value: string) {
+  const official = externalOfficialRoot(officialUrl), candidate = externalOfficialRoot(value);
+  return Boolean(official && candidate && official.hostname.replace(/^www\./u, "") === candidate.hostname.replace(/^www\./u, ""));
+}
+function publishedOfficialHomeMatches(officialUrl: string, value: unknown) {
+  const official = externalOfficialRoot(officialUrl);
+  try {
+    if (!official || typeof value !== "string" || value.length > 2048) return false;
+    const u = new URL(value);
+    return ["http:", "https:"].includes(u.protocol) && !u.username && !u.password && !u.port &&
+      u.pathname === "/" && !u.search && !u.hash && u.hostname.replace(/^www\./u, "") === official.hostname.replace(/^www\./u, "");
+  } catch { return false; }
+}
 
 /** The observed public API role is derived from one exact ordinary tenant root;
  * no API host, path, profile, query or credentials are accepted from metadata. */
@@ -337,9 +367,8 @@ function publicFlags(value: Record<string, unknown>) {
     if (Object.hasOwn(value, key) && value[key] !== "public") fail();
 }
 function sourceBinding(source: TeesnapIdentitySource) {
-  const booking = parseTeesnapRecipeSource(source.bookingUrl),
-    official = parseTeesnapRecipeSource(source.officialUrl);
-  if (!booking || !official || booking.bookingUrl !== official.bookingUrl)
+  const booking = parseTeesnapRecipeSource(source.bookingUrl);
+  if (!booking || !isTeesnapOfficialSourceBinding(source.officialUrl, source.bookingUrl))
     fail("UNSUPPORTED_ADAPTER_SOURCE");
   const address = parsePublicUSBusinessAddress(source.venueAddress);
   if (
@@ -382,6 +411,7 @@ export function parseTeesnapPublicProperty(source: TeesnapIdentitySource, payloa
   const binding = sourceBinding(source), parsed = publicPropertySchema.safeParse(payload);
   if (!parsed.success) fail();
   const property = parsed.data.data;
+  if (externalOfficialRoot(source.officialUrl) && !publishedOfficialHomeMatches(source.officialUrl, property.back_url)) fail("TEESNAP_OFFICIAL_SOURCE_UNVERIFIED");
   publicFlags(property);
   const physical = parsePublicUSBusinessAddressParts({ address: property.address_street, city: property.address_city, state: property.address_region,
     postalCode: property.address_code, country: property.address_country });
@@ -417,11 +447,42 @@ function hasLegacyBootstrap(html: string): boolean {
   return /\b(?:window|globalThis|self)\s*(?:\.\s*(?:courses|property)\b|\[\s*["'](?:courses|property)["']\s*\])|\b(?:courses|property)\s*=/u.test(decoded);
 }
 async function rootDocument(source: TeesnapIdentitySource, read: TeesnapConfigurationRead) {
+  if (externalOfficialRoot(source.officialUrl)) {
+    let url = source.officialUrl;
+    const seen = new Set<string>();
+    for (;;) {
+      if (seen.has(url) || seen.size >= 3 || !isTeesnapExternalOfficialReadUrl(source.officialUrl, url)) fail("TEESNAP_OFFICIAL_SOURCE_UNVERIFIED");
+      seen.add(url);
+      const response = await read(url);
+      if (response.redirected || response.url && response.url !== url) fail("TEESNAP_OFFICIAL_SOURCE_UNVERIFIED");
+      if ([301, 302, 303, 307, 308].includes(response.status)) {
+        const location = response.headers.get("location");
+        if (!location) fail("TEESNAP_OFFICIAL_SOURCE_UNVERIFIED");
+        url = new URL(location, url).href;
+        await response.body?.cancel();
+        continue;
+      }
+      if (response.status !== 200 || !/^text\/html(?:\s*;|$)/iu.test(response.headers.get("content-type") ?? "")) fail("TEESNAP_OFFICIAL_SOURCE_UNVERIFIED");
+      const { visible } = documentNodes(await response.text());
+      const titles = visible.filter(n => n.tagName === "title");
+      const links = visible.filter(n => n.tagName === "a" && /\b(?:book|tee\s*times?|reservations?)\b/iu.test(text(n)))
+        .flatMap(n => { try { const target = parseTeesnapRecipeSource(new URL(attr(n, "href") ?? "", url).href); return target ? [target.bookingUrl] : []; } catch { return []; } });
+      if (titles.length !== 1 || fullCourseName(clean(text(titles[0])).split(/[|–—]/u)[0]) !== fullCourseName(source.venueName) ||
+          !links.length || links.some(target => target !== source.bookingUrl)) fail("TEESNAP_OFFICIAL_SOURCE_UNVERIFIED");
+      break;
+    }
+  }
   const binding = sourceBinding(source), response = await read(binding.bookingUrl);
   if (!response.ok || response.status !== 200) fail("ADAPTER_TRANSPORT_FAILED");
   if (response.redirected || response.url && response.url !== binding.bookingUrl || !/^text\/html(?:\s*;|$)/iu.test(response.headers.get("content-type") ?? "")) fail();
   const body = await response.text();
   const nodes = documentNodes(body);
+  if (externalOfficialRoot(source.officialUrl)) {
+    const homes = nodes.visible.filter(n => n.tagName === "a" && /^(?:course\s+home(?:page)?|official\s+(?:site|website)|website)$/iu.test(clean(text(n))));
+    // Modern shells publish this same backlink in the subsequently verified
+    // public property response. Legacy bootstraps must publish it here.
+    if (hasLegacyBootstrap(body) && !homes.length || homes.some(n => !publishedOfficialHomeMatches(source.officialUrl, attr(n, "href")))) fail("TEESNAP_OFFICIAL_SOURCE_UNVERIFIED");
+  }
   // A generic public SPA shell is eligible; an observed access/session wall is
   // not converted into a public-source observation by reading another role.
   const visible = clean(text(nodes.all.find(node => node.tagName === "body")!));
@@ -639,7 +700,10 @@ export async function revalidateTeesnapConfiguration(
   )
     fail("ADAPTER_CONFIGURATION_CHANGED");
   let current: TeesnapRecipeMetadata;
-  if (parsed.data.publicApiVersion === "BOOKINGSITE_V1") current = await publicProperty(source, read, venueMatches);
+  if (parsed.data.publicApiVersion === "BOOKINGSITE_V1") {
+    if (externalOfficialRoot(source.officialUrl)) await rootDocument(source, read);
+    current = await publicProperty(source, read, venueMatches);
+  }
   else {
     const html = await rootDocument(source, read);
     if (!hasLegacyBootstrap(html)) fail("ADAPTER_CONFIGURATION_CHANGED");

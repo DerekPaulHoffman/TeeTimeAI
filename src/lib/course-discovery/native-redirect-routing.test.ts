@@ -109,8 +109,8 @@ describe("native child-asset denial", () => {
   }
   const proof = (t: Awaited<ReturnType<typeof prepared>>) => t.guard.isCurrentCompletedDocumentRead(t.routes[0].request(), t.main as never,
     { frameId: "main", loaderId: "root-loader", url: root });
-  it.each(["exact terminal", "missing terminal", "late terminal", "wrong network", "finished", "wrong kind", "not canceled", "unbranded RPC", "wrong loader", "wrong frame", "other profile"] as const)(
-    "drains only an exact excluded image whose failed abort has independent terminal proof: %s", async mode => {
+  it.each((["exact terminal", "missing terminal", "late terminal", "wrong network", "finished", "wrong kind", "not canceled", "unbranded RPC", "wrong loader", "wrong frame", "other profile"] as const).flatMap(mode => (["Image", "Font"] as const).map(kind => ({ mode, kind }))))(
+    "drains only an exact excluded asset whose failed abort has independent terminal proof: $kind $mode", async ({ mode, kind }) => {
       const t = await prepared(mode === "other profile" ? null : "SOURCE_ROUTING"), url = "https://example.org/photo.jpg";
       const abortError = Error("OWNED_STAGEHAND_CDP_UNAVAILABLE"), send = t.cdp.send.getMockImplementation()!;
       const recover = vi.fn((error: unknown, id: string) => mode !== "unbranded RPC" && error === abortError && id === "decoration");
@@ -119,14 +119,14 @@ describe("native child-asset denial", () => {
         ? Promise.reject(abortError) : send(name, value));
       try {
         t.events.get("Network.requestWillBeSent")!({ requestId: "network-decoration", frameId: mode === "wrong frame" ? "child" : "main",
-          loaderId: mode === "wrong loader" ? "other-loader" : "root-loader", type: "Image", request: { url, method: "GET" } });
-        t.request("decoration", { resourceType: "Image", networkId: "network-decoration", request: { url, method: "GET", headers: {} } });
+          loaderId: mode === "wrong loader" ? "other-loader" : "root-loader", type: kind, request: { url, method: "GET" } });
+        t.request("decoration", { resourceType: kind, networkId: "network-decoration", request: { url, method: "GET", headers: {} } });
         await vi.waitFor(() => expect(t.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.failRequest" && value?.requestId === "decoration")).toBe(true));
         if (mode === "finished") t.events.get("Network.loadingFinished")!({ requestId: "network-decoration" });
         else if (mode !== "missing terminal" && mode !== "late terminal") t.events.get("Network.loadingFailed")!({ requestId: mode === "wrong network" ? "network-other" : "network-decoration",
-          type: mode === "wrong kind" ? "Script" : "Image", canceled: mode !== "not canceled", errorText: "net::ERR_ABORTED" });
+          type: mode === "wrong kind" ? "Script" : kind, canceled: mode !== "not canceled", errorText: "net::ERR_ABORTED" });
         await vi.waitFor(() => expect(t.guard.pendingReads).toBe(0), { timeout: 1000 });
-        if (mode === "late terminal") t.events.get("Network.loadingFailed")!({ requestId: "network-decoration", type: "Image", canceled: true, errorText: "net::ERR_ABORTED" });
+        if (mode === "late terminal") t.events.get("Network.loadingFailed")!({ requestId: "network-decoration", type: kind, canceled: true, errorText: "net::ERR_ABORTED" });
         if (mode === "exact terminal" || mode === "other profile") {
           expect(recover).toHaveBeenCalledOnce(); expect(t.close).not.toHaveBeenCalled(); expect(t.guard.firstFatal).toBeUndefined();
           expect(t.handler).toHaveBeenCalledOnce(); expect(proof(t)).toBe(true);

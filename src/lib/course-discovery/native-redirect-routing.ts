@@ -898,7 +898,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
       const errorKind = event.errorText === "net::ERR_ABORTED" ? "ABORTED" : event.errorText === "net::ERR_BLOCKED_BY_CLIENT" ? "BLOCKED_BY_CLIENT"
         : event.errorText === "net::ERR_TIMED_OUT" ? "TIMED_OUT" : event.errorText === "net::ERR_FAILED" ? "FAILED" : "OTHER";
       const corsError = event.corsErrorStatus?.corsError;
-      if (!sourceRecord && failedIdentity.kindKnown && failedIdentity.kind === "image" && event.type === "Image" &&
+      if (!sourceRecord && failedIdentity.kindKnown && ["image", "font"].includes(failedIdentity.kind) && resourceKinds[event.type] === failedIdentity.kind &&
           event.canceled === true && ["ABORTED", "BLOCKED_BY_CLIENT"].includes(errorKind) &&
           !finishedNetworkIdentities.has(failedIdentity) && failedIdentity.frameId === rootFrameId &&
           loaderOwners.get(failedIdentity.loaderId) === failedIdentity.generation) terminalCanceledExcludedImages.add(failedIdentity);
@@ -921,7 +921,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
     const excluded = excludedImageAborts.get(event.requestId);
     if (excluded && identity === excluded.identity && identity.revision === excluded.revision &&
         identity.generation === excluded.generation && identity.frameId === rootFrameId &&
-        loaderOwners.get(identity.loaderId) === excluded.generation && event.type === "Image" &&
+        loaderOwners.get(identity.loaderId) === excluded.generation && resourceKinds[event.type] === identity.kind &&
         event.canceled === true && ["net::ERR_ABORTED", "net::ERR_BLOCKED_BY_CLIENT"].includes(event.errorText) &&
         !excluded.finished && !excluded.responseSeen) excluded.terminal.settle();
     for (const pause of initialPauses.values()) if (pause.successorIdentity && pause.networkId === event.requestId &&
@@ -1161,9 +1161,9 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         const networkId = event.networkId;
         const excludedImage = () => {
           const identity = networkId && networkIdentities.get(networkId);
-          return event.resourceType === "Image" &&
+          return ["Image", "Font"].includes(event.resourceType) &&
           event.request.method === "GET" && event.request.hasPostData !== true && event.request.postData === undefined &&
-          typeof networkId === "string" && identity && identity.kind === "image" && identity.kindKnown &&
+          typeof networkId === "string" && identity && identity.kind === resourceKinds[event.resourceType] && identity.kindKnown &&
           identity.url === event.request.url && identity.method === "GET" && identity.frameId === rootFrameId &&
           (identity.generation === generation && !generation.retired || identity.generation.retired) && loaderOwners.get(identity.loaderId) === identity.generation &&
           (!failedNetworkIdentities.has(identity) || terminalCanceledExcludedImages.has(identity)) && !finishedNetworkIdentities.has(identity) &&

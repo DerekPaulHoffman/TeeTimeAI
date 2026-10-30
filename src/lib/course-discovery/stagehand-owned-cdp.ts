@@ -2,7 +2,7 @@
 import WebSocket from "ws";
 export type OwnedCdpEvent = Record<string, unknown>;
 type Listener = (value: OwnedCdpEvent) => unknown;
-type Pending = { method: string; sessionId?: string; requestId?: string; resolve: (value: OwnedCdpEvent) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> };
+type Pending = { method: string; sessionId?: string; requestId?: string; cleanupDetach?: true; resolve: (value: OwnedCdpEvent) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> };
 const methods = ["Extensions.loadUnpacked", "Fetch.continueRequest", "Fetch.continueResponse", "Fetch.enable", "Fetch.failRequest", "Fetch.getResponseBody",
   "Network.enable", "Page.enable", "Page.addScriptToEvaluateOnNewDocument", "Page.getFrameTree", "Page.stopLoading", "Runtime.enable", "Runtime.evaluate", "Runtime.runIfWaitingForDebugger",
   "Target.closeTarget", "Target.createTarget", "Target.detachFromTarget", "Target.getBrowserContexts", "Target.getTargets", "Target.setAutoAttach", "Target.setDiscoverTargets"] as const;
@@ -25,7 +25,7 @@ export function projectOwnedSocketError(error: unknown) {
 }
 export type OwnedCdpSession = {
   send(method: string, params?: Record<string, unknown>): Promise<OwnedCdpEvent>;
-  /** Private, one-use disposition after the router independently proves exact image-request termination. */
+  /** Private, one-use disposition after the router proves exact excluded image/font termination. */
   recoverTerminalExcludedImageAbort(error: unknown, requestId: string): boolean;
   on(method: string, listener: Listener): void;
   off(method: string, listener: Listener): void;
@@ -97,6 +97,12 @@ export async function connectOwnedSourceCdp(endpoint: string, signal: AbortSigna
       if (value.error) {
         const commandError = failure();
         const rpcCode = value.error && typeof value.error === "object" ? (value.error as { code?: unknown }).code : undefined;
+        // detach() is terminal cleanup for one retired target. Chrome can
+        // already have detached it after closeTarget; that RPC rejection must
+        // not poison unrelated guarded targets sharing this connection. The
+        // cleanup caller still receives the rejection. Raw send() calls and
+        // socket/protocol failures retain their normal fatal disposition.
+        if (item.cleanupDetach) { item.reject(commandError); return; }
         if (!firstFailure && item.method === "Fetch.failRequest" && rpcCode === -32602 && item.requestId)
           recoverable.set(commandError, { sessionId: item.sessionId, requestId: item.requestId,
             diagnostic: projectFailure("RPC", item.method, undefined, value.error) });
@@ -111,12 +117,12 @@ export async function connectOwnedSourceCdp(endpoint: string, signal: AbortSigna
       catch { remember("SYNC_LISTENER", undefined, value.method); rejectAll(); }
     }
   });
-  const send = (sessionId: string | undefined, method: string, params: Record<string, unknown> = {}) => {
+  const send = (sessionId: string | undefined, method: string, params: Record<string, unknown> = {}, cleanupDetach?: true) => {
     if (closed || signal.aborted || pending.size >= 256 || !/^[A-Za-z]+\.[A-Za-z]+$/u.test(method)) { if (!closed) remember("SEND", method); return Promise.reject(failure()); }
     const id = ++sequence;
     return new Promise<OwnedCdpEvent>((resolve, reject) => {
       const timer = setTimeout(() => { remember("TIMEOUT", method); pending.delete(id); reject(failure()); }, 15_000);
-      pending.set(id, { method, sessionId,
+      pending.set(id, { method, sessionId, ...(cleanupDetach ? { cleanupDetach } : {}),
         ...(method === "Fetch.failRequest" && typeof params.requestId === "string" && params.requestId.length > 0 && params.requestId.length <= 1024
           ? { requestId: params.requestId } : {}), resolve, reject, timer });
       try { socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) })); }
@@ -134,7 +140,7 @@ export async function connectOwnedSourceCdp(endpoint: string, signal: AbortSigna
     },
     on(method, listener) { const k = key(sessionId, method); if (!listeners.has(k)) listeners.set(k, new Set()); listeners.get(k)!.add(listener); },
     off(method, listener) { listeners.get(key(sessionId, method))?.delete(listener); },
-    async detach() { if (sessionId && !closed) await send(undefined, "Target.detachFromTarget", { sessionId }); },
+    async detach() { if (sessionId && !closed) await send(undefined, "Target.detachFromTarget", { sessionId }, true); },
   });
   return { root: session(), session, failureDiagnostic: () => {
     const diagnostic = firstFailure ?? recoverable.values().next().value?.diagnostic;

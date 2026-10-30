@@ -138,7 +138,9 @@ describe("fresh static public configuration and exact identity", () => {
         { ...source(), officialUrl: "https://cedar-fixture.example/" },
         scopedRead,
       ),
-    ).rejects.toThrow("UNSUPPORTED_ADAPTER_SOURCE");
+    ).rejects.toThrow("TEESNAP_OFFICIAL_SOURCE_UNVERIFIED");
+    expect(scopedRead).toHaveBeenCalledOnce();
+    scopedRead.mockClear();
     await expect(
       inspectTeesnapConfiguration(
         { ...source(), officialUrl: "https://other-fixture.teesnap.net/" },
@@ -146,6 +148,43 @@ describe("fresh static public configuration and exact identity", () => {
       ),
     ).rejects.toThrow("UNSUPPORTED_ADAPTER_SOURCE");
     expect(scopedRead).not.toHaveBeenCalled();
+  });
+  it("independently rechecks the official booking link and tenant homepage on each linked-site replay", async () => {
+    const linked = { ...source(), officialUrl: "https://cedar-fixture.example/" };
+    let currentLink = source().bookingUrl;
+    const official = () => `<title>Cedar Fixture Golf Club | Tee times</title><h1>Welcome to public golf</h1><a href="${currentLink}">Book a tee time</a>`;
+    const tenant = html().replace('<a href="/login">', '<a href="http://www.cedar-fixture.example/">Course Homepage</a><a href="/login">');
+    const scopedRead = vi.fn(async (url: string) => new Response(url === linked.officialUrl ? official() : tenant, { headers: { "content-type": "text/html" } }));
+    const saved = await inspectTeesnapConfiguration(linked, scopedRead);
+    expect(await revalidateTeesnapConfiguration(linked, saved, scopedRead)).toEqual(saved);
+    expect(scopedRead.mock.calls.map(([url]) => url)).toEqual([linked.officialUrl, linked.bookingUrl, linked.officialUrl, linked.bookingUrl]);
+    currentLink = "https://other-fixture.teesnap.net/";
+    await expect(revalidateTeesnapConfiguration(linked, saved, scopedRead)).rejects.toThrow("TEESNAP_OFFICIAL_SOURCE_UNVERIFIED");
+  });
+  it.each(["hidden link", "form link", "wrong title", "other tenant", "missing backlink", "hidden backlink", "foreign backlink", "foreign redirect", "redirect loop"])(
+    "does not use incomplete or conflicting official-source evidence: %s", async mode => {
+      const linked = { ...source(), officialUrl: "https://cedar-fixture.example/" };
+      const link = `<a href="${mode === "other tenant" ? "https://other-fixture.teesnap.net/" : linked.bookingUrl}">Book a tee time</a>`;
+      const official = `<title>${mode === "wrong title" ? "Other Venue" : "Cedar Fixture Golf Club"} | Home</title>` +
+        (mode === "hidden link" ? `<div hidden>${link}</div>` : mode === "form link" ? `<form>${link}</form>` : link);
+      const backlink = `<a href="${mode === "foreign backlink" ? "https://other.example/" : linked.officialUrl}">Course Homepage</a>`;
+      const tenant = html().replace('<a href="/login">', (mode === "missing backlink" ? "" : mode === "hidden backlink" ? `<div hidden>${backlink}</div>` : backlink) + '<a href="/login">');
+      const scopedRead = vi.fn(async (url: string) => {
+        if (url === linked.officialUrl && mode.includes("redirect")) return new Response(null, { status: 301, headers: { location: mode === "foreign redirect" ? "https://other.example/" : linked.officialUrl } });
+        return new Response(url === linked.officialUrl ? official : tenant, { headers: { "content-type": "text/html" } });
+      });
+      await expect(inspectTeesnapConfiguration(linked, scopedRead)).rejects.toThrow("TEESNAP_OFFICIAL_SOURCE_UNVERIFIED");
+      expect(scopedRead.mock.calls.every(([url]) => [linked.officialUrl, linked.bookingUrl].includes(url))).toBe(true);
+    });
+  it("follows only a freshly observed canonical www root redirect", async () => {
+    const linked = { ...source(), officialUrl: "https://www.cedar-fixture.example/" };
+    const canonical = "https://cedar-fixture.example/";
+    const scopedRead = vi.fn(async (url: string) => url === linked.officialUrl
+      ? new Response(null, { status: 308, headers: { location: canonical } })
+      : new Response(url === canonical ? `<title>Cedar Fixture Golf Club</title><a href="${linked.bookingUrl}">Book</a>` :
+        html().replace('<a href="/login">', `<a href="${linked.officialUrl}">Course Homepage</a><a href="/login">`), { headers: { "content-type": "text/html" } }));
+    await expect(inspectTeesnapConfiguration(linked, scopedRead)).resolves.toMatchObject({ tenant: "cedar-fixture" });
+    expect(scopedRead.mock.calls.map(([url]) => url)).toEqual([linked.officialUrl, canonical, linked.bookingUrl]);
   });
   it.each([
     { venueName: "Wrong Fixture Golf Club" },

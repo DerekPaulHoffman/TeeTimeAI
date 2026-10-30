@@ -1333,7 +1333,10 @@ export async function createCourseDiscoveryBrowserSession(input: {
     // resource reads drain. A committed response is not a rendered document.
     // Keep this wait inside the original session deadline; never substitute
     // raw response text for the rendered identity or controls.
-    bodyContentDeadlineAt ??= Math.min(Date.now() + 30_000, input.deadlineAt.getTime());
+    // Public pages can serialize many stylesheets ahead of their first head
+    // script under the provider lane. Allow that bounded parser work to drain
+    // while retaining one clock and the original, possibly shorter deadline.
+    bodyContentDeadlineAt ??= Math.min(Date.now() + 60_000, input.deadlineAt.getTime());
     await page.locator("body").waitFor({ state: "attached", timeout: Math.max(1,
       bodyContentDeadlineAt - Date.now()) });
     // A body can exist before its first parser-blocking script finishes. Its
