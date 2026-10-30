@@ -90,7 +90,8 @@ describe("CPS title, physical contact and current public entry", () => {
   it("serializes the inspected actual entry and independently refreshes the complete chain for two changed inputs", async () => {
     let rootReads = 0, entryReads = 0, closed = 0, transaction = "", active = 0;
     const apiReads: Array<{ path: string; date: string | null }> = [];
-    const deps: CpsDependencies = { trustedContext: { canonicalCoursePhone: phone }, localCapabilities: ["LOCAL_CHROME"],
+    const deps: CpsDependencies = { now: () => new Date("2026-10-29T12:00:00Z"),
+      trustedContext: { canonicalCoursePhone: phone }, localCapabilities: ["LOCAL_CHROME"],
       requestLease: async (_family, work) => { active++; try { return { acquired: true as const, value: await work() }; } finally { active--; } },
       readNativeOfficialPage: async () => { rootReads++; return fixture().root; },
       readOfficialEntry: async (identity, canonicalPhone, deadline, supplied, root) => readCpsOfficialEntry(identity, canonicalPhone, deadline, {
