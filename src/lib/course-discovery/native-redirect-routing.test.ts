@@ -3313,19 +3313,20 @@ describe("native exact request and response ownership", () => {
     } finally { await test.guard.close(); }
   });
 
-  it.each(["GET", "HEAD"])("denies only an exactly attested cross-host Script→Script %s while document/data peers finish", async method => {
-    const test = await installed(), root = "https://example.org/optional.js", target = "https://cdn.example.net/optional.js?v=public-build";
+  it.each(["Script", "Stylesheet"].flatMap(kind => ["GET", "HEAD"].map(method => ({ kind, method }))))("denies only an exactly attested cross-host $kind $method while document/data peers finish", async ({ kind, method }) => {
+    const extension = kind === "Stylesheet" ? "css" : "js";
+    const test = await installed(), root = `https://example.org/optional.${extension}`, target = `https://cdn.example.net/optional.${extension}?v=public-build`;
     try {
-      test.request("script", { resourceType: "Script", request: { url: root, method, headers: {} } });
+      test.request("script", { resourceType: kind, request: { url: root, method, headers: {} } });
       await test.routes[0].continue();
-      test.response("script", { resourceType: "Script", responseStatusCode: 307, responseHeaders: [{ name: "Location", value: target }],
+      test.response("script", { resourceType: kind, responseStatusCode: 307, responseHeaders: [{ name: "Location", value: target }],
         request: { url: root, method, headers: {} } });
       await test.routes[0].request().response();
-      test.request("denied-child", { networkId: "network-script", resourceType: "Script", redirectedRequestId: "script",
+      test.request("denied-child", { networkId: "network-script", resourceType: kind, redirectedRequestId: "script",
         request: { url: target, method, headers: {} } });
       await vi.waitFor(() => expect(test.rejections).toHaveLength(1));
-      expect(test.rejections[0]).toMatchObject({ code: "NATIVE_REDIRECT_CROSS_HOST_RESOURCE_REJECTED", resourceType: "script", method,
-        url: "https://cdn.example.net/optional.js", recordCount: 1 });
+      expect(test.rejections[0]).toMatchObject({ code: "NATIVE_REDIRECT_CROSS_HOST_RESOURCE_REJECTED", resourceType: kind.toLowerCase(), method,
+        url: `https://cdn.example.net/optional.${extension}`, recordCount: 1 });
       expect(JSON.stringify(test.rejections)).not.toContain("public-build");
       expect(JSON.stringify(test.rejections)).not.toContain("network-script");
       expect(test.routes).toHaveLength(1); expect(test.handler).toHaveBeenCalledTimes(1);
@@ -3342,19 +3343,20 @@ describe("native exact request and response ownership", () => {
     } finally { await test.guard.close(); }
   });
 
-  it.each(["wrong-target", "status-200", "missing-location", "method", "kind", "network", "missing-parent", "denied-parent", "unsafe-target"])(
-    "retains fatal provenance rejection for an invalid script redirect: %s", async failure => {
-      const test = await installed(), root = "https://example.org/optional.js", target = failure === "unsafe-target" ? "https://127.0.0.1/optional.js" : "https://cdn.example.net/optional.js";
+  it.each(["Script", "Stylesheet"].flatMap(kind => ["wrong-target", "status-200", "missing-location", "method", "kind", "network", "missing-parent", "denied-parent", "unsafe-target"].map(failure => ({ kind, failure })) ))(
+    "retains fatal provenance rejection for an invalid $kind redirect: $failure", async ({ kind, failure }) => {
+      const extension = kind === "Stylesheet" ? "css" : "js";
+      const test = await installed(), root = `https://example.org/optional.${extension}`, target = failure === "unsafe-target" ? `https://127.0.0.1/optional.${extension}` : `https://cdn.example.net/optional.${extension}`;
       try {
-        test.request("script", { resourceType: "Script", request: { url: root, method: "GET", headers: {} } });
+        test.request("script", { resourceType: kind, request: { url: root, method: "GET", headers: {} } });
         if (failure === "denied-parent") await test.routes[0].abort();
         else {
-          await test.routes[0].continue(); test.response("script", { resourceType: "Script", responseStatusCode: failure === "status-200" ? 200 : 302,
+          await test.routes[0].continue(); test.response("script", { resourceType: kind, responseStatusCode: failure === "status-200" ? 200 : 302,
             responseHeaders: failure === "missing-location" ? [] : [{ name: "Location", value: failure === "wrong-target" ? `${target}/wrong` : target }],
             request: { url: root, method: "GET", headers: {} } });
           await test.routes[0].request().response();
         }
-        test.request("child", { networkId: failure === "network" ? "wrong-network" : "network-script", resourceType: failure === "kind" ? "Document" : "Script",
+        test.request("child", { networkId: failure === "network" ? "wrong-network" : "network-script", resourceType: failure === "kind" ? "Document" : kind,
           redirectedRequestId: failure === "missing-parent" ? "missing" : "script", request: { url: target, method: failure === "method" ? "HEAD" : "GET", headers: {} } });
         await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_PROVENANCE_REJECTED"));
         expect(test.rejections).toEqual([]); expect(test.routes).toHaveLength(1); expect(test.close).toHaveBeenCalledOnce();

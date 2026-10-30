@@ -503,6 +503,17 @@ const modernRead = (payload: unknown = publicProperty(), root = spa) => vi.fn(as
 });
 
 describe("modern public property bootstrap", () => {
+  it("pins a supported cart-off read even when the public page defaults to cart-on", async () => {
+    const payload = publicProperty(), previous = parseTeesnapPublicProperty(source(), payload);
+    payload.data.courses[0].addons_default = "on";
+    const saved = await inspectTeesnapConfiguration(source(), modernRead(payload));
+    expect(saved.defaultAddons).toBe("off");
+    expect(saved.catalogHash).not.toBe(previous.catalogHash);
+    await expect(revalidateTeesnapConfiguration(source(), saved, modernRead(payload))).resolves.toEqual(saved);
+    await expect(revalidateTeesnapConfiguration(source(), saved, modernRead())).rejects.toThrow("ADAPTER_CONFIGURATION_CHANGED");
+    payload.data.courses[0].addons_array = ["off"];
+    expect(() => parseTeesnapPublicProperty(source(), payload)).toThrow("ADAPTER_CONFIGURATION_UNVERIFIED");
+  });
   it("derives only the exact tenant-bound public property role", () => {
     expect(teesnapPublicPropertyUrl(source().bookingUrl)).toBe("https://cedar-fixture.api.teesnap.net/api/bookingsite/property");
     for (const url of ["https://unrelated.example/", "https://cedar-fixture.api.teesnap.net/", source().bookingUrl + "?profileId=7"])
@@ -573,7 +584,7 @@ describe("modern public property bootstrap", () => {
   it.each([
     { players_array: [] }, { players_array: [1, 1, 2] }, { players_array: [0, 1] }, { players_array: [1, 5] },
     { players_array: ["1", "2"] }, { min_players: 2 }, { max_players: 3 }, { default_players: 5 },
-    { players_array: [1, 2, 4], default_players: 3 }, { holes_default: 9 }, { addons_default: "on" },
+    { players_array: [1, 2, 4], default_players: 3 }, { holes_default: 9 }, { addons_default: "required" },
     { holes_array: [9] }, { holes_array: [18, 18] }, { addons_array: ["on"] }, { addons_array: ["off", "off"] },
   ])("fails closed on malformed or inconsistent party/default support (%j)", change => {
     const payload = publicProperty(); Object.assign(payload.data.courses[0], change);

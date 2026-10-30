@@ -1594,12 +1594,12 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
           requestLoaderId !== undefined && requestLoaderId === parent.loaderId && requestGeneration === parent.generation &&
           networkIdentities.get(networkId)?.hasBody === false;
         if (!document && !sameHost && !sourceDataGet) {
-          // A genuine Script->Script CDN redirect still has no cross-host
+          // A genuine script/style CDN redirect still has no cross-host
           // read permission. Deny that exact browser pause without destroying
           // unrelated public documents/data. This is not a fallback for bad
           // provenance: the exact released Location, method, frame, network
           // chain, kind and depth must all already be established.
-          if (kind === "script" && parent.kind === kind && ["GET", "HEAD"].includes(parent.method) &&
+          if (["script", "stylesheet"].includes(kind) && parent.kind === kind && ["GET", "HEAD"].includes(parent.method) &&
               networkId === parent.networkId && (isSafeRecipeUrl(event.request.url) || isSafeBrowserAssetUrl(event.request.url, kind, "GET"))) {
             const diagnostic = requestDiagnostic("NATIVE_REDIRECT_CROSS_HOST_RESOURCE_REJECTED");
             await bounded(reject(), "NATIVE_REDIRECT_ABORT_TIMEOUT");

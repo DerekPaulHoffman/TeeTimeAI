@@ -120,11 +120,23 @@ function standardSidebarNotes(nodes: Element[]) {
       if (node === parent) return true;
     return false;
   };
-  const containers = nodes.filter(n => n.tagName === "div" && cls(n, "container") &&
+  const containers = nodes.filter(n => n.tagName === "div" && (cls(n, "container") || cls(n, "container-fluid")) &&
     contains(n, services[0]) && contains(n, groups[0]) && contains(n, grids[0]));
   if (containers.length !== 1) return [];
-  const sidebars = elements(containers[0]).filter(n => n.tagName === "div" && cls(n, "col-lg-4") && cls(n, "order-1") &&
+  let sidebars = elements(containers[0]).filter(n => n.tagName === "div" && cls(n, "col-lg-4") && cls(n, "order-1") &&
     n.parentNode && "tagName" in n.parentNode && cls(n.parentNode, "row"));
+  // The fluid responsive layout keeps these controls and pricing together,
+  // beside a separate dated grid and a third contact-information column.
+  if (!sidebars.length && cls(containers[0], "container-fluid") && !cls(containers[0], "container")) {
+    const rows = elements(containers[0]).filter(n => n.tagName === "div" && n.parentNode === containers[0] && cls(n, "row") && cls(n, "px-md-5"));
+    if (rows.length !== 1) return [];
+    const columns = rows[0].childNodes.filter((n): n is Element => "tagName" in n);
+    if (columns.length !== 3 || columns.some(n => n.tagName !== "div" || !cls(n, "col-xl-4")) ||
+        columns.slice(0, 2).some(n => !cls(n, "col-lg-6")) || !cls(columns[2], "col-lg-12") ||
+        [services[0], groups[0], grids[0]].some(n => contains(columns[2], n))) return [];
+    sidebars = columns.filter(n => contains(n, services[0]) && contains(n, groups[0]) && !contains(n, grids[0]));
+    if (sidebars.length !== 1 || !columns.some(n => n !== sidebars[0] && contains(n, grids[0]) && !contains(n, services[0]) && !contains(n, groups[0]))) return [];
+  }
   if (sidebars.length !== 1 || !contains(sidebars[0], services[0]) || !contains(sidebars[0], groups[0]) || contains(sidebars[0], grids[0])) return [];
   const cards = elements(sidebars[0]).filter(n => n.tagName === "div" && cls(n, "card") && cls(n, "my-3"));
   const values: string[] = [];

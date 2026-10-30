@@ -38,6 +38,21 @@ function document(date = day, people = 1, duration = 30, expanded = false) {
 }
 const headers = new Headers({ "content-type": "application/json", origin: new URL(source).origin, referer: source });
 describe("selected standard public simulator booking", () => {
+  it("reads the same public pricing witness in the fluid responsive layout", () => {
+    const html = document().replace('class="container location-2641"', 'class="container-fluid"')
+      .replace('<div class="row">', '<div class="row px-md-5">')
+      .replace('class="col-lg-4 order-1"', 'class="col-xl-4 col-lg-6"')
+      .replace('class="col-lg-4 order-3 order-lg-2"', 'class="col-xl-4 col-lg-6"')
+      .replace('</div></div></div></div><script>', '</div><div class="col-xl-4 col-lg-12"><h5>Location details</h5></div></div></div></div><script>');
+    expect(inspectUScheduleRecipeConfiguration(html, source)?.selected.serviceName).toBe("Simulator Booking");
+    expect(readUSchedulePublicPeopleControl(html)).toMatchObject({ valid: true, datedGridEligible: true, selectedPeople: 1 });
+    for (const bad of [html.replace('row px-md-5', 'row'),
+      html.replace('class="col-xl-4 col-lg-6"', 'class="col-xl-4"'), html.replace('col-lg-12', 'col-lg-6'),
+      html.replace(priceHeading, `<h3 hidden>${note}</h3>`),
+      html.replace(priceHeading, `${priceHeading}${priceHeading}`),
+      html.replace(priceHeading, `${priceHeading}<button>Reserve</button>`)])
+      expect(inspectUScheduleRecipeConfiguration(bad, source)).toBeUndefined();
+  });
   it("requires exact selected service, hourly per-simulator pricing, and valid current party control", () => {
     const html = document();
     expect(inspectUScheduleRecipeConfiguration(html, source)?.selected).toMatchObject({ serviceId: "27567", serviceName: "Simulator Booking" });

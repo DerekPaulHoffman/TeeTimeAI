@@ -115,6 +115,18 @@ incomplete. Only the exact visible provider no-times result proves an empty bay;
 missing markup never proves absence. These engineering checks do not substitute
 for cold-alert delivery and model-disabled restart acceptance.
 
+The standard USchedule simulator pricing witness supports both the original
+sidebar and the fluid responsive layout. The latter requires separate columns
+for the selected service and party controls, dated inventory, and contact
+information. The pricing card must remain in the service column, visible and
+free of controls. Duplicate, contradictory or hidden pricing never establishes
+a public per-bay rental.
+
+Modern Teesnap metadata can default to cart-on while explicitly offering the
+cart-off mode used by the reader. Both the published default and the complete
+supported-mode catalog remain pinned in the saved hash. Missing cart-off support,
+an unsupported default or a later catalog change still invalidates execution.
+
 Generic fallback stops immediately when the trusted browser reports a finite
 native transport fatality. It does not send that dead browser back to the model
 or automatically spend a second attempt on it. Each generic attempt also allows
@@ -232,6 +244,12 @@ Network ID is denied with a confirmed, bounded `Fetch.failRequest` ACK before
 any admission or data use; unrelated source DOM may remain usable. All other
 native readers retain fatal missing-ID handling. Abort failures, malformed or
 duplicate events, unknown responses and expired ownership remain fatal.
+
+An exactly attested cross-host script or stylesheet redirect is denied without
+closing unrelated documents and data requests. The parent response, Location,
+method, frame, network identity and resource kind must still match; the denied
+asset is never released or treated as availability evidence. Bad provenance or
+an unacknowledged denial remains fatal.
 
 Failure checkpoints retain closed, bounded source and fixed-inspection facts
 bound to the same job, request, source fingerprint, attempt and original clocks.

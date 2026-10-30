@@ -383,12 +383,12 @@ function sourceBinding(source: TeesnapIdentitySource) {
 }
 
 const publicCourseSchema = z.object({ id: positiveId, name: z.string().trim().min(3).max(200), property_id: positiveId,
-  enabled: z.boolean(), course_type: z.union([z.string().max(100), z.null()]), holes_default: z.literal(18), addons_default: z.literal("off"),
+  enabled: z.boolean(), course_type: z.union([z.string().max(100), z.null()]), holes_default: z.literal(18), addons_default: z.enum(["on", "off"]),
   players_array: z.array(z.number().int().min(1).max(4)).min(1).max(4).refine(values => new Set(values).size === values.length),
   holes_array: z.array(z.union([z.literal(9), z.literal(18)])).min(1).max(2).refine(values => new Set(values).size === values.length && values.includes(18)),
   addons_array: z.array(z.string().min(1).max(40)).min(1).max(8).refine(values => new Set(values).size === values.length && values.includes("off")),
   min_players: z.number().int().min(1).max(4), max_players: z.number().int().min(1).max(4), default_players: z.number().int().min(1).max(4),
-}).passthrough().refine(value => Math.min(...value.players_array) === value.min_players && Math.max(...value.players_array) === value.max_players && value.players_array.includes(value.default_players));
+}).passthrough().refine(value => value.addons_array.includes(value.addons_default) && Math.min(...value.players_array) === value.min_players && Math.max(...value.players_array) === value.max_players && value.players_array.includes(value.default_players));
 const publicPropertySchema = z.object({ success: z.literal(true), data: z.object({
   id: positiveId, name: z.string().trim().min(3).max(200), enabled: z.boolean(),
   address_street: z.string().min(1).max(500), address_city: z.string().min(1).max(80), address_region: z.string().min(1).max(40),
