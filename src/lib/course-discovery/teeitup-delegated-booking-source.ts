@@ -133,7 +133,7 @@ export function delegatedBookingHop(page: OfficialIdentityPage, requestedNext?: 
   note("hopNative", page.browserTransport === "NATIVE_CHROME" && Boolean(page.visibleEvidence));
   note("hopRawBounded", page.html.length <= 600000);
   const all = entries(page);
-  const links = all.filter(node => node.tagName === "a" && /\b(?:tee\s*times?|book|reservations?|reserve)\b/iu.test(text(node)) &&
+  const links = all.filter(node => node.tagName === "a" && /\b(?:tee\s*times?|book(?:ings?)?|reservations?|reserve)\b/iu.test(text(node)) &&
     !/\b(?:lesson|member|login|sign in|checkout|purchase|payment|confirm|account)\b/iu.test(text(node)) &&
     !/\b(?:wait[\s-]?list|alerts?|notif(?:y|ied|ies|ications?)|tournaments?|group\s+(?:outings?|events?|bookings?|reservations?))\b/iu.test(text(node))).flatMap(node => {
     try { const next = new URL(attr(node, "href") ?? "", page.url), current = new URL(page.url);

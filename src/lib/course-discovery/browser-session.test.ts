@@ -1644,8 +1644,9 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       expect(snapshot.pendingRequestCount).toBe(0);
     } finally { await session.close(); }
   }, 20_000);
-  it("waits for a parser-blocking public head script before reading the rendered body", async () => {
-    const fixture = '<!doctype html><html><head><script src="/assets/boot.js"></script></head><body><h1>Public golf</h1><a href="/times">Book a tee time</a></body></html>';
+  it.each(["head", "body"])("waits for a parser-blocking public %s script before reading the rendered body", async position => {
+    const script = '<script src="/assets/boot.js"></script>';
+    const fixture = `<!doctype html><html><head>${position === "head" ? script : ""}</head><body>${position === "body" ? script : ""}<h1>Public golf</h1><a href="/times">Book a tee time</a></body></html>`;
     let documentReads = 0;
     const session = await createCourseDiscoveryBrowserSession({ deadlineAt: new Date(Date.now() + 25_000), initialUrls: ["https://example.org/"] }, {
       fetch: (async value => {

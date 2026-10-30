@@ -527,7 +527,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
       targetUrl: proof.targetUrl, finalUrl: currentUrl, redirects, documentBindingSha256: witness.proof.documentBindingSha256,
       observedAt: witness.proof.observedAt };
   };
-  let navigationStartedAt: number | undefined, contentWaitStartedAt: number | undefined;
+  let navigationStartedAt: number | undefined;
+  let bodyContentDeadlineAt: number | undefined, renderedContentDeadlineAt: number | undefined;
   let ezDocument: EzLinksDocumentWitness | undefined, ezControllerRead: EzLinksControllerRead | undefined;
   let ezConfigurationRead: { document: EzLinksDocumentWitness; token: EzLinksDocumentToken; version: number } | undefined;
   let ezReadContractRead: { document: EzLinksDocumentWitness; token: EzLinksDocumentToken; version: number } | undefined;
@@ -1332,11 +1333,21 @@ export async function createCourseDiscoveryBrowserSession(input: {
     // resource reads drain. A committed response is not a rendered document.
     // Keep this wait inside the original session deadline; never substitute
     // raw response text for the rendered identity or controls.
+    bodyContentDeadlineAt ??= Math.min(Date.now() + 30_000, input.deadlineAt.getTime());
     await page.locator("body").waitFor({ state: "attached", timeout: Math.max(1,
-      Math.min(30_000, input.deadlineAt.getTime() - Date.now())) });
+      bodyContentDeadlineAt - Date.now()) });
+    // A body can exist before its first parser-blocking script finishes. Its
+    // attachment alone does not establish rendered content or source evidence.
+    await page.waitForFunction(() => Boolean(document.body?.innerText.trim()) ||
+      Array.from(document.body?.querySelectorAll("iframe") ?? []).some(frame => {
+        const box = frame.getBoundingClientRect(), style = getComputedStyle(frame);
+        return box.width > 0 && box.height > 0 && style.display !== "none" && style.visibility === "visible";
+      }), undefined,
+      { timeout: Math.max(1, bodyContentDeadlineAt - Date.now()) });
     // Keep one bounded clock per actual navigation/filter action. Observe does
     // not renew it. Branding prose alone must not finish a loading public SPA.
-    const until = Math.min((contentWaitStartedAt ?? navigationStartedAt ?? startedAt) + 8_000, input.deadlineAt.getTime());
+    renderedContentDeadlineAt ??= Math.min(Date.now() + 8_000, input.deadlineAt.getTime());
+    const until = renderedContentDeadlineAt;
     let idleSince: number | undefined;
     while (Date.now() < until) {
       deadline.throwIfAborted();
@@ -1840,7 +1851,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
       const executeAction = async (): Promise<DiscoveryBrowserSnapshot> => {
         staleControlReason = undefined;
       const action = discoveryBrowserActionSchema.parse(value);
-      if (["open", "click", "select", "fill"].includes(action.action)) contentWaitStartedAt = Date.now();
+      if (["open", "click", "select", "fill"].includes(action.action)) {
+        bodyContentDeadlineAt = undefined; renderedContentDeadlineAt = undefined;
+      }
       let documentNavigation = false, navigationAttempted = false;
       navigationFailureKind = undefined;
       try {

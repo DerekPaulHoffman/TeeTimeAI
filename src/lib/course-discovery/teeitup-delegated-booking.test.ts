@@ -137,7 +137,7 @@ describe("fresh native delegated TeeItUp source", () => {
     expect(deps.readDelegatedDocument).not.toHaveBeenCalled();
   });
   it.each(["Tee Time Waitlist", "Tee Time Waitlist Don’t see the tee time you wanted? Sign up to be notified when your desired dates become available. Sign Up",
-    "Book Your Tournament", "Book Tee Time Alerts", "Reserve tee times: Notify me", "Book Your Group Outing", "Reserve Group Events"])
+    "Book Your Tournament", "Book Tee Time Alerts", "Reserve tee times: Notify me", "Book Your Group Outing", "Reserve Group Events", "Group Booking Engine", "Member Booking"])
   ("excludes explicit nonavailability link %s without selecting it via a requested URL", label => {
     const good="https://public.example/tee-times/", bad="https://public.example/another/";
     const p=page(source.officialUrl,good,true);
@@ -147,9 +147,17 @@ describe("fresh native delegated TeeItUp source", () => {
     const only=page(source.officialUrl,undefined,true);only.html+='<a href="'+bad+'">'+label+'</a>';only.visibleEvidence!.linkUrls=[bad];
     expect(()=>delegatedBookingHop(only)).toThrow("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
   });
+  it("requires the exact visible target for an online booking engine caption", () => {
+    const p = page(source.officialUrl, undefined, true);
+    p.html += `<a href="${operator}">Online Booking Engine</a>`;
+    p.visibleEvidence!.linkUrls = [operator];
+    expect(delegatedBookingHop(p, operator).nextUrl).toBe(operator);
+    p.visibleEvidence!.linkUrls = [];
+    expect(() => delegatedBookingHop(p, operator)).toThrow("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
+  });
   it("collapses ordinary booking captions for the same edge but preserves ambiguity between genuine different booking entries",()=>{
     const p=page(source.officialUrl,operator,true);
-    for(const label of ["Book Today Book Your Tee Time","Book Your Tee Time","Book Tee Times"])p.html+='<a href="'+operator+'">'+label+'</a>';
+    for(const label of ["Book Today Book Your Tee Time","Book Your Tee Time","Book Tee Times","Online Booking Engine"])p.html+='<a href="'+operator+'">'+label+'</a>';
     expect(delegatedBookingHop(p).nextUrl).toBe(operator);
     p.html+='<a href="https://public.example/other-tee-times/">Reserve Tee Times</a>';p.visibleEvidence!.linkUrls.push("https://public.example/other-tee-times/");
     expect(()=>delegatedBookingHop(p)).toThrow("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");

@@ -116,6 +116,13 @@ function localParts(value: Date, timeZone: string) {
   return { date: `${parts.year}-${parts.month}-${parts.day}`, time: `${parts.hour}:${parts.minute}:${parts.second}` };
 }
 
+function publicRoundLabel(value: string, holes: number) {
+  const label = value.trim();
+  if (/^(?:Public\*?|Public - Standard)$/iu.test(label)) return true;
+  const round = /^Public (9|18) Holes$/iu.exec(label);
+  return Boolean(round && Number(round[1]) === holes);
+}
+
 /** Public client evidence, 2026-10-20: ordinary TeeTimeView sends every course
  * UUID and the union of every bookableHoles when no purchased-round filter is
  * selected. 1710 client SHA256 3d7f020bc8c0a795d8132b1951cc2be2c50ada2983458c9aa98df02e5631b340;
@@ -159,7 +166,7 @@ export async function executeChronogolf(source: ChronogolfIdentitySource, metada
         if (!course || row.course.id !== course.id || row.course.name !== course.name || row.course.holes !== course.layoutHoles ||
             JSON.stringify([...row.course.bookable_holes].sort((a, b) => a - b)) !== JSON.stringify(course.bookableHoles) ||
             !course.bookableHoles.includes(row.default_price.bookable_holes) || row.default_price.player_type_id !== saved.publicPlayerTypeId ||
-            !/^(?:Public\*?|Public - Standard)$/iu.test(row.default_price.affiliation_type.trim()) ||
+            !publicRoundLabel(row.default_price.affiliation_type, row.default_price.bookable_holes) ||
             row.hole > course.layoutHoles || row.date !== request.date || local.date !== row.date || local.time !== `${row.start_time}:00`)
           fail("ADAPTER_SLOT_MISMATCH");
         if (row.frozen || request.players < row.min_player_size || request.players > row.max_player_size ||

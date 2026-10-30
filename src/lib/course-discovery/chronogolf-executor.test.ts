@@ -57,6 +57,21 @@ function dependencies(options: Options = {}) {
 const execute = (deps: ReturnType<typeof dependencies>, requested = input, saved = metadata(), identity = source) => executeChronogolf(identity, saved, target, requested, deps);
 
 describe("Chronogolf fixed public all-round reader", () => {
+  it("accepts a public round label and an unpadded morning hour with exact public identity", async () => {
+    const value = row(1);
+    value.starts_at = `${input.date}T16:30:00Z`; value.start_time = "9:30";
+    value.default_price.affiliation_type = "Public 9 Holes";
+    expect(await execute(dependencies({ pages: [[value]], perPage: 24 }))).toHaveLength(1);
+    for (const change of [
+      (r: Row) => { r.default_price.affiliation_type = "Public 18 Holes"; },
+      (r: Row) => { r.default_price.affiliation_type = "Public 9 Holes Members"; },
+      (r: Row) => { r.default_price.player_type_id++; },
+      (r: Row) => { r.start_time = "9:31"; },
+    ]) {
+      const conflict = structuredClone(value); change(conflict);
+      await expect(execute(dependencies({ pages: [[conflict]], perPage: 24 }))).rejects.toThrow("ADAPTER_SLOT_MISMATCH");
+    }
+  });
   it("forwards private phone corroboration through the fixed inspector and revalidates it on replay", async () => {
     const identity = { ...source, venueName: "Exampleton", venueAddress: "123 Fairway Drive, Example City, MA 01234, USA", timeZone: "America/New_York" };
     const profile = { ...club(), name: "Exampleton Golf Links", city: "Example City", province: "Massachusetts", postcode: "1234",
