@@ -9,6 +9,7 @@ import { safeBrowserActionIssues, safeDiscoveryTurnFailure, safePublicUrlRejecti
 import { createDiscoveryPublicAssetInventory } from "./course-discovery-public-assets.mjs";
 import { discoveryPromptInstructions, previewDiscoverySnapshot, selectDiscoveryRecipeSchema } from "./course-discovery-prompt-schema.mjs";
 import { nativeRouterOperations, nativeRouterErrorNames, nativeRouterErrorCategories, projectNativeRouterFailure } from "./stagehand/source-diagnostic.mjs";
+import { isCpsPublicSearchDocument } from "./stagehand/public-source-gateway.mjs";
 
 const VERSION = "0.160.1";
 const BROWSER_ACTIONS = ["open", "observe", "click", "select", "fill", "scroll", "inspect_adapter", "inspect", "finish"];
@@ -1392,7 +1393,9 @@ export function createDiscoveryProcess({ executable, args, cwd, environment, sig
 }
 
 export function createDiscoveryBrowser({ cwd, deadlineAt, initialUrls, timeZone = "UTC", venueName, venueAddress, venueOfficialUrl, requestedInput, trustedContext,
-  fixedInspection = false, fixedInspectionFrameWitness, helperEnvironment = {}, signal, processFactory = createDiscoveryProcess }) {
+  fixedInspection = false, fixedInspectionFrameWitness, fixedCpsSourceDocumentUrl, helperEnvironment = {}, signal, processFactory = createDiscoveryProcess }) {
+  if (fixedCpsSourceDocumentUrl !== undefined && (fixedInspection !== true || !isCpsPublicSearchDocument(fixedCpsSourceDocumentUrl)))
+    throw new Error("FIXED_CPS_SOURCE_DOCUMENT_SCOPE_INVALID");
   if (fixedInspectionFrameWitness !== undefined && (fixedInspection !== true || JSON.stringify(fixedInspectionFrameWitness).length > 10_000))
     throw new Error("FIXED_INSPECTION_FRAME_SCOPE_INVALID");
   const channel = processFactory({ executable: process.execPath,
@@ -1402,9 +1405,10 @@ export function createDiscoveryBrowser({ cwd, deadlineAt, initialUrls, timeZone 
       ...(requestedInput === undefined ? [] : ["--requested-input", JSON.stringify(requestedInput)]),
       ...(trustedContext === undefined ? [] : ["--trusted-context", JSON.stringify(trustedContext)]),
       ...(fixedInspectionFrameWitness === undefined ? [] : ["--fixed-inspection-frame-witness", JSON.stringify(fixedInspectionFrameWitness)]),
+      ...(fixedCpsSourceDocumentUrl === undefined ? [] : ["--fixed-cps-source-document", fixedCpsSourceDocumentUrl]),
       "--time-zone", timeZone],
     cwd, environment: { ...discoveryProcessEnvironment(), ...helperEnvironment,
-      ...(fixedInspectionFrameWitness === undefined ? {} : { COURSE_DISCOVERY_FIXED_INSPECTION: "1" }) },
+      ...(fixedInspectionFrameWitness === undefined && fixedCpsSourceDocumentUrl === undefined ? {} : { COURSE_DISCOVERY_FIXED_INSPECTION: "1" }) },
     signal, timeoutMs: Math.min(fixedInspection ? 180_000 : 90_000, Math.max(1, Date.parse(deadlineAt) - Date.now())),
   });
   let closed = false, lastSnapshot, lastProof, lastGesture;

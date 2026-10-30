@@ -1,18 +1,21 @@
 import { parseTeeItUpRecipeSource } from "./teeitup-recipe-source";
 import { uschedulePublicTenant } from "@/lib/simulators/providers/public-configuration";
 import { parseEzLinksSource } from "./ezlinks-source";
+import { parseCpsSource } from "./cps-source";
 
 /** A narrow routing shape, never identity, public access or availability proof. */
-export function strictNativeSupportedSource(value: string): "FOREUP" | "TEEITUP" | "USCHEDULE" | "EZLINKS" | undefined {
+export function strictNativeSupportedSource(value: string): "FOREUP" | "TEEITUP" | "USCHEDULE" | "EZLINKS" | "CPS" | undefined {
   try {
     const url = new URL(value);
     if (url.href !== value || url.protocol !== "https:" || url.username || url.password || url.port) return;
     if (uschedulePublicTenant(value)) return "USCHEDULE";
     if (parseEzLinksSource(value)) return "EZLINKS";
+    if (!url.search && !url.hash && parseCpsSource(value)) return "CPS";
     if (!url.search && !url.hash && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.book\.teeitup\.(?:com|golf)$/u.test(url.hostname) && parseTeeItUpRecipeSource(value)) return "TEEITUP";
-    const ids = /^\/index\.php\/booking\/([1-9]\d{0,9})\/([1-9]\d{0,9})\/?$/u.exec(url.pathname);
-    if (url.hostname === "foreupsoftware.com" && !url.search && ["", "#/teetimes", "#teetimes"].includes(url.hash) &&
-      ids && [ids[1], ids[2]].every(id => Number(id) <= 2_147_483_647)) return "FOREUP";
+    const ids = /^\/index\.php\/booking\/(?:index\/)?([1-9]\d{0,9})(?:\/([1-9]\d{0,9}))?\/?$/u.exec(url.pathname);
+    if (url.hostname === "foreupsoftware.com" && !url.search && ["", "#/", "#/teetimes", "#teetimes"].includes(url.hash) &&
+      ids && ids.slice(1).filter(Boolean).every(id => Number(id) <= 2_147_483_647) &&
+      !(url.pathname.includes("/booking/index/") && ids[2])) return "FOREUP";
   } catch { /* Unknown routes retain the existing model path. */ }
 }
 
@@ -29,7 +32,8 @@ export function uniqueNativeSupportedSource(first: NativeSourceChoiceCapture, se
     second.observedAt > clock.now || clock.now >= clock.deadline || first.linksOverflow || first.framesOverflow || second.linksOverflow || second.framesOverflow ||
     [first, second].some(value => !Array.isArray(value.links) || value.links.length > 160 || !Array.isArray(value.frames) || value.frames.length > 24 ||
       [...value.links, ...value.frames].some(url => typeof url !== "string"))) return null;
-  const currentSearch = (value: NativeSourceChoiceCapture) => parseEzLinksSource(value.pageUrl) && new URL(value.pageUrl).pathname === "/search";
+  const currentSearch = (value: NativeSourceChoiceCapture) => parseEzLinksSource(value.pageUrl) && new URL(value.pageUrl).pathname === "/search" ||
+    strictNativeSupportedSource(value.pageUrl) === "CPS";
   const choices = (value: NativeSourceChoiceCapture) => [...new Set([...(currentSearch(value) ? [value.pageUrl] : []), ...value.links, ...value.frames])]
     .filter(url => (url !== value.pageUrl || currentSearch(value)) && strictNativeSupportedSource(url));
   const before = choices(first), after = choices(second);

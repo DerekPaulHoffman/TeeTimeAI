@@ -393,6 +393,7 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
     const inspectionSignal = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(Math.max(1, deadline - now()))]);
     browser = await worker.createDiscoveryBrowser({ cwd, deadlineAt: new Date(deadline).toISOString(),
       fixedInspection: true, ...(frameWitness ? { fixedInspectionFrameWitness: frameWitness } : {}),
+      ...(earlyCpsContext && !new URL(recipe.source.bookingUrl).search ? { fixedCpsSourceDocumentUrl: recipe.source.bookingUrl } : {}),
       initialUrls: [job.request.identity.officialUrl], timeZone: job.request.input.timeZone,
       requestedInput: job.request.input,
       ...(job.request.trustedContext!==undefined?{trustedContext:job.request.trustedContext}:{}),

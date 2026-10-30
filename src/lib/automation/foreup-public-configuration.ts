@@ -8,7 +8,18 @@ const MAX_SCHEDULES = 30;
 export const FOREUP_STANDARD_PUBLIC_SCOPE = "STANDARD_PUBLIC_CLASS_V1" as const;
 export function isStandardForeupPublicClassName(value: unknown): value is string {
   return typeof value === "string" && value.length <= 300 && !/[\u0000-\u001f\u007f]/u.test(value) &&
-    /^(?:public|(?:(?:spring|summer|fall|winter) )?public play|public tee times|online tee times)$/iu.test(value.trim());
+    /^(?:public|(?:(?:spring|summer|fall|winter) )?public play|public tee times|online tee times|online booking)$/iu.test(value.trim());
+}
+/** The generic Online Booking caption needs its explicit public configuration
+ * flags as well. Missing flags, protection, disabled booking or passes do not
+ * establish the ordinary public audience. */
+export function isStandardForeupPublicClass(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const row = value as Record<string, unknown>;
+  if (!isStandardForeupPublicClassName(row.name)) return false;
+  if (!/^online booking$/iu.test(String(row.name).trim())) return true;
+  return row.online_booking_protected === "0" && row.block_online_booking === "0" && row.deleted === "0" &&
+    Array.isArray(row.pass_item_ids) && row.pass_item_ids.length <= 30 && row.pass_item_ids.every(value => value === "");
 }
 const FOREUP_BOOKING_PATH = /^\/index\.php\/booking\/(?:([1-9]\d{0,9})(?:\/[1-9]\d{0,9})?|index\/([1-9]\d{0,9}))\/?$/u;
 
@@ -117,13 +128,13 @@ export function hasCompleteForeupPublicScheduleScope(input: { html: string; faci
         if (!classId || selectedClassIds.has(classId)) return false;
         selectedClassIds.add(classId);
         if (typeof entry.name !== "string" || entry.name.length > 300 || /[\u0000-\u001f\u007f]/u.test(entry.name)) return false;
-        if (isStandardForeupPublicClassName(entry.name)) selectedExplicitPublicCount += 1;
+        if (isStandardForeupPublicClass(entry)) selectedExplicitPublicCount += 1;
         continue;
       }
       if (entry.name === undefined && visible.length === 1) { isPublic = true; continue; }
       if (typeof entry.name !== "string" || entry.name.length > 300) return false;
       const name = entry.name.trim();
-      if (isStandardForeupPublicClassName(name)) isPublic = true;
+      if (isStandardForeupPublicClass(entry)) isPublic = true;
       // Only unequivocal membership labels exclude a visible class. Unknown
       // labels may describe another public audience and cannot prove coverage.
       else if (!/^(?:(?:full(?: week)?|twilight|junior|senior|annual|club|premium) )?(?:member|members|membership)(?: (?:only|tee times|play))?$/iu.test(name)) return false;
@@ -166,7 +177,7 @@ export function isExplicitForeupPublicClass(input: { html: string; facilityId: n
     positiveProviderId((raw as Record<string, unknown>).teesheet_id) === input.scheduleId &&
     String((raw as Record<string, unknown>).active) === "1" && String((raw as Record<string, unknown>).hidden) === "0" &&
     typeof (raw as Record<string, unknown>).name === "string" &&
-    isStandardForeupPublicClassName((raw as Record<string, unknown>).name));
+    isStandardForeupPublicClass(raw));
 }
 
 export function parseForeupPublicConfiguration(input: {
@@ -180,7 +191,7 @@ export function parseForeupPublicConfiguration(input: {
   const path = FOREUP_BOOKING_PATH.exec(url.pathname);
   if (url.protocol !== "https:" || url.hostname !== "foreupsoftware.com" ||
     url.username || url.password || url.port || url.search || !path ||
-    !["", "#/teetimes", "#teetimes", "#/login"].includes(url.hash) ||
+    !["", "#/", "#/teetimes", "#teetimes", "#/login"].includes(url.hash) ||
     input.html.length > MAX_DOCUMENT_BYTES) return null;
   const facilityId = Number(path[1] ?? path[2]);
   // A comma-separated hospitality descriptor is not a tee-sheet identity.
@@ -229,8 +240,7 @@ export function parseForeupPublicConfiguration(input: {
       positiveProviderId(entry.booking_class_id) !== null;
   });
   const labelledPublic = visibleClasses.filter(bookingClass => {
-    const name = (bookingClass as Record<string, unknown>).name;
-    return isStandardForeupPublicClassName(name);
+    return isStandardForeupPublicClass(bookingClass);
   });
   // Public and membership classes may share one public page. Select only its
   // sole explicit public class (including observed public tee-time labels);
@@ -282,7 +292,7 @@ async function readForeupPublicDocument(input: {
   const path = FOREUP_BOOKING_PATH.exec(source.pathname);
   if (source.protocol !== "https:" || source.hostname !== "foreupsoftware.com" ||
     source.username || source.password || source.port || source.search || !path ||
-    !["", "#/teetimes", "#teetimes", "#/login"].includes(source.hash)) return null;
+    !["", "#/", "#/teetimes", "#teetimes", "#/login"].includes(source.hash)) return null;
   source.hash = "";
   const response = await fetchWithProviderTimeout(source, {
     headers: { accept: "text/html,application/xhtml+xml" }, redirect: "manual", signal: input.signal,

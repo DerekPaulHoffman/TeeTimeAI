@@ -1,5 +1,10 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
+
+it("does not infer support for neighbors of the reviewed 26.3.1 public build", () => {
+  for (const build of ["26.3.1.40424176515", "26.3.1.40424176517", "26.3.2.40424176516"])
+    expect(cpsPublicBuildProtocol(build)).toBeUndefined();
+});
 import { CPS_API_PATH, CPS_PUBLIC_BUILD, CPS_VENUE_PUBLIC_CATALOG_BUILD, cpsMetadataSchema, cpsPublicBuildProtocol, inspectCpsOfficialDocument, parseCpsCatalog,
   parseCpsConfiguration, parseCpsOptions, parseCpsSource, validateCpsIdentity } from "./cps-source";
 
@@ -96,7 +101,7 @@ describe("CPS stable public source", () => {
   });
   it("maps only exact reviewed builds to their independent public startup protocol", () => {
     expect(cpsPublicBuildProtocol(CPS_PUBLIC_BUILD)).toBe("PUBLISHED_KEY");
-    for (const build of ["26.1.2.26379768992", "26.2.2.40425805601", "26.3.0.34794395074"])
+    for (const build of ["26.1.2.26379768992", "26.2.2.40425805601", "26.3.0.34794395074", "26.3.1.40424176516"])
       expect(cpsPublicBuildProtocol(build)).toBe("ANONYMOUS_SHORT_SESSION");
     for (const build of ["26.1.1.26379768992", "26.1.2.26379768991", "26.1.2.26379768993", "26.1.3.26379768992", "26.2.1.40425805601", "26.2.2.40425805600", "26.2.2.40425805602", "26.2.3.40425805601", "26.3.1.34794395074"])
       expect(() => parseCpsConfiguration({ ...configuration(), buildNumber: build }, source)).toThrow("CPS_PUBLIC_BUILD_UNSUPPORTED");
@@ -133,7 +138,7 @@ describe("CPS stable public source", () => {
     for (const value of [null, [], "99.1.2.3", { ...configuration(), buildNumber: "99.1.2.3" }])
       expect(() => parseCpsConfiguration(value, { ...source, bookingUrl: source.bookingUrl + "account" })).toThrow("CPS_CONFIGURATION_UNVERIFIED");
   });
-  it.each([CPS_PUBLIC_BUILD, "26.1.2.26379768992", "26.2.2.40425805601", "26.3.0.34794395074"])("retains required version-specific fields for reviewed build %s", buildNumber => {
+  it.each([CPS_PUBLIC_BUILD, "26.1.2.26379768992", "26.2.2.40425805601", "26.3.0.34794395074", "26.3.1.40424176516"])("retains required version-specific fields for reviewed build %s", buildNumber => {
     const value = { ...configuration(), buildNumber };
     expect(parseCpsConfiguration(value, source).buildNumber).toBe(buildNumber);
     for (const missing of [{ ...value, clientId: undefined }, { ...value, websiteId: undefined }])

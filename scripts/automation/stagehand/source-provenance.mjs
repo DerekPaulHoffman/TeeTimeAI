@@ -1,6 +1,6 @@
 // Fixed collector provenance only. This module performs no I/O or navigation.
 import { publicEvidenceUrl } from './public-evidence.mjs';
-import { isEzLinksLegacyGateway } from './public-source-gateway.mjs';
+import { isEzLinksLegacyGateway, isCpsLegacyGateway, isCpsPublicSearchDocument } from './public-source-gateway.mjs';
 export const SOURCE_CANDIDATE_LIMIT = 160;
 export const SOURCE_CANDIDATE_URL_BYTES = 65536;
 /** Private controller history events on a completed, unchanged native document.
@@ -154,6 +154,25 @@ export function nativeLegacyGatewayLandings(report, isPublic = publicEvidenceUrl
   if(!Number.isFinite(started))return result;
   for(const action of nativeLinkActions(report)){
     const href=norm(action.observedTarget.href),after=norm(action.afterUrl),source=norm(action.sourceUrl);
+    if(isCpsLegacyGateway(href)&&isCpsPublicSearchDocument(after)&&source&&isPublic(source)&&
+      /^(?:book|reserve) (?:a |your )?tee times?$/iu.test(action.observedTarget.text?.replace(/\s+/gu,' ').trim()??'')&&
+      !/\b(?:member|preferred|account|sign.?in|log.?in)\b/iu.test(action.observedTarget.label??'')){
+      const finished=report.finishedAt===undefined?Date.now()+5000:Date.parse(report.finishedAt);
+      const fresh=row=>row.kind==='NATIVE_VISIBLE_DOM'&&/^[a-f0-9]{64}$/u.test(row.documentHash??'')&&
+        Number.isFinite(Date.parse(row.observedAt))&&Date.parse(row.observedAt)>=started&&Date.parse(row.observedAt)<=finished;
+      const origin=rows(report.officialLinkLedger,512).filter(row=>fresh(row)&&row.pageUrl===source&&
+        rows(row.links,512).some(link=>link.href===href&&link.visible===true));
+      const landing=rows(report.officialLinkLedger,512).find(row=>fresh(row)&&row.pageUrl===after&&
+        origin.some(before=>Date.parse(before.observedAt)<=Date.parse(row.observedAt)));
+      // This is a current native document after an observed public click,
+      // not a synthesized redirect chain or provider/availability proof.
+      const key=JSON.stringify([href,after]);
+      if(landing&&rows(report.visitedUrls,1024).includes(after)&&!seen.has(key)){
+        seen.add(key);result.push({sourceUrl:source,href,documentUrl:after,finalUrl:after});
+        if(result.length===4)break;
+      }
+      continue;
+    }
     if(!isEzLinksLegacyGateway(href)||!source||!after||!isPublic(source)||!isPublic(after)||
       /\b(?:member|members|preferred|account|sign.?in|log.?in)\b/iu.test([action.observedTarget.text,action.observedTarget.label,action.observedTarget.rowText].filter(Boolean).join(' ')))continue;
     const legacy=new URL(href),landing=new URL(after),tenant=legacy.hostname.slice(0,-'.ezlinks.com'.length);
@@ -237,6 +256,8 @@ export function observedBookingSourceCandidates(report, officialUrl, isPublic = 
     if (!sourceDiscoveryOnly && output.length === 32) break;
   }
   if(sourceDiscoveryOnly){
+    for(const entry of legacyLandings)if(reachable.has(norm(entry.documentUrl))&&observed.has(norm(entry.finalUrl))&&
+      isCpsPublicSearchDocument(entry.finalUrl))append(norm(entry.finalUrl));
     for(const entry of historyEntries)if(reachable.has(entry.documentUrl)&&reachable.has(entry.finalUrl))append(entry.finalUrl);
     // A visible embedded source is observed routing, never availability proof.
     const frames=[...rows(report.frameLedger,512).flatMap(row=>rows(row.frames,32).filter(f=>f.visible===true).map(f=>({source:row.pageUrl,url:f.src}))),

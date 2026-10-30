@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { parse, type DefaultTreeAdapterMap } from "parse5";
 import { z } from "zod";
-import { FOREUP_STANDARD_PUBLIC_SCOPE, foreupPublicScheduleCatalogSha256, hasCompleteForeupPublicScheduleScope, isStandardForeupPublicClassName, type ForeupPublicConfiguration } from "@/lib/automation/foreup-public-configuration";
+import { FOREUP_STANDARD_PUBLIC_SCOPE, foreupPublicScheduleCatalogSha256, hasCompleteForeupPublicScheduleScope, isStandardForeupPublicClass, type ForeupPublicConfiguration } from "@/lib/automation/foreup-public-configuration";
 import { fullCourseName, type OfficialIdentityPage, type OfficialIdentitySource } from "./teeitup-official-identity";
 import { parsePublicUSBusinessAddress } from "./public-us-business-address";
 import { normalizePublicCoursePhone } from "./teeitup-postal-conflict-proof";
@@ -76,13 +76,13 @@ function nodes(root: Node) {
 function route(value: string) {
   try { const u = new URL(value), match = /^\/index\.php\/booking\/([1-9]\d{0,9})\/([1-9]\d{0,9})\/?$/u.exec(u.pathname);
     return u.protocol === "https:" && u.hostname === "foreupsoftware.com" && !u.port && !u.username && !u.password && !u.search &&
-      ["", "#/teetimes", "#teetimes"].includes(u.hash) && match ? { facilityId: Number(match[1]), scheduleId: Number(match[2]) } : undefined;
+      ["", "#/", "#/teetimes", "#teetimes"].includes(u.hash) && match ? { facilityId: Number(match[1]), scheduleId: Number(match[2]) } : undefined;
   } catch { return; }
 }
 function facilityRoute(value: string) {
-  try { const u = new URL(value), match = /^\/index\.php\/booking\/([1-9]\d{0,9})\/?$/u.exec(u.pathname);
+  try { const u = new URL(value), match = /^\/index\.php\/booking\/(?:index\/)?([1-9]\d{0,9})\/?$/u.exec(u.pathname);
     return u.protocol === "https:" && u.hostname === "foreupsoftware.com" && !u.port && !u.username && !u.password && !u.search &&
-      ["", "#/teetimes", "#teetimes"].includes(u.hash) && match ? { facilityId: Number(match[1]) } : undefined;
+      ["", "#/", "#/teetimes", "#teetimes"].includes(u.hash) && match ? { facilityId: Number(match[1]) } : undefined;
   } catch { return; }
 }
 function canonicalRootUrl(value: string) {
@@ -250,7 +250,7 @@ export function bindForeupOfficialRouteConfiguration(contact: Contact, html: str
     const candidates = schedules.filter(row => record(row) && providerId(row.course_id) === facilityId && Array.isArray(row.booking_classes) &&
       row.booking_classes.filter(value => record(value) && providerId(value.teesheet_id) === providerId(row.teesheet_id) &&
         String(value.active) === "1" && String(value.hidden) === "0" && typeof value.name === "string" &&
-        isStandardForeupPublicClassName(value.name)).length === 1);
+        isStandardForeupPublicClass(value)).length === 1);
     if (candidates.length !== 1 || !record(candidates[0])) return failure();
     selectedRoute = { facilityId, scheduleId: providerId(candidates[0].teesheet_id)! };
   }
@@ -269,7 +269,7 @@ export function bindForeupOfficialRouteConfiguration(contact: Contact, html: str
   if (!Array.isArray(classes) || classes.length < 1 || classes.length > 20 || classes.some(c => !record(c) || !providerId(c.booking_class_id)) ||
       new Set(classes.map(c => providerId(c.booking_class_id))).size !== classes.length) return failure();
   const publicClasses = classes.filter(c => providerId(c.teesheet_id) === selectedRoute.scheduleId && String(c.active) === "1" && String(c.hidden) === "0" &&
-    isStandardForeupPublicClassName(c.name));
+    isStandardForeupPublicClass(c));
   if (publicClasses.length !== 1) return failure();
   if (!hasCompleteForeupPublicScheduleScope({ html, ...selectedRoute, inventoryScope, isProvenForeignSchedule: row => {
     if (providerId(row.course_id) === selectedRoute.facilityId) return false;

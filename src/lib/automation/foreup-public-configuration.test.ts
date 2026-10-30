@@ -7,6 +7,7 @@ import {
   parseForeupPublicConfiguration,
   readForeupPublicConfiguration,
   readForeupStandardPublicSchedule,
+  isStandardForeupPublicClass,
 } from "./foreup-public-configuration";
 
 const bookingUrl = "https://foreupsoftware.com/index.php/booking/19021#/teetimes";
@@ -19,6 +20,23 @@ const schedules = [
   ] },
 ];
 const html = `<html><script>SCHEDULES = ${JSON.stringify(schedules)};</script></html>`;
+
+describe("explicitly unrestricted public Online Booking", () => {
+  const online = { ...schedules[0].booking_classes[0], name: "Online Booking", online_booking_protected: "0", block_online_booking: "0", deleted: "0", pass_item_ids: [""] };
+  const document = (value: unknown) => `SCHEDULES=${JSON.stringify([{ ...schedules[0], booking_classes: [value] }])};`;
+  it("selects its sole public class with complete schedule coverage", () => {
+    expect(isStandardForeupPublicClass(online)).toBe(true);
+    expect(parseForeupPublicConfiguration({ bookingUrl, courseName: "Bridges", html: document(online) })).toMatchObject({ scheduleId: 792, bookingClassId: 4931 });
+    expect(hasCompleteForeupPublicScheduleScope({ html: document(online), facilityId: 19021, scheduleId: 792, inventoryScope: FOREUP_STANDARD_PUBLIC_SCOPE })).toBe(true);
+  });
+  it.each([{ online_booking_protected: "1" }, { block_online_booking: "1" }, { deleted: "1" }, { pass_item_ids: ["123"] },
+    { pass_item_ids: undefined }, { online_booking_protected: undefined }, { name: "Online Booking Members" }])("rejects absent public flags or restrictions %j", delta => {
+    const row = { ...online, ...delta };
+    expect(isStandardForeupPublicClass(row)).toBe(false);
+    expect(parseForeupPublicConfiguration({ bookingUrl, courseName: "Bridges", html: document(row) })).toBeNull();
+    expect(hasCompleteForeupPublicScheduleScope({ html: document(row), facilityId: 19021, scheduleId: 792, inventoryScope: FOREUP_STANDARD_PUBLIC_SCOPE })).toBe(false);
+  });
+});
 
 describe("managed ForeUP single-sheet coverage", () => {
   const selected = { ...schedules[0], booking_classes: [{ ...schedules[0].booking_classes[0], name: "Public" }] };
@@ -223,8 +241,8 @@ describe("public ForeUp schedule configuration", () => {
     expect(parse([{ ...publicPlay, teesheet_id: "781" }])).toBeNull();
   });
 
-  it("reads the exact indexed public landing and derives its schedule without rewriting the source", async () => {
-    const indexed = "https://foreupsoftware.com/index.php/booking/index/19021#teetimes";
+  it.each(["#teetimes", "#/", "#/teetimes", ""])("reads the exact indexed public landing %s and derives its schedule without rewriting the source", async fragment => {
+    const indexed = "https://foreupsoftware.com/index.php/booking/index/19021" + fragment;
     const fetchImpl = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(new Response(html, { headers: { "content-type": "text/html" } }))
       .mockResolvedValueOnce(Response.json([]));
@@ -236,6 +254,12 @@ describe("public ForeUp schedule configuration", () => {
     expect(api.searchParams.get("booking_class")).toBe("4931");
     expect(parseForeupPublicConfiguration({ bookingUrl: indexed, courseName: "Other Venue", html })).toBeNull();
     expect(parseForeupPublicConfiguration({ bookingUrl: indexed.replace("19021", "19022"), courseName: "Columbia Bridges", html })).toBeNull();
+  });
+
+  it.each(["#/store", "#/checkout", "#/reserve?slot=1", "#/%2flogin"])("does not read a non-public indexed view %s", async fragment => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    expect(await readForeupPublicConfiguration({ bookingUrl: "https://foreupsoftware.com/index.php/booking/index/19021" + fragment, courseName: "Columbia Bridges", fetchImpl })).toBeNull();
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it.each(["index/0", "index/01", "index/-1", "index/19021/792", "index/index/19021", "Index/19021", "index/19021/checkout"])

@@ -19,7 +19,7 @@ it("recognizes only a stable current public search document without inventing a 
 });
 describe("strict source-only routing families", () => {
   it.each([[foreup, "FOREUP"], [teeitup, "TEEITUP"], [uschedule, "USCHEDULE"], ["https://clients.uschedule.com/public-studio/booking", "USCHEDULE"]])("recognizes the exact public route %s", (url, family) => expect(strictNativeSupportedSource(url)).toBe(family));
-  it.each(["https://foreupsoftware.com/", "https://foreupsoftware.com/index.php/booking/123", "https://foreupsoftware.com/index.php/booking/123/456#/login",
+  it.each(["https://foreupsoftware.com/", "https://foreupsoftware.com/index.php/booking/123/456#/login",
     "https://foreupsoftware.com/index.php/booking/123/2147483648", "https://public-course.book.teeitup.com/?date=2026-11-01", "https://public-course.book.teeitup.com/#book",
     "https://public-course.book.teeitup.com/account", "https://public-course.book.teeitup.com.evil.example/", "https://iframe.uschedule.com.evil.example/public-studio/booking",
     "https://other.uschedule.com/public-studio/booking", "https://iframe.uschedule.com/public-studio/booking?date=2026-11-01", "https://iframe.uschedule.com/public-studio/booking#book",

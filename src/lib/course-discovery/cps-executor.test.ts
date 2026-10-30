@@ -107,7 +107,7 @@ describe("CPS fixed fresh public reads", () => {
     expect(fixture.reads).toHaveLength(8); expect(fixture.active).toBe(0); expect(fixture.maxActive).toBe(1);
     expect(fixture.reads.every(read => read.init.credentials === "omit" && read.init.redirect === "manual")).toBe(true);
   });
-  it.each(["26.1.2.26379768992", "26.3.0.34794395074"].flatMap(buildNumber =>
+  it.each(["26.1.2.26379768992", "26.3.0.34794395074", "26.3.1.40424176516"].flatMap(buildNumber =>
     [undefined, "injected-published-key"].map(apiKey => ({ buildNumber, apiKey }))))("uses a fresh reviewed public RAM session and never an injected key/account token ($buildNumber, $apiKey)",async ({buildNumber, apiKey})=>{
     const fixture=setup((url,_init,normal)=>url.pathname.endsWith("/Configuration")
       ?json({...config(),buildNumber:buildNumber+"\n",apiKey,authorization:"Bearer untrusted-input",accessToken:"untrusted-input"}):

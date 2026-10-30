@@ -300,6 +300,19 @@ describe("canonical-root compact contact and public facility ownership", () => {
     p.visibleEvidence!.linkUrls = [facilitySource.bookingUrl]; p.visibleEvidence!.addressTexts = [`Phone: ${display}, 10 Example Rd, Example, NY 12345`]; return p; };
   const contact = (p = compactPage()) => deriveForeupOfficialRouteContact(facilitySource, native(p), phone);
   const compactDeps = () => ({ ...deps(), readNativeOfficialPage: vi.fn(async () => native(compactPage())) });
+  it("keeps full independent contact and catalog proof for an exact indexed facility root view", () => {
+    const indexed = { ...facilitySource, bookingUrl: "https://foreupsoftware.com/index.php/booking/index/12345#/" };
+    const p = compactPage();
+    p.html = p.html.replaceAll(facilitySource.bookingUrl, indexed.bookingUrl);
+    p.visibleEvidence!.linkUrls = [indexed.bookingUrl];
+    const observed = deriveForeupOfficialRouteContact(indexed, native(p), phone);
+    const bound = bindForeupOfficialRouteConfiguration(observed, html(), FOREUP_STANDARD_PUBLIC_SCOPE);
+    expect(bound.proof).toMatchObject({ bookingUrl: indexed.bookingUrl, facilityId: 12345, scheduleId: 456,
+      bookingClassId: 12, contactScope: FOREUP_COMPACT_CONTACT_FACILITY_SCOPE });
+    expect(foreupOfficialRouteOwnershipProofSchema.parse(bound.proof)).toEqual(bound.proof);
+    expect(() => deriveForeupOfficialRouteContact({ ...indexed, bookingUrl: indexed.bookingUrl.replace("#/", "#/checkout") }, native(p), phone))
+      .toThrow("FOREUP_OFFICIAL_ROUTE_UNVERIFIED");
+  });
   it("uses the same exact hyphen-title segmentation in compact contact derivation and saved proof validation", () => {
     const p = compactPage(), title = "Example - Home";
     p.html = p.html.replace("Example | County", title); p.visibleEvidence!.title = title;

@@ -33,6 +33,10 @@ const reviewedPublicBuilds = new Map<string, CpsPublicBuildProtocol>([
   // anonymous short session, one unpaged TeeTimes GET, local content slicing.
   ["26.2.2.40425805601", "ANONYMOUS_SHORT_SESSION"],
   ["26.3.0.34794395074", "ANONYMOUS_SHORT_SESSION"],
+  // Exact public main fcb1caee09792c49 + runtime-linked 569.99419b67db96cdb8
+  // and 507.8a54be4a709eda90: anonymous short token; one dated, unpaged
+  // TeeTimes GET; load-more slices the returned source array locally.
+  ["26.3.1.40424176516", "ANONYMOUS_SHORT_SESSION"],
 ]);
 export function cpsPublicBuildProtocol(build: string): CpsPublicBuildProtocol | undefined {
   return reviewedPublicBuilds.get(build);

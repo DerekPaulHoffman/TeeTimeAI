@@ -5,7 +5,7 @@ import { createStagehandCodexModel } from './codex-model.mjs';
 import { classifyNavigationError, projectActionGuardDiagnostic, projectSourceDocumentReadiness, projectNativeIntermediaryPreparation, projectHostGuardFailure } from './source-diagnostic.mjs';
 import { publicEvidenceUrl } from './public-evidence.mjs';
 import { rootWidgetWitness } from './source-provenance.mjs';
-import { isPublicSourceGateway, isEzLinksPublicSearchDocument } from './public-source-gateway.mjs';
+import { isPublicSourceGateway, isEzLinksPublicSearchDocument, isForeupPublicBookingDocument, isCpsPublicSearchDocument } from './public-source-gateway.mjs';
 import { createNativeAnchorPointer } from './native-anchor-pointer.mjs';
 
 export async function loadStagehandRuntime() {
@@ -59,7 +59,8 @@ function reservePublicDocumentNavigation(action, evidence, currentPageUrl) {
     // A fresh visible "Reserve a Bay" link to this public provider gateway
     // opens availability. The unchanged checks above exclude selected slots,
     // forms, inline handlers and transactions; the gateway grants no method.
-    if (isPublicSourceGateway(target.href)) return true;
+    if (isPublicSourceGateway(target.href) || isForeupPublicBookingDocument(target.href)) return true;
+    if (current.origin === target.origin && !target.search && !target.hash && /^\/tee-time-reservations?\/?$/u.test(target.pathname)) return true;
     // A plain same-origin document edge is routing only. Numeric/encoded paths,
     // filters, fragments, private routes and transaction endpoints stay denied.
     return current.origin === target.origin && new URL(native.rawHref, current).href === target.href && !target.search && !target.hash &&
@@ -155,9 +156,10 @@ export function sourceRoutingUniqueWitness(witness,{pageUrl,startedAt,deadline,n
   if(witness===null)return null;
   const keys=value=>value&&typeof value==='object'&&!Array.isArray(value)?Object.keys(value).sort().join(','):'';
   if(keys(witness)!=='documentHash,family,kind,observedAt,pageUrl,url,via'||witness.kind!=='NATIVE_UNIQUE_SUPPORTED_SOURCE'||
-    !['FOREUP','TEEITUP','USCHEDULE','EZLINKS'].includes(witness.family)||!['LINK','FRAME','LINK_AND_FRAME','DOCUMENT'].includes(witness.via)||
+    !['FOREUP','TEEITUP','USCHEDULE','EZLINKS','CPS'].includes(witness.family)||!['LINK','FRAME','LINK_AND_FRAME','DOCUMENT'].includes(witness.via)||
     !isSourceRoutingUrl(witness.pageUrl)||!isSourceRoutingUrl(witness.url)||
-    (witness.via==='DOCUMENT'?witness.family!=='EZLINKS'||witness.url!==witness.pageUrl||!isEzLinksPublicSearchDocument(witness.url):witness.url===witness.pageUrl)||
+    (witness.via==='DOCUMENT'?witness.url!==witness.pageUrl||
+      !(witness.family==='EZLINKS'&&isEzLinksPublicSearchDocument(witness.url)||witness.family==='CPS'&&isCpsPublicSearchDocument(witness.url)):witness.url===witness.pageUrl)||
     typeof witness.documentHash!=='string'||!/^[a-f0-9]{64}$/u.test(witness.documentHash))throw Error('STAGEHAND_NATIVE_HOST_INVALID');
   const stamp=Date.parse(witness.observedAt);
   if(!Number.isFinite(stamp)||new Date(stamp).toISOString()!==witness.observedAt||stamp<startedAt||stamp>now||now>=deadline||witness.pageUrl!==pageUrl)return null;

@@ -212,10 +212,15 @@ async function main() {
   if (frameAt >= 0 && (process.env.COURSE_DISCOVERY_FIXED_INSPECTION !== "1" || configuredTransport !== "NATIVE_CHROME" ||
       !frameText || Buffer.byteLength(frameText) > 10_000)) throw new Error("FIXED_INSPECTION_FRAME_SCOPE_INVALID");
   const fixedInspectionFrameWitness = frameText === undefined ? undefined : fixedInspectionFrameWitnessSchema.parse(JSON.parse(frameText));
+  const cpsDocumentAt = args.indexOf("--fixed-cps-source-document");
+  const fixedCpsSourceDocumentUrl = cpsDocumentAt < 0 ? undefined : args[cpsDocumentAt + 1];
+  if (cpsDocumentAt >= 0 && (process.env.COURSE_DISCOVERY_FIXED_INSPECTION !== "1" || configuredTransport !== "NATIVE_CHROME" ||
+      !fixedCpsSourceDocumentUrl)) throw new Error("FIXED_CPS_SOURCE_DOCUMENT_SCOPE_INVALID");
   const session = await createCourseDiscoveryBrowserSession({ deadlineAt, initialUrls, timeZone, venueName, venueAddress, venueOfficialUrl,
     ...(requestedInput === undefined ? {} : { requestedInput }), ...(trustedContext === undefined ? {} : { trustedContext }) }, { requestLease,
     browserTransport: configuredTransport as "PINNED_HTTP" | "NATIVE_CHROME",
-    ...(fixedInspectionFrameWitness === undefined ? {} : { fixedInspectionFrameWitness }) });
+    ...(fixedInspectionFrameWitness === undefined ? {} : { fixedInspectionFrameWitness }),
+    ...(fixedCpsSourceDocumentUrl === undefined ? {} : { fixedCpsSourceDocumentUrl }) });
   const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
   const timer = setTimeout(() => { input.close(); void session.close(); }, Math.max(1, deadlineAt.getTime() - Date.now()));
   try {

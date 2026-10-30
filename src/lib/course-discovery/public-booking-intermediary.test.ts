@@ -6,6 +6,17 @@ import { collectPublicBookingLinks, rawPublicBookingLinks, uniquePublicBookingIn
 const root = "https://public-course.example/", href = root + "tee-times";
 const html = '<div hidden role="dialog"><a href="/tee-times">Tee Times</a></div><a style="display:none" href="/tee-times">Book Online</a><a href="/tee-times">Book A Tee Time</a><a href="/other">Book Yours</a>';
 const proof = { kind: "VERIFIED_OFFICIAL_DOCUMENT" as const, officialUrl: root, documentUrl: root };
+it("recognizes the exact official public tee-time-reservations landing without a transaction", () => {
+  const source = '<a href="/tee-time-reservations/">Reserve a Tee Time</a><a href="/tee-time-reservations/">Reserve Your Tee Time</a>';
+  expect(uniquePublicBookingIntermediary(rawPublicBookingLinks(source), root)).toBe(root + "tee-time-reservations/");
+  for (const rejected of [
+    '<a href="/tee-time-reservations/?slot=1">Reserve a Tee Time</a>',
+    '<a href="/tee-time-reservations/123">Reserve a Tee Time</a>',
+    '<a href="/members/tee-time-reservations/">Reserve a Tee Time</a>',
+    '<a href="/tee-time-reservations/">Reserve 9:00 AM</a>',
+    '<a href="/tee-time-reservations/" aria-label="Member reservations">Reserve a Tee Time</a>',
+  ]) expect(uniquePublicBookingIntermediary(rawPublicBookingLinks(rejected), root)).toBeNull();
+});
 it("recognizes one literal first-party book-tee-times document across repeated public links", () => {
   const url = root + "book-tee-times/";
   const source = '<a href="/book-tee-times/">Tee Times</a><a href="/book-tee-times/">Book Tee Times</a>';

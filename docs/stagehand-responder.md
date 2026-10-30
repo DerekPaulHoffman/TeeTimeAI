@@ -17,6 +17,30 @@ completed public document read. Independent inspection must observe that route
 again and reopen its exact URL before inspecting the adapter. Neither a model's
 reported URL nor a history event establishes identity or availability.
 
+An exact official `tee-time-reservations` landing captioned "Reserve a Tee
+Time" is public document navigation. It grants no selected-time action, form
+submission, query, login or checkout. Observed ForeUP facility bootstrap links,
+including the provider's `booking/index/<id>` spelling, can go directly to fixed
+inspection; their public configuration and inventory still require full proof.
+Legacy CPS bookmarks must open their actually observed current tenant document.
+An SDK destination alone cannot establish that route: fresh native source and
+landing captures must corroborate the executed public anchor. No tenant is
+inferred from the bookmark's club slug. CPS build `26.3.1.40424176516` has its
+own reviewed anonymous-session and complete unpaged-day protocol; neighboring
+builds remain unsupported until reviewed.
+
+Fixed CPS inspection can capture its exact public source as a completed native
+document without waiting for the general browser to render an anonymous app.
+It retains one eight-second document-read wait tied to that document's time
+origin and the original deadline. The typed CPS reader owns anonymous startup;
+no general POST permission, rendered identity or availability is inferred from
+an empty app shell. Both independent inventory challenges remain required.
+
+ForeUP's literal "Online Booking" class is Standard Public only when its
+catalog explicitly disables protection, booking blocks and deletion, and
+requires no pass. Absent flags and member/pass variants remain unverified.
+The complete catalog digest and every independent replay retain those checks.
+
 Public Teesnap outdoor methods can use the existing fixed reader when the
 canonical official URL is already the same HTTPS tenant root as the booking
 source. The controller selects this fixed public-root transport before starting

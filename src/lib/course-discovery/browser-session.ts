@@ -48,6 +48,7 @@ import { discoveryNavigationFailureKind, safeOfficialSourceDiagnostic, type Offi
 import { inspectPublicRentalProduct } from "./public-product-control";
 import { createPublicCatalogTileScope, inspectPublicCatalogTile, openPublicCatalogTile } from "./public-catalog-tile";
 import { canonicalCpsPublicUrl, cpsPublicEntryUrl, cpsSessionKey, createCpsPublicSessionScope } from "./cps-public-navigation";
+import { parseCpsSource } from "./cps-source";
 import { observedPublicDateChoices, isPublicDateChoice } from "./public-date-choice";
 import { inspectPublicDatePickerInput, openPublicDatePickerInput, type PublicDatePickerInputProof } from "./public-date-picker-input";
 import { isPublicAvailabilityNavigation } from "./public-navigation-control";
@@ -222,6 +223,9 @@ export type DiscoveryBrowserSnapshot = {
     attributes: Record<string, string>; href?: string; target?: string; children: Array<{ selector: string; tag: string; text: string; href?: string; target?: string }> }> };
 };
 export type DiscoveryBrowserSessionDependencies = {
+  /** Fixed metadata inspection only; never a browser action or recipe field.
+   * This skips rendered controls, not the current completed native document. */
+  fixedCpsSourceDocumentUrl?: string;
   delegatedReadBudget?: DelegatedReadBudget;
   /** Private fixed delegated-source reader; never an action/recipe field. */
   captureDelegatedDocument?: true;
@@ -299,6 +303,12 @@ export async function createCourseDiscoveryBrowserSession(input: {
   const requestedInput = input.requestedInput === undefined ? undefined : accessExecutionInputSchema.parse(input.requestedInput);
   const trustedContext = input.trustedContext === undefined ? undefined : discoveryTrustedContextSchema.parse(input.trustedContext);
   const fixedInspectionFrameWitness = deps.fixedInspectionFrameWitness === undefined ? undefined : fixedInspectionFrameWitnessSchema.parse(deps.fixedInspectionFrameWitness);
+  const fixedCpsSourceDocumentUrl = deps.fixedCpsSourceDocumentUrl;
+  if (fixedCpsSourceDocumentUrl !== undefined) {
+    const parsed = parseCpsSource(fixedCpsSourceDocumentUrl), url = parsed && new URL(fixedCpsSourceDocumentUrl);
+    if (deps.browserTransport !== "NATIVE_CHROME" || !url || url.href !== fixedCpsSourceDocumentUrl || url.search || url.hash)
+      throw new Error("FIXED_CPS_SOURCE_DOCUMENT_SCOPE_INVALID");
+  }
   if (fixedInspectionFrameWitness && (deps.browserTransport !== "NATIVE_CHROME" || input.venueOfficialUrl !== fixedInspectionFrameWitness.officialUrl))
     throw new Error("FIXED_INSPECTION_FRAME_SCOPE_INVALID");
   if (requestedInput && requestedInput.timeZone !== (input.timeZone ?? "UTC")) throw new Error("REQUEST_CONTEXT_TIME_ZONE_MISMATCH");
@@ -542,6 +552,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
   };
   let navigationStartedAt: number | undefined;
   let bodyContentDeadlineAt: number | undefined, renderedContentDeadlineAt: number | undefined;
+  let fixedCpsDocumentWait: { timeOrigin: number; until: number } | undefined;
   let ezDocument: EzLinksDocumentWitness | undefined, ezControllerRead: EzLinksControllerRead | undefined;
   let ezConfigurationRead: { document: EzLinksDocumentWitness; token: EzLinksDocumentToken; version: number } | undefined;
   let ezReadContractRead: { document: EzLinksDocumentWitness; token: EzLinksDocumentToken; version: number } | undefined;
@@ -2230,6 +2241,26 @@ export async function createCourseDiscoveryBrowserSession(input: {
             else await known.locator.click();
           } else await known.locator.click();
         }
+      }
+      if (fixedCpsSourceDocumentUrl && page.url() === fixedCpsSourceDocumentUrl) {
+        const timeOrigin = await page.evaluate(() => performance.timeOrigin);
+        if (fixedCpsDocumentWait?.timeOrigin !== timeOrigin)
+          fixedCpsDocumentWait = { timeOrigin, until: Math.min(Date.now() + 8000, input.deadlineAt.getTime()) };
+        await page.locator("body").waitFor({ state: "attached", timeout: Math.max(1, Math.min(5000, fixedCpsDocumentWait.until - Date.now())) });
+        let status: number | undefined;
+        do {
+          if (page.url() !== fixedCpsSourceDocumentUrl || await page.evaluate(() => performance.timeOrigin) !== timeOrigin)
+            throw new Error("FIXED_CPS_SOURCE_DOCUMENT_UNVERIFIED");
+          status = await currentNavigationStatus(page.url(), timeOrigin);
+          if (status === 200 && nativeMainDocumentWitness?.currentUrl === fixedCpsSourceDocumentUrl) break;
+          if (Date.now() >= fixedCpsDocumentWait.until) break;
+          await page.waitForTimeout(Math.min(100, Math.max(1, fixedCpsDocumentWait.until - Date.now())));
+        } while (Date.now() < fixedCpsDocumentWait.until);
+        if (status !== 200 || !nativeMainDocumentWitness || nativeMainDocumentWitness.currentUrl !== fixedCpsSourceDocumentUrl)
+          throw new Error("FIXED_CPS_SOURCE_DOCUMENT_UNVERIFIED");
+        // CPS's typed reader owns anonymous startup and complete inventory.
+        // An empty app shell is no rendered identity, control or EMPTY proof.
+        return snapshot(false, deps.captureDelegatedDocument === true);
       }
       return snapshot(["open", "observe", "click", "select", "fill"].includes(action.action) || documentNavigation, deps.captureDelegatedDocument === true);
       } catch (error) {
