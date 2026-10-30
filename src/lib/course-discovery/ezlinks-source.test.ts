@@ -47,6 +47,15 @@ const instant = (value: string) => new Date(`${value}-04:00`);
 const parse = (body: unknown) => parseEzLinksAvailability(body,parseEzLinksConfiguration(configuration(),identity),input,instant);
 
 describe("fresh EZLinks public configuration", () => {
+  it("accepts an exact Public sponsor with whole-venue Championship and Par 3 course labels", () => {
+    const first = configuration().Courses[0];
+    const value = { ...configuration(), SponsorPageTitle: "Example Ridge - Public - Online tee times made EZ", AllCourseIDs: "101,102",
+      Courses: [{ ...first, CourseName: "Example Ridge Golf Club - Championship" }, { ...first, CourseID: 102, CourseName: "Example Ridge Golf Club - Par 3" }] };
+    expect(parseEzLinksConfiguration(value, identity).metadata.courseIds).toEqual([101,102]);
+    for (const suffix of ["East", "Private", "Members", "Preferred Player", "Championship East"])
+      expect(() => parseEzLinksConfiguration({ ...value, AllCourseIDs: "101", Courses: [{ ...first, CourseName: `Example Ridge Golf Club - ${suffix}` }] }, identity)).toThrow("EZLINKS_CONFIGURATION_UNVERIFIED");
+    expect(() => parseEzLinksConfiguration({ ...value, SponsorPageTitle: "Example Ridge - Members - Online tee times made EZ" }, identity)).toThrow("EZLINKS_CONFIGURATION_UNVERIFIED");
+  });
   it("matches complete names and narrow Golf category labels without substring or location aliases", () => {
     expect(ezlinksVenueMatches("Example Ridge Golf","Example Ridge Golf Course")).toBe(true);
     expect(ezlinksVenueMatches("Example Ridge Golf Club","Example Ridge Golf Course")).toBe(true);
@@ -96,6 +105,16 @@ describe("fresh EZLinks public configuration", () => {
 });
 
 describe("strict unpaged public EZLinks listing", () => {
+  it("requires the fresh pinned Public title and exact master sponsor for an empty secondary rate catalog", () => {
+    const publicConfig = parseEzLinksConfiguration({ ...configuration(), SponsorPageTitle: "Example Ridge - Public - Online tee times made EZ" }, identity);
+    const emptyRates = { ...listing(), r05: [] };
+    expect(parseEzLinksAvailability(emptyRates, publicConfig, input, instant)).toHaveLength(1);
+    expect(() => parse(emptyRates)).toThrow("EZLINKS_PUBLIC_RATE_UNVERIFIED");
+    expect(() => parseEzLinksAvailability({ ...emptyRates, r06: [row({r06:111})] }, publicConfig, input, instant)).toThrow("EZLINKS_SLOT_MISMATCH");
+    expect(parseEzLinksAvailability({ ...emptyRates, r06: [row({r28:"1,6"})] }, publicConfig, input, instant)).toEqual([]);
+    expect(parseEzLinksAvailability({ ...emptyRates, r06: [] }, publicConfig, input, instant)).toEqual([]);
+    expect(publicConfig.metadata.catalogHash).not.toBe(parseEzLinksConfiguration(configuration(),identity).metadata.catalogHash);
+  });
   it("coalesces consistent rate rows without summing capacity or retaining tokens/prices", () => {
     const slots=parse(listing([row(),row({r06:112,r12:302,r08:45})]));expect(slots).toHaveLength(1);
     expect(slots[0]).toMatchObject({startsAt:"2026-10-23T15:00:00.000Z",availableSpots:4,holes:18,resourceId:"ezlinks-course:101"});
@@ -105,6 +124,11 @@ describe("strict unpaged public EZLinks listing", () => {
   });
   it("r04 max price and r07 display mode are not row-count/status markers",()=>{
     expect(parse(listing())).toHaveLength(1);expect(parse(listing([]))).toEqual([]);
+  });
+  it("preserves whole seconds from the actual source timestamp while checking the provider's minute display",()=>{
+    const slots=parse(listing([row({r15:"2026-10-23T11:00:13"})]));
+    expect(slots).toHaveLength(1); expect(slots[0].startsAt).toBe("2026-10-23T15:00:13.000Z");
+    expect(()=>parse(listing([row({r15:"2026-10-23T11:00:13",r24:"11:01 AM"})]))).toThrow("EZLINKS_SLOT_MISMATCH");
   });
   it.each(["5","6","7","8","20"])("never treats restricted/closed icon %s as general public inventory",icon=>{
     expect(parse(listing([row({r28:`1,2,${icon}`})]))).toEqual([]);
@@ -122,7 +146,7 @@ describe("strict unpaged public EZLinks listing", () => {
   });
   it.each([
     {r06:999},{r07:999},{r16:"Other Golf"},{r11:undefined},{r11:5},{r11:3,r14:2},
-    {r15:"2026-10-24T11:00:00"},{r15:"2026-10-23T04:00:00",r24:"4:00 AM"},{r15:"2026-10-23T11:00:01"},
+    {r15:"2026-10-24T11:00:00"},{r15:"2026-10-23T04:00:00",r24:"4:00 AM"},{r15:"2026-10-23T11:00:60"},{r15:"2026-10-23T11:00:13.1"},
     {r17:"2026-10-24T00:00:00"},{r24:"12:00 PM"},{r28:"1,999"},{r28:"1,1"},{r28:"1,9"},
   ])("fails contradictory or unverified raw row %# before filtering",changes=>{
     expect(()=>parse(listing([row(changes)]))).toThrow(/^EZLINKS_/u);

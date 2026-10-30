@@ -69,6 +69,28 @@ automatic retry, using the same job, request, source fingerprint and original
 deadlines. The fixed inspection and independent backend challenges stay fresh.
 Incomplete reads never become an empty availability result.
 
+Public source routing retains both the served document URL and its authenticated
+History API route. Legacy public EZLinks links are investigation gateways, not
+executable sources. Independent inspection must re-earn the exact tenant's
+document/route binding in its fresh browser. A completed admitted native main
+read can admit only its current same-origin history URL, without admitting the
+whole redirected origin. Source evidence and progress clocks remain unchanged.
+
+EZLinks public sponsor recipes pin an explicit public-title mode when the public
+response omits the secondary rate catalog. Every returned row must belong to the
+fresh master sponsor; member, resident, age-restricted and closed inventory stays
+excluded. Whole venue names and a finite Championship/Par 3 layout suffix are
+verified independently of physical layout preferences. Catalog changes invalidate
+the saved method.
+
+USchedule rentals without an Any Available resource option retain a bounded
+immutable catalog of every public simulator resource. Replay uses a separate fresh
+anonymous session for each resource and publishes slots only after all resources
+complete. A changed catalog, failed bay or wrong date makes the entire check
+incomplete. Only the exact visible provider no-times result proves an empty bay;
+missing markup never proves absence. These engineering checks do not substitute
+for cold-alert delivery and model-disabled restart acceptance.
+
 Generic fallback stops immediately when the trusted browser reports a finite
 native transport fatality. It does not send that dead browser back to the model
 or automatically spend a second attempt on it. Each generic attempt also allows

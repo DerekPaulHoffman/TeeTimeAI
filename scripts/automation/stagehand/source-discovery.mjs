@@ -8,9 +8,9 @@ import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
 import { openStagehandSession, loadStagehandRuntime, assertPublicUrl, isSourceRoutingUrl as sourceRoutingUrl, frameworkIdentity, observedActionSummary, observedTargetSummary, sourceDocumentSettled, sourceRoutingUniqueWitness } from './driver.mjs';
 import { installReadOnlyEvidence } from './read-only-evidence.mjs';
-import { isWhooshClubGateway } from './public-source-gateway.mjs';
+import { isPublicSourceGateway } from './public-source-gateway.mjs';
 import { prioritizedPublicEvidence, publicEvidenceUrl } from './public-evidence.mjs';
-import { observedBookingSourceCandidates, assertSourceCandidateBudget, nativeFrameNavigations, nativeIntermediaryNavigations, nativeGestureNavigations, nativeHistoryNavigations, rootWidgetWitness } from './source-provenance.mjs';
+import { observedBookingSourceCandidates, assertSourceCandidateBudget, nativeFrameNavigations, nativeIntermediaryNavigations, nativeGestureNavigations, stageNativeHistoryNavigation, rootWidgetWitness } from './source-provenance.mjs';
 import { sourceFailureDiagnostic, sourceGuardReasons, projectActionGuardDiagnostic } from './source-diagnostic.mjs';
 
 export const SOURCE_BUDGET_MS = 240000;
@@ -344,9 +344,10 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
         const value=await bounded(()=>session.observeHistorySource());
         if(value!==null&&!report.nativeHistoryNavigations.some(row=>row.documentUrl===value.documentUrl&&row.finalUrl===value.finalUrl)){
           if(report.nativeHistoryNavigations.length>=4||value.finalUrl!==evidence.url||await bounded(()=>session.page.url())!==evidence.url)throw fail('STAGEHAND_SOURCE_OUTPUT_INVALID');
-          report.officialLinkLedger.push({kind:'NATIVE_VISIBLE_DOM',pageUrl:value.finalUrl,observedAt:value.completedAt,documentHash:value.documentHash,links:[]});
-          report.nativeHistoryNavigations.push(value);
-          if(nativeHistoryNavigations(report,sourceRoutingUrl).length!==report.nativeHistoryNavigations.length)throw fail('STAGEHAND_SOURCE_OUTPUT_INVALID');
+          const staged=stageNativeHistoryNavigation(report,value,sourceRoutingUrl);
+          report.visitedUrls=staged.visitedUrls;
+          report.officialLinkLedger=staged.officialLinkLedger;
+          report.nativeHistoryNavigations=staged.nativeHistoryNavigations;
         }
       }
       let frames=[];
@@ -363,15 +364,18 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
         if(nativeChoice&&await bounded(()=>session.page.url())!==evidence.url)nativeChoice=null;
         if(nativeChoice){
           const base={pageUrl:nativeChoice.pageUrl,observedAt:nativeChoice.observedAt,documentHash:nativeChoice.documentHash};
-          if(nativeChoice.via!=='FRAME')report.officialLinkLedger.push({...base,kind:'NATIVE_VISIBLE_DOM',links:[{href:nativeChoice.url,visible:true}]});
-          if(nativeChoice.via!=='LINK')report.frameLedger.push({...base,kind:'NATIVE_VISIBLE_FRAME',frames:[{src:nativeChoice.url,visible:true}]});
+          if(nativeChoice.via==='DOCUMENT')report.officialLinkLedger.push({...base,kind:'NATIVE_VISIBLE_DOM',links:[]});
+          else{
+            if(nativeChoice.via!=='FRAME')report.officialLinkLedger.push({...base,kind:'NATIVE_VISIBLE_DOM',links:[{href:nativeChoice.url,visible:true}]});
+            if(nativeChoice.via!=='LINK')report.frameLedger.push({...base,kind:'NATIVE_VISIBLE_FRAME',frames:[{src:nativeChoice.url,visible:true}]});
+          }
         }
       }
       if(Buffer.byteLength(JSON.stringify(report))>1500000){report.officialLinkLedger.pop();report.frameLedger.pop();throw fail('SOURCE_EVIDENCE_LIMIT');}
       const failedRoutes=report.notFoundRecovery?[report.notFoundRecovery.failedUrl,report.notFoundRecovery.targetUrl]:[];
       const candidates=observedBookingSourceCandidates(report,request.identity.officialUrl,sourceRoutingUrl,{sourceDiscoveryOnly:true}).filter(url=>!failedRoutes.includes(url));
       report.eligibleBookingSourceUrls=candidates;report.sourceRoutingContext=sourceRoutingContext(report,candidates);
-      if(nativeChoice&&candidates.includes(nativeChoice.url)){
+      if(nativeChoice&&candidates.includes(nativeChoice.url)&&!isPublicSourceGateway(nativeChoice.url)){
         finalDecision=null; // The stopping choice is native, not an earlier model decision.
         report.adapterSourceProposal={schemaVersion:1,kind:'EXISTING_ADAPTER_SOURCE',bookingUrl:nativeChoice.url};
         report.outcome='SOURCE_PROPOSED_UNVERIFIED';report.decisionOrigin='NATIVE_UNIQUE_SUPPORTED_SOURCE';
@@ -407,7 +411,7 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
       phase='EXTRACT';const extraction=await bounded(()=>session.extract(instruction,sourceDecisionFor(candidates,frames))),decision=sourceDecisionFor(candidates,frames).parse(extraction.data);
       finalDecision=decision.decision;report.metrics.completedSteps=step+1;report.evidenceSummary=safeReason(decision.reason);await persist();
       const routingFrame=decision.decision==='SOURCE_FOUND'&&routingOnlyFrameEntry(decision.bookingUrl);
-      const routingGateway=decision.decision==='SOURCE_FOUND'&&isWhooshClubGateway(decision.bookingUrl);
+      const routingGateway=decision.decision==='SOURCE_FOUND'&&isPublicSourceGateway(decision.bookingUrl);
       if(decision.decision==='SOURCE_FOUND'&&!routingFrame&&!routingGateway){report.adapterSourceProposal=readHybridSourceExport(decision,candidates);report.outcome='SOURCE_PROPOSED_UNVERIFIED';stopCondition='SOURCE_FOUND';break;}
       if(decision.decision==='UNRESOLVED'){
         // A model's old snapshot cannot close discovery while the same native

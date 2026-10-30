@@ -130,6 +130,14 @@ test('native choice cannot escape original deadline or a changed current page',(
   const stamp=Date.now(),w=witness();assert.equal(sourceRoutingUniqueWitness(w,{pageUrl:official,startedAt:stamp-1,deadline:stamp,now:stamp}),null);
   assert.equal(sourceRoutingUniqueWitness(w,{pageUrl:'https://changed.example/',startedAt:stamp-1,deadline:stamp+1000,now:stamp}),null);
 });
+test('a native DOCUMENT choice is only the exact current public EZLinks search document',()=>{
+  const now=Date.now(),pageUrl='https://public-course.ezlinksgolf.com/search',clock={pageUrl,startedAt:now-100,deadline:now+1000,now};
+  const value={kind:'NATIVE_UNIQUE_SUPPORTED_SOURCE',family:'EZLINKS',via:'DOCUMENT',url:pageUrl,pageUrl,observedAt:new Date(now).toISOString(),documentHash:'a'.repeat(64)};
+  assert.deepEqual(sourceRoutingUniqueWitness(value,clock),value);
+  for(const patch of[{family:'FOREUP'},{url:'https://different.ezlinksgolf.com/search'},{url:'https://public-course.ezlinksgolf.com/'},
+    {via:'LINK'},{url:pageUrl+'?member=1',pageUrl:pageUrl+'?member=1'},{url:'https://members.ezlinksgolf.com/search',pageUrl:'https://members.ezlinksgolf.com/search'}])
+    assert.throws(()=>sourceRoutingUniqueWitness({...value,...patch},clock),/STAGEHAND_NATIVE_HOST_INVALID/u);
+});
 for(const sourceRoutingOnly of[false,true])test(`root widget uses only the current private owned target in source mode=${sourceRoutingOnly}`,async()=>{
  let calls=0;const page={pageId:'owned-root',url:async()=>official},browser={context:{pages:async()=>[page]},close:async()=>{}};
  const owned={kind:'OWNED_GUARDED_STAGEHAND_CONTEXT',cdpUrl:'http://127.0.0.1:12345',targetId:page.pageId,assertGuardedTargets:async()=>true,

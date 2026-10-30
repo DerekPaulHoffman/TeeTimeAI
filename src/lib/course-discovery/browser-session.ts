@@ -484,11 +484,14 @@ export async function createCourseDiscoveryBrowserSession(input: {
       subpageTokenPresent: Boolean(officialSubpage), ...officialSubpageAttempt };
   };
   let statusCdp: CDPSession | undefined;
+  let lastNativeContinuityDiagnostic: Record<string, boolean> | undefined;
   const currentNavigationStatus = async (currentUrl: string, documentStartedAt: number) => {
     const read = navigation;
     nativeMainDocumentWitness = undefined;
     // Preserve the exact-document branch, including actual non-2xx statuses.
     const exactStatus = read && sameDiscoveryMainDocument(read.url, currentUrl) ? read.status : undefined;
+    lastNativeContinuityDiagnostic = { readPresent: Boolean(read), status200: read?.status === 200, nativeProxy: Boolean(nativeProxy),
+      requestPresent: Boolean(read?.request), noncePresent: Boolean(read?.documentNonce), routerPresent: Boolean(redirectRouting), safeUrl: isSafeRecipeUrl(currentUrl) };
     if (!read || read.status !== 200 || !nativeProxy || !read.request || !read.documentNonce || !redirectRouting || !isSafeRecipeUrl(currentUrl)) return exactStatus;
     try {
       statusCdp ??= await context.newCDPSession(page);
@@ -496,23 +499,33 @@ export async function createCourseDiscoveryBrowserSession(input: {
       const dom = await page.evaluate(() => ({ url: location.href, startedAt: performance.timeOrigin }));
       const after = (await statusCdp.send("Page.getFrameTree")).frameTree.frame;
       deadline.throwIfAborted();
+      Object.assign(lastNativeContinuityDiagnostic, { sameRead: read === navigation, closed, framePresent: Boolean(before.id), loaderPresent: Boolean(before.loaderId),
+        frameStable: before.id === after.id, loaderStable: before.loaderId === after.loaderId, beforeUrlMatches: before.url === currentUrl,
+        afterUrlMatches: after.url === currentUrl, domUrlMatches: dom.url === currentUrl, timeOriginMatches: dom.startedAt === documentStartedAt, pageUrlMatches: page.url() === currentUrl });
       if (read !== navigation || closed || !before.id || !before.loaderId || before.id !== after.id || before.loaderId !== after.loaderId ||
           before.url !== currentUrl || after.url !== currentUrl || dom.url !== currentUrl || dom.startedAt !== documentStartedAt || page.url() !== currentUrl)
         return exactStatus;
       // The controller requires this exact completed, ACKed main GET, current
       // generation/loader/network revision and the actual native history URL.
-      if (!redirectRouting.firstFatal && redirectRouting.isCurrentCompletedDocumentRead(read.request, page.mainFrame(),
-        { frameId: before.id, loaderId: before.loaderId, url: currentUrl })) {
+      const completedDocumentRead = redirectRouting.isCurrentCompletedDocumentRead(read.request, page.mainFrame(),
+        { frameId: before.id, loaderId: before.loaderId, url: currentUrl });
+      Object.assign(lastNativeContinuityDiagnostic, { routerFatal: Boolean(redirectRouting.firstFatal), completedDocumentRead });
+      if (!redirectRouting.firstFatal && completedDocumentRead) {
         const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
         const routing = nativeRoutingOpenRoot ? attestedNativeDocumentRedirects(read.request, new Set([nativeRoutingOpenRoot])) : undefined;
         const originalUrl = routing?.at(-1)?.toUrl === currentUrl ? nativeRoutingOpenRoot! : read.url;
         nativeMainDocumentWitness = { request: read.request, currentUrl, timeOrigin: documentStartedAt, frameId: before.id, loaderId: before.loaderId,
           proof: { kind: "NATIVE_MAIN_DOCUMENT_CONTINUITY_V1", originalUrlSha256: hash(originalUrl), currentUrlSha256: hash(currentUrl),
             documentBindingSha256: hash([read.documentNonce, before.id, before.loaderId, documentStartedAt, read.url]), observedAt: Date.now(), status: 200 } };
+        // The exact completed main read may have followed an admitted HTTP
+        // redirect before its own document changed route. Admit only this
+        // current same-origin URL, never the destination origin generally.
+        if (allowedNavigation.has(read.url) && new URL(currentUrl).origin === new URL(read.url).origin)
+          allowedNavigation.add(currentUrl);
         return read.status;
       }
       return exactStatus;
-    } catch { return exactStatus; }
+    } catch { Object.assign(lastNativeContinuityDiagnostic, { captureFailed: true }); return exactStatus; }
   };
   const currentGestureCompletion = (currentUrl: string): NativeGestureCompletion | undefined => {
     const witness = nativeMainDocumentWitness, proof = witness?.request && nativeGestureNavigationSource(witness.request);
@@ -1828,6 +1841,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       // Available even when navigation throws or the page has already closed.
       // This contains transport facts only, never page text or response bodies.
       return { loading: pendingReadCount() > 0, pendingRequestCount: pendingReadCount(), cleanupFailed,
+        ...(lastNativeContinuityDiagnostic ? { nativeContinuityDiagnostic: { ...lastNativeContinuityDiagnostic } } : {}),
         ...(teeItUpDelegation ? { teeItUpDelegation: structuredClone(teeItUpDelegation) } : {}),
         ...(adapterRead ? { adapterRead: { ...adapterRead } } : {}),
         ...(lastOfficialIdentityReadDiagnostic ? { officialIdentityReadDiagnostic: {

@@ -73,8 +73,10 @@ function fixture({invalid=false,closeReject=false,afterAct}={}){
 }
 
 const completeDocument={readyState:'interactive',bodyPresent:true,mainDocumentCurrent:true,mainDocumentComplete:true,mainReadPending:false,pendingReads:1,mainDocumentStatus:200};
-test('a model cannot finish at a public club gateway without opening its current observed navigation',async()=>{
- const gateway="https://app.whoosh.io/patron/club/golfer's-lounge", terminal=gateway+'/agenda/simulators/2026-11-01';
+for(const [family,gateway,terminal]of[
+ ['club',"https://app.whoosh.io/patron/club/golfer's-lounge","https://app.whoosh.io/patron/club/golfer's-lounge/agenda/simulators/2026-11-01"],
+ ['legacy tee-sheet','https://public-course.ezlinks.com/','https://public-course.ezlinksgolf.com/search'],
+])test('a model cannot finish at a public '+family+' gateway without opening its current observed navigation',async()=>{
  let current=official,evaluations=0,extracts=0,acts=0,observedInstruction='';
  const session={localCodexCalls:[],browser:{context:{addInitScript:async()=>{}}},
   page:{url:async()=>current,evaluate:async()=>++evaluations%2?{url:current,observedAt:new Date().toISOString(),links:[{href:current===official?gateway:terminal,text:'Public booking',visible:true}],frames:[],dom:[]}:[]},

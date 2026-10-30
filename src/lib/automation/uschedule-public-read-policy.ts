@@ -1,6 +1,7 @@
 import { parse, type DefaultTreeAdapterMap } from "parse5";
 import { readUScheduleNextAvailableView } from "./uschedule-public-view-control";
 import { createHash } from "node:crypto";
+import { readUSchedulePublicResourcePool } from "@/lib/simulators/providers/uschedule-public-resources";
 import { isUSchedulePublicHost } from "@/lib/simulators/providers/public-configuration";
 import { parseUScheduleLocationSource, readUScheduleLocationCatalog, USCHEDULE_LOCATION_CLIENT,
   type UScheduleOfficialLocationProof } from "@/lib/simulators/providers/uschedule-location-source";
@@ -312,6 +313,10 @@ export function createUSchedulePublicReadPolicy(context: { officialLocation?: US
           options("select_group_size").some(node => (attr(node, "value") ?? text(node).trim()) === "1") ? ["1"] : [])],
       ]);
       filters.set("units_to_book", new Set(units.valid && units.selectedOne ? ["1"] : []));
+      // The reviewed resSelect handler changes only a visible physical resource
+      // filter. IDs and group IDs must both come from this exact fresh catalog.
+      const resourcePool = readUSchedulePublicResourcePool(body);
+      filters.set("resource", new Set(resourcePool ? resourcePool.proof.resources.map(resource => `${resourcePool.proof.groupId}~${resource.id}`) : []));
       // The public service-type handler is a catalog filter, never a booking.
       filters.set("service_type_id", new Set(options("select_service_type").filter(node => publicId.test(attr(node, "value") ?? "") &&
         (attr(node, "value") === "0" || isUSchedulePublicRentalLabel(text(node)) &&

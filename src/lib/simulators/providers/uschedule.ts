@@ -8,6 +8,8 @@ import { isUSchedulePublicRentalLabel, isUScheduleSimBookingLabel, hasUScheduleS
   isUScheduleStandardSimulatorBookingLabel, hasUScheduleStandardSimulatorBookingWitness,
   readUSchedulePublicUnitsControl, readUSchedulePublicPeopleControl, readUSchedulePublicRentalNotes } from "@/lib/automation/uschedule-public-read-policy";
 import { readUScheduleNextAvailableView } from "@/lib/automation/uschedule-public-view-control";
+import { readUSchedulePublicResourcePool, matchesUSchedulePublicResourceSelection, hasUSchedulePublicEmptyResult,
+  type USchedulePublicResourceSelection } from "./uschedule-public-resources";
 import { simulatorPublicConfigurationSchema, uschedulePublicTenant, type USchedulePublicConfiguration } from "./public-configuration";
 import { SimulatorAvailabilityError, type SimulatorAvailabilityInput, type SimulatorAvailabilityResult,
   type SimulatorAvailabilitySlot } from "./types";
@@ -57,6 +59,7 @@ function accessChanged(html: string) {
 }
 type LearnedRental = { serviceId: string; serviceName: string; durationMinutes: number; date?: string; tenant?: string; requestedPlayers?: number;
   quantityRole?: "PEOPLE" | "RENTAL_UNITS" | "LEGACY";
+  resourceSelection?: USchedulePublicResourceSelection;
   publicLocationProof?: USchedulePublicLocationProof };
 function selectedRental(html: string, learned?: LearnedRental) {
   if (accessChanged(html)) throw sourceError("The public simulator scheduler now requires interactive access");
@@ -91,8 +94,9 @@ function selectedRental(html: string, learned?: LearnedRental) {
     if (service.length !== 1 || attr(service[0], "value") !== learned.serviceId || visibleText(service[0]).replace(/\s+/gu, " ").trim() !== learned.serviceName ||
         length.length !== 1 || Number(attr(length[0], "value")) !== learned.durationMinutes ||
         groupSize.length > 1 || !people.roleClaimed && groupSize.length === 1 && (selectedGroup.length !== 1 || (attr(selectedGroup[0], "value") ?? visibleText(selectedGroup[0]).trim()) !== "1") ||
-        resources.some(node => { const values = elements(node).filter(option => option.tagName === "option" && selected(option));
-          return values.length !== 1 || attr(values[0], "value") !== "-1"; })) throw sourceError("The selected public rental changed");
+        (learned.resourceSelection ? !matchesUSchedulePublicResourceSelection(html, learned.resourceSelection) :
+          resources.some(node => { const values = elements(node).filter(option => option.tagName === "option" && selected(option));
+            return values.length !== 1 || attr(values[0], "value") !== "-1"; }))) throw sourceError("The selected public rental changed");
     return { serviceId: learned.serviceId, durationMinutes: learned.durationMinutes };
   }
   if (services.length !== 1 || !selected(services[0]) || visibleText(services[0]).replace(/\s+/gu, " ").trim() !== "Simulator Rental" ||
@@ -187,6 +191,10 @@ function publicTimeGrid(all: Element[], learned: LearnedRental | undefined, html
     if (pools.length) return invalid();
     resourceId = locationPool ? `uschedule-location:${locationPool.locationId}:service:${learned.serviceId}:pooled` : `uschedule-service:${learned.serviceId}:pooled`;
   } else {
+  if (learned.resourceSelection) {
+    if (!matchesUSchedulePublicResourceSelection(html, learned.resourceSelection)) return invalid();
+    resourceId = `uschedule-resource-group:${learned.resourceSelection.pool.groupId}:resource:${learned.resourceSelection.resourceId}`;
+  } else {
   if (pools.length !== 1 || unsafe(pools[0])) return invalid();
   const pool = pools[0], groupId = /^resource([1-9]\d{0,9})$/u.exec(attr(pool, "id") ?? "")?.[1];
   const poolLabels = all.filter(node => node.tagName === "label" && attr(node, "for") === attr(pool, "id"));
@@ -199,6 +207,7 @@ function publicTimeGrid(all: Element[], learned: LearnedRental | undefined, html
       new Set(ids).size !== ids.length || ids.filter(id => id === "-1").length !== 1 || ids.some(id => id !== "-1" && !PUBLIC_ID.test(id)) ||
       selected.length !== 1 || attr(selected[0], "value") !== "-1" || clean(selected[0]) !== "Any Available") return invalid();
   resourceId = `uschedule-resource-group:${groupId}:pooled`;
+  }
   }
   // These notes limit the public party, not the physical capacity of a suite.
   // Only visible, control-free notes beside this current grid are considered.
@@ -338,6 +347,7 @@ function listing(html: string, expectedServiceId: string, learned?: LearnedRenta
       return !label || !new RegExp(`^${escaped} - \\$\\d+(?:\\.\\d{2})?$`, "u").test(visibleText(label).replace(/\s+/gu, " ").trim());
     })) throw schemaError("The public row rental identity changed");
   }
+  if (learned && hasUSchedulePublicEmptyResult(html)) return { times: [], cursor: "", morePresent: false, completeDate: true };
   const grid = publicTimeGrid(all, learned, html);
   if (grid) return grid;
   const peopleList = Boolean(learned && readUSchedulePublicPeopleControl(html).valid);
@@ -411,7 +421,7 @@ async function publicResponse(url: URL, init: RequestInit, expectedType: string 
     throw schemaError("The public simulator scheduler returned an unexpected response type");
   return { response, body: await bounded(response, ceiling) };
 }
-async function refresh(url: URL, cookie: string, name: "start_date" | "more_next_avail" | "length" | "service_id" | "group_size" | "units_to_book" | "location_id" | "next_avail", value: string | undefined,
+async function refresh(url: URL, cookie: string, name: "start_date" | "more_next_avail" | "length" | "service_id" | "group_size" | "units_to_book" | "location_id" | "next_avail" | "resource", value: string | undefined,
   fetchImpl: typeof fetch, signal: AbortSignal) {
   const endpoint = new URL(`${url.pathname}/changefield`, url.origin);
   const { body } = await publicResponse(endpoint, { method: "POST", headers: { Accept: "application/json",
@@ -455,7 +465,11 @@ export function inspectUScheduleRecipeConfiguration(html: string, sourceUrl: str
   const people = readUSchedulePublicPeopleControl(html);
   if (units.present && (!units.valid || !units.selectedOne) || /^suite rentals?$/iu.test(current[0].serviceName) && !units.present && !people.valid) return reject("SELECTORS");
   if (people.roleClaimed && !people.valid) return reject("SELECTORS");
-  return { tenant, rentals, durations, selected: current[0] };
+  const resources = elements(parse(html)).filter(node => node.tagName === "select" && (attr(node, "class") ?? "").split(/\s/u).includes("resSelect"));
+  const resourcePool = readUSchedulePublicResourcePool(html);
+  const selectedAny = resources.every(node => { const selected = elements(node).filter(n => n.tagName === "option" && attr(n, "selected") !== undefined); return selected.length === 1 && attr(selected[0], "value") === "-1"; });
+  if (resources.length > 1 || resources.length && !selectedAny && (!resourcePool || people.roleClaimed || units.present)) return reject("SELECTORS");
+  return { tenant, rentals, durations, selected: current[0], ...(resourcePool && resourcePool.selectedResourceId !== "-1" ? { resourcePoolProof: resourcePool.proof } : {}) };
 }
 
 /** A missing public resource-quantity control is not an instruction to create
@@ -514,7 +528,7 @@ export async function prepareUScheduleLocationCatalog(official: UScheduleOfficia
 
 /** Fixed read-only learned path; every page proves selected product, one bay,
  * duration, chronological cursor progress and a later-day completeness witness. */
-export async function fetchUScheduleRecipeAvailability(input: SimulatorAvailabilityInput & { requestedPlayers?: number }, service: { serviceId: string; serviceName: string; publicLocationProof?: USchedulePublicLocationProof },
+export async function fetchUScheduleRecipeAvailability(input: SimulatorAvailabilityInput & { requestedPlayers?: number }, service: { serviceId: string; serviceName: string; publicLocationProof?: USchedulePublicLocationProof; resourceSelection?: USchedulePublicResourceSelection },
   fetchImpl: typeof fetch, diagnostics?: { onListingPage?: (html: string) => void }): Promise<SimulatorAvailabilityResult & { publicPartyLimit?: number | null }> {
   let url = new URL(service.publicLocationProof?.official.entryUrl ?? input.offering.bookingUrl);
   const signal = AbortSignal.timeout(90_000);
@@ -535,7 +549,7 @@ export async function fetchUScheduleRecipeAvailability(input: SimulatorAvailabil
   const cookies = page.response.headers.getSetCookie();
   const cookie = location?.cookie ?? (cookies.length === 1 ? cookies[0].split(";", 1)[0] : "");
   if (!/^ASP\.NET_SessionId=[A-Za-z0-9]{8,100}$/u.test(cookie)) throw sourceError("Anonymous public session missing");
-  const filter = async (name: "service_id" | "length" | "group_size" | "units_to_book" | "start_date", value: string) => {
+  const filter = async (name: "service_id" | "length" | "group_size" | "units_to_book" | "start_date" | "resource", value: string) => {
     await refresh(url, cookie, name, value, fetchImpl, signal);
     page = await publicResponse(url, { method: "GET", headers: { Accept: "text/html", Cookie: cookie } }, "text/html", MAX_HTML_BYTES, fetchImpl, signal);
     if (service.publicLocationProof?.kind === "PUBLIC_LOCATION_SERVICE_POOL_V1") {
@@ -583,6 +597,13 @@ export async function fetchUScheduleRecipeAvailability(input: SimulatorAvailabil
       page = await publicResponse(url, { method: "GET", headers: { Accept: "text/html", Cookie: cookie } }, "text/html", MAX_HTML_BYTES, fetchImpl, signal);
     }
   }
+  if (service.resourceSelection) {
+    const selected = service.resourceSelection, fresh = readUSchedulePublicResourcePool(page.body);
+    if (service.publicLocationProof || !fresh || fresh.proof.catalogHash !== selected.pool.catalogHash ||
+        !selected.pool.resources.some(resource => resource.id === selected.resourceId)) throw sourceError("The selected public rental changed");
+    if (fresh.selectedResourceId !== selected.resourceId) await filter("resource", `${selected.pool.groupId}~${selected.resourceId}`);
+    if (!matchesUSchedulePublicResourceSelection(page.body, selected)) throw sourceError("The selected public rental changed");
+  }
   const learned = { ...service, durationMinutes: input.durationMinutes, date: input.date, tenant, requestedPlayers: input.requestedPlayers, quantityRole }, slots: SimulatorAvailabilitySlot[] = [], seen = new Set<string>();
   let previousOrder = -Infinity;
   let observedPartyLimit: number | null | undefined;
@@ -591,6 +612,10 @@ export async function fetchUScheduleRecipeAvailability(input: SimulatorAvailabil
     // never consumes a transport stream, changes requests or masks the guard.
     try { diagnostics?.onListingPage?.(page.body); } catch { /* Diagnostic only. */ }
     const current = listing(page.body, service.serviceId, learned);
+    if (!current.times.length) {
+      if (index !== 0 || slots.length || !current.completeDate) throw schemaError("The public availability changed during this read");
+      return { slots: [], complete: true, observedAt: new Date(), evidenceUrl: url.href };
+    }
     if (current.publicPartyLimit !== undefined) observedPartyLimit = current.publicPartyLimit === null ? observedPartyLimit ?? null : Math.min(observedPartyLimit ?? Infinity, current.publicPartyLimit);
     if (current.times.at(-1)!.order <= previousOrder) throw schemaError("The public continuation did not advance");
     let crossedDate = false;
@@ -603,8 +628,9 @@ export async function fetchUScheduleRecipeAvailability(input: SimulatorAvailabil
       const startsAt = venueInstant(time.wall, input.timeZone);
       const endsAt = venueInstant(new Date(time.order + input.durationMinutes * 60_000).toISOString().slice(0, 19), input.timeZone);
       if (endsAt.getTime() - startsAt.getTime() !== input.durationMinutes * 60_000) throw schemaError("The public rental crosses a timezone transition");
-      slots.push({ sourceId: `uschedule:${input.offering.id}:${service.serviceId}:${startsAt.toISOString()}`, offeringId: input.offering.id,
-        resourceId: current.resourceId ?? (service.publicLocationProof ? `uschedule-location:${service.publicLocationProof.locationId}:pooled` : "ANY"),
+      slots.push({ sourceId: `uschedule:${input.offering.id}:${service.serviceId}:${startsAt.toISOString()}${service.resourceSelection ? ':resource:'+service.resourceSelection.resourceId : ''}`, offeringId: input.offering.id,
+        resourceId: service.resourceSelection ? `uschedule-resource-group:${service.resourceSelection.pool.groupId}:resource:${service.resourceSelection.resourceId}` :
+          current.resourceId ?? (service.publicLocationProof ? `uschedule-location:${service.publicLocationProof.locationId}:pooled` : "ANY"),
         productId: service.serviceId, startsAt, endsAt, maxPartySize: service.publicLocationProof?.maxPartySize ?? null, bookingUrl: url.href }); seen.add(time.value);
     }
     previousOrder = current.times.at(-1)!.order;

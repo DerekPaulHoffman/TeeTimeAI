@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { discoveryError } from "./course-discovery-client.mjs";
 import { observedBookingSourceCandidates, nativeFrameNavigations, nativeIntermediaryNavigations, nativeGestureNavigations, nativeHistoryNavigations, rootWidgetRoutingWitness } from "./stagehand/source-provenance.mjs";
-import { isWhooshClubGateway } from "./stagehand/public-source-gateway.mjs";
+import { isPublicSourceGateway } from "./stagehand/public-source-gateway.mjs";
 import { sourceTransportCodes } from "./stagehand/source-diagnostic.mjs";
 
 export const STAGEHAND_SOURCE_MODE = "HYBRID_SOURCE_DISCOVERY";
@@ -49,7 +49,7 @@ export function publicStagehandJob(job) {
 export function validateStagehandSourceProposal(proposal) {
   requireFact(plain(proposal) && Reflect.ownKeys(proposal).length === 3 &&
     Object.keys(proposal).sort().join(",") === "bookingUrl,kind,schemaVersion" && proposal.schemaVersion === 1 &&
-    proposal.kind === "EXISTING_ADAPTER_SOURCE" && publicStagehandSourceUrl(proposal.bookingUrl) && !isWhooshClubGateway(proposal.bookingUrl), "STAGEHAND_SOURCE_PROPOSAL_INVALID");
+    proposal.kind === "EXISTING_ADAPTER_SOURCE" && publicStagehandSourceUrl(proposal.bookingUrl) && !isPublicSourceGateway(proposal.bookingUrl), "STAGEHAND_SOURCE_PROPOSAL_INVALID");
   return { schemaVersion: 1, kind: "EXISTING_ADAPTER_SOURCE", bookingUrl: proposal.bookingUrl };
 }
 

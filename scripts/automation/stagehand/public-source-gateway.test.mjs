@@ -1,10 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isWhooshClubGateway } from './public-source-gateway.mjs';
+import { isWhooshClubGateway, isEzLinksLegacyGateway, isPublicSourceGateway } from './public-source-gateway.mjs';
 import { validateStagehandSourceProposal } from '../course-discovery-stagehand-source.mjs';
 import { prepareReadOnlyAction } from './driver.mjs';
 
 const gateway = "https://app.whoosh.io/patron/club/golfer's-lounge";
+test('legacy public tenant entries require observed navigation to the current provider',()=>{
+ const entry='https://public-course.ezlinks.com/';
+ assert.equal(isEzLinksLegacyGateway(entry),true);assert.equal(isPublicSourceGateway(entry),true);
+ assert.throws(()=>validateStagehandSourceProposal({schemaVersion:1,kind:'EXISTING_ADAPTER_SOURCE',bookingUrl:entry}),/STAGEHAND_SOURCE_PROPOSAL_INVALID/u);
+ const current='https://public-course.ezlinksgolf.com/search';assert.equal(isPublicSourceGateway(current),false);
+ assert.equal(validateStagehandSourceProposal({schemaVersion:1,kind:'EXISTING_ADAPTER_SOURCE',bookingUrl:current}).bookingUrl,current);
+ for(const value of[entry+'search',entry+'?date=2030-01-01',entry+'#date',entry.replace('https:','http:'),entry.replace('.com/','.com.evil.example/'),entry.replace('public-course','admin'),entry.replace('public-course','member-course'),entry.replace('public-course','person@public-course'),entry.replace('.com/','.com:444/'),entry.replace('.com/','.com./'),entry.slice(0,-1)])assert.equal(isEzLinksLegacyGateway(value),false,value);
+});
 test('a Whoosh club gateway is routing only, including an encoded apostrophe', () => {
   for (const value of [gateway, gateway+'/', gateway.replace("'", '%27')]) {
     assert.equal(isWhooshClubGateway(value), true);

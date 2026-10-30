@@ -3,7 +3,7 @@ import { discoveryError } from "./course-discovery-client.mjs";
 import { STAGEHAND_SOURCE_MODE, canonicalStagehandData as canonical, stagehandDataHash as hash,
   publicStagehandSourceUrl as publicUrl, validateStagehandSourceProposal as validateAdapterSourceProposal,
   validateStagehandSourceReport } from "./course-discovery-stagehand-source.mjs";
-import { observedBookingSourceCandidates, nativeLinkSource, corroboratedNativeLink, nativeFrameNavigations, nativeIntermediaryNavigations, nativeGestureNavigations, nativeHistoryNavigations } from "./stagehand/source-provenance.mjs";
+import { observedBookingSourceCandidates, nativeLinkSource, corroboratedNativeLink, nativeFrameNavigations, nativeIntermediaryNavigations, nativeGestureNavigations, nativeHistoryNavigations, nativeLegacyGatewayLandings } from "./stagehand/source-provenance.mjs";
 import { safeTeeItUpDelegationDiagnostic, safeFixedAdapterReadDiagnostic, safeFixedInspectionSourceDiagnostic, safeNativeMainDocumentContinuity } from "./course-discovery-worker.mjs";
 import { z } from "zod";
 import { setTimeout as waitForFrame } from "node:timers/promises";
@@ -188,6 +188,7 @@ export function observedInspectionPath(report, officialUrl, bookingUrl) {
     for (const hop of row.redirects) link(hop.fromUrl, hop.toUrl);
   }
   for (const row of nativeHistoryNavigations(report, publicUrl)) link(row.documentUrl, row.finalUrl);
+  for (const row of nativeLegacyGatewayLandings(report, publicUrl)) link(row.href, row.documentUrl);
   for (const row of (report.observedSourceEvidence ?? []).slice(0, 1024)) {
     const source = row.kind === 'NATIVE_DOM_LINK_OBSERVED' ? nativeLinkSource(row) : row.url;
     if (['DOM_OBSERVED', 'NATIVE_DOM_LINK_OBSERVED'].includes(row.kind)) {
@@ -440,6 +441,18 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
         let capability = browser.currentMainDocumentContinuity?.(snapshot, originalUrl, now());
         if (!capability && action === 'open' && path.includes(snapshot.url)) {
           originalUrl = snapshot.url; capability = browser.currentMainDocumentContinuity?.(snapshot, originalUrl, now());
+        }
+        if (!capability && action === 'open') {
+          // A legacy public link can HTTP-redirect to a served document whose
+          // own History API immediately changes its route. The retained edge
+          // supplies only a candidate; the fresh helper must re-earn that exact
+          // document/current-route binding before skipping any path segment.
+          const landings = nativeLegacyGatewayLandings(report, publicUrl).filter(row => row.href === url &&
+            row.finalUrl === snapshot.url && path.includes(row.documentUrl));
+          if (landings.length === 1) {
+            originalUrl = landings[0].documentUrl;
+            capability = browser.currentMainDocumentContinuity?.(snapshot, originalUrl, now());
+          }
         }
         const projected = safeNativeMainDocumentContinuity(capability);
         const sameObservedDocument = !previousContext || action === 'open' || gestureMatched || projected?.documentBindingSha256 === previousContext.capability.documentBindingSha256;

@@ -686,6 +686,7 @@ export async function inspectExistingAdapter(source: Source, deps: Dependencies)
         fail("USCHEDULE_PUBLIC_PARTY_UNVERIFIED");
       return { adapter: existingAdapterMetadataSchema.parse({ family: "USCHEDULE", tenant: config.tenant,
         serviceId: config.selected.serviceId, serviceName: config.selected.serviceName,
+        ...(config.resourcePoolProof ? { publicResourcePoolProof: config.resourcePoolProof } : {}),
         ...(publicRentalPartyProof ? { publicRentalPartyProof } : {}) }) };
     } finally { session.dispose(); }
   }
@@ -911,18 +912,26 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
         capacity = proof.maxPartySize;
       }
       if (capacity !== null && input.players > capacity) fail("USCHEDULE_PUBLIC_PARTY_UNVERIFIED");
-      uscheduleSession = createUSchedulePublicSession(recipe.source.bookingUrl, { ...deps, requestedPlayers: input.players });
-      const available = await fetchUScheduleRecipeAvailability({ date: input.date, durationMinutes: input.durationMinutes!, partySize: 1, requestedPlayers: input.players,
-        timeZone: input.timeZone, offering: { id: recipe.target.offeringId!, courseId: recipe.target.courseId, bookingUrl: recipe.source.bookingUrl,
-          providerFamilyKey: "USCHEDULE", active: true, publicAccessStatus: "PUBLIC", providerMetadata: { tenant: adapter.tenant, serviceId: adapter.serviceId },
-          maxPartySize: null, supportedDurationsMinutes: [input.durationMinutes!] } }, adapter, uscheduleSession.read);
-      // The fresh service/site upper limit does not establish per-suite
-      // capacity. Enforce both known limits while retaining one bay/null capacity.
-      if (available.publicPartyLimit != null && input.players > available.publicPartyLimit) fail("USCHEDULE_PUBLIC_PARTY_UNVERIFIED");
-      return result(available.slots.filter(slot => slot.startsAt > now && slot.startsAt >= start && slot.endsAt <= end).map(slot => ({
-        sourceId: slot.sourceId, startsAt: slot.startsAt.toISOString(), endsAt: slot.endsAt.toISOString(), availableSpots: 1,
-        capacity, bookingUrl: recipe.source.bookingUrl, resourceId: slot.resourceId, productId: slot.productId,
-      })));
+      const collected: AccessExecutionResult["slots"] = [];
+      const resources = adapter.publicResourcePoolProof?.resources ?? [undefined];
+      for (const resource of resources) {
+        uscheduleSession = createUSchedulePublicSession(recipe.source.bookingUrl, { ...deps, requestedPlayers: input.players });
+        const available = await fetchUScheduleRecipeAvailability({ date: input.date, durationMinutes: input.durationMinutes!, partySize: 1, requestedPlayers: input.players,
+          timeZone: input.timeZone, offering: { id: recipe.target.offeringId!, courseId: recipe.target.courseId, bookingUrl: recipe.source.bookingUrl,
+            providerFamilyKey: "USCHEDULE", active: true, publicAccessStatus: "PUBLIC", providerMetadata: { tenant: adapter.tenant, serviceId: adapter.serviceId },
+            maxPartySize: null, supportedDurationsMinutes: [input.durationMinutes!] } }, { ...adapter,
+              ...(resource ? { resourceSelection: { pool: adapter.publicResourcePoolProof!, resourceId: resource.id } } : {}) }, uscheduleSession.read);
+        // The fresh service/site upper limit does not establish per-suite
+        // capacity. Enforce both known limits while retaining one bay/null capacity.
+        if (available.publicPartyLimit != null && input.players > available.publicPartyLimit) fail("USCHEDULE_PUBLIC_PARTY_UNVERIFIED");
+        collected.push(...available.slots.filter(slot => slot.startsAt > now && slot.startsAt >= start && slot.endsAt <= end).map(slot => ({
+          sourceId: slot.sourceId, startsAt: slot.startsAt.toISOString(), endsAt: slot.endsAt.toISOString(), availableSpots: 1,
+          capacity: resource && available.publicPartyLimit != null ? Math.min(capacity ?? Infinity, available.publicPartyLimit) : capacity,
+          bookingUrl: recipe.source.bookingUrl, resourceId: slot.resourceId, productId: slot.productId,
+        })));
+        uscheduleSession.dispose(); uscheduleSession = undefined;
+      }
+      return result(collected);
     }
     if (adapter.family === "TEESNAP") {
       if (!recipe.source.venueAddress || recipe.target.offeringId || input.durationMinutes !== undefined) fail("ADAPTER_TARGET_MISMATCH");

@@ -1,5 +1,6 @@
 // Fixed collector provenance only. This module performs no I/O or navigation.
 import { publicEvidenceUrl } from './public-evidence.mjs';
+import { isEzLinksLegacyGateway } from './public-source-gateway.mjs';
 export const SOURCE_CANDIDATE_LIMIT = 160;
 export const SOURCE_CANDIDATE_URL_BYTES = 65536;
 /** Private controller history events on a completed, unchanged native document.
@@ -18,6 +19,23 @@ export function nativeHistoryNavigations(report, isPublic = publicEvidenceUrl) {
       !rows(report.officialLinkLedger,512).some(w=>w.kind==='NATIVE_VISIBLE_DOM'&&w.pageUrl===row.finalUrl&&w.documentHash===row.documentHash&&w.observedAt===row.completedAt))return false;
     const key=JSON.stringify([row.documentUrl,row.finalUrl]);if(seen.has(key))return false;seen.add(key);return true;
   });
+}
+/** Stage a private native history witness atomically. The served document can
+ * precede the first visible URL when its own script immediately rewrites it. */
+export function stageNativeHistoryNavigation(report, value, isPublic = publicEvidenceUrl) {
+  if(!value||!rows(report?.visitedUrls,1024).includes(value.finalUrl)||
+    !rows(report?.officialLinkLedger,512).some(row=>row.kind==='NATIVE_VISIBLE_DOM'&&row.pageUrl===value.finalUrl)||
+    !Array.isArray(report?.nativeHistoryNavigations)||report.nativeHistoryNavigations.length>=4||
+    !Array.isArray(report?.officialLinkLedger)||report.officialLinkLedger.length>=512)
+    throw Error('STAGEHAND_SOURCE_OUTPUT_INVALID');
+  const visitedUrls=[...new Set([...rows(report.visitedUrls,1024),value.documentUrl,value.finalUrl])];
+  if(visitedUrls.length>1024)throw Error('STAGEHAND_SOURCE_OUTPUT_INVALID');
+  const staged={...report,visitedUrls,
+    officialLinkLedger:[...report.officialLinkLedger,{kind:'NATIVE_VISIBLE_DOM',pageUrl:value.finalUrl,observedAt:value.completedAt,documentHash:value.documentHash,links:[]}],
+    nativeHistoryNavigations:[...report.nativeHistoryNavigations,value]};
+  if(nativeHistoryNavigations(staged,isPublic).length!==staged.nativeHistoryNavigations.length)
+    throw Error('STAGEHAND_SOURCE_OUTPUT_INVALID');
+  return staged;
 }
 export function assertSourceCandidateBudget(candidates) {
   if (!Array.isArray(candidates) || candidates.length > SOURCE_CANDIDATE_LIMIT ||
@@ -128,6 +146,27 @@ export function nativeLinkActions(report) {
     (row.action?.method === 'click' || row.kind === 'PUBLIC_LINK_CLICK') && !row.error && !row.actionError &&
     String(row.observedTarget?.tag).toUpperCase() === 'A' && norm(row.sourceUrl) && norm(row.observedTarget?.href) && norm(row.afterUrl));
 }
+/** Routing only: correlate an actually clicked legacy tenant entry with its
+ * freshly attested current native document. Never synthesize a destination or
+ * treat an SDK afterUrl alone as redirect, identity or availability proof. */
+export function nativeLegacyGatewayLandings(report, isPublic = publicEvidenceUrl) {
+  const started=Date.parse(report?.startedAt),history=nativeHistoryNavigations(report,isPublic),seen=new Set(),result=[];
+  if(!Number.isFinite(started))return result;
+  for(const action of nativeLinkActions(report)){
+    const href=norm(action.observedTarget.href),after=norm(action.afterUrl),source=norm(action.sourceUrl);
+    if(!isEzLinksLegacyGateway(href)||!source||!after||!isPublic(source)||!isPublic(after)||
+      /\b(?:member|members|preferred|account|sign.?in|log.?in)\b/iu.test([action.observedTarget.text,action.observedTarget.label,action.observedTarget.rowText].filter(Boolean).join(' ')))continue;
+    const legacy=new URL(href),landing=new URL(after),tenant=legacy.hostname.slice(0,-'.ezlinks.com'.length);
+    if(landing.hostname!==tenant+'.ezlinksgolf.com'||landing.protocol!=='https:'||landing.username||landing.password||landing.port||landing.search||landing.hash||!['/','/search'].includes(landing.pathname))continue;
+    const route=history.find(row=>(row.documentUrl===after||row.finalUrl===after)&&new URL(row.documentUrl).origin===landing.origin&&new URL(row.documentUrl).pathname==='/');
+    if(!route||!rows(report.officialLinkLedger,512).some(row=>row.kind==='NATIVE_VISIBLE_DOM'&&row.pageUrl===source&&/^[a-f0-9]{64}$/u.test(row.documentHash??'')&&
+      Number.isFinite(Date.parse(row.observedAt))&&Date.parse(row.observedAt)>=started&&Date.parse(row.observedAt)<=Date.parse(route.observedAt)&&
+      rows(row.links,512).some(link=>link.href===href&&link.visible===true)))continue;
+    const key=JSON.stringify([href,route.documentUrl,route.finalUrl]);if(seen.has(key))continue;seen.add(key);
+    result.push({sourceUrl:source,href,documentUrl:route.documentUrl,finalUrl:route.finalUrl});if(result.length===4)break;
+  }
+  return result;
+}
 export function corroboratedNativeLink(row, target, report) {
   const source = nativeLinkSource(row), href = norm(target);
   return Boolean(source && href && nativeLinkActions(report).some(action =>
@@ -141,6 +180,7 @@ export function observedBookingSourceCandidates(report, officialUrl, isPublic = 
   let edgeCount = 0;
   const intermediaryEntries = sourceDiscoveryOnly ? nativeIntermediaryNavigations(report,isPublic) : [];
   const historyEntries = sourceDiscoveryOnly ? nativeHistoryNavigations(report,isPublic) : [];
+  const legacyLandings = sourceDiscoveryOnly ? nativeLegacyGatewayLandings(report,isPublic) : [];
   const see = value => { if (valid(value)) observed.add(norm(value)); };
   const link = (from, to) => {
     if (!valid(from) || !valid(to) || edgeCount >= 2048) return;
@@ -177,6 +217,7 @@ export function observedBookingSourceCandidates(report, officialUrl, isPublic = 
   if(sourceDiscoveryOnly)for(const row of [...nativeFrameNavigations(report,isPublic),...nativeIntermediaryNavigations(report,isPublic),...nativeGestureNavigations(report,isPublic)]){
     see(row.finalUrl);if(row.kind==='NATIVE_GESTURE_SOURCE_OPEN'){see(row.targetUrl);link(row.pageUrl,row.targetUrl);}for(const hop of row.redirects){see(hop.fromUrl);see(hop.toUrl);link(hop.fromUrl,hop.toUrl);}
   }
+  for(const row of legacyLandings)link(row.href,row.documentUrl);
   const reachable = new Set([official]);
   for(const entry of historyEntries){see(entry.finalUrl);link(entry.documentUrl,entry.finalUrl);}
   for (const source of reachable) for (const target of edges.get(source) ?? []) reachable.add(target);
@@ -229,6 +270,7 @@ export function observedBookingSourceCandidates(report, officialUrl, isPublic = 
     for(const row of nativeIntermediaryNavigations(report,isPublic)){visibleLink(row.pageUrl,row.url);for(const hop of row.redirects)visibleLink(hop.fromUrl,hop.toUrl);}
     for(const row of nativeGestureNavigations(report,isPublic)){visibleLink(row.pageUrl,row.targetUrl);for(const hop of row.redirects)visibleLink(hop.fromUrl,hop.toUrl);}
     for(const row of historyEntries)visibleLink(row.documentUrl,row.finalUrl);
+    for(const row of legacyLandings)visibleLink(row.href,row.documentUrl);
     const visibleReachable=new Set([official]);for(const from of visibleReachable)for(const to of visibleEdges.get(from)??[])visibleReachable.add(to);
     const documentKey=value=>{const url=new URL(value);return url.origin+url.pathname+url.search;};
     const startupDocuments=new Set([...startup].map(documentKey));

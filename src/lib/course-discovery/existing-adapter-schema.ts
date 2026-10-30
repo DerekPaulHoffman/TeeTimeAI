@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { acuityOfficialContactProofSchema } from "./acuity-official-contact";
 import { isUSchedulePublicRentalLabel } from "@/lib/automation/uschedule-public-read-policy";
+import { uschedulePublicResourcePoolProofSchema } from "@/lib/simulators/providers/uschedule-public-resources";
 import { whooshSimulatorMetadataSchema } from "./whoosh-simulator-source";
 import { teeItUpOfficialIdentityProofSchema } from "./teeitup-official-identity";
 import { teeItUpOfficialBookingSourceProofSchema } from "./teeitup-official-booking-source";
@@ -69,8 +70,9 @@ export const existingAdapterMetadataSchema = z.discriminatedUnion("family", [
       value.alias === value.officialPostalConflictProof.alias && value.facilityIds.length === 1 && value.facilityIds[0] === value.officialPostalConflictProof.facilityId),
   z.object({ family: z.literal("USCHEDULE"), tenant: z.string().regex(/^[a-z][a-z0-9-]{2,62}$/u),
     serviceId: publicId, serviceName: z.string().trim().min(3).max(200), publicLocationProof: uschedulePublicLocationProofSchema.optional(),
-    publicRentalPartyProof: uschedulePublicRentalPartyProofSchema.optional() }).strict()
+    publicRentalPartyProof: uschedulePublicRentalPartyProofSchema.optional(), publicResourcePoolProof: uschedulePublicResourcePoolProofSchema.optional() }).strict()
     .refine(value => !value.publicLocationProof || !value.publicRentalPartyProof)
+    .refine(value => !value.publicLocationProof || !value.publicResourcePoolProof)
     .refine(value => value.publicLocationProof ? value.publicLocationProof.kind === "PUBLIC_LOCATION_SERVICE_POOL_V1" ?
       value.serviceId === value.publicLocationProof.serviceId && value.serviceName === value.publicLocationProof.serviceName : isUScheduleNonMemberRental(value.serviceName) : isUSchedulePublicRentalLabel(value.serviceName),
       "A public location rental needs its independently verified location contract"),

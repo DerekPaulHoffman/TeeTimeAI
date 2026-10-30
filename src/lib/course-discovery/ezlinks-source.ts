@@ -27,6 +27,7 @@ export const ezlinksMetadataSchema = z.object({
     values.every((value, index) => index === 0 || values[index - 1] < value)),
   clients: clientsSchema,
   catalogHash: z.string().regex(/^[a-f0-9]{64}$/u),
+  publicSponsorMode: z.literal("PUBLIC_TITLE_NO_RATE_CATALOG_V1").optional(),
 }).strict();
 export type EzLinksMetadata = z.infer<typeof ezlinksMetadataSchema>;
 export type EzLinksSource = { officialUrl: string; bookingUrl: string; venueName: string; venueAddress?: string; timeZone: string };
@@ -79,15 +80,15 @@ export type EzLinksConfiguration = {
   firstDate: string; lastDate: string; startTime: string; endTime: string; icons: Array<{ id: number; name: z.infer<typeof iconName> }>;
 };
 
-/** Whole-name comparison only. A terminal Golf Course/Golf Club category can
- * accompany an already complete Golf name; no prefix or city alias is added. */
+/** Whole distinctive name comparison. A terminal golf category is optional;
+ * no prefix, location alias or directional suffix is added. */
 export function ezlinksVenueMatches(expected: string, observed: string): boolean {
   const key = (value: string) => value.normalize("NFKC").toLocaleLowerCase("en-US").replace(/[^\p{L}\p{N}]/gu, "");
   const a = key(expected), b = key(observed);
   if (a === b) return a.length >= 8;
-  const golf = (value: string) => value.replace(/golf(?:course|club)$/u, "golf");
+  const golf = (value: string) => value.replace(/golf(?:(?:course|club))?$/u, "");
   const normalized = golf(a);
-  return normalized === golf(b) && normalized.endsWith("golf") && normalized.slice(0, -4).length >= 8;
+  return normalized === golf(b) && normalized.length >= 8 && !/^(?:municipal|public|championship|executive)$/u.test(normalized);
 }
 export function validateEzLinksIdentity(source: EzLinksSource) {
   if (!parseEzLinksSource(source.bookingUrl) || !getSafeCustomerBookingUrl(source.officialUrl) ||
@@ -110,11 +111,12 @@ export function parseEzLinksConfiguration(value: unknown, source: EzLinksSource)
   const parsed = initSchema.safeParse(value);
   if (!parsed.success) fail("EZLINKS_CONFIGURATION_INVALID");
   const data = parsed.data, context = parseEzLinksSource(source.bookingUrl)!;
-  const title = data.SponsorPageTitle.replace(/ - Daily Fee - Online tee times made EZ$/u, "");
+  const title = data.SponsorPageTitle.replace(/ - (?:Daily Fee|Public) - Online tee times made EZ$/u, "");
+  const publicSponsorMode = data.SponsorPageTitle.endsWith(" - Public - Online tee times made EZ") ? "PUBLIC_TITLE_NO_RATE_CATALOG_V1" as const : undefined;
   const ids = data.Courses.map(course => course.CourseID).sort((a, b) => a - b), declared = data.AllCourseIDs.split(",").map(Number).sort((a, b) => a - b);
   const players = data.NumPlayersList.map(Number);
   if (title === data.SponsorPageTitle || !ezlinksVenueMatches(source.venueName, title) ||
-      data.Courses.some(course => !ezlinksVenueMatches(source.venueName, course.CourseName)) ||
+      data.Courses.some(course => !ezlinksVenueMatches(source.venueName, course.CourseName.replace(/ - (?:Championship|Par 3)$/u, ""))) ||
       /(?:USA|United States(?: of America)?)$/iu.test(source.venueAddress!.trim()) && data.Courses.some(course =>
         !["United States", "United States of America", "US", "USA"].includes(course.CountryName)) ||
       new Set(ids).size !== ids.length || JSON.stringify(ids) !== JSON.stringify(declared) ||
@@ -125,9 +127,10 @@ export function parseEzLinksConfiguration(value: unknown, source: EzLinksSource)
       data.StartTime !== data.StartTimeSet || data.EndTime !== data.EndTimeSet) fail("EZLINKS_CONFIGURATION_UNVERIFIED");
   const courses = [...data.Courses].sort((a, b) => a.CourseID - b.CourseID);
   const icons = data.Icons.map(icon => ({ id: icon.IconId, name: icon.IconName })).sort((a, b) => a.id - b.id);
-  const stable = { tenant: context.tenant, sponsorId: Number(data.MasterSponsorID), courses, players, holes: data.HolesList, icons };
+  const publicMode = publicSponsorMode ? { publicSponsorMode } : {};
+  const stable = { tenant: context.tenant, sponsorId: Number(data.MasterSponsorID), courses, players, holes: data.HolesList, icons, ...publicMode };
   const metadata = ezlinksMetadataSchema.parse({ family: "EZLINKS", browserTransport: "NATIVE_CHROME", tenant: context.tenant,
-    sponsorId: stable.sponsorId, courseIds: ids, clients: reviewedClients(), catalogHash: createHash("sha256").update(JSON.stringify(stable)).digest("hex") });
+    sponsorId: stable.sponsorId, courseIds: ids, clients: reviewedClients(), catalogHash: createHash("sha256").update(JSON.stringify(stable)).digest("hex"), ...publicMode });
   return { metadata, courses, players, holesIndex: 0, firstDate: data.SearchMinDate.slice(0, 10), lastDate: data.SearchMaxDate.slice(0, 10),
     startTime: data.StartTime.slice(0, 5), endTime: data.EndTime.slice(0, 5), icons };
 }
@@ -164,22 +167,26 @@ const pricingSchema = z.object({ r01: publicId, r02: publicId, r03: z.enum(["Dai
 // r04 is max price, r07 is display mode, never an application success/count.
 // The reviewed client receives one unpaged r06 array in this exact envelope.
 const listingSchema = z.object({ r01: opaque, r02: priceText, r03: opaque, r04: priceText,
-  r05: z.array(pricingSchema).min(1).max(40), r06: z.array(rowSchema).max(500), r07: z.number().int().min(0).max(10) }).strict();
+  r05: z.array(pricingSchema).max(40), r06: z.array(rowSchema).max(500), r07: z.number().int().min(0).max(10) }).strict();
 export function parseEzLinksAvailability(value: unknown, configuration: EzLinksConfiguration,
   input: { date: string; players: number; startTime: string; endTime: string }, toInstant: (local: string) => Date) {
   ezlinksAvailabilityBody(configuration, input); // Even an empty result needs a valid bound request.
   const parsed = listingSchema.safeParse(value);
   if (!parsed.success) fail("EZLINKS_AVAILABILITY_INVALID");
   const data = parsed.data, rates = new Map(data.r05.map(rate => [rate.r02, rate]));
+  // Some explicitly Public sponsors expose no secondary rate catalog. Their
+  // exact fresh title is pinned in the recipe; every row must still belong to
+  // that master sponsor and all eligibility/closed icons remain authoritative.
+  const directPublic = data.r05.length === 0 && configuration.metadata.publicSponsorMode === "PUBLIC_TITLE_NO_RATE_CATALOG_V1";
   if (Number(data.r02) > Number(data.r04) || rates.size !== data.r05.length || new Set(data.r05.map(rate => rate.r01)).size !== data.r05.length ||
-      !data.r05.some(rate => rate.r02 === configuration.metadata.sponsorId && rate.r03 === "Daily Fee")) fail("EZLINKS_PUBLIC_RATE_UNVERIFIED");
+      !directPublic && !data.r05.some(rate => rate.r02 === configuration.metadata.sponsorId && rate.r03 === "Daily Fee")) fail("EZLINKS_PUBLIC_RATE_UNVERIFIED");
   const courses = new Map(configuration.courses.map(course => [course.CourseID, course]));
   const iconMap = new Map(configuration.icons.map(icon => [icon.id, icon.name])), offers = new Set<string>();
   const physical = new Map<string, { courseId: number; local: string; capacity: number; startsAt: string; publicRate: boolean; holes?: 9 | 18 }>();
   for (const row of data.r06) {
     const course = courses.get(row.r07), rate = rates.get(row.r06), date = row.r15.slice(0, 10), time = row.r15.slice(11, 16);
-    if (!course || !rate || course.CourseName !== row.r16 || date !== input.date || row.r17 !== `${input.date}T00:00:00` ||
-        !validDay(row.r15) || row.r15.slice(16) !== ":00" || time < configuration.startTime || time > configuration.endTime ||
+    if (!course || (directPublic ? row.r06 !== configuration.metadata.sponsorId : !rate) || course.CourseName !== row.r16 || date !== input.date || row.r17 !== `${input.date}T00:00:00` ||
+        !validDay(row.r15) || !/^:[0-5]\d$/u.test(row.r15.slice(16)) || time < configuration.startTime || time > configuration.endTime ||
         row.r11 > row.r14 || row.r24 !== ezlinksRequestClock(time)) fail("EZLINKS_SLOT_MISMATCH");
     if (!/^-?\d+(?:,-?\d+)*$/u.test(row.r28)) fail("EZLINKS_ICON_UNVERIFIED");
     const iconIds = row.r28.split(",").map(Number), names = iconIds.map(id => iconMap.get(id));
@@ -194,7 +201,7 @@ export function parseEzLinksAvailability(value: unknown, configuration: EzLinksC
     const previous = physical.get(key);
     if (previous && (previous.capacity !== row.r11 || previous.startsAt !== startsAt || previous.holes !== holes)) fail("EZLINKS_SLOT_AMBIGUOUS");
     physical.set(key, { courseId: row.r07, local: row.r15, capacity: row.r11, startsAt, ...(holes === undefined ? {} : { holes }),
-      publicRate: previous?.publicRate === true || rate.r03 === "Daily Fee" && !restricted });
+      publicRate: previous?.publicRate === true || (directPublic || rate?.r03 === "Daily Fee") && !restricted });
   }
   return [...physical.values()].filter(row => row.publicRate && row.capacity >= input.players && row.local.slice(11, 16) >= input.startTime &&
     row.local.slice(11, 16) < input.endTime).sort((a, b) => a.startsAt.localeCompare(b.startsAt) || a.courseId - b.courseId).map(row => ({

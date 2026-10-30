@@ -619,9 +619,9 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       }
     } finally { await session?.close(); proxy?.mockRestore(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
   }, 35_000);
-  it.each(["current", "loader", "foreignFrame", "differentRequest", "differentUrl", "pendingAck", "failedIdentity", "nonSuccess", "newDocument"] as const)
+  it.each(["current", "redirected", "loader", "foreignFrame", "differentRequest", "differentUrl", "pendingAck", "failedIdentity", "nonSuccess", "newDocument"] as const)
   ("retains only the completed native main GET status across an owned same-document path and query change: %s", async mode => {
-    const entry = "https://owned-status.example/", current = entry + "public-search?view=day";
+    const entry = mode === "redirected" ? "https://legacy-owned-status.example/start" : "https://owned-status.example/", current = "https://owned-status.example/public-search?view=day";
     const material = readFileSync("src/lib/course-discovery/cps-browser-wiring.test.ts", "utf8");
     const tls = (name: string): string => JSON.parse(new RegExp(`^const ${name} = (".*");$`, "m").exec(material)![1]);
     const reads: string[] = [], families = new Set<string>(); let active = 0, acquired = 0, released = 0, foreign = 0;
@@ -636,6 +636,7 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
     const ack = new Promise<void>(resolve => { releaseAck = resolve; });
     const server = createServer({ key: tls("fixtureKey"), cert: tls("fixtureCertificate") }, (request, response) => {
       expect(active).toBeGreaterThan(0); reads.push(String(request.url));
+      if (mode === "redirected" && request.url === "/start") { response.writeHead(302, { location: "https://owned-status.example/" }).end(); return; }
       if (request.method !== "GET" || !["/", "/replacement"].includes(String(request.url))) { response.writeHead(500).end(); return; }
       const replaced = request.url === "/replacement";
       response.writeHead(mode === "nonSuccess" || replaced ? 503 : 200, { "content-type": "text/html" }).end('<!doctype html><link rel="icon" href="data:,"><body>Public document<a href="/replacement">Public booking</a>' +
@@ -686,19 +687,20 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
     try {
       await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve)); const port = (server.address() as AddressInfo).port;
       proxy = vi.spyOn(nativeBrowser, "createNativePublicBrowserProxy").mockImplementation(input => originalProxy({ ...input, requireHostAdmission: true }, {
-        resolveAddresses: async hostname => { if (hostname !== "owned-status.example") { foreign++; throw Error("UNOWNED_FIXTURE_HOST"); } return [{ address: "93.184.216.34", family: 4 }]; },
+        resolveAddresses: async hostname => { if (hostname !== "owned-status.example" && !(mode === "redirected" && hostname === "legacy-owned-status.example")) { foreign++; throw Error("UNOWNED_FIXTURE_HOST"); } return [{ address: "93.184.216.34", family: 4 }]; },
         connect: () => connect({ host: "127.0.0.1", port }),
       }));
-      session = await createCourseDiscoveryBrowserSession({ initialUrls: [entry], deadlineAt: new Date(Date.now() + 20_000) }, {
+      session = await createCourseDiscoveryBrowserSession({ initialUrls: [entry], venueName: "Public document", deadlineAt: new Date(Date.now() + 20_000) }, {
         browserTransport: "NATIVE_CHROME", requestLease: lease,
+        inspectAdapter: async () => ({ adapter: { family: "FOREUP", facilityId: 1, scheduleId: 2, bookingClassId: 3 } }),
         launchBrowser: () => launchPublicReadBrowser({ executablePath, headless: true, args: ["--ignore-certificate-errors"] }),
       });
       const snapshot = await session.execute({ id: 1, action: "open", url: entry });
-      expect(snapshot.url).toBe(mode === "nonSuccess" ? entry : current); expect(snapshot.nativeFirstFatal).toBeUndefined(); expect(reads).toEqual(["/"]);
+      expect(snapshot.url).toBe(mode === "nonSuccess" ? entry : current); expect(snapshot.nativeFirstFatal).toBeUndefined(); expect(reads).toEqual(mode === "redirected" ? ["/start", "/"] : ["/"]);
       if (mode === "nonSuccess") { expect(snapshot.navigationStatus).toBe(503); expect(queryCalls).toBe(0); }
       else {
         if (mode !== "pendingAck") expect(queryCalls).toBeGreaterThan(0);
-        expect(snapshot.navigationStatus).toBe(["current", "newDocument"].includes(mode) ? 200 : undefined);
+        expect(snapshot.navigationStatus).toBe(["current", "redirected", "newDocument"].includes(mode) ? 200 : undefined);
         if (mode === "pendingAck") { expect(ackObserved).toBe(true); releaseAck(); expect((await session.execute({ id: 2, action: "observe" })).navigationStatus).toBe(200); expect(queryCalls).toBeGreaterThan(0); }
         if (mode === "current") expect((await session.execute({ id: 2, action: "observe" })).navigationStatus).toBe(200);
         if (mode === "newDocument") {
@@ -706,7 +708,11 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
           expect(next.url).toBe(entry + "replacement"); expect(next.navigationStatus).toBe(503); expect(reads).toEqual(["/", "/replacement"]);
         }
       }
-      if (["current", "newDocument"].includes(mode)) {
+      if (mode === "redirected") {
+        await expect(session.execute({ id: 2, action: "inspect_adapter", url: current })).resolves.toHaveProperty("adapter.family", "FOREUP");
+        await expect(session.execute({ id: 3, action: "inspect_adapter", url: "https://owned-status.example/unobserved" })).rejects.toThrow("UNOBSERVED_NAVIGATION");
+      }
+      if (["current", "redirected", "newDocument"].includes(mode)) {
         const proof = snapshot.nativeMainDocumentContinuity;
         expect(proof).toMatchObject({ kind: "NATIVE_MAIN_DOCUMENT_CONTINUITY_V1", status: 200 });
         expect(proof?.originalUrlSha256).toMatch(/^[a-f0-9]{64}$/u); expect(proof?.currentUrlSha256).toMatch(/^[a-f0-9]{64}$/u);
