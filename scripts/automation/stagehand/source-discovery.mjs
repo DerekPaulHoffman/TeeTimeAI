@@ -8,7 +8,7 @@ import { pathToFileURL } from 'node:url';
 import { z } from 'zod';
 import { openStagehandSession, loadStagehandRuntime, assertPublicUrl, isSourceRoutingUrl as sourceRoutingUrl, frameworkIdentity, observedActionSummary, observedTargetSummary, sourceDocumentSettled, sourceRoutingUniqueWitness } from './driver.mjs';
 import { installReadOnlyEvidence } from './read-only-evidence.mjs';
-import { isPublicSourceGateway } from './public-source-gateway.mjs';
+import { isPublicSourceGateway, isAcuityTenantGateway } from './public-source-gateway.mjs';
 import { prioritizedPublicEvidence, publicEvidenceUrl } from './public-evidence.mjs';
 import { observedBookingSourceCandidates, assertSourceCandidateBudget, nativeFrameNavigations, nativeIntermediaryNavigations, nativeGestureNavigations, stageNativeHistoryNavigation, rootWidgetWitness } from './source-provenance.mjs';
 import { sourceFailureDiagnostic, sourceGuardReasons, projectActionGuardDiagnostic } from './source-diagnostic.mjs';
@@ -375,7 +375,7 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
       const failedRoutes=report.notFoundRecovery?[report.notFoundRecovery.failedUrl,report.notFoundRecovery.targetUrl]:[];
       const candidates=observedBookingSourceCandidates(report,request.identity.officialUrl,sourceRoutingUrl,{sourceDiscoveryOnly:true}).filter(url=>!failedRoutes.includes(url));
       report.eligibleBookingSourceUrls=candidates;report.sourceRoutingContext=sourceRoutingContext(report,candidates);
-      if(nativeChoice&&candidates.includes(nativeChoice.url)&&!isPublicSourceGateway(nativeChoice.url)){
+      if(nativeChoice&&candidates.includes(nativeChoice.url)&&!isPublicSourceGateway(nativeChoice.url)&&!isAcuityTenantGateway(nativeChoice.url)){
         finalDecision=null; // The stopping choice is native, not an earlier model decision.
         report.adapterSourceProposal={schemaVersion:1,kind:'EXISTING_ADAPTER_SOURCE',bookingUrl:nativeChoice.url};
         report.outcome='SOURCE_PROPOSED_UNVERIFIED';report.decisionOrigin='NATIVE_UNIQUE_SUPPORTED_SOURCE';
@@ -411,7 +411,7 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
       phase='EXTRACT';const extraction=await bounded(()=>session.extract(instruction,sourceDecisionFor(candidates,frames))),decision=sourceDecisionFor(candidates,frames).parse(extraction.data);
       finalDecision=decision.decision;report.metrics.completedSteps=step+1;report.evidenceSummary=safeReason(decision.reason);await persist();
       const routingFrame=decision.decision==='SOURCE_FOUND'&&routingOnlyFrameEntry(decision.bookingUrl);
-      const routingGateway=decision.decision==='SOURCE_FOUND'&&isPublicSourceGateway(decision.bookingUrl);
+      const routingGateway=decision.decision==='SOURCE_FOUND'&&(isPublicSourceGateway(decision.bookingUrl)||isAcuityTenantGateway(decision.bookingUrl));
       if(decision.decision==='SOURCE_FOUND'&&!routingFrame&&!routingGateway){report.adapterSourceProposal=readHybridSourceExport(decision,candidates);report.outcome='SOURCE_PROPOSED_UNVERIFIED';stopCondition='SOURCE_FOUND';break;}
       if(decision.decision==='UNRESOLVED'){
         // A model's old snapshot cannot close discovery while the same native

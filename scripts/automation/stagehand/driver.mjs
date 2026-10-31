@@ -5,7 +5,7 @@ import { createStagehandCodexModel } from './codex-model.mjs';
 import { classifyNavigationError, projectActionGuardDiagnostic, projectSourceDocumentReadiness, projectNativeIntermediaryPreparation, projectHostGuardFailure } from './source-diagnostic.mjs';
 import { publicEvidenceUrl } from './public-evidence.mjs';
 import { rootWidgetWitness } from './source-provenance.mjs';
-import { isPublicSourceGateway, isEzLinksPublicSearchDocument, isForeupPublicBookingDocument, isCpsPublicSearchDocument, isAcuityPublicCalendarDocument } from './public-source-gateway.mjs';
+import { isPublicSourceGateway, isEzLinksPublicSearchDocument, isForeupPublicBookingDocument, isCpsPublicSearchDocument, isAcuityPublicCalendarDocument, isAcuityTenantGateway } from './public-source-gateway.mjs';
 import { createNativeAnchorPointer } from './native-anchor-pointer.mjs';
 
 export async function loadStagehandRuntime() {
@@ -59,7 +59,7 @@ function reservePublicDocumentNavigation(action, evidence, currentPageUrl) {
     // A fresh visible "Reserve a Bay" link to this public provider gateway
     // opens availability. The unchanged checks above exclude selected slots,
     // forms, inline handlers and transactions; the gateway grants no method.
-    if (isPublicSourceGateway(target.href) || isForeupPublicBookingDocument(target.href)) return true;
+    if (isPublicSourceGateway(target.href) || isAcuityTenantGateway(target.href) || isForeupPublicBookingDocument(target.href)) return true;
     if (current.origin === target.origin && !target.search && !target.hash && /^\/tee-time-reservations?\/?$/u.test(target.pathname)) return true;
     // A plain same-origin document edge is routing only. Numeric/encoded paths,
     // filters, fragments, private routes and transaction endpoints stay denied.
@@ -489,7 +489,7 @@ export async function openStagehandSession({ model, deadline, cwd, signal, onMet
         }
         let navigationSettlement=null;
         try{navigationSettlement=navigationBefore?await settleNativeLinkNavigation({browser,page,deadline,...navigationBefore,
-          maximumWaitMs:sourceRoutingOnly&&isPublicSourceGateway(new URL(evidence.href,sourceUrl).href)?10000:2500}):null;}
+          maximumWaitMs:sourceRoutingOnly&&(isPublicSourceGateway(new URL(evidence.href,sourceUrl).href)||isAcuityTenantGateway(new URL(evidence.href,sourceUrl).href))?10000:2500}):null;}
         catch(error){return annotate(error,'SETTLE');}
         const selected = navigationSettlement?.page ?? page;
         const currentPages = await checked(browser.context.pages());

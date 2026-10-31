@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 import { isWhooshClubGateway, isEzLinksLegacyGateway, isPublicSourceGateway, isCpsLegacyGateway, isForeupPublicBookingDocument, isCpsPublicSearchDocument, isAcuityTenantGateway } from './public-source-gateway.mjs';
 import { validateStagehandSourceProposal } from '../course-discovery-stagehand-source.mjs';
 
-test('Acuity tenant bookmarks require observed calendar navigation before persistence', () => {
+test('Acuity tenant bookmarks retain independent fixed-inspector canonicalization', () => {
  const entry='https://public-bays.as.me/';
  assert.equal(isAcuityTenantGateway(entry),true);
- assert.equal(isPublicSourceGateway(entry),true);
- assert.throws(()=>validateStagehandSourceProposal({schemaVersion:1,kind:'EXISTING_ADAPTER_SOURCE',bookingUrl:entry}),/STAGEHAND_SOURCE_PROPOSAL_INVALID/u);
+ assert.equal(isPublicSourceGateway(entry),false);
+ assert.equal(validateStagehandSourceProposal({schemaVersion:1,kind:'EXISTING_ADAPTER_SOURCE',bookingUrl:entry}).bookingUrl,entry);
  const calendar=entry+'schedule/owner123';
  assert.equal(isAcuityTenantGateway(calendar),false);
  assert.equal(validateStagehandSourceProposal({schemaVersion:1,kind:'EXISTING_ADAPTER_SOURCE',bookingUrl:calendar}).bookingUrl,calendar);

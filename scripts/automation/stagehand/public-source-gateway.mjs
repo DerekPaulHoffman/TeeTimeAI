@@ -62,7 +62,7 @@ export function isAcuityPublicCalendarDocument(value) {
       /^\/schedule\/[a-zA-Z0-9]{4,40}$/u.test(url.pathname);
   } catch { return false; }
 }
-export const isPublicSourceGateway=value=>isWhooshClubGateway(value)||isEzLinksLegacyGateway(value)||isCpsLegacyGateway(value)||isAcuityTenantGateway(value);
+export const isPublicSourceGateway=value=>isWhooshClubGateway(value)||isEzLinksLegacyGateway(value)||isCpsLegacyGateway(value);
 export function isEzLinksPublicSearchDocument(value){
   try{const url=new URL(value),tenant=/^([a-z](?:[a-z0-9-]{0,61}[a-z0-9])?)\.ezlinksgolf\.com$/u.exec(url.hostname)?.[1];
     return Boolean(typeof value==='string'&&value.length<=2048&&tenant&&!/^(?:www|api|admin|auth|login|account|portal|private|member|config|dev|qa|staging|sandbox|test)/u.test(tenant)&&url.href===value&&url.protocol==='https:'&&!url.username&&!url.password&&!url.port&&!url.search&&!url.hash&&url.pathname==='/search');
