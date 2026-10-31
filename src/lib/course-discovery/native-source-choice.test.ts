@@ -9,6 +9,14 @@ const uschedule = "https://iframe.uschedule.com/public-studio/booking";
 const capture = (patch: Partial<NativeSourceChoiceCapture> = {}): NativeSourceChoiceCapture => ({ pageUrl: "https://official.example/booking", observedAt: 1000,
   documentHash: "a".repeat(64), settled: true, links: [], frames: [teeitup], linksOverflow: false, framesOverflow: false, ...patch });
 const choose = (a: NativeSourceChoiceCapture, b = a) => uniqueNativeSupportedSource(a, b, { startedAt: 999, now: 1001, deadline: 2000 });
+it("recognizes a complete current Acuity calendar but keeps bookmarks and transaction parameters as routing only",()=>{
+ const pageUrl="https://public-bays.as.me/schedule/owner123",value=capture({pageUrl,links:[],frames:[]});
+ expect(choose(value)).toMatchObject({url:pageUrl,family:"ACUITY",via:"DOCUMENT"});
+ expect(choose({...value,links:[foreup]})).toBeNull();
+ for(const url of["https://public-bays.as.me/",pageUrl+"?appointment=1",pageUrl+"#calendar",pageUrl.replace('public-bays','admin'),pageUrl.replace('.as.me/','.as.me.evil.example/'),pageUrl.replace('https:','http:')])
+   expect(strictNativeSupportedSource(url)).toBeUndefined();
+ expect(choose(value,{...value,documentHash:"b".repeat(64)})).toBeNull();expect(choose({...value,settled:false})).toBeNull();
+});
 it("recognizes only a stable current public search document without inventing a link or frame",()=>{
  const pageUrl="https://public-course.ezlinksgolf.com/search",value=capture({pageUrl,links:[],frames:[]});
  expect(choose(value)).toMatchObject({url:pageUrl,family:"EZLINKS",via:"DOCUMENT"});

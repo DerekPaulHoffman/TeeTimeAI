@@ -5,7 +5,7 @@ import { createStagehandCodexModel } from './codex-model.mjs';
 import { classifyNavigationError, projectActionGuardDiagnostic, projectSourceDocumentReadiness, projectNativeIntermediaryPreparation, projectHostGuardFailure } from './source-diagnostic.mjs';
 import { publicEvidenceUrl } from './public-evidence.mjs';
 import { rootWidgetWitness } from './source-provenance.mjs';
-import { isPublicSourceGateway, isEzLinksPublicSearchDocument, isForeupPublicBookingDocument, isCpsPublicSearchDocument } from './public-source-gateway.mjs';
+import { isPublicSourceGateway, isEzLinksPublicSearchDocument, isForeupPublicBookingDocument, isCpsPublicSearchDocument, isAcuityPublicCalendarDocument } from './public-source-gateway.mjs';
 import { createNativeAnchorPointer } from './native-anchor-pointer.mjs';
 
 export async function loadStagehandRuntime() {
@@ -156,10 +156,10 @@ export function sourceRoutingUniqueWitness(witness,{pageUrl,startedAt,deadline,n
   if(witness===null)return null;
   const keys=value=>value&&typeof value==='object'&&!Array.isArray(value)?Object.keys(value).sort().join(','):'';
   if(keys(witness)!=='documentHash,family,kind,observedAt,pageUrl,url,via'||witness.kind!=='NATIVE_UNIQUE_SUPPORTED_SOURCE'||
-    !['FOREUP','TEEITUP','USCHEDULE','EZLINKS','CPS'].includes(witness.family)||!['LINK','FRAME','LINK_AND_FRAME','DOCUMENT'].includes(witness.via)||
+    !['FOREUP','TEEITUP','USCHEDULE','EZLINKS','CPS','ACUITY'].includes(witness.family)||!['LINK','FRAME','LINK_AND_FRAME','DOCUMENT'].includes(witness.via)||
     !isSourceRoutingUrl(witness.pageUrl)||!isSourceRoutingUrl(witness.url)||
     (witness.via==='DOCUMENT'?witness.url!==witness.pageUrl||
-      !(witness.family==='EZLINKS'&&isEzLinksPublicSearchDocument(witness.url)||witness.family==='CPS'&&isCpsPublicSearchDocument(witness.url)):witness.url===witness.pageUrl)||
+      !(witness.family==='EZLINKS'&&isEzLinksPublicSearchDocument(witness.url)||witness.family==='CPS'&&isCpsPublicSearchDocument(witness.url)||witness.family==='ACUITY'&&isAcuityPublicCalendarDocument(witness.url)):witness.url===witness.pageUrl)||
     typeof witness.documentHash!=='string'||!/^[a-f0-9]{64}$/u.test(witness.documentHash))throw Error('STAGEHAND_NATIVE_HOST_INVALID');
   const stamp=Date.parse(witness.observedAt);
   if(!Number.isFinite(stamp)||new Date(stamp).toISOString()!==witness.observedAt||stamp<startedAt||stamp>now||now>=deadline||witness.pageUrl!==pageUrl)return null;
@@ -209,7 +209,7 @@ export function validateOwnedBrowserConnection(connection) {
 export async function settleNativeLinkNavigation({ browser, page, initialPageIds, initialUrl, deadline,
   maximumWaitMs = 2500, now = Date.now, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) }) {
   if (!Number.isFinite(deadline) || deadline <= now()) throw new Error('ORIGINAL_DEADLINE_EXPIRED');
-  if (!Number.isInteger(maximumWaitMs) || maximumWaitMs < 1 || maximumWaitMs > 2500 ||
+  if (!Number.isInteger(maximumWaitMs) || maximumWaitMs < 1 || maximumWaitMs > 10000 ||
       !Array.isArray(initialPageIds) || initialPageIds.length > 128) throw new Error('NAVIGATION_OBSERVATION_OPTIONS_INVALID');
   const start = now(), end = Math.min(deadline, start + maximumWaitMs), known = new Set(initialPageIds);
   let samples = 0;
@@ -219,7 +219,7 @@ export async function settleNativeLinkNavigation({ browser, page, initialPageIds
       timer = setTimeout(() => reject(new Error('NAVIGATION_OBSERVATION_TIMEOUT')), Math.max(1, end - now()));
     })]); } finally { clearTimeout(timer); }
   };
-  while (samples < 26 && now() < end) {
+  while (samples < Math.ceil(maximumWaitMs / 100) + 1 && now() < end) {
     samples++;
     try {
       const pages = await read(browser.context.pages());
@@ -488,7 +488,8 @@ export async function openStagehandSession({ model, deadline, cwd, signal, onMet
           assertNativeSelectReadback(effectiveAction, selected);
         }
         let navigationSettlement=null;
-        try{navigationSettlement=navigationBefore?await settleNativeLinkNavigation({browser,page,deadline,...navigationBefore}):null;}
+        try{navigationSettlement=navigationBefore?await settleNativeLinkNavigation({browser,page,deadline,...navigationBefore,
+          maximumWaitMs:sourceRoutingOnly&&isPublicSourceGateway(new URL(evidence.href,sourceUrl).href)?10000:2500}):null;}
         catch(error){return annotate(error,'SETTLE');}
         const selected = navigationSettlement?.page ?? page;
         const currentPages = await checked(browser.context.pages());

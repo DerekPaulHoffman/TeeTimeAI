@@ -1,7 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isWhooshClubGateway, isEzLinksLegacyGateway, isPublicSourceGateway, isCpsLegacyGateway, isForeupPublicBookingDocument, isCpsPublicSearchDocument } from './public-source-gateway.mjs';
+import { isWhooshClubGateway, isEzLinksLegacyGateway, isPublicSourceGateway, isCpsLegacyGateway, isForeupPublicBookingDocument, isCpsPublicSearchDocument, isAcuityTenantGateway } from './public-source-gateway.mjs';
 import { validateStagehandSourceProposal } from '../course-discovery-stagehand-source.mjs';
+
+test('Acuity tenant bookmarks require observed calendar navigation before persistence', () => {
+ const entry='https://public-bays.as.me/';
+ assert.equal(isAcuityTenantGateway(entry),true);
+ assert.equal(isPublicSourceGateway(entry),true);
+ assert.throws(()=>validateStagehandSourceProposal({schemaVersion:1,kind:'EXISTING_ADAPTER_SOURCE',bookingUrl:entry}),/STAGEHAND_SOURCE_PROPOSAL_INVALID/u);
+ const calendar=entry+'schedule/owner123';
+ assert.equal(isAcuityTenantGateway(calendar),false);
+ assert.equal(validateStagehandSourceProposal({schemaVersion:1,kind:'EXISTING_ADAPTER_SOURCE',bookingUrl:calendar}).bookingUrl,calendar);
+ for(const value of [entry+'?owner=123',entry+'#calendar',entry+'checkout',entry.replace('https:','http:'),entry.replace('.as.me/','.as.me.evil.example/'),entry.replace('public-bays','admin'),entry.replace('public-bays','person@public-bays'),entry.replace('.me/','.me:444/'),entry.replace('.me/','.me./'),entry.slice(0,-1)])assert.equal(isAcuityTenantGateway(value),false,value);
+});
 import { prepareReadOnlyAction, sourceRoutingUniqueWitness } from './driver.mjs';
 
 test('a public CPS legacy bookmark must navigate to an observed current tenant',()=>{

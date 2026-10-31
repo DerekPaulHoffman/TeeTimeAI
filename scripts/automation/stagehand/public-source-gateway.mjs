@@ -43,7 +43,26 @@ export function isForeupPublicBookingDocument(value) {
       !(url.pathname.includes('/booking/index/') && ids[2]));
   } catch { return false; }
 }
-export const isPublicSourceGateway=value=>isWhooshClubGateway(value)||isEzLinksLegacyGateway(value)||isCpsLegacyGateway(value);
+/** A public Acuity tenant bookmark redirects to its published calendar owner.
+ * The owner path must be observed before inspection or recipe persistence. */
+export function isAcuityTenantGateway(value) {
+  try {
+    if (typeof value !== 'string' || value.length > 2048) return false;
+    const url = new URL(value), tenant = /^([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\.as\.me$/u.exec(url.hostname)?.[1];
+    return Boolean(tenant && !/^(?:www|app|api|admin|auth|login|account|member|private|checkout|payment)$/u.test(tenant) &&
+      url.href === value && url.protocol === 'https:' && !url.username && !url.password && !url.port &&
+      url.pathname === '/' && !url.search && !url.hash);
+  } catch { return false; }
+}
+export function isAcuityPublicCalendarDocument(value) {
+  try {
+    const url = new URL(value);
+    return typeof value === 'string' && value.length <= 2048 && url.href === value &&
+      isAcuityTenantGateway(new URL('/',url).href) && !url.search && !url.hash &&
+      /^\/schedule\/[a-zA-Z0-9]{4,40}$/u.test(url.pathname);
+  } catch { return false; }
+}
+export const isPublicSourceGateway=value=>isWhooshClubGateway(value)||isEzLinksLegacyGateway(value)||isCpsLegacyGateway(value)||isAcuityTenantGateway(value);
 export function isEzLinksPublicSearchDocument(value){
   try{const url=new URL(value),tenant=/^([a-z](?:[a-z0-9-]{0,61}[a-z0-9])?)\.ezlinksgolf\.com$/u.exec(url.hostname)?.[1];
     return Boolean(typeof value==='string'&&value.length<=2048&&tenant&&!/^(?:www|api|admin|auth|login|account|portal|private|member|config|dev|qa|staging|sandbox|test)/u.test(tenant)&&url.href===value&&url.protocol==='https:'&&!url.username&&!url.password&&!url.port&&!url.search&&!url.hash&&url.pathname==='/search');

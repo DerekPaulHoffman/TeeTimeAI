@@ -156,6 +156,16 @@ test('permitted link completion observes actual delayed popup, excludes preexist
  assert.equal(r.page,popup);assert.equal(r.changed,true);assert.ok(r.samples>=3);assert.ok(r.waitedMs>0);
 });
 
+test('a slow public gateway remains bounded by its wait and original deadline',async()=>{
+ let time=1000;const page={pageId:'original',url:async()=>'https://public.example/'},popup={pageId:'new',url:async()=>time<4200?'about:blank':'https://public-bays.as.me/schedule/owner123'};
+ const browser={context:{pages:async()=>[page,popup]}};
+ const result=await settleNativeLinkNavigation({browser,page,initialPageIds:['original'],initialUrl:'https://public.example/',deadline:12000,maximumWaitMs:10000,now:()=>time,sleep:async ms=>{time+=ms;}});
+ assert.equal(result.page,popup);assert.equal(result.changed,true);assert.equal(result.waitedMs,3200);
+ time=1000;
+ await assert.rejects(settleNativeLinkNavigation({browser,page,initialPageIds:['original'],initialUrl:'https://public.example/',deadline:3500,maximumWaitMs:10000,now:()=>time,sleep:async ms=>{time+=ms;}}),/ORIGINAL_DEADLINE_EXPIRED/u);
+ await assert.rejects(settleNativeLinkNavigation({browser,page,initialPageIds:['original'],initialUrl:'https://public.example/',deadline:12000,maximumWaitMs:10001,now:()=>1000}),/NAVIGATION_OBSERVATION_OPTIONS_INVALID/u);
+});
+
 for(const sourceRoutingOnly of[false,true])test(`private native witness precedes deterministic source navigation only in source mode=${sourceRoutingOnly}`,async()=>{
  const order=[];let current='https://owned.example/';const destination='https://public-provider.example/start';
  const witness={kind:'NATIVE_VISIBLE_DOM',pageUrl:current,observedAt:new Date().toISOString(),documentHash:'a'.repeat(64),links:[{href:destination,visible:true}]};

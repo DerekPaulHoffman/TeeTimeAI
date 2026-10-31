@@ -8,7 +8,7 @@ const MAX_SCHEDULES = 30;
 export const FOREUP_STANDARD_PUBLIC_SCOPE = "STANDARD_PUBLIC_CLASS_V1" as const;
 export function isStandardForeupPublicClassName(value: unknown): value is string {
   return typeof value === "string" && value.length <= 300 && !/[\u0000-\u001f\u007f]/u.test(value) &&
-    /^(?:public|(?:(?:spring|summer|fall|winter) )?public play|public tee times|online tee times|online booking)$/iu.test(value.trim());
+    /^(?:public|(?:(?:spring|summer|fall|winter) )?public play|public tee times|online tee times|online bookings?)$/iu.test(value.trim());
 }
 /** The generic Online Booking caption needs its explicit public configuration
  * flags as well. Missing flags, protection, disabled booking or passes do not
@@ -17,7 +17,7 @@ export function isStandardForeupPublicClass(value: unknown): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const row = value as Record<string, unknown>;
   if (!isStandardForeupPublicClassName(row.name)) return false;
-  if (!/^online booking$/iu.test(String(row.name).trim())) return true;
+  if (!/^online bookings?$/iu.test(String(row.name).trim())) return true;
   return row.online_booking_protected === "0" && row.block_online_booking === "0" && row.deleted === "0" &&
     Array.isArray(row.pass_item_ids) && row.pass_item_ids.length <= 30 && row.pass_item_ids.every(value => value === "");
 }

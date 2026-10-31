@@ -29,9 +29,22 @@ describe("explicitly unrestricted public Online Booking", () => {
     expect(parseForeupPublicConfiguration({ bookingUrl, courseName: "Bridges", html: document(online) })).toMatchObject({ scheduleId: 792, bookingClassId: 4931 });
     expect(hasCompleteForeupPublicScheduleScope({ html: document(online), facilityId: 19021, scheduleId: 792, inventoryScope: FOREUP_STANDARD_PUBLIC_SCOPE })).toBe(true);
   });
+  it("accepts the published plural caption with the same explicit public flags", () => {
+    const row = { ...online, name: "Online Bookings" };
+    expect(isStandardForeupPublicClass(row)).toBe(true);
+    expect(parseForeupPublicConfiguration({ bookingUrl, courseName: "Bridges", html: document(row) })).toMatchObject({ scheduleId: 792, bookingClassId: 4931 });
+    expect(hasCompleteForeupPublicScheduleScope({ html: document(row), facilityId: 19021, scheduleId: 792, inventoryScope: FOREUP_STANDARD_PUBLIC_SCOPE })).toBe(true);
+  });
   it.each([{ online_booking_protected: "1" }, { block_online_booking: "1" }, { deleted: "1" }, { pass_item_ids: ["123"] },
     { pass_item_ids: undefined }, { online_booking_protected: undefined }, { name: "Online Booking Members" }])("rejects absent public flags or restrictions %j", delta => {
     const row = { ...online, ...delta };
+    expect(isStandardForeupPublicClass(row)).toBe(false);
+    expect(parseForeupPublicConfiguration({ bookingUrl, courseName: "Bridges", html: document(row) })).toBeNull();
+    expect(hasCompleteForeupPublicScheduleScope({ html: document(row), facilityId: 19021, scheduleId: 792, inventoryScope: FOREUP_STANDARD_PUBLIC_SCOPE })).toBe(false);
+  });
+  it.each([{ online_booking_protected: "1" }, { block_online_booking: "1" }, { deleted: "1" }, { pass_item_ids: ["123"] },
+    { pass_item_ids: undefined }, { online_booking_protected: undefined }, { name: "Online Bookings Members" }])("keeps restrictions mandatory for plural captions %j", delta => {
+    const row = { ...online, name: "Online Bookings", ...delta };
     expect(isStandardForeupPublicClass(row)).toBe(false);
     expect(parseForeupPublicConfiguration({ bookingUrl, courseName: "Bridges", html: document(row) })).toBeNull();
     expect(hasCompleteForeupPublicScheduleScope({ html: document(row), facilityId: 19021, scheduleId: 792, inventoryScope: FOREUP_STANDARD_PUBLIC_SCOPE })).toBe(false);
