@@ -127,6 +127,8 @@ const activeSearchCourseInclude = {
   supportIncident: {
     select: {
       id: true,
+      kind: true,
+      engineeringOnly: true,
       cycle: true,
       status: true,
       resolution: true,

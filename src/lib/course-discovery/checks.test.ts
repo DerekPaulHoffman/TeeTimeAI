@@ -28,6 +28,31 @@ beforeEach(() => {
   mocked.refresh.mockResolvedValue(undefined); mocked.runnable.mockReturnValue({ isRunnable: true }); mocked.readerKey.mockReturnValue(null);
 });
 describe("failed established public-method learning", () => {
+  const failedPreference = () => ({ ...search.preferences[0], course: { ...search.preferences[0].course,
+    monitoringMode: "AUTOMATIC", supportIncident: { status: "AUTO_INVESTIGATING", kind: "READER_CANDIDATE", engineeringOnly: false },
+    monitoringStatus: { lastSuccessfulAt: new Date("2030-01-01T10:00:00Z"), lastFailureAt: new Date("2030-01-01T11:00:00Z") },
+  } }) as unknown as typeof search.preferences[number];
+  it("learns a replacement for an automatic source whose latest real reader check failed", async () => {
+    const preference = failedPreference();
+    mocked.readerKey.mockReturnValue("chronogolf:public-course");
+    expect(await getLearnedAvailability(search, preference)).toMatchObject({ state: "pending" });
+    expect(mocked.ensure).toHaveBeenCalledWith({ courseId: "course-1", kind: "OUTDOOR", searchId: "search-1" });
+  });
+  it.each(["recovered", "engineering", "resolved"])("preserves a supported %s source", async condition => {
+    const preference = failedPreference();
+    if (condition === "recovered") preference.course.monitoringStatus!.lastSuccessfulAt = new Date("2030-01-01T12:00:00Z");
+    if (condition === "engineering") preference.course.supportIncident!.engineeringOnly = true;
+    if (condition === "resolved") preference.course.supportIncident!.status = "RESOLVED";
+    expect(await getLearnedAvailability(search, preference)).toBeNull();
+    expect(mocked.ensure).not.toHaveBeenCalled();
+  });
+  it("retains an explicit reader-only route even when a generic recipe or failed reader exists", async () => {
+    const preference = failedPreference(); preference.course.monitoringMode = "LOCAL_READER_ONLY";
+    mocked.activeRecipe.mockResolvedValue({ record: { id: "recipe-1" } });
+    expect(await getLearnedAvailability(search, preference)).toBeNull();
+    expect(await queueFailedOutdoorDiscovery(search, preference, "FETCH_FAILED")).toBe(false);
+    expect(mocked.activeRecipe).not.toHaveBeenCalled(); expect(mocked.ensure).not.toHaveBeenCalled();
+  });
   it("retains the same method for a fresh success after its bounded repair fails", async () => {
     const demand = { ...simulator, date: new Date("2030-01-02T00:00:00Z"), players: 2, startTime: "10:00", endTime: "20:00" };
     mocked.activeRecipe.mockResolvedValue({ record: { id: "recipe-1", hash: "same-hash" } });

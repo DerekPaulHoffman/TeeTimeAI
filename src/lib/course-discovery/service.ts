@@ -63,7 +63,7 @@ export function isRetryableDiscoveryTransactionError(error: unknown) {
 const courseSelect = {
   id: true, name: true, address: true, phone: true, website: true, detectedBookingUrl: true, timeZone: true,
   providerFamilyKey: true, bookingMetadata: true, isPublic: true, activeAccessRecipeId: true,
-  bookingMethod: true, bookingAccessMode: true, automationEligibility: true, automationReason: true,
+  bookingMethod: true, bookingAccessMode: true, automationEligibility: true, automationReason: true, monitoringMode: true,
 } satisfies Prisma.CourseSelect;
 const offeringSelect = {
   id: true, courseId: true, kind: true, active: true, publicAccessStatus: true,
@@ -126,7 +126,7 @@ async function lockSource(tx: Tx, courseId: string) {
 }
 async function loadSource(tx: Pick<Tx, "course" | "courseOffering">, target: Pick<DiscoveryTarget, "courseId" | "offeringId">) {
   const course = await tx.course.findUnique({ where: { id: target.courseId }, select: courseSelect });
-  if (!course || !target.offeringId && course.isPublic === false) conflict();
+  if (!course || !target.offeringId && (course.isPublic === false || course.monitoringMode === "LOCAL_READER_ONLY")) conflict();
   const offering = target.offeringId ? await tx.courseOffering.findUnique({ where: { id: target.offeringId }, select: offeringSelect }) : null;
   if (target.offeringId && (!offering || offering.courseId !== course.id || offering.kind !== "SIMULATOR" || !offering.active || offering.publicAccessStatus === "NOT_PUBLIC")) conflict();
   const fingerprintIdentity = {

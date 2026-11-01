@@ -83,6 +83,11 @@ beforeEach(() => {
 });
 
 describe("bounded course discovery persistence", () => {
+  it("does not admit an explicit local-reader-only source to generic discovery", async () => {
+    course.monitoringMode = "LOCAL_READER_ONLY";
+    await expect(ensureDiscoveryJob({ courseId: "course1", searchId: "search1" })).rejects.toBeInstanceOf(DiscoveryConflictError);
+    expect(mocks.db.courseDiscoveryJob.create).not.toHaveBeenCalled();
+  });
   function locationContactRecipe() {
     const phone = "+13035551234", bookingUrl = "https://clients.uschedule.com/examplegolf/booking?filter=loc[82]";
     Object.assign(course, { phone, address: "100 Public Road, Suite C, Denver, CO 80001, USA", providerFamilyKey: "USCHEDULE", timeZone: "America/Denver" });

@@ -14,6 +14,16 @@ import { refreshMissingDiscoverySource } from "./sources";
 import { prisma } from "@/lib/prisma";
 
 type Preference = ActiveAutomationSearch["preferences"][number];
+/** Capability metadata is not evidence that the most recent read succeeded.
+ * An explicitly automatic source with a real unresolved failure may learn a
+ * replacement method. A subsequent successful read preserves its normal path. */
+function needsEstablishedMethodRecovery(course: Preference["course"]) {
+  const incident = course.supportIncident, monitoring = course.monitoringStatus;
+  return course.monitoringMode === "AUTOMATIC" && incident?.engineeringOnly === false &&
+    incident.status !== "RESOLVED" && ["READER_CANDIDATE", "FETCH_FAILED"].includes(incident.kind) &&
+    monitoring?.lastFailureAt !== null && monitoring?.lastFailureAt !== undefined &&
+    (!monitoring.lastSuccessfulAt || monitoring.lastFailureAt > monitoring.lastSuccessfulAt);
+}
 export function recipeRequestInput(search: ActiveAutomationSearch, preference: Preference) {
   return { date: search.date.toISOString().slice(0, 10), timeZone: preference.course.timeZone, players: search.players,
     startTime: search.startTime, endTime: search.endTime,
@@ -22,6 +32,7 @@ export function recipeRequestInput(search: ActiveAutomationSearch, preference: P
 export async function getLearnedAvailability(search: ActiveAutomationSearch, preference: Preference) {
   if (!await isDiscoveryPilotSearch(search.id)) return null;
   if (search.mode === "OUTDOOR" && preference.course.isPublic === false) return null;
+  if (search.mode === "OUTDOOR" && preference.course.monitoringMode === "LOCAL_READER_ONLY") return null;
   if (search.mode === "SIMULATOR" && (!preference.offering || !preference.offering.active || preference.offering.publicAccessStatus === "NOT_PUBLIC" ||
       preference.offering.monitoringState === "FINAL_IDENTITY" || preference.offering.monitoringState === "FINAL_TECHNICAL" || preference.offering.automationEligibility === "BLOCKED")) return null;
   const target: DiscoveryTarget = { courseId: preference.courseId, ...(preference.offeringId ? { offeringId: preference.offeringId } : {}), kind: search.mode };
@@ -31,7 +42,7 @@ export async function getLearnedAvailability(search: ActiveAutomationSearch, pre
     if (search.mode === "OUTDOOR" && (resolveProviderCapability(preference.course).isRunnable ||
         getLocalReaderCourseKey(preference.course.detectedBookingUrl ?? preference.course.website) !== null)) {
       const admitted = await prisma.courseDiscoveryJob.findUnique({ where: { activeTargetKey: `course:${preference.courseId}` }, select: { id: true } });
-      if (!admitted) return null;
+      if (!admitted && !needsEstablishedMethodRecovery(preference.course)) return null;
     }
     const offering = preference.offering;
     if (search.mode === "SIMULATOR" && offering?.kind === "SIMULATOR" && offering.active &&
@@ -63,7 +74,8 @@ export async function getLearnedAvailability(search: ActiveAutomationSearch, pre
 /** A failed established method may enter the same bounded learning job. The
  * ordinary check supplies the failure; successful reads never call this path. */
 export async function queueFailedOutdoorDiscovery(search: ActiveAutomationSearch, preference: Preference, outcome: SearchCheckCourseResult["outcome"]) {
-  if (!["FETCH_FAILED", "NEEDS_ADAPTER"].includes(outcome) || search.mode !== "OUTDOOR" || preference.course.isPublic === false || !await isDiscoveryPilotSearch(search.id)) return false;
+  if (!["FETCH_FAILED", "NEEDS_ADAPTER"].includes(outcome) || search.mode !== "OUTDOOR" || preference.course.isPublic === false ||
+      preference.course.monitoringMode === "LOCAL_READER_ONLY" || !await isDiscoveryPilotSearch(search.id)) return false;
   const job = await ensureDiscoveryJob({ courseId: preference.courseId, searchId: search.id });
   return Boolean(job && ["QUEUED", "RUNNING"].includes(job.status));
 }
