@@ -27,6 +27,8 @@ import { executeLightspeed, inspectLightspeed } from "./lightspeed-executor";
 import { executeAmelia, inspectAmelia } from "./amelia-executor";
 import { parseChronogolfSource } from "./chronogolf-source";
 import { executeChronogolf, inspectChronogolf } from "./chronogolf-executor";
+import { parseFiveIronSource } from "./five-iron-source";
+import { executeFiveIron, inspectFiveIron } from "./five-iron-executor";
 import { parseGolfVxSource } from "./golfvx-source";
 import { executeGolfVx, inspectGolfVx } from "./golfvx-executor";
 import { parseEzLinksSource } from "./ezlinks-source";
@@ -632,6 +634,10 @@ export async function inspectExistingAdapter(source: Source, deps: Dependencies)
     if (!source.officialUrl) fail("ADAPTER_IDENTITY_MISSING");
     return { adapter: await inspectGolfVx({ ...source, officialUrl: source.officialUrl }, deps) };
   }
+  if (parseFiveIronSource(source.bookingUrl)) {
+    if (!source.officialUrl || !source.venueAddress) fail("ADAPTER_IDENTITY_MISSING");
+    return { adapter: await inspectFiveIron(source, deps) };
+  }
   if (parseChronogolfSource(source.bookingUrl)) {
     if (!source.officialUrl) fail("ADAPTER_IDENTITY_MISSING");
     return { adapter: await inspectChronogolf({ ...source, officialUrl: source.officialUrl }, deps) };
@@ -831,7 +837,7 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
   let uscheduleSession: ReturnType<typeof createUSchedulePublicSession> | undefined;
   try {
     const adapter = existingAdapterMetadataSchema.parse(recipe.adapter);
-    const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "GOLFVX", "REX", "MINDBODY"].includes(adapter.family) || adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR";
+    const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "GOLFVX", "REX", "MINDBODY", "FIVE_IRON"].includes(adapter.family) || adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR";
     if (input.timeZone !== recipe.source.timeZone || recipe.source.providerFamily.toUpperCase() !== adapter.family ||
         (recipe.target.kind === "SIMULATOR") !== simulator || simulator && (!recipe.target.offeringId || !input.durationMinutes) ||
         adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR" && (adapter.facilityIds.length !== 1 || adapter.officialIdentityProof || adapter.officialBookingSourceProof || adapter.officialPostalConflictProof || adapter.officialDelegatedBookingProof || adapter.officialStreetTypeOmittedProof || adapter.officialContactChainProof)) fail("ADAPTER_TARGET_MISMATCH");
@@ -845,7 +851,7 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
           adapter.timeZone !== input.timeZone || adapter.durationMinutes !== input.durationMinutes || input.players > adapter.capacity) fail("ADAPTER_TARGET_MISMATCH");
       if (!deps.localCapabilities?.includes("LOCAL_CHROME")) fail("LOCAL_CHROME_REQUIRED");
     }
-    if (!["USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS", "REX", "CPS", "MINDBODY"].includes(adapter.family)) session = reader(recipe.source, deps, adapter, input);
+    if (!["USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS", "REX", "CPS", "MINDBODY", "FIVE_IRON"].includes(adapter.family)) session = reader(recipe.source, deps, adapter, input);
     const start = deps.toInstant(`${input.date}T${input.startTime}:00`, input);
     const next = new Date(`${input.date}T00:00:00Z`); next.setUTCDate(next.getUTCDate() + 1);
     const end = deps.toInstant(`${input.endTime === "24:00" ? next.toISOString().slice(0, 10) : input.date}T${input.endTime === "24:00" ? "00:00" : input.endTime}:00`, input);
@@ -882,6 +888,10 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
     }
     if (adapter.family === "AMELIA") {
       const slots = await executeAmelia(recipe.source, adapter, { courseId: recipe.target.courseId, offeringId: recipe.target.offeringId! }, input, deps);
+      return result(slots.filter(slot => new Date(slot.startsAt) > now && new Date(slot.startsAt) >= start && new Date(slot.endsAt!) <= end));
+    }
+    if (adapter.family === "FIVE_IRON") {
+      const slots = await executeFiveIron(recipe.source, adapter, input, deps);
       return result(slots.filter(slot => new Date(slot.startsAt) > now && new Date(slot.startsAt) >= start && new Date(slot.endsAt!) <= end));
     }
     if (adapter.family === "CHRONOGOLF") {

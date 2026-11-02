@@ -274,6 +274,26 @@ Do not delete customer alerts or reset attempt clocks to make the pilot pass.
 
 ## Local verification
 
+### Public simulator reader development evidence (2026-11-02)
+
+The learned-recipe executor now recognizes the Five Iron public simulator
+selection route. Discovery binds its public location catalog to the canonical
+official branch page, city and timezone. Execution rechecks that binding and
+uses only the anonymous public location and availability GETs. The saved
+method contains identifiers and bindings, never executable code or credentials.
+
+The provider labels venue wall-clock values with a `Z` suffix; the reader
+converts the observed wall time using the venue's IANA timezone rather than
+treating that suffix as UTC. One complete requested duration must be offered
+by one actual bay. Pooled bays produce one match per interval, and malformed,
+partial, changed-identity and inaccessible responses remain incomplete.
+
+A live development replay returned 17 full one-hour intervals for each of two
+dates with changed golfer context and zero model calls. This was a developer
+protocol check after a failed pilot, with no recipe activation, customer-demand
+writes or email sends. It does not establish unattended discovery, durable
+persistence, inbox timing or reuse after an actual process restart.
+
 Use only the disposable localhost `course_discovery_test` database for the
 Postgres tests; the suites reject other hosts/database names. Apply migrations
 with the local connection explicitly selected, then run the stateful suites
