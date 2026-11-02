@@ -274,7 +274,8 @@ test('core and stateless-history prompt distinguish terminal availability from a
  const history={completedAnchorClicks:[{href:booking,afterUrl:landing,eligibleBookingSource:true,landingChanged:true}]};
  const text=buildSourceDiscoveryInstruction({identity:{name:'Public Course'},target:{kind:'OUTDOOR'},input:{players:2}},[booking],null,history);
  assert.match(text,/terminal public availability provider or a self-hosted availability widget/);
- assert.match(text,/Ordinary outdoor alerts cover Standard Public inventory only/u);
+ assert.match(text,/Ordinary outdoor alerts cover Standard Public outdoor tee times only/u);
+ assert.match(text,/do not choose a Simulator Tee Times link or a simulator tenant/u);
  assert.match(text,/Member and Preferred Player inventory is excluded without trusted eligibility/u);
  assert.match(text,/link labelled Book can lead to an intermediate operator site: choose CONTINUE/);
  assert.match(text,/completed click alone does not establish a terminal source/);

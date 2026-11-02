@@ -49,8 +49,11 @@ export async function executeGolfBook(source:GolfBookSource,saved:GolfBookMetada
       if(states.length!==1||!/^status_[0-4]$/u.test(states[0]))throw Error("ADAPTER_AVAILABILITY_SCHEMA_CHANGED");
       if(states[0]!=="status_1")continue;
       const action=/^redirect\('reserve','date=(\d{10})&lane=([1-9]\d{0,9})&templateId=([1-9]\d{0,9})'\);?$/u.exec(attr(cell,"onclick"));
-      const at=deps.toInstant(`${input.date}T${String(Math.floor(minute/60)).padStart(2,"0")}:${String(minute%60).padStart(2,"0")}:00`,input);
-      if(!action||action[2]!==saved.resourceIds[i]||action[3]!==saved.templateId||Number(action[1])*1000!==at.getTime())throw Error("ADAPTER_AVAILABILITY_SCHEMA_CHANGED");free[i].add(minute);
+      // The publisher encodes the displayed venue wall clock as a UTC-shaped
+      // epoch. Validate that label first; convert to an IANA instant only when
+      // producing a slot. Comparing this value to a zoned instant shifts it.
+      const wallClock=`${input.date}T${String(Math.floor(minute/60)).padStart(2,"0")}:${String(minute%60).padStart(2,"0")}:00.000Z`;
+      if(!action||action[2]!==saved.resourceIds[i]||action[3]!==saved.templateId||new Date(Number(action[1])*1000).toISOString()!==wallClock)throw Error("ADAPTER_AVAILABILITY_SCHEMA_CHANGED");free[i].add(minute);
     }
   }
   const slots:AccessExecutionResult["slots"]=[];

@@ -58,6 +58,10 @@ export function resolveTeeItUpRecipeFacilities(source: { bookingUrl: string; ven
   delegatedProof?: TeeItUpDelegatedBookingProof, omittedProof?: TeeItUpStreetTypeOmittedProof, configuration?: TeeItUpBookingConfiguration,
   contactProof?: TeeItUpOfficialContactChainProof) {
   const booking = parseTeeItUpRecipeSource(source.bookingUrl);
+  // A shared venue name/address does not turn its explicitly named simulator
+  // tenant into an outdoor tee sheet, even when the directory flag is stale.
+  if (offeringKind === "OUTDOOR" && booking && /(?:^|-)(?:simulators?|indoor)(?:-|$)/u.test(booking.alias))
+    throw new Error("ADAPTER_TARGET_MISMATCH");
   const parsed = z.array(facility).min(1).max(100).safeParse(value);
   if (offeringKind === "SIMULATOR" && (officialProof || bookingProof || postalProof || delegatedProof || omittedProof || contactProof) ||
       [officialProof, bookingProof, postalProof, delegatedProof, omittedProof, contactProof].filter(Boolean).length > 1) throw new Error("ADAPTER_IDENTITY_MISMATCH");

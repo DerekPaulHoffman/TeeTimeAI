@@ -12,6 +12,21 @@ const rows = [
 ];
 const selectedSource = { ...source, officialUrl: "https://harbor.example/", providerFamily: "TEEITUP", bookingUrl: "https://harbor.book.teeitup.com/?course=11" };
 const qualified = { ...rows[0], name: "Harbor Golf Club, NY", country: "US", region: "NY" };
+
+it.each(["harbor-simulator", "harbor-country-club-simulators", "indoor-harbor"])("rejects the explicitly separate %s tenant for outdoor inventory even with a stale directory flag", alias => {
+  const source = { ...selectedSource, bookingUrl: `https://${alias}.book.teeitup.com/?course=11` };
+  expect(() => resolveTeeItUpRecipeFacilities(source, [{ ...qualified, isSimulator: false }])).toThrow("ADAPTER_TARGET_MISMATCH");
+});
+it("keeps an older serialized outdoor method pointed at a simulator tenant incomplete instead of EMPTY", async () => {
+  const fetch = vi.fn<typeof globalThis.fetch>(async () => Response.json([{ ...qualified, isSimulator: false }]));
+  const result = await executeExistingAdapterRecipe({ schemaVersion: 1, engine: "EXISTING_ADAPTER", target: { courseId: "example", kind: "OUTDOOR" },
+    source: { ...selectedSource, bookingUrl: "https://harbor-simulator.book.teeitup.com/" }, adapter: { family: "TEEITUP", alias: "harbor-simulator", facilityIds: [11] } },
+    { date: "2030-10-27", players: 2, startTime: "08:00", endTime: "18:00", timeZone: source.timeZone },
+    { fetch, recipeHash: "a".repeat(64), venueMatches: venueProofMatches, toInstant: recipeTimeToInstant,
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }) });
+  expect(result).toMatchObject({ complete: false, status: "INCOMPLETE", slots: [], evidence: { reason: "ADAPTER_TARGET_MISMATCH" } });
+  expect(fetch).toHaveBeenCalledTimes(1);
+});
 describe("selected US state-qualified outdoor identity", () => {
   it("strips only the exact matching terminal state for comparison, preserving original directory facts", () => {
     const result = resolveTeeItUpRecipeFacilities(selectedSource, [qualified]);

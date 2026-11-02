@@ -36,7 +36,7 @@ import assert from 'node:assert/strict';
 import {mkdtempSync,readFileSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
-import {sourceDiscover as sourceDiscoverWithRealClock} from './source-discovery.mjs';
+import {sourceDiscover as sourceDiscoverWithRealClock,sourceFitsRequestedOffering} from './source-discovery.mjs';
 import {sourceRoutingUniqueWitness,openStagehandSession} from './driver.mjs';
 import {validateStagehandSourceReport,createStagehandSourceCheckpoint,readStagehandSourceCheckpoint} from '../course-discovery-stagehand-source.mjs';
 const official='https://official.example/',booking='https://public-course.book.teeitup.com/';
@@ -46,6 +46,16 @@ const job=()=>{const t=Date.now();return{id:'native-source-job',attempts:1,sourc
 function fixture(witness){let calls=0,evaluations=0;const current=official,completed=[];return{get calls(){return calls;},session:{startupMs:1,browser:{context:{addInitScript:async()=>{}}},page:{url:async()=>current,evaluate:async()=>++evaluations%2===0?[]:({url:current,observedAt:new Date().toISOString(),links:[],frames:[],dom:[]})},goto:async()=>({status:()=>200}),observeUniqueSource:async()=>typeof witness==='function'?witness():witness,extract:async(_instruction,schema)=>{calls++;completed.push({model:'gpt-6.1-sol',effort:'medium',usage:{totalTokens:1}});return{data:schema.parse({decision:'UNRESOLVED',reason:'No source',nextActionInstruction:'',bookingUrl:null})};},get localCodexCalls(){return completed;},get modelCallCounts(){return{attempted:calls};},close:async()=>({browserClosed:true,modelClosed:true})}};}
 const witness=(patch={})=>({kind:'NATIVE_UNIQUE_SUPPORTED_SOURCE',pageUrl:official,url:booking,family:'TEEITUP',via:'FRAME',documentHash:'b'.repeat(64),observedAt:new Date().toISOString(),...patch});
 const widgetWitness=(patch={})=>({kind:'NATIVE_ROOT_PUBLIC_WIDGET',pageUrl:official,observedAt:new Date().toISOString(),documentHash:'c'.repeat(64),widgetKind:'CALENDAR',...patch});
+
+test('an explicitly separate simulator tenant cannot end outdoor routing through the native shortcut',async()=>{
+ const url='https://public-course-simulator.book.teeitup.com/',f=fixture(()=>witness({url}));
+ const r=await sourceDiscover({job:job(),sessionFactory:async()=>f.session});
+ assert.equal(r.outcome,'UNRESOLVED');assert.equal(r.decisionOrigin,undefined);assert.equal(f.calls,1);
+ assert.ok(!r.eligibleBookingSourceUrls.includes(url));
+ assert.equal(sourceFitsRequestedOffering(url,'SIMULATOR'),true);
+ assert.equal(sourceFitsRequestedOffering(booking,'OUTDOOR'),true);
+ assert.equal(sourceFitsRequestedOffering('https://simulator-venue.example/tee-times','OUTDOOR'),true);
+});
 
 test('404 compact negative routing history survives own checkpoint and can only exclude, never grant a failed source',async()=>{
  const input=job(),f=fixture(()=>witness()),r=await sourceDiscover({job:input,sessionFactory:async()=>f.session}),failed=official+'missing';

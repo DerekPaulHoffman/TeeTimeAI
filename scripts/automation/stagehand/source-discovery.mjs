@@ -81,6 +81,14 @@ export function sourceDecisionFor(candidates, frames=[]) {
       if(value.decision==='OPEN_FRAME'&&!frames.includes(value.bookingUrl))ctx.addIssue({code:'custom',message:'Frame choice must be one exact fresh native frame enum value'});
     });
 }
+/** Negative routing evidence only; an unmarked URL still needs full identity,
+ * offering, inventory and independent replay proof. Never rewrite a tenant. */
+export function sourceFitsRequestedOffering(value, kind) {
+  if(kind!=='OUTDOOR')return true;
+  try{const u=new URL(value),tenant=/^([a-z0-9-]+)\.(?:book|play)\.teeitup\.(?:com|golf)$/u.exec(u.hostname);
+    return !tenant||!/(?:^|-)(?:simulators?|indoor)(?:-|$)/u.test(tenant[1]);
+  }catch{return false}
+}
 export function readHybridSourceExport(value, candidates) {
   const decision = sourceDecision.parse(value);
   if (decision.decision !== 'SOURCE_FOUND' || !candidates.includes(decision.bookingUrl)) throw new Error('ADAPTER_SOURCE_NOT_OBSERVED');
@@ -112,7 +120,7 @@ export function buildSourceDiscoveryInstruction(ordinaryRequest, candidates, pri
 }
 function sourceDiscoveryCoreInstruction(ordinaryRequest, candidates, priorInspectionFeedback = null) {
   const scope = ordinaryRequest?.target?.kind === 'OUTDOOR'
-    ? 'Ordinary outdoor alerts cover Standard Public inventory only. Member and Preferred Player inventory is excluded without trusted eligibility, and this source-only job provides none.'
+    ? 'Ordinary outdoor alerts cover Standard Public outdoor tee times only. A venue can publish separate simulator and outdoor booking links at the same address. Follow its outdoor Tee Times or Book Now page; do not choose a Simulator Tee Times link or a simulator tenant. Member and Preferred Player inventory is excluded without trusted eligibility, and this source-only job provides none.'
     : 'For simulator alerts seek public whole-bay golf rentals only; Member or Preferred Player access requires trusted eligibility, and this source-only job provides none.';
   return `${scope} Never enter account or booking flows to establish eligibility. ${sourceDiscoveryRoutingInstruction(ordinaryRequest, candidates, priorInspectionFeedback)}`;
 }
@@ -373,7 +381,7 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
       }
       if(Buffer.byteLength(JSON.stringify(report))>1500000){report.officialLinkLedger.pop();report.frameLedger.pop();throw fail('SOURCE_EVIDENCE_LIMIT');}
       const failedRoutes=report.notFoundRecovery?[report.notFoundRecovery.failedUrl,report.notFoundRecovery.targetUrl]:[];
-      const candidates=observedBookingSourceCandidates(report,request.identity.officialUrl,sourceRoutingUrl,{sourceDiscoveryOnly:true}).filter(url=>!failedRoutes.includes(url));
+      const candidates=observedBookingSourceCandidates(report,request.identity.officialUrl,sourceRoutingUrl,{sourceDiscoveryOnly:true}).filter(url=>!failedRoutes.includes(url)&&sourceFitsRequestedOffering(url,request.target.kind));
       report.eligibleBookingSourceUrls=candidates;report.sourceRoutingContext=sourceRoutingContext(report,candidates);
       if(nativeChoice&&candidates.includes(nativeChoice.url)&&!isPublicSourceGateway(nativeChoice.url)&&!isAcuityTenantGateway(nativeChoice.url)){
         finalDecision=null; // The stopping choice is native, not an earlier model decision.

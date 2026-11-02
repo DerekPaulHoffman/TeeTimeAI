@@ -10,7 +10,7 @@ const input = {date:"2030-01-02",players:2,timeZone:source.timeZone,startTime:"0
 const identity = `<a href="https://www.venue.example/?utm_source=golfbooking">Example Golf Simulator</a><a href="https://maps.google.com?q=100 Post Road East, Exampletown CT, 06880">100 Post Road East, Exampletown CT, 06880</a>`;
 function page(date:string,selected:boolean,change=""){
   const button=`<button id="btn_tee_sheet" onclick="redirect('bookingsheet', 'date=${date}&templateId=12')">Simulators</button>`;
-  const stamp=Date.parse(`${date}T15:00:00Z`)/1000;
+  const stamp=Date.parse(`${date}T10:00:00Z`)/1000;
   const rows=Array.from({length:5},(_,i)=>`<tr><td class="time-col">${10+Math.floor(i/4)}:${String(i*15%60).padStart(2,"0")} AM</td>${["1","2"].map((resource,j)=>{
     const free=change==="disjoint"?(j===0?i<2:i>=2):change!=="gap"||j!==0||i!==2;
     return `<td class="status_${free?1:2}" ${free?`onclick="redirect('reserve','date=${stamp+i*900}&lane=${resource}&templateId=12')"`:""}>${free?"Available":"Unavailable"}</td>`;
@@ -58,6 +58,11 @@ describe("learned public GolfBook simulator category",()=>{
     const second=await executeExistingAdapterRecipe(method,{...input,date:"2030-01-03",players:3},deps());
     expect(first.slots).toHaveLength(4);expect(second.slots).toHaveLength(4);
     expect(second.slots[0].startsAt).toBe("2030-01-03T15:00:00.000Z");expect(second.complete).toBe(true);
+  });
+  it.each([["2030-01-02","2030-01-02T15:00:00.000Z"],["2030-07-02","2030-07-02T14:00:00.000Z"]])("converts the published wall-time epoch using the venue offset on %s",async(date,expected)=>{
+    const r=await executeExistingAdapterRecipe(await learned(),{...input,date},deps());
+    expect(r).toMatchObject({status:"AVAILABLE",complete:true});expect(r.slots[0].startsAt).toBe(expected);
+    expect(Date.parse(r.slots[0].endsAt!)-Date.parse(r.slots[0].startsAt)).toBe(3600000);
   });
   it.each(["foreign","karaoke","timezone","resource","template","wrongDate","name","official","hidden"])("keeps %s drift incomplete rather than empty",async change=>{
     const r=await executeExistingAdapterRecipe(await learned(),input,deps(change));expect(r.complete).toBe(false);expect(r.status).not.toBe("EMPTY");expect(r.slots).toEqual([]);

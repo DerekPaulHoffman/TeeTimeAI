@@ -321,6 +321,24 @@ protocol check after a failed pilot, with no recipe activation, customer-demand
 writes or email sends. It does not establish unattended discovery, durable
 persistence, inbox timing or reuse after an actual process restart.
 
+The November 2 Green Woods / Tallwood / Clubhouse Westport cold cohort passed
+only one of three targets. Green Woods persisted its method and 51 matches;
+its matching email reached Gmail 129 seconds after first pickup. Tallwood
+incorrectly accepted the venue's separately named simulator tenant as its
+outdoor source. Clubhouse's independent replay rejected a wall-clock epoch
+as though it were an absolute instant. The original deadlines and failed
+outcomes remain preserved. This is not three-venue acceptance or restart proof.
+
+Outdoor TeeItUp routing now excludes explicitly named simulator/indoor tenants,
+and fixed execution rejects those tenants even when an older directory flag
+labels them outdoor. Other names, complete addresses and timezone checks remain
+required. GolfBook verifies its published wall-clock epoch against the displayed
+date/time, then converts the resulting opening with the venue's IANA timezone.
+Focused winter/summer and wrong-template/time tests guard the conversion. A
+developer replay found 101 full-hour intervals on November 5 and 40 on November
+6, with changed golfer context and zero model calls. That replay did not
+activate a production recipe, save demand or send email.
+
 Use only the disposable localhost `course_discovery_test` database for the
 Postgres tests; the suites reject other hosts/database names. Apply migrations
 with the local connection explicitly selected, then run the stateful suites
