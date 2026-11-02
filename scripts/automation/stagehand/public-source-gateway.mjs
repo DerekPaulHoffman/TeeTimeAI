@@ -58,8 +58,19 @@ export function isAcuityPublicCalendarDocument(value) {
   try {
     const url = new URL(value);
     return typeof value === 'string' && value.length <= 2048 && url.href === value &&
-      isAcuityTenantGateway(new URL('/',url).href) && !url.search && !url.hash &&
+      !url.username && !url.password && !url.port &&
+      (url.origin === 'https://app.acuityscheduling.com' || isAcuityTenantGateway(new URL('/',url).href)) && !url.search && !url.hash &&
       /^\/schedule\/[a-zA-Z0-9]{4,40}$/u.test(url.pathname);
+  } catch { return false; }
+}
+/** Exact observed legacy bookmark only. No owner or canonical key is inferred. */
+export function isAcuityLegacyCalendarGateway(value) {
+  try {
+    const url=new URL(value),fields=url.search.slice(1).split('&'),keys=[...url.searchParams.keys()];
+    return typeof value==='string'&&value.length<=2048&&url.href===value&&url.origin==='https://app.acuityscheduling.com'&&
+      !url.username&&!url.password&&!url.port&&!url.hash&&url.pathname==='/schedule.php'&&
+      fields.length>=1&&fields.length<=2&&new Set(keys).size===fields.length&&keys.includes('owner')&&
+      fields.every(field=>/^(?:owner=[1-9]\d{0,9}|ref=embedded_csp)$/u.test(field));
   } catch { return false; }
 }
 export const isPublicSourceGateway=value=>isWhooshClubGateway(value)||isEzLinksLegacyGateway(value)||isCpsLegacyGateway(value);

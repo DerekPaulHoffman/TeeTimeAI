@@ -418,8 +418,13 @@ export async function sourceDiscover({ job, cwd = process.cwd(), deadlineAt, sig
         ' Current bounded public evidence: '+JSON.stringify(prioritizedPublicEvidence(evidence,{maxCharacters:60000,includeDom:false}));
       phase='EXTRACT';const extraction=await bounded(()=>session.extract(instruction,sourceDecisionFor(candidates,frames))),decision=sourceDecisionFor(candidates,frames).parse(extraction.data);
       finalDecision=decision.decision;report.metrics.completedSteps=step+1;report.evidenceSummary=safeReason(decision.reason);await persist();
-      const routingFrame=decision.decision==='SOURCE_FOUND'&&routingOnlyFrameEntry(decision.bookingUrl);
-      const routingGateway=decision.decision==='SOURCE_FOUND'&&(isPublicSourceGateway(decision.bookingUrl)||isAcuityTenantGateway(decision.bookingUrl));
+      // The URL shape can appear in either an iframe or an ordinary link.
+      // Only a fresh frame witness grants the frame-opening operation; linked
+      // gateways must use the normal guarded visible-link navigation instead.
+      const routingEntry=decision.decision==='SOURCE_FOUND'&&routingOnlyFrameEntry(decision.bookingUrl);
+      const routingLink=routingEntry&&evidence.links.some(link=>link.href===decision.bookingUrl&&link.visible===true);
+      const routingFrame=routingEntry&&(frames.includes(decision.bookingUrl)||!routingLink);
+      const routingGateway=decision.decision==='SOURCE_FOUND'&&(routingEntry||isPublicSourceGateway(decision.bookingUrl)||isAcuityTenantGateway(decision.bookingUrl));
       if(decision.decision==='SOURCE_FOUND'&&!routingFrame&&!routingGateway){report.adapterSourceProposal=readHybridSourceExport(decision,candidates);report.outcome='SOURCE_PROPOSED_UNVERIFIED';stopCondition='SOURCE_FOUND';break;}
       if(decision.decision==='UNRESOLVED'){
         // A model's old snapshot cannot close discovery while the same native

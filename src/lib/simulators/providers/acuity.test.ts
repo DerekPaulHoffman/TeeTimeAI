@@ -27,6 +27,47 @@ function mockReads(payload: unknown = { "2026-10-10": [{ time: "2026-10-10T08:00
   return vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(html, { headers: { "Content-Type": "text/html" } })).mockResolvedValueOnce(new Response(JSON.stringify(payload), { headers: { "Content-Type": "application/json" } }));
 }
 
+function describedSingleBayBusiness() {
+  return { ...business(), description: "Public sports venue", calendars: { "Example Town": [
+    { id: 501, name: "Golf Simulator", timezone: input.timeZone },
+    { id: 502, name: "Other public activities", timezone: input.timeZone },
+  ] }, appointmentTypes: { "Golf": [60, 120].map((duration, index) => ({
+    id: 101 + index, name: `Golf Simulator - ${duration / 60} Hour`, duration, active: true, private: false,
+    type: "service", classSize: null as number | null, canChooseQuantity: false, calendarIDs: [501], paddingBefore: 0, paddingAfter: 0,
+    description: "Our single bay golf simulator is available for hourly reservation.",
+  })) } };
+}
+describe("explicit public single simulator resource", () => {
+  it("discovers only published rental products and replays changed dates without inventing party capacity", async () => {
+    const value = describedSingleBayBusiness(), html = `<script>var BUSINESS = ${JSON.stringify(value)};</script>`;
+    const configuration = projectAcuityPublicConfiguration(html, input.offering.bookingUrl);
+    expect(configuration?.rentals).toEqual([60, 120].map((durationMinutes, i) => ({ id: String(101 + i), durationMinutes, calendarIds: ["501"] })));
+    expect(configuration?.maxPartySize).toBeNull();
+    for (const [date, partySize] of [["2026-10-10", 2], ["2026-10-11", 3]] as const) {
+      const fetch = mockReads({ [date]: [{ time: `${date}T10:00:00-0400`, slotsAvailable: 1 }] }, html);
+      const result = await fetchAcuitySimulatorAvailability({ ...input, date, partySize, durationMinutes: 60,
+        offering: { ...input.offering, maxPartySize: null, providerMetadata: { ownerKey: value.ownerKey, rentalProductIds: ["101", "102"] } } }, fetch);
+      expect(result).toMatchObject({ complete: true, slots: [{ resourceId: "ANY", maxPartySize: null }] });
+      expect(result.slots[0].endsAt.getTime() - result.slots[0].startsAt.getTime()).toBe(3600000);
+      expect(fetch).toHaveBeenCalledTimes(2);
+    }
+  });
+  it.each(["description", "duration", "prepaid", "private", "class", "calendar", "timezone", "duplicate"])(
+    "refuses an uncorroborated single simulator %s", change => {
+      const value = describedSingleBayBusiness();value.appointmentTypes.Golf = [value.appointmentTypes.Golf[0]];
+      const product = value.appointmentTypes.Golf[0];
+      if (change === "description") product.description = "Available appointments";
+      if (change === "duration") product.duration = 120;
+      if (change === "prepaid") product.name = "Pre-Paid Golf Booking";
+      if (change === "private") product.private = true;
+      if (change === "class") { product.type = "class";product.classSize = 4; }
+      if (change === "calendar") value.calendars["Example Town"][0].name = "Unverified room";
+      if (change === "timezone") value.calendars["Example Town"][0].timezone = "America/Chicago";
+      if (change === "duplicate") value.calendars["Example Town"].push({ ...value.calendars["Example Town"][0] });
+      expect(projectAcuityPublicConfiguration(`<script>var BUSINESS = ${JSON.stringify(value)};</script>`, input.offering.bookingUrl)).toBeUndefined();
+    });
+});
+
 const pooledUrl = "https://app.acuityscheduling.com/schedule/pool1234";
 function pooledBusiness() {
   return { ...business(), name: "Example Simulator Pool", ownerKey: "pool1234", description: "Public simulator rental",

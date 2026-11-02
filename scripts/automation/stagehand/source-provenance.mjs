@@ -1,6 +1,6 @@
 // Fixed collector provenance only. This module performs no I/O or navigation.
 import { publicEvidenceUrl } from './public-evidence.mjs';
-import { isEzLinksLegacyGateway, isCpsLegacyGateway, isCpsPublicSearchDocument, isAcuityTenantGateway, isAcuityPublicCalendarDocument } from './public-source-gateway.mjs';
+import { isEzLinksLegacyGateway, isCpsLegacyGateway, isCpsPublicSearchDocument, isAcuityTenantGateway, isAcuityPublicCalendarDocument, isAcuityLegacyCalendarGateway } from './public-source-gateway.mjs';
 export const SOURCE_CANDIDATE_LIMIT = 160;
 export const SOURCE_CANDIDATE_URL_BYTES = 65536;
 /** Private controller history events on a completed, unchanged native document.
@@ -154,8 +154,8 @@ export function nativeLegacyGatewayLandings(report, isPublic = publicEvidenceUrl
   if(!Number.isFinite(started))return result;
   for(const action of nativeLinkActions(report)){
     const href=norm(action.observedTarget.href),after=norm(action.afterUrl),source=norm(action.sourceUrl);
-    const acuity=isAcuityTenantGateway(href)&&isAcuityPublicCalendarDocument(after)&&new URL(href).origin===new URL(after).origin;
-    const caption=action.observedTarget.text?.replace(/\s+/gu,' ').trim()??'';
+    const acuity=(isAcuityTenantGateway(href)||isAcuityLegacyCalendarGateway(href))&&isAcuityPublicCalendarDocument(after)&&new URL(href).origin===new URL(after).origin;
+    const caption=(action.observedTarget.text?.replace(/\s+/gu,' ').trim()??'').replace(/\s+[↗→]\uFE0F?$/u,'');
     if((isCpsLegacyGateway(href)&&isCpsPublicSearchDocument(after)||acuity)&&source&&isPublic(source)&&
       (acuity?/^(?:book now|(?:book|reserve) (?:a |your )?(?:tee times?|bay))$/iu:/^(?:book|reserve) (?:a |your )?tee times?$/iu).test(caption)&&
       !/\b(?:member|preferred|account|sign.?in|log.?in)\b/iu.test(action.observedTarget.label??'')){

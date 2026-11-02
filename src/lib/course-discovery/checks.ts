@@ -4,6 +4,7 @@ import { recordCourseMonitoringSuccess } from "@/lib/automation/course-monitorin
 import { resolveProviderCapability } from "@/lib/automation/provider-capabilities";
 import { getAutomationRuntimeVersion } from "@/lib/automation/runtime-version";
 import { getLocalReaderCourseKey } from "@/lib/local-reader/service";
+import { LOCAL_READER_COURSE_KEYS } from "@/lib/local-reader/course-key";
 import { RUNNABLE_SIMULATOR_PROVIDER_FAMILIES } from "@/lib/simulators/providers";
 import { SimulatorAvailabilityError } from "@/lib/simulators/providers/types";
 import type { SearchCheckCourseResult } from "@/lib/automation/search-check";
@@ -38,9 +39,14 @@ export async function getLearnedAvailability(search: ActiveAutomationSearch, pre
   const target: DiscoveryTarget = { courseId: preference.courseId, ...(preference.offeringId ? { offeringId: preference.offeringId } : {}), kind: search.mode };
   const recipe = await getActiveAccessRecipe(target);
   if (!recipe) {
-    // Preserve established supported paths; learning handles unknown/unconfigured sources.
+    // A dynamic reader key only recognizes a URL shape. It does not prove that
+    // the course still uses that provider or that an executable method exists.
+    // Preserve typed adapters and the explicitly installed static readers;
+    // unconfigured dynamic sources must learn from the current official site.
+    const readerKey = getLocalReaderCourseKey(preference.course.detectedBookingUrl ?? preference.course.website);
+    const establishedStaticReader = LOCAL_READER_COURSE_KEYS.some(key => key === readerKey);
     if (search.mode === "OUTDOOR" && (resolveProviderCapability(preference.course).isRunnable ||
-        getLocalReaderCourseKey(preference.course.detectedBookingUrl ?? preference.course.website) !== null)) {
+        establishedStaticReader)) {
       const admitted = await prisma.courseDiscoveryJob.findUnique({ where: { activeTargetKey: `course:${preference.courseId}` }, select: { id: true } });
       if (!admitted && !needsEstablishedMethodRecovery(preference.course)) return null;
     }

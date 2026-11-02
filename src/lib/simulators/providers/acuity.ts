@@ -120,10 +120,11 @@ function selectPublicRentalProduct(business: Record<string, unknown>, rentalIds:
   // An operator-reviewed ID still needs a current rental identity. League,
   // membership, instruction and fitting appointments are never rental stock.
   const namedBay = namedBayRental(name, durationMinutes);
+  const describedSingleBay = describedSingleSimulatorRental(product, durationMinutes);
   const sessionRental = durationOnlySimulatorSession(business, product, durationMinutes);
   const aggregateHours = aggregateRentalHours(name);
   const aggregate = aggregateHours > 0 && aggregateHours * 60 === durationMinutes;
-  if (!namedBay && !aggregate && !sessionRental) throw sourceError("The reviewed simulator product is not a public rental");
+  if (!namedBay && !describedSingleBay && !aggregate && !sessionRental) throw sourceError("The reviewed simulator product is not a public rental");
   const calendarIds = Array.isArray(product.calendarIDs) ? product.calendarIDs.map(String) : [];
   if (calendarIds.includes("any")) {
     if (sessionRental) throw resourceIdentityError(sourceError("The public simulator session needs named bay calendars"),
@@ -182,7 +183,8 @@ function selectPublicRentalProduct(business: Record<string, unknown>, rentalIds:
     const matches = calendars.filter((item) => String(item.id) === id);
     if (matches.length !== 1) throw resourceIdentityError(sourceError("The public simulator product belongs to an unverified resource calendar"),
       { reason: "CALENDAR_MATCH_AMBIGUOUS" });
-    if (!numberedBayName(matches[0].name)) {
+    if (!numberedBayName(matches[0].name) && !(describedSingleBay && calendarIds.length === 1 &&
+        normalizePlainName(matches[0].name, 120) === "golf simulator")) {
       const name = normalizePlainName(matches[0].name, 120), venueName = normalizePlainName(business.name, 120);
       throw resourceIdentityError(sourceError("The public simulator product belongs to an unverified resource calendar"),
         { reason: "CALENDAR_NAME_UNVERIFIED", calendarNameKind: !name ? "MISSING_OR_INVALID" : venueName && name === venueName ? "VENUE_NAME" : "OTHER" });
@@ -202,6 +204,18 @@ function namedBayRental(name: string, durationMinutes: number) {
   if (/\b(?:simulator|bay)\b/iu.test(name) && /\b(?:booking|rental|reservation|time)\b/iu.test(name) &&
       !/\b(?:league|member|lesson|fitting|handicap)\b/iu.test(name)) return true;
   return durationLabelledSimRental(name, durationMinutes);
+}
+
+/** A published single bay is a real resource even when it has no bay number.
+ * The exact service label, plain public rental description, attached calendar
+ * and timezone are rechecked on every read; unrelated/prepaid products stay out. */
+function describedSingleSimulatorRental(product: Record<string, unknown>, durationMinutes: number) {
+  const hours = normalizePlainName(product.name, 80)?.match(/^golf simulator - (0\.5|[1-4](?:\.5)?) hours?$/u)?.[1];
+  const description = product.description;
+  return hours !== undefined && Number(hours) * 60 === durationMinutes && typeof description === "string" &&
+    description.length <= 4000 && !/[<>]/u.test(description) &&
+    /\bsingle bay golf simulator\b/iu.test(description) && /\bavailable for hourly reservation\b/iu.test(description) &&
+    !/\b(?:pre[- ]?paid|members?|membership|leagues?|lessons?|fittings?|classes?|not available)\b/iu.test(description);
 }
 
 function durationOnlySimulatorSession(business: Record<string, unknown>, product: Record<string, unknown>, durationMinutes: number) {
@@ -331,6 +345,7 @@ export function inspectAcuityPublicConfiguration(html: string, sourceUrl: string
       PUBLIC_ID.test(String(row.id)) && Number.isInteger(row.duration) && Number(row.duration) >= 30 && Number(row.duration) <= 240 && Number(row.duration) % 30 === 0 &&
       row.active === true && row.private === false && row.type === "service" && row.classSize === null && row.canChooseQuantity === false &&
       typeof row.name === "string" && (namedBayRental(row.name, Number(row.duration)) ||
+        describedSingleSimulatorRental(row, Number(row.duration)) ||
         durationOnlySimulatorSession(business, row, Number(row.duration)) ||
         aggregateRentalHours(row.name) > 0 && aggregateRentalHours(row.name) * 60 === Number(row.duration)));
     contractField = "RENTAL_IDENTITY";

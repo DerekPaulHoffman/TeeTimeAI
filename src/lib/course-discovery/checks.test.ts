@@ -81,11 +81,17 @@ describe("failed established public-method learning", () => {
     expect(await getLearnedAvailability(search, search.preferences[0])).toMatchObject({ state: "pending" });
   });
   it("joins a failed local-reader method only after a discovery job was admitted", async () => {
-    mocked.runnable.mockReturnValue({ isRunnable: false }); mocked.readerKey.mockReturnValue("known-reader-key");
+    mocked.runnable.mockReturnValue({ isRunnable: false }); mocked.readerKey.mockReturnValue("simsbury-farms");
     expect(await getLearnedAvailability(search, search.preferences[0])).toBeNull();
     mocked.activeJob.mockResolvedValue({ id: "job-1" });
     expect(await getLearnedAvailability(search, search.preferences[0])).toMatchObject({ state: "pending" });
   });
+  it.each(["cps:public-course.cps.golf", "chronogolf:public-course", "tenfore:public-course"])(
+    "a recognized dynamic reader URL %s is not an established saved method", async key => {
+      mocked.runnable.mockReturnValue({ isRunnable: false }); mocked.readerKey.mockReturnValue(key);
+      expect(await getLearnedAvailability(search, search.preferences[0])).toMatchObject({ state: "pending" });
+      expect(mocked.ensure).toHaveBeenCalledWith({ courseId: "course-1", kind: "OUTDOOR", searchId: "search-1" });
+    });
   it("does not reopen exhausted jobs or enroll a non-pilot", async () => {
     mocked.ensure.mockResolvedValue({ id: "job-1", status: "FAILED" });
     expect(await queueFailedOutdoorDiscovery(search, search.preferences[0], "FETCH_FAILED")).toBe(false);

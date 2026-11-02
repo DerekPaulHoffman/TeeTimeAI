@@ -113,9 +113,17 @@ function acuityVenueMatches(source: Source, observed: string, matches: Dependenc
   // stripped from arbitrary provider prose or applied to another family.
   if (!source.officialUrl || !isSafeRecipeUrl(source.officialUrl) || new URL(source.officialUrl).protocol !== "https:" ||
       !source.venueName || source.venueName.length > 200 || /[<>\p{Cc}]/u.test(source.venueName)) return false;
+  const normalize = (value: string) => value.normalize("NFKC").replace(/\s+/gu, " ").trim().toLocaleLowerCase("en-US");
+  // An omitted terminal company designation does not change the business
+  // name. Keep every brand/location word, require the canonical public source
+  // above, and apply this only to Acuity's business-name field. Postal parsing
+  // is necessary only for the separate locality-qualified alternate below.
+  const companyCore = (value: string) => normalize(value).replace(/(?:,)?\s+(?:co\.?|company)$/u, "");
+  const canonicalCore = companyCore(source.venueName), observedCore = companyCore(observed);
+  if (canonicalCore === observedCore && canonicalCore.replace(/[^\p{L}\p{N}]/gu, "").length >= 8 &&
+      (canonicalCore !== normalize(source.venueName) || observedCore !== normalize(observed))) return true;
   const address = parsePublicUSBusinessAddress(source.venueAddress)?.canonicalAddress;
   if (!address) return false;
-  const normalize = (value: string) => value.normalize("NFKC").replace(/\s+/gu, " ").trim().toLocaleLowerCase("en-US");
   return normalize(observed) === normalize(`${source.venueName}, ${address.locality} ${address.region}`);
 }
 function dateParameter(date: string) { const [year, month, day] = date.split("-"); return `${month}-${day}-${year}`; }

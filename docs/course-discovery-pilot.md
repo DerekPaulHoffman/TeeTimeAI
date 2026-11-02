@@ -426,3 +426,35 @@ Fixed inspection also advances a canonical-root redirect already traversed by
 the fresh browser when its exact completed native redirect chain attests it;
 the destination need not appear again as a page link. Missing or foreign
 redirect attestations remain rejected. These corrections require live proof.
+
+The next bounded CT draw selected Sterling Farms, Oxford Greens and KG Elite.
+It has not passed acceptance: KG's ordinary legacy Acuity link was treated as
+an iframe, Sterling's public Chelsea surface was unsupported, and Oxford's
+recognized old CPS URL bypassed learning and returned no matches despite a
+current official Chronogolf migration. The original jobs/clocks and explicit
+selection exclusions remain preserved outside the repository. Sterling also
+has a basic identity-only demo fixture; this limitation is disclosed rather
+than claiming completely fixture-blind sampling.
+
+Source routing now distinguishes a freshly witnessed iframe from an ordinary
+visible link with the same URL shape. A completed ordinary Acuity click can
+expose its actual same-origin public calendar through the existing paired
+native document ledger; no opaque calendar key is inferred. Identity,
+inventory and independent replay still belong to the fixed inspector.
+An unconfigured dynamic local-reader URL is no longer an established saved
+method merely because its syntax matches a parser. Typed supported adapters,
+the two explicit static readers and LOCAL_READER_ONLY retain their routes.
+These fixes require live verification; they do not establish Chelsea support,
+three received matching emails or changed-parameter restart reuse.
+
+KG development now reaches the public calendar through Stagehand in 22 seconds.
+The fixed reader independently replays nine full one-hour openings on each of
+two dates in under five seconds total with the model disabled. This remains
+local development evidence: nothing was activated in Postgres or emailed.
+The Acuity reader now recognizes an exactly duration-labelled golf simulator
+whose public plain description explicitly identifies a single bay available
+for hourly rental, bound to its one attached Golf Simulator calendar and
+timezone. Prepaid products, private/class services, unknown calendars and
+duration mismatches remain excluded. Acuity-only company-name normalization
+permits an omitted terminal Co./Company without dropping brand/location words
+or changing the canonical name, address, timezone, owner or rental identifiers.

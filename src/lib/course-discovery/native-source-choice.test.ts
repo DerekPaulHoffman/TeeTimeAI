@@ -17,6 +17,12 @@ it("recognizes a complete current Acuity calendar but keeps bookmarks and transa
    expect(strictNativeSupportedSource(url)).toBeUndefined();
  expect(choose(value,{...value,documentHash:"b".repeat(64)})).toBeNull();expect(choose({...value,settled:false})).toBeNull();
 });
+it("recognizes the actually observed shared-host Acuity calendar without inferring its opaque key",()=>{
+ const pageUrl="https://app.acuityscheduling.com/schedule/publiccalendar",value=capture({pageUrl,links:[],frames:[]});
+ expect(choose(value)).toMatchObject({url:pageUrl,family:"ACUITY",via:"DOCUMENT"});
+ for(const url of["https://app.acuityscheduling.com/schedule.php?owner=12345678",pageUrl+"?appointment=1",pageUrl+"#booking",pageUrl.replace('.com/','.com.evil.example/'),pageUrl.replace('app.','admin.')])expect(strictNativeSupportedSource(url)).toBeUndefined();
+ expect(choose(value,{...value,documentHash:"b".repeat(64)})).toBeNull();
+});
 it("recognizes only a stable current public search document without inventing a link or frame",()=>{
  const pageUrl="https://public-course.ezlinksgolf.com/search",value=capture({pageUrl,links:[],frames:[]});
  expect(choose(value)).toMatchObject({url:pageUrl,family:"EZLINKS",via:"DOCUMENT"});

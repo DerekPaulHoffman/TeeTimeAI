@@ -9,7 +9,7 @@ export function strictNativeSupportedSource(value: string): "FOREUP" | "TEEITUP"
     const url = new URL(value);
     if (url.href !== value || url.protocol !== "https:" || url.username || url.password || url.port) return;
     if (uschedulePublicTenant(value)) return "USCHEDULE";
-    if (!url.search && !url.hash && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.as\.me$/u.test(url.hostname) &&
+    if (!url.search && !url.hash && (url.hostname === "app.acuityscheduling.com" || /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.as\.me$/u.test(url.hostname)) &&
       !/^(?:www|app|api|admin|auth|login|account|member|private|checkout|payment)\.as\.me$/u.test(url.hostname) &&
       knownSimulatorPublicConfigurationFamily(value) === "ACUITY") return "ACUITY";
     if (parseEzLinksSource(value)) return "EZLINKS";

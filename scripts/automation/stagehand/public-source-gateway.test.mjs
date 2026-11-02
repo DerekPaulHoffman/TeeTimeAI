@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isWhooshClubGateway, isEzLinksLegacyGateway, isPublicSourceGateway, isCpsLegacyGateway, isForeupPublicBookingDocument, isCpsPublicSearchDocument, isAcuityTenantGateway } from './public-source-gateway.mjs';
+import { isWhooshClubGateway, isEzLinksLegacyGateway, isPublicSourceGateway, isCpsLegacyGateway, isForeupPublicBookingDocument, isCpsPublicSearchDocument, isAcuityTenantGateway, isAcuityLegacyCalendarGateway, isAcuityPublicCalendarDocument } from './public-source-gateway.mjs';
 import { validateStagehandSourceProposal } from '../course-discovery-stagehand-source.mjs';
 
 test('Acuity tenant bookmarks retain independent fixed-inspector canonicalization', () => {
@@ -14,6 +14,12 @@ test('Acuity tenant bookmarks retain independent fixed-inspector canonicalizatio
  for(const value of [entry+'?owner=123',entry+'#calendar',entry+'checkout',entry.replace('https:','http:'),entry.replace('.as.me/','.as.me.evil.example/'),entry.replace('public-bays','admin'),entry.replace('public-bays','person@public-bays'),entry.replace('.me/','.me:444/'),entry.replace('.me/','.me./'),entry.slice(0,-1)])assert.equal(isAcuityTenantGateway(value),false,value);
 });
 import { prepareReadOnlyAction, sourceRoutingUniqueWitness } from './driver.mjs';
+test('legacy shared-host Acuity routing admits only the exact public owner bookmark and clean observed calendar',()=>{
+ const entry='https://app.acuityscheduling.com/schedule.php?owner=12345678',calendar='https://app.acuityscheduling.com/schedule/publiccalendar';
+ assert.equal(isAcuityLegacyCalendarGateway(entry),true);assert.equal(isAcuityLegacyCalendarGateway(entry+'&ref=embedded_csp'),true);assert.equal(isAcuityPublicCalendarDocument(calendar),true);
+ for(const value of[entry+'&owner=87654321',entry+'&appointment=1',entry+'#booking',entry.replace('owner=12345678','owner=%31'),entry.replace('https:','http:'),entry.replace('.com/','.com.evil.example/'),entry.replace('app.','person@app.'),entry.replace('/schedule.php','/checkout')])assert.equal(isAcuityLegacyCalendarGateway(value),false,value);
+ for(const value of[calendar+'?appointment=1',calendar+'#booking',calendar.replace('app.','person@app.'),calendar.replace('.com/','.com.evil.example/'),calendar.replace('/schedule/','/checkout/')])assert.equal(isAcuityPublicCalendarDocument(value),false,value);
+});
 
 test('a public CPS legacy bookmark must navigate to an observed current tenant',()=>{
  const entry='https://secure.east.prophetservices.com/PublicCourse';

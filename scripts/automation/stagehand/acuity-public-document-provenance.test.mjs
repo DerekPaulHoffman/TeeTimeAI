@@ -15,3 +15,9 @@ test('Acuity landing needs fresh native documents, the exact click and same tena
   const r=fixture();change(r);assert.equal(nativeLegacyGatewayLandings(r).length,0);assert.ok(!observedBookingSourceCandidates(r,root,undefined,{sourceDiscoveryOnly:true}).includes(after));
  }
 });
+test('a visible legacy shared-host Acuity bookmark earns only its actual observed calendar landing',()=>{
+ const entry='https://app.acuityscheduling.com/schedule.php?owner=12345678',calendar='https://app.acuityscheduling.com/schedule/publiccalendar';
+ const make=()=>{const r=fixture();r.visitedUrls=[root,calendar];r.officialLinkLedger[0].links[0].href=entry;r.officialLinkLedger[1].pageUrl=calendar;r.actions[0].observedTarget.href=entry;r.actions[0].afterUrl=calendar;return r;};
+ const r=make();r.actions[0].observedTarget.text='Book now ↗';assert.equal(nativeLegacyGatewayLandings(r).length,1);assert.ok(observedBookingSourceCandidates(r,root,undefined,{sourceDiscoveryOnly:true}).includes(calendar));assert.ok(!observedBookingSourceCandidates(r,root).includes(calendar));
+ for(const change of[r=>r.officialLinkLedger.pop(),r=>r.officialLinkLedger[0].links[0].visible=false,r=>r.actions[0].error=true,r=>r.actions[0].afterUrl=calendar+'?appointment=1',r=>r.actions[0].afterUrl=calendar.replace('app.acuityscheduling.com','foreign.example'),r=>r.actions[0].observedTarget.href=entry+'&owner=87654321',r=>r.actions[0].observedTarget.text='Reserve and pay',r=>r.officialLinkLedger[1].observedAt='2020-01-01T00:00:00.000Z']){const bad=make();change(bad);assert.equal(nativeLegacyGatewayLandings(bad).length,0);assert.ok(!observedBookingSourceCandidates(bad,root,undefined,{sourceDiscoveryOnly:true}).includes(calendar));}
+});

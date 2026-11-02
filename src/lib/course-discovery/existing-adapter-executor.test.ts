@@ -362,6 +362,30 @@ describe("fixed existing adapter recipes", () => {
       expect(recipe.source.venueName).toBe("Example Simulator");
     }
   });
+  it.each(["Co.", "Co", "Company"])("retains the full Acuity business name when only the legal %s suffix is omitted", async suffix => {
+    const source = { ...acuity.source, venueName: `Example Simulator ${suffix}`, venueAddress: "10 Harbor Drive, Example, NY 12345, USA" };
+    const html = acuityHtml(), { adapter } = await inspectExistingAdapter(source, { ...deps, fetch: reads(acuity, {}, html) });
+    const recipe = parseAccessRecipe({ ...acuity, source, adapter }) as ExistingAdapterRecipe;
+    for (const request of [{ ...input, durationMinutes: 60 }, { ...input, durationMinutes: 60, date: "2030-10-23", players: 3 }]) {
+      const fetch = reads(recipe, { [request.date]: [{ time: `${request.date}T11:00:00-0400`, slotsAvailable: 1 }] }, html);
+      expect(await executeExistingAdapterRecipe(recipe, request, { ...deps, fetch })).toMatchObject({ status: "AVAILABLE", complete: true,
+        slots: [{ startsAt: `${request.date}T15:00:00.000Z`, endsAt: `${request.date}T16:00:00.000Z` }] });
+    }
+    expect(recipe.source.venueName).toBe(source.venueName);
+  });
+  it.each(["Other Simulator", "Example Simulator West", "Example Simulator, Other NY", "Example Simulator Co. West"])(
+    "a legal suffix cannot erase a different Acuity brand or location: %s", async name => {
+      const source = { ...acuity.source, venueName: "Example Simulator Co.", venueAddress: "10 Harbor Drive, Example, NY 12345, USA" };
+      const html = acuityHtml({ name });
+      await expect(inspectExistingAdapter(source, { ...deps, fetch: reads(acuity, {}, html) })).rejects.toThrow("ADAPTER_IDENTITY_MISMATCH");
+      expect(await executeExistingAdapterRecipe({ ...acuity, source }, { ...input, durationMinutes: 60 }, { ...deps, fetch: reads(acuity, {}, html) }))
+        .toMatchObject({ complete: false, slots: [], evidence: { venueVerified: false } });
+    });
+  it("keeps a canonical building identifier intact during company-name normalization", async () => {
+    const source = { ...acuity.source, venueName: "Example Simulator Co.", venueAddress: "10 Harbor Drive Bldg E, Example, NY 12345, USA" };
+    expect(await inspectExistingAdapter(source, { ...deps, fetch: reads(acuity, {}) })).toEqual({ adapter: acuity.adapter });
+    expect(source.venueAddress).toBe("10 Harbor Drive Bldg E, Example, NY 12345, USA");
+  });
   it.each([
     ["wrong locality", { name: "Example Simulator, Elsewhere NY" }, {}],
     ["wrong state", { name: "Example Simulator, Example NJ" }, {}],

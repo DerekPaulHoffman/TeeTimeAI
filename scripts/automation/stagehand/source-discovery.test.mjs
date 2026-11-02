@@ -76,6 +76,8 @@ const completeDocument={readyState:'interactive',bodyPresent:true,mainDocumentCu
 for(const [family,gateway,terminal]of[
  ['club',"https://app.whoosh.io/patron/club/golfer's-lounge","https://app.whoosh.io/patron/club/golfer's-lounge/agenda/simulators/2026-11-01"],
  ['legacy tee-sheet','https://public-course.ezlinks.com/','https://public-course.ezlinksgolf.com/search'],
+ ['linked Acuity calendar','https://app.acuityscheduling.com/schedule.php?owner=12345678','https://app.acuityscheduling.com/schedule/publiccalendar'],
+ ['linked tee sheet','https://public-course.play.teeitup.com/','https://public-course.book.teeitup.com/'],
 ])test('a model cannot finish at a public '+family+' gateway without opening its current observed navigation',async()=>{
  let current=official,evaluations=0,extracts=0,acts=0,observedInstruction='';
  const session={localCodexCalls:[],browser:{context:{addInitScript:async()=>{}}},
