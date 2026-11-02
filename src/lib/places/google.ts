@@ -385,7 +385,11 @@ function isPlausibleDirectGolfCourseLookupPlace(
     return true;
   }
 
-  if (!place.types?.includes("golf_course")) {
+  // Exact lookup may find a real course classified only as an association.
+  // Keep it pending: this does not change nearby eligibility or prove public access.
+  const associationCandidate = place.primaryType === "association_or_organization" &&
+    /\b(?:country\s+club|golf\s+(?:club|course))\b/i.test(name) && Boolean(place.websiteUri);
+  if (!place.types?.includes("golf_course") && !associationCandidate) {
     return false;
   }
 
@@ -495,8 +499,6 @@ export async function searchGolfCoursesByName(
       body: JSON.stringify({
         textQuery: input.query.trim(),
         languageCode: "en",
-        includedType: "golf_course",
-        strictTypeFiltering: true,
         pageSize: 8,
         rankPreference: "RELEVANCE",
         ...(hasLocationBias

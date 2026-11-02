@@ -377,7 +377,7 @@ describe("Google Places mapping", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       "https://places.googleapis.com/v1/places:searchText",
       expect.objectContaining({
-        body: expect.stringContaining('"strictTypeFiltering":true')
+        body: expect.not.stringContaining('"strictTypeFiltering"')
       })
     );
     const requestBody = JSON.parse(
@@ -387,7 +387,6 @@ describe("Google Places mapping", () => {
       expect.objectContaining({
         textQuery: "Bethpage Black",
         languageCode: "en",
-        includedType: "golf_course",
         pageSize: 8,
         locationBias: {
           circle: {
@@ -397,6 +396,26 @@ describe("Google Places mapping", () => {
         }
       })
     );
+  });
+
+  it("keeps association-only course identities pending without making them public", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    const candidate: GooglePlace = { id: "association-course", displayName: { text: "Example Country Club" },
+      primaryType: "association_or_organization", types: ["association_or_organization"],
+      businessStatus: "OPERATIONAL", websiteUri: "https://course.example/",
+      location: { latitude: 41.8, longitude: -72.4 } };
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({ ok: true, json: async () => ({ places: [
+      candidate,
+      { ...candidate, id: "unrelated", displayName: { text: "Example Association" } },
+      { ...candidate, id: "closed", businessStatus: "CLOSED_TEMPORARILY" },
+      { ...candidate, id: "private", displayName: { text: "Example Private Country Club" } },
+      { ...candidate, id: "shop", primaryType: "sporting_goods_store", types: ["store"] },
+      { ...candidate, id: "no-site", websiteUri: undefined }
+    ] }) } as Response);
+    expect(await searchGolfCoursesByName({ query: "Example Country Club Exampletown" })).toEqual([
+      expect.objectContaining({ googlePlaceId: "association-course", publicAccessStatus: "UNVERIFIED" })
+    ]);
+    expect(filterPublicGolfCoursePlacesWithReviews([candidate], { reviewIndex: TEST_REVIEW_INDEX })).toEqual([]);
   });
 
   it("returns an operational golf-course result for review when Google uses a sports-club primary type", async () => {

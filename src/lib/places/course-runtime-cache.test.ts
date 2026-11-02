@@ -64,7 +64,7 @@ describe("course runtime cache", () => {
         query: "  Bethpage   BLACK ",
         reviewVersion: "reviews-1"
       })
-    ).toBe("lookup-v2:reviews-1:bethpage black:none:none");
+    ).toBe("lookup-v3:reviews-1:bethpage black:none:none");
     expect(getCoursePhotoMetadataCacheKey(" course-1 ")).toBe("photo-metadata-v1:course-1");
   });
 
