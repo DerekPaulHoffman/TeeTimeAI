@@ -352,3 +352,23 @@ npx vitest run src/lib/course-discovery --no-file-parallelism
 These tests mock email transport. They verify database and outbox behavior
 without delivering to customers. The ordinary full suite skips database tests
 when the explicit test URL is absent.
+
+The subsequent November 2 Rolling Meadows / Simulators at MCC / Two Roads
+cohort failed all three targets after their two automatic attempts. No method,
+canonical match or matching email was saved. Setup emails reached Gmail but
+do not count as matching alerts. The jobs retain their original pickup clocks;
+the test alerts were paused after terminal observation, without source hints,
+manual job actions or runtime changes during the run. This cohort was screened
+in advance and randomized only in run order. Two Roads had a basic catalog
+identity but no prior executable configuration, job or recipe. It is not a
+statewide random sample or acceptance evidence. Recorded model usage was at
+least 135,378 tokens, including the unsuccessful generic fallback.
+
+MCC's public informational link says "Reserve a Simulator now!". Source-only
+navigation now accepts that bounded caption variant under the existing current
+document, plain anchor, safe destination and transaction exclusions. Native
+anchor input returns without Playwright's implicit navigation wait; the source
+controller still independently observes navigation and document completion.
+A real isolated Chrome test leaves a target response pending and verifies one
+click returns without claiming a completed page. These focused fixes do not
+establish repaired live discovery, three matching emails or restart reuse.

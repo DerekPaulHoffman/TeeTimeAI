@@ -29,7 +29,10 @@ export async function createNativeAnchorPointer({ cdpUrl, deadline, assertGuarde
       const fresh = await selected.evaluate(readTarget, selector);
       if (selected.url() !== sourceUrl || JSON.stringify(fresh) !== JSON.stringify(evidence) ||
           !await assertGuardedTargets([targetId]) || Date.now() >= deadline) throw Error('ACTION_TARGET_REJECTED');
-      await selected.locator(selector).click({ timeout: Math.min(4000, Math.max(1, deadline - Date.now())) });
+      // The controller observes the resulting navigation and public document
+      // separately. Do not let Playwright's implicit navigation wait turn an
+      // already dispatched anchor click into a second, ambiguous action.
+      await selected.locator(selector).click({ noWaitAfter: true, timeout: Math.min(4000, Math.max(1, deadline - Date.now())) });
     },
     async close() {
       if (closed) return;

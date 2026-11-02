@@ -244,9 +244,9 @@ test('source-only public availability entry requires same-current native anchor 
  assert.equal(prepareReadOnlyAction(click,entry,{sourceRoutingOnly:true,currentPageUrl}),click);
  assert.throws(()=>prepareReadOnlyAction(click,entry),/ACTION_TARGET_REJECTED/);
  assert.throws(()=>prepareReadOnlyAction(click,entry,{sourceRoutingOnly:true}),/ACTION_TARGET_REJECTED/);
- for(const text of ['Reserve Your Simulator','Reserve a Bay','Reserve tee times'])assert.equal(prepareReadOnlyAction(click,{...entry,text},{sourceRoutingOnly:true,currentPageUrl}),click);
+ for(const text of ['Reserve Your Simulator','Reserve a Bay','Reserve tee times','Reserve a Simulator now!','Reserve your bay now.'])assert.equal(prepareReadOnlyAction(click,{...entry,text},{sourceRoutingOnly:true,currentPageUrl}),click);
  for(const delta of [{tag:'BUTTON'},{visible:false},{inForm:true},{formAction:'/public-search'},{type:'password'},{name:'account'},
-  {text:'Reserve ReservationConfirm'},{text:'Reserve now'},{text:'Reserve Your Bay and Pay'},{label:'Confirm reservation'},
+  {text:'Reserve ReservationConfirm'},{text:'Reserve now'},{text:'Reserve Your Bay and Pay'},{text:'Reserve a Simulator now! Confirm'},{text:'Reserve a Simulator now! 10:00 AM'},{label:'Confirm reservation'},
   {rowText:'10:30 AM public bay'},{rowText:'10 AM public bay'},{rowText:'Selected reservation'},
   {href:'https://foreign.example/public-entry'},{href:'https://official.example/public-entry?date=2026-11-01'},
   {href:'https://official.example/public-entry#calendar'},{href:'https://user:secret@official.example/public-entry'},

@@ -49,7 +49,7 @@ function reservePublicDocumentNavigation(action, evidence, currentPageUrl) {
       explicitTime.test(`${evidence.text} ${evidence.label} ${evidence.rowText}`) || /\b\d{1,2}\s*[ap]\.?m\.?\b/iu.test(evidence.rowText ?? '') ||
       /\b(?:confirm|checkout|payment|purchase|hold|reservation|appointment|selected)\b/iu.test(evidence.rowText ?? '')) return false;
   const caption = normalizedOption(evidence.text), label = normalizedOption(evidence.label);
-  const availability = /^reserve (?:your |a )?(?:bay|simulator|tee times?)$/u;
+  const availability = /^reserve (?:your |a )?(?:bay|simulator|tee times?)(?: now)?[.!]?$/u;
   if (!availability.test(caption) || label && label !== 'reserve' && !availability.test(label)) return false;
   try {
     if (!isSourceRoutingUrl(currentPageUrl) || !isSourceRoutingUrl(evidence.href) || typeof native.rawHref !== 'string' ||
