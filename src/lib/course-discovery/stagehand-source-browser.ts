@@ -812,8 +812,23 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
           finalUrl, completedAt: new Date().toISOString(), finalDocumentHash: capture.documentHash, redirects };
       },
       async beforeAction(id: string, actionHref?: string, placeholder?: { text: string; label: string }) {
-        const capture = await captureSourceDom(id), { observed } = capture;
+        let capture = await captureSourceDom(id);
         popupGrants.delete(id); anchorIntents.delete(id); gestureIntents.delete(id);
+        if (actionHref !== undefined && !placeholder && activeReads.size > 0 && sourceSettled(capture) &&
+            typeof capture.observed.url === "string" && actionHref !== capture.observed.url + "#" &&
+            Array.isArray(capture.observed.links) && capture.observed.links.includes(actionHref) &&
+            isSafeRecipeUrl(actionHref) && !transactionUrl(actionHref)) {
+          // Stop the completed source's ancillary loading before any successor
+          // exists. Stopping after an anchor click would cancel that successor;
+          // merely releasing its old provider lease would hide a live request.
+          const before = capture;
+          await capture.target.cdp.send("Page.stopLoading"); check();
+          await Promise.allSettled([...activeReads]); check();
+          capture = await captureSourceDom(id);
+          if (capture.frameId !== before.frameId || capture.loaderId !== before.loaderId ||
+              capture.observed.url !== before.observed.url || !sourceSettled(capture)) throw reject();
+        }
+        const { observed } = capture;
         if (actionHref !== undefined) {
           if (typeof actionHref !== "string" || !Array.isArray(observed.links) || !observed.links.includes(actionHref) || !isSafeRecipeUrl(actionHref) || transactionUrl(actionHref)) {
             const reason = typeof actionHref !== "string" ? "HREF_SHAPE" : !Array.isArray(observed.links) ? "LINK_INVENTORY_MISSING" :

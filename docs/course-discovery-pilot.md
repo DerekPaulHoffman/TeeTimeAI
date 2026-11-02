@@ -372,3 +372,28 @@ controller still independently observes navigation and document completion.
 A real isolated Chrome test leaves a target response pending and verifies one
 click returns without claiming a completed page. These focused fixes do not
 establish repaired live discovery, three matching emails or restart reuse.
+
+The follow-up repair on the same three venues also failed all targets; it was
+not a new-venue acceptance run. It recorded at least 172,425 worker tokens and
+produced only setup emails. Both failed cohorts and their original jobs remain
+preserved; their dashboard alerts were paused after each terminal observation.
+
+Local reproductions now exercise the actual guarded Stagehand browser with no
+model, provider or production calls. A hanging ancillary script previously
+prevented the next public document from loading. The controller stops that
+completed source's old loading before clicking, awaits the old reads and their
+leases, and recaptures the unchanged document and link. Stopping the successor
+after clicking, or releasing a lease while its request is live, is excluded.
+
+A public entry link before a later business-hours section is no longer treated
+as an individual time merely because its whole article contains opening hours.
+This source-only exception retains preceding context, slot/date headings,
+ordinary booking-row checks and the existing plain-link destination guards.
+Separate positive and negative DOM fixtures cover the distinction.
+
+A late request belonging to a retired loader retains its tombstone and original
+pause until an abort acknowledgement or the exact independent network terminal
+arrives. A prior correlated terminal can settle the same pause without issuing
+an invalid second abort. Both event orderings are tested; an unrelated terminal
+still times out. These local fixes require fresh live verification and do not
+change either failed result into acceptance or saved-method restart proof.

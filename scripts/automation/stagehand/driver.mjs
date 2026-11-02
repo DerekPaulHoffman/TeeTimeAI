@@ -42,12 +42,13 @@ export function isPublicFilterSelect(evidence) {
 
 function reservePublicDocumentNavigation(action, evidence, currentPageUrl) {
   const native = evidence?.navigation;
+  const rowText = typeof native?.entrySectionText === 'string' && native.entrySectionText.length <= 700 ? native.entrySectionText : evidence?.rowText;
   if (action.method !== 'click' || evidence?.tag !== 'A' || evidence.visible !== true || evidence.inForm !== false || evidence.formAction ||
       !native || native.pageUrl !== currentPageUrl || native.captionComplete !== true || native.inlineHandler !== false || native.download !== false ||
       native.ariaDisabled !== false || !['', 'link'].includes(native.role) || typeof evidence.text !== 'string' || evidence.text.length > 160 ||
       typeof evidence.label !== 'string' || evidence.label.length > 160 || /password|secret|token|credential|email|phone|contact|username|account|member|customer/iu.test(`${evidence.name} ${evidence.id}`) ||
-      explicitTime.test(`${evidence.text} ${evidence.label} ${evidence.rowText}`) || /\b\d{1,2}\s*[ap]\.?m\.?\b/iu.test(evidence.rowText ?? '') ||
-      /\b(?:confirm|checkout|payment|purchase|hold|reservation|appointment|selected)\b/iu.test(evidence.rowText ?? '')) return false;
+      explicitTime.test(`${evidence.text} ${evidence.label} ${rowText}`) || /\b\d{1,2}\s*[ap]\.?m\.?\b/iu.test(rowText ?? '') ||
+      /\b(?:confirm|checkout|payment|purchase|hold|reservation|appointment|selected)\b/iu.test(rowText ?? '')) return false;
   const caption = normalizedOption(evidence.text), label = normalizedOption(evidence.label);
   const availability = /^reserve (?:your |a )?(?:bay|simulator|tee times?)(?: now)?[.!]?$/u;
   if (!availability.test(caption) || label && label !== 'reserve' && !availability.test(label)) return false;
@@ -91,7 +92,7 @@ export function prepareReadOnlyAction(action, evidence, { sourceRoutingOnly = fa
       /password|secret|credential|email|phone|contact|username/iu.test(`${evidence.name} ${evidence.id}`) ||
       forbiddenTarget ||
       ['click', 'press'].includes(action.method) && !filterSelect && explicitTime.test(`${evidence.text} ${evidence.label}`) ||
-      /\b(?:book|select|reserve)\b/iu.test(`${evidence.text} ${evidence.label}`) && explicitTime.test(evidence.rowText))) {
+      /\b(?:book|select|reserve)\b/iu.test(`${evidence.text} ${evidence.label}`) && !reserveDocumentNavigation && explicitTime.test(evidence.rowText))) {
     const reason = !evidence ? 'TARGET_MISSING' : evidence.visible === false ? 'HIDDEN' :
       ['password','email','tel','file'].includes(String(evidence.type).toLowerCase()) ? 'CREDENTIAL_CONTROL' :
       /password|secret|credential|email|phone|contact|username/iu.test(`${evidence.name} ${evidence.id}`) ? 'PRIVATE_FIELD' :
@@ -185,8 +186,20 @@ export function readNativeActionTarget(selector) {
   const link = candidateLink instanceof HTMLAnchorElement && rendered.visible(candidateLink) && rendered.visible(node) ? candidateLink : null;
   let inlineHandler = false;
   for (let current=link;current;current=current.parentElement) if (current.hasAttribute('onclick') || typeof current.onclick === 'function') inlineHandler = true;
+  let entrySectionText;
+  if (link && parent?.tagName === 'ARTICLE') for (const heading of parent.querySelectorAll('h2,h3,h4,h5')) {
+    // An article is a whole document, not necessarily a tee-time row. Preserve
+    // all preceding context, but do not attach a later business-hours section
+    // to a standalone public entry link. Slot/date headings never qualify.
+    if (!rendered.visible(heading) || !/^(?:hours(?: of operation)?|opening hours|business hours)$/iu.test((heading.textContent ?? '').replace(/\s+/gu,' ').trim()) ||
+        !(link.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING)) continue;
+    const range = document.createRange(); range.selectNodeContents(parent); range.setEndBefore(heading);
+    const text = range.toString(); if (text.length <= 700) entrySectionText = text;
+    break;
+  }
   const navigation = link ? { pageUrl: location.href, rawHref: link.getAttribute('href') ?? '', captionComplete: (link.textContent ?? '').length <= 160,
-    inlineHandler, download: link.hasAttribute('download'), role: (link.getAttribute('role') ?? '').toLowerCase(), target: link.getAttribute('target') ?? '', ariaDisabled: link.getAttribute('aria-disabled') === 'true' } : null;
+    inlineHandler, download: link.hasAttribute('download'), role: (link.getAttribute('role') ?? '').toLowerCase(), target: link.getAttribute('target') ?? '', ariaDisabled: link.getAttribute('aria-disabled') === 'true',
+    ...(entrySectionText === undefined ? {} : { entrySectionText }) } : null;
   return { tag: link ? 'A' : node.tagName, leafTag: node.tagName, text: ((link ?? node).textContent ?? '').slice(0, 500), label: (link ?? node).getAttribute('aria-label') ?? '', fieldLabel: node instanceof HTMLSelectElement ? [...(node.labels ?? [])].map(label => label.textContent ?? '').join(' ').slice(0, 500) : '', visible: rendered.visible(node) && (!candidateLink || Boolean(link)), disabled: node instanceof HTMLSelectElement && node.disabled, multiple: node instanceof HTMLSelectElement && node.multiple, name: node.getAttribute('name') ?? '', id: node.id, type: node.getAttribute('type') ?? '', value: node instanceof HTMLSelectElement || node instanceof HTMLInputElement ? node.value : null, options: node instanceof HTMLSelectElement ? [...node.options].slice(0, 257).map(option => ({ value: option.value, label: option.label || option.textContent || '', disabled: option.disabled || option.parentElement instanceof HTMLOptGroupElement && option.parentElement.disabled })) : null, selectedLabels: node instanceof HTMLSelectElement ? [...node.selectedOptions].map(option => option.label || option.textContent || '') : null, href: link?.href ?? node.getAttribute('href') ?? '', inForm: Boolean(node.closest('form')), formAction: submitter?.getAttribute('formaction') || submitter?.form?.getAttribute('action') || node.closest('form')?.getAttribute('action') || '', rowText: (parent?.textContent ?? '').slice(0, 700), navigation };
 
 }

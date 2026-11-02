@@ -1948,6 +1948,34 @@ describe("native document-generation retirement", () => {
     } finally { await test.guard.close(); }
   });
 
+  it.each(["exact", "prior exact", "wrong network", "prior wrong network"])("handles a retired loader's invalid late interception only with its %s terminal event", async mode => {
+    const test = await installed(), send = test.cdp.send.getMockImplementation()!; let lateAborts = 0;
+    try {
+      await startDocument(test); await test.routes[0].continue(); test.response("document", { resourceType: "Document" });
+      await test.routes[0].request().response(); await test.guard.beginDocumentNavigation(test.main as never);
+      test.cdp.send.mockImplementation((name, value) => {
+        if (name === "Fetch.failRequest" && value?.requestId === "late-script") { lateAborts++; return Promise.reject(Error("Invalid InterceptionId")); }
+        return send(name, value);
+      });
+      identity(test, "late-script", "loader-one", "Script");
+      const terminal = () => test.events.get("Network.loadingFailed")!({ requestId: mode.endsWith("exact") ? "network-late-script" : "network-unrelated", type: "Script", canceled: true, errorText: "net::ERR_ABORTED" });
+      if (mode.startsWith("prior")) terminal();
+      test.request("late-script", { resourceType: "Script" });
+      if (mode !== "prior exact") await vi.waitFor(() => expect(lateAborts).toBe(1), { interval: 1 });
+      expect(test.failures).toEqual([]); expect(test.routes).toHaveLength(1);
+      if (!mode.startsWith("prior")) terminal();
+      if (mode.endsWith("exact")) {
+        await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+        expect(test.failures).toEqual([]); expect(test.guard.firstFatal).toBeUndefined(); expect(test.close).not.toHaveBeenCalled();
+        expect(lateAborts).toBe(mode === "prior exact" ? 0 : 1);
+        identity(test, "next", "loader-two", "Document"); test.request("next", { resourceType: "Document" });
+        await vi.waitFor(() => expect(test.routes).toHaveLength(2)); await test.routes[1].continue(); test.response("next", { resourceType: "Document" });
+        expect((await test.routes[1].request().response())?.status()).toBe(200);
+      } else await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_ABORT_TIMEOUT"));
+      expect(test.cdp.send.mock.calls.some(([name, value]) => ["Fetch.continueRequest", "Fetch.continueResponse", "Fetch.getResponseBody"].includes(name) && value?.requestId === "late-script")).toBe(false);
+    } finally { await test.guard.close(); }
+  });
+
   it("waits for exact old-network terminal ACK and handler/lease drain; queued/late old reads never dispatch or become evidence", async () => {
     const test = await installed(), session = new AbortController(), stop = vi.fn(async () => {});
     let active = 0, released = 0; const completed: string[] = [], errors: unknown[] = [];

@@ -58,7 +58,7 @@ vi.mock("./stagehand-owned-cdp", async original => {
 const material = readFileSync("src/lib/course-discovery/cps-browser-wiring.test.ts", "utf8");
 const certificate = (name: string) => JSON.parse(new RegExp("const " + name + " = (\".*?\");").exec(material)![1]);
 const root = "https://owned-sdk-root.example/", final = "https://owned-sdk-final.example/public/";
-type Mode = "DIRECT" | "HTTP_REDIRECT" | "INITIAL_RELOAD" | "NON_REDIRECT_307_RELOAD";
+type Mode = "DIRECT" | "HTTP_REDIRECT" | "INITIAL_RELOAD" | "NON_REDIRECT_307_RELOAD" | "ANCHOR_CLICK" | "ANCHOR_PENDING_ASSET" | "PUBLIC_ENTRY_BEFORE_HOURS";
 const receipts: Record<string, unknown>[] = [];
 afterEach(() => { trace.enabled = false; vi.unstubAllGlobals(); });
 
@@ -74,12 +74,17 @@ async function fixture(transport: "PLAYWRIGHT" | "STAGEHAND", mode: Mode) {
   });
   const server = createServer({ key: certificate("fixtureKey"), cert: certificate("fixtureCertificate") }, (request, response) => {
     reads.push(request.method + " " + request.headers.host + request.url);
+    if (mode === "ANCHOR_PENDING_ASSET" && request.url === "/slow.js") return;
     if (mode === "HTTP_REDIRECT" && request.headers.host === "owned-sdk-root.example") {
       response.writeHead(302, { location: final }).end(); return;
     }
     const reload = mode === "INITIAL_RELOAD" || mode === "NON_REDIRECT_307_RELOAD" ? '<script>if(!sessionStorage.getItem("owned-once")){sessionStorage.setItem("owned-once","1");location.reload();}</script>' : "";
     response.writeHead(mode === "NON_REDIRECT_307_RELOAD" ? 307 : 200, { "content-type": "text/html", "cache-control": "no-store" });
-    response.end('<!doctype html><html><head><link rel="icon" href="data:,">' + reload + '</head><body><h1>Public fixture course</h1><a href="/public-info/">Public information</a></body></html>');
+    const pendingAsset = mode === "ANCHOR_PENDING_ASSET" && request.url === "/" ? '<script async src="/slow.js"></script>' : "";
+    const entry = mode === "PUBLIC_ENTRY_BEFORE_HOURS"
+      ? '<article><p>Public simulator rentals.</p><p><a href="/public-info/">Reserve a Simulator now!</a></p><h3>Hours of Operation</h3><p>8:00 AM–7:00 PM</p></article>'
+      : '<a href="/public-info/">Public information</a>';
+    response.end('<!doctype html><html><head><link rel="icon" href="data:,">' + reload + pendingAsset + '</head><body><h1>Public fixture course</h1>' + entry + '</body></html>');
   });
   let host: Awaited<ReturnType<typeof createGuardedStagehandSourceBrowser>> | undefined, attached: Browser | undefined;
   let session: Awaited<ReturnType<typeof openStagehandSession>> | undefined;
@@ -104,7 +109,8 @@ async function fixture(transport: "PLAYWRIGHT" | "STAGEHAND", mode: Mode) {
     let navigate: () => Promise<unknown>;
     if (transport === "STAGEHAND") {
       session = await openStagehandSession({ model: "gpt-6.1-sol", modelDisabled: true, sourceRoutingOnly: true,
-        deadline: deadlineAt.getTime(), cwd: process.cwd(), signal: abort.signal, ownedBrowser: host }, {
+        deadline: deadlineAt.getTime(), cwd: process.cwd(), signal: abort.signal, ownedBrowser: host,
+        ...(mode.startsWith("ANCHOR_") || mode === "PUBLIC_ENTRY_BEFORE_HOURS" ? { onNativeSourceWitness: () => {} } : {}) }, {
         createModel: async () => { trace.inferenceCalls++; throw Error("MODEL_FORBIDDEN_IN_LOCAL_FIXTURE"); },
       });
       // Observing readiness on about:blank is outside the source-document
@@ -139,6 +145,13 @@ async function fixture(transport: "PLAYWRIGHT" | "STAGEHAND", mode: Mode) {
       await expect.poll(() => host!.observeSourceReadiness(host!.targetId), { timeout: 5000 }).toMatchObject({
         mainDocumentStatus: 200, mainDocumentCurrent: true, mainDocumentComplete: true, mainReadPending: false });
       if (session) await session.settleSourceDocument();
+      if (mode.startsWith("ANCHOR_") || mode === "PUBLIC_ENTRY_BEFORE_HOURS") {
+        if (!session) throw Error("STAGEHAND_SOURCE_SESSION_REQUIRED");
+        if (mode === "ANCHOR_PENDING_ASSET") await expect.poll(() => reads.some(value => value.endsWith("/slow.js")), { timeout: 5000 }).toBe(true);
+        receipt.action = await session.act({ method: "click", selector: "a", arguments: [] });
+        await session.settleSourceDocument();
+        receipt.clickedUrl = await session.page.url();
+      }
       receipt.readiness = await host.observeSourceReadiness(host.targetId);
       receipt.success = true;
     }
@@ -178,6 +191,11 @@ it.each(["DIRECT", "HTTP_REDIRECT"] as const)("requires the actual Stagehand SDK
   expect(receipt, JSON.stringify({ failure: receipt.failure, events: receipt.events })).toMatchObject({ success: true });
   expect(receipt.failure).toEqual({});
 }, 60_000);
+
+it.each(["ANCHOR_CLICK", "ANCHOR_PENDING_ASSET", "PUBLIC_ENTRY_BEFORE_HOURS"] as const)("requires an actual Stagehand source anchor to retain guarded navigation: %s", async mode => {
+  const receipt = await fixture("STAGEHAND", mode);
+  expect(receipt, JSON.stringify(receipt)).toMatchObject({ success: true, clickedUrl: root + "public-info/", failure: {} });
+}, 70_000);
 
 it("compares an early native duplicate document against both real navigation clients without weakening its guard", async () => {
   const plain = await fixture("PLAYWRIGHT", "INITIAL_RELOAD"), sdk = await fixture("STAGEHAND", "INITIAL_RELOAD");

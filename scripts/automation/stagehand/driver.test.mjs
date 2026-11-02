@@ -280,6 +280,26 @@ test('serialized native anchor collector derives document and navigation safety 
  link.textContent='Reserve Your Bay'+' '.repeat(161);assert.equal(collect().navigation.captionComplete,false);
 });
 
+test('a public entry before business hours is distinct from an individual slot row',async()=>{
+ const {JSDOM}=await import('jsdom'),currentPageUrl='https://official.example/golf-simulators/',click={method:'click',arguments:[]};
+ for(const scenario of ['marketing','slot-before','slot-after','ordinary-book','transaction-url']){
+  const text=scenario==='ordinary-book'?'Book':'Reserve a Simulator now!';
+  const href=scenario==='transaction-url'?'/checkout':'/book-golf-simulators/';
+  const before=scenario==='slot-before'?'<p>Selected session November 5 at 10:00 AM</p>':'<p>Public golf simulators</p>';
+  const after=scenario==='slot-after'?'<h3>November 5 at 10:00 AM</h3>':'<h3>Hours of Operation</h3>';
+  const dom=new JSDOM(`<article>${before}<p><a href="${href}">${text}</a></p>${after}<p>8:00 AM–7:00 PM</p><h3>Price per hour</h3><p>Public hourly rental</p></article>`,{url:currentPageUrl});
+  const win=dom.window;for(const element of win.document.querySelectorAll('*'))element.getClientRects=()=>[{}];
+  const evidence=runInNewContext(`(${readNativeActionTarget.toString()})('a')`,{document:win.document,location:win.location,Node:win.Node,Element:win.Element,HTMLAnchorElement:win.HTMLAnchorElement,HTMLSelectElement:win.HTMLSelectElement,HTMLInputElement:win.HTMLInputElement,HTMLOptGroupElement:win.HTMLOptGroupElement,getComputedStyle:()=>({display:'block',visibility:'visible',opacity:'1'})});
+  assert.match(evidence.rowText,/8:00 AM/);
+  if(scenario==='marketing'){
+   assert.doesNotMatch(evidence.navigation.entrySectionText,/8:00 AM/);
+   assert.equal(prepareReadOnlyAction(click,evidence,{sourceRoutingOnly:true,currentPageUrl}),click);
+   assert.throws(()=>prepareReadOnlyAction(click,evidence),/ACTION_TARGET_REJECTED/);
+  }else assert.throws(()=>prepareReadOnlyAction(click,evidence,{sourceRoutingOnly:true,currentPageUrl}),/ACTION_TARGET_REJECTED/,scenario);
+  win.close();
+ }
+});
+
 test('observed availability navigation uses native URL, witness and DOM rechecks without another model act',async()=>{
  for(const scenario of ['current','changed-during-read','forged-action-url']){
   let current='https://owned.example/',reads=0,sdkCalls=0,nativeCalls=0,nativeClicks=0;const destination='https://owned.example/public-entry';

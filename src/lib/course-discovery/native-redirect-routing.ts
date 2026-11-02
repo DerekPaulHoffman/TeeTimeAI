@@ -1639,11 +1639,26 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         } };
       nativeRequestRecords.set(record.adapter, { record, owner });
       records.set(record.id, record);
-      initialPauses.delete(event.requestId); pendingInitialPause = undefined;
       if (requestGeneration.retired) {
-        await bounded(reject(), "NATIVE_REDIRECT_ABORT_TIMEOUT"); record.paused = false;
+        // Retain the tombstone for late response correlation, but keep this
+        // exact initial pause until its abort ACK or independently correlated
+        // Network terminal arrives. An invalid interception ID alone is not
+        // proof of cancellation and must never authorize another read.
+        pendingInitialPause.generation = requestGeneration;
+        const identity = networkIdentities.get(networkId);
+        if (identity && failedNetworkIdentities.has(identity) && sourceLoadingFailures.has(identity) &&
+            identity.revision === record.networkIdentityRevision && identity.frameId === rootFrameId &&
+            identity.loaderId === record.loaderId && loaderOwners.get(identity.loaderId) === requestGeneration &&
+            identity.url === record.url && identity.method === record.method &&
+            (identity.kind === record.kind || [identity.kind, record.kind].every(kind => kind === "xhr" || kind === "fetch"))) {
+          const pause = pendingInitialPause;
+          pause.networkFailed.settle(); pause.retired = true;
+          pause.retirementAck ??= Promise.resolve().then(() => { pause.cancelled.settle(); });
+        }
+        await abortInitialPause(pendingInitialPause); record.paused = false;
         failRecord(record, "NATIVE_READ_SUPERSEDED"); record.handlerDone = true; return;
       }
+      initialPauses.delete(event.requestId); pendingInitialPause = undefined;
       const route: NativeReadRoute = { request: () => record.adapter,
         noteOfficialRenderGate: facts => {
           if (record.paused && !record.admitted && !record.failed && !record.responseStarted && !closed)
