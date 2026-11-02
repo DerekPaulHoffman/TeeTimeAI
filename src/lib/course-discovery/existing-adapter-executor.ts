@@ -62,6 +62,8 @@ import { parseMindbodyAppointmentSource } from "./mindbody-appointment-grid";
 import { executeMindbodyAppointments, inspectMindbodyAppointments, getMindbodyAppointmentDiagnostic,
   type MindbodyAppointmentDiagnostic, type MindbodyAppointmentReaderDeps } from "./mindbody-appointment-reader";
 import { parsePublicUSBusinessAddress } from "./public-us-business-address";
+import { parseChelseaPublicSource } from "./chelsea-public-source";
+import { executeChelseaPublic, inspectChelseaPublic } from "./chelsea-public-executor";
 import { deriveAcuityOfficialContact, type AcuityOfficialContactProof } from "./acuity-official-contact";
 import { bindTeeItUpOfficialContactChain, readNativeTeeItUpContactChain, type TeeItUpContactChainReader,
   type TeeItUpOfficialContactChainProof } from "./teeitup-official-contact-chain";
@@ -612,6 +614,7 @@ async function inspectForeupConfiguration(source: Source, deps: Dependencies, fe
 /** For a controller-observed provider URL only. Reads typed public configuration
  * and returns bounded IDs; availability and activation remain separate proofs. */
 export async function inspectExistingAdapter(source: Source, deps: Dependencies): Promise<{ adapter: ExistingAdapterMetadata }> {
+  if (parseChelseaPublicSource(source.bookingUrl)) return { adapter: await inspectChelseaPublic(source, deps) };
   if (parseMindbodyAppointmentSource(source.bookingUrl)) {
     if (!source.officialUrl || !source.venueAddress) fail("ADAPTER_IDENTITY_MISSING");
     if (!deps.localCapabilities?.includes("LOCAL_CHROME")) fail("LOCAL_CHROME_REQUIRED");
@@ -865,7 +868,7 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
           adapter.timeZone !== input.timeZone || adapter.durationMinutes !== input.durationMinutes || input.players > adapter.capacity) fail("ADAPTER_TARGET_MISMATCH");
       if (!deps.localCapabilities?.includes("LOCAL_CHROME")) fail("LOCAL_CHROME_REQUIRED");
     }
-    if (!["USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS", "REX", "CPS", "MINDBODY", "FIVE_IRON", "GOLFBOOK"].includes(adapter.family)) session = reader(recipe.source, deps, adapter, input);
+    if (!["CHELSEA", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS", "REX", "CPS", "MINDBODY", "FIVE_IRON", "GOLFBOOK"].includes(adapter.family)) session = reader(recipe.source, deps, adapter, input);
     const start = deps.toInstant(`${input.date}T${input.startTime}:00`, input);
     const next = new Date(`${input.date}T00:00:00Z`); next.setUTCDate(next.getUTCDate() + 1);
     const end = deps.toInstant(`${input.endTime === "24:00" ? next.toISOString().slice(0, 10) : input.date}T${input.endTime === "24:00" ? "00:00" : input.endTime}:00`, input);
@@ -879,6 +882,10 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
     if (adapter.family === "REX") {
       const slots = await executeRex(recipe.source, adapter, { courseId: recipe.target.courseId, offeringId: recipe.target.offeringId! }, input, deps);
       return result(slots.filter(slot => new Date(slot.startsAt) > now && new Date(slot.startsAt) >= start && new Date(slot.endsAt!) <= end));
+    }
+    if (adapter.family === "CHELSEA") {
+      const slots = await executeChelseaPublic(recipe.source, adapter, input, deps);
+      return result(slots.filter(slot => new Date(slot.startsAt) > now && new Date(slot.startsAt) >= start && new Date(slot.startsAt) < end && slot.availableSpots >= input.players));
     }
     if (adapter.family === "CPS") {
       const slots = await executeCps(recipe.source, adapter, { courseId: recipe.target.courseId }, input, deps);

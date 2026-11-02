@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { chelseaPublicMetadataSchema } from "./chelsea-public-source";
 import { acuityOfficialContactProofSchema } from "./acuity-official-contact";
 import { isUSchedulePublicRentalLabel } from "@/lib/automation/uschedule-public-read-policy";
 import { uschedulePublicResourcePoolProofSchema } from "@/lib/simulators/providers/uschedule-public-resources";
@@ -31,6 +32,7 @@ const publicId = z.string().regex(/^[1-9]\d{0,9}$/u);
 
 /** Identifiers from a supported public configuration, never executable code. */
 export const existingAdapterMetadataSchema = z.discriminatedUnion("family", [
+  chelseaPublicMetadataSchema,
   z.object({ family: z.literal("FOREUP"), facilityId: numericId, scheduleId: numericId,
     bookingClassId: numericId, inventoryScope: z.literal(FOREUP_STANDARD_PUBLIC_SCOPE).optional(),
     publicCatalogSha256: z.string().regex(/^[a-f0-9]{64}$/u).optional(),

@@ -279,7 +279,7 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
       recipe.adapter.family === "TEEITUP" && recipe.adapter.offeringKind === "SIMULATOR";
     if (recipe.source.providerFamily !== recipe.adapter.family ||
       (recipe.target.kind === "SIMULATOR") !== simulator ||
-      recipe.target.kind === "SIMULATOR" && !recipe.target.offeringId || ["TEEITUP", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS", "REX", "CPS", "MINDBODY", "TEESNAP", "FIVE_IRON", "GOLFBOOK"].includes(recipe.adapter.family) && !recipe.source.venueAddress)
+      recipe.target.kind === "SIMULATOR" && !recipe.target.offeringId || ["CHELSEA", "TEEITUP", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS", "REX", "CPS", "MINDBODY", "TEESNAP", "FIVE_IRON", "GOLFBOOK"].includes(recipe.adapter.family) && !recipe.source.venueAddress)
       ctx.addIssue({ code: "custom", message: "Supported adapter metadata must match the source and target kind" });
     if (recipe.adapter.family === "TEESNAP" && (recipe.target.kind !== "OUTDOOR" || recipe.target.offeringId ||
         parseTeesnapRecipeSource(recipe.source.bookingUrl)?.tenant !== recipe.adapter.tenant ||

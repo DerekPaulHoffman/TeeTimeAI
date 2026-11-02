@@ -458,3 +458,18 @@ timezone. Prepaid products, private/class services, unknown calendars and
 duration mismatches remain excluded. Acuity-only company-name normalization
 permits an omitted terminal Co./Company without dropping brand/location words
 or changing the canonical name, address, timezone, owner or rental identifiers.
+
+The Chelsea public booking-admin protocol now has a separate typed reader. It
+starts a fresh anonymous session, reads only the two compiled bootstrap pages,
+and submits observed public date/player/round filters. Ephemeral form state and
+the anonymous session remain private to one execution. Individual tee-time
+actions, account login, arbitrary form events and customer credentials are
+excluded; general browser redirect rules stay unchanged. Both published round
+products must return complete, date- and filter-confirmed sheets before a check
+can report availability or an empty result. The reported party count is a
+server-filtered lower bound, not an inferred exact count of remaining places.
+
+Local development replay found matching public inventory on two dates with
+different player counts, without model calls or backend writes. This does not
+establish autonomous source discovery, persisted recipes, received matching
+emails, or reuse after a worker restart. The failed cold cohort remains failed.
