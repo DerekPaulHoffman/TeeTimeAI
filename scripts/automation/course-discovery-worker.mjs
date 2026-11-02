@@ -1507,7 +1507,7 @@ export async function validateDiscoveryRecipe({ cwd, recipe, signal, spawnProces
   const payload = JSON.stringify({ recipe });
   if (Buffer.byteLength(payload, "utf8") > 131_072) return { valid: false, issues: [{ path: "recipe", code: "too_big", message: "Recipe field does not match the required schema." }] };
   return new Promise((resolveResult, reject) => {
-    const child = spawnProcess(process.execPath, [join(cwd, "node_modules/tsx/dist/cli.mjs"), join(cwd, "scripts/automation/course-discovery-browser.ts"), "--validate-recipe"],
+    const child = spawnProcess(process.execPath, [join(cwd, "node_modules/tsx/dist/cli.mjs"), join(cwd, "scripts/automation/validate-course-recipe.ts")],
       { cwd, env: discoveryProcessEnvironment(), windowsHide: true, shell: false, detached: process.platform !== "win32", stdio: ["pipe", "pipe", "pipe"] });
     let output = "", finished = false;
     const complete = (error, value) => {

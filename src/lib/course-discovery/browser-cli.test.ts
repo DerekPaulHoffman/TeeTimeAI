@@ -28,7 +28,12 @@ describe("pure recipe validation CLI", () => {
     expect(invalid).toMatchObject({ valid: false, issues: [expect.objectContaining({ path: "proof.complete.selector", message: "Expected a bounded public display selector" })] });
     expect(JSON.stringify(invalid)).not.toContain("SECRET_SENTINEL");
     recipe.proof.complete.selector = "#complete";
-    expect(await validateDiscoveryRecipe({ cwd: process.cwd(), recipe })).toEqual({ valid: true });
+    // Three investigations can reach schema validation together. None needs to
+    // import a browser session, an availability executor, or provider clients.
+    expect(await Promise.all(Array.from({ length: 3 }, () =>
+      validateDiscoveryRecipe({ cwd: process.cwd(), recipe })))).toEqual([
+      { valid: true }, { valid: true }, { valid: true }
+    ]);
   }, 20_000);
 });
 
