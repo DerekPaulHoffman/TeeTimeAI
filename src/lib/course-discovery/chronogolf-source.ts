@@ -162,11 +162,15 @@ function providerWebsiteIdentityHost(value: string) {
   } catch { return null; }
 }
 function physicalAddress(value: string) {
-  const parsed = completeUSAddress(value);
+  // Some complete public addresses explicitly include a numbered unit after
+  // the street type. Parse the base with the existing strict US grammar and
+  // retain the entire unit in identity/catalog equality; never omit or infer it.
+  const unit = /^(\d{1,7}[A-Za-z]?\s+[^,#]{2,135})\s+#([0-9]{1,10}[A-Za-z]?)(,\s+.+)$/u.exec(value.trim());
+  const parsed = completeUSAddress(unit ? unit[1] + unit[3] : value);
   if (!parsed) return null;
   const street = parsed.street.replace(/\b(?:north|south|east|west|northeast|northwest|southeast|southwest)\b/gu,
     word => ({ north:"n",south:"s",east:"e",west:"w",northeast:"ne",northwest:"nw",southeast:"se",southwest:"sw" })[word]!);
-  return { ...parsed, street };
+  return { ...parsed, street: street + (unit ? ` unit ${unit[2].toLowerCase()}` : "") };
 }
 /** A heading-free canonical site can print its full business identity in one
  * semantic footer address. This is not title text or a provider-host alias. */

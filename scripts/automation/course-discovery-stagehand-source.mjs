@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { discoveryError } from "./course-discovery-client.mjs";
-import { observedBookingSourceCandidates, nativeFrameNavigations, nativeIntermediaryNavigations, nativeGestureNavigations, nativeHistoryNavigations, rootWidgetRoutingWitness } from "./stagehand/source-provenance.mjs";
+import { observedBookingSourceCandidates, nativeFrameNavigations, nativeIntermediaryNavigations, nativeGestureNavigations, nativeHistoryNavigations, nativeLegacyGatewayLandings, rootWidgetRoutingWitness } from "./stagehand/source-provenance.mjs";
 import { isPublicSourceGateway } from "./stagehand/public-source-gateway.mjs";
 import { sourceTransportCodes } from "./stagehand/source-diagnostic.mjs";
 
@@ -150,6 +150,7 @@ const urlField = value => publicStagehandSourceUrl(value) ? value : undefined;
 export function stagehandRoutingReport(report, job) {
   const route = validateStagehandSourceReport(report, job), rootWidget = route.kind === "ROOT_PUBLIC_WIDGET";
   const gestureWitnesses = nativeGestureNavigations(report, publicStagehandSourceUrl);
+  const legacyWitnesses = nativeLegacyGatewayLandings(report, publicStagehandSourceUrl);
   const projected = {
     jobId: report.jobId, firstPickedUpAt: report.firstPickedUpAt, deadlineAt: report.deadlineAt,
     startedAt: report.startedAt, finishedAt: report.finishedAt, workDeadlineAt: report.workDeadlineAt,
@@ -180,10 +181,15 @@ export function stagehandRoutingReport(report, job) {
       const witness = typeof text === "string" && typeof label === "string" && text.length <= 512 && label.length <= 512
         ? gestureWitnesses.find(w => w.pageUrl === row.sourceUrl && w.href === row.observedTarget?.href && w.finalUrl === row.afterUrl &&
           text.replace(/\s+/gu, " ").trim() === w.text && label.replace(/\s+/gu, " ").trim() === w.label) : undefined;
+      // Legacy public landing proof also depends on the actually clicked
+      // caption. Retain it only for an already validated native route, so
+      // checkpoint projection cannot erase the evidence needed on retry.
+      const legacy = typeof text === "string" && typeof label === "string" && text.length <= 512 && label.length <= 512 &&
+        legacyWitnesses.some(w => w.sourceUrl === row.sourceUrl && w.href === row.observedTarget?.href && w.documentUrl === row.afterUrl);
       return {
         sourceUrl: urlField(row.sourceUrl), action: { method: row.action?.method === "click" ? "click" : "OTHER" },
         observedTarget: { tag: row.observedTarget?.tag === "A" ? "A" : "OTHER", href: urlField(row.observedTarget?.href),
-          ...(witness ? { text: witness.text, label: witness.label } : {}) },
+          ...(witness ? { text: witness.text, label: witness.label } : legacy ? { text, label } : {}) },
         afterUrl: urlField(row.afterUrl), ...(row.error || row.actionError ? { error: true } : {}),
         ...(witness ? { openedNewPage: false } : {}),
       };

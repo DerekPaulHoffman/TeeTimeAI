@@ -34,7 +34,7 @@ import { getCpsPostalContactDiagnostic } from "./cps-postal-conflict-proof";
 import { getMindbodyAppointmentDiagnostic } from "./mindbody-appointment-reader";
 import { isPublicCalendarApply } from "./public-calendar-apply";
 import { isObservedPublicCalendarDay, observedPublicCalendarDays } from "./public-calendar-day";
-import { PUBLIC_BROWSER_REQUEST_LIMIT, MINDBODY_APPOINTMENT_REQUEST_LIMIT, assertPublicBrowserRequestBudget, PUBLIC_BROWSER_TOTAL_BYTES, publicOfficialRenderResponseLimit } from "./browser-resource-limits";
+import { PUBLIC_BROWSER_REQUEST_LIMIT, MINDBODY_APPOINTMENT_REQUEST_LIMIT, assertPublicBrowserRequestBudget, PUBLIC_BROWSER_TOTAL_BYTES, publicOfficialRenderResponseLimit, publicBrowserResponseLimit, SOURCE_ROUTING_RESPONSE_PROFILE } from "./browser-resource-limits";
 import { registerPublicReadWorkerDenial } from "./public-read-worker-denial";
 import { observedPublicDropdowns, selectPublicDropdown, type PublicDropdownProof } from "./public-dropdown-control";
 import { observedPublicMenuButtons, selectPublicMenuButton, type PublicMenuButtonProof } from "./public-duration-button";
@@ -248,6 +248,8 @@ export type DiscoveryBrowserSessionDependencies = {
   inspectAdapter?: typeof inspectExistingAdapter;
   /** Private same-report fixed inspector witness; never an action or model field. */
   fixedInspectionFrameWitness?: FixedInspectionFrameWitness;
+  /** Private fixed source inspection, never an action/recipe/model setting. */
+  sourceInspectionOnly?: true;
 };
 export function discoveryBrowserRequestLimit(input: { initialUrls: string[]; timeZone?: string; venueName?: string; venueAddress?: string; venueOfficialUrl?: string;
   requestedInput?: AccessExecutionInput }, deps: Pick<DiscoveryBrowserSessionDependencies, "fixedReaderProfile" | "browserTransport" | "localCapabilities">) {
@@ -314,6 +316,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
   if (requestedInput && requestedInput.timeZone !== (input.timeZone ?? "UTC")) throw new Error("REQUEST_CONTEXT_TIME_ZONE_MISMATCH");
   const initialUrls = input.initialUrls.map(normalizeDiscoveryNavigationUrl);
   if (!initialUrls.length || initialUrls.length > 16 || !initialUrls.every(isSafeRecipeUrl)) throw new Error("INVALID_INITIAL_URLS");
+  if (deps.sourceInspectionOnly !== undefined && (deps.sourceInspectionOnly !== true || deps.browserTransport !== "NATIVE_CHROME" ||
+      !input.venueOfficialUrl || !initialUrls.includes(input.venueOfficialUrl) || initialUrls.length > 2))
+    throw new Error("FIXED_SOURCE_INSPECTION_SCOPE_INVALID");
   const officialContactUrl = deps.officialContactParent && input.venueOfficialUrl && initialUrls.length === 1 &&
     deps.browserTransport === "NATIVE_CHROME" && !deps.allowTeeItUpContactChainRoot &&
     verifiedTeeItUpContactParent(deps.officialContactParent, input.venueOfficialUrl, initialUrls[0]) ? initialUrls[0] : undefined;
@@ -808,12 +813,13 @@ export async function createCourseDiscoveryBrowserSession(input: {
         // inherit a byte allowance from an official document that navigated away.
         const renderGate=officialRenderGate(request.frame()===page.mainFrame());
         route.noteOfficialRenderGate?.(renderGate);
-        const officialRenderDataGet=Boolean(renderGate.nativeTransport && method==="GET" && ["xhr","fetch"].includes(request.resourceType()) &&
+        const officialRenderDataGet=Boolean(!deps.sourceInspectionOnly && renderGate.nativeTransport && method==="GET" && ["xhr","fetch"].includes(request.resourceType()) &&
           renderGate.mainFrame && renderGate.navigationRequestPresent && renderGate.navigationStatus200 && renderGate.witnessPresent &&
           renderGate.witnessRequestMatches && renderGate.witnessUrlMatches && renderGate.completedDocumentRead &&
           (renderGate.officialRootProof || renderGate.officialSubpageProof));
         if (officialRenderDataGet && route.admitOfficialRenderDataLimit?.()!==true) throw new Error("NATIVE_OFFICIAL_RENDER_LIMIT_UNAVAILABLE");
-        const responseLimit=publicOfficialRenderResponseLimit(request.resourceType(),method,officialRenderDataGet);
+        const responseLimit=deps.sourceInspectionOnly ? publicBrowserResponseLimit(request.resourceType(),method,SOURCE_ROUTING_RESPONSE_PROFILE)
+          : publicOfficialRenderResponseLimit(request.resourceType(),method,officialRenderDataGet);
         if (nativeProxy) responseLimitAdmission = { allowedBytes: responseLimit, officialRenderDataLimit: officialRenderDataGet, gate: renderGate };
         if (nativeProxy) {
           nativeProxy.allowHostConnections(url.hostname);
@@ -1028,6 +1034,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     try {
       redirectRouting = await installNativeRedirectRouting(page, handleRoute, {
         signal: deadline, maxRequests: 1024,
+        ...(deps.sourceInspectionOnly ? { responseProfile: SOURCE_ROUTING_RESPONSE_PROFILE } : {}),
         denyUncorrelatedPost: (request, onDecision) => {
           if (closed || deadline.aborted || terminalFailure || page.url() !== page.mainFrame().url()) {
             try { onDecision?.("CALLER_SESSION_UNAVAILABLE"); } catch { /* Diagnostics never affect admission. */ }
@@ -1879,6 +1886,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
       const executeAction = async (): Promise<DiscoveryBrowserSnapshot> => {
         staleControlReason = undefined;
       const action = discoveryBrowserActionSchema.parse(value);
+      if (deps.sourceInspectionOnly && (!['open','observe','inspect_adapter','finish','click'].includes(action.action) ||
+          action.action === 'click' && !((controls.get(action.target)?.kind === 'link' && controls.get(action.target)?.href) || controls.get(action.target)?.entryDisclosure)))
+        throw new Error("FIXED_SOURCE_INSPECTION_ACTION_REJECTED");
       if (["open", "click", "select", "fill"].includes(action.action)) {
         bodyContentDeadlineAt = undefined; renderedContentDeadlineAt = undefined;
       }

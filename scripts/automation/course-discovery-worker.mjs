@@ -262,7 +262,7 @@ function currentNativeBookingContext(observation, contextUrl, bookingUrl) {
 /** This observation is controller memory only; checkpoints cannot restore it. */
 export function createDiscoveryAdapterObservation(job, bookingUrl, adapter, contextUrl, nativeContinuity, browserOwner) {
   if (!safeObservedUrl(job?.request?.identity?.officialUrl) || !safeObservedUrl(bookingUrl) || !safeObservedUrl(contextUrl) ||
-      !["FOREUP", "ACUITY", "TEEITUP", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS", "REX", "CPS", "MINDBODY", "TEESNAP", "FIVE_IRON", "GOLFBOOK"].includes(adapter?.family)) return undefined;
+      !["CHELSEA", "FOREUP", "ACUITY", "TEEITUP", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS", "REX", "CPS", "MINDBODY", "TEESNAP", "FIVE_IRON", "GOLFBOOK"].includes(adapter?.family)) return undefined;
   const adapterKey = canonicalDataKey(adapter), identityKey = canonicalDataKey(job.request.identity),
     targetKey = canonicalDataKey(job.request.target), inputKey = canonicalDataKey(job.request.input);
   if (!adapterKey || !identityKey || !targetKey || !inputKey) return undefined;
@@ -1398,6 +1398,7 @@ export function createDiscoveryBrowser({ cwd, deadlineAt, initialUrls, timeZone 
     throw new Error("FIXED_CPS_SOURCE_DOCUMENT_SCOPE_INVALID");
   if (fixedInspectionFrameWitness !== undefined && (fixedInspection !== true || JSON.stringify(fixedInspectionFrameWitness).length > 10_000))
     throw new Error("FIXED_INSPECTION_FRAME_SCOPE_INVALID");
+  const sourceInspectionOnly = fixedInspection === true && helperEnvironment.COURSE_DISCOVERY_BROWSER_TRANSPORT === "NATIVE_CHROME";
   const channel = processFactory({ executable: process.execPath,
     args: [join(cwd, "node_modules/tsx/dist/cli.mjs"), join(cwd, "scripts/automation/course-discovery-browser.ts"), "--deadline", deadlineAt, "--initial-urls", JSON.stringify(initialUrls),
       ...(venueName ? ["--venue-name", venueName] : []), ...(venueAddress ? ["--venue-address", venueAddress] : []),
@@ -1406,9 +1407,9 @@ export function createDiscoveryBrowser({ cwd, deadlineAt, initialUrls, timeZone 
       ...(trustedContext === undefined ? [] : ["--trusted-context", JSON.stringify(trustedContext)]),
       ...(fixedInspectionFrameWitness === undefined ? [] : ["--fixed-inspection-frame-witness", JSON.stringify(fixedInspectionFrameWitness)]),
       ...(fixedCpsSourceDocumentUrl === undefined ? [] : ["--fixed-cps-source-document", fixedCpsSourceDocumentUrl]),
-      "--time-zone", timeZone],
+      ...(sourceInspectionOnly ? ["--source-inspection"] : []), "--time-zone", timeZone],
     cwd, environment: { ...discoveryProcessEnvironment(), ...helperEnvironment,
-      ...(fixedInspectionFrameWitness === undefined && fixedCpsSourceDocumentUrl === undefined ? {} : { COURSE_DISCOVERY_FIXED_INSPECTION: "1" }) },
+      ...(!sourceInspectionOnly && fixedInspectionFrameWitness === undefined && fixedCpsSourceDocumentUrl === undefined ? {} : { COURSE_DISCOVERY_FIXED_INSPECTION: "1" }) },
     signal, timeoutMs: Math.min(fixedInspection ? 180_000 : 90_000, Math.max(1, Date.parse(deadlineAt) - Date.now())),
   });
   let closed = false, lastSnapshot, lastProof, lastGesture;

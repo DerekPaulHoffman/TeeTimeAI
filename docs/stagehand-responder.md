@@ -7,6 +7,19 @@ Only backend-owned verification can activate an immutable recipe. Subsequent
 checks execute that recipe without model calls. Normal search workflows,
 canonical matching, deduplication and the email outbox retain delivery ownership.
 
+Private native source inspection uses the same bounded render-response profile
+as Stagehand source routing: GET XHR/fetch responses may use the existing 16 MB
+decoded allocation. This permits a large public homepage render response before
+its final document witness is available. The ordinary 2 MB data-read limit,
+192-request session allocation, 48 MB total decoded budget, encrypted-byte
+budget, provider leases and all request/authentication/transaction rules remain
+in force for their respective paths. This profile is a controller-only helper
+mode, excluded from model actions and saved recipes. Its browser allows only
+open/observe, fresh public navigation or the existing proved entry disclosure,
+fixed adapter inspection and finish; it rejects date/player selection, fills,
+scrolls, unknown clicks and generic DOM inspection. Independent availability
+replays execute through the ordinary fixed readers with no source profile.
+
 Source-only navigation executes an already observed public anchor through
 Playwright input on the same launch-owned, guarded Chrome target. The private
 controller rechecks its document and element immediately before input; Stagehand

@@ -16,3 +16,11 @@ test('slow fixed inspection gets a bounded process budget without extending its 
     assert.equal(closed, 1);
   }
 });
+test('only private native fixed source inspection selects the source render budget',async()=>{
+ for(const fixedInspection of[false,true])for(const transport of['NATIVE_CHROME','PINNED_HTTP']){
+  let spawned;const browser=createDiscoveryBrowser({cwd:process.cwd(),initialUrls:['https://example.org/'],deadlineAt:new Date(Date.now()+30000).toISOString(),fixedInspection,
+   helperEnvironment:{COURSE_DISCOVERY_BROWSER_TRANSPORT:transport},processFactory:options=>{spawned=options;return{request:async()=>({}),close:async()=>{}};}});
+  const enabled=fixedInspection&&transport==='NATIVE_CHROME';assert.equal(spawned.args.includes('--source-inspection'),enabled);
+  assert.equal(spawned.environment.COURSE_DISCOVERY_FIXED_INSPECTION,enabled?'1':undefined);await browser.close();
+ }
+});

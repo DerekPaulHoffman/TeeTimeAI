@@ -57,6 +57,18 @@ function dependencies(options: Options = {}) {
 const execute = (deps: ReturnType<typeof dependencies>, requested = input, saved = metadata(), identity = source) => executeChronogolf(identity, saved, target, requested, deps);
 
 describe("Chronogolf fixed public all-round reader", () => {
+  it("preserves an explicitly matching numbered street unit during identity inspection and replay", async () => {
+    const identity = { ...source, venueAddress: "123 Fairway Drive #1188, Portland, OR 97231, USA" };
+    const profile = { ...club(), address: "123 Fairway Dr #1188" }, inspection = dependencies({ profile: html(profile) });
+    const saved = await inspectChronogolf(identity, inspection);
+    const replay = dependencies({ profile: html(profile) });
+    expect(await executeChronogolf(identity, saved, target, input, replay)).toHaveLength(3);
+    for (const address of ["123 Fairway Dr", "123 Fairway Dr #1189", "123 Fairway Dr #01188", "123 Fairway Dr #1188 #1189"]) {
+      const changed = dependencies({ profile: html({ ...profile, address }) });
+      await expect(inspectChronogolf(identity, changed)).rejects.toThrow("ADAPTER_IDENTITY_MISMATCH");
+      expect(changed.reads).toHaveLength(1);
+    }
+  });
   it("accepts a public round label and an unpadded morning hour with exact public identity", async () => {
     const value = row(1);
     value.starts_at = `${input.date}T16:30:00Z`; value.start_time = "9:30";

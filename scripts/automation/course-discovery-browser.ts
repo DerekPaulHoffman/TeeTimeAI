@@ -204,9 +204,13 @@ async function main() {
   const fixedCpsSourceDocumentUrl = cpsDocumentAt < 0 ? undefined : args[cpsDocumentAt + 1];
   if (cpsDocumentAt >= 0 && (process.env.COURSE_DISCOVERY_FIXED_INSPECTION !== "1" || configuredTransport !== "NATIVE_CHROME" ||
       !fixedCpsSourceDocumentUrl)) throw new Error("FIXED_CPS_SOURCE_DOCUMENT_SCOPE_INVALID");
+  const sourceInspectionOnly = args.includes("--source-inspection");
+  if (sourceInspectionOnly && (process.env.COURSE_DISCOVERY_FIXED_INSPECTION !== "1" || configuredTransport !== "NATIVE_CHROME"))
+    throw new Error("FIXED_SOURCE_INSPECTION_SCOPE_INVALID");
   const session = await createCourseDiscoveryBrowserSession({ deadlineAt, initialUrls, timeZone, venueName, venueAddress, venueOfficialUrl,
     ...(requestedInput === undefined ? {} : { requestedInput }), ...(trustedContext === undefined ? {} : { trustedContext }) }, { requestLease,
     browserTransport: configuredTransport as "PINNED_HTTP" | "NATIVE_CHROME",
+    ...(sourceInspectionOnly ? { sourceInspectionOnly: true } : {}),
     ...(fixedInspectionFrameWitness === undefined ? {} : { fixedInspectionFrameWitness }),
     ...(fixedCpsSourceDocumentUrl === undefined ? {} : { fixedCpsSourceDocumentUrl }) });
   const input = createInterface({ input: process.stdin, crlfDelay: Infinity });

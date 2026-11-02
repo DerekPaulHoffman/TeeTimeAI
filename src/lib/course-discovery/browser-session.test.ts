@@ -24,6 +24,15 @@ vi.mock("@/lib/automation/address-pinned-public-fetch", async importOriginal => 
 }));
 
 describe("discovery browser public protocol", () => {
+  it.each(["pinned", "missing official", "foreign official", "extra roots", "untyped switch"])("rejects an unbound source inspection profile before launch: %s", async mode => {
+    const official = "https://source-inspection.example/", launchBrowser = vi.fn();
+    const initialUrls = mode === "extra roots" ? [official, official + "a", official + "b"] : [official];
+    await expect(createCourseDiscoveryBrowserSession({ deadlineAt: new Date(Date.now() + 10000), initialUrls,
+      ...(mode === "missing official" ? {} : { venueOfficialUrl: mode === "foreign official" ? "https://foreign.example/" : official }) },
+    { sourceInspectionOnly: (mode === "untyped switch" ? "true" : true) as true, browserTransport: mode === "pinned" ? "PINNED_HTTP" : "NATIVE_CHROME", launchBrowser }))
+      .rejects.toThrow("FIXED_SOURCE_INSPECTION_SCOPE_INVALID");
+    expect(launchBrowser).not.toHaveBeenCalled();
+  });
   it("uses the current unchanged public POST policy only to confirm denial, never to accept an uncorrelated read", () => {
     const request = { url: "https://example.org/data", method: "POST" as const, resourceType: "xhr" as const, headers: { "content-type": "application/json" }, body: '{"event":"page-view"}' };
     const addHeaders = vi.fn(() => true);
@@ -212,6 +221,45 @@ describe("discovery browser public protocol", () => {
 
 const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
+  it.each([false, true])("keeps the ordinary native data limit and grants only source inspection its bounded render read: %s", async sourceInspectionOnly => {
+    const official = "https://source-render.example/", material = readFileSync("src/lib/course-discovery/cps-browser-wiring.test.ts", "utf8");
+    const tls = (key: string): string => JSON.parse(new RegExp(`^const ${key} = (".*");$`, "m").exec(material)![1]);
+    const server = createServer({ key: tls("fixtureKey"), cert: tls("fixtureCertificate") }, (request, response) => {
+      if (request.url === "/render-data") { response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ text: "x".repeat(3_000_000) })); return; }
+      response.writeHead(200, { "content-type": "text/html" }).end('<html><head><link rel="icon" href="data:,"></head><body><h1>Public Golf Course</h1><p>10 Public Road, Example, NY 12345, USA</p>' +
+        '<a href="/times">Book a tee time</a><script>fetch("/render-data").then(r=>r.json()).then(()=>document.body.append(" Render ready")).catch(()=>{});</script></body></html>');
+    });
+    const originalProxy = nativeBrowser.createNativePublicBrowserProxy;
+    let session: Awaited<ReturnType<typeof createCourseDiscoveryBrowserSession>> | undefined, proxy: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve)); const port = (server.address() as AddressInfo).port;
+      proxy = vi.spyOn(nativeBrowser, "createNativePublicBrowserProxy").mockImplementation(input => originalProxy({ ...input, requireHostAdmission: true }, {
+        resolveAddresses: async hostname => { if (hostname !== "source-render.example") throw Error("UNOWNED_FIXTURE_HOST"); return [{ address: "93.184.216.34", family: 4 }]; },
+        connect: () => connect({ host: "127.0.0.1", port }),
+      }));
+      session = await createCourseDiscoveryBrowserSession({ initialUrls: [official], venueOfficialUrl: official, venueName: "Public Golf Course",
+        venueAddress: "10 Public Road, Example, NY 12345, USA", deadlineAt: new Date(Date.now() + 20000) }, {
+        browserTransport: "NATIVE_CHROME", ...(sourceInspectionOnly ? { sourceInspectionOnly: true } : {}),
+        requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+        launchBrowser: () => launchPublicReadBrowser({ executablePath, headless: true, args: ["--ignore-certificate-errors"] }),
+      });
+      if (!sourceInspectionOnly) {
+        await session.execute({ id: 1, action: "open", url: official }).catch(() => undefined);
+        await expect.poll(() => session!.diagnostics().nativeFirstFatal).toMatchObject({ code: "NATIVE_RESPONSE_LIMIT", allowedBytes: 2000000 });
+      } else {
+        const snapshot = await session.execute({ id: 1, action: "open", url: official });
+        expect(snapshot.controls).toContainEqual(expect.objectContaining({ kind: "link", href: official + "times" }));
+        await expect.poll(async () => (await session!.execute({ id: 2, action: "observe" })).text).toContain("Render ready");
+        expect(session.diagnostics().nativeFirstFatal).toBeUndefined();
+        const unknownTarget = "00000000-0000-4000-8000-000000000001";
+        for (const action of [{ action: "select", target: unknownTarget, option: "3" }, { action: "fill", target: unknownTarget, text: "2030-01-03" },
+          { action: "scroll", direction: "down" }, { action: "click", target: unknownTarget }])
+          await expect(session.execute({ id: 3, ...action })).rejects.toThrow("FIXED_SOURCE_INSPECTION_ACTION_REJECTED");
+        const fresh = await session.execute({ id: 4, action: "observe" }), link = fresh.controls.find(control => control.href === official + "times")!;
+        expect((await session.execute({ id: 5, action: "click", target: link.target })).url).toBe(official + "times");
+      }
+    } finally { await session?.close(); proxy?.mockRestore(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
+  }, 30000);
   it.each(["redirect", "noFrameGrant", "incompleteChain", "staleLoader", "staleGeneration", "foreignFrame", "changedFinal", "clientNavigation"] as const)
   ("binds a fresh fixed-frame OPEN only to its exact completed native redirect document: %s", async mode => {
     const official = "https://routing-frame.example/", frame = official + "html/widget", final = official + "html/public?view=day";

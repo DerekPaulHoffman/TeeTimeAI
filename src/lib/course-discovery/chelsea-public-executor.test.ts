@@ -4,6 +4,7 @@ import { parseAccessRecipe } from "./recipe";
 import { inspectExistingAdapter } from "./existing-adapter-executor";
 import { executeChelseaPublic, inspectChelseaPublic } from "./chelsea-public-executor";
 import { chelseaPublicAvailability, chelseaPublicMetadata, parseChelseaPublicSource, readChelseaPublicForm } from "./chelsea-public-source";
+import { createDiscoveryAdapterObservation, bindDiscoveryRecipeIdentity, inspectedAdapterSourceEvidence } from "../../../scripts/automation/course-discovery-worker.mjs";
 
 const url = "https://public-course.chelseareservations.com/golf/bookingadmin.aspx";
 const source = { officialUrl: "https://official-course.example/", bookingUrl: url, venueName: "Example Municipal Golf Course",
@@ -60,6 +61,18 @@ const deps = { venueMatches: venueProofMatches, toInstant: recipeTimeToInstant,
   requestLease: async <T>(_family: string, work: () => Promise<T>) => ({ acquired: true as const, value: await work() }) };
 
 describe("public Chelsea WebForms availability", () => {
+  it("binds the fixed inspector's Chelsea metadata to the same job and ordinary input", () => {
+    const job = { id: "chelsea-development-job", request: { identity: { name: source.venueName, address: source.venueAddress,
+      officialUrl: source.officialUrl, timeZone: source.timeZone }, target: { courseId: "owned-course", kind: "OUTDOOR" }, input } };
+    const observation = createDiscoveryAdapterObservation(job, url, metadata, source.officialUrl);
+    expect(observation).toBeDefined();
+    const candidate = bindDiscoveryRecipeIdentity({ schemaVersion: 1, engine: "EXISTING_ADAPTER", source, adapter: metadata }, job, observation, source.officialUrl);
+    expect(candidate.adapter).toEqual(metadata);
+    expect(inspectedAdapterSourceEvidence(candidate, job, observation, true, source.officialUrl))
+      .toEqual({ officialUrl: source.officialUrl, observedBookingUrl: url });
+    expect(inspectedAdapterSourceEvidence(candidate, { ...job, id: "other-job" }, observation, true, source.officialUrl)).toBeUndefined();
+    expect(inspectedAdapterSourceEvidence(candidate, { ...job, request: { ...job.request, input: { ...input, players: 3 } } }, observation, true, source.officialUrl)).toBeUndefined();
+  });
   it("discovers current course/round identifiers with a new anonymous GET session", async () => {
     const fetch = publicFetch();
     expect(await inspectExistingAdapter(source, { ...deps, fetch })).toEqual({ adapter: metadata });

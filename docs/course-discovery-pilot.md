@@ -473,3 +473,21 @@ Local development replay found matching public inventory on two dates with
 different player counts, without model calls or backend writes. This does not
 establish autonomous source discovery, persisted recipes, received matching
 emails, or reuse after a worker restart. The failed cold cohort remains failed.
+
+The subsequent normal-resume repair on release `0141083` also failed all three
+venues. Its original clocks, two attempts per job and zero matching deliveries
+remain preserved. Local reader replay had missed worker handoff boundaries:
+Chelsea metadata was absent from the private observation registry; normal
+new-tab Acuity routing lost the public caption during checkpoint projection;
+and the Chronogolf identity reader rejected an identical explicit numbered
+street unit in both canonical and provider addresses. The fixes preserve the
+actual caption only for a validated native legacy route and retain every unit
+character in address equality and the catalog hash. They do not infer addresses
+or erase unit conflicts.
+
+Development now exercises the actual worker, child-process guarded browser,
+fresh fixed inspector and both independent replay helpers against public sites.
+Its coordination and challenge API live only on localhost, with no production
+backend authority, recipe writes or emails. These stronger development checks
+still do not establish live persistence, received matching alerts or restart
+reuse; all those acceptance gates remain required.
