@@ -398,10 +398,10 @@ describe("Google Places mapping", () => {
     );
   });
 
-  it("keeps association-only course identities pending without making them public", async () => {
+  it.each(["association_or_organization", "sports_club"])("keeps association-only %s identities pending without making them public", async (primaryType) => {
     process.env.GOOGLE_PLACES_API_KEY = "test-key";
     const candidate: GooglePlace = { id: "association-course", displayName: { text: "Example Country Club" },
-      primaryType: "association_or_organization", types: ["association_or_organization"],
+      primaryType, types: ["association_or_organization"],
       businessStatus: "OPERATIONAL", websiteUri: "https://course.example/",
       location: { latitude: 41.8, longitude: -72.4 } };
     vi.spyOn(globalThis, "fetch").mockResolvedValue({ ok: true, json: async () => ({ places: [

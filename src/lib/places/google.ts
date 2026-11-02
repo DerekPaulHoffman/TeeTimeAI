@@ -387,7 +387,8 @@ function isPlausibleDirectGolfCourseLookupPlace(
 
   // Exact lookup may find a real course classified only as an association.
   // Keep it pending: this does not change nearby eligibility or prove public access.
-  const associationCandidate = place.primaryType === "association_or_organization" &&
+  const associationCandidate = ["association_or_organization", "sports_club"].includes(place.primaryType ?? "") &&
+    place.types?.includes("association_or_organization") &&
     /\b(?:country\s+club|golf\s+(?:club|course))\b/i.test(name) && Boolean(place.websiteUri);
   if (!place.types?.includes("golf_course") && !associationCandidate) {
     return false;
