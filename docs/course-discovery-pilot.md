@@ -397,3 +397,32 @@ arrives. A prior correlated terminal can settle the same pause without issuing
 an invalid second abort. Both event orderings are tested; an unrelated terminal
 still times out. These local fixes require fresh live verification and do not
 change either failed result into acceptance or saved-method restart proof.
+
+Two later development repairs on the same venues also failed all targets. The
+first stopped before any model call or page inspection during guarded-host
+startup. Windows memory pressure was observed afterward; its cause was not
+established. Three parallel isolated browser/Stagehand/ChatGPT startup checks
+subsequently passed without terminating unrelated processes or changing runtime
+configuration. Startup readiness is separate from reliable discovery.
+
+The next repair reached source discovery and fixed inspection, but produced no
+recipes, canonical matches or matching emails. Its recorded worker usage was at
+least 242,912 tokens, including unsuccessful generic fallbacks. All twelve
+original failed jobs and pickup clocks remain preserved; the three alerts were
+paused after terminal observation. This is development evidence, not an unseen
+cohort or restart-reuse pass.
+
+A deterministic, model-disabled Two Roads reproduction identifies a delayed
+21+ age-confirmation overlay on the brewery homepage as the click blocker. An
+early click before it appears is not reliable access evidence. No age assertion
+was made. Complete one-hour bay inventory also remains unverified there.
+
+Two further local corrections address independently reproduced transport
+failures. Retired response interceptions can expire before their exact native
+network failure arrives; the controller now accepts either the real abort ACK
+or that correlated failure within the existing bound, without reading the
+response or admitting a successor. Foreign and revised identities still fail.
+Fixed inspection also advances a canonical-root redirect already traversed by
+the fresh browser when its exact completed native redirect chain attests it;
+the destination need not appear again as a page link. Missing or foreign
+redirect attestations remain rejected. These corrections require live proof.

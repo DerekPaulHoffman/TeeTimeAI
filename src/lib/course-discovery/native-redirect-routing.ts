@@ -160,6 +160,7 @@ type RecordEntry = {
   cancellation: AbortController; handlerDone: boolean; responsePaused: boolean;
   retirementAck?: Promise<void>;
   retirementAcks?: Partial<Record<"request" | "response", Promise<void>>>;
+  retiredNetworkFailure?: ReturnType<typeof pending<void>>;
   redirect?: { status: number; target: string }; redirectChildId?: string;
   adapter: NativeReadRequest; response: ReturnType<typeof pending<NativeReadResponse | Error>>;
 };
@@ -632,14 +633,33 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
     if (isNativeReadTerminalFailure(record.failure)) record.cancellation.abort(record.failure);
     record.response.settle(record.failure);
   };
-  const abortRetiredPause = (record: RecordEntry, stage: "request" | "response", command: () => Promise<unknown>) => {
+  const exactRetiredNetworkFailure = (record: RecordEntry) => {
+    const identity = networkIdentities.get(record.networkId);
+    return record.generation.retired && identity !== undefined && failedNetworkIdentities.has(identity) && sourceLoadingFailures.has(identity) &&
+      identity.revision === record.networkIdentityRevision && identity.frameId === rootFrameId &&
+      identity.loaderId === record.loaderId && loaderOwners.get(identity.loaderId) === record.generation &&
+      identity.url === record.url && identity.method === record.method &&
+      (identity.kind === record.kind || [identity.kind, record.kind].every(kind => kind === "xhr" || kind === "fetch"));
+  };
+  const abortRetiredPause = (record: RecordEntry, stage: "request" | "response", command: () => Promise<unknown>, timeoutDiagnostic?: () => NativeRequestDiagnostic) => {
     // The boundary and a late response event can observe the same pause while
     // another abort ACK is pending. Dispatch one command for that exact stage;
     // a genuinely later response pause still needs its own bounded ACK.
     const acks = record.retirementAcks ??= {};
     const existing = acks[stage];
     if (existing) return existing;
-    const ack = bounded(Promise.resolve().then(command), "NATIVE_REDIRECT_ABORT_TIMEOUT").then(() => {
+    const dispatched = Promise.resolve().then(command);
+    let completion = dispatched;
+    if (stage === "response") {
+      // stopLoading may invalidate this retired response's interception before
+      // its exact Network failure is delivered. Neither a rejected abort nor
+      // supersession proves completion. Keep the same bound and wait for the
+      // actual ACK or independently correlated terminal event, in either order.
+      const terminal = record.retiredNetworkFailure ??= pending<void>();
+      if (exactRetiredNetworkFailure(record)) terminal.settle();
+      completion = Promise.race([dispatched.then(() => {}, () => new Promise<never>(() => {})), terminal.promise]);
+    }
+    const ack = bounded(completion, "NATIVE_REDIRECT_ABORT_TIMEOUT", timeoutDiagnostic).then(() => {
       if (stage === "request") record.paused = false;
       else record.responsePaused = false;
       if (!record.complete) failRecord(record, "NATIVE_READ_SUPERSEDED");
@@ -918,6 +938,8 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
       failRecord(record, record.generation.retired ? "NATIVE_READ_SUPERSEDED" : "NATIVE_REDIRECT_NETWORK_FAILED");
     const identity = networkIdentities.get(event.requestId);
     if (identity) failedNetworkIdentities.add(identity);
+    for (const record of records.values()) if (record.networkId === event.requestId && exactRetiredNetworkFailure(record))
+      record.retiredNetworkFailure?.settle();
     const excluded = excludedImageAborts.get(event.requestId);
     if (excluded && identity === excluded.identity && identity.revision === excluded.revision &&
         identity.generation === excluded.generation && identity.frameId === rootFrameId &&
@@ -1037,19 +1059,14 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
               record.kind !== resourceKinds[event.resourceType] || event.frameId !== rootFrameId || record.responseStarted)
             { await close("NATIVE_REDIRECT_RESPONSE_MISMATCH"); return; }
           record.responseStarted = true; record.responsePaused = true;
-          const identity = networkIdentities.get(record.networkId);
           // A prior exact Network terminal can outlive its interception ID.
           // Local supersession or an abort ACK alone cannot supply this fact.
-          if (identity && failedNetworkIdentities.has(identity) && sourceLoadingFailures.has(identity) &&
-              identity.revision === record.networkIdentityRevision && identity.frameId === rootFrameId &&
-              identity.loaderId === record.loaderId && loaderOwners.get(identity.loaderId) === record.generation &&
-              identity.url === record.url && identity.method === record.method &&
-              (identity.kind === record.kind || [identity.kind, record.kind].every(kind => kind === "xhr" || kind === "fetch"))) {
+          if (exactRetiredNetworkFailure(record)) {
             record.paused = false; record.responsePaused = false;
             return;
           }
           responseFailureBranch = "RETIRED_RESPONSE_ABORT";
-          await abortRetiredPause(record, "response", reject);
+          await abortRetiredPause(record, "response", reject, () => failureContext?.() ?? requestDiagnostic("NATIVE_REDIRECT_ABORT_TIMEOUT"));
           return;
         }
         // Chrome can terminate a paused read while it waits for a provider

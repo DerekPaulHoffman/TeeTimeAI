@@ -511,7 +511,13 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
     };
     let snapshot = await request('open', job.request.identity.officialUrl), position = 0, publicEntryDisclosed = false, frameWaitUsed = false;
     for (;;) {
-      const current = new URL(nativeContexts.get(snapshot)?.originalUrl ?? snapshot.url).href;
+      const logical = new URL(nativeContexts.get(snapshot)?.originalUrl ?? snapshot.url).href;
+      const actual = new URL(snapshot.url).href;
+      // The private continuity context retains the requested URL. A fresh,
+      // completed native HTTP redirect may already have traversed the next
+      // learned edge; its destination need not also appear as a page link.
+      // Keep the context unchanged and advance only on that exact attestation.
+      const current = logical !== actual && freshNativeOfficialRedirects(snapshot, logical, actual) ? actual : logical;
       // Fresh browser redirects may traverse only the remainder of the observed routing path.
       const landed = path.indexOf(current, position);
       if (landed < position) {

@@ -1865,6 +1865,37 @@ describe("native document-generation retirement", () => {
     } finally { stopped.resolve({}); await boundary?.catch(() => {}); await test.guard.close(); }
   });
 
+  it.each(["during abort", "after abort", "foreign terminal", "revised identity"])("drains a retired response's expired interception only with its exact terminal failure (%s)", async mode => {
+    const test = await installed(), stopped = deferred<object>(), send = test.cdp.send.getMockImplementation()!;
+    let boundary: Promise<void> | undefined, aborts = 0;
+    const terminal = () => test.events.get("Network.loadingFailed")!({ requestId: mode === "foreign terminal" ? "network-foreign" : "network-active",
+      canceled: true, errorText: "net::ERR_ABORTED", type: "Script" });
+    try {
+      await startDocument(test); await test.routes[0].continue(); test.response("document", { resourceType: "Document" }); await test.routes[0].request().response();
+      identity(test, "active", "loader-one", "Script"); test.request("active", { resourceType: "Script" }); await test.routes[1].continue();
+      test.cdp.send.mockImplementation((name, value) => {
+        if (name === "Page.stopLoading") return stopped.promise;
+        if (name === "Fetch.failRequest" && value?.requestId === "active") {
+          aborts++; if (mode === "during abort") terminal();
+          return Promise.reject(new Error("Invalid InterceptionId"));
+        }
+        return send(name, value);
+      });
+      boundary = test.guard.beginDocumentNavigation(test.main as never); boundary.catch(() => {});
+      await vi.waitFor(() => expect(test.cdp.send.mock.calls.some(([name]) => name === "Page.stopLoading")).toBe(true), { interval: 1 });
+      test.response("active", { resourceType: "Script", responseStatusCode: undefined, responseErrorReason: "Aborted" });
+      await vi.waitFor(() => expect(aborts).toBe(1), { interval: 1 });
+      if (mode === "revised identity") identity(test, "active", "loader-one", "Script");
+      if (mode !== "during abort") terminal();
+      if (["during abort", "after abort"].includes(mode)) {
+        await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0), { interval: 1 }); stopped.resolve({}); await boundary;
+        expect(test.guard.firstFatal).toBeUndefined(); expect(test.failures).toEqual([]);
+      } else { await vi.waitFor(() => expect(test.close).toHaveBeenCalledOnce()); stopped.resolve({}); await boundary.catch(() => {}); }
+      expect(test.cdp.send.mock.calls.some(([name, value]) => ["Fetch.getResponseBody", "Fetch.continueResponse"].includes(name) && value?.requestId === "active")).toBe(false);
+      expect(aborts).toBe(1); await expect(test.routes[1].request().response()).rejects.toThrow();
+    } finally { stopped.resolve({}); await boundary?.catch(() => {}); await test.guard.close(); }
+  });
+
   it("deduplicates one retired response abort while the boundary awaits an initial pause", async () => {
     const test = await installed(), initialAck = deferred<object>(), responseAck = deferred<object>(), send = test.cdp.send.getMockImplementation()!;
     let boundary: Promise<void> | undefined;
