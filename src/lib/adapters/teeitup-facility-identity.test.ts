@@ -6,6 +6,14 @@ const course = { name: "Spring Lake 9 Hole Golf Course", address: "4020 Hoctor B
 const facility = { id: 13484, name: "Spring Lake GC", address: "4020 Hoctor Blvd. , Omaha, NE 68107, US", timeZone: "America/Chicago" };
 
 describe("public facility identity reconciliation", () => {
+  it("matches a terminal legal suffix only while preserving complete course identity", () => {
+    const expected = { name: "Example Country Club LLC", address: "100 North Street, Exampletown, CT 06248, USA", timeZone: "America/New_York" };
+    const observed = { id: 12, name: "Example Country Club", address: "100 North St, Exampletown, CT 06248, US", timeZone: expected.timeZone };
+    expect(resolveTeeItUpFacilityIdentity(expected, [observed]).status).toBe("MATCHED");
+    for (const change of [{name:"Other Country Club"},{name:"Example Country Club North"},{address:"101 North St, Exampletown, CT 06248, US"},
+      {address:"100 North St, Elsewhere, CT 06248, US"},{timeZone:"America/Chicago"}])
+      expect(resolveTeeItUpFacilityIdentity(expected, [{...observed,...change}]).status).toBe("UNRESOLVED");
+  });
   it("matches observed naming and address formatting differences without changing layout", () => {
     expect(resolveTeeItUpFacilityIdentity(course, [facility])).toEqual({ status: "MATCHED", facility });
     expect(course.name).toBe("Spring Lake 9 Hole Golf Course");

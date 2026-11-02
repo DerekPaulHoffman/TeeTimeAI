@@ -86,6 +86,9 @@ function addressKey(value: string) {
 function nameIdentity(value: string) {
   const holes = new Set<number>();
   const core = value.normalize("NFKC").toLowerCase()
+    // A terminal legal entity suffix is not a different course. Address,
+    // timezone, course qualifiers and uniqueness remain independent checks.
+    .replace(/(?:,?\s+)(?:llc|inc\.?|incorporated|ltd\.?|corp\.?|corporation)\s*$/u, "")
     .replace(/\b(9|18|nine|eighteen)[ -]*holes?\b/gu, (_, qualifier: string) => {
       holes.add(qualifier === "9" || qualifier === "nine" ? 9 : 18);
       return " ";

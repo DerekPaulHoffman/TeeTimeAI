@@ -288,6 +288,11 @@ the venue-local row clock. Unknown or changed grids remain incomplete. Generic
 synthetic fixtures exercise this method; the new acceptance venues are kept
 out of those fixtures and receive no provider configuration before admission.
 
+TeeItUp directory reconciliation permits a terminal legal entity suffix in a
+course name. It still requires the complete matching address, canonical
+timezone, course qualifiers and a unique facility. This does not authorize
+discarding conflicting location or timezone facts.
+
 Exact simulator-name lookup may corroborate up to two otherwise eligible hybrid
 venues on their current Google-linked official sites. The bounded anonymous
 HTML read stays on the same public hostname, uses the provider request leases,
