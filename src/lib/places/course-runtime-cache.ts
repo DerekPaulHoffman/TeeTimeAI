@@ -70,7 +70,7 @@ export function getCourseLookupCacheKey(input: {
 }) {
   const normalizedQuery = input.query.trim().replace(/\s+/g, " ").toLowerCase();
   return [
-    input.mode === "SIMULATOR" ? "lookup-simulator-v1" : "lookup-v3",
+    input.mode === "SIMULATOR" ? "lookup-simulator-v2" : "lookup-v3",
     input.reviewVersion,
     normalizedQuery,
     input.latitude?.toFixed(3) ?? "none",

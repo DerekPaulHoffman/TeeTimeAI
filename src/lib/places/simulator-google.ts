@@ -5,6 +5,7 @@ import {
 import type { GooglePlaceReviewIndex } from "@/lib/places/google-place-reviews";
 import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import { fetchGooglePlacesJsonWithRetry } from "@/lib/places/google-places-request";
+import { readOfficialSimulatorEvidence } from "./simulator-official-evidence";
 import {
   getPersistedSimulatorCandidates, hasVerifiedPublicSimulatorRental, mapSimulatorCandidate,
   type SimulatorOfferingIndex
@@ -19,7 +20,7 @@ const NON_RENTAL_PRIMARY_TYPES = new Set([
   "golf_instructor", "sports_coaching", "sports_school", "store"
 ]);
 const LESSON_OR_FITTING_PATH = /\/(?:golf-lessons?|golf-school|club-fitting)(?:\/|$)/i;
-export const SIMULATOR_DISCOVERY_CLASSIFICATION_VERSION = "public-rentals-v3";
+export const SIMULATOR_DISCOVERY_CLASSIFICATION_VERSION = "public-rentals-v4";
 
 type SimulatorConfirmationDiagnostic = {
   reason: "CONFIGURATION_MISSING" | "REQUEST_FAILED" | "UPSTREAM_HTTP_ERROR" | "MALFORMED_RESPONSE";
@@ -109,7 +110,7 @@ export function filterSimulatorPlaces(places: GooglePlace[], reviews: GooglePlac
   return places.filter((place) => simulatorRejectionReason(place, reviews, offerings) === null);
 }
 
-function simulatorRejectionReason(place: GooglePlace, reviews: GooglePlaceReviewIndex, offerings: SimulatorOfferingIndex) {
+function simulatorRejectionReason(place: GooglePlace, reviews: GooglePlaceReviewIndex, offerings: SimulatorOfferingIndex, officialEvidence = false) {
     const id = (place.id ?? place.name ?? "").replace(/^places\//, "");
     const review = reviews.byPlaceId.get(id);
     const canonicalId = review?.canonicalPlaceId ?? id;
@@ -132,9 +133,16 @@ function simulatorRejectionReason(place: GooglePlace, reviews: GooglePlaceReview
     if (hasLessonOrFittingWebsite(place.websiteUri)) return "EXCLUDED_WEBSITE_PATH";
     // Text relevance and a website alone can surface apartments and other unrelated
     // businesses. Preserve likely golf hybrids without treating them as verified rentals.
-    return place.types?.includes("indoor_golf_course") || [review, canonicalReview].some((fact) =>
+    return officialEvidence || place.types?.includes("indoor_golf_course") || [review, canonicalReview].some((fact) =>
       fact?.classification === "INDOOR_SIMULATOR") || (Boolean(place.websiteUri) && /\bgolf\b/i.test(name))
       ? null : "MISSING_SIMULATOR_EVIDENCE";
+}
+
+const OFFICIAL_EVIDENCE_PRIMARY_TYPES = new Set(["restaurant", "bar", "sports_bar", "sports_complex", "golf_course", "event_venue"]);
+function canReadOfficialEvidence(place: GooglePlace, reviews: GooglePlaceReviewIndex, offerings: SimulatorOfferingIndex) {
+  const reason = simulatorRejectionReason(place, reviews, offerings);
+  return (reason === null || reason === "MISSING_SIMULATOR_EVIDENCE") &&
+    OFFICIAL_EVIDENCE_PRIMARY_TYPES.has(place.primaryType ?? "") && Boolean(place.websiteUri);
 }
 
 function rejectSimulatorIdentity(reason: NonNullable<ReturnType<typeof simulatorRejectionReason>> | "EXACT_ID_MISMATCH", place: GooglePlace, upstreamStatus: number): never {
@@ -195,7 +203,12 @@ export async function getSimulatorVenueForDemand(googlePlaceId: string, reviews:
   if (!isCompletePlaceIdentity(json)) confirmationUnavailable({ reason: "MALFORMED_RESPONSE", upstreamStatus: response.status });
   const emptyOfferings: SimulatorOfferingIndex = { byPlaceId: new Map(), reviewVersion: "none" };
   if ((json.id ?? json.name?.replace(/^places\//, "")) !== googlePlaceId) rejectSimulatorIdentity("EXACT_ID_MISMATCH", json, response.status);
-  const rejection = simulatorRejectionReason(json, reviews, emptyOfferings);
+  let rejection: ReturnType<typeof simulatorRejectionReason> = simulatorRejectionReason(json, reviews, emptyOfferings);
+  if (rejection === "MISSING_SIMULATOR_EVIDENCE" && canReadOfficialEvidence(json, reviews, emptyOfferings)) {
+    const evidence = await readOfficialSimulatorEvidence(json.websiteUri!);
+    if (evidence === "UNAVAILABLE") confirmationUnavailable({ reason: "REQUEST_FAILED" });
+    if (evidence === "LIKELY") rejection = simulatorRejectionReason(json, reviews, emptyOfferings, true);
+  }
   if (rejection) rejectSimulatorIdentity(rejection, json, response.status);
   const candidate = mapGooglePlaceToCourseCandidate(json, reviews);
   return { ...candidate, website: getSafeCustomerBookingUrl(candidate.website) ?? undefined };
@@ -237,13 +250,20 @@ export async function searchSimulatorVenuesByName(input: CourseNameSearchInput, 
   }, input.signal);
   // For an exact-name lookup require indoor evidence or a rental review. A generic
   // unrelated named business with a website is insufficient simulator evidence.
-  return mapSimulatorPlaces(places.filter((place) => {
+  const ordinary = places.filter((place) => {
     const id = (place.id ?? place.name ?? "").replace(/^places\//, "");
     const offering = offerings.byPlaceId.get(reviews.byPlaceId.get(id)?.canonicalPlaceId ?? id);
     return hasVerifiedPublicSimulatorRental(offering) || place.types?.includes("indoor_golf_course") ||
       /\b(?:indoor\s+golf|golf\s+simulators?|simulator|golf\s+lounge)\b/i.test(place.displayName?.text ?? "") ||
       reviews.byPlaceId.get(id)?.classification === "INDOOR_SIMULATOR";
-  }), reviews, offerings).map((candidate) => hasLocation ? {
+  });
+  const pending = places.filter(place => !ordinary.includes(place) && canReadOfficialEvidence(place, reviews, offerings)).slice(0, 2);
+  const witnessed = (await Promise.all(pending.map(async place =>
+    await readOfficialSimulatorEvidence(place.websiteUri!, input.signal) === "LIKELY" ? place : null))).filter((place): place is GooglePlace => place !== null);
+  if (input.signal?.aborted) throw input.signal.reason;
+  // Only likely identity is recovered; mapSimulatorCandidate keeps rental access unverified.
+  const recovered = witnessed.map(place => mapSimulatorCandidate(mapGooglePlaceToCourseCandidate(place, reviews), offerings));
+  return mergeSimulatorCandidates(mapSimulatorPlaces(ordinary, reviews, offerings), recovered).map((candidate) => hasLocation ? {
     ...candidate, distanceMeters: simulatorDistanceMeters({ latitude: input.latitude as number, longitude: input.longitude as number }, candidate)
   } : candidate);
 }

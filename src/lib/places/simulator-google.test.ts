@@ -3,6 +3,8 @@ import { buildGooglePlaceReviewIndex, type GooglePlaceReviewRecord } from "./goo
 import type { GooglePlace } from "./google";
 import { filterSimulatorPlaces, getSimulatorVenueForDemand, searchNearbySimulatorVenues, searchSimulatorVenuesByName, SimulatorVenueConfirmationUnavailableError } from "./simulator-google";
 import { buildSimulatorOfferingIndex, type SimulatorOfferingRecord } from "./simulator-offerings";
+import { readOfficialSimulatorEvidence } from "./simulator-official-evidence";
+vi.mock("./simulator-official-evidence", () => ({ readOfficialSimulatorEvidence: vi.fn(async () => "ABSENT") }));
 
 const reviews = buildGooglePlaceReviewIndex([]);
 const emptyOfferings = buildSimulatorOfferingIndex([]);
@@ -10,9 +12,45 @@ const place: GooglePlace = { id: "place-1", displayName: { text: "Example Indoor
   primaryType: "indoor_golf_course", types: ["indoor_golf_course"], businessStatus: "OPERATIONAL",
   location: { latitude: 41.24, longitude: -73.2 }, websiteUri: "https://venue.example" };
 const oldKey = process.env.GOOGLE_PLACES_API_KEY;
-afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); if (oldKey === undefined) delete process.env.GOOGLE_PLACES_API_KEY; else process.env.GOOGLE_PLACES_API_KEY = oldKey; });
+afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.mocked(readOfficialSimulatorEvidence).mockReset().mockResolvedValue("ABSENT"); if (oldKey === undefined) delete process.env.GOOGLE_PLACES_API_KEY; else process.env.GOOGLE_PLACES_API_KEY = oldKey; });
 
 describe("simulator Places discovery", () => {
+  it("recovers a restaurant's unverified simulator identity only from current official evidence", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    const hybrid = { ...place, displayName: { text: "The Clubhouse" }, primaryType: "restaurant", types: ["restaurant"] };
+    const fetch = vi.fn(async (url: string) => Response.json(url.includes("searchText") ? { places: [hybrid] } : hybrid));
+    vi.stubGlobal("fetch", fetch);
+    vi.mocked(readOfficialSimulatorEvidence).mockResolvedValueOnce("LIKELY").mockResolvedValueOnce("LIKELY");
+    const candidates = await searchSimulatorVenuesByName({ query: "The Clubhouse Exampletown" }, reviews, emptyOfferings);
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({ name: "The Clubhouse", publicAccessStatus: "UNVERIFIED", monitoringSupport: "UNCONFIRMED" });
+    expect(candidates[0].simulatorEvidenceUrl).toBeUndefined();
+    expect(await getSimulatorVenueForDemand("place-1", reviews)).toMatchObject({ name: "The Clubhouse" });
+  });
+  it("never uses official-site corroboration to bypass a private, closed or residential identity", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    const index = buildGooglePlaceReviewIndex([review("place-1", "PRIVATE_MEMBER_CONTROLLED", "VERIFIED_PRIVATE")]);
+    const variants = [{ ...place, primaryType: "restaurant", types: ["restaurant"] },
+      { ...place, businessStatus: "CLOSED_TEMPORARILY" }, { ...place, primaryType: "apartment_complex", types: ["apartment_complex"] }];
+    for (const candidate of variants) {
+      vi.mocked(readOfficialSimulatorEvidence).mockClear();
+      vi.stubGlobal("fetch", vi.fn(async () => Response.json({ places: [candidate] })));
+      expect(await searchSimulatorVenuesByName({ query: candidate.displayName!.text! }, index, emptyOfferings)).toEqual([]);
+      expect(readOfficialSimulatorEvidence).not.toHaveBeenCalled();
+    }
+  });
+  it("bounds exact-lookup official reads to two and treats a confirmation outage as unavailable", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    const hybrid = { ...place, displayName: { text: "The Clubhouse" }, primaryType: "restaurant", types: ["restaurant"] };
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ places: [0, 1, 2, 3].map(i => ({ ...hybrid, id: `venue-${i}` })) })));
+    vi.mocked(readOfficialSimulatorEvidence).mockClear();
+    expect(await searchSimulatorVenuesByName({ query: "The Clubhouse" }, reviews, emptyOfferings)).toEqual([]);
+    expect(readOfficialSimulatorEvidence).toHaveBeenCalledTimes(2);
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(hybrid)));
+    vi.mocked(readOfficialSimulatorEvidence).mockResolvedValueOnce("UNAVAILABLE");
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await expect(getSimulatorVenueForDemand("place-1", reviews)).rejects.toBeInstanceOf(SimulatorVenueConfirmationUnavailableError);
+  });
   it("allows a private bay but rejects members-only facilities and non-rental fittings", () => {
     const records = [place, { ...place, id: "private-bay", displayName: { text: "Example Indoor Golf Private Bays" } },
       { ...place, id: "members", displayName: { text: "Members Only Indoor Golf" } },

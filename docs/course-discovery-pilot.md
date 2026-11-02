@@ -276,6 +276,16 @@ Do not delete customer alerts or reset attempt clocks to make the pilot pass.
 
 ### Public simulator reader development evidence (2026-11-02)
 
+Exact simulator-name lookup may corroborate up to two otherwise eligible hybrid
+venues on their current Google-linked official sites. The bounded anonymous
+HTML read stays on the same public hostname, uses the provider request leases,
+and requires rendered-text simulator and rental/booking evidence. It does not
+override closed, private, non-rental or residential classifications. This only
+recovers likely identity with unverified rental access; it supplies no booking
+route, provider identifiers or availability configuration to discovery. Saving
+the alert independently refreshes the same official evidence. An unavailable
+confirmation stays unavailable, rather than becoming a verified rental.
+
 The learned-recipe executor now recognizes the Five Iron public simulator
 selection route. Discovery binds its public location catalog to the canonical
 official branch page, city and timezone. Execution rechecks that binding and
