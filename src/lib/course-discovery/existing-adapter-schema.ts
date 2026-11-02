@@ -24,6 +24,7 @@ import { uschedulePublicRentalPartyProofSchema } from "./uschedule-public-rental
 import { foreupOfficialRouteOwnershipProofSchema } from "./foreup-official-route-ownership";
 import { FOREUP_STANDARD_PUBLIC_SCOPE } from "@/lib/automation/foreup-public-configuration";
 import { fiveIronMetadataSchema } from "./five-iron-source";
+import { golfBookMetadataSchema } from "./golfbook-source";
 
 const numericId = z.number().int().min(1).max(2_147_483_647);
 const publicId = z.string().regex(/^[1-9]\d{0,9}$/u);
@@ -88,6 +89,7 @@ export const existingAdapterMetadataSchema = z.discriminatedUnion("family", [
   teesnapMetadataSchema,
   mindbodyAppointmentMetadataSchema,
   fiveIronMetadataSchema,
+  golfBookMetadataSchema,
 ]);
 
 export type ExistingAdapterMetadata = z.infer<typeof existingAdapterMetadataSchema>;

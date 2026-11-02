@@ -276,6 +276,18 @@ Do not delete customer alerts or reset attempt clocks to make the pilot pass.
 
 ### Public simulator reader development evidence (2026-11-02)
 
+Learned GolfBook methods derive the simulator category from the public sheet's
+explicit selector. The fixed reader accepts only anonymous date/template HTML
+GETs on the two recognized public tenant-host formats. The provider's own
+business name, official-site backlink and complete address must match the
+canonical venue, and every replay rechecks the selected category and resource
+catalog. Darts, karaoke and other activities cannot become simulator matches.
+Fifteen- or thirty-minute public cells must cover one complete requested
+session on the same bay; each free cell's published timestamp must agree with
+the venue-local row clock. Unknown or changed grids remain incomplete. Generic
+synthetic fixtures exercise this method; the new acceptance venues are kept
+out of those fixtures and receive no provider configuration before admission.
+
 Exact simulator-name lookup may corroborate up to two otherwise eligible hybrid
 venues on their current Google-linked official sites. The bounded anonymous
 HTML read stays on the same public hostname, uses the provider request leases,

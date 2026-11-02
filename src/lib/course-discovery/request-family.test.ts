@@ -12,6 +12,12 @@ describe("learned requests use the established provider mutex", () => {
   it("keeps unknown hosts bounded by their actual hostname", () => {
     expect(requestFamilyForUrl("https://public.example.org/times")).toBe("public.example.org");
   });
+  it("shares the established GolfBook family across its two exact public host formats", () => {
+    const family = normalizeProviderFamilyKey("GOLFBOOK");
+    expect(requestFamilyForUrl("https://example.golfbook.in/calendar.php")).toBe(family);
+    expect(requestFamilyForUrl("https://example.golfbooking.us/bookingsheet.php")).toBe(family);
+    expect(requestFamilyForUrl("https://example.golfbooking.us.evil.example/calendar.php")).toBe("example.golfbooking.us.evil.example");
+  });
   it("shares the Five Iron public page and API lease without matching lookalike hosts", () => {
     const family = normalizeProviderFamilyKey("FIVE_IRON");
     expect(requestFamilyForUrl("https://booking.fiveirongolf.com/select-experience")).toBe(family);
