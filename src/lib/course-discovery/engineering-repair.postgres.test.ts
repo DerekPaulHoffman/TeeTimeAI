@@ -1,11 +1,13 @@
 // @vitest-environment node
 import { randomUUID } from "node:crypto";
-import { PrismaClient } from "@prisma/client";
+import { Prisma, PrismaClient } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { hashAccessRecipe, parseAccessRecipe } from "./recipe";
 import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
 import { createSimulatorSupportIntentDigest, SIMULATOR_SUPPORT_SOURCE_SELECT } from "@/lib/automation/simulator-support-policy";
+import { createCourseSupportRemediationCourseRef } from "@/lib/automation/course-support-claim-evidence";
+import { buildCourseSupportProviderSnapshotFingerprint } from "@/lib/automation/course-support-verification";
 let client: PrismaClient;
 vi.mock("@/lib/prisma", () => ({ get prisma() { return client; } }));
 const ids = new Set<string>();
@@ -15,6 +17,7 @@ const url = process.env.COURSE_DISCOVERY_TEST_DATABASE_URL;
 let service: typeof import("./service"), engineering: typeof import("./engineering-repair");
 const users: string[] = [], courses: string[] = [];
 const runs: string[] = [];
+const batchOwners: string[] = [];
 describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
   beforeAll(async () => {
     const parsed = new URL(url!);
@@ -25,6 +28,7 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
   });
   afterEach(async () => {
     if (!client) return;
+    await client.courseSupportBatch.deleteMany({ where: { ownerThreadId: { in: batchOwners } } }); batchOwners.length = 0;
     await client.automationRun.deleteMany({ where: { id: { in: runs } } }); runs.length = 0;
     await client.course.deleteMany({ where: { id: { in: courses } } });
     await client.user.deleteMany({ where: { id: { in: users } } });
@@ -34,8 +38,9 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
   async function failed(simulator = false, savedMethod = false) {
     const suffix = randomUUID(), user = await client.user.create({ data: { email: `${suffix}@example.test`, clerkUserId: suffix } });
     users.push(user.id);
-    const course = await client.course.create({ data: { name: "Public repair fixture", latitude: 41, longitude: -73,
-      timeZone: "UTC", isPublic: true, website: "https://golf.example.com/" } });
+    const course = await client.course.create({ data: { googlePlaceId: `ChIJ${suffix.replaceAll("-", "")}`, name: "Public repair fixture", latitude: 41, longitude: -73,
+      address: "1 Test Street, Example, CT 06000", city: "Example", stateCode: "CT", countryCode: "US",
+      timeZone: "UTC", isPublic: true, automationEligibility: "ALLOWED", website: "https://golf.example.com/" } });
     courses.push(course.id);
     const offering = simulator ? await client.courseOffering.create({ data: { courseId: course.id, kind: "SIMULATOR", active: true,
       publicAccessStatus: "UNVERIFIED", supportedDurationsMinutes: [60] } }) : null;
@@ -86,6 +91,43 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
       new Date(f.job.deadlineAt!.getTime() + 60_000));
     expect(context).toMatchObject({ jobId: f.job.id, attempts: 2, originalDeadlineExpired: true,
       originalDeadlineAt: f.job.deadlineAt!.toISOString() });
+  });
+  it("opens owned outdoor research from a current learning handoff without legacy monitoring proof", async () => {
+    const f = await failed(), now = new Date();
+    expect((await engineering.reconcileDiscoveryEngineeringHandoffs()).queued).toBe(1);
+    const owner = `learning-research-${randomUUID()}`; batchOwners.push(owner);
+    const incident = await client.courseSupportIncident.findUniqueOrThrow({ where: { courseId: f.course.id } });
+    const route = { workMode: "ADVANCE_DISCOVERY", strategyAction: "DISCOVER_WITH_HTTP", playbookStage: "OFFICIAL_IDENTITY" } as const;
+    const actionPlan = { schemaVersion: 1, primaryAction: "VERIFY_CURRENT_RUNTIME", allowedActions: ["VERIFY_CURRENT_RUNTIME"], route };
+    const batch = await client.courseSupportBatch.create({ data: { reference: randomUUID(), providerFamilyKey: incident.providerFamilyKey,
+      failureFingerprint: incident.failureFingerprint, status: "CLAIMED", ownerThreadId: owner, leaseToken: randomUUID(),
+      leaseExpiresAt: new Date(Date.now() + 900_000), heartbeatAt: now, baseSha: "a".repeat(40), summary: { remediation: {
+        ...route, allowUnchangedRuntime: true, requiresImplementationPath: false, reason: "PLAYBOOK_STAGE_PENDING", retryBudget: null,
+        attempts: [{ courseRef: createCourseSupportRemediationCourseRef(f.course.id), providerSnapshotFingerprint: buildCourseSupportProviderSnapshotFingerprint(f.course),
+          failureFingerprint: incident.failureFingerprint, playbookEventCountAtClaim: 0, approach: route, actionPlan }] } },
+      incidents: { create: { incidentId: incident.id, courseId: f.course.id, cycle: incident.cycle } } } });
+    await client.courseSupportIncident.update({ where: { id: incident.id }, data: { activeBatchId: batch.id } });
+    await client.courseMonitoringStatus.update({ where: { courseId: f.course.id }, data: { state: "AUTO_INVESTIGATING" } });
+    const { getOwnedCourseSupportResearchContext } = await import("@/lib/automation/course-support-research-context");
+    const context = await getOwnedCourseSupportResearchContext({ batchId: batch.id, leaseToken: batch.leaseToken,
+      ownerThreadId: owner, ordinal: 1 });
+    expect(context).toMatchObject({ outcome: "ready" });
+    expect(context).toMatchObject({ researchContextV1: { monitoringProofRecorded: false, availabilityContract: { signedOutReadOnlyConfirmed: false } } });
+    expect((await client.courseSupportIncident.findUniqueOrThrow({ where: { id: incident.id } })).attemptLedger)
+      .toEqual({ version: 1, events: [] });
+    expect(await client.courseProbe.count({ where: { courseId: f.course.id } })).toBe(0);
+    expect(await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } }))
+      .toMatchObject({ status: "FAILED", attempts: f.job.attempts, firstPickedUpAt: f.job.firstPickedUpAt, deadlineAt: f.job.deadlineAt });
+  });
+  it.each([["database-null", Prisma.DbNull], ["json-null", Prisma.JsonNull]] as const)("initializes an older unowned %s ledger while preserving its receipt and original failed clock", async (_kind, emptyLedger) => {
+    const f = await failed(); await engineering.reconcileDiscoveryEngineeringHandoffs();
+    const before = await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } });
+    await client.courseSupportIncident.update({ where: { courseId: f.course.id }, data: { attemptLedger: emptyLedger } });
+    expect(await engineering.reconcileDiscoveryEngineeringHandoffs()).toEqual({ examined: 1, queued: 0 });
+    expect((await client.courseSupportIncident.findUniqueOrThrow({ where: { courseId: f.course.id } })).attemptLedger)
+      .toEqual({ version: 1, events: [] });
+    expect(await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } })).toEqual(before);
+    expect(await engineering.reconcileDiscoveryEngineeringHandoffs()).toEqual({ examined: 0, queued: 0 });
   });
   it("routes a simulator to exactly its offering incident", async () => {
     const f = await failed(true);

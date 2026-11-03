@@ -10,6 +10,10 @@ A server-issued current receipt releases a failed saved method from learner-only
 
 Simulator claims accept either a current offering-scoped failure probe or the current server-issued learning handoff to that exact incident. Learning failures do not need a fabricated legacy probe. The handoff is revalidated inside the claim transaction against current source and demand; a checkpoint-only, wrong-incident, recovered, paused, edited or source-changed handoff cannot grant ownership. Existing native-child, base-commit, incident revision, lease and capacity checks still apply.
 
+New outdoor handoffs initialize a missing investigation ledger with the valid empty shape before any worker captures its event count. This records no stage completion or public availability evidence. Existing ledgers remain untouched, and initialization requires the same current incident revision with no active batch. The owned-research authority checks remain unchanged.
+
+The normal dispatcher also initializes older queued handoffs when their ledger is still missing, the original episode remains current, and neither a learner nor a coding owner holds the target. This does not requeue the job, replace its receipt, change its clock or retry an owner's protected operation. Owned or changed-episode histories remain fenced.
+
 Workers use Sol through the existing ChatGPT/Codex sign-in. The launcher rejects old templates that direct another model. The worker must reproduce the failure, add regression coverage, repair reusable code, pass exact-commit CI, verify the Git deployment and fresh public inventory, and let the normal application pipeline deliver matching alerts. It must not manually send email, alter alert inputs for a pass, reopen a failed discovery clock, or weaken replay and identity checks.
 
 This uses the existing ten-minute course-support automation. It adds no scheduler, model provider, database or migration. New reader implementation and release can exceed fifteen minutes. Authenticated booking, verification-code and challenge requirements remain explicit unresolved outcomes.

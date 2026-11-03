@@ -3,6 +3,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { reportCourseSupportIssue } from "@/lib/automation/support-incidents";
 import { reconcileSimulatorSupportIncidentFailure } from "@/lib/automation/simulator-support-incidents";
+import { AUTOMATION_PLAYBOOK_VERSION } from "@/lib/automation/course-monitoring-playbook";
 import { isCourseDiscoveryEnabled, isGeneralDiscoveryEnabled } from "./config";
 import { currentDiscoveryEngineeringFailure } from "./service";
 import { hasLegacyDiscoveryOwner } from "./legacy-exclusion";
@@ -14,6 +15,13 @@ const receiptSchema = z.object({ version: z.literal(1), state: z.literal("QUEUED
 type Reader = Parameters<typeof currentDiscoveryEngineeringFailure>[0];
 const object = (v: unknown): Record<string, unknown> => v && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : {};
 const safeCode = (v: unknown) => typeof v === "string" && /^[A-Z][A-Z0-9_]{0,99}$/u.test(v) ? v : null;
+async function initializeEmptyInvestigation(tx: Pick<Prisma.TransactionClient, "courseSupportIncident">,
+  incident: { id: string; updatedAt: Date; attemptLedger: unknown }) {
+  if (incident.attemptLedger !== null) return true;
+  const initialized = await tx.courseSupportIncident.updateMany({ where: { id: incident.id, updatedAt: incident.updatedAt,
+    status: "AUTO_INVESTIGATING", activeBatchId: null }, data: { attemptLedger: { version: AUTOMATION_PLAYBOOK_VERSION, events: [] } } });
+  return initialized.count === 1;
+}
 
 /** Closed hints only. Model checkpoints explain a failure, never establish
  * monitoring eligibility, completeness, access requirements or write authority. */
@@ -70,7 +78,12 @@ export async function reconcileDiscoveryEngineeringHandoffs(now = new Date()) {
       AND j."firstPickedUpAt" IS NOT NULL AND j."completedAt" <= ${now} AND s.status='ACTIVE'
       AND j.request->'demand'->>'alertGeneration'=s."alertGeneration"::text
       AND s.date >= (${now}::timestamptz - interval '1 day')::date
-      AND COALESCE(j.result->'engineeringHandoff'->>'state','') NOT IN ('QUEUED','OBSOLETE')
+      AND (COALESCE(j.result->'engineeringHandoff'->>'state','') NOT IN ('QUEUED','OBSOLETE')
+        OR (j.result->'engineeringHandoff'->>'state'='QUEUED' AND j."offeringId" IS NULL
+          AND j.result->'engineeringHandoff'->>'sourceFingerprint'=j."sourceFingerprint" AND EXISTS (
+          SELECT 1 FROM "CourseSupportIncident" i WHERE i.id=j.result->'engineeringHandoff'->>'incidentId'
+          AND i."courseId"=j."courseId" AND i.status='AUTO_INVESTIGATING' AND i."activeBatchId" IS NULL
+          AND (i."attemptLedger" IS NULL OR i."attemptLedger"='null'::jsonb) AND i."firstSeenAt"<=j."completedAt")))
     ORDER BY j."completedAt",j.id LIMIT 16`);
   let queued = 0;
   for (const candidate of candidates) {
@@ -85,7 +98,23 @@ export async function reconcileDiscoveryEngineeringHandoffs(now = new Date()) {
         }
         return null;
       }
-      if (discoveryEngineeringReceipt(failure.job.result) ||
+      const priorReceipt = discoveryEngineeringReceipt(failure.job.result);
+      if (priorReceipt && !failure.job.offeringId && priorReceipt.sourceFingerprint === failure.job.sourceFingerprint) {
+        // Compatibility for already queued, unowned handoffs. Keep their
+        // receipt, retry state and original job clock exactly as recorded.
+        await tx.$queryRaw(Prisma.sql`SELECT id FROM "Course" WHERE id=${failure.job.courseId} FOR UPDATE`);
+        const fresh = await currentDiscoveryEngineeringFailure(tx, failure.job.id, now);
+        const freshReceipt = fresh ? discoveryEngineeringReceipt(fresh.job.result) : null;
+        if (!fresh || !freshReceipt || freshReceipt.incidentId !== priorReceipt.incidentId ||
+            freshReceipt.sourceFingerprint !== priorReceipt.sourceFingerprint || freshReceipt.queuedAt !== priorReceipt.queuedAt ||
+            await tx.courseDiscoveryJob.findUnique({ where: { activeTargetKey: failure.job.targetKey } }) ||
+            await hasLegacyDiscoveryOwner(tx, failure.request.target)) return null;
+        const incident = await tx.courseSupportIncident.findUnique({ where: { id: priorReceipt.incidentId } });
+        if (incident?.courseId === failure.job.courseId && incident.status === "AUTO_INVESTIGATING" &&
+            incident.activeBatchId === null && incident.firstSeenAt <= failure.job.completedAt!) await initializeEmptyInvestigation(tx, incident);
+        return null;
+      }
+      if (priorReceipt ||
           await tx.courseDiscoveryJob.findUnique({ where: { activeTargetKey: failure.job.targetKey } }) ||
           await hasLegacyDiscoveryOwner(tx, failure.request.target)) return null;
       return failure;
@@ -131,6 +160,10 @@ export async function reconcileDiscoveryEngineeringHandoffs(now = new Date()) {
         await tx.courseSupportIncident.findUnique({ where: { id: incidentId! } });
       if (!incident || incident.status !== "AUTO_INVESTIGATING" ||
           (job.offeringId ? !("offeringId" in incident) || incident.offeringId !== job.offeringId : !("courseId" in incident) || incident.courseId !== job.courseId)) return false;
+      // An empty investigation ledger is lifecycle state, not provider proof.
+      // New learning incidents have no legacy playbook events; initialize the
+      // valid empty shape before any owner captures its event-count fence.
+      if (!job.offeringId && "attemptLedger" in incident && !await initializeEmptyInvestigation(tx, incident)) return false;
       const receipt = receiptSchema.parse({ version: 1, state: "QUEUED", incidentId, queuedAt: now.toISOString(), sourceFingerprint: job.sourceFingerprint });
       const result = { ...object(fresh.job.result), engineeringHandoff: receipt } as Prisma.InputJsonValue;
       const changed = await tx.courseDiscoveryJob.updateMany({ where: { id: job.id, status: job.status, updatedAt: fresh.job.updatedAt,

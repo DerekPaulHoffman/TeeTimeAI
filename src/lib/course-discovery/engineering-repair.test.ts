@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const m = vi.hoisted(() => ({ current: vi.fn(), owner: vi.fn(), report: vi.fn(), simulator: vi.fn(),
   db: { $queryRaw: vi.fn(), $transaction: vi.fn(), courseDiscoveryJob: { findUnique: vi.fn(), findMany: vi.fn(), updateMany: vi.fn() },
-    simulatorSupportIncident: { findUnique: vi.fn() }, courseSupportIncident: { findUnique: vi.fn() } } }));
+    simulatorSupportIncident: { findUnique: vi.fn() }, courseSupportIncident: { findUnique: vi.fn(), updateMany: vi.fn() } } }));
 vi.mock("@/lib/prisma", () => ({ prisma: m.db }));
 vi.mock("./service", () => ({ currentDiscoveryEngineeringFailure: m.current }));
 vi.mock("./legacy-exclusion", () => ({ hasLegacyDiscoveryOwner: m.owner }));
@@ -12,6 +12,7 @@ import { currentDiscoveryEngineeringHandoff, discoveryEngineeringContext, discov
   discoveryFailureDiagnosis, reconcileDiscoveryEngineeringHandoffs } from "./engineering-repair";
 const now = new Date("2030-01-01T12:16:00Z"), picked = new Date("2030-01-01T12:00:00Z");
 let failure: ReturnType<typeof fixture>;
+let outdoorIncident: { id: string; courseId: string; status: string; updatedAt: Date; firstSeenAt: Date; attemptLedger: unknown; activeBatchId: string | null };
 function fixture() { return { job: { id: "job1", targetKey: "course:course1", courseId: "course1", offeringId: null as string | null,
   status: "FAILED", outcome: "TOOL_FAILURE", attempts: 2, activeTargetKey: null, sourceFingerprint: "a".repeat(64),
   baseRecipeId: "recipe1", firstPickedUpAt: picked, deadlineAt: new Date("2030-01-01T12:15:00Z"), completedAt: new Date("2030-01-01T12:02:00Z"),
@@ -26,7 +27,10 @@ beforeEach(() => {
   m.db.courseDiscoveryJob.findUnique.mockImplementation(async ({ where }) => where.activeTargetKey ? null : failure.job);
   m.db.courseDiscoveryJob.findMany.mockImplementation(async () => [failure.job]);
   m.db.courseDiscoveryJob.updateMany.mockImplementation(async ({ data }) => { failure.job.result = data.result; return { count: 1 }; });
-  m.db.courseSupportIncident.findUnique.mockResolvedValue({ id: "incident1", courseId: "course1", status: "AUTO_INVESTIGATING" });
+  outdoorIncident = { id: "incident1", courseId: "course1", status: "AUTO_INVESTIGATING",
+    updatedAt: picked, firstSeenAt: picked, attemptLedger: null, activeBatchId: null };
+  m.db.courseSupportIncident.findUnique.mockImplementation(async () => outdoorIncident);
+  m.db.courseSupportIncident.updateMany.mockImplementation(async ({ data }) => { outdoorIncident = { ...outdoorIncident, ...data }; return { count: 1 }; });
   m.db.simulatorSupportIncident.findUnique.mockResolvedValue({ id: "incident1", offeringId: "bay1", status: "AUTO_INVESTIGATING" });
   m.report.mockResolvedValue({ incidentId: "incident1", status: "AUTO_INVESTIGATING" });
 });
@@ -49,6 +53,47 @@ describe("terminal learner to coding responder", () => {
     expect(await reconcileDiscoveryEngineeringHandoffs(now)).toEqual({ examined: 1, queued: 1 });
     expect(m.simulator).toHaveBeenCalledWith(m.db, expect.objectContaining({ offeringId: "bay1", reason: "DISCOVERY_CODE_REPAIR" }));
     expect(m.report).not.toHaveBeenCalled();
+  });
+  it("initializes an empty outdoor investigation before its claim without inventing provider evidence", async () => {
+    expect((await reconcileDiscoveryEngineeringHandoffs(now)).queued).toBe(1);
+    expect(m.db.courseSupportIncident.updateMany).toHaveBeenCalledWith({
+      where: { id: "incident1", updatedAt: picked, status: "AUTO_INVESTIGATING", activeBatchId: null },
+      data: { attemptLedger: { version: 1, events: [] } },
+    });
+  });
+  it("preserves an existing outdoor investigation ledger", async () => {
+    m.db.courseSupportIncident.findUnique.mockResolvedValue({ id: "incident1", courseId: "course1", status: "AUTO_INVESTIGATING",
+      updatedAt: picked, attemptLedger: { version: 1, events: [{ retained: true }] }, activeBatchId: null });
+    expect((await reconcileDiscoveryEngineeringHandoffs(now)).queued).toBe(1);
+    expect(m.db.courseSupportIncident.updateMany).not.toHaveBeenCalled();
+  });
+  it("does not link outdoor repair when ledger initialization loses its ownership fence", async () => {
+    m.db.courseSupportIncident.updateMany.mockResolvedValue({ count: 0 });
+    expect((await reconcileDiscoveryEngineeringHandoffs(now)).queued).toBe(0);
+    expect(m.db.courseDiscoveryJob.updateMany).not.toHaveBeenCalled();
+  });
+  it("initializes a previously queued unowned handoff without requeueing its job", async () => {
+    failure.job.result = { engineeringHandoff: receipt() };
+    expect((await reconcileDiscoveryEngineeringHandoffs(now)).queued).toBe(0);
+    expect(outdoorIncident.attemptLedger).toEqual({ version: 1, events: [] });
+    expect(m.db.courseDiscoveryJob.updateMany).not.toHaveBeenCalled(); expect(m.report).not.toHaveBeenCalled();
+  });
+  it.each(["learner", "coding", "new-cycle"])("preserves %s authority on a previously queued handoff", async owner => {
+    failure.job.result = { engineeringHandoff: receipt() };
+    if (owner === "coding") m.owner.mockResolvedValue(true);
+    if (owner === "learner") m.db.courseDiscoveryJob.findUnique.mockImplementation(async ({ where }) => where.activeTargetKey ? { id: "active" } : failure.job);
+    if (owner === "new-cycle") outdoorIncident.firstSeenAt = new Date(now.getTime() + 1);
+    await reconcileDiscoveryEngineeringHandoffs(now);
+    expect(m.db.courseSupportIncident.updateMany).not.toHaveBeenCalled();
+    expect(m.db.courseDiscoveryJob.updateMany).not.toHaveBeenCalled();
+  });
+  it("does not initialize an old queued incident if its server receipt changes while acquiring the course lock", async () => {
+    failure.job.result = { engineeringHandoff: receipt() };
+    m.current.mockResolvedValueOnce(failure).mockResolvedValueOnce({ ...failure,
+      job: { ...failure.job, result: { engineeringHandoff: { ...receipt(), incidentId: "replacement-incident" } } } });
+    await reconcileDiscoveryEngineeringHandoffs(now);
+    expect(m.db.courseSupportIncident.updateMany).not.toHaveBeenCalled();
+    expect(m.db.courseDiscoveryJob.updateMany).not.toHaveBeenCalled();
   });
   it.each(["AUTO_INVESTIGATING", "NEEDS_HUMAN"])("preserves the simulator's existing %s episode and cooldown", async status => {
     failure.job.offeringId = "bay1";
