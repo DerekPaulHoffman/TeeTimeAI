@@ -396,6 +396,12 @@ For production-style migration deploys, prefer the unpooled Neon URL and Prisma 
 
 The seed script adds known ForeUP adapter metadata for the first supported public tee sheets.
 
+ForeUP public checks recognize unrestricted `Online Reservations` and `Nonresident`
+classes as well as explicit public-play captions. Generic online and nonresident
+classes require affirmative configuration showing no booking protection, no booking
+block, no deletion, and no pass requirement. Resident and passholder inventory is
+not a fallback; missing flags or multiple eligible public classes remain unverified.
+
 ## Automation
 
 Main commands:

@@ -51,6 +51,49 @@ describe("explicitly unrestricted public Online Booking", () => {
   });
 });
 
+describe("unrestricted municipal public audiences", () => {
+  const flags = { online_booking_protected: "0", block_online_booking: "0", deleted: "0", pass_item_ids: [""] };
+  // Public bootstrap shapes observed on the official booking links, 2026-11-02.
+  const courses = [
+    { name: "Keney Park Golf Course", facility: 22476, schedule: 10926, classId: 49935, caption: "Online Reservations", title: "Keney Golf Course" },
+    { name: "Timberlin Golf Course", facility: 22212, schedule: 10124, classId: 13712, caption: "Nonresident", title: "Timberlin" },
+  ];
+  function document(course: typeof courses[number], delta: Record<string, unknown> = {}, duplicate = false) {
+    const selected = { teesheet_id: String(course.schedule), booking_class_id: String(course.classId), active: "1", hidden: "0", name: course.caption, ...flags, ...delta };
+    const classes = course.caption === "Nonresident" ? [
+      { ...selected, booking_class_id: "13711", name: "Resident", online_booking_protected: "1" }, selected,
+      { ...selected, booking_class_id: "13909", name: "Season Passholder", online_booking_protected: "1", pass_item_ids: ["17869481"] },
+    ] : [selected];
+    if (duplicate) classes.push({ ...selected, booking_class_id: "99999" });
+    return `SCHEDULES=${JSON.stringify([{ course_id: String(course.facility), course_name: course.name, title: course.title,
+      teesheet_id: String(course.schedule), booking_classes: classes }])};`;
+  }
+  it.each(courses)("checks $name using only its unrestricted public class", async course => {
+    const bookingUrl = `https://foreupsoftware.com/index.php/booking/${course.facility}/${course.schedule}#teetimes`, html = document(course);
+    expect(parseForeupPublicConfiguration({ bookingUrl, courseName: course.name, html })).toMatchObject({ scheduleId: course.schedule, bookingClassId: course.classId });
+    expect(hasCompleteForeupPublicScheduleScope({ html, facilityId: course.facility, scheduleId: course.schedule, inventoryScope: FOREUP_STANDARD_PUBLIC_SCOPE })).toBe(true);
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(html, { headers: { "content-type": "text/html" } }));
+    expect(await readForeupStandardPublicSchedule({ bookingUrl, courseName: course.name, scheduleId: course.schedule, fetchImpl }))
+      .toMatchObject({ scheduleId: course.schedule, bookingClassId: course.classId });
+  });
+  it.each(courses.flatMap(course => [
+    { course, delta: { online_booking_protected: "1" } }, { course, delta: { online_booking_protected: undefined } },
+    { course, delta: { block_online_booking: "1" } }, { course, delta: { block_online_booking: undefined } },
+    { course, delta: { deleted: "1" } }, { course, delta: { deleted: undefined } },
+    { course, delta: { pass_item_ids: ["123"] } }, { course, delta: { pass_item_ids: undefined } },
+    { course, delta: { name: `${course.caption} Members` } },
+  ]))("rejects protected, unknown or qualified audience $course.caption: $delta", ({ course, delta }) => {
+    const html = document(course, delta), bookingUrl = `https://foreupsoftware.com/index.php/booking/${course.facility}/${course.schedule}#teetimes`;
+    expect(parseForeupPublicConfiguration({ bookingUrl, courseName: course.name, html })).toBeNull();
+    expect(hasCompleteForeupPublicScheduleScope({ html, facilityId: course.facility, scheduleId: course.schedule, inventoryScope: FOREUP_STANDARD_PUBLIC_SCOPE })).toBe(false);
+  });
+  it.each(courses)("rejects ambiguous public classes for $name", course => {
+    const html = document(course, {}, true), bookingUrl = `https://foreupsoftware.com/index.php/booking/${course.facility}/${course.schedule}#teetimes`;
+    expect(parseForeupPublicConfiguration({ bookingUrl, courseName: course.name, html })).toBeNull();
+    expect(hasCompleteForeupPublicScheduleScope({ html, facilityId: course.facility, scheduleId: course.schedule, inventoryScope: FOREUP_STANDARD_PUBLIC_SCOPE })).toBe(false);
+  });
+});
+
 describe("managed ForeUP single-sheet coverage", () => {
   const selected = { ...schedules[0], booking_classes: [{ ...schedules[0].booking_classes[0], name: "Public" }] };
   const other = { ...selected, title: "Another Nine", teesheet_id: "999", booking_classes: [{ ...selected.booking_classes[0], teesheet_id: "999", booking_class_id: "9999" }] };
