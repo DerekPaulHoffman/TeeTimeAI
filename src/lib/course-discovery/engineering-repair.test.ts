@@ -45,9 +45,17 @@ describe("terminal learner to coding responder", () => {
   });
   it("routes simulator failures to their offering rather than outdoor support", async () => {
     failure.job.offeringId = "bay1";
+    m.db.simulatorSupportIncident.findUnique.mockResolvedValueOnce(null);
     expect(await reconcileDiscoveryEngineeringHandoffs(now)).toEqual({ examined: 1, queued: 1 });
     expect(m.simulator).toHaveBeenCalledWith(m.db, expect.objectContaining({ offeringId: "bay1", reason: "DISCOVERY_CODE_REPAIR" }));
     expect(m.report).not.toHaveBeenCalled();
+  });
+  it.each(["AUTO_INVESTIGATING", "NEEDS_HUMAN"])("preserves the simulator's existing %s episode and cooldown", async status => {
+    failure.job.offeringId = "bay1";
+    m.db.simulatorSupportIncident.findUnique.mockResolvedValue({ id: "incident1", offeringId: "bay1", status,
+      retryAt: new Date(now.getTime() + 86_400_000), reason: "ORIGINAL_FAILURE" });
+    expect((await reconcileDiscoveryEngineeringHandoffs(now)).queued).toBe(status === "AUTO_INVESTIGATING" ? 1 : 0);
+    expect(m.simulator).not.toHaveBeenCalled();
   });
   it.each(["learner", "coding"])("preserves an existing %s owner", async owner => {
     if (owner === "learner") m.db.courseDiscoveryJob.findUnique.mockResolvedValue({ id: "active" });

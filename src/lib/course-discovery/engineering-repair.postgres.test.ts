@@ -101,6 +101,14 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     const current = await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } });
     expect(current).toMatchObject({ status: "FAILED", attempts: 2, firstPickedUpAt: f.job.firstPickedUpAt, deadlineAt: f.job.deadlineAt });
   });
+  it("preserves an existing simulator incident's future retry and reason", async () => {
+    const f = await failed(true), retryAt = new Date(Date.now() + 86_400_000);
+    const original = await client.simulatorSupportIncident.create({ data: { offeringId: f.offering!.id,
+      reason: "ORIGINAL_FAILURE", retryAt } });
+    expect((await engineering.reconcileDiscoveryEngineeringHandoffs()).queued).toBe(1);
+    const current = await client.simulatorSupportIncident.findUniqueOrThrow({ where: { id: original.id } });
+    expect(current).toEqual(original);
+  });
   it.each(["paused", "edited"])("does not repair %s demand", async reason => {
     const f = await failed();
     await client.teeSearch.update({ where: { id: f.search.id }, data: reason === "paused" ? { status: "PAUSED" } : { alertGeneration: { increment: 1 } } });

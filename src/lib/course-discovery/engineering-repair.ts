@@ -100,6 +100,11 @@ export async function reconcileDiscoveryEngineeringHandoffs(now = new Date()) {
         if (!await currentDiscoveryEngineeringFailure(tx, job.id, now) ||
             await tx.courseDiscoveryJob.findUnique({ where: { activeTargetKey: job.targetKey } }) ||
             await hasLegacyDiscoveryOwner(tx, request.target)) return null;
+        const existing = await tx.simulatorSupportIncident.findUnique({ where: { offeringId: job.offeringId! } });
+        // Attach evidence to the existing episode without changing its reason,
+        // final disposition or future retry. The normal reconciler may reopen
+        // a resolved episode, but must not reset an unresolved one's cooldown.
+        if (existing && existing.status !== "RESOLVED") return existing.status === "AUTO_INVESTIGATING" ? existing.id : null;
         await reconcileSimulatorSupportIncidentFailure(tx, { offeringId: job.offeringId!, reason: "DISCOVERY_CODE_REPAIR",
           evidenceUrl: source.identity.officialUrl, now, eligible: true });
         const incident = await tx.simulatorSupportIncident.findUnique({ where: { offeringId: job.offeringId! } });
