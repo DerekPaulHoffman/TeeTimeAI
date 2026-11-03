@@ -67,6 +67,8 @@ import { executeChelseaPublic, inspectChelseaPublic } from "./chelsea-public-exe
 import { deriveAcuityOfficialContact, type AcuityOfficialContactProof } from "./acuity-official-contact";
 import { bindTeeItUpOfficialContactChain, readNativeTeeItUpContactChain, type TeeItUpContactChainReader,
   type TeeItUpOfficialContactChainProof } from "./teeitup-official-contact-chain";
+import { parseSkeddaSource } from "./skedda-source";
+import { inspectSkedda, executeSkedda } from "./skedda-executor";
 
 type Dependencies = {
   fetch?: typeof fetch;
@@ -614,6 +616,10 @@ async function inspectForeupConfiguration(source: Source, deps: Dependencies, fe
 /** For a controller-observed provider URL only. Reads typed public configuration
  * and returns bounded IDs; availability and activation remain separate proofs. */
 export async function inspectExistingAdapter(source: Source, deps: Dependencies): Promise<{ adapter: ExistingAdapterMetadata }> {
+  if (parseSkeddaSource(source.bookingUrl)) {
+    if (!deps.requestedInput?.durationMinutes) fail("ADAPTER_TARGET_MISMATCH");
+    return { adapter: await inspectSkedda(source, deps.requestedInput, deps) };
+  }
   if (parseChelseaPublicSource(source.bookingUrl)) return { adapter: await inspectChelseaPublic(source, deps) };
   if (parseMindbodyAppointmentSource(source.bookingUrl)) {
     if (!source.officialUrl || !source.venueAddress) fail("ADAPTER_IDENTITY_MISSING");
@@ -854,7 +860,7 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
   let uscheduleSession: ReturnType<typeof createUSchedulePublicSession> | undefined;
   try {
     const adapter = existingAdapterMetadataSchema.parse(recipe.adapter);
-    const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "GOLFVX", "REX", "MINDBODY", "FIVE_IRON", "GOLFBOOK"].includes(adapter.family) || adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR";
+    const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "GOLFVX", "REX", "MINDBODY", "FIVE_IRON", "GOLFBOOK", "SKEDDA"].includes(adapter.family) || adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR";
     if (input.timeZone !== recipe.source.timeZone || recipe.source.providerFamily.toUpperCase() !== adapter.family ||
         (recipe.target.kind === "SIMULATOR") !== simulator || simulator && (!recipe.target.offeringId || !input.durationMinutes) ||
         adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR" && (adapter.facilityIds.length !== 1 || adapter.officialIdentityProof || adapter.officialBookingSourceProof || adapter.officialPostalConflictProof || adapter.officialDelegatedBookingProof || adapter.officialStreetTypeOmittedProof || adapter.officialContactChainProof)) fail("ADAPTER_TARGET_MISMATCH");
@@ -868,7 +874,7 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
           adapter.timeZone !== input.timeZone || adapter.durationMinutes !== input.durationMinutes || input.players > adapter.capacity) fail("ADAPTER_TARGET_MISMATCH");
       if (!deps.localCapabilities?.includes("LOCAL_CHROME")) fail("LOCAL_CHROME_REQUIRED");
     }
-    if (!["CHELSEA", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS", "REX", "CPS", "MINDBODY", "FIVE_IRON", "GOLFBOOK"].includes(adapter.family)) session = reader(recipe.source, deps, adapter, input);
+    if (!["CHELSEA", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS", "REX", "CPS", "MINDBODY", "FIVE_IRON", "GOLFBOOK", "SKEDDA"].includes(adapter.family)) session = reader(recipe.source, deps, adapter, input);
     const start = deps.toInstant(`${input.date}T${input.startTime}:00`, input);
     const next = new Date(`${input.date}T00:00:00Z`); next.setUTCDate(next.getUTCDate() + 1);
     const end = deps.toInstant(`${input.endTime === "24:00" ? next.toISOString().slice(0, 10) : input.date}T${input.endTime === "24:00" ? "00:00" : input.endTime}:00`, input);
@@ -917,6 +923,10 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
     }
     if (adapter.family === "GOLFBOOK") {
       const slots = await executeGolfBook(recipe.source, adapter, input, deps);
+      return result(slots.filter(slot => new Date(slot.startsAt) > now && new Date(slot.startsAt) >= start && new Date(slot.endsAt!) <= end));
+    }
+    if (adapter.family === "SKEDDA") {
+      const slots = await executeSkedda(recipe.source, adapter, input, deps);
       return result(slots.filter(slot => new Date(slot.startsAt) > now && new Date(slot.startsAt) >= start && new Date(slot.endsAt!) <= end));
     }
     if (adapter.family === "CHRONOGOLF") {

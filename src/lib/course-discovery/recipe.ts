@@ -14,6 +14,7 @@ import { sevenRoomsPublicRequests, sevenRoomsPublicRows } from "./sevenrooms-pub
 import { publicHeaderFailureDiagnosticSchema } from "./public-header-diagnostic";
 import { parseMindbodyAppointmentSource } from "./mindbody-appointment-grid";
 import { parseTeesnapRecipeSource, isTeesnapOfficialSourceBinding } from "./teesnap-source";
+import { parseSkeddaSource } from "./skedda-source";
 export { expandRecipeTemplate, recipeTemplateSchema } from "./recipe-template";
 
 const secret = /(?:password|secret|token|cookie|session|credential|authorization|api.?key|email|phone)/iu;
@@ -275,12 +276,14 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
     return;
   }
   if (recipe.engine === "EXISTING_ADAPTER") {
-    const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "GOLFVX", "REX", "MINDBODY", "FIVE_IRON", "GOLFBOOK"].includes(recipe.adapter.family) ||
+    const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "GOLFVX", "REX", "MINDBODY", "FIVE_IRON", "GOLFBOOK", "SKEDDA"].includes(recipe.adapter.family) ||
       recipe.adapter.family === "TEEITUP" && recipe.adapter.offeringKind === "SIMULATOR";
     if (recipe.source.providerFamily !== recipe.adapter.family ||
       (recipe.target.kind === "SIMULATOR") !== simulator ||
-      recipe.target.kind === "SIMULATOR" && !recipe.target.offeringId || ["CHELSEA", "TEEITUP", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS", "REX", "CPS", "MINDBODY", "TEESNAP", "FIVE_IRON", "GOLFBOOK"].includes(recipe.adapter.family) && !recipe.source.venueAddress)
+      recipe.target.kind === "SIMULATOR" && !recipe.target.offeringId || ["CHELSEA", "TEEITUP", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS", "REX", "CPS", "MINDBODY", "TEESNAP", "FIVE_IRON", "GOLFBOOK", "SKEDDA"].includes(recipe.adapter.family) && !recipe.source.venueAddress)
       ctx.addIssue({ code: "custom", message: "Supported adapter metadata must match the source and target kind" });
+    if (recipe.adapter.family === "SKEDDA" && parseSkeddaSource(recipe.source.bookingUrl)?.hostname !== `${recipe.adapter.tenant}.skedda.com`)
+      ctx.addIssue({ code: "custom", message: "Public simulator metadata must retain the exact provider tenant" });
     if (recipe.adapter.family === "TEESNAP" && (recipe.target.kind !== "OUTDOOR" || recipe.target.offeringId ||
         parseTeesnapRecipeSource(recipe.source.bookingUrl)?.tenant !== recipe.adapter.tenant ||
         !isTeesnapOfficialSourceBinding(recipe.source.officialUrl, recipe.source.bookingUrl) ||
