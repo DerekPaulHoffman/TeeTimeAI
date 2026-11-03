@@ -95,6 +95,19 @@ export function getDiscoverySourceFingerprint(course: FingerprintCourse, offerin
   offering: offering ? { id: offering.id, maxPartySize: offering.maxPartySize, supportedDurationsMinutes: offering.supportedDurationsMinutes } : null });
 }
 
+/** A saved method already verified HTTPS independently. A later upgrade of
+ * only the raw official-site URL must not discard that method. Reconstruct the
+ * old fingerprint from every current access/provider fact; no other change is
+ * tolerated, and discovery jobs retain their strict original fingerprints. */
+function savedRecipeSourceMatches(storedFingerprint: string, source: Source) {
+  if (storedFingerprint === source.sourceFingerprint) return true;
+  const website = source.course.website;
+  if (!website?.startsWith("https://")) return false;
+  const priorWebsite = `http:${website.slice(6)}`;
+  return normalizeDiscoverySourceUrl(priorWebsite) === website &&
+    getDiscoverySourceFingerprint({ ...source.course, website: priorWebsite }, source.offering) === storedFingerprint;
+}
+
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   if (value && typeof value === "object") return `{${Object.entries(value).filter(([, item]) => item !== undefined).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`).join(",")}}`;
@@ -194,7 +207,7 @@ export async function ensureDiscoveryJobInTransaction(tx: Tx, input: DiscoveryAd
   if (source.activeRecipeId) {
     let valid = false;
     const previous = await tx.courseAccessRecipe.findUnique({ where: { id: source.activeRecipeId } });
-    if (previous && previous.targetKey === targetKey(input) && previous.sourceFingerprint === source.sourceFingerprint) {
+    if (previous && previous.targetKey === targetKey(input) && savedRecipeSourceMatches(previous.sourceFingerprint, source)) {
       try {
         const recipe = parseAccessRecipe(previous.payload);
         bindRecipe(recipe, source);
@@ -518,7 +531,7 @@ export async function getActiveAccessRecipeInTransaction(tx: Pick<Tx, "course" |
   const source = await loadSource(tx, target);
   if (!source.activeRecipeId) return null;
   const stored = await tx.courseAccessRecipe.findUnique({ where: { id: source.activeRecipeId } });
-  if (!stored || stored.targetKey !== targetKey(target) || stored.sourceFingerprint !== source.sourceFingerprint) return null;
+  if (!stored || stored.targetKey !== targetKey(target) || !savedRecipeSourceMatches(stored.sourceFingerprint, source)) return null;
   try {
     const recipe = parseAccessRecipe(stored.payload);
     bindRecipe(recipe, source);
@@ -538,7 +551,7 @@ export async function assertActiveAccessRecipeInTransaction(tx: Tx, target: { co
   const source = await loadSource(tx, target);
   if (source.activeRecipeId !== recipeId) conflict();
   const record = await tx.courseAccessRecipe.findUnique({ where: { id: recipeId } });
-  if (!record || record.targetKey !== targetKey(target) || record.sourceFingerprint !== source.sourceFingerprint) conflict();
+  if (!record || record.targetKey !== targetKey(target) || !savedRecipeSourceMatches(record.sourceFingerprint, source)) conflict();
   const recipe = parseAccessRecipe(record.payload);
   bindRecipe(recipe, source);
   if (hashAccessRecipe(recipe) !== record.hash) conflict();

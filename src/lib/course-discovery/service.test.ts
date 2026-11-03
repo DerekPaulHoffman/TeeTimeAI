@@ -734,6 +734,39 @@ describe("bounded course discovery persistence", () => {
     expect(await getActiveAccessRecipe({ courseId: "course1" })).toBeNull();
   });
 
+  it("reuses the same verified HTTPS method after only the raw official URL upgrades from HTTP", async () => {
+    course.website = "http://golf.example.com/";
+    const admitted = await ensureDiscoveryJob({ courseId: "course1", searchId: "search1" });
+    course.activeAccessRecipeId = "recipe1";
+    const stored = { id: "recipe1", targetKey: "course:course1", sourceFingerprint: admitted!.sourceFingerprint,
+      hash: hashAccessRecipe(recipe), payload: recipe };
+    mocks.db.courseAccessRecipe.findUnique.mockResolvedValue(stored);
+    course.website = recipe.source.officialUrl;
+    vi.clearAllMocks();
+    expect((await getActiveAccessRecipe({ courseId: "course1" }))?.record).toEqual(stored);
+    expect(await ensureDiscoveryJob({ courseId: "course1", searchId: "search1" })).toBeNull();
+    expect(await assertActiveAccessRecipeInTransaction(mocks.db as unknown as Prisma.TransactionClient,
+      { courseId: "course1" }, "recipe1")).toEqual(stored);
+    expect(mocks.db.course.updateMany).not.toHaveBeenCalled();
+    expect(mocks.db.courseDiscoveryJob.create).not.toHaveBeenCalled();
+    expect(mocks.db.courseAccessRecipe.update).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["official host", { website: "https://another.example.com/" }],
+    ["booking route", { detectedBookingUrl: "https://golf.example.com/new-times" }],
+    ["provider metadata", { bookingMetadata: { newScheduleId: 12 } }],
+    ["access", { automationEligibility: "BLOCKED" }],
+  ])("still rejects a changed %s alongside an official URL upgrade", async (_label, change) => {
+    course.website = "http://golf.example.com/";
+    const admitted = await ensureDiscoveryJob({ courseId: "course1", searchId: "search1" });
+    course.activeAccessRecipeId = "recipe1";
+    mocks.db.courseAccessRecipe.findUnique.mockResolvedValue({ id: "recipe1", targetKey: "course:course1",
+      sourceFingerprint: admitted!.sourceFingerprint, hash: hashAccessRecipe(recipe), payload: recipe });
+    Object.assign(course, { website: recipe.source.officialUrl }, change);
+    expect(await getActiveAccessRecipe({ courseId: "course1" })).toBeNull();
+  });
+
   it("validates the current immutable method in the supplied reader without a nested transaction or writes", async () => {
     const admitted = await ensureDiscoveryJob({ courseId: "course1", searchId: "search1" });
     course.activeAccessRecipeId = "recipe1";
