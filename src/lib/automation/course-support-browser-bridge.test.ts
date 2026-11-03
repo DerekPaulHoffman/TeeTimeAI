@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { EventEmitter } from "node:events";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -24,7 +24,11 @@ describe("native owned browser bridge", () => {
       const channel = args[args.indexOf("--interactive-channel") + 1];
       const child = new EventEmitter();
       finished = (async () => {
-        await writeFile(join(channel, "response-0.json"), JSON.stringify({ phase: "open", sequence: 0, screenshot: "AAAA", controls: [] }));
+        // Match the real channel publisher: readers must never see a partial
+        // JSON response while the asynchronous write is still in progress.
+        const response = join(channel, "response-0.json");
+        await writeFile(`${response}.tmp`, JSON.stringify({ phase: "open", sequence: 0, screenshot: "AAAA", controls: [] }));
+        await rename(`${response}.tmp`, response);
         for (let i = 0; i < 200; i++) {
           if ((await readdir(channel)).includes("request-1.json")) break;
           await new Promise(resolve => setTimeout(resolve, 10));
@@ -39,7 +43,7 @@ describe("native owned browser bridge", () => {
     const bridge = createCourseBrowserBridge({ cwd, threadId: "native-thread", nativeIdentityVerified: () => true, spawnProcess });
     try {
       const opened = await bridge.call({ action: "open", assignmentRef: "owned", token: "private", revision: 7, selectedCheckout: cwd, source: "booking" });
-      expect(opened.success).toBe(true);
+      expect(opened.success, JSON.stringify(opened.contentItems)).toBe(true);
       expect(opened.contentItems[1]).toEqual({ type: "inputImage", imageUrl: "data:image/png;base64,AAAA" });
       const closed = await bridge.call({ action: "finish" });
       expect(closed.success).toBe(true);
