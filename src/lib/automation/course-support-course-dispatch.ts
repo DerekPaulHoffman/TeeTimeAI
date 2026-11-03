@@ -416,6 +416,10 @@ export async function planCourseSupportCourseDispatch(input: {
   if (!Number.isInteger(maxStarts) || maxStarts < 1 || maxStarts > 15) {
     throw new Error("Course dispatch maxStarts must be from 1 through 15.");
   }
+  // Terminal learning failures enter the existing code-capable responder before
+  // its ordinary bounded selection. This does not reopen a discovery attempt.
+  const { reconcileDiscoveryEngineeringHandoffs } = await import("@/lib/course-discovery/engineering-repair");
+  await reconcileDiscoveryEngineeringHandoffs(input.now);
   return runWithCourseSupportWriterTransitionLease(async () => transaction(async (tx) => {
     const now = input.now ?? await getCourseDispatchDatabaseNow(tx);
     const runs = await readRuns(tx, new Date(Math.floor(now.getTime() / TICK_MS) * TICK_MS));

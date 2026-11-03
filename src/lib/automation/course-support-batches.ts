@@ -6890,6 +6890,7 @@ export async function getCourseSupportBatchPacket(input: {
           },
           incident: {
             select: {
+              id: true,
               cycle: true,
               kind: true,
               providerFamilyKey: true,
@@ -6921,6 +6922,9 @@ export async function getCourseSupportBatchPacket(input: {
   const remediationDirective = readCourseSupportRemediationDirective(
     batch.summary,
   );
+  const { discoveryEngineeringContext } = await import("@/lib/course-discovery/engineering-repair");
+  const discoveryEngineeringContexts = new Map(await Promise.all(batch.incidents.map(async entry => [entry.id,
+    await discoveryEngineeringContext(prisma, { courseId: entry.course.id }, entry.incident.id, now)] as const)));
   const activeFutureOutdoorSearchCounts = new Map(
     await Promise.all(
       batch.incidents
@@ -7002,6 +7006,7 @@ export async function getCourseSupportBatchPacket(input: {
           playbook.valid && playbook.cycle === entry.cycle;
         return {
           ordinal: String(index + 1).padStart(2, "0"),
+          discoveryEngineeringFailure: discoveryEngineeringContexts.get(entry.id) ?? null,
           actionPlan: claimedActionPlan,
           providerFamilyKey: entry.course.providerFamilyKey,
           providerFamilyCategory: getReportSafeProviderFamilyCategory(
@@ -17734,7 +17739,7 @@ async function listParkedSourceCompleteFinalizationRecoveryCandidates(
 type CourseSupportClaimCandidateReadClient = Pick<
   Prisma.TransactionClient,
   "courseSupportIncident" | "courseMonitoringEvent" | "coursePreference" | "courseDiscoveryPilotEnrollment" | "teeSearch" |
-  "courseDiscoveryJob" | "course" | "courseOffering" | "courseAccessRecipe"
+  "courseDiscoveryJob" | "course" | "courseOffering" | "courseAccessRecipe" | "courseProbe"
 >;
 
 async function listCourseSupportClaimCandidateIncidents(

@@ -47,7 +47,7 @@ function fixture() {
   const thread = {
     id: THREAD, cwd, ephemeral: false, historyMode: "legacy", status: { type: "idle" }, turns: [], source: "vscode",
   };
-  const ack = { cwd, approvalPolicy: "never", sandbox: { type: "dangerFullAccess" }, activePermissionProfile: { id: WORKER_PERMISSION_PROFILE }, thread };
+  const ack = { model: "gpt-6.1-sol", cwd, approvalPolicy: "never", sandbox: { type: "dangerFullAccess" }, activePermissionProfile: { id: WORKER_PERMISSION_PROFILE }, thread };
   const inspectCheckout = vi.fn(() => checkout);
   const inspectCli = vi.fn(() => "codex-cli 0.160.0");
   const options = { cliPath, cwd, receiptPath, promptPath, inspectCheckout, inspectCli, nodePath: process.execPath };
@@ -68,6 +68,7 @@ function fakeServer(f: ReturnType<typeof fixture>, overrides: Record<string, (pa
   let hooks: ClientOptions;
   const request = vi.fn(async (method: string, params: Record<string, unknown>) => {
     if (overrides[method]) return overrides[method](params, hooks);
+    if (method === "account/read") return { account: { type: "chatgpt" } };
     if (method === "permissionProfile/list") return { data: [{ id: WORKER_PERMISSION_PROFILE, allowed: true }] };
     if (method === "thread/start" || method === "thread/resume") return f.ack;
     if (method === "thread/read") return { thread: f.thread };
@@ -88,14 +89,27 @@ function fakeServer(f: ReturnType<typeof fixture>, overrides: Record<string, (pa
 }
 
 describe("course worker preparation contract", () => {
+  it.each([null, { type: "apiKey" }, { type: "amazonBedrock" }])("requires the existing ChatGPT account before creating a worker (%j)", async account => {
+    const f = fixture(), server = fakeServer(f, { "account/read": () => ({ account }) });
+    await expect(prepareCourseSupportWorker({ ...f.options, clientFactory: server.clientFactory })).rejects.toThrow("EXISTING_CHATGPT_SIGN_IN_REQUIRED");
+    expect(server.request.mock.calls.some(([method]) => method === "thread/start" || method === "turn/start")).toBe(false);
+    expect(f.readReceipt().status).toBe("FAILED_BEFORE_CREATION");
+  });
+  it("will not start a turn if the server does not acknowledge Sol", async () => {
+    const f = fixture(), server = fakeServer(f, { "thread/start": () => ({ ...f.ack, model: "unexpected-model" }) });
+    await expect(prepareCourseSupportWorker({ ...f.options, clientFactory: server.clientFactory })).rejects.toThrow("SOL_MODEL_NOT_ACKNOWLEDGED");
+    expect(server.request.mock.calls.some(([method]) => method === "turn/start")).toBe(false);
+    expect(f.readReceipt().threadId).toBe(THREAD);
+  });
   it("creates only one idle persistent truthful native thread after allowed-profile acknowledgement", async () => {
     const f = fixture();
     const server = fakeServer(f);
     await expect(prepareCourseSupportWorker({ ...f.options, clientFactory: server.clientFactory, title: "Course investigation" }))
       .resolves.toMatchObject({ outcome: "prepared", threadId: THREAD });
-    expect(server.request.mock.calls.map(([method]) => method)).toEqual(["initialize", "permissionProfile/list", "thread/start", "thread/name/set"]);
+    expect(server.request.mock.calls.map(([method]) => method)).toEqual(["initialize", "permissionProfile/list", "account/read", "thread/start", "thread/name/set"]);
     expect(server.request.mock.calls.find(([method]) => method === "thread/start")?.[1]).toEqual({
       dynamicTools: [courseBrowserTool],
+      model: "gpt-6.1-sol",
       cwd: f.cwd, ephemeral: false, historyMode: "legacy", approvalPolicy: "never", permissions: WORKER_PERMISSION_PROFILE,
       runtimeWorkspaceRoots: [f.cwd], threadSource: "agent_created_thread",
     });
@@ -200,12 +214,12 @@ describe("one first turn after external binding", () => {
       outcome: "completed", nativeIdentityVerified: true, approvalRequests: 0,
     });
     expect(server.request.mock.calls.map(([method]) => method)).toEqual([
-      "initialize", "permissionProfile/list", "thread/read", "thread/turns/list", "thread/resume", "thread/read", "thread/turns/list", "turn/start",
+      "initialize", "permissionProfile/list", "account/read", "thread/read", "thread/turns/list", "thread/resume", "thread/read", "thread/turns/list", "turn/start",
     ]);
     const start = server.request.mock.calls.find(([method]) => method === "turn/start")?.[1];
     expect(start).toMatchObject({ threadId: THREAD, cwd: f.cwd, approvalPolicy: "never", permissions: WORKER_PERMISSION_PROFILE });
     expect(start).not.toHaveProperty("sandboxPolicy");
-    expect(start).not.toHaveProperty("model");
+    expect(start).toHaveProperty("model", "gpt-6.1-sol");
     expect(f.readReceipt()).toMatchObject({ status: "COMPLETED", turnId: TURN, nativeIdentityVerified: true });
     await expect(runPreparedCourseSupportWorker({ ...f.options, clientFactory: server.clientFactory })).rejects.toThrow("UNUSED_PREPARED_RECEIPT_REQUIRED");
     expect(server.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(1);

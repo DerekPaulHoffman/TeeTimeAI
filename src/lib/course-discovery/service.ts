@@ -62,7 +62,7 @@ export function isRetryableDiscoveryTransactionError(error: unknown) {
 
 const courseSelect = {
   id: true, name: true, address: true, phone: true, website: true, detectedBookingUrl: true, timeZone: true,
-  providerFamilyKey: true, bookingMetadata: true, isPublic: true, activeAccessRecipeId: true,
+  providerFamilyKey: true, bookingMetadata: true, isPublic: true, activeAccessRecipeId: true, detectedPlatform: true,
   bookingMethod: true, bookingAccessMode: true, automationEligibility: true, automationReason: true, monitoringMode: true,
 } satisfies Prisma.CourseSelect;
 const offeringSelect = {
@@ -81,7 +81,7 @@ type Tx = Prisma.TransactionClient;
 type Source = Awaited<ReturnType<typeof loadSource>>;
 type Search = Prisma.TeeSearchGetPayload<{ select: typeof searchSelect }>;
 
-type FingerprintCourse = Omit<Prisma.CourseGetPayload<{ select: typeof courseSelect }>, "phone">;
+type FingerprintCourse = Omit<Prisma.CourseGetPayload<{ select: typeof courseSelect }>, "phone" | "detectedPlatform">;
 type FingerprintOffering = Prisma.CourseOfferingGetPayload<{ select: typeof offeringSelect }>;
 
 /** Pure current-source binding shared with the read-only customer projection. */
@@ -325,6 +325,42 @@ export async function failDiscoveryJob(jobId: string, leaseToken: string, reason
       outcome: reason, completedAt: retry ? null : now,
     } });
   });
+}
+
+/** Engineering reads the original terminal failure; it never reopens its lease
+ * or changes its customer deadline. Every write/ownership handoff rechecks this
+ * snapshot against current saved demand and the current source. */
+export async function currentDiscoveryEngineeringFailure(tx: Pick<Tx, "courseDiscoveryJob" | "course" | "courseOffering" |
+  "teeSearch" | "coursePreference" | "courseDiscoveryPilotEnrollment" | "courseProbe">, jobId: string, now: Date) {
+  const job = await tx.courseDiscoveryJob.findUnique({ where: { id: jobId } });
+  if (!job || !["FAILED", "TIMED_OUT"].includes(job.status) ||
+      !["TOOL_FAILURE", "UNSUPPORTED", "DEADLINE"].includes(job.outcome ?? "") ||
+      job.attempts < 1 || job.attempts > DISCOVERY_MAX_ATTEMPTS || !job.firstPickedUpAt || !job.deadlineAt || !job.completedAt ||
+      job.deadlineAt.getTime() - job.firstPickedUpAt.getTime() !== DISCOVERY_DEADLINE_MS ||
+      job.completedAt < job.firstPickedUpAt || job.completedAt > now || job.activeTargetKey !== null) return null;
+  const parsed = z.object({
+    target: z.object({ courseId: z.string().min(1).max(128), offeringId: z.string().min(1).max(128).optional(),
+      kind: z.enum(["OUTDOOR", "SIMULATOR"]) }).strict(),
+    demand: z.object({ searchId: z.string().min(1).max(128), alertGeneration: z.number().int().nonnegative() }).strict(),
+    input: accessExecutionInputSchema,
+  }).passthrough().safeParse(job.request);
+  if (!parsed.success) return null;
+  const request = parsed.data as unknown as DiscoveryRequest & { demand: NonNullable<DiscoveryRequest["demand"]> };
+  if (request.target.courseId !== job.courseId || (request.target.offeringId ?? null) !== job.offeringId ||
+      !await isDiscoveryPilotSearch(request.demand.searchId, process.env, tx)) return null;
+  let source: Source;
+  try { source = await loadSource(tx, request.target); }
+  catch (error) { if (error instanceof DiscoveryConflictError) return null; throw error; }
+  if (source.sourceFingerprint !== job.sourceFingerprint || source.activeRecipeId !== job.baseRecipeId) return null;
+  const search = await tx.teeSearch.findUnique({ where: { id: request.demand.searchId }, select: searchSelect });
+  if (!search || !activeSearch(search, source, now) || search.alertGeneration !== request.demand.alertGeneration ||
+      canonical(requestFor(source, search)) !== canonical(request)) return null;
+  const preferences = await tx.coursePreference.findMany({ where: { teeSearchId: search.id,
+    courseId: job.courseId, offeringId: job.offeringId }, select: { courseId: true }, take: 2 });
+  if (preferences.length !== 1) return null;
+  if (await tx.courseProbe.findFirst({ where: { teeSearchId: search.id, courseId: job.courseId, offeringId: job.offeringId,
+    outcome: { in: ["MATCH_FOUND", "NO_MATCH"] }, observedAt: { gte: job.completedAt } }, select: { id: true } })) return null;
+  return { job, request, source, search };
 }
 
 const challengeSchema = z.object({

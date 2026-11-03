@@ -3,7 +3,9 @@ import type { Prisma } from "@prisma/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { assertNotDiscoveryPilotTarget, excludeDiscoveryPilotTargets, hasLegacyDiscoveryOwner } from "./legacy-exclusion";
 const activeMethod = vi.hoisted(() => vi.fn());
+const engineeringHandoff = vi.hoisted(() => vi.fn());
 vi.mock("./service", () => ({ getActiveAccessRecipeInTransaction: activeMethod }));
+vi.mock("./engineering-repair", () => ({ currentDiscoveryEngineeringHandoff: engineeringHandoff }));
 
 const now = new Date("2030-01-01T12:00:00.000Z");
 const preferences = vi.fn();
@@ -14,6 +16,7 @@ function row(courseId: string, offeringId: string | null = null, date = "2030-01
 }
 beforeEach(() => {
   vi.resetAllMocks();
+  engineeringHandoff.mockResolvedValue(null);
   vi.stubEnv("COURSE_DISCOVERY_ENABLED", "true");
   vi.stubEnv("COURSE_DISCOVERY_ROLLOUT_MODE", "PILOT");
   vi.stubEnv("COURSE_DISCOVERY_PILOT_SEARCH_IDS", "search-one");
@@ -87,6 +90,20 @@ describe("general rollout legacy handoff", () => {
     await expect(excludeDiscoveryPilotTargets([{ courseId: "venue" }], generalReader, now)).rejects.toThrow("job read unavailable");
     activeMethod.mockRejectedValueOnce(new Error("method read unavailable"));
     await expect(assertNotDiscoveryPilotTarget(generalReader, { courseId: "venue" }, now)).rejects.toThrow("method read unavailable");
+  });
+  it("hands a failed saved method to coding only through a current engineering receipt", async () => {
+    preferences.mockResolvedValue([row("venue"), row("venue", "bay")]);
+    activeMethod.mockResolvedValue({ recipe: {} });
+    engineeringHandoff.mockImplementation(async (_reader, target) => target.offeringId === "bay" ? { receipt: {} } : null);
+    expect(await excludeDiscoveryPilotTargets([{ courseId: "venue" }, { courseId: "venue", offeringId: "bay" }], generalReader, now))
+      .toEqual([{ courseId: "venue", offeringId: "bay" }]);
+  });
+  it("never hands off while another discovery attempt is queued or running", async () => {
+    preferences.mockResolvedValue([row("venue")]);
+    jobs.mockResolvedValue([{ activeTargetKey: "course:venue", status: "RUNNING" }]);
+    engineeringHandoff.mockResolvedValue({ receipt: {} });
+    expect(await excludeDiscoveryPilotTargets([{ courseId: "venue" }], generalReader, now)).toEqual([]);
+    expect(engineeringHandoff).not.toHaveBeenCalled();
   });
   it("does not issue job/method reads for expired demand or when rollout is off", async () => {
     preferences.mockResolvedValue([row("expired", null, "2029-12-31")]);

@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
     course: { findUnique: vi.fn(), updateMany: vi.fn() },
     courseOffering: { findUnique: vi.fn(), updateMany: vi.fn() },
     coursePreference: { findMany: vi.fn() },
+    teeSearch: { findUnique: vi.fn() }, courseProbe: { findFirst: vi.fn() },
     courseDiscoveryJob: { findUnique: vi.fn(), findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn(), update: vi.fn() },
     courseAccessRecipe: { findFirst: vi.fn(), findUnique: vi.fn(), create: vi.fn(), update: vi.fn() },
     courseSupportBatch: { findFirst: vi.fn() }, automationRun: { findMany: vi.fn() },
@@ -23,6 +24,7 @@ import {
   activateDiscoveryRecipe, checkpointDiscoveryJob, claimNextDiscoveryJob, degradeRecipe,
   DiscoveryConflictError, ensureDiscoveryJob, ensureDiscoveryJobInTransaction, failDiscoveryJob, getActiveAccessRecipe, getActiveAccessRecipeInTransaction,
   heartbeatDiscoveryJob, proposeDiscoveryRecipe, recordDiscoveryVerification, assertActiveAccessRecipeInTransaction,
+  currentDiscoveryEngineeringFailure,
 } from "./service";
 
 const now = new Date("2030-01-01T12:00:00.000Z");
@@ -68,6 +70,8 @@ beforeEach(() => {
   mocks.db.courseOffering.findUnique.mockResolvedValue(null);
   mocks.db.courseOffering.updateMany.mockResolvedValue({ count: 1 });
   mocks.db.coursePreference.findMany.mockImplementation(async () => preferences);
+  mocks.db.teeSearch.findUnique.mockImplementation(async () => (preferences[0] as { teeSearch?: unknown })?.teeSearch ?? null);
+  mocks.db.courseProbe.findFirst.mockResolvedValue(null);
   mocks.db.courseDiscoveryJob.findUnique.mockImplementation(async ({ where }) => where.activeTargetKey && job?.activeTargetKey !== where.activeTargetKey ? null : job);
   mocks.db.courseDiscoveryJob.findFirst.mockResolvedValue(null);
   mocks.db.courseDiscoveryJob.findMany.mockImplementation(async () => job ? [job] : []);
@@ -733,6 +737,34 @@ describe("bounded course discovery persistence", () => {
     mocks.db.courseAccessRecipe.findUnique.mockResolvedValue({ id: "recipe1", targetKey: "course:course1", sourceFingerprint: "old", payload: recipe });
     expect(await getActiveAccessRecipe({ courseId: "course1" })).toBeNull();
   });
+
+  it("retains a current terminal discovery failure as engineering evidence with its original clock", async () => {
+    const owner = await claimed();
+    await failDiscoveryJob("job1", owner!.leaseToken!, "TOOL_FAILURE");
+    job!.offeringId = null; // Prisma materializes an omitted optional scalar as null.
+    const snapshot = JSON.stringify(job);
+    expect(await currentDiscoveryEngineeringFailure(mocks.db as unknown as Prisma.TransactionClient, "job1", now))
+      .toMatchObject({ job: { status: "FAILED", firstPickedUpAt: now, deadlineAt: new Date(now.getTime() + 900_000) } });
+    expect(JSON.stringify(job)).toBe(snapshot);
+  });
+
+  it.each(["active attempt", "access required", "cancelled", "changed source", "changed generation", "changed players", "ended demand", "recovered", "missing preference"])
+    ("refuses engineering handoff for %s", async condition => {
+      const owner = await claimed();
+      await failDiscoveryJob("job1", owner!.leaseToken!, "TOOL_FAILURE");
+      job!.offeringId = null;
+      const demand = (preferences[0] as { teeSearch: Record<string, unknown> }).teeSearch;
+      if (condition === "active attempt") Object.assign(job!, { status: "RUNNING", activeTargetKey: "course:course1" });
+      if (condition === "access required") Object.assign(job!, { outcome: "ACCESS_REQUIRED" });
+      if (condition === "cancelled") Object.assign(job!, { status: "CANCELLED" });
+      if (condition === "changed source") course.website = "https://changed.example/";
+      if (condition === "changed generation") demand.alertGeneration = 1;
+      if (condition === "changed players") demand.players = 2;
+      if (condition === "ended demand") demand.status = "PAUSED";
+      if (condition === "recovered") mocks.db.courseProbe.findFirst.mockResolvedValue({ id: "new-success" });
+      if (condition === "missing preference") mocks.db.coursePreference.findMany.mockResolvedValue([]);
+      expect(await currentDiscoveryEngineeringFailure(mocks.db as unknown as Prisma.TransactionClient, "job1", now)).toBeNull();
+    });
 
   it("reuses the same verified HTTPS method after only the raw official URL upgrades from HTTP", async () => {
     course.website = "http://golf.example.com/";

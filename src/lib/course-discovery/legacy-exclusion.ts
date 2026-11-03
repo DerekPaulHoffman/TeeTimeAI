@@ -5,7 +5,7 @@ import { activeDiscoveryPilotSearchIds, isCourseDiscoveryEnabled, isGeneralDisco
 
 type Target = { courseId: string; offeringId?: string | null };
 type Reader = Pick<Prisma.TransactionClient, "coursePreference" | "courseDiscoveryPilotEnrollment" | "teeSearch" |
-  "courseDiscoveryJob" | "course" | "courseOffering" | "courseAccessRecipe">;
+  "courseDiscoveryJob" | "course" | "courseOffering" | "courseAccessRecipe" | "courseProbe">;
 function key(target: Target) { return target.offeringId ? `offering:${target.offeringId}` : `course:${target.courseId}`; }
 
 /** An off pilot does not add database reads to the existing responder. */
@@ -40,7 +40,10 @@ export async function discoveryPilotTargetKeys(reader: Reader, now: Date) {
   for (const [targetKey, target] of targets) {
     if (!owned.has(targetKey) && await getActiveAccessRecipeInTransaction(reader, {
       courseId: target.courseId, ...(target.offeringId ? { offeringId: target.offeringId } : {}),
-    })) owned.add(targetKey);
+    })) {
+      const { currentDiscoveryEngineeringHandoff } = await import("./engineering-repair");
+      if (!await currentDiscoveryEngineeringHandoff(reader, target, now)) owned.add(targetKey);
+    }
   }
   return owned;
 }

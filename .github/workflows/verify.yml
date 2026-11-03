@@ -13,6 +13,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  discovery-repair-persistence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: course_discovery_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d course_discovery_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/course_discovery_test
+      DATABASE_URL_UNPOOLED: postgresql://postgres:postgres@localhost:5432/course_discovery_test
+      COURSE_DISCOVERY_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/course_discovery_test
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          cache: npm
+          node-version: 24
+      - run: npm ci
+      - run: npm run prisma:generate
+      - run: npx prisma migrate deploy
+      - run: npx vitest run src/lib/course-discovery/engineering-repair.postgres.test.ts
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 25

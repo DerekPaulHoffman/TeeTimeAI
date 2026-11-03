@@ -255,4 +255,17 @@ describe("course worker launch supervisor", () => {
     expect(workerInstructions("OUTDOOR", f.selected, REF, f.deps)).toContain(REF);
     expect(f.calls).toEqual(["template:outdoor"]);
   });
+  it.each(["OUTDOOR", "SIMULATOR"])("keeps the %s coding worker on Sol and includes terminal-learning recovery gates", mode => {
+    const f = fixture();
+    const prompt = workerInstructions(mode, f.selected, REF, f.deps);
+    expect(prompt).toContain("Use only gpt-6.1-sol through the existing ChatGPT/Codex sign-in");
+    expect(prompt).toContain("discoveryEngineeringFailure");
+    expect(prompt).toContain("Keep the original failed discovery job terminal and its clock unchanged");
+    expect(prompt).toContain("Never manually send email or change customer alert inputs");
+  });
+  it("rejects an old template that directs a worker to another model", () => {
+    const f = fixture();
+    f.deps.readFile = () => "<assignment-ref> <selected-checkout> may use Astra Medium";
+    expect(() => workerInstructions("OUTDOOR", f.selected, REF, f.deps)).toThrow("SOL_ONLY_WORKER_TEMPLATE_REQUIRED");
+  });
 });

@@ -61,6 +61,15 @@ export function assertFullAccessAcknowledgement(result, cwd) {
   return result;
 }
 
+export const COURSE_SUPPORT_SOL_MODEL = "gpt-6.1-sol";
+async function requireChatGptSignIn(client) {
+  const account = await client.request("account/read", { refreshToken: false });
+  if (account?.account?.type !== "chatgpt") throw failure("EXISTING_CHATGPT_SIGN_IN_REQUIRED");
+}
+function requireSolAcknowledgement(result) {
+  if (result?.model !== COURSE_SUPPORT_SOL_MODEL) throw failure("SOL_MODEL_NOT_ACKNOWLEDGED");
+}
+
 export function assertUnusedWorkerThread(thread, expectedId, historyMode) {
   if (!thread || thread.id !== expectedId || !UUID.test(thread.id) || thread.ephemeral !== false ||
       thread.historyMode !== historyMode || !Array.isArray(thread.turns) || thread.turns.length !== 0 ||
@@ -245,11 +254,12 @@ export async function prepareCourseSupportWorker(options) {
     } });
     receipt.serverPid = client.pid; writeReceipt(receiptPath, receipt);
     await initialize(client, checkout.cwd);
+    await requireChatGptSignIn(client);
     if (transportFailure) throw transportFailure;
     if (approvalSeen) throw failure("UNEXPECTED_APPROVAL_REQUEST");
     receipt.status = "CREATING"; receipt.nativeCreationPossible = true; writeReceipt(receiptPath, receipt);
     const started = await client.request("thread/start", {
-      cwd: checkout.cwd, ephemeral: false, historyMode, approvalPolicy: "never",
+      model: COURSE_SUPPORT_SOL_MODEL, cwd: checkout.cwd, ephemeral: false, historyMode, approvalPolicy: "never",
       permissions: WORKER_PERMISSION_PROFILE, runtimeWorkspaceRoots: [checkout.cwd],
       threadSource: "agent_created_thread",
       dynamicTools: [courseBrowserTool],
@@ -257,6 +267,7 @@ export async function prepareCourseSupportWorker(options) {
     if (UUID.test(started?.thread?.id ?? "")) receipt.threadId = started.thread.id;
     writeReceipt(receiptPath, receipt);
     assertFullAccessAcknowledgement(started, checkout.cwd);
+    requireSolAcknowledgement(started);
     assertUnusedWorkerThread(started.thread, receipt.threadId, historyMode);
     if (transportFailure) throw transportFailure;
     if (approvalSeen) throw failure("UNEXPECTED_APPROVAL_REQUEST");
@@ -264,6 +275,7 @@ export async function prepareCourseSupportWorker(options) {
     if (transportFailure) throw transportFailure;
     if (approvalSeen) throw failure("UNEXPECTED_APPROVAL_REQUEST");
     receipt.status = "PREPARED";
+    receipt.model = COURSE_SUPPORT_SOL_MODEL; receipt.authentication = "ChatGPT";
     receipt.approvalPolicy = started.approvalPolicy;
     receipt.sandbox = started.sandbox;
     receipt.activePermissionProfile = started.activePermissionProfile;
@@ -362,18 +374,20 @@ export async function runPreparedCourseSupportWorker(options) {
     } });
     receipt.serverPid = client.pid; writeReceipt(receiptPath, receipt);
     await initialize(client, receipt.cwd);
+    await requireChatGptSignIn(client);
     await readUnusedThread(client, receipt);
     const resumed = await client.request("thread/resume", {
-      threadId: receipt.threadId, cwd: receipt.cwd, approvalPolicy: "never",
+      model: COURSE_SUPPORT_SOL_MODEL, threadId: receipt.threadId, cwd: receipt.cwd, approvalPolicy: "never",
       permissions: WORKER_PERMISSION_PROFILE, runtimeWorkspaceRoots: [receipt.cwd],
     });
     assertFullAccessAcknowledgement(resumed, receipt.cwd);
+    requireSolAcknowledgement(resumed);
     assertUnusedWorkerThread(resumed.thread, receipt.threadId, receipt.historyMode);
     await readUnusedThread(client, receipt);
     if (fatal) throw fatal;
     receipt.status = "TURN_STARTING"; writeReceipt(receiptPath, receipt);
     const started = await client.request("turn/start", {
-      threadId: receipt.threadId, input: [{ type: "text", text: firstPrompt }],
+      model: COURSE_SUPPORT_SOL_MODEL, threadId: receipt.threadId, input: [{ type: "text", text: firstPrompt }],
       cwd: receipt.cwd, approvalPolicy: "never", permissions: WORKER_PERMISSION_PROFILE,
       runtimeWorkspaceRoots: [receipt.cwd], turnTrigger: "course_support_assigned_worker",
     });
