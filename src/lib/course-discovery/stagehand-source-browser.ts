@@ -30,6 +30,8 @@ type PopupRead = { id: string; networkId: string; url: string; method: string; f
   readinessRetired?: boolean; nativeDocument?: { frameId: string; loaderId: string; currentUrl: string };
   response: Promise<Record<string, unknown>>; resolve(value: Record<string, unknown>): void };
 type Dependencies = { requestLease: Lease; proxyDependencies?: NativePublicProxyDependencies; launchBrowser?: (options: LaunchOptions) => Promise<Browser>;
+  onStartupStage?: (stage: string) => void;
+  onStartupFailure?: (reason: "TIMEOUT" | "CLOSED" | "OTHER", failure?: OwnedCdpFailure) => void;
   contextOptions?: { ignoreHTTPSErrors?: boolean } };
 const record = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const reject = () => new Error("STAGEHAND_GUARDED_SOURCE_REJECTED");
@@ -178,6 +180,7 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
   new Intl.DateTimeFormat("en-US", { timeZone: input.timeZone });
   const cancellation = new AbortController(), signal = AbortSignal.any([cancellation.signal, AbortSignal.timeout(remaining), ...(input.signal ? [input.signal] : [])]);
   const queue = createSimulatorBrowserRequestQueue(deps.requestLease, signal);
+  deps.onStartupStage?.("PROXY");
   const proxy = await createNativePublicBrowserProxy({ signal, requireHostAdmission: true }, deps.proxyDependencies);
   const allowed = new Set([initialUrl]), roots = new Set(allowed), targets = new Map<string, Target>(), activeReads = new Set<Promise<unknown>>();
   const popupGrants = new Map<string, PopupGrant>();
@@ -310,24 +313,29 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
   };
 
   try {
+    deps.onStartupStage?.("EXTENSION");
     const extension = await ownedStagehandExtension();
+    deps.onStartupStage?.("BROWSER_LAUNCH");
     browser = await (deps.launchBrowser ?? (options => launchPublicReadBrowser(options, { localCdp: true })))({
       ...stagehandSourceBrowserMode(),
-      timeout: Math.min(15_000, remaining), proxy: { server: proxy.server },
+      timeout: Math.min(30_000, remaining), proxy: { server: proxy.server },
       ignoreDefaultArgs: ["--disable-extensions"], args: ["--disable-quic", "--enable-unsafe-extension-debugging", `--remote-allow-origins=${extension.origin}`],
     });
     const endpoint = ownedPublicBrowserCdp(browser);
+    deps.onStartupStage?.("CDP_CONNECT");
     cdp = await connectOwnedSourceCdp(endpoint, signal, () => {
       if (!closed) {
         try { socketBoundaryState = { browserConnectedAtFailure: browser?.isConnected() === true, ownedPageCrashObserved, ownedPageCloseObserved, contextClosedObserved }; }
         catch { /* Observations cannot prevent guardian shutdown. */ }
         terminal = true; void close();
       }
-    });
+    }, { extensionLoadTimeoutMs: Math.min(30_000, remaining) });
     const root = cdp.root;
+    deps.onStartupStage?.("EXTENSION_INSTALL");
     const installed = await root.send("Extensions.loadUnpacked", { path: extension.path, enableInIncognito: true });
     if (installed.id !== extension.id) throw reject();
     const before = new Set((record(await root.send("Target.getBrowserContexts")).browserContextIds as string[]) ?? []);
+    deps.onStartupStage?.("CONTEXT_CREATE");
     context = await browser.newContext({ serviceWorkers: "block", acceptDownloads: false, locale: "en-US", timezoneId: input.timeZone,
       proxy: { server: proxy.server, bypass: `127.0.0.1:${new URL(endpoint).port}` }, ...deps.contextOptions });
     await registerStagehandSourceWorkerDenial(context);
@@ -566,15 +574,19 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
       await item.ready;
     };
     root.on("Target.attachedToTarget", attachTarget);
+    deps.onStartupStage?.("TARGET_GUARDS");
     await root.send("Target.setDiscoverTargets", { discover: true });
     await root.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: true, flatten: true,
       filter: [{ type: "page" }, { type: "worker" }, { type: "shared_worker" }, { type: "service_worker" }] });
+    deps.onStartupStage?.("TARGET_CREATE");
     const created = await root.send("Target.createTarget", { url: "about:blank", browserContextId: contextId, newWindow: true, background: false });
     if (typeof created.targetId !== "string") throw reject(); targetId = created.targetId;
     const until = Math.min(input.deadlineAt.getTime(), Date.now() + 5000);
+    deps.onStartupStage?.("TARGET_READY");
     while (!targets.has(targetId) && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 10));
     const initial = targets.get(targetId); if (!initial) throw reject(); await initial.ready; check();
     // The unrouted default profile tab never becomes a discovery target.
+    deps.onStartupStage?.("DEFAULT_CLEANUP");
     const infos = ((await root.send("Target.getTargets")).targetInfos as Array<Record<string, unknown>>) ?? [];
     for (const info of infos) if (info.type === "page" && info.browserContextId !== contextId && !String(info.url).startsWith(extension.origin + "/"))
       await requireDeniedStagehandTargetClosed(root, String(info.targetId));
@@ -670,6 +682,7 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
       target.documentRequest = undefined; target.documentStatus = undefined;
       target.documentRead = undefined; target.documentReadPending = false;
     };
+    deps.onStartupStage?.("READY");
     return {
       kind: "OWNED_GUARDED_STAGEHAND_CONTEXT" as const, cdpUrl: endpoint, targetId,
       assertGuardedTargets,
@@ -897,5 +910,10 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
         ...(intermediaryPreparation ? { nativeIntermediaryPreparation: structuredClone(intermediaryPreparation) } : {}) }),
       async close() { signal.removeEventListener("abort", abort); return close(); },
     };
-  } catch (error) { await close(); throw error instanceof Error && error.message === "STAGEHAND_GUARDED_SOURCE_REJECTED" ? error : reject(); }
+  } catch (error) {
+    try { deps.onStartupFailure?.(error instanceof Error && error.name === "TimeoutError" ? "TIMEOUT"
+      : error instanceof Error && /Target page, context or browser has been closed/u.test(error.message) ? "CLOSED" : "OTHER", cdpFailure()); }
+    catch { /* A diagnostic observer cannot skip owned browser cleanup. */ }
+    await close(); throw error instanceof Error && error.message === "STAGEHAND_GUARDED_SOURCE_REJECTED" ? error : reject();
+  }
 }

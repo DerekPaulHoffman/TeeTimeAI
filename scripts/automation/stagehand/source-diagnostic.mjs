@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { publicEvidenceUrl } from './public-evidence.mjs';
 import { discoveryTurnErrorCategories } from '../course-discovery-diagnostics.mjs';
+import { guardedHostStartupStages, guardedHostStartupFailures } from './guarded-host-startup.mjs';
 
 export const SOURCE_DIAGNOSTIC_MAX_BYTES = 4096;
 export const sourceGuardReasons=['TARGET_MISSING','HIDDEN','CREDENTIAL_CONTROL','PRIVATE_FIELD','TRANSACTION_TEXT','SLOT_TIME','REPEATED_UNCHANGED_NAVIGATION','UNSUPPORTED_PLACEHOLDER_ACTION'];
@@ -57,6 +58,7 @@ export const sourcePhases = ['GUARDED_HOST','SDK_CONNECT','MODEL_CLIENT','SDK_IN
 const startupStages = ['SDK_CONNECT','MODEL_CLIENT','SDK_INITIALIZE','SDK_TARGETS'];
 const transportPhases = ['catalog','spawn','initialize','account/read','thread/start','turn/start','turn/completed','generate','model','event','channel','stdin','close','UNKNOWN'];
 export const sourceTransportCodes = [
+  'DISCOVERY_PROCESS_TIMEOUT','DISCOVERY_PROCESS_FAILED','DISCOVERY_PROCESS_CLOSED','DISCOVERY_PROCESS_INPUT_FAILED',
   'STAGEHAND_NATIVE_HOST_DEADLINE','STAGEHAND_NATIVE_HOST_SCOPE_INVALID','STAGEHAND_NATIVE_HOST_INVALID','STAGEHAND_NATIVE_HOST_FAILED',
   'STAGEHAND_GUARDED_SOURCE_REJECTED','OWNED_STAGEHAND_CDP_UNAVAILABLE','OWNED_PUBLIC_CDP_UNAVAILABLE','PROVIDER_COORDINATION_UNAVAILABLE',
   'STAGEHAND_GUARDED_BROWSER_REQUIRED','STAGEHAND_UNGUARDED_CONTEXT','STAGEHAND_GUARDED_TARGET_MISSING','STAGEHAND_VERSION_CHANGED',
@@ -222,6 +224,8 @@ export const sourceDiagnosticSchema = z.object({
   ownedCdpFailure:ownedCdpFailureSchema.optional(),
   nativeRouterFailure:nativeRouterFailureSchema.optional(),
   hostGuardFailure:hostGuardFailureSchema.optional(),
+  guardedHostStartupStage:z.enum(guardedHostStartupStages).optional(),
+  guardedHostStartupFailure:z.enum(guardedHostStartupFailures).optional(),
   frameWitnessFailure:z.enum(sourceFrameWitnessFailures).optional(),
   sourceStop:sourceStopSchema.optional(),
   sourceDocumentReadiness:sourceDocumentSchema.optional(),
@@ -295,10 +299,12 @@ export function sourceFailureDiagnostic({error,phase,report,startedAt,cleanup,mo
   // wrapper (not that original transport error) supplies a wrapper RPC fact.
   if(currentModel&&!code&&Number.isInteger(error?.cause?.code)&&error.cause.code>=-2147483648&&error.cause.code<=2147483647)value.sdkRpcCode=error.cause.code;
   if(value.transportCode&&value.errorClass==='SDK_ERROR')value.errorClass='STATIC_TRANSPORT';
-  const cdp=ownedCdpFailureSchema.safeParse(ownedCdpFailure);
+  const cdp=ownedCdpFailureSchema.safeParse(ownedCdpFailure??error?.guardedHostOwnedCdpFailure);
   if(cdp.success)value.ownedCdpFailure=cdp.data;
   const native=nativeRouterFailureSchema.safeParse(nativeRouterFailure);
   if(native.success)value.nativeRouterFailure=native.data;
   const host=projectHostGuardFailure(hostGuardFailure);if(host)value.hostGuardFailure=host;
+  if(guardedHostStartupStages.includes(error?.guardedHostStartupStage))value.guardedHostStartupStage=error.guardedHostStartupStage;
+  if(guardedHostStartupFailures.includes(error?.guardedHostStartupFailure))value.guardedHostStartupFailure=error.guardedHostStartupFailure;
   return projectSourceDiagnostic(value);
 }

@@ -343,6 +343,23 @@ failure, and it never changes a job's original clocks or authority.
 
 ## Acceptance receipt
 
+Guarded browser startup has a separate first-request allowance of at most 90
+seconds, narrowed by the original source deadline. Subsequent controller RPCs
+retain their 30-second limit. A local staggered reproduction observed Chrome
+finish initialization at 32.3 seconds after the former 30-second controller
+timeout had already rejected it. Chrome launch and extension installation each
+have a 30-second startup allowance; ordinary native CDP commands retain 15
+seconds. A separate public-page probe recorded an actual
+`Extensions.loadUnpacked` timeout at the former 15-second limit. Startup emits
+only closed stage and failure categories;
+failure evidence retains that label and known process errors without private
+CDP endpoints, job credentials, raw stderr or provider content. Neither this
+allowance nor a retry changes the immutable first pickup or alert deadline.
+Model shutdown first allows 250 milliseconds for a normal stdio EOF exit,
+then falls back to termination of only the owned process tree and waits at
+most three seconds for observed exit. It never infers successful cleanup from
+requesting termination or from a timeout.
+
 Before opening a new cohort, verify the production deployment and managed worker
 against the frozen source version, then verify the exact pilot owner, target keys
 and run identifier. Pilot selector changes require a fresh Git deployment so the

@@ -76,6 +76,13 @@ test('owned process close waits for actual exit and is idempotent', async () => 
   assert.equal(channel.close(), closing);
   const receipt = await closing; assert.ok(Date.now() - started >= 25); assert.equal(receipt.processExited, true);
 });
+
+test('a normal Windows stdio EOF exit avoids forced tree termination and still requires observed closure',async()=>{
+ const fixture=fakeProcess();let spawns=0;
+ fixture.child.stdin.once('finish',()=>setTimeout(()=>fixture.child.emit('close',0,null),20));
+ const channel=createOwnedModelProcess({executable:'fixture',args:[],spawnProcess:()=>{spawns++;assert.equal(spawns,1);return fixture.child;}});
+ const receipt=await channel.close();assert.equal(receipt.processExited,true);assert.equal(spawns,1);
+});
 test('POSIX termination signals only the owned process group through an injected primitive',async()=>{
  const f=fakeProcess(),signals=[];
  const channel=makeOwnedModelProcess({executable:'fixture',args:[],cwd:tmpdir(),environment:{},spawnProcess:f.spawnProcess,platform:'linux',killProcess:(pid,signal)=>{signals.push({pid,signal});queueMicrotask(()=>f.child.emit('close',0,null));}});

@@ -32,7 +32,8 @@ export type OwnedCdpSession = {
   detach(): Promise<void>;
 };
 const failure = () => new Error("OWNED_STAGEHAND_CDP_UNAVAILABLE");
-export async function connectOwnedSourceCdp(endpoint: string, signal: AbortSignal, onFailure: () => void = () => {}) {
+export async function connectOwnedSourceCdp(endpoint: string, signal: AbortSignal, onFailure: () => void = () => {},
+  startup: { extensionLoadTimeoutMs?: number } = {}) {
   if (!/^ws:\/\/127\.0\.0\.1:[1-9]\d{0,4}\/devtools\/browser\/[a-f0-9-]{20,80}$/u.test(endpoint) || signal.aborted) throw failure();
   const socket = new WebSocket(endpoint, { perMessageDeflate: false, maxPayload: 32_000_000, followRedirects: false, handshakeTimeout: 5000 });
   const pending = new Map<number, Pending>(), listeners = new Map<string, Set<Listener>>();
@@ -121,7 +122,9 @@ export async function connectOwnedSourceCdp(endpoint: string, signal: AbortSigna
     if (closed || signal.aborted || pending.size >= 256 || !/^[A-Za-z]+\.[A-Za-z]+$/u.test(method)) { if (!closed) remember("SEND", method); return Promise.reject(failure()); }
     const id = ++sequence;
     return new Promise<OwnedCdpEvent>((resolve, reject) => {
-      const timer = setTimeout(() => { remember("TIMEOUT", method); pending.delete(id); reject(failure()); }, 15_000);
+      const timeoutMs = !sessionId && method === "Extensions.loadUnpacked" && Number.isFinite(startup.extensionLoadTimeoutMs) && startup.extensionLoadTimeoutMs! > 0
+        ? Math.min(30_000, startup.extensionLoadTimeoutMs!) : 15_000;
+      const timer = setTimeout(() => { remember("TIMEOUT", method); pending.delete(id); reject(failure()); }, timeoutMs);
       pending.set(id, { method, sessionId, ...(cleanupDetach ? { cleanupDetach } : {}),
         ...(method === "Fetch.failRequest" && typeof params.requestId === "string" && params.requestId.length > 0 && params.requestId.length <= 1024
           ? { requestId: params.requestId } : {}), resolve, reject, timer });

@@ -1319,7 +1319,8 @@ async function terminateProcess(child, platform = process.platform) {
 }
 
 /** Fixed executable/arguments, bounded NDJSON, no shell, and no secret-bearing logs. */
-export function createDiscoveryProcess({ executable, args, cwd, environment, signal, timeoutMs = 30_000, spawnProcess = spawn, onMessage = () => {}, onFailure = () => {}, onStderr = () => {} }) {
+export function createDiscoveryProcess({ executable, args, cwd, environment, signal, timeoutMs = 30_000, startupTimeoutMs,
+  spawnProcess = spawn, onMessage = () => {}, onFailure = () => {}, onStderr = () => {} }) {
   const child = spawnProcess(executable, args, { cwd, env: environment, windowsHide: true, shell: false, detached: process.platform !== "win32", stdio: ["pipe", "pipe", "pipe"] });
   let nextId = 0;
   let ended = false;
@@ -1378,7 +1379,11 @@ export function createDiscoveryProcess({ executable, args, cwd, environment, sig
       if (ended) return Promise.reject(discoveryError("DISCOVERY_PROCESS_CLOSED"));
       const id = ++nextId;
       return new Promise((resolveRequest, reject) => {
-        const timer = setTimeout(() => { pending.delete(id); reject(discoveryError("DISCOVERY_PROCESS_TIMEOUT")); }, timeoutMs);
+        // Only the initial request may use a separate bounded launch allowance.
+        // Subsequent browser commands retain their existing operation timeout.
+        const requestTimeoutMs = id === 1 && Number.isFinite(startupTimeoutMs) && startupTimeoutMs > 0
+          ? Math.min(90_000, startupTimeoutMs) : timeoutMs;
+        const timer = setTimeout(() => { pending.delete(id); reject(discoveryError("DISCOVERY_PROCESS_TIMEOUT")); }, requestTimeoutMs);
         pending.set(id, { resolve: resolveRequest, reject, timer });
         send(typeof methodOrPayload === "string" ? { id, method: methodOrPayload, params } : { ...methodOrPayload, id });
       });

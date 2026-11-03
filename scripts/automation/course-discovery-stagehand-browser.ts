@@ -30,7 +30,10 @@ async function main() {
       !isSafeRecipeUrl(args[3]) || process.env.COURSE_DISCOVERY_BROWSER_TRANSPORT !== "NATIVE_CHROME") throw Error("STAGEHAND_NATIVE_HOST_FAILED");
   const deadlineAt = new Date(args[1]);
   const requestLease = remoteProviderLease();
-  const host = await createGuardedStagehandSourceBrowser({ deadlineAt, initialUrl: args[3], timeZone: args[5] }, { requestLease });
+  const host = await createGuardedStagehandSourceBrowser({ deadlineAt, initialUrl: args[3], timeZone: args[5] }, { requestLease,
+    onStartupStage: stage => { process.stdout.write(JSON.stringify({ method: "host/startup", params: { stage } }) + "\n"); },
+    onStartupFailure: (reason, ownedCdpFailure) => { process.stdout.write(JSON.stringify({ method: "host/startup-failure", params: { reason,
+      ...(ownedCdpFailure ? { ownedCdpFailure } : {}) } }) + "\n"); } });
   const reader = createInterface({ input: process.stdin, crlfDelay: Infinity });
   const stop = () => { reader.close(); void host.close(); };
   process.once("SIGTERM", stop); process.once("SIGINT", stop);

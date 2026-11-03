@@ -491,3 +491,12 @@ Its coordination and challenge API live only on localhost, with no production
 backend authority, recipe writes or emails. These stronger development checks
 still do not establish live persistence, received matching alerts or restart
 reuse; all those acceptance gates remain required.
+
+The next known-venue repair on `2e70be0` also failed 0/3 before its first model
+call. All three alerts were paused after preserving both automatic attempts,
+original deadlines and zero saved recipes, matches or matching deliveries.
+Startup-only probes reproduced an initial controller timeout while Chrome was
+still progressing: it became ready at 32.3 seconds, after the 30-second timeout.
+The bounded startup allowance and closed startup-stage diagnostics address that
+observed failure. Local concurrent checks and any later known-venue repair
+remain development evidence, not a new unseen-venue acceptance cohort.

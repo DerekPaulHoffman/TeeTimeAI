@@ -169,6 +169,13 @@ export function createOwnedModelProcess({ executable, args, cwd, environment, si
   const close = () => closing ??= (async () => {
     signal?.removeEventListener('abort', onAbort);
     failChannel(fail('LOCAL_MODEL_CLIENT_CLOSED')); fragments = []; fragmentBytes = 0; expected = undefined; child.stdin.end();
+    // A completed stdio server can exit from EOF without spawning taskkill.
+    // Keep the exact owned-tree fallback for an unresponsive server.
+    if (platform === 'win32' && !ended) {
+      let timer;
+      try { await Promise.race([exited, new Promise(done => { timer = setTimeout(done, 250); })]); }
+      finally { clearTimeout(timer); }
+    }
     if (!ended) {
       if (platform === 'win32' && child.pid) {
         // Only our exact owned process tree; never scan or kill other Codex work.
@@ -181,7 +188,7 @@ export function createOwnedModelProcess({ executable, args, cwd, environment, si
       } else { try { killProcess(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch {} } }
     }
     let timer;
-    try { await Promise.race([exited, new Promise(done => { timer = setTimeout(done, 2000); })]); }
+    try { await Promise.race([exited, new Promise(done => { timer = setTimeout(done, 3000); })]); }
     finally { clearTimeout(timer); }
     return { processExited: ended, ownedPid: child.pid ?? null };
   })();

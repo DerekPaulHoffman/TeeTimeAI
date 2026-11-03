@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { discoveryError } from "./course-discovery-client.mjs";
 import { createDiscoveryProcess, discoveryProcessEnvironment } from "./course-discovery-worker.mjs";
+import { guardedHostStartupStages, guardedHostStartupFailures } from "./stagehand/guarded-host-startup.mjs";
 
 /** Private guarded browser attachment. No caller may serialize this capability into model data. */
 export async function createStagehandGuardedBrowserHost({ cwd, initialUrl, timeZone, deadlineAt, helperEnvironment, signal,
@@ -11,10 +12,23 @@ export async function createStagehandGuardedBrowserHost({ cwd, initialUrl, timeZ
     throw discoveryError("STAGEHAND_NATIVE_HOST_SCOPE_INVALID");
   const remaining = Date.parse(deadlineAt) - Date.now();
   if (!(remaining > 0 && remaining <= 240000)) throw discoveryError("STAGEHAND_NATIVE_HOST_DEADLINE");
+  let guardedHostStartupStage = "SPAWN";
+  let guardedHostStartupFailure;
+  let guardedHostOwnedCdpFailure;
   const channel = processFactory({ executable: process.execPath,
     args: [join(cwd, "node_modules/tsx/dist/cli.mjs"), join(cwd, "scripts/automation/course-discovery-stagehand-browser.ts"),
       "--deadline", deadlineAt, "--official-url", initialUrl, "--time-zone", timeZone], cwd,
-    environment: { ...discoveryProcessEnvironment(), ...helperEnvironment }, signal, timeoutMs: Math.min(30000, remaining) });
+    environment: { ...discoveryProcessEnvironment(), ...helperEnvironment }, signal, timeoutMs: Math.min(30000, remaining),
+    startupTimeoutMs: Math.min(90000, remaining),
+    onMessage: message => {
+      if (message?.method === "host/startup" && guardedHostStartupStages.includes(message.params?.stage))
+        guardedHostStartupStage = message.params.stage;
+      if (message?.method === "host/startup-failure" && guardedHostStartupFailures.includes(message.params?.reason)) {
+        guardedHostStartupFailure = message.params.reason;
+        if (message.params.ownedCdpFailure && JSON.stringify(message.params.ownedCdpFailure).length <= 4096)
+          guardedHostOwnedCdpFailure = message.params.ownedCdpFailure;
+      }
+    } });
   let closing;
   const close = () => closing ??= (async () => {
     let receipt = { browserClosed: false, providerRequestsDrained: false };
@@ -46,5 +60,10 @@ export async function createStagehandGuardedBrowserHost({ cwd, initialUrl, timeZ
       snapshotFailures: async () => channel.request({ action: "diagnostic" }),
       close,
     };
-  } catch (error) { await close(); throw error; }
+  } catch (error) {
+    if (error && typeof error === "object") error.guardedHostStartupStage = guardedHostStartupStage;
+    if (error && typeof error === "object" && guardedHostStartupFailure) error.guardedHostStartupFailure = guardedHostStartupFailure;
+    if (error && typeof error === "object" && guardedHostOwnedCdpFailure) error.guardedHostOwnedCdpFailure = guardedHostOwnedCdpFailure;
+    await close(); throw error;
+  }
 }

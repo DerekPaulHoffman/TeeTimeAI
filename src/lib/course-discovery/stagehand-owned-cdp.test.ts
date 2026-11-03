@@ -14,6 +14,22 @@ vi.mock("ws", () => ({ default: FakeSocket }));
 const endpoint = "ws://127.0.0.1:12345/devtools/browser/" + "a".repeat(32);
 afterEach(() => vi.unstubAllGlobals());
 describe("owned CDP first-failure diagnostics", () => {
+  it("allows slow extension startup while ordinary commands retain their existing timeout", async () => {
+    const cdp = await connectOwnedSourceCdp(endpoint, new AbortController().signal, () => {}, { extensionLoadTimeoutMs: 30_000 });
+    vi.useFakeTimers();
+    try {
+      let settled = false;
+      const installed = cdp.root.send("Extensions.loadUnpacked").then(value => { settled = true; return value; });
+      await vi.advanceTimersByTimeAsync(16_000);
+      expect(settled).toBe(false);
+      FakeSocket.last.receive({ id: 1, result: { id: "owned-extension" } });
+      await expect(installed).resolves.toEqual({ id: "owned-extension" });
+      const ordinary = cdp.root.send("Runtime.enable");
+      const rejected = expect(ordinary).rejects.toThrow("OWNED_STAGEHAND_CDP_UNAVAILABLE");
+      await vi.advanceTimersByTimeAsync(15_000); await rejected;
+      expect(cdp.failureDiagnostic()).toMatchObject({ layer: "TIMEOUT", method: "Runtime.enable" });
+    } finally { cdp.close(); vi.useRealTimers(); }
+  });
   it("keeps a retired target cleanup rejection local while another guarded target remains usable", async () => {
     const cdp = await connectOwnedSourceCdp(endpoint, new AbortController().signal);
     const cleanup = cdp.session("retired").detach();
