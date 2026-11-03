@@ -44,6 +44,9 @@ export type DelegatedHop = TeeItUpDelegatedBookingProof["hops"][number];
 type Node = DefaultTreeAdapterMap["node"];
 type Element = DefaultTreeAdapterMap["element"];
 const clean = (value: string) => value.normalize("NFKC").replace(/\s+/gu, " ").trim();
+// These labels describe sections, never a competing physical venue. An exact
+// raw/rendered venue heading and full physical address remain mandatory.
+const publicSectionHeading = /^(?:events?|event central|upcoming events?|latest news|news and events|memberships?|membership options|golf outings?|golf lessons?|dining|contact us)$/u;
 const element = (node: Node): node is Element => "tagName" in node;
 const attr = (node: Element, name: string) => node.attrs.find(value => value.name === name)?.value;
 const fail = (): never => { throw new Error("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED"); };
@@ -111,16 +114,30 @@ export function delegatedCanonicalVenueWitness(source: OfficialIdentitySource, p
   const all = entries(page), expected = fullCourseName(source.venueName), address = teeItUpCompleteStreetAddress(source.venueAddress);
   if (!gate("canonicalAddressValid", Boolean(address && expected.replace(/\bgolf course$/u, "").trim().length >= 5))) return fail();
   const headings = all.filter(node => /^h[1-6]$/u.test(node.tagName)).map(node => fullCourseName(clean(text(node)).replace(/^Welcome to\s+/iu, "")));
-  if (!gate("rootRawVenue", headings.includes(expected) && !all.some(node => node.tagName === "h1" && fullCourseName(clean(text(node)).replace(/^Welcome to\s+/iu, "")) !== expected)) ||
+  if (!gate("rootRawVenue", headings.includes(expected) && !all.some(node => {
+    if (node.tagName !== "h1") return false;
+    const heading = fullCourseName(clean(text(node)).replace(/^Welcome to\s+/iu, ""));
+    return heading !== expected && !publicSectionHeading.test(heading);
+  })) ||
       !gate("rootRenderedVenue", page.visibleEvidence!.headings.some(value => fullCourseName(clean(value).replace(/^Welcome to\s+/iu, "")) === expected))) return fail();
-  const addresses = all.filter(node => ["address", "p", "div", "li", "td"].includes(node.tagName) && physicalContext(node) && clean(text(node)).length <= 500)
-    .map(node => teeItUpCompleteStreetAddress(clean(text(node)).replace(/^Address\s*:\s*/iu, ""))).filter(Boolean);
+  const printedAddress = (value: string) => {
+    const printed = clean(value).replace(/^Address\s*:\s*/iu, "");
+    const direct = teeItUpCompleteStreetAddress(printed);
+    if (direct) return direct;
+    // A printed business name on its own line may precede the address. Remove
+    // only that exact complete name field; retain every street/locality token.
+    const fields = printed.split(/\s*,\s*/u);
+    return fields.length >= 3 && fields.length <= 6 && fields.every(Boolean) && fullCourseName(fields[0]) === expected
+      ? teeItUpCompleteStreetAddress(fields.slice(1).join(", ")) : null;
+  };
+  const addresses = all.filter(node => (["address", "p", "div", "li", "td"].includes(node.tagName) || /^h[1-6]$/u.test(node.tagName)) && physicalContext(node) && clean(text(node)).length <= 500)
+    .map(node => printedAddress(text(node))).filter(Boolean);
   const canonical = JSON.stringify(address);
   // Preserve the existing official-home predicate: a public government page
   // may also display an unrelated agency footer address. Only the exact full
   // canonical physical address can corroborate this venue's identity.
   const rawAddress = addresses.some(value => JSON.stringify(value) === canonical);
-  const renderedAddress = page.visibleEvidence!.addressTexts.some(value => JSON.stringify(teeItUpCompleteStreetAddress(clean(value).replace(/^Address\s*:\s*/iu, ""))) === canonical);
+  const renderedAddress = page.visibleEvidence!.addressTexts.some(value => JSON.stringify(printedAddress(value)) === canonical);
   const pipeFooter = Boolean((!rawAddress || !renderedAddress) && address && brandedPipeFooterMatches(page, all, expected, address));
   if (!gate("rootRawAddress", rawAddress || pipeFooter) || !gate("rootRenderedAddress", renderedAddress || pipeFooter)) return fail();
   return delegatedWitnessHash({ venueName: expected, address });
@@ -165,7 +182,7 @@ export function delegatedBookingHop(page: OfficialIdentityPage, requestedNext?: 
 
 /** Physical directory matching uses the existing official-facility predicate.
  * Delegation does not excuse any street, ZIP, name or timezone discrepancy. */
-function matchesDelegatedLocality(source: OfficialIdentitySource, address: NonNullable<ReturnType<typeof completeUSAddress>>,
+function matchesDelegatedLocality(source: OfficialIdentitySource, address: { locality: string; region: string; postalCode: string },
   row: { name: string; address: string; timeZone: string }) {
   // A city/state/ZIP-only directory is corroborated by the full official
   // address and explicit native booking chain. Never ignore a published street.
@@ -178,14 +195,18 @@ export function bindDelegatedFacility(source: OfficialIdentitySource, chain: { r
   try {
   const rows = z.array(z.object({ id: z.number().int().min(1).max(2147483647), courseId: z.string().min(1).max(128), name: z.string().min(3).max(256),
     address: z.string().min(3).max(1024), timeZone: z.string().min(1).max(100), isSimulator: z.boolean().optional() })).min(1).max(100).safeParse(directory);
-  const address = source.venueAddress && completeUSAddress(source.venueAddress), alias = teeItUpBookAlias(source.bookingUrl);
+  const legacyAddress = source.venueAddress && completeUSAddress(source.venueAddress);
+  const fullAddress = source.venueAddress && teeItUpCompleteStreetAddress(source.venueAddress);
+  const address = legacyAddress || fullAddress, alias = teeItUpBookAlias(source.bookingUrl);
   diagnostic.gates.directoryValid = rows.success;
   diagnostic.gates.canonicalAddressValid = Boolean(address);
   diagnostic.gates.directoryIdsUnique = rows.success ? new Set(rows.data.map(row => row.id)).size === rows.data.length && new Set(rows.data.map(row => row.courseId)).size === rows.data.length : null;
   if (!rows.success || !address || !alias || !source.officialUrl || new Set(rows.data.map(row => row.id)).size !== rows.data.length ||
       new Set(rows.data.map(row => row.courseId)).size !== rows.data.length) return fail();
   const matching = rows.data.filter(row => row.isSimulator === false &&
-    (matchesOfficialFacility({ venueName: fullCourseName(source.venueName), alternateAddress: address }, source, row) || matchesDelegatedLocality(source, address, row)));
+    (Boolean(legacyAddress && matchesOfficialFacility({ venueName: fullCourseName(source.venueName), alternateAddress: legacyAddress }, source, row)) ||
+      Boolean(fullAddress && row.timeZone === source.timeZone && fullCourseName(row.name) === fullCourseName(source.venueName) &&
+        JSON.stringify(teeItUpCompleteStreetAddress(row.address)) === JSON.stringify(fullAddress)) || matchesDelegatedLocality(source, address, row)));
   diagnostic.gates.providerUniqueMatch = matching.length === 1;
   let physical;
   const physicalSource = chain.physicalContactSource ?? (chain.physicalContactProof ? physicalContactSourceData(chain.physicalContactProof) : undefined);

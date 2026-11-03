@@ -8,6 +8,7 @@ const domTests = [
   "src/components/site-observability.test.ts",
   "src/lib/auth/deferred-clerk.test.ts",
   "src/lib/course-discovery/membersports-public-tee-sheet.test.ts",
+  "src/lib/course-discovery/native-venue-heading.test.ts",
   "src/lib/course-discovery/mindbody-appointment-native-capture.test.ts",
   "src/lib/course-discovery/public-catalog-tile.test.ts",
   "src/lib/course-discovery/public-date-choice.test.ts",

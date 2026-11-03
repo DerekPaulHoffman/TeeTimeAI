@@ -30,6 +30,29 @@ function readers() {
 afterEach(() => vi.restoreAllMocks());
 
 describe("fresh native delegated TeeItUp source", () => {
+  it.each(["Event Central", "Upcoming Events", "Golf Outings"])("keeps an exact venue witness alongside the public %s section", section => {
+    const p = page(source.officialUrl, operator, true);
+    p.html = p.html.replace("</body>", `<section><h1>${section}</h1></section></body>`);
+    p.visibleEvidence!.headings.push(section);
+    expect(delegatedCanonicalVenueWitness(source, p)).toMatch(/^[a-f0-9]{64}$/u);
+    p.html = p.html.replace(section, "Other Golf Course");
+    expect(() => delegatedCanonicalVenueWitness(source, p)).toThrow("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
+  });
+  it.each(["raw", "rendered"])("requires the exact complete branded heading address in %s evidence", changed => {
+    const p = page(source.officialUrl, operator, true);
+    p.html = p.html.replace(`<address>${source.venueAddress}</address>`, `<footer><h5>${source.venueName}<br>10 Harbor Drive<br>Example, NY 12345</h5></footer>`);
+    p.visibleEvidence!.addressTexts = [`${source.venueName}, 10 Harbor Drive, Example, NY 12345`];
+    expect(delegatedCanonicalVenueWitness(source, p)).toMatch(/^[a-f0-9]{64}$/u);
+    if (changed === "raw") p.html = p.html.replace("10 Harbor Drive", "11 Harbor Drive");
+    else p.visibleEvidence!.addressTexts = [`${source.venueName}, 11 Harbor Drive, Example, NY 12345`];
+    expect(() => delegatedCanonicalVenueWitness(source, p)).toThrow("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
+  });
+  it.each(["Other Golf Course", "Harbor Golf Course Other Business"])("never strips a different branded address field: %s", brand => {
+    const p = page(source.officialUrl, operator, true);
+    p.html = p.html.replace(`<address>${source.venueAddress}</address>`, `<footer><h5>${brand}<br>10 Harbor Drive<br>Example, NY 12345</h5></footer>`);
+    p.visibleEvidence!.addressTexts = [`${brand}, 10 Harbor Drive, Example, NY 12345`];
+    expect(() => delegatedCanonicalVenueWitness(source, p)).toThrow("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
+  });
   it("keeps a pipe footer with another physical street incomplete after sharing the exact field parser", () => {
     const p = page(source.officialUrl, operator, true);
     const row = `${source.venueName} | 11 Harbor Drive Example, NY 12345 | 212-555-1234`;
@@ -69,6 +92,18 @@ describe("fresh native delegated TeeItUp source", () => {
     expect(delegatedCanonicalVenueWitness(scoped, make(printed))).toMatch(/^[a-f0-9]{64}$/u);
     for (const wrong of [printed.replace("N Harbor", "Harbor"), printed.replace("Suite 2", "Suite 3"), printed.replace("12345-6789", "12345")])
       expect(() => delegatedCanonicalVenueWitness(scoped, make(wrong))).toThrow("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
+  });
+  it("binds a canonical street with a postdirection without dropping it", () => {
+    const scoped = { ...source, venueAddress: "10 West Harbor Drive N, Example, NY 12345" };
+    const chain = { rootWitnessSha256: "a".repeat(64), hops: [{ pageUrl: source.officialUrl, nextUrl: source.bookingUrl, witnessSha256: "b".repeat(64) }] };
+    const row = { ...directory[0], address: "10 West Harbor Dr. North, Example, NY 12345, US" };
+    expect(bindDelegatedFacility(scoped, chain, [row])).toMatchObject({ facilityId: 71, canonicalAddress: scoped.venueAddress });
+    // A directory that publishes only locality is still bound by the exact
+    // official root and booking chain; a published conflicting street is not.
+    expect(bindDelegatedFacility(scoped, chain, [{ ...row, address: "Example, NY 12345" }])).toMatchObject({ facilityId: 71 });
+    for (const wrong of [row.address.replace("North", "South"), row.address.replace(" North", ""), row.address.replace("West Harbor", "East Harbor"),
+      row.address.replace("10 West", "11 West"), row.address.replace("Example", "Other"), row.address.replace("12345", "12346")])
+      expect(() => bindDelegatedFacility(scoped, chain, [{ ...row, address: wrong }])).toThrow("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
   });
   it.each(["otherBrand", "extraField", "extraAddressText", "invalidPhone", "number", "street", "direction", "unit", "locality", "region", "postal", "zip4", "country",
     "hidden", "form", "inert", "mailing", "corporate", "ambiguous", "differentPhone", "renderedMissing", "renderedChanged"])

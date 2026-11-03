@@ -1,4 +1,5 @@
 import { collectNativeOfficialPublicMetadata } from "./public-document-metadata";
+import { revealNativeVenueHeading, revealNativeVenueAddress } from "./native-venue-heading";
 import { isSafePublicSwiftCatalogRedirect } from "./public-bootstrap-read-url";
 import { isSwiftAnonymousPlaceholderRead } from "./swift-public-read-policy";
 import { observedPublicBookingIntermediary } from "./public-booking-intermediary";
@@ -1807,7 +1808,24 @@ export async function createCourseDiscoveryBrowserSession(input: {
       if (officialContactUrl && !verifiedTeeItUpContactParent(deps.officialContactParent!, input.venueOfficialUrl!, officialContactUrl))
         throw new Error("OFFICIAL_CONTACT_CHAIN_UNVERIFIED");
       lastOfficialIdentityReadDiagnostic = undefined;
-      const current = await snapshot(false, true);
+      let current = await snapshot(false, true);
+      const headingName = (value: string) => value.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim()
+        .replace(/^welcome to\s+/u, "").replace(/\bgolf (?:club|course)$/u, "golf course");
+      if (input.venueName && deps.browserTransport === "NATIVE_CHROME" && current.navigationStatus === 200 &&
+          !terminalFailure && !closed && !current.accessRequirementObserved && !current.nativeFirstFatal &&
+          officialIdentityPage?.officialDocumentProof.kind === "VERIFIED_OFFICIAL_DOCUMENT" &&
+          officialIdentityPage.url === current.url && page.url() === current.url &&
+          !officialIdentityPage.visibleEvidence?.headings.some(value => headingName(value) === headingName(input.venueName!))) {
+        await revealNativeVenueHeading(page, input.venueName, input.deadlineAt);
+        current = await snapshot(false, true);
+      }
+      if (input.venueAddress && deps.browserTransport === "NATIVE_CHROME" && current.navigationStatus === 200 &&
+          !terminalFailure && !closed && !current.accessRequirementObserved && !current.nativeFirstFatal &&
+          officialIdentityPage?.officialDocumentProof.kind === "VERIFIED_OFFICIAL_DOCUMENT" &&
+          officialIdentityPage.url === current.url && page.url() === current.url) {
+        await revealNativeVenueAddress(page, input.venueAddress, input.deadlineAt);
+        current = await snapshot(false, true);
+      }
       // Fresh raw/current-document and rendered capture own this witness.
       // Unrelated admitted resources may still be pending; network idle is
       // neither identity proof nor a prerequisite for this one-page read.
