@@ -539,7 +539,14 @@ export async function claimSimulatorSupportAssignment(input: { assignmentRef: st
     if (source.incident.updatedAt.toISOString() !== row.audit.target.updatedAt || (source.incident.retryAt && source.incident.retryAt > now)) throw new Error("Simulator incident changed or is not due.");
     const latest = await tx.courseProbe.findFirst({ where: { offeringId: source.offering.id, teeSearchId: { in: row.audit.target.searchRefs.map(ref => ref.id) } }, orderBy: [{ observedAt: "desc" }, { id: "desc" }] });
     const summary = latest?.rawSummary as Record<string, unknown> | null;
-    if (!row.audit.target.engineeringAuthority && (!latest || !["NEEDS_ADAPTER", "FETCH_FAILED"].includes(latest.outcome) || summary?.mode !== "SIMULATOR" || summary.sourceFingerprint !== source.fingerprint)) throw new Error("Simulator claim requires a current offering-scoped failure probe.");
+    if (!row.audit.target.engineeringAuthority && (!latest || !["NEEDS_ADAPTER", "FETCH_FAILED"].includes(latest.outcome) || summary?.mode !== "SIMULATOR" || summary.sourceFingerprint !== source.fingerprint)) {
+      // Learning failures have their own durable evidence. Require the server's
+      // current source/demand handoff to this exact incident; a model checkpoint
+      // or an old failed job cannot authorize an offering claim.
+      const { currentDiscoveryEngineeringHandoff } = await import("@/lib/course-discovery/engineering-repair");
+      const handoff = await currentDiscoveryEngineeringHandoff(tx, { courseId: source.offering.courseId, offeringId: source.offering.id }, now);
+      if (!handoff || handoff.receipt.incidentId !== source.incident.id) throw new Error("Simulator claim requires a current offering-scoped failure probe.");
+    }
     const live = await dispatch.listLiveCourseSupportDispatchReservations(tx);
     const batches = await tx.courseSupportBatch.findMany({ where: { status: { in: ["CLAIMED", "IMPLEMENTING", "VERIFYING"] } }, select: { id: true, incidents: { select: { courseId: true } } }, take: 16 });
     const occupied = new Set([...live.map(entry => entry.audit.target.courseId), ...batches.flatMap(batch => batch.incidents.length ? batch.incidents.map(entry => entry.courseId) : [batch.id])]);

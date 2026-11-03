@@ -4,6 +4,8 @@ import { PrismaClient } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { hashAccessRecipe, parseAccessRecipe } from "./recipe";
+import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
+import { createSimulatorSupportIntentDigest, SIMULATOR_SUPPORT_SOURCE_SELECT } from "@/lib/automation/simulator-support-policy";
 let client: PrismaClient;
 vi.mock("@/lib/prisma", () => ({ get prisma() { return client; } }));
 const ids = new Set<string>();
@@ -12,6 +14,7 @@ vi.mock("./config", () => ({ isCourseDiscoveryEnabled: () => true, isGeneralDisc
 const url = process.env.COURSE_DISCOVERY_TEST_DATABASE_URL;
 let service: typeof import("./service"), engineering: typeof import("./engineering-repair");
 const users: string[] = [], courses: string[] = [];
+const runs: string[] = [];
 describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
   beforeAll(async () => {
     const parsed = new URL(url!);
@@ -22,6 +25,7 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
   });
   afterEach(async () => {
     if (!client) return;
+    await client.automationRun.deleteMany({ where: { id: { in: runs } } }); runs.length = 0;
     await client.course.deleteMany({ where: { id: { in: courses } } });
     await client.user.deleteMany({ where: { id: { in: users } } });
     courses.length = 0; users.length = 0; ids.clear();
@@ -89,6 +93,59 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     expect(await client.simulatorSupportIncident.findUnique({ where: { offeringId: f.offering!.id } }))
       .toMatchObject({ status: "AUTO_INVESTIGATING", reason: "DISCOVERY_CODE_REPAIR" });
     expect(await client.courseSupportIncident.count({ where: { courseId: f.course.id } })).toBe(0);
+  });
+  async function boundSimulatorHandoff() {
+    const f = await failed(true);
+    expect((await engineering.reconcileDiscoveryEngineeringHandoffs()).queued).toBe(1);
+    const incident = await client.simulatorSupportIncident.findUniqueOrThrow({ where: { offeringId: f.offering!.id } });
+    const fingerprint = getSimulatorOfferingSourceFingerprint(f.offering!), now = new Date(), baseSha = "a".repeat(40);
+    const demand = await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id }, select: SIMULATOR_SUPPORT_SOURCE_SELECT });
+    const assignmentRef = `course-assignment-${randomUUID()}`, child = `handoff-child-${randomUUID()}`;
+    const run = await client.automationRun.create({ data: { kind: "OTHER", status: "RUNNING", promptVersion: "course-support-course-dispatch-v1",
+      ownerThreadId: "handoff-parent", audit: { schemaVersion: 1, tickRef: "fixture", assignmentRef, state: "BOUND", ownerThreadId: "handoff-parent",
+        childThreadId: child, baseSha, reservedAt: now.toISOString(), launchStartedAt: now.toISOString(), boundAt: now.toISOString(),
+        expiresAt: new Date(now.getTime() + 600_000).toISOString(), target: { mode: "SIMULATOR", offeringId: f.offering!.id,
+          offeringSourceFingerprint: fingerprint, incidentId: incident.id, courseId: f.course.id, cycle: 1, providerFamilyKey: "SIMULATOR_SOURCE_PENDING",
+          failureFingerprint: fingerprint, updatedAt: incident.updatedAt.toISOString(), trafficClass: "REAL", searchRefs: [{ id: f.search.id,
+            scheduleVersion: f.search.scheduleVersion, alertGeneration: f.search.alertGeneration, intentDigest: createSimulatorSupportIntentDigest(demand) }] } } } });
+    runs.push(run.id);
+    const lane = await import("@/lib/automation/simulator-support-ownership");
+    return { ...f, incident, run, claim: () => lane.claimSimulatorSupportAssignment({ assignmentRef, ownerThreadId: child, baseSha,
+      branch: "automation/course-support-discovery-claim" }) };
+  }
+  it("claims the exact simulator learning handoff without inventing a legacy failure probe", async () => {
+    const f = await boundSimulatorHandoff();
+    expect(await client.courseProbe.count({ where: { offeringId: f.offering!.id } })).toBe(0);
+    const claimed = await f.claim(); expect(claimed.acquired).toBe(true);
+    const run = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    expect(run.audit).toMatchObject({ state: "CONSUMED", simulatorClaim: { phase: "CLAIMED" } });
+    const job = await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } });
+    expect(job).toMatchObject({ status: "FAILED", attempts: f.job.attempts, firstPickedUpAt: f.job.firstPickedUpAt,
+      deadlineAt: f.job.deadlineAt, completedAt: f.job.completedAt });
+  });
+  it("preserves claims authorized by a current legacy offering failure", async () => {
+    const f = await boundSimulatorHandoff();
+    await client.courseDiscoveryJob.update({ where: { id: f.job.id }, data: { result: { unavailable: true } } });
+    await client.courseProbe.create({ data: { courseId: f.course.id, offeringId: f.offering!.id, teeSearchId: f.search.id,
+      outcome: "NEEDS_ADAPTER", rawSummary: { mode: "SIMULATOR", sourceFingerprint: getSimulatorOfferingSourceFingerprint(f.offering!) } } });
+    expect((await f.claim()).acquired).toBe(true);
+  });
+  it.each(["checkpoint-only", "wrong-incident", "recovered", "paused", "edited", "source-changed"])("rejects a %s simulator learning handoff at claim", async reason => {
+    const f = await boundSimulatorHandoff();
+    const stored = await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } });
+    const receipt = engineering.discoveryEngineeringReceipt(stored.result)!;
+    if (reason === "checkpoint-only") await client.courseDiscoveryJob.update({ where: { id: f.job.id }, data: {
+      result: { unavailable: true }, checkpoint: { engineeringHandoff: receipt } } });
+    if (reason === "wrong-incident") await client.courseDiscoveryJob.update({ where: { id: f.job.id }, data: {
+      result: { engineeringHandoff: { ...receipt, incidentId: "another-incident" } } } });
+    if (reason === "recovered") await client.courseProbe.create({ data: { courseId: f.course.id, offeringId: f.offering!.id,
+      teeSearchId: f.search.id, outcome: "MATCH_FOUND", observedAt: new Date(stored.completedAt!.getTime() + 1) } });
+    if (reason === "paused" || reason === "edited") await client.teeSearch.update({ where: { id: f.search.id }, data:
+      reason === "paused" ? { status: "PAUSED" } : { alertGeneration: { increment: 1 } } });
+    if (reason === "source-changed") await client.courseOffering.update({ where: { id: f.offering!.id }, data: { bookingUrl: "https://changed.example.com/book" } });
+    await expect(f.claim()).rejects.toThrow();
+    const run = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    expect(run.audit).toMatchObject({ state: "BOUND" });
   });
   it("transfers a failing saved method to coding and restores learner ownership after recovery", async () => {
     const f = await failed(false, true);
