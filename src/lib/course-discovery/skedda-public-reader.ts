@@ -37,6 +37,7 @@ export async function readSkeddaPublicCalendar(source:SkeddaSource,input:AccessE
   const proxy=await createNativePublicBrowserProxy({signal,maxBytes:32000000,maxConnections:250});
   let browser:Browser|undefined;
   let phase="LAUNCH",requests=0;
+  let schemaIssues:Array<{code:string;path:string[];keys?:string[]}>|undefined;
   const denied:Array<{role:string;path:string;type:string;reason:string}>=[];
   try{
     browser=deps.launchBrowser?await deps.launchBrowser(proxy.server):await launchPublicReadBrowser({headless:process.platform!=="win32",
@@ -71,13 +72,20 @@ export async function readSkeddaPublicCalendar(source:SkeddaSource,input:AccessE
       if(!main||main.status()!==200||main.request().redirectedFrom()||page.url()!==dated.href)throw Error("SKEDDA_DOCUMENT_UNVERIFIED");
       phase="SPACES";const table=page.getByRole("table",{name:"Spaces",exact:true});await table.waitFor({timeout:Math.min(30000,remaining)});
       await page.getByRole("table",{name:"Day view schedule",exact:true}).waitFor({timeout:Math.min(30000,remaining)});
-      phase="DATA";const visibleResources=await table.locator("th").allTextContents(),result=await captured;signal.throwIfAborted();
+      phase="DATA";const visibleResources=await table.locator("th").evaluateAll(nodes=>nodes.filter(node=>{
+        const rect=node.getBoundingClientRect();if(rect.width<=0||rect.height<=0||node.closest('[hidden],[inert],[aria-hidden="true"]'))return false;
+        for(let parent:Element|null=node;parent;parent=parent.parentElement){const style=getComputedStyle(parent);if(style.display==="none"||style.visibility!=="visible"||Number(style.opacity)===0)return false;}
+        return true;
+      }).map(node=>(node as HTMLElement).innerText)),result=await captured;signal.throwIfAborted();
       if(!result.value||page.url()!==dated.href)throw Error("SKEDDA_PUBLIC_READ_FAILED");
       const web=skeddaWebSchema.safeParse(result.value[0].data),schedule=skeddaCalendarSchema.safeParse(result.value[1].data);
-      if(!web.success||!schedule.success)throw Error("SKEDDA_PUBLIC_SCHEMA_UNVERIFIED");
+      if(!web.success||!schedule.success){const errors=[...(!web.success?web.error.issues:[]),...(!schedule.success?schedule.error.issues:[])];
+        const field=(v:unknown)=>typeof v==="string"&&/^[A-Za-z0-9_-]{1,60}$/u.test(v)?v:"field";
+        schemaIssues=errors.slice(0,12).map(e=>({code:e.code,path:e.path.slice(0,8).map(field),...(e.code==="unrecognized_keys"?{keys:e.keys.slice(0,20).map(field)}:{})}));
+        throw Error("SKEDDA_PUBLIC_SCHEMA_UNVERIFIED");}
       return {web:web.data,calendar:schedule.data,requestUrl:result.value[1].url,visibleResources:visibleResources.map(v=>v.replace(/\s+/gu," ").trim()).filter(Boolean)};
     }finally{signal.removeEventListener("abort",abort);}
   }catch(error){const code=error instanceof Error&&/^[A-Z_]+$/u.test(error.message)?error.message:"SKEDDA_PUBLIC_READ_FAILED";
-    throw Object.assign(new Error(code),{details:{phase,requests,denied}});
+    throw Object.assign(new Error(code),{details:{phase,requests,denied,...(schemaIssues?{schemaIssues}:{})}});
   }finally{stop.abort();queue.dispose();await browser?.close().catch(()=>{});await proxy.close();}
 }

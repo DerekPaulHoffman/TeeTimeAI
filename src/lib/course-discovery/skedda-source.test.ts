@@ -18,7 +18,7 @@ function rawWeb(){return{venue:[{id:"42",name:"Harbor Golf",subdomain:"harbor",s
     {tagIds:null,spaceIds:null,value:1,predicate:2,mode:1,daysBitmask:127,endTotalMinutes:1440}]},quotaRules:{rules:[]},
   spacePresentation:{visibility:{"2":[]},capacities:[{capacity:4,spaceIds:[1]}]}}],
   assets:[{id:"1",name:"Golf Simulator",venue:"42",parents:[],children:[]},{id:"2",name:"Office",venue:"42",parents:[],children:[]}]};}
-function rawCalendar(){return{bookings:[] as Array<Record<string,unknown>>,bookingslist:{start:"2030-01-01T00:00:00",end:"2030-01-05T23:59:59.999",bookings:[] as string[],idx:{} as Record<string,number[]>}};}
+function rawCalendar(){return{bookings:[] as Array<Record<string,unknown>>,visits:[],venueusers:[],bookingslist:{id:"public-range",myEventAttendances:null,userActivities:null,start:"2030-01-01T00:00:00",end:"2030-01-05T23:59:59.999",bookings:[] as string[],idx:{} as Record<string,number[]>}};}
 function fixture(){const web=skeddaWebSchema.parse(rawWeb()),calendar=skeddaCalendarSchema.parse(rawCalendar()),metadata=deriveSkeddaMetadata(source,web,["Golf Simulator"],input),
   requestUrl="https://harbor.skedda.com/bookingslists?start=2030-01-01T00%3A00%3A00&end=2030-01-05T23%3A59%3A59.999";return{web,calendar,metadata,requestUrl};}
 
@@ -68,6 +68,15 @@ describe("anonymous public Skedda simulator evidence",()=>{
       expect(()=>validateSkeddaCalendar(f.web,c,url,input.date)).toThrow();
     }
   });
+  it("rejects pagination or new calendar envelope semantics instead of treating a partial page as empty",()=>{
+    const c=rawCalendar();expect(skeddaCalendarSchema.safeParse({...c,nextPage:"cursor"}).success).toBe(false);
+    expect(skeddaCalendarSchema.safeParse({...c,bookingslist:{...c.bookingslist,nextCursor:"cursor"}}).success).toBe(false);
+  });
+  it("requires every public simulator resource in the rendered scope",()=>{
+    const f=fixture();f.web.assets.push({...f.web.assets[0],id:"3",name:"Golf Simulator 2"});
+    expect(()=>deriveSkeddaMetadata(source,f.web,["Golf Simulator"],input)).toThrow("SKEDDA_RESOURCE_COVERAGE_UNVERIFIED");
+    expect(deriveSkeddaMetadata(source,f.web,["Golf Simulator","Golf Simulator 2"],input).resourceIds).toEqual(["1","3"]);
+  });
   it("returns only complete ordinary-public one-hour openings in the saved window",()=>{
     const f=fixture(),slots=extractSkeddaSlots(source,f.metadata,f.web,f.calendar,input,now,toInstant);
     expect(slots).toHaveLength(1);expect(slots[0]).toMatchObject({startsAt:"2030-01-03T22:00:00.000Z",endsAt:"2030-01-03T23:00:00.000Z",availableSpots:1,capacity:4,resourceId:"1"});
@@ -109,5 +118,8 @@ describe("anonymous public Skedda simulator evidence",()=>{
     const w=rawWeb();Object.assign(w.venue[0],{apiKey:"PRIVATE_TOKEN",contactEmail:"PRIVATE_EMAIL"});
     expect(JSON.stringify(skeddaWebSchema.parse(w))).not.toMatch(/PRIVATE|apiKey|contactEmail/u);
     expect(()=>skeddaMetadataSchema.parse({...fixture().metadata,token:"PRIVATE"})).toThrow();
+    const c=rawCalendar(),personal={...c,venueusers:[{email:"PRIVATE_EMAIL"}],bookingslist:{...c.bookingslist,userActivities:{private:"PRIVATE_ACTIVITY"}}};
+    expect(JSON.stringify(skeddaCalendarSchema.parse(personal))).not.toMatch(/PRIVATE_EMAIL|PRIVATE_ACTIVITY/u);
+    expect(skeddaCalendarSchema.parse({...c,venueusers:null}).venueusers).toEqual([]);
   });
 });

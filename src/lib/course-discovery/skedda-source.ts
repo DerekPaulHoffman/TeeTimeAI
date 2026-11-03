@@ -44,7 +44,12 @@ const wall = z.string().regex(/^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5
 export const skeddaCalendarSchema = z.object({ bookings: z.array(z.object({ id, start: wall, end: wall,
   endOfLastOccurrence: wall, recurrenceRule: z.null(), spaces: z.array(id).min(1).max(100), venue: id,
   type: z.number().int().min(0).max(8), availabilityStatus: z.union([z.literal(1),z.null()]) })).max(5000),
-  bookingslist: z.object({ start: wall, end: wall, bookings: z.array(id).max(5000), idx: z.record(z.string().regex(/^\d{4}-\d{2}-\d{2}$/u),z.array(numericId).max(5000)) }) });
+  // Personal sidecars vary with anonymous visibility. They are never inputs
+  // to availability and are discarded before leaving the capture boundary.
+  venueusers: z.unknown().transform(()=>[]),
+  visits: z.array(z.unknown()).max(1000).transform(()=>[]),
+  bookingslist: z.object({ id:z.string().min(1).max(200),myEventAttendances:z.null(),userActivities:z.unknown().transform(()=>null),start: wall, end: wall, bookings: z.array(id).max(5000),
+    idx: z.record(z.string().regex(/^\d{4}-\d{2}-\d{2}$/u),z.array(numericId).max(5000)) }).strict() }).strict();
 export type SkeddaCalendar = z.infer<typeof skeddaCalendarSchema>;
 export const skeddaMetadataSchema = z.object({ family: z.literal("SKEDDA"), tenant: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/u),
   venueId: id, resourceIds: z.array(id).min(1).max(20).refine(v => new Set(v).size === v.length),
@@ -73,10 +78,13 @@ export function deriveSkeddaMetadata(source:SkeddaSource,web:SkeddaWeb,visibleRe
   // every other component and never discard a unit already in canonical data.
   if(!canonical||!provider||JSON.stringify(canonical.unit?canonical:{...canonical,unit:provider.unit,unitType:provider.unitType})!==JSON.stringify(provider))return fail("ADAPTER_IDENTITY_MISMATCH");
   if(!visibleResources.length||visibleResources.length>100||new Set(visibleResources).size!==visibleResources.length||new Set(web.assets.map(a=>a.id)).size!==web.assets.length||web.assets.some(a=>a.venue!==v.id))return fail();
-  const resources=visibleResources.filter(n=>/^(?:golf\s+)?simulator(?:\s+(?:bay\s*)?#?\d+)?$/iu.test(n)).map(n=>{
+  const rentalName=(n:string)=>/^(?:golf\s+)?simulator(?:\s+(?:bay\s*)?#?\d+)?$/iu.test(n);
+  const resources=visibleResources.filter(rentalName).map(n=>{
     const rows=web.assets.filter(a=>a.name===n);if(rows.length!==1||rows[0].parents.length||rows[0].children.length||Object.hasOwn(v.spacePresentation.visibility,rows[0].id))return fail("ADAPTER_RENTAL_SCOPE_UNVERIFIED");return rows[0];
   });
   if(!resources.length||resources.length>20)return fail("ADAPTER_RENTAL_SCOPE_UNVERIFIED");
+  const publicRentals=web.assets.filter(a=>rentalName(a.name)&&!Object.hasOwn(v.spacePresentation.visibility,a.id)).map(a=>a.id).sort();
+  if(JSON.stringify(resources.map(a=>a.id).sort())!==JSON.stringify(publicRentals))return fail("SKEDDA_RESOURCE_COVERAGE_UNVERIFIED");
   // Inspection and replay pass different structural source objects. Hash the
   // canonical contract explicitly, never caller key order or extra fields.
   const identity={officialUrl:source.officialUrl,bookingUrl:source.bookingUrl,venueName:source.venueName,venueAddress:source.venueAddress,timeZone:source.timeZone};
