@@ -14,7 +14,9 @@ describe.skipIf(!executablePath)("guarded official-to-provider iframe source cha
     const fetcher = vi.fn(async value => new Response(String(value) === official
       ? `<h1>Official golf</h1><a href="${provider}">Book tee times</a>` : String(value) === widget ? "<h1>Public widget</h1>" : providerHtml(wrong),
     { headers: { "content-type": "text/html" } })) as unknown as typeof fetch;
-    const session = await createCourseDiscoveryBrowserSession({ initialUrls: [official, provider], deadlineAt: new Date(Date.now() + 25_000), ...identity }, {
+    // This identity/link fixture includes Chromium startup in a parallel suite.
+    // It does not test deadline expiry; leave enough time to reach its assertions.
+    const session = await createCourseDiscoveryBrowserSession({ initialUrls: [official, provider], deadlineAt: new Date(Date.now() + 60_000), ...identity }, {
       fetch: fetcher, launchBrowser: () => chromium.launch({ executablePath, headless: true }),
       requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
     });
@@ -32,7 +34,7 @@ describe.skipIf(!executablePath)("guarded official-to-provider iframe source cha
       const standalone = await session.execute({ id: 3, action: "open", url: widget });
       expect(standalone.text).toContain("Public widget"); expect(fetcher).toHaveBeenCalledTimes(3);
     } finally { await session.close(); }
-  }, 30_000);
+  }, 75_000);
   it.each([false, true])("does not make a provider URL a parent from initial admission or a wrong identity (%s)", async wrong => {
     const { session, fetcher } = await fixture(wrong);
     try {
@@ -42,5 +44,5 @@ describe.skipIf(!executablePath)("guarded official-to-provider iframe source cha
       await expect(session.execute({ id: 3, action: "open", url: widget })).rejects.toThrow("UNOBSERVED_NAVIGATION");
       expect(fetcher.mock.calls.map(args => String(args[0]))).not.toContain(widget);
     } finally { await session.close(); }
-  }, 30_000);
+  }, 75_000);
 });
