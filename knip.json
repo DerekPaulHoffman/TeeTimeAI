@@ -7,6 +7,7 @@
     "scripts/automation/course-discovery-browser.ts",
     "scripts/automation/validate-course-recipe.ts",
     "scripts/automation/course-discovery-diagnostics.d.mts",
+    "scripts/automation/stagehand/public-source-gateway.d.mts",
     "scripts/automation/course-discovery-stagehand-browser.ts",
     "scripts/automation/inspect-course-support-acceptance-ledger.ts",
     "scripts/ci/preview-smoke-global-setup.ts",
