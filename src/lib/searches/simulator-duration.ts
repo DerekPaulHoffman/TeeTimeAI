@@ -1,6 +1,8 @@
 /** Null is an unrestricted session length; undefined remains a legacy default. */
 export function simulatorDurationMatches(requested: number | null | undefined, actual: number) {
-  return Number.isInteger(actual) && actual >= 30 && actual <= 480 && actual % 15 === 0 &&
+  // Published rentals can include turnover time, such as 50 or 55 minutes.
+  // Preserve the actual complete interval rather than rounding it to an hour.
+  return Number.isInteger(actual) && actual >= 30 && actual <= 480 &&
     (requested == null || requested === actual);
 }
 

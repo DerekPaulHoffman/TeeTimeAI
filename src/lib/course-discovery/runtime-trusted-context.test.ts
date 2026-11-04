@@ -22,6 +22,43 @@ beforeEach(() => {
   mocks.db.teeSearch.findUnique.mockResolvedValue({ id: "search1", status: "ACTIVE", alertGeneration: 1, scheduleVersion: 2, date: new Date("2030-01-02"), endTime: "17:00", userTimeZone: "UTC", preferences: [{ courseId: "course1" }] });
 });
 describe("current durable phone context on warm claim", () => {
+  it.each(["valid", "unlisted room", "wrong room identity", "wrong product", "partial interval"])("accepts only verified full rental room evidence on normal execution: %s", async change => {
+    const bookingUrl = "https://first-room.youcanbook.me/", now = new Date();
+    const rooms = ["12345678-1234-4234-8234-123456789abc", "12345678-1234-4234-8234-123456789abd"].map((profileId, index) => ({
+      profileId, label: `Room ${index + 1}`, officialPageUrl: `https://golf.example.com/room-${index + 1}/`,
+      bookingUrl: index ? "https://second-room.youcanbook.me/" : bookingUrl, durationMinutes: 50, contextSha256: "a".repeat(64),
+    }));
+    const payload = { engine: "EXISTING_ADAPTER", source: { bookingUrl }, adapter: { family: "YOUCANBOOKME",
+      officialEntryUrl: "https://golf.example.com/rooms/", catalogSha256: "b".repeat(64), rooms } };
+    context.target = { courseId: "course1", offeringId: "offering1", kind: "SIMULATOR" };
+    context.input = { ...(context.input as object), durationMinutes: 50 };
+    const row = { id: "job1", purpose: "RECIPE_CHECK", status: "LEASED", leaseToken: "owned", sourceContext: context,
+      scheduleVersion: 2, claimedAt: new Date(now.getTime() - 1000), leaseExpiresAt: new Date(now.getTime() + 60000), jobExpiresAt: new Date(now.getTime() + 60000) };
+    mocks.db.$transaction.mockImplementation(async callback => callback(mocks.db)); mocks.db.$queryRaw.mockResolvedValue([]);
+    mocks.db.localReaderJob.findUnique.mockResolvedValue(row);
+    mocks.db.courseAccessRecipe.findUniqueOrThrow.mockResolvedValue({ payload });
+    mocks.db.courseOffering.findUnique.mockResolvedValue({ activeAccessRecipeId: "recipe1" });
+    mocks.db.teeSearch.findUnique.mockResolvedValue({ id: "search1", status: "ACTIVE", alertGeneration: 1, scheduleVersion: 2,
+      preferences: [{ courseId: "course1", offeringId: "offering1" }] });
+    const slots = rooms.map(room => ({ sourceId: `ycbm:${room.profileId}:${Date.parse("2030-01-02T17:00:00Z")}:50`,
+      startsAt: "2030-01-02T17:00:00Z", endsAt: "2030-01-02T17:50:00Z", bookingUrl: room.bookingUrl,
+      resourceId: room.profileId, productId: `ycbm:${room.profileId}:50`, availableSpots: 1, capacity: null }));
+    if (change === "unlisted room") slots[1].bookingUrl = "https://unlisted.youcanbook.me/";
+    if (change === "wrong room identity") slots[1].resourceId = rooms[0].profileId;
+    if (change === "wrong product") slots[1].productId = `ycbm:${rooms[1].profileId}:60`;
+    if (change === "partial interval") slots[1].endsAt = "2030-01-02T17:45:00Z";
+    const result = { status: "AVAILABLE", complete: true, observedAt: now.toISOString(), sourceUrl: bookingUrl, slots,
+      evidence: { recipeHash: "a".repeat(64), venueVerified: true, dateVerified: true, capacityVerified: true, durationVerified: true, completeVerified: true } };
+    if (change === "valid") {
+      await expect(completeRecipeExecution("job1", "owned", result)).resolves.toMatchObject({ complete: true });
+      expect(mocks.db.localReaderJob.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
+        status: "COMPLETED", result: expect.objectContaining({ slots }),
+      }) }));
+    } else {
+      await expect(completeRecipeExecution("job1", "owned", result)).rejects.toThrow("Invalid recipe slot");
+      expect(mocks.db.localReaderJob.update).not.toHaveBeenCalled();
+    }
+  });
   it.each(["unchanged", "changed", "absent"])("binds %s service-pool phone before simulator warm launch", async change => {
     context.target = { courseId: "course1", offeringId: "offering1", kind: "SIMULATOR" };
     active.recipe = { engine: "EXISTING_ADAPTER", adapter: { family: "USCHEDULE", publicLocationProof: { kind: "PUBLIC_LOCATION_SERVICE_POOL_V1" } } };

@@ -12,6 +12,7 @@ import { accessExecutionInputSchema, accessExecutionResultSchema, type AccessExe
 import { isReaderObservationCurrent } from "./observation-clock";
 import { isTeeItUpRecipeSlotLink } from "./teeitup-recipe-source";
 import { isChronogolfRecipeSlotLink } from "./chronogolf-source";
+import { isYouCanBookRecipeSlotLink } from "./youcanbook-public";
 import { deriveCourseTrustedContext, discoveryTrustedContextSchema, isCurrentTrustedContext, type DiscoveryTrustedContext } from "./trusted-context";
 
 const EXECUTION_TTL_MS = 180_000;
@@ -184,7 +185,9 @@ export async function completeRecipeExecution(id: string, leaseToken: string, va
       const correctBookingUrl = storedRecipe.engine === "EXISTING_ADAPTER" && storedRecipe.adapter?.family === "TEEITUP"
         ? isTeeItUpRecipeSlotLink(bookingUrl, context.input.date, storedRecipe.adapter.facilityIds ?? [], slot)
         : storedRecipe.engine === "EXISTING_ADAPTER" && storedRecipe.adapter?.family === "CHRONOGOLF"
-          ? isChronogolfRecipeSlotLink(bookingUrl, storedRecipe.adapter, context.input.date, slot) : slot.bookingUrl === bookingUrl;
+          ? isChronogolfRecipeSlotLink(bookingUrl, storedRecipe.adapter, context.input.date, slot)
+          : storedRecipe.engine === "EXISTING_ADAPTER" && storedRecipe.adapter?.family === "YOUCANBOOKME"
+            ? isYouCanBookRecipeSlotLink(bookingUrl, storedRecipe.adapter, slot) : slot.bookingUrl === bookingUrl;
       if (!correctBookingUrl || (context.target.kind === "OUTDOOR" && slot.availableSpots < context.input.players) ||
           !isRecipeSlotWithinWindow(slot, context.input, now) ||
           (context.input.durationMinutes && (!slot.endsAt || Date.parse(slot.endsAt) - Date.parse(slot.startsAt) !== context.input.durationMinutes * 60_000))) throw new Error("Invalid recipe slot");
