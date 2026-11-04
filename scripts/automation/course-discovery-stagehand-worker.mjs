@@ -10,7 +10,7 @@ import { projectSourceDiagnostic } from "./stagehand/source-diagnostic.mjs";
 import { isOfficialAdapterJob, inspectOfficialAdapter } from "./course-discovery-official-adapter.mjs";
 
 const defaultSourceDiscover = async args => (await import("./stagehand/source-discovery.mjs")).sourceDiscover(args);
-export const GENERIC_RECIPE_FALLBACK_CODES = Object.freeze(["UNSUPPORTED_ADAPTER_SOURCE", "CPS_PUBLIC_BUILD_UNSUPPORTED", "ADAPTER_CONFIGURATION_UNVERIFIED", "OFFICIAL_POSTAL_SOURCE_UNVERIFIED"]);
+export const GENERIC_RECIPE_FALLBACK_CODES = Object.freeze(["UNSUPPORTED_ADAPTER_SOURCE", "CPS_PUBLIC_BUILD_UNSUPPORTED", "ADAPTER_CONFIGURATION_UNVERIFIED", "OFFICIAL_POSTAL_SOURCE_UNVERIFIED", "CPS_PHONE_BOOKING_SOURCE_UNVERIFIED", "CPS_OFFICIAL_ENTRY_UNVERIFIED"]);
 export const PUBLIC_ROUTING_FALLBACK_CODES = Object.freeze(["FRAMEWORK_INSPECTION_PATH_STALE", "FRAMEWORK_INSPECTION_SOURCE_NOT_SETTLED"]);
 /** Readiness only; the supervisor performs this before claiming cold demand. */
 export async function prepareCourseDiscoveryStagehandWorker({ cwd, prepareSourceDiscovery } = {}) {
@@ -41,13 +41,23 @@ function currentSourceModelFailure(report, job, sourceDeadline, now, invocationS
 
 /** A clean no-proposal decision permits a new attempt at the ordinary root,
  * never adoption of the report's URLs, identity, inventory or source proof. */
-function currentPublicUnresolved(report, job, sourceDeadline, now, invocationStarted) {
+function currentPublicSourceRecovery(report, job, sourceDeadline, now, invocationStarted) {
   const diagnostic = projectSourceDiagnostic(report?.sourceDiagnostic), started = Date.parse(report?.startedAt),
     finished = Date.parse(report?.finishedAt), supplied = Date.parse(report?.workDeadlineAt);
   const cleanFields = new Set(["schemaVersion", "phase", "errorClass", "sourceStop", "sourceDocumentReadiness",
     "nativeIntermediaryPreparation", "elapsedMs", "counts", "completedUsageIsLowerBound", "cleanup", "graph"]);
   const ready = diagnostic?.sourceDocumentReadiness, counts = diagnostic?.counts;
-  return stagehandSourceFailureCode(report, job) === "STAGEHAND_SOURCE_UNRESOLVED" &&
+  const code = stagehandSourceFailureCode(report, job);
+  const unresolved = code === "STAGEHAND_SOURCE_UNRESOLVED" && diagnostic?.phase === "EXTRACT" && diagnostic.errorClass === "NONE" &&
+    diagnostic.sourceStop?.finalDecision === "UNRESOLVED" && diagnostic.sourceStop.condition === "EXPLICIT_UNRESOLVED" &&
+    counts?.actionAttempts === counts?.executedActions;
+  // A timed-out input is not successful navigation. Close the original browser
+  // and investigate the ordinary root again, without adopting any route or fact.
+  const timedOutClick = code === "STAGEHAND_SOURCE_DISCOVERY_FAILED" && diagnostic?.phase === "ACT" && diagnostic.errorClass === "TIMEOUT" &&
+    diagnostic.sourceStop?.condition === "ERROR" && diagnostic.sourceStop.finalDecision === "CONTINUE" &&
+    diagnostic.sourceStop.lastActionKind === "click" && counts?.actionAttempts === counts?.executedActions + 1;
+  if (!unresolved && !timedOutClick) return undefined;
+  const current =
     report.schemaVersion === 1 &&
     report.methodSaved === false && report.methodArtifactSaved === false && report.rootWidgetWitness === undefined &&
     report.decisionOrigin === undefined && report.result === undefined &&
@@ -55,13 +65,13 @@ function currentPublicUnresolved(report, job, sourceDeadline, now, invocationSta
     Number.isFinite(started) && Number.isFinite(finished) && Number.isFinite(supplied) &&
     started >= Math.max(Date.parse(job.firstPickedUpAt), invocationStarted) - 5000 && finished >= started &&
     finished <= Math.min(sourceDeadline, now + 5000) && supplied > started && supplied <= sourceDeadline &&
-    diagnostic?.phase === "EXTRACT" && diagnostic.errorClass === "NONE" && Object.keys(diagnostic).every(key => cleanFields.has(key)) &&
-    diagnostic.sourceStop?.finalDecision === "UNRESOLVED" && diagnostic.sourceStop.condition === "EXPLICIT_UNRESOLVED" &&
+    Object.keys(diagnostic).every(key => cleanFields.has(key)) &&
     diagnostic.cleanup.browserClosed === true && diagnostic.cleanup.modelClosed === true &&
     ready?.bodyPresent === true && ready.mainDocumentCurrent === true && ready.mainDocumentComplete === true &&
     ready.mainReadPending === false && ready.mainDocumentStatus === 200 && ["interactive", "complete"].includes(ready.readyState) &&
-    counts.failedModelCalls === 0 && counts.rejectedActions === 0 && counts.actionAttempts === counts.executedActions &&
+    counts.failedModelCalls === 0 && counts.rejectedActions === 0 &&
     counts.attemptedModelCalls === counts.completedModelCalls && counts.completedModelCalls === report.metrics.localCodexCalls.length;
+  return current ? (timedOutClick ? "SOURCE_PUBLIC_CLICK_TIMEOUT" : "SOURCE_UNRESOLVED_PUBLIC_DOCUMENT") : undefined;
 }
 
 /** Source routing has no customer, provider, identity, inventory, or activation authority.
@@ -176,13 +186,14 @@ export async function runCourseDiscoveryStagehandWorker({
       if (sourceSignal.aborted || now() >= sourceDeadline) throw discoveryError("STAGEHAND_SOURCE_BUDGET_EXHAUSTED");
       const sourceFailure = stagehandSourceFailureCode(report, job);
       if (sourceFailure) {
-        if (sourceFailure === "STAGEHAND_SOURCE_UNRESOLVED" && currentPublicUnresolved(report, job, sourceDeadline, now(), started)) {
+        const sourceRecovery = currentPublicSourceRecovery(report, job, sourceDeadline, now(), started);
+        if (sourceRecovery) {
           // Keep a typed negative diagnostic, not a resumable source export.
           const negative = createStagehandFailureCheckpoint({ job, report, error: discoveryError(sourceFailure), phase,
             metrics, previous: failureEvidence, now: now(), startedAt: started });
           failureEvidence = negative.stagehandFailure;
           await checkpoint("GENERIC_FALLBACK");
-          return await runGenericFromFreshRoot("SOURCE_UNRESOLVED_PUBLIC_DOCUMENT");
+          return await runGenericFromFreshRoot(sourceRecovery);
         }
         if (sourceFailure === "LOCAL_MODEL_TURN_FAILED") {
           const modelFailure = currentSourceModelFailure(report, job, sourceDeadline, now(), started);

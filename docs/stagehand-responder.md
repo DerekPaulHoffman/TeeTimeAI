@@ -106,6 +106,16 @@ automatic retry, using the same job, request, source fingerprint and original
 deadlines. The fixed inspection and independent backend challenges stay fresh.
 Incomplete reads never become an empty availability result.
 
+A source click timeout may start a fresh generic investigation only when the
+current invocation has a complete HTTP 200 main document, completed model calls,
+one uncompleted click, no rejected actions or access/transport diagnostics, and
+confirmed browser/model cleanup. The original source deadline and work deadline
+still apply. This handoff carries typed failure evidence only and starts at the
+ordinary official root; it grants no source, identity, inventory or method proof.
+Closed fixed-adapter CPS phone/contact-entry verification failures can use the
+same existing fresh-root investigation path. They never become accepted identity
+evidence, and errors while opening a path do not qualify as adapter rejection.
+
 Public source routing retains both the served document URL and its authenticated
 History API route. Legacy public EZLinks links are investigation gateways, not
 executable sources. Independent inspection must re-earn the exact tenant's

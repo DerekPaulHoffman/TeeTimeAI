@@ -118,6 +118,54 @@ function cleanUnresolvedReport(t: ReturnType<typeof setup>) {
 }
 
 describe("clean unresolved source fresh-root handoff", () => {
+  function timedOutClick(t: ReturnType<typeof setup>) {
+    const diagnostic = cleanUnresolvedReport(t);
+    Object.assign(t.f.report, { frameworkFailureCode: "STAGEHAND_SOURCE_DISCOVERY_FAILED", actions: [], actionAttempts: [{ status: "OBSERVED" }] });
+    Object.assign(diagnostic, { phase: "ACT", errorClass: "TIMEOUT",
+      sourceStop: { condition: "ERROR", finalDecision: "CONTINUE", lastActionKind: "click" } });
+    Object.assign(diagnostic.counts, { actionAttempts: 1, executedActions: 0 });
+    Object.assign(diagnostic.graph, { actions: 0 });
+    Object.assign(diagnostic.sourceDocumentReadiness!, { readyState: "interactive", pendingReads: 2 });
+    return diagnostic;
+  }
+  it("starts a fresh bounded root investigation after a closed public click timeout, without accepting source or method evidence", async () => {
+    const t = setup(); timedOutClick(t); const original = structuredClone(t.f.job);
+    const genericWorker = vi.fn(async options => {
+      expect(options.job).toBe(t.f.job); expect(options.job).toEqual(original);
+      expect(options.freshOfficialStart).toBe(true);
+      expect(options.workDeadlineAt).toBe(new Date(first + 720000).toISOString());
+      expect(options.checkpointProvenance.stagehandSource).toBeUndefined();
+      const failure = readStagehandFailure({ ...t.f.job, checkpoint: options.checkpointProvenance }, t.f.clock);
+      expect(failure?.entries[0]).toMatchObject({ code: "STAGEHAND_SOURCE_DISCOVERY_FAILED", diagnostic: { phase: "ACT", errorClass: "TIMEOUT" } });
+      return { outcome: "unresolved", metrics: { modelCalls: 1 } };
+    });
+    const failure = await t.run({ genericWorker }).catch(error => error);
+    expect(failure.code).toBe("DISCOVERY_NO_VERIFIED_RECIPE");
+    expect(failure.discoveryMetrics.genericFallback.trigger).toBe("SOURCE_PUBLIC_CLICK_TIMEOUT");
+    expect(genericWorker).toHaveBeenCalledOnce(); expect(t.sourceDiscover).toHaveBeenCalledOnce();
+    expect(t.browserFactory).not.toHaveBeenCalled(); expect(t.client.candidate).not.toHaveBeenCalled();
+    expect(t.client.activate).not.toHaveBeenCalled(); expect(t.f.job).toEqual(original);
+  });
+  it.each(["wrong-code", "phase", "non-click", "failed-model", "not-current", "status", "native", "access", "guard", "cleanup", "unknown", "foreign", "stale"])(
+    "does not use %s public-click timeout evidence for recovery", async mode => {
+      const t = setup(), diagnostic = timedOutClick(t), report = t.f.report as Record<string, unknown>;
+      if (mode === "wrong-code") report.frameworkFailureCode = "STAGEHAND_SOURCE_ACTION_REJECTED";
+      if (mode === "phase") diagnostic.phase = "OPEN";
+      if (mode === "non-click") diagnostic.sourceStop!.lastActionKind = "openObservedFrameSource";
+      if (mode === "failed-model") diagnostic.counts.failedModelCalls = 1;
+      if (mode === "not-current") diagnostic.sourceDocumentReadiness!.mainDocumentCurrent = false;
+      if (mode === "status") diagnostic.sourceDocumentReadiness!.mainDocumentStatus = 403;
+      if (mode === "native") diagnostic.nativeRouterFailure = { code: "NATIVE_REDIRECT_LOADER_TIMEOUT" };
+      if (mode === "access") diagnostic.httpStatus = 403;
+      if (mode === "guard") diagnostic.guardReason = "TRANSACTION_TEXT";
+      if (mode === "cleanup") diagnostic.cleanup.browserClosed = false;
+      if (mode === "unknown") Object.assign(diagnostic, { body: "PRIVATE" });
+      if (mode === "foreign") report.jobId = "foreign-job";
+      if (mode === "stale") report.startedAt = new Date(first - 6000).toISOString();
+      const genericWorker = vi.fn();
+      await expect(t.run({ genericWorker })).rejects.toBeDefined();
+      expect(genericWorker).not.toHaveBeenCalled(); expect(t.client.candidate).not.toHaveBeenCalled();
+    });
   it("retains only typed failure provenance and lets the generic verifier own the sole two challenges and activation", async () => {
     const t = setup(); cleanUnresolvedReport(t); const original = structuredClone(t.f.job), controller = new AbortController();
     t.client.candidate.mockImplementation(async (id, token) => {
@@ -349,7 +397,7 @@ describe("regular Stagehand source worker", () => {
       await expect(t.run({ genericWorker })).rejects.toBeDefined(); expect(genericWorker).not.toHaveBeenCalled();
     }
   });
-  it.each(["UNSUPPORTED_ADAPTER_SOURCE", "ADAPTER_CONFIGURATION_UNVERIFIED", "OFFICIAL_POSTAL_SOURCE_UNVERIFIED"])("does not treat %s from source or opening a path as fixed-metadata fallback", async code => {
+  it.each(["UNSUPPORTED_ADAPTER_SOURCE", "ADAPTER_CONFIGURATION_UNVERIFIED", "OFFICIAL_POSTAL_SOURCE_UNVERIFIED", "CPS_PHONE_BOOKING_SOURCE_UNVERIFIED", "CPS_OFFICIAL_ENTRY_UNVERIFIED"])("does not treat %s from source or opening a path as fixed-metadata fallback", async code => {
     for (const origin of ["source", "open"] as const) {
       const t = setup(), genericWorker = vi.fn(), failure = Object.assign(Error("outside fixed metadata"), { code });
       if (origin === "source") t.sourceDiscover.mockRejectedValue(failure); else t.request.mockRejectedValue(failure);
@@ -793,7 +841,7 @@ describe("regular Stagehand source worker", () => {
     expect(t.executeRecipe).not.toHaveBeenCalled(); expect(t.client.activate).not.toHaveBeenCalled();
   });
 
-  it("persists only bounded official identity, postal and configuration failure gates", async () => {
+  it.each(["OFFICIAL_POSTAL_SOURCE_UNVERIFIED", "CPS_PHONE_BOOKING_SOURCE_UNVERIFIED", "CPS_OFFICIAL_ENTRY_UNVERIFIED"])("persists only bounded %s failure gates before fresh-root investigation", async code => {
     const t = setup(), original = t.request.getMockImplementation()!;
     const keys = ["noTerminalFailure", "sessionOpen", "noAccessRequirement", "noNativeFatal", "status200", "snapshotNative",
       "capturedPagePresent", "captureUrlMatches", "captureFreshWithin5s", "capturedNative", "capturedTimeOriginMatches",
@@ -812,7 +860,7 @@ describe("regular Stagehand source worker", () => {
       rawOfficialCaptured: true, currentOfficialDocument: true }, officialIdentityReadDiagnostic: { captureAgeMs: 5100, gates },
       cpsPostalContact: { gates: { freshNativeOfficialPage: true, canonicalAddressValid: false },
         native: { attestationPresent: true, officialRootMatches: false } } });
-    const primary = Object.assign(Error("OFFICIAL_POSTAL_SOURCE_UNVERIFIED"), { code: "OFFICIAL_POSTAL_SOURCE_UNVERIFIED",
+    const primary = Object.assign(Error(code), { code,
       details: { browserDiagnostics: transported } });
     t.request.mockImplementation(async action => { if (action.action === "inspect_adapter") throw primary; return original(action); });
     const unresolved = Object.assign(Error("postal evidence remains unverified"), { code: "DISCOVERY_NO_VERIFIED_RECIPE" });
@@ -820,7 +868,7 @@ describe("regular Stagehand source worker", () => {
     await expect(t.run({ genericWorker })).rejects.toBe(unresolved);
     expect(genericWorker).toHaveBeenCalledOnce();
     const saved = t.checkpoints.at(-1) as { stagehandFailure: { entries: Array<Record<string, unknown>> } };
-    expect(saved.stagehandFailure.entries[0]).toMatchObject({ phase: "FIXED_INSPECTION", code: "OFFICIAL_POSTAL_SOURCE_UNVERIFIED",
+    expect(saved.stagehandFailure.entries[0]).toMatchObject({ phase: "FIXED_INSPECTION", code,
       fixedInspectionDiagnostic: closed, fixedInspectionDiagnosticSha256: stagehandDataHash(closed) });
     expect(readStagehandFailure({ ...t.f.job, checkpoint: saved }, t.f.clock)).toEqual(saved.stagehandFailure);
     expect(currentStagehandInspectionDiagnostic(primary, t.f.job, t.f.clock, t.f.clock)).toEqual(closed);
