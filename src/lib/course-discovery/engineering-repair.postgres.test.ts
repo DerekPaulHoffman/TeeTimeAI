@@ -71,7 +71,8 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     const finished = await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: owner.id } });
     expect(finished).toMatchObject({ status: "SUCCEEDED", firstPickedUpAt: owner.firstPickedUpAt, deadlineAt: owner.deadlineAt, attempts: 1 });
     expect(finished.deadlineAt!.getTime() - finished.firstPickedUpAt!.getTime()).toBe(900_000);
-    expect(await service.getActiveAccessRecipe(target)).toMatchObject({ id: activation.recipeId, hash: activation.hash });
+    expect(await service.getActiveAccessRecipe(target)).toMatchObject({ record: { id: activation.recipeId, hash: activation.hash },
+      recipe: { target: { ...target, kind: "SIMULATOR" } } });
   });
   async function failed(simulator = false, savedMethod = false) {
     const suffix = randomUUID(), user = await client.user.create({ data: { email: `${suffix}@example.test`, clerkUserId: suffix } });
