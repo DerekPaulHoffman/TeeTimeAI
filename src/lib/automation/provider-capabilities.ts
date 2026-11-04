@@ -42,7 +42,8 @@ export const KNOWN_PROVIDER_FAMILIES = [
   "SUPREME_GOLF",
   "TENFORE",
   "MEMBERSPORTS",
-  "YOUCANBOOKME"
+  "YOUCANBOOKME",
+  "SIMPLY_SCHEDULE_APPOINTMENTS"
 ] as const;
 
 export type KnownProviderFamily = (typeof KNOWN_PROVIDER_FAMILIES)[number];
@@ -244,6 +245,13 @@ export const PROVIDER_CAPABILITIES = {
     // verified learned rental recipes do not enable the legacy dispatcher.
     supportsAutomation: false,
     matchesHostname: (hostname) => matchesDomain(hostname, "youcanbook.me")
+  },
+  SIMPLY_SCHEDULE_APPOINTMENTS: {
+    family: "SIMPLY_SCHEDULE_APPOINTMENTS",
+    detectedPlatform: "CUSTOM",
+    supportsAutomation: false,
+    // A self-hosted plugin is identified only by its current public document.
+    matchesHostname: () => false
   }
 } satisfies Record<KnownProviderFamily, ProviderCapability>;
 
@@ -821,6 +829,7 @@ function isProviderFamilyPublicBookingLandingUrl(
     case "CLUB_CADDIE":
     case "GOLF_GEEK":
     case "YOUCANBOOKME":
+    case "SIMPLY_SCHEDULE_APPOINTMENTS":
       // Learned rental recipes establish their own complete official catalog.
       // Recognition is not authority for the legacy outdoor landing scanner.
       return false;

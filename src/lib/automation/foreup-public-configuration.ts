@@ -8,7 +8,7 @@ const MAX_SCHEDULES = 30;
 export const FOREUP_STANDARD_PUBLIC_SCOPE = "STANDARD_PUBLIC_CLASS_V1" as const;
 export function isStandardForeupPublicClassName(value: unknown): value is string {
   return typeof value === "string" && value.length <= 300 && !/[\u0000-\u001f\u007f]/u.test(value) &&
-    /^(?:public|(?:(?:spring|summer|fall|winter) )?public play|public tee times|online tee times|online bookings?|online reservations?|non[ -]?resident)$/iu.test(value.trim());
+    /^(?:public|(?:(?:spring|summer|fall|winter) )?public play|public tee times|online tee times|online bookings?|online reservations?|book(?: a)? tee times?|non[ -]?resident)$/iu.test(value.trim());
 }
 /** Generic online and nonresident captions need explicit public configuration
  * flags as well. Missing flags, protection, disabled booking or passes do not
@@ -17,7 +17,7 @@ export function isStandardForeupPublicClass(value: unknown): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const row = value as Record<string, unknown>;
   if (!isStandardForeupPublicClassName(row.name)) return false;
-  if (!/^(?:online bookings?|online reservations?|non[ -]?resident)$/iu.test(String(row.name).trim())) return true;
+  if (!/^(?:online bookings?|online reservations?|book(?: a)? tee times?|non[ -]?resident)$/iu.test(String(row.name).trim())) return true;
   return row.online_booking_protected === "0" && row.block_online_booking === "0" && row.deleted === "0" &&
     Array.isArray(row.pass_item_ids) && row.pass_item_ids.length <= 30 && row.pass_item_ids.every(value => value === "");
 }
@@ -163,7 +163,8 @@ export function foreupPublicScheduleCatalogSha256(html: string): string | null {
 
 /** Distinguishes a named Public class from the older sole unlabelled class.
  * A failed scoped proof may use the legacy strict path only for the latter. */
-export function isExplicitForeupPublicClass(input: { html: string; facilityId: number; scheduleId: number; bookingClassId: number }): boolean {
+export function isExplicitForeupPublicClass(input: { html: string; facilityId: number; scheduleId: number; bookingClassId: number },
+  requireBookCaption = false): boolean {
   if (input.html.length > MAX_DOCUMENT_BYTES) return false;
   const schedules = extractSchedulesJson(input.html);
   if (!Array.isArray(schedules) || schedules.length < 1 || schedules.length > MAX_SCHEDULES) return false;
@@ -177,7 +178,7 @@ export function isExplicitForeupPublicClass(input: { html: string; facilityId: n
     positiveProviderId((raw as Record<string, unknown>).teesheet_id) === input.scheduleId &&
     String((raw as Record<string, unknown>).active) === "1" && String((raw as Record<string, unknown>).hidden) === "0" &&
     typeof (raw as Record<string, unknown>).name === "string" &&
-    isStandardForeupPublicClass(raw));
+    isStandardForeupPublicClass(raw) && (!requireBookCaption || /^book(?: a)? tee times?$/iu.test(String((raw as Record<string, unknown>).name).trim())));
 }
 
 export function parseForeupPublicConfiguration(input: {

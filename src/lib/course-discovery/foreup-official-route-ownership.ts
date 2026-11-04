@@ -6,6 +6,8 @@ import { fullCourseName, type OfficialIdentityPage, type OfficialIdentitySource 
 import { parsePublicUSBusinessAddress } from "./public-us-business-address";
 import { normalizePublicCoursePhone } from "./teeitup-postal-conflict-proof";
 import { freshNativeCanonicalRootDocument, isFreshNativeOfficialIdentityPage, nativeCanonicalRootDocumentProofSchema } from "./native-official-page-attestation";
+import { observedTeeItUpContactUrl, verifiedTeeItUpContactParent } from "./teeitup-official-contact-chain";
+import type { DiscoveryTrustedContext } from "./trusted-context";
 
 const failure = (): never => { throw new Error("FOREUP_OFFICIAL_ROUTE_UNVERIFIED"); };
 const clean = (value: string) => value.normalize("NFKC").replace(/\s+/gu, " ").trim();
@@ -26,10 +28,12 @@ const sourceSchema = z.object({ officialUrl: url, officialDocumentUrl: url, book
   officialTitle: label, publicLocationName: label, canonicalAddress: z.string().min(8).max(1024), timeZone: z.string().min(3).max(80),
   publicCoursePhone: z.string().regex(/^\+1[2-9]\d{9}$/u), rootDocumentProof: nativeCanonicalRootDocumentProofSchema.optional(),
   contactScope: z.literal(FOREUP_COMPACT_CONTACT_FACILITY_SCOPE).optional(),
+  officialContactPageUrl: url.optional(), officialBookingEntryUrl: url.optional(),
   sourceWitnessSha256: sha, requiredCapability: z.literal("LOCAL_CHROME"), warmTransport: z.literal("NATIVE_CHROME") }).strict();
 export const foreupOfficialRouteOwnershipProofSchema = sourceSchema.extend({ kind: z.literal("OFFICIAL_FOREUP_ROUTE_OWNERSHIP_V1"),
   providerName: label, sheetTitle: label, providerAddress: z.string().min(8).max(1024), facilityId: id, scheduleId: id, bookingClassId: id,
   inventoryScope: z.literal(FOREUP_STANDARD_PUBLIC_SCOPE).optional(), publicCatalogSha256: sha.optional(),
+  providerDirectoryScope: z.literal("SINGLE_CURRENT_COURSE_WITH_OFFICIAL_CONTACT_V1").optional(),
   providerWitnessSha256: sha, semanticDigest: sha }).strict().refine(value => {
     const { semanticDigest, ...body } = value;
     const source = Object.fromEntries(Object.keys(sourceSchema.shape).filter(key => key !== "sourceWitnessSha256" && Object.hasOwn(value, key)).map(key => [key, value[key as keyof typeof value]]));
@@ -41,7 +45,13 @@ export const foreupOfficialRouteOwnershipProofSchema = sourceSchema.extend({ kin
       titleParts(value.officialTitle, coreName(value.venueName)).filter(part => fullCourseName(part) === coreName(value.venueName)).length === 1 &&
       titleParts(value.officialTitle, coreName(value.venueName)).includes(value.publicLocationName) && fullCourseName(value.publicLocationName) === coreName(value.venueName) :
       selected?.facilityId === value.facilityId && selected.scheduleId === value.scheduleId;
-    return Boolean(Boolean(value.inventoryScope) === Boolean(value.publicCatalogSha256) &&
+    const contactUrl = value.officialContactPageUrl ? new URL(value.officialContactPageUrl) : null;
+    const contactEntry = value.officialBookingEntryUrl ? route(value.officialBookingEntryUrl) : null;
+    const contactChainValid = !value.officialContactPageUrl && !value.officialBookingEntryUrl || Boolean(contactUrl && contactEntry && !value.contactScope &&
+      contactUrl.origin === new URL(value.officialDocumentUrl).origin && contactUrl.pathname !== "/" && !contactUrl.search && !contactUrl.hash &&
+      contactEntry.facilityId === value.facilityId && contactEntry.scheduleId === value.scheduleId);
+    return Boolean(contactChainValid && (!value.providerDirectoryScope || value.officialContactPageUrl && !value.contactScope) &&
+      Boolean(value.inventoryScope) === Boolean(value.publicCatalogSha256) &&
       routeMatches && physical && canonicalAddress &&
       JSON.stringify(physical) === JSON.stringify(canonicalAddress) && value.sourceWitnessSha256 === foreupOwnershipDigest(source) &&
       value.providerWitnessSha256 === foreupOwnershipDigest(provider) && semanticDigest === foreupOwnershipDigest(body));
@@ -49,6 +59,28 @@ export const foreupOfficialRouteOwnershipProofSchema = sourceSchema.extend({ kin
 export type ForeupOfficialRouteOwnershipProof = z.infer<typeof foreupOfficialRouteOwnershipProofSchema>;
 type Contact = z.infer<typeof sourceSchema>;
 const contacts = new WeakMap<Contact, OfficialIdentityPage>();
+export type ForeupOfficialContactChain = { root: OfficialIdentityPage; contact: OfficialIdentityPage };
+export type ForeupOfficialContactChainReader = (source: OfficialIdentitySource, deadlineAt: Date) => Promise<ForeupOfficialContactChain>;
+
+export async function readForeupOfficialContactChain(source: OfficialIdentitySource, deadlineAt: Date, deps: {
+  requestLease?: <T>(family: string, work: () => Promise<T>) => Promise<{ acquired: true; value: T } | { acquired: false }>;
+  trustedContext?: DiscoveryTrustedContext;
+} = {}): Promise<ForeupOfficialContactChain> {
+  if (!source.officialUrl || !route(source.bookingUrl)) return failure();
+  const loaded = await import("./native-official-page-reader");
+  const native = typeof loaded.readNativeOfficialIdentityPage === "function" ? loaded : (loaded as unknown as { default: typeof loaded }).default;
+  const read = native.readNativeOfficialIdentityPage;
+  const requestLease = deps.requestLease ? async <T>(family: string, work: () => Promise<T>) => {
+    const reply = await deps.requestLease!(family, work);
+    return reply.acquired ? { acquired: true as const, value: await reply.value } : { acquired: false as const };
+  } : undefined;
+  const root = await read(source, source.officialUrl, deadlineAt, { requestLease, collectPublicCourseContacts: true,
+    allowTeeItUpContactChainRoot: true, ...(deps.trustedContext ? { trustedContext: deps.trustedContext } : {}) });
+  const target = observedTeeItUpContactUrl(source, root);
+  const contact = await read(source, target, deadlineAt, { requestLease, collectPublicCourseContacts: true, officialContactParent: root,
+    ...(deps.trustedContext ? { trustedContext: deps.trustedContext } : {}) });
+  return { root, contact };
+}
 type Node = DefaultTreeAdapterMap["node"];
 type Element = DefaultTreeAdapterMap["element"];
 const element = (node: Node): node is Element => "tagName" in node;
@@ -218,6 +250,56 @@ export function deriveForeupOfficialRouteContact(source: OfficialIdentitySource,
     requiredCapability: "LOCAL_CHROME" as const, warmTransport: "NATIVE_CHROME" as const };
   const contact = sourceSchema.parse({ ...body, sourceWitnessSha256: foreupOwnershipDigest(body) }); contacts.set(contact, page); return contact;
 }
+/** Complete physical identity on the root's sole observed public Contact page.
+ * Every field comes from the same current official chain; provider ownership
+ * and standard-public schedule coverage are still independently bound below. */
+export function deriveForeupOfficialContactChain(source: OfficialIdentitySource, pair: ForeupOfficialContactChain, privatePhone: unknown): Contact {
+  const { root, contact } = pair, expected = coreName(source.venueName), phone = normalizePublicCoursePhone(privatePhone);
+  const canonical = parsePublicUSBusinessAddress(source.venueAddress ?? ""), rootProof = source.officialUrl && freshNativeCanonicalRootDocument(root, source.officialUrl);
+  if (!source.officialUrl || !source.venueAddress || !route(source.bookingUrl) || !phone || !canonical || !rootProof ||
+      !verifiedTeeItUpContactParent(root, source.officialUrl, contact.url) || !isFreshNativeOfficialIdentityPage(contact, source.officialUrl) ||
+      contact.html.length > 600000 || !root.visibleEvidence || !contact.visibleEvidence) return failure();
+  const contactUrl = new URL(contact.url);
+  if (contactUrl.search || contactUrl.hash) return failure();
+  const roots = nodes(parse(root.html)), entries = nodes(parse(contact.html)), titles = roots.filter(n => n.tagName === "title");
+  if (titles.length !== 1 || clean(root.visibleEvidence.title) !== text(titles[0]) ||
+      titleParts(text(titles[0]), expected).filter(part => fullCourseName(part) === expected).length !== 1) return failure();
+  const publicEntry = (value: string) => {
+    const entry = route(value), wanted = route(source.bookingUrl), u = new URL(value);
+    return Boolean(entry && wanted && entry.facilityId === wanted.facilityId && entry.scheduleId === wanted.scheduleId &&
+      !u.search && ["", "#teetimes", "#/teetimes"].includes(u.hash));
+  };
+  const links = roots.filter(n => n.tagName === "a" && /\b(?:book|tee\s*times?)\b/iu.test(text(n))).flatMap(n => {
+    try { const value = new URL(attr(n, "href") ?? "", root.url).href;
+      return publicEntry(value) && root.visibleEvidence!.linkUrls.includes(value) ? [value] : []; } catch { return []; }
+  });
+  if (!links.length || new Set(links).size !== 1) return failure();
+  const address = (value: string) => {
+    const printed = clean(value).replace(/^Address\s*[:,]?\s*/iu, "");
+    const direct = parsePublicUSBusinessAddress(printed); if (direct) return direct;
+    // Two printed lines may omit only the city/state comma. Both actual
+    // components, the house/street and five-digit ZIP remain mandatory.
+    const parts = printed.split(/\s*,\s*/u);
+    if (parts.length !== 2) return null;
+    const locality = /^([A-Za-z .'-]{2,80})\s+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$/u.exec(parts[1]);
+    return locality ? parsePublicUSBusinessAddress(`${parts[0]}, ${locality[1]}, ${locality[2]} ${locality[3]}`) : null;
+  };
+  const physical = entries.filter(n => blocks.has(n.tagName) && contactText(n).length <= 500).map(n => address(contactText(n))).filter(Boolean);
+  const rendered = contact.visibleEvidence.addressTexts.map(address).filter(Boolean);
+  const unique = (values: unknown[]) => [...new Set(values.map(v => JSON.stringify(v)))];
+  if (unique(physical).length !== 1 || unique(rendered).length !== 1 || unique(physical)[0] !== JSON.stringify(canonical) ||
+      unique(rendered)[0] !== JSON.stringify(canonical)) return failure();
+  const rawPhones = entries.filter(n => ["a", "p", "span", "strong"].includes(n.tagName)).map(n => normalizePublicCoursePhone(text(n))).filter(Boolean);
+  if (new Set(rawPhones).size !== 1 || rawPhones[0] !== phone || contact.visibleEvidence.phoneTextsOmitted ||
+      !contact.visibleEvidence.phoneTexts?.some(value => normalizePublicCoursePhone(value) === phone)) return failure();
+  const publicLocationName = titleParts(text(titles[0]), expected).find(part => fullCourseName(part) === expected)!;
+  const body = { officialUrl: source.officialUrl, officialDocumentUrl: root.url, bookingUrl: source.bookingUrl, venueName: source.venueName,
+    officialTitle: clean(root.visibleEvidence.title), publicLocationName, canonicalAddress: source.venueAddress, timeZone: source.timeZone,
+    publicCoursePhone: phone, officialContactPageUrl: contact.url, officialBookingEntryUrl: links[0],
+    ...(rootProof.rootDocumentProof ? { rootDocumentProof: rootProof.rootDocumentProof } : {}),
+    requiredCapability: "LOCAL_CHROME" as const, warmTransport: "NATIVE_CHROME" as const };
+  const witness = sourceSchema.parse({ ...body, sourceWitnessSha256: foreupOwnershipDigest(body) }); contacts.set(witness, root); return witness;
+}
 /** Bounded JSON literals only. Unknown operational/configuration fields are never projected. */
 function assignment(html: string, name: string, open: "[" | "{"): unknown {
   const matches = [...html.matchAll(new RegExp(`\\b${name}\\s*=\\s*\\${open}`, "gu"))];
@@ -240,7 +322,15 @@ export function bindForeupOfficialRouteConfiguration(contact: Contact, html: str
       !isFreshNativeOfficialIdentityPage(page, contact.officialUrl) || Buffer.byteLength(html) > 512_000) return failure();
   const { sourceWitnessSha256, ...sourceBody } = contact;
   if (sourceWitnessSha256 !== foreupOwnershipDigest(sourceBody)) return failure();
-  const courses = assignment(html, "COURSES", "["), current = assignment(html, "COURSE", "{"), schedules = assignment(html, "SCHEDULES", "[");
+  let courses = assignment(html, "COURSES", "[");
+  const current = assignment(html, "COURSE", "{"), schedules = assignment(html, "SCHEDULES", "[");
+  const singleCurrentCourse = Boolean(contact.officialContactPageUrl && selectedRoute && Array.isArray(courses) && courses.length === 0 &&
+    record(current) && providerId(current.course_id) === selectedRoute.facilityId && Array.isArray(schedules) && schedules.length === 1 &&
+    record(schedules[0]) && providerId(schedules[0].course_id) === selectedRoute.facilityId && providerId(schedules[0].teesheet_id) === selectedRoute.scheduleId);
+  // This is the explicit provider COURSE object, never canonical fields used
+  // to fill a missing profile. Multiple sheets or facilities retain the full
+  // directory requirement and every physical field is checked below.
+  if (singleCurrentCourse) courses = [current];
   if (!Array.isArray(courses) || courses.length < 1 || courses.length > 30 || !Array.isArray(schedules) || schedules.length < 1 || schedules.length > 30 || !record(current)) return failure();
   if (contact.contactScope) {
     if (inventoryScope !== FOREUP_STANDARD_PUBLIC_SCOPE || courses.some(row => !record(row) || !providerId(row.course_id)) ||
@@ -288,6 +378,7 @@ export function bindForeupOfficialRouteConfiguration(contact: Contact, html: str
   const bookingClassId = providerId(publicClasses[0].booking_class_id)!;
   const provider = { providerName: String(facility.name), sheetTitle: String(sheet.title), providerAddress, ...selectedRoute, bookingClassId };
   const body = { kind: "OFFICIAL_FOREUP_ROUTE_OWNERSHIP_V1" as const, ...contact, ...provider,
+    ...(singleCurrentCourse ? { providerDirectoryScope: "SINGLE_CURRENT_COURSE_WITH_OFFICIAL_CONTACT_V1" as const } : {}),
     ...(inventoryScope && publicCatalogSha256 ? { inventoryScope, publicCatalogSha256 } : {}),
     providerWitnessSha256: foreupOwnershipDigest({ ...provider, phone: contact.publicCoursePhone, timeZone: contact.timeZone }) };
   return { proof: foreupOfficialRouteOwnershipProofSchema.parse({ ...body, semanticDigest: foreupOwnershipDigest(body) }),

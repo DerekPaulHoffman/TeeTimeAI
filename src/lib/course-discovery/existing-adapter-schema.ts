@@ -28,6 +28,7 @@ import { fiveIronMetadataSchema } from "./five-iron-source";
 import { golfBookMetadataSchema } from "./golfbook-source";
 import { skeddaMetadataSchema } from "./skedda-source";
 import { youCanBookMetadataSchema } from "./youcanbook-public";
+import { simplyScheduleMetadataSchema } from "./simply-schedule-public";
 
 const numericId = z.number().int().min(1).max(2_147_483_647);
 const publicId = z.string().regex(/^[1-9]\d{0,9}$/u);
@@ -96,6 +97,7 @@ export const existingAdapterMetadataSchema = z.discriminatedUnion("family", [
   golfBookMetadataSchema,
   skeddaMetadataSchema,
   youCanBookMetadataSchema,
+  simplyScheduleMetadataSchema,
 ]);
 
 export type ExistingAdapterMetadata = z.infer<typeof existingAdapterMetadataSchema>;

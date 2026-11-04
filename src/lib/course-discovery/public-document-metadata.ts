@@ -122,7 +122,7 @@ export function collectNativeOfficialPublicMetadata(input: string | { venueName:
         else phoneTextsOmitted = true;
       }
     }
-    if (form && typeof input !== "string" && phoneTexts.length < 20 && value.length <= 40 &&
+    if (typeof input !== "string" && phoneTexts.length < 20 && value.length <= 40 &&
         /^(?:\+?1[ .()-]*)?\(?\d{3}\)?[ .-]*\d{3}[ .-]*\d{4}$/u.test(value) &&
         value.replace(/\D/gu, "").replace(/^1(?=\d{10}$)/u, "") === input.canonicalCoursePhone.slice(2)) phoneTexts.push(value);
     if (value.length >= 15 && value.length <= 500 && addressTexts.length < 160 && /\b\d{5}(?:-\d{4})?\b/u.test(value)) addressTexts.push(value);

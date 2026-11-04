@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { noteNativeOfficialIdentityPageCleanup, registerFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
 import { createPublicBookingParentScope, isCurrentOfficialFrameParent } from "./public-booking-parent";
 import { publicFrameSource } from "./public-frame-source";
 
@@ -40,6 +41,20 @@ describe("context-local verified public booking parents", () => {
     value.observeDocument({ url: contact, status: 403 });
     expect(value.authorizeParent(contact)).toBeUndefined();
     expect(() => createPublicBookingParentScope(identity, "https://other.example/contact/")).toThrow("OFFICIAL_CONTACT_CHAIN_UNVERIFIED");
+  });
+  it("retains canonical ownership for only the original attested redirect-root Contact handoff", () => {
+    const canonical = "https://venue.example/", current = "https://www.venue.example/", contact = current + "contact/";
+    const root = registerFreshNativeOfficialIdentityPage({ url: current, browserTransport: "NATIVE_CHROME",
+      html: '<html><body><a href="/contact/">Contact</a></body></html>', visibleEvidence: { title: identity.venueName, headings: [identity.venueName],
+        addressTexts: [], linkUrls: [contact], officialContactLinkLabels: [{ href: contact, text: "Contact" }] } }, canonical, new Date(Date.now() + 30000),
+      { requestedUrl: canonical, redirects: [{ fromUrl: canonical, toUrl: current, status: 301, completed: true }] });
+    noteNativeOfficialIdentityPageCleanup(root, canonical, "BEFORE"); noteNativeOfficialIdentityPageCleanup(root, canonical, "AFTER", true);
+    const scope = createPublicBookingParentScope({ ...identity, officialUrl: canonical }, contact, undefined, root);
+    scope.observeDocument({ url: contact, status: 200 });
+    expect(scope.authorizeParent(contact)).toEqual({ kind: "VERIFIED_OFFICIAL_DOCUMENT", officialUrl: canonical, documentUrl: contact });
+    expect(() => createPublicBookingParentScope({ ...identity, officialUrl: canonical }, contact)).toThrow("OFFICIAL_CONTACT_CHAIN_UNVERIFIED");
+    expect(() => createPublicBookingParentScope({ ...identity, officialUrl: canonical }, contact, undefined, structuredClone(root))).toThrow("OFFICIAL_CONTACT_CHAIN_UNVERIFIED");
+    expect(() => createPublicBookingParentScope({ ...identity, officialUrl: canonical }, current + "other/", undefined, root)).toThrow("OFFICIAL_CONTACT_CHAIN_UNVERIFIED");
   });
   const prepare = () => {
     const value = scope();

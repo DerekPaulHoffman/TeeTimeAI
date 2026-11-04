@@ -177,6 +177,11 @@ it("captures bounded parent iframe src facts without child URLs or a srcdoc/form
 });
 
 const cmsContext={venueName:venue,venueAddress:"10 Example Rd C, Example, NY 12345, USA",canonicalCoursePhone:"+19165554653"};
+it("captures the exact public contact telephone outside a form without promoting hidden or other numbers",()=>{
+ setup('<main><p>916-555-4653</p><p>916-555-9999</p><div hidden><p>916-555-4653</p></div><form><input name="password"><p>916-555-4653</p></form></main>');
+ const visible=collectNativeOfficialPublicMetadata(cmsContext);
+ expect(visible.phoneTexts).toContain("916-555-4653");expect(visible.phoneTexts).not.toContain("916-555-9999");
+});
 const branchHtml=()=>`<form method="post" action="${document.URL}"><input type="hidden" value="PRIVATE"><a href="/"><img alt="${venue}" src="/logo.png"></a><h1>Example, NY</h1><div><p>916-555-4653</p> <p>10 Example Road, Suite C, Example, NY 12345</p> <a href="https://booking.example/location">Book this location</a></div><footer>Public contact</footer></form>`;
 it("reads actual branch heading, root-logo alt and plain public phone only with trusted visible contact scope",()=>{
  setup(branchHtml());

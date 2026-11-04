@@ -3,6 +3,8 @@ import { isSafeRecipeUrl } from "./recipe";
 import { isPublicAvailabilityNavigation } from "./public-navigation-control";
 import { completeUSAddress, fullCourseName } from "./teeitup-official-identity";
 import { attestedNativeDocumentRedirects } from "./native-redirect-routing";
+import type { OfficialIdentityPage } from "./teeitup-official-identity";
+import { verifiedTeeItUpContactParent } from "./teeitup-official-contact-chain";
 
 export type PublicFrameParentProof = { officialUrl: string; documentUrl: string } & (
   { kind: "VERIFIED_OFFICIAL_DOCUMENT" } |
@@ -62,14 +64,15 @@ function matchesIdentity(venueName: string, venueAddress: string | undefined, ev
  * recipe can populate it. This permits standalone inspection of visible iframe
  * source markup; it never proves availability or permits iframe execution. */
 export function createPublicBookingParentScope(identity: { officialUrl?: string; venueName?: string; venueAddress?: string }, privateOfficialContactUrl?: string,
-  currentNativeDocument?: (request: object, url: string) => string | undefined) {
+  currentNativeDocument?: (request: object, url: string) => string | undefined, privateContactParent?: OfficialIdentityPage) {
   const official = identity.officialUrl && documentKey(identity.officialUrl);
   const candidates = new Map<string, Candidate>(official ? [[official, { kind: "OFFICIAL" }]] : []);
   // Only the browser session's private, independently attested Contact handoff
   // supplies this exact URL. A same-origin URL alone is never admitted here.
   if (official && privateOfficialContactUrl) {
     const contact = documentKey(privateOfficialContactUrl);
-    if (!contact || contact === official || new URL(contact).origin !== new URL(official).origin ||
+    const ownedRedirectContact = privateContactParent && contact && verifiedTeeItUpContactParent(privateContactParent, official, contact);
+    if (!contact || contact === official || new URL(contact).origin !== new URL(official).origin && !ownedRedirectContact ||
         new URL(contact).protocol !== "https:") throw new Error("OFFICIAL_CONTACT_CHAIN_UNVERIFIED");
     candidates.set(contact, { kind: "OFFICIAL" });
   }

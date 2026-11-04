@@ -4,7 +4,7 @@ import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-b
 import { accessExecutionInputSchema, isSafeBrowserAssetUrl, isSafeRecipeUrl, type AccessExecutionInput, type AccessExecutionResult } from "./recipe";
 import { requestFamilyForUrl } from "./request-family";
 import { chronogolfAvailabilityPageSchema, chronogolfMetadataSchema, parseChronogolfPagination, parseChronogolfProfile,
-  parseChronogolfSource, chronogolfOfficialHostMismatch, verifyChronogolfReadClients, chronogolfRecipeBookingUrl, type ChronogolfIdentitySource, type ChronogolfMetadata } from "./chronogolf-source";
+  parseChronogolfSource, chronogolfOfficialIdentityReadRequired, verifyChronogolfReadClients, chronogolfRecipeBookingUrl, type ChronogolfIdentitySource, type ChronogolfMetadata } from "./chronogolf-source";
 
 import type { OfficialIdentityPage } from "./teeitup-official-identity";
 import type { NativeOfficialPageReader } from "./native-official-page-reader";
@@ -73,7 +73,7 @@ function createReader(source: ChronogolfIdentitySource, deps: Deps) {
       let metadata: ChronogolfMetadata;
       try { metadata = parseChronogolfProfile(document.text, url, source, undefined, deps.trustedContext); }
       catch (error) {
-        if (!chronogolfOfficialHostMismatch(error)) throw error;
+        if (!chronogolfOfficialIdentityReadRequired(error)) throw error;
         if (!deps.localCapabilities?.includes("LOCAL_CHROME")) fail("LOCAL_CHROME_REQUIRED");
         signal.throwIfAborted(); if (clock().getTime() >= deadline) fail("DEADLINE_EXCEEDED");
         let page = deps.officialIdentityPage;
@@ -86,7 +86,8 @@ function createReader(source: ChronogolfIdentitySource, deps: Deps) {
               const reply = await deps.requestLease!(family, work);
               return reply.acquired ? { acquired: true, value: await reply.value } : { acquired: false };
             } : undefined;
-            return native.readNativeOfficialIdentityPage(identity, pageUrl, end, { requestLease });
+            return native.readNativeOfficialIdentityPage(identity, pageUrl, end, { requestLease, collectPublicCourseContacts: true,
+              ...(deps.trustedContext ? { trustedContext: deps.trustedContext } : {}) });
           });
           // No provider data lease is held while this separately owned native
           // reader re-earns the ordinary canonical root and its visible edge.

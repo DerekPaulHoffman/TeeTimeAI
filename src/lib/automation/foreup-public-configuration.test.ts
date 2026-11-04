@@ -8,6 +8,7 @@ import {
   readForeupPublicConfiguration,
   readForeupStandardPublicSchedule,
   isStandardForeupPublicClass,
+  isExplicitForeupPublicClass,
 } from "./foreup-public-configuration";
 
 const bookingUrl = "https://foreupsoftware.com/index.php/booking/19021#/teetimes";
@@ -24,6 +25,14 @@ const html = `<html><script>SCHEDULES = ${JSON.stringify(schedules)};</script></
 describe("explicitly unrestricted public Online Booking", () => {
   const online = { ...schedules[0].booking_classes[0], name: "Online Booking", online_booking_protected: "0", block_online_booking: "0", deleted: "0", pass_item_ids: [""] };
   const document = (value: unknown) => `SCHEDULES=${JSON.stringify([{ ...schedules[0], booking_classes: [value] }])};`;
+  it.each(["Book Tee Time", "Book a Tee Time", "Book Tee Times"])("requires explicit unrestricted flags for %s", name => {
+    const row = { ...online, name };
+    expect(isStandardForeupPublicClass(row)).toBe(true);
+    expect(isExplicitForeupPublicClass({ html: document(row), facilityId: 19021, scheduleId: 792, bookingClassId: 4931 }, true)).toBe(true);
+    for (const delta of [{ online_booking_protected: undefined }, { online_booking_protected: "1" }, { block_online_booking: "1" }, { deleted: "1" },
+      { pass_item_ids: ["member-pass"] }, { pass_item_ids: undefined }, { name: name + " Members" }])
+      expect(isStandardForeupPublicClass({ ...row, ...delta })).toBe(false);
+  });
   it("selects its sole public class with complete schedule coverage", () => {
     expect(isStandardForeupPublicClass(online)).toBe(true);
     expect(parseForeupPublicConfiguration({ bookingUrl, courseName: "Bridges", html: document(online) })).toMatchObject({ scheduleId: 792, bookingClassId: 4931 });

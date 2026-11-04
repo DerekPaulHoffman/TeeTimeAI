@@ -28,11 +28,13 @@ type Dependencies = Pick<DiscoveryBrowserSessionDependencies, "requestLease" | "
  * network traffic and the browser session owns status/challenge/visibility. */
 export async function readNativeOfficialIdentityPage(source: OfficialIdentitySource, pageUrl: string, deadlineAt: Date,
   deps: Dependencies = {}): Promise<OfficialIdentityPage> {
+  const ownedContact = Boolean(source.officialUrl && deps.officialContactParent &&
+    verifiedTeeItUpContactParent(deps.officialContactParent, source.officialUrl, pageUrl));
   if (!source.officialUrl || !isSafeRecipeUrl(pageUrl) || !isSafeRecipeUrl(source.officialUrl) ||
-      new URL(pageUrl).origin !== new URL(source.officialUrl).origin) throw new Error("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
+      new URL(pageUrl).origin !== new URL(source.officialUrl).origin && !ownedContact) throw new Error("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
   if (deps.allowTeeItUpContactChainRoot && pageUrl !== source.officialUrl) throw new Error("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
   if (deps.officialContactParent && (deps.allowTeeItUpContactChainRoot ||
-      !verifiedTeeItUpContactParent(deps.officialContactParent, source.officialUrl, pageUrl)))
+      !ownedContact))
     throw new Error("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
   const deadline = new Date(Math.min(deadlineAt.getTime(), Date.now() + 30_000));
   if (!Number.isFinite(deadline.getTime()) || deadline.getTime() <= Date.now()) throw new Error("DEADLINE_EXCEEDED");

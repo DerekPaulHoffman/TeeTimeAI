@@ -55,7 +55,8 @@ import { getTeeItUpDelegationDiagnostic, rememberTeeItUpDelegationFailure } from
 import { currentNativeDelegatedChain, type NativeDelegatedChainToken } from "./teeitup-delegated-booking-context";
 import { bindDelegatedFacility, type TeeItUpDelegatedBookingProof } from "./teeitup-delegated-booking-source";
 import { fixedAdapterTransportCode, rememberFixedAdapterReadFailure, getFixedAdapterReadDiagnostic, type FixedAdapterReadDiagnostic } from "./fixed-adapter-read-diagnostic";
-import { bindForeupOfficialRouteConfiguration, deriveForeupOfficialRouteContact, foreupOwnershipDigest, type ForeupOfficialRouteOwnershipProof } from "./foreup-official-route-ownership";
+import { bindForeupOfficialRouteConfiguration, deriveForeupOfficialRouteContact, deriveForeupOfficialContactChain, readForeupOfficialContactChain,
+  foreupOwnershipDigest, type ForeupOfficialRouteOwnershipProof, type ForeupOfficialContactChainReader } from "./foreup-official-route-ownership";
 import { parseTeeItUpBookingConfiguration, type TeeItUpBookingConfiguration } from "./teeitup-booking-configuration";
 import { bindTeeItUpStreetTypeOmittedProof, isTeeItUpStreetTypeOmissionCandidate, type TeeItUpStreetTypeOmittedProof } from "./teeitup-street-type-omitted-proof";
 import { parseMindbodyAppointmentSource } from "./mindbody-appointment-grid";
@@ -70,6 +71,7 @@ import { bindTeeItUpOfficialContactChain, readNativeTeeItUpContactChain, type Te
 import { parseSkeddaSource } from "./skedda-source";
 import { parseYouCanBookSource } from "./youcanbook-public";
 import { inspectYouCanBook, executeYouCanBook } from "./youcanbook-executor";
+import { inspectSimplySchedule, executeSimplySchedule } from "./simply-schedule-executor";
 import { inspectSkedda, executeSkedda } from "./skedda-executor";
 
 type Dependencies = {
@@ -84,6 +86,7 @@ type Dependencies = {
   trustedContext?: { canonicalCoursePhone?: string };
   localCapabilities?: readonly "LOCAL_CHROME"[];
   readNativeOfficialPage?: NativeOfficialPageReader;
+  readNativeForeupContactChain?: ForeupOfficialContactChainReader;
   /** Controller-only fixed native chain; never supplied by recipe or model. */
   readOfficialContactChain?: TeeItUpContactChainReader;
   officialContactChainPages?: Awaited<ReturnType<TeeItUpContactChainReader>>;
@@ -555,6 +558,12 @@ async function inspectForeupConfiguration(source: Source, deps: Dependencies, fe
           const path = foreupPath.exec(new URL(source.bookingUrl).pathname)!;
           const facilityId = Number(path[1] ?? path[3]);
           let nativeCoverageRequired = false;
+          if (inventoryScope && isExplicitForeupPublicClass({ html, facilityId, scheduleId: legacy.scheduleId, bookingClassId: legacy.bookingClassId }, true)) {
+            // The newly supported generic caption retains explicit public
+            // access flags and independently verified physical ownership.
+            if (warm || !deps.localCapabilities?.includes("LOCAL_CHROME")) fail(coverageFailure);
+            nativeCoverageRequired = true;
+          }
           if (!hasCompleteForeupPublicScheduleScope({ html, facilityId, scheduleId: legacy.scheduleId, inventoryScope })) {
             // A sole unlabelled legacy class retains the old strict path.
             // An explicit Public label with a failed scoped proof cannot
@@ -588,9 +597,26 @@ async function inspectForeupConfiguration(source: Source, deps: Dependencies, fe
       const requestLease: typeof runWithProviderRequestLease | undefined = deps.requestLease ? async (family, work) => {
         const reply = await deps.requestLease!(family, work); return reply.acquired ? { acquired: true, value: await reply.value } : { acquired: false };
       } : undefined;
-      const read: NativeOfficialPageReader = deps.readNativeOfficialPage ?? ((s, url, deadline) => native.readNativeOfficialIdentityPage(s, url, deadline, { requestLease, collectPublicCourseContacts: true }));
-      const page = await read(source, source.officialUrl!, end);
-      const contact = deriveForeupOfficialRouteContact(source, page, deps.trustedContext?.canonicalCoursePhone);
+      const read: NativeOfficialPageReader = deps.readNativeOfficialPage ?? ((s, url, deadline) => native.readNativeOfficialIdentityPage(s, url, deadline,
+        { requestLease, collectPublicCourseContacts: true, ...(deps.trustedContext ? { trustedContext: deps.trustedContext } : {}) }));
+      const chain = async () => {
+        const pages = await (deps.readNativeForeupContactChain ?? ((identity, deadline) => readForeupOfficialContactChain(identity, deadline,
+          { requestLease: deps.requestLease, trustedContext: deps.trustedContext })))(source, end);
+        return deriveForeupOfficialContactChain(source, pages, deps.trustedContext?.canonicalCoursePhone);
+      };
+      // An older controller snapshot selects only which fresh reader to try.
+      // It supplies no identity, edge, address or provider authority.
+      const rootHint = deps.officialIdentityPage?.visibleEvidence;
+      const contactHint = rootHint?.addressTexts.length === 0 && rootHint.officialContactLinkLabels?.some(link => /^contact(?:\s+us)?$/iu.test(link.text));
+      let contact: ReturnType<typeof deriveForeupOfficialRouteContact>;
+      if (expected?.officialContactPageUrl || contactHint) contact = await chain();
+      else {
+        try { contact = deriveForeupOfficialRouteContact(source, await read(source, source.officialUrl!, end), deps.trustedContext?.canonicalCoursePhone); }
+        catch (error) {
+          if (!(error instanceof Error) || error.message !== "OFFICIAL_POSTAL_SOURCE_UNVERIFIED") throw error;
+          contact = await chain();
+        }
+      }
       let derived: ReturnType<typeof bindForeupOfficialRouteConfiguration>;
       try { derived = bindForeupOfficialRouteConfiguration(contact, html, inventoryScope); }
       catch (error) {
@@ -682,6 +708,10 @@ export async function inspectExistingAdapter(source: Source, deps: Dependencies)
     if (!(error instanceof Error) || error.message !== "UNSUPPORTED_ADAPTER_SOURCE") throw error;
     if (!source.officialUrl || !isSafeRecipeUrl(source.officialUrl) ||
         new URL(source.bookingUrl).origin !== new URL(source.officialUrl).origin) throw error;
+    if (deps.requestedInput?.durationMinutes) {
+      const publicRental = await inspectSimplySchedule({ ...source, officialUrl: source.officialUrl }, deps.requestedInput.durationMinutes, deps);
+      if (publicRental) return { adapter: publicRental };
+    }
     // The observed self-hosted page must prove its venue and Amelia bootstrap
     // before the fixed inspector can admit any plugin API request.
     return { adapter: await inspectAmelia({ ...source, officialUrl: source.officialUrl }, deps) };
@@ -866,7 +896,7 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
   let uscheduleSession: ReturnType<typeof createUSchedulePublicSession> | undefined;
   try {
     const adapter = existingAdapterMetadataSchema.parse(recipe.adapter);
-    const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "GOLFVX", "REX", "MINDBODY", "FIVE_IRON", "GOLFBOOK", "SKEDDA", "YOUCANBOOKME"].includes(adapter.family) || adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR";
+    const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "GOLFVX", "REX", "MINDBODY", "FIVE_IRON", "GOLFBOOK", "SKEDDA", "YOUCANBOOKME", "SIMPLY_SCHEDULE_APPOINTMENTS"].includes(adapter.family) || adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR";
     if (input.timeZone !== recipe.source.timeZone || recipe.source.providerFamily.toUpperCase() !== adapter.family ||
         (recipe.target.kind === "SIMULATOR") !== simulator || simulator && (!recipe.target.offeringId || !input.durationMinutes) ||
         adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR" && (adapter.facilityIds.length !== 1 || adapter.officialIdentityProof || adapter.officialBookingSourceProof || adapter.officialPostalConflictProof || adapter.officialDelegatedBookingProof || adapter.officialStreetTypeOmittedProof || adapter.officialContactChainProof)) fail("ADAPTER_TARGET_MISMATCH");
@@ -880,7 +910,7 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
           adapter.timeZone !== input.timeZone || adapter.durationMinutes !== input.durationMinutes || input.players > adapter.capacity) fail("ADAPTER_TARGET_MISMATCH");
       if (!deps.localCapabilities?.includes("LOCAL_CHROME")) fail("LOCAL_CHROME_REQUIRED");
     }
-    if (!["CHELSEA", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS", "REX", "CPS", "MINDBODY", "FIVE_IRON", "GOLFBOOK", "SKEDDA", "YOUCANBOOKME"].includes(adapter.family)) session = reader(recipe.source, deps, adapter, input);
+    if (!["CHELSEA", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS", "REX", "CPS", "MINDBODY", "FIVE_IRON", "GOLFBOOK", "SKEDDA", "YOUCANBOOKME", "SIMPLY_SCHEDULE_APPOINTMENTS"].includes(adapter.family)) session = reader(recipe.source, deps, adapter, input);
     const start = deps.toInstant(`${input.date}T${input.startTime}:00`, input);
     const next = new Date(`${input.date}T00:00:00Z`); next.setUTCDate(next.getUTCDate() + 1);
     const end = deps.toInstant(`${input.endTime === "24:00" ? next.toISOString().slice(0, 10) : input.date}T${input.endTime === "24:00" ? "00:00" : input.endTime}:00`, input);
@@ -937,6 +967,10 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
     }
     if (adapter.family === "YOUCANBOOKME") {
       const slots = await executeYouCanBook(recipe.source, adapter, input, deps);
+      return result(slots.filter(slot => new Date(slot.startsAt) > now && new Date(slot.startsAt) >= start && new Date(slot.endsAt!) <= end));
+    }
+    if (adapter.family === "SIMPLY_SCHEDULE_APPOINTMENTS") {
+      const slots = await executeSimplySchedule(recipe.source, adapter, input, deps);
       return result(slots.filter(slot => new Date(slot.startsAt) > now && new Date(slot.startsAt) >= start && new Date(slot.endsAt!) <= end));
     }
     if (adapter.family === "CHRONOGOLF") {

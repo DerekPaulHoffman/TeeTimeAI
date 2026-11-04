@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { deriveForeupOfficialRouteContact, bindForeupOfficialRouteConfiguration, foreupOfficialRouteOwnershipProofSchema, foreupOwnershipDigest, FOREUP_COMPACT_CONTACT_FACILITY_SCOPE } from "./foreup-official-route-ownership";
-import { registerFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
+import { deriveForeupOfficialRouteContact, deriveForeupOfficialContactChain, bindForeupOfficialRouteConfiguration, foreupOfficialRouteOwnershipProofSchema, foreupOwnershipDigest, FOREUP_COMPACT_CONTACT_FACILITY_SCOPE } from "./foreup-official-route-ownership";
+import { noteNativeOfficialIdentityPageCleanup, registerFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
 import { inspectExistingAdapter, executeExistingAdapterRecipe } from "./existing-adapter-executor";
 import { venueProofMatches, recipeTimeToInstant } from "./executor";
 import { hashAccessRecipe, parseAccessRecipe } from "./recipe";
@@ -23,6 +23,104 @@ function provider() {
     { teesheet_id: "457", booking_class_id: "14", name: "Members", active: "1", hidden: "0" } ] }] };
 }
 const html = (value = provider()) => `<html><body><script>var COURSES=${JSON.stringify(value.courses)};var COURSE=${JSON.stringify(value.course)};var SCHEDULES=${JSON.stringify(value.schedules)};</script></body></html>`;
+
+function officialContactPair(change?: (root: OfficialIdentityPage, contact: OfficialIdentityPage) => void) {
+  const url = "https://official.example/contact/", title = "Home | Example - Public Golf";
+  const root: OfficialIdentityPage = { url: source.officialUrl, browserTransport: "NATIVE_CHROME",
+    html: `<html><head><title>${title}</title></head><body><h1>Play Golf</h1><a href="${source.bookingUrl}">Book a Tee Time</a><a href="${url}">Contact</a></body></html>`,
+    visibleEvidence: { title, headings: ["Play Golf"], linkUrls: [source.bookingUrl, url], addressTexts: [], officialContactLinkLabels: [{ href: url, text: "Contact" }] } };
+  const contact: OfficialIdentityPage = { url, browserTransport: "NATIVE_CHROME",
+    html: `<html><head><title>Contact Us</title></head><body><h1>Contact Us</h1><section><h3>Address</h3><p>10 Example Road<br>Example NY 12345</p></section><section><h3>Phone</h3><p>${display}</p></section></body></html>`,
+    visibleEvidence: { title: "Contact Us", headings: ["Contact Us", "Address", "Phone"], linkUrls: [],
+      addressTexts: ["Address, 10 Example Road, Example NY 12345", "10 Example Road, Example NY 12345"], phoneTexts: [display] } };
+  change?.(root, contact);
+  registerFreshNativeOfficialIdentityPage(root, source.officialUrl, new Date(Date.now() + 30000));
+  registerFreshNativeOfficialIdentityPage(contact, source.officialUrl, new Date(Date.now() + 30000));
+  noteNativeOfficialIdentityPageCleanup(root, source.officialUrl, "BEFORE"); noteNativeOfficialIdentityPageCleanup(root, source.officialUrl, "AFTER", true);
+  return { root, contact };
+}
+describe("public ForeUP official contact chain", () => {
+  it("supports an omitted directory only with one explicit current physical course and one matching schedule", () => {
+    const value = provider(); value.courses = []; value.schedules = [value.schedules[0]];
+    value.schedules[0].booking_classes = [{ ...value.schedules[0].booking_classes[0], name: "Book Tee Time",
+      online_booking_protected: "0", block_online_booking: "0", deleted: "0", pass_item_ids: [""] } as never];
+    const contact = () => deriveForeupOfficialContactChain(source, officialContactPair(), phone);
+    const result = bindForeupOfficialRouteConfiguration(contact(), html(value), FOREUP_STANDARD_PUBLIC_SCOPE);
+    expect(result.proof).toMatchObject({ providerDirectoryScope: "SINGLE_CURRENT_COURSE_WITH_OFFICIAL_CONTACT_V1", bookingClassId: 12 });
+    for (const kind of ["another-sheet", "wrong-course", "missing-address", "restricted"] as const) {
+      const wrong = structuredClone(value);
+      if (kind === "another-sheet") wrong.schedules.push({ ...wrong.schedules[0], teesheet_id: "457" });
+      if (kind === "wrong-course") wrong.course.course_id = "99999";
+      if (kind === "missing-address") wrong.course.address = "";
+      if (kind === "restricted") (wrong.schedules[0].booking_classes[0] as unknown as { online_booking_protected: string }).online_booking_protected = "1";
+      expect(() => bindForeupOfficialRouteConfiguration(contact(), html(wrong), FOREUP_STANDARD_PUBLIC_SCOPE)).toThrow();
+    }
+  });
+  it("does not activate a generic booking caption from a name-only cold shortcut", async () => {
+    const value = provider(); value.courses = []; value.schedules = [value.schedules[0]];
+    const identity = { ...source, venueName: value.course.name };
+    value.schedules[0].booking_classes = [{ ...value.schedules[0].booking_classes[0], name: "Book Tee Time",
+      online_booking_protected: "0", block_online_booking: "0", deleted: "0", pass_item_ids: [""] } as never];
+    const environment = deps(), chain = vi.fn(async () => officialContactPair(root => {
+      root.html = root.html.replace("Home | Example - Public Golf", "Home | Example Park - Public Golf");
+      root.visibleEvidence!.title = "Home | Example Park - Public Golf";
+    }));
+    environment.readNativeOfficialPage.mockRejectedValue(Error("OFFICIAL_POSTAL_SOURCE_UNVERIFIED"));
+    environment.fetch.mockImplementation(async raw => String(raw).includes("/api/") ? Response.json([]) :
+      new Response(html(value), { headers: { "content-type": "text/html" } }));
+    expect(parseForeupPublicConfiguration({ bookingUrl: identity.bookingUrl, courseName: identity.venueName, html: html(value) })).not.toBeNull();
+    const result = await inspectExistingAdapter(identity, { ...environment, readNativeForeupContactChain: chain });
+    expect(chain).toHaveBeenCalledOnce(); expect(result.adapter).toMatchObject({ officialRouteOwnershipProof: { officialContactPageUrl: "https://official.example/contact/" } });
+    await expect(inspectExistingAdapter(identity, { ...environment, localCapabilities: [] })).rejects.toThrow("ADAPTER_CONFIGURATION_UNVERIFIED");
+  });
+  it("cold learns through the owned contact reader and re-reads that same chain on warm execution", async () => {
+    const environment = deps(), chain = vi.fn(async () => officialContactPair());
+    environment.readNativeOfficialPage.mockRejectedValue(Error("OFFICIAL_POSTAL_SOURCE_UNVERIFIED"));
+    const settings = { ...environment, now: () => new Date("2026-10-20T12:00:00Z"), readNativeForeupContactChain: chain }, inspected = await inspectExistingAdapter(source, settings);
+    expect(inspected.adapter).toMatchObject({ family: "FOREUP", officialRouteOwnershipProof: { officialContactPageUrl: "https://official.example/contact/" } });
+    expect(environment.readNativeOfficialPage).toHaveBeenCalledOnce(); expect(chain).toHaveBeenCalledOnce();
+    const recipe = parseAccessRecipe({ schemaVersion: 1, engine: "EXISTING_ADAPTER", target: { courseId: "course", kind: "OUTDOOR" }, source, adapter: inspected.adapter });
+    const result = await executeExistingAdapterRecipe(recipe, input, { ...settings, recipeHash: hashAccessRecipe(recipe), toInstant: recipeTimeToInstant });
+    expect(result).toMatchObject({ status: "EMPTY", complete: true, evidence: { venueVerified: true, completeVerified: true } });
+    expect(environment.readNativeOfficialPage).toHaveBeenCalledOnce(); expect(chain).toHaveBeenCalledTimes(2);
+  });
+  it("binds a fresh root title and booking edge to its observed contact address and telephone", () => {
+    const pair = officialContactPair(), contact = deriveForeupOfficialContactChain(source, pair, phone);
+    const result = bindForeupOfficialRouteConfiguration(contact, html(), FOREUP_STANDARD_PUBLIC_SCOPE);
+    expect(result.proof).toMatchObject({ officialContactPageUrl: pair.contact.url, officialBookingEntryUrl: source.bookingUrl,
+      facilityId: 12345, scheduleId: 456, bookingClassId: 12, inventoryScope: FOREUP_STANDARD_PUBLIC_SCOPE });
+    expect(foreupOfficialRouteOwnershipProofSchema.safeParse(JSON.parse(JSON.stringify(result.proof))).success).toBe(true);
+    expect(() => bindForeupOfficialRouteConfiguration({ ...contact }, html(), FOREUP_STANDARD_PUBLIC_SCOPE)).toThrow();
+  });
+  it.each(["root-copy", "contact-copy", "root-title", "unobserved-path", "foreign-origin", "raw-address", "visible-address", "extra-address", "raw-phone", "visible-phone", "hidden", "raw-entry", "visible-entry"])
+    ("does not accept %s as a complete current physical source", kind => {
+      const pair = officialContactPair((root, contact) => {
+        if (kind === "root-title") root.visibleEvidence!.title = "Other Course";
+        if (kind === "unobserved-path") contact.url = "https://official.example/unobserved/";
+        if (kind === "foreign-origin") contact.url = "https://other.example/contact/";
+        if (kind === "raw-address") contact.html = contact.html.replace("10 Example Road", "999 Other Road");
+        if (kind === "visible-address") contact.visibleEvidence!.addressTexts = ["999 Other Road, Example NY 12345"];
+        if (kind === "extra-address") contact.html = contact.html.replace("</body>", "<p>99 Other Road, Example, NY 12345</p></body>");
+        if (kind === "raw-phone") contact.html = contact.html.replace(display, "555-555-0199");
+        if (kind === "visible-phone") contact.visibleEvidence!.phoneTexts = [];
+        if (kind === "hidden") contact.html = contact.html.replace("<section>", "<section hidden>");
+        if (kind === "raw-entry") root.html = root.html.replace(source.bookingUrl, "https://foreupsoftware.com/index.php/booking/999/456");
+        if (kind === "visible-entry") root.visibleEvidence!.linkUrls = [contact.url];
+      });
+      if (kind === "root-copy") pair.root = structuredClone(pair.root);
+      if (kind === "contact-copy") pair.contact = structuredClone(pair.contact);
+      expect(() => deriveForeupOfficialContactChain(source, pair, phone)).toThrow("FOREUP_OFFICIAL_ROUTE_UNVERIFIED");
+    });
+  it("does not use the official contact chain to bypass provider address or Public scope", () => {
+    for (const kind of ["address", "phone", "public"] as const) {
+      const value = provider();
+      if (kind === "address") value.course.address = "999 Other Road";
+      if (kind === "phone") value.course.phone = "555-555-0199";
+      if (kind === "public") value.schedules[0].booking_classes[0].name = "Member Public Play";
+      expect(() => bindForeupOfficialRouteConfiguration(deriveForeupOfficialContactChain(source, officialContactPair(), phone), html(value), FOREUP_STANDARD_PUBLIC_SCOPE)).toThrow();
+    }
+  });
+});
 describe("seasonal standard public inventory", () => {
   it.each(["Spring", "Summer", "Fall", "Winter"])("selects the sole published %s Public Play class", season => {
     const value = provider(); value.schedules[0].booking_classes[0].name = `${season} Public Play`;

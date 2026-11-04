@@ -16,8 +16,12 @@ const timeZone = z.string().min(1).max(100).refine(value => { try { new Intl.Dat
 function fail(code = "ADAPTER_CONFIGURATION_UNVERIFIED"): never { throw new Error(code); }
 // Only an actual otherwise-matching public profile may request a fresh official-root read.
 const officialHostMismatches = new WeakSet<Error>();
+const officialPostalMismatches = new WeakSet<Error>();
 export function chronogolfOfficialHostMismatch(error: unknown): boolean {
   return error instanceof Error && officialHostMismatches.has(error);
+}
+export function chronogolfOfficialIdentityReadRequired(error: unknown): boolean {
+  return error instanceof Error && (officialHostMismatches.has(error) || officialPostalMismatches.has(error));
 }
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
 const name = z.string().trim().min(3).max(200);
@@ -209,6 +213,56 @@ function headlessCanonicalFooter(source: ChronogolfIdentitySource, page: Officia
   if (!postal(printed) || postal(printed) !== postal(source.venueAddress ?? "")) return false;
   return visible.addressTexts.some(value => typeof value === "string" && literal(value) === literal(name + ", " + printed));
 }
+/** An otherwise exact public profile can contain a mistyped four-digit ZIP.
+ * The independent canonical phone and fresh native official document must
+ * corroborate the complete canonical address and its direct provider edge.
+ * This does not infer a ZIP from the profile or accept a copied page. */
+function canonicalPostalConflictWitness(source: ChronogolfIdentitySource, page: OfficialIdentityPage, canonicalPhone: string) {
+  if (!freshNativeCanonicalRootDocument(page, source.officialUrl) || !page.visibleEvidence || Buffer.byteLength(page.html) > 2_000_000) return false;
+  const all: Element[] = [];
+  const excluded = (node: Element) => ["script", "style", "template", "noscript", "iframe", "form"].includes(node.tagName) ||
+    node.attrs.some(a => ["hidden", "inert"].includes(a.name)) || attr(node, "aria-hidden") === "true" ||
+    /display\s*:\s*none|visibility\s*:\s*(?:hidden|collapse)/iu.test(attr(node, "style") ?? "") ||
+    /(?:^|\s)(?:hidden|d-none|invisible|visually-hidden|sr-only)(?:\s|$)/u.test(attr(node, "class") ?? "");
+  const walk = (node: Node, depth: number) => {
+    if (depth > 80 || all.length > 20000) fail("ADAPTER_IDENTITY_MISMATCH");
+    if (element(node)) { if (excluded(node)) return; all.push(node); }
+    if ("childNodes" in node) node.childNodes.forEach(n => walk(n, depth + 1));
+  };
+  const text = (node: Node): string => node.nodeName === "#text" ? (node as DefaultTreeAdapterMap["textNode"]).value :
+    element(node) && excluded(node) ? "" : "childNodes" in node ? node.childNodes.map(text).join(" ").normalize("NFKC").replace(/\s+/gu, " ").trim() : "";
+  walk(parse(page.html), 0);
+  const titles = all.filter(n => n.tagName === "title"), expectedName = fullCourseName(source.venueName), canonical = physicalAddress(source.venueAddress ?? "");
+  if (titles.length !== 1 || !canonical || text(titles[0]) !== page.visibleEvidence.title ||
+      text(titles[0]).split(/\s*[|–—]\s*/u).filter(p => fullCourseName(p) === expectedName).length !== 1) return false;
+  const addressMatches = (value: string) => {
+    const printed = value.normalize("NFKC").replace(/\s+/gu, " ").trim();
+    if (JSON.stringify(physicalAddress(printed)) === JSON.stringify(canonical)) return true;
+    // A single public footer contact may append its telephone and website.
+    // Remove only those two independently exact complete suffix fields.
+    const contact = /^(.*?)[,\s]+((?:\+?1[ .-]?)?(?:\([2-9]\d{2}\)|[2-9]\d{2})[ .-]?[2-9]\d{2}[ .-]?\d{4})\s*\|\s*((?:www\.)?[a-z0-9.-]+\.[a-z]{2,})$/iu.exec(printed);
+    return Boolean(contact && normalizePublicCoursePhone(contact[2]) === canonicalPhone &&
+      officialHost(`https://${contact[3]}/`) === officialHost(source.officialUrl) &&
+      JSON.stringify(physicalAddress(contact[1].replace(/,\s*$/u, ""))) === JSON.stringify(canonical));
+  };
+  if (!all.some(n => ["address", "p", "div", "li", "span"].includes(n.tagName) && text(n).length <= 500 && addressMatches(text(n))) ||
+      !page.visibleEvidence.addressTexts.some(addressMatches)) return false;
+  const phonePattern = /(?:\+?1[ .-]?)?(?:\([2-9]\d{2}\)|[2-9]\d{2})[ .-]?[2-9]\d{2}[ .-]?\d{4}/gu;
+  if (!all.some(n => ["p", "span", "a", "li"].includes(n.tagName) && text(n).length <= 200 &&
+      [...text(n).matchAll(phonePattern)].some(m => normalizePublicCoursePhone(m[0]) === canonicalPhone))) return false;
+  const links = page.visibleEvidence.linkUrls.filter(url => parseChronogolfSource(url));
+  if (!links.includes(source.bookingUrl)) return false;
+  try { delegatedBookingHop(page, source.bookingUrl); }
+  catch {
+    // A public course may label its exact verified Chronogolf profile "Play
+    // Golf". This is an edge only for this otherwise exact postal conflict;
+    // it does not broaden the general delegated-link scanner.
+    if (!all.some(n => n.tagName === "a" && /^play golf$/iu.test(text(n)) && (() => {
+      try { return new URL(attr(n, "href") ?? "", page.url).href === source.bookingUrl; } catch { return false; }
+    })())) return false;
+  }
+  return Boolean(freshNativeCanonicalRootDocument(page, source.officialUrl));
+}
 /** Fresh complete public profile identity and catalog, not an availability or
  * all-rounds claim. Sales round lengths remain separate from physical layout. */
 export function parseChronogolfProfile(html: string, actualUrl: string, source: ChronogolfIdentitySource,
@@ -239,6 +293,15 @@ export function parseChronogolfProfile(html: string, actualUrl: string, source: 
   const canonicalFiveDigitZip = /,\s*[A-Z]{2}\s+([0-9]{5})(?:,\s*(?:US|USA|United States(?: of America)?))?$/iu.exec(source.venueAddress)?.[1];
   const postcode = /^[0-9]{4}$/u.test(club.postcode) && canonicalFiveDigitZip === `0${club.postcode}` ? canonicalFiveDigitZip : club.postcode;
   const observed = physicalAddress(`${club.address}, ${club.city}, ${province} ${postcode}`);
+  const postalCandidate = canonicalFiveDigitZip?.startsWith("0") && /^[0-9]{4}$/u.test(club.postcode) && !observed &&
+    websiteHost === officialHost(source.officialUrl) && canonicalPhone !== undefined && normalizePublicCoursePhone(club.phone) === canonicalPhone &&
+    club.courses.length === 1 && fullCourseName(club.name) === expectedName ?
+    physicalAddress(`${club.address}, ${club.city}, ${province} 0${club.postcode}`) : null;
+  const postalConflict = postalCandidate && JSON.stringify({ ...postalCandidate, postalCode: canonical.postalCode }) === JSON.stringify(canonical);
+  if (postalConflict && !officialPage) {
+    const error = new Error("ADAPTER_IDENTITY_MISMATCH"); officialPostalMismatches.add(error); throw error;
+  }
+  const verifiedPostalConflict = Boolean(postalConflict && officialPage && canonicalPhone && canonicalPostalConflictWitness(source, officialPage, canonicalPhone));
   // These two complete street spellings denote the same English word. Accept
   // only that exact substitution, with every other physical field unchanged,
   // the same official host, and the independently supplied canonical phone.
@@ -246,7 +309,7 @@ export function parseChronogolfProfile(html: string, actualUrl: string, source: 
     JSON.stringify({ ...observed, street: observed.street.replace(/\btheatre\b/gu, "theater") }) ===
     JSON.stringify({ ...canonical, street: canonical.street.replace(/\btheatre\b/gu, "theater") }) &&
     websiteHost === officialHost(source.officialUrl) && canonicalPhone !== undefined && normalizePublicCoursePhone(club.phone) === canonicalPhone;
-  if (!observed || JSON.stringify(observed) !== JSON.stringify(canonical) && !streetSpelling) fail("ADAPTER_IDENTITY_MISMATCH");
+  if ((!observed || JSON.stringify(observed) !== JSON.stringify(canonical) && !streetSpelling) && !verifiedPostalConflict) fail("ADAPTER_IDENTITY_MISMATCH");
   const canonicalUrl = `https://www.chronogolf.com/club/${club.slug}`;
   for (const url of [requested, actual]) if (url.numericClubId !== undefined ? url.numericClubId !== club.id : url.profileUrl !== canonicalUrl) fail("ADAPTER_IDENTITY_MISMATCH");
   const courses = club.courses.map(course => ({ id: course.id, uuid: course.uuid, name: course.name, layoutHoles: course.holes,
@@ -275,7 +338,9 @@ export function parseChronogolfProfile(html: string, actualUrl: string, source: 
     } catch { fail("ADAPTER_IDENTITY_MISMATCH"); }
   }
   const catalog = { clubId: club.id, clubUuid: club.uuid, profileUrl: canonicalUrl, ...(requested.widgetUrl ? { widgetSourceUrl: requested.widgetUrl } : {}), name: club.name, websiteHost: providerWebsiteIdentityHost(club.website),
-    address: observed, timeZone: club.timezone, publicPlayerTypeId: club.defaultAffiliationTypeId, courses, clients: document.clients,
+    address: observed ?? postalCandidate, timeZone: club.timezone, publicPlayerTypeId: club.defaultAffiliationTypeId, courses, clients: document.clients,
+    ...(verifiedPostalConflict ? { canonicalPostalScope: "FRESH_CANONICAL_ROOT_PHONE_POSTAL_CONFLICT_V1", canonicalAddress: canonical,
+      canonicalPhoneSha256: createHash("sha256").update(JSON.stringify(canonicalPhone)).digest("hex") } : {}),
     ...(streetSpelling ? { canonicalStreetSpellingScope: "THEATRE_THEATER_WITH_CANONICAL_PHONE_V1",
       canonicalPhoneSha256: createHash("sha256").update(JSON.stringify(canonicalPhone)).digest("hex") } : {}),
     ...(publicBrandSuffix ? { canonicalBrandScope: "EXACT_PUBLIC_GOLF_LINKS_SUFFIX_V1", canonicalName: expectedName,

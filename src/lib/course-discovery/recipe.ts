@@ -283,12 +283,15 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
     return;
   }
   if (recipe.engine === "EXISTING_ADAPTER") {
-    const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "GOLFVX", "REX", "MINDBODY", "FIVE_IRON", "GOLFBOOK", "SKEDDA", "YOUCANBOOKME"].includes(recipe.adapter.family) ||
+    const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "GOLFVX", "REX", "MINDBODY", "FIVE_IRON", "GOLFBOOK", "SKEDDA", "YOUCANBOOKME", "SIMPLY_SCHEDULE_APPOINTMENTS"].includes(recipe.adapter.family) ||
       recipe.adapter.family === "TEEITUP" && recipe.adapter.offeringKind === "SIMULATOR";
     if (recipe.source.providerFamily !== recipe.adapter.family ||
       (recipe.target.kind === "SIMULATOR") !== simulator ||
-      recipe.target.kind === "SIMULATOR" && !recipe.target.offeringId || ["CHELSEA", "TEEITUP", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS", "REX", "CPS", "MINDBODY", "TEESNAP", "FIVE_IRON", "GOLFBOOK", "SKEDDA", "YOUCANBOOKME"].includes(recipe.adapter.family) && !recipe.source.venueAddress)
+      recipe.target.kind === "SIMULATOR" && !recipe.target.offeringId || ["CHELSEA", "TEEITUP", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS", "REX", "CPS", "MINDBODY", "TEESNAP", "FIVE_IRON", "GOLFBOOK", "SKEDDA", "YOUCANBOOKME", "SIMPLY_SCHEDULE_APPOINTMENTS"].includes(recipe.adapter.family) && !recipe.source.venueAddress)
       ctx.addIssue({ code: "custom", message: "Supported adapter metadata must match the source and target kind" });
+    if (recipe.adapter.family === "SIMPLY_SCHEDULE_APPOINTMENTS" && (recipe.adapter.bookingUrl !== recipe.source.bookingUrl ||
+        new URL(recipe.source.bookingUrl).hostname.replace(/^www\./u, "") !== new URL(recipe.source.officialUrl).hostname.replace(/^www\./u, "")))
+      ctx.addIssue({ code: "custom", message: "Public rental metadata must retain the exact official booking parent" });
     if (recipe.adapter.family === "YOUCANBOOKME" && (!recipe.adapter.rooms.some(room => room.bookingUrl === recipe.source.bookingUrl) ||
         recipe.adapter.rooms.some(room => new URL(room.officialPageUrl).hostname.replace(/^www\./u, "") !== new URL(recipe.source.officialUrl).hostname.replace(/^www\./u, "")) ||
         new URL(recipe.adapter.officialEntryUrl).hostname.replace(/^www\./u, "") !== new URL(recipe.source.officialUrl).hostname.replace(/^www\./u, "")))

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { parse, type DefaultTreeAdapterMap } from "parse5";
 import { z } from "zod";
-import { getNativeOfficialIdentityPageDiagnostic, isFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
+import { freshNativeCanonicalRootDocument, getNativeOfficialIdentityPageDiagnostic, isFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
 import { completeUSAddress, fullCourseName, type OfficialIdentityPage, type OfficialIdentitySource } from "./teeitup-official-identity";
 
 type Node = DefaultTreeAdapterMap["node"];
@@ -142,11 +142,13 @@ function sameLegacyBooking(left: string, right: string) {
 export function observedTeeItUpContactUrl(source: Pick<OfficialIdentitySource, "officialUrl">, root: OfficialIdentityPage) {
   if (!source.officialUrl || root.html.length > 2_000_000 || !isFreshNativeOfficialIdentityPage(root, source.officialUrl)) throw new Error("OFFICIAL_CONTACT_CHAIN_UNVERIFIED");
   const official = new URL(source.officialUrl), current = new URL(root.url);
-  if (current.href !== official.href || current.protocol !== "https:" || official.pathname !== "/" || official.search || official.hash)
+  const canonical = freshNativeCanonicalRootDocument(root, source.officialUrl);
+  if (!canonical || current.protocol !== "https:" || official.pathname !== "/" || official.search || official.hash ||
+      current.pathname !== "/" || current.search || current.hash)
     throw new Error("OFFICIAL_CONTACT_CHAIN_UNVERIFIED");
   const links = exactVisibleLinks(root, label => /^contact(?:\s+us)?$/iu.test(label));
   const contact = sole(links.map(link => link.href));
-  if (!contact || new URL(contact).origin !== official.origin || contact === root.url) throw new Error("OFFICIAL_CONTACT_CHAIN_UNVERIFIED");
+  if (!contact || new URL(contact).origin !== current.origin || contact === root.url) throw new Error("OFFICIAL_CONTACT_CHAIN_UNVERIFIED");
   return contact;
 }
 /** A fresh native root authorizes exactly its corroborated public Contact link.
@@ -157,7 +159,7 @@ export function verifiedTeeItUpContactParent(root: OfficialIdentityPage, officia
   if (!cleanup.cleanupSettled || !cleanup.cleanupSucceeded || !cleanup.freshAfterCleanup) return false;
   try {
     const official = new URL(officialUrl), target = new URL(targetUrl);
-    return official.protocol === "https:" && target.protocol === "https:" && target.origin === official.origin &&
+    return official.protocol === "https:" && target.protocol === "https:" && target.origin === new URL(root.url).origin &&
       observedTeeItUpContactUrl({ officialUrl }, root) === targetUrl;
   } catch { return false; }
 }

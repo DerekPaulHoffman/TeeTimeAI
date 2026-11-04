@@ -350,7 +350,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
         witness.currentUrl === url && page.url() === url && Date.now() >= witness.proof.observedAt && Date.now() - witness.proof.observedAt <= 5000 &&
         redirectRouting?.isCurrentCompletedDocumentRead(witness.request, page.mainFrame(), { frameId: witness.frameId, loaderId: witness.loaderId, url })
         ? witness.proof.documentBindingSha256 : undefined;
-    });
+    }, deps.officialContactParent);
   const publicIntermediaries = new Map<string, { pageUrl: string; documentStartedAt: number }>();
   let nativeMainDocumentWitness: { request: NativeReadRequest; currentUrl: string; timeOrigin: number; frameId: string; loaderId: string;
     proof: NativeMainDocumentContinuity } | undefined;

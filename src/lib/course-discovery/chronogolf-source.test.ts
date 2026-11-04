@@ -4,6 +4,7 @@ import { CHRONOGOLF_READ_CLIENTS, chronogolfAvailabilityPageSchema, chronogolfMe
   normalizeChronogolfProfileUrl, parseChronogolfPagination, parseChronogolfProfile, parseChronogolfSource, parseChronogolfPublicWidget, verifyChronogolfReadClients, chronogolfOfficialHostMismatch } from "./chronogolf-source";
 
 import { registerFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
+import { chronogolfOfficialIdentityReadRequired } from "./chronogolf-source";
 import type { OfficialIdentityPage } from "./teeitup-official-identity";
 
 const reviewedBodies = vi.hoisted(() => ["reviewed-1710-fixture", "reviewed-1805-fixture"]);
@@ -64,6 +65,79 @@ describe("canonical public profile sources", () => {
     expect(parseChronogolfPublicWidget(value)).toBeNull();
     expect(parseChronogolfSource(value)).toBeNull();
   });
+});
+
+describe("fresh official corroboration for a mistyped four-digit public ZIP", () => {
+  const identity = { ...source, venueAddress: "100 Fairway Blvd, Example City, CT 06001, USA", timeZone: "America/New_York" };
+  const trusted = { canonicalCoursePhone: "+18605550100" };
+  const printed = "100 Fairway Boulevard, Example City, CT 06001";
+  const profile = () => ({ ...club(), province: "Connecticut", postcode: "6002", timezone: identity.timeZone, phone: "(860) 555-0100" });
+  function page(change?: (page: OfficialIdentityPage) => void) {
+    const title = `Top New England Golf | ${identity.venueName}`;
+    const p: OfficialIdentityPage = { url: identity.officialUrl, browserTransport: "NATIVE_CHROME",
+      html: `<html><head><title>${title}</title></head><body><h1>Play Golf</h1><a href="${identity.bookingUrl}">Book Tee Times</a><footer><p>${printed}</p><p>(860) 555-0100</p></footer></body></html>`,
+      visibleEvidence: { title, headings: ["Play Golf"], addressTexts: [printed], linkUrls: [identity.bookingUrl] } };
+    change?.(p); return registerFreshNativeOfficialIdentityPage(p, identity.officialUrl, new Date(Date.now() + 30000));
+  }
+  it("requires the private fresh-root read before accepting the independently corroborated conflict", () => {
+    let rejection: unknown; try { parseChronogolfProfile(html(profile()), identity.bookingUrl, identity, undefined, trusted); } catch (e) { rejection = e; }
+    expect(chronogolfOfficialIdentityReadRequired(rejection)).toBe(true);
+    expect(chronogolfOfficialHostMismatch(rejection)).toBe(false);
+    expect(chronogolfOfficialIdentityReadRequired({ ...(rejection as object) })).toBe(false);
+    const result = parseChronogolfProfile(html(profile()), identity.bookingUrl, identity, page(), trusted);
+    expect(result.family).toBe("CHRONOGOLF");
+    expect(result.catalogHash).not.toBe(parseChronogolfProfile(html({ ...profile(), postcode: "06001" }), identity.bookingUrl, identity).catalogHash);
+  });
+  it("accepts a whole footer contact only when its complete address, phone and website corroborate", () => {
+    const contact = `${printed}, (860) 555-0100 | www.example.org`;
+    const p = page(value => { value.html = value.html.replace(`<p>${printed}</p><p>(860) 555-0100</p>`, `<p>${contact}</p>`);
+      value.visibleEvidence!.addressTexts = [contact]; });
+    expect(parseChronogolfProfile(html(profile()), identity.bookingUrl, identity, p, trusted).family).toBe("CHRONOGOLF");
+    for (const wrong of [contact.replace("555-0100", "555-0101"), contact.replace("www.example.org", "unrelated.example.org"),
+      contact.replace("100 Fairway", "101 Fairway"), "Another venue, " + contact]) {
+      const rejected = page(value => { value.html = value.html.replace(`<p>${printed}</p><p>(860) 555-0100</p>`, `<p>${wrong}</p>`);
+        value.visibleEvidence!.addressTexts = [wrong]; });
+      expect(() => parseChronogolfProfile(html(profile()), identity.bookingUrl, identity, rejected, trusted)).toThrow("ADAPTER_IDENTITY_MISMATCH");
+    }
+  });
+  it("accepts an exact public Play Golf edge without broadening member or event labels", () => {
+    const p = page(value => { value.html = value.html.replace("Book Tee Times", "PLAY GOLF"); });
+    expect(parseChronogolfProfile(html(profile()), identity.bookingUrl, identity, p, trusted).family).toBe("CHRONOGOLF");
+    for (const label of ["Member Play Golf", "Play Golf Outings", "Play Golf Checkout"]) {
+      const rejected = page(value => { value.html = value.html.replace("Book Tee Times", label); });
+      expect(() => parseChronogolfProfile(html(profile()), identity.bookingUrl, identity, rejected, trusted)).toThrow("ADAPTER_IDENTITY_MISMATCH");
+    }
+  });
+  it.each(["copy", "title", "raw-address", "visible-address", "phone", "hidden", "link", "visible-link", "stale"])
+    ("does not accept %s official evidence", kind => {
+      let p = page(value => {
+        if (kind === "title") value.visibleEvidence!.title = "Unrelated Golf Club";
+        if (kind === "raw-address") value.html = value.html.replace(printed, "999 Other Road, Example City, CT 06001");
+        if (kind === "visible-address") value.visibleEvidence!.addressTexts = [];
+        if (kind === "phone") value.html = value.html.replace("(860) 555-0100", "(860) 555-0101");
+        if (kind === "hidden") value.html = value.html.replace("<footer>", "<footer hidden>");
+        if (kind === "link") value.html = value.html.replace(identity.bookingUrl, "https://www.chronogolf.com/club/foreign");
+        if (kind === "visible-link") value.visibleEvidence!.linkUrls = [];
+      });
+      if (kind === "copy") p = structuredClone(p);
+      const clock = kind === "stale" ? vi.spyOn(Date, "now").mockReturnValue(Date.now() + 60001) : undefined;
+      try { expect(() => parseChronogolfProfile(html(profile()), identity.bookingUrl, identity, p, trusted)).toThrow("ADAPTER_IDENTITY_MISMATCH"); }
+      finally { clock?.mockRestore(); }
+    });
+  it.each(["missing-phone", "wrong-phone", "wrong-street", "wrong-city", "wrong-region", "wrong-host", "five-digit-zip"])
+    ("does not authorize a new native read for %s", kind => {
+      const value = profile(); let context: typeof trusted | undefined = trusted;
+      if (kind === "missing-phone") context = undefined;
+      if (kind === "wrong-phone") value.phone = "(860) 555-0101";
+      if (kind === "wrong-street") value.address = "101 Fairway Boulevard";
+      if (kind === "wrong-city") value.city = "Other City";
+      if (kind === "wrong-region") value.province = "Massachusetts";
+      if (kind === "wrong-host") value.website = "https://foreign.example/";
+      if (kind === "five-digit-zip") value.postcode = "06002";
+      let rejection: unknown; try { parseChronogolfProfile(html(value), identity.bookingUrl, identity, undefined, context); } catch (e) { rejection = e; }
+      expect(rejection).toBeInstanceOf(Error); expect(chronogolfOfficialIdentityReadRequired(rejection)).toBe(false);
+      expect(() => parseChronogolfProfile(html(value), identity.bookingUrl, identity, page(), context)).toThrow("ADAPTER_IDENTITY_MISMATCH");
+    });
 });
 describe("fresh exact profile identity and complete UUID catalog", () => {
   it("binds identity, timezone, every course UUID and distinct sale-round options", () => {

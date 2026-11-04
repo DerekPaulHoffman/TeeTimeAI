@@ -440,7 +440,8 @@ describe("provider capability registry", () => {
       WHOOSH: [true, "CUSTOM"],
       TENFORE: [false, "CUSTOM"],
       MEMBERSPORTS: [false, "CUSTOM"],
-      YOUCANBOOKME: [false, "CUSTOM"]
+      YOUCANBOOKME: [false, "CUSTOM"],
+      SIMPLY_SCHEDULE_APPOINTMENTS: [false, "CUSTOM"]
     });
   });
 

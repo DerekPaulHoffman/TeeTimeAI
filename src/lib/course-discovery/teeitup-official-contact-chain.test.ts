@@ -32,6 +32,23 @@ function pair(change: { rootHtml?: string; contactHtml?: string; contactAddress?
   return { root, contact };
 }
 describe("TeeItUp official contact chain", () => {
+  it("accepts only the current www root's exact contact edge after an independently attested canonical redirect", () => {
+    const current = "https://www.harbor.example/", contact = "https://www.harbor.example/contact/";
+    const raw = { url: current, browserTransport: "NATIVE_CHROME" as const,
+      html: '<html><body><a href="/contact/">Contact Us</a></body></html>',
+      visibleEvidence: { title: source.venueName, headings: [source.venueName], addressTexts: [], linkUrls: [contact],
+        officialContactLinkLabels: [{ href: contact, text: "Contact Us" }] } };
+    const root = registerFreshNativeOfficialIdentityPage(raw, source.officialUrl, new Date(Date.now() + 25000), {
+      requestedUrl: source.officialUrl, redirects: [{ fromUrl: source.officialUrl, toUrl: current, status: 301, completed: true }] });
+    noteNativeOfficialIdentityPageCleanup(root, source.officialUrl, "BEFORE"); noteNativeOfficialIdentityPageCleanup(root, source.officialUrl, "AFTER", true);
+    expect(observedTeeItUpContactUrl(source, root)).toBe(contact);
+    expect(verifiedTeeItUpContactParent(root, source.officialUrl, contact)).toBe(true);
+    expect(verifiedTeeItUpContactParent(root, source.officialUrl, "https://harbor.example/contact/")).toBe(false);
+    expect(verifiedTeeItUpContactParent(root, source.officialUrl, "https://www.harbor.example/other/")).toBe(false);
+    expect(verifiedTeeItUpContactParent(structuredClone(root), source.officialUrl, contact)).toBe(false);
+    const unproved = registerFreshNativeOfficialIdentityPage(structuredClone(raw), source.officialUrl, new Date(Date.now() + 25000));
+    expect(() => observedTeeItUpContactUrl(source, unproved)).toThrow("OFFICIAL_CONTACT_CHAIN_UNVERIFIED");
+  });
   it("hands off only the original fresh, closed root's exact Contact link", () => {
     const { root } = pair();
     expect(verifiedTeeItUpContactParent(root, source.officialUrl, contactUrl)).toBe(false);
