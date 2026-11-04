@@ -10,7 +10,7 @@ import { projectSourceDiagnostic } from "./stagehand/source-diagnostic.mjs";
 import { isOfficialAdapterJob, inspectOfficialAdapter } from "./course-discovery-official-adapter.mjs";
 
 const defaultSourceDiscover = async args => (await import("./stagehand/source-discovery.mjs")).sourceDiscover(args);
-export const GENERIC_RECIPE_FALLBACK_CODES = Object.freeze(["UNSUPPORTED_ADAPTER_SOURCE", "CPS_PUBLIC_BUILD_UNSUPPORTED", "ADAPTER_CONFIGURATION_UNVERIFIED"]);
+export const GENERIC_RECIPE_FALLBACK_CODES = Object.freeze(["UNSUPPORTED_ADAPTER_SOURCE", "CPS_PUBLIC_BUILD_UNSUPPORTED", "ADAPTER_CONFIGURATION_UNVERIFIED", "OFFICIAL_POSTAL_SOURCE_UNVERIFIED"]);
 export const PUBLIC_ROUTING_FALLBACK_CODES = Object.freeze(["FRAMEWORK_INSPECTION_PATH_STALE", "FRAMEWORK_INSPECTION_SOURCE_NOT_SETTLED"]);
 /** Readiness only; the supervisor performs this before claiming cold demand. */
 export async function prepareCourseDiscoveryStagehandWorker({ cwd, prepareSourceDiscovery } = {}) {

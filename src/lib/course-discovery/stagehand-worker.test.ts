@@ -283,7 +283,7 @@ describe("regular Stagehand source worker", () => {
     expect(genericWorker).not.toHaveBeenCalled(); expect(t.client.activate).not.toHaveBeenCalled();
   });
 
-  it.each(["UNSUPPORTED_ADAPTER_SOURCE", "CPS_PUBLIC_BUILD_UNSUPPORTED", "ADAPTER_CONFIGURATION_UNVERIFIED"])("hands only a freshly closed %s inspection to generic Sol and activates exactly once", async code => {
+  it.each(["UNSUPPORTED_ADAPTER_SOURCE", "CPS_PUBLIC_BUILD_UNSUPPORTED", "ADAPTER_CONFIGURATION_UNVERIFIED", "OFFICIAL_POSTAL_SOURCE_UNVERIFIED"])("hands only a freshly closed %s inspection to generic Sol and activates exactly once", async code => {
     const t = setup(), before = structuredClone(t.f.job);
     const request = t.request.getMockImplementation()!;
     t.request.mockImplementation(async action => {
@@ -341,7 +341,7 @@ describe("regular Stagehand source worker", () => {
     await expect(t.run({ genericWorker })).rejects.toMatchObject({ code: "DISCOVERY_NO_VERIFIED_RECIPE" });
     expect(genericWorker).toHaveBeenCalledOnce(); expect(t.client.candidate).not.toHaveBeenCalled();
   });
-  it.each(["UNSUPPORTED_ADAPTER_SOURCE", "ADAPTER_CONFIGURATION_UNVERIFIED"])("does not generic-fall back when %s inspection cleanup failed or work expired", async code => {
+  it.each(["UNSUPPORTED_ADAPTER_SOURCE", "ADAPTER_CONFIGURATION_UNVERIFIED", "OFFICIAL_POSTAL_SOURCE_UNVERIFIED"])("does not generic-fall back when %s inspection cleanup failed or work expired", async code => {
     for (const mode of ["cleanup", "deadline"] as const) {
       const t = setup(), request = t.request.getMockImplementation()!, genericWorker = vi.fn();
       t.request.mockImplementation(async action => { if (action.action === "inspect_adapter") throw Object.assign(Error("fixed inspection failed"), { code }); return request(action); });
@@ -349,7 +349,7 @@ describe("regular Stagehand source worker", () => {
       await expect(t.run({ genericWorker })).rejects.toBeDefined(); expect(genericWorker).not.toHaveBeenCalled();
     }
   });
-  it.each(["UNSUPPORTED_ADAPTER_SOURCE", "ADAPTER_CONFIGURATION_UNVERIFIED"])("does not treat %s from source or opening a path as fixed-metadata fallback", async code => {
+  it.each(["UNSUPPORTED_ADAPTER_SOURCE", "ADAPTER_CONFIGURATION_UNVERIFIED", "OFFICIAL_POSTAL_SOURCE_UNVERIFIED"])("does not treat %s from source or opening a path as fixed-metadata fallback", async code => {
     for (const origin of ["source", "open"] as const) {
       const t = setup(), genericWorker = vi.fn(), failure = Object.assign(Error("outside fixed metadata"), { code });
       if (origin === "source") t.sourceDiscover.mockRejectedValue(failure); else t.request.mockRejectedValue(failure);
@@ -815,7 +815,10 @@ describe("regular Stagehand source worker", () => {
     const primary = Object.assign(Error("OFFICIAL_POSTAL_SOURCE_UNVERIFIED"), { code: "OFFICIAL_POSTAL_SOURCE_UNVERIFIED",
       details: { browserDiagnostics: transported } });
     t.request.mockImplementation(async action => { if (action.action === "inspect_adapter") throw primary; return original(action); });
-    await expect(t.run()).rejects.toBe(primary);
+    const unresolved = Object.assign(Error("postal evidence remains unverified"), { code: "DISCOVERY_NO_VERIFIED_RECIPE" });
+    const genericWorker = vi.fn(async () => { throw unresolved; });
+    await expect(t.run({ genericWorker })).rejects.toBe(unresolved);
+    expect(genericWorker).toHaveBeenCalledOnce();
     const saved = t.checkpoints.at(-1) as { stagehandFailure: { entries: Array<Record<string, unknown>> } };
     expect(saved.stagehandFailure.entries[0]).toMatchObject({ phase: "FIXED_INSPECTION", code: "OFFICIAL_POSTAL_SOURCE_UNVERIFIED",
       fixedInspectionDiagnostic: closed, fixedInspectionDiagnosticSha256: stagehandDataHash(closed) });
