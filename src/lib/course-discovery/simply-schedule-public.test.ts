@@ -6,6 +6,7 @@ import { inspectSimplySchedule, executeSimplySchedule } from "./simply-schedule-
 import { parseSimplyScheduleBootstrap, parseSimplyScheduleSlots, simplyScheduleFrame, verifySimplyScheduleOfficial, SSA_PUBLIC_CLIENT_SHA256 } from "./simply-schedule-public";
 import { executeAccessRecipe } from "./executor";
 import { parseAccessRecipe } from "./recipe";
+import { inspectExistingAdapter } from "./existing-adapter-executor";
 
 const source = { officialUrl: "https://rental.example/", bookingUrl: "https://rental.example/book/", venueName: "Example Golf Studio",
   venueAddress: "123 Main Street, Example, CT 06001, USA", timeZone: "America/New_York" };
@@ -58,6 +59,18 @@ function fixture() {
     cancelAfter: (count: number) => { cancelAfter = count; } };
 }
 describe("public Simply Schedule Appointments rental reader", () => {
+  it("learns through the real adapter inspector when the canonical www root links to the bare-host booking parent", async () => {
+    const f = fixture(), aliased = { ...source, officialUrl: "https://www.rental.example/" };
+    const fetch: typeof globalThis.fetch = async (url, init) => String(url) === aliased.officialUrl
+      ? new Response(f.root.replace('href="/book/"', `href="${source.bookingUrl}"`), { headers: { "content-type": "text/html" } })
+      : f.deps.fetch(url, init);
+    const result = await inspectExistingAdapter(aliased, { ...f.deps, fetch, requestedInput: input });
+    expect(result.adapter.family).toBe("SIMPLY_SCHEDULE_APPOINTMENTS");
+    expect(parseAccessRecipe({ schemaVersion: 1, engine: "EXISTING_ADAPTER", source: { ...aliased, providerFamily: result.adapter.family },
+      target: { kind: "SIMULATOR", courseId: "course", offeringId: "offering" }, adapter: result.adapter }).source.officialUrl).toBe(aliased.officialUrl);
+    await expect(inspectExistingAdapter({ ...aliased, officialUrl: "https://foreign.example/" },
+      { ...f.deps, fetch, requestedInput: input })).rejects.toThrow("UNSUPPORTED_ADAPTER_SOURCE");
+  });
   it("executes through the real recipe pipeline and rejects a different target or booking source", async () => {
     const f = fixture(), adapter = await inspectSimplySchedule(source, 60, f.deps);
     const recipe = parseAccessRecipe({ schemaVersion: 1, engine: "EXISTING_ADAPTER", target: { kind: "SIMULATOR", courseId: "course", offeringId: "offering" },

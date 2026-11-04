@@ -2,26 +2,55 @@ import { describe, expect, it } from "vitest";
 import { bindDiscoveryRecipeIdentity, createDiscoveryAdapterObservation, createDiscoverySnapshotCompactor, inspectedAdapterSourceEvidence, shouldInvalidateDiscoveryAdapterObservation } from "../../../scripts/automation/course-discovery-worker.mjs";
 import { foreupOfficialRouteOwnershipProofSchema, foreupOwnershipDigest } from "./foreup-official-route-ownership";
 import { parseAccessRecipe } from "./recipe";
-function fixture(compactFacility = false, standardPublic = compactFacility) {
+function fixture(compactFacility = false, standardPublic = compactFacility, contactChain = false, redirected = false) {
   const official = "https://official.example/", booking = compactFacility ? "https://foreupsoftware.com/index.php/booking/12345#/teetimes" : "https://foreupsoftware.com/index.php/booking/12345/456#/teetimes";
   const job = { id: "owned", sourceFingerprint: "a".repeat(64), attempts: 1, firstPickedUpAt: "2030-01-01T12:00:00.000Z", deadlineAt: "2030-01-01T12:15:00.000Z",
     request: { identity: { name: "Example Golf Course", address: "10 Example Road, Example, NY 12345, USA", officialUrl: official, timeZone: "America/New_York" },
       target: { courseId: "owned-course", kind: "OUTDOOR" }, input: { date: "2030-01-02", players: 2, startTime: "08:00", endTime: "18:00", timeZone: "America/New_York" }, trustedContext: { canonicalCoursePhone: "+15555550123" } } };
-  const source = { officialUrl: official, officialDocumentUrl: official, bookingUrl: booking, venueName: job.request.identity.name,
+  const document = redirected ? "https://www.official.example/" : official;
+  const redirects = [{ fromUrl: official, toUrl: document, status: 301, completed: true }];
+  const rootDocumentProof = { kind: "NATIVE_CANONICAL_ROOT_REDIRECT", canonicalUrl: official, documentUrl: document, redirects,
+    witnessSha256: foreupOwnershipDigest({ canonicalUrl: official, documentUrl: document, redirects }) };
+  const source = { officialUrl: official, officialDocumentUrl: document, bookingUrl: booking, venueName: job.request.identity.name,
     officialTitle: "Example | County", publicLocationName: "Example",
     ...(compactFacility ? { contactScope: "CANONICAL_ROOT_COMPACT_CONTACT_FACILITY_V1" } : {}),
+    ...(contactChain ? { officialContactPageUrl: `${document}contact`, officialBookingEntryUrl: booking } : {}),
+    ...(redirected ? { rootDocumentProof } : {}),
     canonicalAddress: job.request.identity.address, timeZone: job.request.input.timeZone, publicCoursePhone: job.request.trustedContext.canonicalCoursePhone, requiredCapability: "LOCAL_CHROME", warmTransport: "NATIVE_CHROME" };
   const provider = { providerName: "Example Park Golf Course", sheetTitle: "Example East", providerAddress: "10 Example Rd, Example, NY 12345, US", facilityId: 12345, scheduleId: 456, bookingClassId: 12 };
   const publicScope = standardPublic ? { inventoryScope: "STANDARD_PUBLIC_CLASS_V1", publicCatalogSha256: "c".repeat(64) } : {};
-  const body = { kind: "OFFICIAL_FOREUP_ROUTE_OWNERSHIP_V1", ...source, ...provider, ...publicScope, sourceWitnessSha256: foreupOwnershipDigest(source), providerWitnessSha256: foreupOwnershipDigest({ ...provider, phone: source.publicCoursePhone, timeZone: source.timeZone }) };
+  const body = { kind: "OFFICIAL_FOREUP_ROUTE_OWNERSHIP_V1", ...source, ...provider, ...publicScope,
+    ...(contactChain ? { providerDirectoryScope: "SINGLE_CURRENT_COURSE_WITH_OFFICIAL_CONTACT_V1" } : {}),
+    sourceWitnessSha256: foreupOwnershipDigest(source), providerWitnessSha256: foreupOwnershipDigest({ ...provider, phone: source.publicCoursePhone, timeZone: source.timeZone }) };
   const proof = foreupOfficialRouteOwnershipProofSchema.parse({ ...body, semanticDigest: foreupOwnershipDigest(body) });
   const adapter = { family: "FOREUP", facilityId: 12345, scheduleId: 456, bookingClassId: 12, ...publicScope, officialRouteOwnershipProof: proof };
   const proposal = { schemaVersion: 1, engine: "EXISTING_ADAPTER", target: job.request.target, source: { officialUrl: official, bookingUrl: booking, venueName: job.request.identity.name, venueAddress: job.request.identity.address, timeZone: job.request.input.timeZone, providerFamily: "FOREUP" }, adapter: { ...adapter, officialRouteOwnershipProof: { forged: true } } };
-  const observation = createDiscoveryAdapterObservation(job, booking, adapter, official)!;
-  return { job, adapter, proof, proposal, observation, official, booking };
+  const observation = createDiscoveryAdapterObservation(job, booking, adapter, document)!;
+  return { job, adapter, proof, proposal, observation, official, booking, document };
 }
-const bind = (f: ReturnType<typeof fixture>, observation = f.observation) => bindDiscoveryRecipeIdentity(f.proposal, f.job, observation, f.official);
+const bind = (f: ReturnType<typeof fixture>, observation = f.observation) => bindDiscoveryRecipeIdentity(f.proposal, f.job, observation, f.document);
 describe("current native ForeUP ownership bridge", () => {
+  it.each([false, true])("retains fresh official contact-chain ownership with canonical redirect %s", redirected => {
+    const f = fixture(false, true, true, redirected), bound = bind(f);
+    expect(bound.adapter.officialRouteOwnershipProof).toEqual(f.proof);
+    expect(parseAccessRecipe(bound)).toEqual(bound);
+    expect(inspectedAdapterSourceEvidence(bound, f.job, f.observation, true, f.document))
+      .toEqual({ officialUrl: f.official, observedBookingUrl: f.booking });
+    expect(bindDiscoveryRecipeIdentity(f.proposal, f.job).adapter).not.toHaveProperty("officialRouteOwnershipProof");
+  });
+  it.each(["missing-contact", "missing-entry", "contact-origin", "contact-query", "entry-route", "directory-scope", "source-hash", "root-redirect"])(
+    "rejects changed contact-chain %s before adopting the observed proof", change => {
+      const f = fixture(false, true, true, true), observation = structuredClone(f.observation), proof = observation.adapter.officialRouteOwnershipProof;
+      if (change === "missing-contact") delete proof.officialContactPageUrl;
+      if (change === "missing-entry") delete proof.officialBookingEntryUrl;
+      if (change === "contact-origin") proof.officialContactPageUrl = "https://foreign.example/contact";
+      if (change === "contact-query") proof.officialContactPageUrl += "?member=1";
+      if (change === "entry-route") proof.officialBookingEntryUrl = proof.officialBookingEntryUrl.replace("12345/456", "12345/999");
+      if (change === "directory-scope") proof.providerDirectoryScope = "UNREVIEWED";
+      if (change === "source-hash") proof.sourceWitnessSha256 = "d".repeat(64);
+      if (change === "root-redirect") delete proof.rootDocumentProof;
+      expect(bind(f, observation).adapter).not.toHaveProperty("officialRouteOwnershipProof");
+    });
   it("preserves the fixed inspector's Standard Public scope and catalog digest on an existing selected route", () => {
     const f = fixture(false, true), bound = bind(f);
     expect(bound.adapter.officialRouteOwnershipProof).toEqual(f.proof);

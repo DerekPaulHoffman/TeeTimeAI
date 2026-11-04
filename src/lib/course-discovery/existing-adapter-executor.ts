@@ -706,12 +706,16 @@ export async function inspectExistingAdapter(source: Source, deps: Dependencies)
   try { family = familyForSource(source); }
   catch (error) {
     if (!(error instanceof Error) || error.message !== "UNSUPPORTED_ADAPTER_SOURCE") throw error;
-    if (!source.officialUrl || !isSafeRecipeUrl(source.officialUrl) ||
-        new URL(source.bookingUrl).origin !== new URL(source.officialUrl).origin) throw error;
-    if (deps.requestedInput?.durationMinutes) {
+    if (!source.officialUrl || !isSafeRecipeUrl(source.officialUrl)) throw error;
+    // SSA independently re-reads the exact canonical root and its public
+    // booking edge. Its bounded reader permits only the same host's www alias;
+    // keep the other self-hosted adapter's same-origin boundary unchanged.
+    if (deps.requestedInput?.durationMinutes &&
+        new URL(source.bookingUrl).hostname.replace(/^www\./u, "") === new URL(source.officialUrl).hostname.replace(/^www\./u, "")) {
       const publicRental = await inspectSimplySchedule({ ...source, officialUrl: source.officialUrl }, deps.requestedInput.durationMinutes, deps);
       if (publicRental) return { adapter: publicRental };
     }
+    if (new URL(source.bookingUrl).origin !== new URL(source.officialUrl).origin) throw error;
     // The observed self-hosted page must prove its venue and Amelia bootstrap
     // before the fixed inspector can admit any plugin API request.
     return { adapter: await inspectAmelia({ ...source, officialUrl: source.officialUrl }, deps) };

@@ -152,8 +152,11 @@ function foreupOwnershipData(proof, adapter, job, contextUrl) {
   try {
     const sourceKeys = ["officialUrl","officialDocumentUrl","bookingUrl","venueName","officialTitle","publicLocationName","canonicalAddress","timeZone","publicCoursePhone","sourceWitnessSha256","requiredCapability","warmTransport"];
     const compactFacility = proof?.contactScope === "CANONICAL_ROOT_COMPACT_CONTACT_FACILITY_V1";
+    const contactChain = Boolean(proof?.officialContactPageUrl && proof?.officialBookingEntryUrl);
+    if (contactChain) sourceKeys.push("officialContactPageUrl", "officialBookingEntryUrl");
     const keys = [...sourceKeys,"kind","providerName","sheetTitle","providerAddress","facilityId","scheduleId","bookingClassId","providerWitnessSha256","semanticDigest"];
-    if (!proof || Object.keys(proof).some(key => ![...keys,"rootDocumentProof","contactScope","inventoryScope","publicCatalogSha256"].includes(key)) || keys.some(key => !Object.hasOwn(proof,key)) ||
+    if (!proof || Object.keys(proof).some(key => ![...keys,"rootDocumentProof","contactScope","inventoryScope","publicCatalogSha256","providerDirectoryScope"].includes(key)) || keys.some(key => !Object.hasOwn(proof,key)) ||
+        proof.providerDirectoryScope !== undefined && (proof.providerDirectoryScope !== "SINGLE_CURRENT_COURSE_WITH_OFFICIAL_CONTACT_V1" || !contactChain || compactFacility) ||
         Object.hasOwn(proof,"contactScope") && !compactFacility ||
         Boolean(proof.inventoryScope) !== Boolean(proof.publicCatalogSha256) ||
         proof.inventoryScope !== undefined && (proof.inventoryScope !== "STANDARD_PUBLIC_CLASS_V1" || !/^[a-f0-9]{64}$/u.test(proof.publicCatalogSha256 ?? "") ||
@@ -173,6 +176,15 @@ function foreupOwnershipData(proof, adapter, job, contextUrl) {
         Number(route[1]) !== proof.facilityId || !compactFacility && Number(route[2]) !== proof.scheduleId ||
         compactFacility && (proof.officialUrl !== proof.officialDocumentUrl || proof.rootDocumentProof !== undefined)) return false;
     if (proof.officialUrl === proof.officialDocumentUrl ? proof.rootDocumentProof !== undefined : !nativeRootDocumentData(proof.rootDocumentProof,proof.officialUrl,proof.officialDocumentUrl)) return false;
+    if (contactChain) {
+      const contact = new URL(proof.officialContactPageUrl), entry = new URL(proof.officialBookingEntryUrl);
+      const contactRoute = /^\/index\.php\/booking\/([1-9]\d{0,9})\/([1-9]\d{0,9})\/?$/u.exec(entry.pathname);
+      if (compactFacility || !safeObservedUrl(contact.href) || contact.href !== proof.officialContactPageUrl ||
+          contact.origin !== new URL(proof.officialDocumentUrl).origin || contact.pathname === "/" || contact.search || contact.hash ||
+          !safeObservedUrl(entry.href) || entry.href !== proof.officialBookingEntryUrl || entry.origin !== url.origin || entry.search ||
+          !["", "#teetimes", "#/teetimes"].includes(entry.hash) || !contactRoute ||
+          Number(contactRoute[1]) !== proof.facilityId || Number(contactRoute[2]) !== proof.scheduleId) return false;
+    }
     const source = Object.fromEntries(sourceKeys.filter(key => key !== "sourceWitnessSha256").map(key => [key,proof[key]]));
     if (compactFacility) source.contactScope = proof.contactScope;
     if (proof.rootDocumentProof) source.rootDocumentProof = proof.rootDocumentProof;
