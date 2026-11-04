@@ -20,6 +20,18 @@ function fixture(change: Partial<DiscoveryBrowserSnapshot> = {}) {
   return { execute, readOfficialIdentityPage, close, createSession };
 }
 describe("fixed native official source reader", () => {
+  it("uses the private source GET profile only when requested by the identity reader", async () => {
+    for (const enabled of [false, true]) {
+      const mocked = fixture();
+      await readNativeOfficialIdentityPage(source, source.officialUrl, new Date(Date.now() + 30000),
+        { ...mocked, ...(enabled ? { sourceInspectionOnly: true as const } : {}) });
+      const dependencies = (mocked.createSession.mock.calls as unknown as Array<[unknown, Record<string, unknown>]>)[0]?.[1];
+      expect(dependencies).toHaveProperty("browserTransport", "NATIVE_CHROME");
+      if (enabled) expect(dependencies).toHaveProperty("sourceInspectionOnly", true);
+      else expect(dependencies).not.toHaveProperty("sourceInspectionOnly");
+      expect(mocked.close).toHaveBeenCalledOnce();
+    }
+  });
   it.each([35_000, 120_000])("starts captured identity freshness after acquisition while respecting the original %ims deadline", async remaining => {
     const start = Date.now(); let clock = start;
     const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
@@ -216,17 +228,18 @@ describe.runIf(existsSync(executablePath))("fresh native official identity with 
       expect(browsers.every(browser => !browser.isConnected())).toBe(true);
     } finally { for (const browser of browsers) await browser.close(); native.mockRestore(); routing.mockRestore(); proxy.mockRestore(); }
   }, 30_000);
-  it.each(["visible", "hidden address", "missing address", "changed document", "hidden phone"] as const)(
+  it.each(["visible", "hidden address", "missing address", "changed document", "hidden phone", "large inert payload", "large hidden address"] as const)(
     "retains strict raw/rendered/phone proof while ancillary scripts remain pending: %s", async mode => {
       // Every browser read is fulfilled in memory. A dead loopback proxy and
       // an exact URL fence make an accidental external provider read fail.
       const assets = ["https://example.org/pending-one.js", "https://example.org/pending-two.js"];
       let release!: () => void;
       const pending = new Promise<void>(resolve => { release = resolve; });
-      const address = mode === "missing address" ? "" : `<div${mode === "hidden address" ? ' style="opacity:0"' : ""}><address>10 Harbor Drive, Example, NY 12345, USA</address></div>`;
+      const address = mode === "missing address" ? "" : `<div${["hidden address", "large hidden address"].includes(mode) ? ' style="opacity:0"' : ""}><address>10 Harbor Drive, Example, NY 12345, USA</address></div>`;
       const html = `<html><head><title>${source.venueName}</title><link rel="icon" href="data:,"></head><body><h1>${source.venueName}</h1>` +
         address + `<a href="${source.bookingUrl}">Tee Times</a><div${mode === "hidden phone" ? ' style="opacity:0"' : ""}>` +
         '<a class="course-contact" href="tel:+1-916-555-4653">916-555-4653</a></div>' +
+        (mode.startsWith("large ") ? `<script>/*${"x".repeat(700000)}*/</script>` : "") +
         assets.map(url => `<script async src="${url}"></script>`).join("") + "</body></html>";
       const proxy = vi.spyOn(nativeBrowser, "createNativePublicBrowserProxy").mockResolvedValue({ server: "http://127.0.0.1:9",
         close: async () => {}, allowHostConnections: () => {}, cancelHostConnections: async () => {},
@@ -260,7 +273,7 @@ describe.runIf(existsSync(executablePath))("fresh native official identity with 
         const reading = readNativeOfficialIdentityPage(source, source.officialUrl, new Date(Date.now() + 30_000), {
           createSession, requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
         });
-        if (["hidden address", "missing address", "changed document"].includes(mode))
+        if (["hidden address", "large hidden address", "missing address", "changed document"].includes(mode))
           await expect(reading).rejects.toThrow("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
         else {
           const page = await reading;

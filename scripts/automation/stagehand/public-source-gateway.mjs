@@ -83,8 +83,15 @@ export function isCpsPublicSearchDocument(value) {
   try {
     if (typeof value !== 'string' || value.length > 2048) return false;
     const url = new URL(value), tenant = /^([a-z](?:[a-z0-9-]{0,61}[a-z0-9])?)\.cps\.golf$/u.exec(url.hostname)?.[1];
-    return Boolean(tenant && !/^(?:www|api|admin|auth|login|account|private|member|test|staging)$/u.test(tenant) &&
-      url.href === value && url.protocol === 'https:' && !url.username && !url.password && !url.port && !url.search && !url.hash &&
-      ['/', '/onlineresweb/search-teetime'].includes(url.pathname));
+    if (!(tenant && !/^(?:www|api|admin|auth|login|account|private|member|test|staging)$/u.test(tenant) &&
+      url.href === value && url.protocol === 'https:' && !url.username && !url.password && !url.port && !url.hash &&
+      ['/', '/onlineresweb/search-teetime'].includes(url.pathname))) return false;
+    if (!url.search) return true;
+    if (url.pathname !== '/onlineresweb/search-teetime') return false;
+    const fields=url.search.slice(1).split('&');
+    if(fields.length!==2||fields.some(field=>!/^(?:TeeOffTimeMin|TeeOffTimeMax)=(?:0|[1-9]\d?)(?:\.\d{1,15})?$/u.test(field))||
+      new Set([...url.searchParams.keys()]).size!==2)return false;
+    const min=Number(url.searchParams.get('TeeOffTimeMin')),max=Number(url.searchParams.get('TeeOffTimeMax'));
+    return min>=0&&min<=max&&max<24;
   } catch { return false; }
 }

@@ -154,7 +154,7 @@ export function collectNativeOfficialPublicMetadata(input: string | { venueName:
     let group: Element | null = anchor.parentElement, depth = 0, contactGroup = false;
     while (group && group !== document.body && depth++ < 8) {
       if (Array.from(group.querySelectorAll('h1,h2,h3,h4,h5,h6')).some(heading => cms.visible(heading) &&
-          heading.textContent?.replace(/\s+/gu, ' ').trim().toLowerCase() === 'contact us')) { contactGroup = true; break; }
+          /^(?:contact us|visit)$/iu.test(heading.textContent?.replace(/\s+/gu, ' ').trim() ?? ''))) { contactGroup = true; break; }
       group = group.parentElement;
     }
     if (!contactGroup) continue;

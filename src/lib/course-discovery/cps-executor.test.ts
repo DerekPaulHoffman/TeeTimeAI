@@ -1,5 +1,8 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
+import type { ClientRequest, IncomingMessage } from "node:http";
 import { createAddressPinnedPublicFetchTransport } from "@/lib/automation/address-pinned-public-fetch";
 import { CPS_API_PATH, CPS_PUBLIC_BUILD, parseCpsCatalog, parseCpsConfiguration, parseCpsOptions } from "./cps-source";
 import { cpsAvailabilityQuery, cpsBootstrapReadAllowed, cpsLocalInstant, executeCps, inspectCps, normalizeCpsAvailability, decodeCpsOfficialHtml, type CpsDependencies } from "./cps-executor";
@@ -10,6 +13,17 @@ const source = { officialUrl: "https://www.thebobgc.com/", bookingUrl: "https://
   venueAddress: "5370 Schenley Dr, Pittsburgh, PA 15217, USA", timeZone: "America/New_York" };
 const input = { date: "2026-10-23", players: 2, startTime: "08:00", endTime: "18:00", timeZone: source.timeZone };
 const uuid = "00000000-0000-4000-8000-000000000001";
+function ownedBodyLimitTransport() {
+  return createAddressPinnedPublicFetchTransport({ parseUrl: value => new URL(value), maxResponseBytes: 5, timeoutMs: 1000 }, {
+    resolveAddresses: async () => [{ address: "93.184.216.34", family: 4 }],
+    requestNode: (_url, _options, onResponse) => Object.assign(new EventEmitter(), { end() {
+      queueMicrotask(() => {
+        const incoming = Object.assign(new PassThrough(), { headers: { "content-length": "6" }, statusCode: 200, statusMessage: "OK" });
+        onResponse(incoming as IncomingMessage); incoming.end("large");
+      });
+    } }) as ClientRequest,
+  });
+}
 const config = () => ({ siteName: "thebobgcpa", onlineApi: "https://thebobgcpa.cps.golf" + CPS_API_PATH,
   authorityBaseUrl: "https://thebobgcpa.cps.golf/identityapi", clientId: "public-client", websiteId: "00000000-0000-0000-0000-000000000000",
   apiKey: "syntheticPublishedKey", buildNumber: CPS_PUBLIC_BUILD });
@@ -162,8 +176,25 @@ describe("CPS fixed fresh public reads", () => {
       expect(fixture.active).toBe(0);
     }
   });
-  it("revalidates native postal contacts and full catalog on every cold/warm call outside the provider lease, preserving semantic identity across nonces", async () => {
-    const fixture=setup((url,_init,normal)=>url.hostname==="www.thebobgc.com"?new Response("public transport rejected",{status:403}):
+  it.each(["forged limit", "missing Chrome", "missing phone"])("does not enter native size-limit recovery for %s", async reason => {
+    const limited = ownedBodyLimitTransport();
+    const fixture = setup((url, _init, normal) => {
+      if (url.hostname !== "www.thebobgc.com") return normal();
+      if (reason === "forged limit") throw Object.assign(new Error("Official site page is too large to inspect safely"), { code: "OFFICIAL_SITE_BODY_LIMIT" });
+      return limited(url);
+    });
+    let nativeCalls = 0;
+    await expect(inspectCps(source, { ...fixture.deps,
+      localCapabilities: reason === "missing Chrome" ? [] : ["LOCAL_CHROME"],
+      trustedContext: reason === "missing phone" ? {} : { canonicalCoursePhone: "+14126226959" },
+      readNativeOfficialPage: async () => { nativeCalls++; throw Error("UNEXPECTED_NATIVE_READ"); },
+    })).rejects.toThrow("Official site page is too large to inspect safely");
+    expect(nativeCalls).toBe(0); expect(fixture.reads.some(read => read.url.hostname.endsWith("cps.golf"))).toBe(false);
+    expect(fixture.active).toBe(0);
+  });
+  it.each(["HTTP rejection", "owned body limit"])("revalidates native contacts and full catalog after %s on cold/warm calls outside the provider lease", async reason => {
+    const limited = ownedBodyLimitTransport();
+    const fixture=setup((url,_init,normal)=>url.hostname==="www.thebobgc.com"?(reason === "owned body limit" ? limited(url) : new Response("public transport rejected",{status:403})):
       url.pathname.endsWith("/Configuration")?json({...config(),buildNumber:"26.3.0.34794395074\n",apiKey:undefined}):normal());
     let calls=0,wrongPhone=false;
     const contact:PublicCourseContactBlock={venueName:source.venueName,street:"5370 Schenley Drive",locality:"Pittsburgh",region:"PA",postalCode:"15218",country:"US",phone:"412-622-6959"};

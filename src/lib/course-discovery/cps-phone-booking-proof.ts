@@ -109,7 +109,7 @@ function rawContact(html: string, expectedVenue: string, renderedContacts: Array
   if (anchors.length < 1 || anchors.length > 100 || !headings.some(name => fullCourseName(name) === expectedVenue)) return fail();
   const hasContactHeading = (node: Node, depth = 0): boolean => {
     if (depth > 8 || element(node) && excluded(node)) return false;
-    if (element(node) && /^h[1-6]$/u.test(node.tagName) && text(node).replace(/\s+/gu, " ").trim().toLowerCase() === "contact us") return true;
+    if (element(node) && /^h[1-6]$/u.test(node.tagName) && /^(?:contact us|visit)$/iu.test(text(node).replace(/\s+/gu, " ").trim())) return true;
     return "childNodes" in node && node.childNodes.some(child => hasContactHeading(child, depth + 1));
   };
   // Raw HTML cannot determine computed CSS visibility. Bind only the exact
@@ -164,7 +164,10 @@ export function bindCpsPhoneBookingProof(source: Source, page: OfficialIdentityP
   const multiCourseName = selected && cpsOfficialSelectedCourseName(source.venueName, selected.descriptor);
   if (selected && fullCourseName(selected.descriptor) !== fullCourseName(providerVenueName) &&
       multiCourseName !== fullCourseName(providerVenueName)) return fail();
-  if (fullCourseName(providerVenueName) !== fullCourseName(source.venueName) &&
+  const providerBase=fullCourseName(providerVenueName).replace(/\s+golf (?:course|club|preserve)$/u,""),
+    canonicalBase=fullCourseName(source.venueName).replace(/\s+golf (?:course|club|preserve)$/u,"");
+  const exactCanonicalBase=canonicalBase.replace(/\s/gu,"").length>=8&&providerBase===canonicalBase;
+  if (fullCourseName(providerVenueName) !== fullCourseName(source.venueName) && !exactCanonicalBase &&
       (!multiCourseName || fullCourseName(providerVenueName) !== multiCourseName)) return fail();
   return cpsPhoneBookingProofSchema.parse({ kind: "OFFICIAL_PHONE_BOOKING_LINK", officialUrl: source.officialUrl, officialPageUrl: page.url,
     bookingUrl: source.bookingUrl, tenant: catalog.tenant, venueName: source.venueName, canonicalAddressInput: verified.canonicalAddressInput,

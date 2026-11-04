@@ -2,7 +2,7 @@ import test from 'node:test';import assert from 'node:assert/strict';
 import{createDiscoveryBrowser}from'../course-discovery-worker.mjs';
 const base={cwd:'C:/fixture',deadlineAt:new Date(Date.now()+60000).toISOString(),initialUrls:['https://official.example/']};
 test('only fixed inspection can request an exact public CPS document snapshot',()=>{
- for(const value of['https://public-course.cps.golf/','https://public-course.cps.golf/onlineresweb/search-teetime']){
+ for(const value of['https://public-course.cps.golf/','https://public-course.cps.golf/onlineresweb/search-teetime','https://public-course.cps.golf/onlineresweb/search-teetime?TeeOffTimeMin=0&TeeOffTimeMax=23.999722222222225']){
   let spawned;createDiscoveryBrowser({...base,fixedInspection:true,fixedCpsSourceDocumentUrl:value,processFactory:o=>{spawned=o;return{};}});
   const n=spawned.args.indexOf('--fixed-cps-source-document');assert.ok(n>=0);assert.equal(spawned.args[n+1],value);
   assert.equal(spawned.environment.COURSE_DISCOVERY_FIXED_INSPECTION,'1');

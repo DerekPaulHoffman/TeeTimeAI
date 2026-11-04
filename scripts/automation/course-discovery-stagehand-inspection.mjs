@@ -6,6 +6,7 @@ import { STAGEHAND_SOURCE_MODE, canonicalStagehandData as canonical, stagehandDa
 import { observedBookingSourceCandidates, nativeLinkSource, corroboratedNativeLink, nativeFrameNavigations, nativeIntermediaryNavigations, nativeGestureNavigations, nativeHistoryNavigations, nativeLegacyGatewayLandings } from "./stagehand/source-provenance.mjs";
 import { safeTeeItUpDelegationDiagnostic, safeFixedAdapterReadDiagnostic, safeFixedInspectionSourceDiagnostic, safeNativeMainDocumentContinuity } from "./course-discovery-worker.mjs";
 import { z } from "zod";
+import { isCpsPublicSearchDocument } from "./stagehand/public-source-gateway.mjs";
 import { setTimeout as waitForFrame } from "node:timers/promises";
 import { projectNativeRouterFailure, safeNativeRouterFailure } from "./stagehand/source-diagnostic.mjs";
 const fail = code => discoveryError(code), HYBRID_SOURCE_DISCOVERY = STAGEHAND_SOURCE_MODE;
@@ -144,21 +145,7 @@ function observedSourceEvidence(report, identity) {
   if (!observed.has(official)) throw fail("FRAMEWORK_OFFICIAL_SOURCE_NOT_OBSERVED");
 }
 export function isReviewedCpsSourceEntry(value) {
-  if (!publicUrl(value)) return false;
-  try {
-    const url = new URL(value), match = /^([a-z][a-z0-9-]*)\.cps\.golf$/u.exec(url.hostname);
-    if (url.href !== value || url.protocol !== 'https:' || url.username || url.password || url.port || url.hash || !match ||
-        !/^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(match[1]) ||
-        /^(?:www|api|admin|auth|login|account|private|member|test|staging)$/u.test(match[1]) ||
-        !['/', '/onlineresweb/search-teetime'].includes(url.pathname)) return false;
-    if (!url.search) return true;
-    if (url.pathname !== '/onlineresweb/search-teetime') return false;
-    const fields = url.search.slice(1).split('&');
-    if (fields.length !== 2 || fields.some(field => !/^(?:TeeOffTimeMin|TeeOffTimeMax)=(?:0|[1-9]\d?)(?:\.\d{1,15})?$/u.test(field)) ||
-        new Set([...url.searchParams.keys()]).size !== 2) return false;
-    const min = Number(url.searchParams.get('TeeOffTimeMin')), max = Number(url.searchParams.get('TeeOffTimeMax'));
-    return min >= 0 && min <= max && max < 24;
-  } catch { return false; }
+  return Boolean(publicUrl(value)&&isCpsPublicSearchDocument(value));
 }
 
 export function observedInspectionPath(report, officialUrl, bookingUrl) {
@@ -393,7 +380,7 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
     const inspectionSignal = AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(Math.max(1, deadline - now()))]);
     browser = await worker.createDiscoveryBrowser({ cwd, deadlineAt: new Date(deadline).toISOString(),
       fixedInspection: true, ...(frameWitness ? { fixedInspectionFrameWitness: frameWitness } : {}),
-      ...(earlyCpsContext && !new URL(recipe.source.bookingUrl).search ? { fixedCpsSourceDocumentUrl: recipe.source.bookingUrl } : {}),
+      ...(earlyCpsContext ? { fixedCpsSourceDocumentUrl: recipe.source.bookingUrl } : {}),
       initialUrls: [job.request.identity.officialUrl], timeZone: job.request.input.timeZone,
       requestedInput: job.request.input,
       ...(job.request.trustedContext!==undefined?{trustedContext:job.request.trustedContext}:{}),

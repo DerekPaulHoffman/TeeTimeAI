@@ -63,7 +63,7 @@ export function parsePublicCourseContactBlocks(html: string, venueName: string):
 }
 export function hasInertPublicBookingLink(html:string,pageUrl:string,bookingUrl:string){
   let found=false,count=0;
-  const visit=(node:Node,depth=0)=>{if(depth>64||++count>20_000)throw new Error("CPS_POSTAL_CONFLICT_UNVERIFIED");if(element(node)){if(excluded(node))return;if(node.tagName==="a"&&/\b(?:tee\s*times?|book(?:\s+a)?\s+tee\s*time|reservations?)\b/iu.test(text(node))){try{if(new URL(attr(node,"href"),pageUrl).href===bookingUrl)found=true;}catch{/* No authority from malformed markup. */}}}if("childNodes"in node)node.childNodes.forEach(child=>visit(child,depth+1));};
+  const visit=(node:Node,depth=0)=>{if(depth>64||++count>20_000)throw new Error("CPS_POSTAL_CONFLICT_UNVERIFIED");if(element(node)){if(excluded(node))return;if(node.tagName==="a"&&(/\b(?:tee\s*times?|book(?:\s+a)?\s+tee\s*time|reservations?)\b/iu.test(text(node))||/^play\s+golf$/iu.test(text(node).trim()))){try{if(new URL(attr(node,"href"),pageUrl).href===bookingUrl)found=true;}catch{/* No authority from malformed markup. */}}}if("childNodes"in node)node.childNodes.forEach(child=>visit(child,depth+1));};
   visit(parse(html));return found;
 }
 

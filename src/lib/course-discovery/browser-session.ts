@@ -1,8 +1,10 @@
 import { collectNativeOfficialPublicMetadata } from "./public-document-metadata";
+import { isCpsPublicSearchDocument } from "../../../scripts/automation/stagehand/public-source-gateway.mjs";
 import { revealNativeVenueHeading, revealNativeVenueAddress } from "./native-venue-heading";
 import { isSafePublicSwiftCatalogRedirect } from "./public-bootstrap-read-url";
 import { isSwiftAnonymousPlaceholderRead } from "./swift-public-read-policy";
 import { observedPublicBookingIntermediary } from "./public-booking-intermediary";
+import { officialIdentityHtml } from "./official-identity-html";
 import { classifyPublicEntryDisclosure, revalidatePublicEntryDisclosure, type PublicEntryDisclosure, type PublicEntryDisclosureEvidence } from "./public-entry-disclosure";
 import { createHash, randomUUID } from "node:crypto";
 import { chargeDelegatedReadBudget, delegatedProxyAllocation, settleDelegatedProxyBudget, type DelegatedReadBudget } from "./teeitup-delegated-booking-context";
@@ -310,7 +312,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
   const fixedCpsSourceDocumentUrl = deps.fixedCpsSourceDocumentUrl;
   if (fixedCpsSourceDocumentUrl !== undefined) {
     const parsed = parseCpsSource(fixedCpsSourceDocumentUrl), url = parsed && new URL(fixedCpsSourceDocumentUrl);
-    if (deps.browserTransport !== "NATIVE_CHROME" || !url || url.href !== fixedCpsSourceDocumentUrl || url.search || url.hash)
+    if (deps.browserTransport !== "NATIVE_CHROME" || !url || !isCpsPublicSearchDocument(fixedCpsSourceDocumentUrl))
       throw new Error("FIXED_CPS_SOURCE_DOCUMENT_SCOPE_INVALID");
   }
   if (fixedInspectionFrameWitness && (deps.browserTransport !== "NATIVE_CHROME" || input.venueOfficialUrl !== fixedInspectionFrameWitness.officialUrl))
@@ -876,17 +878,19 @@ export async function createCourseDiscoveryBrowserSession(input: {
           ezWitness.token = /^text\/html(?:;|$)/iu.test(reply.headers["content-type"] ?? "") ? ezlinks.observeDocument(url, reply.status) : undefined;
         }
       }
-      // Retain only the bounded, successfully read official document. Its raw
-      // semantic markup is reproducible on warm reads; page.content() contains
-      // transient browser mutations and must not define the saved witness.
+      // Retain only a bounded, successfully read official document. Large
+      // script-heavy pages may discard inert payloads while retaining complete
+      // identity markup. Never use transient page.content() as the witness.
       const officialDocumentProof = bookingParents.authorizeParent(url.href);
       if (deps.captureDelegatedDocument && nativeProxy && request.method() === "GET" && request.isNavigationRequest() && request.frame() === page.mainFrame() &&
           reply.status === 200 && reply.buffer.length <= 600_000 && /^text\/html(?:;|$)/iu.test(reply.headers["content-type"] ?? ""))
         delegatedIdentityDocument = { url: url.href, html: reply.buffer.toString("utf8") };
       if (request.isNavigationRequest() && request.frame() === page.mainFrame() && officialDocumentProof?.kind === "VERIFIED_OFFICIAL_DOCUMENT" &&
           reply.status === 200 &&
-          reply.buffer.length <= 600_000 && /^text\/html(?:;|$)/iu.test(reply.headers["content-type"] ?? ""))
-        officialIdentityDocument = { url: url.href, html: reply.buffer.toString("utf8"), officialDocumentProof };
+          /^text\/html(?:;|$)/iu.test(reply.headers["content-type"] ?? "")) {
+        const identityHtml = officialIdentityHtml(reply.buffer);
+        if (identityHtml !== undefined) officialIdentityDocument = { url: url.href, html: identityHtml, officialDocumentProof };
+      }
       if (["GET", "HEAD"].includes(method) && request.isNavigationRequest() && request.resourceType() === "document" &&
           reply.status >= 200 && reply.status < 400 && isSafeRecipeUrl(url.href)) allowedNavigation.add(url.href);
       responseBytes += reply.buffer.length;

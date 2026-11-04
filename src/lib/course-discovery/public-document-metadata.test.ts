@@ -34,6 +34,15 @@ it("collects only visible Contact Us phone anchors outside forms for address-fre
  expect(overflow.contactPhoneLinksOmitted).toBe(true);
  expect(overflow.phoneTextsOmitted).toBe(true);
 });
+it("collects a visible Visit section without admitting hidden, form or corporate phone anchors",()=>{
+ setup('<h4>'+venue+'</h4><footer><div><h6>VISIT</h6><p>10 Example Road, Example, NY 12345</p><a href="tel:916-555-4653">916-555-4653</a></div></footer>'+
+  '<div hidden><h6>VISIT</h6><a href="tel:555-555-5555">555-555-5555</a></div>'+
+  '<form><h6>VISIT</h6><a href="tel:555-555-5555">555-555-5555</a></form>'+
+  '<div class="corporate"><h6>VISIT</h6><a href="tel:555-555-5555">555-555-5555</a></div>');
+ const got=collectNativeOfficialPublicMetadata(venue);
+ expect(got.contactPhoneLinks).toEqual([{href:"tel:916-555-4653",text:"916-555-4653"}]);
+ expect(got.contactPhoneLinksOmitted).toBe(false);
+});
 it("pairs only bounded computed-visible public link labels with their exact href",()=>{
  setup('<h1>Harbor Country Club</h1><a href="https://harbor.cps.golf/">Championship Course Tee Times</a>'+
    '<a href="https://harbor-par3.cps.golf/">Par 3 Course Tee Times</a>'+

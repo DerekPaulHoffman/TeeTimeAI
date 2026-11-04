@@ -258,7 +258,7 @@ export function parseCpsCatalog(value: unknown, options: CpsOptions, source: Cps
     return cpsMetadataSchema.parse({ ...metadata, officialEntryProof: bindCpsOfficialEntryProof(nativeContact.officialEntry, source, nativeContact.canonicalCoursePhone,
       metadata, courses[0].courseName, venue.address) });
   }
-  if (publicBuild === CPS_VENUE_PUBLIC_CATALOG_BUILD) {
+  if (publicBuild === CPS_VENUE_PUBLIC_CATALOG_BUILD && !(nativeContact?.phoneBooking && courses.length > 1)) {
     // In this exact reviewed public client OnlineCourses populates the course
     // selector; GetAllOptions also contains unselectable legacy options. Admit
     // the complete explicit one-sheet public set, never a default/order/name
@@ -296,13 +296,19 @@ export function parseCpsCatalog(value: unknown, options: CpsOptions, source: Cps
     const exactSingle=nativeContact.phoneBooking&&courses.length===1&&declared.length===1&&
       cpsCourseNameBase(courses[0].courseName)===base;
     const selectedAnchor=nativeContact.phoneBooking ? selectedCpsOfficialBookingAnchor(source,nativeContact.page) : undefined;
+    // The reviewed unpaged catalog may publish a canonical main course beside
+    // a separately named short course. A fresh official venue/phone/link proof
+    // plus one exact canonical base name selects it without using order or a
+    // default. Explicit official course labels retain their existing authority.
+    const exactNamed=nativeContact.phoneBooking&&publicBuild===CPS_VENUE_PUBLIC_CATALOG_BUILD&&!selectedAnchor&&
+      !hasCpsObservedSelectedCourseLabel(source,nativeContact.page) ? courses.filter(row=>cpsCourseNameBase(row.courseName)===base) : [];
     if(exactSingle&&hasCpsObservedSelectedCourseLabel(source,nativeContact.page)&&!selectedAnchor)
       cpsFailure("ADAPTER_IDENTITY_MISMATCH");
     const descriptorName=selectedAnchor&&cpsOfficialSelectedCourseName(source.venueName,selectedAnchor.descriptor);
     if(exactSingle&&selectedAnchor&&fullCourseName(selectedAnchor.descriptor)!==fullCourseName(courses[0].courseName)&&
        descriptorName!==fullCourseName(courses[0].courseName))cpsFailure("ADAPTER_IDENTITY_MISMATCH");
     const matching=exactSingle ? courses : nativeContact.phoneBooking ?
-      descriptorName ? courses.filter(row=>fullCourseName(row.courseName)===descriptorName) : [] :
+      descriptorName ? courses.filter(row=>fullCourseName(row.courseName)===descriptorName) : exactNamed.length===1 ? exactNamed : [] :
       courses.filter(row=>cpsCourseNameBase(row.courseName)===base);
     if(matching.length!==1)cpsFailure("ADAPTER_IDENTITY_MISMATCH");
     const selected=matching[0],option=options.courseOptions.find(row=>row.courseId===selected.courseId);

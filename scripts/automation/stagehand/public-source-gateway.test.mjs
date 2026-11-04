@@ -40,6 +40,15 @@ test('Reserve a Tee Time is read-only navigation only for exact public ForeUP bo
  for(const delta of[{inForm:true},{visible:false},{rowText:'10:30 AM selected tee time'},{text:'Reserve and pay'},{formAction:href},{navigation:{...evidence.navigation,inlineHandler:true}}])assert.throws(()=>prepareReadOnlyAction(action,{...evidence,...delta},{sourceRoutingOnly:true,currentPageUrl}),/ACTION_TARGET_REJECTED/u);
  for(const url of[href+'?slot=1',href.replace('#/','#/login'),href.replace('/index/19339','/index/19339/123'),href.replace('foreupsoftware.com','foreupsoftware.com.evil.example'),href.replace('19339','2147483648')])assert.equal(isForeupPublicBookingDocument(url),false,url);
 });
+test('CPS document filters retain exact source URLs without admitting slot or account state',()=>{
+ const entry='https://public-course.cps.golf/onlineresweb/search-teetime';
+ for(const query of ['TeeOffTimeMin=0&TeeOffTimeMax=23.999722222222225','TeeOffTimeMax=23&TeeOffTimeMin=0'])
+  assert.equal(isCpsPublicSearchDocument(entry+'?'+query),true);
+ for(const query of ['TeeOffTimeMin=0','TeeOffTimeMin=0&TeeOffTimeMax=24','TeeOffTimeMin=23&TeeOffTimeMax=1',
+  'TeeOffTimeMin=0&TeeOffTimeMin=23','TeeOffTimeMin=0&TeeOffTimeMax=23&slot=7','%54eeOffTimeMin=0&TeeOffTimeMax=23',
+  'TeeOffTimeMin=0&TeeOffTimeMax=23#calendar'])assert.equal(isCpsPublicSearchDocument(entry+'?'+query),false);
+ assert.equal(isCpsPublicSearchDocument('https://public-course.cps.golf/?TeeOffTimeMin=0&TeeOffTimeMax=23'),false);
+});
 test('CPS document choices remain exact current-document witnesses',()=>{
  const pageUrl='https://public-course.cps.golf/',now=Date.now(),witness={kind:'NATIVE_UNIQUE_SUPPORTED_SOURCE',family:'CPS',via:'DOCUMENT',url:pageUrl,pageUrl,observedAt:new Date(now).toISOString(),documentHash:'a'.repeat(64)},scope={pageUrl,startedAt:now-1,deadline:now+1000,now};
  assert.equal(isCpsPublicSearchDocument(pageUrl),true);assert.equal(sourceRoutingUniqueWitness(witness,scope),witness);

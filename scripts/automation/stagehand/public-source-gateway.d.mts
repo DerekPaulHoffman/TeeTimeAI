@@ -1,0 +1,10 @@
+export function isWhooshClubGateway(value: unknown): boolean;
+export function isEzLinksLegacyGateway(value: unknown): boolean;
+export function isCpsLegacyGateway(value: unknown): boolean;
+export function isForeupPublicBookingDocument(value: unknown): boolean;
+export function isAcuityTenantGateway(value: unknown): boolean;
+export function isAcuityPublicCalendarDocument(value: unknown): boolean;
+export function isAcuityLegacyCalendarGateway(value: unknown): boolean;
+export function isPublicSourceGateway(value: unknown): boolean;
+export function isEzLinksPublicSearchDocument(value: unknown): boolean;
+export function isCpsPublicSearchDocument(value: unknown): boolean;

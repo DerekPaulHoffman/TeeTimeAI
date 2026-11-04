@@ -1344,6 +1344,7 @@ describe("regular Stagehand source worker", () => {
     await t.run();
     expect(t.request.mock.calls.map(([value]) => value)).toEqual([{ action: "open", url: official }, { action: "open", url: source }, { action: "inspect_adapter", url: source }]);
     expect(t.client.candidate.mock.calls[0][2].source.bookingUrl).toBe(source);
+    expect(t.browserFactory).toHaveBeenCalledWith(expect.objectContaining({ fixedCpsSourceDocumentUrl: source }));
   });
 
   it.each(["valid", "unobservedRoot", "noPrivateProof", "noHttpChain", "arbitraryHop", "foreignHost", "checkout", "changedReopen", "staleProof", "incompleteReplay"])

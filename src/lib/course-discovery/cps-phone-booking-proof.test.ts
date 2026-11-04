@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { bindCpsPhoneBookingProof, selectedCpsOfficialBookingAnchor } from "./cps-phone-booking-proof";
 import { registerFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
 import { parseAccessRecipe } from "./recipe";
-import { cpsMetadataSchema, parseCpsCatalog, type CpsOptions } from "./cps-source";
+import { CPS_VENUE_PUBLIC_CATALOG_BUILD, cpsMetadataSchema, parseCpsCatalog, type CpsOptions } from "./cps-source";
 import type { OfficialIdentityPage } from "./teeitup-official-identity";
 
 const source = { officialUrl: "https://official.example/", bookingUrl: "https://harbor.cps.golf/", venueName: "Harbor Pointe Golf Course",
@@ -22,6 +22,44 @@ const bind = (current: OfficialIdentityPage, number: unknown = phone) =>
   bindCpsPhoneBookingProof(source, current, number, catalog, source.venueName);
 
 describe("CPS fresh official phone and booking link", () => {
+  it("selects only a unique canonical main course beside a differently named short course in the reviewed complete public catalog", () => {
+    const current=page(), options:CpsOptions={webSiteId:"public-site",reservationOptions:{terminalId:1},courseOptions:[
+      {courseId:7,courseName:"Harbor Pointe",webSiteId:"public-site"},{courseId:8,courseName:"Meadow Short Course",webSiteId:"public-site"}]};
+    const rows=options.courseOptions.map(row=>({courseId:row.courseId,courseName:row.courseName,timezoneId:source.timeZone,
+      websiteId:"public-site",active:true as const,holes:18 as const}));
+    let selected="";
+    const context={page:current,canonicalCoursePhone:phone,phoneBooking:true as const,onSelectedLabel:(name:string)=>{selected=name;}};
+    const metadata=parseCpsCatalog(rows,options,source,context,CPS_VENUE_PUBLIC_CATALOG_BUILD);
+    expect(metadata.courseIds).toEqual([7]);expect(selected).toBe("Harbor Pointe");
+    const proof=bindCpsPhoneBookingProof(source,current,phone,metadata,selected);
+    expect(cpsMetadataSchema.parse({...metadata,officialPhoneBookingProof:proof}).courseIds).toEqual([7]);
+    expect(parseCpsCatalog([...rows].reverse(),options,source,context,CPS_VENUE_PUBLIC_CATALOG_BUILD)).toEqual(metadata);
+    const renamed=rows.map(row=>row.courseId===8?{...row,courseName:"Other Short Course"}:row);
+    const renamedOptions={...options,courseOptions:options.courseOptions.map(row=>row.courseId===8?{...row,courseName:"Other Short Course"}:row)};
+    expect(parseCpsCatalog(renamed,renamedOptions,source,context,CPS_VENUE_PUBLIC_CATALOG_BUILD).catalogHash).not.toBe(metadata.catalogHash);
+    for(const name of ["Harbor Pointe East","Harbor Point","Harbor Pointe Golf Club"]) {
+      const changedRows=rows.map(row=>row.courseId===8?{...row,courseName:name}:row);
+      const changedOptions={...options,courseOptions:options.courseOptions.map(row=>row.courseId===8?{...row,courseName:name}:row)};
+      if(name.endsWith("Golf Club"))expect(()=>parseCpsCatalog(changedRows,changedOptions,source,context,CPS_VENUE_PUBLIC_CATALOG_BUILD)).toThrow();
+      else expect(()=>bindCpsPhoneBookingProof(source,current,phone,metadata,name)).toThrow();
+    }
+    expect(()=>parseCpsCatalog(rows,options,source,context,"25.3.4.21239412485")).toThrow();
+  });
+  it("binds a Visit contact section while retaining canonical phone, venue and exact booking-link checks", () => {
+    const html = markup().replace("CONTACT US", "VISIT");
+    const current = page(html, { headings: [source.venueName, "VISIT"] });
+    expect(bind(current)).toMatchObject({ canonicalCoursePhone: phone, bookingUrl: source.bookingUrl });
+    expect(() => bind(current, "+15085550123")).toThrow("CPS_PHONE_BOOKING_SOURCE_UNVERIFIED");
+    expect(() => bind(page(html.replace("<section>", '<section hidden>'), { headings: [source.venueName, "VISIT"] }))).toThrow();
+    expect(() => bind(page(html.replace(source.bookingUrl, "https://other.cps.golf/"), { headings: [source.venueName, "VISIT"] }))).toThrow();
+  });
+  it("corroborates an exact observed Play Golf source link without admitting another destination or a form", () => {
+    const html = markup().replace("Book a Tee Time", "PLAY GOLF");
+    expect(bind(page(html))).toMatchObject({ bookingUrl: source.bookingUrl });
+    expect(() => bind(page(html.replace(source.bookingUrl, "https://other.cps.golf/")))).toThrow();
+    expect(() => bind(page(html.replace(`<a href="${source.bookingUrl}">PLAY GOLF</a>`,
+      `<form><a href="${source.bookingUrl}">PLAY GOLF</a></form>`)))).toThrow();
+  });
   it("selects one named active course from a larger options response using the fresh official descriptor", () => {
     const selected=`<a href="${source.bookingUrl}">Championship Course Tee Times</a>`;
     const alternate='<a href="https://harbor-par3.cps.golf/">Par 3 Course Tee Times</a>';

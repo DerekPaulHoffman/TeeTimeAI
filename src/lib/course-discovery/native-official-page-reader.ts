@@ -13,6 +13,8 @@ type Session = Pick<Awaited<ReturnType<typeof createCourseDiscoveryBrowserSessio
 type Dependencies = Pick<DiscoveryBrowserSessionDependencies, "requestLease" | "launchBrowser"> & {
   delegatedReadBudget?: DelegatedReadBudget;
   collectPublicCourseContacts?: true;
+  /** Private identity acquisition only; preserves the bounded source GET profile. */
+  sourceInspectionOnly?: true;
   allowCpsPhoneBookingContact?: true;
   allowTeeItUpContactChainRoot?: true;
   /** Private, original WeakMap-attested root; only its exact Contact link may be read. */
@@ -39,6 +41,7 @@ export async function readNativeOfficialIdentityPage(source: OfficialIdentitySou
     venueAddress: source.venueAddress, venueOfficialUrl: source.officialUrl, timeZone: source.timeZone,
     ...(deps.trustedContext === undefined ? {} : { trustedContext: structuredClone(deps.trustedContext) }) },
   { requestLease: deps.requestLease, launchBrowser: deps.launchBrowser, browserTransport: "NATIVE_CHROME",
+    ...(deps.sourceInspectionOnly ? { sourceInspectionOnly: true } : {}),
     ...(deps.delegatedReadBudget ? { delegatedReadBudget: deps.delegatedReadBudget } : {}),
     ...(deps.collectPublicCourseContacts ? { collectPublicCourseContacts: true } : {}),
     ...(deps.allowCpsPhoneBookingContact ? { allowCpsPhoneBookingContact: true } : {}),

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { createAddressPinnedPublicFetchTransport } from "@/lib/automation/address-pinned-public-fetch";
+import { createAddressPinnedPublicFetchTransport, isOwnedOfficialSiteBodyLimitError } from "@/lib/automation/address-pinned-public-fetch";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
 import { getTimeZoneOffsetMinutes } from "@/lib/timezones";
@@ -187,14 +187,14 @@ function createReader(sourceInput: CpsSource, deps: CpsDependencies, date: strin
     }
     if(!savedProof){
       try{await legacyOfficial();return undefined;}catch(error){
-        const eligible=error instanceof Error&&["OFFICIAL_BOOKING_SOURCE_UNVERIFIED","OFFICIAL_IDENTITY_UNVERIFIED","OFFICIAL_BOOKING_SOURCE_MISMATCH","ACCESS_REQUIRED"].includes(error.message);
+        const eligible=isOwnedOfficialSiteBodyLimitError(error)||error instanceof Error&&["OFFICIAL_BOOKING_SOURCE_UNVERIFIED","OFFICIAL_IDENTITY_UNVERIFIED","OFFICIAL_BOOKING_SOURCE_MISMATCH","ACCESS_REQUIRED"].includes(error.message);
         if(!eligible||!deps.localCapabilities?.includes("LOCAL_CHROME")||!normalizeCanonicalCoursePhone(deps.trustedContext?.canonicalCoursePhone))throw error;
       }
     }
     // No provider lease is held while a fresh isolated native source reader
     // takes its own bounded leases. The legacy path/default stays unchanged.
     signal.throwIfAborted();
-    const nativeRead=deps.readNativeOfficialPage??((identity,pageUrl,until,mode?:"POSTAL"|"PHONE_LINK")=>readNativeOfficialIdentityPage(identity,pageUrl,until,{collectPublicCourseContacts:true,
+    const nativeRead=deps.readNativeOfficialPage??((identity,pageUrl,until,mode?:"POSTAL"|"PHONE_LINK")=>readNativeOfficialIdentityPage(identity,pageUrl,until,{collectPublicCourseContacts:true,sourceInspectionOnly:true,
       ...(mode==="PHONE_LINK"?{allowCpsPhoneBookingContact:true}:{}),requestLease:deps.requestLease&&(async(family,work)=>{
       const result=await deps.requestLease!(family,work);return result.acquired?{acquired:true,value:await result.value}:{acquired:false};
     })}));
