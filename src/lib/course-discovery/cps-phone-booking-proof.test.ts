@@ -31,6 +31,11 @@ describe("CPS fresh official phone and booking link", () => {
     const context={page:current,canonicalCoursePhone:phone,phoneBooking:true as const,onSelectedLabel:(name:string)=>{selected=name;}};
     const metadata=parseCpsCatalog(rows,options,source,context,CPS_VENUE_PUBLIC_CATALOG_BUILD);
     expect(metadata.courseIds).toEqual([7]);expect(selected).toBe("Harbor Pointe");
+    for (const flags of [{ private: true }, { membersOnly: true }, { requiresLogin: true }, { private: "unknown" }]) {
+      expect(()=>parseCpsCatalog(rows,{...options,reservationOptions:{...options.reservationOptions,...flags}},source,context,CPS_VENUE_PUBLIC_CATALOG_BUILD)).toThrow("ADAPTER_IDENTITY_MISMATCH");
+      expect(()=>parseCpsCatalog(rows,{...options,courseOptions:options.courseOptions.map(row=>row.courseId===7?{...row,...flags}:row)},source,context,CPS_VENUE_PUBLIC_CATALOG_BUILD)).toThrow("ADAPTER_IDENTITY_MISMATCH");
+      expect(()=>parseCpsCatalog(rows.map(row=>row.courseId===8?{...row,...flags}:row),options,source,context,CPS_VENUE_PUBLIC_CATALOG_BUILD)).toThrow("ADAPTER_IDENTITY_MISMATCH");
+    }
     const proof=bindCpsPhoneBookingProof(source,current,phone,metadata,selected);
     expect(cpsMetadataSchema.parse({...metadata,officialPhoneBookingProof:proof}).courseIds).toEqual([7]);
     expect(parseCpsCatalog([...rows].reverse(),options,source,context,CPS_VENUE_PUBLIC_CATALOG_BUILD)).toEqual(metadata);

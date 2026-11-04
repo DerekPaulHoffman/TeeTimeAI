@@ -258,18 +258,22 @@ export function parseCpsCatalog(value: unknown, options: CpsOptions, source: Cps
     return cpsMetadataSchema.parse({ ...metadata, officialEntryProof: bindCpsOfficialEntryProof(nativeContact.officialEntry, source, nativeContact.canonicalCoursePhone,
       metadata, courses[0].courseName, venue.address) });
   }
-  if (publicBuild === CPS_VENUE_PUBLIC_CATALOG_BUILD && !(nativeContact?.phoneBooking && courses.length > 1)) {
-    // In this exact reviewed public client OnlineCourses populates the course
-    // selector; GetAllOptions also contains unselectable legacy options. Admit
-    // the complete explicit one-sheet public set, never a default/order/name
-    // guess from the wider options catalog.
-    const venue = publicClubIdentity(options, source);
+  if (publicBuild === CPS_VENUE_PUBLIC_CATALOG_BUILD) {
+    // Every selection path retains the reviewed client's explicit public-only
+    // contract, including a phone-corroborated canonical main-course match.
     requirePublicFlags(options.reservationOptions);
     for (const course of courses) {
       requirePublicFlags(course);
       const option = options.courseOptions.find(row => row.courseId === course.courseId);
       if (option) requirePublicFlags(option);
     }
+  }
+  if (publicBuild === CPS_VENUE_PUBLIC_CATALOG_BUILD && !(nativeContact?.phoneBooking && courses.length > 1)) {
+    // In this exact reviewed public client OnlineCourses populates the course
+    // selector; GetAllOptions also contains unselectable legacy options. Admit
+    // the complete explicit one-sheet public set, never a default/order/name
+    // guess from the wider options catalog.
+    const venue = publicClubIdentity(options, source);
     if (courses.length !== 1 || new Set(declared).size !== declared.length ||
         courses.some(row => row.websiteId !== options.webSiteId || row.timezoneId !== source.timeZone ||
           options.courseOptions.filter(option => option.courseId === row.courseId && option.courseName === row.courseName && option.webSiteId === row.websiteId).length !== 1) ||
