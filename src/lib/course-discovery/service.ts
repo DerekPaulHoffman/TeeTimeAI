@@ -12,6 +12,7 @@ import { hasLegacyDiscoveryOwner } from "./legacy-exclusion";
 import { isReaderObservationCurrent } from "./observation-clock";
 import { isTeeItUpRecipeSlotLink } from "./teeitup-recipe-source";
 import { isChronogolfRecipeSlotLink } from "./chronogolf-source";
+import { isYouCanBookRecipeSlotLink } from "./youcanbook-public";
 import { normalizeDiscoverySourceUrl } from "./source-url";
 import { deriveCourseTrustedContext, isCurrentTrustedContext, type DiscoveryTrustedContext } from "./trusted-context";
 import {
@@ -532,6 +533,8 @@ export async function recordDiscoveryVerification(input: { jobId: string; leaseT
       const start = localSlotTime(slot.startsAt, challenge.input.timeZone);
       const correctBookingLink = recipe.engine === "EXISTING_ADAPTER" && recipe.adapter.family === "CHRONOGOLF"
         ? isChronogolfRecipeSlotLink(recipe.source.bookingUrl, recipe.adapter, challenge.input.date, slot)
+        : recipe.engine === "EXISTING_ADAPTER" && recipe.adapter.family === "YOUCANBOOKME"
+          ? isYouCanBookRecipeSlotLink(recipe.source.bookingUrl, recipe.adapter, slot)
         : new URL(slot.bookingUrl).origin === new URL(recipe.source.bookingUrl).origin;
       if (start.date !== challenge.input.date || start.time < challenge.input.startTime || start.time >= challenge.input.endTime ||
         !correctBookingLink) conflict();

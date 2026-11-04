@@ -87,6 +87,31 @@ beforeEach(() => {
 });
 
 describe("bounded course discovery persistence", () => {
+  it("persists both independently verified rental room links and rejects destinations outside that exact catalog",async()=>{
+    const {offering}=locationContactRecipe(),bookingUrl="https://first-room.youcanbook.me/";
+    offering.bookingUrl=bookingUrl;offering.providerFamilyKey="YOUCANBOOKME";offering.supportedDurationsMinutes=[50];
+    Object.assign((preferences[0] as {teeSearch:object}).teeSearch,{durationMinutes:50,players:2});
+    const rooms=[{label:"First Bay",officialPageUrl:course.website+"first/",bookingUrl,durationMinutes:50,profileId:"12345678-1234-4234-8234-123456789abc",contextSha256:"a".repeat(64)},
+      {label:"Second Bay",officialPageUrl:course.website+"second/",bookingUrl:"https://second-room.youcanbook.me/",durationMinutes:50,profileId:"12345678-1234-4234-8234-123456789abd",contextSha256:"b".repeat(64)}];
+    const candidate=parseAccessRecipe({schemaVersion:1,engine:"EXISTING_ADAPTER",target:{courseId:"course1",offeringId:"offering1",kind:"SIMULATOR"},
+      source:{officialUrl:course.website,bookingUrl,venueName:course.name,venueAddress:course.address,timeZone:course.timeZone,providerFamily:"YOUCANBOOKME"},
+      adapter:{family:"YOUCANBOOKME",officialEntryUrl:course.website+"rooms/",catalogSha256:"c".repeat(64),rooms}});
+    await ensureDiscoveryJob({courseId:"course1",offeringId:"offering1",searchId:"search1"});const owner=(await claimNextDiscoveryJob("public-rental-worker"))!;
+    const proposed=await proposeDiscoveryRecipe(owner.id,owner.leaseToken!,candidate),originalClock=[job!.firstPickedUpAt,job!.deadlineAt];
+    const replay=(challenge:typeof proposed.challenges[number])=>({status:"AVAILABLE",complete:true,observedAt:now.toISOString(),sourceUrl:bookingUrl,
+      slots:rooms.map(room=>{const startsAt=`${challenge.input.date}T17:00:00.000Z`;return{sourceId:`ycbm:${room.profileId}:${Date.parse(startsAt)}:50`,startsAt,endsAt:`${challenge.input.date}T17:50:00.000Z`,resourceId:room.profileId,productId:`ycbm:${room.profileId}:50`,availableSpots:1,capacity:null,bookingUrl:room.bookingUrl}}),
+      evidence:{recipeHash:proposed.recipeHash,venueVerified:true,dateVerified:true,capacityVerified:true,durationVerified:true,completeVerified:true}});
+    const challenge=proposed.challenges[0],valid=replay(challenge);
+    for(const change of[{bookingUrl:"https://unverified-room.youcanbook.me/"},{bookingUrl:bookingUrl+"wrong-path"},{resourceId:rooms[0].profileId},{sourceId:"unverified"}]){
+      await expect(recordDiscoveryVerification({jobId:owner.id,leaseToken:owner.leaseToken!,challengeId:challenge.id,recipeHash:proposed.recipeHash,input:challenge.input,
+        result:{...valid,slots:[valid.slots[0],{...valid.slots[1],...change}]}})).rejects.toBeInstanceOf(DiscoveryConflictError);
+    }
+    for(const current of proposed.challenges)await recordDiscoveryVerification({jobId:owner.id,leaseToken:owner.leaseToken!,challengeId:current.id,recipeHash:proposed.recipeHash,input:current.input,result:replay(current)});
+    await activateDiscoveryRecipe(owner.id,owner.leaseToken!);
+    expect(mocks.db.courseAccessRecipe.create).toHaveBeenCalledWith(expect.objectContaining({data:expect.objectContaining({payload:expect.objectContaining({adapter:expect.objectContaining({rooms})})})}));
+    expect(mocks.db.courseOffering.updateMany).toHaveBeenCalledWith(expect.objectContaining({data:expect.objectContaining({activeAccessRecipeId:"recipe1",supportedDurationsMinutes:[50]})}));
+    expect([job!.firstPickedUpAt,job!.deadlineAt]).toEqual(originalClock);expect(job!.status).toBe("SUCCEEDED");
+  });
   it("does not admit an explicit local-reader-only source to generic discovery", async () => {
     course.monitoringMode = "LOCAL_READER_ONLY";
     await expect(ensureDiscoveryJob({ courseId: "course1", searchId: "search1" })).rejects.toBeInstanceOf(DiscoveryConflictError);

@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
 import { parseYouCanBookBootstrap, parseYouCanBookSlots, parseYouCanBookSource, readYouCanBookOfficialPage,
-  verifyYouCanBookOfficialIdentity, youCanBookDuration, youCanBookMetadataSchema } from "./youcanbook-public";
+  verifyYouCanBookOfficialIdentity, youCanBookDuration, youCanBookMetadataSchema, isYouCanBookRecipeSlotLink } from "./youcanbook-public";
 const bookingUrl="https://indoor-example.youcanbook.me/",intentId="itt_12345678-1234-1234-1234-123456789abc";
 function fixture(){
   const intent={id:intentId,bookingId:null,intentStatus:"SETTING_UP",selections:{appointmentTypeIds:null,duration:null,form:null,location:null,smsConsent:null,startsAt:null,teamMemberId:null,timeZone:null,units:null}};
@@ -72,6 +72,16 @@ describe("anonymous public default-rental protocol",()=>{
     const metadata={family:"YOUCANBOOKME",officialEntryUrl:"https://official.example/rooms/",catalogSha256:"a".repeat(64),rooms:[{label:"Indoor Bay",officialPageUrl:"https://official.example/room/",bookingUrl,durationMinutes:50,profileId:context().profileId,contextSha256:context().contextSha256}]};
     expect(youCanBookMetadataSchema.safeParse(metadata).success).toBe(true);
     for(const changed of[{...metadata,intentId},{...metadata,run:"code"},{...metadata,rooms:[{...metadata.rooms[0],intentId}]}])expect(youCanBookMetadataSchema.safeParse(changed).success).toBe(false);
+  });
+  it("binds cross-tenant booking destinations to exact verified room/session identifiers",()=>{
+    const first={label:"First Bay",officialPageUrl:"https://official.example/first/",bookingUrl,durationMinutes:50,profileId:context().profileId,contextSha256:"a".repeat(64)},
+      second={...first,label:"Second Bay",officialPageUrl:"https://official.example/second/",bookingUrl:"https://second-room.youcanbook.me/",profileId:"12345678-1234-4234-8234-123456789abd"};
+    const metadata={family:"YOUCANBOOKME",officialEntryUrl:"https://official.example/rooms/",catalogSha256:"b".repeat(64),rooms:[first,second]};
+    const startsAt="2030-01-02T15:00:00.000Z",endsAt="2030-01-02T15:50:00.000Z",slot={sourceId:`ycbm:${second.profileId}:${Date.parse(startsAt)}:50`,bookingUrl:second.bookingUrl,startsAt,endsAt,resourceId:second.profileId,productId:`ycbm:${second.profileId}:50`};
+    expect(isYouCanBookRecipeSlotLink(bookingUrl,metadata,slot)).toBe(true);
+    for(const change of[{bookingUrl:"https://unverified-room.youcanbook.me/"},{bookingUrl:bookingUrl+"checkout"},{bookingUrl},{resourceId:first.profileId},{productId:`ycbm:${first.profileId}:50`},{sourceId:"unverified"},{endsAt:"2030-01-02T16:00:00.000Z"}])
+      expect(isYouCanBookRecipeSlotLink(bookingUrl,metadata,{...slot,...change})).toBe(false);
+    expect(isYouCanBookRecipeSlotLink("https://unverified-root.youcanbook.me/",metadata,slot)).toBe(false);
   });
   it("reads whole official identity and visible public routing without form or hidden links",()=>{
     const html='<article><h1>Example Indoor Golf</h1><p>123 Main Street, Example, CT 06001</p><a href="/rooms/">Book now</a><div hidden><a href="/secret/">Book now</a></div><form><a href="/form/">Book now</a></form></article>';

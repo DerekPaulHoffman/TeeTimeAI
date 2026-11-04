@@ -820,6 +820,9 @@ function isProviderFamilyPublicBookingLandingUrl(
       return Boolean(readMemberSportsLandingScope(url, pathname));
     case "CLUB_CADDIE":
     case "GOLF_GEEK":
+    case "YOUCANBOOKME":
+      // Learned rental recipes establish their own complete official catalog.
+      // Recognition is not authority for the legacy outdoor landing scanner.
       return false;
   }
 }

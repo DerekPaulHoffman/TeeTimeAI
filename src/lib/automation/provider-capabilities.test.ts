@@ -102,6 +102,13 @@ const runnableMetadata = {
 } as const;
 
 describe("provider capability registry", () => {
+  it("recognizes learned public rental ownership without granting legacy landing or server-adapter coverage", () => {
+    for(const url of["https://public-rental.youcanbook.me/","https://api.youcanbook.me/"]){
+      expect(getKnownProviderFamilyForHostname(new URL(url).hostname)).toBe("YOUCANBOOKME");
+      expect(isProviderPublicBookingLandingUrl(url)).toBe(false);
+      expect(resolveProviderCapability({detectedBookingUrl:url,providerFamilyKey:"YOUCANBOOKME",bookingMetadata:{provider:"YOUCANBOOKME"}}).isRunnable).toBe(false);
+    }
+  });
   it("admits only bounded public V2 TeeItUp landings without widening account or transaction routes", () => {
     const origin = "https://public.book-v2.teeitup.golf";
     for (const path of ["/", "/teetimes", "/teetimes/?course=11&date=2030-10-23"])

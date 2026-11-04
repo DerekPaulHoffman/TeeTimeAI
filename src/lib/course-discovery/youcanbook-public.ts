@@ -29,6 +29,18 @@ export const youCanBookMetadataSchema = z.object({ family: z.literal("YOUCANBOOK
   rooms: z.array(room).min(1).max(4) }).strict().refine(v => new Set(v.rooms.map(r => r.bookingUrl)).size === v.rooms.length &&
     new Set(v.rooms.map(r=>r.profileId)).size===v.rooms.length && new Set(v.rooms.map(r=>r.label)).size===v.rooms.length && new Set(v.rooms.map(r=>r.durationMinutes)).size===1);
 export type YouCanBookMetadata = z.infer<typeof youCanBookMetadataSchema>;
+/** Per-slot destinations may cross tenant origins only for an exact room in
+ * the independently replayed catalog, with its own full-session identifiers. */
+export function isYouCanBookRecipeSlotLink(sourceBookingUrl: string, metadata: unknown, slot: {
+  sourceId: string; bookingUrl: string; startsAt: string; endsAt?: string; resourceId?: string; productId?: string;
+}) {
+  const parsed=youCanBookMetadataSchema.safeParse(metadata);
+  if(!parsed.success||!parsed.data.rooms.some(room=>room.bookingUrl===sourceBookingUrl))return false;
+  const room=parsed.data.rooms.find(room=>room.bookingUrl===slot.bookingUrl&&room.profileId===slot.resourceId);
+  const start=Date.parse(slot.startsAt),end=Date.parse(slot.endsAt??"");
+  return Boolean(room&&Number.isFinite(start)&&Number.isFinite(end)&&end-start===room.durationMinutes*60000&&
+    slot.productId===`ycbm:${room.profileId}:${room.durationMinutes}`&&slot.sourceId===`ycbm:${room.profileId}:${start}:${room.durationMinutes}`);
+}
 export type YouCanBookSource = { officialUrl: string; bookingUrl: string; venueName: string; venueAddress?: string; timeZone: string };
 type Node = DefaultTreeAdapterMap["node"];
 type Element = DefaultTreeAdapterMap["element"];
