@@ -1102,6 +1102,7 @@ export const DISCOVERY_BROWSER_INPUT_SCHEMA = { type: "object", oneOf: [
 ] };
 export function discoveryRecipeGuidance({ engine, family, requestBinding, browserTransport, recipeEngineConstraint } = {}) {
   const guidance = [
+        "Only when this job explicitly carries request.durationPreference ANY, input.durationMinutes is a bootstrap value, not a requested rental length. Inspect an actual public rental product, then set proposal wrapper verificationDurationMinutes to that published full-session length. Both fresh independent replays must verify it; selection itself supplies no duration, identity or availability proof. Other jobs must honor the exact requested duration. Never round a published session up to a full hour.",
         "Use public signed-out pages to identify the exact venue and requested offering. For simulator requests identify whole-bay golf rentals, excluding lessons, events and non-golf resources.",
         "Ordinary outdoor alerts cover Standard Public inventory only. Do not include Member or Preferred Player inventory unless trusted eligibility is supplied; this job supplies none. Never authenticate or enter a booking flow to establish eligibility. A named alternative class is not Standard Public proof, and the fixed reader must verify the declared Public scope before a method is accepted.",
         ...(recipeEngineConstraint === "EXISTING_ADAPTER" ? ["The prior typed inspection could not verify its configuration. Start again at the official root and use only a freshly observed source with a successful inspect_adapter response to propose EXISTING_ADAPTER. BROWSER_DOM, BROWSER_JSON and HTTP_JSON proposals are not permitted in this repair branch. Do not reuse the failed adapter metadata or source report as method proof; independent typed replay and activation remain required."] : []),
@@ -1160,8 +1161,8 @@ export const DISCOVERY_TOOLS = [
     inputSchema: DISCOVERY_BROWSER_INPUT_SCHEMA },
   { type: "function", name: "discovery_checkpoint", description: "Save a short factual discovery checkpoint. ACCESS_REQUIRED ends discovery only for a currently observed login/challenge wall. UNSUPPORTED reports an unverified capability limitation and ends only this attempt as a retryable failure; model prose cannot establish terminal lack of support. Policy prose is not an access wall. Never include secrets, cookies, customer identity or claim success.",
     inputSchema: { type: "object", additionalProperties: false, required: ["summary"], properties: { summary: { type: "string", maxLength: 2000 }, outcome: { type: "string", enum: ["ACCESS_REQUIRED", "UNSUPPORTED"] } } } },
-  { type: "function", name: "discovery_propose_recipe", description: "Propose one data-only access recipe. For EXISTING_ADAPTER after current successful inspect_adapter, omit recipe.adapter and set wrapper useCurrentInspectedAdapter:true to copy its full private metadata. No overrides or stale inspections. Full validation and two fresh replay challenges always apply; no uploaded proof or JavaScript.",
-    inputSchema: { type: "object", additionalProperties: false, required: ["recipe"], properties: { recipe: { type: "object" }, useCurrentInspectedAdapter: { const: true } } } },
+  { type: "function", name: "discovery_propose_recipe", description: "Propose one data-only access recipe. Only when request.durationPreference is ANY, verificationDurationMinutes may select one actually observed public rental length for both independent replays; it supplies no duration proof. Otherwise honor the requested exact length. For EXISTING_ADAPTER after current successful inspect_adapter, omit recipe.adapter and set wrapper useCurrentInspectedAdapter:true to copy its full private metadata. No overrides or stale inspections. Full validation and two fresh replay challenges always apply; no uploaded proof or JavaScript.",
+    inputSchema: { type: "object", additionalProperties: false, required: ["recipe"], properties: { recipe: { type: "object" }, useCurrentInspectedAdapter: { const: true }, verificationDurationMinutes: { type: "integer", minimum: 15, maximum: 480 } } } },
 ];
 
 /** Opaque target IDs are only current-snapshot capabilities; exclude them from progress. */
@@ -1558,12 +1559,22 @@ export function discoveryReplayDetails(result, error) {
   };
 }
 
-export async function verifyDiscoveryCandidate({ client, job, recipe, executeRecipe, signal, sourceEvidence, onReplay = () => {}, beforeActivate = async () => {}, afterActivate = async () => {} }) {
-  const proposal = await client.candidate(job.id, job.leaseToken, recipe, signal, sourceEvidence);
+function selectedVerificationDuration(job, value) {
+  if (value === undefined) return undefined;
+  if (job.request?.durationPreference !== "ANY" || job.request?.target?.kind !== "SIMULATOR" ||
+      !Number.isSafeInteger(value) || value < 15 || value > 480) throw discoveryError("DISCOVERY_PROPOSAL_INVALID");
+  return value;
+}
+
+export async function verifyDiscoveryCandidate({ client, job, recipe, executeRecipe, signal, sourceEvidence, verificationDurationMinutes, onReplay = () => {}, beforeActivate = async () => {}, afterActivate = async () => {} }) {
+  const duration = selectedVerificationDuration(job, verificationDurationMinutes);
+  const proposal = duration === undefined ? await client.candidate(job.id, job.leaseToken, recipe, signal, sourceEvidence)
+    : await client.candidate(job.id, job.leaseToken, recipe, signal, sourceEvidence, duration);
   if (!/^[a-f0-9]{64}$/u.test(proposal.recipeHash ?? "") || !Array.isArray(proposal.challenges) || proposal.challenges.length !== 2 ||
       new Set(proposal.challenges.map(challenge => challenge.id)).size !== 2) throw discoveryError("DISCOVERY_CHALLENGES_INVALID");
   for (const [challengeIndex, challenge] of proposal.challenges.entries()) {
-    if (challenge.recipeHash !== proposal.recipeHash || !challenge.input) throw discoveryError("DISCOVERY_CHALLENGES_INVALID");
+    if (challenge.recipeHash !== proposal.recipeHash || !challenge.input || duration !== undefined && challenge.input.durationMinutes !== duration)
+      throw discoveryError("DISCOVERY_CHALLENGES_INVALID");
     if (challenge.completed === true) continue;
     const replayStarted = Date.now();
     let result;
@@ -1994,8 +2005,9 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
             }
           } else {
             if (freshOfficialStart && !officialSourceObserved) throw discoveryError("DISCOVERY_SOURCE_NOT_OBSERVED");
-            if (!input?.recipe || Object.keys(input).some(key => !["recipe", "useCurrentInspectedAdapter"].includes(key)) ||
+            if (!input?.recipe || Object.keys(input).some(key => !["recipe", "useCurrentInspectedAdapter", "verificationDurationMinutes"].includes(key)) ||
                 Object.hasOwn(input, "useCurrentInspectedAdapter") && input.useCurrentInspectedAdapter !== true || activated) throw discoveryError("DISCOVERY_PROPOSAL_INVALID");
+            const verificationDurationMinutes = selectedVerificationDuration(job, input.verificationDurationMinutes);
             const proposal = input.useCurrentInspectedAdapter === true ? fillCurrentInspectedAdapter(input.recipe, job, adapterObservation,
               officialSourceObserved, lastBrowserSnapshot?.url, browser, Boolean(browser && !browserControlsInvalidated && !currentAccessRequirementObserved)) : input.recipe;
             let recipe = bindDiscoveryRecipeIdentity(proposal, job, adapterObservation, lastBrowserSnapshot?.url);
@@ -2031,7 +2043,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
             replayClosedBrowser = true; browserControlsInvalidated = true;
             lastBrowserSnapshot = undefined; currentAccessRequirementObserved = false;
             adapterObservation = undefined;
-            activated = await verifyDiscoveryCandidate({ client, job, recipe, executeRecipe: options => { checkWork(); return executeRecipe({ ...options, deadlineAt: operationDeadlineAt }); }, signal, sourceEvidence,
+            activated = await verifyDiscoveryCandidate({ client, job, recipe, verificationDurationMinutes, executeRecipe: options => { checkWork(); return executeRecipe({ ...options, deadlineAt: operationDeadlineAt }); }, signal, sourceEvidence,
               onReplay: ({ elapsedMs }) => replayDurationsMs.push(elapsedMs),
               beforeActivate: async () => { checkWork(); activationStarted = true; await beforeActivate(); },
               afterActivate: () => afterActivate({ metrics: metrics() }) });
@@ -2105,6 +2117,7 @@ export async function runCourseDiscoveryWorker({ job: originalJob, workDeadlineA
     if (!threadId) throw discoveryError("DISCOVERY_THREAD_INVALID");
     attemptedModelTurns++;
     const turn = await app.request("turn/start", { threadId, input: [{ type: "text", text: JSON.stringify({ identity: job.request.identity, target: job.request.target,
+      ...(job.request.durationPreference === "ANY" ? { durationPreference: "ANY" } : {}),
       input: job.request.input, deadlineAt: operationDeadlineAt, attempt: job.attempts,
       trustedResumeUrls: [...restoredController.urls, ...(restoredController.entryUrls ?? [])], activeBrowserTransport: browserTransport,
       previousDiagnostic: restoredController.lastFailure ?? restoredController.lastFeedback,

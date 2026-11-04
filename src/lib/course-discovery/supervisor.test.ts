@@ -50,6 +50,16 @@ describe("controller resource guard retry disposition", () => {
 });
 
 describe("course discovery client authority", () => {
+  it("signs a selected replay duration as part of the exact candidate body", async () => {
+    const fetchImpl = vi.fn(async () => new Response('{}'));
+    const client = createCourseDiscoveryClient({ baseUrl: "https://example.com", deviceToken: "test-only-device-token", now: () => now, fetchImpl });
+    await client.candidate("job-1", "lease", {}, undefined, undefined, 55);
+    const [, options] = fetchImpl.mock.calls[0] as unknown as [URL, RequestInit];
+    expect(JSON.parse(options.body as string)).toEqual({ leaseToken: "lease", recipe: {}, verificationDurationMinutes: 55 });
+    const signature = createHmac("sha256", "test-only-device-token")
+      .update(`POST\n/api/course-discovery/jobs/job-1/candidate\n${now}\n${options.body}`).digest("hex");
+    expect(options.headers).toMatchObject({ "x-local-reader-signature": signature });
+  });
   it("signs the exact method, route, timestamp and body without disclosing the device token", async () => {
     const fetchImpl = vi.fn(async () => new Response('{"job":null}'));
     const client = createCourseDiscoveryClient({ baseUrl: "https://example.com", deviceToken: " secret-device-token ", now: () => now, fetchImpl });
@@ -843,14 +853,18 @@ describe("controller-only verification", () => {
     await connection.close();
   });
 
-  it("reports a redacted model failure without changing the worker failure outcome", async () => {
+  it.each([false, true])("reports a redacted model failure and preserves Any-duration intent: %s", async anyDuration => {
     const sourceHome = mkdtempSync(join(tmpdir(), "discovery-turn-failure-test-"));
     writeFileSync(join(sourceHome, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6.1-sol" }] }));
     writeFileSync(join(sourceHome, "auth.json"), "test-auth");
     const client = { candidate: vi.fn(), activate: vi.fn(), helperEnvironment: () => ({}) };
-    const processFactory = options => ({ notify: vi.fn(), close: vi.fn(async () => {}), request: async (method: string) => {
+    const modelInputs: Array<Record<string, unknown>> = [];
+    const demand = job(), testJob = { ...demand, request: { ...demand.request, ...(anyDuration ? { durationPreference: "ANY",
+      target: { ...demand.request.target, kind: "SIMULATOR", offeringId: "offering-1" }, input: { ...demand.request.input, durationMinutes: 60 } } : {}) } };
+    const processFactory = options => ({ notify: vi.fn(), close: vi.fn(async () => {}), request: async (method: string, params: Record<string, unknown> = {}) => {
       if (method === "thread/start") return { thread: { id: "thread-1" }, approvalPolicy: "never", sandbox: { type: "readOnly" } };
       if (method === "turn/start") {
+        modelInputs.push(JSON.parse((params.input as Array<{ text: string }>)[0].text));
         queueMicrotask(async () => {
           await options.onMessage({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1" } } }, () => {});
           await options.onMessage({ method: "turn/completed", params: { threadId: "thread-1", turn: {
@@ -863,8 +877,9 @@ describe("controller-only verification", () => {
       return {};
     } });
     try {
-      const failure = await runCourseDiscoveryWorker({ job: job(), client, cwd: process.cwd(), sourceHome, recipeSchema: {},
+      const failure = await runCourseDiscoveryWorker({ job: testJob, client, cwd: process.cwd(), sourceHome, recipeSchema: {},
         resolveCli: () => "fixed-codex", processFactory }).catch(error => error);
+      expect(modelInputs[0].durationPreference).toBe(anyDuration ? "ANY" : undefined);
       expect(failure).toMatchObject({ code: "DISCOVERY_TURN_FAILED", discoveryMetrics: {
         modelFailure: { turnStatus: "failed", errorCategory: "responseStreamDisconnected", httpStatusCode: 502 },
       } });

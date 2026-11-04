@@ -33,6 +33,8 @@ export type DiscoveryRequest = {
   target: DiscoveryTarget;
   identity: { name: string; officialUrl: string | null; bookingUrl: string | null; timeZone: string; providerFamily: string | null; address?: string };
   input: AccessExecutionInput;
+  /** The 60-minute bootstrap input is not a duration restriction for Any demand. */
+  durationPreference?: "ANY";
   demand?: { searchId: string; alertGeneration: number };
   trustedContext?: DiscoveryTrustedContext;
 };
@@ -162,7 +164,8 @@ function activeSearch(search: Search, source: Source, now: Date) {
     isSearchWindowActive({ date: search.date, endTime: search.endTime, courseTimeZones: [source.identity.timeZone], fallbackTimeZone: search.userTimeZone, now });
 }
 function requestFor(source: Source, search: Search): DiscoveryRequest {
-  return { target: source.target, identity: source.identity, ...(source.trustedContext.canonicalCoursePhone ? { trustedContext: source.trustedContext } : {}), demand: { searchId: search.id, alertGeneration: search.alertGeneration }, input: accessExecutionInputSchema.parse({
+  return { target: source.target, identity: source.identity, ...(source.trustedContext.canonicalCoursePhone ? { trustedContext: source.trustedContext } : {}), demand: { searchId: search.id, alertGeneration: search.alertGeneration },
+    ...(search.mode === "SIMULATOR" && search.durationMinutes === null ? { durationPreference: "ANY" as const } : {}), input: accessExecutionInputSchema.parse({
     date: search.date.toISOString().slice(0, 10), timeZone: source.identity.timeZone, players: search.players,
     startTime: search.startTime, endTime: search.endTime,
     ...(search.mode === "SIMULATOR" ? { durationMinutes: search.durationMinutes ?? 60 } : {}),
@@ -367,8 +370,28 @@ const challengeSchema = z.object({
   id: z.string().uuid(), recipeHash: z.string().regex(/^[a-f0-9]{64}$/u), issuedAt: z.string().datetime(),
   input: accessExecutionInputSchema, result: accessExecutionResultSchema.optional(), receivedAt: z.string().datetime().optional(),
 }).strict();
+export const discoveryVerificationDurationSchema = z.number().int().min(15).max(480);
+const durationSelectionSchema = z.object({ searchId: z.string().min(1).max(128), alertGeneration: z.number().int().nonnegative(),
+  minutes: discoveryVerificationDurationSchema }).strict();
 const verificationSchema = z.object({ version: z.literal(1), challenges: z.array(challengeSchema).length(2),
+  durationSelection: durationSelectionSchema.optional(),
   sourceEvidence: discoverySourceEvidenceSchema.optional() }).strict();
+
+async function assertAnyDurationDemand(tx: Tx, source: Source, request: DiscoveryRequest, now: Date,
+  selection: z.infer<typeof durationSelectionSchema> | undefined) {
+  if (!selection) return;
+  if (request.durationPreference !== "ANY" || request.target.kind !== "SIMULATOR" || source.target.kind !== "SIMULATOR" || !request.demand ||
+      selection.searchId !== request.demand.searchId || selection.alertGeneration !== request.demand.alertGeneration) conflict();
+  const search = await currentDemand(tx, source, now, selection.searchId);
+  if (!search || search.id !== selection.searchId || search.alertGeneration !== selection.alertGeneration || search.durationMinutes !== null) conflict();
+}
+
+async function assertVerificationDuration(tx: Tx, source: Source, request: DiscoveryRequest, now: Date,
+  verification: z.infer<typeof verificationSchema>) {
+  await assertAnyDurationDemand(tx, source, request, now, verification.durationSelection);
+  const duration = verification.durationSelection?.minutes;
+  if (duration !== undefined && verification.challenges.some(c => c.input.durationMinutes !== duration)) conflict();
+}
 const activationSchema = z.object({ jobId: z.string(), target: z.object({ courseId: z.string(), offeringId: z.string().optional(), kind: z.enum(["OUTDOOR", "SIMULATOR"]) }).strict(),
   recipeId: z.string(), version: z.number().int().positive(), hash: z.string().regex(/^[a-f0-9]{64}$/u) }).strict();
 
@@ -443,20 +466,31 @@ function bindRecipe(recipe: CourseAccessRecipeData, source: Source, sourceEviden
   }
 }
 
-export async function proposeDiscoveryRecipe(jobId: string, leaseToken: string, proposed: unknown, observedSource?: unknown) {
+export async function proposeDiscoveryRecipe(jobId: string, leaseToken: string, proposed: unknown, observedSource?: unknown, verificationDurationMinutes?: number) {
   const recipe = parseAccessRecipe(proposed);
   const recipeHash = hashAccessRecipe(recipe);
   const sourceEvidence = discoverySourceEvidenceSchema.optional().parse(observedSource);
+  const selectedDuration = discoveryVerificationDurationSchema.optional().parse(verificationDurationMinutes);
   return transaction(async tx => {
     const { job, now, source } = await owned(tx, jobId, leaseToken);
+    const request = job.request as unknown as DiscoveryRequest;
+    if (selectedDuration !== undefined && !request.demand) conflict();
+    const durationSelection = selectedDuration === undefined ? undefined : durationSelectionSchema.parse({
+      searchId: request.demand!.searchId, alertGeneration: request.demand!.alertGeneration, minutes: selectedDuration });
+    await assertAnyDurationDemand(tx, source, request, now, durationSelection);
     if (job.candidateHash === recipeHash && job.verification) {
       const verification = verificationSchema.parse(job.verification);
+      if (canonical(durationSelection) !== canonical(verification.durationSelection)) conflict();
+      await assertVerificationDuration(tx, source, request, now, verification);
       if (sourceEvidence && canonical(sourceEvidence) !== canonical(verification.sourceEvidence)) conflict();
       bindRecipe(recipe, source, verification.sourceEvidence, job.request as unknown as DiscoveryRequest);
       return { recipeHash, challenges: verification.challenges.map(challenge => ({ id: challenge.id, recipeHash: challenge.recipeHash, input: challenge.input, issuedAt: challenge.issuedAt, completed: Boolean(challenge.result) })) };
     }
     bindRecipe(recipe, source, sourceEvidence, job.request as unknown as DiscoveryRequest);
     const input = accessExecutionInputSchema.parse((job.request as unknown as DiscoveryRequest).input);
+    // Selection grants no source proof. Both fixed executor challenges must
+    // independently verify this actual public rental length before activation.
+    if (durationSelection) input.durationMinutes = durationSelection.minutes;
     // Verification inputs never become customer demand or customer matches.
     // A neighboring outdoor party tests parameterization, not universal party support.
     const alternate = { ...input, players: source.offering ? input.players : input.players < 4 ? input.players + 1 : input.players - 1 };
@@ -467,7 +501,7 @@ export async function proposeDiscoveryRecipe(jobId: string, leaseToken: string, 
     }
     const challenges = [input, alternate].map(value => ({ id: randomUUID(), recipeHash, input: accessExecutionInputSchema.parse(value), issuedAt: now.toISOString() }));
     await tx.courseDiscoveryJob.update({ where: { id: job.id }, data: { candidate: json(recipe), candidateHash: recipeHash,
-      verification: json({ version: 1, challenges, ...(sourceEvidence ? { sourceEvidence } : {}) }) } });
+      verification: json({ version: 1, challenges, ...(durationSelection ? { durationSelection } : {}), ...(sourceEvidence ? { sourceEvidence } : {}) }) } });
     return { recipeHash, challenges: challenges.map(challenge => ({ ...challenge, completed: false })) };
   });
 }
@@ -479,6 +513,7 @@ export async function recordDiscoveryVerification(input: { jobId: string; leaseT
     const { job, now, source } = await owned(tx, input.jobId, input.leaseToken);
     const recipe = parseAccessRecipe(job.candidate);
     const verification = verificationSchema.parse(job.verification);
+    await assertVerificationDuration(tx, source, job.request as unknown as DiscoveryRequest, now, verification);
     bindRecipe(recipe, source, verification.sourceEvidence, job.request as unknown as DiscoveryRequest);
     const challenge = verification.challenges.find(item => item.id === input.challengeId);
     if (!challenge || input.recipeHash !== job.candidateHash || result.evidence.recipeHash !== job.candidateHash ||
@@ -523,6 +558,7 @@ export async function activateDiscoveryRecipe(jobId: string, leaseToken: string)
     const { job, now, source } = await owned(tx, jobId, leaseToken);
     const recipe = parseAccessRecipe(job.candidate);
     const verification = verificationSchema.parse(job.verification);
+    await assertVerificationDuration(tx, source, job.request as unknown as DiscoveryRequest, now, verification);
     bindRecipe(recipe, source, verification.sourceEvidence, job.request as unknown as DiscoveryRequest);
     if (hashAccessRecipe(recipe) !== job.candidateHash || verification.challenges.some(challenge => !challenge.result || !challenge.receivedAt || challenge.recipeHash !== job.candidateHash)) conflict();
     const verifiedDurations = verification.challenges.flatMap(challenge => challenge.input.durationMinutes ? [challenge.input.durationMinutes] : []);

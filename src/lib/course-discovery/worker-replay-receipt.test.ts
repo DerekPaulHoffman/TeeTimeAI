@@ -11,6 +11,32 @@ function proofClient() {
 const job = { id: "owned-job", leaseToken: "private-lease", deadlineAt: "2030-01-02T12:00:00Z" };
 
 describe("independent replay receipts", () => {
+  it("passes the selected Any length through the client and both independent executions", async () => {
+    const client = proofClient(), executeRecipe = vi.fn(async () => ({ status: "EMPTY", complete: true, slots: [], evidence: {} }));
+    client.candidate.mockResolvedValue({ recipeHash: hash, challenges: [
+      { id: "first", recipeHash: hash, input: { players: 2, durationMinutes: 55 } },
+      { id: "second", recipeHash: hash, input: { players: 2, durationMinutes: 55 } },
+    ] });
+    const anyJob = { ...job, request: { durationPreference: "ANY", target: { kind: "SIMULATOR" } } };
+    await verifyDiscoveryCandidate({ client, job: anyJob, recipe: {}, verificationDurationMinutes: 55, executeRecipe });
+    expect(client.candidate).toHaveBeenCalledWith(job.id, job.leaseToken, {}, undefined, undefined, 55);
+    expect(executeRecipe.mock.calls.map(([arg]) => arg.input.durationMinutes)).toEqual([55, 55]);
+    expect(client.verification).toHaveBeenCalledTimes(2); expect(client.activate).toHaveBeenCalledOnce();
+  });
+  it("rejects a server challenge that changes the selected rental length", async () => {
+    const client = proofClient(), executeRecipe = vi.fn();
+    const anyJob = { ...job, request: { durationPreference: "ANY", target: { kind: "SIMULATOR" } } };
+    await expect(verifyDiscoveryCandidate({ client, job: anyJob, recipe: {}, verificationDurationMinutes: 55, executeRecipe }))
+      .rejects.toMatchObject({ code: "DISCOVERY_CHALLENGES_INVALID" });
+    expect(executeRecipe).not.toHaveBeenCalled(); expect(client.activate).not.toHaveBeenCalled();
+  });
+  it.each([undefined, { durationPreference: "ANY", target: { kind: "OUTDOOR" } }, { target: { kind: "SIMULATOR" } }])
+  ("does not let a model change duration without Any simulator intent", async request => {
+    const client = proofClient();
+    await expect(verifyDiscoveryCandidate({ client, job: { ...job, request }, recipe: {}, verificationDurationMinutes: 55, executeRecipe: vi.fn() }))
+      .rejects.toMatchObject({ code: "DISCOVERY_PROPOSAL_INVALID" });
+    expect(client.candidate).not.toHaveBeenCalled(); expect(client.activate).not.toHaveBeenCalled();
+  });
   it("pins the requested Sol model, ChatGPT sign-in and a consistent reasoning effort with no model fallback", () => {
     expect(DISCOVERY_MODEL).toBe("gpt-6.1-sol");
     expect(DISCOVERY_CONFIG).toMatchObject({ forced_login_method: "chatgpt", model_reasoning_effort: "medium" });

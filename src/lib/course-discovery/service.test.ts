@@ -108,6 +108,60 @@ describe("bounded course discovery persistence", () => {
         catalogHash: "c".repeat(64), maxPartySize: null, client: { path: "/bundles/js/bookingBS5", sha256: "569c4665e02740090f39df0a016d0f6087edafce318836e62f876db5f9865a0e" } } } });
     return { candidate, offering };
   }
+  async function claimedAnyDuration() {
+    const { candidate } = locationContactRecipe();
+    const search = (preferences[0] as { teeSearch: { durationMinutes: number | null } }).teeSearch;
+    search.durationMinutes = null;
+    await ensureDiscoveryJob({ courseId: "course1", offeringId: "offering1", searchId: "search1" });
+    return { candidate, search, owner: (await claimNextDiscoveryJob("worker-one"))! };
+  }
+  it("independently challenges the published length for Any duration without resetting the cold clock", async () => {
+    const { candidate, owner } = await claimedAnyDuration();
+    const clocks = [job!.firstPickedUpAt, job!.deadlineAt, job!.leaseToken, job!.attempts];
+    expect(owner.request).toMatchObject({ durationPreference: "ANY", input: { durationMinutes: 60 } });
+    const proposed = await proposeDiscoveryRecipe(owner.id, owner.leaseToken!, candidate, undefined, 55);
+    expect(proposed.challenges.map(c => c.input.durationMinutes)).toEqual([55, 55]);
+    expect(proposed.challenges[0].input.date).not.toBe(proposed.challenges[1].input.date);
+    expect([job!.firstPickedUpAt, job!.deadlineAt, job!.leaseToken, job!.attempts]).toEqual(clocks);
+    expect(job!.status).toBe("RUNNING"); expect(mocks.db.courseAccessRecipe.create).not.toHaveBeenCalled();
+    expect(await proposeDiscoveryRecipe(owner.id, owner.leaseToken!, candidate, undefined, 55)).toEqual(proposed);
+    await expect(proposeDiscoveryRecipe(owner.id, owner.leaseToken!, candidate, undefined, 60)).rejects.toBeInstanceOf(DiscoveryConflictError);
+    await expect(proposeDiscoveryRecipe(owner.id, owner.leaseToken!, candidate)).rejects.toBeInstanceOf(DiscoveryConflictError);
+  });
+  it.each(["explicit", "edited", "forged", "outdoor"])("does not change %s demand to a proposed rental length", async mode => {
+    const { candidate, owner, search } = await claimedAnyDuration();
+    if (mode === "explicit" || mode === "forged") {
+      delete (job!.request as { durationPreference?: string }).durationPreference;
+      search.durationMinutes = 60;
+    }
+    if (mode === "edited") search.durationMinutes = 60;
+    if (mode === "forged") (job!.request as { durationPreference?: string }).durationPreference = "ANY";
+    if (mode === "outdoor") (job!.request as { target: { kind: string } }).target.kind = "OUTDOOR";
+    await expect(proposeDiscoveryRecipe(owner.id, owner.leaseToken!, candidate, undefined, 55)).rejects.toBeInstanceOf(DiscoveryConflictError);
+    expect(job!.candidate).toBeUndefined(); expect(mocks.db.courseAccessRecipe.create).not.toHaveBeenCalled();
+  });
+  it.each(["verification", "activation"])("rechecks Any intent at %s after an alert edit", async phase => {
+    const { candidate, owner, search } = await claimedAnyDuration();
+    const proposed = await proposeDiscoveryRecipe(owner.id, owner.leaseToken!, candidate, undefined, 55);
+    const record = (challenge: (typeof proposed.challenges)[number]) => recordDiscoveryVerification({ jobId: owner.id,
+      leaseToken: owner.leaseToken!, challengeId: challenge.id, recipeHash: proposed.recipeHash, input: challenge.input,
+      result: { status: "EMPTY", complete: true, observedAt: now.toISOString(), sourceUrl: candidate.source.bookingUrl, slots: [],
+        evidence: { recipeHash: proposed.recipeHash, venueVerified: true, dateVerified: true, capacityVerified: true, durationVerified: true, completeVerified: true } } });
+    if (phase === "activation") for (const challenge of proposed.challenges) await record(challenge);
+    search.durationMinutes = 60;
+    await expect(phase === "verification" ? record(proposed.challenges[0]) : activateDiscoveryRecipe(owner.id, owner.leaseToken!))
+      .rejects.toBeInstanceOf(DiscoveryConflictError);
+    expect(mocks.db.courseAccessRecipe.create).not.toHaveBeenCalled();
+  });
+  it.each(["generation", "paused", "other-demand"])("does not borrow %s authority for a selected rental length", async mode => {
+    const { candidate, owner, search } = await claimedAnyDuration();
+    const current = search as typeof search & { id: string; status: string; alertGeneration: number };
+    if (mode === "generation") current.alertGeneration++;
+    if (mode === "paused") current.status = "PAUSED";
+    if (mode === "other-demand") { current.id = "search2"; mocks.pilotIds.mockResolvedValue(["search2"]); }
+    await expect(proposeDiscoveryRecipe(owner.id, owner.leaseToken!, candidate, undefined, 55)).rejects.toBeInstanceOf(DiscoveryConflictError);
+    expect(job!.candidate).toBeUndefined(); expect(mocks.db.courseAccessRecipe.create).not.toHaveBeenCalled();
+  });
   it("binds new location contact proof to current parent-course phone through proposal, verification, activation and reuse", async () => {
     const { candidate, offering } = locationContactRecipe();
     await ensureDiscoveryJob({ courseId: "course1", offeringId: "offering1", searchId: "search1" });

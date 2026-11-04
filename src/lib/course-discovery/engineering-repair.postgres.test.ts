@@ -35,6 +35,44 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     courses.length = 0; users.length = 0; ids.clear();
   });
   afterAll(async () => { if (client) await client.$disconnect(); });
+  it("persists a verified Any-duration method with its published length and original cold deadline", async () => {
+    const suffix = randomUUID(), user = await client.user.create({ data: { email: `${suffix}@example.test`, clerkUserId: suffix } });
+    users.push(user.id);
+    const course = await client.course.create({ data: { googlePlaceId: `ChIJ${suffix.replaceAll("-", "")}`, name: "Public rental fixture",
+      latitude: 41, longitude: -73, timeZone: "UTC", isPublic: true, website: "https://golf.example.com/" } });
+    courses.push(course.id);
+    const offering = await client.courseOffering.create({ data: { courseId: course.id, kind: "SIMULATOR", active: true,
+      publicAccessStatus: "UNVERIFIED", supportedDurationsMinutes: [] } });
+    const date = new Date(); date.setUTCDate(date.getUTCDate() + 2); date.setUTCHours(0, 0, 0, 0);
+    const search = await client.teeSearch.create({ data: { userId: user.id, date, startTime: "09:00", endTime: "18:00", players: 2,
+      mode: "SIMULATOR", durationMinutes: null, userTimeZone: "UTC", trafficClass: "PUBLIC",
+      preferences: { create: { courseId: course.id, offeringId: offering.id, rank: 1 } } } });
+    ids.add(search.id);
+    const target = { courseId: course.id, offeringId: offering.id };
+    await service.ensureDiscoveryJob({ ...target, searchId: search.id });
+    const owner = (await service.claimNextDiscoveryJob("fixture-sol-any-duration"))!;
+    const recipe = parseAccessRecipe({ schemaVersion: 1, engine: "HTTP_JSON", target: { ...target, kind: "SIMULATOR" },
+      source: { venueName: course.name, officialUrl: course.website, bookingUrl: "https://golf.example.com/times", timeZone: "UTC", providerFamily: "EXAMPLE" },
+      request: { url: "https://golf.example.com/times?date={{date}}&duration={{durationMinutes}}", method: "GET" },
+      permittedRoutes: [{ origin: "https://golf.example.com", path: "/times", methods: ["GET"], queryKeys: ["date", "duration"] }],
+      proof: { venue: { path: "venue" }, date: { path: "date" }, durationMinutes: { path: "duration" }, complete: { path: "complete" }, empty: { path: "empty" } },
+      slots: { collection: { path: "slots" }, startsAt: { path: "start" }, endsAt: { path: "end" }, availableSpots: { path: "spots" } } });
+    const proposed = await service.proposeDiscoveryRecipe(owner.id, owner.leaseToken!, recipe, undefined, 55);
+    expect(proposed.challenges.map(c => c.input.durationMinutes)).toEqual([55, 55]);
+    for (const challenge of proposed.challenges) await service.recordDiscoveryVerification({ jobId: owner.id, leaseToken: owner.leaseToken!,
+      challengeId: challenge.id, recipeHash: proposed.recipeHash, input: challenge.input, result: { status: "AVAILABLE", complete: true,
+        observedAt: new Date().toISOString(), sourceUrl: recipe.source.bookingUrl,
+        slots: [{ sourceId: `fixture-${challenge.input.date}`, startsAt: `${challenge.input.date}T10:00:00.000Z`,
+          endsAt: `${challenge.input.date}T10:55:00.000Z`, availableSpots: 1, bookingUrl: recipe.source.bookingUrl }],
+        evidence: { recipeHash: proposed.recipeHash, venueVerified: true, dateVerified: true, capacityVerified: true, durationVerified: true, completeVerified: true } } });
+    const activation = await service.activateDiscoveryRecipe(owner.id, owner.leaseToken!);
+    expect(await client.courseOffering.findUniqueOrThrow({ where: { id: offering.id } })).toMatchObject({
+      activeAccessRecipeId: activation.recipeId, publicAccessStatus: "PUBLIC", supportedDurationsMinutes: [55] });
+    const finished = await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: owner.id } });
+    expect(finished).toMatchObject({ status: "SUCCEEDED", firstPickedUpAt: owner.firstPickedUpAt, deadlineAt: owner.deadlineAt, attempts: 1 });
+    expect(finished.deadlineAt!.getTime() - finished.firstPickedUpAt!.getTime()).toBe(900_000);
+    expect(await service.getActiveAccessRecipe(target)).toMatchObject({ id: activation.recipeId, hash: activation.hash });
+  });
   async function failed(simulator = false, savedMethod = false) {
     const suffix = randomUUID(), user = await client.user.create({ data: { email: `${suffix}@example.test`, clerkUserId: suffix } });
     users.push(user.id);

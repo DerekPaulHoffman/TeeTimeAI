@@ -20,6 +20,16 @@ beforeEach(() => { vi.resetAllMocks(); vi.stubEnv("LOCAL_READER_DEVICE_TOKEN", s
 afterEach(() => vi.unstubAllEnvs());
 const context = { params: Promise.resolve({ id: "job1" }) };
 describe("trusted observed-source candidate input", () => {
+  it("authenticates a proposed replay length without accepting caller-supplied proof", async () => {
+    expect((await POST(request({ leaseToken, recipe: {}, verificationDurationMinutes: 55 }), context)).status).toBe(200);
+    expect(mocks.propose).toHaveBeenCalledWith("job1", leaseToken, {}, undefined, 55);
+    expect((await POST(request({ leaseToken, recipe: {}, verificationDurationMinutes: 55 }, false), context)).status).toBe(401);
+    expect(mocks.propose).toHaveBeenCalledOnce();
+  });
+  it.each([0, 14, 55.5, 481, "55", null, { minutes: 55, verified: true }])("rejects an invalid replay length %j", async value => {
+    expect((await POST(request({ leaseToken, recipe: {}, verificationDurationMinutes: value }), context)).status).toBe(400);
+    expect(mocks.propose).not.toHaveBeenCalled();
+  });
   it("accepts exact safe source evidence only through an authenticated request", async () => {
     const response = await POST(request({ leaseToken, recipe: {}, sourceEvidence }), context);
     expect(response.status).toBe(200);
