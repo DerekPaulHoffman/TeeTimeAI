@@ -432,7 +432,8 @@ describe("provider capability registry", () => {
       CLUB_CADDIE: [true, "CLUB_CADDIE"],
       WHOOSH: [true, "CUSTOM"],
       TENFORE: [false, "CUSTOM"],
-      MEMBERSPORTS: [false, "CUSTOM"]
+      MEMBERSPORTS: [false, "CUSTOM"],
+      YOUCANBOOKME: [false, "CUSTOM"]
     });
   });
 
@@ -522,7 +523,9 @@ describe("provider capability registry", () => {
     ["app.clubcaddie.com", "CLUB_CADDIE"],
     ["app.whoosh.io", "WHOOSH"],
     ["fox.tenfore.golf", "TENFORE"],
-    ["app.membersports.com", "MEMBERSPORTS"]
+    ["app.membersports.com", "MEMBERSPORTS"],
+    ["public-rental.youcanbook.me", "YOUCANBOOKME"],
+    ["api.youcanbook.me", "YOUCANBOOKME"]
   ])("maps %s to the canonical %s family", (hostname, family) => {
     expect(getKnownProviderFamilyForHostname(hostname)).toBe(family);
   });

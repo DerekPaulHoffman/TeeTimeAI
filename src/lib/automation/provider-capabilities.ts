@@ -41,7 +41,8 @@ export const KNOWN_PROVIDER_FAMILIES = [
   "WHOOSH",
   "SUPREME_GOLF",
   "TENFORE",
-  "MEMBERSPORTS"
+  "MEMBERSPORTS",
+  "YOUCANBOOKME"
 ] as const;
 
 export type KnownProviderFamily = (typeof KNOWN_PROVIDER_FAMILIES)[number];
@@ -235,6 +236,14 @@ export const PROVIDER_CAPABILITIES = {
     detectedPlatform: "CUSTOM",
     supportsAutomation: false,
     matchesHostname: (hostname) => hostname === "app.membersports.com"
+  },
+  YOUCANBOOKME: {
+    family: "YOUCANBOOKME",
+    detectedPlatform: "CUSTOM",
+    // Identification and shared request ownership only. Its separately
+    // verified learned rental recipes do not enable the legacy dispatcher.
+    supportsAutomation: false,
+    matchesHostname: (hostname) => matchesDomain(hostname, "youcanbook.me")
   }
 } satisfies Record<KnownProviderFamily, ProviderCapability>;
 

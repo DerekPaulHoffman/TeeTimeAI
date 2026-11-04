@@ -10,7 +10,7 @@ lastVerifiedRelease: null
 
 ## Current Support State
 
-- The learned-recipe executor supports one reviewed v1 public default-rental protocol. This does not add a general legacy server adapter or enable rollout.
+- The learned-recipe executor supports one reviewed v1 public default-rental protocol. The capability registry recognizes the provider for ownership and diagnosis only; it does not add a general legacy server adapter or enable rollout.
 - Requires a canonical official root and complete address, a static room/duration directory, and anonymous provider roots for every room at the selected published duration.
 - The reader uses GET only. It does not use cookies, account sessions, form selections, slot selections, reservations, or POST requests. Server-created anonymous browsing IDs stay in memory and are never recipe fields.
 - Unsupported: v2 contexts, preview pages, challenges, selectable appointment types/team members, multiple or remote locations, missing rooms, changed client bytes, and other directory layouts.
@@ -30,14 +30,14 @@ lastVerifiedRelease: null
 - Verified release: `not-production-verified`.
 - Exact-runtime outcome: not yet established.
 
-## Approaches That Failed
+## Approaches That Failed Or Were Inconclusive
 
 ### `generic-dom-with-opaque-date-response`
 
 - Generic browser extraction cannot treat an opaque response URL or visible times as date/completeness proof. Request failures and token limits remain failures.
 - A public server-provided browsing context is distinct from a customer account, but must be implemented as the reviewed protocol rather than a generic authorization/header exception.
 
-## Safe Reopen Triggers
+## Material Reopen Triggers
 
 - A changed published client requires protocol review and regression evidence before a new hash is supported.
 - A changed official room/duration catalog or location requires a new independently verified method.
