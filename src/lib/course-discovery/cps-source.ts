@@ -110,10 +110,11 @@ const excluded = (node: Element) => ["script", "style", "template", "noscript", 
   ["hidden", "inert"].some(key => attr(node, key) !== undefined) || attr(node, "aria-hidden") === "true" ||
   /display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0(?:[;\s]|$)/iu.test(attr(node, "style") ?? "") ||
   /(?:^|\s)(?:hidden|d-none|invisible|visually-hidden|sr-only|screen-reader-only)(?:\s|$)/iu.test(attr(node, "class") ?? "");
-function visibleText(node: Node): string {
+function visibleText(node: Node, omitPhoneLinks = false): string {
   if (node.nodeName === "#text") return (node as DefaultTreeAdapterMap["textNode"]).value;
-  if (element(node) && (excluded(node) || node.tagName === "iframe")) return " ";
-  return "childNodes" in node ? node.childNodes.map(visibleText).join(" ") : "";
+  if (element(node) && (excluded(node) || node.tagName === "iframe" ||
+      omitPhoneLinks && node.tagName === "a" && /^tel:/iu.test(attr(node, "href") ?? ""))) return " ";
+  return "childNodes" in node ? node.childNodes.map(child => visibleText(child, omitPhoneLinks)).join(" ") : "";
 }
 /** Fresh inert HTML corroborates the canonical address and exact observed
  * provider link. It does not claim a provider street address or refreshed CSS. */
@@ -130,9 +131,15 @@ export function inspectCpsOfficialDocument(html: string, pageUrl: string, source
   const body = entries.find(node => node.tagName === "body");
   const text = visibleText(body ?? root).normalize("NFKC").replace(/[|\r\n]+/gu, ", ").replace(/\s+/gu, " ");
   const name = fullCourseName(source.venueName), words = fullCourseName(text);
-  if (!(` ${words} `).includes(` ${name} `)) cpsFailure("OFFICIAL_IDENTITY_UNVERIFIED");
+  // fullCourseName equates the terminal Golf Club/Golf Course wording. In a
+  // complete document that suffix is no longer at the end of the input.
+  const names = new Set([name, name.replace(/\bgolf course$/u, "golf club")]);
+  if (![...names].some(value => (` ${words} `).includes(` ${value} `))) cpsFailure("OFFICIAL_IDENTITY_UNVERIFIED");
   const addresses = new Set<string>();
-  for (const match of text.matchAll(/\b\d{1,8}\s+[A-Za-z0-9 .#'’-]+,\s*[A-Za-z .'-]+,\s*[A-Za-z]{2}\s+\d{5}(?:-\d{4})?(?:,?\s*(?:USA|US|United States))?\b/gu)) {
+  // A phone link immediately before the street otherwise contributes its last
+  // digits to the house number. Phone text is never physical-address evidence.
+  const addressText = visibleText(body ?? root, true).normalize("NFKC").replace(/[|\r\n]+/gu, ", ").replace(/\s+/gu, " ");
+  for (const match of addressText.matchAll(/\b\d{1,8}\s+[A-Za-z0-9 .#'’-]+,\s*[A-Za-z .'-]+,\s*[A-Za-z]{2}\s+\d{5}(?:-\d{4})?(?:,?\s*(?:USA|US|United States))?\b/gu)) {
     const address = completeUSAddress(match[0]); if (address) addresses.add(JSON.stringify(address));
   }
   if (addresses.size !== 1 || !addresses.has(JSON.stringify(completeUSAddress(source.venueAddress!)))) cpsFailure("OFFICIAL_IDENTITY_UNVERIFIED");

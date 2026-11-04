@@ -115,6 +115,10 @@ ordinary official root; it grants no source, identity, inventory or method proof
 Closed fixed-adapter CPS phone/contact-entry verification failures can use the
 same existing fresh-root investigation path. They never become accepted identity
 evidence, and errors while opening a path do not qualify as adapter rejection.
+The CPS official-document address scan excludes telephone-link text so adjacent
+phone digits cannot become part of a house number. Whole venue names retain the
+existing terminal Golf Club/Golf Course equivalence inside a longer document;
+the exact address and observed booking-link requirements remain in force.
 
 Public source routing retains both the served document URL and its authenticated
 History API route. Legacy public EZLinks links are investigation gateways, not

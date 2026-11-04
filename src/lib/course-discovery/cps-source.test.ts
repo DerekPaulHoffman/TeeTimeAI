@@ -19,6 +19,35 @@ const options = () => ({ webSiteId: "public-site", courseOptions: [{ courseId: 1
 const courses = () => [{ courseId: 1, courseName: source.venueName, timezoneId: source.timeZone, websiteId: "public-site", active: true as const, holes: 9 as const }];
 
 describe("CPS stable public source", () => {
+  const adjacentContact = (phone: string, address = "5370 Schenley Drive, Pittsburgh, PA 15217") =>
+    `<html><body><h1>${source.venueName}</h1><a href="${source.bookingUrl}">Book Tee Time</a>` +
+    `<div>BOOK A TEE TIME: <a href="tel:4126226959">${phone}</a> ${address}</div></body></html>`;
+  it.each(["412.622.6959", "412 622 6959", "(412) 622-6959"])("keeps the printed %s phone separate from the adjacent house number", phone => {
+    expect(inspectCpsOfficialDocument(adjacentContact(phone), source.officialUrl, source)).toEqual({ bookingLinked: true });
+  });
+  it.each(["Golf Club", "Golf Course"])("matches the whole canonical venue with its existing %s suffix equivalence inside a complete document", suffix => {
+    const club = { ...source, venueName: "Bob O'Connor Golf Club" };
+    const html = adjacentContact("412.622.6959").replaceAll(source.venueName, `Bob O'Connor ${suffix}`);
+    expect(inspectCpsOfficialDocument(html, source.officialUrl, club)).toEqual({ bookingLinked: true });
+    expect(inspectCpsOfficialDocument(html, source.officialUrl, source)).toEqual({ bookingLinked: true });
+  });
+  it("does not replace whole-venue matching with a Golf Club suffix match", () => {
+    const html = adjacentContact("412.622.6959").replaceAll(source.venueName, "Another Golf Club");
+    expect(() => inspectCpsOfficialDocument(html, source.officialUrl, { ...source, venueName: "Bob O'Connor Golf Club" }))
+      .toThrow("OFFICIAL_IDENTITY_UNVERIFIED");
+  });
+  it.each(["5371 Schenley Drive, Pittsburgh, PA 15217", "5370 Schenley Drive, Pittsburgh, PA 15218"])(
+    "still rejects a mismatched address after excluding phone text: %s", address => {
+      expect(() => inspectCpsOfficialDocument(adjacentContact("412.622.6959", address), source.officialUrl, source)).toThrow("OFFICIAL_IDENTITY_UNVERIFIED");
+    });
+  it("never takes physical address evidence from a telephone link", () => {
+    expect(() => inspectCpsOfficialDocument(adjacentContact("5370 Schenley Drive, Pittsburgh, PA 15217", ""), source.officialUrl, source))
+      .toThrow("OFFICIAL_IDENTITY_UNVERIFIED");
+  });
+  it("does not hide a second printed street address while excluding telephone links", () => {
+    expect(() => inspectCpsOfficialDocument(adjacentContact("412.622.6959") + "<p>5371 Schenley Drive, Pittsburgh, PA 15217</p>", source.officialUrl, source))
+      .toThrow("OFFICIAL_IDENTITY_UNVERIFIED");
+  });
   it("accepts only an exact public tenant document, never API/account/query/credential sources", () => {
     expect(parseCpsSource(source.bookingUrl)?.tenant).toBe("thebobgcpa");
     expect(parseCpsSource(source.bookingUrl + "onlineresweb/search-teetime")?.tenant).toBe("thebobgcpa");
