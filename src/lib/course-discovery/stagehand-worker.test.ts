@@ -117,6 +117,36 @@ function cleanUnresolvedReport(t: ReturnType<typeof setup>) {
   return diagnostic!;
 }
 
+describe("published default-rental duration in fixed discovery", () => {
+  it.each(["ANY", "EXACT"])("keeps two independent replays and the original clock for %s duration", async preference => {
+    const t=setup(),publicBooking="https://indoor-example.youcanbook.me/";
+    Object.assign(t.f.report,JSON.parse(JSON.stringify(t.f.report).replaceAll(booking,publicBooking)));
+    Object.assign(t.f.job.request.target,{kind:"SIMULATOR",offeringId:"offering"});
+    Object.assign(t.f.job.request,{durationPreference:preference});Object.assign(t.f.job.request.input,{durationMinutes:60});
+    const originalClock=[t.f.job.firstPickedUpAt,t.f.job.deadlineAt];
+    const adapter={family:"YOUCANBOOKME",officialEntryUrl:official+"rooms/",catalogSha256:"a".repeat(64),rooms:[{
+      label:"Indoor Room",officialPageUrl:official+"room/",bookingUrl:publicBooking,durationMinutes:50,
+      profileId:"12345678-1234-4234-8234-123456789abc",contextSha256:"c".repeat(64)}]};
+    t.request.mockImplementation(async action=>({url:official,browserTransport:"NATIVE_CHROME",navigationStatus:200,
+      accessRequirementObserved:false,loading:false,controls:[{kind:"link",href:publicBooking}],adapter:action.action==="inspect_adapter"?adapter:undefined}) as never);
+    t.client.candidate.mockImplementation(async(...args)=>{
+      expect((args as unknown[])[5]).toBe(preference==="ANY"?50:undefined);
+      const input={...t.f.job.request.input,durationMinutes:preference==="ANY"?50:60};
+      return{recipeHash:"b".repeat(64),challenges:[{id:"backend-one",recipeHash:"b".repeat(64),input},
+        {id:"backend-two",recipeHash:"b".repeat(64),input:{...input,date:"2030-01-04",players:3}}]};
+    });
+    const executeRecipe=vi.fn(async({input}:{input:{durationMinutes?:number}})=>({status:input.durationMinutes===50?"AVAILABLE":"INCOMPLETE",complete:input.durationMinutes===50,slots:[],
+      evidence:{venueVerified:input.durationMinutes===50,dateVerified:input.durationMinutes===50,capacityVerified:input.durationMinutes===50,durationVerified:input.durationMinutes===50,completeVerified:input.durationMinutes===50}}));
+    if(preference==="ANY"){
+      await t.run({executeRecipe});expect(executeRecipe).toHaveBeenCalledTimes(2);expect(t.client.verification).toHaveBeenCalledTimes(2);expect(t.client.activate).toHaveBeenCalledOnce();
+    }else{
+      await expect(t.run({executeRecipe})).rejects.toMatchObject({code:"DISCOVERY_REPLAY_INCOMPLETE"});expect(t.client.activate).not.toHaveBeenCalled();
+    }
+    expect([t.f.job.firstPickedUpAt,t.f.job.deadlineAt]).toEqual(originalClock);
+    expect(t.genericWorker).not.toHaveBeenCalled();
+  });
+});
+
 describe("clean unresolved source fresh-root handoff", () => {
   function timedOutClick(t: ReturnType<typeof setup>) {
     const diagnostic = cleanUnresolvedReport(t);

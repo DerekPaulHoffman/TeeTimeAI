@@ -4,6 +4,13 @@ import { normalizeProviderFamilyKey } from "@/lib/automation/provider-capabiliti
 import { createSimulatorBrowserRequestQueue } from "@/lib/automation/simulator-browser-request-queue";
 
 describe("learned requests use the established provider mutex", () => {
+  it("serializes anonymous rental documents and their shared availability API as one provider", () => {
+    const family=normalizeProviderFamilyKey("YOUCANBOOKME");
+    expect(requestFamilyForUrl("https://public-room.youcanbook.me/")).toBe(family);
+    expect(requestFamilyForUrl("https://other-room.youcanbook.me/assets/index-public.js")).toBe(family);
+    expect(requestFamilyForUrl("https://api.youcanbook.me/v1/availabilities/public")).toBe(family);
+    expect(requestFamilyForUrl("https://public-room.youcanbook.me.evil.example/")).toBe("public-room.youcanbook.me.evil.example");
+  });
   it("shares ForeUP's existing family lease across its public page and API", () => {
     expect(requestFamilyForUrl("https://foreupsoftware.com/index.php/booking/21017")).toBe("FOREUP");
     expect(requestFamilyForUrl("https://foreupsoftware.com/index.php/api/booking/times")).toBe("FOREUP");

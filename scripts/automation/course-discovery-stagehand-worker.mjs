@@ -258,7 +258,12 @@ export async function runCourseDiscoveryStagehandWorker({
     if (validation.valid !== true) throw discoveryError("DISCOVERY_RECIPE_INVALID");
     await checkpoint("FIXED_INSPECTION_COMPLETE");
     phase = "REPLAY";
+    const publicRentalDurations = prepared.recipe.adapter?.family === "YOUCANBOOKME" ?
+      [...new Set(prepared.recipe.adapter.rooms?.map(room => room.durationMinutes))] : [];
+    const verificationDurationMinutes = job.request?.target?.kind === "SIMULATOR" && job.request.durationPreference === "ANY" &&
+      publicRentalDurations.length === 1 ? publicRentalDurations[0] : undefined;
     const activation = await verifyDiscoveryCandidate({ client, job, recipe: prepared.recipe, sourceEvidence: prepared.sourceEvidence, signal, executeRecipe,
+      ...(verificationDurationMinutes === undefined ? {} : { verificationDurationMinutes }),
       onReplay: replay => {
         metrics.replayDurationsMs.push(replay.elapsedMs);
         publishMetrics();
