@@ -305,6 +305,7 @@ export async function openStagehandSession({ model, deadline, cwd, signal, onMet
   let stagehand;
   let codexModel;
   let closing;
+  let cleanupDetails;
   let startupPhase = 'SDK_CONNECT';
   let disabledModelCalls = 0;
   const onAbort = () => { void browser?.close().catch(() => {}); void nativePointer?.close().catch(() => {}); void codexModel?.close().catch(() => {}); void owned.close().catch(() => {}); };
@@ -534,6 +535,7 @@ export async function openStagehandSession({ model, deadline, cwd, signal, onMet
       get sourceDocumentReadiness() { return documentReadiness?structuredClone(documentReadiness):undefined; },
       get nativeIntermediaryPreparation() { return intermediaryPreparation?structuredClone(intermediaryPreparation):undefined; },
       get disabledModelCalls() { return disabledModelCalls; },
+      get cleanupDetails() { return cleanupDetails ? structuredClone(cleanupDetails) : undefined; },
       close() { return closing ??= (async()=>{
         signal?.removeEventListener('abort', onAbort);
         // The private host close includes its native finish ACK (at most 30s)
@@ -554,12 +556,29 @@ export async function openStagehandSession({ model, deadline, cwd, signal, onMet
           hostGuardFailure=projectHostGuardFailure(failures?.hostGuardFailure);
           if(intermediaryAttempted)intermediaryPreparation??=projectNativeIntermediaryPreparation(failures?.nativeIntermediaryPreparation);
         }else if(typeof owned.snapshotFailure==='function')ownedCdpFailure=await closeWithin(Promise.resolve().then(()=>owned.snapshotFailure()),500);
-        const modelReceipt = codexModel ? await closeWithin(Promise.resolve().then(()=>codexModel.close()), 4000) : null;
+        // Keep the original close promises. A per-phase wait expiring does not
+        // mean the owned process failed to close while later teardown ran.
+        // Reconcile only those same operations, within the original deadline;
+        // never start another process or infer an ACK from process absence.
+        let modelState = codexModel ? 'PENDING' : 'NOT_REQUIRED', hostState = 'PENDING';
+        const modelClosing = codexModel ? Promise.resolve().then(()=>codexModel.close()).then(value=>{modelState='COMPLETED';return value;},error=>{modelState='REJECTED';throw error;}) : Promise.resolve(null);
+        let modelReceipt = codexModel ? await closeWithin(modelClosing, 4000) : null;
+        const modelWaitExpired = modelState === 'PENDING';
         await closeWithin(Promise.resolve().then(()=>stagehand.close()), 2000);
-        await closeWithin(Promise.resolve().then(()=>browser.close()), 4000);
+        const browserClosing = Promise.resolve().then(()=>browser.close());
+        await closeWithin(browserClosing, 4000);
         if (nativePointer) await closeWithin(Promise.resolve().then(()=>nativePointer.close()), 4000);
-        const hostReceipt = await closeWithin(Promise.resolve().then(()=>owned.close()), 35000);
-        return { browserClosed: Date.now()<deadline&&!signal?.aborted&&browser.closed&&hostReceipt?.browserClosed === true, modelClosed: modelDisabled || modelReceipt?.processExited === true && modelReceipt?.cleanup?.credentialsRemoved === true };
+        const hostClosing = Promise.resolve().then(()=>owned.close()).then(value=>{hostState='COMPLETED';return value;},error=>{hostState='REJECTED';throw error;});
+        const hostReceipt = await closeWithin(hostClosing, 35000);
+        if (modelReceipt === undefined) modelReceipt = await closeWithin(modelClosing, 500);
+        if (hostReceipt?.browserClosed === true && !browser.closed) await closeWithin(browserClosing, 500);
+        const withinOriginalDeadline = Date.now()<deadline&&!signal?.aborted;
+        cleanupDetails = { withinOriginalDeadline, modelWaitExpired, modelState, hostState,
+          modelProcessExited: typeof modelReceipt?.processExited === 'boolean' ? modelReceipt.processExited : null,
+          modelCredentialsRemoved: typeof modelReceipt?.cleanup?.credentialsRemoved === 'boolean' ? modelReceipt.cleanup.credentialsRemoved : null,
+          browserClientClosed: browser.closed === true, hostBrowserClosed: typeof hostReceipt?.browserClosed === 'boolean' ? hostReceipt.browserClosed : null };
+        return { browserClosed: withinOriginalDeadline&&browser.closed&&hostReceipt?.browserClosed === true,
+          modelClosed: modelDisabled || withinOriginalDeadline&&modelReceipt?.processExited === true && modelReceipt?.cleanup?.credentialsRemoved === true };
       })(); },
     };
   } catch (error) {

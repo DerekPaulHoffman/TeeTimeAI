@@ -2,6 +2,18 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { projectSourceDiagnostic, projectActionGuardDiagnostic, sourceFailureDiagnostic, captureModelFailure, classifyNavigationError, SOURCE_DIAGNOSTIC_MAX_BYTES, stagehandRedirectRejections, projectNativeRouterFailure, safeNativeRouterFailure, projectHostGuardFailure, hostGuardReasons } from './source-diagnostic.mjs';
 
+test('cleanup diagnostics retain bounded acknowledgment facts without private process or credential data',()=>{
+ const facts={withinOriginalDeadline:true,modelWaitExpired:true,modelState:'COMPLETED',hostState:'COMPLETED',
+  modelProcessExited:true,modelCredentialsRemoved:true,browserClientClosed:false,hostBrowserClosed:true};
+ const diagnostic=sourceFailureDiagnostic({cleanup:{browserClosed:false,modelClosed:true},cleanupDetails:facts});
+ assert.deepEqual(diagnostic.cleanupDetails,facts);assert.deepEqual(projectSourceDiagnostic(diagnostic),diagnostic);
+ assert.equal(sourceFailureDiagnostic({cleanup:{browserClosed:true,modelClosed:true},cleanupDetails:facts}).cleanupDetails,undefined);
+ for(const delta of [{credentialPath:'PRIVATE'},{modelState:'PRIVATE'},{modelProcessExited:'PRIVATE'}]){
+  assert.equal(sourceFailureDiagnostic({cleanup:{browserClosed:false,modelClosed:true},cleanupDetails:{...facts,...delta}}).cleanupDetails,undefined);
+  assert.equal(projectSourceDiagnostic({...diagnostic,cleanupDetails:{...facts,...delta}}),undefined);
+ }
+});
+
 test('host guards retain only exact closed stage/reason pairs and optional DOM fragment presence',()=>{
  for(const[stage,reasons]of Object.entries(hostGuardReasons))for(const reason of reasons){
   const failure={stage,reason};assert.deepEqual(projectHostGuardFailure(failure),failure);

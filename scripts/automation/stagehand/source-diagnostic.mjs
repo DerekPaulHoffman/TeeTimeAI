@@ -214,6 +214,9 @@ export function captureModelFailure(error,attempt,completedCalls){
  if(partial.success&&Object.keys(partial.data).length)value.failedCallUsage=partial.data;
  const result=modelFailureSchema.safeParse(value);return result.success?result.data:undefined;
 }
+const cleanupDetailsSchema = z.object({ withinOriginalDeadline:z.boolean(),modelWaitExpired:z.boolean(),
+  modelState:z.enum(['NOT_REQUIRED','PENDING','COMPLETED','REJECTED']),hostState:z.enum(['PENDING','COMPLETED','REJECTED']),
+  modelProcessExited:z.boolean().nullable(),modelCredentialsRemoved:z.boolean().nullable(),browserClientClosed:z.boolean(),hostBrowserClosed:z.boolean().nullable() }).strict();
 export const sourceDiagnosticSchema = z.object({
   schemaVersion:z.literal(1),phase:z.enum(sourcePhases),startupStage:z.enum(startupStages).optional(),
   errorClass:z.enum(['NONE','VALIDATION','TIMEOUT','ABORT','STATIC_TRANSPORT','SDK_ERROR','UNKNOWN']),
@@ -237,6 +240,7 @@ export const sourceDiagnosticSchema = z.object({
     completedModelCalls:count,attemptedModelCalls:count,failedModelCalls:count}).strict(),
   completedUsageIsLowerBound:z.literal(true),failedCallUsage:usage.optional(),
   cleanup:z.object({browserClosed:z.boolean(),modelClosed:z.boolean()}).strict(),
+  cleanupDetails:cleanupDetailsSchema.optional(),
   graph:z.object({sha256:z.string().regex(/^[a-f0-9]{64}$/u),pages:count,links:count,visibleLinks:count,frames:count,actions:count}).strict(),
 }).strict();
 export function projectSourceDiagnostic(value) {
@@ -245,7 +249,7 @@ export function projectSourceDiagnostic(value) {
   return parsed.data;
 }
 const boundedCount=value=>Number.isSafeInteger(value)&&value>=0&&value<=1000000?value:0;
-export function sourceFailureDiagnostic({error,phase,report,startedAt,cleanup,modelAttempts,modelFailure,ownedCdpFailure,nativeRouterFailure,hostGuardFailure,sourceStop,documentReadiness,intermediaryPreparation}={}) {
+export function sourceFailureDiagnostic({error,phase,report,startedAt,cleanup,cleanupDetails,modelAttempts,modelFailure,ownedCdpFailure,nativeRouterFailure,hostGuardFailure,sourceStop,documentReadiness,intermediaryPreparation}={}) {
   const rows=(value,max)=>Array.isArray(value)?value.slice(0,max):[];
   const safe=value=>publicEvidenceUrl(value);
   const ledger=rows(report?.officialLinkLedger,512).map(row=>({pageUrl:safe(row.pageUrl),links:rows(row.links,512).map(link=>({href:safe(link.href),visible:link.visible===true})).filter(link=>link.href)}));
@@ -273,6 +277,8 @@ export function sourceFailureDiagnostic({error,phase,report,startedAt,cleanup,mo
     completedUsageIsLowerBound:true,cleanup:{browserClosed:cleanup?.browserClosed===true,modelClosed:cleanup?.modelClosed===true},
     graph:{sha256:createHash('sha256').update(JSON.stringify(graph)).digest('hex'),pages:ledger.length,links:ledger.reduce((n,row)=>n+row.links.length,0),
       visibleLinks:ledger.reduce((n,row)=>n+row.links.filter(link=>link.visible).length,0),frames:frames.reduce((n,row)=>n+row.frames.length,0),actions:actions.length}};
+  const teardown=cleanupDetailsSchema.safeParse(cleanupDetails);
+  if(teardown.success&&(!value.cleanup.browserClosed||!value.cleanup.modelClosed))value.cleanupDetails=teardown.data;
   const guardReason=error?.stagehandGuardReason??report?.actionAttempts?.at(-1)?.guardReason;
   const attempt=report?.actionAttempts?.at(-1);
   const guard=projectActionGuardDiagnostic(error?.stagehandActionDiagnostic)??projectActionGuardDiagnostic({guardReason,

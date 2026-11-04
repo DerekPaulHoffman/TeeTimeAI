@@ -1,5 +1,33 @@
 import test from 'node:test';
 
+for(const expired of [false,true])test('teardown reconciles the same model close only before the original deadline: '+expired,async t=>{
+ const page={pageId:'owned',url:async()=>'https://official.example/'};
+ const browser={closed:false,context:{pages:async()=>[page]},close:async()=>{browser.closed=true;}};
+ let modelCloses=0,hostCloses=0;
+ const owned={kind:'OWNED_GUARDED_STAGEHAND_CONTEXT',cdpUrl:'http://127.0.0.1:12345',targetId:'owned',
+  assertGuardedTargets:async()=>true,prepareNavigation:async()=>{},beforeAction:async()=>{},
+  close:async()=>{hostCloses++;await new Promise(resolve=>setTimeout(resolve,700));return{browserClosed:true};}};
+ const now=Date.now();
+ const session=await openStagehandSession({model:'gpt-6.1-sol',deadline:now+(expired?4500:20000),sourceRoutingOnly:true,ownedBrowser:owned},{
+  createModel:async()=>({model:{generate:async()=>{throw Error('NO_MODEL_CALLS');}},
+   close:async()=>{modelCloses++;await new Promise(resolve=>setTimeout(resolve,4100));return{processExited:true,cleanup:{credentialsRemoved:true}};}}),
+  loadRuntime:async()=>({localBrowser:{connect:async()=>browser},Stagehand:{create:async()=>({close:async()=>{}})}}),
+ });
+ t.mock.timers.enable({apis:['setTimeout','Date'],now});
+ try{
+  const closing=session.close();
+  for(let i=0;i<100;i++)await Promise.resolve();
+  t.mock.timers.tick(4000);
+  for(let i=0;i<100;i++)await Promise.resolve();
+  t.mock.timers.tick(700);
+  for(let i=0;i<100;i++)await Promise.resolve();
+  assert.deepEqual(await closing,{browserClosed:!expired,modelClosed:!expired});
+  assert.equal(modelCloses,1);assert.equal(hostCloses,1);
+  assert.equal(session.cleanupDetails.modelWaitExpired,true);
+  assert.equal(session.cleanupDetails.withinOriginalDeadline,!expired);
+ }finally{t.mock.timers.reset();}
+});
+
 for(const mode of ['valid','label-only','missing','changed-current'])test('placeholder JS driver requires completed private native source: '+mode,async()=>{
  const initial='https://official.example/',destination='https://provider.example/services';let current=initial;const order=[];
   const placeholderText=mode==='label-only'?'':'Book Bay',placeholderLabel=mode==='label-only'?'Book Bay':'';

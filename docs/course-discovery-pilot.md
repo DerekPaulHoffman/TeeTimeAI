@@ -20,7 +20,7 @@ prove inbox placement or human reading.
 3. The normal local controller uses Stagehand4.3.0 with GPT-6.1 Sol through the
    existing ChatGPT sign-in. Its source-only model session has no client tools,
    shell, database, email or activation authority. Stagehand observes and follows
-   guarded public navigation for at most120 seconds from the original pickup;
+   guarded public navigation for at most four minutes from the original pickup;
    its sole handoff is one exactly observed official-linked source. A fresh
    fixed reader derives typed adapter metadata and availability independently.
    The trusted controller retains the credential for the private API.
