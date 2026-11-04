@@ -5,6 +5,8 @@ import { isSafePublicSwiftCatalogRedirect } from "./public-bootstrap-read-url";
 import { isSwiftAnonymousPlaceholderRead } from "./swift-public-read-policy";
 import { observedPublicBookingIntermediary } from "./public-booking-intermediary";
 import { officialIdentityHtml } from "./official-identity-html";
+import { inspectSquarePublicEntryElement, inspectSquarePublicCatalogLinkElement } from "./square-public-entry-control";
+import { isSquarePublicServiceCatalogUrl } from "@/lib/automation/square-public-read-policy";
 import { classifyPublicEntryDisclosure, revalidatePublicEntryDisclosure, type PublicEntryDisclosure, type PublicEntryDisclosureEvidence } from "./public-entry-disclosure";
 import { createHash, randomUUID } from "node:crypto";
 import { chargeDelegatedReadBudget, delegatedProxyAllocation, settleDelegatedProxyBudget, type DelegatedReadBudget } from "./teeitup-delegated-booking-context";
@@ -37,7 +39,7 @@ import { getCpsPostalContactDiagnostic } from "./cps-postal-conflict-proof";
 import { getMindbodyAppointmentDiagnostic } from "./mindbody-appointment-reader";
 import { isPublicCalendarApply } from "./public-calendar-apply";
 import { isObservedPublicCalendarDay, observedPublicCalendarDays } from "./public-calendar-day";
-import { PUBLIC_BROWSER_REQUEST_LIMIT, MINDBODY_APPOINTMENT_REQUEST_LIMIT, assertPublicBrowserRequestBudget, PUBLIC_BROWSER_TOTAL_BYTES, publicOfficialRenderResponseLimit, publicBrowserResponseLimit, SOURCE_ROUTING_RESPONSE_PROFILE } from "./browser-resource-limits";
+import { PUBLIC_BROWSER_REQUEST_LIMIT, MINDBODY_APPOINTMENT_REQUEST_LIMIT, SQUARE_CALENDAR_ENTRY_REQUEST_LIMIT, assertPublicBrowserRequestBudget, PUBLIC_BROWSER_TOTAL_BYTES, publicOfficialRenderResponseLimit, publicBrowserResponseLimit, SOURCE_ROUTING_RESPONSE_PROFILE } from "./browser-resource-limits";
 import { registerPublicReadWorkerDenial } from "./public-read-worker-denial";
 import { observedPublicDropdowns, selectPublicDropdown, type PublicDropdownProof } from "./public-dropdown-control";
 import { observedPublicMenuButtons, selectPublicMenuButton, type PublicMenuButtonProof } from "./public-duration-button";
@@ -49,6 +51,7 @@ import { verifiedTeeItUpContactParent } from "./teeitup-official-contact-chain";
 import { createTeeItUpOfficialBookingScope, observedTeeItUpOfficialBookingChain, type TeeItUpSourceRequestToken } from "./teeitup-official-booking-context";
 import { discoveryNavigationFailureKind, safeOfficialSourceDiagnostic, type OfficialSourceDiagnostic, type NavigationFailureKind } from "./official-source-diagnostics";
 import { inspectPublicRentalProduct, selectPublicRentalProduct } from "./public-product-control";
+import { squarePublicControlSelector } from "./square-public-service-control";
 import { inspectSquarePublicDateElement } from "./square-public-date-control";
 import { createPublicCatalogTileScope, inspectPublicCatalogTile, openPublicCatalogTile } from "./public-catalog-tile";
 import { canonicalCpsPublicUrl, cpsPublicEntryUrl, cpsSessionKey, createCpsPublicSessionScope } from "./cps-public-navigation";
@@ -116,7 +119,7 @@ type ObservedControl = { tag: string; role: string; name: string; label: string;
   sensitiveForm: boolean; inForm: boolean; hasDownload: boolean; inputType: string; hasPopup: string; selector: string; options?: Array<{ value: string; label: string }>;
   currentValue?: string; product?: { selector: string; durationMinutes: number }; choiceValue?: string; choiceContext?: string; disabledChoice?: boolean;
   formSafeAnchor?: boolean; readOnlyFormDisplay?: boolean; documentNavigationOnly?: boolean; datePicker?: PublicDatePickerInputProof;
-  service?: PublicRentalServiceProof; serviceContinuation?: PublicServiceContinuationMode; serviceMenuOption?: boolean; catalogTile?: boolean };
+  service?: PublicRentalServiceProof; serviceContinuation?: PublicServiceContinuationMode; serviceMenuOption?: boolean; catalogTile?: boolean; squarePublicEntry?: boolean; squareCatalogLink?: boolean };
 type EzLinksDocumentWitness = { url: string; settled: boolean; status?: number; token?: EzLinksDocumentToken;
   observedAt?: number;
   init?: unknown; initAt?: number; initVersion: number; pendingInit: number; initAttempted: boolean;
@@ -187,6 +190,7 @@ export function sameDiscoveryMainDocument(observedUrl: string, currentUrl: strin
 
 type StaleControlReason = "ELEMENT_NOT_OBSERVED" | "TARGET_OR_DOCUMENT_CHANGED" | "NATIVE_DOCUMENT_CHANGED" | "CONTROL_NOT_RENDERED" |
   "CONTROL_DISABLED" | "CONTROL_SIGNATURE_CHANGED" | "PUBLIC_DATE_CHOICE_CHANGED" | "ENTRY_DISCLOSURE_CHANGED" |
+  "PUBLIC_ENTRY_SOURCE_UNVERIFIED" | "PUBLIC_ENTRY_CONTROL_CHANGED" |
   "GESTURE_CONTROL_MISSING" | "GESTURE_CONTROL_AMBIGUOUS" | "GESTURE_NATIVE_SOURCE_CHANGED" |
   "GESTURE_LABEL_INVALID" | "GESTURE_BOOKING_INTENT_MISSING" | "GESTURE_INTENT_MISSING";
 
@@ -327,7 +331,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     deps.browserTransport === "NATIVE_CHROME" && !deps.allowTeeItUpContactChainRoot &&
     verifiedTeeItUpContactParent(deps.officialContactParent, input.venueOfficialUrl, initialUrls[0]) ? initialUrls[0] : undefined;
   if (deps.officialContactParent && !officialContactUrl) throw new Error("OFFICIAL_CONTACT_CHAIN_UNVERIFIED");
-  const requestLimit = discoveryBrowserRequestLimit({ ...input, initialUrls }, deps);
+  let requestLimit = discoveryBrowserRequestLimit({ ...input, initialUrls }, deps);
   try { new Intl.DateTimeFormat("en-US", { timeZone: input.timeZone ?? "UTC" }); } catch { throw new Error("INVALID_TIME_ZONE"); }
   const remaining = input.deadlineAt.getTime() - Date.now();
   if (!Number.isFinite(remaining) || remaining <= 0 || remaining > 20 * 60_000) throw new Error("INVALID_DEADLINE");
@@ -352,6 +356,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
     proof: NativeMainDocumentContinuity } | undefined;
   let gestureIntent: { sourceUrl: string; href: string; text: string; label: string; sourceRequest: NativeReadRequest;
     sourceBinding: string; until: number; used: boolean } | undefined;
+  let squareEntryIntent: { sourceUrl: string; sourceRequest: NativeReadRequest; sourceBinding: string;
+    controlBindingSha256: string; until: number; used: boolean } | undefined;
   let pendingOfficialSubpage: { targetUrl: string; sourceRequest: NativeReadRequest; sourceBinding: string } | undefined;
   let officialSubpage: { url: string; request: NativeReadRequest; frameId: string; loaderId: string; binding: string } | undefined;
   let fixedInspectionFrameToken: { parentUrl: string; frameUrl: string; timeOrigin: number; request: NativeReadRequest;
@@ -467,7 +473,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
   };
   type ControlDocument = { url: string; timeOrigin: number; frameId?: string; loaderId?: string; binding?: string; request?: NativeReadRequest };
   type ControlRecord = { locator: Locator; signature: string; kind: string; document?: ControlDocument; href?: string; documentNavigationOnly?: boolean; calendarDay?: string; dropdown?: PublicDropdownProof; menuButton?: PublicMenuButtonProof; catalogTile?: boolean;
-    service?: boolean; serviceContinuation?: PublicServiceContinuationMode; datePicker?: PublicDatePickerInputProof; entryDisclosure?: PublicEntryDisclosure };
+    service?: boolean; serviceContinuation?: PublicServiceContinuationMode; datePicker?: PublicDatePickerInputProof; entryDisclosure?: PublicEntryDisclosure; squarePublicEntry?: boolean; squareCatalogLink?: boolean };
   const controls = new Map<string, ControlRecord>();
   let entryDisclosureUsed = false, disclosureGetOnly = false;
   let entryGetIntent: { sourceUrl: string; href: string; expiresAt: number; used: boolean } | undefined;
@@ -548,7 +554,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
   };
   const currentGestureCompletion = (currentUrl: string): NativeGestureCompletion | undefined => {
     const witness = nativeMainDocumentWitness, proof = witness?.request && nativeGestureNavigationSource(witness.request);
-    if (!witness || !proof || !gestureIntent?.used || proof.sourceUrl !== gestureIntent.sourceUrl || proof.href !== gestureIntent.href ||
+    if (!witness || !proof || proof.controlKind || !gestureIntent?.used || proof.sourceUrl !== gestureIntent.sourceUrl || proof.href !== gestureIntent.href ||
         proof.text !== gestureIntent.text || proof.label !== gestureIntent.label || proof.targetUrl === proof.sourceUrl ||
         witness.currentUrl !== currentUrl || !isSafeRecipeUrl(currentUrl) || !redirectRouting ||
         !redirectRouting.isCurrentCompletedDocumentRead(witness.request, page.mainFrame(),
@@ -1056,6 +1062,20 @@ export async function createCourseDiscoveryBrowserSession(input: {
           entryGetIntent.used = true; return true;
         },
         controllerScriptGetIntent: (sourceUrl, targetUrl) => {
+          const entry = squareEntryIntent, entryWitness = nativeMainDocumentWitness;
+          const entryCurrent = () => Boolean(entry && squareEntryIntent === entry && !entry.used && !closed && !deadline.aborted &&
+            !terminalFailure && !redirectRouting?.firstFatal && Date.now() < entry.until && page.url() === sourceUrl && entry.sourceUrl === sourceUrl &&
+            entryWitness?.request === entry.sourceRequest && entryWitness.proof.documentBindingSha256 === entry.sourceBinding &&
+            redirectRouting?.isCurrentCompletedDocumentRead(entryWitness.request, page.mainFrame(),
+              { frameId: entryWitness.frameId, loaderId: entryWitness.loaderId, url: sourceUrl }));
+          if (entry && entryCurrent() && isSafeRecipeUrl(targetUrl) && isSquarePublicServiceCatalogUrl(targetUrl))
+            return Object.freeze({ controlKind: "SQUARE_PUBLIC_CALENDAR_ENTRY" as const, sourceUrl, text: "Book", label: "Public calendar entry", targetUrl,
+              controlBindingSha256: entry.controlBindingSha256, observedAt: new Date(entry.until - 5000).toISOString(), documentHash: entry.sourceBinding,
+              active: () => squareEntryIntent === entry && !closed && !deadline.aborted && !terminalFailure,
+              consume: () => {
+                if (!entryCurrent()) return false;
+                entry.used = true; requestLimit = Math.max(requestLimit, SQUARE_CALENDAR_ENTRY_REQUEST_LIMIT); return true;
+              } });
           const intent = gestureIntent, witness = nativeMainDocumentWitness;
           const current = () => Boolean(intent && gestureIntent === intent && !intent.used && !closed && !deadline.aborted && !terminalFailure &&
             Date.now() < intent.until && page.url() === sourceUrl && intent.sourceUrl === sourceUrl && witness &&
@@ -1230,7 +1250,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
   }, undefined, { timeout: 1000 }).then(async control => {
     const datePicker = !control.sensitiveForm && control.tag === "input" ? await inspectPublicDatePickerInput(locator) : undefined;
     const squareDate = control.tag === "button" ? await locator.evaluate(inspectSquarePublicDateElement, undefined, { timeout: 1000 }) : undefined;
-    const product = !control.sensitiveForm && ["a", "button"].includes(control.tag) ? await inspectPublicRentalProduct(locator) : undefined;
+    const squarePublicEntry = nativeProxy && control.tag === "button" && await locator.evaluate(inspectSquarePublicEntryElement, undefined, { timeout: 1000 });
+    const squareCatalogLink = control.tag === "a" ? await locator.evaluate(inspectSquarePublicCatalogLinkElement, undefined, { timeout: 1000 }) : undefined;
+    const product = !control.sensitiveForm && (["a", "button"].includes(control.tag) || control.role === "option") ? await inspectPublicRentalProduct(locator) : undefined;
     const catalogTile = !control.sensitiveForm && control.tag === "article" ? await inspectPublicCatalogTile(locator, catalogTiles) : undefined;
     // The service proof validates rendered fields itself, including hidden later
     // wizard stages. Keep the generic sensitive-form exclusion for other controls.
@@ -1248,9 +1270,11 @@ export async function createCourseDiscoveryBrowserSession(input: {
         /^(?:Select\s+)?(?:Service|Activity|Product):?$/iu.test(trigger.getAttribute("aria-label") ?? ""));
     }, undefined, { timeout: 1000 });
     const href = control.href ? normalizeDiscoveryNavigationUrl(control.href) : undefined;
+    const squareControlSelector = (product && ("squareService" in product || "squareVariant" in product) || serviceContinuation === "SQUARE_SERVICE")
+      ? await locator.evaluate(squarePublicControlSelector, undefined, { timeout: 1000 }) : undefined;
     const documentNavigationOnly = discoveryPublicAvailabilityEntryNavigation({ ...control, href }) || Boolean(control.formSafeAnchor && href && !new URL(href).hash &&
       discoveryPublicAnchorKind({ ...control, href, sensitiveForm: false }));
-    return { ...control, ...(squareDate ? { calendar: true, name: `Date ${squareDate.date}`, label: `Date ${squareDate.date}` } : {}), ...(datePicker ? { datePicker, name: datePicker.label, label: datePicker.label, currentValue: datePicker.currentValue } : {}),
+    return { ...control, ...(squareControlSelector ? { selector: squareControlSelector } : {}), ...(squareCatalogLink ? { ...squareCatalogLink, label: squareCatalogLink.name, squareCatalogLink: true } : {}), ...(squarePublicEntry ? { squarePublicEntry: true } : {}), ...(squareDate ? { calendar: true, name: `Date ${squareDate.date}`, label: `Date ${squareDate.date}` } : {}), ...(datePicker ? { datePicker, name: datePicker.label, label: datePicker.label, currentValue: datePicker.currentValue } : {}),
       ...(catalogTile ? { name: catalogTile.name, label: catalogTile.name, catalogTile: true } : {}), ...(documentNavigationOnly ? { documentNavigationOnly: true } : {}), ...(product ? { product, ...("squareService" in product ? { name: "Add", label: "Add public rental" } : {}) } : {}), ...(service ? { service } : {}),
       ...(serviceContinuation === "SQUARE_SERVICE" ? { name: "Next", label: "Show public rental availability" } : {}),
       ...(serviceContinuation ? { serviceContinuation } : {}), ...(serviceMenuOption ? { serviceMenuOption: true } : {}),
@@ -1258,6 +1282,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
   });
   const publicControlKind = (control: ObservedControl, blockedAccess: boolean) => {
     if (!recipeSelectorSchema.safeParse(control.selector).success || blockedAccess || control.serviceMenuOption) return null;
+    if (control.squarePublicEntry) return "public-calendar-entry";
+    if (control.squareCatalogLink && control.href && isSafeRecipeUrl(control.href)) return "link";
     // The generic link fallback must retain the same transaction-parameter
     // exclusion as a labelled public availability link.
     if (control.href && !control.documentNavigationOnly && !isPublicAvailabilityNavigation(control.href, (control.name || control.label).trim())) return null;
@@ -1357,6 +1383,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
     const target = [...(previous?.entries() ?? [])].find(([id, known]) => !controls.has(id) &&
       known.kind === kind && known.signature === signature)?.[0] ?? randomUUID();
     controls.set(target, { locator, signature, kind, document: controlsDocument, href: control.href, ...(control.documentNavigationOnly ? { documentNavigationOnly: true } : {}),
+      ...(control.squarePublicEntry ? { squarePublicEntry: true } : {}),
+      ...(control.squareCatalogLink ? { squareCatalogLink: true } : {}),
       ...(control.catalogTile ? { catalogTile: true } : {}),
       ...(control.datePicker ? { datePicker: control.datePicker } : {}),
       ...(extra.date ? { calendarDay: extra.date } : {}), ...(extra.dropdown ? { dropdown: extra.dropdown } : {}),
@@ -1902,6 +1930,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
         mindbodyCapture: mindbodyCapture.diagnostics(),
         officialSourceDiagnostic: officialDiagnostics(), ...(navigationFailureKind ? { navigationFailureKind } : {}),
         ...(staleControlReason ? { staleControlReason } : {}),
+        publicEntryRenderGate: officialRenderGate(true),
         ...((redirectRouting?.firstFatal ?? browserSessionNativeLimit) ? { nativeFirstFatal: redirectRouting?.firstFatal ?? browserSessionNativeLimit } : {}),
         ...(redirectRouting?.rejectedRequests?.length ? { nativeRejectedRequests: redirectRouting.rejectedRequests } : {}),
         requests: observedRequests.map(request => ({ url: request.url, method: request.method, resourceType: request.resourceType,
@@ -1916,7 +1945,12 @@ export async function createCourseDiscoveryBrowserSession(input: {
     async execute(value: unknown): Promise<DiscoveryBrowserSnapshot> {
       const executeAction = async (): Promise<DiscoveryBrowserSnapshot> => {
         staleControlReason = undefined;
-      const action = discoveryBrowserActionSchema.parse(value);
+      let action = discoveryBrowserActionSchema.parse(value);
+      if (action.action === "open") {
+        const targetUrl = action.url;
+        const observed = [...controls.entries()].filter(([, known]) => known.squareCatalogLink && known.href === targetUrl && known.document?.url === page.url());
+        if (observed.length === 1) action = { id: action.id, action: "click", target: observed[0][0] };
+      }
       if (deps.sourceInspectionOnly && (!['open','observe','inspect_adapter','finish','click'].includes(action.action) ||
           action.action === 'click' && !((controls.get(action.target)?.kind === 'link' && controls.get(action.target)?.href) || controls.get(action.target)?.entryDisclosure)))
         throw new Error("FIXED_SOURCE_INSPECTION_ACTION_REJECTED");
@@ -2102,7 +2136,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
               undefined, { timeout: 1000 });
               if (!await isRenderedControl(link.locator)) { failAnchor("NOT_RENDERED"); continue; }
               if (!await link.locator.isEnabled()) { failAnchor("NOT_ENABLED"); continue; }
-              if (JSON.stringify(await observeControl(link.locator)) !== link.signature) { failAnchor("SIGNATURE_CHANGED"); continue; }
+              const freshControl = await observeControl(link.locator);
+              if (JSON.stringify(freshControl) !== link.signature) { failAnchor("SIGNATURE_CHANGED"); continue; }
               if (current.href !== action.url) { failAnchor("HREF_MISMATCH"); continue; }
               if (!current.rawHref) { failAnchor("RAW_HREF_MISSING"); continue; }
               if (current.inForm) { failAnchor("IN_FORM"); continue; }
@@ -2110,7 +2145,8 @@ export async function createCourseDiscoveryBrowserSession(input: {
               if (current.handler) { failAnchor("HANDLER"); continue; }
               if (current.disabled) { failAnchor("ARIA_DISABLED"); continue; }
               if (![null, "", "_self"].includes(current.target)) { failAnchor("TARGET"); continue; }
-              if (![null, "", "link"].includes(current.role)) { failAnchor("ROLE"); continue; }
+              if (![null, "", "link"].includes(current.role) &&
+                  !(current.role === "button" && discoveryPublicAnchorKind(freshControl) === "link")) { failAnchor("ROLE"); continue; }
               oneLinkFresh = true;
               officialSubpageAttempt = { ...officialSubpageAttempt, anchorFailure: "NONE", anchorOrdinal: "NONE" };
               break;
@@ -2178,6 +2214,34 @@ export async function createCourseDiscoveryBrowserSession(input: {
           if (known.kind !== "field" || !/^[\d\s/:.T-]{1,120}$/u.test(action.text)) throw new Error("UNSAFE_CONTROL");
           await known.locator.fill(action.text); await known.locator.dispatchEvent("change");
         } else {
+          if (known.squareCatalogLink) {
+            const observed = await known.locator.evaluate(inspectSquarePublicCatalogLinkElement, undefined, { timeout: 1000 });
+            if (!observed || observed.href !== known.href) staleControl("PUBLIC_ENTRY_CONTROL_CHANGED");
+            // Let this public app keep its own same-document route and loaded
+            // assets. A real document successor still needs the exact native
+            // GET intent; neither path resets counters, bytes or deadlines.
+            entryGetIntent = { sourceUrl: page.url(), href: observed.href, expiresAt: Date.now() + 5000, used: false };
+            try { await known.locator.click(); return await snapshot(); } finally { entryGetIntent = undefined; }
+          }
+          if (known.squarePublicEntry) {
+            gestureIntent = undefined; squareEntryIntent = undefined;
+            const timeOrigin = await page.evaluate(() => performance.timeOrigin);
+            await currentNavigationStatus(page.url(), timeOrigin);
+            const source = nativeMainDocumentWitness;
+            const officialDocument = page.url() === input.venueOfficialUrl || Boolean(input.venueOfficialUrl && navigation?.request &&
+              attestedNativeDocumentRedirects(navigation.request, new Set([input.venueOfficialUrl]))?.at(-1)?.toUrl === page.url()) ||
+              Boolean(officialSubpage && navigation?.status === 200 && navigation.request === officialSubpage.request &&
+                page.url() === officialSubpage.url && source?.request === officialSubpage.request && source.frameId === officialSubpage.frameId &&
+                source.loaderId === officialSubpage.loaderId && source.proof.documentBindingSha256 === officialSubpage.binding);
+            if (!nativeProxy || !officialDocument || !source || source.currentUrl !== page.url() || navigation?.status !== 200 ||
+                !redirectRouting?.isCurrentCompletedDocumentRead(source.request, page.mainFrame(),
+                  { frameId: source.frameId, loaderId: source.loaderId, url: page.url() })) staleControl("PUBLIC_ENTRY_SOURCE_UNVERIFIED");
+            if (!await known.locator.evaluate(inspectSquarePublicEntryElement, undefined, { timeout: 1000 })) staleControl("PUBLIC_ENTRY_CONTROL_CHANGED");
+            squareEntryIntent = { sourceUrl: page.url(), sourceRequest: source.request, sourceBinding: source.proof.documentBindingSha256,
+              controlBindingSha256: createHash("sha256").update(JSON.stringify([source.proof.documentBindingSha256, known.signature, known.document?.timeOrigin])).digest("hex"),
+              until: Date.now() + 5000, used: false };
+            try { await known.locator.click(); return await snapshot(); } finally { squareEntryIntent = undefined; }
+          }
           if (known.entryDisclosure) {
             const timeOrigin = await page.evaluate(() => performance.timeOrigin);
             await currentNavigationStatus(page.url(), timeOrigin);
@@ -2209,7 +2273,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
             return snapshot();
           }
           const squareProduct = await inspectPublicRentalProduct(known.locator);
-          if (squareProduct && "squareService" in squareProduct) {
+          if (squareProduct && ("squareService" in squareProduct || "squareVariant" in squareProduct)) {
             serviceSelection = await selectPublicRentalProduct(known.locator, page.locator(squareProduct.selector), squareProduct.durationMinutes);
             return snapshot();
           }

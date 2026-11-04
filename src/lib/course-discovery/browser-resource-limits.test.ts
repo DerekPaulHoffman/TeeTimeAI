@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { assertPublicBrowserRequestBudget, PUBLIC_BROWSER_REQUEST_LIMIT, MINDBODY_APPOINTMENT_REQUEST_LIMIT,
+import { assertPublicBrowserRequestBudget, PUBLIC_BROWSER_REQUEST_LIMIT, MINDBODY_APPOINTMENT_REQUEST_LIMIT, SQUARE_CALENDAR_ENTRY_REQUEST_LIMIT,
   PUBLIC_BROWSER_TOTAL_BYTES, PUBLIC_BROWSER_TUNNEL_BYTES, SOURCE_ROUTING_RESPONSE_PROFILE, publicBrowserResponseLimit, publicOfficialRenderResponseLimit } from "./browser-resource-limits";
 describe("monotonic fixed public browser request budgets", () => {
-  it.each([PUBLIC_BROWSER_REQUEST_LIMIT, MINDBODY_APPOINTMENT_REQUEST_LIMIT])("admits exactly %i requests without resetting on document transitions", limit => {
+  it.each([...new Set([PUBLIC_BROWSER_REQUEST_LIMIT, MINDBODY_APPOINTMENT_REQUEST_LIMIT, SQUARE_CALENDAR_ENTRY_REQUEST_LIMIT])])("admits exactly %i requests without resetting on document transitions", limit => {
     let count = 0;
     for (let document = 0; document < 8; document++) for (let resource = 0; resource < limit / 8; resource++) {
       assertPublicBrowserRequestBudget(count, limit); count++;

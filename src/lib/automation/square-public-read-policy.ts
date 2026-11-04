@@ -18,6 +18,17 @@ export function isSquareAppointmentsNamespace(url: URL) {
   catch { return true; }
 }
 
+function publicSquareQuery(url: URL, allowService: boolean) {
+  for (const [key, value] of url.searchParams) {
+    if (url.searchParams.getAll(key).length !== 1 ||
+        !((key === "color" || key === "buttonTextColor") && /^[a-fA-F0-9]{6}$/u.test(value) ||
+          key === "locale" && /^[a-z]{2}(?:-[A-Z]{2})?$/u.test(value) ||
+          key === "referrer" && /^[a-z]{1,16}$/u.test(value) ||
+          allowService && key === "service_id" && /^[A-Z0-9]{16,32}$/u.test(value))) return false;
+  }
+  return true;
+}
+
 function visibleLocation(source: string | undefined) {
   if (!source) return null;
   try {
@@ -25,15 +36,18 @@ function visibleLocation(source: string | undefined) {
     if (url.origin !== "https://book.squareup.com" || url.username || url.password || url.hash) return null;
     const match = /^\/appointments\/[a-z0-9]{1,64}\/location\/([A-Z0-9]{13})(?:\/(?:services(?:\/[A-Z0-9]{16,32})?|availability))?$/u.exec(url.pathname);
     if (!match) return null;
-    for (const [key, value] of url.searchParams) {
-      if (url.searchParams.getAll(key).length !== 1 ||
-          !((key === "color" || key === "buttonTextColor") && /^[a-fA-F0-9]{6}$/u.test(value) ||
-            key === "locale" && /^[a-z]{2}(?:-[A-Z]{2})?$/u.test(value) ||
-            key === "referrer" && /^[a-z]{1,16}$/u.test(value) ||
-            key === "service_id" && /^[A-Z0-9]{16,32}$/u.test(value))) return null;
-    }
+    if (!publicSquareQuery(url, true)) return null;
     return match[1];
   } catch { return null; }
+}
+
+/** Exact undated public catalog or its legacy app-host gateway; presentation
+ * fields only. This never widens the availability POST's source authority.
+ * The caller must separately own a fresh native calendar-entry gesture. */
+export function isSquarePublicServiceCatalogUrl(value: string) {
+  if (value.length > 2048 || !/^https:\/\/(?:book\.squareup\.com\/appointments\/[a-z0-9]{1,64}\/location\/[A-Z0-9]{13}\/services|app\.squareup\.com\/appointments\/book\/[A-Z0-9]{13}\/start)(?:\?[^#]*)?$/u.test(value)) return false;
+  const url = new URL(value);
+  return url.href === value && publicSquareQuery(url, false);
 }
 
 /** Anonymous inventory only. A caller must supply its current guarded document

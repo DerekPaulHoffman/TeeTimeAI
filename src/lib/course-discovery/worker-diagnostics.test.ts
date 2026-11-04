@@ -3,12 +3,12 @@ import { bindDiscoveryRecipeIdentity, createDiscoveryAdapterObservation, createD
 import { describePublicUrlRejection, safeBrowserActionIssues } from "../../../scripts/automation/course-discovery-diagnostics.mjs";
 
 describe("durable discovery browser diagnostics", () => {
-  it("projects only a finite stale-control reason through browser and fixed-inspection failures", () => {
-    const raw = { staleControlReason: "CONTROL_SIGNATURE_CHANGED", target: "private-target", url: "https://private.example/?token=private" };
+  it.each(["CONTROL_SIGNATURE_CHANGED", "PUBLIC_ENTRY_SOURCE_UNVERIFIED", "PUBLIC_ENTRY_CONTROL_CHANGED"])("projects only a finite stale-control reason through browser and fixed-inspection failures: %s", staleControlReason => {
+    const raw = { staleControlReason, target: "private-target", url: "https://private.example/?token=private" };
     const browser = safeBrowserFailureDiagnostics(raw);
     const fixed = safeFixedInspectionSourceDiagnostic(browser);
-    expect(browser?.staleControlReason).toBe("CONTROL_SIGNATURE_CHANGED");
-    expect(fixed?.staleControlReason).toBe("CONTROL_SIGNATURE_CHANGED");
+    expect(browser?.staleControlReason).toBe(staleControlReason);
+    expect(fixed?.staleControlReason).toBe(staleControlReason);
     expect(JSON.stringify({ browser, fixed })).not.toMatch(/private-target|private\.example|token/u);
     expect(safeBrowserFailureDiagnostics({ ...raw, staleControlReason: "CONTROL_SIGNATURE_CHANGED:private" })).not.toHaveProperty("staleControlReason");
     expect(safeFixedInspectionSourceDiagnostic({ ...raw, staleControlReason: { reason: "CONTROL_SIGNATURE_CHANGED" } })).toBeUndefined();

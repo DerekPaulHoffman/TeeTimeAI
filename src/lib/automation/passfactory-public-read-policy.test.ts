@@ -2,6 +2,24 @@
 import { describe, expect, it } from "vitest";
 import { createPassfactoryPublicReadPolicy, isIncidentalBrowserRequest, isNonEvidenceBrowserResource } from "./passfactory-public-read-policy";
 
+it("denies only the exact non-inventory OneTrust configuration role", () => {
+  const config = "https://cdn.cookielaw.org/consent/12345678-1234-1234-1234-123456789abc/12345678-1234-1234-1234-123456789abc.json";
+  for (const type of ["xhr", "fetch"]) expect(isNonEvidenceBrowserResource(config, type)).toBe(true);
+  for (const value of [config + "?date=2030-01-11", config + "#times", config.replace("cdn.cookielaw.org", "example.org"),
+    config.replace("/consent/", "/availability/"), config.replace("https:", "http:"), config.replace(".json", ".js")])
+    expect(isNonEvidenceBrowserResource(value, "xhr")).toBe(false);
+  expect(isNonEvidenceBrowserResource(config, "document")).toBe(false);
+});
+
+it("denies optional Square feature configuration without granting a preflight or POST", () => {
+  const config = "https://app.squareup.com/1.0/features/get-flags";
+  for (const kind of ["xhr", "fetch"]) expect(isNonEvidenceBrowserResource(config, kind)).toBe(true);
+  for (const value of [config + "?date=2030-01-11", config + "/availability", config.replace("app.squareup.com", "example.org"),
+    "https://app.squareup.com/appointments/api/buyer/availability"])
+    expect(isNonEvidenceBrowserResource(value, "xhr")).toBe(false);
+  expect(isNonEvidenceBrowserResource(config, "document")).toBe(false);
+});
+
 describe("observed PassFactory public widget reads", () => {
   const headers = new Headers({ origin: "https://passfactory.com", "content-type": "application/json" });
   const resource = { facility_code: "Public123", start_date: "2026-10-01", end_date: "2026-10-31", type: 2 };
@@ -45,6 +63,10 @@ describe("observed PassFactory public widget reads", () => {
 
 it("exempts only exact incidental telemetry destinations from completeness", () => {
   expect(isIncidentalBrowserRequest("https://r.stripe.com/b")).toBe(true);
+  expect(isIncidentalBrowserRequest("https://ec.editmysite.com/com.snowplowanalytics.snowplow/tp2")).toBe(true);
+  expect(isNonEvidenceBrowserResource("https://ec.editmysite.com/com.snowplowanalytics.snowplow/tp2", "xhr")).toBe(true);
+  expect(isIncidentalBrowserRequest("https://ec.editmysite.com/api/availability")).toBe(false);
+  expect(isIncidentalBrowserRequest("https://ec.editmysite.com.example/com.snowplowanalytics.snowplow/tp2")).toBe(false);
   expect(isIncidentalBrowserRequest("https://analytics.google.com/g/collect?v=2")).toBe(true);
   expect(isIncidentalBrowserRequest("https://www.google-analytics.com/analytics.js")).toBe(true);
   expect(isIncidentalBrowserRequest("https://www.google-analytics.com/j/collect?v=1")).toBe(true);

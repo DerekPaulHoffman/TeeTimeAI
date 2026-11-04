@@ -4,8 +4,11 @@ export const PUBLIC_BROWSER_REQUEST_LIMIT = 192;
 /** Fixed native appointment catalog/day transitions load their public script
  * and stylesheet set again. This separate protocol allocation never resets. */
 export const MINDBODY_APPOINTMENT_REQUEST_LIMIT = 512;
+/** Available only after consuming one privately verified native Square public
+ * calendar-entry gesture. Counts never reset; ordinary sessions stay at 192. */
+export const SQUARE_CALENDAR_ENTRY_REQUEST_LIMIT = 512;
 export function assertPublicBrowserRequestBudget(count: number, limit: number) {
-  if (![PUBLIC_BROWSER_REQUEST_LIMIT, MINDBODY_APPOINTMENT_REQUEST_LIMIT].includes(limit) ||
+  if (![PUBLIC_BROWSER_REQUEST_LIMIT, MINDBODY_APPOINTMENT_REQUEST_LIMIT, SQUARE_CALENDAR_ENTRY_REQUEST_LIMIT].includes(limit) ||
       !Number.isSafeInteger(count) || count < 0 || count >= limit) throw new Error("PUBLIC_READ_REQUEST_LIMIT");
 }
 export const PUBLIC_BROWSER_TOTAL_BYTES = 48_000_000;

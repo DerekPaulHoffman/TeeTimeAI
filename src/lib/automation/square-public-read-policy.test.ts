@@ -1,6 +1,29 @@
 import { describe, expect, it } from "vitest";
 import { isAnonymousBrowserReadPost } from "./simulator-interactive-browser";
-import { isSquarePublicAvailabilityPost, squarePublicAvailabilityCoversDate } from "./square-public-read-policy";
+import { isSquarePublicAvailabilityPost, isSquarePublicServiceCatalogUrl, squarePublicAvailabilityCoversDate } from "./square-public-read-policy";
+
+describe("public Square calendar entry destinations", () => {
+  const catalog = "https://book.squareup.com/appointments/example12345678/location/LOC1234567890/services";
+  it("accepts only an exact undated catalog with existing presentation query fields", () => {
+    expect(isSquarePublicServiceCatalogUrl(catalog)).toBe(true);
+    expect(isSquarePublicServiceCatalogUrl("https://app.squareup.com/appointments/book/LOC1234567890/start?color=ffffff&locale=en&referrer=so")).toBe(true);
+    expect(isSquarePublicServiceCatalogUrl(catalog.replace("book.squareup.com", "app.squareup.com"))).toBe(false);
+    expect(isSquarePublicServiceCatalogUrl("https://app.squareup.com/appointments/book/LOC1234567890/start?service_id=" + "A".repeat(24))).toBe(false);
+    expect(isSquarePublicServiceCatalogUrl(catalog + "?color=ffffff&buttonTextColor=000000&locale=en-US&referrer=so")).toBe(true);
+  });
+  it.each(["?service_id=" + "A".repeat(24), "?slot_id=123", "?date=2030-01-04", "?locale=en&locale=en", "?color=javascript:bad", "?unknown=yes", "#calendar", "/../services", "/" + "A".repeat(24)])("rejects selected, ambiguous or nonliteral routes: %s", suffix => {
+    expect(isSquarePublicServiceCatalogUrl(catalog + suffix)).toBe(false);
+  });
+  it("rejects foreign, credentialed and encoded paths", () => {
+    for (const url of [catalog.replace("book.squareup.com", "book.squareup.com.example"), catalog.replace("https://", "https://user@"), catalog.replace("services", "%73ervices"), catalog.replace("services", "availability")])
+      expect(isSquarePublicServiceCatalogUrl(url)).toBe(false);
+  });
+  it("does not give the legacy navigation gateway availability POST authority", () => {
+    expect(isSquarePublicAvailabilityPost(new URL("https://app.squareup.com/appointments/api/buyer/availability"),
+      new Headers({ "content-type": "application/json" }), JSON.stringify(payload()),
+      "https://app.squareup.com/appointments/book/LOC1234567890/start")).toBe(false);
+  });
+});
 
 const source = "https://book.squareup.com/appointments/example12345678/location/LOC1234567890/availability";
 const endpoint = "https://app.squareup.com/appointments/api/buyer/availability";

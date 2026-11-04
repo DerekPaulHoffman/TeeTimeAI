@@ -6,6 +6,8 @@ import { createAddressPinnedPublicFetchTransport } from "@/lib/automation/addres
 import { createPassfactoryPublicReadPolicy, isIncidentalBrowserRequest, isNonEvidenceBrowserResource } from "@/lib/automation/passfactory-public-read-policy";
 import { isAnonymousBrowserReadPost } from "@/lib/automation/simulator-interactive-browser";
 import { squarePublicAvailabilityCoversDate } from "@/lib/automation/square-public-read-policy";
+import { isCompleteSquarePublicMonthResponse } from "./square-public-month-response";
+import { inspectSquareAvailabilityScope } from "./square-public-service-control";
 import { isMemberSportsPublicTeeSheetPost } from "@/lib/automation/membersports-public-read-policy";
 import { isRexAnonymousPlaceholderRead, isRexNamespace, isRexPublicBrowserReadPost } from "@/lib/automation/rex-public-read-policy";
 import { createPublicCatalogTileScope, openPublicCatalogTile, type PublicCatalogTileProof } from "./public-catalog-tile";
@@ -142,6 +144,10 @@ function matchesAvailabilityRequest(recipe: BrowserAccessRecipe, input: AccessEx
 export function matchesAvailabilityResponse(recipe: BrowserAccessRecipe, input: AccessExecutionInput,
   request: { url: string; method: string; body?: string | null }, status: number, responseBody?: string | Uint8Array) {
   if (status < 200 || status >= 300 || !matchesAvailabilityRequest(recipe, input, request)) return false;
+  if (recipe.availabilityResponse.kind === "SQUARE_PUBLIC_MONTH") {
+    try { return isCompleteSquarePublicMonthResponse(JSON.parse(typeof responseBody === "string" ? responseBody : Buffer.from(responseBody ?? []).toString("utf8")), request.body, input.durationMinutes); }
+    catch { return false; }
+  }
   const success = recipe.availabilityResponse.success;
   if (!success) return true;
   try {
@@ -344,12 +350,14 @@ async function domDateParts(root: Locator, field: RecipeDateParts) {
   if (!selected) return undefined;
   return parseObservedCalendarDate(await domField(root, field.monthYear), await domField(root, field.day));
 }
-async function extractDom(recipe: Extract<CourseAccessRecipeData, { engine: "BROWSER_DOM" }>, root: Locator): Promise<Extracted> {
+async function extractDom(recipe: Extract<CourseAccessRecipeData, { engine: "BROWSER_DOM" }>, root: Locator,
+  selectedRentalService?: PublicRentalServiceSelection, durationMinutes?: number): Promise<Extracted> {
   const p = recipe.proof;
   const rows: Extracted["rows"] = [];
   if (!("selector" in recipe.slots.collection)) throw new Error("INVALID_COLLECTION");
   let collectionRoot = root;
   let observedResourceId: string | undefined;
+  let squareScope = false;
   const scope = recipe.slots.scope;
   if (scope) {
     const groups = root.locator(scope.selector);
@@ -361,11 +369,14 @@ async function extractDom(recipe: Extract<CourseAccessRecipeData, { engine: "BRO
       if (forbiddenRoot) throw new Error("INVALID_RESOURCE_SCOPE");
       const label = clean(await domField(group, scope.label));
       if (label === clean(scope.expectedLabel)) {
-        if (!("selector" in scope.label) || !await group.evaluate((element, selector) => {
+        const typedSquareScope = recipe.availabilityResponse.kind === "SQUARE_PUBLIC_MONTH" && "selector" in scope.label &&
+          await inspectSquareAvailabilityScope(group, selectedRentalService, scope.label.selector, recipe.slots.collection.selector, durationMinutes);
+        if (!("selector" in scope.label) || !typedSquareScope && !await group.evaluate((element, selector) => {
           const labels = element.querySelectorAll(selector);
           return labels.length === 1 && labels[0].parentElement === element;
         }, scope.label.selector) || await group.locator(scope.selector).count() > 0) throw new Error("RESOURCE_SCOPE_NOT_CARD");
         matching.push(group);
+        squareScope = Boolean(typedSquareScope);
         // This is an internal identity for the observed card label, not a
         // claimed provider ID. Actual provider IDs below take precedence.
         observedResourceId = `dom-label:${createHash("sha256").update(label).digest("hex")}`;
@@ -377,7 +388,7 @@ async function extractDom(recipe: Extract<CourseAccessRecipeData, { engine: "BRO
   }
   const elements = collectionRoot.locator(recipe.slots.collection.selector);
   if (await elements.count() > 500) throw new Error("INCOMPLETE_COLLECTION");
-  if (scope && "selector" in scope.label && !await collectionRoot.evaluate((card, selectors) => {
+  if (scope && "selector" in scope.label && !squareScope && !await collectionRoot.evaluate((card, selectors) => {
     const label = card.querySelector(selectors.label);
     if (!label) return false;
     const rows = Array.from(card.querySelectorAll(selectors.rows)).filter(element =>
@@ -1050,7 +1061,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
       if (providerThrottled) return fail("FAILED", "PROVIDER_THROTTLED");
       if (blocked || !recipeAllowsRequest(recipe, canonicalCpsPublicUrl(page.url()), "GET")) return fail("INCOMPLETE", "UNSCOPED_OR_FAILED_RESOURCE");
       const extract = async (): Promise<Extracted> => {
-        if (recipe.engine === "BROWSER_DOM") return extractDom(recipe, page.locator("body"));
+        if (recipe.engine === "BROWSER_DOM") return extractDom(recipe, page.locator("body"), selectedRentalService, input.durationMinutes);
         if (recipe.requestBinding === "MEMBERSPORTS_PUBLIC_TEE_SHEET") {
           const current = memberSportsRead, identity = memberSportsIdentity;
           if (!current || !identity || current.generation !== mutationGeneration || current.documentSequence !== mainDocumentSequence ||

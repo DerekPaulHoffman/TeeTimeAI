@@ -3550,7 +3550,9 @@ describe("native exact request and response ownership", () => {
   it.each([
     ["Image", "https://example.org/photo"], ["Font", "https://example.org/type"], ["Media", "https://example.org/video"],
     ["Other", "https://example.org/photo.png"], ["Other", "https://example.org/type.woff2"],
-  ])("aborts non-evidence browser %s without a network ID while a legitimate GET still completes (%s)", async (resourceType, url) => {
+    ["XHR", "https://ec.editmysite.com/com.snowplowanalytics.snowplow/tp2", "OPTIONS"],
+    ["Fetch", "https://ec.editmysite.com/com.snowplowanalytics.snowplow/tp2", "POST"],
+  ])("aborts non-evidence browser %s without a network ID while a legitimate GET still completes (%s)", async (resourceType, url, method) => {
     const test = await installed(), signal = new AbortController(), stop = vi.fn(async () => {}), bodies: string[] = [];
     const lease = vi.fn(async (_host: string, work: () => Promise<unknown>) => ({ acquired: true as const, value: await work() }));
     const queue = createSimulatorBrowserRequestQueue(lease, signal.signal);
@@ -3559,7 +3561,7 @@ describe("native exact request and response ownership", () => {
       bodies.push((await queue.run("example.org", () => continueNativeBrowserRead(route, signal.signal, 1000, stop))).body.toString());
     });
     try {
-      test.request("decoration", { resourceType, networkId: undefined, request: { url, method: "GET", headers: {} } });
+      test.request("decoration", { resourceType, networkId: undefined, request: { url, method: method ?? "GET", headers: {} } });
       await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
       expect(test.handler).not.toHaveBeenCalled(); expect(lease).not.toHaveBeenCalled();
       test.request("availability");
@@ -3991,6 +3993,31 @@ describe("private placeholder-click native gesture provenance", () => {
       expect(t.guard.isCurrentCompletedDocumentRead(request, t.main as never, { frameId: "main", loaderId: "next-loader", url: target })).toBe(true);
       p.retire(); expect(nativeGestureNavigationSource(request)).toBeNull(); expect(p.value.consume()).toBe(false);
       expect(t.failures).toEqual([]);
+    } finally { await t.guard.close(); }
+  });
+  it.each(["valid", "no action", "anchor", "inactive", "consumed", "no gesture", "no initiator", "wrong source", "new window", "body", "foreign target"])("correlates other current-tab navigation only with a typed public calendar gesture: %s", async mode => {
+    const destination = mode === "foreign target" ? "https://booking.example.org/services" : "https://book.squareup.com/appointments/example12345678/location/LOC1234567890/services";
+    const p = proof();
+    if (mode === "inactive") p.retire();
+    if (mode === "consumed") p.value.consume();
+    const typed: NativeGestureIntent = { controlKind: "SQUARE_PUBLIC_CALENDAR_ENTRY", sourceUrl: mode === "wrong source" ? source + "/other" : source,
+      text: "Book", label: "Public calendar entry", targetUrl: destination, observedAt: new Date().toISOString(),
+      documentHash: "a".repeat(64), controlBindingSha256: "b".repeat(64), active: p.value.active, consume: p.value.consume };
+    const t = await prepare(mode === "no action" ? undefined : () => mode === "anchor" ? { ...p.value, targetUrl: destination } : typed);
+    try {
+      pageIntent(t, { reason: "other", url: destination, disposition: mode === "new window" ? "newWindow" : "currentTab" });
+      const request = mode === "body" ? { url: destination, method: "POST", hasPostData: true, postData: "private" } : { url: destination, method: "GET" };
+      network(t, { request, ...(mode === "no gesture" ? { hasUserGesture: false } : {}), ...(mode === "no initiator" ? { initiator: { type: "other" } } : {}) });
+      pause(t, { request: { ...request, headers: {} } });
+      if (mode === "valid") {
+        await vi.waitFor(() => expect(t.routes).toHaveLength(2));
+        expect(nativeGestureNavigationSource(t.routes[1].request())).toBe(typed); expect(p.consumed()).toBe(true);
+        expect(nativeGestureNavigationSource({ ...t.routes[1].request() })).toBeNull();
+      } else {
+        await vi.waitFor(() => expect(t.close).toHaveBeenCalled());
+        expect(t.routes).toHaveLength(1);
+        expect(t.cdp.send.mock.calls.some(([name, params]) => name === "Fetch.continueRequest" && params?.requestId === "next")).toBe(false);
+      }
     } finally { await t.guard.close(); }
   });
   for (const mode of ["no action", "inactive", "consumed", "no gesture", "no initiator", "wrong source", "wrong target", "no Page event", "foreign Page", "new window", "foreign Network", "wrong Network URL", "same loader", "body", "source revision"]) {

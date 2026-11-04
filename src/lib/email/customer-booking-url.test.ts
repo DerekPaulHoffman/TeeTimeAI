@@ -4,6 +4,24 @@ import { renderCustomerEmail } from "./customer-email";
 import { getSafeCustomerBookingUrl } from "./customer-booking-url";
 
 describe("getSafeCustomerBookingUrl", () => {
+  const publicService = "https://book.squareup.com/appointments/example12345678/location/LOC1234567890/services/M7X4A9B2C6D8E3F5G1H0J2K4";
+  it("keeps a public Square catalog variation ID without treating it as a credential", () => {
+    expect(getSafeCustomerBookingUrl(publicService)).toBe(publicService);
+    expect(getSafeCustomerBookingUrl(publicService + "?locale=en")).toBe(publicService + "?locale=en");
+  });
+  it.each([
+    publicService.replace("book.squareup.com", "foreign.example"),
+    publicService.replace("book.squareup.com", "app.squareup.com"),
+    publicService.replace("https:", "http:"),
+    publicService.replace("/services/", "/availability/"),
+    publicService.replace("/services/", "/accounts/"),
+    publicService + "/extra", publicService + "?token=private",
+    publicService + "#M7X4A9B2C6D8E3F5G1H0J2K4",
+    publicService.replace("/M7X4", "/%4D7X4"),
+    "https://public.example.org/?redirect=" + encodeURIComponent(publicService),
+  ])("preserves independent credential and route guards beside a public Square ID: %s", url => {
+    expect(getSafeCustomerBookingUrl(url)).toBeUndefined();
+  });
   it.each([
     "http://www.cityofwestminster.us/ParksRecreation/GolfWestminster/WalnutCreekGolfPreserve",
     "https://public.example.org/CedarValleyNaturePreserve",

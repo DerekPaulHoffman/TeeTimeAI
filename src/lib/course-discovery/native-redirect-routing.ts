@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { CDPSession, Frame, Page, Response, Route } from "@playwright/test";
 import { isNonEvidenceBrowserResource } from "@/lib/automation/passfactory-public-read-policy";
+import { isSquarePublicServiceCatalogUrl } from "@/lib/automation/square-public-read-policy";
 import { isMindbodyClassicPublicBootstrapPost, mindbodyClassicPublicBootstrapSource, mindbodyClassicPublicBootstrapPostDiagnostic, mindbodyClassicPublicBootstrapSourceDiagnostic, mindbodyClassicBootstrapUrlDiagnostic,
   type MindbodyClassicBootstrapPostOutcome, type MindbodyClassicBootstrapSourceOutcome, type MindbodyClassicBootstrapQueryCount, type MindbodyClassicBootstrapQueryRow } from "@/lib/automation/mindbody-public-read-policy";
 import { canonicalPublicReadUrl } from "./public-request-url";
@@ -179,10 +180,11 @@ type PendingInitialPause = { id: string; generation: DocumentGeneration; retired
 type ExcludedImageAbort = { fetchId: string; identity: NetworkIdentity; generation: DocumentGeneration; revision: number;
   terminal: ReturnType<typeof pending<void>>; finished: boolean; responseSeen: boolean };
 type CommittedDocument = { record: RecordEntry; loaderId: string };
-type DocumentIntent = { source: CommittedDocument; target: string; reason: "scriptInitiated" | "anchorClick" | "formSubmissionPost"; networkRevision: number; createdAt: number; used: boolean;
-  controllerForm?: MindbodyPublicFormIntent };
-export type NativeGestureIntent = Readonly<{ sourceUrl: string; href: string; text: string; label: string; targetUrl: string; observedAt: string; documentHash: string;
-  active(): boolean; consume(): boolean }>;
+type DocumentIntent = { source: CommittedDocument; target: string; reason: "scriptInitiated" | "anchorClick" | "formSubmissionPost" | "other"; networkRevision: number; createdAt: number; used: boolean;
+  controllerForm?: MindbodyPublicFormIntent; controllerGesture?: NativeGestureIntent };
+export type NativeGestureIntent = Readonly<{ sourceUrl: string; text: string; label: string; targetUrl: string; observedAt: string; documentHash: string;
+  active(): boolean; consume(): boolean } & ({ href: string; controlKind?: undefined } |
+    { controlKind: "SQUARE_PUBLIC_CALENDAR_ENTRY"; controlBindingSha256: string; href?: never })>;
 export type NativeMindbodyBootstrapSource = Readonly<{ sourceUrl: string }>;
 type NativeRecordOwner = { closed: boolean; authorizeHeaders?: (record: RecordEntry) => Promise<PublicClientReadHeaderProof | null>;
   mindbodyBootstrapSource?: (record: RecordEntry) => NativeMindbodyBootstrapSource | null;
@@ -763,7 +765,17 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         ? "SOURCE_NOT_CURRENT" : "NAVIGATION_NOT_ELIGIBLE";
     if (!generationTracking || closed || boundaryPending || awaitingDocument || !committedDocument ||
       committedDocument.record.generation !== generation || generation.retired || committedDocument.record.failed ||
-      !["scriptInitiated", "anchorClick", "formSubmissionPost"].includes(event.reason) || event.disposition !== "currentTab" || typeof event.url !== "string" || event.url.length > 2048) return;
+      !["scriptInitiated", "anchorClick", "formSubmissionPost", "other"].includes(event.reason) || event.disposition !== "currentTab" || typeof event.url !== "string" || event.url.length > 2048) return;
+    // Chrome reports window.open(url, '_self') as "other". This is eligible
+    // only for an owned public calendar control; actual GET/script/user-gesture
+    // Network identity is still required before dispatch or consumption.
+    let controllerGesture: NativeGestureIntent | undefined;
+    if (event.reason === "other") {
+      if (!isSquarePublicServiceCatalogUrl(event.url)) return;
+      try { controllerGesture = options.controllerScriptGetIntent?.(currentDocumentUrl, event.url); } catch { return; }
+      if (controllerGesture?.controlKind !== "SQUARE_PUBLIC_CALENDAR_ENTRY" || controllerGesture.sourceUrl !== currentDocumentUrl ||
+          controllerGesture.targetUrl !== event.url || !controllerGesture.active()) return;
+    }
     if (event.reason === "anchorClick" && !options.controllerGetIntent) return;
     documentIntentStatus = "PUBLIC_SOURCE_NOT_ELIGIBLE";
     if (event.reason === "anchorClick") {
@@ -786,8 +798,8 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         currentDocumentUrl !== committedDocument.record.transportUrl || !mindbodyClassicPublicBootstrapSource(currentDocumentUrl, event.url))) return;
     // This private one-use event binds ownership, never navigation permission.
     // The exact successor still passes the caller's ordinary public-read guard.
-    documentIntent = { source: committedDocument, target: event.url, reason: event.reason === "formSubmissionPost" ? "formSubmissionPost" : event.reason === "anchorClick" ? "anchorClick" : "scriptInitiated",
-      networkRevision: networkIdentityRevision, createdAt: Date.now(), used: false, ...(controllerForm ? { controllerForm } : {}) };
+    documentIntent = { source: committedDocument, target: event.url, reason: event.reason === "formSubmissionPost" ? "formSubmissionPost" : event.reason === "anchorClick" ? "anchorClick" : event.reason === "other" ? "other" : "scriptInitiated",
+      networkRevision: networkIdentityRevision, createdAt: Date.now(), used: false, ...(controllerForm ? { controllerForm } : {}), ...(controllerGesture ? { controllerGesture } : {}) };
     documentIntentStatus = "RETAINED";
   });
   const publishNetworkIdentity = (id: string, identity: NetworkIdentity) => {
@@ -1496,7 +1508,8 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
             currentDocumentUrl === intent.source.record.transportUrl && /^text\/html(?:\s*;|$)/iu.test(intent.source.record.responseMimeType ?? "") &&
             isMindbodyClassicPublicBootstrapPost(new URL(event.request.url), new Headers(headers(event.request.headers)), event.request.postData, intent.source.record.transportUrl) &&
             isMindbodyClassicPublicBootstrapPost(new URL(identity.url), new Headers(identity.headerEntries), identity.body, intent.source.record.transportUrl);
-          const publicGet = (intent?.reason === "scriptInitiated" && ["GET", "HEAD"].includes(event.request.method) || intent?.reason === "anchorClick" && event.request.method === "GET") &&
+          const publicGet = (intent?.reason === "scriptInitiated" && ["GET", "HEAD"].includes(event.request.method) ||
+            (intent?.reason === "anchorClick" || intent?.reason === "other" && intent.controllerGesture?.controlKind === "SQUARE_PUBLIC_CALENDAR_ENTRY") && event.request.method === "GET") &&
             event.request.hasPostData !== true && event.request.postData === undefined;
           const publicForm = intent?.reason === "formSubmissionPost" && intent.controllerForm && intent.controllerForm.sourceCurrent() &&
             intent.controllerForm.sourceUrl === currentDocumentUrl && intent.controllerForm.targetUrl === event.request.url && event.request.method === "POST" &&
@@ -1518,7 +1531,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
             firstFatal ??= diagnostic("LOADER_OWNER"); await reject(); await close("NATIVE_REDIRECT_LOADER_MISMATCH"); return;
           }
           const gestureSourceIdentity = networkIdentities.get(intent.source.record.networkId);
-          if (intent.reason === "scriptInitiated" && options.controllerScriptGetIntent && kind === "document" &&
+          if ((intent.reason === "scriptInitiated" || intent.reason === "other" && intent.controllerGesture?.controlKind === "SQUARE_PUBLIC_CALENDAR_ENTRY") && options.controllerScriptGetIntent && kind === "document" &&
               event.request.method === "GET" && identity.hasUserGesture && identity.scriptInitiator && !identity.hasBody &&
               intent.source.record.method === "GET" && intent.source.record.body === null && intent.source.record.responseStatus === 200 &&
               gestureSourceIdentity && !failedNetworkIdentities.has(gestureSourceIdentity) &&
@@ -1531,8 +1544,11 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
                 sameDocumentRoute.frameId === rootFrameId && sameDocumentRoute.loaderId === intent.source.loaderId &&
                 sameDocumentRoute.generation === generation && sameDocumentRoute.networkIdentityRevision === intent.source.record.networkIdentityRevision)) &&
               Date.now() - intent.createdAt <= 5000) {
-            const proof = options.controllerScriptGetIntent(currentDocumentUrl, event.request.url);
+            const proof = intent.controllerGesture ?? options.controllerScriptGetIntent(currentDocumentUrl, event.request.url);
             if (proof && proof.sourceUrl === currentDocumentUrl && proof.targetUrl === event.request.url && proof.active() && proof.consume()) gestureSource = proof;
+          }
+          if (intent.reason === "other" && !gestureSource) {
+            firstFatal ??= diagnostic("DOCUMENT_INTENT"); await reject(); await close("NATIVE_REDIRECT_LOADER_MISMATCH"); return;
           }
           intent.used = true; boundaryPending = true;
           const previous = generation, successor: DocumentGeneration = { id: previous.id + 1, retired: false, loaderId: identity.loaderId };

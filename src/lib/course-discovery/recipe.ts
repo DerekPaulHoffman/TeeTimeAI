@@ -156,8 +156,8 @@ const stepSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("selectDate"), monthYearSelector: recipeSelectorSchema,
     nextSelector: recipeSelectorSchema, previousSelector: recipeSelectorSchema, daySelector: recipeSelectorSchema }).strict()
     .describe("Choose the requested date using a visible full English month and four-digit year heading, safe calendar next/previous controls and a reusable numeric day selector. Moves at most twelve months, verifying each adjacent month before selecting the exact visible requested day. Final independent date proof is still required."),
-  z.object({ action: z.literal("selectProduct"), selector: recipeSelectorSchema, productSelector: recipeSelectorSchema }).strict()
-    .describe("Choose the requested whole-rental duration within one observed public product/resource card. Supports Book/Select on a single-duration card, or an exact duration-and-price option (for example 1 hour $40) within one named rental/bay card. Public Square also supports the exact Add button inside its one Main content service section, with one selected Regular/Standard/duration-only variant and published matching price/duration. It creates a private single-use SQUARE_SERVICE continuation capability; it never adds a dated slot. Duplicate durations, start-time/date choices, mixed action controls, sensitive forms and transaction steps are rejected. productSelector must identify the same enclosing card proved by the control; it cannot be a broad page wrapper."),
+  z.object({ action: z.literal("selectProduct"), selector: recipeSelectorSchema.describe("CSS relative to productSelector, not a duplicated absolute card prefix. The runtime requires one exact public product control inside that card."), productSelector: recipeSelectorSchema }).strict()
+    .describe("Choose the requested whole-rental duration within one observed public product/resource card. Supports Book/Select on a single-duration card, or an exact duration-and-price option (for example 1 hour $40) within one named rental/bay card. Public Square supports selecting one published Regular/Standard/duration-only variant inside its Main content service section, with independent selected-option readback; then a separate selectProduct on its exact Add button creates the private single-use SQUARE_SERVICE continuation capability. Selecting a variant alone never permits Next. These undated operations never add a dated slot. Duplicate variants, start-time/date choices, sensitive forms and transaction steps are rejected. productSelector must identify the same enclosing card proved by the control; it cannot be a broad page wrapper."),
   z.object({ action: z.literal("select"), selector: recipeSelectorSchema, value: recipeTemplateSchema,
     purpose: z.enum(["DATE", "PLAYERS", "DURATION", "PRODUCT", "RESOURCE"]) }).strict().describe("Select an observed native HTML <select> option value. PLAYERS/DURATION also support a labelled public role=combobox with an exact visible data-value option, or a focusable dropdown with one adjacent explicit field label and caret whose displayed option and selected readback are independently verified. DURATION also supports an explicitly labelled duration button that opens one bounded duration-only menu; exact offered minutes and the closed menu plus selected button readback are independently verified. PLAYERS supports an explicit Players button with its current count, one SELECT DESIRED PARTY SIZE menu, and unique numeric options with matching accessible labels; current ownership, closed menu and selected count are independently verified. Duration values are minutes; simulator party selection is one bay except the closed SEVENROOMS_PUBLIC_PARTICIPANTS binding, which requests attendees. The inspected PassFactory /ftbb client resets duration when the date changes: select DATE then DURATION. Only that hash-verified local duration operation may retain an already completed date response; all other filters require a new response."),
   z.object({ action: z.literal("fill"), selector: recipeSelectorSchema, value: recipeTemplateSchema,
@@ -167,13 +167,16 @@ const stepSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("waitFor"), selector: recipeSelectorSchema }).strict(),
 ]);
 const availabilityResponseSchema = z.object({
-  kind: z.enum(["JSON", "SERVER_DOCUMENT"]).optional(),
+  kind: z.enum(["JSON", "SERVER_DOCUMENT", "SQUARE_PUBLIC_MONTH"]).optional()
+    .describe("SQUARE_PUBLIC_MONTH validates the entire original public Square response: bounded complete availability array, every selected-duration interval/segment and requested staff identity, no error/pagination/unknown outcome. Only its exact public month request/date protocol is eligible. It can support proof.complete {availabilityResponse:true} without inventing a scalar success flag; fresh DOM venue/date/resource and selected-duration proofs remain mandatory."),
   url: availabilityUrlTemplate, method: z.enum(["GET", "POST"]),
   date: z.object({ source: z.enum(["QUERY", "JSON_BODY", "PATH"]), path: jsonPath,
     format: z.enum(["ISO_DATE", "MM-DD-YYYY", "M/D/YYYY", "SQUARE_PUBLIC_MONTH_RANGE"]).optional().describe("Default ISO_DATE is YYYY-MM-DD. MM-DD-YYYY is zero-padded; use {{dateMdy}} in its URL. M/D/YYYY is an explicit unpadded month/day/year JSON_BODY date on a POST only. SQUARE_PUBLIC_MONTH_RANGE is only the source-bound public Square buyer availability POST: fixed start_at_range paths must cover the entire venue-local day; current visible date and full duration proof remain required.") }).strict(),
   endDatePath: jsonPath.optional(),
   success: z.object({ path: jsonPath, equals: z.union([z.string().max(200), z.number().finite(), z.boolean(), z.null()]) }).strict().optional(),
-}).strict().refine(value => value.date.format !== "SQUARE_PUBLIC_MONTH_RANGE" || value.method === "POST" && value.date.source === "JSON_BODY" &&
+}).strict().refine(value => value.kind !== "SQUARE_PUBLIC_MONTH" || value.date.format === "SQUARE_PUBLIC_MONTH_RANGE" && !value.success,
+  "Square completion requires its exact public month protocol without a model-supplied success flag")
+  .refine(value => value.date.format !== "SQUARE_PUBLIC_MONTH_RANGE" || value.method === "POST" && value.date.source === "JSON_BODY" &&
   value.url === "https://app.squareup.com/appointments/api/buyer/availability" &&
   value.date.path === "search_availability_request.query.filter.start_at_range.start_at" &&
   value.endDatePath === "search_availability_request.query.filter.start_at_range.end_at", "Square month evidence requires its exact public endpoint and range paths")
@@ -438,7 +441,7 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
       }
     }
   }
-  if (recipe.engine === "BROWSER_DOM" && "availabilityResponse" in recipe.proof.complete && !recipe.availabilityResponse.success)
+  if (recipe.engine === "BROWSER_DOM" && "availabilityResponse" in recipe.proof.complete && !recipe.availabilityResponse.success && recipe.availabilityResponse.kind !== "SQUARE_PUBLIC_MONTH")
     ctx.addIssue({ code: "custom", message: "Response-only completion requires an application-level JSON success guard" });
   if (recipe.slots.scope && (recipe.engine !== "BROWSER_DOM" || recipe.target.kind !== "SIMULATOR"))
     ctx.addIssue({ code: "custom", message: "Resource scopes apply only to simulator DOM cards" });

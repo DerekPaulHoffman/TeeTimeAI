@@ -141,10 +141,20 @@ function hasSensitiveUrlState(url: URL, nestingDepth: number) {
           ((isOpaqueCredentialValue(segment) &&
             !(nestingDepth === 0 && partIndex === 0 && isSegmentedPublicTitleCasePathSegment(segment))) ||
             isOpaqueRedirectPathSegment(segments, index)) &&
-          !isAllowedProviderIdentifier(segments, index)
+          !isAllowedProviderIdentifier(segments, index) &&
+          !(nestingDepth === 0 && partIndex === 0 && isPublicSquareServiceIdentifier(url, segments, index))
       )
     );
   });
+}
+
+/** Published Square service variations use opaque catalog IDs. This exception
+ * applies only to that literal public path segment; query, fragment, nested
+ * redirect, account and credential checks remain independent. */
+function isPublicSquareServiceIdentifier(url: URL, segments: string[], index: number) {
+  return url.origin === "https://book.squareup.com" && index === 5 && segments.length === 6 &&
+    /^\/appointments\/[a-z0-9]{1,64}\/location\/[A-Z0-9]{13}\/services\/[A-Z0-9]{16,32}$/u.test(url.pathname) &&
+    url.pathname === "/" + segments.join("/");
 }
 
 function isAllowlistedPublicProviderBookingPath(url: URL) {

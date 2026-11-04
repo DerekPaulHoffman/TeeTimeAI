@@ -71,6 +71,7 @@ export function isIncidentalBrowserRequest(value: string) {
     ["analytics.google.com", "www.google-analytics.com", "region1.google-analytics.com", "stats.g.doubleclick.net"].includes(url.hostname) ||
     // Parse.ly's documented client tracker is analytics, never availability.
     url.hostname === "cdn.parsely.com" && /^\/keys\/[a-z0-9][a-z0-9.-]{0,252}\/p\.js$/iu.test(url.pathname) ||
+    url.hostname === "ec.editmysite.com" && url.pathname === "/com.snowplowanalytics.snowplow/tp2" ||
     url.hostname === "www.google.com" && /^(?:\/g\/collect|\/ccm\/collect|\/rmkt\/collect\/\d+\/)$/u.test(url.pathname) ||
     url.hostname === "ad.doubleclick.net" && url.pathname === "/ccm/s/collect" ||
     url.hostname === "googleads.g.doubleclick.net" && /^\/pagead\/viewthroughconversion\/\d+\/$/u.test(url.pathname) ||
@@ -94,6 +95,14 @@ export function isNonEvidenceBrowserResource(value: string, resourceType: string
   // Deny analytics before native loader correlation, including CDP Ping.
   // This grants no read and cannot hide an application availability request.
   if (isIncidentalBrowserRequest(value)) return true;
+  if (["xhr", "fetch"].includes(resourceType)) {
+    // Optional Square client feature configuration is never public inventory.
+    // Abort its preflight and POST; do not forward its device/user fields.
+    if (value === "https://app.squareup.com/1.0/features/get-flags") return true;
+    // OneTrust's exact public cookie-banner configuration is not inventory.
+    // Deny before native correlation; never grant a read or availability proof.
+    if (/^https:\/\/cdn\.cookielaw\.org\/consent\/[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\/[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\.json$/u.test(value)) return true;
+  }
   if (["script", "xhr"].includes(resourceType)) {
     try {
       const url = new URL(value);
