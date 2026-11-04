@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { lstat, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
-import { chromium, type Locator, type Page } from "@playwright/test";
+import type { BrowserType, Locator, Page } from "@playwright/test";
 import { z } from "zod";
 import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import { createAddressPinnedPublicFetchTransport } from "./address-pinned-public-fetch";
@@ -96,7 +96,7 @@ const delay = (ms: number) => new Promise(resolveDelay => setTimeout(resolveDela
 
 /** One owned source read; the native worker chooses each next action from fresh visual evidence. */
 export async function collectInteractiveSimulatorResearch(input: { url: string; channel: string; assertOwned: () => Promise<void> },
-  dependencies: { launch?: typeof chromium.launch; lease?: typeof runWithProviderRequestLease; fetch?: typeof fetch } = {}): Promise<SimulatorResearchResult> {
+  dependencies: { launch?: BrowserType["launch"]; lease?: typeof runWithProviderRequestLease; fetch?: typeof fetch } = {}): Promise<SimulatorResearchResult> {
   const channel = await validateBrowserChannel(input.channel);
   const requestedUrl = getSafeCustomerBookingUrl(input.url);
   if (!requestedUrl) throw new Error("SIMULATOR_RESEARCH_UNSAFE_URL");
@@ -117,7 +117,8 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
   const atPhase = async <T>(phase: SimulatorResearchFailurePhase, operation: () => Promise<T>): Promise<T> => {
     try { return await operation(); } catch (error) { throw tagSimulatorResearchFailure(failure ?? error, phase); }
   };
-  const browser = await atPhase("BROWSER_LAUNCH", () => (dependencies.launch ?? (options => chromium.launch(options)))({ headless: true, timeout: budget(15_000) }));
+  const launch: BrowserType["launch"] = dependencies.launch ?? (async options => (await import("@playwright/test")).chromium.launch(options));
+  const browser = await atPhase("BROWSER_LAUNCH", () => launch({ headless: true, timeout: budget(15_000) }));
   let context;
   try { context = await atPhase("BROWSER_CONTEXT", () => browser.newContext({ storageState: { cookies: [], origins: [] }, serviceWorkers: "block",
     acceptDownloads: false, viewport: { width: 1280, height: 900 } })); }
