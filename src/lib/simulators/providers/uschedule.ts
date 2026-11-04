@@ -99,12 +99,25 @@ function selectedRental(html: string, learned?: LearnedRental) {
             return values.length !== 1 || attr(values[0], "value") !== "-1"; }))) throw sourceError("The selected public rental changed");
     return { serviceId: learned.serviceId, durationMinutes: learned.durationMinutes };
   }
-  if (services.length !== 1 || !selected(services[0]) || visibleText(services[0]).replace(/\s+/gu, " ").trim() !== "Simulator Rental" ||
+  const serviceName = services.length === 1 ? visibleText(services[0]).replace(/\s+/gu, " ").trim() : "";
+  const hourlyRental = serviceName === "Hourly Simulator Rental";
+  if (services.length !== 1 || !selected(services[0]) || !(serviceName === "Simulator Rental" || hourlyRental) ||
       !PUBLIC_ID.test(attr(services[0], "value") ?? "") || lengths.length < 1 || lengths.length > 7 ||
       lengths.filter(selected).length !== 1 || attr(lengths.find(selected)!, "value") !== "60" ||
       lengths.some(node => !/^(?:60|90|120|150|180|210|240)$/u.test(attr(node, "value") ?? "")) ||
       new Set(lengths.map(node => attr(node, "value"))).size !== lengths.length) {
     throw sourceError("The reviewed default one-hour Simulator Rental is no longer unambiguous");
+  }
+  if (hourlyRental) {
+    // This profile is a single default one-hour pooled rental. Other quantity,
+    // location and resource controls need their independently reviewed reader.
+    if (all.some(node => node.tagName === "select" &&
+        (["select_group_size", "select_location"].includes(attr(node, "id") ?? "") ||
+          (attr(node, "class") ?? "").split(/\s+/u).includes("resSelect"))))
+      throw sourceError("The default hourly rental has unverified selectors");
+    const rows = all.filter(node => (attr(node, "class") ?? "").split(/\s+/u).includes("next_avail_item"));
+    if (!rows.length || rows.some(node => !/\bHourly Simulator Rental - \$\d+(?:\.\d{2})?$/u.test(visibleText(node).replace(/\s+/gu, " ").trim())))
+      throw sourceError("The default hourly rental row identity changed");
   }
   return { serviceId: attr(services[0], "value")!, durationMinutes: 60 as const };
 }
