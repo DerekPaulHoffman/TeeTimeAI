@@ -10,6 +10,7 @@ import { createSimulatorBrowserRequestQueue } from "./simulator-browser-request-
 import { createPassfactoryPublicReadPolicy, isIncidentalBrowserRequest } from "./passfactory-public-read-policy";
 import { addVerifiedMindbodyReadHeaders, isMindbodyPublicReadPost } from "./mindbody-public-read-policy";
 import { isRexNamespace, isRexPublicReadPost } from "./rex-public-read-policy";
+import { isSquareAppointmentsNamespace, isSquarePublicAvailabilityPost } from "./square-public-read-policy";
 import { projectPassfactoryCalendarEvidence, type PassfactoryCalendarEvidence } from "./passfactory-calendar-evidence";
 import { inspectSimulatorClientCode, mergeSimulatorClientCodeEvidence, type SimulatorClientCodeEvidence } from "./simulator-client-code-evidence";
 import { createBlockedResourceDiagnostics, simulatorCredentialHeaderKind, summarizeBlockedRequestBody } from "./simulator-blocked-resources";
@@ -52,10 +53,11 @@ export function interactiveControlKind(input: { tag: string; role: string; name:
 }
 
 /** Only explicitly read-shaped anonymous JSON requests, never arbitrary page POSTs. */
-export function isAnonymousBrowserReadPost(url: URL, headers: Headers, body: string) {
+export function isAnonymousBrowserReadPost(url: URL, headers: Headers, body: string, sourceDocumentUrl?: string) {
   // A Next server-action header controls the operation independently of body
   // shape. Never let a GraphQL-looking body authorize an unknown action.
   if (headers.has("next-action")) return isMindbodyPublicReadPost(url, headers, body);
+  if (isSquareAppointmentsNamespace(url)) return isSquarePublicAvailabilityPost(url, headers, body, sourceDocumentUrl);
   if (isRexNamespace(url)) return isRexPublicReadPost(url, headers, body);
   // This known REST API must use its exact source-bound contracts. Adding a
   // GraphQL-looking field must not bypass them or authorize a transaction URL.
@@ -103,7 +105,7 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
   const passfactory = createPassfactoryPublicReadPolicy();
   passfactory.observeWidgetUrl(requestedUrl);
   const allowsReadPost = (url: URL, headers: Headers, body: string) =>
-    isAnonymousBrowserReadPost(url, headers, body) || passfactory.allows(url, headers, body);
+    isAnonymousBrowserReadPost(url, headers, body, page?.url() ?? requestedUrl) || passfactory.allows(url, headers, body);
   const deadline = AbortSignal.timeout(INTERACTIVE_BROWSER_DURATION_MS);
   const expiresAt = Date.now() + INTERACTIVE_BROWSER_DURATION_MS;
   let failure: unknown;

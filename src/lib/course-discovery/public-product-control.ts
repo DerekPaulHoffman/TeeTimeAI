@@ -1,6 +1,7 @@
 import type { Locator } from "@playwright/test";
 import { isSafeRecipeUrl, recipeSelectorSchema } from "./recipe";
 import { isPublicAvailabilityNavigation } from "./public-navigation-control";
+import { inspectSquareRentalAddElement, selectSquareRental } from "./square-public-service-control";
 
 export type PublicRentalProductProof = { selector: string; durationMinutes: number };
 
@@ -149,6 +150,7 @@ export function inspectPublicRentalProductElement(node: Element): PublicRentalPr
 export async function inspectPublicRentalProduct(node: Locator): Promise<PublicRentalProductProof | undefined> {
   if (await node.count() !== 1) return undefined;
   const proof = await node.evaluate(inspectPublicRentalProductElement, undefined, { timeout: 1000 });
+  if (!proof) return await node.evaluate(inspectSquareRentalAddElement, undefined, { timeout: 1000 });
   if (proof) {
     const href = await node.evaluate(element => element.tagName === "A" ? (element as HTMLAnchorElement).href : undefined, undefined, { timeout: 1000 });
     if (href && (!isSafeRecipeUrl(href) || !isPublicAvailabilityNavigation(href, "Select"))) return undefined;
@@ -157,7 +159,7 @@ export async function inspectPublicRentalProduct(node: Locator): Promise<PublicR
 }
 
 /** Revalidate the same public card immediately before clicking a recipe product. */
-export async function selectPublicRentalProduct(node: Locator, card: Locator, durationMinutes: number): Promise<void> {
+export async function selectPublicRentalProduct(node: Locator, card: Locator, durationMinutes: number) {
   if (await card.count() !== 1 || !await card.isVisible()) throw new Error("UNSAFE_PRODUCT_SELECTION");
   const proof = await inspectPublicRentalProduct(node);
   if (!proof || proof.durationMinutes !== durationMinutes) throw new Error("UNSAFE_PRODUCT_SELECTION");
@@ -166,6 +168,7 @@ export async function selectPublicRentalProduct(node: Locator, card: Locator, du
   try {
     if (!handle || !await node.page().locator(proof.selector).evaluate((element, selectedCard) => element === selectedCard, handle))
       throw new Error("UNSAFE_PRODUCT_SELECTION");
+    if ("squareService" in proof && proof.squareService) return await selectSquareRental(node, proof as import("./square-public-service-control").SquareRentalProof);
     await node.click();
   } finally { await handle?.dispose(); }
 }

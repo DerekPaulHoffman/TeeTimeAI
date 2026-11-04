@@ -270,7 +270,7 @@ export async function createGuardedStagehandSourceBrowser(input: { initialUrl: s
       // Preserve policy-bearing headers such as Next-Action. Removing them
       // could make a server mutation resemble an ordinary JSON read.
       const projectedHeaders = new Headers(headers);
-      const publicPost = method === "POST" && body !== null && (isAnonymousBrowserReadPost(url, projectedHeaders, body) ||
+      const publicPost = method === "POST" && body !== null && (isAnonymousBrowserReadPost(url, projectedHeaders, body, target.currentUrl) ||
         bootstrapPost);
       requestGuard = "METHOD_POLICY";
       if (!["GET", "HEAD"].includes(method) && !preflight && !publicPost) throw reject();

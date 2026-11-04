@@ -1,7 +1,8 @@
 import type { ElementHandle, Locator } from "@playwright/test";
+import { inspectSquareRentalNext, continueSquareRental } from "./square-public-service-control";
 
 export type PublicRentalServiceProof = { label: string; selectedText: string; options: Array<{ label: string; value?: string }> };
-export type PublicServiceContinuationMode = "SERVICE" | "SKIP_PACKAGES";
+export type PublicServiceContinuationMode = "SERVICE" | "SKIP_PACKAGES" | "SQUARE_SERVICE";
 export type PublicRentalServiceSelection = Readonly<{ label: string }>;
 type SelectionState = { trigger: Locator; field: ElementHandle<Element>; document: ElementHandle<Element>; url: string; selectedName: string;
   phase: "SELECTED" | "SERVICE_DONE" | "PACKAGES_DONE"; inFlight?: boolean };
@@ -170,6 +171,7 @@ export async function selectPublicRentalService(node: Locator, optionText: strin
 }
 
 export async function inspectPublicServiceContinuation(node: Locator, selection: PublicRentalServiceSelection | undefined, mode: PublicServiceContinuationMode): Promise<boolean> {
+  if (mode === "SQUARE_SERVICE") return inspectSquareRentalNext(node, selection);
   const saved = selection && selections.get(selection);
   if (!saved || saved.inFlight || saved.phase !== (mode === "SERVICE" ? "SELECTED" : "SERVICE_DONE") ||
       saved.trigger.page() !== node.page() || node.page().url() !== saved.url || await node.count() !== 1) return false;
@@ -228,6 +230,7 @@ export async function inspectPublicServiceContinuation(node: Locator, selection:
 }
 
 export async function continuePublicRentalService(node: Locator, selection: PublicRentalServiceSelection | undefined, mode: PublicServiceContinuationMode): Promise<void> {
+  if (mode === "SQUARE_SERVICE") return continueSquareRental(node, selection);
   if (!await inspectPublicServiceContinuation(node, selection, mode)) throw new Error("UNSAFE_SERVICE_CONTINUATION");
   const state = selection && selections.get(selection);
   if (!state || state.inFlight || state.phase !== (mode === "SERVICE" ? "SELECTED" : "SERVICE_DONE")) throw new Error("UNSAFE_SERVICE_CONTINUATION");

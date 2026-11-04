@@ -46,7 +46,8 @@ import type { OfficialIdentityPage } from "./teeitup-official-identity";
 import { verifiedTeeItUpContactParent } from "./teeitup-official-contact-chain";
 import { createTeeItUpOfficialBookingScope, observedTeeItUpOfficialBookingChain, type TeeItUpSourceRequestToken } from "./teeitup-official-booking-context";
 import { discoveryNavigationFailureKind, safeOfficialSourceDiagnostic, type OfficialSourceDiagnostic, type NavigationFailureKind } from "./official-source-diagnostics";
-import { inspectPublicRentalProduct } from "./public-product-control";
+import { inspectPublicRentalProduct, selectPublicRentalProduct } from "./public-product-control";
+import { inspectSquarePublicDateElement } from "./square-public-date-control";
 import { createPublicCatalogTileScope, inspectPublicCatalogTile, openPublicCatalogTile } from "./public-catalog-tile";
 import { canonicalCpsPublicUrl, cpsPublicEntryUrl, cpsSessionKey, createCpsPublicSessionScope } from "./cps-public-navigation";
 import { parseCpsSource } from "./cps-source";
@@ -398,7 +399,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
   initialUrls.forEach(value => passfactory.observeWidgetUrl(value));
   const readPost = (url: URL, headers: Headers, body: string) =>
     ezlinks.handles(url) ? ezlinks.allows(url, headers, body) :
-      isAnonymousBrowserReadPost(url, headers, body) || passfactory.allows(url, headers, body) || uschedule.allows(url, headers, body);
+      isAnonymousBrowserReadPost(url, headers, body, page.url()) || passfactory.allows(url, headers, body) || uschedule.allows(url, headers, body);
   const queue = createSimulatorBrowserRequestQueue(deps.requestLease ?? runWithProviderRequestLease, deadline);
   if (deps.delegatedReadBudget && deps.browserTransport !== "NATIVE_CHROME") throw new Error("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
   const nativeProxy = deps.browserTransport === "NATIVE_CHROME" ? await createNativePublicBrowserProxy({ signal: deadline,
@@ -1224,6 +1225,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
       ...(node.tagName === "SELECT" && !sensitiveForm ? { options: Array.from((node as HTMLSelectElement).options).slice(0, 100).map(item => ({ value: item.value.slice(0, 200), label: (item.textContent ?? "").trim().slice(0, 200) })) } : {}) };
   }, undefined, { timeout: 1000 }).then(async control => {
     const datePicker = !control.sensitiveForm && control.tag === "input" ? await inspectPublicDatePickerInput(locator) : undefined;
+    const squareDate = control.tag === "button" ? await locator.evaluate(inspectSquarePublicDateElement, undefined, { timeout: 1000 }) : undefined;
     const product = !control.sensitiveForm && ["a", "button"].includes(control.tag) ? await inspectPublicRentalProduct(locator) : undefined;
     const catalogTile = !control.sensitiveForm && control.tag === "article" ? await inspectPublicCatalogTile(locator, catalogTiles) : undefined;
     // The service proof validates rendered fields itself, including hidden later
@@ -1233,6 +1235,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     if (serviceSelection && control.tag === "button") {
       const mode = /^Skip packages and continue with (?:the )?selected service\b/iu.test(control.name) ? "SKIP_PACKAGES" : "SERVICE";
       if (await inspectPublicServiceContinuation(locator, serviceSelection, mode)) serviceContinuation = mode;
+      else if (await inspectPublicServiceContinuation(locator, serviceSelection, "SQUARE_SERVICE")) serviceContinuation = "SQUARE_SERVICE";
     }
     const serviceMenuOption = control.role === "option" && await locator.evaluate(element => {
       const menu = element.closest('[role="listbox"]');
@@ -1243,8 +1246,9 @@ export async function createCourseDiscoveryBrowserSession(input: {
     const href = control.href ? normalizeDiscoveryNavigationUrl(control.href) : undefined;
     const documentNavigationOnly = discoveryPublicAvailabilityEntryNavigation({ ...control, href }) || Boolean(control.formSafeAnchor && href && !new URL(href).hash &&
       discoveryPublicAnchorKind({ ...control, href, sensitiveForm: false }));
-    return { ...control, ...(datePicker ? { datePicker, name: datePicker.label, label: datePicker.label, currentValue: datePicker.currentValue } : {}),
-      ...(catalogTile ? { name: catalogTile.name, label: catalogTile.name, catalogTile: true } : {}), ...(documentNavigationOnly ? { documentNavigationOnly: true } : {}), ...(product ? { product } : {}), ...(service ? { service } : {}),
+    return { ...control, ...(squareDate ? { calendar: true, name: `Date ${squareDate.date}`, label: `Date ${squareDate.date}` } : {}), ...(datePicker ? { datePicker, name: datePicker.label, label: datePicker.label, currentValue: datePicker.currentValue } : {}),
+      ...(catalogTile ? { name: catalogTile.name, label: catalogTile.name, catalogTile: true } : {}), ...(documentNavigationOnly ? { documentNavigationOnly: true } : {}), ...(product ? { product, ...("squareService" in product ? { name: "Add", label: "Add public rental" } : {}) } : {}), ...(service ? { service } : {}),
+      ...(serviceContinuation === "SQUARE_SERVICE" ? { name: "Next", label: "Show public rental availability" } : {}),
       ...(serviceContinuation ? { serviceContinuation } : {}), ...(serviceMenuOption ? { serviceMenuOption: true } : {}),
       ...(href ? { href } : {}) };
   });
@@ -1302,10 +1306,15 @@ export async function createCourseDiscoveryBrowserSession(input: {
         if (element.tagName === 'BUTTON' && !element.getAttribute('aria-label') && !element.getAttribute('aria-labelledby') &&
             !element.getAttribute('title') && !element.getAttribute('aria-haspopup') && !element.hasAttribute('data-value') &&
             element.getAttribute('role') !== 'option' && !element.closest('[role="grid"],[role="dialog"],[class*="calendar"],[class*="datepicker"]')) {
-          const name = (element.innerText || element.querySelector('img')?.getAttribute('alt') || '').trim();
+          const root = element.getRootNode();
+          const squareServiceAction = root instanceof ShadowRoot && root.host.tagName === "MARKET-BUTTON" &&
+            /^(?:Add|Next)$/u.test(root.host.textContent?.trim() ?? "") ? root.host.textContent : "";
+          const name = (element.innerText || squareServiceAction || element.querySelector('img')?.getAttribute('alt') || '').trim();
           const candidateName = /\b(?:date|day|month|calendar|duration|length|party|players?|people|guests?|bay|resource|simulator|golf sim|location|activity|availability|available|search|view times|next|previous|back|continue|apply)\b/iu.test(name);
-          const productName = /^(?:book|select)$/iu.test(name) || /\b(?:hours?|hrs?|hr|minutes?|mins?|min)\b.*(?:\$|USD)|\d\s*h\s*(?:\$|USD)/iu.test(name);
-          if (!candidateName && !productName) continue;
+          const productName = /^(?:book|select)$/iu.test(name) || squareServiceAction === "Add" || /\b(?:hours?|hrs?|hr|minutes?|mins?|min)\b.*(?:\$|USD)|\d\s*h\s*(?:\$|USD)/iu.test(name);
+          const squareDate = root instanceof ShadowRoot && root.host.tagName === "MARKET-BUTTON" &&
+            root.host.closest('[data-testid="present-week"]');
+          if (!candidateName && !productName && !squareDate) continue;
         }
         visible.push({ index, priority: element.tagName === 'A' && /\b(?:book|reserve|reservations?|tee\s*times?|availability)\b/iu.test(`${element.innerText} ${element.getAttribute('aria-label') ?? ''}`) });
       }
@@ -2193,6 +2202,11 @@ export async function createCourseDiscoveryBrowserSession(input: {
           }
           if (known.serviceContinuation) {
             await continuePublicRentalService(known.locator, serviceSelection, known.serviceContinuation);
+            return snapshot();
+          }
+          const squareProduct = await inspectPublicRentalProduct(known.locator);
+          if (squareProduct && "squareService" in squareProduct) {
+            serviceSelection = await selectPublicRentalProduct(known.locator, page.locator(squareProduct.selector), squareProduct.durationMinutes);
             return snapshot();
           }
           serviceSelection = undefined;

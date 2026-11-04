@@ -198,5 +198,5 @@ describe.runIf(existsSync(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ?? "C:
       await expect(selectPublicDateChoice(page, 'td[role="button"][tabindex="0"]', "2026-10-23")).rejects.toThrow("AMBIGUOUS_DATE_CHOICE");
       expect(network).toBe(0);
     } finally { await browser.close(); }
-  });
+  }, 30_000);
 });

@@ -5,6 +5,7 @@ import type { Browser, Locator } from "@playwright/test";
 import { createAddressPinnedPublicFetchTransport } from "@/lib/automation/address-pinned-public-fetch";
 import { createPassfactoryPublicReadPolicy, isIncidentalBrowserRequest, isNonEvidenceBrowserResource } from "@/lib/automation/passfactory-public-read-policy";
 import { isAnonymousBrowserReadPost } from "@/lib/automation/simulator-interactive-browser";
+import { squarePublicAvailabilityCoversDate } from "@/lib/automation/square-public-read-policy";
 import { isMemberSportsPublicTeeSheetPost } from "@/lib/automation/membersports-public-read-policy";
 import { isRexAnonymousPlaceholderRead, isRexNamespace, isRexPublicBrowserReadPost } from "@/lib/automation/rex-public-read-policy";
 import { createPublicCatalogTileScope, openPublicCatalogTile, type PublicCatalogTileProof } from "./public-catalog-tile";
@@ -124,6 +125,7 @@ function matchesAvailabilityRequest(recipe: BrowserAccessRecipe, input: AccessEx
   if (recipe.engine === "BROWSER_JSON" && recipe.requestBinding === "SEVENROOMS_PUBLIC_PARTICIPANTS") {
     if (!browserJsonPrimaryRequestMatches(request, primary, recipe.source.bookingUrl, input, isSafeRecipeUrl)) return false;
   } else if (request.method !== primary.method || request.url !== primary.url) return false;
+  if (fence.date.format === "SQUARE_PUBLIC_MONTH_RANGE") return squarePublicAvailabilityCoversDate(request, recipe.source.bookingUrl, input);
   try {
     const url = new URL(request.url), segments = url.pathname.slice(1).split("/");
     if (fence.date.source === "PATH" && (request.method !== "GET" || segments.some(segment => !segment) || /%(?:2f|5c)/iu.test(url.pathname))) return false;
@@ -437,7 +439,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
   const passfactory = createPassfactoryPublicReadPolicy();
   passfactory.observeWidgetUrl(recipe.source.bookingUrl);
   const allowsPost = (url: URL, headers: Headers, body: string) => recipeAllowsRequest(recipe, url.href, "POST") &&
-    (isAnonymousBrowserReadPost(url, headers, body) || passfactory.allows(url, headers, body));
+    (isAnonymousBrowserReadPost(url, headers, body, recipe.source.bookingUrl) || passfactory.allows(url, headers, body));
   const requestQueue = createSimulatorBrowserRequestQueue(deps.requestLease ?? runWithProviderRequestLease, signal);
   const read = async (url: string, method: string, body?: string, headers = new Headers({ accept: "application/json" }), resourceType?: string,
     observeFailure?: (diagnostic: AccessExecutionDiagnostic) => void) => {
@@ -525,6 +527,8 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
     };
     let serverDocument: { generation: number; documentSequence: number; dataSequence: number; extracted: ServerDocumentExtraction } | undefined;
     let lastSuccessfulAvailabilityRequest: PublicAvailabilityRequest | undefined;
+    const squareMonth = recipe.engine === "BROWSER_DOM" && recipe.availabilityResponse.date.format === "SQUARE_PUBLIC_MONTH_RANGE";
+    let squareMonthRead: { generation: number; documentSequence: number; request: PublicAvailabilityRequest } | undefined;
     let latestBrowserJsonRead = 0;
     let browserJson: { generation: number; documentSequence: number; readSequence: number; extracted: ReturnType<typeof extractBrowserJsonRows> } | undefined;
     const memberSports = recipe.engine === "BROWSER_JSON" && recipe.requestBinding === "MEMBERSPORTS_PUBLIC_TEE_SHEET";
@@ -615,6 +619,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
         responseGeneration = generation;
         rejectedResponseGeneration = undefined;
         lastSuccessfulAvailabilityRequest = request;
+        if (squareMonth) squareMonthRead = { generation, documentSequence: mainDocumentSequence, request };
       } else {
         browserJson = undefined;
         responseGeneration = undefined;
@@ -862,10 +867,11 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
         }
         const invalidateAvailability = () => {
           mutationGeneration++; responseGeneration = undefined; rejectedResponseGeneration = undefined; browserJson = undefined;
+          squareMonthRead = undefined;
           memberSportsRead = undefined;
           carriedDurationGeneration = carryDurationFence ? mutationGeneration : undefined;
         };
-        if (step.action === "openOfficialBooking" || step.action === "followLink" || step.action === "selectDateChoice" && !memberSports || step.action === "selectDate" || step.action === "selectProduct" ||
+        if (step.action === "openOfficialBooking" || step.action === "followLink" || step.action === "selectDateChoice" && !memberSports && !squareMonth || step.action === "selectDate" || step.action === "selectProduct" ||
           step.action === "selectRentalService" || step.action === "continueToAvailability" || step.action === "select" || step.action === "fill" ||
           step.action === "clickFilter" && ["SELECT_DATE", "APPLY_DATE", "SELECT_FILTER", "RUN_SEARCH"].includes(step.purpose)) invalidateAvailability();
         if (step.action === "openOfficialBooking") {
@@ -900,7 +906,16 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
           continue;
         }
         if (step.action === "selectDateChoice") {
-          selectedDateDay = await selectPublicDateChoice(page, step.selector, input.date, memberSports ? choice => {
+          selectedDateDay = await selectPublicDateChoice(page, step.selector, input.date, memberSports || squareMonth ? choice => {
+            if (squareMonth) {
+              const current = squareMonthRead;
+              const carry = choice.date === input.date && current && !signal.aborted && !blocked && !providerThrottled && !pendingReadCount() &&
+                responseGeneration === mutationGeneration && rejectedResponseGeneration !== mutationGeneration &&
+                current.generation === mutationGeneration && current.documentSequence === mainDocumentSequence &&
+                squarePublicAvailabilityCoversDate(current.request, page.url(), input);
+              if (!carry) invalidateAvailability();
+              return;
+            }
             const current = memberSportsRead, identity = memberSportsIdentity;
             // A validated already-pressed date only closes this public calendar.
             // Preserve an independently accepted exact current read, never an
@@ -926,7 +941,7 @@ export async function executeAccessRecipe(recipeValue: CourseAccessRecipeData, i
           const card = page.locator(step.productSelector);
           const button = card.locator(step.selector);
           if (!input.durationMinutes) throw new Error("UNSAFE_PRODUCT_SELECTION");
-          await selectPublicRentalProduct(button, card, input.durationMinutes);
+          selectedRentalService = await selectPublicRentalProduct(button, card, input.durationMinutes);
           selectedProductDuration = input.durationMinutes;
           continue;
         }

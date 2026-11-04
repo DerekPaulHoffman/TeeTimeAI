@@ -58,6 +58,23 @@ canonical match writes. Simulator availability represents one full resource
 rental; saved player count is not a bay-capacity filter. `24:00` means the next
 venue-local midnight.
 
+An ordinary simulator alert with Any duration may learn a complete published
+session length. The bootstrap 60-minute request is not a promise that the venue
+sells an hour. Both independent replay challenges must verify the selected actual
+length, and activation rechecks that the original search still requests Any.
+Explicit durations cannot be overridden; saved matches retain their actual ends.
+
+The public Square browser path admits only its exact anonymous availability
+request for the location in the guarded source. Its service Add button requires
+one selected standard rental variant and a published matching price and duration.
+A private capability then permits one Next from that unchanged undated summary;
+it cannot continue from a slot or customer form. The week date selector requires
+seven consecutive weekday-correct dates within one displayed month. A completed
+month response may survive that date-only selection only when it covers the
+entire venue-local day in the same document and mutation generation. Cross-month
+weeks, changed services, failed or pending reads and incomplete extraction remain
+unresolved. These guards and fixture replays do not establish live delivery.
+
 A model's `UNSUPPORTED` report ends only its current attempt as an unverified
 capability limitation. It does not prove the source is inaccessible or bypass
 the one-retry limit and original deadline. A terminal access requirement still

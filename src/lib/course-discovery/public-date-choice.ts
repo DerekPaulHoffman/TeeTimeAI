@@ -1,4 +1,5 @@
 import type { Locator, Page } from "@playwright/test";
+import { inspectSquarePublicDateElement } from "./square-public-date-control";
 
 /** A dated calendar choice is a complete date, never a dated time/product card. */
 export function inspectPublicDateChoiceElement(value: Element | string,
@@ -129,7 +130,8 @@ export function inspectPublicDateChoiceElement(value: Element | string,
 export function parsePublicDateChoice(value: string) { return inspectPublicDateChoiceElement(value)?.date; }
 
 export async function isPublicDateChoice(node: Locator, date: string): Promise<boolean> {
-  return await node.count() === 1 && (await node.evaluate(inspectPublicDateChoiceElement, undefined, { timeout: 1000 }))?.date === date;
+  return await node.count() === 1 && ((await node.evaluate(inspectPublicDateChoiceElement, undefined, { timeout: 1000 })) ??
+    (await node.evaluate(inspectSquarePublicDateElement, undefined, { timeout: 1000 })))?.date === date;
 }
 
 export async function observedPublicDateChoices(page: Page): Promise<Array<{ locator: Locator; date: string }>> {
@@ -150,27 +152,34 @@ export async function selectPublicDateChoice(page: Page, selector: string, date:
   beforeClick?: (proof: { date: string; alreadySelected: boolean }) => void): Promise<Locator> {
   const candidates = page.locator(selector);
   if (await candidates.count() > 1000) throw new Error("AMBIGUOUS_DATE_CHOICE");
-  const text = await candidates.evaluateAll(elements => elements.map((element, index) => ({ index,
-    text: ((element as HTMLElement).innerText ?? "").slice(0, 101), ariaLabel: (element.getAttribute("aria-label") ?? "").slice(0, 101) })));
-  const indexes = text.filter(value => parsePublicDateChoice(value.ariaLabel ?? "") === date || parsePublicDateChoice(value.text) === date).map(value => value.index);
+  const text = await candidates.evaluateAll(elements => elements.map((element, index) => {
+    const root = element.getRootNode(), host = root instanceof ShadowRoot ? root.host : element;
+    return { index, text: ((element as HTMLElement).innerText ?? "").slice(0, 101), ariaLabel: (element.getAttribute("aria-label") ?? "").slice(0, 101),
+      square: host.tagName === "MARKET-BUTTON" && Boolean(host.closest('[data-testid="present-week"]')) };
+  }));
+  const filtered = text.filter(value => value.square || parsePublicDateChoice(value.ariaLabel ?? "") === date || parsePublicDateChoice(value.text) === date);
+  const indexes = filtered.map(value => value.index);
   if (indexes.length > 62) throw new Error("AMBIGUOUS_DATE_CHOICE");
-  const matching: Locator[] = [];
+  const matching: Array<{ locator: Locator; square: boolean }> = [];
   for (const index of indexes) {
     const node = candidates.nth(index);
-    if ((await node.evaluate(inspectPublicDateChoiceElement, undefined, { timeout: 1000 }))?.date === date) matching.push(node);
+    const square = filtered.find(value => value.index === index)?.square === true;
+    if ((await node.evaluate(square ? inspectSquarePublicDateElement : inspectPublicDateChoiceElement, undefined, { timeout: 1000 }))?.date === date)
+      matching.push({ locator: node, square });
   }
-  if (matching.length !== 1 || (await matching[0].evaluate(inspectPublicDateChoiceElement, undefined, { timeout: 1000 }))?.date !== date) throw new Error("AMBIGUOUS_DATE_CHOICE");
+  if (matching.length !== 1 || (await matching[0].locator.evaluate(matching[0].square ? inspectSquarePublicDateElement : inspectPublicDateChoiceElement, undefined, { timeout: 1000 }))?.date !== date) throw new Error("AMBIGUOUS_DATE_CHOICE");
   if (beforeClick) {
-    const handle = await matching[0].elementHandle();
+    const handle = await matching[0].locator.elementHandle();
     if (!handle) throw new Error("AMBIGUOUS_DATE_CHOICE");
     try {
-      const proof = await handle.evaluate(inspectPublicDateChoiceElement, { selector, date });
+      const proof = matching[0].square ? await handle.evaluate(inspectSquarePublicDateElement, { date }) :
+        await handle.evaluate(inspectPublicDateChoiceElement, { selector, date });
       if (proof?.date !== date) throw new Error("AMBIGUOUS_DATE_CHOICE");
       // Synchronous controller work runs after the same handle's full proof.
       // Never resolve the selector again after deciding whether to carry a read.
       beforeClick({ date: proof.date, alreadySelected: proof.alreadySelected === true });
       await handle.click();
     } finally { await handle.dispose(); }
-  } else await matching[0].click();
-  return matching[0];
+  } else await matching[0].locator.click();
+  return matching[0].locator;
 }
