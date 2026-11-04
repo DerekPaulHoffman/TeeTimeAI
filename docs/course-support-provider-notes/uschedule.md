@@ -54,6 +54,13 @@ reviewed support. Projection is configuration evidence, never monitoring proof.
 - Two independent successful deployed observations for an adopted source are
   still required before claiming monitoring recovery.
 
+## Next Novel Action
+
+Register and verify the exact reader release, then follow only a newly eligible
+owned booking read to obtain current validated configuration. Stop when source
+authority, the research budget or the deployment proof does not permit it;
+preserve an unresolved incident rather than infer rental identifiers.
+
 ## Change Log
 
 - 2026-11-04: Added strict default hourly rental support without widening the
