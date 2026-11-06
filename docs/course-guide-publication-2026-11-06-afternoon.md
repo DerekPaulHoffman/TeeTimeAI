@@ -1,0 +1,7 @@
+# Course guide publication, November 6 afternoon
+
+Published the [Meadowbrook Golf Course guide](https://teetimespot.com/courses/meadowbrook-golf-course-rapid-city-sd) in Rapid City, South Dakota. The profile records three durable sources covering municipal operation, the physical 18-hole layout, the parkland setting, and public daily-fee play. [Course overview](https://golfatmeadowbrook.com/home), [daily rates](https://golfatmeadowbrook.com/course/rates), [Rapid City Golf Policy Manual](https://www.golfatmeadowbrook.com/images/Policy-and-Procedues-FINAL-DRAFT-1.pdf).
+
+Copper Creek passed draft validation and remains pending because the official website failed the fresh source read during apply. Rapid City Executive Golf was deferred because the city manual lists 200 Founders Park Drive and the stored record lists 200 12th Street. Hobe Sound was excluded based on its previously established private access.
+
+Published guides increased from 183 to 184 and visible guides from 194 to 195. The actionable queue fell from 20 to 19. Stale, missing-profile, and locality counts stayed at 11, 48, and 30. Seventeen focused tests passed. Desktop and mobile checks confirmed the live title, description, canonical URL, structured data, internal links, and intercepted AUTOMATION analytics. The guide appears in the directory and sitemap. The sampled South Dakota and Pennington County hub URLs returned 404.
