@@ -1,0 +1,11 @@
+# New England course guide publication, November 7
+
+This production batch published one new guide and refreshed two stale guides. All three read back as published with seven durable sources.
+
+- [Candia Woods Golf Links](https://teetimespot.com/courses/candia-woods-golf-links-candia-nh) covers the public 18-hole course, its six sets of tees, driving range and clubhouse dining. The operator's current Candia Woods pages identify the course at 313 South Road, and New Hampshire records corroborate Rockingham County. [Facility overview](https://candiaoaks.com/candia-woods/), [golf and practice facilities](https://candiaoaks.com/candia-woods/golf/), [public access](https://candiaoaks.com/candia-woods/golf/tee-times-and-policies/), [county corroboration](https://gc.nh.gov/rsa/html/LXIII/662/662-4.htm).
+- [Widow's Walk Golf Course](https://teetimespot.com/courses/widow-s-walk-golf-course-scituate-ma) now covers the town's coastal 18-hole layout, conservation setting, driving range and restaurant. [Town of Scituate](https://scituatema.gov/1216/Widows-Walk-Golf-Course), [official course](https://widowswalkgolf.com/).
+- [Veterans Memorial Golf Course](https://teetimespot.com/courses/veterans-memorial-golf-course-springfield-ma) now covers the Springfield municipal layout, renovated clubhouse and public access. [City of Springfield](https://www.springfield-ma.gov/park/golf), [municipal golf operator](https://vets-franconia-golf.com/).
+
+Published guides rose from 189 to 192 and visible guides from 200 to 201. Stale guides fell from 11 to 9, missing profiles from 43 to 42, actionable entries from 19 to 17 and the locality queue from 25 to 24. Hole counts and par appear in editorial copy. Production readback matched the prior booking, provider and monitoring fields.
+
+All 53 focused tests passed. Six live desktop and mobile checks verified the revised copy, titles, descriptions, canonical URLs, GolfCourse and WebPage structured data and intercepted AUTOMATION analytics. All three guides appear in the course directory and sitemap, and all 12 nearby-course links returned HTTP 200. The sampled Massachusetts, New Hampshire, Plymouth County, Hampden County and Rockingham County hub paths returned HTTP 404.
