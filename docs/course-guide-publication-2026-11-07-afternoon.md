@@ -1,0 +1,12 @@
+# Atlanta and Queens course guide publication, November 7
+
+This production batch published two new public course guides. Both read back as published with three durable sources in total.
+
+- [Bobby Jones Golf Course](https://teetimespot.com/courses/bobby-jones-golf-course-atlanta-ga) covers the reversible nine-hole layout, the Azalea and Magnolia routings, the foundation-led redevelopment, and the practice and clubhouse facilities. The facility confirms the Northside Drive address in Atlanta, and the city cadastral map corroborates Fulton County. [Course design](https://www.bobbyjonesgc.com/golf-course/), [facility and public reservations](https://www.bobbyjonesgc.com/), [Atlanta cadastral map](https://gis.atlantaga.gov/docs/mylarzoning/17-145.pdf).
+- [Flushing Meadows Pitch and Putt](https://teetimespot.com/courses/flushing-meadows-pitch-and-putt-corona-ny) covers the lighted 18-hole short course in Queens, its 40- to 80-yard holes, club rentals, and public booking. NYC Parks corroborates the location and the separate miniature golf facility. The first apply failed when the Parks page returned HTTP 403 to the publication validator. A revised draft supported by the course operator passed a new dry run and applied successfully. [GolfNYC course page](https://www.golfnyc.com/flushing-meadows-pitch-putt/), [NYC Parks facility listing](https://nycgovparks.org/parks/flushing-meadows-corona-park).
+
+Knights Play Golf Center stayed in the locality queue. Its official pages confirm public access and the Apex address, but they exceed the publication validator's safe response-size limit. The failed apply left its locality and profile unchanged. [Knights Play Golf Center](https://www.knightsplay.com/).
+
+Published guides rose from 192 to 194 and visible guides from 201 to 203. Missing profiles fell from 42 to 40 and the locality queue from 24 to 22. Stale guides held at nine and actionable entries at 17. Locality was enriched for both published courses. Production readback showed zero changes to provider execution fields. Verified layout details appear in guide copy.
+
+All 54 focused tests passed. Four live desktop and mobile checks passed for guide copy, titles, descriptions, canonical URLs, structured data, internal links, and intercepted AUTOMATION analytics. Both guides appear in the directory and sitemap. Eight related guide links returned HTTP 200. The sampled state and county hub paths for Georgia, New York, and North Carolina returned HTTP 404.
