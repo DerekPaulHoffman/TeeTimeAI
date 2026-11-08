@@ -1,0 +1,11 @@
+# Course guide publication for November 7 evening
+
+Production published two guides and refreshed one. All three profiles read back as published with eight durable sources.
+
+- [Solitude Links](https://teetimespot.com/courses/solitude-links-golf-course-and-banquet-center-kimball-mi) in Kimball, Michigan covers the public 18-hole layout, the sand-and-gravel base, the aerial course tour, and on-site facilities. [Course details](https://www.solitudelinksgolf.com/golf/course-details/), [public tee times](https://www.solitudelinksgolf.com/golf/tee-times/).
+- [Columbia Bridges](https://teetimespot.com/courses/columbia-bridges-columbia-il) in Columbia, Illinois distinguishes Bridges from the operator's AA Road course. It covers the expansion to 18 holes and the operator's nine-hole routing through spring 2027. The city directory and operator corroborate the locality. [Club website](https://www.columbiagolfclub.net/), [club contacts](https://www.columbiagolfclub.net/contact), [city directory](https://www.columbiail.gov/businessdirectoryii.aspx?lngBusinessCategoryID=19&lngNewPage=0&txtAreaCode=&txtCity=&txtState=&txtZipCode=), [route and layout history](https://www.greatriverroad-illinois.org/Columbia-Golf-Club-The-Bridges).
+- [Val Halla Golf & Recreation](https://teetimespot.com/courses/val-halla-golf-and-recreation-cumberland-center-me) in Cumberland Center, Maine was refreshed with municipal ownership, public access, the 18-hole layout, junior golf, and the clubhouse restaurant. [Course website](https://valhalla.golf/), [daily rates](https://valhalla.golf/rates), [junior golf](https://valhalla.golf/junior-golf).
+
+Published guides rose from 194 to 197 and visible guides from 203 to 205. Stale guides fell from nine to eight, missing profiles from 40 to 39, actionable entries from 17 to 15, and locality entries from 22 to 21. Columbia Bridges gained corroborated locality. Readback found no material changes to provider monitoring evidence.
+
+All 54 focused tests passed. Six desktop and mobile checks verified guide copy, titles, descriptions, canonical URLs, structured data, internal links, and intercepted AUTOMATION analytics. The course directory and sitemap include all three guides. Five nearby guide links returned HTTP 200. The six sampled state and county hub paths returned HTTP 404. The current hub registry covers Connecticut.
