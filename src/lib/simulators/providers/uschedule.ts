@@ -99,6 +99,34 @@ function selectedRental(html: string, learned?: LearnedRental) {
             return values.length !== 1 || attr(values[0], "value") !== "-1"; }))) throw sourceError("The selected public rental changed");
     return { serviceId: learned.serviceId, durationMinutes: learned.durationMinutes };
   }
+  // A public Sim Booking can be selected beside unrelated member products.
+  // Bind only that selected service and its visible simulator description;
+  // neither the other products nor the terse label establishes eligibility.
+  const currentServices = services.filter(selected);
+  if (currentServices.length === 1 && isUScheduleSimBookingLabel(visibleText(currentServices[0]))) {
+    const service = currentServices[0];
+    const unsafe = (node: Element) => {
+      for (let current: Node | undefined = node; current; current = "parentNode" in current ? current.parentNode ?? undefined : undefined) {
+        if ("tagName" in current && (current.attrs.some(a => ["hidden", "inert", "disabled"].includes(a.name) ||
+          ["aria-hidden", "aria-disabled"].includes(a.name) && a.value === "true") ||
+          /display\s*:\s*none|visibility\s*:\s*(?:hidden|collapse)/iu.test(attr(current, "style") ?? ""))) return true;
+      }
+      return false;
+    };
+    const ids = services.map(node => attr(node, "value") ?? "");
+    if (services.length > 20 || ids.some(id => !PUBLIC_ID.test(id)) || new Set(ids).size !== ids.length || unsafe(service) ||
+        !hasUScheduleSimBookingDescription(html) || lengths.length < 1 || lengths.length > 7 || lengths.some(unsafe) ||
+        lengths.filter(selected).length !== 1 || attr(lengths.find(selected)!, "value") !== "60" ||
+        lengths.some(node => !/^(?:60|90|120|150|180|210|240)$/u.test(attr(node, "value") ?? "")) ||
+        new Set(lengths.map(node => attr(node, "value"))).size !== lengths.length ||
+        all.some(node => node.tagName === "select" && (["select_group_size", "select_location"].includes(attr(node, "id") ?? "") ||
+          (attr(node, "class") ?? "").split(/\s+/u).includes("resSelect"))))
+      throw sourceError("The selected public Sim Booking rental changed");
+    const rows = all.filter(node => (attr(node, "class") ?? "").split(/\s+/u).includes("next_avail_item"));
+    if (!rows.length || rows.some(node => unsafe(node) || !/\bSim Booking - \$\d+(?:\.\d{2})?$/u.test(visibleText(node).replace(/\s+/gu, " ").trim())))
+      throw sourceError("The selected public Sim Booking row identity changed");
+    return { serviceId: attr(service, "value")!, durationMinutes: 60 as const };
+  }
   const serviceName = services.length === 1 ? visibleText(services[0]).replace(/\s+/gu, " ").trim() : "";
   const hourlyRental = serviceName === "Hourly Simulator Rental";
   if (services.length !== 1 || !selected(services[0]) || !(serviceName === "Simulator Rental" || hourlyRental) ||

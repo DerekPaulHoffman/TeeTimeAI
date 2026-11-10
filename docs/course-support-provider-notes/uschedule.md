@@ -3,7 +3,7 @@ schemaVersion: 1
 mode: SIMULATOR
 providerFamily: USCHEDULE
 registrySupport: RUNNABLE
-lastReviewedAt: 2026-11-04
+lastReviewedAt: 2026-11-10
 lastVerifiedRelease: null
 ---
 
@@ -18,6 +18,21 @@ guards. Additional quantity, resource and location selectors require separately
 reviewed support. Projection is configuration evidence, never monitoring proof.
 
 ## Approaches That Worked
+
+### `selected-sim-booking-hour`
+
+- A selected Sim Booking may coexist with unrelated member products. Require
+  a visible corroborating simulator-play description, unique bounded service
+  identifiers, an explicit selected 60-minute duration and matching priced rows.
+- Reject location, resource and quantity selectors in this default pooled
+  profile. Preserve unknown capacity, anonymous date/cursor reads and complete
+  ordered-list requirements; the other catalog entries grant no eligibility.
+- Implementation: `src/lib/simulators/providers/uschedule.ts`.
+- Tests: `src/lib/simulators/providers/uschedule-sim-booking.test.ts` covers
+  open-day intervals, later-day completion, occupied-bay rejection, source drift,
+  member/access rejection and projection privacy.
+- Proof level: local tests. Exact-runtime monitoring remains unverified until
+  fresh owned configuration, release proof and two deployed checks succeed.
 
 ### `default-hourly-rental`
 
@@ -63,5 +78,8 @@ preserve an unresolved incident rather than infer rental identifiers.
 
 ## Change Log
 
+- 2026-11-10: Added a strict selected Sim Booking profile with independently
+  corroborated simulator description; unrelated member catalog entries do not
+  determine the selected rental's access.
 - 2026-11-04: Added strict default hourly rental support without widening the
   supported duration, capacity, transaction or source-research boundaries.
