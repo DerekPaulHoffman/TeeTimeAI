@@ -64,7 +64,7 @@ export async function discoveryEngineeringContext(reader: Reader, target: { cour
     originalFirstPickupAt: job.firstPickedUpAt!.toISOString(), originalDeadlineAt: job.deadlineAt!.toISOString(),
     completedAt: job.completedAt!.toISOString(), attempts: job.attempts, outcome: job.outcome,
     originalDeadlineExpired: now > job.deadlineAt!, diagnosis: discoveryFailureDiagnosis(job),
-    instruction: "Diagnose and repair reusable code under the existing assignment, path, implementation and release gates. Reproduce the failure, add a regression, verify fresh public inventory and independent model-disabled replay. Keep this original job terminal; recovery after its deadline does not pass the original fifteen-minute contract." };
+    instruction: "Use this diagnosis with the current owned action plan or simulator research guide. Complete the authorized verification or research stage first when implementation is not yet allowed. Repair reusable code only under existing path, implementation and release gates. Keep this original job terminal; recovery after its deadline does not pass the original fifteen-minute contract." };
 }
 
 /** Existing scheduled coding dispatch is the sole consumer. A restart or a
@@ -142,7 +142,7 @@ export async function reconcileDiscoveryEngineeringHandoffs(now = new Date()) {
     } else {
       const issue = await reportCourseSupportIssue({ course: source.course, searchId: request.demand.searchId,
         kind: "NEEDS_ADAPTER", message: "The public reader could not produce a verified reusable method; code diagnosis is required.",
-        nextAction: "Inspect the discoveryEngineeringFailure packet, reproduce its failure, and repair reusable monitoring under the normal implementation and release gates.",
+        nextAction: "Use the discoveryEngineeringFailure packet to guide the current authorized stage. Repair reusable monitoring when implementation is authorized.",
         readPath: "DISCOVERY_CODE_REPAIR", now, failureObservedAt: job.completedAt!, episodeStartedAt: job.firstPickedUpAt!,
         onBeforeSourceWrite: async tx => { if (!await currentDiscoveryEngineeringFailure(tx, job.id, now) ||
           await tx.courseDiscoveryJob.findUnique({ where: { activeTargetKey: job.targetKey } }) ||

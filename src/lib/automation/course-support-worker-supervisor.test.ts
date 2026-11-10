@@ -260,6 +260,8 @@ describe("course worker launch supervisor", () => {
     const prompt = workerInstructions(mode, f.selected, REF, f.deps);
     expect(prompt).toContain("Use only gpt-6.1-sol through the existing ChatGPT/Codex sign-in");
     expect(prompt).toContain("discoveryEngineeringFailure");
+    expect(prompt).toContain("When the action plan authorizes only VERIFY_CURRENT_RUNTIME, run the owner-bound verifier");
+    expect(prompt).toContain("only when the owned action and exclusive path authority authorize implementation");
     expect(prompt).toContain("Keep the original failed discovery job terminal and its clock unchanged");
     expect(prompt).toContain("Never manually send email or change customer alert inputs");
   });
