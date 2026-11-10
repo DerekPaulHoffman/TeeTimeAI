@@ -227,6 +227,52 @@ describe("owned known-reader public configuration", () => {
     expect(JSON.stringify(result.publicConfiguration)).not.toMatch(/secret@example|never-persist-this|customer|session/u);
     expect(fetch).toHaveBeenCalledOnce();
   });
+  it("retains a closed USchedule catalog diagnostic without accepting a new rental profile", async () => {
+    const html = uscheduleHtml.replace("Simulator Rental</option>", "Simulator Rental - One Hour</option><option value=\"999\">Private lesson name</option>");
+    const fetch = vi.fn(async () => response(html));
+    const result = await collectSimulatorSupportResearch({ url: uscheduleSource }, { fetch, lease, now: () => instant });
+    expect(result.publicConfiguration).toBeUndefined();
+    expect(result.configurationDiagnostic).toEqual({ phase: "CONFIG", reason: "PUBLIC_PROVIDER_CONFIG_REJECTED",
+      publicProviderFamily: "USCHEDULE", contractField: "RENTAL_IDENTITY", uscheduleRental: {
+        serviceCount: 2, selectedServiceCount: 1, selectedServiceId: "29547", selectedServiceLabelKind: "ONE_HOUR",
+        durationSelectorState: "PRESENT", durationCount: 1, selectedDurationCount: 1, selectedDurationMinutes: 60, durationOptionsMinutes: [60],
+        resourceSelectorCount: 0, locationSelectorCount: 0, groupSelectorCount: 0,
+        pooledRowCount: 1, pooledResourceState: "ZERO",
+      } });
+    expect(persistedDiagnostic(result.configurationDiagnostic)).toEqual(result.configurationDiagnostic);
+    expect(JSON.stringify(result.configurationDiagnostic)).not.toMatch(/Private lesson|secret@example|never-persist|customer|session/u);
+    expect(fetch).toHaveBeenCalledOnce();
+    const diagnostic = result.configurationDiagnostic!;
+    for (const patch of [
+      { publicProviderFamily: "ACUITY" }, { contractField: "PUBLIC_ACCESS" },
+      { uscheduleRental: { ...diagnostic.uscheduleRental, rawHtml: html } },
+      { uscheduleRental: { ...diagnostic.uscheduleRental, selectedServiceLabelKind: "raw private label" } },
+    ]) expect(() => persistedDiagnostic({ ...diagnostic, ...patch })).toThrow();
+  });
+  it.each([
+    ["missing", "", { durationSelectorState: "MISSING", durationCount: 0, selectedDurationCount: 0 }],
+    ["empty", '<select id="select_length"></select>', { durationSelectorState: "PRESENT", durationCount: 0, selectedDurationCount: 0 }],
+    ["malformed", '<select id="select_length"><option value="secret@example.test" selected>Private</option></select>',
+      { durationSelectorState: "PRESENT", durationCount: 1, selectedDurationCount: 1 }],
+  ])("keeps %s USchedule duration facts unknown without exposing values", async (_name, selector, expected) => {
+    const html = uscheduleHtml.replace(/<select id="select_length">.*?<\/select>/u, selector);
+    const result = await collectSimulatorSupportResearch({ url: uscheduleSource }, { fetch: vi.fn(async () => response(html)), lease, now: () => instant });
+    expect(result.publicConfiguration).toBeUndefined();
+    expect(result.configurationDiagnostic?.uscheduleRental).toMatchObject(expected);
+    expect(result.configurationDiagnostic?.uscheduleRental).not.toHaveProperty("selectedDurationMinutes");
+    expect(result.configurationDiagnostic?.uscheduleRental).not.toHaveProperty("durationOptionsMinutes");
+    expect(persistedDiagnostic(result.configurationDiagnostic)).toEqual(result.configurationDiagnostic);
+    expect(JSON.stringify(result.configurationDiagnostic)).not.toMatch(/secret@example|Private|never-persist/u);
+  });
+  it.each([
+    uscheduleHtml + '<p>Sign in to continue</p>',
+    uscheduleHtml + '<select id="select_service"><option selected value="777">Private</option></select>',
+    uscheduleHtml.replace("</select>", '<option value="999">Other</option>'.repeat(101) + "</select>"),
+  ])("withholds static rental diagnostics for controlled or ambiguous documents", async html => {
+    const result = await collectSimulatorSupportResearch({ url: uscheduleSource }, { fetch: vi.fn(async () => response(html)), lease, now: () => instant });
+    expect(result.publicConfiguration).toBeUndefined();
+    expect(result.configurationDiagnostic).toBeUndefined();
+  });
   it("returns inert Acuity rental metadata from one existing owned read without private fields", async () => {
     const fetch = vi.fn(async () => response(acuityConfig()));
     const result = await collectSimulatorSupportResearch({ url: acuitySource }, { fetch, lease, now: () => instant });

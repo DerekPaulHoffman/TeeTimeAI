@@ -79,7 +79,25 @@ const configurationDiagnostic = z.object({
   phase: z.enum(["CONFIG", "VENUE", "RANGES", "RENTALS", "RESOURCES"]),
   reason: z.enum(["CONFIG_SHAPE", "CONFIG_NUMBER", "CONFIG_STRING", "CONFIG_BOOLEAN", "CONFIG_ARRAY", "CONFIG_IDENTITY", "CONFIG_NO_ELIGIBLE_RENTALS",
     "PUBLIC_PROVIDER_HTTP_ERROR", "PUBLIC_PROVIDER_CONFIG_REJECTED", "PUBLIC_PROVIDER_CATALOG_AMBIGUOUS", "PUBLIC_PROVIDER_NO_ONE_HOUR_RENTAL"]),
-  publicProviderFamily: z.enum(["TEESHEET", "UPPER_HAND", "ACUITY"]).optional(),
+  publicProviderFamily: z.enum(["TEESHEET", "UPPER_HAND", "ACUITY", "USCHEDULE"]).optional(),
+  uscheduleRental: z.object({
+    serviceCount: z.number().int().min(0).max(100), selectedServiceCount: z.number().int().min(0).max(100),
+    selectedServiceId: z.string().regex(/^[1-9]\d{0,9}$/u).optional(),
+    selectedServiceLabelKind: z.enum(["DEFAULT", "HOURLY", "ONE_HOUR", "OTHER"]).optional(),
+    durationSelectorState: z.enum(["MISSING", "PRESENT"]),
+    durationCount: z.number().int().min(0).max(20), selectedDurationCount: z.number().int().min(0).max(20),
+    selectedDurationMinutes: z.number().int().min(1).max(1440).optional(),
+    durationOptionsMinutes: z.array(z.number().int().min(1).max(1440)).min(1).max(20).optional(),
+    resourceSelectorCount: z.number().int().min(0).max(100), locationSelectorCount: z.number().int().min(0).max(100),
+    groupSelectorCount: z.number().int().min(0).max(100), pooledRowCount: z.number().int().min(0).max(25),
+    pooledResourceState: z.enum(["NO_ROWS", "ZERO", "OTHER_OR_MISSING"]),
+  }).strict().refine(v => v.selectedServiceCount <= v.serviceCount && v.selectedDurationCount <= v.durationCount &&
+    (v.selectedServiceId === undefined || v.selectedServiceCount === 1) &&
+    (v.selectedServiceLabelKind !== undefined) === (v.selectedServiceCount === 1) &&
+    (v.selectedDurationMinutes === undefined || v.selectedDurationCount === 1) &&
+    (v.durationSelectorState !== "MISSING" || v.durationCount === 0) &&
+    (!v.durationOptionsMinutes || v.durationOptionsMinutes.length === v.durationCount) &&
+    (v.pooledResourceState === "NO_ROWS") === (v.pooledRowCount === 0)).optional(),
   httpStatus: z.number().int().min(100).max(599).optional(),
   contractField: z.enum(["SETTINGS", "CATALOG", "RENTAL_IDENTITY", "PUBLIC_ACCESS", "DURATION", "RESOURCE_IDENTITY"]).optional(),
   resourceIdentity: z.object({
@@ -136,7 +154,9 @@ const configurationDiagnostic = z.object({
       : entry.httpStatus === undefined && entry.contractField !== undefined)
     : entry.publicProviderFamily === undefined && entry.httpStatus === undefined && entry.contractField === undefined)
   .refine(entry => entry.resourceIdentity === undefined || entry.reason === "PUBLIC_PROVIDER_CONFIG_REJECTED" &&
-    entry.publicProviderFamily === "ACUITY" && entry.contractField === "RESOURCE_IDENTITY");
+    entry.publicProviderFamily === "ACUITY" && entry.contractField === "RESOURCE_IDENTITY")
+  .refine(entry => entry.uscheduleRental === undefined || entry.reason === "PUBLIC_PROVIDER_CONFIG_REJECTED" &&
+    entry.publicProviderFamily === "USCHEDULE" && entry.contractField === "RENTAL_IDENTITY");
 const renderWarning = z.enum(["SECONDARY_REQUEST_BUDGET_EXHAUSTED", "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED", "SECONDARY_STYLESHEET_URL_REJECTED", "SECONDARY_REQUESTS_BLOCKED", "MAIN_DOCUMENT_HTTP_ERROR"]);
 const bodyLimitDiagnostic = z.object({
   resourceKind: z.enum(["SECONDARY_SCRIPT", "SECONDARY_STYLESHEET"]),

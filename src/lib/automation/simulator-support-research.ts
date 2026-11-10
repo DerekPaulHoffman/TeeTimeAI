@@ -7,7 +7,7 @@ import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import { sanitizeResponderText } from "./course-support-responder-policy";
 import { inspectAcuityPublicConfiguration, type AcuityResourceIdentityDiagnostic } from "@/lib/simulators/providers/acuity";
 import { projectGolfBookPublicConfiguration } from "@/lib/simulators/providers/golfbook";
-import { projectUSchedulePublicConfiguration } from "@/lib/simulators/providers/uschedule";
+import { projectUSchedulePublicConfiguration, inspectUScheduleRentalDiagnostic, type UScheduleRentalDiagnostic } from "@/lib/simulators/providers/uschedule";
 import type { SimulatorPublicConfiguration } from "@/lib/simulators/providers/public-configuration";
 import { collectSimulatorPublicApiConfiguration, projectYourGolfBookingReviewedSlotConfiguration, type PublicApiConfigurationDiagnostic } from "./simulator-public-api-configuration";
 import { tagSimulatorResearchFailure, tagSimulatorResearchResourceKind, type SimulatorResearchFailurePhase,
@@ -48,7 +48,8 @@ export type SimulatorPublicCalendar = {
 export type SimulatorConfigurationDiagnostic = {
   phase: "CONFIG" | "VENUE" | "RANGES" | "RENTALS" | "RESOURCES";
   reason: "CONFIG_SHAPE" | "CONFIG_NUMBER" | "CONFIG_STRING" | "CONFIG_BOOLEAN" | "CONFIG_ARRAY" | "CONFIG_IDENTITY" | "CONFIG_NO_ELIGIBLE_RENTALS" | PublicApiConfigurationDiagnostic["reason"];
-  publicProviderFamily?: PublicApiConfigurationDiagnostic["publicProviderFamily"] | "ACUITY";
+  publicProviderFamily?: PublicApiConfigurationDiagnostic["publicProviderFamily"] | "ACUITY" | "USCHEDULE";
+  uscheduleRental?: UScheduleRentalDiagnostic;
   httpStatus?: number;
   contractField?: PublicApiConfigurationDiagnostic["contractField"];
   resourceIdentity?: AcuityResourceIdentityDiagnostic;
@@ -541,13 +542,16 @@ export function resultFromSimulatorResearchBody(requestedUrl: string, url: strin
   const acuity = inspectAcuityPublicConfiguration(html, url);
   const publicConfiguration = acuity?.publicConfiguration ?? projectGolfBookPublicConfiguration(html, url) ??
     projectUSchedulePublicConfiguration(html, url) ?? projectYourGolfBookingReviewedSlotConfiguration(calendar.configurationDiagnostic, url);
+  const uscheduleRental = publicConfiguration ? undefined : inspectUScheduleRentalDiagnostic(html, url);
   const retainedLinks = new Set(summary.links);
   const retainedBookingLinks = [...new Set(bookingLinks)].filter(link => retainedLinks.has(link));
   const retainedVenueLinks = venueLinks.filter(link => retainedLinks.has(link));
   return { ...base, ...summary, pageSurfaces: summarizeSimulatorPageSurfaces(html, url), ...(retainedBookingLinks.length ? { bookingLinks: retainedBookingLinks } : {}),
     ...(retainedVenueLinks.length ? { venueLinks: retainedVenueLinks } : {}),
     ...(publicConfiguration ? { publicConfiguration } : {}), ...calendar,
-    ...(acuity?.configurationDiagnostic ? { configurationDiagnostic: acuity.configurationDiagnostic } : {}) };
+    ...(acuity?.configurationDiagnostic ? { configurationDiagnostic: acuity.configurationDiagnostic } : {}),
+    ...(uscheduleRental ? { configurationDiagnostic: { phase: "CONFIG" as const, reason: "PUBLIC_PROVIDER_CONFIG_REJECTED" as const,
+      publicProviderFamily: "USCHEDULE" as const, contractField: "RENTAL_IDENTITY" as const, uscheduleRental } } : {}) };
 }
 const resultFromBody = resultFromSimulatorResearchBody;
 

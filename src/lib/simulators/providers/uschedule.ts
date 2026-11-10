@@ -304,6 +304,55 @@ function publicRentalPartyLimit(html: string) {
   return limits[0] ?? null;
 }
 
+export type UScheduleRentalDiagnostic = {
+  serviceCount: number; selectedServiceCount: number; selectedServiceId?: string;
+  selectedServiceLabelKind?: "DEFAULT" | "HOURLY" | "ONE_HOUR" | "OTHER";
+  durationSelectorState: "MISSING" | "PRESENT";
+  durationCount: number; selectedDurationCount: number; selectedDurationMinutes?: number;
+  durationOptionsMinutes?: number[];
+  resourceSelectorCount: number; locationSelectorCount: number; groupSelectorCount: number;
+  pooledRowCount: number; pooledResourceState: "NO_ROWS" | "ZERO" | "OTHER_OR_MISSING";
+};
+
+/** Static shape only: never accepts a rental, infers a duration or exposes labels/session fields. */
+export function inspectUScheduleRentalDiagnostic(html: string, sourceUrl: string): UScheduleRentalDiagnostic | undefined {
+  if (!uschedulePublicTenant(sourceUrl) || Buffer.byteLength(html, "utf8") > MAX_HTML_BYTES || accessChanged(html)) return;
+  const all = elements(parse(html));
+  const selects = (id: string) => all.filter(n => n.tagName === "select" && attr(n, "id") === id);
+  const services = selects("select_service"), lengths = selects("select_length");
+  // Duplicate or oversized controls stay unknown, rather than projecting a partial catalog.
+  if (services.length !== 1 || lengths.length > 1) return;
+  const options = (selects: Element[]) => selects.flatMap(n => elements(n).filter(n => n.tagName === "option"));
+  const serviceOptions = options(services), durations = options(lengths);
+  const rows = all.filter(n => (attr(n, "class") ?? "").split(/\s+/u).includes("next_avail_item"));
+  const resourceSelectorCount = all.filter(n => n.tagName === "select" && (attr(n, "class") ?? "").split(/\s+/u).includes("resSelect")).length;
+  const locationSelectorCount = selects("select_location").length, groupSelectorCount = selects("select_group_size").length;
+  if (serviceOptions.length > 100 || durations.length > 20 || rows.length > MAX_PUBLIC_ROWS_PER_PAGE ||
+      Math.max(resourceSelectorCount, locationSelectorCount, groupSelectorCount) > 100) return;
+  const selected = (nodes: Element[]) => nodes.filter(n => attr(n, "selected") !== undefined);
+  const currentServices = selected(serviceOptions), currentDurations = selected(durations);
+  const minuteValue = (node: Element) => {
+    const value = attr(node, "value") ?? "";
+    return /^[1-9]\d{0,3}$/u.test(value) && Number(value) <= 1440 ? Number(value) : undefined;
+  };
+  const service = currentServices.length === 1 ? currentServices[0] : undefined;
+  const id = service && attr(service, "value"), label = service && visibleText(service).replace(/\s+/gu, " ").trim();
+  const durationValues = durations.map(minuteValue);
+  const selectedMinutes = currentDurations.length === 1 ? minuteValue(currentDurations[0]) : undefined;
+  return {
+    serviceCount: serviceOptions.length, selectedServiceCount: currentServices.length,
+    ...(id && PUBLIC_ID.test(id) ? { selectedServiceId: id } : {}),
+    ...(service ? { selectedServiceLabelKind: label === "Simulator Rental" ? "DEFAULT" : label === "Hourly Simulator Rental" ? "HOURLY" :
+      label === "Simulator Rental - One Hour" ? "ONE_HOUR" : "OTHER" } as const : {}),
+    durationSelectorState: lengths.length ? "PRESENT" : "MISSING",
+    durationCount: durations.length, selectedDurationCount: currentDurations.length,
+    ...(selectedMinutes !== undefined ? { selectedDurationMinutes: selectedMinutes } : {}),
+    ...(durations.length && durationValues.every((v): v is number => v !== undefined) ? { durationOptionsMinutes: durationValues } : {}),
+    resourceSelectorCount, locationSelectorCount, groupSelectorCount,
+    pooledRowCount: rows.length, pooledResourceState: !rows.length ? "NO_ROWS" : rows.every(n => attr(n, "data-empid") === "0") ? "ZERO" : "OTHER_OR_MISSING",
+  };
+}
+
 /** Inert projection of the selected public rental only. No session or list data survives. */
 export function projectUSchedulePublicConfiguration(html: string, sourceUrl: string): USchedulePublicConfiguration | undefined {
   const tenant = uschedulePublicTenant(sourceUrl);
