@@ -280,10 +280,16 @@ export async function claimNextDiscoveryJob(workerId: string) {
       if (!demand) { await finish("CANCELLED", "NO_ACTIVE_DEMAND"); continue; }
       if (await hasLegacyDiscoveryOwner(tx, source.target)) continue;
       const deadlineAt = current.deadlineAt ?? new Date(now.getTime() + DISCOVERY_DEADLINE_MS);
+      const request = requestFor(source, demand);
+      // A retry can bind to an edited or replacement alert. Its old checkpoint
+      // and replay challenges describe the previous request, but its clock still applies.
+      const requestChanged = canonical(current.request) !== canonical(request);
       return tx.courseDiscoveryJob.update({ where: { id: current.id }, data: {
         status: "RUNNING", attempts: { increment: 1 }, workerId, firstPickedUpAt: current.firstPickedUpAt ?? now,
         deadlineAt, leaseToken: randomUUID(), leaseExpiresAt: new Date(Math.min(deadlineAt.getTime(), now.getTime() + DISCOVERY_LEASE_MS)),
-        request: json(requestFor(source, demand)), outcome: null,
+        request: json(request), outcome: null,
+        ...(requestChanged ? { checkpoint: current.attempts > 0 ? { requestRebound: true } : Prisma.DbNull,
+          candidate: Prisma.DbNull, candidateHash: null, verification: Prisma.DbNull } : {}),
       } });
     }
     return null;

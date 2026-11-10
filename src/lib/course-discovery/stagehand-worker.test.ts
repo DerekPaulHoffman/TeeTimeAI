@@ -295,6 +295,28 @@ describe("clean unresolved source fresh-root handoff", () => {
 });
 
 describe("clean native root widget handoff", () => {
+  it("uses the original deadline and a fresh official root on a retry with edited demand", async () => {
+    const t = setup();
+    t.f.job.attempts = 2;
+    t.f.job.checkpoint = { requestRebound: true };
+    t.f.job.request.demand.alertGeneration = 2;
+    t.f.job.request.input.date = "2030-01-04";
+    t.f.clock = first + 180_000;
+    const genericWorker = vi.fn(async options => {
+      expect(options.job).toBe(t.f.job);
+      expect(options.workDeadlineAt).toBe(new Date(first + 720_000).toISOString());
+      expect(options.freshOfficialStart).toBe(true);
+      expect(options.checkpointProvenance).toEqual({ stagehandProgress: { phase: "GENERIC_FALLBACK" } });
+      await options.beforeActivate(); await options.afterActivate();
+      return { outcome: "activated", metrics: {} };
+    });
+    const result = await t.run({ genericWorker });
+    expect(result.metrics.genericFallback.trigger).toBe("ALERT_REQUEST_CHANGED");
+    expect(genericWorker).toHaveBeenCalledOnce();
+    expect(t.sourceDiscover).not.toHaveBeenCalled();
+    expect(t.afterActivate).toHaveBeenCalledOnce();
+  });
+
   it.each([[false, "PUBLIC_FILTERS"], [true, "PUBLIC_FILTERS"], [false, "SERVICE_CATALOG"], [true, "SERVICE_CATALOG"]] as const)("hands only the original job and clean routing checkpoint to fresh generic discovery (resume=%s, kind=%s)", async (resumed, widgetKind) => {
     const t = setup(); rootWidgetReport(t, widgetKind);
     if (resumed) { t.f.job.checkpoint = { stagehandSource: createStagehandSourceCheckpoint(t.f.job, t.f.report) }; t.f.job.attempts = 2; }

@@ -114,7 +114,7 @@ export async function runCourseDiscoveryStagehandWorker({
     check();
     phase = "GENERIC_FALLBACK";
     metrics.source = { ...sourceMetrics(report), elapsedMs: metrics.sourceElapsedMs, resumed: metrics.sourceResumed,
-      usageRecordedLowerBound: true, usageFromPriorAttempt: metrics.sourceResumed, browserClosed: report.browserClosed === true, modelClosed: report.modelClosed === true };
+      usageRecordedLowerBound: true, usageFromPriorAttempt: metrics.sourceResumed, browserClosed: report?.browserClosed === true, modelClosed: report?.modelClosed === true };
     metrics.modelCallsMeaning = "SOURCE_COMPLETED_CALLS_ONLY_GENERIC_USAGE_SEPARATE";
     metrics.genericFallback = { trigger, startedAt: now(), workDeadlineAt: new Date(deadline).toISOString(), freshOfficialStart: true,
       ...(retryPlan ? { skippedPriorInspection: true } : {}) };
@@ -167,6 +167,11 @@ export async function runCourseDiscoveryStagehandWorker({
       publishMetrics();
     }
     if (!prepared) {
+    if (job.attempts === 2 && job.checkpoint?.requestRebound === true && Object.keys(job.checkpoint).length === 1) {
+      // Start at the official root with no old routes or replay evidence. The
+      // original work deadline still applies and the generic worker must verify before activating.
+      return await runGenericFromFreshRoot("ALERT_REQUEST_CHANGED");
+    }
     reference = readStagehandSourceCheckpoint(job, workDeadlineAt, now());
     if (reference) {
       metrics.sourceResumed = true;

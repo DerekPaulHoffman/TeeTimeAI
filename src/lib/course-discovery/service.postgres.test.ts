@@ -110,15 +110,35 @@ describe.skipIf(!url)("course discovery in isolated Postgres", () => {
   it("recovers an expired lease once without extending the first deadline", async () => {
     const f = await fixture(); await f.ensure();
     const first = (await service.claimNextDiscoveryJob("first-worker"))!;
+    const checkpoint = { fixture: "same request" };
+    await service.checkpointDiscoveryJob(first.id, first.leaseToken!, checkpoint);
     await client.courseDiscoveryJob.update({ where: { id: first.id }, data: { leaseExpiresAt: new Date(0) } });
     const second = (await service.claimNextDiscoveryJob("second-worker"))!;
     expect(second.deadlineAt).toEqual(first.deadlineAt);
     expect(second.firstPickedUpAt).toEqual(first.firstPickedUpAt);
     expect(second.attempts).toBe(2);
+    expect(second.checkpoint).toEqual(checkpoint);
     await expect(service.heartbeatDiscoveryJob(first.id, first.leaseToken!)).rejects.toBeInstanceOf(service.DiscoveryConflictError);
     await client.courseDiscoveryJob.update({ where: { id: first.id }, data: { leaseExpiresAt: new Date(0) } });
     expect(await service.claimNextDiscoveryJob("third-worker")).toBeNull();
     expect((await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: first.id } })).status).toBe("FAILED");
+  });
+
+  it("discards old request evidence when a retry picks up an edited alert", async () => {
+    const f = await fixture();
+    const first = await verified(f);
+    await service.checkpointDiscoveryJob(first.id, first.leaseToken!, { stagehandSource: { fixture: "old request" } });
+    await service.failDiscoveryJob(first.id, first.leaseToken!, "TOOL_FAILURE", true);
+    const editedDate = new Date(f.search.date);
+    editedDate.setUTCDate(editedDate.getUTCDate() + 1);
+    await client.teeSearch.update({ where: { id: f.search.id }, data: { date: editedDate, alertGeneration: { increment: 1 } } });
+
+    const retry = await service.claimNextDiscoveryJob("edited-alert-retry");
+    expect(retry).toMatchObject({
+      id: first.id, attempts: 2, firstPickedUpAt: first.firstPickedUpAt, deadlineAt: first.deadlineAt,
+      request: { demand: { searchId: f.search.id, alertGeneration: 1 }, input: { date: editedDate.toISOString().slice(0, 10) } },
+      checkpoint: { requestRebound: true }, candidate: null, candidateHash: null, verification: null,
+    });
   });
 
   it("recovers a committed checkpoint after an owned OS process crash and natural lease expiry", async () => {
