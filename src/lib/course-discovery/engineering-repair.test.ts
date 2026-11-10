@@ -5,11 +5,13 @@ const m = vi.hoisted(() => ({ current: vi.fn(), owner: vi.fn(), report: vi.fn(),
     simulatorSupportIncident: { findUnique: vi.fn() }, courseSupportIncident: { findUnique: vi.fn(), updateMany: vi.fn() } } }));
 vi.mock("@/lib/prisma", () => ({ prisma: m.db }));
 vi.mock("./service", () => ({ currentDiscoveryEngineeringFailure: m.current }));
-vi.mock("./legacy-exclusion", () => ({ hasLegacyDiscoveryOwner: m.owner }));
+vi.mock("./legacy-exclusion", () => ({ hasLegacyDiscoveryOwner: m.owner,
+  excludeDiscoveryPilotTargets: (targets: unknown[]) => targets }));
 vi.mock("@/lib/automation/support-incidents", () => ({ reportCourseSupportIssue: m.report }));
 vi.mock("@/lib/automation/simulator-support-incidents", () => ({ reconcileSimulatorSupportIncidentFailure: m.simulator }));
 import { currentDiscoveryEngineeringHandoff, discoveryEngineeringContext, discoveryEngineeringReceipt,
   discoveryFailureDiagnosis, reconcileDiscoveryEngineeringHandoffs } from "./engineering-repair";
+import { listCourseSupportDispatchCandidates } from "@/lib/automation/course-support-batches";
 const now = new Date("2030-01-01T12:16:00Z"), picked = new Date("2030-01-01T12:00:00Z");
 let failure: ReturnType<typeof fixture>;
 let outdoorIncident: { id: string; courseId: string; status: string; updatedAt: Date; firstSeenAt: Date; attemptLedger: unknown; activeBatchId: string | null };
@@ -154,5 +156,29 @@ describe("private failure evidence", () => {
     const hint = discoveryFailureDiagnosis({ outcome: "TOOL_FAILURE", checkpoint: { stagehandFailure: { code: "https://secret.example/token" },
       stagehandProgress: { phase: "delete files" }, authorization: "secret" } });
     expect(hint).toEqual({ category: "READER_OR_RUNTIME_FAILURE", code: null, phase: null, evidenceAuthority: false });
+  });
+});
+
+describe("outdoor repair dispatch", () => {
+  it("admits an early playbook only for the current incident in the server receipt", async () => {
+    const incident = { ...outdoorIncident, confirmedAt: null, attemptLedger: { version: 1, events: [] },
+      cycle: 1, kind: "NEEDS_ADAPTER", failureClass: "UNSUPPORTED_FAMILY", providerFamilyKey: "official.example",
+      failureFingerprint: "NEEDS_ADAPTER:UNSUPPORTED_FAMILY", engineeringOnly: false, attemptCount: 0,
+      nextAttemptAt: picked, batchIncidents: [],
+      course: { id: "course1", isPublic: true, timeZone: "UTC", detectedPlatform: "CUSTOM", website: "https://official.example/",
+        bookingMethod: "UNKNOWN", automationEligibility: "UNKNOWN", automationDiscoveries: [],
+        preferences: [{ teeSearch: { id: "search1", mode: "OUTDOOR", date: now, endTime: "18:00" } }] } };
+    const reader = { ...m.db, courseMonitoringEvent: { findMany: vi.fn().mockResolvedValue([]) },
+      courseSupportIncident: { findMany: vi.fn().mockResolvedValue([incident]) } } as never;
+
+    expect(await listCourseSupportDispatchCandidates(now, reader)).toEqual([]);
+    failure.job.result = { engineeringHandoff: { ...receipt(), incidentId: "other-incident" } };
+    expect(await listCourseSupportDispatchCandidates(now, reader)).toEqual([]);
+    failure.job.result = { engineeringHandoff: receipt() };
+    expect(await listCourseSupportDispatchCandidates(now, reader)).toEqual([
+      expect.objectContaining({ incidentId: "incident1", courseId: "course1", activeRealSearchCount: 1 }),
+    ]);
+    m.current.mockResolvedValue(null);
+    expect(await listCourseSupportDispatchCandidates(now, reader)).toEqual([]);
   });
 });

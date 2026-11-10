@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { excludeDiscoveryPilotTargets } from "@/lib/course-discovery/legacy-exclusion";
+import { isGeneralDiscoveryEnabled } from "@/lib/course-discovery/config";
 
 import { Prisma } from "@prisma/client";
 import type {
@@ -985,6 +986,37 @@ export async function withCourseSupportWriteConflictRetry<T>(
   throw new Error("Course-support write-conflict retry exhausted unexpectedly.");
 }
 
+function needsEarlyDiscoveryHandoff(attemptLedger: unknown, cycle: number) {
+  const assessment = assessAutomationPlaybook(attemptLedger, cycle);
+  return assessment.valid && assessment.conclusion === "INCOMPLETE" &&
+    (assessment.nextStage === "OFFICIAL_IDENTITY" || assessment.nextStage === "TYPED_ADAPTER" ||
+      assessment.nextStage === "OFFICIAL_HTTP_DISCOVERY" || assessment.nextStage === "HTTP_ADAPTER_RETRY");
+}
+
+async function loadEarlyDiscoveryHandoffs(
+  tx: Prisma.TransactionClient,
+  incidents: readonly {
+    id: string;
+    courseId: string;
+    confirmedAt: Date | null;
+    attemptLedger: unknown;
+    cycle: number;
+    course: { preferences: readonly CourseSupportDemandPreference[]; timeZone: string };
+  }[],
+  now: Date,
+) {
+  const ids = new Set<string>();
+  if (!isGeneralDiscoveryEnabled()) return ids;
+  const { currentDiscoveryEngineeringHandoff } = await import("@/lib/course-discovery/engineering-repair");
+  for (const incident of incidents) {
+    if (incident.confirmedAt !== null || !needsEarlyDiscoveryHandoff(incident.attemptLedger, incident.cycle) ||
+        deriveCourseSupportCurrentDemand(incident.course.preferences, { timeZone: incident.course.timeZone, now }).activeRealSearchCount === 0) continue;
+    const handoff = await currentDiscoveryEngineeringHandoff(tx, { courseId: incident.courseId }, now);
+    if (handoff?.receipt.incidentId === incident.id) ids.add(incident.id);
+  }
+  return ids;
+}
+
 function isResponderSelectionEligible(input: {
   confirmedAt: Date | null | undefined;
   attemptLedger: unknown;
@@ -996,6 +1028,7 @@ function isResponderSelectionEligible(input: {
   shortRetryMarker?: StartedReaderShortRetryMarker | null;
   engineeringOnly: boolean;
   activeRealSearchCount: number;
+  earlyDiscoveryHandoff?: boolean;
 }) {
   if (input.confirmedAt != null) {
     return true;
@@ -1005,6 +1038,9 @@ function isResponderSelectionEligible(input: {
   }
   if (input.activeRealSearchCount <= 0) {
     return false;
+  }
+  if (input.earlyDiscoveryHandoff && needsEarlyDiscoveryHandoff(input.attemptLedger, input.cycle)) {
+    return true;
   }
   const assessment = assessAutomationPlaybook(input.attemptLedger, input.cycle);
   return (
@@ -3783,6 +3819,7 @@ export async function inspectCourseSupportQueue(input?: {
     prisma,
     rawDueIncidents,
   );
+  const earlyDiscoveryHandoffs = await loadEarlyDiscoveryHandoffs(prisma, rawDueIncidents, now);
   const hasPotentialActiveDemand = rawDueIncidents.some((incident) => {
     const demand = deriveCourseSupportCurrentDemand(incident.course.preferences, {
       timeZone: incident.course.timeZone,
@@ -3791,6 +3828,7 @@ export async function inspectCourseSupportQueue(input?: {
     return demand.activeRealSearchCount > 0 && isResponderSelectionEligible({
       ...incident,
       incidentId: incident.id,
+      earlyDiscoveryHandoff: earlyDiscoveryHandoffs.has(incident.id),
       activeRealSearchCount: demand.activeRealSearchCount,
       shortRetryMarker: readerShortRetryMarkers.get(
         buildCourseSupportVerificationWatchShortRetryIdempotencyKey({
@@ -3872,6 +3910,7 @@ export async function inspectCourseSupportQueue(input?: {
             }),
           ),
           engineeringOnly: incident.engineeringOnly,
+          earlyDiscoveryHandoff: earlyDiscoveryHandoffs.has(incident.id),
           activeRealSearchCount: currentDemand.activeRealSearchCount,
         })
       ) {
@@ -5010,12 +5049,14 @@ export async function claimCourseSupportBatch(input: {
                 select: STARTED_READER_SHORT_RETRY_MARKER_SELECT,
               })
             : null;
+          const lockedEarlyDiscoveryHandoffs = await loadEarlyDiscoveryHandoffs(tx, [current], claimDatabaseNow);
           const rebuilt = buildCourseSupportCandidates(
             [current],
             claimDatabaseNow,
             lockedShortRetryMarker
               ? new Map([[shortRetryMarkerKey, lockedShortRetryMarker]])
               : undefined,
+            lockedEarlyDiscoveryHandoffs,
           ).find((candidate) => candidate.id === incident.id);
           if (!rebuilt) {
             throw new Error(
@@ -5484,6 +5525,7 @@ export async function claimCourseSupportBatch(input: {
               nextAttemptAt: current.nextAttemptAt,
               shortRetryMarker: lockedShortRetryMarker,
               engineeringOnly: currentEngineeringOnly,
+              earlyDiscoveryHandoff: lockedEarlyDiscoveryHandoffs.has(current.id),
               activeRealSearchCount: currentDemand.activeRealSearchCount,
             })
           ) {
@@ -5558,6 +5600,7 @@ export async function claimCourseSupportBatch(input: {
           currentIncidents,
           claimDatabaseNow,
           lockedShortRetryMarkers,
+          await loadEarlyDiscoveryHandoffs(tx, currentIncidents, claimDatabaseNow),
         )
           .map(
             (candidate) =>
@@ -5849,6 +5892,7 @@ export async function claimCourseSupportBatch(input: {
             tx,
             outsideDueIncidents,
           );
+          const outsideEarlyDiscoveryHandoffs = await loadEarlyDiscoveryHandoffs(tx, outsideDueIncidents, claimDatabaseNow);
           const outsideActiveDemandAppeared = outsideDueIncidents.some(
             (incident) => {
               const { course } = incident;
@@ -5874,6 +5918,7 @@ export async function claimCourseSupportBatch(input: {
                     }),
                   ),
                   engineeringOnly: incident.engineeringOnly,
+                  earlyDiscoveryHandoff: outsideEarlyDiscoveryHandoffs.has(incident.id),
                   activeRealSearchCount: currentDemand.activeRealSearchCount,
                 }) &&
                 currentDemand.activeRealSearchCount > 0 &&
@@ -17821,6 +17866,7 @@ async function listCourseSupportClaimCandidates(
       incidents,
       now,
       readerShortRetryMarkers,
+      await loadEarlyDiscoveryHandoffs(client, incidents, now),
     ),
     historyBlockedCount,
   };
@@ -19434,6 +19480,7 @@ function buildCourseSupportCandidates(
   incidents: readonly CourseSupportCandidateIncident[],
   now: Date,
   readerShortRetryMarkers: ReadonlyMap<string, StartedReaderShortRetryMarker> = new Map(),
+  earlyDiscoveryHandoffs?: ReadonlySet<string>,
 ): CourseSupportClaimCandidate[] {
   assertBoundedCourseSupportCandidateHistory(incidents);
   return incidents.flatMap(({ course, batchIncidents, ...incident }) => {
@@ -19456,6 +19503,7 @@ function buildCourseSupportCandidates(
           }),
         ),
         engineeringOnly: incident.engineeringOnly,
+        earlyDiscoveryHandoff: earlyDiscoveryHandoffs?.has(incident.id),
         activeRealSearchCount: currentDemand.activeRealSearchCount,
       })
     ) {
@@ -19866,11 +19914,12 @@ function buildSelectableCourseSupportClaimCandidates(
   incidents: readonly CourseSupportCandidateIncident[],
   now: Date,
   readerShortRetryMarkers?: ReadonlyMap<string, StartedReaderShortRetryMarker>,
+  earlyDiscoveryHandoffs?: ReadonlySet<string>,
 ) {
   const incidentById = new Map(
     incidents.map((incident) => [incident.id, incident] as const),
   );
-  return buildCourseSupportCandidates(incidents, now, readerShortRetryMarkers).filter((candidate) => {
+  return buildCourseSupportCandidates(incidents, now, readerShortRetryMarkers, earlyDiscoveryHandoffs).filter((candidate) => {
     const incident = incidentById.get(candidate.id);
     if (!incident || incident.activeBatchId !== null) return false;
     if (readCandidateSourceCompleteFinalizationRecovery(candidate)) return true;

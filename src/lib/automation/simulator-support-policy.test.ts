@@ -20,6 +20,13 @@ describe("offering-scoped simulator responder contract", () => {
     expect(current({ ...original, scheduleVersion: 3 }, original)).toBe(true);
     for (const changed of [{ ...original, durationMinutes: 90 }, { ...original, status: "PAUSED" as const }, { ...original, additionalEmails: ["other@example.test"] }, { ...original, preferences: [{ courseId: "course", offeringId: "different", rank: 1 }] }]) expect(current(changed, original)).toBe(false);
   });
+  it("admits real Any-duration demand without changing the saved intent", () => {
+    const anyDuration = { ...source(), durationMinutes: null };
+    expect(current(anyDuration, anyDuration)).toBe(true);
+    expect(current({ ...anyDuration, durationMinutes: 60 }, anyDuration)).toBe(false);
+    const synthetic = { ...anyDuration, trafficClass: "TEST" as const, syntheticMultiCycle: true };
+    expect(current(synthetic, synthetic, "SYNTHETIC")).toBe(false);
+  });
   it.each(["TEST", "AUTOMATION"] as const)("accepts only explicit current %s multi-cycle authority", trafficClass => {
     const synthetic = { ...source(), trafficClass, syntheticMultiCycle: true };
     expect(current(synthetic, synthetic, "SYNTHETIC")).toBe(true);

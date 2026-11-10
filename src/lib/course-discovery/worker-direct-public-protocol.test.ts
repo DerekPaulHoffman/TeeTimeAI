@@ -95,6 +95,19 @@ async function run(options: { actions?: Action[]; mutate?: (value: ReturnType<ty
 describe("unattended direct public protocol inspection", () => {
   const open: Action = { tool: "discovery_browser", arguments: { action: "open", url: "https://examplegolf.org/" } };
   const checkpoint: Action = { tool: "discovery_checkpoint", arguments: { summary: "bounded synthetic observation" } };
+  it("denies the failed inspection on retry while allowing a fresh public observation", async () => {
+    const out = await run({
+      mutate: value => Object.assign(value, { attempts: 2 }),
+      workerOptions: { freshOfficialStart: true, retryPlan: { code: "UNSUPPORTED_ADAPTER_SOURCE", rejectedBookingUrl: booking } },
+      actions: [open, inspect(booking + "#teetimes"), { tool: "discovery_browser", arguments: { action: "observe" } }],
+    });
+    expect(out.browserRequest.mock.calls.map(([action]) => action.action)).toEqual(["open", "observe"]);
+    expect(out.inspectProtocol).not.toHaveBeenCalled();
+    expect(out.result.discoveryMetrics.genericToolTrace.entries).toContainEqual(expect.objectContaining({
+      action: "BROWSER_INSPECT_ADAPTER", errorCode: "DISCOVERY_RETRY_SAME_ADAPTER",
+    }));
+    expect(out.client.activate).not.toHaveBeenCalled();
+  });
   it.each(["snapshot", "error"])("stops trusted native fatal %s before queued work, proposal or activation", async origin => {
     const nativeFirstFatal = { code: "NATIVE_REDIRECT_LOADER_MISMATCH", phase: "LOADER_OWNER", loaderKnown: false, privateBody: "must not persist" };
     const out = await run({ concurrentActions: true, actions: [open, inspect(), proposal],

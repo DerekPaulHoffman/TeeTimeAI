@@ -1221,6 +1221,32 @@ describe("regular Stagehand source worker", () => {
     expect(t.client.verification).toHaveBeenCalledTimes(2); expect(t.client.activate).toHaveBeenCalledOnce();
   });
 
+  it.each(["UNSUPPORTED_ADAPTER_SOURCE", "ADAPTER_CONFIGURATION_UNVERIFIED", "ADAPTER_IDENTITY_MISMATCH"])(
+    "uses the closed %s inspection to choose a different approach on retry", async code => {
+      const t = setup();
+      const request = t.request.getMockImplementation()!;
+      t.request.mockImplementation(async action => {
+        if (action.action === "inspect_adapter") throw Object.assign(Error(code), { code });
+        return request(action);
+      });
+      const genericWorker = vi.fn(async () => { throw Object.assign(Error("unverified"), { code: "DISCOVERY_NO_VERIFIED_RECIPE" }); });
+      await expect(t.run({ genericWorker })).rejects.toMatchObject({ code: "DISCOVERY_NO_VERIFIED_RECIPE" });
+      t.f.job.checkpoint = t.client.checkpoint.mock.calls.at(-1)![2];
+      t.f.job.attempts = 2;
+      t.f.clock = first + 260_000;
+      await expect(t.run({ genericWorker })).rejects.toMatchObject({ code: "DISCOVERY_NO_VERIFIED_RECIPE" });
+      expect(t.sourceDiscover).toHaveBeenCalledOnce();
+      expect(t.browserFactory).toHaveBeenCalledOnce();
+      expect(genericWorker).toHaveBeenLastCalledWith(expect.objectContaining({
+        freshOfficialStart: true,
+        retryPlan: { code, rejectedBookingUrl: booking },
+        workDeadlineAt: new Date(first + 720_000).toISOString(),
+        ...(code === "UNSUPPORTED_ADAPTER_SOURCE" ? {} : { recipeEngineConstraint: "EXISTING_ADAPTER" }),
+      }));
+      expect(t.client.candidate).not.toHaveBeenCalled();
+    },
+  );
+
   it.each(["job", "fingerprint", "request", "clock", "report", "proof", "attempt"])("rejects a changed %s source checkpoint before source, browser or candidate", async change => {
     const t = setup(); t.f.job.attempts = 2;
     const ref = createStagehandSourceCheckpoint({ ...t.f.job, attempts: 1 }, t.f.report);

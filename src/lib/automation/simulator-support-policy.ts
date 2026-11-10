@@ -73,7 +73,8 @@ export function isCurrentSimulatorSupportSource(input: {
   const { search, ref, offeringId, trafficClass, timeZone, now } = input;
   if (search.mode !== "SIMULATOR" || search.status !== "ACTIVE" || search.id !== ref.id ||
       search.alertGeneration !== ref.alertGeneration || search.scheduleVersion < ref.scheduleVersion ||
-      !search.durationMinutes || !search.preferences.some(preference => preference.offeringId === offeringId) ||
+      (trafficClass === "SYNTHETIC" && !search.durationMinutes) ||
+      !search.preferences.some(preference => preference.offeringId === offeringId) ||
       (trafficClass === "REAL" && ["TEST", "AUTOMATION"].includes(search.trafficClass)) ||
       (trafficClass === "SYNTHETIC" && !["TEST", "AUTOMATION"].includes(search.trafficClass)) ||
       !ref.intentDigest || ref.intentDigest !== createSimulatorSupportIntentDigest(search) ||
