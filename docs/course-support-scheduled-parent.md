@@ -125,6 +125,13 @@ change. Any worker HEAD, branch, binding, identity, privacy or runtime drift
 still stops setup. This does not renew an assignment or bypass the durable
 claim, expiry, source, implementation or release checks.
 
+The selected checkout can hold a warm npm content cache in
+`.codex-artifacts/npm-cache`. Worker setup copies only tarballs named by
+the worker's lockfile into its private cache. npm still verifies integrity
+and installs private dependencies. Missing entries use the normal registry.
+The dependency stage receipt records how many packages were copied and
+whether installation timed out.
+
 If the parent finishes while the supervisor is still asynchronous, report
 "dispatched" or "bound as observed", not a healthy or successfully running
 worker. Include the observation time for an ongoing state. A later failed

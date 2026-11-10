@@ -19,6 +19,7 @@ import {
   runCourseSupportWorkerProduction,
   resolveCourseSupportWorkerRuntime
 } from "../../../scripts/automation/course-support-worker-runtime.mjs";
+import { seedLockedNpmCache } from "../../../scripts/automation/course-support-package-cache.mjs";
 
 const fixtures: string[] = [];
 const productionKeys = ["DATABASE_URL", "DATABASE_URL_UNPOOLED", "RESEND_API_KEY", "AUTOMATION_API_KEY", "VERCEL_TOKEN", "GOOGLE_PLACES_API_KEY", "CLERK_SECRET_KEY", "EMAIL_ACTION_SECRET"];
@@ -199,6 +200,38 @@ function writeVercelFixture(checkout: string, version = "62.2.0") {
 }
 
 describe("private Windows worker runtime", () => {
+  it("seeds only locked content without overwriting an existing entry", () => {
+    const { checkout, selectedCheckout } = fixture();
+    const lockfile = join(checkout, "package-lock.json");
+    const source = join(selectedCheckout, ".codex-artifacts", "npm-cache");
+    const destination = join(checkout, ".codex-artifacts", "npm-cache");
+    const cacheEntry = (body: string) => {
+      const digest = createHash("sha512").update(body);
+      const encoded = digest.digest();
+      const hex = encoded.toString("hex");
+      const bucket = join("_cacache", "content-v2", "sha512", hex.slice(0, 2), hex.slice(2, 4));
+      mkdirSync(join(source, bucket), { recursive: true });
+      const path = join(bucket, hex.slice(4));
+      writeFileSync(join(source, path), body);
+      return { path, integrity: `sha512-${encoded.toString("base64")}` };
+    };
+    const locked = cacheEntry("locked content");
+    const unrelated = cacheEntry("unrelated content");
+    writeFileSync(lockfile, JSON.stringify({ packages: { "node_modules/example": { integrity: locked.integrity } } }));
+    expect(seedLockedNpmCache(lockfile, source, destination)).toBe(1);
+    expect(readFileSync(join(destination, locked.path), "utf8")).toBe("locked content");
+    expect(existsSync(join(destination, unrelated.path))).toBe(false);
+    writeFileSync(join(destination, locked.path), "existing content");
+    expect(seedLockedNpmCache(lockfile, source, destination)).toBe(0);
+    expect(readFileSync(join(destination, locked.path), "utf8")).toBe("existing content");
+    const shared = join(selectedCheckout, "shared-cache");
+    mkdirSync(shared);
+    const linkedDestination = join(checkout, "linked-cache");
+    symlinkSync(shared, linkedDestination, "junction");
+    expect(seedLockedNpmCache(lockfile, source, linkedDestination)).toBe(0);
+    expect(readdirSync(shared)).toEqual([]);
+  });
+
   it("recognizes the real locked installed CLI and its declared entry without executing it", () => {
     const checkout = process.cwd();
     const manifest = JSON.parse(readFileSync(join(checkout, "node_modules", "vercel", "package.json"), "utf8"));
@@ -290,7 +323,7 @@ describe("private Windows worker runtime", () => {
     expect(receipt.outcome).toBe("prepared");
     const setup = dependencies.runCommand.mock.calls.filter(([, args]) => args.includes("ci") || args.includes("prisma:generate"));
     expect(setup).toHaveLength(2);
-    expect(setup.map(([, args]) => args.slice(1))).toEqual([["ci", "--prefix", checkout], ["run", "prisma:generate", "--prefix", checkout]]);
+    expect(setup.map(([, args]) => args.slice(1))).toEqual([["ci", "--prefer-offline", "--no-audit", "--no-fund", "--prefix", checkout], ["run", "prisma:generate", "--prefix", checkout]]);
     for (const [command, args, settings] of setup as unknown as [string, string[], { cwd: string; env: Record<string, string> }][]) {
       expect(command).toBe(dependencies.runtime.nodePath);
       expect(args[0]).toBe(dependencies.runtime.npmCliPath);

@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { isAbsolute, relative, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
+import { seedLockedNpmCache } from "./course-support-package-cache.mjs";
 
 import {
   inspectGeneratedPrismaClient,
@@ -280,8 +281,16 @@ export function prepareCourseSupportWorkerRuntime(options = {}, dependencies = {
   };
   const run = dependencies.runCommand || runCommand;
   const stages = [];
+  const selected = canonical(options.selectedCheckout);
+  let seededPackageCount = 0;
+  try {
+    seededPackageCount = seedLockedNpmCache(resolve(checkout, "package-lock.json"),
+      resolve(selected, ".codex-artifacts", "npm-cache"), localEnv.npm_config_cache);
+  } catch {
+    // The warm store is optional. The locked install remains the readiness gate.
+  }
   let fresh = initial;
-  for (const [stage, args] of [["dependencies", ["ci", "--prefix", checkout]], ["vercel_cli", [resolve(checkout, "node_modules", "vercel", "dist", "vc.js"), "--version"]], ["generated_client", ["run", "prisma:generate", "--prefix", checkout]]]) {
+  for (const [stage, args] of [["dependencies", ["ci", "--prefer-offline", "--no-audit", "--no-fund", "--prefix", checkout]], ["vercel_cli", [resolve(checkout, "node_modules", "vercel", "dist", "vc.js"), "--version"]], ["generated_client", ["run", "prisma:generate", "--prefix", checkout]]]) {
     if (stage === "vercel_cli" && fresh.vercel.status !== "current") return { ...fresh, mode: "prepare", outcome: "readiness_failed", stages };
     const startedAt = new Date().toISOString();
     const started = performance.now();
@@ -289,6 +298,7 @@ export function prepareCourseSupportWorkerRuntime(options = {}, dependencies = {
     const result = run(command.command, command.args, { cwd: checkout, env: localEnv, timeout: stage === "vercel_cli" ? 10_000 : 600_000 });
     const cliVersionVerified = stage !== "vercel_cli" || [result.stdout, result.stderr].some(value => typeof value === "string" && [vercelVersion, `Vercel CLI ${vercelVersion}`].includes(value.trim()));
     stages.push({ stage, startedAt, completedAt: new Date().toISOString(), elapsedMs: Math.round(performance.now() - started), exitCode: result.status,
+      ...(stage === "dependencies" ? { seededPackageCount, ...(result.errorCode === "ETIMEDOUT" ? { timedOut: true } : {}) } : {}),
       ...(stage === "vercel_cli" ? { versionVerified: cliVersionVerified } : {}) });
     if (result.status !== 0 || !cliVersionVerified) return { ...initial, mode: "prepare", outcome: "setup_failed", stages };
     // origin/main is shared by all linked worktrees. A concurrent fetch may
