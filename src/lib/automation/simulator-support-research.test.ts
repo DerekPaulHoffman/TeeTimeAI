@@ -249,6 +249,50 @@ describe("owned known-reader public configuration", () => {
       { uscheduleRental: { ...diagnostic.uscheduleRental, selectedServiceLabelKind: "raw private label" } },
     ]) expect(() => persistedDiagnostic({ ...diagnostic, ...patch })).toThrow();
   });
+  it("distinguishes a default pooled resource from an assigned or malformed resource without accepting the rental", async () => {
+    const options = '<option value="-1" selected>Any Available</option>' +
+      [1, 2, 3, 4, 5].map(id => `<option value="${id}">Private resource ${id}</option>`).join("");
+    const base = uscheduleHtml.replace("Simulator Rental</option>", "Hourly Simulator Rental</option>") +
+      `<select id="resource8" class="resSelect">${options}</select>`;
+    for (const [html, state] of [
+      [base, "ANY"],
+      [base.replace('value="-1" selected', 'value="-1"').replace('value="1"', 'value="1" selected'), "RESOURCE"],
+      [base.replace('value="-1" selected', 'value="secret@example.test" selected'), "INVALID"],
+      [base.replace('value="-1" selected', 'value="-1"'), "NONE"],
+      [base.replace('value="1"', 'value="1" selected'), "MULTIPLE"],
+    ] as const) {
+      const fetch = vi.fn(async () => response(html));
+      const result = await collectSimulatorSupportResearch({ url: uscheduleSource }, { fetch, lease, now: () => instant });
+      expect(result.publicConfiguration).toBeUndefined();
+      expect(result.configurationDiagnostic?.uscheduleRental?.resourceControl).toMatchObject({
+        optionCount: 6, selectedState: state, resourceValueCount: 5,
+      });
+      expect(persistedDiagnostic(result.configurationDiagnostic)).toEqual(result.configurationDiagnostic);
+      expect(JSON.stringify(result.configurationDiagnostic)).not.toMatch(/Private resource|secret@example|resource8/u);
+      expect(fetch).toHaveBeenCalledOnce();
+      const diagnostic = result.configurationDiagnostic!;
+      const control = diagnostic.uscheduleRental!.resourceControl!;
+      for (const patch of [
+        { ...control, optionCount: 101 }, { ...control, selectedCount: 7 },
+        { ...control, resourceValueCount: 7 }, { ...control, selectedState: "RAW_LABEL" },
+        { ...control, selectedState: "NONE", selectedCount: 1 },
+        { ...control, selectedState: "ANY", selectedCount: 1, anyValueCount: 0 },
+        { ...control, selectedState: "RESOURCE", selectedCount: 1, resourceValueCount: 0 },
+        { ...control, resourceId: "secret@example.test" },
+      ]) expect(() => persistedDiagnostic({ ...diagnostic, uscheduleRental: { ...diagnostic.uscheduleRental, resourceControl: patch } })).toThrow();
+    }
+  });
+  it("withholds resource details for duplicate or oversized selectors and preserves legacy missing facts", async () => {
+    const control = '<select class="resSelect"><option value="-1" selected>Any Available</option></select>';
+    for (const selector of [control + control, control.replace('</select>', '<option value="1">Bay</option>'.repeat(100) + '</select>')]) {
+      const result = await collectSimulatorSupportResearch({ url: uscheduleSource }, {
+        fetch: vi.fn(async () => response(uscheduleHtml.replace("Simulator Rental</option>", "Hourly Simulator Rental</option>") + selector)), lease, now: () => instant,
+      });
+      expect(result.publicConfiguration).toBeUndefined();
+      expect(result.configurationDiagnostic?.uscheduleRental).not.toHaveProperty("resourceControl");
+      expect(persistedDiagnostic(result.configurationDiagnostic)).toEqual(result.configurationDiagnostic);
+    }
+  });
   it.each([
     ["missing", "", { durationSelectorState: "MISSING", durationCount: 0, selectedDurationCount: 0 }],
     ["empty", '<select id="select_length"></select>', { durationSelectorState: "PRESENT", durationCount: 0, selectedDurationCount: 0 }],

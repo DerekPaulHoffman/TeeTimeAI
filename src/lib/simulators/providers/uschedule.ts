@@ -311,6 +311,8 @@ export type UScheduleRentalDiagnostic = {
   durationCount: number; selectedDurationCount: number; selectedDurationMinutes?: number;
   durationOptionsMinutes?: number[];
   resourceSelectorCount: number; locationSelectorCount: number; groupSelectorCount: number;
+  resourceControl?: { optionCount: number; selectedCount: number; resourceValueCount: number;
+    anyValueCount: number; selectedState: "NONE" | "MULTIPLE" | "ANY" | "RESOURCE" | "INVALID" };
   pooledRowCount: number; pooledResourceState: "NO_ROWS" | "ZERO" | "OTHER_OR_MISSING";
 };
 
@@ -325,7 +327,8 @@ export function inspectUScheduleRentalDiagnostic(html: string, sourceUrl: string
   const options = (selects: Element[]) => selects.flatMap(n => elements(n).filter(n => n.tagName === "option"));
   const serviceOptions = options(services), durations = options(lengths);
   const rows = all.filter(n => (attr(n, "class") ?? "").split(/\s+/u).includes("next_avail_item"));
-  const resourceSelectorCount = all.filter(n => n.tagName === "select" && (attr(n, "class") ?? "").split(/\s+/u).includes("resSelect")).length;
+  const resourceSelectors = all.filter(n => n.tagName === "select" && (attr(n, "class") ?? "").split(/\s+/u).includes("resSelect"));
+  const resourceSelectorCount = resourceSelectors.length;
   const locationSelectorCount = selects("select_location").length, groupSelectorCount = selects("select_group_size").length;
   if (serviceOptions.length > 100 || durations.length > 20 || rows.length > MAX_PUBLIC_ROWS_PER_PAGE ||
       Math.max(resourceSelectorCount, locationSelectorCount, groupSelectorCount) > 100) return;
@@ -339,6 +342,19 @@ export function inspectUScheduleRentalDiagnostic(html: string, sourceUrl: string
   const id = service && attr(service, "value"), label = service && visibleText(service).replace(/\s+/gu, " ").trim();
   const durationValues = durations.map(minuteValue);
   const selectedMinutes = currentDurations.length === 1 ? minuteValue(currentDurations[0]) : undefined;
+  // Value classes distinguish a default pool from a chosen resource. They do
+  // not certify the catalog, visibility, rental linkage or public eligibility.
+  // Omit ambiguous/oversized catalogs rather than sampling a resource tail.
+  const resourceOptions = resourceSelectorCount === 1 ? options(resourceSelectors) : undefined;
+  const selectedResources = resourceOptions && selected(resourceOptions);
+  const selectedValue = selectedResources?.length === 1 ? attr(selectedResources[0], "value") : undefined;
+  const resourceControl: UScheduleRentalDiagnostic["resourceControl"] = resourceOptions && resourceOptions.length <= 100 && selectedResources ? {
+    optionCount: resourceOptions.length, selectedCount: selectedResources.length,
+    resourceValueCount: resourceOptions.filter(n => PUBLIC_ID.test(attr(n, "value") ?? "")).length,
+    anyValueCount: resourceOptions.filter(n => attr(n, "value") === "-1").length,
+    selectedState: !selectedResources.length ? "NONE" : selectedResources.length > 1 ? "MULTIPLE" :
+      selectedValue === "-1" ? "ANY" : PUBLIC_ID.test(selectedValue ?? "") ? "RESOURCE" : "INVALID",
+  } : undefined;
   return {
     serviceCount: serviceOptions.length, selectedServiceCount: currentServices.length,
     ...(id && PUBLIC_ID.test(id) ? { selectedServiceId: id } : {}),
@@ -349,6 +365,7 @@ export function inspectUScheduleRentalDiagnostic(html: string, sourceUrl: string
     ...(selectedMinutes !== undefined ? { selectedDurationMinutes: selectedMinutes } : {}),
     ...(durations.length && durationValues.every((v): v is number => v !== undefined) ? { durationOptionsMinutes: durationValues } : {}),
     resourceSelectorCount, locationSelectorCount, groupSelectorCount,
+    ...(resourceControl ? { resourceControl } : {}),
     pooledRowCount: rows.length, pooledResourceState: !rows.length ? "NO_ROWS" : rows.every(n => attr(n, "data-empid") === "0") ? "ZERO" : "OTHER_OR_MISSING",
   };
 }

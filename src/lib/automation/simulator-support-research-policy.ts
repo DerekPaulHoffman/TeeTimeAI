@@ -89,6 +89,15 @@ const configurationDiagnostic = z.object({
     selectedDurationMinutes: z.number().int().min(1).max(1440).optional(),
     durationOptionsMinutes: z.array(z.number().int().min(1).max(1440)).min(1).max(20).optional(),
     resourceSelectorCount: z.number().int().min(0).max(100), locationSelectorCount: z.number().int().min(0).max(100),
+    resourceControl: z.object({
+      optionCount: z.number().int().min(0).max(100), selectedCount: z.number().int().min(0).max(100),
+      resourceValueCount: z.number().int().min(0).max(100), anyValueCount: z.number().int().min(0).max(100),
+      selectedState: z.enum(["NONE", "MULTIPLE", "ANY", "RESOURCE", "INVALID"]),
+    }).strict().refine(v => v.selectedCount <= v.optionCount && v.resourceValueCount + v.anyValueCount <= v.optionCount &&
+      (v.selectedState === "NONE") === (v.selectedCount === 0) &&
+      (v.selectedState === "MULTIPLE") === (v.selectedCount > 1) &&
+      (v.selectedState !== "ANY" || v.anyValueCount > 0) &&
+      (v.selectedState !== "RESOURCE" || v.resourceValueCount > 0)).optional(),
     groupSelectorCount: z.number().int().min(0).max(100), pooledRowCount: z.number().int().min(0).max(25),
     pooledResourceState: z.enum(["NO_ROWS", "ZERO", "OTHER_OR_MISSING"]),
   }).strict().refine(v => v.selectedServiceCount <= v.serviceCount && v.selectedDurationCount <= v.durationCount &&
@@ -97,6 +106,7 @@ const configurationDiagnostic = z.object({
     (v.selectedDurationMinutes === undefined || v.selectedDurationCount === 1) &&
     (v.durationSelectorState !== "MISSING" || v.durationCount === 0) &&
     (!v.durationOptionsMinutes || v.durationOptionsMinutes.length === v.durationCount) &&
+    (!v.resourceControl || v.resourceSelectorCount === 1) &&
     (v.pooledResourceState === "NO_ROWS") === (v.pooledRowCount === 0)).optional(),
   httpStatus: z.number().int().min(100).max(599).optional(),
   contractField: z.enum(["SETTINGS", "CATALOG", "RENTAL_IDENTITY", "PUBLIC_ACCESS", "DURATION", "RESOURCE_IDENTITY"]).optional(),
