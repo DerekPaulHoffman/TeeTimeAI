@@ -282,7 +282,7 @@ function currentNativeBookingContext(observation, contextUrl, bookingUrl) {
 /** This observation is controller memory only; checkpoints cannot restore it. */
 export function createDiscoveryAdapterObservation(job, bookingUrl, adapter, contextUrl, nativeContinuity, browserOwner) {
   if (!safeObservedUrl(job?.request?.identity?.officialUrl) || !safeObservedUrl(bookingUrl) || !safeObservedUrl(contextUrl) ||
-      !["CHELSEA", "FOREUP", "ACUITY", "TEEITUP", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS", "REX", "CPS", "MINDBODY", "TEESNAP", "FIVE_IRON", "GOLFBOOK", "SKEDDA", "YOUCANBOOKME", "SIMPLY_SCHEDULE_APPOINTMENTS"].includes(adapter?.family)) return undefined;
+      !["TEEQUEST", "CLUBESSENTIAL", "CHELSEA", "FOREUP", "ACUITY", "TEEITUP", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS", "REX", "CPS", "MINDBODY", "TEESNAP", "FIVE_IRON", "GOLFBOOK", "SKEDDA", "YOUCANBOOKME", "SIMPLY_SCHEDULE_APPOINTMENTS"].includes(adapter?.family)) return undefined;
   const adapterKey = canonicalDataKey(adapter), identityKey = canonicalDataKey(job.request.identity),
     targetKey = canonicalDataKey(job.request.target), inputKey = canonicalDataKey(job.request.input);
   if (!adapterKey || !identityKey || !targetKey || !inputKey) return undefined;

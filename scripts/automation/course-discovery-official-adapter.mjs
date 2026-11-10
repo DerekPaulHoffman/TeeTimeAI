@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { discoveryError } from "./course-discovery-client.mjs";
+import { outdoorPublicRoot } from "../../src/lib/course-discovery/outdoor-public-roots.mjs";
 
 export const OFFICIAL_ADAPTER_INSPECTION_MS = 30_000;
 function officialRoot(value) {
@@ -14,10 +15,13 @@ const plainText = (value, min, max) => typeof value === "string" && value.trim()
 /** Routing only. Fresh fixed identity/catalog reads and both backend challenges
  * still own authority; this predicate cannot authorize availability or a method. */
 export function isOfficialAdapterJob(job) {
-  const { identity, target, input } = job?.request ?? {}, root = officialRoot(identity?.officialUrl);
+  const { identity, target, input } = job?.request ?? {};
+  const outdoor = outdoorPublicRoot(identity?.officialUrl);
+  const root = outdoor ?? officialRoot(identity?.officialUrl);
   if (!root || target?.kind !== "OUTDOOR" || target.offeringId !== undefined || !/^[A-Za-z0-9_-]{1,128}$/u.test(target.courseId ?? "") ||
-    identity.bookingUrl != null && identity.bookingUrl !== root.url || !plainText(identity.name, 3, 200) || !plainText(identity.address, 3, 1024) ||
+    !outdoor && identity.bookingUrl != null && identity.bookingUrl !== root.url || !plainText(identity.name, 3, 200) || !plainText(identity.address, 3, 1024) ||
     !plainText(identity.timeZone, 1, 100) || input?.timeZone !== identity.timeZone || input.durationMinutes !== undefined) return false;
+  if (outdoor) return identity.timeZone === "America/New_York";
   try { return new Intl.DateTimeFormat("en-US", { timeZone: identity.timeZone }).resolvedOptions().timeZone === identity.timeZone; }
   catch { return false; }
 }
@@ -30,7 +34,8 @@ export async function inspectOfficialAdapter({ job, cwd, deadlineAt, helperEnvir
   if (!(remaining > 0)) throw discoveryError("DISCOVERY_WORK_DEADLINE");
   const { createDiscoveryProcess, discoveryProcessEnvironment } = await import("./course-discovery-worker.mjs");
   signal?.throwIfAborted();
-  const source = { officialUrl: job.request.identity.officialUrl, bookingUrl: job.request.identity.officialUrl,
+  const outdoor = outdoorPublicRoot(job.request.identity.officialUrl);
+  const source = { officialUrl: job.request.identity.officialUrl, bookingUrl: outdoor?.bookingUrl ?? job.request.identity.officialUrl,
     venueName: job.request.identity.name, venueAddress: job.request.identity.address, timeZone: job.request.identity.timeZone };
   const payload = { target: job.request.target, source, input: job.request.input };
   if (Buffer.byteLength(JSON.stringify(payload)) > 16_384) throw discoveryError("OFFICIAL_ADAPTER_INPUT_LIMIT");
@@ -48,7 +53,16 @@ export async function inspectOfficialAdapter({ job, cwd, deadlineAt, helperEnvir
     if (Date.now() >= Date.parse(deadlineAt)) throw discoveryError("DISCOVERY_WORK_DEADLINE");
     const adapter = result?.adapter, root = officialRoot(source.officialUrl);
     const modern = adapter?.publicApiVersion === "BOOKINGSITE_V1";
-    if (!adapter || Object.keys(result).sort().join(",") !== "adapter,observation" ||
+    const observation = result?.observation;
+    if (outdoor) {
+      const validMetadata = outdoor.family === "TEEQUEST" ?
+        /^[1-9]\d{0,8}-[1-9]\d{0,5}$/u.test(adapter?.courseKey ?? "") && ["9", "18", "9,18"].includes(adapter?.rounds?.join(",")) :
+        adapter?.siteId === 4747 && adapter?.courseId === 1;
+      if (adapter?.family !== outdoor.family || !validMetadata || observation?.transport !== "FIXED_PUBLIC_ROOT" ||
+          observation.publicRequests !== outdoor.publicRequests || !Number.isSafeInteger(observation.publicResponseBytes) ||
+          observation.publicResponseBytes < 1 || observation.publicResponseBytes > 1_200_000)
+        throw discoveryError("OFFICIAL_ADAPTER_RESULT_INVALID");
+    } else if (!adapter || Object.keys(result).sort().join(",") !== "adapter,observation" ||
       Object.keys(result.observation ?? {}).sort().join(",") !== "publicRequests,publicResponseBytes,transport" ||
       Object.keys(adapter).sort().join(",") !== (modern
         ? "catalogHash,courseId,defaultAddons,defaultHoles,family,publicApiVersion,supportedPlayers,tenant,timeZone"
@@ -71,6 +85,6 @@ export async function inspectOfficialAdapter({ job, cwd, deadlineAt, helperEnvir
   if (failure) { receipt.outcome = "FAILED"; failure.officialAdapterReceipt = receipt; throw failure; }
   if (!receipt.helperClosed) throw discoveryError("OFFICIAL_ADAPTER_CLOSE_FAILED");
   return { recipe: { schemaVersion: 1, engine: "EXISTING_ADAPTER", target: { ...job.request.target },
-      source: { ...source, providerFamily: "TEESNAP" }, adapter: result.adapter },
+      source: { ...source, providerFamily: outdoor?.family ?? "TEESNAP" }, adapter: result.adapter },
     sourceEvidence: { officialUrl: source.officialUrl, observedBookingUrl: source.bookingUrl }, receipt };
 }

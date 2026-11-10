@@ -15,6 +15,8 @@ import { isAcuityPublicBookingUrl } from "@/lib/simulators/providers/acuity";
 import type { AcuityPublicConfiguration } from "@/lib/simulators/providers/public-configuration";
 import { SimulatorAvailabilityError } from "@/lib/simulators/providers/types";
 import { existingAdapterMetadataSchema, type ExistingAdapterMetadata, type ExistingAdapterRecipe } from "./existing-adapter-schema";
+import { executeOutdoorPublic, inspectOutdoorPublic } from "./outdoor-public-executor";
+import { outdoorPublicRoot } from "./outdoor-public-roots.mjs";
 import { accessExecutionDiagnosticSchema, accessExecutionInputSchema, accessExecutionResultSchema, isSafeRecipeUrl, type AccessExecutionDiagnostic, type AccessExecutionInput, type AccessExecutionResult } from "./recipe";
 import { requestFamilyForUrl } from "./request-family";
 import { assertTeeItUpRecipeAvailability, parseTeeItUpRecipeSource, resolveTeeItUpRecipeFacilities, teeItUpRecipeBookingUrl, type TeeItUpRecipeFacility } from "./teeitup-recipe-source";
@@ -646,6 +648,7 @@ async function inspectForeupConfiguration(source: Source, deps: Dependencies, fe
 /** For a controller-observed provider URL only. Reads typed public configuration
  * and returns bounded IDs; availability and activation remain separate proofs. */
 export async function inspectExistingAdapter(source: Source, deps: Dependencies): Promise<{ adapter: ExistingAdapterMetadata }> {
+  if (outdoorPublicRoot(source.officialUrl)) return { adapter: (await inspectOutdoorPublic(source, deps)).adapter };
   if (parseYouCanBookSource(source.bookingUrl)) {
     if (!source.officialUrl || !source.venueAddress) fail("ADAPTER_IDENTITY_MISSING");
     return { adapter: await inspectYouCanBook({ ...source, officialUrl: source.officialUrl }, deps) };
@@ -919,12 +922,16 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
           adapter.timeZone !== input.timeZone || adapter.durationMinutes !== input.durationMinutes || input.players > adapter.capacity) fail("ADAPTER_TARGET_MISMATCH");
       if (!deps.localCapabilities?.includes("LOCAL_CHROME")) fail("LOCAL_CHROME_REQUIRED");
     }
-    if (!["CHELSEA", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS", "REX", "CPS", "MINDBODY", "FIVE_IRON", "GOLFBOOK", "SKEDDA", "YOUCANBOOKME", "SIMPLY_SCHEDULE_APPOINTMENTS"].includes(adapter.family)) session = reader(recipe.source, deps, adapter, input);
+    if (!["TEEQUEST", "CLUBESSENTIAL", "CHELSEA", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS", "REX", "CPS", "MINDBODY", "FIVE_IRON", "GOLFBOOK", "SKEDDA", "YOUCANBOOKME", "SIMPLY_SCHEDULE_APPOINTMENTS"].includes(adapter.family)) session = reader(recipe.source, deps, adapter, input);
     const start = deps.toInstant(`${input.date}T${input.startTime}:00`, input);
     const next = new Date(`${input.date}T00:00:00Z`); next.setUTCDate(next.getUTCDate() + 1);
     const end = deps.toInstant(`${input.endTime === "24:00" ? next.toISOString().slice(0, 10) : input.date}T${input.endTime === "24:00" ? "00:00" : input.endTime}:00`, input);
     const now = clock();
     if (end <= now) fail("INVALID_REQUEST_DATE_OR_ZONE");
+    if (adapter.family === "TEEQUEST" || adapter.family === "CLUBESSENTIAL") {
+      const slots = await executeOutdoorPublic(recipe.source, adapter, input, deps);
+      return result(slots.filter(slot => new Date(slot.startsAt) > now && new Date(slot.startsAt) >= start && new Date(slot.startsAt) < end));
+    }
     if (adapter.family === "MINDBODY") {
       const slots = await executeMindbodyAppointments({ ...recipe.source, venueAddress: recipe.source.venueAddress! }, adapter, recipe.target, input,
         { ...deps, ...(deps.createMindbodySession ? { createSession: deps.createMindbodySession } : {}) });

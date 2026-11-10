@@ -15,6 +15,8 @@ import { discoveryTrustedContextSchema } from "../../src/lib/course-discovery/tr
 import { fixedInspectionFrameWitnessSchema } from "../../src/lib/course-discovery/fixed-inspection-frame-witness";
 import { inspectExistingAdapter } from "../../src/lib/course-discovery/existing-adapter-executor";
 import { parseTeesnapRecipeSource, teesnapMetadataSchema } from "../../src/lib/course-discovery/teesnap-source";
+import { outdoorPublicRoot } from "../../src/lib/course-discovery/outdoor-public-roots.mjs";
+import { inspectOutdoorPublic } from "../../src/lib/course-discovery/outdoor-public-executor";
 
 function publicFailureCode(error: unknown) {
   if (error instanceof z.ZodError) return "BROWSER_ACTION_SCHEMA_INVALID";
@@ -59,7 +61,16 @@ async function main() {
           source: z.object({ officialUrl: z.string().max(2048), bookingUrl: z.string().max(2048), venueName: z.string().trim().min(3).max(200),
             venueAddress: z.string().trim().min(3).max(1024), timeZone: z.string().min(1).max(100) }).strict(), input: accessExecutionInputSchema }).strict().parse(raw);
         id = value.id;
-        const { source, input } = value, root = parseTeesnapRecipeSource(source.officialUrl);
+        const { source, input } = value, outdoor = outdoorPublicRoot(source.officialUrl);
+        if (outdoor) {
+          if (source.bookingUrl !== outdoor.bookingUrl || source.timeZone !== input.timeZone || input.durationMinutes !== undefined)
+            throw new Error("OFFICIAL_ADAPTER_SCOPE_INVALID");
+          const inspected = await inspectOutdoorPublic(source, { deadlineAt, requestLease, venueMatches: venueProofMatches });
+          const output = { adapter: inspected.adapter, observation: { transport: "FIXED_PUBLIC_ROOT", ...inspected.observation } };
+          process.stdout.write(`${JSON.stringify({ id, ok: true, result: output })}\n`);
+          return;
+        }
+        const root = parseTeesnapRecipeSource(source.officialUrl);
         if (!root || root.bookingUrl !== source.officialUrl || source.bookingUrl !== source.officialUrl || source.timeZone !== input.timeZone ||
           input.durationMinutes !== undefined || /[\u0000-\u001f\u007f]/u.test(source.venueName + source.venueAddress)) throw new Error("OFFICIAL_ADAPTER_SCOPE_INVALID");
         const workDeadline = Math.min(deadlineAt.getTime(), Date.now() + 25_000);

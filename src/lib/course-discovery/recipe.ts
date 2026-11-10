@@ -15,6 +15,7 @@ import { publicHeaderFailureDiagnosticSchema } from "./public-header-diagnostic"
 import { parseMindbodyAppointmentSource } from "./mindbody-appointment-grid";
 import { parseTeesnapRecipeSource, isTeesnapOfficialSourceBinding } from "./teesnap-source";
 import { parseSkeddaSource } from "./skedda-source";
+import { outdoorPublicRoot } from "./outdoor-public-roots.mjs";
 export { expandRecipeTemplate, recipeTemplateSchema } from "./recipe-template";
 
 const secret = /(?:password|secret|token|cookie|session|credential|authorization|api.?key|email|phone)/iu;
@@ -283,6 +284,12 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
     return;
   }
   if (recipe.engine === "EXISTING_ADAPTER") {
+    if (recipe.adapter.family === "TEEQUEST" || recipe.adapter.family === "CLUBESSENTIAL") {
+      const root = outdoorPublicRoot(recipe.source.officialUrl);
+      if (root?.family !== recipe.adapter.family || root.bookingUrl !== recipe.source.bookingUrl ||
+          recipe.source.timeZone !== "America/New_York" || recipe.target.offeringId || !recipe.source.venueAddress)
+        ctx.addIssue({ code: "custom", message: "Outdoor public metadata requires the verified course booking page" });
+    }
     const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "GOLFVX", "REX", "MINDBODY", "FIVE_IRON", "GOLFBOOK", "SKEDDA", "YOUCANBOOKME", "SIMPLY_SCHEDULE_APPOINTMENTS"].includes(recipe.adapter.family) ||
       recipe.adapter.family === "TEEITUP" && recipe.adapter.offeringKind === "SIMULATOR";
     if (recipe.source.providerFamily !== recipe.adapter.family ||

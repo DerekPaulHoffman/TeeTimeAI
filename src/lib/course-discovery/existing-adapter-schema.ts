@@ -29,6 +29,7 @@ import { golfBookMetadataSchema } from "./golfbook-source";
 import { skeddaMetadataSchema } from "./skedda-source";
 import { youCanBookMetadataSchema } from "./youcanbook-public";
 import { simplyScheduleMetadataSchema } from "./simply-schedule-public";
+import { clubEssentialPublicMetadata, teeQuestPublicMetadata } from "./outdoor-public-executor";
 
 const numericId = z.number().int().min(1).max(2_147_483_647);
 const publicId = z.string().regex(/^[1-9]\d{0,9}$/u);
@@ -36,6 +37,8 @@ const publicId = z.string().regex(/^[1-9]\d{0,9}$/u);
 /** Identifiers from a supported public configuration, never executable code. */
 export const existingAdapterMetadataSchema = z.discriminatedUnion("family", [
   chelseaPublicMetadataSchema,
+  clubEssentialPublicMetadata,
+  teeQuestPublicMetadata,
   z.object({ family: z.literal("FOREUP"), facilityId: numericId, scheduleId: numericId,
     bookingClassId: numericId, inventoryScope: z.literal(FOREUP_STANDARD_PUBLIC_SCOPE).optional(),
     publicCatalogSha256: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
