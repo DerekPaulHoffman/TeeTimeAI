@@ -282,6 +282,35 @@ describe("owned known-reader public configuration", () => {
       ]) expect(() => persistedDiagnostic({ ...diagnostic, uscheduleRental: { ...diagnostic.uscheduleRental, resourceControl: patch } })).toThrow();
     }
   });
+  it("distinguishes unsafe resource catalogs from complete inert options without exposing labels or accepting a rental", async () => {
+    const control = '<select id="resource8" class="resSelect"><option value="-1" selected>Any Available</option>' +
+      [1, 2, 3, 4, 5].map(id => `<option value="${id}">Private resource ${id}</option>`).join("") + '</select>';
+    const base = uscheduleHtml.replace("Simulator Rental</option>", "Hourly Simulator Rental</option>");
+    for (const [selector, state] of [
+      [control, "STATIC_UNIQUE_OPTIONS"],
+      [`<div hidden>${control}</div>`, "UNSAFE_NODE"],
+      [control.replace('value="5"', 'value="4"'), "INVALID_VALUES"],
+      [control.replace('value="5"', 'value="secret@example.test"'), "INVALID_VALUES"],
+      [control.replace('value="5"', 'disabled value="5"'), "UNSAFE_NODE"],
+      [control.replace('value="5"', 'style="opacity:0" value="5"'), "UNSAFE_NODE"],
+      [control.replace('value="5"', 'onmouseover="private()" value="5"'), "UNSAFE_NODE"],
+      [control.replace('</select>', '<optgroup label="Private"><option value="6">Private</option></optgroup></select>'), "INVALID_STRUCTURE"],
+    ] as const) {
+      const fetch = vi.fn(async () => response(base + selector));
+      const result = await collectSimulatorSupportResearch({ url: uscheduleSource }, { fetch, lease, now: () => instant });
+      expect(result.publicConfiguration).toBeUndefined();
+      expect(result.configurationDiagnostic?.uscheduleRental?.resourceControl).toHaveProperty("catalogState", state);
+      expect(persistedDiagnostic(result.configurationDiagnostic)).toEqual(result.configurationDiagnostic);
+      expect(JSON.stringify(result.configurationDiagnostic)).not.toMatch(/Private resource|secret@example|resource8/u);
+      expect(fetch).toHaveBeenCalledOnce();
+      const diagnostic = result.configurationDiagnostic!;
+      expect(() => persistedDiagnostic({ ...diagnostic, uscheduleRental: { ...diagnostic.uscheduleRental,
+        resourceControl: { ...diagnostic.uscheduleRental!.resourceControl, catalogState: "private raw value" } } })).toThrow();
+      const legacy = structuredClone(diagnostic);
+      delete legacy.uscheduleRental!.resourceControl!.catalogState;
+      expect(persistedDiagnostic(legacy)?.uscheduleRental?.resourceControl).not.toHaveProperty("catalogState");
+    }
+  });
   it("withholds resource details for duplicate or oversized selectors and preserves legacy missing facts", async () => {
     const control = '<select class="resSelect"><option value="-1" selected>Any Available</option></select>';
     for (const selector of [control + control, control.replace('</select>', '<option value="1">Bay</option>'.repeat(100) + '</select>')]) {

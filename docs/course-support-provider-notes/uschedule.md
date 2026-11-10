@@ -50,6 +50,22 @@ reviewed support. Projection is configuration evidence, never monitoring proof.
 
 ## Approaches That Failed Or Were Inconclusive
 
+### `resource-counts-without-catalog-shape`
+
+- A selected pool and numeric resource counts do not establish whether every
+  option is inert, visible, uniquely identified or directly in the selector.
+- The rental diagnostic now reports a closed catalog-shape state. It inspects
+  every option and ancestor and rejects raw values from the persisted schema.
+  Old missing states remain unknown. Static unique options do not establish
+  rental linkage, public eligibility, capacity or full-session availability.
+- Implementation: `src/lib/simulators/providers/uschedule.ts` and
+  `src/lib/automation/simulator-support-research-policy.ts`.
+- Regression/privacy/rejection checks:
+  `src/lib/automation/simulator-support-research.test.ts`.
+- Proof level: local tests only. The existing rental rejection is unchanged.
+- Next action: use only a fresh guide-authorized source observation to read the
+  diagnostic, then separately establish resource semantics before reader work.
+
 ### `literal-default-label-only`
 
 - Normalized failure class: `INVALID_SOURCE`.
@@ -77,6 +93,9 @@ authority, the research budget or the deployment proof does not permit it;
 preserve an unresolved incident rather than infer rental identifiers.
 
 ## Change Log
+
+- 2026-11-10: Distinguished complete inert resource catalogs from unsafe,
+  malformed and duplicate options without relaxing rental acceptance.
 
 - 2026-11-10: Added a strict selected Sim Booking profile with independently
   corroborated simulator description; unrelated member catalog entries do not

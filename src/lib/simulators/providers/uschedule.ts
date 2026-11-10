@@ -318,7 +318,8 @@ export type UScheduleRentalDiagnostic = {
   durationOptionsMinutes?: number[];
   resourceSelectorCount: number; locationSelectorCount: number; groupSelectorCount: number;
   resourceControl?: { optionCount: number; selectedCount: number; resourceValueCount: number;
-    anyValueCount: number; selectedState: "NONE" | "MULTIPLE" | "ANY" | "RESOURCE" | "INVALID" };
+    anyValueCount: number; selectedState: "NONE" | "MULTIPLE" | "ANY" | "RESOURCE" | "INVALID";
+    catalogState?: "STATIC_UNIQUE_OPTIONS" | "UNSAFE_NODE" | "INVALID_STRUCTURE" | "INVALID_VALUES" };
   pooledRowCount: number; pooledResourceState: "NO_ROWS" | "ZERO" | "OTHER_OR_MISSING";
 };
 
@@ -354,12 +355,36 @@ export function inspectUScheduleRentalDiagnostic(html: string, sourceUrl: string
   const resourceOptions = resourceSelectorCount === 1 ? options(resourceSelectors) : undefined;
   const selectedResources = resourceOptions && selected(resourceOptions);
   const selectedValue = selectedResources?.length === 1 ? attr(selectedResources[0], "value") : undefined;
+  // Inspect every option and its ancestors, never just the selected pool or a
+  // sampled tail. This describes inert source shape only, not rental linkage,
+  // resource semantics, public access or availability.
+  const unsafeResourceNode = (node: Node) => {
+    for (let current: Node | undefined = node; current; current = "parentNode" in current ? current.parentNode ?? undefined : undefined) {
+      if (!("tagName" in current)) continue;
+      if (["script", "style", "iframe", "template", "noscript"].includes(current.tagName) ||
+          current.attrs.some(a => ["hidden", "inert", "disabled"].includes(a.name) || /^on/iu.test(a.name) ||
+            ["aria-hidden", "aria-disabled"].includes(a.name) && a.value === "true") ||
+          /display\s*:\s*none|visibility\s*:\s*(?:hidden|collapse)|(?:^|;)\s*opacity\s*:\s*0(?:\.0*)?\s*(?:!important\s*)?(?:;|$)/iu.test(attr(current, "style") ?? "") ||
+          /(?:^|\s)(?:d-none|hidden|invisible|sr-only|disabled)(?:\s|$)/u.test(attr(current, "class") ?? "")) return true;
+    }
+    return false;
+  };
+  const resourceCatalogState = (): NonNullable<UScheduleRentalDiagnostic["resourceControl"]>["catalogState"] => {
+    const control = resourceSelectors[0];
+    const children = control.childNodes.filter((node): node is Element => "tagName" in node);
+    if (children.some(node => node.tagName !== "option" || elements(node).length)) return "INVALID_STRUCTURE";
+    if (unsafeResourceNode(control) || resourceOptions!.some(unsafeResourceNode)) return "UNSAFE_NODE";
+    const values = resourceOptions!.map(node => attr(node, "value") ?? "");
+    return !values.length || values.some(value => value !== "-1" && !PUBLIC_ID.test(value)) || new Set(values).size !== values.length
+      ? "INVALID_VALUES" : "STATIC_UNIQUE_OPTIONS";
+  };
   const resourceControl: UScheduleRentalDiagnostic["resourceControl"] = resourceOptions && resourceOptions.length <= 100 && selectedResources ? {
     optionCount: resourceOptions.length, selectedCount: selectedResources.length,
     resourceValueCount: resourceOptions.filter(n => PUBLIC_ID.test(attr(n, "value") ?? "")).length,
     anyValueCount: resourceOptions.filter(n => attr(n, "value") === "-1").length,
     selectedState: !selectedResources.length ? "NONE" : selectedResources.length > 1 ? "MULTIPLE" :
       selectedValue === "-1" ? "ANY" : PUBLIC_ID.test(selectedValue ?? "") ? "RESOURCE" : "INVALID",
+    catalogState: resourceCatalogState(),
   } : undefined;
   return {
     serviceCount: serviceOptions.length, selectedServiceCount: currentServices.length,

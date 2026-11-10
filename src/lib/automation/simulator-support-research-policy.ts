@@ -93,6 +93,7 @@ const configurationDiagnostic = z.object({
       optionCount: z.number().int().min(0).max(100), selectedCount: z.number().int().min(0).max(100),
       resourceValueCount: z.number().int().min(0).max(100), anyValueCount: z.number().int().min(0).max(100),
       selectedState: z.enum(["NONE", "MULTIPLE", "ANY", "RESOURCE", "INVALID"]),
+      catalogState: z.enum(["STATIC_UNIQUE_OPTIONS", "UNSAFE_NODE", "INVALID_STRUCTURE", "INVALID_VALUES"]).optional(),
     }).strict().refine(v => v.selectedCount <= v.optionCount && v.resourceValueCount + v.anyValueCount <= v.optionCount &&
       (v.selectedState === "NONE") === (v.selectedCount === 0) &&
       (v.selectedState === "MULTIPLE") === (v.selectedCount > 1) &&
