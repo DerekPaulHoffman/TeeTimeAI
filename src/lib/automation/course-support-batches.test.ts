@@ -17130,6 +17130,7 @@ describe("course-support recovery", () => {
 
   it("requeues superseded unchanged-runtime evidence only through the original owner", async () => {
     const expired = expiredRecoveryBatch(["AUTO_INVESTIGATING"]);
+    expired.incidents[0].incident.lastSeenAt = new Date(now.getTime() - 300 * 60_000);
     const batch = { ...expired, summary: { ...expired.summary, plannedPaths: [], remediation: {
       workMode: "ADVANCE_DISCOVERY", strategyAction: "DISCOVER_WITH_BROWSER", playbookStage: "BROWSER_ADAPTER_RETRY",
       allowUnchangedRuntime: true,
@@ -17138,6 +17139,15 @@ describe("course-support recovery", () => {
     prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
     prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
     prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.courseProbeFindMany.mockResolvedValue(
+      Array.from({ length: 257 }, (_, index) => ({
+        id: `routine-pending-${index}`,
+        outcome: "FETCH_FAILED",
+        observedAt: new Date(now.getTime() - (index + 1) * 60_000),
+        runtimeVersion: "c".repeat(40),
+        rawSummary: null,
+      })),
+    );
     const deployment = { commitSha: "d".repeat(40), deploymentId: "dpl_new" };
     const input = { batchId: batch.id, currentBranch: batch.summary.branch, currentHeadSha: deployment.commitSha,
       dirtyPaths: [], baseIsAncestor: true, releaseIsPublished: true, supersedingDeployment: deployment, now };

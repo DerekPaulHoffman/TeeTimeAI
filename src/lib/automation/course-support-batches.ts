@@ -10903,9 +10903,6 @@ function assessAuthoritativeCourseSupportSuccessProbe(input: {
   now: Date;
 }) {
   const probes = [...(input.probes ?? [])];
-  if (probes.length > COURSE_SUPPORT_AUTHORITATIVE_PROBE_READ_LIMIT) {
-    return { status: "INVALID" as const, probe: null };
-  }
   for (const probe of probes) {
     if (
       !(probe.observedAt instanceof Date) ||
@@ -10930,6 +10927,16 @@ function assessAuthoritativeCourseSupportSuccessProbe(input: {
     return { status: "NONE" as const, probe: null };
   }
   const newestOrderingTime = getAuthoritativeProbeOrderingTime(newest);
+  // The database reads newest row timestamps first, and a provider observation
+  // cannot be later than its persisted row. Omitted rows cannot outrank or tie
+  // the newest observation if even the oldest returned row is strictly earlier.
+  if (
+    probes.length > COURSE_SUPPORT_AUTHORITATIVE_PROBE_READ_LIMIT &&
+    Math.min(...probes.map((probe) => probe.observedAt.getTime())) >=
+      newestOrderingTime.getTime()
+  ) {
+    return { status: "INVALID" as const, probe: null };
+  }
   if (
     probes.some(
       (probe) =>
