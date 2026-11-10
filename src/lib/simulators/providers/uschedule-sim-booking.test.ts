@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { fetchUScheduleAvailability, projectUSchedulePublicConfiguration } from "./uschedule";
 import type { SimulatorAvailabilityInput } from "./types";
+import { resultFromSimulatorResearchBody } from "@/lib/automation/simulator-support-research";
 
 const bookingUrl = "https://clients.uschedule.com/examplegolf/booking";
 const input: SimulatorAvailabilityInput = {
@@ -25,6 +26,13 @@ function sequence(dated = document(["110420301300", "110520301300"])) {
 }
 
 describe("selected one-hour public Sim Booking", () => {
+  it("retains the reviewed service through the owned research projection", () => {
+    const result = resultFromSimulatorResearchBody(bookingUrl, bookingUrl, 200, "text/html", Buffer.from(document()), new Date("2030-11-04T12:00:00Z"));
+    expect(result.publicConfiguration).toEqual({ family: "USCHEDULE", tenant: "examplegolf", serviceId: "72", durationMinutes: 60, availabilityKind: "OPAQUE_POOLED" });
+    expect(result.publicConfiguration).not.toHaveProperty("maxPartySize");
+    const changed = document().replace("Play or Practice", "Members Play or Practice");
+    expect(resultFromSimulatorResearchBody(bookingUrl, bookingUrl, 200, "text/html", Buffer.from(changed), new Date()).publicConfiguration).toBeUndefined();
+  });
   it("projects only the selected corroborated rental beside unrelated member options", () => {
     const value = projectUSchedulePublicConfiguration(document(), bookingUrl);
     expect(value).toEqual({ family: "USCHEDULE", tenant: "examplegolf", serviceId: "72", durationMinutes: 60, availabilityKind: "OPAQUE_POOLED" });
