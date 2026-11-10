@@ -516,7 +516,7 @@ describe("course support preflight Playwright Chromium readiness", () => {
     );
     expect(playwright.chromium.launch).toHaveBeenCalledWith({
       headless: true,
-      timeout: 8_000
+      timeout: 20_000
     });
     expect(browser.newContext).toHaveBeenCalledWith({ serviceWorkers: "block" });
     expect(context.route).toHaveBeenCalledWith("**/*", expect.any(Function));

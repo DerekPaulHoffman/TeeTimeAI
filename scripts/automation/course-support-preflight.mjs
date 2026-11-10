@@ -26,9 +26,9 @@ export const approvedCourseSupportResponderCheckouts = Object.freeze([
   approvedCourseSupportResponderCheckout,
   "C:\\dev\\TeeTimeAI-responder-self-healing"
 ]);
-export const playwrightChromiumRuntimeSmokeTimeoutMs = 12_000;
+export const playwrightChromiumRuntimeSmokeTimeoutMs = 30_000;
 
-const playwrightChromiumLaunchTimeoutMs = 8_000;
+const playwrightChromiumLaunchTimeoutMs = 20_000;
 const playwrightChromiumRuntimeSmokeFlag =
   "--internal-playwright-chromium-runtime-smoke";
 

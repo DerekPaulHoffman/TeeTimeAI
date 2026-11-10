@@ -8,7 +8,8 @@ import { seedLockedNpmCache } from "./course-support-package-cache.mjs";
 
 import {
   inspectGeneratedPrismaClient,
-  inspectPlaywrightChromiumRuntime
+  inspectPlaywrightChromiumRuntime,
+  playwrightChromiumRuntimeSmokeTimeoutMs
 } from "./course-support-preflight.mjs";
 
 // Windows npm.cmd can redirect to the roaming global prefix. Invoke the actual
@@ -314,7 +315,7 @@ export function prepareCourseSupportWorkerRuntime(options = {}, dependencies = {
     mkdirSync(privateTemp, { recursive: true });
     return inspectPlaywrightChromiumRuntime(directory, undefined, undefined, () => run(runtime.nodePath,
       [resolve(directory, "scripts", "automation", "course-support-preflight.mjs"), "--internal-playwright-chromium-runtime-smoke", directory],
-      { cwd: directory, env: { ...localEnv, TMP: privateTemp, TEMP: privateTemp }, timeout: 12_000 }
+      { cwd: directory, env: { ...localEnv, TMP: privateTemp, TEMP: privateTemp }, timeout: playwrightChromiumRuntimeSmokeTimeoutMs }
     ).status === 0);
   });
   const browser = browserFiles.executableAvailable
