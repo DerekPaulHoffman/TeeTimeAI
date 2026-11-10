@@ -241,6 +241,7 @@ export type DiscoveryBrowserSessionDependencies = {
   collectPublicCourseContacts?: true;
   /** Private CPS phone/link source read; postal reader remains the default. */
   allowCpsPhoneBookingContact?: true;
+  allowOfficialShopBookingLink?: true;
   /** Private fixed TeeItUp reader: canonical root may prove only the contact edge. */
   allowTeeItUpContactChainRoot?: true;
   /** Private exact Contact handoff from the original fresh native root object. */
@@ -1892,10 +1893,10 @@ export async function createCourseDiscoveryBrowserSession(input: {
           !officialIdentityPage || officialIdentityPage.url !== current.url || captureAgeMs! > 5000 ||
           officialIdentityPage.browserTransport !== "NATIVE_CHROME" || officialIdentityPage.documentStartedAt !== timeOrigin ||
           officialIdentityPage.officialDocumentProof.kind !== "VERIFIED_OFFICIAL_DOCUMENT" ||
-          !(deps.allowCpsPhoneBookingContact ? officialIdentityPage.visibleEvidence?.headings.length &&
+          !(deps.allowOfficialShopBookingLink || (deps.allowCpsPhoneBookingContact ? officialIdentityPage.visibleEvidence?.headings.length &&
             officialIdentityPage.visibleEvidence.contactPhoneLinks?.length : deps.allowTeeItUpContactChainRoot ?
             officialIdentityPage.visibleEvidence?.headings.length && officialIdentityPage.visibleEvidence.officialContactLinkLabels?.length :
-            officialIdentityPage.visibleEvidence?.addressTexts.length) ||
+            officialIdentityPage.visibleEvidence?.addressTexts.length)) ||
           !officialIdentityPage.visibleEvidence?.linkUrls.length ||
           !sameDiscoveryMainDocument(officialIdentityPage.url, page.url())) throw new Error("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
       return structuredClone({ url: officialIdentityPage.url, html: officialIdentityPage.html,

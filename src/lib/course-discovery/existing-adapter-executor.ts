@@ -43,6 +43,8 @@ import { executeCps, inspectCps } from "./cps-executor";
 import { deriveUScheduleOfficialLocation, parseUScheduleLocationSource } from "@/lib/simulators/providers/uschedule-location-source";
 import { executeUSchedulePublicLocation, inspectUSchedulePublicLocation } from "./uschedule-location-executor";
 import { deriveUSchedulePublicRentalParty, isUSchedulePublicRentalPartyAbsent } from "./uschedule-public-rental-party";
+import { verifyUScheduleOfficialShop } from "./uschedule-official-shop";
+import { fixedUScheduleRentalDuration } from "@/lib/automation/uschedule-public-read-policy";
 import { isFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
 import { observedTeeItUpOfficialBookingChain, type TeeItUpOfficialBookingToken } from "./teeitup-official-booking-context";
 import { bindTeeItUpOfficialBookingFacility, type TeeItUpOfficialBookingSourceProof, type TeeItUpObservedSourceChain } from "./teeitup-official-booking-source";
@@ -741,7 +743,10 @@ export async function inspectExistingAdapter(source: Source, deps: Dependencies)
         fail("ADAPTER_CONFIGURATION_UNVERIFIED");
       }
       const normalized = source.venueName.normalize("NFKC").toLowerCase().replace(/&/gu, "and").replace(/[^a-z0-9]/gu, "");
-      if (normalized.length < 8 || normalized !== config.tenant.replace(/-/gu, "")) fail("ADAPTER_IDENTITY_MISMATCH");
+      if (normalized.length < 8 || normalized !== config.tenant.replace(/-/gu, "")) {
+        if (!config.fixedDuration) fail("ADAPTER_IDENTITY_MISMATCH");
+        await verifyUScheduleOfficialShop(source, deps);
+      }
       let publicRentalPartyProof;
       if (deps.officialIdentityPage) {
         try { publicRentalPartyProof = deriveUSchedulePublicRentalParty(source, deps.officialIdentityPage); }
@@ -991,7 +996,11 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
         })));
       }
       const normalized = recipe.source.venueName.normalize("NFKC").toLowerCase().replace(/&/gu, "and").replace(/[^a-z0-9]/gu, "");
-      if (uschedulePublicTenant(recipe.source.bookingUrl) !== adapter.tenant || normalized.length < 8 || normalized !== adapter.tenant.replace(/-/gu, "")) fail("ADAPTER_IDENTITY_MISMATCH");
+      if (uschedulePublicTenant(recipe.source.bookingUrl) !== adapter.tenant) fail("ADAPTER_IDENTITY_MISMATCH");
+      if (normalized.length < 8 || normalized !== adapter.tenant.replace(/-/gu, "")) {
+        if (!fixedUScheduleRentalDuration(adapter.serviceName)) fail("ADAPTER_IDENTITY_MISMATCH");
+        await verifyUScheduleOfficialShop(recipe.source, deps);
+      }
       let capacity: number | null = null;
       if (adapter.publicRentalPartyProof) {
         const proof = adapter.publicRentalPartyProof;

@@ -1930,6 +1930,7 @@ async function recover(args: string[]) {
   const git = readGitState();
   const batchId = await resolveBatchId(args);
   const provenance = await getCourseSupportBatchRecoveryProvenance(batchId);
+  const ownerThreadId = requireOwnerThread(args);
   const baseIsAncestor = isGitAncestor(provenance.baseSha, git.headSha);
   const committedPaths = baseIsAncestor
     ? readCommittedPaths(provenance.baseSha, git.headSha)
@@ -1944,9 +1945,30 @@ async function recover(args: string[]) {
     provenance.releaseSha && releaseIsAncestor
       ? readCommittedPaths(provenance.releaseSha, git.headSha)
       : [];
+  let supersedingDeployment: { commitSha: string; deploymentId: string } | undefined;
+  if (args.includes("--requeue-superseded-runtime")) {
+    if (git.dirtyPaths.length || git.branch !== provenance.branch ||
+        git.headSha !== git.originMainSha || provenance.releaseSha !== provenance.baseSha ||
+        git.originMainSha === provenance.baseSha || !isGitAncestor(provenance.baseSha, git.originMainSha) ||
+        provenance.plannedPaths.length || provenance.remediationDirective?.allowUnchangedRuntime !== true) {
+      throw new Error("Superseded-runtime recovery requires the clean original branch at the newer main release.");
+    }
+    const commitSha = git.originMainSha;
+    const proof = await waitForGitDeployment({ commitSha, timeoutSeconds: 35, pollSeconds: 5 }, {
+      listDeployments: ({ signal }) => runCourseSupportVercelJson<VercelDeploymentList>([
+        "ls", "--environment", "production", "--meta", `githubCommitSha=${commitSha}`, "--format", "json", "--limit", "20",
+      ], signal),
+      inspectAlias: (alias, { signal } = {}) => runCourseSupportVercelJson<VercelDeploymentInspection>([
+        "inspect", alias, "--format", "json",
+      ], signal),
+    });
+    runGit(["fetch", "origin", "main"]);
+    if (readGitState().originMainSha !== commitSha) throw new Error("Production main changed during superseded-runtime recovery.");
+    supersedingDeployment = { commitSha: proof.commitSha, deploymentId: proof.deploymentId };
+  }
   return recoverCourseSupportBatch({
     batchId,
-    requestingThreadId: requireOwnerThread(args),
+    requestingThreadId: ownerThreadId,
     currentBranch: git.branch,
     currentHeadSha: git.headSha,
     dirtyPaths: git.dirtyPaths,
@@ -1954,7 +1976,8 @@ async function recover(args: string[]) {
     baseIsAncestor,
     committedPaths,
     releaseIsAncestor,
-    releaseCommittedPaths
+    releaseCommittedPaths,
+    supersedingDeployment
   });
 }
 

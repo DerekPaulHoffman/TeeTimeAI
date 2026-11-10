@@ -8,7 +8,7 @@ import type { DiscoveryTrustedContext } from "./trusted-context";
 import { verifiedTeeItUpContactParent } from "./teeitup-official-contact-chain";
 
 export type NativeOfficialPageReader = (source: OfficialIdentitySource, pageUrl: string, deadlineAt: Date,
-  mode?: "POSTAL" | "PHONE_LINK") => Promise<OfficialIdentityPage>;
+  mode?: "POSTAL" | "PHONE_LINK" | "USCHEDULE_SHOP") => Promise<OfficialIdentityPage>;
 type Session = Pick<Awaited<ReturnType<typeof createCourseDiscoveryBrowserSession>>, "execute" | "readOfficialIdentityPage" | "close">;
 type Dependencies = Pick<DiscoveryBrowserSessionDependencies, "requestLease" | "launchBrowser"> & {
   delegatedReadBudget?: DelegatedReadBudget;
@@ -17,6 +17,7 @@ type Dependencies = Pick<DiscoveryBrowserSessionDependencies, "requestLease" | "
   sourceInspectionOnly?: true;
   allowCpsPhoneBookingContact?: true;
   allowTeeItUpContactChainRoot?: true;
+  allowOfficialShopBookingLink?: true;
   /** Private, original WeakMap-attested root; only its exact Contact link may be read. */
   officialContactParent?: OfficialIdentityPage;
   trustedContext?: DiscoveryTrustedContext;
@@ -48,6 +49,7 @@ export async function readNativeOfficialIdentityPage(source: OfficialIdentitySou
     ...(deps.collectPublicCourseContacts ? { collectPublicCourseContacts: true } : {}),
     ...(deps.allowCpsPhoneBookingContact ? { allowCpsPhoneBookingContact: true } : {}),
     ...(deps.allowTeeItUpContactChainRoot ? { allowTeeItUpContactChainRoot: true } : {}),
+    ...(deps.allowOfficialShopBookingLink ? { allowOfficialShopBookingLink: true } : {}),
     ...(deps.officialContactParent ? { officialContactParent: deps.officialContactParent } : {}) });
   let capturedPage: OfficialIdentityPage | undefined;
   try {
@@ -56,8 +58,8 @@ export async function readNativeOfficialIdentityPage(source: OfficialIdentitySou
     // these diagnostic readiness facts never substitute for identity proof.
     const ready = (current: DiscoveryBrowserSnapshot) => current.officialSourceDiagnostic?.rawOfficialCaptured === true &&
       current.officialSourceDiagnostic.currentOfficialDocument === true && current.officialSourceDiagnostic.officialProvenance === true &&
-      (deps.allowCpsPhoneBookingContact || deps.allowTeeItUpContactChainRoot ? current.officialSourceDiagnostic.renderedHeadingsPresent === true :
-        current.officialSourceDiagnostic.renderedAddressesPresent === true) && current.officialSourceDiagnostic.renderedLinksPresent === true;
+      (deps.allowOfficialShopBookingLink || (deps.allowCpsPhoneBookingContact || deps.allowTeeItUpContactChainRoot ? current.officialSourceDiagnostic.renderedHeadingsPresent === true :
+        current.officialSourceDiagnostic.renderedAddressesPresent === true)) && current.officialSourceDiagnostic.renderedLinksPresent === true;
     const readable = (current: DiscoveryBrowserSnapshot) => {
       const lineage = current.nativeDocumentRedirects;
       const redirected = lineage && lineage.length > 0 && lineage.length <= 5 && lineage[0].fromUrl === pageUrl &&

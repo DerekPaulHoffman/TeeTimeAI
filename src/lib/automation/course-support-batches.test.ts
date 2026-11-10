@@ -17128,6 +17128,33 @@ describe("course-support recovery", () => {
     );
   });
 
+  it("requeues superseded unchanged-runtime evidence only through the original owner", async () => {
+    const expired = expiredRecoveryBatch(["AUTO_INVESTIGATING"]);
+    const batch = { ...expired, summary: { ...expired.summary, plannedPaths: [], remediation: {
+      workMode: "ADVANCE_DISCOVERY", strategyAction: "DISCOVER_WITH_BROWSER", playbookStage: "BROWSER_ADAPTER_RETRY",
+      allowUnchangedRuntime: true,
+    } } };
+    prismaMocks.batchFindUnique.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    const deployment = { commitSha: "d".repeat(40), deploymentId: "dpl_new" };
+    const input = { batchId: batch.id, currentBranch: batch.summary.branch, currentHeadSha: deployment.commitSha,
+      dirtyPaths: [], baseIsAncestor: true, releaseIsPublished: true, supersedingDeployment: deployment, now };
+    await expect(recoverCourseSupportBatch({ ...input, requestingThreadId: "different-owner" }))
+      .resolves.toMatchObject({ outcome: "command_failed" });
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+    await expect(recoverCourseSupportBatch({ ...input, requestingThreadId: batch.ownerThreadId }))
+      .resolves.toMatchObject({ outcome: "retryable_failed", safelyRequeued: true, durableCloseoutRecorded: true });
+    expect(prismaMocks.batchUpdateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ ownerThreadId: batch.ownerThreadId, releaseSha: batch.releaseSha }),
+      data: expect.objectContaining({ status: "RETRYABLE_FAILED", summary: expect.objectContaining({
+        supersededRuntimeRecovery: { previousSha: batch.releaseSha, deployment,
+          previousResults: [{ id: "batch-entry-1", result: "STALE_EVIDENCE" }] },
+      }) }),
+    }));
+  });
+
   it("adopts a proven empty legacy execution fence with an unchanged-runtime release before safe requeue", async () => {
     const courseRef = createHash("sha256")
       .update("course-1")

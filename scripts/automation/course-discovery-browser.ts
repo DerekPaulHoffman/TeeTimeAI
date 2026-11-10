@@ -167,6 +167,7 @@ async function main() {
     const result = await executeAccessRecipe(recipe, accessExecutionInputSchema.parse(value.input), { deadlineAt, requestLease, trustedContext,
       ...(configuredTransport === "NATIVE_CHROME" ? { localCapabilities: ["LOCAL_CHROME"] as const,
         readNativeOfficialPage: (source, url, deadline, mode) => readNativeOfficialIdentityPage(source, url, deadline, { requestLease, trustedContext,
+          ...(mode === "USCHEDULE_SHOP" ? { allowOfficialShopBookingLink: true } : {}),
           ...(recipe.engine === "EXISTING_ADAPTER" && recipe.adapter.family === "CPS" &&
             (recipe.adapter.officialPostalConflictProof || recipe.adapter.officialPhoneBookingProof)
             ? { collectPublicCourseContacts: true } : {}),

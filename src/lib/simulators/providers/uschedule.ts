@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 
 import { fetchWithProviderTimeout } from "@/lib/adapters/fetch-with-timeout";
 import { isUSchedulePublicRentalLabel, isUScheduleSimBookingLabel, hasUScheduleSimBookingDescription,
-  isUScheduleStandardSimulatorBookingLabel, hasUScheduleStandardSimulatorBookingWitness,
+  isUScheduleStandardSimulatorBookingLabel, hasUScheduleStandardSimulatorBookingWitness, fixedUScheduleRentalDuration,
   readUSchedulePublicUnitsControl, readUSchedulePublicPeopleControl, readUSchedulePublicRentalNotes } from "@/lib/automation/uschedule-public-read-policy";
 import { readUScheduleNextAvailableView } from "@/lib/automation/uschedule-public-view-control";
 import { readUSchedulePublicResourcePool, matchesUSchedulePublicResourceSelection, hasUSchedulePublicEmptyResult,
@@ -58,6 +58,7 @@ function accessChanged(html: string) {
       node.tagName === "iframe" && /recaptcha|hcaptcha|challenges\.cloudflare/iu.test(attr(node, "src") ?? ""));
 }
 type LearnedRental = { serviceId: string; serviceName: string; durationMinutes: number; date?: string; tenant?: string; requestedPlayers?: number;
+  bookingUrl?: string;
   quantityRole?: "PEOPLE" | "RENTAL_UNITS" | "LEGACY";
   resourceSelection?: USchedulePublicResourceSelection;
   publicLocationProof?: USchedulePublicLocationProof };
@@ -71,12 +72,17 @@ function selectedRental(html: string, learned?: LearnedRental) {
     return { serviceId: learned.serviceId, durationMinutes: learned.durationMinutes };
   }
   const all = elements(parse(html));
-  const options = (id: string) => {
+  const options = (id: string, optional = false) => {
     const selects = all.filter(node => node.tagName === "select" && attr(node, "id") === id);
+    if (optional && selects.length === 0) return [];
     if (selects.length !== 1) throw sourceError("The public simulator rental selectors are missing or ambiguous");
     return elements(selects[0]).filter(node => node.tagName === "option");
   };
-  const services = options("select_service"), lengths = options("select_length");
+  const fixed = learned && !all.some(node => node.tagName === "select" && attr(node, "id") === "select_length")
+    ? fixedUScheduleRentalDuration(learned.serviceName) : undefined;
+  if (fixed !== undefined && (!learned?.bookingUrl || !inspectUScheduleRecipeConfiguration(html, learned.bookingUrl)?.fixedDuration))
+    throw sourceError("The fixed public rental catalog changed");
+  const services = options("select_service"), lengths = options("select_length", fixed !== undefined);
   const selected = (node: Element) => node.attrs.some(item => item.name === "selected");
   if (learned) {
     if (isUScheduleStandardSimulatorBookingLabel(learned.serviceName) && !hasUScheduleStandardSimulatorBookingWitness(html))
@@ -92,7 +98,7 @@ function selectedRental(html: string, learned?: LearnedRental) {
     const selectedGroup = groupSize.length === 1 ? elements(groupSize[0]).filter(node => node.tagName === "option" && selected(node)) : [];
     const resources = all.filter(node => node.tagName === "select" && (attr(node, "class") ?? "").split(/\s/u).includes("resSelect"));
     if (service.length !== 1 || attr(service[0], "value") !== learned.serviceId || visibleText(service[0]).replace(/\s+/gu, " ").trim() !== learned.serviceName ||
-        length.length !== 1 || Number(attr(length[0], "value")) !== learned.durationMinutes ||
+        (fixed !== undefined ? fixed !== learned.durationMinutes : length.length !== 1 || Number(attr(length[0], "value")) !== learned.durationMinutes) ||
         groupSize.length > 1 || !people.roleClaimed && groupSize.length === 1 && (selectedGroup.length !== 1 || (attr(selectedGroup[0], "value") ?? visibleText(selectedGroup[0]).trim()) !== "1") ||
         (learned.resourceSelection ? !matchesUSchedulePublicResourceSelection(html, learned.resourceSelection) :
           resources.some(node => { const values = elements(node).filter(option => option.tagName === "option" && selected(option));
@@ -555,12 +561,20 @@ export function inspectUScheduleRecipeConfiguration(html: string, sourceUrl: str
   if (bodies.length !== 1 || !(attr(bodies[0], "class") ?? "").split(/\s/u).includes(tenant)) return reject("TENANT_DOCUMENT");
   const select = (id: string) => all.filter(node => node.tagName === "select" && attr(node, "id") === id);
   const services = select("select_service"), lengths = select("select_length");
-  if (services.length !== 1 || lengths.length !== 1) return reject("SELECTORS");
-  const rentals = elements(services[0]).filter(node => node.tagName === "option").map(node => ({ serviceId: attr(node, "value") ?? "",
-    serviceName: visibleText(node).replace(/\s+/gu, " ").trim(), selected: node.attrs.some(value => value.name === "selected") }))
+  if (services.length !== 1 || lengths.length > 1) return reject("SELECTORS");
+  const options = elements(services[0]).filter(node => node.tagName === "option").map(node => ({ serviceId: attr(node, "value") ?? "",
+    serviceName: visibleText(node).replace(/\s+/gu, " ").trim(), selected: node.attrs.some(value => value.name === "selected") }));
+  const fixedDuration = lengths.length === 0;
+  if (fixedDuration && (options.length > 20 || options.some(row => !PUBLIC_ID.test(row.serviceId)) ||
+      new Set(options.map(row => row.serviceId)).size !== options.length || options.filter(row => row.selected).length !== 1 ||
+      all.some(node => node.tagName === "select" && (["select_location", "select_group_size", "select_units_to_book"].includes(attr(node, "id") ?? "") ||
+        (attr(node, "class") ?? "").split(/\s+/u).includes("resSelect"))))) return reject("SELECTORS");
+  const rentals = options
     .filter(row => PUBLIC_ID.test(row.serviceId) && isUSchedulePublicRentalLabel(row.serviceName) &&
+      (!fixedDuration || fixedUScheduleRentalDuration(row.serviceName)) &&
       (!isUScheduleStandardSimulatorBookingLabel(row.serviceName) || row.selected && hasUScheduleStandardSimulatorBookingWitness(html)));
-  const durations = elements(lengths[0]).filter(node => node.tagName === "option").map(node => Number(attr(node, "value")))
+  const durations = fixedDuration ? [...new Set(rentals.flatMap(row => fixedUScheduleRentalDuration(row.serviceName) ?? []))] :
+    elements(lengths[0]).filter(node => node.tagName === "option").map(node => Number(attr(node, "value")))
     .filter(value => Number.isInteger(value) && value >= 15 && value <= 480);
   const current = rentals.filter(row => row.selected);
   if (!rentals.length || rentals.length > 20) return reject("RENTAL_CATALOG");
@@ -576,7 +590,8 @@ export function inspectUScheduleRecipeConfiguration(html: string, sourceUrl: str
   const resourcePool = readUSchedulePublicResourcePool(html);
   const selectedAny = resources.every(node => { const selected = elements(node).filter(n => n.tagName === "option" && attr(n, "selected") !== undefined); return selected.length === 1 && attr(selected[0], "value") === "-1"; });
   if (resources.length > 1 || resources.length && !selectedAny && (!resourcePool || people.roleClaimed || units.present)) return reject("SELECTORS");
-  return { tenant, rentals, durations, selected: current[0], ...(resourcePool && resourcePool.selectedResourceId !== "-1" ? { resourcePoolProof: resourcePool.proof } : {}) };
+  return { tenant, rentals, durations, selected: current[0], fixedDuration,
+    ...(resourcePool && resourcePool.selectedResourceId !== "-1" ? { resourcePoolProof: resourcePool.proof } : {}) };
 }
 
 /** A missing public resource-quantity control is not an instruction to create
@@ -644,14 +659,16 @@ export async function fetchUScheduleRecipeAvailability(input: SimulatorAvailabil
   const location = service.publicLocationProof ? await prepareUScheduleLocationCatalog(service.publicLocationProof.official, fetchImpl, signal) : undefined;
   if (location) url = location.url;
   let page = location?.page ?? await publicResponse(url, { method: "GET", headers: { Accept: "text/html" } }, "text/html", MAX_HTML_BYTES, fetchImpl, signal);
+  const config = location ? undefined : inspectUScheduleRecipeConfiguration(page.body, url.href);
   if (location) {
     if (location.config.proof.catalogHash !== service.publicLocationProof!.catalogHash || location.config.service.serviceId !== service.serviceId ||
         location.config.service.serviceName !== service.serviceName || !location.config.durations.includes(input.durationMinutes))
       throw sourceError("The public location catalog changed");
   } else {
-    const config = inspectUScheduleRecipeConfiguration(page.body, url.href);
     if (!config || !config.rentals.some(row => row.serviceId === service.serviceId && row.serviceName === service.serviceName) || !config.durations.includes(input.durationMinutes))
       throw sourceError("The learned public rental is no longer available");
+    if (config.fixedDuration && fixedUScheduleRentalDuration(service.serviceName) !== input.durationMinutes)
+      throw sourceError("The learned public rental has a different fixed duration");
   }
   const cookies = page.response.headers.getSetCookie();
   const cookie = location?.cookie ?? (cookies.length === 1 ? cookies[0].split(";", 1)[0] : "");
@@ -665,9 +682,9 @@ export async function fetchUScheduleRecipeAvailability(input: SimulatorAvailabil
           fresh.service.serviceName !== service.serviceName || fresh.selectedDuration !== input.durationMinutes) throw sourceError("The public location rental changed");
     }
   };
-  if (!location && inspectUScheduleRecipeConfiguration(page.body, url.href)!.selected.serviceId !== service.serviceId) await filter("service_id", service.serviceId);
+  if (config && config.selected.serviceId !== service.serviceId) await filter("service_id", service.serviceId);
   const quantityRole: LearnedRental["quantityRole"] = location ? undefined : readUSchedulePublicPeopleControl(page.body).roleClaimed ? "PEOPLE" : readUSchedulePublicUnitsControl(page.body).present ? "RENTAL_UNITS" : "LEGACY";
-  await filter("length", String(input.durationMinutes));
+  if (!config?.fixedDuration) await filter("length", String(input.durationMinutes));
   if (!location) {
     const units = readUSchedulePublicUnitsControl(page.body);
     const peopleAfterLength = readUSchedulePublicPeopleControl(page.body);
@@ -711,7 +728,7 @@ export async function fetchUScheduleRecipeAvailability(input: SimulatorAvailabil
     if (fresh.selectedResourceId !== selected.resourceId) await filter("resource", `${selected.pool.groupId}~${selected.resourceId}`);
     if (!matchesUSchedulePublicResourceSelection(page.body, selected)) throw sourceError("The selected public rental changed");
   }
-  const learned = { ...service, durationMinutes: input.durationMinutes, date: input.date, tenant, requestedPlayers: input.requestedPlayers, quantityRole }, slots: SimulatorAvailabilitySlot[] = [], seen = new Set<string>();
+  const learned = { ...service, durationMinutes: input.durationMinutes, date: input.date, tenant, bookingUrl: url.href, requestedPlayers: input.requestedPlayers, quantityRole }, slots: SimulatorAvailabilitySlot[] = [], seen = new Set<string>();
   let previousOrder = -Infinity;
   let observedPartyLimit: number | null | undefined;
   for (let index = 0; index < 16; index++) {

@@ -18,6 +18,10 @@ const normalizedLabel = (value: string) => value.normalize("NFKC").replace(/\s+/
 const publicNonMemberRental = /^(?:public\s*\/\s*)?non[- ]member\s+(?:simulators?|bays?)\s+rentals?$/iu;
 export function isUScheduleSimBookingLabel(value: string) { return simBooking.test(normalizedLabel(value)); }
 export function isUScheduleStandardSimulatorBookingLabel(value: string) { return standardSimulatorBooking.test(normalizedLabel(value)); }
+export function fixedUScheduleRentalDuration(value: string): 60 | 120 | undefined {
+  const length = /^simulator rental - (one hour|1 hour|two hours|2 hours)$/iu.exec(normalizedLabel(value))?.[1].toLowerCase();
+  if (length) return length.endsWith("hours") ? 120 : 60;
+}
 /** USCHEDULE simulator adapter only; recipe validation rejects OUTDOOR targets. */
 export function isUSchedulePublicRentalLabel(value: string) {
   const label = normalizedLabel(value), publicTeeTimes = /^public tee times$/iu.test(label);
@@ -317,9 +321,11 @@ export function createUSchedulePublicReadPolicy(context: { officialLocation?: US
         (!isUScheduleStandardSimulatorBookingLabel(text(node)) || hasUScheduleStandardSimulatorBookingWitness(body) && people.valid) &&
         (!/^suite rentals?$/iu.test(text(node).trim()) || units.valid && units.selectedOne || people.valid) && publicId.test(attr(node, "value") ?? "") && attr(node, "value") !== "0");
       const lengths = options("select_length").filter(node => /^(?:[1-9]\d{0,2})$/u.test(attr(node, "value") ?? "") && Number(attr(node, "value")) >= 15 && Number(attr(node, "value")) <= 480);
-      if (!services.length || !lengths.length) return false;
+      const fixedRental = !nodes.some(node => node.tagName === "select" && attr(node, "id") === "select_length") &&
+        services.some(node => attr(node, "selected") !== undefined && fixedUScheduleRentalDuration(text(node)));
+      if (!services.length || !lengths.length && !fixedRental) return false;
       const filters = new Map<string, Set<string>>([
-        ["service_id", new Set(services.map(node => attr(node, "value")!))],
+        ["service_id", new Set(services.filter(node => !fixedRental || fixedUScheduleRentalDuration(text(node))).map(node => attr(node, "value")!))],
         ["length", new Set(lengths.map(node => attr(node, "value")!))],
         ["group_size", new Set(people.roleClaimed ? people.valid && Number.isInteger(requested) && requested! >= 1 && requested! <= 4 && people.values.includes(String(requested)) ? [String(requested)] : [] :
           options("select_group_size").some(node => (attr(node, "value") ?? text(node).trim()) === "1") ? ["1"] : [])],

@@ -546,6 +546,13 @@ npm run automation:course-support -- closeout --batch-ref <batch-ref> --outcome 
 # after that existing closeout or the first concrete rejection.
 npm run automation:course-support -- recover --batch-ref <batch-ref>
 
+# An expired unchanged-runtime verification may still be pinned to a release
+# that no longer serves production. The original owner fast-forwards its clean
+# branch to reviewed main and uses this form for that exact stale batch.
+# It verifies both production domains, preserves the old evidence and schedules
+# a fresh retry only if the existing request and search guards permit closeout.
+npm run automation:course-support -- recover --batch-ref <batch-ref> --requeue-superseded-runtime
+
 # Responder-state backfill is dry-run by default. Existing synthetic cohorts first
 # use the bounded cohort backfill shown in the rollout section.
 npm run automation:course-support -- backfill

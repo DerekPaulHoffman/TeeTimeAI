@@ -15156,6 +15156,7 @@ export async function recoverCourseSupportBatch(input: {
   committedPaths?: string[];
   releaseIsAncestor?: boolean;
   releaseCommittedPaths?: string[];
+  supersedingDeployment?: { commitSha: string; deploymentId: string };
   now?: Date;
 }) {
   const now = input.now ?? new Date();
@@ -15618,6 +15619,9 @@ export async function recoverCourseSupportBatch(input: {
       summary: batch.summary,
       baseSha: batch.baseSha,
     });
+    const plannedPaths = Array.isArray(summary.plannedPaths)
+      ? summary.plannedPaths.filter((path): path is string => typeof path === "string")
+      : [];
     const recovery = assessCourseSupportRecovery({
       leaseExpiresAt: batch.leaseExpiresAt,
       ownerThreadId: batch.ownerThreadId,
@@ -15628,11 +15632,7 @@ export async function recoverCourseSupportBatch(input: {
         typeof summary.branch === "string" ? summary.branch : null,
       currentBranch: input.currentBranch,
       currentHeadSha: input.currentHeadSha,
-      plannedPaths: Array.isArray(summary.plannedPaths)
-        ? summary.plannedPaths.filter(
-            (path): path is string => typeof path === "string",
-          )
-        : [],
+      plannedPaths,
       dirtyPaths: normalizeCourseSupportObservedGitPaths(input.dirtyPaths),
       baseIsAncestor: input.baseIsAncestor,
       committedPaths: normalizeCourseSupportObservedGitPaths(
@@ -15644,7 +15644,28 @@ export async function recoverCourseSupportBatch(input: {
       ),
       now,
     });
-    if (recovery.action === "BLOCK") {
+    const supersedingDeployment = input.supersedingDeployment;
+    const requeueSupersededRuntime = Boolean(
+      supersedingDeployment && input.baseIsAncestor === true && input.releaseIsPublished &&
+      batch.ownerThreadId === input.requestingThreadId &&
+      batch.status === "VERIFYING" && batch.releaseSha === batch.baseSha && batch.deployedAt &&
+      input.currentHeadSha === supersedingDeployment.commitSha && summary.branch === input.currentBranch &&
+      input.dirtyPaths.length === 0 &&
+      plannedPaths.length === 0 &&
+      readCourseSupportRemediationDirective(summary)?.allowUnchangedRuntime === true &&
+      supersedingDeployment.commitSha !== batch.baseSha &&
+      batch.incidents.length > 0 && batch.incidents.every(entry => entry.result === "STALE_EVIDENCE"),
+    );
+    if (supersedingDeployment && !requeueSupersededRuntime) {
+      return {
+        outcome: "command_failed" as const,
+        recovered: false,
+        reasons: ["The original batch is not an expired unchanged-runtime verification with settled stale evidence."],
+        threadDisposition: "KEEP_VISIBLE" as const,
+        archiveReason: "Superseded-runtime recovery provenance did not match.",
+      };
+    }
+    if (recovery.action === "BLOCK" || requeueSupersededRuntime) {
       const normalizedDirtyPaths = normalizeCourseSupportObservedGitPaths(
         input.dirtyPaths,
       );
@@ -15868,7 +15889,9 @@ export async function recoverCourseSupportBatch(input: {
               )
             : null;
         const message =
-          stoppedImplementationCount > 0
+          requeueSupersededRuntime
+            ? "The unchanged verification runtime no longer serves production. Stale evidence was preserved and verification was requeued."
+            : stoppedImplementationCount > 0
             ? "Expired responder implementation work lacked required runtime release and deployment proof, so it was parked for human review without another automatic retry."
             : currentSourceActionPlanChangeEntryIds.size > 0
               ? "The expired implementation assignment was superseded by the current durable source-discovery route and safely requeued."
@@ -16625,6 +16648,7 @@ export async function recoverCourseSupportBatch(input: {
             where: {
               id: batch.id,
               status: batch.status,
+              ownerThreadId: batch.ownerThreadId,
               revision: batch.revision,
               leaseExpiresAt: { lte: now },
               releaseSha: batch.releaseSha,
@@ -16646,6 +16670,11 @@ export async function recoverCourseSupportBatch(input: {
                   ownerThreadId: batch.ownerThreadId,
                 }, now),
                 ...backgroundRecoveryRun,
+                ...(requeueSupersededRuntime ? { supersededRuntimeRecovery: {
+                  previousSha: batch.releaseSha,
+                  deployment: supersedingDeployment,
+                  previousResults: batch.incidents.map(entry => ({ id: entry.id, result: entry.result })),
+                } } : {}),
                 closeout: {
                   outcome: derivedOutcome,
                   derivedOutcome,
