@@ -3,7 +3,7 @@ schemaVersion: 1
 mode: SIMULATOR
 providerFamily: USCHEDULE
 registrySupport: RUNNABLE
-lastReviewedAt: 2026-11-10
+lastReviewedAt: 2026-11-11
 lastVerifiedRelease: null
 ---
 
@@ -50,6 +50,21 @@ reviewed support. Projection is configuration evidence, never monitoring proof.
 
 ## Approaches That Failed Or Were Inconclusive
 
+### `other-label-without-syntax`
+
+- The closed `OTHER` label kind alone cannot distinguish a suffixed simulator
+  rental from another service. An optional closed label-shape diagnostic now
+  separates those forms without retaining the suffix or other source text.
+- This describes syntax only. It does not establish venue identity, rental
+  linkage, public access, capacity or availability. Existing rental rejection
+  remains unchanged and legacy absent label shapes remain unknown.
+- Implementation: `src/lib/simulators/providers/uschedule.ts` and
+  `src/lib/automation/simulator-support-research-policy.ts`.
+- Regression, persistence and privacy checks:
+  `src/lib/automation/simulator-support-research.test.ts`.
+- Proof level: local tests only. Next action: register the exact release and
+  obtain a fresh guide-authorized observation before choosing reader support.
+
 ### `resource-counts-without-catalog-shape`
 
 - A selected pool and numeric resource counts do not establish whether every
@@ -93,6 +108,9 @@ authority, the research budget or the deployment proof does not permit it;
 preserve an unresolved incident rather than infer rental identifiers.
 
 ## Change Log
+
+- 2026-11-11: Distinguished rejected rental-label syntax without retaining
+  labels or changing acceptance, source access or monitoring proof.
 
 - 2026-11-10: Distinguished complete inert resource catalogs from unsafe,
   malformed and duplicate options without relaxing rental acceptance.
