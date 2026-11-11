@@ -138,16 +138,18 @@ function selectedRental(html: string, learned?: LearnedRental) {
   if (services.length !== 1 || !selected(services[0]) || !(serviceName === "Simulator Rental" || hourlyRental) ||
       !PUBLIC_ID.test(attr(services[0], "value") ?? "") || lengths.length < 1 || lengths.length > 7 ||
       lengths.filter(selected).length !== 1 || attr(lengths.find(selected)!, "value") !== "60" ||
-      lengths.some(node => !/^(?:60|90|120|150|180|210|240)$/u.test(attr(node, "value") ?? "")) ||
+      lengths.some(node => !(hourlyRental ? /^(?:60|90|120|150|180|210|240|300)$/u : /^(?:60|90|120|150|180|210|240)$/u).test(attr(node, "value") ?? "")) ||
       new Set(lengths.map(node => attr(node, "value"))).size !== lengths.length) {
     throw sourceError("The reviewed default one-hour Simulator Rental is no longer unambiguous");
   }
   if (hourlyRental) {
-    // This profile is a single default one-hour pooled rental. Other quantity,
-    // location and resource controls need their independently reviewed reader.
+    // The provider's explicit Any Available choice still represents one
+    // pooled rental, never a fabricated count of unoccupied resources.
+    const resources = all.filter(node => node.tagName === "select" && (attr(node, "class") ?? "").split(/\s/u).includes("resSelect"));
+    const pool = resources.length ? readUSchedulePublicResourcePool(html) : undefined;
     if (all.some(node => node.tagName === "select" &&
-        (["select_group_size", "select_location"].includes(attr(node, "id") ?? "") ||
-          (attr(node, "class") ?? "").split(/\s+/u).includes("resSelect"))))
+        ["select_group_size", "select_location", "select_units_to_book"].includes(attr(node, "id") ?? "")) ||
+        resources.length && (!pool || pool.selectedResourceId !== "-1" || !pool.proof.hasAnyChoice))
       throw sourceError("The default hourly rental has unverified selectors");
     const rows = all.filter(node => (attr(node, "class") ?? "").split(/\s+/u).includes("next_avail_item"));
     if (!rows.length || rows.some(node => !/\bHourly Simulator Rental - \$\d+(?:\.\d{2})?$/u.test(visibleText(node).replace(/\s+/gu, " ").trim())))
@@ -829,6 +831,7 @@ export async function fetchUScheduleAvailability(input: SimulatorAvailabilityInp
   const first = await publicResponse(url, { method: "GET", headers: { Accept: "text/html" } },
     "text/html", MAX_HTML_BYTES, fetchImpl, signal);
   if (selectedRental(first.body).serviceId !== metadata.data.serviceId) throw sourceError("The public simulator service changed identity");
+  const resourceCatalogHash = readUSchedulePublicResourcePool(first.body)?.proof.catalogHash;
   const cookies = first.response.headers.getSetCookie();
   if (cookies.length !== 1) throw sourceError("The anonymous public scheduler session changed");
   const cookie = cookies[0].split(";", 1)[0];
@@ -842,6 +845,8 @@ export async function fetchUScheduleAvailability(input: SimulatorAvailabilityInp
     const dated = await publicResponse(url, { method: "GET", headers: { Accept: "text/html", Cookie: cookie } },
       "text/html", MAX_HTML_BYTES, fetchImpl, signal);
     const current = listing(dated.body, metadata.data.serviceId);
+    if (readUSchedulePublicResourcePool(dated.body)?.proof.catalogHash !== resourceCatalogHash)
+      throw sourceError("The public simulator resource catalog changed during the read");
     if (current.times.at(-1)!.order <= previousOrder) throw schemaError("The public continuation did not advance");
     let crossedDate = false;
     for (const time of current.times) {

@@ -23,7 +23,62 @@ function sequence(dated = document(["110420300800", "110520300800"])) {
   return vi.fn<typeof globalThis.fetch>(async () => replies.shift()!);
 }
 
+function fiveBayDocument(times = ["110420300800", "110520300800"]) {
+  return document(times).replace('</select>\n    <div class="choices">', '<option value="300">5 hours</option></select>\n    <div class="choices">')
+    .replace("</body>", `<section id="res_section"><label for="resource91">Simualtors</label>
+      <select id="resource91" class="resSelect"><option value="-1" selected>Any Available</option>
+      ${[1, 2, 3, 4, 5].map(n => `<option value="${100 + n}">Simulator Bay ${n} - Golf Software</option>`).join("")}</select></section></body>`);
+}
+
+function fiveBaySequence(dated = fiveBayDocument()) {
+  const replies = [new Response(fiveBayDocument(), { headers: { "content-type": "text/html", "set-cookie": "ASP.NET_SessionId=AnonymousFixture123; HttpOnly" } }),
+    Response.json({ code: "refresh" }), new Response(dated, { headers: { "content-type": "text/html" } })];
+  return vi.fn<typeof globalThis.fetch>(async () => replies.shift()!);
+}
+
 describe("one-hour public hourly simulator rental", () => {
+  it("reads the complete five-bay default pool with an explicitly selected hour, preserving unknown capacity", async () => {
+    expect(projectUSchedulePublicConfiguration(fiveBayDocument(), bookingUrl)).toEqual({ family: "USCHEDULE", tenant: "examplegolf",
+      serviceId: "72", durationMinutes: 60, availabilityKind: "OPAQUE_POOLED" });
+    const fetch = fiveBaySequence();
+    const result = await fetchUScheduleAvailability(input, fetch);
+    expect(result.complete).toBe(true);
+    expect(result.slots).toHaveLength(1);
+    expect(result.slots[0]).toMatchObject({ resourceId: "ANY", maxPartySize: null,
+      startsAt: new Date("2030-11-04T13:00:00Z"), endsAt: new Date("2030-11-04T14:00:00Z") });
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(String(fetch.mock.calls[1][1]?.body)).toBe('[{"Name":"start_date","Value":"11/04/2030"}]');
+  });
+  it("requires the later-day witness for a five-bay no-match result", async () => {
+    const result = await fetchUScheduleAvailability(input, fiveBaySequence(fiveBayDocument(["110520300800"])));
+    expect(result).toMatchObject({ complete: true, slots: [] });
+    await expect(fetchUScheduleAvailability(input, fiveBaySequence(fiveBayDocument(["110420300800"]).replace('<a id="more_next_avail">show more results</a>', ""))))
+      .rejects.toMatchObject({ code: "SCHEMA_CHANGED" });
+  });
+  it("never calls an occupied or explicitly assigned bay pooled availability", async () => {
+    await expect(fetchUScheduleAvailability(input, fiveBaySequence(fiveBayDocument().replaceAll('data-empid="0"', 'data-empid="105"'))))
+      .rejects.toMatchObject({ code: "SCHEMA_CHANGED" });
+  });
+  it("rejects a changed complete resource catalog after the date refresh", async () => {
+    await expect(fetchUScheduleAvailability(input, fiveBaySequence(fiveBayDocument().replace('value="105"', 'value="106"'))))
+      .rejects.toMatchObject({ code: "INVALID_SOURCE" });
+  });
+  it.each([
+    ["hidden final bay", (html: string) => html.replace('value="105"', 'value="105" hidden')],
+    ["member final bay", (html: string) => html.replace('Simulator Bay 5 - Golf Software', 'Member Bay 5')],
+    ["duplicate final bay", (html: string) => html.replace('value="105"', 'value="104"')],
+    ["extra bay", (html: string) => html.replace('</select></section>', '<option value="106">Simulator Bay 6</option></select></section>')],
+    ["unlinked control", (html: string) => html.replace('id="res_section"', 'id="other_section"')],
+    ["ambiguous label", (html: string) => html.replace('Simualtors</label>', 'Resources</label>')],
+    ["selected bay", (html: string) => html.replace('value="-1" selected', 'value="-1"').replace('value="105"', 'value="105" selected')],
+    ["changed duration", (html: string) => html.replace('value="60" selected', 'value="60"').replace('value="300"', 'value="300" selected')],
+  ])("rejects %s across the full five-bay catalog before filtering", async (_name, change) => {
+    const page = change(fiveBayDocument());
+    expect(projectUSchedulePublicConfiguration(page, bookingUrl)).toBeUndefined();
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(new Response(page, { headers: { "content-type": "text/html" } }));
+    await expect(fetchUScheduleAvailability(input, fetch)).rejects.toMatchObject({ code: "INVALID_SOURCE" });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
   it("projects the exact selected one-hour pooled service without capacity or longer durations", () => {
     expect(projectUSchedulePublicConfiguration(document(), bookingUrl)).toEqual({ family: "USCHEDULE", tenant: "examplegolf",
       serviceId: "72", durationMinutes: 60, availabilityKind: "OPAQUE_POOLED" });

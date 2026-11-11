@@ -8,7 +8,7 @@ const id = z.string().regex(/^[1-9]\d{0,9}$/u);
 const label = z.string().min(1).max(200).refine(value => value === value.normalize("NFKC").replace(/\s+/gu, " ").trim() && !/[<>\p{Cc}]/u.test(value) &&
   !/\b(?:members?|staff|prepaid|punch\s*card|credit|package|lesson|coaching)\b/iu.test(value));
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
-const catalog = z.object({ groupId: id, hasAnyChoice: z.boolean(), resources: z.array(z.object({ id, label }).strict()).min(1).max(4)
+const catalog = z.object({ groupId: id, hasAnyChoice: z.boolean(), resources: z.array(z.object({ id, label }).strict()).min(1).max(5)
   .refine(values => values.every((value, index) => index === 0 || values[index - 1].id.localeCompare(value.id) < 0)) }).strict();
 export const uschedulePublicResourcePoolProofSchema = catalog.extend({ kind: z.literal("PUBLIC_SIMULATOR_RESOURCE_POOL_V1"), catalogHash: z.string().regex(/^[a-f0-9]{64}$/u) })
   .refine(value => value.catalogHash === digest({ groupId: value.groupId, hasAnyChoice: value.hasAnyChoice, resources: value.resources }));
@@ -40,9 +40,12 @@ export function readUSchedulePublicResourcePool(html: string) {
   const sections = nodes.filter(n => attr(n, "id") === "res_section");
   let parent: Node | undefined = control;
   while (parent && parent !== sections[0]) parent = "parentNode" in parent ? parent.parentNode ?? undefined : undefined;
-  if (!groupId || sections.length !== 1 || parent !== sections[0] || labels.length !== 1 || unsafe(labels[0]) || text(labels[0]).trim() !== "Simulators") return;
+  // Both spellings are observed public simulator-control labels. All option,
+  // ancestor, section and identity checks still cover the complete catalog.
+  if (!groupId || sections.length !== 1 || parent !== sections[0] || labels.length !== 1 || unsafe(labels[0]) ||
+      !["Simulators", "Simualtors"].includes(text(labels[0]).trim())) return;
   const options = "childNodes" in control ? control.childNodes.filter((n): n is Element => "tagName" in n) : [];
-  if (!options.length || options.length > 5 || options.some(n => n.tagName !== "option" || unsafe(n) || ("childNodes" in n && n.childNodes.some(child => "tagName" in child)))) return;
+  if (!options.length || options.length > 6 || options.some(n => n.tagName !== "option" || unsafe(n) || ("childNodes" in n && n.childNodes.some(child => "tagName" in child)))) return;
   const values = options.map(n => ({ id: attr(n, "value") ?? "", label: text(n).normalize("NFKC").replace(/\s+/gu, " ").trim(), selected: attr(n, "selected") !== undefined }));
   const selected = values.filter(n => n.selected), any = values.filter(n => n.id === "-1");
   if (selected.length !== 1 || new Set(values.map(n => n.id)).size !== values.length || any.length > 1 || any.some(n => n.label !== "Any Available")) return;
