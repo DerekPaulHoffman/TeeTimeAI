@@ -319,7 +319,9 @@ export type UScheduleRentalDiagnostic = {
   resourceSelectorCount: number; locationSelectorCount: number; groupSelectorCount: number;
   resourceControl?: { optionCount: number; selectedCount: number; resourceValueCount: number;
     anyValueCount: number; selectedState: "NONE" | "MULTIPLE" | "ANY" | "RESOURCE" | "INVALID";
-    catalogState?: "STATIC_UNIQUE_OPTIONS" | "UNSAFE_NODE" | "INVALID_STRUCTURE" | "INVALID_VALUES" };
+    catalogState?: "STATIC_UNIQUE_OPTIONS" | "UNSAFE_NODE" | "INVALID_STRUCTURE" | "INVALID_VALUES";
+    linkage?: { groupIdState: "VALID" | "INVALID"; sectionState: "LINKED" | "UNLINKED" | "MISSING_OR_AMBIGUOUS";
+      labelState: "SIMULATORS" | "MISSPELLED_SIMULATORS" | "OTHER" | "MISSING_OR_AMBIGUOUS" | "UNSAFE" } };
   pooledRowCount: number; pooledResourceState: "NO_ROWS" | "ZERO" | "OTHER_OR_MISSING";
 };
 
@@ -378,13 +380,28 @@ export function inspectUScheduleRentalDiagnostic(html: string, sourceUrl: string
     return !values.length || values.some(value => value !== "-1" && !PUBLIC_ID.test(value)) || new Set(values).size !== values.length
       ? "INVALID_VALUES" : "STATIC_UNIQUE_OPTIONS";
   };
+  // Static linkage is independent from safe option values. Do not expose IDs,
+  // labels, or infer rental eligibility from a recognizable control label.
+  const resourceLinkage = (): NonNullable<NonNullable<UScheduleRentalDiagnostic["resourceControl"]>["linkage"]> => {
+    const control = resourceSelectors[0], controlId = attr(control, "id") ?? "";
+    const groupValid = /^resource[1-9]\d{0,9}$/u.test(controlId);
+    const sections = all.filter(node => attr(node, "id") === "res_section");
+    let parent: Node | undefined = control;
+    while (parent && parent !== sections[0]) parent = "parentNode" in parent ? parent.parentNode ?? undefined : undefined;
+    const labels = groupValid ? all.filter(node => node.tagName === "label" && attr(node, "for") === controlId) : [];
+    const label = labels.length === 1 ? visibleText(labels[0]).replace(/\s+/gu, " ").trim() : undefined;
+    return { groupIdState: groupValid ? "VALID" : "INVALID",
+      sectionState: sections.length !== 1 ? "MISSING_OR_AMBIGUOUS" : parent === sections[0] ? "LINKED" : "UNLINKED",
+      labelState: !groupValid ? "OTHER" : labels.length !== 1 ? "MISSING_OR_AMBIGUOUS" : unsafeResourceNode(labels[0]) ? "UNSAFE" :
+        label === "Simulators" ? "SIMULATORS" : label === "Simualtors" ? "MISSPELLED_SIMULATORS" : "OTHER" };
+  };
   const resourceControl: UScheduleRentalDiagnostic["resourceControl"] = resourceOptions && resourceOptions.length <= 100 && selectedResources ? {
     optionCount: resourceOptions.length, selectedCount: selectedResources.length,
     resourceValueCount: resourceOptions.filter(n => PUBLIC_ID.test(attr(n, "value") ?? "")).length,
     anyValueCount: resourceOptions.filter(n => attr(n, "value") === "-1").length,
     selectedState: !selectedResources.length ? "NONE" : selectedResources.length > 1 ? "MULTIPLE" :
       selectedValue === "-1" ? "ANY" : PUBLIC_ID.test(selectedValue ?? "") ? "RESOURCE" : "INVALID",
-    catalogState: resourceCatalogState(),
+    catalogState: resourceCatalogState(), linkage: resourceLinkage(),
   } : undefined;
   return {
     serviceCount: serviceOptions.length, selectedServiceCount: currentServices.length,

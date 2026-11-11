@@ -94,6 +94,11 @@ const configurationDiagnostic = z.object({
       resourceValueCount: z.number().int().min(0).max(100), anyValueCount: z.number().int().min(0).max(100),
       selectedState: z.enum(["NONE", "MULTIPLE", "ANY", "RESOURCE", "INVALID"]),
       catalogState: z.enum(["STATIC_UNIQUE_OPTIONS", "UNSAFE_NODE", "INVALID_STRUCTURE", "INVALID_VALUES"]).optional(),
+      linkage: z.object({
+        groupIdState: z.enum(["VALID", "INVALID"]),
+        sectionState: z.enum(["LINKED", "UNLINKED", "MISSING_OR_AMBIGUOUS"]),
+        labelState: z.enum(["SIMULATORS", "MISSPELLED_SIMULATORS", "OTHER", "MISSING_OR_AMBIGUOUS", "UNSAFE"]),
+      }).strict().refine(v => v.groupIdState !== "INVALID" || v.labelState === "OTHER").optional(),
     }).strict().refine(v => v.selectedCount <= v.optionCount && v.resourceValueCount + v.anyValueCount <= v.optionCount &&
       (v.selectedState === "NONE") === (v.selectedCount === 0) &&
       (v.selectedState === "MULTIPLE") === (v.selectedCount > 1) &&

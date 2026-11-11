@@ -311,6 +311,41 @@ describe("owned known-reader public configuration", () => {
       expect(persistedDiagnostic(legacy)?.uscheduleRental?.resourceControl).not.toHaveProperty("catalogState");
     }
   });
+  it("reports resource label and group linkage separately from an inert catalog without accepting it", async () => {
+    const options = '<option value="-1" selected>Any Available</option>' +
+      [1, 2, 3, 4, 5].map(id => `<option value="${id}">Private resource ${id}</option>`).join("");
+    const control = `<section id="res_section"><label for="resource8">Simualtors</label><select id="resource8" class="resSelect">${options}</select></section>`;
+    const base = uscheduleHtml.replace("Simulator Rental</option>", "Hourly Simulator Rental</option>");
+    for (const [selector, linkage] of [
+      [control, { groupIdState: "VALID", sectionState: "LINKED", labelState: "MISSPELLED_SIMULATORS" }],
+      [control.replace("Simualtors", "Simulators"), { groupIdState: "VALID", sectionState: "LINKED", labelState: "SIMULATORS" }],
+      [control.replace("Simualtors", "secret@example.test"), { groupIdState: "VALID", sectionState: "LINKED", labelState: "OTHER" }],
+      [control.replace('for="resource8"', 'for="other"'), { groupIdState: "VALID", sectionState: "LINKED", labelState: "MISSING_OR_AMBIGUOUS" }],
+      [control.replace('id="res_section"', 'id="other"'), { groupIdState: "VALID", sectionState: "MISSING_OR_AMBIGUOUS", labelState: "MISSPELLED_SIMULATORS" }],
+      [control.replace('class="resSelect"', 'class="resSelect" hidden'), { groupIdState: "VALID", sectionState: "LINKED", labelState: "MISSPELLED_SIMULATORS" }],
+      [control.replace('<label ', '<label hidden '), { groupIdState: "VALID", sectionState: "LINKED", labelState: "UNSAFE" }],
+      [control.replace(/resource8/gu, "secret@example.test"), { groupIdState: "INVALID", sectionState: "LINKED", labelState: "OTHER" }],
+      [control.replace('<select', '</section><select').replace('</select></section>', '</select>'),
+        { groupIdState: "VALID", sectionState: "UNLINKED", labelState: "MISSPELLED_SIMULATORS" }],
+    ] as const) {
+      const fetch = vi.fn(async () => response(base + selector));
+      const result = await collectSimulatorSupportResearch({ url: uscheduleSource }, { fetch, lease, now: () => instant });
+      expect(result.publicConfiguration).toBeUndefined();
+      expect(result.configurationDiagnostic?.uscheduleRental?.resourceControl).toHaveProperty("linkage", linkage);
+      expect(persistedDiagnostic(result.configurationDiagnostic)).toEqual(result.configurationDiagnostic);
+      expect(JSON.stringify(result.configurationDiagnostic)).not.toMatch(/Private resource|secret@example|resource8|Simualtors/u);
+      expect(fetch).toHaveBeenCalledOnce();
+      const diagnostic = result.configurationDiagnostic!;
+      const resourceControl = diagnostic.uscheduleRental!.resourceControl!;
+      expect(() => persistedDiagnostic({ ...diagnostic, uscheduleRental: { ...diagnostic.uscheduleRental,
+        resourceControl: { ...resourceControl, linkage: { ...linkage, labelState: "raw private label" } } } })).toThrow();
+      expect(() => persistedDiagnostic({ ...diagnostic, uscheduleRental: { ...diagnostic.uscheduleRental,
+        resourceControl: { ...resourceControl, linkage: { ...linkage, groupId: "8" } } } })).toThrow();
+      const legacy = structuredClone(diagnostic);
+      delete (legacy.uscheduleRental!.resourceControl as { linkage?: unknown }).linkage;
+      expect(persistedDiagnostic(legacy)?.uscheduleRental?.resourceControl).not.toHaveProperty("linkage");
+    }
+  });
   it("withholds resource details for duplicate or oversized selectors and preserves legacy missing facts", async () => {
     const control = '<select class="resSelect"><option value="-1" selected>Any Available</option></select>';
     for (const selector of [control + control, control.replace('</select>', '<option value="1">Bay</option>'.repeat(100) + '</select>')]) {
