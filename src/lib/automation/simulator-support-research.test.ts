@@ -249,6 +249,60 @@ describe("owned known-reader public configuration", () => {
       { uscheduleRental: { ...diagnostic.uscheduleRental, selectedServiceLabelKind: "raw private label" } },
     ]) expect(() => persistedDiagnostic({ ...diagnostic, ...patch })).toThrow();
   });
+  it("distinguishes a selected location from an unproven location catalog without exposing its values", async () => {
+    const locations = '<select id="select_location"><option value="72" selected>Private Branch</option><option value="73">Other Branch</option></select>';
+    const html = locations + uscheduleHtml.replace("Simulator Rental</option>", "Simulator Rental - Private Branch</option>");
+    const fetch = vi.fn(async () => response(html));
+    const result = await collectSimulatorSupportResearch({ url: uscheduleSource }, { fetch, lease, now: () => instant });
+    expect(result.publicConfiguration).toBeUndefined();
+    expect(result.configurationDiagnostic?.uscheduleRental).toHaveProperty("locationControl", {
+      optionCount: 2, selectedCount: 1, selectedValueKind: "PUBLIC_ID", catalogState: "STATIC_UNIQUE_OPTIONS",
+    });
+    expect(persistedDiagnostic(result.configurationDiagnostic)).toEqual(result.configurationDiagnostic);
+    expect(JSON.stringify(result.configurationDiagnostic)).not.toMatch(/Private Branch|Other Branch|"72"|"73"|secret@example|never-persist/u);
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+  it("keeps unsafe, malformed and ambiguous location selections distinct and private", async () => {
+    const cases = [
+      ['<option value="">Choose Location</option>', "NONE", "STATIC_UNIQUE_OPTIONS"],
+      ['<option value="" selected>Choose Location</option>', "EMPTY", "STATIC_UNIQUE_OPTIONS"],
+      ['<option selected>Private Branch</option>', "OTHER", "INVALID_VALUES"],
+      ['<option value="raw-private-value" selected>Private Branch</option>', "OTHER", "INVALID_VALUES"],
+      ['<option value="72" selected>A</option><option value="73" selected>B</option>', "MULTIPLE", "STATIC_UNIQUE_OPTIONS"],
+      ['<option value="72" selected>A</option><option value="72">Duplicate tail</option>', "PUBLIC_ID", "INVALID_VALUES"],
+      ['<option value="72" selected>A</option><option value="73" hidden>Hidden tail</option>', "PUBLIC_ID", "UNSAFE_NODE"],
+      ['<optgroup label="Private group"><option value="72" selected>A</option></optgroup>', "PUBLIC_ID", "INVALID_STRUCTURE"],
+    ] as const;
+    for (const [options, selectedValueKind, catalogState] of cases) {
+      const html = `<select id="select_location">${options}</select>` + uscheduleHtml.replace("Simulator Rental</option>", "Simulator Rental - Branch</option>");
+      const result = await collectSimulatorSupportResearch({ url: uscheduleSource }, { fetch: vi.fn(async () => response(html)), lease, now: () => instant });
+      const diagnostic = result.configurationDiagnostic!;
+      expect(result.publicConfiguration).toBeUndefined();
+      expect(diagnostic.uscheduleRental).toHaveProperty("locationControl", expect.objectContaining({ selectedValueKind, catalogState }));
+      expect(persistedDiagnostic(diagnostic)).toEqual(diagnostic);
+      expect(JSON.stringify(diagnostic)).not.toMatch(/Private Branch|Private group|raw-private-value|Hidden tail|"72"|"73"/u);
+      const control = diagnostic.uscheduleRental!.locationControl!;
+      for (const patch of [
+        { ...control, rawLabel: "private" }, { ...control, selectedValueKind: "private" }, { ...control, catalogState: "private" },
+        { ...control, selectedCount: 101 }, { ...control, selectedCount: 0, selectedValueKind: "PUBLIC_ID" },
+      ]) expect(() => persistedDiagnostic({ ...diagnostic, uscheduleRental: { ...diagnostic.uscheduleRental, locationControl: patch } })).toThrow();
+      expect(() => persistedDiagnostic({ ...diagnostic, uscheduleRental: { ...diagnostic.uscheduleRental, locationSelectorCount: 2 } })).toThrow();
+      const legacy = { ...diagnostic.uscheduleRental }; delete legacy.locationControl;
+      expect(persistedDiagnostic({ ...diagnostic, uscheduleRental: legacy })?.uscheduleRental).not.toHaveProperty("locationControl");
+    }
+  });
+  it("does not sample oversized or duplicate location controls", async () => {
+    for (const locations of [
+      `<select id="select_location">${Array.from({ length: 101 }, (_, i) => `<option value="${i + 1}"${i === 0 ? " selected" : ""}>Branch</option>`).join("")}</select>`,
+      '<select id="select_location"><option value="72" selected>A</option></select>'.repeat(2),
+    ]) {
+      const html = locations + uscheduleHtml.replace("Simulator Rental</option>", "Simulator Rental - Branch</option>");
+      const result = await collectSimulatorSupportResearch({ url: uscheduleSource }, { fetch: vi.fn(async () => response(html)), lease, now: () => instant });
+      expect(result.publicConfiguration).toBeUndefined();
+      expect(result.configurationDiagnostic?.uscheduleRental).not.toHaveProperty("locationControl");
+      expect(persistedDiagnostic(result.configurationDiagnostic)).toEqual(result.configurationDiagnostic);
+    }
+  });
   it("distinguishes a suffixed rental label without disclosing its suffix or accepting a location rental", async () => {
     for (const [label, shape] of [
       ["Simulator Rental - Private Branch", "SIMULATOR_RENTAL_WITH_SUFFIX"],

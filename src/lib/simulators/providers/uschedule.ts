@@ -320,6 +320,9 @@ export type UScheduleRentalDiagnostic = {
   durationCount: number; selectedDurationCount: number; selectedDurationMinutes?: number;
   durationOptionsMinutes?: number[];
   resourceSelectorCount: number; locationSelectorCount: number; groupSelectorCount: number;
+  locationControl?: { optionCount: number; selectedCount: number;
+    selectedValueKind: "NONE" | "MULTIPLE" | "EMPTY" | "PUBLIC_ID" | "OTHER";
+    catalogState: "STATIC_UNIQUE_OPTIONS" | "UNSAFE_NODE" | "INVALID_STRUCTURE" | "INVALID_VALUES" };
   resourceControl?: { optionCount: number; selectedCount: number; resourceValueCount: number;
     anyValueCount: number; selectedState: "NONE" | "MULTIPLE" | "ANY" | "RESOURCE" | "INVALID";
     catalogState?: "STATIC_UNIQUE_OPTIONS" | "UNSAFE_NODE" | "INVALID_STRUCTURE" | "INVALID_VALUES";
@@ -407,6 +410,26 @@ export function inspectUScheduleRentalDiagnostic(html: string, sourceUrl: string
       selectedValue === "-1" ? "ANY" : PUBLIC_ID.test(selectedValue ?? "") ? "RESOURCE" : "INVALID",
     catalogState: resourceCatalogState(), linkage: resourceLinkage(),
   } : undefined;
+  // A location selector count alone cannot establish whether a branch was
+  // selected. Report closed static classes only; no branch IDs or labels, and
+  // no claim that a selection matches the venue or rental. Inspect the tail.
+  const locations = selects("select_location"), locationOptions = locations.length === 1 ? options(locations) : undefined;
+  let locationControl: UScheduleRentalDiagnostic["locationControl"];
+  if (locationOptions && locationOptions.length <= 100) {
+    const control = locations[0], selectedLocations = selected(locationOptions);
+    const values = locationOptions.map(node => attr(node, "value") ?? "");
+    const value = selectedLocations.length === 1 ? attr(selectedLocations[0], "value") : undefined;
+    const direct = children(control);
+    const invalidStructure = direct.some(node => node.tagName !== "option" || elements(node).length) ||
+      direct.length !== locationOptions.length;
+    locationControl = { optionCount: locationOptions.length, selectedCount: selectedLocations.length,
+      selectedValueKind: !selectedLocations.length ? "NONE" : selectedLocations.length > 1 ? "MULTIPLE" :
+        value === "" ? "EMPTY" : PUBLIC_ID.test(value ?? "") ? "PUBLIC_ID" : "OTHER",
+      catalogState: invalidStructure ? "INVALID_STRUCTURE" : unsafeResourceNode(control) || locationOptions.some(unsafeResourceNode) ? "UNSAFE_NODE" :
+        !values.length || locationOptions.some(node => attr(node, "value") === undefined) ||
+        values.some(value => value !== "" && !PUBLIC_ID.test(value)) || new Set(values).size !== values.length
+          ? "INVALID_VALUES" : "STATIC_UNIQUE_OPTIONS" };
+  }
   return {
     serviceCount: serviceOptions.length, selectedServiceCount: currentServices.length,
     ...(id && PUBLIC_ID.test(id) ? { selectedServiceId: id } : {}),
@@ -422,6 +445,7 @@ export function inspectUScheduleRentalDiagnostic(html: string, sourceUrl: string
     ...(selectedMinutes !== undefined ? { selectedDurationMinutes: selectedMinutes } : {}),
     ...(durations.length && durationValues.every((v): v is number => v !== undefined) ? { durationOptionsMinutes: durationValues } : {}),
     resourceSelectorCount, locationSelectorCount, groupSelectorCount,
+    ...(locationControl ? { locationControl } : {}),
     ...(resourceControl ? { resourceControl } : {}),
     pooledRowCount: rows.length, pooledResourceState: !rows.length ? "NO_ROWS" : rows.every(n => attr(n, "data-empid") === "0") ? "ZERO" : "OTHER_OR_MISSING",
   };
