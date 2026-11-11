@@ -84,6 +84,7 @@ const configurationDiagnostic = z.object({
     serviceCount: z.number().int().min(0).max(100), selectedServiceCount: z.number().int().min(0).max(100),
     selectedServiceId: z.string().regex(/^[1-9]\d{0,9}$/u).optional(),
     selectedServiceLabelKind: z.enum(["DEFAULT", "HOURLY", "ONE_HOUR", "OTHER"]).optional(),
+    selectedServiceLabelShape: z.enum(["SIMULATOR_RENTAL_WITH_SUFFIX", "PUBLIC_TEE_TIMES", "OTHER"]).optional(),
     durationSelectorState: z.enum(["MISSING", "PRESENT"]),
     durationCount: z.number().int().min(0).max(20), selectedDurationCount: z.number().int().min(0).max(20),
     selectedDurationMinutes: z.number().int().min(1).max(1440).optional(),
@@ -109,6 +110,7 @@ const configurationDiagnostic = z.object({
   }).strict().refine(v => v.selectedServiceCount <= v.serviceCount && v.selectedDurationCount <= v.durationCount &&
     (v.selectedServiceId === undefined || v.selectedServiceCount === 1) &&
     (v.selectedServiceLabelKind !== undefined) === (v.selectedServiceCount === 1) &&
+    (v.selectedServiceLabelShape === undefined || v.selectedServiceLabelKind === "OTHER") &&
     (v.selectedDurationMinutes === undefined || v.selectedDurationCount === 1) &&
     (v.durationSelectorState !== "MISSING" || v.durationCount === 0) &&
     (!v.durationOptionsMinutes || v.durationOptionsMinutes.length === v.durationCount) &&

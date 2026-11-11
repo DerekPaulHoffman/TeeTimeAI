@@ -315,6 +315,7 @@ function publicRentalPartyLimit(html: string) {
 export type UScheduleRentalDiagnostic = {
   serviceCount: number; selectedServiceCount: number; selectedServiceId?: string;
   selectedServiceLabelKind?: "DEFAULT" | "HOURLY" | "ONE_HOUR" | "OTHER";
+  selectedServiceLabelShape?: "SIMULATOR_RENTAL_WITH_SUFFIX" | "PUBLIC_TEE_TIMES" | "OTHER";
   durationSelectorState: "MISSING" | "PRESENT";
   durationCount: number; selectedDurationCount: number; selectedDurationMinutes?: number;
   durationOptionsMinutes?: number[];
@@ -351,6 +352,7 @@ export function inspectUScheduleRentalDiagnostic(html: string, sourceUrl: string
   };
   const service = currentServices.length === 1 ? currentServices[0] : undefined;
   const id = service && attr(service, "value"), label = service && visibleText(service).replace(/\s+/gu, " ").trim();
+  const knownLabel = label === "Simulator Rental" || label === "Hourly Simulator Rental" || label === "Simulator Rental - One Hour";
   const durationValues = durations.map(minuteValue);
   const selectedMinutes = currentDurations.length === 1 ? minuteValue(currentDurations[0]) : undefined;
   // Value classes distinguish a default pool from a chosen resource. They do
@@ -410,6 +412,11 @@ export function inspectUScheduleRentalDiagnostic(html: string, sourceUrl: string
     ...(id && PUBLIC_ID.test(id) ? { selectedServiceId: id } : {}),
     ...(service ? { selectedServiceLabelKind: label === "Simulator Rental" ? "DEFAULT" : label === "Hourly Simulator Rental" ? "HOURLY" :
       label === "Simulator Rental - One Hour" ? "ONE_HOUR" : "OTHER" } as const : {}),
+    // Describe syntax only. A suffix is not venue identity, public access or
+    // rental linkage; keep the original rejection and never retain its text.
+    ...(service && !knownLabel ? { selectedServiceLabelShape: label === "Public Tee Times" ? "PUBLIC_TEE_TIMES" :
+      label && label.length <= 200 && /^Simulator Rental - \S[^\u0000-\u001f\u007f]*$/u.test(label)
+        ? "SIMULATOR_RENTAL_WITH_SUFFIX" : "OTHER" } as const : {}),
     durationSelectorState: lengths.length ? "PRESENT" : "MISSING",
     durationCount: durations.length, selectedDurationCount: currentDurations.length,
     ...(selectedMinutes !== undefined ? { selectedDurationMinutes: selectedMinutes } : {}),

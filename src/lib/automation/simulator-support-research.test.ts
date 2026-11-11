@@ -249,6 +249,35 @@ describe("owned known-reader public configuration", () => {
       { uscheduleRental: { ...diagnostic.uscheduleRental, selectedServiceLabelKind: "raw private label" } },
     ]) expect(() => persistedDiagnostic({ ...diagnostic, ...patch })).toThrow();
   });
+  it("distinguishes a suffixed rental label without disclosing its suffix or accepting a location rental", async () => {
+    for (const [label, shape] of [
+      ["Simulator Rental - Private Branch", "SIMULATOR_RENTAL_WITH_SUFFIX"],
+      ["Public Tee Times", "PUBLIC_TEE_TIMES"],
+      ["Private lesson name", "OTHER"],
+      ["Simulator Rental - ", "OTHER"],
+    ] as const) {
+      const html = uscheduleHtml.replace("Simulator Rental</option>", `${label}</option>`);
+      const fetch = vi.fn(async () => response(html));
+      const result = await collectSimulatorSupportResearch({ url: uscheduleSource }, { fetch, lease, now: () => instant });
+      expect(result.publicConfiguration).toBeUndefined();
+      expect(result.configurationDiagnostic?.uscheduleRental).toMatchObject({
+        selectedServiceLabelKind: "OTHER", selectedServiceLabelShape: shape,
+      });
+      expect(persistedDiagnostic(result.configurationDiagnostic)).toEqual(result.configurationDiagnostic);
+      const legacy = { ...result.configurationDiagnostic!.uscheduleRental };
+      delete legacy.selectedServiceLabelShape;
+      expect(persistedDiagnostic({ ...result.configurationDiagnostic, uscheduleRental: legacy })?.uscheduleRental)
+        .not.toHaveProperty("selectedServiceLabelShape");
+      expect(JSON.stringify(result.configurationDiagnostic)).not.toMatch(/Private Branch|Private lesson|secret@example|never-persist/u);
+      expect(fetch).toHaveBeenCalledOnce();
+      expect(() => persistedDiagnostic({ ...result.configurationDiagnostic, uscheduleRental: {
+        ...result.configurationDiagnostic!.uscheduleRental, selectedServiceLabelShape: label,
+      } })).toThrow();
+      expect(() => persistedDiagnostic({ ...result.configurationDiagnostic, uscheduleRental: {
+        ...result.configurationDiagnostic!.uscheduleRental, selectedServiceLabelKind: "DEFAULT",
+      } })).toThrow();
+    }
+  });
   it("distinguishes a default pooled resource from an assigned or malformed resource without accepting the rental", async () => {
     const options = '<option value="-1" selected>Any Available</option>' +
       [1, 2, 3, 4, 5].map(id => `<option value="${id}">Private resource ${id}</option>`).join("");
