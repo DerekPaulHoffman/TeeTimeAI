@@ -63,6 +63,7 @@ export type CourseDispatchAudit = {
   ownerThreadId: string;
   childThreadId: string | null;
   launcherReceiptPath?: string;
+  controlledRetryOf?: string;
   baseSha: string;
   reservedAt: string;
   expiresAt: string;
@@ -405,21 +406,49 @@ async function revokeStaleBound(
   }
 }
 
+const SPORTS_HAUS_FAILED_ASSIGNMENT = "course-assignment-e95a61ec-95a8-437f-95c8-8b47cb13ae70";
+const SPORTS_HAUS_OFFERING_ID = "cmwedc5w6000508l6ebtykh6y";
+
+async function readSportsHausRetry(tx: Prisma.TransactionClient, assignmentRef: string) {
+  if (assignmentRef !== SPORTS_HAUS_FAILED_ASSIGNMENT) throw new Error("Sports Haus retry requires the original database failure assignment.");
+  const rows = await tx.automationRun.findMany({
+    where: { promptVersion: COURSE_DISPATCH_PROMPT_VERSION, OR: [
+      { audit: { path: ["controlledRetryOf"], equals: assignmentRef } },
+      { audit: { path: ["assignmentRef"], equals: assignmentRef } },
+    ] },
+    select: { status: true, outcome: true, audit: true }, take: 2,
+  });
+  if (rows.length !== 1) return null;
+  const row = rows[0];
+  const audit = parseCourseDispatchAudit(row.audit);
+  const recovery = row.audit as { simulatorFailureRecovery?: { failure?: { code?: string } } };
+  if (!audit || audit.controlledRetryOf || audit.assignmentRef !== assignmentRef ||
+      row.status !== "COMPLETED" || row.outcome !== "simulator_research_failed" ||
+      audit.state !== "CONSUMED" || audit.target.mode !== "SIMULATOR" ||
+      audit.target.offeringId !== SPORTS_HAUS_OFFERING_ID ||
+      audit.simulatorClaim?.phase !== "CLAIMED" || audit.simulatorClaim.plannedPaths.length ||
+      audit.simulatorClaim.releaseSha || !audit.target.offeringSourceFingerprint ||
+      recovery.simulatorFailureRecovery?.failure?.code !== "DATABASE_OPERATION_FAILED") return null;
+  return { incidentId: audit.target.incidentId, offeringId: SPORTS_HAUS_OFFERING_ID,
+    sourceFingerprint: audit.target.offeringSourceFingerprint, searchRefs: audit.target.searchRefs };
+}
+
 export async function planCourseSupportCourseDispatch(input: {
   ownerThreadId: string;
   baseSha: string;
   now?: Date;
   maxStarts?: number;
+  controlledRetryOf?: string;
 }) {
   assertIdentity(input.ownerThreadId, input.baseSha);
-  const maxStarts = input.maxStarts ?? 5;
+  const maxStarts = input.controlledRetryOf ? 1 : input.maxStarts ?? 5;
   if (!Number.isInteger(maxStarts) || maxStarts < 1 || maxStarts > 15) {
     throw new Error("Course dispatch maxStarts must be from 1 through 15.");
   }
   // Terminal learning failures enter the existing code-capable responder before
   // its ordinary bounded selection. This does not reopen a discovery attempt.
   const { reconcileDiscoveryEngineeringHandoffs } = await import("@/lib/course-discovery/engineering-repair");
-  await reconcileDiscoveryEngineeringHandoffs(input.now);
+  if (!input.controlledRetryOf) await reconcileDiscoveryEngineeringHandoffs(input.now);
   return runWithCourseSupportWriterTransitionLease(async () => transaction(async (tx) => {
     const now = input.now ?? await getCourseDispatchDatabaseNow(tx);
     const runs = await readRuns(tx, new Date(Math.floor(now.getTime() / TICK_MS) * TICK_MS));
@@ -428,6 +457,8 @@ export async function planCourseSupportCourseDispatch(input: {
     const { reconcileExpiredSimulatorResearchExecutions } = await import("./simulator-support-ownership");
     await reconcileExpiredSimulatorResearchExecutions(tx, now, runs);
     const tick = tickRef(now);
+    const retryOf = input.controlledRetryOf;
+    const retryTarget = retryOf ? await readSportsHausRetry(tx, retryOf) : null;
     const sameTick = runs.filter((run) => run.parsed?.tickRef === tick);
     const activeBatches = await tx.courseSupportBatch.findMany({
       where: { status: { in: ["CLAIMED", "IMPLEMENTING", "VERIFYING"] } },
@@ -453,10 +484,10 @@ export async function planCourseSupportCourseDispatch(input: {
     // launch budget. The legacy background fallback must not interpret a zero
     // launch list as evidence that no active-alert course is waiting.
     if (availableStarts > 0 || live.length === 0) {
-      const outdoorCandidates = (await listCourseSupportDispatchCandidates(now, tx))
+      const outdoorCandidates = retryOf ? [] : (await listCourseSupportDispatchCandidates(now, tx))
         .filter(candidate => !activeBatches.some(batch => courseSupportAssignedCandidateConflicts(candidate, batch)));
-      const dueSimulatorCandidates = await listSimulatorSupportDispatchCandidates(now, tx);
-      const awakened = await reconcileSimulatorCapabilityWakeups(now, tx);
+      const dueSimulatorCandidates = retryOf && !retryTarget ? [] : await listSimulatorSupportDispatchCandidates(now, tx, retryTarget ?? undefined);
+      const awakened = !retryOf && await reconcileSimulatorCapabilityWakeups(now, tx);
       const simulatorCandidates = (awakened ? await listSimulatorSupportDispatchCandidates(now, tx) : dueSimulatorCandidates)
         .map(candidate => ({ ...candidate, selectionKey: `simulator:${candidate.offeringId}` }));
       const candidates = [...outdoorCandidates, ...simulatorCandidates];
@@ -546,6 +577,7 @@ export async function planCourseSupportCourseDispatch(input: {
       for (const { candidate, source } of selection.selected) {
         const audit: CourseDispatchAudit = {
           schemaVersion: 1,
+          ...(retryOf ? { controlledRetryOf: retryOf } : {}),
           tickRef: tick,
           assignmentRef: `course-assignment-${randomUUID()}`,
           state: "RESERVED",
@@ -599,7 +631,7 @@ export async function planCourseSupportCourseDispatch(input: {
         occupiedCourses.add(candidate.courseId);
       }
     }
-    const continuation = await collectCourseSupportContinuationCandidates({ ownerThreadId: input.ownerThreadId, now, runs, tx });
+    const continuation = retryOf ? { continuationItems: [], attentionCount: 0 } : await collectCourseSupportContinuationCandidates({ ownerThreadId: input.ownerThreadId, now, runs, tx });
     return {
       tickRef: tick,
       activeCount: activeBatches.length,
@@ -618,7 +650,7 @@ export async function planCourseSupportCourseDispatch(input: {
       continuationItems: continuation.continuationItems,
       continuationAttentionCount: continuation.attentionCount,
       continuationEligibleCount: continuation.continuationItems.length,
-      launchItems: runs.filter((run) => run.parsed?.tickRef === tick && run.status === "RUNNING" && ["RESERVED", "STARTING", "BOUND"].includes(run.parsed?.state ?? ""))
+      launchItems: runs.filter((run) => run.parsed?.tickRef === tick && (retryOf ? run.parsed.controlledRetryOf === retryOf && run.parsed.ownerThreadId === input.ownerThreadId && Boolean(retryTarget) : !run.parsed.controlledRetryOf) && run.status === "RUNNING" && ["RESERVED", "STARTING", "BOUND"].includes(run.parsed?.state ?? ""))
         .map((run) => ({ assignmentRef: run.parsed!.assignmentRef, state: run.parsed!.state,
           ...(run.parsed!.target.mode === "SIMULATOR" ? { mode: "SIMULATOR" as const } : {}) })),
     };
@@ -779,7 +811,7 @@ async function collectCourseSupportContinuationCandidates(input: {
   const { readSimulatorSupportContinuationContext } = await import("./simulator-support-ownership");
   for (const run of input.runs) {
     const audit = run.parsed;
-    if (run.status !== "RUNNING" || !audit || audit.target.mode !== "SIMULATOR" || audit.state !== "CONSUMED") continue;
+    if (run.status !== "RUNNING" || !audit || audit.controlledRetryOf || audit.target.mode !== "SIMULATOR" || audit.state !== "CONSUMED") continue;
     if (!audit.childThreadId || audit.childThreadId === input.ownerThreadId) { attentionCount += 1; continue; }
     const ledger = readCourseSupportContinuationLedger(audit.simulatorContinuation);
     if (ledger.receipts.some(receipt => receipt.status === "PENDING")) { attentionCount += 1; continue; }

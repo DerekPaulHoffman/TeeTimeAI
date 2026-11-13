@@ -41,7 +41,7 @@ export function readDispatchArguments(args: readonly string[]) {
   const [command, ...options] = args;
   const commands = new Set(["plan", "start", "bind", "cancel", "assignment", "continue", "continued"]);
   if (!command || !commands.has(command)) throw new Error("Use plan, start, bind, cancel, assignment, continue, or continued.");
-  const allowedValues = new Set(["--assignment-ref", "--child-thread", "--max-starts", "--receipt-file", "--launcher-receipt"]);
+  const allowedValues = new Set(["--assignment-ref", "--child-thread", "--max-starts", "--receipt-file", "--launcher-receipt", "--retry-sports-haus-once"]);
   const allowedFlags = new Set(["--scheduled-cycle", "--confirmed-not-started"]);
   for (let index = 0; index < options.length; index += 1) {
     const option = options[index];
@@ -55,6 +55,9 @@ export function readDispatchArguments(args: readonly string[]) {
   }
   const assignmentRef = readDispatchOption(options, "--assignment-ref");
   const childThreadId = readDispatchOption(options, "--child-thread");
+  const controlledRetryOf = readDispatchOption(options, "--retry-sports-haus-once");
+  if (controlledRetryOf && (command !== "plan" || options.includes("--scheduled-cycle") || options.includes("--max-starts") ||
+      !/^course-assignment-[a-f0-9-]{36}$/u.test(controlledRetryOf))) throw new Error("Sports Haus retry requires an original assignment reference and an unscheduled plan.");
   const maxStartsValue = readDispatchOption(options, "--max-starts");
   const receiptFile = readDispatchOption(options, "--receipt-file");
   const launcherReceiptPath = readDispatchOption(options, "--launcher-receipt");
@@ -79,7 +82,7 @@ export function readDispatchArguments(args: readonly string[]) {
   if (command === "cancel" && !options.includes("--confirmed-not-started")) {
     throw new Error("Cancellation requires proof that no native worker was started.");
   }
-  return { command, assignmentRef, childThreadId, launcherReceiptPath, maxStarts, receiptFile, scheduledCycle: options.includes("--scheduled-cycle") };
+  return { command, assignmentRef, childThreadId, launcherReceiptPath, maxStarts, ...(controlledRetryOf ? { controlledRetryOf } : {}), receiptFile, scheduledCycle: options.includes("--scheduled-cycle") };
 }
 
 export function readDispatchGitState(requireCurrentMain = true) {
@@ -139,7 +142,7 @@ export function selectCourseDispatchLegacyHandoff(inspection: LegacyInspection) 
 }
 
 export async function planCourseDispatchCycle(
-  input: { ownerThreadId: string; baseSha: string; maxStarts?: number; scheduledCycle: boolean },
+  input: { ownerThreadId: string; baseSha: string; maxStarts?: number; scheduledCycle: boolean; controlledRetryOf?: string },
   dependencies = {
     plan: planCourseSupportCourseDispatch,
     refresh: refreshPendingCustomerRecoveries,
@@ -147,9 +150,9 @@ export async function planCourseDispatchCycle(
   },
 ) {
   const plan = await dependencies.plan({
-    ownerThreadId: input.ownerThreadId, baseSha: input.baseSha, maxStarts: input.maxStarts,
+    ownerThreadId: input.ownerThreadId, baseSha: input.baseSha, maxStarts: input.maxStarts, ...(input.controlledRetryOf ? { controlledRetryOf: input.controlledRetryOf } : {}),
   });
-  if (!plan.acquired || !courseDispatchMayInspectLegacy(plan)) return plan;
+  if (input.controlledRetryOf || !plan.acquired || !courseDispatchMayInspectLegacy(plan)) return plan;
   // The plan's writer transition has committed before this legacy read.
   // Native reservations and pending active-future courses fence fallback.
   const customerRecovery = await dependencies.refresh();
@@ -197,7 +200,7 @@ async function main() {
     let result: unknown;
     if (input.command === "plan") {
       result = await planCourseDispatchCycle({
-        ownerThreadId, baseSha, maxStarts: input.maxStarts, scheduledCycle: input.scheduledCycle,
+        ownerThreadId, baseSha, maxStarts: input.maxStarts, controlledRetryOf: input.controlledRetryOf, scheduledCycle: input.scheduledCycle,
       });
     } else if (input.command === "start") {
       result = await beginCourseSupportCourseDispatch({ ownerThreadId, assignmentRef: input.assignmentRef! });

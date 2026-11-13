@@ -28,6 +28,7 @@ async function hasExhaustedSimulatorDispatch(tx: Prisma.TransactionClient, incid
     orderBy: [{ completedAt: "desc" }, { id: "desc" }], take: 2,
   });
   const [latest, previous] = rows;
+  if (typeof (latest?.audit as { controlledRetryOf?: unknown } | null)?.controlledRetryOf === "string") return true;
   if (!latest) return false;
   if (STARTUP_FAILURES.has(latest.outcome ?? "")) return previous?.outcome === latest.outcome;
   if (latest.outcome !== "simulator_research_failed" && latest.outcome !== "simulator_retryable_failed") return false;
@@ -176,9 +177,9 @@ export async function resolveUnownedSimulatorSupportIncident(tx: Prisma.Transact
   await tx.simulatorSupportIncident.updateMany({ where: { offeringId: input.offeringId, status: { not: "RESOLVED" } }, data: { status: "RESOLVED", resolvedAt: input.now, retryAt: null } });
 }
 
-export async function listSimulatorSupportDispatchCandidates(now: Date, tx: Prisma.TransactionClient) {
+export async function listSimulatorSupportDispatchCandidates(now: Date, tx: Prisma.TransactionClient, controlledRetry?: { incidentId: string; offeringId: string; sourceFingerprint: string; searchRefs: CourseDispatchAudit["target"]["searchRefs"] }) {
   const observedIncidents = await tx.simulatorSupportIncident.findMany({
-    where: { status: "AUTO_INVESTIGATING", OR: [{ retryAt: null }, { retryAt: { lte: now } }], offering: { kind: "SIMULATOR", active: true, publicAccessStatus: { not: "NOT_PUBLIC" } } },
+    where: { ...(controlledRetry ? { id: controlledRetry.incidentId, offeringId: controlledRetry.offeringId } : {}), status: "AUTO_INVESTIGATING", OR: [{ retryAt: null }, { retryAt: { lte: now } }], offering: { kind: "SIMULATOR", active: true, publicAccessStatus: { not: "NOT_PUBLIC" } } },
     include: { offering: { include: { course: { select: { timeZone: true, website: true } } } } },
     orderBy: [{ firstSeenAt: "asc" }, { id: "asc" }], take: 128,
   });
@@ -192,13 +193,17 @@ export async function listSimulatorSupportDispatchCandidates(now: Date, tx: Pris
   if (preferences.length === 1024) throw new Error("Simulator support source read reached its bound.");
   const candidates = [];
   for (const incident of incidents) {
-    const sources = preferences.filter(preference => preference.offeringId === incident.offeringId).flatMap(({ teeSearch }) => {
+    const currentSources = preferences.filter(preference => preference.offeringId === incident.offeringId).flatMap(({ teeSearch }) => {
       const trafficClass = ["TEST", "AUTOMATION"].includes(teeSearch.trafficClass) ? "SYNTHETIC" as const : "REAL" as const;
       const ref = { id: teeSearch.id, scheduleVersion: teeSearch.scheduleVersion, alertGeneration: teeSearch.alertGeneration, intentDigest: createSimulatorSupportIntentDigest(teeSearch) };
       return isCurrentSimulatorSupportSource({ search: teeSearch, ref, offeringId: incident.offeringId, trafficClass, timeZone: incident.offering.course.timeZone, now }) ? [{ ...ref, trafficClass: teeSearch.trafficClass }] : [];
     }).sort((a, b) => Number(["TEST", "AUTOMATION"].includes(a.trafficClass)) - Number(["TEST", "AUTOMATION"].includes(b.trafficClass)) || a.id.localeCompare(b.id));
     const sourceFingerprint = getSimulatorOfferingSourceFingerprint(incident.offering);
-    if (await hasExhaustedSimulatorDispatch(tx, incident.id, sourceFingerprint, { officialUrl: incident.offering.course.website,
+    const sources = controlledRetry ? currentSources.filter(source => controlledRetry.searchRefs.some(ref =>
+      ref.id === source.id && ref.scheduleVersion === source.scheduleVersion &&
+      ref.alertGeneration === source.alertGeneration && ref.intentDigest === source.intentDigest)) : currentSources;
+    if (controlledRetry && (sourceFingerprint !== controlledRetry.sourceFingerprint || !sources.length)) continue;
+    if (!controlledRetry && await hasExhaustedSimulatorDispatch(tx, incident.id, sourceFingerprint, { officialUrl: incident.offering.course.website,
       bookingUrl: incident.offering.bookingUrl, evidenceUrl: incident.offering.evidenceUrl }, now)) continue;
     const engineering = sources.length ? null : await findSimulatorEngineeringAuthority(tx, { incidentId: incident.id, courseId: incident.offering.courseId,
       offeringId: incident.offeringId, offeringSourceFingerprint: sourceFingerprint }, now);

@@ -136,3 +136,11 @@ If the parent finishes while the supervisor is still asynchronous, report
 "dispatched" or "bound as observed", not a healthy or successfully running
 worker. Include the observation time for an ongoing state. A later failed
 receipt supersedes that startup observation without another human wakeup.
+
+For the one-off Sports Haus database recovery, run the approved responder preflight with `--context-only` to obtain the real checkout and worker context, then run this unscheduled command from that checkout in the current parent's native Codex session:
+
+```powershell
+npx vercel env run -e production -- npm run automation:course-dispatch -- plan --retry-sports-haus-once course-assignment-e95a61ec-95a8-437f-95c8-8b47cb13ae70
+```
+
+Use the same supervisor and a separate managed worker worktree. Zero launch items means stop. The first reservation consumes the override even if startup or research fails. The worker can read public evidence and close its diagnostic, but cannot publish changes, queue rechecks or send alerts.

@@ -61,6 +61,21 @@ describe("course dispatcher command authority", () => {
     expect(() => readDispatchArguments(["plan", "--scheduled-cycle", "--scheduled-cycle"])).toThrow();
   });
 
+  it("keeps a controlled Sports Haus plan isolated from scheduled and legacy work", async () => {
+    const ref = "course-assignment-10000000-2000-3000-4000-500000000000";
+    const option = ["--retry-sports-haus-once", ref];
+    expect(readDispatchArguments(["plan", ...option])).toMatchObject({ controlledRetryOf: ref });
+    for (const extra of [["--scheduled-cycle"], ["--max-starts", "1"], option]) {
+      expect(() => readDispatchArguments(["plan", ...option, ...extra])).toThrow();
+    }
+    const dependencies = { plan: vi.fn().mockResolvedValue(emptyPlan), refresh: vi.fn(), inspect: vi.fn() };
+    const input = { ownerThreadId: "owner", baseSha: "a".repeat(40), controlledRetryOf: ref, scheduledCycle: false };
+    expect(await planCourseDispatchCycle(input, dependencies)).toBe(emptyPlan);
+    expect(dependencies.plan).toHaveBeenCalledWith(expect.objectContaining({ controlledRetryOf: ref }));
+    expect(dependencies.refresh).not.toHaveBeenCalled();
+    expect(dependencies.inspect).not.toHaveBeenCalled();
+  });
+
   it("requires a real child binding selector only for the binding command", () => {
     expect(readDispatchArguments(["bind", "--assignment-ref", "opaque-ref", "--child-thread", "native-child"])).toMatchObject({
       command: "bind", assignmentRef: "opaque-ref", childThreadId: "native-child",
