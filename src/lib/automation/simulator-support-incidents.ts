@@ -16,6 +16,7 @@ async function hasExhaustedSimulatorDispatch(tx: Prisma.TransactionClient, incid
   sources: { officialUrl: string | null; bookingUrl: string | null; evidenceUrl: string | null }, now: Date) {
   const rows = await tx.automationRun.findMany({
     where: { promptVersion: DISPATCH_PROMPT_VERSION, status: "COMPLETED", completedAt: { lte: now },
+      outcome: { notIn: ["reservation_expired", "base_changed_before_claim"] },
       AND: [
         { audit: { path: ["target", "incidentId"], equals: incidentId } },
         { OR: [
@@ -37,6 +38,10 @@ async function hasExhaustedSimulatorDispatch(tx: Prisma.TransactionClient, incid
       claim.sourceFingerprint !== fingerprint || claim.releaseSha || claim.plannedPaths.length) return false;
   if (latest.completedAt && simulatorCapabilityWakeupReceipt({ audit, incidentId, courseId: audit.target.courseId,
     offeringId: audit.target.offeringId, sourceFingerprint: fingerprint, completedAt: latest.completedAt, now })) return false;
+  if (previous?.outcome === latest.outcome) {
+    const prior = parseCourseDispatchAudit(previous.audit)?.simulatorClaim;
+    if (prior?.phase === "CLAIMED" && prior.sourceFingerprint === fingerprint && !prior.releaseSha && !prior.plannedPaths.length) return true;
+  }
   // A failed rendered read or a concrete public-route failure already has a
   // durable owner result. A cooldown alone supplies no new route or evidence.
   let state;
@@ -53,7 +58,8 @@ async function hasExhaustedSimulatorDispatch(tx: Prisma.TransactionClient, incid
     (entry.sourceFingerprint ?? (claim.originalSourceFingerprint === fingerprint ? fingerprint : null)) === fingerprint &&
     (entry.rendered && entry.outcome === "READ" ||
       entry.failure?.stage === "PUBLIC_READ" && ["ACCESS", "BUDGET", "NETWORK", "BROWSER", "TOOLING", "UNKNOWN"].includes(entry.failure.category) ||
-      [401, 403, 404].includes(entry.httpStatus)));
+      [401, 403, 404].includes(entry.httpStatus) ||
+      entry.configurationDiagnostic?.reason === "PUBLIC_PROVIDER_CONFIG_REJECTED"));
   if (!attempted || state.inFlight) return false;
   const memory = readSimulatorResearchFailureMemory(audit.simulatorResearchPriorFailures);
   return !getSimulatorResearchRetryGuide({ ...sources, state, now,

@@ -92,7 +92,8 @@ describe.skipIf(!url)("simulator capability wakeup in isolated Postgres", () => 
     const { incident, run } = await fixture(false);
     const audit = run.audit as Record<string, unknown>;
     const research = audit.simulatorResearch as { history: Array<Record<string, unknown>> };
-    const { publicReadEvidence: _plainRead, ...entry } = research.history[0];
+    const entry = { ...research.history[0] };
+    delete entry.publicReadEvidence;
     await client.automationRun.update({ where: { id: run.id }, data: {
       outcome: "simulator_research_failed",
       audit: { ...audit, simulatorResearch: { ...research, history: [{ ...entry, rendered: true, httpStatus: 403 }] } } as Prisma.InputJsonValue,
@@ -103,6 +104,22 @@ describe.skipIf(!url)("simulator capability wakeup in isolated Postgres", () => 
     await client.courseOffering.update({ where: { id: incident.offeringId },
       data: { bookingUrl: "https://clients.uschedule.com/stingers-golf/booking?newSource=1" } });
     expect((await candidates()).map(row => row.incidentId)).toEqual([incident.id]);
+  });
+
+  it("stops repeated legacy research closeouts without route history", async () => {
+    const { incident, run } = await fixture(false);
+    const audit = { ...(run.audit as Record<string, unknown>) };
+    delete audit.simulatorResearch;
+    await client.automationRun.update({ where: { id: run.id }, data: { audit: audit as Prisma.InputJsonValue } });
+    const candidates = () => client.$transaction(tx => listSimulatorSupportDispatchCandidates(new Date(), tx));
+    expect((await candidates()).map(row => row.incidentId)).toEqual([incident.id]);
+    const second = await client.automationRun.create({ data: {
+      kind: "OTHER", status: "COMPLETED", outcome: "simulator_retryable_failed",
+      promptVersion: run.promptVersion, completedAt: new Date(),
+      audit: { ...audit, assignmentRef: randomUUID() } as Prisma.InputJsonValue,
+    } });
+    ids.runs.push(second.id);
+    expect(await candidates()).toEqual([]);
   });
 
   it("stops dispatch after the same worker startup failure repeats", async () => {
