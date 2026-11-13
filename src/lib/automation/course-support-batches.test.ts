@@ -2352,8 +2352,8 @@ describe("course-support write-conflict retry", () => {
   });
 
   it("retries a bounded number of rolled-back write conflicts", async () => {
-    const conflict = Object.assign(new Error("write conflict"), {
-      code: "P2034",
+    const conflict = Object.assign(new Error("Raw query failed. Code: `40001`. Message: `could not serialize access due to concurrent update`"), {
+      code: "P2010",
     });
     const operation = vi
       .fn<() => Promise<string>>()

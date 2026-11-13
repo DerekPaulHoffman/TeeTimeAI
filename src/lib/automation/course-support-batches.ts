@@ -950,6 +950,7 @@ export function isRetryableCourseSupportWriteConflict(error: unknown) {
   return (
     message.includes("deadlock detected") ||
     message.includes("write conflict") ||
+    message.includes("could not serialize access") ||
     message.includes("serialization failure")
   );
 }
