@@ -119,7 +119,7 @@ function localParts(value: Date, timeZone: string) {
 
 function publicRoundLabel(value: string, holes: number) {
   const label = value.trim();
-  if (/^(?:Public\*?|Public - Standard)$/iu.test(label)) return true;
+  if (/^(?:Public\*?|Public - Standard|Online Regular Public)$/iu.test(label)) return true;
   const round = /^Public (9|18) Holes$/iu.exec(label);
   return Boolean(round && Number(round[1]) === holes);
 }
@@ -158,6 +158,7 @@ export async function executeChronogolf(source: ChronogolfIdentitySource, metada
       let value: unknown; try { value = JSON.parse(response.text); } catch { fail("ADAPTER_AVAILABILITY_SCHEMA_CHANGED"); }
       const parsed = chronogolfAvailabilityPageSchema.safeParse(value);
       if (!parsed.success) fail("ADAPTER_AVAILABILITY_SCHEMA_CHANGED");
+      if (parsed.data.total_count !== undefined && parsed.data.total_count !== pagination.total) fail("ADAPTER_PAGINATION_UNVERIFIED");
       const rows = parsed.data.teetimes, expectedCount = Math.min(pagination.perPage, Math.max(0, pagination.total - (page - 1) * pagination.perPage));
       if (rows.length !== expectedCount || parsed.data.status === "sold_out" && (rows.length !== 0 || pagination.total !== 0)) fail("ADAPTER_PAGINATION_UNVERIFIED");
       for (const row of rows) {

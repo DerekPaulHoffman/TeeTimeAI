@@ -164,6 +164,20 @@ describe("Chronogolf fixed public all-round reader", () => {
     expect(await execute(deps, changed)).toHaveLength(1);
     expect(deps.reads.at(-1)!.searchParams.get("start_date")).toBe(changed.date); expect(deps.reads.at(-1)!.searchParams.get("free_slots")).toBe("3");
   });
+  it("reads the New Paltz public rate and checks the body count against pagination headers", async () => {
+    const slot = row(1);
+    slot.default_price.affiliation_type = "Online Regular Public";
+    const fixture = (totalCount: number) => dependencies({
+      pages: [[slot]], perPage: 24,
+      response: async (url, response) => url.pathname === "/marketplace/v2/teetimes"
+        ? Response.json({ ...await response.json(), total_count: totalCount }, { headers: response.headers })
+        : response,
+    });
+    await expect(execute(fixture(1))).resolves.toHaveLength(1);
+    await expect(execute(fixture(2))).rejects.toThrow("ADAPTER_PAGINATION_UNVERIFIED");
+    slot.default_price.player_type_id++;
+    await expect(execute(fixture(1))).rejects.toThrow("ADAPTER_SLOT_MISMATCH");
+  });
   it.each(["open", "sold_out"])("accepts explicit verified zero-total %s only", async status => {
     expect(await execute(dependencies({ pages: [[]], total: 0, perPage: 24, status }))).toEqual([]);
   });

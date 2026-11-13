@@ -138,7 +138,7 @@ function simulatorRejectionReason(place: GooglePlace, reviews: GooglePlaceReview
       ? null : "MISSING_SIMULATOR_EVIDENCE";
 }
 
-const OFFICIAL_EVIDENCE_PRIMARY_TYPES = new Set(["restaurant", "bar", "sports_bar", "sports_complex", "golf_course", "event_venue"]);
+const OFFICIAL_EVIDENCE_PRIMARY_TYPES = new Set(["restaurant", "bar", "sports_bar", "sports_complex", "sports_club", "golf_course", "event_venue"]);
 function canReadOfficialEvidence(place: GooglePlace, reviews: GooglePlaceReviewIndex, offerings: SimulatorOfferingIndex) {
   const reason = simulatorRejectionReason(place, reviews, offerings);
   return (reason === null || reason === "MISSING_SIMULATOR_EVIDENCE") &&
@@ -147,7 +147,7 @@ function canReadOfficialEvidence(place: GooglePlace, reviews: GooglePlaceReviewI
 
 function rejectSimulatorIdentity(reason: NonNullable<ReturnType<typeof simulatorRejectionReason>> | "EXACT_ID_MISMATCH", place: GooglePlace, upstreamStatus: number): never {
   const primaryTypes = new Set(["indoor_golf_course", "golf_course", "golf_instructor", "sports_coaching", "sports_school",
-    "bar", "sports_bar", "sports_complex", "store", "sporting_goods_store", "apartment_building", "apartment_complex",
+    "bar", "sports_bar", "sports_complex", "sports_club", "store", "sporting_goods_store", "apartment_building", "apartment_complex",
     "condominium_complex", "housing_complex", "real_estate_agency"]);
   const statuses = new Set(["OPERATIONAL", "CLOSED_TEMPORARILY", "CLOSED_PERMANENTLY"]);
   console.error("[simulator-place-confirmation-rejected]", {
