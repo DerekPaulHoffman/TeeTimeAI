@@ -26,8 +26,15 @@ function waitForCapacity(signal: AbortSignal) {
 export function createSimulatorBrowserRequestQueue(lease: RequestLease, signal: AbortSignal) {
   const pending: PendingRequest[] = [];
   const activeHosts = new Set<string>();
+  const idle = new Set<() => void>();
+  const notifyIdle = () => {
+    if (pending.length || activeHosts.size) return;
+    for (const resolve of idle) resolve();
+    idle.clear();
+  };
   const abortPending = () => {
     for (const request of pending.splice(0)) request.reject(signal.reason);
+    notifyIdle();
   };
   signal.addEventListener("abort", abortPending, { once: true });
 
@@ -46,7 +53,7 @@ export function createSimulatorBrowserRequestQueue(lease: RequestLease, signal: 
         await waitForCapacity(request.signal);
       }
     } catch (error) { request.reject(error); }
-    finally { activeHosts.delete(request.hostname); drain(); }
+    finally { activeHosts.delete(request.hostname); drain(); notifyIdle(); }
   };
 
   const drain = () => {
@@ -72,5 +79,12 @@ export function createSimulatorBrowserRequestQueue(lease: RequestLease, signal: 
       });
     },
     dispose() { signal.removeEventListener("abort", abortPending); },
+    // Browser response bodies can be consumed before the route callback has
+    // finished releasing its durable lease. A short-lived helper must await
+    // those callbacks after closing the browser and before reporting success.
+    waitForIdle(): Promise<void> {
+      if (!pending.length && !activeHosts.size) return Promise.resolve();
+      return new Promise(resolve => { idle.add(resolve); });
+    },
   };
 }

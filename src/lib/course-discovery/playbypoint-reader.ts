@@ -17,6 +17,12 @@ type Dependencies = { deadlineAt?: Date; localCapabilities?: readonly "LOCAL_CHR
   launchBrowser?: (proxy: string) => Promise<Browser>;
   toInstant?: (value: unknown, input: AccessExecutionInput) => Date };
 function fail(code: string): never { throw Error(code); }
+export function playbyPointFailureCode(error: unknown, phase: string) {
+  const allowed = ["LAUNCH", "IDENTITY", "DATE_CONTROL", "DATE_CLICK", "SIMULATOR_CONTROL", "SIMULATOR_RESPONSE", "AVAILABILITY"];
+  if (error instanceof Error && /^[A-Z_]{1,80}$/u.test(error.message)) return error.message;
+  const stage = allowed.includes(phase) ? phase : "UNKNOWN";
+  return `PLAYBYPOINT_${stage}_${error instanceof Error && error.name === "TimeoutError" ? "TIMEOUT" : "FAILED"}`;
+}
 const nameKey = (value: string) => value.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
 function officialBookingLinks(html: string, officialUrl: string) {
   const roots = new Set<string>(), official = new URL(officialUrl);
@@ -228,8 +234,13 @@ export async function readPlaybyPoint(source: PlaybyPointSource, input: AccessEx
       return { metadata, slots };
     } finally { signal.removeEventListener("abort", abort); }
   } catch (error) {
-    const code = error instanceof Error && /^[A-Z_]+$/u.test(error.message) ? error.message : "PLAYBYPOINT_PUBLIC_READ_FAILED";
+    const code = playbyPointFailureCode(error, phase);
     throw Object.assign(Error(code), { details: { phase, requestCount, denied,
       errorKind: error instanceof Error ? error.name : "unknown" } });
-  } finally { controller.abort(); queue.dispose(); await browser?.close().catch(() => {}); await proxy.close(); }
+  } finally {
+    controller.abort(); queue.dispose();
+    await browser?.close().catch(() => {});
+    await queue.waitForIdle();
+    await proxy.close();
+  }
 }

@@ -6,6 +6,27 @@ afterEach(() => vi.useRealTimers());
 const deferred = () => { let resolve!: () => void; const promise = new Promise<void>(r => { resolve = r; }); return { promise, resolve }; };
 
 describe("interactive browser request capacity", () => {
+  it("does not finish browser shutdown until an observed response's durable lease is released", async () => {
+    const controller = new AbortController(), observed = deferred(), release = deferred();
+    let occupied = 0;
+    const queue = createSimulatorBrowserRequestQueue(async (_host, run) => {
+      occupied++;
+      try { const value = await run(); await release.promise; return { acquired: true as const, value }; }
+      finally { occupied--; }
+    }, controller.signal);
+    const result = expect(queue.run("public.test", async () => { observed.resolve(); return "body already read"; }))
+      .rejects.toThrow("browser closed");
+    await observed.promise;
+    controller.abort(new Error("browser closed")); queue.dispose();
+    let finished = false;
+    const shutdown = queue.waitForIdle().then(() => { finished = true; });
+    await Promise.resolve();
+    expect(finished).toBe(false); expect(occupied).toBe(1);
+    release.resolve(); await shutdown; await result;
+    expect(occupied).toBe(0); expect(finished).toBe(true);
+    await expect(queue.waitForIdle()).resolves.toBeUndefined();
+  });
+
   it("serializes a host while allowing a second host and never exceeds two active lanes", async () => {
     const controller = new AbortController();
     const release = deferred();

@@ -37,3 +37,10 @@ fresh typed-adapter investigation at that root. The denied link stays blocked;
 its URL and facts confer no routing, inventory or activation authority. A guard
 denial after navigation, an access response, another page, or incomplete cleanup
 does not qualify. Regression cases cover the exact failure and those exclusions.
+
+After the browser closes, the reader waits for its queued and active requests
+to settle, including the durable provider-lease release. A response body may be
+available before that release finishes; returning it and terminating the helper
+early can leave shared request capacity occupied until lease expiry. A delayed
+release regression verifies that shutdown cannot finish in that state. Unknown
+browser failures retain their fixed reader phase without raw page/error text.

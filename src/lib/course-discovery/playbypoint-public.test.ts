@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { PLAYBYPOINT_QUERY, parsePlaybyPointWidget, playbyPointReadInput, playbyPointResourceSelection,
   type PlaybyPointOptions } from "./playbypoint-public";
-import { playbyPointRouteAllowed } from "./playbypoint-reader";
+import { playbyPointRouteAllowed, playbyPointFailureCode } from "./playbypoint-reader";
+
+it("retains the failed public-read phase without private browser error text", () => {
+  const timeout = Object.assign(Error("PRIVATE_URL?token=PRIVATE"), { name: "TimeoutError" });
+  expect(playbyPointFailureCode(timeout, "IDENTITY")).toBe("PLAYBYPOINT_IDENTITY_TIMEOUT");
+  expect(playbyPointFailureCode(timeout, "DATE_CONTROL")).toBe("PLAYBYPOINT_DATE_CONTROL_TIMEOUT");
+  expect(playbyPointFailureCode(timeout, "PRIVATE_URL")).toBe("PLAYBYPOINT_UNKNOWN_TIMEOUT");
+  expect(playbyPointFailureCode(Error("PLAYBYPOINT_CLIENT_CHANGED"), "AVAILABILITY")).toBe("PLAYBYPOINT_CLIENT_CHANGED");
+});
 
 const facilityUuid = "13bb78da-12d1-6280-3b0e-0234297bb93d";
 const body = (input: object = {}, query = PLAYBYPOINT_QUERY) => JSON.stringify({
