@@ -56,7 +56,17 @@ function currentPublicSourceRecovery(report, job, sourceDeadline, now, invocatio
   const timedOutClick = code === "STAGEHAND_SOURCE_DISCOVERY_FAILED" && diagnostic?.phase === "ACT" && diagnostic.errorClass === "TIMEOUT" &&
     diagnostic.sourceStop?.condition === "ERROR" && diagnostic.sourceStop.finalDecision === "CONTINUE" &&
     diagnostic.sourceStop.lastActionKind === "click" && counts?.actionAttempts === counts?.executedActions + 1;
-  if (!unresolved && !timedOutClick) return undefined;
+  // A rejected sign-in link is not evidence that the canonical public root
+  // requires an account. Keep that link blocked and allow only a fresh typed
+  // adapter inspection from the unchanged simulator root, never DOM fallback.
+  const guardedSimulatorLink = job.request?.target?.kind === "SIMULATOR" &&
+    code === "STAGEHAND_GUARDED_SOURCE_REJECTED" && diagnostic?.phase === "ACT" && diagnostic.errorClass === "STATIC_TRANSPORT" &&
+    diagnostic.transportCode === code && diagnostic.hostGuardFailure?.stage === "BEFORE_ACTION" &&
+    diagnostic.hostGuardFailure.reason === "HREF_URL_POLICY" && diagnostic.sourceStop?.condition === "ERROR" &&
+    diagnostic.sourceStop.finalDecision === "CONTINUE" && diagnostic.sourceStop.lastActionKind === "click" &&
+    counts?.actionAttempts === 1 && counts.executedActions === 0 && diagnostic.graph?.pages === 1 && diagnostic.graph.actions === 0;
+  if (!unresolved && !timedOutClick && !guardedSimulatorLink) return undefined;
+  if (guardedSimulatorLink) { cleanFields.add("transportCode"); cleanFields.add("hostGuardFailure"); }
   const current =
     report.schemaVersion === 1 &&
     report.methodSaved === false && report.methodArtifactSaved === false && report.rootWidgetWitness === undefined &&
@@ -71,7 +81,8 @@ function currentPublicSourceRecovery(report, job, sourceDeadline, now, invocatio
     ready.mainReadPending === false && ready.mainDocumentStatus === 200 && ["interactive", "complete"].includes(ready.readyState) &&
     counts.failedModelCalls === 0 && counts.rejectedActions === 0 &&
     counts.attemptedModelCalls === counts.completedModelCalls && counts.completedModelCalls === report.metrics.localCodexCalls.length;
-  return current ? (timedOutClick ? "SOURCE_PUBLIC_CLICK_TIMEOUT" : "SOURCE_UNRESOLVED_PUBLIC_DOCUMENT") : undefined;
+  return current ? (guardedSimulatorLink ? "SOURCE_PUBLIC_SIMULATOR_LINK_REJECTED" :
+    timedOutClick ? "SOURCE_PUBLIC_CLICK_TIMEOUT" : "SOURCE_UNRESOLVED_PUBLIC_DOCUMENT") : undefined;
 }
 
 /** Source routing has no customer, provider, identity, inventory, or activation authority.
@@ -127,7 +138,7 @@ export async function runCourseDiscoveryStagehandWorker({
         // An identity rejection may be a stale route or the wrong public
         // facility. Let Sol investigate again, but never escape that typed
         // identity/scope rejection through generic DOM or JSON extraction.
-        ...(["ADAPTER_CONFIGURATION_UNVERIFIED", "ADAPTER_IDENTITY_MISMATCH"].includes(trigger) ? { recipeEngineConstraint: "EXISTING_ADAPTER" } : {}),
+        ...(["ADAPTER_CONFIGURATION_UNVERIFIED", "ADAPTER_IDENTITY_MISMATCH", "SOURCE_PUBLIC_SIMULATOR_LINK_REJECTED"].includes(trigger) ? { recipeEngineConstraint: "EXISTING_ADAPTER" } : {}),
         beforeActivate: async () => { check(); await beforeActivate(); },
         afterActivate: async ({ metrics: genericMetrics } = {}) => {
           activationAcknowledged = true; metrics.genericFallback.worker = genericMetrics; await afterActivate({ metrics });

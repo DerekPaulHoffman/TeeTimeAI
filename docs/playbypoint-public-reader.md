@@ -27,3 +27,13 @@ The Sports Haus reproduction returned 34 verified bay intervals for November
 19, 2026, from 9 a.m. through 6 p.m. via the normal recipe executor. This local
 reader check precedes independent production recipe replay, alert delivery and
 restart acceptance.
+
+The first released worker trial found a separate source-routing gap: Stagehand
+selected an account link on the otherwise public official homepage, then its
+retry exhausted the source budget without reaching this reader. Recovery now
+requires a completed, current public root, a link denied before any action,
+closed browser/model resources, and the original job clock. It starts only a
+fresh typed-adapter investigation at that root. The denied link stays blocked;
+its URL and facts confer no routing, inventory or activation authority. A guard
+denial after navigation, an access response, another page, or incomplete cleanup
+does not qualify. Regression cases cover the exact failure and those exclusions.
