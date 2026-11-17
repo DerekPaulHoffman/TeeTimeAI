@@ -1,5 +1,8 @@
 # Public simulator rentals through PlaybyPoint
 
+This learned-recipe reader runs in local Chrome. It does not register a legacy
+server-dispatch adapter or change that dispatcher's supported provider list.
+
 The fixed reader supports the public 60-minute simulator rental. It derives a
 booking subdomain from the current official site's links, checks the venue name
 and complete address on that site's public booking homepage, and reads its
