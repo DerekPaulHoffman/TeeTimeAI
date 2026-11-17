@@ -2323,6 +2323,15 @@ describe("course-support path planning", () => {
     ).toBe(false);
   });
 
+  it("lets the same full-repair owner reserve a follow-up fix while preserving legacy release sealing", () => {
+    expect(canAppendCourseSupportBatchPath({ status: "VERIFYING", releaseSha: "a".repeat(40),
+      plannedPaths: ["src/lib/adapters/teeitup.ts"], allowFollowUpImplementation: true })).toBe(true);
+    for (const status of ["COMPLETED", "RETRYABLE_FAILED", "NEEDS_HUMAN"] as const) {
+      expect(canAppendCourseSupportBatchPath({ status: status as never, releaseSha: "a".repeat(40),
+        plannedPaths: [], allowFollowUpImplementation: true })).toBe(false);
+    }
+  });
+
   it.each(["CLAIMED", "IMPLEMENTING"] as const)(
     "keeps ordinary %s path planning available",
     (status) => {
@@ -26177,21 +26186,21 @@ describe("detached verification atomic batch fences", () => {
     );
   });
 
-  it("rejects implementation verification when no implementation release was provided", async () => {
+  it.each([false, true])("rejects implementation verification without its code release (full mission: %s)", async fullMission => {
     prismaMocks.batchFindFirst.mockResolvedValue({
       ...verificationBatch(),
       baseSha: "c".repeat(40),
       releaseSha: null,
       deployedAt: null,
       summary: {
-        plannedPaths: [],
+        plannedPaths: fullMission ? ["src/lib/adapters/teeitup.ts"] : [],
         remediation: {
           workMode: "IMPLEMENT_REUSABLE_SUPPORT",
           strategyAction: "REPAIR_PROVIDER_ADAPTER",
           playbookStage: "TYPED_ADAPTER",
-          allowUnchangedRuntime: false,
-          requiresImplementationPath: true,
-          reason: "IMPLEMENTATION_REQUIRED",
+          allowUnchangedRuntime: fullMission,
+          requiresImplementationPath: !fullMission,
+          reason: fullMission ? "FAILED_LEARNER_IMPLEMENTATION_HANDOFF" : "IMPLEMENTATION_REQUIRED",
           retryBudget: null,
         },
       },

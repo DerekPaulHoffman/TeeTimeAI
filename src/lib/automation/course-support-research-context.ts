@@ -187,6 +187,15 @@ export async function validateOwnedCourseSupportResearchContext(
       current.researchContextV1.actionPlan.allowedActions.includes("IMPLEMENT_REUSABLE_SUPPORT") &&
       current.researchContextV1.availabilityContract.status === "CONFIRMED_PUBLIC_READ" &&
       current.researchContextV1.linkChain.status === "CURRENT_DISCOVERY_CORROBORATED",
+    // Repairing a broken reader/discovery tool cannot require that broken tool
+    // to have already produced a complete provider contract. This permission
+    // never activates provider data or substitutes for independent replay.
+    discoveryToolingRepairMayProceed:
+      current.researchContextV1.actionPlan.allowedActions.includes("INVESTIGATE_PUBLIC_SOURCE") &&
+      current.researchContextV1.actionPlan.allowedActions.includes("IMPLEMENT_REUSABLE_SUPPORT") &&
+      current.researchContextV1.providerSnapshot.monitoringMode !== "LOCAL_READER_ONLY" &&
+      current.researchContextV1.availabilityContract.status !== "BARRIER" &&
+      current.researchContextV1.availabilityContract.status !== "CONFLICTING",
     furtherBoundedInspectionRequired:
       !current.researchContextV1.actionPlan.allowedActions.includes("IMPLEMENT_REUSABLE_SUPPORT") ||
       current.researchContextV1.availabilityContract.status !== "CONFIRMED_PUBLIC_READ" ||

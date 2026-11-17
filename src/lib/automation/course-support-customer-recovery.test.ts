@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ findMany: vi.fn(), count: vi.fn(), transaction: vi.fn() }));
 vi.mock("@/lib/prisma", () => ({ prisma: { courseSupportBatch: { findMany: mocks.findMany, count: mocks.count }, $transaction: mocks.transaction } }));
-import { assessCustomerRecovery, refreshPendingCustomerRecoveries, type CustomerRecoverySearch } from "./course-support-customer-recovery";
+import { assessCustomerRecovery, readCustomerRecovery, refreshPendingCustomerRecoveries, type CustomerRecoverySearch } from "./course-support-customer-recovery";
 
 const floor = new Date("2026-09-21T12:00:00Z");
 const now = new Date("2026-09-21T12:20:00Z");
@@ -90,12 +90,25 @@ describe("customer recovery acceptance", () => {
 
 describe("durable recovery across responder runs", () => {
   beforeEach(() => vi.clearAllMocks());
+  it("keeps real customer demand open when failed verification never dispatched a recheck", async () => {
+    const value = search(); value.probes = []; value.emailDeliveries = [];
+    const client = { courseSupportBatchSearch: { findMany: vi.fn().mockResolvedValue([]) },
+      teeSearch: { findMany: vi.fn().mockResolvedValue([value]) } };
+    expect(await readCustomerRecovery(client as never, { id: "batch", createdAt: floor,
+      releaseSha, deployedAt: floor, recheckDispatchStartedAt: null, summary: { customerRecoveryVersion: 1 } },
+      ["private-course"], now)).toMatchObject({ status: "OPEN", affectedSearchCount: 1,
+        pendingProviderPairCount: 1, pendingRecipientCourseCount: 2 });
+    expect(client.teeSearch.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({
+      status: "ACTIVE", mode: "OUTDOOR", preferences: { some: { courseId: { in: ["private-course"] } } },
+    }) }));
+  });
   it("revisits a closed provider batch and persists completion only after the missing delivery arrives", async () => {
     const value = search(); const extra = value.emailDeliveries.pop()!;
     const batch = { id: "batch", reference: "CS-test", createdAt: floor, releaseSha, deployedAt: floor,
       recheckDispatchStartedAt: floor, revision: 1, summary: { customerRecoveryVersion: 1, customerRecovery: assess(value) },
       incidents: [{ courseId: "private-course" }] };
-    const tx = { $queryRaw: vi.fn().mockResolvedValue([]), courseSupportBatchSearch: { findMany: vi.fn().mockImplementation(() => [{ scheduleVersion: 3, teeSearch: value }]) },
+    const tx = { $queryRaw: vi.fn().mockResolvedValue([]), teeSearch: { findMany: vi.fn().mockResolvedValue([]) },
+      courseSupportBatchSearch: { findMany: vi.fn().mockImplementation(() => [{ scheduleVersion: 3, teeSearch: value }]) },
       courseSupportBatch: { updateMany: vi.fn().mockImplementation(({ where, data }) => {
         expect(where.revision).toBe(batch.revision); batch.summary = data.summary; batch.revision++; return { count: 1 };
       }) } };

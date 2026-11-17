@@ -196,6 +196,22 @@ function fixture() {
 describe("owned course-support research context", () => {
   beforeEach(() => database.batchFindFirst.mockReset());
 
+  it("permits owned discovery-tool repair before a missing provider contract, without granting provider proof", async () => {
+    const batch = fixture();
+    batch.summary.remediation.reason = "FAILED_LEARNER_IMPLEMENTATION_HANDOFF";
+    batch.summary.remediation.attempts[0].actionPlan.allowedActions.push("INVESTIGATE_PUBLIC_SOURCE");
+    batch.incidents[0].course.automationDiscoveries = [];
+    database.batchFindFirst.mockResolvedValue(batch);
+    const context = await getOwnedCourseSupportResearchContext(input);
+    if (context.outcome !== "ready") throw new Error("Expected owner context");
+    expect(await validateOwnedCourseSupportResearchContext({ ...input, contextDigest: context.researchContextV1.contextDigest }))
+      .toMatchObject({ outcome: "valid", discoveryToolingRepairMayProceed: true,
+        implementationMayProceedFromResearch: false, monitoringProofRecorded: false });
+    batch.incidents[0].course.bookingAccessMode = "ACCOUNT_REQUIRED";
+    expect(await validateOwnedCourseSupportResearchContext({ ...input, contextDigest: context.researchContextV1.contextDigest }))
+      .toMatchObject({ outcome: "authority_drift" });
+  });
+
   it("gates exact identity and URLs by the active owner and emits candidate-only read evidence", async () => {
     database.batchFindFirst.mockResolvedValue(fixture());
     const result = await getOwnedCourseSupportResearchContext(input);

@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { refreshPendingCustomerRecoveries } from "@/lib/automation/course-support-customer-recovery";
+import { shouldContinueOwnedFullRepair } from "@/lib/automation/course-support-full-repair";
 import { promisify } from "node:util";
 
 import {
@@ -1345,7 +1346,9 @@ async function verify(
           verificationAttemptSnapshot.capturedAt
         );
 
-      const watchResult = await runCourseSupportVerificationWatch({
+      type CloseoutResult = Awaited<ReturnType<typeof closeoutSettledCourseSupportBatch>> |
+        Awaited<ReturnType<typeof closeoutStoppedCourseSupportBatch>>;
+      const watchResult = await runCourseSupportVerificationWatch<Awaited<ReturnType<typeof runPass>>["verification"], CloseoutResult>({
         pass: (signal) => runPass(signal, verificationAttemptSnapshot),
         maxMinutes,
         pollMs: pollSeconds === undefined ? undefined : pollSeconds * 1_000,
@@ -1393,6 +1396,7 @@ async function verify(
       return closeoutAfterWatch
         ? {
             ...watchResult,
+            ...(watchResult.closeout?.outcome === "repair_required" ? { outcome: "repair_required" as const } : {}),
             verificationStageDeadlineGrant: deadlineGrant,
             durableCloseoutRecorded:
               watchResult.closeout?.durableCloseoutRecorded === true
@@ -1759,6 +1763,17 @@ async function closeoutSettledCourseSupportBatch(input: {
     );
   }
 
+  if (shouldContinueOwnedFullRepair(packet)) {
+    return {
+      outcome: "repair_required" as const,
+      durableCloseoutRecorded: false,
+      ownershipRetained: true,
+      verificationWatchPassCount: input.passCount,
+      preCloseoutExplicitHumanCount: packet.courses.filter(course => course.result === "NEEDS_HUMAN").length,
+      nextAction: "Read the persisted failed verification, diagnose a different approach, and continue this same owned repair. Do not close or claim another batch, retry unchanged discovery, or classify tooling failure as unavailable inventory.",
+    };
+  }
+
   const settled = await closeoutSettledCourseSupportVerification({
     courses: packet.courses,
     closeout: (preCloseoutExplicitHumanCount) =>
@@ -1806,6 +1821,20 @@ async function closeoutStoppedCourseSupportBatch(input: {
   signal?: AbortSignal;
 }) {
   input.signal?.throwIfAborted();
+  const packet = await getCourseSupportBatchPacket({ batchId: input.batchId,
+    leaseToken: input.leaseToken, ownerThreadId: input.ownerThreadId });
+  input.signal?.throwIfAborted();
+  if (packet.outcome === "ready" && shouldContinueOwnedFullRepair(packet)) {
+    const checkpoint = await heartbeatCourseSupportBatch({ batchId: input.batchId,
+      leaseToken: input.leaseToken, ownerThreadId: input.ownerThreadId,
+      ownerFailureCheckpoint: { stage: "VERIFICATION", failureDomain: "PRODUCTION_VERIFICATION",
+        reasonCode: "VERIFICATION_TOOLING_FAILED" } });
+    if (!checkpoint.heartbeatRecorded) throw new Error("Full repair lost ownership while retaining verification failure.");
+    return { outcome: "repair_required" as const, durableCloseoutRecorded: false,
+      ownershipRetained: true, verificationWatchPassCount: input.passCount,
+      verificationFailureCode: input.failureCode ?? null,
+      nextAction: "Inspect the retained verification failure and fresh owned research context. Continue the same repair with a different tested approach; source, access and ownership fences still apply." };
+  }
   const result = await closeoutCourseSupportBatch({
     batchId: input.batchId,
     leaseToken: input.leaseToken,

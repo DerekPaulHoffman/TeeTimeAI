@@ -138,6 +138,33 @@ describe("terminal learner to coding responder", () => {
   });
 });
 describe("private failure evidence", () => {
+  it.each(["OFFICIAL_PHYSICAL_CONTACT_UNVERIFIED", "STAGEHAND_SOURCE_DISCOVERY_FAILED"])("carries the actual bounded worker checkpoint entry for %s into repair", code => {
+    const checkpoint = {
+      stagehandProgress: { phase: "SOURCE_EXPORTED" },
+      stagehandFailure: { schemaVersion: 1, kind: "OWN_STAGEHAND_FAILURE_DIAGNOSTIC", entries: [
+        { attempt: 1, phase: "SOURCE_DISCOVERY", code: "STAGEHAND_SOURCE_BUDGET_EXHAUSTED" },
+        { attempt: 2, phase: "FIXED_INSPECTION", code, message: "PRIVATE_UNTRUSTED_INSTRUCTIONS" },
+      ] },
+    };
+    expect(discoveryFailureDiagnosis({ outcome: "TOOL_FAILURE", checkpoint })).toMatchObject({
+      code, phase: "FIXED_INSPECTION", evidenceAuthority: false,
+    });
+    expect(JSON.stringify(discoveryFailureDiagnosis({ outcome: "TOOL_FAILURE", checkpoint }))).not.toContain("PRIVATE_UNTRUSTED_INSTRUCTIONS");
+  });
+  it("does not traverse malformed or unbounded checkpoint histories", () => {
+    for (const entries of [null, "PRIVATE", [{ attempt: 2, phase: "PRIVATE invalid", code: "PRIVATE invalid" }],
+      Array.from({ length: 3 }, (_, i) => ({ attempt: i + 1, code: "BROWSER_UNAVAILABLE", phase: "REPLAY" }))]) {
+      expect(discoveryFailureDiagnosis({ outcome: "TOOL_FAILURE", checkpoint: {
+        stagehandFailure: { schemaVersion: 1, kind: "OWN_STAGEHAND_FAILURE_DIAGNOSTIC", entries },
+      } })).toMatchObject({ code: null, phase: null, evidenceAuthority: false });
+    }
+  });
+  it("retains a bounded resumed second-attempt replay failure as diagnosis only", () => {
+    expect(discoveryFailureDiagnosis({ outcome: "TOOL_FAILURE", checkpoint: { stagehandFailure: {
+      schemaVersion: 1, kind: "OWN_STAGEHAND_FAILURE_DIAGNOSTIC",
+      entries: [{ attempt: 2, code: "DISCOVERY_REPLAY_INCOMPLETE", phase: "REPLAY" }],
+    } } })).toEqual({ category: "REPLAY_VALIDATION_FAILED", code: "DISCOVERY_REPLAY_INCOMPLETE", phase: "REPLAY", evidenceAuthority: false });
+  });
   it("does not accept a model checkpoint as a server-issued engineering link", async () => {
     Object.assign(failure.job.checkpoint, { engineeringHandoff: receipt() });
     expect(await currentDiscoveryEngineeringHandoff(m.db as never, { courseId: "course1" }, now)).toBeNull();

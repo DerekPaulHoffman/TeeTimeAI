@@ -28,6 +28,8 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
   });
   afterEach(async () => {
     if (!client) return;
+    const ownedRuns = await client.automationRun.findMany({ where: { ownerThreadId: { in: batchOwners } }, select: { id: true } });
+    runs.push(...ownedRuns.map(run => run.id));
     await client.courseSupportBatch.deleteMany({ where: { ownerThreadId: { in: batchOwners } } }); batchOwners.length = 0;
     await client.automationRun.deleteMany({ where: { id: { in: runs } } }); runs.length = 0;
     await client.course.deleteMany({ where: { id: { in: courses } } });
@@ -157,6 +159,25 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     expect(await client.courseProbe.count({ where: { courseId: f.course.id } })).toBe(0);
     expect(await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } }))
       .toMatchObject({ status: "FAILED", attempts: f.job.attempts, firstPickedUpAt: f.job.firstPickedUpAt, deadlineAt: f.job.deadlineAt });
+  });
+  it("claims a real failed outdoor learner as a full repair, preserving its demand and failed clock", async () => {
+    const f = await failed();
+    await engineering.reconcileDiscoveryEngineeringHandoffs();
+    const owner = `full-repair-${randomUUID()}`; batchOwners.push(owner);
+    const lane = await import("@/lib/automation/course-support-batches");
+    const claimed = await lane.claimCourseSupportBatch({ ownerThreadId: owner,
+      branch: "automation/course-support-full-repair", baseSha: "a".repeat(40), maxCourses: 1 });
+    expect(claimed).toMatchObject({ outcome: "ready" });
+    const batch = await client.courseSupportBatch.findFirstOrThrow({ where: { ownerThreadId: owner } });
+    expect(await lane.getCourseSupportBatchPacket({ batchId: batch.id, leaseToken: batch.leaseToken, ownerThreadId: owner }))
+      .toMatchObject({ outcome: "ready", remediation: { reason: "FAILED_LEARNER_IMPLEMENTATION_HANDOFF" },
+        courses: [{ actionPlan: { primaryAction: "IMPLEMENT_REUSABLE_SUPPORT",
+          allowedActions: expect.arrayContaining(["INVESTIGATE_PUBLIC_SOURCE"]) } }] });
+    expect(await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } }))
+      .toMatchObject({ status: "FAILED", attempts: f.job.attempts,
+        firstPickedUpAt: f.job.firstPickedUpAt, deadlineAt: f.job.deadlineAt });
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } }))
+      .toMatchObject({ status: "ACTIVE", alertGeneration: 0 });
   });
   it.each([["database-null", Prisma.DbNull], ["json-null", Prisma.JsonNull]] as const)("initializes an older unowned %s ledger while preserving its receipt and original failed clock", async (_kind, emptyLedger) => {
     const f = await failed(); await engineering.reconcileDiscoveryEngineeringHandoffs();

@@ -27,10 +27,18 @@ async function initializeEmptyInvestigation(tx: Pick<Prisma.TransactionClient, "
  * monitoring eligibility, completeness, access requirements or write authority. */
 export function discoveryFailureDiagnosis(job: { outcome: string | null; checkpoint: unknown }) {
   const checkpoint = object(job.checkpoint), progress = object(checkpoint.stagehandProgress), failure = object(checkpoint.stagehandFailure);
-  const code = safeCode(failure.code), phase = safeCode(progress.phase);
+  // The native worker writes a bounded attempt history, not a flat code. Do
+  // not turn arbitrary checkpoint prose into a repair instruction.
+  const entries = failure.schemaVersion === 1 && failure.kind === "OWN_STAGEHAND_FAILURE_DIAGNOSTIC" &&
+    Array.isArray(failure.entries) && failure.entries.length > 0 && failure.entries.length <= 2
+    ? failure.entries.map(object) : [];
+  const validHistory = entries.every((entry, index) => [1, 2].includes(entry.attempt as number) &&
+    (index === 0 || (entries[index - 1].attempt as number) < (entry.attempt as number)) && safeCode(entry.code) && safeCode(entry.phase));
+  const last = validHistory ? entries.at(-1) : undefined;
+  const code = safeCode(last?.code ?? failure.code), phase = safeCode(last?.phase ?? progress.phase);
   const category = job.outcome === "DEADLINE" ? "DEADLINE_EXCEEDED" : job.outcome === "UNSUPPORTED" ? "MISSING_READER_CAPABILITY" :
     code === "GUARDED_HOST" ? "BROWSER_TRANSPORT_REJECTED" : code === "ADAPTER_CONFIGURATION_CHANGED" ? "SAVED_METHOD_SOURCE_CHANGED" :
-      code === "BROWSER_UNAVAILABLE" ? "LOCAL_BROWSER_UNAVAILABLE" : phase === "INDEPENDENT_REPLAY" ? "REPLAY_VALIDATION_FAILED" : "READER_OR_RUNTIME_FAILURE";
+      code === "BROWSER_UNAVAILABLE" ? "LOCAL_BROWSER_UNAVAILABLE" : phase === "INDEPENDENT_REPLAY" || phase === "REPLAY" ? "REPLAY_VALIDATION_FAILED" : "READER_OR_RUNTIME_FAILURE";
   return { category, code, phase, evidenceAuthority: false as const };
 }
 
@@ -64,7 +72,7 @@ export async function discoveryEngineeringContext(reader: Reader, target: { cour
     originalFirstPickupAt: job.firstPickedUpAt!.toISOString(), originalDeadlineAt: job.deadlineAt!.toISOString(),
     completedAt: job.completedAt!.toISOString(), attempts: job.attempts, outcome: job.outcome,
     originalDeadlineExpired: now > job.deadlineAt!, diagnosis: discoveryFailureDiagnosis(job),
-    instruction: "Use this diagnosis with the current owned action plan or simulator research guide. Complete the authorized verification or research stage first when implementation is not yet allowed. Repair reusable code only under existing path, implementation and release gates. Keep this original job terminal; recovery after its deadline does not pass the original fifteen-minute contract." };
+    instruction: "Use the current owned action plan to investigate and repair the failed learning process end to end. A tooling failure is engineering work, not evidence of inaccessible inventory. Reserve implementation paths, test the observed regression, and prove the exact deployed runtime and normal customer recovery. Keep this original job terminal; recovery after its deadline does not pass the original fifteen-minute contract." };
 }
 
 /** Existing scheduled coding dispatch is the sole consumer. A restart or a

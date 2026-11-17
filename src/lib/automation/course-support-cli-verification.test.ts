@@ -29,6 +29,17 @@ describe("course-support verification command failure signaling", () => {
     }
   };
 
+  it.each(["verify", "verify-release"])("%s returns owned repair work without pretending it closed or passed", async command => {
+    const repair = { outcome: "repair_required", stoppedReason: "error", failureCode: "BROWSER_STAGE_NETWORK_FAILED",
+      durableCloseoutRecorded: false, closeout: { outcome: "repair_required", ownershipRetained: true, durableCloseoutRecorded: false } };
+    const result = command === "verify" ? repair : { outcome: "release_verification_completed", verification: repair };
+    const write = vi.fn();
+    await runConfiguredCommand({ argv: [command], isWorkerExecutionAllowed: vi.fn(async () => true),
+      verify: async () => result, verifyRelease: async () => result, write });
+    expect(process.exitCode).not.toBe(1);
+    expect(write).toHaveBeenCalledExactlyOnceWith(result);
+  });
+
   it.each(["verify", "verify-release"])(
     "%s fails after successful cleanup and preserves the durable result",
     async (command) => {
