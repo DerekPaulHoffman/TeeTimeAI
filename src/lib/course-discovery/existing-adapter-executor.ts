@@ -77,6 +77,7 @@ import { parseYouCanBookSource } from "./youcanbook-public";
 import { inspectYouCanBook, executeYouCanBook } from "./youcanbook-executor";
 import { inspectSimplySchedule, executeSimplySchedule } from "./simply-schedule-executor";
 import { inspectSkedda, executeSkedda } from "./skedda-executor";
+import { isPlaybyPointCandidate, readPlaybyPoint } from "./playbypoint-reader";
 
 type Dependencies = {
   fetch?: typeof fetch;
@@ -657,6 +658,10 @@ export async function inspectExistingAdapter(source: Source, deps: Dependencies)
     if (!deps.requestedInput?.durationMinutes) fail("ADAPTER_TARGET_MISMATCH");
     return { adapter: await inspectSkedda(source, deps.requestedInput, deps) };
   }
+  if (deps.requestedInput?.durationMinutes && isPlaybyPointCandidate(source) &&
+      new URL(source.bookingUrl).hostname.startsWith("book.")) {
+    return { adapter: (await readPlaybyPoint(source, deps.requestedInput, deps)).metadata };
+  }
   if (parseChelseaPublicSource(source.bookingUrl)) return { adapter: await inspectChelseaPublic(source, deps) };
   if (parseMindbodyAppointmentSource(source.bookingUrl)) {
     if (!source.officialUrl || !source.venueAddress) fail("ADAPTER_IDENTITY_MISSING");
@@ -712,6 +717,12 @@ export async function inspectExistingAdapter(source: Source, deps: Dependencies)
   catch (error) {
     if (!(error instanceof Error) || error.message !== "UNSUPPORTED_ADAPTER_SOURCE") throw error;
     if (!source.officialUrl || !isSafeRecipeUrl(source.officialUrl)) throw error;
+    if (deps.requestedInput?.durationMinutes && isPlaybyPointCandidate(source)) {
+      try { return { adapter: (await readPlaybyPoint(source, deps.requestedInput, deps)).metadata }; }
+      catch (publicReadError) {
+        if (!(publicReadError instanceof Error) || publicReadError.message !== "PLAYBYPOINT_OFFICIAL_SOURCE_UNVERIFIED") throw publicReadError;
+      }
+    }
     // SSA independently re-reads the exact canonical root and its public
     // booking edge. Its bounded reader permits only the same host's www alias;
     // keep the other self-hosted adapter's same-origin boundary unchanged.
@@ -908,7 +919,7 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
   let uscheduleSession: ReturnType<typeof createUSchedulePublicSession> | undefined;
   try {
     const adapter = existingAdapterMetadataSchema.parse(recipe.adapter);
-    const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "GOLFVX", "REX", "MINDBODY", "FIVE_IRON", "GOLFBOOK", "SKEDDA", "YOUCANBOOKME", "SIMPLY_SCHEDULE_APPOINTMENTS"].includes(adapter.family) || adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR";
+    const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "GOLFVX", "REX", "MINDBODY", "FIVE_IRON", "GOLFBOOK", "SKEDDA", "PLAYBYPOINT", "YOUCANBOOKME", "SIMPLY_SCHEDULE_APPOINTMENTS"].includes(adapter.family) || adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR";
     if (input.timeZone !== recipe.source.timeZone || recipe.source.providerFamily.toUpperCase() !== adapter.family ||
         (recipe.target.kind === "SIMULATOR") !== simulator || simulator && (!recipe.target.offeringId || !input.durationMinutes) ||
         adapter.family === "TEEITUP" && adapter.offeringKind === "SIMULATOR" && (adapter.facilityIds.length !== 1 || adapter.officialIdentityProof || adapter.officialBookingSourceProof || adapter.officialPostalConflictProof || adapter.officialDelegatedBookingProof || adapter.officialStreetTypeOmittedProof || adapter.officialContactChainProof)) fail("ADAPTER_TARGET_MISMATCH");
@@ -922,7 +933,7 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
           adapter.timeZone !== input.timeZone || adapter.durationMinutes !== input.durationMinutes || input.players > adapter.capacity) fail("ADAPTER_TARGET_MISMATCH");
       if (!deps.localCapabilities?.includes("LOCAL_CHROME")) fail("LOCAL_CHROME_REQUIRED");
     }
-    if (!["TEEQUEST", "CLUBESSENTIAL", "CHELSEA", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS", "REX", "CPS", "MINDBODY", "FIVE_IRON", "GOLFBOOK", "SKEDDA", "YOUCANBOOKME", "SIMPLY_SCHEDULE_APPOINTMENTS"].includes(adapter.family)) session = reader(recipe.source, deps, adapter, input);
+    if (!["TEEQUEST", "CLUBESSENTIAL", "CHELSEA", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS", "REX", "CPS", "MINDBODY", "FIVE_IRON", "GOLFBOOK", "SKEDDA", "PLAYBYPOINT", "YOUCANBOOKME", "SIMPLY_SCHEDULE_APPOINTMENTS"].includes(adapter.family)) session = reader(recipe.source, deps, adapter, input);
     const start = deps.toInstant(`${input.date}T${input.startTime}:00`, input);
     const next = new Date(`${input.date}T00:00:00Z`); next.setUTCDate(next.getUTCDate() + 1);
     const end = deps.toInstant(`${input.endTime === "24:00" ? next.toISOString().slice(0, 10) : input.date}T${input.endTime === "24:00" ? "00:00" : input.endTime}:00`, input);
@@ -980,6 +991,11 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
     if (adapter.family === "SKEDDA") {
       const slots = await executeSkedda(recipe.source, adapter, input, deps);
       return result(slots.filter(slot => new Date(slot.startsAt) > now && new Date(slot.startsAt) >= start && new Date(slot.endsAt!) <= end));
+    }
+    if (adapter.family === "PLAYBYPOINT") {
+      const available = await readPlaybyPoint(recipe.source, input, deps, adapter);
+      return result(available.slots.filter(slot => new Date(slot.startsAt) > now &&
+        new Date(slot.startsAt) >= start && new Date(slot.endsAt) <= end));
     }
     if (adapter.family === "YOUCANBOOKME") {
       const slots = await executeYouCanBook(recipe.source, adapter, input, deps);
