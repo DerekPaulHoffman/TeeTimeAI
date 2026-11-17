@@ -3661,6 +3661,8 @@ export function buildCourseSupportReleaseHistory(input: {
         recheckDispatchedAt:
           input.previousRecheckDispatchedAt?.toISOString() ?? null,
         recheckDispatch: summary.recheckDispatch ?? null,
+        ...(summary.verificationStageDeadlineGrant
+          ? { verificationStageDeadlineGrant: summary.verificationStageDeadlineGrant } : {}),
         incidentVerifications: input.previousIncidentVerifications.map(
           (entry) => ({
             ordinal: entry.ordinal,
@@ -6634,10 +6636,12 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
               verifiedIncidentUpdatedAt: true,
               verificationRequests: {
                 take: 1,
+                orderBy: [{ createdAt: "desc" }, { id: "desc" }],
                 select: {
                   id: true,
                   status: true,
                   startedAt: true,
+                  releaseSha: true,
                 },
               },
               incident: {
@@ -6670,11 +6674,13 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
       }
 
       const summary = asJsonObject(batch.summary);
+      const remediationDirective = readCourseSupportRemediationDirective(batch.summary);
+      const fullRepair = remediationDirective?.reason === "FAILED_LEARNER_IMPLEMENTATION_HANDOFF";
       if (
         Object.prototype.hasOwnProperty.call(
           summary,
           COURSE_SUPPORT_VERIFICATION_STAGE_DEADLINE_GRANT_KEY,
-        )
+        ) && (!fullRepair || asJsonObject(summary[COURSE_SUPPORT_VERIFICATION_STAGE_DEADLINE_GRANT_KEY]).releaseSha === batch.releaseSha)
       ) {
         return {
           outcome: "REPLAYED" as const,
@@ -6684,9 +6690,6 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
         };
       }
 
-      const remediationDirective = readCourseSupportRemediationDirective(
-        batch.summary,
-      );
       const targets = batch.incidents.flatMap((entry) => {
         const playbook = assessAutomationPlaybook(
           entry.incident.attemptLedger,
@@ -6728,6 +6731,7 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
             stageAssessment.attemptCount === 0,
         );
         const grantableStageState =
+          fullRepair ||
           directSourceStage ||
           unstartedBrowserStage ||
           assignedDetachedStage ||
@@ -6738,9 +6742,9 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
           (playbook.conclusion === "INCOMPLETE" ||
             concludedRecoveryStage !== null) &&
           stage !== null &&
-          stage === remediationDirective?.playbookStage &&
+          (stage === remediationDirective?.playbookStage || fullRepair) &&
           grantableStageState &&
-          entry.verificationRequests.length === 0
+          (fullRepair ? !entry.verificationRequests.some(request => request.releaseSha === batch.releaseSha) : entry.verificationRequests.length === 0)
           ? [
               {
                 entry,
@@ -6819,7 +6823,7 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
                 batchId: input.batchId,
                 incidentId: incident.id,
                 cycle: target.entry.cycle,
-                verificationRequests: { none: {} },
+                  verificationRequests: { none: fullRepair ? { releaseSha: batch.releaseSha ?? undefined } : {} },
               },
             },
           },
@@ -6850,6 +6854,7 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
       ).map(([, grant]) => grant);
       const marker = {
         schemaVersion: 1,
+        ...(fullRepair ? { releaseSha: batch.releaseSha } : {}),
         grantedAt: databaseNow.toISOString(),
         incidentCount: targets.length,
         stages: stageGrants,

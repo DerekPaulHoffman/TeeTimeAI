@@ -164,6 +164,10 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     const f = await failed();
     await engineering.reconcileDiscoveryEngineeringHandoffs();
     const owner = `full-repair-${randomUUID()}`; batchOwners.push(owner);
+    // This isolated fixture exercises a due scheduled claim, after the normal
+    // first-failure delay. Do not alter the original learner clock or demand.
+    await client.courseSupportIncident.update({ where: { courseId: f.course.id },
+      data: { nextAttemptAt: new Date(Date.now() - 1_000) } });
     const lane = await import("@/lib/automation/course-support-batches");
     const claimed = await lane.claimCourseSupportBatch({ ownerThreadId: owner,
       branch: "automation/course-support-full-repair", baseSha: "a".repeat(40), maxCourses: 1 });

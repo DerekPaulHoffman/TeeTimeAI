@@ -135,7 +135,6 @@ export async function readCustomerRecovery(
   const undispatched = courseIds.length ? await client.teeSearch.findMany({
     where: { status: "ACTIVE", mode: "OUTDOOR", trafficClass: { notIn: ["TEST", "AUTOMATION"] },
       id: { notIn: dispatches.map(d => d.teeSearch?.id).filter((id): id is string => Boolean(id)) },
-      date: { gte: new Date(now.getTime() - 86_400_000) },
       preferences: { some: { courseId: { in: courseIds } } } },
     take: READ_LIMIT + 1,
     select: {
