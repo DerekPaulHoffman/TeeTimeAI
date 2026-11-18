@@ -10,6 +10,7 @@ import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-f
 import { createSimulatorSupportIntentDigest, SIMULATOR_SUPPORT_SOURCE_SELECT } from "@/lib/automation/simulator-support-policy";
 import { createCourseSupportRemediationCourseRef } from "@/lib/automation/course-support-claim-evidence";
 import { buildCourseSupportProviderSnapshotFingerprint } from "@/lib/automation/course-support-verification";
+import { appendAutomationPlaybookEvent } from "@/lib/automation/course-monitoring-playbook";
 let client: PrismaClient;
 vi.mock("@/lib/prisma", () => ({ get prisma() { return client; } }));
 const ids = new Set<string>();
@@ -186,6 +187,68 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } }))
       .toMatchObject({ status: "ACTIVE", alertGeneration: 0 });
   });
+  it.each(["automatic", "operator", "claimed-code", "consumed", "no-recovery", "changed-source", "cancelled"])(
+    "retains only the acknowledged unconsumed %s runtime-recovery handoff before legacy deadline review", async scenario => {
+      const f = await failed(); await engineering.reconcileDiscoveryEngineeringHandoffs();
+      await client.courseSupportIncident.update({ where: { courseId: f.course.id }, data: { nextAttemptAt: new Date(Date.now() - 1000) } });
+      const owner = randomUUID(), baseSha = "a".repeat(40); batchOwners.push(owner);
+      const lane = await import("@/lib/automation/course-support-batches");
+      const monitoring = await import("@/lib/automation/course-monitoring");
+      await lane.claimCourseSupportBatch({ ownerThreadId: owner, branch: "automation/course-support-runtime-repair", baseSha, maxCourses: 1 });
+      const batch = await client.courseSupportBatch.findFirstOrThrow({ where: { ownerThreadId: owner } });
+      const incident = await client.courseSupportIncident.findUniqueOrThrow({ where: { courseId: f.course.id } });
+      const now = new Date(Date.now() + 120_000), completedAt = new Date(now.getTime() - 90_000);
+      const endpointAt = new Date(now.getTime() - 60_000), deadline = new Date(endpointAt.getTime() - 30_000);
+      const retryAt = monitoring.getHumanReviewRetryAt(endpointAt, 1);
+      let ledger: ReturnType<typeof appendAutomationPlaybookEvent> | null = null;
+      const steps = [
+        ["OFFICIAL_IDENTITY", "OFFICIAL_IDENTITY", "COMPLETED"], ["TYPED_ADAPTER", "TYPED_PROVIDER_ADAPTER", "NOT_APPLICABLE"],
+        ["OFFICIAL_HTTP_DISCOVERY", "OFFICIAL_HTTP", "COMPLETED"], ["HTTP_ADAPTER_RETRY", "TYPED_PROVIDER_ADAPTER", "NOT_APPLICABLE"],
+        ["RENDERED_BROWSER_DISCOVERY", "RENDERED_BROWSER", "COMPLETED"], ["BROWSER_ADAPTER_RETRY", "TYPED_PROVIDER_ADAPTER", "NOT_APPLICABLE"],
+        ["LOCAL_READER", "LOCAL_READER", "NOT_APPLICABLE"], ["INDEPENDENT_CONFIRMATION", "INDEPENDENT_CONFIRMATION", "COMPLETED"],
+      ] as const;
+      for (const [index, [stage, readPath, transition]] of steps.entries()) ledger = appendAutomationPlaybookEvent(ledger, {
+        cycle: incident.cycle, stage, readPath, transition, evidenceKind: "TOOLING", failureFingerprint: "PLAYBOOK:FIXTURE:COMPLETE",
+        ...(transition === "NOT_APPLICABLE" ? { skipReason: "NO_RUNNABLE_ADAPTER" as const } : {}),
+        runtimeVersion: baseSha, observedAt: new Date(batch.createdAt.getTime() + 1000 + index),
+      });
+      const closeout = { outcome: "retryable_failed", failureDomain: "GIT", remediationAttemptConsumed: scenario === "consumed" };
+      await client.courseSupportBatch.update({ where: { id: batch.id }, data: { status: "RETRYABLE_FAILED", releaseSha: baseSha,
+        deployedAt: new Date(batch.createdAt.getTime() + 1000), completedAt, summary: { ...(batch.summary as Prisma.JsonObject), closeout,
+          plannedPaths: scenario === "claimed-code" ? ["src/lib/adapters/fixture.ts"] : [],
+          ...(scenario === "no-recovery" ? {} : { supersededRuntimeRecovery: { previousSha: baseSha,
+            deployment: { commitSha: "b".repeat(40), deploymentId: "dpl_IsolatedFixture" } } }),
+        } } });
+      await client.courseSupportBatchIncident.updateMany({ where: { batchId: batch.id }, data: { result: "RETRY_SCHEDULED" } });
+      await client.courseSupportIncident.update({ where: { id: incident.id }, data: { status: "NEEDS_HUMAN", activeBatchId: null,
+        humanReviewReason: "OTHER_TECHNICAL_LIMITATION", escalatedAt: endpointAt, escalationDeadlineAt: deadline,
+        confirmedAt: batch.createdAt, activeRealSearchCount: 1, nextAttemptAt: retryAt, attemptLedger: ledger! } });
+      await client.courseMonitoringStatus.update({ where: { courseId: f.course.id }, data: { state: "ENGINEERING_VERIFICATION_NEEDED",
+        stateChangedAt: endpointAt, failureFingerprint: incident.failureFingerprint, nextAutomaticAttemptAt: retryAt,
+        revalidationRequestedAt: null } });
+      await client.courseMonitoringEvent.create({ data: { courseId: f.course.id, incidentId: incident.id,
+        eventType: "HUMAN_REVIEW_REQUESTED", source: "SEARCH_WORKFLOW", fromState: "AUTO_INVESTIGATING", toState: "ENGINEERING_VERIFICATION_NEEDED",
+        failureFingerprint: incident.failureFingerprint, message: "The bounded automated playbook ended without fresh runnable proof.",
+        operatorActorId: scenario === "operator" ? "fixture-operator" : null, occurredAt: endpointAt,
+        audit: { cycle: incident.cycle, playbookVersion: 1, playbookConclusion: "UNRESOLVED_EXHAUSTED", playbookExhausted: true,
+          automationStalled: false, nextStage: null, automaticRecheckHours: 6, escalationDeadlineAt: deadline.toISOString() } } });
+      if (scenario === "changed-source") await client.course.update({ where: { id: f.course.id }, data: { website: "https://changed.example.com/" } });
+      if (scenario === "cancelled") await client.teeSearch.update({ where: { id: f.search.id }, data: { status: "CANCELLED" } });
+      const originalJob = await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } });
+      await monitoring.reconcileCourseMonitoringDeadline({ courseId: f.course.id, source: "SEARCH_WORKFLOW", now });
+      expect(await client.courseSupportIncident.findUniqueOrThrow({ where: { id: incident.id } })).toMatchObject({
+        status: scenario === "automatic" ? "AUTO_INVESTIGATING" : "NEEDS_HUMAN", cycle: incident.cycle,
+        attemptCount: incident.attemptCount, attemptLedger: ledger, activeBatchId: null,
+      });
+      expect(await client.courseSupportBatch.findUniqueOrThrow({ where: { id: batch.id } }))
+        .toMatchObject({ status: "RETRYABLE_FAILED", ownerThreadId: owner, completedAt, summary: { closeout } });
+      expect(await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } })).toEqual(originalJob);
+      await monitoring.reconcileCourseMonitoringDeadline({ courseId: f.course.id, source: "SEARCH_WORKFLOW", now });
+      expect(await client.courseMonitoringEvent.count({ where: { incidentId: incident.id,
+        audit: { path: ["action"], equals: "unused_completed_discovery_implementation_deadline_continuation" } } }))
+        .toBe(scenario === "automatic" ? 1 : 0);
+    });
+
   it.each(["data-only", "claimed-code", "cancelled", "changed-source"])("corrects only the unowned misclassified %s full repair, preserving prior evidence", async scenario => {
     const f = await failed();
     await engineering.reconcileDiscoveryEngineeringHandoffs();

@@ -19507,12 +19507,47 @@ export async function readUnusedCompletedDiscoveryImplementationHandoff(
     ))
   ) return { available: false };
   const { course, ...incident } = candidate;
+  const assessment = assessAutomationPlaybook(candidate.attemptLedger, input.cycle);
+  const latest = [...currentCycleBatchIncidents].sort((left, right) =>
+    right.batch.completedAt!.getTime() - left.batch.completedAt!.getTime() || right.id.localeCompare(left.id))[0];
+  const summary = asJsonObject(latest?.batch.summary);
+  const directive = readCourseSupportRemediationDirective(summary);
+  const claim = readCourseSupportRemediationClaimAttempt({ summary, courseId: input.courseId, expectedAttemptCount: 1 });
+  const recovered = asJsonObject(summary.supersededRuntimeRecovery);
+  const deployment = asJsonObject(recovered.deployment);
+  const closeout = asJsonObject(summary.closeout);
+  // An acknowledged runtime-only recovery did not consume implementation.
+  // Keep its current failed-learner handoff ahead of the legacy exhausted-
+  // discovery endpoint. This grants no read retry, code claim or job reset.
+  if (isGeneralDiscoveryEnabled() && latest?.result === "RETRY_SCHEDULED" && latest.batch.status === "RETRYABLE_FAILED" &&
+      assessment.valid && assessment.conclusion === "UNRESOLVED_EXHAUSTED" && directive && claim &&
+      claim.providerSnapshotFingerprint === buildCourseSupportProviderSnapshotFingerprint(course) &&
+      claim.failureFingerprint === candidate.failureFingerprint &&
+      closeout.outcome === "retryable_failed" && closeout.failureDomain === "GIT" && closeout.remediationAttemptConsumed === false &&
+      recovered.previousSha === latest.batch.releaseSha && typeof deployment.commitSha === "string" &&
+      /^[a-f0-9]{40}$/u.test(deployment.commitSha) && deployment.commitSha !== latest.batch.releaseSha &&
+      typeof deployment.deploymentId === "string" && /^dpl_[A-Za-z0-9]+$/u.test(deployment.deploymentId) &&
+      currentCycleBatchIncidents.every(entry => {
+        const paths = asJsonObject(entry.batch.summary).plannedPaths;
+        return Array.isArray(paths) && paths.length === 0 && (!entry.batch.releaseSha || entry.batch.releaseSha === entry.batch.baseSha);
+      }) && isDataOnlyFullRepair({ reason: directive.reason, workMode: directive.workMode,
+        requiresImplementationPath: directive.requiresImplementationPath, plannedPaths: [], baseSha: latest.batch.baseSha,
+        releaseSha: latest.batch.releaseSha, allowedActions: claim.actionPlan?.allowedActions ?? [] })) {
+    const { currentDiscoveryEngineeringHandoff } = await import("@/lib/course-discovery/engineering-repair");
+    const handoff = await currentDiscoveryEngineeringHandoff(transaction, { courseId: input.courseId }, input.now);
+    if (handoff?.receipt.incidentId === input.incidentId && handoff.job.outcome === "TOOL_FAILURE" &&
+        handoff.job.completedAt! <= latest.batch.createdAt && new Date(handoff.receipt.queuedAt) <= latest.batch.createdAt &&
+        !await transaction.courseDiscoveryJob.findUnique({ where: { activeTargetKey: handoff.job.targetKey } })) {
+      await assertBoundedCourseSupportCandidateCurrentCycleHistory(transaction, [candidate]);
+      return { available: true, sourceCompletedAt: latest.batch.completedAt! };
+    }
+  }
   if (!isCompletedDiscoveryFailureRefinement({
     incident,
     course,
     currentCycleBatchIncidents,
     providerSnapshotFingerprint: buildCourseSupportProviderSnapshotFingerprint(course),
-    playbookAssessment: assessAutomationPlaybook(candidate.attemptLedger, input.cycle),
+    playbookAssessment: assessment,
   })) return { available: false };
   await assertBoundedCourseSupportCandidateCurrentCycleHistory(transaction, [candidate]);
   const route = buildCourseSupportCandidates([candidate], input.now)[0];
