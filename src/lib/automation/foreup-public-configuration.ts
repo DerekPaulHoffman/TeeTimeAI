@@ -6,9 +6,22 @@ const MAX_DOCUMENT_BYTES = 512_000;
 const MAX_SCHEDULE_JSON_CHARS = 256_000;
 const MAX_SCHEDULES = 30;
 export const FOREUP_STANDARD_PUBLIC_SCOPE = "STANDARD_PUBLIC_CLASS_V1" as const;
+function publicClassWeekdays(value: unknown): number[] | null {
+  if (typeof value !== "string") return null;
+  const caption = /^Public\s*\|\s*(.+)$/iu.exec(value.trim())?.[1];
+  if (!caption) return null;
+  const names = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+  const range = /^(\w+)\s*[-–]\s*(\w+)$/u.exec(caption.toLowerCase());
+  if (range) {
+    const start = names.indexOf(range[1]), end = names.indexOf(range[2]);
+    return start >= 0 && end >= start ? Array.from({ length: end - start + 1 }, (_, i) => start + i) : null;
+  }
+  const days = caption.toLowerCase().split(/\s*(?:,|&)\s*/u).map(day => names.indexOf(day));
+  return days.length > 0 && days.every(day => day >= 0) && new Set(days).size === days.length ? days : null;
+}
 export function isStandardForeupPublicClassName(value: unknown): value is string {
   return typeof value === "string" && value.length <= 300 && !/[\u0000-\u001f\u007f]/u.test(value) &&
-    /^(?:public|(?:(?:spring|summer|fall|winter) )?public play|public tee times|online tee times|online bookings?|online reservations?|book(?: a)? tee times?|non[ -]?resident|best available rate(?: \(0-\d{1,3} days\))?)$/iu.test(value.trim());
+    (publicClassWeekdays(value) !== null || /^(?:public|(?:(?:spring|summer|fall|winter) )?public play|public tee times|online tee times|online bookings?|online reservations?|book(?: a)? tee times?|non[ -]?resident|best available rate(?: \(0-\d{1,3} days\))?)$/iu.test(value.trim()));
 }
 /** Generic online, nonresident and best-available captions need public configuration
  * flags as well. Missing flags, protection, disabled booking or passes do not
@@ -17,7 +30,14 @@ export function isStandardForeupPublicClass(value: unknown): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const row = value as Record<string, unknown>;
   if (!isStandardForeupPublicClassName(row.name)) return false;
-  if (!/^(?:online bookings?|online reservations?|book(?: a)? tee times?|non[ -]?resident|best available rate(?: \(0-\d{1,3} days\))?)$/iu.test(String(row.name).trim())) return true;
+  if (publicClassWeekdays(row.name) !== null) {
+    // An explicitly public dated class may disable the booking transaction
+    // while keeping its anonymous tee sheet readable. Authentication and
+    // pass requirements still exclude it; the adapter must prove the read.
+    return row.online_booking_protected === "0" && row.deleted === "0" &&
+      Array.isArray(row.pass_item_ids) && row.pass_item_ids.length <= 30 && row.pass_item_ids.every(value => value === "");
+  }
+  if (publicClassWeekdays(row.name) === null && !/^(?:online bookings?|online reservations?|book(?: a)? tee times?|non[ -]?resident|best available rate(?: \(0-\d{1,3} days\))?)$/iu.test(String(row.name).trim())) return true;
   return row.online_booking_protected === "0" && row.block_online_booking === "0" && row.deleted === "0" &&
     Array.isArray(row.pass_item_ids) && row.pass_item_ids.length <= 30 && row.pass_item_ids.every(value => value === "");
 }
@@ -185,6 +205,7 @@ export function parseForeupPublicConfiguration(input: {
   bookingUrl: string;
   courseName: string;
   html: string;
+  date?: Date;
 }): ForeupPublicConfiguration | null {
   let url: URL;
   try { url = new URL(input.bookingUrl); }
@@ -241,7 +262,9 @@ export function parseForeupPublicConfiguration(input: {
       positiveProviderId(entry.booking_class_id) !== null;
   });
   const labelledPublic = visibleClasses.filter(bookingClass => {
-    return isStandardForeupPublicClass(bookingClass);
+    const weekdays = publicClassWeekdays(bookingClass.name);
+    return isStandardForeupPublicClass(bookingClass) && (weekdays === null ||
+      Boolean(input.date && Number.isFinite(input.date.getTime()) && weekdays.includes(input.date.getUTCDay())));
   });
   // Public and membership classes may share one public page. Select only its
   // sole explicit public class (including observed public tee-time labels);
@@ -311,6 +334,7 @@ export async function readForeupStandardPublicSchedule(input: {
   courseName: string;
   scheduleId: number;
   bookingClassId?: number;
+  date?: Date;
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
 }): Promise<ForeupPublicConfiguration | null> {
@@ -340,6 +364,7 @@ export async function readForeupStandardPublicSchedule(input: {
 export async function readForeupPublicConfiguration(input: {
   bookingUrl: string;
   courseName: string;
+  date?: Date;
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
   rethrowError?: (error: unknown) => boolean;
