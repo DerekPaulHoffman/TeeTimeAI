@@ -1,5 +1,7 @@
 // @vitest-environment node
 import { randomUUID } from "node:crypto";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { Prisma, PrismaClient } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -27,6 +29,7 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     await client.$connect(); service = await import("./service"); engineering = await import("./engineering-repair");
   });
   afterEach(async () => {
+    vi.unstubAllEnvs();
     if (!client) return;
     const ownedRuns = await client.automationRun.findMany({ where: { ownerThreadId: { in: batchOwners } }, select: { id: true } });
     runs.push(...ownedRuns.map(run => run.id));
@@ -182,6 +185,48 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
         firstPickedUpAt: f.job.firstPickedUpAt, deadlineAt: f.job.deadlineAt });
     expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } }))
       .toMatchObject({ status: "ACTIVE", alertGeneration: 0 });
+  });
+  it("keeps failed verification evidence and offers only its original Desktop owner a continuation", async () => {
+    const f = await failed();
+    await engineering.reconcileDiscoveryEngineeringHandoffs();
+    await client.courseSupportIncident.update({ where: { courseId: f.course.id }, data: { nextAttemptAt: new Date(Date.now() - 1000) } });
+    const parent = randomUUID(), owner = randomUUID(); batchOwners.push(parent, owner);
+    const dispatcher = await import("@/lib/automation/course-support-course-dispatch");
+    const lane = await import("@/lib/automation/course-support-batches");
+    const research = await import("@/lib/automation/course-support-research-context");
+    const baseSha = "a".repeat(40);
+    const plan = await dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: parent, baseSha, maxStarts: 1 });
+    if (!plan.acquired || plan.value.launchItems.length !== 1) throw new Error("Expected one real fixture dispatch");
+    const assignmentRef = plan.value.launchItems[0].assignmentRef;
+    await dispatcher.beginCourseSupportCourseDispatch({ ownerThreadId: parent, assignmentRef });
+    await dispatcher.bindCourseSupportCourseDispatch({ ownerThreadId: parent, assignmentRef, childThreadId: owner,
+      launcherReceiptPath: join(tmpdir(), randomUUID(), "launcher.receipt.private.json") });
+    // This process models the bound child's test session, rather than the
+    // previous parent. Runtime identity validation remains enabled.
+    vi.stubEnv("CODEX_THREAD_ID", owner);
+    expect(await lane.claimCourseSupportBatch({ ownerThreadId: owner, branch: `automation/course-support-${randomUUID()}`,
+      baseSha, maxCourses: 1, dispatchAssignmentRef: assignmentRef })).toMatchObject({ outcome: "ready" });
+    const batch = await client.courseSupportBatch.findFirstOrThrow({ where: { ownerThreadId: owner } });
+    // Exact observed post-verification boundary. Source, cycle, playbook and
+    // failed learner clock remain unchanged in this isolated database fixture.
+    await client.courseSupportBatch.update({ where: { id: batch.id }, data: { status: "VERIFYING", releaseSha: baseSha,
+      summary: { ...(batch.summary as Prisma.JsonObject), plannedPaths: [] } } });
+    await client.courseSupportBatchIncident.updateMany({ where: { batchId: batch.id }, data: { result: "STALE_EVIDENCE", verifiedAt: new Date() } });
+    expect(await research.getOwnedCourseSupportResearchContext({ batchId: batch.id, leaseToken: batch.leaseToken,
+      ownerThreadId: owner, ordinal: 1 })).toMatchObject({ outcome: "ready", researchContextV1: { monitoringProofRecorded: false } });
+    const nextParent = randomUUID(); batchOwners.push(nextParent);
+    const next = await dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: nextParent, baseSha, maxStarts: 1 });
+    expect(next).toMatchObject({ acquired: true, value: { fullRepairContinuationItems: [{ threadId: owner,
+      assignmentRef, batchReference: batch.reference, kind: "OWNED_OUTDOOR_FULL_REPAIR" }] } });
+    expect(await client.courseSupportBatch.findUniqueOrThrow({ where: { id: batch.id } }))
+      .toMatchObject({ ownerThreadId: owner, leaseToken: batch.leaseToken, leaseExpiresAt: batch.leaseExpiresAt });
+    expect(await client.courseSupportBatchIncident.findFirstOrThrow({ where: { batchId: batch.id } }))
+      .toMatchObject({ result: "STALE_EVIDENCE" });
+    expect(await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } }))
+      .toMatchObject({ status: "FAILED", attempts: f.job.attempts, firstPickedUpAt: f.job.firstPickedUpAt, deadlineAt: f.job.deadlineAt });
+    await client.teeSearch.update({ where: { id: f.search.id }, data: { status: "CANCELLED" } });
+    const cancelled = await dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: nextParent, baseSha, maxStarts: 1 });
+    expect(cancelled).toMatchObject({ acquired: true, value: { fullRepairContinuationItems: [] } });
   });
   it.each([["database-null", Prisma.DbNull], ["json-null", Prisma.JsonNull]] as const)("initializes an older unowned %s ledger while preserving its receipt and original failed clock", async (_kind, emptyLedger) => {
     const f = await failed(); await engineering.reconcileDiscoveryEngineeringHandoffs();

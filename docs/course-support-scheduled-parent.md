@@ -7,6 +7,32 @@ tool owns the inference turn. Do not fall back to the browser-unqualified native
 CLI model runner. Existing explicitly returned legacy continuations retain their
 original owner and separate contract; this does not authorize a takeover.
 
+After the required learner health check and protected cleanup, handle actual
+`fullRepairContinuationItems` before new launches. These are source-checked
+data-only outdoor full repairs that still belong to their original Desktop
+owner after negative verification. They are not a new claim or an ownership
+transfer. Do not create a worktree or invoke the simulator continuation runner
+for them. Save the actual preflight context and each exact item with exclusive
+private UTF-8 writes below selectedCheckout's ignored `.codex-artifacts`, then
+run the selected checkout's sealed helper once:
+
+```text
+course-support-desktop-continuation.mjs --context-file <actual-context-file> --item-file <actual-item-file>
+```
+
+Retain its process handle through terminal success. `original_worker_active`,
+`unchanged_runtime` and `already_requested` require no message. Only
+`desktop_continuation_message_required` permits passing the returned exact
+threadId/prompt/model/thinking to supported `send_message_to_thread` on local.
+Save the actual acknowledgement privately. Never replay a failed/ambiguous send
+or change the recipient. The helper reads native thread/read and terminal
+turns/list with itemsView:notLoaded; it never resumes a CLI turn, changes the
+original launcher receipt or claims completion/identity evidence it did not
+observe. One exclusive marker per assignment/new runtime prevents duplicates.
+Only the original worker can update its own clean branch, read/recover its same
+packet under existing fences, and continue or safely requeue the superseded
+runtime. Read the current full-repair continuation guide for that scope.
+
 Use the existing sole ten-minute course-support automation. Start its scheduled
 turn with exactly one shell command:
 

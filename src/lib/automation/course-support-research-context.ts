@@ -13,6 +13,7 @@ import {
 } from "./course-support-batches";
 import { courseSupportActionPlanMatchesRoute } from "./course-support-action-plan";
 import { courseSupportFailureFingerprintsMatch } from "./course-support-failure-fingerprint";
+import { allowsRetainedFullRepairResearch } from "./course-support-full-repair";
 import {
   appendCourseSupportLineage,
   COURSE_SUPPORT_LINEAGE_EVENT_LIMIT,
@@ -429,6 +430,16 @@ export function buildOwnedCourseSupportResearchContext(
       event.outcome === "MATCH_FOUND" || event.outcome === "NO_MATCH" ||
       (event.failureFingerprint !== null &&
         !courseSupportFailureFingerprintsMatch(event.failureFingerprint, batch.failureFingerprint))));
+  // Verification keeps its negative result and history. A still-owned full
+  // repair may inspect again; the original source/cycle/plan/lease checks below
+  // still apply, and the context digest already binds the evaluated result.
+  const retainedRepairResearch = allowsRetainedFullRepairResearch({
+    reason: remediation?.reason ?? null,
+    workMode: remediation?.workMode ?? "",
+    batchStatus: batch.status,
+    result: entry.result,
+    allowedActions: claim?.actionPlan?.allowedActions ?? [],
+  });
   if (!remediation || !claim?.actionPlan ||
       claim.actionPlan.primaryAction === "WAIT_FOR_MATERIAL_CHANGE" ||
       !courseSupportActionPlanMatchesRoute({
@@ -437,7 +448,7 @@ export function buildOwnedCourseSupportResearchContext(
         strategyAction: remediation.strategyAction,
         playbookStage: remediation.playbookStage,
       }) ||
-      entry.result !== "PENDING" || entry.cycle !== entry.incident.cycle ||
+      (entry.result !== "PENDING" && !retainedRepairResearch) || entry.cycle !== entry.incident.cycle ||
       entry.incident.status !== "AUTO_INVESTIGATING" ||
       entry.incident.activeBatchId !== input.batchId ||
       entry.incident.resolution !== null ||
@@ -453,7 +464,14 @@ export function buildOwnedCourseSupportResearchContext(
         entry.course.monitoringStatus.failureFingerprint,
         batch.failureFingerprint,
       ) || monitoringDrift) {
-    return controlResult("authority_drift", input.ordinal);
+    const reasonCode = !remediation || !claim?.actionPlan ? "CLAIM_PLAN_UNAVAILABLE" :
+      claim.providerSnapshotFingerprint !== snapshotFingerprint ? "PROVIDER_SNAPSHOT_CHANGED" :
+      claim.playbookEventCountAtClaim !== playbookEventCount ? "PLAYBOOK_ADVANCED_SINCE_CLAIM" :
+      entry.cycle !== entry.incident.cycle ? "INCIDENT_CYCLE_CHANGED" :
+      entry.incident.activeBatchId !== input.batchId ? "INCIDENT_OWNER_CHANGED" :
+      entry.result !== "PENDING" && !retainedRepairResearch ? "VERIFICATION_RESULT_NOT_INVESTIGABLE" :
+      monitoringDrift ? "MONITORING_EVIDENCE_CHANGED" : "RESEARCH_AUTHORITY_CHANGED";
+    return { ...controlResult("authority_drift", input.ordinal), reasonCode };
   }
 
   const course = entry.course;
@@ -465,7 +483,7 @@ export function buildOwnedCourseSupportResearchContext(
   const cycleStartedAt = confirmedAt && confirmedAt > entry.incident.firstSeenAt
     ? confirmedAt : confirmedAt ? entry.incident.firstSeenAt : null;
   if (!cycleStartedAt || cycleStartedAt > now) {
-    return controlResult("authority_drift", input.ordinal);
+    return { ...controlResult("authority_drift", input.ordinal), reasonCode: "CYCLE_EVIDENCE_WINDOW_INVALID" as const };
   }
   const officialSiteUrl = safeResearchUrl(course.website);
   const officialBookingUrl = safeResearchUrl(course.detectedBookingUrl);

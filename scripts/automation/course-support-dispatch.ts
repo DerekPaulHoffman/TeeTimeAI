@@ -104,6 +104,7 @@ export function courseDispatchMayInspectLegacy(plan: DispatchPlan) {
   return plan.value.launchItems.length === 0 && plan.value.reservedCount === 0 &&
     plan.value.eligibleCount === 0 && plan.value.attention.startingCount === 0 &&
     plan.value.attention.boundCount === 0 && (plan.value.continuationItems?.length ?? 0) === 0 &&
+    (plan.value.fullRepairContinuationItems?.length ?? 0) === 0 &&
     (plan.value.continuationAttentionCount ?? 0) === 0;
 }
 
