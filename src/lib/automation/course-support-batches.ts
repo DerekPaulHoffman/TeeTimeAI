@@ -8845,8 +8845,18 @@ export async function verifyCourseSupportBatch(input: {
           batch.recheckDispatchedAt,
         )
       : null;
-  const verificationSearchExecutionFence =
-    persistedSearchHealth?.searchExecutionFence ??
+  const verificationSummary = asJsonObject(batch.summary);
+  const previousRegisteredRelease = Array.isArray(verificationSummary.releaseHistory)
+    ? asJsonObject(verificationSummary.releaseHistory.at(-1)) : {};
+  const awaitingDescendantDispatch = Boolean(releaseSha &&
+    batch.recheckDispatchKey === null && batch.recheckDispatchStartedAt === null && batch.recheckDispatchedAt === null &&
+    verificationSummary.searchExecutionFence === null && previousRegisteredRelease.supersededBy === releaseSha);
+  // BatchSearch rows survive for audit. Before this descendant owns a new
+  // dispatch, those rows still describe its predecessor, not its new floor.
+  const verificationSearchExecutionFence = awaitingDescendantDispatch
+    ? buildCourseSupportSearchExecutionFenceSnapshot({ courseIds, expectedSearches: [], recheckDispatchKey: null,
+      recheckDispatchStartedAt: null, recheckDispatchedAt: null, now, dispatches: [] })
+    : persistedSearchHealth?.searchExecutionFence ??
     (await readCourseSupportSearchExecutionFence(
       prisma,
       createCourseSupportSearchExecutionFenceInput({

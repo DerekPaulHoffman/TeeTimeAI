@@ -28291,6 +28291,30 @@ describe("detached verification atomic batch fences", () => {
     });
   });
 
+  it.each([false, true])("does not bootstrap a descendant dispatch fence from predecessor rows (dispatch already started: %s)", async started => {
+    const searchRef = "e".repeat(64);
+    const oldDispatch = batchSearchDispatch(searchRef, { id: "predecessor-probe", outcome: "FETCH_FAILED", observedAt, runtimeVersion: "c".repeat(40) });
+    oldDispatch.teeSearch.probes[0].rawSummary = { providerExecution: false } as never;
+    const batch = verificationBatch();
+    const releaseHistory = [{ releaseSha: "c".repeat(40), supersededBy: releaseSha, searchExecutionFence: emptySearchExecutionFence() }];
+    Object.assign(batch, { baseSha: "b".repeat(40),
+      recheckDispatchKey: started ? "dispatch-1" : null,
+      recheckDispatchStartedAt: started ? new Date("2026-07-15T19:51:00.000Z") : null,
+      recheckDispatchedAt: null,
+      summary: { ...operationalRemediationSummary(), searchExecutionFence: null,
+        releaseHistory },
+    });
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.batchSearchFindMany.mockResolvedValue([oldDispatch]);
+    await verifyCourseSupportBatch({ batchId: "batch-1", leaseToken: "lease-1", ownerThreadId: "owner-thread", releaseSha, now });
+    const firstSummary = prismaMocks.batchUpdateMany.mock.calls[0][0].data.summary;
+    expect(firstSummary.searchExecutionFence).toMatchObject({ batchSearchCount: started ? 1 : 0, probeCount: started ? 1 : 0 });
+    expect(firstSummary.releaseHistory).toEqual(releaseHistory);
+    if (!started) expect(firstSummary.searchExecutionFence.memberships).toEqual([]);
+  });
+
   it.each([
     {
       label: "a settled late non-provider probe",
