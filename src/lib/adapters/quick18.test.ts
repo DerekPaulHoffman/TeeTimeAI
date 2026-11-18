@@ -85,6 +85,44 @@ function parseSolitude(html: string, players = 2) {
 }
 
 describe("Quick18 public read-only tee sheet", () => {
+  it("scopes a named course without borrowing another course's inventory", () => {
+    const html = page(solitudeRow({ course: "The Roadrunner (18 Holes)", providerCourseId: "1770" }) +
+      solitudeRow({ time: "12:00PM", course: "The Snake (12 Holes)", providerCourseId: "1771" }), "9/29/2026", solitudeHeaders);
+    const slots = parseQuick18Slots({ html, courseId: "snake", targetDate, players: 3, evidenceUrl,
+      providerCourseId: "1771", courseName: "The Snake (12 Holes)" });
+    expect(slots).toHaveLength(1);
+    expect(slots[0].bookingUrl).toContain("/course/1771/");
+  });
+
+  it("combines only explicitly verified provider courses at one club", () => {
+    const html = page(solitudeRow({ course: "Raptor", providerCourseId: "23" }) +
+      solitudeRow({ time: "12:00PM", course: "Talon", providerCourseId: "24" }), "9/29/2026", solitudeHeaders);
+    const providerCourses = [{ providerCourseId: "23", courseName: "Raptor" }, { providerCourseId: "24", courseName: "Talon" }];
+    const slots = parseQuick18Slots({ html, courseId: "grayhawk", targetDate, players: 2, evidenceUrl, providerCourses });
+    expect(slots).toHaveLength(2);
+    expect(new Set(slots.map((slot) => slot.sourceId)).size).toBe(2);
+    expect(() => parseQuick18Slots({ html, courseId: "grayhawk", targetDate, players: 2, evidenceUrl,
+      providerCourses: [{ providerCourseId: "23", courseName: "Talon" }] })).toThrow(/verified name/u);
+  });
+
+  it("rejects absent scoped courses and conflicting row rate identities", () => {
+    const input = { courseId: "snake", targetDate, players: 2, evidenceUrl,
+      providerCourseId: "1771", courseName: "The Snake (12 Holes)" };
+    expect(() => parseQuick18Slots({ ...input, html: page(solitudeRow({ course: "Roadrunner", providerCourseId: "1770" }),
+      "9/29/2026", solitudeHeaders) })).toThrow(/did not corroborate/u);
+    const mixed = solitudeRow({ course: "The Snake (12 Holes)", providerCourseId: "1771" }).replace("/course/1771/", "/course/1770/");
+    expect(() => parseQuick18Slots({ ...input, html: page(mixed, "9/29/2026", solitudeHeaders) })).toThrow(/within one row/u);
+  });
+
+  it("validates bounded unique provider course mappings", () => {
+    const providerCourses = [{ providerCourseId: "23", courseName: "Raptor" }, { providerCourseId: "24", courseName: "Talon" }];
+    expect(isQuick18Metadata({ ...metadata, providerCourses })).toBe(true);
+    for (const courses of [[], [...providerCourses, providerCourses[0]], [{ providerCourseId: "23", courseName: "" }]]) {
+      expect(isQuick18Metadata({ ...metadata, providerCourses: courses })).toBe(false);
+    }
+    expect(isQuick18Metadata({ ...metadata, providerCourses, courseName: "Grayhawk" })).toBe(false);
+    expect(isQuick18Metadata({ ...metadata, providerCourses, providerCourseId: "23" })).toBe(false);
+  });
   it.each(["Best Rate Available", "Best Available Rate", "Best Rate Guarantee", "Out of State (0-12)"])(
     "reads the observed public %s column without taking card or resident rates", (caption) => {
       const html = page(row("8:00AM", "1 to 4 players", "202609290800"), "9/29/2026",
@@ -229,7 +267,7 @@ describe("Quick18 public read-only tee sheet", () => {
     expect(() => parseQuick18Slots({
       html: sheet(solitudeRow({})), courseId: "solitude", targetDate, players: 2,
       evidenceUrl, providerCourseId: "9999", courseName: "Solitude Links Golf Course"
-    })).toThrow(/mixes provider courses/u);
+    })).toThrow(/did not corroborate/u);
     expect(() => parseQuick18Slots({
       html: sheet(solitudeRow({})), courseId: "solitude", targetDate, players: 2,
       evidenceUrl, courseName: "Another Golf Club"
@@ -270,7 +308,7 @@ describe("Quick18 public read-only tee sheet", () => {
         courseName: "Solitude Links Golf Course",
         providerCourseId: "9999"
       }
-    }, fetchImpl)).rejects.toThrow(/mixes provider courses/u);
+    }, fetchImpl)).rejects.toThrow(/did not corroborate/u);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
