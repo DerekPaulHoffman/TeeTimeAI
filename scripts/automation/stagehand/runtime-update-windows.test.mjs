@@ -1,7 +1,58 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
+import { courseSupportWorkerRuntimeEnvironment } from '../course-support-worker-runtime.mjs';
+
+test('worker runtime retains required nonsecret Windows metadata without forwarding credentials', () => {
+  const environment = courseSupportWorkerRuntimeEnvironment({ status: 'available', nodePath: process.execPath }, process.cwd(), {
+    OS: 'Windows_NT', CODEX_THREAD_ID: 'fixture-native-identity', PATH: 'fixture-path',
+    RESEND_API_KEY: 'fixture-private', DATABASE_URL: 'fixture-private', UNKNOWN_SETTING: 'fixture-private',
+  });
+  assert.equal(environment.OS, 'Windows_NT');
+  assert.equal(environment.CODEX_THREAD_ID, 'fixture-native-identity');
+  for (const key of ['RESEND_API_KEY', 'DATABASE_URL', 'UNKNOWN_SETTING']) assert.equal(Object.hasOwn(environment, key), false);
+});
+
+test('actual Windows native guards work under the production sanitized environment and reject a different owner', { skip: process.platform !== 'win32' }, () => {
+  const owner = '12345678-1234-4234-8234-123456789abc';
+  const environment = courseSupportWorkerRuntimeEnvironment({ status: 'available', nodePath: process.execPath }, process.cwd(), {
+    ...process.env, CODEX_THREAD_ID: owner,
+  });
+  for (const expected of [owner, '87654321-1234-4234-8234-123456789abc']) {
+    const output = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `
+      $ErrorActionPreference='Stop';$OwnerThreadId='${expected}'
+      try {
+        foreach($file in @('update-course-discovery-runtime.ps1','manage-course-discovery-task.ps1')){
+          $tokens=$null;$errors=$null
+          $ast=[System.Management.Automation.Language.Parser]::ParseFile('${resolve('scripts/automation').replaceAll("'", "''")}\\'+$file,[ref]$tokens,[ref]$errors)
+          if($errors.Count){throw 'FIXTURE_PARSE_FAILED'}
+          $body=($ast.EndBlock.Statements|Where-Object{$_ -is [System.Management.Automation.Language.TryStatementAst]}|Select-Object -First 1).Body
+          $guard=$body.Statements|Where-Object{$_ -is [System.Management.Automation.Language.IfStatementAst]}|Select-Object -First 1
+          Invoke-Expression $guard.Extent.Text
+        }
+        'NATIVE_WINDOWS_GUARDS_PASSED'
+      } catch { if($_.Exception.Message -ceq 'ORIGINAL_NATIVE_OWNER_REQUIRED'){'NATIVE_OWNER_REJECTED';exit 3};throw }
+    `], { env: environment, encoding: 'utf8', windowsHide: true, timeout: 15000 });
+    assert.equal(output.status, expected === owner ? 0 : 3, 'native guard result');
+    assert.match(output.stdout, expected === owner ? /NATIVE_WINDOWS_GUARDS_PASSED/u : /NATIVE_OWNER_REJECTED/u);
+  }
+});
+
+test('actual updater emits only bounded structured pre-mutation failure facts', { skip: process.platform !== 'win32' }, () => {
+  const environment = courseSupportWorkerRuntimeEnvironment({ status: 'available', nodePath: process.execPath }, process.cwd(), {
+    ...process.env, CODEX_THREAD_ID: '12345678-1234-4234-8234-123456789abc',
+  });
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-File',
+    resolve('scripts/automation/update-course-discovery-runtime.ps1'), '-RuntimeVersion', 'a'.repeat(40),
+    '-OwnerThreadId', '87654321-1234-4234-8234-123456789abc'], { env: environment, encoding: 'utf8', windowsHide: true, timeout: 15000 });
+  assert.equal(result.status, 1);
+  assert.deepEqual(JSON.parse(result.stdout), { schemaVersion: 1, outcome: 'blocked', reasonCode: 'ORIGINAL_NATIVE_OWNER_REQUIRED',
+    phase: 'VALIDATE_NATIVE_OWNER', apply: false, stateChanged: false, mutationAttempted: false, drainAttempted: false,
+    taskStopAttempted: false, runtimeUpdateAttempted: false, taskStartAttempted: false, activationWriteAttempted: false,
+    acceptanceRestartProof: false });
+  assert.equal(result.stderr.trim(), '');
+});
 
 test('Windows updater requires two fresh idle acknowledgements and preserves a foreign live drain', { skip: process.platform !== 'win32' }, () => {
   const script = resolve('scripts/automation/update-course-discovery-runtime.ps1');

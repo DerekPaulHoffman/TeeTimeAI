@@ -32,7 +32,9 @@ export function resolveCourseSupportWorkerRuntime({
 }
 
 function setupEnvironment(environment) {
-  const allowed = ["SystemRoot", "ComSpec", "TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "ProgramFiles", "PATHEXT", "PATH", "CODEX_THREAD_ID"];
+  // Windows PowerShell lifecycle guards require this nonsecret host marker.
+  // Keep credential and arbitrary configuration propagation excluded.
+  const allowed = ["OS", "SystemRoot", "ComSpec", "TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "ProgramFiles", "PATHEXT", "PATH", "CODEX_THREAD_ID"];
   const names = new Map(allowed.map((key) => [key.toLowerCase(), key]));
   const result = {};
   for (const [key, value] of Object.entries(environment)) {

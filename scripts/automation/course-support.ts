@@ -7,6 +7,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { refreshPendingCustomerRecoveries } from "@/lib/automation/course-support-customer-recovery";
 import { shouldContinueOwnedFullRepair } from "@/lib/automation/course-support-full-repair";
+import { CourseSupportRuntimeUpdateFailure, prepareCourseSupportRuntime } from "@/lib/automation/course-support-runtime-update";
 import { settleCourseSupportRecoveryFence } from "@/lib/automation/course-support-recovery-progress";
 import { waitForCourseSupportPathAdmission } from "@/lib/automation/course-support-path-admission";
 import { promisify } from "node:util";
@@ -1648,15 +1649,8 @@ async function recoverPublishedLearning(input: { batchId: string; ownerThreadId:
       prepareRuntime: async () => {
         if (process.platform !== "win32") throw Error("LOCAL_WINDOWS_RUNTIME_REQUIRED");
         const executable = resolve(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe");
-        try {
-          const { stdout } = await execFileAsync(executable, ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-File",
-            resolve("scripts/automation/update-course-discovery-runtime.ps1"), "-RuntimeVersion", runtimeVersion,
-            "-OwnerThreadId", input.ownerThreadId, "-Apply"], { encoding: "utf8", timeout: 21 * 60_000,
-            maxBuffer: 128 * 1024, windowsHide: true });
-          const state = JSON.parse(stdout) as { outcome?: string; runtimeVersion?: string };
-          if (!["already_current", "runtime_updated"].includes(state.outcome ?? "") || state.runtimeVersion !== runtimeVersion)
-            throw Error("EXACT_LOCAL_RUNTIME_REQUIRED");
-        } catch { throw Error("LOCAL_RUNTIME_UPDATE_NOT_PROVED"); }
+        await prepareCourseSupportRuntime({ executable, scriptPath: resolve("scripts/automation/update-course-discovery-runtime.ps1"),
+          runtimeVersion, ownerThreadId: input.ownerThreadId });
       },
       admit: () => requestOwnedOutdoorLearningRecovery({ ...input, leaseToken, runtimeVersion }),
       read: job => ownedOutdoorLearningRecoveryProgress({ ...input, leaseToken, jobId: job.jobId, originalJobId: job.originalJobId }),
@@ -2524,6 +2518,7 @@ export function buildCourseSupportCommandFailure(error: unknown) {
       ? { failureClass: error.failureClass }
       : {}),
     error: message,
+    ...(error instanceof CourseSupportRuntimeUpdateFailure ? { runtimeUpdate: error.diagnostic } : {}),
     durableCloseoutRecorded: false,
     ...policy
   };
