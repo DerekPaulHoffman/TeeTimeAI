@@ -107,6 +107,7 @@ export type CourseSupportRemediationRoute = {
 };
 
 type AssignedDetachedStageDirective = {
+  reason?: unknown;
   workMode?: unknown;
   strategyAction?: unknown;
   playbookStage?: unknown;
@@ -142,7 +143,14 @@ export function isExactAssignedDetachedStageDirective(input: {
       (directive.workMode === "VERIFY_TRANSIENT" &&
         directive.strategyAction === "RUN_TYPED_ADAPTER") ||
       (directive.workMode === "ADVANCE_DISCOVERY" &&
-        directive.strategyAction === "REPAIR_PROVIDER_ADAPTER")
+        directive.strategyAction === "REPAIR_PROVIDER_ADAPTER") ||
+      // The server-issued full repair retains this exact stage. Recognizing
+      // it permits ordinary progression, not new access or provider proof;
+      // ownership, source, release and transport guards still run downstream.
+      (directive.workMode === "IMPLEMENT_REUSABLE_SUPPORT" &&
+        directive.reason === "FAILED_LEARNER_IMPLEMENTATION_HANDOFF" &&
+        directive.strategyAction === "DISCOVER_WITH_BROWSER" &&
+        directive.retryBudget === null)
     );
   }
 

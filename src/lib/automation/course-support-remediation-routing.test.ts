@@ -39,6 +39,23 @@ const runnableCourse = {
 } satisfies CourseSupportRemediationRoutingInput;
 
 describe("course-support remediation routing", () => {
+  it("allows the failed learner owner's exact pending browser retry without granting another attempt", () => {
+    // Exact persisted failed-learner directive from a source-discovery repair.
+    const remediationDirective = { workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+      strategyAction: "DISCOVER_WITH_BROWSER", playbookStage: "BROWSER_ADAPTER_RETRY",
+      allowUnchangedRuntime: true, requiresImplementationPath: false,
+      reason: "FAILED_LEARNER_IMPLEMENTATION_HANDOFF", retryBudget: null };
+    const pending = { remediationDirective, playbookConclusion: "INCOMPLETE" as const,
+      nextPlaybookStage: "BROWSER_ADAPTER_RETRY" as const,
+      nextPlaybookStageStatus: "PENDING" as const, nextPlaybookStageAttemptCount: 0 };
+    expect(isAssignedDetachedStageProgression(pending)).toBe(true);
+    expect(isAssignedDetachedStageProgression({ ...pending,
+      nextPlaybookStageStatus: "FAILED_RETRYABLE", nextPlaybookStageAttemptCount: 1 })).toBe(false);
+    expect(isAssignedDetachedStageProgression({ ...pending, remediationDirective: {
+      ...remediationDirective, reason: "IMPLEMENTATION_REQUIRED" } })).toBe(false);
+    expect(isAssignedDetachedStageProgression({ ...pending,
+      nextPlaybookStage: "LOCAL_READER" })).toBe(false);
+  });
   it.each(["OFFICIAL_IDENTITY", "BROWSER_ADAPTER_RETRY", "INDEPENDENT_CONFIRMATION"] as const)(
     "gives the coding owner the failed learner repair at %s, instead of another unchanged verifier", stage => {
       const input = { ...runnableCourse, detectedPlatform: "CUSTOM", providerFamilyKey: "CUSTOM",
