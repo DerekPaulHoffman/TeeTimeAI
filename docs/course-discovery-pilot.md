@@ -320,6 +320,14 @@ route, provider identifiers or availability configuration to discovery. Saving
 the alert independently refreshes the same official evidence. An unavailable
 confirmation stays unavailable, rather than becoming a verified rental.
 
+Instructional names and coaching primary types may enter that same bounded
+official-site check. They still require independent practice evidence: either
+simulator rental/booking text, or golf bays with launch monitors and explicitly
+available practice sessions. A coaching label or indoor secondary type alone
+is insufficient. Stores, lesson-only URLs, membership-only names and reviewed
+private/non-rental identities stay excluded. Recovered demand remains unverified
+until the worker independently verifies the exact public rental and full session.
+
 The learned-recipe executor now recognizes the Five Iron public simulator
 selection route. Discovery binds its public location catalog to the canonical
 official branch page, city and timezone. Execution rechecks that binding and

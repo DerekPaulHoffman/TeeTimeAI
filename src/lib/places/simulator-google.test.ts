@@ -15,6 +15,32 @@ const oldKey = process.env.GOOGLE_PLACES_API_KEY;
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.mocked(readOfficialSimulatorEvidence).mockReset().mockResolvedValue("ABSENT"); if (oldKey === undefined) delete process.env.GOOGLE_PLACES_API_KEY; else process.env.GOOGLE_PLACES_API_KEY = oldKey; });
 
 describe("simulator Places discovery", () => {
+  it.each(["golf_instructor", "sports_coaching", "sports_school", "indoor_golf_course"])("admits a coaching venue as unverified demand only after official bay evidence (%s)", async primaryType => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    const hybrid = { ...place, displayName: { text: "Example Golf Academy" }, primaryType, types: [primaryType] };
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => Response.json(url.includes("searchText") ? { places: [hybrid] } : hybrid)));
+    expect(await searchSimulatorVenuesByName({ query: "Example Golf Academy" }, reviews, emptyOfferings)).toEqual([]);
+    expect(filterSimulatorPlaces([hybrid], reviews, emptyOfferings)).toEqual([]);
+    vi.mocked(readOfficialSimulatorEvidence).mockResolvedValue("LIKELY");
+    const candidates = await searchSimulatorVenuesByName({ query: "Example Golf Academy" }, reviews, emptyOfferings);
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({ publicAccessStatus: "UNVERIFIED", monitoringSupport: "UNCONFIRMED" });
+    expect(candidates[0].simulatorEvidenceUrl).toBeUndefined();
+    await expect(getSimulatorVenueForDemand("place-1", reviews)).resolves.toMatchObject({ googlePlaceId: "place-1" });
+  });
+  it.each([
+    { displayName: { text: "Members Only Golf Academy" }, primaryType: "golf_instructor" },
+    { displayName: { text: "Example Golf Academy" }, primaryType: "sporting_goods_store" },
+    { displayName: { text: "Example Golf Academy" }, primaryType: "golf_instructor", websiteUri: "https://academy.example/golf-lessons" },
+    { displayName: { text: "Example Golf Academy" }, primaryType: "golf_instructor", businessStatus: "CLOSED_PERMANENTLY" },
+  ])("does not bypass hard rental exclusions for a coaching venue", async overrides => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    const candidate = { ...place, ...overrides };
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ places: [candidate] })));
+    vi.mocked(readOfficialSimulatorEvidence).mockResolvedValue("LIKELY");
+    expect(await searchSimulatorVenuesByName({ query: candidate.displayName.text }, reviews, emptyOfferings)).toEqual([]);
+    expect(readOfficialSimulatorEvidence).not.toHaveBeenCalled();
+  });
   it.each(["restaurant", "sports_club"])("recovers an unverified simulator at a %s only from current official evidence", async primaryType => {
     process.env.GOOGLE_PLACES_API_KEY = "test-key";
     const hybrid = { ...place, displayName: { text: "The Clubhouse" }, primaryType, types: [primaryType] };

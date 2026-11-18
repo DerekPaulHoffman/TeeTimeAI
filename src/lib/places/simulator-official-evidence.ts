@@ -60,8 +60,12 @@ export async function readOfficialSimulatorEvidence(website: string, signal?: Ab
           if (Buffer.byteLength(html) > 2_000_000) return "UNAVAILABLE" as const;
           const document = parse(html);
           const visible = text(document).replace(/\s+/gu, " ");
-          return { document, likely: /\b(?:golf(?:\s*(?:&|and)\s*sports)?\s+simulators?|simulator\s+golf)\b/iu.test(visible) &&
-            /\b(?:book(?:ing)?|rent(?:als?)?|reserve|hourly|per\s+hour)\b/iu.test(visible) };
+          const simulatorRental = /\b(?:golf(?:\s*(?:&|and)\s*sports)?\s+simulators?|simulator\s+golf)\b/iu.test(visible) &&
+            /\b(?:book(?:ing)?|rent(?:als?)?|reserve|hourly|per\s+hour)\b/iu.test(visible);
+          const instrumentedPractice = /\bgolf\b/iu.test(visible) && /\bbays?\b/iu.test(visible) &&
+            /\blaunch\s+monitors?\b/iu.test(visible) &&
+            /\bpractice\s+(?:times?|sessions?)\s+(?:available|rentals?)\b/iu.test(visible);
+          return { document, likely: simulatorRental || instrumentedPractice };
         } finally { await response.body?.cancel().catch(() => {}); }
       };
       const home = await read(root);

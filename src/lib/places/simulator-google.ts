@@ -12,15 +12,17 @@ import {
 } from "@/lib/places/simulator-offerings";
 
 const SIMULATOR_FIELDS = "places.id,places.displayName,places.formattedAddress,places.addressComponents,places.location,places.websiteUri,places.photos,places.types,places.primaryType,places.businessStatus";
-const NON_RENTAL_NAME = /\b(?:disc\s+golf|mini(?:ature)?\s+golf|equipment\s+(?:sales|repair)|simulator\s+(?:sales|installation)|club\s*fitting|golf\s+(?:lessons?|school|academy))\b/i;
+const NON_RENTAL_NAME = /\b(?:disc\s+golf|mini(?:ature)?\s+golf|equipment\s+(?:sales|repair)|simulator\s+(?:sales|installation)|club\s*fitting)\b/i;
+const INSTRUCTIONAL_NAME = /\bgolf\s+(?:lessons?|school|academy)\b/i;
+const INSTRUCTIONAL_PRIMARY_TYPES = new Set(["golf_instructor", "sports_coaching", "sports_school"]);
 const MEMBERS_ONLY = /\b(?:members?\s+only|membership\s+required|private\s+(?:golf\s+)?(?:club|facility))\b/i;
 const RESIDENTIAL_NAME = /\b(?:apartments?|residences?|condominiums?|residential|housing\s+(?:complex|community))\b/i;
 const NON_RENTAL_PRIMARY_TYPES = new Set([
   "apartment_building", "apartment_complex", "condominium_complex", "housing_complex", "real_estate_agency",
-  "golf_instructor", "sports_coaching", "sports_school", "store"
+  "store"
 ]);
 const LESSON_OR_FITTING_PATH = /\/(?:golf-lessons?|golf-school|club-fitting)(?:\/|$)/i;
-export const SIMULATOR_DISCOVERY_CLASSIFICATION_VERSION = "public-rentals-v4";
+export const SIMULATOR_DISCOVERY_CLASSIFICATION_VERSION = "public-rentals-v5";
 
 type SimulatorConfirmationDiagnostic = {
   reason: "CONFIGURATION_MISSING" | "REQUEST_FAILED" | "UPSTREAM_HTTP_ERROR" | "MALFORMED_RESPONSE";
@@ -129,7 +131,9 @@ function simulatorRejectionReason(place: GooglePlace, reviews: GooglePlaceReview
     if (verified) return null;
     const primaryType = place.primaryType ?? "";
     if (NON_RENTAL_NAME.test(name) || MEMBERS_ONLY.test(name) || RESIDENTIAL_NAME.test(name)) return "EXCLUDED_NAME";
+    if (!officialEvidence && INSTRUCTIONAL_NAME.test(name)) return "EXCLUDED_NAME";
     if (NON_RENTAL_PRIMARY_TYPES.has(primaryType) || primaryType.endsWith("_store") || primaryType.endsWith("_shop")) return "EXCLUDED_PRIMARY_TYPE";
+    if (!officialEvidence && INSTRUCTIONAL_PRIMARY_TYPES.has(primaryType)) return "EXCLUDED_PRIMARY_TYPE";
     if (hasLessonOrFittingWebsite(place.websiteUri)) return "EXCLUDED_WEBSITE_PATH";
     // Text relevance and a website alone can surface apartments and other unrelated
     // businesses. Preserve likely golf hybrids without treating them as verified rentals.
@@ -138,9 +142,11 @@ function simulatorRejectionReason(place: GooglePlace, reviews: GooglePlaceReview
       ? null : "MISSING_SIMULATOR_EVIDENCE";
 }
 
-const OFFICIAL_EVIDENCE_PRIMARY_TYPES = new Set(["restaurant", "bar", "sports_bar", "sports_complex", "sports_club", "golf_course", "event_venue"]);
+const OFFICIAL_EVIDENCE_PRIMARY_TYPES = new Set(["restaurant", "bar", "sports_bar", "sports_complex", "sports_club", "golf_course", "indoor_golf_course", "event_venue", ...INSTRUCTIONAL_PRIMARY_TYPES]);
 function canReadOfficialEvidence(place: GooglePlace, reviews: GooglePlaceReviewIndex, offerings: SimulatorOfferingIndex) {
-  const reason = simulatorRejectionReason(place, reviews, offerings);
+  // Coaching labels do not disprove separately advertised bay practice. The
+  // bounded official read may establish likely identity, never rental access.
+  const reason = simulatorRejectionReason(place, reviews, offerings, true);
   return (reason === null || reason === "MISSING_SIMULATOR_EVIDENCE") &&
     OFFICIAL_EVIDENCE_PRIMARY_TYPES.has(place.primaryType ?? "") && Boolean(place.websiteUri);
 }
@@ -204,7 +210,7 @@ export async function getSimulatorVenueForDemand(googlePlaceId: string, reviews:
   const emptyOfferings: SimulatorOfferingIndex = { byPlaceId: new Map(), reviewVersion: "none" };
   if ((json.id ?? json.name?.replace(/^places\//, "")) !== googlePlaceId) rejectSimulatorIdentity("EXACT_ID_MISMATCH", json, response.status);
   let rejection: ReturnType<typeof simulatorRejectionReason> = simulatorRejectionReason(json, reviews, emptyOfferings);
-  if (rejection === "MISSING_SIMULATOR_EVIDENCE" && canReadOfficialEvidence(json, reviews, emptyOfferings)) {
+  if (rejection && canReadOfficialEvidence(json, reviews, emptyOfferings)) {
     const evidence = await readOfficialSimulatorEvidence(json.websiteUri!);
     if (evidence === "UNAVAILABLE") confirmationUnavailable({ reason: "REQUEST_FAILED" });
     if (evidence === "LIKELY") rejection = simulatorRejectionReason(json, reviews, emptyOfferings, true);
@@ -250,13 +256,13 @@ export async function searchSimulatorVenuesByName(input: CourseNameSearchInput, 
   }, input.signal);
   // For an exact-name lookup require indoor evidence or a rental review. A generic
   // unrelated named business with a website is insufficient simulator evidence.
-  const ordinary = places.filter((place) => {
+  const ordinary = filterSimulatorPlaces(places.filter((place) => {
     const id = (place.id ?? place.name ?? "").replace(/^places\//, "");
     const offering = offerings.byPlaceId.get(reviews.byPlaceId.get(id)?.canonicalPlaceId ?? id);
     return hasVerifiedPublicSimulatorRental(offering) || place.types?.includes("indoor_golf_course") ||
       /\b(?:indoor\s+golf|golf\s+simulators?|simulator|golf\s+lounge)\b/i.test(place.displayName?.text ?? "") ||
       reviews.byPlaceId.get(id)?.classification === "INDOOR_SIMULATOR";
-  });
+  }), reviews, offerings);
   const pending = places.filter(place => !ordinary.includes(place) && canReadOfficialEvidence(place, reviews, offerings)).slice(0, 2);
   const witnessed = (await Promise.all(pending.map(async place =>
     await readOfficialSimulatorEvidence(place.websiteUri!, input.signal) === "LIKELY" ? place : null))).filter((place): place is GooglePlace => place !== null);

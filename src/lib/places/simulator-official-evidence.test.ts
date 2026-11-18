@@ -3,6 +3,19 @@ import { readOfficialSimulatorEvidence } from "./simulator-official-evidence";
 
 const lease = async <T,>(_family: string, work: () => Promise<T>) => ({ acquired: true as const, value: await work() });
 describe("official simulator intake corroboration", () => {
+  it("recognizes an official golf practice facility with instrumented bays without claiming public rental", async () => {
+    const fetch = vi.fn(async () => new Response('<h1>Golf coaching</h1><p>Coaching in the bays. Practice times available.</p><h2>High speed cameras and launch monitors</h2>', { headers: { "content-type": "text/html" } }));
+    await expect(readOfficialSimulatorEvidence("https://academy.example/", undefined, { fetch, lease })).resolves.toBe("LIKELY");
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+  it.each([
+    '<h1>Golf coaching</h1><p>Launch monitors for lessons. Book a lesson.</p>',
+    '<h1>Golf equipment</h1><p>Launch monitors and hitting bays for sale. Book a fitting.</p>',
+    '<h1>Golf coaching</h1><p>Practice times available in the bays.</p>',
+    '<h1>Golf coaching</h1><script>Launch monitors, bays, practice times available</script>',
+  ])("requires visible golf, bay, launch-monitor and independent practice evidence", async html => {
+    await expect(readOfficialSimulatorEvidence("https://academy.example/", undefined, { fetch: async () => new Response(html, { headers: { "content-type": "text/html" } }), lease })).resolves.toBe("ABSENT");
+  });
   it("reads only the official HTML anonymously and establishes likely identity, not inventory", async () => {
     const fetch = vi.fn(async () => new Response("<h1>The Clubhouse</h1><p>Book our golf &amp; sports simulators by the hour.</p>", { headers: { "content-type": "text/html" } }));
     expect(await readOfficialSimulatorEvidence("https://clubhouse.example/", undefined, { fetch, lease })).toBe("LIKELY");
