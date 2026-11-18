@@ -20531,7 +20531,7 @@ function courseSupportBatchOwnsCheckout(batch: {
     readBatchPlannedPaths(batch.summary).length > 0;
 }
 
-function courseSupportBatchReservesCheckout(batch: {
+export function courseSupportBatchReservesCheckout(batch: {
   status: CourseSupportBatchStatus;
   summary: Prisma.JsonValue | null;
 }) {

@@ -1,5 +1,7 @@
 # Continue the same unresolved Desktop repair
 
+The normal planner defers this continuation while a live competing batch would block its original owner's recovery through existing provider/code or exclusive implementation ownership. It reconsiders on later normal ticks after that ownership completes or expires, before consuming a one-use Desktop continuation intent. This changes no recovery authority, source check, lease, provider budget, historical marker or failed learning clock.
+
 This guide applies only to the original native owner of the exact batch/reference in the controller's message. The scheduler observed your actual completed/error-null turn with supported native metadata; it did not adopt your claim, extend your lease, change a result or mark monitoring/email successful. It allows only one requested continuation per tested runtime, including the same runtime for a currently owned unfinished full repair. A prior negative verification remains durable evidence. The original failed learning job, first pickup and deadline never restart.
 
 A zero-pass verifier may leave the course result `PENDING`. That is not monitoring success or necessarily an active command. Continuation selection additionally requires the existing verification-tooling failure checkpoint recorded after this deployment and batch creation; the native helper still rejects a running worker. Revalidate the real owned packet and process state before continuing. No checkpoint permits repeating an unfinished command or bypassing a failed protected operation.

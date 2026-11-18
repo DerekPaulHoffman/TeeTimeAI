@@ -1,10 +1,65 @@
 import { describe, expect, it } from "vitest";
 
-import { collectCurrentCourseDispatchSourceUsage, selectCourseDispatchTargets } from "./course-support-course-dispatch";
+import { collectCurrentCourseDispatchSourceUsage, isOwnedFullRepairContinuationReady, selectCourseDispatchTargets } from "./course-support-course-dispatch";
 import { createCourseDispatchIntentDigest } from "./course-support-dispatch-intent";
 import { createSimulatorSupportIntentDigest, type SimulatorEngineeringAuthority, type SimulatorSupportSource } from "./simulator-support-policy";
 
 const source = (id: string) => [{ id, scheduleVersion: 1, alertGeneration: 1, trafficClass: "PUBLIC" }];
+
+describe("same-owner continuation waits for recovery capacity", () => {
+  const now = new Date("2030-01-01T12:00:00Z");
+  const batch = (id: string, path: string | null) => ({
+    id, status: "VERIFYING" as const, leaseExpiresAt: new Date("2030-01-01T12:15:00Z"),
+    providerFamilyKey: id, failureFingerprint: id,
+    summary: {
+      dispatchAssignmentRef: `course-assignment-${id === "waiting" ? "11111111" : "22222222"}-2222-4333-8444-555555555555`,
+      dispatchCourseDigest: (id === "waiting" ? "a" : "b").repeat(64),
+      plannedPaths: path ? [path] : [],
+    },
+  });
+
+  it("keeps a code repair's continuation available until the other code owner finishes", () => {
+    const waiting = batch("waiting", "src/lib/first-provider.ts");
+    const occupied = batch("occupied", "src/lib/another-provider.ts");
+    const before = JSON.stringify([waiting, occupied]);
+    // Different courses, families and files still share exclusive implementation.
+    expect(isOwnedFullRepairContinuationReady(waiting, [waiting, occupied], now)).toBe(false);
+    expect(JSON.stringify([waiting, occupied])).toBe(before);
+    expect(isOwnedFullRepairContinuationReady(waiting, [waiting, { ...occupied, status: "PARTIAL" }], now)).toBe(true);
+    // The waiting mission itself and its published runtime never changed.
+    expect(isOwnedFullRepairContinuationReady(waiting, [waiting], now)).toBe(true);
+  });
+
+  it("reconsiders after an expired competing lease without transferring it", () => {
+    const waiting = batch("waiting", "src/lib/first-provider.ts");
+    const occupied = batch("occupied", "src/lib/another-provider.ts");
+    expect(isOwnedFullRepairContinuationReady(waiting, [waiting, occupied], now)).toBe(false);
+    expect(isOwnedFullRepairContinuationReady(waiting, [waiting, occupied], occupied.leaseExpiresAt)).toBe(true);
+    expect(occupied.status).toBe("VERIFYING");
+    expect(occupied.leaseExpiresAt.toISOString()).toBe("2030-01-01T12:15:00.000Z");
+  });
+
+  it("keeps unrelated data-only workers eligible and does not mistake its own lease for competition", () => {
+    const waiting = batch("waiting", null);
+    const occupied = batch("occupied", "src/lib/another-provider.ts");
+    expect(isOwnedFullRepairContinuationReady(waiting, [waiting, occupied], now)).toBe(true);
+  });
+
+  it("retains a legacy provider conflict even without code ownership", () => {
+    const waiting = batch("waiting", null);
+    const occupied = { ...batch("occupied", null), providerFamilyKey: waiting.providerFamilyKey,
+      summary: { plannedPaths: [] } };
+    expect(isOwnedFullRepairContinuationReady(waiting, [waiting, occupied], now)).toBe(false);
+    expect(isOwnedFullRepairContinuationReady(waiting, [waiting, { ...occupied, status: "COMPLETED" }], now)).toBe(true);
+  });
+
+  it("does not ignore a conflict with an unknown lease or admit on an invalid clock", () => {
+    const waiting = batch("waiting", "src/lib/first-provider.ts");
+    const occupied = { ...batch("occupied", "src/lib/another-provider.ts"), leaseExpiresAt: new Date(NaN) };
+    expect(isOwnedFullRepairContinuationReady(waiting, [waiting, occupied], now)).toBe(false);
+    expect(isOwnedFullRepairContinuationReady(waiting, [waiting], new Date(NaN))).toBe(false);
+  });
+});
 
 describe("course support course dispatch selection", () => {
   it("admits fifteen distinct courses from three active alerts and excludes a fourth cohort", () => {

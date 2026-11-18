@@ -535,6 +535,25 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
       .toMatchObject({ status: "FAILED", attempts: f.job.attempts, firstPickedUpAt: f.job.firstPickedUpAt, deadlineAt: f.job.deadlineAt });
     if (scenario === "published-code") {
       await client.courseSupportBatch.update({ where: { id: batch.id }, data: { leaseExpiresAt: new Date(Date.now() - 1000) } });
+      const waiting = await client.courseSupportBatch.findUniqueOrThrow({ where: { id: batch.id } });
+      const competingOwner = randomUUID(); batchOwners.push(competingOwner);
+      const competing = await client.courseSupportBatch.create({ data: {
+        reference: randomUUID(), ownerThreadId: competingOwner, providerFamilyKey: "OTHER_PROVIDER",
+        failureFingerprint: "OTHER_SOURCE", status: "IMPLEMENTING", leaseToken: randomUUID(),
+        leaseExpiresAt: new Date(Date.now() + 900_000), heartbeatAt: new Date(), baseSha,
+        summary: { plannedPaths: ["src/lib/adapters/another-provider.ts"],
+          dispatchAssignmentRef: `course-assignment-${randomUUID()}`, dispatchCourseDigest: "e".repeat(64) },
+      } });
+      // The actual planner must not spend this runtime's one-use Desktop intent
+      // while the original owner's recovery would only return deferred_busy.
+      const busy = await dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: nextParent, baseSha, maxStarts: 1 });
+      expect(busy).toMatchObject({ acquired: true, value: { fullRepairContinuationItems: [] } });
+      expect(await client.courseSupportBatch.findUniqueOrThrow({ where: { id: batch.id } })).toEqual(waiting);
+      await client.courseSupportBatch.update({ where: { id: competing.id }, data: { status: "PARTIAL", completedAt: new Date() } });
+      const freed = await dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: nextParent, baseSha, maxStarts: 1 });
+      expect(freed).toMatchObject({ acquired: true, value: { fullRepairContinuationItems: [{ threadId: owner,
+        assignmentRef, batchReference: batch.reference, continuationMode: "PUBLISHED_IMPLEMENTATION" }] } });
+      expect(await client.courseSupportBatch.findUniqueOrThrow({ where: { id: batch.id } })).toEqual(waiting);
       expect(await lane.recoverCourseSupportBatch({ batchId: batch.id, requestingThreadId: owner,
         currentBranch: String((batch.summary as Prisma.JsonObject).branch), currentHeadSha: "d".repeat(40), dirtyPaths: [],
         releaseIsPublished: true, currentHeadIsPublished: true, baseIsAncestor: true, releaseIsAncestor: true,

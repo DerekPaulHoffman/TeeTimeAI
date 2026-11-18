@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { isAbsolute, posix, win32 } from "node:path";
 
-import { Prisma } from "@prisma/client";
+import { Prisma, type CourseSupportBatchStatus } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
 import { isSearchWindowActive } from "./date-boundary";
@@ -36,6 +36,8 @@ import {
   withCourseSupportWriteConflictRetry,
   readCourseSupportRemediationDirective,
   readCourseSupportRemediationClaimAttempt,
+  courseSupportBatchReservesCheckout,
+  courseSupportRecoveryBatchesConflict,
 } from "./course-support-batches";
 import { allowsRetainedFullRepairResearch, hasStoppedFullRepairVerification } from "./course-support-full-repair";
 import { retryCourseSupportWriterAdmission } from "./course-support-writer-admission";
@@ -664,10 +666,31 @@ export async function planCourseSupportCourseDispatch(input: {
 
 /** Read-only control projection. It never claims, extends or transfers a lease.
  * Only the original Desktop owner may recover or continue its own packet. */
+type RecoveryContinuationBatch = {
+  id: string; status: CourseSupportBatchStatus; leaseExpiresAt: Date;
+  providerFamilyKey: string; failureFingerprint: string; summary: Prisma.JsonValue | null;
+};
+
+/** Admission readiness only, never recovery authority. Do not consume a native
+ * continuation's one-use marker just to discover an already known writer
+ * conflict. Reconsider on the next normal tick after that owner releases it. */
+export function isOwnedFullRepairContinuationReady(batch: RecoveryContinuationBatch,
+  activeBatches: readonly RecoveryContinuationBatch[], now: Date) {
+  if (!Number.isFinite(now.getTime())) return false;
+  return !activeBatches.some(other => {
+    if (other.id === batch.id || !["CLAIMED", "IMPLEMENTING", "VERIFYING"].includes(other.status)) return false;
+    const expiresAt = other.leaseExpiresAt.getTime();
+    if (Number.isFinite(expiresAt) && expiresAt <= now.getTime()) return false;
+    return courseSupportBatchReservesCheckout(batch) && courseSupportBatchReservesCheckout(other) ||
+      courseSupportRecoveryBatchesConflict(batch, other);
+  });
+}
+
 async function collectOwnedFullRepairContinuations(tx: Prisma.TransactionClient,
-  activeBatches: readonly { id: string; status: string; summary: Prisma.JsonValue | null }[], now: Date) {
+  activeBatches: readonly RecoveryContinuationBatch[], now: Date) {
   const ids = activeBatches.filter(batch => batch.status === "VERIFYING" &&
-    readCourseSupportRemediationDirective(batch.summary)?.reason === "FAILED_LEARNER_IMPLEMENTATION_HANDOFF").map(batch => batch.id);
+    readCourseSupportRemediationDirective(batch.summary)?.reason === "FAILED_LEARNER_IMPLEMENTATION_HANDOFF" &&
+    isOwnedFullRepairContinuationReady(batch, activeBatches, now)).map(batch => batch.id);
   if (!ids.length) return [];
   const batches = await tx.courseSupportBatch.findMany({
     where: { id: { in: ids }, status: "VERIFYING" },
