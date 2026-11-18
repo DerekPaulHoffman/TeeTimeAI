@@ -1,4 +1,5 @@
 import { collectNativeOfficialPublicMetadata } from "./public-document-metadata";
+import { captureNativeCurrentFrameSource } from "./native-current-frame-source";
 import { isCpsPublicSearchDocument } from "../../../scripts/automation/stagehand/public-source-gateway.mjs";
 import { revealNativeVenueHeading, revealNativeVenueAddress } from "./native-venue-heading";
 import { isSafePublicSwiftCatalogRedirect } from "./public-bootstrap-read-url";
@@ -1843,7 +1844,10 @@ export async function createCourseDiscoveryBrowserSession(input: {
           captured.documentStartedAt !== origin || Date.now() - captured.observedAt > 5000 || !captured.visibleEvidence ||
           !/<html(?:\s|>)/iu.test(captured.html) || !/<body(?:\s|>)/iu.test(captured.html) || !/<\/body\s*>/iu.test(captured.html) || !/<\/html\s*>/iu.test(captured.html))
         throw new Error("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
-      return structuredClone({ url: captured.url, html: captured.html, visibleEvidence: captured.visibleEvidence, browserTransport: captured.browserTransport });
+      const document = structuredClone({ url: captured.url, html: captured.html, visibleEvidence: captured.visibleEvidence, browserTransport: captured.browserTransport });
+      if (input.venueOfficialUrl) await captureNativeCurrentFrameSource(page, document, input.venueOfficialUrl, origin, input.deadlineAt);
+      deadline.throwIfAborted();
+      return document;
       } catch (error) { rememberTeeItUpDelegationFailure(error, diagnostic); throw error; }
     },
     async readOfficialIdentityPage(): Promise<OfficialIdentityPage> {

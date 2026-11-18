@@ -7,6 +7,7 @@ import { completeUSAddress, fullCourseName, matchesOfficialFacility, type Offici
 import { publicDocumentUrl, teeItUpBookAlias, teeItUpCompleteStreetAddress, teeItUpBrandedPipeAddressMatches } from "./teeitup-official-booking-source";
 import { createDelegationDiagnostic, rememberTeeItUpDelegationFailure, type DelegatedDiagnosticGate } from "./teeitup-delegated-booking-diagnostic";
 import { collectBookingEdgeEvidence } from "./booking-edge-evidence";
+import { hasNativeCurrentFrameSource } from "./native-current-frame-source";
 
 const sha = z.string().regex(/^[a-f0-9]{64}$/u);
 export function safeDelegatedBookingUrl(value: string) {
@@ -190,11 +191,15 @@ function resolveDelegatedBookingHop(page: OfficialIdentityPage, requestedNext?: 
   if (!frameObservation.success) return fail();
   const rendered = frameObservation.data.rows.filter(row => row.visible && !row.srcdoc && !row.inForm);
   const raw = entries(page, true).filter(node => node.tagName === "iframe" && attr(node,"src") !== undefined && attr(node,"srcdoc") === undefined);
+  const currentFrameSource = hasNativeCurrentFrameSource(page, canonicalRoot, requestedNext);
   let rawMatches = false, renderedMatches = false;
   try { rawMatches = raw.length === 1 && new URL(attr(raw[0],"src")!,page.url).href === requestedNext;
-    renderedMatches = rendered.length === 1 && new URL(rendered[0].src,page.url).href === requestedNext && attr(raw[0],"src") === rendered[0].src; } catch { /* An invalid source cannot be observed authority. */ }
+    renderedMatches = rendered.length === 1 && new URL(rendered[0].src,page.url).href === requestedNext &&
+      (currentFrameSource || (raw.length === 1 && attr(raw[0],"src") === rendered[0].src)); } catch { /* An invalid source cannot be observed authority. */ }
   note("hopRawLinkPresent",rawMatches);note("hopRenderedLinkPresent",renderedMatches);
-  const unique = rawMatches && renderedMatches && links.length === 0;
+  // A JavaScript-created frame needs a separate original-object witness from
+  // the current native document. Rendered metadata alone grants nothing.
+  const unique = (rawMatches || currentFrameSource) && renderedMatches && links.length === 0;
   note("hopUnique",unique);if (!unique) return fail();
   const kind = "NATIVE_VISIBLE_IFRAME_SRC" as const;
   return { pageUrl: page.url, nextUrl: requestedNext, kind, witnessSha256: delegatedWitnessHash({ pageUrl: page.url, nextUrl: requestedNext, kind }) };

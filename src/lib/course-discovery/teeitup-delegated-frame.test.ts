@@ -7,6 +7,7 @@ import { readTeeItUpDelegatedBookingChain } from "./teeitup-delegated-booking-re
 import { getTeeItUpDelegationDiagnostic } from "./teeitup-delegated-booking-diagnostic";
 import { inspectExistingAdapter, executeExistingAdapterRecipe } from "./existing-adapter-executor";
 import { parseAccessRecipe } from "./recipe";
+import { captureNativeCurrentFrameSource } from "./native-current-frame-source";
 import type { OfficialIdentityPage, OfficialIdentitySource } from "./teeitup-official-identity";
 
 const source={officialUrl:"https://public.example/",bookingUrl:"https://public.book.teeitup.com/",venueName:"Public Golf Course",venueAddress:"10 Public Road, Example, NY 12345, USA",timeZone:"America/New_York"};
@@ -74,8 +75,13 @@ describe("fresh native exact final iframe source hop",()=>{
   expect(execute).toHaveBeenCalledTimes(1);expect(close).toHaveBeenCalledTimes(1);
   expect(delegatedBookingHop(p,source.bookingUrl,undefined,source.officialUrl).kind).toBe("NATIVE_VISIBLE_IFRAME_SRC");
  });
- it("serializes the typed final hop and rebuilds both native documents for two fresh warm inputs",async()=>{
-  const hops=vi.fn(async(_s:OfficialIdentitySource,grant:DelegatedGetGrant)=>{const next=consumeDelegatedGet(grant);return next.url===operator?registered():registerFreshNativeDelegatedDocument({url:next.url,browserTransport:"NATIVE_CHROME",html:"Public booking",visibleEvidence:{title:"Public",headings:[],addressTexts:[],linkUrls:[]}},source.officialUrl,new Date(Date.now()+120000));});
+ it.each([false,true])("serializes the typed final hop and rebuilds both native documents for two fresh warm inputs (dynamic=%s)",async dynamic=>{
+  const hops=vi.fn(async(_s:OfficialIdentitySource,grant:DelegatedGetGrant)=>{const next=consumeDelegatedGet(grant);
+   if(next.url!==operator)return registerFreshNativeDelegatedDocument({url:next.url,browserTransport:"NATIVE_CHROME",html:"Public booking",visibleEvidence:{title:"Public",headings:[],addressTexts:[],linkUrls:[]}},source.officialUrl,new Date(Date.now()+120000));
+   const parent=rawParent();
+   if(dynamic){parent.html="<html><body>Public booking</body></html>";const evaluate=vi.fn().mockResolvedValueOnce({documentUrl:operator,timeOrigin:123,frames:structuredClone(parent.visibleEvidence!.delegatedFrameSources)}).mockResolvedValueOnce({documentUrl:operator,timeOrigin:123});
+    await captureNativeCurrentFrameSource({url:()=>operator,evaluate} as never,parent,source.officialUrl,123,new Date(Date.now()+120000));}
+   return registered(parent);});
   const roots=vi.fn(async()=>root()),lease=async<T>(_f:string,work:()=>Promise<T>)=>({acquired:true as const,value:await work()}),fetcher=vi.fn<typeof fetch>(async value=>Response.json(new URL(String(value)).pathname.endsWith("facilities")?directory:[{courseId:"11",teetimes:[]}]));
   const deps={localCapabilities:["LOCAL_CHROME"] as const,readDelegatedRoot:roots,readNativeOfficialPage:roots,readDelegatedDocument:hops,deadlineAt:new Date(Date.now()+120000),requestLease:lease,fetch:fetcher};
   const token=await readTeeItUpDelegatedBookingChain(source,deps),chain=currentNativeDelegatedChain(token),proof=bindDelegatedFacility(source,chain,directory);
