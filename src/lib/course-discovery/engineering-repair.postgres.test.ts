@@ -324,6 +324,14 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
         ...(scenario === "pending-stopped" ? { ownerFailureCheckpoints: [{ schemaVersion: 1, stage: "VERIFICATION",
           failureDomain: "PRODUCTION_VERIFICATION", reasonCode: "VERIFICATION_TOOLING_FAILED", recordedAt: new Date().toISOString() }] } : {}) } } });
     await client.courseSupportBatchIncident.updateMany({ where: { batchId: batch.id }, data: { result: pending ? "PENDING" : "STALE_EVIDENCE", verifiedAt: new Date() } });
+    if (scenario === "data-only") {
+      const before = await client.courseSupportBatch.findUniqueOrThrow({ where: { id: batch.id } });
+      expect(await lane.heartbeatCourseSupportBatch({ batchId: batch.id, leaseToken: batch.leaseToken,
+        ownerThreadId: owner, status: "IMPLEMENTING" })).toMatchObject({ outcome: "implementation_path_required",
+          stateChanged: false, heartbeatRecorded: false, requiredAction: "CLAIM_IMPLEMENTATION_PATH" });
+      const after = await client.courseSupportBatch.findUniqueOrThrow({ where: { id: batch.id } });
+      expect(after).toEqual(before);
+    }
     expect(await research.getOwnedCourseSupportResearchContext({ batchId: batch.id, leaseToken: batch.leaseToken,
       ownerThreadId: owner, ordinal: 1 })).toMatchObject({ outcome: "ready", researchContextV1: { monitoringProofRecorded: false } });
     const nextParent = randomUUID(); batchOwners.push(nextParent);

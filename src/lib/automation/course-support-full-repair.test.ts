@@ -48,6 +48,15 @@ describe("full repair retains the original owner after negative verification", (
       batchCreatedAt: new Date("2026-11-18T06:00:00Z"), now: new Date("2026-11-18T06:10:00Z"),
       events: [event], releaseHistory: [history] };
     expect(fullRepairReadProgressMatchesClaim(input)).toBe(true);
+    const unpublished = "d".repeat(40);
+    const chain = [
+      { releaseSha: "c".repeat(40), deployedAt: "2026-11-18T05:45:00Z", supersededAt: "2026-11-18T05:58:00Z", supersededBy: unpublished },
+      { releaseSha: unpublished, deployedAt: null, supersededAt: "2026-11-18T06:00:00Z", supersededBy: before },
+      history,
+    ];
+    expect(fullRepairReadProgressMatchesClaim({ ...input, releaseHistory: chain })).toBe(true);
+    expect(fullRepairReadProgressMatchesClaim({ ...input, releaseHistory: chain,
+      events: [{ ...event, runtimeVersion: unpublished }] })).toBe(false);
     for (const change of [
       { releaseHistory: [] }, { releaseHistory: [{ ...history, deployedAt: null }] },
       { releaseHistory: [{ ...history, supersededBy: "c".repeat(40) }] },

@@ -8200,6 +8200,16 @@ export async function heartbeatCourseSupportBatch(
       archiveReason: "Responder batch ownership or lease freshness was lost.",
     };
   }
+  if (input.status === "IMPLEMENTING" && batch.status !== "IMPLEMENTING" &&
+      !input.releaseSha && !input.deployedAt && !input.releaseAdvanceProof && !input.ownerFailureCheckpoint) {
+    // Exact read-only precondition: claim-path owns this transition. Report a
+    // correctable sequence without entering a writer lease or transaction.
+    return { outcome: "implementation_path_required" as const, heartbeatRecorded: false,
+      stateChanged: false as const, requiredAction: "CLAIM_IMPLEMENTATION_PATH" as const,
+      status: batch.status, releaseSha: batch.releaseSha, releaseAdvanced: false,
+      threadDisposition: "KEEP_VISIBLE" as const,
+      archiveReason: "Claim an authorized implementation path before entering IMPLEMENTING; this request changed no state." };
+  }
   const initialPlan = prepareCourseSupportHeartbeat(batch, input);
   const initialWouldOwnCheckout = courseSupportBatchReservesCheckout({
     status: initialPlan.status,

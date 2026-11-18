@@ -25,24 +25,30 @@ export function fullRepairReadProgressMatchesClaim(input: {
 }
 
 /** The server owns this same batch's append-only registered release history.
- * Only a complete deployed chain ending at the current release can explain
- * earlier non-final reads. It grants no new read or implementation authority. */
+ * Only a complete registered chain ending at the current release can explain
+ * earlier non-final reads; undeployed entries supply no read window.
+ * It grants no new read or implementation authority. */
 function fullRepairPreviousRuntimeWindows(input: { runtimeVersion: string | null; releaseHistory?: unknown; now: Date }) {
   const windows = new Map<string, { deployedAt: Date; supersededAt: Date }>();
+  const registered = new Set<string>();
   if (!Array.isArray(input.releaseHistory) || input.releaseHistory.length === 0 || input.releaseHistory.length > 100) return windows;
   let priorSupersededAt: Date | null = null;
   for (let index = 0; index < input.releaseHistory.length; index++) {
     const entry = input.releaseHistory[index];
     const next = input.releaseHistory[index + 1];
     if (!entry || typeof entry !== "object" || Array.isArray(entry) ||
-        !/^[a-f0-9]{40}$/u.test(entry.releaseSha ?? "") || windows.has(entry.releaseSha) ||
+        !/^[a-f0-9]{40}$/u.test(entry.releaseSha ?? "") || registered.has(entry.releaseSha) ||
         entry.releaseSha === input.runtimeVersion || entry.supersededBy !== (next?.releaseSha ?? input.runtimeVersion) ||
-        typeof entry.deployedAt !== "string" || typeof entry.supersededAt !== "string") return new Map();
-    const deployedAt = new Date(entry.deployedAt), supersededAt = new Date(entry.supersededAt);
-    if (!Number.isFinite(deployedAt.getTime()) || !Number.isFinite(supersededAt.getTime()) ||
-        deployedAt > supersededAt || supersededAt > input.now ||
+        (entry.deployedAt !== null && typeof entry.deployedAt !== "string") || typeof entry.supersededAt !== "string") return new Map();
+    const supersededAt = new Date(entry.supersededAt);
+    if (!Number.isFinite(supersededAt.getTime()) || supersededAt > input.now ||
         (priorSupersededAt && supersededAt < priorSupersededAt)) return new Map();
-    windows.set(entry.releaseSha, { deployedAt, supersededAt });
+    registered.add(entry.releaseSha);
+    if (entry.deployedAt !== null) {
+      const deployedAt = new Date(entry.deployedAt);
+      if (!Number.isFinite(deployedAt.getTime()) || deployedAt > supersededAt) return new Map();
+      windows.set(entry.releaseSha, { deployedAt, supersededAt });
+    }
     priorSupersededAt = supersededAt;
   }
   return windows;

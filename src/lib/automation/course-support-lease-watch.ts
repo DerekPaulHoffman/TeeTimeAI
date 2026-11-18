@@ -4,7 +4,8 @@ export const DEFAULT_COURSE_SUPPORT_LEASE_WATCH_MINUTES = 45;
 export async function runCourseSupportLeaseWatch(input: {
   maxMinutes?: number;
   intervalMs?: number;
-  renew: () => Promise<{ heartbeatRecorded: boolean; leaseExpiresAt?: string | null }>;
+  renew: () => Promise<{ heartbeatRecorded: boolean; leaseExpiresAt?: string | null;
+    outcome?: string; stateChanged?: boolean; requiredAction?: string }>;
   onRenewed?: (input: {
     renewalCount: number;
     leaseExpiresAt?: string | null;
@@ -39,6 +40,13 @@ export async function runCourseSupportLeaseWatch(input: {
 
   while (now() < deadline) {
     const result = await input.renew();
+    if (renewalCount === 0 && result.heartbeatRecorded === false &&
+        result.outcome === "implementation_path_required" && result.stateChanged === false &&
+        result.requiredAction === "CLAIM_IMPLEMENTATION_PATH") {
+      return { outcome: "implementation_path_required" as const, heartbeatRecorded: false,
+        stateChanged: false as const, requiredAction: "CLAIM_IMPLEMENTATION_PATH" as const,
+        renewalCount: 0, maxMinutes };
+    }
     if (!result.heartbeatRecorded) {
       throw new Error("Course-support lease watch lost durable batch ownership.");
     }

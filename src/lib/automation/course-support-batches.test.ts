@@ -23411,10 +23411,10 @@ describe("course-support release heartbeat persistence", () => {
     expect(prismaMocks.batchUpdateMany).toHaveBeenCalledTimes(1);
   });
 
-  it("requires path ownership before a claimed batch can enter IMPLEMENTING", async () => {
+  it.each(["CLAIMED", "VERIFYING"])("returns a no-write path precondition before a %s batch can enter IMPLEMENTING", async status => {
     prismaMocks.batchFindFirst.mockResolvedValue({
       ...ownedBatch(),
-      status: "CLAIMED",
+      status,
       releaseSha: null,
       deployedAt: null,
       summary: { branch, plannedPaths: [] },
@@ -23428,8 +23428,10 @@ describe("course-support release heartbeat persistence", () => {
         status: "IMPLEMENTING",
         now,
       }),
-    ).rejects.toThrow("claim a planned path");
+    ).resolves.toMatchObject({ outcome: "implementation_path_required", heartbeatRecorded: false,
+      stateChanged: false, requiredAction: "CLAIM_IMPLEMENTATION_PATH", status });
     expect(prismaMocks.transaction).not.toHaveBeenCalled();
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
   });
 
   it("advances with owner/CAS fences, archives stable ordinals, and resets only machine proof", async () => {
