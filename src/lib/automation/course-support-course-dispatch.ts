@@ -40,6 +40,7 @@ import {
   courseSupportRecoveryBatchesConflict,
 } from "./course-support-batches";
 import { allowsRetainedFullRepairResearch, hasStoppedFullRepairVerification } from "./course-support-full-repair";
+import { readOwnedFailedLearningProgress } from "./course-support-learning-followthrough";
 import { retryCourseSupportWriterAdmission } from "./course-support-writer-admission";
 import { COURSE_DISPATCH_INCIDENT_SNAPSHOT_SELECT, isCourseDispatchIncidentSnapshotCurrent } from "./course-support-dispatch-snapshot";
 import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-verification";
@@ -732,10 +733,7 @@ async function collectOwnedFullRepairContinuations(tx: Prisma.TransactionClient,
         entry.incident.failureFingerprint !== audit.target.failureFingerprint) continue;
     const directive = readCourseSupportRemediationDirective(batch.summary);
     const claim = readCourseSupportRemediationClaimAttempt({ summary: batch.summary, courseId: entry.courseId, expectedAttemptCount: 1 });
-    if (!directive || !claim || !allowsRetainedFullRepairResearch({ reason: directive.reason, workMode: directive.workMode,
-      batchStatus: "VERIFYING", result: entry.result, allowedActions: claim.actionPlan?.allowedActions ?? [],
-      pendingVerificationStopped: hasStoppedFullRepairVerification({ summary: batch.summary,
-        batchCreatedAt: batch.createdAt, deployedAt: batch.deployedAt, now }) }) ||
+    if (!directive || !claim ||
       claim.providerSnapshotFingerprint !== buildCourseSupportProviderSnapshotFingerprint(entry.course)) continue;
     const searches = await tx.coursePreference.findMany({
       where: { courseId: entry.courseId, teeSearchId: { in: audit.target.searchRefs.map(ref => ref.id) }, teeSearch: { mode: "OUTDOOR" } },
@@ -746,10 +744,24 @@ async function collectOwnedFullRepairContinuations(tx: Prisma.TransactionClient,
       return !ref || !isCurrentCourseDispatchSource({ ref, search: teeSearch, trafficClass: audit.target.trafficClass,
         courseTimeZone: entry.course.timeZone, now });
     })) continue;
+    // Read-only progress from a reciprocal terminal child, after revalidating
+    // the original owner, provider and active demand. This can wake diagnosis;
+    // it never creates/retries a job or grants another public read.
+    const failedLearningProgress = publishedImplementation ? await readOwnedFailedLearningProgress(tx, {
+      batchId: batch.id, batchReference: batch.reference, ownerThreadId: batch.ownerThreadId!, releaseSha: batch.releaseSha!,
+      deployedAt: batch.deployedAt!, courseId: entry.courseId, incidentId: entry.incidentId, cycle: entry.cycle,
+      sourceFingerprint: (await import("@/lib/course-discovery/service")).getDiscoverySourceFingerprint(entry.course),
+      searchRefs: audit.target.searchRefs, now,
+    }) : null;
+    if (!allowsRetainedFullRepairResearch({ reason: directive.reason, workMode: directive.workMode,
+      batchStatus: "VERIFYING", result: entry.result, allowedActions: claim.actionPlan?.allowedActions ?? [],
+      pendingVerificationStopped: Boolean(failedLearningProgress) || hasStoppedFullRepairVerification({ summary: batch.summary,
+        batchCreatedAt: batch.createdAt, deployedAt: batch.deployedAt, now }) })) continue;
     items.push({ kind: "OWNED_OUTDOOR_FULL_REPAIR" as const, assignmentRef: audit.assignmentRef,
       threadId: audit.childThreadId!, launcherReceiptPath: audit.launcherReceiptPath!, batchReference: batch.reference,
       baseSha: batch.baseSha, releaseSha: batch.releaseSha,
       continuationTrigger: "UNFINISHED_FULL_REPAIR" as const,
+      ...(failedLearningProgress ? { failedLearningProgress } : {}),
       continuationMode: dataOnly ? "DATA_ONLY" as const : "PUBLISHED_IMPLEMENTATION" as const });
     if (items.length === 5) break;
   }

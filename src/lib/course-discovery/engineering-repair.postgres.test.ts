@@ -565,6 +565,29 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
       });
       expect(await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } }))
         .toMatchObject({ status: "FAILED", attempts: f.job.attempts, firstPickedUpAt: f.job.firstPickedUpAt, deadlineAt: f.job.deadlineAt });
+      const recovered = await client.courseSupportBatch.findUniqueOrThrow({ where: { id: batch.id } });
+      const admission = await service.requestOwnedOutdoorLearningRecovery({ batchId: batch.id, leaseToken: recovered.leaseToken,
+        ownerThreadId: owner, releaseSha: "c".repeat(40), runtimeVersion: "d".repeat(40) });
+      if (!("jobId" in admission)) throw Error("Expected a distinct owned late learning child");
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const child = await service.claimNextDiscoveryJob("progress-fixture", "d".repeat(40));
+        expect(child?.id).toBe(admission.jobId);
+        await service.failDiscoveryJob(child!.id, child!.leaseToken!, "TOOL_FAILURE", true);
+      }
+      // No tooling checkpoint and no new release: this actual reciprocal failed
+      // child is sufficient to wake diagnosis, never another learning budget.
+      await client.courseSupportBatchIncident.updateMany({ where: { batchId: batch.id }, data: { result: "PENDING" } });
+      const failedChild = await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: admission.jobId } });
+      const progressed = await dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: nextParent, baseSha, maxStarts: 1 });
+      expect(progressed).toMatchObject({ acquired: true, value: { fullRepairContinuationItems: [{ threadId: owner,
+        failedLearningProgress: { version: 1, jobId: failedChild.id, completedAt: failedChild.completedAt!.toISOString(),
+          fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/u) } }] } });
+      expect(await dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: nextParent, baseSha, maxStarts: 1 }))
+        .toMatchObject({ acquired: true, value: { fullRepairContinuationItems: progressed.acquired ? progressed.value.fullRepairContinuationItems : [] } });
+      expect(await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: failedChild.id } })).toEqual(failedChild);
+      expect(await client.courseDiscoveryJob.count({ where: { courseId: f.course.id } })).toBe(2);
+      expect(await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } }))
+        .toMatchObject({ status: "FAILED", attempts: f.job.attempts, firstPickedUpAt: f.job.firstPickedUpAt, deadlineAt: f.job.deadlineAt });
     }
     await client.teeSearch.update({ where: { id: f.search.id }, data: { status: "CANCELLED" } });
     const cancelled = await dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: nextParent, baseSha, maxStarts: 1 });

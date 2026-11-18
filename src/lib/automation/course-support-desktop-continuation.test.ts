@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
 import { prepareOwnedDesktopContinuation } from "../../../scripts/automation/course-support-desktop-continuation.mjs";
 
@@ -36,7 +37,7 @@ function fixture() {
     throw new Error("Unexpected native operation");
   });
   const client = { request, notify: vi.fn(), close: vi.fn(async () => {}) };
-  const deps = { environment: { CODEX_THREAD_ID: PARENT }, approvedCheckouts: [selected],
+  const deps = { environment: { CODEX_THREAD_ID: PARENT }, approvedCheckouts: [selected], now: () => Date.parse("2030-01-01T00:00:00.000Z"),
     inspectCli: vi.fn(() => ({ status: "current", cliPath: join(selected, "codex.exe") })),
     resolveRuntime: vi.fn(() => ({ status: "available", nodePath: process.execPath })), clientFactory: vi.fn(() => client),
     git: vi.fn((cwd: string, args: string[]) => {
@@ -52,6 +53,82 @@ function fixture() {
 }
 
 describe("original Desktop full-repair continuation", () => {
+  function progressFixture() {
+    const f = fixture(), published = "c".repeat(40);
+    const item = { ...f.item, continuationMode: "PUBLISHED_IMPLEMENTATION", releaseSha: published,
+      continuationTrigger: "UNFINISHED_FULL_REPAIR" };
+    const originalGit = f.deps.git.getMockImplementation()!;
+    f.deps.git.mockImplementation((cwd, args) => cwd === f.worker && args[0] === "rev-parse" && args[1] === "HEAD"
+      ? published : originalGit(cwd, args));
+    const completedAt = "2030-01-01T00:01:00.000Z", jobId = "new-failed-child";
+    const progress = { version: 1, jobId, completedAt, fingerprint: createHash("sha256")
+      .update([jobId, completedAt, item.batchReference, item.releaseSha].join("\0")).digest("hex") };
+    const advance = () => {
+      f.deps.now = () => Date.parse("2030-01-01T00:02:00.000Z");
+      const request = f.client.request.getMockImplementation()!;
+      f.client.request.mockImplementation(async method => method === "thread/turns/list" ? { data: [{
+        id: "cccccccc-dddd-4eee-8fff-aaaaaaaaaaaa", status: "completed", error: null, itemsView: "notLoaded", items: [], completedAt: 1893456120,
+      }] } : request(method));
+    };
+    return { ...f, item, progress, advance };
+  }
+
+  it("wakes the same owner once on a new reciprocal failure without another release or changing the original receipt", async () => {
+    const f = progressFixture();
+    const first = await prepareOwnedDesktopContinuation({ context: f.context, item: f.item }, f.deps);
+    const firstBytes = readFileSync(first.receiptPath, "utf8");
+    f.advance();
+    const item = { ...f.item, failedLearningProgress: f.progress };
+    const follow = await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps);
+    expect(follow).toMatchObject({ outcome: "desktop_continuation_message_required", threadId: CHILD, monitoringVerified: false });
+    expect(follow.prompt).toContain(`newly terminal failed learning result is available: ${f.progress.jobId}`);
+    expect(follow.receiptPath).toContain(`desktop-repair-followthrough-${REF}-${f.progress.fingerprint}`);
+    expect(JSON.parse(readFileSync(follow.receiptPath, "utf8"))).toMatchObject({ parentReceiptPath: first.receiptPath,
+      failedLearningProgress: f.progress, observedFailureFingerprint: f.progress.fingerprint });
+    expect(readFileSync(first.receiptPath, "utf8")).toBe(firstBytes);
+    expect(await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps)).toMatchObject({ outcome: "already_requested", messageRequired: false });
+    expect(f.deps.clientFactory).toHaveBeenCalledTimes(2);
+    expect(f.client.request.mock.calls.some(([method]) => /start|resume|send|steer/u.test(method))).toBe(false);
+  });
+
+  it("does not resend a primary intent when no later native turn proves it ran", async () => {
+    const f = progressFixture();
+    await prepareOwnedDesktopContinuation({ context: f.context, item: f.item }, f.deps);
+    f.deps.now = () => Date.parse("2030-01-01T00:02:00.000Z");
+    expect(await prepareOwnedDesktopContinuation({ context: f.context, item: { ...f.item, failedLearningProgress: f.progress } }, f.deps))
+      .toMatchObject({ outcome: "prior_continuation_not_observed", messageRequired: false });
+  });
+
+  it("does not grant a second wake for a failure already observed by the primary intent", async () => {
+    const f = progressFixture(); f.advance();
+    const item = { ...f.item, failedLearningProgress: f.progress };
+    await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps);
+    f.deps.now = () => Date.parse("2030-01-01T00:03:00.000Z");
+    expect(await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps)).toMatchObject({ outcome: "already_requested", messageRequired: false });
+    expect(f.deps.clientFactory).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["foreign-release", "future", "added-url", "invalid-date"])("rejects %s diagnostic progress before native access", async scenario => {
+    const f = progressFixture(); f.advance();
+    const progress = { ...f.progress, ...(scenario === "added-url" ? { sourceUrl: "https://untrusted.example" } : {}) };
+    if (scenario === "future") progress.completedAt = "2030-01-02T00:00:00.000Z";
+    if (scenario === "invalid-date") progress.completedAt = "invalid";
+    const item = { ...f.item, ...(scenario === "foreign-release" ? { releaseSha: "d".repeat(40) } : {}), failedLearningProgress: progress };
+    await expect(prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps)).rejects.toThrow();
+    expect(f.deps.clientFactory).not.toHaveBeenCalled();
+  });
+
+  it("preserves one-use follow-through while its original worker is active", async () => {
+    const f = progressFixture();
+    await prepareOwnedDesktopContinuation({ context: f.context, item: f.item }, f.deps); f.advance();
+    const original = f.client.request.getMockImplementation()!;
+    f.client.request.mockImplementation(async method => method === "thread/read"
+      ? { thread: { id: CHILD, cwd: f.worker, status: { type: "active" } } } : original(method));
+    const item = { ...f.item, failedLearningProgress: f.progress };
+    expect(await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps)).toMatchObject({ outcome: "original_worker_active", messageRequired: false });
+    expect(existsSync(join(f.selected, ".codex-artifacts", `desktop-repair-followthrough-${REF}-${f.progress.fingerprint}.private.json`))).toBe(false);
+  });
+
   it("continues only the same clean published implementation owner after proving its registered release is on main", async () => {
     const f = fixture(), published = "c".repeat(40);
     const item = { ...f.item, continuationMode: "PUBLISHED_IMPLEMENTATION", releaseSha: published };

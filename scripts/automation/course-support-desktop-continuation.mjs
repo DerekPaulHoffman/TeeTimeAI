@@ -17,6 +17,21 @@ const git = (cwd, args) => execFileSync("git", args, { cwd, encoding: "utf8", wi
   timeout: 40000, env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" } }).trim();
 const readJson = file => { if (!isAbsolute(file)) fail("ABSOLUTE_PRIVATE_INPUT_REQUIRED"); return JSON.parse(readFileSync(file, "utf8")); };
 
+function readFailedLearningProgress(item, now) {
+  const progress = item.failedLearningProgress;
+  if (progress === undefined) return null;
+  if (!progress || typeof progress !== "object" || Array.isArray(progress) ||
+      Object.keys(progress).sort().join(",") !== "completedAt,fingerprint,jobId,version" || progress.version !== 1 ||
+      !/^[A-Za-z0-9_-]{1,128}$/u.test(progress.jobId ?? "") || typeof progress.completedAt !== "string" ||
+      !Number.isFinite(Date.parse(progress.completedAt)) || new Date(progress.completedAt).toISOString() !== progress.completedAt ||
+      Date.parse(progress.completedAt) > now || item.continuationMode !== "PUBLISHED_IMPLEMENTATION" ||
+      item.continuationTrigger !== "UNFINISHED_FULL_REPAIR" ||
+      progress.fingerprint !== createHash("sha256").update([progress.jobId, progress.completedAt, item.batchReference, item.releaseSha].join("\0")).digest("hex")) {
+    fail("CURRENT_FAILED_LEARNING_PROGRESS_REQUIRED");
+  }
+  return progress;
+}
+
 function inactive(thread) {
   return ["idle", "notLoaded"].includes(thread?.status?.type) &&
     !thread.activeTurnId && !thread.activeTurn && !thread.pendingTurn && !thread.pendingApproval && !thread.needsAttention && !thread.error &&
@@ -28,6 +43,8 @@ function inactive(thread) {
  * lease, batch result, job clock, model turn or legacy CLI receipt is changed. */
 export async function prepareOwnedDesktopContinuation({ context, item }, dependencies = {}) {
   const environment = dependencies.environment ?? process.env;
+  const now = (dependencies.now ?? Date.now)();
+  if (!Number.isFinite(now)) fail("CURRENT_CONTINUATION_CLOCK_REQUIRED");
   if (!UUID.test(environment.CODEX_THREAD_ID ?? "")) fail("NATIVE_PARENT_ID_REQUIRED");
   if (context?.kind !== "course_support_preflight_context" || context.exactHead !== true || !isAbsolute(context.selectedCheckout ?? "")) fail("CURRENT_PREFLIGHT_REQUIRED");
   const selected = realpathSync(context.selectedCheckout);
@@ -83,8 +100,25 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
   const parentCommon = realpathSync(resolve(selected, execute(selected, ["rev-parse", "--git-common-dir"])));
   if (!same(common, parentCommon) || same(common, realpathSync(execute(worker, ["rev-parse", "--absolute-git-dir"])))) fail("ORIGINAL_LINKED_WORKER_REQUIRED");
   execute(selected, ["merge-base", "--is-ancestor", workerHead, currentSha]);
-  const marker = join(selected, ".codex-artifacts", `desktop-repair-continuation-${item.assignmentRef}-${currentSha}.private.json`);
-  if (existsSync(marker)) return { outcome: "already_requested", messageRequired: false };
+  const progress = readFailedLearningProgress(item, now);
+  const primaryMarker = join(selected, ".codex-artifacts", `desktop-repair-continuation-${item.assignmentRef}-${currentSha}.private.json`);
+  let marker = primaryMarker, prior = null;
+  if (existsSync(primaryMarker)) {
+    if (!progress) return { outcome: "already_requested", messageRequired: false };
+    prior = readJson(primaryMarker);
+    if (prior.schemaVersion !== 1 || prior.kind !== "OWNED_DESKTOP_CONTINUATION_REQUESTED" ||
+        prior.status !== "REQUESTED_NOT_ACKNOWLEDGED" || prior.childThreadId !== item.threadId ||
+        prior.assignmentRef !== item.assignmentRef || prior.batchReference !== item.batchReference ||
+        prior.runtimeSha !== currentSha || !UUID.test(prior.priorTurnId ?? "") ||
+        !Number.isFinite(Date.parse(prior.preparedAt)) || Date.parse(prior.preparedAt) > now) fail("ORIGINAL_CONTINUATION_PROVENANCE_CHANGED");
+    if (Date.parse(progress.completedAt) <= Date.parse(prior.preparedAt) || progress.fingerprint === prior.observedFailureFingerprint) {
+      return { outcome: "already_requested", messageRequired: false };
+    }
+    // Global to this exact failed child, not a fresh allowance on every runtime.
+    // Retain the original intent and never resend an ambiguous native request.
+    marker = join(selected, ".codex-artifacts", `desktop-repair-followthrough-${item.assignmentRef}-${progress.fingerprint}.private.json`);
+    if (existsSync(marker)) return { outcome: "already_requested", messageRequired: false };
+  }
   const cli = (dependencies.inspectCli ?? inspectPinnedWorkerCli)(selected);
   const runtime = (dependencies.resolveRuntime ?? resolveCourseSupportWorkerRuntime)();
   if (cli.status !== "current" || runtime.status !== "available" || !isAbsolute(runtime.nodePath ?? "")) fail("PARENT_RUNTIME_UNAVAILABLE");
@@ -105,6 +139,7 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
     const turn = turns.data?.[0];
     if (!Array.isArray(turns.data) || turns.data.length !== 1 || !UUID.test(turn?.id ?? "") || turn.status !== "completed" || turn.error !== null ||
         turn.itemsView !== "notLoaded" || !Array.isArray(turn.items) || turn.items.length !== 0 || !Number.isSafeInteger(turn.completedAt) || turn.completedAt <= 0) fail("ORIGINAL_TERMINAL_TURN_REQUIRED");
+    if (prior && turn.id === prior.priorTurnId) return { outcome: "prior_continuation_not_observed", messageRequired: false };
     if (execute(selected, ["rev-parse", "HEAD"]) !== currentSha || execute(worker, ["rev-parse", "HEAD"]) !== workerHead) fail("CONTINUATION_RUNTIME_CHANGED");
     const guide = join(selected, "docs", "course-support-full-repair-continuation.md");
     const guideBytes = readFileSync(guide);
@@ -113,9 +148,13 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
       parentThreadId: environment.CODEX_THREAD_ID, childThreadId: item.threadId, assignmentRef: item.assignmentRef,
       batchReference: item.batchReference, priorTurnId: turn.id, priorTurnStatus: turn.status, priorTurnError: turn.error,
       runtimeSha: currentSha, continuationTrigger: item.continuationTrigger ?? null,
-      unchangedRuntime, preparedAt: new Date().toISOString(), monitoringVerified: false }, true);
+      observedFailureFingerprint: progress?.fingerprint ?? null,
+      ...(prior ? { parentReceiptPath: primaryMarker, failedLearningProgress: progress } : {}),
+      unchangedRuntime, preparedAt: new Date(now).toISOString(), monitoringVerified: false }, true);
     return { outcome: "desktop_continuation_message_required", messageRequired: true, threadId: item.threadId,
-      hostId: "local", model: "gpt-6.1-sol", thinking: "high", prompt: message, receiptPath: marker, monitoringVerified: false };
+      hostId: "local", model: "gpt-6.1-sol", thinking: "high",
+      prompt: progress ? `${message}\nA newly terminal failed learning result is available: ${progress.jobId}, completed ${progress.completedAt}. Re-read its source-bound private diagnostics through the owned packet/context. This wakes diagnosis only: do not retry that exhausted job or reset its clock. Missing captured structural evidence is itself a tooling defect to reproduce and repair within the returned tooling scope.` : message,
+      receiptPath: marker, monitoringVerified: false };
   } finally { await client?.close(); }
 }
 
