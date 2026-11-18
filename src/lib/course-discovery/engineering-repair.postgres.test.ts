@@ -327,7 +327,8 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     const next = await dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: nextParent, baseSha, maxStarts: 1 });
     expect(next).toMatchObject({ acquired: true, value: { fullRepairContinuationItems: scenario === "unpublished-code" ? [] : [{ threadId: owner,
       assignmentRef, batchReference: batch.reference, kind: "OWNED_OUTDOOR_FULL_REPAIR",
-      continuationMode: code ? "PUBLISHED_IMPLEMENTATION" : "DATA_ONLY" }] } });
+      continuationMode: code ? "PUBLISHED_IMPLEMENTATION" : "DATA_ONLY",
+      continuationTrigger: "UNFINISHED_FULL_REPAIR" }] } });
     expect(await client.courseSupportBatch.findUniqueOrThrow({ where: { id: batch.id } }))
       .toMatchObject({ ownerThreadId: owner, leaseToken: batch.leaseToken, leaseExpiresAt: batch.leaseExpiresAt });
     expect(await client.courseSupportBatchIncident.findFirstOrThrow({ where: { batchId: batch.id } }))

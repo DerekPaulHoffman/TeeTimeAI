@@ -724,6 +724,7 @@ async function collectOwnedFullRepairContinuations(tx: Prisma.TransactionClient,
     items.push({ kind: "OWNED_OUTDOOR_FULL_REPAIR" as const, assignmentRef: audit.assignmentRef,
       threadId: audit.childThreadId!, launcherReceiptPath: audit.launcherReceiptPath!, batchReference: batch.reference,
       baseSha: batch.baseSha, releaseSha: batch.releaseSha,
+      continuationTrigger: "UNFINISHED_FULL_REPAIR" as const,
       continuationMode: dataOnly ? "DATA_ONLY" as const : "PUBLISHED_IMPLEMENTATION" as const });
     if (items.length === 5) break;
   }

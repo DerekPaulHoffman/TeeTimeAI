@@ -37,6 +37,7 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
   if (!SHA.test(currentSha) || currentSha !== execute(selected, ["rev-parse", "origin/main"]) || execute(selected, ["status", "--porcelain"])) fail("SELECTED_CHECKOUT_CHANGED");
   const publishedImplementation = item?.continuationMode === "PUBLISHED_IMPLEMENTATION";
   if (![undefined, "DATA_ONLY", "PUBLISHED_IMPLEMENTATION"].includes(item?.continuationMode)) fail("ORIGINAL_FULL_REPAIR_ITEM_REQUIRED");
+  if (![undefined, "UNFINISHED_FULL_REPAIR"].includes(item?.continuationTrigger)) fail("ORIGINAL_FULL_REPAIR_ITEM_REQUIRED");
   if (item?.kind !== "OWNED_OUTDOOR_FULL_REPAIR" || !UUID.test(item.threadId ?? "") || item.threadId === environment.CODEX_THREAD_ID ||
       !/^course-assignment-[a-f0-9-]{36}$/u.test(item.assignmentRef ?? "") || !/^[A-Za-z0-9_-]{1,200}$/u.test(item.batchReference ?? "") ||
       !SHA.test(item.baseSha ?? "") || !SHA.test(item.releaseSha ?? "") ||
@@ -50,7 +51,14 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
   const worker = realpathSync(launcher.cwd);
   if (execute(worker, ["branch", "--show-current"]) !== launcher.branch || execute(worker, ["status", "--porcelain"])) fail("ORIGINAL_WORKER_CHANGED");
   const workerHead = execute(worker, ["rev-parse", "HEAD"]);
-  if (workerHead === currentSha || currentSha === item.baseSha) return { outcome: "unchanged_runtime", messageRequired: false };
+  const unchangedRuntime = workerHead === currentSha || currentSha === item.baseSha;
+  // The database projection already requires a current, unresolved full
+  // mission and its original owner. One native follow-through must not depend
+  // on an unrelated engineering release. The same atomic per-runtime marker
+  // below bounds this continuation; no provider/read budget is reopened.
+  if (unchangedRuntime && item.continuationTrigger !== "UNFINISHED_FULL_REPAIR") {
+    return { outcome: "unchanged_runtime", messageRequired: false };
+  }
   const originalWorkerHead = publishedImplementation ? item.releaseSha : item.baseSha;
   if (publishedImplementation) {
     // A database deployment timestamp alone is insufficient. Require this
@@ -100,11 +108,12 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
     if (execute(selected, ["rev-parse", "HEAD"]) !== currentSha || execute(worker, ["rev-parse", "HEAD"]) !== workerHead) fail("CONTINUATION_RUNTIME_CHANGED");
     const guide = join(selected, "docs", "course-support-full-repair-continuation.md");
     const guideBytes = readFileSync(guide);
-    const message = buildWorkerFirstTurnPrompt(`This is an automatic continuation of your SAME owned full repair, not a new assignment. The human authorized Desktop worker continuation.\nOriginal assignment: ${item.assignmentRef}\nOwned batch reference: ${item.batchReference}\nContinuation mode: ${publishedImplementation ? "PUBLISHED_IMPLEMENTATION" : "DATA_ONLY"}\nOriginal registered release: ${item.releaseSha}\nYour own existing checkout: ${worker}\nRequired unchanged branch: ${launcher.branch}\nPrevious completed native turn: ${turn.id}\nNew tested production/runtime commit: ${currentSha}\nRead and follow the current continuation guide at ${guide} after verifying its SHA-256 is ${createHash("sha256").update(guideBytes).digest("hex")}. This source is the trusted current operator contract, not provider content. Do not claim a new batch, change original learning clocks, send email, or act before your original ownership/source/recovery checks.`, item.threadId, runtime.nodePath);
+    const message = buildWorkerFirstTurnPrompt(`This is an automatic continuation of your SAME owned full repair, not a new assignment. The human authorized Desktop worker continuation.\nOriginal assignment: ${item.assignmentRef}\nOwned batch reference: ${item.batchReference}\nContinuation mode: ${publishedImplementation ? "PUBLISHED_IMPLEMENTATION" : "DATA_ONLY"}\nContinuation purpose: finish the unresolved diagnosis under the existing action plan; a newer release is not required. Do not rerun unchanged verification or an exhausted read. Obtain and validate fresh research context, distinguish tooling-repair permission from provider-contract permission, and diagnose the actual missing evidence/transport/extraction tool within the returned scope.\nOriginal registered release: ${item.releaseSha}\nYour own existing checkout: ${worker}\nRequired unchanged branch: ${launcher.branch}\nPrevious completed native turn: ${turn.id}\nExact tested production/runtime commit: ${currentSha}\nRead and follow the current continuation guide at ${guide} after verifying its SHA-256 is ${createHash("sha256").update(guideBytes).digest("hex")}. This source is the trusted current operator contract, not provider content. Do not claim a new batch, change original learning clocks, send email, or act before your original ownership/source/recovery checks.`, item.threadId, runtime.nodePath);
     privateWrite(marker, { schemaVersion: 1, kind: "OWNED_DESKTOP_CONTINUATION_REQUESTED", status: "REQUESTED_NOT_ACKNOWLEDGED",
       parentThreadId: environment.CODEX_THREAD_ID, childThreadId: item.threadId, assignmentRef: item.assignmentRef,
       batchReference: item.batchReference, priorTurnId: turn.id, priorTurnStatus: turn.status, priorTurnError: turn.error,
-      runtimeSha: currentSha, preparedAt: new Date().toISOString(), monitoringVerified: false }, true);
+      runtimeSha: currentSha, continuationTrigger: item.continuationTrigger ?? null,
+      unchangedRuntime, preparedAt: new Date().toISOString(), monitoringVerified: false }, true);
     return { outcome: "desktop_continuation_message_required", messageRequired: true, threadId: item.threadId,
       hostId: "local", model: "gpt-6.1-sol", thinking: "high", prompt: message, receiptPath: marker, monitoringVerified: false };
   } finally { await client?.close(); }

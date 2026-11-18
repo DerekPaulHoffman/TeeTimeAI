@@ -151,6 +151,44 @@ describe("original Desktop full-repair continuation", () => {
     expect(f.deps.clientFactory).not.toHaveBeenCalled();
   });
 
+  it("offers exactly one unchanged-runtime diagnostic continuation for an explicitly projected unfinished mission", async () => {
+    const f = fixture();
+    const original = f.deps.git.getMockImplementation()!;
+    f.deps.git.mockImplementation((cwd, args) => args[0] === "rev-parse" && ["HEAD", "origin/main"].includes(args[1])
+      ? BEFORE : original(cwd, args));
+    const item = { ...f.item, continuationTrigger: "UNFINISHED_FULL_REPAIR" };
+    const result = await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps);
+    expect(result).toMatchObject({ outcome: "desktop_continuation_message_required", monitoringVerified: false,
+      model: "gpt-6.1-sol", prompt: expect.stringContaining("Do not rerun unchanged verification or an exhausted read") });
+    expect(JSON.parse(readFileSync(result.receiptPath, "utf8"))).toMatchObject({ unchangedRuntime: true,
+      continuationTrigger: "UNFINISHED_FULL_REPAIR", priorTurnId: TURN, runtimeSha: BEFORE, monitoringVerified: false });
+    expect(await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps))
+      .toMatchObject({ outcome: "already_requested", messageRequired: false });
+    expect(f.deps.clientFactory).toHaveBeenCalledTimes(1);
+    expect(f.client.request.mock.calls.some(([method]) => /start|resume|send|steer/u.test(method))).toBe(false);
+    expect(JSON.parse(readFileSync(f.launcherPath, "utf8"))).toEqual(f.launcher);
+  });
+
+  it.each(["active", "failed", "apiKey", "unknown-trigger"])("does not continue unchanged-runtime work on %s evidence", async scenario => {
+    const f = fixture();
+    const original = f.deps.git.getMockImplementation()!;
+    f.deps.git.mockImplementation((cwd, args) => args[0] === "rev-parse" && ["HEAD", "origin/main"].includes(args[1])
+      ? BEFORE : original(cwd, args));
+    const request = f.client.request.getMockImplementation()!;
+    f.client.request.mockImplementation(async method => {
+      if (scenario === "active" && method === "thread/read") return { thread: { id: CHILD, cwd: f.worker, status: { type: "active" } } };
+      if (scenario === "apiKey" && method === "account/read") return { account: { type: "apiKey" } };
+      if (scenario === "failed" && method === "thread/turns/list") return { data: [{ id: TURN, status: "failed", error: null,
+        itemsView: "notLoaded", items: [], completedAt: 1700000000 }] };
+      return request(method);
+    });
+    const operation = prepareOwnedDesktopContinuation({ context: f.context,
+      item: { ...f.item, continuationTrigger: scenario === "unknown-trigger" ? "RETRY_PROVIDER" : "UNFINISHED_FULL_REPAIR" } }, f.deps);
+    if (scenario === "active") await expect(operation).resolves.toMatchObject({ outcome: "original_worker_active", messageRequired: false });
+    else await expect(operation).rejects.toThrow();
+    expect(existsSync(join(f.selected, ".codex-artifacts", `desktop-repair-continuation-${REF}-${BEFORE}.private.json`))).toBe(false);
+  });
+
   it("preserves dirty original work and refuses API-key model authentication", async () => {
     const f = fixture();
     const original = f.deps.git.getMockImplementation()!;
