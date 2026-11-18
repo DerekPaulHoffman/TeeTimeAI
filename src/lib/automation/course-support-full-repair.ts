@@ -8,7 +8,7 @@ export function allowsRetainedFullRepairResearch(input: {
   allowedActions: readonly string[];
 }) {
   return input.reason === "FAILED_LEARNER_IMPLEMENTATION_HANDOFF" &&
-    input.workMode === "IMPLEMENT_REUSABLE_SUPPORT" && input.batchStatus === "VERIFYING" &&
+    input.workMode === "IMPLEMENT_REUSABLE_SUPPORT" && ["VERIFYING", "IMPLEMENTING"].includes(input.batchStatus) &&
     input.result === "STALE_EVIDENCE" &&
     input.allowedActions.includes("INVESTIGATE_PUBLIC_SOURCE") &&
     input.allowedActions.includes("IMPLEMENT_REUSABLE_SUPPORT");

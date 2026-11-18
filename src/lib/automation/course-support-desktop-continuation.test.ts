@@ -52,6 +52,20 @@ function fixture() {
 }
 
 describe("original Desktop full-repair continuation", () => {
+  it("preserves its same owner's previously advanced clean runtime across a later release", async () => {
+    const f = fixture();
+    await prepareOwnedDesktopContinuation({ context: f.context, item: f.item }, f.deps);
+    const priorGit = f.deps.git.getMockImplementation()!;
+    const later = "c".repeat(40);
+    f.deps.git.mockImplementation((cwd, args) => args[0] === "rev-parse" && ["HEAD", "origin/main"].includes(args[1])
+      ? cwd === f.worker ? CURRENT : later : priorGit(cwd, args));
+    expect(await prepareOwnedDesktopContinuation({ context: f.context, item: f.item }, f.deps))
+      .toMatchObject({ outcome: "desktop_continuation_message_required", threadId: CHILD });
+    const marker = join(f.selected, ".codex-artifacts", `desktop-repair-continuation-${REF}-${CURRENT}.private.json`);
+    writeFileSync(marker, JSON.stringify({ childThreadId: PARENT }));
+    await expect(prepareOwnedDesktopContinuation({ context: f.context, item: f.item }, f.deps))
+      .rejects.toMatchObject({ code: "ORIGINAL_CONTINUATION_PROVENANCE_CHANGED" });
+  });
   it("observes terminal native metadata and requests one same-owner message without starting inference or altering the old receipt", async () => {
     const f = fixture();
     const result = await prepareOwnedDesktopContinuation({ context: f.context, item: f.item }, f.deps);
