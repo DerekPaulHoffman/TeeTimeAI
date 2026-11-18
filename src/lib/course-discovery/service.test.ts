@@ -611,6 +611,21 @@ describe("bounded course discovery persistence", () => {
     expect(job!.activeTargetKey).toBeNull();
   });
 
+  it("discards old replay challenges after a runtime change while retaining the same retry clock", async () => {
+    await ensureDiscoveryJob({ courseId: "course1", searchId: "search1" });
+    const first = (await claimNextDiscoveryJob("first-runtime", "a".repeat(40)))!;
+    const proposed = await proposeDiscoveryRecipe(first.id, first.leaseToken!, recipe);
+    await failDiscoveryJob(first.id, first.leaseToken!, "TOOL_FAILURE", true);
+    const second = (await claimNextDiscoveryJob("changed-runtime", "b".repeat(40)))!;
+    expect(second).toMatchObject({ attempts: 2, firstPickedUpAt: first.firstPickedUpAt, deadlineAt: first.deadlineAt,
+      result: { executionRuntimeVersion: "b".repeat(40) }, checkpoint: { executionRuntimeChanged: true } });
+    expect(second.candidate).toEqual(Prisma.DbNull);
+    expect(second.verification).toEqual(Prisma.DbNull);
+    const replay = await proposeDiscoveryRecipe(second.id, second.leaseToken!, recipe);
+    expect(replay.challenges.map(challenge => challenge.id)).not.toEqual(proposed.challenges.map(challenge => challenge.id));
+    expect(job!.verification).toMatchObject({ executionRuntimeVersion: "b".repeat(40) });
+  });
+
   it("cancels a lost-lease job after all active demand disappears", async () => {
     await claimed();
     job!.leaseExpiresAt = new Date(now.getTime() - 1);

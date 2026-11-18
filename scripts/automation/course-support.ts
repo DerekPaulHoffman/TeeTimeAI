@@ -707,6 +707,9 @@ async function runCommand(
     case "heartbeat":
       writeResult(await heartbeat(args));
       return;
+    case "recover-learning":
+      writeResult(await recoverLearning(args));
+      return;
     case "verify":
     case "verify-release": {
       const result = await (command === "verify"
@@ -737,7 +740,7 @@ async function runCommand(
       return;
     default:
       throw new Error(
-        "Unknown course-support command. Use inspect, coverage, acceptance-history, claim, packet, research-context, validate-research-context, register-research-specialist, inspect-provider-contract, claim-path, source-search-context, record-source-search, mark-needs-human, heartbeat, verify-release, verify, closeout, recover, or backfill."
+        "Unknown course-support command. Use inspect, coverage, acceptance-history, claim, packet, research-context, validate-research-context, register-research-specialist, inspect-provider-contract, claim-path, source-search-context, record-source-search, mark-needs-human, heartbeat, verify-release, recover-learning, verify, closeout, recover, or backfill."
       );
   }
 }
@@ -1535,6 +1538,11 @@ async function verifyRelease(args: string[]) {
     verificationArgs.push("--owner-thread", explicitOwnerThread);
   }
   try {
+    const learning = await recoverPublishedLearning({ batchId, ownerThreadId, releaseSha });
+    if (learning) return { outcome: "release_learning_recovery" as const,
+      deployment: { source: deploymentProof.source, state: deploymentProof.state,
+        deployedAt: deploymentProof.deployedAt, verifiedAliasCount: deploymentProof.aliases.length },
+      verification: learning };
     const verification = await verify(verificationArgs, {
       allowOwnerBoundChangedReleaseProof: true
     });
@@ -1558,6 +1566,68 @@ async function verifyRelease(args: string[]) {
     });
     throw error;
   }
+}
+
+async function recoverLearning(args: string[]) {
+  for (let index = 0; index < args.length; index += 2) {
+    if (!["--batch-ref", "--owner-thread"].includes(args[index]) || !args[index + 1] || args[index + 1].startsWith("--") ||
+        args.indexOf(args[index]) !== index) throw Error("recover-learning accepts only one batch reference and optional original owner.");
+  }
+  const batchId = await resolveCourseSupportBatchReference(requireOption(args, "--batch-ref"));
+  const ownerThreadId = requireOwnerThread(args);
+  const provenance = await getCourseSupportBatchRecoveryProvenance(batchId);
+  if (!provenance.releaseSha) throw Error("REGISTERED_IMPLEMENTATION_REQUIRED");
+  const result = await recoverPublishedLearning({ batchId, ownerThreadId, releaseSha: provenance.releaseSha });
+  if (!result) throw Error("OWNED_OUTDOOR_LEARNING_REPAIR_REQUIRED");
+  return result;
+}
+
+/** Executes shared, tested runtime P without registering P as this owner's
+ * implementation R. Existing terminal learner jobs and budgets stay intact. */
+async function recoverPublishedLearning(input: { batchId: string; ownerThreadId: string; releaseSha: string }) {
+  const { prisma } = await import("@/lib/prisma");
+  const { loadOwnedOutdoorRepairBatch, readLearningRecipeHandoff } = await import("@/lib/course-discovery/learning-repair-recovery");
+  const eligible = await loadOwnedOutdoorRepairBatch(prisma, { batchId: input.batchId, now: new Date() });
+  if (!eligible) return null;
+  if (eligible.batch.ownerThreadId !== input.ownerThreadId || eligible.batch.releaseSha !== input.releaseSha)
+    throw Error("ORIGINAL_NATIVE_OWNER_REQUIRED");
+  runGit(["fetch", "origin", "main"]);
+  const git = readGitState();
+  const provenance = await getCourseSupportBatchRecoveryProvenance(input.batchId);
+  if (git.dirtyPaths.length || git.branch !== provenance.branch || git.headSha !== git.originMainSha ||
+      !isGitAncestor(provenance.baseSha, git.headSha) || !isGitAncestor(input.releaseSha, git.headSha))
+    throw Error("CLEAN_PUBLISHED_DESCENDANT_RUNTIME_REQUIRED");
+  const runtimeVersion = git.headSha;
+  const { watchOwnedLearningRecovery } = await import("@/lib/automation/course-support-learning-recovery");
+  const { requestOwnedOutdoorLearningRecovery, ownedOutdoorLearningRecoveryProgress } = await import("@/lib/course-discovery/service");
+  return runWithCourseSupportOperationHeartbeat({ ...input, allowDurableCloseout: true }, async (leaseToken, signal) => {
+    return watchOwnedLearningRecovery({ signal,
+      prepareRuntime: async () => {
+        if (process.platform !== "win32") throw Error("LOCAL_WINDOWS_RUNTIME_REQUIRED");
+        const executable = resolve(process.env.SystemRoot ?? "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe");
+        try {
+          const { stdout } = await execFileAsync(executable, ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-File",
+            resolve("scripts/automation/update-course-discovery-runtime.ps1"), "-RuntimeVersion", runtimeVersion,
+            "-OwnerThreadId", input.ownerThreadId, "-Apply"], { encoding: "utf8", timeout: 21 * 60_000,
+            maxBuffer: 128 * 1024, windowsHide: true });
+          const state = JSON.parse(stdout) as { outcome?: string; runtimeVersion?: string };
+          if (!["already_current", "runtime_updated"].includes(state.outcome ?? "") || state.runtimeVersion !== runtimeVersion)
+            throw Error("EXACT_LOCAL_RUNTIME_REQUIRED");
+        } catch { throw Error("LOCAL_RUNTIME_UPDATE_NOT_PROVED"); }
+      },
+      admit: () => requestOwnedOutdoorLearningRecovery({ ...input, leaseToken, runtimeVersion }),
+      read: job => ownedOutdoorLearningRecoveryProgress({ ...input, leaseToken, jobId: job.jobId, originalJobId: job.originalJobId }),
+      readHandoff: async job => {
+        const row = await prisma.courseSupportBatch.findUnique({ where: { id: input.batchId },
+          select: { ownerThreadId: true, leaseToken: true, status: true, completedAt: true, summary: true } });
+        const handoff = readLearningRecipeHandoff(row?.summary);
+        return { durableCloseoutRecorded: row?.status === "PARTIAL" && row.ownerThreadId === input.ownerThreadId &&
+          row.leaseToken === leaseToken && row.completedAt?.toISOString() === handoff?.handedOffAt &&
+          handoff?.recovery.jobId === job.jobId && handoff.recovery.originalJobId === job.originalJobId &&
+          handoff.recovery.releaseSha === input.releaseSha && handoff.recovery.runtimeVersion === job.runtimeVersion };
+      },
+    });
+  });
 }
 
 export function assertCourseSupportVerificationReleaseLane(input: {

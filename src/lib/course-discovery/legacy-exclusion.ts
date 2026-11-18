@@ -1,4 +1,4 @@
-import { Prisma } from "@prisma/client";
+import { Prisma, type CourseDiscoveryJob } from "@prisma/client";
 import { isSearchWindowActive } from "@/lib/automation/date-boundary";
 import { getSyntheticMultiCycleExpiresAt } from "@/lib/automation/synthetic-test-window";
 import { activeDiscoveryPilotSearchIds, isCourseDiscoveryEnabled, isGeneralDiscoveryEnabled } from "./config";
@@ -61,7 +61,26 @@ export async function assertNotDiscoveryPilotTarget(reader: Reader, target: Targ
 
 /** Existing legacy ownership is never stolen when a target joins the pilot. */
 export async function hasLegacyDiscoveryOwner(reader: Pick<Prisma.TransactionClient, "courseSupportBatch" | "automationRun">, target: Target) {
+  return legacyDiscoveryOwnerConflict(reader, target);
+}
+
+/** Only a current reciprocal server-issued recovery link can share its own
+ * coding owner's read lane. Ordinary admission retains the full exclusion. */
+export async function discoveryJobLegacyOwnership(reader: Prisma.TransactionClient,
+  job: Pick<CourseDiscoveryJob, "id" | "status" | "attempts" | "firstPickedUpAt" | "deadlineAt" | "result" | "targetKey" | "courseId" | "offeringId" | "sourceFingerprint" | "baseRecipeId">,
+  now: Date) {
+  const { learningRepairReadOwner } = await import("./learning-repair-recovery");
+  const owner = await learningRepairReadOwner(reader, job, now);
+  if (owner.kind === "INVALID") return { blocked: true, repairAuthorityLost: true };
+  return { blocked: await legacyDiscoveryOwnerConflict(reader, job,
+    owner.kind === "OWNED_REPAIR" ? owner : undefined), repairAuthorityLost: false };
+}
+
+async function legacyDiscoveryOwnerConflict(reader: Pick<Prisma.TransactionClient, "courseSupportBatch" | "automationRun">,
+  target: Target, originalOwner?: { batchId: string; ownerThreadId: string; incidentId: string; cycle: number;
+    assignmentRef: string | null; baseSha: string; observedAt: number }) {
   const batch = await reader.courseSupportBatch.findFirst({ where: {
+    ...(originalOwner ? { id: { not: originalOwner.batchId } } : {}),
     status: { in: ["CLAIMED", "IMPLEMENTING", "VERIFYING"] }, incidents: { some: { courseId: target.courseId } },
   }, select: { id: true } });
   if (batch) return true;
@@ -70,11 +89,23 @@ export async function hasLegacyDiscoveryOwner(reader: Pick<Prisma.TransactionCli
     audit: { path: ["target", target.offeringId ? "offeringId" : "courseId"], equals: target.offeringId ?? target.courseId },
   }, select: { audit: true }, take: 16 });
   if (runs.length >= 16) throw new Error("Legacy ownership is unavailable.");
+  const parser = originalOwner ? (await import("@/lib/automation/course-support-course-dispatch")).parseCourseDispatchAudit : null;
   return runs.some(run => {
     const audit = run.audit as Record<string, unknown> | null;
     if (!audit || !["RESERVED", "STARTING", "BOUND", "CONSUMED"].includes(String(audit.state))) throw new Error("Legacy ownership is unavailable.");
     const source = audit.target as Record<string, unknown> | undefined;
     if (!source) throw new Error("Legacy ownership is unavailable.");
-    return target.offeringId ? source.offeringId === target.offeringId : !source.offeringId && source.courseId === target.courseId;
+    const matches = target.offeringId ? source.offeringId === target.offeringId : !source.offeringId && source.courseId === target.courseId;
+    // The read job does not adopt another assignment or coding claim. Only
+    // this batch's exact already-consumed native owner is a shared lane.
+    const parsed = parser?.(audit);
+    const consumedAt = Date.parse(parsed?.consumedAt ?? "");
+    const shared = Boolean(originalOwner?.assignmentRef && parsed && parsed.state === "CONSUMED" &&
+      parsed.childThreadId === originalOwner.ownerThreadId && parsed.assignmentRef === originalOwner.assignmentRef &&
+      parsed.target.incidentId === originalOwner.incidentId && parsed.target.cycle === originalOwner.cycle &&
+      parsed.baseSha === originalOwner.baseSha && parsed.target.mode === undefined && !parsed.target.offeringId &&
+      parsed.controlledRetryOf === undefined && Number.isFinite(consumedAt) &&
+      consumedAt >= Date.parse(parsed.reservedAt) && consumedAt <= originalOwner.observedAt);
+    return matches && !shared;
   });
 }

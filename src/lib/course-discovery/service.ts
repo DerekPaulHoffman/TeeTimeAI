@@ -9,6 +9,10 @@ import { getSyntheticMultiCycleExpiresAt } from "@/lib/automation/synthetic-test
 import { parseCourseLocalWindowEnd } from "@/lib/searches/window-end";
 import { activeDiscoveryPilotSearchIds, isDiscoveryPilotSearch } from "./config";
 import { hasLegacyDiscoveryOwner } from "./legacy-exclusion";
+import { hasLearningRepairRecoveryMarker, learningRepairRecoverySchema, loadOwnedOutdoorLearningRepair,
+  MAX_LEARNING_REPAIR_RECOVERIES, readLearningRepairRecoveries, readLearningRepairRecoveryOf,
+  readLearningExecutionRuntime, loadOwnedOutdoorRepairBatch, learningRepairReadOwner,
+  hasReciprocalLearningRepairLink, learningRecipeHandoffSchema, readLearningRecipeHandoff } from "./learning-repair-recovery";
 import { isReaderObservationCurrent } from "./observation-clock";
 import { isTeeItUpRecipeSlotLink } from "./teeitup-recipe-source";
 import { isChronogolfRecipeSlotLink } from "./chronogolf-source";
@@ -254,8 +258,200 @@ export async function ensureDiscoveryJobInTransaction(tx: Tx, input: DiscoveryAd
     offeringId: source.offering?.id, sourceFingerprint: source.sourceFingerprint, baseRecipeId: source.activeRecipeId, request: json(request) } });
 }
 
-export async function claimNextDiscoveryJob(workerId: string) {
+/** The original coding owner may return its tested repair to the normal recipe
+ * learner. This creates a separately audited LATE job, never a fresh clock on
+ * the customer's original failed attempt. No caller supplies a target/source. */
+export async function requestOwnedOutdoorLearningRecovery(input: {
+  batchId: string; leaseToken: string; ownerThreadId: string; releaseSha: string; runtimeVersion: string;
+}) {
+  z.string().regex(/^[a-f0-9]{40}$/u).parse(input.runtimeVersion);
+  const { runWithCourseSupportWriterTransitionLease } = await import("@/lib/automation/course-support-batches");
+  const admission = await runWithCourseSupportWriterTransitionLease(() => transaction(async tx => {
+    const now = await databaseNow(tx);
+    const candidate = await tx.courseSupportBatch.findUnique({ where: { id: input.batchId },
+      select: { incidents: { select: { courseId: true } } } });
+    if (!candidate || candidate.incidents.length !== 1) return { outcome: "not_applicable" as const };
+    await lockSource(tx, candidate.incidents[0].courseId);
+    const { currentDiscoveryEngineeringHandoff } = await import("./engineering-repair");
+    const handoff = await currentDiscoveryEngineeringHandoff(tx, { courseId: candidate.incidents[0].courseId }, now);
+    if (!handoff) return { outcome: "not_applicable" as const };
+    let originalJobId = handoff.job.id;
+    if (hasLearningRepairRecoveryMarker(handoff.job.result)) {
+      const prior = readLearningRepairRecoveryOf(handoff.job.result);
+      const root = prior ? await tx.courseDiscoveryJob.findUnique({ where: { id: prior.originalJobId } }) : null;
+      if (!prior || !root || prior.jobId !== handoff.job.id || root.targetKey !== handoff.job.targetKey ||
+          root.sourceFingerprint !== handoff.job.sourceFingerprint || !hasReciprocalLearningRepairLink(root.result, prior)) conflict();
+      originalJobId = root.id;
+    }
+    const owned = await loadOwnedOutdoorLearningRepair(tx, { batchId: input.batchId, originalJobId, now });
+    if (!owned || owned.batch.leaseToken !== input.leaseToken || owned.batch.ownerThreadId !== input.ownerThreadId ||
+        owned.batch.releaseSha !== input.releaseSha) conflict();
+    const { job: original, request } = owned.failure;
+    const history = readLearningRepairRecoveries(original.result);
+    if (!history) return { outcome: "invalid_recovery_history" as const };
+    const prior = history.find(link => link.batchId === input.batchId && link.releaseSha === input.releaseSha);
+    if (prior) {
+      const current = await tx.courseDiscoveryJob.findUnique({ where: { id: prior.jobId } });
+      if (!current || current.sourceFingerprint !== original.sourceFingerprint || current.targetKey !== original.targetKey) conflict();
+      return { outcome: "existing" as const, jobId: current.id, originalJobId: original.id,
+        releaseSha: input.releaseSha, runtimeVersion: prior.runtimeVersion };
+    }
+    if (history.length >= MAX_LEARNING_REPAIR_RECOVERIES) return { outcome: "recovery_history_exhausted" as const };
+    if (await tx.courseDiscoveryJob.findUnique({ where: { activeTargetKey: original.targetKey } })) return { outcome: "busy" as const };
+    const link = learningRepairRecoverySchema.parse({ version: 1, kind: "LATE_ENGINEERING_RECOVERY",
+      originalJobId: original.id, jobId: randomUUID(), batchId: owned.batch.id, incidentId: owned.entry.incidentId,
+      ownerThreadId: owned.batch.ownerThreadId,
+      cycle: owned.entry.cycle, sourceFingerprint: original.sourceFingerprint, releaseSha: input.releaseSha,
+      runtimeVersion: input.runtimeVersion,
+      originalFirstPickedUpAt: original.firstPickedUpAt!.toISOString(), originalDeadlineAt: original.deadlineAt!.toISOString(),
+      requestedAt: now.toISOString() });
+    const child = await tx.courseDiscoveryJob.create({ data: { id: link.jobId, courseId: original.courseId,
+      targetKey: original.targetKey, activeTargetKey: original.targetKey, sourceFingerprint: original.sourceFingerprint,
+      baseRecipeId: original.baseRecipeId, request: json(request), result: { learningRecoveryOf: link } } });
+    const parentResult = original.result && typeof original.result === "object" && !Array.isArray(original.result) ? original.result : {};
+    const updated = await tx.courseDiscoveryJob.updateMany({ where: { id: original.id, status: original.status,
+      sourceFingerprint: original.sourceFingerprint, activeTargetKey: null, updatedAt: original.updatedAt },
+      data: { result: { ...parentResult, learningRecoveries: [...history, link] } as Prisma.InputJsonValue } });
+    if (updated.count !== 1) conflict();
+    // A foreign/malformed legacy owner rolls the entire admission back. The
+    // only exception comes from the now-reciprocal database link, not input.
+    if ((await discoveryJobOwnership(tx, child, now)).blocked) conflict();
+    return { outcome: "created" as const, jobId: child.id, originalJobId: original.id,
+      releaseSha: input.releaseSha, runtimeVersion: input.runtimeVersion };
+  }));
+  return admission.acquired ? admission.value : { outcome: "busy" as const };
+}
+
+async function discoveryJobOwnership(tx: Tx, job: Prisma.CourseDiscoveryJobGetPayload<object>, now: Date) {
+  if (!hasLearningRepairRecoveryMarker(job.result)) return {
+    blocked: await hasLegacyDiscoveryOwner(tx, { courseId: job.courseId, offeringId: job.offeringId }), repairAuthorityLost: false,
+  };
+  const { discoveryJobLegacyOwnership } = await import("./legacy-exclusion");
+  return discoveryJobLegacyOwnership(tx, job, now);
+}
+
+/** Read-only progress for the same original controller. Method persistence is
+ * deliberately separate from matching observations or email acceptance. */
+type OwnedLearningRecoveryInput = {
+  batchId: string; leaseToken: string; ownerThreadId: string; releaseSha: string;
+  originalJobId: string; jobId: string;
+};
+export async function ownedOutdoorLearningRecoveryProgress(input: OwnedLearningRecoveryInput) {
+  return transaction(tx => readOwnedOutdoorLearningRecoveryProgress(tx, input));
+}
+async function readOwnedOutdoorLearningRecoveryProgress(tx: Tx, input: OwnedLearningRecoveryInput) {
+    const identity = await tx.courseDiscoveryJob.findUnique({ where: { id: input.jobId }, select: { courseId: true } });
+    if (!identity) conflict();
+    await lockSource(tx, identity.courseId);
+    const now = await databaseNow(tx);
+    const owned = await loadOwnedOutdoorRepairBatch(tx, { batchId: input.batchId, now,
+      allowExpiredDelegation: true, allowCompletedMethodHandoff: true });
+    if (!owned || owned.batch.leaseToken !== input.leaseToken || owned.batch.ownerThreadId !== input.ownerThreadId ||
+        owned.batch.releaseSha !== input.releaseSha || owned.entry.courseId !== identity.courseId) conflict();
+    const original = await tx.courseDiscoveryJob.findUnique({ where: { id: input.originalJobId } });
+    const child = await tx.courseDiscoveryJob.findUnique({ where: { id: input.jobId } });
+    const link = readLearningRepairRecoveries(original?.result)?.find(value => value.jobId === input.jobId);
+    if (!original || !child || !link || !["FAILED", "TIMED_OUT"].includes(original.status) ||
+        original.firstPickedUpAt?.toISOString() !== link.originalFirstPickedUpAt || original.deadlineAt?.toISOString() !== link.originalDeadlineAt ||
+        link.originalJobId !== original.id || link.batchId !== owned.batch.id || link.ownerThreadId !== input.ownerThreadId ||
+        link.releaseSha !== input.releaseSha || link.incidentId !== owned.entry.incidentId || link.cycle !== owned.entry.cycle ||
+        original.courseId !== identity.courseId || child.offeringId !== null || original.offeringId !== null ||
+        child.sourceFingerprint !== link.sourceFingerprint || original.sourceFingerprint !== link.sourceFingerprint ||
+        child.baseRecipeId !== original.baseRecipeId || child.targetKey !== original.targetKey) conflict();
+    const source = await loadSource(tx, { courseId: identity.courseId });
+    if (source.course.isPublic === false || source.course.monitoringMode === "LOCAL_READER_ONLY") return { state: "OBSOLETE" as const };
+    const request = original.request as unknown as DiscoveryRequest;
+    const demand = request.demand ? await currentDemand(tx, source, now, request.demand.searchId) : null;
+    if (!demand || demand.id !== request.demand!.searchId || demand.alertGeneration !== request.demand!.alertGeneration ||
+        canonical(requestFor(source, demand).input) !== canonical(request.input)) return { state: "OBSOLETE" as const };
+    if (child.status === "SUCCEEDED") {
+      const activation = activationSchema.parse(child.result);
+      const active = await getActiveAccessRecipeInTransaction(tx, { courseId: identity.courseId });
+      if (activation.jobId !== child.id || !active || active.record.id !== activation.recipeId ||
+          active.record.hash !== activation.hash ||
+          verificationSchema.parse(active.record.verification).executionRuntimeVersion !== link.runtimeVersion) conflict();
+      if (owned.recordedHandoff && (owned.recordedHandoff.recipeId !== activation.recipeId ||
+          owned.recordedHandoff.recipeHash !== activation.hash ||
+          canonical(owned.recordedHandoff.recovery) !== canonical(link))) conflict();
+      return { state: "METHOD_SAVED" as const, recipeId: activation.recipeId, recipeHash: activation.hash,
+        runtimeVersion: link.runtimeVersion, originalFirstPickedUpAt: link.originalFirstPickedUpAt, originalDeadlineAt: link.originalDeadlineAt };
+    }
+    if (owned.recordedHandoff) conflict();
+    if (source.sourceFingerprint !== child.sourceFingerprint || source.activeRecipeId !== child.baseRecipeId)
+      return { state: "OBSOLETE" as const };
+    const readOwner = await learningRepairReadOwner(tx, child, now);
+    if (["QUEUED", "RUNNING"].includes(child.status) && readOwner.kind !== "OWNED_REPAIR") conflict();
+    const clock = { firstPickedUpAt: child.firstPickedUpAt?.toISOString() ?? null,
+      deadlineAt: child.deadlineAt?.toISOString() ?? null, attempts: child.attempts, runtimeVersion: link.runtimeVersion };
+    if (["QUEUED", "RUNNING"].includes(child.status)) return { state: "PENDING" as const, ...clock };
+    const { discoveryFailureDiagnosis } = await import("./engineering-repair");
+    return { state: "FAILED" as const, status: child.status, outcome: child.outcome, ...clock,
+      diagnosis: discoveryFailureDiagnosis(child) };
+}
+
+/** Release only this owner's published coding phase after real independent
+ * recipe replay. The support incident remains unresolved until the existing
+ * normal availability pipeline records success; this never sends email. */
+export async function handoffOwnedLearningRecipeToMonitoring(input: OwnedLearningRecoveryInput) {
+  const { runWithCourseSupportWriterTransitionLease } = await import("@/lib/automation/course-support-batches");
+  const lane = await runWithCourseSupportWriterTransitionLease(() => transaction(tx =>
+    handoffLearningRecipeInTransaction(tx, input)));
+  return lane.acquired ? lane.value : { outcome: "busy" as const, durableCloseoutRecorded: false as const };
+}
+
+async function handoffLearningRecipeInTransaction(tx: Tx, input: OwnedLearningRecoveryInput, delegatedCompletion = false) {
+    const batch = await tx.courseSupportBatch.findUnique({ where: { id: input.batchId } });
+    if (!batch || batch.ownerThreadId !== input.ownerThreadId || batch.leaseToken !== input.leaseToken || batch.releaseSha !== input.releaseSha) conflict();
+    const recorded = readLearningRecipeHandoff(batch.summary);
+    if (batch.status === "PARTIAL" && batch.completedAt && recorded && recorded.recovery.jobId === input.jobId &&
+        recorded.recovery.originalJobId === input.originalJobId && recorded.recovery.batchId === input.batchId &&
+        recorded.recovery.releaseSha === input.releaseSha && recorded.handedOffAt === batch.completedAt.toISOString())
+      return { outcome: "learning_recipe_handoff" as const, durableCloseoutRecorded: true as const,
+        monitoringVerified: false as const, deliveryVerified: false as const, handoff: recorded };
+    const progress = await readOwnedOutdoorLearningRecoveryProgress(tx, input);
+    if (progress.state !== "METHOD_SAVED") conflict();
+    const now = await databaseNow(tx);
+    const owned = await loadOwnedOutdoorRepairBatch(tx, { batchId: input.batchId, now,
+      allowExpiredDelegation: delegatedCompletion });
+    if (!owned || owned.batch.ownerThreadId !== input.ownerThreadId || owned.batch.leaseToken !== input.leaseToken ||
+        owned.batch.releaseSha !== input.releaseSha) conflict();
+    const original = await tx.courseDiscoveryJob.findUniqueOrThrow({ where: { id: input.originalJobId } });
+    const link = readLearningRepairRecoveries(original.result)?.find(value => value.jobId === input.jobId);
+    const recipe = await tx.courseAccessRecipe.findUniqueOrThrow({ where: { id: progress.recipeId } });
+    if (!link) conflict();
+    const handoff = learningRecipeHandoffSchema.parse({ version: 1, phase: "METHOD_REPLAYED_MONITORING_PENDING",
+      recovery: link, recipeId: progress.recipeId, recipeHash: progress.recipeHash,
+      sourceFingerprint: recipe.sourceFingerprint, handedOffAt: now.toISOString() });
+    const incident = await tx.courseSupportIncident.updateMany({ where: { id: owned.entry.incidentId,
+      activeBatchId: batch.id, status: "AUTO_INVESTIGATING", cycle: owned.entry.cycle, revision: owned.entry.incident.revision },
+      data: { activeBatchId: null, nextAttemptAt: new Date(now.getTime() + 5 * 60_000),
+        nextAction: "A saved method passed independent replay; normal monitoring is pending.", revision: { increment: 1 } } });
+    if (incident.count !== 1) conflict();
+    const entry = await tx.courseSupportBatchIncident.updateMany({ where: { batchId: batch.id,
+      incidentId: owned.entry.incidentId, courseId: owned.entry.courseId, cycle: owned.entry.cycle },
+      data: { result: "RETRY_SCHEDULED", message: "Saved method replay succeeded. Normal monitoring and alert delivery remain pending.",
+        proofSnapshot: json({ kind: "LEARNING_RECIPE_HANDOFF", ...handoff, monitoringVerified: false, deliveryVerified: false }) } });
+    if (entry.count !== 1) conflict();
+    const summary = batch.summary && typeof batch.summary === "object" && !Array.isArray(batch.summary) ? batch.summary : {};
+    const closed = await tx.courseSupportBatch.updateMany({ where: { id: batch.id, ownerThreadId: input.ownerThreadId,
+      leaseToken: input.leaseToken, status: "VERIFYING", releaseSha: input.releaseSha, revision: batch.revision,
+      ...(!delegatedCompletion ? { leaseExpiresAt: { gt: now } } : {}) }, data: { status: "PARTIAL", completedAt: now, heartbeatAt: now, leaseExpiresAt: now,
+      revision: { increment: 1 }, summary: json({ ...summary, learningRecoveryHandoff: handoff,
+        closeout: { outcome: "learning_recipe_handoff", monitoringVerified: false, deliveryVerified: false } }) } });
+    if (closed.count !== 1) conflict();
+    await tx.courseSupportVerificationRequest.updateMany({ where: { batchIncident: { batchId: batch.id },
+      status: { in: ["QUEUED", "CHECKING", "RETRYABLE_FAILED"] } }, data: { status: "STALE", revision: { increment: 1 },
+      leaseToken: null, leaseExpiresAt: null, nextAttemptAt: null, completedAt: now, lastError: "verified_recipe_handed_to_normal_monitoring" } });
+    if (owned.batch.ownerAutomationRunId) await tx.automationRun.updateMany({ where: { id: owned.batch.ownerAutomationRunId, completedAt: null },
+      data: { kind: "COURSE_SUPPORT", status: "COMPLETED", completedAt: now, outcome: "learning_recipe_handoff",
+        notes: JSON.stringify({ lifecycle: "verified_recipe_handoff", monitoringVerified: false, deliveryVerified: false }) } });
+    return { outcome: "learning_recipe_handoff" as const, durableCloseoutRecorded: true as const,
+      monitoringVerified: false as const, deliveryVerified: false as const, handoff };
+}
+
+export async function claimNextDiscoveryJob(workerId: string, runtimeVersion?: string) {
   z.string().min(3).max(100).regex(/^[a-zA-Z0-9._-]+$/u).parse(workerId);
+  if (runtimeVersion !== undefined) z.string().regex(/^[a-f0-9]{40}$/u).parse(runtimeVersion);
   return transaction(async tx => {
     const now = await databaseNow(tx);
     const candidates = await tx.courseDiscoveryJob.findMany({ where: { activeTargetKey: { not: null }, OR: [
@@ -278,17 +474,28 @@ export async function claimNextDiscoveryJob(workerId: string) {
       const originalDemandId = typeof previousRequest.demand?.searchId === "string" ? previousRequest.demand.searchId : undefined;
       const demand = originalDemandId ? await currentDemand(tx, source, now, originalDemandId) ?? await currentDemand(tx, source, now) : await currentDemand(tx, source, now);
       if (!demand) { await finish("CANCELLED", "NO_ACTIVE_DEMAND"); continue; }
-      if (await hasLegacyDiscoveryOwner(tx, source.target)) continue;
+      const ownership = await discoveryJobOwnership(tx, current, now);
+      if (ownership.repairAuthorityLost) { await finish("CANCELLED", "REPAIR_AUTHORITY_CHANGED"); continue; }
+      if (ownership.blocked) continue;
+      const recovery = readLearningRepairRecoveryOf(current.result);
+      // The installed local reader does not change when Vercel deploys. An old
+      // runtime must leave this new-code recovery queued, without starting its clock.
+      if (recovery && recovery.runtimeVersion !== runtimeVersion) continue;
       const deadlineAt = current.deadlineAt ?? new Date(now.getTime() + DISCOVERY_DEADLINE_MS);
       const request = requestFor(source, demand);
       // A retry can bind to an edited or replacement alert. Its old checkpoint
       // and replay challenges describe the previous request, but its clock still applies.
       const requestChanged = canonical(current.request) !== canonical(request);
+      const runtimeChanged = current.attempts > 0 && runtimeVersion !== undefined &&
+        readLearningExecutionRuntime(current.result) !== runtimeVersion;
       return tx.courseDiscoveryJob.update({ where: { id: current.id }, data: {
         status: "RUNNING", attempts: { increment: 1 }, workerId, firstPickedUpAt: current.firstPickedUpAt ?? now,
         deadlineAt, leaseToken: randomUUID(), leaseExpiresAt: new Date(Math.min(deadlineAt.getTime(), now.getTime() + DISCOVERY_LEASE_MS)),
         request: json(request), outcome: null,
-        ...(requestChanged ? { checkpoint: current.attempts > 0 ? { requestRebound: true } : Prisma.DbNull,
+        ...(runtimeVersion ? { result: json({ ...(current.result && typeof current.result === "object" &&
+          !Array.isArray(current.result) ? current.result : {}), executionRuntimeVersion: runtimeVersion }) } : {}),
+        ...(requestChanged || runtimeChanged ? { checkpoint: current.attempts > 0 ? { requestRebound: requestChanged,
+          ...(runtimeChanged ? { executionRuntimeChanged: true } : {}) } : Prisma.DbNull,
           candidate: Prisma.DbNull, candidateHash: null, verification: Prisma.DbNull } : {}),
       } });
     }
@@ -307,7 +514,8 @@ async function owned(tx: Tx, jobId: string, leaseToken: string) {
   const source = await loadSource(tx, { courseId: job.courseId, offeringId: job.offeringId ?? undefined });
   const claimedContext = (job.request as unknown as DiscoveryRequest).trustedContext;
   if (claimedContext !== undefined && !isCurrentTrustedContext(claimedContext, source.trustedContext)) conflict();
-  if (source.sourceFingerprint !== job.sourceFingerprint || source.activeRecipeId !== job.baseRecipeId || !await currentDemand(tx, source, now) || await hasLegacyDiscoveryOwner(tx, source.target)) conflict();
+  if (source.sourceFingerprint !== job.sourceFingerprint || source.activeRecipeId !== job.baseRecipeId || !await currentDemand(tx, source, now) ||
+      (await discoveryJobOwnership(tx, job, now)).blocked) conflict();
   return { job, now, source };
 }
 
@@ -381,6 +589,7 @@ export const discoveryVerificationDurationSchema = z.number().int().min(15).max(
 const durationSelectionSchema = z.object({ searchId: z.string().min(1).max(128), alertGeneration: z.number().int().nonnegative(),
   minutes: discoveryVerificationDurationSchema }).strict();
 const verificationSchema = z.object({ version: z.literal(1), challenges: z.array(challengeSchema).length(2),
+  executionRuntimeVersion: z.string().regex(/^[a-f0-9]{40}$/u).optional(),
   durationSelection: durationSelectionSchema.optional(),
   sourceEvidence: discoverySourceEvidenceSchema.optional() }).strict();
 
@@ -508,7 +717,9 @@ export async function proposeDiscoveryRecipe(jobId: string, leaseToken: string, 
     }
     const challenges = [input, alternate].map(value => ({ id: randomUUID(), recipeHash, input: accessExecutionInputSchema.parse(value), issuedAt: now.toISOString() }));
     await tx.courseDiscoveryJob.update({ where: { id: job.id }, data: { candidate: json(recipe), candidateHash: recipeHash,
-      verification: json({ version: 1, challenges, ...(durationSelection ? { durationSelection } : {}), ...(sourceEvidence ? { sourceEvidence } : {}) }) } });
+      verification: json({ version: 1, challenges,
+        ...(readLearningExecutionRuntime(job.result) ? { executionRuntimeVersion: readLearningExecutionRuntime(job.result) } : {}),
+        ...(durationSelection ? { durationSelection } : {}), ...(sourceEvidence ? { sourceEvidence } : {}) }) } });
     return { recipeHash, challenges: challenges.map(challenge => ({ ...challenge, completed: false })) };
   });
 }
@@ -565,6 +776,9 @@ export async function activateDiscoveryRecipe(jobId: string, leaseToken: string)
     const completed = await tx.courseDiscoveryJob.findUnique({ where: { id: jobId } });
     if (completed?.status === "SUCCEEDED" && completed.leaseToken === leaseToken) return activationSchema.parse(completed.result);
     const { job, now, source } = await owned(tx, jobId, leaseToken);
+    const recovery = readLearningRepairRecoveryOf(job.result);
+    const recoveryOwner = recovery ? await learningRepairReadOwner(tx, job, now) : null;
+    if (recovery && recoveryOwner?.kind !== "OWNED_REPAIR") conflict();
     const recipe = parseAccessRecipe(job.candidate);
     const verification = verificationSchema.parse(job.verification);
     await assertVerificationDuration(tx, source, job.request as unknown as DiscoveryRequest, now, verification);
@@ -598,6 +812,15 @@ export async function activateDiscoveryRecipe(jobId: string, leaseToken: string)
       // idempotent. No operation can renew or write a SUCCEEDED job.
       status: "SUCCEEDED", activeTargetKey: null, leaseExpiresAt: null, completedAt: now, outcome: "RECIPE_READY", result: json(result),
     } });
+    if (recovery && recoveryOwner?.kind === "OWNED_REPAIR") {
+      const codingOwner = await tx.courseSupportBatch.findUnique({ where: { id: recovery.batchId },
+        select: { leaseToken: true, ownerThreadId: true } });
+      if (!codingOwner || codingOwner.ownerThreadId !== recovery.ownerThreadId ||
+          codingOwner.ownerThreadId !== recoveryOwner.ownerThreadId) conflict();
+      await handoffLearningRecipeInTransaction(tx, { batchId: recovery.batchId, leaseToken: codingOwner.leaseToken,
+        ownerThreadId: recovery.ownerThreadId, releaseSha: recovery.releaseSha,
+        originalJobId: recovery.originalJobId, jobId: job.id }, true);
+    }
     return result;
   });
 }

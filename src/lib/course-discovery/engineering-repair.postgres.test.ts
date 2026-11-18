@@ -121,6 +121,193 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     }
     return { target, course, offering, search, job: await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: job!.id } }) };
   }
+  async function deployedReaderRepair() {
+    const f = await failed();
+    await engineering.reconcileDiscoveryEngineeringHandoffs();
+    await client.courseSupportIncident.update({ where: { courseId: f.course.id }, data: { nextAttemptAt: new Date(Date.now() - 1000) } });
+    const ownerThreadId = `reader-recovery-${randomUUID()}`; batchOwners.push(ownerThreadId);
+    const lane = await import("@/lib/automation/course-support-batches");
+    expect(await lane.claimCourseSupportBatch({ ownerThreadId, branch: "automation/course-support-reader-recovery",
+      baseSha: "a".repeat(40), maxCourses: 1 })).toMatchObject({ outcome: "ready" });
+    const batch = await client.courseSupportBatch.findFirstOrThrow({ where: { ownerThreadId } });
+    expect(await lane.appendCourseSupportBatchPath({ batchId: batch.id, leaseToken: batch.leaseToken, ownerThreadId,
+      path: "src/lib/course-discovery/example-public-reader.ts" })).toMatchObject({ pathRecorded: true });
+    // External Git/CI/deployment are not performed by a persistence fixture.
+    // Their verified server-owned state is supplied here; production admission
+    // still obtains it from the exact owned batch, never a caller checkpoint.
+    const releaseSha = "b".repeat(40);
+    await client.courseSupportBatch.update({ where: { id: batch.id }, data: {
+      status: "VERIFYING", releaseSha, deployedAt: batch.createdAt } });
+    return { ...f, batch, input: { batchId: batch.id, leaseToken: batch.leaseToken, ownerThreadId, releaseSha, runtimeVersion: releaseSha } };
+  }
+
+  it.each(["live-owner", "expired-original-owner"])("returns a repaired reader to replay and normal monitoring with %s", async scenario => {
+    const f = await deployedReaderRepair();
+    const admission = await service.requestOwnedOutdoorLearningRecovery(f.input);
+    expect(admission).toMatchObject({ outcome: "created", originalJobId: f.job.id, releaseSha: f.input.releaseSha });
+    if (!("jobId" in admission)) throw Error("Missing recovery fixture");
+    const progress = { ...f.input, originalJobId: f.job.id, jobId: admission.jobId };
+    expect(await service.ownedOutdoorLearningRecoveryProgress(progress)).toMatchObject({ state: "PENDING", attempts: 0 });
+    expect(await service.requestOwnedOutdoorLearningRecovery(f.input)).toMatchObject({ outcome: "existing", jobId: admission.jobId });
+    expect(await service.claimNextDiscoveryJob("old-runtime", "a".repeat(40))).toBeNull();
+    expect(await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: admission.jobId } }))
+      .toMatchObject({ status: "QUEUED", attempts: 0, firstPickedUpAt: null, deadlineAt: null });
+    const child = await service.claimNextDiscoveryJob("repaired-runtime", f.input.releaseSha);
+    expect(child?.id).toBe(admission.jobId);
+    expect(child?.attempts).toBe(1);
+    if (scenario === "expired-original-owner") await client.courseSupportBatch.update({ where: { id: f.batch.id },
+      data: { leaseExpiresAt: new Date(0) } });
+    await service.heartbeatDiscoveryJob(child!.id, child!.leaseToken!);
+    const recipe = parseAccessRecipe({ schemaVersion: 1, engine: "HTTP_JSON", target: { ...f.target, kind: "OUTDOOR" },
+      source: { venueName: f.course.name, officialUrl: f.course.website, bookingUrl: "https://golf.example.com/times", providerFamily: "EXAMPLE", timeZone: "UTC" },
+      request: { url: "https://golf.example.com/times?date={{date}}", method: "GET" },
+      permittedRoutes: [{ origin: "https://golf.example.com", path: "/times", methods: ["GET"], queryKeys: ["date"] }],
+      proof: { venue: { path: "venue" }, date: { path: "date" }, complete: { path: "complete" }, empty: { path: "empty" } },
+      slots: { collection: { path: "slots" }, startsAt: { path: "start" }, availableSpots: { path: "spots" } } });
+    const proposed = await service.proposeDiscoveryRecipe(child!.id, child!.leaseToken!, recipe);
+    await expect(service.activateDiscoveryRecipe(child!.id, child!.leaseToken!)).rejects.toBeInstanceOf(service.DiscoveryConflictError);
+    for (const challenge of proposed.challenges) await service.recordDiscoveryVerification({ jobId: child!.id, leaseToken: child!.leaseToken!,
+      challengeId: challenge.id, recipeHash: proposed.recipeHash, input: challenge.input, result: {
+        status: "AVAILABLE", complete: true, observedAt: new Date().toISOString(), sourceUrl: recipe.source.bookingUrl,
+        slots: [{ sourceId: "fixture", startsAt: `${challenge.input.date}T10:00:00.000Z`, availableSpots: 4, bookingUrl: recipe.source.bookingUrl }],
+        evidence: { recipeHash: proposed.recipeHash, venueVerified: true, dateVerified: true, capacityVerified: true, durationVerified: true, completeVerified: true },
+      } });
+    const activated = await service.activateDiscoveryRecipe(child!.id, child!.leaseToken!);
+    expect(await service.ownedOutdoorLearningRecoveryProgress(progress)).toMatchObject({ state: "METHOD_SAVED",
+      recipeId: activated.recipeId, recipeHash: activated.hash, runtimeVersion: f.input.runtimeVersion,
+      originalFirstPickedUpAt: f.job.firstPickedUpAt!.toISOString(), originalDeadlineAt: f.job.deadlineAt!.toISOString() });
+    expect(await service.getActiveAccessRecipe(f.target)).toMatchObject({ record: { id: activated.recipeId,
+      verification: { executionRuntimeVersion: f.input.releaseSha, challenges: expect.any(Array) } } });
+    const original = await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } });
+    for (const key of ["status", "outcome", "attempts", "firstPickedUpAt", "deadlineAt", "completedAt", "sourceFingerprint"] as const)
+      expect(original[key]).toEqual(f.job[key]);
+    expect(original.result).toMatchObject({ learningRecoveries: [{ jobId: child!.id, originalJobId: original.id,
+      kind: "LATE_ENGINEERING_RECOVERY", batchId: f.batch.id, releaseSha: f.input.releaseSha }] });
+    expect(await client.courseSupportBatch.findUniqueOrThrow({ where: { id: f.batch.id } }))
+      .toMatchObject({ ownerThreadId: f.input.ownerThreadId, status: "PARTIAL", completedAt: expect.any(Date) });
+    const handoff = await service.handoffOwnedLearningRecipeToMonitoring(progress);
+    expect(handoff).toMatchObject({ outcome: "learning_recipe_handoff", durableCloseoutRecorded: true,
+      monitoringVerified: false, deliveryVerified: false,
+      handoff: { phase: "METHOD_REPLAYED_MONITORING_PENDING", recipeId: activated.recipeId } });
+    expect(await service.handoffOwnedLearningRecipeToMonitoring(progress)).toEqual(handoff);
+    expect(await client.courseSupportBatch.findUniqueOrThrow({ where: { id: f.batch.id } }))
+      .toMatchObject({ ownerThreadId: f.input.ownerThreadId, status: "PARTIAL", completedAt: expect.any(Date) });
+    expect(await client.courseSupportIncident.findUniqueOrThrow({ where: { courseId: f.course.id } }))
+      .toMatchObject({ status: "AUTO_INVESTIGATING", activeBatchId: null, resolution: null });
+    expect(await client.courseProbe.count({ where: { courseId: f.course.id } })).toBe(0);
+    expect(await client.teeTimeMatch.count({ where: { courseId: f.course.id } })).toBe(0);
+    // The existing normal observation path, not the coding handoff, owns the
+    // actual monitoring resolution. This fixture performs no email operation.
+    const { recordCourseMonitoringSuccess } = await import("@/lib/automation/course-monitoring");
+    await recordCourseMonitoringSuccess({ courseId: f.course.id, outcome: "MATCH_FOUND",
+      providerObservedAt: new Date(), runtimeVersion: f.input.runtimeVersion });
+    expect(await client.courseSupportIncident.findUniqueOrThrow({ where: { courseId: f.course.id } }))
+      .toMatchObject({ status: "RESOLVED", activeBatchId: null, resolution: "MONITORING_RESTORED" });
+  });
+
+  it("binds a published shared execution prefix without replacing implementation provenance", async () => {
+    const f = await deployedReaderRepair(), runtimeVersion = "c".repeat(40);
+    const admission = await service.requestOwnedOutdoorLearningRecovery({ ...f.input, runtimeVersion });
+    if (!("jobId" in admission)) throw Error("Missing recovery fixture");
+    expect(await service.claimNextDiscoveryJob("old-implementation-runtime", f.input.releaseSha)).toBeNull();
+    expect(await service.claimNextDiscoveryJob("current-execution-runtime", runtimeVersion)).toMatchObject({ id: admission.jobId });
+    expect(await client.courseSupportBatch.findUniqueOrThrow({ where: { id: f.batch.id } }))
+      .toMatchObject({ releaseSha: f.input.releaseSha, baseSha: f.batch.baseSha });
+    expect((await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } })).result)
+      .toMatchObject({ learningRecoveries: [{ releaseSha: f.input.releaseSha, runtimeVersion }] });
+  });
+
+  it("requires a different registered repair before another recovery budget is admitted", async () => {
+    const f = await deployedReaderRepair(), admission = await service.requestOwnedOutdoorLearningRecovery(f.input);
+    if (!("jobId" in admission)) throw Error("Missing recovery fixture");
+    const incident = await client.courseSupportIncident.findUniqueOrThrow({ where: { courseId: f.course.id } });
+    for (let n = 0; n < 2; n++) {
+      const child = await service.claimNextDiscoveryJob("repaired-runtime", f.input.releaseSha);
+      expect(child?.id).toBe(admission.jobId);
+      await service.failDiscoveryJob(child!.id, child!.leaseToken!, "TOOL_FAILURE", true);
+    }
+    const exhausted = await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: admission.jobId } });
+    expect(await service.requestOwnedOutdoorLearningRecovery(f.input)).toMatchObject({ outcome: "existing", jobId: exhausted.id });
+    expect(await service.claimNextDiscoveryJob("unchanged-runtime", f.input.releaseSha)).toBeNull();
+    expect(await client.courseDiscoveryJob.count({ where: { courseId: f.course.id } })).toBe(2);
+    const next = { ...f.input, releaseSha: "c".repeat(40), runtimeVersion: "c".repeat(40) };
+    await client.courseSupportBatch.update({ where: { id: f.batch.id }, data: { releaseSha: next.releaseSha } });
+    const repaired = await service.requestOwnedOutdoorLearningRecovery(next);
+    expect(repaired).toMatchObject({ outcome: "created", originalJobId: f.job.id });
+    expect(await service.claimNextDiscoveryJob("old-runtime", f.input.releaseSha)).toBeNull();
+    expect(await service.claimNextDiscoveryJob("new-runtime", next.releaseSha)).toMatchObject({ attempts: 1 });
+    expect(await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: exhausted.id } })).toMatchObject({
+      status: "FAILED", attempts: 2, firstPickedUpAt: exhausted.firstPickedUpAt, deadlineAt: exhausted.deadlineAt });
+    expect((await client.courseSupportIncident.findUniqueOrThrow({ where: { id: incident.id } })).attemptLedger).toEqual(incident.attemptLedger);
+  });
+
+  it.each(["valid", "malformed", "wrong-assignment", "wrong-native-owner"])("shares only the exact %s consumed dispatch lane", async scenario => {
+    const f = await deployedReaderRepair(), assignmentRef = `course-assignment-${randomUUID()}`;
+    const batch = await client.courseSupportBatch.findUniqueOrThrow({ where: { id: f.batch.id } });
+    const incident = await client.courseSupportIncident.findUniqueOrThrow({ where: { courseId: f.course.id } });
+    await client.courseSupportBatch.update({ where: { id: batch.id },
+      data: { summary: { ...(batch.summary as Prisma.JsonObject), dispatchAssignmentRef: assignmentRef } } });
+    const audit = { schemaVersion: 1, tickRef: "course-fixture", assignmentRef: scenario === "wrong-assignment" ? `course-assignment-${randomUUID()}` : assignmentRef,
+      state: "CONSUMED", ownerThreadId: "parent-fixture", childThreadId: scenario === "wrong-native-owner" ? "foreign-owner" : f.input.ownerThreadId,
+      baseSha: batch.baseSha, reservedAt: batch.createdAt.toISOString(), expiresAt: new Date(Date.now() + 900000).toISOString(),
+      consumedAt: batch.createdAt.toISOString(), target: { incidentId: incident.id, courseId: f.course.id, cycle: incident.cycle,
+        providerFamilyKey: batch.providerFamilyKey, failureFingerprint: batch.failureFingerprint, updatedAt: incident.updatedAt.toISOString(),
+        trafficClass: "REAL", searchRefs: scenario === "malformed" ? [] : [{ id: f.search.id, scheduleVersion: f.search.scheduleVersion, alertGeneration: f.search.alertGeneration }] } };
+    const run = await client.automationRun.create({ data: { promptVersion: "course-support-course-dispatch-v1", audit } }); runs.push(run.id);
+    if (scenario === "valid") {
+      const admission = await service.requestOwnedOutdoorLearningRecovery(f.input);
+      if (!("jobId" in admission)) throw Error("Missing recovery fixture");
+      expect(await service.claimNextDiscoveryJob("repaired-runtime", f.input.releaseSha)).toMatchObject({ id: admission.jobId });
+    } else {
+      await expect(service.requestOwnedOutdoorLearningRecovery(f.input)).rejects.toBeInstanceOf(service.DiscoveryConflictError);
+      expect(await client.courseDiscoveryJob.count({ where: { courseId: f.course.id } })).toBe(1);
+    }
+  });
+
+  it("does not share a different active coding batch", async () => {
+    const f = await deployedReaderRepair();
+    const incident = await client.courseSupportIncident.findUniqueOrThrow({ where: { courseId: f.course.id } });
+    const other = `foreign-${randomUUID()}`; batchOwners.push(other);
+    await client.courseSupportBatch.create({ data: { reference: randomUUID(), ownerThreadId: other, leaseToken: randomUUID(),
+      leaseExpiresAt: new Date(Date.now() + 900000), heartbeatAt: new Date(), baseSha: "d".repeat(40), providerFamilyKey: f.batch.providerFamilyKey,
+      failureFingerprint: "e".repeat(64), incidents: { create: { incidentId: incident.id, courseId: f.course.id, cycle: incident.cycle } } } });
+    await expect(service.requestOwnedOutdoorLearningRecovery(f.input)).rejects.toBeInstanceOf(service.DiscoveryConflictError);
+    expect(await client.courseDiscoveryJob.count({ where: { courseId: f.course.id } })).toBe(1);
+  });
+
+  it.each(["owner", "token", "release", "undeployed", "no-code"])("rejects an unauthorized %s repaired-learning handoff", async scenario => {
+    const f = await deployedReaderRepair(), input = { ...f.input };
+    if (scenario === "owner") input.ownerThreadId = "foreign-owner";
+    if (scenario === "token") input.leaseToken = randomUUID();
+    if (scenario === "release") input.releaseSha = "c".repeat(40);
+    if (scenario === "undeployed") await client.courseSupportBatch.update({ where: { id: f.batch.id }, data: { deployedAt: null } });
+    if (scenario === "no-code") await client.courseSupportBatch.update({ where: { id: f.batch.id },
+      data: { summary: { ...(f.batch.summary as Prisma.JsonObject), plannedPaths: [] } } });
+    await expect(service.requestOwnedOutdoorLearningRecovery(input)).rejects.toBeInstanceOf(service.DiscoveryConflictError);
+    expect(await client.courseDiscoveryJob.count({ where: { courseId: f.course.id } })).toBe(1);
+    expect((await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } })).result)
+      .not.toHaveProperty("learningRecoveries");
+  });
+
+  it.each(["expired-owner", "changed-native-owner", "forged-link", "cancelled-alert", "changed-source"])("cancels an unstarted recovery after %s", async scenario => {
+    const f = await deployedReaderRepair(), admission = await service.requestOwnedOutdoorLearningRecovery(f.input);
+    if (!("jobId" in admission)) throw Error("Missing recovery fixture");
+    if (scenario === "expired-owner") await client.courseSupportBatch.update({ where: { id: f.batch.id }, data: { leaseExpiresAt: new Date(0) } });
+    if (scenario === "changed-native-owner") {
+      const other = `changed-native-${randomUUID()}`; batchOwners.push(other);
+      await client.courseSupportBatch.update({ where: { id: f.batch.id }, data: { ownerThreadId: other } });
+    }
+    if (scenario === "forged-link") await client.courseDiscoveryJob.update({ where: { id: admission.jobId }, data: {
+      result: { learningRecoveryOf: { version: 1, jobId: admission.jobId, checkpointOnly: true } } } });
+    if (scenario === "cancelled-alert") await client.teeSearch.update({ where: { id: f.search.id }, data: { status: "CANCELLED" } });
+    if (scenario === "changed-source") await client.course.update({ where: { id: f.course.id }, data: { website: "https://changed.example.com/" } });
+    expect(await service.claimNextDiscoveryJob("repaired-runtime", f.input.releaseSha)).toBeNull();
+    expect(await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: admission.jobId } }))
+      .toMatchObject({ status: "CANCELLED", attempts: 0, firstPickedUpAt: null, deadlineAt: null, activeTargetKey: null });
+    expect(await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } }))
+      .toMatchObject({ status: "FAILED", attempts: f.job.attempts, firstPickedUpAt: f.job.firstPickedUpAt, deadlineAt: f.job.deadlineAt });
+  });
+
   it("durably admits code repair once while preserving the failed attempts and deadline", async () => {
     const f = await failed();
     expect(await engineering.reconcileDiscoveryEngineeringHandoffs()).toEqual({ examined: 1, queued: 1 });

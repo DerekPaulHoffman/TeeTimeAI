@@ -140,6 +140,24 @@ describe("terminal learner to coding responder", () => {
   });
 });
 describe("private failure evidence", () => {
+  it("surfaces the linked recovery's new failure while preserving the original failed clock", async () => {
+    const link = { version: 1, kind: "LATE_ENGINEERING_RECOVERY", originalJobId: "job1", jobId: "child1", batchId: "batch1",
+      incidentId: "incident1", ownerThreadId: "owner1", cycle: 1, sourceFingerprint: failure.job.sourceFingerprint,
+      releaseSha: "b".repeat(40), runtimeVersion: "c".repeat(40), requestedAt: now.toISOString(),
+      originalFirstPickedUpAt: picked.toISOString(), originalDeadlineAt: failure.job.deadlineAt.toISOString() };
+    failure.job.result = { engineeringHandoff: receipt(), learningRecoveries: [link] };
+    const child = { ...failure.job, id: "child1", attempts: 1, result: { learningRecoveryOf: link },
+      checkpoint: { stagehandFailure: { code: "BROWSER_UNAVAILABLE" } } };
+    m.db.courseDiscoveryJob.findUnique.mockImplementation(async ({ where }) => where.id === child.id ? child : failure.job);
+    const context = await discoveryEngineeringContext(m.db as never, { courseId: "course1" }, "incident1", now);
+    expect(context).toMatchObject({ jobId: "job1", originalFirstPickupAt: picked.toISOString(),
+      originalDeadlineAt: failure.job.deadlineAt.toISOString(), diagnosis: { category: "SAVED_METHOD_SOURCE_CHANGED" },
+      latestLearningRecovery: { jobId: "child1", implementationRelease: link.releaseSha, executionRuntime: link.runtimeVersion,
+        diagnosis: { category: "LOCAL_BROWSER_UNAVAILABLE" }, evidenceAuthority: false } });
+    child.result.learningRecoveryOf = { ...link, runtimeVersion: "d".repeat(40) };
+    expect(await discoveryEngineeringContext(m.db as never, { courseId: "course1" }, "incident1", now))
+      .toMatchObject({ latestLearningRecovery: null });
+  });
   it("projects only closed delegation gates from the failed inspection without making them proof", () => {
     const diagnostic = createDelegationDiagnostic("ROOT_IDENTITY");
     diagnostic.gates.rootRenderedAddress = false;
