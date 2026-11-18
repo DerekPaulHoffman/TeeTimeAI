@@ -18,6 +18,7 @@ export type Quick18Metadata = {
   bookingBaseUrl: string;
   providerCourseId?: string;
   courseName?: string;
+  providerCourses?: Array<{ providerCourseId: string; courseName: string }>;
 };
 
 export function isQuick18PublicSearchUrl(value: string | URL): boolean {
@@ -54,6 +55,15 @@ export function isQuick18Metadata(value: unknown): value is Quick18Metadata {
   return (
     metadata.provider === "QUICK18" &&
     typeof metadata.bookingBaseUrl === "string" &&
+    (metadata.providerCourses === undefined || (
+      metadata.providerCourseId === undefined && metadata.courseName === undefined &&
+      Array.isArray(metadata.providerCourses) && metadata.providerCourses.length > 0 &&
+      metadata.providerCourses.length <= 4 &&
+      metadata.providerCourses.every((course) => course &&
+        typeof course.providerCourseId === "string" && /^[1-9]\d{0,9}$/u.test(course.providerCourseId) &&
+        typeof course.courseName === "string" && course.courseName.trim().length > 0 && course.courseName.length <= 200) &&
+      new Set(metadata.providerCourses.map((course) => course.providerCourseId)).size === metadata.providerCourses.length
+    )) &&
     isQuick18PublicSearchUrl(metadata.bookingBaseUrl) &&
     (metadata.providerCourseId === undefined ||
       (typeof metadata.providerCourseId === "string" && /^[1-9]\d{0,9}$/u.test(metadata.providerCourseId))) &&
@@ -116,7 +126,8 @@ export async function fetchQuick18TeeSheet(
     players: input.players,
     evidenceUrl: evidenceUrl.toString(),
     providerCourseId: input.metadata.providerCourseId,
-    courseName: input.metadata.courseName
+    courseName: input.metadata.courseName,
+    providerCourses: input.metadata.providerCourses
   });
   return {
     slots,
@@ -133,6 +144,7 @@ export function parseQuick18Slots(input: {
   evidenceUrl: string;
   providerCourseId?: string;
   courseName?: string;
+  providerCourses?: Quick18Metadata["providerCourses"];
 }): TeeTimeSlot[] {
   const document = parse(input.html);
   const selectedDate = findElements(document, "input").find(
@@ -183,7 +195,7 @@ export function parseQuick18Slots(input: {
   ) {
     throw schemaError("Quick18 tee-time table columns changed");
   }
-  if (courseColumn !== null && !input.courseName) {
+  if (courseColumn !== null && !input.courseName && !input.providerCourses?.length) {
     throw schemaError("Quick18 tee-time matrix course identity is unbound");
   }
   const publicColumns = headers.flatMap((header, index) =>
@@ -205,6 +217,9 @@ export function parseQuick18Slots(input: {
   let explicitNoTimes = false;
   let displayedCourse: string | null = null;
   let observedProviderCourseId: string | null = null;
+  const scopedCourses = input.providerCourses ?? (input.providerCourseId && input.courseName
+    ? [{ providerCourseId: input.providerCourseId, courseName: input.courseName }] : null);
+  let scopedRowCount = 0;
   for (const row of findElements(matrix, "tr")) {
     const cells = children(row, "td");
     if (cells.length === 0) continue;
@@ -257,10 +272,25 @@ export function parseQuick18Slots(input: {
     }
     const booking = publicBookings[0];
     if (!booking) continue;
+    const rowProviderIds = publicBookings.map((option) => new URL(option.url).pathname.match(
+      /^\/teetimes\/course\/([1-9]\d{0,9})\/teetime\//u
+    )?.[1]);
+    let scopedCourse: { providerCourseId: string; courseName: string } | undefined;
+    if (scopedCourses) {
+      if (rowProviderIds.some((id) => !id || id !== rowProviderIds[0])) {
+        throw schemaError("Quick18 public rates mix provider courses within one row");
+      }
+      scopedCourse = scopedCourses.find((course) => course.providerCourseId === rowProviderIds[0]);
+      if (!scopedCourse) continue;
+      if (courseColumn === null || !haveCompatibleQuick18CourseNames(
+        scopedCourse.courseName, textContent(cells[courseColumn]).replace(/\s+/gu, " ").trim()
+      )) throw schemaError("Quick18 scoped provider course does not match its verified name");
+      scopedRowCount += 1;
+    }
     // Back-nine and other products can remain in the matrix while their
     // ordinary public rate is unavailable. They contribute no inventory to
     // this read; bind identity only for rows that expose a public selection.
-    if (courseColumn !== null) {
+    if (courseColumn !== null && !scopedCourses) {
       const courseName = textContent(cells[courseColumn]).replace(/\s+/gu, " ").trim().toLowerCase();
       if (displayedCourse !== null && displayedCourse !== courseName) {
         throw schemaError("Quick18 tee-time matrix mixes courses");
@@ -277,7 +307,7 @@ export function parseQuick18Slots(input: {
       if (
         !providerCourseId ||
         (input.providerCourseId && input.providerCourseId !== providerCourseId) ||
-        (observedProviderCourseId !== null && observedProviderCourseId !== providerCourseId)
+        (!scopedCourses && observedProviderCourseId !== null && observedProviderCourseId !== providerCourseId)
       ) {
         throw schemaError("Quick18 tee-time matrix mixes provider courses");
       }
@@ -308,6 +338,9 @@ export function parseQuick18Slots(input: {
     }
   }
   if (slots.length === 0) {
+    if (scopedCourses && sawTimeRow && scopedRowCount === 0) {
+      throw schemaError("Quick18 matrix did not corroborate the scoped provider course");
+    }
     if (/\b(?:loading tee times|please wait|updating tee times|unable to load|error loading|temporarily unavailable)\b/iu.test(visibleText(document))) {
       throw schemaError("Quick18 tee sheet is still loading or unavailable");
     }
