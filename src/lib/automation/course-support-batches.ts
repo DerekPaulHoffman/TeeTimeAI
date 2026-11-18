@@ -3,7 +3,7 @@ import { excludeDiscoveryPilotTargets } from "@/lib/course-discovery/legacy-excl
 import { isGeneralDiscoveryEnabled } from "@/lib/course-discovery/config";
 
 import { Prisma } from "@prisma/client";
-import { isDataOnlyFullRepair } from "./course-support-full-repair";
+import { fullRepairReadProgressMatchesClaim, isDataOnlyFullRepair } from "./course-support-full-repair";
 import type {
   AutomationReason,
   BookingMethod,
@@ -6638,6 +6638,7 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
             orderBy: [{ createdAt: "asc" }, { id: "asc" }],
             select: {
               id: true,
+              courseId: true,
               cycle: true,
               result: true,
               proofSnapshot: true,
@@ -6707,6 +6708,32 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
         const concludedRecoveryStage =
           getConcludedDetachedVerificationRecoveryStage(playbook);
         const stage = playbook.nextStage ?? concludedRecoveryStage;
+        const claim = fullRepair && batch.incidents.length === 1
+          ? readCourseSupportRemediationClaimAttempt({ summary: batch.summary, courseId: entry.courseId, expectedAttemptCount: 1 })
+          : null;
+        const events = parseAutomationPlaybookLedger(entry.incident.attemptLedger)?.events
+          .filter(event => event.cycle === entry.incident.cycle);
+        // A changed implementation still needs a verification evaluation after
+        // legacy discovery is exhausted. This window grants no discovery read:
+        // browser target selection, detached eligibility and all persistence
+        // fences continue to use the unchanged legacy ledger.
+        const implementationVerification = Boolean(
+          fullRepair && batch.status === "VERIFYING" &&
+          /^[a-f0-9]{40}$/u.test(batch.releaseSha ?? "") && batch.deployedAt &&
+          batch.deployedAt >= batch.createdAt && batch.deployedAt <= databaseNow &&
+          Array.isArray(summary.plannedPaths) && summary.plannedPaths.length > 0 &&
+          summary.plannedPaths.every(path => typeof path === "string" && path.length > 0) &&
+          playbook.valid && playbook.cycle === entry.incident.cycle &&
+          playbook.conclusion === "UNRESOLVED_EXHAUSTED" && stage === null &&
+          claim?.actionPlan?.primaryAction === "IMPLEMENT_REUSABLE_SUPPORT" &&
+          courseSupportActionPlanAllows(claim.actionPlan, "INVESTIGATE_PUBLIC_SOURCE") &&
+          claim.approach.workMode === remediationDirective?.workMode &&
+          claim.approach.strategyAction === remediationDirective?.strategyAction &&
+          claim.approach.playbookStage === remediationDirective?.playbookStage && events &&
+          fullRepairReadProgressMatchesClaim({ fullRepair: true, claimedEventCount: claim.playbookEventCountAtClaim,
+            runtimeVersion: batch.releaseSha, batchCreatedAt: batch.createdAt, now: databaseNow,
+            releaseHistory: summary.releaseHistory, events }),
+        );
         const stageAssessment = playbook.stages.find(
           (assessment) => assessment.stage === stage,
         );
@@ -6749,15 +6776,15 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
           entry.incident.status === "AUTO_INVESTIGATING" &&
           entry.incident.activeBatchId === input.batchId &&
           (playbook.conclusion === "INCOMPLETE" ||
-            concludedRecoveryStage !== null) &&
-          stage !== null &&
+            concludedRecoveryStage !== null || implementationVerification) &&
+          (stage !== null || implementationVerification) &&
           (stage === remediationDirective?.playbookStage || fullRepair) &&
           grantableStageState &&
           (fullRepair ? !entry.verificationRequests.some(request => request.releaseSha === batch.releaseSha) : entry.verificationRequests.length === 0)
           ? [
               {
                 entry,
-                stage,
+                stage: stage ?? "IMPLEMENTATION_VERIFICATION" as const,
                 deadlineAt: getCourseMonitoringEscalationDeadline(
                   databaseNow,
                   entry.incident.activeRealSearchCount,
@@ -6859,7 +6886,7 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
             incidentCount: (current?.incidentCount ?? 0) + 1,
           });
           return grants;
-        }, new Map<string, { cycle: number; stage: AutomationPlaybookStage; deadlineAt: string; incidentCount: number }>()),
+        }, new Map<string, { cycle: number; stage: AutomationPlaybookStage | "IMPLEMENTATION_VERIFICATION"; deadlineAt: string; incidentCount: number }>()),
       ).map(([, grant]) => grant);
       const marker = {
         schemaVersion: 1,

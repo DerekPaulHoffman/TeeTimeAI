@@ -1747,13 +1747,20 @@ describe("course-support verification scheduling", () => {
     expect(prismaMocks.requestUpdateMany).not.toHaveBeenCalled();
   });
 
-  it("requires reusable implementation before scheduling an exhausted discovery ledger", async () => {
+  it.each([false, true])("keeps exhausted discovery fenced after an implementation verification window: %s", async fullRepair => {
+    const ledger = unresolvedExhaustedLedger();
+    const route = { workMode: "IMPLEMENT_REUSABLE_SUPPORT", strategyAction: "DISCOVER_WITH_BROWSER", playbookStage: "BROWSER_ADAPTER_RETRY" };
     prismaMocks.batchFindUnique.mockResolvedValue({
       id: "batch-1",
       status: "VERIFYING",
       releaseSha,
       completedAt: null,
       summary: {
+        ...(fullRepair ? {
+          plannedPaths: ["src/lib/automation/repaired-reader.ts"],
+          verificationStageDeadlineGrant: { schemaVersion: 1, releaseSha, grantedAt: now.toISOString(), incidentCount: 1,
+            stages: [{ cycle: 1, stage: "IMPLEMENTATION_VERIFICATION", deadlineAt: new Date(now.getTime() + 10 * 60_000).toISOString(), incidentCount: 1 }] },
+        } : {}),
         remediation: {
           workMode: "ADVANCE_DISCOVERY",
           strategyAction: "REPAIR_PROVIDER_ADAPTER",
@@ -1762,6 +1769,13 @@ describe("course-support verification scheduling", () => {
           requiresImplementationPath: false,
           reason: "PLAYBOOK_STAGE_PENDING",
           retryBudget: null,
+          ...(fullRepair ? { ...route, reason: "FAILED_LEARNER_IMPLEMENTATION_HANDOFF", attempts: [{
+            courseRef: createHash("sha256").update("course-1").digest("hex").slice(0, 24),
+            providerSnapshotFingerprint: "f".repeat(64), failureFingerprint: canonicalFailureFingerprint,
+            playbookEventCountAtClaim: (ledger as { events: unknown[] }).events.length, approach: route,
+            actionPlan: { schemaVersion: 1, primaryAction: "IMPLEMENT_REUSABLE_SUPPORT",
+              allowedActions: ["IMPLEMENT_REUSABLE_SUPPORT", "INVESTIGATE_PUBLIC_SOURCE"], route },
+          }] } : {}),
         },
       },
       incidents: [
@@ -1772,7 +1786,7 @@ describe("course-support verification scheduling", () => {
           cycle: 1,
           verifiedIncidentUpdatedAt: new Date("2026-07-21T11:55:00.000Z"),
           incident: incident({
-            attemptLedger: unresolvedExhaustedLedger(),
+            attemptLedger: ledger,
           }),
           course: course({
             detectedBookingUrl:

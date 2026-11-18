@@ -7068,6 +7068,7 @@ describe("course-support claim demand fencing", () => {
     >;
     summary?: Record<string, unknown>;
     leaseExpiresAt?: Date;
+    deployedAt?: Date | null;
   } = {}) {
     const attemptLedgers = input.attemptLedgers ?? [
       browserReadyAttemptLedger(),
@@ -7077,7 +7078,7 @@ describe("course-support claim demand fencing", () => {
       revision: 11,
       createdAt: new Date("2026-07-21T01:37:00.000Z"),
       releaseSha: "a".repeat(40),
-      deployedAt: null,
+      deployedAt: input.deployedAt ?? null,
       recheckDispatchStartedAt: null,
       leaseExpiresAt:
         input.leaseExpiresAt ?? new Date("2026-07-21T02:30:00.000Z"),
@@ -7096,6 +7097,7 @@ describe("course-support claim demand fencing", () => {
         } as const),
       incidents: attemptLedgers.map((attemptLedger, index) => ({
         id: `batch-incident-${index + 1}`,
+        courseId: `course-${index + 1}`,
         cycle: 1,
         result: "PENDING",
         proofSnapshot: null,
@@ -11736,6 +11738,58 @@ describe("course-support claim demand fencing", () => {
       .toMatchObject({ outcome: "REPLAYED", granted: false });
     expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledTimes(1);
   });
+
+  it.each(["valid", "undeployed", "data-only", "missing-permission", "different-route", "already-requested"])(
+    "evaluates an exhausted full repair without reopening legacy reads: %s", async scenario => {
+      const verificationNow = new Date("2026-07-21T03:20:00.000Z");
+      prismaMocks.queryRaw.mockResolvedValue([{ now: verificationNow }]);
+      const ledger = exhaustedAttemptLedger(1, new Date("2026-07-21T02:00:00.000Z"), "a".repeat(40));
+      const route = { workMode: "IMPLEMENT_REUSABLE_SUPPORT", strategyAction: "DISCOVER_WITH_BROWSER", playbookStage: "BROWSER_ADAPTER_RETRY" };
+      const batch = ownedStageDeadlineGrantBatch({
+        attemptLedgers: [ledger],
+        leaseExpiresAt: new Date("2026-07-21T04:00:00.000Z"),
+        deployedAt: scenario === "undeployed" ? null : new Date("2026-07-21T03:10:00.000Z"),
+        verificationRequests: scenario === "already-requested" ? [[{ id: "current-request", status: "STALE", startedAt: null, releaseSha: "b".repeat(40) }]] : [[]],
+        summary: {
+          plannedPaths: scenario === "data-only" ? [] : ["src/lib/automation/repaired-reader.ts"],
+          remediation: { ...route, allowUnchangedRuntime: true, requiresImplementationPath: false,
+            reason: "FAILED_LEARNER_IMPLEMENTATION_HANDOFF", retryBudget: null, attempts: [{
+              courseRef: createHash("sha256").update("course-1").digest("hex").slice(0, 24),
+              providerSnapshotFingerprint: "f".repeat(64), failureFingerprint: "TEST:EXHAUSTED",
+              playbookEventCountAtClaim: (ledger as { events: unknown[] }).events.length,
+              approach: scenario === "different-route" ? { ...route, strategyAction: "RUN_TYPED_ADAPTER" } : route,
+              actionPlan: { schemaVersion: 1, primaryAction: "IMPLEMENT_REUSABLE_SUPPORT",
+                allowedActions: scenario === "missing-permission" ? ["IMPLEMENT_REUSABLE_SUPPORT"] : ["IMPLEMENT_REUSABLE_SUPPORT", "INVESTIGATE_PUBLIC_SOURCE"],
+                route: scenario === "different-route" ? { ...route, strategyAction: "RUN_TYPED_ADAPTER" } : route },
+            }] },
+        },
+      });
+      batch.releaseSha = "b".repeat(40);
+      const originalLedger = structuredClone(ledger);
+      prismaMocks.batchFindFirst.mockResolvedValue(batch);
+      prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+      prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+
+      const result = await grantOwnedCourseSupportVerificationStageDeadline({ batchId: "batch-1", leaseToken: "lease-1", ownerThreadId: "owner-thread" });
+      expect(result).toMatchObject({ outcome: scenario === "valid" ? "GRANTED" : "NO_GRANTABLE_STAGE" });
+      expect(ledger).toEqual(originalLedger);
+      expect(assessAutomationPlaybook(ledger, 1)).toMatchObject({ conclusion: "UNRESOLVED_EXHAUSTED", nextStage: null });
+      if (scenario !== "valid") {
+        expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+        expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+        return;
+      }
+      const update = prismaMocks.supportIncidentUpdateMany.mock.calls[0][0];
+      expect(Object.keys(update.data).sort()).toEqual(["escalationDeadlineAt", "revision"]);
+      const savedSummary = prismaMocks.batchUpdateMany.mock.calls[0][0].data.summary;
+      expect(savedSummary.verificationStageDeadlineGrant).toMatchObject({ releaseSha: "b".repeat(40),
+        stages: [{ cycle: 1, stage: "IMPLEMENTATION_VERIFICATION", deadlineAt: expect.any(String), incidentCount: 1 }] });
+      batch.summary = savedSummary;
+      expect(await grantOwnedCourseSupportVerificationStageDeadline({ batchId: "batch-1", leaseToken: "lease-1", ownerThreadId: "owner-thread" }))
+        .toMatchObject({ outcome: "REPLAYED", granted: false });
+      expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it("grants three zero-attempt depth-four browser entries from database time immediately before watch", async () => {
     const verifyStartedAt = new Date("2026-07-21T02:06:00.000Z");
