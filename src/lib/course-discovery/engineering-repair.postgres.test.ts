@@ -29,6 +29,7 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     await client.$connect(); service = await import("./service"); engineering = await import("./engineering-repair");
   });
   afterEach(async () => {
+    vi.unstubAllEnvs();
     if (!client) return;
     const ownedRuns = await client.automationRun.findMany({ where: { ownerThreadId: { in: batchOwners } }, select: { id: true } });
     runs.push(...ownedRuns.map(run => run.id));
@@ -200,6 +201,9 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     await dispatcher.beginCourseSupportCourseDispatch({ ownerThreadId: parent, assignmentRef });
     await dispatcher.bindCourseSupportCourseDispatch({ ownerThreadId: parent, assignmentRef, childThreadId: owner,
       launcherReceiptPath: join(tmpdir(), randomUUID(), "launcher.receipt.private.json") });
+    // This process models the bound child's test session, rather than the
+    // previous parent. Runtime identity validation remains enabled.
+    vi.stubEnv("CODEX_THREAD_ID", owner);
     expect(await lane.claimCourseSupportBatch({ ownerThreadId: owner, branch: `automation/course-support-${randomUUID()}`,
       baseSha, maxCourses: 1, dispatchAssignmentRef: assignmentRef })).toMatchObject({ outcome: "ready" });
     const batch = await client.courseSupportBatch.findFirstOrThrow({ where: { ownerThreadId: owner } });
