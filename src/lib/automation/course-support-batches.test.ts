@@ -22176,6 +22176,24 @@ describe("course-support batch ordinals", () => {
     expect(prismaMocks.monitoringEventCreate).not.toHaveBeenCalled();
   });
 
+  it("distinguishes an unentered writer lane from lost path ownership", async () => {
+    leaseMocks.withPostgresAdvisoryTextLease.mockResolvedValueOnce({ acquired: false });
+    await expect(appendCourseSupportBatchPath({ batchId: "batch-1", leaseToken: "lease-1",
+      ownerThreadId: "owner-thread", path: "src/lib/course-discovery/chronogolf-source.ts", now,
+    })).resolves.toMatchObject({ outcome: "deferred_busy", pathRecorded: false,
+      reasonCode: "WRITER_TRANSITION_LANE_BUSY" });
+    expect(prismaMocks.batchFindFirst).not.toHaveBeenCalled();
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("still stops path admission when the owned batch is absent", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValue(null);
+    await expect(appendCourseSupportBatchPath({ batchId: "batch-1", leaseToken: "lease-1",
+      ownerThreadId: "owner-thread", path: "src/lib/course-discovery/chronogolf-source.ts", now,
+    })).resolves.toMatchObject({ outcome: "recovery_required", pathRecorded: false });
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+  });
+
   it("claims implementation scope only while the shared checkout is otherwise idle", async () => {
     prismaMocks.batchFindFirst.mockResolvedValue({
       status: "CLAIMED",

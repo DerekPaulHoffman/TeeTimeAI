@@ -6526,7 +6526,12 @@ export async function appendCourseSupportBatchPath(input: {
     if (implementationBusy) return { sealed: false as const, busy: true as const };
     return { sealed: false as const, busy: false as const, plannedPaths, leaseExpiresAt };
   });
-  if (!lease.acquired || lease.value === null) {
+  // A failed advisory try-lock never invokes the callback. No path mutation
+  // or ownership check ran, so do not report it as a lost batch lease.
+  if (!lease.acquired) return { outcome: "deferred_busy" as const, pathRecorded: false,
+    reasonCode: "WRITER_TRANSITION_LANE_BUSY" as const, threadDisposition: "KEEP_VISIBLE" as const,
+    archiveReason: "The writer transition lane is busy; no path operation was entered." };
+  if (lease.value === null) {
     return {
       outcome: "recovery_required" as const,
       pathRecorded: false,

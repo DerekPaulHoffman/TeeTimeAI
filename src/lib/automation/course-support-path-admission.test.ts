@@ -16,6 +16,16 @@ describe("owned implementation admission", () => {
       wait: async ms => { clock += ms; } })).toBe(busy);
     expect(clock).toBe(45_000); expect(attempt).toHaveBeenCalledTimes(3);
   });
+  it("waits through a writer-lane miss that never entered the mutation", async () => {
+    let clock = 0;
+    const writerBusy = { ...busy, reasonCode: "WRITER_TRANSITION_LANE_BUSY" };
+    const ready = { outcome: "ready", pathRecorded: true };
+    const attempt = vi.fn().mockResolvedValueOnce(writerBusy).mockResolvedValueOnce(busy).mockResolvedValue(ready);
+    expect(await waitForCourseSupportPathAdmission(attempt, { now: () => clock, budgetMs: 90_000,
+      wait: async ms => { clock += ms; } })).toBe(ready);
+    expect(attempt).toHaveBeenCalledTimes(3);
+    expect(clock).toBe(60_000);
+  });
   it.each([{ outcome: "recovery_required", pathRecorded: false }, { ...busy, reasonCode: "SOURCE_CHANGED" },
     { ...busy, pathRecorded: true }, { outcome: "command_failed" }])("does not retry another result %j", async result => {
     const attempt = vi.fn(async () => result), wait = vi.fn();

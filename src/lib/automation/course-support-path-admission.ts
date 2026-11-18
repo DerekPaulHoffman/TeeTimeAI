@@ -16,7 +16,7 @@ export async function waitForCourseSupportPathAdmission<T>(attempt: () => Promis
     const result = await attempt();
     const value = result as Record<string, unknown> | null;
     if (value?.outcome !== "deferred_busy" || value.pathRecorded !== false ||
-        value.reasonCode !== "EXCLUSIVE_IMPLEMENTATION_AUTHORITY_HELD") return result;
+        !["EXCLUSIVE_IMPLEMENTATION_AUTHORITY_HELD", "WRITER_TRANSITION_LANE_BUSY"].includes(String(value.reasonCode))) return result;
     const remaining = deadline - now();
     if (remaining <= 0) return result;
     await wait(Math.min(30_000, remaining), input.signal);
