@@ -186,6 +186,41 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } }))
       .toMatchObject({ status: "ACTIVE", alertGeneration: 0 });
   });
+  it.each(["data-only", "claimed-code", "cancelled", "changed-source"])("corrects only the unowned misclassified %s full repair, preserving prior evidence", async scenario => {
+    const f = await failed();
+    await engineering.reconcileDiscoveryEngineeringHandoffs();
+    await client.courseSupportIncident.update({ where: { courseId: f.course.id }, data: { nextAttemptAt: new Date(Date.now() - 1000) } });
+    const owner = `data-only-recovery-${randomUUID()}`; batchOwners.push(owner);
+    const lane = await import("@/lib/automation/course-support-batches");
+    await lane.claimCourseSupportBatch({ ownerThreadId: owner, branch: "automation/course-support-data-only", baseSha: "a".repeat(40), maxCourses: 1 });
+    const batch = await client.courseSupportBatch.findFirstOrThrow({ where: { ownerThreadId: owner } });
+    const incident = await client.courseSupportIncident.findUniqueOrThrow({ where: { courseId: f.course.id } });
+    const closeout = { outcome: "needs_human", reason: "expired_implementation_stopped_without_proof", remediationAttemptConsumed: false };
+    // Exact historical bug shape; production correction must preserve this.
+    await client.courseSupportBatch.update({ where: { id: batch.id }, data: { status: "PARTIAL", completedAt: new Date(),
+      releaseSha: batch.baseSha, summary: { ...(batch.summary as Prisma.JsonObject), closeout,
+        plannedPaths: scenario === "claimed-code" ? ["src/lib/adapters/claimed.ts"] : [] } } });
+    await client.courseSupportBatchIncident.updateMany({ where: { batchId: batch.id }, data: { result: "NEEDS_HUMAN" } });
+    await client.courseSupportIncident.update({ where: { id: incident.id }, data: { status: "NEEDS_HUMAN", activeBatchId: null,
+      humanReviewReason: "AUTOMATION_STALLED", nextAttemptAt: null } });
+    await client.courseMonitoringStatus.update({ where: { courseId: f.course.id }, data: { state: "ENGINEERING_VERIFICATION_NEEDED" } });
+    if (scenario === "cancelled") await client.teeSearch.update({ where: { id: f.search.id }, data: { status: "CANCELLED" } });
+    if (scenario === "changed-source") await client.course.update({ where: { id: f.course.id }, data: { website: "https://changed.example.com/" } });
+    await engineering.reconcileDiscoveryEngineeringHandoffs();
+    expect(await client.courseSupportIncident.findUniqueOrThrow({ where: { id: incident.id } }))
+      .toMatchObject({ status: scenario === "data-only" ? "AUTO_INVESTIGATING" : "NEEDS_HUMAN", cycle: incident.cycle,
+        attemptCount: incident.attemptCount, attemptLedger: incident.attemptLedger, activeBatchId: null });
+    const preserved = await client.courseSupportBatch.findUniqueOrThrow({ where: { id: batch.id } });
+    expect(preserved).toMatchObject({ status: "PARTIAL", ownerThreadId: owner, summary: { closeout } });
+    expect((preserved.summary as Prisma.JsonObject).dataOnlyFullRepairCorrectionV1 !== undefined).toBe(scenario === "data-only");
+    expect(await client.courseSupportBatchIncident.findFirstOrThrow({ where: { batchId: batch.id } })).toMatchObject({ result: "NEEDS_HUMAN" });
+    expect(await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } })).toMatchObject({ status: "FAILED",
+      attempts: f.job.attempts, firstPickedUpAt: f.job.firstPickedUpAt, deadlineAt: f.job.deadlineAt, completedAt: f.job.completedAt });
+    const eventCount = await client.courseMonitoringEvent.count({ where: { incidentId: incident.id, eventType: "REVALIDATION_REQUESTED" } });
+    expect(eventCount).toBe(scenario === "data-only" ? 1 : 0);
+    await engineering.reconcileDiscoveryEngineeringHandoffs();
+    expect(await client.courseMonitoringEvent.count({ where: { incidentId: incident.id, eventType: "REVALIDATION_REQUESTED" } })).toBe(eventCount);
+  });
   it("keeps failed verification evidence and offers only its original Desktop owner a continuation", async () => {
     const f = await failed();
     await engineering.reconcileDiscoveryEngineeringHandoffs();

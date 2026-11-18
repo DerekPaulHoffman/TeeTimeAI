@@ -3,6 +3,7 @@ import { excludeDiscoveryPilotTargets } from "@/lib/course-discovery/legacy-excl
 import { isGeneralDiscoveryEnabled } from "@/lib/course-discovery/config";
 
 import { Prisma } from "@prisma/client";
+import { isDataOnlyFullRepair } from "./course-support-full-repair";
 import type {
   AutomationReason,
   BookingMethod,
@@ -15848,7 +15849,14 @@ export async function recoverCourseSupportBatch(input: {
           retryIncidents.flatMap((entry) =>
             implementationActionEntryIds.has(entry.id) &&
             !strictImplementationProofRecorded &&
-            !supersededImplementationEntryIds.has(entry.id)
+            !supersededImplementationEntryIds.has(entry.id) &&
+            !isDataOnlyFullRepair({
+              reason: readCourseSupportRemediationDirective(batch.summary)?.reason ?? null,
+              workMode: readCourseSupportRemediationDirective(batch.summary)?.workMode ?? "",
+              requiresImplementationPath: readCourseSupportRemediationDirective(batch.summary)?.requiresImplementationPath !== false,
+              plannedPaths: readBatchPlannedPaths(batch.summary), baseSha: batch.baseSha, releaseSha: batch.releaseSha,
+              allowedActions: claimedAttemptByRetryEntryId.get(entry.id)?.actionPlan?.allowedActions ?? [],
+            })
               ? [entry.id]
               : []
           )

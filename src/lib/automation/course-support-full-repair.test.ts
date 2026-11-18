@@ -1,7 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { shouldContinueOwnedFullRepair } from "./course-support-full-repair";
+import { isDataOnlyFullRepair, shouldContinueOwnedFullRepair } from "./course-support-full-repair";
 
 describe("full repair retains the original owner after negative verification", () => {
+  it("does not require a code release until an optional-code full mission actually claims code", () => {
+    const dataOnly = { reason: "FAILED_LEARNER_IMPLEMENTATION_HANDOFF", workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+      requiresImplementationPath: false, plannedPaths: [], baseSha: "a".repeat(40), releaseSha: "a".repeat(40),
+      allowedActions: ["IMPLEMENT_REUSABLE_SUPPORT", "INVESTIGATE_PUBLIC_SOURCE"] };
+    expect(isDataOnlyFullRepair(dataOnly)).toBe(true);
+    for (const change of [{ plannedPaths: ["src/lib/adapters/example.ts"] }, { releaseSha: "b".repeat(40) },
+      { requiresImplementationPath: true }, { reason: "IMPLEMENTATION_REQUIRED" }, { allowedActions: ["IMPLEMENT_REUSABLE_SUPPORT"] }])
+      expect(isDataOnlyFullRepair({ ...dataOnly, ...change })).toBe(false);
+  });
   const packet = { remediation: { reason: "FAILED_LEARNER_IMPLEMENTATION_HANDOFF" }, courses: [{
     result: "RETRY_SCHEDULED", terminalProofDurable: false,
     actionPlan: { allowedActions: ["IMPLEMENT_REUSABLE_SUPPORT", "INVESTIGATE_PUBLIC_SOURCE"] },

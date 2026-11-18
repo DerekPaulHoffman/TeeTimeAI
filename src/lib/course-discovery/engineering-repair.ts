@@ -7,6 +7,9 @@ import { AUTOMATION_PLAYBOOK_VERSION } from "@/lib/automation/course-monitoring-
 import { isCourseDiscoveryEnabled, isGeneralDiscoveryEnabled } from "./config";
 import { currentDiscoveryEngineeringFailure } from "./service";
 import { hasLegacyDiscoveryOwner } from "./legacy-exclusion";
+import { isDataOnlyFullRepair } from "@/lib/automation/course-support-full-repair";
+import { createCourseSupportRemediationCourseRef } from "@/lib/automation/course-support-claim-evidence";
+import { buildCourseSupportProviderSnapshotFingerprint } from "@/lib/automation/course-support-verification";
 
 const receiptSchema = z.object({ version: z.literal(1), state: z.literal("QUEUED"),
   incidentId: z.string().min(1).max(128), queuedAt: z.string().datetime(),
@@ -15,6 +18,73 @@ const receiptSchema = z.object({ version: z.literal(1), state: z.literal("QUEUED
 type Reader = Parameters<typeof currentDiscoveryEngineeringFailure>[0];
 const object = (v: unknown): Record<string, unknown> => v && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : {};
 const safeCode = (v: unknown) => typeof v === "string" && /^[A-Z][A-Z0-9_]{0,99}$/u.test(v) ? v : null;
+
+/** Compatibility for the specific old data-only/code-proof misclassification.
+ * Keep the failed batch and original learner clocks; reopen only current,
+ * unowned demand once, with an append-only correction and ordinary budgets. */
+async function restoreMisclassifiedDataOnlyRepair(tx: Prisma.TransactionClient, input: {
+  incident: { id: string; courseId: string; status: string; activeBatchId: string | null; cycle: number;
+    humanReviewReason: string | null; updatedAt: Date; failureFingerprint: string; revision: number };
+  course: Parameters<typeof buildCourseSupportProviderSnapshotFingerprint>[0];
+  sourceFingerprint: string; failedAt: Date; now: Date;
+}) {
+  const { incident, now } = input;
+  if (incident.status !== "NEEDS_HUMAN" || incident.activeBatchId || incident.humanReviewReason !== "AUTOMATION_STALLED") return;
+  const batch = await tx.courseSupportBatch.findFirst({
+    where: { completedAt: { not: null }, incidents: { some: { incidentId: incident.id, cycle: incident.cycle } } },
+    orderBy: [{ completedAt: "desc" }, { id: "desc" }],
+    select: { id: true, revision: true, status: true, completedAt: true, baseSha: true, releaseSha: true, summary: true,
+      incidents: { select: { courseId: true, incidentId: true, cycle: true, result: true } } },
+  });
+  if (!batch || batch.status !== "PARTIAL" || batch.incidents.length !== 1 ||
+      batch.incidents[0].incidentId !== incident.id || batch.incidents[0].cycle !== incident.cycle ||
+      batch.incidents[0].result !== "NEEDS_HUMAN") return;
+  const summary = object(batch.summary), directive = object(summary.remediation), closeout = object(summary.closeout);
+  const attempts = Array.isArray(directive.attempts) ? directive.attempts.map(object) : [];
+  const claim = attempts.length === 1 ? attempts[0] : null;
+  const actions = object(claim?.actionPlan).allowedActions;
+  if (summary.dataOnlyFullRepairCorrectionV1 || closeout.reason !== "expired_implementation_stopped_without_proof" ||
+      closeout.outcome !== "needs_human" || !Array.isArray(summary.plannedPaths) || summary.plannedPaths.length !== 0 ||
+      !claim || claim.courseRef !== createCourseSupportRemediationCourseRef(incident.courseId) ||
+      claim.providerSnapshotFingerprint !== buildCourseSupportProviderSnapshotFingerprint(input.course) ||
+      claim.failureFingerprint !== incident.failureFingerprint || !isDataOnlyFullRepair({
+        reason: typeof directive.reason === "string" ? directive.reason : null,
+        workMode: typeof directive.workMode === "string" ? directive.workMode : "",
+        requiresImplementationPath: directive.requiresImplementationPath !== false,
+        plannedPaths: [], baseSha: batch.baseSha, releaseSha: batch.releaseSha,
+        allowedActions: Array.isArray(actions) ? actions.filter((v): v is string => typeof v === "string") : [],
+      })) return;
+  const monitoring = await tx.courseMonitoringStatus.findUnique({ where: { courseId: incident.courseId } });
+  if (!monitoring || monitoring.state !== "ENGINEERING_VERIFICATION_NEEDED" ||
+      monitoring.failureFingerprint !== incident.failureFingerprint ||
+      (monitoring.lastSuccessfulAt && monitoring.lastSuccessfulAt > input.failedAt)) return;
+  const latest = await tx.courseSupportBatchIncident.findFirst({ where: { incidentId: incident.id, cycle: incident.cycle,
+    batch: { completedAt: null } }, select: { id: true } });
+  if (latest) return;
+  const nextAttemptAt = now;
+  const message = "A full discovery repair had not claimed code; missing code-release proof did not establish an inaccessible course. Resume the unresolved repair under ordinary ownership and verification.";
+  const changed = await tx.courseSupportIncident.updateMany({ where: { id: incident.id, updatedAt: incident.updatedAt,
+    revision: incident.revision, status: "NEEDS_HUMAN", activeBatchId: null, cycle: incident.cycle }, data: {
+    status: "AUTO_INVESTIGATING", nextAttemptAt, humanReviewReason: null, nextReminderAt: null,
+    latestMessage: message, nextAction: "Continue the current full repair; preserve failed evidence and require independent saved-method proof.",
+    revision: { increment: 1 },
+  } });
+  if (changed.count !== 1) throw Error("Data-only repair ownership changed during correction.");
+  const monitored = await tx.courseMonitoringStatus.updateMany({ where: { courseId: incident.courseId, revision: monitoring.revision,
+    state: monitoring.state, lastSuccessfulAt: monitoring.lastSuccessfulAt }, data: { state: "AUTO_INVESTIGATING",
+    nextAutomaticAttemptAt: nextAttemptAt, stateChangedAt: now, revision: { increment: 1 } } });
+  const corrected = await tx.courseSupportBatch.updateMany({ where: { id: batch.id, revision: batch.revision,
+    status: batch.status, completedAt: batch.completedAt }, data: { summary: { ...summary,
+    dataOnlyFullRepairCorrectionV1: { schemaVersion: 1, reason: "NO_CODE_PATHS_WERE_CLAIMED", observedAt: now.toISOString(),
+      sourceFingerprint: input.sourceFingerprint, incidentCycle: incident.cycle, monitoringRestored: false },
+  } as Prisma.InputJsonValue, revision: { increment: 1 } } });
+  if (monitored.count !== 1 || corrected.count !== 1) throw Error("Data-only repair evidence changed during correction.");
+  await tx.courseMonitoringEvent.create({ data: { courseId: incident.courseId, incidentId: incident.id,
+    eventType: "REVALIDATION_REQUESTED", source: "COURSE_SUPPORT_RESPONDER", fromState: monitoring.state,
+    toState: "AUTO_INVESTIGATING", failureFingerprint: incident.failureFingerprint, readPath: "DISCOVERY_CODE_REPAIR",
+    message, occurredAt: now, idempotencyKey: `data-only-full-repair-correction:${batch.id}`,
+    audit: { schemaVersion: 1, priorBatchPreserved: true, clocksPreserved: true, codePathsClaimed: false, monitoringRestored: false } } });
+}
 async function initializeEmptyInvestigation(tx: Pick<Prisma.TransactionClient, "courseSupportIncident">,
   incident: { id: string; updatedAt: Date; attemptLedger: unknown }) {
   if (incident.attemptLedger !== null) return true;
@@ -90,8 +160,16 @@ export async function reconcileDiscoveryEngineeringHandoffs(now = new Date()) {
         OR (j.result->'engineeringHandoff'->>'state'='QUEUED' AND j."offeringId" IS NULL
           AND j.result->'engineeringHandoff'->>'sourceFingerprint'=j."sourceFingerprint" AND EXISTS (
           SELECT 1 FROM "CourseSupportIncident" i WHERE i.id=j.result->'engineeringHandoff'->>'incidentId'
-          AND i."courseId"=j."courseId" AND i.status='AUTO_INVESTIGATING' AND i."activeBatchId" IS NULL
-          AND (i."attemptLedger" IS NULL OR i."attemptLedger"='null'::jsonb) AND i."firstSeenAt"<=j."completedAt")))
+          AND i."courseId"=j."courseId" AND i."activeBatchId" IS NULL AND
+          ((i.status='AUTO_INVESTIGATING' AND (i."attemptLedger" IS NULL OR i."attemptLedger"='null'::jsonb) AND i."firstSeenAt"<=j."completedAt")
+           OR (i.status='NEEDS_HUMAN' AND i."humanReviewReason"='AUTOMATION_STALLED' AND EXISTS (
+             SELECT 1 FROM "CourseSupportBatchIncident" bi JOIN "CourseSupportBatch" b ON b.id=bi."batchId"
+             WHERE bi."incidentId"=i.id AND bi.cycle=i.cycle AND b."completedAt" IS NOT NULL
+               AND b.summary#>>'{closeout,reason}'='expired_implementation_stopped_without_proof'
+               AND b.summary#>>'{remediation,reason}'='FAILED_LEARNER_IMPLEMENTATION_HANDOFF'
+               AND b.summary->'plannedPaths'='[]'::jsonb
+               AND (b."releaseSha" IS NULL OR b."releaseSha"=b."baseSha")
+               AND b.summary#>'{dataOnlyFullRepairCorrectionV1}' IS NULL))))))
     ORDER BY j."completedAt",j.id LIMIT 16`);
   let queued = 0;
   for (const candidate of candidates) {
@@ -118,6 +196,10 @@ export async function reconcileDiscoveryEngineeringHandoffs(now = new Date()) {
             await tx.courseDiscoveryJob.findUnique({ where: { activeTargetKey: failure.job.targetKey } }) ||
             await hasLegacyDiscoveryOwner(tx, failure.request.target)) return null;
         const incident = await tx.courseSupportIncident.findUnique({ where: { id: priorReceipt.incidentId } });
+        if (incident?.courseId === failure.job.courseId) await restoreMisclassifiedDataOnlyRepair(tx, {
+          incident, course: fresh.source.course, sourceFingerprint: fresh.job.sourceFingerprint,
+          failedAt: fresh.job.completedAt!, now,
+        });
         if (incident?.courseId === failure.job.courseId && incident.status === "AUTO_INVESTIGATING" &&
             incident.activeBatchId === null && incident.firstSeenAt <= failure.job.completedAt!) await initializeEmptyInvestigation(tx, incident);
         return null;
