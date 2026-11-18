@@ -3667,6 +3667,7 @@ export function buildCourseSupportReleaseHistory(input: {
         recheckDispatchedAt:
           input.previousRecheckDispatchedAt?.toISOString() ?? null,
         recheckDispatch: summary.recheckDispatch ?? null,
+        searchExecutionFence: summary.searchExecutionFence ?? null,
         ...(summary.verificationStageDeadlineGrant
           ? { verificationStageDeadlineGrant: summary.verificationStageDeadlineGrant } : {}),
         incidentVerifications: input.previousIncidentVerifications.map(
@@ -3686,6 +3687,10 @@ export function buildCourseSupportReleaseHistory(input: {
       },
     ].slice(-20),
     recheckDispatch: null,
+    // The descendant gets a new dispatch and post-dispatch probe floor.
+    // Its fence must be captured there, never compared with probes that only
+    // belonged to the predecessor. Preserve that fence in history above.
+    searchExecutionFence: null,
   } as Prisma.InputJsonValue;
 }
 
@@ -6937,6 +6942,44 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
   );
 }
 
+/** Diagnostics only: finite aggregate fields from the retained verification.
+ * Never expose search/probe references or use this projection as authority. */
+function retainedCourseSupportVerificationDiagnostics(value: Prisma.JsonValue | null) {
+  const summary = asJsonObject(value);
+  const dispatch = getPersistedRecheckDispatch(value);
+  const fence = readPersistedCourseSupportSearchExecutionFence(summary.searchExecutionFence);
+  if (!dispatch && !fence) return null;
+  const countKeys = ["affectedSearchCount", "queuedCount", "queueFailureCount", "directStartCount",
+    "currentAffectedSearchCount", "healthySchedulerCount", "freshSearchCheckCount", "restoredCourseCount",
+    "provenRunnableCourseCount", "affectedCourseSearchPairCount", "healthyCourseSearchPairCount",
+    "detachedVerificationEligibleCount", "detachedVerificationCreatedCount", "detachedVerificationIneligibleCount",
+    "detachedVerificationPendingCount", "detachedVerificationAssignedStageOrchestrationGapCount"] as const;
+  const flagKeys = ["attempted", "dispatchError", "schedulerHealthComplete", "courseOutcomeHealthComplete",
+    "detachedVerificationDispatchError", "detachedVerificationRerunNeeded"] as const;
+  const reasons = ["DISPATCH_NOT_COMPLETE", "DISPATCH_SET_CHANGED", "SEARCH_REMOVAL_UNVERIFIED", "SEARCH_GENERATION_CHANGED",
+    "SEARCH_STATUS_CHANGED", "SEARCH_MODE_CHANGED", "SEARCH_WORKFLOW_MISSING", "SEARCH_CHECK_UNSETTLED", "SEARCH_LEASE_ACTIVE",
+    "SEARCH_RECHECK_PENDING", "SEARCH_CHECK_STALE", "SEARCH_REMEDIATION_CHANGED", "PREFERENCE_MEMBERSHIP_EMPTY"] as const;
+  const rejectionCounts = asJsonObject(dispatch?.detachedVerificationIneligibleReasonCounts);
+  return {
+    searchExecutionFence: fence ? {
+      capturedAt: parseProofDate(fence.capturedAt)?.toISOString() ?? null,
+      settled: fence.settled,
+      reasons: reasons.filter(reason => fence.reasons.includes(reason)),
+      batchSearchCount: finiteCount(fence.batchSearchCount), teeSearchCount: finiteCount(fence.teeSearchCount),
+      preferenceCount: finiteCount(fence.preferenceCount), probeCount: finiteCount(fence.probeCount),
+      providerExecutionAttemptCourseCount: new Set(fence.providerExecutionAttemptCourseRefs).size,
+      searchExecutionMayHaveStartedCourseCount: new Set(fence.searchExecutionMayHaveStartedCourseRefs).size,
+    } : null,
+    recheckDispatch: dispatch ? {
+      capturedAt: parseProofDate(dispatch.schedulerHealthObservedAt)?.toISOString() ?? null,
+      ...Object.fromEntries(countKeys.map(key => [key, finiteCount(dispatch[key])])),
+      ...Object.fromEntries(flagKeys.map(key => [key, typeof dispatch[key] === "boolean" ? dispatch[key] : null])),
+      stageHandoffRequiredCount: finiteCount(rejectionCounts.playbook_stage_handoff_required),
+      monitoringNotActionableCount: finiteCount(rejectionCounts.monitoring_not_actionable),
+    } : null,
+  };
+}
+
 export async function getCourseSupportBatchPacket(input: {
   batchId: string;
   leaseToken: string;
@@ -7070,6 +7113,7 @@ export async function getCourseSupportBatchPacket(input: {
       )
       .map((entry) => entry.id),
     remediation: remediationDirective,
+    verificationDiagnostics: retainedCourseSupportVerificationDiagnostics(batch.summary),
     courses: orderCourseSupportBatchIncidents(batch.incidents).map(
       (entry, index) => {
         const claimedActionPlan =

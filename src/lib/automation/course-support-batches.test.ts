@@ -212,6 +212,7 @@ import {
 } from "./course-support-batches";
 import {
   buildCourseSupportSearchExecutionFenceSnapshot,
+  canAdvanceCourseSupportSearchExecutionFence,
   persistCourseSupportSearchExecutionFence,
 } from "./course-support-search-execution-fence";
 import { buildCourseSupportActionExecution } from "./course-support-action-execution";
@@ -21158,6 +21159,44 @@ describe("course-support queue inspection admission runtime", () => {
 });
 
 describe("course-support batch ordinals", () => {
+  it("exposes retained verification blockers as bounded aggregate diagnostics without private references", async () => {
+    const secret = "PRIVATE_DIAGNOSTIC_TOKEN https://private.example/ private@example.com";
+    const fence = { ...emptySearchExecutionFenceForCourses(), settled: false,
+      reasons: ["SEARCH_CHECK_STALE", secret], batchSearchCount: 1, teeSearchCount: 1, preferenceCount: 2, probeCount: 0,
+      privateNote: secret };
+    const summary = { searchExecutionFence: fence, recheckDispatch: {
+      attempted: true, dispatchError: false, affectedSearchCount: 1, queuedCount: 1,
+      freshSearchCheckCount: 0, healthySchedulerCount: -1, restoredCourseCount: "0", schedulerHealthComplete: false,
+      courseOutcomeHealthComplete: true, affectedSearchRefs: [{ searchRef: "a".repeat(64), scheduleVersion: 7 }],
+      detachedVerificationIneligibleReasonCounts: { playbook_stage_handoff_required: 1, monitoring_not_actionable: 0, [secret]: 9 },
+      privateNote: secret,
+    } };
+    const original = structuredClone(summary);
+    prismaMocks.batchFindFirst.mockResolvedValue({ reference: "batch-reference", providerFamilyKey: "SOURCE_MISSING",
+      failureFingerprint: "bounded-fingerprint", createdAt: now, leaseExpiresAt: new Date(now.getTime() + 15 * 60_000),
+      summary, incidents: [] });
+    const packet = await getCourseSupportBatchPacket({ batchId: "batch-1", leaseToken: "lease-1", ownerThreadId: "owner-thread", now });
+    expect(packet).toMatchObject({ outcome: "ready", verificationDiagnostics: {
+      searchExecutionFence: { settled: false, reasons: ["SEARCH_CHECK_STALE"], teeSearchCount: 1, probeCount: 0 },
+      recheckDispatch: { attempted: true, dispatchError: false, affectedSearchCount: 1, queuedCount: 1,
+        freshSearchCheckCount: 0, healthySchedulerCount: null, restoredCourseCount: null, queueFailureCount: null,
+        stageHandoffRequiredCount: 1, monitoringNotActionableCount: 0, detachedVerificationRerunNeeded: null },
+    } });
+    if (packet.outcome !== "ready") throw Error("Expected an owned packet");
+    expect(JSON.stringify(packet.verificationDiagnostics)).not.toMatch(/PRIVATE|private\.example|private@|searchRef|courseRef|probeRef|digest|privateNote/u);
+    expect(summary).toEqual(original);
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("retains unknown diagnostics when no verification snapshot was recorded", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValue({ reference: "batch-reference", providerFamilyKey: "SOURCE_MISSING",
+      failureFingerprint: "bounded-fingerprint", createdAt: now, leaseExpiresAt: new Date(now.getTime() + 15 * 60_000),
+      summary: { searchExecutionFence: { schemaVersion: 1, settled: false, privateNote: "PRIVATE" } }, incidents: [] });
+    expect(await getCourseSupportBatchPacket({ batchId: "batch-1", leaseToken: "lease-1", ownerThreadId: "owner-thread", now }))
+      .toMatchObject({ outcome: "ready", verificationDiagnostics: null });
+  });
+
   it("uses course name before creation time and id for stable packet/history ordinals", () => {
     const entries = [
       {
@@ -22441,12 +22480,25 @@ describe("course-support follow-up releases", () => {
       }).action,
     ).toBe("UNCHANGED");
 
+    const searchRef = "d".repeat(64), courseRef = "e".repeat(24), oldProbe = "f".repeat(64);
+    const oldFence = { ...emptySearchExecutionFenceForCourses(), batchSearchCount: 1, teeSearchCount: 1,
+      memberships: [{ searchRef, scheduleVersion: 2, alertGeneration: 1, courseRefs: [courseRef] }],
+      probeEvidenceRefs: [oldProbe], probeEvidenceBySearch: [{ searchRef, probes: [{ probeRef: oldProbe, courseRef }] }],
+      searchExecutionMayHaveStartedCourseRefs: [courseRef] };
+    const currentFence = { ...oldFence, probeEvidenceRefs: ["1".repeat(64)],
+      probeEvidenceBySearch: [{ searchRef, probes: [{ probeRef: "1".repeat(64), courseRef }] }] };
+    // A new dispatch reads only probes after its own floor. An earlier
+    // release's probe cannot be present, so keeping that fence never converges.
+    expect(canAdvanceCourseSupportSearchExecutionFence(oldFence, currentFence)).toBe(false);
+    const sourceSummary = {
+      branch, plannedPaths: ["src/lib/provider.ts"], recheckDispatch: { attempted: true },
+      searchExecutionFence: oldFence, untouchedLedger: { originalAttemptCount: 6 },
+      executionEver: { schemaVersion: 2, changedReleaseDeploymentRecorded: true,
+        providerExecutionCourseRefs: [], providerExecutionAttemptCourseRefs: [courseRef], terminalExecutionCourseRefs: [] },
+    };
+    const originalSummary = structuredClone(sourceSummary);
     const summary = buildCourseSupportReleaseHistory({
-      summary: {
-        branch,
-        plannedPaths: ["src/lib/provider.ts"],
-        recheckDispatch: { attempted: true },
-      },
+      summary: sourceSummary,
       baseSha: "a".repeat(40),
       previousReleaseSha,
       previousDeployedAt: new Date("2026-07-15T20:05:00.000Z"),
@@ -22475,11 +22527,14 @@ describe("course-support follow-up releases", () => {
     }) as Record<string, unknown>;
 
     expect(summary.recheckDispatch).toBeNull();
+    expect(summary.searchExecutionFence).toBeNull();
+    expect(summary.untouchedLedger).toEqual(originalSummary.untouchedLedger);
+    expect(sourceSummary).toEqual(originalSummary);
     expect(summary.executionEver).toEqual({
       schemaVersion: 2,
-      changedReleaseDeploymentRecorded: false,
+      changedReleaseDeploymentRecorded: true,
       providerExecutionCourseRefs: [],
-      providerExecutionAttemptCourseRefs: [],
+      providerExecutionAttemptCourseRefs: [courseRef],
       terminalExecutionCourseRefs: [
         createHash("sha256").update("course-1").digest("hex").slice(0, 24),
       ],
@@ -22490,6 +22545,7 @@ describe("course-support follow-up releases", () => {
         deployedAt: "2026-07-15T20:05:00.000Z",
         supersededBy: nextReleaseSha,
         supersededAt: "2026-07-15T20:10:00.000Z",
+        searchExecutionFence: oldFence,
         incidentVerifications: [
           expect.objectContaining({
             ordinal: 1,
