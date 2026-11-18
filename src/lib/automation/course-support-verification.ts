@@ -43,6 +43,7 @@ import {
 import { sanitizeResponderText } from "./course-support-responder-policy";
 import { getAutomationRuntimeVersion } from "./runtime-version";
 import { readCourseSupportRemediationClaimAttempt } from "./course-support-claim-evidence";
+import { fullRepairReadProgressMatchesClaim } from "./course-support-full-repair";
 import {
   isAssignedDetachedStageProgression,
   isExactAssignedDetachedStageDirective,
@@ -3096,7 +3097,9 @@ function hasOwnedFullRepairFirstBrowserRetry(input: DetachedEligibilityInput, no
   const stage = assessment.stages.find(value => value.stage === "BROWSER_ADAPTER_RETRY");
   return Boolean(ledger && assessment.valid && assessment.cycle === input.incident.cycle && assessment.conclusion === "INCOMPLETE" &&
     assessment.nextStage === "BROWSER_ADAPTER_RETRY" && stage?.status === "PENDING" && stage.attemptCount === 0 &&
-    claim.playbookEventCountAtClaim === ledger.events.filter(event => event.cycle === input.incident.cycle).length);
+    fullRepairReadProgressMatchesClaim({ fullRepair: true, claimedEventCount: claim.playbookEventCountAtClaim,
+      runtimeVersion: input.releaseSha, batchCreatedAt: input.batchCreatedAt, now,
+      events: ledger.events.filter(event => event.cycle === input.incident.cycle) }));
 }
 
 function isAssignedDetachedProgression(
