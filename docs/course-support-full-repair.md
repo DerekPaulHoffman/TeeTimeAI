@@ -32,6 +32,8 @@ An owned read's monitoring observation uses a diagnostic `PLAYBOOK:...` fingerpr
 
 Keep a private hypothesis/evidence/fix/test record linked to retained verification and commits. Existing append-only discovery, playbook, verification and release history provide durable product evidence. Never overwrite failures, invent completed stages or create another scheduler.
 
+Keep model waiting separate from the verifier's internal polling cadence. Retain one command handle and wait up to fifty seconds for new output (`write_stdin` with empty input, `yield_time_ms: 50000`, and bounded output, or the equivalent wait on an existing tool cell). Do not wake the model every one or five seconds, start a duplicate command, or repeatedly reload unchanged packets while that owned command is running. Use meaningful progress updates within the host's responsiveness limit.
+
 Only a durable current `RESTORED` or factual `FINAL_DISPOSITION` permits normal provider closeout. Customer recovery stays separate and open until actual active alerts have fresh normal checks, healthy continuation and provider-accepted matching/recovery email. An empty dispatch table is not no demand. Observe the normal outbox and read Gmail when available for inbox evidence. Never send/resend email manually, mark delivery successful or alter alert inputs for a pass.
 
 After controlled restart, prove saved-method reuse separately with changed parameters and discovery/model calls disabled. Compare recipe ID/hash and normal matches. Late recovery cannot pass the original fifteen-minute contract.

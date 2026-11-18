@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -82,7 +82,7 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
   if (cli.status !== "current" || runtime.status !== "available" || !isAbsolute(runtime.nodePath ?? "")) fail("PARENT_RUNTIME_UNAVAILABLE");
   let client;
   try {
-    const artifactDir = join(selected, ".codex-artifacts", `desktop-repair-observation-${item.assignmentRef}-${Date.now()}`);
+    const artifactDir = join(selected, ".codex-artifacts", `desktop-repair-observation-${item.assignmentRef}-${randomUUID()}`);
     mkdirSync(artifactDir, { mode: 0o700 });
     client = (dependencies.clientFactory ?? createWorkerAppServer)({ cliPath: cli.cliPath, cwd: selected,
       eventPath: join(artifactDir, "events.private.jsonl"), stderrPath: join(artifactDir, "stderr.private.log") });

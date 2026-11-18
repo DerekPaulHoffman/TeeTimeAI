@@ -28,6 +28,7 @@ learning attempts failed; later engineering recovery never resets their clocks.
 | A legitimate owned read advanced the ledger and invalidated its worker's next research context | Preserve the immutable claim, permit only bounded non-final progress from the same runtime, and bind fresh contexts to the updated evidence digest. Legacy, foreign-runtime and final-disposition changes remain rejected | full-repair and research-context suites |
 | Original-worker continuation excluded already published implementations | Retain the same code owner only after durable deployed-release evidence and local Git ancestry/clean-branch checks. Recover an expired code lease from its exact registered release before advancing that branch; unpublished or foreign work remains excluded | desktop-continuation suite and engineering-repair Postgres projection |
 | The same read's monitoring diagnostic was mistaken for a changed incident fingerprint | Reconcile only exact same-incident/source/time/path/fingerprint observations against validated current-runtime read progress. Actual success, foreign or unmatched evidence still stops | research-context diagnostic positive and rejection cases |
+| Two valid native observations collided on a timestamp folder | Use a unique private observation directory while retaining the separate atomic one-use message marker | desktop-continuation frozen-clock regression |
 
 An old simulator implementation with retained unmerged code remained the actual
 global implementation owner. Its original Desktop chat was asked to reconcile

@@ -10,7 +10,7 @@ const TURN = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
 const REF = "course-assignment-12345678-1234-4234-8234-123456789abc";
 const BEFORE = "a".repeat(40), CURRENT = "b".repeat(40);
 const roots: string[] = [];
-afterEach(() => { for (const root of roots.splice(0)) {
+afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) {
   if (!resolve(root).startsWith(join(tmpdir(), "course-desktop-continuation-"))) throw new Error("Unexpected test cleanup target");
   rmSync(root, { recursive: true, force: true });
 } });
@@ -82,6 +82,8 @@ describe("original Desktop full-repair continuation", () => {
   });
 
   it("preserves its same owner's previously advanced clean runtime across a later release", async () => {
+    // CI reproduced two valid observations within the same millisecond.
+    vi.spyOn(Date, "now").mockReturnValue(1700000000000);
     const f = fixture();
     await prepareOwnedDesktopContinuation({ context: f.context, item: f.item }, f.deps);
     const priorGit = f.deps.git.getMockImplementation()!;
