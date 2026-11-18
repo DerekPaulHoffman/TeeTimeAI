@@ -37,7 +37,7 @@ import {
   readCourseSupportRemediationDirective,
   readCourseSupportRemediationClaimAttempt,
 } from "./course-support-batches";
-import { allowsRetainedFullRepairResearch } from "./course-support-full-repair";
+import { allowsRetainedFullRepairResearch, hasStoppedFullRepairVerification } from "./course-support-full-repair";
 import { retryCourseSupportWriterAdmission } from "./course-support-writer-admission";
 import { COURSE_DISPATCH_INCIDENT_SNAPSHOT_SELECT, isCourseDispatchIncidentSnapshotCurrent } from "./course-support-dispatch-snapshot";
 import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-verification";
@@ -671,7 +671,7 @@ async function collectOwnedFullRepairContinuations(tx: Prisma.TransactionClient,
   if (!ids.length) return [];
   const batches = await tx.courseSupportBatch.findMany({
     where: { id: { in: ids }, status: "VERIFYING" },
-    select: { id: true, reference: true, ownerThreadId: true, baseSha: true, releaseSha: true, deployedAt: true, summary: true,
+    select: { id: true, reference: true, ownerThreadId: true, baseSha: true, releaseSha: true, deployedAt: true, createdAt: true, summary: true,
       incidents: { select: { courseId: true, incidentId: true, cycle: true, result: true, course: true,
         incident: { select: { cycle: true, status: true, activeBatchId: true, providerFamilyKey: true, failureFingerprint: true } } } } },
   });
@@ -710,7 +710,9 @@ async function collectOwnedFullRepairContinuations(tx: Prisma.TransactionClient,
     const directive = readCourseSupportRemediationDirective(batch.summary);
     const claim = readCourseSupportRemediationClaimAttempt({ summary: batch.summary, courseId: entry.courseId, expectedAttemptCount: 1 });
     if (!directive || !claim || !allowsRetainedFullRepairResearch({ reason: directive.reason, workMode: directive.workMode,
-      batchStatus: "VERIFYING", result: entry.result, allowedActions: claim.actionPlan?.allowedActions ?? [] }) ||
+      batchStatus: "VERIFYING", result: entry.result, allowedActions: claim.actionPlan?.allowedActions ?? [],
+      pendingVerificationStopped: hasStoppedFullRepairVerification({ summary: batch.summary,
+        batchCreatedAt: batch.createdAt, deployedAt: batch.deployedAt, now }) }) ||
       claim.providerSnapshotFingerprint !== buildCourseSupportProviderSnapshotFingerprint(entry.course)) continue;
     const searches = await tx.coursePreference.findMany({
       where: { courseId: entry.courseId, teeSearchId: { in: audit.target.searchRefs.map(ref => ref.id) }, teeSearch: { mode: "OUTDOOR" } },

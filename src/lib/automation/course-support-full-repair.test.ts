@@ -1,7 +1,23 @@
 import { describe, expect, it } from "vitest";
-import { fullRepairReadProgressMatchesClaim, isDataOnlyFullRepair, shouldContinueOwnedFullRepair } from "./course-support-full-repair";
+import { allowsRetainedFullRepairResearch, fullRepairReadProgressMatchesClaim, hasStoppedFullRepairVerification, isDataOnlyFullRepair, shouldContinueOwnedFullRepair } from "./course-support-full-repair";
 
 describe("full repair retains the original owner after negative verification", () => {
+  it("continues a zero-pass pending result only after its current deployed verification failure checkpoint", () => {
+    const checkpoint = { schemaVersion: 1, stage: "VERIFICATION", failureDomain: "PRODUCTION_VERIFICATION",
+      reasonCode: "VERIFICATION_TOOLING_FAILED", recordedAt: "2026-11-18T06:05:00Z" };
+    const input = { summary: { ownerFailureCheckpoints: [checkpoint] }, batchCreatedAt: new Date("2026-11-18T06:00:00Z"),
+      deployedAt: new Date("2026-11-18T06:01:00Z"), now: new Date("2026-11-18T06:10:00Z") };
+    const mission = { reason: "FAILED_LEARNER_IMPLEMENTATION_HANDOFF", workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+      batchStatus: "VERIFYING", result: "PENDING", allowedActions: ["IMPLEMENT_REUSABLE_SUPPORT", "INVESTIGATE_PUBLIC_SOURCE"] };
+    expect(hasStoppedFullRepairVerification(input)).toBe(true);
+    expect(allowsRetainedFullRepairResearch({ ...mission, pendingVerificationStopped: hasStoppedFullRepairVerification(input) })).toBe(true);
+    expect(allowsRetainedFullRepairResearch(mission)).toBe(false);
+    for (const changed of [{ ...checkpoint, recordedAt: "2026-11-18T05:59:00Z" },
+      { ...checkpoint, recordedAt: "2026-11-18T06:00:30Z" }, { ...checkpoint, recordedAt: "2026-11-18T06:11:00Z" },
+      { ...checkpoint, failureDomain: "NETWORK" }, { ...checkpoint, reasonCode: "OTHER" }])
+      expect(hasStoppedFullRepairVerification({ ...input, summary: { ownerFailureCheckpoints: [changed] } })).toBe(false);
+    expect(hasStoppedFullRepairVerification({ ...input, deployedAt: null })).toBe(false);
+  });
   it("accepts only bounded non-factual same-runtime append-only read progress, without changing the claim", () => {
     const input = { fullRepair: true, claimedEventCount: 0, runtimeVersion: "a".repeat(40),
       batchCreatedAt: new Date("2026-11-18T06:00:00Z"), now: new Date("2026-11-18T06:10:00Z"),

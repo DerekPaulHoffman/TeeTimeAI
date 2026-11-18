@@ -66,12 +66,25 @@ export function allowsRetainedFullRepairResearch(input: {
   batchStatus: string;
   result: string;
   allowedActions: readonly string[];
+  pendingVerificationStopped?: boolean;
 }) {
   return input.reason === "FAILED_LEARNER_IMPLEMENTATION_HANDOFF" &&
     input.workMode === "IMPLEMENT_REUSABLE_SUPPORT" && ["VERIFYING", "IMPLEMENTING"].includes(input.batchStatus) &&
-    input.result === "STALE_EVIDENCE" &&
+    (input.result === "STALE_EVIDENCE" || input.result === "PENDING" && input.pendingVerificationStopped === true) &&
     input.allowedActions.includes("INVESTIGATE_PUBLIC_SOURCE") &&
     input.allowedActions.includes("IMPLEMENT_REUSABLE_SUPPORT");
+}
+
+export function hasStoppedFullRepairVerification(input: { summary: unknown; batchCreatedAt: Date; deployedAt: Date | null; now: Date }) {
+  if (!input.summary || typeof input.summary !== "object" || Array.isArray(input.summary) ||
+      !input.deployedAt || !Number.isFinite(input.deployedAt.getTime())) return false;
+  const checkpoints = (input.summary as Record<string, unknown>).ownerFailureCheckpoints;
+  const checkpoint = Array.isArray(checkpoints) ? checkpoints.at(-1) : null;
+  if (!checkpoint || checkpoint.schemaVersion !== 1 || checkpoint.stage !== "VERIFICATION" ||
+      checkpoint.failureDomain !== "PRODUCTION_VERIFICATION" || checkpoint.reasonCode !== "VERIFICATION_TOOLING_FAILED" ||
+      typeof checkpoint.recordedAt !== "string") return false;
+  const recordedAt = new Date(checkpoint.recordedAt);
+  return recordedAt >= input.batchCreatedAt && recordedAt >= input.deployedAt && recordedAt <= input.now;
 }
 
 export function shouldContinueOwnedFullRepair(packet: {

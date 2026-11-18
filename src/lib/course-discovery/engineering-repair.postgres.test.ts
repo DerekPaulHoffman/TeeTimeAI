@@ -293,7 +293,7 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     await engineering.reconcileDiscoveryEngineeringHandoffs();
     expect(await client.courseMonitoringEvent.count({ where: { incidentId: incident.id, eventType: "REVALIDATION_REQUESTED" } })).toBe(eventCount);
   });
-  it.each(["data-only", "published-code", "unpublished-code"])("keeps failed verification evidence and offers only its original %s Desktop owner a continuation", async scenario => {
+  it.each(["data-only", "published-code", "unpublished-code", "pending-stopped", "pending-no-checkpoint"])("keeps failed verification evidence and offers only its original %s Desktop owner a continuation", async scenario => {
     const f = await failed();
     await engineering.reconcileDiscoveryEngineeringHandoffs();
     await client.courseSupportIncident.update({ where: { courseId: f.course.id }, data: { nextAttemptAt: new Date(Date.now() - 1000) } });
@@ -317,22 +317,25 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     // Exact observed post-verification boundary. Source, cycle, playbook and
     // failed learner clock remain unchanged in this isolated database fixture.
     const code = scenario !== "data-only";
+    const pending = scenario.startsWith("pending-");
     await client.courseSupportBatch.update({ where: { id: batch.id }, data: { status: "VERIFYING", releaseSha: code ? "c".repeat(40) : baseSha,
-      deployedAt: scenario === "published-code" ? batch.createdAt : null,
-      summary: { ...(batch.summary as Prisma.JsonObject), plannedPaths: code ? ["src/lib/adapters/example.ts"] : [] } } });
-    await client.courseSupportBatchIncident.updateMany({ where: { batchId: batch.id }, data: { result: "STALE_EVIDENCE", verifiedAt: new Date() } });
+      deployedAt: scenario === "published-code" || pending ? batch.createdAt : null,
+      summary: { ...(batch.summary as Prisma.JsonObject), plannedPaths: code ? ["src/lib/adapters/example.ts"] : [],
+        ...(scenario === "pending-stopped" ? { ownerFailureCheckpoints: [{ schemaVersion: 1, stage: "VERIFICATION",
+          failureDomain: "PRODUCTION_VERIFICATION", reasonCode: "VERIFICATION_TOOLING_FAILED", recordedAt: new Date().toISOString() }] } : {}) } } });
+    await client.courseSupportBatchIncident.updateMany({ where: { batchId: batch.id }, data: { result: pending ? "PENDING" : "STALE_EVIDENCE", verifiedAt: new Date() } });
     expect(await research.getOwnedCourseSupportResearchContext({ batchId: batch.id, leaseToken: batch.leaseToken,
       ownerThreadId: owner, ordinal: 1 })).toMatchObject({ outcome: "ready", researchContextV1: { monitoringProofRecorded: false } });
     const nextParent = randomUUID(); batchOwners.push(nextParent);
     const next = await dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: nextParent, baseSha, maxStarts: 1 });
-    expect(next).toMatchObject({ acquired: true, value: { fullRepairContinuationItems: scenario === "unpublished-code" ? [] : [{ threadId: owner,
+    expect(next).toMatchObject({ acquired: true, value: { fullRepairContinuationItems: ["unpublished-code", "pending-no-checkpoint"].includes(scenario) ? [] : [{ threadId: owner,
       assignmentRef, batchReference: batch.reference, kind: "OWNED_OUTDOOR_FULL_REPAIR",
       continuationMode: code ? "PUBLISHED_IMPLEMENTATION" : "DATA_ONLY",
       continuationTrigger: "UNFINISHED_FULL_REPAIR" }] } });
     expect(await client.courseSupportBatch.findUniqueOrThrow({ where: { id: batch.id } }))
       .toMatchObject({ ownerThreadId: owner, leaseToken: batch.leaseToken, leaseExpiresAt: batch.leaseExpiresAt });
     expect(await client.courseSupportBatchIncident.findFirstOrThrow({ where: { batchId: batch.id } }))
-      .toMatchObject({ result: "STALE_EVIDENCE" });
+      .toMatchObject({ result: pending ? "PENDING" : "STALE_EVIDENCE" });
     expect(await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } }))
       .toMatchObject({ status: "FAILED", attempts: f.job.attempts, firstPickedUpAt: f.job.firstPickedUpAt, deadlineAt: f.job.deadlineAt });
     if (scenario === "published-code") {
