@@ -1,5 +1,13 @@
 # Local Chrome tee-time reader
 
+Version 1.13.3 supports both the older TeeItUp root calendar and the newer exact
+`/teetimes` public route. Signed jobs retain the verified source route while
+binding the same tenant, facility, date and public query fields. Course names
+still match exactly after the existing normalization; no transaction route or
+account access is added. Update the installed reader and confirm its fresh
+`TEEITUP_RENDERED:2` heartbeat before releasing the backend requirement. Preserve
+installed local changes and the existing extension identity and settings.
+
 Version 1.12 adds an owner-bound official-source observation purpose for the
 approved `https://parks.cityofomaha.org/*` origin. It reads visible course
 identity, address and public booking links, following only matching course

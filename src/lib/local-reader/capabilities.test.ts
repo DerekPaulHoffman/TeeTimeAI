@@ -89,7 +89,7 @@ describe("local reader capabilities", () => {
       )
     ).toEqual({
       key: "TEEITUP_RENDERED",
-      parserVersion: 1
+      parserVersion: 2
     });
   });
 

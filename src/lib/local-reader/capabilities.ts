@@ -59,7 +59,7 @@ export function getRequiredLocalReaderCapability(
     case "MEMBERSPORTS":
       return { key: "MEMBERSPORTS_RENDERED", parserVersion: 1 };
     case "TEEITUP":
-      return { key: "TEEITUP_RENDERED", parserVersion: 1 };
+      return { key: "TEEITUP_RENDERED", parserVersion: 2 };
     case "PROPHET":
       return {
         key: "PROPHET_FREAR_RENDERED",

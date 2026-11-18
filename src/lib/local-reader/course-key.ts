@@ -272,7 +272,8 @@ export function isAllowedLocalReaderUrl(courseKey: LocalReaderCourseKey, value: 
 export function getLocalReaderJobUrl(
   courseKey: LocalReaderCourseKey,
   targetDate: string,
-  players = 1
+  players = 1,
+  sourceBookingUrl?: string
 ) {
   if (isDynamicCpsCourseKey(courseKey)) {
     return `https://${courseKey.slice("cps:".length)}/onlineresweb/search-teetime`;
@@ -312,6 +313,13 @@ export function getLocalReaderJobUrl(
   if (isDynamicTeeItUpCourseKey(courseKey)) {
     const [, hostname, courseId] = courseKey.split(":");
     const url = new URL(`https://${hostname}/`);
+    if (sourceBookingUrl) {
+      const source = new URL(sourceBookingUrl);
+      if (getLocalReaderCourseKey(sourceBookingUrl) !== courseKey) {
+        throw new Error("TeeItUp source does not match the reader job");
+      }
+      url.pathname = source.pathname;
+    }
     if (courseId !== "root") url.searchParams.set("course", courseId);
     if (targetDate) url.searchParams.set("date", targetDate);
     url.searchParams.set("max", "999999");
@@ -468,7 +476,7 @@ function getTeeItUpScope(url: URL) {
   if (
     url.protocol !== "https:" ||
     !TEEITUP_TENANT_HOSTNAME.test(url.hostname) ||
-    url.pathname !== "/" ||
+    !["/", "/teetimes"].includes(url.pathname) ||
     url.username !== "" ||
     url.password !== "" ||
     url.hash !== ""

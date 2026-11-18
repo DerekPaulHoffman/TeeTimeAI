@@ -433,7 +433,7 @@ describe("local Chrome reader contract", () => {
     );
     const contentMatches = manifest.content_scripts.flatMap((entry) => entry.matches);
 
-    expect(manifest.version).toBe("1.13.0");
+    expect(manifest.version).toBe("1.13.3");
     expect(manifest.host_permissions).toContain("https://parks.cityofomaha.org/*");
     expect(contentMatches).toContain("https://parks.cityofomaha.org/*");
     expect(manifest.host_permissions).toContain("https://*.cps.golf/*");
@@ -461,7 +461,7 @@ describe("local Chrome reader contract", () => {
     expect(backgroundSource).toContain('["EZLINKS_RENDERED", 1]');
     expect(backgroundSource).toContain('["WEBTRAC_RENDERED", 1]');
     expect(backgroundSource).toContain('["MEMBERSPORTS_RENDERED", 1]');
-    expect(backgroundSource).toContain('["TEEITUP_RENDERED", 1]');
+    expect(backgroundSource).toContain('["TEEITUP_RENDERED", 2]');
     expect(backgroundSource).toContain("async function submitPendingResult(tabId, pending)");
     expect(backgroundSource).toContain("function withPendingJobsLock(operation)");
     expect(backgroundSource).toContain("expectJson: true");
@@ -740,6 +740,34 @@ describe("local Chrome reader contract", () => {
         "https://other-course.book.teeitup.com/?course=5165&date=2026-10-08&max=999999"
       )
     ).toBe(false);
+  });
+
+  it("preserves the verified newer public TeeItUp calendar route while binding its tenant, facility and date", () => {
+    const source = "https://desert-mirage-at-golf-ranch-glendale.book.teeitup.com/teetimes?course=4245";
+    const key = getLocalReaderCourseKey(source)!;
+    const url = getLocalReaderJobUrl(key, "2026-11-21", 2, source);
+    expect(url).toBe(source + "&date=2026-11-21&max=999999");
+    const job = { ...dynamicTeeItUpJob(key, "Desert Mirage at Golf Ranch Glendale"),
+      targetDate: "2026-11-21", players: 2, bookingUrl: url };
+    expect(localReaderJobSchema.parse(job).bookingUrl).toBe(url);
+    expect(loadTeeItUpReader().isAllowedPageUrl(job, url)).toBe(true);
+    expect(loadTeeItUpReader().isAllowedPageUrl(job, url.replace("4245", "26"))).toBe(false);
+    expect(loadTeeItUpReader().isAllowedPageUrl(job, url.replace("2026-11-21", "2026-11-22"))).toBe(false);
+    expect(() => getLocalReaderJobUrl(key, "2026-11-21", 2, source.replace("4245", "26"))).toThrow("does not match");
+    for (const path of ["/checkout", "/teetimes/checkout", "/login", "/course/info"]) {
+      expect(getLocalReaderCourseKey(source.replace("/teetimes", path))).toBeNull();
+    }
+    document.body.innerHTML = `<div role="group">
+      <div data-testid="teetimes-tile-time">8:00 AM</div>
+      <div data-testid="teetimes-tile-available-players">1 - 4</div>
+      <div data-testid="teetimes-tile-hole-verbiage">9</div>
+      <div data-testid="teetimes-tile-course-name">Desert Mirage at Golf Ranch Glendale</div>
+      <button data-testid="teetimes_choose_rate_button" aria-label="minimum price - $39.49 - maximum price - $43.49"></button>
+      </div>`;
+    expect(loadTeeItUpReader().readSnapshot(document, url, job)).toMatchObject({
+      status: "AVAILABLE", slots: [{ startsAtLocal: "2026-11-21T08:00:00", availableSpots: 4, holes: [9], priceCents: 3949 }]
+    });
+    expect(loadTeeItUpReader().readSnapshot(document, url, { ...job, courseName: "Another Course" }).status).toBe("READER_ERROR");
   });
 
   it("parses rendered TeeItUp cards for the exact course and requested group", () => {

@@ -437,6 +437,7 @@ export async function queueLocalReaderCourseVerification(input: {
     courseKey,
     input.targetDate,
     input.players,
+    input.bookingUrl,
   );
   if (!existing) {
     return prisma.localReaderJob.upsert({
@@ -813,6 +814,7 @@ export async function queueLocalReaderJob(input: {
         courseKey,
         input.targetDate,
         input.players,
+        input.bookingUrl,
       ),
       jobExpiresAt: new Date(now.getTime() + JOB_LIFETIME_MS),
       requiredCapabilityKey: requiredCapability.key,
@@ -824,6 +826,7 @@ export async function queueLocalReaderJob(input: {
         courseKey,
         input.targetDate,
         input.players,
+        input.bookingUrl,
       ),
       status: "PENDING",
       leaseToken: null,
