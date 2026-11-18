@@ -5,6 +5,27 @@ import { waitForGitDeployment } from "./wait-for-git-deployment";
 const commitSha = "a".repeat(40);
 
 describe("waitForGitDeployment", () => {
+  it("recognizes an actually promoted exact build despite its retained historical alias-check failure", async () => {
+    await expect(waitForGitDeployment({ commitSha }, {
+      listDeployments: () => ({ deployments: [gitDeployment("READY")] }),
+      inspectDeployment: () => ({ ...gitDeployment("READY"), id: "dpl_fixture", readyState: "READY",
+        readySubstate: "PROMOTED", aliasAssigned: true, aliasError: null, checks: { "deployment-alias": { state: "failed" } } }),
+      inspectAlias: () => ({ id: "dpl_fixture", readyState: "READY", url: "git.vercel.app" }),
+    })).resolves.toMatchObject({ commitSha, deploymentId: "dpl_fixture", state: "READY" });
+  });
+
+  it.each(["STAGED", "not-assigned", "missing-id", "wrong-id", "wrong-url", "not-ready", "alias-error"])(
+    "does not treat historical failure as resolved with incomplete current proof: %s", async missing => {
+      await expect(waitForGitDeployment({ commitSha }, {
+        listDeployments: () => ({ deployments: [gitDeployment("READY")] }),
+        inspectDeployment: () => ({ ...gitDeployment("READY"), id: missing === "missing-id" ? undefined : "dpl_fixture", readyState: "READY",
+          readySubstate: missing === "STAGED" ? "STAGED" : "PROMOTED", aliasAssigned: missing !== "not-assigned",
+          aliasError: missing === "alias-error" ? { code: "PRIVATE_ERROR" } : null, checks: { "deployment-alias": { state: "failed" } } }),
+        inspectAlias: alias => ({ id: missing === "wrong-id" && alias.startsWith("www.") ? "dpl_other" : "dpl_fixture",
+          readyState: missing === "not-ready" ? "BUILDING" : "READY", url: missing === "wrong-url" ? "old.vercel.app" : "git.vercel.app" }),
+      })).rejects.toThrow(missing === "alias-error" ? "PRODUCTION_ALIAS_ASSIGNMENT_FAILED" : "PRODUCTION_ALIAS_CHECK_FAILED");
+    });
+
   it.each([
     [{ checks: { "deployment-alias": { state: "failed" } } }, "PRODUCTION_ALIAS_CHECK_FAILED"],
     [{ aliasError: { code: "PRIVATE_ERROR", message: "private platform detail" } }, "PRODUCTION_ALIAS_ASSIGNMENT_FAILED"],

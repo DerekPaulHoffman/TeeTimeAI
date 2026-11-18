@@ -44,8 +44,11 @@ export type WaitForGitDeploymentDependencies = {
 };
 
 export type GitDeploymentPromotionInspection = {
+  id?: string;
   url?: string;
   readyState?: string;
+  readySubstate?: string;
+  aliasAssigned?: boolean;
   meta?: { githubCommitSha?: string; githubCommitRef?: string };
   aliasError?: unknown;
   checks?: { "deployment-alias"?: { state?: string } };
@@ -110,6 +113,7 @@ export async function waitForGitDeployment(
           `git_deployment_${(deployment.state ?? "pending").toLowerCase()}`,
         );
       } else {
+        let promotedWithHistoricalFailure: GitDeploymentPromotionInspection | undefined;
         if (dependencies.inspectDeployment) {
           const inspection = await dependencies.inspectDeployment(deployment.url!, { signal: options.signal });
           if (deadlineReached()) break;
@@ -121,8 +125,16 @@ export async function waitForGitDeployment(
           // release fence, not fifteen minutes of domain propagation. Do not
           // expose platform error text or try to repair/promote from this read.
           if (inspection.checks?.["deployment-alias"]?.state === "failed") {
-            report("production_alias_check_failed");
-            throw new GitDeploymentFailedError("PRODUCTION_ALIAS_CHECK_FAILED");
+            // Normal promotion can succeed while Vercel retains this earlier
+            // automatic attempt's failed check. Require fresh promoted state
+            // AND both exact deployment ids below before accepting that case.
+            if (inspection.readySubstate === "PROMOTED" && inspection.aliasAssigned === true &&
+                /^dpl_[A-Za-z0-9]+$/u.test(inspection.id ?? "")) {
+              promotedWithHistoricalFailure = inspection;
+            } else {
+              report("production_alias_check_failed");
+              throw new GitDeploymentFailedError("PRODUCTION_ALIAS_CHECK_FAILED");
+            }
           }
           if (inspection.aliasError != null) {
             report("production_alias_assignment_failed");
@@ -145,7 +157,10 @@ export async function waitForGitDeployment(
           requiredAliases,
         });
 
-        if (aliasState.verified) {
+        const promotedId = promotedWithHistoricalFailure?.id;
+        const exactPromotedIds = !promotedWithHistoricalFailure ||
+          aliasInspections.every(({ inspection }) => inspection.id === promotedId);
+        if (aliasState.verified && exactPromotedIds) {
           if (deadlineReached()) {
             break;
           }
@@ -169,6 +184,10 @@ export async function waitForGitDeployment(
             source: "git",
             state: "READY",
           };
+        }
+        if (promotedWithHistoricalFailure) {
+          report("production_alias_check_failed");
+          throw new GitDeploymentFailedError("PRODUCTION_ALIAS_CHECK_FAILED");
         }
         report("waiting_for_production_aliases");
       }
