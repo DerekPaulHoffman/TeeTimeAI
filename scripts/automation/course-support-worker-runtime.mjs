@@ -157,6 +157,30 @@ function inspectBrowserFiles(checkout) {
   }
 }
 
+function runtimeVersionProbe(run, command, args, settings, pattern) {
+  // Version queries are credential-free observations, never an install or a
+  // protected product operation. Re-read only a lost/transient observation.
+  // Retain closed diagnostics rather than arbitrary process output.
+  let attempts = 0;
+  let firstFailure;
+  for (;;) {
+    attempts++;
+    const result = run(command, args, settings);
+    const value = typeof result.stdout === "string" ? result.stdout.trim() : "";
+    const status = result.errorCode === "EACCES" || result.errorCode === "EPERM" ? "permission_denied"
+      : result.errorCode === "ENOENT" ? "unavailable"
+      : result.errorCode === "ETIMEDOUT" ? "timed_out"
+      : ["EAGAIN", "EBUSY", "EINTR"].includes(result.errorCode) ? "temporarily_unavailable"
+      : result.errorCode ? "spawn_failed"
+      : result.signal ? "interrupted"
+      : result.status === 0 && pattern.test(value) ? "current"
+      : (result.status === null || result.status === 0) && !value ? "missing_observation"
+      : result.status !== 0 ? "exit_failed" : "invalid_version";
+    if (attempts === 1 && ["timed_out", "temporarily_unavailable", "missing_observation"].includes(status)) { firstFailure = status; continue; }
+    return { value: status === "current" ? value : null, status, attempts, ...(firstFailure ? { firstFailure } : {}) };
+  }
+}
+
 function inspectWorkerRuntimeState(options = {}, dependencies = {}, setupAuthority = null) {
   const checkout = canonical(options.checkout || process.cwd());
   const selectedCheckout = options.selectedCheckout ? canonical(options.selectedCheckout) : null;
@@ -200,15 +224,15 @@ function inspectWorkerRuntimeState(options = {}, dependencies = {}, setupAuthori
     guards.setupHeadUnchanged = head === setupAuthority.head;
     guards.setupBranchUnchanged = branch === setupAuthority.branch;
   }
-  const version = (command, args, pattern) => {
-    const result = run(command, args, { cwd: checkout, env: inspectionEnv });
-    const value = result.stdout.trim();
-    return result.status === 0 && pattern.test(value) ? value : null;
-  };
+  const nodeProbe = runtime.status === "available" ? runtimeVersionProbe(run, runtime.nodePath, ["--version"], { cwd: checkout, env: inspectionEnv }, /^v\d+\.\d+\.\d+$/) : null;
+  const npmProbe = runtime.status === "available" ? runtimeVersionProbe(run, runtime.nodePath, [runtime.npmCliPath, "--version"], { cwd: checkout, env: inspectionEnv }, /^\d+\.\d+\.\d+$/) : null;
   const runtimeReceipt = runtime.status === "available" ? {
     status: runtime.status, source: runtime.source,
-    nodeVersion: version(runtime.nodePath, ["--version"], /^v\d+\.\d+\.\d+$/),
-    npmVersion: version(runtime.nodePath, [runtime.npmCliPath, "--version"], /^\d+\.\d+\.\d+$/)
+    nodeVersion: nodeProbe.value, npmVersion: npmProbe.value,
+    probes: { node: { status: nodeProbe.status, attempts: nodeProbe.attempts }, npm: { status: npmProbe.status, attempts: npmProbe.attempts } },
+    probeRecoveryCount: [nodeProbe, npmProbe].filter(probe => probe.status === "current" && probe.attempts > 1).length,
+    probeRecoveries: Object.entries({ node: nodeProbe, npm: npmProbe }).flatMap(([probe, result]) => result.status === "current" && result.firstFailure
+      ? [{ probe, failure: result.firstFailure }] : [])
   } : { status: runtime.status };
   const client = dependenciesPrivate ? (dependencies.inspectClient || inspectGeneratedPrismaClient)(checkout) : { status: "shared_output_rejected" };
   const browser = dependenciesPrivate ? (dependencies.inspectBrowser || inspectBrowserFiles)(checkout) : { moduleAvailable: false, executableAvailable: false, smoke: "not_run" };
@@ -293,6 +317,16 @@ export function prepareCourseSupportWorkerRuntime(options = {}, dependencies = {
     // The warm store is optional. The locked install remains the readiness gate.
   }
   let fresh = initial;
+  const probeRecoveries = [...(initial.runtime.probeRecoveries || [])];
+  const reinspection = () => {
+    const value = inspectWorkerRuntimeState(options, { ...dependencies, runtime }, authority).receipt;
+    probeRecoveries.push(...(value.runtime.probeRecoveries || []));
+    value.runtime.probeRecoveryCount = probeRecoveries.length;
+    value.runtime.probeRecoveries = [...probeRecoveries];
+    return value;
+  };
+  const failedInspectionOutcome = value => Object.entries(value.guards).some(([name, passed]) => name !== "atLocalOriginMain" && !passed)
+    ? "guard_changed" : "readiness_failed";
   for (const [stage, args] of [["dependencies", ["ci", "--prefer-offline", "--no-audit", "--no-fund", "--prefix", checkout]], ["vercel_cli", [resolve(checkout, "node_modules", "vercel", "dist", "vc.js"), "--version"]], ["generated_client", ["run", "prisma:generate", "--prefix", checkout]]]) {
     if (stage === "vercel_cli" && fresh.vercel.status !== "current") return { ...fresh, mode: "prepare", outcome: "readiness_failed", stages };
     const startedAt = new Date().toISOString();
@@ -308,8 +342,9 @@ export function prepareCourseSupportWorkerRuntime(options = {}, dependencies = {
     // advance it during npm ci without changing this validated worker. Pin
     // preparation to its initial HEAD and branch; durable claim/release fences
     // still decide whether this assignment may perform product work.
-    fresh = inspectWorkerRuntimeState(options, { ...dependencies, runtime }, authority).receipt;
-    if (!fresh.prepareEligible || (stage !== "dependencies" && fresh.vercel.status !== "current")) return { ...fresh, mode: "prepare", outcome: "guard_changed", stages };
+    fresh = reinspection();
+    if (!fresh.prepareEligible) return { ...fresh, mode: "prepare", outcome: failedInspectionOutcome(fresh), stages };
+    if (stage !== "dependencies" && fresh.vercel.status !== "current") return { ...fresh, mode: "prepare", outcome: "guard_changed", stages };
   }
   const browserFiles = fresh.browser;
   const browserSmoke = dependencies.browserSmoke || ((directory) => {
@@ -323,8 +358,8 @@ export function prepareCourseSupportWorkerRuntime(options = {}, dependencies = {
   const browser = browserFiles.executableAvailable
     ? { ...browserFiles, smoke: browserSmoke(checkout).status === "current" ? "passed" : "failed" }
     : browserFiles;
-  const final = inspectWorkerRuntimeState(options, { ...dependencies, runtime }, authority).receipt;
-  if (!final.prepareEligible) return { ...final, mode: "prepare", outcome: "guard_changed", stages };
+  const final = reinspection();
+  if (!final.prepareEligible) return { ...final, mode: "prepare", outcome: failedInspectionOutcome(final), stages };
   const finalBrowser = { ...final.browser, smoke: browser.smoke };
   const ready = final.client.status === "current" && final.vercel.status === "current" && finalBrowser.executableAvailable && finalBrowser.smoke === "passed";
   return { ...final, mode: "prepare", browser: finalBrowser, setupRequired: !ready, outcome: ready ? "prepared" : "readiness_failed", stages };

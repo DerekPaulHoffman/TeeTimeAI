@@ -31,6 +31,8 @@ describe("interactive fallback after the first incomplete fast calendar read", (
     const guide = getSimulatorResearchGuide(input(state));
     expect(guide.browserFallbackRequired).toBe(true);
     expect(guide.requiredTool).toBe("course_research_browser");
+    expect(guide.interactiveTransports).toEqual(["NATIVE_TOOL", "DESKTOP_COMMAND"]);
+    expect(guide.desktopCommand).toBe("scripts/automation/course-support-browser-desktop.mjs");
     expect(guide.suggestedReads[0]).toEqual({ source: "booking", rendered: true });
     expect(guide.suggestedReads.every(route => route.rendered)).toBe(true);
     expect(getSimulatorResearchRetryGuide(input(state))).toMatchObject({

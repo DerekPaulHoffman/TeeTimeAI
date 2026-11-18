@@ -352,6 +352,86 @@ describe("private Windows worker runtime", () => {
     expect(JSON.stringify(receipt)).not.toContain("private-token");
   });
 
+  it.each(["node", "npm"])("recovers one lost %s version observation after successful generation without repeating setup", (probe) => {
+    const { options, dependencies } = fixture();
+    const original = dependencies.runCommand.getMockImplementation()!;
+    let generated = false, lost = false;
+    dependencies.runCommand.mockImplementation((command, args) => {
+      if (args.includes("prisma:generate")) generated = true;
+      if (generated && !lost && args.at(-1) === "--version" && (probe === "node" ? args.length === 1 : args[0] === dependencies.runtime.npmCliPath)) {
+        lost = true;
+        return { status: null, stdout: "", errorCode: "ETIMEDOUT", stderr: "private-spawn-diagnostic" };
+      }
+      return original(command, args);
+    });
+    const receipt = prepareCourseSupportWorkerRuntime(options, dependencies);
+    expect(receipt.outcome).toBe("prepared");
+    expect(receipt.stages.map(stage => stage.stage)).toEqual(["dependencies", "vercel_cli", "generated_client"]);
+    expect(dependencies.runCommand.mock.calls.filter(([, args]) => args.includes("ci"))).toHaveLength(1);
+    expect(dependencies.runCommand.mock.calls.filter(([, args]) => args.includes("prisma:generate"))).toHaveLength(1);
+    expect(dependencies.browserSmoke).toHaveBeenCalledOnce();
+    expect(receipt.runtime.probeRecoveryCount).toBe(1);
+    expect(receipt.runtime.probeRecoveries).toEqual([{ probe, failure: "timed_out" }]);
+    expect(JSON.stringify(receipt)).not.toContain("private-spawn-diagnostic");
+  });
+
+  it.each([null, 0])("re-reads one empty version observation with exit %s without inventing a timeout", status => {
+    const { options, dependencies } = fixture();
+    const original = dependencies.runCommand.getMockImplementation()!;
+    let reads = 0;
+    dependencies.runCommand.mockImplementation((command, args) => {
+      if (args.length === 1 && args[0] === "--version" && ++reads === 1) return { status, stdout: "" };
+      return original(command, args);
+    });
+    expect(inspectCourseSupportWorkerRuntime(options, dependencies)).toMatchObject({ prepareEligible: true,
+      runtime: { nodeVersion: "v22.22.2", probes: { node: { status: "current", attempts: 2 } },
+        probeRecoveries: [{ probe: "node", failure: "missing_observation" }] } });
+    expect(reads).toBe(2);
+  });
+
+  it("bounds lost version probes and reports readiness failure separately from authority drift", () => {
+    const { options, dependencies } = fixture();
+    const original = dependencies.runCommand.getMockImplementation()!;
+    let installed = false, failedReads = 0;
+    dependencies.runCommand.mockImplementation((command, args) => {
+      if (args.includes("ci")) installed = true;
+      if (installed && args.length === 1 && args[0] === "--version") {
+        failedReads++;
+        return { status: null, stdout: "", errorCode: "ETIMEDOUT", stderr: "private-error" };
+      }
+      return original(command, args);
+    });
+    const receipt = prepareCourseSupportWorkerRuntime(options, dependencies);
+    expect(receipt).toMatchObject({ outcome: "readiness_failed", prepareEligible: false,
+      runtime: { probes: { node: { status: "timed_out", attempts: 2 } } } });
+    expect(Object.values(receipt.guards).every(Boolean)).toBe(true);
+    expect(failedReads).toBe(2);
+    expect(receipt.stages).toHaveLength(1);
+    expect(dependencies.browserSmoke).not.toHaveBeenCalled();
+    expect(JSON.stringify(receipt)).not.toContain("private-error");
+  });
+
+  it.each([
+    ["EACCES", null, "", "permission_denied"],
+    ["EPERM", null, "", "permission_denied"],
+    ["ENOENT", null, "", "unavailable"],
+    [undefined, 1, "private-error", "exit_failed"],
+    [undefined, 0, "private-malformed-version", "invalid_version"],
+  ])("never retries a permanent runtime probe failure %s/%s", (errorCode, status, stdout, expected) => {
+    const { options, dependencies } = fixture();
+    const original = dependencies.runCommand.getMockImplementation()!;
+    let probes = 0;
+    dependencies.runCommand.mockImplementation((command, args) => {
+      if (args.length === 1 && args[0] === "--version") { probes++; return { status, stdout, errorCode }; }
+      return original(command, args);
+    });
+    const receipt = inspectCourseSupportWorkerRuntime(options, dependencies);
+    expect(receipt).toMatchObject({ prepareEligible: false, runtime: { probes: { node: { status: expected, attempts: 1 } } } });
+    expect(probes).toBe(1);
+    expect(JSON.stringify(receipt)).not.toContain("private-error");
+    expect(JSON.stringify(receipt)).not.toContain("private-malformed-version");
+  });
+
   it.each(["dependencies", "browser"])("keeps the validated setup head when another worktree fetches during %s", (stage) => {
     const { options, dependencies } = fixture();
     let advanced = false;
@@ -401,7 +481,7 @@ describe("private Windows worker runtime", () => {
       return original(command, args);
     });
     const receipt = prepareCourseSupportWorkerRuntime(options, dependencies);
-    expect(receipt.outcome).toBe("guard_changed");
+    expect(receipt.outcome).toBe(drift === "version" ? "readiness_failed" : "guard_changed");
     expect(receipt.prepareEligible).toBe(false);
     expect(receipt.stages).toHaveLength(1);
     expect(dependencies.runCommand.mock.calls.some(([, args]) => args.includes("prisma:generate"))).toBe(false);

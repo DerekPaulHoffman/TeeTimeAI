@@ -658,7 +658,9 @@ export function getSimulatorResearchGuide(input: {
   const browserFallbackRequired = needsSimulatorInteractiveFallback(input) && allowedReads.some(route => route.rendered);
   const suggestedReads = browserFallbackRequired ? allowedReads.filter(route => route.rendered) : allowedReads;
   return { readsRemaining: SIMULATOR_RESEARCH_MAX_READS - input.state.readCount,
-    browserFallbackRequired, ...(browserFallbackRequired ? { requiredTool: "course_research_browser" as const } : {}),
+    browserFallbackRequired, ...(browserFallbackRequired ? { requiredTool: "course_research_browser" as const,
+      interactiveTransports: ["NATIVE_TOOL", "DESKTOP_COMMAND"] as const,
+      desktopCommand: "scripts/automation/course-support-browser-desktop.mjs" as const } : {}),
     inFlight: Boolean(input.state.inFlight), suggestedReads, rejectedReads,
     blockedResourceDiagnostics: input.state.history.flatMap(entry => entry.blockedResourceDiagnostics &&
       entry.sourceFingerprint === input.state.sourceFingerprint && entry.rendered && entry.outcome === "READ" &&
