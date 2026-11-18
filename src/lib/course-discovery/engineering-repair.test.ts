@@ -12,6 +12,8 @@ vi.mock("@/lib/automation/simulator-support-incidents", () => ({ reconcileSimula
 import { currentDiscoveryEngineeringHandoff, discoveryEngineeringContext, discoveryEngineeringReceipt,
   discoveryFailureDiagnosis, reconcileDiscoveryEngineeringHandoffs } from "./engineering-repair";
 import { listCourseSupportDispatchCandidates } from "@/lib/automation/course-support-batches";
+import { sanitizeResponderValue } from "@/lib/automation/course-support-responder-policy";
+import { createDelegationDiagnostic } from "./teeitup-delegated-booking-diagnostic";
 const now = new Date("2030-01-01T12:16:00Z"), picked = new Date("2030-01-01T12:00:00Z");
 let failure: ReturnType<typeof fixture>;
 let outdoorIncident: { id: string; courseId: string; status: string; updatedAt: Date; firstSeenAt: Date; attemptLedger: unknown; activeBatchId: string | null };
@@ -138,6 +140,32 @@ describe("terminal learner to coding responder", () => {
   });
 });
 describe("private failure evidence", () => {
+  it("projects only closed delegation gates from the failed inspection without making them proof", () => {
+    const diagnostic = createDelegationDiagnostic("ROOT_IDENTITY");
+    diagnostic.gates.rootRenderedAddress = false;
+    const entry = { attempt: 1, phase: "FIXED_INSPECTION", code: "OFFICIAL_PHYSICAL_CONTACT_UNVERIFIED",
+      fixedInspectionDiagnostic: { teeItUpDelegation: { ...diagnostic, url: "https://private.example/token" } } };
+    const project = () => sanitizeResponderValue(discoveryFailureDiagnosis({ outcome: "TOOL_FAILURE",
+      checkpoint: { stagehandFailure: { schemaVersion: 1, kind: "OWN_STAGEHAND_FAILURE_DIAGNOSTIC", entries: [entry] } } }));
+    expect(project()).toMatchObject({ failureCode: entry.code,
+      delegationDiagnostic: { stage: diagnostic.stage, gates: Object.entries(diagnostic.gates).map(([gate, passed]) => ({ gate: gate.replace(/([a-z])([A-Z])/gu, "$1_$2").toUpperCase(), passed })) },
+      evidenceAuthority: false });
+    expect(JSON.stringify(project())).not.toContain("private.example");
+    Object.assign(entry.fixedInspectionDiagnostic.teeItUpDelegation.gates, { rootRenderedAddress: "PRIVATE" });
+    expect(project()).not.toHaveProperty("delegationDiagnostic");
+  });
+  it("keeps a closed worker failure hint usable after CLI sanitization without exposing a code credential", () => {
+    const project = (code: string) => sanitizeResponderValue(discoveryFailureDiagnosis({
+      outcome: "TOOL_FAILURE", checkpoint: { stagehandFailure: { schemaVersion: 1,
+        kind: "OWN_STAGEHAND_FAILURE_DIAGNOSTIC", entries: [{ attempt: 1,
+          phase: "FIXED_INSPECTION", code, message: "PRIVATE_PROVIDER_BODY" }] } },
+    }));
+    expect(project("ADAPTER_TRANSPORT_FAILED")).toMatchObject({ code: "[redacted]",
+      failureCode: "ADAPTER_TRANSPORT_FAILED", evidenceAuthority: false });
+    for (const code of ["PRIVATE_PROVIDER_BODY", "TOKEN_ABC123", "https://private.example/token"])
+      expect(project(code)).toMatchObject({ code: "[redacted]", failureCode: null, evidenceAuthority: false });
+    expect(JSON.stringify(project("TOKEN_ABC123"))).not.toContain("TOKEN_ABC123");
+  });
   it.each(["OFFICIAL_PHYSICAL_CONTACT_UNVERIFIED", "STAGEHAND_SOURCE_DISCOVERY_FAILED"])("carries the actual bounded worker checkpoint entry for %s into repair", code => {
     const checkpoint = {
       stagehandProgress: { phase: "SOURCE_EXPORTED" },
@@ -163,7 +191,8 @@ describe("private failure evidence", () => {
     expect(discoveryFailureDiagnosis({ outcome: "TOOL_FAILURE", checkpoint: { stagehandFailure: {
       schemaVersion: 1, kind: "OWN_STAGEHAND_FAILURE_DIAGNOSTIC",
       entries: [{ attempt: 2, code: "DISCOVERY_REPLAY_INCOMPLETE", phase: "REPLAY" }],
-    } } })).toEqual({ category: "REPLAY_VALIDATION_FAILED", code: "DISCOVERY_REPLAY_INCOMPLETE", phase: "REPLAY", evidenceAuthority: false });
+    } } })).toEqual({ category: "REPLAY_VALIDATION_FAILED", code: "DISCOVERY_REPLAY_INCOMPLETE",
+      failureCode: "DISCOVERY_REPLAY_INCOMPLETE", phase: "REPLAY", evidenceAuthority: false });
   });
   it("does not accept a model checkpoint as a server-issued engineering link", async () => {
     Object.assign(failure.job.checkpoint, { engineeringHandoff: receipt() });
@@ -182,7 +211,7 @@ describe("private failure evidence", () => {
   it("never forwards arbitrary checkpoint strings, request values or credentials", () => {
     const hint = discoveryFailureDiagnosis({ outcome: "TOOL_FAILURE", checkpoint: { stagehandFailure: { code: "https://secret.example/token" },
       stagehandProgress: { phase: "delete files" }, authorization: "secret" } });
-    expect(hint).toEqual({ category: "READER_OR_RUNTIME_FAILURE", code: null, phase: null, evidenceAuthority: false });
+    expect(hint).toEqual({ category: "READER_OR_RUNTIME_FAILURE", code: null, failureCode: null, phase: null, evidenceAuthority: false });
   });
 });
 

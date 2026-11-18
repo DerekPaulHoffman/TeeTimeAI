@@ -10,6 +10,7 @@ import { hasLegacyDiscoveryOwner } from "./legacy-exclusion";
 import { isDataOnlyFullRepair } from "@/lib/automation/course-support-full-repair";
 import { createCourseSupportRemediationCourseRef } from "@/lib/automation/course-support-claim-evidence";
 import { buildCourseSupportProviderSnapshotFingerprint } from "@/lib/automation/course-support-verification";
+import { delegatedDiagnosticGates, delegatedDiagnosticStages } from "./teeitup-delegated-booking-diagnostic";
 
 const receiptSchema = z.object({ version: z.literal(1), state: z.literal("QUEUED"),
   incidentId: z.string().min(1).max(128), queuedAt: z.string().datetime(),
@@ -18,6 +19,30 @@ const receiptSchema = z.object({ version: z.literal(1), state: z.literal("QUEUED
 type Reader = Parameters<typeof currentDiscoveryEngineeringFailure>[0];
 const object = (v: unknown): Record<string, unknown> => v && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : {};
 const safeCode = (v: unknown) => typeof v === "string" && /^[A-Z][A-Z0-9_]{0,99}$/u.test(v) ? v : null;
+// A diagnostic projection, not a checkpoint validator. Keep the generic `code`
+// credential redacted; only these known worker outcomes may cross the CLI as a
+// failureCode. Unknown and model-supplied uppercase strings remain unavailable.
+const diagnosticFailureCodes = new Set([
+  "GUARDED_HOST", "BROWSER_UNAVAILABLE", "ADAPTER_TRANSPORT_FAILED",
+  "ADAPTER_CONFIGURATION_CHANGED", "ADAPTER_CONFIGURATION_UNVERIFIED", "ADAPTER_IDENTITY_MISMATCH",
+  "INVALID_ADAPTER_SOURCE", "UNSUPPORTED_ADAPTER_SOURCE", "CPS_PUBLIC_BUILD_UNSUPPORTED",
+  "STAGEHAND_WORKER_FAILED", "STAGEHAND_SOURCE_DISCOVERY_FAILED", "STAGEHAND_SOURCE_OUTPUT_INVALID",
+  "STAGEHAND_FIXED_INSPECTION_FAILED", "STAGEHAND_SOURCE_BUDGET_EXHAUSTED",
+  "OFFICIAL_DELEGATED_SOURCE_UNVERIFIED", "OFFICIAL_PHYSICAL_CONTACT_UNVERIFIED",
+  "FOREUP_OFFICIAL_ROUTE_UNVERIFIED", "USCHEDULE_PUBLIC_LOCATION_UNVERIFIED", "USCHEDULE_PUBLIC_PARTY_UNVERIFIED",
+  "OFFICIAL_POSTAL_SOURCE_UNVERIFIED", "CPS_PHONE_BOOKING_SOURCE_UNVERIFIED", "CPS_OFFICIAL_ENTRY_UNVERIFIED",
+  "OFFICIAL_STREET_TYPE_OMITTED_UNVERIFIED", "OFFICIAL_STREET_TYPE_OMITTED_CHANGED",
+  "OFFICIAL_CONTACT_SOURCE_UNVERIFIED", "OFFICIAL_CONTACT_READER_UNAVAILABLE", "OFFICIAL_CONTACT_ROOT_READ_UNVERIFIED",
+  "OFFICIAL_CONTACT_ROOT_LINK_UNVERIFIED", "OFFICIAL_CONTACT_PAGE_READ_UNVERIFIED", "OFFICIAL_CONTACT_DOCUMENT_UNVERIFIED",
+  "OFFICIAL_CONTACT_DEADLINE_EXCEEDED", "OFFICIAL_CONTACT_CHAIN_READ_UNVERIFIED",
+  "OFFICIAL_CONTACT_DIRECTORY_BIND_UNVERIFIED", "OFFICIAL_CONTACT_DIRECTORY_READ_UNVERIFIED",
+  "DISCOVERY_WORK_DEADLINE", "DISCOVERY_RECIPE_INVALID", "DISCOVERY_REPLAY_INCOMPLETE", "DISCOVERY_CHALLENGE_INVALID",
+  "DISCOVERY_LEASE_REJECTED", "DISCOVERY_LEASE_EXPIRED", "DISCOVERY_CANCELLED",
+  "FRAMEWORK_INSPECTION_DEADLINE", "FRAMEWORK_INSPECTION_CANCELLED", "FRAMEWORK_INSPECTION_SOURCE_UNREADABLE",
+  "FRAMEWORK_INSPECTION_PATH_STALE", "FRAMEWORK_INSPECTION_SOURCE_NOT_SETTLED", "FRAMEWORK_INSPECTION_METADATA_INVALID",
+  "FRAMEWORK_INSPECTION_METADATA_CONFLICT", "FRAMEWORK_INSPECTION_PROOF_NOT_BOUND", "FRAMEWORK_INSPECTION_OBSERVATION_INVALID",
+  "FRAMEWORK_INSPECTION_CLOSE_FAILED", "FRAMEWORK_INSPECTION_CONTEXT_CHANGED", "FRAMEWORK_INSPECTION_LANDING_CHANGED",
+]);
 
 /** Compatibility for the specific old data-only/code-proof misclassification.
  * Keep the failed batch and original learner clocks; reopen only current,
@@ -109,7 +134,16 @@ export function discoveryFailureDiagnosis(job: { outcome: string | null; checkpo
   const category = job.outcome === "DEADLINE" ? "DEADLINE_EXCEEDED" : job.outcome === "UNSUPPORTED" ? "MISSING_READER_CAPABILITY" :
     code === "GUARDED_HOST" ? "BROWSER_TRANSPORT_REJECTED" : code === "ADAPTER_CONFIGURATION_CHANGED" ? "SAVED_METHOD_SOURCE_CHANGED" :
       code === "BROWSER_UNAVAILABLE" ? "LOCAL_BROWSER_UNAVAILABLE" : phase === "INDEPENDENT_REPLAY" || phase === "REPLAY" ? "REPLAY_VALIDATION_FAILED" : "READER_OR_RUNTIME_FAILURE";
-  return { category, code, phase, evidenceAuthority: false as const };
+  const diagnostic = object(object(last?.fixedInspectionDiagnostic).teeItUpDelegation);
+  const gates = object(diagnostic.gates);
+  const delegationDiagnostic = delegatedDiagnosticStages.some(stage => stage === diagnostic.stage) &&
+    delegatedDiagnosticGates.every(key => gates[key] === null || typeof gates[key] === "boolean")
+    ? { stage: diagnostic.stage, gates: delegatedDiagnosticGates.map(gate => ({
+      gate: gate.replace(/([a-z])([A-Z])/gu, "$1_$2").toUpperCase(), passed: gates[gate] })) }
+    : undefined;
+  return { category, code, failureCode: code && diagnosticFailureCodes.has(code) ? code : null,
+    ...(delegationDiagnostic ? { delegationDiagnostic } : {}),
+    phase, evidenceAuthority: false as const };
 }
 
 export function discoveryEngineeringReceipt(result: unknown) {

@@ -46,7 +46,7 @@ type Element = DefaultTreeAdapterMap["element"];
 const clean = (value: string) => value.normalize("NFKC").replace(/\s+/gu, " ").trim();
 // These labels describe sections, never a competing physical venue. An exact
 // raw/rendered venue heading and full physical address remain mandatory.
-const publicSectionHeading = /^(?:events?|event central|upcoming events?|latest news|news and events|memberships?|membership options|golf outings?|golf lessons?|dining|contact us)$/u;
+const publicSectionHeading = /^(?:home|events?|event central|upcoming events?|latest news|news and events|memberships?|membership options|golf outings?|golf lessons?|dining|contact us)$/u;
 const element = (node: Node): node is Element => "tagName" in node;
 const attr = (node: Element, name: string) => node.attrs.find(value => value.name === name)?.value;
 const fail = (): never => { throw new Error("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED"); };

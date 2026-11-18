@@ -30,7 +30,7 @@ function readers() {
 afterEach(() => vi.restoreAllMocks());
 
 describe("fresh native delegated TeeItUp source", () => {
-  it.each(["Event Central", "Upcoming Events", "Golf Outings"])("keeps an exact venue witness alongside the public %s section", section => {
+  it.each(["Home", "Event Central", "Upcoming Events", "Golf Outings"])("keeps an exact venue witness alongside the public %s section", section => {
     const p = page(source.officialUrl, operator, true);
     p.html = p.html.replace("</body>", `<section><h1>${section}</h1></section></body>`);
     p.visibleEvidence!.headings.push(section);
