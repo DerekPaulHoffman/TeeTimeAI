@@ -46,13 +46,15 @@ export function publicFrameSource(input: { src: string; label: string; visible: 
     const parsed = new URL(url);
     // A labelled frame cannot turn a malformed same-family widget into the
     // generic iframe route after the typed widget grammar rejects it.
-    if (parsed.hostname === "www.chronogolf.com" && /\/widget\/?$/u.test(parsed.pathname) && !parseChronogolfPublicWidget(url)) return;
+    const chronogolfWidgetPath = ["chronogolf.com", "www.chronogolf.com"].includes(parsed.hostname) && /\/widget\/?$/u.test(parsed.pathname);
+    if (chronogolfWidgetPath && !parseChronogolfPublicWidget(url)) return;
     const teeItUpV2 = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.book-v2\.teeitup\.golf$/u.test(parsed.hostname) &&
       parsed.pathname === "/" && !parsed.search && !parsed.hash;
     // Legacy official embeds can omit a title on their public play entry.
     // Expose that exact source only; the later book destination still needs
     // independently observed navigation/redirect authority and fresh identity.
     const officialDocument = scopedParent && parentProof?.kind === "VERIFIED_OFFICIAL_DOCUMENT";
+    if (chronogolfWidgetPath && !officialDocument) return;
     const teeItUpPlay = officialDocument && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.play\.teeitup\.com$/u.test(parsed.hostname) &&
       parsed.pathname === "/" && !parsed.search && !parsed.hash;
     const acuityEntry = officialDocument && isPublicAcuityFrameEntry(url);

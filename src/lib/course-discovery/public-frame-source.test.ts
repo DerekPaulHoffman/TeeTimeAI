@@ -34,6 +34,17 @@ describe("official public iframe source navigation", () => {
     expect(read()).toBe(entry.src);
     expect(read({ ...entry, src: "/availability", label: "Tee time booking" })).toBe("https://venue.example/availability");
   });
+  it.each(["chronogolf.com", "www.chronogolf.com"])("keeps the public club widget on %s bound to a verified official parent", host => {
+    const src = `https://${host}/club/1234/widget?medium=widget&source=club`;
+    const proof = { kind: "VERIFIED_OFFICIAL_DOCUMENT" as const, officialUrl: official, documentUrl: document };
+    const frame = { ...entry, src, label: "Chronogolf Tee Time booking widget" };
+    expect(publicFrameSource(frame, document, official, document, proof)).toBe(src);
+    expect(publicFrameSource(frame, document, official, document)).toBeUndefined();
+    for (const changed of [{ visible: false }, { srcdoc: true }, { label: "Sign in to booking" },
+      { src: src + "&token=1" }, { src: src + "#?date=2026-10-24" }, { src: src.replace("/1234/", "/other/") }])
+      expect(publicFrameSource({ ...frame, ...changed }, document, official, document, proof)).toBeUndefined();
+    expect(publicFrameSource(frame, document, official, official, proof)).toBeUndefined();
+  });
   it("exposes only exact public USchedule roots even when their visible iframe has no title", () => {
     for (const host of ["clients.uschedule.com", "iframe.uschedule.com"]) {
       const src = `https://${host}/public-rental/booking`;

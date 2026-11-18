@@ -53,8 +53,10 @@ export function parseChronogolfPublicWidget(value: string): { widgetUrl: string;
   try {
     const url = new URL(value);
     const match = /^\/club\/([1-9]\d{0,9})\/widget$/u.exec(url.pathname);
-    if (url.href !== value || url.protocol !== "https:" || url.hostname !== "www.chronogolf.com" || url.username || url.password || url.port || url.hash ||
-        !match || url.search !== "?target=_blank&source=chronogolf&medium=profile") return null;
+    const profileEmbed = url.hostname === "www.chronogolf.com" && url.search === "?target=_blank&source=chronogolf&medium=profile";
+    const clubEmbed = ["chronogolf.com", "www.chronogolf.com"].includes(url.hostname) && url.search === "?medium=widget&source=club";
+    if (url.href !== value || url.protocol !== "https:" || url.username || url.password || url.port || url.hash ||
+        !match || !(profileEmbed || clubEmbed)) return null;
     const numericClubId = Number(match[1]);
     if (!id.safeParse(numericClubId).success) return null;
     return { widgetUrl: value, profileUrl: `https://www.chronogolf.com/club/${numericClubId}`, numericClubId };

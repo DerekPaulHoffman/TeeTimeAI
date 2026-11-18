@@ -49,6 +49,23 @@ describe("canonical public profile sources", () => {
     expect(() => chronogolfRecipeBookingUrl(source.bookingUrl, observed, "2026-10-23")).toThrow("ADAPTER_SLOT_LINK_UNVERIFIED");
     expect(() => parseChronogolfProfile(html(), widget, { ...source, bookingUrl: widget })).toThrow("ADAPTER_IDENTITY_MISSING");
   });
+  it.each(["chronogolf.com", "www.chronogolf.com"])("recognizes the public club embed on %s without accepting selected inventory state", host => {
+    const embedded = `https://${host}/club/1234/widget?medium=widget&source=club`;
+    expect(parseChronogolfPublicWidget(embedded)).toEqual({ widgetUrl: embedded, profileUrl: "https://www.chronogolf.com/club/1234", numericClubId: 1234 });
+    expect(parseChronogolfSource(embedded)).toEqual({ widgetUrl: embedded, profileUrl: "https://www.chronogolf.com/club/1234", slug: "1234", numericClubId: 1234 });
+    const observed = parseChronogolfProfile(html(), source.bookingUrl, { ...source, bookingUrl: embedded });
+    expect(observed.widgetSourceUrl).toBe(embedded);
+    expect(chronogolfRecipeBookingUrl(embedded, observed, "2026-10-24")).toBe(`${source.bookingUrl}?date=2026-10-24&step=teetimes`);
+    for (const changed of [embedded + "&date=2026-10-24", embedded + "&account=1", embedded + "&medium=widget",
+      embedded + "#?date=2026-10-24", embedded.replace("medium=widget&source=club", "source=club&medium=widget"),
+      embedded.replace("source=club", "source=other"), embedded.replace("medium=widget", "medium=profile"),
+      embedded.replace("/1234/", "/01234/"), embedded.replace("/1234/", "/2147483648/"),
+      embedded.replace("https://", "http://"), embedded.replace("https://", "https://user:secret@"),
+      embedded.replace(host, host + ":8443"), embedded.replace(host, host + ".evil.example")]) {
+      expect(parseChronogolfPublicWidget(changed)).toBeNull();
+      expect(parseChronogolfSource(changed)).toBeNull();
+    }
+  });
   it.each([
     "http://www.chronogolf.com/club/1234/widget?target=_blank&source=chronogolf&medium=profile",
     "https://chronogolf.com/club/1234/widget?target=_blank&source=chronogolf&medium=profile",
