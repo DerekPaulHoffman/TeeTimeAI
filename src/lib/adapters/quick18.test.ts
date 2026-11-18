@@ -248,6 +248,14 @@ describe("Quick18 public read-only tee sheet", () => {
     expect(isQuick18Metadata({ ...metadata, courseName: "" })).toBe(false);
   });
 
+  it("ignores unavailable back-nine products without admitting another course's public inventory", () => {
+    const unavailable = solitudeRow({ course: "Back 9", eighteen: "N/A Rate not available for date selected", nine: "N/A" });
+    const html = page(unavailable + solitudeRow({}), "9/29/2026", solitudeHeaders);
+    expect(parseSolitude(html)).toHaveLength(1);
+    expect(() => parseSolitude(page(solitudeRow({ course: "Another Course" }) + solitudeRow({}),
+      "9/29/2026", solitudeHeaders))).toThrow(/does not match the official course/u);
+  });
+
   it("enforces persisted course identity during the public read", async () => {
     const html = page(solitudeRow({}), "9/29/2026", solitudeHeaders);
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(

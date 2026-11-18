@@ -25,6 +25,16 @@ const html = `<html><script>SCHEDULES = ${JSON.stringify(schedules)};</script></
 describe("explicitly unrestricted public Online Booking", () => {
   const online = { ...schedules[0].booking_classes[0], name: "Online Booking", online_booking_protected: "0", block_online_booking: "0", deleted: "0", pass_item_ids: [""] };
   const document = (value: unknown) => `SCHEDULES=${JSON.stringify([{ ...schedules[0], booking_classes: [value] }])};`;
+  it.each(["Best Available Rate", "Best Available Rate (0-60 Days)"])("requires unrestricted public flags for %s", name => {
+    const row = { ...online, name };
+    expect(isStandardForeupPublicClass(row)).toBe(true);
+    expect(parseForeupPublicConfiguration({ bookingUrl, courseName: "Bridges", html: document(row) })).toMatchObject({ bookingClassId: 4931 });
+    for (const delta of [{ online_booking_protected: "1" }, { online_booking_protected: undefined },
+      { pass_item_ids: ["17758419"] }, { block_online_booking: "1" }, { deleted: "1" },
+      { name: "Loyalty Card Tee Times (0-7 Days)" }, { name: `${name} Members` }]) {
+      expect(isStandardForeupPublicClass({ ...row, ...delta })).toBe(false);
+    }
+  });
   it.each(["Book Tee Time", "Book a Tee Time", "Book Tee Times"])("requires explicit unrestricted flags for %s", name => {
     const row = { ...online, name };
     expect(isStandardForeupPublicClass(row)).toBe(true);

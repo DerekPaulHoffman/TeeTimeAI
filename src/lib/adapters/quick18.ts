@@ -225,16 +225,6 @@ export function parseQuick18Slots(input: {
     if (!time || !range || (courseColumn !== null && !textContent(cells[courseColumn]).trim())) {
       throw schemaError("Quick18 tee-time row could not be read");
     }
-    if (courseColumn !== null) {
-      const courseName = textContent(cells[courseColumn]).replace(/\s+/gu, " ").trim().toLowerCase();
-      if (displayedCourse !== null && displayedCourse !== courseName) {
-        throw schemaError("Quick18 tee-time matrix mixes courses");
-      }
-      if (input.courseName && !haveCompatibleQuick18CourseNames(input.courseName, courseName)) {
-        throw schemaError("Quick18 tee-time matrix does not match the official course");
-      }
-      displayedCourse = courseName;
-    }
     sawTimeRow = true;
 
     const publicBookings: Array<{ url: string; priceCents: number | null; holes: 9 | 18 | null }> = [];
@@ -267,6 +257,19 @@ export function parseQuick18Slots(input: {
     }
     const booking = publicBookings[0];
     if (!booking) continue;
+    // Back-nine and other products can remain in the matrix while their
+    // ordinary public rate is unavailable. They contribute no inventory to
+    // this read; bind identity only for rows that expose a public selection.
+    if (courseColumn !== null) {
+      const courseName = textContent(cells[courseColumn]).replace(/\s+/gu, " ").trim().toLowerCase();
+      if (displayedCourse !== null && displayedCourse !== courseName) {
+        throw schemaError("Quick18 tee-time matrix mixes courses");
+      }
+      if (input.courseName && !haveCompatibleQuick18CourseNames(input.courseName, courseName)) {
+        throw schemaError("Quick18 tee-time matrix does not match the official course");
+      }
+      displayedCourse = courseName;
+    }
     for (const publicBooking of publicBookings) {
       const providerCourseId = new URL(publicBooking.url).pathname.match(
         /^\/teetimes\/course\/([1-9]\d{0,9})\/teetime\//u
