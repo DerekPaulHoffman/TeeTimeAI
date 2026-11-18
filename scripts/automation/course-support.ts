@@ -7,6 +7,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { refreshPendingCustomerRecoveries } from "@/lib/automation/course-support-customer-recovery";
 import { shouldContinueOwnedFullRepair } from "@/lib/automation/course-support-full-repair";
+import { settleCourseSupportRecoveryFence } from "@/lib/automation/course-support-recovery-progress";
 import { promisify } from "node:util";
 
 import {
@@ -1995,7 +1996,7 @@ async function recover(args: string[]) {
     if (readGitState().originMainSha !== commitSha) throw new Error("Production main changed during superseded-runtime recovery.");
     supersedingDeployment = { commitSha: proof.commitSha, deploymentId: proof.deploymentId };
   }
-  return recoverCourseSupportBatch({
+  return settleCourseSupportRecoveryFence(() => recoverCourseSupportBatch({
     batchId,
     requestingThreadId: ownerThreadId,
     currentBranch: git.branch,
@@ -2007,6 +2008,13 @@ async function recover(args: string[]) {
     releaseIsAncestor,
     releaseCommittedPaths,
     supersedingDeployment
+  }), () => {
+    const current = readGitState();
+    if (current.branch !== git.branch || current.headSha !== git.headSha ||
+        current.originMainSha !== git.originMainSha || current.dirtyPaths.length ||
+        process.env.CODEX_THREAD_ID !== ownerThreadId) {
+      throw new Error("Responder recovery authority changed after committed fence adoption.");
+    }
   });
 }
 

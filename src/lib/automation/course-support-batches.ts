@@ -16129,6 +16129,7 @@ export async function recoverCourseSupportBatch(input: {
               reasons: [
                 "Legacy responder search execution was proven empty; run recovery again against the retained fence.",
               ],
+              recoveryProgress: { kind: "COMMITTED_SEARCH_EXECUTION_FENCE_ADOPTION" as const, revision: batch.revision + 1 },
               threadDisposition: "KEEP_VISIBLE" as const,
               archiveReason:
                 "Responder recovery needs one exact fence pass before closeout.",
@@ -16288,6 +16289,7 @@ export async function recoverCourseSupportBatch(input: {
               reasons: [
                 "Fresh search execution evidence was retained; run recovery again against the adopted fence.",
               ],
+              recoveryProgress: { kind: "COMMITTED_SEARCH_EXECUTION_FENCE_ADOPTION" as const, revision: batch.revision + 1 },
               threadDisposition: "KEEP_VISIBLE" as const,
               archiveReason:
                 "Responder recovery needs one settled fence pass before closeout.",

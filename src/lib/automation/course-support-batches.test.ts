@@ -17258,6 +17258,7 @@ describe("course-support recovery", () => {
       outcome: "recovery_required",
       safelyRequeued: false,
       durableCloseoutRecorded: false,
+      recoveryProgress: { kind: "COMMITTED_SEARCH_EXECUTION_FENCE_ADOPTION", revision: expiredBatch.revision + 1 },
     });
 
     const adoptedSummary =
@@ -17788,6 +17789,7 @@ describe("course-support recovery", () => {
         outcome: "recovery_required",
         safelyRequeued: false,
         durableCloseoutRecorded: false,
+        recoveryProgress: { kind: "COMMITTED_SEARCH_EXECUTION_FENCE_ADOPTION", revision: expiredBatch.revision + 1 },
       });
 
       const adoptedSummary =

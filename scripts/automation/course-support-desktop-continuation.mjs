@@ -47,7 +47,18 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
   if (execute(worker, ["branch", "--show-current"]) !== launcher.branch || execute(worker, ["status", "--porcelain"])) fail("ORIGINAL_WORKER_CHANGED");
   const workerHead = execute(worker, ["rev-parse", "HEAD"]);
   if (workerHead === currentSha || currentSha === item.baseSha) return { outcome: "unchanged_runtime", messageRequired: false };
-  if (workerHead !== item.baseSha) fail("ORIGINAL_DATA_ONLY_BASE_CHANGED");
+  if (workerHead !== item.baseSha) {
+    // A previous automatic continuation let this same owner fast-forward its
+    // own clean branch. Retain that exact request as provenance; never adopt
+    // arbitrary clean commits or an unrelated worker's checkout.
+    const priorPath = join(selected, ".codex-artifacts", `desktop-repair-continuation-${item.assignmentRef}-${workerHead}.private.json`);
+    if (!existsSync(priorPath)) fail("ORIGINAL_DATA_ONLY_BASE_CHANGED");
+    const prior = readJson(priorPath);
+    if (prior.schemaVersion !== 1 || prior.kind !== "OWNED_DESKTOP_CONTINUATION_REQUESTED" ||
+        prior.status !== "REQUESTED_NOT_ACKNOWLEDGED" || prior.childThreadId !== item.threadId ||
+        prior.assignmentRef !== item.assignmentRef || prior.batchReference !== item.batchReference ||
+        prior.runtimeSha !== workerHead || !UUID.test(prior.priorTurnId ?? "")) fail("ORIGINAL_CONTINUATION_PROVENANCE_CHANGED");
+  }
   // A detached or primary/unrelated repository must never become an owner.
   const common = realpathSync(resolve(worker, execute(worker, ["rev-parse", "--git-common-dir"])));
   const parentCommon = realpathSync(resolve(selected, execute(selected, ["rev-parse", "--git-common-dir"])));
