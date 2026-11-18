@@ -57,6 +57,38 @@ describe("Chelsea Reservations adapter", () => {
     });
   });
 
+  it("uses an explicitly verified nonmember route and its current General Public type", async () => {
+    const publicMetadata: ChelseaMetadata = {
+      ...metadata,
+      bookingBaseUrl: "https://westbk.chelseareservations.com/nonmember/",
+      publicBookingPath: "/nonmember/code/Booking/booking1.aspx",
+      publicMemberTypeCode: "07"
+    };
+    const page = calendarHtml("07/13/2026") +
+      '<select id="ddlMemberType"><option value="07">General Public</option></select>' +
+      '<select id="ddlTime"><option value="07:00">7 AM</option></select>' +
+      '<select id="ddlTimeEnd"><option value="17:00">5 PM</option></select>';
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce(htmlResponse(page))
+      .mockResolvedValueOnce(htmlResponse(calendarHtml("07/18/2026")))
+      .mockResolvedValueOnce(htmlResponse(resultsHtml()));
+    await fetchChelseaTeeSheet({ courseId: "lakes", date: new Date("2026-07-18"),
+      players: 2, metadata: publicMetadata }, fetchImpl as typeof fetch,
+      new Date("2026-07-13"));
+    expect(fetchImpl.mock.calls[0][0]).toBe(
+      "https://westbk.chelseareservations.com/nonmember/code/Booking/booking1.aspx"
+    );
+    expect(String(fetchImpl.mock.calls[1][1]?.body)).toContain("ddlMemberType=07");
+    expect(String(fetchImpl.mock.calls[1][1]?.body)).toContain("ddlTime=07%3A00");
+    expect(String(fetchImpl.mock.calls[1][1]?.body)).toContain("ddlTimeEnd=17%3A00");
+    expect(isChelseaMetadata({ ...publicMetadata, publicBookingPath: "/member/login" })).toBe(false);
+    const rejectedFetch = vi.fn().mockResolvedValue(htmlResponse(page.replace("General Public", "Members")));
+    await expect(fetchChelseaTeeSheet({ courseId: "lakes", date: new Date("2026-07-18"),
+      players: 2, metadata: publicMetadata }, rejectedFetch as typeof fetch,
+      new Date("2026-07-13"))).rejects.toThrow("not corroborated");
+    expect(rejectedFetch).toHaveBeenCalledTimes(1);
+  });
+
   it("reads the unauthenticated non-member tee sheet without selecting Reserve", async () => {
     const fetchImpl = vi
       .fn()

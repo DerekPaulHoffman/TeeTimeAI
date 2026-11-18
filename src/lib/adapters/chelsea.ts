@@ -12,6 +12,8 @@ export type ChelseaMetadata = {
   bookingBaseUrl: string;
   courseCode: number;
   courseLabel: string;
+  publicBookingPath?: "/nonmember/code/Booking/booking1.aspx";
+  publicMemberTypeCode?: string;
   bookingWindowDaysAhead?: number;
   bookingWindowEvidenceUrl?: string;
 };
@@ -40,6 +42,10 @@ export function isChelseaMetadata(value: unknown): value is ChelseaMetadata {
     (metadata.courseCode ?? 0) > 0 &&
     typeof metadata.courseLabel === "string" &&
     metadata.courseLabel.trim().length > 0 &&
+    (metadata.publicBookingPath === undefined ||
+      metadata.publicBookingPath === "/nonmember/code/Booking/booking1.aspx") &&
+    (metadata.publicMemberTypeCode === undefined ||
+      /^\d{2}$/.test(metadata.publicMemberTypeCode)) &&
     (metadata.bookingWindowDaysAhead === undefined ||
       (Number.isInteger(metadata.bookingWindowDaysAhead) &&
         metadata.bookingWindowDaysAhead >= 0 &&
@@ -78,18 +84,29 @@ export async function fetchChelseaTeeSheet(
   }
 
   const bookingPageUrl = new URL(
-    "/GPInprocess/code/Booking/booking1.aspx",
+    input.metadata.publicBookingPath ?? "/GPInprocess/code/Booking/booking1.aspx",
     input.metadata.bookingBaseUrl
   ).toString();
   const cookies = new Map<string, string>();
   let page = await requestChelseaPage(bookingPageUrl, undefined, cookies, fetchImpl);
+  if (input.metadata.publicMemberTypeCode) {
+    const memberSelect = page.html.match(
+      /<select[^>]+(?:id|name)=["']ddlMemberType["'][^>]*>([\s\S]*?)<\/select>/i
+    )?.[1];
+    const publicCode = memberSelect?.match(
+      /<option[^>]+value=["'](\d{2})["'][^>]*>\s*General Public\s*<\/option>/i
+    )?.[1];
+    if (publicCode !== input.metadata.publicMemberTypeCode) {
+      throw new Error("Chelsea public member type is not corroborated by the current page");
+    }
+  }
 
   let dayButton = findTargetDayButton(page.html, targetDate);
   if (!dayButton) {
     page = await postChelseaForm(
       page,
       {
-        ...baseSearchFields(input.metadata, input.players),
+        ...baseSearchFields(input.metadata, input.players, page.html),
         __EVENTTARGET: "gaNextWeek",
         __EVENTARGUMENT: ""
       },
@@ -110,7 +127,7 @@ export async function fetchChelseaTeeSheet(
   page = await postChelseaForm(
     page,
     {
-      ...baseSearchFields(input.metadata, input.players),
+      ...baseSearchFields(input.metadata, input.players, page.html),
       [dayButton]: ""
     },
     cookies,
@@ -123,7 +140,7 @@ export async function fetchChelseaTeeSheet(
   page = await postChelseaForm(
     page,
     {
-      ...baseSearchFields(input.metadata, input.players),
+      ...baseSearchFields(input.metadata, input.players, page.html),
       btnDisplayTimes: "GO >"
     },
     cookies,
@@ -163,13 +180,22 @@ function getBookingWindowEvidence(metadata: ChelseaMetadata): BookingWindowEvide
   };
 }
 
-function baseSearchFields(metadata: ChelseaMetadata, players: number) {
+function baseSearchFields(metadata: ChelseaMetadata, players: number, html: string) {
+  const values = (id: string) => {
+    const select = html.match(new RegExp(
+      `<select[^>]+(?:id|name)=["']${id}["'][^>]*>([\\s\\S]*?)<\\/select>`, "i"
+    ))?.[1];
+    return [...(select ?? "").matchAll(/<option[^>]+value=["'](\d{2}:\d{2})["']/gi)]
+      .map((match) => match[1]).sort();
+  };
+  const starts = values("ddlTime");
+  const ends = values("ddlTimeEnd");
   return {
     ddlCourse1: String(metadata.courseCode),
-    ddlTime: "05:00",
-    ddlTimeEnd: "18:00",
+    ddlTime: starts[0] ?? "05:00",
+    ddlTimeEnd: ends.at(-1) ?? "18:00",
     ddlQuantity: String(Math.min(4, Math.max(1, players))),
-    ddlMemberType: "05"
+    ddlMemberType: metadata.publicMemberTypeCode ?? "05"
   };
 }
 
