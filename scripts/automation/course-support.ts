@@ -94,7 +94,7 @@ import type {
   VercelDeploymentInspection,
   VercelDeploymentList,
 } from "@/lib/deployments/vercel-git";
-import { waitForGitDeployment } from "@/lib/deployments/wait-for-git-deployment";
+import { GitDeploymentReadOnlyFailure, waitForGitDeployment, type GitDeploymentPromotionInspection } from "@/lib/deployments/wait-for-git-deployment";
 
 import {
   getPersistableBrowserOperationFailure,
@@ -1476,6 +1476,10 @@ async function verifyRelease(args: string[]) {
                 "--limit",
                 "20"
               ], deploymentSignal),
+            inspectDeployment: (url, { signal: deploymentSignal } = {}) =>
+              runCourseSupportVercelJson<GitDeploymentPromotionInspection>([
+                "api", `/v13/deployments/${url}`, "--method", "GET"
+              ], deploymentSignal),
             inspectAlias: (alias, { signal: deploymentSignal } = {}) =>
               runCourseSupportVercelJson<VercelDeploymentInspection>([
                 "inspect",
@@ -1505,6 +1509,27 @@ async function verifyRelease(args: string[]) {
         return proof;
       } catch (error) {
         signal.throwIfAborted();
+        const diagnosis = await retainOwnedReleaseDiagnosis({ error, releaseSha, signal }, {
+          reconfirmAuthority: async () => {
+            const packet = await getCourseSupportBatchPacket({ batchId, leaseToken, ownerThreadId });
+            if (packet.outcome !== "ready" || !shouldContinueOwnedFullRepair(packet)) return false;
+            const provenance = await getCourseSupportBatchRecoveryProvenance(batchId);
+            if (provenance.releaseSha !== releaseSha) return false;
+            const ordinal = Number(packet.courses[0].ordinal);
+            const context = await getOwnedCourseSupportResearchContext({ batchId, leaseToken, ownerThreadId, ordinal });
+            if (context.outcome !== "ready") return false;
+            const validation = await validateOwnedCourseSupportResearchContext({ batchId, leaseToken, ownerThreadId, ordinal,
+              contextDigest: context.researchContextV1.contextDigest });
+            return validation.outcome === "valid" && validation.discoveryToolingRepairMayProceed;
+          },
+          checkpoint: async () => {
+            const checkpoint = await heartbeatCourseSupportBatch({ batchId, leaseToken, ownerThreadId,
+              releaseSha, status: "VERIFYING", ownerFailureCheckpoint: { stage: "DEPLOYMENT_WAIT",
+                failureDomain: "DEPLOYMENT", reasonCode: "DEPLOYMENT_FAILED" } });
+            return checkpoint.heartbeatRecorded;
+          }
+        });
+        if (diagnosis) return diagnosis;
         try {
           await recordCourseSupportOwnerFailureCheckpoint({
             batchId,
@@ -1522,6 +1547,8 @@ async function verifyRelease(args: string[]) {
       }
     }
   );
+
+  if ("outcome" in deploymentProof) return deploymentProof;
 
   const verificationArgs = [
     "--batch-ref",
@@ -1566,6 +1593,22 @@ async function verifyRelease(args: string[]) {
     });
     throw error;
   }
+}
+
+export async function retainOwnedReleaseDiagnosis(input: { error: unknown; releaseSha: string; signal: AbortSignal },
+  dependencies: { reconfirmAuthority: () => Promise<boolean>; checkpoint: () => Promise<boolean> }) {
+  if (!(input.error instanceof GitDeploymentReadOnlyFailure) || input.error.commitSha !== input.releaseSha) return null;
+  input.signal.throwIfAborted();
+  if (!await dependencies.reconfirmAuthority()) return null;
+  input.signal.throwIfAborted();
+  if (!await dependencies.checkpoint()) throw Error("Release diagnosis lost durable batch ownership.");
+  input.signal.throwIfAborted();
+  return { outcome: "repair_required" as const, repairPhase: "RELEASE_DIAGNOSIS" as const,
+    failureCode: input.error.reasonCode, releaseCheckOutcome: "failed" as const,
+    ownershipRetained: true, durableCloseoutRecorded: false,
+    deploymentVerified: false, monitoringVerified: false, deliveryVerified: false,
+    threadDisposition: "KEEP_VISIBLE" as const,
+    nextAction: "Preserve the failed release receipt and continue this same owned mission with CI and platform diagnosis. Make a different authorized correction before verification. Do not replay the unchanged failed operation, promote through failed CI, enter provider or learner work, reset budgets, or claim another batch." };
 }
 
 async function recoverLearning(args: string[]) {

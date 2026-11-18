@@ -5,6 +5,43 @@ import { waitForGitDeployment } from "./wait-for-git-deployment";
 const commitSha = "a".repeat(40);
 
 describe("waitForGitDeployment", () => {
+  it.each([
+    [{ checks: { "deployment-alias": { state: "failed" } } }, "PRODUCTION_ALIAS_CHECK_FAILED"],
+    [{ aliasError: { code: "PRIVATE_ERROR", message: "private platform detail" } }, "PRODUCTION_ALIAS_ASSIGNMENT_FAILED"],
+  ] as const)("fails immediately for a terminal alias gate without returning proof or leaking details: %s", async (gate, reason) => {
+    const inspectAlias = vi.fn(), delay = vi.fn(), statuses: string[] = [];
+    await expect(waitForGitDeployment({ commitSha }, {
+      listDeployments: () => ({ deployments: [gitDeployment("READY")] }),
+      inspectDeployment: () => ({ ...gitDeployment("READY"), readyState: "READY", ...gate }),
+      inspectAlias, delay, onStatus: status => statuses.push(status),
+    })).rejects.toThrow(`ended with ${reason}`);
+    expect(statuses).toEqual([reason.toLowerCase()]);
+    expect(inspectAlias).not.toHaveBeenCalled(); expect(delay).not.toHaveBeenCalled();
+  });
+
+  it("never interprets a foreign deployment's failed alias check as exact-head evidence", async () => {
+    let time = 0;
+    const inspectAlias = vi.fn();
+    await expect(waitForGitDeployment({ commitSha, timeoutSeconds: 1 }, {
+      listDeployments: () => ({ deployments: [gitDeployment("READY")] }),
+      inspectDeployment: () => ({ ...gitDeployment("READY"), url: "other.vercel.app", readyState: "READY",
+        checks: { "deployment-alias": { state: "failed" } } }),
+      inspectAlias, now: () => time, delay: async ms => { time += ms; },
+    })).rejects.toThrow("Timed out after 1s");
+    expect(inspectAlias).not.toHaveBeenCalled();
+  });
+
+  it.each(["succeeded", "pending"])("still requires both aliases when the deployment alias check is %s", async state => {
+    let time = 0;
+    const inspectAlias = vi.fn(() => ({ readyState: "READY", url: "old.vercel.app" }));
+    await expect(waitForGitDeployment({ commitSha, timeoutSeconds: 1 }, {
+      listDeployments: () => ({ deployments: [gitDeployment("READY")] }),
+      inspectDeployment: () => ({ ...gitDeployment("READY"), readyState: "READY", checks: { "deployment-alias": { state } } }),
+      inspectAlias, now: () => time, delay: async ms => { time += ms; },
+    })).rejects.toThrow("Timed out after 1s");
+    expect(inspectAlias).toHaveBeenCalledTimes(2);
+  });
+
   it("returns exact Git deployment and alias proof", async () => {
     await expect(
       waitForGitDeployment(

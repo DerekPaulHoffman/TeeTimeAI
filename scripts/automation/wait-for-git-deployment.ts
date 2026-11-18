@@ -4,7 +4,7 @@ import {
   type VercelDeploymentInspection,
   type VercelDeploymentList
 } from "@/lib/deployments/vercel-git";
-import { waitForGitDeployment } from "@/lib/deployments/wait-for-git-deployment";
+import { waitForGitDeployment, type GitDeploymentPromotionInspection } from "@/lib/deployments/wait-for-git-deployment";
 
 const args = process.argv.slice(2);
 const commitSha = readOption(args, "--sha") ?? readGitHead();
@@ -41,6 +41,9 @@ async function runDeploymentWait() {
           "--limit",
           "20"
         ]),
+      inspectDeployment: url => runVercelJson<GitDeploymentPromotionInspection>([
+        "api", `/v13/deployments/${url}`, "--method", "GET"
+      ]),
       inspectAlias: (alias) =>
         runVercelJson<VercelDeploymentInspection>([
           "inspect",

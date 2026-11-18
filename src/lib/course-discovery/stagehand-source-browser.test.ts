@@ -574,14 +574,14 @@ async function ownedPopupFixture(workerCase: boolean, ackMode: AckMode, popupSpa
   let successorBeforeParentRelease = false;
   let releasePopupQueue!: () => void, popupQueueHeld = false, popupQueueReleased = false;
   const popupQueueGate = new Promise<void>(resolve => { releasePopupQueue = () => { popupQueueReleased = true; resolve(); }; });
-  const seen: string[] = [], concurrent: number[] = [];
+  const seen: string[] = [], concurrent: number[] = [], unleasedReads: string[] = [];
   const server = createServer({ key: certificate("fixtureKey"), cert: certificate("fixtureCertificate") }, (request, response) => {
     const host = (request.headers.host ?? "").split(":")[0], path = request.url ?? "/";
     if (!hosts.has(host)) { response.writeHead(403).end(); return; }
     seen.push(host + path);
     if (host === "owned-final.example" && popupAck.pending > 0) popupAck.earlySuccessor = true;
     if (host === "owned-final.example" && families.has(requestFamilyForUrl("https://owned-booking.example/landing?keep=full"))) successorBeforeParentRelease = true;
-    if (!families.has(requestFamilyForUrl("https://" + host + path))) unleased++;
+    if (!families.has(requestFamilyForUrl("https://" + host + path))) { unleased++; unleasedReads.push(host + path); }
     concurrent.push(active);
     if (host === "owned-booking.example") { response.writeHead(302, { location: "https://owned-final.example/calendar?keep=full" }).end(); return; }
     if (path === "/escape-worker.js") { response.writeHead(200, { "content-type": "application/javascript" }).end("fetch('/worker-escape')"); return; }
@@ -745,7 +745,9 @@ async function ownedPopupFixture(workerCase: boolean, ackMode: AckMode, popupSpa
     } else {
       const pending = page.evaluate(async () => { await Promise.allSettled([fetch("/slow-one"), fetch("/slow-two"), fetch("/slow-three")]); });
       void pending.catch(() => {});
-      for (let attempt = 0; !active && attempt < 50; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+      // Admission alone does not prove a request reached the server. Cancel
+      // an observed live slow read, rather than racing dispatch and arrival.
+      await expect.poll(() => seen.some(value => value.startsWith("owned-source.example/slow"))).toBe(true);
       expect(active, JSON.stringify(host.diagnostics())).toBeGreaterThan(0);
     }
     cancellation.abort();
@@ -755,7 +757,7 @@ async function ownedPopupFixture(workerCase: boolean, ackMode: AckMode, popupSpa
       expect(closed.ownedCdpFailure.pendingRequests).toBeLessThanOrEqual(256);
       expect(JSON.stringify(closed.ownedCdpFailure)).not.toMatch(/targetId|sessionId|contextId|https?:|message|stack/u);
     }
-    expect(unleased).toBe(0); expect(active).toBe(0); expect(acquired).toBe(released);
+    expect(unleased, JSON.stringify(unleasedReads)).toBe(0); expect(active).toBe(0); expect(acquired).toBe(released);
     if (ackMode === "DELAY") {
       expect(popupAck.delayed).toBeGreaterThan(0); expect(popupAck.earlySuccessor).toBe(false); expect(successorBeforeParentRelease).toBe(false);
     }

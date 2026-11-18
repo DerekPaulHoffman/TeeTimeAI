@@ -7,8 +7,15 @@ const reject = code => { throw Object.assign(new Error(code), { code }); };
 
 export function validateDiscoveryRuntimeRelease({ runtimeVersion, runs, deployments, inspections }) {
   if (!/^[a-f0-9]{40}$/u.test(runtimeVersion ?? '')) reject('INVALID_RUNTIME_VERSION');
-  const ci = runs?.find(run => run.headSha === runtimeVersion && run.status === 'completed' && run.conclusion === 'success');
-  if (!ci || !Number.isSafeInteger(ci.databaseId)) reject('RUNTIME_CI_REQUIRED');
+  const exactRuns = Array.isArray(runs) ? runs.filter(run => run.headSha === runtimeVersion) : [];
+  // A branch pass cannot mask a later main failure. Reruns retain their run id,
+  // so order by the current attempt's start time before using the id as a tie-break.
+  if (!exactRuns.length || exactRuns.some(run => typeof run.startedAt !== 'string' || !Number.isFinite(Date.parse(run.startedAt)) ||
+      !Number.isSafeInteger(run.databaseId) || run.databaseId <= 0 ||
+      !Number.isSafeInteger(run.attempt) || run.attempt <= 0)) reject('RUNTIME_CI_REQUIRED');
+  const ci = exactRuns.sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt) ||
+    b.databaseId - a.databaseId || b.attempt - a.attempt)[0];
+  if (ci.status !== 'completed' || ci.conclusion !== 'success') reject('RUNTIME_CI_REQUIRED');
   const candidate = deployments?.filter(d => d.meta?.githubCommitSha === runtimeVersion &&
     d.meta.githubCommitRef === 'main' && d.meta.githubDeployment === '1' && d.meta.branchAlias && d.url)
     .sort((a, b) => b.createdAt - a.createdAt)[0];
@@ -40,7 +47,7 @@ async function main() {
   const runtimeVersion = process.argv[3];
   const [runs, list, inspections] = await Promise.all([
     jsonCommand(process.platform === 'win32' ? 'gh.exe' : 'gh', ['run', 'list', '--workflow', 'verify.yml', '--commit', runtimeVersion,
-      '--json', 'databaseId,headSha,status,conclusion', '--limit', '10']),
+      '--json', 'databaseId,headSha,status,conclusion,startedAt,attempt', '--limit', '10']),
     vercel(['ls', '--environment', 'production', '--meta', `githubCommitSha=${runtimeVersion}`, '--format', 'json', '--limit', '20']),
     Promise.all(['teetimespot.com', 'www.teetimespot.com'].map(async alias => ({ alias,
       inspection: await vercel(['inspect', alias, '--format', 'json']) }))),

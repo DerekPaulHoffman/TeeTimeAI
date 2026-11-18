@@ -3,7 +3,8 @@ import { resolve } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { runConfiguredCommand } from "../../../scripts/automation/course-support";
+import { retainOwnedReleaseDiagnosis, runConfiguredCommand } from "../../../scripts/automation/course-support";
+import { GitDeploymentReadOnlyFailure, waitForGitDeployment } from "../deployments/wait-for-git-deployment";
 
 describe("course-support verification command failure signaling", () => {
   let previousExitCode: typeof process.exitCode;
@@ -28,6 +29,63 @@ describe("course-support verification command failure signaling", () => {
       threadDisposition: "KEEP_VISIBLE"
     }
   };
+
+  it("retains a confirmed read-only release failure for the same full repair without claiming deployment or customer success", async () => {
+    const releaseSha = "a".repeat(40), controller = new AbortController();
+    const reconfirmAuthority = vi.fn(async () => true), checkpoint = vi.fn(async () => true);
+    const error = await waitForGitDeployment({ commitSha: releaseSha }, {
+      listDeployments: () => ({ deployments: [{ url: "fixture.vercel.app", state: "READY", createdAt: 1800000000000,
+        meta: { githubCommitSha: releaseSha, githubCommitRef: "main", githubDeployment: "1", branchAlias: "fixture-git-main.vercel.app" } }] }),
+      inspectDeployment: () => ({ url: "fixture.vercel.app", readyState: "READY",
+        meta: { githubCommitSha: releaseSha, githubCommitRef: "main" }, checks: { "deployment-alias": { state: "failed" } } }),
+      inspectAlias: vi.fn(),
+    }).catch(failure => failure);
+    expect(error).toBeInstanceOf(GitDeploymentReadOnlyFailure);
+    const result = await retainOwnedReleaseDiagnosis({ releaseSha, signal: controller.signal, error }, { reconfirmAuthority, checkpoint });
+    expect(reconfirmAuthority).toHaveBeenCalledOnce(); expect(checkpoint).toHaveBeenCalledOnce();
+    expect(reconfirmAuthority.mock.invocationCallOrder[0]).toBeLessThan(checkpoint.mock.invocationCallOrder[0]);
+    expect(result).toMatchObject({ outcome: "repair_required", repairPhase: "RELEASE_DIAGNOSIS", releaseCheckOutcome: "failed",
+      failureCode: "PRODUCTION_ALIAS_CHECK_FAILED", ownershipRetained: true, durableCloseoutRecorded: false,
+      deploymentVerified: false, monitoringVerified: false, deliveryVerified: false, threadDisposition: "KEEP_VISIBLE" });
+    expect(result).not.toHaveProperty("deployment"); expect(result?.nextAction).toContain("Do not replay the unchanged failed operation");
+    const write = vi.fn();
+    await runConfiguredCommand({ argv: ["verify-release"], isWorkerExecutionAllowed: async () => true,
+      verifyRelease: async () => result, write });
+    expect(write).toHaveBeenCalledExactlyOnceWith(result); expect(process.exitCode).not.toBe(1);
+  });
+
+  it.each([new Error("unknown crash"), new Error("Git deployment timed out"),
+    new GitDeploymentReadOnlyFailure("b".repeat(40), "PRODUCTION_ALIAS_CHECK_FAILED")])(
+    "does not convert unknown or foreign failures into repair authority: %s", async error => {
+      const reconfirmAuthority = vi.fn(async () => true), checkpoint = vi.fn(async () => true);
+      expect(await retainOwnedReleaseDiagnosis({ error, releaseSha: "a".repeat(40), signal: new AbortController().signal },
+        { reconfirmAuthority, checkpoint })).toBeNull();
+      expect(reconfirmAuthority).not.toHaveBeenCalled(); expect(checkpoint).not.toHaveBeenCalled();
+    });
+
+  it("preserves the stop for legacy/stage-only missions or rejected fresh owner/source/lease authority", async () => {
+    const releaseSha = "a".repeat(40), checkpoint = vi.fn(async () => true);
+    expect(await retainOwnedReleaseDiagnosis({ releaseSha, signal: new AbortController().signal,
+      error: new GitDeploymentReadOnlyFailure(releaseSha, "PRODUCTION_ALIAS_CHECK_FAILED") },
+    { reconfirmAuthority: async () => false, checkpoint })).toBeNull();
+    expect(checkpoint).not.toHaveBeenCalled();
+  });
+
+  it.each(["before", "during"])("preserves cancellation %s authority revalidation", async when => {
+    const releaseSha = "a".repeat(40), controller = new AbortController(), checkpoint = vi.fn(async () => true);
+    if (when === "before") controller.abort(Error("CANCELLED"));
+    await expect(retainOwnedReleaseDiagnosis({ releaseSha, signal: controller.signal,
+      error: new GitDeploymentReadOnlyFailure(releaseSha, "PRODUCTION_ALIAS_CHECK_FAILED") },
+    { reconfirmAuthority: async () => { controller.abort(Error("CANCELLED")); return true; }, checkpoint })).rejects.toThrow("CANCELLED");
+    expect(checkpoint).not.toHaveBeenCalled();
+  });
+
+  it("does not retain the mission when the durable ownership checkpoint fails", async () => {
+    const releaseSha = "a".repeat(40);
+    await expect(retainOwnedReleaseDiagnosis({ releaseSha, signal: new AbortController().signal,
+      error: new GitDeploymentReadOnlyFailure(releaseSha, "PRODUCTION_ALIAS_ASSIGNMENT_FAILED") },
+    { reconfirmAuthority: async () => true, checkpoint: async () => false })).rejects.toThrow("lost durable batch ownership");
+  });
 
   it.each(["verify", "verify-release"])("%s returns owned repair work without pretending it closed or passed", async command => {
     const repair = { outcome: "repair_required", stoppedReason: "error", failureCode: "BROWSER_STAGE_NETWORK_FAILED",

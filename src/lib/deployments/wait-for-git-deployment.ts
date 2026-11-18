@@ -36,9 +36,19 @@ export type WaitForGitDeploymentDependencies = {
     alias: string,
     input?: { signal?: AbortSignal },
   ) => VercelDeploymentInspection | Promise<VercelDeploymentInspection>;
+  inspectDeployment?: (url: string, input?: { signal?: AbortSignal }) =>
+    GitDeploymentPromotionInspection | Promise<GitDeploymentPromotionInspection>;
   now?: () => number;
   delay?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
   onStatus?: (status: string, commitSha: string) => void;
+};
+
+export type GitDeploymentPromotionInspection = {
+  url?: string;
+  readyState?: string;
+  meta?: { githubCommitSha?: string; githubCommitRef?: string };
+  aliasError?: unknown;
+  checks?: { "deployment-alias"?: { state?: string } };
 };
 
 export async function waitForGitDeployment(
@@ -100,6 +110,25 @@ export async function waitForGitDeployment(
           `git_deployment_${(deployment.state ?? "pending").toLowerCase()}`,
         );
       } else {
+        if (dependencies.inspectDeployment) {
+          const inspection = await dependencies.inspectDeployment(deployment.url!, { signal: options.signal });
+          if (deadlineReached()) break;
+          if (inspection.url !== deployment.url || inspection.meta?.githubCommitSha !== commitSha ||
+              inspection.meta.githubCommitRef !== branch || inspection.readyState !== "READY") {
+            throw new Error("The promotion inspection did not match the exact ready Git deployment.");
+          }
+          // READY only attests the build. A failed alias check is a terminal
+          // release fence, not fifteen minutes of domain propagation. Do not
+          // expose platform error text or try to repair/promote from this read.
+          if (inspection.checks?.["deployment-alias"]?.state === "failed") {
+            report("production_alias_check_failed");
+            throw new GitDeploymentFailedError("PRODUCTION_ALIAS_CHECK_FAILED");
+          }
+          if (inspection.aliasError != null) {
+            report("production_alias_assignment_failed");
+            throw new GitDeploymentFailedError("PRODUCTION_ALIAS_ASSIGNMENT_FAILED");
+          }
+        }
         const aliasInspections = await Promise.all(
           requiredAliases.map(async (alias) => ({
             alias,
@@ -146,6 +175,9 @@ export async function waitForGitDeployment(
       lastError = "";
     } catch (error) {
       if (error instanceof GitDeploymentFailedError) {
+        if (error.state === "PRODUCTION_ALIAS_CHECK_FAILED" || error.state === "PRODUCTION_ALIAS_ASSIGNMENT_FAILED") {
+          throw new GitDeploymentReadOnlyFailure(commitSha, error.state);
+        }
         throw new Error(
           `Git deployment for ${shortSha(commitSha)} ended with ${error.state}`,
         );
@@ -167,6 +199,16 @@ export async function waitForGitDeployment(
       lastError ? ` (${lastError})` : ""
     }`,
   );
+}
+
+/** Only an exact-attributed, terminal read-only promotion inspection supplies
+ * this type. Unknown CLI errors, timeouts and cancellation keep their stops. */
+export class GitDeploymentReadOnlyFailure extends Error {
+  constructor(readonly commitSha: string, readonly reasonCode:
+    "PRODUCTION_ALIAS_CHECK_FAILED" | "PRODUCTION_ALIAS_ASSIGNMENT_FAILED") {
+    super(`Git deployment for ${shortSha(commitSha)} ended with ${reasonCode}`);
+    this.name = "GitDeploymentReadOnlyFailure";
+  }
 }
 
 class GitDeploymentFailedError extends Error {
