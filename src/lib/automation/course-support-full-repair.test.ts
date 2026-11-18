@@ -24,6 +24,27 @@ describe("full repair retains the original owner after negative verification", (
       { requiresImplementationPath: true }, { reason: "IMPLEMENTATION_REQUIRED" }, { allowedActions: ["IMPLEMENT_REUSABLE_SUPPORT"] }])
       expect(isDataOnlyFullRepair({ ...dataOnly, ...change })).toBe(false);
   });
+  it("retains its own earlier read across a registered deployed repair release, without accepting unrelated or final evidence", () => {
+    const before = "a".repeat(40), current = "b".repeat(40);
+    const event = { observedAt: "2026-11-18T06:03:00Z", runtimeVersion: before, transition: "COMPLETED" };
+    const history = { releaseSha: before, deployedAt: "2026-11-18T06:01:00Z", supersededAt: "2026-11-18T06:05:00Z", supersededBy: current };
+    const input = { fullRepair: true, claimedEventCount: 0, runtimeVersion: current,
+      batchCreatedAt: new Date("2026-11-18T06:00:00Z"), now: new Date("2026-11-18T06:10:00Z"),
+      events: [event], releaseHistory: [history] };
+    expect(fullRepairReadProgressMatchesClaim(input)).toBe(true);
+    for (const change of [
+      { releaseHistory: [] }, { releaseHistory: [{ ...history, deployedAt: null }] },
+      { releaseHistory: [{ ...history, supersededBy: "c".repeat(40) }] },
+      { releaseHistory: [{ ...history, supersededAt: "2026-11-18T06:11:00Z" }] },
+      { events: [{ ...event, observedAt: "2026-11-18T06:00:30Z" }] },
+      { events: [{ ...event, observedAt: history.supersededAt }] },
+      { events: [{ ...event, runtimeVersion: "c".repeat(40) }] },
+      { events: [{ ...event, transition: "FAILED_FINAL", technicalReason: "ACCOUNT_REQUIRED" }] },
+      { fullRepair: false },
+    ]) expect(fullRepairReadProgressMatchesClaim({ ...input, ...change })).toBe(false);
+    expect(input.claimedEventCount).toBe(0);
+    expect(input.events).toEqual([event]);
+  });
   const packet = { remediation: { reason: "FAILED_LEARNER_IMPLEMENTATION_HANDOFF" }, courses: [{
     result: "RETRY_SCHEDULED", terminalProofDurable: false,
     actionPlan: { allowedActions: ["IMPLEMENT_REUSABLE_SUPPORT", "INVESTIGATE_PUBLIC_SOURCE"] },

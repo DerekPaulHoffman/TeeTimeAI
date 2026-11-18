@@ -235,7 +235,7 @@ describe("owned course-support research context", () => {
       expect(batch.summary.remediation.attempts[0].playbookEventCountAtClaim).toBe(1);
     });
 
-  it.each(["current-full", "old-runtime", "legacy-route"])("revalidates %s read progress without rewriting immutable claim evidence", async scenario => {
+  it.each(["current-full", "registered-previous-release", "old-runtime", "legacy-route"])("revalidates %s read progress without rewriting immutable claim evidence", async scenario => {
     const batch = fixture();
     if (scenario !== "legacy-route") {
       batch.summary.remediation.reason = "FAILED_LEARNER_IMPLEMENTATION_HANDOFF";
@@ -253,7 +253,13 @@ describe("owned course-support research context", () => {
       readPath: "TYPED_PROVIDER_ADAPTER", evidenceKind: "TOOLING", failureFingerprint: "NETWORK:RETRY",
       runtimeVersion: scenario === "old-runtime" ? "b".repeat(40) : batch.releaseSha, observedAt: new Date("2026-09-28T13:47:00Z") });
     batch.incidents[0].incident.attemptLedger = ledger;
-    expect(await getOwnedCourseSupportResearchContext(input)).toMatchObject({ outcome: scenario === "current-full" ? "ready" : "authority_drift" });
+    if (scenario === "registered-previous-release") {
+      Object.assign(batch.summary, { releaseHistory: [{ releaseSha: batch.releaseSha, deployedAt: "2026-09-28T13:35:00Z",
+        supersededAt: "2026-09-28T13:50:00Z", supersededBy: "b".repeat(40) }] });
+      batch.releaseSha = "b".repeat(40);
+    }
+    expect(await getOwnedCourseSupportResearchContext(input)).toMatchObject({
+      outcome: ["current-full", "registered-previous-release"].includes(scenario) ? "ready" : "authority_drift" });
     expect(batch.summary.remediation.attempts[0].playbookEventCountAtClaim).toBe(1);
     if (scenario === "current-full") expect(await validateOwnedCourseSupportResearchContext({ ...input, contextDigest: before.researchContextV1.contextDigest }))
       .toMatchObject({ outcome: "authority_drift", reasonCode: "RESEARCH_CONTEXT_CHANGED", packetRefreshRequired: true });

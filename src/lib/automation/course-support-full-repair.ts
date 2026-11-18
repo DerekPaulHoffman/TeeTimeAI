@@ -3,6 +3,7 @@
 export function fullRepairReadProgressMatchesClaim(input: {
   fullRepair: boolean; claimedEventCount: number; runtimeVersion: string | null;
   batchCreatedAt: Date; now: Date;
+  releaseHistory?: unknown;
   events: readonly { observedAt: string; runtimeVersion: string; transition: string;
     factualDisposition?: unknown; technicalReason?: unknown }[];
 }) {
@@ -11,12 +12,40 @@ export function fullRepairReadProgressMatchesClaim(input: {
   if (input.claimedEventCount === input.events.length) return true;
   if (!input.fullRepair || !/^[a-f0-9]{40}$/u.test(input.runtimeVersion ?? "") ||
       !Number.isFinite(input.batchCreatedAt?.getTime())) return false;
+  const previousRuntimeWindows = fullRepairPreviousRuntimeWindows(input);
   return input.events.slice(input.claimedEventCount).every(event => {
     const observedAt = new Date(event.observedAt);
-    return event.runtimeVersion === input.runtimeVersion && observedAt >= input.batchCreatedAt && observedAt <= input.now &&
+    const previous = previousRuntimeWindows.get(event.runtimeVersion);
+    const ownedRuntime = event.runtimeVersion === input.runtimeVersion ||
+      Boolean(previous && observedAt >= previous.deployedAt && observedAt < previous.supersededAt);
+    return ownedRuntime && observedAt >= input.batchCreatedAt && observedAt <= input.now &&
       ["STARTED", "COMPLETED", "NOT_APPLICABLE", "FAILED_RETRYABLE"].includes(event.transition) &&
       event.factualDisposition === undefined && event.technicalReason === undefined;
   });
+}
+
+/** The server owns this same batch's append-only registered release history.
+ * Only a complete deployed chain ending at the current release can explain
+ * earlier non-final reads. It grants no new read or implementation authority. */
+function fullRepairPreviousRuntimeWindows(input: { runtimeVersion: string | null; releaseHistory?: unknown; now: Date }) {
+  const windows = new Map<string, { deployedAt: Date; supersededAt: Date }>();
+  if (!Array.isArray(input.releaseHistory) || input.releaseHistory.length === 0 || input.releaseHistory.length > 100) return windows;
+  let priorSupersededAt: Date | null = null;
+  for (let index = 0; index < input.releaseHistory.length; index++) {
+    const entry = input.releaseHistory[index];
+    const next = input.releaseHistory[index + 1];
+    if (!entry || typeof entry !== "object" || Array.isArray(entry) ||
+        !/^[a-f0-9]{40}$/u.test(entry.releaseSha ?? "") || windows.has(entry.releaseSha) ||
+        entry.releaseSha === input.runtimeVersion || entry.supersededBy !== (next?.releaseSha ?? input.runtimeVersion) ||
+        typeof entry.deployedAt !== "string" || typeof entry.supersededAt !== "string") return new Map();
+    const deployedAt = new Date(entry.deployedAt), supersededAt = new Date(entry.supersededAt);
+    if (!Number.isFinite(deployedAt.getTime()) || !Number.isFinite(supersededAt.getTime()) ||
+        deployedAt > supersededAt || supersededAt > input.now ||
+        (priorSupersededAt && supersededAt < priorSupersededAt)) return new Map();
+    windows.set(entry.releaseSha, { deployedAt, supersededAt });
+    priorSupersededAt = supersededAt;
+  }
+  return windows;
 }
 
 export function isDataOnlyFullRepair(input: {

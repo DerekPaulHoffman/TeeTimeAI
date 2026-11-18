@@ -3099,6 +3099,7 @@ function hasOwnedFullRepairFirstBrowserRetry(input: DetachedEligibilityInput, no
     assessment.nextStage === "BROWSER_ADAPTER_RETRY" && stage?.status === "PENDING" && stage.attemptCount === 0 &&
     fullRepairReadProgressMatchesClaim({ fullRepair: true, claimedEventCount: claim.playbookEventCountAtClaim,
       runtimeVersion: input.releaseSha, batchCreatedAt: input.batchCreatedAt, now,
+      releaseHistory: summary.releaseHistory,
       events: ledger.events.filter(event => event.cycle === input.incident.cycle) }));
 }
 
