@@ -16862,6 +16862,25 @@ describe("course-support recovery", () => {
       expect(assessCourseSupportRecovery(input).action).toBe(scenario === "owned" ? "RECOVER" : "BLOCK");
     });
 
+  it.each(["owned", "unqualified", "foreign-owner", "unpublished", "dirty", "wrong-branch", "wrong-base", "wrong-release", "no-paths", "live-lease"])(
+    "retains claimed-base recovery fences for %s", scenario => {
+      const input = { leaseExpiresAt: new Date(now.getTime() - 1), ownerThreadId: "original-owner", requestingThreadId: "original-owner",
+        baseSha: "a".repeat(40), releaseSha: "a".repeat(40), expectedBranch: "automation/course-support-original",
+        currentBranch: "automation/course-support-original", currentHeadSha: "c".repeat(40), plannedPaths: ["src/lib/adapters/original.ts"],
+        dirtyPaths: [] as string[], baseIsAncestor: true, releaseIsAncestor: true, releaseCommittedPaths: ["src/lib/automation/shared-runtime.ts"],
+        currentHeadIsPublished: true, claimedBaseRuntimeImport: true, now };
+      if (scenario === "unqualified") input.claimedBaseRuntimeImport = false;
+      if (scenario === "foreign-owner") input.requestingThreadId = "other-owner";
+      if (scenario === "unpublished") input.currentHeadIsPublished = false;
+      if (scenario === "dirty") input.dirtyPaths.push(input.plannedPaths[0]);
+      if (scenario === "wrong-branch") input.currentBranch = "automation/other";
+      if (scenario === "wrong-base") input.baseIsAncestor = false;
+      if (scenario === "wrong-release") input.releaseIsAncestor = false;
+      if (scenario === "no-paths") input.plannedPaths = [];
+      if (scenario === "live-lease") input.leaseExpiresAt = new Date(now.getTime() + 1);
+      expect(assessCourseSupportRecovery(input).action).toBe(scenario === "owned" ? "RECOVER" : "BLOCK");
+    });
+
   it("allows a clean expired batch to move to a new task", () => {
     expect(
       assessCourseSupportRecovery({

@@ -535,6 +535,19 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
       .toMatchObject({ result: pending ? "PENDING" : "STALE_EVIDENCE" });
     expect(await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } }))
       .toMatchObject({ status: "FAILED", attempts: f.job.attempts, firstPickedUpAt: f.job.firstPickedUpAt, deadlineAt: f.job.deadlineAt });
+    if (claimed) {
+      await client.courseSupportBatch.update({ where: { id: batch.id }, data: { leaseExpiresAt: new Date(Date.now() - 1000) } });
+      expect(await lane.recoverCourseSupportBatch({ batchId: batch.id, requestingThreadId: owner,
+        currentBranch: String((batch.summary as Prisma.JsonObject).branch), currentHeadSha: "d".repeat(40), dirtyPaths: [],
+        releaseIsPublished: true, currentHeadIsPublished: true, baseIsAncestor: true, releaseIsAncestor: true,
+        releaseCommittedPaths: ["src/lib/automation/shared-runtime.ts"] })).toMatchObject({ outcome: "ready", recovered: true });
+      expect(await client.courseSupportBatch.findUniqueOrThrow({ where: { id: batch.id } })).toMatchObject({
+        ownerThreadId: owner, releaseSha: baseSha, summary: { plannedPaths: ["src/lib/adapters/example.ts"],
+          publishedRuntimeRecoveryV1: { runtimeSha: "d".repeat(40), registeredReleaseSha: baseSha, implementationProofChanged: false } },
+      });
+      expect(await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } }))
+        .toMatchObject({ status: "FAILED", attempts: f.job.attempts, firstPickedUpAt: f.job.firstPickedUpAt, deadlineAt: f.job.deadlineAt });
+    }
     if (scenario === "published-code") {
       await client.courseSupportBatch.update({ where: { id: batch.id }, data: { leaseExpiresAt: new Date(Date.now() - 1000) } });
       const waiting = await client.courseSupportBatch.findUniqueOrThrow({ where: { id: batch.id } });

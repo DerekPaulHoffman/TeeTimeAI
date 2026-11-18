@@ -5,14 +5,15 @@ export function fullRepairContinuationMode(input: {
   plannedPaths: unknown; now: Date;
 }) {
   if (!/^[a-f0-9]{40}$/u.test(input.baseSha) || !Number.isFinite(input.now.getTime()) ||
-      !Array.isArray(input.plannedPaths) || input.plannedPaths.length > 32 ||
-      input.plannedPaths.some(path => typeof path !== "string" || !path || path.length > 300)) return null;
+      !Array.isArray(input.plannedPaths) ||
+      input.plannedPaths.some(path => typeof path !== "string" || !path)) return null;
   const paths = input.plannedPaths;
   const deployed = input.deployedAt instanceof Date && Number.isFinite(input.deployedAt.getTime()) && input.deployedAt <= input.now;
   // Claiming the first path moves VERIFYING to IMPLEMENTING. That useful
   // progress must not remove this same owner's native continuation route.
   // Local qualification still rejects dirty or unregistered unpublished HEADs.
-  if (input.status === "IMPLEMENTING" && paths.length > 0 && input.releaseSha === input.baseSha && deployed) return "CLAIMED_IMPLEMENTATION" as const;
+  if (input.status === "IMPLEMENTING" && paths.length > 0 && paths.length <= 32 && paths.every(path => path.length <= 300) &&
+      input.releaseSha === input.baseSha && deployed) return "CLAIMED_IMPLEMENTATION" as const;
   if (input.status !== "VERIFYING") return null;
   if (paths.length === 0 && input.releaseSha === input.baseSha) return "DATA_ONLY" as const;
   return paths.length > 0 && /^[a-f0-9]{40}$/u.test(input.releaseSha ?? "") && input.releaseSha !== input.baseSha && deployed

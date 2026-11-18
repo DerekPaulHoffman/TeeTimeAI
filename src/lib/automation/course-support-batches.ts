@@ -3,7 +3,7 @@ import { excludeDiscoveryPilotTargets } from "@/lib/course-discovery/legacy-excl
 import { isGeneralDiscoveryEnabled } from "@/lib/course-discovery/config";
 
 import { Prisma } from "@prisma/client";
-import { fullRepairReadProgressMatchesClaim, isDataOnlyFullRepair } from "./course-support-full-repair";
+import { fullRepairContinuationMode, fullRepairReadProgressMatchesClaim, isDataOnlyFullRepair } from "./course-support-full-repair";
 import type {
   AutomationReason,
   BookingMethod,
@@ -3309,6 +3309,7 @@ export function assessCourseSupportRecovery(input: {
   releaseIsAncestor?: boolean;
   releaseCommittedPaths?: string[];
   currentHeadIsPublished?: boolean;
+  claimedBaseRuntimeImport?: boolean;
   now?: Date;
 }) {
   const now = input.now ?? new Date();
@@ -3323,7 +3324,8 @@ export function assessCourseSupportRecovery(input: {
   if (input.currentHeadSha !== expectedHead) {
     const safelyImportedPublishedRuntime = input.currentHeadIsPublished === true &&
       input.ownerThreadId === input.requestingThreadId && Boolean(input.expectedBranch) && input.expectedBranch === input.currentBranch &&
-      input.dirtyPaths.length === 0 && input.plannedPaths.length > 0 && Boolean(input.releaseSha && input.releaseSha !== input.baseSha) &&
+      input.dirtyPaths.length === 0 && input.plannedPaths.length > 0 && Boolean(input.releaseSha &&
+        (input.releaseSha !== input.baseSha || input.claimedBaseRuntimeImport === true)) &&
       input.baseIsAncestor === true && input.releaseIsAncestor === true;
     const committedPaths = input.releaseSha
       ? (input.releaseCommittedPaths ?? [])
@@ -15773,6 +15775,13 @@ export async function recoverCourseSupportBatch(input: {
         input.releaseCommittedPaths ?? [],
       ),
       currentHeadIsPublished: allowPublishedRuntimeImport,
+      // Derived here from the actual retained batch, never a CLI switch. The
+      // same original owner may import shared tested tooling before writing
+      // its first implementation; its release and failed clock stay unchanged.
+      claimedBaseRuntimeImport: allowPublishedRuntimeImport && fullRepairContinuationMode({
+        status: batch.status, baseSha: batch.baseSha, releaseSha: batch.releaseSha,
+        deployedAt: batch.deployedAt, plannedPaths, now,
+      }) === "CLAIMED_IMPLEMENTATION",
       now,
     });
     const supersedingDeployment = input.supersedingDeployment;

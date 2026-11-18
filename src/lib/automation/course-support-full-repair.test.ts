@@ -10,6 +10,8 @@ describe("unfinished original-owner implementation phase", () => {
     expect(phase).toEqual(snapshot);
     expect(fullRepairContinuationMode({ ...phase, status: "VERIFYING", plannedPaths: [] })).toBe("DATA_ONLY");
     expect(fullRepairContinuationMode({ ...phase, status: "VERIFYING", releaseSha: "b".repeat(40) })).toBe("PUBLISHED_IMPLEMENTATION");
+    expect(fullRepairContinuationMode({ ...phase, status: "VERIFYING", releaseSha: "b".repeat(40),
+      plannedPaths: Array(33).fill("src/lib/already-published.ts") })).toBe("PUBLISHED_IMPLEMENTATION");
   });
   it.each([
     { status: "COMPLETE" }, { status: "CLAIMED" }, { status: "VERIFYING" }, { plannedPaths: [] },
