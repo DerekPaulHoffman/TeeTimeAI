@@ -5,7 +5,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inspectPinnedWorkerCli } from "./course-support-worker-cli.mjs";
 import { approvedCourseSupportResponderCheckouts } from "./course-support-preflight.mjs";
-import { assertFullAccessAcknowledgement, assertOwnedWorkerCheckout, buildWorkerFirstTurnPrompt, prepareCourseSupportWorker, privateWrite, readWorkerCliVersion, retainPrimaryFailure, runPreparedCourseSupportWorker } from "./course-support-worker-launcher.mjs";
+import { assertFullAccessAcknowledgement, assertOwnedWorkerCheckout, buildWorkerFirstTurnPrompt, prepareCourseSupportWorker, prepareCourseSupportWorkerBranch, privateWrite, readWorkerCliVersion, retainPrimaryFailure, runPreparedCourseSupportWorker } from "./course-support-worker-launcher.mjs";
 import { courseSupportWorkerProductionCommand, courseSupportWorkerRuntimeEnvironment, inspectCourseSupportWorkerVercel, resolveCourseSupportWorkerRuntime } from "./course-support-worker-runtime.mjs";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
@@ -56,8 +56,10 @@ export function validateSupervisorInput(input, dependencies = {}) {
   const selectedMain = (dependencies.git ?? git)(selected, ["rev-parse", "origin/main"]);
   if (!SHA.test(selectedHead) || selectedHead !== selectedMain ||
       (dependencies.git ?? git)(selected, ["status", "--porcelain"])) fail("SELECTED_CHECKOUT_CHANGED");
-  const owned = (dependencies.inspectWorker ?? assertOwnedWorkerCheckout)(worker, selected);
-  if (owned.baseSha !== selectedHead || !/^automation\/course-support-[a-z0-9][a-z0-9-]*$/.test(owned.branch)) fail("WORKER_BASE_CHANGED");
+  const inspectWorker = dependencies.inspectWorker ?? ((cwd, root) => assertOwnedWorkerCheckout(cwd, root, execFileSync, { allowDetached: executionMode === "DESKTOP" }));
+  const owned = inspectWorker(worker, selected);
+  if (owned.baseSha !== selectedHead || (!/^automation\/course-support-[a-z0-9][a-z0-9-]*$/.test(owned.branch) &&
+      !(executionMode === "DESKTOP" && owned.branch === ""))) fail("WORKER_BASE_CHANGED");
   const binding = readJson(join(selected, ".vercel", "project.json"));
   if (typeof binding.projectId !== "string" || !binding.projectId ||
       typeof binding.orgId !== "string" || !binding.orgId) fail("SELECTED_PROJECT_BINDING_REQUIRED");
@@ -178,6 +180,14 @@ export async function superviseCourseSupportWorker(input, dependencies = {}) {
   privateJson(receiptPath, receipt, true, dependencies.receiptIo);
   const save = (status, extra = {}) => { Object.assign(receipt, extra, { status, updatedAt: new Date().toISOString() }); privateJson(receiptPath, receipt, false, dependencies.receiptIo); };
   try {
+    if (validated.owned.branch === "") {
+      save("BRANCH_PREPARING");
+      const owned = (dependencies.prepareWorkerBranch ?? prepareCourseSupportWorkerBranch)(validated.worker, validated.selected, validated.assignmentRef);
+      const expectedBranch = `automation/course-support-${validated.assignmentRef.slice("course-assignment-".length)}`;
+      if (owned.branch !== expectedBranch || owned.baseSha !== validated.baseSha || !same(owned.cwd, validated.worker)) fail("WORKER_BRANCH_PREPARATION_CHANGED");
+      validated.owned = owned;
+      save("BRANCH_READY", { workerBranch: owned.branch });
+    }
     save("START_REQUESTED");
     productionDispatch("start", ["start", "--assignment-ref", validated.assignmentRef], validated, dependencies);
     save("STARTING");

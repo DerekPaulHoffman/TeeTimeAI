@@ -28,12 +28,15 @@ function fixture(mode?: "SIMULATOR") {
   const assignment = { state: "RESERVED", assignmentRef: REF, ...(mode ? { mode } : {}) };
   const input = { context, assignment, workerCheckout: worker, outputDir: output, parentThreadId: PARENT };
   const calls: string[] = [];
+  let workerBranch = "automation/course-support-fixture";
   const deps = {
     environment: { CODEX_THREAD_ID: PARENT, CODEX_HOME: "normal-auth-home", DATABASE_URL: "private-db", RESEND_API_KEY: "private-email" },
     approvedCheckouts: [selected],
     inspectCli: vi.fn(() => context.workerCli),
     inspectPreparedCli: vi.fn(() => context.workerCli.cliVersion),
-    inspectWorker: vi.fn(() => ({ cwd: worker, branch: "automation/course-support-fixture", baseSha: SHA })),
+    inspectWorker: vi.fn(() => ({ cwd: worker, branch: workerBranch, baseSha: SHA })),
+    prepareWorkerBranch: vi.fn(() => { calls.push("branch"); workerBranch = `automation/course-support-${REF.slice("course-assignment-".length)}`;
+      return { cwd: worker, branch: workerBranch, baseSha: SHA }; }),
     git: vi.fn((_cwd: string, args: string[]) => args[0] === "status" ? "" : SHA),
     resolveRuntime: vi.fn(() => ({ status: "available", nodePath: node, npmCliPath: npm })),
     readFile: vi.fn((file: string) => {
@@ -50,7 +53,7 @@ function fixture(mode?: "SIMULATOR") {
       calls.push("prepare");
       writeFileSync(receiptPath, JSON.stringify({ schemaVersion: 1, status: "PREPARED", threadId: CHILD, approvalPolicy: "never",
         model: "gpt-6.1-sol", authentication: "ChatGPT", historyMode, nativeIdentityVerified: false, approvalRequests: 0,
-        branch: "automation/course-support-fixture", baseSha: SHA, cliPath: context.workerCli.cliPath, cliVersion: context.workerCli.cliVersion,
+        branch: workerBranch, baseSha: SHA, cliPath: context.workerCli.cliPath, cliVersion: context.workerCli.cliVersion,
         sandbox: { type: "dangerFullAccess" }, activePermissionProfile: { id: ":danger-full-access" }, cwd: worker }));
       return { outcome: "prepared", threadId: CHILD, receiptPath };
     }),
@@ -60,6 +63,35 @@ function fixture(mode?: "SIMULATOR") {
 }
 
 describe("course worker launch supervisor", () => {
+  it("names a clean detached Desktop checkout before production start and preserves exact branch proof", async () => {
+    const f = fixture();
+    f.deps.inspectWorker.mockReturnValueOnce({ cwd: f.worker, branch: "", baseSha: SHA });
+    const result = await superviseCourseSupportWorker({ ...f.input, executionMode: "DESKTOP" }, f.deps);
+    expect(f.calls).toEqual(["template:outdoor", "branch", "start", "prepare", "bind"]);
+    expect(f.deps.prepareWorkerBranch).toHaveBeenCalledWith(f.worker, f.selected, REF);
+    expect(claimPreparedDesktopWorker({ receiptPath: result.receiptPath, parentThreadId: PARENT,
+      expectedChildThreadId: CHILD, expectedAssignmentRef: REF }, f.deps)).toMatchObject({ outcome: "desktop_message_required" });
+  });
+
+  it("retains branch preparation failure without any production start or native creation", async () => {
+    const f = fixture();
+    f.deps.inspectWorker.mockReturnValueOnce({ cwd: f.worker, branch: "", baseSha: SHA });
+    f.deps.prepareWorkerBranch.mockImplementationOnce(() => { throw Object.assign(new Error("branch exists"), { code: "BRANCH_EXISTS" }); });
+    await expect(superviseCourseSupportWorker({ ...f.input, executionMode: "DESKTOP" }, f.deps)).rejects.toMatchObject({ code: "BRANCH_EXISTS" });
+    expect(f.deps.spawn).not.toHaveBeenCalled();
+    expect(f.deps.prepare).not.toHaveBeenCalled();
+    expect(JSON.parse(readFileSync(join(f.output, "supervisor.receipt.private.json"), "utf8")))
+      .toMatchObject({ status: "ATTENTION", failedAt: "BRANCH_PREPARING", failureCode: "BRANCH_EXISTS" });
+  });
+
+  it("does not admit detached native legacy workers or another named task branch", () => {
+    const f = fixture();
+    for (const branch of ["", "fix/restore-course-monitoring-2991615-a"]) {
+      f.deps.inspectWorker.mockReturnValueOnce({ cwd: f.worker, branch, baseSha: SHA });
+      expect(() => validateSupervisorInput(f.input, f.deps)).toThrow("WORKER_BASE_CHANGED");
+    }
+    expect(f.deps.prepareWorkerBranch).not.toHaveBeenCalled();
+  });
   it("prepares and binds a desktop worker without starting a standalone inference turn", async () => {
     const f = fixture();
     const result = await superviseCourseSupportWorker({ ...f.input, executionMode: "DESKTOP" }, f.deps);

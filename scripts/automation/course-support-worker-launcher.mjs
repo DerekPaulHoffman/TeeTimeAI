@@ -78,7 +78,7 @@ export function assertUnusedWorkerThread(thread, expectedId, historyMode) {
   }
 }
 
-export function assertOwnedWorkerCheckout(cwd, root = ROOT, git = execFileSync) {
+export function assertOwnedWorkerCheckout(cwd, root = ROOT, git = execFileSync, { allowDetached = false } = {}) {
   if (!isAbsolute(cwd)) throw failure("ABSOLUTE_WORKER_CHECKOUT_REQUIRED");
   const read = (checkout, args) => git("git", args, {
     cwd: checkout, encoding: "utf8", windowsHide: true, timeout: WORKER_RPC_TIMEOUT_MS,
@@ -93,11 +93,24 @@ export function assertOwnedWorkerCheckout(cwd, root = ROOT, git = execFileSync) 
   const rootCommon = realpathSync(resolve(root, read(root, ["rev-parse", "--git-common-dir"])));
   const gitDir = realpathSync(read(canonical, ["rev-parse", "--absolute-git-dir"]));
   if (!samePath(canonical, top) || !samePath(common, rootCommon) || samePath(common, gitDir) ||
-      !/^automation\/course-support-[a-z0-9][a-z0-9-]*$/.test(branch) || !/^[a-f0-9]{40}$/i.test(baseSha) ||
+      (!/^automation\/course-support-[a-z0-9][a-z0-9-]*$/.test(branch) && !(allowDetached && branch === "")) || !/^[a-f0-9]{40}$/i.test(baseSha) ||
       baseSha !== currentMain || read(canonical, ["status", "--porcelain"])) {
     throw failure("OWNED_CLEAN_LINKED_WORKTREE_REQUIRED");
   }
   return { cwd: canonical, branch, baseSha };
+}
+
+/** Name only a clean detached managed checkout; never rename or adopt an
+ * existing task branch. The assignment supplies a deterministic unique name. */
+export function prepareCourseSupportWorkerBranch(cwd, root, assignmentRef, git = execFileSync) {
+  if (!/^course-assignment-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(assignmentRef ?? "")) throw failure("RESERVED_ASSIGNMENT_REQUIRED");
+  const before = assertOwnedWorkerCheckout(cwd, root, git, { allowDetached: true });
+  if (before.branch) throw failure("DETACHED_WORKER_CHECKOUT_REQUIRED");
+  const branch = `automation/course-support-${assignmentRef.slice("course-assignment-".length)}`;
+  git("git", ["switch", "-c", branch], { cwd: before.cwd, encoding: "utf8", windowsHide: true, timeout: WORKER_RPC_TIMEOUT_MS });
+  const owned = assertOwnedWorkerCheckout(cwd, root, git);
+  if (owned.branch !== branch || owned.baseSha !== before.baseSha) throw failure("WORKER_BRANCH_PREPARATION_CHANGED");
+  return owned;
 }
 
 export function readWorkerCliVersion(cliPath, execute = execFileSync) {

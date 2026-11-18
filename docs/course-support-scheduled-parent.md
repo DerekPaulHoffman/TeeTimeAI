@@ -23,8 +23,11 @@ permission requests, or send email.
 
 For each actual `RESERVED` launch item, create one managed linked worktree from
 current `origin/main` with the supported worktree tool. Wait for its final
-registered path. Create a unique `automation/course-support-*` branch there
-before edits. Preserve existing checkouts. Bind `$preflightContext` to the actual
+registered path and leave the new worktree **detached and clean**. Do not run a
+branch-creation or branch-rename command: the deterministic supervisor creates
+its unique `automation/course-support-<assignment UUID>` branch before any
+production start, native preparation or file edits. It never adopts another
+named branch. Preserve existing checkouts. Bind `$preflightContext` to the actual
 returned context object, `$launchItem` to that exact `RESERVED` item, and
 `$workerCheckout` to the final registered worker path. Do not manufacture a
 context, item, base, native identifier, or readiness result.
