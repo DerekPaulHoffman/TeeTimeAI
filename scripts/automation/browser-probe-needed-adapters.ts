@@ -1652,6 +1652,7 @@ async function createMainFrameInteractionGuard(
 ): Promise<MainFrameInteractionGuard> {
   const mainFrame = page.mainFrame();
   let blocked = false;
+  const blockedChildFrames = new Set<Frame>();
   let deferredCrossOriginDestination: string | null = null;
   const observeDestination = (url: string) => {
     if (
@@ -1680,6 +1681,19 @@ async function createMainFrameInteractionGuard(
   page.on("request", onRequest);
   const routeHandler = async (route: Route) => {
     const request = route.request();
+    if (blocked) {
+      await route.abort("blockedbyclient").catch(() => undefined);
+      return;
+    }
+    const requestFrame = request.frame();
+    let frame: Frame | null = requestFrame;
+    while (frame && frame !== mainFrame) {
+      if (blockedChildFrames.has(frame)) {
+        await route.abort("blockedbyclient").catch(() => undefined);
+        return;
+      }
+      frame = frame.parentFrame();
+    }
     if (
       isRestrictedBrowserNetworkObservation({
         url: request.url(),
@@ -1695,7 +1709,11 @@ async function createMainFrameInteractionGuard(
         method: request.method(),
         resourceType: request.resourceType(),
       })) {
-        blocked = true;
+        // A child widget's prohibited write fences that frame and descendants.
+        // It must not erase independently readable parent identity/navigation.
+        // The write is still aborted and its restriction remains in evidence.
+        if (requestFrame === mainFrame) blocked = true;
+        else blockedChildFrames.add(requestFrame);
       }
       await route.abort("blockedbyclient").catch(() => undefined);
       return;

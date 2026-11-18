@@ -20,6 +20,45 @@ function managedProtectionHtml(reference: string, extra = "") {
 }
 
 describe("rendered browser navigation safety", () => {
+  it("retains official source evidence while aborting an auxiliary frame's forbidden write", async () => {
+    const browser = await chromium.launch();
+    const context = await browser.newContext({ serviceWorkers: "block" });
+    try {
+      const page = await context.newPage();
+      const official = "https://wrapper-course.example/";
+      const provider = "https://wrapper-golf-course.book.teeitup.com/";
+      const servedWrites: string[] = [];
+      const servedAfterWrite: string[] = [];
+      vi.spyOn(page.request, "get").mockResolvedValue({ ok: () => false } as APIResponse);
+      await context.route("**/*", route => {
+        const url = new URL(route.request().url());
+        if (route.request().method() !== "GET") { servedWrites.push(route.request().method()); return route.abort(); }
+        if (url.hostname === "weather-widget.example") {
+          if (url.pathname === "/after-write") servedAfterWrite.push(url.pathname);
+          return route.fulfill({ status: 200, contentType: "text/html",
+            body: '<html><body>Weather<script>fetch("/record", {method:"POST", body:"blocked"}).catch(() => {}).then(() => fetch("/after-write")).catch(() => {});</script></body></html>' });
+        }
+        if (url.origin === new URL(official).origin) {
+          const content = url.pathname === "/"
+            ? '<h1>Wrapper Golf Course</h1><a href="/tee-times/">Book a tee time</a><iframe src="https://weather-widget.example/widget"></iframe>'
+            : `<h1>Tee Times</h1><iframe src="${provider}"></iframe>`;
+          return route.fulfill({ status: 200, contentType: "text/html",
+            body: `<html><title>${url.pathname === "/" ? "Home" : "Tee Times"} - Wrapper Golf Course</title><body>${content}<footer>100 Fairway Road, Mesa, AZ 85201</footer></body></html>` });
+        }
+        if (url.origin === new URL(provider).origin) return route.fulfill({ status: 200,
+          contentType: "text/html", body: "<html><title>Wrapper Golf Course</title><body>Public tee times</body></html>" });
+        return route.abort();
+      });
+      const evidence = await collectBrowserEvidence(page, { courseId: "wrapper-course",
+        courseName: "Wrapper Golf Course", sourceUrl: official, officialCourseWebsite: official,
+        city: "Mesa", stateCode: "AZ", address: "100 Fairway Road, Mesa, AZ 85201" });
+      expect(evidence.officialPage?.linkCandidates).toContainEqual(expect.objectContaining({ url: provider }));
+      expect(evidence.browserInvestigation.bookingNavigationAttempts).toBeLessThanOrEqual(3);
+      expect(servedWrites).toEqual([]);
+      expect(servedAfterWrite).toEqual([]);
+      expect(evidence.browserInvestigation.restrictedNetworkObserved).toBe(true);
+    } finally { await context.close(); await browser.close(); }
+  }, 30_000);
   it.each([200, 403])("records a CPS visitor security check from HTTP %i before following page controls", async (status) => {
     const browser = await chromium.launch();
     const context = await browser.newContext({ serviceWorkers: "block" });
