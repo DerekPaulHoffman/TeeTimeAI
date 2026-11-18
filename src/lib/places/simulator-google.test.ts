@@ -15,9 +15,9 @@ const oldKey = process.env.GOOGLE_PLACES_API_KEY;
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.mocked(readOfficialSimulatorEvidence).mockReset().mockResolvedValue("ABSENT"); if (oldKey === undefined) delete process.env.GOOGLE_PLACES_API_KEY; else process.env.GOOGLE_PLACES_API_KEY = oldKey; });
 
 describe("simulator Places discovery", () => {
-  it("recovers a restaurant's unverified simulator identity only from current official evidence", async () => {
+  it.each(["restaurant", "sports_club"])("recovers an unverified simulator at a %s only from current official evidence", async primaryType => {
     process.env.GOOGLE_PLACES_API_KEY = "test-key";
-    const hybrid = { ...place, displayName: { text: "The Clubhouse" }, primaryType: "restaurant", types: ["restaurant"] };
+    const hybrid = { ...place, displayName: { text: "The Clubhouse" }, primaryType, types: [primaryType] };
     const fetch = vi.fn(async (url: string) => Response.json(url.includes("searchText") ? { places: [hybrid] } : hybrid));
     vi.stubGlobal("fetch", fetch);
     vi.mocked(readOfficialSimulatorEvidence).mockResolvedValueOnce("LIKELY").mockResolvedValueOnce("LIKELY");

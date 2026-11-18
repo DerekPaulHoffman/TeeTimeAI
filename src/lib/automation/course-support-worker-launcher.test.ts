@@ -19,6 +19,7 @@ import {
   hasNativeIdentityProof,
   isApprovalRequest,
   prepareCourseSupportWorker,
+  prepareCourseSupportWorkerBranch,
   privateWrite,
   readWorkerCliVersion,
   readWorkerLauncherArguments,
@@ -348,6 +349,30 @@ describe("worker environment and acknowledgement guards", () => {
     });
     expect(assertOwnedWorkerCheckout(f.cwd, f.cwd, git).cwd).toBe(f.cwd);
     expect(git.mock.calls.some(([, args]) => args.some((value) => value.startsWith("--path-format")))).toBe(false);
+  });
+
+  it.each(["ready", "named", "dirty", "stale", "primary"])("prepares a deterministic detached worker branch with %s checkout evidence", (state) => {
+    const f = fixture();
+    const assignment = "course-assignment-12345678-1234-4234-8234-123456789abc";
+    const expected = "automation/course-support-12345678-1234-4234-8234-123456789abc";
+    let branch = state === "named" ? "fix/restore-course-monitoring-2991615-a" : "";
+    const git = vi.fn((_binary: string, args: string[]) => {
+      if (args[0] === "switch") { branch = args[2]; return ""; }
+      const values: Record<string, string> = {
+        "rev-parse --show-toplevel": f.cwd, "branch --show-current": branch, "rev-parse HEAD": "a".repeat(40),
+        "rev-parse origin/main": (state === "stale" ? "b" : "a").repeat(40), "rev-parse --git-common-dir": tmpdir(),
+        "rev-parse --absolute-git-dir": state === "primary" ? tmpdir() : f.cwd, "status --porcelain": state === "dirty" ? " M user-file" : "",
+      };
+      return values[args.join(" ")];
+    });
+    if (state === "ready") {
+      expect(() => assertOwnedWorkerCheckout(f.cwd, f.cwd, git)).toThrow("OWNED_CLEAN_LINKED_WORKTREE_REQUIRED");
+      expect(prepareCourseSupportWorkerBranch(f.cwd, f.cwd, assignment, git)).toMatchObject({ branch: expected, baseSha: "a".repeat(40) });
+      expect(git.mock.calls.filter(([, args]) => args[0] === "switch").map(([, args]) => args)).toEqual([["switch", "-c", expected]]);
+    } else {
+      expect(() => prepareCourseSupportWorkerBranch(f.cwd, f.cwd, assignment, git)).toThrow();
+      expect(git.mock.calls.some(([, args]) => args[0] === "switch")).toBe(false);
+    }
   });
 
   it.each(["codex-cli 0.160.0", "codex-cli 0.160.1"])("pins qualified %s and does not substitute PATH", (version) => {

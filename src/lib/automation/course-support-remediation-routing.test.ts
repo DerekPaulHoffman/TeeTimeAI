@@ -39,6 +39,35 @@ const runnableCourse = {
 } satisfies CourseSupportRemediationRoutingInput;
 
 describe("course-support remediation routing", () => {
+  it.each(["OFFICIAL_IDENTITY", "BROWSER_ADAPTER_RETRY", "INDEPENDENT_CONFIRMATION"] as const)(
+    "gives the coding owner the failed learner repair at %s, instead of another unchanged verifier", stage => {
+      const input = { ...runnableCourse, detectedPlatform: "CUSTOM", providerFamilyKey: "CUSTOM",
+        detectedBookingUrl: null, bookingMetadata: null, bookingMethod: "UNKNOWN",
+        automationEligibility: "UNKNOWN", failureClass: "UNSUPPORTED_FAMILY" as const,
+        playbookAssessment: incompletePlaybook(stage), currentLearnerEngineeringHandoff: true };
+      const route = routeCourseSupportRemediation(input);
+      expect(route).toMatchObject({ workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+        reason: "FAILED_LEARNER_IMPLEMENTATION_HANDOFF", allowUnchangedRuntime: true, requiresImplementationPath: false });
+      const plan = buildCourseSupportClaimActionPlan({ route, incidentKind: "NEEDS_ADAPTER",
+        incidentProviderFamilyKey: "CUSTOM", course: input });
+      expect(plan.primaryAction).toBe("IMPLEMENT_REUSABLE_SUPPORT");
+      expect(plan.allowedActions).toContain("INVESTIGATE_PUBLIC_SOURCE");
+      expect(routeCourseSupportRemediation({ ...input, currentLearnerEngineeringHandoff: false }).reason)
+        .not.toBe("FAILED_LEARNER_IMPLEMENTATION_HANDOFF");
+      expect(routeCourseSupportRemediation({ ...input, priorUnchangedAttempt: route.attemptSignature }).workMode)
+        .toBe("WAIT_FOR_MATERIAL_CHANGE");
+    });
+  it.each(["AUTH", "CHALLENGE"] as const)("does not turn %s into public research authority", failureClass => {
+    expect(routeCourseSupportRemediation({ ...runnableCourse, failureClass,
+      currentLearnerEngineeringHandoff: true }).reason).not.toBe("FAILED_LEARNER_IMPLEMENTATION_HANDOFF");
+  });
+  it("preserves authoritative terminal facts and private-course exclusions over learner hints", () => {
+    for (const input of [
+      { ...runnableCourse, isPublic: false },
+      { ...runnableCourse, playbookAssessment: { conclusion: "TECHNICAL_FINAL" as const, nextStage: null } },
+    ]) expect(routeCourseSupportRemediation({ ...input, currentLearnerEngineeringHandoff: true }).reason)
+      .not.toBe("FAILED_LEARNER_IMPLEMENTATION_HANDOFF");
+  });
   it("shares exactly the native discovery action set with recovery readers", () => {
     for (const action of [
       "DISCOVER_WITH_HTTP", "DISCOVER_WITH_BROWSER", "VERIFY_TECHNICAL_CONSTRAINT",

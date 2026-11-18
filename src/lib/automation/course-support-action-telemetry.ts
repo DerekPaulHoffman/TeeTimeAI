@@ -362,6 +362,7 @@ function classifySelectedActionExecution(input: {
       if (evidence.terminalResultRecorded) return true;
       return input.zeroExecution === true ? false : null;
     case "INSPECT_PROVIDER_CONTRACT":
+    case "INVESTIGATE_PUBLIC_SOURCE":
     case "WAIT_FOR_MATERIAL_CHANGE":
       // Completed-batch history has no action-specific marker for either
       // diagnostic inspection or waiting. Generic playbook/provider evidence

@@ -25,6 +25,44 @@ const html = `<html><script>SCHEDULES = ${JSON.stringify(schedules)};</script></
 describe("explicitly unrestricted public Online Booking", () => {
   const online = { ...schedules[0].booking_classes[0], name: "Online Booking", online_booking_protected: "0", block_online_booking: "0", deleted: "0", pass_item_ids: [""] };
   const document = (value: unknown) => `SCHEDULES=${JSON.stringify([{ ...schedules[0], booking_classes: [value] }])};`;
+  it("selects the sole published weekday public class for the course-local requested date", () => {
+    const weekday = { ...online, name: "Public | Monday - Thursday" };
+    const weekend = { ...online, name: "Public | Friday, Saturday & Sunday", booking_class_id: "4932" };
+    const html = `SCHEDULES=${JSON.stringify([{ ...schedules[0], booking_classes: [weekday, weekend] }])};`;
+    const input = { bookingUrl, courseName: "Bridges", html };
+    expect(parseForeupPublicConfiguration(input)).toBeNull();
+    expect(parseForeupPublicConfiguration({ ...input, date: new Date("2026-11-18T00:00:00Z") })).toMatchObject({ bookingClassId: 4931 });
+    for (const day of ["2026-11-20", "2026-11-21", "2026-11-22"]) {
+      expect(parseForeupPublicConfiguration({ ...input, date: new Date(`${day}T00:00:00Z`) })).toMatchObject({ bookingClassId: 4932 });
+    }
+    expect(isStandardForeupPublicClass({ ...weekend, online_booking_protected: "1" })).toBe(false);
+    expect(isStandardForeupPublicClass({ ...weekday, block_online_booking: "1" })).toBe(true);
+    expect(isStandardForeupPublicClass({ ...weekday, pass_item_ids: ["member-pass"] })).toBe(false);
+    expect(isStandardForeupPublicClass({ ...weekday, name: "Public | Monday - Thursday Members" })).toBe(false);
+    expect(isStandardForeupPublicClass({ ...weekday, name: "Public | Tuesday, Unknown" })).toBe(false);
+    const ambiguous = `SCHEDULES=${JSON.stringify([{ ...schedules[0], booking_classes: [weekday,
+      { ...weekday, booking_class_id: "4933" }] }])};`;
+    expect(parseForeupPublicConfiguration({ ...input, html: ambiguous, date: new Date("2026-11-18T00:00:00Z") })).toBeNull();
+  });
+  it("freshly resolves a dated class without replacing an explicitly pinned class", async () => {
+    const weekday = { ...online, name: "Public | Monday - Thursday" };
+    const weekend = { ...online, name: "Public | Friday, Saturday & Sunday", booking_class_id: "4932" };
+    const body = `SCHEDULES=${JSON.stringify([{ ...schedules[0], booking_classes: [weekday, weekend] }])};`;
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(body, { headers: { "content-type": "text/html" } }));
+    const input = { bookingUrl, courseName: "Bridges", scheduleId: 792, fetchImpl, date: new Date("2026-11-21T00:00:00Z") };
+    expect(await readForeupStandardPublicSchedule(input)).toMatchObject({ bookingClassId: 4932 });
+    expect(await readForeupStandardPublicSchedule({ ...input, bookingClassId: 4931 })).toBeNull();
+  });
+  it.each(["Best Available Rate", "Best Available Rate (0-60 Days)"])("requires unrestricted public flags for %s", name => {
+    const row = { ...online, name };
+    expect(isStandardForeupPublicClass(row)).toBe(true);
+    expect(parseForeupPublicConfiguration({ bookingUrl, courseName: "Bridges", html: document(row) })).toMatchObject({ bookingClassId: 4931 });
+    for (const delta of [{ online_booking_protected: "1" }, { online_booking_protected: undefined },
+      { pass_item_ids: ["17758419"] }, { block_online_booking: "1" }, { deleted: "1" },
+      { name: "Loyalty Card Tee Times (0-7 Days)" }, { name: `${name} Members` }]) {
+      expect(isStandardForeupPublicClass({ ...row, ...delta })).toBe(false);
+    }
+  });
   it.each(["Book Tee Time", "Book a Tee Time", "Book Tee Times"])("requires explicit unrestricted flags for %s", name => {
     const row = { ...online, name };
     expect(isStandardForeupPublicClass(row)).toBe(true);

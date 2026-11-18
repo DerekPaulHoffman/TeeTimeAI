@@ -444,6 +444,8 @@ function main() {
     } else if (playwrightChromiumSetupRequired) {
       process.stdout.write(`${JSON.stringify(playwrightChromiumSetupRequired)}\n`);
       process.exitCode = 2;
+    } else if (process.argv.includes("--context-only")) {
+      process.stdout.write(JSON.stringify(selectedResponderCheckoutContext(resolvedCheckout, selection.failover, workerCli)) + "\n");
     } else if (!process.argv.includes("--run")) {
       process.stdout.write(
         `${JSON.stringify({

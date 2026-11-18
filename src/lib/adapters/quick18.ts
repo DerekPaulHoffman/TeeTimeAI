@@ -225,16 +225,6 @@ export function parseQuick18Slots(input: {
     if (!time || !range || (courseColumn !== null && !textContent(cells[courseColumn]).trim())) {
       throw schemaError("Quick18 tee-time row could not be read");
     }
-    if (courseColumn !== null) {
-      const courseName = textContent(cells[courseColumn]).replace(/\s+/gu, " ").trim().toLowerCase();
-      if (displayedCourse !== null && displayedCourse !== courseName) {
-        throw schemaError("Quick18 tee-time matrix mixes courses");
-      }
-      if (input.courseName && !haveCompatibleQuick18CourseNames(input.courseName, courseName)) {
-        throw schemaError("Quick18 tee-time matrix does not match the official course");
-      }
-      displayedCourse = courseName;
-    }
     sawTimeRow = true;
 
     const publicBookings: Array<{ url: string; priceCents: number | null; holes: 9 | 18 | null }> = [];
@@ -267,6 +257,19 @@ export function parseQuick18Slots(input: {
     }
     const booking = publicBookings[0];
     if (!booking) continue;
+    // Back-nine and other products can remain in the matrix while their
+    // ordinary public rate is unavailable. They contribute no inventory to
+    // this read; bind identity only for rows that expose a public selection.
+    if (courseColumn !== null) {
+      const courseName = textContent(cells[courseColumn]).replace(/\s+/gu, " ").trim().toLowerCase();
+      if (displayedCourse !== null && displayedCourse !== courseName) {
+        throw schemaError("Quick18 tee-time matrix mixes courses");
+      }
+      if (input.courseName && !haveCompatibleQuick18CourseNames(input.courseName, courseName)) {
+        throw schemaError("Quick18 tee-time matrix does not match the official course");
+      }
+      displayedCourse = courseName;
+    }
     for (const publicBooking of publicBookings) {
       const providerCourseId = new URL(publicBooking.url).pathname.match(
         /^\/teetimes\/course\/([1-9]\d{0,9})\/teetime\//u
@@ -324,6 +327,7 @@ export function parseQuick18Slots(input: {
 function isPublicRateHeader(header: string) {
   return (
     isUnqualifiedRoundRateHeader(header) ||
+    /^(?:best rate available|best available rate|best rate guarantee|out of state(?:\s*\(\d{1,3}-\d{1,3}\))?)$/iu.test(header.replace(/\s+/gu, " ").trim()) ||
     (/\b(?:daily rate|public|non[- ]?member|guest)\b/iu.test(header) &&
       !/\b(?:back\s+9|members?|membership|group|special|locals?|twilight|league|resident|staff|private|employee|passholder|season pass|corporate)\b/iu.test(
         header.replace(/non[- ]?member/iu, "")
@@ -332,7 +336,7 @@ function isPublicRateHeader(header: string) {
 }
 
 function isUnqualifiedRoundRateHeader(header: string) {
-  return /^(?:18|9)\s+holes?$/iu.test(header.replace(/\s+/gu, " ").trim());
+  return /^(?:18|9)\s+holes?(?:\s+rate)?$/iu.test(header.replace(/\s+/gu, " ").trim());
 }
 
 function haveCompatibleQuick18CourseNames(officialName: string, matrixName: string) {
@@ -344,8 +348,8 @@ function haveCompatibleQuick18CourseNames(officialName: string, matrixName: stri
 }
 
 function roundRatePriority(header: string) {
-  if (/^18\s+holes?$/iu.test(header.replace(/\s+/gu, " ").trim())) return 0;
-  if (/^9\s+holes?$/iu.test(header.replace(/\s+/gu, " ").trim())) return 1;
+  if (/^18\s+holes?(?:\s+rate)?$/iu.test(header.replace(/\s+/gu, " ").trim())) return 0;
+  if (/^9\s+holes?(?:\s+rate)?$/iu.test(header.replace(/\s+/gu, " ").trim())) return 1;
   return 2;
 }
 

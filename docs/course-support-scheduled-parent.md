@@ -1,5 +1,38 @@
 # Scheduled course-support bridge
 
+New assigned workers execute through the human-authorized Desktop transport in
+`docs/course-support-desktop-worker.md`, using Sol/ChatGPT and First user Chrome.
+The supervisor still owns preparation and binding; the supported Desktop chat
+tool owns the inference turn. Do not fall back to the browser-unqualified native
+CLI model runner. Existing explicitly returned legacy continuations retain their
+original owner and separate contract; this does not authorize a takeover.
+
+After the required learner health check and protected cleanup, handle actual
+`fullRepairContinuationItems` before new launches. These are source-checked
+data-only outdoor full repairs that still belong to their original Desktop
+owner after negative verification. They are not a new claim or an ownership
+transfer. Do not create a worktree or invoke the simulator continuation runner
+for them. Save the actual preflight context and each exact item with exclusive
+private UTF-8 writes below selectedCheckout's ignored `.codex-artifacts`, then
+run the selected checkout's sealed helper once:
+
+```text
+course-support-desktop-continuation.mjs --context-file <actual-context-file> --item-file <actual-item-file>
+```
+
+Retain its process handle through terminal success. `original_worker_active`,
+`unchanged_runtime` and `already_requested` require no message. Only
+`desktop_continuation_message_required` permits passing the returned exact
+threadId/prompt/model/thinking to supported `send_message_to_thread` on local.
+Save the actual acknowledgement privately. Never replay a failed/ambiguous send
+or change the recipient. The helper reads native thread/read and terminal
+turns/list with itemsView:notLoaded; it never resumes a CLI turn, changes the
+original launcher receipt or claims completion/identity evidence it did not
+observe. One exclusive marker per assignment/new runtime prevents duplicates.
+Only the original worker can update its own clean branch, read/recover its same
+packet under existing fences, and continue or safely requeue the superseded
+runtime. Read the current full-repair continuation guide for that scope.
+
 Use the existing sole ten-minute course-support automation. Start its scheduled
 turn with exactly one shell command:
 
@@ -16,8 +49,11 @@ permission requests, or send email.
 
 For each actual `RESERVED` launch item, create one managed linked worktree from
 current `origin/main` with the supported worktree tool. Wait for its final
-registered path. Create a unique `automation/course-support-*` branch there
-before edits. Preserve existing checkouts. Bind `$preflightContext` to the actual
+registered path and leave the new worktree **detached and clean**. Do not run a
+branch-creation or branch-rename command: the deterministic supervisor creates
+its unique `automation/course-support-<assignment UUID>` branch before any
+production start, native preparation or file edits. It never adopts another
+named branch. Preserve existing checkouts. Bind `$preflightContext` to the actual
 returned context object, `$launchItem` to that exact `RESERVED` item, and
 `$workerCheckout` to the final registered worker path. Do not manufacture a
 context, item, base, native identifier, or readiness result.
@@ -50,7 +86,7 @@ foreach ($artifact in @(
   try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
 }
 $supervisorScript = Join-Path $preflightContext.selectedCheckout 'scripts\automation\course-support-worker-supervisor.mjs'
-& 'C:\Program Files\nodejs\node.exe' $supervisorScript --detach --context-file $contextFile --assignment-file $assignmentFile --worker-checkout $workerCheckout --output-dir $outputDirectory
+& 'C:\Program Files\nodejs\node.exe' $supervisorScript --execution-mode DESKTOP --context-file $contextFile --assignment-file $assignmentFile --worker-checkout $workerCheckout --output-dir $outputDirectory
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
@@ -62,9 +98,17 @@ The supervisor owns validation, start, native preparation, permission proof,
 binding, complete mode-specific prompt generation, and execution. Do not repeat
 those operations manually, write another launch helper, copy worker instructions
 into the automation prompt, substitute another CLI, or retry an ambiguous launch.
-An exclusive marker prevents replay. Its returned PID means only that the
-supervisor process started; native binding, claimed ownership, completed work,
-deployed support, and monitoring remain separate facts in their own receipts.
+An exclusive marker prevents replay. Retain the foreground handle until terminal
+success with `desktop_turn_required`. Then use the exact returned receipt and
+child ID, and the original assignment reference, for the one-use
+`--desktop-context` command documented in the Desktop contract. Parse its complete
+successful JSON without printing the generated prompt, and pass only its actual
+threadId/prompt/model/thinking to supported `send_message_to_thread` on the local
+host. The human explicitly authorized creating and continuing these per-course
+Desktop worker chats. Preserve the actual App acknowledgement privately; do not
+retry a failed or ambiguous send, launch a CLI turn, create a replacement chat or
+reconstruct the prompt. Preparation, actual turn execution, claimed ownership,
+completed repair, deployed support and monitoring remain separate facts.
 
 `STARTING` and unclaimed `BOUND` authority expire after fifteen minutes, or when
 the base changes. A later normal planner releases those slots while retaining
@@ -136,3 +180,11 @@ If the parent finishes while the supervisor is still asynchronous, report
 "dispatched" or "bound as observed", not a healthy or successfully running
 worker. Include the observation time for an ongoing state. A later failed
 receipt supersedes that startup observation without another human wakeup.
+
+For the one-off Sports Haus database recovery, run the approved responder preflight with `--context-only` to obtain the real checkout and worker context, then run this unscheduled command from that checkout in the current parent's native Codex session:
+
+```powershell
+npx vercel env run -e production -- npm run automation:course-dispatch -- plan --retry-sports-haus-once course-assignment-e95a61ec-95a8-437f-95c8-8b47cb13ae70
+```
+
+Use the same supervisor and a separate managed worker worktree. Zero launch items means stop. The first reservation consumes the override even if startup or research fails. The worker can read public evidence and close its diagnostic, but cannot publish changes, queue rechecks or send alerts.

@@ -284,6 +284,7 @@ export async function configureSimulatorSupportOffering(input: Owner & { manifes
         [facts.website, facts.bookingUrl, facts.evidenceUrl].some(url => !getSafeCustomerBookingUrl(url))) throw new Error("Simulator configuration requires reviewed public rental evidence and safe public URLs.");
     selectSimulatorEngineeringDuration(facts.supportedDurationsMinutes);
     const row = await loadOwned(tx, input, now);
+    if (row.audit.controlledRetryOf) throw new Error("Controlled simulator retries are research only.");
     const codeRepair = row.claim.releaseSha && row.claim.phase === "IMPLEMENTING" &&
       Boolean((row.audit as CourseDispatchAudit & { simulatorRepairPending?: unknown }).simulatorRepairPending);
     const metadataRepair = row.claim.releaseSha && row.claim.phase === "VERIFYING" && input.repair === true && !codeRepair;
@@ -508,6 +509,7 @@ export async function classifySimulatorSupportOffering(input: Owner & { evidence
   const evidence = simulatorDispositionSchema.parse(input.evidence);
   return withTransition(async (tx, now) => {
     const row = await loadOwned(tx, input, now);
+    if (row.audit.controlledRetryOf) throw new Error("Controlled simulator retries are research only.");
     const observedAt = new Date(evidence.observedAt);
     const officialHosts = [row.source.offering.course.website, row.source.offering.bookingUrl, row.source.offering.evidenceUrl].filter((value): value is string => Boolean(value)).map(value => new URL(value).hostname);
     if (observedAt > now || observedAt < new Date(row.claim.claimedAt) || observedAt < new Date(now.getTime() - 30 * 60_000) ||
@@ -560,6 +562,10 @@ export async function claimSimulatorSupportAssignment(input: { assignmentRef: st
     } as unknown as Prisma.InputJsonValue, outcome: "simulator_claimed" } });
     return { assignmentRef: input.assignmentRef, token: claim.token, revision: claim.revision, phase: claim.phase, leaseExpiresAt: claim.leaseExpiresAt,
       offeringId: source.offering.id, courseId: source.offering.courseId, engineeringOnly: row.audit.target.trafficClass === "SYNTHETIC", sourceFingerprint: source.fingerprint,
+      ...(row.audit.controlledRetryOf ? { controlledRetry: "SPORTS_HAUS_RESEARCH_ONLY" as const,
+        requestedSlot: { date: source.searches[0].date.toISOString().slice(0, 10),
+          durationMinutes: source.searches[0].durationMinutes, offeringId: source.offering.id,
+          timeZone: source.offering.course.timeZone } } : {}),
       supportAuthority: row.audit.target.engineeringAuthority ? "ENGINEERING_INCIDENT" as const : "ACTIVE_ALERT" as const,
       venue: source.offering.course, evidenceUrl: source.offering.evidenceUrl, bookingUrl: source.offering.bookingUrl,
       providerFamilyKey: source.offering.providerFamilyKey, providerMetadata: source.offering.providerMetadata, supportedDurationsMinutes: source.offering.supportedDurationsMinutes,
@@ -614,6 +620,7 @@ export function claimSimulatorSupportPath(input: Owner & { path: string }) {
   const path = validateSimulatorSupportPath(input.path);
   return withTransition(async (tx, now) => {
     const row = await loadOwned(tx, input, now);
+    if (row.audit.controlledRetryOf) throw new Error("Controlled simulator retries are research only.");
     const dispatch = await import("./course-support-course-dispatch");
     const batches = await tx.courseSupportBatch.findMany({ where: { status: { in: ["CLAIMED", "IMPLEMENTING", "VERIFYING"] } }, select: { status: true, summary: true } });
     if (batches.some(batch => { const summary = batch.summary as Record<string, unknown> | null; return batch.status === "IMPLEMENTING" || (Array.isArray(summary?.plannedPaths) && summary.plannedPaths.length > 0) || (summary?.remediationDirective as Record<string, unknown> | undefined)?.requiresImplementationPath === true; }) ||
@@ -835,6 +842,11 @@ export function retrySimulatorSupport(input: Owner & { retryMinutes: number; cur
     const state = readSimulatorResearchState(row.audit.simulatorResearch, row.source.fingerprint);
     const verification = (row.audit as CourseDispatchAudit & { simulatorEngineeringVerification?: { inFlight?: unknown } }).simulatorEngineeringVerification;
     if (state.inFlight || verification?.inFlight) throw new Error("Finish or reconcile the original bounded simulator read before retry.");
+    if (row.audit.controlledRetryOf) {
+      await tx.automationRun.update({ where: { id: row.runId }, data: { status: "COMPLETED", completedAt: now,
+        outcome: "simulator_controlled_retry_closed" } });
+      return { outcome: "controlled_retry_closed" as const, durableCloseoutRecorded: true };
+    }
     const publishedOwnedRelease = Boolean(row.claim.phase === "VERIFYING" && row.claim.releaseSha && row.claim.deployment);
     if (row.claim.phase === "IMPLEMENTING" || ((row.claim.plannedPaths.length > 0 || row.claim.releaseSha !== null) && !publishedOwnedRelease) ||
         (row.audit as CourseDispatchAudit & { simulatorRepairPending?: unknown }).simulatorRepairPending) throw new Error("Retry cannot release unfinished simulator implementation ownership.");

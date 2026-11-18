@@ -31,6 +31,7 @@ export const COURSE_SUPPORT_CLAIM_ACTIONS = [
   "SEARCH_FOR_OFFICIAL_SOURCE",
   "INSPECT_PROVIDER_CONTRACT",
   "IMPLEMENT_REUSABLE_SUPPORT",
+  "INVESTIGATE_PUBLIC_SOURCE",
   "COMPLETE_CLASSIFICATION",
   "WAIT_FOR_MATERIAL_CHANGE",
 ] as const;
@@ -137,7 +138,11 @@ export function buildCourseSupportClaimActionPlan(input: {
     return actionPlan(
       route,
       "IMPLEMENT_REUSABLE_SUPPORT",
-      providerContractEligible ? ["INSPECT_PROVIDER_CONTRACT"] : [],
+      [
+        ...(providerContractEligible ? ["INSPECT_PROVIDER_CONTRACT" as const] : []),
+        ...(input.route.reason === "FAILED_LEARNER_IMPLEMENTATION_HANDOFF"
+          ? ["INVESTIGATE_PUBLIC_SOURCE" as const] : []),
+      ],
     );
   }
   if (assignedBrowserAdapterRetry) {

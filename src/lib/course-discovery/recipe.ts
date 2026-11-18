@@ -290,11 +290,11 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
           recipe.source.timeZone !== "America/New_York" || recipe.target.offeringId || !recipe.source.venueAddress)
         ctx.addIssue({ code: "custom", message: "Outdoor public metadata requires the verified course booking page" });
     }
-    const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "GOLFVX", "REX", "MINDBODY", "FIVE_IRON", "GOLFBOOK", "SKEDDA", "YOUCANBOOKME", "SIMPLY_SCHEDULE_APPOINTMENTS"].includes(recipe.adapter.family) ||
+    const simulator = ["ACUITY", "USCHEDULE", "WHOOSH", "LIGHTSPEED", "AMELIA", "GOLFVX", "REX", "MINDBODY", "FIVE_IRON", "GOLFBOOK", "SKEDDA", "PLAYBYPOINT", "YOUCANBOOKME", "SIMPLY_SCHEDULE_APPOINTMENTS"].includes(recipe.adapter.family) ||
       recipe.adapter.family === "TEEITUP" && recipe.adapter.offeringKind === "SIMULATOR";
     if (recipe.source.providerFamily !== recipe.adapter.family ||
       (recipe.target.kind === "SIMULATOR") !== simulator ||
-      recipe.target.kind === "SIMULATOR" && !recipe.target.offeringId || ["CHELSEA", "TEEITUP", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS", "REX", "CPS", "MINDBODY", "TEESNAP", "FIVE_IRON", "GOLFBOOK", "SKEDDA", "YOUCANBOOKME", "SIMPLY_SCHEDULE_APPOINTMENTS"].includes(recipe.adapter.family) && !recipe.source.venueAddress)
+      recipe.target.kind === "SIMULATOR" && !recipe.target.offeringId || ["CHELSEA", "TEEITUP", "AMELIA", "CHRONOGOLF", "GOLFVX", "EZLINKS", "REX", "CPS", "MINDBODY", "TEESNAP", "FIVE_IRON", "GOLFBOOK", "SKEDDA", "PLAYBYPOINT", "YOUCANBOOKME", "SIMPLY_SCHEDULE_APPOINTMENTS"].includes(recipe.adapter.family) && !recipe.source.venueAddress)
       ctx.addIssue({ code: "custom", message: "Supported adapter metadata must match the source and target kind" });
     if (recipe.adapter.family === "SIMPLY_SCHEDULE_APPOINTMENTS" && (recipe.adapter.bookingUrl !== recipe.source.bookingUrl ||
         new URL(recipe.source.bookingUrl).hostname.replace(/^www\./u, "") !== new URL(recipe.source.officialUrl).hostname.replace(/^www\./u, "")))
@@ -305,6 +305,9 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
       ctx.addIssue({ code: "custom", message: "Public rentals must retain the current official directory and selected provider source" });
     if (recipe.adapter.family === "SKEDDA" && parseSkeddaSource(recipe.source.bookingUrl)?.hostname !== `${recipe.adapter.tenant}.skedda.com`)
       ctx.addIssue({ code: "custom", message: "Public simulator metadata must retain the exact provider tenant" });
+    if (recipe.adapter.family === "PLAYBYPOINT" && (recipe.adapter.entryUrl !== recipe.source.bookingUrl ||
+        recipe.adapter.timeZone !== recipe.source.timeZone))
+      ctx.addIssue({ code: "custom", message: "Public bay metadata must retain its exact source and timezone" });
     if (recipe.adapter.family === "TEESNAP" && (recipe.target.kind !== "OUTDOOR" || recipe.target.offeringId ||
         parseTeesnapRecipeSource(recipe.source.bookingUrl)?.tenant !== recipe.adapter.tenant ||
         !isTeesnapOfficialSourceBinding(recipe.source.officialUrl, recipe.source.bookingUrl) ||

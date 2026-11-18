@@ -30,9 +30,18 @@ import { isDiscoveryPilotSearch } from "@/lib/course-discovery/config";
 import { assertRecipeObservationCurrent, markRecipeObservationConsumed, recipeFailureIsRetryable, recipeResultIsSuccessful } from "@/lib/course-discovery/runtime";
 import { continueGenericRecipeMatchSources } from "@/lib/course-discovery/match-source-continuity";
 import { reconcileSimulatorSupportIncidentFailure, resolveUnownedSimulatorSupportIncident } from "./simulator-support-incidents";
+import { getCourseLocalDate } from "@/lib/courses/inventory-horizon";
 
 const OBSERVATION_LEASE_MS = 2 * 60_000;
 class SimulatorObservationSupersededError extends Error {}
+
+function assertSimulatorSlotProof(slot: SimulatorAvailabilitySlot, offeringId: string, date: string, duration: number | null, timeZone: string) {
+  if (slot.offeringId !== offeringId || !slot.productId || !slot.resourceId ||
+      !simulatorDurationMatches(duration, (slot.endsAt.getTime() - slot.startsAt.getTime()) / 60_000) ||
+      getCourseLocalDate(slot.startsAt, timeZone) !== date) {
+    throw new SimulatorAvailabilityError("SCHEMA_CHANGED", "Simulator slot does not match its offering, date or duration");
+  }
+}
 
 function isSimulatorSupportEligible(search: ActiveAutomationSearch) {
   return !isSyntheticWebsiteTrafficClass(search.trafficClass) || search.syntheticMultiCycle;
@@ -170,6 +179,11 @@ async function learnedSimulatorAvailability(search: ActiveAutomationSearch, pref
   const reads: Array<NonNullable<Awaited<ReturnType<typeof getLearnedAvailability>>>> = [];
   for (const duration of durations.length ? durations : [60]) {
     const read = await getLearnedAvailability({ ...search, durationMinutes: duration }, preference);
+    if (read?.state === "ready" && (read.target.offeringId !== preference.offering?.id ||
+        read.result.slots.some(slot => !slot.endsAt ||
+          Date.parse(slot.endsAt) - Date.parse(slot.startsAt) !== duration * 60_000))) {
+      throw new SimulatorAvailabilityError("SCHEMA_CHANGED", "Simulator recipe result does not match its offering or requested duration");
+    }
     if (read) reads.push(read);
   }
   if (!reads.length) return null;
@@ -235,7 +249,8 @@ export async function runSimulatorSearchCheck(search: ActiveAutomationSearch, ru
         const slots: SimulatorAvailabilitySlot[] = learned.result.slots.map(slot => ({
           sourceId: slot.sourceId, offeringId: offering!.id, resourceId: slot.resourceId ?? "ANY", productId: slot.productId ?? "rental",
           startsAt: new Date(slot.startsAt), endsAt: new Date(slot.endsAt!), maxPartySize: slot.capacity ?? null, bookingUrl: slot.bookingUrl,
-        })).filter(slot => simulatorDurationMatches(search.durationMinutes, (slot.endsAt.getTime() - slot.startsAt.getTime()) / 60_000));
+        }));
+        for (const slot of slots) assertSimulatorSlotProof(slot, offering!.id, date, search.durationMinutes, preference.course.timeZone);
         const count = await commitObservation({ search, lease, offering: claimedRecipe.offering, token: claimedRecipe.token, runId,
           outcome: slots.length ? "MATCH_FOUND" : "NO_MATCH", slots, observedAt: new Date(learned.result.observedAt), evidenceUrl: learned.result.sourceUrl,
           accessRecipeObservations: learnedRead!.observations });
@@ -318,8 +333,10 @@ export async function runSimulatorSearchCheck(search: ActiveAutomationSearch, ru
             claimed.offering.supportedDurationsMinutes).slice(0, 1));
           const results = [];
           for (const durationMinutes of durations) {
-            results.push(await fetchSimulatorAvailability({ offering: { ...claimed.offering, bookingUrl: claimed.offering.bookingUrl! },
-              date, durationMinutes, partySize: 1, timeZone: preference.course.timeZone }));
+            const result = await fetchSimulatorAvailability({ offering: { ...claimed.offering, bookingUrl: claimed.offering.bookingUrl! },
+              date, durationMinutes, partySize: 1, timeZone: preference.course.timeZone });
+            for (const slot of result.slots) assertSimulatorSlotProof(slot, claimed.offering.id, date, durationMinutes, preference.course.timeZone);
+            results.push(result);
           }
           return { complete: results.every(result => result.complete), slots: results.flatMap(result => result.slots),
             observedAt: results.length ? new Date(Math.min(...results.map(result => result.observedAt.getTime()))) : new Date(),

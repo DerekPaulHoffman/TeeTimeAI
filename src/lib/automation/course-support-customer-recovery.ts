@@ -110,7 +110,7 @@ export function assessCustomerRecovery(input: {
 }
 
 export async function readCustomerRecovery(
-  client: Pick<Prisma.TransactionClient, "courseSupportBatchSearch">,
+  client: Pick<Prisma.TransactionClient, "courseSupportBatchSearch" | "teeSearch">,
   batch: { id: string; createdAt: Date; releaseSha: string | null; deployedAt: Date | null; recheckDispatchStartedAt: Date | null; summary: unknown },
   courseIds: string[], now: Date,
 ) {
@@ -129,10 +129,30 @@ export async function readCustomerRecovery(
         orderBy: { sentAt: "desc" }, select: { alertGeneration: true, recipient: true, status: true, sentAt: true, payload: true } },
     } } },
   }) : [];
-  if (dispatches.length > READ_LIMIT || dispatches.some(d => d.teeSearch && (d.teeSearch.probes.length > 1280 || d.teeSearch.emailDeliveries.length > 512))) {
+  // A failed provider verification can precede recheck dispatch entirely. An
+  // empty dispatch table therefore says nothing about actual customer demand.
+  // Keep those customer cases open instead of reporting NO_ACTIVE_DEMAND.
+  const undispatched = courseIds.length ? await client.teeSearch.findMany({
+    where: { status: "ACTIVE", mode: "OUTDOOR", trafficClass: { notIn: ["TEST", "AUTOMATION"] },
+      id: { notIn: dispatches.map(d => d.teeSearch?.id).filter((id): id is string => Boolean(id)) },
+      preferences: { some: { courseId: { in: courseIds } } } },
+    take: READ_LIMIT + 1,
+    select: {
+      id: true, mode: true, status: true, trafficClass: true, scheduleVersion: true, alertGeneration: true,
+      alertEmail: true, additionalEmails: true, user: { select: { email: true } },
+      workflowRunId: true, checkStatus: true, checkLeaseToken: true, checkLeaseExpiresAt: true,
+      nextCheckAt: true, lastCheckedAt: true, preferences: { select: { courseId: true } },
+      probes: { where: { courseId: { in: courseIds }, observedAt: { gte: floor } }, take: 1281,
+        orderBy: { observedAt: "desc" }, select: { courseId: true, automationRunId: true, outcome: true, observedAt: true, runtimeVersion: true, rawSummary: true } },
+      emailDeliveries: { where: { status: "SENT", sentAt: { gte: batch.createdAt } }, take: 513,
+        orderBy: { sentAt: "desc" }, select: { alertGeneration: true, recipient: true, status: true, sentAt: true, payload: true } },
+    },
+  }) : [];
+  const demand = [...dispatches, ...undispatched.map(search => ({ scheduleVersion: search.scheduleVersion, teeSearch: search }))];
+  if (demand.length > READ_LIMIT || demand.some(d => d.teeSearch && (d.teeSearch.probes.length > 1280 || d.teeSearch.emailDeliveries.length > 512))) {
     throw new Error("Customer recovery evidence exceeds its bounded read limit; engineering review is required.");
   }
-  return assessCustomerRecovery({ searches: dispatches.map(d => ({ dispatchedVersion: d.scheduleVersion, search: d.teeSearch })),
+  return assessCustomerRecovery({ searches: demand.map(d => ({ dispatchedVersion: d.scheduleVersion, search: d.teeSearch })),
     courseIds, releaseSha: batch.releaseSha, evidenceSince: floor, notificationSince: batch.createdAt,
     previous: object(batch.summary).customerRecovery, now });
 }
@@ -146,7 +166,7 @@ export async function refreshPendingCustomerRecoveries(now = new Date()) {
     orderBy: [{ heartbeatAt: "asc" }, { id: "asc" }], take: 32,
     select: { id: true, reference: true, createdAt: true, releaseSha: true, deployedAt: true,
       recheckDispatchStartedAt: true, summary: true, revision: true,
-      incidents: { where: { result: "RESTORED" }, select: { courseId: true } } },
+      incidents: { where: { result: { not: "FINAL_DISPOSITION" } }, select: { courseId: true } } },
   });
   let completedCount = 0;
   const openCases: { batchRef: string; pendingProviderPairCount: number; pendingSchedulerCount: number; pendingRecipientCourseCount: number }[] = [];

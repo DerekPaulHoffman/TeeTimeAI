@@ -79,6 +79,7 @@ export async function fetchCourseTeeSheet(
       courseName: course.name,
       scheduleId: metadata.scheduleId,
       bookingClassId: metadata.bookingClassId,
+      date,
     });
     if (!publicSchedule) throw new Error("ForeUP Standard Public class could not be verified");
     const result = await fetchForeupTeeSheet({

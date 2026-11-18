@@ -71,6 +71,7 @@ export type CourseSupportRemediationRoutingReason =
   | "NO_PLAYBOOK_STAGE_AVAILABLE"
   | "IMPLEMENTATION_REQUIRED"
   | "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF"
+  | "FAILED_LEARNER_IMPLEMENTATION_HANDOFF"
   | "CLASSIFICATION_READY"
   | "UNCHANGED_ATTEMPT_ALREADY_RECORDED"
   | "STARTED_LOCAL_READER_CONTINUATION"
@@ -88,6 +89,9 @@ export type CourseSupportRemediationRoutingInput = MonitoringStrategyInput & {
   materialChanges?: CourseSupportMaterialChangeIndicators;
   transientRetryBudget?: number;
   providerContractEvidenceAvailable?: boolean;
+  /** Server revalidates the failed job, source, demand and incident at claim.
+   * Never derive this permission from a model checkpoint or diagnostic code. */
+  currentLearnerEngineeringHandoff?: boolean;
 };
 
 export type CourseSupportRemediationRoute = {
@@ -326,6 +330,36 @@ export function routeCourseSupportRemediation(
       playbookStage: input.playbookAssessment.nextStage,
       retryBudget: null,
     });
+  }
+
+  // The read-only learner has already tried the investigation. Sending its
+  // coding owner back through unchanged-runtime stage verification loses the
+  // goal and reproduces the same missing metadata. Give that owner the repair,
+  // while retaining factual/access finals and all publication/replay gates.
+  if (input.currentLearnerEngineeringHandoff === true && input.isPublic !== false &&
+      hasSafePublicDiscoverySource(input) && !CLASSIFICATION_ACTIONS.has(strategy.action) &&
+      input.failureClass !== "AUTH" && input.failureClass !== "CHALLENGE") {
+    const attempt = { workMode: "IMPLEMENT_REUSABLE_SUPPORT" as const,
+      strategyAction: strategy.action, playbookStage: input.playbookAssessment.nextStage };
+    if (!materialChangeDetected && isSameAttempt(input.priorUnchangedAttempt, attempt)) {
+      return waitingRoute({ reason: "UNCHANGED_ATTEMPT_ALREADY_RECORDED", strategy,
+        materialChangeDetected, retryBudget: null, resumeWorkMode: "IMPLEMENT_REUSABLE_SUPPORT", attemptSignature: attempt });
+    }
+    return {
+      ...actionableRoute({
+        workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+        reason: "FAILED_LEARNER_IMPLEMENTATION_HANDOFF",
+        strategy,
+        materialChangeDetected,
+        playbookStage: input.playbookAssessment.nextStage,
+        retryBudget: null,
+      }),
+      // A data-only configuration repair may succeed through guarded current
+      // runtime discovery. Once actual code paths are claimed, verification
+      // independently enforces the new committed/deployed implementation.
+      allowUnchangedRuntime: true,
+      requiresImplementationPath: false,
+    };
   }
 
   if (

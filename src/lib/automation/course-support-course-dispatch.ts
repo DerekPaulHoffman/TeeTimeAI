@@ -34,7 +34,10 @@ import {
   MAX_CONCURRENT_COURSE_SUPPORT_BATCHES,
   runWithCourseSupportWriterTransitionLease,
   withCourseSupportWriteConflictRetry,
+  readCourseSupportRemediationDirective,
+  readCourseSupportRemediationClaimAttempt,
 } from "./course-support-batches";
+import { allowsRetainedFullRepairResearch } from "./course-support-full-repair";
 import { retryCourseSupportWriterAdmission } from "./course-support-writer-admission";
 import { COURSE_DISPATCH_INCIDENT_SNAPSHOT_SELECT, isCourseDispatchIncidentSnapshotCurrent } from "./course-support-dispatch-snapshot";
 import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-verification";
@@ -63,6 +66,7 @@ export type CourseDispatchAudit = {
   ownerThreadId: string;
   childThreadId: string | null;
   launcherReceiptPath?: string;
+  controlledRetryOf?: string;
   baseSha: string;
   reservedAt: string;
   expiresAt: string;
@@ -405,21 +409,49 @@ async function revokeStaleBound(
   }
 }
 
+const SPORTS_HAUS_FAILED_ASSIGNMENT = "course-assignment-e95a61ec-95a8-437f-95c8-8b47cb13ae70";
+const SPORTS_HAUS_OFFERING_ID = "cmwedc5w6000508l6ebtykh6y";
+
+async function readSportsHausRetry(tx: Prisma.TransactionClient, assignmentRef: string) {
+  if (assignmentRef !== SPORTS_HAUS_FAILED_ASSIGNMENT) throw new Error("Sports Haus retry requires the original database failure assignment.");
+  const rows = await tx.automationRun.findMany({
+    where: { promptVersion: COURSE_DISPATCH_PROMPT_VERSION, OR: [
+      { audit: { path: ["controlledRetryOf"], equals: assignmentRef } },
+      { audit: { path: ["assignmentRef"], equals: assignmentRef } },
+    ] },
+    select: { status: true, outcome: true, audit: true }, take: 2,
+  });
+  if (rows.length !== 1) return null;
+  const row = rows[0];
+  const audit = parseCourseDispatchAudit(row.audit);
+  const recovery = row.audit as { simulatorFailureRecovery?: { failure?: { code?: string } } };
+  if (!audit || audit.controlledRetryOf || audit.assignmentRef !== assignmentRef ||
+      row.status !== "COMPLETED" || row.outcome !== "simulator_research_failed" ||
+      audit.state !== "CONSUMED" || audit.target.mode !== "SIMULATOR" ||
+      audit.target.offeringId !== SPORTS_HAUS_OFFERING_ID ||
+      audit.simulatorClaim?.phase !== "CLAIMED" || audit.simulatorClaim.plannedPaths.length ||
+      audit.simulatorClaim.releaseSha || !audit.target.offeringSourceFingerprint ||
+      recovery.simulatorFailureRecovery?.failure?.code !== "DATABASE_OPERATION_FAILED") return null;
+  return { incidentId: audit.target.incidentId, offeringId: SPORTS_HAUS_OFFERING_ID,
+    sourceFingerprint: audit.target.offeringSourceFingerprint, searchRefs: audit.target.searchRefs };
+}
+
 export async function planCourseSupportCourseDispatch(input: {
   ownerThreadId: string;
   baseSha: string;
   now?: Date;
   maxStarts?: number;
+  controlledRetryOf?: string;
 }) {
   assertIdentity(input.ownerThreadId, input.baseSha);
-  const maxStarts = input.maxStarts ?? 5;
+  const maxStarts = input.controlledRetryOf ? 1 : input.maxStarts ?? 5;
   if (!Number.isInteger(maxStarts) || maxStarts < 1 || maxStarts > 15) {
     throw new Error("Course dispatch maxStarts must be from 1 through 15.");
   }
   // Terminal learning failures enter the existing code-capable responder before
   // its ordinary bounded selection. This does not reopen a discovery attempt.
   const { reconcileDiscoveryEngineeringHandoffs } = await import("@/lib/course-discovery/engineering-repair");
-  await reconcileDiscoveryEngineeringHandoffs(input.now);
+  if (!input.controlledRetryOf) await reconcileDiscoveryEngineeringHandoffs(input.now);
   return runWithCourseSupportWriterTransitionLease(async () => transaction(async (tx) => {
     const now = input.now ?? await getCourseDispatchDatabaseNow(tx);
     const runs = await readRuns(tx, new Date(Math.floor(now.getTime() / TICK_MS) * TICK_MS));
@@ -428,10 +460,12 @@ export async function planCourseSupportCourseDispatch(input: {
     const { reconcileExpiredSimulatorResearchExecutions } = await import("./simulator-support-ownership");
     await reconcileExpiredSimulatorResearchExecutions(tx, now, runs);
     const tick = tickRef(now);
+    const retryOf = input.controlledRetryOf;
+    const retryTarget = retryOf ? await readSportsHausRetry(tx, retryOf) : null;
     const sameTick = runs.filter((run) => run.parsed?.tickRef === tick);
     const activeBatches = await tx.courseSupportBatch.findMany({
       where: { status: { in: ["CLAIMED", "IMPLEMENTING", "VERIFYING"] } },
-      select: { id: true, leaseExpiresAt: true, providerFamilyKey: true, failureFingerprint: true, summary: true, incidents: { select: { courseId: true } } },
+      select: { id: true, status: true, leaseExpiresAt: true, providerFamilyKey: true, failureFingerprint: true, summary: true, incidents: { select: { courseId: true } } },
     });
     const live = runs.filter((run) => run.status === "RUNNING" &&
       (["RESERVED", "STARTING", "BOUND"].includes(run.parsed?.state ?? "") ||
@@ -453,10 +487,10 @@ export async function planCourseSupportCourseDispatch(input: {
     // launch budget. The legacy background fallback must not interpret a zero
     // launch list as evidence that no active-alert course is waiting.
     if (availableStarts > 0 || live.length === 0) {
-      const outdoorCandidates = (await listCourseSupportDispatchCandidates(now, tx))
+      const outdoorCandidates = retryOf ? [] : (await listCourseSupportDispatchCandidates(now, tx))
         .filter(candidate => !activeBatches.some(batch => courseSupportAssignedCandidateConflicts(candidate, batch)));
-      const dueSimulatorCandidates = await listSimulatorSupportDispatchCandidates(now, tx);
-      const awakened = await reconcileSimulatorCapabilityWakeups(now, tx);
+      const dueSimulatorCandidates = retryOf && !retryTarget ? [] : await listSimulatorSupportDispatchCandidates(now, tx, retryTarget ?? undefined);
+      const awakened = !retryOf && await reconcileSimulatorCapabilityWakeups(now, tx);
       const simulatorCandidates = (awakened ? await listSimulatorSupportDispatchCandidates(now, tx) : dueSimulatorCandidates)
         .map(candidate => ({ ...candidate, selectionKey: `simulator:${candidate.offeringId}` }));
       const candidates = [...outdoorCandidates, ...simulatorCandidates];
@@ -546,6 +580,7 @@ export async function planCourseSupportCourseDispatch(input: {
       for (const { candidate, source } of selection.selected) {
         const audit: CourseDispatchAudit = {
           schemaVersion: 1,
+          ...(retryOf ? { controlledRetryOf: retryOf } : {}),
           tickRef: tick,
           assignmentRef: `course-assignment-${randomUUID()}`,
           state: "RESERVED",
@@ -599,7 +634,8 @@ export async function planCourseSupportCourseDispatch(input: {
         occupiedCourses.add(candidate.courseId);
       }
     }
-    const continuation = await collectCourseSupportContinuationCandidates({ ownerThreadId: input.ownerThreadId, now, runs, tx });
+    const continuation = retryOf ? { continuationItems: [], attentionCount: 0 } : await collectCourseSupportContinuationCandidates({ ownerThreadId: input.ownerThreadId, now, runs, tx });
+    const fullRepairContinuationItems = retryOf ? [] : await collectOwnedFullRepairContinuations(tx, activeBatches, now);
     return {
       tickRef: tick,
       activeCount: activeBatches.length,
@@ -618,11 +654,74 @@ export async function planCourseSupportCourseDispatch(input: {
       continuationItems: continuation.continuationItems,
       continuationAttentionCount: continuation.attentionCount,
       continuationEligibleCount: continuation.continuationItems.length,
-      launchItems: runs.filter((run) => run.parsed?.tickRef === tick && run.status === "RUNNING" && ["RESERVED", "STARTING", "BOUND"].includes(run.parsed?.state ?? ""))
+      fullRepairContinuationItems,
+      launchItems: runs.filter((run) => run.parsed?.tickRef === tick && (retryOf ? run.parsed.controlledRetryOf === retryOf && run.parsed.ownerThreadId === input.ownerThreadId && Boolean(retryTarget) : !run.parsed.controlledRetryOf) && run.status === "RUNNING" && ["RESERVED", "STARTING", "BOUND"].includes(run.parsed?.state ?? ""))
         .map((run) => ({ assignmentRef: run.parsed!.assignmentRef, state: run.parsed!.state,
           ...(run.parsed!.target.mode === "SIMULATOR" ? { mode: "SIMULATOR" as const } : {}) })),
     };
   }));
+}
+
+/** Read-only control projection. It never claims, extends or transfers a lease.
+ * Only the original Desktop owner may recover or continue its own packet. */
+async function collectOwnedFullRepairContinuations(tx: Prisma.TransactionClient,
+  activeBatches: readonly { id: string; status: string; summary: Prisma.JsonValue | null }[], now: Date) {
+  const ids = activeBatches.filter(batch => batch.status === "VERIFYING" &&
+    readCourseSupportRemediationDirective(batch.summary)?.reason === "FAILED_LEARNER_IMPLEMENTATION_HANDOFF").map(batch => batch.id);
+  if (!ids.length) return [];
+  const batches = await tx.courseSupportBatch.findMany({
+    where: { id: { in: ids }, status: "VERIFYING" },
+    select: { id: true, reference: true, ownerThreadId: true, baseSha: true, releaseSha: true, summary: true,
+      incidents: { select: { courseId: true, incidentId: true, cycle: true, result: true, course: true,
+        incident: { select: { cycle: true, status: true, activeBatchId: true, providerFamilyKey: true, failureFingerprint: true } } } } },
+  });
+  const refs = batches.flatMap(batch => {
+    const summary = batch.summary && typeof batch.summary === "object" && !Array.isArray(batch.summary) ? batch.summary : {};
+    return typeof summary.dispatchAssignmentRef === "string" && /^course-assignment-[a-f0-9-]{36}$/u.test(summary.dispatchAssignmentRef)
+      ? [summary.dispatchAssignmentRef] : [];
+  });
+  if (!refs.length) return [];
+  // Consumed outdoor launch runs are complete; they intentionally are not in
+  // the running-reservation inventory. Read only these original audit refs.
+  const originalRuns = await tx.automationRun.findMany({ where: { promptVersion: COURSE_DISPATCH_PROMPT_VERSION,
+    OR: refs.map(ref => ({ audit: { path: ["assignmentRef"], equals: ref } })) }, select: { audit: true }, take: refs.length + 1 });
+  if (originalRuns.length > refs.length) throw new Error("Original full-repair dispatch provenance is ambiguous.");
+  const audits = originalRuns.map(run => parseCourseDispatchAudit(run.audit)).filter((audit): audit is CourseDispatchAudit =>
+    Boolean(audit && audit.state === "CONSUMED" && audit.target.mode === undefined && audit.childThreadId && audit.launcherReceiptPath));
+  const items = [];
+  for (const batch of batches) {
+    const summary = batch.summary && typeof batch.summary === "object" && !Array.isArray(batch.summary) ? batch.summary : {};
+    const audit = audits.find(value => value.assignmentRef === summary.dispatchAssignmentRef &&
+      value.childThreadId === batch.ownerThreadId && value.baseSha === batch.baseSha);
+    const entry = batch.incidents[0];
+    // Implementation-bearing recovery keeps its stricter original protocol.
+    if (!audit || batch.incidents.length !== 1 || !entry || batch.releaseSha !== batch.baseSha ||
+        !Array.isArray(summary.plannedPaths) || summary.plannedPaths.length !== 0 ||
+        entry.courseId !== audit.target.courseId || entry.incidentId !== audit.target.incidentId ||
+        entry.cycle !== audit.target.cycle || entry.incident.cycle !== entry.cycle ||
+        entry.incident.status !== "AUTO_INVESTIGATING" || entry.incident.activeBatchId !== batch.id ||
+        entry.incident.providerFamilyKey !== audit.target.providerFamilyKey ||
+        entry.incident.failureFingerprint !== audit.target.failureFingerprint) continue;
+    const directive = readCourseSupportRemediationDirective(batch.summary);
+    const claim = readCourseSupportRemediationClaimAttempt({ summary: batch.summary, courseId: entry.courseId, expectedAttemptCount: 1 });
+    if (!directive || !claim || !allowsRetainedFullRepairResearch({ reason: directive.reason, workMode: directive.workMode,
+      batchStatus: "VERIFYING", result: entry.result, allowedActions: claim.actionPlan?.allowedActions ?? [] }) ||
+      claim.providerSnapshotFingerprint !== buildCourseSupportProviderSnapshotFingerprint(entry.course)) continue;
+    const searches = await tx.coursePreference.findMany({
+      where: { courseId: entry.courseId, teeSearchId: { in: audit.target.searchRefs.map(ref => ref.id) }, teeSearch: { mode: "OUTDOOR" } },
+      select: { teeSearch: { select: COURSE_DISPATCH_SOURCE_SELECT } },
+    });
+    if (searches.length !== audit.target.searchRefs.length || searches.some(({ teeSearch }) => {
+      const ref = audit.target.searchRefs.find(value => value.id === teeSearch.id);
+      return !ref || !isCurrentCourseDispatchSource({ ref, search: teeSearch, trafficClass: audit.target.trafficClass,
+        courseTimeZone: entry.course.timeZone, now });
+    })) continue;
+    items.push({ kind: "OWNED_OUTDOOR_FULL_REPAIR" as const, assignmentRef: audit.assignmentRef,
+      threadId: audit.childThreadId!, launcherReceiptPath: audit.launcherReceiptPath!, batchReference: batch.reference,
+      baseSha: batch.baseSha, releaseSha: batch.releaseSha });
+    if (items.length === 5) break;
+  }
+  return items;
 }
 
 async function transition(input: { ownerThreadId: string; assignmentRef: string; childThreadId?: string; launcherReceiptPath?: string; confirmedNotCreated?: boolean; next: DispatchState }) {
@@ -779,7 +878,7 @@ async function collectCourseSupportContinuationCandidates(input: {
   const { readSimulatorSupportContinuationContext } = await import("./simulator-support-ownership");
   for (const run of input.runs) {
     const audit = run.parsed;
-    if (run.status !== "RUNNING" || !audit || audit.target.mode !== "SIMULATOR" || audit.state !== "CONSUMED") continue;
+    if (run.status !== "RUNNING" || !audit || audit.controlledRetryOf || audit.target.mode !== "SIMULATOR" || audit.state !== "CONSUMED") continue;
     if (!audit.childThreadId || audit.childThreadId === input.ownerThreadId) { attentionCount += 1; continue; }
     const ledger = readCourseSupportContinuationLedger(audit.simulatorContinuation);
     if (ledger.receipts.some(receipt => receipt.status === "PENDING")) { attentionCount += 1; continue; }

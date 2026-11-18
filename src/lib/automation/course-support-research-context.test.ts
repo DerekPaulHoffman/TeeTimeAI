@@ -196,6 +196,66 @@ function fixture() {
 describe("owned course-support research context", () => {
   beforeEach(() => database.batchFindFirst.mockReset());
 
+  it.each([401, 403])("retains HTTP %s evidence without blocking repair of the discovery tool itself", async status => {
+    const batch = fixture();
+    batch.summary.remediation.reason = "FAILED_LEARNER_IMPLEMENTATION_HANDOFF";
+    batch.summary.remediation.attempts[0].actionPlan.allowedActions.push("INVESTIGATE_PUBLIC_SOURCE");
+    Object.assign(batch.incidents[0].course.automationDiscoveries[0].evidence, { accessBarriers: [{ status }] });
+    database.batchFindFirst.mockResolvedValue(batch);
+    const context = await getOwnedCourseSupportResearchContext(input);
+    expect(context).toMatchObject({ outcome: "ready", researchContextV1: { availabilityContract: { status: "BARRIER" }, accessBarriers: expect.arrayContaining([`HTTP_${status}`]) } });
+    if (context.outcome !== "ready") throw Error("Expected unchanged owned context");
+    expect(await validateOwnedCourseSupportResearchContext({ ...input, contextDigest: context.researchContextV1.contextDigest }))
+      .toMatchObject({ outcome: "valid", discoveryToolingRepairMayProceed: true,
+        discoveryToolingRepairScope: "TOOLING_ONLY_NO_ACCESS_OVERRIDE",
+        implementationMayProceedFromResearch: false, furtherBoundedInspectionRequired: true, monitoringProofRecorded: false });
+    expect(context.researchContextV1.accessBarriers).toEqual(expect.arrayContaining([`HTTP_${status}`, "RESTRICTED_NETWORK"]));
+  });
+
+  it("permits owned discovery-tool repair before a missing provider contract, without granting provider proof", async () => {
+    const batch = fixture();
+    batch.summary.remediation.reason = "FAILED_LEARNER_IMPLEMENTATION_HANDOFF";
+    batch.summary.remediation.attempts[0].actionPlan.allowedActions.push("INVESTIGATE_PUBLIC_SOURCE");
+    batch.incidents[0].course.automationDiscoveries = [];
+    database.batchFindFirst.mockResolvedValue(batch);
+    const context = await getOwnedCourseSupportResearchContext(input);
+    if (context.outcome !== "ready") throw new Error("Expected owner context");
+    expect(await validateOwnedCourseSupportResearchContext({ ...input, contextDigest: context.researchContextV1.contextDigest }))
+      .toMatchObject({ outcome: "valid", discoveryToolingRepairMayProceed: true,
+        implementationMayProceedFromResearch: false, monitoringProofRecorded: false });
+    batch.incidents[0].course.bookingAccessMode = "ACCOUNT_REQUIRED";
+    expect(await validateOwnedCourseSupportResearchContext({ ...input, contextDigest: context.researchContextV1.contextDigest }))
+      .toMatchObject({ outcome: "authority_drift" });
+  });
+
+  it.each(["VERIFYING", "IMPLEMENTING"])("keeps negative verification evidence while permitting a fresh %s context for the same full repair", async status => {
+    const batch = fixture();
+    batch.summary.remediation.reason = "FAILED_LEARNER_IMPLEMENTATION_HANDOFF";
+    batch.summary.remediation.attempts[0].actionPlan.allowedActions.push("INVESTIGATE_PUBLIC_SOURCE");
+    database.batchFindFirst.mockResolvedValue(batch);
+    const before = await getOwnedCourseSupportResearchContext(input);
+    if (before.outcome !== "ready") throw new Error("Expected original owner context");
+    batch.status = status;
+    batch.incidents[0].result = "STALE_EVIDENCE";
+    const after = await getOwnedCourseSupportResearchContext(input);
+    expect(after.outcome).toBe("ready");
+    expect(batch.incidents[0].result).toBe("STALE_EVIDENCE");
+    expect(await validateOwnedCourseSupportResearchContext({ ...input, contextDigest: before.researchContextV1.contextDigest }))
+      .toMatchObject({ outcome: "authority_drift", reasonCode: "RESEARCH_CONTEXT_CHANGED" });
+    batch.incidents[0].course.website = "https://changed-course.example/";
+    expect(await getOwnedCourseSupportResearchContext(input)).toMatchObject({ outcome: "authority_drift" });
+  });
+
+  it.each(["IMPLEMENTATION_REQUIRED", "NEWLY_CONFIRMED"])("does not reopen stale research on ordinary %s routes", async reason => {
+    const batch = fixture();
+    batch.status = "VERIFYING";
+    batch.incidents[0].result = "STALE_EVIDENCE";
+    batch.summary.remediation.reason = reason;
+    batch.summary.remediation.attempts[0].actionPlan.allowedActions.push("INVESTIGATE_PUBLIC_SOURCE");
+    database.batchFindFirst.mockResolvedValue(batch);
+    expect(await getOwnedCourseSupportResearchContext(input)).toMatchObject({ outcome: "authority_drift" });
+  });
+
   it("gates exact identity and URLs by the active owner and emits candidate-only read evidence", async () => {
     database.batchFindFirst.mockResolvedValue(fixture());
     const result = await getOwnedCourseSupportResearchContext(input);

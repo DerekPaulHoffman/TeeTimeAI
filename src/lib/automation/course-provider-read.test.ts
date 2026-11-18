@@ -185,7 +185,7 @@ describe("fetchCourseTeeSheet", () => {
     await expect(fetchCourseTeeSheet(course, date, 2, false)).rejects.toThrow(/Public class could not be verified/u);
     expect(foreupPublicMocks.readForeupStandardPublicSchedule).toHaveBeenCalledWith({
       bookingUrl: course.bookingMetadata && (course.bookingMetadata as { bookingBaseUrl: string }).bookingBaseUrl,
-      courseName: course.name, scheduleId: 792, bookingClassId: undefined,
+      courseName: course.name, scheduleId: 792, bookingClassId: undefined, date,
     });
     expect(adapterMocks.fetchForeupTeeSheet).not.toHaveBeenCalled();
   });

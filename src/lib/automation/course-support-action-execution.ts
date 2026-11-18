@@ -104,6 +104,7 @@ export function buildCourseSupportActionExecution(input: {
           );
     case "SEARCH_FOR_OFFICIAL_SOURCE":
     case "INSPECT_PROVIDER_CONTRACT":
+    case "INVESTIGATE_PUBLIC_SOURCE":
     case "WAIT_FOR_MATERIAL_CHANGE":
       return actionExecution(
         input.action,
@@ -203,6 +204,7 @@ function isValidCourseSupportActionExecutionCombination(
         [
           "SEARCH_FOR_OFFICIAL_SOURCE",
           "INSPECT_PROVIDER_CONTRACT",
+          "INVESTIGATE_PUBLIC_SOURCE",
           "WAIT_FOR_MATERIAL_CHANGE",
         ].includes(execution.action)
       );

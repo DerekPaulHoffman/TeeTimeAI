@@ -3,6 +3,7 @@ import { excludeDiscoveryPilotTargets } from "@/lib/course-discovery/legacy-excl
 import { isGeneralDiscoveryEnabled } from "@/lib/course-discovery/config";
 
 import { Prisma } from "@prisma/client";
+import { isDataOnlyFullRepair } from "./course-support-full-repair";
 import type {
   AutomationReason,
   BookingMethod,
@@ -950,6 +951,7 @@ export function isRetryableCourseSupportWriteConflict(error: unknown) {
   return (
     message.includes("deadlock detected") ||
     message.includes("write conflict") ||
+    message.includes("could not serialize access") ||
     message.includes("serialization failure")
   );
 }
@@ -988,9 +990,7 @@ export async function withCourseSupportWriteConflictRetry<T>(
 
 function needsEarlyDiscoveryHandoff(attemptLedger: unknown, cycle: number) {
   const assessment = assessAutomationPlaybook(attemptLedger, cycle);
-  return assessment.valid && assessment.conclusion === "INCOMPLETE" &&
-    (assessment.nextStage === "OFFICIAL_IDENTITY" || assessment.nextStage === "TYPED_ADAPTER" ||
-      assessment.nextStage === "OFFICIAL_HTTP_DISCOVERY" || assessment.nextStage === "HTTP_ADAPTER_RETRY");
+  return assessment.valid && (assessment.conclusion === "INCOMPLETE" || assessment.conclusion === "UNRESOLVED_EXHAUSTED");
 }
 
 async function loadEarlyDiscoveryHandoffs(
@@ -1009,7 +1009,7 @@ async function loadEarlyDiscoveryHandoffs(
   if (!isGeneralDiscoveryEnabled()) return ids;
   const { currentDiscoveryEngineeringHandoff } = await import("@/lib/course-discovery/engineering-repair");
   for (const incident of incidents) {
-    if (incident.confirmedAt !== null || !needsEarlyDiscoveryHandoff(incident.attemptLedger, incident.cycle) ||
+    if (!needsEarlyDiscoveryHandoff(incident.attemptLedger, incident.cycle) ||
         deriveCourseSupportCurrentDemand(incident.course.preferences, { timeZone: incident.course.timeZone, now }).activeRealSearchCount === 0) continue;
     const handoff = await currentDiscoveryEngineeringHandoff(tx, { courseId: incident.courseId }, now);
     if (handoff?.receipt.incidentId === incident.id) ids.add(incident.id);
@@ -1673,7 +1673,9 @@ function assertCourseSupportImplementationVerificationReady(input: {
   deployedAt: Date | null;
 }) {
   const remediation = readCourseSupportRemediationDirective(input.summary);
-  if (!remediation?.requiresImplementationPath) {
+  const fullRepairHasCode = remediation?.reason === "FAILED_LEARNER_IMPLEMENTATION_HANDOFF" &&
+    readBatchPlannedPaths(input.summary).length > 0;
+  if (!remediation?.requiresImplementationPath && !fullRepairHasCode) {
     return;
   }
   if (
@@ -3660,6 +3662,8 @@ export function buildCourseSupportReleaseHistory(input: {
         recheckDispatchedAt:
           input.previousRecheckDispatchedAt?.toISOString() ?? null,
         recheckDispatch: summary.recheckDispatch ?? null,
+        ...(summary.verificationStageDeadlineGrant
+          ? { verificationStageDeadlineGrant: summary.verificationStageDeadlineGrant } : {}),
         incidentVerifications: input.previousIncidentVerifications.map(
           (entry) => ({
             ordinal: entry.ordinal,
@@ -6436,6 +6440,7 @@ export async function appendCourseSupportBatchPath(input: {
         status: batch.status,
         releaseSha: batch.releaseSha,
         plannedPaths: currentPlannedPaths,
+        allowFollowUpImplementation: readCourseSupportRemediationDirective(batch.summary)?.reason === "FAILED_LEARNER_IMPLEMENTATION_HANDOFF",
       })
     ) {
       return { sealed: true as const };
@@ -6547,6 +6552,7 @@ export function canAppendCourseSupportBatchPath(input: {
   status: CourseSupportBatchStatus;
   releaseSha: string | null;
   plannedPaths: string[];
+  allowFollowUpImplementation?: boolean;
 }) {
   if (input.status === "CLAIMED" || input.status === "IMPLEMENTING") {
     return true;
@@ -6554,8 +6560,7 @@ export function canAppendCourseSupportBatchPath(input: {
 
   return (
     input.status === "VERIFYING" &&
-    input.releaseSha === null &&
-    input.plannedPaths.length === 0
+    ((input.releaseSha === null && input.plannedPaths.length === 0) || input.allowFollowUpImplementation === true)
   );
 }
 
@@ -6632,10 +6637,12 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
               verifiedIncidentUpdatedAt: true,
               verificationRequests: {
                 take: 1,
+                orderBy: [{ createdAt: "desc" }, { id: "desc" }],
                 select: {
                   id: true,
                   status: true,
                   startedAt: true,
+                  releaseSha: true,
                 },
               },
               incident: {
@@ -6668,11 +6675,13 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
       }
 
       const summary = asJsonObject(batch.summary);
+      const remediationDirective = readCourseSupportRemediationDirective(batch.summary);
+      const fullRepair = remediationDirective?.reason === "FAILED_LEARNER_IMPLEMENTATION_HANDOFF";
       if (
         Object.prototype.hasOwnProperty.call(
           summary,
           COURSE_SUPPORT_VERIFICATION_STAGE_DEADLINE_GRANT_KEY,
-        )
+        ) && (!fullRepair || asJsonObject(summary[COURSE_SUPPORT_VERIFICATION_STAGE_DEADLINE_GRANT_KEY]).releaseSha === batch.releaseSha)
       ) {
         return {
           outcome: "REPLAYED" as const,
@@ -6682,9 +6691,6 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
         };
       }
 
-      const remediationDirective = readCourseSupportRemediationDirective(
-        batch.summary,
-      );
       const targets = batch.incidents.flatMap((entry) => {
         const playbook = assessAutomationPlaybook(
           entry.incident.attemptLedger,
@@ -6726,6 +6732,7 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
             stageAssessment.attemptCount === 0,
         );
         const grantableStageState =
+          fullRepair ||
           directSourceStage ||
           unstartedBrowserStage ||
           assignedDetachedStage ||
@@ -6736,9 +6743,9 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
           (playbook.conclusion === "INCOMPLETE" ||
             concludedRecoveryStage !== null) &&
           stage !== null &&
-          stage === remediationDirective?.playbookStage &&
+          (stage === remediationDirective?.playbookStage || fullRepair) &&
           grantableStageState &&
-          entry.verificationRequests.length === 0
+          (fullRepair ? !entry.verificationRequests.some(request => request.releaseSha === batch.releaseSha) : entry.verificationRequests.length === 0)
           ? [
               {
                 entry,
@@ -6817,7 +6824,7 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
                 batchId: input.batchId,
                 incidentId: incident.id,
                 cycle: target.entry.cycle,
-                verificationRequests: { none: {} },
+                  verificationRequests: { none: fullRepair ? { releaseSha: batch.releaseSha ?? undefined } : {} },
               },
             },
           },
@@ -6848,6 +6855,7 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
       ).map(([, grant]) => grant);
       const marker = {
         schemaVersion: 1,
+        ...(fullRepair ? { releaseSha: batch.releaseSha } : {}),
         grantedAt: databaseNow.toISOString(),
         incidentCount: targets.length,
         stages: stageGrants,
@@ -8320,7 +8328,8 @@ function prepareCourseSupportHeartbeat(
     releaseChanged && input.releaseAdvanceProof
       ? normalizeCourseSupportReleaseProvenance(input.releaseAdvanceProof)
       : null;
-  if (releaseChanged && remediationDirective?.requiresImplementationPath) {
+  if (releaseChanged && (remediationDirective?.requiresImplementationPath ||
+      (remediationDirective?.reason === "FAILED_LEARNER_IMPLEMENTATION_HANDOFF" && plannedPaths.length > 0))) {
     const expectedBranch =
       typeof summary.branch === "string" ? summary.branch : null;
     const committedPaths = releaseProvenance?.committedPaths ?? [];
@@ -10193,6 +10202,7 @@ const COURSE_SUPPORT_DECISION_ROUTING_REASONS = new Set<
   "NO_PLAYBOOK_STAGE_AVAILABLE",
   "IMPLEMENTATION_REQUIRED",
   "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF",
+  "FAILED_LEARNER_IMPLEMENTATION_HANDOFF",
   "CLASSIFICATION_READY",
   "UNCHANGED_ATTEMPT_ALREADY_RECORDED",
   "STARTED_LOCAL_READER_CONTINUATION",
@@ -13292,7 +13302,7 @@ async function closeoutCourseSupportBatchAttempt(
     }
     customerRecovery = await readCustomerRecovery(
       tx, batch,
-      normalizedEntries.filter(entry => entry.normalizedResult === "RESTORED").map(entry => entry.courseId),
+      normalizedEntries.filter(entry => entry.normalizedResult !== "FINAL_DISPOSITION").map(entry => entry.courseId),
       now,
     );
     const courseMonitoringAvailable = hasCourseMonitoringPersistence(tx);
@@ -15839,7 +15849,14 @@ export async function recoverCourseSupportBatch(input: {
           retryIncidents.flatMap((entry) =>
             implementationActionEntryIds.has(entry.id) &&
             !strictImplementationProofRecorded &&
-            !supersededImplementationEntryIds.has(entry.id)
+            !supersededImplementationEntryIds.has(entry.id) &&
+            !isDataOnlyFullRepair({
+              reason: readCourseSupportRemediationDirective(batch.summary)?.reason ?? null,
+              workMode: readCourseSupportRemediationDirective(batch.summary)?.workMode ?? "",
+              requiresImplementationPath: readCourseSupportRemediationDirective(batch.summary)?.requiresImplementationPath !== false,
+              plannedPaths: readBatchPlannedPaths(batch.summary), baseSha: batch.baseSha, releaseSha: batch.releaseSha,
+              allowedActions: claimedAttemptByRetryEntryId.get(entry.id)?.actionPlan?.allowedActions ?? [],
+            })
               ? [entry.id]
               : []
           )
@@ -16120,6 +16137,7 @@ export async function recoverCourseSupportBatch(input: {
               reasons: [
                 "Legacy responder search execution was proven empty; run recovery again against the retained fence.",
               ],
+              recoveryProgress: { kind: "COMMITTED_SEARCH_EXECUTION_FENCE_ADOPTION" as const, revision: batch.revision + 1 },
               threadDisposition: "KEEP_VISIBLE" as const,
               archiveReason:
                 "Responder recovery needs one exact fence pass before closeout.",
@@ -16279,6 +16297,7 @@ export async function recoverCourseSupportBatch(input: {
               reasons: [
                 "Fresh search execution evidence was retained; run recovery again against the adopted fence.",
               ],
+              recoveryProgress: { kind: "COMMITTED_SEARCH_EXECUTION_FENCE_ADOPTION" as const, revision: batch.revision + 1 },
               threadDisposition: "KEEP_VISIBLE" as const,
               archiveReason:
                 "Responder recovery needs one settled fence pass before closeout.",
@@ -19677,6 +19696,8 @@ function buildCourseSupportCandidates(
         priorRefinedImplementationAttempt?.approach ?? priorAttempt?.approach ?? null,
       providerContractEvidenceAvailable:
         currentProviderContractEvidence !== null,
+      currentLearnerEngineeringHandoff: earlyDiscoveryHandoffs?.has(incident.id) === true &&
+        course.monitoringMode !== "LOCAL_READER_ONLY",
       materialChanges: deferredFailureHandoff
         ? {
             providerSnapshotChanged: false,
@@ -19727,7 +19748,7 @@ function buildCourseSupportCandidates(
       incident,
       now,
     });
-    if (retainedSourceRecovery) {
+    if (retainedSourceRecovery && routedRemediation.reason !== "FAILED_LEARNER_IMPLEMENTATION_HANDOFF") {
       routedRemediation = {
         ...routedRemediation,
         workMode: "ADVANCE_DISCOVERY",
@@ -19749,8 +19770,9 @@ function buildCourseSupportCandidates(
         },
       };
     }
-    if (hasUnresolvedCourseSupportSourceResearch({ course, incident, now }) ||
-      hasConsumedSourceResearchBehindNeutralDiscoveryWindow({ course, incident, currentCycleBatchIncidents, now })) {
+    if (routedRemediation.reason !== "FAILED_LEARNER_IMPLEMENTATION_HANDOFF" &&
+      (hasUnresolvedCourseSupportSourceResearch({ course, incident, now }) ||
+      hasConsumedSourceResearchBehindNeutralDiscoveryWindow({ course, incident, currentCycleBatchIncidents, now }))) {
       routedRemediation = {
         ...routedRemediation,
         workMode: "WAIT_FOR_MATERIAL_CHANGE",

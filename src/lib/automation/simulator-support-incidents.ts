@@ -4,10 +4,69 @@ import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-f
 import { createSimulatorSupportIntentDigest, isCurrentSimulatorSupportSource, isValidSimulatorEngineeringAuthority, isValidSimulatorSupportClaim, SIMULATOR_SUPPORT_SOURCE_SELECT, type SimulatorEngineeringAuthority } from "./simulator-support-policy";
 import type { CourseDispatchAudit } from "./course-support-course-dispatch";
 import { simulatorCapabilityWakeupReceipt } from "./simulator-capability-wakeup";
+import { getSimulatorResearchRetryGuide, readSimulatorResearchFailureMemory, readSimulatorResearchState } from "./simulator-support-research-policy";
 
 const DISPATCH_PROMPT_VERSION = "course-support-course-dispatch-v1";
 const ENGINEERING_HISTORY_LIMIT = 64;
 const ENGINEERING_CLOSEOUTS = new Set(["simulator_retryable_failed", "simulator_research_failed", "simulator_source_withdrawn", "simulator_source_changed", "simulator_monitoring_restored", "simulator_engineering_customer_priority", "simulator_engineering_monitoring_verified"]);
+
+const STARTUP_FAILURES = new Set(["worker_startup_expired", "worker_claim_expired"]);
+
+async function hasExhaustedSimulatorDispatch(tx: Prisma.TransactionClient, incidentId: string, fingerprint: string,
+  sources: { officialUrl: string | null; bookingUrl: string | null; evidenceUrl: string | null }, now: Date) {
+  const rows = await tx.automationRun.findMany({
+    where: { promptVersion: DISPATCH_PROMPT_VERSION, status: "COMPLETED", completedAt: { lte: now },
+      outcome: { notIn: ["reservation_expired", "base_changed_before_claim"] },
+      AND: [
+        { audit: { path: ["target", "incidentId"], equals: incidentId } },
+        { OR: [
+          { audit: { path: ["simulatorClaim", "sourceFingerprint"], equals: fingerprint } },
+          { audit: { path: ["target", "offeringSourceFingerprint"], equals: fingerprint } },
+        ] },
+      ] },
+    select: { outcome: true, audit: true, completedAt: true },
+    orderBy: [{ completedAt: "desc" }, { id: "desc" }], take: 2,
+  });
+  const [latest, previous] = rows;
+  if (typeof (latest?.audit as { controlledRetryOf?: unknown } | null)?.controlledRetryOf === "string") return true;
+  if (!latest) return false;
+  if (STARTUP_FAILURES.has(latest.outcome ?? "")) return previous?.outcome === latest.outcome;
+  if (latest.outcome !== "simulator_research_failed" && latest.outcome !== "simulator_retryable_failed") return false;
+  const { parseCourseDispatchAudit } = await import("./course-support-course-dispatch");
+  const audit = parseCourseDispatchAudit(latest.audit);
+  const claim = audit?.simulatorClaim;
+  if (!audit || audit.state !== "CONSUMED" || !audit.target.offeringId || claim?.phase !== "CLAIMED" ||
+      claim.sourceFingerprint !== fingerprint || claim.releaseSha || claim.plannedPaths.length) return false;
+  if (latest.completedAt && simulatorCapabilityWakeupReceipt({ audit, incidentId, courseId: audit.target.courseId,
+    offeringId: audit.target.offeringId, sourceFingerprint: fingerprint, completedAt: latest.completedAt, now })) return false;
+  if (previous?.outcome === latest.outcome) {
+    const prior = parseCourseDispatchAudit(previous.audit)?.simulatorClaim;
+    if (prior?.phase === "CLAIMED" && prior.sourceFingerprint === fingerprint && !prior.releaseSha && !prior.plannedPaths.length) return true;
+  }
+  // A failed rendered read or a concrete public-route failure already has a
+  // durable owner result. A cooldown alone supplies no new route or evidence.
+  let state;
+  try {
+    state = readSimulatorResearchState(audit.simulatorResearch, fingerprint);
+  } catch {
+    // An unreadable closeout cannot justify launching another worker.
+    return true;
+  }
+  const latestRead = state.history.at(-1);
+  if (latestRead?.rendered && [401, 403, 404].includes(latestRead.httpStatus) &&
+      latestRead.requestedUrl === sources.bookingUrl && state.sourceFingerprint === fingerprint) return true;
+  const attempted = state.history.some(entry =>
+    (entry.sourceFingerprint ?? (claim.originalSourceFingerprint === fingerprint ? fingerprint : null)) === fingerprint &&
+    (entry.rendered && entry.outcome === "READ" ||
+      entry.failure?.stage === "PUBLIC_READ" && ["ACCESS", "BUDGET", "NETWORK", "BROWSER", "TOOLING", "UNKNOWN"].includes(entry.failure.category) ||
+      [401, 403, 404].includes(entry.httpStatus) ||
+      entry.configurationDiagnostic?.reason === "PUBLIC_PROVIDER_CONFIG_REJECTED"));
+  if (!attempted || state.inFlight) return false;
+  const memory = readSimulatorResearchFailureMemory(audit.simulatorResearchPriorFailures);
+  return !getSimulatorResearchRetryGuide({ ...sources, state, now,
+    priorFailedRoutes: memory?.sourceFingerprint === fingerprint ? memory.routes : [],
+  }).bookingResearchRequired;
+}
 
 function consumedEngineeringProvenance(row: { kind: string; status: string; outcome: string | null; completedAt: Date | null }, audit: CourseDispatchAudit | null, now: Date) {
   if (!audit || row.kind !== "OTHER" || row.status !== "COMPLETED" || !row.completedAt || row.completedAt > now ||
@@ -118,10 +177,10 @@ export async function resolveUnownedSimulatorSupportIncident(tx: Prisma.Transact
   await tx.simulatorSupportIncident.updateMany({ where: { offeringId: input.offeringId, status: { not: "RESOLVED" } }, data: { status: "RESOLVED", resolvedAt: input.now, retryAt: null } });
 }
 
-export async function listSimulatorSupportDispatchCandidates(now: Date, tx: Prisma.TransactionClient) {
+export async function listSimulatorSupportDispatchCandidates(now: Date, tx: Prisma.TransactionClient, controlledRetry?: { incidentId: string; offeringId: string; sourceFingerprint: string; searchRefs: CourseDispatchAudit["target"]["searchRefs"] }) {
   const observedIncidents = await tx.simulatorSupportIncident.findMany({
-    where: { status: "AUTO_INVESTIGATING", OR: [{ retryAt: null }, { retryAt: { lte: now } }], offering: { kind: "SIMULATOR", active: true, publicAccessStatus: { not: "NOT_PUBLIC" } } },
-    include: { offering: { include: { course: { select: { timeZone: true } } } } },
+    where: { ...(controlledRetry ? { id: controlledRetry.incidentId, offeringId: controlledRetry.offeringId } : {}), status: "AUTO_INVESTIGATING", OR: [{ retryAt: null }, { retryAt: { lte: now } }], offering: { kind: "SIMULATOR", active: true, publicAccessStatus: { not: "NOT_PUBLIC" } } },
+    include: { offering: { include: { course: { select: { timeZone: true, website: true } } } } },
     orderBy: [{ firstSeenAt: "asc" }, { id: "asc" }], take: 128,
   });
   if (observedIncidents.length === 128) throw new Error("Simulator support queue reached its bounded read limit.");
@@ -134,12 +193,18 @@ export async function listSimulatorSupportDispatchCandidates(now: Date, tx: Pris
   if (preferences.length === 1024) throw new Error("Simulator support source read reached its bound.");
   const candidates = [];
   for (const incident of incidents) {
-    const sources = preferences.filter(preference => preference.offeringId === incident.offeringId).flatMap(({ teeSearch }) => {
+    const currentSources = preferences.filter(preference => preference.offeringId === incident.offeringId).flatMap(({ teeSearch }) => {
       const trafficClass = ["TEST", "AUTOMATION"].includes(teeSearch.trafficClass) ? "SYNTHETIC" as const : "REAL" as const;
       const ref = { id: teeSearch.id, scheduleVersion: teeSearch.scheduleVersion, alertGeneration: teeSearch.alertGeneration, intentDigest: createSimulatorSupportIntentDigest(teeSearch) };
       return isCurrentSimulatorSupportSource({ search: teeSearch, ref, offeringId: incident.offeringId, trafficClass, timeZone: incident.offering.course.timeZone, now }) ? [{ ...ref, trafficClass: teeSearch.trafficClass }] : [];
     }).sort((a, b) => Number(["TEST", "AUTOMATION"].includes(a.trafficClass)) - Number(["TEST", "AUTOMATION"].includes(b.trafficClass)) || a.id.localeCompare(b.id));
     const sourceFingerprint = getSimulatorOfferingSourceFingerprint(incident.offering);
+    const sources = controlledRetry ? currentSources.filter(source => controlledRetry.searchRefs.some(ref =>
+      ref.id === source.id && ref.scheduleVersion === source.scheduleVersion &&
+      ref.alertGeneration === source.alertGeneration && ref.intentDigest === source.intentDigest)) : currentSources;
+    if (controlledRetry && (sourceFingerprint !== controlledRetry.sourceFingerprint || !sources.length)) continue;
+    if (!controlledRetry && await hasExhaustedSimulatorDispatch(tx, incident.id, sourceFingerprint, { officialUrl: incident.offering.course.website,
+      bookingUrl: incident.offering.bookingUrl, evidenceUrl: incident.offering.evidenceUrl }, now)) continue;
     const engineering = sources.length ? null : await findSimulatorEngineeringAuthority(tx, { incidentId: incident.id, courseId: incident.offering.courseId,
       offeringId: incident.offeringId, offeringSourceFingerprint: sourceFingerprint }, now);
     if (!sources.length && !engineering) continue;

@@ -27,6 +27,7 @@ import { FOREUP_STANDARD_PUBLIC_SCOPE } from "@/lib/automation/foreup-public-con
 import { fiveIronMetadataSchema } from "./five-iron-source";
 import { golfBookMetadataSchema } from "./golfbook-source";
 import { skeddaMetadataSchema } from "./skedda-source";
+import { playbyPointMetadataSchema } from "./playbypoint-public";
 import { youCanBookMetadataSchema } from "./youcanbook-public";
 import { simplyScheduleMetadataSchema } from "./simply-schedule-public";
 import { clubEssentialPublicMetadata, teeQuestPublicMetadata } from "./outdoor-public-executor";
@@ -99,6 +100,7 @@ export const existingAdapterMetadataSchema = z.discriminatedUnion("family", [
   fiveIronMetadataSchema,
   golfBookMetadataSchema,
   skeddaMetadataSchema,
+  playbyPointMetadataSchema,
   youCanBookMetadataSchema,
   simplyScheduleMetadataSchema,
 ]);

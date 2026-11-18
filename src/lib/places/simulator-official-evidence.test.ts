@@ -8,6 +8,24 @@ describe("official simulator intake corroboration", () => {
     expect(await readOfficialSimulatorEvidence("https://clubhouse.example/", undefined, { fetch, lease })).toBe("LIKELY");
     expect(fetch).toHaveBeenCalledWith("https://clubhouse.example/", expect.objectContaining({ method: "GET", credentials: "omit" }));
   });
+  it("uses one official About page when the multi-sport homepage does not describe its simulators", async () => {
+    const fetch = vi.fn(async (url: string) => new Response(url.endsWith("/about")
+      ? '<h1>About the sports club</h1><p>Two Trackman golf simulators.</p><a href="/play">Book now</a>'
+      : '<nav><a href="/about">About</a></nav><h1>Padel, pickleball and golf</h1><footer><a href="/about">About us</a></footer>',
+    { headers: { "content-type": "text/html" } }));
+    await expect(readOfficialSimulatorEvidence("https://clubhouse.example/", undefined, { fetch, lease })).resolves.toBe("LIKELY");
+    expect(fetch.mock.calls.map(([url]) => url)).toEqual(["https://clubhouse.example/", "https://clubhouse.example/about"]);
+  });
+  it.each([
+    '<nav><a href="https://other.example/about">About</a></nav>',
+    '<nav><a href="/about?token=1">About</a></nav>',
+    '<nav hidden><a href="/about">About</a></nav>',
+    '<a href="/about">About</a><a href="/about-us">About us</a>',
+  ])("does not follow an untrusted or ambiguous About link", async html => {
+    const fetch = vi.fn(async () => new Response(html, { headers: { "content-type": "text/html" } }));
+    await expect(readOfficialSimulatorEvidence("https://clubhouse.example/", undefined, { fetch, lease })).resolves.toBe("ABSENT");
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
   it.each([
     "<script>Book golf simulators</script><p>Restaurant</p>",
     "<div hidden>Book golf simulators</div><p>Restaurant</p>",

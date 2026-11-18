@@ -366,7 +366,8 @@ export const chronogolfAvailabilityPageSchema = z.object({ status: z.enum(["open
   start_time: z.string().regex(/^(?:[01]?\d|2[0-3]):[0-5]\d$/u).transform(value => value.padStart(5, "0")), date: dateOnlySchema, event_id: z.null(), has_deal: z.boolean(),
   default_price: z.object({ green_fee: price, half_cart: price.nullable(), one_person_cart: price.nullable(), player_type_id: id,
     subtotal: price, bookable_holes: holes, affiliation_type: z.string().min(1).max(100) }).strict(), departure: z.null(), format: z.literal("normal"), frozen: z.boolean(),
-}).strict().refine(value => value.min_player_size <= value.max_player_size)).max(500) }).strict()
+}).strict().refine(value => value.min_player_size <= value.max_player_size)).max(500),
+  total_count: z.number().int().min(0).max(5000).optional() }).strict()
   .refine(value => value.status !== "sold_out" || value.teetimes.length === 0);
 export type ChronogolfAvailabilityPage = z.infer<typeof chronogolfAvailabilityPageSchema>;
 

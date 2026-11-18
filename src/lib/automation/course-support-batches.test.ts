@@ -2323,6 +2323,15 @@ describe("course-support path planning", () => {
     ).toBe(false);
   });
 
+  it("lets the same full-repair owner reserve a follow-up fix while preserving legacy release sealing", () => {
+    expect(canAppendCourseSupportBatchPath({ status: "VERIFYING", releaseSha: "a".repeat(40),
+      plannedPaths: ["src/lib/adapters/teeitup.ts"], allowFollowUpImplementation: true })).toBe(true);
+    for (const status of ["COMPLETED", "RETRYABLE_FAILED", "NEEDS_HUMAN"] as const) {
+      expect(canAppendCourseSupportBatchPath({ status: status as never, releaseSha: "a".repeat(40),
+        plannedPaths: [], allowFollowUpImplementation: true })).toBe(false);
+    }
+  });
+
   it.each(["CLAIMED", "IMPLEMENTING"] as const)(
     "keeps ordinary %s path planning available",
     (status) => {
@@ -2352,8 +2361,8 @@ describe("course-support write-conflict retry", () => {
   });
 
   it("retries a bounded number of rolled-back write conflicts", async () => {
-    const conflict = Object.assign(new Error("write conflict"), {
-      code: "P2034",
+    const conflict = Object.assign(new Error("Raw query failed. Code: `40001`. Message: `could not serialize access due to concurrent update`"), {
+      code: "P2010",
     });
     const operation = vi
       .fn<() => Promise<string>>()
@@ -7055,7 +7064,7 @@ describe("course-support claim demand fencing", () => {
     attemptLedgers?: unknown[];
     escalationDeadlines?: Array<Date | null>;
     verificationRequests?: Array<
-      Array<{ id: string; status: string; startedAt: Date | null }>
+      Array<{ id: string; status: string; startedAt: Date | null; releaseSha?: string }>
     >;
     summary?: Record<string, unknown>;
     leaseExpiresAt?: Date;
@@ -11702,6 +11711,32 @@ describe("course-support claim demand fencing", () => {
     ).toBe(3);
   });
 
+  it("grants a changed full-repair release bounded verification once, without reusing its predecessor's expired window", async () => {
+    const verificationNow = new Date("2026-07-21T03:20:00.000Z");
+    prismaMocks.queryRaw.mockResolvedValue([{ now: verificationNow }]);
+    const batch = ownedStageDeadlineGrantBatch({
+      leaseExpiresAt: new Date("2026-07-21T04:00:00.000Z"),
+      verificationRequests: [[{ id: "old-release-read", status: "FAILED", startedAt: null, releaseSha: "a".repeat(40) }]],
+      summary: { remediation: { workMode: "IMPLEMENT_REUSABLE_SUPPORT", strategyAction: "DISCOVER_WITH_HTTP",
+        playbookStage: "OFFICIAL_IDENTITY", allowUnchangedRuntime: true, requiresImplementationPath: false,
+        reason: "FAILED_LEARNER_IMPLEMENTATION_HANDOFF", retryBudget: null },
+        verificationStageDeadlineGrant: { schemaVersion: 1, releaseSha: "a".repeat(40),
+          grantedAt: "2026-07-21T01:30:00.000Z", incidentCount: 1, stages: [] } },
+    });
+    batch.releaseSha = "b".repeat(40);
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    expect(await grantOwnedCourseSupportVerificationStageDeadline({ batchId: "batch-1", leaseToken: "lease-1", ownerThreadId: "owner-thread" }))
+      .toMatchObject({ outcome: "GRANTED", grantedIncidentCount: 1 });
+    const summary = prismaMocks.batchUpdateMany.mock.calls[0][0].data.summary;
+    expect(summary.verificationStageDeadlineGrant).toMatchObject({ releaseSha: "b".repeat(40) });
+    batch.summary = summary;
+    expect(await grantOwnedCourseSupportVerificationStageDeadline({ batchId: "batch-1", leaseToken: "lease-1", ownerThreadId: "owner-thread" }))
+      .toMatchObject({ outcome: "REPLAYED", granted: false });
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledTimes(1);
+  });
+
   it("grants three zero-attempt depth-four browser entries from database time immediately before watch", async () => {
     const verifyStartedAt = new Date("2026-07-21T02:06:00.000Z");
     prismaMocks.queryRaw.mockResolvedValue([{ now: verifyStartedAt }]);
@@ -11814,7 +11849,8 @@ describe("course-support claim demand fencing", () => {
               id: true,
               verificationRequests: {
                 take: 1,
-                select: { id: true, status: true, startedAt: true },
+                orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+                select: { id: true, status: true, startedAt: true, releaseSha: true },
               },
             }),
           }),
@@ -17222,6 +17258,7 @@ describe("course-support recovery", () => {
       outcome: "recovery_required",
       safelyRequeued: false,
       durableCloseoutRecorded: false,
+      recoveryProgress: { kind: "COMMITTED_SEARCH_EXECUTION_FENCE_ADOPTION", revision: expiredBatch.revision + 1 },
     });
 
     const adoptedSummary =
@@ -17752,6 +17789,7 @@ describe("course-support recovery", () => {
         outcome: "recovery_required",
         safelyRequeued: false,
         durableCloseoutRecorded: false,
+        recoveryProgress: { kind: "COMMITTED_SEARCH_EXECUTION_FENCE_ADOPTION", revision: expiredBatch.revision + 1 },
       });
 
       const adoptedSummary =
@@ -26177,21 +26215,21 @@ describe("detached verification atomic batch fences", () => {
     );
   });
 
-  it("rejects implementation verification when no implementation release was provided", async () => {
+  it.each([false, true])("rejects implementation verification without its code release (full mission: %s)", async fullMission => {
     prismaMocks.batchFindFirst.mockResolvedValue({
       ...verificationBatch(),
       baseSha: "c".repeat(40),
       releaseSha: null,
       deployedAt: null,
       summary: {
-        plannedPaths: [],
+        plannedPaths: fullMission ? ["src/lib/adapters/teeitup.ts"] : [],
         remediation: {
           workMode: "IMPLEMENT_REUSABLE_SUPPORT",
           strategyAction: "REPAIR_PROVIDER_ADAPTER",
           playbookStage: "TYPED_ADAPTER",
-          allowUnchangedRuntime: false,
-          requiresImplementationPath: true,
-          reason: "IMPLEMENTATION_REQUIRED",
+          allowUnchangedRuntime: fullMission,
+          requiresImplementationPath: !fullMission,
+          reason: fullMission ? "FAILED_LEARNER_IMPLEMENTATION_HANDOFF" : "IMPLEMENTATION_REQUIRED",
           retryBudget: null,
         },
       },

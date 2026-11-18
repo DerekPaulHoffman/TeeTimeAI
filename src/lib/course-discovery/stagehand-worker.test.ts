@@ -147,6 +147,55 @@ describe("published default-rental duration in fixed discovery", () => {
   });
 });
 
+describe("simulator public root recovery after a rejected link", () => {
+  function rejectedLink(t: ReturnType<typeof setup>) {
+    Object.assign(t.f.job.request.target, { kind: "SIMULATOR", offeringId: "public-rental" });
+    Object.assign(t.f.job.request.input, { durationMinutes: 60 });
+    Object.assign(t.f.report, { visitedUrls: [official], actions: [] });
+    const diagnostic = cleanUnresolvedReport(t);
+    Object.assign(t.f.report, { frameworkFailureCode: "STAGEHAND_GUARDED_SOURCE_REJECTED" });
+    Object.assign(diagnostic, { phase: "ACT", errorClass: "STATIC_TRANSPORT", transportCode: "STAGEHAND_GUARDED_SOURCE_REJECTED",
+      hostGuardFailure: { stage: "BEFORE_ACTION", reason: "HREF_URL_POLICY" },
+      sourceStop: { condition: "ERROR", finalDecision: "CONTINUE", lastActionKind: "click" } });
+    Object.assign(diagnostic.counts, { actionAttempts: 1, executedActions: 0 });
+    Object.assign(diagnostic.graph, { pages: 1, actions: 0 });
+    return diagnostic;
+  }
+  it("keeps the rejected link blocked and permits only typed inspection at the original public root under the same deadline", async () => {
+    const t = setup(); rejectedLink(t); const original = structuredClone(t.f.job);
+    const genericWorker = vi.fn(async options => {
+      expect(options.job).toBe(t.f.job); expect(options.job).toEqual(original);
+      expect(options.freshOfficialStart).toBe(true); expect(options.recipeEngineConstraint).toBe("EXISTING_ADAPTER");
+      expect(options.workDeadlineAt).toBe(new Date(first + 720000).toISOString());
+      expect(options.checkpointProvenance.stagehandSource).toBeUndefined();
+      for (const key of ["recipe", "adapter", "sourceEvidence", "initialUrls", "trustedResumeUrls"]) expect(options).not.toHaveProperty(key);
+      throw Object.assign(Error("TEST_TYPED_READER_REQUIRED"), { code: "TEST_TYPED_READER_REQUIRED" });
+    });
+    const error = await t.run({ genericWorker }).catch(value => value);
+    expect(error.code).toBe("TEST_TYPED_READER_REQUIRED");
+    expect(error.discoveryMetrics.genericFallback.trigger).toBe("SOURCE_PUBLIC_SIMULATOR_LINK_REJECTED");
+    expect(genericWorker).toHaveBeenCalledOnce(); expect(t.f.job).toEqual(original);
+    expect(t.browserFactory).not.toHaveBeenCalled(); expect(t.client.activate).not.toHaveBeenCalled();
+  });
+  it.each(["outdoor", "wrong-guard", "wrong-stage", "executed-action", "another-page", "status403", "pending", "cleanup", "stale", "unknown", "native-denial"])(
+    "does not treat %s as public simulator root recovery", async mode => {
+      const t = setup(), diagnostic = rejectedLink(t);
+      if (mode === "outdoor") t.f.job.request.target.kind = "OUTDOOR";
+      if (mode === "wrong-guard") diagnostic.hostGuardFailure!.reason = "DOM_URL_CHANGED";
+      if (mode === "wrong-stage") diagnostic.hostGuardFailure!.stage = "SOURCE_DOM";
+      if (mode === "executed-action") diagnostic.counts.executedActions = 1;
+      if (mode === "another-page") diagnostic.graph.pages = 2;
+      if (mode === "status403") diagnostic.sourceDocumentReadiness!.mainDocumentStatus = 403;
+      if (mode === "pending") diagnostic.sourceDocumentReadiness!.mainReadPending = true;
+      if (mode === "cleanup") diagnostic.cleanup.browserClosed = false;
+      if (mode === "stale") t.f.report.startedAt = new Date(first - 10000).toISOString();
+      if (mode === "unknown") Object.assign(diagnostic, { body: "PRIVATE" });
+      if (mode === "native-denial") diagnostic.nativeRouterFailure = { code: "NATIVE_REDIRECT_LOADER_TIMEOUT" };
+      await expect(t.run()).rejects.toBeDefined();
+      expect(t.genericWorker).not.toHaveBeenCalled(); expect(t.client.activate).not.toHaveBeenCalled();
+    });
+});
+
 describe("clean unresolved source fresh-root handoff", () => {
   function timedOutClick(t: ReturnType<typeof setup>) {
     const diagnostic = cleanUnresolvedReport(t);

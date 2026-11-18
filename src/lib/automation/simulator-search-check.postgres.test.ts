@@ -120,6 +120,23 @@ describe.skipIf(!databaseUrl)("simulator check against isolated Postgres", () =>
       endsAt: new Date(`${target}T16:00:00.000Z`), maxPartySize: 8, bookingUrl };
   }
 
+  it.each(["date", "duration", "offering"] as const)("fails closed when the slot has the wrong %s", async mismatch => {
+    const { search, active, venues, run, lease } = await fixture(1);
+    const { offering } = venues[0];
+    const slot = providerSlot(offering.id, offering.bookingUrl!, search.date);
+    const incorrect = {
+      date: providerSlot(offering.id, offering.bookingUrl!, new Date(search.date.getTime() + 86_400_000)),
+      duration: { ...slot, endsAt: new Date(slot.startsAt.getTime() + 60 * 60_000) },
+      offering: { ...slot, offeringId: "other-simulator-offering" },
+    };
+    mocks.fetch.mockResolvedValue({ complete: true, observedAt: new Date(), evidenceUrl: offering.evidenceUrl,
+      slots: [slot, incorrect[mismatch]] });
+    const result = await runCheck(active, run.id, lease);
+    expect(result.courseResults[0].outcome).toBe("FETCH_FAILED");
+    expect(await client.teeTimeMatch.count({ where: { teeSearchId: search.id } })).toBe(0);
+    expect(mocks.sendMatch).not.toHaveBeenCalled();
+  });
+
   it("checks all published lengths for Any and preserves their exact intervals through delivery", async () => {
     const { search, venues, run, lease } = await fixture(1, { setupPending: true });
     const venue = venues[0];

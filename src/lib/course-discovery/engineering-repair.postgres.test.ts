@@ -1,5 +1,7 @@
 // @vitest-environment node
 import { randomUUID } from "node:crypto";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { Prisma, PrismaClient } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -27,7 +29,10 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     await client.$connect(); service = await import("./service"); engineering = await import("./engineering-repair");
   });
   afterEach(async () => {
+    vi.unstubAllEnvs();
     if (!client) return;
+    const ownedRuns = await client.automationRun.findMany({ where: { ownerThreadId: { in: batchOwners } }, select: { id: true } });
+    runs.push(...ownedRuns.map(run => run.id));
     await client.courseSupportBatch.deleteMany({ where: { ownerThreadId: { in: batchOwners } } }); batchOwners.length = 0;
     await client.automationRun.deleteMany({ where: { id: { in: runs } } }); runs.length = 0;
     await client.course.deleteMany({ where: { id: { in: courses } } });
@@ -157,6 +162,106 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     expect(await client.courseProbe.count({ where: { courseId: f.course.id } })).toBe(0);
     expect(await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } }))
       .toMatchObject({ status: "FAILED", attempts: f.job.attempts, firstPickedUpAt: f.job.firstPickedUpAt, deadlineAt: f.job.deadlineAt });
+  });
+  it("claims a real failed outdoor learner as a full repair, preserving its demand and failed clock", async () => {
+    const f = await failed();
+    await engineering.reconcileDiscoveryEngineeringHandoffs();
+    const owner = `full-repair-${randomUUID()}`; batchOwners.push(owner);
+    // This isolated fixture exercises a due scheduled claim, after the normal
+    // first-failure delay. Do not alter the original learner clock or demand.
+    await client.courseSupportIncident.update({ where: { courseId: f.course.id },
+      data: { nextAttemptAt: new Date(Date.now() - 1_000) } });
+    const lane = await import("@/lib/automation/course-support-batches");
+    const claimed = await lane.claimCourseSupportBatch({ ownerThreadId: owner,
+      branch: "automation/course-support-full-repair", baseSha: "a".repeat(40), maxCourses: 1 });
+    expect(claimed).toMatchObject({ outcome: "ready" });
+    const batch = await client.courseSupportBatch.findFirstOrThrow({ where: { ownerThreadId: owner } });
+    expect(await lane.getCourseSupportBatchPacket({ batchId: batch.id, leaseToken: batch.leaseToken, ownerThreadId: owner }))
+      .toMatchObject({ outcome: "ready", remediation: { reason: "FAILED_LEARNER_IMPLEMENTATION_HANDOFF" },
+        courses: [{ actionPlan: { primaryAction: "IMPLEMENT_REUSABLE_SUPPORT",
+          allowedActions: expect.arrayContaining(["INVESTIGATE_PUBLIC_SOURCE"]) } }] });
+    expect(await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } }))
+      .toMatchObject({ status: "FAILED", attempts: f.job.attempts,
+        firstPickedUpAt: f.job.firstPickedUpAt, deadlineAt: f.job.deadlineAt });
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } }))
+      .toMatchObject({ status: "ACTIVE", alertGeneration: 0 });
+  });
+  it.each(["data-only", "claimed-code", "cancelled", "changed-source"])("corrects only the unowned misclassified %s full repair, preserving prior evidence", async scenario => {
+    const f = await failed();
+    await engineering.reconcileDiscoveryEngineeringHandoffs();
+    await client.courseSupportIncident.update({ where: { courseId: f.course.id }, data: { nextAttemptAt: new Date(Date.now() - 1000) } });
+    const owner = `data-only-recovery-${randomUUID()}`; batchOwners.push(owner);
+    const lane = await import("@/lib/automation/course-support-batches");
+    await lane.claimCourseSupportBatch({ ownerThreadId: owner, branch: "automation/course-support-data-only", baseSha: "a".repeat(40), maxCourses: 1 });
+    const batch = await client.courseSupportBatch.findFirstOrThrow({ where: { ownerThreadId: owner } });
+    const incident = await client.courseSupportIncident.findUniqueOrThrow({ where: { courseId: f.course.id } });
+    const closeout = { outcome: "needs_human", reason: "expired_implementation_stopped_without_proof", remediationAttemptConsumed: false };
+    // Exact historical bug shape; production correction must preserve this.
+    await client.courseSupportBatch.update({ where: { id: batch.id }, data: { status: "PARTIAL", completedAt: new Date(),
+      releaseSha: batch.baseSha, summary: { ...(batch.summary as Prisma.JsonObject), closeout,
+        plannedPaths: scenario === "claimed-code" ? ["src/lib/adapters/claimed.ts"] : [] } } });
+    await client.courseSupportBatchIncident.updateMany({ where: { batchId: batch.id }, data: { result: "NEEDS_HUMAN" } });
+    await client.courseSupportIncident.update({ where: { id: incident.id }, data: { status: "NEEDS_HUMAN", activeBatchId: null,
+      humanReviewReason: "AUTOMATION_STALLED", nextAttemptAt: null } });
+    await client.courseMonitoringStatus.update({ where: { courseId: f.course.id }, data: { state: "ENGINEERING_VERIFICATION_NEEDED" } });
+    if (scenario === "cancelled") await client.teeSearch.update({ where: { id: f.search.id }, data: { status: "CANCELLED" } });
+    if (scenario === "changed-source") await client.course.update({ where: { id: f.course.id }, data: { website: "https://changed.example.com/" } });
+    await engineering.reconcileDiscoveryEngineeringHandoffs();
+    expect(await client.courseSupportIncident.findUniqueOrThrow({ where: { id: incident.id } }))
+      .toMatchObject({ status: scenario === "data-only" ? "AUTO_INVESTIGATING" : "NEEDS_HUMAN", cycle: incident.cycle,
+        attemptCount: incident.attemptCount, attemptLedger: incident.attemptLedger, activeBatchId: null });
+    const preserved = await client.courseSupportBatch.findUniqueOrThrow({ where: { id: batch.id } });
+    expect(preserved).toMatchObject({ status: "PARTIAL", ownerThreadId: owner, summary: { closeout } });
+    expect((preserved.summary as Prisma.JsonObject).dataOnlyFullRepairCorrectionV1 !== undefined).toBe(scenario === "data-only");
+    expect(await client.courseSupportBatchIncident.findFirstOrThrow({ where: { batchId: batch.id } })).toMatchObject({ result: "NEEDS_HUMAN" });
+    expect(await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } })).toMatchObject({ status: "FAILED",
+      attempts: f.job.attempts, firstPickedUpAt: f.job.firstPickedUpAt, deadlineAt: f.job.deadlineAt, completedAt: f.job.completedAt });
+    const eventCount = await client.courseMonitoringEvent.count({ where: { incidentId: incident.id, eventType: "REVALIDATION_REQUESTED" } });
+    expect(eventCount).toBe(scenario === "data-only" ? 1 : 0);
+    await engineering.reconcileDiscoveryEngineeringHandoffs();
+    expect(await client.courseMonitoringEvent.count({ where: { incidentId: incident.id, eventType: "REVALIDATION_REQUESTED" } })).toBe(eventCount);
+  });
+  it("keeps failed verification evidence and offers only its original Desktop owner a continuation", async () => {
+    const f = await failed();
+    await engineering.reconcileDiscoveryEngineeringHandoffs();
+    await client.courseSupportIncident.update({ where: { courseId: f.course.id }, data: { nextAttemptAt: new Date(Date.now() - 1000) } });
+    const parent = randomUUID(), owner = randomUUID(); batchOwners.push(parent, owner);
+    const dispatcher = await import("@/lib/automation/course-support-course-dispatch");
+    const lane = await import("@/lib/automation/course-support-batches");
+    const research = await import("@/lib/automation/course-support-research-context");
+    const baseSha = "a".repeat(40);
+    const plan = await dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: parent, baseSha, maxStarts: 1 });
+    if (!plan.acquired || plan.value.launchItems.length !== 1) throw new Error("Expected one real fixture dispatch");
+    const assignmentRef = plan.value.launchItems[0].assignmentRef;
+    await dispatcher.beginCourseSupportCourseDispatch({ ownerThreadId: parent, assignmentRef });
+    await dispatcher.bindCourseSupportCourseDispatch({ ownerThreadId: parent, assignmentRef, childThreadId: owner,
+      launcherReceiptPath: join(tmpdir(), randomUUID(), "launcher.receipt.private.json") });
+    // This process models the bound child's test session, rather than the
+    // previous parent. Runtime identity validation remains enabled.
+    vi.stubEnv("CODEX_THREAD_ID", owner);
+    expect(await lane.claimCourseSupportBatch({ ownerThreadId: owner, branch: `automation/course-support-${randomUUID()}`,
+      baseSha, maxCourses: 1, dispatchAssignmentRef: assignmentRef })).toMatchObject({ outcome: "ready" });
+    const batch = await client.courseSupportBatch.findFirstOrThrow({ where: { ownerThreadId: owner } });
+    // Exact observed post-verification boundary. Source, cycle, playbook and
+    // failed learner clock remain unchanged in this isolated database fixture.
+    await client.courseSupportBatch.update({ where: { id: batch.id }, data: { status: "VERIFYING", releaseSha: baseSha,
+      summary: { ...(batch.summary as Prisma.JsonObject), plannedPaths: [] } } });
+    await client.courseSupportBatchIncident.updateMany({ where: { batchId: batch.id }, data: { result: "STALE_EVIDENCE", verifiedAt: new Date() } });
+    expect(await research.getOwnedCourseSupportResearchContext({ batchId: batch.id, leaseToken: batch.leaseToken,
+      ownerThreadId: owner, ordinal: 1 })).toMatchObject({ outcome: "ready", researchContextV1: { monitoringProofRecorded: false } });
+    const nextParent = randomUUID(); batchOwners.push(nextParent);
+    const next = await dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: nextParent, baseSha, maxStarts: 1 });
+    expect(next).toMatchObject({ acquired: true, value: { fullRepairContinuationItems: [{ threadId: owner,
+      assignmentRef, batchReference: batch.reference, kind: "OWNED_OUTDOOR_FULL_REPAIR" }] } });
+    expect(await client.courseSupportBatch.findUniqueOrThrow({ where: { id: batch.id } }))
+      .toMatchObject({ ownerThreadId: owner, leaseToken: batch.leaseToken, leaseExpiresAt: batch.leaseExpiresAt });
+    expect(await client.courseSupportBatchIncident.findFirstOrThrow({ where: { batchId: batch.id } }))
+      .toMatchObject({ result: "STALE_EVIDENCE" });
+    expect(await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } }))
+      .toMatchObject({ status: "FAILED", attempts: f.job.attempts, firstPickedUpAt: f.job.firstPickedUpAt, deadlineAt: f.job.deadlineAt });
+    await client.teeSearch.update({ where: { id: f.search.id }, data: { status: "CANCELLED" } });
+    const cancelled = await dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: nextParent, baseSha, maxStarts: 1 });
+    expect(cancelled).toMatchObject({ acquired: true, value: { fullRepairContinuationItems: [] } });
   });
   it.each([["database-null", Prisma.DbNull], ["json-null", Prisma.JsonNull]] as const)("initializes an older unowned %s ledger while preserving its receipt and original failed clock", async (_kind, emptyLedger) => {
     const f = await failed(); await engineering.reconcileDiscoveryEngineeringHandoffs();
