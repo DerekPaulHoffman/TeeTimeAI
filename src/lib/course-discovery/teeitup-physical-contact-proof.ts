@@ -11,7 +11,7 @@ const url = z.string().max(2048).refine(v => Boolean(publicDocumentUrl(v))), sha
 const name = z.string().min(3).max(200), address = z.string().min(15).max(1024), locality = z.string().min(2).max(80);
 const sourceSchema = z.object({ officialUrl: url, officialDocumentUrl: url, bookingUrl: url, bookingEntryUrl: url.optional(),
   canonicalName: name, officialBrandName: name, publicLocationName: name, brandLocationLabel: z.string().regex(/^[A-Z0-9]{2,8}$/u).nullable(),
-  canonicalNameRelation: z.enum(["EXACT_PUBLIC_LOCATION_NAME", "PUBLIC_LOCATION_AND_OBSERVED_SERVICE"]), serviceRemainder: z.string().min(2).max(40).nullable(), observedServiceLabel: z.string().min(2).max(120).nullable(),
+  canonicalNameRelation: z.enum(["EXACT_PUBLIC_LOCATION_NAME", "PUBLIC_LOCATION_AND_OBSERVED_SERVICE", "COUNTRY_CLUB_GOLF_DESIGNATION"]), serviceRemainder: z.string().min(2).max(40).nullable(), observedServiceLabel: z.string().min(2).max(120).nullable(),
   canonicalAddress: address, officialAddress: address, canonicalLocality: locality, officialLocality: locality,
   publicCoursePhone: z.string().regex(/^\+1[2-9]\d{2}[2-9]\d{6}$/u),
   warmTransport: z.literal("NATIVE_CHROME"), requiredCapability: z.literal("LOCAL_CHROME"),
@@ -112,6 +112,12 @@ function physicalBlock(value: string) {
 function nameRelation(canonicalName: string, publicName: string, serviceLabels: string[]) {
   const full = literal(canonicalName), base = literal(publicName);
   if (full === base) return { canonicalNameRelation: "EXACT_PUBLIC_LOCATION_NAME" as const, serviceRemainder: null, observedServiceLabel: null };
+  // A separate physical-contact proof retains both literal names. This is not
+  // a global name normalizer: native title/heading, full postal address, public
+  // telephone and the provider's exact printed name must independently agree.
+  const designation = /^(.*\S) golf (?:&|and) country club$/u.exec(full);
+  if (designation && designation[1].length >= 5 && base === `${designation[1]} country club`)
+    return { canonicalNameRelation: "COUNTRY_CLUB_GOLF_DESIGNATION" as const, serviceRemainder: null, observedServiceLabel: null };
   const connector = [`${base} and `, `${base} & `].find(v => full.startsWith(v));
   if (!connector) return;
   const remainder = clean(canonicalName).slice(connector.length);
@@ -150,6 +156,61 @@ export function deriveNativePhysicalContactSource(source: OfficialIdentitySource
     // A semantic named address/telephone contact is an independent identity
     // path. Marketing headings and WordPress classes grant no authority here.
     const titleParts = clean(text(titles[0])).split(/\s*(?:\||–|—| - )\s*/u);
+    const designationTitles = titleParts.filter(v => nameRelation(source.venueName, v, [])?.canonicalNameRelation === "COUNTRY_CLUB_GOLF_DESIGNATION");
+    if (designationTitles.length === 1) {
+      const publicName = designationTitles[0], relation = nameRelation(source.venueName, publicName, [])!;
+      const h1 = all.filter(n => n.tagName === "h1");
+      if (!gate("titleBrandBinding", titleParts.length <= 3 && titleParts.every(v => literal(v) === literal(publicName) || /^(?:home|welcome)$/iu.test(v)) &&
+          h1.length === 1 && literal(text(h1[0])) === literal(publicName) && visible.headings.some(v => literal(v) === literal(publicName)))) return reject();
+      diagnostic.stage = "PHYSICAL_BLOCK";
+      // Only a complete explicitly labelled physical footer address. A comma
+      // between the printed region and ZIP is punctuation, never a missing field.
+      const printedAddress = (value: string) => {
+        const normalized = clean(value).replace(/^Address\s*:\s*/iu, "").replace(/\b([A-Z]{2})\s*,\s*(\d{5}(?:-\d{4})?)\b/u, "$1 $2");
+        return parseNamedContactAddress(normalized);
+      };
+      // CMS footer widgets may be siblings of the semantic copyright footer.
+      // The container identifies scope only; it supplies no identity authority.
+      const inFooter = (node: Element) => { let current: Node | undefined = node;
+        while (current) { if (element(current) && (current.tagName === "footer" || attr(current, "role") === "contentinfo" ||
+          (attr(current, "class") ?? "").split(/\s+/u).includes("footer-widgets"))) return true;
+          current = "parentNode" in current ? current.parentNode ?? undefined : undefined; } return false; };
+      const carriers = all.filter(n => ["p", "address", "div"].includes(n.tagName) && inFooter(n) && physicalContext(n) &&
+        /^Address\s*:/iu.test(clean(text(n))) && clean(text(n)).length <= 500);
+      const carrierSet = new Set(carriers), ancestors = new Set<Element>();
+      for (const node of carriers) { let parent: Node | undefined = node.parentNode ?? undefined;
+        while (parent) { if (element(parent) && carrierSet.has(parent)) ancestors.add(parent); parent = "parentNode" in parent ? parent.parentNode ?? undefined : undefined; } }
+      const valid = carriers.filter(n => !ancestors.has(n)).map(n => ({ printed: clean(text(n)), parsed: printedAddress(text(n)) }));
+      // Ignore enclosing wrappers, never an incomplete/conflicting leaf field.
+      if (valid.some(v => !v.parsed)) return reject();
+      const distinct = new Map(valid.map(v => [physicalContactDigest(v.parsed), v]));
+      diagnostic.rawCandidateCount = valid.length; diagnostic.leafCandidateCount = valid.length; diagnostic.distinctPhysicalCount = distinct.size;
+      if (!gate("physicalBlockUnique", distinct.size === 1)) return reject();
+      const block = [...distinct.values()][0];
+      if (!gate("canonicalAddressExact", physicalContactDigest(block.parsed) === physicalContactDigest(canonicalAddress)) ||
+          !gate("visiblePhysicalBlockMatches", !visible.phoneTextsOmitted && visible.addressTexts.some(v => /^Address\s*:/iu.test(clean(v)) && physicalContactDigest(printedAddress(v)) === physicalContactDigest(canonicalAddress)))) return reject();
+      gate("physicalBrandBinding", true); gate("observedServiceBinding", true);
+      diagnostic.stage = "PHONE";
+      const contacts = all.filter(n => n.tagName === "a" && /^tel:/u.test(attr(n, "href") ?? ""));
+      gate("rawPhonesPresent", contacts.length > 0); gate("rawPhoneHrefsMatch", contacts.every(n => normalizePublicCoursePhone((attr(n, "href") ?? "").slice(4)) === phone));
+      gate("rawPhoneTextsMatch", contacts.every(n => normalizePublicCoursePhone(clean(text(n))) === phone)); gate("visiblePhonesPresent", Boolean(visible.phoneTexts?.length));
+      gate("visiblePhonesMatch", Boolean(visible.phoneTexts?.every(v => normalizePublicCoursePhone(v) === phone)));
+      if (!diagnostic.gates.rawPhonesPresent || !diagnostic.gates.rawPhoneHrefsMatch || !diagnostic.gates.rawPhoneTextsMatch || !diagnostic.gates.visiblePhonesPresent || !diagnostic.gates.visiblePhonesMatch) return reject();
+      diagnostic.stage = "BOOKING_EDGE";
+      const bookingEdge = bookingEntryUrl ?? source.bookingUrl;
+      if (bookingEntryUrl && (!publicDocumentUrl(bookingEntryUrl) || bookingEntryUrl === source.bookingUrl || bookingEntryUrl === page.url)) return reject();
+      const links = all.filter(n => n.tagName === "a" && /\b(?:tee\s*times?|book|reservations?|reserve)\b/iu.test(text(n)) &&
+        !/\b(?:lesson|member|login|sign in|checkout|purchase|payment|confirm|account)\b/iu.test(text(n))).filter(n => {
+        try { return new URL(attr(n, "href") ?? "", page.url).href === bookingEdge; } catch { return false; }
+      });
+      if (!gate("rawBookingLinkPresent", links.length > 0) || !gate("visibleBookingLinkPresent", visible.linkUrls.includes(bookingEdge))) return reject();
+      const data = sourceSchema.parse({ officialUrl: source.officialUrl, officialDocumentUrl: page.url, bookingUrl: source.bookingUrl, ...(bookingEntryUrl ? { bookingEntryUrl } : {}),
+        canonicalName: source.venueName, officialBrandName: publicName, publicLocationName: publicName, brandLocationLabel: null, ...relation,
+        canonicalAddress: source.venueAddress, officialAddress: block.printed.replace(/^Address\s*:\s*/iu, "").replace(/\b([A-Z]{2})\s*,\s*(\d{5}(?:-\d{4})?)\b/u, "$1 $2"),
+        canonicalLocality: canonicalAddress.locality, officialLocality: block.parsed!.locality, publicCoursePhone: phone, warmTransport: "NATIVE_CHROME", requiredCapability: "LOCAL_CHROME" });
+      diagnostic.stage = "COMPLETE";
+      return { ...data, sourceWitnessSha256: physicalContactDigest(data) };
+    }
     if (!gate("titleBrandBinding", titleParts.length <= 3 && titleParts.some(v => literal(v) === literal(source.venueName)))) return reject();
     diagnostic.stage = "PHYSICAL_BLOCK";
     const raw = readNamedPublicContacts(page.html, source.venueName);
