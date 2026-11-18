@@ -90,6 +90,7 @@ const researchBatchSelect = {
             take: 8,
             select: {
               incidentId: true,
+              source: true,
               eventType: true,
               outcome: true,
               readPath: true,
@@ -429,18 +430,28 @@ export function buildOwnedCourseSupportResearchContext(
   const currentPlaybookEvents = parseAutomationPlaybookLedger(entry.incident.attemptLedger)
     ?.events.filter((event) => event.cycle === entry.cycle);
   const playbookEventCount = currentPlaybookEvents?.length ?? -1;
+  const fullRepair = remediation?.reason === "FAILED_LEARNER_IMPLEMENTATION_HANDOFF" && remediation.workMode === "IMPLEMENT_REUSABLE_SUPPORT" &&
+    claim?.actionPlan?.primaryAction === "IMPLEMENT_REUSABLE_SUPPORT" && claim.actionPlan.allowedActions.includes("INVESTIGATE_PUBLIC_SOURCE");
   const playbookProgressCurrent = Boolean(claim && currentPlaybookEvents && fullRepairReadProgressMatchesClaim({
-    fullRepair: remediation?.reason === "FAILED_LEARNER_IMPLEMENTATION_HANDOFF" && remediation.workMode === "IMPLEMENT_REUSABLE_SUPPORT" &&
-      claim.actionPlan?.primaryAction === "IMPLEMENT_REUSABLE_SUPPORT" && claim.actionPlan.allowedActions.includes("INVESTIGATE_PUBLIC_SOURCE"),
+    fullRepair,
     claimedEventCount: claim.playbookEventCountAtClaim, events: currentPlaybookEvents,
     runtimeVersion: batch.releaseSha ?? batch.baseSha, batchCreatedAt: batch.createdAt, now,
   }));
+  // Playbook observations have diagnostic fingerprints (PLAYBOOK:...), not
+  // incident fingerprints. Reconcile only the exact same owned read; prefix
+  // matching or ignoring all newer failures would conceal real source drift.
+  const ownedReadObservations = fullRepair && playbookProgressCurrent && claim
+    ? currentPlaybookEvents?.slice(claim.playbookEventCountAtClaim) ?? [] : [];
   const monitoringDrift = entry.course.monitoringEvents.some((event) =>
     event.occurredAt >= batch.createdAt &&
     (event.eventType === "CHECK_SUCCEEDED" || event.eventType === "RECOVERED" ||
       event.outcome === "MATCH_FOUND" || event.outcome === "NO_MATCH" ||
       (event.failureFingerprint !== null &&
-        !courseSupportFailureFingerprintsMatch(event.failureFingerprint, batch.failureFingerprint))));
+        !courseSupportFailureFingerprintsMatch(event.failureFingerprint, batch.failureFingerprint) &&
+        !(event.source === "COURSE_SUPPORT_RESPONDER" && event.eventType === "AUTOMATION_ATTEMPTED" &&
+          event.incidentId === entry.incident.id && event.outcome === null &&
+          ownedReadObservations.some(read => read.observedAt === event.occurredAt.toISOString() &&
+            read.readPath === event.readPath && read.failureFingerprint === event.failureFingerprint)))));
   // Verification keeps its negative result and history. A still-owned full
   // repair may inspect again; the original source/cycle/plan/lease checks below
   // still apply, and the context digest already binds the evaluated result.

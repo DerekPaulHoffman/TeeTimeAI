@@ -78,8 +78,9 @@ function fixture() {
     monitoringStatus: { state: "AUTO_INVESTIGATING", failureFingerprint },
     monitoringEvents: [{
       incidentId: "incident-mount-snow",
+      source: "COURSE_SUPPORT_RESPONDER",
       eventType: "AUTOMATION_ATTEMPTED",
-      outcome: "NEEDS_ADAPTER",
+      outcome: "NEEDS_ADAPTER" as string | null,
       readPath: "RENDERED_BROWSER",
       failureFingerprint,
       occurredAt: new Date("2026-09-28T13:40:00.000Z"),
@@ -197,6 +198,42 @@ function fixture() {
 
 describe("owned course-support research context", () => {
   beforeEach(() => database.batchFindFirst.mockReset());
+
+  it.each(["owned", "wrong-incident", "wrong-time", "wrong-path", "wrong-fingerprint", "wrong-source", "successful-read", "legacy-route"])(
+    "reconciles only an exact owned read diagnostic: %s", async scenario => {
+      const batch = fixture(), observedAt = new Date("2026-09-28T13:46:00Z");
+      if (scenario !== "legacy-route") {
+        batch.summary.remediation.reason = "FAILED_LEARNER_IMPLEMENTATION_HANDOFF";
+        batch.summary.remediation.attempts[0].actionPlan.allowedActions.push("INVESTIGATE_PUBLIC_SOURCE");
+      }
+      const fingerprint = "PLAYBOOK:BROWSER_ADAPTER_RETRY:NO_RUNNABLE_ADAPTER";
+      for (const [stage, readPath, transition] of [
+        ["TYPED_ADAPTER", "TYPED_PROVIDER_ADAPTER", "NOT_APPLICABLE"],
+        ["OFFICIAL_HTTP_DISCOVERY", "OFFICIAL_HTTP", "COMPLETED"],
+        ["HTTP_ADAPTER_RETRY", "TYPED_PROVIDER_ADAPTER", "NOT_APPLICABLE"],
+        ["RENDERED_BROWSER_DISCOVERY", "RENDERED_BROWSER", "COMPLETED"],
+      ] as const) batch.incidents[0].incident.attemptLedger = appendAutomationPlaybookEvent(batch.incidents[0].incident.attemptLedger, {
+        cycle: 1, stage, readPath, transition, evidenceKind: "TOOLING", failureFingerprint: "PLAYBOOK:PREREQUISITE:COMPLETE",
+        ...(transition === "NOT_APPLICABLE" ? { skipReason: "NO_PROVIDER_METADATA" as const } : {}),
+        runtimeVersion: batch.releaseSha, observedAt: new Date("2026-09-28T13:45:00Z"),
+      });
+      batch.incidents[0].incident.attemptLedger = appendAutomationPlaybookEvent(batch.incidents[0].incident.attemptLedger, {
+        cycle: 1, stage: "BROWSER_ADAPTER_RETRY", transition: "NOT_APPLICABLE", readPath: "TYPED_PROVIDER_ADAPTER",
+        evidenceKind: "TOOLING", skipReason: "NO_RUNNABLE_ADAPTER", failureFingerprint: fingerprint,
+        runtimeVersion: batch.releaseSha, observedAt,
+      });
+      batch.incidents[0].course.monitoringEvents.push({
+        incidentId: scenario === "wrong-incident" ? "foreign-incident" : "incident-mount-snow",
+        source: scenario === "wrong-source" ? "SEARCH_WORKFLOW" : "COURSE_SUPPORT_RESPONDER",
+        eventType: scenario === "successful-read" ? "CHECK_SUCCEEDED" : "AUTOMATION_ATTEMPTED", outcome: null,
+        readPath: scenario === "wrong-path" ? "RENDERED_BROWSER" : "TYPED_PROVIDER_ADAPTER",
+        failureFingerprint: scenario === "wrong-fingerprint" ? "PLAYBOOK:BROWSER_ADAPTER_RETRY:OTHER" : fingerprint,
+        occurredAt: scenario === "wrong-time" ? new Date("2026-09-28T13:47:00Z") : observedAt,
+      });
+      database.batchFindFirst.mockResolvedValue(batch);
+      expect(await getOwnedCourseSupportResearchContext(input)).toMatchObject({ outcome: scenario === "owned" ? "ready" : "authority_drift" });
+      expect(batch.summary.remediation.attempts[0].playbookEventCountAtClaim).toBe(1);
+    });
 
   it.each(["current-full", "old-runtime", "legacy-route"])("revalidates %s read progress without rewriting immutable claim evidence", async scenario => {
     const batch = fixture();

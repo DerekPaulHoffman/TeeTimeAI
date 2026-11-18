@@ -28,6 +28,8 @@ For this mission, settled negative verification returns `repair_required` with `
 
 Each distinct full-repair release receives its bounded verification-stage window once. A later descendant does not inherit its predecessor's expired verification grant. The customer's original learning pickup, deadline, attempts and failed acceptance result never change.
 
+An owned read's monitoring observation uses a diagnostic `PLAYBOOK:...` fingerprint, distinct from the incident fingerprint. Fresh full-repair research reconciles it only when the source, exact incident, timestamp, read path and fingerprint match a validated same-runtime ledger entry appended after the claim. Successful monitoring, unmatched observations and legacy routes retain their drift checks; a diagnostic prefix alone grants nothing.
+
 Keep a private hypothesis/evidence/fix/test record linked to retained verification and commits. Existing append-only discovery, playbook, verification and release history provide durable product evidence. Never overwrite failures, invent completed stages or create another scheduler.
 
 Only a durable current `RESTORED` or factual `FINAL_DISPOSITION` permits normal provider closeout. Customer recovery stays separate and open until actual active alerts have fresh normal checks, healthy continuation and provider-accepted matching/recovery email. An empty dispatch table is not no demand. Observe the normal outbox and read Gmail when available for inbox evidence. Never send/resend email manually, mark delivery successful or alter alert inputs for a pass.
