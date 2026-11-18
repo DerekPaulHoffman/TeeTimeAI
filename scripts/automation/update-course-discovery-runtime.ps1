@@ -13,11 +13,29 @@ $nonce = [Guid]::NewGuid().ToString()
 $sourceRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $ps5 = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $manager = Join-Path $PSScriptRoot 'manage-course-discovery-task.ps1'
-function NativeText([string]$Program,[string[]]$Arguments) {
+function NativeText([string]$Program,[string[]]$Arguments,[switch]$ReleaseProof) {
   $priorPreference=$ErrorActionPreference
   try { $ErrorActionPreference='Continue'; $value=& $Program @Arguments 2>$null; $code=$LASTEXITCODE }
   finally { $ErrorActionPreference=$priorPreference }
-  if($code -ne 0){throw 'RUNTIME_PROOF_COMMAND_FAILED'}
+  if($code -ne 0){
+    $releaseCode=$null
+    if($ReleaseProof){
+      try {
+        $outputText=($value -join [Environment]::NewLine).Trim()
+        if($outputText.Length -le 4096){
+          $child=$outputText|ConvertFrom-Json
+          $names=@($child.PSObject.Properties.Name|Sort-Object)
+          if(($names -join ',') -ceq 'outcome,reasonCode,schemaVersion' -and $child.schemaVersion -eq 1 -and $child.outcome -ceq 'blocked' -and
+            $child.reasonCode -cin @('INVALID_RUNTIME_VERSION','RUNTIME_CI_REQUIRED','RUNTIME_CI_PENDING_TIMEOUT',
+              'RUNTIME_GIT_DEPLOYMENT_REQUIRED','RUNTIME_CANONICAL_ALIASES_REQUIRED','INVALID_RUNTIME_PROOF_ARGUMENT','RUNTIME_RELEASE_PROOF_UNAVAILABLE')){
+            $releaseCode=$child.reasonCode
+          }
+        }
+      }catch{ }
+    }
+    if($releaseCode){throw $releaseCode}
+    throw 'RUNTIME_PROOF_COMMAND_FAILED'
+  }
   return ($value -join [Environment]::NewLine).Trim()
 }
 function GitText([string]$Workspace,[string[]]$Arguments) { NativeText 'git.exe' (@('-C',$Workspace)+$Arguments) }
@@ -99,7 +117,7 @@ try {
   $differences=GitText $runtimeRoot @('diff','--name-only',$oldHead,$RuntimeVersion)
   if(@($differences -split '\r?\n'|Where-Object{$_ -match '^(?:package(?:-lock)?\.json|prisma/|tools/local-chrome-reader/)'}).Count){throw 'DEPENDENCY_SCHEMA_OR_INSTALLED_READER_ROLLOUT_REQUIRED'}
   $phase='QUALIFY_RELEASE'
-  $proof=(NativeText $node @((Join-Path $PSScriptRoot 'course-discovery-runtime-release.mjs'),'--runtime-sha',$RuntimeVersion))|ConvertFrom-Json
+  $proof=(NativeText $node @((Join-Path $PSScriptRoot 'course-discovery-runtime-release.mjs'),'--runtime-sha',$RuntimeVersion) -ReleaseProof)|ConvertFrom-Json
   if($proof.runtimeVersion -cne $RuntimeVersion -or $proof.ciConclusion -cne 'success'){throw 'EXACT_RELEASE_PROOF_REQUIRED'}
   $phase='VALIDATE_READER'
   $validation=(NativeText $ps5 @('-NoProfile','-NonInteractive','-File',$wrapper,'-WorkspacePath',$runtimeRoot,'-ConfigPath',$config,'-NodePath',$node,'-ValidateOnly'))|ConvertFrom-Json
@@ -165,7 +183,8 @@ try {
     'NATIVE_DRAIN_PROTOCOL_BOOTSTRAP_REQUIRED','CURRENT_STAGEHAND_MODE_REQUIRED','SINGLE_MANAGED_SUPERVISOR_REQUIRED',
     'INVALID_DRAIN_CONTROL','DRAIN_CONTROL_CHANGED','RUNTIME_DRAIN_OR_STARTUP_NOT_PROVED','MANAGED_RUNTIME_CHANGED_DURING_DRAIN',
     'OLD_SUPERVISOR_STILL_RUNNING','EXACT_RUNTIME_UPDATE_FAILED','RUNTIME_CONFIGURATION_CHANGED','NEW_SINGLETON_RUNTIME_NOT_PROVED',
-    'RUNTIME_PROOF_COMMAND_FAILED','RUNTIME_UPDATE_FAILED')
+    'RUNTIME_PROOF_COMMAND_FAILED','RUNTIME_UPDATE_FAILED','INVALID_RUNTIME_VERSION','RUNTIME_CI_REQUIRED','RUNTIME_CI_PENDING_TIMEOUT',
+    'RUNTIME_GIT_DEPLOYMENT_REQUIRED','RUNTIME_CANONICAL_ALIASES_REQUIRED','INVALID_RUNTIME_PROOF_ARGUMENT','RUNTIME_RELEASE_PROOF_UNAVAILABLE')
   $reason=if($codes -ccontains $_.Exception.Message){$_.Exception.Message}else{'RUNTIME_UPDATE_FAILED'}
   @{schemaVersion=1;outcome='blocked';reasonCode=$reason;phase=$phase;apply=[bool]$Apply;stateChanged=[bool]$changed;
     mutationAttempted=[bool]$mutationAttempted;drainAttempted=[bool]$drainAttempted;taskStopAttempted=[bool]$taskStopAttempted;

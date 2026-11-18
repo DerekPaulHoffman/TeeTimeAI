@@ -11,6 +11,8 @@ const reasons = new Set([
   "INVALID_DRAIN_CONTROL", "DRAIN_CONTROL_CHANGED", "RUNTIME_DRAIN_OR_STARTUP_NOT_PROVED", "MANAGED_RUNTIME_CHANGED_DURING_DRAIN",
   "OLD_SUPERVISOR_STILL_RUNNING", "EXACT_RUNTIME_UPDATE_FAILED", "RUNTIME_CONFIGURATION_CHANGED", "NEW_SINGLETON_RUNTIME_NOT_PROVED",
   "RUNTIME_PROOF_COMMAND_FAILED", "RUNTIME_UPDATE_FAILED",
+  "INVALID_RUNTIME_VERSION", "RUNTIME_CI_REQUIRED", "RUNTIME_CI_PENDING_TIMEOUT", "RUNTIME_GIT_DEPLOYMENT_REQUIRED",
+  "RUNTIME_CANONICAL_ALIASES_REQUIRED", "INVALID_RUNTIME_PROOF_ARGUMENT", "RUNTIME_RELEASE_PROOF_UNAVAILABLE",
 ]);
 const phases = new Set([
   "VALIDATE_NATIVE_OWNER", "VALIDATE_MANAGED_TASK", "VALIDATE_ACTIVATION", "VALIDATE_SOURCE", "QUALIFY_RELEASE", "VALIDATE_READER",
@@ -66,7 +68,9 @@ export async function prepareCourseSupportRuntime(input: {
   try {
     ({ stdout } = await execute(input.executable, ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-File",
       input.scriptPath, "-RuntimeVersion", input.runtimeVersion, "-OwnerThreadId", input.ownerThreadId, "-Apply"],
-    { encoding: "utf8", timeout: 21 * 60_000, maxBuffer: 128 * 1024, windowsHide: true }));
+    // Includes bounded read-only CI qualification before the existing idle
+    // drain/start protocol. It changes no learning-job clock or read budget.
+    { encoding: "utf8", timeout: 36 * 60_000, maxBuffer: 128 * 1024, windowsHide: true }));
   } catch (error) {
     // execFile rejects for nonzero exits but carries the updater's JSON stdout.
     // Reading only that bounded closed projection preserves the original cause.

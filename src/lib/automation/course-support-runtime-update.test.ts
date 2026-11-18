@@ -8,6 +8,12 @@ const blocked = { schemaVersion: 1, outcome: "blocked", reasonCode: "ORIGINAL_NA
   runtimeUpdateAttempted: false, taskStartAttempted: false, activationWriteAttempted: false, acceptanceRestartProof: false };
 
 describe("safe managed runtime update diagnostics", () => {
+  it.each(["RUNTIME_CI_REQUIRED", "RUNTIME_CI_PENDING_TIMEOUT", "RUNTIME_CANONICAL_ALIASES_REQUIRED", "RUNTIME_RELEASE_PROOF_UNAVAILABLE"])("retains the closed %s release diagnostic without forwarding command output", reasonCode => {
+    const result = projectRuntimeUpdateDiagnostic(JSON.stringify({ ...blocked, reasonCode, phase: "QUALIFY_RELEASE",
+      rawOutput: "fixture-private" }));
+    expect(result).toMatchObject({ attributed: true, reasonCode, phase: "QUALIFY_RELEASE", stateChanged: false, mutationAttempted: false });
+    expect(JSON.stringify(result)).not.toContain("fixture-private");
+  });
   it("retains the original closed failure projection from a nonzero child and through CLI reporting", async () => {
     const execute = vi.fn(async () => { throw Object.assign(Error("private exception"), {
       stdout: JSON.stringify({ ...blocked, privateField: "private stdout field" }), stderr: "secret-bearing stderr",

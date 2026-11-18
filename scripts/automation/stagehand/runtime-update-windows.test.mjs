@@ -1,8 +1,41 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { courseSupportWorkerRuntimeEnvironment } from '../course-support-worker-runtime.mjs';
+
+test('actual Windows qualification adapter preserves only closed proof reasons and discards private child output', { skip: process.platform !== 'win32' }, () => {
+  const quote = value => "'" + value.replaceAll("'", "''") + "'";
+  const folder = mkdtempSync(join(tmpdir(), 'course-runtime-qualification-'));
+  try { for (const scenario of ['known', 'unknown', 'extra', 'generic']) {
+    const payload = { schemaVersion: 1, outcome: 'blocked', reasonCode: scenario === 'unknown' ? 'PRIVATE_REASON' : 'RUNTIME_CI_PENDING_TIMEOUT',
+      ...(scenario === 'extra' ? { raw: 'fixture-private' } : {}) };
+    const program = `process.stdout.write(${JSON.stringify(JSON.stringify(payload))});process.stderr.write('fixture-private');process.exit(1)`;
+    const programPath = join(folder, scenario + '.mjs');
+    writeFileSync(programPath, program);
+    const source = `
+      $ErrorActionPreference='Stop';$tokens=$null;$errors=$null
+      $ast=[System.Management.Automation.Language.Parser]::ParseFile(${quote(resolve('scripts/automation/update-course-discovery-runtime.ps1'))},[ref]$tokens,[ref]$errors)
+      if($errors.Count){throw 'FIXTURE_PARSE_FAILED'}
+      $function=$ast.Find({param($item)$item -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $item.Name -eq 'NativeText'},$true)
+      Invoke-Expression $function.Extent.Text
+      try { NativeText ${quote(process.execPath)} @(${quote(programPath)}) ${scenario === 'generic' ? '' : '-ReleaseProof'};exit 9 }
+      catch { $_.Exception.Message }
+    `;
+    const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', source], {
+      env: courseSupportWorkerRuntimeEnvironment({ status: 'available', nodePath: process.execPath }, process.cwd(), process.env),
+      encoding: 'utf8', windowsHide: true, timeout: 15000,
+    });
+    assert.equal(result.status, 0);
+    assert.equal(result.stdout.trim(), scenario === 'known' ? 'RUNTIME_CI_PENDING_TIMEOUT' : 'RUNTIME_PROOF_COMMAND_FAILED');
+    assert.doesNotMatch(result.stdout + result.stderr, /fixture-private|PRIVATE_REASON/u);
+  } } finally {
+    if (dirname(resolve(folder)) !== resolve(tmpdir()) || !resolve(folder).startsWith(join(tmpdir(), 'course-runtime-qualification-'))) throw new Error('Unexpected fixture cleanup target');
+    rmSync(folder, { recursive: true, force: true });
+  }
+});
 
 test('worker runtime retains required nonsecret Windows metadata without forwarding credentials', () => {
   const environment = courseSupportWorkerRuntimeEnvironment({ status: 'available', nodePath: process.execPath }, process.cwd(), {
