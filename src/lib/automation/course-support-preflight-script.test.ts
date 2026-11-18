@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   approvedCourseSupportResponderCheckout,
   approvedCourseSupportResponderCheckouts,
+  dependenciesNeedRefresh,
   generatedPrismaSetupRequiredResult,
   getResponderCheckoutRefreshPlan,
   inspectGeneratedPrismaClient,
@@ -32,7 +33,7 @@ describe("pinned launcher preflight handoff", () => {
     });
   });
 
-  it.each(["unavailable", "package_version_mismatch", "runtime_version_mismatch", "path_not_owned", "unsupported_platform"])(
+  it.each(["unavailable", "package_version_mismatch", "runtime_version_mismatch", "path_not_owned", "unsupported_platform", "artifacts_present"])(
     "never starts production planning with a %s native launcher", (status) => {
       const launch = vi.fn();
       expect(() => launchWithPinnedWorkerCli({ status }, launch)).toThrow("PINNED_WORKER_CLI_UNAVAILABLE");
@@ -43,6 +44,31 @@ describe("pinned launcher preflight handoff", () => {
     const launch = vi.fn(() => ({ status: 0 }));
     expect(launchWithPinnedWorkerCli(workerCli, launch)).toEqual({ status: 0 });
     expect(launch).toHaveBeenCalledOnce();
+  });
+});
+
+describe("restore a positively missing locked dispatcher dependency", () => {
+  function fixture(inspection: Record<string, string>, marker: string | null = null) {
+    return { exists: vi.fn(() => marker !== null), read: vi.fn(() => marker ?? ""), lockHash: vi.fn(() => "current-lock"),
+      inspect: vi.fn(() => inspection) };
+  }
+  it.each(["PACKAGE", "NATIVE_PACKAGE", "NATIVE_EXECUTABLE"])("restores a missing %s even without a marker", artifact => {
+    const deps = fixture({ status: "unavailable", missingLockedArtifact: artifact });
+    expect(dependenciesNeedRefresh("approved", false, deps)).toBe(true);
+    expect(deps.inspect).toHaveBeenCalledExactlyOnceWith("approved");
+  });
+  it("does not let a current marker hide a missing package", () => {
+    expect(dependenciesNeedRefresh("approved", false,
+      fixture({ status: "unavailable", missingLockedArtifact: "PACKAGE" }, "current-lock"))).toBe(true);
+  });
+  it.each(["artifacts_present", "unavailable", "package_version_mismatch", "path_not_owned", "unsupported_platform"])(
+    "never reinstalls on %s without positive absence", status => {
+      expect(dependenciesNeedRefresh("approved", false, fixture({ status }))).toBe(false);
+    });
+  it("retains the established stale-lock refresh without inspecting or executing a runtime", () => {
+    const deps = fixture({ status: "unavailable" }, "old-lock");
+    expect(dependenciesNeedRefresh("approved", false, deps)).toBe(true);
+    expect(deps.inspect).not.toHaveBeenCalled();
   });
 });
 

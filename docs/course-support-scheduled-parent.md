@@ -40,6 +40,15 @@ turn with exactly one shell command:
 & 'C:\Program Files\nodejs\node.exe' C:\dev\TeeTimeAI-responder-self-healing\scripts\automation\course-support-preflight.mjs --run --scheduled-cycle --course-dispatch
 ```
 
+During existing clean, approved checkout preparation, a positively absent
+lockfile-owned Codex package/native artifact triggers the normal dependency
+restore, including required development and optional packages. Artifact-only
+inspection never proves executable readiness. The pinned version, owned paths,
+generated client and browser checks must still pass before production planning;
+permission errors, version mismatches and unknown runtime failures retain their
+setup stops. A healthy installation is not reinstalled merely because its local
+lock marker is absent.
+
 Stop on a nonzero exit from the preflight, setup failure, or unavailable
 production evidence. Use
 the actual returned `course_support_preflight_context` and exact

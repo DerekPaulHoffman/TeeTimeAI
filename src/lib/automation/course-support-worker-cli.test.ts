@@ -60,7 +60,8 @@ describe("pinned responder native CLI", () => {
   it.each(["package", "native", "binary"])("does not fall back to desktop or PATH when the %s is missing", (missing) => {
     const f = fixture();
     rmSync(missing === "package" ? f.packageFile : missing === "native" ? f.nativeFile : f.cliPath);
-    expect(inspectPinnedWorkerCli(f.root, f.options)).toEqual({ status: "unavailable" });
+    expect(inspectPinnedWorkerCli(f.root, f.options)).toEqual({ status: "unavailable",
+      missingLockedArtifact: missing === "package" ? "PACKAGE" : missing === "native" ? "NATIVE_PACKAGE" : "NATIVE_EXECUTABLE" });
     expect(f.options.execute).not.toHaveBeenCalled();
   });
 
@@ -78,6 +79,25 @@ describe("pinned responder native CLI", () => {
     const inspection = inspectPinnedWorkerCli(f.root, f.options);
     expect(inspection).toEqual({ status: "unavailable" });
     expect(JSON.stringify(pinnedWorkerCliSetupRequiredResult(inspection))).not.toContain("secret data");
+  });
+
+  it("can inspect owned artifacts without executing or granting runtime readiness", () => {
+    const f = fixture();
+    const inspection = inspectPinnedWorkerCli(f.root, { ...f.options, verifyExecutable: false });
+    expect(inspection).toEqual({ status: "artifacts_present" });
+    expect(f.options.execute).not.toHaveBeenCalled();
+    expect(pinnedWorkerCliSetupRequiredResult(inspection)).toMatchObject({ outcome: "setup_required" });
+  });
+
+  it("does not treat a permission error as a missing dependency", () => {
+    const f = fixture();
+    const canonical = (path: string) => {
+      if (resolve(path) === resolve(f.packageFile)) throw Object.assign(new Error("private failure"), { code: "EACCES" });
+      return realpathSync(path);
+    };
+    expect(inspectPinnedWorkerCli(f.root, { ...f.options, canonical, verifyExecutable: false }))
+      .toEqual({ status: "unavailable" });
+    expect(f.options.execute).not.toHaveBeenCalled();
   });
 
   it("refuses unsupported host platforms before reading or executing an installation", () => {

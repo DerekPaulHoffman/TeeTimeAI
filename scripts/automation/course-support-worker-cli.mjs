@@ -15,13 +15,15 @@ function within(parent, child) {
 export function inspectPinnedWorkerCli(checkout, {
   platform = process.platform, arch = process.arch,
   read = readFileSync, canonical = realpathSync, stat = statSync,
-  execute = execFileSync,
+  execute = execFileSync, verifyExecutable = true,
 } = {}) {
   if (platform !== "win32" || !["x64", "arm64"].includes(arch)) return { status: "unsupported_platform" };
+  let artifact = null;
   try {
     const root = canonical(checkout);
     const modules = canonical(resolve(root, "node_modules"));
     if (!within(root, modules)) return { status: "path_not_owned" };
+    artifact = "PACKAGE";
     const packageFile = canonical(resolve(modules, "@openai/codex/package.json"));
     if (!within(modules, packageFile)) return { status: "path_not_owned" };
     const pkg = JSON.parse(read(packageFile, "utf8"));
@@ -29,18 +31,26 @@ export function inspectPinnedWorkerCli(checkout, {
     const nativeVersion = `${PINNED_WORKER_CLI_PACKAGE_VERSION}-win32-${arch}`;
     if (pkg.name !== "@openai/codex" || pkg.version !== PINNED_WORKER_CLI_PACKAGE_VERSION ||
         pkg.optionalDependencies?.[alias] !== `npm:@openai/codex@${nativeVersion}`) return { status: "package_version_mismatch" };
+    artifact = "NATIVE_PACKAGE";
     const nativeFile = canonical(createRequire(packageFile).resolve(`${alias}/package.json`));
     if (!within(modules, nativeFile)) return { status: "path_not_owned" };
     const native = JSON.parse(read(nativeFile, "utf8"));
     if (native.name !== "@openai/codex" || native.version !== nativeVersion) return { status: "package_version_mismatch" };
     const target = arch === "x64" ? "x86_64-pc-windows-msvc" : "aarch64-pc-windows-msvc";
     const nativeRoot = dirname(nativeFile);
+    artifact = "NATIVE_EXECUTABLE";
     const cliPath = canonical(resolve(nativeRoot, "vendor", target, "bin", "codex.exe"));
     if (!within(nativeRoot, cliPath) || !stat(cliPath).isFile()) return { status: "path_not_owned" };
+    if (!verifyExecutable) return { status: "artifacts_present" };
+    artifact = null;
     const version = execute(cliPath, ["--version"], { encoding: "utf8", windowsHide: true, timeout: 40_000 }).trim();
     if (version !== PINNED_WORKER_CLI_VERSION) return { status: "runtime_version_mismatch" };
     return { status: "current", cliPath, cliVersion: version, source: "pinned_package" };
-  } catch { return { status: "unavailable" }; }
+  } catch (error) {
+    const missing = artifact !== null && (error?.code === "ENOENT" ||
+      artifact === "NATIVE_PACKAGE" && error?.code === "MODULE_NOT_FOUND");
+    return { status: "unavailable", ...(missing ? { missingLockedArtifact: artifact } : {}) };
+  }
 }
 
 export function pinnedWorkerCliSetupRequiredResult(inspection) {

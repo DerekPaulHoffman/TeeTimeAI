@@ -523,7 +523,7 @@ function prepareApprovedResponderCheckout(candidate, currentMain) {
   }
   if (dependenciesNeedRefresh(checkout, plan.refreshDependencies)) {
     markDependencyRefreshRequired(checkout);
-    if (!runNpm(["ci"], checkout)) return false;
+    if (!runNpm(["ci", "--include=dev", "--include=optional"], checkout)) return false;
     markDependenciesCurrent(checkout);
   }
   return (
@@ -532,11 +532,18 @@ function prepareApprovedResponderCheckout(candidate, currentMain) {
   );
 }
 
-function dependenciesNeedRefresh(checkout, forced) {
+export function dependenciesNeedRefresh(checkout, forced, {
+  exists = existsSync, read = readFileSync, lockHash = packageLockHash,
+  inspect = directory => inspectPinnedWorkerCli(directory, { verifyExecutable: false }),
+} = {}) {
   if (forced) return true;
   const marker = dependencyMarkerPath(checkout);
-  if (!existsSync(marker)) return false;
-  return readFileSync(marker, "utf8").trim() !== packageLockHash(checkout);
+  if (exists(marker) && read(marker, "utf8").trim() !== lockHash(checkout)) return true;
+  // A missing lockfile dependency can strand every future scheduled tick even
+  // when the source and marker are current. Restore only positively absent
+  // owned package artifacts; version, path, permission and runtime failures
+  // retain the later setup stop. This never launches a model or provider read.
+  return ["PACKAGE", "NATIVE_PACKAGE", "NATIVE_EXECUTABLE"].includes(inspect(checkout).missingLockedArtifact);
 }
 
 function markDependencyRefreshRequired(checkout) {
