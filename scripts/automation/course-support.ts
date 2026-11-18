@@ -1643,7 +1643,7 @@ async function recoverPublishedLearning(input: { batchId: string; ownerThreadId:
     throw Error("CLEAN_PUBLISHED_DESCENDANT_RUNTIME_REQUIRED");
   const runtimeVersion = git.headSha;
   const { watchOwnedLearningRecovery } = await import("@/lib/automation/course-support-learning-recovery");
-  const { requestOwnedOutdoorLearningRecovery, ownedOutdoorLearningRecoveryProgress } = await import("@/lib/course-discovery/service");
+  const { requestOwnedOutdoorLearningRecovery, ownedOutdoorLearningRecoveryProgress, DiscoveryConflictError } = await import("@/lib/course-discovery/service");
   return runWithCourseSupportOperationHeartbeat({ ...input, allowDurableCloseout: true }, async (leaseToken, signal) => {
     return watchOwnedLearningRecovery({ signal,
       prepareRuntime: async () => {
@@ -1654,14 +1654,23 @@ async function recoverPublishedLearning(input: { batchId: string; ownerThreadId:
       },
       admit: () => requestOwnedOutdoorLearningRecovery({ ...input, leaseToken, runtimeVersion }),
       read: job => ownedOutdoorLearningRecoveryProgress({ ...input, leaseToken, jobId: job.jobId, originalJobId: job.originalJobId }),
+      isStateConflict: error => error instanceof DiscoveryConflictError,
       readHandoff: async job => {
         const row = await prisma.courseSupportBatch.findUnique({ where: { id: input.batchId },
           select: { ownerThreadId: true, leaseToken: true, status: true, completedAt: true, summary: true } });
         const handoff = readLearningRecipeHandoff(row?.summary);
-        return { durableCloseoutRecorded: row?.status === "PARTIAL" && row.ownerThreadId === input.ownerThreadId &&
+        const durableCloseoutRecorded = row?.status === "PARTIAL" && row.ownerThreadId === input.ownerThreadId &&
           row.leaseToken === leaseToken && row.completedAt?.toISOString() === handoff?.handedOffAt &&
           handoff?.recovery.jobId === job.jobId && handoff.recovery.originalJobId === job.originalJobId &&
-          handoff.recovery.releaseSha === input.releaseSha && handoff.recovery.runtimeVersion === job.runtimeVersion };
+          handoff.recovery.releaseSha === input.releaseSha && handoff.recovery.runtimeVersion === job.runtimeVersion;
+        // These are facts from the exact already-completed coding phase, not
+        // current monitoring, delivery, renewed ownership or read authority.
+        return { durableCloseoutRecorded, ...(durableCloseoutRecorded && handoff ? { method: {
+          state: "METHOD_SAVED" as const, recipeId: handoff.recipeId, recipeHash: handoff.recipeHash,
+          runtimeVersion: handoff.recovery.runtimeVersion,
+          originalFirstPickedUpAt: handoff.recovery.originalFirstPickedUpAt,
+          originalDeadlineAt: handoff.recovery.originalDeadlineAt,
+        } } : {}) };
       },
     });
   });

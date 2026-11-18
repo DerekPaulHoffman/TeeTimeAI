@@ -10,7 +10,9 @@ export async function watchOwnedLearningRecovery(input: {
   prepareRuntime: () => Promise<void>;
   admit: () => Promise<Admission>;
   read: (job: Extract<Admission, { jobId: string }>) => Promise<Progress>;
-  readHandoff: (job: Extract<Admission, { jobId: string }>) => Promise<{ durableCloseoutRecorded: boolean }>;
+  readHandoff: (job: Extract<Admission, { jobId: string }>) => Promise<{ durableCloseoutRecorded: boolean;
+    method?: Extract<Progress, { state: "METHOD_SAVED" }> }>;
+  isStateConflict?: (error: unknown) => boolean;
   signal: AbortSignal;
   now?: () => number;
   wait?: (signal: AbortSignal) => Promise<unknown>;
@@ -41,6 +43,16 @@ export async function watchOwnedLearningRecovery(input: {
         durableCloseoutRecorded: false, monitoringVerified: false, deliveryVerified: false, job, learning: last };
       await wait(input.signal);
     } catch (error) {
+      if (input.isStateConflict?.(error)) {
+        // A completed atomic coding handoff can outlive the active-state
+        // projection. Reconcile that historical phase once, without repeating
+        // the failed read, admission, runtime preparation or any provider work.
+        const handoff = await input.readHandoff(job);
+        if (!handoff.durableCloseoutRecorded || !handoff.method ||
+            handoff.method.runtimeVersion !== job.runtimeVersion) throw error;
+        return { outcome: "learning_recipe_handoff" as const, durableCloseoutRecorded: true,
+          monitoringVerified: false, deliveryVerified: false, job, method: handoff.method };
+      }
       if (!input.signal.aborted) throw error;
       // Never suppress lost ownership unless the independently persisted phase
       // handoff for this exact original owner actually completed.

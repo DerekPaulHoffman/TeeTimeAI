@@ -64,6 +64,8 @@ Only a durable current `RESTORED` or factual `FINAL_DISPOSITION` permits normal 
 
 After controlled restart, prove saved-method reuse separately with changed parameters and discovery/model calls disabled. Compare recipe ID/hash and normal matches. Late recovery cannot pass the original fifteen-minute contract.
 
+A typed discovery-state conflict after activation permits one read-only reconciliation of the exact already-recorded coding handoff. Require the same original owner and lease, batch, original/child job, registered release, execution runtime and completion timestamp. Return only that historical method phase; monitoring and delivery remain unverified, and no lease, provider-read authority or retry is granted. A missing marker or method, runtime mismatch, or unknown error retains the failure. Never repeat the failed read, admission or runtime preparation to obtain this result.
+
 ## Distinguish a failed tool from a failed venue
 
 A complete, attributable exception in an offline pure diagnostic fixture is local development feedback after source inspection proves there was no protected operation, credential use or uncertain side effect. Preserve the stack trace, correct the fixture/input or claim the actual product path before fixing code, and run the changed local check. Follow the assigned-worker contract's narrow local-debugging rule. Unknown crashes and failed setup, provider, production, identity, ownership, lease or access operations retain their stops. A malformed local test input never establishes a venue limitation.

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { watchOwnedLearningRecovery } from "./course-support-learning-recovery";
+class StateConflict extends Error {}
 
 function fixture() {
   const controller = new AbortController();
@@ -9,7 +10,8 @@ function fixture() {
   const pending = { state: "PENDING" as const, firstPickedUpAt: null, deadlineAt: null, attempts: 0, runtimeVersion: job.runtimeVersion };
   return { controller, job, method, pending, prepareRuntime: vi.fn(async () => {}), admit: vi.fn(async () => job),
     read: vi.fn(async () => method as typeof method | typeof pending | { state: "OBSOLETE" }),
-    readHandoff: vi.fn(async () => ({ durableCloseoutRecorded: true })), signal: controller.signal };
+    readHandoff: vi.fn(async () => ({ durableCloseoutRecorded: true, method })),
+    isStateConflict: (error: unknown) => error instanceof StateConflict, signal: controller.signal };
 }
 describe("original coding owner returning a repair to the learner", () => {
   it("prepares the exact runtime before admission; method handoff is not email success", async () => {
@@ -43,5 +45,30 @@ describe("original coding owner returning a repair to the learner", () => {
     expect(await watchOwnedLearningRecovery({ ...f, now: () => time, wait: async () => { time += 18 * 60_000; } }))
       .toMatchObject({ outcome: "learning_recovery_pending", durableCloseoutRecorded: false });
     expect(f.admit).toHaveBeenCalledTimes(1);
+  });
+  it("reconciles a typed state conflict only against the exact completed coding-phase marker", async () => {
+    const f = fixture(); f.read.mockRejectedValue(new StateConflict("state changed after activation"));
+    expect(await watchOwnedLearningRecovery(f)).toMatchObject({ outcome: "learning_recipe_handoff", method: f.method,
+      durableCloseoutRecorded: true, monitoringVerified: false, deliveryVerified: false });
+    expect(f.read).toHaveBeenCalledTimes(1); expect(f.admit).toHaveBeenCalledTimes(1);
+    expect(f.prepareRuntime).toHaveBeenCalledTimes(1); expect(f.readHandoff).toHaveBeenCalledTimes(1);
+  });
+  it("preserves a state conflict when no matching durable marker or method facts exist", async () => {
+    for (const marker of [{ durableCloseoutRecorded: false }, { durableCloseoutRecorded: true }]) {
+      const f = fixture(), error = new StateConflict("ownership or source changed"); f.read.mockRejectedValue(error);
+      await expect(watchOwnedLearningRecovery({ ...f, readHandoff: async () => marker })).rejects.toBe(error);
+      expect(f.read).toHaveBeenCalledTimes(1); expect(f.admit).toHaveBeenCalledTimes(1);
+    }
+  });
+  it("never turns an unknown read failure into success from a completed marker", async () => {
+    const f = fixture(), error = Error("unknown read failure"); f.read.mockRejectedValue(error);
+    await expect(watchOwnedLearningRecovery(f)).rejects.toBe(error);
+    expect(f.readHandoff).not.toHaveBeenCalled(); expect(f.admit).toHaveBeenCalledTimes(1);
+  });
+  it("preserves a state conflict when the completed method belongs to another runtime", async () => {
+    const f = fixture(), error = new StateConflict("runtime changed"); f.read.mockRejectedValue(error);
+    f.readHandoff.mockResolvedValue({ durableCloseoutRecorded: true, method: { ...f.method, runtimeVersion: "d".repeat(40) } });
+    await expect(watchOwnedLearningRecovery(f)).rejects.toBe(error);
+    expect(f.read).toHaveBeenCalledTimes(1); expect(f.admit).toHaveBeenCalledTimes(1);
   });
 });
