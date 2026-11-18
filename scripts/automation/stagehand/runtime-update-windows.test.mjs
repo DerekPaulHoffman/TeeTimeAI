@@ -6,6 +6,52 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { courseSupportWorkerRuntimeEnvironment } from '../course-support-worker-runtime.mjs';
 
+test('actual Windows startup reconciliation retries only one conclusively stopped owned start, without repeating the update', { skip: process.platform !== 'win32' }, () => {
+  const quote = value => "'" + value.replaceAll("'", "''") + "'";
+  for (const scenario of ['recover', 'first-success', 'active', 'running', 'stale', 'config', 'task', 'source', 'foreign-drain', 'second-failure', 'unknown-failure']) {
+    const source = `
+      $ErrorActionPreference='Stop';$scenario=${quote(scenario)};$tokens=$null;$errors=$null
+      $ast=[System.Management.Automation.Language.Parser]::ParseFile(${quote(resolve('scripts/automation/update-course-discovery-runtime.ps1'))},[ref]$tokens,[ref]$errors)
+      if($errors.Count){throw 'FIXTURE_PARSE_FAILED'}
+      $definition=$ast.Find({param($item)$item -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $item.Name -eq 'WaitUpdatedRuntimeStartup'},$true)
+      Invoke-Expression $definition.Extent.Text
+      $RuntimeVersion='${'a'.repeat(40)}';$runtimeRoot='fixture-runtime';$config='fixture-config';$configHash='config-hash';$taskHash='task-hash'
+      $ps5='fixture-powershell';$manager='fixture-manager';$lockStream=New-Object IO.MemoryStream
+      $taskStartRequests=1;$startupRequestedAt=[DateTimeOffset]::UtcNow.AddSeconds(-3);$firstStoppedTaskResult=$null
+      $waitCalls=0;$startCalls=0;$refreshCalls=0
+      function WaitIdle { param($Expected,$Since,$Seconds)
+        $script:waitCalls++
+        if($scenario -eq 'unknown-failure'){throw 'UNKNOWN_STARTUP_FAILURE'}
+        if(($script:waitCalls -eq 1 -and $scenario -ne 'first-success') -or $scenario -eq 'second-failure'){throw 'RUNTIME_DRAIN_OR_STARTUP_NOT_PROVED'}
+        return @{runtimeVersion=$Expected;ready=$true;drained=$true}
+      }
+      function Get-ScheduledTask {param($TaskName,$TaskPath) return @{State=$(if($scenario -eq 'running'){'Running'}else{'Ready'})}}
+      function Get-ScheduledTaskInfo {param($InputObject) return @{LastTaskResult=1;LastRunTime=$(if($scenario -eq 'stale'){[DateTimeOffset]::UtcNow.AddMinutes(-5).LocalDateTime}else{[DateTimeOffset]::UtcNow.AddSeconds(-2).LocalDateTime})}}
+      function Supervisors {if($scenario -eq 'active'){return @{ProcessId=99}}}
+      function GitText {param($Workspace,$Arguments) if($Arguments[0] -eq 'status'){return ''};if($scenario -eq 'source'){return '${'b'.repeat(40)}'};return $RuntimeVersion}
+      function Get-FileHash {param($LiteralPath,$Algorithm) return @{Hash=$(if($scenario -eq 'config'){'changed'}else{$configHash})}}
+      function TaskDigest {if($scenario -eq 'task'){return 'changed'};return $taskHash}
+      function RefreshDrain {$script:refreshCalls++;if($scenario -eq 'foreign-drain'){throw 'DRAIN_CONTROL_CHANGED'}}
+      function NativeText {param($Program,$Arguments)
+        if(($Arguments -join ',') -cne '-NoProfile,-NonInteractive,-File,fixture-manager,-Action,Start,-Apply'){throw 'UNEXPECTED_MUTATION'}
+        $script:startCalls++
+      }
+      try {$result=WaitUpdatedRuntimeStartup ([DateTimeOffset]::UtcNow);$outcome='ready';$reason=$null}
+      catch {$outcome='blocked';$reason=$_.Exception.Message}
+      finally {$lockStream.Dispose()}
+      @{outcome=$outcome;reason=$reason;waitCalls=$waitCalls;startCalls=$startCalls;taskStartRequests=$taskStartRequests;firstStoppedTaskResult=$firstStoppedTaskResult}|ConvertTo-Json -Compress
+    `;
+    const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', source],
+      { encoding: 'utf8', windowsHide: true, timeout: 15000 });
+    assert.equal(result.status, 0, scenario);
+    const observation = JSON.parse(result.stdout);
+    assert.equal(observation.outcome, ['recover', 'first-success'].includes(scenario) ? 'ready' : 'blocked', scenario);
+    assert.equal(observation.startCalls, ['recover', 'second-failure'].includes(scenario) ? 1 : 0, scenario);
+    assert.equal(observation.taskStartRequests, ['recover', 'second-failure'].includes(scenario) ? 2 : 1, scenario);
+    assert.equal(observation.waitCalls, ['recover', 'second-failure'].includes(scenario) ? 2 : 1, scenario);
+  }
+});
+
 test('actual Windows qualification adapter preserves only closed proof reasons and discards private child output', { skip: process.platform !== 'win32' }, () => {
   const quote = value => "'" + value.replaceAll("'", "''") + "'";
   const folder = mkdtempSync(join(tmpdir(), 'course-runtime-qualification-'));
@@ -83,7 +129,7 @@ test('actual updater emits only bounded structured pre-mutation failure facts', 
   assert.deepEqual(JSON.parse(result.stdout), { schemaVersion: 1, outcome: 'blocked', reasonCode: 'ORIGINAL_NATIVE_OWNER_REQUIRED',
     phase: 'VALIDATE_NATIVE_OWNER', apply: false, stateChanged: false, mutationAttempted: false, drainAttempted: false,
     taskStopAttempted: false, runtimeUpdateAttempted: false, taskStartAttempted: false, activationWriteAttempted: false,
-    acceptanceRestartProof: false });
+    taskStartRequests: 0, firstStoppedTaskResult: null, acceptanceRestartProof: false });
   assert.equal(result.stderr.trim(), '');
 });
 

@@ -11,6 +11,36 @@ $ErrorActionPreference = 'Stop'
 # The launching shell may be PowerShell 7. Load this Windows PowerShell
 # process's own system modules, not incompatible inherited module paths.
 $env:PSModulePath = Join-Path $PSHOME 'Modules'
+$startupPhase='VALIDATE_CONFIGURATION'
+
+function Write-CourseDiscoveryStartupFailure([string]$Phase,[string]$Reason,[Nullable[int]]$ChildExitCode=$null) {
+  $known=@('INVALID_RUNTIME_PATHS','STABLE_GIT_WORKSPACE_REQUIRED','COMMITTED_DISCOVERY_RUNTIME_REQUIRED',
+    'CLEAN_DISCOVERY_RUNTIME_REQUIRED','CONFIG_MUST_BE_OUTSIDE_REPOSITORIES','CONFIG_ACL_MUST_BE_PROTECTED',
+    'CONFIG_ACL_TOO_BROAD','INVALID_RUNTIME_CONFIG','LOGS_MUST_BE_EXTERNAL','SUPERVISOR_EXITED_NONZERO')
+  $reasonCode=if($known -ccontains $Reason){$Reason}else{'STARTUP_FAILURE_REDACTED'}
+  $safePhase=if($Phase -cin @('VALIDATE_CONFIGURATION','LOAD_ENVIRONMENT','PREPARE_LOG_DIRECTORY','RUN_SUPERVISOR','WRITE_SUPERVISOR_LOG','SUPERVISOR_EXIT')){$Phase}else{'UNKNOWN'}
+  $record=[ordered]@{event='runtime_start_failed';observedAt=[DateTimeOffset]::UtcNow.ToString('o');phase=$safePhase;reasonCode=$reasonCode}
+  if($null -ne $ChildExitCode){$record.childExitCode=[int]$ChildExitCode}
+  $line=$record|ConvertTo-Json -Compress
+  # Only append closed facts to an existing external log directory. Never echo
+  # exception text, config values, paths or credentials, including on bad JSON.
+  try {
+    $privateDir=[IO.Path]::GetFullPath([IO.Path]::GetDirectoryName($ConfigPath)).TrimEnd('\')
+    $folder=if($LogDirectory){[IO.Path]::GetFullPath($LogDirectory)}else{Join-Path $privateDir 'logs'}
+    $workspaceFull=[IO.Path]::GetFullPath($WorkspacePath).TrimEnd('\')
+    $info=Get-Item -LiteralPath $folder
+    if($info.PSIsContainer -and -not($info.Attributes -band [IO.FileAttributes]::ReparsePoint) -and
+      $folder.StartsWith($privateDir+'\',[StringComparison]::OrdinalIgnoreCase) -and
+      -not $folder.StartsWith($workspaceFull+'\',[StringComparison]::OrdinalIgnoreCase)){
+      $file=Join-Path $folder ([DateTimeOffset]::UtcNow.ToString('yyyy-MM-dd')+'.jsonl')
+      $prior=if(Test-Path -LiteralPath $file){Get-Item -LiteralPath $file}else{$null}
+      if(-not $prior -or (-not($prior.Attributes -band [IO.FileAttributes]::ReparsePoint) -and $prior.Length -lt 8388608)){
+        Add-Content -LiteralPath $file -Value $line -Encoding UTF8
+      }
+    }
+  }catch{ }
+  [Console]::Error.WriteLine($line)
+}
 
 function Get-CourseDiscoveryRuntimeConfig {
   param([string]$Workspace, [string]$Configuration, [string]$Node)
@@ -193,6 +223,7 @@ try {
   }
   # Credentials are inherited only by the supervisor process. The existing
   # worker strips them before starting the model subprocess.
+  $startupPhase='LOAD_ENVIRONMENT'
   foreach ($property in $runtime.Environment.PSObject.Properties) {
     [Environment]::SetEnvironmentVariable($property.Name, [string]$property.Value, 'Process')
   }
@@ -200,11 +231,13 @@ try {
   [Environment]::SetEnvironmentVariable('COURSE_DISCOVERY_DRAIN_PATH',
     (Join-Path ([IO.Path]::GetDirectoryName($runtime.ConfigPath)) 'drain-request.json'), 'Process')
   Set-Location -LiteralPath $runtime.WorkspacePath
+  $startupPhase='PREPARE_LOG_DIRECTORY'
   if (-not $LogDirectory) { $LogDirectory = Join-Path ([IO.Path]::GetDirectoryName($runtime.ConfigPath)) 'logs' }
   $logs = [IO.Path]::GetFullPath($LogDirectory)
   if ($logs.StartsWith($runtime.WorkspacePath + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'LOGS_MUST_BE_EXTERNAL' }
   $null = New-Item -Path $logs -ItemType Directory -Force
   $supervisorResult = @{ ExitCode = 1 }
+  $startupPhase='RUN_SUPERVISOR'
   & {
     # Windows PowerShell turns native stderr into ErrorRecords. Continue only
     # inside the child invocation so a Node warning cannot stop supervision.
@@ -215,15 +248,18 @@ try {
   } | ForEach-Object {
     # Keep file/path/logger failures terminating in both PowerShell versions.
     $ErrorActionPreference = 'Stop'
+    $startupPhase='WRITE_SUPERVISOR_LOG'
     $line = ConvertTo-SafeDiscoveryLogLine -Line ([string]$_)
     $log = Join-Path $logs ((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd') + '.jsonl')
     if (-not (Test-Path -LiteralPath $log) -or (Get-Item -LiteralPath $log).Length -lt 8388608) {
       Add-Content -LiteralPath $log -Value $line -Encoding UTF8
     }
   }
+  if($supervisorResult.ExitCode -ne 0){Write-CourseDiscoveryStartupFailure 'SUPERVISOR_EXIT' 'SUPERVISOR_EXITED_NONZERO' $supervisorResult.ExitCode}
   exit $supervisorResult.ExitCode
 } catch {
   # Do not echo exception messages: JSON/parser/path errors can contain secrets.
   [Console]::Error.WriteLine('COURSE_DISCOVERY_RUNTIME_START_FAILED')
+  Write-CourseDiscoveryStartupFailure $startupPhase $_.Exception.Message
   exit 1
 }

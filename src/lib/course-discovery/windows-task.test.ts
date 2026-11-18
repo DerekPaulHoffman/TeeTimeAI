@@ -10,6 +10,39 @@ import { describe, expect, it } from "vitest";
 describe.runIf(process.platform === "win32")("Windows supervisor lifecycle dry runs", () => {
   const interpreters = ["powershell.exe", "pwsh.exe"].filter(name => process.platform === "win32" &&
     spawnSync(name, ["-NoProfile", "-NonInteractive", "-Command", "exit 0"], { windowsHide: true }).status === 0);
+  it.each(interpreters)("persists closed bootstrap diagnostics without leaking config or unknown error text with %s", interpreter => {
+    const temporary = mkdtempSync(join(tmpdir(), "course-discovery-task-"));
+    const workspace = join(temporary, "workspace"), privateDir = join(temporary, "private"), logs = join(privateDir, "logs");
+    const config = join(privateDir, "runtime.json"), canary = "fake-test-device-secret-never-print";
+    mkdirSync(workspace); mkdirSync(logs, { recursive: true });
+    writeFileSync(config, JSON.stringify({ COURSE_DISCOVERY_API_ORIGIN: "https://example.invalid", LOCAL_READER_DEVICE_TOKEN: canary,
+      COURSE_DISCOVERY_BROWSER_TRANSPORT: "NATIVE_CHROME" }));
+    try {
+      const wrapper = resolve("scripts/automation/run-course-discovery-supervisor.ps1");
+      const result = spawnSync(interpreter, ["-NoProfile", "-NonInteractive", "-File", wrapper, "-WorkspacePath", workspace,
+        "-ConfigPath", config, "-NodePath", process.execPath, "-LogDirectory", logs], { encoding: "utf8", windowsHide: true, timeout: 15000 });
+      expect(result.status).toBe(1);
+      const quote = (value: string) => `'${value.replace(/'/gu, "''")}'`;
+      const unknown = spawnSync(interpreter, ["-NoProfile", "-NonInteractive", "-Command", `
+        $tokens=$null;$errors=$null;$ast=[System.Management.Automation.Language.Parser]::ParseFile(${quote(wrapper)},[ref]$tokens,[ref]$errors)
+        $definition=$ast.Find({param($item)$item -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $item.Name -eq 'Write-CourseDiscoveryStartupFailure'},$true)
+        Invoke-Expression $definition.Extent.Text
+        $ConfigPath=${quote(config)};$LogDirectory=${quote(logs)};$WorkspacePath=${quote(workspace)}
+        Write-CourseDiscoveryStartupFailure 'RUN_SUPERVISOR' ${quote(canary)}
+      `], { encoding: "utf8", windowsHide: true, timeout: 15000 });
+      expect(unknown.status).toBe(0);
+      const log = readFileSync(join(logs, new Date().toISOString().slice(0, 10) + ".jsonl"), "utf8").replace(/^\uFEFF/u, "");
+      const records = log.trim().split(/\r?\n/u).map(line => JSON.parse(line));
+      expect(records).toEqual([
+        { event: "runtime_start_failed", observedAt: expect.any(String), phase: "VALIDATE_CONFIGURATION", reasonCode: "INVALID_RUNTIME_PATHS" },
+        { event: "runtime_start_failed", observedAt: expect.any(String), phase: "RUN_SUPERVISOR", reasonCode: "STARTUP_FAILURE_REDACTED" },
+      ]);
+      expect(log + result.stdout + result.stderr + unknown.stdout + unknown.stderr).not.toContain(canary);
+    } finally {
+      if (dirname(temporary) !== resolve(tmpdir()) || !temporary.startsWith(join(resolve(tmpdir()), "course-discovery-task-"))) throw new Error("Unsafe test cleanup path");
+      rmSync(temporary, { recursive: true, force: true });
+    }
+  });
   it.each(interpreters)("keeps real Node stderr nonfatal, preserves its exit code, and keeps log failures fatal with %s", interpreter => {
     const temporary = mkdtempSync(join(tmpdir(), "course-discovery-task-"));
     const source = readFileSync(resolve("scripts/automation/run-course-discovery-supervisor.ps1"), "utf8");
@@ -19,6 +52,7 @@ describe.runIf(process.platform === "win32")("Windows supervisor lifecycle dry r
     // replacing only its validated runtime paths with test-owned paths.
     const pipeline = source.slice(start, end);
     const quote = (value: string) => `'${value.replace(/'/gu, "''")}'`;
+    const projectors = `$tokens=$null;$errors=$null\n$ast=[System.Management.Automation.Language.Parser]::ParseFile(${quote(resolve("scripts/automation/run-course-discovery-supervisor.ps1"))},[ref]$tokens,[ref]$errors)\nif($errors.Count){throw 'FIXTURE_PARSE_FAILED'}\nforeach($name in @('ConvertTo-SafeDiscoveryToolTrace','ConvertTo-SafeGenericFallbackUsage','ConvertTo-SafeDiscoveryLogLine','Write-CourseDiscoveryStartupFailure')){ $definition=$ast.Find({param($item)$item -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $item.Name -eq $name},$true);Invoke-Expression $definition.Extent.Text }\n`;
     const entrypoint = join(temporary, "scripts", "automation", "course-discovery-supervisor.mjs");
     mkdirSync(dirname(entrypoint), { recursive: true });
     const harness = join(temporary, "pipeline.ps1");
@@ -27,7 +61,7 @@ describe.runIf(process.platform === "win32")("Windows supervisor lifecycle dry r
         const logs = join(temporary, `logs-${exitCode}`); mkdirSync(logs);
         const sdkUrl = pathToFileURL(resolve("node_modules/@browserbasehq/stagehand/dist/index.mjs")).href;
         writeFileSync(entrypoint, `console.log(JSON.stringify({event:'supervisor_started'}));const sdk=await import(${JSON.stringify(sdkUrl)});if(typeof sdk.Stagehand.create!=='function')process.exit(93);process.emitWarning('private-fixture-warning',{type:'DeprecationWarning',code:'DEP_FIXTURE'});setTimeout(()=>{console.log(JSON.stringify({event:'poll_completed',observedAt:'2030-01-01T00:00:00.000Z'}));process.exit(${exitCode});},30);`);
-        writeFileSync(harness, `$ErrorActionPreference='Stop'\n$runtime=@{NodePath=${quote(process.execPath)};WorkspacePath=${quote(temporary)}}\n$logs=${quote(logs)}\ntry {\n${pipeline}\nexit $supervisorResult.ExitCode\n} catch { [Console]::Error.WriteLine('TEST_LOG_WRITE_FAILED');exit 91 }`);
+        writeFileSync(harness, `$ErrorActionPreference='Stop'\n${projectors}$runtime=@{NodePath=${quote(process.execPath)};WorkspacePath=${quote(temporary)}}\n$logs=${quote(logs)}\ntry {\n${pipeline}\nexit $supervisorResult.ExitCode\n} catch { [Console]::Error.WriteLine('TEST_LOG_WRITE_FAILED');exit 91 }`);
         const result = spawnSync(interpreter, ["-NoProfile", "-NonInteractive", "-File", harness], { encoding: "utf8", windowsHide: true });
         expect(result.status).toBe(exitCode);
         const log = readFileSync(join(logs, `${new Date().toISOString().slice(0, 10)}.jsonl`), "utf8").replace(/^\uFEFF/u, "");
@@ -39,7 +73,7 @@ describe.runIf(process.platform === "win32")("Windows supervisor lifecycle dry r
       const blockedLogs = join(temporary, "blocked-logs"); mkdirSync(blockedLogs);
       // An exclusively held logfile makes the actual Add-Content fail. The
       // logger must still stop, independently of the child's stderr policy.
-      writeFileSync(harness, `$ErrorActionPreference='Stop'\n$runtime=@{NodePath=${quote(process.execPath)};WorkspacePath=${quote(temporary)}}\n$logs=${quote(blockedLogs)}\n$path=Join-Path $logs ((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd')+'.jsonl')\n$locked=[IO.File]::Open($path,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)\ntry {\n${pipeline}\nexit $supervisorResult.ExitCode\n} catch { [Console]::Error.WriteLine('TEST_LOG_WRITE_FAILED');exit 91 } finally {$locked.Dispose()}`);
+      writeFileSync(harness, `$ErrorActionPreference='Stop'\n${projectors}$runtime=@{NodePath=${quote(process.execPath)};WorkspacePath=${quote(temporary)}}\n$logs=${quote(blockedLogs)}\n$path=Join-Path $logs ((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd')+'.jsonl')\n$locked=[IO.File]::Open($path,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)\ntry {\n${pipeline}\nexit $supervisorResult.ExitCode\n} catch { [Console]::Error.WriteLine('TEST_LOG_WRITE_FAILED');exit 91 } finally {$locked.Dispose()}`);
       const blocked = spawnSync(interpreter, ["-NoProfile", "-NonInteractive", "-File", harness], { encoding: "utf8", windowsHide: true });
       expect(blocked.status).toBe(91); expect(blocked.stderr).toContain("TEST_LOG_WRITE_FAILED");
       expect(blocked.stderr).not.toContain("private-fixture-warning");

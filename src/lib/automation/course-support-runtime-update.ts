@@ -17,6 +17,7 @@ const reasons = new Set([
 const phases = new Set([
   "VALIDATE_NATIVE_OWNER", "VALIDATE_MANAGED_TASK", "VALIDATE_ACTIVATION", "VALIDATE_SOURCE", "QUALIFY_RELEASE", "VALIDATE_READER",
   "ACQUIRE_UPDATE_LOCK", "CAPTURE_CONFIGURATION", "VALIDATE_SINGLETON", "VALIDATE_DRAIN_CONTROL", "WRITE_DRAIN_CONTROL",
+  "RECONCILE_STOPPED_UPDATED_RUNTIME", "RESTART_STOPPED_UPDATED_TASK",
   "WAIT_DRAIN_ACKNOWLEDGEMENT", "REVALIDATE_DRAINED_RUNTIME", "STOP_MANAGED_TASK", "WAIT_SUPERVISOR_STOP", "UPDATE_RUNTIME",
   "VALIDATE_UPDATED_RUNTIME", "START_MANAGED_TASK", "VERIFY_UPDATED_SINGLETON", "WRITE_ACTIVATION_RECEIPT",
 ]);
@@ -26,6 +27,7 @@ const flags = ["apply", "stateChanged", "mutationAttempted", "drainAttempted", "
 type Flag = typeof flags[number];
 export type RuntimeUpdateDiagnostic = {
   attributed: boolean; reasonCode: string; phase: string; acceptanceRestartProof: false;
+  taskStartRequests: number | null; firstStoppedTaskResult: 1 | null;
 } & Record<Flag, boolean | null>;
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -45,6 +47,9 @@ export function projectRuntimeUpdateDiagnostic(stdout: unknown): RuntimeUpdateDi
     flags.every(key => typeof value[key] === "boolean");
   return { attributed: Boolean(valid), reasonCode: valid ? value.reasonCode as string : "UNATTRIBUTED_RUNTIME_UPDATE_FAILURE",
     phase: valid ? value.phase as string : "UNKNOWN", acceptanceRestartProof: false,
+    taskStartRequests: valid && Number.isSafeInteger(value.taskStartRequests) && Number(value.taskStartRequests) >= 0 && Number(value.taskStartRequests) <= 2
+      ? value.taskStartRequests as number : null,
+    firstStoppedTaskResult: valid && value.firstStoppedTaskResult === 1 ? 1 : null,
     ...Object.fromEntries(flags.map(key => [key, valid ? value[key] : null])) as Record<Flag, boolean | null> };
 }
 

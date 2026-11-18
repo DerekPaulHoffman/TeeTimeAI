@@ -8,6 +8,12 @@ const blocked = { schemaVersion: 1, outcome: "blocked", reasonCode: "ORIGINAL_NA
   runtimeUpdateAttempted: false, taskStartAttempted: false, activationWriteAttempted: false, acceptanceRestartProof: false };
 
 describe("safe managed runtime update diagnostics", () => {
+  it("retains bounded stopped-start reconciliation evidence without guessing fields from older receipts", () => {
+    expect(projectRuntimeUpdateDiagnostic(JSON.stringify({ ...blocked, phase: "RECONCILE_STOPPED_UPDATED_RUNTIME",
+      taskStartRequests: 2, firstStoppedTaskResult: 1 }))).toMatchObject({ attributed: true, taskStartRequests: 2, firstStoppedTaskResult: 1 });
+    for (const count of [undefined, -1, 3, true, "2"]) expect(projectRuntimeUpdateDiagnostic(JSON.stringify({ ...blocked,
+      taskStartRequests: count, firstStoppedTaskResult: "private" }))).toMatchObject({ taskStartRequests: null, firstStoppedTaskResult: null });
+  });
   it.each(["RUNTIME_CI_REQUIRED", "RUNTIME_CI_PENDING_TIMEOUT", "RUNTIME_CANONICAL_ALIASES_REQUIRED", "RUNTIME_RELEASE_PROOF_UNAVAILABLE"])("retains the closed %s release diagnostic without forwarding command output", reasonCode => {
     const result = projectRuntimeUpdateDiagnostic(JSON.stringify({ ...blocked, reasonCode, phase: "QUALIFY_RELEASE",
       rawOutput: "fixture-private" }));
