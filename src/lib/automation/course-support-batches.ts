@@ -6449,7 +6449,7 @@ export async function appendCourseSupportBatchPath(input: {
     const leaseExpiresAt = new Date(
       now.getTime() + COURSE_SUPPORT_BATCH_LEASE_MS,
     );
-    await prisma.$transaction(async (transaction) => {
+    const implementationBusy = await prisma.$transaction(async (transaction) => {
       const otherActiveBatches = await transaction.courseSupportBatch.findMany({
         where: {
           id: { not: input.batchId },
@@ -6464,9 +6464,7 @@ export async function appendCourseSupportBatchPath(input: {
           courseSupportBatchReservesCheckout(activeBatch),
         )
       ) {
-        throw new Error(
-          "Responder code changes require exclusive access to the approved checkout.",
-        );
+        return true;
       }
       const conflicts = findConflictingResponderPaths(
         [path],
@@ -6518,8 +6516,10 @@ export async function appendCourseSupportBatchPath(input: {
           },
         });
       }
+      return false;
     });
-    return { sealed: false as const, plannedPaths, leaseExpiresAt };
+    if (implementationBusy) return { sealed: false as const, busy: true as const };
+    return { sealed: false as const, busy: false as const, plannedPaths, leaseExpiresAt };
   });
   if (!lease.acquired || lease.value === null) {
     return {
@@ -6538,6 +6538,9 @@ export async function appendCourseSupportBatchPath(input: {
         "Responder verification provenance is sealed and cannot add paths.",
     };
   }
+  if (lease.value.busy) return { outcome: "deferred_busy" as const, pathRecorded: false,
+    reasonCode: "EXCLUSIVE_IMPLEMENTATION_AUTHORITY_HELD" as const, threadDisposition: "KEEP_VISIBLE" as const,
+    archiveReason: "Another owner retains exclusive implementation authority; no path was recorded." };
   return {
     outcome: "ready" as const,
     pathRecorded: true,

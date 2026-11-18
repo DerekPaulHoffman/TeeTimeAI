@@ -22166,7 +22166,7 @@ describe("course-support batch ordinals", () => {
     );
   });
 
-  it("rejects a second implementation path owner", async () => {
+  it("defers a second implementation path owner without recording a path", async () => {
     prismaMocks.batchFindFirst.mockResolvedValue({
       status: "CLAIMED",
       revision: 2,
@@ -22191,7 +22191,8 @@ describe("course-support batch ordinals", () => {
         path: "src/lib/tee-times/adapters/cps/normalize.ts",
         now,
       }),
-    ).rejects.toThrow("exclusive access");
+    ).resolves.toMatchObject({ outcome: "deferred_busy", pathRecorded: false,
+      reasonCode: "EXCLUSIVE_IMPLEMENTATION_AUTHORITY_HELD" });
     expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
   });
 
@@ -22231,9 +22232,9 @@ describe("course-support batch ordinals", () => {
       now,
     };
 
-    await expect(appendCourseSupportBatchPath(input)).rejects.toThrow(
-      "exclusive access",
-    );
+    await expect(appendCourseSupportBatchPath(input)).resolves.toMatchObject({
+      outcome: "deferred_busy", reasonCode: "EXCLUSIVE_IMPLEMENTATION_AUTHORITY_HELD", pathRecorded: false,
+    });
     await expect(appendCourseSupportBatchPath(input)).resolves.toMatchObject({
       outcome: "ready",
       pathRecorded: true,
