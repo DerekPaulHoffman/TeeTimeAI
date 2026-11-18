@@ -1,5 +1,25 @@
 import { describe, expect, it } from "vitest";
-import { allowsRetainedFullRepairResearch, fullRepairReadProgressMatchesClaim, hasStoppedFullRepairVerification, isDataOnlyFullRepair, shouldContinueOwnedFullRepair } from "./course-support-full-repair";
+import { allowsRetainedFullRepairResearch, fullRepairContinuationMode, fullRepairReadProgressMatchesClaim, hasStoppedFullRepairVerification, isDataOnlyFullRepair, shouldContinueOwnedFullRepair } from "./course-support-full-repair";
+
+describe("unfinished original-owner implementation phase", () => {
+  const phase = { status: "IMPLEMENTING", baseSha: "a".repeat(40), releaseSha: "a".repeat(40),
+    plannedPaths: ["src/lib/course-discovery/public-source.ts"], deployedAt: new Date("2030-01-01T10:00:00Z"), now: new Date("2030-01-01T11:00:00Z") };
+  it("retains the phase between negative verification, a claimed path and a future implementation", () => {
+    const snapshot = structuredClone(phase);
+    expect(fullRepairContinuationMode(phase)).toBe("CLAIMED_IMPLEMENTATION");
+    expect(phase).toEqual(snapshot);
+    expect(fullRepairContinuationMode({ ...phase, status: "VERIFYING", plannedPaths: [] })).toBe("DATA_ONLY");
+    expect(fullRepairContinuationMode({ ...phase, status: "VERIFYING", releaseSha: "b".repeat(40) })).toBe("PUBLISHED_IMPLEMENTATION");
+  });
+  it.each([
+    { status: "COMPLETE" }, { status: "CLAIMED" }, { status: "VERIFYING" }, { plannedPaths: [] },
+    { plannedPaths: null }, { plannedPaths: [null] }, { plannedPaths: Array(33).fill("claimed.ts") },
+    { releaseSha: null }, { releaseSha: "unregistered" }, { releaseSha: "b".repeat(40) },
+    { deployedAt: null }, { deployedAt: new Date("invalid") }, { deployedAt: new Date("2030-01-02T10:00:00Z") },
+  ])("does not invent continuation proof for %j", change => {
+    expect(fullRepairContinuationMode({ ...phase, ...change })).toBeNull();
+  });
+});
 
 describe("full repair retains the original owner after negative verification", () => {
   it("continues a zero-pass pending result only after its current deployed verification failure checkpoint", () => {

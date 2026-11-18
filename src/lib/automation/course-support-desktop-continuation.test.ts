@@ -53,6 +53,40 @@ function fixture() {
 }
 
 describe("original Desktop full-repair continuation", () => {
+  it("continues the original clean owner between claiming a tooling path and publishing its implementation", async () => {
+    const f = fixture();
+    const item = { ...f.item, continuationMode: "CLAIMED_IMPLEMENTATION", continuationTrigger: "UNFINISHED_FULL_REPAIR",
+      plannedPaths: ["src/lib/course-discovery/public-source.ts"] };
+    const result = await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps);
+    expect(result).toMatchObject({ outcome: "desktop_continuation_message_required", threadId: CHILD,
+      monitoringVerified: false, prompt: expect.stringContaining("Continuation mode: CLAIMED_IMPLEMENTATION") });
+    expect(result.prompt).toContain("Finish the already claimed tooling repair");
+    expect(await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps))
+      .toMatchObject({ outcome: "already_requested", messageRequired: false });
+    expect(f.deps.clientFactory).toHaveBeenCalledTimes(1);
+    expect(f.client.request.mock.calls.some(([method]) => /start|resume|send|steer/u.test(method))).toBe(false);
+    expect(JSON.parse(readFileSync(f.launcherPath, "utf8"))).toEqual(f.launcher);
+  });
+
+  it.each(["no-paths", "parent-traversal", "unregistered-head", "dirty", "release", "trigger"])("preserves claimed work and rejects %s continuation drift", async scenario => {
+    const f = fixture();
+    const item = { ...f.item, continuationMode: "CLAIMED_IMPLEMENTATION", continuationTrigger: "UNFINISHED_FULL_REPAIR",
+      plannedPaths: ["src/lib/course-discovery/public-source.ts"] };
+    if (scenario === "no-paths") item.plannedPaths = [];
+    if (scenario === "parent-traversal") item.plannedPaths = ["../other-repository/file.ts"];
+    if (scenario === "release") item.releaseSha = "c".repeat(40);
+    if (scenario === "trigger") item.continuationTrigger = "RETRY_PROVIDER";
+    const previous = f.deps.git.getMockImplementation()!;
+    f.deps.git.mockImplementation((cwd, args) => {
+      if (cwd === f.worker && scenario === "unregistered-head" && args[0] === "rev-parse" && args[1] === "HEAD") return "c".repeat(40);
+      if (cwd === f.worker && scenario === "dirty" && args[0] === "status") return " M owned-but-unpublished.ts";
+      return previous(cwd, args);
+    });
+    await expect(prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps)).rejects.toThrow();
+    expect(f.deps.clientFactory).not.toHaveBeenCalled();
+    expect(JSON.parse(readFileSync(f.launcherPath, "utf8"))).toEqual(f.launcher);
+  });
+
   function progressFixture() {
     const f = fixture(), published = "c".repeat(40);
     const item = { ...f.item, continuationMode: "PUBLISHED_IMPLEMENTATION", releaseSha: published,
