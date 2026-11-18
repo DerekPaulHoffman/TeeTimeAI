@@ -740,7 +740,7 @@ function isProviderFamilyPublicBookingLandingUrl(
     case "CHELSEA":
       return Boolean(
         isSingleProviderTenantHostname(hostname, "chelseareservations.com") &&
-        (isRoot || /^\/gpinprocess\/?$/iu.test(pathname)) &&
+        (isRoot || /^\/(?:gpinprocess|nonmember)\/?$/iu.test(pathname)) &&
         !url.hash &&
         hasOnlyProviderTrackingQuery(url)
       );

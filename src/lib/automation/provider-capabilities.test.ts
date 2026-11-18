@@ -204,7 +204,8 @@ describe("provider capability registry", () => {
     "https://foreupsoftware.com/index.php/booking/21017#/teetimes",
     "https://foreupsoftware.com/index.php/booking/index/19433#/teetimes",
     "https://fox.tenfore.golf/gainfieldfarms",
-    "https://dennis.chelseareservations.com/GPInprocess"
+    "https://dennis.chelseareservations.com/GPInprocess",
+    "https://westbk.chelseareservations.com/nonmember/"
   ])("keeps public booking landing URL %s", (url) => {
     expect(isProviderInfrastructureUrl(url)).toBe(false);
     expect(isProviderPublicBookingLandingUrl(url)).toBe(true);
