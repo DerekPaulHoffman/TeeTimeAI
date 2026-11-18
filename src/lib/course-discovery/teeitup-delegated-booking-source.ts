@@ -215,6 +215,18 @@ function matchesDelegatedLocality(source: OfficialIdentitySource, address: { loc
   return Boolean(locality && row.timeZone === source.timeZone && fullCourseName(row.name) === fullCourseName(source.venueName) &&
     clean(locality[1]).toLowerCase() === address.locality && locality[2].toUpperCase() === address.region && locality[3] === address.postalCode);
 }
+/** A public US directory can print a numeric ZIP without its leading zero.
+ * Only restore one exact digit already established by the canonical native
+ * source. The ordinary full identity comparison still checks every other
+ * published component, and the original provider address remains unchanged. */
+function delegatedPostalRepresentation(canonicalAddress: string, providerAddress: string, country: unknown) {
+  const canonical = teeItUpCompleteStreetAddress(canonicalAddress);
+  if (!canonical || !/^0[1-9]\d{3}$/u.test(canonical.postalCode) || country !== undefined && country !== "US") return;
+  const printed = /^(.*, )([A-Z]{2}) ([1-9]\d{3})(?:,? (US|USA|United States(?: of America)?))?$/iu.exec(clean(providerAddress).replace(/\s*,\s*/gu, ", "));
+  if (!printed || printed[2].toUpperCase() !== canonical.region || printed[3] !== canonical.postalCode.slice(1) ||
+      !printed[4] && country !== "US") return;
+  return `${printed[1]}${printed[2]} 0${printed[3]}${printed[4] ? `, ${printed[4]}` : ""}`;
+}
 export function bindDelegatedFacility(source: OfficialIdentitySource, chain: { rootWitnessSha256: string; hops: DelegatedHop[]; rootDocumentProof?: NativeCanonicalRootDocumentProof; physicalContactSource?: NativePhysicalContactSource; physicalContactProof?: TeeItUpPhysicalContactProof; physicalContactRequired?: true }, directory: unknown): TeeItUpDelegatedBookingProof {
   const diagnostic = createDelegationDiagnostic("PROVIDER_BIND");
   try {
@@ -228,14 +240,28 @@ export function bindDelegatedFacility(source: OfficialIdentitySource, chain: { r
   diagnostic.gates.directoryIdsUnique = rows.success ? new Set(rows.data.map(row => row.id)).size === rows.data.length && new Set(rows.data.map(row => row.courseId)).size === rows.data.length : null;
   if (!rows.success || !address || !alias || !source.officialUrl || new Set(rows.data.map(row => row.id)).size !== rows.data.length ||
       new Set(rows.data.map(row => row.courseId)).size !== rows.data.length) return fail();
-  const matching = rows.data.filter(row => row.isSimulator === false &&
-    (Boolean(legacyAddress && matchesOfficialFacility({ venueName: fullCourseName(source.venueName), alternateAddress: legacyAddress }, source, row)) ||
+  const nameMatches = rows.data.filter(row => fullCourseName(row.name) === fullCourseName(source.venueName));
+  const nameTimeZoneMatches = nameMatches.filter(row => row.timeZone === source.timeZone);
+  const matchesIdentity = (row: typeof rows.data[number]) =>
+    Boolean(legacyAddress && matchesOfficialFacility({ venueName: fullCourseName(source.venueName), alternateAddress: legacyAddress }, source, row)) ||
       Boolean(fullAddress && row.timeZone === source.timeZone && fullCourseName(row.name) === fullCourseName(source.venueName) &&
-        JSON.stringify(teeItUpCompleteStreetAddress(row.address)) === JSON.stringify(fullAddress)) || matchesDelegatedLocality(source, address, row)));
+        JSON.stringify(teeItUpCompleteStreetAddress(row.address)) === JSON.stringify(fullAddress)) || matchesDelegatedLocality(source, address, row);
+  const postalRepresentations = rows.data.map((row, index) => delegatedPostalRepresentation(source.venueAddress!, row.address,
+    (directory as Array<{ country?: unknown }>)[index].country));
+  const restoredIdentity = rows.data.map((row, index) => postalRepresentations[index] !== undefined &&
+    matchesIdentity({ ...row, address: postalRepresentations[index]! }));
+  const identityMatches = rows.data.filter((row, index) => matchesIdentity(row) || restoredIdentity[index]);
+  const matching = identityMatches.filter(row => row.isSimulator === false);
   diagnostic.gates.providerUniqueMatch = matching.length === 1;
   let physical;
   const physicalSource = chain.physicalContactSource ?? (chain.physicalContactProof ? physicalContactSourceData(chain.physicalContactProof) : undefined);
   const requirePhysical = chain.physicalContactRequired || Boolean(chain.physicalContactProof);
+  Object.assign(diagnostic.gates, { directoryNameMatch: nameMatches.length > 0, directoryNameTimeZoneMatch: nameTimeZoneMatches.length > 0,
+    directoryIdentityMatch: identityMatches.length > 0, directoryIdentityUnique: identityMatches.length === 1,
+    directoryIdentityOutdoor: identityMatches.some(row => row.isSimulator === false), directoryIdentitySimulator: identityMatches.some(row => row.isSimulator === true),
+    directoryIdentityKindMissing: identityMatches.some(row => row.isSimulator === undefined),
+    directoryPostalRepresentationMatch: restoredIdentity.some(Boolean),
+    directoryPhysicalFallbackAvailable: Boolean(physicalSource), directoryPhysicalFallbackRequired: Boolean(requirePhysical) });
   if ((matching.length !== 1 || requirePhysical) && physicalSource &&
       (physicalSource.bookingEntryUrl ? chain.hops.length === 2 && physicalSource.bookingEntryUrl === chain.hops[0].nextUrl : chain.hops.length === 1))
     physical = bindTeeItUpPhysicalContactFacility(source, physicalSource, directory);

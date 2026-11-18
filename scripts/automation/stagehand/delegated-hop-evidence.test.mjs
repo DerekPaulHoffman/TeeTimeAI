@@ -25,6 +25,21 @@ test('retains bounded structural hop evidence through the failed-learner diagnos
   assert.deepEqual(safeTeeItUpDelegationDiagnostic(value), value);
   assert.ok(!JSON.stringify(value).match(/https:|cookie|token|<html|PRIVATE/iu));
 });
+
+test('retains only optional boolean facility-binding gates without changing historical checkpoint shape', () => {
+  const old = fixture();
+  assert.deepEqual(safeTeeItUpDelegationDiagnostic(old), old);
+  const value = { ...old, stage: 'PROVIDER_BIND', gates: { ...old.gates, directoryNameMatch: true,
+    directoryNameTimeZoneMatch: true, directoryIdentityMatch: true, directoryIdentityUnique: true,
+    directoryIdentityOutdoor: false, directoryIdentitySimulator: false, directoryIdentityKindMissing: true,
+    directoryPhysicalFallbackAvailable: false, directoryPhysicalFallbackRequired: false, directoryPostalRepresentationMatch: false } };
+  assert.deepEqual(safeTeeItUpDelegationDiagnostic(value), value);
+  value.gates.directoryIdentityKindMissing = 'PRIVATE';
+  const safe = safeTeeItUpDelegationDiagnostic(value);
+  assert.equal(safe.gates.directoryIdentityKindMissing, undefined);
+  assert.equal(safe.gates.directoryIdentityMatch, true);
+  assert.ok(!JSON.stringify(safe).includes('PRIVATE'));
+});
 test('preserves historical gates but drops malformed or content-bearing new evidence', () => {
   for (const change of [v => v.raw.frameCount = 20001, v => v.raw.html = 'PRIVATE', v => v.observedAt = 'PRIVATE',
     v => v.rendered.framesState = 'PRIVATE', v => v.cookie = 'PRIVATE', v => v.freshNativeCapture = 'PRIVATE']) {
@@ -38,7 +53,16 @@ test('preserves historical gates but drops malformed or content-bearing new evid
   assert.deepEqual(safeTeeItUpDelegationDiagnostic(old), old);
 });
 test('round-trips evidence in the original job-bound failure checkpoint and rejects digest or source drift', () => {
+  for (const withBinding of [false, true]) {
   const diagnostic = { teeItUpDelegation: fixture() };
+  if (withBinding) {
+    delete diagnostic.teeItUpDelegation.hopEvidence;
+    diagnostic.teeItUpDelegation.stage = 'PROVIDER_BIND';
+    Object.assign(diagnostic.teeItUpDelegation.gates, { directoryNameMatch: true, directoryNameTimeZoneMatch: true,
+      directoryIdentityMatch: false, directoryIdentityUnique: false, directoryIdentityOutdoor: false,
+      directoryIdentitySimulator: false, directoryIdentityKindMissing: false, directoryPhysicalFallbackAvailable: false,
+      directoryPhysicalFallbackRequired: false, directoryPostalRepresentationMatch: false });
+  }
   const job = { id: 'job1', sourceFingerprint: 'a'.repeat(64), request: { target: { courseId: 'course1' } }, attempts: 1,
     firstPickedUpAt: '2030-01-01T12:00:00.000Z', deadlineAt: '2030-01-01T12:15:00.000Z' };
   const failure = { schemaVersion: 1, kind: 'OWN_STAGEHAND_FAILURE_DIAGNOSTIC', jobId: job.id, sourceFingerprint: job.sourceFingerprint,
@@ -52,6 +76,8 @@ test('round-trips evidence in the original job-bound failure checkpoint and reje
   assert.deepEqual(readStagehandFailure({ ...job, checkpoint: { stagehandFailure: failure } }, now), failure);
   assert.ok(Buffer.byteLength(JSON.stringify(failure)) < 4000);
   assert.equal(readStagehandFailure({ ...job, sourceFingerprint: 'b'.repeat(64), checkpoint: { stagehandFailure: failure } }, now), undefined);
-  failure.entries[0].fixedInspectionDiagnostic.teeItUpDelegation.hopEvidence.raw.frameCount++;
+  if (withBinding) failure.entries[0].fixedInspectionDiagnostic.teeItUpDelegation.gates.directoryIdentityMatch = true;
+  else failure.entries[0].fixedInspectionDiagnostic.teeItUpDelegation.hopEvidence.raw.frameCount++;
   assert.equal(readStagehandFailure({ ...job, checkpoint: { stagehandFailure: failure } }, now), undefined);
+  }
 });

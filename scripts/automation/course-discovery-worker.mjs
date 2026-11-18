@@ -968,12 +968,15 @@ export function safeTeeItUpDelegationDiagnostic(value) {
     "secondReadReturned", "rootRefreshRequired", "rootRefreshReturned", "rootRefreshIdentityMatches", "rootRefreshLinkMatches", "finalFresh", "finalUrlMatches",
     "directoryValid", "directoryIdsUnique", "providerUniqueMatch", "hopSessionOpen", "hopNoAccess", "hopNoFatal", "hopStatus200", "hopCaptured",
     "hopUrlMatches", "hopCaptureFresh", "hopTimeOriginMatches", "hopRawClosed", "hopNativeTransport"];
+  const bindingGates = ["directoryNameMatch", "directoryNameTimeZoneMatch", "directoryIdentityMatch", "directoryIdentityUnique",
+    "directoryIdentityOutdoor", "directoryIdentitySimulator", "directoryIdentityKindMissing", "directoryPhysicalFallbackAvailable", "directoryPhysicalFallbackRequired", "directoryPostalRepresentationMatch"];
   try {
     if (!value || typeof value !== "object" || Array.isArray(value) || !stages.includes(value.stage) ||
         !value.gates || typeof value.gates !== "object" || Array.isArray(value.gates) ||
         !gates.every(key => Object.hasOwn(value.gates, key) && (typeof value.gates[key] === "boolean" || value.gates[key] === null))) return undefined;
     const hopEvidence = safeBookingEdgeEvidence(value.hopEvidence);
-    return { stage: value.stage, gates: Object.fromEntries(gates.map(key => [key, value.gates[key]])),
+    return { stage: value.stage, gates: Object.fromEntries([...gates, ...bindingGates.filter(key =>
+      Object.hasOwn(value.gates, key) && (typeof value.gates[key] === "boolean" || value.gates[key] === null))].map(key => [key, value.gates[key]])),
       ...(hopEvidence ? { hopEvidence } : {}) };
   } catch { return undefined; }
 }

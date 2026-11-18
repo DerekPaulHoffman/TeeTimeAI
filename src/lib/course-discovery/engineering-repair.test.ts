@@ -203,6 +203,19 @@ describe("private failure evidence", () => {
     Object.assign(entry.fixedInspectionDiagnostic.teeItUpDelegation.gates, { rootRenderedAddress: "PRIVATE" });
     expect(project()).not.toHaveProperty("delegationDiagnostic");
   });
+  it("projects optional binding booleans without losing historical failures or copying untrusted fields", () => {
+    const diagnostic = createDelegationDiagnostic("PROVIDER_BIND");
+    Object.assign(diagnostic.gates, { directoryNameMatch: true, directoryIdentityMatch: true,
+      directoryIdentityKindMissing: true, directoryIdentitySimulator: "PRIVATE", providerName: "PRIVATE" });
+    const result = discoveryFailureDiagnosis({ outcome: "TOOL_FAILURE", checkpoint: { stagehandFailure: {
+      schemaVersion: 1, kind: "OWN_STAGEHAND_FAILURE_DIAGNOSTIC", entries: [{ attempt: 1, phase: "FIXED_INSPECTION",
+        code: "OFFICIAL_DELEGATED_SOURCE_UNVERIFIED", fixedInspectionDiagnostic: { teeItUpDelegation: diagnostic } }] } } });
+    expect(result).toMatchObject({ delegationDiagnostic: { stage: "PROVIDER_BIND", gates: expect.arrayContaining([
+      { gate: "DIRECTORY_NAME_MATCH", passed: true }, { gate: "DIRECTORY_IDENTITY_MATCH", passed: true },
+      { gate: "DIRECTORY_IDENTITY_KIND_MISSING", passed: true }]) }, evidenceAuthority: false });
+    expect(JSON.stringify(result)).not.toContain("PRIVATE");
+    expect(result.delegationDiagnostic!.gates.some(row => row.gate === "DIRECTORY_IDENTITY_SIMULATOR")).toBe(false);
+  });
   it("keeps a closed worker failure hint usable after CLI sanitization without exposing a code credential", () => {
     const project = (code: string) => sanitizeResponderValue(discoveryFailureDiagnosis({
       outcome: "TOOL_FAILURE", checkpoint: { stagehandFailure: { schemaVersion: 1,

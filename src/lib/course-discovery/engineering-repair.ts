@@ -10,7 +10,7 @@ import { hasLegacyDiscoveryOwner } from "./legacy-exclusion";
 import { isDataOnlyFullRepair } from "@/lib/automation/course-support-full-repair";
 import { createCourseSupportRemediationCourseRef } from "@/lib/automation/course-support-claim-evidence";
 import { buildCourseSupportProviderSnapshotFingerprint } from "@/lib/automation/course-support-verification";
-import { delegatedDiagnosticGates, delegatedDiagnosticStages } from "./teeitup-delegated-booking-diagnostic";
+import { delegatedDiagnosticGates, delegatedDiagnosticStages, delegatedFacilityBindingDiagnosticGates } from "./teeitup-delegated-booking-diagnostic";
 import { bookingEdgeEvidenceSchema } from "./booking-edge-evidence";
 import { hasReciprocalLearningRepairLink, readLearningRepairRecoveries, readLearningRepairRecoveryOf } from "./learning-repair-recovery";
 
@@ -140,7 +140,8 @@ export function discoveryFailureDiagnosis(job: { outcome: string | null; checkpo
   const gates = object(diagnostic.gates);
   const delegationDiagnostic = delegatedDiagnosticStages.some(stage => stage === diagnostic.stage) &&
     delegatedDiagnosticGates.every(key => gates[key] === null || typeof gates[key] === "boolean")
-    ? { stage: diagnostic.stage, gates: delegatedDiagnosticGates.map(gate => ({
+    ? { stage: diagnostic.stage, gates: [...delegatedDiagnosticGates, ...delegatedFacilityBindingDiagnosticGates.filter(key =>
+      gates[key] === null || typeof gates[key] === "boolean")].map(gate => ({
       gate: gate.replace(/([a-z])([A-Z])/gu, "$1_$2").toUpperCase(), passed: gates[gate] })) }
     : undefined;
   const hopEvidence = includeBookingEdgeEvidence ? bookingEdgeEvidenceSchema.safeParse(diagnostic.hopEvidence) : null;

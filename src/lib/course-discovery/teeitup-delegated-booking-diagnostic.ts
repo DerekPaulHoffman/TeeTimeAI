@@ -9,7 +9,13 @@ export const delegatedDiagnosticGates = ["capabilityAvailable", "sourceValid", "
   "directoryValid", "directoryIdsUnique", "providerUniqueMatch", "hopSessionOpen", "hopNoAccess", "hopNoFatal", "hopStatus200", "hopCaptured",
   "hopUrlMatches", "hopCaptureFresh", "hopTimeOriginMatches", "hopRawClosed", "hopNativeTransport"] as const;
 export type DelegatedDiagnosticGate = typeof delegatedDiagnosticGates[number];
-export type TeeItUpDelegationDiagnostic = { stage: typeof delegatedDiagnosticStages[number]; gates: Record<DelegatedDiagnosticGate, boolean | null>; hopEvidence?: BookingEdgeEvidence };
+// Optional extension: older job-bound checkpoints retain their exact shape.
+// These are failure observations only, never facility or read authority.
+export const delegatedFacilityBindingDiagnosticGates = ["directoryNameMatch", "directoryNameTimeZoneMatch", "directoryIdentityMatch", "directoryIdentityUnique",
+  "directoryIdentityOutdoor", "directoryIdentitySimulator", "directoryIdentityKindMissing", "directoryPhysicalFallbackAvailable", "directoryPhysicalFallbackRequired", "directoryPostalRepresentationMatch"] as const;
+type FacilityBindingDiagnosticGate = typeof delegatedFacilityBindingDiagnosticGates[number];
+export type TeeItUpDelegationDiagnostic = { stage: typeof delegatedDiagnosticStages[number]; gates: Record<DelegatedDiagnosticGate, boolean | null> &
+  Partial<Record<FacilityBindingDiagnosticGate, boolean | null>>; hopEvidence?: BookingEdgeEvidence };
 const failures = new WeakMap<object, TeeItUpDelegationDiagnostic>();
 export function createDelegationDiagnostic(stage: TeeItUpDelegationDiagnostic["stage"] = "CAPABILITY"): TeeItUpDelegationDiagnostic {
   return { stage, gates: Object.fromEntries(delegatedDiagnosticGates.map(key => [key, null])) as TeeItUpDelegationDiagnostic["gates"] };
@@ -19,7 +25,8 @@ export function rememberTeeItUpDelegationFailure(error: unknown, diagnostic: Tee
   if (!error || typeof error !== "object") return;
   const prior = failures.get(error);
   const gates = { ...diagnostic.gates };
-  if (prior) for (const key of delegatedDiagnosticGates) if (prior.gates[key] !== null) gates[key] = prior.gates[key];
+  if (prior) for (const key of [...delegatedDiagnosticGates, ...delegatedFacilityBindingDiagnosticGates])
+    if (typeof prior.gates[key] === "boolean") gates[key] = prior.gates[key];
   const parsed = bookingEdgeEvidenceSchema.safeParse(prior?.hopEvidence ?? diagnostic.hopEvidence);
   failures.set(error, { stage: prior && prior.stage !== "NATIVE_DOCUMENT_READ" ? prior.stage : diagnostic.stage, gates,
     ...(parsed.success ? { hopEvidence: parsed.data } : {}) });

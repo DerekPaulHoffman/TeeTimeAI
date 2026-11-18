@@ -30,6 +30,27 @@ function readers() {
 afterEach(() => vi.restoreAllMocks());
 
 describe("fresh native delegated TeeItUp source", () => {
+  it.each(["kindMissing", "simulator", "name", "timeZone", "address", "ambiguous"])("retains only closed binding checks for a valid directory rejected by %s", variant => {
+    const rows = structuredClone(directory);
+    if (variant === "kindMissing") delete (rows[0] as { isSimulator?: boolean }).isSimulator;
+    if (variant === "simulator") rows[0].isSimulator = true;
+    if (variant === "name") rows[0].name = "Other Golf Course";
+    if (variant === "timeZone") rows[0].timeZone = "America/Chicago";
+    if (variant === "address") rows[0].address = "11 Harbor Drive, Example, NY 12345";
+    if (variant === "ambiguous") rows.push({ ...rows[0], id: 72, courseId: "provider-72" });
+    const chain = { rootWitnessSha256: "a".repeat(64), hops: [{ pageUrl: source.officialUrl, nextUrl: source.bookingUrl, witnessSha256: "b".repeat(64) }] };
+    let primary: unknown;
+    try { bindDelegatedFacility(source, chain, rows); } catch (error) { primary = error; }
+    expect(primary).toBeInstanceOf(Error);
+    const gates = getTeeItUpDelegationDiagnostic(primary)!.gates;
+    expect(gates).toMatchObject({ directoryValid: true, directoryIdsUnique: true, providerUniqueMatch: false,
+      directoryNameMatch: variant !== "name", directoryNameTimeZoneMatch: !["name", "timeZone"].includes(variant),
+      directoryIdentityMatch: !["name", "timeZone", "address"].includes(variant),
+      directoryIdentityUnique: !["name", "timeZone", "address", "ambiguous"].includes(variant),
+      directoryIdentityOutdoor: variant === "ambiguous", directoryIdentitySimulator: variant === "simulator",
+      directoryIdentityKindMissing: variant === "kindMissing", directoryPhysicalFallbackAvailable: false, directoryPhysicalFallbackRequired: false });
+    expect(JSON.stringify(getTeeItUpDelegationDiagnostic(primary))).not.toMatch(/Harbor|Example|https:|provider-7|America\//u);
+  });
   it.each(["Home", "Event Central", "Upcoming Events", "Golf Outings"])("keeps an exact venue witness alongside the public %s section", section => {
     const p = page(source.officialUrl, operator, true);
     p.html = p.html.replace("</body>", `<section><h1>${section}</h1></section></body>`);
@@ -37,6 +58,40 @@ describe("fresh native delegated TeeItUp source", () => {
     expect(delegatedCanonicalVenueWitness(source, p)).toMatch(/^[a-f0-9]{64}$/u);
     p.html = p.html.replace(section, "Other Golf Course");
     expect(() => delegatedCanonicalVenueWitness(source, p)).toThrow("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
+  });
+  it.each(["10 Harbor Dr., Example, MA 1234 US", "10 Harbor Dr., Example, MA 1234, US", "10 Harbor Dr., Example, MA 1234", "Example, MA 1234"])
+  ("binds the exact corroborated leading zero postal representation: %s", address => {
+    const scoped = { ...source, venueAddress: "10 Harbor Drive, Example, MA 01234, USA" };
+    const chain = { rootWitnessSha256: "a".repeat(64), hops: [{ pageUrl: scoped.officialUrl, nextUrl: scoped.bookingUrl, witnessSha256: "b".repeat(64) }] };
+    const rows = [{ ...directory[0], address, ...(address.endsWith("US") ? {} : { country: "US" }) }];
+    expect(bindDelegatedFacility(scoped, chain, rows)).toMatchObject({ facilityId: 71, providerAddress: address, canonicalAddress: scoped.venueAddress });
+  });
+  it.each(["postal", "threeDigits", "fiveDigits", "sixDigits", "zip4", "canonicalZip4", "nonzeroCanonical", "street", "direction", "unit", "locality", "region", "name", "timeZone", "simulator", "kindMissing", "country", "countryConflict", "noCountry", "ambiguous"])
+  ("does not excuse %s when checking a missing leading zero postal digit", variant => {
+    const scoped = { ...source, venueAddress: "10 Harbor Drive, Example, MA 01234, USA" };
+    const row: typeof directory[0] & { country?: string } = { ...directory[0], address: "10 Harbor Dr., Example, MA 1234 US", country: "US" };
+    if (variant === "postal") row.address = row.address.replace("1234", "1235");
+    if (variant === "threeDigits") row.address = row.address.replace("1234", "234");
+    if (variant === "fiveDigits") row.address = row.address.replace("1234", "11234");
+    if (variant === "sixDigits") row.address = row.address.replace("1234", "001234");
+    if (variant === "zip4") row.address = row.address.replace("1234", "1234-6789");
+    if (variant === "canonicalZip4") scoped.venueAddress = scoped.venueAddress.replace("01234", "01234-6789");
+    if (variant === "nonzeroCanonical") scoped.venueAddress = scoped.venueAddress.replace("01234", "11234");
+    if (variant === "street") row.address = row.address.replace("10 Harbor", "11 Harbor");
+    if (variant === "direction") row.address = row.address.replace("10 Harbor", "10 North Harbor");
+    if (variant === "unit") row.address = row.address.replace("Dr.,", "Dr. Suite 2,");
+    if (variant === "locality") row.address = row.address.replace("Example", "Other");
+    if (variant === "region") row.address = row.address.replace("MA", "NY");
+    if (variant === "name") row.name = "Other Golf Course";
+    if (variant === "timeZone") row.timeZone = "America/Chicago";
+    if (variant === "simulator") row.isSimulator = true;
+    if (variant === "kindMissing") delete (row as { isSimulator?: boolean }).isSimulator;
+    if (variant === "country") row.address = row.address.replace(" US", " Canada");
+    if (variant === "countryConflict") row.country = "CA";
+    if (variant === "noCountry") { row.address = row.address.replace(" US", ""); delete row.country; }
+    const rows = variant === "ambiguous" ? [row, { ...row, id: 72, courseId: "provider-72" }] : [row];
+    const chain = { rootWitnessSha256: "a".repeat(64), hops: [{ pageUrl: scoped.officialUrl, nextUrl: scoped.bookingUrl, witnessSha256: "b".repeat(64) }] };
+    expect(() => bindDelegatedFacility(scoped, chain, rows)).toThrow("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
   });
   it.each(["raw", "rendered"])("requires the exact complete branded heading address in %s evidence", changed => {
     const p = page(source.officialUrl, operator, true);
@@ -441,20 +496,26 @@ describe("fresh native delegated TeeItUp source", () => {
       expect(events.indexOf("API")).toBeGreaterThan(events.indexOf("HTTP_TIMEOUT"));
     } finally { timer.mockRestore(); }
   });
-  it("keeps warm witnesses semantic across unrelated nonce changes, while rebuilding both native hops for two independent inputs", async () => {
+  it.each([false, true])("keeps warm witnesses semantic across unrelated nonce changes, while rebuilding both native hops for two independent inputs (leading zero=%s)", async leadingZero => {
     const deps = readers();
+    const scoped = leadingZero ? { ...source, venueAddress: "10 Harbor Drive, Example, MA 01234, USA" } : source;
+    const scopedDirectory = leadingZero ? [{ ...directory[0], address: "10 Harbor Dr., Example, MA 1234 US", country: "US" }] : directory;
+    const nativeRoot = () => { const p = page(scoped.officialUrl, operator, true);
+      p.html = p.html.replaceAll(source.venueAddress, scoped.venueAddress); p.visibleEvidence!.addressTexts = [scoped.venueAddress];
+      return registerFreshNativeOfficialIdentityPage(p, scoped.officialUrl, new Date(Date.now() + 120000)); };
+    deps.readNativeOfficialPage.mockImplementation(async () => nativeRoot());
     const calls: string[] = [], fetcher = vi.fn<typeof fetch>(async value => {
       const u = new URL(String(value)); calls.push(u.href);
-      return Response.json(u.pathname.endsWith("facilities") ? directory : [{ courseId: "provider-71", teetimes: [] }]);
+      return Response.json(u.pathname.endsWith("facilities") ? scopedDirectory : [{ courseId: "provider-71", teetimes: [] }]);
     });
     const lease = async <T>(_family: string, work: () => Promise<T>) => ({ acquired: true as const, value: await work() });
     // The legacy string-address predicate rejects the otherwise identical
     // country suffix. The native fallback must earn the complete chain and
     // use the existing parsed official-facility predicate, not inject a proof.
-    const inspected = await inspectExistingAdapter(source, { ...deps, fetch: fetcher, venueMatches: (a, b) => a === b, requestLease: lease });
+    const inspected = await inspectExistingAdapter(scoped, { ...deps, fetch: fetcher, venueMatches: (a, b) => a === b, requestLease: lease });
     const recipe = parseAccessRecipe({ schemaVersion: 1, engine: "EXISTING_ADAPTER", target: { courseId: "course", kind: "OUTDOOR" },
-      source: { ...source, providerFamily: "TEEITUP" }, adapter: inspected.adapter });
-    deps.readNativeOfficialPage.mockImplementation(async () => { const p = root(); p.html = p.html.replace("</body>", "<script>nonce=123</script></body>"); return registerFreshNativeOfficialIdentityPage(p, source.officialUrl, new Date(Date.now() + 120000)); });
+      source: { ...scoped, providerFamily: "TEEITUP" }, adapter: inspected.adapter });
+    deps.readNativeOfficialPage.mockImplementation(async () => { const p = nativeRoot(); p.html = p.html.replace("</body>", "<script>nonce=123</script></body>"); return registerFreshNativeOfficialIdentityPage(p, scoped.officialUrl, new Date(Date.now() + 120000)); });
     for (const [date, players] of [["2030-10-24", 2], ["2030-10-25", 3]] as const) {
       const result = await executeExistingAdapterRecipe(recipe as never, { date, players, startTime: "08:00", endTime: "18:00", timeZone: source.timeZone },
         { ...deps, recipeHash: "a".repeat(64), fetch: fetcher, requestLease: lease, venueMatches: (a, b) => a === b, toInstant: value => new Date(String(value)) });
