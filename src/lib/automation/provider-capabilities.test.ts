@@ -202,11 +202,22 @@ describe("provider capability registry", () => {
     "https://public-course.ezlinksgolf.com/index.html#/search",
     "https://cedar-ridge-golf-course-v2.book.teeitup.com/",
     "https://foreupsoftware.com/index.php/booking/21017#/teetimes",
+    "https://foreupsoftware.com/index.php/booking/index/19433#/teetimes",
     "https://fox.tenfore.golf/gainfieldfarms",
     "https://dennis.chelseareservations.com/GPInprocess"
   ])("keeps public booking landing URL %s", (url) => {
     expect(isProviderInfrastructureUrl(url)).toBe(false);
     expect(isProviderPublicBookingLandingUrl(url)).toBe(true);
+  });
+
+  it("runs observed ForeUP indexed landings only with valid scoped metadata", () => {
+    const bookingBaseUrl = "https://foreupsoftware.com/index.php/booking/index/19433#/teetimes";
+    expect(resolveProviderCapability({ detectedPlatform: "FOREUP", detectedBookingUrl: bookingBaseUrl,
+      bookingMetadata: { scheduleId: 1616, bookingClassId: 1098, bookingBaseUrl } }).isRunnable).toBe(true);
+    for (const path of ["index/0", "index/19433/1616", "index/19433/checkout", "index/19433.json"]) {
+      expect(isProviderPublicBookingLandingUrl(`https://foreupsoftware.com/index.php/booking/${path}#/teetimes`)).toBe(false);
+    }
+    expect(isProviderPublicBookingLandingUrl(`${bookingBaseUrl}&token=secret`)).toBe(false);
   });
 
   it.each([

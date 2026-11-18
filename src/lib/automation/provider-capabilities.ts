@@ -712,7 +712,7 @@ function isProviderFamilyPublicBookingLandingUrl(
     case "FOREUP":
       return Boolean(
         /^(?:www\.)?foreupsoftware\.com$/u.test(hostname) &&
-        /^\/index\.php\/booking\/[1-9]\d{0,9}(?:\/[1-9]\d{0,9})?\/?$/u.test(pathname) &&
+        /^\/index\.php\/booking\/(?:[1-9]\d{0,9}(?:\/[1-9]\d{0,9})?|index\/[1-9]\d{0,9})\/?$/u.test(pathname) &&
         (!url.hash || /^#\/?teetimes\/?$/iu.test(url.hash))
       );
     case "TEEITUP":

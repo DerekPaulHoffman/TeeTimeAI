@@ -85,6 +85,32 @@ function parseSolitude(html: string, players = 2) {
 }
 
 describe("Quick18 public read-only tee sheet", () => {
+  it.each(["Best Rate Available", "Best Available Rate", "Best Rate Guarantee", "Out of State (0-12)"])(
+    "reads the observed public %s column without taking card or resident rates", (caption) => {
+      const html = page(row("8:00AM", "1 to 4 players", "202609290800"), "9/29/2026",
+        ["Tee Time", "Players", caption, "Arizona Residents (0-12)"]);
+      expect(parse(html)).toMatchObject([{ priceCents: 8400, availableSpots: 4 }]);
+      expect(parse(html)[0].bookingUrl).toContain("psid=6786");
+    }
+  );
+
+  it.each(["Best Rate Available Members", "Swing First Rate", "Arizona Residents (0-12)",
+    "18 Hole Rate Members", "27 Hole Rate", "36 Hole Rate"])(
+    "does not classify %s as an ordinary public round", (caption) => {
+      const html = page(row("8:00AM", "1 to 4 players", "202609290800"), "9/29/2026",
+        ["Tee Time", "Players", caption, "Member Rate"]);
+      expect(() => parse(html)).toThrow(/public rate column is missing/u);
+    }
+  );
+
+  it("preserves round length and rejects free or member offers under an 18 Hole Rate caption", () => {
+    const html = page(row("8:00AM", "1 to 4 players", "202609290800"), "9/29/2026",
+      ["Tee Time", "Players", "18 Hole Rate", "27 Hole Rate"]);
+    expect(parse(html)).toMatchObject([{ holes: 18, priceOptions: [{ holes: 18, priceCents: 8400 }] }]);
+    expect(() => parse(html.replace("$84.00", "$0.00"))).toThrow(/public rate is ambiguous/u);
+    expect(() => parse(html.replace("$84.00", "$84.00 Member Special"))).toThrow(/public rate is ambiguous/u);
+  });
+
   it("accepts only a tenant public search page and bounded date query", () => {
     expect(isQuick18Metadata(metadata)).toBe(true);
     expect(isQuick18PublicSearchUrl(`${bookingBaseUrl}?teedate=20260929`)).toBe(true);
