@@ -671,7 +671,7 @@ async function collectOwnedFullRepairContinuations(tx: Prisma.TransactionClient,
   if (!ids.length) return [];
   const batches = await tx.courseSupportBatch.findMany({
     where: { id: { in: ids }, status: "VERIFYING" },
-    select: { id: true, reference: true, ownerThreadId: true, baseSha: true, releaseSha: true, summary: true,
+    select: { id: true, reference: true, ownerThreadId: true, baseSha: true, releaseSha: true, deployedAt: true, summary: true,
       incidents: { select: { courseId: true, incidentId: true, cycle: true, result: true, course: true,
         incident: { select: { cycle: true, status: true, activeBatchId: true, providerFamilyKey: true, failureFingerprint: true } } } } },
   });
@@ -694,9 +694,14 @@ async function collectOwnedFullRepairContinuations(tx: Prisma.TransactionClient,
     const audit = audits.find(value => value.assignmentRef === summary.dispatchAssignmentRef &&
       value.childThreadId === batch.ownerThreadId && value.baseSha === batch.baseSha);
     const entry = batch.incidents[0];
-    // Implementation-bearing recovery keeps its stricter original protocol.
-    if (!audit || batch.incidents.length !== 1 || !entry || batch.releaseSha !== batch.baseSha ||
-        !Array.isArray(summary.plannedPaths) || summary.plannedPaths.length !== 0 ||
+    const paths = Array.isArray(summary.plannedPaths) ? summary.plannedPaths : null;
+    const dataOnly = paths?.length === 0 && batch.releaseSha === batch.baseSha;
+    const publishedImplementation = paths && paths.length > 0 && paths.every(path => typeof path === "string" && path.length > 0) &&
+      /^[a-f0-9]{40}$/u.test(batch.releaseSha ?? "") && batch.releaseSha !== batch.baseSha &&
+      batch.deployedAt instanceof Date && batch.deployedAt <= now;
+    // This projection changes no implementation/recovery authority. The local
+    // helper must additionally prove that the exact clean release is on main.
+    if (!audit || batch.incidents.length !== 1 || !entry || (!dataOnly && !publishedImplementation) ||
         entry.courseId !== audit.target.courseId || entry.incidentId !== audit.target.incidentId ||
         entry.cycle !== audit.target.cycle || entry.incident.cycle !== entry.cycle ||
         entry.incident.status !== "AUTO_INVESTIGATING" || entry.incident.activeBatchId !== batch.id ||
@@ -718,7 +723,8 @@ async function collectOwnedFullRepairContinuations(tx: Prisma.TransactionClient,
     })) continue;
     items.push({ kind: "OWNED_OUTDOOR_FULL_REPAIR" as const, assignmentRef: audit.assignmentRef,
       threadId: audit.childThreadId!, launcherReceiptPath: audit.launcherReceiptPath!, batchReference: batch.reference,
-      baseSha: batch.baseSha, releaseSha: batch.releaseSha });
+      baseSha: batch.baseSha, releaseSha: batch.releaseSha,
+      continuationMode: dataOnly ? "DATA_ONLY" as const : "PUBLISHED_IMPLEMENTATION" as const });
     if (items.length === 5) break;
   }
   return items;

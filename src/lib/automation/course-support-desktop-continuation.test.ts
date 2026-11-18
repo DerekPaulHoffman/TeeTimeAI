@@ -52,6 +52,35 @@ function fixture() {
 }
 
 describe("original Desktop full-repair continuation", () => {
+  it("continues only the same clean published implementation owner after proving its registered release is on main", async () => {
+    const f = fixture(), published = "c".repeat(40);
+    const item = { ...f.item, continuationMode: "PUBLISHED_IMPLEMENTATION", releaseSha: published };
+    const priorGit = f.deps.git.getMockImplementation()!;
+    f.deps.git.mockImplementation((cwd, args) => cwd === f.worker && args[0] === "rev-parse" && args[1] === "HEAD"
+      ? published : priorGit(cwd, args));
+    expect(await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps))
+      .toMatchObject({ outcome: "desktop_continuation_message_required", threadId: CHILD,
+        prompt: expect.stringContaining("Continuation mode: PUBLISHED_IMPLEMENTATION") });
+    expect(f.deps.git).toHaveBeenCalledWith(f.selected, ["merge-base", "--is-ancestor", BEFORE, published]);
+    expect(f.deps.git).toHaveBeenCalledWith(f.selected, ["merge-base", "--is-ancestor", published, CURRENT]);
+    expect(f.deps.git.mock.calls.some(([, args]) => ["merge", "checkout", "reset", "commit"].includes(args[0]))).toBe(false);
+    expect(JSON.parse(readFileSync(f.launcherPath, "utf8"))).toEqual(f.launcher);
+  });
+
+  it.each(["unpublished", "unregistered-head", "unchanged-release", "unknown-mode"])("rejects a %s implementation continuation", async scenario => {
+    const f = fixture(), published = "c".repeat(40);
+    const item = { ...f.item, continuationMode: scenario === "unknown-mode" ? "ANY_IMPLEMENTATION" : "PUBLISHED_IMPLEMENTATION",
+      releaseSha: scenario === "unchanged-release" ? BEFORE : published };
+    const priorGit = f.deps.git.getMockImplementation()!;
+    f.deps.git.mockImplementation((cwd, args) => {
+      if (scenario === "unpublished" && args[0] === "merge-base" && args[2] === published) throw Error("Release is not on main");
+      return cwd === f.worker && args[0] === "rev-parse" && args[1] === "HEAD"
+        ? scenario === "unregistered-head" ? "d".repeat(40) : published : priorGit(cwd, args);
+    });
+    await expect(prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps)).rejects.toThrow();
+    expect(f.deps.clientFactory).not.toHaveBeenCalled();
+  });
+
   it("preserves its same owner's previously advanced clean runtime across a later release", async () => {
     const f = fixture();
     await prepareOwnedDesktopContinuation({ context: f.context, item: f.item }, f.deps);

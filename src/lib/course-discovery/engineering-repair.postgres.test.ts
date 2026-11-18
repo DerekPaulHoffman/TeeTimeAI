@@ -221,7 +221,7 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     await engineering.reconcileDiscoveryEngineeringHandoffs();
     expect(await client.courseMonitoringEvent.count({ where: { incidentId: incident.id, eventType: "REVALIDATION_REQUESTED" } })).toBe(eventCount);
   });
-  it("keeps failed verification evidence and offers only its original Desktop owner a continuation", async () => {
+  it.each(["data-only", "published-code", "unpublished-code"])("keeps failed verification evidence and offers only its original %s Desktop owner a continuation", async scenario => {
     const f = await failed();
     await engineering.reconcileDiscoveryEngineeringHandoffs();
     await client.courseSupportIncident.update({ where: { courseId: f.course.id }, data: { nextAttemptAt: new Date(Date.now() - 1000) } });
@@ -244,15 +244,18 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     const batch = await client.courseSupportBatch.findFirstOrThrow({ where: { ownerThreadId: owner } });
     // Exact observed post-verification boundary. Source, cycle, playbook and
     // failed learner clock remain unchanged in this isolated database fixture.
-    await client.courseSupportBatch.update({ where: { id: batch.id }, data: { status: "VERIFYING", releaseSha: baseSha,
-      summary: { ...(batch.summary as Prisma.JsonObject), plannedPaths: [] } } });
+    const code = scenario !== "data-only";
+    await client.courseSupportBatch.update({ where: { id: batch.id }, data: { status: "VERIFYING", releaseSha: code ? "c".repeat(40) : baseSha,
+      deployedAt: scenario === "published-code" ? new Date(Date.now() - 1000) : null,
+      summary: { ...(batch.summary as Prisma.JsonObject), plannedPaths: code ? ["src/lib/adapters/example.ts"] : [] } } });
     await client.courseSupportBatchIncident.updateMany({ where: { batchId: batch.id }, data: { result: "STALE_EVIDENCE", verifiedAt: new Date() } });
     expect(await research.getOwnedCourseSupportResearchContext({ batchId: batch.id, leaseToken: batch.leaseToken,
       ownerThreadId: owner, ordinal: 1 })).toMatchObject({ outcome: "ready", researchContextV1: { monitoringProofRecorded: false } });
     const nextParent = randomUUID(); batchOwners.push(nextParent);
     const next = await dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: nextParent, baseSha, maxStarts: 1 });
-    expect(next).toMatchObject({ acquired: true, value: { fullRepairContinuationItems: [{ threadId: owner,
-      assignmentRef, batchReference: batch.reference, kind: "OWNED_OUTDOOR_FULL_REPAIR" }] } });
+    expect(next).toMatchObject({ acquired: true, value: { fullRepairContinuationItems: scenario === "unpublished-code" ? [] : [{ threadId: owner,
+      assignmentRef, batchReference: batch.reference, kind: "OWNED_OUTDOOR_FULL_REPAIR",
+      continuationMode: code ? "PUBLISHED_IMPLEMENTATION" : "DATA_ONLY" }] } });
     expect(await client.courseSupportBatch.findUniqueOrThrow({ where: { id: batch.id } }))
       .toMatchObject({ ownerThreadId: owner, leaseToken: batch.leaseToken, leaseExpiresAt: batch.leaseExpiresAt });
     expect(await client.courseSupportBatchIncident.findFirstOrThrow({ where: { batchId: batch.id } }))

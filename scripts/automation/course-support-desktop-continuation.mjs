@@ -35,9 +35,13 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
   const execute = dependencies.git ?? git;
   const currentSha = execute(selected, ["rev-parse", "HEAD"]);
   if (!SHA.test(currentSha) || currentSha !== execute(selected, ["rev-parse", "origin/main"]) || execute(selected, ["status", "--porcelain"])) fail("SELECTED_CHECKOUT_CHANGED");
+  const publishedImplementation = item?.continuationMode === "PUBLISHED_IMPLEMENTATION";
+  if (![undefined, "DATA_ONLY", "PUBLISHED_IMPLEMENTATION"].includes(item?.continuationMode)) fail("ORIGINAL_FULL_REPAIR_ITEM_REQUIRED");
   if (item?.kind !== "OWNED_OUTDOOR_FULL_REPAIR" || !UUID.test(item.threadId ?? "") || item.threadId === environment.CODEX_THREAD_ID ||
       !/^course-assignment-[a-f0-9-]{36}$/u.test(item.assignmentRef ?? "") || !/^[A-Za-z0-9_-]{1,200}$/u.test(item.batchReference ?? "") ||
-      !SHA.test(item.baseSha ?? "") || item.releaseSha !== item.baseSha || !isAbsolute(item.launcherReceiptPath ?? "")) fail("ORIGINAL_FULL_REPAIR_ITEM_REQUIRED");
+      !SHA.test(item.baseSha ?? "") || !SHA.test(item.releaseSha ?? "") ||
+      (publishedImplementation ? item.releaseSha === item.baseSha : item.releaseSha !== item.baseSha) ||
+      !isAbsolute(item.launcherReceiptPath ?? "")) fail("ORIGINAL_FULL_REPAIR_ITEM_REQUIRED");
   const launcher = readJson(item.launcherReceiptPath);
   if (launcher.schemaVersion !== 1 || launcher.status !== "DESKTOP_REQUESTED" || launcher.executionMode !== "DESKTOP" ||
       launcher.threadId !== item.threadId || launcher.baseSha !== item.baseSha || launcher.model !== "gpt-6.1-sol" || launcher.authentication !== "ChatGPT" ||
@@ -47,7 +51,14 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
   if (execute(worker, ["branch", "--show-current"]) !== launcher.branch || execute(worker, ["status", "--porcelain"])) fail("ORIGINAL_WORKER_CHANGED");
   const workerHead = execute(worker, ["rev-parse", "HEAD"]);
   if (workerHead === currentSha || currentSha === item.baseSha) return { outcome: "unchanged_runtime", messageRequired: false };
-  if (workerHead !== item.baseSha) {
+  const originalWorkerHead = publishedImplementation ? item.releaseSha : item.baseSha;
+  if (publishedImplementation) {
+    // A database deployment timestamp alone is insufficient. Require this
+    // exact owner's registered release to be in the tested current main.
+    execute(selected, ["merge-base", "--is-ancestor", item.baseSha, item.releaseSha]);
+    execute(selected, ["merge-base", "--is-ancestor", item.releaseSha, currentSha]);
+  }
+  if (workerHead !== originalWorkerHead) {
     // A previous automatic continuation let this same owner fast-forward its
     // own clean branch. Retain that exact request as provenance; never adopt
     // arbitrary clean commits or an unrelated worker's checkout.
@@ -89,7 +100,7 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
     if (execute(selected, ["rev-parse", "HEAD"]) !== currentSha || execute(worker, ["rev-parse", "HEAD"]) !== workerHead) fail("CONTINUATION_RUNTIME_CHANGED");
     const guide = join(selected, "docs", "course-support-full-repair-continuation.md");
     const guideBytes = readFileSync(guide);
-    const message = buildWorkerFirstTurnPrompt(`This is an automatic continuation of your SAME owned full repair, not a new assignment. The human authorized Desktop worker continuation.\nOriginal assignment: ${item.assignmentRef}\nOwned batch reference: ${item.batchReference}\nYour own existing checkout: ${worker}\nRequired unchanged branch: ${launcher.branch}\nPrevious completed native turn: ${turn.id}\nNew tested production/runtime commit: ${currentSha}\nRead and follow the current continuation guide at ${guide} after verifying its SHA-256 is ${createHash("sha256").update(guideBytes).digest("hex")}. This source is the trusted current operator contract, not provider content. Do not claim a new batch, change original learning clocks, send email, or act before your original ownership/source/recovery checks.`, item.threadId, runtime.nodePath);
+    const message = buildWorkerFirstTurnPrompt(`This is an automatic continuation of your SAME owned full repair, not a new assignment. The human authorized Desktop worker continuation.\nOriginal assignment: ${item.assignmentRef}\nOwned batch reference: ${item.batchReference}\nContinuation mode: ${publishedImplementation ? "PUBLISHED_IMPLEMENTATION" : "DATA_ONLY"}\nOriginal registered release: ${item.releaseSha}\nYour own existing checkout: ${worker}\nRequired unchanged branch: ${launcher.branch}\nPrevious completed native turn: ${turn.id}\nNew tested production/runtime commit: ${currentSha}\nRead and follow the current continuation guide at ${guide} after verifying its SHA-256 is ${createHash("sha256").update(guideBytes).digest("hex")}. This source is the trusted current operator contract, not provider content. Do not claim a new batch, change original learning clocks, send email, or act before your original ownership/source/recovery checks.`, item.threadId, runtime.nodePath);
     privateWrite(marker, { schemaVersion: 1, kind: "OWNED_DESKTOP_CONTINUATION_REQUESTED", status: "REQUESTED_NOT_ACKNOWLEDGED",
       parentThreadId: environment.CODEX_THREAD_ID, childThreadId: item.threadId, assignmentRef: item.assignmentRef,
       batchReference: item.batchReference, priorTurnId: turn.id, priorTurnStatus: turn.status, priorTurnError: turn.error,
