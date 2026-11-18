@@ -20,7 +20,9 @@ Require your real native CODEX_THREAD_ID. Before any provider work, claim, evide
 & 'C:\Program Files\nodejs\node.exe' scripts/automation/course-support-worker-runtime.mjs production --selected-checkout <selected-checkout> --script automation:course-dispatch -- assignment --assignment-ref <assignment-ref>
 An awaiting_binding result permits read-only waiting at least fifteen seconds apart for at most three minutes. A bound result identifying your own child is required to proceed. Any wrong identity, expired/revoked assignment, nonzero exit, missing setup, or bounded binding timeout stops with a visible concrete blocker. Never claim ordinary work instead.
 
-Once bound and on a clean named branch at exact current origin/main, run exactly:
+Before claiming, use the supported browser inventory to verify that Chrome's **First user** profile is available. Inventory is a local capability check, not provider research. A connector/host failure stops preparation before course ownership; preserve its diagnostic and do not fall back to an unverified Chrome window or claim the course anyway. Never print browser connection fields or credentials. This readiness step does not authorize navigation or provider work before the claim.
+
+Once bound, browser-ready, and on a clean named branch at exact current origin/main, run exactly:
 & 'C:\Program Files\nodejs\node.exe' scripts/automation/course-support-worker-runtime.mjs production --selected-checkout <selected-checkout> --script automation:course-support -- claim --max-courses 1 --dispatch-assignment <assignment-ref>
 Continue only if ready and exactly one course belongs to this child. A stale base, source, alert generation, incident cycle, authority or due-time fence stops; never select a replacement course or broaden the claim. Use your own worker checkout for all later commands. The parent-selected checkout is a binding reference, never a shared implementation workspace. Reserve required paths and the existing exclusive implementation authority before editing.
 

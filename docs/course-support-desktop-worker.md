@@ -1,0 +1,23 @@
+# Desktop execution for a prepared course worker
+
+Status: **browser transport qualified; venue acceptance pending**. The human explicitly authorized creating/continuing per-course Desktop chats using Sol and First user Chrome. Both an app-created Desktop chat and a legacy empty native chat continued through Desktop read Example Domain in First user Chrome. The legacy worker also verified its actual native identity. Standalone CLI/app-server model turns could not access that browser, including after a rejected environment-forwarding experiment. Do not spoof a parent's identity or bypass access restrictions.
+
+Use the existing **legacy** cold-thread history format. The November 17 paginated empty-thread Desktop send failed before resolving its missing rollout; that failed attempt was preserved and was not replayed. A distinct legacy preparation and supported Desktop message succeeded. This is a regression requirement, not a reason to fabricate rollout files or start a hidden warm-up model turn.
+
+The optional `DESKTOP` transport keeps the existing dispatcher, managed checkout, Sol/ChatGPT account proof, permissions acknowledgement, native chat creation, source-bound assignment and exclusive ownership. It changes which supported client executes the first turn. The supervisor prepares and binds the original empty native chat, then returns `desktop_turn_required`; it starts no standalone inference turn.
+
+The authorized scheduled parent runs its usual single supervisor command with `--execution-mode DESKTOP`, in the foreground, retaining that command's process handle until its terminal result. Use only the actual resulting receipt path, child ID and original assignment reference. This is preparation, not a course claim or monitoring success.
+
+Run the same selected-checkout supervisor once with:
+
+```text
+--desktop-context <actual-supervisor-receipt> --expected-assignment <actual-assignment-ref> --expected-child <actual-child-id>
+```
+
+This command checks the actual parent, prepared native permission/model/account proof, unchanged clean worker branch and base, and generated prompt digest. It reserves the same exclusive first-turn marker used by the native launcher. A parent/child/assignment mismatch, altered prompt, moved branch or existing marker stops before a message. It emits a private `desktop_message_required` object; no message has been accepted at that point.
+
+The authorized parent passes only that object's `threadId`, `prompt`, `model` and `thinking` to the supported `send_message_to_thread` action on the local host. Parse the complete successful helper JSON and pass its prompt in the same tool-orchestration runtime without printing or reconstructing the long prompt. This continues the already prepared chat; do not create a replacement, copy instructions into another chat, rebuild the worker prompt or use a CLI `turn/start` for the same first turn. Save the actual app-tool acknowledgement in an exclusive private artifact; do not substitute preparation for acceptance. An uncertain send is never replayed. Native binding and the original fifteen-minute unclaimed startup authority remain enforced.
+
+The worker first proves its actual native identity, performs the private runtime setup and checks its bound assignment. It verifies **First user** browser inventory before claiming a course. Only then does the existing source/owner-gated claim permit public provider investigation. A missing browser is preparation failure, not a course disposition. Public signed-out access, provider request limits, path ownership, exact publication, independent replay, cancellation and normal delivery gates remain unchanged. No agent sends email manually.
+
+Do not label a requested Desktop turn RUNNING, COMPLETED or monitoring-restored based on local preparation. Launcher and supervisor remain DESKTOP_REQUESTED; supported Desktop wait snapshots own actual turn status, and Postgres owns course/customer outcomes. The native CLI's process receipt is not a Desktop execution observer. Completed Desktop chats currently stay visible rather than gaining an invented native completion/identity receipt for cleanup or legacy continuation. Preserve an unresolved preparation receipt when the app does not acknowledge the message. The two failed November 17 venue trials remain failed; their source/alert clocks and evidence must remain intact.

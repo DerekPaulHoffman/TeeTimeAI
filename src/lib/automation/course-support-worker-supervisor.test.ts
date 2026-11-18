@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { mkdtempSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { dispatchCourseSupportWorker, readSupervisorArguments, superviseCourseSupportWorker, validateSupervisorInput, workerInstructions } from "../../../scripts/automation/course-support-worker-supervisor.mjs";
+import { claimPreparedDesktopWorker, dispatchCourseSupportWorker, readSupervisorArguments, superviseCourseSupportWorker, validateSupervisorInput, workerInstructions } from "../../../scripts/automation/course-support-worker-supervisor.mjs";
 
 const SHA = "a".repeat(40);
 const PARENT = "11111111-2222-4333-8444-555555555555";
@@ -32,6 +32,7 @@ function fixture(mode?: "SIMULATOR") {
     environment: { CODEX_THREAD_ID: PARENT, CODEX_HOME: "normal-auth-home", DATABASE_URL: "private-db", RESEND_API_KEY: "private-email" },
     approvedCheckouts: [selected],
     inspectCli: vi.fn(() => context.workerCli),
+    inspectPreparedCli: vi.fn(() => context.workerCli.cliVersion),
     inspectWorker: vi.fn(() => ({ cwd: worker, branch: "automation/course-support-fixture", baseSha: SHA })),
     git: vi.fn((_cwd: string, args: string[]) => args[0] === "status" ? "" : SHA),
     resolveRuntime: vi.fn(() => ({ status: "available", nodePath: node, npmCliPath: npm })),
@@ -45,9 +46,11 @@ function fixture(mode?: "SIMULATOR") {
       return { status: 0, stdout: JSON.stringify({ acquired: true, value: {
         assignmentRef: REF, state: stage === "start" ? "STARTING" : "BOUND", baseSha: SHA } }), stderr: "" };
     }),
-    prepare: vi.fn(async ({ receiptPath }: { receiptPath: string }) => {
+    prepare: vi.fn(async ({ receiptPath, historyMode = "legacy" }: { receiptPath: string; historyMode?: string }) => {
       calls.push("prepare");
-      writeFileSync(receiptPath, JSON.stringify({ status: "PREPARED", threadId: CHILD, approvalPolicy: "never",
+      writeFileSync(receiptPath, JSON.stringify({ schemaVersion: 1, status: "PREPARED", threadId: CHILD, approvalPolicy: "never",
+        model: "gpt-6.1-sol", authentication: "ChatGPT", historyMode, nativeIdentityVerified: false, approvalRequests: 0,
+        branch: "automation/course-support-fixture", baseSha: SHA, cliPath: context.workerCli.cliPath, cliVersion: context.workerCli.cliVersion,
         sandbox: { type: "dangerFullAccess" }, activePermissionProfile: { id: ":danger-full-access" }, cwd: worker }));
       return { outcome: "prepared", threadId: CHILD, receiptPath };
     }),
@@ -57,6 +60,70 @@ function fixture(mode?: "SIMULATOR") {
 }
 
 describe("course worker launch supervisor", () => {
+  it("prepares and binds a desktop worker without starting a standalone inference turn", async () => {
+    const f = fixture();
+    const result = await superviseCourseSupportWorker({ ...f.input, executionMode: "DESKTOP" }, f.deps);
+    expect(result).toMatchObject({ outcome: "desktop_turn_required", childThreadId: CHILD });
+    expect(f.calls).toEqual(["template:outdoor", "start", "prepare", "bind"]);
+    expect(f.deps.run).not.toHaveBeenCalled();
+    expect(f.deps.prepare).toHaveBeenCalledWith(expect.objectContaining({ historyMode: "legacy", enableResearchBridge: false }));
+    const input = { receiptPath: result.receiptPath, parentThreadId: PARENT, expectedChildThreadId: CHILD, expectedAssignmentRef: REF };
+    const prepared = claimPreparedDesktopWorker(input, f.deps);
+    expect(prepared).toMatchObject({ outcome: "desktop_message_required", threadId: CHILD, model: "gpt-6.1-sol",
+      thinking: "high", monitoringVerified: false, messageAcceptance: "PENDING" });
+    expect(prepared.prompt).toContain("courseWorkerNativeIdentity");
+    expect(prepared.prompt).toContain(REF);
+    expect(prepared.prompt).not.toMatch(/private-db|private-email|fixture-pipe|fixture-identity/);
+    expect(existsSync(join(f.output, "launcher.receipt.private.json.first-turn-started"))).toBe(true);
+    expect(JSON.parse(readFileSync(join(f.output, "launcher.receipt.private.json"), "utf8")))
+      .toMatchObject({ executionMode: "DESKTOP", status: "DESKTOP_REQUESTED", nativeIdentityVerified: false });
+    expect(() => claimPreparedDesktopWorker(input, f.deps))
+      .toThrow("PREPARED_DESKTOP_WORKER_REQUIRED");
+  });
+
+  it("does not consume a desktop dispatch on changed parent, source branch or prompt", async () => {
+    const f = fixture();
+    const result = await superviseCourseSupportWorker({ ...f.input, executionMode: "DESKTOP" }, f.deps);
+    const input = { receiptPath: result.receiptPath, parentThreadId: PARENT, expectedChildThreadId: CHILD, expectedAssignmentRef: REF };
+    expect(() => claimPreparedDesktopWorker({ ...input, parentThreadId: CHILD }, f.deps))
+      .toThrow("NATIVE_PARENT_ID_MISMATCH");
+    expect(() => claimPreparedDesktopWorker({ ...input, expectedChildThreadId: PARENT }, f.deps)).toThrow("DESKTOP_ASSIGNMENT_CHANGED");
+    f.deps.inspectWorker.mockReturnValueOnce({ cwd: f.worker, branch: "automation/course-support-fixture", baseSha: "b".repeat(40) });
+    expect(() => claimPreparedDesktopWorker(input, f.deps))
+      .toThrow("WORKER_BASE_CHANGED");
+    writeFileSync(join(f.output, "worker.prompt.private.md"), "changed instructions");
+    expect(() => claimPreparedDesktopWorker(input, f.deps))
+      .toThrow("WORKER_PROMPT_CHANGED");
+    expect(existsSync(join(f.output, "launcher.receipt.private.json.first-turn-started"))).toBe(false);
+  });
+
+  it.each([
+    { schemaVersion: 2 }, { nativeIdentityVerified: true }, { turnId: CHILD },
+    { approvalRequests: 1 }, { authentication: "apiKey" }, { model: "unexpected-model" },
+    { branch: "automation/course-support-other" }, { baseSha: "b".repeat(40) }, { historyMode: "paginated" },
+  ])("refuses changed prepared native proof before reserving Desktop execution: %j", async (change) => {
+    const f = fixture();
+    const result = await superviseCourseSupportWorker({ ...f.input, executionMode: "DESKTOP" }, f.deps);
+    const launcherPath = join(f.output, "launcher.receipt.private.json");
+    const launcher = JSON.parse(readFileSync(launcherPath, "utf8"));
+    writeFileSync(launcherPath, JSON.stringify({ ...launcher, ...change }));
+    expect(() => claimPreparedDesktopWorker({ receiptPath: result.receiptPath, parentThreadId: PARENT,
+      expectedChildThreadId: CHILD, expectedAssignmentRef: REF }, f.deps)).toThrow("DESKTOP_NATIVE_PROOF_CHANGED");
+    expect(existsSync(`${launcherPath}.first-turn-started`)).toBe(false);
+  });
+
+  it("refuses a changed prepared CLI or an already reserved native first turn", async () => {
+    const f = fixture();
+    const result = await superviseCourseSupportWorker({ ...f.input, executionMode: "DESKTOP" }, f.deps);
+    const input = { receiptPath: result.receiptPath, parentThreadId: PARENT, expectedChildThreadId: CHILD, expectedAssignmentRef: REF };
+    f.deps.inspectPreparedCli.mockReturnValueOnce("changed-cli-version");
+    expect(() => claimPreparedDesktopWorker(input, f.deps)).toThrow("WORKER_RECEIPT_RUNTIME_CHANGED");
+    const marker = join(f.output, "launcher.receipt.private.json.first-turn-started");
+    expect(existsSync(marker)).toBe(false);
+    writeFileSync(marker, "");
+    expect(() => claimPreparedDesktopWorker(input, f.deps)).toThrow(/EEXIST/);
+    expect(JSON.parse(readFileSync(result.receiptPath, "utf8")).status).toBe("DESKTOP_READY");
+  });
   it("refuses missing selected CLI readiness before durable start or native creation", async () => {
     const f = fixture();
     unlinkSync(join(f.selected, "node_modules", "vercel", "dist", "vc.js"));

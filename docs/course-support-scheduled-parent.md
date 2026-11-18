@@ -1,5 +1,12 @@
 # Scheduled course-support bridge
 
+New assigned workers execute through the human-authorized Desktop transport in
+`docs/course-support-desktop-worker.md`, using Sol/ChatGPT and First user Chrome.
+The supervisor still owns preparation and binding; the supported Desktop chat
+tool owns the inference turn. Do not fall back to the browser-unqualified native
+CLI model runner. Existing explicitly returned legacy continuations retain their
+original owner and separate contract; this does not authorize a takeover.
+
 Use the existing sole ten-minute course-support automation. Start its scheduled
 turn with exactly one shell command:
 
@@ -50,7 +57,7 @@ foreach ($artifact in @(
   try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
 }
 $supervisorScript = Join-Path $preflightContext.selectedCheckout 'scripts\automation\course-support-worker-supervisor.mjs'
-& 'C:\Program Files\nodejs\node.exe' $supervisorScript --detach --context-file $contextFile --assignment-file $assignmentFile --worker-checkout $workerCheckout --output-dir $outputDirectory
+& 'C:\Program Files\nodejs\node.exe' $supervisorScript --execution-mode DESKTOP --context-file $contextFile --assignment-file $assignmentFile --worker-checkout $workerCheckout --output-dir $outputDirectory
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
@@ -62,9 +69,17 @@ The supervisor owns validation, start, native preparation, permission proof,
 binding, complete mode-specific prompt generation, and execution. Do not repeat
 those operations manually, write another launch helper, copy worker instructions
 into the automation prompt, substitute another CLI, or retry an ambiguous launch.
-An exclusive marker prevents replay. Its returned PID means only that the
-supervisor process started; native binding, claimed ownership, completed work,
-deployed support, and monitoring remain separate facts in their own receipts.
+An exclusive marker prevents replay. Retain the foreground handle until terminal
+success with `desktop_turn_required`. Then use the exact returned receipt and
+child ID, and the original assignment reference, for the one-use
+`--desktop-context` command documented in the Desktop contract. Parse its complete
+successful JSON without printing the generated prompt, and pass only its actual
+threadId/prompt/model/thinking to supported `send_message_to_thread` on the local
+host. The human explicitly authorized creating and continuing these per-course
+Desktop worker chats. Preserve the actual App acknowledgement privately; do not
+retry a failed or ambiguous send, launch a CLI turn, create a replacement chat or
+reconstruct the prompt. Preparation, actual turn execution, claimed ownership,
+completed repair, deployed support and monitoring remain separate facts.
 
 `STARTING` and unclaimed `BOUND` authority expire after fifteen minutes, or when
 the base changes. A later normal planner releases those slots while retaining

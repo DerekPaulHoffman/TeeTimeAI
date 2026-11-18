@@ -262,7 +262,7 @@ export async function prepareCourseSupportWorker(options) {
       model: COURSE_SUPPORT_SOL_MODEL, cwd: checkout.cwd, ephemeral: false, historyMode, approvalPolicy: "never",
       permissions: WORKER_PERMISSION_PROFILE, runtimeWorkspaceRoots: [checkout.cwd],
       threadSource: "agent_created_thread",
-      dynamicTools: [courseBrowserTool],
+      dynamicTools: options.enableResearchBridge === false ? [] : [courseBrowserTool],
     });
     if (UUID.test(started?.thread?.id ?? "")) receipt.threadId = started.thread.id;
     writeReceipt(receiptPath, receipt);
