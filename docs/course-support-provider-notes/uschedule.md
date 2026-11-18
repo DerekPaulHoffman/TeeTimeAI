@@ -50,6 +50,24 @@ reviewed support. Projection is configuration evidence, never monitoring proof.
 
 ## Approaches That Failed Or Were Inconclusive
 
+### `location-count-without-selection`
+
+- A location selector count does not distinguish a selected branch from a
+  placeholder, missing selection, multiple selections or malformed catalog.
+- The optional `locationControl` diagnostic reports closed selection/value and
+  catalog-shape classes. Every option and ancestor is inspected; oversized and
+  duplicate controls stay unknown. No location names or identifiers are retained.
+- This does not establish venue/rental linkage or accept a new rental profile.
+  Missing legacy diagnostics remain unknown. Existing public configuration and
+  access rejection remain unchanged.
+- Implementation: `src/lib/simulators/providers/uschedule.ts` and
+  `src/lib/automation/simulator-support-research-policy.ts`.
+- Regression/privacy/rejection checks:
+  `src/lib/automation/simulator-support-research.test.ts`.
+- Proof level: focused local tests; monitoring remains unverified. After exact
+  release registration and deployment, use only the next guide-authorized read
+  to inspect the actual selection before deciding reusable reader support.
+
 ### `other-label-without-syntax`
 
 - The closed `OTHER` label kind alone cannot distinguish a suffixed simulator
@@ -108,6 +126,9 @@ authority, the research budget or the deployment proof does not permit it;
 preserve an unresolved incident rather than infer rental identifiers.
 
 ## Change Log
+
+- 2026-11-11: Distinguished location selection and complete static catalog shape
+  without retaining branch values or relaxing rental acceptance.
 
 - 2026-11-11: Distinguished rejected rental-label syntax without retaining
   labels or changing acceptance, source access or monitoring proof.
