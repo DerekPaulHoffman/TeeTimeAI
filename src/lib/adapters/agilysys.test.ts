@@ -56,10 +56,55 @@ describe("Agilysys metadata", () => {
     expect(isAgilysysMetadata({ ...metadata, propertyId: "other" })).toBe(false);
     expect(isAgilysysMetadata({ ...metadata, courseId: 0 })).toBe(false);
     expect(isAgilysysMetadata({ ...metadata, playerTypeId: 0 })).toBe(false);
+    expect(isAgilysysMetadata({ ...metadata, courseIds: [560, 561] })).toBe(true);
+    for (const courseIds of [[], [561], [560, 560], [560, -1], [560, 561, 562, 563, 564]]) {
+      expect(isAgilysysMetadata({ ...metadata, courseIds })).toBe(false);
+    }
   });
 });
 
 describe("fetchAgilysysTeeSheet", () => {
+  it("reads a bounded club's verified courses with one anonymous bootstrap and distinct identities", async () => {
+    const sheet = { success: true, availableTeeSlots: [{ slots: [{
+      scheduleDateTime: "2026-07-23T09:15:00", availability: 4, teeTimeId: 123,
+      rateType: [{ name: "Public Guest", isPrivate: false, holeType: 18,
+        rates: { greenFee: 120, cartFee: 0, otherFee: 0 } }]
+    }] }] };
+    const fetchImpl = vi.fn().mockResolvedValueOnce(jsonResponse({ success: true, token: "t".repeat(64) }))
+      .mockResolvedValueOnce(jsonResponse(sheet)).mockResolvedValueOnce(jsonResponse(sheet));
+    const result = await fetchAgilysysTeeSheet({ courseId: "club", date: new Date("2026-07-23T00:00:00Z"),
+      players: 3, metadata: { ...metadata, courseIds: [560, 561] } }, fetchImpl as typeof fetch);
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(new URL(fetchImpl.mock.calls[1][0]).searchParams.get("courseId")).toBe("560");
+    expect(new URL(fetchImpl.mock.calls[2][0]).searchParams.get("courseId")).toBe("561");
+    expect(result.slots.map(slot => slot.sourceId)).toEqual(["agilysys-553-560-123", "agilysys-553-561-123"]);
+    expect(result.slots.map(slot => new URL(slot.bookingUrl).searchParams.get("id"))).toEqual(["560", "561"]);
+  });
+
+  it("rejects conditional resort/package rates even when the source marks them non-private", async () => {
+    const rate = (name: string, holeType = 18) => ({ name, isPrivate: false, holeType,
+      rates: { greenFee: 10, cartFee: 0, otherFee: 0 } });
+    const fetchImpl = vi.fn().mockResolvedValueOnce(jsonResponse({ success: true, token: "t".repeat(64) }))
+      .mockResolvedValueOnce(jsonResponse({ success: true, availableTeeSlots: [{ slots: [{
+        scheduleDateTime: "2026-07-23T09:15:00", availability: 4,
+        rateType: [rate("Resort Guest"), rate("MVC Guest"), rate("Bring Your Swing Package", 9),
+          rate("Member"), rate("Resident"), { ...rate("Public Guest"), isPrivate: undefined },
+          { ...rate("Non-Resident Public"), rates: { greenFee: 100, cartFee: 0, otherFee: 0 } }]
+      }] }] }));
+    const result = await fetchAgilysysTeeSheet({ courseId: "club", date: new Date("2026-07-23T00:00:00Z"),
+      players: 3, metadata }, fetchImpl as typeof fetch);
+    expect(result.slots).toHaveLength(1);
+    expect(result.slots[0]).toMatchObject({ priceCents: 10000, bookableHoleCounts: [18],
+      priceOptions: [{ holes: 18, priceCents: 10000 }] });
+  });
+
+  it("does not hide a failed scoped course behind another course's successful response", async () => {
+    const fetchImpl = vi.fn().mockResolvedValueOnce(jsonResponse({ success: true, token: "t".repeat(64) }))
+      .mockResolvedValueOnce(jsonResponse({ success: true, availableTeeSlots: [] }))
+      .mockResolvedValueOnce(jsonResponse({}, { status: 503 }));
+    await expect(fetchAgilysysTeeSheet({ courseId: "club", date: new Date("2026-07-23T00:00:00Z"), players: 2,
+      metadata: { ...metadata, courseIds: [560, 561] } }, fetchImpl as typeof fetch)).rejects.toThrow(/503/u);
+  });
   it("uses the public session only for a bounded signed-out availability read", async () => {
     const fetchImpl = vi.fn()
       .mockResolvedValueOnce(jsonResponse({ success: true, token: "t".repeat(64) }))

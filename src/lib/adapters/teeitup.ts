@@ -140,6 +140,7 @@ export async function fetchTeeItUpTeeSheet(input: {
   }
 
   const slots: TeeTimeSlot[] = [];
+  let observedPublicTargetDate = false;
   let bookingWindowEvidence: BookingWindowEvidence | null = null;
 
   for (const alias of input.metadata.aliases) {
@@ -226,6 +227,15 @@ export async function fetchTeeItUpTeeSheet(input: {
         // does not authorize a smaller party. Choose rates only after this test.
         const validRates = (Array.isArray(slot.rates) ? slot.rates : []).filter(rate => Array.isArray(rate?.allowedPlayers) &&
           rate.allowedPlayers.length > 0 && rate.allowedPlayers.every(players => Number.isInteger(players) && players > 0 && players <= 100));
+        // A loaded public calendar may have no slots for this party size.
+        // Bind that evidence to the selected facility and course-local date;
+        // an empty or malformed response alone remains inconclusive.
+        const observedFacility = resolveResponseFacility(slot.courseId, facilities, facilityByCourseId);
+        if (validRates.length > 0 && observedFacility?.id &&
+          toLocalDateTime(slot.teetime, observedFacility.timeZone ?? input.timeZone ?? "America/New_York")
+            .startsWith(`${input.date.toISOString().slice(0, 10)}T`)) {
+          observedPublicTargetDate = true;
+        }
         const rates = input.players === undefined ? validRates : validRates.filter(rate => rate.allowedPlayers!.includes(input.players!));
         const rate = pickBestRate(rates);
         const availableSpots = getAvailableSpots(rates);
@@ -265,7 +275,7 @@ export async function fetchTeeItUpTeeSheet(input: {
   return {
     slots,
     targetDateStatus:
-      bookingWindowEvidence ? "NOT_OPEN" : slots.length > 0 ? "OPEN" : "UNKNOWN",
+      bookingWindowEvidence ? "NOT_OPEN" : slots.length > 0 || observedPublicTargetDate ? "OPEN" : "UNKNOWN",
     bookingWindowEvidence
   };
 }

@@ -16,6 +16,7 @@ export type AgilysysMetadata = {
   tenantId: number;
   propertyId: string;
   courseId: number;
+  courseIds?: number[];
   playerTypeId: number;
   bookingBaseUrl: string;
 };
@@ -56,6 +57,12 @@ export function isAgilysysMetadata(value: unknown): value is AgilysysMetadata {
       isPositiveBoundedInteger(metadata.tenantId) &&
       isSafeAgilysysPropertyId(metadata.propertyId) &&
       isPositiveBoundedInteger(metadata.courseId) &&
+      (metadata.courseIds === undefined || (
+        Array.isArray(metadata.courseIds) && metadata.courseIds.length > 0 && metadata.courseIds.length <= 4 &&
+        metadata.courseIds.every(isPositiveBoundedInteger) &&
+        new Set(metadata.courseIds).size === metadata.courseIds.length &&
+        metadata.courseIds.includes(metadata.courseId!)
+      )) &&
       isPositiveBoundedInteger(metadata.playerTypeId) &&
       identity?.tenantId === metadata.tenantId &&
       identity.propertyId === metadata.propertyId
@@ -127,6 +134,26 @@ export async function fetchAgilysysTeeSheet(
 
   const targetDate = input.date.toISOString().slice(0, 10);
   const token = await fetchAgilysysPublicToken(input.metadata, fetchImpl);
+  const slots: TeeTimeSlot[] = [];
+  for (const courseId of input.metadata.courseIds ?? [input.metadata.courseId]) {
+    slots.push(...await fetchAgilysysCourseSlots({
+      ...input,
+      metadata: { ...input.metadata, courseId }
+    }, token, targetDate, fetchImpl));
+  }
+  return {
+    slots,
+    targetDateStatus: slots.length > 0 ? ("OPEN" as const) : ("UNKNOWN" as const),
+    bookingWindowEvidence: null
+  };
+}
+
+async function fetchAgilysysCourseSlots(
+  input: { courseId: string; date: Date; players: number; metadata: AgilysysMetadata },
+  token: string,
+  targetDate: string,
+  fetchImpl: typeof fetch
+): Promise<TeeTimeSlot[]> {
   const endpoint = buildAgilysysTeeSheetUrl(input.metadata, targetDate);
   const response = await fetchWithProviderTimeout(
     endpoint,
@@ -172,12 +199,7 @@ export async function fetchAgilysysTeeSheet(
       })
     );
 
-  return {
-    slots,
-    targetDateStatus:
-      slots.length > 0 ? ("OPEN" as const) : ("UNKNOWN" as const),
-    bookingWindowEvidence: null
-  };
+  return slots;
 }
 
 async function fetchAgilysysPublicToken(
@@ -293,7 +315,12 @@ function normalizeAgilysysSlot(
 }
 
 function normalizeAgilysysRate(rate: AgilysysRate) {
-  if (rate.isPrivate === true || (rate.holeType !== 9 && rate.holeType !== 18)) {
+  const unrestrictedName = typeof rate.name === "string"
+    ? rate.name.replace(/\bnon[- ]?residents?\b/giu, "") : "";
+  if (
+    rate.isPrivate !== false || (rate.holeType !== 9 && rate.holeType !== 18) ||
+    /\b(?:members?|membership|residents?|resort|mvc|package|passholders?|cardholders?|locals?)\b/iu.test(unrestrictedName)
+  ) {
     return [];
   }
   const parts = [rate.rates?.greenFee, rate.rates?.cartFee, rate.rates?.otherFee];

@@ -7,6 +7,26 @@ import {
 } from "./teeitup";
 
 describe("TeeItUp adapter", () => {
+  it.each([
+    { stamp: "2026-11-20T14:15:00Z", course: "desert-springs", allowed: [1, 2], status: "OPEN" },
+    { stamp: "2026-11-21T14:15:00Z", course: "desert-springs", allowed: [1, 2], status: "UNKNOWN" },
+    { stamp: "2026-11-20T14:15:00Z", course: "unselected-course", allowed: [1, 2], status: "UNKNOWN" },
+    { stamp: "2026-11-20T14:15:00Z", course: "desert-springs", allowed: [], status: "UNKNOWN" }
+  ])("classifies a loaded but non-matching party only with bound public date evidence: $status", async ({ stamp, course, allowed, status }) => {
+    const read = vi.fn<typeof fetch>().mockResolvedValueOnce(Response.json([
+      { id: 164, courseId: "desert-springs", name: "Desert Springs", timeZone: "America/Phoenix" }
+    ])).mockResolvedValueOnce(Response.json([{ courseId: "desert-springs", teetimes: [
+      { courseId: course, teetime: stamp, rates: [{ allowedPlayers: allowed, holes: 18, greenFeeCart: 10000 }] }
+    ] }]));
+    const readSheet = fetchTeeItUpTeeSheet({ courseId: "venue", date: new Date("2026-11-20T00:00:00Z"),
+      players: 3, timeZone: "America/Phoenix", metadata: { aliases: ["desert-springs-golf-course"],
+        bookingBaseUrl: "https://desert-springs-golf-course.book.teeitup.com/?course=164", facilityIds: [164] } }, read);
+    if (course === "unselected-course") {
+      await expect(readSheet).rejects.toThrow(/outside the selected facility set/u);
+    } else {
+      await expect(readSheet).resolves.toMatchObject({ slots: [], targetDateStatus: status });
+    }
+  });
   afterEach(() => {
     vi.unstubAllGlobals();
   });
