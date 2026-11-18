@@ -6,6 +6,7 @@ import { bindTeeItUpPhysicalContactFacility, physicalContactSourceData, teeItUpP
 import { completeUSAddress, fullCourseName, matchesOfficialFacility, type OfficialIdentityPage, type OfficialIdentitySource } from "./teeitup-official-identity";
 import { publicDocumentUrl, teeItUpBookAlias, teeItUpCompleteStreetAddress, teeItUpBrandedPipeAddressMatches } from "./teeitup-official-booking-source";
 import { createDelegationDiagnostic, rememberTeeItUpDelegationFailure, type DelegatedDiagnosticGate } from "./teeitup-delegated-booking-diagnostic";
+import { collectBookingEdgeEvidence } from "./booking-edge-evidence";
 
 const sha = z.string().regex(/^[a-f0-9]{64}$/u);
 export function safeDelegatedBookingUrl(value: string) {
@@ -152,6 +153,18 @@ export function delegatedCanonicalVenueWitness(source: OfficialIdentitySource, p
 /** Every exact edge must occur in both nonhidden inert markup and its own
  * current rendered document; neither a report nor a URL set is authority. */
 export function delegatedBookingHop(page: OfficialIdentityPage, requestedNext?: string,
+  onGate?: (key: DelegatedDiagnosticGate, value: boolean) => void, canonicalRoot?: string): DelegatedHop {
+  try { return resolveDelegatedBookingHop(page, requestedNext, onGate, canonicalRoot); }
+  catch (error) {
+    try {
+      const diagnostic = createDelegationDiagnostic("NATIVE_DOCUMENT_READ");
+      diagnostic.hopEvidence = collectBookingEdgeEvidence(page, requestedNext, canonicalRoot);
+      rememberTeeItUpDelegationFailure(error, diagnostic);
+    } catch { /* Optional failure evidence never changes the original rejection. */ }
+    throw error;
+  }
+}
+function resolveDelegatedBookingHop(page: OfficialIdentityPage, requestedNext?: string,
   onGate?: (key: DelegatedDiagnosticGate, value: boolean) => void, canonicalRoot?: string): DelegatedHop {
   const note = (key: DelegatedDiagnosticGate, value: boolean) => { try { onGate?.(key, value); } catch { /* Observation cannot change validation. */ } };
   note("hopNative", page.browserTransport === "NATIVE_CHROME" && Boolean(page.visibleEvidence));

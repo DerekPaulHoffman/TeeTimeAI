@@ -940,6 +940,25 @@ export function safeFixedInspectionSourceDiagnostic(value) {
   return Object.keys(result).length ? result : undefined;
 }
 /** Mirror the native delegated reader's closed failure-only grammar. */
+function safeBookingEdgeEvidence(value) {
+  const exact = (record, keys) => record && typeof record === 'object' && !Array.isArray(record) &&
+    Object.keys(record).length === keys.length && keys.every(key => Object.hasOwn(record, key));
+  const stamp = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value) && Number.isFinite(Date.parse(value));
+  const count = value => Number.isSafeInteger(value) && value >= 0 && value <= 20000;
+  const rawCounts = ['anchorCount','requestedAnchorCount','unrenderedAnchorCount','frameCount','requestedFrameCount','hiddenFrameCount','formFrameCount','srcdocFrameCount'];
+  const renderedCounts = ['frameCount','visibleFrameCount','requestedFrameCount','hiddenFrameCount','formFrameCount','srcdocFrameCount','matchingRawSourceCount'];
+  if (!exact(value, ['schemaVersion','observedAt','attestedAt','provenance','freshNativeCapture','raw','rendered']) || value.schemaVersion !== 1 ||
+      !stamp(value.observedAt) || !(value.attestedAt === null || stamp(value.attestedAt) && Date.parse(value.attestedAt) <= Date.parse(value.observedAt)) ||
+      !['NATIVE_ROOT','NATIVE_DELEGATED','UNATTESTED'].includes(value.provenance) || typeof value.freshNativeCapture !== 'boolean' ||
+      value.provenance === 'UNATTESTED' && (value.attestedAt !== null || value.freshNativeCapture) ||
+      value.provenance !== 'UNATTESTED' && value.attestedAt === null ||
+      !exact(value.raw, ['bounded','omitted',...rawCounts]) || typeof value.raw.bounded !== 'boolean' || typeof value.raw.omitted !== 'boolean' || !rawCounts.every(key => count(value.raw[key])) ||
+      !exact(value.rendered, ['linkCount','linkListAtLimit','requestedLinkPresent','framesState',...renderedCounts]) ||
+      !count(value.rendered.linkCount) || typeof value.rendered.linkListAtLimit !== 'boolean' || typeof value.rendered.requestedLinkPresent !== 'boolean' ||
+      !['ABSENT','MALFORMED','OMITTED','COMPLETE'].includes(value.rendered.framesState) ||
+      !renderedCounts.every(key => value.rendered.framesState === 'COMPLETE' ? count(value.rendered[key]) && value.rendered[key] <= 24 : value.rendered[key] === null)) return undefined;
+  return structuredClone(value);
+}
 export function safeTeeItUpDelegationDiagnostic(value) {
   const stages = ["CAPABILITY", "SOURCE", "ROOT_READ", "ROOT_FRESH", "ROOT_IDENTITY", "ROOT_LINK", "HOP_ONE_READ", "NATIVE_DOCUMENT_READ",
     "HOP_ONE_FRESH", "HOP_TWO_LINK", "HOP_TWO_READ", "ROOT_REFRESH", "FINAL_FRESH", "CHAIN_REGISTER", "PROVIDER_BIND"];
@@ -953,7 +972,9 @@ export function safeTeeItUpDelegationDiagnostic(value) {
     if (!value || typeof value !== "object" || Array.isArray(value) || !stages.includes(value.stage) ||
         !value.gates || typeof value.gates !== "object" || Array.isArray(value.gates) ||
         !gates.every(key => Object.hasOwn(value.gates, key) && (typeof value.gates[key] === "boolean" || value.gates[key] === null))) return undefined;
-    return { stage: value.stage, gates: Object.fromEntries(gates.map(key => [key, value.gates[key]])) };
+    const hopEvidence = safeBookingEdgeEvidence(value.hopEvidence);
+    return { stage: value.stage, gates: Object.fromEntries(gates.map(key => [key, value.gates[key]])),
+      ...(hopEvidence ? { hopEvidence } : {}) };
   } catch { return undefined; }
 }
 export function safeFixedAdapterReadDiagnostic(value) {

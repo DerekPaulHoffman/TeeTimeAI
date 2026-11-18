@@ -9,7 +9,9 @@ const database = vi.hoisted(() => ({
   transactionBatchUpdateMany: vi.fn(),
   queryRaw: vi.fn(),
   queryRawUnsafe: vi.fn(),
+  learningEvidence: vi.fn(async () => null as unknown),
 }));
+vi.mock("../course-discovery/engineering-repair", () => ({ getOwnedLearningBookingEdgeEvidence: database.learningEvidence }));
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     courseSupportBatch: { findFirst: database.batchFindFirst },
@@ -197,7 +199,27 @@ function fixture() {
 }
 
 describe("owned course-support research context", () => {
-  beforeEach(() => database.batchFindFirst.mockReset());
+  beforeEach(() => { database.batchFindFirst.mockReset(); database.learningEvidence.mockReset().mockResolvedValue(null); });
+
+  it.each(["owned", "owner-lost", "source-drift"])("rechecks private learning evidence before returning the context: %s", async scenario => {
+    const batch = fixture();
+    batch.summary.remediation.reason = "FAILED_LEARNER_IMPLEMENTATION_HANDOFF";
+    batch.summary.remediation.attempts[0].actionPlan.allowedActions.push("INVESTIGATE_PUBLIC_SOURCE");
+    database.batchFindFirst.mockResolvedValue(batch);
+    const before = await getOwnedCourseSupportResearchContext(input);
+    expect(before.outcome).toBe("ready");
+    database.learningEvidence.mockResolvedValue({ schemaVersion: 1, sourceFingerprint: "a".repeat(64), executionRuntime: "b".repeat(40),
+      evidenceAuthority: false, untrustedPageEvidence: true, evidence: { raw: { frameCount: 0 }, rendered: { framesState: "OMITTED" } } });
+    const changed = structuredClone(batch); changed.incidents[0].course.website = "https://changed.example/";
+    database.batchFindFirst.mockResolvedValueOnce(batch).mockResolvedValueOnce(scenario === "owner-lost" ? null : scenario === "source-drift" ? changed : batch);
+    const result = await getOwnedCourseSupportResearchContext(input);
+    if (scenario === "owned") {
+      expect(result).toMatchObject({ privateContext: true, researchContextV1: { learningBookingEdgeEvidence: {
+        evidenceAuthority: false, untrustedPageEvidence: true } } });
+      if (result.outcome === "ready" && before.outcome === "ready") expect(result.researchContextV1.contextDigest).not.toBe(before.researchContextV1.contextDigest);
+      expect(database.learningEvidence).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ batchId: input.batchId, ownerThreadId: input.ownerThreadId }));
+    } else expect(result).toMatchObject({ outcome: scenario === "owner-lost" ? "recovery_required" : "authority_drift" });
+  });
 
   it.each(["owned", "wrong-incident", "wrong-time", "wrong-path", "wrong-fingerprint", "wrong-source", "successful-read", "legacy-route"])(
     "reconciles only an exact owned read diagnostic: %s", async scenario => {

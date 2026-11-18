@@ -13,8 +13,8 @@ export const nativeCanonicalRootDocumentProofSchema = z.object({
 }).strict().refine(value => validRootRedirects(value.canonicalUrl, value.documentUrl, value.redirects) &&
   value.witnessSha256 === rootWitness(value.canonicalUrl, value.documentUrl, value.redirects));
 export type NativeCanonicalRootDocumentProof = z.infer<typeof nativeCanonicalRootDocumentProofSchema>;
-const pages = new WeakMap<OfficialIdentityPage, { officialUrl: string; expiresAt: number; hash: string; rootDocumentProof?: NativeCanonicalRootDocumentProof }>();
-const delegatedPages = new WeakMap<OfficialIdentityPage, { officialUrl: string; expiresAt: number; hash: string }>();
+const pages = new WeakMap<OfficialIdentityPage, { officialUrl: string; observedAt: number; expiresAt: number; hash: string; rootDocumentProof?: NativeCanonicalRootDocumentProof }>();
+const delegatedPages = new WeakMap<OfficialIdentityPage, { officialUrl: string; observedAt: number; expiresAt: number; hash: string }>();
 type CleanupFacts = { cleanupStarted: boolean; cleanupSettled: boolean; cleanupSucceeded: boolean;
   freshBeforeCleanup: boolean | null; freshAfterCleanup: boolean | null };
 const cleanupFacts = new WeakMap<OfficialIdentityPage, CleanupFacts>();
@@ -43,7 +43,7 @@ export function registerFreshNativeOfficialIdentityPage(page: OfficialIdentityPa
   // This is venue identity and its public source edge, never availability.
   // Two bounded native child reads must fit after its actual capture; their
   // own shorter attestations and the caller's original deadline still apply.
-  pages.set(page, { officialUrl, expiresAt: Math.min(deadlineAt.getTime(), Date.now() + 60_000), hash: hash(page), ...(rootDocumentProof ? { rootDocumentProof } : {}) });
+  pages.set(page, { officialUrl, observedAt: Date.now(), expiresAt: Math.min(deadlineAt.getTime(), Date.now() + 60_000), hash: hash(page), ...(rootDocumentProof ? { rootDocumentProof } : {}) });
   cleanupFacts.set(page, { cleanupStarted: false, cleanupSettled: false, cleanupSucceeded: false,
     freshBeforeCleanup: null, freshAfterCleanup: null });
   return page;
@@ -88,10 +88,18 @@ export function freshNativeCanonicalRootDocument(page: OfficialIdentityPage, off
 
 /** A current owned delegated document is not a canonical official venue page. */
 export function registerFreshNativeDelegatedDocument(page: OfficialIdentityPage, officialUrl: string, deadlineAt: Date) {
-  delegatedPages.set(page, { officialUrl, expiresAt: Math.min(deadlineAt.getTime(), Date.now() + 30_000), hash: hash(page) });
+  delegatedPages.set(page, { officialUrl, observedAt: Date.now(), expiresAt: Math.min(deadlineAt.getTime(), Date.now() + 30_000), hash: hash(page) });
   return page;
 }
 export function isFreshNativeDelegatedDocument(page: OfficialIdentityPage, officialUrl: string) {
   const value = delegatedPages.get(page);
   return Boolean(value && value.officialUrl === officialUrl && value.expiresAt > Date.now() && page.browserTransport === "NATIVE_CHROME" && hash(page) === value.hash);
+}
+/** Structural diagnostic provenance only; never registers or renews authority. */
+export function getNativePageObservationDiagnostic(page: OfficialIdentityPage, officialUrl?: string) {
+  const delegated = delegatedPages.get(page), root = pages.get(page), value = delegated ?? root;
+  return { attestedAt: value ? new Date(value.observedAt).toISOString() : null,
+    provenance: delegated ? "NATIVE_DELEGATED" as const : root ? "NATIVE_ROOT" as const : "UNATTESTED" as const,
+    freshNativeCapture: Boolean(officialUrl && value?.officialUrl === officialUrl && value.expiresAt > Date.now() &&
+      page.browserTransport === "NATIVE_CHROME" && hash(page) === value.hash) };
 }

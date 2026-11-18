@@ -4,6 +4,7 @@ import { authorizeDelegatedGet, consumeDelegatedGet, currentNativeDelegatedChain
 import { registerFreshNativeOfficialIdentityPage, registerFreshNativeDelegatedDocument } from "./native-official-page-attestation";
 import { readNativeDelegatedDocument } from "./native-official-page-reader";
 import { readTeeItUpDelegatedBookingChain } from "./teeitup-delegated-booking-reader";
+import { getTeeItUpDelegationDiagnostic } from "./teeitup-delegated-booking-diagnostic";
 import { inspectExistingAdapter, executeExistingAdapterRecipe } from "./existing-adapter-executor";
 import { parseAccessRecipe } from "./recipe";
 import type { OfficialIdentityPage, OfficialIdentitySource } from "./teeitup-official-identity";
@@ -16,6 +17,18 @@ const registered=(p=rawParent())=>registerFreshNativeDelegatedDocument(p,source.
 function root(){return registerFreshNativeOfficialIdentityPage({url:source.officialUrl,browserTransport:"NATIVE_CHROME",html:'<h1>'+source.venueName+'</h1><address>'+source.venueAddress+'</address><a href="'+operator+'">Book Tee Times</a>',visibleEvidence:{title:source.venueName,headings:[source.venueName],addressTexts:[source.venueAddress],linkUrls:[operator]}},source.officialUrl,new Date(Date.now()+120000));}
 afterEach(()=>vi.restoreAllMocks());
 describe("fresh native exact final iframe source hop",()=>{
+ it("carries only structure from the actual failed intermediate read and does not grant a second GET",async()=>{
+  const hops=vi.fn(async()=>{const p=rawParent();p.visibleEvidence!.delegatedFrameSources!.omitted=true;return registered(p);});
+  let primary:unknown;
+  try{await readTeeItUpDelegatedBookingChain(source,{localCapabilities:["LOCAL_CHROME"],readDelegatedRoot:async()=>root(),readDelegatedDocument:hops});}catch(error){primary=error;}
+  expect(hops).toHaveBeenCalledTimes(1);
+  const diagnostic=getTeeItUpDelegationDiagnostic(primary);
+  expect(diagnostic).toMatchObject({stage:"HOP_TWO_LINK",gates:{firstReadReturned:true,secondReadReturned:null},
+   hopEvidence:{provenance:"NATIVE_DELEGATED",freshNativeCapture:true,raw:{frameCount:1,requestedFrameCount:1},rendered:{framesState:"OMITTED",frameCount:null}}});
+  expect(JSON.stringify(diagnostic)).not.toMatch(/https:|Public Golf|<iframe/iu);
+  diagnostic!.hopEvidence!.raw.frameCount=99;
+  expect(getTeeItUpDelegationDiagnostic(primary)!.hopEvidence!.raw.frameCount).toBe(1);
+ });
  it("earns one exact main GET from the current parent and binds the kind into its semantic witness",()=>{
   const p=registered(),hop=delegatedBookingHop(p,source.bookingUrl,undefined,source.officialUrl);
   expect(hop).toEqual({pageUrl:operator,nextUrl:source.bookingUrl,kind:"NATIVE_VISIBLE_IFRAME_SRC",witnessSha256:delegatedWitnessHash({pageUrl:operator,nextUrl:source.bookingUrl,kind:"NATIVE_VISIBLE_IFRAME_SRC"})});

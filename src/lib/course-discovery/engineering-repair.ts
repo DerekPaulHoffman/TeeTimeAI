@@ -11,6 +11,7 @@ import { isDataOnlyFullRepair } from "@/lib/automation/course-support-full-repai
 import { createCourseSupportRemediationCourseRef } from "@/lib/automation/course-support-claim-evidence";
 import { buildCourseSupportProviderSnapshotFingerprint } from "@/lib/automation/course-support-verification";
 import { delegatedDiagnosticGates, delegatedDiagnosticStages } from "./teeitup-delegated-booking-diagnostic";
+import { bookingEdgeEvidenceSchema } from "./booking-edge-evidence";
 import { hasReciprocalLearningRepairLink, readLearningRepairRecoveries, readLearningRepairRecoveryOf } from "./learning-repair-recovery";
 
 const receiptSchema = z.object({ version: z.literal(1), state: z.literal("QUEUED"),
@@ -121,7 +122,7 @@ async function initializeEmptyInvestigation(tx: Pick<Prisma.TransactionClient, "
 
 /** Closed hints only. Model checkpoints explain a failure, never establish
  * monitoring eligibility, completeness, access requirements or write authority. */
-export function discoveryFailureDiagnosis(job: { outcome: string | null; checkpoint: unknown }) {
+export function discoveryFailureDiagnosis(job: { outcome: string | null; checkpoint: unknown }, includeBookingEdgeEvidence = false) {
   const checkpoint = object(job.checkpoint), progress = object(checkpoint.stagehandProgress), failure = object(checkpoint.stagehandFailure);
   // The native worker writes a bounded attempt history, not a flat code. Do
   // not turn arbitrary checkpoint prose into a repair instruction.
@@ -142,9 +143,39 @@ export function discoveryFailureDiagnosis(job: { outcome: string | null; checkpo
     ? { stage: diagnostic.stage, gates: delegatedDiagnosticGates.map(gate => ({
       gate: gate.replace(/([a-z])([A-Z])/gu, "$1_$2").toUpperCase(), passed: gates[gate] })) }
     : undefined;
+  const hopEvidence = includeBookingEdgeEvidence ? bookingEdgeEvidenceSchema.safeParse(diagnostic.hopEvidence) : null;
   return { category, code, failureCode: code && diagnosticFailureCodes.has(code) ? code : null,
     ...(delegationDiagnostic ? { delegationDiagnostic } : {}),
+    ...(delegationDiagnostic && hopEvidence?.success ? { bookingEdgeEvidence: hopEvidence.data } : {}),
     phase, evidenceAuthority: false as const };
+}
+
+/** Only the same live, source-bound repair owner's reciprocal failed child.
+ * Structural facts remain untrusted diagnosis, never provider/read authority. */
+export async function getOwnedLearningBookingEdgeEvidence(reader: Reader, input: {
+  batchId: string; ownerThreadId: string; courseId: string; incidentId: string; incidentCycle: number; providerSnapshotFingerprint: string; now: Date;
+}) {
+  const current = await currentDiscoveryEngineeringHandoff(reader, { courseId: input.courseId }, input.now);
+  if (!current || current.receipt.incidentId !== input.incidentId ||
+      buildCourseSupportProviderSnapshotFingerprint(current.source.course) !== input.providerSnapshotFingerprint) return null;
+  const parentLink = readLearningRepairRecoveryOf(current.job.result);
+  const root = parentLink ? await reader.courseDiscoveryJob.findUnique({ where: { id: parentLink.originalJobId } }) : current.job;
+  const link = root && readLearningRepairRecoveries(root.result)?.filter(value => value.batchId === input.batchId &&
+    value.ownerThreadId === input.ownerThreadId && value.incidentId === input.incidentId && value.cycle === input.incidentCycle &&
+    value.sourceFingerprint === current.job.sourceFingerprint).at(-1);
+  if (!root || !link || !hasReciprocalLearningRepairLink(root.result, link)) return null;
+  const child = await reader.courseDiscoveryJob.findUnique({ where: { id: link.jobId } });
+  if (!child || !["FAILED", "TIMED_OUT"].includes(child.status) || !child.firstPickedUpAt || !child.deadlineAt || !child.completedAt ||
+      child.courseId !== input.courseId || child.offeringId !== null || child.targetKey !== root.targetKey ||
+      child.baseRecipeId !== root.baseRecipeId || child.sourceFingerprint !== link.sourceFingerprint ||
+      object(child.result).executionRuntimeVersion !== link.runtimeVersion ||
+      JSON.stringify(readLearningRepairRecoveryOf(child.result)) !== JSON.stringify(link)) return null;
+  const evidence = discoveryFailureDiagnosis(child, true).bookingEdgeEvidence;
+  if (!evidence || Date.parse(evidence.observedAt) < child.firstPickedUpAt.getTime() ||
+      Date.parse(evidence.observedAt) > Math.min(child.deadlineAt.getTime(), child.completedAt.getTime(), input.now.getTime()) ||
+      evidence.attestedAt && Date.parse(evidence.attestedAt) < child.firstPickedUpAt.getTime()) return null;
+  return { schemaVersion: 1 as const, sourceFingerprint: link.sourceFingerprint, implementationRelease: link.releaseSha,
+    executionRuntime: link.runtimeVersion, evidence, evidenceAuthority: false as const, untrustedPageEvidence: true as const };
 }
 
 export function discoveryEngineeringReceipt(result: unknown) {

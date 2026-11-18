@@ -27,6 +27,7 @@ import {
 } from "./course-support-provider-contract-evidence";
 import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-verification";
 import { prisma } from "../prisma";
+import type { getOwnedLearningBookingEdgeEvidence } from "../course-discovery/engineering-repair";
 
 const RESEARCH_CONTEXT_VERSION = 1;
 const ACTIVE_BATCH_STATUSES = ["CLAIMED", "IMPLEMENTING", "VERIFYING"] as const;
@@ -163,7 +164,25 @@ export async function getOwnedCourseSupportResearchContext(
     select: researchBatchSelect,
   });
   if (!batch) return controlResult("recovery_required", input.ordinal);
-  return buildOwnedCourseSupportResearchContext(input, batch, now);
+  const initial = buildOwnedCourseSupportResearchContext(input, batch, now);
+  if (initial.outcome !== "ready" || readCourseSupportRemediationDirective(batch.summary)?.reason !== "FAILED_LEARNER_IMPLEMENTATION_HANDOFF") return initial;
+  const { getOwnedLearningBookingEdgeEvidence } = await import("../course-discovery/engineering-repair");
+  const entry = orderCourseSupportBatchIncidents(batch.incidents)[input.ordinal - 1];
+  const evidence = await getOwnedLearningBookingEdgeEvidence(prisma, { batchId: input.batchId, ownerThreadId: input.ownerThreadId,
+    courseId: entry.course.id, incidentId: entry.incident.id, incidentCycle: entry.cycle,
+    providerSnapshotFingerprint: initial.researchContextV1.providerSnapshot.fingerprint, now });
+  if (!evidence) return initial;
+  // Do not disclose a private observation after owner/source/plan drift while
+  // its reciprocal child was read. The digest binds the observation as well.
+  const confirmed = await prisma.courseSupportBatch.findFirst({ where: {
+    id: input.batchId, leaseToken: input.leaseToken, ownerThreadId: input.ownerThreadId,
+    status: { in: [...ACTIVE_BATCH_STATUSES] }, leaseExpiresAt: { gt: input.now ?? new Date() },
+  }, select: researchBatchSelect });
+  if (!confirmed) return controlResult("recovery_required", input.ordinal);
+  const fresh = buildOwnedCourseSupportResearchContext(input, confirmed, now);
+  if (fresh.outcome !== "ready" || fresh.researchContextV1.contextDigest !== initial.researchContextV1.contextDigest)
+    return controlResult("authority_drift", input.ordinal);
+  return buildOwnedCourseSupportResearchContext(input, confirmed, now, evidence);
 }
 
 export async function validateOwnedCourseSupportResearchContext(
@@ -413,6 +432,7 @@ export function buildOwnedCourseSupportResearchContext(
   input: OwnedResearchContextInput,
   batch: ResearchBatch,
   now: Date,
+  learningBookingEdgeEvidence: Awaited<ReturnType<typeof getOwnedLearningBookingEdgeEvidence>> = null,
 ) {
   if (batch.leaseExpiresAt <= now) return controlResult("recovery_required", input.ordinal);
   const ordered = orderCourseSupportBatchIncidents(batch.incidents);
@@ -699,6 +719,7 @@ export function buildOwnedCourseSupportResearchContext(
     conflicts: [...new Set(conflicts)].sort(),
     missingEvidence: [...new Set(missingEvidence)],
     monitoringProofRecorded: false as const,
+    learningBookingEdgeEvidence,
     recentDiscoveryObservations: observations.slice(0, 8),
     recentMonitoringObservations: course.monitoringEvents
       .filter((event) => event.incidentId === entry.incident.id)
