@@ -2005,6 +2005,7 @@ async function recover(args: string[]) {
     committedPaths,
     releaseIsAncestor,
     releaseCommittedPaths,
+    currentHeadIsPublished: isGitAncestor(git.headSha, git.originMainSha),
     supersedingDeployment
   }), () => {
     const current = readGitState();

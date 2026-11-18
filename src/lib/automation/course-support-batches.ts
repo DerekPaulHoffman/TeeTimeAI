@@ -3308,6 +3308,7 @@ export function assessCourseSupportRecovery(input: {
   committedPaths?: string[];
   releaseIsAncestor?: boolean;
   releaseCommittedPaths?: string[];
+  currentHeadIsPublished?: boolean;
   now?: Date;
 }) {
   const now = input.now ?? new Date();
@@ -3320,6 +3321,10 @@ export function assessCourseSupportRecovery(input: {
   }
   const expectedHead = input.releaseSha ?? input.baseSha;
   if (input.currentHeadSha !== expectedHead) {
+    const safelyImportedPublishedRuntime = input.currentHeadIsPublished === true &&
+      input.ownerThreadId === input.requestingThreadId && Boolean(input.expectedBranch) && input.expectedBranch === input.currentBranch &&
+      input.dirtyPaths.length === 0 && input.plannedPaths.length > 0 && Boolean(input.releaseSha && input.releaseSha !== input.baseSha) &&
+      input.baseIsAncestor === true && input.releaseIsAncestor === true;
     const committedPaths = input.releaseSha
       ? (input.releaseCommittedPaths ?? [])
       : (input.committedPaths ?? []);
@@ -3328,7 +3333,7 @@ export function assessCourseSupportRecovery(input: {
       (!input.releaseSha || input.releaseIsAncestor === true) &&
       committedPaths.length > 0 &&
       committedPaths.every((path) => input.plannedPaths.includes(path));
-    if (!safelyCommittedPlannedChange) {
+    if (!safelyCommittedPlannedChange && !safelyImportedPublishedRuntime) {
       reasons.push("The checkout HEAD does not match the batch provenance.");
     }
     if (
@@ -15176,6 +15181,7 @@ export async function recoverCourseSupportBatch(input: {
   committedPaths?: string[];
   releaseIsAncestor?: boolean;
   releaseCommittedPaths?: string[];
+  currentHeadIsPublished?: boolean;
   supersedingDeployment?: { commitSha: string; deploymentId: string };
   now?: Date;
 }) {
@@ -15642,6 +15648,14 @@ export async function recoverCourseSupportBatch(input: {
     const plannedPaths = Array.isArray(summary.plannedPaths)
       ? summary.plannedPaths.filter((path): path is string => typeof path === "string")
       : [];
+    const recoveryDirective = readCourseSupportRemediationDirective(summary);
+    const recoveryClaim = batch.incidents.length === 1 ? readCourseSupportRemediationClaimAttempt({
+      summary, courseId: batch.incidents[0].courseId, expectedAttemptCount: 1,
+    }) : null;
+    const allowPublishedRuntimeImport = input.currentHeadIsPublished === true &&
+      recoveryDirective?.reason === "FAILED_LEARNER_IMPLEMENTATION_HANDOFF" && recoveryDirective.workMode === "IMPLEMENT_REUSABLE_SUPPORT" &&
+      recoveryClaim?.actionPlan?.primaryAction === "IMPLEMENT_REUSABLE_SUPPORT" &&
+      recoveryClaim.actionPlan.allowedActions.includes("INVESTIGATE_PUBLIC_SOURCE");
     const recovery = assessCourseSupportRecovery({
       leaseExpiresAt: batch.leaseExpiresAt,
       ownerThreadId: batch.ownerThreadId,
@@ -15662,6 +15676,7 @@ export async function recoverCourseSupportBatch(input: {
       releaseCommittedPaths: normalizeCourseSupportObservedGitPaths(
         input.releaseCommittedPaths ?? [],
       ),
+      currentHeadIsPublished: allowPublishedRuntimeImport,
       now,
     });
     const supersedingDeployment = input.supersedingDeployment;
@@ -17059,6 +17074,11 @@ export async function recoverCourseSupportBatch(input: {
             ownerThreadId: input.requestingThreadId,
           }, now),
           ...backgroundRecoveryRun,
+          ...(allowPublishedRuntimeImport && batch.releaseSha && input.currentHeadSha !== batch.releaseSha &&
+            batch.ownerThreadId === input.requestingThreadId && plannedPaths.length > 0 ? {
+              publishedRuntimeRecoveryV1: { runtimeSha: input.currentHeadSha, registeredReleaseSha: batch.releaseSha,
+                observedAt: now.toISOString(), implementationProofChanged: false },
+            } : {}),
         } as Prisma.InputJsonValue,
         leaseToken,
         leaseExpiresAt,

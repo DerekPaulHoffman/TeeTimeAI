@@ -16788,6 +16788,25 @@ describe("course-support recovery", () => {
     expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
   });
 
+  it.each(["owned", "foreign-owner", "unpublished", "dirty", "wrong-branch", "wrong-base", "wrong-release", "data-only", "live-lease", "missing-branch"])(
+    "preserves original code recovery authority for a shared published runtime: %s", scenario => {
+      const input = { leaseExpiresAt: new Date(now.getTime() - 1), ownerThreadId: "original-owner", requestingThreadId: "original-owner",
+        baseSha: "a".repeat(40), releaseSha: "b".repeat(40), expectedBranch: "automation/course-support-original",
+        currentBranch: "automation/course-support-original", currentHeadSha: "c".repeat(40), plannedPaths: ["src/lib/adapters/original.ts"],
+        dirtyPaths: [] as string[], baseIsAncestor: true, releaseIsAncestor: true, releaseCommittedPaths: ["src/lib/automation/shared-runtime.ts"],
+        currentHeadIsPublished: true, now };
+      if (scenario === "foreign-owner") input.requestingThreadId = "other-owner";
+      if (scenario === "unpublished") input.currentHeadIsPublished = false;
+      if (scenario === "dirty") input.dirtyPaths.push(input.plannedPaths[0]);
+      if (scenario === "wrong-branch") input.currentBranch = "automation/other";
+      if (scenario === "wrong-base") input.baseIsAncestor = false;
+      if (scenario === "wrong-release") input.releaseIsAncestor = false;
+      if (scenario === "data-only") input.plannedPaths = [];
+      if (scenario === "live-lease") input.leaseExpiresAt = new Date(now.getTime() + 1);
+      if (scenario === "missing-branch") { input.expectedBranch = ""; input.currentBranch = ""; }
+      expect(assessCourseSupportRecovery(input).action).toBe(scenario === "owned" ? "RECOVER" : "BLOCK");
+    });
+
   it("allows a clean expired batch to move to a new task", () => {
     expect(
       assessCourseSupportRecovery({
