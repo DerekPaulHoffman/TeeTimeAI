@@ -50,6 +50,19 @@ describe("private discovery API boundary", () => {
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(mocks.next).toHaveBeenCalledWith("worker-one");
   });
+  it("passes a signed committed runtime to admission and rejects malformed runtime metadata", async () => {
+    mocks.next.mockResolvedValue(null);
+    const runtimeVersion = "a".repeat(40);
+    const response = await POST(request("/api/course-discovery/jobs/next", { workerId: "worker-one", runtimeVersion }));
+    expect(response.status).toBe(200);
+    expect(mocks.next).toHaveBeenCalledExactlyOnceWith("worker-one", runtimeVersion);
+    mocks.next.mockClear();
+    for (const value of ["latest", "A".repeat(40), "a".repeat(39)]) {
+      expect((await POST(request("/api/course-discovery/jobs/next", { workerId: "worker-one", runtimeVersion: value }))).status).toBe(400);
+    }
+    expect((await POST(request("/api/course-discovery/jobs/next", { workerId: "worker-one", runtimeVersion }, false))).status).toBe(401);
+    expect(mocks.next).not.toHaveBeenCalled();
+  });
   it("does not accept caller-supplied verification when activating", async () => {
     const response = await activate(request("/api/course-discovery/jobs/job1/activate", { leaseToken: "11111111-1111-4111-8111-111111111111", verification: { passed: true } }), { params: Promise.resolve({ id: "job1" }) });
     expect(response.status).toBe(400);

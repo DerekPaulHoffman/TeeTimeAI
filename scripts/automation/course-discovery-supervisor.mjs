@@ -5,6 +5,7 @@ import { createCourseDiscoveryClient, discoveryError } from "./course-discovery-
 import { noVerifiedRecipeDiagnostic, DISCOVERY_NONRETRYABLE_GUARD_CODES } from "./course-discovery-worker.mjs";
 import { createCourseDiscoveryHandlers, DISCOVERY_WORKER_MODES } from "./course-discovery-handlers.mjs";
 import { STAGEHAND_SOURCE_BUDGET_MS } from "./course-discovery-stagehand-source.mjs";
+import { createRuntimeDrainReader } from "./course-discovery-runtime-drain.mjs";
 
 export const DISCOVERY_POLL_MS = 15_000;
 export const DISCOVERY_HEARTBEAT_MS = 15_000;
@@ -51,7 +52,8 @@ export function validateClaimedRecipeExecution(job, now = Date.now()) {
 
 /** Polling, leases and deadlines are controller-owned, independent of inference. */
 export function createCourseDiscoverySupervisor({ client, startWorker, executeRecipe, prepareWorker, mode, workerId = `discovery-${randomUUID()}`,
-  now = Date.now, onEvent = () => {}, timers = { setInterval, clearInterval, setTimeout, clearTimeout } }) {
+  now = Date.now, onEvent = () => {}, readDrain = () => null, runtimeVersion,
+  timers = { setInterval, clearInterval, setTimeout, clearTimeout } }) {
   if (mode !== undefined && !DISCOVERY_WORKER_MODES.includes(mode)) throw discoveryError("DISCOVERY_WORKER_MODE_INVALID");
   const active = new Map();
   let stopped = false;
@@ -72,6 +74,7 @@ export function createCourseDiscoverySupervisor({ client, startWorker, executeRe
     }
   };
   const emit = (event, detail = {}) => onEvent({ event, active: active.size, ...detail });
+  const drainRequest = () => { try { return readDrain(); } catch { return null; } };
 
   function launch(job, execution = false) {
     const controller = new AbortController();
@@ -259,6 +262,7 @@ export function createCourseDiscoverySupervisor({ client, startWorker, executeRe
     polling = true;
     try {
       while (!stopped && active.size < DISCOVERY_CONCURRENCY) {
+        if (drainRequest()) break;
         if (client.nextExecution && executeRecipe) {
           const { job: execution } = await client.nextExecution(workerId);
           if (execution && !stopped) {
@@ -271,7 +275,7 @@ export function createCourseDiscoverySupervisor({ client, startWorker, executeRe
         // Warm recipes need no model catalog. Prepare cold-worker capability
         // before claiming a job so a local prerequisite cannot consume an attempt.
         await ensureWorkerPrepared();
-        if (stopped) break;
+        if (stopped || drainRequest()) break;
         const { job } = await client.next(workerId);
         if (!job || stopped) break;
         validateClaimedDiscoveryJob(job, now());
@@ -280,7 +284,14 @@ export function createCourseDiscoverySupervisor({ client, startWorker, executeRe
       }
     } catch (error) {
       emit("poll_failed", { code: /^[A-Z_]+$/u.test(error?.code ?? "") ? error.code : "DISCOVERY_API_UNAVAILABLE" });
-    } finally { polling = false; emit("poll_completed", { observedAt: new Date(now()).toISOString() }); }
+    } finally {
+      polling = false;
+      const drain = drainRequest();
+      emit("poll_completed", { observedAt: new Date(now()).toISOString(),
+        ...(mode ? { workerMode: mode } : {}),
+        ...(runtimeVersion ? { runtimeVersion } : {}),
+        ...(drain ? { drainNonce: drain.nonce, drained: active.size === 0 } : {}) });
+    }
   }
   return {
     get activeCount() { return active.size; },
@@ -308,9 +319,13 @@ async function main() {
     baseUrl: process.env.COURSE_DISCOVERY_API_ORIGIN,
     deviceToken: process.env.LOCAL_READER_DEVICE_TOKEN,
     browserTransport: process.env.COURSE_DISCOVERY_BROWSER_TRANSPORT ?? "PINNED_HTTP",
+    runtimeVersion: process.env.COURSE_DISCOVERY_RUNTIME_SHA,
   });
   const handlers = createCourseDiscoveryHandlers({ client, cwd, mode: process.env.COURSE_DISCOVERY_WORKER_MODE ?? "STAGEHAND_SOL" });
   const supervisor = createCourseDiscoverySupervisor({ ...handlers,
+    runtimeVersion: process.env.COURSE_DISCOVERY_RUNTIME_SHA,
+    readDrain: createRuntimeDrainReader({ path: process.env.COURSE_DISCOVERY_DRAIN_PATH,
+      runtimeVersion: process.env.COURSE_DISCOVERY_RUNTIME_SHA }),
     onEvent: event => process.stdout.write(`${JSON.stringify(event)}\n`),
   });
   const stop = () => { void supervisor.stop().then(() => { process.exitCode = 0; }); };

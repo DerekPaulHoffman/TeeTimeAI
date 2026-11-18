@@ -27,6 +27,10 @@ function Get-CourseDiscoveryRuntimeConfig {
   }
   $gitRoot = & git -C $root rev-parse --show-toplevel 2>$null
   if ($LASTEXITCODE -ne 0 -or [IO.Path]::GetFullPath([string]$gitRoot).TrimEnd('\') -ne $root) { throw 'STABLE_GIT_WORKSPACE_REQUIRED' }
+  $runtimeHead = [string](& git -C $root rev-parse HEAD 2>$null)
+  if ($LASTEXITCODE -ne 0 -or $runtimeHead.Trim() -cnotmatch '^[a-f0-9]{40}$') { throw 'COMMITTED_DISCOVERY_RUNTIME_REQUIRED' }
+  $runtimeDirty = & git -C $root status --porcelain 2>$null
+  if ($LASTEXITCODE -ne 0 -or $runtimeDirty) { throw 'CLEAN_DISCOVERY_RUNTIME_REQUIRED' }
   $ancestor = $configFile.Directory
   while ($ancestor) {
     if (Test-Path -LiteralPath (Join-Path $ancestor.FullName '.git')) { throw 'CONFIG_MUST_BE_OUTSIDE_REPOSITORIES' }
@@ -47,7 +51,8 @@ function Get-CourseDiscoveryRuntimeConfig {
       $origin.AbsolutePath -ne '/' -or $origin.Query -or $origin.Fragment -or
       [string]$data.LOCAL_READER_DEVICE_TOKEN -notmatch '^\S{16,4096}$' -or
       $data.COURSE_DISCOVERY_BROWSER_TRANSPORT -notin @('PINNED_HTTP', 'NATIVE_CHROME')) { throw 'INVALID_RUNTIME_CONFIG' }
-  return @{ WorkspacePath = $root; ConfigPath = $configFile.FullName; NodePath = $nodeFile.FullName; Environment = $data }
+  return @{ WorkspacePath = $root; ConfigPath = $configFile.FullName; NodePath = $nodeFile.FullName;
+    Environment = $data; RuntimeVersion = $runtimeHead.Trim() }
 }
 
 function ConvertTo-SafeDiscoveryToolTrace {
@@ -137,6 +142,10 @@ function ConvertTo-SafeDiscoveryLogLine {
         if ($null -ne $value -and ([string]$value) -match '^[A-Za-z0-9_.:+-]{1,200}$') { $safe[$key] = $value }
       }
       if ($record.workerMode -cin @('STAGEHAND_SOL', 'NATIVE_SOL', 'REUSE_ONLY')) { $safe.workerMode = $record.workerMode }
+      if ([string]$record.runtimeVersion -cmatch '^[a-f0-9]{40}$') { $safe.runtimeVersion = [string]$record.runtimeVersion }
+      if ([string]$record.drainNonce -cmatch '^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$' -and $record.drained -is [bool]) {
+        $safe.drainNonce = [string]$record.drainNonce; $safe.drained = [bool]$record.drained
+      }
       if ($record.metrics) {
         $metrics = [ordered]@{}
         foreach ($key in @('model', 'framework', 'frameworkRole', 'reasoningEffort', 'modelCalls', 'sourceElapsedMs', 'fixedInspectionModelCalls', 'replayModelCalls', 'browserActions', 'browserStartedAt', 'firstBrowserStartupMs', 'firstOpenStartedAt', 'firstOpenCompletedAt', 'firstOpenElapsedMs', 'providerRequestsObserved', 'responseBytesObserved')) {
@@ -178,7 +187,8 @@ function ConvertTo-SafeDiscoveryLogLine {
 try {
   $runtime = Get-CourseDiscoveryRuntimeConfig -Workspace $WorkspacePath -Configuration $ConfigPath -Node $NodePath
   if ($ValidateOnly) {
-    [pscustomobject]@{ valid = $true; workspace = $runtime.WorkspacePath; config = $runtime.ConfigPath; node = $runtime.NodePath; credentialsPrinted = $false } | ConvertTo-Json -Compress
+    [pscustomobject]@{ valid = $true; workspace = $runtime.WorkspacePath; config = $runtime.ConfigPath; node = $runtime.NodePath;
+      runtimeVersion = $runtime.RuntimeVersion; credentialsPrinted = $false } | ConvertTo-Json -Compress
     exit 0
   }
   # Credentials are inherited only by the supervisor process. The existing
@@ -186,6 +196,9 @@ try {
   foreach ($property in $runtime.Environment.PSObject.Properties) {
     [Environment]::SetEnvironmentVariable($property.Name, [string]$property.Value, 'Process')
   }
+  [Environment]::SetEnvironmentVariable('COURSE_DISCOVERY_RUNTIME_SHA', $runtime.RuntimeVersion, 'Process')
+  [Environment]::SetEnvironmentVariable('COURSE_DISCOVERY_DRAIN_PATH',
+    (Join-Path ([IO.Path]::GetDirectoryName($runtime.ConfigPath)) 'drain-request.json'), 'Process')
   Set-Location -LiteralPath $runtime.WorkspacePath
   if (-not $LogDirectory) { $LogDirectory = Join-Path ([IO.Path]::GetDirectoryName($runtime.ConfigPath)) 'logs' }
   $logs = [IO.Path]::GetFullPath($LogDirectory)

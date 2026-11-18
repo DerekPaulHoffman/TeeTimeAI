@@ -13,7 +13,7 @@ function identifier(value) {
 }
 
 /** The device token belongs to the controller; never pass this client to a model. */
-export function createCourseDiscoveryClient({ baseUrl, deviceToken, browserTransport = "PINNED_HTTP", fetchImpl = fetch, now = Date.now, timeoutMs = 10_000 }) {
+export function createCourseDiscoveryClient({ baseUrl, deviceToken, browserTransport = "PINNED_HTTP", runtimeVersion, fetchImpl = fetch, now = Date.now, timeoutMs = 10_000 }) {
   const base = new URL(baseUrl);
   if (base.username || base.password || base.search || base.hash || base.pathname !== "/" ||
       (base.protocol !== "https:" && !(base.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(base.hostname)))) {
@@ -22,6 +22,7 @@ export function createCourseDiscoveryClient({ baseUrl, deviceToken, browserTrans
   const secret = deviceToken?.replace(/^\uFEFF/u, "").trim();
   if (!secret || secret.length < 16) throw discoveryError("DISCOVERY_DEVICE_TOKEN_REQUIRED");
   if (!["PINNED_HTTP", "NATIVE_CHROME"].includes(browserTransport)) throw discoveryError("INVALID_DISCOVERY_BROWSER_TRANSPORT");
+  if (runtimeVersion !== undefined && !/^[a-f0-9]{40}$/u.test(runtimeVersion)) throw discoveryError("INVALID_DISCOVERY_RUNTIME_VERSION");
   async function post(path, payload, signal) {
     const body = JSON.stringify(payload);
     if (Buffer.byteLength(body) > 200_000) throw discoveryError("DISCOVERY_REQUEST_TOO_LARGE");
@@ -66,7 +67,8 @@ export function createCourseDiscoveryClient({ baseUrl, deviceToken, browserTrans
     },
     nextExecution: (workerId, signal) => post("/api/course-discovery/executions/next", { workerId: identifier(workerId) }, signal),
     executionResult: (id, leaseToken, result, signal) => post(`/api/course-discovery/executions/${identifier(id)}/result`, { leaseToken, result }, signal),
-    next: (workerId, signal) => post(`${PREFIX}/next`, { workerId: identifier(workerId) }, signal),
+    next: (workerId, signal) => post(`${PREFIX}/next`, { workerId: identifier(workerId),
+      ...(runtimeVersion ? { runtimeVersion } : {}) }, signal),
     heartbeat: (id, leaseToken, signal) => jobPost(id, "heartbeat", { leaseToken }, signal),
     checkpoint: (id, leaseToken, checkpoint, signal) => jobPost(id, "checkpoint", { leaseToken, checkpoint }, signal),
     candidate: (id, leaseToken, recipe, signal, sourceEvidence, verificationDurationMinutes) => jobPost(id, "candidate", { leaseToken, recipe,

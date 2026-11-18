@@ -11,6 +11,7 @@ import { isDataOnlyFullRepair } from "@/lib/automation/course-support-full-repai
 import { createCourseSupportRemediationCourseRef } from "@/lib/automation/course-support-claim-evidence";
 import { buildCourseSupportProviderSnapshotFingerprint } from "@/lib/automation/course-support-verification";
 import { delegatedDiagnosticGates, delegatedDiagnosticStages } from "./teeitup-delegated-booking-diagnostic";
+import { hasReciprocalLearningRepairLink, readLearningRepairRecoveries, readLearningRepairRecoveryOf } from "./learning-repair-recovery";
 
 const receiptSchema = z.object({ version: z.literal(1), state: z.literal("QUEUED"),
   incidentId: z.string().min(1).max(128), queuedAt: z.string().datetime(),
@@ -172,10 +173,25 @@ export async function discoveryEngineeringContext(reader: Reader, target: { cour
   const current = await currentDiscoveryEngineeringHandoff(reader, target, now);
   if (!current || current.receipt.incidentId !== incidentId) return null;
   const { job } = current;
+  const parentLink = readLearningRepairRecoveryOf(job.result);
+  const root = parentLink ? await reader.courseDiscoveryJob.findUnique({ where: { id: parentLink.originalJobId } }) : job;
+  const latestLink = root ? readLearningRepairRecoveries(root.result)?.filter(link => link.incidentId === incidentId &&
+    link.sourceFingerprint === job.sourceFingerprint).at(-1) : null;
+  const child = latestLink ? await reader.courseDiscoveryJob.findUnique({ where: { id: latestLink.jobId } }) : null;
+  const validChild = root && child && latestLink && hasReciprocalLearningRepairLink(root.result, latestLink) &&
+    child.courseId === job.courseId && child.offeringId === job.offeringId && child.targetKey === root.targetKey &&
+    child.sourceFingerprint === latestLink.sourceFingerprint &&
+    latestLink.originalJobId === root.id && child.baseRecipeId === root.baseRecipeId &&
+    (JSON.stringify(readLearningRepairRecoveryOf(child.result)) === JSON.stringify(latestLink) || child.status === "SUCCEEDED") ? child : null;
   return { version: 1, jobId: job.id, sourceFingerprint: job.sourceFingerprint, baseRecipeId: job.baseRecipeId,
     originalFirstPickupAt: job.firstPickedUpAt!.toISOString(), originalDeadlineAt: job.deadlineAt!.toISOString(),
     completedAt: job.completedAt!.toISOString(), attempts: job.attempts, outcome: job.outcome,
     originalDeadlineExpired: now > job.deadlineAt!, diagnosis: discoveryFailureDiagnosis(job),
+    latestLearningRecovery: validChild && latestLink ? { jobId: validChild.id, kind: latestLink.kind,
+      implementationRelease: latestLink.releaseSha, executionRuntime: latestLink.runtimeVersion,
+      status: validChild.status, outcome: validChild.outcome, attempts: validChild.attempts,
+      firstPickedUpAt: validChild.firstPickedUpAt?.toISOString() ?? null, deadlineAt: validChild.deadlineAt?.toISOString() ?? null,
+      diagnosis: discoveryFailureDiagnosis(validChild), evidenceAuthority: false as const } : null,
     instruction: "Use the current owned action plan to investigate and repair the failed learning process end to end. A tooling failure is engineering work, not evidence of inaccessible inventory. Reserve implementation paths, test the observed regression, and prove the exact deployed runtime and normal customer recovery. Keep this original job terminal; recovery after its deadline does not pass the original fifteen-minute contract." };
 }
 

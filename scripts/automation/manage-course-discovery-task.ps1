@@ -92,6 +92,12 @@ try {
           elseif ($record.event -eq 'poll_completed') { $summary.pollStatus = if ($pollFailed) { 'failed' } else { 'completed' }; $pollFailed = $false }
         }
         if ($heartbeat) {
+          if ($heartbeat.workerMode -cin @('STAGEHAND_SOL', 'NATIVE_SOL', 'REUSE_ONLY')) { $summary.workerMode = $heartbeat.workerMode }
+          if ([string]$heartbeat.runtimeVersion -cmatch '^[a-f0-9]{40}$') { $summary.runtimeVersion = [string]$heartbeat.runtimeVersion }
+          if ($heartbeat.active -is [ValueType] -and [string]$heartbeat.active -cmatch '^[0-3]$') { $summary.activeOperations = [int]$heartbeat.active }
+          if ([string]$heartbeat.drainNonce -cmatch '^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$' -and $heartbeat.drained -is [bool]) {
+            $summary.drainNonce = [string]$heartbeat.drainNonce; $summary.drained = [bool]$heartbeat.drained
+          }
           $at = ConvertTo-CourseDiscoveryHeartbeatInstant $heartbeat.observedAt
           if ($null -eq $at) {
             $summary.heartbeatStatus = 'invalid'
