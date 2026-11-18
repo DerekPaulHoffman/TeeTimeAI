@@ -1054,6 +1054,22 @@ describe("runCourseSupportVerificationWatch", () => {
     expect(onStopped).toHaveBeenCalledOnce();
   });
 
+  it("retains the last completed blocked check when the watch reaches its deadline", async () => {
+    let clock = 0;
+    const blocked = { browserStages: { eligibleCount: 0, persistedCount: 0 }, verification: {
+      detachedVerification: { rerunNeeded: true, assignedStageOrchestrationGapCount: 0,
+        schedulerIneligibleReasonCounts: { playbook_stage_handoff_required: 1 }, schedulerDispatchError: false },
+      searchExecutionFence: { rerunNeeded: false },
+    } };
+    const onStopped = vi.fn(async () => ({ outcome: "repair_required", durableCloseoutRecorded: false }));
+    const result = await runCourseSupportVerificationWatch({ pass: async () => blocked, onStopped,
+      now: () => clock, deadlineAt: 10_000, pollMs: 5_000, sleep: async ms => { clock += ms; } });
+    expect(result).toMatchObject({ outcome: "verification_watch_closed", stoppedReason: "endpoint", passCount: 2,
+      browserStages: blocked.browserStages, verification: blocked.verification,
+      closeout: { outcome: "repair_required", durableCloseoutRecorded: false } });
+    expect(onStopped).toHaveBeenCalledOnce();
+  });
+
   it("aborts a never-resolving pass at the endpoint and releases once", async () => {
     let currentTime = 0;
     let passSignal: AbortSignal | undefined;
@@ -1080,6 +1096,8 @@ describe("runCourseSupportVerificationWatch", () => {
       passCount: 0
     });
     expect(passSignal?.aborted).toBe(true);
+    expect(result).not.toHaveProperty("verification");
+    expect(result).not.toHaveProperty("browserStages");
     expect(onStopped).toHaveBeenCalledOnce();
     expect(onStopped).toHaveBeenCalledWith(
       expect.objectContaining({

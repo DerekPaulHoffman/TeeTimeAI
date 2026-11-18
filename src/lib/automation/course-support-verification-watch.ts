@@ -739,6 +739,9 @@ export async function runCourseSupportVerificationWatch<
       evidenceRefreshRetryCount,
       lastEvidenceRefreshReason,
       browserStageTotals,
+      // A timeout/error is unresolved. Keep its last completed observation for
+      // diagnosis, just as the settled path does; never invent a partial pass.
+      ...(lastPass ? { browserStages: lastPass.browserStages, verification: lastPass.verification } : {}),
       closeout: releaseResult.value
     };
   };
