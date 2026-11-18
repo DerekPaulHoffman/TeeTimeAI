@@ -151,6 +151,36 @@ describe("fresh native delegated TeeItUp source", () => {
     const chain = currentNativeDelegatedChain(await readTeeItUpDelegatedBookingChain(source, deps));
     expect(bindDelegatedFacility(source, chain, directory)).toMatchObject({ facilityId: 71, bookingUrl: source.bookingUrl });
   });
+  it.each(["<br>", "<br />", ": "])("binds exact venue identity across a native welcome-heading separator: %s", async separator => {
+    const deps = readers();
+    deps.readDelegatedRoot.mockImplementation(async () => {
+      const p = page(source.officialUrl, operator, true);
+      p.html = p.html.replace(`<h1>${source.venueName}</h1>`, `<h4>Welcome to${separator}${source.venueName}!</h4>`);
+      // collectNativeOfficialPublicMetadata represents rendered line breaks
+      // with comma separators. Both sides still contain the complete name.
+      p.visibleEvidence!.headings = [`Welcome to, ${source.venueName}!`];
+      return registerFreshNativeOfficialIdentityPage(p, source.officialUrl, new Date(Date.now() + 120000));
+    });
+    const chain = currentNativeDelegatedChain(await readTeeItUpDelegatedBookingChain(source, deps));
+    expect(bindDelegatedFacility(source, chain, directory)).toMatchObject({ facilityId: 71, canonicalAddress: source.venueAddress });
+  });
+  it.each(["raw-name", "rendered-name", "competing-h1", "hidden", "raw-address", "rendered-address"])(
+    "rejects a separated welcome heading with %s evidence", async variant => {
+      const deps = readers();
+      deps.readDelegatedRoot.mockImplementation(async () => {
+        const p = page(source.officialUrl, operator, true);
+        const name = variant === "raw-name" ? "Other Golf Course" : source.venueName;
+        p.html = p.html.replace(`<h1>${source.venueName}</h1>`, `<h4${variant === "hidden" ? " hidden" : ""}>Welcome to<br>${name}!</h4>`);
+        if (variant === "competing-h1") p.html = p.html.replace("</body>", "<h1>Other Golf Course</h1></body>");
+        p.visibleEvidence!.headings = [`Welcome to, ${variant === "rendered-name" ? "Other Golf Course" : source.venueName}!`];
+        if (variant === "raw-address") p.html = p.html.replace(source.venueAddress, "11 Harbor Drive, Example, NY 12345");
+        if (variant === "rendered-address") p.visibleEvidence!.addressTexts = ["11 Harbor Drive, Example, NY 12345"];
+        return registerFreshNativeOfficialIdentityPage(p, source.officialUrl, new Date(Date.now() + 120000));
+      });
+      await expect(readTeeItUpDelegatedBookingChain(source, deps)).rejects.toThrow("OFFICIAL_DELEGATED_SOURCE_UNVERIFIED");
+      expect(deps.readDelegatedDocument).not.toHaveBeenCalled();
+    },
+  );
   it.each(["wrong", "hidden", "form", "inert", "conflictingH1", "rawAddress", "renderedAddress", "renderedName"])
   ("does not admit an H4 venue witness with %s evidence", async variant => {
     const deps = readers(), heading = `Welcome to ${source.venueName}!`;

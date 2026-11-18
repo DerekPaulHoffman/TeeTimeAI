@@ -113,13 +113,20 @@ export function delegatedCanonicalVenueWitness(source: OfficialIdentitySource, p
   if (!source.officialUrl || !source.venueAddress || !gate("rootDocumentProvenance", page.url === source.officialUrl || Boolean(freshNativeCanonicalRootDocument(page, source.officialUrl)?.rootDocumentProof))) return fail();
   const all = entries(page), expected = fullCourseName(source.venueName), address = teeItUpCompleteStreetAddress(source.venueAddress);
   if (!gate("canonicalAddressValid", Boolean(address && expected.replace(/\bgolf course$/u, "").trim().length >= 5))) return fail();
-  const headings = all.filter(node => /^h[1-6]$/u.test(node.tagName)).map(node => fullCourseName(clean(text(node)).replace(/^Welcome to\s+/iu, "")));
+  // Native rendered metadata and inert <br> extraction both use punctuation
+  // for line breaks. Normalize that formatting before recognizing the fixed
+  // greeting; the remaining complete name must still match exactly.
+  const headingName = (value: string) => {
+    const normalized = fullCourseName(value);
+    return normalized === expected ? normalized : normalized.replace(/^welcome to\s+/u, "");
+  };
+  const headings = all.filter(node => /^h[1-6]$/u.test(node.tagName)).map(node => headingName(text(node)));
   if (!gate("rootRawVenue", headings.includes(expected) && !all.some(node => {
     if (node.tagName !== "h1") return false;
-    const heading = fullCourseName(clean(text(node)).replace(/^Welcome to\s+/iu, ""));
+    const heading = headingName(text(node));
     return heading !== expected && !publicSectionHeading.test(heading);
   })) ||
-      !gate("rootRenderedVenue", page.visibleEvidence!.headings.some(value => fullCourseName(clean(value).replace(/^Welcome to\s+/iu, "")) === expected))) return fail();
+      !gate("rootRenderedVenue", page.visibleEvidence!.headings.some(value => headingName(value) === expected))) return fail();
   const printedAddress = (value: string) => {
     const printed = clean(value).replace(/^Address\s*:\s*/iu, "");
     const direct = teeItUpCompleteStreetAddress(printed);
