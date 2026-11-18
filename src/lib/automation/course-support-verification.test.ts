@@ -1630,6 +1630,36 @@ describe("course-support verification scheduling", () => {
     expect(prismaMocks.activeSearchCount).not.toHaveBeenCalled();
   });
 
+  it.each(["valid", "wrong-snapshot", "missing-permission", "already-attempted", "wrong-owner", "reader-only", "account-required", "claimed-code", "altered-route", "missing-unchanged-grant"])(
+    "keeps the full mission's first public browser retry in its own batch: %s", async scenario => {
+      const provider = course({ detectedBookingUrl: null, detectedPlatform: null, providerFamilyKey: "SOURCE_MISSING", bookingMetadata: null,
+        ...(scenario === "reader-only" ? { monitoringMode: "LOCAL_READER_ONLY" } : {}),
+        ...(scenario === "account-required" ? { automationEligibility: "BLOCKED", automationReason: "ACCOUNT_REQUIRED", bookingAccessMode: "ACCOUNT_REQUIRED", ...currentIntelligence() } : {}),
+      });
+      const ledger = browserAdapterRetryReadyLedger(scenario === "already-attempted");
+      const route = { workMode: "IMPLEMENT_REUSABLE_SUPPORT", strategyAction: "REPAIR_PROVIDER_ADAPTER", playbookStage: "BROWSER_ADAPTER_RETRY" };
+      const allowedActions = scenario === "missing-permission" ? ["IMPLEMENT_REUSABLE_SUPPORT"] : ["IMPLEMENT_REUSABLE_SUPPORT", "INVESTIGATE_PUBLIC_SOURCE"];
+      const summary = { plannedPaths: [], remediation: { ...route, allowUnchangedRuntime: true, requiresImplementationPath: false,
+        reason: "FAILED_LEARNER_IMPLEMENTATION_HANDOFF", retryBudget: null, attempts: [{
+          courseRef: createHash("sha256").update("course-1").digest("hex").slice(0, 24),
+          providerSnapshotFingerprint: scenario === "wrong-snapshot" ? "0".repeat(64) : fingerprint(provider),
+          failureFingerprint: canonicalFailureFingerprint,
+          playbookEventCountAtClaim: (ledger as { events: unknown[] }).events.length, approach: route,
+          actionPlan: { schemaVersion: 1, primaryAction: "IMPLEMENT_REUSABLE_SUPPORT", allowedActions, route },
+        }] } };
+      if (scenario === "claimed-code") (summary.plannedPaths as string[]).push("src/lib/adapters/claimed.ts");
+      if (scenario === "altered-route") summary.remediation.strategyAction = "RUN_TYPED_ADAPTER";
+      if (scenario === "missing-unchanged-grant") summary.remediation.allowUnchangedRuntime = false;
+      prismaMocks.batchFindUnique.mockResolvedValue({ id: "batch-1", status: "VERIFYING", releaseSha, completedAt: null, summary,
+        incidents: [{ id: "batch-incident-1", incidentId: "incident-1", courseId: "course-1", cycle: 1,
+          verifiedIncidentUpdatedAt: new Date("2026-07-21T11:55:00.000Z"),
+          incident: incident({ attemptLedger: ledger, ...(scenario === "wrong-owner" ? { activeBatchId: "foreign-batch" } : {}) }), course: provider }] });
+      const result = await scheduleCourseSupportVerificationRequests({ batchId: "batch-1", releaseSha, now });
+      expect(result).toMatchObject({ createdCount: scenario === "valid" ? 1 : 0, eligibleCount: scenario === "valid" ? 1 : 0,
+        ineligibleCount: scenario === "valid" ? 0 : 1 });
+      if (scenario !== "valid") expect(prismaMocks.requestCreateMany).not.toHaveBeenCalled();
+    });
+
   it("requires a browser-retry stage handoff before scheduling non-runnable progression", async () => {
     prismaMocks.batchFindUnique.mockResolvedValue({
       id: "batch-1",

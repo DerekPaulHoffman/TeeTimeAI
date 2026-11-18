@@ -144,6 +144,8 @@ function fixture() {
     },
   };
   return {
+    baseSha: "a".repeat(40),
+    releaseSha: "a".repeat(40),
     revision: 4,
     reference: "batch-reference",
     status: "IMPLEMENTING",
@@ -195,6 +197,30 @@ function fixture() {
 
 describe("owned course-support research context", () => {
   beforeEach(() => database.batchFindFirst.mockReset());
+
+  it.each(["current-full", "old-runtime", "legacy-route"])("revalidates %s read progress without rewriting immutable claim evidence", async scenario => {
+    const batch = fixture();
+    if (scenario !== "legacy-route") {
+      batch.summary.remediation.reason = "FAILED_LEARNER_IMPLEMENTATION_HANDOFF";
+      batch.summary.remediation.attempts[0].actionPlan.allowedActions.push("INVESTIGATE_PUBLIC_SOURCE");
+    }
+    database.batchFindFirst.mockResolvedValue(batch);
+    const before = await getOwnedCourseSupportResearchContext(input);
+    if (before.outcome !== "ready") throw Error("Expected original context");
+    let ledger = appendAutomationPlaybookEvent(batch.incidents[0].incident.attemptLedger, {
+      cycle: 1, stage: "TYPED_ADAPTER", transition: "STARTED", readPath: "TYPED_PROVIDER_ADAPTER", evidenceKind: "TOOLING",
+      failureFingerprint: "NETWORK:RETRY", runtimeVersion: scenario === "old-runtime" ? "b".repeat(40) : batch.releaseSha,
+      observedAt: new Date("2026-09-28T13:46:00Z"),
+    });
+    ledger = appendAutomationPlaybookEvent(ledger, { cycle: 1, stage: "TYPED_ADAPTER", transition: "FAILED_RETRYABLE", failureClass: "NETWORK",
+      readPath: "TYPED_PROVIDER_ADAPTER", evidenceKind: "TOOLING", failureFingerprint: "NETWORK:RETRY",
+      runtimeVersion: scenario === "old-runtime" ? "b".repeat(40) : batch.releaseSha, observedAt: new Date("2026-09-28T13:47:00Z") });
+    batch.incidents[0].incident.attemptLedger = ledger;
+    expect(await getOwnedCourseSupportResearchContext(input)).toMatchObject({ outcome: scenario === "current-full" ? "ready" : "authority_drift" });
+    expect(batch.summary.remediation.attempts[0].playbookEventCountAtClaim).toBe(1);
+    if (scenario === "current-full") expect(await validateOwnedCourseSupportResearchContext({ ...input, contextDigest: before.researchContextV1.contextDigest }))
+      .toMatchObject({ outcome: "authority_drift", reasonCode: "RESEARCH_CONTEXT_CHANGED", packetRefreshRequired: true });
+  });
 
   it.each([401, 403])("retains HTTP %s evidence without blocking repair of the discovery tool itself", async status => {
     const batch = fixture();

@@ -13,7 +13,7 @@ import {
 } from "./course-support-batches";
 import { courseSupportActionPlanMatchesRoute } from "./course-support-action-plan";
 import { courseSupportFailureFingerprintsMatch } from "./course-support-failure-fingerprint";
-import { allowsRetainedFullRepairResearch } from "./course-support-full-repair";
+import { allowsRetainedFullRepairResearch, fullRepairReadProgressMatchesClaim } from "./course-support-full-repair";
 import {
   appendCourseSupportLineage,
   COURSE_SUPPORT_LINEAGE_EVENT_LIMIT,
@@ -33,6 +33,8 @@ const ACTIVE_BATCH_STATUSES = ["CLAIMED", "IMPLEMENTING", "VERIFYING"] as const;
 const MAX_RESEARCH_ORDINAL = 20;
 
 const researchBatchSelect = {
+  baseSha: true,
+  releaseSha: true,
   revision: true,
   reference: true,
   status: true,
@@ -424,8 +426,15 @@ export function buildOwnedCourseSupportResearchContext(
   });
   const snapshotFingerprint = buildCourseSupportProviderSnapshotFingerprint(entry.course);
   const playbook = assessAutomationPlaybook(entry.incident.attemptLedger, entry.cycle);
-  const playbookEventCount = parseAutomationPlaybookLedger(entry.incident.attemptLedger)
-    ?.events.filter((event) => event.cycle === entry.cycle).length ?? -1;
+  const currentPlaybookEvents = parseAutomationPlaybookLedger(entry.incident.attemptLedger)
+    ?.events.filter((event) => event.cycle === entry.cycle);
+  const playbookEventCount = currentPlaybookEvents?.length ?? -1;
+  const playbookProgressCurrent = Boolean(claim && currentPlaybookEvents && fullRepairReadProgressMatchesClaim({
+    fullRepair: remediation?.reason === "FAILED_LEARNER_IMPLEMENTATION_HANDOFF" && remediation.workMode === "IMPLEMENT_REUSABLE_SUPPORT" &&
+      claim.actionPlan?.primaryAction === "IMPLEMENT_REUSABLE_SUPPORT" && claim.actionPlan.allowedActions.includes("INVESTIGATE_PUBLIC_SOURCE"),
+    claimedEventCount: claim.playbookEventCountAtClaim, events: currentPlaybookEvents,
+    runtimeVersion: batch.releaseSha ?? batch.baseSha, batchCreatedAt: batch.createdAt, now,
+  }));
   const monitoringDrift = entry.course.monitoringEvents.some((event) =>
     event.occurredAt >= batch.createdAt &&
     (event.eventType === "CHECK_SUCCEEDED" || event.eventType === "RECOVERED" ||
@@ -458,7 +467,7 @@ export function buildOwnedCourseSupportResearchContext(
       entry.incident.failureFingerprint !== batch.failureFingerprint ||
       claim.failureFingerprint !== batch.failureFingerprint ||
       claim.providerSnapshotFingerprint !== snapshotFingerprint ||
-      claim.playbookEventCountAtClaim !== playbookEventCount ||
+      !playbookProgressCurrent ||
       !playbook.valid || playbook.cycle !== entry.cycle ||
       entry.course.monitoringStatus?.state !== "AUTO_INVESTIGATING" ||
       !entry.course.monitoringStatus.failureFingerprint ||
@@ -468,7 +477,7 @@ export function buildOwnedCourseSupportResearchContext(
       ) || monitoringDrift) {
     const reasonCode = !remediation || !claim?.actionPlan ? "CLAIM_PLAN_UNAVAILABLE" :
       claim.providerSnapshotFingerprint !== snapshotFingerprint ? "PROVIDER_SNAPSHOT_CHANGED" :
-      claim.playbookEventCountAtClaim !== playbookEventCount ? "PLAYBOOK_ADVANCED_SINCE_CLAIM" :
+      !playbookProgressCurrent ? "PLAYBOOK_ADVANCED_SINCE_CLAIM" :
       entry.cycle !== entry.incident.cycle ? "INCIDENT_CYCLE_CHANGED" :
       entry.incident.activeBatchId !== input.batchId ? "INCIDENT_OWNER_CHANGED" :
       entry.result !== "PENDING" && !retainedRepairResearch ? "VERIFICATION_RESULT_NOT_INVESTIGABLE" :
@@ -710,6 +719,7 @@ export function buildOwnedCourseSupportResearchContext(
     incidentCycle: entry.cycle,
     cycleStartedAt: cycleStartedAt.toISOString(),
     playbookEventCount,
+    playbookEvidenceDigest: digest(currentPlaybookEvents),
     researchContext,
   });
   return {

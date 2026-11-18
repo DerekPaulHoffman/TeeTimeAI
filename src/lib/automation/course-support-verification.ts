@@ -42,6 +42,8 @@ import {
 } from "./provider-capabilities";
 import { sanitizeResponderText } from "./course-support-responder-policy";
 import { getAutomationRuntimeVersion } from "./runtime-version";
+import { readCourseSupportRemediationClaimAttempt } from "./course-support-claim-evidence";
+import { fullRepairReadProgressMatchesClaim } from "./course-support-full-repair";
 import {
   isAssignedDetachedStageProgression,
   isExactAssignedDetachedStageDirective,
@@ -2862,7 +2864,7 @@ async function evaluateDetachedEligibility(
   }
   if (
     mode === "PROGRESSION" &&
-    requiresBrowserAdapterRetryStageHandoff(input)
+    requiresBrowserAdapterRetryStageHandoff(input, now)
   ) {
     return {
       eligible: false,
@@ -3051,6 +3053,7 @@ function hasFreshOwnedRunnableDiscovery(
 
 function requiresBrowserAdapterRetryStageHandoff(
   input: DetachedEligibilityInput,
+  now: Date,
 ) {
   const playbook = assessAutomationPlaybook(
     input.incident.attemptLedger,
@@ -3068,10 +3071,35 @@ function requiresBrowserAdapterRetryStageHandoff(
   const remediation = asJsonRecord(
     asJsonRecord(input.batchSummary).remediation,
   );
-  return !isExactAssignedDetachedStageDirective({
+  return !hasOwnedFullRepairFirstBrowserRetry(input, now) && !isExactAssignedDetachedStageDirective({
     remediationDirective: remediation,
     stage: "BROWSER_ADAPTER_RETRY",
   });
+}
+
+/** The full mission already owns this first bounded public read. Do not ask
+ * another legacy stage owner to claim the same course. This grants no repeat
+ * budget, code authority, access override, monitoring or delivery proof. */
+function hasOwnedFullRepairFirstBrowserRetry(input: DetachedEligibilityInput, now: Date) {
+  const summary = asJsonRecord(input.batchSummary), directive = asJsonRecord(summary.remediation);
+  if (directive.reason !== "FAILED_LEARNER_IMPLEMENTATION_HANDOFF" ||
+      directive.workMode !== "IMPLEMENT_REUSABLE_SUPPORT" || directive.allowUnchangedRuntime !== true ||
+      directive.requiresImplementationPath !== false || !Array.isArray(summary.plannedPaths) || summary.plannedPaths.length !== 0 ||
+      input.course.monitoringMode === "LOCAL_READER_ONLY" || evaluateMonitoringGate({ ...input.course, now }).disposition !== "ACTIONABLE") return false;
+  const claim = readCourseSupportRemediationClaimAttempt({ summary: input.batchSummary, courseId: input.courseId, expectedAttemptCount: 1 });
+  if (!claim?.actionPlan || claim.actionPlan.primaryAction !== "IMPLEMENT_REUSABLE_SUPPORT" ||
+      !claim.actionPlan.allowedActions.includes("INVESTIGATE_PUBLIC_SOURCE") ||
+      claim.approach.workMode !== directive.workMode || claim.approach.strategyAction !== directive.strategyAction ||
+      claim.approach.playbookStage !== directive.playbookStage ||
+      claim.providerSnapshotFingerprint !== buildCourseSupportProviderSnapshotFingerprint(input.course)) return false;
+  const ledger = parseAutomationPlaybookLedger(input.incident.attemptLedger);
+  const assessment = assessAutomationPlaybook(input.incident.attemptLedger, input.incident.cycle);
+  const stage = assessment.stages.find(value => value.stage === "BROWSER_ADAPTER_RETRY");
+  return Boolean(ledger && assessment.valid && assessment.cycle === input.incident.cycle && assessment.conclusion === "INCOMPLETE" &&
+    assessment.nextStage === "BROWSER_ADAPTER_RETRY" && stage?.status === "PENDING" && stage.attemptCount === 0 &&
+    fullRepairReadProgressMatchesClaim({ fullRepair: true, claimedEventCount: claim.playbookEventCountAtClaim,
+      runtimeVersion: input.releaseSha, batchCreatedAt: input.batchCreatedAt, now,
+      events: ledger.events.filter(event => event.cycle === input.incident.cycle) }));
 }
 
 function isAssignedDetachedProgression(
@@ -3088,7 +3116,7 @@ function isAssignedDetachedProgression(
   const nextStageAssessment = playbook.stages.find(
     (stage) => stage.stage === playbook.nextStage,
   );
-  const assigned = isAssignedDetachedStageProgression({
+  const assigned = hasOwnedFullRepairFirstBrowserRetry(input, now) || isAssignedDetachedStageProgression({
     remediationDirective: remediation,
     playbookConclusion: playbook.conclusion,
     nextPlaybookStage: playbook.nextStage,
