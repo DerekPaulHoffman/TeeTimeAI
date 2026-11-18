@@ -34,7 +34,10 @@ import {
   MAX_CONCURRENT_COURSE_SUPPORT_BATCHES,
   runWithCourseSupportWriterTransitionLease,
   withCourseSupportWriteConflictRetry,
+  readCourseSupportRemediationDirective,
+  readCourseSupportRemediationClaimAttempt,
 } from "./course-support-batches";
+import { allowsRetainedFullRepairResearch } from "./course-support-full-repair";
 import { retryCourseSupportWriterAdmission } from "./course-support-writer-admission";
 import { COURSE_DISPATCH_INCIDENT_SNAPSHOT_SELECT, isCourseDispatchIncidentSnapshotCurrent } from "./course-support-dispatch-snapshot";
 import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-verification";
@@ -462,7 +465,7 @@ export async function planCourseSupportCourseDispatch(input: {
     const sameTick = runs.filter((run) => run.parsed?.tickRef === tick);
     const activeBatches = await tx.courseSupportBatch.findMany({
       where: { status: { in: ["CLAIMED", "IMPLEMENTING", "VERIFYING"] } },
-      select: { id: true, leaseExpiresAt: true, providerFamilyKey: true, failureFingerprint: true, summary: true, incidents: { select: { courseId: true } } },
+      select: { id: true, status: true, leaseExpiresAt: true, providerFamilyKey: true, failureFingerprint: true, summary: true, incidents: { select: { courseId: true } } },
     });
     const live = runs.filter((run) => run.status === "RUNNING" &&
       (["RESERVED", "STARTING", "BOUND"].includes(run.parsed?.state ?? "") ||
@@ -632,6 +635,7 @@ export async function planCourseSupportCourseDispatch(input: {
       }
     }
     const continuation = retryOf ? { continuationItems: [], attentionCount: 0 } : await collectCourseSupportContinuationCandidates({ ownerThreadId: input.ownerThreadId, now, runs, tx });
+    const fullRepairContinuationItems = retryOf ? [] : await collectOwnedFullRepairContinuations(tx, activeBatches, now);
     return {
       tickRef: tick,
       activeCount: activeBatches.length,
@@ -650,11 +654,74 @@ export async function planCourseSupportCourseDispatch(input: {
       continuationItems: continuation.continuationItems,
       continuationAttentionCount: continuation.attentionCount,
       continuationEligibleCount: continuation.continuationItems.length,
+      fullRepairContinuationItems,
       launchItems: runs.filter((run) => run.parsed?.tickRef === tick && (retryOf ? run.parsed.controlledRetryOf === retryOf && run.parsed.ownerThreadId === input.ownerThreadId && Boolean(retryTarget) : !run.parsed.controlledRetryOf) && run.status === "RUNNING" && ["RESERVED", "STARTING", "BOUND"].includes(run.parsed?.state ?? ""))
         .map((run) => ({ assignmentRef: run.parsed!.assignmentRef, state: run.parsed!.state,
           ...(run.parsed!.target.mode === "SIMULATOR" ? { mode: "SIMULATOR" as const } : {}) })),
     };
   }));
+}
+
+/** Read-only control projection. It never claims, extends or transfers a lease.
+ * Only the original Desktop owner may recover or continue its own packet. */
+async function collectOwnedFullRepairContinuations(tx: Prisma.TransactionClient,
+  activeBatches: readonly { id: string; status: string; summary: Prisma.JsonValue | null }[], now: Date) {
+  const ids = activeBatches.filter(batch => batch.status === "VERIFYING" &&
+    readCourseSupportRemediationDirective(batch.summary)?.reason === "FAILED_LEARNER_IMPLEMENTATION_HANDOFF").map(batch => batch.id);
+  if (!ids.length) return [];
+  const batches = await tx.courseSupportBatch.findMany({
+    where: { id: { in: ids }, status: "VERIFYING" },
+    select: { id: true, reference: true, ownerThreadId: true, baseSha: true, releaseSha: true, summary: true,
+      incidents: { select: { courseId: true, incidentId: true, cycle: true, result: true, course: true,
+        incident: { select: { cycle: true, status: true, activeBatchId: true, providerFamilyKey: true, failureFingerprint: true } } } } },
+  });
+  const refs = batches.flatMap(batch => {
+    const summary = batch.summary && typeof batch.summary === "object" && !Array.isArray(batch.summary) ? batch.summary : {};
+    return typeof summary.dispatchAssignmentRef === "string" && /^course-assignment-[a-f0-9-]{36}$/u.test(summary.dispatchAssignmentRef)
+      ? [summary.dispatchAssignmentRef] : [];
+  });
+  if (!refs.length) return [];
+  // Consumed outdoor launch runs are complete; they intentionally are not in
+  // the running-reservation inventory. Read only these original audit refs.
+  const originalRuns = await tx.automationRun.findMany({ where: { promptVersion: COURSE_DISPATCH_PROMPT_VERSION,
+    OR: refs.map(ref => ({ audit: { path: ["assignmentRef"], equals: ref } })) }, select: { audit: true }, take: refs.length + 1 });
+  if (originalRuns.length > refs.length) throw new Error("Original full-repair dispatch provenance is ambiguous.");
+  const audits = originalRuns.map(run => parseCourseDispatchAudit(run.audit)).filter((audit): audit is CourseDispatchAudit =>
+    Boolean(audit && audit.state === "CONSUMED" && audit.target.mode === undefined && audit.childThreadId && audit.launcherReceiptPath));
+  const items = [];
+  for (const batch of batches) {
+    const summary = batch.summary && typeof batch.summary === "object" && !Array.isArray(batch.summary) ? batch.summary : {};
+    const audit = audits.find(value => value.assignmentRef === summary.dispatchAssignmentRef &&
+      value.childThreadId === batch.ownerThreadId && value.baseSha === batch.baseSha);
+    const entry = batch.incidents[0];
+    // Implementation-bearing recovery keeps its stricter original protocol.
+    if (!audit || batch.incidents.length !== 1 || !entry || batch.releaseSha !== batch.baseSha ||
+        !Array.isArray(summary.plannedPaths) || summary.plannedPaths.length !== 0 ||
+        entry.courseId !== audit.target.courseId || entry.incidentId !== audit.target.incidentId ||
+        entry.cycle !== audit.target.cycle || entry.incident.cycle !== entry.cycle ||
+        entry.incident.status !== "AUTO_INVESTIGATING" || entry.incident.activeBatchId !== batch.id ||
+        entry.incident.providerFamilyKey !== audit.target.providerFamilyKey ||
+        entry.incident.failureFingerprint !== audit.target.failureFingerprint) continue;
+    const directive = readCourseSupportRemediationDirective(batch.summary);
+    const claim = readCourseSupportRemediationClaimAttempt({ summary: batch.summary, courseId: entry.courseId, expectedAttemptCount: 1 });
+    if (!directive || !claim || !allowsRetainedFullRepairResearch({ reason: directive.reason, workMode: directive.workMode,
+      batchStatus: "VERIFYING", result: entry.result, allowedActions: claim.actionPlan?.allowedActions ?? [] }) ||
+      claim.providerSnapshotFingerprint !== buildCourseSupportProviderSnapshotFingerprint(entry.course)) continue;
+    const searches = await tx.coursePreference.findMany({
+      where: { courseId: entry.courseId, teeSearchId: { in: audit.target.searchRefs.map(ref => ref.id) }, teeSearch: { mode: "OUTDOOR" } },
+      select: { teeSearch: { select: COURSE_DISPATCH_SOURCE_SELECT } },
+    });
+    if (searches.length !== audit.target.searchRefs.length || searches.some(({ teeSearch }) => {
+      const ref = audit.target.searchRefs.find(value => value.id === teeSearch.id);
+      return !ref || !isCurrentCourseDispatchSource({ ref, search: teeSearch, trafficClass: audit.target.trafficClass,
+        courseTimeZone: entry.course.timeZone, now });
+    })) continue;
+    items.push({ kind: "OWNED_OUTDOOR_FULL_REPAIR" as const, assignmentRef: audit.assignmentRef,
+      threadId: audit.childThreadId!, launcherReceiptPath: audit.launcherReceiptPath!, batchReference: batch.reference,
+      baseSha: batch.baseSha, releaseSha: batch.releaseSha });
+    if (items.length === 5) break;
+  }
+  return items;
 }
 
 async function transition(input: { ownerThreadId: string; assignmentRef: string; childThreadId?: string; launcherReceiptPath?: string; confirmedNotCreated?: boolean; next: DispatchState }) {

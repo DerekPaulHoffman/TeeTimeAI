@@ -1,5 +1,19 @@
 /** A failed reader is an engineering mission, not a succession of verifier
  * assignments. Negative deployed evidence stays with the same lease owner. */
+export function allowsRetainedFullRepairResearch(input: {
+  reason: string | null;
+  workMode: string;
+  batchStatus: string;
+  result: string;
+  allowedActions: readonly string[];
+}) {
+  return input.reason === "FAILED_LEARNER_IMPLEMENTATION_HANDOFF" &&
+    input.workMode === "IMPLEMENT_REUSABLE_SUPPORT" && input.batchStatus === "VERIFYING" &&
+    input.result === "STALE_EVIDENCE" &&
+    input.allowedActions.includes("INVESTIGATE_PUBLIC_SOURCE") &&
+    input.allowedActions.includes("IMPLEMENT_REUSABLE_SUPPORT");
+}
+
 export function shouldContinueOwnedFullRepair(packet: {
   remediation: { reason: string | null } | null;
   courses: readonly {

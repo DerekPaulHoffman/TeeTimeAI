@@ -212,6 +212,34 @@ describe("owned course-support research context", () => {
       .toMatchObject({ outcome: "authority_drift" });
   });
 
+  it("keeps negative verification evidence while permitting a fresh context for the same full repair", async () => {
+    const batch = fixture();
+    batch.summary.remediation.reason = "FAILED_LEARNER_IMPLEMENTATION_HANDOFF";
+    batch.summary.remediation.attempts[0].actionPlan.allowedActions.push("INVESTIGATE_PUBLIC_SOURCE");
+    database.batchFindFirst.mockResolvedValue(batch);
+    const before = await getOwnedCourseSupportResearchContext(input);
+    if (before.outcome !== "ready") throw new Error("Expected original owner context");
+    batch.status = "VERIFYING";
+    batch.incidents[0].result = "STALE_EVIDENCE";
+    const after = await getOwnedCourseSupportResearchContext(input);
+    expect(after.outcome).toBe("ready");
+    expect(batch.incidents[0].result).toBe("STALE_EVIDENCE");
+    expect(await validateOwnedCourseSupportResearchContext({ ...input, contextDigest: before.researchContextV1.contextDigest }))
+      .toMatchObject({ outcome: "authority_drift", reasonCode: "RESEARCH_CONTEXT_CHANGED" });
+    batch.incidents[0].course.website = "https://changed-course.example/";
+    expect(await getOwnedCourseSupportResearchContext(input)).toMatchObject({ outcome: "authority_drift" });
+  });
+
+  it.each(["IMPLEMENTATION_REQUIRED", "NEWLY_CONFIRMED"])("does not reopen stale research on ordinary %s routes", async reason => {
+    const batch = fixture();
+    batch.status = "VERIFYING";
+    batch.incidents[0].result = "STALE_EVIDENCE";
+    batch.summary.remediation.reason = reason;
+    batch.summary.remediation.attempts[0].actionPlan.allowedActions.push("INVESTIGATE_PUBLIC_SOURCE");
+    database.batchFindFirst.mockResolvedValue(batch);
+    expect(await getOwnedCourseSupportResearchContext(input)).toMatchObject({ outcome: "authority_drift" });
+  });
+
   it("gates exact identity and URLs by the active owner and emits candidate-only read evidence", async () => {
     database.batchFindFirst.mockResolvedValue(fixture());
     const result = await getOwnedCourseSupportResearchContext(input);
