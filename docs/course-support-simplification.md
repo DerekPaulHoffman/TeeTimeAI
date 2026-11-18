@@ -5,6 +5,35 @@ repair. It distinguishes a working scheduler from working monitoring. A launch,
 successful command, completed research attempt, green test suite, or Ready
 deployment does not establish that a golfer's selected course can be monitored.
 
+## November 17–18 scheduler qualification
+
+The interactive and scheduled environments were not equivalent. Native CLI
+model turns could not use the qualified local browser. Actual Desktop workers,
+continued through the supported App tool using Sol/ChatGPT and First user CUA,
+independently reached the two trial venues' public calendars. This establishes
+browser access, not saved methods or customer delivery. The original timed
+learning attempts failed; later engineering recovery never resets their clocks.
+
+| Observed stop | Corrective contract | Regression location |
+| --- | --- | --- |
+| Worker chose a branch its launcher rejected | Supervisor creates the exact assignment branch from a clean detached managed worktree | worker-supervisor and worker-launcher suites |
+| Another browser interface omitted First user | Qualify the actual CUA inventory; actual host/access denial still stops | worker-supervisor suite |
+| Verification retained STALE_EVIDENCE but research required PENDING | Keep negative evidence and authorize only the same full-repair owner under current source/cycle/lease guards, including after claiming code paths | research-context suite and engineering-repair Postgres lifecycle |
+| Completed outdoor Desktop workers had no scheduler continuation | Source-bound original-owner projection, real terminal metadata and one-use per-runtime marker; never infer success from launcher intent | desktop-continuation suite |
+| Successful recovery fence adoption required another model command | Typed post-commit progress permits bounded internal settlement after fresh authority checks; errors never replay | recovery-progress and batch suites |
+| Retained network BARRIER prohibited fixing discovery code | Explicit tooling-only scope preserves barriers and grants neither provider access nor activation/monitoring proof | research-context HTTP401/403 regressions |
+| Optional-code discovery missions were treated as unfinished code despite zero claimed paths | Distinguish data-only work; preserve strict code-release proof after actual code claims. Correct only the exact prior misclassification with current unowned demand and an additive idempotent receipt | full-repair suite and engineering-repair Postgres exclusions/idempotence |
+| A busy implementation owner ended other still-owned repairs | Claim-path waits within one heartbeating command for a bounded confirmed mutex release; no path while busy and no foreign ownership transfer | path-admission, batch and verification-watch suites |
+
+An old simulator implementation with retained unmerged code remained the actual
+global implementation owner. Its original Desktop chat was asked to reconcile
+its own CI, release and verification; no parent adopted or deleted its claim.
+The two trial venues still had no saved-method, matching-email or restart-reuse
+proof at this checkpoint. Passing the regressions or releasing these contracts
+does not change that acceptance result. Keep the normal deployed checks,
+canonical matches, application outbox and separate inbox/reuse evidence as the
+completion gates.
+
 The normal October 9 06:00 UTC worker configured Back9 from a fresh public read,
 adopted its source and registered the live release. Its deployed engineering
 verification then returned HTTP 503 before any availability observation was

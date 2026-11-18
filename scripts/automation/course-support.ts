@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { refreshPendingCustomerRecoveries } from "@/lib/automation/course-support-customer-recovery";
 import { shouldContinueOwnedFullRepair } from "@/lib/automation/course-support-full-repair";
 import { settleCourseSupportRecoveryFence } from "@/lib/automation/course-support-recovery-progress";
+import { waitForCourseSupportPathAdmission } from "@/lib/automation/course-support-path-admission";
 import { promisify } from "node:util";
 
 import {
@@ -973,12 +974,9 @@ export function parseCourseSupportProviderContractInspectionOptions(
 async function claimPath(args: string[]) {
   const ownerThreadId = requireOwnerThread(args);
   const batchId = await resolveBatchId(args);
-  return appendCourseSupportBatchPath({
-    batchId,
-    leaseToken: await getOwnedCourseSupportLeaseToken({ batchId, ownerThreadId }),
-    ownerThreadId,
-    path: requireOption(args, "--path")
-  });
+  const path = requireOption(args, "--path");
+  return runWithCourseSupportOperationHeartbeat({ batchId, ownerThreadId }, (leaseToken, signal) =>
+    waitForCourseSupportPathAdmission(() => appendCourseSupportBatchPath({ batchId, leaseToken, ownerThreadId, path }), { signal }));
 }
 
 export function shouldCompleteParkedCampaignForInspection(args: readonly string[]) {
