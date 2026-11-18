@@ -63,6 +63,9 @@ function WaitIdle([string]$Expected,[DateTimeOffset]$Since,[int]$Seconds) {
 try {
   if($env:OS -ne 'Windows_NT' -or $env:CODEX_THREAD_ID -cne $OwnerThreadId){throw 'ORIGINAL_NATIVE_OWNER_REQUIRED'}
   $systemModules=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\Modules'
+  # The native worker can inherit PowerShell 7 paths. Load inbox modules from
+  # this Windows PowerShell host, matching the existing managed-task wrapper.
+  $env:PSModulePath=(Join-Path $PSHOME 'Modules')+[IO.Path]::PathSeparator+$systemModules
   Import-Module (Join-Path $systemModules 'ScheduledTasks\ScheduledTasks.psd1') -ErrorAction Stop
   $task=Get-ScheduledTask -TaskName 'Tee Time Spot Course Discovery' -TaskPath '\TeeTimeSpot\'
   if($task.Description -cne 'Tee Time Spot course discovery supervisor; managed lifecycle v1' -or @($task.Actions).Count -ne 1 -or
