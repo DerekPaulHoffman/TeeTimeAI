@@ -24,6 +24,7 @@ learning attempts failed; later engineering recovery never resets their clocks.
 | Retained network BARRIER prohibited fixing discovery code | Explicit tooling-only scope preserves barriers and grants neither provider access nor activation/monitoring proof | research-context HTTP401/403 regressions |
 | Optional-code discovery missions were treated as unfinished code despite zero claimed paths | Distinguish data-only work; preserve strict code-release proof after actual code claims. Correct only the exact prior misclassification with current unowned demand and an additive idempotent receipt | full-repair suite and engineering-repair Postgres exclusions/idempotence |
 | A busy implementation owner ended other still-owned repairs | Claim-path waits within one heartbeating command for a bounded confirmed mutex release; no path while busy and no foreign ownership transfer | path-admission, batch and verification-watch suites |
+| The full repair's first public adapter retry demanded a second legacy stage owner | Permit that one unattempted read only from the parsed current one-course full-mission plan, unchanged source/ledger and actionable public access. Retain all repeat, code, reader-only, authentication and ownership gates | verification scheduling positive and rejection cases |
 
 An old simulator implementation with retained unmerged code remained the actual
 global implementation owner. Its original Desktop chat was asked to reconcile
