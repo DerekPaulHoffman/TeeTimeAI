@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { chromium } from "@playwright/test";
@@ -11,6 +11,9 @@ describe("interactive public research boundaries", () => {
   it("offers navigation and calendar filters, never slots, checkout or contact controls", () => {
     const button = (name: string) => ({ tag: "button", role: "", name, label: "" });
     expect(interactiveControlKind(button("Next month"))).toBe("calendar");
+    expect(interactiveControlKind(button("Add"))).toBeNull();
+    expect(interactiveControlKind(button("Next"))).toBeNull();
+    expect(interactiveControlKind({ ...button("Add"), squareServiceSelection: { operation: "ADD" } })).toBe("service");
     expect(interactiveControlKind({ tag: "select", role: "", name: "", label: "Duration" })).toBe("filter");
     expect(interactiveControlKind(button("1:30 PM"))).toBeNull();
     expect(interactiveControlKind(button("Confirm reservation"))).toBeNull();
@@ -74,6 +77,74 @@ describe("interactive public research boundaries", () => {
     expect(interactiveControlKind({ ...popup, sensitiveForm: true })).toBeNull();
     expect(interactiveControlKind({ ...popup, name: "1:00 PM" })).toBeNull();
   });
+
+  it.each([false, true])("reaches Square's public calendar through service filters while retaining mutation denial=%s", async attemptMutation => {
+    const channel = resolve(".codex-artifacts/browser", `fixture-${randomUUID()}`);
+    await mkdir(channel, { recursive: true });
+    const catalog = "https://book.squareup.com/appointments/publicvenue/location/AAAAAAAAAAAAA/services";
+    const detail = `${catalog}/BBBBBBBBBBBBBBBB`;
+    const availability = catalog.replace("/services", "/availability");
+    const seen: string[] = [];
+    let stopped = false, nextRequest = 1;
+    const fetch = vi.fn(async (input: Parameters<typeof global.fetch>[0]) => {
+      const url = String(input); seen.push(url);
+      const html = url === detail ? `<html><body><h1>1 hour simulator practice</h1><button type="button" id="add">Add</button><script>
+        document.querySelector('#add').onclick=()=>{
+          history.pushState({},'',${JSON.stringify(catalog)});
+          document.body.innerHTML='<aside><h2>Appointment summary</h2><div>1 hour simulator practice</div><div>$50</div><button type="button" id="next">Next</button></aside>';
+          document.querySelector('#next').onclick=()=>location.assign(${JSON.stringify(availability)});
+        };</script></body></html>` : `<html><body><h1>Public availability</h1>
+          <div role="grid"><button role="gridcell">20</button></div><button>1:30 PM</button>
+          <aside><h2>Appointment summary</h2><div>1 hour simulator practice</div><button>Next</button></aside>
+          <button>Confirm appointment</button><button>Checkout</button><input type="email" aria-label="Email">
+          ${attemptMutation ? "<script>fetch('/appointments/api/create-booking',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({query:'mutation Reserve { reserve { id } }'})}).catch(()=>{});</script>" : ""}</body></html>`;
+      return new Response(html, { headers: { "content-type": "text/html" } });
+    }) as typeof global.fetch;
+    const lease = (async (_family: string, work: () => Promise<unknown>) => ({ acquired: true, value: await work() })) as never;
+    const task = collectInteractiveSimulatorResearch({ url: detail, channel,
+      assertOwned: async () => { if (stopped) throw new Error("Fixture stopped"); } }, { fetch, lease });
+    const settled = task.then(value => ({ value }), error => ({ error }));
+    const wait = async (number: number) => {
+      for (let i = 0; i < 400; i++) {
+        try { return JSON.parse(await readFile(join(channel, `response-${number}.json`), "utf8")); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; await new Promise(done => setTimeout(done, 25)); }
+      }
+      throw new Error("Fixture response timeout");
+    };
+    const send = async (number: number, action: unknown) => {
+      const path = join(channel, `request-${number}.json`);
+      await writeFile(`${path}.tmp`, JSON.stringify(action)); await rename(`${path}.tmp`, path);
+      nextRequest = number + 1;
+    };
+    try {
+      const first = await wait(0);
+      const add = first.controls.find((c: { name: string; kind: string }) => c.name === "Add" && c.kind === "service");
+      expect(add).toBeDefined();
+      await send(1, { action: "click", target: add.target });
+      const second = await wait(1);
+      const next = second.controls.find((c: { name: string; kind: string }) => c.name === "Next" && c.kind === "service");
+      expect(next, JSON.stringify(second.controls)).toBeDefined();
+      expect(second.url).toBe(catalog);
+      await send(2, { action: "click", target: next.target });
+      const third = await wait(2);
+      expect(third.url).toBe(availability);
+      expect(third.controls.some((c: { name: string }) => c.name === "20")).toBe(true);
+      expect(third.controls.some((c: { name: string }) => /Next|1:30|Confirm|Checkout|Email/u.test(c.name))).toBe(false);
+      await send(3, { action: "finish" });
+      const result = await task;
+      expect(result.renderComplete).toBe(!attemptMutation);
+      expect(seen).toEqual([detail, availability]);
+      if (attemptMutation) expect(result.blockedResourceDiagnostics).toEqual(expect.arrayContaining([
+        expect.objectContaining({ state: "NOT_EXECUTED", method: "POST", reason: "METHOD_NOT_ALLOWED" }),
+      ]));
+    } finally {
+      stopped = true;
+      await send(nextRequest, { action: "finish" }).catch(() => {});
+      await settled;
+      if (!channel.startsWith(resolve(".codex-artifacts/browser") + "/") && !channel.startsWith(resolve(".codex-artifacts/browser") + "\\")) throw new Error("Bad fixture path");
+      await rm(channel, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   it("follows an observed new-tab booking link and waits for slow calendar resources", async () => {
     const channel = resolve(".codex-artifacts/browser", `fixture-${randomUUID()}`);

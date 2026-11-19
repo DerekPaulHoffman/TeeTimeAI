@@ -11,6 +11,7 @@ import { createPassfactoryPublicReadPolicy, isIncidentalBrowserRequest } from ".
 import { addVerifiedMindbodyReadHeaders, isMindbodyPublicReadPost } from "./mindbody-public-read-policy";
 import { isRexNamespace, isRexPublicReadPost } from "./rex-public-read-policy";
 import { isSquareAppointmentsNamespace, isSquarePublicAvailabilityPost } from "./square-public-read-policy";
+import { observedSquarePublicServiceControl, type SquarePublicServiceChoice, type SquarePublicServiceControl } from "./square-public-service-controls";
 import { projectPassfactoryCalendarEvidence, type PassfactoryCalendarEvidence } from "./passfactory-calendar-evidence";
 import { inspectSimulatorClientCode, mergeSimulatorClientCodeEvidence, type SimulatorClientCodeEvidence } from "./simulator-client-code-evidence";
 import { createBlockedResourceDiagnostics, simulatorCredentialHeaderKind, summarizeBlockedRequestBody } from "./simulator-blocked-resources";
@@ -34,9 +35,12 @@ const filterName = /\b(?:date|day|month|calendar|duration|length|party|players?|
 const timeSlot = /\b\d{1,2}:\d{2}\s*(?:am|pm)?\b/iu;
 
 /** UI intent is checked separately from the server request contract. Slots are never clicked. */
-export function interactiveControlKind(input: { tag: string; role: string; name: string; label: string; href?: string; calendar?: boolean; verifiedCalendarDay?: boolean; sensitiveForm?: boolean; inputType?: string; hasPopup?: string }) {
+export function interactiveControlKind(input: { tag: string; role: string; name: string; label: string; href?: string; calendar?: boolean; verifiedCalendarDay?: boolean; sensitiveForm?: boolean; inputType?: string; hasPopup?: string; squareServiceSelection?: { operation: "ADD" | "NEXT" } | null }) {
   const name = `${input.name} ${input.label}`.trim();
   if (input.sensitiveForm || forbidden.test(name) || timeSlot.test(input.name)) return null;
+  if (input.tag === "button" && (!input.label.trim() || input.label.trim() === input.name.trim()) &&
+      (input.name.trim() === "Add" && input.squareServiceSelection?.operation === "ADD" ||
+       input.name.trim() === "Next" && input.squareServiceSelection?.operation === "NEXT")) return "service" as const;
   if (input.tag === "button" && input.name.length <= 160 &&
       (/^rentals$/iu.test(input.name.trim()) && !input.label.trim() ||
        /^rentals$/iu.test(input.label.trim()) && /^rentals(?:\s|$)/iu.test(input.name.trim()))) return "filter" as const;
@@ -159,7 +163,8 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
   let selectedCalendarFilters: NonNullable<SimulatorResearchResult["selectedCalendarFilters"]> = [];
   const blockedResources = createBlockedResourceDiagnostics();
   const active = new Set<Promise<void>>();
-  let controls = new Map<string, { locator: Locator; kind: string; signature: string; href?: string }>();
+  let squareChoice: SquarePublicServiceChoice | null = null;
+  let controls = new Map<string, { locator: Locator; kind: string; signature: string; href?: string; squareServiceSelection?: SquarePublicServiceControl | null }>();
   const transport = dependencies.fetch ?? createAddressPinnedPublicFetchTransport({
     parseUrl: value => { const safe = getSafeCustomerBookingUrl(value); if (!safe) throw new Error("BROWSER_UNSAFE_REQUEST"); return new URL(safe); },
     maxResponseBytes: 4_000_000, timeoutMs: 45_000, redirectLimit: 0, authorizeReadPost: allowsReadPost,
@@ -294,7 +299,8 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
     page.on("framenavigated", frame => {
       if (frame === page?.mainFrame()) { viewGeneration++; lastNavigationAt = Date.now(); pendingNavigation = false; }
     });
-    const observedControl = async (locator: Locator) => locator.evaluate(element => {
+    const observedControl = async (locator: Locator) => {
+      const item = await locator.evaluate(element => {
       const e = element as HTMLElement;
       const input = element as HTMLInputElement;
       let label = [e.getAttribute("aria-label"), ...(Array.from(input.labels ?? []).map(l => l.textContent)),
@@ -314,14 +320,28 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
           }
         }
       }
-      return { tag: e.tagName.toLowerCase(), role: e.getAttribute("role") ?? "", name: (e.innerText || e.getAttribute("aria-label") || "").trim().slice(0, 160), label: label.slice(0, 200),
+      const name = (e.innerText || e.getAttribute("aria-label") || "").trim().slice(0, 160);
+      const headings = name === "Add" ? Array.from(document.querySelectorAll<HTMLElement>("h1")).filter(h => h.getClientRects().length) : [];
+      let selectionSummary = "";
+      if (name === "Next") {
+        for (let group = e.parentElement, depth = 0; group && depth < 4 && !["BODY", "MAIN", "FORM"].includes(group.tagName); group = group.parentElement, depth++) {
+          const headings = Array.from(group.querySelectorAll<HTMLElement>("h2,h3")).filter(h => h.getClientRects().length && h.innerText.trim() === "Appointment summary");
+          if (headings.length === 1 && group.querySelectorAll("button").length <= 5 && group.querySelectorAll("a[href]").length <= 2 && !group.querySelector("input,select,textarea")) {
+            selectionSummary = group.innerText.trim().slice(0, 4001); break;
+          }
+        }
+      }
+      return { tag: e.tagName.toLowerCase(), role: e.getAttribute("role") ?? "", name, label: label.slice(0, 200),
         hasPopup: e.getAttribute("aria-haspopup") ?? "",
         href: e instanceof HTMLAnchorElement ? e.href : undefined,
         calendar: Boolean(e.closest('[role="grid"]')),
         inputType: input.type,
         selectedValue: e.tagName === "SELECT" ? (element as HTMLSelectElement).selectedOptions[0]?.textContent ?? "" : e.innerText,
-        sensitiveForm: Boolean(e.closest("form")?.querySelector('input[type="password"],input[type="email"],input[type="tel"],[autocomplete^="cc-"]')) };
-    });
+        sensitiveForm: Boolean(e.closest("form")?.querySelector('input[type="password"],input[type="email"],input[type="tel"],[autocomplete^="cc-"]')),
+        insideForm: Boolean(e.closest("form")), publicHeading: headings.length === 1 ? headings[0].innerText.trim().slice(0, 201) : "", selectionSummary };
+      });
+      return { ...item, squareServiceSelection: observedSquarePublicServiceControl(page!.url(), item, squareChoice) };
+    };
     const captureSnapshot = async (message?: string) => atPhase("BROWSER_DOCUMENT", async () => {
       for (let attempt = 0; ; attempt++) {
         const generation = viewGeneration;
@@ -353,7 +373,7 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
             const kind = interactiveControlKind(item);
             if (!kind || access.length || status >= 400 || kind === "option" && !choosingFilter) continue;
             const target = randomUUID();
-            controls.set(target, { locator, kind, signature: JSON.stringify(item), href: item.href });
+            controls.set(target, { locator, kind, signature: JSON.stringify(item), href: item.href, squareServiceSelection: item.squareServiceSelection });
             visible.push({ target, kind, name: sanitizeResponderText(item.name), label: sanitizeResponderText(item.label),
               ...(item.tag === "select" ? { options: await locator.locator("option").allTextContents() } : {}) });
             if (kind === "filter") selectedCalendarFilters.push({ label: sanitizeResponderText(item.label).slice(0, 200),
@@ -409,6 +429,8 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
           if (control.kind !== "filter") throw new Error("BROWSER_ACTION_REJECTED");
           await control.locator.selectOption({ label: action.option }, { timeout: 5_000 });
         } else {
+          if (control.squareServiceSelection?.operation === "ADD") squareChoice = { ...control.squareServiceSelection, nextUsed: false };
+          if (control.squareServiceSelection?.operation === "NEXT" && squareChoice) squareChoice.nextUsed = true;
           choosingFilter = control.kind === "filter";
           if (control.kind === "link" && control.href) {
             if (++navigations > 3) throw new Error("SIMULATOR_RESEARCH_REDIRECT_LIMIT");
