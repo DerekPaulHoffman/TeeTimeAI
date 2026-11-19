@@ -1253,6 +1253,53 @@ describe("native root GET CORS preflight ownership", () => {
       expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "options")).toBe(false);
     } finally { await test.guard.close(); }
   });
+  it("aborts an uncorrelated ordinary POST preflight without granting a read or killing the current document", async () => {
+    const test = await prepare({}, false);
+    try {
+      test.events.get("Page.frameNavigated")!({ frame: { id: "main", loaderId: "current-loader", url: "https://example.org" } });
+      pause(test, { request: { url, method: "OPTIONS", headers: { Origin: "https://example.org", "Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "content-type" } } });
+      await vi.waitFor(() => expect(test.rejections).toHaveLength(1));
+      expect(test.rejections[0]).toMatchObject({ code: "NATIVE_REDIRECT_REQUEST_REJECTED", method: "OPTIONS", requestedPreflightMethod: "POST" });
+      expect(test.guard.firstFatal).toBeUndefined(); expect(test.failures).toEqual([]); expect(test.close).not.toHaveBeenCalled();
+      expect(test.routes).toHaveLength(1);
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "options")).toBe(false);
+      source(test);
+      test.request("fresh-get", { networkId: "original-get", resourceType: "Fetch", request: { url, method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(test.routes).toHaveLength(2));
+      await test.routes[1].continue();
+      expect(test.guard.firstFatal).toBeUndefined();
+    } finally { await test.guard.close(); }
+  });
+  it.each(["sensitive", "unsafe-origin", "missing-origin", "GET", "HEAD", "known-source", "uncommitted"])("keeps the fatal correlation boundary for an unqualified preflight: %s", async mode => {
+    const test = await prepare({}, mode === "known-source");
+    try {
+      if (mode !== "uncommitted") test.events.get("Page.frameNavigated")!({ frame: { id: "main", loaderId: "current-loader", url: "https://example.org" } });
+      const requestHeaders: Record<string, string> = { Origin: "https://example.org", "Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "content-type" };
+      if (mode === "sensitive") requestHeaders["Access-Control-Request-Headers"] = "authorization";
+      if (mode === "unsafe-origin") requestHeaders.Origin = "http://127.0.0.1";
+      if (mode === "missing-origin") delete requestHeaders.Origin;
+      if (mode === "GET" || mode === "HEAD") requestHeaders["Access-Control-Request-Method"] = mode;
+      if (mode === "known-source") metadata(test);
+      pause(test, { request: { url, method: "OPTIONS", headers: requestHeaders } });
+      await vi.waitFor(() => expect(test.failures.length).toBeGreaterThan(0));
+      expect(test.rejections).toEqual([]); expect(test.routes).toHaveLength(1);
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "options")).toBe(false);
+    } finally { await test.guard.close(); }
+  });
+  it("retains a failed preflight abort as a fatal command failure", async () => {
+    const test = await prepare({}, false), original = test.cdp.send.getMockImplementation()!;
+    try {
+      test.events.get("Page.frameNavigated")!({ frame: { id: "main", loaderId: "current-loader", url: "https://example.org" } });
+      test.cdp.send.mockImplementation(async (name, values) => {
+        if (name === "Fetch.failRequest" && values?.requestId === "options") throw Error("Protocol error");
+        return original(name, values);
+      });
+      pause(test, { request: { url, method: "OPTIONS", headers: { Origin: "https://example.org", "Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "content-type" } } });
+      await vi.waitFor(() => expect(test.failures.length).toBeGreaterThan(0));
+      expect(test.rejections).toEqual([]); expect(test.routes).toHaveLength(1);
+      expect(test.cdp.send.mock.calls.filter(([name, values]) => name === "Fetch.failRequest" && values?.requestId === "options")).toHaveLength(1);
+    } finally { await test.guard.close(); }
+  });
   it("omits unavailable preflight source facts instead of reporting unobserved negative facts", async () => {
     const test = await prepare({}, false);
     try {

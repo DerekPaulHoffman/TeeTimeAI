@@ -1451,6 +1451,37 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
             sourceResponseComplete: committedDocument?.record.complete === true, successorTerminalFailed: pendingInitialPause?.terminalFailed === true };
         };
         const current = networkIdentities.get(networkId);
+        // Denial is not read authority. A bodyless POST preflight without any
+        // native source cannot be dispatched or provide response evidence.
+        // Abort that isolated pause under the completed current document;
+        // keep other independently correlated reads usable. Sensitive/unknown
+        // headers, navigation changes and failed abort acknowledgements retain
+        // their original fatal boundaries.
+        const deniedPreflight = requestDiagnostic("NATIVE_REDIRECT_REQUEST_REJECTED");
+        const denialDocument = committedDocument;
+        if (!current && !parent && event.redirectedRequestId === undefined && event.request.method === "OPTIONS" &&
+            ["xhr", "fetch"].includes(kind) && event.frameId === rootFrameId &&
+            event.request.hasPostData !== true && event.request.postData === undefined &&
+            deniedPreflight.requestedPreflightMethod === "POST" && deniedPreflight.preflightOriginSafe === true &&
+            ["ORDINARY", "NONE"].includes(deniedPreflight.preflightRequestedHeadersCategory ?? "") &&
+            isSafeRecipeUrl(event.request.url) && !pendingPreflightIdentities.has(networkId) &&
+            !preflightRegistrationGates.has(networkId) && !preflightGateOverflow &&
+            !generation.retired && !boundaryPending && !awaitingDocument && denialDocument?.record.admitted &&
+            denialDocument.record.complete && !denialDocument.record.failed && denialDocument.record.responseStatus === 200 &&
+            denialDocument.record.generation === generation && loaderOwners.get(denialDocument.loaderId) === generation) {
+          const deniedGeneration = generation;
+          sourceDeniedFetchIds.add(event.requestId);
+          await bounded(reject(), "NATIVE_REDIRECT_ABORT_TIMEOUT");
+          if (closed || options.signal?.aborted) return;
+          if (generation !== deniedGeneration || generation.retired || boundaryPending || awaitingDocument ||
+              committedDocument !== denialDocument || networkIdentities.has(networkId) || pendingPreflightIdentities.has(networkId)) {
+            await close("NATIVE_REDIRECT_LOADER_MISMATCH"); return;
+          }
+          delete deniedPreflight.url;
+          rejectedRequests.push(deniedPreflight); if (rejectedRequests.length > 12) rejectedRequests.shift();
+          try { options.onRequestRejected?.({ ...deniedPreflight }); } catch { /* A denial never authorizes a read. */ }
+          return;
+        }
         const childAsset = () => {
           const value = childAssets.get(networkId);
           return childRootCurrent() && value && !value.invalid && value.generation === generation &&
