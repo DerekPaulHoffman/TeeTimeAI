@@ -77,6 +77,11 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
   const claimedImplementation = item?.continuationMode === "CLAIMED_IMPLEMENTATION";
   const registeredImplementation = item?.continuationMode === "REGISTERED_IMPLEMENTATION";
   const sourceReconciliationOnly = item?.sourceReconciliationOnly === true;
+  const expiredDemandRecoveryOnly = item?.expiredDemandRecoveryOnly === true;
+  if (item?.expiredDemandRecoveryOnly !== undefined &&
+      (!expiredDemandRecoveryOnly || !registeredImplementation || sourceReconciliationOnly || item.failedLearningProgress !== undefined)) {
+    fail("EXPIRED_COURSE_DEMAND_PROOF_REQUIRED");
+  }
   if (item?.sourceReconciliationOnly !== undefined &&
       (!sourceReconciliationOnly || item.continuationMode !== "DATA_ONLY" || item.continuationTrigger !== "UNFINISHED_FULL_REPAIR")) {
     fail("DATA_ONLY_SOURCE_RECONCILIATION_REQUIRED");
@@ -118,6 +123,7 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
     execute(selected, ["merge-base", "--is-ancestor", item.baseSha, item.releaseSha]);
     const sharedBase = execute(selected, ["merge-base", "--all", workerHead, currentSha]);
     if (!SHA.test(sharedBase)) fail("ORIGINAL_CANDIDATE_ANCESTRY_REQUIRED");
+    if (expiredDemandRecoveryOnly && sharedBase !== workerHead) fail("EXPIRED_COURSE_RELEASE_NOT_PUBLISHED");
     if (sharedBase !== workerHead) {
       execute(selected, ["merge-base", "--is-ancestor", item.baseSha, sharedBase]);
       const raw = execute(worker, ["diff", "--name-only", "--no-renames", "-z", `${sharedBase}..${workerHead}`]);
@@ -155,7 +161,7 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
   if (!localCandidate) execute(selected, ["merge-base", "--is-ancestor", workerHead, currentSha]);
   const progress = readFailedLearningProgress(item, now);
   const primaryMarker = join(selected, ".codex-artifacts", registeredImplementation
-    ? `desktop-repair-registered-${item.assignmentRef}-${item.releaseSha}.private.json`
+    ? `desktop-repair-${expiredDemandRecoveryOnly ? "expired-demand" : "registered"}-${item.assignmentRef}-${item.releaseSha}.private.json`
     : `desktop-repair-continuation-${item.assignmentRef}-${currentSha}.private.json`);
   let marker = primaryMarker, prior = null;
   if (existsSync(primaryMarker)) {
@@ -215,7 +221,9 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
     const releaseInstruction = publishedImplementation || claimedImplementation
       ? " The operator's standing full-repair release authorization includes normal promotion of your same exact registered Ready Git artifact after fresh current-main, complete required CI, project and original owner/source/lease checks. An automatic alias-check failure alone does not require a new permission request. Preserve the failed evidence; do not create a new CLI production build, remap arbitrary aliases, change configuration, roll back or bypass a failed gate."
       : "";
-    const purpose = registeredImplementation
+    const purpose = expiredDemandRecoveryOnly
+      ? `EXPIRED_DEMAND_CLOSEOUT_ONLY. The original alert completed after its search window ended. On your unchanged clean original branch, import the exact tested main commit with a fast-forward only. Run npm run automation:course-support -- recover --batch-ref ${item.batchReference} --close-expired-demand once using your actual native identity. This records only your expired claim's closeout after revalidating the completed alert and current ownership. Never extend this lease, reopen demand, run learner admission, publish a release, access a provider, or send email. Stop after the typed result; any new alert uses the ordinary workflow.`
+      : registeredImplementation
       ? "REGISTERED_RELEASE_RECONCILIATION. Your exact clean registered candidate is retained and its owner-bound deployment proof is absent. Reconcile the stopped release stage using the continuation guide. Do not infer a venue failure, start another provider read or use learner admission before release, ownership and deployment proof are established."
       : sourceReconciliationOnly
       ? "SOURCE_RECONCILIATION_ONLY. The source snapshot changed after this data-only claim. Read your same owned packet and use only the existing qualified original-owner recovery/requeue path when eligible. Do not investigate or implement against the changed snapshot, request provider reads, change claim fingerprints, or repeat verification. Stop after the typed recovery result; the scheduler owns subsequent admission. A rejected recovery stays visible."
@@ -228,6 +236,7 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
       runtimeSha: currentSha, continuationTrigger: item.continuationTrigger ?? null,
       continuationMode: item.continuationMode ?? "DATA_ONLY", plannedPathCount: claimedImplementation ? item.plannedPaths.length : 0,
       ...(sourceReconciliationOnly ? { sourceReconciliationOnly: true } : {}),
+      ...(expiredDemandRecoveryOnly ? { expiredDemandRecoveryOnly: true } : {}),
       ...(localCandidate ? { localCandidate } : {}),
       observedFailureFingerprint: progress?.fingerprint ?? null,
       ...(prior ? { parentReceiptPath: primaryMarker, failedLearningProgress: progress } : {}),

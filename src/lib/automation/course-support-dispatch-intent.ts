@@ -43,6 +43,26 @@ export type CourseDispatchSourceRef = {
   intentDigest?: string;
 };
 
+/** A naturally ended alert can release its original claim only. This does not
+ * make the old request current for research, monitoring or delivery. */
+export function isNaturallyCompletedCourseDispatchSource(input: {
+  ref: CourseDispatchSourceRef;
+  search: CourseDispatchSource;
+  courseTimeZone: string;
+  now: Date;
+}) {
+  const { ref, search, courseTimeZone, now } = input;
+  return search.mode === "OUTDOOR" && search.status === "COMPLETED" &&
+    search.id === ref.id && search.alertGeneration === ref.alertGeneration &&
+    search.scheduleVersion >= ref.scheduleVersion &&
+    !["TEST", "AUTOMATION"].includes(search.trafficClass) &&
+    typeof ref.intentDigest === "string" && ref.intentDigest === createCourseDispatchIntentDigest(search) &&
+    !isSearchWindowActive({
+      date: search.date, endTime: search.endTime, courseTimeZones: [courseTimeZone],
+      fallbackTimeZone: search.userTimeZone, now,
+    });
+}
+
 function normalizeEmail(email: string | null) {
   return email?.trim().toLowerCase() || null;
 }

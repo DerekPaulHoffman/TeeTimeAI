@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { refreshPendingCustomerRecoveries } from "@/lib/automation/course-support-customer-recovery";
+import { closeExpiredCourseSupportDemand } from "@/lib/automation/course-support-course-dispatch";
 import { shouldContinueOwnedFullRepair } from "@/lib/automation/course-support-full-repair";
 import { CourseSupportRuntimeUpdateFailure, prepareCourseSupportRuntime } from "@/lib/automation/course-support-runtime-update";
 import { settleCourseSupportRecoveryFence } from "@/lib/automation/course-support-recovery-progress";
@@ -2100,6 +2101,17 @@ async function recover(args: string[]) {
   const batchId = await resolveBatchId(args);
   const provenance = await getCourseSupportBatchRecoveryProvenance(batchId);
   const ownerThreadId = requireOwnerThread(args);
+  if (args.includes("--close-expired-demand")) {
+    const batchRef = readSingleOption(args, "--batch-ref");
+    if (!batchRef || args.includes("--requeue-superseded-runtime") ||
+        process.env.CODEX_THREAD_ID?.trim() !== ownerThreadId ||
+        git.dirtyPaths.length || git.branch !== provenance.branch ||
+        git.headSha !== git.originMainSha || !provenance.releaseSha ||
+        !isGitAncestor(provenance.releaseSha, git.originMainSha)) {
+      throw new Error("Expired-demand closeout requires the original clean branch and its published release.");
+    }
+    return closeExpiredCourseSupportDemand({ ownerThreadId, batchRef, registeredReleaseSha: provenance.releaseSha });
+  }
   const baseIsAncestor = isGitAncestor(provenance.baseSha, git.headSha);
   const committedPaths = baseIsAncestor
     ? readCommittedPaths(provenance.baseSha, git.headSha)

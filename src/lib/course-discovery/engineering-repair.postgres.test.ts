@@ -11,6 +11,7 @@ import { createSimulatorSupportIntentDigest, SIMULATOR_SUPPORT_SOURCE_SELECT } f
 import { createCourseSupportRemediationCourseRef } from "@/lib/automation/course-support-claim-evidence";
 import { buildCourseSupportProviderSnapshotFingerprint } from "@/lib/automation/course-support-verification";
 import { appendAutomationPlaybookEvent } from "@/lib/automation/course-monitoring-playbook";
+import { COURSE_DISPATCH_SOURCE_SELECT, createCourseDispatchIntentDigest } from "@/lib/automation/course-support-dispatch-intent";
 let client: PrismaClient;
 vi.mock("@/lib/prisma", () => ({ get prisma() { return client; } }));
 const ids = new Set<string>();
@@ -648,6 +649,49 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
       expect(await client.courseDiscoveryJob.count({ where: { courseId: f.course.id } })).toBe(2);
       expect(await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } }))
         .toMatchObject({ status: "FAILED", attempts: f.job.attempts, firstPickedUpAt: f.job.firstPickedUpAt, deadlineAt: f.job.deadlineAt });
+    }
+    if (registered) {
+      const retiredSearch = await client.teeSearch.update({ where: { id: f.search.id },
+        data: { status: "COMPLETED", date: new Date(Date.now() - 2 * 86_400_000) }, select: COURSE_DISPATCH_SOURCE_SELECT });
+      // Model an alert whose bound date has elapsed; keep its original intent
+      // digest and all learning-attempt evidence intact during closeout.
+      const originalRun = await client.automationRun.findFirstOrThrow({
+        where: { promptVersion: dispatcher.COURSE_DISPATCH_PROMPT_VERSION, audit: { path: ["assignmentRef"], equals: assignmentRef } },
+      });
+      const audit = dispatcher.parseCourseDispatchAudit(originalRun.audit)!;
+      audit.target.searchRefs[0].intentDigest = createCourseDispatchIntentDigest(retiredSearch);
+      await client.automationRun.update({ where: { id: originalRun.id }, data: { audit: audit as unknown as Prisma.InputJsonValue } });
+      const withdrawn = await dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: nextParent, baseSha, maxStarts: 1 });
+      expect(withdrawn).toMatchObject({ acquired: true, value: { fullRepairContinuationItems: [{
+        threadId: owner, assignmentRef, continuationMode: "REGISTERED_IMPLEMENTATION", expiredDemandRecoveryOnly: true,
+      }] } });
+      const close = { ownerThreadId: owner, batchRef: batch.reference, registeredReleaseSha: "c".repeat(40) };
+      vi.stubEnv("CODEX_THREAD_ID", nextParent);
+      await expect(dispatcher.closeExpiredCourseSupportDemand({ ...close, ownerThreadId: nextParent }))
+        .rejects.toThrow("EXPIRED_COURSE_DEMAND_PROOF_REQUIRED");
+      vi.stubEnv("CODEX_THREAD_ID", owner);
+      const oldJob = await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } });
+      const currentSearch = await client.teeSearch.create({ data: { userId: f.search.userId, mode: "OUTDOOR",
+        date: f.search.date, startTime: f.search.startTime, endTime: f.search.endTime, players: f.search.players,
+        userTimeZone: "UTC", trafficClass: "PUBLIC", preferences: { create: { courseId: f.course.id, rank: 1 } } } });
+      ids.add(currentSearch.id);
+      expect(await service.ensureDiscoveryJob({ ...f.target, searchId: currentSearch.id })).toBeNull();
+      expect(await dispatcher.closeExpiredCourseSupportDemand(close)).toMatchObject({ acquired: true, value: {
+        outcome: "expired_demand_released", durableCloseoutRecorded: true, monitoringVerified: false, deliveryVerified: false,
+      } });
+      expect(await client.courseSupportBatch.findUniqueOrThrow({ where: { id: batch.id } }))
+        .toMatchObject({ status: "RETRYABLE_FAILED", ownerThreadId: owner, releaseSha: close.registeredReleaseSha, leaseExpiresAt });
+      expect(await client.courseSupportIncident.findUniqueOrThrow({ where: { courseId: f.course.id } }))
+        .toMatchObject({ status: "AUTO_INVESTIGATING", activeBatchId: null, resolution: null });
+      expect(await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } })).toEqual(oldJob);
+      expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id }, select: COURSE_DISPATCH_SOURCE_SELECT }))
+        .toEqual(retiredSearch);
+      expect(await client.teeTimeMatch.count({ where: { courseId: f.course.id } })).toBe(0);
+      expect(await service.ensureDiscoveryJob({ ...f.target, searchId: currentSearch.id }))
+        .toMatchObject({ status: "QUEUED", firstPickedUpAt: null, deadlineAt: null,
+          request: { demand: { searchId: currentSearch.id } } });
+      await expect(dispatcher.closeExpiredCourseSupportDemand(close)).rejects.toThrow("EXPIRED_COURSE_DEMAND_PROOF_REQUIRED");
+      return;
     }
     await client.teeSearch.update({ where: { id: f.search.id }, data: { status: "CANCELLED" } });
     const cancelled = await dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: nextParent, baseSha, maxStarts: 1 });

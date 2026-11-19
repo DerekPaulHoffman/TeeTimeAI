@@ -86,6 +86,35 @@ describe("source reconciliation observes current canonical deployments", () => {
 });
 
 describe("original Desktop full-repair continuation", () => {
+  it("uses a separate closeout-only intent for expired demand and published code", async () => {
+    const f = fixture();
+    const registered = "c".repeat(40);
+    const item = { ...f.item, releaseSha: registered, continuationMode: "REGISTERED_IMPLEMENTATION",
+      continuationTrigger: "UNFINISHED_FULL_REPAIR", plannedPaths: ["src/lib/course-discovery/public-calendar.ts"],
+      expiredDemandRecoveryOnly: true };
+    const originalGit = f.deps.git.getMockImplementation()!;
+    f.deps.git.mockImplementation((cwd, args) => {
+      if (args[0] === "merge-base" && args[1] === "--all") return registered;
+      if (args[0] === "rev-parse" && args[1] === "HEAD" && cwd === f.worker) return registered;
+      return originalGit(cwd, args);
+    });
+    const result = await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps);
+    expect(result).toMatchObject({ threadId: CHILD, messageRequired: true,
+      prompt: expect.stringContaining("EXPIRED_DEMAND_CLOSEOUT_ONLY") });
+    expect(result.prompt).toContain("--close-expired-demand");
+    expect(result.prompt).not.toContain("REGISTERED_RELEASE_RECONCILIATION");
+    expect(result.receiptPath).toContain("desktop-repair-expired-demand-");
+    expect(await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps))
+      .toMatchObject({ outcome: "already_requested", messageRequired: false });
+    f.deps.git.mockImplementation((cwd, args) => {
+      if (args[0] === "merge-base" && args[1] === "--all") return BEFORE;
+      if (args[0] === "rev-parse" && args[1] === "HEAD" && cwd === f.worker) return registered;
+      return originalGit(cwd, args);
+    });
+    await expect(prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps))
+      .rejects.toThrow("EXPIRED_COURSE_RELEASE_NOT_PUBLISHED");
+  });
+
   it("defers a stopped registered release until current main is Ready and asks its original owner only once", async () => {
     const f = fixture();
     const registered = "c".repeat(40), path = "src/lib/course-discovery/public-calendar.ts";

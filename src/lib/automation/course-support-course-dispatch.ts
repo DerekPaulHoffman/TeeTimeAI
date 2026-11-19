@@ -26,6 +26,7 @@ import {
   COURSE_DISPATCH_SOURCE_SELECT,
   createCourseDispatchIntentDigest,
   isCurrentCourseDispatchSource,
+  isNaturallyCompletedCourseDispatchSource,
   type CourseDispatchSourceRef,
 } from "./course-support-dispatch-intent";
 import {
@@ -753,11 +754,17 @@ async function collectOwnedFullRepairContinuations(tx: Prisma.TransactionClient,
       where: { courseId: entry.courseId, teeSearchId: { in: audit.target.searchRefs.map(ref => ref.id) }, teeSearch: { mode: "OUTDOOR" } },
       select: { teeSearch: { select: COURSE_DISPATCH_SOURCE_SELECT } },
     });
-    if (searches.length !== audit.target.searchRefs.length || searches.some(({ teeSearch }) => {
+    if (searches.length === 0 || searches.length !== audit.target.searchRefs.length) continue;
+    const boundSources = searches.flatMap(({ teeSearch }) => {
       const ref = audit.target.searchRefs.find(value => value.id === teeSearch.id);
-      return !ref || !isCurrentCourseDispatchSource({ ref, search: teeSearch, trafficClass: audit.target.trafficClass,
-        courseTimeZone: entry.course.timeZone, now });
-    })) continue;
+      return ref ? [{ ref, search: teeSearch, courseTimeZone: entry.course.timeZone, now }] : [];
+    });
+    if (boundSources.length !== searches.length) continue;
+    const currentDemand = boundSources.every(source => isCurrentCourseDispatchSource({ ...source, trafficClass: audit.target.trafficClass }));
+    const expiredDemandRecoveryOnly = !currentDemand && Boolean(registeredPaths) &&
+      sourcePurpose === "CONTINUE_REPAIR" && audit.target.trafficClass === "REAL" &&
+      boundSources.every(isNaturallyCompletedCourseDispatchSource);
+    if (!currentDemand && !expiredDemandRecoveryOnly) continue;
     // Read-only progress from a reciprocal terminal child, after revalidating
     // the original owner, provider and active demand. This can wake diagnosis;
     // it never creates/retries a job or grants another public read.
@@ -776,12 +783,65 @@ async function collectOwnedFullRepairContinuations(tx: Prisma.TransactionClient,
       baseSha: batch.baseSha, releaseSha: batch.releaseSha,
       continuationTrigger: "UNFINISHED_FULL_REPAIR" as const,
       ...(sourcePurpose === "RECONCILE_SOURCE" ? { sourceReconciliationOnly: true as const } : {}),
+      ...(expiredDemandRecoveryOnly ? { expiredDemandRecoveryOnly: true as const } : {}),
       ...(failedLearningProgress ? { failedLearningProgress } : {}),
       continuationMode, ...(registeredPaths ? { plannedPaths: registeredPaths }
         : ["CLAIMED_IMPLEMENTATION", "PUBLISHED_IMPLEMENTATION"].includes(continuationMode) ? { plannedPaths: paths as string[] } : {}) });
     if (items.length === 5) break;
   }
   return items;
+}
+
+/** Only the same original Desktop owner may close an expired, completed-alert
+ * claim. There is no lease extension, recipe activation or search write. */
+export async function closeExpiredCourseSupportDemand(input: {
+  ownerThreadId: string; batchRef: string; registeredReleaseSha: string;
+}) {
+  assertIdentity(input.ownerThreadId);
+  return retryCourseSupportWriterAdmission(timeout => runWithCourseSupportWriterTransitionLease(writerLease => transaction(async tx => {
+    const now = await getCourseDispatchDatabaseNow(tx);
+    const batch = await tx.courseSupportBatch.findFirst({
+      where: { reference: input.batchRef, ownerThreadId: input.ownerThreadId, status: "VERIFYING",
+        releaseSha: input.registeredReleaseSha, completedAt: null, leaseExpiresAt: { lte: now } },
+      select: { id: true, status: true, revision: true, ownerAutomationRunId: true, leaseExpiresAt: true, providerFamilyKey: true,
+        failureFingerprint: true, summary: true, incidents: { select: { id: true, incidentId: true, courseId: true, cycle: true } } },
+    });
+    const entry = batch?.incidents[0];
+    if (!batch || !entry) throw new Error("EXPIRED_COURSE_DEMAND_PROOF_REQUIRED");
+    const [candidate] = await collectOwnedFullRepairContinuations(tx, [batch], now);
+    if (!candidate?.expiredDemandRecoveryOnly || candidate.threadId !== input.ownerThreadId ||
+        candidate.releaseSha !== input.registeredReleaseSha ||
+        await tx.courseDiscoveryJob.findFirst({ where: { courseId: entry.courseId, status: { in: ["QUEUED", "RUNNING"] } }, select: { id: true } }) ||
+        await tx.courseSupportVerificationRequest.findFirst({ where: { batchIncidentId: entry.id,
+          status: { in: ["QUEUED", "CHECKING", "RETRYABLE_FAILED"] } }, select: { id: true } })) {
+      throw new Error("EXPIRED_COURSE_DEMAND_PROOF_REQUIRED");
+    }
+    const message = "The original alert ended before verification. Its results and published code remain available.";
+    const nextAttemptAt = new Date(now.getTime() + 5 * 60_000);
+    const closeout = { outcome: "retryable_failed", derivedOutcome: "retryable_failed", reason: "expired_original_alert",
+      terminalCount: 0, retryCount: 1, needsHumanCount: 0, monitoringVerified: false, deliveryVerified: false };
+    const closed = await tx.courseSupportBatch.updateMany({
+      where: { id: batch.id, ownerThreadId: input.ownerThreadId, revision: batch.revision, status: "VERIFYING",
+        releaseSha: input.registeredReleaseSha, completedAt: null, leaseExpiresAt: { lte: now } },
+      data: { status: "RETRYABLE_FAILED", completedAt: now, revision: { increment: 1 },
+        summary: { ...batch.summary as Prisma.JsonObject, closeout } },
+    });
+    const released = await tx.courseSupportIncident.updateMany({
+      where: { id: entry.incidentId, cycle: entry.cycle, status: "AUTO_INVESTIGATING", activeBatchId: batch.id },
+      data: { activeBatchId: null, nextAttemptAt, nextAction: message, revision: { increment: 1 } },
+    });
+    const recorded = await tx.courseSupportBatchIncident.updateMany({
+      where: { id: entry.id, result: "PENDING" }, data: { result: "RETRY_SCHEDULED", message },
+    });
+    if (closed.count !== 1 || released.count !== 1 || recorded.count !== 1) throw new Error("EXPIRED_COURSE_DEMAND_CHANGED");
+    if (batch.ownerAutomationRunId) await tx.automationRun.updateMany({
+      where: { id: batch.ownerAutomationRunId, completedAt: null },
+      data: { kind: "COURSE_SUPPORT", status: "COMPLETED", completedAt: now,
+        outcome: closeout.outcome, notes: JSON.stringify({ schemaVersion: 1, lifecycle: "closeout", ...closeout }) },
+    });
+    return { outcome: "expired_demand_released" as const, durableCloseoutRecorded: true,
+      monitoringVerified: false, deliveryVerified: false };
+  }, writerLease), { timeout }));
 }
 
 async function transition(input: { ownerThreadId: string; assignmentRef: string; childThreadId?: string; launcherReceiptPath?: string; confirmedNotCreated?: boolean; next: DispatchState }) {

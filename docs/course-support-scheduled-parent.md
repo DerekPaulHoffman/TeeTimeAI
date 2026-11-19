@@ -11,7 +11,8 @@ After the required learner health check and protected cleanup, handle actual
 `fullRepairContinuationItems` before new launches. These are source-checked
 outdoor full repairs that still belong to their original Desktop owner. The
 plan can include data-only, claimed implementation, published implementation,
-or an interrupted registered implementation awaiting deployment proof. Pass
+an interrupted registered implementation awaiting deployment proof, or closeout
+of that same expired claim after the original alert window ends. Pass
 the exact returned item to the helper whenever it appears. Do not create a
 worktree or invoke the simulator continuation runner
 for them. Save the actual preflight context and each exact item with exclusive
