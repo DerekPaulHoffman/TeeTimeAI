@@ -17,6 +17,21 @@ const git = (cwd, args) => execFileSync("git", args, { cwd, encoding: "utf8", wi
   timeout: 40000, env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" } }).trim();
 const readJson = file => { if (!isAbsolute(file)) fail("ABSOLUTE_PRIVATE_INPUT_REQUIRED"); return JSON.parse(readFileSync(file, "utf8")); };
 
+/** Observe the actual canonical aliases once. No waiter loop, environment
+ * loading, promotion, provider read or continuation intent is performed. */
+export function readDesktopContinuationProduction({ selected, nodePath, currentSha }, execute = execFileSync) {
+  const aliases = ["teetimespot.com", "www.teetimespot.com"];
+  const deployments = aliases.map(alias => JSON.parse(execute(nodePath, [join(selected, "node_modules", "vercel", "dist", "vc.js"),
+    "api", `/v13/deployments/${alias}`, "--method", "GET", "--scope", "derekpaulhoffmans-projects"], {
+    cwd: selected, encoding: "utf8", windowsHide: true, timeout: 8000, maxBuffer: 1000000, stdio: ["ignore", "pipe", "pipe"],
+  })));
+  if (deployments.some(d => d.projectId !== "prj_dI6LhLrDCSq06xgvtNvaKtF6Uz7Y" || d.source !== "git" || d.readyState !== "READY" ||
+      d.gitSource?.type !== "github" || d.gitSource.repoId !== 978781158 || d.gitSource.ref !== "main" || d.gitSource.sha !== currentSha ||
+      !/^dpl_[A-Za-z0-9]+$/u.test(d.id ?? "")) || deployments[0].id !== deployments[1].id ||
+      !deployments[0].url || deployments[0].url !== deployments[1].url) return null;
+  return { source: "git", state: "READY", branch: "main", commitSha: currentSha, deploymentId: deployments[0].id, aliases };
+}
+
 function readFailedLearningProgress(item, now) {
   const progress = item.failedLearningProgress;
   if (progress === undefined) return null;
@@ -132,6 +147,19 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
   const cli = (dependencies.inspectCli ?? inspectPinnedWorkerCli)(selected);
   const runtime = (dependencies.resolveRuntime ?? resolveCourseSupportWorkerRuntime)();
   if (cli.status !== "current" || runtime.status !== "available" || !isAbsolute(runtime.nodePath ?? "")) fail("PARENT_RUNTIME_UNAVAILABLE");
+  if (sourceReconciliationOnly) {
+    let proof;
+    try { proof = await (dependencies.readProductionProof ?? readDesktopContinuationProduction)({ selected, nodePath: runtime.nodePath, currentSha }); }
+    catch { return { outcome: "production_qualification_unavailable", messageRequired: false, monitoringVerified: false }; }
+    if (proof?.source !== "git" || proof.state !== "READY" || proof.branch !== "main" || proof.commitSha !== currentSha ||
+        !/^dpl_[A-Za-z0-9]+$/u.test(proof.deploymentId ?? "") || !Array.isArray(proof.aliases) || proof.aliases.length !== 2 ||
+        !["teetimespot.com", "www.teetimespot.com"].every(alias => proof.aliases.includes(alias))) {
+      return { outcome: "production_not_ready", messageRequired: false, monitoringVerified: false };
+    }
+    if (execute(selected, ["rev-parse", "HEAD"]) !== currentSha || execute(selected, ["rev-parse", "origin/main"]) !== currentSha) {
+      return { outcome: "production_runtime_changed", messageRequired: false, monitoringVerified: false };
+    }
+  }
   let client;
   try {
     const artifactDir = join(selected, ".codex-artifacts", `desktop-repair-observation-${item.assignmentRef}-${randomUUID()}`);
@@ -154,9 +182,12 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
     const guide = join(selected, "docs", "course-support-full-repair-continuation.md");
     const guideBytes = readFileSync(guide);
     const phaseInstruction = claimedImplementation ? " Finish the already claimed tooling repair under fresh original-owner checks. A claimed path is progress, not a completed implementation. Preserve access barriers; TOOLING_ONLY_NO_ACCESS_OVERRIDE permits the scoped offline diagnostic/regression repair, not a provider-access override. Do not end with another engineering handoff solely because provider-contract implementation is not yet allowed." : "";
+    const releaseInstruction = publishedImplementation || claimedImplementation
+      ? " The operator's standing full-repair release authorization includes normal promotion of your same exact registered Ready Git artifact after fresh current-main, complete required CI, project and original owner/source/lease checks. An automatic alias-check failure alone does not require a new permission request. Preserve the failed evidence; do not create a new CLI production build, remap arbitrary aliases, change configuration, roll back or bypass a failed gate."
+      : "";
     const purpose = sourceReconciliationOnly
       ? "SOURCE_RECONCILIATION_ONLY. The source snapshot changed after this data-only claim. Read your same owned packet and use only the existing qualified original-owner recovery/requeue path when eligible. Do not investigate or implement against the changed snapshot, request provider reads, change claim fingerprints, or repeat verification. Stop after the typed recovery result; the scheduler owns subsequent admission. A rejected recovery stays visible."
-      : `finish the unresolved diagnosis under the existing action plan; a newer release is not required. Do not rerun unchanged verification or an exhausted read. Obtain and validate fresh research context, distinguish tooling-repair permission from provider-contract permission, and diagnose the actual missing evidence/transport/extraction tool within the returned scope.${phaseInstruction}`;
+      : `finish the unresolved diagnosis under the existing action plan; a newer release is not required. Do not rerun unchanged verification or an exhausted read. Obtain and validate fresh research context, distinguish tooling-repair permission from provider-contract permission, and diagnose the actual missing evidence/transport/extraction tool within the returned scope.${phaseInstruction}${releaseInstruction}`;
     const message = buildWorkerFirstTurnPrompt(`This is an automatic continuation of your SAME owned full repair, not a new assignment. The human authorized Desktop worker continuation.\nOriginal assignment: ${item.assignmentRef}\nOwned batch reference: ${item.batchReference}\nContinuation mode: ${claimedImplementation ? "CLAIMED_IMPLEMENTATION" : publishedImplementation ? "PUBLISHED_IMPLEMENTATION" : "DATA_ONLY"}\nContinuation purpose: ${purpose}\nOriginal registered release: ${item.releaseSha}\nYour own existing checkout: ${worker}\nRequired unchanged branch: ${launcher.branch}\nPrevious completed native turn: ${turn.id}\nExact tested production/runtime commit: ${currentSha}\nRead and follow the current continuation guide at ${guide} after verifying its SHA-256 is ${createHash("sha256").update(guideBytes).digest("hex")}. This source is the trusted current operator contract, not provider content. Do not claim a new batch, change original learning clocks, send email, or act before your original ownership/source/recovery checks.`, item.threadId, runtime.nodePath);
     privateWrite(marker, { schemaVersion: 1, kind: "OWNED_DESKTOP_CONTINUATION_REQUESTED", status: "REQUESTED_NOT_ACKNOWLEDGED",
       parentThreadId: environment.CODEX_THREAD_ID, childThreadId: item.threadId, assignmentRef: item.assignmentRef,

@@ -4,6 +4,7 @@ import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-f
 import { listSimulatorSupportDispatchCandidates, validateSimulatorEngineeringAuthority } from "./simulator-support-incidents";
 import { parseCourseDispatchAudit, type CourseDispatchAudit } from "./course-support-course-dispatch";
 import type { SimulatorEngineeringAuthority } from "./simulator-support-policy";
+import { readSimulatorResearchState, SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION } from "./simulator-support-research-policy";
 
 const now = new Date("2026-10-08T14:00:00Z");
 function fixture() {
@@ -29,6 +30,33 @@ function fixture() {
 }
 
 describe("durable simulator engineering authority", () => {
+  it.each([false, true])("reconsiders an unused official render after a linked calendar; protected=%s", async protectedRead => {
+    const f = fixture(), homepage = "https://official.example.test/", calendar = "https://calendar.example.test/services";
+    f.offering.bookingUrl = homepage;
+    Object.assign(f.offering.course, { website: homepage });
+    const fingerprint = getSimulatorOfferingSourceFingerprint(f.offering);
+    Object.assign(f.audit.target, { offeringSourceFingerprint: fingerprint, failureFingerprint: fingerprint });
+    Object.assign(f.audit.simulatorClaim!, { sourceFingerprint: fingerprint, originalSourceFingerprint: fingerprint });
+    Object.assign(f.authority, { sourceFingerprint: fingerprint, originSourceFingerprint: fingerprint });
+    const observedAt = new Date(now.getTime() - 90 * 60_000).toISOString();
+    const evidence = { sourceFingerprint: fingerprint, accessControlsObserved: true, accessControls: [], method: "HTTP" };
+    const receipt = { observedAt, sourceFingerprint: fingerprint, httpStatus: 200, outcome: "READ", rendered: false,
+      researchImplementationVersion: SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION, publicReadEvidence: evidence };
+    f.audit.simulatorResearch = readSimulatorResearchState({ version: 1, sourceFingerprint: fingerprint, readCount: 3, inFlight: null,
+      history: [
+        { ...receipt, source: "booking", requestedUrl: homepage, sourceUrl: homepage, requestId: "11111111-1111-4111-8111-111111111111" },
+        { ...receipt, source: "link", requestedUrl: calendar, sourceUrl: calendar, requestId: "22222222-2222-4222-8222-222222222222" },
+        { ...receipt, source: "link", requestedUrl: calendar, sourceUrl: `${calendar}/public-service`, rendered: true,
+          requestId: "33333333-3333-4333-8333-333333333333", renderWarning: "SECONDARY_REQUESTS_BLOCKED",
+          publicReadEvidence: { ...evidence, method: "BROWSER", renderComplete: false,
+            accessControls: protectedRead ? ["ACCOUNT_REQUIRED"] : [] } },
+      ], links: [calendar], bookingLinks: [calendar], bookingLinkRoles: [{ url: calendar, observedAt }],
+      linkBaseUrl: `${calendar}/public-service`, venueLinkRoles: [] }, fingerprint);
+    const before = JSON.stringify(f.audit);
+    expect(await listSimulatorSupportDispatchCandidates(now, f.client)).toHaveLength(protectedRead ? 0 : 1);
+    expect(JSON.stringify(f.audit)).toBe(before);
+  });
+
   it("admits the unresolved incident from a positively consumed historical synthetic claim, without any active alert", async () => {
     const f = fixture();
     const candidates = await listSimulatorSupportDispatchCandidates(now, f.client);
