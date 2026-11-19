@@ -39,7 +39,7 @@ import {
   courseSupportBatchReservesCheckout,
   courseSupportRecoveryBatchesConflict,
 } from "./course-support-batches";
-import { allowsRetainedFullRepairResearch, fullRepairContinuationMode, fullRepairSourceContinuation, hasStoppedFullRepairVerification } from "./course-support-full-repair";
+import { allowsFullRepairReleaseQualificationInspection, allowsRetainedFullRepairResearch, fullRepairContinuationMode, fullRepairSourceContinuation, hasStoppedFullRepairVerification } from "./course-support-full-repair";
 import { readOwnedFailedLearningProgress } from "./course-support-learning-followthrough";
 import { retryCourseSupportWriterAdmission } from "./course-support-writer-admission";
 import { COURSE_DISPATCH_INCIDENT_SNAPSHOT_SELECT, isCourseDispatchIncidentSnapshotCurrent } from "./course-support-dispatch-snapshot";
@@ -762,14 +762,23 @@ async function collectOwnedFullRepairContinuations(tx: Prisma.TransactionClient,
       sourceFingerprint: (await import("@/lib/course-discovery/service")).getDiscoverySourceFingerprint(entry.course),
       searchRefs: audit.target.searchRefs, now,
     }) : null;
-    if (!allowsRetainedFullRepairResearch({ reason: directive.reason, workMode: directive.workMode,
+    const retainedResearch = allowsRetainedFullRepairResearch({ reason: directive.reason, workMode: directive.workMode,
       batchStatus: batch.status, result: entry.result, allowedActions: claim.actionPlan?.allowedActions ?? [],
       pendingVerificationStopped: Boolean(failedLearningProgress) || hasStoppedFullRepairVerification({ summary: batch.summary,
-        batchCreatedAt: batch.createdAt, deployedAt: batch.deployedAt, now }) })) continue;
+        batchCreatedAt: batch.createdAt, deployedAt: batch.deployedAt, now }) });
+    const inspectQualification = !retainedResearch && allowsFullRepairReleaseQualificationInspection({
+      reason: directive.reason, workMode: directive.workMode, batchStatus: batch.status, result: entry.result,
+      continuationMode, allowedActions: claim.actionPlan?.allowedActions ?? [] });
+    if (!retainedResearch && !inspectQualification) continue;
+    if (inspectQualification && (await tx.courseSupportVerificationRequest.findFirst({ where: {
+      courseId: entry.courseId, status: { in: ["QUEUED", "CHECKING"] } }, select: { id: true } }) ||
+      await tx.courseDiscoveryJob.findFirst({ where: { courseId: entry.courseId, offeringId: null,
+        status: { in: ["QUEUED", "RUNNING"] } }, select: { id: true } }))) continue;
     items.push({ kind: "OWNED_OUTDOOR_FULL_REPAIR" as const, assignmentRef: audit.assignmentRef,
       threadId: audit.childThreadId!, launcherReceiptPath: audit.launcherReceiptPath!, batchReference: batch.reference,
       baseSha: batch.baseSha, releaseSha: batch.releaseSha,
       continuationTrigger: "UNFINISHED_FULL_REPAIR" as const,
+      ...(inspectQualification ? { releaseQualificationInspectionOnly: true as const } : {}),
       ...(sourcePurpose === "RECONCILE_SOURCE" ? { sourceReconciliationOnly: true as const } : {}),
       ...(failedLearningProgress ? { failedLearningProgress } : {}),
       continuationMode, ...(["CLAIMED_IMPLEMENTATION", "PUBLISHED_IMPLEMENTATION"].includes(continuationMode) ? { plannedPaths: paths as string[] } : {}) });

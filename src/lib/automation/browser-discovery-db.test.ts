@@ -1713,6 +1713,9 @@ describe("browser discovery persistence", () => {
   });
 
   it("records a weak contact-only observation without erasing runnable provider evidence", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-18T12:00:00.000Z"));
+    onTestFinished(() => vi.useRealTimers());
     mockedPrisma.course.findUnique.mockResolvedValueOnce({
       name: "Westwoods Golf Course",
       providerFamilyKey: "FOREUP",
@@ -1759,6 +1762,9 @@ describe("browser discovery persistence", () => {
   });
 
   it("allows explicit high-confidence phone-only proof to replace stale runnable metadata", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-18T12:00:00.000Z"));
+    onTestFinished(() => vi.useRealTimers());
     const updatedAt = new Date("2026-08-01T12:00:00.000Z");
     mockedPrisma.course.findUnique
       .mockResolvedValueOnce({

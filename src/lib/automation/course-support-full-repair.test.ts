@@ -1,5 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { allowsRetainedFullRepairResearch, fullRepairContinuationMode, fullRepairSourceContinuation, fullRepairReadProgressMatchesClaim, hasStoppedFullRepairVerification, isDataOnlyFullRepair, shouldContinueOwnedFullRepair } from "./course-support-full-repair";
+import { allowsFullRepairReleaseQualificationInspection, allowsRetainedFullRepairResearch, fullRepairContinuationMode, fullRepairSourceContinuation, fullRepairReadProgressMatchesClaim, hasStoppedFullRepairVerification, isDataOnlyFullRepair, shouldContinueOwnedFullRepair } from "./course-support-full-repair";
+
+describe("pending release qualification inspection", () => {
+  const value = { reason: "FAILED_LEARNER_IMPLEMENTATION_HANDOFF", workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+    batchStatus: "VERIFYING", result: "PENDING", continuationMode: "PUBLISHED_IMPLEMENTATION" as const,
+    allowedActions: ["INVESTIGATE_PUBLIC_SOURCE", "IMPLEMENT_REUSABLE_SUPPORT"] };
+  it("does not fabricate a verification failure checkpoint or grant retained research", () => {
+    const before = structuredClone(value);
+    expect(allowsFullRepairReleaseQualificationInspection(value)).toBe(true);
+    expect(allowsRetainedFullRepairResearch(value)).toBe(false);
+    expect(value).toEqual(before);
+  });
+  it.each([{ reason: "OTHER" }, { workMode: "DISCOVERY_ONLY" }, { batchStatus: "COMPLETE" }, { result: "RESTORED" },
+    { continuationMode: "DATA_ONLY" as const }, { allowedActions: ["INVESTIGATE_PUBLIC_SOURCE"] }])
+    ("requires the existing full published mission: %j", change => {
+      expect(allowsFullRepairReleaseQualificationInspection({ ...value, ...change })).toBe(false);
+    });
+});
 
 describe("changed-source reconciliation for an unfinished data-only mission", () => {
   const input = { mode: "DATA_ONLY" as const, result: "STALE_EVIDENCE", claimedFingerprint: "a".repeat(64), currentFingerprint: "b".repeat(64) };

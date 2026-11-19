@@ -482,7 +482,7 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     await engineering.reconcileDiscoveryEngineeringHandoffs();
     expect(await client.courseMonitoringEvent.count({ where: { incidentId: incident.id, eventType: "REVALIDATION_REQUESTED" } })).toBe(eventCount);
   });
-  it.each(["data-only", "published-code", "unpublished-code", "claimed-path", "pending-stopped", "pending-no-checkpoint"])("keeps failed verification evidence and offers only its original %s Desktop owner a continuation", async scenario => {
+  it.each(["data-only", "published-code", "unpublished-code", "claimed-path", "pending-stopped", "pending-no-checkpoint", "pending-active-learning", "pending-active-verification"])("keeps failed verification evidence and offers only its original %s Desktop owner a continuation", async scenario => {
     const f = await failed();
     await engineering.reconcileDiscoveryEngineeringHandoffs();
     await client.courseSupportIncident.update({ where: { courseId: f.course.id }, data: { nextAttemptAt: new Date(Date.now() - 1000) } });
@@ -525,11 +525,24 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     expect(await research.getOwnedCourseSupportResearchContext({ batchId: batch.id, leaseToken: batch.leaseToken,
       ownerThreadId: owner, ordinal: 1 })).toMatchObject({ outcome: "ready", researchContextV1: { monitoringProofRecorded: false } });
     const nextParent = randomUUID(); batchOwners.push(nextParent);
+    if (scenario === "pending-active-learning") await client.courseDiscoveryJob.create({ data: {
+      targetKey: f.job.targetKey, activeTargetKey: f.job.targetKey, courseId: f.course.id,
+      sourceFingerprint: f.job.sourceFingerprint, request: f.job.request as Prisma.InputJsonValue } });
+    if (scenario === "pending-active-verification") {
+      const entry = await client.courseSupportBatchIncident.findFirstOrThrow({ where: { batchId: batch.id } });
+      await client.courseSupportVerificationRequest.create({ data: { batchIncidentId: entry.id, courseId: f.course.id,
+        releaseSha: "c".repeat(40), nextAttemptAt: new Date(), deadlineAt: new Date(Date.now() + 900_000), targetDateLocal: f.search.date.toISOString().slice(0, 10),
+        timeZone: "UTC", providerFamilyKeySnapshot: f.course.providerFamilyKey ?? "EXAMPLE", platformSnapshot: f.course.detectedPlatform,
+        bookingMethodSnapshot: f.course.bookingMethod, automationEligibilitySnapshot: f.course.automationEligibility,
+        automationReasonSnapshot: f.course.automationReason, providerSnapshotFingerprint: buildCourseSupportProviderSnapshotFingerprint(f.course),
+        providerSnapshotAt: new Date() } });
+    }
     const next = await dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: nextParent, baseSha, maxStarts: 1 });
-    expect(next).toMatchObject({ acquired: true, value: { fullRepairContinuationItems: ["unpublished-code", "pending-no-checkpoint"].includes(scenario) ? [] : [{ threadId: owner,
+    expect(next).toMatchObject({ acquired: true, value: { fullRepairContinuationItems: ["unpublished-code", "pending-active-learning", "pending-active-verification"].includes(scenario) ? [] : [{ threadId: owner,
       assignmentRef, batchReference: batch.reference, kind: "OWNED_OUTDOOR_FULL_REPAIR",
       continuationMode: claimed ? "CLAIMED_IMPLEMENTATION" : code ? "PUBLISHED_IMPLEMENTATION" : "DATA_ONLY",
       ...(claimed ? { plannedPaths: ["src/lib/adapters/example.ts"] } : {}),
+      ...(scenario === "pending-no-checkpoint" ? { releaseQualificationInspectionOnly: true } : {}),
       continuationTrigger: "UNFINISHED_FULL_REPAIR" }] } });
     expect(await client.courseSupportBatch.findUniqueOrThrow({ where: { id: batch.id } }))
       .toMatchObject({ ownerThreadId: owner, leaseToken: batch.leaseToken, leaseExpiresAt: batch.leaseExpiresAt });

@@ -7,6 +7,7 @@ import { approvedCourseSupportResponderCheckouts } from "./course-support-prefli
 import { inspectPinnedWorkerCli } from "./course-support-worker-cli.mjs";
 import { assertFullAccessAcknowledgement, buildWorkerFirstTurnPrompt, createWorkerAppServer, privateWrite } from "./course-support-worker-launcher.mjs";
 import { resolveCourseSupportWorkerRuntime } from "./course-support-worker-runtime.mjs";
+import { validateDiscoveryRuntimeCi } from "./course-discovery-runtime-release.mjs";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/iu;
 const SHA = /^[a-f0-9]{40}$/u;
@@ -36,6 +37,14 @@ export function readDesktopContinuationProduction({ selected, nodePath, currentS
       !/^dpl_[A-Za-z0-9]+$/u.test(d.id ?? "")) || deployments[0].id !== deployments[1].id ||
       !deployments[0].url || deployments[0].url !== deployments[1].url) return null;
   return { source: "git", state: "READY", branch: "main", commitSha: currentSha, deploymentId: deployments[0].id, aliases };
+}
+
+export function readDesktopContinuationCi({ selected, currentSha }, execute = execFileSync) {
+  const runs = JSON.parse(execute(process.platform === "win32" ? "gh.exe" : "gh", ["run", "list", "--workflow", "verify.yml",
+    "--commit", currentSha, "--json", "databaseId,headSha,status,conclusion,startedAt,attempt", "--limit", "10"], {
+    cwd: selected, encoding: "utf8", windowsHide: true, timeout: 8000, maxBuffer: 1000000, stdio: ["ignore", "pipe", "pipe"],
+  }));
+  return validateDiscoveryRuntimeCi(currentSha, runs);
 }
 
 function readFailedLearningProgress(item, now) {
@@ -76,6 +85,10 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
   const publishedImplementation = item?.continuationMode === "PUBLISHED_IMPLEMENTATION";
   const claimedImplementation = item?.continuationMode === "CLAIMED_IMPLEMENTATION";
   const sourceReconciliationOnly = item?.sourceReconciliationOnly === true;
+  const releaseQualificationInspectionOnly = item?.releaseQualificationInspectionOnly === true;
+  if (item?.releaseQualificationInspectionOnly !== undefined && (!releaseQualificationInspectionOnly ||
+      !publishedImplementation || sourceReconciliationOnly || item.failedLearningProgress !== undefined ||
+      item.continuationTrigger !== "UNFINISHED_FULL_REPAIR")) fail("RELEASE_QUALIFICATION_INSPECTION_REQUIRED");
   if (item?.sourceReconciliationOnly !== undefined &&
       (!sourceReconciliationOnly || item.continuationMode !== "DATA_ONLY" || item.continuationTrigger !== "UNFINISHED_FULL_REPAIR")) {
     fail("DATA_ONLY_SOURCE_RECONCILIATION_REQUIRED");
@@ -134,6 +147,8 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
         prior.runtimeSha !== workerHead || !UUID.test(prior.priorTurnId ?? "")) fail("ORIGINAL_CONTINUATION_PROVENANCE_CHANGED");
     }
   }
+  if (releaseQualificationInspectionOnly && localCandidate)
+    return { outcome: "unpublished_release_qualification", messageRequired: false, monitoringVerified: false };
   // A detached or primary/unrelated repository must never become an owner.
   const common = realpathSync(resolve(worker, execute(worker, ["rev-parse", "--git-common-dir"])));
   const parentCommon = realpathSync(resolve(selected, execute(selected, ["rev-parse", "--git-common-dir"])));
@@ -161,7 +176,16 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
   const cli = (dependencies.inspectCli ?? inspectPinnedWorkerCli)(selected);
   const runtime = (dependencies.resolveRuntime ?? resolveCourseSupportWorkerRuntime)();
   if (cli.status !== "current" || runtime.status !== "available" || !isAbsolute(runtime.nodePath ?? "")) fail("PARENT_RUNTIME_UNAVAILABLE");
-  if (sourceReconciliationOnly) {
+  let qualificationCi = null;
+  if (releaseQualificationInspectionOnly) {
+    try { qualificationCi = (dependencies.readCiProof ?? readDesktopContinuationCi)({ selected, currentSha }); }
+    catch { return { outcome: "ci_qualification_unavailable", messageRequired: false, monitoringVerified: false }; }
+    if (qualificationCi?.runtimeVersion !== currentSha || qualificationCi.conclusion !== "success" ||
+        !Number.isSafeInteger(qualificationCi.runId) || qualificationCi.runId <= 0 ||
+        !Number.isSafeInteger(qualificationCi.attempt) || qualificationCi.attempt <= 0)
+      return { outcome: "ci_not_qualified", messageRequired: false, monitoringVerified: false };
+  }
+  if (sourceReconciliationOnly || releaseQualificationInspectionOnly) {
     let proof;
     try { proof = await (dependencies.readProductionProof ?? readDesktopContinuationProduction)({ selected, nodePath: runtime.nodePath, currentSha }); }
     catch { return { outcome: "production_qualification_unavailable", messageRequired: false, monitoringVerified: false }; }
@@ -173,6 +197,13 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
     if (execute(selected, ["rev-parse", "HEAD"]) !== currentSha || execute(selected, ["rev-parse", "origin/main"]) !== currentSha) {
       return { outcome: "production_runtime_changed", messageRequired: false, monitoringVerified: false };
     }
+  }
+  if (releaseQualificationInspectionOnly) {
+    let latest;
+    try { latest = (dependencies.readCiProof ?? readDesktopContinuationCi)({ selected, currentSha }); }
+    catch { return { outcome: "ci_qualification_unavailable", messageRequired: false, monitoringVerified: false }; }
+    if (JSON.stringify(latest) !== JSON.stringify(qualificationCi))
+      return { outcome: "ci_qualification_changed", messageRequired: false, monitoringVerified: false };
   }
   let client;
   try {
@@ -199,7 +230,9 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
     const releaseInstruction = publishedImplementation || claimedImplementation
       ? " The operator's standing full-repair release authorization includes normal promotion of your same exact registered Ready Git artifact after fresh current-main, complete required CI, project and original owner/source/lease checks. An automatic alias-check failure alone does not require a new permission request. Preserve the failed evidence; do not create a new CLI production build, remap arbitrary aliases, change configuration, roll back or bypass a failed gate."
       : "";
-    const purpose = sourceReconciliationOnly
+    const purpose = releaseQualificationInspectionOnly
+      ? "RELEASE_QUALIFICATION_INSPECTION_ONLY. The registered repair is still pending and no verification or learning job is queued/running. Independent read-only qualification now found the current exact main CI successful and both canonical Git aliases Ready. This is not a recorded failed provider operation, a new read allowance or a verifier-replay grant. Inspect your same owned packet and retained preparation receipt, use fresh original-owner recovery/context, and follow the normal trusted-upstream release-qualification path only when its current gates admit it. Never rerun an unchanged failed protected operation, reset clocks, infer monitoring, or change another owner. Preserve missing/uncertain effects; a rejected recovery stays visible."
+      : sourceReconciliationOnly
       ? "SOURCE_RECONCILIATION_ONLY. The source snapshot changed after this data-only claim. Read your same owned packet and use only the existing qualified original-owner recovery/requeue path when eligible. Do not investigate or implement against the changed snapshot, request provider reads, change claim fingerprints, or repeat verification. Stop after the typed recovery result; the scheduler owns subsequent admission. A rejected recovery stays visible."
       : `finish the unresolved diagnosis under the existing action plan; a newer release is not required. Do not rerun unchanged verification or an exhausted read. Obtain and validate fresh research context, distinguish tooling-repair permission from provider-contract permission, and diagnose the actual missing evidence/transport/extraction tool within the returned scope.${phaseInstruction}${releaseInstruction}`;
     const candidateInstruction = localCandidate ? `\nPreserved unregistered local candidate: ${localCandidate.headSha}. Its exact unpublished delta is confined to your already claimed paths. Follow the guide's candidate-preserving merge; do not reset it or treat it as registered/published.` : "";
@@ -210,6 +243,7 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
       runtimeSha: currentSha, continuationTrigger: item.continuationTrigger ?? null,
       continuationMode: item.continuationMode ?? "DATA_ONLY", plannedPathCount: claimedImplementation ? item.plannedPaths.length : 0,
       ...(sourceReconciliationOnly ? { sourceReconciliationOnly: true } : {}),
+      ...(releaseQualificationInspectionOnly ? { releaseQualificationInspectionOnly: true, qualificationCi } : {}),
       ...(localCandidate ? { localCandidate } : {}),
       observedFailureFingerprint: progress?.fingerprint ?? null,
       ...(prior ? { parentReceiptPath: primaryMarker, failedLearningProgress: progress } : {}),

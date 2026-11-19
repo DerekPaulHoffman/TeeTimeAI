@@ -130,6 +130,18 @@ export function hasStoppedFullRepairVerification(input: { summary: unknown; batc
   return recordedAt >= input.batchCreatedAt && recordedAt >= input.deployedAt && recordedAt <= input.now;
 }
 
+/** Selection permits local qualification inspection only. It never asserts a
+ * stopped provider operation or grants another verification/read attempt. */
+export function allowsFullRepairReleaseQualificationInspection(input: {
+  reason: string | null; workMode: string; batchStatus: string; result: string;
+  allowedActions: readonly string[]; continuationMode: ReturnType<typeof fullRepairContinuationMode>;
+}) {
+  return input.reason === "FAILED_LEARNER_IMPLEMENTATION_HANDOFF" &&
+    input.workMode === "IMPLEMENT_REUSABLE_SUPPORT" && input.batchStatus === "VERIFYING" && input.result === "PENDING" &&
+    input.continuationMode === "PUBLISHED_IMPLEMENTATION" &&
+    input.allowedActions.includes("INVESTIGATE_PUBLIC_SOURCE") && input.allowedActions.includes("IMPLEMENT_REUSABLE_SUPPORT");
+}
+
 export function shouldContinueOwnedFullRepair(packet: {
   remediation: { reason: string | null } | null;
   courses: readonly {

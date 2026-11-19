@@ -18,9 +18,14 @@ function latestRuntimeCi(runtimeVersion, runs) {
     b.databaseId - a.databaseId || b.attempt - a.attempt)[0];
 }
 
-export function validateDiscoveryRuntimeRelease({ runtimeVersion, runs, deployments, inspections }) {
+export function validateDiscoveryRuntimeCi(runtimeVersion, runs) {
   const ci = latestRuntimeCi(runtimeVersion, runs);
   if (ci.status !== 'completed' || ci.conclusion !== 'success') reject('RUNTIME_CI_REQUIRED');
+  return { runtimeVersion, runId: ci.databaseId, attempt: ci.attempt, conclusion: 'success' };
+}
+
+export function validateDiscoveryRuntimeRelease({ runtimeVersion, runs, deployments, inspections }) {
+  const ci = validateDiscoveryRuntimeCi(runtimeVersion, runs);
   const candidate = deployments?.filter(d => d.meta?.githubCommitSha === runtimeVersion &&
     d.meta.githubCommitRef === 'main' && d.meta.githubDeployment === '1' && d.meta.branchAlias && d.url)
     .sort((a, b) => b.createdAt - a.createdAt)[0];
@@ -30,7 +35,7 @@ export function validateDiscoveryRuntimeRelease({ runtimeVersion, runs, deployme
       aliases.some(alias => !inspections.some(item => item.alias === alias && item.inspection?.readyState === 'READY' &&
         item.inspection.url === candidate.url && /^dpl_[A-Za-z0-9]+$/u.test(item.inspection.id ?? ''))) ||
       inspections[0].inspection.id !== inspections[1].inspection.id) reject('RUNTIME_CANONICAL_ALIASES_REQUIRED');
-  return { runtimeVersion, ciRunId: ci.databaseId, ciConclusion: 'success', deployment: {
+  return { runtimeVersion, ciRunId: ci.runId, ciConclusion: 'success', deployment: {
     source: 'git', state: 'READY', commitSha: runtimeVersion, aliases,
     deploymentId: inspections[0].inspection.id, deploymentUrl: `https://${candidate.url}`,
     deployedAt: new Date(candidate.createdAt).toISOString() } };
