@@ -118,7 +118,7 @@ export async function prepareOwnedDesktopContinuation({ context, item }, depende
     // arbitrary clean commits or an unrelated worker's checkout.
     const priorPath = join(selected, ".codex-artifacts", `desktop-repair-continuation-${item.assignmentRef}-${workerHead}.private.json`);
     if (!existsSync(priorPath)) {
-      if (!publishedImplementation || item.continuationTrigger !== "UNFINISHED_FULL_REPAIR" || !validPaths(item.plannedPaths)) fail("ORIGINAL_DATA_ONLY_BASE_CHANGED");
+      if (!(publishedImplementation || claimedImplementation) || item.continuationTrigger !== "UNFINISHED_FULL_REPAIR" || !validPaths(item.plannedPaths)) fail("ORIGINAL_DATA_ONLY_BASE_CHANGED");
       const sharedBase = execute(selected, ["merge-base", "--all", workerHead, currentSha]);
       if (!SHA.test(sharedBase) || sharedBase === workerHead) fail("ORIGINAL_CANDIDATE_ANCESTRY_REQUIRED");
       execute(selected, ["merge-base", "--is-ancestor", item.releaseSha, sharedBase]);

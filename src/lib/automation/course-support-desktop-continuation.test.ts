@@ -286,6 +286,24 @@ describe("original Desktop full-repair continuation", () => {
     expect(JSON.parse(readFileSync(f.launcherPath, "utf8"))).toEqual(f.launcher);
   });
 
+  it("also preserves the first clean claimed candidate before its initial release registration", async () => {
+    const f = fixture(), candidate = "c".repeat(40);
+    const item = { ...f.item, continuationMode: "CLAIMED_IMPLEMENTATION", continuationTrigger: "UNFINISHED_FULL_REPAIR",
+      plannedPaths: ["src/lib/adapters/owned.ts"] };
+    const previous = f.deps.git.getMockImplementation()!;
+    f.deps.git.mockImplementation((cwd, args) => {
+      if (cwd === f.worker && args[0] === "rev-parse" && args[1] === "HEAD") return candidate;
+      if (args[0] === "merge-base" && args[1] === "--all") return BEFORE;
+      if (args[0] === "diff") return "src/lib/adapters/owned.ts\0";
+      return previous(cwd, args);
+    });
+    const result = await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps);
+    expect(result).toMatchObject({ outcome: "desktop_continuation_message_required", monitoringVerified: false });
+    expect(result.prompt).toContain(`Preserved unregistered local candidate: ${candidate}`);
+    expect(JSON.parse(readFileSync(result.receiptPath, "utf8"))).toMatchObject({ localCandidate: { headSha: candidate } });
+    expect(f.deps.git.mock.calls.some(([, args]) => ["merge", "checkout", "reset", "commit"].includes(args[0]))).toBe(false);
+  });
+
   it.each(["unpublished", "unregistered-head", "unchanged-release", "unknown-mode"])("rejects a %s implementation continuation", async scenario => {
     const f = fixture(), published = "c".repeat(40);
     const item = { ...f.item, continuationMode: scenario === "unknown-mode" ? "ANY_IMPLEMENTATION" : "PUBLISHED_IMPLEMENTATION",
