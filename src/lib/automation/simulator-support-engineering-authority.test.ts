@@ -30,6 +30,29 @@ function fixture() {
 }
 
 describe("durable simulator engineering authority", () => {
+  it.each(["repaired controller", "current controller failure", "different failure", "access barrier", "future failure"])("reconsiders only a different public read after a known controller repair: %s", async scenario => {
+    const f = fixture(), homepage = "https://official.example.test/";
+    f.offering.bookingUrl = homepage; Object.assign(f.offering.course, { website: homepage });
+    const fingerprint = getSimulatorOfferingSourceFingerprint(f.offering);
+    Object.assign(f.audit.target, { offeringSourceFingerprint: fingerprint, failureFingerprint: fingerprint });
+    Object.assign(f.audit.simulatorClaim!, { sourceFingerprint: fingerprint, originalSourceFingerprint: fingerprint });
+    Object.assign(f.authority, { sourceFingerprint: fingerprint, originSourceFingerprint: fingerprint });
+    const failure = { stage: "PUBLIC_READ", category: "UNKNOWN", code: "UNCLASSIFIED_FAILURE", researchPhase: "BROWSER_REQUEST",
+      sourceLocation: scenario === "different failure" ? "src/lib/automation/simulator-interactive-browser.ts:262" : "src/lib/automation/simulator-interactive-browser.ts:263" };
+    const observedAt = scenario === "future failure" ? new Date(now.getTime() + 1).toISOString() : "2026-10-08T11:04:00.000Z";
+    const legacy = { source: "booking", requestedUrl: homepage, sourceUrl: homepage, sourceFingerprint: fingerprint,
+      observedAt, httpStatus: 0, rendered: true, outcome: "HARD_FAILED", requestId: "11111111-1111-4111-8111-111111111111", failure,
+      researchImplementationVersion: scenario === "current controller failure" ? "public-calendar-document-scoped-evidence-v38" : "public-calendar-document-scoped-evidence-v37" };
+    f.audit.simulatorResearch = readSimulatorResearchState({ version: 1, sourceFingerprint: fingerprint, readCount: 1, history: [legacy],
+      inFlight: null, links: [], bookingLinks: [], linkBaseUrl: null }, fingerprint);
+    if (scenario === "access barrier") Object.assign(f.audit, { simulatorResearchPriorFailures: { version: 1, sourceFingerprint: fingerprint,
+      routes: [{ url: homepage, rendered: false, httpStatus: 403 }] } });
+    f.row.outcome = "simulator_research_failed";
+    const before = JSON.stringify(f.audit);
+    expect(await listSimulatorSupportDispatchCandidates(now, f.client)).toHaveLength(scenario === "repaired controller" ? 1 : 0);
+    expect(JSON.stringify(f.audit)).toBe(before);
+  });
+
   it.each([false, true])("reconsiders an unused official render after a linked calendar; protected=%s", async protectedRead => {
     const f = fixture(), homepage = "https://official.example.test/", calendar = "https://calendar.example.test/services";
     f.offering.bookingUrl = homepage;

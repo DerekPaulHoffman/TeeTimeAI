@@ -14,6 +14,12 @@ Regression coverage: `square-public-read-policy.test.ts` binds venue identity an
 
 A failed learner reopened an incident at cycle two with no repeated-poll confirmation. The dispatcher correctly admitted its explicit investigation-and-implementation mission, but research demanded a confirmation timestamp and stopped before any public read. For this exact full-repair mission, use the current incident's first-seen timestamp only when it predates the owned batch claim; retain null confirmation and every source, cycle, owner, lease, action-plan and evidence check. Ordinary unconfirmed reopened incidents remain ineligible. The research-context regression covers the actual cycle-two shape, excludes old-cycle discovery, and rejects absent investigation authority, a cycle that starts after the claim, and future timestamps.
 
+## 2026-11-18 - Reconsider A Different Read After A Specific Controller Repair
+
+Publishing the public-catalog redirect correction did not itself recover an old research-only failure. The scheduler correctly retained its hard-failure receipt, but treated the repaired controller as unchanged and never admitted another worker. The renderer implementation version now describes the shipped redirect behavior. A narrowly identified pre-repair rejection can permit normal admission only when an ordinary plain read of a saved official/booking root remains allowed. The original failed render, state, incident, claim and first-pickup clocks are retained; this neither resurrects its closed owner nor authorizes repeating that failed route. Fresh public evidence and the usual independent recipe verification are still required.
+
+The policy recognizes only the historical controller version, closed request-phase diagnostic and owned throw location for this repaired defect. It rejects current-version failures, unrelated unknown errors, changed observation provenance, future timestamps, exhausted or active read state, and retained access denials. Research-policy and real dispatcher regressions enforce these distinctions. A private read-only snapshot of the actual retained failure also reproduced the intended result offline: the original hard failure stays blocked while a different plain read becomes eligible. A version change alone never makes arbitrary hard failures retryable.
+
 ## 2026-08-18 - Stop Unchanged Repair Retries
 
 ### Observed Pattern

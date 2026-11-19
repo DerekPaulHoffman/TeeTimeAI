@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertSimulatorResearchFallbackBeforeRetry, currentSimulatorResearchBlockedRoutes, getSimulatorResearchGuide, getSimulatorResearchRetryGuide, getSimulatorResearchObservationFingerprint, getSimulatorResearchImplementationVersion, mergeSimulatorResearchBlockedRoutes, readSettledSimulatorPublicCheckpoint, readSimulatorResearchFailureMemory, readSimulatorResearchState, selectSimulatorResearchTarget, SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION, type SimulatorResearchBlockedRoute } from "./simulator-support-research-policy";
+import { assertSimulatorResearchFallbackBeforeRetry, currentSimulatorResearchBlockedRoutes, getSimulatorResearchGuide, getSimulatorResearchRetryGuide, getSimulatorResearchObservationFingerprint, getSimulatorResearchImplementationVersion, hasDifferentPublicReadAfterCatalogRepair, mergeSimulatorResearchBlockedRoutes, readSettledSimulatorPublicCheckpoint, readSimulatorResearchFailureMemory, readSimulatorResearchState, selectSimulatorResearchTarget, SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION, type SimulatorResearchBlockedRoute } from "./simulator-support-research-policy";
 
 const fingerprint = "a".repeat(64), now = new Date("2026-10-06T20:00:00Z");
 const officialUrl = "https://venue.example.test", bookingUrl = "https://calendar.example.test/booking/bays";
@@ -9,6 +9,43 @@ const failedHomepage = () => ({ ...empty(), readCount: 1, history: [{ source: "o
 const savedBayUrl = "https://yourgolfbooking.com/venues/public-golf/booking/bays";
 const bookingRootUrl = "https://yourgolfbooking.com/venues/public-golf/booking";
 const acuityTenantRoot = "https://onegolfhaven.as.me/";
+
+describe("different source read after the shipped public catalog controller repair", () => {
+  const failure = { stage: "PUBLIC_READ" as const, category: "UNKNOWN" as const, code: "UNCLASSIFIED_FAILURE", researchPhase: "BROWSER_REQUEST" as const,
+    sourceLocation: "src/lib/automation/simulator-interactive-browser.ts:263" };
+  const failed = () => readSimulatorResearchState({ ...empty(), readCount: 1, history: [{ source: "official", sourceUrl: officialUrl, requestedUrl: officialUrl,
+    sourceFingerprint: fingerprint, observedAt: now.toISOString(), httpStatus: 0, rendered: true, outcome: "HARD_FAILED",
+    requestId: "11111111-1111-4111-8111-111111111111", researchImplementationVersion: "public-calendar-document-scoped-evidence-v37", failure }] }, fingerprint);
+  it("admits only a different plain read and retains the original blocked render", () => {
+    const state = failed(), before = structuredClone(state);
+    const blocked: SimulatorResearchBlockedRoute = { url: officialUrl, rendered: true, httpStatus: 0, failure,
+      researchImplementationVersion: "public-calendar-document-scoped-evidence-v37" };
+    expect(hasDifferentPublicReadAfterCatalogRepair({ state, officialUrl, bookingUrl: officialUrl, now, priorFailedRoutes: [blocked] })).toBe(true);
+    expect(state).toEqual(before);
+    expect(selectSimulatorResearchTarget({ state: empty(), officialUrl, bookingUrl: officialUrl, source: "official", rendered: false, now,
+      priorFailedRoutes: [blocked] })).toMatchObject({ source: "official", rendered: false });
+    expect(() => selectSimulatorResearchTarget({ state: empty(), officialUrl, bookingUrl: officialUrl, source: "official", rendered: true, now,
+      priorFailedRoutes: [blocked] })).toThrow("unchanged structural");
+    expect(getSimulatorResearchRetryGuide({ state, officialUrl, bookingUrl: officialUrl, now, priorFailedRoutes: [blocked] }).closeoutReason).toBe("HARD_FAILURE");
+  });
+  it.each(["new controller", "other source", "other code", "other module", "later phase", "budget exhausted", "active read", "account denial", "another unknown"])("does not reclassify %s as this repaired defect", scenario => {
+    const state = failed();
+    const last = state.history[0];
+    const priorFailedRoutes: SimulatorResearchBlockedRoute[] = [];
+    if (scenario === "new controller") last.researchImplementationVersion = SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION;
+    if (scenario === "other source") last.sourceFingerprint = "b".repeat(64);
+    if (scenario === "other code") last.failure!.code = "UNKNOWN_OTHER";
+    if (scenario === "other module") last.failure!.sourceLocation = "src/lib/automation/simulator-support-research.ts:263";
+    if (scenario === "later phase") last.failure!.researchPhase = "BROWSER_NAVIGATION";
+    if (scenario === "budget exhausted") state.readCount = 6;
+    if (scenario === "active read") state.inFlight = { source: "official", url: officialUrl, rendered: false,
+      requestId: "22222222-2222-4222-8222-222222222222", startedAt: now.toISOString(), expiresAt: new Date(now.getTime() + 1000).toISOString() };
+    if (scenario === "account denial") priorFailedRoutes.push({ url: officialUrl, rendered: false, httpStatus: 200, accessControls: ["ACCOUNT_REQUIRED"] });
+    if (scenario === "another unknown") priorFailedRoutes.push({ url: bookingUrl, rendered: true, httpStatus: 0,
+      failure: { ...failure, sourceLocation: "src/lib/automation/simulator-interactive-browser.ts:262" } });
+    expect(hasDifferentPublicReadAfterCatalogRepair({ state, officialUrl, bookingUrl: officialUrl, now, priorFailedRoutes })).toBe(false);
+  });
+});
 
 describe("bounded public reference root before unchanged unknown-provider retry", () => {
   const root = "https://calendar.example.test/";

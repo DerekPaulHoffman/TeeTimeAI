@@ -6,7 +6,7 @@ import { blockedResourceDiagnosticsSchema } from "./simulator-blocked-resources"
 import { simulatorPageSurfacesSchema } from "./simulator-page-surfaces";
 
 export const SIMULATOR_RESEARCH_MAX_READS = 6;
-export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-document-scoped-evidence-v37";
+export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-document-scoped-evidence-v38";
 export function getSimulatorResearchImplementationVersion(url: string) {
   const family = knownSimulatorPublicConfigurationFamily(url);
   if (family === "TEESHEET" || family === "UPPER_HAND" || family === "YOUR_GOLF_BOOKING") return "public-calendar-provider-api-configuration-v1";
@@ -414,6 +414,36 @@ export function currentSimulatorResearchBlockedRoutes(routes: readonly Simulator
     return !incompleteSecondary || route.researchImplementationVersion === getSimulatorResearchImplementationVersion(route.url) &&
       !(now && isSecondaryRevalidationDue(route, now));
   });
+}
+
+/** A shipped controller correction can make a different source-read approach
+ * useful. Preserve the failed render as blocked: this only allows ordinary
+ * admission when a plain saved-root read remains available under normal rules.
+ * The historical line/version identifies the old redirect rejection, rather
+ * than making every unknown failure retryable after an unrelated deployment. */
+export function hasDifferentPublicReadAfterCatalogRepair(input: {
+  state: SimulatorResearchState; priorFailedRoutes: readonly SimulatorResearchBlockedRoute[];
+  officialUrl: string | null; bookingUrl: string | null; evidenceUrl?: string | null; now: Date;
+}) {
+  const latest = input.state.history.at(-1), failure = latest?.failure;
+  if (!latest || input.state.inFlight || input.state.readCount >= SIMULATOR_RESEARCH_MAX_READS || latest.outcome !== "HARD_FAILED" || !latest.rendered || latest.httpStatus !== 0 ||
+      latest.sourceFingerprint !== input.state.sourceFingerprint || !latest.requestId ||
+      latest.researchImplementationVersion !== "public-calendar-document-scoped-evidence-v37" ||
+      getSimulatorResearchImplementationVersion(latest.requestedUrl) !== "public-calendar-document-scoped-evidence-v38" ||
+      failure?.stage !== "PUBLIC_READ" || failure.category !== "UNKNOWN" || failure.code !== "UNCLASSIFIED_FAILURE" ||
+      failure.researchPhase !== "BROWSER_REQUEST" || failure.sourceLocation !== "src/lib/automation/simulator-interactive-browser.ts:263" ||
+      !Number.isFinite(input.now.getTime()) || !Number.isFinite(Date.parse(latest.observedAt)) || Date.parse(latest.observedAt) > input.now.getTime()) return false;
+  const roots = [input.officialUrl, input.bookingUrl].map(value => getSafeCustomerBookingUrl(value)).filter((value): value is string => Boolean(value));
+  if (!roots.some(root => routeIdentity(root) === routeIdentity(latest.requestedUrl)) ||
+      input.state.history.some(entry => [401, 403, 404].includes(entry.httpStatus) || entry.publicReadEvidence?.accessControls.length) ||
+      input.priorFailedRoutes.some(route => isProtectedSimulatorResearchDenial(route) || route.failure &&
+        !(route.failure.code === failure.code && route.failure.researchPhase === failure.researchPhase &&
+          route.failure.sourceLocation === failure.sourceLocation && route.researchImplementationVersion === latest.researchImplementationVersion))) return false;
+  const failedRender: SimulatorResearchBlockedRoute = { url: latest.requestedUrl, rendered: true, httpStatus: 0, failure,
+    observedAt: latest.observedAt, requestId: latest.requestId, researchImplementationVersion: latest.researchImplementationVersion };
+  const prospective = getSimulatorResearchGuide({ ...input, state: readSimulatorResearchState(undefined, input.state.sourceFingerprint),
+    priorFailedRoutes: mergeSimulatorResearchBlockedRoutes([failedRender, ...input.priorFailedRoutes]) });
+  return prospective.suggestedReads.some(route => !route.rendered && (route.source === "official" || route.source === "booking"));
 }
 
 /** Legacy reads retain unknown access evidence; only new owned settlements qualify. */
