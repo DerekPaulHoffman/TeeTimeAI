@@ -11,6 +11,21 @@ afterEach(() => {
 });
 
 describe("simulator support failure receipts", () => {
+  it("retains the production-loader callback cause as a closed tooling fact without raw error text", () => {
+    const error = new Error("locator.evaluate: ReferenceError: __name is not defined\nprivate source text");
+    error.stack = "Error: private\n    at observedControl (C:\\repo\\src\\lib\\automation\\simulator-interactive-browser.ts:318:34)";
+    tagSimulatorResearchFailure(error, "BROWSER_DOCUMENT");
+    const receipt = classifySimulatorSupportFailure(error, "PUBLIC_READ");
+    expect(receipt).toMatchObject({ category: "TOOLING", code: "BROWSER_CALLBACK_HELPER_MISSING", researchPhase: "BROWSER_DOCUMENT" });
+    expect(readSafeSimulatorSupportFailure(receipt)).toEqual(receipt);
+    expect(JSON.stringify(receipt)).not.toContain("private");
+  });
+  it.each(["wrong phase", "wrong module", "untrusted text"])("does not invent a callback cause from %s", scenario => {
+    const error = new Error(scenario === "untrusted text" ? "Page says __name is not defined" : "locator.evaluate: ReferenceError: __name is not defined");
+    error.stack = `Error\n    at source (C:\\repo\\src\\lib\\automation\\${scenario === "wrong module" ? "simulator-support-policy" : "simulator-interactive-browser"}.ts:318:34)`;
+    tagSimulatorResearchFailure(error, scenario === "wrong phase" ? "BROWSER_REQUEST" : "BROWSER_DOCUMENT");
+    expect(classifySimulatorSupportFailure(error, "PUBLIC_READ").code).toBe("UNCLASSIFIED_FAILURE");
+  });
   it("preserves a rejected redirect as a closed access failure rather than unknown", () => {
     const failure = tagSimulatorResearchFailure(new Error("BROWSER_UNSAFE_REDIRECT"), "BROWSER_REQUEST");
     expect(classifySimulatorSupportFailure(failure, "PUBLIC_READ")).toMatchObject({

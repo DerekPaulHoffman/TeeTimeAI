@@ -318,18 +318,21 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
       const item = await locator.evaluate(element => {
       const e = element as HTMLElement;
       const input = element as HTMLInputElement;
-      const composedParent = (node: Element): HTMLElement | null => node.parentElement ??
-        ((node.getRootNode() as ShadowRoot).host as HTMLElement | undefined) ?? null;
-      const composedClosest = (node: Element, selector: string) => {
-        for (let current: Element | null = node, depth = 0; current && depth < 32; current = composedParent(current), depth++) {
+      // Object methods retain their names without tsx's module-scoped __name
+      // helper. This callback is serialized into a different JavaScript realm.
+      const composed = {
+      parent(node: Element): HTMLElement | null { return node.parentElement ??
+        ((node.getRootNode() as ShadowRoot).host as HTMLElement | undefined) ?? null; },
+      closest(node: Element, selector: string) {
+        for (let current: Element | null = node, depth = 0; current && depth < 32; current = composed.parent(current), depth++) {
           if (current.matches(selector)) return current;
         }
         return null;
-      };
-      const renderedText = (node: HTMLElement) => {
+      },
+      text(node: HTMLElement) {
         if (node.innerText?.trim()) return node.innerText;
         const seen = new Set<Node>(); let size = 0, truncated = false;
-        const visit = (current: Node, depth: number): string => {
+        const walker = { visit(current: Node, depth: number): string {
           if (seen.has(current)) return "";
           if (depth > 24 || seen.size >= 512 || size > 5000) { truncated = true; return ""; }
           seen.add(current);
@@ -341,11 +344,11 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
           }
           const children = current instanceof HTMLSlotElement ? current.assignedNodes({ flatten: true })
             : current instanceof HTMLElement && current.shadowRoot ? Array.from(current.shadowRoot.childNodes) : Array.from(current.childNodes);
-          return children.map(child => visit(child, depth + 1)).join(" ");
-        };
-        const text = visit(node, 0);
+          return children.map(child => walker.visit(child, depth + 1)).join(" ");
+        } };
+        const text = walker.visit(node, 0);
         return truncated || size > 5000 ? "" : text;
-      };
+      } };
       let label = [e.getAttribute("aria-label"), ...(Array.from(input.labels ?? []).map(l => l.textContent)),
         e.getAttribute("aria-labelledby")?.split(/\s+/u).map(id => document.getElementById(id)?.textContent).join(" ")].filter(Boolean).join(" ");
       // Some public widgets visually label custom dropdowns without wiring an
@@ -363,28 +366,28 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
           }
         }
       }
-      const name = (e.innerText || e.getAttribute("aria-label") || renderedText(e)).trim().slice(0, 160);
+      const name = (e.innerText || e.getAttribute("aria-label") || composed.text(e)).trim().slice(0, 160);
       const content = Array.from(document.querySelectorAll<HTMLElement>('main,[role="main"],[role="region"][aria-label="Main content"],section[aria-label="Main content"]')).filter(h => h.getClientRects().length);
       const headingRoot = content.length === 1 ? content[0] : document;
       const serviceHeadings = name === "Add" ? Array.from(headingRoot.querySelectorAll<HTMLElement>("h2")).filter(h => h.getClientRects().length) : [];
       const headings = serviceHeadings.length ? serviceHeadings : name === "Add" ? Array.from(headingRoot.querySelectorAll<HTMLElement>("h1")).filter(h => h.getClientRects().length) : [];
       let selectionSummary = "";
       if (name === "Next") {
-        for (let group = composedParent(e), depth = 0; group && depth < 6 && !["BODY", "MAIN", "FORM"].includes(group.tagName); group = composedParent(group), depth++) {
+        for (let group = composed.parent(e), depth = 0; group && depth < 6 && !["BODY", "MAIN", "FORM"].includes(group.tagName); group = composed.parent(group), depth++) {
           const headings = Array.from(group.querySelectorAll<HTMLElement>("h2,h3")).filter(h => h.getClientRects().length && h.innerText.trim() === "Appointment summary");
           if (headings.length === 1 && group.querySelectorAll("button,market-button").length <= 5 && group.querySelectorAll("a[href],market-link").length <= 2 && !group.querySelector("input,select,textarea,market-input,market-select,market-textarea")) {
-            selectionSummary = renderedText(group).trim().slice(0, 4001); break;
+            selectionSummary = composed.text(group).trim().slice(0, 4001); break;
           }
         }
       }
       return { tag: e.tagName.toLowerCase(), role: e.getAttribute("role") ?? "", name, label: label.slice(0, 200),
         hasPopup: e.getAttribute("aria-haspopup") ?? "",
         href: e instanceof HTMLAnchorElement ? e.href : undefined,
-        calendar: Boolean(composedClosest(e, '[role="grid"]')),
+        calendar: Boolean(composed.closest(e, '[role="grid"]')),
         inputType: input.type,
-        selectedValue: e.tagName === "SELECT" ? (element as HTMLSelectElement).selectedOptions[0]?.textContent ?? "" : renderedText(e),
-        sensitiveForm: Boolean(composedClosest(e, "form")?.querySelector('input[type="password"],input[type="email"],input[type="tel"],[autocomplete^="cc-"]')),
-        insideForm: Boolean(composedClosest(e, "form")), publicHeading: headings.length === 1 ? renderedText(headings[0]).trim().slice(0, 201) : "", selectionSummary };
+        selectedValue: e.tagName === "SELECT" ? (element as HTMLSelectElement).selectedOptions[0]?.textContent ?? "" : composed.text(e),
+        sensitiveForm: Boolean(composed.closest(e, "form")?.querySelector('input[type="password"],input[type="email"],input[type="tel"],[autocomplete^="cc-"]')),
+        insideForm: Boolean(composed.closest(e, "form")), publicHeading: headings.length === 1 ? composed.text(headings[0]).trim().slice(0, 201) : "", selectionSummary };
       });
       return { ...item, squareServiceSelection: observedSquarePublicServiceControl(page!.url(), item, squareChoice) };
     };

@@ -7,7 +7,7 @@ import { simulatorPageSurfacesSchema } from "./simulator-page-surfaces";
 import { isSquarePublicServiceCatalogUrl } from "./square-public-read-policy";
 
 export const SIMULATOR_RESEARCH_MAX_READS = 6;
-export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-document-scoped-evidence-v40";
+export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-document-scoped-evidence-v41";
 export function getSimulatorResearchImplementationVersion(url: string) {
   const family = knownSimulatorPublicConfigurationFamily(url);
   if (family === "TEESHEET" || family === "UPPER_HAND" || family === "YOUR_GOLF_BOOKING") return "public-calendar-provider-api-configuration-v1";
@@ -387,7 +387,7 @@ function isHistoricalCatalogControllerFailure(route: Partial<SimulatorResearchBl
   return Boolean(route.url && route.rendered && route.httpStatus === 0 && route.requestId && route.observedAt &&
     Number.isFinite(now.getTime()) && Number.isFinite(Date.parse(route.observedAt)) && Date.parse(route.observedAt) <= now.getTime() &&
     !route.accessControls?.length && route.researchImplementationVersion === "public-calendar-document-scoped-evidence-v37" &&
-    getSimulatorResearchImplementationVersion(route.url) === "public-calendar-document-scoped-evidence-v40" &&
+    getSimulatorResearchImplementationVersion(route.url) === SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION &&
     route.failure?.stage === "PUBLIC_READ" && route.failure.category === "UNKNOWN" && route.failure.code === "UNCLASSIFIED_FAILURE" &&
     route.failure.researchPhase === "BROWSER_REQUEST" && route.failure.sourceLocation === "src/lib/automation/simulator-interactive-browser.ts:263");
 }
@@ -401,7 +401,7 @@ export function repairedSlottedCatalogReceipt(input: { state: SimulatorResearchS
   if (!latest || state.inFlight || state.readCount < 1 || state.readCount >= SIMULATOR_RESEARCH_MAX_READS ||
       state.history.length !== state.readCount || !latest.rendered || latest.outcome !== "READ" || latest.failure ||
       latest.researchImplementationVersion !== "public-calendar-document-scoped-evidence-v39" ||
-      getSimulatorResearchImplementationVersion(latest.sourceUrl) !== "public-calendar-document-scoped-evidence-v40" ||
+      getSimulatorResearchImplementationVersion(latest.sourceUrl) !== SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION ||
       !isSquarePublicServiceCatalogUrl(latest.sourceUrl) || latest.sourceUrl !== latest.requestedUrl ||
       latest.publicReadEvidence?.method !== "BROWSER" || latest.publicReadEvidence.renderComplete !== false ||
       !latest.renderWarning?.startsWith("SECONDARY_") || !latest.requestId ||
@@ -418,6 +418,56 @@ export function repairedSlottedCatalogReceipt(input: { state: SimulatorResearchS
         (entry.source === "official" || entry.source === "booking") && entry.publicReadEvidence?.method === "HTTP" &&
         routeIdentity(entry.requestedUrl) === routeIdentity(route.url) && Date.parse(entry.observedAt) > Date.parse(route.observedAt!))))) return null;
   return { sourceUrl: latest.sourceUrl, requestId: latest.requestId };
+}
+
+function isHistoricalBrowserCallbackFailure(route: Partial<SimulatorResearchBlockedRoute>, now: Date) {
+  return Boolean(route.url && isSquarePublicServiceCatalogUrl(route.url) && route.rendered && route.httpStatus === 0 &&
+    route.requestId && route.observedAt && Number.isFinite(Date.parse(route.observedAt)) &&
+    Date.parse(route.observedAt) <= now.getTime() && !route.accessControls?.length &&
+    route.researchImplementationVersion === "public-calendar-document-scoped-evidence-v40" &&
+    getSimulatorResearchImplementationVersion(route.url) === "public-calendar-document-scoped-evidence-v41" &&
+    route.failure?.stage === "PUBLIC_READ" && route.failure.category === "UNKNOWN" &&
+    route.failure.code === "UNCLASSIFIED_FAILURE" && route.failure.researchPhase === "BROWSER_DOCUMENT" &&
+    route.failure.sourceLocation === "src/lib/automation/simulator-interactive-browser.ts:318");
+}
+
+/** The production-loader regression proves the v40 callback cannot serialize.
+ * Retain that failed read; only this changed implementation may investigate it. */
+export function repairedBrowserCallbackReceipt(input: { state: SimulatorResearchState;
+  priorFailedRoutes: readonly SimulatorResearchBlockedRoute[]; now: Date }) {
+  const { state, now } = input, latest = state.history.at(-1);
+  if (!latest || state.inFlight || state.readCount < 2 || state.readCount >= SIMULATOR_RESEARCH_MAX_READS ||
+      state.readCount !== state.history.length || latest.outcome !== "HARD_FAILED" ||
+      latest.sourceFingerprint !== state.sourceFingerprint || latest.sourceUrl !== latest.requestedUrl ||
+      !isHistoricalBrowserCallbackFailure({ url: latest.requestedUrl, rendered: latest.rendered, httpStatus: latest.httpStatus,
+        observedAt: latest.observedAt, requestId: latest.requestId, failure: latest.failure,
+        researchImplementationVersion: latest.researchImplementationVersion, accessControls: latest.publicReadEvidence?.accessControls }, now)) return null;
+  const previous = state.history.slice(0, -1);
+  if (previous.some(entry => entry.outcome !== "READ" || entry.failure || entry.rendered ||
+      entry.httpStatus < 200 || entry.httpStatus >= 300 || !entry.requestId ||
+      entry.researchImplementationVersion !== "public-calendar-document-scoped-evidence-v40" ||
+      entry.sourceFingerprint !== state.sourceFingerprint || entry.publicReadEvidence?.sourceFingerprint !== state.sourceFingerprint ||
+      entry.publicReadEvidence.method !== "HTTP" || !entry.publicReadEvidence.accessControlsObserved || entry.publicReadEvidence.accessControls.length ||
+      !Number.isFinite(Date.parse(entry.observedAt)) || Date.parse(entry.observedAt) >= Date.parse(latest.observedAt)) ||
+      !previous.some(entry => entry.requestedUrl === latest.requestedUrl)) return null;
+  if (input.priorFailedRoutes.some(route => isProtectedSimulatorResearchDenial(route) || route.failure &&
+      !(isHistoricalCatalogControllerFailure(route, now) && previous.some(entry =>
+        (entry.source === "official" || entry.source === "booking") && routeIdentity(entry.requestedUrl) === routeIdentity(route.url) &&
+        Date.parse(entry.observedAt) > Date.parse(route.observedAt!))))) return null;
+  return { sourceUrl: latest.sourceUrl, requestId: latest.requestId! };
+}
+
+function isRepairedBrowserCallbackReadDue(route: Partial<SimulatorResearchBlockedRoute>, state: SimulatorResearchState, now: Date) {
+  const fresh = state.history.at(-1);
+  return isHistoricalBrowserCallbackFailure(route, now) && !state.inFlight &&
+    state.readCount < SIMULATOR_RESEARCH_MAX_READS && Boolean(fresh && !fresh.rendered && fresh.outcome === "READ" && !fresh.failure &&
+      fresh.httpStatus >= 200 && fresh.httpStatus < 300 && fresh.requestId &&
+      fresh.sourceFingerprint === state.sourceFingerprint && routeIdentity(fresh.requestedUrl) === routeIdentity(route.url!) &&
+      fresh.researchImplementationVersion === SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION &&
+      fresh.publicReadEvidence?.sourceFingerprint === state.sourceFingerprint && fresh.publicReadEvidence.method === "HTTP" &&
+      fresh.publicReadEvidence.accessControlsObserved && !fresh.publicReadEvidence.accessControls.length &&
+      Date.parse(fresh.observedAt) > Date.parse(route.observedAt!) && Date.parse(fresh.observedAt) <= now.getTime() &&
+      Date.parse(fresh.observedAt) >= now.getTime() - 30 * 60_000);
 }
 
 /** Retry the specifically corrected controller only after a new owned public
@@ -477,6 +527,11 @@ export function hasDifferentPublicReadAfterCatalogRepair(input: {
   state: SimulatorResearchState; priorFailedRoutes: readonly SimulatorResearchBlockedRoute[];
   officialUrl: string | null; bookingUrl: string | null; evidenceUrl?: string | null; now: Date;
 }) {
+  if (repairedBrowserCallbackReceipt(input)) {
+    const prospective = getSimulatorResearchGuide({ ...input, state: readSimulatorResearchState(undefined, input.state.sourceFingerprint),
+      priorFailedRoutes: [...input.priorFailedRoutes] });
+    return prospective.suggestedReads.some(route => !route.rendered && (route.source === "official" || route.source === "booking"));
+  }
   const latest = input.state.history.at(-1), failure = latest?.failure;
   const roots = [input.officialUrl, input.bookingUrl].map(value => getSafeCustomerBookingUrl(value)).filter((value): value is string => Boolean(value));
   // A worker may have completed the required plain observation and then lost
@@ -488,7 +543,7 @@ export function hasDifferentPublicReadAfterCatalogRepair(input: {
       latest.sourceFingerprint === input.state.sourceFingerprint && latest.publicReadEvidence?.sourceFingerprint === input.state.sourceFingerprint &&
       latest.publicReadEvidence.method === "HTTP" && latest.publicReadEvidence.accessControlsObserved && !latest.publicReadEvidence.accessControls.length &&
       latest.researchImplementationVersion === "public-calendar-document-scoped-evidence-v38" &&
-      getSimulatorResearchImplementationVersion(latest.requestedUrl) === "public-calendar-document-scoped-evidence-v40" &&
+      getSimulatorResearchImplementationVersion(latest.requestedUrl) === SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION &&
       Number.isFinite(Date.parse(latest.observedAt)) && Date.parse(latest.observedAt) <= input.now.getTime() &&
       roots.some(root => routeIdentity(root) === routeIdentity(latest.requestedUrl)) &&
       input.priorFailedRoutes.some(route => isHistoricalCatalogControllerFailure(route, input.now) &&
@@ -501,7 +556,7 @@ export function hasDifferentPublicReadAfterCatalogRepair(input: {
   if (!latest || input.state.inFlight || input.state.readCount >= SIMULATOR_RESEARCH_MAX_READS || latest.outcome !== "HARD_FAILED" || !latest.rendered || latest.httpStatus !== 0 ||
       latest.sourceFingerprint !== input.state.sourceFingerprint || !latest.requestId ||
       latest.researchImplementationVersion !== "public-calendar-document-scoped-evidence-v37" ||
-      getSimulatorResearchImplementationVersion(latest.requestedUrl) !== "public-calendar-document-scoped-evidence-v40" ||
+      getSimulatorResearchImplementationVersion(latest.requestedUrl) !== SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION ||
       failure?.stage !== "PUBLIC_READ" || failure.category !== "UNKNOWN" || failure.code !== "UNCLASSIFIED_FAILURE" ||
       failure.researchPhase !== "BROWSER_REQUEST" || failure.sourceLocation !== "src/lib/automation/simulator-interactive-browser.ts:263" ||
       !Number.isFinite(input.now.getTime()) || !Number.isFinite(Date.parse(latest.observedAt)) || Date.parse(latest.observedAt) > input.now.getTime()) return false;
@@ -681,7 +736,8 @@ export function selectSimulatorResearchTarget(input: {
   if (input.priorFailedRoutes?.some(entry => routeIdentity(entry.url) === routeIdentity(url) && entry.rendered === input.rendered &&
       !isRepairedStaticBudgetReadDue(entry, state, input.now) &&
       !([input.officialUrl, input.bookingUrl].some(root => getSafeCustomerBookingUrl(root) && routeIdentity(root!) === routeIdentity(url)) &&
-        isRepairedCatalogControllerReadDue(entry, state, input.now)))) throw new Error("An unchanged structural source failure needs a different research route or materially changed source.");
+        isRepairedCatalogControllerReadDue(entry, state, input.now) ||
+        isRepairedBrowserCallbackReadDue(entry, state, input.now)))) throw new Error("An unchanged structural source failure needs a different research route or materially changed source.");
   return { source, url, rendered: input.rendered };
 }
 

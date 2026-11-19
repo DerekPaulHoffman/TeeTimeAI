@@ -17,6 +17,7 @@ export type SimulatorSupportFailure = {
 type Classification = Pick<SimulatorSupportFailure, "category" | "code"> & { stage?: SimulatorSupportFailureStage };
 
 const researchCodes: Record<string, Classification> = {
+  SIMULATOR_BROWSER_CALLBACK_HELPER_MISSING: { category: "TOOLING", code: "BROWSER_CALLBACK_HELPER_MISSING" },
   BROWSER_UNSAFE_REDIRECT: { category: "ACCESS", code: "PUBLIC_REDIRECT_NOT_ELIGIBLE" },
   SIMULATOR_RESEARCH_UNSAFE_URL: { category: "ACCESS", code: "UNSAFE_PUBLIC_URL" },
   SIMULATOR_RESEARCH_DESTINATION_CHANGED: { category: "ACCESS", code: "PUBLIC_DESTINATION_CHANGED" },
@@ -220,7 +221,11 @@ export function classifySimulatorSupportFailure(error: unknown, stage: Simulator
     const name = stringProperty(current, "name");
     const causeCode = stringProperty(current, "code");
     const browserCode = /^page\.goto: net::ERR_([A-Z_]+)\b/u.exec(message ?? "")?.[1];
-    const research = knownValue(researchCodes, message);
+    const missingBrowserHelper = researchPhase === "BROWSER_DOCUMENT" &&
+      sourceLocation?.startsWith("src/lib/automation/simulator-interactive-browser.ts:") &&
+      /^locator\.evaluate: ReferenceError: __name is not defined(?:\n|$)/u.test(message ?? "");
+    const research = knownValue(researchCodes, message) ||
+      (missingBrowserHelper ? researchCodes.SIMULATOR_BROWSER_CALLBACK_HELPER_MISSING : undefined);
     const known = (research && { ...research, stage: "PUBLIC_READ" as const }) || knownValue(ownedMessages, message) ||
       knownValue(browserCodes, browserCode) || knownValue(causeCodes, causeCode) ||
       (name === "TimeoutError" || name === "AbortError" ? { category: "NETWORK" as const, code: name === "TimeoutError" ? "PUBLIC_READ_TIMEOUT" : "PUBLIC_READ_ABORTED", stage: "PUBLIC_READ" as const } : undefined) ||

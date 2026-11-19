@@ -369,6 +369,10 @@ describe("course worker launch supervisor", () => {
     expect(prompt).toContain("only when the owned action and exclusive path authority authorize implementation");
     expect(prompt).toContain("Keep the original failed discovery job terminal and its clock unchanged");
     expect(prompt).toContain("Never manually send email or change customer alert inputs");
+    expect(prompt).toContain("a verifier with terminal exit code 0");
+    expect(prompt).toContain("Unknown failure cause is not proof of uncertain operation effects");
+    expect(prompt).toContain("only when that current context explicitly permits tooling repair");
+    expect(prompt).toContain("Nonzero or unfinished protected commands");
   });
   it("rejects an old template that directs a worker to another model", () => {
     const f = fixture();

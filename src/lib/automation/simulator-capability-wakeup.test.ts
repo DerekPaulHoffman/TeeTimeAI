@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { CourseDispatchAudit } from "./course-support-course-dispatch";
 import { simulatorCapabilityWakeupReceipt } from "./simulator-capability-wakeup";
-import { SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION } from "./simulator-support-research-policy";
+import { readSimulatorResearchState, selectSimulatorResearchTarget, SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION } from "./simulator-support-research-policy";
 
 const now = new Date("2026-10-09T18:00:00.000Z");
 const fingerprint = "a".repeat(64);
@@ -62,6 +62,43 @@ describe("simulator capability wakeup receipt", () => {
     const f = slottedFixture(), before = JSON.stringify(f);
     expect(simulatorCapabilityWakeupReceipt(f)).toEqual({ sourceUrl: slottedCatalog, requestId: "33333333-3333-4333-8333-333333333333" });
     expect(JSON.stringify(f)).toBe(before);
+  });
+  function callbackFixture() {
+    const f = slottedFixture(), state = f.audit.simulatorResearch!;
+    for (const entry of state.history) entry.researchImplementationVersion = "public-calendar-document-scoped-evidence-v40";
+    const last = state.history[2];
+    Object.assign(last, { outcome: "HARD_FAILED", httpStatus: 0, failure: { stage: "PUBLIC_READ", category: "UNKNOWN",
+      code: "UNCLASSIFIED_FAILURE", researchPhase: "BROWSER_DOCUMENT", sourceLocation: "src/lib/automation/simulator-interactive-browser.ts:318" } });
+    delete last.publicReadEvidence; delete last.renderWarning;
+    return f;
+  }
+  it("wakes the precisely reproduced old production-loader failure with all original evidence retained", () => {
+    const f = callbackFixture(), before = JSON.stringify(f);
+    expect(simulatorCapabilityWakeupReceipt(f)).toEqual({ sourceUrl: slottedCatalog, requestId: "33333333-3333-4333-8333-333333333333" });
+    expect(JSON.stringify(f)).toBe(before);
+  });
+  it.each(["current collector", "different phase", "different line", "different catalog", "unknown public access", "denied HTTP", "unknown old failure"])("does not reclassify the production-loader receipt with %s", scenario => {
+    const f = callbackFixture(), state = f.audit.simulatorResearch!, last = state.history[2];
+    if (scenario === "current collector") last.researchImplementationVersion = SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION;
+    if (scenario === "different phase") last.failure!.researchPhase = "BROWSER_REQUEST";
+    if (scenario === "different line") last.failure!.sourceLocation = "src/lib/automation/simulator-interactive-browser.ts:319";
+    if (scenario === "different catalog") last.requestedUrl = last.sourceUrl = slottedCatalog.replace("AAAAAAAAAAAAA", "CCCCCCCCCCCCC");
+    if (scenario === "unknown public access") delete state.history[1].publicReadEvidence;
+    if (scenario === "denied HTTP") state.history[1].httpStatus = 403;
+    if (scenario === "unknown old failure") (f.audit as unknown as {simulatorResearchPriorFailures: {routes: {failure: {code: string}}[]}}).simulatorResearchPriorFailures.routes[0].failure.code = "OTHER_UNKNOWN";
+    expect(simulatorCapabilityWakeupReceipt(f)).toBeNull();
+  });
+  it("keeps the failed callback fenced until the new owner has independently refreshed its public catalog", () => {
+    const f = callbackFixture(), old = f.audit.simulatorResearch!, last = old.history[2];
+    const priorFailedRoutes = [{ url: last.requestedUrl, rendered: last.rendered, httpStatus: last.httpStatus,
+      requestId: last.requestId, observedAt: last.observedAt, researchImplementationVersion: last.researchImplementationVersion, failure: last.failure }];
+    const input = { officialUrl: "https://official.example.test/", bookingUrl: slottedCatalog,
+      source: "booking" as const, rendered: true, now, priorFailedRoutes };
+    expect(() => selectSimulatorResearchTarget({ ...input, state: readSimulatorResearchState(undefined, fingerprint) })).toThrow("unchanged structural");
+    const state = readSimulatorResearchState({ ...old, readCount: 2, history: old.history.slice(0, 2).map((entry, index) => ({ ...entry,
+      researchImplementationVersion: SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION, observedAt: `2026-10-09T17:${58 + index}:00.000Z` })) }, fingerprint);
+    expect(selectSimulatorResearchTarget({ ...input, state })).toMatchObject({ url: slottedCatalog, rendered: true });
+    expect(last.outcome).toBe("HARD_FAILED");
   });
   it.each(["current collector", "changed source", "access", "unknown access", "different destination", "unknown failure", "future read", "already implementing"])("does not wake slotted-control research with %s", scenario => {
     const f = slottedFixture(), last = f.audit.simulatorResearch!.history[2];
