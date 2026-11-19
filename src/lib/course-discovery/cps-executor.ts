@@ -16,6 +16,7 @@ import { readNativeOfficialIdentityPage, type NativeOfficialPageReader } from ".
 import { createCps26PublicSession } from "./cps-public-session";
 import { deriveCpsRootEntry, type CpsOfficialEntryProof } from "./cps-official-entry-proof";
 import { readCpsOfficialEntry } from "./cps-official-entry-reader";
+import { failCpsAvailability } from "./cps-availability-diagnostic";
 
 export type CpsDependencies = { fetch?: typeof fetch; now?: () => Date; deadlineAt?: Date; signal?: AbortSignal;
   trustedContext?: { canonicalCoursePhone?: string }; localCapabilities?: readonly "LOCAL_CHROME"[]; readNativeOfficialPage?: NativeOfficialPageReader;
@@ -295,14 +296,16 @@ export function normalizeCpsAvailability(value: unknown, transactionId: string, 
   input: AccessExecutionInput, now: Date): AccessExecutionResult["slots"] {
   validateInput(input, source);
   const response = z.object({ isSuccess: z.literal(true), transactionId: z.literal(transactionId), content: z.array(slotSchema).max(500) }).strict().safeParse(value);
-  if (!uuid(transactionId) || !response.success) fail("CPS_AVAILABILITY_INCOMPLETE");
+  if (!uuid(transactionId)) failCpsAvailability("TRANSACTION_ID", value, transactionId);
+  if (!response.success) failCpsAvailability("SCHEMA", value, transactionId, undefined, response.error.issues);
   const ids = new Set<number>();
   // Validate every row, including excluded times/party options, before filtering.
   const rows = response.data.content.map(row => {
-    if (ids.has(row.teeSheetId) || !metadata.courseIds.includes(row.courseId) || row.startTime.slice(0, 10) !== input.date)
-      fail("CPS_AVAILABILITY_INCOMPLETE");
+    if (ids.has(row.teeSheetId)) failCpsAvailability("DUPLICATE_ID", value, transactionId);
+    if (!metadata.courseIds.includes(row.courseId)) failCpsAvailability("COURSE_ID", value, transactionId);
+    if (row.startTime.slice(0, 10) !== input.date) failCpsAvailability("DATE", value, transactionId);
     const holes = row.holes ?? row.defaultHoles;
-    if (holes !== 9 && holes !== 18) fail("CPS_AVAILABILITY_INCOMPLETE");
+    if (holes !== 9 && holes !== 18) failCpsAvailability("ROUND_LENGTH", value, transactionId, row);
     ids.add(row.teeSheetId); return { row, holes, instant: cpsLocalInstant(row.startTime, input.timeZone) };
   });
   return rows.filter(({ row, instant }) => row.availableParticipantNo.includes(input.players) && (row.minPlayer ?? 1) <= input.players &&

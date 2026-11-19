@@ -747,9 +747,37 @@ USCHEDULE_READ_GATES.add("PUBLIC_PEOPLE_SELECTOR_IS_UNAVAILABLE");
 USCHEDULE_READ_GATES.add("PUBLIC_PEOPLE_SELECTOR_CHANGED");
 USCHEDULE_READ_GATES.add("PUBLIC_SINGLE_UNIT_SELECTOR_IS_UNAVAILABLE");
 USCHEDULE_READ_GATES.add("PUBLIC_SINGLE_UNIT_SELECTOR_CHANGED");
+export function safeCpsAvailabilityDiagnostic(value) {
+  try {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const required = ["schemaVersion", "stage", "envelopeObject", "successTrue", "transactionMatches", "transactionMatchesIgnoringCase", "rowCount", "issues", "issuesOmitted"];
+    if (required.some(key => !Object.hasOwn(value, key)) || Object.keys(value).some(key => ![...required, "roundLength"].includes(key)) ||
+        value.schemaVersion !== 1 || !["TRANSACTION_ID", "SCHEMA", "DUPLICATE_ID", "COURSE_ID", "DATE", "ROUND_LENGTH"].includes(value.stage) ||
+        !["envelopeObject", "successTrue", "transactionMatches", "transactionMatchesIgnoringCase", "issuesOmitted"].every(key => typeof value[key] === "boolean")) return undefined;
+    const count = item => item === "OVER_LIMIT" || Number.isSafeInteger(item) && item >= 0 && item <= 500;
+    if (value.rowCount !== "NOT_ARRAY" && !count(value.rowCount) || !Array.isArray(value.issues) || value.issues.length > 12 ||
+        (value.stage === "SCHEMA" ? !value.issues.length : value.issues.length || value.issuesOmitted)) return undefined;
+    for (const issue of value.issues) {
+      if (!issue || typeof issue !== "object" || Array.isArray(issue) ||
+          ["field", "kind", "valueType"].some(key => !Object.hasOwn(issue, key)) ||
+          Object.keys(issue).some(key => !["field", "kind", "valueType", "safePositiveInteger", "extraKeyCount"].includes(key)) ||
+          !["ENVELOPE", "ROW", "IS_SUCCESS", "TRANSACTION_ID", "CONTENT", "TEE_SHEET_ID", "COURSE_ID", "START_TIME", "PARTICIPANTS", "MIN_PLAYER", "HOLES", "DEFAULT_HOLES", "OTHER"].includes(issue.field) ||
+          !["INVALID_TYPE", "INVALID_VALUE", "UNRECOGNIZED_KEYS", "TOO_BIG", "TOO_SMALL", "INVALID_FORMAT", "CUSTOM", "OTHER"].includes(issue.kind) ||
+          !["MISSING", "NULL", "ARRAY", "OBJECT", "STRING", "NUMBER", "BOOLEAN", "OTHER"].includes(issue.valueType) ||
+          issue.safePositiveInteger !== undefined && (typeof issue.safePositiveInteger !== "boolean" || issue.valueType !== "NUMBER") ||
+          issue.extraKeyCount !== undefined && (issue.kind !== "UNRECOGNIZED_KEYS" || !count(issue.extraKeyCount))) return undefined;
+    }
+    if ((value.stage === "ROUND_LENGTH") !== (value.roundLength !== undefined)) return undefined;
+    if (value.roundLength && (typeof value.roundLength !== "object" || Array.isArray(value.roundLength) || Object.keys(value.roundLength).sort().join(",") !== "defaultHoles,holes" ||
+        !["holes", "defaultHoles"].every(key => ["MISSING", "NULL", "ZERO", "NINE", "EIGHTEEN", "OTHER"].includes(value.roundLength[key])))) return undefined;
+    return structuredClone(value);
+  } catch { return undefined; }
+}
 function safeReplayDiagnostic(value) {
   if (!value || typeof value !== "object" || !/^[A-Z_0-9]{1,80}$/u.test(value.code ?? "")) return undefined;
   const result = { code: value.code };
+  const cpsAvailability = value.code === "CPS_AVAILABILITY_INCOMPLETE" ? safeCpsAvailabilityDiagnostic(value.cpsAvailability) : undefined;
+  if (cpsAvailability) result.cpsAvailability = cpsAvailability;
   const mindbodyReplay = value.code === "MINDBODY_NATIVE_CAPTURE_FAILURE" ? safeMindbodyReplay(value.mindbodyReplay) : undefined;
   if (mindbodyReplay) result.mindbodyReplay = mindbodyReplay;
   if (Number.isInteger(value.stepIndex) && value.stepIndex >= 0 && value.stepIndex <= 31) result.stepIndex = value.stepIndex;

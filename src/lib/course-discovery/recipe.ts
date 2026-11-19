@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { isIP } from "node:net";
 import { z } from "zod";
+import { cpsAvailabilityDiagnosticSchema } from "./cps-availability-diagnostic";
 import { uscheduleReadGates } from "@/lib/simulators/providers/uschedule-read-diagnostic";
 import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import { existingAdapterMetadataSchema } from "./existing-adapter-schema";
@@ -529,6 +530,7 @@ const accessRequestFailureDiagnosticSchema = z.object({
   publicHeaderDiagnostic: publicHeaderFailureDiagnosticSchema.optional().describe("Closed facts captured at an unchanged native public-read header denial. These facts never authorize requests or prove the cause of a later timeout."),
 }).strict();
 export const accessExecutionDiagnosticSchema = accessRequestFailureDiagnosticSchema.extend({
+  cpsAvailability: cpsAvailabilityDiagnosticSchema.optional().describe("Closed availability parser failure predicates only; no source, identity, request, completeness or activation authority."),
   mindbodyReplay: z.object({
     stage: z.enum(["IDLE", "WAIT_DOCUMENT", "WAIT_RENDERED", "RAW_CATALOG", "RENDERED_CATALOG", "COMPARE_CATALOG", "CATALOG_READY", "FILTER_SETTLEMENT",
       "WAIT_GRID", "WAIT_GRID_RENDERED", "RAW_GRID", "GRID_READY", "DAY_FORM", "BROWSE_LOCATE", "BROWSE_VALIDATE", "BROWSE_ACTION", "BROWSE_DONE", "DAY_ACTION"]),
@@ -552,6 +554,8 @@ export const accessExecutionDiagnosticSchema = accessRequestFailureDiagnosticSch
     retryable: z.boolean(), httpStatus: z.number().int().min(100).max(599).optional(), uscheduleGate: z.enum(uscheduleReadGates).optional(),
   }).strict().optional(),
 }).strict().superRefine((diagnostic, ctx) => {
+  if (diagnostic.cpsAvailability && diagnostic.code !== "CPS_AVAILABILITY_INCOMPLETE")
+    ctx.addIssue({ code: "custom", message: "Availability parser facts require their fixed failure code", path: ["cpsAvailability"] });
   if (diagnostic.simulatorError?.uscheduleGate && (diagnostic.code !== "SIMULATOR_PROVIDER_ERROR" || !["INVALID_SOURCE", "SCHEMA_CHANGED"].includes(diagnostic.simulatorError.code)))
     ctx.addIssue({ code: "custom", message: "USchedule gate requires its provider failure classification", path: ["simulatorError", "uscheduleGate"] });
   if (diagnostic.mindbodyReplay && diagnostic.code !== "MINDBODY_NATIVE_CAPTURE_FAILURE")
