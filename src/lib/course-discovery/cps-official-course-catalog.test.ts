@@ -45,6 +45,30 @@ function redirectedFixture(canonicalUrl: string, documentUrl: string, linkOrigin
 }
 
 describe("native official named public course catalog", () => {
+  it.each([9, 18] as const)("binds only a declared %s round-length suffix to the complete official names", holes => {
+    const f = fixture();
+    const rows = f.rows.map(row => ({ ...row, holes, courseName: `${row.courseName} ${holes}` }));
+    const options = { ...f.options, courseOptions: rows.map(row => ({ courseId: row.courseId, courseName: row.courseName, webSiteId: row.websiteId })) };
+    const metadata = parseCpsCatalog(rows, options, source, f.context, build);
+    expect(metadata).toMatchObject({ courseIds: [7, 9], publicCatalogMode: "OFFICIAL_NAMED_ONLINE_COURSES" });
+    expect(bindCpsOfficialCourseNames(source, f.page, rows).map(row => row.officialUrl)).toEqual(labels.map(row => row.href));
+    expect(parseCpsCatalog([...rows].reverse(), options, source, f.context, build)).toEqual(metadata);
+    expect(metadata).not.toHaveProperty("layoutHoleCounts");
+  });
+  it.each(["wrong-length", "missing-length", "other-number", "extra-word", "leading-number", "duplicate-base", "missing-official", "ambiguous-official"])(
+    "does not use a round-length suffix to bypass %s", change => {
+      const f = fixture();
+      const rows: Array<{ courseId: number; courseName: string; holes?: 9 | 18 }> = f.rows.map(row => ({ ...row, courseName: row.courseName + " 18" }));
+      if (change === "wrong-length") rows[0].holes = 9;
+      if (change === "missing-length") delete rows[0].holes;
+      if (change === "other-number") rows[0].courseName = "North 27";
+      if (change === "extra-word") rows[0].courseName = "North Championship 18";
+      if (change === "leading-number") rows[0].courseName = "18 North";
+      if (change === "duplicate-base") rows[1].courseName = "North";
+      if (change === "missing-official") f.page.visibleEvidence!.officialCourseLinkLabels = labels.slice(0, 1);
+      if (change === "ambiguous-official") f.page.visibleEvidence!.officialCourseLinkLabels!.push({ href: "https://official.example/other", text: "North Course" });
+      expect(() => bindCpsOfficialCourseNames(source, f.page, rows)).toThrow("ADAPTER_IDENTITY_MISMATCH");
+    });
   it("keeps actual rejected comparison keys out of browser diagnostics and clears them on the next inspection", async () => {
     const f = fixture();
     f.rows[0].courseName = f.options.courseOptions[0].courseName = "Harbor North";
@@ -169,8 +193,10 @@ describe("native official named public course catalog", () => {
     expect(() => parseAccessRecipe({ ...recipe, source: { ...recipe.source, venueAddress: undefined } })).toThrow();
     expect(JSON.stringify(metadata)).not.toMatch(/public-site|508|official\.example|North|South/u);
   });
-  it.each(["missing-labels", "omitted-labels", "foreign-link", "query-link", "ambiguous-path", "missing-raw", "hidden-raw", "renamed-raw", "extra-official-course", "extra-provider-course", "missing-provider-course", "duplicate-course", "wrong-site", "wrong-timezone", "wrong-address", "wrong-venue", "private-row", "private-option", "private-venue", "malformed-flag", "wrong-phone", "copied-native", "expired-native", "explicit-selection"])("rejects incomplete or conflicting named venue evidence: %s", change => {
+  it.each(["missing-labels", "omitted-labels", "foreign-link", "query-link", "ambiguous-path", "missing-raw", "hidden-raw", "renamed-raw", "extra-official-course", "extra-provider-course", "missing-provider-course", "duplicate-course", "wrong-site", "wrong-timezone", "wrong-address", "wrong-venue", "private-row", "private-option", "private-venue", "malformed-flag", "wrong-phone", "copied-native", "expired-native", "explicit-selection"].flatMap(change =>
+    [false, true].map(numbered => ({ change, numbered }))))("rejects incomplete or conflicting named venue evidence: $change (numbered=$numbered)", ({ change, numbered }) => {
     const f = fixture();
+    if (numbered) for (let i = 0; i < f.rows.length; i++) f.options.courseOptions[i].courseName = f.rows[i].courseName += " 18";
     if (change === "missing-labels") delete f.page.visibleEvidence!.officialCourseLinkLabels;
     if (change === "omitted-labels") f.page.visibleEvidence!.officialCourseLinkLabelsOmitted = true;
     if (change === "foreign-link" || change === "query-link") f.page.visibleEvidence!.officialCourseLinkLabels = labels.map((row, index) => index ? row :

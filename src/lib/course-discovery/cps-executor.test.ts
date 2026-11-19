@@ -176,9 +176,10 @@ describe("CPS fixed fresh public reads", () => {
       expect(fixture.active).toBe(0);
     }
   });
-  it.each([false, true])("independently replays the complete native named course set and rejects drift before availability (redirect: %s)", async redirected => {
+  it.each([false, true].flatMap(redirected => [false, true].map(numbered => ({ redirected, numbered }))))("independently replays the complete native named course set and rejects drift before availability (redirect=$redirected numbered=$numbered)", async ({ redirected, numbered }) => {
     let drift = "", nativeCalls = 0;
-    const names = [{ courseId: 1, courseName: "North", webSiteId: "public-site" }, { courseId: 2, courseName: "South", webSiteId: "public-site" }];
+    const names = [{ courseId: 1, courseName: "North", webSiteId: "public-site" }, { courseId: 2, courseName: "South", webSiteId: "public-site" }]
+      .map(row => ({ ...row, courseName: row.courseName + (numbered ? " 9" : "") }));
     const fixture = setup(async (url, _init, normal) => {
       if (url.hostname === "www.thebobgc.com") return new Response("No source identity", { headers: { "content-type": "text/html" } });
       if (url.pathname.endsWith("/Configuration")) return json({ ...config(), apiKey: undefined,
@@ -196,7 +197,7 @@ describe("CPS fixed fresh public reads", () => {
     const nativeRead: CpsDependencies["readNativeOfficialPage"] = async (identity, pageUrl, until, mode) => {
       expect(fixture.active).toBe(0); nativeCalls++;
       const documentUrl = redirected ? source.officialUrl.replace("//www.", "//") : source.officialUrl;
-      const printed = "412-622-6959", links = names.map(item => ({ href: documentUrl + item.courseName.toLowerCase(), text: item.courseName + " Course" }));
+      const printed = "412-622-6959", links = ["North", "South"].map(name => ({ href: documentUrl + name.toLowerCase(), text: name + " Course" }));
       const html = `<html><body><h1>${source.venueName}</h1><section><h2>Contact Us</h2><a href="tel:${printed}">${printed}</a></section>` +
         `<a href="${source.bookingUrl}">Book A Tee Time</a>${links.map(link => `<a href="${link.href}">${link.text}</a>`).join("")}</body></html>`;
       const page = await readNativeOfficialIdentityPage(identity, pageUrl, until, { allowCpsPhoneBookingContact: mode === "PHONE_LINK" ? true : undefined,

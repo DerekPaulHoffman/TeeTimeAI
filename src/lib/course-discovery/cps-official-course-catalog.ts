@@ -45,7 +45,7 @@ const fail = (stage: FailureStage, comparison?: unknown): never => {
  * These current raw/rendered witnesses only participate in a rederived catalog
  * hash. They never override access, provider, phone or physical identity gates. */
 export function bindCpsOfficialCourseNames(source: { officialUrl: string; venueName: string }, page: OfficialIdentityPage,
-  courses: ReadonlyArray<{ courseId: number; courseName: string }>) {
+  courses: ReadonlyArray<{ courseId: number; courseName: string; holes?: 9 | 18 }>) {
   const shown = page.visibleEvidence?.officialCourseLinkLabels;
   const root = freshNativeCanonicalRootDocument(page, source.officialUrl);
   if (!root || page.browserTransport !== "NATIVE_CHROME") return fail("NAMED_ROOT_PROVENANCE");
@@ -72,8 +72,17 @@ export function bindCpsOfficialCourseNames(source: { officialUrl: string; venueN
     if (prior) prior.labels.add(pairLabel(row.text));
     else named.set(name, { href: row.href, labels: new Set([pairLabel(row.text)]) });
   }
-  if (named.size !== courses.length || new Set(courses.map(row => key(row.courseName))).size !== courses.length ||
-      courses.some(row => !named.has(key(row.courseName)) || restricted.test(row.courseName))) return fail("NAMED_COURSE_NAMES", {
+  const courseNames = courses.map(row => {
+    const literal = key(row.courseName);
+    if (named.has(literal)) return literal;
+    // A public sheet may append its declared round length. Remove only that
+    // exact final token when the entire remaining name has an official link.
+    // This supplies no physical-layout fact and never picks a default sheet.
+    const suffix = /^(.+) (9|18)$/u.exec(literal);
+    return suffix && Number(suffix[2]) === row.holes && named.has(suffix[1]) ? suffix[1] : literal;
+  });
+  if (named.size !== courses.length || new Set(courseNames).size !== courses.length ||
+      courses.some((row, index) => !named.has(courseNames[index]) || restricted.test(row.courseName))) return fail("NAMED_COURSE_NAMES", {
         schemaVersion: 1, kind: "CPS_NAMED_COURSE_COMPARISON", observedAt: new Date().toISOString(), canonicalName: key(source.venueName),
         officialNames: [...named.keys()].sort(), providerNames: courses.map(row => key(row.courseName)),
       });
@@ -93,6 +102,7 @@ export function bindCpsOfficialCourseNames(source: { officialUrl: string; venueN
   walk(parse(page.html));
   for (const row of named.values()) for (const label of row.labels)
     if (!rawPairs.has(JSON.stringify([row.href, label]))) return fail("NAMED_RAW_LINK_PAIR");
-  return [...courses].sort((a, b) => a.courseId - b.courseId).map(row => ({ courseId: row.courseId, courseName: row.courseName,
-    officialUrl: named.get(key(row.courseName))!.href, officialLabels: [...named.get(key(row.courseName))!.labels].sort() }));
+  return courses.map((row, index) => ({ row, official: named.get(courseNames[index])! }))
+    .sort((a, b) => a.row.courseId - b.row.courseId).map(({ row, official }) => ({ courseId: row.courseId, courseName: row.courseName,
+      officialUrl: official.href, officialLabels: [...official.labels].sort() }));
 }
