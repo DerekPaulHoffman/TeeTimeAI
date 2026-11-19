@@ -2,11 +2,12 @@ import { discoveryError } from "./course-discovery-client.mjs";
 import { canonicalStagehandData as canonical, stagehandDataHash as hash, createStagehandSourceCheckpoint } from "./course-discovery-stagehand-source.mjs";
 import { projectSourceDiagnostic, sourceTransportCodes, safeNativeRouterFailure } from "./stagehand/source-diagnostic.mjs";
 import { safeTeeItUpDelegationDiagnostic, safeFixedAdapterReadDiagnostic, safeFixedInspectionSourceDiagnostic } from "./course-discovery-worker.mjs";
-import { currentStagehandInspectionDiagnostic, safeInspectionReadability, safeInspectionLandingDiagnostic } from "./course-discovery-stagehand-inspection.mjs";
+import { currentStagehandInspectionDiagnostic, safeInspectionReadability, safeInspectionLandingDiagnostic, stagehandInspectionFailureCodes } from "./course-discovery-stagehand-inspection.mjs";
 
 const LIMIT = 32000, KIND = "OWN_STAGEHAND_FAILURE_DIAGNOSTIC";
 const phases = new Set(["SOURCE_RESUME", "SOURCE_DISCOVERY", "SOURCE_VALIDATION", "FIXED_INSPECTION", "RECIPE_VALIDATION", "REPLAY", "ACTIVATION", "UNKNOWN"]);
-const codes = new Set([...sourceTransportCodes, "OFFICIAL_DELEGATED_SOURCE_UNVERIFIED", "OFFICIAL_PHYSICAL_CONTACT_UNVERIFIED", "FOREUP_OFFICIAL_ROUTE_UNVERIFIED", "UNSUPPORTED_ADAPTER_SOURCE", "CPS_PUBLIC_BUILD_UNSUPPORTED", "ADAPTER_CONFIGURATION_UNVERIFIED", "STAGEHAND_WORKER_FAILED", "STAGEHAND_SOURCE_DISCOVERY_FAILED", "STAGEHAND_SOURCE_OUTPUT_INVALID",
+const workerErrorNames = ["Error", "TypeError", "RangeError", "SyntaxError", "TimeoutError", "AbortError", "ZodError", "ProtocolError", "UNKNOWN"];
+const codes = new Set([...sourceTransportCodes, ...stagehandInspectionFailureCodes, "OFFICIAL_DELEGATED_SOURCE_UNVERIFIED", "OFFICIAL_PHYSICAL_CONTACT_UNVERIFIED", "FOREUP_OFFICIAL_ROUTE_UNVERIFIED", "UNSUPPORTED_ADAPTER_SOURCE", "CPS_PUBLIC_BUILD_UNSUPPORTED", "ADAPTER_CONFIGURATION_UNVERIFIED", "STAGEHAND_WORKER_FAILED", "STAGEHAND_SOURCE_DISCOVERY_FAILED", "STAGEHAND_SOURCE_OUTPUT_INVALID",
   "ADAPTER_TRANSPORT_FAILED", "ADAPTER_CONFIGURATION_CHANGED", "ADAPTER_IDENTITY_MISMATCH", "INVALID_ADAPTER_SOURCE", "USCHEDULE_PUBLIC_LOCATION_UNVERIFIED", "USCHEDULE_PUBLIC_PARTY_UNVERIFIED", "OFFICIAL_POSTAL_SOURCE_UNVERIFIED", "CPS_PHONE_BOOKING_SOURCE_UNVERIFIED", "CPS_OFFICIAL_ENTRY_UNVERIFIED",
   "OFFICIAL_STREET_TYPE_OMITTED_UNVERIFIED", "OFFICIAL_STREET_TYPE_OMITTED_CHANGED",
   "OFFICIAL_CONTACT_SOURCE_UNVERIFIED", "OFFICIAL_CONTACT_READER_UNAVAILABLE", "OFFICIAL_CONTACT_ROOT_READ_UNVERIFIED",
@@ -37,6 +38,10 @@ function validEntry(value, job, now) {
     tokenUsage: Object.fromEntries(["inputTokens", "cachedInputTokens", "outputTokens", "reasoningOutputTokens", "totalTokens"].map(key => [key, count(value.tokenUsage?.[key])])),
     cleanup: { sourceBrowserClosed: fact(value.cleanup.sourceBrowserClosed), sourceModelClosed: fact(value.cleanup.sourceModelClosed), inspectionBrowserClosed: fact(value.cleanup.inspectionBrowserClosed) },
     sourceResumed: value.sourceResumed };
+  if (value.workerErrorName !== undefined) {
+    if (value.code !== "STAGEHAND_WORKER_FAILED" || !workerErrorNames.includes(value.workerErrorName)) return false;
+    projected.workerErrorName = value.workerErrorName;
+  }
   if (value.diagnostic !== undefined) {
     const diagnostic = projectSourceDiagnostic(value.diagnostic);
     if (!diagnostic || value.diagnosticSha256 !== hash(diagnostic)) return false;
@@ -110,6 +115,7 @@ export function createStagehandFailureCheckpoint({ job, report, error, phase, me
   const fixedInspectionDiagnostic = phase === "FIXED_INSPECTION" ? currentStagehandInspectionDiagnostic(error, job, startedAt, now) : undefined;
   const code = [error?.code, error?.message].find(value => codes.has(value)) ?? "STAGEHAND_WORKER_FAILED";
   const entry = { attempt: job.attempts, observedAt: new Date(now).toISOString(), phase: phases.has(phase) ? phase : "UNKNOWN", code,
+    ...(code === "STAGEHAND_WORKER_FAILED" ? { workerErrorName: workerErrorNames.includes(error?.name) ? error.name : "UNKNOWN" } : {}),
     counts: { completedModelCalls: count(metrics?.modelCalls, 1000000), sourceElapsedMs: count(metrics?.sourceElapsedMs, 900000),
       workerElapsedMs: count(Math.max(0, now - startedAt), 900000), completedReplays: count(metrics?.replayDurationsMs?.length, 2) },
     tokenUsage: Object.fromEntries(["inputTokens", "cachedInputTokens", "outputTokens", "reasoningOutputTokens", "totalTokens"].map(key => [key, count(metrics?.tokenUsage?.[key])])),

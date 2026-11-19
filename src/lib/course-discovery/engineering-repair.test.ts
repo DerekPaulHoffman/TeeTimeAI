@@ -289,6 +289,19 @@ describe("private failure evidence", () => {
     expect(result).toMatchObject({ nativeTransportDiagnostic: { failureCode, ...facts }, evidenceAuthority: false });
     expect(JSON.stringify(result)).not.toContain("PRIVATE");
   });
+  it("exposes retained fixed-inspection readability without page or identity values", () => {
+    const row = { action: "open", actionIndex: 1, currentUrlCategory: "BOOKING_ORIGIN", nativeTransport: true,
+      navigationStatusPresent: true, navigationStatus: 200, accessRequirementObserved: false, nativeFatalPresent: false,
+      nativeFatalCode: null, readyState: "complete", pendingRequestCount: 0, officialDocumentCurrent: null, failedPredicates: [] };
+    const project = (readability: unknown) => discoveryFailureDiagnosis({ outcome: "TOOL_FAILURE", checkpoint: {
+      stagehandFailure: { schemaVersion: 1, kind: "OWN_STAGEHAND_FAILURE_DIAGNOSTIC", entries: [{ attempt: 1,
+        phase: "FIXED_INSPECTION", code: "STAGEHAND_WORKER_FAILED", fixedInspectionDiagnostic: { readability } }] },
+    } });
+    expect(project([{ ...row, currentUrlSha256: "PRIVATE", html: "PRIVATE" }])).toMatchObject({ fixedInspectionReadability: [row], evidenceAuthority: false });
+    expect(JSON.stringify(project([{ ...row, html: "PRIVATE" }]))).not.toContain("PRIVATE");
+    for (const value of [[{ ...row, pendingRequestCount: -1 }], [{ ...row, nativeTransport: "true" }], Array(7).fill(row), "PRIVATE", null])
+      expect(project(value)).not.toHaveProperty("fixedInspectionReadability");
+  });
   it("does not traverse malformed or unbounded checkpoint histories", () => {
     for (const entries of [null, "PRIVATE", [{ attempt: 2, phase: "PRIVATE invalid", code: "PRIVATE invalid" }],
       Array.from({ length: 3 }, (_, i) => ({ attempt: i + 1, code: "BROWSER_UNAVAILABLE", phase: "REPLAY" }))]) {

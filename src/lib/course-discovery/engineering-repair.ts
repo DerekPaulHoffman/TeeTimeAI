@@ -13,7 +13,7 @@ import { buildCourseSupportProviderSnapshotFingerprint } from "@/lib/automation/
 import { delegatedDiagnosticGates, delegatedDiagnosticStages, delegatedFacilityBindingDiagnosticGates } from "./teeitup-delegated-booking-diagnostic";
 import { bookingEdgeEvidenceSchema } from "./booking-edge-evidence";
 import { hasReciprocalLearningRepairLink, readLearningRepairRecoveries, readLearningRepairRecoveryOf } from "./learning-repair-recovery";
-import { projectStagehandNativeRouterFailure } from "./stagehand-native-router-diagnostic";
+import { projectStagehandNativeRouterFailure, stagehandNativeRouterCodes } from "./stagehand-native-router-diagnostic";
 import { cpsPhoneBookingFailureStages } from "./cps-phone-booking-proof";
 
 const receiptSchema = z.object({ version: z.literal(1), state: z.literal("QUEUED"),
@@ -46,6 +46,9 @@ const diagnosticFailureCodes = new Set([
   "FRAMEWORK_INSPECTION_PATH_STALE", "FRAMEWORK_INSPECTION_SOURCE_NOT_SETTLED", "FRAMEWORK_INSPECTION_METADATA_INVALID",
   "FRAMEWORK_INSPECTION_METADATA_CONFLICT", "FRAMEWORK_INSPECTION_PROOF_NOT_BOUND", "FRAMEWORK_INSPECTION_OBSERVATION_INVALID",
   "FRAMEWORK_INSPECTION_CLOSE_FAILED", "FRAMEWORK_INSPECTION_CONTEXT_CHANGED", "FRAMEWORK_INSPECTION_LANDING_CHANGED",
+  "FRAMEWORK_HYBRID_REPORT_INVALID", "FRAMEWORK_SOURCE_PROPOSAL_WITH_RECIPE", "FRAMEWORK_INSPECTION_ENGINE_INVALID",
+  "FRAMEWORK_HYBRID_SOURCE_NOT_ELIGIBLE", "FRAMEWORK_INSPECTION_SCOPE_INVALID", "FRAMEWORK_INSPECTION_ACTION_LIMIT",
+  "FRAMEWORK_INSPECTION_TRANSPORT_CHANGED", "FRAMEWORK_INSPECTION_SOURCE_CONTEXT_CHANGED", "FRAMEWORK_INSPECTION_RECEIPT_FAILED",
 ]);
 
 /** Compatibility for the specific old data-only/code-proof misclassification.
@@ -124,6 +127,16 @@ async function initializeEmptyInvestigation(tx: Pick<Prisma.TransactionClient, "
 
 /** Closed hints only. Model checkpoints explain a failure, never establish
  * monitoring eligibility, completeness, access requirements or write authority. */
+const inspectionReadabilitySchema = z.array(z.object({
+  action: z.enum(["open", "observe", "inspect_adapter", "click"]), actionIndex: z.number().int().min(1).max(6),
+  currentUrlCategory: z.enum(["OFFICIAL_ORIGIN", "BOOKING_ORIGIN", "OTHER_PUBLIC_HTTPS", "NON_PUBLIC_OR_INVALID"]),
+  nativeTransport: z.boolean().nullable(), navigationStatusPresent: z.boolean(), navigationStatus: z.number().int().min(100).max(599).nullable(),
+  accessRequirementObserved: z.boolean().nullable(), nativeFatalPresent: z.boolean(), nativeFatalCode: z.enum(stagehandNativeRouterCodes).nullable(),
+  readyState: z.enum(["loading", "interactive", "complete"]).nullable(), pendingRequestCount: z.number().int().min(0).max(2048).nullable(),
+  officialDocumentCurrent: z.boolean().nullable(),
+  failedPredicates: z.array(z.enum(["TRANSPORT_CHANGED", "PUBLIC_URL_REJECTED", "ACCESS_REQUIREMENT", "NATIVE_FATAL", "OPEN_STATUS_MISSING", "STATUS_REJECTED"])).max(6),
+})).min(1).max(6).refine(rows => new Set(rows.map(row => row.actionIndex)).size === rows.length);
+
 export function discoveryFailureDiagnosis(job: { outcome: string | null; checkpoint: unknown }, includeBookingEdgeEvidence = false) {
   const checkpoint = object(job.checkpoint), progress = object(checkpoint.stagehandProgress), failure = object(checkpoint.stagehandFailure);
   // The native worker writes a bounded attempt history, not a flat code. Do
@@ -147,7 +160,13 @@ export function discoveryFailureDiagnosis(job: { outcome: string | null; checkpo
       gate: gate.replace(/([a-z])([A-Z])/gu, "$1_$2").toUpperCase(), passed: gates[gate] })) }
     : undefined;
   const hopEvidence = includeBookingEdgeEvidence ? bookingEdgeEvidenceSchema.safeParse(diagnostic.hopEvidence) : null;
+  // Existing persisted inspection facts only. Deliberately omit URL hashes,
+  // source text, identities and private binding values from this handoff.
+  const readability = inspectionReadabilitySchema.safeParse(object(last?.fixedInspectionDiagnostic).readability);
   const inspection = { category, code, failureCode: code && diagnosticFailureCodes.has(code) ? code : null,
+    ...(code === "STAGEHAND_WORKER_FAILED" && ["Error", "TypeError", "RangeError", "SyntaxError", "TimeoutError", "AbortError", "ZodError", "ProtocolError", "UNKNOWN"].includes(String(last?.workerErrorName))
+      ? { workerErrorName: last?.workerErrorName } : {}),
+    ...(readability.success ? { fixedInspectionReadability: readability.data } : {}),
     ...(code === "CPS_PHONE_BOOKING_SOURCE_UNVERIFIED" && cpsPhoneBookingFailureStages.some(stage =>
       stage === object(last?.fixedInspectionDiagnostic).cpsPhoneBookingFailureStage) ? {
         cpsPhoneBookingFailureStage: object(last?.fixedInspectionDiagnostic).cpsPhoneBookingFailureStage,

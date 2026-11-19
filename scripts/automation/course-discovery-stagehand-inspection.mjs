@@ -331,6 +331,7 @@ const inspectionCodes = new Set(["FRAMEWORK_HYBRID_REPORT_INVALID","FRAMEWORK_SO
   "OFFICIAL_CONTACT_DEADLINE_EXCEEDED", "OFFICIAL_CONTACT_CHAIN_READ_UNVERIFIED",
   "OFFICIAL_CONTACT_DIRECTORY_BIND_UNVERIFIED", "OFFICIAL_CONTACT_DIRECTORY_READ_UNVERIFIED", "CPS_PHONE_BOOKING_SOURCE_UNVERIFIED", "CPS_OFFICIAL_ENTRY_UNVERIFIED"]);
 export const inspectionErrorCode = error => inspectionCodes.has(error?.code) ? error.code : "STAGEHAND_FIXED_INSPECTION_FAILED";
+export const stagehandInspectionFailureCodes = Object.freeze([...inspectionCodes]);
 export async function inspectStagehandAdapter({ report, adapterSourceProposal, job, worker, client, cwd, workDeadlineAt, signal,
   now = Date.now, onReceipt = () => {} }) {
   validateStagehandSourceReport(report, job);

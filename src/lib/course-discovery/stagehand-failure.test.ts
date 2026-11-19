@@ -7,9 +7,25 @@ import { createDelegationDiagnostic } from "./teeitup-delegated-booking-diagnost
 import { deriveNativePhysicalContactSource } from "./teeitup-physical-contact-proof";
 import { deriveForeupOfficialRouteContact } from "./foreup-official-route-ownership";
 import { createStagehandNativeRouterFailureCapture } from "./stagehand-native-router-diagnostic";
-import { inspectionErrorCode } from "../../../scripts/automation/course-discovery-stagehand-inspection.mjs";
+import { inspectionErrorCode, stagehandInspectionFailureCodes } from "../../../scripts/automation/course-discovery-stagehand-inspection.mjs";
 
 const first = Date.parse("2030-01-02T12:00:00.000Z");
+it("retains only the closed exception name for an otherwise unclassified worker failure", () => {
+  const f = fixture(), saved = createStagehandFailureCheckpoint({ ...f, phase: "FIXED_INSPECTION", error: new TypeError("PRIVATE") });
+  expect(saved.stagehandFailure.entries[0]).toMatchObject({ code: "STAGEHAND_WORKER_FAILED", workerErrorName: "TypeError" });
+  expect(readStagehandFailure({ ...f.job, checkpoint: saved }, f.now)).toEqual(saved.stagehandFailure);
+  expect(JSON.stringify(saved)).not.toContain("PRIVATE");
+  saved.stagehandFailure.entries[0].workerErrorName = "PRIVATE";
+  expect(readStagehandFailure({ ...f.job, checkpoint: saved }, f.now)).toBeUndefined();
+});
+it.each(stagehandInspectionFailureCodes)("does not collapse the known fixed-inspection failure %s", code => {
+  const f = fixture(), error = Object.assign(new Error("PRIVATE"), { code });
+  expect(inspectionErrorCode(error)).toBe(code);
+  const checkpoint = createStagehandFailureCheckpoint({ ...f, phase: "FIXED_INSPECTION", error });
+  expect(checkpoint.stagehandFailure.entries[0].code).toBe(code);
+  expect(readStagehandFailure({ ...f.job, checkpoint }, f.now)).toEqual(checkpoint.stagehandFailure);
+  expect(JSON.stringify(checkpoint)).not.toContain("PRIVATE");
+});
 it("round-trips the original source host navigation rejection through the bound failure checkpoint only", () => {
   const f = fixture(), capture = createStagehandNativeRouterFailureCapture();
   capture.record("STAGEHAND_GUARDED_SOURCE_REJECTED", { phase: "SOURCE_HOST_REQUEST", sourceRequestGuard: "TRANSACTION_URL", method: "GET", resourceType: "document", rootFrame: true,
