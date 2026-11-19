@@ -31,7 +31,7 @@ it("retains only closed official render gate facts", () => {
   expect(projectNativeOfficialRenderGate({ ...raw, witnessPresent: "true" })).toBeUndefined();
   expect(projectNativeOfficialRenderGate({ ...raw, anchorFailure: "https://private.example/" })).toBeUndefined();
 });
-async function installed(maxRequests?: number, signal?: AbortSignal, afterRoute?: (route: NativeReadRoute) => Promise<void>, responseProfile?: PublicBrowserResponseProfile,
+async function installed(limits?: number | { timeoutMs: number }, signal?: AbortSignal, afterRoute?: (route: NativeReadRoute) => Promise<void>, responseProfile?: PublicBrowserResponseProfile,
   onCommandFailure?: (diagnostic: NativeRequestDiagnostic) => void, controllerGetIntent?: (sourceUrl: string, targetUrl: string) => boolean,
   denyUncorrelatedPost?: (request: NativeUncorrelatedPost) => boolean, controllerScriptGetIntent?: (sourceUrl: string, targetUrl: string) => NativeGestureIntent | undefined) {
   const events = new Map<string, (event: unknown) => void>(), routes: NativeReadRoute[] = [];
@@ -42,7 +42,8 @@ async function installed(maxRequests?: number, signal?: AbortSignal, afterRoute?
       : name === "Fetch.getResponseBody" ? { body: `body-${value?.requestId}`, base64Encoded: false } : {}), detach };
   const page = { context: () => ({ newCDPSession: async () => cdp }), mainFrame: () => main, close } as unknown as Page;
   const handler = vi.fn(async (route: NativeReadRoute) => { routes.push(route); await afterRoute?.(route); });
-  const guard = await installNativeRedirectRouting(page, handler, { timeoutMs: 100, maxRequests, signal, responseProfile, onCommandFailure, controllerGetIntent, controllerScriptGetIntent, denyUncorrelatedPost,
+  const maxRequests = typeof limits === "number" ? limits : undefined;
+  const guard = await installNativeRedirectRouting(page, handler, { timeoutMs: typeof limits === "object" ? limits.timeoutMs : 100, maxRequests, signal, responseProfile, onCommandFailure, controllerGetIntent, controllerScriptGetIntent, denyUncorrelatedPost,
     onFailure: code => failures.push(code), onSubframeBlocked: request => subframes.push(request), onRequestRejected: request => rejections.push(request) });
   const request = (id: string, values: object = {}) => events.get("Fetch.requestPaused")!({ requestId: id, networkId: `network-${id}`,
     frameId: "main", resourceType: "XHR", request: { url: "https://example.org/data", method: "GET", headers: {} }, ...values });
@@ -2323,7 +2324,9 @@ describe("native anonymous Mindbody bootstrap ownership", () => {
   };
 
   it.each([{ held: false, queried: false }, { held: true, queried: false }, { held: false, queried: true }, { held: true, queried: true }])("attests one public form successor only after source completion and ACK (held=$held query=$queried)", async ({ held, queried }) => {
-    const test = await installed(), ack = deferred<object>();
+    // Positive ACK ordering waits on real timers under the full CI workload.
+    // Keep the 100 ms fixture in timeout/rejection tests and production intact.
+    const test = await installed({ timeoutMs: 2000 }), ack = deferred<object>();
     const actualTarget = queried ? target + "?studioid=685163" : target;
     try {
       await prepare(test, true, held ? ack : undefined); intent(test, { url: actualTarget });
