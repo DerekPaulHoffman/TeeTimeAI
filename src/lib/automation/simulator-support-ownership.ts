@@ -907,7 +907,7 @@ export async function readSimulatorSupportClaim(input: { assignmentRef: string; 
     { courseId: offering.courseId, offeringId: offering.id }, row.audit.target.incidentId, observedAt);
   const postRepairResearchBoundary = getSimulatorPostRepairResearchBoundary({ claim: row.audit.simulatorClaim,
     baseSha: row.audit.baseSha, sourceFingerprint: getSimulatorOfferingSourceFingerprint(offering), now: observedAt });
-  return { ...row.audit.simulatorClaim, discoveryEngineeringFailure, baseSha: row.audit.baseSha, offeringId: row.audit.target.offeringId!,
+  return { ...row.audit.simulatorClaim, assignmentRef: row.audit.assignmentRef, discoveryEngineeringFailure, baseSha: row.audit.baseSha, offeringId: row.audit.target.offeringId!,
     supportAuthority: row.audit.target.engineeringAuthority ? "ENGINEERING_INCIDENT" as const : "ACTIVE_ALERT" as const,
     research, researchGuide: getSimulatorResearchGuide({ state: research, officialUrl: offering.course.website ?? offering.evidenceUrl,
       bookingUrl: offering.bookingUrl, evidenceUrl: offering.evidenceUrl, now: observedAt, postRepairResearchBoundary,

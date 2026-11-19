@@ -3,6 +3,27 @@ import { retryCourseSupportWriterAdmission } from "./course-support-writer-admis
 import { courseSupportWriterTransactionOptions } from "./course-support-writer-budget";
 
 describe("course-support writer admission", () => {
+  it("keeps a heartbeat admission inside its smaller deadline without extending the transaction budget", async () => {
+    let clock = 0;
+    const lease = vi.fn(async () => lease.mock.calls.length === 1
+      ? { acquired: false as const } : { acquired: true as const, value: "renewed" });
+    expect(await retryCourseSupportWriterAdmission(lease, { budgetMs: 25_000, now: () => clock,
+      sleep: async milliseconds => { clock += milliseconds; } })).toEqual({ acquired: true, value: "renewed" });
+    expect(lease.mock.calls.map(call => call[0])).toEqual([25_000, 24_925]);
+    const busy = vi.fn(async () => ({ acquired: false as const }));
+    clock = 0;
+    expect(await retryCourseSupportWriterAdmission(busy, { budgetMs: 25_000, now: () => clock,
+      sleep: async milliseconds => { clock += milliseconds; } })).toEqual({ acquired: false });
+    expect(clock).toBeLessThan(3_000);
+    expect(busy.mock.calls.every(call => call[0] >= 22_000)).toBe(true);
+  });
+
+  it.each([0, 21_999, 60_001, NaN, 25_000.5])("rejects an invalid bounded budget (%s) before writer admission", async budgetMs => {
+    const transition = vi.fn();
+    await expect(retryCourseSupportWriterAdmission(transition, { budgetMs })).rejects.toThrow("Invalid course-support writer admission budget");
+    expect(transition).not.toHaveBeenCalled();
+  });
+
   it("retries two definite refusals, then runs the transition once", async () => {
     let clock = 0;
     const callback = vi.fn(async () => "saved");

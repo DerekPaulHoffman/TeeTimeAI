@@ -1390,7 +1390,10 @@ export async function renewCourseSupportBatchOperationLease(input: {
     return operationLeaseRenewalResult(null);
   }
   if (courseSupportBatchReservesCheckout(batch)) {
-    const transition = await runWithCourseSupportWriterTransitionLease(() =>
+    // A refused advisory lock has not entered the transition. Briefly retry
+    // admission inside the 30-second operation-heartbeat timeout, rereading
+    // database time and the original owner on every admitted attempt.
+    const transition = await retryCourseSupportWriterAdmission(timeout => runWithCourseSupportWriterTransitionLease(() =>
       runCourseSupportTransactionWithRetry(async (transaction) => {
         const databaseNow = await getCourseSupportDatabaseNow(transaction);
         const current = await transaction.courseSupportBatch.findFirst({
@@ -1439,9 +1442,10 @@ export async function renewCourseSupportBatchOperationLease(input: {
           }
         });
         return updated.count === 1 ? leaseExpiresAt : null;
-      })
-    );
-    return operationLeaseRenewalResult(transition.acquired ? transition.value : null);
+      }), { timeout }
+    ), { budgetMs: 25_000 });
+    if (!transition.acquired) return { ...operationLeaseRenewalResult(null), outcome: "writer_busy" as const };
+    return operationLeaseRenewalResult(transition.value);
   }
 
   const leaseExpiresAt = new Date(now.getTime() + COURSE_SUPPORT_BATCH_LEASE_MS);

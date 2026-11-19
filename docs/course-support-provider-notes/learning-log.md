@@ -2,6 +2,18 @@
 
 This file records generic process lessons only. It is not a provider-family note and scheduled responders must not read it during routine claimed work. Live incident and monitoring state remains in Postgres.
 
+## 2026-11-18 - Distinguish Writer Admission From Ownership Loss
+
+A release verifier stopped with a lost-ownership heartbeat while its retained batch still had the same owner and a fresh lease. The old heartbeat result collapsed several causes, so this snapshot alone cannot establish the exact live cause. A focused regression independently reproduced one concrete defect: a definite advisory-lock refusal, before entering the renewal transition, was treated as lost ownership without another admission attempt.
+
+Heartbeat renewal now briefly retries only that definite refusal under a 25-second total budget, inside the existing 30-second renewal limit. Each admitted transition checks database time, original owner/token/revision, lease freshness and competing implementation ownership again. An admitted null result, callback exception, ambiguous result, expired lease or different owner is never retried. Persistent contention reports writer busy and leaves ownership unconfirmed; it neither extends a lease nor replays provider work. Tests cover transient contention, ownership loss during the wait, bounded exhaustion and existing expired-owner rejection. This repairs a demonstrated failure path, not proof that the affected live verifier or course recovered.
+
+## 2026-11-18 - Preserve Assignment Identity Across Inspection
+
+A simulator worker successfully claimed and inspected its assignment, then constructed its next command from the inspection result. That result contained the current token and revision but omitted the immutable assignment reference. Stringifying the absent field produced a different reference; the ownership lookup rejected it before a provider read or durable transition. The worker stopped correctly, but this was an internal handoff failure rather than evidence of inaccessible availability.
+
+Inspection now returns the original assignment reference with the verified claim. Workers retain the initial reference and check the echo; common serialized missing values are rejected during argument parsing. A regression exercises the real inspection function and next-command parser together, verifies inspection is read-only, and retains rejection for another owner or assignment. No ownership error, source operation or uncertain mutation is automatically replayed.
+
 ## 2026-11-18 - Keep Public Catalog Redirects Inside The Research Transport
 
 An ordinary public Book Now link reached its service catalog in Chrome but failed inside interactive research. The legacy Square gateway redirects to a different Square host. The controller rejected that handoff, and its failure classifier discarded the known rejection as an unknown error. Repeating the read could not repair either problem.
