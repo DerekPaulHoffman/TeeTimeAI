@@ -388,7 +388,7 @@ function reader(source: Source, deps: Dependencies, adapter?: ExistingAdapterMet
             officialStreetTypeOmittedProof, publicBookingConfiguration);
         } else {
         if (delegatedToken) {
-          officialDelegatedBookingProof = bindDelegatedFacility(source, currentNativeDelegatedChain(delegatedToken), JSON.parse(text));
+          officialDelegatedBookingProof = bindDelegatedFacility(source, currentNativeDelegatedChain(delegatedToken), JSON.parse(text), apiAlias());
           if (savedDelegatedProof && JSON.stringify(officialDelegatedBookingProof) !== JSON.stringify(savedDelegatedProof)) fail("OFFICIAL_DELEGATED_SOURCE_CHANGED");
         }
         if (adapter?.family === "TEEITUP" && adapter.officialIdentityProof && !officialIdentityProof) fail("OFFICIAL_IDENTITY_UNVERIFIED");

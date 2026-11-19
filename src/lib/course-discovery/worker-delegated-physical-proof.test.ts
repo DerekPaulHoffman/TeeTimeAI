@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { bindTeeItUpIntentionalDelegation } from "./teeitup-intentional-delegation-proof";
+import type { NativePhysicalContactSource } from "./teeitup-physical-contact-proof";
 import { createHash } from "node:crypto";
 import { bindDiscoveryRecipeIdentity, createDiscoveryAdapterObservation, createDiscoverySnapshotCompactor,
   inspectedAdapterSourceEvidence, shouldInvalidateDiscoveryAdapterObservation } from "../../../scripts/automation/course-discovery-worker.mjs";
@@ -98,6 +100,31 @@ describe("current native USchedule contact observation bridge", () => {
 });
 
 describe("current native delegated physical proof bridge", () => {
+  it("carries only current exact-facility delegation proof and rejects uploaded, stale, shared and changed contact data", () => {
+    const f = fixture(), physical = f.proof.physicalContactProof;
+    const nonSource = new Set(["kind", "providerName", "providerAddress", "providerLocality", "providerLocalityRelation", "semanticDigest"]);
+    const contact = Object.fromEntries(Object.entries(physical).filter(([key]) => !nonSource.has(key))) as NativePhysicalContactSource;
+    const source = { officialUrl: f.official, bookingUrl: f.booking, venueName: f.job.request.identity.name,
+      venueAddress: f.job.request.identity.address, timeZone: f.job.request.input.timeZone };
+    const address = f.proof.providerAddress.replace(/^12 Public/u, "12 Other");
+    const intentional = bindTeeItUpIntentionalDelegation(source, contact, [{ id: 71, courseId: "provider-71", name: contact.officialBrandName,
+      address, timeZone: source.timeZone, country: "US", isSimulator: false, phone: contact.publicCoursePhone }], { apiAlias: "public-course", facilityIds: [71] }, "public-course");
+    const proof = { ...f.proof, providerAddress: address, intentionalDelegationProof: intentional };
+    delete (proof as { physicalContactProof?: unknown }).physicalContactProof;
+    const adapter = { ...f.adapter, officialDelegatedBookingProof: proof };
+    const proposal = { ...f.proposal, adapter: { ...adapter, officialDelegatedBookingProof: { forged: true } } };
+    const observation = createDiscoveryAdapterObservation(f.job, f.booking, adapter, f.document)!;
+    const bound = bindDiscoveryRecipeIdentity(proposal, f.job, observation, f.document);
+    expect(bound.adapter.officialDelegatedBookingProof).toEqual(proof); expect(parseAccessRecipe(bound)).toEqual(bound);
+    expect(bindDiscoveryRecipeIdentity(proposal, f.job).adapter).not.toHaveProperty("officialDelegatedBookingProof");
+    expect(bindDiscoveryRecipeIdentity(proposal, { ...f.job, attempts: 2 }, observation, f.document).adapter).not.toHaveProperty("officialDelegatedBookingProof");
+    for (const change of [{ bookingConfiguration: { apiAlias: "public-course", facilityIds: [71, 72] } }, { providerPhone: "+15085555517" },
+      { contact: { ...intentional.contact, publicCoursePhone: "+15085555517" } }, { facilityId: 72 }]) {
+      const altered = structuredClone(observation), value = altered.adapter.officialDelegatedBookingProof.intentionalDelegationProof;
+      Object.assign(value, change); value.semanticDigest = physicalContactDigest(Object.fromEntries(Object.entries(value).filter(([key]) => key !== "semanticDigest")));
+      expect(bindDiscoveryRecipeIdentity(proposal, f.job, altered, f.document).adapter).not.toHaveProperty("officialDelegatedBookingProof");
+    }
+  });
   it("retains a current native country-club designation proof across the serialized worker handoff", () => {
     const f = fixture(), canonical = "Public Hollow Golf & Country Club", publicName = "Public Hollow Country Club";
     f.job.request.identity.name = canonical; f.proposal.source.venueName = canonical; f.proof.venueName = canonical;

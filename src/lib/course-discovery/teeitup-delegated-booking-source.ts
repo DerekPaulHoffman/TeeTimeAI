@@ -8,6 +8,8 @@ import { publicDocumentUrl, teeItUpBookAlias, teeItUpCompleteStreetAddress, teeI
 import { createDelegationDiagnostic, rememberTeeItUpDelegationFailure, type DelegatedDiagnosticGate } from "./teeitup-delegated-booking-diagnostic";
 import { collectBookingEdgeEvidence } from "./booking-edge-evidence";
 import { hasNativeCurrentFrameSource } from "./native-current-frame-source";
+import { bindTeeItUpIntentionalDelegation, teeItUpIntentionalDelegationProofSchema, type TeeItUpIntentionalDelegationProof } from "./teeitup-intentional-delegation-proof";
+import type { TeeItUpBookingConfiguration } from "./teeitup-booking-configuration";
 
 const sha = z.string().regex(/^[a-f0-9]{64}$/u);
 export function safeDelegatedBookingUrl(value: string) {
@@ -25,12 +27,20 @@ export const teeItUpDelegatedBookingProofSchema = z.object({
   kind: z.literal("OFFICIAL_DELEGATED_BOOKING_SOURCE"), officialUrl: url, bookingUrl: url,
   venueName: z.string().min(3).max(200), canonicalAddress: z.string().min(15).max(1024), timeZone: z.string().min(1).max(100),
   rootWitnessSha256: sha, rootDocumentProof: nativeCanonicalRootDocumentProofSchema.optional(), physicalContactProof: teeItUpPhysicalContactProofSchema.optional(),
+  intentionalDelegationProof: teeItUpIntentionalDelegationProofSchema.optional(),
   hops: z.array(z.object({ pageUrl: url, nextUrl: url, witnessSha256: sha, kind: z.literal("NATIVE_VISIBLE_IFRAME_SRC").optional() }).strict()).min(1).max(2),
   alias: z.string().regex(/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u),
   facilityId: z.number().int().min(1).max(2147483647), courseId: z.string().min(1).max(128),
   providerAddress: z.string().min(3).max(1024),
   warmTransport: z.literal("NATIVE_CHROME"), requiredCapability: z.literal("LOCAL_CHROME"),
 }).strict().refine(value => value.hops.at(-1)?.nextUrl === value.bookingUrl &&
+  !(value.physicalContactProof && value.intentionalDelegationProof) &&
+  (!value.intentionalDelegationProof || value.intentionalDelegationProof.contact.officialUrl === value.officialUrl &&
+    value.intentionalDelegationProof.contact.bookingUrl === value.bookingUrl && value.intentionalDelegationProof.contact.officialDocumentUrl === value.hops[0].pageUrl &&
+    value.intentionalDelegationProof.contact.canonicalName === value.venueName && value.intentionalDelegationProof.contact.canonicalAddress === value.canonicalAddress &&
+    value.intentionalDelegationProof.providerAddress === value.providerAddress && value.intentionalDelegationProof.facilityId === value.facilityId &&
+    value.intentionalDelegationProof.courseId === value.courseId && value.intentionalDelegationProof.timeZone === value.timeZone &&
+    (value.intentionalDelegationProof.contact.bookingEntryUrl ? value.hops.length === 2 && value.intentionalDelegationProof.contact.bookingEntryUrl === value.hops[0].nextUrl : value.hops.length === 1)) &&
   (!value.rootDocumentProof || value.rootDocumentProof.canonicalUrl === value.officialUrl && value.rootDocumentProof.documentUrl === value.hops[0].pageUrl) &&
   (!value.physicalContactProof || (value.physicalContactProof.bookingEntryUrl ? value.hops.length === 2 && value.physicalContactProof.bookingEntryUrl === value.hops[0].nextUrl : value.hops.length === 1) &&
     value.physicalContactProof.officialUrl === value.officialUrl && value.physicalContactProof.bookingUrl === value.bookingUrl &&
@@ -227,7 +237,8 @@ function delegatedPostalRepresentation(canonicalAddress: string, providerAddress
       !printed[4] && country !== "US") return;
   return `${printed[1]}${printed[2]} 0${printed[3]}${printed[4] ? `, ${printed[4]}` : ""}`;
 }
-export function bindDelegatedFacility(source: OfficialIdentitySource, chain: { rootWitnessSha256: string; hops: DelegatedHop[]; rootDocumentProof?: NativeCanonicalRootDocumentProof; physicalContactSource?: NativePhysicalContactSource; physicalContactProof?: TeeItUpPhysicalContactProof; physicalContactRequired?: true }, directory: unknown): TeeItUpDelegatedBookingProof {
+export function bindDelegatedFacility(source: OfficialIdentitySource, chain: { rootWitnessSha256: string; hops: DelegatedHop[]; rootDocumentProof?: NativeCanonicalRootDocumentProof; physicalContactSource?: NativePhysicalContactSource; physicalContactProof?: TeeItUpPhysicalContactProof; physicalContactRequired?: true;
+  intentionalDelegationConfiguration?: TeeItUpBookingConfiguration; intentionalDelegationProof?: TeeItUpIntentionalDelegationProof }, directory: unknown, directoryApiAlias?: string): TeeItUpDelegatedBookingProof {
   const diagnostic = createDelegationDiagnostic("PROVIDER_BIND");
   try {
   const rows = z.array(z.object({ id: z.number().int().min(1).max(2147483647), courseId: z.string().min(1).max(128), name: z.string().min(3).max(256),
@@ -254,8 +265,15 @@ export function bindDelegatedFacility(source: OfficialIdentitySource, chain: { r
   const matching = identityMatches.filter(row => row.isSimulator === false);
   diagnostic.gates.providerUniqueMatch = matching.length === 1;
   let physical;
-  const physicalSource = chain.physicalContactSource ?? (chain.physicalContactProof ? physicalContactSourceData(chain.physicalContactProof) : undefined);
-  const requirePhysical = chain.physicalContactRequired || Boolean(chain.physicalContactProof);
+  const physicalSource = chain.physicalContactSource ?? (chain.physicalContactProof ? physicalContactSourceData(chain.physicalContactProof) : chain.intentionalDelegationProof?.contact);
+  const requirePhysical = chain.physicalContactRequired || Boolean(chain.physicalContactProof || chain.intentionalDelegationProof);
+  const configuration = chain.intentionalDelegationConfiguration ?? chain.intentionalDelegationProof?.bookingConfiguration;
+  const actualDirectoryAlias = directoryApiAlias ?? chain.intentionalDelegationProof?.bookingConfiguration.apiAlias;
+  diagnostic.gates.directoryIntentionalConfigurationAvailable = Boolean(configuration);
+  diagnostic.gates.directoryIntentionalSoleFacilityBound = Boolean(configuration && actualDirectoryAlias === configuration.apiAlias &&
+    Array.isArray(configuration.facilityIds) && configuration.facilityIds.length === 1 && rows.data.length === 1 && configuration.facilityIds[0] === rows.data[0].id);
+  diagnostic.gates.directoryIntentionalDelegationVerified = false;
+  let intentional: TeeItUpIntentionalDelegationProof | undefined;
   Object.assign(diagnostic.gates, { directoryNameMatch: nameMatches.length > 0, directoryNameTimeZoneMatch: nameTimeZoneMatches.length > 0,
     directoryIdentityMatch: identityMatches.length > 0, directoryIdentityUnique: identityMatches.length === 1,
     directoryIdentityOutdoor: identityMatches.some(row => row.isSimulator === false), directoryIdentitySimulator: identityMatches.some(row => row.isSimulator === true),
@@ -264,15 +282,25 @@ export function bindDelegatedFacility(source: OfficialIdentitySource, chain: { r
     directoryPhysicalFallbackAvailable: Boolean(physicalSource), directoryPhysicalFallbackRequired: Boolean(requirePhysical) });
   if ((matching.length !== 1 || requirePhysical) && physicalSource &&
       (physicalSource.bookingEntryUrl ? chain.hops.length === 2 && physicalSource.bookingEntryUrl === chain.hops[0].nextUrl : chain.hops.length === 1))
-    physical = bindTeeItUpPhysicalContactFacility(source, physicalSource, directory, (key, value) => { diagnostic.gates[key] = value; },
-      evidence => { diagnostic.physicalBindingEvidence = evidence; });
-  if (requirePhysical && !physical) return fail();
-  if (matching.length !== 1 && !physical) return fail();
-  const selected = physical ? rows.data.find(row => row.id === physical.facilityId && row.courseId === physical.courseId)! : matching[0];
+    try {
+      physical = bindTeeItUpPhysicalContactFacility(source, physicalSource, directory, (key, value) => { diagnostic.gates[key] = value; },
+        evidence => { diagnostic.physicalBindingEvidence = evidence; });
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== "OFFICIAL_PHYSICAL_CONTACT_UNVERIFIED" || !configuration || !actualDirectoryAlias) throw error;
+      // A separate proof of explicit delegation, not an address equivalence or
+      // relaxed ordinary match. The native token earns configuration anew.
+      intentional = bindTeeItUpIntentionalDelegation(source, physicalSource, directory, configuration, actualDirectoryAlias);
+      diagnostic.gates.directoryIntentionalDelegationVerified = true;
+    }
+  if (requirePhysical && !physical && !intentional) return fail();
+  if (matching.length !== 1 && !physical && !intentional) return fail();
+  const selectedIdentity = physical ?? intentional;
+  const selected = selectedIdentity ? rows.data.find(row => row.id === selectedIdentity.facilityId && row.courseId === selectedIdentity.courseId)! : matching[0];
   return teeItUpDelegatedBookingProofSchema.parse({ kind: "OFFICIAL_DELEGATED_BOOKING_SOURCE", officialUrl: source.officialUrl, bookingUrl: source.bookingUrl,
     venueName: source.venueName, canonicalAddress: source.venueAddress, timeZone: source.timeZone,
     rootWitnessSha256: chain.rootWitnessSha256, hops: chain.hops, ...(chain.rootDocumentProof ? { rootDocumentProof: chain.rootDocumentProof } : {}),
     ...(physical ? { physicalContactProof: physical.physicalContactProof } : {}), alias,
+    ...(intentional ? { intentionalDelegationProof: intentional } : {}),
     facilityId: selected.id, courseId: selected.courseId, providerAddress: selected.address, warmTransport: "NATIVE_CHROME", requiredCapability: "LOCAL_CHROME" });
   } catch (error) { rememberTeeItUpDelegationFailure(error, diagnostic); throw error; }
 }

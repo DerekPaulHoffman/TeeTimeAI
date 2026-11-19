@@ -132,7 +132,7 @@ function canonicalDataKey(value) {
 const nativeUScheduleContactRequired = adapter => adapter?.family === "USCHEDULE" && adapter.publicLocationProof?.kind === "PUBLIC_LOCATION_SERVICE_POOL_V1";
 const nativeAcuityContactRequired = adapter => adapter?.family === "ACUITY" && Boolean(adapter.officialContactProof);
 const currentNativeProofRequired = adapter => Boolean(nativeUScheduleContactRequired(adapter) || nativeAcuityContactRequired(adapter) || adapter?.officialEntryProof || adapter?.officialRouteOwnershipProof || adapter?.officialStreetTypeOmittedProof || adapter?.officialContactChainProof ||
-  adapter?.officialDelegatedBookingProof?.rootDocumentProof || adapter?.officialDelegatedBookingProof?.physicalContactProof ||
+  adapter?.officialDelegatedBookingProof?.rootDocumentProof || adapter?.officialDelegatedBookingProof?.physicalContactProof || adapter?.officialDelegatedBookingProof?.intentionalDelegationProof ||
   Array.isArray(adapter?.officialDelegatedBookingProof?.hops) && adapter.officialDelegatedBookingProof.hops.some(hop => hop?.kind === "NATIVE_VISIBLE_IFRAME_SRC"));
 function dataHash(value) { const key = canonicalDataKey(value); return key ? createHash("sha256").update(key).digest("hex") : undefined; }
 function acuityContactData(proof, job, bookingUrl, contextUrl) {
@@ -251,6 +251,37 @@ function physicalContactData(proof, outer, job) {
       safeObservedUrl(proof.officialDocumentUrl) && new URL(proof.officialDocumentUrl).href === proof.officialDocumentUrl &&
       proof.warmTransport === "NATIVE_CHROME" && proof.requiredCapability === "LOCAL_CHROME" &&
       proof.sourceWitnessSha256 === dataHash(source) && proof.semanticDigest === dataHash(semantic);
+  } catch { return false; }
+}
+function intentionalDelegationData(proof, outer, job) {
+  try {
+    const keys = value => value && typeof value === "object" && !Array.isArray(value) ? Object.keys(value).sort().join(",") : "";
+    const bounded = (value, min, max) => typeof value === "string" && value.length >= min && value.length <= max && !/[\u0000-\u001f\u007f]/u.test(value);
+    const contact = proof.contact, configuration = proof.bookingConfiguration;
+    const sourceKeys = ["officialUrl", "officialDocumentUrl", "bookingUrl", "canonicalName", "officialBrandName", "publicLocationName", "brandLocationLabel",
+      "canonicalNameRelation", "serviceRemainder", "observedServiceLabel", "canonicalAddress", "officialAddress", "canonicalLocality", "officialLocality", "publicCoursePhone", "warmTransport", "requiredCapability"];
+    if (Object.hasOwn(contact, "bookingEntryUrl")) sourceKeys.push("bookingEntryUrl");
+    const source = Object.fromEntries(sourceKeys.map(key => [key, contact[key]])), semantic = { ...proof }; delete semantic.semanticDigest;
+    return keys(proof) === "bookingConfiguration,contact,country,courseId,facilityId,isSimulator,kind,providerAddress,providerAddressVerified,providerName,providerPhone,semanticDigest,timeZone" &&
+      proof.kind === "OFFICIAL_INTENTIONAL_DELEGATION_V1" && proof.country === "US" && proof.isSimulator === false && proof.providerAddressVerified === false &&
+      proof.facilityId === outer.facilityId && proof.courseId === outer.courseId && proof.timeZone === outer.timeZone && proof.providerAddress === outer.providerAddress &&
+      bounded(proof.providerAddress, 15, 1024) && bounded(proof.providerName, 3, 200) && bounded(proof.providerPhone, 1, 40) &&
+      proof.providerName.normalize("NFKC").replace(/\s+/gu, " ").trim().toLowerCase() === contact.officialBrandName.normalize("NFKC").replace(/\s+/gu, " ").trim().toLowerCase() &&
+      (() => { const digits = proof.providerPhone.replace(/\D/gu, ""); return `+${digits.length === 10 ? "1" : ""}${digits}` === contact.publicCoursePhone; })() &&
+      keys(configuration) === "apiAlias,facilityIds" && typeof configuration.apiAlias === "string" && /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(configuration.apiAlias) &&
+      Array.isArray(configuration.facilityIds) && configuration.facilityIds.length === 1 && configuration.facilityIds[0] === proof.facilityId &&
+      keys(contact) === [...sourceKeys, "sourceWitnessSha256"].sort().join(",") && contact.sourceWitnessSha256 === dataHash(source) && proof.semanticDigest === dataHash(semantic) &&
+      contact.officialUrl === outer.officialUrl && contact.officialDocumentUrl === outer.hops[0].pageUrl && contact.bookingUrl === outer.bookingUrl &&
+      contact.canonicalName === job.request.identity.name && contact.canonicalAddress === job.request.identity.address &&
+      contact.publicCoursePhone === job.request.trustedContext?.canonicalCoursePhone && /^\+1[2-9]\d{2}[2-9]\d{6}$/u.test(contact.publicCoursePhone) &&
+      ["canonicalName", "officialBrandName", "publicLocationName"].every(key => bounded(contact[key], 3, 200)) &&
+      ["canonicalAddress", "officialAddress"].every(key => bounded(contact[key], 15, 1024)) &&
+      ["canonicalLocality", "officialLocality"].every(key => bounded(contact[key], 2, 80)) &&
+      (contact.brandLocationLabel === null || typeof contact.brandLocationLabel === "string" && /^[A-Z0-9]{2,8}$/u.test(contact.brandLocationLabel)) &&
+      ["EXACT_PUBLIC_LOCATION_NAME", "PUBLIC_LOCATION_AND_OBSERVED_SERVICE", "COUNTRY_CLUB_GOLF_DESIGNATION"].includes(contact.canonicalNameRelation) &&
+      (contact.serviceRemainder === null || bounded(contact.serviceRemainder, 2, 40)) && (contact.observedServiceLabel === null || bounded(contact.observedServiceLabel, 2, 120)) &&
+      (contact.bookingEntryUrl ? outer.hops.length === 2 && contact.bookingEntryUrl === outer.hops[0].nextUrl : outer.hops.length === 1) &&
+      contact.warmTransport === "NATIVE_CHROME" && contact.requiredCapability === "LOCAL_CHROME";
   } catch { return false; }
 }
 const nativeMainDocumentCapabilities = new WeakMap(), nativeObservationContexts = new WeakMap(), inspectedAdapterBindings = new WeakMap();
@@ -529,7 +560,7 @@ export function bindDiscoveryRecipeIdentity(recipe, job, adapterObservation, con
       const sha = value => typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
       const keys = value => value && typeof value === "object" && !Array.isArray(value) ? Object.keys(value).sort().join(",") : "";
       const publicUrl = value => safeObservedUrl(value) && new URL(value).href === value;
-      const optionalKeys = ["rootDocumentProof", "physicalContactProof"].filter(key => proof?.[key] !== undefined);
+      const optionalKeys = ["rootDocumentProof", "physicalContactProof", "intentionalDelegationProof"].filter(key => proof?.[key] !== undefined);
       const hopShape = (hop, index) => {
         if (keys(hop) === "nextUrl,pageUrl,witnessSha256") return true;
         if (keys(hop) !== "kind,nextUrl,pageUrl,witnessSha256" || hop.kind !== "NATIVE_VISIBLE_IFRAME_SRC" ||
@@ -558,6 +589,7 @@ export function bindDiscoveryRecipeIdentity(recipe, job, adapterObservation, con
           (!currentNativeProofRequired(observed) || currentNativeProofObservation(job, adapterObservation)) &&
           (!proof.rootDocumentProof || nativeRootDocumentData(proof.rootDocumentProof, proof.officialUrl, proof.hops[0].pageUrl)) &&
           (!proof.physicalContactProof || proof.hops.length === (Object.hasOwn(proof.physicalContactProof, "bookingEntryUrl") ? 2 : 1) && physicalContactData(proof.physicalContactProof, proof, job)) &&
+          (!proof.intentionalDelegationProof || !proof.physicalContactProof && intentionalDelegationData(proof.intentionalDelegationProof, proof, job)) &&
           proof.warmTransport === "NATIVE_CHROME" && proof.requiredCapability === "LOCAL_CHROME") {
         try { const bytes = JSON.stringify(proof); if (Buffer.byteLength(bytes, "utf8") <= 16_000) adapter.officialDelegatedBookingProof = JSON.parse(bytes); }
         catch { /* Only the current private native observation can confer this proof. */ }
@@ -997,6 +1029,7 @@ export function safeTeeItUpDelegationDiagnostic(value) {
     "directoryValid", "directoryIdsUnique", "providerUniqueMatch", "hopSessionOpen", "hopNoAccess", "hopNoFatal", "hopStatus200", "hopCaptured",
     "hopUrlMatches", "hopCaptureFresh", "hopTimeOriginMatches", "hopRawClosed", "hopNativeTransport"];
   const bindingGates = ["directoryNameMatch", "directoryNameTimeZoneMatch", "directoryIdentityMatch", "directoryIdentityUnique",
+    "directoryIntentionalConfigurationAvailable", "directoryIntentionalSoleFacilityBound", "directoryIntentionalDelegationVerified",
     "directoryIdentityOutdoor", "directoryIdentitySimulator", "directoryIdentityKindMissing", "directoryPhysicalFallbackAvailable", "directoryPhysicalFallbackRequired", "directoryPostalRepresentationMatch",
     "directoryPhysicalSchemaValid", "directoryPhysicalCountryValid", "directoryPhysicalOutdoorValid", "directoryPhysicalPhoneFieldValid", "directoryPhysicalIdsUnique",
     "directoryPhysicalAddressParseValid", "directoryPhysicalPostalRestorationUsed", "directoryPhysicalNumberMatch", "directoryPhysicalStreetNameMatch", "directoryPhysicalRegionMatch", "directoryPhysicalPostalMatch", "directoryPhysicalUnitMatch",
