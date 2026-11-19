@@ -1391,7 +1391,7 @@ function describeCpsDiagnosticValue(value: unknown) {
     : describeCpsValueType(value);
 }
 
-function isCpsNoTeeTimesSentinel(value: unknown) {
+export function isCpsNoTeeTimesSentinel(value: unknown) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return false;
   }

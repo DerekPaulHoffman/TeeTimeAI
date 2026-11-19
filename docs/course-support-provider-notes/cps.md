@@ -53,3 +53,4 @@ lastVerifiedRelease: null
 ## Change Log
 
 - 2026-11-19: Distinguished conditional sheet-label binding from incomplete availability replay; recorded the missing object-structure evidence and retained all parser rejection gates.
+- 2026-11-19: Private structural capture on deployed release `cd4a6c68a1902c5c7fb6782ffe638f3f9d1ed238` identified a five-field message object, not wrapped inventory. Values remain uncaptured. The established production adapter already recognizes one exact canonical empty message; the learner now reuses that unchanged recognizer with stricter literal transaction binding. Unknown messages and altered, incomplete or contradictory envelopes remain rejected. Tests cover all five message fields and normal executor request counts. Local proof only; fresh independent execution is still required to establish whether the actual message matches that known contract.

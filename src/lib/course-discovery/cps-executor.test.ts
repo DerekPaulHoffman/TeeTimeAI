@@ -428,6 +428,38 @@ describe("CPS fixed fresh public reads", () => {
 
 describe("CPS complete full-sheet normalization", () => {
   const normalize = (value: unknown, request = input) => normalizeCpsAvailability(value, uuid, metadata(), source, request, new Date("2026-10-22T00:00:00Z"));
+  const noTimes = () => ({ isSuccess: true, transactionId: uuid, content: {
+    messageKey: "NO_TEETIMES", messageTemplate: "No tee times available",
+    messageAppearance: "Appears on the tee sheet when there are no tee times available on a selected day",
+    messageDetail: "No tee times available,please try different criteria.", messageType: "Attention",
+  } });
+  it("accepts the existing canonical no-opening response with exact transaction binding", () => {
+    expect(normalize(noTimes())).toEqual([]);
+  });
+  it.each(["messageKey", "messageTemplate", "messageAppearance", "messageDetail", "messageType"] as const)(
+    "rejects a missing, non-string or changed canonical message field: %s", key => {
+      for (const changed of [undefined, null, 0, "unknown message", noTimes().content[key] + " "]) {
+        expect(() => normalize({ ...noTimes(), content: { ...noTimes().content, [key]: changed } })).toThrow("CPS_AVAILABILITY_INCOMPLETE");
+      }
+    });
+  it.each(["transaction", "missing-transaction", "invalid-request-transaction", "success", "outer-extra", "content-extra", "null", "empty-object"])(
+    "never converts an unbound or contradictory message into empty inventory: %s", change => {
+      let value: unknown = noTimes();
+      if (change === "transaction") value = { ...noTimes(), transactionId: "00000000-0000-4000-8000-000000000002" };
+      if (change === "missing-transaction") value = { ...noTimes(), transactionId: undefined };
+      if (change === "success") value = { ...noTimes(), isSuccess: false };
+      if (change === "outer-extra") value = { ...noTimes(), totalCount: 0 };
+      if (change === "content-extra") value = { ...noTimes(), content: { ...noTimes().content, availableCount: 1 } };
+      if (change === "null") value = { ...noTimes(), content: null };
+      if (change === "empty-object") value = { ...noTimes(), content: {} };
+      expect(() => change === "invalid-request-transaction" ? normalizeCpsAvailability(value, "invalid", metadata(), source, input, new Date()) : normalize(value)).toThrow("CPS_AVAILABILITY_INCOMPLETE");
+    });
+  it("reads the known empty message through the normal executor without adding requests", async () => {
+    const fixture = setup((url, _init, normal) => url.pathname.endsWith("/TeeTimes") ?
+      json({ ...noTimes(), transactionId: url.searchParams.get("transactionId") }) : normal());
+    expect(await execute(fixture.deps)).toEqual([]);
+    expect(fixture.reads.filter(read => new URL(read.url).pathname.endsWith("/TeeTimes"))).toHaveLength(1);
+  });
   it("accepts the observed full nine-hole sheet with no default round length", () => {
     const rows = Array.from({ length: 55 }, (_, index) => ({ ...row(index + 1), defaultHoles: 0 }));
     expect(normalize(envelope(rows))).toHaveLength(55);

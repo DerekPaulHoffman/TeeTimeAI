@@ -17,6 +17,7 @@ import { createCps26PublicSession } from "./cps-public-session";
 import { deriveCpsRootEntry, type CpsOfficialEntryProof } from "./cps-official-entry-proof";
 import { readCpsOfficialEntry } from "./cps-official-entry-reader";
 import { failCpsAvailability } from "./cps-availability-diagnostic";
+import { isCpsNoTeeTimesSentinel } from "../adapters/cps";
 
 export type CpsDependencies = { fetch?: typeof fetch; now?: () => Date; deadlineAt?: Date; signal?: AbortSignal;
   trustedContext?: { canonicalCoursePhone?: string }; localCapabilities?: readonly "LOCAL_CHROME"[]; readNativeOfficialPage?: NativeOfficialPageReader;
@@ -297,6 +298,10 @@ export function normalizeCpsAvailability(value: unknown, transactionId: string, 
   validateInput(input, source);
   const response = z.object({ isSuccess: z.literal(true), transactionId: z.literal(transactionId), content: z.array(slotSchema).max(500) }).strict().safeParse(value);
   if (!uuid(transactionId)) failCpsAvailability("TRANSACTION_ID", value, transactionId);
+  // Reuse the production adapter's exact five-field empty sentinel. An unknown
+  // message is not empty inventory, and the learner additionally requires its
+  // own literal transaction echo before accepting this known response.
+  if (isCpsNoTeeTimesSentinel(value) && (value as { transactionId: string }).transactionId === transactionId) return [];
   if (!response.success) failCpsAvailability("SCHEMA", value, transactionId, undefined, response.error.issues);
   const ids = new Set<number>();
   // Validate every row, including excluded times/party options, before filtering.
