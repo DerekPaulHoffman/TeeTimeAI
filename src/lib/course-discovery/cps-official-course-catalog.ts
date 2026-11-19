@@ -13,6 +13,9 @@ const excluded = (node: Element) => ["script", "style", "template", "noscript", 
 const text = (node: Node): string => node.nodeName === "#text" ? (node as DefaultTreeAdapterMap["textNode"]).value :
   element(node) && excluded(node) ? "" : "childNodes" in node ? node.childNodes.map(text).join(" ") : "";
 const clean = (value: string) => value.normalize("NFKC").replace(/\s+/gu, " ").trim();
+// CSS text-transform changes presentation case, not the public course label.
+// Keep every word and punctuation mark in the raw/rendered pair and its hash.
+const pairLabel = (value: string) => clean(value).toLowerCase();
 const restricted = /\b(?:private|members?|login|account|checkout|payment|simulator|practice|range|lessons?|events?|gifts?|store|shop|banquet)\b/iu;
 const key = (value: string) => fullCourseName(value).replace(/\s+(?:golf course|course)$/u, "");
 export const cpsOfficialCourseCatalogFailureStages = ["NAMED_ROOT_PROVENANCE", "NAMED_VISIBLE_LINKS", "NAMED_DOCUMENT_LIMIT",
@@ -58,8 +61,8 @@ export function bindCpsOfficialCourseNames(source: { officialUrl: string; venueN
     if (name.length < 3 || name === key(source.venueName) || /^(?:the|our|public|golf|course|courses)$/u.test(name)) return fail("NAMED_LINK_NAME");
     const prior = named.get(name);
     if (prior && prior.href !== row.href) return fail("NAMED_LINK_AMBIGUITY");
-    if (prior) prior.labels.add(clean(row.text));
-    else named.set(name, { href: row.href, labels: new Set([clean(row.text)]) });
+    if (prior) prior.labels.add(pairLabel(row.text));
+    else named.set(name, { href: row.href, labels: new Set([pairLabel(row.text)]) });
   }
   if (named.size !== courses.length || new Set(courses.map(row => key(row.courseName))).size !== courses.length ||
       courses.some(row => !named.has(key(row.courseName)) || restricted.test(row.courseName))) return fail("NAMED_COURSE_NAMES");
@@ -70,7 +73,7 @@ export function bindCpsOfficialCourseNames(source: { officialUrl: string; venueN
       if (excluded(node)) return;
       if (node.tagName === "a" && !node.attrs.some(row => ["onclick", "download"].includes(row.name))) {
         let href: string; try { href = new URL(attr(node, "href"), page.url).href; } catch { href = ""; }
-        const label = clean(text(node)), observed = named.get(key(label));
+        const label = pairLabel(text(node)), observed = named.get(key(label));
         if (observed?.href === href && observed.labels.has(label)) rawPairs.add(JSON.stringify([href, label]));
       }
     }

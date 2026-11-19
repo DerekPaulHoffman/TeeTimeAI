@@ -1,5 +1,7 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
+import { chromium } from "@playwright/test";
+import { collectNativeOfficialPublicMetadata } from "./public-document-metadata";
 import { freshNativeCanonicalRootDocument, registerFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
 import { bindCpsOfficialCourseNames, getCpsOfficialCourseCatalogFailureStage } from "./cps-official-course-catalog";
 import { parseCpsCatalog, getCpsCatalogIdentityFailureStage, CPS_VENUE_PUBLIC_CATALOG_BUILD, type CpsOptions } from "./cps-source";
@@ -42,6 +44,40 @@ function redirectedFixture(canonicalUrl: string, documentUrl: string, linkOrigin
 }
 
 describe("native official named public course catalog", () => {
+  it("preserves the same catalog hash for actual browser CSS case transforms on direct and attested roots", async () => {
+    const browser = await chromium.launch({ headless: true });
+    let externalRequests = 0, markup = "", documentUrl = source.officialUrl;
+    try {
+      const context = await browser.newContext({ serviceWorkers: "block", storageState: { cookies: [], origins: [] } });
+      await context.route("**/*", async route => {
+        if (route.request().url() !== documentUrl || route.request().method() !== "GET") { externalRequests++; await route.abort(); return; }
+        await route.fulfill({ contentType: "text/html", body: markup });
+      });
+      const tab = await context.newPage();
+      for (documentUrl of [source.officialUrl, "https://www.official.example/"]) {
+        for (const linkOrigin of ["CANONICAL", "DOCUMENT"] as const) {
+          let baseline: unknown;
+          for (const transform of ["none", "uppercase", "lowercase"]) {
+            const f = redirectedFixture(source.officialUrl, documentUrl, linkOrigin);
+            markup = f.page.html.replace("<body>", `<head><style>a{text-transform:${transform}}</style></head><body>`);
+            await tab.goto(documentUrl);
+            const visibleEvidence = await tab.evaluate(collectNativeOfficialPublicMetadata, {
+              venueName: source.venueName, venueAddress: source.venueAddress, canonicalCoursePhone: phone, officialUrl: source.officialUrl,
+            });
+            const page: OfficialIdentityPage = { url: documentUrl, html: markup, browserTransport: "NATIVE_CHROME", visibleEvidence };
+            registerFreshNativeOfficialIdentityPage(page, source.officialUrl, new Date(Date.now() + 30_000),
+              documentUrl === source.officialUrl ? undefined : f.provenance);
+            expect(visibleEvidence.officialCourseLinkLabels).toHaveLength(2);
+            if (transform === "uppercase") expect(visibleEvidence.officialCourseLinkLabels![0].text).toBe("NORTH GOLF COURSE");
+            const metadata = parseCpsCatalog(f.rows, f.options, source, { ...f.context, page }, build);
+            if (transform === "none") baseline = metadata;
+            else expect(metadata).toEqual(baseline);
+          }
+        }
+      }
+      expect(externalRequests).toBe(0);
+    } finally { await browser.close(); }
+  }, 30_000);
   it.each([
     ["https://official.example/", "https://www.official.example/", "DOCUMENT"],
     ["https://official.example/", "https://www.official.example/", "CANONICAL"],
@@ -74,6 +110,12 @@ describe("native official named public course catalog", () => {
       if (change === "copied") f.context.page = structuredClone(f.page);
       expect(() => parseCpsCatalog(f.rows, f.options, f.source, f.context, build)).toThrow();
     });
+  it.each(["North Course", "North-Golf Course", "North 2 Golf Course"])("does not erase substantive raw/rendered label disagreement: %s", shown => {
+    const f = fixture();
+    f.page.visibleEvidence!.officialCourseLinkLabels![0].text = shown;
+    registerFreshNativeOfficialIdentityPage(f.page, source.officialUrl, new Date(Date.now() + 30_000));
+    expect(() => parseCpsCatalog(f.rows, f.options, source, f.context, build)).toThrow("ADAPTER_IDENTITY_MISMATCH");
+  });
   it("binds the complete two-course venue without guessing one canonical or default course", () => {
     const f = fixture();
     const metadata = parseCpsCatalog(f.rows, f.options, source, f.context, build);

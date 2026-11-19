@@ -211,7 +211,8 @@ describe("CPS fixed fresh public reads", () => {
             return { url: documentUrl, html, browserTransport: "NATIVE_CHROME", visibleEvidence: { title: source.venueName,
               headings: [source.venueName, "Contact Us"], addressTexts: [], linkUrls: [source.bookingUrl, ...links.map(link => link.href)],
               phoneTexts: [printed], contactPhoneLinks: [{ href: `tel:${printed}`, text: printed }],
-              publicLinkLabels: [{ href: source.bookingUrl, text: "Book A Tee Time" }], officialCourseLinkLabels: links } };
+              publicLinkLabels: [{ href: source.bookingUrl, text: "Book A Tee Time" }],
+              officialCourseLinkLabels: links.map(link => ({ ...link, text: nativeCalls > 2 ? link.text.toUpperCase() : link.text })) } };
           }, close: async () => {} }) });
       return drift === "copied-native" ? structuredClone(page) : page;
     };

@@ -1,5 +1,5 @@
 /** Fixed computed-visible metadata read. It performs no form action or network call. */
-export function collectNativeOfficialPublicMetadata(input: string | { venueName: string; venueAddress: string; canonicalCoursePhone: string }) {
+export function collectNativeOfficialPublicMetadata(input: string | { venueName: string; venueAddress: string; canonicalCoursePhone: string; officialUrl?: string }) {
   const expectedVenueName = typeof input === "string" ? input : input.venueName;
   const labels = { name(v: string) { return v.normalize("NFKC").replace(/\s+/gu, " ").trim().toLowerCase().replace(/^welcome to\s+/u, "")
     .replace(/[^\p{L}\p{N}]+/gu, " ").trim().replace(/\bgolf (?:club|course)$/u, "golf course"); } };
@@ -167,6 +167,17 @@ export function collectNativeOfficialPublicMetadata(input: string | { venueName:
   const publicBookingEntryLinks: Array<{ href: string; text: string }> = [];
   let publicBookingEntryLinksOmitted = false;
   const allPublicAnchors = Array.from(document.querySelectorAll('a[href]'));
+  // Capture actual visible links only; the native binder separately requires
+  // fresh canonical-root provenance before either origin can be accepted.
+  const courseLinkOrigins = new Set<string>();
+  try { courseLinkOrigins.add(new URL(document.URL).origin); } catch { /* Empty diagnostic fixtures have no document URL. */ }
+  if (typeof input !== "string" && input.officialUrl && input.officialUrl.length <= 2048) {
+    try {
+      const canonical = new URL(input.officialUrl);
+      if (canonical.href === input.officialUrl && canonical.protocol === "https:" && !canonical.username && !canonical.password &&
+          !canonical.port && !canonical.search && !canonical.hash) courseLinkOrigins.add(canonical.origin);
+    } catch { /* Unusable canonical input supplies no additional capture origin. */ }
+  }
   const officialCourseLinkLabels: Array<{ href: string; text: string }> = [];
   let officialCourseLinkLabelsOmitted = allPublicAnchors.length > 3000;
   if (!officialCourseLinkLabelsOmitted) for (const anchor of allPublicAnchors) {
@@ -175,7 +186,7 @@ export function collectNativeOfficialPublicMetadata(input: string | { venueName:
     const text = anchor.innerText.normalize('NFKC').replace(/\s+/gu, ' ').trim();
     let href: URL; try { href = new URL(anchor.href); } catch { continue; }
     if (!text || text.length > 160 || /[\u0000-\u001f\u007f]/u.test(text) || !/\b(?:golf\s+)?course$/iu.test(text) ||
-        href.protocol !== 'https:' || href.origin !== new URL(document.URL).origin || href.pathname === '/' ||
+        href.protocol !== 'https:' || !courseLinkOrigins.has(href.origin) || href.pathname === '/' ||
         href.search || href.hash || href.username || href.password || href.port) continue;
     if (officialCourseLinkLabels.length >= 120) { officialCourseLinkLabelsOmitted = true; officialCourseLinkLabels.length = 0; break; }
     officialCourseLinkLabels.push({ href: href.href, text });

@@ -22,6 +22,16 @@ it("captures visible named course links separately from public provider booking 
  const overflow = collectNativeOfficialPublicMetadata(venue);
  expect(overflow.officialCourseLinkLabelsOmitted).toBe(true); expect(overflow.officialCourseLinkLabels).toEqual([]);
 });
+it("captures named links on the supplied canonical origin and the current document without inferring www", () => {
+ setup('<a href="https://www.official.example/north">North Course</a><a href="/south">South Course</a>'+
+   '<a href="https://foreign.example/east">East Course</a>');
+ expect(collectNativeOfficialPublicMetadata(venue).officialCourseLinkLabels).toEqual([{href:"https://official.example/south",text:"South Course"}]);
+ const context={venueName:venue,venueAddress:address,canonicalCoursePhone:"+15083799886",officialUrl:"https://www.official.example/"};
+ expect(collectNativeOfficialPublicMetadata(context).officialCourseLinkLabels).toEqual([
+   {href:"https://www.official.example/north",text:"North Course"},{href:"https://official.example/south",text:"South Course"}]);
+ for(const officialUrl of ["http://www.official.example/","https://www.official.example/?token=private","https://www.official.example/#private"])
+   expect(collectNativeOfficialPublicMetadata({...context,officialUrl}).officialCourseLinkLabels).toEqual([{href:"https://official.example/south",text:"South Course"}]);
+});
 
 it("collects all six visible semantic heading levels without promoting hidden, inert or form headings",()=>{
  const visible=Array.from({length:6},(_,i)=>`<h${i+1}>Public heading ${i+1}</h${i+1}>`).join("");

@@ -771,6 +771,8 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
     expect(statusSessions).toBe(mode === "nonSuccess" ? 0 : 1); expect(statusDetached).toBe(statusSessions);
     expect(foreign).toBe(0); expect(active).toBe(0); expect(acquired).toBeGreaterThan(0); expect(released).toBe(acquired);
   }, 30_000);
+  // Real Chromium launch/open/inspection can exceed the default five-second
+  // harness; keep the asserted constructor data and twenty-second session clock.
   it.each([true, false])("forwards only immutable constructor fixed inspection context when present: %s", async supplied => {
     const source = "https://example.org/";
     const requestedInput = { date: "2030-01-02", players: 2, durationMinutes: 60, startTime: "08:00", endTime: "18:00", timeZone: "America/New_York" };
@@ -789,7 +791,7 @@ describe.runIf(existsSync(executablePath))("isolated discovery browser", () => {
       if (supplied) expect(received[1].requestedInput).toEqual({ ...requestedInput, durationMinutes: 60 });
       else expect(received[1]).not.toHaveProperty("requestedInput");
     } finally { await session.close(); }
-  });
+  }, 30_000);
   it.each(["valid", "valid query", "wrong query", "missing", "revoked", "invalid body", "redirect 302", "redirect 303", "redirect unproven", "redirect 307"] as const)("independently checks a native classic bootstrap before queued transport: %s", async mode => {
     const entry = "https://clients.mindbodyonline.com/classic/ws?studioid=685163&stype=-9", target = "https://clients.mindbodyonline.com/classic/home" + (mode === "valid query" ? "?studioid=685163" : mode === "wrong query" ? "?studioid=12345" : "");
     const empty = "tg vt lvl qParam view page catid prodid prodGroupId sSU optForwardingLink singleUseToken oAuthToken launchGUID launchUID launchPWDChange launchPWDChangeKey launchLostPWD launchResetPWD launchBizModeLogin launchBizModeLoginWithRedirectLink key consumerModeRedirect extLink giftCardID".split(" ");
