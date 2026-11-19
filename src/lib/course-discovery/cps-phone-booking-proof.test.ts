@@ -22,6 +22,21 @@ const bind = (current: OfficialIdentityPage, number: unknown = phone) =>
   bindCpsPhoneBookingProof(source, current, number, catalog, source.venueName);
 
 describe("CPS fresh official phone and booking link", () => {
+  it.each(["About Harbor Pointe Golf Course", "AboutHarbor Pointe Golf Course"])("binds the exact named About heading only with matching raw/rendered title: %s", heading => {
+    const title = `Golf Course | ${source.venueName} | Example, NY`;
+    const html = markup().replace("<html>", `<html><head><title>${title}</title></head>`)
+      .replace(`<h1>${source.venueName}</h1>`, `<h2>${heading}</h2>`);
+    const current = page(html, { title, headings: [heading, "CONTACT US"] });
+    expect(bind(current)).toMatchObject({ canonicalCoursePhone: phone, venueName: source.venueName });
+    for (const change of [
+      { title: "Other Golf Course" }, { title: `${title} | ${source.venueName}` },
+      { headings: ["About Other Golf Course"] }, { phoneTexts: ["508-555-0123"] }, { linkUrls: [] },
+    ]) expect(() => bind(page(html, { title, headings: [heading, "CONTACT US"], ...change }))).toThrow();
+    for (const raw of [html.replace(title, "Other Golf Course"), html.replace(`<h2>${heading}</h2>`, ""),
+      html.replace(`<h2>${heading}</h2>`, `<h2 hidden>${heading}</h2>`), html.replace(`<h2>${heading}</h2>`, "<h2>About Other Golf Course</h2>")])
+      expect(() => bind(page(raw, { title, headings: [heading, "CONTACT US"] }))).toThrow();
+    expect(() => bind(structuredClone(current))).toThrow();
+  });
   it.each([
     ["VENUE_IDENTITY", () => page(markup(), { headings: ["About Harbor Pointe Golf Course"] })],
     ["BOOKING_LINK", () => page(markup(), { linkUrls: ["https://other.cps.golf/"] })],

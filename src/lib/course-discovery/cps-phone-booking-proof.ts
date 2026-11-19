@@ -98,21 +98,36 @@ export function selectedCpsOfficialBookingAnchor(source: Source, page: OfficialI
       labels: shown.map(row=>clean(row.text)).sort(), selectedAnchorLabel }) };
 }
 
-function rawContact(html: string, expectedVenue: string, renderedContacts: Array<{ href: string; text: string }>) {
+/** A section label is not part of the venue name. This additive path still
+ * needs the full exact name in the heading and one exact title component;
+ * rawContact independently binds the same native-rendered title to HTML. */
+function venueHeadingMatches(value: string, expectedVenue: string, title: string) {
+  const heading = fullCourseName(value);
+  if (heading === expectedVenue) return true;
+  const parts = title.split("|").map(clean);
+  return parts.length <= 3 && parts.filter(part => fullCourseName(part) === expectedVenue).length === 1 &&
+    (heading === `about ${expectedVenue}` || heading === `about${expectedVenue}`);
+}
+
+function rawContact(html: string, expectedVenue: string, renderedContacts: Array<{ href: string; text: string }>, renderedTitle: string) {
   if (Buffer.byteLength(html, "utf8") > 600_000) return fail();
-  const root = parse(html), anchors: Array<{ href: string; text: string; node: Element }> = [], headings: string[] = [];
+  const root = parse(html), anchors: Array<{ href: string; text: string; node: Element }> = [], headings: string[] = [], titles: string[] = [];
   let visited = 0;
   const walk = (node: Node, depth = 0) => {
     if (++visited > 20_000 || depth > 64) return fail();
     if (element(node)) {
       if (excluded(node)) return;
+      if (node.tagName === "title") titles.push(clean(text(node)));
       if (/^h[1-6]$/u.test(node.tagName)) headings.push(text(node).replace(/\s+/gu, " ").trim());
       if (node.tagName === "a" && attr(node, "href").startsWith("tel:")) anchors.push({ href: attr(node, "href"), text: text(node).replace(/\s+/gu, " ").trim(), node });
     }
     if ("childNodes" in node) node.childNodes.forEach(child => walk(child, depth + 1));
   };
   walk(root);
-  if (anchors.length < 1 || anchors.length > 100 || !headings.some(name => fullCourseName(name) === expectedVenue)) return fail();
+  const exactHeading = headings.some(name => fullCourseName(name) === expectedVenue);
+  const namedSection = titles.length === 1 && titles[0] === clean(renderedTitle) &&
+    headings.some(name => venueHeadingMatches(name, expectedVenue, titles[0]));
+  if (anchors.length < 1 || anchors.length > 100 || !exactHeading && !namedSection) return fail();
   const hasContactHeading = (node: Node, depth = 0): boolean => {
     if (depth > 8 || element(node) && excluded(node)) return false;
     if (element(node) && /^h[1-6]$/u.test(node.tagName) && /^(?:contact us|visit)$/iu.test(text(node).replace(/\s+/gu, " ").trim())) return true;
@@ -147,7 +162,7 @@ export function verifyCpsPhoneBookingContact(source: Source, page: OfficialIdent
     phone = normalizePublicCoursePhone(canonicalCoursePhone), visible = page.visibleEvidence, canonicalAddress = source.venueAddress && completeUSAddress(source.venueAddress);
   if (!root || !visible || !phone || !canonicalAddress || !expectedVenue || page.browserTransport !== "NATIVE_CHROME") return fail();
   stage = "VENUE_IDENTITY";
-  if (!visible.headings.some(name => fullCourseName(name) === expectedVenue)) return fail();
+  if (!visible.headings.some(name => venueHeadingMatches(name, expectedVenue, visible.title))) return fail();
   stage = "BOOKING_LINK";
   if (!visible.linkUrls.includes(source.bookingUrl)) return fail();
   stage = "CONTACT_COMPLETENESS";
@@ -163,7 +178,7 @@ export function verifyCpsPhoneBookingContact(source: Source, page: OfficialIdent
   }
   if (renderedPhones.size !== 1 || !renderedPhones.has(phone) || contactPhones.size !== 1 || !contactPhones.has(phone)) return fail();
   stage = "RAW_CONTACT";
-  const raw = rawContact(page.html, expectedVenue, visible.contactPhoneLinks);
+  const raw = rawContact(page.html, expectedVenue, visible.contactPhoneLinks, visible.title);
   if (raw.contactPhones.length !== 1 || raw.contactPhones[0] !== phone) return fail();
   stage = "INERT_BOOKING_LINK";
   try { if (!hasInertPublicBookingLink(page.html, page.url, source.bookingUrl)) return fail(); } catch { return fail(); }
