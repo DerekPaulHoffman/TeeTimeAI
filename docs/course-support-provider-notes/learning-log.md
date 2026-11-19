@@ -2,6 +2,12 @@
 
 This file records generic process lessons only. It is not a provider-family note and scheduled responders must not read it during routine claimed work. Live incident and monitoring state remains in Postgres.
 
+## 2026-11-18 - Complete The Browser Repair Handoff
+
+The earlier controller repair permitted normal admission for a different plain public read but left the necessary rendered root permanently blocked by the old controller's receipt. The next worker completed its plain HTTP observation, then stopped on an internal command error. Both episodes received the same coarse research-failed outcome, so the scheduler also treated them as identical exhausted research. A read-only snapshot and offline policy replay showed a public HTTP 200, observed absent access controls, and no eligible browser route. This was a recovery-control gap, not unavailable inventory.
+
+The current research contract now distinguishes that exact historical controller failure and the pre-correction plain handoff. A new owner must first obtain its own fresh successful current-version HTTP observation of the same saved root, with matching source fingerprint and explicit absent access controls. Only then can it use the corrected browser within the unchanged request and read budgets. Old receipts remain intact; unrelated unknown failures, access denials, changed source, stale evidence and already attempted current-version reads do not qualify. The implementation version changes with this actual handoff correction so an attempt that stops again before its browser step cannot repeatedly wake itself. Policy, dispatcher, stale-evidence and ownership tests cover the complete sequence; offline admission eligibility does not establish live replay or email delivery.
+
 ## 2026-11-18 - Distinguish Writer Admission From Ownership Loss
 
 A release verifier stopped with a lost-ownership heartbeat while its retained batch still had the same owner and a fresh lease. The old heartbeat result collapsed several causes, so this snapshot alone cannot establish the exact live cause. A focused regression independently reproduced one concrete defect: a definite advisory-lock refusal, before entering the renewal transition, was treated as lost ownership without another admission attempt.
