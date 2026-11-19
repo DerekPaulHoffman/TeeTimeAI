@@ -20,6 +20,19 @@ export function fullRepairContinuationMode(input: {
     ? "PUBLISHED_IMPLEMENTATION" as const : null;
 }
 
+/** A changed source with no implementation belongs to the original owner's
+ * existing reconciliation path, never to research using the stale claim. */
+export function fullRepairSourceContinuation(input: {
+  mode: ReturnType<typeof fullRepairContinuationMode>; result: string;
+  claimedFingerprint: string; currentFingerprint: string;
+}) {
+  if (!input.mode || !/^[a-f0-9]{64}$/u.test(input.claimedFingerprint) ||
+      !/^[a-f0-9]{64}$/u.test(input.currentFingerprint)) return null;
+  if (input.claimedFingerprint === input.currentFingerprint) return "CONTINUE_REPAIR" as const;
+  return input.mode === "DATA_ONLY" && input.result === "STALE_EVIDENCE"
+    ? "RECONCILE_SOURCE" as const : null;
+}
+
 export function fullRepairReadProgressMatchesClaim(input: {
   fullRepair: boolean; claimedEventCount: number; runtimeVersion: string | null;
   batchCreatedAt: Date; now: Date;

@@ -1,5 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { allowsRetainedFullRepairResearch, fullRepairContinuationMode, fullRepairReadProgressMatchesClaim, hasStoppedFullRepairVerification, isDataOnlyFullRepair, shouldContinueOwnedFullRepair } from "./course-support-full-repair";
+import { allowsRetainedFullRepairResearch, fullRepairContinuationMode, fullRepairSourceContinuation, fullRepairReadProgressMatchesClaim, hasStoppedFullRepairVerification, isDataOnlyFullRepair, shouldContinueOwnedFullRepair } from "./course-support-full-repair";
+
+describe("changed-source reconciliation for an unfinished data-only mission", () => {
+  const input = { mode: "DATA_ONLY" as const, result: "STALE_EVIDENCE", claimedFingerprint: "a".repeat(64), currentFingerprint: "b".repeat(64) };
+  it("keeps the original owner actionable without accepting the changed source for research", () => {
+    const before = structuredClone(input);
+    expect(fullRepairSourceContinuation(input)).toBe("RECONCILE_SOURCE");
+    expect(input).toEqual(before);
+    expect(fullRepairSourceContinuation({ ...input, currentFingerprint: input.claimedFingerprint })).toBe("CONTINUE_REPAIR");
+  });
+  it("does not reconcile source drift into code-bearing, unfinished or malformed authority", () => {
+    for (const change of [{ mode: "CLAIMED_IMPLEMENTATION" as const }, { mode: "PUBLISHED_IMPLEMENTATION" as const },
+      { mode: null }, { result: "PENDING" }, { result: "RESTORED" }, { claimedFingerprint: "unknown" },
+      { currentFingerprint: "" }]) expect(fullRepairSourceContinuation({ ...input, ...change })).toBeNull();
+  });
+});
 
 describe("unfinished original-owner implementation phase", () => {
   const phase = { status: "IMPLEMENTING", baseSha: "a".repeat(40), releaseSha: "a".repeat(40),

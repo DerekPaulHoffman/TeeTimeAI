@@ -39,7 +39,7 @@ import {
   courseSupportBatchReservesCheckout,
   courseSupportRecoveryBatchesConflict,
 } from "./course-support-batches";
-import { allowsRetainedFullRepairResearch, fullRepairContinuationMode, hasStoppedFullRepairVerification } from "./course-support-full-repair";
+import { allowsRetainedFullRepairResearch, fullRepairContinuationMode, fullRepairSourceContinuation, hasStoppedFullRepairVerification } from "./course-support-full-repair";
 import { readOwnedFailedLearningProgress } from "./course-support-learning-followthrough";
 import { retryCourseSupportWriterAdmission } from "./course-support-writer-admission";
 import { COURSE_DISPATCH_INCIDENT_SNAPSHOT_SELECT, isCourseDispatchIncidentSnapshotCurrent } from "./course-support-dispatch-snapshot";
@@ -731,8 +731,11 @@ async function collectOwnedFullRepairContinuations(tx: Prisma.TransactionClient,
         entry.incident.failureFingerprint !== audit.target.failureFingerprint) continue;
     const directive = readCourseSupportRemediationDirective(batch.summary);
     const claim = readCourseSupportRemediationClaimAttempt({ summary: batch.summary, courseId: entry.courseId, expectedAttemptCount: 1 });
-    if (!directive || !claim ||
-      claim.providerSnapshotFingerprint !== buildCourseSupportProviderSnapshotFingerprint(entry.course)) continue;
+    if (!directive || !claim) continue;
+    const sourcePurpose = fullRepairSourceContinuation({ mode: continuationMode, result: entry.result,
+      claimedFingerprint: claim.providerSnapshotFingerprint,
+      currentFingerprint: buildCourseSupportProviderSnapshotFingerprint(entry.course) });
+    if (!sourcePurpose) continue;
     const searches = await tx.coursePreference.findMany({
       where: { courseId: entry.courseId, teeSearchId: { in: audit.target.searchRefs.map(ref => ref.id) }, teeSearch: { mode: "OUTDOOR" } },
       select: { teeSearch: { select: COURSE_DISPATCH_SOURCE_SELECT } },
@@ -759,6 +762,7 @@ async function collectOwnedFullRepairContinuations(tx: Prisma.TransactionClient,
       threadId: audit.childThreadId!, launcherReceiptPath: audit.launcherReceiptPath!, batchReference: batch.reference,
       baseSha: batch.baseSha, releaseSha: batch.releaseSha,
       continuationTrigger: "UNFINISHED_FULL_REPAIR" as const,
+      ...(sourcePurpose === "RECONCILE_SOURCE" ? { sourceReconciliationOnly: true as const } : {}),
       ...(failedLearningProgress ? { failedLearningProgress } : {}),
       continuationMode, ...(continuationMode === "CLAIMED_IMPLEMENTATION" ? { plannedPaths: paths as string[] } : {}) });
     if (items.length === 5) break;

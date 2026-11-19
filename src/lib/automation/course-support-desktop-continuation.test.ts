@@ -53,6 +53,31 @@ function fixture() {
 }
 
 describe("original Desktop full-repair continuation", () => {
+  it("wakes the same clean data-only owner solely to reconcile a changed source", async () => {
+    const f = fixture();
+    const item = { ...f.item, continuationMode: "DATA_ONLY", continuationTrigger: "UNFINISHED_FULL_REPAIR", sourceReconciliationOnly: true };
+    const result = await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps);
+    expect(result).toMatchObject({ outcome: "desktop_continuation_message_required", threadId: CHILD,
+      monitoringVerified: false, prompt: expect.stringContaining("SOURCE_RECONCILIATION_ONLY") });
+    expect(result.prompt).toContain("Do not investigate or implement against the changed snapshot");
+    expect(result.prompt).not.toContain("Obtain and validate fresh research context");
+    expect(await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps))
+      .toMatchObject({ outcome: "already_requested", messageRequired: false });
+    expect(f.client.request.mock.calls.some(([method]) => /start|resume|send|steer/u.test(method))).toBe(false);
+    expect(JSON.parse(readFileSync(f.launcherPath, "utf8"))).toEqual(f.launcher);
+  });
+
+  it.each(["CLAIMED_IMPLEMENTATION", "PUBLISHED_IMPLEMENTATION", "missing-mode", "wrong-trigger", "false-flag"])("rejects invalid source-reconciliation purpose %s", async scenario => {
+    const f = fixture();
+    const item = { ...f.item, continuationMode: "DATA_ONLY", continuationTrigger: "UNFINISHED_FULL_REPAIR", sourceReconciliationOnly: true };
+    if (scenario === "missing-mode") delete (item as Partial<typeof item>).continuationMode;
+    else if (scenario === "wrong-trigger") item.continuationTrigger = "RETRY_PROVIDER";
+    else if (scenario === "false-flag") item.sourceReconciliationOnly = false;
+    else item.continuationMode = scenario;
+    await expect(prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps)).rejects.toThrow();
+    expect(f.deps.clientFactory).not.toHaveBeenCalled();
+  });
+
   it("continues the original clean owner between claiming a tooling path and publishing its implementation", async () => {
     const f = fixture();
     const item = { ...f.item, continuationMode: "CLAIMED_IMPLEMENTATION", continuationTrigger: "UNFINISHED_FULL_REPAIR",

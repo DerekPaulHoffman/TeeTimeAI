@@ -16,6 +16,10 @@ learning attempts failed; later engineering recovery never resets their clocks.
 
 | Observed stop | Corrective contract | Regression location |
 | --- | --- | --- |
+| A data-only worker learned a booking source, then disappeared from continuation selection because its snapshot changed | Wake only the same clean original owner for qualified reconciliation/requeue. The stale snapshot grants no research or implementation authority; code-bearing and pending work remain fenced | full-repair source-purpose and desktop-continuation prompt/deduplication regressions |
+| A public rental service's Add and calendar Next filters were hidden alongside transaction controls | Recognize only source-bound public Square service filters and one same-session transition to the calendar; keep slot/customer/checkout actions and mutations blocked | square-public-service-controls and real-browser interactive fixtures |
+| Claiming the first tooling path changed VERIFYING to IMPLEMENTING and silently removed continuation | Preserve the original clean claimed-implementation phase, with registered paths and qualified published-runtime import | full-repair, desktop-continuation and isolated-Postgres owner recovery |
+| Desktop workers had no callable CLI dynamic browser tool | Expose the same original-owned bounded research channel through its Desktop command transport; preserve source/request/action limits | browser-desktop and browser-bridge suites |
 | Worker chose a branch its launcher rejected | Supervisor creates the exact assignment branch from a clean detached managed worktree | worker-supervisor and worker-launcher suites |
 | Another browser interface omitted First user | Qualify the actual CUA inventory; actual host/access denial still stops | worker-supervisor suite |
 | Verification retained STALE_EVIDENCE but research required PENDING | Keep negative evidence and authorize only the same full-repair owner under current source/cycle/lease guards, including after claiming code paths | research-context suite and engineering-repair Postgres lifecycle |
