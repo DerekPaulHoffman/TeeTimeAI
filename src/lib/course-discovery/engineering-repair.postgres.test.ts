@@ -543,7 +543,8 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     const plannedPath = "src/lib/adapters/example.ts";
     await client.courseSupportBatch.update({ where: { id: batch.id }, data: { status: claimed ? "IMPLEMENTING" : "VERIFYING", releaseSha: code && !claimed ? "c".repeat(40) : baseSha,
       deployedAt: scenario === "published-code" || pending && !registered || claimed ? batch.createdAt : null,
-      summary: { ...(batch.summary as Prisma.JsonObject), plannedPaths: code ? [plannedPath] : [],
+      summary: { ...(batch.summary as Prisma.JsonObject), plannedPaths: registered
+        ? [plannedPath, ...Array.from({ length: 37 }, (_, index) => `src/lib/previous-fix-${index}.ts`)] : code ? [plannedPath] : [],
         ...(registered ? { searchExecutionFence: null, recheckDispatch: null, releaseProvenance: { schemaVersion: 1,
           fromSha: baseSha, toSha: "c".repeat(40), branch: (batch.summary as Prisma.JsonObject).branch,
           committedPaths: [plannedPath], descendantVerified: true } } : {}),

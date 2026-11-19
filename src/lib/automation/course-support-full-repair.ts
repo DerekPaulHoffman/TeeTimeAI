@@ -39,7 +39,7 @@ export function fullRepairSourceContinuation(input: {
     ? "RECONCILE_SOURCE" as const : null;
 }
 
-export function hasInterruptedRegisteredFullRepair(input: {
+export function interruptedRegisteredFullRepairPaths(input: {
   status: string; result: string; baseSha: string; releaseSha: string | null; deployedAt: Date | null;
   leaseExpiresAt: Date; now: Date; recheckDispatchKey: string | null;
   recheckDispatchStartedAt: Date | null; recheckDispatchedAt: Date | null;
@@ -48,15 +48,19 @@ export function hasInterruptedRegisteredFullRepair(input: {
   const { summary } = input;
   const provenance = summary.releaseProvenance as Record<string, unknown> | null;
   const paths = summary.plannedPaths;
-  return input.status === "VERIFYING" && input.result === "PENDING" && input.deployedAt === null &&
+  const eligible = input.status === "VERIFYING" && input.result === "PENDING" && input.deployedAt === null &&
     input.leaseExpiresAt <= input.now && input.releaseSha !== input.baseSha && /^[a-f0-9]{40}$/u.test(input.releaseSha ?? "") &&
     input.recheckDispatchKey === null && input.recheckDispatchStartedAt === null && input.recheckDispatchedAt === null &&
     summary.searchExecutionFence === null && summary.recheckDispatch === null &&
-    Array.isArray(paths) && paths.length > 0 && paths.length <= 32 && paths.every(path => typeof path === "string" && path.length > 0) &&
+    Array.isArray(paths) && paths.length > 0 && paths.every(path => typeof path === "string" && path.length > 0) &&
     provenance?.schemaVersion === 1 && provenance.descendantVerified === true && provenance.toSha === input.releaseSha &&
     typeof provenance.fromSha === "string" && /^[a-f0-9]{40}$/u.test(provenance.fromSha) && provenance.fromSha !== input.releaseSha &&
     typeof summary.branch === "string" && provenance.branch === summary.branch && Array.isArray(provenance.committedPaths) &&
-    provenance.committedPaths.length > 0 && provenance.committedPaths.every(path => typeof path === "string" && paths.includes(path));
+    provenance.committedPaths.length > 0 && provenance.committedPaths.length <= 32 &&
+    provenance.committedPaths.every(path => typeof path === "string" && paths.includes(path));
+  // The original claim can accumulate paths over multiple releases. The
+  // local controller only needs the proven delta for this registered commit.
+  return eligible ? provenance.committedPaths as string[] : null;
 }
 
 export function fullRepairReadProgressMatchesClaim(input: {
