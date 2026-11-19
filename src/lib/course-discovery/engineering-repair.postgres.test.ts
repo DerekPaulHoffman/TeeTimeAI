@@ -143,6 +143,37 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
 
   // This end-to-end database fixture includes cold tooling imports on hosted
   // runners. Its harness budget is separate from the asserted worker deadlines.
+  it.each(["live-original-owner", "foreign-native-owner", "expired-owner-lease"])(
+    "reconciles an interrupted pre-deployment wait without changing durable effects: %s", async scenario => {
+      const f = await deployedReaderRepair();
+      // This is the real persisted boundary after a release heartbeat and an
+      // interrupted read-only deployment wait, before its proof was recorded.
+      await client.courseSupportBatch.update({ where: { id: f.batch.id }, data: { deployedAt: null,
+        ...(scenario === "expired-owner-lease" ? { leaseExpiresAt: new Date(Date.now() - 1000) } : {}) } });
+      const snapshot = async () => ({
+        batch: await client.courseSupportBatch.findUniqueOrThrow({ where: { id: f.batch.id } }),
+        jobs: await client.courseDiscoveryJob.findMany({ where: { courseId: f.course.id }, orderBy: { id: "asc" } }),
+        recipes: await client.courseAccessRecipe.findMany({ where: { courseId: f.course.id }, orderBy: { id: "asc" } }),
+        search: await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } }),
+      });
+      const before = await snapshot();
+      vi.stubEnv("CODEX_THREAD_ID", scenario === "foreign-native-owner" ? `foreign-${randomUUID()}` : f.input.ownerThreadId);
+      const { recoverLearning } = await import("../../../scripts/automation/course-support");
+      const noHttp = vi.spyOn(globalThis, "fetch").mockRejectedValue(Error("NO_PUBLIC_OR_DEPLOYMENT_READ_ALLOWED"));
+      try {
+        const pending = recoverLearning(["--batch-ref", f.batch.reference]);
+        if (scenario === "live-original-owner") {
+          const result = await pending;
+          expect(result).toMatchObject({ outcome: "release_verification_required", stateChanged: false,
+            requiredAction: "VERIFY_REGISTERED_RELEASE", releaseSha: f.input.releaseSha,
+            deploymentVerified: false, monitoringVerified: false, deliveryVerified: false, durableCloseoutRecorded: false });
+          expect(result).toHaveProperty("nextAction", expect.stringContaining("interrupted deployment wait"));
+        } else await expect(pending).rejects.toThrow();
+        expect(noHttp).not.toHaveBeenCalled();
+        expect(await snapshot()).toEqual(before);
+      } finally { noHttp.mockRestore(); }
+    }, 20_000);
+
   it.each(["live-owner", "expired-original-owner"])("returns a repaired reader to replay and normal monitoring with %s", async scenario => {
     const f = await deployedReaderRepair();
     const admission = await service.requestOwnedOutdoorLearningRecovery(f.input);
