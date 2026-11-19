@@ -11,7 +11,7 @@ const database = vi.hoisted(() => ({
   queryRawUnsafe: vi.fn(),
   learningEvidence: vi.fn(async () => null as unknown),
 }));
-vi.mock("../course-discovery/engineering-repair", () => ({ getOwnedLearningBookingEdgeEvidence: database.learningEvidence }));
+vi.mock("../course-discovery/engineering-repair", () => ({ getOwnedLearningFailureEvidence: database.learningEvidence }));
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     courseSupportBatch: { findFirst: database.batchFindFirst },
@@ -201,22 +201,29 @@ function fixture() {
 describe("owned course-support research context", () => {
   beforeEach(() => { database.batchFindFirst.mockReset(); database.learningEvidence.mockReset().mockResolvedValue(null); });
 
-  it.each(["owned", "owner-lost", "source-drift"])("rechecks private learning evidence before returning the context: %s", async scenario => {
+  it.each(["owned", "owner-lost", "source-drift"].flatMap(scenario => ["edge", "physical"].map(kind => ({ scenario, kind }))))("rechecks private $kind evidence before returning the context: $scenario", async ({ scenario, kind }) => {
     const batch = fixture();
     batch.summary.remediation.reason = "FAILED_LEARNER_IMPLEMENTATION_HANDOFF";
     batch.summary.remediation.attempts[0].actionPlan.allowedActions.push("INVESTIGATE_PUBLIC_SOURCE");
     database.batchFindFirst.mockResolvedValue(batch);
     const before = await getOwnedCourseSupportResearchContext(input);
     expect(before.outcome).toBe("ready");
-    database.learningEvidence.mockResolvedValue({ schemaVersion: 1, sourceFingerprint: "a".repeat(64), executionRuntime: "b".repeat(40),
-      evidenceAuthority: false, untrustedPageEvidence: true, evidence: { raw: { frameCount: 0 }, rendered: { framesState: "OMITTED" } } });
+    database.learningEvidence.mockResolvedValue({ schemaVersion: 1, sourceFingerprint: "a".repeat(64), implementationRelease: "b".repeat(40), executionRuntime: "b".repeat(40),
+      evidenceAuthority: false, untrustedPageEvidence: true,
+      bookingEdgeEvidence: kind === "edge" ? { raw: { frameCount: 0 }, rendered: { framesState: "OMITTED" } } : null,
+      physicalBindingEvidence: kind === "physical" ? { schemaVersion: 1, observedAt: "2026-09-28T13:46:00Z",
+        canonicalStreet: { before: "", street: "oakridge", type: "rd", after: "" }, providerStreet: { before: "", street: "oak ridge", type: "rd", after: "" } } : null });
     const changed = structuredClone(batch); changed.incidents[0].course.website = "https://changed.example/";
     database.batchFindFirst.mockResolvedValueOnce(batch).mockResolvedValueOnce(scenario === "owner-lost" ? null : scenario === "source-drift" ? changed : batch);
     const result = await getOwnedCourseSupportResearchContext(input);
     if (scenario === "owned") {
-      expect(result).toMatchObject({ privateContext: true, researchContextV1: { learningBookingEdgeEvidence: {
+      expect(result).toMatchObject({ privateContext: true, researchContextV1: { [kind === "edge" ? "learningBookingEdgeEvidence" : "learningPhysicalBindingEvidence"]: {
         evidenceAuthority: false, untrustedPageEvidence: true } } });
-      if (result.outcome === "ready" && before.outcome === "ready") expect(result.researchContextV1.contextDigest).not.toBe(before.researchContextV1.contextDigest);
+      if (result.outcome === "ready" && before.outcome === "ready") {
+        expect(result.researchContextV1.contextDigest).not.toBe(before.researchContextV1.contextDigest);
+        expect(result.researchContextV1.availabilityContract).toEqual(before.researchContextV1.availabilityContract);
+        expect(result.researchContextV1.monitoringProofRecorded).toBe(before.researchContextV1.monitoringProofRecorded);
+      }
       expect(database.learningEvidence).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ batchId: input.batchId, ownerThreadId: input.ownerThreadId }));
     } else expect(result).toMatchObject({ outcome: scenario === "owner-lost" ? "recovery_required" : "authority_drift" });
   });

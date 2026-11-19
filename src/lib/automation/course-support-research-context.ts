@@ -28,6 +28,7 @@ import {
 import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-verification";
 import { prisma } from "../prisma";
 import type { getOwnedLearningBookingEdgeEvidence } from "../course-discovery/engineering-repair";
+import type { PhysicalBindingFailureEvidence } from "../course-discovery/physical-binding-failure-evidence";
 
 const RESEARCH_CONTEXT_VERSION = 1;
 const ACTIVE_BATCH_STATUSES = ["CLAIMED", "IMPLEMENTING", "VERIFYING"] as const;
@@ -166,9 +167,9 @@ export async function getOwnedCourseSupportResearchContext(
   if (!batch) return controlResult("recovery_required", input.ordinal);
   const initial = buildOwnedCourseSupportResearchContext(input, batch, now);
   if (initial.outcome !== "ready" || readCourseSupportRemediationDirective(batch.summary)?.reason !== "FAILED_LEARNER_IMPLEMENTATION_HANDOFF") return initial;
-  const { getOwnedLearningBookingEdgeEvidence } = await import("../course-discovery/engineering-repair");
+  const { getOwnedLearningFailureEvidence } = await import("../course-discovery/engineering-repair");
   const entry = orderCourseSupportBatchIncidents(batch.incidents)[input.ordinal - 1];
-  const evidence = await getOwnedLearningBookingEdgeEvidence(prisma, { batchId: input.batchId, ownerThreadId: input.ownerThreadId,
+  const evidence = await getOwnedLearningFailureEvidence(prisma, { batchId: input.batchId, ownerThreadId: input.ownerThreadId,
     courseId: entry.course.id, incidentId: entry.incident.id, incidentCycle: entry.cycle,
     providerSnapshotFingerprint: initial.researchContextV1.providerSnapshot.fingerprint, now });
   if (!evidence) return initial;
@@ -182,7 +183,10 @@ export async function getOwnedCourseSupportResearchContext(
   const fresh = buildOwnedCourseSupportResearchContext(input, confirmed, now);
   if (fresh.outcome !== "ready" || fresh.researchContextV1.contextDigest !== initial.researchContextV1.contextDigest)
     return controlResult("authority_drift", input.ordinal);
-  return buildOwnedCourseSupportResearchContext(input, confirmed, now, evidence);
+  const { bookingEdgeEvidence, physicalBindingEvidence, ...header } = evidence;
+  return buildOwnedCourseSupportResearchContext(input, confirmed, now,
+    bookingEdgeEvidence ? { ...header, evidence: bookingEdgeEvidence } : null,
+    physicalBindingEvidence ? { ...header, evidence: physicalBindingEvidence } : null);
 }
 
 export async function validateOwnedCourseSupportResearchContext(
@@ -433,6 +437,8 @@ export function buildOwnedCourseSupportResearchContext(
   batch: ResearchBatch,
   now: Date,
   learningBookingEdgeEvidence: Awaited<ReturnType<typeof getOwnedLearningBookingEdgeEvidence>> = null,
+  learningPhysicalBindingEvidence: { schemaVersion: 1; sourceFingerprint: string; implementationRelease: string; executionRuntime: string;
+    evidence: PhysicalBindingFailureEvidence; evidenceAuthority: false; untrustedPageEvidence: true } | null = null,
 ) {
   if (batch.leaseExpiresAt <= now) return controlResult("recovery_required", input.ordinal);
   const ordered = orderCourseSupportBatchIncidents(batch.incidents);
@@ -725,6 +731,7 @@ export function buildOwnedCourseSupportResearchContext(
     missingEvidence: [...new Set(missingEvidence)],
     monitoringProofRecorded: false as const,
     learningBookingEdgeEvidence,
+    learningPhysicalBindingEvidence,
     recentDiscoveryObservations: observations.slice(0, 8),
     recentMonitoringObservations: course.monitoringEvents
       .filter((event) => event.incidentId === entry.incident.id)

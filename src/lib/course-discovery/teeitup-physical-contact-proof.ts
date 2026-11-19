@@ -7,6 +7,7 @@ import { freshNativeCanonicalRootDocument } from "./native-official-page-attesta
 import type { OfficialIdentityPage, OfficialIdentitySource } from "./teeitup-official-identity";
 import { parseNamedContactAddress, readNamedPublicContacts } from "./public-named-contact";
 import { normalizePublicUSState } from "./public-us-business-address";
+import { physicalBindingFailureEvidenceSchema, type PhysicalBindingFailureEvidence } from "./physical-binding-failure-evidence";
 
 const url = z.string().max(2048).refine(v => Boolean(publicDocumentUrl(v))), sha = z.string().regex(/^[a-f0-9]{64}$/u);
 const name = z.string().min(3).max(200), address = z.string().min(15).max(1024), locality = z.string().min(2).max(80);
@@ -316,7 +317,8 @@ export function bindTeeItUpPhysicalContactFacility(source: OfficialIdentitySourc
     "directoryPhysicalAddressParseValid" | "directoryPhysicalPostalRestorationUsed" | "directoryPhysicalNumberMatch" | "directoryPhysicalStreetNameMatch" | "directoryPhysicalRegionMatch" | "directoryPhysicalPostalMatch" | "directoryPhysicalUnitMatch" |
     "directoryPhysicalAddressHasControls" | "directoryPhysicalAddressFieldCountTwo" | "directoryPhysicalAddressFieldCountThree" | "directoryPhysicalAddressFieldCountFour" | "directoryPhysicalAddressFieldCountFive" | "directoryPhysicalAddressFieldCountOther" |
     "directoryPhysicalAddressRegionPostalSeparated" | "directoryPhysicalAddressFourDigitPostal" | "directoryPhysicalAddressPostalExtension" | "directoryPhysicalAddressNamePrefix" | "directoryPhysicalAddressMailingMarker" |
-    "directoryPhysicalStreetMatch" | "directoryPhysicalPhoneMatch" | "directoryPhysicalTimeZoneMatch" | "directoryPhysicalContactMatch" | "directoryPhysicalContactUnique" | "directoryPhysicalNameMatch" | "directoryPhysicalLocalityFieldsMatch", value: boolean) => void): { physicalContactProof: TeeItUpPhysicalContactProof; facilityId: number; courseId: string } {
+    "directoryPhysicalStreetMatch" | "directoryPhysicalPhoneMatch" | "directoryPhysicalTimeZoneMatch" | "directoryPhysicalContactMatch" | "directoryPhysicalContactUnique" | "directoryPhysicalNameMatch" | "directoryPhysicalLocalityFieldsMatch", value: boolean) => void,
+  onFailureEvidence?: (evidence: PhysicalBindingFailureEvidence) => void): { physicalContactProof: TeeItUpPhysicalContactProof; facilityId: number; courseId: string } {
   const gate = (key: Parameters<NonNullable<typeof onGate>>[0], value: boolean) => { try { onGate?.(key, value); } catch { /* Diagnostics never change proof. */ } return value; };
   const fields = sourceSchema.safeParse(Object.fromEntries(Object.keys(sourceSchema.shape).map(key => [key, contact[key as keyof NativePhysicalContactSource]])));
   if (!fields.success || physicalContactDigest(fields.data) !== contact.sourceWitnessSha256 || contact.officialUrl !== source.officialUrl || contact.bookingUrl !== source.bookingUrl || contact.canonicalName !== source.venueName || contact.canonicalAddress !== source.venueAddress) return reject();
@@ -362,6 +364,20 @@ export function bindTeeItUpPhysicalContactFacility(source: OfficialIdentitySourc
   gate("directoryPhysicalTimeZoneMatch", rows.data.some(v => v.timeZone === source.timeZone));
   const matches = rows.data.filter((v, i) => { const a = parsedAddresses[i]; return a && sameExceptLocality(canonicalAddress, a) &&
     v.timeZone === source.timeZone && normalizePublicCoursePhone(v.phone) === contact.publicCoursePhone; });
+  if (matches.length !== 1 && onFailureEvidence) {
+    const comparable = rows.data.flatMap((row, i) => {
+      const value = parsedAddresses[i];
+      return value && literal(row.name) === literal(contact.officialBrandName) && row.timeZone === source.timeZone &&
+        normalizePublicCoursePhone(row.phone) === contact.publicCoursePhone &&
+        (["number", "region", "postalCode", "country", "unitType", "unit"] as const).every(key => value[key] === canonicalAddress[key]) ? [value] : [];
+    });
+    if (comparable.length === 1) {
+      const fields = (value: FullAddress) => ({ before: value.before, street: value.street, type: value.type, after: value.after });
+      const evidence = physicalBindingFailureEvidenceSchema.safeParse({ schemaVersion: 1, observedAt: new Date().toISOString(),
+        canonicalStreet: fields(canonicalAddress), providerStreet: fields(comparable[0]) });
+      if (evidence.success) try { onFailureEvidence(evidence.data); } catch { /* Failure observations confer no authority. */ }
+    }
+  }
   gate("directoryPhysicalContactMatch", matches.length > 0);
   if (!gate("directoryPhysicalContactUnique", matches.length === 1)) return reject();
   const row = matches[0], provider = physicalProviderAddress(canonicalAddress, row.address, row.country);

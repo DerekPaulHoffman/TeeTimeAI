@@ -15,6 +15,7 @@ import { bookingEdgeEvidenceSchema } from "./booking-edge-evidence";
 import { hasReciprocalLearningRepairLink, readLearningRepairRecoveries, readLearningRepairRecoveryOf } from "./learning-repair-recovery";
 import { projectStagehandNativeRouterFailure, stagehandNativeRouterCodes } from "./stagehand-native-router-diagnostic";
 import { cpsPhoneBookingFailureStages } from "./cps-phone-booking-proof";
+import { physicalBindingFailureEvidenceSchema } from "./physical-binding-failure-evidence";
 
 const receiptSchema = z.object({ version: z.literal(1), state: z.literal("QUEUED"),
   incidentId: z.string().min(1).max(128), queuedAt: z.string().datetime(),
@@ -160,6 +161,7 @@ export function discoveryFailureDiagnosis(job: { outcome: string | null; checkpo
       gate: gate.replace(/([a-z])([A-Z])/gu, "$1_$2").toUpperCase(), passed: gates[gate] })) }
     : undefined;
   const hopEvidence = includeBookingEdgeEvidence ? bookingEdgeEvidenceSchema.safeParse(diagnostic.hopEvidence) : null;
+  const physical = includeBookingEdgeEvidence && diagnostic.stage === "PROVIDER_BIND" ? physicalBindingFailureEvidenceSchema.safeParse(diagnostic.physicalBindingEvidence) : null;
   // Existing persisted inspection facts only. Deliberately omit URL hashes,
   // source text, identities and private binding values from this handoff.
   const readability = inspectionReadabilitySchema.safeParse(object(last?.fixedInspectionDiagnostic).readability);
@@ -173,6 +175,7 @@ export function discoveryFailureDiagnosis(job: { outcome: string | null; checkpo
       } : {}),
     ...(delegationDiagnostic ? { delegationDiagnostic } : {}),
     ...(delegationDiagnostic && hopEvidence?.success ? { bookingEdgeEvidence: hopEvidence.data } : {}),
+    ...(delegationDiagnostic && physical?.success ? { physicalBindingEvidence: physical.data } : {}),
     phase, evidenceAuthority: false as const };
   // A fallback retains the fixed rejection as provenance, then serializes its
   // terminal guard last. Do not report the older inspection as the current
@@ -185,7 +188,7 @@ export function discoveryFailureDiagnosis(job: { outcome: string | null; checkpo
   return { ...inspection, ...(guardCode ? {
     category: guardCode === "DISCOVERY_NATIVE_TRANSPORT_FATAL" ? "BROWSER_TRANSPORT_REJECTED" : "READER_OR_RUNTIME_FAILURE",
     code: guardCode, failureCode: guardCode, phase: "GENERIC_FALLBACK",
-    delegationDiagnostic: undefined, bookingEdgeEvidence: undefined, priorInspection: inspection,
+    delegationDiagnostic: undefined, bookingEdgeEvidence: undefined, physicalBindingEvidence: undefined, priorInspection: inspection,
     ...(guardCode === "DISCOVERY_NATIVE_TRANSPORT_FATAL" ? {
       nativeTransportDiagnostic: { failureCode: nativeFailureCode, ...nativeFacts },
     } : {}),
@@ -194,7 +197,7 @@ export function discoveryFailureDiagnosis(job: { outcome: string | null; checkpo
 
 /** Only the same live, source-bound repair owner's reciprocal failed child.
  * Structural facts remain untrusted diagnosis, never provider/read authority. */
-export async function getOwnedLearningBookingEdgeEvidence(reader: Reader, input: {
+export async function getOwnedLearningFailureEvidence(reader: Reader, input: {
   batchId: string; ownerThreadId: string; courseId: string; incidentId: string; incidentCycle: number; providerSnapshotFingerprint: string; now: Date;
 }) {
   const current = await currentDiscoveryEngineeringHandoff(reader, { courseId: input.courseId }, input.now);
@@ -214,11 +217,22 @@ export async function getOwnedLearningBookingEdgeEvidence(reader: Reader, input:
       JSON.stringify(readLearningRepairRecoveryOf(child.result)) !== JSON.stringify(link)) return null;
   const diagnosis = discoveryFailureDiagnosis(child, true);
   const evidence = diagnosis.priorInspection?.bookingEdgeEvidence ?? diagnosis.bookingEdgeEvidence;
-  if (!evidence || Date.parse(evidence.observedAt) < child.firstPickedUpAt.getTime() ||
-      Date.parse(evidence.observedAt) > Math.min(child.deadlineAt.getTime(), child.completedAt.getTime(), input.now.getTime()) ||
-      evidence.attestedAt && Date.parse(evidence.attestedAt) < child.firstPickedUpAt.getTime()) return null;
+  const physical = diagnosis.priorInspection?.physicalBindingEvidence ?? diagnosis.physicalBindingEvidence;
+  const withinAttempt = (at: string) => Date.parse(at) >= child.firstPickedUpAt!.getTime() &&
+    Date.parse(at) <= Math.min(child.deadlineAt!.getTime(), child.completedAt!.getTime(), input.now.getTime());
+  if (!evidence && !physical || evidence && (!withinAttempt(evidence.observedAt) || evidence.attestedAt && !withinAttempt(evidence.attestedAt)) ||
+      physical && !withinAttempt(physical.observedAt)) return null;
   return { schemaVersion: 1 as const, sourceFingerprint: link.sourceFingerprint, implementationRelease: link.releaseSha,
-    executionRuntime: link.runtimeVersion, evidence, evidenceAuthority: false as const, untrustedPageEvidence: true as const };
+    executionRuntime: link.runtimeVersion, bookingEdgeEvidence: evidence ?? null, physicalBindingEvidence: physical ?? null,
+    evidenceAuthority: false as const, untrustedPageEvidence: true as const };
+}
+
+/** Compatibility projection for callers that require a booking-edge witness. */
+export async function getOwnedLearningBookingEdgeEvidence(reader: Reader, input: Parameters<typeof getOwnedLearningFailureEvidence>[1]) {
+  const value = await getOwnedLearningFailureEvidence(reader, input);
+  if (!value?.bookingEdgeEvidence) return null;
+  const { bookingEdgeEvidence, physicalBindingEvidence: _physical, ...header } = value; void _physical;
+  return { ...header, evidence: bookingEdgeEvidence };
 }
 
 export function discoveryEngineeringReceipt(result: unknown) {
