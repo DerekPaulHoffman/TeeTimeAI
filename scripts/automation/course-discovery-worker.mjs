@@ -916,7 +916,9 @@ function safeFixedReaderFailureDiagnostics(value) {
   const result = {}, cps = value?.cpsPostalContact;
   if (["ROOT_PROVENANCE", "VENUE_IDENTITY", "BOOKING_LINK", "CONTACT_COMPLETENESS", "PHONE_IDENTITY", "RAW_CONTACT", "INERT_BOOKING_LINK"].includes(value?.cpsPhoneBookingFailureStage))
     result.cpsPhoneBookingFailureStage = value.cpsPhoneBookingFailureStage;
-  if (["CLUB_IDENTITY", "PUBLIC_FLAG_SHAPE", "PUBLIC_ACCESS", "OFFICIAL_ENTRY_CATALOG", "SINGLE_PUBLIC_CATALOG", "CATALOG_BINDING", "OFFICIAL_SELECTION", "UNIQUE_SELECTED_COURSE", "SELECTED_COURSE", "EXACT_CATALOG"].includes(value?.cpsCatalogIdentityFailureStage))
+  if (["CLUB_IDENTITY", "PUBLIC_FLAG_SHAPE", "PUBLIC_ACCESS", "OFFICIAL_ENTRY_CATALOG", "SINGLE_PUBLIC_CATALOG", "CATALOG_BINDING", "OFFICIAL_SELECTION", "UNIQUE_SELECTED_COURSE", "SELECTED_COURSE", "EXACT_CATALOG",
+    "NAMED_ROOT_PROVENANCE", "NAMED_VISIBLE_LINKS", "NAMED_DOCUMENT_LIMIT", "NAMED_LINK_SCOPE", "NAMED_LINK_LABEL", "NAMED_LINK_NAME",
+    "NAMED_LINK_AMBIGUITY", "NAMED_COURSE_NAMES", "NAMED_RAW_TREE_LIMIT", "NAMED_RAW_LINK_PAIR"].includes(value?.cpsCatalogIdentityFailureStage))
     result.cpsCatalogIdentityFailureStage = value.cpsCatalogIdentityFailureStage;
   if (record(cps)) {
     const keys = ["freshNativeOfficialPage", "canonicalAddressPresent", "canonicalAddressValid", "canonicalPhoneValid", "rawContactsPresent",

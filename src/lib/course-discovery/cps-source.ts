@@ -9,7 +9,7 @@ import { cpsPhoneBookingProofSchema, cpsOfficialCourseDescriptor, cpsOfficialSel
 import type { OfficialIdentityPage } from "./teeitup-official-identity";
 import { parsePublicUSBusinessAddress } from "./public-us-business-address";
 import { bindCpsOfficialEntryProof, cpsOfficialEntryProofSchema, verifyCpsOfficialEntryContext, type CpsOfficialEntryContext } from "./cps-official-entry-proof";
-import { bindCpsOfficialCourseNames } from "./cps-official-course-catalog";
+import { bindCpsOfficialCourseNames, cpsOfficialCourseCatalogFailureStages, getCpsOfficialCourseCatalogFailureStage } from "./cps-official-course-catalog";
 
 const id = z.number().int().min(1).max(2_147_483_647);
 const tenant = z.string().regex(/^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u)
@@ -67,7 +67,8 @@ export const cpsMetadataSchema = z.object({ family: z.literal("CPS"), tenant,
 export type CpsMetadata = z.infer<typeof cpsMetadataSchema>;
 export type CpsSource = { officialUrl: string; bookingUrl: string; venueName: string; venueAddress?: string; timeZone: string };
 export const cpsCatalogIdentityFailureStages = ["CLUB_IDENTITY", "PUBLIC_FLAG_SHAPE", "PUBLIC_ACCESS", "OFFICIAL_ENTRY_CATALOG",
-  "SINGLE_PUBLIC_CATALOG", "CATALOG_BINDING", "OFFICIAL_SELECTION", "UNIQUE_SELECTED_COURSE", "SELECTED_COURSE", "EXACT_CATALOG"] as const;
+  "SINGLE_PUBLIC_CATALOG", "CATALOG_BINDING", "OFFICIAL_SELECTION", "UNIQUE_SELECTED_COURSE", "SELECTED_COURSE", "EXACT_CATALOG",
+  ...cpsOfficialCourseCatalogFailureStages] as const;
 const catalogIdentityFailures = new WeakMap<object, typeof cpsCatalogIdentityFailureStages[number]>();
 export function getCpsCatalogIdentityFailureStage(error: unknown) {
   return error && typeof error === "object" ? catalogIdentityFailures.get(error) : undefined;
@@ -325,7 +326,11 @@ export function parseCpsCatalog(value: unknown, options: CpsOptions, source: Cps
       const venue = publicClubIdentity(options, source);
       let officialCourses;
       try { officialCourses = bindCpsOfficialCourseNames(source, nativeContact.page, courses); }
-      catch (error) { if (error instanceof Error && error.message === "ADAPTER_IDENTITY_MISMATCH") catalogIdentityFailure("CATALOG_BINDING"); throw error; }
+      catch (error) {
+        if (error instanceof Error && error.message === "ADAPTER_IDENTITY_MISMATCH")
+          catalogIdentityFailure(getCpsOfficialCourseCatalogFailureStage(error) ?? "CATALOG_BINDING");
+        throw error;
+      }
       const context = parseCpsSource(source.bookingUrl)!;
       const stable = { mode: "OFFICIAL_NAMED_ONLINE_COURSES", buildNumber: publicBuild, tenant: context.tenant,
         officialUrl: source.officialUrl, bookingUrl: source.bookingUrl, canonicalName: name,

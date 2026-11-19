@@ -15,7 +15,20 @@ const text = (node: Node): string => node.nodeName === "#text" ? (node as Defaul
 const clean = (value: string) => value.normalize("NFKC").replace(/\s+/gu, " ").trim();
 const restricted = /\b(?:private|members?|login|account|checkout|payment|simulator|practice|range|lessons?|events?|gifts?|store|shop|banquet)\b/iu;
 const key = (value: string) => fullCourseName(value).replace(/\s+(?:golf course|course)$/u, "");
-const fail = (): never => { throw Error("ADAPTER_IDENTITY_MISMATCH"); };
+export const cpsOfficialCourseCatalogFailureStages = ["NAMED_ROOT_PROVENANCE", "NAMED_VISIBLE_LINKS", "NAMED_DOCUMENT_LIMIT",
+  "NAMED_LINK_SCOPE", "NAMED_LINK_LABEL", "NAMED_LINK_NAME", "NAMED_LINK_AMBIGUITY", "NAMED_COURSE_NAMES",
+  "NAMED_RAW_TREE_LIMIT", "NAMED_RAW_LINK_PAIR"] as const;
+type FailureStage = typeof cpsOfficialCourseCatalogFailureStages[number];
+const failures = new WeakMap<object, FailureStage>();
+/** Controller-owned failure vocabulary only; contains no source text or URLs. */
+export function getCpsOfficialCourseCatalogFailureStage(error: unknown) {
+  return error && typeof error === "object" ? failures.get(error) : undefined;
+}
+const fail = (stage: FailureStage): never => {
+  const error = Error("ADAPTER_IDENTITY_MISMATCH");
+  failures.set(error, stage);
+  throw error;
+};
 
 /** Complete named sheets at a single venue, not a default/first-course choice.
  * These current raw/rendered witnesses only participate in a rederived catalog
@@ -23,9 +36,10 @@ const fail = (): never => { throw Error("ADAPTER_IDENTITY_MISMATCH"); };
 export function bindCpsOfficialCourseNames(source: { officialUrl: string; venueName: string }, page: OfficialIdentityPage,
   courses: ReadonlyArray<{ courseId: number; courseName: string }>) {
   const shown = page.visibleEvidence?.officialCourseLinkLabels;
-  if (!freshNativeCanonicalRootDocument(page, source.officialUrl) || page.browserTransport !== "NATIVE_CHROME" ||
-      page.visibleEvidence?.officialCourseLinkLabelsOmitted === true || !Array.isArray(shown) || shown.length < 2 || shown.length > 120 ||
-      courses.length < 2 || courses.length > 40 || Buffer.byteLength(page.html, "utf8") > 600_000) return fail();
+  if (!freshNativeCanonicalRootDocument(page, source.officialUrl) || page.browserTransport !== "NATIVE_CHROME") return fail("NAMED_ROOT_PROVENANCE");
+  if (page.visibleEvidence?.officialCourseLinkLabelsOmitted === true || !Array.isArray(shown) || shown.length < 2 || shown.length > 120)
+    return fail("NAMED_VISIBLE_LINKS");
+  if (courses.length < 2 || courses.length > 40 || Buffer.byteLength(page.html, "utf8") > 600_000) return fail("NAMED_DOCUMENT_LIMIT");
   const origin = new URL(source.officialUrl).origin;
   const publicLink = (href: string) => {
     try { const url = new URL(href); return href.length <= 2048 && url.href === href && url.protocol === "https:" && url.origin === origin &&
@@ -34,21 +48,21 @@ export function bindCpsOfficialCourseNames(source: { officialUrl: string; venueN
   };
   const named = new Map<string, { href: string; labels: Set<string> }>();
   for (const row of shown) {
-    if (typeof row?.href !== "string" || typeof row.text !== "string" || row.text.length > 160 ||
-        /[\u0000-\u001f\u007f]/u.test(row.text) || !publicLink(row.href) || !/\b(?:golf\s+)?course$/iu.test(clean(row.text)) ||
-        restricted.test(row.text)) return fail();
+    if (typeof row?.href !== "string" || !publicLink(row.href)) return fail("NAMED_LINK_SCOPE");
+    if (typeof row.text !== "string" || row.text.length > 160 || /[\u0000-\u001f\u007f]/u.test(row.text) ||
+        !/\b(?:golf\s+)?course$/iu.test(clean(row.text)) || restricted.test(row.text)) return fail("NAMED_LINK_LABEL");
     const name = key(row.text);
-    if (name.length < 3 || name === key(source.venueName) || /^(?:the|our|public|golf|course|courses)$/u.test(name)) return fail();
+    if (name.length < 3 || name === key(source.venueName) || /^(?:the|our|public|golf|course|courses)$/u.test(name)) return fail("NAMED_LINK_NAME");
     const prior = named.get(name);
-    if (prior && prior.href !== row.href) return fail();
+    if (prior && prior.href !== row.href) return fail("NAMED_LINK_AMBIGUITY");
     if (prior) prior.labels.add(clean(row.text));
     else named.set(name, { href: row.href, labels: new Set([clean(row.text)]) });
   }
   if (named.size !== courses.length || new Set(courses.map(row => key(row.courseName))).size !== courses.length ||
-      courses.some(row => !named.has(key(row.courseName)) || restricted.test(row.courseName))) return fail();
+      courses.some(row => !named.has(key(row.courseName)) || restricted.test(row.courseName))) return fail("NAMED_COURSE_NAMES");
   const rawPairs = new Set<string>(); let visited = 0;
   const walk = (node: Node, depth = 0) => {
-    if (++visited > 20_000 || depth > 64) return fail();
+    if (++visited > 20_000 || depth > 64) return fail("NAMED_RAW_TREE_LIMIT");
     if (element(node)) {
       if (excluded(node)) return;
       if (node.tagName === "a" && !node.attrs.some(row => ["onclick", "download"].includes(row.name))) {
@@ -60,7 +74,8 @@ export function bindCpsOfficialCourseNames(source: { officialUrl: string; venueN
     if ("childNodes" in node) node.childNodes.forEach(child => walk(child, depth + 1));
   };
   walk(parse(page.html));
-  for (const row of named.values()) for (const label of row.labels) if (!rawPairs.has(JSON.stringify([row.href, label]))) return fail();
+  for (const row of named.values()) for (const label of row.labels)
+    if (!rawPairs.has(JSON.stringify([row.href, label]))) return fail("NAMED_RAW_LINK_PAIR");
   return [...courses].sort((a, b) => a.courseId - b.courseId).map(row => ({ courseId: row.courseId, courseName: row.courseName,
     officialUrl: named.get(key(row.courseName))!.href, officialLabels: [...named.get(key(row.courseName))!.labels].sort() }));
 }

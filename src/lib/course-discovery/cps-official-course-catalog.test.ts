@@ -1,7 +1,8 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
 import { registerFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
-import { parseCpsCatalog, CPS_VENUE_PUBLIC_CATALOG_BUILD, type CpsOptions } from "./cps-source";
+import { bindCpsOfficialCourseNames, getCpsOfficialCourseCatalogFailureStage } from "./cps-official-course-catalog";
+import { parseCpsCatalog, getCpsCatalogIdentityFailureStage, CPS_VENUE_PUBLIC_CATALOG_BUILD, type CpsOptions } from "./cps-source";
 import { parseAccessRecipe } from "./recipe";
 import type { OfficialIdentityPage } from "./teeitup-official-identity";
 
@@ -22,7 +23,7 @@ function fixture() {
       `<a href="${source.bookingUrl}">Book A Tee Time</a>${labels.map(row => `<a href="${row.href}">${row.text}</a>`).join("")}</body></html>`,
     visibleEvidence: { title: source.venueName, headings: [source.venueName, "Contact Us"], linkUrls: [source.bookingUrl, ...labels.map(row => row.href)],
       addressTexts: [source.venueAddress], phoneTexts: ["508-379-9886"], contactPhoneLinks: [{ href: "tel:5083799886", text: "508-379-9886" }],
-      publicLinkLabels: [{ href: source.bookingUrl, text: "Book A Tee Time" }], officialCourseLinkLabels: labels } };
+      publicLinkLabels: [{ href: source.bookingUrl, text: "Book A Tee Time" }], officialCourseLinkLabels: labels.map(row => ({ ...row })) } };
   registerFreshNativeOfficialIdentityPage(page, source.officialUrl, new Date(Date.now() + 30_000));
   return { options, rows, page, context: { page, canonicalCoursePhone: phone, phoneBooking: true as const, onSelectedLabel: () => {} } };
 }
@@ -68,6 +69,54 @@ describe("native official named public course catalog", () => {
     if (change === "expired-native") registerFreshNativeOfficialIdentityPage(f.page, source.officialUrl, new Date(Date.now() - 1));
     if (change === "explicit-selection") { f.page.html = f.page.html.replace("Book A Tee Time", "North Course Tee Times"); f.page.visibleEvidence!.publicLinkLabels = [{ href: source.bookingUrl, text: "North Course Tee Times" }]; }
     expect(() => parseCpsCatalog(f.rows, f.options, source, f.context, build)).toThrow();
+  });
+  it.each([
+    ["missing-labels", "NAMED_VISIBLE_LINKS"],
+    ["foreign-link", "NAMED_LINK_SCOPE"],
+    ["invalid-label", "NAMED_LINK_LABEL"],
+    ["generic-name", "NAMED_LINK_NAME"],
+    ["ambiguous-path", "NAMED_LINK_AMBIGUITY"],
+    ["extra-official-course", "NAMED_COURSE_NAMES"],
+    ["missing-raw", "NAMED_RAW_LINK_PAIR"],
+  ])("retains the exact named-catalog rejection instead of collapsing %s into catalog binding", (change, stage) => {
+    const f = fixture();
+    const links = f.page.visibleEvidence!.officialCourseLinkLabels!;
+    if (change === "missing-labels") delete f.page.visibleEvidence!.officialCourseLinkLabels;
+    if (change === "foreign-link") links[0] = { ...links[0], href: "https://other.example/north" };
+    if (change === "invalid-label") links[0] = { ...links[0], text: "North" };
+    if (change === "generic-name") links[0] = { ...links[0], text: "Public Course" };
+    if (change === "ambiguous-path") links.push({ href: "https://official.example/other", text: "North Course" });
+    if (change === "extra-official-course") links.push({ href: "https://official.example/east", text: "East Course" });
+    if (change === "missing-raw") f.page.html = f.page.html.replace('<a href="https://official.example/north">North Golf Course</a>', "");
+    registerFreshNativeOfficialIdentityPage(f.page, source.officialUrl, new Date(Date.now() + 30_000));
+    let failure: unknown;
+    try { parseCpsCatalog(f.rows, f.options, source, f.context, build); } catch (error) { failure = error; }
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe("ADAPTER_IDENTITY_MISMATCH");
+    expect(getCpsCatalogIdentityFailureStage(failure)).toBe(stage);
+    expect(getCpsCatalogIdentityFailureStage(new Error("ADAPTER_IDENTITY_MISMATCH"))).toBeUndefined();
+    expect(getCpsCatalogIdentityFailureStage({ ...(failure as Error) })).toBeUndefined();
+    expect(JSON.stringify(failure)).not.toMatch(/official\.example|other\.example|North|South|public-site|508/u);
+  });
+  it.each([
+    ["copied-native", "NAMED_ROOT_PROVENANCE"],
+    ["omitted-labels", "NAMED_VISIBLE_LINKS"],
+    ["oversize-document", "NAMED_DOCUMENT_LIMIT"],
+    ["oversize-tree", "NAMED_RAW_TREE_LIMIT"],
+  ])("retains the bounded native-document gate for %s", (change, stage) => {
+    const f = fixture();
+    if (change === "omitted-labels") f.page.visibleEvidence!.officialCourseLinkLabelsOmitted = true;
+    if (change === "oversize-document") f.page.html += " ".repeat(600_001);
+    if (change === "oversize-tree") f.page.html = f.page.html.replace("</body>", "<b></b>".repeat(20_001) + "</body>");
+    registerFreshNativeOfficialIdentityPage(f.page, source.officialUrl, new Date(Date.now() + 30_000));
+    const page = change === "copied-native" ? structuredClone(f.page) : f.page;
+    let failure: unknown;
+    try { bindCpsOfficialCourseNames(source, page, f.rows); } catch (error) { failure = error; }
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe("ADAPTER_IDENTITY_MISMATCH");
+    expect(getCpsOfficialCourseCatalogFailureStage(failure)).toBe(stage);
+    expect(getCpsOfficialCourseCatalogFailureStage(new Error("ADAPTER_IDENTITY_MISMATCH"))).toBeUndefined();
+    expect(getCpsOfficialCourseCatalogFailureStage({ ...(failure as Error) })).toBeUndefined();
   });
   it.each([CPS_VENUE_PUBLIC_CATALOG_BUILD, "26.2.2.40425805600", "26.2.2.40425805602", "26.3.0.34794395074"])("does not broaden another exact build's public-catalog contract: %s", candidate => {
     const f = fixture();
