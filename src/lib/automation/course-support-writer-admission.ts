@@ -12,13 +12,17 @@ const MAX_BACKOFF_MS = 750;
 
 export async function retryCourseSupportWriterAdmission<T>(
   transition: (timeout: number) => Promise<WriterResult<T>>,
-  options: { now?: () => number; sleep?: (milliseconds: number) => Promise<void> } = {},
+  options: { now?: () => number; sleep?: (milliseconds: number) => Promise<void>; budgetMs?: number } = {},
 ): Promise<WriterResult<T>> {
+  const budgetMs = options.budgetMs ?? TOTAL_BUDGET_MS;
+  if (!Number.isInteger(budgetMs) || budgetMs < COURSE_SUPPORT_WRITER_MIN_TRANSACTION_BUDGET_MS || budgetMs > TOTAL_BUDGET_MS) {
+    throw new Error("Invalid course-support writer admission budget.");
+  }
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? ((milliseconds: number) => new Promise<void>(resolve => setTimeout(resolve, milliseconds)));
   const startedAt = now();
-  const deadline = startedAt + TOTAL_BUDGET_MS;
-  const admissionDeadline = startedAt + ADMISSION_WINDOW_MS;
+  const deadline = startedAt + budgetMs;
+  const admissionDeadline = startedAt + Math.min(ADMISSION_WINDOW_MS, budgetMs - COURSE_SUPPORT_WRITER_MIN_TRANSACTION_BUDGET_MS);
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     const currentTime = now();
     const remaining = Math.floor(deadline - currentTime);

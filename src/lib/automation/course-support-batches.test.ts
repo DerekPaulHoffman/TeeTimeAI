@@ -23202,6 +23202,48 @@ describe("course-support release heartbeat persistence", () => {
     expect(prismaMocks.queryRaw).not.toHaveBeenCalled();
   });
 
+  it("renews the same owner after a definite writer-lock refusal without repeating a transition", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValue({ status: "VERIFYING", revision: 8,
+      summary: { plannedPaths: ["src/lib/tee-times/adapters/cps/fetch.ts"] } });
+    leaseMocks.withPostgresAdvisoryTextLease.mockResolvedValueOnce({ acquired: false });
+    prismaMocks.queryRaw.mockResolvedValue([{ now }]);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    await expect(renewCourseSupportBatchOperationLease({ batchId: "batch-1", leaseToken: "lease-token",
+      ownerThreadId: "owner-thread", now })).resolves.toMatchObject({ outcome: "ready", heartbeatRecorded: true });
+    expect(leaseMocks.withPostgresAdvisoryTextLease).toHaveBeenCalledTimes(2);
+    expect(prismaMocks.batchUpdateMany).toHaveBeenCalledTimes(1);
+    expect(prismaMocks.batchFindFirst).toHaveBeenCalledTimes(2);
+    expect(leaseMocks.withPostgresAdvisoryTextLease.mock.calls.every(call => call[3].timeout <= 25_000)).toBe(true);
+  });
+
+  it("does not retry an owner lost after writer-lock contention", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValueOnce({ status: "VERIFYING", revision: 8,
+      summary: { plannedPaths: ["src/lib/tee-times/adapters/cps/fetch.ts"] } }).mockResolvedValueOnce(null);
+    leaseMocks.withPostgresAdvisoryTextLease.mockResolvedValueOnce({ acquired: false });
+    prismaMocks.queryRaw.mockResolvedValue([{ now }]);
+    await expect(renewCourseSupportBatchOperationLease({ batchId: "batch-1", leaseToken: "lease-token",
+      ownerThreadId: "owner-thread", now })).resolves.toMatchObject({ outcome: "recovery_required", heartbeatRecorded: false });
+    expect(leaseMocks.withPostgresAdvisoryTextLease).toHaveBeenCalledTimes(2);
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("reports persistent heartbeat writer contention separately without writing or extending a lease", async () => {
+    vi.useFakeTimers();
+    try {
+      prismaMocks.batchFindFirst.mockResolvedValue({ status: "VERIFYING", revision: 8,
+        summary: { plannedPaths: ["src/lib/tee-times/adapters/cps/fetch.ts"] } });
+      leaseMocks.withPostgresAdvisoryTextLease.mockResolvedValue({ acquired: false });
+      const result = renewCourseSupportBatchOperationLease({ batchId: "batch-1", leaseToken: "lease-token",
+        ownerThreadId: "owner-thread", now });
+      await vi.runAllTimersAsync();
+      await expect(result).resolves.toMatchObject({ outcome: "writer_busy", heartbeatRecorded: false, leaseExpiresAt: null });
+      expect(leaseMocks.withPostgresAdvisoryTextLease.mock.calls.length).toBeGreaterThan(1);
+      expect(prismaMocks.batchFindFirst).toHaveBeenCalledTimes(1);
+      expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+      expect(prismaMocks.queryRaw).not.toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
+  });
+
   it("renews the sole checkout owner under the writer lease and database clock", async () => {
     const databaseNow = new Date("2026-07-15T20:00:02.000Z");
     prismaMocks.batchFindFirst.mockResolvedValue({

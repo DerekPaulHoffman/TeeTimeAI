@@ -2058,6 +2058,9 @@ async function runWithCourseSupportOperationHeartbeat<T>(
     });
     signal?.throwIfAborted();
     if (!result.heartbeatRecorded) {
+      if (result.outcome === "writer_busy") {
+        throw new Error("Course-support operation heartbeat writer admission remained busy; ownership is unconfirmed.");
+      }
       throw new Error("Course-support operation heartbeat lost durable batch ownership.");
     }
   };
