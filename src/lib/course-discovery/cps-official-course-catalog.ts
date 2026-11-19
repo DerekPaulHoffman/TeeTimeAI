@@ -36,13 +36,16 @@ const fail = (stage: FailureStage): never => {
 export function bindCpsOfficialCourseNames(source: { officialUrl: string; venueName: string }, page: OfficialIdentityPage,
   courses: ReadonlyArray<{ courseId: number; courseName: string }>) {
   const shown = page.visibleEvidence?.officialCourseLinkLabels;
-  if (!freshNativeCanonicalRootDocument(page, source.officialUrl) || page.browserTransport !== "NATIVE_CHROME") return fail("NAMED_ROOT_PROVENANCE");
+  const root = freshNativeCanonicalRootDocument(page, source.officialUrl);
+  if (!root || page.browserTransport !== "NATIVE_CHROME") return fail("NAMED_ROOT_PROVENANCE");
   if (page.visibleEvidence?.officialCourseLinkLabelsOmitted === true || !Array.isArray(shown) || shown.length < 2 || shown.length > 120)
     return fail("NAMED_VISIBLE_LINKS");
   if (courses.length < 2 || courses.length > 40 || Buffer.byteLength(page.html, "utf8") > 600_000) return fail("NAMED_DOCUMENT_LIMIT");
-  const origin = new URL(source.officialUrl).origin;
+  // The native proof supplies the current document origin. Never infer a www
+  // variant or another sibling host from the canonical URL or a copied page.
+  const origins = new Set([new URL(source.officialUrl).origin, new URL(root.documentUrl).origin]);
   const publicLink = (href: string) => {
-    try { const url = new URL(href); return href.length <= 2048 && url.href === href && url.protocol === "https:" && url.origin === origin &&
+    try { const url = new URL(href); return href.length <= 2048 && url.href === href && url.protocol === "https:" && origins.has(url.origin) &&
       url.pathname !== "/" && !url.search && !url.hash && !url.username && !url.password && !url.port && !restricted.test(url.pathname.replace(/[_/-]/gu, " ")); }
     catch { return false; }
   };

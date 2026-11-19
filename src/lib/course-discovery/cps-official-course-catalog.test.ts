@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import { registerFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
+import { freshNativeCanonicalRootDocument, registerFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
 import { bindCpsOfficialCourseNames, getCpsOfficialCourseCatalogFailureStage } from "./cps-official-course-catalog";
 import { parseCpsCatalog, getCpsCatalogIdentityFailureStage, CPS_VENUE_PUBLIC_CATALOG_BUILD, type CpsOptions } from "./cps-source";
 import { parseAccessRecipe } from "./recipe";
@@ -27,8 +27,53 @@ function fixture() {
   registerFreshNativeOfficialIdentityPage(page, source.officialUrl, new Date(Date.now() + 30_000));
   return { options, rows, page, context: { page, canonicalCoursePhone: phone, phoneBooking: true as const, onSelectedLabel: () => {} } };
 }
+function redirectedFixture(canonicalUrl: string, documentUrl: string, linkOrigin: "CANONICAL" | "DOCUMENT" | "MIXED" = "DOCUMENT") {
+  const f = fixture(), redirectedSource = { ...source, officialUrl: canonicalUrl };
+  const links = labels.map((row, index) => ({ ...row, href: new URL(new URL(row.href).pathname,
+    linkOrigin === "CANONICAL" || linkOrigin === "MIXED" && index === 0 ? canonicalUrl : documentUrl).href }));
+  f.page.url = documentUrl;
+  f.page.html = labels.reduce((html, row, index) => html.replaceAll(row.href, links[index].href), f.page.html);
+  f.page.visibleEvidence!.officialCourseLinkLabels = links;
+  f.page.visibleEvidence!.linkUrls = [source.bookingUrl, ...links.map(row => row.href)];
+  const provenance = { requestedUrl: canonicalUrl,
+    redirects: [{ fromUrl: canonicalUrl, toUrl: documentUrl, status: 301, completed: true }] };
+  registerFreshNativeOfficialIdentityPage(f.page, canonicalUrl, new Date(Date.now() + 30_000), provenance);
+  return { ...f, source: redirectedSource, provenance };
+}
 
 describe("native official named public course catalog", () => {
+  it.each([
+    ["https://official.example/", "https://www.official.example/", "DOCUMENT"],
+    ["https://official.example/", "https://www.official.example/", "CANONICAL"],
+    ["https://official.example/", "https://www.official.example/", "MIXED"],
+    ["https://www.official.example/", "https://official.example/", "DOCUMENT"],
+    ["https://www.official.example/", "https://official.example/", "CANONICAL"],
+    ["https://www.official.example/", "https://official.example/", "MIXED"],
+  ] as const)("binds canonical %s to freshly attested document %s with %s course links", (canonicalUrl, documentUrl, linkOrigin) => {
+    const f = redirectedFixture(canonicalUrl, documentUrl, linkOrigin);
+    expect(freshNativeCanonicalRootDocument(f.page, canonicalUrl)?.documentUrl).toBe(documentUrl);
+    expect(parseCpsCatalog(f.rows, f.options, f.source, f.context, build)).toMatchObject({
+      courseIds: [7, 9], publicCatalogMode: "OFFICIAL_NAMED_ONLINE_COURSES" });
+    expect(bindCpsOfficialCourseNames(f.source, f.page, f.rows).map(row => row.officialUrl))
+      .toEqual(f.page.visibleEvidence!.officialCourseLinkLabels!.map(row => row.href));
+  });
+  it.each(["missing-witness", "expired", "copied", "foreign-link", "unobserved-www", "missing-raw", "wrong-phone", "wrong-address", "private-row"])(
+    "does not let an attested redirect bypass %s", change => {
+      const f = redirectedFixture("https://official.example/", "https://www.official.example/");
+      if (change === "foreign-link") {
+        f.page.html = f.page.html.replaceAll("https://www.official.example/north", "https://foreign.example/north");
+        f.page.visibleEvidence!.officialCourseLinkLabels![0].href = "https://foreign.example/north";
+      }
+      if (change === "missing-raw") f.page.html = f.page.html.replace('<a href="https://www.official.example/north">North Golf Course</a>', "");
+      if (change === "unobserved-www") f.page.url = f.source.officialUrl;
+      if (change === "wrong-phone") f.context.canonicalCoursePhone = "+15085550123";
+      if (change === "wrong-address") f.options.reservationOptions.clubAddress = "11 Harbor Dr, Example, NY 12345, USA";
+      if (change === "private-row") Object.assign(f.rows[0], { membersOnly: true });
+      registerFreshNativeOfficialIdentityPage(f.page, f.source.officialUrl, new Date(Date.now() + (change === "expired" ? -1 : 30_000)),
+        ["missing-witness", "unobserved-www"].includes(change) ? undefined : f.provenance);
+      if (change === "copied") f.context.page = structuredClone(f.page);
+      expect(() => parseCpsCatalog(f.rows, f.options, f.source, f.context, build)).toThrow();
+    });
   it("binds the complete two-course venue without guessing one canonical or default course", () => {
     const f = fixture();
     const metadata = parseCpsCatalog(f.rows, f.options, source, f.context, build);

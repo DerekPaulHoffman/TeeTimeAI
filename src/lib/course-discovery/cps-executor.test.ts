@@ -176,7 +176,7 @@ describe("CPS fixed fresh public reads", () => {
       expect(fixture.active).toBe(0);
     }
   });
-  it("independently replays the complete native named course set and rejects drift before availability", async () => {
+  it.each([false, true])("independently replays the complete native named course set and rejects drift before availability (redirect: %s)", async redirected => {
     let drift = "", nativeCalls = 0;
     const names = [{ courseId: 1, courseName: "North", webSiteId: "public-site" }, { courseId: 2, courseName: "South", webSiteId: "public-site" }];
     const fixture = setup(async (url, _init, normal) => {
@@ -195,16 +195,20 @@ describe("CPS fixed fresh public reads", () => {
     });
     const nativeRead: CpsDependencies["readNativeOfficialPage"] = async (identity, pageUrl, until, mode) => {
       expect(fixture.active).toBe(0); nativeCalls++;
-      const printed = "412-622-6959", links = names.map(item => ({ href: source.officialUrl + item.courseName.toLowerCase(), text: item.courseName + " Course" }));
+      const documentUrl = redirected ? source.officialUrl.replace("//www.", "//") : source.officialUrl;
+      const printed = "412-622-6959", links = names.map(item => ({ href: documentUrl + item.courseName.toLowerCase(), text: item.courseName + " Course" }));
       const html = `<html><body><h1>${source.venueName}</h1><section><h2>Contact Us</h2><a href="tel:${printed}">${printed}</a></section>` +
         `<a href="${source.bookingUrl}">Book A Tee Time</a>${links.map(link => `<a href="${link.href}">${link.text}</a>`).join("")}</body></html>`;
       const page = await readNativeOfficialIdentityPage(identity, pageUrl, until, { allowCpsPhoneBookingContact: mode === "PHONE_LINK" ? true : undefined,
-        createSession: async () => ({ execute: async () => ({ url: source.officialUrl, navigationStatus: 200, browserTransport: "NATIVE_CHROME",
+        createSession: async () => ({ execute: async () => ({ url: documentUrl, navigationStatus: 200, browserTransport: "NATIVE_CHROME",
+          ...(redirected && drift !== "missing-witness" ? { nativeDocumentRedirects: [
+            { fromUrl: source.officialUrl, toUrl: documentUrl, status: 301, completed: true },
+          ] } : {}),
           officialSourceDiagnostic: { stage: "CONTROLLER_CAPTURE", rawOfficialCaptured: true, currentOfficialDocument: true,
             officialProvenance: true, renderedHeadingsPresent: true, renderedAddressesPresent: false, renderedLinksPresent: true } } as never),
           readOfficialIdentityPage: async () => {
             if (mode !== "PHONE_LINK") throw Error("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
-            return { url: source.officialUrl, html, browserTransport: "NATIVE_CHROME", visibleEvidence: { title: source.venueName,
+            return { url: documentUrl, html, browserTransport: "NATIVE_CHROME", visibleEvidence: { title: source.venueName,
               headings: [source.venueName, "Contact Us"], addressTexts: [], linkUrls: [source.bookingUrl, ...links.map(link => link.href)],
               phoneTexts: [printed], contactPhoneLinks: [{ href: `tel:${printed}`, text: printed }],
               publicLinkLabels: [{ href: source.bookingUrl, text: "Book A Tee Time" }], officialCourseLinkLabels: links } };
@@ -221,7 +225,7 @@ describe("CPS fixed fresh public reads", () => {
       expect(slots[0].startsAt).toBe(request.date + "T14:30:00.000Z");
     }
     expect(JSON.stringify(saved)).toBe(immutable); expect(nativeCalls).toBe(4); expect(fixture.maxActive).toBe(1); expect(fixture.active).toBe(0);
-    for (const change of ["catalog", "build", "phone", "copied-native", "no-native"]) {
+    for (const change of ["catalog", "build", "phone", "copied-native", "no-native", ...(redirected ? ["missing-witness"] : [])]) {
       drift = change; fixture.reads.length = 0;
       await expect(executeCps(source, saved, { courseId: "course-1" }, input, { ...deps,
         ...(change === "phone" ? { trustedContext: { canonicalCoursePhone: "+14126229999" } } : {}),
