@@ -28,10 +28,20 @@ describe("unfinished original-owner implementation phase", () => {
     expect(fullRepairContinuationMode({ ...phase, status: "VERIFYING", releaseSha: "b".repeat(40),
       plannedPaths: Array(33).fill("src/lib/already-published.ts") })).toBe("PUBLISHED_IMPLEMENTATION");
   });
+  it("keeps the original follow-up implementation selectable after its registration heartbeat stops", () => {
+    const followup = { ...phase, releaseSha: "b".repeat(40) }, before = structuredClone(followup);
+    expect(fullRepairContinuationMode(followup)).toBe("PUBLISHED_IMPLEMENTATION");
+    expect(followup).toEqual(before);
+    for (const change of [{ status: "CLAIMED" }, { status: "COMPLETE" }, { plannedPaths: [] },
+      { plannedPaths: Array(33).fill("claimed.ts") }, { releaseSha: "unregistered" }, { deployedAt: null },
+      { deployedAt: new Date("2030-01-02T10:00:00Z") }]) {
+      expect(fullRepairContinuationMode({ ...followup, ...change })).toBeNull();
+    }
+  });
   it.each([
     { status: "COMPLETE" }, { status: "CLAIMED" }, { status: "VERIFYING" }, { plannedPaths: [] },
     { plannedPaths: null }, { plannedPaths: [null] }, { plannedPaths: Array(33).fill("claimed.ts") },
-    { releaseSha: null }, { releaseSha: "unregistered" }, { releaseSha: "b".repeat(40) },
+    { releaseSha: null }, { releaseSha: "unregistered" },
     { deployedAt: null }, { deployedAt: new Date("invalid") }, { deployedAt: new Date("2030-01-02T10:00:00Z") },
   ])("does not invent continuation proof for %j", change => {
     expect(fullRepairContinuationMode({ ...phase, ...change })).toBeNull();
