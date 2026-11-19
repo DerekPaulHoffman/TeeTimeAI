@@ -17,6 +17,7 @@ import { projectStagehandNativeRouterFailure, stagehandNativeRouterCodes } from 
 import { cpsPhoneBookingFailureStages } from "./cps-phone-booking-proof";
 import { cpsCatalogIdentityFailureStages } from "./cps-source";
 import { physicalBindingFailureEvidenceSchema } from "./physical-binding-failure-evidence";
+import { safeOfficialSourceDiagnostic, navigationFailureKinds } from "./official-source-diagnostics";
 
 const receiptSchema = z.object({ version: z.literal(1), state: z.literal("QUEUED"),
   incidentId: z.string().min(1).max(128), queuedAt: z.string().datetime(),
@@ -177,7 +178,25 @@ export function discoveryFailureDiagnosis(job: { outcome: string | null; checkpo
   // source text, identities and private binding values from this handoff.
   const readability = inspectionReadabilitySchema.safeParse(object(last?.fixedInspectionDiagnostic).readability);
   const execution = phase === "FIXED_INSPECTION" ? inspectionExecutionSchema.safeParse(object(last?.fixedInspectionDiagnostic).execution) : null;
+  const officialSource = phase === "FIXED_INSPECTION" ? safeOfficialSourceDiagnostic(object(last?.fixedInspectionDiagnostic).officialSourceDiagnostic) : undefined;
+  const fixedNative = object(object(last?.fixedInspectionDiagnostic).nativeRouterFailure);
+  const fixedNativeProjection = phase === "FIXED_INSPECTION" && stagehandNativeRouterCodes.some(code => code === fixedNative.code)
+    ? projectStagehandNativeRouterFailure(fixedNative.code, fixedNative) : undefined;
+  const { code: fixedNativeCode, ...fixedNativeFacts } = fixedNativeProjection ?? {};
+  const navigation = phase === "FIXED_INSPECTION" && navigationFailureKinds.some(kind => kind === object(last?.fixedInspectionDiagnostic).navigationFailureKind)
+    ? object(last?.fixedInspectionDiagnostic).navigationFailureKind : undefined;
+  // Presence is not validity or authority. A retained digest can explain why
+  // diagnostics are unavailable; never reconstruct their omitted contents.
+  const fixedInspectionDiagnosticRetention = phase === "FIXED_INSPECTION" && last?.fixedInspectionDiagnostic &&
+    typeof last.fixedInspectionDiagnostic === "object" && !Array.isArray(last.fixedInspectionDiagnostic) ? "PRESENT" as const :
+    phase === "FIXED_INSPECTION" && last?.fixedInspectionDiagnosticOmittedForBudget === true &&
+      typeof last.fixedInspectionDiagnosticSha256 === "string" && /^[a-f0-9]{64}$/u.test(last.fixedInspectionDiagnosticSha256)
+      ? "OMITTED_FOR_BUDGET" as const : undefined;
   const inspection = { category, code, failureCode: code && diagnosticFailureCodes.has(code) ? code : null,
+    ...(fixedInspectionDiagnosticRetention ? { fixedInspectionDiagnosticRetention } : {}),
+    ...(officialSource ? { fixedInspectionSourceDiagnostic: officialSource } : {}),
+    ...(fixedNativeCode ? { fixedInspectionNativeTransportDiagnostic: { failureCode: fixedNativeCode, ...fixedNativeFacts } } : {}),
+    ...(navigation ? { fixedInspectionNavigationFailureKind: navigation } : {}),
     ...(code === "STAGEHAND_WORKER_FAILED" && ["Error", "TypeError", "RangeError", "SyntaxError", "TimeoutError", "AbortError", "ZodError", "ProtocolError", "UNKNOWN"].includes(String(last?.workerErrorName))
       ? { workerErrorName: last?.workerErrorName } : {}),
     ...(readability.success ? { fixedInspectionReadability: readability.data } : {}),

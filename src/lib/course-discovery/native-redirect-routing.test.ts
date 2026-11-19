@@ -1286,6 +1286,32 @@ describe("native root GET CORS preflight ownership", () => {
       expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "options")).toBe(false);
     } finally { await test.guard.close(); }
   });
+  it.each([false, true])("keeps a late exact bodyful POST preflight denied during abort acknowledgement (OPTIONS metadata first: %s)", async optionsFirst => {
+    const test = await prepare({}, false), original = test.cdp.send.getMockImplementation()!;
+    try {
+      test.events.get("Page.frameNavigated")!({ frame: { id: "main", loaderId: "current-loader", url: "https://example.org" } });
+      test.cdp.send.mockImplementation(async (name, values) => {
+        if (name === "Fetch.failRequest" && values?.requestId === "options") {
+          if (optionsFirst) metadata(test);
+          source(test, { request: { url, method: "POST", hasPostData: true, postData: "fixture-body" } });
+          if (!optionsFirst) metadata(test);
+        }
+        return original(name, values);
+      });
+      pause(test, { request: { url, method: "OPTIONS", headers: { Origin: "https://example.org", "Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "content-type" } } });
+      await vi.waitFor(() => expect(test.rejections).toHaveLength(1));
+      expect(test.guard.firstFatal).toBeUndefined(); expect(test.failures).toEqual([]); expect(test.close).not.toHaveBeenCalled();
+      expect(test.routes).toHaveLength(1);
+      expect(test.cdp.send.mock.calls.filter(([name, value]) => name === "Fetch.failRequest" && value?.requestId === "options")).toHaveLength(1);
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "options")).toBe(false);
+      source(test, { requestId: "independent-get" });
+      test.request("fresh-get", { networkId: "independent-get", resourceType: "Fetch", request: { url, method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(test.routes).toHaveLength(2)); await test.routes[1].continue();
+      test.response("fresh-get", { networkId: "independent-get", resourceType: "Fetch", request: { url, method: "GET", headers: {} } });
+      expect((await test.routes[1].request().response())?.status()).toBe(200);
+      expect(test.guard.firstFatal).toBeUndefined();
+    } finally { await test.guard.close(); }
+  });
   it("retains the actual preflight identity change during abort acknowledgement as a diagnosed fatal boundary", async () => {
     const test = await prepare({}, false), original = test.cdp.send.getMockImplementation()!;
     try {
@@ -1298,6 +1324,35 @@ describe("native root GET CORS preflight ownership", () => {
       await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_LOADER_MISMATCH"));
       expect(test.guard.firstFatal).toMatchObject({ code: "NATIVE_REDIRECT_LOADER_MISMATCH", phase: "LOADER_IDENTITY",
         operation: "REQUEST_RELEASE", method: "OPTIONS", requestedPreflightMethod: "POST", identityPresent: true });
+      expect(test.routes).toHaveLength(1); expect(test.rejections).toEqual([]);
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "options")).toBe(false);
+    } finally { await test.guard.close(); }
+  });
+  it.each(["HEAD", "bodyless", "unavailable-body", "oversized-body", "wrong-url", "wrong-frame", "wrong-loader", "source-failed", "source-replaced", "pending-only", "duplicate-metadata", "options-frame", "options-type", "options-body", "document-failed", "navigation"])("keeps conflicting late preflight metadata fatal during abort acknowledgement: %s", async mode => {
+    const test = await prepare({}, false), original = test.cdp.send.getMockImplementation()!;
+    try {
+      test.events.get("Page.frameNavigated")!({ frame: { id: "main", loaderId: "current-loader", url: "https://example.org" } });
+      test.cdp.send.mockImplementation(async (name, values) => {
+        if (name === "Fetch.failRequest" && values?.requestId === "options") {
+          if (mode !== "pending-only") source(test, {
+            ...(mode === "wrong-frame" ? { frameId: "child" } : {}),
+            ...(mode === "wrong-loader" ? { loaderId: "foreign-loader" } : {}),
+            request: { url: mode === "wrong-url" ? `${url}/other` : url, method: mode === "HEAD" ? "HEAD" : "POST",
+              ...(mode === "bodyless" ? {} : { hasPostData: true,
+                ...(mode === "unavailable-body" ? {} : { postData: mode === "oversized-body" ? "x".repeat(32_769) : "fixture-body" }) }) }
+          });
+          metadata(test, mode === "options-frame" ? { frameId: "child" } : mode === "options-type" ? { type: "Document" } :
+            mode === "options-body" ? { request: { url, method: "OPTIONS", hasPostData: true, postData: "fixture-body" } } : {});
+          if (mode === "source-failed") test.events.get("Network.loadingFailed")!({ requestId: "original-get", errorText: "net::ERR_FAILED" });
+          if (mode === "source-replaced") source(test, { request: { url, method: "POST", hasPostData: true, postData: "replacement" } });
+          if (mode === "duplicate-metadata") metadata(test);
+          if (mode === "document-failed") test.events.get("Network.loadingFailed")!({ requestId: "document", errorText: "net::ERR_FAILED" });
+          if (mode === "navigation") test.events.get("Page.frameNavigated")!({ frame: { id: "main", loaderId: "new-loader", url: "https://example.org/other" } });
+        }
+        return original(name, values);
+      });
+      pause(test, { request: { url, method: "OPTIONS", headers: { Origin: "https://example.org", "Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "content-type" } } });
+      await vi.waitFor(() => expect(test.failures.length).toBeGreaterThan(0));
       expect(test.routes).toHaveLength(1); expect(test.rejections).toEqual([]);
       expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "options")).toBe(false);
     } finally { await test.guard.close(); }
