@@ -974,6 +974,19 @@ function safeBookingEdgeEvidence(value) {
       !renderedCounts.every(key => value.rendered.framesState === 'COMPLETE' ? count(value.rendered[key]) && value.rendered[key] <= 24 : value.rendered[key] === null)) return undefined;
   return structuredClone(value);
 }
+export function safePhysicalBindingFailureEvidence(value) {
+  try {
+    const exact = (row, keys) => row && typeof row === "object" && !Array.isArray(row) && Object.keys(row).sort().join(",") === [...keys].sort().join(",");
+    const directions = ["", "n", "s", "e", "w", "ne", "nw", "se", "sw"], types = ["rd", "st", "dr", "ave", "blvd", "ln", "ct", "pkwy", "hwy", "way", "cir", "trl", "ter"];
+    const component = row => exact(row, ["before", "street", "type", "after"]) && directions.includes(row.before) && directions.includes(row.after) &&
+      types.includes(row.type) && typeof row.street === "string" && row.street.length >= 1 && row.street.length <= 200 && /^[a-z0-9'-]+(?: [a-z0-9'-]+)*$/u.test(row.street);
+    if (!exact(value, ["schemaVersion", "observedAt", "canonicalStreet", "providerStreet"]) || value.schemaVersion !== 1 ||
+        typeof value.observedAt !== "string" || new Date(value.observedAt).toISOString() !== value.observedAt ||
+        !component(value.canonicalStreet) || !component(value.providerStreet) ||
+        ["before", "street", "type", "after"].every(key => value.canonicalStreet[key] === value.providerStreet[key])) return undefined;
+    return structuredClone(value);
+  } catch { return undefined; }
+}
 export function safeTeeItUpDelegationDiagnostic(value) {
   const stages = ["CAPABILITY", "SOURCE", "ROOT_READ", "ROOT_FRESH", "ROOT_IDENTITY", "ROOT_LINK", "HOP_ONE_READ", "NATIVE_DOCUMENT_READ",
     "HOP_ONE_FRESH", "HOP_TWO_LINK", "HOP_TWO_READ", "ROOT_REFRESH", "FINAL_FRESH", "CHAIN_REGISTER", "PROVIDER_BIND"];
@@ -995,9 +1008,10 @@ export function safeTeeItUpDelegationDiagnostic(value) {
         !value.gates || typeof value.gates !== "object" || Array.isArray(value.gates) ||
         !gates.every(key => Object.hasOwn(value.gates, key) && (typeof value.gates[key] === "boolean" || value.gates[key] === null))) return undefined;
     const hopEvidence = safeBookingEdgeEvidence(value.hopEvidence);
+    const physicalBindingEvidence = safePhysicalBindingFailureEvidence(value.physicalBindingEvidence);
     return { stage: value.stage, gates: Object.fromEntries([...gates, ...bindingGates.filter(key =>
       Object.hasOwn(value.gates, key) && (typeof value.gates[key] === "boolean" || value.gates[key] === null))].map(key => [key, value.gates[key]])),
-      ...(hopEvidence ? { hopEvidence } : {}) };
+      ...(hopEvidence ? { hopEvidence } : {}), ...(physicalBindingEvidence ? { physicalBindingEvidence } : {}) };
   } catch { return undefined; }
 }
 export function safeFixedAdapterReadDiagnostic(value) {

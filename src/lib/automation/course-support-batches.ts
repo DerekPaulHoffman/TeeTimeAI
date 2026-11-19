@@ -3314,6 +3314,7 @@ export function assessCourseSupportRecovery(input: {
   releaseCommittedPaths?: string[];
   currentHeadIsPublished?: boolean;
   claimedBaseRuntimeImport?: boolean;
+  unpublishedCandidate?: { publishedMainSha: string; containsRelease: boolean; isAncestorOfHead: boolean; paths: string[] };
   now?: Date;
 }) {
   const now = input.now ?? new Date();
@@ -3339,7 +3340,14 @@ export function assessCourseSupportRecovery(input: {
       (!input.releaseSha || input.releaseIsAncestor === true) &&
       committedPaths.length > 0 &&
       committedPaths.every((path) => input.plannedPaths.includes(path));
-    if (!safelyCommittedPlannedChange && !safelyImportedPublishedRuntime) {
+    const candidate = input.unpublishedCandidate;
+    const safelyPreservedCandidate = Boolean(candidate && /^[a-f0-9]{40}$/u.test(candidate.publishedMainSha) &&
+      candidate.publishedMainSha !== input.currentHeadSha && candidate.containsRelease && candidate.isAncestorOfHead &&
+      input.baseIsAncestor === true && input.releaseIsAncestor === true && input.releaseSha &&
+      input.ownerThreadId === input.requestingThreadId && input.expectedBranch && input.expectedBranch === input.currentBranch &&
+      input.dirtyPaths.length === 0 && input.plannedPaths.length > 0 && candidate.paths.length > 0 &&
+      candidate.paths.every(path => input.plannedPaths.includes(path)));
+    if (!safelyCommittedPlannedChange && !safelyImportedPublishedRuntime && !safelyPreservedCandidate) {
       reasons.push("The checkout HEAD does not match the batch provenance.");
     }
     if (
@@ -8298,7 +8306,7 @@ export async function heartbeatCourseSupportBatch(
     summary: batch.summary,
   });
   const persisted = initialWouldOwnCheckout
-    ? await runWithCourseSupportWriterTransitionLease(() =>
+    ? await retryCourseSupportWriterAdmission(timeout => runWithCourseSupportWriterTransitionLease(() =>
         runCourseSupportTransactionWithRetry(async (transaction) => {
           const databaseNow = await getCourseSupportDatabaseNow(transaction);
           const current = await transaction.courseSupportBatch.findFirst({
@@ -8347,7 +8355,7 @@ export async function heartbeatCourseSupportBatch(
             true,
           );
         }),
-      )
+        { timeout }), { budgetMs: 25_000 })
     : {
         acquired: true as const,
         value: await runCourseSupportTransactionWithRetry((transaction) =>
@@ -8361,7 +8369,13 @@ export async function heartbeatCourseSupportBatch(
           ),
         ),
       };
-  const heartbeat = persisted.acquired ? persisted.value : null;
+  if (!persisted.acquired) {
+    return { outcome: "writer_busy" as const, heartbeatRecorded: false, stateChanged: false as const,
+      status: initialPlan.status, releaseSha: null, releaseAdvanced: false, leaseExpiresAt: null,
+      threadDisposition: "KEEP_VISIBLE" as const,
+      archiveReason: "The release heartbeat did not enter its writer transition; preserve the candidate and inspect current ownership before another permitted action." };
+  }
+  const heartbeat = persisted.value;
   return {
     outcome: heartbeat ? ("ready" as const) : ("recovery_required" as const),
     heartbeatRecorded: heartbeat !== null,
@@ -15284,6 +15298,7 @@ export async function recoverCourseSupportBatch(input: {
   releaseIsAncestor?: boolean;
   releaseCommittedPaths?: string[];
   currentHeadIsPublished?: boolean;
+  unpublishedCandidate?: { publishedMainSha: string; containsRelease: boolean; isAncestorOfHead: boolean; paths: string[] };
   supersedingDeployment?: { commitSha: string; deploymentId: string };
   now?: Date;
 }) {
@@ -15779,6 +15794,14 @@ export async function recoverCourseSupportBatch(input: {
         input.releaseCommittedPaths ?? [],
       ),
       currentHeadIsPublished: allowPublishedRuntimeImport,
+      // Only a server-qualified full repair may preserve its own clean local
+      // candidate after importing published main. Shared upstream bytes are
+      // not claimed as this worker's implementation or registered as a release.
+      unpublishedCandidate: recoveryDirective?.reason === "FAILED_LEARNER_IMPLEMENTATION_HANDOFF" &&
+        recoveryDirective.workMode === "IMPLEMENT_REUSABLE_SUPPORT" && recoveryClaim?.actionPlan?.primaryAction === "IMPLEMENT_REUSABLE_SUPPORT" &&
+        recoveryClaim.actionPlan.allowedActions.includes("INVESTIGATE_PUBLIC_SOURCE") &&
+        input.unpublishedCandidate ? { ...input.unpublishedCandidate,
+          paths: normalizeCourseSupportObservedGitPaths(input.unpublishedCandidate.paths) } : undefined,
       // Derived here from the actual retained batch, never a CLI switch. The
       // same original owner may import shared tested tooling before writing
       // its first implementation; its release and failed clock stay unchanged.

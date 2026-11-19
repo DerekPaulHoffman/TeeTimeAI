@@ -10,7 +10,7 @@ vi.mock("./legacy-exclusion", () => ({ hasLegacyDiscoveryOwner: m.owner,
 vi.mock("@/lib/automation/support-incidents", () => ({ reportCourseSupportIssue: m.report }));
 vi.mock("@/lib/automation/simulator-support-incidents", () => ({ reconcileSimulatorSupportIncidentFailure: m.simulator }));
 import { currentDiscoveryEngineeringHandoff, discoveryEngineeringContext, discoveryEngineeringReceipt,
-  discoveryFailureDiagnosis, getOwnedLearningBookingEdgeEvidence, reconcileDiscoveryEngineeringHandoffs } from "./engineering-repair";
+  discoveryFailureDiagnosis, getOwnedLearningBookingEdgeEvidence, getOwnedLearningFailureEvidence, reconcileDiscoveryEngineeringHandoffs } from "./engineering-repair";
 import { collectBookingEdgeEvidence } from "./booking-edge-evidence";
 import { buildCourseSupportProviderSnapshotFingerprint } from "@/lib/automation/course-support-verification";
 import { listCourseSupportDispatchCandidates } from "@/lib/automation/course-support-batches";
@@ -42,8 +42,9 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllEnvs());
 describe("terminal learner to coding responder", () => {
-  it.each(["owned", "foreign-owner", "foreign-batch", "cycle-drift", "source-drift", "runtime-drift", "unlinked-child", "late-observation"])(
-    "discloses structural evidence only from the same reciprocal current-source child: %s", async scenario => {
+  it.each(["owned", "foreign-owner", "foreign-batch", "cycle-drift", "source-drift", "runtime-drift", "unlinked-child", "late-observation", "early-observation"].flatMap(scenario =>
+    ["edge", "physical"].map(kind => ({ scenario, kind }))))(
+    "discloses $kind evidence only from the same reciprocal current-source child: $scenario", async ({ scenario, kind }) => {
       const link = { version: 1, kind: "LATE_ENGINEERING_RECOVERY", originalJobId: "job1", jobId: "child1", batchId: "batch1",
         incidentId: "incident1", ownerThreadId: "owner1", cycle: 1, sourceFingerprint: failure.job.sourceFingerprint,
         releaseSha: "b".repeat(40), runtimeVersion: "c".repeat(40), requestedAt: new Date("2030-01-01T12:10:00Z").toISOString(),
@@ -52,8 +53,14 @@ describe("terminal learner to coding responder", () => {
       const clock = vi.spyOn(Date, "now").mockReturnValue(new Date("2030-01-01T12:11:00Z").getTime());
       const evidence = collectBookingEdgeEvidence({ url: "https://official.example/tee-times/", html: "<html><body></body></html>" });
       clock.mockRestore();
-      const diagnostic = createDelegationDiagnostic("HOP_TWO_LINK"); diagnostic.hopEvidence = evidence;
+      const physical = { schemaVersion: 1 as const, observedAt: evidence.observedAt,
+        canonicalStreet: { before: "" as const, street: "oakridge", type: "rd" as const, after: "" as const },
+        providerStreet: { before: "" as const, street: "oak ridge", type: "rd" as const, after: "" as const } };
+      const diagnostic = createDelegationDiagnostic(kind === "edge" ? "HOP_TWO_LINK" : "PROVIDER_BIND");
+      if (kind === "edge") diagnostic.hopEvidence = evidence; else diagnostic.physicalBindingEvidence = physical;
       if (scenario === "late-observation") evidence.observedAt = new Date("2030-01-01T12:30:00Z").toISOString();
+      if (scenario === "late-observation") physical.observedAt = evidence.observedAt;
+      if (scenario === "early-observation") physical.observedAt = evidence.observedAt = "2030-01-01T12:09:00.000Z";
       const child = { ...failure.job, id: "child1", firstPickedUpAt: new Date("2030-01-01T12:10:00Z"),
         deadlineAt: new Date("2030-01-01T12:25:00Z"), completedAt: new Date("2030-01-01T12:12:00Z"),
         result: { learningRecoveryOf: scenario === "unlinked-child" ? { ...link, batchId: "foreign" } : link,
@@ -61,13 +68,14 @@ describe("terminal learner to coding responder", () => {
         checkpoint: { stagehandFailure: { schemaVersion: 1, kind: "OWN_STAGEHAND_FAILURE_DIAGNOSTIC", entries: [
           { attempt: 1, code: "OFFICIAL_DELEGATED_SOURCE_UNVERIFIED", phase: "FIXED_INSPECTION", fixedInspectionDiagnostic: { teeItUpDelegation: diagnostic } } ] } } };
       m.db.courseDiscoveryJob.findUnique.mockImplementation(async ({ where }) => where.id === child.id ? child : failure.job);
-      const result = await getOwnedLearningBookingEdgeEvidence(m.db as never, { batchId: scenario === "foreign-batch" ? "other" : "batch1",
+      const result = await (kind === "edge" ? getOwnedLearningBookingEdgeEvidence : getOwnedLearningFailureEvidence)(m.db as never, { batchId: scenario === "foreign-batch" ? "other" : "batch1",
         ownerThreadId: scenario === "foreign-owner" ? "other" : "owner1", courseId: "course1", incidentId: "incident1", incidentCycle: scenario === "cycle-drift" ? 2 : 1, now,
         providerSnapshotFingerprint: scenario === "source-drift" ? "f".repeat(64) : buildCourseSupportProviderSnapshotFingerprint(failure.source.course as never) });
       if (scenario === "owned") {
         expect(result).toMatchObject({ sourceFingerprint: failure.job.sourceFingerprint, executionRuntime: link.runtimeVersion,
-          evidence, evidenceAuthority: false, untrustedPageEvidence: true });
+          [kind === "edge" ? "evidence" : "physicalBindingEvidence"]: kind === "edge" ? evidence : physical, evidenceAuthority: false, untrustedPageEvidence: true });
         expect(discoveryFailureDiagnosis(child)).not.toHaveProperty("bookingEdgeEvidence");
+        expect(discoveryFailureDiagnosis(child)).not.toHaveProperty("physicalBindingEvidence");
         expect(JSON.stringify(result)).not.toMatch(/https:|official.example|<html/u);
       } else expect(result).toBeNull();
     });

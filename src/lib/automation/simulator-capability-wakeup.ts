@@ -2,7 +2,7 @@ import { RUNNABLE_SIMULATOR_PROVIDER_FAMILIES } from "@/lib/simulators/providers
 import { knownSimulatorPublicConfigurationFamily } from "@/lib/simulators/providers/public-configuration";
 import type { CourseDispatchAudit } from "./course-support-course-dispatch";
 import { isValidSimulatorSupportClaim } from "./simulator-support-policy";
-import { readSimulatorResearchFailureMemory, readSimulatorResearchState, repairedSlottedCatalogReceipt, repairedBrowserCallbackReceipt } from "./simulator-support-research-policy";
+import { readSimulatorResearchFailureMemory, readSimulatorResearchState, repairedSlottedCatalogReceipt, repairedBrowserCallbackReceipt, repairedSquareDateReceipt } from "./simulator-support-research-policy";
 
 const OLD_GENERIC_COLLECTORS = new Set([
   "public-calendar-resource-local-v3",
@@ -55,7 +55,8 @@ export function simulatorCapabilityWakeupReceipt(input: {
     const memory = readSimulatorResearchFailureMemory(audit.simulatorResearchPriorFailures);
     if (!memory || memory.sourceFingerprint === sourceFingerprint) {
       const repairedCatalog = repairedSlottedCatalogReceipt({ state: research, priorFailedRoutes: memory?.routes ?? [], now }) ??
-        repairedBrowserCallbackReceipt({ state: research, priorFailedRoutes: memory?.routes ?? [], now });
+        repairedBrowserCallbackReceipt({ state: research, priorFailedRoutes: memory?.routes ?? [], now }) ??
+        repairedSquareDateReceipt({ state: research, priorFailedRoutes: memory?.routes ?? [], now });
       if (repairedCatalog) return repairedCatalog;
     }
     if (memory && (memory.sourceFingerprint !== sourceFingerprint || memory.routes.some(route =>

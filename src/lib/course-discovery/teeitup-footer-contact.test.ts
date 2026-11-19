@@ -1,7 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { deriveNativePhysicalContactSource, bindTeeItUpPhysicalContactFacility, teeItUpPhysicalContactProofSchema } from "./teeitup-physical-contact-proof";
 import { registerFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
 import type { OfficialIdentityPage } from "./teeitup-official-identity";
+import { bindDelegatedFacility } from "./teeitup-delegated-booking-source";
+import { getTeeItUpDelegationDiagnostic } from "./teeitup-delegated-booking-diagnostic";
 
 const source = { officialUrl: "https://course.example/", bookingUrl: "https://example.book.teeitup.com/",
   venueName: "Example Hollow Golf & Country Club", venueAddress: "18 Old Turnpike Rd, Example, MA 01068, USA", timeZone: "America/New_York" };
@@ -17,6 +19,30 @@ const directory = [{ id: 71, courseId: "public-71", name: publicName, address: "
 const derive = (p = page()) => deriveNativePhysicalContactSource(source, p, phone);
 
 describe("native country-club footer contact", () => {
+  it("captures only the failed street components without accepting a mismatched provider identity", () => {
+    const capture = vi.fn(), row = { ...directory[0], address: "18 Old Turn Pike Road, Other Recorded, Massachusetts 1068, US" };
+    expect(() => bindTeeItUpPhysicalContactFacility(source, derive(), [row], undefined, capture)).toThrow("OFFICIAL_PHYSICAL_CONTACT_UNVERIFIED");
+    expect(capture).toHaveBeenCalledOnce();
+    expect(capture.mock.calls[0][0]).toEqual({ schemaVersion: 1, observedAt: expect.any(String),
+      canonicalStreet: { before: "", street: "old turnpike", type: "rd", after: "" },
+      providerStreet: { before: "", street: "old turn pike", type: "rd", after: "" } });
+    expect(JSON.stringify(capture.mock.calls)).not.toMatch(/https:|Example|Hollow|01068|1068|508|public-71|courseId|phone/u);
+    let failure: unknown;
+    try { bindDelegatedFacility(source, { rootWitnessSha256: "a".repeat(64), hops: [{ pageUrl: source.officialUrl, nextUrl: source.bookingUrl,
+      witnessSha256: "b".repeat(64) }], physicalContactSource: derive(), physicalContactRequired: true }, [row]); } catch (error) { failure = error; }
+    expect(getTeeItUpDelegationDiagnostic(failure)?.physicalBindingEvidence).toMatchObject({ canonicalStreet: { street: "old turnpike" }, providerStreet: { street: "old turn pike" } });
+    const broken = vi.fn(() => { throw Error("DIAGNOSTIC_ONLY"); });
+    expect(() => bindTeeItUpPhysicalContactFacility(source, derive(), [row], undefined, broken)).toThrow("OFFICIAL_PHYSICAL_CONTACT_UNVERIFIED");
+  });
+  it("never captures an ambiguous or otherwise mismatched physical comparison", () => {
+    const conflict = { ...directory[0], address: "18 Other Rd, Example, MA 01068, US" };
+    for (const rows of [[conflict, { ...conflict, id: 72, courseId: "public-72" }], [{ ...conflict, phone: "+15085555517" }],
+      [{ ...conflict, address: "19 Other Rd, Example, MA 01068, US" }], [{ ...conflict, name: "Different Country Club" }]]) {
+      const capture = vi.fn();
+      expect(() => bindTeeItUpPhysicalContactFacility(source, derive(), rows, undefined, capture)).toThrow();
+      expect(capture).not.toHaveBeenCalled();
+    }
+  });
   it("retains literal names and earns the explicit designation relation using exact physical contact", () => {
     const contact = derive(), bound = bindTeeItUpPhysicalContactFacility(source, contact, directory);
     expect(contact).toMatchObject({ canonicalName: source.venueName, officialBrandName: publicName,

@@ -264,7 +264,8 @@ export function bindDelegatedFacility(source: OfficialIdentitySource, chain: { r
     directoryPhysicalFallbackAvailable: Boolean(physicalSource), directoryPhysicalFallbackRequired: Boolean(requirePhysical) });
   if ((matching.length !== 1 || requirePhysical) && physicalSource &&
       (physicalSource.bookingEntryUrl ? chain.hops.length === 2 && physicalSource.bookingEntryUrl === chain.hops[0].nextUrl : chain.hops.length === 1))
-    physical = bindTeeItUpPhysicalContactFacility(source, physicalSource, directory, (key, value) => { diagnostic.gates[key] = value; });
+    physical = bindTeeItUpPhysicalContactFacility(source, physicalSource, directory, (key, value) => { diagnostic.gates[key] = value; },
+      evidence => { diagnostic.physicalBindingEvidence = evidence; });
   if (requirePhysical && !physical) return fail();
   if (matching.length !== 1 && !physical) return fail();
   const selected = physical ? rows.data.find(row => row.id === physical.facilityId && row.courseId === physical.courseId)! : matching[0];

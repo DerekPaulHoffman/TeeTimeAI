@@ -1,8 +1,24 @@
 import { describe, expect, it } from "vitest";
 import { bindDiscoveryRecipeIdentity, createDiscoveryAdapterObservation, createDiscoverySnapshotCompactor, discoveryBrowserFeedback, discoveryCheckpointDisposition, inspectedAdapterSourceEvidence, noVerifiedRecipeDiagnostic, readDiscoveryControllerCheckpoint, safeBrowserFailureDiagnostics, safeFixedInspectionSourceDiagnostic, verifyDiscoveryCandidate } from "../../../scripts/automation/course-discovery-worker.mjs";
 import { describePublicUrlRejection, safeBrowserActionIssues } from "../../../scripts/automation/course-discovery-diagnostics.mjs";
+import { safePhysicalBindingFailureEvidence, safeTeeItUpDelegationDiagnostic } from "../../../scripts/automation/course-discovery-worker.mjs";
+import { physicalBindingFailureEvidenceSchema } from "./physical-binding-failure-evidence";
+import { createDelegationDiagnostic } from "./teeitup-delegated-booking-diagnostic";
 
 describe("durable discovery browser diagnostics", () => {
+  it("retains the exact bounded private street comparison through worker validation", () => {
+    const evidence = { schemaVersion: 1 as const, observedAt: "2030-01-01T12:11:00.000Z",
+      canonicalStreet: { before: "", street: "oakridge", type: "rd", after: "" }, providerStreet: { before: "", street: "oak ridge", type: "rd", after: "" } };
+    expect(safePhysicalBindingFailureEvidence(evidence)).toEqual(physicalBindingFailureEvidenceSchema.parse(evidence));
+    expect(safeTeeItUpDelegationDiagnostic({ ...createDelegationDiagnostic("PROVIDER_BIND"), physicalBindingEvidence: evidence })).toMatchObject({ physicalBindingEvidence: evidence });
+    for (const value of [{ ...evidence, body: "PRIVATE" }, { ...evidence, observedAt: "not-a-date" },
+      { ...evidence, providerStreet: { ...evidence.providerStreet, street: "https://private.example/token" } },
+      { ...evidence, providerStreet: { ...evidence.providerStreet, street: "x".repeat(201) } },
+      { ...evidence, providerStreet: evidence.canonicalStreet }]) {
+      expect(physicalBindingFailureEvidenceSchema.safeParse(value).success).toBe(false);
+      expect(safePhysicalBindingFailureEvidence(value)).toBeUndefined();
+    }
+  });
   it.each(["CONTROL_SIGNATURE_CHANGED", "PUBLIC_ENTRY_SOURCE_UNVERIFIED", "PUBLIC_ENTRY_CONTROL_CHANGED"])("projects only a finite stale-control reason through browser and fixed-inspection failures: %s", staleControlReason => {
     const raw = { staleControlReason, target: "private-target", url: "https://private.example/?token=private" };
     const browser = safeBrowserFailureDiagnostics(raw);

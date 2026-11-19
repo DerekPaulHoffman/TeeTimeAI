@@ -764,7 +764,7 @@ async function collectOwnedFullRepairContinuations(tx: Prisma.TransactionClient,
       continuationTrigger: "UNFINISHED_FULL_REPAIR" as const,
       ...(sourcePurpose === "RECONCILE_SOURCE" ? { sourceReconciliationOnly: true as const } : {}),
       ...(failedLearningProgress ? { failedLearningProgress } : {}),
-      continuationMode, ...(continuationMode === "CLAIMED_IMPLEMENTATION" ? { plannedPaths: paths as string[] } : {}) });
+      continuationMode, ...(["CLAIMED_IMPLEMENTATION", "PUBLISHED_IMPLEMENTATION"].includes(continuationMode) ? { plannedPaths: paths as string[] } : {}) });
     if (items.length === 5) break;
   }
   return items;

@@ -11,6 +11,10 @@ afterEach(() => {
 });
 
 describe("simulator support failure receipts", () => {
+  it("retains a definite implementation-capacity refusal separately from an unknown command failure", () => {
+    expect(classifySimulatorSupportFailure(new Error("Another course-support worker owns implementation authority."))).toEqual({
+      stage: "COMMAND", category: "CAPACITY", code: "IMPLEMENTATION_AUTHORITY_BUSY" });
+  });
   it("retains the production-loader callback cause as a closed tooling fact without raw error text", () => {
     const error = new Error("locator.evaluate: ReferenceError: __name is not defined\nprivate source text");
     error.stack = "Error: private\n    at observedControl (C:\\repo\\src\\lib\\automation\\simulator-interactive-browser.ts:318:34)";

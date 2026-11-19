@@ -31,6 +31,7 @@ const researchCodes: Record<string, Classification> = {
 };
 
 const ownedMessages: Record<string, Classification> = {
+  "Another course-support worker owns implementation authority.": { category: "CAPACITY", code: "IMPLEMENTATION_AUTHORITY_BUSY" },
   "Simulator support owner, revision or lease is stale.": { category: "OWNERSHIP", code: "OWNER_REVISION_OR_LEASE_STALE" },
   "Simulator source demand changed; preserve ownership and stop.": { category: "SOURCE", code: "SOURCE_DEMAND_CHANGED" },
   "Simulator offering source changed; an explicit owner adoption is required.": { category: "SOURCE", code: "OFFERING_SOURCE_CHANGED" },
