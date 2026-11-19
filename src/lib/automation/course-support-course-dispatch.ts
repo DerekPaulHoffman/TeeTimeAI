@@ -39,7 +39,7 @@ import {
   courseSupportBatchReservesCheckout,
   courseSupportRecoveryBatchesConflict,
 } from "./course-support-batches";
-import { allowsRetainedFullRepairResearch, fullRepairContinuationMode, fullRepairSourceContinuation, hasStoppedFullRepairVerification } from "./course-support-full-repair";
+import { allowsRetainedFullRepairResearch, fullRepairContinuationMode, fullRepairSourceContinuation, hasInterruptedRegisteredFullRepair, hasStoppedFullRepairVerification } from "./course-support-full-repair";
 import { readOwnedFailedLearningProgress } from "./course-support-learning-followthrough";
 import { retryCourseSupportWriterAdmission } from "./course-support-writer-admission";
 import { COURSE_DISPATCH_INCIDENT_SNAPSHOT_SELECT, isCourseDispatchIncidentSnapshotCurrent } from "./course-support-dispatch-snapshot";
@@ -704,6 +704,7 @@ async function collectOwnedFullRepairContinuations(tx: Prisma.TransactionClient,
   const batches = await tx.courseSupportBatch.findMany({
     where: { id: { in: ids }, status: { in: ["VERIFYING", "IMPLEMENTING"] } },
     select: { id: true, status: true, reference: true, ownerThreadId: true, baseSha: true, releaseSha: true, deployedAt: true, createdAt: true, summary: true,
+      leaseExpiresAt: true, recheckDispatchKey: true, recheckDispatchStartedAt: true, recheckDispatchedAt: true,
       incidents: { select: { courseId: true, incidentId: true, cycle: true, result: true, course: true,
         incident: { select: { cycle: true, status: true, activeBatchId: true, providerFamilyKey: true, failureFingerprint: true } } } } },
   });
@@ -727,7 +728,9 @@ async function collectOwnedFullRepairContinuations(tx: Prisma.TransactionClient,
       value.childThreadId === batch.ownerThreadId && value.baseSha === batch.baseSha);
     const entry = batch.incidents[0];
     const paths = Array.isArray(summary.plannedPaths) ? summary.plannedPaths : null;
-    const continuationMode = fullRepairContinuationMode({ ...batch, plannedPaths: paths, now });
+    const registeredImplementation = Boolean(entry && hasInterruptedRegisteredFullRepair({ ...batch, result: entry.result, summary, now }));
+    const continuationMode = registeredImplementation ? "REGISTERED_IMPLEMENTATION" as const
+      : fullRepairContinuationMode({ ...batch, plannedPaths: paths, now });
     const publishedImplementation = continuationMode === "PUBLISHED_IMPLEMENTATION";
     // This projection changes no implementation/recovery authority. The local
     // helper must additionally prove that the exact clean release is on main.
@@ -740,6 +743,8 @@ async function collectOwnedFullRepairContinuations(tx: Prisma.TransactionClient,
     const directive = readCourseSupportRemediationDirective(batch.summary);
     const claim = readCourseSupportRemediationClaimAttempt({ summary: batch.summary, courseId: entry.courseId, expectedAttemptCount: 1 });
     if (!directive || !claim) continue;
+    if (registeredImplementation && (directive.workMode !== "IMPLEMENT_REUSABLE_SUPPORT" ||
+        claim.actionPlan?.primaryAction !== "IMPLEMENT_REUSABLE_SUPPORT" || !claim.actionPlan.allowedActions.includes("INVESTIGATE_PUBLIC_SOURCE"))) continue;
     const sourcePurpose = fullRepairSourceContinuation({ mode: continuationMode, result: entry.result,
       claimedFingerprint: claim.providerSnapshotFingerprint,
       currentFingerprint: buildCourseSupportProviderSnapshotFingerprint(entry.course) });
@@ -762,7 +767,7 @@ async function collectOwnedFullRepairContinuations(tx: Prisma.TransactionClient,
       sourceFingerprint: (await import("@/lib/course-discovery/service")).getDiscoverySourceFingerprint(entry.course),
       searchRefs: audit.target.searchRefs, now,
     }) : null;
-    if (!allowsRetainedFullRepairResearch({ reason: directive.reason, workMode: directive.workMode,
+    if (!registeredImplementation && !allowsRetainedFullRepairResearch({ reason: directive.reason, workMode: directive.workMode,
       batchStatus: batch.status, result: entry.result, allowedActions: claim.actionPlan?.allowedActions ?? [],
       pendingVerificationStopped: Boolean(failedLearningProgress) || hasStoppedFullRepairVerification({ summary: batch.summary,
         batchCreatedAt: batch.createdAt, deployedAt: batch.deployedAt, now }) })) continue;
@@ -772,7 +777,7 @@ async function collectOwnedFullRepairContinuations(tx: Prisma.TransactionClient,
       continuationTrigger: "UNFINISHED_FULL_REPAIR" as const,
       ...(sourcePurpose === "RECONCILE_SOURCE" ? { sourceReconciliationOnly: true as const } : {}),
       ...(failedLearningProgress ? { failedLearningProgress } : {}),
-      continuationMode, ...(["CLAIMED_IMPLEMENTATION", "PUBLISHED_IMPLEMENTATION"].includes(continuationMode) ? { plannedPaths: paths as string[] } : {}) });
+      continuationMode, ...(["CLAIMED_IMPLEMENTATION", "PUBLISHED_IMPLEMENTATION", "REGISTERED_IMPLEMENTATION"].includes(continuationMode) ? { plannedPaths: paths as string[] } : {}) });
     if (items.length === 5) break;
   }
   return items;

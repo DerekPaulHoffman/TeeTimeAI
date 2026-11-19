@@ -13,7 +13,7 @@ import {
 } from "./course-support-batches";
 import { courseSupportActionPlanMatchesRoute } from "./course-support-action-plan";
 import { courseSupportFailureFingerprintsMatch } from "./course-support-failure-fingerprint";
-import { allowsRetainedFullRepairResearch, fullRepairReadProgressMatchesClaim } from "./course-support-full-repair";
+import { allowsRetainedFullRepairResearch, fullRepairReadProgressMatchesClaim, readLegacyFullRepairBaseVerification } from "./course-support-full-repair";
 import {
   appendCourseSupportLineage,
   COURSE_SUPPORT_LINEAGE_EVENT_LIMIT,
@@ -149,6 +149,18 @@ export type OwnedResearchContextInput = {
   now?: Date;
 };
 
+function readOwnedResearchBaseVerification(db: Pick<Prisma.TransactionClient, "courseMonitoringEvent" | "courseSupportVerificationRequest">,
+  input: OwnedResearchContextInput, batch: ResearchBatch, now: Date) {
+  const summary = record(batch.summary);
+  if (readCourseSupportRemediationDirective(batch.summary)?.reason !== "FAILED_LEARNER_IMPLEMENTATION_HANDOFF" ||
+      !Array.isArray(summary.releaseHistory) || summary.releaseHistory.length < 20 || batch.incidents.length !== 1 || input.ordinal !== 1) return null;
+  const entry = batch.incidents[0];
+  return readLegacyFullRepairBaseVerification(db, { batchId: input.batchId, batchReference: batch.reference, entryId: entry.id,
+    courseId: entry.course.id, incidentId: entry.incident.id, baseSha: batch.baseSha,
+    runtimeVersion: batch.releaseSha, providerSnapshotFingerprint: buildCourseSupportProviderSnapshotFingerprint(entry.course),
+    batchCreatedAt: batch.createdAt, now, releaseHistory: summary.releaseHistory, olderReleaseWindows: summary.olderReleaseWindows });
+}
+
 /** A private, read-only projection. Never copy privateContext into aggregate notes. */
 export async function getOwnedCourseSupportResearchContext(
   input: OwnedResearchContextInput,
@@ -166,7 +178,8 @@ export async function getOwnedCourseSupportResearchContext(
     select: researchBatchSelect,
   });
   if (!batch) return controlResult("recovery_required", input.ordinal);
-  const initial = buildOwnedCourseSupportResearchContext(input, batch, now);
+  const legacyBaseVerification = await readOwnedResearchBaseVerification(prisma, input, batch, now);
+  const initial = buildOwnedCourseSupportResearchContext(input, batch, now, null, null, null, legacyBaseVerification);
   if (initial.outcome !== "ready" || readCourseSupportRemediationDirective(batch.summary)?.reason !== "FAILED_LEARNER_IMPLEMENTATION_HANDOFF") return initial;
   const { getOwnedLearningFailureEvidence } = await import("../course-discovery/engineering-repair");
   const entry = orderCourseSupportBatchIncidents(batch.incidents)[input.ordinal - 1];
@@ -181,14 +194,15 @@ export async function getOwnedCourseSupportResearchContext(
     status: { in: [...ACTIVE_BATCH_STATUSES] }, leaseExpiresAt: { gt: input.now ?? new Date() },
   }, select: researchBatchSelect });
   if (!confirmed) return controlResult("recovery_required", input.ordinal);
-  const fresh = buildOwnedCourseSupportResearchContext(input, confirmed, now);
+  const freshLegacyBaseVerification = await readOwnedResearchBaseVerification(prisma, input, confirmed, now);
+  const fresh = buildOwnedCourseSupportResearchContext(input, confirmed, now, null, null, null, freshLegacyBaseVerification);
   if (fresh.outcome !== "ready" || fresh.researchContextV1.contextDigest !== initial.researchContextV1.contextDigest)
     return controlResult("authority_drift", input.ordinal);
   const { bookingEdgeEvidence, physicalBindingEvidence, courseNameComparisonEvidence, ...header } = evidence;
   return buildOwnedCourseSupportResearchContext(input, confirmed, now,
     bookingEdgeEvidence ? { ...header, evidence: bookingEdgeEvidence } : null,
     physicalBindingEvidence ? { ...header, evidence: physicalBindingEvidence } : null,
-    courseNameComparisonEvidence ? { ...header, evidence: courseNameComparisonEvidence } : null);
+    courseNameComparisonEvidence ? { ...header, evidence: courseNameComparisonEvidence } : null, freshLegacyBaseVerification);
 }
 
 export async function validateOwnedCourseSupportResearchContext(
@@ -324,7 +338,8 @@ export async function registerOwnedCourseSupportResearchSpecialist(
       select: researchBatchSelect,
     });
     if (!batch) return researchAssignmentControl("recovery_required", input.ordinal);
-    const current = buildOwnedCourseSupportResearchContext(input, batch, now);
+    const legacyBaseVerification = await readOwnedResearchBaseVerification(transaction, input, batch, now);
+    const current = buildOwnedCourseSupportResearchContext(input, batch, now, null, null, null, legacyBaseVerification);
     if (current.outcome !== "ready") return researchAssignmentControl(current.outcome, input.ordinal);
     if (current.researchContextV1.contextDigest !== input.contextDigest) {
       return researchAssignmentControl("authority_drift", input.ordinal);
@@ -443,6 +458,7 @@ export function buildOwnedCourseSupportResearchContext(
     evidence: PhysicalBindingFailureEvidence; evidenceAuthority: false; untrustedPageEvidence: true } | null = null,
   learningCourseNameComparisonEvidence: { schemaVersion: 1; sourceFingerprint: string; implementationRelease: string; executionRuntime: string;
     evidence: CpsCourseNameComparisonEvidence; evidenceAuthority: false; untrustedPageEvidence: true } | null = null,
+  legacyBaseVerification: Awaited<ReturnType<typeof readLegacyFullRepairBaseVerification>> = null,
 ) {
   if (batch.leaseExpiresAt <= now) return controlResult("recovery_required", input.ordinal);
   const ordered = orderCourseSupportBatchIncidents(batch.incidents);
@@ -468,6 +484,7 @@ export function buildOwnedCourseSupportResearchContext(
     runtimeVersion: batch.releaseSha ?? batch.baseSha, batchCreatedAt: batch.createdAt, now,
     releaseHistory: record(batch.summary).releaseHistory,
     olderReleaseWindows: record(batch.summary).olderReleaseWindows,
+    legacyBaseVerification,
   }));
   // Playbook observations have diagnostic fingerprints (PLAYBOOK:...), not
   // incident fingerprints. Reconcile only the exact same owned read; prefix
@@ -758,6 +775,8 @@ export function buildOwnedCourseSupportResearchContext(
     registeredReleaseHistoryDigest: record(batch.summary).olderReleaseWindows === undefined
       ? digest(record(batch.summary).releaseHistory ?? null)
       : digest({ recent: record(batch.summary).releaseHistory ?? null, older: record(batch.summary).olderReleaseWindows }),
+    ...(legacyBaseVerification ? { legacyBaseVerificationDigest: digest({ releaseSha: legacyBaseVerification.releaseSha,
+      startedAt: legacyBaseVerification.startedAt.toISOString(), completedAt: legacyBaseVerification.completedAt.toISOString() }) } : {}),
     batchFailureFingerprint: batch.failureFingerprint,
     orderedMembers: ordered.map((member) => ({
       batchEntryId: member.id,
