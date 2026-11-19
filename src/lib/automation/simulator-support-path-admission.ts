@@ -2,7 +2,7 @@ import type { SimulatorSupportClaim } from "./simulator-support-policy";
 
 export const SIMULATOR_IMPLEMENTATION_BUSY = "Another course-support worker owns implementation authority.";
 type Owner = { assignmentRef: string; ownerThreadId: string; token: string; revision: number; path: string };
-type Claim = Pick<SimulatorSupportClaim, "token" | "revision" | "phase" | "leaseExpiresAt"> & { assignmentRef: string };
+type Claim = Pick<SimulatorSupportClaim, "token" | "revision" | "phase" | "leaseExpiresAt" | "pendingImplementation"> & { assignmentRef: string };
 type Result<T> = { acquired: false } | { acquired: true; value: T };
 
 /** Wait only after the exact transaction refusal raised before saveClaim.
@@ -10,16 +10,27 @@ type Result<T> = { acquired: false } | { acquired: true; value: T };
 export async function waitForSimulatorSupportPath<T extends Claim>(input: Owner, dependencies: {
   claim: (owner: Owner) => Promise<Result<T>>;
   heartbeat: (owner: Owner) => Promise<Result<T>>;
+  defer: (owner: Owner) => Promise<Result<T>>;
   now?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;
   maximumWaitMs?: number;
-}): Promise<Result<T & { deferredBusy?: true; outcome?: "implementation_deferred_busy" }>> {
+}): Promise<Result<T & { deferredBusy?: true; stopWorker?: true; outcome?: "implementation_deferred_busy" }>> {
   const maximum = dependencies.maximumWaitMs ?? 20 * 60_000;
   if (!Number.isSafeInteger(maximum) || maximum < 1 || maximum > 20 * 60_000) throw new Error("INVALID_IMPLEMENTATION_WAIT_BUDGET");
   const now = dependencies.now ?? (() => performance.now());
   const sleep = dependencies.sleep ?? (milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)));
   const deadline = now() + maximum;
   let owner = { ...input };
+  const defer = async () => {
+    const result = await dependencies.defer(owner);
+    if (!result.acquired) return result;
+    if (result.value.assignmentRef !== owner.assignmentRef || result.value.token !== owner.token ||
+        !Number.isSafeInteger(result.value.revision) || result.value.revision <= owner.revision ||
+        result.value.phase !== "WAITING_IMPLEMENTATION" || result.value.pendingImplementation?.path !== owner.path)
+      throw new Error("IMPLEMENTATION_WAIT_NOT_PERSISTED");
+    return { acquired: true as const, value: { ...result.value,
+      deferredBusy: true as const, stopWorker: true as const, outcome: "implementation_deferred_busy" as const } };
+  };
   for (;;) {
     try {
       const result = await dependencies.claim(owner);
@@ -41,11 +52,9 @@ export async function waitForSimulatorSupportPath<T extends Claim>(input: Owner,
     }
     owner = { ...owner, revision: renewed.value.revision };
     const remaining = deadline - now();
-    if (remaining <= 0) return { acquired: true, value: { ...renewed.value,
-      deferredBusy: true, outcome: "implementation_deferred_busy" } };
+    if (remaining <= 0) return defer();
     await sleep(Math.min(15_000, remaining));
-    // At the deadline report the latest actual heartbeat, not another claim.
-    if (now() >= deadline) return { acquired: true, value: { ...renewed.value,
-      deferredBusy: true, outcome: "implementation_deferred_busy" } };
+    // Persist waiting intent at the deadline without another path claim.
+    if (now() >= deadline) return defer();
   }
 }

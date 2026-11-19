@@ -149,6 +149,14 @@ export function validateOriginalWorkerContinuation(input, dependencies = {}) {
       execute(worker, ["merge-base", item.baseSha, head]) !== item.baseSha) fail("ORIGINAL_OWNED_CHECKOUT_CHANGED");
   const paths = changedPaths(worker, execute);
   if (paths.some(path => !item.plannedPaths.includes(path))) fail("UNKNOWN_OWNED_CHECKOUT_CHANGE");
+  if (item.checkpoint.ownedStage?.phase === "WAITING_IMPLEMENTATION") {
+    const pending = item.checkpoint.ownedStage.pendingImplementation;
+    const workerHead = execute(worker, ["rev-parse", "HEAD"]);
+    if (item.plannedPaths.length || item.releaseSha !== null || !pending || pending.version !== 1 ||
+        pending.sourceFingerprint !== item.sourceFingerprint || typeof pending.path !== "string" || !pending.path ||
+        !SHA.test(workerHead) || execute(worker, ["merge-base", workerHead, head]) !== workerHead)
+      fail("UNPUBLISHED_DEFERRED_IMPLEMENTATION_WORK");
+  }
   if (!isAbsolute(outputDir ?? "")) fail("PRIVATE_OUTPUT_REQUIRED");
   const output = realpathSync(outputDir);
   if (same(output, selected) || same(output, worker)) fail("PRIVATE_OUTPUT_REQUIRED");

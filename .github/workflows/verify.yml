@@ -41,6 +41,35 @@ jobs:
       - run: npm run prisma:generate
       - run: npx prisma migrate deploy
       - run: npx vitest run src/lib/course-discovery/engineering-repair.postgres.test.ts
+  simulator-repair-persistence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: simulator_preview
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d simulator_preview"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/simulator_preview
+      DATABASE_URL_UNPOOLED: postgresql://postgres:postgres@localhost:5432/simulator_preview
+      SIMULATOR_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/simulator_preview
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          cache: npm
+          node-version: 24
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run prisma:generate
+      - run: npx prisma migrate deploy
+      - run: npx vitest run src/lib/automation/simulator-support-ownership.postgres.test.ts
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 25

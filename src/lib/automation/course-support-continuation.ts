@@ -4,6 +4,7 @@ import { win32 } from "node:path";
 import { z } from "zod";
 
 import type { SimulatorSupportFailure } from "./simulator-support-failure";
+import { isValidSimulatorImplementationWait, type SimulatorSupportClaim } from "./simulator-support-policy";
 
 /** Human-approved recovery of an existing native worker, never a new launch. */
 export const COURSE_SUPPORT_CONTINUATION_POLICY_VERSION = "same-native-worker-recovery-v1";
@@ -97,10 +98,12 @@ export type CourseSupportContinuationCheckpoint = {
   claimLeaseExpired?: boolean;
   researchOnlyClaim?: boolean;
   ownedStage?: {
-    phase: "IMPLEMENTING" | "VERIFYING"; claimedAt: string; plannedPaths: string[];
+    phase: "WAITING_IMPLEMENTATION" | "IMPLEMENTING" | "VERIFYING"; claimedAt: string; plannedPaths: string[];
     releaseSha: string | null; deployment: unknown; recheckQueuedAt: string | null;
     verificationCycle: number; sourceFingerprint: string; originalSourceFingerprint: string;
     offeringRevision: number; branch: string;
+    pendingImplementation?: SimulatorSupportClaim["pendingImplementation"];
+    leaseExpiresAt?: string;
   };
   publicReadEvidence?: { sourceFingerprint: string; accessControlsObserved: true; accessControls: Array<"CAPTCHA_OR_CHALLENGE" | "ACCOUNT_REQUIRED" | "QUEUE">;
     method: "HTTP" | "BROWSER"; renderComplete?: boolean; httpStatus: number };
@@ -572,10 +575,14 @@ function hasReviewedSecondaryCheckpoint(checkpoint: CourseSupportContinuationChe
 
 /** Read-only candidates still require fresh native and exact-release proof. */
 export function isCourseSupportContinuationCandidateCheckpoint(checkpoint: CourseSupportContinuationCheckpoint) {
-  if (checkpoint.kind === "EXPIRED_OWNED_STAGE") return checkpoint.providerReadInFlight === false &&
-    checkpoint.claimLeaseExpired === true && checkpoint.ownedStage !== undefined &&
-    ["IMPLEMENTING", "VERIFYING"].includes(checkpoint.ownedStage.phase) &&
-    (checkpoint.ownedStage.plannedPaths.length > 0 || checkpoint.ownedStage.releaseSha !== null);
+  if (checkpoint.kind === "EXPIRED_OWNED_STAGE") {
+    if (checkpoint.providerReadInFlight !== false || checkpoint.claimLeaseExpired !== true || !checkpoint.ownedStage) return false;
+    const stage = checkpoint.ownedStage;
+    if (stage.phase === "WAITING_IMPLEMENTATION") return isValidSimulatorImplementationWait({ ...stage,
+      deployment: stage.deployment as SimulatorSupportClaim["deployment"], leaseExpiresAt: stage.leaseExpiresAt ?? "" });
+    return ["IMPLEMENTING", "VERIFYING"].includes(stage.phase) &&
+      (stage.plannedPaths.length > 0 || stage.releaseSha !== null) && stage.pendingImplementation == null;
+  }
   if (checkpoint.providerReadInFlight || !Number.isInteger(checkpoint.readCount) || checkpoint.readCount < 1 || checkpoint.readCount > 6) return false;
   if (checkpoint.kind === "EXPIRED_UNFINISHED_READ") return checkpoint.failure === null && Boolean(checkpoint.requestId);
   if (checkpoint.kind === "EXPIRED_SETTLED_PUBLIC_READ") return hasSettledPublicEvidence(checkpoint);
