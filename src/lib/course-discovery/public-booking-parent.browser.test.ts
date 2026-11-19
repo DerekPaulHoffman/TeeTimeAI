@@ -5,7 +5,8 @@ import { describe, expect, it, vi } from "vitest";
 import { createCourseDiscoveryBrowserSession } from "./browser-session";
 
 vi.mock("@/lib/automation/provider-request-lease", () => ({ runWithProviderRequestLease: vi.fn() }));
-const executablePath = ["C:/Program Files/Google/Chrome/Application/chrome.exe", "/usr/bin/google-chrome", "/usr/bin/chromium"].find(existsSync);
+// Match CI's browser-runtime check before considering a system installation.
+const executablePath = [chromium.executablePath(), "C:/Program Files/Google/Chrome/Application/chrome.exe", "/usr/bin/google-chrome", "/usr/bin/chromium"].find(existsSync);
 describe.skipIf(!executablePath)("guarded official-to-provider iframe source chain", () => {
   const official = "https://venue.example/", provider = "https://booking.example/club/12", widget = "https://booking.example/club/12/widget";
   const identity = { venueOfficialUrl: official, venueName: "Harbour Pointe Golf Club", venueAddress: "11817 Harbour Pointe Blvd, Mukilteo, WA 98275, USA" };
@@ -24,15 +25,20 @@ describe.skipIf(!executablePath)("guarded official-to-provider iframe source cha
   }
   it("promotes only a visible provider iframe after the real official link and canonical visible identity, without executing the frame", async () => {
     const { session, fetcher } = await fixture();
+    let phase = "OPEN_OFFICIAL";
     try {
       const first = await session.execute({ id: 1, action: "open", url: official });
       const link = first.controls.find(control => control.name === "Book tee times")!;
+      phase = "FOLLOW_OBSERVED_PROVIDER_LINK";
       const landing = await session.execute({ id: 2, action: "click", target: link.target });
       expect(landing.url).toBe(provider); expect(landing.navigationStatus).toBe(200);
       expect(landing.frames).toContainEqual({ url: widget, source: "OFFICIAL_IFRAME_SRC" });
       expect(fetcher.mock.calls.map(args => String(args[0]))).toEqual([official, provider]);
+      phase = "OPEN_VERIFIED_IFRAME";
       const standalone = await session.execute({ id: 3, action: "open", url: widget });
       expect(standalone.text).toContain("Public widget"); expect(fetcher).toHaveBeenCalledTimes(3);
+    } catch (error) {
+      throw new Error(`PUBLIC_BOOKING_PARENT_FIXTURE_FAILED_${phase}`, { cause: error });
     } finally { await session.close(); }
   }, 75_000);
   it.each([false, true])("does not make a provider URL a parent from initial admission or a wrong identity (%s)", async wrong => {

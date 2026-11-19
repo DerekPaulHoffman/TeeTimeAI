@@ -2,6 +2,10 @@
 
 This file records generic process lessons only. It is not a provider-family note and scheduled responders must not read it during routine claimed work. Live incident and monitoring state remains in Postgres.
 
+## 2026-11-19 - Run Browser Source-Chain Fixtures On The Qualified Runtime
+
+A complete candidate CI run passed both persistence jobs and 19,654 application tests, but one real-browser official-link/visible-identity/iframe fixture expired its sixty-second session deadline. That fixture chose system Google Chrome while CI's explicit runtime check qualified the installed Playwright Chromium. Prefer the same installed Chromium before system fallbacks and retain finite step diagnostics for official open, observed provider-link navigation and verified iframe open, preserving the original error as cause. Do not skip the fixture, expand production deadlines, permit unobserved iframe navigation or weaken identity/completeness assertions. This corrects a concrete test/runtime mismatch; the failed receipt remains, and successful CI is still required before release.
+
 ## 2026-11-19 - Qualify A Pending Published Repair Without Inventing A Failure Checkpoint
 
 An original full-repair worker stopped at `RUNTIME_CI_REQUIRED` before the normal verifier ran. Its current published/deployed batch stayed PENDING, with no queued/running learning or verification job and no verifier failure checkpoint. CI later passed on the same head, but the selector required a checkpoint it could never receive from the stopped preparation. Do not invent that checkpoint, assume an access failure, retry the old operation, or retire the owner.
