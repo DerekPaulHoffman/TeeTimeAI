@@ -2,7 +2,7 @@ import { discoveryError } from "./course-discovery-client.mjs";
 import { canonicalStagehandData as canonical, stagehandDataHash as hash, createStagehandSourceCheckpoint } from "./course-discovery-stagehand-source.mjs";
 import { projectSourceDiagnostic, sourceTransportCodes, safeNativeRouterFailure } from "./stagehand/source-diagnostic.mjs";
 import { safeTeeItUpDelegationDiagnostic, safeFixedAdapterReadDiagnostic, safeFixedInspectionSourceDiagnostic } from "./course-discovery-worker.mjs";
-import { currentStagehandInspectionDiagnostic, safeInspectionReadability, safeInspectionLandingDiagnostic, stagehandInspectionFailureCodes } from "./course-discovery-stagehand-inspection.mjs";
+import { currentStagehandInspectionDiagnostic, safeInspectionReadability, safeInspectionLandingDiagnostic, safeInspectionExecutionDiagnostic, stagehandInspectionFailureCodes } from "./course-discovery-stagehand-inspection.mjs";
 
 const LIMIT = 32000, KIND = "OWN_STAGEHAND_FAILURE_DIAGNOSTIC";
 const phases = new Set(["SOURCE_RESUME", "SOURCE_DISCOVERY", "SOURCE_VALIDATION", "FIXED_INSPECTION", "RECIPE_VALIDATION", "REPLAY", "ACTIVATION", "UNKNOWN"]);
@@ -57,12 +57,14 @@ function validEntry(value, job, now) {
     const landing = safeInspectionLandingDiagnostic(value.fixedInspectionDiagnostic?.landing);
     const nativeRouterFailure = safeNativeRouterFailure(value.fixedInspectionDiagnostic?.nativeRouterFailure);
     const fixedSource = safeFixedInspectionSourceDiagnostic(value.fixedInspectionDiagnostic);
-    const diagnostic = teeItUpDelegation || adapterRead || readability || landing || nativeRouterFailure || fixedSource ? {
+    const execution = safeInspectionExecutionDiagnostic(value.fixedInspectionDiagnostic?.execution);
+    const diagnostic = teeItUpDelegation || adapterRead || readability || landing || nativeRouterFailure || fixedSource || execution ? {
       ...(teeItUpDelegation ? { teeItUpDelegation } : {}), ...(adapterRead ? { adapterRead } : {}),
       ...(readability ? { readability } : {}),
       ...(landing ? { landing } : {}),
       ...(nativeRouterFailure ? { nativeRouterFailure } : {}),
       ...(fixedSource ?? {}),
+      ...(execution ? { execution } : {}),
     } : undefined;
     if (value.phase !== "FIXED_INSPECTION" || !diagnostic || canonical(diagnostic) !== canonical(value.fixedInspectionDiagnostic) ||
         value.fixedInspectionDiagnosticSha256 !== hash(diagnostic)) return false;
