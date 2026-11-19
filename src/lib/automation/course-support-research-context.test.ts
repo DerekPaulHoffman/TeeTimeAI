@@ -462,6 +462,29 @@ describe("owned course-support research context", () => {
     expect(JSON.stringify(result)).not.toMatch(/golfer(?:%25)?(?:%40|@)example\.com/iu);
   });
 
+  it.each(["owned full repair", "ordinary repair", "missing investigation action", "cycle starts after claim", "future cycle"])("bounds an unconfirmed reopened learner cycle using its explicit mission: %s", async scenario => {
+    const batch = fixture();
+    const entry = batch.incidents[0];
+    entry.cycle = 2; entry.incident.cycle = 2;
+    entry.incident.confirmedAt = null;
+    entry.incident.firstSeenAt = new Date(scenario === "future cycle" ? "2026-09-28T14:01:00Z"
+      : scenario === "cycle starts after claim" ? "2026-09-28T13:31:00Z" : "2026-09-28T13:20:00Z");
+    entry.course.automationDiscoveries[0].createdAt = new Date("2026-09-28T13:15:00Z");
+    entry.incident.attemptLedger = appendAutomationPlaybookEvent(null, {
+      cycle: 2, stage: "OFFICIAL_IDENTITY", transition: "COMPLETED", readPath: "OFFICIAL_IDENTITY", evidenceKind: "OFFICIAL_SOURCE",
+      failureFingerprint: "TEST:OFFICIAL_IDENTITY:COMPLETE", runtimeVersion: "test-runtime", observedAt: new Date("2026-09-28T13:25:00Z"),
+    });
+    if (scenario !== "ordinary repair") batch.summary.remediation.reason = "FAILED_LEARNER_IMPLEMENTATION_HANDOFF";
+    if (scenario !== "missing investigation action") batch.summary.remediation.attempts[0].actionPlan.allowedActions.push("INVESTIGATE_PUBLIC_SOURCE");
+    database.batchFindFirst.mockResolvedValue(batch);
+    const result = await getOwnedCourseSupportResearchContext(input);
+    if (scenario === "owned full repair") {
+      expect(result).toMatchObject({ outcome: "ready", researchContextV1: { incidentCycle: 2,
+        recentDiscoveryObservations: [], linkChain: { status: "SNAPSHOT_ONLY" }, availabilityContract: { status: "MISSING" } } });
+      expect(entry.incident.confirmedAt).toBeNull();
+    } else expect(result).toMatchObject({ outcome: "authority_drift" });
+  });
+
   it("excludes prior-cycle discovery even when the provider snapshot is unchanged", async () => {
     const batch = fixture();
     const entry = batch.incidents[0];

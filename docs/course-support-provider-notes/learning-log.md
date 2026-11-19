@@ -10,6 +10,10 @@ The correction admits only a main-document GET redirect from the exact legacy ga
 
 Regression coverage: `square-public-read-policy.test.ts` binds venue identity and rejects credentials, selected services/dates/slots and unrelated destinations; `simulator-interactive-browser.test.ts` drives the observed-link handoff in Chromium with a simulated provider and asserts every destination goes through the injected transport. Different locations, checkout and iframe redirects remain denied. `simulator-support-failure.test.ts` verifies that the known rejection survives persistence projection. These fixtures prove the repair boundary; live saved-method replay and application delivery remain separate acceptance gates.
 
+## 2026-11-18 - Give An Admitted Learner Repair A Current Evidence Boundary
+
+A failed learner reopened an incident at cycle two with no repeated-poll confirmation. The dispatcher correctly admitted its explicit investigation-and-implementation mission, but research demanded a confirmation timestamp and stopped before any public read. For this exact full-repair mission, use the current incident's first-seen timestamp only when it predates the owned batch claim; retain null confirmation and every source, cycle, owner, lease, action-plan and evidence check. Ordinary unconfirmed reopened incidents remain ineligible. The research-context regression covers the actual cycle-two shape, excludes old-cycle discovery, and rejects absent investigation authority, a cycle that starts after the claim, and future timestamps.
+
 ## 2026-08-18 - Stop Unchanged Repair Retries
 
 ### Observed Pattern
