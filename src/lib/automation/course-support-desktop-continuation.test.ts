@@ -113,6 +113,7 @@ describe("original Desktop full-repair continuation", () => {
       monitoringVerified: false, prompt: expect.stringContaining("SOURCE_RECONCILIATION_ONLY") });
     expect(result.prompt).toContain("Do not investigate or implement against the changed snapshot");
     expect(result.prompt).not.toContain("Obtain and validate fresh research context");
+    expect(result.prompt).not.toContain("standing full-repair release authorization");
     expect(await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps))
       .toMatchObject({ outcome: "already_requested", messageRequired: false });
     expect(f.client.request.mock.calls.some(([method]) => /start|resume|send|steer/u.test(method))).toBe(false);
@@ -138,6 +139,7 @@ describe("original Desktop full-repair continuation", () => {
     expect(result).toMatchObject({ outcome: "desktop_continuation_message_required", threadId: CHILD,
       monitoringVerified: false, prompt: expect.stringContaining("Continuation mode: CLAIMED_IMPLEMENTATION") });
     expect(result.prompt).toContain("Finish the already claimed tooling repair");
+    expect(result.prompt).toContain("standing full-repair release authorization includes normal promotion");
     expect(await prepareOwnedDesktopContinuation({ context: f.context, item }, f.deps))
       .toMatchObject({ outcome: "already_requested", messageRequired: false });
     expect(f.deps.clientFactory).toHaveBeenCalledTimes(1);
