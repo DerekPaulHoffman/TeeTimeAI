@@ -1089,6 +1089,46 @@ const retryGuide = (state = empty(), rest = {}) => getSimulatorResearchRetryGuid
 const successfulHomepage = () => ({ ...failedHomepage(), history: [{ ...failedHomepage().history[0], httpStatus: 200 }] });
 const requestId = "11111111-1111-4111-8111-111111111111";
 
+describe("refresh an official booking handoff instead of stranding an incomplete calendar", () => {
+  const retained = () => {
+    const observedAt = new Date(now.getTime() - 90 * 60_000).toISOString();
+    const publicReadEvidence = { sourceFingerprint: fingerprint, accessControlsObserved: true as const, accessControls: [], method: "HTTP" as const };
+    const common = { observedAt, sourceFingerprint: fingerprint, httpStatus: 200, outcome: "READ" as const,
+      rendered: false, researchImplementationVersion: SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION, publicReadEvidence };
+    return readSimulatorResearchState({ ...empty(), readCount: 3, history: [
+      { ...common, source: "booking", requestedUrl: officialUrl, sourceUrl: officialUrl, requestId },
+      { ...common, source: "link", requestedUrl: bookingUrl, sourceUrl: bookingUrl, requestId: "22222222-2222-4222-8222-222222222222" },
+      { ...common, source: "link", requestedUrl: bookingUrl, sourceUrl: `${bookingUrl}/service`, rendered: true,
+        requestId: "33333333-3333-4333-8333-333333333333", renderWarning: "SECONDARY_REQUESTS_BLOCKED",
+        publicReadEvidence: { ...publicReadEvidence, method: "BROWSER", renderComplete: false } },
+    ], links: [bookingUrl], bookingLinks: [bookingUrl], bookingLinkRoles: [{ url: bookingUrl, observedAt }],
+    linkBaseUrl: `${bookingUrl}/service` }, fingerprint);
+  };
+  const guide = (state = retained(), rest = {}) => retryGuide(state, { bookingUrl: officialUrl, ...rest });
+  it("selects the already allowed untried homepage render and preserves the original read budget and history", () => {
+    const state = retained(), before = structuredClone(state);
+    const result = guide(state);
+    expect(result.researchGuide.suggestedReads).toContainEqual({ source: "booking", rendered: true });
+    expect(result).toMatchObject({ bookingResearchRequired: true, nextEligibleBookingRead: { source: "booking", rendered: true },
+      researchPurpose: "REFRESH_OFFICIAL_BOOKING_HANDOFF", closeoutReason: null });
+    expect(state).toEqual(before);
+  });
+  it.each(["complete", "no-warning", "access", "unknown-access", "source", "not-linked", "budget", "one-read-left", "already-rendered"])(
+    "does not turn %s into refresh authority", scenario => {
+      const state = retained(), latest = state.history.at(-1)!;
+      if (scenario === "complete") latest.publicReadEvidence!.renderComplete = true;
+      if (scenario === "no-warning") latest.renderWarning = undefined;
+      if (scenario === "access") latest.publicReadEvidence!.accessControls = ["ACCOUNT_REQUIRED"];
+      if (scenario === "unknown-access") latest.publicReadEvidence!.accessControlsObserved = false;
+      if (scenario === "source") latest.sourceFingerprint = "b".repeat(64);
+      if (scenario === "not-linked") latest.source = "booking";
+      if (scenario === "budget") state.readCount = 6;
+      if (scenario === "one-read-left") state.readCount = 5;
+      if (scenario === "already-rendered") { state.history.push({ ...state.history[0], rendered: true }); state.readCount++; }
+      expect(guide(state).researchPurpose).not.toBe("REFRESH_OFFICIAL_BOOKING_HANDOFF");
+    });
+});
+
 describe("calendar research required before incomplete simulator retry", () => {
   it("offers an untried derived root before generic pages after both saved bay modes are spent", () => {
     const success = successfulHomepage().history[0];

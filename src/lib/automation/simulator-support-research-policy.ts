@@ -707,7 +707,7 @@ export function getSimulatorResearchRetryGuide(input: {
   type CloseoutReason = "HARD_FAILURE" | "READ_BUDGET_EXHAUSTED" | "PROVIDER_BACKOFF" |
     "NO_ALLOWED_RESEARCH_ROUTES" | "NO_ELIGIBLE_BOOKING_ROUTES" | null;
   const result = (nextEligibleBookingRead: Route | null, skipHomepageFallback: boolean, closeoutReason: CloseoutReason,
-    researchPurpose?: "PUBLIC_REFERENCE_ROOT") => ({
+    researchPurpose?: "PUBLIC_REFERENCE_ROOT" | "REFRESH_OFFICIAL_BOOKING_HANDOFF") => ({
     researchGuide, nextEligibleBookingRead, bookingResearchRequired: Boolean(nextEligibleBookingRead), skipHomepageFallback, closeoutReason,
     ...(researchPurpose ? { researchPurpose } : {}),
   });
@@ -734,6 +734,23 @@ export function getSimulatorResearchRetryGuide(input: {
       (!official || routeIdentity(selected.url) !== routeIdentity(official));
   });
   if (next) return result(next, false, null);
+  // A saved booking URL can still be the official homepage. After following
+  // its calendar, stale link roles may leave only this untried rendered mode.
+  // The source selector already admits it: refresh the handoff instead of
+  // silently treating a useful different approach as exhausted research.
+  const incompleteLinkedCalendar = latest?.source === "link" && latest.rendered && !latest.failure &&
+    latest.outcome === "READ" && latest.publicReadEvidence?.method === "BROWSER" &&
+    latest.publicReadEvidence.renderComplete === false && latest.renderWarning?.startsWith("SECONDARY_");
+  if (!distinctSavedBooking && official && booking && incompleteLinkedCalendar &&
+      state.readCount <= SIMULATOR_RESEARCH_MAX_READS - 2 &&
+      state.history.every(entry => entry.outcome === "READ" && !entry.failure && entry.httpStatus >= 200 && entry.httpStatus < 300 &&
+        entry.sourceFingerprint === state.sourceFingerprint && entry.publicReadEvidence?.sourceFingerprint === state.sourceFingerprint &&
+        entry.publicReadEvidence.accessControlsObserved === true && entry.publicReadEvidence.accessControls.length === 0 &&
+        Number.isFinite(Date.parse(entry.observedAt)) && Date.parse(entry.observedAt) <= input.now.getTime()) &&
+      !input.priorFailedRoutes.some(isProtectedSimulatorResearchDenial)) {
+    const refresh = researchGuide.suggestedReads.find(route => route.source === "booking" && route.rendered);
+    if (refresh) return result(refresh, false, null, "REFRESH_OFFICIAL_BOOKING_HANDOFF");
+  }
   // A linked public root can supply provider reference/contact evidence when
   // an unknown booking surface is still an incomplete shell. It is never a
   // booking-role or eligibility fact. Choose only an already-admitted route.
