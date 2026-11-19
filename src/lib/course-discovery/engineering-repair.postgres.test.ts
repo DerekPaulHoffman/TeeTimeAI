@@ -625,25 +625,131 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
       .toMatchObject({ status: "AUTO_INVESTIGATING", reason: "DISCOVERY_CODE_REPAIR" });
     expect(await client.courseSupportIncident.count({ where: { courseId: f.course.id } })).toBe(0);
   });
-  async function boundSimulatorHandoff() {
+  async function boundSimulatorHandoff(fullRepair = false) {
     const f = await failed(true);
     expect((await engineering.reconcileDiscoveryEngineeringHandoffs()).queued).toBe(1);
     const incident = await client.simulatorSupportIncident.findUniqueOrThrow({ where: { offeringId: f.offering!.id } });
     const fingerprint = getSimulatorOfferingSourceFingerprint(f.offering!), now = new Date(), baseSha = "a".repeat(40);
     const demand = await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id }, select: SIMULATOR_SUPPORT_SOURCE_SELECT });
+    const repair = fullRepair ? await (await import("@/lib/automation/simulator-full-repair")).currentSimulatorFullRepair(client, {
+      courseId: f.course.id, offeringId: f.offering!.id, incidentId: incident.id, offeringSourceFingerprint: fingerprint }, now) : null;
+    if (fullRepair) expect(repair).not.toBeNull();
     const assignmentRef = `course-assignment-${randomUUID()}`, child = `handoff-child-${randomUUID()}`;
     const run = await client.automationRun.create({ data: { kind: "OTHER", status: "RUNNING", promptVersion: "course-support-course-dispatch-v1",
       ownerThreadId: "handoff-parent", audit: { schemaVersion: 1, tickRef: "fixture", assignmentRef, state: "BOUND", ownerThreadId: "handoff-parent",
         childThreadId: child, baseSha, reservedAt: now.toISOString(), launchStartedAt: now.toISOString(), boundAt: now.toISOString(),
         expiresAt: new Date(now.getTime() + 600_000).toISOString(), target: { mode: "SIMULATOR", offeringId: f.offering!.id,
-          offeringSourceFingerprint: fingerprint, incidentId: incident.id, courseId: f.course.id, cycle: 1, providerFamilyKey: "SIMULATOR_SOURCE_PENDING",
+          offeringSourceFingerprint: fingerprint, ...(repair ? { fullRepair: repair } : {}), incidentId: incident.id, courseId: f.course.id, cycle: 1, providerFamilyKey: "SIMULATOR_SOURCE_PENDING",
           failureFingerprint: fingerprint, updatedAt: incident.updatedAt.toISOString(), trafficClass: "REAL", searchRefs: [{ id: f.search.id,
             scheduleVersion: f.search.scheduleVersion, alertGeneration: f.search.alertGeneration, intentDigest: createSimulatorSupportIntentDigest(demand) }] } } } });
     runs.push(run.id);
     const lane = await import("@/lib/automation/simulator-support-ownership");
-    return { ...f, incident, run, claim: () => lane.claimSimulatorSupportAssignment({ assignmentRef, ownerThreadId: child, baseSha,
+    return { ...f, incident, run, assignmentRef, child, claim: () => lane.claimSimulatorSupportAssignment({ assignmentRef, ownerThreadId: child, baseSha,
       branch: "automation/course-support-discovery-claim" }) };
   }
+  it("keeps a full simulator repair through a denied read, retry, and expired executor without resetting the failed learner", async () => {
+    const f = await boundSimulatorHandoff(true), lane = await import("@/lib/automation/simulator-support-ownership");
+    const originalJob = await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } });
+    const { parseCourseDispatchAudit } = await import("@/lib/automation/course-support-course-dispatch");
+    const admission = await f.claim();
+    expect(admission.acquired).toBe(true);
+    if (!admission.acquired) throw new Error("Fixture did not acquire source ownership");
+    const claimed = admission.value;
+    const owner = { assignmentRef: f.assignmentRef, ownerThreadId: f.child, token: claimed.token, revision: claimed.revision };
+    expect(claimed).toMatchObject({ fullRepair: { failedJobId: f.job.id }, fullRepairActions: expect.arrayContaining(["IMPLEMENT_REUSABLE_SUPPORT"]) });
+    await expect(lane.readSimulatorSupportSource({ ...owner, source: "official", rendered: true }, {
+      browser: async () => { throw new Error("SIMULATOR_RESEARCH_DESTINATION_CHANGED"); },
+    })).rejects.toThrow("SIMULATOR_RESEARCH_HARD_FAILED");
+    const stored = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const audit = parseCourseDispatchAudit(stored.audit)!;
+    expect(stored).toMatchObject({ status: "RUNNING", completedAt: null });
+    expect(audit.simulatorResearch!.history.at(-1)).toMatchObject({ outcome: "HARD_FAILED", failure: { code: "PUBLIC_DESTINATION_CHANGED" } });
+    expect(await lane.retrySimulatorSupport({ ...owner, revision: audit.simulatorClaim!.revision, retryMinutes: 15 }))
+      .toMatchObject({ acquired: true, value: { outcome: "repair_required", ownershipRetained: true, monitoringVerified: false, deliveryVerified: false } });
+    expect(await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).toEqual(stored);
+    const browser = vi.fn();
+    await expect(lane.readSimulatorSupportSource({ ...owner, revision: audit.simulatorClaim!.revision, source: "official", rendered: true }, { browser })).rejects.toThrow();
+    expect(browser).not.toHaveBeenCalled();
+    audit.simulatorClaim!.leaseExpiresAt = new Date(Date.now() - 1000).toISOString();
+    await client.automationRun.update({ where: { id: f.run.id }, data: { audit: audit as unknown as Prisma.InputJsonValue } });
+    await lane.reconcileExpiredSimulatorResearchExecutions(client, new Date(), [{ id: f.run.id, status: "RUNNING", parsed: audit }]);
+    expect(await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).toMatchObject({ status: "RUNNING" });
+    const context = await lane.readSimulatorSupportContinuationContext(client, audit, new Date());
+    expect(context.checkpoint).toMatchObject({ kind: "EXPIRED_OWNED_STAGE", ownedStage: { phase: "CLAIMED", fullRepair: { failedJobId: f.job.id } } });
+    expect(await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } })).toEqual(originalJob);
+    const candidates = await (await import("@/lib/automation/simulator-support-incidents")).listSimulatorSupportDispatchCandidates(new Date(), client);
+    expect(candidates.filter(row => row.offeringId === f.offering!.id)).toEqual([]);
+  });
+  it.each(["paused", "changed-source", "withdrawn-handoff", "reader-only"])("rejects stale full simulator repair authority: %s", async reason => {
+    const f = await boundSimulatorHandoff(true);
+    if (reason === "paused") await client.teeSearch.update({ where: { id: f.search.id }, data: { status: "PAUSED" } });
+    if (reason === "changed-source") await client.courseOffering.update({ where: { id: f.offering!.id }, data: { bookingUrl: "https://changed.example.com/" } });
+    if (reason === "withdrawn-handoff") await client.courseDiscoveryJob.update({ where: { id: f.job.id }, data: { result: { unavailable: true } } });
+    if (reason === "reader-only") await client.course.update({ where: { id: f.course.id }, data: { monitoringMode: "LOCAL_READER_ONLY" } });
+    await expect(f.claim()).rejects.toThrow();
+    expect((await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).audit).toMatchObject({ state: "BOUND" });
+  });
+  it("admits full simulator repair after exhausted legacy research while preserving its denied routes and deduplicating the failed learner", async () => {
+    const f = await boundSimulatorHandoff(), lane = await import("@/lib/automation/simulator-support-ownership");
+    const incidents = await import("@/lib/automation/simulator-support-incidents");
+    const { parseCourseDispatchAudit } = await import("@/lib/automation/course-support-course-dispatch");
+    const admission = await f.claim();
+    if (!admission.acquired) throw new Error("Fixture did not acquire legacy source");
+    await expect(lane.readSimulatorSupportSource({ assignmentRef: f.assignmentRef, ownerThreadId: f.child,
+      token: admission.value.token, revision: admission.value.revision, source: "official", rendered: true }, {
+      browser: async () => { throw new Error("SIMULATOR_RESEARCH_DESTINATION_CHANGED"); },
+    })).rejects.toThrow("SIMULATOR_RESEARCH_HARD_FAILED");
+    const previous = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    expect(previous).toMatchObject({ status: "COMPLETED", outcome: "simulator_research_failed" });
+    await client.simulatorSupportIncident.update({ where: { id: f.incident.id }, data: { retryAt: new Date(Date.now() - 1000) } });
+    const [candidate] = (await incidents.listSimulatorSupportDispatchCandidates(new Date(), client)).filter(row => row.offeringId === f.offering!.id);
+    expect(candidate).toMatchObject({ fullRepair: { failedJobId: f.job.id, incidentId: f.incident.id } });
+    const priorAudit = parseCourseDispatchAudit(previous.audit)!;
+    const assignmentRef = `new-repair-${randomUUID()}`, child = `new-original-${randomUUID()}`, now = new Date();
+    const nextAudit = { ...priorAudit, assignmentRef, state: "BOUND" as const, childThreadId: child,
+      simulatorClaim: undefined, simulatorResearch: undefined, simulatorResearchPriorFailures: undefined,
+      consumedAt: undefined, reservedAt: now.toISOString(), launchStartedAt: now.toISOString(), boundAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 600_000).toISOString(),
+      target: { ...priorAudit.target, updatedAt: candidate.updatedAt, fullRepair: candidate.fullRepair } };
+    const next = await client.automationRun.create({ data: { kind: "OTHER", status: "RUNNING", promptVersion: previous.promptVersion,
+      ownerThreadId: previous.ownerThreadId, audit: JSON.parse(JSON.stringify(nextAudit)) as Prisma.InputJsonValue } });
+    runs.push(next.id);
+    const granted = await lane.claimSimulatorSupportAssignment({ assignmentRef, ownerThreadId: child, baseSha: priorAudit.baseSha,
+      branch: "automation/course-support-full-repair-fixture" });
+    expect(granted).toMatchObject({ acquired: true, value: { fullRepair: candidate.fullRepair } });
+    const consumed = parseCourseDispatchAudit((await client.automationRun.findUniqueOrThrow({ where: { id: next.id } })).audit)!;
+    expect(consumed.simulatorResearchPriorFailures).toMatchObject({ routes: [{ url: f.course.website, rendered: true,
+      failure: { code: "PUBLIC_DESTINATION_CHANGED" } }] });
+    expect(await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).toEqual(previous);
+    expect((await incidents.listSimulatorSupportDispatchCandidates(new Date(), client)).filter(row => row.offeringId === f.offering!.id)).toEqual([]);
+    // Even a previously bound duplicate cannot claim after this owner finishes.
+    await client.automationRun.update({ where: { id: next.id }, data: { status: "COMPLETED", completedAt: new Date() } });
+    const duplicate = await client.automationRun.create({ data: { kind: "OTHER", status: "RUNNING", promptVersion: previous.promptVersion,
+      ownerThreadId: previous.ownerThreadId, audit: JSON.parse(JSON.stringify({ ...nextAudit, assignmentRef: `${assignmentRef}-duplicate` })) as Prisma.InputJsonValue } });
+    runs.push(duplicate.id);
+    await expect(lane.claimSimulatorSupportAssignment({ assignmentRef: `${assignmentRef}-duplicate`, ownerThreadId: child,
+      baseSha: priorAudit.baseSha, branch: "automation/course-support-full-repair-fixture" })).rejects.toThrow("original consumed owner");
+  });
+  it.each(["cancelled", "source-changed", "recovered"])("retires only the ungranted full simulator repair when %s", async reason => {
+    const f = await boundSimulatorHandoff(true), lane = await import("@/lib/automation/simulator-support-ownership");
+    const { parseCourseDispatchAudit } = await import("@/lib/automation/course-support-course-dispatch");
+    expect((await f.claim()).acquired).toBe(true);
+    const audit = parseCourseDispatchAudit((await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).audit)!;
+    audit.simulatorClaim!.leaseExpiresAt = new Date(Date.now() - 1000).toISOString();
+    await client.automationRun.update({ where: { id: f.run.id }, data: { audit: audit as unknown as Prisma.InputJsonValue } });
+    if (reason === "cancelled") await client.teeSearch.update({ where: { id: f.search.id }, data: { status: "CANCELLED" } });
+    if (reason === "source-changed") await client.courseOffering.update({ where: { id: f.offering!.id }, data: { bookingUrl: "https://changed.example.com/" } });
+    if (reason === "recovered") await client.courseProbe.create({ data: { teeSearchId: f.search.id, courseId: f.course.id,
+      offeringId: f.offering!.id, outcome: "MATCH_FOUND" } });
+    if (reason === "recovered") expect(await lane.readSimulatorSupportContinuationContext(client, audit, new Date()))
+      .toMatchObject({ checkpoint: null, leaseValid: false });
+    else await expect(lane.readSimulatorSupportContinuationContext(client, audit, new Date())).rejects.toThrow();
+    await lane.reconcileExpiredSimulatorResearchExecutions(client, new Date(), [{ id: f.run.id, status: "RUNNING", parsed: audit }]);
+    expect(await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).toMatchObject({ status: "COMPLETED",
+      outcome: reason === "cancelled" ? "simulator_source_withdrawn" : "simulator_source_changed", audit: { simulatorClaim: { plannedPaths: [] } } });
+    expect(await client.courseDiscoveryJob.findUniqueOrThrow({ where: { id: f.job.id } })).toMatchObject({ status: "FAILED",
+      firstPickedUpAt: f.job.firstPickedUpAt, deadlineAt: f.job.deadlineAt, attempts: f.job.attempts });
+  });
   it("claims the exact simulator learning handoff without inventing a legacy failure probe", async () => {
     const f = await boundSimulatorHandoff();
     expect(await client.courseProbe.count({ where: { offeringId: f.offering!.id } })).toBe(0);

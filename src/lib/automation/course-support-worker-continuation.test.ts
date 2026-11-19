@@ -123,11 +123,13 @@ function fixture(overrides: Record<string, unknown> = {}) {
 }
 
 describe("deterministic original-worker continuation", () => {
-  it.each([true, false])("keeps ungranted deferred work on published ancestry (trusted=%s)", trusted => {
+  it.each([true, false].flatMap(trusted => ["WAITING_IMPLEMENTATION", "CLAIMED"].map(phase => ({ trusted, phase }))))
+    ("keeps ungranted $phase work on published ancestry (trusted=$trusted)", ({ trusted, phase }) => {
     const f = validationFixture();
     f.input.item.plannedPaths = [];
-    Object.assign(f.input.item.checkpoint.ownedStage, { phase: "WAITING_IMPLEMENTATION", plannedPaths: [],
-      pendingImplementation: { version: 1, path: f.path, sourceFingerprint: f.input.item.sourceFingerprint } });
+    Object.assign(f.input.item.checkpoint.ownedStage, { phase, plannedPaths: [],
+      ...(phase === "WAITING_IMPLEMENTATION" ? { pendingImplementation: { version: 1, path: f.path, sourceFingerprint: f.input.item.sourceFingerprint } }
+        : { fullRepair: { version: 1, kind: "FAILED_LEARNER_FULL_REPAIR" } }) });
     const originalGit = f.dependencies.git.getMockImplementation()!;
     f.dependencies.git.mockImplementation((cwd, args) => {
       if (cwd === f.worker && args.join(" ") === "status --porcelain -z --untracked-files=all") return "";

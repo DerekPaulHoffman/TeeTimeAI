@@ -2,6 +2,12 @@
 
 This file records generic process lessons only. It is not a provider-family note and scheduled responders must not read it during routine claimed work. Live incident and monitoring state remains in Postgres.
 
+## 2026-11-19 - Exhausted Research Does Not Complete A Failed Learner Repair
+
+A current failed simulator learner had a queued engineering handoff, but dispatch treated its completed research-only attempt as exhausted and admitted no code repair. Give that exact server-qualified failed learner one full repair mission, independently revalidated at claim. Retain the original failed job, deadline, prior route failures, provider limits and all source, lease, implementation and deployment gates. A consumed mission deduplicates later admissions, including an already-bound duplicate; startup reservations do not consume it. No old completed claim is revived or missing intent backfilled.
+
+The full mission continues through investigation, reusable implementation, independent saved-method execution and normal application recovery. Its retry reports `repair_required` without releasing ownership or demanding another source read. A hard read still stops that operation and records its failure, while the mission remains owned for offline diagnosis. Normal same-original-worker continuation can resume its expired ungranted stage only with current failed-learner authority and a clean original checkout on published ancestry. Cancellation, source changes and independent recovery retire only ungranted stale work. Reader-only routes and controlled research retries keep their existing scope. Isolated Postgres tests exercise actual exhausted research, denied-route inheritance, admission, duplicate rejection, retained retry ownership, expiry and cancellation; native continuation tests reject unpublished ungranted work. These are engineering regressions, not evidence of a successful live venue or a passed fifteen-minute cohort.
+
 ## 2026-11-19 - Persist Deferred Implementation Instead Of Forcing More Research
 
 A later bounded path wait returned `implementation_deferred_busy` after renewing the original claim, but stored no requested repair. Its next ordinary retry saw only a research-only claim and required extra source reads, ending at a redirect-scope guard. This did not establish a missing site, inaccessible inventory or exhaustion of the six-read budget. Original-owner retained-receipt diagnosis was an explicit operator intervention after a failed cohort, not unattended acceptance.

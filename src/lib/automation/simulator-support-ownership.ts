@@ -6,6 +6,7 @@ import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-f
 import { runWithCourseSupportWriterTransitionLease, withCourseSupportWriteConflictRetry, MAX_CONCURRENT_COURSE_SUPPORT_BATCHES, isRuntimeBearingCourseSupportPath } from "./course-support-batches";
 import { retryCourseSupportWriterAdmission } from "./course-support-writer-admission";
 import { SIMULATOR_IMPLEMENTATION_BUSY } from "./simulator-support-path-admission";
+import { currentSimulatorFullRepair, hasConsumedSimulatorFullRepair, readSimulatorFullRepair } from "./simulator-full-repair";
 import { assertCourseSupportWriterCommitHeadroom, assertCourseSupportWriterTransactionStart, courseSupportWriterTransactionOptions } from "./course-support-writer-budget";
 import type { CourseDispatchAudit } from "./course-support-course-dispatch";
 import { assertSimulatorSupportDeployment, createSimulatorSupportIntentDigest, isCurrentSimulatorSupportSource, isValidSimulatorImplementationWait, SIMULATOR_SUPPORT_LEASE_MS, SIMULATOR_SUPPORT_SOURCE_SELECT, validateSimulatorSupportPath, type SimulatorSupportClaim } from "./simulator-support-policy";
@@ -215,13 +216,19 @@ export async function readSimulatorSupportContinuationContext(tx: Prisma.Transac
   const last = research.history.at(-1);
   const pending = research.inFlight;
   const claim = audit.simulatorClaim;
+  const fullRepair = readSimulatorFullRepair(audit.target.fullRepair);
+  const currentFullRepair = fullRepair && claim.phase === "CLAIMED" ? await currentSimulatorFullRepair(tx, {
+    courseId: source.offering.courseId, offeringId: source.offering.id, incidentId: source.incident.id,
+    offeringSourceFingerprint: source.fingerprint }, now) : null;
+  const fullRepairInvestigation = Boolean(currentFullRepair && JSON.stringify(currentFullRepair) === JSON.stringify(fullRepair));
   const implementationWaiting = isValidSimulatorImplementationWait(claim);
   if (implementationWaiting && source.offering.monitoringRevision !== claim.offeringRevision)
     throw new Error("Simulator source demand changed; preserve ownership and stop.");
   const implementationCapacityBusy = implementationWaiting && await simulatorImplementationCapacityBusy(tx, audit.assignmentRef);
   const postRepairResearchBoundary = getSimulatorPostRepairResearchBoundary({ claim, baseSha: audit.baseSha,
     sourceFingerprint: source.fingerprint, now });
-  const ownedWork = implementationWaiting || ["IMPLEMENTING", "VERIFYING"].includes(claim.phase) && (claim.plannedPaths.length > 0 || claim.releaseSha !== null);
+  const ownedWork = implementationWaiting || fullRepairInvestigation ||
+    ["IMPLEMENTING", "VERIFYING"].includes(claim.phase) && (claim.plannedPaths.length > 0 || claim.releaseSha !== null);
   const expiredPending = pending && new Date(pending.expiresAt) <= now;
   const expiredOwnedStage = ownedWork && new Date(claim.leaseExpiresAt) <= now && (!pending || expiredPending);
   const settledFailure = !ownedWork && !pending && Boolean(last?.failure && ["HARD_FAILED", "NETWORK_FAILED", "CAPACITY_BUSY"].includes(last.outcome)) &&
@@ -243,12 +250,13 @@ export async function readSimulatorSupportContinuationContext(tx: Prisma.Transac
     claimLeaseExpired: new Date(audit.simulatorClaim.leaseExpiresAt) <= now,
     researchOnlyClaim: audit.simulatorClaim.phase === "CLAIMED" && !audit.simulatorClaim.plannedPaths.length && !audit.simulatorClaim.releaseSha,
     ...(expiredOwnedStage ? { ownedStage: {
-      phase: claim.phase as "WAITING_IMPLEMENTATION" | "IMPLEMENTING" | "VERIFYING", claimedAt: claim.claimedAt,
+      phase: claim.phase as "CLAIMED" | "WAITING_IMPLEMENTATION" | "IMPLEMENTING" | "VERIFYING", claimedAt: claim.claimedAt,
       plannedPaths: claim.plannedPaths, releaseSha: claim.releaseSha, deployment: claim.deployment,
       recheckQueuedAt: claim.recheckQueuedAt, verificationCycle: claim.verificationCycle,
       sourceFingerprint: claim.sourceFingerprint, originalSourceFingerprint: claim.originalSourceFingerprint,
       offeringRevision: claim.offeringRevision, branch: claim.branch,
       ...(implementationWaiting ? { pendingImplementation: claim.pendingImplementation, leaseExpiresAt: claim.leaseExpiresAt } : {}),
+      ...(fullRepairInvestigation ? { fullRepair: fullRepair!, leaseExpiresAt: claim.leaseExpiresAt } : {}),
     } } : {}),
     ...(settledPublic ? { publicReadEvidence: settledPublic.publicReadEvidence } : {}),
     allowedResearchRouteCount: implementationWaiting ? 0 : getSimulatorResearchGuide({ state: routeState,
@@ -399,7 +407,7 @@ export async function readSimulatorSupportSource(input: Owner & { source?: Simul
           requestId: before.value.requestId, failure, researchImplementationVersion: getSimulatorResearchImplementationVersion(before.value.url),
         }] };
         const saved = await saveClaim(tx, row, now, {}, research);
-        const researchOnly = row.claim.phase === "CLAIMED" && row.claim.plannedPaths.length === 0 &&
+        const researchOnly = !row.audit.target.fullRepair && row.claim.phase === "CLAIMED" && row.claim.plannedPaths.length === 0 &&
           !row.claim.releaseSha && !row.claim.deployment && !row.claim.recheckQueuedAt;
         // A failed read has no implementation to adopt. Closing this execution
         // fences its old token and lets the ordinary scheduler retry a different
@@ -547,6 +555,14 @@ export async function claimSimulatorSupportAssignment(input: { assignmentRef: st
     const dispatch = await import("./course-support-course-dispatch");
     if (!dispatch.isCourseSupportLaunchAuthorityCurrent(row.audit, now)) throw new Error("Simulator launch authority expired before claim.");
     const source = await lockSource(tx, row.audit, now);
+    if (row.audit.target.fullRepair) {
+      const current = await currentSimulatorFullRepair(tx, { courseId: source.offering.courseId,
+        offeringId: source.offering.id, incidentId: source.incident.id, offeringSourceFingerprint: source.fingerprint }, now);
+      if (!current || JSON.stringify(current) !== JSON.stringify(readSimulatorFullRepair(row.audit.target.fullRepair)))
+        throw new Error("The exact failed-learner simulator repair changed before claim.");
+      if (await hasConsumedSimulatorFullRepair(tx, source.offering.id, current))
+        throw new Error("Simulator full repair already has an original consumed owner.");
+    }
     await assertNotDiscoveryPilotTarget(tx, { courseId: source.offering.courseId, offeringId: source.offering.id }, now);
     if (row.audit.target.engineeringAuthority && source.verificationTargets.some(search => !["TEST", "AUTOMATION"].includes(search.trafficClass))) throw new Error("SIMULATOR_ENGINEERING_CUSTOMER_CHECK_REQUIRED");
     if (source.incident.updatedAt.toISOString() !== row.audit.target.updatedAt || (source.incident.retryAt && source.incident.retryAt > now)) throw new Error("Simulator incident changed or is not due.");
@@ -578,6 +594,8 @@ export async function claimSimulatorSupportAssignment(input: { assignmentRef: st
           durationMinutes: source.searches[0].durationMinutes, offeringId: source.offering.id,
           timeZone: source.offering.course.timeZone } } : {}),
       supportAuthority: row.audit.target.engineeringAuthority ? "ENGINEERING_INCIDENT" as const : "ACTIVE_ALERT" as const,
+      ...(row.audit.target.fullRepair ? { fullRepair: row.audit.target.fullRepair,
+        fullRepairActions: ["INVESTIGATE_PUBLIC_SOURCE", "IMPLEMENT_REUSABLE_SUPPORT", "VERIFY_CURRENT_RUNTIME"] as const } : {}),
       venue: source.offering.course, evidenceUrl: source.offering.evidenceUrl, bookingUrl: source.offering.bookingUrl,
       providerFamilyKey: source.offering.providerFamilyKey, providerMetadata: source.offering.providerMetadata, supportedDurationsMinutes: source.offering.supportedDurationsMinutes,
       researchGuide: getSimulatorResearchGuide({ state: readSimulatorResearchState(undefined, source.fingerprint),
@@ -765,11 +783,17 @@ export async function reconcileExpiredSimulatorResearchExecutions(tx: Prisma.Tra
       rendered: pending.rendered, outcome: "HARD_FAILED", requestId: pending.requestId,
       failure: { stage: "PUBLIC_READ", category: "UNKNOWN", code: "RESEARCH_RESERVATION_INTERRUPTED" },
     }] } : state;
+    const repair = readSimulatorFullRepair(audit.target.fullRepair);
+    const currentRepair = repair && source && claim.phase === "CLAIMED" ? await currentSimulatorFullRepair(tx, {
+      courseId: source.offering.courseId, offeringId: source.offering.id, incidentId: source.incident.id,
+      offeringSourceFingerprint: source.fingerprint }, now) : null;
+    const repairCurrent = Boolean(repair && currentRepair && JSON.stringify(repair) === JSON.stringify(currentRepair));
     const sourceChanged = source && (source.fingerprint !== claim.sourceFingerprint ||
+      Boolean(repair && claim.phase === "CLAIMED" && !repairCurrent) ||
       claim.phase === "WAITING_IMPLEMENTATION" && source.offering.monitoringRevision !== claim.offeringRevision);
     // A valid code dependency is not expired research. Cancellation/source drift
     // still releases this ungranted reservation without erasing its intent.
-    if (claim.phase === "WAITING_IMPLEMENTATION" && !sourceWithdrawn && !sourceChanged) continue;
+    if ((claim.phase === "WAITING_IMPLEMENTATION" || repairCurrent) && !sourceWithdrawn && !sourceChanged) continue;
     const retryAt = !sourceWithdrawn && !sourceChanged ? new Date(now.getTime() + 15 * 60_000) : null;
     if (retryAt) await tx.simulatorSupportIncident.update({ where: { id: source!.incident.id }, data: { retryAt } });
     const updated = { ...audit, simulatorResearch: readSimulatorResearchState(research, claim.sourceFingerprint),
@@ -883,6 +907,8 @@ export function retrySimulatorSupport(input: Owner & { retryMinutes: number; cur
     if (state.inFlight || verification?.inFlight) throw new Error("Finish or reconcile the original bounded simulator read before retry.");
     if (row.claim.phase === "WAITING_IMPLEMENTATION") return { outcome: "implementation_waiting" as const,
       stopWorker: true as const, pendingImplementation: row.claim.pendingImplementation, pathGranted: false as const };
+    if (row.audit.target.fullRepair) return { outcome: "repair_required" as const, ownershipRetained: true as const,
+      phase: row.claim.phase, originalJobPreserved: true as const, monitoringVerified: false as const, deliveryVerified: false as const };
     if (row.audit.controlledRetryOf) {
       await tx.automationRun.update({ where: { id: row.runId }, data: { status: "COMPLETED", completedAt: now,
         outcome: "simulator_controlled_retry_closed" } });
@@ -949,6 +975,8 @@ export async function readSimulatorSupportClaim(input: { assignmentRef: string; 
   const postRepairResearchBoundary = getSimulatorPostRepairResearchBoundary({ claim: row.audit.simulatorClaim,
     baseSha: row.audit.baseSha, sourceFingerprint: getSimulatorOfferingSourceFingerprint(offering), now: observedAt });
   return { ...row.audit.simulatorClaim, assignmentRef: row.audit.assignmentRef, discoveryEngineeringFailure, baseSha: row.audit.baseSha, offeringId: row.audit.target.offeringId!,
+    ...(row.audit.target.fullRepair ? { fullRepair: row.audit.target.fullRepair,
+      fullRepairActions: ["INVESTIGATE_PUBLIC_SOURCE", "IMPLEMENT_REUSABLE_SUPPORT", "VERIFY_CURRENT_RUNTIME"] as const } : {}),
     supportAuthority: row.audit.target.engineeringAuthority ? "ENGINEERING_INCIDENT" as const : "ACTIVE_ALERT" as const,
     research, researchGuide: getSimulatorResearchGuide({ state: research, officialUrl: offering.course.website ?? offering.evidenceUrl,
       bookingUrl: offering.bookingUrl, evidenceUrl: offering.evidenceUrl, now: observedAt, postRepairResearchBoundary,

@@ -5,6 +5,7 @@ import { createSimulatorSupportIntentDigest, isCurrentSimulatorSupportSource, is
 import type { CourseDispatchAudit } from "./course-support-course-dispatch";
 import { simulatorCapabilityWakeupReceipt } from "./simulator-capability-wakeup";
 import { getSimulatorResearchRetryGuide, hasDifferentPublicReadAfterCatalogRepair, readSimulatorResearchFailureMemory, readSimulatorResearchState } from "./simulator-support-research-policy";
+import { currentSimulatorFullRepair, hasConsumedSimulatorFullRepair } from "./simulator-full-repair";
 
 const DISPATCH_PROMPT_VERSION = "course-support-course-dispatch-v1";
 const ENGINEERING_HISTORY_LIMIT = 64;
@@ -205,7 +206,11 @@ export async function listSimulatorSupportDispatchCandidates(now: Date, tx: Pris
       ref.id === source.id && ref.scheduleVersion === source.scheduleVersion &&
       ref.alertGeneration === source.alertGeneration && ref.intentDigest === source.intentDigest)) : currentSources;
     if (controlledRetry && (sourceFingerprint !== controlledRetry.sourceFingerprint || !sources.length)) continue;
-    if (!controlledRetry && await hasExhaustedSimulatorDispatch(tx, incident.id, sourceFingerprint, { officialUrl: incident.offering.course.website,
+    const fullRepair = !controlledRetry && sources.length ? await currentSimulatorFullRepair(tx, {
+      courseId: incident.offering.courseId, offeringId: incident.offeringId, incidentId: incident.id,
+      offeringSourceFingerprint: sourceFingerprint }, now) : null;
+    if (fullRepair && await hasConsumedSimulatorFullRepair(tx, incident.offeringId, fullRepair)) continue;
+    if (!controlledRetry && !fullRepair && await hasExhaustedSimulatorDispatch(tx, incident.id, sourceFingerprint, { officialUrl: incident.offering.course.website,
       bookingUrl: incident.offering.bookingUrl, evidenceUrl: incident.offering.evidenceUrl }, now)) continue;
     const engineering = sources.length ? null : await findSimulatorEngineeringAuthority(tx, { incidentId: incident.id, courseId: incident.offering.courseId,
       offeringId: incident.offeringId, offeringSourceFingerprint: sourceFingerprint }, now);
@@ -214,6 +219,7 @@ export async function listSimulatorSupportDispatchCandidates(now: Date, tx: Pris
       mode: "SIMULATOR" as const, cycle: 1, providerFamilyKey: incident.offering.providerFamilyKey ?? "SIMULATOR_SOURCE_PENDING",
       failureFingerprint: sourceFingerprint, offeringSourceFingerprint: sourceFingerprint, updatedAt: incident.updatedAt.toISOString(),
       activeRealSearchCount: sources.filter(source => !["TEST", "AUTOMATION"].includes(source.trafficClass)).length, sources,
+      ...(fullRepair ? { fullRepair } : {}),
       ...(engineering ? { engineeringAuthority: engineering.authority, engineeringSearchRefs: engineering.searchRefs } : {}) });
   }
   return candidates;

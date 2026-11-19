@@ -5,6 +5,7 @@ import { z } from "zod";
 
 import type { SimulatorSupportFailure } from "./simulator-support-failure";
 import { isValidSimulatorImplementationWait, type SimulatorSupportClaim } from "./simulator-support-policy";
+import { readSimulatorFullRepair, type SimulatorFullRepair } from "./simulator-full-repair";
 
 /** Human-approved recovery of an existing native worker, never a new launch. */
 export const COURSE_SUPPORT_CONTINUATION_POLICY_VERSION = "same-native-worker-recovery-v1";
@@ -98,12 +99,13 @@ export type CourseSupportContinuationCheckpoint = {
   claimLeaseExpired?: boolean;
   researchOnlyClaim?: boolean;
   ownedStage?: {
-    phase: "WAITING_IMPLEMENTATION" | "IMPLEMENTING" | "VERIFYING"; claimedAt: string; plannedPaths: string[];
+    phase: "CLAIMED" | "WAITING_IMPLEMENTATION" | "IMPLEMENTING" | "VERIFYING"; claimedAt: string; plannedPaths: string[];
     releaseSha: string | null; deployment: unknown; recheckQueuedAt: string | null;
     verificationCycle: number; sourceFingerprint: string; originalSourceFingerprint: string;
     offeringRevision: number; branch: string;
     pendingImplementation?: SimulatorSupportClaim["pendingImplementation"];
     leaseExpiresAt?: string;
+    fullRepair?: SimulatorFullRepair;
   };
   publicReadEvidence?: { sourceFingerprint: string; accessControlsObserved: true; accessControls: Array<"CAPTCHA_OR_CHALLENGE" | "ACCOUNT_REQUIRED" | "QUEUE">;
     method: "HTTP" | "BROWSER"; renderComplete?: boolean; httpStatus: number };
@@ -578,6 +580,14 @@ export function isCourseSupportContinuationCandidateCheckpoint(checkpoint: Cours
   if (checkpoint.kind === "EXPIRED_OWNED_STAGE") {
     if (checkpoint.providerReadInFlight !== false || checkpoint.claimLeaseExpired !== true || !checkpoint.ownedStage) return false;
     const stage = checkpoint.ownedStage;
+    if (stage.phase === "CLAIMED") {
+      const repair = readSimulatorFullRepair(stage.fullRepair);
+      return Boolean(repair && repair.offeringSourceFingerprint === stage.sourceFingerprint &&
+        stage.originalSourceFingerprint === stage.sourceFingerprint && !stage.plannedPaths.length &&
+        stage.releaseSha === null && stage.deployment === null && stage.recheckQueuedAt === null &&
+        stage.verificationCycle === 0 && stage.pendingImplementation == null &&
+        Number.isFinite(Date.parse(stage.leaseExpiresAt ?? "")));
+    }
     if (stage.phase === "WAITING_IMPLEMENTATION") return isValidSimulatorImplementationWait({ ...stage,
       deployment: stage.deployment as SimulatorSupportClaim["deployment"], leaseExpiresAt: stage.leaseExpiresAt ?? "" });
     return ["IMPLEMENTING", "VERIFYING"].includes(stage.phase) &&

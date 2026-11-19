@@ -37,6 +37,34 @@ function input() {
   };
 }
 
+describe("full simulator repair checkpoint", () => {
+  function fullRepair(): CourseSupportContinuationCheckpoint {
+    return { kind: "EXPIRED_OWNED_STAGE", observedAt: "2026-10-07T07:50:00.000Z", readCount: 6,
+      requestId: null, failure: null, allowedResearchRouteCount: 0, providerReadInFlight: false, claimLeaseExpired: true,
+      ownedStage: { phase: "CLAIMED", claimedAt: "2026-10-07T07:30:00.000Z", plannedPaths: [],
+        releaseSha: null, deployment: null, recheckQueuedAt: null, verificationCycle: 0, sourceFingerprint: "b".repeat(64),
+        originalSourceFingerprint: "b".repeat(64), offeringRevision: 0, branch: "automation/course-support-fixture",
+        leaseExpiresAt: "2026-10-07T08:00:00.000Z", fullRepair: { version: 1, kind: "FAILED_LEARNER_FULL_REPAIR",
+          failedJobId: "failed-learner", incidentId: "offering-incident", learningSourceFingerprint: "c".repeat(64),
+          offeringSourceFingerprint: "b".repeat(64) } } };
+  }
+  it("continues the same repair with exhausted reads without granting another read or code path", () => {
+    expect(assessCourseSupportContinuationCheckpoint({ checkpoint: fullRepair(), currentMainSha: releaseSha, now }))
+      .toMatchObject({ eligible: true, scope: "RESUME_ORIGINAL_OWNED_STAGE" });
+  });
+  it.each(["legacy", "source", "granted-path", "published", "live-lease", "active-read", "missing-lease"])("rejects invalid %s full repair continuation", change => {
+    const value = fullRepair(), stage = value.ownedStage!;
+    if (change === "legacy") delete stage.fullRepair;
+    if (change === "source") stage.fullRepair!.offeringSourceFingerprint = "a".repeat(64);
+    if (change === "granted-path") stage.plannedPaths = ["src/lib/simulators/providers/reader.ts"];
+    if (change === "published") stage.releaseSha = releaseSha;
+    if (change === "live-lease") value.claimLeaseExpired = false;
+    if (change === "active-read") value.providerReadInFlight = true;
+    if (change === "missing-lease") delete stage.leaseExpiresAt;
+    expect(assessCourseSupportContinuationCheckpoint({ checkpoint: value, currentMainSha: releaseSha, now }).eligible).toBe(false);
+  });
+});
+
 describe("deferred simulator implementation checkpoint", () => {
   function waiting(): CourseSupportContinuationCheckpoint {
     return { kind: "EXPIRED_OWNED_STAGE", observedAt: "2026-10-07T07:50:00.000Z", readCount: 2,
