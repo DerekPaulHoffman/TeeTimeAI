@@ -2094,7 +2094,7 @@ function applyCourseSupportOperationalRetryBudget(input: {
 export async function getCourseSupportBatchRecoveryProvenance(batchId: string) {
   const batch = await prisma.courseSupportBatch.findUnique({
     where: { id: batchId },
-    select: { baseSha: true, releaseSha: true, summary: true }
+    select: { baseSha: true, releaseSha: true, deployedAt: true, summary: true }
   });
   if (!batch) {
     throw new Error("Course-support batch was not found.");
@@ -2104,6 +2104,7 @@ export async function getCourseSupportBatchRecoveryProvenance(batchId: string) {
   return {
     baseSha: batch.baseSha,
     releaseSha: batch.releaseSha,
+    deployedAt: batch.deployedAt,
     branch: typeof summary.branch === "string" ? summary.branch : null,
     plannedPaths: Array.isArray(summary.plannedPaths)
       ? normalizePaths(

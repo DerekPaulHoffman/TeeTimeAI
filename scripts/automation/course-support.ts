@@ -538,6 +538,7 @@ type CourseSupportVerificationCommandDependencies = {
   write?: typeof writeResult;
   verify?: (args: string[]) => Promise<unknown>;
   verifyRelease?: (args: string[]) => Promise<unknown>;
+  recoverLearning?: (args: string[]) => Promise<unknown>;
 };
 
 export async function runConfiguredCommand(input?: {
@@ -709,7 +710,7 @@ async function runCommand(
       writeResult(await heartbeat(args));
       return;
     case "recover-learning":
-      writeResult(await recoverLearning(args));
+      (verificationCommands?.write ?? writeResult)(await (verificationCommands?.recoverLearning ?? recoverLearning)(args));
       return;
     case "verify":
     case "verify-release": {
@@ -1612,16 +1613,37 @@ export async function retainOwnedReleaseDiagnosis(input: { error: unknown; relea
     nextAction: "Preserve the failed release receipt and continue this same owned mission with CI and platform diagnosis. Make a different authorized correction before verification. Do not replay the unchanged failed operation, promote through failed CI, enter provider or learner work, reset budgets, or claim another batch." };
 }
 
-async function recoverLearning(args: string[]) {
+export async function recoverLearning(args: string[], dependencies = {
+  resolveBatch: resolveCourseSupportBatchReference,
+  provenance: getCourseSupportBatchRecoveryProvenance,
+  ownedLease: getOwnedCourseSupportLeaseToken,
+  packet: getCourseSupportBatchPacket,
+  recover: recoverPublishedLearning,
+}) {
   for (let index = 0; index < args.length; index += 2) {
     if (!["--batch-ref", "--owner-thread"].includes(args[index]) || !args[index + 1] || args[index + 1].startsWith("--") ||
         args.indexOf(args[index]) !== index) throw Error("recover-learning accepts only one batch reference and optional original owner.");
   }
-  const batchId = await resolveCourseSupportBatchReference(requireOption(args, "--batch-ref"));
+  const batchId = await dependencies.resolveBatch(requireOption(args, "--batch-ref"));
   const ownerThreadId = requireOwnerThread(args);
-  const provenance = await getCourseSupportBatchRecoveryProvenance(batchId);
+  const provenance = await dependencies.provenance(batchId);
   if (!provenance.releaseSha) throw Error("REGISTERED_IMPLEMENTATION_REQUIRED");
-  const result = await recoverPublishedLearning({ batchId, ownerThreadId, releaseSha: provenance.releaseSha });
+  // Promotion is not the owner's persisted deployment proof. Diagnose this
+  // known no-operation prerequisite before the generic learning eligibility
+  // failure, without renewing a lease or starting/retrying any learner work.
+  if (provenance.deployedAt === null && provenance.releaseSha !== provenance.baseSha &&
+      /^[a-f0-9]{40}$/u.test(provenance.releaseSha) && provenance.plannedPaths.length > 0) {
+    const leaseToken = await dependencies.ownedLease({ batchId, ownerThreadId });
+    const packet = await dependencies.packet({ batchId, ownerThreadId, leaseToken });
+    if (packet.outcome !== "ready" || !shouldContinueOwnedFullRepair(packet))
+      throw Error("OWNED_OUTDOOR_LEARNING_REPAIR_REQUIRED");
+    return { outcome: "release_verification_required" as const, stateChanged: false,
+      requiredAction: "VERIFY_REGISTERED_RELEASE" as const, releaseSha: provenance.releaseSha,
+      deploymentVerified: false, monitoringVerified: false, deliveryVerified: false,
+      durableCloseoutRecorded: false, threadDisposition: "KEEP_VISIBLE" as const,
+      nextAction: "Learning did not run: this registered implementation has no owner-bound deployment proof. Preserve the release failure. After a different authorized correction and fresh exact-head CI/Ready/both-alias proof, use normal verify-release for this registered SHA to persist and verify it. Do not repeat an unchanged failed operation, write deployment state manually, start a learner job, reset clocks or send email." };
+  }
+  const result = await dependencies.recover({ batchId, ownerThreadId, releaseSha: provenance.releaseSha });
   if (!result) throw Error("OWNED_OUTDOOR_LEARNING_REPAIR_REQUIRED");
   return result;
 }

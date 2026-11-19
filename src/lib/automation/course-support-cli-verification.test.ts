@@ -3,8 +3,84 @@ import { resolve } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { retainOwnedReleaseDiagnosis, runConfiguredCommand } from "../../../scripts/automation/course-support";
+import { recoverLearning, retainOwnedReleaseDiagnosis, runConfiguredCommand } from "../../../scripts/automation/course-support";
 import { GitDeploymentReadOnlyFailure, waitForGitDeployment } from "../deployments/wait-for-git-deployment";
+
+describe("saved-method recovery deployment prerequisite", () => {
+  type Dependencies = NonNullable<Parameters<typeof recoverLearning>[1]>;
+  const args = ["--batch-ref", "original-reference"];
+  const releaseSha = "b".repeat(40);
+  function fixture() {
+    const provenance = { baseSha: "a".repeat(40), releaseSha, deployedAt: null as Date | null,
+      branch: "fix/public-calendar", plannedPaths: ["src/lib/course-discovery/reader.ts"], remediationDirective: null };
+    const packet = { outcome: "ready", remediation: { reason: "FAILED_LEARNER_IMPLEMENTATION_HANDOFF" },
+      courses: [{ result: "PENDING", terminalProofDurable: false,
+        actionPlan: { allowedActions: ["INVESTIGATE_PUBLIC_SOURCE", "IMPLEMENT_REUSABLE_SUPPORT"] } }] };
+    const dependencies: Dependencies = {
+      resolveBatch: vi.fn(async () => "original-batch"),
+      provenance: vi.fn(async () => provenance),
+      ownedLease: vi.fn(async () => "original-token"),
+      packet: vi.fn(async () => packet as unknown as Awaited<ReturnType<Dependencies["packet"]>>),
+      recover: vi.fn(async () => null),
+    };
+    return { provenance, packet, dependencies };
+  }
+  beforeEach(() => vi.stubEnv("CODEX_THREAD_ID", "native-owner"));
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("diagnoses promotion without persisted proof as a no-operation required action, through the real command", async () => {
+    const f = fixture(), before = structuredClone({ provenance: f.provenance, packet: f.packet });
+    const write = vi.fn(), exitCode = process.exitCode;
+    await runConfiguredCommand({ argv: ["recover-learning", ...args], isWorkerExecutionAllowed: async () => true,
+      recoverLearning: commandArgs => recoverLearning(commandArgs, f.dependencies), write });
+    expect(write).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ outcome: "release_verification_required",
+      stateChanged: false, requiredAction: "VERIFY_REGISTERED_RELEASE", releaseSha,
+      deploymentVerified: false, monitoringVerified: false, deliveryVerified: false, durableCloseoutRecorded: false }));
+    expect(write.mock.calls[0][0].nextAction).toContain("Do not repeat an unchanged failed operation");
+    expect(process.exitCode).toBe(exitCode);
+    expect(f.dependencies.ownedLease).toHaveBeenCalledExactlyOnceWith({ batchId: "original-batch", ownerThreadId: "native-owner" });
+    expect(f.dependencies.packet).toHaveBeenCalledExactlyOnceWith({ batchId: "original-batch", ownerThreadId: "native-owner", leaseToken: "original-token" });
+    expect(f.dependencies.recover).not.toHaveBeenCalled();
+    expect({ provenance: f.provenance, packet: f.packet }).toEqual(before);
+  });
+
+  it.each(["foreign-owner", "expired-lease", "unknown-read"])("preserves %s failures without offering an action", async code => {
+    const f = fixture(), failure = Error(code);
+    vi.mocked(f.dependencies.ownedLease).mockRejectedValue(failure);
+    await expect(recoverLearning(args, f.dependencies)).rejects.toBe(failure);
+    expect(f.dependencies.packet).not.toHaveBeenCalled(); expect(f.dependencies.recover).not.toHaveBeenCalled();
+  });
+
+  it.each(["not-ready", "legacy", "terminal", "missing-action"])("does not grant the full-repair action for %s", async scenario => {
+    const f = fixture();
+    if (scenario === "not-ready") f.packet.outcome = "not-owned";
+    if (scenario === "legacy") f.packet.remediation.reason = "LEGACY";
+    if (scenario === "terminal") Object.assign(f.packet.courses[0], { result: "RESTORED", terminalProofDurable: true });
+    if (scenario === "missing-action") f.packet.courses[0].actionPlan.allowedActions = ["IMPLEMENT_REUSABLE_SUPPORT"];
+    await expect(recoverLearning(args, f.dependencies)).rejects.toThrow("OWNED_OUTDOOR_LEARNING_REPAIR_REQUIRED");
+    expect(f.dependencies.recover).not.toHaveBeenCalled();
+  });
+
+  it("keeps actual learning failures on the existing deployed-release path", async () => {
+    const f = fixture(), failure = Error("SOURCE_CHANGED");
+    f.provenance.deployedAt = new Date("2030-01-01T00:00:00Z");
+    vi.mocked(f.dependencies.recover).mockRejectedValue(failure);
+    await expect(recoverLearning(args, f.dependencies)).rejects.toBe(failure);
+    expect(f.dependencies.ownedLease).not.toHaveBeenCalled(); expect(f.dependencies.packet).not.toHaveBeenCalled();
+    expect(f.dependencies.recover).toHaveBeenCalledExactlyOnceWith({ batchId: "original-batch", ownerThreadId: "native-owner", releaseSha });
+  });
+
+  it.each(["no-release", "no-paths", "unchanged-release", "unknown-proof"])("does not infer a missing proof for %s", async scenario => {
+    const f = fixture();
+    if (scenario === "no-release") f.provenance.releaseSha = "";
+    if (scenario === "no-paths") f.provenance.plannedPaths = [];
+    if (scenario === "unchanged-release") f.provenance.releaseSha = f.provenance.baseSha;
+    if (scenario === "unknown-proof") Object.assign(f.provenance, { deployedAt: undefined });
+    await expect(recoverLearning(args, f.dependencies)).rejects.toThrow(scenario === "no-release"
+      ? "REGISTERED_IMPLEMENTATION_REQUIRED" : "OWNED_OUTDOOR_LEARNING_REPAIR_REQUIRED");
+    expect(f.dependencies.ownedLease).not.toHaveBeenCalled();
+  });
+});
 
 describe("course-support verification command failure signaling", () => {
   let previousExitCode: typeof process.exitCode;
