@@ -240,7 +240,14 @@ function physicalContactData(proof, outer, job) {
       proof.providerLocalityRelation === (proof.officialLocality === proof.providerLocality ? "SAME_RECORDED" : "DIFFERENT_RECORDED") &&
       (proof.brandLocationLabel === null || typeof proof.brandLocationLabel === "string" && /^[A-Z0-9]{2,8}$/u.test(proof.brandLocationLabel)) &&
       (proof.canonicalNameRelation === "EXACT_PUBLIC_LOCATION_NAME" && proof.serviceRemainder === null && proof.observedServiceLabel === null ||
-        proof.canonicalNameRelation === "PUBLIC_LOCATION_AND_OBSERVED_SERVICE" && bounded(proof.serviceRemainder, 2, 40) && bounded(proof.observedServiceLabel, 2, 120)) &&
+        proof.canonicalNameRelation === "PUBLIC_LOCATION_AND_OBSERVED_SERVICE" && bounded(proof.serviceRemainder, 2, 40) && bounded(proof.observedServiceLabel, 2, 120) ||
+        proof.canonicalNameRelation === "COUNTRY_CLUB_GOLF_DESIGNATION" && proof.serviceRemainder === null && proof.observedServiceLabel === null &&
+          proof.brandLocationLabel === null && (() => {
+            const literal = value => value.normalize("NFKC").replace(/\s+/gu, " ").trim().toLowerCase();
+            const match = /^(.*\S) golf (?:&|and) country club$/u.exec(literal(proof.canonicalName));
+            return match && match[1].length >= 5 && literal(proof.publicLocationName) === `${match[1]} country club` &&
+              literal(proof.officialBrandName) === literal(proof.publicLocationName) && literal(proof.providerName) === literal(proof.publicLocationName);
+          })()) &&
       safeObservedUrl(proof.officialDocumentUrl) && new URL(proof.officialDocumentUrl).href === proof.officialDocumentUrl &&
       proof.warmTransport === "NATIVE_CHROME" && proof.requiredCapability === "LOCAL_CHROME" &&
       proof.sourceWitnessSha256 === dataHash(source) && proof.semanticDigest === dataHash(semantic);
@@ -969,7 +976,9 @@ export function safeTeeItUpDelegationDiagnostic(value) {
     "directoryValid", "directoryIdsUnique", "providerUniqueMatch", "hopSessionOpen", "hopNoAccess", "hopNoFatal", "hopStatus200", "hopCaptured",
     "hopUrlMatches", "hopCaptureFresh", "hopTimeOriginMatches", "hopRawClosed", "hopNativeTransport"];
   const bindingGates = ["directoryNameMatch", "directoryNameTimeZoneMatch", "directoryIdentityMatch", "directoryIdentityUnique",
-    "directoryIdentityOutdoor", "directoryIdentitySimulator", "directoryIdentityKindMissing", "directoryPhysicalFallbackAvailable", "directoryPhysicalFallbackRequired", "directoryPostalRepresentationMatch"];
+    "directoryIdentityOutdoor", "directoryIdentitySimulator", "directoryIdentityKindMissing", "directoryPhysicalFallbackAvailable", "directoryPhysicalFallbackRequired", "directoryPostalRepresentationMatch",
+    "directoryPhysicalSchemaValid", "directoryPhysicalCountryValid", "directoryPhysicalOutdoorValid", "directoryPhysicalPhoneFieldValid", "directoryPhysicalIdsUnique",
+    "directoryPhysicalStreetMatch", "directoryPhysicalPhoneMatch", "directoryPhysicalTimeZoneMatch", "directoryPhysicalContactMatch", "directoryPhysicalContactUnique", "directoryPhysicalNameMatch", "directoryPhysicalLocalityFieldsMatch"];
   try {
     if (!value || typeof value !== "object" || Array.isArray(value) || !stages.includes(value.stage) ||
         !value.gates || typeof value.gates !== "object" || Array.isArray(value.gates) ||

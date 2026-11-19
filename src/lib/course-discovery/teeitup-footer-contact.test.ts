@@ -64,4 +64,12 @@ describe("native country-club footer contact", () => {
     for (const change of [{ canonicalName: "Other Golf & Country Club" }, { canonicalNameRelation: "EXACT_PUBLIC_LOCATION_NAME" }, { publicCoursePhone: "+15085555517" }])
       expect(() => teeItUpPhysicalContactProofSchema.parse({ ...proof, ...change })).toThrow();
   });
+  it("reports the exact failed provider-contact predicate without exposing source data", () => {
+    const gates: Record<string, boolean> = {};
+    expect(() => bindTeeItUpPhysicalContactFacility(source, derive(), [{ ...directory[0], phone: "+15085555517" }],
+      (key, value) => { gates[key] = value; })).toThrow();
+    expect(gates).toMatchObject({ directoryPhysicalSchemaValid: true, directoryPhysicalIdsUnique: true,
+      directoryPhysicalContactMatch: false, directoryPhysicalContactUnique: false });
+    expect(JSON.stringify(gates)).not.toMatch(/example|https:|\+1508/iu);
+  });
 });

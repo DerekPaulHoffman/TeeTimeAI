@@ -296,20 +296,36 @@ export function deriveNativePhysicalContactSource(source: OfficialIdentitySource
   } catch (error) { if (error && typeof error === "object") failures.set(error, { ...diagnostic, gates: { ...diagnostic.gates } }); throw error; }
 }
 function nonBusinessLabel(value: string) { return value.length < 2 || value.length > 120 || /\b(?:account|member|checkout|login|payment|billing|mailing|corporate|fax)\b/iu.test(value); }
-export function bindTeeItUpPhysicalContactFacility(source: OfficialIdentitySource, contact: NativePhysicalContactSource, directory: unknown): { physicalContactProof: TeeItUpPhysicalContactProof; facilityId: number; courseId: string } {
+export function bindTeeItUpPhysicalContactFacility(source: OfficialIdentitySource, contact: NativePhysicalContactSource, directory: unknown,
+  onGate?: (key: "directoryPhysicalSchemaValid" | "directoryPhysicalCountryValid" | "directoryPhysicalOutdoorValid" | "directoryPhysicalPhoneFieldValid" | "directoryPhysicalIdsUnique" |
+    "directoryPhysicalStreetMatch" | "directoryPhysicalPhoneMatch" | "directoryPhysicalTimeZoneMatch" | "directoryPhysicalContactMatch" | "directoryPhysicalContactUnique" | "directoryPhysicalNameMatch" | "directoryPhysicalLocalityFieldsMatch", value: boolean) => void): { physicalContactProof: TeeItUpPhysicalContactProof; facilityId: number; courseId: string } {
+  const gate = (key: Parameters<NonNullable<typeof onGate>>[0], value: boolean) => { try { onGate?.(key, value); } catch { /* Diagnostics never change proof. */ } return value; };
   const fields = sourceSchema.safeParse(Object.fromEntries(Object.keys(sourceSchema.shape).map(key => [key, contact[key as keyof NativePhysicalContactSource]])));
   if (!fields.success || physicalContactDigest(fields.data) !== contact.sourceWitnessSha256 || contact.officialUrl !== source.officialUrl || contact.bookingUrl !== source.bookingUrl || contact.canonicalName !== source.venueName || contact.canonicalAddress !== source.venueAddress) return reject();
   const rows = z.array(z.object({ id: z.number().int().min(1).max(2147483647), courseId: z.string().min(1).max(128), name: name, address,
     timeZone: z.string().min(1).max(100), isSimulator: z.literal(false), country: z.literal("US"), phone: z.string().max(40),
     locality: locality.optional(), region: z.string().max(40).optional(), postalCode: z.string().max(10).optional() })).min(1).max(100).safeParse(directory);
   const canonicalAddress = teeItUpCompleteStreetAddress(contact.canonicalAddress);
+  gate("directoryPhysicalSchemaValid", rows.success);
+  if (Array.isArray(directory) && directory.length >= 1 && directory.length <= 100 && directory.every(v => v && typeof v === "object" && !Array.isArray(v))) {
+    gate("directoryPhysicalCountryValid", directory.every(v => v.country === "US"));
+    gate("directoryPhysicalOutdoorValid", directory.every(v => v.isSimulator === false));
+    gate("directoryPhysicalPhoneFieldValid", directory.every(v => typeof v.phone === "string" && v.phone.length <= 40));
+  }
+  if (rows.success) gate("directoryPhysicalIdsUnique", new Set(rows.data.map(v => v.id)).size === rows.data.length && new Set(rows.data.map(v => v.courseId)).size === rows.data.length);
   if (!rows.success || !canonicalAddress || new Set(rows.data.map(v => v.id)).size !== rows.data.length || new Set(rows.data.map(v => v.courseId)).size !== rows.data.length) return reject();
+  gate("directoryPhysicalStreetMatch", rows.data.some(v => { const a = teeItUpCompleteStreetAddress(v.address); return Boolean(a && sameExceptLocality(canonicalAddress, a)); }));
+  gate("directoryPhysicalPhoneMatch", rows.data.some(v => normalizePublicCoursePhone(v.phone) === contact.publicCoursePhone));
+  gate("directoryPhysicalTimeZoneMatch", rows.data.some(v => v.timeZone === source.timeZone));
   const matches = rows.data.filter(v => { const a = teeItUpCompleteStreetAddress(v.address); return a && sameExceptLocality(canonicalAddress, a) &&
     v.timeZone === source.timeZone && normalizePublicCoursePhone(v.phone) === contact.publicCoursePhone; });
-  if (matches.length !== 1) return reject();
+  gate("directoryPhysicalContactMatch", matches.length > 0);
+  if (!gate("directoryPhysicalContactUnique", matches.length === 1)) return reject();
   const row = matches[0], provider = teeItUpCompleteStreetAddress(row.address);
-  if (!provider || literal(row.name) !== literal(contact.officialBrandName) || row.locality !== undefined && literal(row.locality) !== provider.locality ||
-      row.region !== undefined && row.region.toUpperCase() !== provider.region || row.postalCode !== undefined && row.postalCode !== provider.postalCode) return reject();
+  const nameMatches = gate("directoryPhysicalNameMatch", literal(row.name) === literal(contact.officialBrandName));
+  const localityMatches = gate("directoryPhysicalLocalityFieldsMatch", Boolean(provider && (row.locality === undefined || literal(row.locality) === provider.locality) &&
+    (row.region === undefined || row.region.toUpperCase() === provider.region) && (row.postalCode === undefined || row.postalCode === provider.postalCode)));
+  if (!provider || !nameMatches || !localityMatches) return reject();
   const data = { ...fields.data, kind: "OFFICIAL_PHYSICAL_CONTACT_BINDING_V1" as const, providerName: row.name, providerAddress: row.address,
     providerLocality: provider.locality, providerLocalityRelation: provider.locality === contact.officialLocality ? "SAME_RECORDED" as const : "DIFFERENT_RECORDED" as const,
     sourceWitnessSha256: contact.sourceWitnessSha256 };

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { bindDiscoveryRecipeIdentity, createDiscoveryAdapterObservation, createDiscoverySnapshotCompactor,
   inspectedAdapterSourceEvidence, shouldInvalidateDiscoveryAdapterObservation } from "../../../scripts/automation/course-discovery-worker.mjs";
+import { safeTeeItUpDelegationDiagnostic } from "../../../scripts/automation/course-discovery-worker.mjs";
+import { createDelegationDiagnostic, delegatedFacilityBindingDiagnosticGates } from "./teeitup-delegated-booking-diagnostic";
 import { nativeCanonicalRootDocumentProofSchema } from "./native-official-page-attestation";
 import { physicalContactDigest, teeItUpPhysicalContactProofSchema } from "./teeitup-physical-contact-proof";
 import { parseAccessRecipe } from "./recipe";
@@ -96,6 +98,38 @@ describe("current native USchedule contact observation bridge", () => {
 });
 
 describe("current native delegated physical proof bridge", () => {
+  it("retains a current native country-club designation proof across the serialized worker handoff", () => {
+    const f = fixture(), canonical = "Public Hollow Golf & Country Club", publicName = "Public Hollow Country Club";
+    f.job.request.identity.name = canonical; f.proposal.source.venueName = canonical; f.proof.venueName = canonical;
+    const p = f.proof.physicalContactProof;
+    Object.assign(p, { canonicalName: canonical, officialBrandName: publicName, publicLocationName: publicName, providerName: publicName,
+      brandLocationLabel: null, canonicalNameRelation: "COUNTRY_CLUB_GOLF_DESIGNATION", serviceRemainder: null, observedServiceLabel: null });
+    const nonSource = new Set(["kind", "providerName", "providerAddress", "providerLocality", "providerLocalityRelation", "sourceWitnessSha256", "semanticDigest"]);
+    p.sourceWitnessSha256 = physicalContactDigest(Object.fromEntries(Object.entries(p).filter(([key]) => !nonSource.has(key))));
+    p.semanticDigest = physicalContactDigest(Object.fromEntries(Object.entries(p).filter(([key]) => key !== "semanticDigest")));
+    expect(teeItUpPhysicalContactProofSchema.parse(p)).toEqual(p);
+    const observation = createDiscoveryAdapterObservation(f.job, f.booking, f.adapter, f.document)!;
+    const bound = bind(f, observation);
+    expect(bound.adapter.officialDelegatedBookingProof).toEqual(f.proof);
+    expect(parseAccessRecipe(bound)).toEqual(bound);
+    expect(bindDiscoveryRecipeIdentity(f.proposal, f.job).adapter).not.toHaveProperty("officialDelegatedBookingProof");
+    for (const field of ["jobAttempt", "sourceFingerprint", "identityKey", "trustedContextKey", "inputKey", "deadlineAt"])
+      expect(bind(f, { ...observation, [field]: "changed" }).adapter).not.toHaveProperty("officialDelegatedBookingProof");
+    for (const change of [{ publicLocationName: "Other Country Club" }, { providerName: canonical }, { serviceRemainder: "Restaurant" }, { brandLocationLabel: "NC" }]) {
+      const altered = structuredClone(observation), physical = altered.adapter.officialDelegatedBookingProof.physicalContactProof;
+      Object.assign(physical, change);
+      physical.sourceWitnessSha256 = physicalContactDigest(Object.fromEntries(Object.entries(physical).filter(([key]) => !nonSource.has(key))));
+      physical.semanticDigest = physicalContactDigest(Object.fromEntries(Object.entries(physical).filter(([key]) => key !== "semanticDigest")));
+      expect(bind(f, altered).adapter).not.toHaveProperty("officialDelegatedBookingProof");
+    }
+  });
+  it("preserves closed physical binding diagnostics through worker sanitization", () => {
+    const diagnostic = createDelegationDiagnostic("PROVIDER_BIND");
+    for (const key of delegatedFacilityBindingDiagnosticGates) diagnostic.gates[key] = key.endsWith("Valid") ? true : false;
+    expect(safeTeeItUpDelegationDiagnostic(diagnostic)).toEqual(diagnostic);
+    const raw = { ...diagnostic, gates: { ...diagnostic.gates, directoryPhysicalNameMatch: "PRIVATE", copiedBody: "PRIVATE" } };
+    expect(JSON.stringify(safeTeeItUpDelegationDiagnostic(raw))).not.toContain("PRIVATE");
+  });
   it("adopts the typed final native iframe edge only from the exact current observation", () => {
     const f = fixture(true), hop = { ...f.proof.hops[1], kind: "NATIVE_VISIBLE_IFRAME_SRC" };
     hop.witnessSha256 = createHash("sha256").update(JSON.stringify({ pageUrl: hop.pageUrl, nextUrl: hop.nextUrl, kind: hop.kind })).digest("hex");

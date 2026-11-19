@@ -12,7 +12,9 @@ export type DelegatedDiagnosticGate = typeof delegatedDiagnosticGates[number];
 // Optional extension: older job-bound checkpoints retain their exact shape.
 // These are failure observations only, never facility or read authority.
 export const delegatedFacilityBindingDiagnosticGates = ["directoryNameMatch", "directoryNameTimeZoneMatch", "directoryIdentityMatch", "directoryIdentityUnique",
-  "directoryIdentityOutdoor", "directoryIdentitySimulator", "directoryIdentityKindMissing", "directoryPhysicalFallbackAvailable", "directoryPhysicalFallbackRequired", "directoryPostalRepresentationMatch"] as const;
+  "directoryIdentityOutdoor", "directoryIdentitySimulator", "directoryIdentityKindMissing", "directoryPhysicalFallbackAvailable", "directoryPhysicalFallbackRequired", "directoryPostalRepresentationMatch",
+  "directoryPhysicalSchemaValid", "directoryPhysicalCountryValid", "directoryPhysicalOutdoorValid", "directoryPhysicalPhoneFieldValid", "directoryPhysicalIdsUnique",
+  "directoryPhysicalStreetMatch", "directoryPhysicalPhoneMatch", "directoryPhysicalTimeZoneMatch", "directoryPhysicalContactMatch", "directoryPhysicalContactUnique", "directoryPhysicalNameMatch", "directoryPhysicalLocalityFieldsMatch"] as const;
 type FacilityBindingDiagnosticGate = typeof delegatedFacilityBindingDiagnosticGates[number];
 export type TeeItUpDelegationDiagnostic = { stage: typeof delegatedDiagnosticStages[number]; gates: Record<DelegatedDiagnosticGate, boolean | null> &
   Partial<Record<FacilityBindingDiagnosticGate, boolean | null>>; hopEvidence?: BookingEdgeEvidence };
