@@ -905,6 +905,23 @@ function safeOfficialBrowserDiagnostics(value) {
     result.navigationFailureKind = value.navigationFailureKind;
   return result;
 }
+/** Private normalized failure inputs, separate from transport/aggregate diagnostics.
+ * Mirrors the strict TS schema; never returns URLs, IDs, documents or credentials. */
+export function safePrivateCourseNameComparison(value) {
+  try {
+    if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).sort().join(",") !== "canonicalName,kind,observedAt,officialNames,providerNames,schemaVersion" ||
+        value.schemaVersion !== 1 || value.kind !== "CPS_NAMED_COURSE_COMPARISON" ||
+        typeof value.observedAt !== "string" || !Number.isFinite(Date.parse(value.observedAt)) || new Date(value.observedAt).toISOString() !== value.observedAt ||
+        Buffer.byteLength(JSON.stringify(value), "utf8") > 4096) return undefined;
+    const name = part => typeof part === "string" && part.length <= 240 && /^(?:[\p{L}\p{N}]+(?: [\p{L}\p{N}]+)*)?$/u.test(part) &&
+      part === part.normalize("NFKC").toLowerCase();
+    if (!name(value.canonicalName) || !value.canonicalName || !Array.isArray(value.officialNames) || value.officialNames.length < 2 || value.officialNames.length > 120 ||
+        !Array.isArray(value.providerNames) || value.providerNames.length < 2 || value.providerNames.length > 40 ||
+        !value.officialNames.every(name) || !value.providerNames.every(name)) return undefined;
+    return { schemaVersion: 1, kind: "CPS_NAMED_COURSE_COMPARISON", observedAt: value.observedAt,
+      canonicalName: value.canonicalName, officialNames: [...value.officialNames], providerNames: [...value.providerNames] };
+  } catch { return undefined; }
+}
 function safeFixedReaderFailureDiagnostics(value) {
   const record = item => item !== null && typeof item === "object" && !Array.isArray(item);
   const booleans = (source, keys, nullable = []) => {
@@ -1488,9 +1505,11 @@ export function createDiscoveryProcess({ executable, args, cwd, environment, sig
         const code = message.ok === false && typeof message.error === "string" && /^[A-Z_]{1,80}$/u.test(message.error)
           ? message.error : "DISCOVERY_PROCESS_REQUEST_FAILED";
         const diagnostics = safeBrowserFailureDiagnostics(message.diagnostics);
+        const privateCourseNameComparison = code === "ADAPTER_IDENTITY_MISMATCH" ? safePrivateCourseNameComparison(message.privateCourseNameComparison) : undefined;
         entry.reject(discoveryError(code, { details: {
           ...(code === "BROWSER_ACTION_SCHEMA_INVALID" ? { issues: safeBrowserActionIssues(message.issues) } : {}),
           ...(diagnostics ? { browserDiagnostics: diagnostics } : {}),
+          ...(privateCourseNameComparison ? { privateCourseNameComparison } : {}),
         } }));
       }
       else entry.resolve(message.result);

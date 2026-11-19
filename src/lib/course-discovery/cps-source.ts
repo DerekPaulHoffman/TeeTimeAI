@@ -10,6 +10,7 @@ import type { OfficialIdentityPage } from "./teeitup-official-identity";
 import { parsePublicUSBusinessAddress } from "./public-us-business-address";
 import { bindCpsOfficialEntryProof, cpsOfficialEntryProofSchema, verifyCpsOfficialEntryContext, type CpsOfficialEntryContext } from "./cps-official-entry-proof";
 import { bindCpsOfficialCourseNames, cpsOfficialCourseCatalogFailureStages, getCpsOfficialCourseCatalogFailureStage } from "./cps-official-course-catalog";
+export { getCpsPrivateCourseNameComparison } from "./cps-official-course-catalog";
 
 const id = z.number().int().min(1).max(2_147_483_647);
 const tenant = z.string().regex(/^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u)
@@ -74,8 +75,8 @@ export function getCpsCatalogIdentityFailureStage(error: unknown) {
   return error && typeof error === "object" ? catalogIdentityFailures.get(error) : undefined;
 }
 export function cpsFailure(code: string): never { throw new Error(code); }
-function catalogIdentityFailure(stage: typeof cpsCatalogIdentityFailureStages[number]): never {
-  const error = new Error("ADAPTER_IDENTITY_MISMATCH");
+function catalogIdentityFailure(stage: typeof cpsCatalogIdentityFailureStages[number], originalError?: Error): never {
+  const error = originalError ?? new Error("ADAPTER_IDENTITY_MISMATCH");
   catalogIdentityFailures.set(error, stage);
   throw error;
 }
@@ -328,7 +329,7 @@ export function parseCpsCatalog(value: unknown, options: CpsOptions, source: Cps
       try { officialCourses = bindCpsOfficialCourseNames(source, nativeContact.page, courses); }
       catch (error) {
         if (error instanceof Error && error.message === "ADAPTER_IDENTITY_MISMATCH")
-          catalogIdentityFailure(getCpsOfficialCourseCatalogFailureStage(error) ?? "CATALOG_BINDING");
+          catalogIdentityFailure(getCpsOfficialCourseCatalogFailureStage(error) ?? "CATALOG_BINDING", error);
         throw error;
       }
       const context = parseCpsSource(source.bookingUrl)!;

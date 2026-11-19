@@ -4,7 +4,7 @@ import { STAGEHAND_SOURCE_MODE, canonicalStagehandData as canonical, stagehandDa
   publicStagehandSourceUrl as publicUrl, validateStagehandSourceProposal as validateAdapterSourceProposal,
   validateStagehandSourceReport } from "./course-discovery-stagehand-source.mjs";
 import { observedBookingSourceCandidates, nativeLinkSource, corroboratedNativeLink, nativeFrameNavigations, nativeIntermediaryNavigations, nativeGestureNavigations, nativeHistoryNavigations, nativeLegacyGatewayLandings } from "./stagehand/source-provenance.mjs";
-import { safeTeeItUpDelegationDiagnostic, safeFixedAdapterReadDiagnostic, safeFixedInspectionSourceDiagnostic, safeNativeMainDocumentContinuity } from "./course-discovery-worker.mjs";
+import { safeTeeItUpDelegationDiagnostic, safeFixedAdapterReadDiagnostic, safeFixedInspectionSourceDiagnostic, safeNativeMainDocumentContinuity, safePrivateCourseNameComparison } from "./course-discovery-worker.mjs";
 import { z } from "zod";
 import { isCpsPublicSearchDocument } from "./stagehand/public-source-gateway.mjs";
 import { setTimeout as waitForFrame } from "node:timers/promises";
@@ -12,6 +12,7 @@ import { projectNativeRouterFailure, safeNativeRouterFailure } from "./stagehand
 const fail = code => discoveryError(code), HYBRID_SOURCE_DISCOVERY = STAGEHAND_SOURCE_MODE;
 const INSPECTION_ACTION_LIMIT = 6;
 const inspectionFailures = new WeakMap();
+const privateNameComparisons = new WeakMap();
 const publicRoutingRecoveries = new WeakMap();
 // Diagnostics only: never copy arbitrary helper codes, messages or stacks.
 const executionFailureCodes = ["UNKNOWN", "BROWSER_ACTION_FAILED", "BROWSER_ACTION_SCHEMA_INVALID", "BROWSER_EVALUATION_FAILED",
@@ -130,6 +131,16 @@ export function currentStagehandInspectionDiagnostic(error, job, startedAt, now)
       ...(execution ? { execution } : {}),
     } : undefined;
   } catch { return undefined; }
+}
+/** Same invocation binding as the closed diagnostic, separately retained private
+ * failure inputs. A copied error, old attempt or source cannot supply these. */
+export function currentStagehandPrivateCourseNameComparison(error, job, startedAt, now) {
+  const diagnostic = currentStagehandInspectionDiagnostic(error, job, startedAt, now);
+  if (diagnostic?.cpsCatalogIdentityFailureStage !== "NAMED_COURSE_NAMES") return undefined;
+  const value = safePrivateCourseNameComparison(privateNameComparisons.get(error));
+  if (!value || Date.parse(value.observedAt) < Math.max(startedAt, Date.parse(job.firstPickedUpAt)) ||
+      Date.parse(value.observedAt) > Math.min(now, Date.parse(job.deadlineAt))) return undefined;
+  return value;
 }
 /** Current private readability permits a fresh investigation, never a recipe. */
 export function currentStagehandPublicRoutingRecovery(error, job, startedAt, now) {
@@ -516,6 +527,11 @@ export async function inspectStagehandAdapter({ report, adapterSourceProposal, j
         } catch { /* Diagnostic access cannot replace the primary failure. */ }
         try { Object.assign(step, safeFixedInspectionSourceDiagnostic(error?.details?.browserDiagnostics)); }
         catch { /* Diagnostic access cannot replace the primary failure. */ }
+        try {
+          const comparison = error?.code === "ADAPTER_IDENTITY_MISMATCH" && step.cpsCatalogIdentityFailureStage === "NAMED_COURSE_NAMES"
+            ? safePrivateCourseNameComparison(error?.details?.privateCourseNameComparison) : undefined;
+          if (comparison) privateNameComparisons.set(error, comparison);
+        } catch { /* Private data never replaces the primary rejection. */ }
         throw error;
       }
       finally { step.elapsedMs = Math.max(0, now() - start); }

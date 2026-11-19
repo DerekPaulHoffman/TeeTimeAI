@@ -1,8 +1,8 @@
 import { discoveryError } from "./course-discovery-client.mjs";
 import { canonicalStagehandData as canonical, stagehandDataHash as hash, createStagehandSourceCheckpoint } from "./course-discovery-stagehand-source.mjs";
 import { projectSourceDiagnostic, sourceTransportCodes, safeNativeRouterFailure } from "./stagehand/source-diagnostic.mjs";
-import { safeTeeItUpDelegationDiagnostic, safeFixedAdapterReadDiagnostic, safeFixedInspectionSourceDiagnostic } from "./course-discovery-worker.mjs";
-import { currentStagehandInspectionDiagnostic, safeInspectionReadability, safeInspectionLandingDiagnostic, safeInspectionExecutionDiagnostic, stagehandInspectionFailureCodes } from "./course-discovery-stagehand-inspection.mjs";
+import { safeTeeItUpDelegationDiagnostic, safeFixedAdapterReadDiagnostic, safeFixedInspectionSourceDiagnostic, safePrivateCourseNameComparison } from "./course-discovery-worker.mjs";
+import { currentStagehandInspectionDiagnostic, currentStagehandPrivateCourseNameComparison, safeInspectionReadability, safeInspectionLandingDiagnostic, safeInspectionExecutionDiagnostic, stagehandInspectionFailureCodes } from "./course-discovery-stagehand-inspection.mjs";
 
 const LIMIT = 32000, KIND = "OWN_STAGEHAND_FAILURE_DIAGNOSTIC";
 const phases = new Set(["SOURCE_RESUME", "SOURCE_DISCOVERY", "SOURCE_VALIDATION", "FIXED_INSPECTION", "RECIPE_VALIDATION", "REPLAY", "ACTIVATION", "UNKNOWN"]);
@@ -73,6 +73,21 @@ function validEntry(value, job, now) {
     if (value.phase !== "FIXED_INSPECTION" || !sha(value.fixedInspectionDiagnosticSha256) || value.fixedInspectionDiagnosticOmittedForBudget !== true) return false;
     projected.fixedInspectionDiagnosticSha256 = value.fixedInspectionDiagnosticSha256; projected.fixedInspectionDiagnosticOmittedForBudget = true;
   }
+  if (value.privateCourseNameComparison !== undefined) {
+    const comparison = safePrivateCourseNameComparison(value.privateCourseNameComparison);
+    if (value.phase !== "FIXED_INSPECTION" || value.code !== "ADAPTER_IDENTITY_MISMATCH" ||
+        value.fixedInspectionDiagnostic?.cpsCatalogIdentityFailureStage !== "NAMED_COURSE_NAMES" || !comparison ||
+        canonical(comparison) !== canonical(value.privateCourseNameComparison) || value.privateCourseNameComparisonSha256 !== hash(comparison) ||
+        Date.parse(comparison.observedAt) < Date.parse(job.firstPickedUpAt) ||
+        Date.parse(comparison.observedAt) > Math.min(Date.parse(job.deadlineAt), Date.parse(value.observedAt), now)) return false;
+    projected.privateCourseNameComparison = comparison;
+    projected.privateCourseNameComparisonSha256 = value.privateCourseNameComparisonSha256;
+  } else if (value.privateCourseNameComparisonSha256 !== undefined) {
+    if (value.phase !== "FIXED_INSPECTION" || value.code !== "ADAPTER_IDENTITY_MISMATCH" ||
+        !sha(value.privateCourseNameComparisonSha256) || value.privateCourseNameComparisonOmittedForBudget !== true) return false;
+    projected.privateCourseNameComparisonSha256 = value.privateCourseNameComparisonSha256;
+    projected.privateCourseNameComparisonOmittedForBudget = true;
+  }
   return canonical(projected) === canonical(value);
 }
 
@@ -92,6 +107,12 @@ export function readStagehandFailure(job, now = Date.now()) {
 export function packStagehandCheckpoint({ reference, failure, progress }) {
   const value = { ...(reference ? { stagehandSource: structuredClone(reference) } : {}), ...(progress ? { stagehandProgress: structuredClone(progress) } : {}),
     ...(failure ? { stagehandFailure: structuredClone(failure) } : {}) };
+  if (size(value) > LIMIT && value.stagehandFailure) for (const entry of value.stagehandFailure.entries) {
+    if (size(value) <= LIMIT) break;
+    if (entry.privateCourseNameComparison) {
+      delete entry.privateCourseNameComparison; entry.privateCourseNameComparisonOmittedForBudget = true;
+    }
+  }
   if (size(value) > LIMIT && value.stagehandProgress?.replay?.result?.diagnostic) {
     const result = value.stagehandProgress.replay.result;
     result.diagnosticSha256 = hash(result.diagnostic); result.diagnosticOmittedForBudget = true; delete result.diagnostic;
@@ -115,6 +136,7 @@ export function createStagehandFailureCheckpoint({ job, report, error, phase, me
   }
   const diagnostic = projectSourceDiagnostic(report?.sourceDiagnostic ?? error?.sourceDiagnostic);
   const fixedInspectionDiagnostic = phase === "FIXED_INSPECTION" ? currentStagehandInspectionDiagnostic(error, job, startedAt, now) : undefined;
+  const privateCourseNameComparison = phase === "FIXED_INSPECTION" ? currentStagehandPrivateCourseNameComparison(error, job, startedAt, now) : undefined;
   const code = [error?.code, error?.message].find(value => codes.has(value)) ?? "STAGEHAND_WORKER_FAILED";
   const entry = { attempt: job.attempts, observedAt: new Date(now).toISOString(), phase: phases.has(phase) ? phase : "UNKNOWN", code,
     ...(code === "STAGEHAND_WORKER_FAILED" ? { workerErrorName: workerErrorNames.includes(error?.name) ? error.name : "UNKNOWN" } : {}),
@@ -124,7 +146,8 @@ export function createStagehandFailureCheckpoint({ job, report, error, phase, me
     cleanup: { sourceBrowserClosed: fact(report?.browserClosed), sourceModelClosed: fact(report?.modelClosed), inspectionBrowserClosed: fact(metrics?.inspection?.browserClosed) },
     sourceResumed: metrics?.sourceResumed === true,
     ...(diagnostic ? { diagnostic, diagnosticSha256: hash(diagnostic) } : {}),
-    ...(fixedInspectionDiagnostic ? { fixedInspectionDiagnostic, fixedInspectionDiagnosticSha256: hash(fixedInspectionDiagnostic) } : {}) };
+    ...(fixedInspectionDiagnostic ? { fixedInspectionDiagnostic, fixedInspectionDiagnosticSha256: hash(fixedInspectionDiagnostic) } : {}),
+    ...(privateCourseNameComparison ? { privateCourseNameComparison, privateCourseNameComparisonSha256: hash(privateCourseNameComparison) } : {}) };
   if (!validEntry(entry, job, now)) throw discoveryError("STAGEHAND_SOURCE_SCOPE_INVALID");
   const prior = readStagehandFailure({ ...job, checkpoint: { stagehandFailure: previous } }, now);
   const entries = [...(prior?.entries ?? []).filter(value => value.attempt < job.attempts), entry].slice(-2);

@@ -29,6 +29,7 @@ import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-
 import { prisma } from "../prisma";
 import type { getOwnedLearningBookingEdgeEvidence } from "../course-discovery/engineering-repair";
 import type { PhysicalBindingFailureEvidence } from "../course-discovery/physical-binding-failure-evidence";
+import type { CpsCourseNameComparisonEvidence } from "../course-discovery/cps-course-name-comparison-evidence";
 
 const RESEARCH_CONTEXT_VERSION = 1;
 const ACTIVE_BATCH_STATUSES = ["CLAIMED", "IMPLEMENTING", "VERIFYING"] as const;
@@ -183,10 +184,11 @@ export async function getOwnedCourseSupportResearchContext(
   const fresh = buildOwnedCourseSupportResearchContext(input, confirmed, now);
   if (fresh.outcome !== "ready" || fresh.researchContextV1.contextDigest !== initial.researchContextV1.contextDigest)
     return controlResult("authority_drift", input.ordinal);
-  const { bookingEdgeEvidence, physicalBindingEvidence, ...header } = evidence;
+  const { bookingEdgeEvidence, physicalBindingEvidence, courseNameComparisonEvidence, ...header } = evidence;
   return buildOwnedCourseSupportResearchContext(input, confirmed, now,
     bookingEdgeEvidence ? { ...header, evidence: bookingEdgeEvidence } : null,
-    physicalBindingEvidence ? { ...header, evidence: physicalBindingEvidence } : null);
+    physicalBindingEvidence ? { ...header, evidence: physicalBindingEvidence } : null,
+    courseNameComparisonEvidence ? { ...header, evidence: courseNameComparisonEvidence } : null);
 }
 
 export async function validateOwnedCourseSupportResearchContext(
@@ -439,6 +441,8 @@ export function buildOwnedCourseSupportResearchContext(
   learningBookingEdgeEvidence: Awaited<ReturnType<typeof getOwnedLearningBookingEdgeEvidence>> = null,
   learningPhysicalBindingEvidence: { schemaVersion: 1; sourceFingerprint: string; implementationRelease: string; executionRuntime: string;
     evidence: PhysicalBindingFailureEvidence; evidenceAuthority: false; untrustedPageEvidence: true } | null = null,
+  learningCourseNameComparisonEvidence: { schemaVersion: 1; sourceFingerprint: string; implementationRelease: string; executionRuntime: string;
+    evidence: CpsCourseNameComparisonEvidence; evidenceAuthority: false; untrustedPageEvidence: true } | null = null,
 ) {
   if (batch.leaseExpiresAt <= now) return controlResult("recovery_required", input.ordinal);
   const ordered = orderCourseSupportBatchIncidents(batch.incidents);
@@ -732,6 +736,7 @@ export function buildOwnedCourseSupportResearchContext(
     monitoringProofRecorded: false as const,
     learningBookingEdgeEvidence,
     learningPhysicalBindingEvidence,
+    ...(learningCourseNameComparisonEvidence ? { learningCourseNameComparisonEvidence } : {}),
     recentDiscoveryObservations: observations.slice(0, 8),
     recentMonitoringObservations: course.monitoringEvents
       .filter((event) => event.incidentId === entry.incident.id)

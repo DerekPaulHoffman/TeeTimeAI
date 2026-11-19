@@ -3,10 +3,11 @@ import { describe, expect, it } from "vitest";
 import { chromium } from "@playwright/test";
 import { collectNativeOfficialPublicMetadata } from "./public-document-metadata";
 import { freshNativeCanonicalRootDocument, registerFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
-import { bindCpsOfficialCourseNames, getCpsOfficialCourseCatalogFailureStage } from "./cps-official-course-catalog";
+import { bindCpsOfficialCourseNames, getCpsOfficialCourseCatalogFailureStage, getCpsPrivateCourseNameComparison } from "./cps-official-course-catalog";
 import { parseCpsCatalog, getCpsCatalogIdentityFailureStage, CPS_VENUE_PUBLIC_CATALOG_BUILD, type CpsOptions } from "./cps-source";
 import { parseAccessRecipe } from "./recipe";
 import type { OfficialIdentityPage } from "./teeitup-official-identity";
+import { createCourseDiscoveryBrowserSession } from "./browser-session";
 
 const source = { officialUrl: "https://official.example/", bookingUrl: "https://harbor.cps.golf/",
   venueName: "Harbor Pointe Golf Course", venueAddress: "10 Harbor Dr, Example, NY 12345, USA", timeZone: "America/New_York" };
@@ -44,6 +45,45 @@ function redirectedFixture(canonicalUrl: string, documentUrl: string, linkOrigin
 }
 
 describe("native official named public course catalog", () => {
+  it("keeps actual rejected comparison keys out of browser diagnostics and clears them on the next inspection", async () => {
+    const f = fixture();
+    f.rows[0].courseName = f.options.courseOptions[0].courseName = "Harbor North";
+    let primary: unknown;
+    try { parseCpsCatalog(f.rows, f.options, source, f.context, build); } catch (error) { primary = error; }
+    expect(getCpsPrivateCourseNameComparison(primary)).toBeDefined();
+    let failure = primary;
+    const session = await createCourseDiscoveryBrowserSession({ initialUrls: [source.officialUrl], venueName: source.venueName,
+      deadlineAt: new Date(Date.now() + 20_000) }, {
+      inspectAdapter: async () => { throw failure; },
+      fetch: async () => new Response("<html><body><h1>Public venue</h1></body></html>", { headers: { "content-type": "text/html" } }),
+      launchBrowser: () => chromium.launch({ headless: true }),
+      requestLease: async (_family, work) => ({ acquired: true, value: await work() }),
+    });
+    try {
+      await session.execute({ id: 1, action: "open", url: source.officialUrl });
+      await expect(session.execute({ id: 2, action: "inspect_adapter", url: source.officialUrl })).rejects.toBe(primary);
+      expect(session.privateCourseNameComparison()).toEqual(getCpsPrivateCourseNameComparison(primary));
+      expect(JSON.stringify(session.diagnostics())).not.toMatch(/harbor north|officialNames|providerNames/u);
+      failure = Error("ADAPTER_IDENTITY_MISMATCH");
+      await expect(session.execute({ id: 3, action: "inspect_adapter", url: source.officialUrl })).rejects.toBe(failure);
+      expect(session.privateCourseNameComparison()).toBeUndefined();
+    } finally { await session.close(); }
+  }, 30_000);
+  it("keeps actual compared keys private through the unchanged catalog rejection", () => {
+    const f = fixture();
+    f.rows[0].courseName = f.options.courseOptions[0].courseName = "Harbor North";
+    let failure: unknown;
+    try { parseCpsCatalog(f.rows, f.options, source, f.context, build); } catch (error) { failure = error; }
+    expect((failure as Error).message).toBe("ADAPTER_IDENTITY_MISMATCH");
+    expect(getCpsCatalogIdentityFailureStage(failure)).toBe("NAMED_COURSE_NAMES");
+    expect(getCpsPrivateCourseNameComparison(failure)).toMatchObject({ canonicalName: "harbor pointe",
+      officialNames: ["north", "south"], providerNames: ["harbor north", "south"] });
+    expect(JSON.stringify(failure)).not.toMatch(/harbor|north|south/u);
+    expect(getCpsPrivateCourseNameComparison({ ...(failure as Error) })).toBeUndefined();
+    const value = getCpsPrivateCourseNameComparison(failure)!;
+    value.providerNames[0] = "changed";
+    expect(getCpsPrivateCourseNameComparison(failure)!.providerNames[0]).toBe("harbor north");
+  });
   it("preserves the same catalog hash for actual browser CSS case transforms on direct and attested roots", async () => {
     const browser = await chromium.launch({ headless: true });
     let externalRequests = 0, markup = "", documentUrl = source.officialUrl;

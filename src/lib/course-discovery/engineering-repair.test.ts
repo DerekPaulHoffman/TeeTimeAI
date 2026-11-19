@@ -18,6 +18,7 @@ import { sanitizeResponderValue } from "@/lib/automation/course-support-responde
 import { createDelegationDiagnostic } from "./teeitup-delegated-booking-diagnostic";
 import { cpsCatalogIdentityFailureStages } from "./cps-source";
 import { safeFixedInspectionSourceDiagnostic, safeBrowserFailureDiagnostics } from "../../../scripts/automation/course-discovery-worker.mjs";
+import { stagehandDataHash } from "../../../scripts/automation/course-discovery-stagehand-source.mjs";
 const now = new Date("2030-01-01T12:16:00Z"), picked = new Date("2030-01-01T12:00:00Z");
 let failure: ReturnType<typeof fixture>;
 let outdoorIncident: { id: string; courseId: string; status: string; updatedAt: Date; firstSeenAt: Date; attemptLedger: unknown; activeBatchId: string | null };
@@ -44,6 +45,44 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllEnvs());
 describe("terminal learner to coding responder", () => {
+  it.each(["owned", "foreign-owner", "foreign-batch", "cycle-drift", "source-drift", "runtime-drift", "unlinked-child",
+    "late-observation", "early-observation", "digest-drift", "request-drift", "checkpoint-job-drift", "omitted", "unsafe-input"])(
+    "keeps name comparisons private and tied to the original reciprocal failed child: %s", async scenario => {
+      const link = { version: 1, kind: "LATE_ENGINEERING_RECOVERY", originalJobId: "job1", jobId: "child1", batchId: "batch1",
+        incidentId: "incident1", ownerThreadId: "owner1", cycle: 1, sourceFingerprint: failure.job.sourceFingerprint,
+        releaseSha: "b".repeat(40), runtimeVersion: "c".repeat(40), requestedAt: "2030-01-01T12:10:00.000Z",
+        originalFirstPickedUpAt: picked.toISOString(), originalDeadlineAt: failure.job.deadlineAt.toISOString() };
+      failure.job.result = { engineeringHandoff: receipt(), learningRecoveries: [link] };
+      const evidence = { schemaVersion: 1, kind: "CPS_NAMED_COURSE_COMPARISON", observedAt: "2030-01-01T12:11:00.000Z",
+        canonicalName: "harbor pointe", officialNames: ["north", "south"], providerNames: ["harbor north", "harbor south"] };
+      if (scenario === "late-observation") evidence.observedAt = "2030-01-01T12:13:00.000Z";
+      if (scenario === "early-observation") evidence.observedAt = "2030-01-01T12:09:00.000Z";
+      if (scenario === "unsafe-input") Object.assign(evidence, { url: "https://private.example/" });
+      const request = { target: { courseId: "course1" } };
+      const diagnostic = { cpsCatalogIdentityFailureStage: "NAMED_COURSE_NAMES" };
+      const entry = { attempt: 1, code: "ADAPTER_IDENTITY_MISMATCH", phase: "FIXED_INSPECTION", observedAt: "2030-01-01T12:11:01.000Z",
+        fixedInspectionDiagnostic: diagnostic, fixedInspectionDiagnosticSha256: stagehandDataHash(diagnostic),
+        ...(scenario === "omitted" ? { privateCourseNameComparisonOmittedForBudget: true } : { privateCourseNameComparison: evidence }),
+        privateCourseNameComparisonSha256: scenario === "digest-drift" ? "f".repeat(64) : stagehandDataHash(evidence) };
+      const child = { ...failure.job, id: "child1", request, firstPickedUpAt: new Date("2030-01-01T12:10:00Z"),
+        deadlineAt: new Date("2030-01-01T12:25:00Z"), completedAt: new Date("2030-01-01T12:12:00Z"),
+        result: { learningRecoveryOf: scenario === "unlinked-child" ? { ...link, batchId: "foreign" } : link,
+          executionRuntimeVersion: scenario === "runtime-drift" ? "d".repeat(40) : link.runtimeVersion },
+        checkpoint: { stagehandFailure: { schemaVersion: 1, kind: "OWN_STAGEHAND_FAILURE_DIAGNOSTIC", jobId: scenario === "checkpoint-job-drift" ? "other" : "child1",
+          sourceFingerprint: link.sourceFingerprint, requestSha256: scenario === "request-drift" ? "f".repeat(64) : stagehandDataHash(request),
+          firstPickedUpAt: "2030-01-01T12:10:00.000Z", deadlineAt: "2030-01-01T12:25:00.000Z", entries: [entry] } } };
+      m.db.courseDiscoveryJob.findUnique.mockImplementation(async ({ where }) => where.id === child.id ? child : failure.job);
+      const result = await getOwnedLearningFailureEvidence(m.db as never, { batchId: scenario === "foreign-batch" ? "other" : "batch1",
+        ownerThreadId: scenario === "foreign-owner" ? "other" : "owner1", courseId: "course1", incidentId: "incident1",
+        incidentCycle: scenario === "cycle-drift" ? 2 : 1, now,
+        providerSnapshotFingerprint: scenario === "source-drift" ? "f".repeat(64) : buildCourseSupportProviderSnapshotFingerprint(failure.source.course as never) });
+      if (scenario === "owned") expect(result).toMatchObject({ courseNameComparisonEvidence: evidence, evidenceAuthority: false, untrustedPageEvidence: true });
+      else expect(result).toBeNull();
+      expect(JSON.stringify(discoveryFailureDiagnosis(child))).not.toContain("harbor");
+      expect(JSON.stringify(sanitizeResponderValue(discoveryFailureDiagnosis(child)))).not.toContain("harbor");
+      expect(await getOwnedLearningBookingEdgeEvidence(m.db as never, { batchId: "batch1", ownerThreadId: "owner1", courseId: "course1",
+        incidentId: "incident1", incidentCycle: 1, now, providerSnapshotFingerprint: buildCourseSupportProviderSnapshotFingerprint(failure.source.course as never) })).toBeNull();
+    });
   it("exposes persisted closed source diagnostics without treating them as source proof", () => {
     const result = discoveryFailureDiagnosis({ outcome: "TOOL_FAILURE", checkpoint: {
       stagehandFailure: { schemaVersion: 1, kind: "OWN_STAGEHAND_FAILURE_DIAGNOSTIC", entries: [{ attempt: 2,

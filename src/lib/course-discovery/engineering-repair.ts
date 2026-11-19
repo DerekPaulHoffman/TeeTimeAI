@@ -18,6 +18,7 @@ import { cpsPhoneBookingFailureStages } from "./cps-phone-booking-proof";
 import { cpsCatalogIdentityFailureStages } from "./cps-source";
 import { physicalBindingFailureEvidenceSchema } from "./physical-binding-failure-evidence";
 import { safeOfficialSourceDiagnostic, navigationFailureKinds } from "./official-source-diagnostics";
+import { readPrivateCourseNameComparison } from "./cps-course-name-comparison-evidence";
 
 const receiptSchema = z.object({ version: z.literal(1), state: z.literal("QUEUED"),
   incidentId: z.string().min(1).max(128), queuedAt: z.string().datetime(),
@@ -254,12 +255,15 @@ export async function getOwnedLearningFailureEvidence(reader: Reader, input: {
   const diagnosis = discoveryFailureDiagnosis(child, true);
   const evidence = diagnosis.priorInspection?.bookingEdgeEvidence ?? diagnosis.bookingEdgeEvidence;
   const physical = diagnosis.priorInspection?.physicalBindingEvidence ?? diagnosis.physicalBindingEvidence;
+  const comparison = readPrivateCourseNameComparison({ ...child, firstPickedUpAt: child.firstPickedUpAt,
+    deadlineAt: child.deadlineAt, completedAt: child.completedAt }, input.now);
   const withinAttempt = (at: string) => Date.parse(at) >= child.firstPickedUpAt!.getTime() &&
     Date.parse(at) <= Math.min(child.deadlineAt!.getTime(), child.completedAt!.getTime(), input.now.getTime());
-  if (!evidence && !physical || evidence && (!withinAttempt(evidence.observedAt) || evidence.attestedAt && !withinAttempt(evidence.attestedAt)) ||
+  if (!evidence && !physical && !comparison || evidence && (!withinAttempt(evidence.observedAt) || evidence.attestedAt && !withinAttempt(evidence.attestedAt)) ||
       physical && !withinAttempt(physical.observedAt)) return null;
   return { schemaVersion: 1 as const, sourceFingerprint: link.sourceFingerprint, implementationRelease: link.releaseSha,
     executionRuntime: link.runtimeVersion, bookingEdgeEvidence: evidence ?? null, physicalBindingEvidence: physical ?? null,
+    ...(comparison ? { courseNameComparisonEvidence: comparison } : {}),
     evidenceAuthority: false as const, untrustedPageEvidence: true as const };
 }
 
@@ -267,7 +271,8 @@ export async function getOwnedLearningFailureEvidence(reader: Reader, input: {
 export async function getOwnedLearningBookingEdgeEvidence(reader: Reader, input: Parameters<typeof getOwnedLearningFailureEvidence>[1]) {
   const value = await getOwnedLearningFailureEvidence(reader, input);
   if (!value?.bookingEdgeEvidence) return null;
-  const { bookingEdgeEvidence, physicalBindingEvidence: _physical, ...header } = value; void _physical;
+  const { bookingEdgeEvidence, physicalBindingEvidence: _physical, courseNameComparisonEvidence: _comparison, ...header } = value;
+  void _physical; void _comparison;
   return { ...header, evidence: bookingEdgeEvidence };
 }
 

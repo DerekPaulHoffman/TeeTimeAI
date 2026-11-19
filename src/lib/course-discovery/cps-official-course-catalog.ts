@@ -1,6 +1,7 @@
 import { parse, type DefaultTreeAdapterMap } from "parse5";
 import { freshNativeCanonicalRootDocument } from "./native-official-page-attestation";
 import { fullCourseName, type OfficialIdentityPage } from "./teeitup-official-identity";
+import { parseCpsCourseNameComparisonEvidence, type CpsCourseNameComparisonEvidence } from "./cps-course-name-comparison-evidence";
 
 type Node = DefaultTreeAdapterMap["node"];
 type Element = DefaultTreeAdapterMap["element"];
@@ -23,13 +24,20 @@ export const cpsOfficialCourseCatalogFailureStages = ["NAMED_ROOT_PROVENANCE", "
   "NAMED_RAW_TREE_LIMIT", "NAMED_RAW_LINK_PAIR"] as const;
 type FailureStage = typeof cpsOfficialCourseCatalogFailureStages[number];
 const failures = new WeakMap<object, FailureStage>();
+const privateComparisons = new WeakMap<object, CpsCourseNameComparisonEvidence>();
 /** Controller-owned failure vocabulary only; contains no source text or URLs. */
 export function getCpsOfficialCourseCatalogFailureStage(error: unknown) {
   return error && typeof error === "object" ? failures.get(error) : undefined;
 }
-const fail = (stage: FailureStage): never => {
+export function getCpsPrivateCourseNameComparison(error: unknown) {
+  const value = error && typeof error === "object" ? privateComparisons.get(error) : undefined;
+  return value ? structuredClone(value) : undefined;
+}
+const fail = (stage: FailureStage, comparison?: unknown): never => {
   const error = Error("ADAPTER_IDENTITY_MISMATCH");
   failures.set(error, stage);
+  const privateValue = stage === "NAMED_COURSE_NAMES" ? parseCpsCourseNameComparisonEvidence(comparison) : undefined;
+  if (privateValue) privateComparisons.set(error, privateValue);
   throw error;
 };
 
@@ -65,7 +73,10 @@ export function bindCpsOfficialCourseNames(source: { officialUrl: string; venueN
     else named.set(name, { href: row.href, labels: new Set([pairLabel(row.text)]) });
   }
   if (named.size !== courses.length || new Set(courses.map(row => key(row.courseName))).size !== courses.length ||
-      courses.some(row => !named.has(key(row.courseName)) || restricted.test(row.courseName))) return fail("NAMED_COURSE_NAMES");
+      courses.some(row => !named.has(key(row.courseName)) || restricted.test(row.courseName))) return fail("NAMED_COURSE_NAMES", {
+        schemaVersion: 1, kind: "CPS_NAMED_COURSE_COMPARISON", observedAt: new Date().toISOString(), canonicalName: key(source.venueName),
+        officialNames: [...named.keys()].sort(), providerNames: courses.map(row => key(row.courseName)),
+      });
   const rawPairs = new Set<string>(); let visited = 0;
   const walk = (node: Node, depth = 0) => {
     if (++visited > 20_000 || depth > 64) return fail("NAMED_RAW_TREE_LIMIT");

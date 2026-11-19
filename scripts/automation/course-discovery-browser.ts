@@ -230,17 +230,22 @@ async function main() {
   try {
     for await (const line of input) {
       let id: unknown = null;
+      let action: string | undefined;
       try {
         if (line.length > 16_384) throw new Error("REQUEST_TOO_LARGE");
         const value = JSON.parse(line) as { id?: unknown; action?: string };
         id = value.id ?? null;
+        action = value.action;
         const result = await session.execute(value);
         process.stdout.write(`${JSON.stringify({ id, ok: true, result })}\n`);
         if (value.action === "finish") break;
       } catch (error) {
         const code = publicFailureCode(error);
         const issues = error instanceof z.ZodError ? safeBrowserActionIssues(error.issues) : undefined;
-        process.stdout.write(`${JSON.stringify({ id, ok: false, error: code, diagnostics: session.diagnostics(), ...(issues ? { issues } : {}) })}\n`);
+        const privateCourseNameComparison = process.env.COURSE_DISCOVERY_FIXED_INSPECTION === "1" && action === "inspect_adapter" && code === "ADAPTER_IDENTITY_MISMATCH"
+          ? session.privateCourseNameComparison() : undefined;
+        process.stdout.write(`${JSON.stringify({ id, ok: false, error: code, diagnostics: session.diagnostics(),
+          ...(privateCourseNameComparison ? { privateCourseNameComparison } : {}), ...(issues ? { issues } : {}) })}\n`);
       }
     }
   } finally { clearTimeout(timer); input.close(); await session.close(); }
