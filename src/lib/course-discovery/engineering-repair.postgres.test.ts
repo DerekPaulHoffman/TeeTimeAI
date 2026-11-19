@@ -141,6 +141,8 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
     return { ...f, batch, input: { batchId: batch.id, leaseToken: batch.leaseToken, ownerThreadId, releaseSha, runtimeVersion: releaseSha } };
   }
 
+  // This end-to-end database fixture includes cold tooling imports on hosted
+  // runners. Its harness budget is separate from the asserted worker deadlines.
   it.each(["live-owner", "expired-original-owner"])("returns a repaired reader to replay and normal monitoring with %s", async scenario => {
     const f = await deployedReaderRepair();
     const admission = await service.requestOwnedOutdoorLearningRecovery(f.input);
@@ -203,7 +205,7 @@ describe.skipIf(!url)("engineering handoff in isolated Postgres", () => {
       providerObservedAt: new Date(), runtimeVersion: f.input.runtimeVersion });
     expect(await client.courseSupportIncident.findUniqueOrThrow({ where: { courseId: f.course.id } }))
       .toMatchObject({ status: "RESOLVED", activeBatchId: null, resolution: "MONITORING_RESTORED" });
-  });
+  }, 20_000);
 
   it("binds a published shared execution prefix without replacing implementation provenance", async () => {
     const f = await deployedReaderRepair(), runtimeVersion = "c".repeat(40);

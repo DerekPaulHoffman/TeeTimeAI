@@ -2,6 +2,10 @@
 
 This file records generic process lessons only. It is not a provider-family note and scheduled responders must not read it during routine claimed work. Live incident and monitoring state remains in Postgres.
 
+## 2026-11-19 - Separate A Cold Database Fixture Budget From Worker Deadlines
+
+The exact combined commit passed task-branch CI, but its push-triggered main run timed out the first end-to-end reader-recovery database case at Vitest's default five seconds; 65 other database cases and the application and simulator jobs passed. The protected release gate correctly stopped before any runtime drain, task stop/start, update or activation. Preserve that failure and rerun only the failed CI job once on the same head to test the runner/cold-import hypothesis. Give that two-scenario integration fixture an explicit bounded twenty-second harness budget for its cold tooling imports and many real database transitions. Keep every ownership, independent replay, original fifteen-minute deadline and normal monitoring assertion unchanged. This changes no product timeout, grants no verifier replay and does not establish a venue result.
+
 ## 2026-11-19 - Exhausted Research Does Not Complete A Failed Learner Repair
 
 A current failed simulator learner had a queued engineering handoff, but dispatch treated its completed research-only attempt as exhausted and admitted no code repair. Give that exact server-qualified failed learner one full repair mission, independently revalidated at claim. Retain the original failed job, deadline, prior route failures, provider limits and all source, lease, implementation and deployment gates. A consumed mission deduplicates later admissions, including an already-bound duplicate; startup reservations do not consume it. No old completed claim is revived or missing intent backfilled.
