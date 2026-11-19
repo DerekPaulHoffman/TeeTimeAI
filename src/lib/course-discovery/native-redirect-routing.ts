@@ -382,6 +382,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
   const preflightSources = new Set<NetworkIdentity>();
   const networkWaiters = new Map<string, ReturnType<typeof pending<void>>>();
   const initialPauses = new Map<string, PendingInitialPause>();
+  const retiringDeniedPauses = new Map<string, DocumentGeneration>();
   const duplicateFetchId = (id: string) => records.has(id) || sourceDeniedFetchIds.has(id) ||
     options.responseProfile === SOURCE_ROUTING_RESPONSE_PROFILE && initialPauses.has(id);
   const loaderOwners = new Map<string, DocumentGeneration>();
@@ -705,6 +706,7 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
     if (stopLoading) await bounded(cdp.send("Page.stopLoading"), "NATIVE_REDIRECT_DRAIN_TIMEOUT");
     await bounded((async () => {
       while ([...initialPauses.values()].some(pause => pause.generation === previous) ||
+        [...retiringDeniedPauses.values()].some(value => value === previous) ||
         [...records.values()].some(record => record.generation === previous && (record.responsePaused || !record.handlerDone || !record.complete && !record.failed))) {
         if (closed || options.signal?.aborted) throw new Error("NATIVE_REDIRECT_CLOSED");
         await new Promise(resolve => setTimeout(resolve, 5));
@@ -1251,8 +1253,15 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         const lifecycle = { missingNetworkClosed: closed, missingNetworkAborted: options.signal?.aborted === true,
           missingNetworkGenerationRetired: generation.retired, missingNetworkBoundaryPending: boundaryPending,
           missingNetworkAwaitingDocument: awaitingDocument };
+        // Only the fixed caller can confirm denial of a bounded data POST
+        // while an owned old loader drains. This grants no read/correlation
+        // authority, and the successor must wait for this exact abort ACK.
+        const retiringPost = options.responseProfile !== SOURCE_ROUTING_RESPONSE_PROFILE && Boolean(options.denyUncorrelatedPost) &&
+          generationTracking && generation.retired && boundaryPending && !awaitingDocument && Boolean(generation.loaderId) &&
+          loaderOwners.get(generation.loaderId!) === generation && event.request.method === "POST" &&
+          ["xhr", "fetch"].includes(resourceKinds[event.resourceType]);
         if (options.responseProfile !== SOURCE_ROUTING_RESPONSE_PROFILE && !options.denyUncorrelatedPost || networkId !== undefined ||
-            closed || options.signal?.aborted || generation.retired || boundaryPending || awaitingDocument ||
+            closed || options.signal?.aborted || (!retiringPost && (generation.retired || boundaryPending || awaitingDocument)) ||
             event.redirectedRequestId !== undefined || initialPauses.has(event.requestId) ||
             typeof event.requestId !== "string" || !event.requestId || event.requestId.length > 1024 || /[\u0000-\u0020\u007f]/u.test(event.requestId) ||
             !Object.hasOwn(resourceKinds, event.resourceType) || !/^(?:GET|HEAD|POST|OPTIONS|PUT|PATCH|DELETE|CONNECT|TRACE)$/u.test(event.request.method) ||
@@ -1293,18 +1302,24 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
         }
         sourceDeniedFetchIds.add(event.requestId); // Reserve before awaiting ACK.
         const deniedGeneration = generation;
-        await bounded(reject(), "NATIVE_REDIRECT_ABORT_TIMEOUT");
-        if (closed || options.signal?.aborted) return;
-        if (generation !== deniedGeneration || deniedGeneration.retired || boundaryPending || awaitingDocument) {
-          await close("NATIVE_REDIRECT_LOADER_MISMATCH"); return;
+        if (retiringPost) retiringDeniedPauses.set(event.requestId, deniedGeneration);
+        try {
+          await bounded(reject(), "NATIVE_REDIRECT_ABORT_TIMEOUT");
+          if (closed || options.signal?.aborted) return;
+          if (generation !== deniedGeneration || (retiringPost ? !deniedGeneration.retired || !boundaryPending || awaitingDocument :
+              deniedGeneration.retired || boundaryPending || awaitingDocument)) {
+            await close("NATIVE_REDIRECT_LOADER_MISMATCH"); return;
+          }
+          // Confirmed denial is explicitly nonfatal. It can never replace the
+          // first actual failure or become document/response completion evidence.
+          const diagnostic = { ...requestDiagnostic(callerDenied ? "NATIVE_REDIRECT_REQUEST_REJECTED" : "NATIVE_REDIRECT_NETWORK_ID_MISSING"), duplicateRequestId: false };
+          delete diagnostic.url;
+          rejectedRequests.push(diagnostic); if (rejectedRequests.length > 12) rejectedRequests.shift();
+          try { options.onRequestRejected?.({ ...diagnostic }); } catch { /* Denial facts cannot authorize work. */ }
+          return;
+        } finally {
+          if (retiringDeniedPauses.get(event.requestId) === deniedGeneration) retiringDeniedPauses.delete(event.requestId);
         }
-        // Confirmed denial is explicitly nonfatal. It can never replace the
-        // first actual failure or become document/response completion evidence.
-        const diagnostic = { ...requestDiagnostic(callerDenied ? "NATIVE_REDIRECT_REQUEST_REJECTED" : "NATIVE_REDIRECT_NETWORK_ID_MISSING"), duplicateRequestId: false };
-        delete diagnostic.url;
-        rejectedRequests.push(diagnostic); if (rejectedRequests.length > 12) rejectedRequests.shift();
-        try { options.onRequestRejected?.({ ...diagnostic }); } catch { /* Denial facts cannot authorize work. */ }
-        return;
       }
       const rejection = event.request.hasPostData && event.request.postData === undefined ? "NATIVE_REDIRECT_POST_BODY_MISSING" :
         (typeof event.request.postData === "string" ? Buffer.byteLength(event.request.postData) : 0) > 32768 ? "NATIVE_REDIRECT_POST_BODY_LIMIT" : undefined;

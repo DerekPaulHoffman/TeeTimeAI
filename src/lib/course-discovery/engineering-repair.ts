@@ -13,6 +13,7 @@ import { buildCourseSupportProviderSnapshotFingerprint } from "@/lib/automation/
 import { delegatedDiagnosticGates, delegatedDiagnosticStages, delegatedFacilityBindingDiagnosticGates } from "./teeitup-delegated-booking-diagnostic";
 import { bookingEdgeEvidenceSchema } from "./booking-edge-evidence";
 import { hasReciprocalLearningRepairLink, readLearningRepairRecoveries, readLearningRepairRecoveryOf } from "./learning-repair-recovery";
+import { projectStagehandNativeRouterFailure } from "./stagehand-native-router-diagnostic";
 
 const receiptSchema = z.object({ version: z.literal(1), state: z.literal("QUEUED"),
   incidentId: z.string().min(1).max(128), queuedAt: z.string().datetime(),
@@ -145,10 +146,26 @@ export function discoveryFailureDiagnosis(job: { outcome: string | null; checkpo
       gate: gate.replace(/([a-z])([A-Z])/gu, "$1_$2").toUpperCase(), passed: gates[gate] })) }
     : undefined;
   const hopEvidence = includeBookingEdgeEvidence ? bookingEdgeEvidenceSchema.safeParse(diagnostic.hopEvidence) : null;
-  return { category, code, failureCode: code && diagnosticFailureCodes.has(code) ? code : null,
+  const inspection = { category, code, failureCode: code && diagnosticFailureCodes.has(code) ? code : null,
     ...(delegationDiagnostic ? { delegationDiagnostic } : {}),
     ...(delegationDiagnostic && hopEvidence?.success ? { bookingEdgeEvidence: hopEvidence.data } : {}),
     phase, evidenceAuthority: false as const };
+  // A fallback retains the fixed rejection as provenance, then serializes its
+  // terminal guard last. Do not report the older inspection as the current
+  // failure or allow arbitrary checkpoint strings to become reason codes.
+  const guard = object(checkpoint.genericGuard);
+  const guardCode = job.outcome === "TOOL_FAILURE" &&
+    (guard.code === "DISCOVERY_NATIVE_TRANSPORT_FATAL" || guard.code === "DISCOVERY_GENERIC_BUDGET_EXHAUSTED") ? guard.code : null;
+  const fatal = object(guard.nativeFirstFatal);
+  const { code: nativeFailureCode, ...nativeFacts } = projectStagehandNativeRouterFailure(fatal.code, fatal);
+  return { ...inspection, ...(guardCode ? {
+    category: guardCode === "DISCOVERY_NATIVE_TRANSPORT_FATAL" ? "BROWSER_TRANSPORT_REJECTED" : "READER_OR_RUNTIME_FAILURE",
+    code: guardCode, failureCode: guardCode, phase: "GENERIC_FALLBACK",
+    delegationDiagnostic: undefined, bookingEdgeEvidence: undefined, priorInspection: inspection,
+    ...(guardCode === "DISCOVERY_NATIVE_TRANSPORT_FATAL" ? {
+      nativeTransportDiagnostic: { failureCode: nativeFailureCode, ...nativeFacts },
+    } : {}),
+  } : {}) };
 }
 
 /** Only the same live, source-bound repair owner's reciprocal failed child.
@@ -171,7 +188,8 @@ export async function getOwnedLearningBookingEdgeEvidence(reader: Reader, input:
       child.baseRecipeId !== root.baseRecipeId || child.sourceFingerprint !== link.sourceFingerprint ||
       object(child.result).executionRuntimeVersion !== link.runtimeVersion ||
       JSON.stringify(readLearningRepairRecoveryOf(child.result)) !== JSON.stringify(link)) return null;
-  const evidence = discoveryFailureDiagnosis(child, true).bookingEdgeEvidence;
+  const diagnosis = discoveryFailureDiagnosis(child, true);
+  const evidence = diagnosis.priorInspection?.bookingEdgeEvidence ?? diagnosis.bookingEdgeEvidence;
   if (!evidence || Date.parse(evidence.observedAt) < child.firstPickedUpAt.getTime() ||
       Date.parse(evidence.observedAt) > Math.min(child.deadlineAt.getTime(), child.completedAt.getTime(), input.now.getTime()) ||
       evidence.attestedAt && Date.parse(evidence.attestedAt) < child.firstPickedUpAt.getTime()) return null;

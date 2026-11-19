@@ -321,6 +321,76 @@ describe("native child-asset denial", () => {
 describe("fixed caller deny-only uncorrelated POST", () => {
   const url = "https://example.org/public", body = "x".repeat(442);
   const denied = { networkId: undefined, request: { url, method: "POST", headers: { "Content-Type": "application/json" }, hasPostData: true, postData: body } };
+  async function committed(test: Awaited<ReturnType<typeof installed>>) {
+    await test.guard.beginDocumentNavigation(test.main as never);
+    test.events.get("Network.requestWillBeSent")!({ requestId: "network-document", frameId: "main", loaderId: "loader-document", type: "Document", request: { url, method: "GET" } });
+    test.request("document", { resourceType: "Document", request: { url, method: "GET", headers: {} } });
+    await test.routes[0].continue();
+    test.response("document", { resourceType: "Document", request: { url, method: "GET", headers: {} }, responseHeaders: [{ name: "Content-Type", value: "text/html" }] });
+    await test.routes[0].request().response();
+    test.events.get("Page.frameNavigated")!({ frame: { id: "main", loaderId: "loader-document", url } });
+    await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+  }
+  it("drains an independently policy-denied missing-ID POST during retirement without poisoning the successor", async () => {
+    const policy = vi.fn((request: NativeUncorrelatedPost) => discoveryDefiniteUncorrelatedPostDenial(request, url, isAnonymousBrowserReadPost, () => true));
+    const test = await installed(undefined, undefined, undefined, undefined, undefined, undefined, policy);
+    const ack = deferred<object>(); let navigating: Promise<void> | undefined;
+    try {
+      await committed(test);
+      const send = test.cdp.send.getMockImplementation()!;
+      test.cdp.send.mockImplementation((name, value) => {
+        if (name === "Page.stopLoading") test.request("retiring-denied", { ...denied, request: { ...denied.request, url: "https://example.org/checkout/" } });
+        return name === "Fetch.failRequest" && value?.requestId === "retiring-denied" ? ack.promise : send(name, value);
+      });
+      let completed = false;
+      navigating = test.guard.beginDocumentNavigation(test.main as never).then(() => { completed = true; });
+      await vi.waitFor(() => expect(policy).toHaveBeenCalledOnce());
+      expect(completed).toBe(false); expect(test.guard.firstFatal).toBeUndefined(); expect(test.rejections).toEqual([]);
+      expect(test.handler).toHaveBeenCalledOnce();
+      ack.resolve({}); await navigating;
+      expect(test.rejections).toHaveLength(1); expect(test.guard.firstFatal).toBeUndefined(); expect(test.close).not.toHaveBeenCalled();
+      expect(test.cdp.send.mock.calls.filter(([name, value]) => value?.requestId === "retiring-denied" &&
+        ["Fetch.continueRequest", "Fetch.continueResponse", "Fetch.getResponseBody"].includes(name))).toEqual([]);
+      test.events.get("Network.requestWillBeSent")!({ requestId: "network-next", frameId: "main", loaderId: "loader-next", type: "Document", request: { url, method: "GET" } });
+      test.request("next", { resourceType: "Document", request: { url, method: "GET", headers: {} } });
+      await vi.waitFor(() => expect(test.routes).toHaveLength(2)); await test.routes[1].continue();
+      test.response("next", { resourceType: "Document", request: { url, method: "GET", headers: {} }, responseHeaders: [{ name: "Content-Type", value: "text/html" }] });
+      await test.routes[1].request().response();
+      test.events.get("Page.frameNavigated")!({ frame: { id: "main", loaderId: "loader-next", url } });
+      await vi.waitFor(() => expect(test.guard.pendingReads).toBe(0));
+      expect(test.guard.isCurrentCompletedDocumentRead(test.routes[1].request(), test.main as never, { frameId: "main", loaderId: "loader-next", url })).toBe(true);
+      expect(JSON.stringify(test.rejections)).not.toMatch(/example.org|"postData"|"headers"|"requestId"|"networkId"/u);
+    } finally { ack.resolve({}); await navigating?.catch(() => {}); await test.guard.close(); }
+  });
+  it.each(["allowed", "unknown", "throw", "missing body", "no owned loader"])("keeps retired missing-ID POST fatal for %s", async mode => {
+    const policy = vi.fn(() => { if (mode === "throw") throw Error("UNCERTAIN_POLICY"); return mode === "allowed" ? false : mode === "unknown" ? undefined as never : true; });
+    const test = await installed(undefined, undefined, undefined, undefined, undefined, undefined, policy);
+    try {
+      if (mode !== "no owned loader") await committed(test);
+      const send = test.cdp.send.getMockImplementation()!;
+      test.cdp.send.mockImplementation((name, value) => {
+        if (name === "Page.stopLoading") test.request("retiring-denied", { ...denied, request: { ...denied.request, ...(mode === "missing body" ? { postData: undefined } : {}) } });
+        return send(name, value);
+      });
+      await expect(test.guard.beginDocumentNavigation(test.main as never)).rejects.toThrow();
+      expect(test.guard.firstFatal?.code).toBe(mode === "missing body" ? "NATIVE_REDIRECT_POST_BODY_MISSING" : "NATIVE_REDIRECT_NETWORK_ID_MISSING");
+      expect(test.rejections).toEqual([]); expect(test.handler).toHaveBeenCalledTimes(mode === "no owned loader" ? 0 : 1);
+    } finally { await test.guard.close(); }
+  });
+  it.each(["reject", "hang"])("does not complete a retired denial without its own abort ACK: %s", async mode => {
+    const test = await installed(undefined, undefined, undefined, undefined, undefined, undefined, () => true);
+    try {
+      await committed(test);
+      const send = test.cdp.send.getMockImplementation()!;
+      test.cdp.send.mockImplementation((name, value) => {
+        if (name === "Page.stopLoading") test.request("retiring-denied", denied);
+        return name === "Fetch.failRequest" && value?.requestId === "retiring-denied" ? mode === "reject" ? Promise.reject(Error("Protocol abort rejected")) : new Promise(() => {}) : send(name, value);
+      });
+      await expect(test.guard.beginDocumentNavigation(test.main as never)).rejects.toThrow();
+      expect(test.guard.firstFatal?.code).toBe(mode === "hang" ? "NATIVE_REDIRECT_ABORT_TIMEOUT" : "NATIVE_REDIRECT_ROUTING_FAILED");
+      expect(test.rejections).toEqual([]); expect(test.handler).toHaveBeenCalledOnce();
+    } finally { await test.guard.close(); }
+  });
   it("aborts a categorically forbidden POST URL only after its exact ACK and without read authority", async () => {
     const policy = vi.fn((request: NativeUncorrelatedPost) => discoveryDefiniteUncorrelatedPostDenial(request, url, isAnonymousBrowserReadPost, () => true));
     const test = await installed(undefined, undefined, undefined, undefined, undefined, undefined, policy);

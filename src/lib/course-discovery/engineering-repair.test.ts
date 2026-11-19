@@ -216,6 +216,31 @@ describe("private failure evidence", () => {
     expect(JSON.stringify(result)).not.toContain("PRIVATE");
     expect(result.delegationDiagnostic!.gates.some(row => row.gate === "DIRECTORY_IDENTITY_SIMULATOR")).toBe(false);
   });
+  it.each(["DISCOVERY_NATIVE_TRANSPORT_FATAL", "DISCOVERY_GENERIC_BUDGET_EXHAUSTED"])("reports terminal %s instead of the earlier fixed inspection", code => {
+    const diagnostic = createDelegationDiagnostic("PROVIDER_BIND");
+    const checkpoint = { stagehandFailure: { schemaVersion: 1, kind: "OWN_STAGEHAND_FAILURE_DIAGNOSTIC", entries: [
+      { attempt: 1, phase: "FIXED_INSPECTION", code: "OFFICIAL_PHYSICAL_CONTACT_UNVERIFIED", fixedInspectionDiagnostic: { teeItUpDelegation: diagnostic } },
+    ] }, genericGuard: { code, toolOperations: 5, nativeFirstFatal: { code: "NATIVE_REDIRECT_RESPONSE_TIMEOUT", phase: "RESPONSE_WAIT",
+      method: "GET", resourceType: "document", url: "https://private.example/token", message: "PRIVATE_BODY", operation: "PRIVATE_OPERATION" } } };
+    const result = JSON.parse(JSON.stringify(sanitizeResponderValue(discoveryFailureDiagnosis({ outcome: "TOOL_FAILURE", checkpoint }))));
+    expect(result).toMatchObject({ failureCode: code, phase: "GENERIC_FALLBACK", evidenceAuthority: false,
+      priorInspection: { failureCode: "OFFICIAL_PHYSICAL_CONTACT_UNVERIFIED", phase: "FIXED_INSPECTION", delegationDiagnostic: { stage: "PROVIDER_BIND" } } });
+    expect(JSON.stringify(result)).not.toMatch(/private|token|PRIVATE/iu);
+    if (code === "DISCOVERY_NATIVE_TRANSPORT_FATAL") expect(result).toMatchObject({ category: "BROWSER_TRANSPORT_REJECTED",
+      nativeTransportDiagnostic: { failureCode: "NATIVE_REDIRECT_RESPONSE_TIMEOUT", phase: "RESPONSE_WAIT", method: "GET", resourceType: "document" } });
+    else expect(result).not.toHaveProperty("nativeTransportDiagnostic");
+    expect(result).not.toHaveProperty("delegationDiagnostic");
+  });
+  it("never promotes an arbitrary guard or native reason into a diagnostic or changes a non-tool outcome", () => {
+    const checkpoint = { stagehandFailure: { code: "ADAPTER_TRANSPORT_FAILED" }, genericGuard: {
+      code: "PRIVATE_GUARD", nativeFirstFatal: { code: "PRIVATE_NATIVE", url: "https://private.example/token" } } };
+    expect(discoveryFailureDiagnosis({ outcome: "TOOL_FAILURE", checkpoint })).toMatchObject({ failureCode: "ADAPTER_TRANSPORT_FAILED" });
+    checkpoint.genericGuard.code = "DISCOVERY_NATIVE_TRANSPORT_FATAL";
+    const result = discoveryFailureDiagnosis({ outcome: "TOOL_FAILURE", checkpoint });
+    expect(result).toMatchObject({ nativeTransportDiagnostic: { failureCode: "UNKNOWN" }, evidenceAuthority: false });
+    expect(JSON.stringify(result)).not.toMatch(/PRIVATE|private\.example/u);
+    expect(discoveryFailureDiagnosis({ outcome: "DEADLINE", checkpoint })).toMatchObject({ category: "DEADLINE_EXCEEDED", failureCode: "ADAPTER_TRANSPORT_FAILED" });
+  });
   it("keeps a closed worker failure hint usable after CLI sanitization without exposing a code credential", () => {
     const project = (code: string) => sanitizeResponderValue(discoveryFailureDiagnosis({
       outcome: "TOOL_FAILURE", checkpoint: { stagehandFailure: { schemaVersion: 1,
