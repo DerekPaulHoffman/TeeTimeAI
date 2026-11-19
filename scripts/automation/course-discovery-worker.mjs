@@ -979,6 +979,8 @@ export function safeTeeItUpDelegationDiagnostic(value) {
     "directoryIdentityOutdoor", "directoryIdentitySimulator", "directoryIdentityKindMissing", "directoryPhysicalFallbackAvailable", "directoryPhysicalFallbackRequired", "directoryPostalRepresentationMatch",
     "directoryPhysicalSchemaValid", "directoryPhysicalCountryValid", "directoryPhysicalOutdoorValid", "directoryPhysicalPhoneFieldValid", "directoryPhysicalIdsUnique",
     "directoryPhysicalAddressParseValid", "directoryPhysicalPostalRestorationUsed", "directoryPhysicalNumberMatch", "directoryPhysicalStreetNameMatch", "directoryPhysicalRegionMatch", "directoryPhysicalPostalMatch", "directoryPhysicalUnitMatch",
+    "directoryPhysicalAddressHasControls", "directoryPhysicalAddressFieldCountTwo", "directoryPhysicalAddressFieldCountThree", "directoryPhysicalAddressFieldCountFour", "directoryPhysicalAddressFieldCountFive", "directoryPhysicalAddressFieldCountOther",
+    "directoryPhysicalAddressRegionPostalSeparated", "directoryPhysicalAddressFourDigitPostal", "directoryPhysicalAddressPostalExtension", "directoryPhysicalAddressNamePrefix", "directoryPhysicalAddressMailingMarker",
     "directoryPhysicalStreetMatch", "directoryPhysicalPhoneMatch", "directoryPhysicalTimeZoneMatch", "directoryPhysicalContactMatch", "directoryPhysicalContactUnique", "directoryPhysicalNameMatch", "directoryPhysicalLocalityFieldsMatch"];
   try {
     if (!value || typeof value !== "object" || Array.isArray(value) || !stages.includes(value.stage) ||

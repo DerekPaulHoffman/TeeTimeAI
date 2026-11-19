@@ -82,4 +82,14 @@ describe("native country-club footer contact", () => {
   it.each(["18 Old Turnpike Rd, Example, MA 1069, US", "19 Old Turnpike Rd, Example, MA 1068, US", "18 Other Rd, Example, MA 1068, US", "18 Old Turnpike Rd, Example, CA 1068, US", "18 Old Turnpike Rd, Example, MA 106, US", "18 Old Turnpike Rd, Example, MA 1068, Canada"])("never fills a different or incomplete physical identity: %s", address => {
     expect(() => bindTeeItUpPhysicalContactFacility(source, derive(), [{ ...directory[0], address }])).toThrow();
   });
+  it("distinguishes incomplete formatting from a normalized but different address without returning contents", () => {
+    const gates: Record<string, boolean> = {};
+    expect(() => bindTeeItUpPhysicalContactFacility(source, derive(), [{ ...directory[0], address: "18 Old Turnpike Rd, Example, MA, 01068, US" }], (key, value) => { gates[key] = value; })).toThrow();
+    expect(gates).toMatchObject({ directoryPhysicalAddressFieldCountFour: true, directoryPhysicalAddressRegionPostalSeparated: true,
+      directoryPhysicalAddressHasControls: false, directoryPhysicalAddressParseValid: false });
+    const conflict: Record<string, boolean> = {};
+    expect(() => bindTeeItUpPhysicalContactFacility(source, derive(), [{ ...directory[0], address: "19 Old Turnpike Rd, Example, MA 1068, US" }], (key, value) => { conflict[key] = value; })).toThrow();
+    expect(conflict).toMatchObject({ directoryPhysicalAddressParseValid: true, directoryPhysicalNumberMatch: false, directoryPhysicalContactMatch: false });
+    expect(JSON.stringify({ gates, conflict })).not.toMatch(/example|turnpike|01068|https:/iu);
+  });
 });

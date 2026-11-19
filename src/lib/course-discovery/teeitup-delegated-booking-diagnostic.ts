@@ -15,6 +15,8 @@ export const delegatedFacilityBindingDiagnosticGates = ["directoryNameMatch", "d
   "directoryIdentityOutdoor", "directoryIdentitySimulator", "directoryIdentityKindMissing", "directoryPhysicalFallbackAvailable", "directoryPhysicalFallbackRequired", "directoryPostalRepresentationMatch",
   "directoryPhysicalSchemaValid", "directoryPhysicalCountryValid", "directoryPhysicalOutdoorValid", "directoryPhysicalPhoneFieldValid", "directoryPhysicalIdsUnique",
   "directoryPhysicalAddressParseValid", "directoryPhysicalPostalRestorationUsed", "directoryPhysicalNumberMatch", "directoryPhysicalStreetNameMatch", "directoryPhysicalRegionMatch", "directoryPhysicalPostalMatch", "directoryPhysicalUnitMatch",
+  "directoryPhysicalAddressHasControls", "directoryPhysicalAddressFieldCountTwo", "directoryPhysicalAddressFieldCountThree", "directoryPhysicalAddressFieldCountFour", "directoryPhysicalAddressFieldCountFive", "directoryPhysicalAddressFieldCountOther",
+  "directoryPhysicalAddressRegionPostalSeparated", "directoryPhysicalAddressFourDigitPostal", "directoryPhysicalAddressPostalExtension", "directoryPhysicalAddressNamePrefix", "directoryPhysicalAddressMailingMarker",
   "directoryPhysicalStreetMatch", "directoryPhysicalPhoneMatch", "directoryPhysicalTimeZoneMatch", "directoryPhysicalContactMatch", "directoryPhysicalContactUnique", "directoryPhysicalNameMatch", "directoryPhysicalLocalityFieldsMatch"] as const;
 type FacilityBindingDiagnosticGate = typeof delegatedFacilityBindingDiagnosticGates[number];
 export type TeeItUpDelegationDiagnostic = { stage: typeof delegatedDiagnosticStages[number]; gates: Record<DelegatedDiagnosticGate, boolean | null> &

@@ -6,6 +6,7 @@ import { normalizePublicCoursePhone } from "./teeitup-postal-conflict-proof";
 import { freshNativeCanonicalRootDocument } from "./native-official-page-attestation";
 import type { OfficialIdentityPage, OfficialIdentitySource } from "./teeitup-official-identity";
 import { parseNamedContactAddress, readNamedPublicContacts } from "./public-named-contact";
+import { normalizePublicUSState } from "./public-us-business-address";
 
 const url = z.string().max(2048).refine(v => Boolean(publicDocumentUrl(v))), sha = z.string().regex(/^[a-f0-9]{64}$/u);
 const name = z.string().min(3).max(200), address = z.string().min(15).max(1024), locality = z.string().min(2).max(80);
@@ -71,9 +72,11 @@ function physicalProviderAddress(canonical: FullAddress, value: string, country:
   if (direct) return direct;
   if (country !== "US" || !/^0[1-9]\d{3}$/u.test(canonical.postalCode)) return;
   const printed = /^(.*, )([A-Za-z ]{2,40}) ([1-9]\d{3})(?:,? (US|USA|United States(?: of America)?))?$/iu.exec(clean(value).replace(/\s*,\s*/gu, ", "));
-  if (!printed || printed[3] !== canonical.postalCode.slice(1)) return;
+  if (!printed) return;
   const parsed = teeItUpCompleteStreetAddress(`${printed[1]}${printed[2]} 0${printed[3]}${printed[4] ? `, ${printed[4]}` : ""}`);
-  return parsed && parsed.region === canonical.region && sameExceptLocality(canonical, parsed) ? parsed : undefined;
+  // Parsing is diagnostic only. The binder and serialized proof both require
+  // sameExceptLocality against canonical identity before accepting anything.
+  return parsed;
 }
 type Node = DefaultTreeAdapterMap["node"];
 type Element = DefaultTreeAdapterMap["element"];
@@ -311,6 +314,8 @@ function nonBusinessLabel(value: string) { return value.length < 2 || value.leng
 export function bindTeeItUpPhysicalContactFacility(source: OfficialIdentitySource, contact: NativePhysicalContactSource, directory: unknown,
   onGate?: (key: "directoryPhysicalSchemaValid" | "directoryPhysicalCountryValid" | "directoryPhysicalOutdoorValid" | "directoryPhysicalPhoneFieldValid" | "directoryPhysicalIdsUnique" |
     "directoryPhysicalAddressParseValid" | "directoryPhysicalPostalRestorationUsed" | "directoryPhysicalNumberMatch" | "directoryPhysicalStreetNameMatch" | "directoryPhysicalRegionMatch" | "directoryPhysicalPostalMatch" | "directoryPhysicalUnitMatch" |
+    "directoryPhysicalAddressHasControls" | "directoryPhysicalAddressFieldCountTwo" | "directoryPhysicalAddressFieldCountThree" | "directoryPhysicalAddressFieldCountFour" | "directoryPhysicalAddressFieldCountFive" | "directoryPhysicalAddressFieldCountOther" |
+    "directoryPhysicalAddressRegionPostalSeparated" | "directoryPhysicalAddressFourDigitPostal" | "directoryPhysicalAddressPostalExtension" | "directoryPhysicalAddressNamePrefix" | "directoryPhysicalAddressMailingMarker" |
     "directoryPhysicalStreetMatch" | "directoryPhysicalPhoneMatch" | "directoryPhysicalTimeZoneMatch" | "directoryPhysicalContactMatch" | "directoryPhysicalContactUnique" | "directoryPhysicalNameMatch" | "directoryPhysicalLocalityFieldsMatch", value: boolean) => void): { physicalContactProof: TeeItUpPhysicalContactProof; facilityId: number; courseId: string } {
   const gate = (key: Parameters<NonNullable<typeof onGate>>[0], value: boolean) => { try { onGate?.(key, value); } catch { /* Diagnostics never change proof. */ } return value; };
   const fields = sourceSchema.safeParse(Object.fromEntries(Object.keys(sourceSchema.shape).map(key => [key, contact[key as keyof NativePhysicalContactSource]])));
@@ -327,6 +332,20 @@ export function bindTeeItUpPhysicalContactFacility(source: OfficialIdentitySourc
   }
   if (rows.success) gate("directoryPhysicalIdsUnique", new Set(rows.data.map(v => v.id)).size === rows.data.length && new Set(rows.data.map(v => v.courseId)).size === rows.data.length);
   if (!rows.success || !canonicalAddress || new Set(rows.data.map(v => v.id)).size !== rows.data.length || new Set(rows.data.map(v => v.courseId)).size !== rows.data.length) return reject();
+  const shapes = rows.data.map(v => {
+    const parts = clean(v.address).replace(/,(?:\s*,)+/gu, ",").split(/\s*,\s*/u);
+    if (/^(?:US|USA|United States(?: of America)?)$/iu.test(parts.at(-1) ?? "")) parts.pop();
+    return { parts, address: v.address, name: v.name };
+  });
+  gate("directoryPhysicalAddressHasControls", shapes.some(v => /[\u0000-\u001f\u007f]/u.test(v.address)));
+  for (const [key, count] of [["directoryPhysicalAddressFieldCountTwo", 2], ["directoryPhysicalAddressFieldCountThree", 3], ["directoryPhysicalAddressFieldCountFour", 4], ["directoryPhysicalAddressFieldCountFive", 5]] as const)
+    gate(key, shapes.some(v => v.parts.length === count));
+  gate("directoryPhysicalAddressFieldCountOther", shapes.some(v => ![2, 3, 4, 5].includes(v.parts.length)));
+  gate("directoryPhysicalAddressRegionPostalSeparated", shapes.some(v => normalizePublicUSState(v.parts.at(-2) ?? "") === canonicalAddress.region && /^\d{4,5}(?:-\d{4})?$/u.test(v.parts.at(-1) ?? "")));
+  gate("directoryPhysicalAddressFourDigitPostal", shapes.some(v => /^(?:[A-Za-z .]{2,40} )?[1-9]\d{3}(?:-\d{4})?$/u.test(v.parts.at(-1) ?? "")));
+  gate("directoryPhysicalAddressPostalExtension", shapes.some(v => /\b\d{4,5}-\d{4}$/u.test(v.parts.at(-1) ?? "")));
+  gate("directoryPhysicalAddressNamePrefix", shapes.some(v => literal(v.address).startsWith(`${literal(v.name)},`)));
+  gate("directoryPhysicalAddressMailingMarker", shapes.some(v => /\b(?:mailing|corporate|billing|headquarters|p\s*\.?\s*o\s*\.?\s*box)\b/iu.test(v.address)));
   const parsedAddresses = rows.data.map(v => physicalProviderAddress(canonicalAddress, v.address, v.country));
   const parsed = parsedAddresses.filter((v): v is FullAddress => Boolean(v));
   gate("directoryPhysicalAddressParseValid", parsed.length > 0);
