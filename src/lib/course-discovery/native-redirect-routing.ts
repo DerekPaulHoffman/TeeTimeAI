@@ -1308,6 +1308,9 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
           if (closed || options.signal?.aborted) return;
           if (generation !== deniedGeneration || (retiringPost ? !deniedGeneration.retired || !boundaryPending || awaitingDocument :
               deniedGeneration.retired || boundaryPending || awaitingDocument)) {
+            firstFatal ??= { ...requestDiagnostic("NATIVE_REDIRECT_LOADER_MISMATCH"), phase: "LOADER_OWNER", operation: "REQUEST_RELEASE",
+              recordGenerationCurrent: generation === deniedGeneration, recordGenerationRetired: deniedGeneration.retired,
+              awaitingDocument, missingNetworkBoundaryPending: boundaryPending };
             await close("NATIVE_REDIRECT_LOADER_MISMATCH"); return;
           }
           // Confirmed denial is explicitly nonfatal. It can never replace the
@@ -1475,6 +1478,9 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
           if (closed || options.signal?.aborted) return;
           if (generation !== deniedGeneration || generation.retired || boundaryPending || awaitingDocument ||
               committedDocument !== denialDocument || networkIdentities.has(networkId) || pendingPreflightIdentities.has(networkId)) {
+            firstFatal ??= { ...diagnostic("LOADER_IDENTITY"), operation: "REQUEST_RELEASE",
+              recordGenerationCurrent: generation === deniedGeneration, recordGenerationRetired: deniedGeneration.retired,
+              missingNetworkBoundaryPending: boundaryPending };
             await close("NATIVE_REDIRECT_LOADER_MISMATCH"); return;
           }
           delete deniedPreflight.url;
@@ -1516,11 +1522,14 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
           const acknowledgement = reject(); deniedChild.abortingFetchId = event.requestId;
           await bounded(acknowledgement, "NATIVE_REDIRECT_ABORT_TIMEOUT");
           if (closed || options.signal?.aborted) return;
-          if (childAsset() !== deniedChild) { await close("NATIVE_REDIRECT_LOADER_MISMATCH"); return; }
-          const diagnostic = { ...requestDiagnostic("NATIVE_REDIRECT_FRAME_UNGUARDED"), duplicateRequestId: false };
-          delete diagnostic.url;
-          rejectedRequests.push(diagnostic); if (rejectedRequests.length > 12) rejectedRequests.shift();
-          try { options.onRequestRejected?.({ ...diagnostic }); options.onSubframeBlocked?.({ url: event.request.url, resourceType: kind }); }
+          if (childAsset() !== deniedChild) {
+            firstFatal ??= { ...diagnostic("LOADER_OWNER"), operation: "REQUEST_RELEASE" };
+            await close("NATIVE_REDIRECT_LOADER_MISMATCH"); return;
+          }
+          const childDenialDiagnostic = { ...requestDiagnostic("NATIVE_REDIRECT_FRAME_UNGUARDED"), duplicateRequestId: false };
+          delete childDenialDiagnostic.url;
+          rejectedRequests.push(childDenialDiagnostic); if (rejectedRequests.length > 12) rejectedRequests.shift();
+          try { options.onRequestRejected?.({ ...childDenialDiagnostic }); options.onSubframeBlocked?.({ url: event.request.url, resourceType: kind }); }
           catch { /* Negative facts grant no read or navigation authority. */ }
           return;
         }

@@ -64,7 +64,18 @@ export const cpsMetadataSchema = z.object({ family: z.literal("CPS"), tenant,
     cpsCourseNameBase(value.officialPostalConflictProof.venueName).replace(/\s/gu,"").length>=8));
 export type CpsMetadata = z.infer<typeof cpsMetadataSchema>;
 export type CpsSource = { officialUrl: string; bookingUrl: string; venueName: string; venueAddress?: string; timeZone: string };
+export const cpsCatalogIdentityFailureStages = ["CLUB_IDENTITY", "PUBLIC_FLAG_SHAPE", "PUBLIC_ACCESS", "OFFICIAL_ENTRY_CATALOG",
+  "SINGLE_PUBLIC_CATALOG", "CATALOG_BINDING", "OFFICIAL_SELECTION", "UNIQUE_SELECTED_COURSE", "SELECTED_COURSE", "EXACT_CATALOG"] as const;
+const catalogIdentityFailures = new WeakMap<object, typeof cpsCatalogIdentityFailureStages[number]>();
+export function getCpsCatalogIdentityFailureStage(error: unknown) {
+  return error && typeof error === "object" ? catalogIdentityFailures.get(error) : undefined;
+}
 export function cpsFailure(code: string): never { throw new Error(code); }
+function catalogIdentityFailure(stage: typeof cpsCatalogIdentityFailureStages[number]): never {
+  const error = new Error("ADAPTER_IDENTITY_MISMATCH");
+  catalogIdentityFailures.set(error, stage);
+  throw error;
+}
 function safePublicUrl(value: string, allowRoutingQuery = false) {
   try { const url = new URL(value); return value.length <= 2048 && url.href === value && url.protocol === "https:" &&
     !url.username && !url.password && !url.port && (allowRoutingQuery || !url.search) && !url.hash && Boolean(getSafeCustomerBookingUrl(value)); }
@@ -222,18 +233,18 @@ function publicClubIdentity(options: CpsOptions, source: CpsSource) {
   const expected = core(source.venueName), actual = name.success ? core(name.data) : "";
   if (!name.success || !address || !expectedAddress || JSON.stringify(address) !== JSON.stringify(expectedAddress) ||
       expected !== actual || expected.replace(/\s/gu, "").length < 8 ||
-      /^(?:the\s+)?(?:(?:golf|course|club|public|municipal|country)\s*)+$/u.test(expected)) cpsFailure("ADAPTER_IDENTITY_MISMATCH");
+      /^(?:the\s+)?(?:(?:golf|course|club|public|municipal|country)\s*)+$/u.test(expected)) catalogIdentityFailure("CLUB_IDENTITY");
   return { name: fullCourseName(name.data), address };
 }
 const publicAccessFlags = ["private", "is_private", "membersOnly", "members_only", "requiresLogin", "requires_login"] as const;
 function publicFlags(value: Record<string, unknown>) {
   return Object.fromEntries(publicAccessFlags.map(key => {
-    if (Object.hasOwn(value, key) && typeof value[key] !== "boolean") cpsFailure("ADAPTER_IDENTITY_MISMATCH");
+    if (Object.hasOwn(value, key) && typeof value[key] !== "boolean") catalogIdentityFailure("PUBLIC_FLAG_SHAPE");
     return [key, value[key] ?? null];
   }));
 }
 function requirePublicFlags(value: Record<string, unknown>) {
-  if (Object.values(publicFlags(value)).some(flag => flag === true)) cpsFailure("ADAPTER_IDENTITY_MISMATCH");
+  if (Object.values(publicFlags(value)).some(flag => flag === true)) catalogIdentityFailure("PUBLIC_ACCESS");
 }
 export function parseCpsCatalog(value: unknown, options: CpsOptions, source: CpsSource,
   nativeContact?:{page:OfficialIdentityPage;canonicalCoursePhone:unknown;onSelectedLabel:(label:string)=>void;phoneBooking?:true;officialEntry?:CpsOfficialEntryContext}, publicBuild?: string): CpsMetadata {
@@ -253,7 +264,7 @@ export function parseCpsCatalog(value: unknown, options: CpsOptions, source: Cps
         courses.some(row => row.websiteId !== options.webSiteId || row.timezoneId !== source.timeZone ||
           base(row.courseName) !== base(source.venueName) || /\b(?:private|members?|login|sign\s*in|simulator|practice|driving range|lesson|event|gift)\b/iu.test(row.courseName.replace(/[_-]/gu, " ")) ||
           options.courseOptions.filter(option => option.courseId === row.courseId && option.courseName === row.courseName && option.webSiteId === row.websiteId).length !== 1))
-      cpsFailure("ADAPTER_IDENTITY_MISMATCH");
+      catalogIdentityFailure("OFFICIAL_ENTRY_CATALOG");
     const context = parseCpsSource(source.bookingUrl)!;
     const stable = { mode: "OFFICIAL_TITLE_PHYSICAL_ENTRY", buildNumber: publicBuild, tenant: context.tenant, venue,
       officialUrl: source.officialUrl, canonicalName: source.venueName, canonicalAddress: parsePublicUSBusinessAddress(source.venueAddress), timeZone: source.timeZone,
@@ -285,7 +296,7 @@ export function parseCpsCatalog(value: unknown, options: CpsOptions, source: Cps
         courses.some(row => row.websiteId !== options.webSiteId || row.timezoneId !== source.timeZone ||
           options.courseOptions.filter(option => option.courseId === row.courseId && option.courseName === row.courseName && option.webSiteId === row.websiteId).length !== 1) ||
         /\b(?:private|members?|login|sign\s*in|simulator|practice|driving range|lesson|event|gift)\b/iu.test(courses[0].courseName.replace(/[_-]/gu, " ")))
-      cpsFailure("ADAPTER_IDENTITY_MISMATCH");
+      catalogIdentityFailure("SINGLE_PUBLIC_CATALOG");
     const context = parseCpsSource(source.bookingUrl)!;
     const stable = { mode: "VENUE_BOUND_ONLINE_COURSES", buildNumber: publicBuild, tenant: context.tenant,
       officialUrl: source.officialUrl, canonicalName: name, canonicalAddress: parsePublicUSBusinessAddress(source.venueAddress),
@@ -302,7 +313,7 @@ export function parseCpsCatalog(value: unknown, options: CpsOptions, source: Cps
     if(base.replace(/\s/gu,"").length<8||new Set(ids).size!==ids.length||
       (nativeContact.phoneBooking ? ids.some(courseId=>!declared.includes(courseId)) : JSON.stringify(ids)!==JSON.stringify(declared))||
       courses.some(row=>row.websiteId!==options.webSiteId||options.courseOptions.find(option=>option.courseId===row.courseId)?.courseName!==row.courseName||
-        nativeContact.phoneBooking&&row.timezoneId!==source.timeZone))cpsFailure("ADAPTER_IDENTITY_MISMATCH");
+        nativeContact.phoneBooking&&row.timezoneId!==source.timeZone))catalogIdentityFailure("CATALOG_BINDING");
     for(const row of courses){try{new Intl.DateTimeFormat("en-US",{timeZone:row.timezoneId});}catch{cpsFailure("CPS_CATALOG_UNVERIFIED");}}
     const exactSingle=nativeContact.phoneBooking&&courses.length===1&&declared.length===1&&
       cpsCourseNameBase(courses[0].courseName)===base;
@@ -314,17 +325,17 @@ export function parseCpsCatalog(value: unknown, options: CpsOptions, source: Cps
     const exactNamed=nativeContact.phoneBooking&&publicBuild===CPS_VENUE_PUBLIC_CATALOG_BUILD&&!selectedAnchor&&
       !hasCpsObservedSelectedCourseLabel(source,nativeContact.page) ? courses.filter(row=>cpsCourseNameBase(row.courseName)===base) : [];
     if(exactSingle&&hasCpsObservedSelectedCourseLabel(source,nativeContact.page)&&!selectedAnchor)
-      cpsFailure("ADAPTER_IDENTITY_MISMATCH");
+      catalogIdentityFailure("OFFICIAL_SELECTION");
     const descriptorName=selectedAnchor&&cpsOfficialSelectedCourseName(source.venueName,selectedAnchor.descriptor);
     if(exactSingle&&selectedAnchor&&fullCourseName(selectedAnchor.descriptor)!==fullCourseName(courses[0].courseName)&&
-       descriptorName!==fullCourseName(courses[0].courseName))cpsFailure("ADAPTER_IDENTITY_MISMATCH");
+       descriptorName!==fullCourseName(courses[0].courseName))catalogIdentityFailure("OFFICIAL_SELECTION");
     const matching=exactSingle ? courses : nativeContact.phoneBooking ?
       descriptorName ? courses.filter(row=>fullCourseName(row.courseName)===descriptorName) : exactNamed.length===1 ? exactNamed : [] :
       courses.filter(row=>cpsCourseNameBase(row.courseName)===base);
-    if(matching.length!==1)cpsFailure("ADAPTER_IDENTITY_MISMATCH");
+    if(matching.length!==1)catalogIdentityFailure("UNIQUE_SELECTED_COURSE");
     const selected=matching[0],option=options.courseOptions.find(row=>row.courseId===selected.courseId);
     if(!option||option.courseName!==selected.courseName||selected.timezoneId!==source.timeZone||
-      (!nativeContact.phoneBooking&&cpsCourseNameBase(option.courseName)!==base))cpsFailure("ADAPTER_IDENTITY_MISMATCH");
+      (!nativeContact.phoneBooking&&cpsCourseNameBase(option.courseName)!==base))catalogIdentityFailure("SELECTED_COURSE");
     const context=parseCpsSource(source.bookingUrl)!;
     const stable={tenant:context.tenant,officialUrl:source.officialUrl,canonicalName:source.venueName,canonicalAddress:completeUSAddress(source.venueAddress!),timeZone:source.timeZone,
       selectedCourseId:selected.courseId,
@@ -340,7 +351,7 @@ export function parseCpsCatalog(value: unknown, options: CpsOptions, source: Cps
   }
   if (new Set(ids).size !== ids.length || JSON.stringify(ids) !== JSON.stringify(declared) ||
       courses.some(row => fullCourseName(row.courseName) !== name || row.timezoneId !== source.timeZone || row.websiteId !== options.webSiteId) ||
-      options.courseOptions.some(row => fullCourseName(row.courseName) !== name)) cpsFailure("ADAPTER_IDENTITY_MISMATCH");
+      options.courseOptions.some(row => fullCourseName(row.courseName) !== name)) catalogIdentityFailure("EXACT_CATALOG");
   const context = parseCpsSource(source.bookingUrl)!;
   // Website IDs and public API keys are freshly rederived RAM-only routing data.
   const stable = { tenant: context.tenant, courseIds: ids, venueName: name, venueAddress: completeUSAddress(source.venueAddress!),

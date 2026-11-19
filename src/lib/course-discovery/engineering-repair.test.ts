@@ -16,6 +16,8 @@ import { buildCourseSupportProviderSnapshotFingerprint } from "@/lib/automation/
 import { listCourseSupportDispatchCandidates } from "@/lib/automation/course-support-batches";
 import { sanitizeResponderValue } from "@/lib/automation/course-support-responder-policy";
 import { createDelegationDiagnostic } from "./teeitup-delegated-booking-diagnostic";
+import { cpsCatalogIdentityFailureStages } from "./cps-source";
+import { safeFixedInspectionSourceDiagnostic, safeBrowserFailureDiagnostics } from "../../../scripts/automation/course-discovery-worker.mjs";
 const now = new Date("2030-01-01T12:16:00Z"), picked = new Date("2030-01-01T12:00:00Z");
 let failure: ReturnType<typeof fixture>;
 let outdoorIncident: { id: string; courseId: string; status: string; updatedAt: Date; firstSeenAt: Date; attemptLedger: unknown; activeBatchId: string | null };
@@ -42,6 +44,20 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllEnvs());
 describe("terminal learner to coding responder", () => {
+  it.each([...cpsCatalogIdentityFailureStages, "PRIVATE"])("preserves only finite catalog failure stage %s across the helper and owned diagnosis", stage => {
+    const diagnostic = safeFixedInspectionSourceDiagnostic({ cpsCatalogIdentityFailureStage: stage, html: "PRIVATE" });
+    const transported = safeBrowserFailureDiagnostics({ cpsCatalogIdentityFailureStage: stage, headers: "PRIVATE" });
+    if (stage === "PRIVATE") { expect(diagnostic).toBeUndefined(); expect(transported).not.toHaveProperty("cpsCatalogIdentityFailureStage"); return; }
+    expect(diagnostic).toEqual({ cpsCatalogIdentityFailureStage: stage });
+    expect(transported).toMatchObject(diagnostic);
+    const result = discoveryFailureDiagnosis({ outcome: "TOOL_FAILURE", checkpoint: {
+      stagehandFailure: { schemaVersion: 1, kind: "OWN_STAGEHAND_FAILURE_DIAGNOSTIC", entries: [{ attempt: 1, phase: "FIXED_INSPECTION",
+        code: "ADAPTER_IDENTITY_MISMATCH", fixedInspectionDiagnostic: diagnostic }] },
+    } });
+    expect(result).toMatchObject({ cpsCatalogIdentityFailureStage: stage, evidenceAuthority: false });
+    expect(sanitizeResponderValue(result)).toMatchObject({ cpsCatalogIdentityFailureStage: stage });
+    expect(JSON.stringify(result)).not.toContain("PRIVATE");
+  });
   it.each(["owned", "foreign-owner", "foreign-batch", "cycle-drift", "source-drift", "runtime-drift", "unlinked-child", "late-observation", "early-observation"].flatMap(scenario =>
     ["edge", "physical"].map(kind => ({ scenario, kind }))))(
     "discloses $kind evidence only from the same reciprocal current-source child: $scenario", async ({ scenario, kind }) => {

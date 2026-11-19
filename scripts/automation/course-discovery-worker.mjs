@@ -916,6 +916,8 @@ function safeFixedReaderFailureDiagnostics(value) {
   const result = {}, cps = value?.cpsPostalContact;
   if (["ROOT_PROVENANCE", "VENUE_IDENTITY", "BOOKING_LINK", "CONTACT_COMPLETENESS", "PHONE_IDENTITY", "RAW_CONTACT", "INERT_BOOKING_LINK"].includes(value?.cpsPhoneBookingFailureStage))
     result.cpsPhoneBookingFailureStage = value.cpsPhoneBookingFailureStage;
+  if (["CLUB_IDENTITY", "PUBLIC_FLAG_SHAPE", "PUBLIC_ACCESS", "OFFICIAL_ENTRY_CATALOG", "SINGLE_PUBLIC_CATALOG", "CATALOG_BINDING", "OFFICIAL_SELECTION", "UNIQUE_SELECTED_COURSE", "SELECTED_COURSE", "EXACT_CATALOG"].includes(value?.cpsCatalogIdentityFailureStage))
+    result.cpsCatalogIdentityFailureStage = value.cpsCatalogIdentityFailureStage;
   if (record(cps)) {
     const keys = ["freshNativeOfficialPage", "canonicalAddressPresent", "canonicalAddressValid", "canonicalPhoneValid", "rawContactsPresent",
       "renderedContactsPresent", "contactCountBounded", "rawContactsNormalizable", "renderedContactsNormalizable", "uniqueNormalizedContact",
@@ -984,6 +986,8 @@ export function safeFixedInspectionSourceDiagnostic(value) {
   if (cps) result.cpsPostalContact = cps;
   const phoneStage = safeFixedReaderFailureDiagnostics(value).cpsPhoneBookingFailureStage;
   if (phoneStage) result.cpsPhoneBookingFailureStage = phoneStage;
+  const catalogStage = safeFixedReaderFailureDiagnostics(value).cpsCatalogIdentityFailureStage;
+  if (catalogStage) result.cpsCatalogIdentityFailureStage = catalogStage;
   return Object.keys(result).length ? result : undefined;
 }
 /** Mirror the native delegated reader's closed failure-only grammar. */

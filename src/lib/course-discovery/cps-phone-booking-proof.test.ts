@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { bindCpsPhoneBookingProof, selectedCpsOfficialBookingAnchor, getCpsPhoneBookingFailureStage } from "./cps-phone-booking-proof";
 import { registerFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
 import { parseAccessRecipe } from "./recipe";
-import { CPS_VENUE_PUBLIC_CATALOG_BUILD, cpsMetadataSchema, parseCpsCatalog, type CpsOptions } from "./cps-source";
+import { CPS_VENUE_PUBLIC_CATALOG_BUILD, cpsMetadataSchema, parseCpsCatalog, getCpsCatalogIdentityFailureStage, type CpsOptions } from "./cps-source";
 import type { OfficialIdentityPage } from "./teeitup-official-identity";
 
 const source = { officialUrl: "https://official.example/", bookingUrl: "https://harbor.cps.golf/", venueName: "Harbor Pointe Golf Course",
@@ -22,6 +22,22 @@ const bind = (current: OfficialIdentityPage, number: unknown = phone) =>
   bindCpsPhoneBookingProof(source, current, number, catalog, source.venueName);
 
 describe("CPS fresh official phone and booking link", () => {
+  it.each(["CATALOG_BINDING", "UNIQUE_SELECTED_COURSE", "PUBLIC_ACCESS"])("retains the actual catalog rejection gate %s without changing identity decisions", stage => {
+    const options: CpsOptions = { webSiteId: "public-site", reservationOptions: { terminalId: 1 }, courseOptions: [
+      { courseId: 7, courseName: stage === "UNIQUE_SELECTED_COURSE" ? "Different Main Course" : "Harbor Pointe", webSiteId: "public-site" },
+      { courseId: 8, courseName: "Meadow Short Course", webSiteId: "public-site" }] };
+    if (stage === "PUBLIC_ACCESS") options.reservationOptions.private = true;
+    const rows = options.courseOptions.map(row => ({ courseId: row.courseId, courseName: row.courseName, timezoneId: source.timeZone,
+      websiteId: "public-site", active: true as const, holes: 18 as const }));
+    if (stage === "CATALOG_BINDING") rows.push(rows[0]);
+    let caught: unknown;
+    try { parseCpsCatalog(rows, options, source, { page: page(), canonicalCoursePhone: phone, phoneBooking: true, onSelectedLabel: () => {} }, CPS_VENUE_PUBLIC_CATALOG_BUILD); }
+    catch (error) { caught = error; }
+    expect(caught).toBeInstanceOf(Error); expect((caught as Error).message).toBe("ADAPTER_IDENTITY_MISMATCH");
+    expect(getCpsCatalogIdentityFailureStage(caught)).toBe(stage);
+    expect(getCpsCatalogIdentityFailureStage(new Error("ADAPTER_IDENTITY_MISMATCH"))).toBeUndefined();
+    expect(getCpsCatalogIdentityFailureStage({ ...(caught as Error) })).toBeUndefined();
+  });
   it.each(["About Harbor Pointe Golf Course", "AboutHarbor Pointe Golf Course"])("binds the exact named About heading only with matching raw/rendered title: %s", heading => {
     const title = `Golf Course | ${source.venueName} | Example, NY`;
     const html = markup().replace("<html>", `<html><head><title>${title}</title></head>`)

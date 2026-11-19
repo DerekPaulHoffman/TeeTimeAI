@@ -15,6 +15,7 @@ import { bookingEdgeEvidenceSchema } from "./booking-edge-evidence";
 import { hasReciprocalLearningRepairLink, readLearningRepairRecoveries, readLearningRepairRecoveryOf } from "./learning-repair-recovery";
 import { projectStagehandNativeRouterFailure, stagehandNativeRouterCodes } from "./stagehand-native-router-diagnostic";
 import { cpsPhoneBookingFailureStages } from "./cps-phone-booking-proof";
+import { cpsCatalogIdentityFailureStages } from "./cps-source";
 import { physicalBindingFailureEvidenceSchema } from "./physical-binding-failure-evidence";
 
 const receiptSchema = z.object({ version: z.literal(1), state: z.literal("QUEUED"),
@@ -184,6 +185,10 @@ export function discoveryFailureDiagnosis(job: { outcome: string | null; checkpo
     ...(code === "CPS_PHONE_BOOKING_SOURCE_UNVERIFIED" && cpsPhoneBookingFailureStages.some(stage =>
       stage === object(last?.fixedInspectionDiagnostic).cpsPhoneBookingFailureStage) ? {
         cpsPhoneBookingFailureStage: object(last?.fixedInspectionDiagnostic).cpsPhoneBookingFailureStage,
+      } : {}),
+    ...(phase === "FIXED_INSPECTION" && code === "ADAPTER_IDENTITY_MISMATCH" && cpsCatalogIdentityFailureStages.some(stage =>
+      stage === object(last?.fixedInspectionDiagnostic).cpsCatalogIdentityFailureStage) ? {
+        cpsCatalogIdentityFailureStage: object(last?.fixedInspectionDiagnostic).cpsCatalogIdentityFailureStage,
       } : {}),
     ...(delegationDiagnostic ? { delegationDiagnostic } : {}),
     ...(delegationDiagnostic && hopEvidence?.success ? { bookingEdgeEvidence: hopEvidence.data } : {}),

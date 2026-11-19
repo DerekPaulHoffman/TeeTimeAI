@@ -1286,6 +1286,22 @@ describe("native root GET CORS preflight ownership", () => {
       expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "options")).toBe(false);
     } finally { await test.guard.close(); }
   });
+  it("retains the actual preflight identity change during abort acknowledgement as a diagnosed fatal boundary", async () => {
+    const test = await prepare({}, false), original = test.cdp.send.getMockImplementation()!;
+    try {
+      test.events.get("Page.frameNavigated")!({ frame: { id: "main", loaderId: "current-loader", url: "https://example.org" } });
+      test.cdp.send.mockImplementation(async (name, values) => {
+        if (name === "Fetch.failRequest" && values?.requestId === "options") { source(test); metadata(test); }
+        return original(name, values);
+      });
+      pause(test, { request: { url, method: "OPTIONS", headers: { Origin: "https://example.org", "Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "content-type" } } });
+      await vi.waitFor(() => expect(test.failures).toContain("NATIVE_REDIRECT_LOADER_MISMATCH"));
+      expect(test.guard.firstFatal).toMatchObject({ code: "NATIVE_REDIRECT_LOADER_MISMATCH", phase: "LOADER_IDENTITY",
+        operation: "REQUEST_RELEASE", method: "OPTIONS", requestedPreflightMethod: "POST", identityPresent: true });
+      expect(test.routes).toHaveLength(1); expect(test.rejections).toEqual([]);
+      expect(test.cdp.send.mock.calls.some(([name, value]) => name === "Fetch.continueRequest" && value?.requestId === "options")).toBe(false);
+    } finally { await test.guard.close(); }
+  });
   it("retains a failed preflight abort as a fatal command failure", async () => {
     const test = await prepare({}, false), original = test.cdp.send.getMockImplementation()!;
     try {
