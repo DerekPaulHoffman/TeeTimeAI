@@ -522,7 +522,12 @@ export function buildOwnedCourseSupportResearchContext(
   // retain the earlier confirmation while moving firstSeenAt to the new cycle.
   // The later bound excludes evidence from either prior-cycle shape.
   const confirmedAt = entry.incident.confirmedAt ??
-    (entry.cycle === 1 ? entry.incident.firstSeenAt : null);
+    // A failed learner's explicitly admitted full-repair mission does not
+    // require the ordinary repeated-poll confirmation. Its current cycle must
+    // already predate this claim. Use that evidence boundary without inventing
+    // confirmation, moving the incident clock or importing prior-cycle reads.
+    (entry.cycle === 1 || fullRepair && entry.incident.firstSeenAt <= batch.createdAt && batch.createdAt <= now
+      ? entry.incident.firstSeenAt : null);
   const cycleStartedAt = confirmedAt && confirmedAt > entry.incident.firstSeenAt
     ? confirmedAt : confirmedAt ? entry.incident.firstSeenAt : null;
   if (!cycleStartedAt || cycleStartedAt > now) {

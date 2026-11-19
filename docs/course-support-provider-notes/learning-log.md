@@ -2,6 +2,18 @@
 
 This file records generic process lessons only. It is not a provider-family note and scheduled responders must not read it during routine claimed work. Live incident and monitoring state remains in Postgres.
 
+## 2026-11-18 - Keep Public Catalog Redirects Inside The Research Transport
+
+An ordinary public Book Now link reached its service catalog in Chrome but failed inside interactive research. The legacy Square gateway redirects to a different Square host. The controller rejected that handoff, and its failure classifier discarded the known rejection as an unknown error. Repeating the read could not repair either problem.
+
+The correction admits only a main-document GET redirect from the exact legacy gateway to the undated public catalog with the same location and, when present, merchant. It preserves anonymous transport, request/deadline limits, source ownership and transaction denial. An admitted document redirect becomes a fresh guarded navigation: Playwright's HTTP redirect chain does not invoke the route handler again, so forwarding a 302 would let the destination escape the pinned research transport. Rejected redirects now retain a closed diagnostic code without exposing URLs or credentials.
+
+Regression coverage: `square-public-read-policy.test.ts` binds venue identity and rejects credentials, selected services/dates/slots and unrelated destinations; `simulator-interactive-browser.test.ts` drives the observed-link handoff in Chromium with a simulated provider and asserts every destination goes through the injected transport. Different locations, checkout and iframe redirects remain denied. `simulator-support-failure.test.ts` verifies that the known rejection survives persistence projection. These fixtures prove the repair boundary; live saved-method replay and application delivery remain separate acceptance gates.
+
+## 2026-11-18 - Give An Admitted Learner Repair A Current Evidence Boundary
+
+A failed learner reopened an incident at cycle two with no repeated-poll confirmation. The dispatcher correctly admitted its explicit investigation-and-implementation mission, but research demanded a confirmation timestamp and stopped before any public read. For this exact full-repair mission, use the current incident's first-seen timestamp only when it predates the owned batch claim; retain null confirmation and every source, cycle, owner, lease, action-plan and evidence check. Ordinary unconfirmed reopened incidents remain ineligible. The research-context regression covers the actual cycle-two shape, excludes old-cycle discovery, and rejects absent investigation authority, a cycle that starts after the claim, and future timestamps.
+
 ## 2026-08-18 - Stop Unchanged Repair Retries
 
 ### Observed Pattern

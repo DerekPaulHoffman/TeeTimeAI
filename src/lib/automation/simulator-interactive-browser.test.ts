@@ -78,6 +78,68 @@ describe("interactive public research boundaries", () => {
     expect(interactiveControlKind({ ...popup, name: "1:00 PM" })).toBeNull();
   });
 
+  it.each(["public catalog", "different location", "checkout", "resource redirect"])("handles an observed legacy Square link without authorizing unrelated redirects: %s", async mode => {
+    const channel = resolve(".codex-artifacts/browser", `fixture-${randomUUID()}`);
+    await mkdir(channel, { recursive: true });
+    const home = "https://venue.example.test/";
+    const gateway = "https://app.squareup.com/appointments/book/publicvenue/AAAAAAAAAAAAA/start";
+    const catalog = "https://book.squareup.com/appointments/publicvenue/location/AAAAAAAAAAAAA/services";
+    const destination = mode === "different location" ? catalog.replace("AAAAAAAAAAAAA", "CCCCCCCCCCCCC")
+      : mode === "checkout" ? catalog.replace("services", "checkout") : catalog;
+    const seen: string[] = [];
+    let nextRequest = 1;
+    const fetch = vi.fn(async (input: Parameters<typeof global.fetch>[0]) => {
+      const url = String(input); seen.push(url);
+      if (url === gateway) return new Response(null, { status: 302, headers: { location: destination } });
+      return new Response(url === home ? `<html><body>${mode === "resource redirect" ? `<iframe src="${gateway}"></iframe>` : `<a target="_blank" href="${gateway}">Book Now</a>`}</body></html>`
+        : "<html><body><h1>Public simulator services</h1><div>1 hour practice $50</div><button>1:30 PM</button><button>Checkout</button></body></html>",
+      { headers: { "content-type": "text/html" } });
+    }) as typeof global.fetch;
+    const lease = (async (_family: string, work: () => Promise<unknown>) => ({ acquired: true, value: await work() })) as never;
+    const task = collectInteractiveSimulatorResearch({ url: home, channel, assertOwned: async () => {} }, { fetch, lease });
+    const settled = task.then(value => ({ value }), error => ({ error }));
+    const wait = async (number: number) => {
+      for (let i = 0; i < 400; i++) {
+        try { return JSON.parse(await readFile(join(channel, `response-${number}.json`), "utf8")); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; await new Promise(done => setTimeout(done, 25)); }
+      }
+      throw new Error("Fixture response timeout");
+    };
+    const send = async (number: number, action: unknown) => {
+      const path = join(channel, `request-${number}.json`);
+      await writeFile(`${path}.tmp`, JSON.stringify(action)); await rename(`${path}.tmp`, path);
+      nextRequest = number + 1;
+    };
+    try {
+      if (mode !== "resource redirect") {
+        const first = await wait(0);
+        const book = first.controls.find((c: { name: string }) => c.name === "Book Now");
+        expect(book).toBeDefined();
+        await send(1, { action: "click", target: book.target });
+      }
+      if (mode === "public catalog") {
+        const second = await wait(1);
+        expect(second.url).toBe(catalog);
+        expect(second.text).toContain("Public simulator services");
+        expect(second.controls.some((c: { name: string }) => /1:30|Checkout/u.test(c.name))).toBe(false);
+        await send(2, { action: "finish" });
+        expect((await task).renderComplete).toBe(true);
+        expect(seen).toEqual([home, gateway, catalog]);
+      } else {
+        const result = await settled;
+        expect(result).toHaveProperty("error");
+        if ("error" in result) expect(classifySimulatorSupportFailure(result.error, "PUBLIC_READ")).toMatchObject({
+          category: "ACCESS", code: "PUBLIC_REDIRECT_NOT_ELIGIBLE", researchPhase: "BROWSER_REQUEST",
+        });
+        expect(seen).not.toContain(destination);
+      }
+    } finally {
+      await send(nextRequest, { action: "finish" }).catch(() => {});
+      await settled;
+      await rm(channel, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it.each([false, true])("reaches Square's public calendar through service filters while retaining mutation denial=%s", async attemptMutation => {
     const channel = resolve(".codex-artifacts/browser", `fixture-${randomUUID()}`);
     await mkdir(channel, { recursive: true });
