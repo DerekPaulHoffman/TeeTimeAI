@@ -2,6 +2,12 @@
 
 This file records generic process lessons only. It is not a provider-family note and scheduled responders must not read it during routine claimed work. Live incident and monitoring state remains in Postgres.
 
+## 2026-11-18 - Preserve Assignment Identity Across Inspection
+
+A simulator worker successfully claimed and inspected its assignment, then constructed its next command from the inspection result. That result contained the current token and revision but omitted the immutable assignment reference. Stringifying the absent field produced a different reference; the ownership lookup rejected it before a provider read or durable transition. The worker stopped correctly, but this was an internal handoff failure rather than evidence of inaccessible availability.
+
+Inspection now returns the original assignment reference with the verified claim. Workers retain the initial reference and check the echo; common serialized missing values are rejected during argument parsing. A regression exercises the real inspection function and next-command parser together, verifies inspection is read-only, and retains rejection for another owner or assignment. No ownership error, source operation or uncertain mutation is automatically replayed.
+
 ## 2026-11-18 - Keep Public Catalog Redirects Inside The Research Transport
 
 An ordinary public Book Now link reached its service catalog in Chrome but failed inside interactive research. The legacy Square gateway redirects to a different Square host. The controller rejected that handoff, and its failure classifier discarded the known rejection as an unknown error. Repeating the read could not repair either problem.

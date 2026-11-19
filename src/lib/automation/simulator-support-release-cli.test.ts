@@ -6,6 +6,10 @@ const original = "a".repeat(40), upstream = "b".repeat(40), candidate = "c".repe
 
 describe("private simulator source CLI selection", () => {
   const ownerArgs = ["--assignment-ref", "owned-assignment", "--token", "owned-token", "--revision", "3"];
+  it.each(["undefined", "null", "[object Object]"])("rejects a serialized missing assignment reference (%s) before dispatch", assignmentRef => {
+    expect(() => readSimulatorSupportArguments(["source-read", "--assignment-ref", assignmentRef,
+      "--token", "owned-token", "--revision", "3", "--source", "official"])).toThrow("arguments are incomplete");
+  });
   it("permits engineering verification only with the original authority and no arbitrary provider/date input", async () => {
     expect(readSimulatorSupportArguments(["verify-engineering", ...ownerArgs])).toMatchObject({ command: "verify-engineering", revision: 3 });
     for (const extra of [["--source", "booking"], ["--url", "https://public.example"], ["--date", "2026-10-09"], ["--sha", "a".repeat(40)]]) {

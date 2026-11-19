@@ -46,6 +46,7 @@ export function readSimulatorSupportArguments(args: readonly string[]) {
   const allowed = new Set(["--assignment-ref", ...(command !== "claim" ? ["--token", "--revision"] : []),
     ...(command === "path" ? ["--path"] : []), ...(command === "release" ? ["--sha"] : []), ...(command === "retry" ? ["--retry-minutes"] : []), ...(["configure", "classify"].includes(command) ? ["--manifest"] : []), ...(command === "source-read" ? ["--source", "--link", "--interactive-channel"] : [])]);
   if ([...values.keys()].some(value => !allowed.has(value)) || !values.get("--assignment-ref") ||
+      /^(?:undefined|null|\[object Object\])$/iu.test(values.get("--assignment-ref")!) ||
       (!["claim", "inspect"].includes(command) && (!values.get("--token") || !/^[1-9][0-9]*$/.test(values.get("--revision") ?? ""))) ||
       (command === "inspect" && (values.has("--token") !== values.has("--revision") ||
         values.has("--revision") && !/^[1-9][0-9]*$/.test(values.get("--revision")!))) ||
