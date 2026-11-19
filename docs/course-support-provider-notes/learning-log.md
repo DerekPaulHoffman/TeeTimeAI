@@ -2,6 +2,14 @@
 
 This file records generic process lessons only. It is not a provider-family note and scheduled responders must not read it during routine claimed work. Live incident and monitoring state remains in Postgres.
 
+## 2026-11-19 - Read The Same Composed Controls A Human Sees
+
+The repaired controller reached a public service catalog unattended, but its worker received unnamed service links and could not select a rental. A separate operator inspection in First user Chrome found the precise difference: the visible service labels and Add/Next text were assigned into shadow DOM slots. The inner anchor and button had empty innerText and textContent. The collector also assumed a service heading was h1 (the actual page used h1 for the venue and h2 for the service), and its summary walk stopped at a shadow root. These are collector defects, not missing public inventory or authentication requirements.
+
+The collector now reads bounded visible composed text, follows composed ancestry for summary and form checks, and uses an unambiguous content heading. It preserves the service's member/lesson rejection, same-read Add-to-Next binding and anonymous availability transport. The realistic Chromium fixture failed with an empty-name link before this correction; it now exercises service link, Add, Next and the public calendar with slotted components. Additional cases reject member details, ambiguous headings, forms across a shadow boundary and a booking mutation.
+
+The changed implementation is versioned v40. A narrowly proven old-v39 public partial Square catalog can qualify for the existing normal capability wakeup even during its old cooldown. It requires positively consumed unchanged-source provenance, complete current public-read history without access denials, and the exact older collector contract. Historical unrelated failures remain blocked, and the new version cannot repeatedly wake itself. Old claims, receipts and first-pickup clocks remain intact. The operator inspection selected only the service availability filter; no slot, booking, checkout or email action occurred. This evidence and local replay do not establish live saved-method or delivery acceptance.
+
 ## 2026-11-18 - Complete The Browser Repair Handoff
 
 The earlier controller repair permitted normal admission for a different plain public read but left the necessary rendered root permanently blocked by the old controller's receipt. The next worker completed its plain HTTP observation, then stopped on an internal command error. Both episodes received the same coarse research-failed outcome, so the scheduler also treated them as identical exhausted research. A read-only snapshot and offline policy replay showed a public HTTP 200, observed absent access controls, and no eligible browser route. This was a recovery-control gap, not unavailable inventory.

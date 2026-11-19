@@ -2,7 +2,7 @@ import { RUNNABLE_SIMULATOR_PROVIDER_FAMILIES } from "@/lib/simulators/providers
 import { knownSimulatorPublicConfigurationFamily } from "@/lib/simulators/providers/public-configuration";
 import type { CourseDispatchAudit } from "./course-support-course-dispatch";
 import { isValidSimulatorSupportClaim } from "./simulator-support-policy";
-import { readSimulatorResearchFailureMemory, readSimulatorResearchState } from "./simulator-support-research-policy";
+import { readSimulatorResearchFailureMemory, readSimulatorResearchState, repairedSlottedCatalogReceipt } from "./simulator-support-research-policy";
 
 const OLD_GENERIC_COLLECTORS = new Set([
   "public-calendar-resource-local-v3",
@@ -53,6 +53,10 @@ export function simulatorCapabilityWakeupReceipt(input: {
         observedTimes.some((time, index) => index > 0 && time < observedTimes[index - 1]) ||
         new Set(requestIds).size !== requestIds.length) return null;
     const memory = readSimulatorResearchFailureMemory(audit.simulatorResearchPriorFailures);
+    if (!memory || memory.sourceFingerprint === sourceFingerprint) {
+      const repairedCatalog = repairedSlottedCatalogReceipt({ state: research, priorFailedRoutes: memory?.routes ?? [], now });
+      if (repairedCatalog) return repairedCatalog;
+    }
     if (memory && (memory.sourceFingerprint !== sourceFingerprint || memory.routes.some(route =>
       route.failure || [401, 403, 404].includes(route.httpStatus) || (route.accessControls?.length ?? 0) > 0))) return null;
     const receiptIndex = research.history.map((_, index) => index).reverse().find(index => {

@@ -140,7 +140,13 @@ describe("interactive public research boundaries", () => {
     }
   }, 30_000);
 
-  it.each([false, true])("reaches Square's public calendar through service filters while retaining mutation denial=%s", async attemptMutation => {
+  const squareServiceFixtures: { shadow: boolean; attemptMutation: boolean; unsafeDetail?: "member" | "form" | "ambiguous"; unsafeSummary?: "many-controls" | "field" }[] = [
+    { shadow: false, attemptMutation: false }, { shadow: false, attemptMutation: true },
+    { shadow: true, attemptMutation: false }, { shadow: true, attemptMutation: true },
+    ...(["member", "form", "ambiguous"] as const).map(unsafeDetail => ({ shadow: true, attemptMutation: false, unsafeDetail })),
+    ...(["many-controls", "field"] as const).map(unsafeSummary => ({ shadow: true, attemptMutation: false, unsafeSummary })),
+  ];
+  it.each(squareServiceFixtures)("reaches only public Square service filters: %j", async ({ shadow, attemptMutation, unsafeDetail, unsafeSummary }) => {
     const channel = resolve(".codex-artifacts/browser", `fixture-${randomUUID()}`);
     await mkdir(channel, { recursive: true });
     const catalog = "https://book.squareup.com/appointments/publicvenue/location/AAAAAAAAAAAAA/services";
@@ -148,12 +154,26 @@ describe("interactive public research boundaries", () => {
     const availability = catalog.replace("/services", "/availability");
     const seen: string[] = [];
     let stopped = false, nextRequest = 1;
+    const components = `<script>
+      customElements.define('market-row',class extends HTMLElement {connectedCallback(){this.attachShadow({mode:'open'}).innerHTML=
+        '<a href="'+this.getAttribute('href')+'"><slot name="label"></slot><slot name="subtext"></slot></a>';}});
+      customElements.define('market-button',class extends HTMLElement {connectedCallback(){this.attachShadow({mode:'open'}).innerHTML=
+        '<button type="button"><slot></slot></button>';}});
+      </script>`;
     const fetch = vi.fn(async (input: Parameters<typeof global.fetch>[0]) => {
       const url = String(input); seen.push(url);
-      const html = url === detail ? `<html><body><h1>1 hour simulator practice</h1><button type="button" id="add">Add</button><script>
+      const extra = unsafeSummary === "many-controls" ? '<market-button>Help</market-button>'.repeat(6)
+        : unsafeSummary === "field" ? '<market-input type="email"></market-input>' : '';
+      const summary = shadow
+        ? '<aside><div><div><h2>Appointment summary</h2><div>1 hour simulator practice</div><div>$50</div></div>'+extra+'<market-button-group><market-button id="next">Next</market-button></market-button-group></div></aside>'
+        : '<aside><h2>Appointment summary</h2><div>1 hour simulator practice</div><div>$50</div><button type="button" id="next">Next</button></aside>';
+      const html = shadow && url === catalog ? `<html><body>${components}<h1>Public simulator venue</h1>
+        <market-row href="${detail}"><label slot="label">1 hour simulator practice</label><div slot="subtext">$50 ・ 1 hr</div></market-row></body></html>`
+        : url === detail ? `<html><body>${shadow ? `${components}<header><h1>Public simulator venue</h1></header><main><h2>${unsafeDetail === "member" ? "Member 1 hour practice" : "1 hour simulator practice"}</h2>${unsafeDetail === "ambiguous" ? "<h2>Another public rental</h2>" : ""}${unsafeDetail === "form" ? "<form>" : ""}<market-button id="add">Add</market-button>${unsafeDetail === "form" ? "</form>" : ""}</main>`
+          : '<h1>1 hour simulator practice</h1><button type="button" id="add">Add</button>'}<script>
         document.querySelector('#add').onclick=()=>{
           history.pushState({},'',${JSON.stringify(catalog)});
-          document.body.innerHTML='<aside><h2>Appointment summary</h2><div>1 hour simulator practice</div><div>$50</div><button type="button" id="next">Next</button></aside>';
+          document.body.innerHTML=${JSON.stringify(summary)};
           document.querySelector('#next').onclick=()=>location.assign(${JSON.stringify(availability)});
         };</script></body></html>` : `<html><body><h1>Public availability</h1>
           <div role="grid"><button role="gridcell">20</button></div><button>1:30 PM</button>
@@ -163,7 +183,7 @@ describe("interactive public research boundaries", () => {
       return new Response(html, { headers: { "content-type": "text/html" } });
     }) as typeof global.fetch;
     const lease = (async (_family: string, work: () => Promise<unknown>) => ({ acquired: true, value: await work() })) as never;
-    const task = collectInteractiveSimulatorResearch({ url: detail, channel,
+    const task = collectInteractiveSimulatorResearch({ url: shadow ? catalog : detail, channel,
       assertOwned: async () => { if (stopped) throw new Error("Fixture stopped"); } }, { fetch, lease });
     const settled = task.then(value => ({ value }), error => ({ error }));
     const wait = async (number: number) => {
@@ -179,23 +199,40 @@ describe("interactive public research boundaries", () => {
       nextRequest = number + 1;
     };
     try {
-      const first = await wait(0);
+      let first = await wait(0), sequence = 1;
+      if (shadow) {
+        const service = first.controls.find((c: { name: string; kind: string }) => c.kind === "link" && /1 hour simulator practice/u.test(c.name));
+        expect(service, JSON.stringify(first.controls)).toBeDefined();
+        await send(sequence, { action: "click", target: service.target }); first = await wait(sequence++);
+      }
       const add = first.controls.find((c: { name: string; kind: string }) => c.name === "Add" && c.kind === "service");
+      if (unsafeDetail) {
+        expect(add).toBeUndefined();
+        await send(sequence, { action: "finish" }); await task;
+        expect(seen).toEqual([catalog, detail]);
+        return;
+      }
       expect(add).toBeDefined();
-      await send(1, { action: "click", target: add.target });
-      const second = await wait(1);
+      await send(sequence, { action: "click", target: add.target });
+      const second = await wait(sequence++);
       const next = second.controls.find((c: { name: string; kind: string }) => c.name === "Next" && c.kind === "service");
+      if (unsafeSummary) {
+        expect(next).toBeUndefined();
+        await send(sequence, { action: "finish" }); await task;
+        expect(seen).toEqual([catalog, detail]);
+        return;
+      }
       expect(next, JSON.stringify(second.controls)).toBeDefined();
       expect(second.url).toBe(catalog);
-      await send(2, { action: "click", target: next.target });
-      const third = await wait(2);
+      await send(sequence, { action: "click", target: next.target });
+      const third = await wait(sequence++);
       expect(third.url).toBe(availability);
       expect(third.controls.some((c: { name: string }) => c.name === "20")).toBe(true);
       expect(third.controls.some((c: { name: string }) => /Next|1:30|Confirm|Checkout|Email/u.test(c.name))).toBe(false);
-      await send(3, { action: "finish" });
+      await send(sequence, { action: "finish" });
       const result = await task;
       expect(result.renderComplete).toBe(!attemptMutation);
-      expect(seen).toEqual([detail, availability]);
+      expect(seen).toEqual(shadow ? [catalog, detail, availability] : [detail, availability]);
       if (attemptMutation) expect(result.blockedResourceDiagnostics).toEqual(expect.arrayContaining([
         expect.objectContaining({ state: "NOT_EXECUTED", method: "POST", reason: "METHOD_NOT_ALLOWED" }),
       ]));

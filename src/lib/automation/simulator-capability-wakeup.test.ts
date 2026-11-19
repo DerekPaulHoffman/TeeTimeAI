@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { CourseDispatchAudit } from "./course-support-course-dispatch";
 import { simulatorCapabilityWakeupReceipt } from "./simulator-capability-wakeup";
+import { SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION } from "./simulator-support-research-policy";
 
 const now = new Date("2026-10-09T18:00:00.000Z");
 const fingerprint = "a".repeat(64);
@@ -36,6 +37,45 @@ function fixture() {
 }
 
 describe("simulator capability wakeup receipt", () => {
+  const slottedCatalog = "https://book.squareup.com/appointments/publicvenue/location/AAAAAAAAAAAAA/services";
+  function slottedFixture() {
+    const f = fixture(), root = "https://official.example.test/", state = f.audit.simulatorResearch!;
+    const receipt = state.history[0];
+    state.history = [
+      { ...receipt, source: "booking", requestedUrl: root, sourceUrl: root, observedAt: "2026-10-09T17:48:00.000Z",
+        researchImplementationVersion: "public-calendar-document-scoped-evidence-v39" },
+      { ...receipt, source: "link", requestedUrl: slottedCatalog, sourceUrl: slottedCatalog, observedAt: "2026-10-09T17:49:00.000Z",
+        requestId: "22222222-2222-4222-8222-222222222222", researchImplementationVersion: "public-calendar-document-scoped-evidence-v39" },
+      { ...receipt, source: "link", requestedUrl: slottedCatalog, sourceUrl: slottedCatalog, observedAt: "2026-10-09T17:50:00.000Z",
+        requestId: "33333333-3333-4333-8333-333333333333", researchImplementationVersion: "public-calendar-document-scoped-evidence-v39",
+        rendered: true, renderWarning: "SECONDARY_REQUESTS_BLOCKED", publicReadEvidence: { sourceFingerprint: fingerprint,
+          accessControlsObserved: true, accessControls: [], method: "BROWSER", renderComplete: false } },
+    ]; state.readCount = 3;
+    Object.assign(f.audit, { simulatorResearchPriorFailures: { version: 1, sourceFingerprint: fingerprint, routes: [{
+      url: root, rendered: true, httpStatus: 0, observedAt: "2026-10-09T17:30:00.000Z",
+      requestId: "44444444-4444-4444-8444-444444444444", researchImplementationVersion: "public-calendar-document-scoped-evidence-v37",
+      failure: { stage: "PUBLIC_READ", category: "UNKNOWN", code: "UNCLASSIFIED_FAILURE", researchPhase: "BROWSER_REQUEST",
+        sourceLocation: "src/lib/automation/simulator-interactive-browser.ts:263" } }] } });
+    return f;
+  }
+  it("wakes one owned public catalog after the actual slotted-control collector repair without deleting its old failures", () => {
+    const f = slottedFixture(), before = JSON.stringify(f);
+    expect(simulatorCapabilityWakeupReceipt(f)).toEqual({ sourceUrl: slottedCatalog, requestId: "33333333-3333-4333-8333-333333333333" });
+    expect(JSON.stringify(f)).toBe(before);
+  });
+  it.each(["current collector", "changed source", "access", "unknown access", "different destination", "unknown failure", "future read", "already implementing"])("does not wake slotted-control research with %s", scenario => {
+    const f = slottedFixture(), last = f.audit.simulatorResearch!.history[2];
+    if (scenario === "current collector") last.researchImplementationVersion = SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION;
+    if (scenario === "changed source") last.sourceFingerprint = "b".repeat(64);
+    if (scenario === "access") last.publicReadEvidence!.accessControls = ["ACCOUNT_REQUIRED"];
+    if (scenario === "unknown access") delete last.publicReadEvidence;
+    if (scenario === "different destination") last.sourceUrl = slottedCatalog.replace("AAAAAAAAAAAAA", "CCCCCCCCCCCCC");
+    if (scenario === "unknown failure") Object.assign(f.audit, { simulatorResearchPriorFailures: { version: 1, sourceFingerprint: fingerprint,
+      routes: [{ url: slottedCatalog, rendered: true, httpStatus: 0, failure: { stage: "PUBLIC_READ", category: "UNKNOWN", code: "OTHER_UNKNOWN" } }] } });
+    if (scenario === "future read") last.observedAt = "2026-10-10T00:00:00.000Z";
+    if (scenario === "already implementing") f.audit.simulatorClaim!.plannedPaths = ["src/lib/automation/simulator-interactive-browser.ts"];
+    expect(simulatorCapabilityWakeupReceipt(f)).toBeNull();
+  });
   it("admits a fresh original public HTTP receipt for a newly runnable structural family", () => {
     expect(simulatorCapabilityWakeupReceipt(fixture())).toEqual({ sourceUrl: bookingUrl, requestId });
   });
