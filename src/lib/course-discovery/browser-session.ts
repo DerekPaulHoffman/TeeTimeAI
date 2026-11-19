@@ -37,6 +37,7 @@ import { canonicalPublicReadUrl } from "./public-request-url";
 import { inspectExistingAdapter } from "./existing-adapter-executor";
 import { getFixedAdapterReadDiagnostic } from "./fixed-adapter-read-diagnostic";
 import { getCpsPostalContactDiagnostic } from "./cps-postal-conflict-proof";
+import { getCpsPhoneBookingFailureStage } from "./cps-phone-booking-proof";
 import { getMindbodyAppointmentDiagnostic } from "./mindbody-appointment-reader";
 import { isPublicCalendarApply } from "./public-calendar-apply";
 import { isObservedPublicCalendarDay, observedPublicCalendarDays } from "./public-calendar-day";
@@ -390,6 +391,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
     staleControlReason = reason; throw new Error("STALE_OR_UNKNOWN_CONTROL");
   };
   let cpsPostalContact: ReturnType<typeof getCpsPostalContactDiagnostic>;
+  let cpsPhoneBookingFailureStage: ReturnType<typeof getCpsPhoneBookingFailureStage>;
   let mindbodyAppointment: ReturnType<typeof getMindbodyAppointmentDiagnostic>;
   const officialDiagnostics = () => safeOfficialSourceDiagnostic({ ...teeBookingScope.diagnostics(page.url()), ...officialSourceDiagnostic,
     rawOfficialCaptured: Boolean(officialIdentityDocument), currentOfficialDocument: Boolean(officialIdentityDocument && sameDiscoveryMainDocument(officialIdentityDocument.url, page.url())),
@@ -1931,6 +1933,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
         } } : {}),
         admittedRequestCounts: { ...admittedRequestCounts }, requestLimit,
         ...(cpsPostalContact ? { cpsPostalContact: structuredClone(cpsPostalContact) } : {}),
+        ...(cpsPhoneBookingFailureStage ? { cpsPhoneBookingFailureStage } : {}),
         ...(mindbodyAppointment ? { mindbodyAppointment: structuredClone(mindbodyAppointment) } : {}),
         mindbodyCapture: mindbodyCapture.diagnostics(),
         officialSourceDiagnostic: officialDiagnostics(), ...(navigationFailureKind ? { navigationFailureKind } : {}),
@@ -2040,6 +2043,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
         adapterRead = undefined;
         officialSourceDiagnostic = undefined;
         cpsPostalContact = undefined;
+        cpsPhoneBookingFailureStage = undefined;
         mindbodyAppointment = undefined;
         if (!isSafeRecipeUrl(action.url) || !allowedNavigation.has(new URL(action.url).href)) throw new Error("UNOBSERVED_NAVIGATION");
         if (!input.venueName || input.venueName.length > 200) throw new Error("MISSING_VENUE_IDENTITY");
@@ -2062,6 +2066,7 @@ export async function createCourseDiscoveryBrowserSession(input: {
           // Preserve the same failure and only controller-owned closed facts.
           // Nested reader pages and their private request material stay private.
           try { cpsPostalContact = getCpsPostalContactDiagnostic(error); } catch { /* Diagnostics cannot replace the primary failure. */ }
+          try { cpsPhoneBookingFailureStage = getCpsPhoneBookingFailureStage(error); } catch { /* Diagnostics cannot replace the primary failure. */ }
           try { mindbodyAppointment = getMindbodyAppointmentDiagnostic(error); } catch { /* Diagnostics cannot replace the primary failure. */ }
           try { teeItUpDelegation = getTeeItUpDelegationDiagnostic(error); } catch { /* Diagnostics cannot replace the primary failure. */ }
           try { adapterRead = getFixedAdapterReadDiagnostic(error); } catch { /* Diagnostics cannot replace the primary failure. */ }

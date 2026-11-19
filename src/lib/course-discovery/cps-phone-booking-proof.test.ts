@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import { bindCpsPhoneBookingProof, selectedCpsOfficialBookingAnchor } from "./cps-phone-booking-proof";
+import { bindCpsPhoneBookingProof, selectedCpsOfficialBookingAnchor, getCpsPhoneBookingFailureStage } from "./cps-phone-booking-proof";
 import { registerFreshNativeOfficialIdentityPage } from "./native-official-page-attestation";
 import { parseAccessRecipe } from "./recipe";
 import { CPS_VENUE_PUBLIC_CATALOG_BUILD, cpsMetadataSchema, parseCpsCatalog, type CpsOptions } from "./cps-source";
@@ -22,6 +22,23 @@ const bind = (current: OfficialIdentityPage, number: unknown = phone) =>
   bindCpsPhoneBookingProof(source, current, number, catalog, source.venueName);
 
 describe("CPS fresh official phone and booking link", () => {
+  it.each([
+    ["VENUE_IDENTITY", () => page(markup(), { headings: ["About Harbor Pointe Golf Course"] })],
+    ["BOOKING_LINK", () => page(markup(), { linkUrls: ["https://other.cps.golf/"] })],
+    ["CONTACT_COMPLETENESS", () => page(markup(), { phoneTextsOmitted: true })],
+    ["PHONE_IDENTITY", () => page(markup(), { phoneTexts: ["508-555-0123"] })],
+    ["RAW_CONTACT", () => page(markup().replace("Harbor Pointe Golf Course", "Other Course"))],
+    ["INERT_BOOKING_LINK", () => page(markup().replace(source.bookingUrl, "https://other.cps.golf/"))],
+    ["ROOT_PROVENANCE", () => structuredClone(page())],
+  ] as const)("retains only the exact failed gate %s without changing rejection", (stage, fixture) => {
+    let caught: unknown;
+    try { bind(fixture()); } catch (error) { caught = error; }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toBe("CPS_PHONE_BOOKING_SOURCE_UNVERIFIED");
+    expect(getCpsPhoneBookingFailureStage(caught)).toBe(stage);
+    expect(getCpsPhoneBookingFailureStage(new Error("CPS_PHONE_BOOKING_SOURCE_UNVERIFIED"))).toBeUndefined();
+    expect(getCpsPhoneBookingFailureStage({ message: "PRIVATE" })).toBeUndefined();
+  });
   it("selects only a unique canonical main course beside a differently named short course in the reviewed complete public catalog", () => {
     const current=page(), options:CpsOptions={webSiteId:"public-site",reservationOptions:{terminalId:1},courseOptions:[
       {courseId:7,courseName:"Harbor Pointe",webSiteId:"public-site"},{courseId:8,courseName:"Meadow Short Course",webSiteId:"public-site"}]};

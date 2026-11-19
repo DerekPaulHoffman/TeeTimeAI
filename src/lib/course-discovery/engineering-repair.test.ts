@@ -266,6 +266,18 @@ describe("private failure evidence", () => {
     });
     expect(JSON.stringify(discoveryFailureDiagnosis({ outcome: "TOOL_FAILURE", checkpoint }))).not.toContain("PRIVATE_UNTRUSTED_INSTRUCTIONS");
   });
+  it("carries only a closed phone rejection stage through a later transport failure", () => {
+    for (const stage of ["VENUE_IDENTITY", "PRIVATE", ["VENUE_IDENTITY"]]) {
+      const checkpoint = { stagehandFailure: { schemaVersion: 1, kind: "OWN_STAGEHAND_FAILURE_DIAGNOSTIC",
+        entries: [{ attempt: 1, phase: "FIXED_INSPECTION", code: "CPS_PHONE_BOOKING_SOURCE_UNVERIFIED",
+          fixedInspectionDiagnostic: { cpsPhoneBookingFailureStage: stage, html: "PRIVATE" } }] },
+        genericGuard: { code: "DISCOVERY_NATIVE_TRANSPORT_FATAL", nativeFirstFatal: { code: "NATIVE_REDIRECT_LOADER_TIMEOUT" } } };
+      const result = discoveryFailureDiagnosis({ outcome: "TOOL_FAILURE", checkpoint });
+      if (stage === "VENUE_IDENTITY") expect(result).toMatchObject({ priorInspection: { cpsPhoneBookingFailureStage: stage, evidenceAuthority: false } });
+      else expect(result.priorInspection).not.toHaveProperty("cpsPhoneBookingFailureStage");
+      expect(JSON.stringify(result)).not.toContain("PRIVATE");
+    }
+  });
   it("does not traverse malformed or unbounded checkpoint histories", () => {
     for (const entries of [null, "PRIVATE", [{ attempt: 2, phase: "PRIVATE invalid", code: "PRIVATE invalid" }],
       Array.from({ length: 3 }, (_, i) => ({ attempt: i + 1, code: "BROWSER_UNAVAILABLE", phase: "REPLAY" }))]) {

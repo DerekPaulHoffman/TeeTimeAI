@@ -14,6 +14,7 @@ import { delegatedDiagnosticGates, delegatedDiagnosticStages, delegatedFacilityB
 import { bookingEdgeEvidenceSchema } from "./booking-edge-evidence";
 import { hasReciprocalLearningRepairLink, readLearningRepairRecoveries, readLearningRepairRecoveryOf } from "./learning-repair-recovery";
 import { projectStagehandNativeRouterFailure } from "./stagehand-native-router-diagnostic";
+import { cpsPhoneBookingFailureStages } from "./cps-phone-booking-proof";
 
 const receiptSchema = z.object({ version: z.literal(1), state: z.literal("QUEUED"),
   incidentId: z.string().min(1).max(128), queuedAt: z.string().datetime(),
@@ -147,6 +148,10 @@ export function discoveryFailureDiagnosis(job: { outcome: string | null; checkpo
     : undefined;
   const hopEvidence = includeBookingEdgeEvidence ? bookingEdgeEvidenceSchema.safeParse(diagnostic.hopEvidence) : null;
   const inspection = { category, code, failureCode: code && diagnosticFailureCodes.has(code) ? code : null,
+    ...(code === "CPS_PHONE_BOOKING_SOURCE_UNVERIFIED" && cpsPhoneBookingFailureStages.some(stage =>
+      stage === object(last?.fixedInspectionDiagnostic).cpsPhoneBookingFailureStage) ? {
+        cpsPhoneBookingFailureStage: object(last?.fixedInspectionDiagnostic).cpsPhoneBookingFailureStage,
+      } : {}),
     ...(delegationDiagnostic ? { delegationDiagnostic } : {}),
     ...(delegationDiagnostic && hopEvidence?.success ? { bookingEdgeEvidence: hopEvidence.data } : {}),
     phase, evidenceAuthority: false as const };

@@ -2,7 +2,7 @@
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
-import { createDiscoveryProcess, discoveryBrowserFeedback, readDiscoveryControllerCheckpoint, safeBrowserFailureDiagnostics } from "../../../scripts/automation/course-discovery-worker.mjs";
+import { createDiscoveryProcess, discoveryBrowserFeedback, readDiscoveryControllerCheckpoint, safeBrowserFailureDiagnostics, safeFixedInspectionSourceDiagnostic } from "../../../scripts/automation/course-discovery-worker.mjs";
 
 const gateKeys = ["freshNativeOfficialPage", "canonicalAddressPresent", "canonicalAddressValid", "canonicalPhoneValid", "rawContactsPresent",
   "renderedContactsPresent", "contactCountBounded", "rawContactsNormalizable", "renderedContactsNormalizable", "uniqueNormalizedContact",
@@ -17,6 +17,20 @@ const mindbody = () => ({ stage: "COMPARE_CATALOG", rawBytes: 150000, renderedBy
     renderedTextLengths: { title: 9, bodyText: 410, locationId: 1, studioId: 6, venueAddress: 50 } } });
 
 describe("closed nested fixed-reader failure transport", () => {
+  it("preserves the closed phone rejection gate through helper decoding and fixed inspection", async () => {
+    const child = Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough(), exitCode: 0 });
+    const channel = createDiscoveryProcess({ executable: "unused", args: [], cwd: "unused", environment: {}, spawnProcess: () => child });
+    const pending = channel.request({ action: "inspect_adapter" });
+    child.stdout.write(JSON.stringify({ id: 1, ok: false, error: "CPS_PHONE_BOOKING_SOURCE_UNVERIFIED", diagnostics: {
+      cpsPhoneBookingFailureStage: "VENUE_IDENTITY", rawHtml: "PRIVATE" } }) + "\n");
+    await expect(pending).rejects.toMatchObject({ code: "CPS_PHONE_BOOKING_SOURCE_UNVERIFIED",
+      details: { browserDiagnostics: { cpsPhoneBookingFailureStage: "VENUE_IDENTITY" } } });
+    expect(safeFixedInspectionSourceDiagnostic({ cpsPhoneBookingFailureStage: "VENUE_IDENTITY", token: "PRIVATE" }))
+      .toEqual({ cpsPhoneBookingFailureStage: "VENUE_IDENTITY" });
+    for (const value of ["PRIVATE", ["VENUE_IDENTITY"], { stage: "VENUE_IDENTITY" }, null])
+      expect(safeBrowserFailureDiagnostics({ cpsPhoneBookingFailureStage: value })).not.toHaveProperty("cpsPhoneBookingFailureStage");
+    await channel.close(); child.stdout.destroy(); child.stderr.destroy(); child.stdin.destroy();
+  });
   it("carries closed filter facts through the actual helper decoder and checkpoint without raw fields",async()=>{
     const filterSettlement={sourceControlBound:true,newDocumentObserved:true,currentDocument:true,controlIsCategory:false,
       categorySelected:true,serviceSelected:null,expectedControlPresent:true,expectedControlSelected:false,pendingReads:2,elapsedMs:12000};

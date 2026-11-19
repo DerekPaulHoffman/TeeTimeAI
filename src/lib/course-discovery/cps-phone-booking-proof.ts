@@ -21,6 +21,12 @@ const text = (node: Node): string => node.nodeName === "#text" ? (node as Defaul
   element(node) && excluded(node) ? "" : "childNodes" in node ? node.childNodes.map(text).join(" ") : "";
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const fail = (): never => { throw new Error("CPS_PHONE_BOOKING_SOURCE_UNVERIFIED"); };
+export const cpsPhoneBookingFailureStages = ["ROOT_PROVENANCE", "VENUE_IDENTITY", "BOOKING_LINK", "CONTACT_COMPLETENESS", "PHONE_IDENTITY", "RAW_CONTACT", "INERT_BOOKING_LINK"] as const;
+const failureStages = new WeakMap<object, typeof cpsPhoneBookingFailureStages[number]>();
+/** Failure-only fixed vocabulary. Never grants identity or access authority. */
+export function getCpsPhoneBookingFailureStage(error: unknown) {
+  return error && typeof error === "object" ? failureStages.get(error) : undefined;
+}
 const publicUrl = z.string().url().max(2048).refine(value => { try { const u = new URL(value); return u.protocol === "https:" && !u.username && !u.password && !u.port && !u.hash; } catch { return false; } });
 const digest = z.string().regex(/^[a-f0-9]{64}$/u);
 export const cpsPhoneBookingProofSchema = z.object({ kind: z.literal("OFFICIAL_PHONE_BOOKING_LINK"), officialUrl: publicUrl,
@@ -135,12 +141,19 @@ function rawContact(html: string, expectedVenue: string, renderedContacts: Array
 
 /** Current official root, raw and rendered venue/phone/link, never a postal claim. */
 export function verifyCpsPhoneBookingContact(source: Source, page: OfficialIdentityPage, canonicalCoursePhone: unknown) {
+  let stage: typeof cpsPhoneBookingFailureStages[number] = "ROOT_PROVENANCE";
+  try {
   const root = freshNativeCanonicalRootDocument(page, source.officialUrl), expectedVenue = fullCourseName(source.venueName),
     phone = normalizePublicCoursePhone(canonicalCoursePhone), visible = page.visibleEvidence, canonicalAddress = source.venueAddress && completeUSAddress(source.venueAddress);
-  if (!root || !visible || !phone || !canonicalAddress || !expectedVenue || page.browserTransport !== "NATIVE_CHROME" ||
-      !visible.headings.some(name => fullCourseName(name) === expectedVenue) || !visible.linkUrls.includes(source.bookingUrl) ||
-      visible.phoneTextsOmitted === true || visible.contactPhoneLinksOmitted === true ||
+  if (!root || !visible || !phone || !canonicalAddress || !expectedVenue || page.browserTransport !== "NATIVE_CHROME") return fail();
+  stage = "VENUE_IDENTITY";
+  if (!visible.headings.some(name => fullCourseName(name) === expectedVenue)) return fail();
+  stage = "BOOKING_LINK";
+  if (!visible.linkUrls.includes(source.bookingUrl)) return fail();
+  stage = "CONTACT_COMPLETENESS";
+  if (visible.phoneTextsOmitted === true || visible.contactPhoneLinksOmitted === true ||
       !Array.isArray(visible.phoneTexts) || !Array.isArray(visible.contactPhoneLinks)) return fail();
+  stage = "PHONE_IDENTITY";
   const renderedPhones = new Set(visible.phoneTexts.map(normalizePublicCoursePhone)), contactPhones = new Set<string>();
   for (const row of visible.contactPhoneLinks) {
     const target = typeof row.href === "string" && row.href.startsWith("tel:") ? normalizePublicCoursePhone(row.href.slice(4)) : undefined;
@@ -149,12 +162,18 @@ export function verifyCpsPhoneBookingContact(source: Source, page: OfficialIdent
     contactPhones.add(target);
   }
   if (renderedPhones.size !== 1 || !renderedPhones.has(phone) || contactPhones.size !== 1 || !contactPhones.has(phone)) return fail();
+  stage = "RAW_CONTACT";
   const raw = rawContact(page.html, expectedVenue, visible.contactPhoneLinks);
   if (raw.contactPhones.length !== 1 || raw.contactPhones[0] !== phone) return fail();
+  stage = "INERT_BOOKING_LINK";
   try { if (!hasInertPublicBookingLink(page.html, page.url, source.bookingUrl)) return fail(); } catch { return fail(); }
   return { phone, canonicalAddressInput: source.venueAddress!, rawWitnessSha256: hash({ venue: raw.venueHeading, contactPairs: raw.matchedPairs,
       contactPhones: raw.contactPhones, bookingUrl: source.bookingUrl }), renderedWitnessSha256: hash({ venue: expectedVenue,
       phones: [...renderedPhones], contactPhones: [...contactPhones], bookingUrl: source.bookingUrl }) };
+  } catch (error) {
+    if (error instanceof Error && error.message === "CPS_PHONE_BOOKING_SOURCE_UNVERIFIED") failureStages.set(error, stage);
+    throw error;
+  }
 }
 export function bindCpsPhoneBookingProof(source: Source, page: OfficialIdentityPage, canonicalCoursePhone: unknown,
   catalog: { tenant: string; catalogHash: string; courseIds: number[] }, providerVenueName: string): CpsPhoneBookingProof {

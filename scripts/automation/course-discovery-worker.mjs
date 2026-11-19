@@ -878,6 +878,8 @@ function safeFixedReaderFailureDiagnostics(value) {
     return Object.keys(copy).length ? copy : undefined;
   };
   const result = {}, cps = value?.cpsPostalContact;
+  if (["ROOT_PROVENANCE", "VENUE_IDENTITY", "BOOKING_LINK", "CONTACT_COMPLETENESS", "PHONE_IDENTITY", "RAW_CONTACT", "INERT_BOOKING_LINK"].includes(value?.cpsPhoneBookingFailureStage))
+    result.cpsPhoneBookingFailureStage = value.cpsPhoneBookingFailureStage;
   if (record(cps)) {
     const keys = ["freshNativeOfficialPage", "canonicalAddressPresent", "canonicalAddressValid", "canonicalPhoneValid", "rawContactsPresent",
       "renderedContactsPresent", "contactCountBounded", "rawContactsNormalizable", "renderedContactsNormalizable", "uniqueNormalizedContact",
@@ -944,6 +946,8 @@ export function safeFixedInspectionSourceDiagnostic(value) {
       gates: Object.fromEntries(keys.map(key => [key, identity.gates[key]])) };
   const cps = safeFixedReaderFailureDiagnostics(value).cpsPostalContact;
   if (cps) result.cpsPostalContact = cps;
+  const phoneStage = safeFixedReaderFailureDiagnostics(value).cpsPhoneBookingFailureStage;
+  if (phoneStage) result.cpsPhoneBookingFailureStage = phoneStage;
   return Object.keys(result).length ? result : undefined;
 }
 /** Mirror the native delegated reader's closed failure-only grammar. */
