@@ -119,6 +119,13 @@ describe("current durable phone context on warm claim", () => {
     active.recipe = { engine: "EXISTING_ADAPTER", adapter: { family: "TEEITUP", officialDelegatedBookingProof: {} } };delete context.trustedContext;delete active.trustedContext;
     expect(await claimNextRecipeExecution("worker1")).toHaveProperty("id", "job1");
   });
+  it.each(["unchanged", "changed", "absent"])("binds %s intentional delegation contact before a warm launch", async change => {
+    active.recipe = { engine: "EXISTING_ADAPTER", adapter: { family: "TEEITUP", officialDelegatedBookingProof: { intentionalDelegationProof: {} } } };
+    if (change === "changed") context.trustedContext = { canonicalCoursePhone: "+13035554321" };
+    if (change === "absent") delete context.trustedContext;
+    if (change === "unchanged") expect(await claimNextRecipeExecution("worker1")).toMatchObject({ trustedContext: active.trustedContext });
+    else { expect(await claimNextRecipeExecution("worker1")).toBeNull(); expect(mocks.db.localReaderJob.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: { status: "EXPIRED" } })); }
+  });
   it("returns unchanged TeeItUp omission context only to the private executor", async () => {
     active.recipe = { engine: "EXISTING_ADAPTER", adapter: { family: "TEEITUP", officialStreetTypeOmittedProof: {} } };
     expect(await claimNextRecipeExecution("worker1")).toMatchObject({ trustedContext: active.trustedContext });

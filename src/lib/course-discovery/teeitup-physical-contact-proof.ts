@@ -19,6 +19,18 @@ const sourceSchema = z.object({ officialUrl: url, officialDocumentUrl: url, book
   warmTransport: z.literal("NATIVE_CHROME"), requiredCapability: z.literal("LOCAL_CHROME"),
 }).strict();
 export type NativePhysicalContactSource = z.infer<typeof sourceSchema> & { sourceWitnessSha256: string };
+/** Independent official contact facts only. This is not a facility match or a
+ * replacement for the current native page capability held by the executor. */
+export const nativePhysicalContactSourceSchema = sourceSchema.extend({ sourceWitnessSha256: sha }).strict().refine(value => {
+  const fields = Object.fromEntries(Object.keys(sourceSchema.shape).map(key => [key, value[key as keyof typeof value]]));
+  const a = teeItUpCompleteStreetAddress(value.canonicalAddress), b = parseNamedContactAddress(value.officialAddress);
+  const relation = nameRelation(value.canonicalName, value.publicLocationName, value.observedServiceLabel ? [value.observedServiceLabel] : []);
+  return (!value.bookingEntryUrl || value.bookingEntryUrl !== value.bookingUrl && value.bookingEntryUrl !== value.officialDocumentUrl) &&
+    value.sourceWitnessSha256 === physicalContactDigest(fields) && Boolean(a && b && sameExceptLocality(a, b) && a.locality === b.locality &&
+    a.locality === value.canonicalLocality && b.locality === value.officialLocality &&
+    brandLocation(value.officialBrandName, value.publicLocationName)?.label === value.brandLocationLabel &&
+    relation?.canonicalNameRelation === value.canonicalNameRelation && relation?.serviceRemainder === value.serviceRemainder && relation?.observedServiceLabel === value.observedServiceLabel);
+});
 export const teeItUpPhysicalContactProofSchema = sourceSchema.extend({ kind: z.literal("OFFICIAL_PHYSICAL_CONTACT_BINDING_V1"),
   providerName: name, providerAddress: address, providerLocality: locality, providerLocalityRelation: z.enum(["SAME_RECORDED", "DIFFERENT_RECORDED"]),
   sourceWitnessSha256: sha, semanticDigest: sha,
@@ -68,7 +80,7 @@ function sameExceptLocality(a: FullAddress, b: FullAddress) {
 /** Preserve the provider's literal address. Only an independently known US
  * leading-zero ZIP may have lost that one zero in its numeric representation.
  * Every other printed component still passes the complete address comparison. */
-function physicalProviderAddress(canonical: FullAddress, value: string, country: unknown) {
+export function physicalProviderAddress(canonical: FullAddress, value: string, country: unknown) {
   const direct = teeItUpCompleteStreetAddress(value);
   if (direct) return direct;
   if (country !== "US" || !/^0[1-9]\d{3}$/u.test(canonical.postalCode)) return;

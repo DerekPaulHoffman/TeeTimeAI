@@ -3,6 +3,7 @@ import { freshNativeCanonicalRootDocument, isFreshNativeDelegatedDocument, isFre
 import { delegatedBookingHop, type DelegatedHop } from "./teeitup-delegated-booking-source";
 import type { DelegatedDiagnosticGate } from "./teeitup-delegated-booking-diagnostic";
 import type { NativePhysicalContactSource } from "./teeitup-physical-contact-proof";
+import { parseTeeItUpBookingConfiguration } from "./teeitup-booking-configuration";
 
 declare const grantBrand: unique symbol;
 export type DelegatedGetGrant = object & { readonly [grantBrand]: true };
@@ -71,6 +72,12 @@ export function currentNativeDelegatedChain(token: NativeDelegatedChainToken) {
   if (!value || Date.now() >= value.deadline || !isFreshNativeOfficialIdentityPage(value.root, value.officialUrl) ||
       !isFreshNativeDelegatedDocument(value.final, value.officialUrl) || value.final.url !== value.bookingUrl) return fail();
   const rootDocumentProof = freshNativeCanonicalRootDocument(value.root, value.officialUrl)?.rootDocumentProof;
+  let intentionalDelegationConfiguration;
+  if (value.physicalContactSource) try {
+    intentionalDelegationConfiguration = parseTeeItUpBookingConfiguration(value.final.html,
+      value.physicalContactSource.officialBrandName, undefined, value.physicalContactSource.canonicalAddress);
+  } catch { /* Missing exact destination configuration never relaxes identity. */ }
   return { rootWitnessSha256: value.rootWitnessSha256, hops: value.hops.map(hop => ({ ...hop })), ...(rootDocumentProof ? { rootDocumentProof } : {}),
+    ...(intentionalDelegationConfiguration ? { intentionalDelegationConfiguration } : {}),
     ...(value.physicalContactSource ? { physicalContactSource: structuredClone(value.physicalContactSource) } : {}), ...(value.physicalContactRequired ? { physicalContactRequired: true as const } : {}) };
 }
