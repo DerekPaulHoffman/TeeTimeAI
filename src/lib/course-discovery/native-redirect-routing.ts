@@ -1473,11 +1473,33 @@ export async function installNativeRedirectRouting(page: Page, handler: (route: 
             denialDocument.record.complete && !denialDocument.record.failed && denialDocument.record.responseStatus === 200 &&
             denialDocument.record.generation === generation && loaderOwners.get(denialDocument.loaderId) === generation) {
           const deniedGeneration = generation;
+          const denialDocumentIdentity = networkIdentities.get(denialDocument.record.networkId);
           sourceDeniedFetchIds.add(event.requestId);
           await bounded(reject(), "NATIVE_REDIRECT_ABORT_TIMEOUT");
           if (closed || options.signal?.aborted) return;
+          const lateIdentity = networkIdentities.get(networkId), latePreflight = lateIdentity?.preflight;
+          const lateSource = latePreflight?.identity, lateGate = preflightRegistrationGates.get(networkId);
+          // The denied OPTIONS can acquire its exact native POST metadata while
+          // its abort acknowledgement is pending. This only explains the denied
+          // pause; it creates no read record, completion or POST authority.
+          const exactDeniedPost = Boolean(lateIdentity && latePreflight && lateSource &&
+            lateGate?.reason === "REGISTERED" && lateGate.generation === deniedGeneration &&
+            lateGate.sourceNetworkId === latePreflight.networkId && !preflightGateOverflow &&
+            lateIdentity.generation === deniedGeneration && !failedNetworkIdentities.has(lateIdentity) &&
+            lateIdentity.method === "OPTIONS" && lateIdentity.url === event.request.url && !lateIdentity.hasBody &&
+            (lateIdentity.frameId === undefined || lateIdentity.frameId === rootFrameId) &&
+            latePreflight.generation === deniedGeneration && !latePreflight.used &&
+            networkIdentities.get(latePreflight.networkId) === lateSource && !failedNetworkIdentities.has(lateSource) &&
+            lateSource.generation === deniedGeneration && lateSource.frameId === rootFrameId &&
+            lateSource.loaderId === denialDocument.loaderId && loaderOwners.get(lateSource.loaderId) === deniedGeneration &&
+            lateSource.url === event.request.url && lateSource.method === "POST" && lateSource.hasBody && lateSource.body !== null &&
+            ["xhr", "fetch"].includes(lateSource.kind) && !lateSource.preflight);
           if (generation !== deniedGeneration || generation.retired || boundaryPending || awaitingDocument ||
-              committedDocument !== denialDocument || networkIdentities.has(networkId) || pendingPreflightIdentities.has(networkId)) {
+              committedDocument !== denialDocument || denialDocument.record.failed ||
+              !denialDocumentIdentity || failedNetworkIdentities.has(denialDocumentIdentity) ||
+              networkIdentities.get(denialDocument.record.networkId) !== denialDocumentIdentity ||
+              loaderOwners.get(denialDocument.loaderId) !== deniedGeneration ||
+              Boolean((lateIdentity || lateGate) && !exactDeniedPost) || pendingPreflightIdentities.has(networkId)) {
             firstFatal ??= { ...diagnostic("LOADER_IDENTITY"), operation: "REQUEST_RELEASE",
               recordGenerationCurrent: generation === deniedGeneration, recordGenerationRetired: deniedGeneration.retired,
               missingNetworkBoundaryPending: boundaryPending };

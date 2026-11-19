@@ -44,6 +44,42 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllEnvs());
 describe("terminal learner to coding responder", () => {
+  it("exposes persisted closed source diagnostics without treating them as source proof", () => {
+    const result = discoveryFailureDiagnosis({ outcome: "TOOL_FAILURE", checkpoint: {
+      stagehandFailure: { schemaVersion: 1, kind: "OWN_STAGEHAND_FAILURE_DIAGNOSTIC", entries: [{ attempt: 2,
+        phase: "FIXED_INSPECTION", code: "STAGEHAND_WORKER_FAILED", fixedInspectionDiagnostic: {
+          officialSourceDiagnostic: { stage: "CONTROLLER_CAPTURE", rawOfficialCaptured: false, currentOfficialDocument: false, html: "PRIVATE" },
+          navigationFailureKind: "TIMEOUT", url: "PRIVATE",
+        } }] },
+    } });
+    expect(result).toMatchObject({ fixedInspectionSourceDiagnostic: { stage: "CONTROLLER_CAPTURE", rawOfficialCaptured: false,
+      currentOfficialDocument: false }, fixedInspectionNavigationFailureKind: "TIMEOUT", evidenceAuthority: false });
+    expect(JSON.stringify(result)).not.toContain("PRIVATE");
+  });
+  it("projects the fixed inspector's own native transport rejection separately from generic fallback", () => {
+    const result = discoveryFailureDiagnosis({ outcome: "TOOL_FAILURE", checkpoint: {
+      stagehandFailure: { schemaVersion: 1, kind: "OWN_STAGEHAND_FAILURE_DIAGNOSTIC", entries: [{ attempt: 2, phase: "FIXED_INSPECTION",
+        code: "STAGEHAND_WORKER_FAILED", fixedInspectionDiagnostic: { nativeRouterFailure: {
+          code: "NATIVE_REDIRECT_LOADER_MISMATCH", phase: "LOADER_IDENTITY", operation: "REQUEST_RELEASE", method: "OPTIONS",
+          identityPresent: true, url: "PRIVATE", headers: "PRIVATE" } } }] },
+    } });
+    expect(result).toMatchObject({ fixedInspectionNativeTransportDiagnostic: { failureCode: "NATIVE_REDIRECT_LOADER_MISMATCH",
+      phase: "LOADER_IDENTITY", operation: "REQUEST_RELEASE", method: "OPTIONS", identityPresent: true }, evidenceAuthority: false });
+    expect(JSON.stringify(result)).not.toContain("PRIVATE");
+  });
+  it("reports retained budget omission markers without inventing diagnostic contents", () => {
+    const project = (entry: object) => discoveryFailureDiagnosis({ outcome: "TOOL_FAILURE", checkpoint: {
+      stagehandFailure: { schemaVersion: 1, kind: "OWN_STAGEHAND_FAILURE_DIAGNOSTIC", entries: [{ attempt: 2,
+        phase: "FIXED_INSPECTION", code: "STAGEHAND_WORKER_FAILED", ...entry }] },
+    } });
+    expect(project({ fixedInspectionDiagnosticOmittedForBudget: true, fixedInspectionDiagnosticSha256: "a".repeat(64) }))
+      .toMatchObject({ fixedInspectionDiagnosticRetention: "OMITTED_FOR_BUDGET", evidenceAuthority: false });
+    expect(project({ fixedInspectionDiagnostic: { html: "PRIVATE" } })).toMatchObject({ fixedInspectionDiagnosticRetention: "PRESENT" });
+    for (const entry of [{}, { fixedInspectionDiagnosticOmittedForBudget: true },
+      { fixedInspectionDiagnosticOmittedForBudget: true, fixedInspectionDiagnosticSha256: "PRIVATE" }])
+      expect(project(entry)).not.toHaveProperty("fixedInspectionDiagnosticRetention");
+    expect(JSON.stringify(project({ fixedInspectionDiagnostic: { html: "PRIVATE" } }))).not.toContain("PRIVATE");
+  });
   it.each([...cpsCatalogIdentityFailureStages, "PRIVATE"])("preserves only finite catalog failure stage %s across the helper and owned diagnosis", stage => {
     const diagnostic = safeFixedInspectionSourceDiagnostic({ cpsCatalogIdentityFailureStage: stage, html: "PRIVATE" });
     const transported = safeBrowserFailureDiagnostics({ cpsCatalogIdentityFailureStage: stage, headers: "PRIVATE" });

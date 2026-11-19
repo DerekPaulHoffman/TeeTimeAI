@@ -1761,9 +1761,12 @@ describe("browser discovery persistence", () => {
     expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
   });
 
-  it("allows explicit high-confidence phone-only proof to replace stale runnable metadata", async () => {
+  it.each([
+    { now: "2026-11-18T12:00:00.000Z", accepted: true },
+    { now: "2026-11-19T12:00:00.000Z", accepted: false },
+  ])("applies explicit high-confidence phone-only proof only before review expiry: $now", async ({ now, accepted }) => {
     vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(new Date("2026-11-18T12:00:00.000Z"));
+    vi.setSystemTime(new Date(now));
     onTestFinished(() => vi.useRealTimers());
     const updatedAt = new Date("2026-08-01T12:00:00.000Z");
     mockedPrisma.course.findUnique
@@ -1814,6 +1817,11 @@ describe("browser discovery persistence", () => {
       }
     });
 
+    if (!accepted) {
+      expect(result).toBeNull();
+      expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
+      return;
+    }
     expect(result).toEqual({ id: "course-westwoods" });
     expect(mockedPrisma.course.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
