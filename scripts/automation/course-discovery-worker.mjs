@@ -978,6 +978,7 @@ export function safeTeeItUpDelegationDiagnostic(value) {
   const bindingGates = ["directoryNameMatch", "directoryNameTimeZoneMatch", "directoryIdentityMatch", "directoryIdentityUnique",
     "directoryIdentityOutdoor", "directoryIdentitySimulator", "directoryIdentityKindMissing", "directoryPhysicalFallbackAvailable", "directoryPhysicalFallbackRequired", "directoryPostalRepresentationMatch",
     "directoryPhysicalSchemaValid", "directoryPhysicalCountryValid", "directoryPhysicalOutdoorValid", "directoryPhysicalPhoneFieldValid", "directoryPhysicalIdsUnique",
+    "directoryPhysicalAddressParseValid", "directoryPhysicalPostalRestorationUsed", "directoryPhysicalNumberMatch", "directoryPhysicalStreetNameMatch", "directoryPhysicalRegionMatch", "directoryPhysicalPostalMatch", "directoryPhysicalUnitMatch",
     "directoryPhysicalStreetMatch", "directoryPhysicalPhoneMatch", "directoryPhysicalTimeZoneMatch", "directoryPhysicalContactMatch", "directoryPhysicalContactUnique", "directoryPhysicalNameMatch", "directoryPhysicalLocalityFieldsMatch"];
   try {
     if (!value || typeof value !== "object" || Array.isArray(value) || !stages.includes(value.stage) ||

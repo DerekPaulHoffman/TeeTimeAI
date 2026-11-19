@@ -23,7 +23,7 @@ export const teeItUpPhysicalContactProofSchema = sourceSchema.extend({ kind: z.l
 }).strict().refine(value => {
   const fields = Object.fromEntries(Object.keys(sourceSchema.shape).map(key => [key, value[key as keyof typeof value]]));
   const { semanticDigest, ...rest } = value;
-  const a = teeItUpCompleteStreetAddress(value.canonicalAddress), b = parseNamedContactAddress(value.officialAddress), c = teeItUpCompleteStreetAddress(value.providerAddress);
+  const a = teeItUpCompleteStreetAddress(value.canonicalAddress), b = parseNamedContactAddress(value.officialAddress), c = a && physicalProviderAddress(a, value.providerAddress, "US");
   const relation = nameRelation(value.canonicalName, value.publicLocationName, value.observedServiceLabel ? [value.observedServiceLabel] : []);
   return (!value.bookingEntryUrl || value.bookingEntryUrl !== value.bookingUrl && value.bookingEntryUrl !== value.officialDocumentUrl) &&
     value.sourceWitnessSha256 === physicalContactDigest(fields) && semanticDigest === physicalContactDigest(rest) && Boolean(a && b && c &&
@@ -62,6 +62,18 @@ type FullAddress = NonNullable<ReturnType<typeof teeItUpCompleteStreetAddress>>;
 function sameExceptLocality(a: FullAddress, b: FullAddress) {
   const { locality: _a, ...first } = a, { locality: _b, ...second } = b; void _a; void _b;
   return physicalContactDigest(first) === physicalContactDigest(second);
+}
+/** Preserve the provider's literal address. Only an independently known US
+ * leading-zero ZIP may have lost that one zero in its numeric representation.
+ * Every other printed component still passes the complete address comparison. */
+function physicalProviderAddress(canonical: FullAddress, value: string, country: unknown) {
+  const direct = teeItUpCompleteStreetAddress(value);
+  if (direct) return direct;
+  if (country !== "US" || !/^0[1-9]\d{3}$/u.test(canonical.postalCode)) return;
+  const printed = /^(.*, )([A-Za-z ]{2,40}) ([1-9]\d{3})(?:,? (US|USA|United States(?: of America)?))?$/iu.exec(clean(value).replace(/\s*,\s*/gu, ", "));
+  if (!printed || printed[3] !== canonical.postalCode.slice(1)) return;
+  const parsed = teeItUpCompleteStreetAddress(`${printed[1]}${printed[2]} 0${printed[3]}${printed[4] ? `, ${printed[4]}` : ""}`);
+  return parsed && parsed.region === canonical.region && sameExceptLocality(canonical, parsed) ? parsed : undefined;
 }
 type Node = DefaultTreeAdapterMap["node"];
 type Element = DefaultTreeAdapterMap["element"];
@@ -298,6 +310,7 @@ export function deriveNativePhysicalContactSource(source: OfficialIdentitySource
 function nonBusinessLabel(value: string) { return value.length < 2 || value.length > 120 || /\b(?:account|member|checkout|login|payment|billing|mailing|corporate|fax)\b/iu.test(value); }
 export function bindTeeItUpPhysicalContactFacility(source: OfficialIdentitySource, contact: NativePhysicalContactSource, directory: unknown,
   onGate?: (key: "directoryPhysicalSchemaValid" | "directoryPhysicalCountryValid" | "directoryPhysicalOutdoorValid" | "directoryPhysicalPhoneFieldValid" | "directoryPhysicalIdsUnique" |
+    "directoryPhysicalAddressParseValid" | "directoryPhysicalPostalRestorationUsed" | "directoryPhysicalNumberMatch" | "directoryPhysicalStreetNameMatch" | "directoryPhysicalRegionMatch" | "directoryPhysicalPostalMatch" | "directoryPhysicalUnitMatch" |
     "directoryPhysicalStreetMatch" | "directoryPhysicalPhoneMatch" | "directoryPhysicalTimeZoneMatch" | "directoryPhysicalContactMatch" | "directoryPhysicalContactUnique" | "directoryPhysicalNameMatch" | "directoryPhysicalLocalityFieldsMatch", value: boolean) => void): { physicalContactProof: TeeItUpPhysicalContactProof; facilityId: number; courseId: string } {
   const gate = (key: Parameters<NonNullable<typeof onGate>>[0], value: boolean) => { try { onGate?.(key, value); } catch { /* Diagnostics never change proof. */ } return value; };
   const fields = sourceSchema.safeParse(Object.fromEntries(Object.keys(sourceSchema.shape).map(key => [key, contact[key as keyof NativePhysicalContactSource]])));
@@ -314,17 +327,29 @@ export function bindTeeItUpPhysicalContactFacility(source: OfficialIdentitySourc
   }
   if (rows.success) gate("directoryPhysicalIdsUnique", new Set(rows.data.map(v => v.id)).size === rows.data.length && new Set(rows.data.map(v => v.courseId)).size === rows.data.length);
   if (!rows.success || !canonicalAddress || new Set(rows.data.map(v => v.id)).size !== rows.data.length || new Set(rows.data.map(v => v.courseId)).size !== rows.data.length) return reject();
-  gate("directoryPhysicalStreetMatch", rows.data.some(v => { const a = teeItUpCompleteStreetAddress(v.address); return Boolean(a && sameExceptLocality(canonicalAddress, a)); }));
+  const parsedAddresses = rows.data.map(v => physicalProviderAddress(canonicalAddress, v.address, v.country));
+  const parsed = parsedAddresses.filter((v): v is FullAddress => Boolean(v));
+  gate("directoryPhysicalAddressParseValid", parsed.length > 0);
+  gate("directoryPhysicalPostalRestorationUsed", rows.data.some((v, i) => !teeItUpCompleteStreetAddress(v.address) && Boolean(parsedAddresses[i])));
+  if (parsed.length) {
+    gate("directoryPhysicalNumberMatch", parsed.some(v => v.number === canonicalAddress.number));
+    gate("directoryPhysicalStreetNameMatch", parsed.some(v => ["before", "street", "type", "after"].every(key => v[key as keyof FullAddress] === canonicalAddress[key as keyof FullAddress])));
+    gate("directoryPhysicalRegionMatch", parsed.some(v => v.region === canonicalAddress.region));
+    gate("directoryPhysicalPostalMatch", parsed.some(v => v.postalCode === canonicalAddress.postalCode));
+    gate("directoryPhysicalUnitMatch", parsed.some(v => v.unitType === canonicalAddress.unitType && v.unit === canonicalAddress.unit));
+  }
+  gate("directoryPhysicalStreetMatch", parsed.some(v => sameExceptLocality(canonicalAddress, v)));
   gate("directoryPhysicalPhoneMatch", rows.data.some(v => normalizePublicCoursePhone(v.phone) === contact.publicCoursePhone));
   gate("directoryPhysicalTimeZoneMatch", rows.data.some(v => v.timeZone === source.timeZone));
-  const matches = rows.data.filter(v => { const a = teeItUpCompleteStreetAddress(v.address); return a && sameExceptLocality(canonicalAddress, a) &&
+  const matches = rows.data.filter((v, i) => { const a = parsedAddresses[i]; return a && sameExceptLocality(canonicalAddress, a) &&
     v.timeZone === source.timeZone && normalizePublicCoursePhone(v.phone) === contact.publicCoursePhone; });
   gate("directoryPhysicalContactMatch", matches.length > 0);
   if (!gate("directoryPhysicalContactUnique", matches.length === 1)) return reject();
-  const row = matches[0], provider = teeItUpCompleteStreetAddress(row.address);
+  const row = matches[0], provider = physicalProviderAddress(canonicalAddress, row.address, row.country);
   const nameMatches = gate("directoryPhysicalNameMatch", literal(row.name) === literal(contact.officialBrandName));
   const localityMatches = gate("directoryPhysicalLocalityFieldsMatch", Boolean(provider && (row.locality === undefined || literal(row.locality) === provider.locality) &&
-    (row.region === undefined || row.region.toUpperCase() === provider.region) && (row.postalCode === undefined || row.postalCode === provider.postalCode)));
+    (row.region === undefined || row.region.toUpperCase() === provider.region) && (row.postalCode === undefined || row.postalCode === provider.postalCode ||
+      /^0[1-9]\d{3}$/u.test(provider.postalCode) && /^[1-9]\d{3}$/u.test(row.postalCode) && `0${row.postalCode}` === provider.postalCode)));
   if (!provider || !nameMatches || !localityMatches) return reject();
   const data = { ...fields.data, kind: "OFFICIAL_PHYSICAL_CONTACT_BINDING_V1" as const, providerName: row.name, providerAddress: row.address,
     providerLocality: provider.locality, providerLocalityRelation: provider.locality === contact.officialLocality ? "SAME_RECORDED" as const : "DIFFERENT_RECORDED" as const,

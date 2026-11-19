@@ -72,4 +72,14 @@ describe("native country-club footer contact", () => {
       directoryPhysicalContactMatch: false, directoryPhysicalContactUnique: false });
     expect(JSON.stringify(gates)).not.toMatch(/example|https:|\+1508/iu);
   });
+  it.each(["MA", "Massachusetts"])("retains a provider's four-digit ZIP representation while proving the full address (%s)", state => {
+    const raw = `18 Old Turnpike Rd, Example, ${state} 1068, US`, gates: Record<string, boolean> = {};
+    const result = bindTeeItUpPhysicalContactFacility(source, derive(), [{ ...directory[0], address: raw, postalCode: "1068" }], (key, value) => { gates[key] = value; });
+    expect(result.physicalContactProof.providerAddress).toBe(raw);
+    expect(teeItUpPhysicalContactProofSchema.parse(JSON.parse(JSON.stringify(result.physicalContactProof)))).toEqual(result.physicalContactProof);
+    expect(gates.directoryPhysicalPostalRestorationUsed).toBe(true);
+  });
+  it.each(["18 Old Turnpike Rd, Example, MA 1069, US", "19 Old Turnpike Rd, Example, MA 1068, US", "18 Other Rd, Example, MA 1068, US", "18 Old Turnpike Rd, Example, CA 1068, US", "18 Old Turnpike Rd, Example, MA 106, US", "18 Old Turnpike Rd, Example, MA 1068, Canada"])("never fills a different or incomplete physical identity: %s", address => {
+    expect(() => bindTeeItUpPhysicalContactFacility(source, derive(), [{ ...directory[0], address }])).toThrow();
+  });
 });
