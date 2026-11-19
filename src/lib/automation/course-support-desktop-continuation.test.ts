@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { join, resolve } from "node:path";
-import { prepareOwnedDesktopContinuation, readDesktopContinuationCi, readDesktopContinuationProduction } from "../../../scripts/automation/course-support-desktop-continuation.mjs";
+import { prepareOwnedDesktopContinuation, readDesktopContinuationProduction } from "../../../scripts/automation/course-support-desktop-continuation.mjs";
 
 const PARENT = "11111111-2222-4333-8444-555555555555";
 const CHILD = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
@@ -86,54 +86,6 @@ describe("source reconciliation observes current canonical deployments", () => {
 });
 
 describe("original Desktop full-repair continuation", () => {
-  function qualificationFixture() {
-    const f = fixture(), originalGit = f.deps.git.getMockImplementation()!;
-    f.deps.git.mockImplementation((cwd, args) => cwd === f.worker && args[0] === "rev-parse" && args[1] === "HEAD"
-      ? CURRENT : originalGit(cwd, args));
-    const item = { ...f.item, releaseSha: CURRENT, continuationMode: "PUBLISHED_IMPLEMENTATION",
-      continuationTrigger: "UNFINISHED_FULL_REPAIR", releaseQualificationInspectionOnly: true };
-    const ci = { runtimeVersion: CURRENT, runId: 123, attempt: 2, conclusion: "success" };
-    return { ...f, item, ci, deps: { ...f.deps, readCiProof: vi.fn(() => ci) } };
-  }
-  it("inspects a pending original release only after stable exact CI and Ready canonical aliases", async () => {
-    const f = qualificationFixture();
-    const result = await prepareOwnedDesktopContinuation({ context: f.context, item: f.item }, f.deps);
-    expect(result).toMatchObject({ messageRequired: true, threadId: CHILD, monitoringVerified: false,
-      prompt: expect.stringContaining("RELEASE_QUALIFICATION_INSPECTION_ONLY") });
-    expect(result.prompt).toContain("not a recorded failed provider operation");
-    expect(f.deps.readCiProof).toHaveBeenCalledTimes(2);
-    expect(JSON.parse(readFileSync(result.receiptPath, "utf8"))).toMatchObject({ releaseQualificationInspectionOnly: true, qualificationCi: f.ci });
-    expect(await prepareOwnedDesktopContinuation({ context: f.context, item: f.item }, f.deps))
-      .toMatchObject({ outcome: "already_requested", messageRequired: false });
-    expect(f.client.request.mock.calls.some(([method]) => /start|resume|send|steer/u.test(method))).toBe(false);
-    expect(JSON.parse(readFileSync(f.launcherPath, "utf8"))).toEqual(f.launcher);
-  });
-  it.each(["unavailable", "wrong-sha", "failed", "changed", "building", "missing-alias"])("does not consume pending release intent when qualification is %s", async scenario => {
-    const f = qualificationFixture();
-    if (scenario === "unavailable") f.deps.readCiProof.mockImplementation(() => { throw Error("private CI details"); });
-    if (scenario === "wrong-sha") f.deps.readCiProof.mockReturnValue({ ...f.ci, runtimeVersion: BEFORE });
-    if (scenario === "failed") f.deps.readCiProof.mockReturnValue({ ...f.ci, conclusion: "failure" });
-    if (scenario === "changed") f.deps.readCiProof.mockReturnValueOnce(f.ci).mockReturnValue({ ...f.ci, attempt: 3 });
-    if (scenario === "building") f.deps.readProductionProof.mockReturnValue({ ...f.deps.readProductionProof(), state: "BUILDING" });
-    if (scenario === "missing-alias") f.deps.readProductionProof.mockReturnValue({ ...f.deps.readProductionProof(), aliases: ["teetimespot.com"] });
-    const result = await prepareOwnedDesktopContinuation({ context: f.context, item: f.item }, f.deps);
-    expect(result).toMatchObject({ messageRequired: false, monitoringVerified: false });
-    expect(JSON.stringify(result)).not.toContain("private CI details");
-    expect(f.deps.clientFactory).not.toHaveBeenCalled();
-    f.deps.readCiProof.mockReset().mockReturnValue(f.ci);
-    f.deps.readProductionProof.mockReturnValue({ source: "git", state: "READY", branch: "main", commitSha: CURRENT,
-      deploymentId: "dpl_qualified", aliases: ["teetimespot.com", "www.teetimespot.com"] });
-    expect(await prepareOwnedDesktopContinuation({ context: f.context, item: f.item }, f.deps)).toMatchObject({ messageRequired: true });
-  });
-  it("cannot mask a later main CI failure with a branch pass", () => {
-    const runs = [{ headSha: CURRENT, databaseId: 1, attempt: 1, status: "completed", conclusion: "success", startedAt: "2030-01-01T00:00:00Z" },
-      { headSha: CURRENT, databaseId: 2, attempt: 1, status: "completed", conclusion: "failure", startedAt: "2030-01-01T00:01:00Z" }];
-    expect(() => readDesktopContinuationCi({ selected: "/approved", currentSha: CURRENT }, () => JSON.stringify(runs)))
-      .toThrow("RUNTIME_CI_REQUIRED");
-    expect(readDesktopContinuationCi({ selected: "/approved", currentSha: CURRENT }, () => JSON.stringify([
-      runs[0], { ...runs[1], attempt: 2, conclusion: "success", startedAt: "2030-01-01T00:02:00Z" }]))).toEqual({
-      runtimeVersion: CURRENT, runId: 2, attempt: 2, conclusion: "success" });
-  });
   it.each(["building", "wrong-sha", "missing-alias", "cli-source", "unavailable"])("defers source reconciliation before consuming its intent when production is %s", async scenario => {
     const f = fixture();
     const item = { ...f.item, continuationMode: "DATA_ONLY", continuationTrigger: "UNFINISHED_FULL_REPAIR", sourceReconciliationOnly: true };

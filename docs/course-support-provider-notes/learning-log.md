@@ -2,17 +2,17 @@
 
 This file records generic process lessons only. It is not a provider-family note and scheduled responders must not read it during routine claimed work. Live incident and monitoring state remains in Postgres.
 
+## 2026-11-19 - Verify Snapshot Fields Before Changing Recovery Authority
+
+A read-only observer gained new checkpoint projections while an older saved snapshot was still current. Selecting absent properties rendered them as null, which was incorrectly interpreted as a missing durable checkpoint. Fresh schema-present evidence and the original native turn showed that the checkpoint existed and the worker had already resumed automatically. Withdraw the unpublished extra qualification path rather than relaxing an intentional PENDING-without-checkpoint fence. Preserve the actual failed receipts, source ownership and already-working continuation. Require an observation timestamp, explicit field presence and a current native-status read before diagnosing missing recovery state or publishing a replacement.
+
 ## 2026-11-19 - Run Browser Source-Chain Fixtures On The Qualified Runtime
 
 A complete candidate CI run passed both persistence jobs and 19,654 application tests, but one real-browser official-link/visible-identity/iframe fixture expired its sixty-second session deadline. That fixture chose system Google Chrome while CI's explicit runtime check qualified the installed Playwright Chromium. Prefer the same installed Chromium before system fallbacks and retain finite step diagnostics for official open, observed provider-link navigation and verified iframe open, preserving the original error as cause. Do not skip the fixture, expand production deadlines, permit unobserved iframe navigation or weaken identity/completeness assertions. This corrects a concrete test/runtime mismatch; the failed receipt remains, and successful CI is still required before release.
 
-## 2026-11-19 - Qualify A Pending Published Repair Without Inventing A Failure Checkpoint
+## 2026-11-19 - Pin A Fixture Clock Without Relaxing Evidence Expiry
 
-An original full-repair worker stopped at `RUNTIME_CI_REQUIRED` before the normal verifier ran. Its current published/deployed batch stayed PENDING, with no queued/running learning or verification job and no verifier failure checkpoint. CI later passed on the same head, but the selector required a checkpoint it could never receive from the stopped preparation. Do not invent that checkpoint, assume an access failure, retry the old operation, or retire the owner.
-
-Offer only the same current published full mission a release-qualification inspection when its demand/source/owner are current and no learning or verification work is queued/running. Independently read the latest exact-head CI, both actual Ready canonical Git aliases, then CI again before a one-use native intent. Changed/failed/pending CI, unavailable/split production, unpublished local code and active work retain their stops without a model wake or consumed intent. The original worker may inspect its retained preparation receipt and use the existing fresh recovery and trusted-upstream release path only when those gates admit it. This is no provider-read, verifier-replay, job-reset, monitoring or delivery grant. Isolated Postgres and native continuation regressions cover this precise missing-checkpoint boundary, active-work exclusions and pre-intent qualification failures.
-
-During release checks an older high-confidence phone-only fixture also expired at noon on the real wall clock, causing an unrelated false CI failure. Pin only the Date clock for both related acceptance/rejection fixtures and restore it after each case. Keep the production expiry rule and all assertions unchanged; a contact-only rejection must not pass merely because its fixture date has expired.
+During release checks an older high-confidence phone-only fixture expired at noon on the real wall clock, causing an unrelated false CI failure. Pin only the Date clock for both related acceptance/rejection fixtures and restore it after each case. Keep the production expiry rule and all assertions unchanged; a contact-only rejection must not pass merely because its fixture date has expired.
 
 ## 2026-11-19 - Separate A Cold Database Fixture Budget From Worker Deadlines
 
