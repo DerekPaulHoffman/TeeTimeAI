@@ -318,6 +318,34 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
       const item = await locator.evaluate(element => {
       const e = element as HTMLElement;
       const input = element as HTMLInputElement;
+      const composedParent = (node: Element): HTMLElement | null => node.parentElement ??
+        ((node.getRootNode() as ShadowRoot).host as HTMLElement | undefined) ?? null;
+      const composedClosest = (node: Element, selector: string) => {
+        for (let current: Element | null = node, depth = 0; current && depth < 32; current = composedParent(current), depth++) {
+          if (current.matches(selector)) return current;
+        }
+        return null;
+      };
+      const renderedText = (node: HTMLElement) => {
+        if (node.innerText?.trim()) return node.innerText;
+        const seen = new Set<Node>(); let size = 0, truncated = false;
+        const visit = (current: Node, depth: number): string => {
+          if (seen.has(current)) return "";
+          if (depth > 24 || seen.size >= 512 || size > 5000) { truncated = true; return ""; }
+          seen.add(current);
+          if (current.nodeType === Node.TEXT_NODE) { const text = current.textContent ?? ""; size += text.length; return text; }
+          if (current instanceof HTMLElement) {
+            if (["SCRIPT", "STYLE", "TEMPLATE", "NOSCRIPT"].includes(current.tagName) || current.hidden || current.getAttribute("aria-hidden") === "true") return "";
+            const style = getComputedStyle(current);
+            if (style.display === "none" || style.visibility === "hidden") return "";
+          }
+          const children = current instanceof HTMLSlotElement ? current.assignedNodes({ flatten: true })
+            : current instanceof HTMLElement && current.shadowRoot ? Array.from(current.shadowRoot.childNodes) : Array.from(current.childNodes);
+          return children.map(child => visit(child, depth + 1)).join(" ");
+        };
+        const text = visit(node, 0);
+        return truncated || size > 5000 ? "" : text;
+      };
       let label = [e.getAttribute("aria-label"), ...(Array.from(input.labels ?? []).map(l => l.textContent)),
         e.getAttribute("aria-labelledby")?.split(/\s+/u).map(id => document.getElementById(id)?.textContent).join(" ")].filter(Boolean).join(" ");
       // Some public widgets visually label custom dropdowns without wiring an
@@ -335,25 +363,28 @@ export async function collectInteractiveSimulatorResearch(input: { url: string; 
           }
         }
       }
-      const name = (e.innerText || e.getAttribute("aria-label") || "").trim().slice(0, 160);
-      const headings = name === "Add" ? Array.from(document.querySelectorAll<HTMLElement>("h1")).filter(h => h.getClientRects().length) : [];
+      const name = (e.innerText || e.getAttribute("aria-label") || renderedText(e)).trim().slice(0, 160);
+      const content = Array.from(document.querySelectorAll<HTMLElement>('main,[role="main"],[role="region"][aria-label="Main content"],section[aria-label="Main content"]')).filter(h => h.getClientRects().length);
+      const headingRoot = content.length === 1 ? content[0] : document;
+      const serviceHeadings = name === "Add" ? Array.from(headingRoot.querySelectorAll<HTMLElement>("h2")).filter(h => h.getClientRects().length) : [];
+      const headings = serviceHeadings.length ? serviceHeadings : name === "Add" ? Array.from(headingRoot.querySelectorAll<HTMLElement>("h1")).filter(h => h.getClientRects().length) : [];
       let selectionSummary = "";
       if (name === "Next") {
-        for (let group = e.parentElement, depth = 0; group && depth < 4 && !["BODY", "MAIN", "FORM"].includes(group.tagName); group = group.parentElement, depth++) {
+        for (let group = composedParent(e), depth = 0; group && depth < 6 && !["BODY", "MAIN", "FORM"].includes(group.tagName); group = composedParent(group), depth++) {
           const headings = Array.from(group.querySelectorAll<HTMLElement>("h2,h3")).filter(h => h.getClientRects().length && h.innerText.trim() === "Appointment summary");
-          if (headings.length === 1 && group.querySelectorAll("button").length <= 5 && group.querySelectorAll("a[href]").length <= 2 && !group.querySelector("input,select,textarea")) {
-            selectionSummary = group.innerText.trim().slice(0, 4001); break;
+          if (headings.length === 1 && group.querySelectorAll("button,market-button").length <= 5 && group.querySelectorAll("a[href],market-link").length <= 2 && !group.querySelector("input,select,textarea,market-input,market-select,market-textarea")) {
+            selectionSummary = renderedText(group).trim().slice(0, 4001); break;
           }
         }
       }
       return { tag: e.tagName.toLowerCase(), role: e.getAttribute("role") ?? "", name, label: label.slice(0, 200),
         hasPopup: e.getAttribute("aria-haspopup") ?? "",
         href: e instanceof HTMLAnchorElement ? e.href : undefined,
-        calendar: Boolean(e.closest('[role="grid"]')),
+        calendar: Boolean(composedClosest(e, '[role="grid"]')),
         inputType: input.type,
-        selectedValue: e.tagName === "SELECT" ? (element as HTMLSelectElement).selectedOptions[0]?.textContent ?? "" : e.innerText,
-        sensitiveForm: Boolean(e.closest("form")?.querySelector('input[type="password"],input[type="email"],input[type="tel"],[autocomplete^="cc-"]')),
-        insideForm: Boolean(e.closest("form")), publicHeading: headings.length === 1 ? headings[0].innerText.trim().slice(0, 201) : "", selectionSummary };
+        selectedValue: e.tagName === "SELECT" ? (element as HTMLSelectElement).selectedOptions[0]?.textContent ?? "" : renderedText(e),
+        sensitiveForm: Boolean(composedClosest(e, "form")?.querySelector('input[type="password"],input[type="email"],input[type="tel"],[autocomplete^="cc-"]')),
+        insideForm: Boolean(composedClosest(e, "form")), publicHeading: headings.length === 1 ? renderedText(headings[0]).trim().slice(0, 201) : "", selectionSummary };
       });
       return { ...item, squareServiceSelection: observedSquarePublicServiceControl(page!.url(), item, squareChoice) };
     };

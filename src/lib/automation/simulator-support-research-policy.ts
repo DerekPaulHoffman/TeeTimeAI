@@ -4,9 +4,10 @@ import { classifySimulatorSupportFailure, readSafeSimulatorSupportFailure, type 
 import { isAcuityPublicResearchRoot, isSimulatorPublicConfigurationSource, knownSimulatorPublicConfigurationFamily, simulatorPublicConfigurationSchema } from "@/lib/simulators/providers/public-configuration";
 import { blockedResourceDiagnosticsSchema } from "./simulator-blocked-resources";
 import { simulatorPageSurfacesSchema } from "./simulator-page-surfaces";
+import { isSquarePublicServiceCatalogUrl } from "./square-public-read-policy";
 
 export const SIMULATOR_RESEARCH_MAX_READS = 6;
-export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-document-scoped-evidence-v39";
+export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-document-scoped-evidence-v40";
 export function getSimulatorResearchImplementationVersion(url: string) {
   const family = knownSimulatorPublicConfigurationFamily(url);
   if (family === "TEESHEET" || family === "UPPER_HAND" || family === "YOUR_GOLF_BOOKING") return "public-calendar-provider-api-configuration-v1";
@@ -386,9 +387,37 @@ function isHistoricalCatalogControllerFailure(route: Partial<SimulatorResearchBl
   return Boolean(route.url && route.rendered && route.httpStatus === 0 && route.requestId && route.observedAt &&
     Number.isFinite(now.getTime()) && Number.isFinite(Date.parse(route.observedAt)) && Date.parse(route.observedAt) <= now.getTime() &&
     !route.accessControls?.length && route.researchImplementationVersion === "public-calendar-document-scoped-evidence-v37" &&
-    getSimulatorResearchImplementationVersion(route.url) === "public-calendar-document-scoped-evidence-v39" &&
+    getSimulatorResearchImplementationVersion(route.url) === "public-calendar-document-scoped-evidence-v40" &&
     route.failure?.stage === "PUBLIC_READ" && route.failure.category === "UNKNOWN" && route.failure.code === "UNCLASSIFIED_FAILURE" &&
     route.failure.researchPhase === "BROWSER_REQUEST" && route.failure.sourceLocation === "src/lib/automation/simulator-interactive-browser.ts:263");
+}
+
+/** The v39 collector saw Square's public catalog but dropped slotted labels.
+ * A changed collector may investigate it again; this is not rental or calendar
+ * proof. A current-version result cannot use this one-time capability wakeup. */
+export function repairedSlottedCatalogReceipt(input: { state: SimulatorResearchState;
+  priorFailedRoutes: readonly SimulatorResearchBlockedRoute[]; now: Date }) {
+  const { state, now } = input, latest = state.history.at(-1);
+  if (!latest || state.inFlight || state.readCount < 1 || state.readCount >= SIMULATOR_RESEARCH_MAX_READS ||
+      state.history.length !== state.readCount || !latest.rendered || latest.outcome !== "READ" || latest.failure ||
+      latest.researchImplementationVersion !== "public-calendar-document-scoped-evidence-v39" ||
+      getSimulatorResearchImplementationVersion(latest.sourceUrl) !== "public-calendar-document-scoped-evidence-v40" ||
+      !isSquarePublicServiceCatalogUrl(latest.sourceUrl) || latest.sourceUrl !== latest.requestedUrl ||
+      latest.publicReadEvidence?.method !== "BROWSER" || latest.publicReadEvidence.renderComplete !== false ||
+      !latest.renderWarning?.startsWith("SECONDARY_") || !latest.requestId ||
+      latest.configurationDiagnostic?.reason === "PUBLIC_PROVIDER_CONFIG_REJECTED" ||
+      !Number.isFinite(now.getTime()) || state.history.some(entry => entry.outcome !== "READ" || entry.failure ||
+        entry.httpStatus < 200 || entry.httpStatus >= 300 || entry.sourceFingerprint !== state.sourceFingerprint ||
+        entry.researchImplementationVersion !== "public-calendar-document-scoped-evidence-v39" || !entry.requestId ||
+        entry.publicReadEvidence?.sourceFingerprint !== state.sourceFingerprint || !entry.publicReadEvidence.accessControlsObserved ||
+        entry.publicReadEvidence.accessControls.length || !Number.isFinite(Date.parse(entry.observedAt)) || Date.parse(entry.observedAt) > now.getTime())) return null;
+  if (!state.history.some(entry => !entry.rendered && entry.publicReadEvidence?.method === "HTTP" &&
+      entry.requestedUrl === latest.requestedUrl && Date.parse(entry.observedAt) < Date.parse(latest.observedAt))) return null;
+  if (input.priorFailedRoutes.some(route => isProtectedSimulatorResearchDenial(route) || route.failure &&
+      !(isHistoricalCatalogControllerFailure(route, now) && state.history.some(entry => !entry.rendered &&
+        (entry.source === "official" || entry.source === "booking") && entry.publicReadEvidence?.method === "HTTP" &&
+        routeIdentity(entry.requestedUrl) === routeIdentity(route.url) && Date.parse(entry.observedAt) > Date.parse(route.observedAt!))))) return null;
+  return { sourceUrl: latest.sourceUrl, requestId: latest.requestId };
 }
 
 /** Retry the specifically corrected controller only after a new owned public
@@ -459,7 +488,7 @@ export function hasDifferentPublicReadAfterCatalogRepair(input: {
       latest.sourceFingerprint === input.state.sourceFingerprint && latest.publicReadEvidence?.sourceFingerprint === input.state.sourceFingerprint &&
       latest.publicReadEvidence.method === "HTTP" && latest.publicReadEvidence.accessControlsObserved && !latest.publicReadEvidence.accessControls.length &&
       latest.researchImplementationVersion === "public-calendar-document-scoped-evidence-v38" &&
-      getSimulatorResearchImplementationVersion(latest.requestedUrl) === "public-calendar-document-scoped-evidence-v39" &&
+      getSimulatorResearchImplementationVersion(latest.requestedUrl) === "public-calendar-document-scoped-evidence-v40" &&
       Number.isFinite(Date.parse(latest.observedAt)) && Date.parse(latest.observedAt) <= input.now.getTime() &&
       roots.some(root => routeIdentity(root) === routeIdentity(latest.requestedUrl)) &&
       input.priorFailedRoutes.some(route => isHistoricalCatalogControllerFailure(route, input.now) &&
@@ -472,7 +501,7 @@ export function hasDifferentPublicReadAfterCatalogRepair(input: {
   if (!latest || input.state.inFlight || input.state.readCount >= SIMULATOR_RESEARCH_MAX_READS || latest.outcome !== "HARD_FAILED" || !latest.rendered || latest.httpStatus !== 0 ||
       latest.sourceFingerprint !== input.state.sourceFingerprint || !latest.requestId ||
       latest.researchImplementationVersion !== "public-calendar-document-scoped-evidence-v37" ||
-      getSimulatorResearchImplementationVersion(latest.requestedUrl) !== "public-calendar-document-scoped-evidence-v39" ||
+      getSimulatorResearchImplementationVersion(latest.requestedUrl) !== "public-calendar-document-scoped-evidence-v40" ||
       failure?.stage !== "PUBLIC_READ" || failure.category !== "UNKNOWN" || failure.code !== "UNCLASSIFIED_FAILURE" ||
       failure.researchPhase !== "BROWSER_REQUEST" || failure.sourceLocation !== "src/lib/automation/simulator-interactive-browser.ts:263" ||
       !Number.isFinite(input.now.getTime()) || !Number.isFinite(Date.parse(latest.observedAt)) || Date.parse(latest.observedAt) > input.now.getTime()) return false;
