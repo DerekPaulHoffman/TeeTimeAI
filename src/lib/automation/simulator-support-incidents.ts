@@ -4,7 +4,7 @@ import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-f
 import { createSimulatorSupportIntentDigest, isCurrentSimulatorSupportSource, isValidSimulatorEngineeringAuthority, isValidSimulatorSupportClaim, SIMULATOR_SUPPORT_SOURCE_SELECT, type SimulatorEngineeringAuthority } from "./simulator-support-policy";
 import type { CourseDispatchAudit } from "./course-support-course-dispatch";
 import { simulatorCapabilityWakeupReceipt } from "./simulator-capability-wakeup";
-import { getSimulatorResearchRetryGuide, readSimulatorResearchFailureMemory, readSimulatorResearchState } from "./simulator-support-research-policy";
+import { getSimulatorResearchRetryGuide, hasDifferentPublicReadAfterCatalogRepair, readSimulatorResearchFailureMemory, readSimulatorResearchState } from "./simulator-support-research-policy";
 
 const DISPATCH_PROMPT_VERSION = "course-support-course-dispatch-v1";
 const ENGINEERING_HISTORY_LIMIT = 64;
@@ -39,18 +39,21 @@ async function hasExhaustedSimulatorDispatch(tx: Prisma.TransactionClient, incid
       claim.sourceFingerprint !== fingerprint || claim.releaseSha || claim.plannedPaths.length) return false;
   if (latest.completedAt && simulatorCapabilityWakeupReceipt({ audit, incidentId, courseId: audit.target.courseId,
     offeringId: audit.target.offeringId, sourceFingerprint: fingerprint, completedAt: latest.completedAt, now })) return false;
-  if (previous?.outcome === latest.outcome) {
-    const prior = parseCourseDispatchAudit(previous.audit)?.simulatorClaim;
-    if (prior?.phase === "CLAIMED" && prior.sourceFingerprint === fingerprint && !prior.releaseSha && !prior.plannedPaths.length) return true;
-  }
   // A failed rendered read or a concrete public-route failure already has a
   // durable owner result. A cooldown alone supplies no new route or evidence.
-  let state;
+  let state, memory;
   try {
     state = readSimulatorResearchState(audit.simulatorResearch, fingerprint);
+    memory = readSimulatorResearchFailureMemory(audit.simulatorResearchPriorFailures);
   } catch {
     // An unreadable closeout cannot justify launching another worker.
     return true;
+  }
+  if ((!memory || memory.sourceFingerprint === fingerprint) && hasDifferentPublicReadAfterCatalogRepair({ ...sources, state, now,
+    priorFailedRoutes: memory?.routes ?? [] })) return false;
+  if (previous?.outcome === latest.outcome) {
+    const prior = parseCourseDispatchAudit(previous.audit)?.simulatorClaim;
+    if (prior?.phase === "CLAIMED" && prior.sourceFingerprint === fingerprint && !prior.releaseSha && !prior.plannedPaths.length) return true;
   }
   const latestRead = state.history.at(-1);
   if (latestRead?.rendered && [401, 403, 404].includes(latestRead.httpStatus) &&
@@ -62,7 +65,6 @@ async function hasExhaustedSimulatorDispatch(tx: Prisma.TransactionClient, incid
       [401, 403, 404].includes(entry.httpStatus) ||
       entry.configurationDiagnostic?.reason === "PUBLIC_PROVIDER_CONFIG_REJECTED"));
   if (!attempted || state.inFlight) return false;
-  const memory = readSimulatorResearchFailureMemory(audit.simulatorResearchPriorFailures);
   return !getSimulatorResearchRetryGuide({ ...sources, state, now,
     priorFailedRoutes: memory?.sourceFingerprint === fingerprint ? memory.routes : [],
   }).bookingResearchRequired;
