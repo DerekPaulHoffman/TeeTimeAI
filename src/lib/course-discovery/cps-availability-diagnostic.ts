@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { captureCpsAvailabilityStructure, type CpsAvailabilityStructure } from "./cps-availability-structure";
 
 const count = z.union([z.number().int().min(0).max(500), z.literal("OVER_LIMIT")]);
 const round = z.enum(["MISSING", "NULL", "ZERO", "NINE", "EIGHTEEN", "OTHER"]);
@@ -21,6 +22,7 @@ export const cpsAvailabilityDiagnosticSchema = z.object({
 type Diagnostic = z.infer<typeof cpsAvailabilityDiagnosticSchema>;
 type Issue = { code: string; path: readonly PropertyKey[]; keys?: readonly string[] };
 const failures = new WeakMap<object, Diagnostic>();
+const structures = new WeakMap<object, CpsAvailabilityStructure>();
 const object = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const boundedCount = (value: number) => value > 500 ? "OVER_LIMIT" as const : value;
 const valueType = (value: unknown) => value === undefined ? "MISSING" : value === null ? "NULL" : Array.isArray(value) ? "ARRAY" :
@@ -56,10 +58,18 @@ export function failCpsAvailability(stage: Diagnostic["stage"], value: unknown, 
       }), ...(stage === "ROUND_LENGTH" ? { roundLength: { holes: category(object(row).holes), defaultHoles: category(object(row).defaultHoles) } } : {}) };
     const parsed = cpsAvailabilityDiagnosticSchema.safeParse(diagnostic);
     if (parsed.success) failures.set(error, parsed.data);
+    if (stage === "SCHEMA" && parsed.success && parsed.data.issues.some(issue => issue.field === "CONTENT" && issue.valueType === "OBJECT")) {
+      const structure = captureCpsAvailabilityStructure(rows);
+      if (structure) structures.set(error, structure);
+    }
   } catch { /* Optional diagnostics cannot replace the parser's rejection. */ }
   throw error;
 }
 export function getCpsAvailabilityDiagnostic(error: unknown) {
   const value = error && typeof error === "object" ? failures.get(error) : undefined;
+  return value ? structuredClone(value) : undefined;
+}
+export function getPrivateCpsAvailabilityStructure(error: unknown) {
+  const value = error && typeof error === "object" ? structures.get(error) : undefined;
   return value ? structuredClone(value) : undefined;
 }

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { isIP } from "node:net";
 import { z } from "zod";
 import { cpsAvailabilityDiagnosticSchema } from "./cps-availability-diagnostic";
+import { cpsAvailabilityStructureSchema } from "./cps-availability-structure";
 import { uscheduleReadGates } from "@/lib/simulators/providers/uschedule-read-diagnostic";
 import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import { existingAdapterMetadataSchema } from "./existing-adapter-schema";
@@ -530,6 +531,7 @@ const accessRequestFailureDiagnosticSchema = z.object({
   publicHeaderDiagnostic: publicHeaderFailureDiagnosticSchema.optional().describe("Closed facts captured at an unchanged native public-read header denial. These facts never authorize requests or prove the cause of a later timeout."),
 }).strict();
 export const accessExecutionDiagnosticSchema = accessRequestFailureDiagnosticSchema.extend({
+  privateCpsAvailabilityStructure: cpsAvailabilityStructureSchema.optional().describe("Private failure structure without scalar values; excluded from aggregate replay diagnostics and bound to the failed job before owner disclosure."),
   cpsAvailability: cpsAvailabilityDiagnosticSchema.optional().describe("Closed availability parser failure predicates only; no source, identity, request, completeness or activation authority."),
   mindbodyReplay: z.object({
     stage: z.enum(["IDLE", "WAIT_DOCUMENT", "WAIT_RENDERED", "RAW_CATALOG", "RENDERED_CATALOG", "COMPARE_CATALOG", "CATALOG_READY", "FILTER_SETTLEMENT",
@@ -554,6 +556,9 @@ export const accessExecutionDiagnosticSchema = accessRequestFailureDiagnosticSch
     retryable: z.boolean(), httpStatus: z.number().int().min(100).max(599).optional(), uscheduleGate: z.enum(uscheduleReadGates).optional(),
   }).strict().optional(),
 }).strict().superRefine((diagnostic, ctx) => {
+  if (diagnostic.privateCpsAvailabilityStructure && (diagnostic.code !== "CPS_AVAILABILITY_INCOMPLETE" ||
+      diagnostic.cpsAvailability?.stage !== "SCHEMA" || !diagnostic.cpsAvailability.issues.some(issue => issue.field === "CONTENT" && issue.valueType === "OBJECT")))
+    ctx.addIssue({ code: "custom", message: "Private structure requires its actual content-object rejection", path: ["privateCpsAvailabilityStructure"] });
   if (diagnostic.cpsAvailability && diagnostic.code !== "CPS_AVAILABILITY_INCOMPLETE")
     ctx.addIssue({ code: "custom", message: "Availability parser facts require their fixed failure code", path: ["cpsAvailability"] });
   if (diagnostic.simulatorError?.uscheduleGate && (diagnostic.code !== "SIMULATOR_PROVIDER_ERROR" || !["INVALID_SOURCE", "SCHEMA_CHANGED"].includes(diagnostic.simulatorError.code)))

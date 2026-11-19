@@ -1,7 +1,7 @@
 import { discoveryError } from "./course-discovery-client.mjs";
 import { canonicalStagehandData as canonical, stagehandDataHash as hash, createStagehandSourceCheckpoint } from "./course-discovery-stagehand-source.mjs";
 import { projectSourceDiagnostic, sourceTransportCodes, safeNativeRouterFailure } from "./stagehand/source-diagnostic.mjs";
-import { safeTeeItUpDelegationDiagnostic, safeFixedAdapterReadDiagnostic, safeFixedInspectionSourceDiagnostic, safePrivateCourseNameComparison } from "./course-discovery-worker.mjs";
+import { safeTeeItUpDelegationDiagnostic, safeFixedAdapterReadDiagnostic, safeFixedInspectionSourceDiagnostic, safePrivateCourseNameComparison, safePrivateCpsAvailabilityStructure } from "./course-discovery-worker.mjs";
 import { currentStagehandInspectionDiagnostic, currentStagehandPrivateCourseNameComparison, safeInspectionReadability, safeInspectionLandingDiagnostic, safeInspectionExecutionDiagnostic, stagehandInspectionFailureCodes } from "./course-discovery-stagehand-inspection.mjs";
 
 const LIMIT = 32000, KIND = "OWN_STAGEHAND_FAILURE_DIAGNOSTIC";
@@ -88,6 +88,21 @@ function validEntry(value, job, now) {
     projected.privateCourseNameComparisonSha256 = value.privateCourseNameComparisonSha256;
     projected.privateCourseNameComparisonOmittedForBudget = true;
   }
+  if (value.privateCpsAvailabilityStructure !== undefined) {
+    const structure = safePrivateCpsAvailabilityStructure(value.privateCpsAvailabilityStructure);
+    if (value.phase !== "REPLAY" || value.code !== "DISCOVERY_REPLAY_INCOMPLETE" || value.replayFailureCode !== "CPS_AVAILABILITY_INCOMPLETE" ||
+        !structure || canonical(structure) !== canonical(value.privateCpsAvailabilityStructure) || value.privateCpsAvailabilityStructureSha256 !== hash(structure) ||
+        Date.parse(structure.observedAt) < Date.parse(job.firstPickedUpAt) || Date.parse(structure.observedAt) > Math.min(Date.parse(job.deadlineAt), Date.parse(value.observedAt), now)) return false;
+    projected.privateCpsAvailabilityStructure = structure;
+    projected.privateCpsAvailabilityStructureSha256 = value.privateCpsAvailabilityStructureSha256;
+    projected.replayFailureCode = value.replayFailureCode;
+  } else if (value.privateCpsAvailabilityStructureSha256 !== undefined) {
+    if (value.phase !== "REPLAY" || value.code !== "DISCOVERY_REPLAY_INCOMPLETE" || value.replayFailureCode !== "CPS_AVAILABILITY_INCOMPLETE" ||
+        !sha(value.privateCpsAvailabilityStructureSha256) || value.privateCpsAvailabilityStructureOmittedForBudget !== true) return false;
+    projected.privateCpsAvailabilityStructureSha256 = value.privateCpsAvailabilityStructureSha256;
+    projected.privateCpsAvailabilityStructureOmittedForBudget = true;
+    projected.replayFailureCode = value.replayFailureCode;
+  }
   return canonical(projected) === canonical(value);
 }
 
@@ -109,6 +124,9 @@ export function packStagehandCheckpoint({ reference, failure, progress }) {
     ...(failure ? { stagehandFailure: structuredClone(failure) } : {}) };
   if (size(value) > LIMIT && value.stagehandFailure) for (const entry of value.stagehandFailure.entries) {
     if (size(value) <= LIMIT) break;
+    if (entry.privateCpsAvailabilityStructure) {
+      delete entry.privateCpsAvailabilityStructure; entry.privateCpsAvailabilityStructureOmittedForBudget = true;
+    }
     if (entry.privateCourseNameComparison) {
       delete entry.privateCourseNameComparison; entry.privateCourseNameComparisonOmittedForBudget = true;
     }
@@ -138,6 +156,8 @@ export function createStagehandFailureCheckpoint({ job, report, error, phase, me
   const fixedInspectionDiagnostic = phase === "FIXED_INSPECTION" ? currentStagehandInspectionDiagnostic(error, job, startedAt, now) : undefined;
   const privateCourseNameComparison = phase === "FIXED_INSPECTION" ? currentStagehandPrivateCourseNameComparison(error, job, startedAt, now) : undefined;
   const code = [error?.code, error?.message].find(value => codes.has(value)) ?? "STAGEHAND_WORKER_FAILED";
+  const privateCpsAvailabilityStructure = phase === "REPLAY" && code === "DISCOVERY_REPLAY_INCOMPLETE" &&
+    error?.details?.reason === "CPS_AVAILABILITY_INCOMPLETE" ? safePrivateCpsAvailabilityStructure(error?.privateCpsAvailabilityStructure) : undefined;
   const entry = { attempt: job.attempts, observedAt: new Date(now).toISOString(), phase: phases.has(phase) ? phase : "UNKNOWN", code,
     ...(code === "STAGEHAND_WORKER_FAILED" ? { workerErrorName: workerErrorNames.includes(error?.name) ? error.name : "UNKNOWN" } : {}),
     counts: { completedModelCalls: count(metrics?.modelCalls, 1000000), sourceElapsedMs: count(metrics?.sourceElapsedMs, 900000),
@@ -147,7 +167,8 @@ export function createStagehandFailureCheckpoint({ job, report, error, phase, me
     sourceResumed: metrics?.sourceResumed === true,
     ...(diagnostic ? { diagnostic, diagnosticSha256: hash(diagnostic) } : {}),
     ...(fixedInspectionDiagnostic ? { fixedInspectionDiagnostic, fixedInspectionDiagnosticSha256: hash(fixedInspectionDiagnostic) } : {}),
-    ...(privateCourseNameComparison ? { privateCourseNameComparison, privateCourseNameComparisonSha256: hash(privateCourseNameComparison) } : {}) };
+    ...(privateCourseNameComparison ? { privateCourseNameComparison, privateCourseNameComparisonSha256: hash(privateCourseNameComparison) } : {}),
+    ...(privateCpsAvailabilityStructure ? { privateCpsAvailabilityStructure, privateCpsAvailabilityStructureSha256: hash(privateCpsAvailabilityStructure), replayFailureCode: "CPS_AVAILABILITY_INCOMPLETE" } : {}) };
   if (!validEntry(entry, job, now)) throw discoveryError("STAGEHAND_SOURCE_SCOPE_INVALID");
   const prior = readStagehandFailure({ ...job, checkpoint: { stagehandFailure: previous } }, now);
   const entries = [...(prior?.entries ?? []).filter(value => value.attempt < job.attempts), entry].slice(-2);

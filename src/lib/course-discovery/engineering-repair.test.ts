@@ -46,24 +46,28 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllEnvs());
 describe("terminal learner to coding responder", () => {
   it.each(["owned", "foreign-owner", "foreign-batch", "cycle-drift", "source-drift", "runtime-drift", "unlinked-child",
-    "late-observation", "early-observation", "digest-drift", "request-drift", "checkpoint-job-drift", "omitted", "unsafe-input"])(
-    "keeps name comparisons private and tied to the original reciprocal failed child: %s", async scenario => {
+    "late-observation", "early-observation", "digest-drift", "request-drift", "checkpoint-job-drift", "omitted", "unsafe-input"].flatMap(scenario => ["names", "availability"].map(kind => ({ scenario, kind }))))(
+    "keeps $kind private and tied to the original reciprocal failed child: $scenario", async ({ scenario, kind }) => {
       const link = { version: 1, kind: "LATE_ENGINEERING_RECOVERY", originalJobId: "job1", jobId: "child1", batchId: "batch1",
         incidentId: "incident1", ownerThreadId: "owner1", cycle: 1, sourceFingerprint: failure.job.sourceFingerprint,
         releaseSha: "b".repeat(40), runtimeVersion: "c".repeat(40), requestedAt: "2030-01-01T12:10:00.000Z",
         originalFirstPickedUpAt: picked.toISOString(), originalDeadlineAt: failure.job.deadlineAt.toISOString() };
       failure.job.result = { engineeringHandoff: receipt(), learningRecoveries: [link] };
-      const evidence = { schemaVersion: 1, kind: "CPS_NAMED_COURSE_COMPARISON", observedAt: "2030-01-01T12:11:00.000Z",
-        canonicalName: "harbor pointe", officialNames: ["north", "south"], providerNames: ["harbor north", "harbor south"] };
+      const evidence = kind === "names" ? { schemaVersion: 1, kind: "CPS_NAMED_COURSE_COMPARISON", observedAt: "2030-01-01T12:11:00.000Z",
+        canonicalName: "harbor pointe", officialNames: ["north", "south"], providerNames: ["harbor north", "harbor south"] } :
+        { schemaVersion: 1, kind: "CPS_AVAILABILITY_CONTENT_STRUCTURE", observedAt: "2030-01-01T12:11:00.000Z", truncated: false,
+          nodes: [{ path: [], type: "OBJECT", count: 1 }, { path: ["teeTimes"], type: "ARRAY", count: 0 }] };
       if (scenario === "late-observation") evidence.observedAt = "2030-01-01T12:13:00.000Z";
       if (scenario === "early-observation") evidence.observedAt = "2030-01-01T12:09:00.000Z";
       if (scenario === "unsafe-input") Object.assign(evidence, { url: "https://private.example/" });
       const request = { target: { courseId: "course1" } };
       const diagnostic = { cpsCatalogIdentityFailureStage: "NAMED_COURSE_NAMES" };
-      const entry = { attempt: 1, code: "ADAPTER_IDENTITY_MISMATCH", phase: "FIXED_INSPECTION", observedAt: "2030-01-01T12:11:01.000Z",
-        fixedInspectionDiagnostic: diagnostic, fixedInspectionDiagnosticSha256: stagehandDataHash(diagnostic),
-        ...(scenario === "omitted" ? { privateCourseNameComparisonOmittedForBudget: true } : { privateCourseNameComparison: evidence }),
-        privateCourseNameComparisonSha256: scenario === "digest-drift" ? "f".repeat(64) : stagehandDataHash(evidence) };
+      const privateKey = kind === "names" ? "privateCourseNameComparison" : "privateCpsAvailabilityStructure";
+      const entry = { attempt: 1, code: kind === "names" ? "ADAPTER_IDENTITY_MISMATCH" : "DISCOVERY_REPLAY_INCOMPLETE",
+        phase: kind === "names" ? "FIXED_INSPECTION" : "REPLAY", observedAt: "2030-01-01T12:11:01.000Z",
+        ...(kind === "names" ? { fixedInspectionDiagnostic: diagnostic, fixedInspectionDiagnosticSha256: stagehandDataHash(diagnostic) } : { replayFailureCode: "CPS_AVAILABILITY_INCOMPLETE" }),
+        ...(scenario === "omitted" ? { [`${privateKey}OmittedForBudget`]: true } : { [privateKey]: evidence }),
+        [`${privateKey}Sha256`]: scenario === "digest-drift" ? "f".repeat(64) : stagehandDataHash(evidence) };
       const child = { ...failure.job, id: "child1", request, firstPickedUpAt: new Date("2030-01-01T12:10:00Z"),
         deadlineAt: new Date("2030-01-01T12:25:00Z"), completedAt: new Date("2030-01-01T12:12:00Z"),
         result: { learningRecoveryOf: scenario === "unlinked-child" ? { ...link, batchId: "foreign" } : link,
@@ -76,10 +80,11 @@ describe("terminal learner to coding responder", () => {
         ownerThreadId: scenario === "foreign-owner" ? "other" : "owner1", courseId: "course1", incidentId: "incident1",
         incidentCycle: scenario === "cycle-drift" ? 2 : 1, now,
         providerSnapshotFingerprint: scenario === "source-drift" ? "f".repeat(64) : buildCourseSupportProviderSnapshotFingerprint(failure.source.course as never) });
-      if (scenario === "owned") expect(result).toMatchObject({ courseNameComparisonEvidence: evidence, evidenceAuthority: false, untrustedPageEvidence: true });
+      if (scenario === "owned") expect(result).toMatchObject({ [kind === "names" ? "courseNameComparisonEvidence" : "availabilityStructureEvidence"]: evidence, evidenceAuthority: false, untrustedPageEvidence: true });
       else expect(result).toBeNull();
       expect(JSON.stringify(discoveryFailureDiagnosis(child))).not.toContain("harbor");
       expect(JSON.stringify(sanitizeResponderValue(discoveryFailureDiagnosis(child)))).not.toContain("harbor");
+      expect(JSON.stringify(discoveryFailureDiagnosis(child))).not.toContain("teeTimes");
       expect(await getOwnedLearningBookingEdgeEvidence(m.db as never, { batchId: "batch1", ownerThreadId: "owner1", courseId: "course1",
         incidentId: "incident1", incidentCycle: 1, now, providerSnapshotFingerprint: buildCourseSupportProviderSnapshotFingerprint(failure.source.course as never) })).toBeNull();
     });

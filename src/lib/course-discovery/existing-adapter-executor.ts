@@ -42,7 +42,7 @@ import { parseRexSource } from "./rex-source";
 import { executeRex, inspectRex } from "./rex-executor";
 import { parseCpsSource } from "./cps-source";
 import { executeCps, inspectCps } from "./cps-executor";
-import { getCpsAvailabilityDiagnostic } from "./cps-availability-diagnostic";
+import { getCpsAvailabilityDiagnostic, getPrivateCpsAvailabilityStructure } from "./cps-availability-diagnostic";
 import { deriveUScheduleOfficialLocation, parseUScheduleLocationSource } from "@/lib/simulators/providers/uschedule-location-source";
 import { executeUSchedulePublicLocation, inspectUSchedulePublicLocation } from "./uschedule-location-executor";
 import { deriveUSchedulePublicRentalParty, isUSchedulePublicRentalPartyAbsent } from "./uschedule-public-rental-party";
@@ -1143,7 +1143,9 @@ export async function executeExistingAdapterRecipe(recipe: ExistingAdapterRecipe
     })));
   } catch (error) {
     const cpsAvailability = recipe.adapter.family === "CPS" ? getCpsAvailabilityDiagnostic(error) : undefined;
-    const diagnostic = cpsAvailability ? { code: "CPS_AVAILABILITY_INCOMPLETE", cpsAvailability } :
+    const structure = cpsAvailability ? getPrivateCpsAvailabilityStructure(error) : undefined;
+    const diagnostic = cpsAvailability ? { code: "CPS_AVAILABILITY_INCOMPLETE", cpsAvailability,
+      ...(structure ? { privateCpsAvailabilityStructure: structure } : {}) } :
       recipe.adapter.family === "MINDBODY" ? mindbodyReplayDiagnostic(error) : simulatorErrorDiagnostic(error, recipe.adapter.family === "USCHEDULE");
     const message = session?.failureReason() ?? uscheduleSession?.failureReason() ?? diagnostic?.simulatorError?.code ??
       (error instanceof FixedAdapterFailure || recipe.adapter.family !== "ACUITY" && error instanceof Error ? error.message : "");

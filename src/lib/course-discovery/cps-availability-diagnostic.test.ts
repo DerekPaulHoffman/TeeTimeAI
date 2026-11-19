@@ -3,12 +3,12 @@ import { afterEach, expect, it, vi } from "vitest";
 const mocked = vi.hoisted(() => ({ execute: vi.fn() }));
 vi.mock("./cps-executor", () => ({ executeCps: mocked.execute, inspectCps: vi.fn() }));
 const { normalizeCpsAvailability } = await vi.importActual<typeof import("./cps-executor")>("./cps-executor");
-import { cpsAvailabilityDiagnosticSchema, failCpsAvailability, getCpsAvailabilityDiagnostic } from "./cps-availability-diagnostic";
+import { cpsAvailabilityDiagnosticSchema, failCpsAvailability, getCpsAvailabilityDiagnostic, getPrivateCpsAvailabilityStructure } from "./cps-availability-diagnostic";
 import { executeExistingAdapterRecipe } from "./existing-adapter-executor";
 import { accessExecutionDiagnosticSchema } from "./recipe";
 import type { ExistingAdapterRecipe } from "./existing-adapter-schema";
 import { discoveryReplayDetails, safeCpsAvailabilityDiagnostic, verifyDiscoveryCandidate } from "../../../scripts/automation/course-discovery-worker.mjs";
-import { createStagehandFailureCheckpoint, readStagehandFailure } from "../../../scripts/automation/course-discovery-stagehand-failure.mjs";
+import { createStagehandFailureCheckpoint, readStagehandFailure, packStagehandCheckpoint } from "../../../scripts/automation/course-discovery-stagehand-failure.mjs";
 
 const transaction = "00000000-0000-4000-8000-000000000001";
 const source = { officialUrl: "https://official.example/", bookingUrl: "https://harbor.cps.golf/", venueName: "Harbor Pointe Golf Course",
@@ -25,7 +25,7 @@ function reject(value: unknown, id = transaction) {
   expect((failure as Error).message).toBe("CPS_AVAILABILITY_INCOMPLETE");
   return { error: failure, diagnostic: getCpsAvailabilityDiagnostic(failure)! };
 }
-afterEach(() => vi.resetAllMocks());
+afterEach(() => { vi.resetAllMocks(); vi.useRealTimers(); });
 
 it.each(["transaction", "envelope", "success", "echo", "content", "row-shape", "participants", "duplicate", "course", "date", "round"])(
   "retains the actual rejected parser boundary without changing its failure: %s", change => {
@@ -91,8 +91,12 @@ it.each(["unknown-stage", "raw-field", "unknown-issue", "raw-issue", "oversize",
   expect(safeCpsAvailabilityDiagnostic(value)).toBeUndefined();
 });
 
-it("carries the actual parser rejection through adapter execution, replay feedback and its checkpoint without activation", async () => {
-  const { error, diagnostic } = reject({ ...envelope(), PRIVATE_FIELD: "PRIVATE_RESPONSE" });
+it.each(["envelope", "content-object"])("carries the actual parser rejection through execution and its private checkpoint without activation: %s", async scenario => {
+  vi.setSystemTime(now);
+  const { error, diagnostic } = reject(scenario === "content-object" ? { ...envelope(), content: { teeTimes: [row()], message: "PRIVATE_RESPONSE" } } : { ...envelope(), PRIVATE_FIELD: "PRIVATE_RESPONSE" });
+  vi.useRealTimers();
+  const structure = getPrivateCpsAvailabilityStructure(error);
+  expect(getPrivateCpsAvailabilityStructure({ ...(error as Error) })).toBeUndefined();
   mocked.execute.mockRejectedValue(error);
   const recipe: ExistingAdapterRecipe = { schemaVersion: 1, engine: "EXISTING_ADAPTER", target: { courseId: "course1", kind: "OUTDOOR" }, source, adapter: metadata };
   const fetch = vi.fn(async () => { throw Error("UNEXPECTED_PROVIDER_READ"); });
@@ -102,6 +106,8 @@ it("carries the actual parser rejection through adapter execution, replay feedba
   expect(result).toMatchObject({ status: "INCOMPLETE", complete: false, slots: [], evidence: { reason: "CPS_AVAILABILITY_INCOMPLETE",
     venueVerified: false, completeVerified: false, diagnostic: { code: "CPS_AVAILABILITY_INCOMPLETE", cpsAvailability: diagnostic } } });
   expect(discoveryReplayDetails(result)).toMatchObject({ complete: false, diagnostic: { cpsAvailability: diagnostic } });
+  expect(discoveryReplayDetails(result).diagnostic).not.toHaveProperty("privateCpsAvailabilityStructure");
+  expect(accessExecutionDiagnosticSchema.safeParse(result.evidence.diagnostic).success).toBe(true);
   expect(accessExecutionDiagnosticSchema.safeParse({ code: "OTHER", cpsAvailability: diagnostic }).success).toBe(false);
   expect(discoveryReplayDetails({ ...result, evidence: { diagnostic: { code: "OTHER", cpsAvailability: diagnostic } } }).diagnostic).not.toHaveProperty("cpsAvailability");
   const client = { candidate: vi.fn(async () => ({ recipeHash: "a".repeat(64), challenges: [1, 2].map(id => ({ id: String(id), recipeHash: "a".repeat(64), input })) })),
@@ -109,13 +115,31 @@ it("carries the actual parser rejection through adapter execution, replay feedba
   const job = { id: "owned-job", leaseToken: "owned-test-token", sourceFingerprint: "a".repeat(64), attempts: 1,
     request: { target: recipe.target, input }, firstPickedUpAt: now.toISOString(), deadlineAt: new Date(now.getTime() + 900000).toISOString() };
   const replays: unknown[] = [];
-  const failure = await verifyDiscoveryCandidate({ job, client, recipe, executeRecipe: async () => result, onReplay: value => replays.push(value) }).catch(error => error);
+  const failure = await verifyDiscoveryCandidate({ job, client, recipe, executeRecipe: async () => JSON.parse(JSON.stringify(result)), onReplay: value => replays.push(value) }).catch(error => error);
   expect(failure.code).toBe("DISCOVERY_REPLAY_INCOMPLETE");
   expect(client.verification).not.toHaveBeenCalled(); expect(client.activate).not.toHaveBeenCalled();
   const saved = createStagehandFailureCheckpoint({ job, error: failure, phase: "REPLAY", metrics: { replayDurationsMs: [1] },
     progress: { phase: "INDEPENDENT_REPLAY", replay: replays[0] }, startedAt: now.getTime(), now: now.getTime() + 1000 });
   expect(readStagehandFailure({ ...job, checkpoint: saved }, now.getTime() + 1000)).toEqual(saved.stagehandFailure);
   expect(saved.stagehandProgress.replay.result.diagnostic.cpsAvailability).toEqual(diagnostic);
+  if (scenario === "content-object") {
+    expect(structure).toBeDefined();
+    expect(saved.stagehandFailure.entries[0].privateCpsAvailabilityStructure).toEqual(structure);
+    expect(saved.stagehandProgress.replay.result.diagnostic).not.toHaveProperty("privateCpsAvailabilityStructure");
+    expect(accessExecutionDiagnosticSchema.safeParse({ ...result.evidence.diagnostic, code: "OTHER" }).success).toBe(false);
+    const bare = { stagehandFailure: saved.stagehandFailure, stagehandProgress: { padding: "" } };
+    const padding = "x".repeat(32001 - Buffer.byteLength(JSON.stringify(bare), "utf8"));
+    const packed = packStagehandCheckpoint({ failure: saved.stagehandFailure, progress: { padding } });
+    expect(packed.stagehandFailure.entries[0]).toMatchObject({ privateCpsAvailabilityStructureOmittedForBudget: true });
+    expect(packed.stagehandFailure.entries[0]).not.toHaveProperty("privateCpsAvailabilityStructure");
+    expect(readStagehandFailure({ ...job, checkpoint: packed }, now.getTime() + 1000)).toEqual(packed.stagehandFailure);
+    for (const change of ["structure", "code"]) {
+      const changed = structuredClone(saved);
+      if (change === "structure") changed.stagehandFailure.entries[0].privateCpsAvailabilityStructure.nodes[0].count = 99;
+      else changed.stagehandFailure.entries[0].replayFailureCode = "OTHER";
+      expect(readStagehandFailure({ ...job, checkpoint: changed }, now.getTime() + 1000)).toBeUndefined();
+    }
+  } else expect(saved.stagehandFailure.entries[0]).not.toHaveProperty("privateCpsAvailabilityStructure");
   expect(JSON.stringify(saved)).not.toMatch(/PRIVATE_RESPONSE|PRIVATE_FIELD/u);
 });
 

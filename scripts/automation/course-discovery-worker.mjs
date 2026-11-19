@@ -747,6 +747,30 @@ USCHEDULE_READ_GATES.add("PUBLIC_PEOPLE_SELECTOR_IS_UNAVAILABLE");
 USCHEDULE_READ_GATES.add("PUBLIC_PEOPLE_SELECTOR_CHANGED");
 USCHEDULE_READ_GATES.add("PUBLIC_SINGLE_UNIT_SELECTOR_IS_UNAVAILABLE");
 USCHEDULE_READ_GATES.add("PUBLIC_SINGLE_UNIT_SELECTOR_CHANGED");
+/** Private keys/types only; never copy this into safeReplayDiagnostic. */
+export function safePrivateCpsAvailabilityStructure(value) {
+  try {
+    const plain = item => item && typeof item === "object" && !Array.isArray(item);
+    const count = item => item === "OVER_LIMIT" || Number.isSafeInteger(item) && item >= 0 && item <= 500;
+    if (!plain(value) || Object.keys(value).sort().join(",") !== "kind,nodes,observedAt,schemaVersion,truncated" ||
+        value.schemaVersion !== 1 || value.kind !== "CPS_AVAILABILITY_CONTENT_STRUCTURE" || typeof value.truncated !== "boolean" ||
+        typeof value.observedAt !== "string" || !Number.isFinite(Date.parse(value.observedAt)) || new Date(value.observedAt).toISOString() !== value.observedAt ||
+        !Array.isArray(value.nodes) || !value.nodes.length || value.nodes.length > 96 || Buffer.byteLength(JSON.stringify(value), "utf8") > 16000) return undefined;
+    const seen = new Map();
+    for (const [index, node] of value.nodes.entries()) {
+      if (!plain(node) || !Array.isArray(node.path) || node.path.length > 4 ||
+          node.path.some(part => part !== 0 && (typeof part !== "string" || !/^[A-Za-z_]{1,48}$/u.test(part) || ["__proto__", "prototype", "constructor"].includes(part))) ||
+          !["OBJECT", "ARRAY", "NULL", "STRING", "NUMBER", "BOOLEAN", "OTHER"].includes(node.type) ||
+          Object.keys(node).some(key => !["path", "type", "count"].includes(key)) ||
+          ["OBJECT", "ARRAY"].includes(node.type) !== Object.hasOwn(node, "count") || Object.hasOwn(node, "count") && !count(node.count)) return undefined;
+      const id = JSON.stringify(node.path), parent = seen.get(JSON.stringify(node.path.slice(0, -1)));
+      if (seen.has(id) || (index === 0 ? node.path.length !== 0 || node.type !== "OBJECT" : !node.path.length || !parent ||
+          (node.path.at(-1) === 0 ? parent.type !== "ARRAY" || parent.count === 0 : parent.type !== "OBJECT"))) return undefined;
+      seen.set(id, node);
+    }
+    return structuredClone(value);
+  } catch { return undefined; }
+}
 export function safeCpsAvailabilityDiagnostic(value) {
   try {
     if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
@@ -1768,7 +1792,13 @@ export async function verifyDiscoveryCandidate({ client, job, recipe, executeRec
     }
     const details = discoveryReplayDetails(result);
     onReplay({ elapsedMs: Date.now() - replayStarted, challengeIndex, result: details });
-    if (!details.complete) throw discoveryError("DISCOVERY_REPLAY_INCOMPLETE", { details });
+    if (!details.complete) {
+      const facts = details.diagnostic?.cpsAvailability;
+      const structure = details.reason === "CPS_AVAILABILITY_INCOMPLETE" && details.diagnostic?.code === "CPS_AVAILABILITY_INCOMPLETE" &&
+        facts?.stage === "SCHEMA" && facts.issues.some(issue => issue.field === "CONTENT" && issue.valueType === "OBJECT")
+        ? safePrivateCpsAvailabilityStructure(result?.evidence?.diagnostic?.privateCpsAvailabilityStructure) : undefined;
+      throw discoveryError("DISCOVERY_REPLAY_INCOMPLETE", { details, ...(structure ? { privateCpsAvailabilityStructure: structure } : {}) });
+    }
     await client.verification(job.id, challenge.id, job.leaseToken, { recipeHash: proposal.recipeHash, input: challenge.input, result }, signal);
   }
   // Stop and drain lease heartbeats before the final compare-and-set retires

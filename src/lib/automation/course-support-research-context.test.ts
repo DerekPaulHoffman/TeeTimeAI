@@ -201,7 +201,7 @@ function fixture() {
 describe("owned course-support research context", () => {
   beforeEach(() => { database.batchFindFirst.mockReset(); database.learningEvidence.mockReset().mockResolvedValue(null); });
 
-  it.each(["owned", "owner-lost", "source-drift"].flatMap(scenario => ["edge", "physical", "names"].map(kind => ({ scenario, kind }))))("rechecks private $kind evidence before returning the context: $scenario", async ({ scenario, kind }) => {
+  it.each(["owned", "owner-lost", "source-drift"].flatMap(scenario => ["edge", "physical", "names", "availability"].map(kind => ({ scenario, kind }))))("rechecks private $kind evidence before returning the context: $scenario", async ({ scenario, kind }) => {
     const batch = fixture();
     batch.summary.remediation.reason = "FAILED_LEARNER_IMPLEMENTATION_HANDOFF";
     batch.summary.remediation.attempts[0].actionPlan.allowedActions.push("INVESTIGATE_PUBLIC_SOURCE");
@@ -210,6 +210,8 @@ describe("owned course-support research context", () => {
     expect(before.outcome).toBe("ready");
     database.learningEvidence.mockResolvedValue({ schemaVersion: 1, sourceFingerprint: "a".repeat(64), implementationRelease: "b".repeat(40), executionRuntime: "b".repeat(40),
       evidenceAuthority: false, untrustedPageEvidence: true,
+      ...(kind === "availability" ? { availabilityStructureEvidence: { schemaVersion: 1, kind: "CPS_AVAILABILITY_CONTENT_STRUCTURE", observedAt: "2026-09-28T13:46:00.000Z",
+        truncated: false, nodes: [{ path: [], type: "OBJECT", count: 0 }] } } : {}),
       ...(kind === "names" ? { courseNameComparisonEvidence: { schemaVersion: 1, kind: "CPS_NAMED_COURSE_COMPARISON", observedAt: "2026-09-28T13:46:00.000Z",
         canonicalName: "harbor pointe", officialNames: ["north", "south"], providerNames: ["harbor north", "harbor south"] } } : {}),
       bookingEdgeEvidence: kind === "edge" ? { raw: { frameCount: 0 }, rendered: { framesState: "OMITTED" } } : null,
@@ -219,7 +221,7 @@ describe("owned course-support research context", () => {
     database.batchFindFirst.mockResolvedValueOnce(batch).mockResolvedValueOnce(scenario === "owner-lost" ? null : scenario === "source-drift" ? changed : batch);
     const result = await getOwnedCourseSupportResearchContext(input);
     if (scenario === "owned") {
-      expect(result).toMatchObject({ privateContext: true, researchContextV1: { [kind === "edge" ? "learningBookingEdgeEvidence" : kind === "names" ? "learningCourseNameComparisonEvidence" : "learningPhysicalBindingEvidence"]: {
+      expect(result).toMatchObject({ privateContext: true, researchContextV1: { [kind === "edge" ? "learningBookingEdgeEvidence" : kind === "names" ? "learningCourseNameComparisonEvidence" : kind === "availability" ? "learningAvailabilityStructureEvidence" : "learningPhysicalBindingEvidence"]: {
         evidenceAuthority: false, untrustedPageEvidence: true } } });
       if (result.outcome === "ready" && before.outcome === "ready") {
         expect(result.researchContextV1.contextDigest).not.toBe(before.researchContextV1.contextDigest);
@@ -227,6 +229,8 @@ describe("owned course-support research context", () => {
         expect(result.researchContextV1.monitoringProofRecorded).toBe(before.researchContextV1.monitoringProofRecorded);
         expect(JSON.stringify(result.researchContextV1.learningBookingEdgeEvidence)).not.toContain("courseNameComparisonEvidence");
         expect(JSON.stringify(result.researchContextV1.learningPhysicalBindingEvidence)).not.toContain("courseNameComparisonEvidence");
+        expect(JSON.stringify(result.researchContextV1.learningBookingEdgeEvidence)).not.toContain("availabilityStructureEvidence");
+        expect(JSON.stringify(result.researchContextV1.learningPhysicalBindingEvidence)).not.toContain("availabilityStructureEvidence");
       }
       expect(database.learningEvidence).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ batchId: input.batchId, ownerThreadId: input.ownerThreadId }));
     } else expect(result).toMatchObject({ outcome: scenario === "owner-lost" ? "recovery_required" : "authority_drift" });
