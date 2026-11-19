@@ -180,10 +180,10 @@ async function main() {
         readNativeOfficialPage: (source, url, deadline, mode) => readNativeOfficialIdentityPage(source, url, deadline, { requestLease, trustedContext,
           ...(mode === "USCHEDULE_SHOP" ? { allowOfficialShopBookingLink: true } : {}),
           ...(recipe.engine === "EXISTING_ADAPTER" && recipe.adapter.family === "CPS" &&
-            (recipe.adapter.officialPostalConflictProof || recipe.adapter.officialPhoneBookingProof)
+            (recipe.adapter.officialPostalConflictProof || recipe.adapter.officialPhoneBookingProof || recipe.adapter.publicCatalogMode === "OFFICIAL_NAMED_ONLINE_COURSES")
             ? { collectPublicCourseContacts: true } : {}),
           ...(recipe.engine === "EXISTING_ADAPTER" && recipe.adapter.family === "CPS" &&
-            recipe.adapter.officialPhoneBookingProof && mode === "PHONE_LINK"
+            (recipe.adapter.officialPhoneBookingProof || recipe.adapter.publicCatalogMode === "OFFICIAL_NAMED_ONLINE_COURSES") && mode === "PHONE_LINK"
             ? { allowCpsPhoneBookingContact: true } : {}) }) } : {}) });
     process.stdout.write(`${JSON.stringify(result)}\n`);
     return;

@@ -1,0 +1,66 @@
+import { parse, type DefaultTreeAdapterMap } from "parse5";
+import { freshNativeCanonicalRootDocument } from "./native-official-page-attestation";
+import { fullCourseName, type OfficialIdentityPage } from "./teeitup-official-identity";
+
+type Node = DefaultTreeAdapterMap["node"];
+type Element = DefaultTreeAdapterMap["element"];
+const element = (node: Node): node is Element => "tagName" in node;
+const attr = (node: Element, key: string) => node.attrs.find(row => row.name === key)?.value ?? "";
+const excluded = (node: Element) => ["script", "style", "template", "noscript", "iframe", "form", "input", "textarea", "select", "button"].includes(node.tagName) ||
+  node.attrs.some(row => ["hidden", "inert"].includes(row.name) || row.name === "aria-hidden" && row.value === "true") ||
+  /display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0(?:[;\s]|$)/iu.test(attr(node, "style")) ||
+  /(?:^|\s)(?:hidden|d-none|invisible|visually-hidden|sr-only|screen-reader-only)(?:\s|$)/iu.test(attr(node, "class"));
+const text = (node: Node): string => node.nodeName === "#text" ? (node as DefaultTreeAdapterMap["textNode"]).value :
+  element(node) && excluded(node) ? "" : "childNodes" in node ? node.childNodes.map(text).join(" ") : "";
+const clean = (value: string) => value.normalize("NFKC").replace(/\s+/gu, " ").trim();
+const restricted = /\b(?:private|members?|login|account|checkout|payment|simulator|practice|range|lessons?|events?|gifts?|store|shop|banquet)\b/iu;
+const key = (value: string) => fullCourseName(value).replace(/\s+(?:golf course|course)$/u, "");
+const fail = (): never => { throw Error("ADAPTER_IDENTITY_MISMATCH"); };
+
+/** Complete named sheets at a single venue, not a default/first-course choice.
+ * These current raw/rendered witnesses only participate in a rederived catalog
+ * hash. They never override access, provider, phone or physical identity gates. */
+export function bindCpsOfficialCourseNames(source: { officialUrl: string; venueName: string }, page: OfficialIdentityPage,
+  courses: ReadonlyArray<{ courseId: number; courseName: string }>) {
+  const shown = page.visibleEvidence?.officialCourseLinkLabels;
+  if (!freshNativeCanonicalRootDocument(page, source.officialUrl) || page.browserTransport !== "NATIVE_CHROME" ||
+      page.visibleEvidence?.officialCourseLinkLabelsOmitted === true || !Array.isArray(shown) || shown.length < 2 || shown.length > 120 ||
+      courses.length < 2 || courses.length > 40 || Buffer.byteLength(page.html, "utf8") > 600_000) return fail();
+  const origin = new URL(source.officialUrl).origin;
+  const publicLink = (href: string) => {
+    try { const url = new URL(href); return href.length <= 2048 && url.href === href && url.protocol === "https:" && url.origin === origin &&
+      url.pathname !== "/" && !url.search && !url.hash && !url.username && !url.password && !url.port && !restricted.test(url.pathname.replace(/[_/-]/gu, " ")); }
+    catch { return false; }
+  };
+  const named = new Map<string, { href: string; labels: Set<string> }>();
+  for (const row of shown) {
+    if (typeof row?.href !== "string" || typeof row.text !== "string" || row.text.length > 160 ||
+        /[\u0000-\u001f\u007f]/u.test(row.text) || !publicLink(row.href) || !/\b(?:golf\s+)?course$/iu.test(clean(row.text)) ||
+        restricted.test(row.text)) return fail();
+    const name = key(row.text);
+    if (name.length < 3 || name === key(source.venueName) || /^(?:the|our|public|golf|course|courses)$/u.test(name)) return fail();
+    const prior = named.get(name);
+    if (prior && prior.href !== row.href) return fail();
+    if (prior) prior.labels.add(clean(row.text));
+    else named.set(name, { href: row.href, labels: new Set([clean(row.text)]) });
+  }
+  if (named.size !== courses.length || new Set(courses.map(row => key(row.courseName))).size !== courses.length ||
+      courses.some(row => !named.has(key(row.courseName)) || restricted.test(row.courseName))) return fail();
+  const rawPairs = new Set<string>(); let visited = 0;
+  const walk = (node: Node, depth = 0) => {
+    if (++visited > 20_000 || depth > 64) return fail();
+    if (element(node)) {
+      if (excluded(node)) return;
+      if (node.tagName === "a" && !node.attrs.some(row => ["onclick", "download"].includes(row.name))) {
+        let href: string; try { href = new URL(attr(node, "href"), page.url).href; } catch { href = ""; }
+        const label = clean(text(node)), observed = named.get(key(label));
+        if (observed?.href === href && observed.labels.has(label)) rawPairs.add(JSON.stringify([href, label]));
+      }
+    }
+    if ("childNodes" in node) node.childNodes.forEach(child => walk(child, depth + 1));
+  };
+  walk(parse(page.html));
+  for (const row of named.values()) for (const label of row.labels) if (!rawPairs.has(JSON.stringify([row.href, label]))) return fail();
+  return [...courses].sort((a, b) => a.courseId - b.courseId).map(row => ({ courseId: row.courseId, courseName: row.courseName,
+    officialUrl: named.get(key(row.courseName))!.href, officialLabels: [...named.get(key(row.courseName))!.labels].sort() }));
+}

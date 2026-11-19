@@ -9,6 +9,7 @@ import { cpsPhoneBookingProofSchema, cpsOfficialCourseDescriptor, cpsOfficialSel
 import type { OfficialIdentityPage } from "./teeitup-official-identity";
 import { parsePublicUSBusinessAddress } from "./public-us-business-address";
 import { bindCpsOfficialEntryProof, cpsOfficialEntryProofSchema, verifyCpsOfficialEntryContext, type CpsOfficialEntryContext } from "./cps-official-entry-proof";
+import { bindCpsOfficialCourseNames } from "./cps-official-course-catalog";
 
 const id = z.number().int().min(1).max(2_147_483_647);
 const tenant = z.string().regex(/^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u)
@@ -20,6 +21,7 @@ export const CPS_API_PATH = "/onlineres/onlineapi/api/v1/onlinereservation";
 // the UI's load-more operation slices the already returned content locally.
 export const CPS_PUBLIC_BUILD = "25.3.4.21239412485";
 export const CPS_VENUE_PUBLIC_CATALOG_BUILD = "26.1.2.26379768992";
+export const CPS_NAMED_PUBLIC_CATALOG_BUILD = "26.2.2.40425805601";
 // 26.3.0.34794395074: reviewed public main 9b94214d3a50be69 and its
 // exact runtime-linked 569/507/647 modules. SearchTeetimes sends the same
 // unpaged dated GET; normal display pagination slices its complete array.
@@ -31,7 +33,7 @@ const reviewedPublicBuilds = new Map<string, CpsPublicBuildProtocol>([
   [CPS_VENUE_PUBLIC_CATALOG_BUILD, "ANONYMOUS_SHORT_SESSION"],
   // Exact published26.2.2 main777a9b24764cf162 + runtime-linked569/507/647:
   // anonymous short session, one unpaged TeeTimes GET, local content slicing.
-  ["26.2.2.40425805601", "ANONYMOUS_SHORT_SESSION"],
+  [CPS_NAMED_PUBLIC_CATALOG_BUILD, "ANONYMOUS_SHORT_SESSION"],
   ["26.3.0.34794395074", "ANONYMOUS_SHORT_SESSION"],
   // Exact public main fcb1caee09792c49 + runtime-linked 569.99419b67db96cdb8
   // and 507.8a54be4a709eda90: anonymous short token; one dated, unpaged
@@ -43,7 +45,7 @@ export function cpsPublicBuildProtocol(build: string): CpsPublicBuildProtocol | 
 }
 export const cpsMetadataSchema = z.object({ family: z.literal("CPS"), tenant,
   courseIds: z.array(id).min(1).max(40).refine(values => values.every((value, index) => !index || values[index - 1] < value)),
-  catalogHash: z.string().regex(/^[a-f0-9]{64}$/u), publicCatalogMode: z.literal("VENUE_BOUND_ONLINE_COURSES").optional(), officialPostalConflictProof: cpsPostalConflictProofSchema.optional(),
+  catalogHash: z.string().regex(/^[a-f0-9]{64}$/u), publicCatalogMode: z.enum(["VENUE_BOUND_ONLINE_COURSES", "OFFICIAL_NAMED_ONLINE_COURSES"]).optional(), officialPostalConflictProof: cpsPostalConflictProofSchema.optional(),
   officialPhoneBookingProof: cpsPhoneBookingProofSchema.optional(), officialEntryProof: cpsOfficialEntryProofSchema.optional() }).strict()
   .refine(value=>!(value.officialPostalConflictProof&&value.officialPhoneBookingProof)&&
     !(value.officialEntryProof&&(value.officialPostalConflictProof||value.officialPhoneBookingProof||value.publicCatalogMode))&&
@@ -307,14 +309,33 @@ export function parseCpsCatalog(value: unknown, options: CpsOptions, source: Cps
       publicCatalogMode: "VENUE_BOUND_ONLINE_COURSES", catalogHash: createHash("sha256").update(JSON.stringify(stable)).digest("hex") });
   }
   if(nativeContact){
-    if(nativeContact.phoneBooking)verifyCpsPhoneBookingContact(source,nativeContact.page,nativeContact.canonicalCoursePhone);
-    else verifyCpsPostalContact(source,nativeContact.page,nativeContact.canonicalCoursePhone);
+    const phoneContact = nativeContact.phoneBooking ? verifyCpsPhoneBookingContact(source,nativeContact.page,nativeContact.canonicalCoursePhone) : undefined;
+    if (!nativeContact.phoneBooking) verifyCpsPostalContact(source,nativeContact.page,nativeContact.canonicalCoursePhone);
     const base=cpsCourseNameBase(source.venueName);
     if(base.replace(/\s/gu,"").length<8||new Set(ids).size!==ids.length||
       (nativeContact.phoneBooking ? ids.some(courseId=>!declared.includes(courseId)) : JSON.stringify(ids)!==JSON.stringify(declared))||
       courses.some(row=>row.websiteId!==options.webSiteId||options.courseOptions.find(option=>option.courseId===row.courseId)?.courseName!==row.courseName||
         nativeContact.phoneBooking&&row.timezoneId!==source.timeZone))catalogIdentityFailure("CATALOG_BINDING");
     for(const row of courses){try{new Intl.DateTimeFormat("en-US",{timeZone:row.timezoneId});}catch{cpsFailure("CPS_CATALOG_UNVERIFIED");}}
+    if (phoneContact && courses.length > 1 && publicBuild === CPS_NAMED_PUBLIC_CATALOG_BUILD &&
+        !hasCpsObservedSelectedCourseLabel(source, nativeContact.page)) {
+      requirePublicFlags(options.reservationOptions);
+      for (const course of courses) requirePublicFlags(course);
+      for (const option of options.courseOptions) requirePublicFlags(option);
+      const venue = publicClubIdentity(options, source);
+      let officialCourses;
+      try { officialCourses = bindCpsOfficialCourseNames(source, nativeContact.page, courses); }
+      catch (error) { if (error instanceof Error && error.message === "ADAPTER_IDENTITY_MISMATCH") catalogIdentityFailure("CATALOG_BINDING"); throw error; }
+      const context = parseCpsSource(source.bookingUrl)!;
+      const stable = { mode: "OFFICIAL_NAMED_ONLINE_COURSES", buildNumber: publicBuild, tenant: context.tenant,
+        officialUrl: source.officialUrl, bookingUrl: source.bookingUrl, canonicalName: name,
+        canonicalAddress: parsePublicUSBusinessAddress(source.venueAddress), timeZone: source.timeZone, venue,
+        phoneContact, officialCourses, publicFlags: publicFlags(options.reservationOptions),
+        courses: courses.map(row => ({ id: row.courseId, name: row.courseName, timeZone: row.timezoneId, websiteId: row.websiteId, holes: row.holes, flags: publicFlags(row) })),
+        options: [...options.courseOptions].sort((a, b) => a.courseId - b.courseId).map(row => ({ id: row.courseId, name: row.courseName, websiteId: row.webSiteId, flags: publicFlags(row) })) };
+      return cpsMetadataSchema.parse({ family: "CPS", tenant: context.tenant, courseIds: ids,
+        publicCatalogMode: "OFFICIAL_NAMED_ONLINE_COURSES", catalogHash: createHash("sha256").update(JSON.stringify(stable)).digest("hex") });
+    }
     const exactSingle=nativeContact.phoneBooking&&courses.length===1&&declared.length===1&&
       cpsCourseNameBase(courses[0].courseName)===base;
     const selectedAnchor=nativeContact.phoneBooking ? selectedCpsOfficialBookingAnchor(source,nativeContact.page) : undefined;

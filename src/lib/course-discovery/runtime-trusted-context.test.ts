@@ -22,6 +22,13 @@ beforeEach(() => {
   mocks.db.teeSearch.findUnique.mockResolvedValue({ id: "search1", status: "ACTIVE", alertGeneration: 1, scheduleVersion: 2, date: new Date("2030-01-02"), endTime: "17:00", userTimeZone: "UTC", preferences: [{ courseId: "course1" }] });
 });
 describe("current durable phone context on warm claim", () => {
+  it.each(["unchanged", "changed", "absent"])("binds %s trusted phone before named multi-course warm launch", async change => {
+    active.recipe = { engine: "EXISTING_ADAPTER", adapter: { family: "CPS", publicCatalogMode: "OFFICIAL_NAMED_ONLINE_COURSES" } };
+    if (change === "changed") active.trustedContext = { canonicalCoursePhone: "+13035554321" };
+    if (change === "absent") delete context.trustedContext;
+    if (change === "unchanged") expect(await claimNextRecipeExecution("worker1")).toMatchObject({ trustedContext: active.trustedContext });
+    else expect(await claimNextRecipeExecution("worker1")).toBeNull();
+  });
   it.each(["valid", "unlisted room", "wrong room identity", "wrong product", "partial interval"])("accepts only verified full rental room evidence on normal execution: %s", async change => {
     const bookingUrl = "https://first-room.youcanbook.me/", now = new Date();
     const rooms = ["12345678-1234-4234-8234-123456789abc", "12345678-1234-4234-8234-123456789abd"].map((profileId, index) => ({

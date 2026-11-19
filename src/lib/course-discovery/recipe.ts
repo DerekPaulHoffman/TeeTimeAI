@@ -343,6 +343,9 @@ export const accessRecipeSchema = z.discriminatedUnion("engine", [
         proof.timeZone!==recipe.source.timeZone||recipe.target.kind!=="OUTDOOR")
         ctx.addIssue({code:"custom",message:"Native public phone and booking proof must match the exact canonical recipe source"});
     }
+    if (recipe.adapter.family === "CPS" && recipe.adapter.publicCatalogMode === "OFFICIAL_NAMED_ONLINE_COURSES" &&
+        (recipe.target.kind !== "OUTDOOR" || !recipe.source.venueAddress || recipe.adapter.courseIds.length < 2))
+      ctx.addIssue({ code: "custom", message: "Native named outdoor courses require a complete venue source and multiple course IDs" });
     if(recipe.adapter.family==="CPS"&&recipe.adapter.officialEntryProof){
       const proof=recipe.adapter.officialEntryProof;
       if(proof.officialUrl!==recipe.source.officialUrl||proof.bookingUrl!==recipe.source.bookingUrl||

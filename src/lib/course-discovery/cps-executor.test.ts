@@ -176,6 +176,60 @@ describe("CPS fixed fresh public reads", () => {
       expect(fixture.active).toBe(0);
     }
   });
+  it("independently replays the complete native named course set and rejects drift before availability", async () => {
+    let drift = "", nativeCalls = 0;
+    const names = [{ courseId: 1, courseName: "North", webSiteId: "public-site" }, { courseId: 2, courseName: "South", webSiteId: "public-site" }];
+    const fixture = setup(async (url, _init, normal) => {
+      if (url.hostname === "www.thebobgc.com") return new Response("No source identity", { headers: { "content-type": "text/html" } });
+      if (url.pathname.endsWith("/Configuration")) return json({ ...config(), apiKey: undefined,
+        buildNumber: drift === "build" ? "26.3.0.34794395074" : "26.2.2.40425805601" });
+      if (url.pathname.includes("/GetAllOptions/")) return json({ ...options(), courseOptions: names,
+        reservationOptions: { terminalId: 1, clubName: source.venueName, clubAddress: source.venueAddress } });
+      if (url.pathname.endsWith("/OnlineCourses")) return json(names.map(item => ({ ...courses()[0], courseId: item.courseId,
+        courseName: item.courseName, holes: drift === "catalog" ? 18 : 9 })));
+      if (url.pathname.endsWith("/TeeTimes")) {
+        const response = await normal().json();
+        return json({ ...response, content: [response.content[0], { ...response.content[0], courseId: 2, teeSheetId: 8 }] });
+      }
+      return normal();
+    });
+    const nativeRead: CpsDependencies["readNativeOfficialPage"] = async (identity, pageUrl, until, mode) => {
+      expect(fixture.active).toBe(0); nativeCalls++;
+      const printed = "412-622-6959", links = names.map(item => ({ href: source.officialUrl + item.courseName.toLowerCase(), text: item.courseName + " Course" }));
+      const html = `<html><body><h1>${source.venueName}</h1><section><h2>Contact Us</h2><a href="tel:${printed}">${printed}</a></section>` +
+        `<a href="${source.bookingUrl}">Book A Tee Time</a>${links.map(link => `<a href="${link.href}">${link.text}</a>`).join("")}</body></html>`;
+      const page = await readNativeOfficialIdentityPage(identity, pageUrl, until, { allowCpsPhoneBookingContact: mode === "PHONE_LINK" ? true : undefined,
+        createSession: async () => ({ execute: async () => ({ url: source.officialUrl, navigationStatus: 200, browserTransport: "NATIVE_CHROME",
+          officialSourceDiagnostic: { stage: "CONTROLLER_CAPTURE", rawOfficialCaptured: true, currentOfficialDocument: true,
+            officialProvenance: true, renderedHeadingsPresent: true, renderedAddressesPresent: false, renderedLinksPresent: true } } as never),
+          readOfficialIdentityPage: async () => {
+            if (mode !== "PHONE_LINK") throw Error("OFFICIAL_POSTAL_SOURCE_UNVERIFIED");
+            return { url: source.officialUrl, html, browserTransport: "NATIVE_CHROME", visibleEvidence: { title: source.venueName,
+              headings: [source.venueName, "Contact Us"], addressTexts: [], linkUrls: [source.bookingUrl, ...links.map(link => link.href)],
+              phoneTexts: [printed], contactPhoneLinks: [{ href: `tel:${printed}`, text: printed }],
+              publicLinkLabels: [{ href: source.bookingUrl, text: "Book A Tee Time" }], officialCourseLinkLabels: links } };
+          }, close: async () => {} }) });
+      return drift === "copied-native" ? structuredClone(page) : page;
+    };
+    const deps: CpsDependencies = { ...fixture.deps, localCapabilities: ["LOCAL_CHROME"], trustedContext: { canonicalCoursePhone: "+14126226959" }, readNativeOfficialPage: nativeRead };
+    const saved = await inspectCps(source, deps), immutable = JSON.stringify(saved);
+    expect(saved).toMatchObject({ courseIds: [1, 2], publicCatalogMode: "OFFICIAL_NAMED_ONLINE_COURSES" });
+    expect(fixture.reads.some(read => read.url.pathname.endsWith("/RegisterTransactionId") || read.url.pathname.endsWith("/TeeTimes"))).toBe(false);
+    for (const request of [input, { ...input, date: "2026-10-24", players: 3 }]) {
+      const slots = await executeCps(source, saved, { courseId: "course-1" }, request, deps);
+      expect(slots.map(slot => slot.resourceId)).toEqual(["cps-course:1", "cps-course:2"]);
+      expect(slots[0].startsAt).toBe(request.date + "T14:30:00.000Z");
+    }
+    expect(JSON.stringify(saved)).toBe(immutable); expect(nativeCalls).toBe(4); expect(fixture.maxActive).toBe(1); expect(fixture.active).toBe(0);
+    for (const change of ["catalog", "build", "phone", "copied-native", "no-native"]) {
+      drift = change; fixture.reads.length = 0;
+      await expect(executeCps(source, saved, { courseId: "course-1" }, input, { ...deps,
+        ...(change === "phone" ? { trustedContext: { canonicalCoursePhone: "+14126229999" } } : {}),
+        ...(change === "no-native" ? { localCapabilities: [] } : {}) })).rejects.toThrow();
+      expect(fixture.reads.some(read => read.url.pathname.endsWith("/RegisterTransactionId") || read.url.pathname.endsWith("/TeeTimes"))).toBe(false);
+      expect(fixture.active).toBe(0);
+    }
+  });
   it.each(["forged limit", "missing Chrome", "missing phone"])("does not enter native size-limit recovery for %s", async reason => {
     const limited = ownedBodyLimitTransport();
     const fixture = setup((url, _init, normal) => {

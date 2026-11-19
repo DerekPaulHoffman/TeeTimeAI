@@ -22,6 +22,9 @@ export type OfficialIdentityPage = { url: string; html: string; visibleEvidence?
   /** Exact computed-visible public anchor text paired with its URL. */
   publicLinkLabels?: Array<{ href: string; text: string }>;
   publicLinkLabelsOmitted?: boolean;
+  /** Same-origin named outdoor course links from the current visible root. */
+  officialCourseLinkLabels?: Array<{ href: string; text: string }>;
+  officialCourseLinkLabelsOmitted?: boolean;
   /** Current ordinary public booking links; private native identity capture only. */
   publicBookingEntryLinks?: Array<{ href: string; text: string }>;
   publicBookingEntryLinksOmitted?: boolean;

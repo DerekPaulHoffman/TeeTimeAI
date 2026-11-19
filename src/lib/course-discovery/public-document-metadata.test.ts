@@ -6,6 +6,23 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { collectNativeOfficialPublicMetadata } from "./public-document-metadata";
 
+it("captures visible named course links separately from public provider booking links", () => {
+ setup('<a href="/north">North Golf Course</a><a href="/south">South Course</a>'+
+   '<a hidden href="/hidden">Hidden Course</a><form><a href="/form">Form Course</a></form>'+
+   '<a href="https://other.example/east">East Course</a><a href="/query?token=private">Query Course</a>'+
+   '<a href="/" >Venue Golf Course</a><a href="/clicked" onclick="private()">Clicked Course</a>'+
+   '<a href="https://harbor.cps.golf/">Book A Tee Time</a>');
+ const got = collectNativeOfficialPublicMetadata(venue);
+ expect(got.officialCourseLinkLabels).toEqual([{ href: "https://official.example/north", text: "North Golf Course" },
+   { href: "https://official.example/south", text: "South Course" }]);
+ expect(got.officialCourseLinkLabelsOmitted).toBe(false);
+ expect(got.publicLinkLabels).toEqual([{ href: "https://harbor.cps.golf/", text: "Book A Tee Time" }]);
+ expect(JSON.stringify(got.officialCourseLinkLabels)).not.toContain("private");
+ setup(Array.from({ length: 121 }, (_, index) => `<a href="/course-${index}">Named ${index} Course</a>`).join(""));
+ const overflow = collectNativeOfficialPublicMetadata(venue);
+ expect(overflow.officialCourseLinkLabelsOmitted).toBe(true); expect(overflow.officialCourseLinkLabels).toEqual([]);
+});
+
 it("collects all six visible semantic heading levels without promoting hidden, inert or form headings",()=>{
  const visible=Array.from({length:6},(_,i)=>`<h${i+1}>Public heading ${i+1}</h${i+1}>`).join("");
  setup(visible+'<h4 hidden>Hidden venue</h4><section inert><h4>Inert venue</h4></section><form><h4>Form venue</h4></form><section style="display:none"><h4>CSS-hidden venue</h4></section>');
@@ -126,11 +143,12 @@ it("actual installed tsx serialization runs in a separate page-like VM without m
  const result=spawnSync(process.execPath,["--import",pathToFileURL(resolve("node_modules/tsx/dist/loader.mjs")).href,"--input-type=module","--eval",script],{encoding:"utf8",timeout:10000});
  expect(result.status,result.stderr).toBe(0);expect(result.stdout.trim()).toBe("SERIALIZATION_OK");
 });
-it("actual Node and tsx serialization collects a visible CPS course link without module helpers",()=>{
+it("actual Node and tsx serialization collects visible booking and named course links without module helpers",()=>{
  const moduleUrl=pathToFileURL(resolve("src/lib/course-discovery/public-document-metadata.ts")).href;
- const markup='<body><a href="https://harbor.cps.golf/">Championship Course Tee Times</a></body>';
+ const markup='<body><a href="https://harbor.cps.golf/">Championship Course Tee Times</a><a href="/north">North Course</a><a href="/south">South Golf Course</a></body>';
  const script=`import {createRequire} from 'node:module';import {fileURLToPath} from 'node:url';import {runInContext} from 'node:vm';const req=createRequire(process.cwd()+'/package.json');const {JSDOM}=req('jsdom');const {collectNativeOfficialPublicMetadata:collect}=req(fileURLToPath(${JSON.stringify(moduleUrl)}));const dom=new JSDOM(${JSON.stringify(markup)},{url:'https://official.example/',runScripts:'outside-only'});Object.defineProperty(dom.window.HTMLElement.prototype,'innerText',{get(){return this.textContent??'';}});dom.window.HTMLElement.prototype.getBoundingClientRect=function(){return {width:10,height:10};};const result=runInContext('('+collect.toString()+')('+JSON.stringify('Harbor Country Club')+')',dom.getInternalVMContext());if(result.publicLinkLabels.length!==1||result.publicLinkLabels[0].text!=='Championship Course Tee Times')throw Error('CPS_LINK_SERIALIZATION_INVALID');console.log('CPS_LINK_SERIALIZATION_OK');`;
- const result=spawnSync(process.execPath,["--import",pathToFileURL(resolve("node_modules/tsx/dist/loader.mjs")).href,"--input-type=module","--eval",script],{encoding:"utf8",timeout:10000});
+ const namedScript=script+"if(JSON.stringify(result.officialCourseLinkLabels)!==JSON.stringify([{href:'https://official.example/north',text:'North Course'},{href:'https://official.example/south',text:'South Golf Course'}])||result.officialCourseLinkLabelsOmitted)throw Error('NAMED_COURSE_SERIALIZATION_INVALID');";
+ const result=spawnSync(process.execPath,["--import",pathToFileURL(resolve("node_modules/tsx/dist/loader.mjs")).href,"--input-type=module","--eval",namedScript],{encoding:"utf8",timeout:10000});
  expect(result.status,result.stderr).toBe(0);expect(result.stdout.trim()).toBe("CPS_LINK_SERIALIZATION_OK");
 });
 it("reads static exact-venue H2 public metadata in the unique whole-document wrapper without field values",()=>{setup(html());const got=collectNativeOfficialPublicMetadata(venue);expect(got.headings).toContain(venue);expect(got.addressTexts).toContain(address);expect(got.publicRentalTexts).toContain(rental);expect(JSON.stringify(got)).not.toContain("PRIVATE");});

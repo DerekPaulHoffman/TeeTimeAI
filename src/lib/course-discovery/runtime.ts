@@ -35,8 +35,8 @@ function readContext(value: unknown): Context {
 }
 
 function requiresPhoneContext(recipe: unknown) {
-  const value = recipe as { engine?: string; adapter?: { family?: string; publicLocationProof?: { kind?: string }; officialContactProof?: unknown; officialRouteOwnershipProof?: unknown; officialPostalConflictProof?: unknown; officialStreetTypeOmittedProof?: unknown; officialDelegatedBookingProof?: { physicalContactProof?: unknown; intentionalDelegationProof?: unknown } } };
-  return value?.engine === "EXISTING_ADAPTER" && (value.adapter?.family === "CPS" && Boolean(value.adapter.officialPostalConflictProof) ||
+  const value = recipe as { engine?: string; adapter?: { family?: string; publicCatalogMode?: string; publicLocationProof?: { kind?: string }; officialContactProof?: unknown; officialRouteOwnershipProof?: unknown; officialPostalConflictProof?: unknown; officialStreetTypeOmittedProof?: unknown; officialDelegatedBookingProof?: { physicalContactProof?: unknown; intentionalDelegationProof?: unknown } } };
+  return value?.engine === "EXISTING_ADAPTER" && (value.adapter?.family === "CPS" && Boolean(value.adapter.officialPostalConflictProof || value.adapter.publicCatalogMode === "OFFICIAL_NAMED_ONLINE_COURSES") ||
     value.adapter?.family === "ACUITY" && Boolean(value.adapter.officialContactProof) ||
     value.adapter?.family === "USCHEDULE" && value.adapter.publicLocationProof?.kind === "PUBLIC_LOCATION_SERVICE_POOL_V1" ||
     value.adapter?.family === "FOREUP" && Boolean(value.adapter.officialRouteOwnershipProof) ||

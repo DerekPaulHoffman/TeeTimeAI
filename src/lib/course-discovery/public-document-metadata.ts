@@ -167,6 +167,19 @@ export function collectNativeOfficialPublicMetadata(input: string | { venueName:
   const publicBookingEntryLinks: Array<{ href: string; text: string }> = [];
   let publicBookingEntryLinksOmitted = false;
   const allPublicAnchors = Array.from(document.querySelectorAll('a[href]'));
+  const officialCourseLinkLabels: Array<{ href: string; text: string }> = [];
+  let officialCourseLinkLabelsOmitted = allPublicAnchors.length > 3000;
+  if (!officialCourseLinkLabelsOmitted) for (const anchor of allPublicAnchors) {
+    if (!(anchor instanceof HTMLAnchorElement) || anchor.closest('form') || !cms.visible(anchor) ||
+        anchor.hasAttribute('onclick') || anchor.hasAttribute('download')) continue;
+    const text = anchor.innerText.normalize('NFKC').replace(/\s+/gu, ' ').trim();
+    let href: URL; try { href = new URL(anchor.href); } catch { continue; }
+    if (!text || text.length > 160 || /[\u0000-\u001f\u007f]/u.test(text) || !/\b(?:golf\s+)?course$/iu.test(text) ||
+        href.protocol !== 'https:' || href.origin !== new URL(document.URL).origin || href.pathname === '/' ||
+        href.search || href.hash || href.username || href.password || href.port) continue;
+    if (officialCourseLinkLabels.length >= 120) { officialCourseLinkLabelsOmitted = true; officialCourseLinkLabels.length = 0; break; }
+    officialCourseLinkLabels.push({ href: href.href, text });
+  }
   const officialContactLinkLabels: Array<{ href: string; text: string }> = [];
   let officialContactLinkLabelsOmitted = allPublicAnchors.length > 3000;
   let publicLinkLabelsOmitted = allPublicAnchors.length > 3000;
@@ -276,6 +289,6 @@ export function collectNativeOfficialPublicMetadata(input: string | { venueName:
   }
   return { title: document.title.slice(0, 500), headings, linkUrls, addressTexts, phoneTexts, phoneTextsOmitted, contactPhoneLinks, contactPhoneLinksOmitted,
     publicBookingEntryLinks, publicBookingEntryLinksOmitted, cpsBookingWidgets, cpsBookingWidgetsOmitted,
-    publicLinkLabels, publicLinkLabelsOmitted, officialContactLinkLabels, officialContactLinkLabelsOmitted,
+    publicLinkLabels, publicLinkLabelsOmitted, officialCourseLinkLabels, officialCourseLinkLabelsOmitted, officialContactLinkLabels, officialContactLinkLabelsOmitted,
     brandLinks, publicRentalTexts, publicBusinessLabels, officialContactBusinessNames, namedContactBlocks, namedContactBlocksOmitted, delegatedFrameSources };
 }

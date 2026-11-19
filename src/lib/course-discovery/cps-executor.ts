@@ -8,7 +8,7 @@ import type { AccessExecutionInput, AccessExecutionResult } from "./recipe";
 import { isActiveBrowserAccessChallenge } from "./recipe";
 import { teeItUpInertDocumentContent } from "./teeitup-official-booking-source";
 import { requestFamilyForUrl } from "./request-family";
-import { CPS_API_PATH, CPS_VENUE_PUBLIC_CATALOG_BUILD, cpsFailure as fail, cpsMetadataSchema, cpsPublicBuildProtocol, inspectCpsOfficialDocument, parseCpsCatalog, parseCpsConfiguration,
+import { CPS_API_PATH, CPS_VENUE_PUBLIC_CATALOG_BUILD, CPS_NAMED_PUBLIC_CATALOG_BUILD, cpsFailure as fail, cpsMetadataSchema, cpsPublicBuildProtocol, inspectCpsOfficialDocument, parseCpsCatalog, parseCpsConfiguration,
   parseCpsOptions, parseCpsSource, sameCpsOfficialSite, validateCpsIdentity, type CpsConfiguration, type CpsMetadata, type CpsOptions, type CpsSource } from "./cps-source";
 import { bindCpsPostalConflictProof, normalizeCanonicalCoursePhone, verifyCpsPostalContact, type CpsPostalConflictProof } from "./cps-postal-conflict-proof";
 import { bindCpsPhoneBookingProof, verifyCpsPhoneBookingContact, type CpsPhoneBookingProof } from "./cps-phone-booking-proof";
@@ -108,6 +108,9 @@ function createReader(sourceInput: CpsSource, deps: CpsDependencies, date: strin
   let context = parseCpsSource(source.bookingUrl)!;
   const deadline = Math.min(Date.now() + 120_000, deps.deadlineAt?.getTime() ?? Infinity);
   if (!Number.isFinite(deadline) || deadline <= Date.now()) fail("DEADLINE_EXCEEDED");
+  const savedNamedCatalog = savedCatalogMode === "OFFICIAL_NAMED_ONLINE_COURSES";
+  if (savedNamedCatalog && (!deps.localCapabilities?.includes("LOCAL_CHROME") || !normalizeCanonicalCoursePhone(deps.trustedContext?.canonicalCoursePhone)))
+    fail("LOCAL_CHROME_REQUIRED");
   if(savedProof){
     if(!deps.localCapabilities?.includes("LOCAL_CHROME"))fail("LOCAL_CHROME_REQUIRED");
     if(normalizeCanonicalCoursePhone(deps.trustedContext?.canonicalCoursePhone)!==savedProof.canonicalCoursePhone)fail("CPS_CANONICAL_PHONE_CHANGED");
@@ -185,7 +188,7 @@ function createReader(sourceInput: CpsSource, deps: CpsDependencies, date: strin
       if (entry.source.bookingUrl !== source.bookingUrl) fail("ADAPTER_CONFIGURATION_CHANGED");
       return { page: entry.root, phoneBooking: false, officialEntry: entry };
     }
-    if(!savedProof){
+    if(!savedProof && !savedNamedCatalog){
       try{await legacyOfficial();return undefined;}catch(error){
         const eligible=isOwnedOfficialSiteBodyLimitError(error)||error instanceof Error&&["OFFICIAL_BOOKING_SOURCE_UNVERIFIED","OFFICIAL_IDENTITY_UNVERIFIED","OFFICIAL_BOOKING_SOURCE_MISMATCH","ACCESS_REQUIRED"].includes(error.message);
         if(!eligible||!deps.localCapabilities?.includes("LOCAL_CHROME")||!normalizeCanonicalCoursePhone(deps.trustedContext?.canonicalCoursePhone))throw error;
@@ -198,18 +201,18 @@ function createReader(sourceInput: CpsSource, deps: CpsDependencies, date: strin
       ...(mode==="PHONE_LINK"?{allowCpsPhoneBookingContact:true}:{}),requestLease:deps.requestLease&&(async(family,work)=>{
       const result=await deps.requestLease!(family,work);return result.acquired?{acquired:true,value:await result.value}:{acquired:false};
     })}));
-    let phoneBooking=savedProof?.kind==="OFFICIAL_PHONE_BOOKING_LINK";
+    let phoneBooking=savedNamedCatalog||savedProof?.kind==="OFFICIAL_PHONE_BOOKING_LINK";
     let page;
     try { page=await nativeRead(source,source.officialUrl,new Date(deadline),phoneBooking?"PHONE_LINK":"POSTAL"); }
     catch(error){
-      if(savedProof||!(error instanceof Error)||error.message!=="OFFICIAL_POSTAL_SOURCE_UNVERIFIED")throw error;
+      if(savedProof||savedNamedCatalog||!(error instanceof Error)||error.message!=="OFFICIAL_POSTAL_SOURCE_UNVERIFIED")throw error;
       phoneBooking=true;page=await nativeRead(source,source.officialUrl,new Date(deadline),"PHONE_LINK");
     }
     signal.throwIfAborted();
     const phoneOrEntry = async () => {
       try { verifyCpsPhoneBookingContact(source,page,deps.trustedContext?.canonicalCoursePhone); return { page, phoneBooking: true }; }
       catch (error) {
-        if (savedProof || !(error instanceof Error) || error.message !== "CPS_PHONE_BOOKING_SOURCE_UNVERIFIED") throw error;
+        if (savedProof || savedNamedCatalog || !(error instanceof Error) || error.message !== "CPS_PHONE_BOOKING_SOURCE_UNVERIFIED") throw error;
         // No new document read unless the additive title/full-contact root
         // and its sole current visible same-origin booking link already prove.
         try { deriveCpsRootEntry(source,page,deps.trustedContext?.canonicalCoursePhone); } catch { throw error; }
@@ -234,7 +237,7 @@ function createReader(sourceInput: CpsSource, deps: CpsDependencies, date: strin
     const nativeOfficial = await official(), nativeOfficialPage=nativeOfficial?.page;
     const config = parseCpsConfiguration(await json(context.origin + "/onlineresweb/Home/Configuration", new Headers({
       accept: "application/json", referer: context.origin + "/", "user-agent": "TeeTimeSpot/1.0 (+https://teetimespot.com)" })), source);
-    if (savedCatalogMode && config.buildNumber !== CPS_VENUE_PUBLIC_CATALOG_BUILD) fail("ADAPTER_CONFIGURATION_CHANGED");
+    if (savedCatalogMode && config.buildNumber !== (savedNamedCatalog ? CPS_NAMED_PUBLIC_CATALOG_BUILD : CPS_VENUE_PUBLIC_CATALOG_BUILD)) fail("ADAPTER_CONFIGURATION_CHANGED");
     if (cpsPublicBuildProtocol(config.buildNumber) === "ANONYMOUS_SHORT_SESSION") {
       publicSession = createCps26PublicSession(source, config, date, { deadlineAt: new Date(deadline), signal,
         bootstrapHeaders: publicHeaders(source, config, undefined, date), fetch: deps.fetch,
